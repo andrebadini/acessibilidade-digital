@@ -10,11 +10,13 @@ function outcome(value) {
 }
 
 function safeId(event) {
-  if (typeof event?.nodeId === 'string' && event.nodeId.trim()) return event.nodeId;
-  if (Number.isSafeInteger(event?.nodeId)) return String(event.nodeId);
-  if (typeof event?.selector !== 'string' || !event.selector.trim()) return null;
+  const nodeId = typeof event?.nodeId === 'string' ? event.nodeId.trim() : '';
+  if (/^(?:document|n-(?:(?:0|[1-9]\d*)|d(?:0|[1-9]\d*)-(?:0|[1-9]\d*)|fixture-[1-9]\d*))$/u.test(nodeId)) return nodeId;
+  const source = nodeId || (Number.isSafeInteger(event?.nodeId) ? String(event.nodeId) :
+    typeof event?.selector === 'string' ? event.selector.trim() : '');
+  if (!source) return null;
   let hash = 2166136261;
-  for (const character of redactSensitiveText(event.selector.normalize('NFKC'))) {
+  for (const character of redactSensitiveText(source.normalize('NFKC'))) {
     hash ^= character.codePointAt(0);
     hash = Math.imul(hash, 16777619) >>> 0;
   }

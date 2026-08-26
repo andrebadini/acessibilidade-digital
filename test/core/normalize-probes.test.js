@@ -11,18 +11,18 @@ function completeRaw() {
       focusableCount: 2,
       completed: true,
       events: [
-        { nodeId: 'a', selector: '#a', beforeCss: { outlineWidth: '0px' }, afterCss: { outlineWidth: '2px' }, rect: { x: 0, y: 0, width: 24, height: 24 }, intersectionRatio: 1, areaSufficient: true },
-        { nodeId: 'b', selector: '#b', beforeCss: { outlineWidth: '0px' }, afterCss: { outlineWidth: '0px' }, rect: { x: 10, y: 10, width: 44, height: 44 }, intersectionRatio: 0.5, areaSufficient: false },
-        { nodeId: 'b', selector: '#b', beforeCss: { outlineWidth: '0px' }, afterCss: { outlineWidth: '0px' }, rect: { x: 10, y: 10, width: 44, height: 44 }, intersectionRatio: 0.5, areaSufficient: false }
+        { nodeId: 'n-101', selector: '#a', beforeCss: { outlineWidth: '0px' }, afterCss: { outlineWidth: '2px' }, rect: { x: 0, y: 0, width: 24, height: 24 }, intersectionRatio: 1, areaSufficient: true },
+        { nodeId: 'n-102', selector: '#b', beforeCss: { outlineWidth: '0px' }, afterCss: { outlineWidth: '0px' }, rect: { x: 10, y: 10, width: 44, height: 44 }, intersectionRatio: 0.5, areaSufficient: false },
+        { nodeId: 'n-102', selector: '#b', beforeCss: { outlineWidth: '0px' }, afterCss: { outlineWidth: '0px' }, rect: { x: 10, y: 10, width: 44, height: 44 }, intersectionRatio: 0.5, areaSufficient: false }
       ]
     },
     reflow: { testedWidthCssPx: 320, horizontalOverflow: true, exception: 'none' },
     textResize: { scalePercent: 200, lossOfContent: false },
     targetSizes: [
-      { nodeId: 'tiny', width: 23.99, height: 24, exception: 'none' },
-      { nodeId: 'minimum-edge', width: 24, height: 24, exception: 'none' },
-      { nodeId: 'enhanced-small', width: 43.99, height: 44, exception: 'none' },
-      { nodeId: 'enhanced-edge', width: 44, height: 44, exception: 'none' }
+      { nodeId: 'n-201', width: 23.99, height: 24, exception: 'none' },
+      { nodeId: 'n-202', width: 24, height: 24, exception: 'none' },
+      { nodeId: 'n-203', width: 43.99, height: 44, exception: 'none' },
+      { nodeId: 'n-204', width: 44, height: 44, exception: 'none' }
     ],
     motion: { prefersReducedMotion: true, animatedCount: 2, reducedAnimatedCount: 1, complete: true },
     warnings: [],
@@ -32,14 +32,14 @@ function completeRaw() {
 
 test('normalizes focus order, repeated-focus traps, CSS change and viewport intersection', () => {
   const probes = normalizeProbes(completeRaw());
-  assert.deepEqual(probes.focusOrder.targets, ['a', 'b', 'b']);
+  assert.deepEqual(probes.focusOrder.targets, ['n-101', 'n-102', 'n-102']);
   assert.equal(probes.focusOrder.outcome, 'passed');
   assert.equal(probes.keyboardTraps.outcome, 'failed');
-  assert.deepEqual(probes.keyboardTraps.targets, ['b']);
+  assert.deepEqual(probes.keyboardTraps.targets, ['n-102']);
   assert.equal(probes.focusAppearance.outcome, 'failed');
-  assert.deepEqual(probes.focusAppearance.targets, ['b']);
+  assert.deepEqual(probes.focusAppearance.targets, ['n-102']);
   assert.equal(probes.obscuredTargets.outcome, 'failed');
-  assert.deepEqual(probes.obscuredTargets.targets, ['b']);
+  assert.deepEqual(probes.obscuredTargets.targets, ['n-102']);
 });
 
 test('normalizes exact 320 px, 200%, 24/44 boundaries and reduced motion', () => {
@@ -48,10 +48,10 @@ test('normalizes exact 320 px, 200%, 24/44 boundaries and reduced motion', () =>
   assert.equal(probes.reflow.testedWidthCssPx, 320);
   assert.equal(probes.textResize.outcome, 'passed');
   assert.equal(probes.textResize.scalePercent, 200);
-  assert.deepEqual(probes.targetSizes.minimum24.failedNodeIds, ['tiny']);
-  assert.deepEqual(probes.targetSizes.enhanced44.failedNodeIds, ['tiny', 'minimum-edge', 'enhanced-small']);
-  assert.equal(probes.targetSizes.observations.find(item => item.nodeId === 'minimum-edge').minimum24, true);
-  assert.equal(probes.targetSizes.observations.find(item => item.nodeId === 'enhanced-edge').enhanced44, true);
+  assert.deepEqual(probes.targetSizes.minimum24.failedNodeIds, ['n-201']);
+  assert.deepEqual(probes.targetSizes.enhanced44.failedNodeIds, ['n-201', 'n-202', 'n-203']);
+  assert.equal(probes.targetSizes.observations.find(item => item.nodeId === 'n-202').minimum24, true);
+  assert.equal(probes.targetSizes.observations.find(item => item.nodeId === 'n-204').enhanced44, true);
   assert.equal(probes.motion.outcome, 'failed');
   assert.equal(probes.motion.prefersReducedMotion, true);
 });
@@ -72,6 +72,39 @@ test('small targets without an observed exception remain cantTell', () => {
   assert.equal(probes.targetSizes.minimum24.outcome, 'cantTell');
   assert.equal(probes.targetSizes.enhanced44.outcome, 'cantTell');
   assert.equal(probes.targetSizes.observations[0].exception, 'unknown');
+});
+
+test('only preserves authoritative SnapshotV1 node IDs and hashes every arbitrary nodeId or selector', () => {
+  const marker = 'PROBE_NODE_PRIVACY_MARKER';
+  const raw = {
+    focus: {
+      focusableCount: 4,
+      completed: true,
+      events: [
+        { nodeId: 'n-42', indicatorVisible: true, intersectionRatio: 1 },
+        { nodeId: 'n-0042', indicatorVisible: true, intersectionRatio: 1 },
+        { nodeId: `password-token-${marker}`, indicatorVisible: false, intersectionRatio: 0 },
+        { selector: `#secret-${marker}`, indicatorVisible: false, intersectionRatio: 0 }
+      ]
+    },
+    targetSizes: [{ nodeId: `authorization-${marker}`, width: 1, height: 1, exception: 'none' }]
+  };
+  const first = normalizeProbes(raw);
+  const second = normalizeProbes(raw);
+  assert.equal(first.focusOrder.targets[0], 'n-42');
+  for (const id of [
+    ...first.focusOrder.targets,
+    ...first.keyboardTraps.targets,
+    ...first.focusAppearance.targets,
+    ...first.obscuredTargets.targets,
+    ...first.focusAppearance.observations.map(item => item.nodeId),
+    ...first.obscuredTargets.observations.map(item => item.nodeId),
+    ...first.targetSizes.minimum24.failedNodeIds,
+    ...first.targetSizes.enhanced44.failedNodeIds,
+    ...first.targetSizes.observations.map(item => item.nodeId)
+  ]) assert.match(id, /^(?:n-42|probe-[0-9a-f]{8})$/u);
+  assert.deepEqual(first, second);
+  assert.doesNotMatch(JSON.stringify(first), new RegExp(marker));
 });
 
 test('runDynamicProbes caps Tab traversal at focusableCount plus two and records no destructive action', async () => {
@@ -134,8 +167,64 @@ test('mandatory baseline and guard failures abort before Tab or viewport mutatio
     adapter[failure] = async () => { throw new Error('token=DO_NOT_SERIALIZE'); };
     const raw = await runDynamicProbes({ adapter, timeoutMs: 20, cleanupTimeoutMs: 20 });
     assert.equal(calls.includes('focus') || calls.includes('reflow'), false, failure);
-    assert.equal(calls.includes('removeNavigationGuards'), false);
+    assert.equal(calls.includes('removeNavigationGuards'), failure === 'installNavigationGuards');
     assert.doesNotMatch(JSON.stringify(raw), /DO_NOT_SERIALIZE/);
+  }
+});
+
+test('removes guards once after partial installation rejects before resolving', async () => {
+  let residue = false;
+  let removed = 0;
+  let focusCalls = 0;
+  const raw = await runDynamicProbes({ timeoutMs: 20, cleanupTimeoutMs: 20, adapter: {
+    snapshotState: async () => ({}),
+    installNavigationGuards: async context => {
+      assert.equal(typeof context?.token, 'object');
+      assert.equal(typeof context?.signal?.aborted, 'boolean');
+      residue = true;
+      throw new Error('partial install');
+    },
+    removeNavigationGuards: async () => { removed += 1; residue = false; },
+    getFocusableCount: async () => { focusCalls += 1; return 0; }
+  } });
+  assert.equal(removed, 1);
+  assert.equal(residue, false);
+  assert.equal(focusCalls, 0);
+  assert.equal(raw.warnings.length > 0, true);
+});
+
+test('cancels and removes partial never-resolving guard installation on timeout and abort', async () => {
+  for (const termination of ['timeout', 'abort']) {
+    let residue = false;
+    let removed = 0;
+    let installContext;
+    const controller = new AbortController();
+    const promise = runDynamicProbes({
+      signal: termination === 'abort' ? controller.signal : undefined,
+      timeoutMs: termination === 'abort' ? 1_000 : 10,
+      cleanupTimeoutMs: 20,
+      adapter: {
+        snapshotState: async () => ({}),
+        installNavigationGuards: async context => {
+          installContext = context;
+          residue = true;
+          return new Promise(() => {});
+        },
+        removeNavigationGuards: async context => {
+          removed += 1;
+          assert.equal(context, installContext);
+          residue = false;
+        },
+        getFocusableCount: async () => { throw new Error('must not run'); }
+      }
+    });
+    if (termination === 'abort') setTimeout(() => controller.abort(), 5);
+    const raw = await promise;
+    assert.equal(removed, 1, termination);
+    assert.equal(residue, false, termination);
+    assert.equal(installContext.token.cancelled, true, termination);
+    assert.equal(installContext.signal.aborted, true, termination);
+    assert.equal(raw.actions.some(item => item.type === 'key' || item.type === 'viewport'), false, termination);
   }
 });
 
@@ -180,14 +269,14 @@ test('merges probe observations into a fresh serializable SnapshotV1 consumed by
     document: { nodeId: 'document', title: 'Fixture' },
     nodes: completeRaw().targetSizes.map(item => ({ nodeId: item.nodeId, parentId: null, children: [], tagName: 'button', attributes: {}, focusable: true }))
   };
-  snapshot.nodes.push({ nodeId: 'a', parentId: null, children: [], tagName: 'a', attributes: { href: '#' }, focusable: true });
-  snapshot.nodes.push({ nodeId: 'b', parentId: null, children: [], tagName: 'button', attributes: {}, focusable: true });
+  snapshot.nodes.push({ nodeId: 'n-101', parentId: null, children: [], tagName: 'a', attributes: { href: '#' }, focusable: true });
+  snapshot.nodes.push({ nodeId: 'n-102', parentId: null, children: [], tagName: 'button', attributes: {}, focusable: true });
   const merged = mergeProbesIntoSnapshot(snapshot, normalizeProbes(completeRaw()));
   assert.notEqual(merged, snapshot);
   assert.deepEqual(merged.document.reflowObservation, { testedWidthCssPx: 320, twoDimensionalScroll: true, exception: 'none' });
   assert.deepEqual(merged.document.textResizeObservation, { scalePercent: 200, lossOfContent: false });
-  assert.deepEqual(merged.nodes.find(node => node.nodeId === 'minimum-edge').targetSize, { width: 24, height: 24, exception: 'none' });
-  assert.deepEqual(merged.nodes.find(node => node.nodeId === 'b').focusObservation, {
+  assert.deepEqual(merged.nodes.find(node => node.nodeId === 'n-202').targetSize, { width: 24, height: 24, exception: 'none' });
+  assert.deepEqual(merged.nodes.find(node => node.nodeId === 'n-102').focusObservation, {
     indicatorVisible: false, fullyVisible: false, partiallyVisible: true, areaSufficient: false
   });
   assert.doesNotThrow(() => JSON.stringify(merged));
@@ -205,10 +294,10 @@ test('merge preserves unknown focus observations as cantTell instead of fabricat
   const snapshot = {
     schemaVersion: 1,
     document: { nodeId: 'document', title: 'Fixture' },
-    nodes: [{ nodeId: 'a', parentId: null, children: [], tagName: 'button', attributes: {}, focusable: true }]
+    nodes: [{ nodeId: 'n-301', parentId: null, children: [], tagName: 'button', attributes: {}, focusable: true }]
   };
   const probes = normalizeProbes({
-    focus: { focusableCount: 1, completed: false, events: [{ nodeId: 'a', selector: '#a' }] },
+    focus: { focusableCount: 1, completed: false, events: [{ nodeId: 'n-301', selector: '#a' }] },
     warnings: [{ code: 'TIMEOUT', message: 'sem observação visual' }], actions: []
   });
   const merged = mergeProbesIntoSnapshot(snapshot, probes);

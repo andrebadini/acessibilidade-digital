@@ -39,7 +39,9 @@ export async function runDynamicProbes(options = {}) {
   const actions = [];
   const raw = { focus: { focusableCount: null, completed: false, events: [] }, warnings, actions };
   let state = null;
-  let guardsInstalled = false;
+  let guardsAttempted = false;
+  const guardAbortController = new AbortController();
+  const guardContext = { signal: guardAbortController.signal, token: { cancelled: false } };
 
   const invoke = (name, args = []) => {
     if (typeof adapter[name] !== 'function') throw new ProbeFailure('PROBE_FAILED');
@@ -59,8 +61,8 @@ export async function runDynamicProbes(options = {}) {
     state = await invoke('snapshotState');
     if (!state || typeof state !== 'object') throw new ProbeFailure('PROBE_FAILED');
     actions.push({ type: 'guard-navigation', operation: 'install' });
-    await invoke('installNavigationGuards');
-    guardsInstalled = true;
+    guardsAttempted = true;
+    await invoke('installNavigationGuards', [guardContext]);
 
     const count = await invoke('getFocusableCount');
     if (!Number.isSafeInteger(count) || count < 0) throw new ProbeFailure('PROBE_FAILED');
@@ -84,7 +86,9 @@ export async function runDynamicProbes(options = {}) {
   } catch (error) {
     warnings.push(sanitizeWarning({ code: error instanceof ProbeFailure ? error.code : 'PROBE_FAILED' }));
   } finally {
-    if (guardsInstalled) await cleanup('removeNavigationGuards', [], 'listeners');
+    guardContext.token.cancelled = true;
+    guardAbortController.abort();
+    if (guardsAttempted) await cleanup('removeNavigationGuards', [guardContext], 'listeners');
     if (state && Object.hasOwn(state, 'styles')) await cleanup('restoreStyles', [state.styles], 'styles');
     if (state && Object.hasOwn(state, 'viewport')) await cleanup('restoreViewport', [state.viewport], 'viewport');
     if (state && Object.hasOwn(state, 'scroll')) await cleanup('restoreScroll', [state.scroll], 'scroll');
