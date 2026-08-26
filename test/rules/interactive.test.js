@@ -218,7 +218,7 @@ test('native element review and custom semantics distinguish observable native a
   ]))).outcome, 'passed');
   assert.equal((await evaluate('custom-component-semantics', snapshot([
     record('aria-button', 'div', { role: 'button', accessibleName: 'Abrir' })
-  ]))).outcome, 'passed');
+  ]))).outcome, 'cantTell');
   assert.equal((await evaluate('custom-component-semantics', snapshot())).outcome, 'inapplicable');
 });
 
@@ -236,4 +236,36 @@ test('invalid aria reference on a custom component is mapped to its declared sem
   assert.equal(failed.outcome, 'failed');
   assert.equal(failed.targets[0].data.attribute, 'aria-controls');
   assert.equal(failed.targets[0].data.reason, 'missing-idref');
+});
+
+test('custom semantics rejects unknown, abstract, presentational and incompatible roles', async () => {
+  const abstractRoles = [
+    'widget', 'command', 'composite', 'input', 'landmark', 'range', 'roletype',
+    'section', 'sectionhead', 'select', 'structure', 'window'
+  ];
+  const nodes = [
+    record('unknown', 'x-control', { customElement: true, interactive: true, role: 'made-up' }),
+    ...abstractRoles.map(role => record(`abstract-${role}`, 'x-control', {
+      customElement: true, interactive: true, role
+    })),
+    record('none', 'x-control', { customElement: true, interactive: true, role: 'none' }),
+    record('presentation', 'x-control', { customElement: true, interactive: true, role: 'presentation' }),
+    record('article', 'x-control', { customElement: true, interactive: true, role: 'article' }),
+    record('wrong-interaction', 'x-control', { customElement: true, interaction: 'button', role: 'link' })
+  ];
+
+  const value = await evaluate('custom-component-semantics', snapshot(nodes));
+  assert.equal(value.outcome, 'failed');
+  assert.deepEqual(value.targets.map(target => target.nodeId), nodes.map(node => node.nodeId));
+});
+
+test('custom semantics passes compatible widget roles and reviews insufficient compatibility data', async () => {
+  assert.equal((await evaluate('custom-component-semantics', snapshot([
+    record('button', 'x-button', { customElement: true, interactive: true, role: 'button' }),
+    record('checkbox', 'x-checkbox', { customElement: true, interactive: true, role: 'checkbox' })
+  ]))).outcome, 'passed');
+
+  assert.equal((await evaluate('custom-component-semantics', snapshot([
+    record('unknown-interactivity', 'x-button', { customElement: true, role: 'button' })
+  ]))).outcome, 'cantTell');
 });

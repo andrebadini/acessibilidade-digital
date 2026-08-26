@@ -9,6 +9,7 @@ import {
 } from '../../src/core/rules/registry.js';
 import { runRules } from '../../src/core/rules/run-rules.js';
 import { aggregateItems } from '../../src/core/rules/aggregate-items.js';
+import { getReadonlyViewDiagnostics } from '../../src/core/rules/safe-data.js';
 
 const DEFAULT_REASON_FOR_TESTS =
   'Não há resultado de regra vinculado a este item; é necessária revisão humana.';
@@ -396,7 +397,7 @@ test('runRules contains rejected thenables and continues without leaking rejecti
   assert.doesNotMatch(JSON.stringify(values[0]), new RegExp(secret));
 });
 
-test('runRules gives each rule an isolated frozen deep view without freezing caller data', async () => {
+test('runRules protects the shared frozen deep view without freezing caller data', async () => {
   const snapshot = { nested: { label: 'original' }, nodes: [{ id: 1 }] };
   const context = {
     preferences: { locale: 'pt-BR' },
@@ -431,6 +432,103 @@ test('runRules gives each rule an isolated frozen deep view without freezing cal
   assert.equal(Object.isFrozen(snapshot), false);
   assert.equal(Object.isFrozen(snapshot.nested), false);
   assert.equal(Object.isFrozen(context), false);
+});
+
+test('runRules creates one shared readonly execution view for every rule', async () => {
+  const snapshot = { nodes: [{ nodeId: 'one' }], nested: { value: 1 } };
+  const context = { marker: { locale: 'pt-BR' } };
+  const received = [];
+  const rules = createRuleRegistry(Array.from({ length: 130 }, (_, index) => ({
+    id: `identity-${index}`, mode: 'automated', nbrItems: ['5.1.1'],
+    evaluate(viewSnapshot, viewContext) {
+      received.push([viewSnapshot, viewContext]);
+      assert.equal(Object.isFrozen(viewSnapshot), true);
+      assert.equal(Object.isFrozen(viewContext), true);
+      return { outcome: 'passed' };
+    }
+  })));
+
+  const before = getReadonlyViewDiagnostics().creations;
+  const values = await runRules(snapshot, context, rules);
+  const after = getReadonlyViewDiagnostics().creations;
+  assert.equal(values.every(value => value.outcome === 'passed'), true);
+  assert.equal(received.every(([value]) => value === received[0][0]), true);
+  assert.equal(received.every(([, value]) => value === received[0][1]), true);
+  assert.notEqual(received[0][0], snapshot);
+  assert.notEqual(received[0][1], context);
+  assert.equal(after - before, 1);
+});
+
+test('10k-node execution keeps a single clone behind a broad performance gate', async () => {
+  const nodes = Array.from({ length: 10_000 }, (_, index) => ({
+    nodeId: `node-${index}`, attributes: {}, children: [], parentId: null
+  }));
+  const rules = createRuleRegistry(Array.from({ length: 130 }, (_, index) => ({
+    id: `benchmark-${index}`, mode: 'automated', nbrItems: ['5.1.1'],
+    evaluate(view) {
+      return { outcome: view.nodes.length === 10_000 ? 'passed' : 'failed' };
+    }
+  })));
+  const beforeClones = getReadonlyViewDiagnostics().creations;
+  const started = performance.now();
+  const values = await runRules({ nodes }, {}, rules);
+  const elapsedMs = performance.now() - started;
+
+  assert.equal(getReadonlyViewDiagnostics().creations - beforeClones, 1);
+  assert.equal(values.every(value => value.outcome === 'passed'), true);
+  assert.ok(elapsedMs < 10_000, `10k-node benchmark took ${elapsedMs.toFixed(1)}ms`);
+});
+
+test('readonly execution view blocks Date Map Set typed-array and helper-return mutation', async () => {
+  const helperValue = { nested: { value: 'original' } };
+  const snapshot = {
+    date: new Date('2026-08-26T00:00:00.000Z'),
+    map: new Map([['key', { value: 'original' }]]),
+    set: new Set(['original']),
+    bytes: new Uint8Array([1, 2, 3])
+  };
+  const context = { helper: () => helperValue, asyncHelper: async () => helperValue };
+  const seen = [];
+  const rules = createRuleRegistry([
+    {
+      id: 'attempt-special-mutation', mode: 'automated', nbrItems: ['5.1.1'],
+      async evaluate(view, helpers) {
+        const attempts = [
+          () => view.date.setUTCFullYear(1999),
+          () => view.map.set('key', { value: 'changed' }),
+          () => view.map.forEach((value, key, map) => map.set(key, value)),
+          () => view.set.add('changed'),
+          () => view.set.forEach((value, key, set) => set.add('changed')),
+          () => { view.bytes[0] = 9; },
+          () => { view.bytes.subarray(0)[0] = 9; },
+          () => view.bytes.forEach((value, index, array) => { array[index] = 9; }),
+          () => { helpers.helper().nested.value = 'changed'; },
+          async () => { (await helpers.asyncHelper()).nested.value = 'changed'; }
+        ];
+        for (const attempt of attempts) await assert.rejects(async () => attempt(), /read.?only|readonly|assign|frozen/i);
+        new Uint8Array(view.bytes.buffer)[0] = 9;
+        assert.equal(view.bytes[0], 1);
+        return { outcome: 'passed' };
+      }
+    },
+    {
+      id: 'observe-special-values', mode: 'automated', nbrItems: ['5.1.2'],
+      async evaluate(view, helpers) {
+        seen.push(view.date.toISOString(), view.map.get('key').value, [...view.set][0], view.bytes[0]);
+        seen.push(helpers.helper().nested.value, (await helpers.asyncHelper()).nested.value);
+        return { outcome: 'passed' };
+      }
+    }
+  ]);
+
+  const values = await runRules(snapshot, context, rules);
+  assert.deepEqual(values.map(value => value.outcome), ['passed', 'passed']);
+  assert.deepEqual(seen, ['2026-08-26T00:00:00.000Z', 'original', 'original', 1, 'original', 'original']);
+  assert.equal(snapshot.date.getUTCFullYear(), 2026);
+  assert.equal(snapshot.map.get('key').value, 'original');
+  assert.equal(snapshot.set.has('changed'), false);
+  assert.deepEqual([...snapshot.bytes], [1, 2, 3]);
+  assert.equal(helperValue.nested.value, 'original');
 });
 
 test('runRules and aggregateItems deeply detach JSON-safe evidence', async () => {
@@ -573,7 +671,7 @@ test('context helper returns are isolated for synchronous and asynchronous helpe
   assert.deepEqual(asyncValue, { nested: { value: 'async-original' } });
 });
 
-test('runRules preserves usable structured snapshot types in independent per-rule copies', async () => {
+test('runRules preserves usable structured snapshot types in a shared readonly copy', async () => {
   const snapshot = {
     date: new Date('2026-08-26T00:00:00.000Z'),
     map: new Map([['one', { value: 1 }]]),
@@ -610,7 +708,7 @@ test('runRules preserves usable structured snapshot types in independent per-rul
 
   const values = await runRules(snapshot, {}, rules);
 
-  assert.deepEqual(values.map(value => value.outcome), ['passed', 'passed']);
+  assert.deepEqual(values.map(value => value.outcome), ['untested', 'passed']);
   assert.equal(snapshot.date.toISOString(), '2026-08-26T00:00:00.000Z');
   assert.equal(snapshot.map.has('two'), false);
   assert.equal(snapshot.set.has('two'), false);

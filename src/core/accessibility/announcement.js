@@ -47,6 +47,19 @@ function observedState(properties) {
   return states;
 }
 
+const SENSITIVE_AUTOCOMPLETE = new Set([
+  'current-password', 'new-password', 'one-time-code'
+]);
+
+function mayDiscloseValue(properties) {
+  if (ownProperty(properties, 'valueDisclosure') !== 'safe') return false;
+  if (ownProperty(properties, 'sensitive') === true) return false;
+  const inputType = previewText(ownProperty(properties, 'inputType') ?? ownProperty(properties, 'type')).toLowerCase();
+  if (inputType === 'password') return false;
+  const autocomplete = previewText(ownProperty(properties, 'autocomplete')).toLowerCase().split(' ');
+  return !autocomplete.some(token => SENSITIVE_AUTOCOMPLETE.has(token));
+}
+
 /**
  * Formats a deterministic Portuguese text preview. It is not a claim about
  * the exact speech of NVDA, JAWS, VoiceOver, or any other screen reader.
@@ -54,7 +67,9 @@ function observedState(properties) {
 export function buildAnnouncementPreview(properties = {}) {
   const safeProperties = propertiesOf(properties);
   const role = ROLE_LABELS.get(ownProperty(safeProperties, 'role'));
-  const value = previewText(ownProperty(safeProperties, 'value'));
+  const value = mayDiscloseValue(safeProperties)
+    ? previewText(ownProperty(safeProperties, 'value'))
+    : '';
   const rawLevel = ownProperty(safeProperties, 'level');
   const level = Number.isInteger(rawLevel) && rawLevel > 0
     ? `nível ${rawLevel}`

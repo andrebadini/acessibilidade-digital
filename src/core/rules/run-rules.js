@@ -141,7 +141,7 @@ async function runOneRule(snapshot, context, rule, duplicateRuleIds) {
   }
 
   try {
-    const value = await rule.evaluate(createReadonlyView(snapshot), createReadonlyView(context));
+    const value = await rule.evaluate(snapshot, context);
     if (!isEvaluationResult(value, rule)) {
       return makeResult(rule, 'untested', INVALID_RESULT);
     }
@@ -196,9 +196,10 @@ export async function runRules(snapshot, context, rules) {
     normalizedRules.push(normalizeRule(safeRuleSlot(rules, index), index));
   }
   const duplicated = duplicateRuleIds(normalizedRules);
+  const [readonlySnapshot, readonlyContext] = createReadonlyView([snapshot, context]);
   const values = [];
   for (const rule of normalizedRules) {
-    values.push(await runOneRule(snapshot, context, rule, duplicated));
+    values.push(await runOneRule(readonlySnapshot, readonlyContext, rule, duplicated));
   }
   return Object.freeze(values);
 }

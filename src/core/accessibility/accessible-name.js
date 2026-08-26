@@ -29,22 +29,41 @@ function isHidden(node) {
     || attributes['aria-hidden'] === 'true';
 }
 
+function isSnapshotIndexes(index) {
+  return index && typeof index === 'object' &&
+    index.byNodeId instanceof Map && index.byDomId instanceof Map;
+}
+
 function nodesFromIndex(index) {
+  if (isSnapshotIndexes(index)) return [...index.byNodeId.values()];
   if (index instanceof Map) return [...index.values()];
   if (Array.isArray(index)) return index;
   if (index && typeof index === 'object') return Object.values(index);
   return [];
 }
 
-function nodeId(node) {
+function legacyId(node) {
   return normalizeText(node?.id) || normalizeText(attribute(node, 'id'));
 }
 
-function findById(index, id) {
-  if (!id) return undefined;
+function findByNodeId(index, id) {
+  if (id === null || id === undefined || id === '') return undefined;
+  if (isSnapshotIndexes(index)) return index.byNodeId.get(String(id));
   if (index instanceof Map) return index.get(id);
-  if (Array.isArray(index)) return index.find(node => nodeId(node) === id);
-  if (index && typeof index === 'object') return index[id] ?? nodesFromIndex(index).find(node => nodeId(node) === id);
+  if (Array.isArray(index)) return index.find(node => String(node?.nodeId ?? legacyId(node)) === String(id));
+  if (index && typeof index === 'object') return index[id] ?? nodesFromIndex(index).find(node => String(node?.nodeId ?? legacyId(node)) === String(id));
+  return undefined;
+}
+
+function findByDomId(index, id) {
+  if (id === null || id === undefined || id === '') return undefined;
+  if (isSnapshotIndexes(index)) {
+    const matches = index.byDomId.get(id);
+    return matches?.length === 1 ? matches[0] : undefined;
+  }
+  if (index instanceof Map) return index.get(id);
+  if (Array.isArray(index)) return index.find(node => legacyId(node) === id);
+  if (index && typeof index === 'object') return index[id] ?? nodesFromIndex(index).find(node => legacyId(node) === id);
   return undefined;
 }
 
@@ -52,12 +71,18 @@ function hasAttribute(node, name) {
   return Object.hasOwn(attributesOf(node), name);
 }
 
-function textFromContents(node, allowHidden) {
-  if (!node || (!allowHidden && isHidden(node))) return '';
+function textFromContents(node, index, allowHidden, visiting = new Set()) {
+  if (!node || (!allowHidden && isHidden(node)) || visiting.has(node)) return '';
+
+  const nextVisiting = new Set(visiting);
+  nextVisiting.add(node);
 
   const ownText = normalizeText(node.text);
   const childText = Array.isArray(node.children)
-    ? node.children.map(child => textFromContents(child, allowHidden)).filter(Boolean).join(' ')
+    ? node.children.map(child => {
+      const childNode = child && typeof child === 'object' ? child : findByNodeId(index, child);
+      return textFromContents(childNode, index, allowHidden, nextVisiting);
+    }).filter(Boolean).join(' ')
     : '';
 
   return normalizeText([ownText, childText].filter(Boolean).join(' '));
@@ -100,7 +125,7 @@ function resolveReferences(ids, index, visiting) {
   const parts = [];
   for (const id of normalizeText(ids).split(' ')) {
     if (!id) continue;
-    const referenced = findById(index, id);
+    const referenced = findByDomId(index, id);
     if (!referenced || visiting.has(referenced)) continue;
 
     const text = fallbackName(referenced, index, new Set(visiting), true, true).value;
@@ -114,8 +139,10 @@ function nativeLabelText(node, index, visiting) {
 
   const labels = Array.isArray(node?.labels) ? node.labels : [];
   const fromLabels = labels.map(label => {
-    if (typeof label === 'string') {
-      const referenced = findById(index, label);
+    if (typeof label === 'string' || Number.isSafeInteger(label)) {
+      const referenced = isSnapshotIndexes(index)
+        ? findByNodeId(index, label)
+        : findByDomId(index, label);
       return referenced
         ? fallbackName(referenced, index, new Set(visiting), true, true).value
         : normalizeText(label);
@@ -123,8 +150,9 @@ function nativeLabelText(node, index, visiting) {
     return fallbackName(label, index, new Set(visiting), true, true).value;
   }).filter(Boolean);
 
-  const id = nodeId(node);
-  const fromFor = id
+  const id = normalizeText(attribute(node, 'id')) || (!isSnapshotIndexes(index) ? normalizeText(node?.id) : '');
+  const uniqueTarget = !isSnapshotIndexes(index) || index.byDomId.get(id)?.length === 1;
+  const fromFor = id && uniqueTarget
     ? nodesFromIndex(index)
       .filter(candidate => tagOf(candidate) === 'label' && attribute(candidate, 'for') === id)
       .map(label => fallbackName(label, index, new Set(visiting), true, true).value)
@@ -159,7 +187,7 @@ function fallbackName(node, index, visiting = new Set(), allowHiddenRoot = false
   }
 
   if (acceptsContents(node, fromReference)) {
-    const contents = textFromContents(node, allowHiddenRoot && isHidden(node));
+    const contents = textFromContents(node, index, allowHiddenRoot && isHidden(node));
     if (contents) return { value: contents, source: 'contents' };
   }
 

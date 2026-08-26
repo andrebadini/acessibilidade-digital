@@ -200,27 +200,93 @@ const ARIA_IDREF_ATTRIBUTES = Object.freeze([
   'aria-errormessage', 'aria-flowto', 'aria-labelledby', 'aria-owns'
 ]);
 
+const ABSTRACT_ARIA_ROLES = new Set([
+  'command', 'composite', 'input', 'landmark', 'range', 'roletype', 'section',
+  'sectionhead', 'select', 'structure', 'widget', 'window'
+]);
+const PRESENTATIONAL_ARIA_ROLES = new Set(['none', 'presentation']);
+const CONCRETE_ARIA_ROLES = new Set([
+  'alert', 'alertdialog', 'application', 'article', 'banner', 'blockquote', 'button',
+  'caption', 'cell', 'checkbox', 'code', 'columnheader', 'combobox', 'comment',
+  'complementary', 'contentinfo', 'definition', 'deletion', 'dialog', 'directory',
+  'document', 'emphasis', 'feed', 'figure', 'form', 'generic', 'grid', 'gridcell',
+  'group', 'heading', 'img', 'insertion', 'link', 'list', 'listbox', 'listitem',
+  'log', 'main', 'marquee', 'math', 'menu', 'menubar', 'menuitem',
+  'menuitemcheckbox', 'menuitemradio', 'meter', 'navigation', 'note', 'option',
+  'paragraph', 'progressbar', 'radio', 'radiogroup', 'region', 'row', 'rowgroup',
+  'rowheader', 'scrollbar', 'search', 'searchbox', 'separator', 'slider',
+  'spinbutton', 'status', 'strong', 'subscript', 'suggestion', 'superscript',
+  'switch', 'tab', 'table', 'tablist', 'tabpanel', 'term', 'textbox', 'timer',
+  'toolbar', 'tooltip', 'tree', 'treegrid', 'treeitem'
+]);
+const WIDGET_ARIA_ROLES = new Set([
+  'button', 'cell', 'checkbox', 'columnheader', 'combobox', 'grid', 'gridcell',
+  'link', 'listbox', 'menu', 'menubar', 'menuitem', 'menuitemcheckbox',
+  'menuitemradio', 'option', 'progressbar', 'radio', 'radiogroup', 'row',
+  'rowheader', 'scrollbar', 'searchbox', 'separator', 'slider', 'spinbutton',
+  'switch', 'tab', 'tablist', 'textbox', 'toolbar', 'tree', 'treegrid', 'treeitem'
+]);
+
+function compatibilityOf(node, role) {
+  if (ABSTRACT_ARIA_ROLES.has(role)) return 'abstract-role';
+  const interaction = normalizeText(node?.interaction).toLowerCase();
+  const axRole = normalizeText(node?.axRole).toLowerCase();
+  const explicitlyInteractive = node?.interactive === true || interaction !== '';
+  if (PRESENTATIONAL_ARIA_ROLES.has(role)) {
+    return explicitlyInteractive ? 'presentational-interactive-role' : null;
+  }
+  if (!CONCRETE_ARIA_ROLES.has(role)) return 'unknown-role';
+  if (interaction === 'link' && role !== 'link') return 'role-interaction-mismatch';
+  if (interaction === 'button' && role !== 'button') return 'role-interaction-mismatch';
+  if (axRole && axRole !== role) return 'role-ax-mismatch';
+  if (node?.interactive === false) {
+    return WIDGET_ARIA_ROLES.has(role) ? 'role-interactivity-mismatch' : 'compatible';
+  }
+
+  const compatibilityKnown = node?.interactive === true || interaction !== '' || axRole !== '';
+  if (!compatibilityKnown) return null;
+  if (!WIDGET_ARIA_ROLES.has(role)) return 'non-widget-interactive-role';
+  return 'compatible';
+}
+
 function customComponentSemantics(snapshot) {
   return interactiveResult(snapshot, ({ nodes }) => {
-    const components = nodes.filter(node => isComponent(node) && !isNativeControl(node));
+    const components = nodes.filter(node => !isNativeControl(node) && (
+      isComponent(node) || node?.customElement === true || node?.interactive === true
+    ));
     if (components.length === 0) return result('inapplicable', 'Não há componentes customizados observáveis.');
     const ids = domIdIndex(nodes);
     const failures = [];
+    let incomplete = false;
     for (const node of components) {
-      if (!roleOf(node)) {
+      const role = roleOf(node);
+      if (!role) {
         failures.push(target(node, 'Informe uma função semântica para este componente customizado.', {
           reason: 'missing-custom-role'
+        }));
+        continue;
+      }
+      const compatibility = compatibilityOf(node, role);
+      if (compatibility !== 'compatible' && compatibility !== null) {
+        failures.push(target(node, 'Use uma função ARIA concreta e compatível com a interação.', {
+          reason: compatibility
         }));
         continue;
       }
       const invalid = invalidReferences(node, ARIA_IDREF_ATTRIBUTES, ids);
       if (invalid) {
         failures.push(target(node, 'Corrija a referência ARIA deste componente customizado.', invalid));
+      } else if (compatibility === null) {
+        incomplete = true;
       }
     }
     return failures.length > 0
       ? result('failed', 'Há componentes customizados com semântica incompleta ou inválida.', failures)
-      : result('passed', 'Os componentes customizados observados possuem função e referências válidas.');
+      : incomplete
+        ? result('cantTell', 'A compatibilidade entre função e interação não pôde ser determinada.', [], [
+          'Colete o estado interativo ou a função calculada na árvore de acessibilidade.'
+        ])
+        : result('passed', 'Os componentes customizados observados possuem função e referências válidas.');
   });
 }
 

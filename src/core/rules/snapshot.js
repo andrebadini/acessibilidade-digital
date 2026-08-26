@@ -60,8 +60,10 @@ export function snapshotParts(snapshot) {
     !hasOwn(snapshot, 'document') || snapshot.document === null ||
     typeof snapshot.document !== 'object' || Array.isArray(snapshot.document) ||
     !hasOwn(snapshot, 'nodes') || !Array.isArray(snapshot.nodes) ||
-    !hasOwn(snapshot, 'byId') || snapshot.byId === null ||
-    typeof snapshot.byId !== 'object' || Array.isArray(snapshot.byId)
+    !(snapshot.schemaVersion === 1 || (
+      hasOwn(snapshot, 'byId') && snapshot.byId !== null &&
+      typeof snapshot.byId === 'object' && !Array.isArray(snapshot.byId)
+    ))
   ) {
     return null;
   }

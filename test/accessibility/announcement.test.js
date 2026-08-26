@@ -13,12 +13,13 @@ test('labels the Portuguese output explicitly as a preview', () => {
   });
 });
 
-test('formats mapped roles, values and observed states in a stable order', () => {
+test('formats opted-in safe values and observed states in a stable order', () => {
   assert.deepEqual(buildAnnouncementPreview({
     name: 'Aceito os termos',
     role: 'checkbox',
     description: 'Leia antes de continuar',
     value: 'sim',
+    valueDisclosure: 'safe',
     checked: 'mixed',
     selected: true,
     expanded: false,
@@ -31,6 +32,22 @@ test('formats mapped roles, values and observed states in a stable order', () =>
     kind: 'preview',
     locale: 'pt-BR'
   });
+});
+
+test('omits values by default and sensitive metadata always wins over opt-in', () => {
+  const secret = 'token=mt-secret-123';
+  assert.equal(buildAnnouncementPreview({ name: 'Chave', value: secret }).text, 'Chave');
+
+  for (const properties of [
+    { value: secret, valueDisclosure: 'safe', sensitive: true },
+    { value: secret, valueDisclosure: 'safe', inputType: 'password' },
+    { value: secret, valueDisclosure: 'safe', autocomplete: 'current-password' },
+    { value: secret, valueDisclosure: 'safe', autocomplete: 'new-password' },
+    { value: secret, valueDisclosure: 'safe', autocomplete: 'one-time-code' },
+    { value: '123456', valueDisclosure: 'safe', autocomplete: 'section-login one-time-code' }
+  ]) {
+    assert.doesNotMatch(buildAnnouncementPreview({ name: 'Credencial', ...properties }).text, /secret|123456/i);
+  }
 });
 
 test('supports every minimum role and avoids unknown claims or duplicate punctuation', () => {
