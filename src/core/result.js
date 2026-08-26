@@ -7,8 +7,8 @@ export const OUTCOMES = Object.freeze([
 ]);
 
 export const TEST_MODES = Object.freeze([
-  'automatic',
-  'semiAuto',
+  'automated',
+  'assisted',
   'manual'
 ]);
 

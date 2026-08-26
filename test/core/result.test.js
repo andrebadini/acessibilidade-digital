@@ -8,7 +8,7 @@ import {
 
 test('createRuleResult rejects an unknown outcome', () => {
   assert.throws(() => createRuleResult({
-    ruleId: 'html-title', outcome: 'ok', mode: 'automatic', targets: []
+    ruleId: 'html-title', outcome: 'ok', mode: 'automated', targets: []
   }), /outcome/i);
 });
 
@@ -18,13 +18,29 @@ test('createRuleResult rejects an unknown test mode', () => {
   }), /test mode/i);
 });
 
+test('createRuleResult rejects legacy test mode names', () => {
+  for (const mode of ['automatic', 'semiAuto']) {
+    assert.throws(() => createRuleResult({
+      ruleId: 'html-title', outcome: 'passed', mode, targets: []
+    }), /test mode/i);
+  }
+});
+
+test('createRuleResult accepts every global test mode', () => {
+  for (const mode of ['automated', 'assisted', 'manual']) {
+    assert.equal(createRuleResult({
+      ruleId: 'html-title', outcome: 'passed', mode, targets: []
+    }).mode, mode);
+  }
+});
+
 test('createRuleResult returns the validated frozen result contract', () => {
   const targets = ['document'];
   const limitations = ['Only static markup was inspected'];
   const result = createRuleResult({
     ruleId: 'html-title',
     outcome: 'passed',
-    mode: 'automatic',
+    mode: 'automated',
     targets,
     summary: 'A descriptive title is present',
     limitations
@@ -33,7 +49,7 @@ test('createRuleResult returns the validated frozen result contract', () => {
   assert.deepEqual(result, {
     ruleId: 'html-title',
     outcome: 'passed',
-    mode: 'automatic',
+    mode: 'automated',
     targets,
     summary: 'A descriptive title is present',
     limitations
@@ -60,7 +76,7 @@ test('createRuleResult defaults optional fields', () => {
 
 test('exports the supported outcomes and test modes', () => {
   assert.deepEqual(OUTCOMES, ['passed', 'failed', 'cantTell', 'inapplicable', 'untested']);
-  assert.deepEqual(TEST_MODES, ['automatic', 'semiAuto', 'manual']);
+  assert.deepEqual(TEST_MODES, ['automated', 'assisted', 'manual']);
   assert.equal(Object.isFrozen(OUTCOMES), true);
   assert.equal(Object.isFrozen(TEST_MODES), true);
 });
