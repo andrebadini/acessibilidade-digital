@@ -65,6 +65,50 @@ test('registerRule validates and defensively normalizes an isolated rule', () =>
   assert.notEqual(rule.nbrItems, sourceItems);
 });
 
+test('registerRule preserves optional WCAG metadata as normalized frozen IDs', () => {
+  const sourceWcag = [' 4.1.2 ', '4.1.2', '2.4.6'];
+  const rule = registerRule({
+    id: 'accessible-component-name',
+    mode: 'automated',
+    nbrItems: ['5.13.10'],
+    wcag: sourceWcag,
+    evaluate() { return { outcome: 'passed' }; }
+  });
+
+  assert.deepEqual(rule.wcag, ['4.1.2', '2.4.6']);
+  assert.equal(Object.isFrozen(rule.wcag), true);
+  assert.notEqual(rule.wcag, sourceWcag);
+  assert.throws(() => registerRule({
+    id: 'empty-wcag',
+    mode: 'automated',
+    nbrItems: ['5.13.10'],
+    wcag: [],
+    evaluate() { return { outcome: 'passed' }; }
+  }), /wcag/i);
+});
+
+test('runRules preserves declared WCAG metadata without changing legacy results', async () => {
+  const [declared, legacy] = await runRules({}, {}, [
+    {
+      id: 'declared-wcag', mode: 'automated', nbrItems: ['5.13.10'], wcag: ['4.1.2'],
+      evaluate: () => ({ outcome: 'passed' })
+    },
+    {
+      id: 'legacy', mode: 'manual', nbrItems: ['5.1.1'],
+      evaluate: () => ({ outcome: 'inapplicable' })
+    }
+  ]);
+
+  assert.deepEqual(declared.wcag, ['4.1.2']);
+  assert.equal(Object.isFrozen(declared.wcag), true);
+  assert.equal(Object.hasOwn(legacy, 'wcag'), false);
+
+  const [aggregated] = aggregateItems([declared], [
+    item('5.13.10', '', ['declared-wcag'])
+  ]);
+  assert.deepEqual(aggregated.ruleResults[0].wcag, ['4.1.2']);
+});
+
 test('explicit rule registry rejects duplicate IDs without global state', () => {
   const first = { id: 'same-id', mode: 'manual', nbrItems: ['5.1.1'], evaluate() {} };
   const second = { id: ' same-id ', mode: 'manual', nbrItems: ['5.1.2'], evaluate() {} };

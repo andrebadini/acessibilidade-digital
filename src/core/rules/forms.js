@@ -1,0 +1,289 @@
+import { createRuleRegistry } from './registry.js';
+import {
+  ancestorNodes,
+  attribute,
+  domIdIndex,
+  hasAttribute,
+  hasOwn,
+  isFormField,
+  isHidden,
+  missingSnapshotResult,
+  nodeIndex,
+  normalizeText,
+  result,
+  roleOf,
+  snapshotParts,
+  tagOf,
+  target
+} from './snapshot.js';
+
+function formResult(snapshot, evaluate) {
+  const parts = snapshotParts(snapshot);
+  return parts ? evaluate(parts) : missingSnapshotResult();
+}
+
+function fieldsOf(nodes) {
+  return nodes.filter(isFormField);
+}
+
+function formFieldLabel(snapshot) {
+  return formResult(snapshot, ({ nodes }) => {
+    const fields = fieldsOf(nodes);
+    if (fields.length === 0) return result('inapplicable', 'Não há campos de formulário aplicáveis.');
+    const failures = [];
+    let incomplete = false;
+    for (const field of fields) {
+      if (!hasOwn(field, 'accessibleName')) incomplete = true;
+      else if (!normalizeText(field.accessibleName)) {
+        failures.push(target(field, 'Forneça um rótulo acessível para este campo.', {
+          reason: 'missing-field-label'
+        }));
+      }
+    }
+    if (failures.length > 0) return result('failed', 'Há campos sem rótulo acessível.', failures);
+    if (incomplete) return result('cantTell', 'O nome acessível de um campo não foi coletado.', [], [
+      'Colete o nome acessível calculado de todos os campos.'
+    ]);
+    return result('passed', 'Todos os campos aplicáveis possuem rótulo acessível.');
+  });
+}
+
+function nestedLabel(field, index) {
+  const chain = ancestorNodes(field, index);
+  return chain.complete && chain.ancestors.some(node => tagOf(node) === 'label');
+}
+
+function formLabelAssociation(snapshot) {
+  return formResult(snapshot, ({ nodes }) => {
+    const fields = fieldsOf(nodes);
+    const labels = nodes.filter(node => !isHidden(node) && tagOf(node) === 'label');
+    if (fields.length === 0 && labels.length === 0) {
+      return result('inapplicable', 'Não há campos ou rótulos de formulário aplicáveis.');
+    }
+    const ids = domIdIndex(nodes);
+    const index = nodeIndex(nodes);
+    const labelsByTarget = new Map();
+    const failures = [];
+
+    for (const label of labels) {
+      if (!hasAttribute(label, 'for')) continue;
+      const forId = normalizeText(attribute(label, 'for'));
+      const matches = ids.get(forId) ?? [];
+      if (matches.length === 0) {
+        failures.push(target(label, 'Corrija a referência for deste rótulo.', {
+          reason: 'missing-idref', attribute: 'for'
+        }));
+      } else if (!matches.every(isFormField)) {
+        failures.push(target(label, 'Associe este rótulo a um campo rotulável.', {
+          reason: 'invalid-label-target', attribute: 'for'
+        }));
+      } else {
+        const bucket = labelsByTarget.get(forId) ?? [];
+        bucket.push(label);
+        labelsByTarget.set(forId, bucket);
+      }
+    }
+
+    for (const field of fields) {
+      const id = normalizeText(attribute(field, 'id'));
+      const referencedLabels = id ? labelsByTarget.get(id) ?? [] : [];
+      const explicitLabelIds = Array.isArray(field?.labels) ? field.labels : [];
+      if (id && (ids.get(id)?.length ?? 0) > 1 && referencedLabels.length > 0) {
+        failures.push(target(field, 'Use um ID único para associar o rótulo a este campo.', {
+          reason: 'ambiguous-idref', attribute: 'for'
+        }));
+      } else if (referencedLabels.length > 0 || explicitLabelIds.length > 0 || nestedLabel(field, index)) {
+        continue;
+      } else {
+        failures.push(target(field, 'Associe programaticamente um rótulo a este campo.', {
+          reason: 'missing-association'
+        }));
+      }
+    }
+    return failures.length > 0
+      ? result('failed', 'Há rótulos com associação ausente, inválida ou ambígua.', failures)
+      : result('passed', 'Todos os campos observados possuem rótulo associado.');
+  });
+}
+
+function relatedFieldsGrouping(snapshot) {
+  return formResult(snapshot, ({ nodes }) => {
+    const groupedTypes = fieldsOf(nodes).filter(node => {
+      const type = normalizeText(attribute(node, 'type')).toLowerCase();
+      return ['checkbox', 'radio'].includes(type) && normalizeText(attribute(node, 'name'));
+    });
+    const groups = new Map();
+    for (const field of groupedTypes) {
+      const key = `${normalizeText(attribute(field, 'type')).toLowerCase()}:${normalizeText(attribute(field, 'name'))}`;
+      const group = groups.get(key) ?? [];
+      group.push(field);
+      groups.set(key, group);
+    }
+    const applicable = [...groups.values()].filter(group => group.length > 1);
+    if (applicable.length === 0) return result('inapplicable', 'Não há conjuntos de campos relacionados aplicáveis.');
+    const index = nodeIndex(nodes);
+    const failures = [];
+    let incomplete = false;
+    for (const group of applicable) {
+      for (const field of group) {
+        const chain = ancestorNodes(field, index);
+        if (!chain.complete) {
+          incomplete = true;
+          continue;
+        }
+        const container = chain.ancestors.find(node =>
+          tagOf(node) === 'fieldset' || ['group', 'radiogroup'].includes(roleOf(node))
+        );
+        if (!container || !normalizeText(container.accessibleName)) {
+          failures.push(target(field, 'Agrupe e nomeie programaticamente estes campos relacionados.', {
+            reason: 'missing-related-fields-group'
+          }));
+        }
+      }
+    }
+    if (failures.length > 0) return result('failed', 'Há campos relacionados sem grupo identificado.', failures);
+    if (incomplete) return result('cantTell', 'A ancestralidade de campos relacionados não foi coletada.', [], [
+      'Colete a árvore ancestral completa dos campos.'
+    ]);
+    return result('passed', 'Os campos relacionados estão em grupos identificados.');
+  });
+}
+
+function requiredDeclaration(node) {
+  if (hasAttribute(node, 'required')) return { required: true, valid: true };
+  if (!hasAttribute(node, 'aria-required')) return { required: false, valid: true };
+  const value = normalizeText(attribute(node, 'aria-required')).toLowerCase();
+  if (!['false', 'true'].includes(value)) return { required: true, valid: false };
+  return { required: value === 'true', valid: true };
+}
+
+function requiredFieldIdentification(snapshot) {
+  return formResult(snapshot, ({ nodes }) => {
+    const declared = fieldsOf(nodes).filter(node =>
+      hasAttribute(node, 'required') || hasAttribute(node, 'aria-required') || node?.required === true
+    );
+    if (declared.length === 0) return result('inapplicable', 'Não há campos obrigatórios observáveis.');
+    const failures = [];
+    let incomplete = false;
+    for (const field of declared) {
+      const declaration = requiredDeclaration(field);
+      if (!declaration.valid) {
+        failures.push(target(field, 'Use um valor válido para o estado obrigatório.', {
+          reason: 'invalid-required-state'
+        }));
+      } else if (!hasOwn(field, 'required')) {
+        incomplete = true;
+      } else if (declaration.required !== field.required) {
+        failures.push(target(field, 'Mantenha o estado obrigatório programático consistente.', {
+          reason: 'required-state-mismatch'
+        }));
+      } else if (!hasOwn(field, 'requiredIndicator')) {
+        incomplete = true;
+      } else if (!normalizeText(field.requiredIndicator)) {
+        failures.push(target(field, 'Identifique de modo perceptível que este campo é obrigatório.', {
+          reason: 'missing-required-identification'
+        }));
+      }
+    }
+    if (failures.length > 0) return result('failed', 'Há campos com identificação ou estado obrigatório inválido.', failures);
+    if (incomplete) return result('cantTell', 'Faltam dados do estado ou da identificação de campo obrigatório.', [], [
+      'Colete o estado calculado e o indicador associado de cada campo obrigatório.'
+    ]);
+    return result('passed', 'Os campos obrigatórios possuem estado e identificação observáveis.');
+  });
+}
+
+const AUTOCOMPLETE_PURPOSES = new Set([
+  'additional-name', 'address-level1', 'address-level2', 'address-level3', 'address-level4',
+  'address-line1', 'address-line2', 'address-line3', 'bday', 'bday-day', 'bday-month',
+  'bday-year', 'cc-additional-name', 'cc-csc', 'cc-exp', 'cc-exp-month', 'cc-exp-year',
+  'cc-family-name', 'cc-given-name', 'cc-name', 'cc-number', 'cc-type', 'country',
+  'country-name', 'current-password', 'email', 'family-name', 'given-name', 'honorific-prefix',
+  'honorific-suffix', 'impp', 'language', 'name', 'new-password', 'nickname', 'one-time-code',
+  'organization', 'organization-title', 'photo', 'postal-code', 'sex', 'street-address',
+  'tel', 'tel-area-code', 'tel-country-code', 'tel-extension', 'tel-local',
+  'tel-local-prefix', 'tel-local-suffix', 'tel-national', 'transaction-amount',
+  'transaction-currency', 'url', 'username'
+]);
+
+function validAutocomplete(value, purpose) {
+  const tokens = normalizeText(value).toLowerCase().split(' ').filter(Boolean);
+  if (tokens.length === 0) return false;
+  let index = 0;
+  if (tokens[index]?.startsWith('section-') && tokens[index].length > 8) index += 1;
+  if (['billing', 'shipping'].includes(tokens[index])) index += 1;
+  if (['fax', 'home', 'mobile', 'pager', 'work'].includes(tokens[index])) index += 1;
+  return tokens.length === index + 1 && AUTOCOMPLETE_PURPOSES.has(tokens[index]) && tokens[index] === purpose;
+}
+
+function inputPurpose(snapshot) {
+  return formResult(snapshot, ({ nodes }) => {
+    const fields = fieldsOf(nodes);
+    if (fields.length === 0) return result('inapplicable', 'Não há campos de entrada aplicáveis.');
+    const targets = fields.filter(node => hasOwn(node, 'inputPurpose'));
+    if (targets.length === 0) {
+      return result('cantTell', 'A finalidade dos campos não foi normalizada.', [], [
+        'Colete a finalidade observável dos campos que recebem dados pessoais.'
+      ]);
+    }
+    const failures = [];
+    let incomplete = targets.length !== fields.length;
+    for (const field of targets) {
+      const purpose = normalizeText(field.inputPurpose).toLowerCase();
+      const autocomplete = attribute(field, 'autocomplete');
+      if (!purpose) incomplete = true;
+      else if (!validAutocomplete(autocomplete, purpose)) {
+        failures.push(target(field, 'Use autocomplete válido e compatível com a finalidade deste campo.', {
+          reason: 'invalid-or-missing-autocomplete'
+        }));
+      }
+    }
+    if (failures.length > 0) return result('failed', 'Há campos com finalidade sem autocomplete válido.', failures);
+    if (incomplete) return result('cantTell', 'A finalidade de um campo não foi normalizada.', [], [
+      'Colete a finalidade observável de todos os campos aplicáveis.'
+    ]);
+    return result('passed', 'Os campos aplicáveis possuem autocomplete compatível com sua finalidade.');
+  });
+}
+
+function statusMessageSemantics(snapshot) {
+  return formResult(snapshot, ({ document, nodes }) => {
+    if (!hasOwn(document, 'statusMessageNodeIds') || !Array.isArray(document.statusMessageNodeIds)) {
+      return result('cantTell', 'A observação de mensagens de status não foi coletada.', [], [
+        'Observe as mensagens produzidas durante as interações auditadas.'
+      ]);
+    }
+    if (document.statusMessageNodeIds.length === 0) {
+      return result('inapplicable', 'Nenhuma mensagem de status foi observada.');
+    }
+    const index = nodeIndex(nodes);
+    const failures = [];
+    let incomplete = false;
+    for (const id of document.statusMessageNodeIds) {
+      const node = index.get(String(id));
+      if (!node) {
+        incomplete = true;
+        continue;
+      }
+      if (!['alert', 'status'].includes(roleOf(node))) {
+        failures.push(target(node, 'Exponha esta mensagem com uma função de status adequada.', {
+          reason: 'missing-status-role'
+        }));
+      }
+    }
+    if (failures.length > 0) return result('failed', 'Há mensagens observadas sem semântica de status.', failures);
+    if (incomplete) return result('cantTell', 'Uma mensagem observada não está presente no snapshot.', [], [
+      'Colete o nó correspondente a cada mensagem de status observada.'
+    ]);
+    return result('passed', 'As mensagens de status observadas possuem semântica adequada.');
+  });
+}
+
+export const FORM_RULES = createRuleRegistry([
+  { id: 'form-field-label', mode: 'automated', nbrItems: ['5.9.1'], wcag: ['3.3.2', '4.1.2'], evaluate: formFieldLabel },
+  { id: 'form-label-association', mode: 'automated', nbrItems: ['5.9.3'], wcag: ['1.3.1'], evaluate: formLabelAssociation },
+  { id: 'related-fields-grouping', mode: 'automated', nbrItems: ['5.9.6'], wcag: ['1.3.1'], evaluate: relatedFieldsGrouping },
+  { id: 'required-field-identification', mode: 'automated', nbrItems: ['5.9.7'], wcag: ['3.3.2'], evaluate: requiredFieldIdentification },
+  { id: 'input-purpose', mode: 'automated', nbrItems: ['5.9.8'], wcag: ['1.3.5'], evaluate: inputPurpose },
+  { id: 'status-message-semantics', mode: 'automated', nbrItems: ['5.13.8'], wcag: ['4.1.3'], evaluate: statusMessageSemantics }
+]);

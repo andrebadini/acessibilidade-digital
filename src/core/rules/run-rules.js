@@ -43,6 +43,7 @@ function hasOwn(value, field) {
 
 function normalizeRule(rule, index) {
   try {
+    const hasWcag = hasOwn(rule, 'wcag');
     if (
       rule !== null && typeof rule === 'object' &&
       hasOwn(rule, 'id') && hasOwn(rule, 'mode') &&
@@ -51,12 +52,18 @@ function normalizeRule(rule, index) {
       TEST_MODES.includes(rule.mode) &&
       Array.isArray(rule.nbrItems) && rule.nbrItems.length > 0 &&
       rule.nbrItems.every(isNonEmptyString) &&
+      (!hasWcag || (
+        Array.isArray(rule.wcag) && rule.wcag.length > 0 && rule.wcag.every(isNonEmptyString)
+      )) &&
       typeof rule.evaluate === 'function'
     ) {
       return Object.freeze({
         id: rule.id.trim(),
         mode: rule.mode,
         nbrItems: Object.freeze([...new Set(rule.nbrItems.map(itemId => itemId.trim()))]),
+        ...(hasWcag
+          ? { wcag: Object.freeze([...new Set(rule.wcag.map(criterionId => criterionId.trim()))]) }
+          : {}),
         evaluate: rule.evaluate
       });
     }
@@ -120,7 +127,8 @@ function makeResult(rule, outcome, details) {
 
   return Object.freeze({
     ...base,
-    nbrItems: Object.freeze([...rule.nbrItems])
+    nbrItems: Object.freeze([...rule.nbrItems]),
+    ...(hasOwn(rule, 'wcag') ? { wcag: Object.freeze([...rule.wcag]) } : {})
   });
 }
 

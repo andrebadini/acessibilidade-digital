@@ -69,7 +69,13 @@ function normalizeRuleResult(value) {
       summary: value.summary,
       limitations: cloneJsonSafeArray(value.limitations)
     });
-    return Object.freeze({ ...base, nbrItems: Object.freeze(nbrItems) });
+    const wcag = hasOwn(value, 'wcag') ? normalizeItemIds(value.wcag) : null;
+    if (wcag !== null && wcag.length === 0) return null;
+    return Object.freeze({
+      ...base,
+      nbrItems: Object.freeze(nbrItems),
+      ...(wcag === null ? {} : { wcag: Object.freeze(wcag) })
+    });
   } catch {
     return null;
   }

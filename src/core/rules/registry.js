@@ -42,6 +42,27 @@ function normalizeNbrItems(nbrItems) {
   return Object.freeze(normalized);
 }
 
+function normalizeWcag(wcag) {
+  if (!Array.isArray(wcag)) {
+    throw new TypeError('Rule WCAG metadata must be a non-empty array');
+  }
+
+  const normalized = [];
+  const seen = new Set();
+  for (const criterionId of wcag) {
+    const id = normalizedString(criterionId, 'Rule WCAG criterion ID');
+    if (!seen.has(id)) {
+      seen.add(id);
+      normalized.push(id);
+    }
+  }
+
+  if (normalized.length === 0) {
+    throw new TypeError('Rule WCAG metadata must be a non-empty array');
+  }
+  return Object.freeze(normalized);
+}
+
 function existingRuleIds(existingRules) {
   if (!Array.isArray(existingRules)) {
     throw new TypeError('Existing rules must be an array');
@@ -81,6 +102,7 @@ export function registerRule(definition, existingRules = []) {
     id,
     mode: definition.mode,
     nbrItems: normalizeNbrItems(definition.nbrItems),
+    ...(hasOwn(definition, 'wcag') ? { wcag: normalizeWcag(definition.wcag) } : {}),
     evaluate: definition.evaluate
   });
 }
