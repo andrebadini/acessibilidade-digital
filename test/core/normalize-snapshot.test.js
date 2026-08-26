@@ -106,6 +106,10 @@ test('normalizes a real columnar DOMSnapshot in deterministic iframe and shadow 
   assert.deepEqual(innerHtml.framePath, [iframe.nodeId]);
   assert.equal(shadowRoot.shadowRootType, 'open');
   assert.equal(shadowRoot.parentId, snapshot.nodes.find(node => node.backendNodeId === 16).nodeId);
+  assert.equal(shadowRoot.shadowRootId, shadowRoot.nodeId);
+  assert.equal(shadowRoot.shadowHostId, snapshot.nodes.find(node => node.backendNodeId === 16).nodeId);
+  assert.equal(snapshot.nodes.find(node => node.backendNodeId === 18).shadowRootId, shadowRoot.nodeId);
+  assert.equal(snapshot.nodes.find(node => node.backendNodeId === 18).shadowHostId, snapshot.nodes.find(node => node.backendNodeId === 16).nodeId);
   assert.equal(snapshot.nodes.find(node => node.backendNodeId === 4).text, 'Bem-vindo');
   assert.deepEqual(snapshot.nodes.find(node => node.backendNodeId === 4).styles, {
     display: 'block', visibility: 'visible', color: 'rgb(10, 20, 30)'
@@ -144,7 +148,7 @@ test('merges AX and runtime data while redacting sensitive values and resource U
   const snippet = sanitizeHtmlSnippet('<button id="send" onclick="bad()" data-token="fixture">Enviar</button>');
   const screenshot = await captureFullPage({ command: async () => ({ data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB' }) }, rawMetrics(snapshot));
   assert.deepEqual(selector, { css: '#send', framePath: [], confidence: 'high' });
-  assert.equal(snippet, '<button id="send">Enviar</button>');
+  assert.equal(snippet, '&lt;button id=&quot;send&quot;&gt;Enviar&lt;/button&gt;');
   assert.equal(screenshot.status, 'captured');
 });
 
@@ -176,6 +180,48 @@ test('accepts only explicitly marked simplified fixtures', () => {
   assert.throws(() => normalizeSnapshot({ ...simplified, format: undefined }), /DOMSnapshot|formato/i);
 });
 
+test('applies privacy redaction after runtime and AX merges and zeros executable subtrees', () => {
+  const marker = 'POST_MERGE_PRIVACY_MARKER';
+  const raw = {
+    format: 'simplified-v1',
+    document: { url: `https://user:${marker}@example.test/?token=${marker}&ok=1`, title: 'Privacy' },
+    nodes: [
+      {
+        backendNodeId: 1, tagName: 'input', parentBackendNodeId: null,
+        attributes: { type: 'password', value: marker, style: `background:url(data:image/png,${marker})` },
+        visibleText: marker, form: { type: 'password', value: marker, currentValue: marker },
+        styles: { display: 'block', 'background-image': `url("data:image/svg+xml,${marker}")` },
+        media: { kind: 'image', currentSrc: `data:image/png;base64,${marker}` }
+      },
+      { backendNodeId: 2, tagName: 'script', parentBackendNodeId: null, text: `window.token='${marker}'` },
+      { backendNodeId: 3, tagName: '#text', parentBackendNodeId: 2, text: marker, visibleText: marker },
+      { backendNodeId: 4, tagName: 'style', parentBackendNodeId: null, text: `body{background:url(blob:${marker})}` },
+      { backendNodeId: 5, tagName: '#text', parentBackendNodeId: 4, text: marker },
+      { backendNodeId: 6, tagName: 'template', parentBackendNodeId: null, text: marker },
+      { backendNodeId: 7, tagName: '#text', parentBackendNodeId: 6, text: marker }
+    ],
+    axTree: { nodes: [{
+      backendDOMNodeId: 1, role: { value: 'textbox' }, name: { value: 'Senha da conta' }, value: { value: marker }
+    }] }
+  };
+  const snapshot = normalizeSnapshot(raw);
+  const password = snapshot.nodes[0];
+  assert.equal(password.accessibleName, 'Senha da conta');
+  assert.equal(password.backgroundImageKind, 'url');
+  assert.equal(Object.hasOwn(password.attributes, 'style'), false);
+  assert.equal(Object.hasOwn(password.attributes, 'value'), false);
+  assert.equal(Object.hasOwn(password, 'axValue'), false);
+  assert.equal(Object.hasOwn(password.form, 'value'), false);
+  assert.equal(Object.hasOwn(password.form, 'currentValue'), false);
+  assert.equal(password.visibleText, '');
+  assert.equal(password.media.currentSrc, 'data:[redacted]');
+  for (const node of snapshot.nodes.slice(1)) {
+    assert.equal(node.text, '');
+    assert.equal(node.visibleText, '');
+  }
+  assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(marker));
+});
+
 test('associates runtime data by sanitized document URL when Chrome and CDP frame IDs differ', () => {
   const raw = columnarRaw();
   raw.pageData = [{
@@ -191,43 +237,92 @@ test('associates runtime data by sanitized document URL when Chrome and CDP fram
   assert.equal(button.hidden, true);
 });
 
+test('keeps DOMSnapshot document bounds and only retains runtime viewport/document rects as distinct coordinates', () => {
+  const raw = columnarRaw();
+  raw.pageData[0].result.nodes[0].viewportRect = { x: 8, y: 500, width: 90, height: 32 };
+  raw.pageData[0].result.nodes[0].documentRect = { x: 8, y: 1500, width: 90, height: 32 };
+  const button = normalizeSnapshot(raw).nodes.find(node => node.backendNodeId === 8);
+  assert.deepEqual(button.rect, { x: 8, y: 120, width: 90, height: 32 });
+  assert.deepEqual(button.viewportRect, { x: 8, y: 500, width: 90, height: 32 });
+  assert.deepEqual(button.documentRect, { x: 8, y: 1500, width: 90, height: 32 });
+});
+
+test('does not associate ambiguous runtime fallbacks across same-URL frames', () => {
+  const raw = columnarRaw();
+  const mainUrlIndex = raw.domSnapshot.documents[0].documentURL;
+  const h1Index = raw.domSnapshot.strings.indexOf('H1');
+  raw.domSnapshot.documents[1].documentURL = mainUrlIndex;
+  raw.domSnapshot.documents[1].nodes.nodeName[3] = h1Index;
+  raw.pageData = [
+    { frameId: 0, result: { url: 'https://example.test/page?view=public', nodes: [{ order: 2, tagName: 'h1', visibleText: 'WRONG_A', focusable: true }] } },
+    { frameId: 1, result: { url: 'https://example.test/page?view=public', nodes: [{ order: 2, tagName: 'h1', visibleText: 'WRONG_B', focusable: true }] } }
+  ];
+  raw.coverage = {
+    runtime: { outcome: 'partial', expectedFrameCount: 2, observedFrameCount: 2 },
+    accessibility: { outcome: 'complete', expectedFrameCount: 2, observedFrameCount: 2 }
+  };
+  const snapshot = normalizeSnapshot(raw);
+  const headings = snapshot.nodes.filter(node => node.tagName === 'h1');
+  assert.equal(headings.length, 2);
+  assert.equal(headings.some(node => /WRONG_/u.test(node.visibleText)), false);
+  assert.equal(headings.some(node => node.focusable === true), false);
+  assert.equal(snapshot.document.warnings.some(item => item.code === 'RUNTIME_MATCH_AMBIGUOUS'), true);
+  assert.equal(snapshot.document.coverage.runtime.outcome, 'partial');
+});
+
 test('collectPage issues the minimal structural CDP commands and injects runtime collection', async () => {
   const calls = [];
   const cdp = { command: async (method, params = {}) => {
     calls.push([method, params]);
+    if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'root', url: 'https://example.test/' }, childFrames: [{ frame: { id: 'child', url: 'https://example.test/frame' } }] } };
     if (method === 'DOMSnapshot.captureSnapshot') return Object.freeze({ strings: [], documents: [] });
-    if (method === 'Accessibility.getFullAXTree') return { nodes: [] };
+    if (method === 'Accessibility.getFullAXTree') return { nodes: [{ nodeId: `ax-${params.frameId}` }] };
     if (method === 'Page.getLayoutMetrics') return { cssContentSize: { width: 1, height: 1 } };
     return {};
   } };
   const injections = [];
   const executeScript = async options => {
     injections.push(options);
-    return [{ frameId: 0, result: { nodes: [] } }];
+    return [
+      { frameId: 'root', result: { url: 'https://example.test/', nodes: [] } },
+      { frameId: 'child', result: { url: 'https://example.test/frame', nodes: [] } }
+    ];
   };
 
   const raw = await collectPage(cdp, 42, { executeScript });
   assert.deepEqual(calls.slice(0, 4).map(([method]) => method), ['Page.enable', 'DOM.enable', 'Accessibility.enable', 'Network.enable']);
-  assert.deepEqual(calls.slice(4).map(([method]) => method), ['DOMSnapshot.captureSnapshot', 'Accessibility.getFullAXTree', 'Page.getLayoutMetrics']);
-  assert.deepEqual(calls[4][1], { computedStyles: COMPUTED_STYLES, includeDOMRects: true, includePaintOrder: true });
+  assert.deepEqual(calls.slice(4).map(([method]) => method), ['Page.getFrameTree', 'DOMSnapshot.captureSnapshot', 'Accessibility.getFullAXTree', 'Accessibility.getFullAXTree', 'Page.getLayoutMetrics']);
+  assert.deepEqual(calls[5][1], { computedStyles: COMPUTED_STYLES, includeDOMRects: true, includePaintOrder: true });
+  assert.deepEqual(calls.filter(([method]) => method === 'Accessibility.getFullAXTree').map(([, params]) => params), [{ frameId: 'root' }, { frameId: 'child' }]);
   assert.equal(injections[0].target.tabId, 42);
   assert.equal(injections[0].target.allFrames, true);
   assert.equal(typeof injections[0].func, 'function');
-  assert.deepEqual(raw.pageData, [{ frameId: 0, result: { nodes: [] } }]);
+  assert.equal(raw.axTree.nodes.length, 2);
+  assert.equal(raw.pageData.length, 2);
+  assert.equal(raw.coverage.runtime.outcome, 'complete');
+  assert.equal(raw.coverage.accessibility.outcome, 'complete');
   assert.deepEqual(raw.warnings, []);
 });
 
 test('collectPage degrades blocked frame injection to a warning but propagates structural failure', async () => {
-  const healthy = { command: async method => {
+  const healthy = { command: async (method, params) => {
+    if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'root', url: 'https://example.test/' }, childFrames: [{ frame: { id: 'child', url: 'https://example.test/frame' } }] } };
     if (method === 'DOMSnapshot.captureSnapshot') return { strings: [], documents: [] };
-    if (method === 'Accessibility.getFullAXTree') return { nodes: [] };
+    if (method === 'Accessibility.getFullAXTree') {
+      if (params.frameId === 'child') throw new Error('AX token=AX_FRAME_WARNING_FAKE');
+      return { nodes: [] };
+    }
     if (method === 'Page.getLayoutMetrics') return {};
     return {};
   } };
   const partial = await collectPage(healthy, 9, { executeScript: async () => { throw new Error('frame blocked token=FRAME_WARNING_FAKE'); } });
   assert.equal(partial.pageData.length, 0);
-  assert.match(partial.warnings[0].message, /frame blocked/);
-  assert.doesNotMatch(JSON.stringify(partial), /FRAME_WARNING_FAKE/);
+  assert.equal(partial.coverage.runtime.outcome, 'partial');
+  assert.equal(partial.coverage.accessibility.outcome, 'partial');
+  assert.equal(partial.warnings.some(item => item.code === 'FRAME_RUNTIME_BLOCKED'), true);
+  assert.equal(partial.warnings.some(item => item.code === 'RUNTIME_FRAME_MISSING'), true);
+  assert.equal(partial.warnings.some(item => item.code === 'AX_FRAME_UNAVAILABLE'), true);
+  assert.doesNotMatch(JSON.stringify(partial), /FRAME_WARNING_FAKE|AX_FRAME_WARNING_FAKE/);
 
   const broken = { command: async method => {
     if (method === 'DOMSnapshot.captureSnapshot') throw new Error('main snapshot failed');

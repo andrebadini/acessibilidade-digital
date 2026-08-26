@@ -170,6 +170,10 @@ export function result(outcome, summary, targets = [], limitations = []) {
   return { outcome, targets, summary, limitations };
 }
 
+export function probeCoverageCantTell(document, key) {
+  return document?.probeCoverage?.[key] === 'cantTell';
+}
+
 export function orderTargets(targets, nodes) {
   const positions = new Map();
   nodes.forEach((node, index) => {

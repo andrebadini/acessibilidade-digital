@@ -57,14 +57,14 @@ test('normalizes exact 320 px, 200%, 24/44 boundaries and reduced motion', () =>
 });
 
 test('missing, timed-out or incomplete observations remain cantTell', () => {
-  const probes = normalizeProbes({ warnings: [{ code: 'TIMEOUT', message: 'limite token=PROBE_WARNING_FAKE' }], actions: [{ type: 'probe', detail: 'authorization=ACTION_FAKE' }] });
+  const probes = normalizeProbes({ warnings: [{ code: 'TIMEOUT', message: 'limite token=PROBE_WARNING_FAKE' }], actions: [{ type: 'ACTION_MARKER_FAKE', detail: 'authorization=ACTION_FAKE' }] });
   for (const key of ['focusOrder', 'keyboardTraps', 'focusAppearance', 'obscuredTargets', 'reflow', 'textResize', 'motion']) {
     assert.equal(probes[key].outcome, 'cantTell');
   }
   assert.equal(probes.targetSizes.minimum24.outcome, 'cantTell');
   assert.equal(probes.targetSizes.enhanced44.outcome, 'cantTell');
-  assert.deepEqual(probes.warnings, [{ code: 'TIMEOUT', message: 'limite token=[redacted]' }]);
-  assert.doesNotMatch(JSON.stringify(probes), /PROBE_WARNING_FAKE|ACTION_FAKE/);
+  assert.deepEqual(probes.warnings, [{ code: 'TIMEOUT', message: 'Uma medição excedeu o tempo limite.' }]);
+  assert.doesNotMatch(JSON.stringify(probes), /PROBE_WARNING_FAKE|ACTION_FAKE|ACTION_MARKER_FAKE/);
 });
 
 test('small targets without an observed exception remain cantTell', () => {
@@ -100,8 +100,8 @@ test('runDynamicProbes caps Tab traversal at focusableCount plus two and records
   assert.deepEqual(cleanup, ['listeners', 'styles:original', 'viewport:1280', 'scroll:4,5', 'focus:#start']);
 });
 
-test('runDynamicProbes restores every mutable state after each probe-stage rejection and cancellation', async () => {
-  const stages = ['installNavigationGuards', 'getFocusableCount', 'pressTab', 'measureReflow', 'measureTextResize', 'measureTargetSizes', 'measureMotion'];
+test('runDynamicProbes restores captured or installed state after each probe-stage rejection', async () => {
+  const stages = ['getFocusableCount', 'pressTab', 'measureReflow', 'measureTextResize', 'measureTargetSizes', 'measureMotion'];
   for (const failingStage of stages) {
     const restored = new Set();
     const adapter = {
@@ -115,18 +115,63 @@ test('runDynamicProbes restores every mutable state after each probe-stage rejec
     adapter[failingStage] = async () => { throw new Error(`${failingStage} rejected`); };
     const raw = await runDynamicProbes({ adapter });
     assert.deepEqual([...restored].sort(), ['focus', 'listeners', 'scroll', 'styles', 'viewport'], failingStage);
-    assert.match(raw.warnings.map(item => item.message).join(' '), /rejected/);
+    assert.equal(raw.warnings.length > 0, true);
   }
+});
+
+test('mandatory baseline and guard failures abort before Tab or viewport mutations', async () => {
+  for (const failure of ['snapshotState', 'installNavigationGuards']) {
+    const calls = [];
+    const adapter = {
+      snapshotState: async () => ({ focus: null, scroll: {}, viewport: {}, styles: {} }),
+      installNavigationGuards: async () => {},
+      getFocusableCount: async () => { calls.push('focus'); return 1; },
+      measureReflow: async () => { calls.push('reflow'); return {}; },
+      restoreStyles: async () => calls.push('restoreStyles'), restoreViewport: async () => calls.push('restoreViewport'),
+      restoreScroll: async () => calls.push('restoreScroll'), restoreFocus: async () => calls.push('restoreFocus'),
+      removeNavigationGuards: async () => calls.push('removeNavigationGuards')
+    };
+    adapter[failure] = async () => { throw new Error('token=DO_NOT_SERIALIZE'); };
+    const raw = await runDynamicProbes({ adapter, timeoutMs: 20, cleanupTimeoutMs: 20 });
+    assert.equal(calls.includes('focus') || calls.includes('reflow'), false, failure);
+    assert.equal(calls.includes('removeNavigationGuards'), false);
+    assert.doesNotMatch(JSON.stringify(raw), /DO_NOT_SERIALIZE/);
+  }
+});
+
+test('timeout and AbortSignal stop immediately and cleanup cannot hang', async () => {
+  const never = () => new Promise(() => {});
+  const cleanup = [];
+  const baseline = {
+    snapshotState: async () => ({ focus: 'start', scroll: {}, viewport: {}, styles: {} }),
+    installNavigationGuards: async () => {}, getFocusableCount: never,
+    removeNavigationGuards: async () => cleanup.push('listeners'), restoreStyles: async () => cleanup.push('styles'),
+    restoreViewport: async () => cleanup.push('viewport'), restoreScroll: never, restoreFocus: async () => cleanup.push('focus')
+  };
+  const started = Date.now();
+  const timed = await runDynamicProbes({ adapter: baseline, timeoutMs: 15, cleanupTimeoutMs: 15 });
+  assert.equal(Date.now() - started < 250, true);
+  assert.equal(timed.warnings.some(item => item.code === 'TIMEOUT'), true);
+  assert.deepEqual(cleanup, ['listeners', 'styles', 'viewport', 'focus']);
 
   const controller = new AbortController();
-  controller.abort('cancelled');
-  const restored = [];
-  await runDynamicProbes({ signal: controller.signal, adapter: {
+  const abortCalls = [];
+  const promise = runDynamicProbes({ signal: controller.signal, timeoutMs: 1000, cleanupTimeoutMs: 15, adapter: {
     snapshotState: async () => ({ focus: null, scroll: {}, viewport: {}, styles: {} }),
-    removeNavigationGuards: async () => restored.push('listeners'), restoreStyles: async () => restored.push('styles'),
-    restoreViewport: async () => restored.push('viewport'), restoreScroll: async () => restored.push('scroll'), restoreFocus: async () => restored.push('focus')
+    installNavigationGuards: async () => {}, getFocusableCount: never,
+    removeNavigationGuards: async () => abortCalls.push('listeners'), restoreStyles: async () => abortCalls.push('styles'),
+    restoreViewport: async () => abortCalls.push('viewport'), restoreScroll: async () => abortCalls.push('scroll'), restoreFocus: async () => abortCalls.push('focus')
   } });
-  assert.deepEqual(restored, ['listeners', 'styles', 'viewport', 'scroll', 'focus']);
+  setTimeout(() => controller.abort(), 5);
+  const aborted = await promise;
+  assert.equal(aborted.warnings.some(item => item.code === 'ABORTED'), true);
+  assert.deepEqual(abortCalls, ['listeners', 'styles', 'viewport', 'scroll', 'focus']);
+});
+
+test('invalid dimensions and a non-reduce motion run remain cantTell', () => {
+  for (const width of [-1, Number.NaN]) assert.equal(normalizeProbes({ reflow: { testedWidthCssPx: width, horizontalOverflow: false } }).reflow.outcome, 'cantTell');
+  assert.equal(normalizeProbes({ motion: { complete: true, prefersReducedMotion: false, animatedCount: 0, reducedAnimatedCount: 0 } }).motion.outcome, 'cantTell');
+  assert.equal(normalizeProbes({ motion: { complete: true, prefersReducedMotion: false, preference: 'reduce', animatedCount: 0, reducedAnimatedCount: 0 } }).motion.outcome, 'cantTell');
 });
 
 test('merges probe observations into a fresh serializable SnapshotV1 consumed by core rules', async () => {
@@ -167,9 +212,25 @@ test('merge preserves unknown focus observations as cantTell instead of fabricat
     warnings: [{ code: 'TIMEOUT', message: 'sem observação visual' }], actions: []
   });
   const merged = mergeProbesIntoSnapshot(snapshot, probes);
-  assert.deepEqual(merged.nodes[0].focusObservation, {});
+  assert.equal(merged.nodes[0].focusObservation, undefined);
   const audit = await runCoreAudit(merged);
   for (const ruleId of ['focus-visible', 'focus-fully-visible', 'focus-partially-visible', 'focus-indicator-area']) {
     assert.equal(audit.ruleResults.find(item => item.ruleId === ruleId).outcome, 'cantTell');
+  }
+});
+
+test('partial frame coverage propagates cantTell before pass or inapplicable', async () => {
+  const snapshot = {
+    schemaVersion: 1,
+    document: { nodeId: 'document', coverage: { runtime: { outcome: 'partial' } } },
+    nodes: []
+  };
+  const merged = mergeProbesIntoSnapshot(snapshot, normalizeProbes(completeRaw()));
+  assert.equal(merged.document.probeCoverage.focusAppearance, 'cantTell');
+  assert.equal(merged.document.reflowObservation, null);
+  assert.equal(merged.nodes.some(node => node.focusObservation || node.targetSize), false);
+  const audit = await runCoreAudit(merged);
+  for (const ruleId of ['focus-visible', 'responsive-reflow', 'text-resizing', 'target-size-minimum', 'interaction-animation']) {
+    assert.equal(audit.ruleResults.find(item => item.ruleId === ruleId).outcome, 'cantTell', ruleId);
   }
 });

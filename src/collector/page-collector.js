@@ -6,7 +6,7 @@ export function collectRuntimePageData() {
   const sensitive = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
   const styleNames = [
     'display', 'visibility', 'opacity', 'color', 'background-color',
-    'background-image', 'font-size', 'font-weight', 'line-height',
+    'font-size', 'font-weight', 'line-height',
     'letter-spacing', 'word-spacing', 'outline-color', 'outline-style',
     'outline-width', 'box-shadow', 'text-decoration-color', 'overflow-x',
     'overflow-y', 'animation-duration', 'animation-iteration-count',
@@ -14,6 +14,8 @@ export function collectRuntimePageData() {
   ];
   const cleanUrl = (value) => {
     if (typeof value !== 'string' || value.trim() === '') return '';
+    if (/^data:/iu.test(value)) return 'data:[redacted]';
+    if (/^blob:/iu.test(value)) return 'blob:[redacted]';
     try {
       const url = new URL(value, document.baseURI);
       url.username = '';
@@ -26,6 +28,13 @@ export function collectRuntimePageData() {
     } catch {
       return '';
     }
+  };
+  const backgroundKind = value => {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (!normalized || normalized === 'none') return 'none';
+    const url = /url\s*\(/u.test(normalized);
+    const gradient = /(?:repeating-)?(?:linear|radial|conic)-gradient\s*\(/u.test(normalized);
+    return url && gradient ? 'mixed' : url ? 'url' : gradient ? 'gradient' : 'mixed';
   };
   const identifierIsSensitive = (element) => sensitive.test([
     element.getAttribute('name'), element.id, element.getAttribute('autocomplete')
@@ -87,8 +96,10 @@ export function collectRuntimePageData() {
       order,
       tagName: element.localName,
       selectorHint: selector(element),
-      rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      viewportRect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      documentRect: { x: rect.x + scrollX, y: rect.y + scrollY, width: rect.width, height: rect.height },
       styles,
+      backgroundImageKind: backgroundKind(computed.getPropertyValue('background-image')),
       hidden: !visible,
       visibleText: sensitiveControl ? '' : (element.innerText || '').replace(/\s+/gu, ' ').trim(),
       focusable: element.matches('a[href],button,input:not([type="hidden"]),select,textarea,[tabindex],[contenteditable="true"]') && !element.disabled,

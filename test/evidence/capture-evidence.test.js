@@ -20,11 +20,23 @@ test('captures and validates one deterministic full-page PNG evidence record', a
   const cdp = fakeCdp();
   const first = await captureFullPage(cdp, { cssContentSize: { width: 800, height: 1200 } });
   const second = await captureFullPage(fakeCdp(), { cssContentSize: { width: 800, height: 1200 } });
-  assert.deepEqual(cdp.calls, [['Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, fromSurface: true }]]);
+  assert.deepEqual(cdp.calls, [['Page.captureScreenshot', {
+    format: 'png', captureBeyondViewport: true, fromSurface: true,
+    clip: { x: 0, y: 0, width: 800, height: 1200, scale: 1 }
+  }]]);
   assert.equal(first.status, 'captured');
   assert.equal(first.dataUrl, `data:image/png;base64,${PNG_1PX}`);
   assert.equal(first.evidenceId, second.evidenceId);
   assert.deepEqual(first.metadata, { kind: 'full-page', mimeType: 'image/png', width: 800, height: 1200 });
+});
+
+test('converts an explicitly viewport-relative rect to document coordinates before clipping', async () => {
+  const cdp = fakeCdp();
+  await captureElement(cdp, { x: 20, y: 500, width: 60, height: 40, coordinateSpace: 'viewport' }, {
+    cssContentSize: { width: 1000, height: 2000 }, scrollX: 0, scrollY: 1000
+  });
+  assert.equal(cdp.calls[0][1].clip.y, 1500);
+  assert.equal(cdp.calls[0][1].clip.x, 20);
 });
 
 test('captures clamped element thumbnails and references the full-page evidence id', async () => {

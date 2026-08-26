@@ -1,5 +1,11 @@
 import { assertSnapshotV1 } from './snapshot-schema.js';
-import { redactSensitiveText } from './privacy.js';
+import {
+  backgroundImageKind,
+  redactNormalizedNode,
+  sanitizeEvidenceUrl,
+  sanitizeJsonData,
+  sanitizeWarnings
+} from './privacy.js';
 
 const SENSITIVE = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
 const URL_ATTRIBUTES = new Set(['action', 'cite', 'formaction', 'href', 'poster', 'src']);
@@ -10,19 +16,7 @@ function cleanText(value) {
 }
 
 export function sanitizeResourceUrl(value, base) {
-  if (typeof value !== 'string' || value.trim() === '') return '';
-  if (/^data:/iu.test(value)) return value.replace(/#.*$/u, '');
-  try {
-    const url = new URL(value, base);
-    if (!['http:', 'https:', 'blob:'].includes(url.protocol)) return '';
-    url.username = '';
-    url.password = '';
-    for (const key of [...url.searchParams.keys()]) if (SENSITIVE.test(key)) url.searchParams.delete(key);
-    if (SENSITIVE.test(url.hash)) url.hash = '';
-    return url.href;
-  } catch {
-    return '';
-  }
+  return sanitizeEvidenceUrl(value, base);
 }
 
 function sensitiveElement(tagName, attributes) {
@@ -37,7 +31,7 @@ function sanitizeAttributes(input, tagName, base) {
   const output = {};
   const normalizedInput = Object.fromEntries(Object.entries(input || {}).map(([name, value]) => [String(name).toLowerCase(), value]));
   for (const [name, rawValue] of Object.entries(normalizedInput)) {
-    if (/^on/iu.test(name) || name === 'srcdoc') continue;
+    if (/^on/iu.test(name) || name === 'srcdoc' || name === 'style') continue;
     if (name === 'value' && sensitiveElement(tagName, normalizedInput)) continue;
     let value = typeof rawValue === 'string' ? rawValue : rawValue === true ? '' : String(rawValue ?? '');
     if (URL_ATTRIBUTES.has(name)) value = sanitizeResourceUrl(value, base);
@@ -84,10 +78,17 @@ function copyRuntime(record, base) {
     if (typeof record?.[key] === 'string' || typeof record?.[key] === 'boolean' || record?.[key] === null) result[key] = record[key];
   }
   if (typeof record?.selectorHint === 'string' && !SENSITIVE.test(record.selectorHint)) result.selectorHint = record.selectorHint;
-  const rect = copyRect(record?.rect);
-  if (rect) result.rect = rect;
+  const viewportRect = copyRect(record?.viewportRect);
+  const documentRect = copyRect(record?.documentRect);
+  if (viewportRect) result.viewportRect = viewportRect;
+  if (documentRect) result.documentRect = documentRect;
   if (record?.styles && typeof record.styles === 'object' && !Array.isArray(record.styles)) {
-    result.styles = Object.fromEntries(Object.entries(record.styles).filter(([, value]) => typeof value === 'string'));
+    result.styles = {};
+    for (const [name, value] of Object.entries(record.styles)) {
+      if (typeof value !== 'string') continue;
+      if (name === 'background-image' || name === 'backgroundImage') result.backgroundImageKind = backgroundImageKind(value);
+      else result.styles[name] = value;
+    }
   }
   if (record?.form && typeof record.form === 'object' && !Array.isArray(record.form)) {
     result.form = Object.fromEntries(Object.entries(record.form).filter(([, value]) => ['string', 'boolean', 'number'].includes(typeof value)));
@@ -134,6 +135,7 @@ function normalizeSimplified(raw) {
       text: sensitive || EXECUTABLE_TEXT_PARENTS.has(tagName) ? '' : cleanText(node.text),
       visibleText: sensitive ? '' : cleanText(node.visibleText ?? node.text),
       hidden: node.hidden === true || (tagName === 'input' && cleanText(attributes.type).toLowerCase() === 'hidden'),
+      ...(copyRect(node.rect) ? { rect: copyRect(node.rect) } : {}),
       ...runtimeData
     };
     const ax = axByBackend.get(node.backendNodeId);
@@ -151,10 +153,29 @@ function normalizeSimplified(raw) {
   });
   const byId = new Map(nodes.map(node => [node.nodeId, node]));
   for (const node of nodes) if (node.parentId && byId.has(node.parentId)) byId.get(node.parentId).children.push(node.nodeId);
+  const executableById = new Map(nodes.map(node => [node.nodeId, EXECUTABLE_TEXT_PARENTS.has(node.tagName)]));
+  const inExecutableSubtree = node => {
+    const visited = new Set();
+    let current = node;
+    while (current && !visited.has(current.nodeId)) {
+      visited.add(current.nodeId);
+      if (executableById.get(current.nodeId)) return true;
+      current = current.parentId ? byId.get(current.parentId) : null;
+    }
+    return false;
+  };
+  const redactedNodes = nodes.map(node => redactNormalizedNode(node, { executable: inExecutableSubtree(node) }));
   return assertSnapshotV1({
     schemaVersion: 1,
-    document: { nodeId: 'document', title: cleanText(raw.document?.title), url: sanitizeResourceUrl(raw.document?.url || ''), language: cleanText(raw.document?.language), warnings: [] },
-    nodes
+    document: {
+      nodeId: 'document',
+      title: cleanText(raw.document?.title),
+      url: sanitizeResourceUrl(raw.document?.url || ''),
+      language: cleanText(raw.document?.language),
+      warnings: sanitizeWarnings(raw.warnings),
+      ...(raw.coverage && typeof raw.coverage === 'object' ? { coverage: sanitizeJsonData(raw.coverage) } : {})
+    },
+    nodes: redactedNodes
   });
 }
 
@@ -190,12 +211,19 @@ function normalizeColumnar(raw) {
       document.layout.nodeIndex.forEach((nodeIndex, layoutIndex) => {
         const rect = copyRect(document.layout.bounds?.[layoutIndex]);
         const styles = {};
+        let layoutBackgroundImageKind;
         const styleRow = document.layout.styles?.[layoutIndex];
         if (Array.isArray(styleRow)) styleNames.forEach((name, index) => {
           const value = stringAt(strings, styleRow[index]);
-          if (value !== '') styles[name] = value;
+          if (value === '') return;
+          if (name === 'background-image') layoutBackgroundImageKind = backgroundImageKind(value);
+          else styles[name] = value;
         });
-        layoutByNode.set(nodeIndex, { ...(rect ? { rect } : {}), ...(Object.keys(styles).length ? { styles } : {}) });
+        layoutByNode.set(nodeIndex, {
+          ...(rect ? { rect } : {}),
+          ...(Object.keys(styles).length ? { styles } : {}),
+          ...(layoutBackgroundImageKind ? { backgroundImageKind: layoutBackgroundImageKind } : {})
+        });
       });
     }
     for (let nodeIndex = 0; nodeIndex < count; nodeIndex += 1) {
@@ -231,6 +259,12 @@ function normalizeColumnar(raw) {
   for (const ax of Array.isArray(raw.axTree) ? raw.axTree : raw.axTree?.nodes || []) {
     if (Number.isFinite(ax?.backendDOMNodeId) && !axByBackend.has(ax.backendDOMNodeId)) axByBackend.set(ax.backendDOMNodeId, ax);
   }
+  const addMulti = (map, key, value) => {
+    if (key === '' || key === null || key === undefined) return;
+    const values = map.get(key) || [];
+    values.push(value);
+    map.set(key, values);
+  };
   const runtimeByBackend = new Map();
   const runtimeBySelector = new Map();
   const runtimeByUrlSelector = new Map();
@@ -240,16 +274,41 @@ function normalizeColumnar(raw) {
     const frameId = String(entry?.frameId ?? data?.frameId ?? '');
     const runtimeUrl = sanitizeResourceUrl(data?.url || '');
     for (const node of Array.isArray(data?.nodes) ? data.nodes : []) {
-      if (Number.isFinite(node.backendNodeId)) runtimeByBackend.set(node.backendNodeId, node);
+      if (Number.isFinite(node.backendNodeId)) addMulti(runtimeByBackend, node.backendNodeId, node);
       if (typeof node.selectorHint === 'string') {
-        runtimeBySelector.set(`${frameId}:${node.selectorHint}`, node);
-        if (runtimeUrl) runtimeByUrlSelector.set(`${runtimeUrl}:${node.selectorHint}`, node);
+        addMulti(runtimeBySelector, `${frameId}:${node.selectorHint}`, node);
+        if (runtimeUrl) addMulti(runtimeByUrlSelector, `${runtimeUrl}:${node.selectorHint}`, node);
       }
       if (runtimeUrl && Number.isSafeInteger(node.order) && typeof node.tagName === 'string') {
-        runtimeByUrlOrder.set(`${runtimeUrl}:${node.order}:${node.tagName.toLowerCase()}`, node);
+        addMulti(runtimeByUrlOrder, `${runtimeUrl}:${node.order}:${node.tagName.toLowerCase()}`, node);
       }
     }
   }
+
+  const recordsByBackend = new Map();
+  const recordsBySelector = new Map();
+  const recordsByUrlSelector = new Map();
+  const recordsByUrlOrder = new Map();
+  for (const record of records) {
+    if (Number.isFinite(record.backendNodeId)) addMulti(recordsByBackend, record.backendNodeId, record);
+    const idSelector = record.attributes.id ? `#${record.attributes.id}` : '';
+    if (idSelector) {
+      addMulti(recordsBySelector, `${record.frameId}:${idSelector}`, record);
+      addMulti(recordsByUrlSelector, `${record.base}:${idSelector}`, record);
+    }
+    if (Number.isSafeInteger(record.elementOrder)) addMulti(recordsByUrlOrder, `${record.base}:${record.elementOrder}:${record.tagName}`, record);
+  }
+  let ambiguousRuntimeMatch = false;
+  const uniqueMatch = (runtimeMap, recordMap, key) => {
+    if (!key) return null;
+    const runtimeCandidates = runtimeMap.get(key) || [];
+    const recordCandidates = recordMap.get(key) || [];
+    if (runtimeCandidates.length === 1 && recordCandidates.length === 1) return runtimeCandidates[0];
+    if (runtimeCandidates.length > 0 && recordCandidates.length > 0 && (runtimeCandidates.length !== 1 || recordCandidates.length !== 1)) {
+      ambiguousRuntimeMatch = true;
+    }
+    return null;
+  };
 
   const rootsByDocument = new Map();
   const childrenByRecord = new Map();
@@ -289,20 +348,56 @@ function normalizeColumnar(raw) {
   });
 
   const outputByRecord = new Map();
+  const executableMemo = new Map();
+  const inExecutableSubtree = record => {
+    if (executableMemo.has(record)) return executableMemo.get(record);
+    let current = record;
+    const visited = new Set();
+    while (current && !visited.has(current)) {
+      visited.add(current);
+      if (EXECUTABLE_TEXT_PARENTS.has(current.tagName)) {
+        executableMemo.set(record, true);
+        return true;
+      }
+      current = byDocumentAndIndex.get(`${current.documentIndex}:${current.parentIndex}`);
+    }
+    executableMemo.set(record, false);
+    return false;
+  };
   const descendantText = (record) => {
-    if (EXECUTABLE_TEXT_PARENTS.has(record.tagName) || sensitiveElement(record.tagName, record.attributes)) return '';
+    if (inExecutableSubtree(record) || sensitiveElement(record.tagName, record.attributes)) return '';
     const parts = [record.rawText];
     for (const child of childrenByRecord.get(record) || []) parts.push(descendantText(child));
     return cleanText(parts.join(' '));
   };
+  const shadowScope = record => {
+    let current = record;
+    const visited = new Set();
+    while (current && !visited.has(current)) {
+      visited.add(current);
+      if (current.shadowRootType) {
+        const host = byDocumentAndIndex.get(`${current.documentIndex}:${current.parentIndex}`) || null;
+        return { root: current, host };
+      }
+      current = byDocumentAndIndex.get(`${current.documentIndex}:${current.parentIndex}`);
+    }
+    return null;
+  };
+  const shadowRootByHost = new Map();
+  for (const record of records) {
+    if (!record.shadowRootType) continue;
+    const host = byDocumentAndIndex.get(`${record.documentIndex}:${record.parentIndex}`);
+    if (host && !shadowRootByHost.has(host)) shadowRootByHost.set(host, record);
+  }
   const nodes = ordered.map(record => {
     const host = documentHost.get(record.documentIndex);
     const parent = byDocumentAndIndex.get(`${record.documentIndex}:${record.parentIndex}`);
     const effectiveParent = parent?.nodeType === 9 ? host || null : parent || host || null;
     const idSelector = record.attributes.id ? `#${record.attributes.id}` : '';
-    const runtime = runtimeByBackend.get(record.backendNodeId) || runtimeBySelector.get(`${record.frameId}:${idSelector}`) ||
-      runtimeByUrlSelector.get(`${record.base}:${idSelector}`) ||
-      runtimeByUrlOrder.get(`${record.base}:${record.elementOrder}:${record.tagName}`) || null;
+    const runtime = uniqueMatch(runtimeByBackend, recordsByBackend, record.backendNodeId) ||
+      uniqueMatch(runtimeBySelector, recordsBySelector, idSelector ? `${record.frameId}:${idSelector}` : '') ||
+      uniqueMatch(runtimeByUrlSelector, recordsByUrlSelector, idSelector ? `${record.base}:${idSelector}` : '') ||
+      uniqueMatch(runtimeByUrlOrder, recordsByUrlOrder, Number.isSafeInteger(record.elementOrder) ? `${record.base}:${record.elementOrder}:${record.tagName}` : '') || null;
     const runtimeData = runtime ? copyRuntime(runtime, record.base) : {};
     const sensitive = sensitiveElement(record.tagName, record.attributes);
     const ax = axByBackend.get(record.backendNodeId);
@@ -323,8 +418,21 @@ function normalizeColumnar(raw) {
         (record.tagName === 'input' && cleanText(record.attributes.type).toLowerCase() === 'hidden') ||
         record.layout.styles?.display === 'none' || record.layout.styles?.visibility === 'hidden',
       ...record.layout,
+      ...(!record.layout.rect && runtimeData.documentRect ? { rect: runtimeData.documentRect } : {}),
       ...runtimeData
     };
+    const scope = shadowScope(record);
+    if (scope) {
+      node.shadowRootId = scope.root.id;
+      node.shadowHostId = scope.host?.id ?? null;
+      node.shadowPath = scope.host ? [scope.host.id] : [];
+    }
+    const hostedRoot = shadowRootByHost.get(record);
+    if (hostedRoot) {
+      node.isShadowHost = true;
+      node.hostedShadowRootId = hostedRoot.id;
+      if (!scope) node.shadowRootId = hostedRoot.id;
+    }
     if (record.shadowRootType) node.shadowRootType = record.shadowRootType;
     if (ax) {
       const role = axString(ax.role);
@@ -356,6 +464,10 @@ function normalizeColumnar(raw) {
     }
   }
 
+  const redactedNodes = ordered.map(record => redactNormalizedNode(outputByRecord.get(record), {
+    executable: inExecutableSubtree(record)
+  }));
+
   const primary = documents[0] || {};
   const primaryRoot = (rootsByDocument.get(0) || []).find(record => record.nodeType === 9);
   const html = primaryRoot ? (childrenByRecord.get(primaryRoot) || []).find(record => record.tagName === 'html') : null;
@@ -365,9 +477,13 @@ function normalizeColumnar(raw) {
     url: sanitizeResourceUrl(stringAt(strings, primary.documentURL)),
     language: cleanText(html?.attributes.lang || stringAt(strings, primary.contentLanguage)),
     layoutMetrics: raw.layoutMetrics && typeof raw.layoutMetrics === 'object' ? JSON.parse(JSON.stringify(raw.layoutMetrics)) : {},
-    warnings: (Array.isArray(raw.warnings) ? raw.warnings : []).map(item => ({ code: cleanText(item?.code), frameId: item?.frameId ?? null, message: redactSensitiveText(cleanText(item?.message)) }))
+    warnings: sanitizeWarnings([
+      ...(Array.isArray(raw.warnings) ? raw.warnings : []),
+      ...(ambiguousRuntimeMatch ? [{ code: 'RUNTIME_MATCH_AMBIGUOUS' }] : [])
+    ]),
+    ...(raw.coverage && typeof raw.coverage === 'object' ? { coverage: sanitizeJsonData(raw.coverage) } : {})
   };
-  return assertSnapshotV1({ schemaVersion: 1, document, nodes });
+  return assertSnapshotV1({ schemaVersion: 1, document, nodes: redactedNodes });
 }
 
 /** Normalizes a CDP DOMSnapshot/AX/runtime bundle into public SnapshotV1. */

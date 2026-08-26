@@ -1,5 +1,5 @@
 import { assertSnapshotV1 } from './snapshot-schema.js';
-import { redactSensitiveText, sanitizeJsonData } from './privacy.js';
+import { redactSensitiveText, sanitizeJsonData, sanitizeWarnings } from './privacy.js';
 
 function finite(value) {
   return typeof value === 'number' && Number.isFinite(value);
@@ -12,7 +12,13 @@ function outcome(value) {
 function safeId(event) {
   if (typeof event?.nodeId === 'string' && event.nodeId.trim()) return event.nodeId;
   if (Number.isSafeInteger(event?.nodeId)) return String(event.nodeId);
-  return typeof event?.selector === 'string' && event.selector.trim() ? event.selector : null;
+  if (typeof event?.selector !== 'string' || !event.selector.trim()) return null;
+  let hash = 2166136261;
+  for (const character of redactSensitiveText(event.selector.normalize('NFKC'))) {
+    hash ^= character.codePointAt(0);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return `probe-${hash.toString(16).padStart(8, '0')}`;
 }
 
 function unique(values) {
@@ -32,6 +38,23 @@ function jsonData(value, fallback) {
   } catch {
     return fallback;
   }
+}
+
+const ACTION_TYPES = new Set(['guard-navigation', 'key', 'viewport', 'text-resize', 'measure-targets', 'motion', 'restore']);
+
+function sanitizeAction(action) {
+  const type = ACTION_TYPES.has(action?.type) ? action.type : 'probe';
+  return {
+    type,
+    ...(type === 'key' && action?.key === 'Tab' ? { key: 'Tab' } : {}),
+    ...(type === 'key' && Number.isSafeInteger(action?.index) ? { index: action.index } : {}),
+    ...(type === 'viewport' && finite(action?.widthCssPx) ? { widthCssPx: action.widthCssPx } : {}),
+    ...(type === 'text-resize' && finite(action?.scalePercent) ? { scalePercent: action.scalePercent } : {}),
+    ...(type === 'measure-targets' && Array.isArray(action?.thresholdsCssPx) ? { thresholdsCssPx: action.thresholdsCssPx.filter(finite) } : {}),
+    ...(type === 'guard-navigation' && action?.operation === 'install' ? { operation: 'install' } : {}),
+    ...(type === 'restore' && ['listeners', 'styles', 'viewport', 'scroll', 'focus'].includes(action?.target) ? { target: action.target } : {}),
+    ...(type === 'motion' && action?.preference === 'reduce' ? { preference: 'reduce' } : {})
+  };
 }
 
 /** Converts raw probe events to a JSON-safe conservative tri-state contract. */
@@ -64,7 +87,7 @@ export function normalizeProbes(raw = {}) {
   const knownVisibility = visibilityObservations.filter(item => item.intersectionRatio !== null);
   const obscured = unique(knownVisibility.filter(item => item.intersectionRatio < 1).map(item => item.nodeId));
 
-  const reflowValid = finite(raw.reflow?.testedWidthCssPx) && raw.reflow.testedWidthCssPx <= 320 &&
+  const reflowValid = finite(raw.reflow?.testedWidthCssPx) && raw.reflow.testedWidthCssPx > 0 && raw.reflow.testedWidthCssPx <= 320 &&
     typeof raw.reflow?.horizontalOverflow === 'boolean';
   const resizeValid = finite(raw.textResize?.scalePercent) && raw.textResize.scalePercent >= 200 &&
     typeof raw.textResize?.lossOfContent === 'boolean';
@@ -84,12 +107,14 @@ export function normalizeProbes(raw = {}) {
   const minimumUnknown = targetObservations.some(item => !item.minimum24 && item.exception !== 'none' && !minimumExceptions.has(item.exception));
   const enhancedUnknown = targetObservations.some(item => !item.enhanced44 && item.exception !== 'none' && !enhancedExceptions.has(item.exception));
 
-  const motionValid = raw.motion?.complete === true && typeof raw.motion?.prefersReducedMotion === 'boolean' &&
+  const reducedPreferenceExecuted = raw.motion?.prefersReducedMotion === true ||
+    (raw.motion?.prefersReducedMotion === undefined && raw.motion?.preference === 'reduce');
+  const motionValid = raw.motion?.complete === true && reducedPreferenceExecuted &&
     Number.isSafeInteger(raw.motion?.animatedCount) && raw.motion.animatedCount >= 0 &&
     Number.isSafeInteger(raw.motion?.reducedAnimatedCount) && raw.motion.reducedAnimatedCount >= 0;
   const motionFailed = motionValid && raw.motion.prefersReducedMotion && raw.motion.reducedAnimatedCount > 0;
 
-  return {
+  const normalized = {
     focusOrder: {
       outcome: focusComplete ? 'passed' : 'cantTell',
       targets: focusIds,
@@ -131,18 +156,27 @@ export function normalizeProbes(raw = {}) {
       animatedCount: motionValid ? raw.motion.animatedCount : null,
       reducedAnimatedCount: motionValid ? raw.motion.reducedAnimatedCount : null
     },
-    warnings: (Array.isArray(raw.warnings) ? raw.warnings : []).map(item => ({
-      code: typeof item?.code === 'string' ? item.code : 'PROBE_WARNING',
-      message: redactSensitiveText(typeof item?.message === 'string' ? item.message : item?.message)
-    })),
-    actions: sanitizeJsonData(Array.isArray(raw.actions) ? raw.actions : [])
+    warnings: sanitizeWarnings(raw.warnings),
+    actions: sanitizeJsonData((Array.isArray(raw.actions) ? raw.actions : []).map(sanitizeAction))
   };
+  normalized.probeCoverage = Object.fromEntries([
+    'focusOrder', 'keyboardTraps', 'focusAppearance', 'obscuredTargets', 'reflow', 'textResize', 'motion'
+  ].map(key => [key, normalized[key].outcome === 'cantTell' ? 'cantTell' : 'complete']));
+  normalized.probeCoverage.targetSizes = [normalized.targetSizes.minimum24, normalized.targetSizes.enhanced44]
+    .some(item => item.outcome === 'cantTell') ? 'cantTell' : 'complete';
+  return normalized;
 }
 
 /** Merges normalized observations without mutating the public snapshot. */
 export function mergeProbesIntoSnapshot(snapshot, probes) {
   assertSnapshotV1(snapshot);
   const normalized = probes && probes.focusOrder && probes.targetSizes ? probes : normalizeProbes(probes);
+  const runtimeOutcome = snapshot.document?.coverage?.runtime?.outcome;
+  const runtimeIncomplete = typeof runtimeOutcome === 'string' && runtimeOutcome !== 'complete';
+  const probeCoverage = { ...(normalized.probeCoverage || {}) };
+  if (runtimeIncomplete) {
+    for (const key of ['focusOrder', 'keyboardTraps', 'focusAppearance', 'obscuredTargets', 'reflow', 'textResize', 'targetSizes', 'motion']) probeCoverage[key] = 'cantTell';
+  }
   const focusById = new Map();
   for (const item of normalized.focusAppearance.observations || []) focusById.set(String(item.nodeId), { appearance: item });
   for (const item of normalized.obscuredTargets.observations || []) {
@@ -153,15 +187,16 @@ export function mergeProbesIntoSnapshot(snapshot, probes) {
   const targetById = new Map((normalized.targetSizes.observations || []).map(item => [String(item.nodeId), item]));
 
   const nodes = snapshot.nodes.map(node => {
-    const focus = focusById.get(String(node.nodeId));
-    const target = targetById.get(String(node.nodeId));
+    const focus = probeCoverage.focusAppearance === 'complete' || probeCoverage.obscuredTargets === 'complete'
+      ? focusById.get(String(node.nodeId)) : null;
+    const target = probeCoverage.targetSizes === 'complete' ? targetById.get(String(node.nodeId)) : null;
     const focusObservation = {};
-    if (typeof focus?.appearance?.visible === 'boolean') focusObservation.indicatorVisible = focus.appearance.visible;
-    if (finite(focus?.visibility?.intersectionRatio)) {
+    if (probeCoverage.focusAppearance === 'complete' && typeof focus?.appearance?.visible === 'boolean') focusObservation.indicatorVisible = focus.appearance.visible;
+    if (probeCoverage.obscuredTargets === 'complete' && finite(focus?.visibility?.intersectionRatio)) {
       focusObservation.fullyVisible = focus.visibility.intersectionRatio >= 1;
       focusObservation.partiallyVisible = focus.visibility.intersectionRatio > 0;
     }
-    if (typeof focus?.appearance?.areaSufficient === 'boolean') focusObservation.areaSufficient = focus.appearance.areaSufficient;
+    if (probeCoverage.focusAppearance === 'complete' && typeof focus?.appearance?.areaSufficient === 'boolean') focusObservation.areaSufficient = focus.appearance.areaSufficient;
     return {
       ...node,
       attributes: { ...node.attributes },
@@ -174,12 +209,13 @@ export function mergeProbesIntoSnapshot(snapshot, probes) {
     schemaVersion: 1,
     document: {
       ...snapshot.document,
-      reflowObservation: normalized.reflow.outcome === 'cantTell' ? null : {
+      probeCoverage,
+      reflowObservation: probeCoverage.reflow === 'cantTell' || normalized.reflow.outcome === 'cantTell' ? null : {
         testedWidthCssPx: normalized.reflow.testedWidthCssPx,
         twoDimensionalScroll: normalized.reflow.horizontalOverflow,
         exception: normalized.reflow.exception
       },
-      textResizeObservation: normalized.textResize.outcome === 'cantTell' ? null : {
+      textResizeObservation: probeCoverage.textResize === 'cantTell' || normalized.textResize.outcome === 'cantTell' ? null : {
         scalePercent: normalized.textResize.scalePercent,
         lossOfContent: normalized.textResize.lossOfContent
       },

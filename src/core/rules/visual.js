@@ -10,6 +10,7 @@ import {
   nodeIndex,
   normalizeText,
   orderTargets,
+  probeCoverageCantTell,
   result,
   snapshotParts,
   target
@@ -129,7 +130,8 @@ const ENHANCED_TARGET_EXCEPTIONS = new Set(['equivalent', 'inline', 'user-agent'
 const KNOWN_TARGET_EXCEPTIONS = new Set([...MINIMUM_TARGET_EXCEPTIONS, ...ENHANCED_TARGET_EXCEPTIONS]);
 
 function targetSize(snapshot, threshold) {
-  return visualResult(snapshot, ({ nodes }) => {
+  return visualResult(snapshot, ({ document, nodes }) => {
+    if (probeCoverageCantTell(document, 'targetSizes')) return result('cantTell', 'A cobertura da medição de alvos está incompleta.');
     const exceptions = threshold === 44 ? ENHANCED_TARGET_EXCEPTIONS : MINIMUM_TARGET_EXCEPTIONS;
     const candidates = nodes.filter(isComponent);
     if (candidates.length === 0) return result('inapplicable', 'Não há alvos de acionamento aplicáveis.');
@@ -160,7 +162,9 @@ function targetSize(snapshot, threshold) {
 }
 
 function focusProperty(snapshot, property, label) {
-  return visualResult(snapshot, ({ nodes }) => {
+  return visualResult(snapshot, ({ document, nodes }) => {
+    const coverageKey = ['fullyVisible', 'partiallyVisible'].includes(property) ? 'obscuredTargets' : 'focusAppearance';
+    if (probeCoverageCantTell(document, coverageKey)) return result('cantTell', 'A cobertura da observação de foco está incompleta.');
     const candidates = nodes.filter(node => !isHidden(node) && node?.focusable === true);
     if (candidates.length === 0) return result('inapplicable', 'Não há elementos focáveis aplicáveis.');
     const failures = [];
@@ -211,6 +215,7 @@ function zoomNotBlocked(snapshot) {
 
 function exceptionObservation(snapshot, field, failureProperty, label) {
   return visualResult(snapshot, ({ document }) => {
+    if (label.coverageKey && probeCoverageCantTell(document, label.coverageKey)) return result('cantTell', `${label.observation} possui cobertura incompleta.`, [], [label.request]);
     if (!hasOwn(document, field) || !document[field] || typeof document[field] !== 'object') {
       return result('cantTell', `${label.observation} não foi observada.`, [], [label.request]);
     }
@@ -245,6 +250,7 @@ function textSpacing(snapshot) {
 
 function textResize(snapshot) {
   return visualResult(snapshot, ({ document }) => {
+    if (probeCoverageCantTell(document, 'textResize')) return result('cantTell', 'A cobertura do redimensionamento de texto está incompleta.');
     const observation = document.textResizeObservation;
     if (!observation || !finite(observation.scalePercent) || observation.scalePercent < 200 || typeof observation.lossOfContent !== 'boolean') {
       return result('cantTell', 'O redimensionamento de texto a 200% não foi observado completamente.', [], [
@@ -306,7 +312,7 @@ export const VISUAL_RULES = createRuleRegistry([
     observation: 'A orientação de exibição', request: 'Teste ambas as orientações e registre se a restrição é essencial ou inexistente.', passed: 'A página não restringe a orientação.', failed: 'A página restringe a orientação sem exceção.', message: 'Permita o uso em ambas as orientações.', reason: 'orientation-restricted'
   })),
   definition('responsive-reflow', snapshot => exceptionObservation(snapshot, 'reflowObservation', 'twoDimensionalScroll', {
-    observation: 'O reflow a 320 CSS px', request: 'Teste a largura equivalente a 320 CSS px e registre rolagem bidimensional e exceção.', passed: 'Não houve rolagem bidimensional no teste de reflow.', failed: 'O conteúdo exige rolagem bidimensional sem exceção.', message: 'Faça o conteúdo refluir sem rolagem em duas dimensões.', reason: 'two-dimensional-scroll', complete: observation => finite(observation.testedWidthCssPx) && observation.testedWidthCssPx > 0 && observation.testedWidthCssPx <= 320
+    observation: 'O reflow a 320 CSS px', request: 'Teste a largura equivalente a 320 CSS px e registre rolagem bidimensional e exceção.', passed: 'Não houve rolagem bidimensional no teste de reflow.', failed: 'O conteúdo exige rolagem bidimensional sem exceção.', message: 'Faça o conteúdo refluir sem rolagem em duas dimensões.', reason: 'two-dimensional-scroll', coverageKey: 'reflow', complete: observation => finite(observation.testedWidthCssPx) && observation.testedWidthCssPx > 0 && observation.testedWidthCssPx <= 320
   })),
   definition('focus-indicator-area', snapshot => focusProperty(snapshot, 'areaSufficient', FOCUS_LABELS.area)),
   definition('text-contrast-enhanced', snapshot => textContrast(snapshot, true)),

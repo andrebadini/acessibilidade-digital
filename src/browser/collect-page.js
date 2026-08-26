@@ -1,5 +1,5 @@
 import { collectRuntimePageData } from '../collector/page-collector.js';
-import { redactSensitiveText } from '../core/privacy.js';
+import { sanitizeEvidenceUrl, sanitizeWarning } from '../core/privacy.js';
 
 export const COMPUTED_STYLE_PROPERTIES = Object.freeze([
   'display', 'visibility', 'opacity', 'color', 'background-color',
@@ -26,18 +26,48 @@ export async function collectPage(cdp, tabId, options = {}) {
     await cdp.command(`${domain}.enable`, {});
   }
 
-  // Structural failures are fatal. Keep this sequence deterministic for an
-  // auditable command log and never request cookies, storage or headers.
+  // Network is enabled to preserve the planned CDP domain set, but no network
+  // event, request header, cookie, authentication or storage data is consumed.
+  const frameTreeResult = await cdp.command('Page.getFrameTree', {});
+  const expectedFrames = [];
+  const seenFrameIds = new Set();
+  const visitFrame = tree => {
+    const frameId = typeof tree?.frame?.id === 'string' ? tree.frame.id : '';
+    if (frameId && !seenFrameIds.has(frameId)) {
+      seenFrameIds.add(frameId);
+      expectedFrames.push({ frameId, url: sanitizeEvidenceUrl(tree.frame.url || '') });
+    }
+    for (const child of Array.isArray(tree?.childFrames) ? tree.childFrames : []) visitFrame(child);
+  };
+  visitFrame(frameTreeResult?.frameTree);
+
+  // Structural DOM and layout failures are fatal. Keep this sequence
+  // deterministic and never request cookies, storage or headers.
   const capturedDomSnapshot = await cdp.command('DOMSnapshot.captureSnapshot', {
     computedStyles: [...COMPUTED_STYLE_PROPERTIES],
     includeDOMRects: true,
     includePaintOrder: true
   });
   const domSnapshot = { ...capturedDomSnapshot, computedStyles: [...COMPUTED_STYLE_PROPERTIES] };
-  const axTree = await cdp.command('Accessibility.getFullAXTree', {});
+  const warnings = [];
+  const axNodes = [];
+  const axFrames = [];
+  let observedAxFrames = 0;
+  const framesForAx = expectedFrames.length > 0 ? expectedFrames : [{ frameId: null, url: '' }];
+  for (const frame of framesForAx) {
+    try {
+      const response = await cdp.command('Accessibility.getFullAXTree', frame.frameId === null ? {} : { frameId: frame.frameId });
+      const nodes = Array.isArray(response?.nodes) ? response.nodes : [];
+      axNodes.push(...nodes);
+      axFrames.push({ frameId: frame.frameId, nodes });
+      observedAxFrames += 1;
+    } catch {
+      warnings.push(sanitizeWarning({ code: 'AX_FRAME_UNAVAILABLE', frameId: frame.frameId }));
+    }
+  }
+  const axTree = { nodes: axNodes, frames: axFrames };
   const layoutMetrics = await cdp.command('Page.getLayoutMetrics', {});
 
-  const warnings = [];
   let pageData = [];
   const executeScript = options.executeScript ?? defaultExecuteScript;
   try {
@@ -46,12 +76,44 @@ export async function collectPage(cdp, tabId, options = {}) {
       world: 'ISOLATED',
       func: collectRuntimePageData
     });
-    pageData = Array.isArray(results) ? results.filter(entry => entry && !entry.error) : [];
+    pageData = Array.isArray(results) ? results.filter(entry => entry && !entry.error && entry.result) : [];
     for (const entry of Array.isArray(results) ? results : []) {
-      if (entry?.error) warnings.push({ code: 'FRAME_RUNTIME_BLOCKED', frameId: entry.frameId ?? null, message: redactSensitiveText(entry.error) });
+      if (entry?.error) warnings.push(sanitizeWarning({ code: 'FRAME_RUNTIME_BLOCKED', frameId: entry.frameId ?? null }));
     }
-  } catch (error) {
-    warnings.push({ code: 'FRAME_RUNTIME_BLOCKED', frameId: null, message: redactSensitiveText(error instanceof Error ? error.message : error) });
+  } catch {
+    warnings.push(sanitizeWarning({ code: 'FRAME_RUNTIME_BLOCKED', frameId: null }));
   }
-  return { domSnapshot, axTree, layoutMetrics, pageData, warnings };
+
+  const observedFrameIds = new Set(pageData.map(entry => typeof entry.frameId === 'string' ? entry.frameId : '').filter(Boolean));
+  const expectedByUrl = new Map();
+  const observedByUrl = new Map();
+  const addByUrl = (map, url, value) => {
+    if (!url) return;
+    const values = map.get(url) || [];
+    values.push(value);
+    map.set(url, values);
+  };
+  for (const frame of expectedFrames) addByUrl(expectedByUrl, frame.url, frame.frameId);
+  for (const entry of pageData) addByUrl(observedByUrl, sanitizeEvidenceUrl(entry.result?.url || ''), entry);
+  let matchedRuntimeFrames = 0;
+  for (const frame of expectedFrames) {
+    const explicit = observedFrameIds.has(frame.frameId);
+    const urlMatch = !explicit && frame.url && expectedByUrl.get(frame.url)?.length === 1 && observedByUrl.get(frame.url)?.length === 1;
+    if (explicit || urlMatch) matchedRuntimeFrames += 1;
+    else warnings.push(sanitizeWarning({ code: 'RUNTIME_FRAME_MISSING', frameId: frame.frameId }));
+  }
+  const expectedCount = framesForAx.length;
+  const coverage = {
+    runtime: {
+      outcome: expectedFrames.length > 0 && matchedRuntimeFrames === expectedFrames.length ? 'complete' : 'partial',
+      expectedFrameCount: expectedFrames.length,
+      observedFrameCount: matchedRuntimeFrames
+    },
+    accessibility: {
+      outcome: observedAxFrames === expectedCount ? 'complete' : 'partial',
+      expectedFrameCount: expectedCount,
+      observedFrameCount: observedAxFrames
+    }
+  };
+  return { domSnapshot, axTree, layoutMetrics, pageData, warnings, coverage };
 }

@@ -48,16 +48,26 @@ async function capture(cdp, params, kind, metadata = {}) {
 
 export async function captureFullPage(cdp, metrics = {}) {
   const size = dimensions(metrics);
-  return capture(cdp, { format: 'png', captureBeyondViewport: true, fromSurface: true }, 'full-page', size);
+  const clip = size.width !== null && size.height !== null
+    ? { x: 0, y: 0, width: size.width, height: size.height, scale: 1 }
+    : null;
+  return capture(cdp, {
+    format: 'png', captureBeyondViewport: true, fromSurface: true,
+    ...(clip ? { clip } : {})
+  }, 'full-page', size);
 }
 
 function normalizedClip(rect, metrics) {
   if (!rect || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(rect[key])) || rect.width <= 0 || rect.height <= 0) return null;
   const size = dimensions(metrics);
-  const left = Math.max(0, rect.x);
-  const top = Math.max(0, rect.y);
-  const right = size.width === null ? rect.x + rect.width : Math.min(size.width, rect.x + rect.width);
-  const bottom = size.height === null ? rect.y + rect.height : Math.min(size.height, rect.y + rect.height);
+  const viewportRelative = rect.coordinateSpace === 'viewport';
+  if (viewportRelative && (!Number.isFinite(metrics.scrollX) || !Number.isFinite(metrics.scrollY))) return null;
+  const documentX = rect.x + (viewportRelative ? metrics.scrollX : 0);
+  const documentY = rect.y + (viewportRelative ? metrics.scrollY : 0);
+  const left = Math.max(0, documentX);
+  const top = Math.max(0, documentY);
+  const right = size.width === null ? documentX + rect.width : Math.min(size.width, documentX + rect.width);
+  const bottom = size.height === null ? documentY + rect.height : Math.min(size.height, documentY + rect.height);
   if (right <= left || bottom <= top) return null;
   return { x: left, y: top, width: right - left, height: bottom - top, scale: 1 };
 }

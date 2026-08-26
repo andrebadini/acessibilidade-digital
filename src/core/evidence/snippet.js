@@ -56,7 +56,6 @@ function parseTag(token) {
 
 function sanitizeUrl(value) {
   if (typeof value !== 'string' || !value.trim()) return null;
-  if (/^data:image\/(?:png|jpeg|gif|webp);/iu.test(value)) return value.replace(/#.*$/u, '');
   const absolute = /^[a-z][a-z0-9+.-]*:/iu.test(value);
   try {
     const url = new URL(value, 'https://snippet.invalid/');
@@ -85,15 +84,19 @@ function sanitizeText(value) {
 function sanitizeTag(parsed) {
   if (parsed.closing) return `</${parsed.name}>`;
   const values = Object.fromEntries(parsed.attributes.map(attribute => [attribute.name, attribute.value ?? '']));
+  const types = parsed.attributes.filter(attribute => attribute.name === 'type').map(attribute => String(attribute.value || '').toLowerCase());
   const inputSensitive = parsed.name === 'input' && (
-    String(values.type).toLowerCase() === 'password' ||
+    types.includes('password') ||
     /^(?:current-password|new-password|one-time-code)$/iu.test(values.autocomplete || '') ||
     (String(values.type).toLowerCase() === 'hidden' && SENSITIVE.test(`${values.id || ''} ${values.name || ''} ${values.autocomplete || ''}`))
   );
   const output = [];
   for (const attribute of parsed.attributes) {
     const { name } = attribute;
-    if (/^on/iu.test(name) || name === 'srcdoc') continue;
+    if (/^on/iu.test(name) || name === 'srcdoc' || name === 'style') continue;
+    if (name === 'xlink:href' || name === 'ping' || name === 'srcset') continue;
+    if ((parsed.name === 'object' && name === 'data') || (parsed.name === 'embed' && name === 'src')) continue;
+    if (parsed.name === 'meta' && String(values['http-equiv']).toLowerCase() === 'refresh' && name === 'content') continue;
     if (SENSITIVE.test(name) && !['id', 'name', 'autocomplete'].includes(name)) continue;
     if (name === 'value' && (inputSensitive || SENSITIVE.test(`${values.id || ''} ${values.name || ''} ${values.autocomplete || ''}`))) continue;
     let value = attribute.value;
@@ -105,6 +108,10 @@ function sanitizeTag(parsed) {
     output.push(value === null ? name : `${name}="${escapeAttribute(value)}"`);
   }
   return `<${parsed.name}${output.length ? ` ${output.join(' ')}` : ''}${parsed.selfClosing ? ' /' : ''}>`;
+}
+
+function escapeHtmlText(value) {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 
 /** Sanitizes untrusted HTML source without DOMParser or third-party code. */
@@ -152,5 +159,5 @@ export function sanitizeHtmlSnippet(html) {
     output += sanitizeTag(parsed);
     position = token.end;
   }
-  return output.replace(/\s+/gu, ' ').trim();
+  return escapeHtmlText(output.replace(/\s+/gu, ' ').trim());
 }

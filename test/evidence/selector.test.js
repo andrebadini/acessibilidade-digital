@@ -49,3 +49,13 @@ test('includes a sanitized shadow path and never embeds password or token identi
   assert.deepEqual(selector.framePath, []);
   assert.doesNotMatch(JSON.stringify(selector), /password|token|access_token/i);
 });
+
+test('builds selectors by shadow scope instead of treating shadow ids as document-global', () => {
+  const outside = { nodeId: 'outside', tagName: 'button', attributes: { id: 'inner' }, parentId: null, children: [] };
+  const host = { nodeId: 'host', tagName: 'x-host', attributes: { id: 'account-panel' }, parentId: null, children: ['root'], shadowRootId: 'root' };
+  const root = { nodeId: 'root', tagName: '#document-fragment', attributes: {}, parentId: 'host', children: ['inside'], shadowRootId: 'root', shadowHostId: 'host' };
+  const inside = { nodeId: 'inside', tagName: 'button', attributes: { id: 'inner' }, parentId: 'root', children: [], shadowRootId: 'root', shadowHostId: 'host' };
+  const selector = buildStableSelector(inside, index([outside, host, root, inside]));
+  assert.deepEqual(selector, { css: '#account-panel >>> #inner', framePath: [], confidence: 'high' });
+  assert.doesNotMatch(selector.css, /\*/u);
+});

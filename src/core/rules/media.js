@@ -9,6 +9,7 @@ import {
   missingSnapshotResult,
   normalizeText,
   orderTargets,
+  probeCoverageCantTell,
   result,
   snapshotParts,
   tagOf,
@@ -272,7 +273,8 @@ function animationControl(snapshot) {
 }
 
 function interactionAnimation(snapshot) {
-  return mediaResult(snapshot, ({ nodes }) => {
+  return mediaResult(snapshot, ({ document, nodes }) => {
+    if (probeCoverageCantTell(document, 'motion')) return result('cantTell', 'A cobertura da preferência de movimento reduzido está incompleta.');
     const candidates = nodes.filter(node => !isHidden(node) && Array.isArray(node?.animations) &&
       node.animations.some(animation => animation?.triggeredByInteraction === true));
     if (candidates.length === 0) return result('inapplicable', 'Não há animação acionada por interação observada.');

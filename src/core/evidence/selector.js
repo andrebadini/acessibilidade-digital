@@ -34,7 +34,7 @@ function escapeCssString(value) {
 
 function tagOf(node) {
   const value = typeof node?.tagName === 'string' ? node.tagName.trim().toLowerCase() : '';
-  return /^[a-z][a-z0-9-]*$/u.test(value) ? value : '*';
+  return /^[a-z][a-z0-9-]*$/u.test(value) ? value : 'element';
 }
 
 function nodesFromIndex(index) {
@@ -50,18 +50,24 @@ function byNodeId(index, id) {
   return index?.byId?.[String(id)];
 }
 
-function idIsUnique(id, index) {
-  const values = index?.byDomId instanceof Map ? index.byDomId.get(id) : index?.byDomId?.[id];
-  if (Array.isArray(values)) return values.length === 1;
-  if (values) return true;
-  return nodesFromIndex(index).filter(node => node?.attributes?.id === id).length === 1;
+function scopeKey(node) {
+  const frame = (Array.isArray(node?.framePath) ? node.framePath : []).map(String).join('/');
+  const shadow = node?.shadowHostId && node?.shadowRootId ? String(node.shadowRootId) : 'document';
+  return `${frame}\u0000${shadow}`;
+}
+
+function idIsUnique(id, node, index) {
+  return nodesFromIndex(index).filter(candidate =>
+    candidate?.attributes?.id === id && scopeKey(candidate) === scopeKey(node)
+  ).length === 1;
 }
 
 function semanticSelector(node, index) {
   for (const name of SEMANTIC_ATTRIBUTES) {
     const value = typeof node?.attributes?.[name] === 'string' ? node.attributes[name].trim() : '';
     if (!value || SENSITIVE.test(`${name} ${value}`)) continue;
-    const matches = nodesFromIndex(index).filter(candidate => tagOf(candidate) === tagOf(node) && candidate?.attributes?.[name] === value);
+    const matches = nodesFromIndex(index).filter(candidate => scopeKey(candidate) === scopeKey(node) &&
+      tagOf(candidate) === tagOf(node) && candidate?.attributes?.[name] === value);
     if (matches.length <= 1) return `${tagOf(node)}[${name}="${escapeCssString(value)}"]`;
   }
   return '';
@@ -73,6 +79,7 @@ function nthPath(node, index) {
   let current = node;
   while (current && !visited.has(String(current.nodeId))) {
     visited.add(String(current.nodeId));
+    if (current.shadowRootType || String(current.nodeId) === String(node.shadowRootId || '')) break;
     const tag = tagOf(current);
     let part = tag;
     const parent = current.parentId == null ? null : byNodeId(index, current.parentId);
@@ -86,7 +93,7 @@ function nthPath(node, index) {
     parts.unshift(part);
     current = parent;
   }
-  return parts.join(' > ') || '*';
+  return parts.join(' > ') || 'element';
 }
 
 function safePath(value) {
@@ -96,18 +103,35 @@ function safePath(value) {
 /** Builds a deterministic selector without embedding credential-like data. */
 export function buildStableSelector(node, index = {}) {
   if (!node || typeof node !== 'object') throw new TypeError('O nó da evidência é inválido.');
-  const id = typeof node.attributes?.id === 'string' ? node.attributes.id.trim() : '';
-  let css;
-  let confidence;
-  if (id && !SENSITIVE.test(id) && idIsUnique(id, index)) {
-    css = `#${escapeCssIdentifier(id)}`;
-    confidence = 'high';
-  } else {
-    css = semanticSelector(node, index);
-    confidence = css ? 'medium' : 'low';
-    if (!css) css = nthPath(node, index);
-  }
-  const shadowPath = safePath(node.shadowPath);
-  if (shadowPath.length > 0) css = `${shadowPath.join(' >>> ')} >>> ${css}`;
-  return { css, framePath: safePath(node.framePath), confidence };
+  const visited = new Set();
+  const build = current => {
+    if (!current || visited.has(String(current.nodeId))) return { css: 'element', confidence: 'low' };
+    visited.add(String(current.nodeId));
+    const id = typeof current.attributes?.id === 'string' ? current.attributes.id.trim() : '';
+    let css;
+    let confidence;
+    if (id && !SENSITIVE.test(id) && idIsUnique(id, current, index)) {
+      css = `#${escapeCssIdentifier(id)}`;
+      confidence = 'high';
+    } else {
+      css = semanticSelector(current, index);
+      confidence = css ? 'medium' : 'low';
+      if (!css) css = nthPath(current, index);
+    }
+    if (current.shadowHostId && current.shadowRootId) {
+      const host = byNodeId(index, current.shadowHostId);
+      if (host) {
+        const hostSelector = build(host);
+        const ranks = { high: 2, medium: 1, low: 0 };
+        confidence = ranks[hostSelector.confidence] < ranks[confidence] ? hostSelector.confidence : confidence;
+        css = `${hostSelector.css} >>> ${css}`;
+      }
+    } else {
+      const legacyShadowPath = safePath(current.shadowPath).filter(part => /^(?:[#.][^\s>]+|[a-z][a-z0-9-]*)$/iu.test(part));
+      if (legacyShadowPath.length > 0) css = `${legacyShadowPath.join(' >>> ')} >>> ${css}`;
+    }
+    return { css, confidence };
+  };
+  const built = build(node);
+  return { css: built.css, framePath: safePath(node.framePath), confidence: built.confidence };
 }
