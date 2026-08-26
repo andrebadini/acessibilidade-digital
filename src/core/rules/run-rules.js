@@ -1,4 +1,5 @@
 import { OUTCOMES, TEST_MODES, createRuleResult } from '../result.js';
+import { cloneJsonSafeArray, createReadonlyView } from './safe-data.js';
 
 const EXECUTION_FAILURE = Object.freeze({
   summary: 'A regra não pôde ser executada com segurança.',
@@ -11,6 +12,13 @@ const INVALID_RESULT = Object.freeze({
   summary: 'A regra retornou um resultado inválido e não foi considerada.',
   limitations: Object.freeze([
     'Revise a implementação da regra e execute a auditoria novamente.'
+  ])
+});
+
+const DUPLICATE_RULE = Object.freeze({
+  summary: 'A regra possui um identificador duplicado e não foi considerada.',
+  limitations: Object.freeze([
+    'Remova a duplicidade do identificador da regra e execute a auditoria novamente.'
   ])
 });
 
@@ -79,9 +87,9 @@ function makeResult(rule, outcome, details) {
     ruleId: rule.id,
     outcome,
     mode: rule.mode,
-    targets: details.targets ?? [],
+    targets: cloneJsonSafeArray(details.targets ?? []),
     summary: details.summary,
-    limitations: details.limitations ?? []
+    limitations: cloneJsonSafeArray(details.limitations ?? [])
   });
 
   return Object.freeze({
@@ -90,21 +98,31 @@ function makeResult(rule, outcome, details) {
   });
 }
 
-async function runOneRule(snapshot, context, rule, index) {
-  const normalizedRule = normalizeRule(rule, index);
-  if (typeof normalizedRule.evaluate !== 'function') {
-    return makeResult(normalizedRule, 'untested', INVALID_RESULT);
+async function runOneRule(snapshot, context, rule, duplicateRuleIds) {
+  if (typeof rule.evaluate !== 'function') {
+    return makeResult(rule, 'untested', INVALID_RESULT);
+  }
+  if (duplicateRuleIds.has(rule.id)) {
+    return makeResult(rule, 'untested', DUPLICATE_RULE);
   }
 
   try {
-    const value = await normalizedRule.evaluate(snapshot, context);
-    if (!isEvaluationResult(value, normalizedRule)) {
-      return makeResult(normalizedRule, 'untested', INVALID_RESULT);
+    const value = await rule.evaluate(createReadonlyView(snapshot), createReadonlyView(context));
+    if (!isEvaluationResult(value, rule)) {
+      return makeResult(rule, 'untested', INVALID_RESULT);
     }
-    return makeResult(normalizedRule, value.outcome, value);
+    return makeResult(rule, value.outcome, value);
   } catch {
-    return makeResult(normalizedRule, 'untested', EXECUTION_FAILURE);
+    return makeResult(rule, 'untested', EXECUTION_FAILURE);
   }
+}
+
+function duplicateRuleIds(rules) {
+  const counts = new Map();
+  for (const rule of rules) {
+    counts.set(rule.id, (counts.get(rule.id) ?? 0) + 1);
+  }
+  return new Set([...counts].filter(([, count]) => count > 1).map(([id]) => id));
 }
 
 /**
@@ -116,9 +134,11 @@ export async function runRules(snapshot, context, rules) {
     throw new TypeError('Rules must be an array');
   }
 
+  const normalizedRules = rules.map(normalizeRule);
+  const duplicated = duplicateRuleIds(normalizedRules);
   const values = [];
-  for (let index = 0; index < rules.length; index += 1) {
-    values.push(await runOneRule(snapshot, context, rules[index], index));
+  for (const rule of normalizedRules) {
+    values.push(await runOneRule(snapshot, context, rule, duplicated));
   }
   return Object.freeze(values);
 }
