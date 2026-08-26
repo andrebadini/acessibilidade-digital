@@ -1,19 +1,76 @@
 :root {
-  color-scheme: light dark;
-  font-family: system-ui, sans-serif;
+  color-scheme: light;
+  --ink: #14212b;
+  --surface: #ffffff;
+  --brand: #003b71;
+  --action: #005a9c;
+  --focus: #8b2f00;
+  --border: #738596;
+  --muted-surface: #eef4f8;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   line-height: 1.5;
 }
 
+* {
+  box-sizing: border-box;
+}
+
 body {
+  min-width: 20rem;
   margin: 0;
-  background: Canvas;
-  color: CanvasText;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.institutional-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem max(1rem, calc((100% - 46rem) / 2));
+  background: var(--brand);
+  color: #ffffff;
+}
+
+.institutional-header p {
+  max-width: 31rem;
+  margin: 0;
+  font-weight: 700;
+}
+
+.institutional-logo {
+  display: block;
+  width: min(14rem, 38vw);
+  height: auto;
+  padding: 0.35rem;
+  background: #ffffff;
+  object-fit: contain;
 }
 
 main {
-  max-width: 42rem;
+  max-width: 46rem;
   margin: 0 auto;
   padding: 1.5rem;
+}
+
+h1,
+h2 {
+  color: var(--brand);
+  line-height: 1.2;
+}
+
+h1 {
+  margin: 0 0 0.5rem;
+  font-size: clamp(2rem, 8vw, 3rem);
+}
+
+h2 {
+  margin-top: 0;
+  font-size: 1.2rem;
+}
+
+.intro {
+  max-width: 65ch;
+  margin-bottom: 1.5rem;
 }
 
 form {
@@ -21,40 +78,72 @@ form {
   gap: 0.75rem;
 }
 
+label {
+  font-weight: 700;
+}
+
 input,
 button {
-  font: inherit;
   min-height: 2.75rem;
-  padding: 0.5rem 0.75rem;
+  padding: 0.55rem 0.75rem;
+  font: inherit;
 }
 
 input {
-  border: 2px solid currentColor;
-  border-radius: 0.25rem;
-  background: Canvas;
-  color: CanvasText;
+  border: 2px solid var(--border);
+  border-radius: 0.3rem;
+  background: var(--surface);
+  color: var(--ink);
 }
 
 button {
-  border: 2px solid #003e73;
-  border-radius: 0.25rem;
-  background: #005ea8;
-  color: #fff;
+  border: 2px solid var(--brand);
+  border-radius: 0.3rem;
+  background: var(--action);
+  color: #ffffff;
+  font-weight: 700;
   cursor: pointer;
 }
 
 button:disabled {
   cursor: wait;
-  opacity: 0.7;
+  background: #5d6872;
+}
+
+.status-card {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  border: 2px solid var(--border);
+  border-radius: 0.3rem;
+  background: var(--muted-surface);
+}
+
+.status-card p {
+  margin-bottom: 0.75rem;
 }
 
 a {
-  color: LinkText;
+  color: #004f8f;
+  font-weight: 700;
+  text-decoration-thickness: 0.12em;
+  text-underline-offset: 0.15em;
 }
 
 :focus-visible {
-  outline: 3px solid #f6b900;
+  outline: 3px solid var(--focus);
   outline-offset: 3px;
+  box-shadow: 0 0 0 6px var(--surface);
+}
+
+@media (max-width: 36rem) {
+  .institutional-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .institutional-logo {
+    width: min(15rem, 75vw);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

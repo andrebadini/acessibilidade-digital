@@ -8,15 +8,23 @@
     <script type="module" src="panel.js"></script>
   </head>
   <body>
+    <header class="institutional-header">
+      <img class="institutional-logo" src="../../assets/gov-mt-logo.png" alt="Governo de Mato Grosso" width="1120" height="440">
+      <p>PROCON-MT — Secretaria Adjunta de Proteção e Defesa dos Direitos do Consumidor</p>
+    </header>
     <main>
       <h1>Audita MT</h1>
+      <p class="intro">Audite uma página com evidências locais e revisão assistida. Nenhum conteúdo da auditoria é enviado a servidores.</p>
       <form id="audit-form" novalidate>
         <label for="audit-url">Endereço do site</label>
         <input id="audit-url" name="audit-url" type="url" inputmode="url" autocomplete="url" required aria-describedby="audit-status" placeholder="https://exemplo.mt.gov.br">
         <button type="submit">Auditar</button>
       </form>
-      <p id="audit-status" role="status" aria-live="polite">Informe o endereço do site a auditar.</p>
-      <a id="latest-report" hidden aria-disabled="true">Revisar ocorrências</a>
+      <section class="status-card" aria-labelledby="status-heading">
+        <h2 id="status-heading">Andamento</h2>
+        <p id="audit-status" role="status" aria-live="polite">Informe o endereço do site a auditar.</p>
+        <a id="latest-report" hidden aria-disabled="true">Revisar ocorrências</a>
+      </section>
     </main>
   </body>
 </html>

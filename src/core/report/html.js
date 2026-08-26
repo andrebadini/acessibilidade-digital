@@ -1,6 +1,10 @@
 import { sanitizeResourceUrl } from '../normalize-snapshot.js';
 import { createAuditModel } from './audit-model.js';
+import { sha256Hex } from './hash.js';
 import { REPORT_CSS } from './report.css.js';
+
+const BRAND_SOURCE_URL = 'https://www.secom.mt.gov.br/documents/21013/0/_govmt_manual_de_identidade_oficial_expandido_abril_2026.pdf/7921f56c-66a0-15a1-37d7-3f04c37fadfc';
+const BRAND_SHA256 = '1736ccf3c3783a42e9ebc7649a3fa473774b4c5f413ba1a09616cbd2e76cac7d';
 
 const STATUS = Object.freeze({
   passed: { label: 'Aprovado', icon: '✓' },
@@ -9,6 +13,21 @@ const STATUS = Object.freeze({
   inapplicable: { label: 'Não aplicável', icon: '—' },
   untested: { label: 'Não testado', icon: '!' },
 });
+
+export async function createBrandAsset(value) {
+  const bytes = toBytes(value);
+  const { width, height } = pngDimensions(bytes);
+  const sha256 = await sha256Hex(bytes);
+  if (width !== 1120 || height !== 440 || sha256 !== BRAND_SHA256) throw new TypeError('O ativo de marca não corresponde ao PNG oficial renderizado e verificado.');
+  return Object.freeze({
+    dataUrl: `data:image/png;base64,${base64(bytes)}`,
+    sha256,
+    sourceUrl: BRAND_SOURCE_URL,
+    alt: 'Governo de Mato Grosso',
+    width,
+    height,
+  });
+}
 
 export function renderHtmlReport(input, assets = {}) {
   const model = createAuditModel(input);
@@ -51,7 +70,7 @@ ${integrity(model)}
 function header(assets) {
   const brand = assets?.brand;
   const logo = brand && isPngDataUrl(brand.dataUrl)
-    ? `<img class="brand-logo" src="${escapeHtml(brand.dataUrl)}" alt="${escapeHtml(brand.alt || 'Governo de Mato Grosso')}" width="1120" height="440">`
+    ? `<img class="brand-logo" src="${escapeHtml(brand.dataUrl)}" alt="Governo de Mato Grosso" width="1120" height="440">`
     : '';
   const agency = brand ? '<p class="agency">PROCON-MT — Secretaria Adjunta de Proteção e Defesa dos Direitos do Consumidor</p>' : '<p class="agency">Audita MT</p>';
   return `<header class="report-header"><div class="report-header__inner">${logo}${agency}</div></header>`;
@@ -155,4 +174,26 @@ function isPngDataUrl(value) {
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/gu, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+}
+
+function toBytes(value) {
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  throw new TypeError('O ativo de marca deve ser fornecido como bytes PNG.');
+}
+
+function pngDimensions(bytes) {
+  if (bytes.length < 24 || ![137, 80, 78, 71, 13, 10, 26, 10].every((byte, index) => bytes[index] === byte)) {
+    throw new TypeError('O ativo de marca deve ser PNG válido.');
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return { width: view.getUint32(16), height: view.getUint32(20) };
+}
+
+function base64(bytes) {
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + 0x8000, bytes.length)));
+  }
+  return btoa(binary);
 }
