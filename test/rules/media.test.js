@@ -55,6 +55,15 @@ test('audio autoplay over three seconds requires a stop, pause or independent vo
   assert.equal((await evaluate('audio-control', snapshot([
     record('audio', 'audio', { autoplay: true, hasAudio: true })
   ]))).outcome, 'cantTell');
+  assert.equal((await evaluate('audio-control', snapshot([
+    record('audio', 'audio', { autoplay: true, hasAudio: true, durationSeconds: 4, audioControl: { canPause: false } })
+  ]))).outcome, 'cantTell');
+  assert.equal((await evaluate('audio-control', snapshot([
+    record('audio', 'audio', { autoplay: true, hasAudio: true, durationSeconds: 4, audioControl: { canPause: true } })
+  ]))).outcome, 'passed');
+  assert.equal((await evaluate('audio-control', snapshot([
+    record('audio', 'audio', { autoplay: true, hasAudio: true, durationSeconds: -1, audioControl: { canPause: false, canStop: false, independentVolume: false } })
+  ]))).outcome, 'cantTell');
   assert.equal((await evaluate('audio-control', snapshot())).outcome, 'inapplicable');
 });
 
@@ -65,6 +74,18 @@ test('prerecorded video with audio fails without captions and reviews track equi
   assert.equal(present.outcome, 'cantTell');
   assert.equal(present.targets[0].data.reason, 'verify-caption-equivalence');
   assert.equal((await evaluate('video-captions', snapshot([video({ captionTracks: [], essentiality: 'unknown' })]))).outcome, 'cantTell');
+  assert.equal((await evaluate('video-captions', snapshot([
+    record('video', 'video', { mediaTiming: 'prerecorded', essentiality: 'non-essential', captionTracks: [] })
+  ]))).outcome, 'cantTell');
+  assert.equal((await evaluate('video-captions', snapshot([
+    record('video', 'video', { mediaTiming: 'prerecorded', hasAudio: 'yes', essentiality: 'non-essential', captionTracks: [] })
+  ]))).outcome, 'cantTell');
+  const missingTrackCollection = await evaluate('video-captions', snapshot([video({})]));
+  assert.equal(missingTrackCollection.outcome, 'cantTell');
+  assert.deepEqual(missingTrackCollection.targets.map(target => target.nodeId), ['video']);
+  assert.equal((await evaluate('video-captions', snapshot([video({ captionTracks: [{}] })]))).outcome, 'cantTell');
+  assert.equal((await evaluate('video-captions', snapshot([video({ captionTracks: [{ kind: 'captions' }] })]))).outcome, 'cantTell');
+  assert.equal((await evaluate('video-captions', snapshot([video({ hasAudio: false, captionTracks: [] })]))).outcome, 'inapplicable');
 });
 
 test('transcript, audio description, sign language and live equivalents expose review candidates', async () => {
@@ -82,9 +103,33 @@ test('transcript, audio description, sign language and live equivalents expose r
 
 test('CSS animation duration and control are objective only with explicit essentiality', async () => {
   const animated = animation => snapshot([record('box', 'div', { animations: [animation] })]);
-  assert.equal((await evaluate('animation-control', animated({ durationSeconds: 5.01, iterationCount: Infinity, hasPauseControl: false, essentiality: 'non-essential' }))).outcome, 'failed');
-  assert.equal((await evaluate('animation-control', animated({ durationSeconds: 5, iterationCount: Infinity, hasPauseControl: false, essentiality: 'non-essential' }))).outcome, 'passed');
-  assert.equal((await evaluate('animation-control', animated({ durationSeconds: 10, iterationCount: Infinity, hasPauseControl: false, essentiality: 'unknown' }))).outcome, 'cantTell');
+  const noControl = { hasPauseControl: false, hasStopControl: false, hasHideControl: false };
+  assert.equal((await evaluate('animation-control', animated({ durationSeconds: 5.01, iterationCount: 1, ...noControl, essentiality: 'non-essential' }))).outcome, 'failed');
+  assert.equal((await evaluate('animation-control', animated({ durationSeconds: 5, iterationCount: 1, ...noControl, essentiality: 'non-essential' }))).outcome, 'passed');
+  assert.equal((await evaluate('animation-control', animated({ durationSeconds: 6, iterationCount: 1, ...noControl, essentiality: 'non-essential' }))).outcome, 'failed');
+  assert.equal((await evaluate('animation-control', animated({ durationSeconds: 5, iterationCount: Infinity, ...noControl, essentiality: 'non-essential' }))).outcome, 'failed');
+  assert.equal((await evaluate('animation-control', animated({ durationSeconds: 6, iterationCount: 2, hasPauseControl: false, hasStopControl: true, hasHideControl: false, essentiality: 'non-essential' }))).outcome, 'passed');
+  assert.equal((await evaluate('animation-control', animated({ durationSeconds: 6, iterationCount: 2, hasPauseControl: false, hasStopControl: true, hasHideControl: false }))).outcome, 'passed');
+  assert.equal((await evaluate('animation-control', animated({ durationSeconds: 6, iterationCount: 2, hasPauseControl: false, hasStopControl: false, hasHideControl: true, essentiality: 'non-essential' }))).outcome, 'passed');
+  assert.equal((await evaluate('animation-control', animated({ durationSeconds: 10, iterationCount: 1, ...noControl, essentiality: 'unknown' }))).outcome, 'cantTell');
+  assert.equal((await evaluate('animation-control', animated({ durationSeconds: 10, iterationCount: 1, hasPauseControl: false, essentiality: 'non-essential' }))).outcome, 'cantTell');
+  for (const animation of [
+    { durationSeconds: -1, iterationCount: 1 },
+    { durationSeconds: 0, iterationCount: 1 },
+    { durationSeconds: 1, iterationCount: 0 },
+    { durationSeconds: '6', iterationCount: 1 },
+    { durationSeconds: 6, iterationCount: '2' }
+  ]) {
+    assert.equal((await evaluate('animation-control', animated({ ...animation, ...noControl, essentiality: 'non-essential' }))).outcome, 'cantTell');
+  }
+});
+
+test('interaction animation consumes normalized reduced-motion observation conservatively', async () => {
+  const animated = animation => snapshot([record('box', 'div', { animations: [{ triggeredByInteraction: true, ...animation }] })]);
+  assert.equal((await evaluate('interaction-animation', animated({ respectsReducedMotion: false, essentiality: 'non-essential' }))).outcome, 'failed');
+  assert.equal((await evaluate('interaction-animation', animated({ respectsReducedMotion: true, essentiality: 'non-essential' }))).outcome, 'cantTell');
+  assert.equal((await evaluate('interaction-animation', animated({ essentiality: 'non-essential' }))).outcome, 'cantTell');
+  assert.equal((await evaluate('interaction-animation', animated({ respectsReducedMotion: false, essentiality: 'unknown' }))).outcome, 'cantTell');
 });
 
 test('flashing conclusions require reliable measurement', async () => {
@@ -100,6 +145,9 @@ test('flashing conclusions require reliable measurement', async () => {
   assert.equal((await evaluate('flashing-content-limit', snapshot([], {
     flashObservation: { reliable: false }
   }))).outcome, 'cantTell');
+  assert.equal((await evaluate('flashing-content-enhanced', snapshot([], {
+    flashObservation: { reliable: true, flashesPerSecond: -1 }
+  }))).outcome, 'cantTell');
 });
 
 test('updating content over five seconds needs explicit control and essentiality', async () => {
@@ -114,5 +162,8 @@ test('updating content over five seconds needs explicit control and essentiality
   }))).outcome, 'passed');
   assert.equal((await evaluate('updating-content-control', updating({
     durationSeconds: 10, essentiality: 'unknown', hasPauseControl: false
+  }))).outcome, 'cantTell');
+  assert.equal((await evaluate('updating-content-control', updating({
+    durationSeconds: -1, essentiality: 'non-essential', hasPauseControl: false
   }))).outcome, 'cantTell');
 });

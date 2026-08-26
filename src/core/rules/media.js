@@ -110,14 +110,26 @@ function audioControl(snapshot) {
         incomplete = true;
         continue;
       }
+      if (node.durationSeconds < 0) {
+        incomplete = true;
+        continue;
+      }
       if (node.durationSeconds <= 3 || node.muted === true) continue;
       const control = node.audioControl;
       if (!control || typeof control !== 'object') {
         incomplete = true;
-      } else if (![control.canPause, control.canStop, control.independentVolume].some(value => value === true)) {
+      } else if ([control.canPause, control.canStop, control.independentVolume].some(value => value === true)) {
+        continue;
+      } else if (
+        ['canPause', 'canStop', 'independentVolume'].every(field =>
+          hasOwn(control, field) && control[field] === false
+        )
+      ) {
         failures.push(target(node, 'Forneça pausa, parada ou volume independente para este áudio automático.', {
           reason: 'missing-autoplay-audio-control', durationSeconds: node.durationSeconds
         }));
+      } else {
+        incomplete = true;
       }
     }
     if (failures.length > 0) return result('failed', 'Há áudio automático acima de três segundos sem controle adequado.', failures);
@@ -130,12 +142,20 @@ function audioControl(snapshot) {
 
 function videoCaptions(snapshot) {
   return mediaResult(snapshot, ({ nodes }) => {
-    const videos = nodes.filter(node => !isHidden(node) && tagOf(node) === 'video' && node?.mediaTiming === 'prerecorded' && node?.hasAudio === true);
+    const videos = nodes.filter(node => !isHidden(node) && tagOf(node) === 'video' && node?.mediaTiming === 'prerecorded');
     if (videos.length === 0) return result('inapplicable', 'Não há vídeo pré-gravado com áudio aplicável.');
     const failures = [];
     const review = [];
     let incomplete = false;
+    let applicable = false;
     for (const node of videos) {
+      if (node.hasAudio === false) continue;
+      if (node.hasAudio !== true) {
+        incomplete = true;
+        review.push(target(node, 'Determine se este vídeo possui áudio antes de concluir a exigência de legendas.', { reason: 'unknown-video-audio' }));
+        continue;
+      }
+      applicable = true;
       if (node.essentiality !== 'non-essential') {
         incomplete = true;
         review.push(target(node, 'Determine a finalidade da mídia antes de concluir a exigência de legendas.', { reason: 'unknown-media-essentiality' }));
@@ -143,10 +163,28 @@ function videoCaptions(snapshot) {
       }
       if (!Array.isArray(node.captionTracks)) {
         incomplete = true;
-      } else if (!node.captionTracks.some(track => track && track.kind === 'captions')) {
+        review.push(target(node, 'Colete as faixas de texto deste vídeo antes de concluir a presença de legendas.', {
+          reason: 'missing-captions-observation'
+        }));
+      } else if (node.captionTracks.length === 0) {
         failures.push(target(node, 'Forneça uma faixa de legendas para este vídeo pré-gravado com áudio.', { reason: 'missing-captions-track' }));
       } else {
-        review.push(target(node, 'Compare as legendas com todo o conteúdo sonoro relevante.', { reason: 'verify-caption-equivalence' }));
+        const validTracks = node.captionTracks.filter(track =>
+          track && typeof track === 'object' && !Array.isArray(track) &&
+          typeof track.kind === 'string' && normalizeText(track.kind)
+        );
+        const captions = validTracks.filter(track =>
+          normalizeText(track.kind).toLowerCase() === 'captions' && normalizeText(track.srclang)
+        );
+        if (captions.length > 0) {
+          review.push(target(node, 'Compare as legendas com todo o conteúdo sonoro relevante.', { reason: 'verify-caption-equivalence' }));
+        } else if (validTracks.length !== node.captionTracks.length ||
+          validTracks.some(track => normalizeText(track.kind).toLowerCase() === 'captions')) {
+          incomplete = true;
+          review.push(target(node, 'Complete os metadados da faixa antes de verificar as legendas.', { reason: 'malformed-captions-track' }));
+        } else {
+          failures.push(target(node, 'Forneça uma faixa de legendas para este vídeo pré-gravado com áudio.', { reason: 'missing-captions-track' }));
+        }
       }
     }
     if (failures.length > 0) return result('failed', 'Há vídeo pré-gravado com áudio sem faixa de legendas.', failures);
@@ -154,6 +192,7 @@ function videoCaptions(snapshot) {
       'Confirme sincronização, identificação de falantes e equivalência de fala e sons relevantes.'
     ]);
     if (incomplete) return result('cantTell', 'A coleta de faixas de legendas está incompleta.', [], ['Colete as faixas de texto do vídeo.']);
+    if (!applicable) return result('inapplicable', 'Os vídeos pré-gravados observados não possuem áudio.');
     return result('cantTell', 'A equivalência das legendas exige revisão humana.', [], ['Compare as legendas com o áudio.']);
   });
 }
@@ -188,19 +227,32 @@ function animationControl(snapshot) {
     let incomplete = false;
     for (const node of candidates) {
       for (const animation of node.animations) {
-        if (!animation || !Number.isFinite(animation.durationSeconds)) {
+        const validIterations = animation && (
+          animation.iterationCount === Infinity ||
+          (Number.isFinite(animation.iterationCount) && animation.iterationCount > 0)
+        );
+        if (!animation || !Number.isFinite(animation.durationSeconds) ||
+          animation.durationSeconds <= 0 || !validIterations) {
           incomplete = true;
           continue;
         }
-        if (animation.durationSeconds <= 5 || animation.iterationCount === 1) continue;
+        const totalDurationSeconds = animation.durationSeconds * animation.iterationCount;
+        if (totalDurationSeconds <= 5) continue;
+        const controls = [animation.hasPauseControl, animation.hasStopControl, animation.hasHideControl];
+        if (controls.some(value => value === true)) continue;
         if (animation.essentiality === 'essential') continue;
         if (animation.essentiality !== 'non-essential') {
           incomplete = true;
           continue;
         }
-        if (animation.hasPauseControl !== true) failures.push(target(node, 'Forneça controle para pausar, parar ou ocultar esta animação.', {
-          reason: 'missing-animation-control', durationSeconds: animation.durationSeconds
-        }));
+        if (controls.every(value => value === false)) {
+          failures.push(target(node, 'Forneça controle para pausar, parar ou ocultar esta animação.', {
+            reason: 'missing-animation-control', durationSeconds: animation.durationSeconds,
+            iterationCount: animation.iterationCount, totalDurationSeconds
+          }));
+        } else {
+          incomplete = true;
+        }
       }
     }
     if (failures.length > 0) return result('failed', 'Há animação prolongada sem controle.', failures);
@@ -216,9 +268,27 @@ function interactionAnimation(snapshot) {
     const candidates = nodes.filter(node => !isHidden(node) && Array.isArray(node?.animations) &&
       node.animations.some(animation => animation?.triggeredByInteraction === true));
     if (candidates.length === 0) return result('inapplicable', 'Não há animação acionada por interação observada.');
-    return result('cantTell', 'A necessidade da animação de interação exige revisão humana.', candidates.map(node =>
-      target(node, 'Confirme se esta animação pode ser desabilitada e se é essencial.', { reason: 'verify-interaction-animation' })
-    ), ['Avalie finalidade, opção de desativação e efeito vestibular da animação.']);
+    const failures = [];
+    const review = [];
+    for (const node of candidates) {
+      for (const animation of node.animations.filter(value => value?.triggeredByInteraction === true)) {
+        if (animation.respectsReducedMotion === false && animation.essentiality === 'non-essential') {
+          failures.push(target(node, 'Permita desabilitar esta animação de interação por preferência de movimento reduzido.', {
+            reason: 'reduced-motion-not-respected'
+          }));
+        } else {
+          review.push(target(node, 'Confirme se esta animação pode ser desabilitada e se é essencial.', {
+            reason: animation.respectsReducedMotion === true
+              ? 'reduced-motion-mechanism-observed'
+              : 'verify-interaction-animation'
+          }));
+        }
+      }
+    }
+    if (failures.length > 0) return result('failed', 'Há animação de interação não essencial que ignora movimento reduzido.', failures);
+    return result('cantTell', 'A necessidade da animação de interação exige revisão humana.', review, [
+      'Avalie finalidade, preferência de movimento reduzido e efeito vestibular da animação.'
+    ]);
   });
 }
 
@@ -232,7 +302,7 @@ function flashing(snapshot, enhanced) {
       'Use amostragem de pixels com frequência suficiente e registre a área crítica.'
     ]);
     if (enhanced) {
-      if (!Number.isFinite(observation.flashesPerSecond)) return result('cantTell', 'A frequência de flashes não foi calculada.', [], ['Calcule flashes por segundo.']);
+      if (!Number.isFinite(observation.flashesPerSecond) || observation.flashesPerSecond < 0) return result('cantTell', 'A frequência de flashes não foi calculada.', [], ['Calcule flashes por segundo.']);
       return observation.flashesPerSecond > 3
         ? result('failed', 'O conteúdo excede três flashes por segundo.', [documentTarget(document, 'Reduza a frequência para no máximo três flashes por segundo.', { reason: 'flash-rate-exceeded', flashesPerSecond: observation.flashesPerSecond })])
         : result('passed', 'A medição confiável não excede três flashes por segundo.');
@@ -252,7 +322,7 @@ function updatingContent(snapshot) {
     let incomplete = false;
     for (const node of candidates) {
       const observation = node.updatingContent;
-      if (!Number.isFinite(observation.durationSeconds)) incomplete = true;
+      if (!Number.isFinite(observation.durationSeconds) || observation.durationSeconds < 0) incomplete = true;
       else if (observation.durationSeconds <= 5 || observation.essentiality === 'essential' || observation.hasPauseControl === true) continue;
       else if (observation.essentiality !== 'non-essential') incomplete = true;
       else failures.push(target(node, 'Forneça controle para pausar, parar ou ocultar esta atualização.', { reason: 'missing-updating-content-control' }));

@@ -58,11 +58,36 @@ test('WCAG sRGB contrast preserves effective 4.49/4.50 and 2.99/3.00 boundaries'
   assert.ok(Math.abs(contrastRatio('#000', srgbGrayForBlackContrast(3)) - 3) < 1e-10);
 });
 
+test('contrast thresholds compare the real ratio without epsilon or display rounding', async () => {
+  const value = await evaluate('text-contrast-minimum', snapshot([
+    record('below', 'p', { text: 'Texto', contrast: {
+      foreground: '#000', background: srgbGrayForBlackContrast(4.499999999999501),
+      fontSizePx: 16, fontWeight: 400
+    } })
+  ]));
+  assert.equal(value.outcome, 'failed');
+  assert.equal(value.targets[0].nodeId, 'below');
+  assert.ok(value.targets[0].data.ratio < 4.5);
+});
+
 test('contrast flattens foreground alpha only against an explicit opaque background', () => {
   assert.equal(contrastRatio('rgba(0, 0, 0, 0.5)', '#fff').toFixed(6), '3.976653');
+  assert.ok(Number.isNaN(contrastRatio('rgba(0, 0, 0, 0)', '#fff')));
+  assert.ok(Number.isNaN(contrastRatio('#0000', '#fff')));
+  assert.ok(Number.isNaN(contrastRatio('#00000000', '#fff')));
   assert.ok(Number.isNaN(contrastRatio('rgba(0, 0, 0, 0.5)', 'transparent')));
   assert.ok(Number.isNaN(contrastRatio('not-a-color', '#fff')));
   assert.ok(Number.isNaN(contrastRatio({ r: Number.NaN, g: 0, b: 0, a: 1 }, '#fff')));
+});
+
+test('fully transparent foreground colors make contrast rules cantTell', async () => {
+  for (const foreground of ['rgba(0, 0, 0, 0)', '#0000', '#00000000']) {
+    assert.equal((await evaluate('text-contrast-minimum', snapshot([
+      record('transparent', 'p', { text: 'Texto', contrast: {
+        foreground, background: '#fff', fontSizePx: 16, fontWeight: 400
+      } })
+    ]))).outcome, 'cantTell');
+  }
 });
 
 test('text contrast uses size and weight for large text and never rounds near thresholds', async () => {
@@ -71,13 +96,13 @@ test('text contrast uses size and weight for large text and never rounds near th
       foreground: '#000', background: srgbGrayForBlackContrast(4.49), fontSizePx: 16, fontWeight: 400
     } }),
     record('normal-ok', 'p', { text: 'Texto', contrast: {
-      foreground: '#000', background: srgbGrayForBlackContrast(4.5), fontSizePx: 16, fontWeight: 400
+      foreground: '#000', background: srgbGrayForBlackContrast(4.50000000000001), fontSizePx: 16, fontWeight: 400
     } }),
     record('large-low', 'p', { text: 'Texto', contrast: {
       foreground: '#000', background: srgbGrayForBlackContrast(2.99), fontSizePx: 24, fontWeight: 400
     } }),
     record('large-ok', 'p', { text: 'Texto', contrast: {
-      foreground: '#000', background: srgbGrayForBlackContrast(3), fontSizePx: 18.6667, fontWeight: 700
+      foreground: '#000', background: srgbGrayForBlackContrast(3.000000000000001), fontSizePx: 18.6667, fontWeight: 700
     } })
   ]));
   assert.equal(failed.outcome, 'failed');
@@ -85,7 +110,7 @@ test('text contrast uses size and weight for large text and never rounds near th
 
   assert.equal((await evaluate('text-contrast-enhanced', snapshot([
     record('enhanced', 'p', { text: 'Texto', contrast: {
-      foreground: '#000', background: srgbGrayForBlackContrast(4.5), fontSizePx: 24, fontWeight: 400
+      foreground: '#000', background: srgbGrayForBlackContrast(4.50000000000001), fontSizePx: 24, fontWeight: 400
     } })
   ]))).outcome, 'passed');
 });
@@ -140,6 +165,15 @@ test('target sizes preserve 23.99/24 and 43.99/44 boundaries with explicit excep
   assert.equal((await evaluate('target-size-minimum', snapshot([
     record('unknown', 'button', { role: 'button', targetSize: { width: 20, height: 20 } })
   ]))).outcome, 'cantTell');
+  assert.equal((await evaluate('target-size-minimum', snapshot([
+    record('spaced', 'button', { role: 'button', targetSize: { width: 10, height: 10, exception: 'spacing' } })
+  ]))).outcome, 'passed');
+  assert.equal((await evaluate('target-size-enhanced', snapshot([
+    record('not-exempt', 'button', { role: 'button', targetSize: { width: 10, height: 10, exception: 'spacing' } })
+  ]))).outcome, 'failed');
+  assert.equal((await evaluate('target-size-enhanced', snapshot([
+    record('unknown', 'button', { role: 'button', targetSize: { width: 10, height: 10, exception: 'other' } })
+  ]))).outcome, 'cantTell');
 });
 
 test('zoom reports restrictive viewport directives and distinguishes missing collection', async () => {
@@ -148,6 +182,14 @@ test('zoom reports restrictive viewport directives and distinguishes missing col
   }))).outcome, 'failed');
   assert.equal((await evaluate('zoom-not-blocked', snapshot([], { metaViewport: null }))).outcome, 'passed');
   assert.equal((await evaluate('zoom-not-blocked', snapshot())).outcome, 'cantTell');
+  for (const metaViewport of [
+    { userScalable: 'no', maximumScale: '1' },
+    { userScalable: false, maximumScale: Number.NaN },
+    { userScalable: true, maximumScale: -1 },
+    {}
+  ]) {
+    assert.equal((await evaluate('zoom-not-blocked', snapshot([], { metaViewport }))).outcome, 'cantTell');
+  }
 });
 
 test('focus visibility and obstruction only conclude from explicit observations', async () => {
@@ -173,6 +215,11 @@ test('orientation, reflow, resizing and text spacing require completed observati
   assert.equal((await evaluate('responsive-reflow', snapshot([], {
     reflowObservation: { twoDimensionalScroll: false }
   }))).outcome, 'cantTell');
+  for (const testedWidthCssPx of [-1, 0, Number.NaN]) {
+    assert.equal((await evaluate('responsive-reflow', snapshot([], {
+      reflowObservation: { testedWidthCssPx, twoDimensionalScroll: false }
+    }))).outcome, 'cantTell');
+  }
   assert.equal((await evaluate('text-resizing', snapshot([], {
     textResizeObservation: { scalePercent: 200, lossOfContent: false }
   }))).outcome, 'passed');
@@ -183,6 +230,30 @@ test('orientation, reflow, resizing and text spacing require completed observati
     }))).outcome, 'failed');
     assert.equal((await evaluate(ruleId, snapshot())).outcome, 'cantTell');
   }
+});
+
+test('font weight accepts normalized CSS numbers and keywords without guessing relative weights', async () => {
+  const largeFixture = fontWeight => snapshot([
+    record('text', 'p', { text: 'Texto', contrast: {
+      foreground: '#000', background: srgbGrayForBlackContrast(3.000000000000001), fontSizePx: 18.6667, fontWeight
+    } })
+  ]);
+  for (const fontWeight of [700, '700', 'bold']) {
+    assert.equal((await evaluate('text-contrast-minimum', largeFixture(fontWeight))).outcome, 'passed');
+  }
+  assert.equal((await evaluate('text-contrast-minimum', snapshot([
+    record('text', 'p', { text: 'Texto', contrast: {
+      foreground: '#000', background: srgbGrayForBlackContrast(4.50000000000001), fontSizePx: 16, fontWeight: 'normal'
+    } })
+  ]))).outcome, 'passed');
+  for (const fontWeight of ['bolder', 'lighter', '-1', 'heavy', Number.NaN]) {
+    assert.equal((await evaluate('text-contrast-minimum', largeFixture(fontWeight))).outcome, 'cantTell');
+  }
+  assert.equal((await evaluate('text-contrast-minimum', snapshot([
+    record('text', 'p', { text: 'Texto', contrast: {
+      foreground: '#000', background: '#fff', fontSizePx: -1, fontWeight: 400
+    } })
+  ]))).outcome, 'cantTell');
 });
 
 test('invalid text-block measurements remain cantTell instead of false failures', async () => {

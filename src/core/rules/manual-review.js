@@ -4,12 +4,14 @@ import { INTERACTIVE_RULES } from './interactive.js';
 import { MEDIA_RULES } from './media.js';
 import { createRuleRegistry } from './registry.js';
 import {
+  ancestorNodes,
   attribute,
   documentTarget,
   isComponent,
   isFormField,
   isHidden,
   missingSnapshotResult,
+  nodeIndex,
   normalizeText,
   orderTargets,
   result,
@@ -108,8 +110,26 @@ const TARGET_GROUPS = Object.freeze({
 });
 
 const LANDMARK_ROLES = new Set(['banner', 'complementary', 'contentinfo', 'form', 'main', 'navigation', 'region', 'search']);
+const PAGE_LEVEL_WHEN_EMPTY = new Set([
+  'hover-focus-additional-content', 'hover-focus-content-persistent',
+  'hover-focus-content-dismissible', 'single-key-shortcuts',
+  'single-key-shortcut-control', 'full-keyboard-access',
+  'partial-keyboard-access', 'concurrent-input-mechanisms'
+]);
 
 function scopedCandidates(ruleId, nodes) {
+  if (ruleId === 'focusable-elements-interactive') return nodes.filter(isComponent);
+  if (ruleId === 'content-in-landmarks') {
+    const index = nodeIndex(nodes);
+    return nodes.filter(node => {
+      if (isHidden(node) || (!normalizeText(node?.text) && !isComponent(node))) return false;
+      if (LANDMARK_ROLES.has(roleOf(node)) || ['main', 'nav', 'aside'].includes(tagOf(node))) return false;
+      const chain = ancestorNodes(node, index);
+      return !chain.complete || !chain.ancestors.some(ancestor =>
+        LANDMARK_ROLES.has(roleOf(ancestor)) || ['main', 'nav', 'aside'].includes(tagOf(ancestor))
+      );
+    });
+  }
   if (TARGET_GROUPS.focus.has(ruleId)) return nodes.filter(node => !isHidden(node) && node?.focusable === true);
   if (TARGET_GROUPS.hover.has(ruleId)) return nodes.filter(node => !isHidden(node) && (node?.hoverContent === true || node?.focusContent === true));
   if (TARGET_GROUPS.component.has(ruleId)) return nodes.filter(isComponent);
@@ -125,7 +145,16 @@ function scopedCandidates(ruleId, nodes) {
 function assistedReview(snapshot, item) {
   return reviewResult(snapshot, ({ document, nodes }) => {
     const candidates = scopedCandidates(item.ruleIds[0], nodes);
-    if (Array.isArray(candidates) && candidates.length === 0) return result('inapplicable', `Não há alvos observáveis para revisar: ${item.title}.`);
+    if (Array.isArray(candidates) && candidates.length === 0) {
+      if (!PAGE_LEVEL_WHEN_EMPTY.has(item.ruleIds[0])) {
+        return result('inapplicable', `Não há alvos observáveis para revisar: ${item.title}.`);
+      }
+      return result('cantTell', `A coleta de alvos para “${item.title}” é insuficiente para concluir a aplicabilidade.`, [
+        documentTarget(document, `Revise a página e suas interações quanto a: ${item.title}.`, {
+          reason: 'page-level-insufficient-observation', itemId: item.id
+        })
+      ], [item.humanReason]);
+    }
     const targets = Array.isArray(candidates)
       ? candidates.map(node => target(node, `Revise manualmente: ${item.title}.`, { reason: 'human-judgment-required', itemId: item.id }))
       : [documentTarget(document, `Revise a página e o processo quanto a: ${item.title}.`, { reason: 'page-level-human-judgment', itemId: item.id })];

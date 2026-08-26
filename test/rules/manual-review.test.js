@@ -37,6 +37,40 @@ test('remaining assisted rules return cantTell with objective human reason and a
   assert.equal((await evaluate('focus-order', snapshot())).outcome, 'inapplicable');
 });
 
+test('manual candidate selection includes interactive non-focusable elements and content outside landmarks', async () => {
+  const interactive = await evaluate('focusable-elements-interactive', snapshot([
+    record('custom', 'div', { interaction: 'button', focusable: false })
+  ]));
+  assert.equal(interactive.outcome, 'cantTell');
+  assert.deepEqual(interactive.targets.map(target => target.nodeId), ['custom']);
+
+  const outside = await evaluate('content-in-landmarks', snapshot([
+    record('outside', 'p', { text: 'Conteúdo fora de região' })
+  ]));
+  assert.equal(outside.outcome, 'cantTell');
+  assert.deepEqual(outside.targets.map(target => target.nodeId), ['outside']);
+});
+
+test('manual review preserves all 300 candidates in snapshot order', async () => {
+  const nodes = Array.from({ length: 300 }, (_, index) => record(`control-${index + 1}`, 'div', {
+    interaction: 'button', focusable: false
+  }));
+  const value = await evaluate('focusable-elements-interactive', snapshot(nodes));
+  assert.equal(value.outcome, 'cantTell');
+  assert.equal(value.targets.length, 300);
+  assert.deepEqual(value.targets.map(target => target.nodeId), nodes.map(node => node.nodeId));
+});
+
+test('transversal assisted review uses page evidence when target collection is insufficient', async () => {
+  for (const ruleId of ['single-key-shortcuts', 'hover-focus-additional-content']) {
+    const value = await evaluate(ruleId, snapshot());
+    assert.equal(value.outcome, 'cantTell');
+    assert.equal(value.targets.length, 1);
+    assert.equal(value.targets[0].nodeId, 'document');
+    assert.ok(value.limitations[0]);
+  }
+});
+
 test('assisted/manual review rules never pass merely because no automated failure was found', async () => {
   const assisted = MANUAL_REVIEW_RULES.filter(rule => rule.mode === 'assisted');
   const value = snapshot([
@@ -47,6 +81,7 @@ test('assisted/manual review rules never pass merely because no automated failur
   const results = await runRules(value, {}, assisted);
   assert.ok(results.every(result => result.outcome !== 'passed'));
   assert.ok(results.filter(result => result.outcome === 'cantTell').every(result => result.limitations.length > 0));
+  assert.ok(results.filter(result => result.outcome === 'cantTell').every(result => result.targets.length > 0));
 });
 
 test('manual items without rule IDs have pure serializable review descriptions', () => {

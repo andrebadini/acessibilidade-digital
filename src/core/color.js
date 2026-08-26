@@ -83,7 +83,7 @@ export function parseColor(value) {
 }
 
 function flatten(foreground, background) {
-  if (background.a !== 1) return null;
+  if (background.a !== 1 || foreground.a === 0) return null;
   if (foreground.a === 1) return foreground;
   return {
     r: foreground.r * foreground.a + background.r * (1 - foreground.a),

@@ -38,6 +38,15 @@ function finite(value) {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
+function fontWeight(value) {
+  if (value === 'normal') return 400;
+  if (value === 'bold') return 700;
+  const normalized = typeof value === 'string' && /^\d+(?:\.\d+)?$/u.test(value.trim())
+    ? Number(value.trim())
+    : value;
+  return finite(normalized) && normalized >= 1 && normalized <= 1000 ? normalized : null;
+}
+
 function uncertainComposition(observation) {
   return !observation || observation.reliable === false ||
     (typeof observation.backgroundImage === 'string' &&
@@ -46,9 +55,10 @@ function uncertainComposition(observation) {
 }
 
 function isLargeText(observation) {
-  if (!finite(observation.fontSizePx) || !finite(observation.fontWeight)) return null;
+  const weight = fontWeight(observation.fontWeight);
+  if (!finite(observation.fontSizePx) || observation.fontSizePx <= 0 || weight === null) return null;
   return observation.fontSizePx >= 24 ||
-    (observation.fontSizePx >= (14 * 96 / 72) && observation.fontWeight >= 700);
+    (observation.fontSizePx >= (14 * 96 / 72) && weight >= 700);
 }
 
 function textContrast(snapshot, enhanced) {
@@ -70,7 +80,7 @@ function textContrast(snapshot, enhanced) {
         continue;
       }
       const threshold = enhanced ? (large ? 4.5 : 7) : (large ? 3 : 4.5);
-      if (ratio < threshold && Math.abs(ratio - threshold) > 1e-12) {
+      if (ratio < threshold) {
         failures.push(target(node, `Aumente o contraste deste texto para pelo menos ${threshold}:1.`, {
           reason: 'insufficient-text-contrast', ratio, threshold, largeText: large
         }));
@@ -102,7 +112,7 @@ function nonTextContrast(snapshot, field, kind) {
       }
       const ratio = contrastRatio(observation.foreground, observation.background);
       if (!Number.isFinite(ratio)) incomplete = true;
-      else if (ratio < 3 && Math.abs(ratio - 3) > 1e-12) failures.push(target(node, `Aumente o contraste deste ${kind} para pelo menos 3:1.`, {
+      else if (ratio < 3) failures.push(target(node, `Aumente o contraste deste ${kind} para pelo menos 3:1.`, {
         reason: 'insufficient-non-text-contrast', ratio, threshold: 3
       }));
     }
@@ -114,10 +124,13 @@ function nonTextContrast(snapshot, field, kind) {
   });
 }
 
-const TARGET_EXCEPTIONS = new Set(['equivalent', 'inline', 'user-agent', 'essential', 'spacing']);
+const MINIMUM_TARGET_EXCEPTIONS = new Set(['equivalent', 'inline', 'user-agent', 'essential', 'spacing']);
+const ENHANCED_TARGET_EXCEPTIONS = new Set(['equivalent', 'inline', 'user-agent', 'essential']);
+const KNOWN_TARGET_EXCEPTIONS = new Set([...MINIMUM_TARGET_EXCEPTIONS, ...ENHANCED_TARGET_EXCEPTIONS]);
 
 function targetSize(snapshot, threshold) {
   return visualResult(snapshot, ({ nodes }) => {
+    const exceptions = threshold === 44 ? ENHANCED_TARGET_EXCEPTIONS : MINIMUM_TARGET_EXCEPTIONS;
     const candidates = nodes.filter(isComponent);
     if (candidates.length === 0) return result('inapplicable', 'Não há alvos de acionamento aplicáveis.');
     const failures = [];
@@ -129,8 +142,8 @@ function targetSize(snapshot, threshold) {
         continue;
       }
       if (observation.width >= threshold && observation.height >= threshold) continue;
-      if (TARGET_EXCEPTIONS.has(observation.exception)) continue;
-      if (observation.exception !== 'none') {
+      if (exceptions.has(observation.exception)) continue;
+      if (observation.exception !== 'none' && !KNOWN_TARGET_EXCEPTIONS.has(observation.exception)) {
         incomplete = true;
         continue;
       }
@@ -177,8 +190,19 @@ function zoomNotBlocked(snapshot) {
     if (!viewport || typeof viewport !== 'object') return result('cantTell', 'A diretiva meta viewport é inválida ou incompleta.', [], [
       'Colete user-scalable e maximum-scale em forma normalizada.'
     ]);
-    const blocked = viewport.userScalable === false ||
-      (finite(viewport.maximumScale) && viewport.maximumScale < 2);
+    const hasUserScalable = hasOwn(viewport, 'userScalable');
+    const hasMaximumScale = hasOwn(viewport, 'maximumScale');
+    if (
+      (!hasUserScalable && !hasMaximumScale) ||
+      (hasUserScalable && typeof viewport.userScalable !== 'boolean') ||
+      (hasMaximumScale && (!finite(viewport.maximumScale) || viewport.maximumScale <= 0))
+    ) {
+      return result('cantTell', 'A diretiva meta viewport é inválida ou incompleta.', [], [
+        'Colete propriedades próprias normalizadas para userScalable e maximumScale.'
+      ]);
+    }
+    const blocked = (hasUserScalable && viewport.userScalable === false) ||
+      (hasMaximumScale && viewport.maximumScale < 2);
     return blocked
       ? result('failed', 'A diretiva de viewport restringe o zoom.', [documentTarget(document, 'Remova a restrição de ampliação da página.', { reason: 'zoom-restricted' })])
       : result('passed', 'A diretiva de viewport observada não restringe o zoom mínimo.');
@@ -282,7 +306,7 @@ export const VISUAL_RULES = createRuleRegistry([
     observation: 'A orientação de exibição', request: 'Teste ambas as orientações e registre se a restrição é essencial ou inexistente.', passed: 'A página não restringe a orientação.', failed: 'A página restringe a orientação sem exceção.', message: 'Permita o uso em ambas as orientações.', reason: 'orientation-restricted'
   })),
   definition('responsive-reflow', snapshot => exceptionObservation(snapshot, 'reflowObservation', 'twoDimensionalScroll', {
-    observation: 'O reflow a 320 CSS px', request: 'Teste a largura equivalente a 320 CSS px e registre rolagem bidimensional e exceção.', passed: 'Não houve rolagem bidimensional no teste de reflow.', failed: 'O conteúdo exige rolagem bidimensional sem exceção.', message: 'Faça o conteúdo refluir sem rolagem em duas dimensões.', reason: 'two-dimensional-scroll', complete: observation => finite(observation.testedWidthCssPx) && observation.testedWidthCssPx <= 320
+    observation: 'O reflow a 320 CSS px', request: 'Teste a largura equivalente a 320 CSS px e registre rolagem bidimensional e exceção.', passed: 'Não houve rolagem bidimensional no teste de reflow.', failed: 'O conteúdo exige rolagem bidimensional sem exceção.', message: 'Faça o conteúdo refluir sem rolagem em duas dimensões.', reason: 'two-dimensional-scroll', complete: observation => finite(observation.testedWidthCssPx) && observation.testedWidthCssPx > 0 && observation.testedWidthCssPx <= 320
   })),
   definition('focus-indicator-area', snapshot => focusProperty(snapshot, 'areaSufficient', FOCUS_LABELS.area)),
   definition('text-contrast-enhanced', snapshot => textContrast(snapshot, true)),
