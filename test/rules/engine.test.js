@@ -606,3 +606,69 @@ test('aggregateItems quarantines every duplicate normative ID without changing c
   assert.deepEqual(values.map(value => value.ruleResults), [[], []]);
   assert.ok(values.every(value => /duplicado|integridade/i.test(value.humanReason)));
 });
+
+test('registerRule rejects each inherited contractual definition field', () => {
+  const base = {
+    id: 'own-only',
+    mode: 'automated',
+    nbrItems: ['5.1.1'],
+    evaluate() { return { outcome: 'passed' }; }
+  };
+
+  for (const field of ['id', 'mode', 'nbrItems', 'evaluate']) {
+    const definition = { ...base };
+    delete definition[field];
+    Object.setPrototypeOf(definition, { [field]: base[field] });
+    assert.throws(() => registerRule(definition), /own|rule|id|mode|item|evaluate/i, field);
+  }
+});
+
+test('createRuleRegistry rejects a fully inherited rule definition', () => {
+  const inherited = {
+    id: 'inherited-definition',
+    mode: 'automated',
+    nbrItems: ['5.1.1'],
+    evaluate() { return { outcome: 'passed' }; }
+  };
+
+  assert.throws(
+    () => createRuleRegistry([Object.create(inherited)]),
+    /own|rule|id|mode|item|evaluate/i
+  );
+});
+
+test('runRules quarantines a hostile accessor slot without invoking it and continues', async () => {
+  const secret = 'token=slot-getter-secret';
+  const rules = [];
+  Object.defineProperty(rules, '0', {
+    enumerable: true,
+    get() { throw new Error(secret); }
+  });
+  rules[1] = {
+    id: 'after-hostile-slot', mode: 'manual', nbrItems: ['5.1.1'],
+    evaluate() { return { outcome: 'passed' }; }
+  };
+
+  const values = await runRules({}, {}, rules);
+
+  assert.deepEqual(values.map(value => [value.ruleId, value.outcome]), [
+    ['invalid-rule-1', 'untested'],
+    ['after-hostile-slot', 'passed']
+  ]);
+  assert.doesNotMatch(JSON.stringify(values), new RegExp(secret));
+});
+
+test('runRules contains hostile array proxy descriptors and length access', async () => {
+  const hostileRules = new Proxy([], {
+    getOwnPropertyDescriptor() { throw new Error('descriptor secret'); },
+    get(target, property) {
+      if (property === 'length') throw new Error('length secret');
+      return Reflect.get(target, property);
+    }
+  });
+
+  const values = await runRules({}, {}, hostileRules);
+
+  assert.deepEqual(values, []);
+  assert.doesNotThrow(() => JSON.stringify(values));
+});

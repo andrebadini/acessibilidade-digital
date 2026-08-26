@@ -151,18 +151,41 @@ function duplicateRuleIds(rules) {
   return new Set([...counts].filter(([, count]) => count > 1).map(([id]) => id));
 }
 
+function safeRulesLength(rules) {
+  try {
+    if (!Array.isArray(rules)) return null;
+    const descriptor = Object.getOwnPropertyDescriptor(rules, 'length');
+    return descriptor && Object.hasOwn(descriptor, 'value') &&
+      Number.isSafeInteger(descriptor.value) && descriptor.value >= 0
+      ? descriptor.value
+      : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function safeRuleSlot(rules, index) {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(rules, String(index));
+    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Runs rules in the supplied order. A single rule failure is represented as an
  * untested RuleResult so the remaining audit can still be reported.
  */
 export async function runRules(snapshot, context, rules) {
-  if (!Array.isArray(rules)) {
+  const length = safeRulesLength(rules);
+  if (length === null) {
     throw new TypeError('Rules must be an array');
   }
 
   const normalizedRules = [];
-  for (let index = 0; index < rules.length; index += 1) {
-    normalizedRules.push(normalizeRule(rules[index], index));
+  for (let index = 0; index < length; index += 1) {
+    normalizedRules.push(normalizeRule(safeRuleSlot(rules, index), index));
   }
   const duplicated = duplicateRuleIds(normalizedRules);
   const values = [];

@@ -1,5 +1,17 @@
 import { TEST_MODES } from '../result.js';
 
+const RULE_FIELDS = Object.freeze(['id', 'mode', 'nbrItems', 'evaluate']);
+
+function hasOwn(value, field) {
+  return value !== null && typeof value === 'object' && Object.hasOwn(value, field);
+}
+
+function requireOwnRuleFields(definition) {
+  if (!RULE_FIELDS.every(field => hasOwn(definition, field))) {
+    throw new TypeError('Rule definition fields must be own properties');
+  }
+}
+
 function normalizedString(value, label) {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new TypeError(`${label} must be a non-empty string`);
@@ -35,7 +47,12 @@ function existingRuleIds(existingRules) {
     throw new TypeError('Existing rules must be an array');
   }
 
-  return new Set(existingRules.map(rule => normalizedString(rule?.id, 'Existing rule ID')));
+  return new Set(existingRules.map(rule => {
+    if (!hasOwn(rule, 'id')) {
+      throw new TypeError('Existing rule ID must be an own property');
+    }
+    return normalizedString(rule.id, 'Existing rule ID');
+  }));
 }
 
 /**
@@ -47,6 +64,7 @@ export function registerRule(definition, existingRules = []) {
     throw new TypeError('Rule definition must be an object');
   }
 
+  requireOwnRuleFields(definition);
   const id = normalizedString(definition.id, 'Rule ID');
   const ids = existingRuleIds(existingRules);
   if (ids.has(id)) {
