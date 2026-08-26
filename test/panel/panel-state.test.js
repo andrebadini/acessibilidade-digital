@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createSubmissionGate, isMessageForAudit, isSafeReportUrl } from '../../src/panel/panel-state.js';
+import { createSubmissionGate, isMessageForAudit, isSafeReportUrl, reducePanelState } from '../../src/panel/panel-state.js';
 
 test('correlates audit messages using auditId or sessionId', () => {
   assert.equal(isMessageForAudit({ auditId: 'a-1' }, 'a-1'), true);
@@ -28,4 +28,15 @@ test('uses a synchronous gate to reject reentrant submissions until released', (
   assert.equal(gate.tryAcquire(), false);
   gate.release();
   assert.equal(gate.tryAcquire(), true);
+});
+
+test('keeps progress monotonic and restores a safe completed review link', () => {
+  const base = { auditId: 'a-1', status: 'running', percent: 50, message: 'Testando', reviewUrl: null };
+  assert.deepEqual(reducePanelState(base, { type: 'AUDIT_PROGRESS', auditId: 'a-1', percent: 20, message: 'Antigo' }), base);
+  const progressed = reducePanelState(base, { type: 'AUDIT_PROGRESS', auditId: 'a-1', percent: 72, message: 'Preparando evidências' });
+  assert.equal(progressed.percent, 72);
+  const completed = reducePanelState(progressed, { type: 'AUDIT_COMPLETE', auditId: 'a-1', status: 'complete', reviewUrl: 'chrome-extension://test/src/review/index.html?auditId=a-1' }, 'chrome-extension://test/');
+  assert.equal(completed.status, 'complete');
+  assert.equal(completed.reviewUrl, 'chrome-extension://test/src/review/index.html?auditId=a-1');
+  assert.equal(reducePanelState(progressed, { type: 'AUDIT_COMPLETE', auditId: 'a-1', reviewUrl: 'javascript:alert(1)' }, 'chrome-extension://test/').reviewUrl, null);
 });

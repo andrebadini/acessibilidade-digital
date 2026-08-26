@@ -1,0 +1,111 @@
+import { createReviewDecision } from '../core/review/decisions.js';
+import { createAuditStore } from '../storage/audit-store.js';
+import { getPendingReviewEntries, normalizeReviewAuditId, recordReviewDecision } from './review-state.js';
+
+const ANSWERS = ['conforme', 'não conforme', 'não foi possível determinar'];
+const list = document.querySelector('#review-list');
+const status = document.querySelector('#review-status');
+const evaluator = document.querySelector('#review-evaluator');
+const store = createAuditStore();
+let auditModel;
+
+function safeAuditId() {
+  const value = new URL(location.href).searchParams.get('auditId');
+  return normalizeReviewAuditId(value);
+}
+
+function appendText(parent, tag, value, className) {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  element.textContent = value;
+  parent.append(element);
+  return element;
+}
+
+function evidenceFor(occurrence) {
+  const ids = new Set(occurrence.evidenceIds || []);
+  return (auditModel.evidence?.artifacts || []).filter(item => ids.has(item.evidenceId));
+}
+
+function nextUnanswered(card) {
+  let next = card.nextElementSibling;
+  while (next?.classList.contains('answered')) next = next.nextElementSibling;
+  (next?.querySelector('button') || document.querySelector('a[href="../panel/index.html"]'))?.focus();
+}
+
+async function saveDecision(occurrence, answer, note, card) {
+  const evaluatorName = evaluator.value.trim();
+  if (!evaluatorName) {
+    status.textContent = 'Informe o nome da pessoa avaliadora antes de responder.';
+    evaluator.focus();
+    return;
+  }
+  const decision = createReviewDecision({
+    auditId: auditModel.auditId, itemId: occurrence.itemId, occurrenceId: occurrence.occurrenceId,
+    answer, evaluator: evaluatorName, note, decidedAt: new Date().toISOString(), mode: occurrence.mode === 'manual' ? 'manual' : 'assisted',
+  });
+  auditModel = recordReviewDecision(auditModel, decision);
+  await store.setAudit(auditModel.auditId, auditModel);
+  card.classList.add('answered');
+  for (const button of card.querySelectorAll('button')) button.disabled = true;
+  status.textContent = `Decisão salva para o item ${occurrence.itemId}.`;
+  nextUnanswered(card);
+}
+
+function renderCard(entry) {
+  const occurrence = auditModel.occurrences.find(value => value.occurrenceId === entry.occurrenceId);
+  const item = auditModel.itemResults.find(value => value.id === entry.itemId);
+  if (!occurrence || !item) return;
+  const card = document.createElement('article');
+  card.className = 'review-card';
+  card.id = `review-${occurrence.occurrenceId.replace(/[^A-Za-z0-9_-]/gu, '-')}`;
+  appendText(card, 'h2', entry.question || `O item “${item.title}” está conforme no contexto apresentado?`);
+  appendText(card, 'p', `ABNT NBR 17225 — item ${item.printedId || item.id} (${item.classification || 'classificação não informada'}).`);
+  const wcag = (item.wcag || []).map(reference => `${reference.id || reference} nível ${reference.level || ''}`.trim()).join(', ');
+  appendText(card, 'p', `WCAG: ${wcag || 'sem referência vinculada'}.`);
+  appendText(card, 'p', `Razão: ${entry.reason || occurrence.justification || item.humanReason || 'revisão humana necessária'}.`);
+  for (const evidence of evidenceFor(occurrence)) {
+    if (evidence.selector?.css) appendText(card, 'code', `Seletor: ${evidence.selector.css}`);
+    if (evidence.snippet) appendText(card, 'code', evidence.snippet);
+    if (evidence.dataUrl) {
+      const image = document.createElement('img');
+      image.className = 'evidence-media';
+      image.src = evidence.dataUrl;
+      image.alt = evidence.kind === 'full-page' ? 'Captura completa da página auditada' : `Captura do elemento relacionado ao item ${item.id}`;
+      card.append(image);
+    }
+  }
+  const noteLabel = appendText(card, 'label', 'Nota opcional');
+  const note = document.createElement('textarea');
+  note.rows = 3;
+  noteLabel.append(note);
+  const answers = document.createElement('div');
+  answers.className = 'answers';
+  for (const answer of ANSWERS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = answer;
+    button.addEventListener('click', () => {
+      void saveDecision(occurrence, answer, note.value, card).catch(() => { status.textContent = 'Não foi possível salvar a decisão.'; });
+    });
+    answers.append(button);
+  }
+  const skip = document.createElement('button');
+  skip.type = 'button';
+  skip.textContent = 'Pular revisão';
+  skip.addEventListener('click', () => { status.textContent = 'Revisão pulada; o resultado permanece indeterminado.'; nextUnanswered(card); });
+  answers.append(skip);
+  card.append(answers);
+  list.append(card);
+}
+
+async function start() {
+  const id = safeAuditId() || normalizeReviewAuditId((await store.getLatest())?.auditId);
+  if (!id) { status.textContent = 'Auditoria não identificada.'; return; }
+  auditModel = await store.getAudit(id);
+  if (!auditModel || auditModel.auditId !== id) { status.textContent = 'Auditoria não encontrada.'; return; }
+  for (const entry of getPendingReviewEntries(auditModel)) renderCard(entry);
+  status.textContent = list.childElementCount ? `${list.childElementCount} ocorrências aguardam revisão.` : 'Não há ocorrências para revisar.';
+}
+
+void start().catch(() => { status.textContent = 'Não foi possível carregar a revisão.'; });

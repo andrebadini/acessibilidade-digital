@@ -1,5 +1,5 @@
 import { normalizeAuditUrl } from '../core/url.js';
-import { createSubmissionGate, isMessageForAudit, isSafeReportUrl } from './panel-state.js';
+import { createSubmissionGate, isMessageForAudit, isSafeReportUrl, reducePanelState } from './panel-state.js';
 
 const form = document.querySelector('#audit-form');
 const input = document.querySelector('#audit-url');
@@ -8,6 +8,7 @@ const status = document.querySelector('#audit-status');
 const latestReport = document.querySelector('#latest-report');
 const submissionGate = createSubmissionGate();
 let activeAuditId = null;
+let panelState = null;
 
 function setStatus(message) {
   status.textContent = message;
@@ -54,20 +55,19 @@ form.addEventListener('submit', (event) => {
   try {
     chrome.runtime.sendMessage({ type: 'START_AUDIT', url }, (response) => {
       const runtimeError = chrome.runtime.lastError;
-      submissionGate.release();
-      setSubmitting(false);
       if (runtimeError) {
-        activeAuditId = null;
+        finishActiveAudit();
         setStatus(`Não foi possível iniciar a auditoria: ${runtimeError.message}`);
         return;
       }
       if (!response || response.ok !== true || typeof response.auditId !== 'string') {
-        activeAuditId = null;
+        finishActiveAudit();
         setStatus(response?.error || 'Não foi possível iniciar a auditoria.');
         return;
       }
       activeAuditId = response.auditId;
-      setStatus('Auditoria preparada. A coleta será iniciada em breve.');
+      panelState = { auditId: activeAuditId, status: 'running', percent: 0, message: 'Auditoria preparada. A coleta será iniciada em breve.', reviewUrl: null };
+      setStatus(panelState.message);
     });
   } catch (error) {
     finishActiveAudit();
@@ -77,18 +77,12 @@ form.addEventListener('submit', (event) => {
 
 chrome.runtime.onMessage.addListener((message) => {
   if (!message || typeof message !== 'object' || !isMessageForAudit(message, activeAuditId)) return;
-  if (message.type === 'AUDIT_PROGRESS' && typeof message.message === 'string') {
-    setStatus(message.message);
-    return;
-  }
+  panelState = reducePanelState(panelState, message, chrome.runtime.getURL('/'));
+  setStatus(panelState.message);
+  if (message.type === 'AUDIT_PROGRESS') return;
   if (message.type === 'AUDIT_COMPLETE') {
-    if (isSafeReportUrl(message.reportUrl, chrome.runtime.getURL('/'))) {
-      showReport(message.reportUrl);
-      setStatus('Auditoria concluída.');
-    } else {
-      clearReport();
-      setStatus('Auditoria concluída, mas o relatório está indisponível.');
-    }
+    if (panelState.reviewUrl) showReport(panelState.reviewUrl);
+    else clearReport();
     finishActiveAudit();
     return;
   }
@@ -98,3 +92,29 @@ chrome.runtime.onMessage.addListener((message) => {
     finishActiveAudit();
   }
 });
+
+function restoreLatest() {
+  try {
+    chrome.runtime.sendMessage({ type: 'GET_LAST_AUDIT' }, response => {
+      if (chrome.runtime.lastError || !response?.ok || !response.state?.auditId) return;
+      const saved = response.state;
+      panelState = {
+        auditId: saved.auditId,
+        status: saved.status || 'running',
+        percent: Number.isFinite(saved.percent) ? saved.percent : 0,
+        message: saved.message || 'Auditoria em andamento.',
+        reviewUrl: isSafeReportUrl(saved.reviewUrl, chrome.runtime.getURL('/')) ? saved.reviewUrl : null,
+      };
+      setStatus(panelState.message);
+      if (['running', 'idle'].includes(panelState.status)) {
+        activeAuditId = panelState.auditId;
+        setSubmitting(true);
+        submissionGate.tryAcquire();
+      } else if (panelState.reviewUrl) showReport(panelState.reviewUrl);
+    });
+  } catch {
+    // A restauração é opcional; o formulário permanece utilizável.
+  }
+}
+
+restoreLatest();

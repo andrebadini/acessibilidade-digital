@@ -1,0 +1,118 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
+
+function model(overrides = {}) {
+  const fullPage = Object.freeze({ evidenceId: 'ev-full', kind: 'full-page', hash: 'sha-full' });
+  const element = Object.freeze({ evidenceId: 'ev-node', kind: 'element', hash: 'sha-node' });
+  return Object.freeze({
+    schemaVersion: 1,
+    auditId: 'audit-1',
+    evidence: Object.freeze({ artifacts: Object.freeze([fullPage, element]) }),
+    reproducibility: Object.freeze({ evidenceHash: 'manifest-hash' }),
+    ruleResults: Object.freeze([
+      Object.freeze({ ruleId: 'auto-rule', outcome: 'failed', mode: 'automated', nbrItems: Object.freeze(['5.1.1']) }),
+      Object.freeze({ ruleId: 'assist-rule', outcome: 'cantTell', mode: 'assisted', nbrItems: Object.freeze(['5.1.2']) }),
+    ]),
+    itemResults: Object.freeze([
+      Object.freeze({ id: '5.1.1', outcome: 'failed', evaluation: 'automated' }),
+      Object.freeze({ id: '5.1.2', outcome: 'cantTell', evaluation: 'assisted' }),
+    ]),
+    occurrences: Object.freeze([
+      Object.freeze({ occurrenceId: 'occ-auto', itemId: '5.1.1', ruleId: 'auto-rule', outcome: 'failed', evidenceIds: Object.freeze(['ev-node']) }),
+      Object.freeze({ occurrenceId: 'occ-a', itemId: '5.1.2', ruleId: 'assist-rule', outcome: 'cantTell', evidenceIds: Object.freeze(['ev-full']) }),
+      Object.freeze({ occurrenceId: 'occ-b', itemId: '5.1.2', ruleId: 'assist-rule', outcome: 'cantTell', evidenceIds: Object.freeze(['ev-node']) }),
+    ]),
+    manualReview: Object.freeze([
+      Object.freeze({ occurrenceId: 'occ-auto', itemId: '5.1.1' }),
+      Object.freeze({ occurrenceId: 'occ-a', itemId: '5.1.2' }),
+      Object.freeze({ occurrenceId: 'occ-b', itemId: '5.1.2' }),
+    ]),
+    reviewDecisions: Object.freeze([]),
+    ...overrides,
+  });
+}
+
+const decision = (occurrenceId, answer = 'conforme', extra = {}) => createReviewDecision({
+  auditId: 'audit-1', itemId: occurrenceId === 'occ-auto' ? '5.1.1' : '5.1.2', occurrenceId,
+  answer, evaluator: 'Fiscal Ana', decidedAt: '2026-08-26T10:00:00-04:00', mode: 'assisted', ...extra,
+});
+
+test('creates a canonical frozen JSON-safe review decision', () => {
+  const value = decision('occ-a', 'não conforme', { note: '  Falha confirmada.  ' });
+  assert.equal(value.answer, 'não conforme');
+  assert.equal(value.evaluator, 'Fiscal Ana');
+  assert.equal(value.note, 'Falha confirmada.');
+  assert.equal(value.decidedAt, '2026-08-26T14:00:00.000Z');
+  assert.equal(value.mode, 'assisted');
+  assert.match(value.decisionId, /^decision-/);
+  assert.equal(Object.isFrozen(value), true);
+  assert.doesNotThrow(() => JSON.stringify(value));
+});
+
+test('rejects invalid IDs, answers, evaluator, timestamps and modes', () => {
+  for (const change of [
+    { auditId: '' }, { itemId: ' ' }, { occurrenceId: '' }, { answer: 'sim' },
+    { evaluator: '' }, { decidedAt: 'amanhã' }, { mode: 'semiAuto' },
+  ]) {
+    assert.throws(() => createReviewDecision({
+      auditId: 'audit-1', itemId: '5.1.2', occurrenceId: 'occ-a', answer: 'conforme',
+      evaluator: 'Fiscal', decidedAt: '2026-08-26T10:00:00Z', mode: 'manual', ...change,
+    }), /decis|resposta|avaliador|data|modo|identificador/i);
+  }
+});
+
+test('requires known audit, item and occurrence links and rejects ambiguous duplicates', () => {
+  assert.throws(() => applyReviewDecisions(model(), [decision('occ-a', 'conforme', { auditId: 'other' })]), /auditoria/i);
+  assert.throws(() => applyReviewDecisions(model(), [decision('occ-a', 'conforme', { itemId: 'unknown' })]), /item/i);
+  assert.throws(() => applyReviewDecisions(model(), [decision('unknown')]), /ocorrência/i);
+  assert.throws(() => applyReviewDecisions(model(), [decision('occ-a'), decision('occ-a', 'não conforme')]), /duplic|ambígua/i);
+});
+
+test('validates the integrity of previously stored decisions before applying new ones', () => {
+  const corrupt = model({ reviewDecisions: Object.freeze([Object.freeze({
+    auditId: 'audit-1', itemId: 'unknown', occurrenceId: 'unknown', answer: 'conforme',
+    evaluator: 'Fiscal', decidedAt: '2026-08-26T14:00:00.000Z', mode: 'manual',
+  })]) });
+  assert.throws(() => applyReviewDecisions(corrupt, []), /item|ocorrência/i);
+});
+
+test('never promotes an automatic failure and never overwrites automatic rule results', () => {
+  const original = model();
+  const reviewed = applyReviewDecisions(original, [decision('occ-auto')]);
+  assert.equal(reviewed.itemResults.find(item => item.id === '5.1.1').outcome, 'failed');
+  assert.deepEqual(reviewed.ruleResults, original.ruleResults);
+  assert.notEqual(reviewed, original);
+});
+
+test('aggregates review answers conservatively across all reviewable occurrences', () => {
+  const incomplete = applyReviewDecisions(model(), [decision('occ-a')]);
+  assert.equal(incomplete.itemResults.find(item => item.id === '5.1.2').outcome, 'cantTell');
+
+  const unknown = applyReviewDecisions(model(), [
+    decision('occ-a'), decision('occ-b', 'não foi possível determinar'),
+  ]);
+  assert.equal(unknown.itemResults.find(item => item.id === '5.1.2').outcome, 'cantTell');
+
+  const failed = applyReviewDecisions(model(), [decision('occ-a'), decision('occ-b', 'não conforme')]);
+  assert.equal(failed.itemResults.find(item => item.id === '5.1.2').outcome, 'failed');
+
+  const passed = applyReviewDecisions(model(), [decision('occ-a'), decision('occ-b')]);
+  const item = passed.itemResults.find(value => value.id === '5.1.2');
+  assert.equal(item.outcome, 'passed');
+  assert.equal(item.originalOutcome, 'cantTell');
+  assert.equal(item.reviewedOutcome, 'passed');
+  assert.equal(item.review.mode, 'assisted');
+  assert.equal(item.review.evaluator, 'Fiscal Ana');
+});
+
+test('preserves evidence bytes, evidence links and reproducibility hashes', () => {
+  const original = model();
+  const reviewed = applyReviewDecisions(original, [decision('occ-a'), decision('occ-b')]);
+  assert.strictEqual(reviewed.evidence, original.evidence);
+  assert.strictEqual(reviewed.reproducibility, original.reproducibility);
+  assert.deepEqual(reviewed.occurrences.map(item => item.evidenceIds), original.occurrences.map(item => item.evidenceIds));
+  assert.equal(Object.isFrozen(reviewed), true);
+  assert.doesNotThrow(() => JSON.stringify(reviewed));
+});

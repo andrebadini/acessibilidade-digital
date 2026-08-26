@@ -1,5 +1,8 @@
 import { createAuditSession } from './session.js';
 import { normalizeAuditUrl } from '../core/url.js';
+import { createChromeAdapter } from './chrome-adapter.js';
+import { runAudit } from './run-audit.js';
+import { createAuditStore } from '../storage/audit-store.js';
 
 const PANEL_PATH = '/src/panel/index.html';
 const sessionKey = (id) => `audita-mt:session:${id}`;
@@ -42,7 +45,11 @@ export function registerServiceWorker(chromeApi, options = {}) {
   const sessions = options.sessionStore ?? createSessionStore(chromeApi, options.sessions);
   const createId = options.createId ?? (() => crypto.randomUUID());
   const now = options.now ?? (() => new Date().toISOString());
-  const logger = options.logger ?? console;
+  const logger = options.logger ?? { error() {} };
+  const runner = options.runner ?? runAudit;
+  const auditStore = options.auditStore ?? createAuditStore(options.auditStoreOptions);
+  const chromeAdapterFactory = options.chromeAdapterFactory ?? createChromeAdapter;
+  const activeBySender = new Map();
 
   chromeApi.action.onClicked.addListener(() => {
     void Promise.resolve()
@@ -51,18 +58,28 @@ export function registerServiceWorker(chromeApi, options = {}) {
   });
 
   chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (!message || message.type !== 'START_AUDIT') return false;
+    if (!message || !['START_AUDIT', 'GET_LAST_AUDIT'].includes(message.type)) return false;
     if (!isAuthorizedPanelSender(sender, chromeApi.runtime.id)) {
       sendResponse({ ok: false, error: 'Origem da mensagem não autorizada.' });
       return true;
     }
+    if (message.type === 'GET_LAST_AUDIT') {
+      void auditStore.getLatest().then(value => sendResponse({ ok: true, state: value ?? null }), () => sendResponse({ ok: false, error: 'Não foi possível restaurar a última auditoria.' }));
+      return true;
+    }
     try {
       const requestedUrl = normalizeAuditUrl(message.url);
+      const senderKey = `${sender.id}:${sender.documentId || sender.tab?.id || sender.url}`;
+      const existing = activeBySender.get(senderKey);
+      if (existing) {
+        sendResponse({ ok: true, auditId: existing, state: 'running', duplicate: true });
+        return true;
+      }
       const auditId = createId();
       const session = createAuditSession({ id: auditId, requestedUrl, startedAt: now() });
-      void sessions.set(auditId, session)
-        .then(() => sendResponse({ ok: true, auditId, state: session.state }))
-        .catch(() => sendResponse({ ok: false, error: 'Não foi possível preparar a auditoria.' }));
+      activeBySender.set(senderKey, auditId);
+      sendResponse({ ok: true, auditId, state: session.state });
+      void runInBackground({ auditId, requestedUrl, session, senderKey });
     } catch (error) {
       sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Não foi possível preparar a auditoria.' });
     }
@@ -70,6 +87,60 @@ export function registerServiceWorker(chromeApi, options = {}) {
   });
 
   return sessions;
+
+  async function runInBackground({ auditId, requestedUrl, session, senderKey }) {
+    try {
+      await sessions.set(auditId, session);
+      await auditStore.setLatest({ auditId, status: 'running', percent: 0, message: 'Preparando a auditoria.' });
+      const adapter = chromeAdapterFactory(chromeApi);
+      const pipelineAdapter = {
+        ...adapter,
+        async emitProgress(progress) {
+          await Promise.allSettled([
+            auditStore.setLatest({ auditId, status: 'running', percent: progress.percent, message: progress.message }),
+            sendRuntimeMessage(chromeApi, progress),
+          ]);
+        },
+      };
+      const model = await runner({ url: requestedUrl, chromeAdapter: pipelineAdapter, now, idFactory: () => auditId, closeAuditTab: true });
+      await auditStore.setAudit(auditId, model);
+      const status = model?.session?.status || 'failed';
+      const reviewUrl = model?.report?.reviewUrl || null;
+      await auditStore.setLatest({ auditId, status, percent: ['complete', 'partial'].includes(status) ? 100 : model?.progress?.at?.(-1)?.percent || 0, message: status === 'partial' ? 'Auditoria concluída com limitações.' : status === 'complete' ? 'Auditoria concluída.' : 'A auditoria não pôde ser concluída.', reviewUrl });
+      if (['complete', 'partial'].includes(status)) {
+        await sendRuntimeMessage(chromeApi, { type: 'AUDIT_COMPLETE', auditId, sessionId: auditId, status, reviewUrl });
+      } else {
+        await sendRuntimeMessage(chromeApi, { type: 'AUDIT_FAILED', auditId, sessionId: auditId, status, error: status === 'cancelled' ? 'A auditoria foi cancelada.' : 'A auditoria não pôde ser concluída.' });
+      }
+    } catch {
+      await Promise.allSettled([
+        auditStore.setLatest({ auditId, status: 'failed', percent: 0, message: 'A auditoria não pôde ser iniciada.' }),
+        sendRuntimeMessage(chromeApi, { type: 'AUDIT_FAILED', auditId, sessionId: auditId, status: 'failed', error: 'A auditoria não pôde ser iniciada.' }),
+      ]);
+      logger.error('A auditoria em segundo plano falhou de forma controlada.');
+    } finally {
+      if (activeBySender.get(senderKey) === auditId) activeBySender.delete(senderKey);
+    }
+  }
+}
+
+function sendRuntimeMessage(chromeApi, message) {
+  if (typeof chromeApi.runtime?.sendMessage !== 'function') return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
+    try {
+      const result = chromeApi.runtime.sendMessage(message, value => {
+        const error = chromeApi.runtime.lastError;
+        if (error) finish(reject, new Error(error.message || 'Falha ao enviar progresso.'));
+        else finish(resolve, value);
+      });
+      if (result && typeof result.then === 'function') result.then(value => finish(resolve, value), error => finish(reject, error));
+      else if (chromeApi.runtime.sendMessage.length < 2) finish(resolve);
+    } catch (error) {
+      finish(reject, error);
+    }
+  });
 }
 
 function invokeStorage(chromeApi, storage, method, argument) {

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Revisão assistida — Audita MT</title>
+    <link rel="stylesheet" href="review.css">
+    <script type="module" src="review.js"></script>
+  </head>
+  <body>
+    <main>
+      <h1>Revisão assistida</h1>
+      <p id="review-status" role="status" aria-live="polite">Carregando a auditoria.</p>
+      <div class="review-controls">
+        <label for="review-evaluator">Nome da pessoa avaliadora</label>
+        <input id="review-evaluator" autocomplete="name" required>
+        <a href="../panel/index.html">Voltar ao painel</a>
+      </div>
+      <section id="review-list" aria-label="Ocorrências para revisão"></section>
+    </main>
+  </body>
+</html>
