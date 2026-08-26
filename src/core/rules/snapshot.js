@@ -10,6 +10,15 @@ export function normalizedComparableText(value) {
   return normalizeText(value).normalize('NFKC').toLocaleLowerCase('pt-BR');
 }
 
+export function normalizedLabelText(value) {
+  return normalizeText(value)
+    .normalize('NFKC')
+    .toLocaleLowerCase('pt-BR')
+    .replace(/[\p{P}\p{S}]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
 export function attributesOf(node) {
   return node && typeof node.attributes === 'object' && node.attributes !== null &&
     !Array.isArray(node.attributes)
@@ -157,6 +166,26 @@ export function documentTarget(document, message, data = {}) {
 
 export function result(outcome, summary, targets = [], limitations = []) {
   return { outcome, targets, summary, limitations };
+}
+
+export function orderTargets(targets, nodes) {
+  const positions = new Map();
+  nodes.forEach((node, index) => {
+    const id = nodeIdOf(node);
+    if (id !== null && !positions.has(String(id))) positions.set(String(id), index);
+  });
+
+  return targets.map((value, index) => ({ value, index })).sort((left, right) => {
+    const leftPosition = positions.get(String(left.value?.nodeId));
+    const rightPosition = positions.get(String(right.value?.nodeId));
+    const leftKnown = leftPosition !== undefined;
+    const rightKnown = rightPosition !== undefined;
+    if (leftKnown && rightKnown) return leftPosition - rightPosition || left.index - right.index;
+    if (leftKnown !== rightKnown) return leftKnown ? -1 : 1;
+    const leftKey = `${String(left.value?.nodeId ?? '')}\u0000${String(left.value?.selectorHint ?? '')}\u0000${String(left.value?.message ?? '')}`;
+    const rightKey = `${String(right.value?.nodeId ?? '')}\u0000${String(right.value?.selectorHint ?? '')}\u0000${String(right.value?.message ?? '')}`;
+    return leftKey.localeCompare(rightKey) || left.index - right.index;
+  }).map(entry => entry.value);
 }
 
 export function missingSnapshotResult() {

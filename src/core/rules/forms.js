@@ -10,6 +10,7 @@ import {
   missingSnapshotResult,
   nodeIndex,
   normalizeText,
+  orderTargets,
   result,
   roleOf,
   snapshotParts,
@@ -19,7 +20,9 @@ import {
 
 function formResult(snapshot, evaluate) {
   const parts = snapshotParts(snapshot);
-  return parts ? evaluate(parts) : missingSnapshotResult();
+  if (!parts) return missingSnapshotResult();
+  const value = evaluate(parts);
+  return { ...value, targets: orderTargets(value.targets, parts.nodes) };
 }
 
 function fieldsOf(nodes) {
@@ -51,6 +54,16 @@ function formFieldLabel(snapshot) {
 function nestedLabel(field, index) {
   const chain = ancestorNodes(field, index);
   return chain.complete && chain.ancestors.some(node => tagOf(node) === 'label');
+}
+
+function labelAssociatedWithField(label, field, ids, index) {
+  if (tagOf(label) !== 'label') return false;
+  if (hasAttribute(label, 'for')) {
+    const matches = ids.get(normalizeText(attribute(label, 'for'))) ?? [];
+    return matches.length === 1 && matches[0] === field;
+  }
+  const chain = ancestorNodes(field, index);
+  return chain.complete && chain.ancestors.includes(label);
 }
 
 function formLabelAssociation(snapshot) {
@@ -87,12 +100,45 @@ function formLabelAssociation(snapshot) {
     for (const field of fields) {
       const id = normalizeText(attribute(field, 'id'));
       const referencedLabels = id ? labelsByTarget.get(id) ?? [] : [];
-      const explicitLabelIds = Array.isArray(field?.labels) ? field.labels : [];
+      let explicitLabelsValid = false;
+      let explicitFailure = null;
+      if (hasOwn(field, 'labels')) {
+        if (!Array.isArray(field.labels)) {
+          explicitFailure = 'invalid-label-reference';
+        } else if (field.labels.length > 0) {
+          explicitLabelsValid = true;
+          for (const labelId of field.labels) {
+            if (typeof labelId !== 'string' && !Number.isSafeInteger(labelId)) {
+              explicitFailure = 'invalid-label-reference';
+              break;
+            }
+            const label = index.get(String(labelId));
+            if (!label) {
+              explicitFailure = 'missing-label-reference';
+              break;
+            }
+            if (tagOf(label) !== 'label') {
+              explicitFailure = 'invalid-label-reference';
+              break;
+            }
+            if (!labelAssociatedWithField(label, field, ids, index)) {
+              explicitFailure = 'label-associated-to-other-field';
+              break;
+            }
+          }
+        }
+      }
+      if (explicitFailure) {
+        failures.push(target(field, 'Corrija a referência de rótulo normalizada deste campo.', {
+          reason: explicitFailure, attribute: 'labels'
+        }));
+        continue;
+      }
       if (id && (ids.get(id)?.length ?? 0) > 1 && referencedLabels.length > 0) {
         failures.push(target(field, 'Use um ID único para associar o rótulo a este campo.', {
           reason: 'ambiguous-idref', attribute: 'for'
         }));
-      } else if (referencedLabels.length > 0 || explicitLabelIds.length > 0 || nestedLabel(field, index)) {
+      } else if (referencedLabels.length > 0 || explicitLabelsValid || nestedLabel(field, index)) {
         continue;
       } else {
         failures.push(target(field, 'Associe programaticamente um rótulo a este campo.', {
@@ -159,9 +205,10 @@ function requiredDeclaration(node) {
 
 function requiredFieldIdentification(snapshot) {
   return formResult(snapshot, ({ nodes }) => {
-    const declared = fieldsOf(nodes).filter(node =>
-      hasAttribute(node, 'required') || hasAttribute(node, 'aria-required') || node?.required === true
-    );
+    const declared = fieldsOf(nodes).filter(node => {
+      const declaration = requiredDeclaration(node);
+      return !declaration.valid || declaration.required || node?.required === true;
+    });
     if (declared.length === 0) return result('inapplicable', 'Não há campos obrigatórios observáveis.');
     const failures = [];
     let incomplete = false;
@@ -212,8 +259,14 @@ function validAutocomplete(value, purpose) {
   let index = 0;
   if (tokens[index]?.startsWith('section-') && tokens[index].length > 8) index += 1;
   if (['billing', 'shipping'].includes(tokens[index])) index += 1;
-  if (['fax', 'home', 'mobile', 'pager', 'work'].includes(tokens[index])) index += 1;
-  return tokens.length === index + 1 && AUTOCOMPLETE_PURPOSES.has(tokens[index]) && tokens[index] === purpose;
+  const hasContactType = ['fax', 'home', 'mobile', 'pager', 'work'].includes(tokens[index]);
+  if (hasContactType) index += 1;
+  const fieldToken = tokens[index];
+  index += 1;
+  if (tokens[index] === 'webauthn') index += 1;
+  const contactPurpose = fieldToken === 'email' || fieldToken === 'impp' || fieldToken?.startsWith('tel');
+  return tokens.length === index && AUTOCOMPLETE_PURPOSES.has(fieldToken) &&
+    fieldToken === purpose && (!hasContactType || contactPurpose);
 }
 
 function inputPurpose(snapshot) {
@@ -265,7 +318,10 @@ function statusMessageSemantics(snapshot) {
         incomplete = true;
         continue;
       }
-      if (!['alert', 'status'].includes(roleOf(node))) {
+      const live = normalizeText(attribute(node, 'aria-live')).toLowerCase();
+      const hasExplicitLive = ['assertive', 'polite'].includes(live);
+      const hasImplicitLive = ['alert', 'log', 'status'].includes(roleOf(node));
+      if (live === 'off' || (!hasExplicitLive && !hasImplicitLive)) {
         failures.push(target(node, 'Exponha esta mensagem com uma função de status adequada.', {
           reason: 'missing-status-role'
         }));

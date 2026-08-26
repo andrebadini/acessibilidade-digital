@@ -113,6 +113,51 @@ test('form label association accepts explicit unique for and fails missing or am
   assert.equal((await evaluate('form-label-association', snapshot())).outcome, 'inapplicable');
 });
 
+test('form label association validates every normalized labels reference and its field relationship', async () => {
+  const valid = await evaluate('form-label-association', snapshot([
+    record('label', 'label', { attributes: { for: 'email' } }),
+    record('field', 'input', {
+      attributes: { id: 'email', type: 'email' },
+      labels: ['label'],
+      accessibleName: 'E-mail'
+    })
+  ]));
+  assert.equal(valid.outcome, 'passed');
+
+  const failed = await evaluate('form-label-association', snapshot([
+    record('other-label', 'label', { attributes: { for: 'other' } }),
+    record('other', 'input', { attributes: { id: 'other', type: 'text' }, accessibleName: 'Outro' }),
+    record('not-label', 'div'),
+    record('missing-ref', 'input', {
+      attributes: { id: 'one', type: 'text' }, labels: ['absent'], accessibleName: 'Um'
+    }),
+    record('wrong-type', 'input', {
+      attributes: { id: 'two', type: 'text' }, labels: ['not-label'], accessibleName: 'Dois'
+    }),
+    record('wrong-field', 'input', {
+      attributes: { id: 'three', type: 'text' }, labels: ['other-label'], accessibleName: 'Três'
+    })
+  ]));
+  assert.equal(failed.outcome, 'failed');
+  assert.deepEqual(failed.targets.map(target => target.nodeId), ['missing-ref', 'wrong-type', 'wrong-field']);
+  assert.deepEqual(failed.targets.map(target => target.data.reason), [
+    'missing-label-reference', 'invalid-label-reference', 'label-associated-to-other-field'
+  ]);
+});
+
+test('form evidence is globally ordered by snapshot nodes across labels and fields', async () => {
+  const failed = await evaluate('form-label-association', snapshot([
+    record('field-first', 'input', { attributes: { type: 'text' }, accessibleName: 'Primeiro' }),
+    record('orphan-label', 'label', { attributes: { for: 'absent' } }),
+    record('field-last', 'textarea', { accessibleName: 'Último' })
+  ]));
+
+  assert.equal(failed.outcome, 'failed');
+  assert.deepEqual(failed.targets.map(target => target.nodeId), [
+    'field-first', 'orphan-label', 'field-last'
+  ]);
+});
+
 test('related radio and checkbox fields require an observable named group', async () => {
   const failed = await evaluate('related-fields-grouping', snapshot([
     record('r1', 'input', { attributes: { type: 'radio', name: 'delivery' }, role: 'radio' }),
@@ -131,6 +176,14 @@ test('related radio and checkbox fields require an observable named group', asyn
   assert.equal((await evaluate('related-fields-grouping', snapshot([
     record('single', 'input', { attributes: { type: 'checkbox', name: 'terms' }, role: 'checkbox' })
   ]))).outcome, 'inapplicable');
+
+  const interleaved = await evaluate('related-fields-grouping', snapshot([
+    record('a1', 'input', { attributes: { type: 'radio', name: 'a' }, role: 'radio' }),
+    record('b1', 'input', { attributes: { type: 'radio', name: 'b' }, role: 'radio' }),
+    record('a2', 'input', { attributes: { type: 'radio', name: 'a' }, role: 'radio' }),
+    record('b2', 'input', { attributes: { type: 'radio', name: 'b' }, role: 'radio' })
+  ]));
+  assert.deepEqual(interleaved.targets.map(target => target.nodeId), ['a1', 'b1', 'a2', 'b2']);
 });
 
 test('required field rule checks both programmatic state and observable identification', async () => {
@@ -168,6 +221,17 @@ test('required field rule checks both programmatic state and observable identifi
   });
   delete unknownState.required;
   assert.equal((await evaluate('required-field-identification', snapshot([unknownState]))).outcome, 'cantTell');
+
+  assert.equal((await evaluate('required-field-identification', snapshot([
+    record('optional', 'input', {
+      attributes: { type: 'text', 'aria-required': 'false' }, required: false
+    })
+  ]))).outcome, 'inapplicable');
+  assert.equal((await evaluate('required-field-identification', snapshot([
+    record('invalid-token', 'input', {
+      attributes: { type: 'text', 'aria-required': 'sometimes' }, required: false
+    })
+  ]))).outcome, 'failed');
 });
 
 test('input purpose validates autocomplete tokens for every field with an observed personal-data purpose', async () => {
@@ -186,6 +250,27 @@ test('input purpose validates autocomplete tokens for every field with an observ
   assert.equal((await evaluate('input-purpose', snapshot([
     record('unknown', 'input', { attributes: { type: 'email' } })
   ]))).outcome, 'cantTell');
+
+  for (const [autocomplete, purpose] of [
+    ['username webauthn', 'username'],
+    ['section-login username webauthn', 'username'],
+    ['billing home tel webauthn', 'tel'],
+    ['work email', 'email']
+  ]) {
+    assert.equal((await evaluate('input-purpose', snapshot([
+      record('valid', 'input', { attributes: { autocomplete }, inputPurpose: purpose })
+    ]))).outcome, 'passed', autocomplete);
+  }
+  for (const [autocomplete, purpose] of [
+    ['webauthn username', 'username'],
+    ['home name', 'name'],
+    ['username name', 'username'],
+    ['section-login webauthn', 'username']
+  ]) {
+    assert.equal((await evaluate('input-purpose', snapshot([
+      record('invalid', 'input', { attributes: { autocomplete }, inputPurpose: purpose })
+    ]))).outcome, 'failed', autocomplete);
+  }
 });
 
 test('status messages pass only when observed and exposed with status semantics', async () => {
@@ -205,4 +290,23 @@ test('status messages pass only when observed and exposed with status semantics'
   const incomplete = snapshot();
   delete incomplete.document.statusMessageNodeIds;
   assert.equal((await evaluate('status-message-semantics', incomplete)).outcome, 'cantTell');
+
+  for (const node of [
+    record('polite', 'div', { attributes: { 'aria-live': 'polite' } }),
+    record('assertive', 'div', { attributes: { 'aria-live': 'assertive' } }),
+    record('log', 'div', { role: 'log' })
+  ]) {
+    assert.equal((await evaluate('status-message-semantics', snapshot([
+      node
+    ], { statusMessageNodeIds: [node.nodeId] }))).outcome, 'passed');
+  }
+  assert.equal((await evaluate('status-message-semantics', snapshot([
+    record('off', 'div', { role: 'status', attributes: { 'aria-live': 'off' } })
+  ], { statusMessageNodeIds: ['off'] }))).outcome, 'failed');
+
+  const ordered = await evaluate('status-message-semantics', snapshot([
+    record('first', 'div'),
+    record('second', 'div')
+  ], { statusMessageNodeIds: ['second', 'first'] }));
+  assert.deepEqual(ordered.targets.map(target => target.nodeId), ['first', 'second']);
 });

@@ -259,6 +259,10 @@ test('list semantics detects list items outside a list and passes an observable 
   assert.equal((await evaluate('list-semantics', snapshot([
     record('item', 'li', { role: 'listitem', parentId: 'missing' })
   ]))).outcome, 'cantTell');
+  assert.equal((await evaluate('list-semantics', snapshot([
+    record('list', 'ul', { role: 'list', children: ['item'] }),
+    record('item', 'li', { role: 'presentation', parentId: 'list' })
+  ]))).outcome, 'failed');
 });
 
 test('table semantics and header association report invalid, missing and ambiguous structures', async () => {
@@ -294,5 +298,51 @@ test('table semantics and header association report invalid, missing and ambiguo
     record('table', 'table', { role: 'table' }),
     record('row', 'tr', { role: 'row', parentId: 'table' }),
     record('cell', 'td', { role: 'cell', parentId: 'row' })
+  ]))).outcome, 'cantTell');
+
+  for (const suppressedRole of ['none', 'presentation']) {
+    assert.equal((await evaluate('table-semantics', snapshot([
+      record('table', 'table', { role: 'table' }),
+      record('row', 'tr', { role: 'row', parentId: 'table' }),
+      record('cell', 'td', { role: suppressedRole, parentId: 'row' })
+    ]))).outcome, 'failed');
+  }
+});
+
+test('table header references must resolve inside the same determinable table', async () => {
+  const crossTable = await evaluate('table-headers', snapshot([
+    record('table-1', 'table', { role: 'table' }),
+    record('head', 'th', {
+      role: 'columnheader', tableId: 'table-1', attributes: { id: 'shared' }
+    }),
+    record('table-2', 'table', { role: 'table' }),
+    record('cell', 'td', {
+      role: 'cell', tableId: 'table-2', attributes: { headers: 'shared' }
+    })
+  ]));
+  assert.equal(crossTable.outcome, 'failed');
+  assert.equal(crossTable.targets[0].data.reason, 'cross-table-header-reference');
+
+  const sameTable = await evaluate('table-headers', snapshot([
+    record('table', 'table', { role: 'table' }),
+    record('head', 'th', {
+      role: 'columnheader', tableId: 'table', attributes: { id: 'head' }
+    }),
+    record('cell', 'td', {
+      role: 'cell', tableId: 'table', attributes: { headers: 'head' }
+    })
+  ]));
+  assert.equal(sameTable.outcome, 'passed');
+
+  const unknownAncestryNodes = [
+    record('head', 'th', { role: 'columnheader', attributes: { id: 'head' } }),
+    record('cell', 'td', { role: 'cell', attributes: { headers: 'head' } })
+  ];
+  for (const node of unknownAncestryNodes) delete node.parentId;
+  assert.equal((await evaluate('table-headers', snapshot(unknownAncestryNodes))).outcome, 'cantTell');
+
+  assert.equal((await evaluate('table-headers', snapshot([
+    record('head', 'th', { role: 'columnheader', attributes: { id: 'head' } }),
+    record('cell', 'td', { role: 'cell', attributes: { headers: 'head' } })
   ]))).outcome, 'cantTell');
 });

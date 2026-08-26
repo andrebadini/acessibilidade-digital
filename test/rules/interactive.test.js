@@ -89,6 +89,9 @@ test('link and button semantics fail every observed interaction lacking its role
   ]))).outcome, 'passed');
   assert.equal((await evaluate('link-semantics', snapshot())).outcome, 'inapplicable');
   assert.equal((await evaluate('button-semantics', snapshot())).outcome, 'inapplicable');
+  assert.equal((await evaluate('button-semantics', snapshot([
+    record('text-input', 'input')
+  ]))).outcome, 'inapplicable');
   assert.equal((await evaluate('link-semantics', {})).outcome, 'cantTell');
 });
 
@@ -171,10 +174,28 @@ test('visible label in name uses conservative Unicode, case and whitespace norma
   assert.equal((await evaluate('visible-label-in-name', snapshot([
     record('ok', 'button', { role: 'button', visibleText: 'Cafe\u0301', accessibleName: 'CAFÉ especial' })
   ]))).outcome, 'passed');
+  assert.equal((await evaluate('visible-label-in-name', snapshot([
+    record('punctuation', 'button', { role: 'button', visibleText: 'Salvar!', accessibleName: 'Salvar' }),
+    record('accent', 'button', { role: 'button', visibleText: 'Ação…', accessibleName: 'Executar AÇÃO' })
+  ]))).outcome, 'passed');
+  assert.equal((await evaluate('visible-label-in-name', snapshot([
+    record('symbols-only', 'button', { role: 'button', visibleText: '!!!', accessibleName: 'Abrir' })
+  ]))).outcome, 'cantTell');
   assert.equal((await evaluate('visible-label-in-name', snapshot())).outcome, 'inapplicable');
   const unknown = record('unknown', 'button', { role: 'button', visibleText: 'Enviar' });
   delete unknown.accessibleName;
   assert.equal((await evaluate('visible-label-in-name', snapshot([unknown]))).outcome, 'cantTell');
+});
+
+test('accessible component name preserves all 257 failed targets in document order', async () => {
+  const nodes = Array.from({ length: 257 }, (_, index) => record(`control-${index + 1}`, 'button', {
+    role: 'button', accessibleName: ''
+  }));
+  const failed = await evaluate('accessible-component-name', snapshot(nodes));
+
+  assert.equal(failed.outcome, 'failed');
+  assert.equal(failed.targets.length, 257);
+  assert.deepEqual(failed.targets.map(target => target.nodeId), nodes.map(node => node.nodeId));
 });
 
 test('native element review and custom semantics distinguish observable native and custom controls', async () => {

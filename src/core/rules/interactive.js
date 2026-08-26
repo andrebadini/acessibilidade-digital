@@ -10,7 +10,8 @@ import {
   isNativeControl,
   missingSnapshotResult,
   normalizeText,
-  normalizedComparableText,
+  normalizedLabelText,
+  orderTargets,
   result,
   roleOf,
   snapshotParts,
@@ -20,7 +21,9 @@ import {
 
 function interactiveResult(snapshot, evaluate) {
   const parts = snapshotParts(snapshot);
-  return parts ? evaluate(parts) : missingSnapshotResult();
+  if (!parts) return missingSnapshotResult();
+  const value = evaluate(parts);
+  return { ...value, targets: orderTargets(value.targets, parts.nodes) };
 }
 
 function isLink(node) {
@@ -32,7 +35,7 @@ function isLink(node) {
 
 function isButton(node) {
   const tag = tagOf(node);
-  const type = normalizeText(attribute(node, 'type') ?? 'submit').toLowerCase();
+  const type = normalizeText(attribute(node, 'type') ?? 'text').toLowerCase();
   return !isHidden(node) && (
     tag === 'button' ||
     (tag === 'input' && ['button', 'image', 'reset', 'submit'].includes(type)) ||
@@ -48,7 +51,7 @@ function hasLinkSemantics(node) {
 
 function hasButtonSemantics(node) {
   const tag = tagOf(node);
-  const type = normalizeText(attribute(node, 'type') ?? 'submit').toLowerCase();
+  const type = normalizeText(attribute(node, 'type') ?? 'text').toLowerCase();
   const native = tag === 'button' ||
     (tag === 'input' && ['button', 'image', 'reset', 'submit'].includes(type));
   const role = roleOf(node);
@@ -144,7 +147,7 @@ function accessibleComponentName(snapshot) {
 
 function visibleLabelInName(snapshot) {
   return interactiveResult(snapshot, ({ nodes }) => {
-    const candidates = nodes.filter(node => isComponent(node) && normalizedComparableText(node?.visibleText));
+    const candidates = nodes.filter(node => isComponent(node) && normalizeText(node?.visibleText));
     if (candidates.length === 0) {
       return result('inapplicable', 'Não há componentes com rótulo visível aplicável.');
     }
@@ -155,9 +158,11 @@ function visibleLabelInName(snapshot) {
         incomplete = true;
         continue;
       }
-      const visible = normalizedComparableText(node.visibleText);
-      const accessible = normalizedComparableText(node.accessibleName);
-      if (!accessible.includes(visible)) {
+      const visible = normalizedLabelText(node.visibleText);
+      const accessible = normalizedLabelText(node.accessibleName);
+      if (!visible) {
+        incomplete = true;
+      } else if (!accessible.includes(visible)) {
         failures.push(target(node, 'Inclua o rótulo visível no nome acessível do componente.', {
           reason: 'visible-label-not-in-name'
         }));

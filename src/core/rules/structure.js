@@ -13,6 +13,7 @@ import {
   nodeIndex,
   normalizeText,
   normalizedComparableText,
+  orderTargets,
   result,
   roleOf,
   snapshotParts,
@@ -22,7 +23,9 @@ import {
 
 function structuralResult(snapshot, evaluate) {
   const parts = snapshotParts(snapshot);
-  return parts ? evaluate(parts) : missingSnapshotResult();
+  if (!parts) return missingSnapshotResult();
+  const value = evaluate(parts);
+  return { ...value, targets: orderTargets(value.targets, parts.nodes) };
 }
 
 const GRANDFATHERED_LANGUAGE_TAGS = new Set([
@@ -354,6 +357,12 @@ function listSemantics(snapshot) {
     for (const node of candidates) {
       const tag = tagOf(node);
       const role = roleOf(node);
+      if ((tag === 'li' || role === 'listitem') && ['none', 'presentation'].includes(role)) {
+        failures.push(target(node, 'Preserve a semântica deste item de lista.', {
+          reason: 'suppressed-listitem-semantics'
+        }));
+        continue;
+      }
       if (['ol', 'ul'].includes(tag) && role && role !== 'list') {
         failures.push(target(node, 'Preserve a semântica de lista deste elemento.', { reason: 'invalid-list-role' }));
       }
@@ -392,6 +401,12 @@ function tableSemantics(snapshot) {
     const failures = [];
     let incomplete = false;
     for (const node of candidates) {
+      if (isCell(node) && ['none', 'presentation'].includes(roleOf(node))) {
+        failures.push(target(node, 'Preserve a semântica desta célula de tabela.', {
+          reason: 'suppressed-table-cell-semantics'
+        }));
+        continue;
+      }
       if (tagOf(node) === 'table' && roleOf(node) && !['grid', 'table'].includes(roleOf(node))) {
         failures.push(target(node, 'Preserve a semântica de tabela deste elemento.', {
           reason: 'invalid-table-role'
@@ -415,12 +430,26 @@ function tableSemantics(snapshot) {
   });
 }
 
+function enclosingTable(node, index) {
+  if (hasOwn(node, 'tableId')) {
+    const table = index.get(String(node.tableId));
+    return table && isTable(table)
+      ? { table, complete: true }
+      : { table: null, complete: false };
+  }
+  if (!hasOwn(node, 'parentId')) return { table: null, complete: false };
+  const chain = ancestorNodes(node, index);
+  if (!chain.complete) return { table: null, complete: false };
+  return { table: chain.ancestors.find(isTable) ?? null, complete: true };
+}
+
 function tableHeaders(snapshot) {
   return structuralResult(snapshot, ({ nodes }) => {
     const cells = nodes.filter(node => !isHidden(node) &&
       (tagOf(node) === 'td' || roleOf(node) === 'cell'));
     if (cells.length === 0) return result('inapplicable', 'Não há células de dados para associar a cabeçalhos.');
     const ids = domIdIndex(nodes);
+    const index = nodeIndex(nodes);
     const failures = [];
     let incomplete = false;
     for (const cell of cells) {
@@ -442,6 +471,19 @@ function tableHeaders(snapshot) {
       })) {
         failures.push(target(cell, 'Associe esta célula a cabeçalhos semânticos válidos.', {
           reason: 'invalid-header-reference', attribute: 'headers'
+        }));
+        continue;
+      }
+
+      const cellTable = enclosingTable(cell, index);
+      const headerTables = references.map(id => enclosingTable(ids.get(id)[0], index));
+      if (!cellTable.complete || headerTables.some(value => !value.complete)) {
+        incomplete = true;
+      } else if (!cellTable.table || headerTables.some(value => !value.table)) {
+        incomplete = true;
+      } else if (headerTables.some(value => value.table !== cellTable.table)) {
+        failures.push(target(cell, 'Referencie apenas cabeçalhos da mesma tabela.', {
+          reason: 'cross-table-header-reference', attribute: 'headers'
         }));
       }
     }
