@@ -95,17 +95,24 @@ function imageAlternative(snapshot, ruleId) {
   });
 }
 
-function audioProducingNodes(nodes) {
-  return nodes.filter(node => !isHidden(node) && ['audio', 'video'].includes(tagOf(node)) && node?.hasAudio !== false);
-}
-
 function audioControl(snapshot) {
   return mediaResult(snapshot, ({ nodes }) => {
-    const candidates = audioProducingNodes(nodes).filter(node => node?.autoplay === true);
+    const candidates = nodes.filter(node =>
+      !isHidden(node) && ['audio', 'video'].includes(tagOf(node)) && node?.autoplay === true
+    );
     if (candidates.length === 0) return result('inapplicable', 'Não há áudio iniciado automaticamente.');
     const failures = [];
     let incomplete = false;
+    let applicable = false;
     for (const node of candidates) {
+      if (tagOf(node) === 'video' && node.hasAudio !== true) {
+        if (
+          node.hasAudio !== false && node.muted !== true &&
+          (!Number.isFinite(node.durationSeconds) || node.durationSeconds > 3)
+        ) incomplete = true;
+        continue;
+      }
+      applicable = true;
       if (!Number.isFinite(node.durationSeconds)) {
         incomplete = true;
         continue;
@@ -136,6 +143,7 @@ function audioControl(snapshot) {
     if (incomplete) return result('cantTell', 'A duração ou os controles do áudio automático não foram coletados.', [], [
       'Observe a duração efetiva e a disponibilidade de pausa, parada ou volume independente.'
     ]);
+    if (!applicable) return result('inapplicable', 'Não há áudio iniciado automaticamente de forma conclusiva.');
     return result('passed', 'Todo áudio automático observado dura até três segundos ou oferece controle adequado.');
   });
 }

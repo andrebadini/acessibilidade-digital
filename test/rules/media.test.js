@@ -67,6 +67,19 @@ test('audio autoplay over three seconds requires a stop, pause or independent vo
   assert.equal((await evaluate('audio-control', snapshot())).outcome, 'inapplicable');
 });
 
+test('audio control preserves video hasAudio tri-state while native audio is inherently audible', async () => {
+  const noControl = { canPause: false, canStop: false, independentVolume: false };
+  const autoplay = (tagName, overrides = {}) => record(tagName, tagName, {
+    autoplay: true, durationSeconds: 4, audioControl: noControl, ...overrides
+  });
+
+  assert.equal((await evaluate('audio-control', snapshot([autoplay('video')]))).outcome, 'cantTell');
+  assert.equal((await evaluate('audio-control', snapshot([autoplay('video', { hasAudio: 'yes' })]))).outcome, 'cantTell');
+  assert.equal((await evaluate('audio-control', snapshot([autoplay('video', { hasAudio: false })]))).outcome, 'inapplicable');
+  assert.equal((await evaluate('audio-control', snapshot([autoplay('video', { hasAudio: true })]))).outcome, 'failed');
+  assert.equal((await evaluate('audio-control', snapshot([autoplay('audio')]))).outcome, 'failed');
+});
+
 test('prerecorded video with audio fails without captions and reviews track equivalence when present', async () => {
   const video = overrides => record('video', 'video', { mediaTiming: 'prerecorded', hasAudio: true, essentiality: 'non-essential', ...overrides });
   assert.equal((await evaluate('video-captions', snapshot([video({ captionTracks: [] })]))).outcome, 'failed');
