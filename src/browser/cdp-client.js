@@ -5,54 +5,96 @@ export function createCdpClient({ attach, detach, send }) {
     throw new TypeError('O transporte CDP precisa fornecer attach, send e detach.');
   }
 
-  let tabId;
-  let connected = false;
+  let queue = Promise.resolve();
+  let connection = null;
+  let detachFailure = null;
+
+  const enqueue = (operation) => {
+    const result = queue.then(operation, operation);
+    queue = result.catch(() => {});
+    return result;
+  };
+  const ensureUsable = () => {
+    if (detachFailure) throw new Error('O CDP exige limpeza manual após falha ao desconectar.', { cause: detachFailure });
+  };
+  const release = async (record) => {
+    if (!record || record.released) return;
+    record.released = true;
+    if (connection === record) connection = null;
+    try {
+      await detach(record.target);
+    } catch (error) {
+      detachFailure = error;
+      throw error;
+    }
+  };
 
   return {
-    async connect(nextTabId) {
-      if (!Number.isInteger(nextTabId)) throw new TypeError('O tabId do CDP é inválido.');
-      if (connected) throw new Error('O CDP já está conectado.');
-      await attach({ tabId: nextTabId }, PROTOCOL_VERSION);
-      tabId = nextTabId;
-      connected = true;
+    connect(nextTabId) {
+      return enqueue(async () => {
+        if (!Number.isInteger(nextTabId)) throw new TypeError('O tabId do CDP é inválido.');
+        ensureUsable();
+        if (connection?.target.tabId === nextTabId) return;
+        if (connection) await release(connection);
+        const record = { target: { tabId: nextTabId }, released: false };
+        await attach(record.target, PROTOCOL_VERSION);
+        connection = record;
+      });
     },
-
-    async command(method, params) {
-      if (!connected) throw new Error('O CDP não está conectado.');
-      if (typeof method !== 'string' || !method) throw new TypeError('O método CDP é inválido.');
-      try {
-        return await send({ tabId }, method, params);
-      } catch (error) {
-        await disconnectAfterCommandFailure(detach, tabId, error);
-        tabId = undefined;
-        connected = false;
-        throw error;
-      }
+    command(method, params) {
+      return enqueue(async () => {
+        if (!connection) throw new Error('O CDP não está conectado.');
+        ensureUsable();
+        if (typeof method !== 'string' || !method) throw new TypeError('O método CDP é inválido.');
+        const record = connection;
+        try {
+          return await send(record.target, method, params);
+        } catch (error) {
+          try {
+            await release(record);
+          } catch {
+            // The command error remains actionable; reuse is blocked by detachFailure.
+          }
+          throw error;
+        }
+      });
     },
-
-    async disconnect() {
-      if (!connected) return;
-      const target = tabId;
-      tabId = undefined;
-      connected = false;
-      await detach({ tabId: target });
+    disconnect() {
+      return enqueue(async () => {
+        if (detachFailure) return;
+        await release(connection);
+      });
     },
   };
-}
-
-async function disconnectAfterCommandFailure(detach, tabId, commandError) {
-  try {
-    await detach({ tabId });
-  } catch {
-    // The command failure is the useful error; the local client is disconnected either way.
-  }
 }
 
 export function createChromeDebuggerTransport(chromeApi) {
   if (!chromeApi?.debugger) throw new TypeError('chrome.debugger não está disponível.');
   return {
-    attach: (target, version) => chromeApi.debugger.attach(target, version),
-    send: (target, method, params) => chromeApi.debugger.sendCommand(target, method, params),
-    detach: (target) => chromeApi.debugger.detach(target),
+    attach: (target, version) => invokeChrome(chromeApi, (callback) => chromeApi.debugger.attach(target, version, callback)),
+    send: (target, method, params) => invokeChrome(chromeApi, (callback) => chromeApi.debugger.sendCommand(target, method, params, callback)),
+    detach: (target) => invokeChrome(chromeApi, (callback) => chromeApi.debugger.detach(target, callback)),
   };
+}
+
+function invokeChrome(chromeApi, invoke) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (handler, value) => {
+      if (settled) return;
+      settled = true;
+      handler(value);
+    };
+    const callback = (result) => {
+      const lastError = chromeApi.runtime?.lastError;
+      if (lastError) settle(reject, new Error(lastError.message || 'Falha no chrome.debugger.'));
+      else settle(resolve, result);
+    };
+    try {
+      const result = invoke(callback);
+      if (result && typeof result.then === 'function') result.then((value) => settle(resolve, value), (error) => settle(reject, error));
+    } catch (error) {
+      settle(reject, error);
+    }
+  });
 }

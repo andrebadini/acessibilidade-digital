@@ -73,6 +73,16 @@ test('keeps capture failure recoverable and records serializable diagnostics', (
   assert.equal(current.partial, true);
 });
 
+test('requires a non-empty JSON-safe diagnostic for a recoverable capture failure', () => {
+  let current = session();
+  for (const type of ['NAVIGATE', 'COLLECT', 'TEST', 'CAPTURE']) {
+    current = transitionSession(current, { type });
+  }
+  for (const diagnostic of [undefined, '', '   ', {}, { message: '' }, { message: 'ok', extra: () => {} }]) {
+    assert.throws(() => transitionSession(current, { type: 'CAPTURE_FAILED', diagnostic }), /Diagnóstico/);
+  }
+});
+
 test('can enter failed or cancelled terminal states from active states', () => {
   const navigating = transitionSession(session(), { type: 'NAVIGATE' });
   assert.equal(transitionSession(navigating, { type: 'FAIL', diagnostic: 'CDP indisponível' }).state, 'failed');

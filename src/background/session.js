@@ -32,6 +32,9 @@ export function transitionSession(session, event) {
   if (TERMINAL_STATES.has(session.state)) {
     throw new Error(`A sessão está em estado terminal: ${session.state}.`);
   }
+  if (event.type === 'CAPTURE_FAILED' && event.diagnostic === undefined) {
+    throw new TypeError('Diagnóstico de captura obrigatório.');
+  }
 
   if (event.type === 'FAIL' || event.type === 'CANCEL') {
     if (!ACTIVE_STATES.has(session.state)) throw new Error(`Transição inválida: ${session.state} → ${event.type}.`);
@@ -65,16 +68,28 @@ function normalizeDiagnostic(diagnostic, at) {
   const value = typeof diagnostic === 'string'
     ? { code: 'SESSION_EVENT', message: diagnostic }
     : diagnostic;
-  if (!value || typeof value !== 'object' || typeof value.message !== 'string') {
+  if (!value || typeof value !== 'object' || typeof value.message !== 'string' || !value.message.trim() || !isJsonSafe(diagnostic)) {
     throw new TypeError('Diagnóstico de sessão inválido.');
   }
   const normalized = {
     ...(typeof value.code === 'string' ? { code: value.code } : {}),
-    message: value.message,
+    message: value.message.trim(),
     ...(at ? { at } : {}),
   };
   JSON.stringify(normalized);
   return normalized;
+}
+
+function isJsonSafe(value, seen = new Set()) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value !== 'object' || seen.has(value)) return false;
+  seen.add(value);
+  const safe = Array.isArray(value)
+    ? value.every((item) => isJsonSafe(item, seen))
+    : Object.keys(value).every((key) => isJsonSafe(value[key], seen));
+  seen.delete(value);
+  return safe;
 }
 
 function freezeSession(session) {
