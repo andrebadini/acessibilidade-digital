@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Audita MT</title>
+    <link rel="stylesheet" href="panel.css">
+    <script type="module" src="panel.js"></script>
+  </head>
+  <body>
+    <main>
+      <h1>Audita MT</h1>
+      <form id="audit-form" novalidate>
+        <label for="audit-url">Endereço do site</label>
+        <input id="audit-url" name="audit-url" type="url" inputmode="url" autocomplete="url" required aria-describedby="audit-status" placeholder="https://exemplo.mt.gov.br">
+        <button type="submit">Auditar</button>
+      </form>
+      <p id="audit-status" role="status" aria-live="polite">Informe o endereço do site a auditar.</p>
+      <a id="latest-report" hidden aria-disabled="true">Último relatório</a>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Audita MT",
+  "version": "0.1.0",
+  "description": "Auditoria local de acessibilidade para fiscalização.",
+  "permissions": [
+    "activeTab",
+    "debugger",
+    "downloads",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Abrir Audita MT"
+  }
+}
