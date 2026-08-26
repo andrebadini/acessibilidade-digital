@@ -33,7 +33,9 @@ function fakeAdapter(options = {}) {
         screenshots += 1;
         const pristine = screenshots === 1;
         events.push(pristine ? 'full-page' : `thumbnail:${params.clip?.y}`);
-        if (options.fullPageFailure && pristine) throw new Error('capture unavailable');
+        if (options.fullPageFailure && pristine) {
+          throw options.fullPageFailure instanceof Error ? options.fullPageFailure : new Error('capture unavailable');
+        }
         return { data: PNG };
       }
       if (method === 'DOM.getOuterHTML') {
@@ -115,14 +117,21 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
   assert.doesNotMatch(JSON.stringify(model), /REMOVE|SECRET|user:pass|password=/i);
 });
 
-test('keeps capture failures partial and isolates per-node evidence failures', async () => {
-  const adapter = fakeAdapter({ fullPageFailure: true, snippetFailureNode: 1 });
+test('keeps a pristine capture timeout partial without retrying element screenshots', async () => {
+  const adapter = fakeAdapter({ fullPageFailure: new DOMException('capture timeout', 'TimeoutError'), snippetFailureNode: 1 });
   const model = await runAudit({ url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'audit-partial' });
   assert.equal(model.session.status, 'partial');
   assert.ok(model.session.diagnostics.some(item => item.code === 'FULL_PAGE_CAPTURE_FAILED'));
   assert.ok(model.session.diagnostics.some(item => item.code === 'SNIPPET_CAPTURE_FAILED'));
+  assert.ok(model.session.diagnostics.some(item => item.code === 'ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE'));
   assert.ok(adapter.events.includes('collect'));
-  assert.ok(model.evidence.artifacts.some(item => item.nodeId === 'n-2'));
+  assert.equal(adapter.counts.screenshots, 1);
+  assert.equal(adapter.events.some(event => event.startsWith('thumbnail:')), false);
+  const element = model.evidence.artifacts.find(item => item.nodeId === 'n-2');
+  assert.ok(element);
+  assert.ok(element.selector?.css);
+  assert.match(element.snippet, /Node 2/);
+  assert.equal(Object.hasOwn(element, 'dataUrl'), false);
   assert.equal(adapter.counts.disconnects, 1);
   assert.equal(adapter.counts.removals, 1);
 });

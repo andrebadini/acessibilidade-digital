@@ -75,6 +75,37 @@ test('keeps the CDP connection usable after one command fails until explicit dis
   assert.equal(fake.calls.filter(([method]) => method === 'detach').length, 1);
 });
 
+test('times out a pending command, releases the queue, and disconnects explicitly once', async () => {
+  let sends = 0;
+  const fake = transport({ send: async (...args) => {
+    fake.calls.push(['send', ...args]);
+    sends += 1;
+    if (sends === 1) return new Promise(() => {});
+    return { recovered: true };
+  } });
+  const client = createCdpClient({ ...fake, commandTimeoutMs: 10 });
+  const guard = promise => {
+    let timer;
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('O teste excedeu 250 ms.')), 250); }),
+    ]).finally(() => clearTimeout(timer));
+  };
+
+  await guard(client.connect(24));
+  await assert.rejects(guard(client.command('Page.captureScreenshot')), error => error?.name === 'TimeoutError');
+  assert.deepEqual(await guard(client.command('DOM.getOuterHTML')), { recovered: true });
+  assert.equal(fake.calls.filter(([method]) => method === 'detach').length, 0);
+  await guard(client.disconnect());
+  assert.equal(fake.calls.filter(([method]) => method === 'detach').length, 1);
+});
+
+test('rejects invalid CDP command timeout configuration', () => {
+  for (const commandTimeoutMs of [0, -1, Number.POSITIVE_INFINITY, '15']) {
+    assert.throws(() => createCdpClient({ ...transport(), commandTimeoutMs }), /timeout/i);
+  }
+});
+
 test('serializes concurrent connects and detaches the old tab before attaching a new tab', async () => {
   const fake = transport();
   const client = createCdpClient(fake);

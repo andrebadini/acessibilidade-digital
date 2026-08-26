@@ -313,6 +313,10 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     state.occurrences = makeOccurrences(auditId, state.ruleResults, state.itemResults);
     const indexes = buildSnapshotIndexes(state.snapshot);
     const artifactByNode = new Map();
+    const canCaptureElements = Boolean(state.fullPage);
+    if (!canCaptureElements && state.occurrences.some(occurrence => occurrence.nodeId)) {
+      recoverable('ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE', 'As miniaturas de elementos não foram tentadas porque a captura original da página falhou.');
+    }
     for (const occurrence of state.occurrences) {
       throwIfAborted(signal);
       if (state.fullPage) occurrence.evidenceIds.push(state.fullPage.evidenceId);
@@ -336,17 +340,19 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
           recoverable('SNIPPET_CAPTURE_FAILED', 'O trecho de código do elemento não pôde ser capturado.', { occurrenceId: occurrence.occurrenceId });
         }
         let thumbnail = null;
-        try {
-          thumbnail = await awaitStep(() => (chromeAdapter.captureElement || captureElement)(cdp, node.rect, {
-            ...(state.snapshot.document.layoutMetrics || raw.layoutMetrics || pristineMetrics),
-            fullPageEvidenceId: state.fullPage?.evidenceId || null,
-          }));
-          if (thumbnail.status !== 'captured') {
+        if (canCaptureElements) {
+          try {
+            thumbnail = await awaitStep(() => (chromeAdapter.captureElement || captureElement)(cdp, node.rect, {
+              ...(state.snapshot.document.layoutMetrics || raw.layoutMetrics || pristineMetrics),
+              fullPageEvidenceId: state.fullPage.evidenceId,
+            }));
+            if (thumbnail.status !== 'captured') {
+              recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: occurrence.occurrenceId });
+            }
+          } catch (error) {
+            rethrowAbort(error, signal);
             recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: occurrence.occurrenceId });
           }
-        } catch (error) {
-          rethrowAbort(error, signal);
-          recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: occurrence.occurrenceId });
         }
         const selector = buildStableSelector(node, indexes);
         const artifact = {

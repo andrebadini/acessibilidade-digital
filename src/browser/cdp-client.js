@@ -1,8 +1,12 @@
 const PROTOCOL_VERSION = '1.3';
+const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
 
-export function createCdpClient({ attach, detach, send }) {
+export function createCdpClient({ attach, detach, send, commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS }) {
   if (typeof attach !== 'function' || typeof detach !== 'function' || typeof send !== 'function') {
     throw new TypeError('O transporte CDP precisa fornecer attach, send e detach.');
+  }
+  if (typeof commandTimeoutMs !== 'number' || !Number.isFinite(commandTimeoutMs) || commandTimeoutMs <= 0) {
+    throw new TypeError('O timeout de comando CDP deve ser um número finito positivo.');
   }
 
   let queue = Promise.resolve();
@@ -46,7 +50,7 @@ export function createCdpClient({ attach, detach, send }) {
         if (!connection) throw new Error('O CDP não está conectado.');
         ensureUsable();
         if (typeof method !== 'string' || !method) throw new TypeError('O método CDP é inválido.');
-        return send(connection.target, method, params);
+        return withTimeout(() => send(connection.target, method, params), commandTimeoutMs);
       });
     },
     disconnect() {
@@ -56,6 +60,14 @@ export function createCdpClient({ attach, detach, send }) {
       });
     },
   };
+}
+
+function withTimeout(operation, timeoutMs) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new DOMException('O comando CDP excedeu o tempo limite.', 'TimeoutError')), timeoutMs);
+  });
+  return Promise.race([Promise.resolve().then(operation), timeout]).finally(() => clearTimeout(timer));
 }
 
 export function createChromeDebuggerTransport(chromeApi) {
