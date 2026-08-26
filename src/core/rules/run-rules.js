@@ -36,21 +36,32 @@ function isNonEmptyString(value) {
   return typeof value === 'string' && value.trim() !== '';
 }
 
+function hasOwn(value, field) {
+  return value !== null && (typeof value === 'object' || typeof value === 'function') &&
+    Object.hasOwn(value, field);
+}
+
 function normalizeRule(rule, index) {
-  if (
-    rule !== null && typeof rule === 'object' &&
-    isNonEmptyString(rule.id) &&
-    TEST_MODES.includes(rule.mode) &&
-    Array.isArray(rule.nbrItems) && rule.nbrItems.length > 0 &&
-    rule.nbrItems.every(isNonEmptyString) &&
-    typeof rule.evaluate === 'function'
-  ) {
-    return Object.freeze({
-      id: rule.id.trim(),
-      mode: rule.mode,
-      nbrItems: Object.freeze([...new Set(rule.nbrItems.map(itemId => itemId.trim()))]),
-      evaluate: rule.evaluate
-    });
+  try {
+    if (
+      rule !== null && typeof rule === 'object' &&
+      hasOwn(rule, 'id') && hasOwn(rule, 'mode') &&
+      hasOwn(rule, 'nbrItems') && hasOwn(rule, 'evaluate') &&
+      isNonEmptyString(rule.id) &&
+      TEST_MODES.includes(rule.mode) &&
+      Array.isArray(rule.nbrItems) && rule.nbrItems.length > 0 &&
+      rule.nbrItems.every(isNonEmptyString) &&
+      typeof rule.evaluate === 'function'
+    ) {
+      return Object.freeze({
+        id: rule.id.trim(),
+        mode: rule.mode,
+        nbrItems: Object.freeze([...new Set(rule.nbrItems.map(itemId => itemId.trim()))]),
+        evaluate: rule.evaluate
+      });
+    }
+  } catch {
+    // Invalid direct rule inputs are represented below as safe untested rules.
   }
 
   return Object.freeze({
@@ -68,18 +79,33 @@ function hasSameItems(value, rule) {
   return value.nbrItems.every((itemId, index) => itemId === rule.nbrItems[index]);
 }
 
+function hasInheritedContractField(value) {
+  return [...EVALUATION_RESULT_FIELDS].some(
+    field => field in value && !hasOwn(value, field)
+  );
+}
+
 function isEvaluationResult(value, rule) {
   return (
     value !== null && typeof value === 'object' && !Array.isArray(value) &&
     Object.keys(value).every(field => EVALUATION_RESULT_FIELDS.has(field)) &&
-    OUTCOMES.includes(value.outcome) &&
-    (value.ruleId === undefined || value.ruleId === rule.id) &&
-    (value.mode === undefined || value.mode === rule.mode) &&
-    (value.nbrItems === undefined || hasSameItems(value, rule)) &&
-    (value.targets === undefined || Array.isArray(value.targets)) &&
-    (value.summary === undefined || typeof value.summary === 'string') &&
-    (value.limitations === undefined || Array.isArray(value.limitations))
+    !hasInheritedContractField(value) &&
+    hasOwn(value, 'outcome') && OUTCOMES.includes(value.outcome) &&
+    (!hasOwn(value, 'ruleId') || value.ruleId === rule.id) &&
+    (!hasOwn(value, 'mode') || value.mode === rule.mode) &&
+    (!hasOwn(value, 'nbrItems') || hasSameItems(value, rule)) &&
+    (!hasOwn(value, 'targets') || Array.isArray(value.targets)) &&
+    (!hasOwn(value, 'summary') || typeof value.summary === 'string') &&
+    (!hasOwn(value, 'limitations') || Array.isArray(value.limitations))
   );
+}
+
+function evaluationDetails(value) {
+  return {
+    targets: hasOwn(value, 'targets') ? value.targets : [],
+    summary: hasOwn(value, 'summary') ? value.summary : '',
+    limitations: hasOwn(value, 'limitations') ? value.limitations : []
+  };
 }
 
 function makeResult(rule, outcome, details) {
@@ -111,7 +137,7 @@ async function runOneRule(snapshot, context, rule, duplicateRuleIds) {
     if (!isEvaluationResult(value, rule)) {
       return makeResult(rule, 'untested', INVALID_RESULT);
     }
-    return makeResult(rule, value.outcome, value);
+    return makeResult(rule, value.outcome, evaluationDetails(value));
   } catch {
     return makeResult(rule, 'untested', EXECUTION_FAILURE);
   }
@@ -134,7 +160,10 @@ export async function runRules(snapshot, context, rules) {
     throw new TypeError('Rules must be an array');
   }
 
-  const normalizedRules = rules.map(normalizeRule);
+  const normalizedRules = [];
+  for (let index = 0; index < rules.length; index += 1) {
+    normalizedRules.push(normalizeRule(rules[index], index));
+  }
   const duplicated = duplicateRuleIds(normalizedRules);
   const values = [];
   for (const rule of normalizedRules) {

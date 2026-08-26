@@ -28,6 +28,14 @@ function descriptorValue(value, key) {
   }
 }
 
+function typedArrayName(value) {
+  return value instanceof DataView ? 'DataView' : value.constructor.name;
+}
+
+function canonicalObject(type, value) {
+  return Object.freeze({ type, value });
+}
+
 function cloneJsonSafeValue(value, ancestors) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') {
     return value;
@@ -41,6 +49,38 @@ function cloneJsonSafeValue(value, ancestors) {
 
   ancestors.add(value);
   try {
+    if (value instanceof Date) {
+      const time = value.getTime();
+      return canonicalObject('Date', Number.isFinite(time) ? value.toISOString() : null);
+    }
+    if (value instanceof Map) {
+      const entries = [];
+      for (const [key, entryValue] of Map.prototype.entries.call(value)) {
+        entries.push(Object.freeze([
+          cloneJsonSafeValue(key, ancestors),
+          cloneJsonSafeValue(entryValue, ancestors)
+        ]));
+      }
+      return canonicalObject('Map', Object.freeze(entries));
+    }
+    if (value instanceof Set) {
+      const values = [];
+      for (const entryValue of Set.prototype.values.call(value)) {
+        values.push(cloneJsonSafeValue(entryValue, ancestors));
+      }
+      return canonicalObject('Set', Object.freeze(values));
+    }
+    if (value instanceof ArrayBuffer) {
+      return canonicalObject('ArrayBuffer', Object.freeze([...new Uint8Array(value)]));
+    }
+    if (ArrayBuffer.isView(value)) {
+      const values = value instanceof DataView
+        ? [...new Uint8Array(value.buffer, value.byteOffset, value.byteLength)]
+        : [...value];
+      return canonicalObject(typedArrayName(value), Object.freeze(
+        values.map(entryValue => cloneJsonSafeValue(entryValue, ancestors))
+      ));
+    }
     if (Array.isArray(value)) {
       const clone = [];
       for (let index = 0; index < value.length; index += 1) {
@@ -80,10 +120,51 @@ function cloneReadonlyValue(value, seen) {
   if (typeof value === 'function') {
     const original = value;
     const wrapper = function readonlyContextFunction(...args) {
-      return Reflect.apply(original, this, args);
+      const result = Reflect.apply(original, this, args);
+      if (
+        result !== null && (typeof result === 'object' || typeof result === 'function') &&
+        typeof result.then === 'function'
+      ) {
+        return Promise.resolve(result).then(createReadonlyView);
+      }
+      return createReadonlyView(result);
     };
     seen.set(value, wrapper);
     return Object.freeze(wrapper);
+  }
+
+  if (value instanceof Date) {
+    const clone = new Date(value.getTime());
+    seen.set(value, clone);
+    return Object.freeze(clone);
+  }
+  if (value instanceof Map) {
+    const clone = new Map();
+    seen.set(value, clone);
+    for (const [key, entryValue] of Map.prototype.entries.call(value)) {
+      clone.set(cloneReadonlyValue(key, seen), cloneReadonlyValue(entryValue, seen));
+    }
+    return Object.freeze(clone);
+  }
+  if (value instanceof Set) {
+    const clone = new Set();
+    seen.set(value, clone);
+    for (const entryValue of Set.prototype.values.call(value)) {
+      clone.add(cloneReadonlyValue(entryValue, seen));
+    }
+    return Object.freeze(clone);
+  }
+  if (value instanceof ArrayBuffer) {
+    const clone = value.slice(0);
+    seen.set(value, clone);
+    return clone;
+  }
+  if (ArrayBuffer.isView(value)) {
+    const clone = value instanceof DataView
+      ? new DataView(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength))
+      : new value.constructor(value);
+    seen.set(value, clone);
+    return clone;
   }
 
   const clone = Array.isArray(value) ? [] : {};

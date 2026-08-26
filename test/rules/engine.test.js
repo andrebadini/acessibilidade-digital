@@ -442,3 +442,167 @@ test('aggregateItems implements every ordered outcome pair with the same precede
     }
   }
 });
+
+test('runRules rejects an evaluation result whose contractual fields are inherited', async () => {
+  const inherited = {
+    outcome: 'passed',
+    targets: [],
+    summary: '',
+    limitations: []
+  };
+  const rules = createRuleRegistry([{
+    id: 'own-result', mode: 'automated', nbrItems: ['5.1.1'],
+    evaluate() { return Object.create(inherited); }
+  }]);
+
+  const [value] = await runRules({}, {}, rules);
+
+  assert.equal(value.outcome, 'untested');
+});
+
+test('runRules rejects optional contractual fields inherited beside an own outcome', async () => {
+  const inherited = { targets: [{ nodeId: 1 }] };
+  const rules = createRuleRegistry([{
+    id: 'inherited-targets', mode: 'automated', nbrItems: ['5.1.1'],
+    evaluate() { return Object.assign(Object.create(inherited), { outcome: 'passed' }); }
+  }]);
+
+  const [value] = await runRules({}, {}, rules);
+
+  assert.equal(value.outcome, 'untested');
+  assert.deepEqual(value.targets, []);
+});
+
+test('aggregateItems rejects a fully inherited RuleResult', () => {
+  const inherited = {
+    ruleId: 'declared',
+    outcome: 'passed',
+    mode: 'automated',
+    targets: [],
+    summary: '',
+    limitations: [],
+    nbrItems: ['known']
+  };
+  const [value] = aggregateItems([Object.create(inherited)], [item('known', '', ['declared'])]);
+
+  assert.equal(value.outcome, 'cantTell');
+  assert.deepEqual(value.ruleResults, []);
+});
+
+test('context helper returns are isolated for synchronous and asynchronous helpers', async () => {
+  const syncValue = { nested: { value: 'sync-original' } };
+  const asyncValue = { nested: { value: 'async-original' } };
+  const context = {
+    getSync() { return syncValue; },
+    async getAsync() { return asyncValue; }
+  };
+  const rules = createRuleRegistry([
+    {
+      id: 'mutates-sync-return', mode: 'automated', nbrItems: ['5.1.1'],
+      evaluate(snapshot, viewContext) {
+        viewContext.getSync().nested.value = 'changed';
+        return { outcome: 'passed' };
+      }
+    },
+    {
+      id: 'mutates-async-return', mode: 'automated', nbrItems: ['5.1.2'],
+      async evaluate(snapshot, viewContext) {
+        const value = await viewContext.getAsync();
+        value.nested.value = 'changed';
+        return { outcome: 'passed' };
+      }
+    },
+    {
+      id: 'observes-helper-returns', mode: 'manual', nbrItems: ['5.1.3'],
+      async evaluate(snapshot, viewContext) {
+        assert.equal(viewContext.getSync().nested.value, 'sync-original');
+        assert.equal((await viewContext.getAsync()).nested.value, 'async-original');
+        return { outcome: 'passed' };
+      }
+    }
+  ]);
+
+  const values = await runRules({}, context, rules);
+
+  assert.deepEqual(values.map(value => value.outcome), ['untested', 'untested', 'passed']);
+  assert.deepEqual(syncValue, { nested: { value: 'sync-original' } });
+  assert.deepEqual(asyncValue, { nested: { value: 'async-original' } });
+});
+
+test('runRules preserves usable structured snapshot types in independent per-rule copies', async () => {
+  const snapshot = {
+    date: new Date('2026-08-26T00:00:00.000Z'),
+    map: new Map([['one', { value: 1 }]]),
+    set: new Set(['one']),
+    bytes: new Uint8Array([7, 8])
+  };
+  const rules = createRuleRegistry([
+    {
+      id: 'mutates-structured-copy', mode: 'automated', nbrItems: ['5.1.1'],
+      evaluate(view) {
+        assert.equal(view.date instanceof Date, true);
+        assert.equal(view.map instanceof Map, true);
+        assert.equal(view.set instanceof Set, true);
+        assert.equal(view.bytes instanceof Uint8Array, true);
+        assert.equal(view.map.get('one').value, 1);
+        view.date.setUTCFullYear(2030);
+        view.map.set('two', { value: 2 });
+        view.set.add('two');
+        view.bytes[0] = 9;
+        return { outcome: 'passed' };
+      }
+    },
+    {
+      id: 'observes-structured-original', mode: 'manual', nbrItems: ['5.1.2'],
+      evaluate(view) {
+        assert.equal(view.date.toISOString(), '2026-08-26T00:00:00.000Z');
+        assert.equal(view.map.has('two'), false);
+        assert.equal(view.set.has('two'), false);
+        assert.deepEqual([...view.bytes], [7, 8]);
+        return { outcome: 'passed' };
+      }
+    }
+  ]);
+
+  const values = await runRules(snapshot, {}, rules);
+
+  assert.deepEqual(values.map(value => value.outcome), ['passed', 'passed']);
+  assert.equal(snapshot.date.toISOString(), '2026-08-26T00:00:00.000Z');
+  assert.equal(snapshot.map.has('two'), false);
+  assert.equal(snapshot.set.has('two'), false);
+  assert.deepEqual([...snapshot.bytes], [7, 8]);
+});
+
+test('runRules quarantines sparse and invalid rule entries while continuing valid rules', async () => {
+  const rules = new Array(4);
+  rules[1] = null;
+  rules[2] = {
+    id: 'valid', mode: 'manual', nbrItems: ['5.1.1'],
+    evaluate() { return { outcome: 'passed' }; }
+  };
+  rules[3] = 42;
+
+  const values = await runRules({}, {}, rules);
+
+  assert.deepEqual(values.map(value => [value.ruleId, value.outcome, value.nbrItems]), [
+    ['invalid-rule-1', 'untested', []],
+    ['invalid-rule-2', 'untested', []],
+    ['valid', 'passed', ['5.1.1']],
+    ['invalid-rule-4', 'untested', []]
+  ]);
+  assert.doesNotThrow(() => JSON.stringify(values));
+});
+
+test('aggregateItems quarantines every duplicate normative ID without changing catalogue order', () => {
+  const duplicated = [
+    item('duplicate', '', ['declared']),
+    item('duplicate', '', ['declared'])
+  ];
+  const values = aggregateItems([result('declared', 'passed', ['duplicate'])], duplicated);
+
+  assert.equal(values.length, 2);
+  assert.deepEqual(values.map(value => value.id), ['duplicate', 'duplicate']);
+  assert.deepEqual(values.map(value => value.outcome), ['cantTell', 'cantTell']);
+  assert.deepEqual(values.map(value => value.ruleResults), [[], []]);
+  assert.ok(values.every(value => /duplicado|integridade/i.test(value.humanReason)));
+});

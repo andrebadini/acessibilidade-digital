@@ -12,6 +12,21 @@ const OUTCOME_PRIORITY = Object.freeze({
 
 const DEFAULT_HUMAN_REASON =
   'Não há resultado de regra vinculado a este item; é necessária revisão humana.';
+const DUPLICATE_ITEM_REASON =
+  'O catálogo normativo contém um identificador duplicado; o item exige revisão de integridade.';
+
+function hasOwn(value, field) {
+  return value !== null && (typeof value === 'object' || typeof value === 'function') &&
+    Object.hasOwn(value, field);
+}
+
+function ownValue(value, field) {
+  try {
+    return hasOwn(value, field) ? value[field] : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function normalizeItemIds(value) {
   if (!Array.isArray(value)) return [];
@@ -32,6 +47,10 @@ function normalizeRuleResult(value) {
   try {
     if (
       value === null || typeof value !== 'object' || Array.isArray(value) ||
+      !hasOwn(value, 'ruleId') || !hasOwn(value, 'outcome') ||
+      !hasOwn(value, 'mode') || !hasOwn(value, 'nbrItems') ||
+      !hasOwn(value, 'targets') || !hasOwn(value, 'summary') ||
+      !hasOwn(value, 'limitations') ||
       typeof value.ruleId !== 'string' || value.ruleId.trim() === '' ||
       !OUTCOMES.includes(value.outcome) || !TEST_MODES.includes(value.mode) ||
       !Array.isArray(value.targets) || typeof value.summary !== 'string' ||
@@ -57,24 +76,33 @@ function normalizeRuleResult(value) {
 }
 
 function safeHumanReason(item) {
-  return typeof item?.humanReason === 'string' && item.humanReason.trim() !== ''
-    ? item.humanReason
+  const humanReason = ownValue(item, 'humanReason');
+  return typeof humanReason === 'string' && humanReason.trim() !== ''
+    ? humanReason
     : DEFAULT_HUMAN_REASON;
 }
 
 function copyNormativeData(item, index) {
-  const id = typeof item?.id === 'string' && item.id.trim() !== ''
-    ? item.id
+  const itemId = ownValue(item, 'id');
+  const printedId = ownValue(item, 'printedId');
+  const title = ownValue(item, 'title');
+  const classification = ownValue(item, 'classification');
+  const wcag = ownValue(item, 'wcag');
+  const evaluation = ownValue(item, 'evaluation');
+  const ruleIds = ownValue(item, 'ruleIds');
+  const humanReason = ownValue(item, 'humanReason');
+  const id = typeof itemId === 'string' && itemId.trim() !== ''
+    ? itemId
     : `invalid-item-${index + 1}`;
   return {
     id,
-    printedId: typeof item?.printedId === 'string' ? item.printedId : id,
-    title: typeof item?.title === 'string' ? item.title : '',
-    classification: typeof item?.classification === 'string' ? item.classification : '',
-    wcag: cloneJsonSafeArray(Array.isArray(item?.wcag) ? item.wcag : []),
-    evaluation: typeof item?.evaluation === 'string' ? item.evaluation : '',
-    ruleIds: Object.freeze(normalizeItemIds(item?.ruleIds)),
-    humanReason: typeof item?.humanReason === 'string' ? item.humanReason : ''
+    printedId: typeof printedId === 'string' ? printedId : id,
+    title: typeof title === 'string' ? title : '',
+    classification: typeof classification === 'string' ? classification : '',
+    wcag: cloneJsonSafeArray(Array.isArray(wcag) ? wcag : []),
+    evaluation: typeof evaluation === 'string' ? evaluation : '',
+    ruleIds: Object.freeze(normalizeItemIds(ruleIds)),
+    humanReason: typeof humanReason === 'string' ? humanReason : ''
   };
 }
 
@@ -110,8 +138,21 @@ export function aggregateItems(ruleResults, items = NBR17225_ITEMS) {
     ruleResult => resultCounts.get(ruleResult.ruleId) === 1
   );
 
-  return Object.freeze(items.map((item, index) => {
-    const normative = copyNormativeData(item, index);
+  const normativeItems = items.map(copyNormativeData);
+  const itemCounts = new Map();
+  for (const normative of normativeItems) {
+    itemCounts.set(normative.id, (itemCounts.get(normative.id) ?? 0) + 1);
+  }
+
+  return Object.freeze(normativeItems.map((normative, index) => {
+    if (itemCounts.get(normative.id) > 1) {
+      return Object.freeze({
+        ...normative,
+        humanReason: DUPLICATE_ITEM_REASON,
+        outcome: 'cantTell',
+        ruleResults: Object.freeze([])
+      });
+    }
     const declaredRuleIds = new Set(normative.ruleIds);
     const linkedResults = Object.freeze(usableResults.filter(
       ruleResult => ruleResult.nbrItems.includes(normative.id) &&
@@ -119,7 +160,7 @@ export function aggregateItems(ruleResults, items = NBR17225_ITEMS) {
     ));
     return Object.freeze({
       ...normative,
-      humanReason: linkedResults.length === 0 ? safeHumanReason(item) : normative.humanReason,
+      humanReason: linkedResults.length === 0 ? safeHumanReason(items[index]) : normative.humanReason,
       outcome: aggregateOutcome(linkedResults),
       ruleResults: linkedResults
     });
