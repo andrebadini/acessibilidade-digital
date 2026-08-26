@@ -58,6 +58,23 @@ test('returns to a safe disconnected state when attach, send, or detach reject',
   await assert.rejects(detachFailure.command('Page.enable'), /não está conectado/i);
 });
 
+test('keeps the CDP connection usable after one command fails until explicit disconnect', async () => {
+  let attempts = 0;
+  const fake = transport({ send: async (...args) => {
+    fake.calls.push(['send', ...args]);
+    attempts += 1;
+    if (attempts === 1) throw new Error('captura falhou');
+    return { recovered: true };
+  } });
+  const client = createCdpClient(fake);
+  await client.connect(23);
+  await assert.rejects(client.command('Page.captureScreenshot'), /captura falhou/);
+  assert.deepEqual(await client.command('DOMSnapshot.captureSnapshot'), { recovered: true });
+  assert.equal(fake.calls.filter(([method]) => method === 'detach').length, 0);
+  await client.disconnect();
+  assert.equal(fake.calls.filter(([method]) => method === 'detach').length, 1);
+});
+
 test('serializes concurrent connects and detaches the old tab before attaching a new tab', async () => {
   const fake = transport();
   const client = createCdpClient(fake);
@@ -78,13 +95,15 @@ test('treats a concurrent connect to the same tab as idempotent', async () => {
   await client.disconnect();
 });
 
-test('serializes concurrent command failures into one detach for their captured session', async () => {
+test('serializes concurrent command failures without implicit detach', async () => {
   const fake = transport({ send: async () => { throw new Error('comando falhou'); } });
   const client = createCdpClient(fake);
   await client.connect(13);
   await Promise.allSettled([client.command('Page.enable'), client.command('Runtime.enable')]);
+  assert.equal(fake.calls.filter(([method]) => method === 'detach').length, 0);
+  await assert.rejects(client.command('Page.enable'), /comando falhou/i);
+  await client.disconnect();
   assert.equal(fake.calls.filter(([method]) => method === 'detach').length, 1);
-  await assert.rejects(client.command('Page.enable'), /não está conectado/i);
 });
 
 test('does not let a failed old command detach a newer connection', async () => {

@@ -18,6 +18,7 @@ test('review page is local, keyboard-friendly and has one live status and one h1
 test('review script renders snippets inertly, offers exactly three answers and never auto-selects', async () => {
   const source = await read('src/review/review.js');
   assert.match(source, /createElement/);
+  assert.match(source, /isSafeEvidenceImageUrl/);
   assert.match(source, /textContent/);
   assert.doesNotMatch(source, /innerHTML/);
   for (const answer of ['conforme', 'não conforme', 'não foi possível determinar']) assert.match(source, new RegExp(answer, 'u'));

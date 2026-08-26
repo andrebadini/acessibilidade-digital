@@ -38,6 +38,7 @@ function fakeAdapter(options = {}) {
       }
       if (method === 'DOM.getOuterHTML') {
         if (options.snippetFailureNode === params.backendNodeId) throw new Error('node vanished');
+        options.afterSnippet?.(params.backendNodeId);
         return { outerHTML: `<button data-token="SECRET">Node ${params.backendNodeId}</button>` };
       }
       return {};
@@ -56,8 +57,8 @@ function fakeAdapter(options = {}) {
       return { url: 'https://example.test/final?token=REMOVE&view=public' };
     },
     async connectCdp() { events.push('connect-cdp'); return cdp; },
-    async collectPage() { events.push('collect'); if (options.collectFailure) throw new Error('DOM unavailable'); return rawPage(); },
-    async runDynamicProbes() { events.push('probes'); return { focus: { completed: false, events: [] }, warnings: [], actions: [] }; },
+    async collectPage() { events.push('collect'); options.afterCollect?.(); if (options.collectFailure) throw new Error('DOM unavailable'); return rawPage(); },
+    async runDynamicProbes() { events.push('probes'); return options.rawProbes || { focus: { completed: false, events: [] }, warnings: [], actions: [] }; },
     async getEnvironment() { return { chromeVersion: 'Chrome/140.0', viewport: { width: 800, height: 600, deviceScaleFactor: 1 } }; },
     async getFinalUrl() { return 'https://example.test/final?token=REMOVE&view=public'; },
     async emitProgress(message) { events.push(`progress:${message.percent}`); },
@@ -120,6 +121,7 @@ test('keeps capture failures partial and isolates per-node evidence failures', a
   assert.equal(model.session.status, 'partial');
   assert.ok(model.session.diagnostics.some(item => item.code === 'FULL_PAGE_CAPTURE_FAILED'));
   assert.ok(model.session.diagnostics.some(item => item.code === 'SNIPPET_CAPTURE_FAILED'));
+  assert.ok(adapter.events.includes('collect'));
   assert.ok(model.evidence.artifacts.some(item => item.nodeId === 'n-2'));
   assert.equal(adapter.counts.disconnects, 1);
   assert.equal(adapter.counts.removals, 1);
@@ -167,4 +169,38 @@ test('accepts only a JSON-safe report placeholder and never copies handoff secre
   const model = await runAudit({ url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'audit-safe' });
   assert.deepEqual(model.report.artifact, { status: 'pending', formats: [] });
   assert.doesNotMatch(JSON.stringify(model), /REMOVE|Bearer|authorization|"pdf"|"html"/i);
+});
+
+test('cancels immediately when the signal aborts after collection', async () => {
+  const controller = new AbortController();
+  const adapter = fakeAdapter({ afterCollect: () => controller.abort(new DOMException('cancelada', 'AbortError')) });
+  const model = await runAudit({ url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'audit-abort-collect', signal: controller.signal });
+  assert.equal(model.session.status, 'cancelled');
+  assert.equal(model.progress.some(entry => entry.percent === 100), false);
+  assert.equal(adapter.events.includes('handoff'), false);
+  assert.equal(adapter.counts.disconnects, 1);
+  assert.equal(adapter.counts.removals, 1);
+});
+
+test('stops the occurrence loop immediately when evidence capture observes abort', async () => {
+  const controller = new AbortController();
+  const adapter = fakeAdapter({ afterSnippet: backendNodeId => {
+    if (backendNodeId === 1) controller.abort(new DOMException('cancelada', 'AbortError'));
+  } });
+  const model = await runAudit({ url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'audit-abort-evidence', signal: controller.signal });
+  assert.equal(model.session.status, 'cancelled');
+  assert.equal(model.progress.some(entry => entry.percent === 100), false);
+  assert.equal(adapter.events.includes('handoff'), false);
+  assert.equal(model.evidence.artifacts.some(item => item.nodeId === 'n-2'), false);
+  assert.equal(adapter.counts.disconnects, 1);
+  assert.equal(adapter.counts.removals, 1);
+});
+
+test('marks timed-out or incomplete dynamic probes partial with a fixed diagnostic', async () => {
+  const adapter = fakeAdapter({ rawProbes: {
+    focus: { completed: false, events: [] }, warnings: [{ code: 'TIMEOUT' }], actions: [],
+  } });
+  const model = await runAudit({ url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'audit-probe-timeout' });
+  assert.equal(model.session.status, 'partial');
+  assert.ok(model.session.diagnostics.some(entry => entry.code === 'DYNAMIC_PROBES_INCOMPLETE'));
 });

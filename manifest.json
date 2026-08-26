@@ -19,6 +19,9 @@
     "service_worker": "src/background/service-worker.js",
     "type": "module"
   },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; img-src 'self' data: blob:; style-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'"
+  },
   "action": {
     "default_title": "Abrir Audita MT"
   }

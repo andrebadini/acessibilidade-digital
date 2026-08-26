@@ -36,6 +36,7 @@ export function reducePanelState(current, message, extensionBaseUrl = '') {
   if (!current || typeof current !== 'object' || !message || typeof message !== 'object') return current;
   if (!isMessageForAudit(message, current.auditId)) return current;
   if (message.type === 'AUDIT_PROGRESS') {
+    if (['complete', 'partial', 'failed', 'cancelled'].includes(current.status)) return current;
     const percent = Number.isFinite(message.percent) ? Math.max(0, Math.min(100, message.percent)) : current.percent;
     if (percent < (current.percent ?? 0)) return current;
     return {

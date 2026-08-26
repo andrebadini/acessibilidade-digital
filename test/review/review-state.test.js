@@ -1,7 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { getPendingReviewEntries, normalizeReviewAuditId, recordReviewDecision } from '../../src/review/review-state.js';
+import { getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId, recordReviewDecision } from '../../src/review/review-state.js';
+
+test('allows only valid PNG data or same-extension blob evidence images', () => {
+  const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
+  const base = 'chrome-extension://test/';
+  assert.equal(isSafeEvidenceImageUrl(png, base), true);
+  assert.equal(isSafeEvidenceImageUrl('blob:chrome-extension://test/uuid', base), true);
+  for (const value of [
+    'https://example.test/evidence.png', 'javascript:alert(1)',
+    'data:image/svg+xml,<svg onload=alert(1)>', 'data:text/html,<script>alert(1)</script>',
+    'data:image/png;base64,SGVsbG8=', 'blob:chrome-extension://other/uuid',
+  ]) assert.equal(isSafeEvidenceImageUrl(value, base), false, value);
+});
 
 test('accepts only bounded inert audit IDs from query or persisted state', () => {
   assert.equal(normalizeReviewAuditId('audit-1:part.2'), 'audit-1:part.2');
@@ -20,11 +32,12 @@ test('records a decision by applying conservative review aggregation to the stor
   });
   const reviewed = recordReviewDecision(model, {
     auditId: 'audit-1', itemId: '5.1.1', occurrenceId: 'occ-1', answer: 'conforme',
-    evaluator: 'Fiscal', decidedAt: '2026-08-26T14:00:00Z', mode: 'assisted',
+    evaluator: 'Fiscal', decidedAt: '2026-08-26T14:00:00.000Z', mode: 'assisted',
   });
   assert.equal(reviewed.itemResults[0].outcome, 'passed');
   assert.equal(reviewed.manualReview[0].status, 'answered');
   assert.equal(reviewed.reviewDecisions.length, 1);
-  assert.strictEqual(reviewed.evidence, evidence);
+  assert.notStrictEqual(reviewed.evidence, evidence);
+  assert.deepEqual(reviewed.evidence, evidence);
   assert.deepEqual(getPendingReviewEntries(reviewed), []);
 });

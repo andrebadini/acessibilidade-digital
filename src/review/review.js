@@ -1,6 +1,6 @@
 import { createReviewDecision } from '../core/review/decisions.js';
 import { createAuditStore } from '../storage/audit-store.js';
-import { getPendingReviewEntries, normalizeReviewAuditId, recordReviewDecision } from './review-state.js';
+import { getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId, recordReviewDecision } from './review-state.js';
 
 const ANSWERS = ['conforme', 'não conforme', 'não foi possível determinar'];
 const list = document.querySelector('#review-list');
@@ -67,7 +67,7 @@ function renderCard(entry) {
   for (const evidence of evidenceFor(occurrence)) {
     if (evidence.selector?.css) appendText(card, 'code', `Seletor: ${evidence.selector.css}`);
     if (evidence.snippet) appendText(card, 'code', evidence.snippet);
-    if (evidence.dataUrl) {
+    if (isSafeEvidenceImageUrl(evidence.dataUrl, chrome.runtime.getURL('/'))) {
       const image = document.createElement('img');
       image.className = 'evidence-media';
       image.src = evidence.dataUrl;

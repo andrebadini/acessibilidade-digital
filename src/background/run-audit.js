@@ -64,6 +64,25 @@ function diagnostic(code, message, at, recoverable = false, details = {}) {
   return { code, message, at, recoverable, ...details };
 }
 
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  if (signal.reason?.name === 'AbortError') throw signal.reason;
+  throw new DOMException('Operação cancelada.', 'AbortError');
+}
+
+function rethrowAbort(error, signal) {
+  if (error?.name === 'AbortError' || signal?.aborted) {
+    if (error?.name === 'AbortError') throw error;
+    throwIfAborted(signal);
+  }
+}
+
+function probesTimedOut(raw, normalized) {
+  if (raw?.timedOut === true || raw?.incompleteReason === 'timeout') return true;
+  return [...(Array.isArray(raw?.warnings) ? raw.warnings : []), ...(Array.isArray(normalized?.warnings) ? normalized.warnings : [])]
+    .some(warning => typeof warning?.code === 'string' && /TIMEOUT/u.test(warning.code));
+}
+
 function fallbackItems() {
   return NBR17225_ITEMS.map(item => ({ ...item, wcag: item.wcag.map(reference => ({ ...reference })), outcome: 'cantTell', ruleResults: [] }));
 }
@@ -185,11 +204,20 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
   let fatal = false;
   let recoverableFailure = false;
 
+  const awaitStep = async operation => {
+    throwIfAborted(signal);
+    const value = await operation();
+    throwIfAborted(signal);
+    return value;
+  };
+
   const progress = async (phase, message, percent) => {
+    throwIfAborted(signal);
     const previous = state.progress.at(-1)?.percent ?? -1;
     const entry = { type: 'AUDIT_PROGRESS', sessionId: auditId, auditId, phase, message, percent: Math.max(previous, percent), at: canonicalNow(now) };
-    state.progress.push(entry);
     try { await chromeAdapter.emitProgress?.(entry); } catch { /* Progress transport must not abort the audit. */ }
+    throwIfAborted(signal);
+    state.progress.push(entry);
   };
   const recoverable = (code, message, details = {}) => {
     recoverableFailure = true;
@@ -202,20 +230,21 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
   };
 
   try {
-    if (signal?.aborted) throw signal.reason || new DOMException('Operação cancelada', 'AbortError');
+    throwIfAborted(signal);
     await progress('opening', 'Abrindo o site', 5);
-    tab = await chromeAdapter.createTab({ url: 'about:blank', active: false });
+    tab = await awaitStep(() => chromeAdapter.createTab({ url: 'about:blank', active: false }));
     if (!Number.isInteger(tab?.id)) throw new Error('Tab inválida');
-    await chromeAdapter.navigateTab(tab.id, navigationUrl, { signal });
-    const navigation = await chromeAdapter.waitForStable(tab.id, { signal, timeoutMs: 30_000 });
-    state.finalUrl = safeUrl(navigation?.url || await chromeAdapter.getFinalUrl?.(tab.id) || navigationUrl);
-    cdp = await chromeAdapter.connectCdp(tab.id, { signal });
+    await awaitStep(() => chromeAdapter.navigateTab(tab.id, navigationUrl, { signal }));
+    const navigation = await awaitStep(() => chromeAdapter.waitForStable(tab.id, { signal, timeoutMs: 30_000 }));
+    const observedUrl = navigation?.url || await awaitStep(() => chromeAdapter.getFinalUrl?.(tab.id)) || navigationUrl;
+    state.finalUrl = safeUrl(observedUrl);
+    cdp = await awaitStep(() => chromeAdapter.connectCdp(tab.id, { signal }));
     if (!cdp || typeof cdp.command !== 'function') throw new Error('CDP inválido');
 
     let pristineMetrics = {};
     try {
-      pristineMetrics = await cdp.command('Page.getLayoutMetrics', {});
-      state.fullPage = await (chromeAdapter.captureFullPage || captureFullPage)(cdp, pristineMetrics);
+      pristineMetrics = await awaitStep(() => cdp.command('Page.getLayoutMetrics', {}));
+      state.fullPage = await awaitStep(() => (chromeAdapter.captureFullPage || captureFullPage)(cdp, pristineMetrics));
       const artifact = {
         evidenceId: state.fullPage.evidenceId,
         kind: 'full-page',
@@ -225,12 +254,13 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
         hash: stableHash(state.fullPage.dataUrl),
       };
       state.artifacts.push(artifact);
-    } catch {
+    } catch (error) {
+      rethrowAbort(error, signal);
       recoverable('FULL_PAGE_CAPTURE_FAILED', 'Não foi possível capturar a página completa no estado original.');
     }
 
     try {
-      const environment = await chromeAdapter.getEnvironment?.(tab.id, cdp, pristineMetrics);
+      const environment = await awaitStep(() => chromeAdapter.getEnvironment?.(tab.id, cdp, pristineMetrics));
       if (environment && typeof environment === 'object') state.environment = {
         chromeVersion: typeof environment.chromeVersion === 'string' ? environment.chromeVersion : '',
         viewport: {
@@ -239,7 +269,8 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
           deviceScaleFactor: Number.isFinite(environment.viewport?.deviceScaleFactor) ? environment.viewport.deviceScaleFactor : null,
         },
       };
-    } catch {
+    } catch (error) {
+      rethrowAbort(error, signal);
       recoverable('ENVIRONMENT_UNAVAILABLE', 'Os metadados públicos do ambiente não puderam ser lidos.');
     }
 
@@ -247,8 +278,8 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     let raw;
     try {
       raw = chromeAdapter.collectPage
-        ? await chromeAdapter.collectPage(cdp, tab.id, { signal })
-        : await collectPage(cdp, tab.id, { executeScript: chromeAdapter.executeScript, signal });
+        ? await awaitStep(() => chromeAdapter.collectPage(cdp, tab.id, { signal }))
+        : await awaitStep(() => collectPage(cdp, tab.id, { executeScript: chromeAdapter.executeScript, signal }));
       state.snapshot = normalizeSnapshot(raw);
     } catch (error) {
       fail('COLLECTION_FAILED', 'A estrutura da página não pôde ser coletada com segurança.', error);
@@ -257,16 +288,20 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
 
     try {
       const rawProbes = chromeAdapter.runDynamicProbes
-        ? await chromeAdapter.runDynamicProbes(tab.id, cdp, { signal })
-        : await runDynamicProbes({ adapter: chromeAdapter.createProbeAdapter?.(tab.id, cdp), signal });
-      state.snapshot = mergeProbesIntoSnapshot(state.snapshot, normalizeProbes(rawProbes));
-    } catch {
+        ? await awaitStep(() => chromeAdapter.runDynamicProbes(tab.id, cdp, { signal }))
+        : await awaitStep(() => runDynamicProbes({ adapter: chromeAdapter.createProbeAdapter?.(tab.id, cdp), signal }));
+      const normalizedProbes = normalizeProbes(rawProbes);
+      if (probesTimedOut(rawProbes, normalizedProbes)) recoverable('DYNAMIC_PROBES_INCOMPLETE', 'As verificações dinâmicas atingiram o tempo limite.');
+      state.snapshot = mergeProbesIntoSnapshot(state.snapshot, normalizedProbes);
+      throwIfAborted(signal);
+    } catch (error) {
+      rethrowAbort(error, signal);
       recoverable('DYNAMIC_PROBES_FAILED', 'As verificações dinâmicas não puderam ser concluídas.');
     }
 
     await progress('testing', 'Verificando acessibilidade', 50);
     try {
-      const core = await runCoreAudit(state.snapshot);
+      const core = await awaitStep(() => runCoreAudit(state.snapshot));
       state.ruleResults = [...core.ruleResults];
       state.itemResults = [...core.itemResults];
     } catch (error) {
@@ -279,6 +314,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     const indexes = buildSnapshotIndexes(state.snapshot);
     const artifactByNode = new Map();
     for (const occurrence of state.occurrences) {
+      throwIfAborted(signal);
       if (state.fullPage) occurrence.evidenceIds.push(state.fullPage.evidenceId);
       if (!occurrence.nodeId) continue;
       if (artifactByNode.has(occurrence.nodeId)) {
@@ -293,21 +329,23 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
       try {
         let snippet = '';
         try {
-          const response = await cdp.command('DOM.getOuterHTML', { backendNodeId: node.backendNodeId });
+          const response = await awaitStep(() => cdp.command('DOM.getOuterHTML', { backendNodeId: node.backendNodeId }));
           snippet = sanitizeHtmlSnippet(typeof response?.outerHTML === 'string' ? response.outerHTML : '');
-        } catch {
+        } catch (error) {
+          rethrowAbort(error, signal);
           recoverable('SNIPPET_CAPTURE_FAILED', 'O trecho de código do elemento não pôde ser capturado.', { occurrenceId: occurrence.occurrenceId });
         }
         let thumbnail = null;
         try {
-          thumbnail = await (chromeAdapter.captureElement || captureElement)(cdp, node.rect, {
+          thumbnail = await awaitStep(() => (chromeAdapter.captureElement || captureElement)(cdp, node.rect, {
             ...(state.snapshot.document.layoutMetrics || raw.layoutMetrics || pristineMetrics),
             fullPageEvidenceId: state.fullPage?.evidenceId || null,
-          });
+          }));
           if (thumbnail.status !== 'captured') {
             recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: occurrence.occurrenceId });
           }
-        } catch {
+        } catch (error) {
+          rethrowAbort(error, signal);
           recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: occurrence.occurrenceId });
         }
         const selector = buildStableSelector(node, indexes);
@@ -322,25 +360,30 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
         artifactByNode.set(node.nodeId, artifact);
         state.artifacts.push(artifact);
         occurrence.evidenceIds.push(artifact.evidenceId);
-      } catch {
+      } catch (error) {
+        rethrowAbort(error, signal);
         recoverable('EVIDENCE_CAPTURE_FAILED', 'As evidências de uma ocorrência não puderam ser preparadas.', { occurrenceId: occurrence.occurrenceId });
       }
+      throwIfAborted(signal);
     }
     state.manualReview = manualQueue(state.occurrences, state.itemResults);
 
     await progress('reporting', 'Gerando relatório', 92);
+    throwIfAborted(signal);
     state.status = recoverableFailure ? 'partial' : 'complete';
     try {
-      const handoff = await chromeAdapter.handoffReport?.(draftModel({ ...state, endedAt: canonicalNow(now) }));
+      const handoff = await awaitStep(() => chromeAdapter.handoffReport?.(draftModel({ ...state, endedAt: canonicalNow(now) })));
       state.report = {
         status: 'review-ready',
         reviewUrl: safeInternalUrl(handoff?.reviewUrl),
         artifact: { status: 'pending', formats: [] },
       };
-    } catch {
+    } catch (error) {
+      rethrowAbort(error, signal);
       recoverable('REPORT_HANDOFF_FAILED', 'A fila de revisão não pôde ser preparada.');
       state.status = 'partial';
     }
+    throwIfAborted(signal);
     await progress('complete', 'Auditoria concluída', 100);
   } catch (error) {
     if (!error?.auditHandled) fail('NAVIGATION_FAILED', error?.name === 'AbortError' || signal?.aborted ? 'A auditoria foi cancelada.' : 'O site não pôde ser aberto de forma estável.', error);

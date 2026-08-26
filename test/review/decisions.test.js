@@ -36,7 +36,7 @@ function model(overrides = {}) {
 
 const decision = (occurrenceId, answer = 'conforme', extra = {}) => createReviewDecision({
   auditId: 'audit-1', itemId: occurrenceId === 'occ-auto' ? '5.1.1' : '5.1.2', occurrenceId,
-  answer, evaluator: 'Fiscal Ana', decidedAt: '2026-08-26T10:00:00-04:00', mode: 'assisted', ...extra,
+  answer, evaluator: 'Fiscal Ana', decidedAt: '2026-08-26T14:00:00.000Z', mode: 'assisted', ...extra,
 });
 
 test('creates a canonical frozen JSON-safe review decision', () => {
@@ -54,13 +54,31 @@ test('creates a canonical frozen JSON-safe review decision', () => {
 test('rejects invalid IDs, answers, evaluator, timestamps and modes', () => {
   for (const change of [
     { auditId: '' }, { itemId: ' ' }, { occurrenceId: '' }, { answer: 'sim' },
-    { evaluator: '' }, { decidedAt: 'amanhã' }, { mode: 'semiAuto' },
+    { evaluator: '' }, { decidedAt: 'amanhã' }, { decidedAt: '2026-08-26T14:00:00Z' },
+    { decidedAt: 'August 26, 2026 14:00:00 UTC' }, { mode: 'semiAuto' },
   ]) {
     assert.throws(() => createReviewDecision({
       auditId: 'audit-1', itemId: '5.1.2', occurrenceId: 'occ-a', answer: 'conforme',
       evaluator: 'Fiscal', decidedAt: '2026-08-26T10:00:00Z', mode: 'manual', ...change,
     }), /decis|resposta|avaliador|data|modo|identificador/i);
   }
+});
+
+test('requires a plain decision with own contractual properties', () => {
+  const inherited = Object.create({
+    auditId: 'audit-1', itemId: '5.1.2', occurrenceId: 'occ-a', answer: 'conforme',
+    evaluator: 'Fiscal', decidedAt: '2026-08-26T14:00:00.000Z', mode: 'manual',
+  });
+  assert.throws(() => createReviewDecision(inherited), /própr|decisão|campo/i);
+  assert.throws(() => createReviewDecision([]), /decisão/i);
+  let accessed = false;
+  const hostile = {
+    auditId: 'audit-1', itemId: '5.1.2', occurrenceId: 'occ-a', answer: 'conforme',
+    evaluator: 'Fiscal', decidedAt: '2026-08-26T14:00:00.000Z', mode: 'manual',
+    get payload() { accessed = true; return 'não executar'; },
+  };
+  assert.throws(() => createReviewDecision(hostile), /dados|propriedade|decisão/i);
+  assert.equal(accessed, false);
 });
 
 test('requires known audit, item and occurrence links and rejects ambiguous duplicates', () => {
@@ -110,9 +128,28 @@ test('aggregates review answers conservatively across all reviewable occurrences
 test('preserves evidence bytes, evidence links and reproducibility hashes', () => {
   const original = model();
   const reviewed = applyReviewDecisions(original, [decision('occ-a'), decision('occ-b')]);
-  assert.strictEqual(reviewed.evidence, original.evidence);
-  assert.strictEqual(reviewed.reproducibility, original.reproducibility);
+  assert.deepEqual(reviewed.evidence, original.evidence);
+  assert.deepEqual(reviewed.reproducibility, original.reproducibility);
+  assert.notStrictEqual(reviewed.evidence, original.evidence);
   assert.deepEqual(reviewed.occurrences.map(item => item.evidenceIds), original.occurrences.map(item => item.evidenceIds));
   assert.equal(Object.isFrozen(reviewed), true);
   assert.doesNotThrow(() => JSON.stringify(reviewed));
+});
+
+test('never freezes or mutates any object reachable from the input model', () => {
+  const input = structuredClone(model());
+  const evidence = input.evidence;
+  const artifact = evidence.artifacts[0];
+  const reviewed = applyReviewDecisions(input, [decision('occ-a'), decision('occ-b')]);
+  assert.equal(Object.isFrozen(input), false);
+  assert.equal(Object.isFrozen(evidence), false);
+  assert.equal(Object.isFrozen(artifact), false);
+  assert.deepEqual(reviewed.evidence, evidence);
+  assert.notStrictEqual(reviewed.evidence, evidence);
+});
+
+test('rejects audit models whose contractual IDs are inherited or ambiguous', () => {
+  const inheritedAudit = Object.create({ auditId: 'audit-1' });
+  Object.assign(inheritedAudit, { itemResults: [], occurrences: [], ruleResults: [], manualReview: [], reviewDecisions: [] });
+  assert.throws(() => applyReviewDecisions(inheritedAudit, []), /modelo|própr/i);
 });

@@ -40,3 +40,10 @@ test('keeps progress monotonic and restores a safe completed review link', () =>
   assert.equal(completed.reviewUrl, 'chrome-extension://test/src/review/index.html?auditId=a-1');
   assert.equal(reducePanelState(progressed, { type: 'AUDIT_COMPLETE', auditId: 'a-1', reviewUrl: 'javascript:alert(1)' }, 'chrome-extension://test/').reviewUrl, null);
 });
+
+test('ignores every progress event after a terminal state', () => {
+  for (const status of ['complete', 'partial', 'failed', 'cancelled']) {
+    const terminal = { auditId: 'a-1', status, percent: status === 'failed' ? 72 : 100, message: 'Terminal', reviewUrl: null };
+    assert.deepEqual(reducePanelState(terminal, { type: 'AUDIT_PROGRESS', auditId: 'a-1', percent: 100, message: 'Atrasado' }), terminal);
+  }
+});

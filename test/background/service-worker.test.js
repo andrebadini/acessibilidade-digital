@@ -106,8 +106,8 @@ test('runs the audit in background, persists the model and sends correlated prog
   const chromeApi = createChrome();
   const writes = [];
   const auditStore = {
-    async setAudit(id, value) { writes.push(['audit', id, value]); },
     async setLatest(value) { writes.push(['latest', value]); },
+    async commitAudit(id, model, latest) { writes.push(['commit', id, model, latest]); },
   };
   const runner = async ({ chromeAdapter }) => {
     await chromeAdapter.emitProgress({ type: 'AUDIT_PROGRESS', auditId: 'audit-1', sessionId: 'audit-1', percent: 50, message: 'Verificando acessibilidade' });
@@ -127,14 +127,14 @@ test('runs the audit in background, persists the model and sends correlated prog
   await new Promise(resolve => setImmediate(resolve));
   assert.ok(chromeApi.runtime.sent.some(message => message.type === 'AUDIT_PROGRESS' && message.auditId === 'audit-1'));
   assert.ok(chromeApi.runtime.sent.some(message => message.type === 'AUDIT_COMPLETE' && message.auditId === 'audit-1'));
-  assert.ok(writes.some(([kind, id]) => kind === 'audit' && id === 'audit-1'));
+  assert.ok(writes.some(([kind, id]) => kind === 'commit' && id === 'audit-1'));
 });
 
 test('deduplicates concurrent START_AUDIT messages from the same panel sender', () => {
   const chromeApi = createChrome();
   let finish;
   const runner = () => new Promise(resolve => { finish = resolve; });
-  registerServiceWorker(chromeApi, { createId: () => 'audit-1', runner, auditStore: { async setLatest() {}, async setAudit() {} }, chromeAdapterFactory: () => ({}) });
+  registerServiceWorker(chromeApi, { createId: () => 'audit-1', runner, auditStore: { async setLatest() {}, async commitAudit() {} }, chromeAdapterFactory: () => ({}) });
   const sender = { id: 'test', url: 'chrome-extension://test/src/panel/index.html', documentId: 'panel-1' };
   let first;
   let second;
@@ -143,6 +143,65 @@ test('deduplicates concurrent START_AUDIT messages from the same panel sender', 
   assert.equal(first.auditId, 'audit-1');
   assert.deepEqual(second, { ok: true, auditId: 'audit-1', state: 'running', duplicate: true });
   finish?.({ auditId: 'audit-1', session: { status: 'complete' }, report: {} });
+});
+
+test('stores only a sanitized URL before execution while runner keeps the full navigation URL', async () => {
+  const chromeApi = createChrome();
+  const sessions = new Map();
+  const stored = [];
+  let runnerUrl;
+  const auditStore = {
+    async setLatest(value) { stored.push(value); },
+    async commitAudit(_id, _model, latest) { stored.push(latest); },
+  };
+  registerServiceWorker(chromeApi, {
+    createId: () => 'audit-private', sessions, auditStore,
+    chromeAdapterFactory: () => ({}),
+    runner: async ({ url }) => { runnerUrl = url; return { auditId: 'audit-private', session: { status: 'complete' }, report: {} }; },
+  });
+  chromeApi.listeners.message.listener(
+    { type: 'START_AUDIT', url: 'https://example.test/path?token=TOPSECRET&view=public#auth=TOPSECRET' },
+    { id: 'test', url: 'chrome-extension://test/src/panel/index.html' }, () => {},
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(runnerUrl, /TOPSECRET/);
+  assert.doesNotMatch(JSON.stringify([...sessions.values(), ...stored]), /TOPSECRET|token=|auth=/i);
+  assert.match(sessions.get('audit-private').requestedUrl, /view=public/);
+});
+
+test('notification failure after atomic commit never rewrites committed complete state', async () => {
+  const chromeApi = createChrome();
+  chromeApi.runtime.sendMessage = async () => { throw new Error('panel closed'); };
+  const writes = [];
+  const auditStore = {
+    async setLatest(value) { writes.push(['latest', value]); },
+    async commitAudit(id, model, latest) { writes.push(['commit', id, model, latest]); },
+  };
+  registerServiceWorker(chromeApi, {
+    createId: () => 'audit-notify', auditStore, chromeAdapterFactory: () => ({}),
+    runner: async () => ({ auditId: 'audit-notify', session: { status: 'complete' }, report: {} }),
+  });
+  chromeApi.listeners.message.listener({ type: 'START_AUDIT', url: 'https://example.test/' }, { id: 'test', url: 'chrome-extension://test/src/panel/index.html' }, () => {});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(writes.filter(([kind]) => kind === 'commit').length, 1);
+  assert.equal(writes.some(([kind, value]) => kind === 'latest' && value.status === 'failed'), false);
+});
+
+test('commit failure sends no completion and persists only best-effort failed latest', async () => {
+  const chromeApi = createChrome();
+  const latest = [];
+  const auditStore = {
+    async setLatest(value) { latest.push(value); },
+    async commitAudit() { throw new Error('transaction aborted'); },
+  };
+  registerServiceWorker(chromeApi, {
+    createId: () => 'audit-commit-fail', auditStore, chromeAdapterFactory: () => ({}),
+    runner: async () => ({ auditId: 'audit-commit-fail', session: { status: 'complete' }, report: {} }),
+  });
+  chromeApi.listeners.message.listener({ type: 'START_AUDIT', url: 'https://example.test/' }, { id: 'test', url: 'chrome-extension://test/src/panel/index.html' }, () => {});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(chromeApi.runtime.sent.some(message => message.type === 'AUDIT_COMPLETE'), false);
+  assert.equal(latest.at(-1).status, 'failed');
 });
 
 test('restores the latest persisted audit state to a reopened authorized panel', async () => {

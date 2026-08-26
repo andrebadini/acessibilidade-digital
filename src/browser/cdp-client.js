@@ -46,17 +46,7 @@ export function createCdpClient({ attach, detach, send }) {
         if (!connection) throw new Error('O CDP não está conectado.');
         ensureUsable();
         if (typeof method !== 'string' || !method) throw new TypeError('O método CDP é inválido.');
-        const record = connection;
-        try {
-          return await send(record.target, method, params);
-        } catch (error) {
-          try {
-            await release(record);
-          } catch {
-            // The command error remains actionable; reuse is blocked by detachFailure.
-          }
-          throw error;
-        }
+        return send(connection.target, method, params);
       });
     },
     disconnect() {

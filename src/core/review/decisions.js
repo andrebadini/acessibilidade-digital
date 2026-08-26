@@ -1,6 +1,34 @@
 const ANSWERS = Object.freeze(['conforme', 'não conforme', 'não foi possível determinar']);
 const MODES = Object.freeze(['assisted', 'manual']);
 
+function isPlainRecord(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function ownValue(record, key, label) {
+  const descriptor = isPlainRecord(record) ? Object.getOwnPropertyDescriptor(record, key) : null;
+  if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new TypeError(`${label} deve ser uma propriedade própria.`);
+  return descriptor.value;
+}
+
+function assertJsonData(value, label = 'valor', ancestors = new WeakSet()) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number' && Number.isFinite(value)) return;
+  if (typeof value !== 'object') throw new TypeError(`${label} não é JSON-safe.`);
+  if (ancestors.has(value)) throw new TypeError(`${label} contém referência circular.`);
+  if (!Array.isArray(value) && !isPlainRecord(value)) throw new TypeError(`${label} deve conter apenas objetos de dados simples.`);
+  ancestors.add(value);
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== 'string') throw new TypeError(`${label} contém propriedade inválida.`);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new TypeError(`${label}.${key} deve ser uma propriedade de dados.`);
+    assertJsonData(descriptor.value, `${label}.${key}`, ancestors);
+  }
+  ancestors.delete(value);
+}
+
 function required(value, label) {
   if (typeof value !== 'string' || !value.trim()) throw new TypeError(`${label} deve ser um identificador não vazio.`);
   return value.trim();
@@ -9,8 +37,10 @@ function required(value, label) {
 function canonicalInstant(value) {
   if (typeof value !== 'string' || !value.trim()) throw new TypeError('A data da decisão é obrigatória.');
   const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) throw new TypeError('A data da decisão deve ser ISO válida.');
-  return date.toISOString();
+  if (!Number.isFinite(date.getTime()) || date.toISOString() !== value) {
+    throw new TypeError('A data da decisão deve ser ISO canônica.');
+  }
+  return value;
 }
 
 function stableId(value) {
@@ -30,32 +60,65 @@ function freeze(value, seen = new WeakSet()) {
 }
 
 export function createReviewDecision(input) {
-  if (!input || typeof input !== 'object') throw new TypeError('Decisão de revisão inválida.');
-  const auditId = required(input.auditId, 'O identificador da auditoria');
-  const itemId = required(input.itemId, 'O identificador do item');
-  const occurrenceId = required(input.occurrenceId, 'O identificador da ocorrência');
-  if (!ANSWERS.includes(input.answer)) throw new TypeError('Resposta de revisão inválida.');
-  const evaluator = required(input.evaluator, 'O avaliador');
-  const decidedAt = canonicalInstant(input.decidedAt);
-  const mode = input.mode ?? 'assisted';
+  if (!isPlainRecord(input)) throw new TypeError('Decisão de revisão deve ser um objeto de dados simples.');
+  assertJsonData(input, 'Decisão de revisão');
+  const auditId = required(ownValue(input, 'auditId', 'O identificador da auditoria'), 'O identificador da auditoria');
+  const itemId = required(ownValue(input, 'itemId', 'O identificador do item'), 'O identificador do item');
+  const occurrenceId = required(ownValue(input, 'occurrenceId', 'O identificador da ocorrência'), 'O identificador da ocorrência');
+  const answer = ownValue(input, 'answer', 'A resposta de revisão');
+  if (!ANSWERS.includes(answer)) throw new TypeError('Resposta de revisão inválida.');
+  const evaluator = required(ownValue(input, 'evaluator', 'O avaliador'), 'O avaliador');
+  const decidedAt = canonicalInstant(ownValue(input, 'decidedAt', 'A data da decisão'));
+  const mode = ownValue(input, 'mode', 'O modo de revisão');
   if (!MODES.includes(mode)) throw new TypeError('Modo de revisão inválido.');
-  if (input.note !== undefined && typeof input.note !== 'string') throw new TypeError('A nota da decisão deve ser texto.');
-  const note = input.note?.trim() || '';
-  const canonical = { auditId, itemId, occurrenceId, answer: input.answer, evaluator, decidedAt, mode, ...(note ? { note } : {}) };
-  JSON.stringify(canonical);
+  const noteValue = Object.hasOwn(input, 'note') ? ownValue(input, 'note', 'A nota da decisão') : undefined;
+  if (noteValue !== undefined && typeof noteValue !== 'string') throw new TypeError('A nota da decisão deve ser texto.');
+  const note = noteValue?.trim() || '';
+  const canonical = { auditId, itemId, occurrenceId, answer, evaluator, decidedAt, mode, ...(note ? { note } : {}) };
+  assertJsonData(canonical, 'Decisão de revisão');
   return Object.freeze({ decisionId: stableId(JSON.stringify(canonical)), ...canonical });
 }
 
+function requireArray(record, key, label) {
+  const value = ownValue(record, key, label);
+  if (!Array.isArray(value)) throw new TypeError(`${label} deve ser uma lista.`);
+  return value;
+}
+
 export function applyReviewDecisions(auditModel, decisions) {
-  if (!auditModel || typeof auditModel !== 'object' || typeof auditModel.auditId !== 'string') throw new TypeError('Modelo de auditoria inválido.');
+  if (!isPlainRecord(auditModel)) throw new TypeError('Modelo de auditoria inválido.');
+  assertJsonData(auditModel, 'Modelo de auditoria');
+  const auditId = required(ownValue(auditModel, 'auditId', 'O identificador da auditoria'), 'O identificador da auditoria');
   if (!Array.isArray(decisions)) throw new TypeError('As decisões devem ser uma lista.');
+  const sourceItems = requireArray(auditModel, 'itemResults', 'Os resultados de itens');
+  const sourceOccurrences = requireArray(auditModel, 'occurrences', 'As ocorrências');
+  const sourceRules = requireArray(auditModel, 'ruleResults', 'Os resultados de regras');
+  const sourceManualReview = requireArray(auditModel, 'manualReview', 'A fila de revisão');
+  const sourcePrior = requireArray(auditModel, 'reviewDecisions', 'O histórico de decisões');
+
+  const itemIds = new Set();
+  for (const item of sourceItems) {
+    const id = required(ownValue(item, 'id', 'O identificador do item'), 'O identificador do item');
+    if (itemIds.has(id)) throw new TypeError(`Item duplicado ou ambíguo: ${id}.`);
+    itemIds.add(id);
+  }
+  const occurrenceIds = new Set();
+  for (const occurrence of sourceOccurrences) {
+    const id = required(ownValue(occurrence, 'occurrenceId', 'O identificador da ocorrência'), 'O identificador da ocorrência');
+    required(ownValue(occurrence, 'itemId', 'O vínculo da ocorrência'), 'O vínculo da ocorrência');
+    if (occurrenceIds.has(id)) throw new TypeError(`Ocorrência duplicada ou ambígua: ${id}.`);
+    occurrenceIds.add(id);
+  }
+
   const normalized = decisions.map(createReviewDecision);
-  const prior = Array.isArray(auditModel.reviewDecisions) ? auditModel.reviewDecisions.map(createReviewDecision) : [];
-  const itemById = new Map((auditModel.itemResults || []).map(item => [item.id, item]));
-  const occurrenceById = new Map((auditModel.occurrences || []).map(occurrence => [occurrence.occurrenceId, occurrence]));
+  const prior = sourcePrior.map(createReviewDecision);
+  // Clone only after validation so accessors and exotic prototypes are never executed.
+  const cloned = structuredClone(auditModel);
+  const itemById = new Map(cloned.itemResults.map(item => [item.id, item]));
+  const occurrenceById = new Map(cloned.occurrences.map(occurrence => [occurrence.occurrenceId, occurrence]));
   const seenOccurrences = new Set();
   for (const decision of [...prior, ...normalized]) {
-    if (decision.auditId !== auditModel.auditId) throw new TypeError('A decisão pertence a outra auditoria.');
+    if (decision.auditId !== auditId) throw new TypeError('A decisão pertence a outra auditoria.');
     if (!itemById.has(decision.itemId)) throw new TypeError(`Item de revisão desconhecido: ${decision.itemId}.`);
     const occurrence = occurrenceById.get(decision.occurrenceId);
     if (!occurrence) throw new TypeError(`Ocorrência de revisão desconhecida: ${decision.occurrenceId}.`);
@@ -74,16 +137,16 @@ export function applyReviewDecisions(auditModel, decisions) {
   }
   const combined = [...combinedByOccurrence.values()];
   const reviewableByItem = new Map();
-  for (const occurrence of auditModel.occurrences || []) {
+  for (const occurrence of cloned.occurrences) {
     const list = reviewableByItem.get(occurrence.itemId) || [];
     list.push(occurrence);
     reviewableByItem.set(occurrence.itemId, list);
   }
 
-  const automaticFailures = new Set((auditModel.ruleResults || [])
+  const automaticFailures = new Set(sourceRules
     .filter(result => result.mode === 'automated' && result.outcome === 'failed')
     .flatMap(result => Array.isArray(result.nbrItems) ? result.nbrItems : []));
-  const itemResults = (auditModel.itemResults || []).map(item => {
+  cloned.itemResults = cloned.itemResults.map(item => {
     const occurrences = reviewableByItem.get(item.id) || [];
     const itemDecisions = occurrences.map(occurrence => combinedByOccurrence.get(occurrence.occurrenceId)).filter(Boolean);
     if (itemDecisions.length === 0) return item;
@@ -107,20 +170,14 @@ export function applyReviewDecisions(auditModel, decisions) {
       },
     };
   });
-  const manualReview = (auditModel.manualReview || []).map(entry => {
+  cloned.manualReview = sourceManualReview.map((_, index) => {
+    const entry = cloned.manualReview[index];
     const decision = combinedByOccurrence.get(entry.occurrenceId);
     return decision ? { ...entry, status: 'answered', decisionId: decision.decisionId } : entry;
   });
-  const result = {
-    ...auditModel,
-    itemResults,
-    manualReview,
-    reviewDecisions: combined,
-    evidence: auditModel.evidence,
-    reproducibility: auditModel.reproducibility,
-  };
-  JSON.stringify(result);
-  return freeze(result);
+  cloned.reviewDecisions = combined;
+  assertJsonData(cloned, 'Modelo revisado');
+  return freeze(cloned);
 }
 
 export { ANSWERS as REVIEW_ANSWERS, MODES as REVIEW_MODES };
