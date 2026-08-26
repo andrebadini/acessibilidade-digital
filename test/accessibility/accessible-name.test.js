@@ -189,3 +189,39 @@ test('does not repeat title as a description when the AX name already equals it'
     description: '', descriptionSource: 'none'
   });
 });
+
+test('uses complete visible text from referenced headings with a Map index', () => {
+  const first = { tagName: 'span', attributes: { id: 'first' }, text: 'Prefixo' };
+  const heading = {
+    tagName: 'h2', attributes: { id: 'heading' }, text: 'Título da seção',
+    children: [{ tagName: 'span', hidden: true, text: 'SEGREDO' }]
+  };
+  const node = { tagName: 'button', attributes: { 'aria-labelledby': 'missing first heading' } };
+
+  assert.deepEqual(computeAccessibleText(node, indexFor(first, heading, node)), {
+    name: 'Prefixo Título da seção', nameSource: 'aria-labelledby',
+    description: '', descriptionSource: 'none'
+  });
+});
+
+test('uses complete visible text from referenced section, list, and table with an object index', () => {
+  const section = { tagName: 'section', attributes: { id: 'section' }, text: 'Descrição da seção' };
+  const list = {
+    tagName: 'ul', attributes: { id: 'list' },
+    children: [{ tagName: 'li', text: 'Item da lista' }]
+  };
+  const table = {
+    tagName: 'table', attributes: { id: 'table' },
+    children: [{ tagName: 'tr', children: [{ tagName: 'td', text: 'Célula da tabela' }] }]
+  };
+  const node = {
+    tagName: 'input',
+    attributes: { 'aria-label': 'Campo', 'aria-describedby': 'section missing list table' }
+  };
+  const index = { section, list, table, node };
+
+  assert.deepEqual(computeAccessibleText(node, index), {
+    name: 'Campo', nameSource: 'aria-label',
+    description: 'Descrição da seção Item da lista Célula da tabela', descriptionSource: 'aria-describedby'
+  });
+});

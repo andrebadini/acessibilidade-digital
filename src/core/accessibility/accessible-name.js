@@ -68,10 +68,6 @@ const CONTENT_NAME_ROLES = new Set([
   'button', 'checkbox', 'link', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
   'option', 'radio', 'switch', 'tab', 'treeitem'
 ]);
-const REFERENCE_CONTENT_TAGS = new Set([
-  'a', 'abbr', 'b', 'button', 'cite', 'code', 'div', 'em', 'i', 'label', 'legend',
-  'option', 'p', 'span', 'strong', 'summary'
-]);
 const LABELABLE_TAGS = new Set(['button', 'input', 'meter', 'output', 'progress', 'select', 'textarea']);
 
 function roleOf(node) {
@@ -84,9 +80,10 @@ function isLabelable(node) {
 }
 
 function acceptsContents(node, fromReference) {
+  if (fromReference) return true;
   const role = roleOf(node);
   if (role) return CONTENT_NAME_ROLES.has(role);
-  return (fromReference ? REFERENCE_CONTENT_TAGS : CONTENT_NAME_TAGS).has(tagOf(node));
+  return CONTENT_NAME_TAGS.has(tagOf(node));
 }
 
 function axText(axNode, property) {
