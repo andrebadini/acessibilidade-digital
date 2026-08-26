@@ -1,17 +1,28 @@
-const ROLE_LABELS = Object.freeze({
-  button: 'botão',
-  link: 'link',
-  checkbox: 'caixa de seleção',
-  radio: 'botão de opção',
-  textbox: 'campo de texto',
-  combobox: 'caixa de combinação',
-  heading: 'cabeçalho',
-  img: 'imagem',
-  region: 'região',
-  table: 'tabela',
-  list: 'lista',
-  listitem: 'item da lista'
-});
+const ROLE_LABELS = new Map([
+  ['button', 'botão'],
+  ['link', 'link'],
+  ['checkbox', 'caixa de seleção'],
+  ['radio', 'botão de opção'],
+  ['textbox', 'campo de texto'],
+  ['combobox', 'caixa de combinação'],
+  ['heading', 'cabeçalho'],
+  ['img', 'imagem'],
+  ['region', 'região'],
+  ['table', 'tabela'],
+  ['list', 'lista'],
+  ['listitem', 'item da lista']
+]);
+const EMPTY_PROPERTIES = Object.freeze({});
+
+function propertiesOf(input) {
+  return input !== null && typeof input === 'object' && !Array.isArray(input)
+    ? input
+    : EMPTY_PROPERTIES;
+}
+
+function ownProperty(properties, key) {
+  return Object.hasOwn(properties, key) ? properties[key] : undefined;
+}
 
 function previewText(value) {
   if (typeof value !== 'string' && typeof value !== 'number') return '';
@@ -20,16 +31,19 @@ function previewText(value) {
 
 function observedState(properties) {
   const states = [];
-  if (properties.checked === true) states.push('marcado');
-  if (properties.checked === false) states.push('desmarcado');
-  if (properties.checked === 'mixed') states.push('parcialmente marcado');
-  if (properties.selected === true) states.push('selecionado');
-  if (properties.selected === false) states.push('não selecionado');
-  if (properties.expanded === true) states.push('expandido');
-  if (properties.expanded === false) states.push('recolhido');
-  if (properties.disabled === true) states.push('indisponível');
-  if (properties.required === true) states.push('obrigatório');
-  if (properties.invalid === true) states.push('inválido');
+  const checked = ownProperty(properties, 'checked');
+  const selected = ownProperty(properties, 'selected');
+  const expanded = ownProperty(properties, 'expanded');
+  if (checked === true) states.push('marcado');
+  if (checked === false) states.push('desmarcado');
+  if (checked === 'mixed') states.push('parcialmente marcado');
+  if (selected === true) states.push('selecionado');
+  if (selected === false) states.push('não selecionado');
+  if (expanded === true) states.push('expandido');
+  if (expanded === false) states.push('recolhido');
+  if (ownProperty(properties, 'disabled') === true) states.push('indisponível');
+  if (ownProperty(properties, 'required') === true) states.push('obrigatório');
+  if (ownProperty(properties, 'invalid') === true) states.push('inválido');
   return states;
 }
 
@@ -38,18 +52,20 @@ function observedState(properties) {
  * the exact speech of NVDA, JAWS, VoiceOver, or any other screen reader.
  */
 export function buildAnnouncementPreview(properties = {}) {
-  const role = ROLE_LABELS[properties.role];
-  const value = previewText(properties.value);
-  const level = Number.isInteger(properties.level) && properties.level > 0
-    ? `nível ${properties.level}`
+  const safeProperties = propertiesOf(properties);
+  const role = ROLE_LABELS.get(ownProperty(safeProperties, 'role'));
+  const value = previewText(ownProperty(safeProperties, 'value'));
+  const rawLevel = ownProperty(safeProperties, 'level');
+  const level = Number.isInteger(rawLevel) && rawLevel > 0
+    ? `nível ${rawLevel}`
     : '';
   const parts = [
-    previewText(properties.name),
+    previewText(ownProperty(safeProperties, 'name')),
     role,
-    previewText(properties.description),
+    previewText(ownProperty(safeProperties, 'description')),
     value && `valor ${value}`,
     level,
-    ...observedState(properties)
+    ...observedState(safeProperties)
   ].filter(Boolean);
   const seen = new Set();
   const uniqueParts = parts.filter(part => {

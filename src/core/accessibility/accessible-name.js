@@ -63,8 +63,30 @@ function textFromContents(node, allowHidden) {
   return normalizeText([ownText, childText].filter(Boolean).join(' '));
 }
 
-function acceptsContents(node) {
-  return !new Set(['area', 'base', 'br', 'embed', 'img', 'input', 'meta', 'script', 'style', 'track']).has(tagOf(node));
+const CONTENT_NAME_TAGS = new Set(['a', 'button', 'label', 'legend', 'option', 'summary']);
+const CONTENT_NAME_ROLES = new Set([
+  'button', 'checkbox', 'link', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
+  'option', 'radio', 'switch', 'tab', 'treeitem'
+]);
+const REFERENCE_CONTENT_TAGS = new Set([
+  'a', 'abbr', 'b', 'button', 'cite', 'code', 'div', 'em', 'i', 'label', 'legend',
+  'option', 'p', 'span', 'strong', 'summary'
+]);
+const LABELABLE_TAGS = new Set(['button', 'input', 'meter', 'output', 'progress', 'select', 'textarea']);
+
+function roleOf(node) {
+  return normalizeText(attribute(node, 'role')).toLowerCase();
+}
+
+function isLabelable(node) {
+  const tag = tagOf(node);
+  return LABELABLE_TAGS.has(tag) && !(tag === 'input' && normalizeText(attribute(node, 'type')).toLowerCase() === 'hidden');
+}
+
+function acceptsContents(node, fromReference) {
+  const role = roleOf(node);
+  if (role) return CONTENT_NAME_ROLES.has(role);
+  return (fromReference ? REFERENCE_CONTENT_TAGS : CONTENT_NAME_TAGS).has(tagOf(node));
 }
 
 function axText(axNode, property) {
@@ -84,37 +106,39 @@ function resolveReferences(ids, index, visiting) {
     const referenced = findById(index, id);
     if (!referenced || visiting.has(referenced)) continue;
 
-    const text = fallbackName(referenced, index, new Set(visiting), true).value;
+    const text = fallbackName(referenced, index, new Set(visiting), true, true).value;
     if (text) parts.push(text);
   }
   return normalizeText(parts.join(' '));
 }
 
 function nativeLabelText(node, index, visiting) {
+  if (!isLabelable(node)) return '';
+
   const labels = Array.isArray(node?.labels) ? node.labels : [];
   const fromLabels = labels.map(label => {
     if (typeof label === 'string') {
       const referenced = findById(index, label);
       return referenced
-        ? fallbackName(referenced, index, new Set(visiting), true).value
+        ? fallbackName(referenced, index, new Set(visiting), true, true).value
         : normalizeText(label);
     }
-    return fallbackName(label, index, new Set(visiting), true).value;
+    return fallbackName(label, index, new Set(visiting), true, true).value;
   }).filter(Boolean);
 
   const id = nodeId(node);
   const fromFor = id
     ? nodesFromIndex(index)
       .filter(candidate => tagOf(candidate) === 'label' && attribute(candidate, 'for') === id)
-      .map(label => fallbackName(label, index, new Set(visiting), true).value)
+      .map(label => fallbackName(label, index, new Set(visiting), true, true).value)
       .filter(Boolean)
     : [];
 
   return normalizeText([...fromLabels, ...fromFor].join(' '));
 }
 
-function fallbackName(node, index, visiting = new Set(), allowHidden = false) {
-  if (!node || (!allowHidden && isHidden(node))) return { value: '', source: NO_SOURCE };
+function fallbackName(node, index, visiting = new Set(), allowHiddenRoot = false, fromReference = false) {
+  if (!node || (!allowHiddenRoot && isHidden(node))) return { value: '', source: NO_SOURCE };
   if (visiting.has(node)) return { value: '', source: NO_SOURCE };
 
   const nextVisiting = new Set(visiting);
@@ -132,12 +156,13 @@ function fallbackName(node, index, visiting = new Set(), allowHidden = false) {
   const nativeLabel = nativeLabelText(node, index, nextVisiting);
   if (nativeLabel) return { value: nativeLabel, source: 'label' };
 
-  if (hasAttribute(node, 'alt') && ['area', 'img'].includes(tagOf(node))) {
+  const isImageInput = tagOf(node) === 'input' && normalizeText(attribute(node, 'type')).toLowerCase() === 'image';
+  if (hasAttribute(node, 'alt') && (['area', 'img'].includes(tagOf(node)) || isImageInput)) {
     return { value: normalizeText(attribute(node, 'alt')), source: 'alt' };
   }
 
-  if (acceptsContents(node)) {
-    const contents = textFromContents(node, allowHidden);
+  if (acceptsContents(node, fromReference)) {
+    const contents = textFromContents(node, allowHiddenRoot && isHidden(node));
     if (contents) return { value: contents, source: 'contents' };
   }
 
@@ -147,7 +172,7 @@ function fallbackName(node, index, visiting = new Set(), allowHidden = false) {
   return { value: '', source: NO_SOURCE };
 }
 
-function fallbackDescription(node, index, name) {
+function fallbackDescription(node, index, finalName) {
   const describedBy = attribute(node, 'aria-describedby');
   if (describedBy) {
     const value = resolveReferences(describedBy, index, new Set([node]));
@@ -155,7 +180,7 @@ function fallbackDescription(node, index, name) {
   }
 
   const title = normalizeText(attribute(node, 'title'));
-  if (title && name.source !== 'title' && title !== name.value) {
+  if (title && title !== finalName) {
     return { value: title, source: 'title' };
   }
 
@@ -173,10 +198,11 @@ export function computeAccessibleText(node, index, axNode) {
   const axName = axText(axNode, 'name');
   const axDescription = axText(axNode, 'description');
   const fallback = fallbackName(node, index);
-  const description = fallbackDescription(node, index, fallback);
+  const name = axName || fallback.value;
+  const description = fallbackDescription(node, index, name);
 
   return {
-    name: axName || fallback.value,
+    name,
     nameSource: axName ? 'accessibility-tree' : fallback.source,
     description: axDescription || description.value,
     descriptionSource: axDescription ? 'accessibility-tree' : description.source

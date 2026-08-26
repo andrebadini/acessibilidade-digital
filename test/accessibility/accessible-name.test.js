@@ -128,3 +128,64 @@ test('excludes ordinary hidden contents, terminates reference cycles, and report
     name: '', nameSource: 'none', description: '', descriptionSource: 'none'
   });
 });
+
+test('does not include a hidden descendant of a visible referenced root', () => {
+  const label = {
+    tagName: 'span', attributes: { id: 'visible-label' }, text: 'Visível',
+    children: [{ tagName: 'span', hidden: true, text: 'SEGREDO' }]
+  };
+  const node = { tagName: 'button', attributes: { 'aria-labelledby': 'visible-label' } };
+
+  assert.equal(computeAccessibleText(node, indexFor(label, node)).name, 'Visível');
+});
+
+test('allows the whole subtree of a directly referenced hidden root', () => {
+  const label = {
+    tagName: 'span', attributes: { id: 'hidden-label' }, hidden: true, text: 'Rótulo oculto',
+    children: [{ tagName: 'span', hidden: true, text: 'Subtexto oculto' }]
+  };
+  const node = { tagName: 'button', attributes: { 'aria-labelledby': 'hidden-label' } };
+
+  assert.equal(computeAccessibleText(node, indexFor(label, node)).name, 'Rótulo oculto Subtexto oculto');
+});
+
+test('uses only conservative name-from-content and native-label applicability', () => {
+  const divLabel = { tagName: 'label', attributes: { id: 'div-label', for: 'target' }, text: 'Rótulo inválido' };
+  const hiddenInputLabel = { tagName: 'label', attributes: { id: 'hidden-label', for: 'secret' }, text: 'Segredo' };
+  const textInputLabel = { tagName: 'label', attributes: { id: 'text-label', for: 'email' }, text: 'E-mail' };
+  const target = { tagName: 'div', attributes: { id: 'target' } };
+  const hiddenInput = { tagName: 'input', attributes: { id: 'secret', type: 'hidden' } };
+  const textInput = { tagName: 'input', attributes: { id: 'email', type: 'email' } };
+  const textarea = { tagName: 'textarea', text: 'Nome falso' };
+  const list = { tagName: 'ul', text: 'Nome falso' };
+  const combo = { tagName: 'div', attributes: { role: 'combobox' }, text: 'Nome falso' };
+  const button = { tagName: 'button', text: 'Nome permitido' };
+  const imageInput = { tagName: 'input', attributes: { type: 'image', alt: 'Pesquisar' } };
+  const textInputWithAlt = { tagName: 'input', attributes: { type: 'text', alt: 'Não aplicável' } };
+  const index = indexFor(divLabel, hiddenInputLabel, textInputLabel, target, hiddenInput, textInput);
+
+  assert.equal(computeAccessibleText(target, index).nameSource, 'none');
+  assert.equal(computeAccessibleText(hiddenInput, index).nameSource, 'none');
+  assert.equal(computeAccessibleText(textInput, index).name, 'E-mail');
+  assert.equal(computeAccessibleText(textarea, index).nameSource, 'none');
+  assert.equal(computeAccessibleText(list, index).nameSource, 'none');
+  assert.equal(computeAccessibleText(combo, index).nameSource, 'none');
+  assert.deepEqual(computeAccessibleText(button, index), {
+    name: 'Nome permitido', nameSource: 'contents', description: '', descriptionSource: 'none'
+  });
+  assert.equal(computeAccessibleText(imageInput, index).name, 'Pesquisar');
+  assert.equal(computeAccessibleText(imageInput, index).nameSource, 'alt');
+  assert.equal(computeAccessibleText(textInputWithAlt, index).nameSource, 'none');
+});
+
+test('does not repeat title as a description when the AX name already equals it', () => {
+  const node = {
+    tagName: 'button',
+    attributes: { 'aria-label': 'Rótulo DOM', title: 'Salvar' }
+  };
+
+  assert.deepEqual(computeAccessibleText(node, indexFor(node), { name: 'Salvar' }), {
+    name: 'Salvar', nameSource: 'accessibility-tree',
+    description: '', descriptionSource: 'none'
+  });
+});
