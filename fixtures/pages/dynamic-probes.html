@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fixture local de probes</title>
+  <style>
+    :focus-visible { outline: 3px solid #005fcc; outline-offset: 2px; }
+    .overflow { width: 360px; }
+    .small { width: 23.99px; height: 24px; }
+    .minimum { width: 24px; height: 24px; }
+    .enhanced-small { width: 43.99px; height: 44px; }
+    .enhanced { width: 44px; height: 44px; }
+    .motion { animation: pulse 1s infinite; }
+    @media (prefers-reduced-motion: reduce) { .motion { animation: none; } }
+    @keyframes pulse { from { opacity: 1; } to { opacity: .5; } }
+  </style>
+</head>
+<body>
+  <a href="#local">Link local</a>
+  <form><button class="small">23,99</button><button class="minimum">24</button></form>
+  <button class="enhanced-small">43,99</button><button class="enhanced">44</button>
+  <div class="overflow">Conteúdo para observação determinística de reflow.</div>
+  <div class="motion">Movimento respeita preferência reduzida.</div>
+  <div id="local" tabindex="0">Destino local</div>
+</body>
+</html>

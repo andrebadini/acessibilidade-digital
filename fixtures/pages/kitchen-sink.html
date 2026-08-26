@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fixture local de coleta</title>
+  <style>
+    :focus-visible { outline: 3px solid #005fcc; }
+    .low-contrast { color: #aaa; background: #fff; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Casos de coleta</h1>
+    <label for="account">Conta</label><input id="account" autocomplete="username">
+    <label for="fixture-password">Senha fictícia</label><input id="fixture-password" type="password" value="fixture-only" autocomplete="current-password">
+    <input type="hidden" name="csrf_token" value="fixture-only">
+    <button id="good-button">Continuar</button>
+    <button class="low-contrast"></button>
+    <img alt="Quadrado azul" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Crect width='16' height='16' fill='blue'/%3E%3C/svg%3E">
+    <video controls muted><track kind="captions" srclang="pt" label="Português"></video>
+    <iframe title="Subdocumento" srcdoc="<!doctype html><html lang='pt-BR'><body><p>Conteúdo local</p></body></html>"></iframe>
+    <div id="shadow-host"></div>
+  </main>
+  <script>
+    document.querySelector('#shadow-host').attachShadow({ mode: 'open' }).innerHTML = '<button data-testid="shadow-action">Ação sombra</button>';
+  </script>
+</body>
+</html>
