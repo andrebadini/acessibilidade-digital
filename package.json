@@ -1,0 +1,8 @@
+{
+  "name": "audita-mt",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}
