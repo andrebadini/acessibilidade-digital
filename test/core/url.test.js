@@ -27,7 +27,9 @@ test('rejects missing, non-string, malformed, credentialed, and restricted URLs'
     undefined, null, 42, {}, [], '', '   ', 'http://', 'https://?x=1',
     'http:example.com', 'https:example.com', 'ftp://example.com', '/caminho', '?consulta=1',
     'https://exam\u0000ple.test/', 'https://exam\u001fple.test/', 'https://exam\u007fple.test/',
-    'https://exam\\ple.test/', 'https://exa\u202Emple.test/', 'https://exa\u2066mple.test/',
+    'https://exam\u0080ple.test/', 'https://exam\u009fple.test/', 'https://exam\\ple.test/',
+    'https://exa\u061Cmple.test/', 'https://exa\u200Emple.test/', 'https://exa\u200Fmple.test/',
+    'https://exa\u202Emple.test/', 'https://exa\u2066mple.test/',
   ]) {
     assert.throws(() => normalizeAuditUrl(value), /URL|endereço/i);
   }

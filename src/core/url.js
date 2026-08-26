@@ -16,7 +16,7 @@ export function normalizeAuditUrl(value) {
   if (!trimmed) {
     throw new TypeError('Informe um endereço para auditoria.');
   }
-  if (/[\u0000-\u001F\u007F\\\u202A-\u202E\u2066-\u2069]/.test(trimmed)) {
+  if (/[\u0000-\u001F\u007F-\u009F\\\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/.test(trimmed)) {
     throw new TypeError('A URL contém caracteres não permitidos.');
   }
   if (/^[/?#]/.test(trimmed) || hasMalformedOrUnsupportedScheme(trimmed)) {

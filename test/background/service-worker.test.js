@@ -73,6 +73,31 @@ test('persists sessions with storage.session and falls back to an injected map',
   assert.deepEqual(await fallbackStore.get('audit-2'), { id: 'audit-2' });
 });
 
+test('reads callback-only storage lastError and never ACKs a failed START_AUDIT persistence', async () => {
+  const chromeApi = createChrome();
+  chromeApi.storage = {
+    session: {
+      set(_value, callback) {
+        chromeApi.runtime.lastError = { message: 'storage denied' };
+        callback();
+        chromeApi.runtime.lastError = null;
+      },
+    },
+  };
+  const store = createSessionStore(chromeApi);
+  await assert.rejects(store.set('audit-1', { id: 'audit-1' }), /storage denied/);
+
+  registerServiceWorker(chromeApi, { createId: () => 'audit-1' });
+  let response;
+  chromeApi.listeners.message.listener(
+    { type: 'START_AUDIT', url: 'https://example.test/' },
+    { id: 'test', url: 'chrome-extension://test/src/panel/index.html' },
+    (value) => { response = value; },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(response, { ok: false, error: 'Não foi possível preparar a auditoria.' });
+});
+
 test('handles rejected panel-tab creation without an unhandled rejection', async () => {
   const chromeApi = createChrome();
   chromeApi.tabs.create = async () => { throw new Error('tabs indisponível'); };

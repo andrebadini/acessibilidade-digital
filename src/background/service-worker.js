@@ -27,9 +27,9 @@ export function createSessionStore(chromeApi, fallback = new Map()) {
     };
   }
   return {
-    async set(id, value) { await invokeStorage(storage, 'set', { [sessionKey(id)]: value }); },
+    async set(id, value) { await invokeStorage(chromeApi, storage, 'set', { [sessionKey(id)]: value }); },
     async get(id) {
-      const result = await invokeStorage(storage, 'get', sessionKey(id));
+      const result = await invokeStorage(chromeApi, storage, 'get', sessionKey(id));
       return result?.[sessionKey(id)];
     },
   };
@@ -72,7 +72,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
   return sessions;
 }
 
-function invokeStorage(storage, method, argument) {
+function invokeStorage(chromeApi, storage, method, argument) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (handler, value) => {
@@ -81,7 +81,11 @@ function invokeStorage(storage, method, argument) {
       handler(value);
     };
     try {
-      const result = storage[method](argument, (value) => finish(resolve, value));
+      const result = storage[method](argument, (value) => {
+        const lastError = chromeApi?.runtime?.lastError;
+        if (lastError) finish(reject, new Error(lastError.message || 'Falha no armazenamento da extensão.'));
+        else finish(resolve, value);
+      });
       if (result && typeof result.then === 'function') result.then((value) => finish(resolve, value), (error) => finish(reject, error));
     } catch (error) {
       finish(reject, error);
