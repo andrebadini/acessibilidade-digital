@@ -8,6 +8,7 @@ import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { AXE_MV3_CSP_GATE, AXE_RUN_CONFIG } from '../../src/browser/axe-adapter.js';
+import { decideAxeE2eExecution } from '../../scripts/axe-e2e-decision.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const fixtures = join(root, 'test', 'e2e', 'fixtures');
@@ -29,15 +30,13 @@ test('runs pinned local axe in every isolated frame under real MV3 and strict pa
   const response = await fetch(fixtureUrl);
   assert.equal(response.headers.get('content-security-policy'), strictCsp);
   debug('fixture CSP verified');
-  if (!AXE_MV3_CSP_GATE.enabled) {
+  const decision = decideAxeE2eExecution({ gate: AXE_MV3_CSP_GATE, chromeBinary });
+  if (decision.action === 'skip') {
     assert.equal(AXE_RUN_CONFIG.rules['target-size'].enabled, false);
-    t.skip(AXE_MV3_CSP_GATE.code);
+    t.skip(decision.code);
     return;
   }
-  if (!chromeBinary) {
-    t.skip('CHROME_BIN precisa apontar para Chromium ou Chrome for Testing com suporte a --load-extension.');
-    return;
-  }
+  assert.equal(decision.action, 'run', decision.code);
 
   const profile = await mkdtemp(join(tmpdir(), 'audita-axe-chrome-'));
   const chrome = spawn(chromeBinary, [

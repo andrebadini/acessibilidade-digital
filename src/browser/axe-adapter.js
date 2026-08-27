@@ -1,5 +1,3 @@
-import { redactSensitiveText } from '../core/privacy.js';
-
 export const AXE_MV3_CSP_GATE = Object.freeze({
   enabled: false,
   targetSizeEnabled: false,
@@ -31,36 +29,97 @@ const MAX_NODES = 100;
 const MAX_CHECKS = 32;
 const MAX_TAGS = 32;
 const MAX_TARGET_PARTS = 16;
-const MAX_TEXT = 512;
 const DEFAULT_TIMEOUT_MS = 30_000;
+const CATALOG_IDENTIFIER = /^[a-z][a-z0-9._:-]{0,127}$/iu;
+const SELECTOR_ALLOWED_CHARACTERS = /^[a-z0-9_.#():>\- \t]+$/iu;
+const SELECTOR_SENSITIVE_IDENTIFIER = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|api[-_]?key)/iu;
+const DEFAULT_TIMERS = Object.freeze({
+  set: (callback, timeoutMs) => setTimeout(callback, timeoutMs),
+  clear: timer => clearTimeout(timer),
+});
 
-function safeText(value, limit = MAX_TEXT) {
-  return redactSensitiveText(typeof value === 'string' ? value : '').slice(0, limit);
+export const AXE_TARGET_UNAVAILABLE = '[target-unavailable]';
+const AXE_CATALOG_ID_UNAVAILABLE = 'axe-id-unavailable';
+
+function safeCatalogIdentifier(value, fallback = null) {
+  return typeof value === 'string' && CATALOG_IDENTIFIER.test(value) ? value : fallback;
 }
 
 function safeImpact(value) {
   return ['minor', 'moderate', 'serious', 'critical'].includes(value) ? value : null;
 }
 
+function unsafeSelectorIdentifier(value) {
+  return SELECTOR_SENSITIVE_IDENTIFIER.test(value)
+    || /\d{6,}/u.test(value)
+    || (value.length >= 16 && /[a-z]/iu.test(value) && /\d/u.test(value));
+}
+
+function safeSelectorCompound(compound) {
+  let remaining = compound;
+  const identifiers = [];
+  let observed = false;
+  const tag = remaining.match(/^[a-z][a-z0-9-]{0,31}/iu)?.[0];
+  if (tag) {
+    observed = true;
+    identifiers.push(tag);
+    remaining = remaining.slice(tag.length);
+  }
+  while (remaining) {
+    const named = remaining.match(/^[.#]([a-z_][a-z0-9_-]{0,31})/iu);
+    if (named) {
+      observed = true;
+      identifiers.push(named[1]);
+      remaining = remaining.slice(named[0].length);
+      continue;
+    }
+    const position = remaining.match(/^:nth-of-type\(([1-9]\d{0,3})\)/iu);
+    if (position) {
+      observed = true;
+      remaining = remaining.slice(position[0].length);
+      continue;
+    }
+    return false;
+  }
+  return observed && identifiers.every(identifier => !unsafeSelectorIdentifier(identifier));
+}
+
+function safeStructuralSelector(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 256) return AXE_TARGET_UNAVAILABLE;
+  if (!SELECTOR_ALLOWED_CHARACTERS.test(value) || /[\u0000-\u001f\u007f]/u.test(value) || /(?:javascript|data|blob|file|https?):/iu.test(value)) return AXE_TARGET_UNAVAILABLE;
+  const normalized = value.trim().replace(/\s*>\s*/gu, ' > ').replace(/[ \t]+/gu, ' ');
+  if (!normalized || normalized.startsWith('>') || normalized.endsWith('>') || normalized.includes('> >')) return AXE_TARGET_UNAVAILABLE;
+  const tokens = normalized.split(' ');
+  let previousWasCombinator = true;
+  for (const token of tokens) {
+    if (token === '>') {
+      if (previousWasCombinator) return AXE_TARGET_UNAVAILABLE;
+      previousWasCombinator = true;
+    } else {
+      if (!safeSelectorCompound(token)) return AXE_TARGET_UNAVAILABLE;
+      previousWasCombinator = false;
+    }
+  }
+  return previousWasCombinator ? AXE_TARGET_UNAVAILABLE : normalized;
+}
+
 function sanitizeTarget(value, depth = 0) {
-  if (typeof value === 'string') return safeText(value);
-  if (!Array.isArray(value) || depth >= 3) return null;
-  return value.slice(0, MAX_TARGET_PARTS).map(item => sanitizeTarget(item, depth + 1)).filter(item => item !== null);
+  if (typeof value === 'string') return safeStructuralSelector(value);
+  if (!Array.isArray(value) || depth >= 3 || value.length === 0) return AXE_TARGET_UNAVAILABLE;
+  return value.slice(0, MAX_TARGET_PARTS).map(item => sanitizeTarget(item, depth + 1));
 }
 
 function sanitizeCheck(check) {
   return {
-    id: safeText(check?.id, 128),
+    id: safeCatalogIdentifier(check?.id, AXE_CATALOG_ID_UNAVAILABLE),
     impact: safeImpact(check?.impact),
-    message: safeText(check?.message),
   };
 }
 
 function sanitizeNode(node) {
   return {
     impact: safeImpact(node?.impact),
-    target: sanitizeTarget(node?.target) ?? [],
-    failureSummary: safeText(node?.failureSummary),
+    target: sanitizeTarget(node?.target),
     any: (Array.isArray(node?.any) ? node.any : []).slice(0, MAX_CHECKS).map(sanitizeCheck),
     all: (Array.isArray(node?.all) ? node.all : []).slice(0, MAX_CHECKS).map(sanitizeCheck),
     none: (Array.isArray(node?.none) ? node.none : []).slice(0, MAX_CHECKS).map(sanitizeCheck),
@@ -69,11 +128,9 @@ function sanitizeNode(node) {
 
 function sanitizeGroup(group) {
   return {
-    id: safeText(group?.id, 128),
+    id: safeCatalogIdentifier(group?.id, AXE_CATALOG_ID_UNAVAILABLE),
     impact: safeImpact(group?.impact),
-    tags: (Array.isArray(group?.tags) ? group.tags : []).slice(0, MAX_TAGS).map(tag => safeText(tag, 128)),
-    description: safeText(group?.description),
-    help: safeText(group?.help),
+    tags: (Array.isArray(group?.tags) ? group.tags : []).slice(0, MAX_TAGS).map(tag => safeCatalogIdentifier(tag)).filter(Boolean),
     nodes: (Array.isArray(group?.nodes) ? group.nodes : []).slice(0, MAX_NODES).map(sanitizeNode),
   };
 }
@@ -107,48 +164,72 @@ function diagnostic(code, frameId = null) {
   return { code, frameId: Number.isSafeInteger(frameId) ? frameId : null };
 }
 
-async function withTimeout(operation, timeoutMs) {
+function timeoutError() {
+  return new DOMException('Tempo limite do axe excedido.', 'TimeoutError');
+}
+
+function assertDeadline(deadline) {
+  if (deadline.expired) throw timeoutError();
+}
+
+async function withTimeout(operation, timeoutMs, timers) {
   let timer;
+  const deadline = { expired: false };
   try {
+    const timedOut = new Promise((_, reject) => {
+      timer = timers.set(() => {
+        deadline.expired = true;
+        reject(timeoutError());
+      }, timeoutMs);
+    });
     return await Promise.race([
-      operation,
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new DOMException('Tempo limite do axe excedido.', 'TimeoutError')), timeoutMs);
-      }),
+      operation(deadline),
+      timedOut,
     ]);
   } finally {
-    clearTimeout(timer);
+    timers.clear(timer);
   }
 }
 
-async function executeAxe(tabId, executeScript) {
+async function executeAxe(tabId, executeScript, deadline) {
   const target = { tabId, allFrames: true };
   let injections;
+  assertDeadline(deadline);
   try {
     injections = await executeScript({ target, world: 'ISOLATED', files: [AXE_PROVENANCE.runtimePath] });
   } catch {
+    assertDeadline(deadline);
     return { status: 'partial', provenance: AXE_PROVENANCE, frames: [], diagnostics: [diagnostic('AXE_INJECTION_FAILED')] };
   }
+  // An already-issued Chrome API call cannot be canceled, so the expired guard
+  // prevents its late resolution from starting or publishing subsequent work.
+  assertDeadline(deadline);
   let runs;
+  assertDeadline(deadline);
   try {
     runs = await executeScript({ target, world: 'ISOLATED', func: runAxeInFrame, args: [AXE_RUN_CONFIG] });
   } catch {
+    assertDeadline(deadline);
     return { status: 'partial', provenance: AXE_PROVENANCE, frames: [], diagnostics: [diagnostic('AXE_EXECUTION_FAILED')] };
   }
+  assertDeadline(deadline);
 
-  const runByFrame = new Map((Array.isArray(runs) ? runs : []).filter(entry => Number.isSafeInteger(entry?.frameId)).map(entry => [entry.frameId, entry]));
+  const injectionIds = [...new Set((Array.isArray(injections) ? injections : []).map(entry => entry?.frameId).filter(Number.isSafeInteger))];
+  const runEntries = (Array.isArray(runs) ? runs : []).filter(entry => Number.isSafeInteger(entry?.frameId));
+  const runByFrame = new Map(runEntries.map(entry => [entry.frameId, entry]));
+  const frameIds = [...injectionIds, ...runEntries.map(entry => entry.frameId).filter(frameId => !injectionIds.includes(frameId))];
+  const injectedFrames = new Set(injectionIds);
   const frames = [];
   const diagnostics = [];
-  for (const injection of Array.isArray(injections) ? injections : []) {
-    if (!Number.isSafeInteger(injection?.frameId)) continue;
-    const frameId = injection.frameId;
+  for (const frameId of frameIds) {
+    if (!injectedFrames.has(frameId)) diagnostics.push(diagnostic('AXE_FRAME_TOPOLOGY_CHANGED', frameId));
     const entry = runByFrame.get(frameId);
     if (!entry) {
       frames.push({ frameId, status: 'missing' });
       diagnostics.push(diagnostic('AXE_FRAME_MISSING', frameId));
     } else if (!entry.result?.ok) {
       frames.push({ frameId, status: 'failed' });
-      diagnostics.push(diagnostic('AXE_FRAME_RUN_FAILED', frameId));
+      diagnostics.push(diagnostic(entry.result?.code === 'AXE_RUNTIME_UNAVAILABLE' ? 'AXE_FRAME_RUNTIME_UNAVAILABLE' : 'AXE_FRAME_RUN_FAILED', frameId));
     } else if (entry.result.version !== AXE_PROVENANCE.version) {
       frames.push({ frameId, status: 'failed' });
       diagnostics.push(diagnostic('AXE_VERSION_MISMATCH', frameId));
@@ -164,11 +245,12 @@ async function executeAxe(tabId, executeScript) {
   };
 }
 
-export async function probeAxeInTab(tabId, { executeScript = defaultExecuteScript, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export async function probeAxeInTab(tabId, { executeScript = defaultExecuteScript, timeoutMs = DEFAULT_TIMEOUT_MS, timers = DEFAULT_TIMERS } = {}) {
   if (!Number.isSafeInteger(tabId) || tabId < 0) throw new TypeError('O tabId do axe é inválido.');
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) throw new TypeError('O timeout do axe é inválido.');
+  if (!timers || typeof timers.set !== 'function' || typeof timers.clear !== 'function') throw new TypeError('O timer do axe é inválido.');
   try {
-    return await withTimeout(executeAxe(tabId, executeScript), timeoutMs);
+    return await withTimeout(deadline => executeAxe(tabId, executeScript, deadline), timeoutMs, timers);
   } catch (error) {
     if (error?.name !== 'TimeoutError') throw error;
     return { status: 'partial', provenance: AXE_PROVENANCE, frames: [], diagnostics: [diagnostic('AXE_TIMEOUT')] };

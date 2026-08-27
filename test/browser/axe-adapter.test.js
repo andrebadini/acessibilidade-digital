@@ -104,13 +104,74 @@ test('normalizes success, missing, failed and version-mismatched frames as parti
   ]);
 });
 
-test('bounds raw groups and nodes while stripping audited HTML, URLs, unknown data and secrets', async () => {
+test('marks a run-only frame and runtime-unavailable result as a partial topology change', async () => {
+  let phase = 0;
+  const executeScript = async () => {
+    phase += 1;
+    if (phase === 1) return [{ frameId: 0 }];
+    return [
+      { frameId: 0, result: { ok: true, version: '4.13.0', results: { violations: [], incomplete: [], passes: [], inapplicable: [] } } },
+      { frameId: 7, result: { ok: false, code: 'AXE_RUNTIME_UNAVAILABLE' } },
+    ];
+  };
+
+  const result = await adapter.probeAxeInTab(12, { executeScript, timeoutMs: 100 });
+
+  assert.equal(result.status, 'partial');
+  assert.deepEqual(result.frames.map(frame => [frame.frameId, frame.status]), [[0, 'success'], [7, 'failed']]);
+  assert.deepEqual(result.diagnostics, [
+    { code: 'AXE_FRAME_TOPOLOGY_CHANGED', frameId: 7 },
+    { code: 'AXE_FRAME_RUNTIME_UNAVAILABLE', frameId: 7 },
+  ]);
+});
+
+test('never starts the run phase when a timed-out injection resolves late', async () => {
+  let releaseInjection;
+  const injection = new Promise(resolve => { releaseInjection = resolve; });
+  let timeoutCallback;
+  const timers = {
+    set(callback) { timeoutCallback = callback; return 1; },
+    clear() {},
+  };
+  const calls = [];
+  const promise = adapter.probeAxeInTab(13, {
+    executeScript: async options => {
+      calls.push(options);
+      return options.files ? injection : [];
+    },
+    timeoutMs: 10,
+    timers,
+  });
+  await Promise.resolve();
+  assert.equal(calls.length, 1);
+
+  timeoutCallback();
+  const result = await promise;
+  assert.deepEqual(result.diagnostics, [{ code: 'AXE_TIMEOUT', frameId: null }]);
+  releaseInjection([{ frameId: 0 }]);
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(calls.length, 1, 'a segunda chamada executeScript não pode iniciar após o deadline');
+});
+
+test('allows only catalog metadata and narrow structural selectors across the raw axe boundary', async () => {
   const hostileNode = {
     impact: 'serious',
     html: '<input value="password=TOPSECRET">',
-    target: ['#safe', 'input[data-token="token=TOPSECRET"]'],
-    failureSummary: 'Fix password=TOPSECRET before continuing',
-    any: [{ id: 'label', impact: 'serious', message: 'token=TOPSECRET', data: { password: 'TOPSECRET' } }],
+    target: [
+      '#safe',
+      'main > form.customer-form > input#email-field:nth-of-type(1)',
+      '#customer-4111111111111111',
+      'javascript:alert(1)',
+      'javascript:alert(document.cookie)',
+      'input[value="person@example.com"]',
+      '#cpf-12345678901',
+      '#user-a8F3kP9zR2mQ7wX4tN6v',
+      'button\n#control',
+    ],
+    failureSummary: 'javascript:alert(document.cookie) customer 4111111111111111',
+    any: [{ id: 'label-title-only', impact: 'serious', message: 'customer@example.com token=TOPSECRET', data: { password: 'TOPSECRET' } }],
     all: [],
     none: [],
     unknown: 'TOPSECRET',
@@ -142,9 +203,19 @@ test('bounds raw groups and nodes while stripping audited HTML, URLs, unknown da
   assert.equal(raw.violations.length, 100);
   assert.equal(raw.violations[0].nodes.length, 100);
   assert.deepEqual(Object.keys(raw).sort(), ['inapplicable', 'incomplete', 'passes', 'violations']);
-  assert.deepEqual(Object.keys(raw.violations[0]).sort(), ['description', 'help', 'id', 'impact', 'nodes', 'tags']);
-  assert.deepEqual(Object.keys(raw.violations[0].nodes[0]).sort(), ['all', 'any', 'failureSummary', 'impact', 'none', 'target']);
-  assert.deepEqual(Object.keys(raw.violations[0].nodes[0].any[0]).sort(), ['id', 'impact', 'message']);
-  assert.doesNotMatch(JSON.stringify(raw), /TOPSECRET|private\.invalid|remote\.invalid|<input|"data"/iu);
-  assert.match(JSON.stringify(raw), /\[redacted\]/u);
+  assert.deepEqual(Object.keys(raw.violations[0]).sort(), ['id', 'impact', 'nodes', 'tags']);
+  assert.deepEqual(Object.keys(raw.violations[0].nodes[0]).sort(), ['all', 'any', 'impact', 'none', 'target']);
+  assert.deepEqual(Object.keys(raw.violations[0].nodes[0].any[0]).sort(), ['id', 'impact']);
+  assert.deepEqual(raw.violations[0].nodes[0].target, [
+    '#safe',
+    'main > form.customer-form > input#email-field:nth-of-type(1)',
+    adapter.AXE_TARGET_UNAVAILABLE,
+    adapter.AXE_TARGET_UNAVAILABLE,
+    adapter.AXE_TARGET_UNAVAILABLE,
+    adapter.AXE_TARGET_UNAVAILABLE,
+    adapter.AXE_TARGET_UNAVAILABLE,
+    adapter.AXE_TARGET_UNAVAILABLE,
+    adapter.AXE_TARGET_UNAVAILABLE,
+  ]);
+  assert.doesNotMatch(JSON.stringify(raw), /TOPSECRET|private\.invalid|remote\.invalid|<input|customer-411|javascript:|document\.cookie|person@example|12345678901|a8F3kP9z|failureSummary|description|help|message|"data"/iu);
 });
