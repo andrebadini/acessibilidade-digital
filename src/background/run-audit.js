@@ -1,5 +1,8 @@
 import { captureElement, captureFullPage } from '../browser/capture-evidence.js';
 import { collectPage } from '../browser/collect-page.js';
+import { AXE_PROVENANCE, runAxeInTab } from '../browser/axe-adapter.js';
+import { dedupeFindingsForPresentation } from '../core/axe/dedupe-findings.js';
+import { normalizeAxeResults } from '../core/axe/normalize-axe-results.js';
 import {
   NBR17225_ITEMS,
   buildAnnouncementPreview,
@@ -8,6 +11,7 @@ import {
   computeAccessibleText,
   hashEvidenceArtifact,
   mergeProbesIntoSnapshot,
+  mergeAxeSupplementalResults,
   normalizeProbes,
   normalizeSnapshot,
   runCoreAudit,
@@ -17,6 +21,7 @@ import {
 import { canonicalStringify } from '../core/report/canonical-json.js';
 import { sha256Hex } from '../core/report/hash.js';
 import { normalizeAuditUrl } from '../core/url.js';
+import { axeEquivalenceForAuditaRule } from '../core/normative/axe-nbr-crosswalk.js';
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
 
 const SCHEMA_VERSION = 1;
@@ -240,12 +245,25 @@ function makeOccurrences(auditId, ruleResults, itemResults) {
     const targets = Array.isArray(result.targets) && result.targets.length ? result.targets : [null];
     for (const itemId of itemIds) for (const target of targets) {
       const nodeId = targetNodeId(target);
+      const equivalence = axeEquivalenceForAuditaRule(result.ruleId);
       add({
         itemId,
+        nbrItemRef: itemId,
         ruleId: result.ruleId,
         outcome: result.outcome,
         mode: result.mode,
         nodeId: nodeId && nodeId !== 'document' ? nodeId : null,
+        pageId: 'page-1',
+        source: { engine: 'audita-core', ruleId: result.ruleId, version: METHODOLOGY.version },
+        target: {
+          nodeId: nodeId && nodeId !== 'document' ? nodeId : null,
+          selector: null,
+          framePath: [],
+        },
+        equivalenceKey: equivalence?.equivalenceKey ?? `audita:${result.ruleId}`,
+        presentationTargetKey: equivalence?.targetScope === 'document'
+          ? 'document'
+          : nodeId && nodeId !== 'document' ? `node:${nodeId}` : null,
         evidenceIds: [],
         justification: typeof target?.message === 'string' && target.message.trim() ? target.message.trim() : result.summary || 'A ocorrência exige verificação humana.',
       });
@@ -257,15 +275,41 @@ function makeOccurrences(auditId, ruleResults, itemResults) {
     add({
       itemId: item.id, ruleId: null, outcome: 'cantTell', mode: item.evaluation,
       nodeId: null, evidenceIds: [],
+      pageId: 'page-1', nbrItemRef: item.id,
+      source: { engine: 'audita-manual-review', ruleId: `manual:${item.id}`, version: METHODOLOGY.version },
+      target: { nodeId: null, selector: null, framePath: [] },
+      equivalenceKey: `manual:${item.id}`, presentationTargetKey: null,
       justification: item.humanReason || 'O item depende de revisão humana no nível da página.',
     });
   }
   return occurrences;
 }
 
+function resolvePresentationTargets(occurrences, artifacts) {
+  const selectorToNodeIds = new Map();
+  for (const artifact of artifacts) {
+    const selector = artifact?.selector?.css;
+    if (typeof selector !== 'string' || !selector || !artifact.nodeId) continue;
+    const ids = selectorToNodeIds.get(selector) ?? [];
+    ids.push(artifact.nodeId);
+    selectorToNodeIds.set(selector, ids);
+  }
+  for (const occurrence of occurrences) {
+    if (occurrence.presentationTargetKey === 'document') continue;
+    if (occurrence.nodeId) {
+      occurrence.presentationTargetKey = `node:${occurrence.nodeId}`;
+      continue;
+    }
+    const selector = occurrence.target?.selector ?? occurrence.selector;
+    const candidates = typeof selector === 'string' ? selectorToNodeIds.get(selector) : null;
+    if (candidates?.length === 1) occurrence.presentationTargetKey = `node:${candidates[0]}`;
+  }
+}
+
 function manualQueue(occurrences, itemResults) {
   const itemById = new Map(itemResults.map(item => [item.id, item]));
-  return occurrences.filter(occurrence => occurrence.outcome === 'cantTell' || occurrence.mode !== 'automated').map(occurrence => {
+  return occurrences.filter(occurrence => occurrence.itemId &&
+    (occurrence.outcome === 'cantTell' || occurrence.mode !== 'automated')).map(occurrence => {
     const item = itemById.get(occurrence.itemId);
     return {
       occurrenceId: occurrence.occurrenceId,
@@ -292,7 +336,12 @@ async function draftModel(state) {
     finalUrl: state.finalUrl || state.requestedUrl,
     timestamps: { startedAt: state.startedAt, ...(state.endedAt ? { endedAt: state.endedAt } : {}) },
     environment: state.environment,
-    methodology: METHODOLOGY,
+    methodology: {
+      ...METHODOLOGY,
+      ruleCount: state.ruleResults.length,
+      coreRuleCount: state.coreRuleResults.length,
+      supplementalRuleCount: Math.max(0, state.ruleResults.length - state.coreRuleResults.length),
+    },
     session: { status: state.status, diagnostics: state.diagnostics, partial: state.status === 'partial' },
     snapshot: state.snapshot ? {
       schemaVersion: state.snapshot.schemaVersion,
@@ -307,6 +356,9 @@ async function draftModel(state) {
     evidence: { stateCount: state.fullPage ? 1 : 0, artifacts: state.artifacts },
     manualReview: state.manualReview,
     reviewDecisions: [],
+    axe: state.axe,
+    limitations: state.limitations,
+    presentation: state.presentation,
     progress: state.progress,
     report: state.report,
     reproducibility: {
@@ -335,7 +387,9 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     endedAt: '',
     environment: { chromeVersion: '', viewport: { width: null, height: null, deviceScaleFactor: null } },
     status: 'running', diagnostics: [], progress: [], snapshot: null,
-    ruleResults: [], itemResults: fallbackItems(), occurrences: [], manualReview: [],
+    ruleResults: [], coreRuleResults: [], itemResults: fallbackItems(), occurrences: [], manualReview: [],
+    axe: normalizeAxeResults({ status: 'disabled', provenance: AXE_PROVENANCE, frames: [], diagnostics: [{ code: 'AXE_FEATURE_DISABLED' }] }, { pageId: 'page-1' }),
+    rawAxe: null, limitations: [], presentation: { groups: [], occurrenceCount: 0, hiddenOccurrenceCount: 0 },
     artifacts: [], fullPage: null,
     report: { status: 'pending', reviewUrl: null, artifact: { status: 'pending', formats: [] } },
   };
@@ -400,6 +454,19 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     }
 
     try {
+      const axeRunner = typeof chromeAdapter.runAxeInTab === 'function'
+        ? chromeAdapter.runAxeInTab.bind(chromeAdapter)
+        : runAxeInTab;
+      state.rawAxe = await awaitStep(() => axeRunner(tab.id));
+    } catch (error) {
+      rethrowAbort(error, signal);
+      state.rawAxe = {
+        status: 'partial', provenance: AXE_PROVENANCE, frames: [],
+        diagnostics: [{ code: 'AXE_EXECUTION_FAILED', frameId: null }],
+      };
+    }
+
+    try {
       const environment = await awaitStep(() => chromeAdapter.getEnvironment?.(tab.id, cdp, pristineMetrics));
       if (environment && typeof environment === 'object') state.environment = {
         chromeVersion: typeof environment.chromeVersion === 'string' ? environment.chromeVersion : '',
@@ -424,6 +491,21 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     } catch (error) {
       fail('COLLECTION_FAILED', 'A estrutura da página não pôde ser coletada com segurança.', error);
     }
+
+    state.axe = normalizeAxeResults(state.rawAxe, {
+      pageId: 'page-1', auditId, snapshot: state.snapshot, rulesVersion: METHODOLOGY.version,
+    });
+    state.rawAxe = null;
+    state.limitations.push(...state.axe.limitations);
+    if (state.axe.status === 'disabled') {
+      state.diagnostics.push(diagnostic(
+        'AXE_FEATURE_DISABLED',
+        'O motor suplementar axe-core permaneceu desativado pelo gate MV3/CSP; o motor próprio continuou normalmente.',
+        canonicalNow(now), true,
+      ));
+    } else if (state.axe.status === 'partial') {
+      recoverable('AXE_EXECUTION_FAILED', 'O motor suplementar axe-core teve cobertura parcial; o motor próprio continuou normalmente.');
+    }
     if (fatal) throw Object.assign(new Error('AUDIT_FATAL_HANDLED'), { auditHandled: true });
 
     try {
@@ -442,15 +524,20 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     await progress('testing', 'Verificando acessibilidade', 50);
     try {
       const core = await awaitStep(() => runCoreAudit(state.snapshot));
-      state.ruleResults = [...core.ruleResults];
-      state.itemResults = [...core.itemResults];
+      state.coreRuleResults = [...core.ruleResults];
+      const hybrid = mergeAxeSupplementalResults(core, state.axe);
+      state.ruleResults = [...hybrid.ruleResults];
+      state.itemResults = [...hybrid.itemResults];
     } catch (error) {
       fail('CORE_AUDIT_FAILED', 'O núcleo de regras não pôde concluir a auditoria.', error);
     }
     if (fatal) throw Object.assign(new Error('AUDIT_FATAL_HANDLED'), { auditHandled: true });
 
     await progress('evidence', 'Preparando evidências', 72);
-    state.occurrences = makeOccurrences(auditId, state.ruleResults, state.itemResults);
+    state.occurrences = [
+      ...makeOccurrences(auditId, state.coreRuleResults, state.itemResults),
+      ...structuredClone(state.axe.occurrences),
+    ];
     const indexes = buildSnapshotIndexes(state.snapshot);
     const artifactByNode = new Map();
     const canCaptureElements = Boolean(state.fullPage);
@@ -520,6 +607,8 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
       throwIfAborted(signal);
     }
     state.manualReview = manualQueue(state.occurrences, state.itemResults);
+    resolvePresentationTargets(state.occurrences, state.artifacts);
+    state.presentation = dedupeFindingsForPresentation(state.occurrences);
 
     await progress('reporting', 'Gerando relatório', 92);
     throwIfAborted(signal);
@@ -554,7 +643,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
   async function finalize() {
     if (state.status === 'running') state.status = recoverableFailure ? 'partial' : fatal ? 'failed' : 'complete';
     state.endedAt = canonicalNow(now);
-    if (!state.occurrences.length && state.ruleResults.length) state.occurrences = makeOccurrences(auditId, state.ruleResults, state.itemResults);
+    if (!state.occurrences.length && state.coreRuleResults.length) state.occurrences = makeOccurrences(auditId, state.coreRuleResults, state.itemResults);
     if (!state.manualReview.length && state.occurrences.length) state.manualReview = manualQueue(state.occurrences, state.itemResults);
     return draftModel(state);
   }

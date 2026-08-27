@@ -20,7 +20,7 @@ export {
 export { createRuleRegistry, registerRule } from './rules/registry.js';
 export { runRules } from './rules/run-rules.js';
 export { aggregateItems } from './rules/aggregate-items.js';
-export { CORE_RULES, runCoreAudit, validateCoreRuleComposition } from './audit.js';
+export { CORE_RULES, mergeAxeSupplementalResults, runCoreAudit, validateCoreRuleComposition } from './audit.js';
 export { normalizeSnapshot, sanitizeResourceUrl } from './normalize-snapshot.js';
 export { mergeProbesIntoSnapshot, normalizeProbes } from './normalize-probes.js';
 export { buildStableSelector, escapeCssIdentifier } from './evidence/selector.js';

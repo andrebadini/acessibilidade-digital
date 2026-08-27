@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
 import { runAudit } from '../../src/background/run-audit.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
@@ -208,6 +209,14 @@ function fakeAdapter(options = {}) {
       return { url: 'https://example.test/final?token=REMOVE&view=public' };
     },
     async connectCdp() { events.push('connect-cdp'); return cdp; },
+    async runAxeInTab() {
+      events.push('axe');
+      if (options.axeFailure) throw options.axeFailure;
+      return options.axeRun || {
+        status: 'disabled', provenance: AXE_PROVENANCE, frames: [],
+        diagnostics: [{ code: 'AXE_FEATURE_DISABLED', frameId: null }],
+      };
+    },
     async collectPage() { events.push('collect'); options.afterCollect?.(); if (options.collectFailure) throw new Error('DOM unavailable'); return page; },
     async runDynamicProbes() { events.push('probes'); return options.rawProbes || { focus: { completed: false, events: [] }, warnings: [], actions: [] }; },
     async getEnvironment() { return { chromeVersion: 'Chrome/140.0', viewport: { width: 800, height: 600, deviceScaleFactor: 1 } }; },
@@ -233,9 +242,14 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
   assert.equal(model.ruleResults.length, 130);
   assert.equal(model.itemResults.length, 146);
   assert.equal(model.session.status, 'complete');
+  assert.equal(model.axe.status, 'disabled');
+  assert.ok(model.limitations.some(value => /axe-core|MV3|CSP/i.test(value)));
+  assert.ok(model.session.diagnostics.some(value => value.code === 'AXE_FEATURE_DISABLED'));
   assert.equal(model.requestedUrl, 'https://example.test/start?view=public');
   assert.equal(model.finalUrl, 'https://example.test/final?view=public');
   assert.ok(adapter.events.indexOf('full-page') < adapter.events.indexOf('collect'));
+  assert.ok(adapter.events.indexOf('axe') < adapter.events.indexOf('collect'));
+  assert.ok(adapter.events.indexOf('axe') < adapter.events.indexOf('probes'));
   assert.ok(adapter.events.indexOf('full-page') < adapter.events.indexOf('probes'));
   assert.equal(adapter.counts.disconnects, 1);
   assert.equal(adapter.counts.removals, 1);
@@ -272,6 +286,76 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
   assert.equal(Object.isFrozen(model.occurrences), true);
   assert.doesNotThrow(() => JSON.stringify(model));
   assert.doesNotMatch(JSON.stringify(model), /REMOVE|SECRET|user:pass|password=/i);
+});
+
+test('integrates a confirmed top-frame axe violation with provenance, ABNT outcome and fixed legal reference', async () => {
+  const page = rawPage();
+  page.document.language = '';
+  const axeRun = {
+    status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],
+    frames: [{ frameId: 0, status: 'success', result: {
+      violations: [{
+        id: 'html-has-lang', impact: 'serious', tags: ['wcag2a', 'wcag311', 'section508'],
+        nodes: [{ impact: 'serious', target: ['html'], html: '<html data-private="NÃO-PERSISTIR">', failureSummary: 'NÃO-PERSISTIR' }],
+      }],
+      incomplete: [], passes: [{ id: 'document-title', nodes: [] }], inapplicable: [],
+    } }],
+  };
+  const adapter = fakeAdapter({ page, axeRun });
+  const model = await runAudit({
+    url: 'https://example.test/', chromeAdapter: adapter,
+    now: clock, idFactory: () => 'audit-axe-confirmed',
+  });
+  const axeOccurrence = model.occurrences.find(occurrence => occurrence.source?.engine === 'axe-core');
+  const coreOccurrence = model.occurrences.find(occurrence => occurrence.ruleId === 'page-language');
+
+  assert.equal(model.ruleResults.length, 131);
+  assert.equal(model.itemResults.find(item => item.id === '5.13.2').outcome, 'failed');
+  assert.equal(axeOccurrence.outcome, 'failed');
+  assert.equal(axeOccurrence.itemId, '5.13.2');
+  assert.equal(axeOccurrence.applicabilityEvidence.source.ruleId, 'page-language');
+  assert.deepEqual(axeOccurrence.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v1' });
+  assert.ok(axeOccurrence.evidenceIds.includes(model.evidence.artifacts.find(item => item.kind === 'full-page').evidenceId));
+  assert.equal(model.axe.provenance.version, '4.13.0');
+  assert.equal(model.axe.provenance.config.rules['target-size'].enabled, false);
+  assert.equal(model.ruleResults.some(rule => rule.outcome === 'passed' && rule.source?.engine === 'axe-core'), false);
+  assert.doesNotMatch(JSON.stringify(model), /NÃO-PERSISTIR|section508/iu);
+  assert.ok(adapter.events.indexOf('axe') < adapter.events.indexOf('collect'));
+  assert.ok(adapter.events.indexOf('axe') < adapter.events.indexOf('probes'));
+  assert.ok(coreOccurrence);
+  const corroboratedGroup = model.presentation.groups.find(group =>
+    group.occurrenceIds.includes(coreOccurrence.occurrenceId));
+  assert.deepEqual(corroboratedGroup.occurrenceIds, [coreOccurrence.occurrenceId, axeOccurrence.occurrenceId]);
+  assert.deepEqual(corroboratedGroup.sources.map(source => source.engine), ['audita-core', 'axe-core']);
+  assert.ok(corroboratedGroup.occurrenceIds.every(id => model.occurrences.some(occurrence => occurrence.occurrenceId === id)));
+
+  const report = await enrichAuditForReport(model, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  });
+  const reportOccurrence = report.occurrences.find(occurrence => occurrence.source.engine === 'axe-core');
+  assert.equal(report.schemaVersion, 2);
+  assert.equal(reportOccurrence.target.selector, 'html');
+  assert.equal(reportOccurrence.impact, 'serious');
+  assert.equal(reportOccurrence.confidence, 'high');
+  assert.deepEqual(reportOccurrence.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v1' });
+  assert.equal(reportOccurrence.foreignBenchmarkRefs[0].benchmarkId, 'us.revised-508.wcag20-aa.v1');
+});
+
+test('keeps the Audita core running when axe throws and records a bounded partial diagnostic', async () => {
+  const adapter = fakeAdapter({ axeFailure: new Error('PRIVATE axe failure details') });
+  const model = await runAudit({
+    url: 'https://example.test/', chromeAdapter: adapter,
+    now: clock, idFactory: () => 'audit-axe-partial',
+  });
+
+  assert.equal(model.session.status, 'partial');
+  assert.equal(model.ruleResults.length, 130);
+  assert.equal(model.itemResults.length, 146);
+  assert.ok(model.session.diagnostics.some(entry => entry.code === 'AXE_EXECUTION_FAILED'));
+  assert.doesNotMatch(JSON.stringify(model), /PRIVATE axe failure details/iu);
+  assert.ok(adapter.events.includes('collect'));
+  assert.ok(adapter.events.includes('probes'));
 });
 
 test('attaches normalized AX accessibility to element evidence, its hash and the final HTML', async () => {

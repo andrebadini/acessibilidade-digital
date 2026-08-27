@@ -92,3 +92,73 @@ export async function runCoreAudit(snapshot, context = {}, rules = CORE_RULES) {
     })
   });
 }
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function supplementalOccurrenceCanAffectItem(occurrence, ruleById) {
+  if (!occurrence || typeof occurrence !== 'object' || typeof occurrence.nbrItemRef !== 'string') return false;
+  const rule = ruleById.get(occurrence.ruleId);
+  if (!rule || !Array.isArray(rule.nbrItems) || !rule.nbrItems.includes(occurrence.nbrItemRef)) return false;
+  if (occurrence.outcome === 'cantTell') return true;
+  const item = NBR17225_ITEMS.find(entry => entry.id === occurrence.nbrItemRef);
+  return occurrence.outcome === 'failed' && occurrence.source?.engine === 'axe-core' &&
+    occurrence.applicabilityEvidence?.confirmed === true &&
+    occurrence.applicabilityEvidence?.nbrItemRef === occurrence.nbrItemRef &&
+    occurrence.applicabilityEvidence?.source?.engine === 'audita-core' &&
+    occurrence.applicabilityEvidence?.source?.version === '1.0.0' &&
+    item?.ruleIds.includes(occurrence.applicabilityEvidence?.source?.ruleId);
+}
+
+/**
+ * Adds sanitized supplemental rule records while the ABNT item registry stays
+ * authoritative. A pass is summary-only and can never enter this boundary.
+ */
+export function mergeAxeSupplementalResults(coreAudit, supplemental) {
+  if (!coreAudit || typeof coreAudit !== 'object' || !Array.isArray(coreAudit.ruleResults) || !Array.isArray(coreAudit.itemResults)) {
+    throw new TypeError('O resultado do motor próprio é inválido.');
+  }
+  const incomingRules = Array.isArray(supplemental?.ruleResults)
+    ? supplemental.ruleResults.filter(rule => rule && typeof rule === 'object' && rule.outcome !== 'passed')
+    : [];
+  const existingIds = new Set(coreAudit.ruleResults.map(rule => rule.ruleId));
+  const supplementalRules = incomingRules.filter(rule => typeof rule.ruleId === 'string' &&
+    rule.ruleId.startsWith('axe.') && !existingIds.has(rule.ruleId));
+  const ruleById = new Map(supplementalRules.map(rule => [rule.ruleId, rule]));
+  const occurrenceOutcomes = new Map();
+  for (const occurrence of Array.isArray(supplemental?.occurrences) ? supplemental.occurrences : []) {
+    if (!supplementalOccurrenceCanAffectItem(occurrence, ruleById)) continue;
+    const previous = occurrenceOutcomes.get(occurrence.nbrItemRef);
+    if (occurrence.outcome === 'failed' || previous !== 'failed') {
+      occurrenceOutcomes.set(occurrence.nbrItemRef, occurrence.outcome);
+    }
+  }
+  const itemResults = coreAudit.itemResults.map(item => {
+    const supplementalOutcome = occurrenceOutcomes.get(item.id);
+    if (supplementalOutcome === 'failed') return { ...item, outcome: 'failed' };
+    if (supplementalOutcome === 'cantTell' && item.outcome !== 'failed') return { ...item, outcome: 'cantTell' };
+    return { ...item };
+  });
+  const coreRuleResults = cloneJson(coreAudit.ruleResults);
+  const copiedSupplemental = cloneJson(supplementalRules);
+  return deepFreeze({
+    schemaVersion: coreAudit.schemaVersion,
+    ruleResults: [...coreRuleResults, ...copiedSupplemental],
+    itemResults: cloneJson(itemResults),
+    composition: {
+      ruleCount: coreRuleResults.length + copiedSupplemental.length,
+      coreRuleCount: coreRuleResults.length,
+      supplementalRuleCount: copiedSupplemental.length,
+      itemCount: itemResults.length,
+      valid: coreAudit.composition?.valid === true,
+    },
+  });
+}
+
+function deepFreeze(value, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object' || seen.has(value) || Object.isFrozen(value)) return value;
+  seen.add(value);
+  for (const child of Object.values(value)) deepFreeze(child, seen);
+  return Object.freeze(value);
+}
