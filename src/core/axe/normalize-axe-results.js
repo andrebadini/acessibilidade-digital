@@ -26,43 +26,60 @@ function deepFreeze(value, seen = new WeakSet()) {
   return Object.freeze(value);
 }
 
-function safeRead(value, property) {
+function readOwnData(value, property) {
   try {
-    if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return undefined;
+    if ((typeof value !== 'object' && typeof value !== 'function') || value === null) {
+      return { value: undefined, readable: false, ownData: false };
+    }
     const descriptor = Object.getOwnPropertyDescriptor(value, property);
-    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
-  } catch { return undefined; }
+    if (!descriptor) return { value: undefined, readable: true, ownData: false };
+    if (!Object.hasOwn(descriptor, 'value')) return { value: undefined, readable: false, ownData: false };
+    return { value: descriptor.value, readable: true, ownData: true };
+  } catch { return { value: undefined, readable: false, ownData: false }; }
+}
+
+function safeRead(value, property) {
+  return readOwnData(value, property).value;
 }
 
 function safeIsArray(value) {
   try { return Array.isArray(value); } catch { return false; }
 }
 
-function safeArray(value, property, max = MAX_OCCURRENCES) {
-  const candidate = safeRead(value, property);
-  if (!safeIsArray(candidate)) return [];
-  let length;
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(candidate, 'length');
-    length = descriptor && Object.hasOwn(descriptor, 'value') && Number.isSafeInteger(descriptor.value) && descriptor.value >= 0
-      ? descriptor.value
-      : 0;
-  } catch { return []; }
+function inspectArray(value, property, max = MAX_OCCURRENCES) {
+  const propertyRead = readOwnData(value, property);
+  const candidate = propertyRead.value;
+  if (!propertyRead.readable || !propertyRead.ownData) {
+    return { values: [], declaredLength: 0, valid: false, readable: propertyRead.readable };
+  }
+  let isArray;
+  try { isArray = Array.isArray(candidate); } catch {
+    return { values: [], declaredLength: 0, valid: false, readable: false };
+  }
+  if (!isArray) return { values: [], declaredLength: 0, valid: false, readable: true };
+  const lengthRead = readOwnData(candidate, 'length');
+  const length = lengthRead.value;
+  if (!lengthRead.readable || !lengthRead.ownData || !Number.isSafeInteger(length) || length < 0) {
+    return { values: [], declaredLength: 0, valid: false, readable: lengthRead.readable };
+  }
   const boundedLength = Math.min(length, max);
   const output = new Array(boundedLength);
-  for (let index = 0; index < boundedLength; index += 1) output[index] = safeRead(candidate, String(index));
-  return output;
+  let readable = true;
+  for (let index = 0; index < boundedLength; index += 1) {
+    const entryRead = readOwnData(candidate, String(index));
+    if (!entryRead.readable) readable = false;
+    output[index] = entryRead.value;
+  }
+  return { values: output, declaredLength: length, valid: true, readable };
+}
+
+function safeArray(value, property, max = MAX_OCCURRENCES) {
+  return inspectArray(value, property, max).values;
 }
 
 function declaredArrayLength(value, property) {
-  const candidate = safeRead(value, property);
-  if (!safeIsArray(candidate)) return 0;
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(candidate, 'length');
-    return descriptor && Object.hasOwn(descriptor, 'value') && Number.isSafeInteger(descriptor.value) && descriptor.value >= 0
-      ? descriptor.value
-      : 0;
-  } catch { return 0; }
+  const inspected = inspectArray(value, property, 0);
+  return inspected.valid ? inspected.declaredLength : 0;
 }
 
 function canonicalId(value, fallback) {
@@ -225,7 +242,8 @@ export function normalizeAxeResults(input, options = {}) {
     : 'page-1';
   const inputStatus = safeRead(input, 'status');
   const requestedStatus = ['complete', 'partial', 'disabled'].includes(inputStatus) ? inputStatus : 'partial';
-  const diagnostics = safeArray(input, 'diagnostics', MAX_RAW_DIAGNOSTICS).map(entry => {
+  const diagnosticCollection = inspectArray(input, 'diagnostics', MAX_RAW_DIAGNOSTICS);
+  const diagnostics = diagnosticCollection.values.map(entry => {
     const code = safeRead(entry, 'code');
     return {
       code: ['AXE_FEATURE_DISABLED', 'AXE_PROVENANCE_INVALID'].includes(code)
@@ -259,6 +277,10 @@ export function normalizeAxeResults(input, options = {}) {
         passes: { groups: 0, nodes: 0 }, inapplicable: { groups: 0, nodes: 0 },
       },
     });
+  }
+
+  if (!diagnosticCollection.valid || !diagnosticCollection.readable) {
+    diagnostics.push({ code: 'AXE_DIAGNOSTIC_UNAVAILABLE', frameId: null });
   }
 
   const rawFrames = safeArray(input, 'frames', MAX_FRAMES);
@@ -297,7 +319,7 @@ export function normalizeAxeResults(input, options = {}) {
   if (frames.length === 0) topologyPartial = true;
   if (diagnostics.length > 0) topologyPartial = true;
   let truncated = diagnostics.some(entry => entry.code === 'AXE_RESULTS_TRUNCATED') ||
-    declaredArrayLength(input, 'frames') > MAX_FRAMES || declaredArrayLength(input, 'diagnostics') > MAX_RAW_DIAGNOSTICS;
+    declaredArrayLength(input, 'frames') > MAX_FRAMES || diagnosticCollection.declaredLength > MAX_RAW_DIAGNOSTICS;
   if (frames.some(frame => hasNestedResultTruncation(safeRead(frame, 'result')))) truncated = true;
   const technicalSummary = summaryCounts(frames);
   const occurrences = [];

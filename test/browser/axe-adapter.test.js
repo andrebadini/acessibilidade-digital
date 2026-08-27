@@ -49,6 +49,38 @@ test('uses a bounded explicit ruleset without legacy Section 508 or experimental
   assert.doesNotMatch(JSON.stringify(adapter.AXE_RUN_CONFIG), /experimental|section508/iu);
 });
 
+test('diagnostic canonicalization distinguishes a readable empty array from invalid and unreadable collections', () => {
+  const revokedPair = Proxy.revocable([], {});
+  revokedPair.revoke();
+  const unreadableLength = new Proxy([], {
+    getOwnPropertyDescriptor(target, property) {
+      if (property === 'length') throw new Error('diagnostics length unavailable');
+      return Reflect.getOwnPropertyDescriptor(target, property);
+    },
+  });
+  const invalidLength = new Proxy([], {
+    getOwnPropertyDescriptor(target, property) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
+      return property === 'length' ? { ...descriptor, value: '0' } : descriptor;
+    },
+  });
+
+  assert.deepEqual(adapter.canonicalizeAxeDiagnosticsWithMetadata([]), {
+    diagnostics: [], truncated: false, valid: true, readable: true,
+  });
+  for (const [label, value, readable] of [
+    ['null', null, true],
+    ['ordinary object', {}, true],
+    ['revoked', revokedPair.proxy, false],
+    ['unreadable length', unreadableLength, false],
+    ['invalid length descriptor', invalidLength, true],
+  ]) {
+    assert.deepEqual(adapter.canonicalizeAxeDiagnosticsWithMetadata(value), {
+      diagnostics: [], truncated: false, valid: false, readable,
+    }, label);
+  }
+});
+
 test('keeps the production feature gate off without a successful real MV3 CSP run', async () => {
   assert.deepEqual(adapter.AXE_MV3_CSP_GATE, {
     enabled: false,

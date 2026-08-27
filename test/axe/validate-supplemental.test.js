@@ -166,6 +166,37 @@ test('requires the exact complete normalized top-level axe payload even when dis
   }
 });
 
+test('rejects forged normalized payloads whose diagnostics collection is missing, invalid or unreadable', () => {
+  let accessorCalls = 0;
+  const revokedPair = Proxy.revocable([], {});
+  revokedPair.revoke();
+  const mutations = [
+    value => { delete value.diagnostics; },
+    value => { value.diagnostics = null; },
+    value => { value.diagnostics = {}; },
+    value => { value.diagnostics = revokedPair.proxy; },
+    value => {
+      Object.defineProperty(value, 'diagnostics', {
+        enumerable: true,
+        get() { accessorCalls += 1; throw new Error('diagnostics getter must not execute'); },
+      });
+    },
+  ];
+
+  for (const mutate of mutations) {
+    const hostile = validSupplemental();
+    mutate(hostile);
+    let checked;
+    assert.doesNotThrow(() => {
+      checked = validateNormalizedAxeSupplemental(hostile, { rulesVersion: '1.0.0' });
+    });
+    assert.ok(checked.errors.length > 0);
+    assert.deepEqual(checked.ruleResults, []);
+    assert.deepEqual(checked.occurrences, []);
+  }
+  assert.equal(accessorCalls, 0);
+});
+
 test('uses the adapter structural-selector allowlist and rejects hostile tag-shaped private selectors', () => {
   const supplemental = structuredClone(normalizeAxeResults({
     status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],

@@ -169,3 +169,28 @@ GREEN final:
 - ZIP rastreado restaurado byte a byte: SHA-256 `987acb65524093d0cae4b263277786ab7718d375e53112b4e63bbf0687a56e9a`.
 
 O gate axe e `target-size` continuam desativados. Nenhum estado da Web Store ou superfície pública foi alterado.
+
+## Fix round 5 — falha fechada em diagnósticos não inspecionáveis
+
+A fronteira de diagnóstico agora distingue explicitamente uma lista própria, válida e legível de uma coleção ausente, herdada, não-array, baseada em accessor, revogada ou com descritor/comprimento não inspecionável. A extração limitada preserva `valid`, `readable` e o comprimento declarado até a derivação de cobertura; a canonicalização exportada preserva os mesmos metadados sem alterar o catálogo, a ordem ou os limites. Somente uma lista própria e legível pode representar o vazio legítimo. Qualquer outra forma recebe `AXE_DIAGNOSTIC_UNAVAILABLE`, força `status: partial` e a limitação parcial canônica.
+
+Os estados terminais continuam isolados: gate solicitado como desativado produz apenas `AXE_FEATURE_DISABLED`, e proveniência inválida produz apenas `AXE_PROVENANCE_INVALID` com suas limitações exatas. O normalizado resultante passa pelo validador estrito, enquanto payloads de relatório fornecidos diretamente com diagnósticos ausentes, inválidos, revogados ou baseados em accessor continuam rejeitados sem executar getters.
+
+### Evidência TDD e revisão adversarial do fix round 5
+
+RED observado antes da implementação:
+
+- um frame concluído com `diagnostics` ausente normalizava como `complete`, sem diagnóstico ou limitação;
+- a mesma promoção indevida ocorria com coleção não-array, revogada ou cujo descritor de comprimento lançava;
+- `canonicalizeAxeDiagnosticsWithMetadata` não distinguia a lista vazia válida dessas entradas inválidas ou não legíveis.
+
+GREEN e revisão estreita:
+
+- focados (`axe-adapter`, normalizador e validador suplementar): 51/51;
+- suíte adjacente de axe, adaptador, core e runner: 88/88;
+- `npm test`: 484 aprovados, 0 falhas e 1 skip explícito de E2E MV3/CSP, 485 testes no total;
+- `npm run verify`: exit 0 com os mesmos 484 aprovados/1 skip e confirmação de manifesto/CSP, axe 4.13.0 gated, 130 regras próprias/146 itens, identidade neutra, artefatos e privacidade;
+- a auto-revisão adversarial reconfirmou lista própria vazia, ausência, herança, `null`, objeto/escalar, accessor não executado, proxy revogado, trap de descritor, comprimento ilegível/inválido, estados desativado/proveniência inválida, rejeição direta pelo validador e os limites 63/64/65/64+64;
+- ZIP rastreado restaurado byte a byte após os testes: SHA-256 `987acb65524093d0cae4b263277786ab7718d375e53112b4e63bbf0687a56e9a`.
+
+O catálogo fechado, os caps, o marcador de truncamento, a ordem canônica, o gate axe, `target-size` e todas as superfícies públicas/Web Store permanecem inalterados.

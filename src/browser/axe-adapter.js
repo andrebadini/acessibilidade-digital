@@ -48,32 +48,47 @@ const AXE_DIAGNOSTIC_RANK = new Map(AXE_DIAGNOSTIC_CODES.map((code, index) => [c
 const MAX_CANONICAL_DIAGNOSTICS = 64;
 const MAX_DIAGNOSTIC_CANDIDATES = 321;
 
-function diagnosticOwn(value, key) {
+function diagnosticOwnWithMetadata(value, key) {
   try {
-    if (!value || (typeof value !== 'object' && typeof value !== 'function')) return undefined;
+    if (!value || (typeof value !== 'object' && typeof value !== 'function')) {
+      return { value: undefined, readable: true, ownData: false };
+    }
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
-  } catch { return undefined; }
+    if (!descriptor) return { value: undefined, readable: true, ownData: false };
+    if (!Object.hasOwn(descriptor, 'value')) return { value: undefined, readable: false, ownData: false };
+    return { value: descriptor.value, readable: true, ownData: true };
+  } catch { return { value: undefined, readable: false, ownData: false }; }
 }
 
-/** Drops private diagnostic fields and reports when the unique stable set exceeds the canonical cap. */
+function diagnosticMetadata(diagnostics, truncated, valid, readable) {
+  return Object.freeze({ diagnostics: Object.freeze(diagnostics), truncated, valid, readable });
+}
+
+/** Drops private fields and reports collection validity/readability plus unique-set truncation. */
 export function canonicalizeAxeDiagnosticsWithMetadata(value) {
   let isArray = false;
   try { isArray = Array.isArray(value); } catch {
-    return Object.freeze({ diagnostics: Object.freeze([]), truncated: false });
+    return diagnosticMetadata([], false, false, false);
   }
-  if (!isArray) return Object.freeze({ diagnostics: Object.freeze([]), truncated: false });
-  const declaredLength = diagnosticOwn(value, 'length');
-  const length = Number.isSafeInteger(declaredLength) && declaredLength >= 0
-    ? Math.min(declaredLength, MAX_DIAGNOSTIC_CANDIDATES)
-    : 0;
+  if (!isArray) return diagnosticMetadata([], false, false, true);
+  const lengthRead = diagnosticOwnWithMetadata(value, 'length');
+  const declaredLength = lengthRead.value;
+  if (!lengthRead.readable || !lengthRead.ownData || !Number.isSafeInteger(declaredLength) || declaredLength < 0) {
+    return diagnosticMetadata([], false, false, lengthRead.readable);
+  }
+  const length = Math.min(declaredLength, MAX_DIAGNOSTIC_CANDIDATES);
   const unique = new Map();
+  let readable = true;
   for (let index = 0; index < length; index += 1) {
-    const entry = diagnosticOwn(value, String(index));
-    const rawCode = diagnosticOwn(entry, 'code');
+    const entryRead = diagnosticOwnWithMetadata(value, String(index));
+    const entry = entryRead.value;
+    const codeRead = diagnosticOwnWithMetadata(entry, 'code');
+    const rawCode = codeRead.value;
     const code = AXE_DIAGNOSTIC_RANK.has(rawCode) ? rawCode : 'AXE_DIAGNOSTIC_UNAVAILABLE';
-    const rawFrameId = diagnosticOwn(entry, 'frameId');
+    const frameRead = diagnosticOwnWithMetadata(entry, 'frameId');
+    const rawFrameId = frameRead.value;
     const frameId = Number.isSafeInteger(rawFrameId) && rawFrameId >= 0 ? rawFrameId : null;
+    if (!entryRead.readable || !codeRead.readable || !frameRead.readable) readable = false;
     unique.set(`${code}\u0000${frameId ?? ''}`, { code, frameId });
   }
   const sorted = [...unique.values()].sort((left, right) =>
@@ -84,10 +99,12 @@ export function canonicalizeAxeDiagnosticsWithMetadata(value) {
   if (truncation && !retained.includes(truncation)) retained = [...retained.slice(0, MAX_CANONICAL_DIAGNOSTICS - 1), truncation].sort((left, right) =>
     AXE_DIAGNOSTIC_RANK.get(left.code) - AXE_DIAGNOSTIC_RANK.get(right.code) ||
     (left.frameId ?? -1) - (right.frameId ?? -1));
-  return Object.freeze({
-    diagnostics: Object.freeze(retained.map(entry => Object.freeze(entry))),
-    truncated: sorted.length > MAX_CANONICAL_DIAGNOSTICS || declaredLength > MAX_DIAGNOSTIC_CANDIDATES,
-  });
+  return diagnosticMetadata(
+    retained.map(entry => Object.freeze(entry)),
+    sorted.length > MAX_CANONICAL_DIAGNOSTICS || declaredLength > MAX_DIAGNOSTIC_CANDIDATES,
+    true,
+    readable,
+  );
 }
 
 /** Compatibility projection for callers that only need the canonical entries. */

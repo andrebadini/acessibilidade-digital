@@ -8,6 +8,17 @@ import { normalizeAxeResults } from '../../src/core/axe/normalize-axe-results.js
 import { validateNormalizedAxeSupplemental } from '../../src/core/axe/validate-supplemental.js';
 
 const PROVENANCE = AXE_PROVENANCE;
+const PARTIAL_LIMITATION = 'O motor suplementar axe-core teve cobertura parcial; somente resultados vinculados a frames concluídos foram considerados.';
+const PROVENANCE_LIMITATION = 'A proveniência do resultado axe não corresponde ao pacote verificado; nenhum achado foi publicado.';
+
+function emptySuccessfulRun() {
+  return {
+    status: 'complete', provenance: PROVENANCE, diagnostics: [],
+    frames: [{ frameId: 0, status: 'success', result: {
+      violations: [], incomplete: [], passes: [], inapplicable: [],
+    } }],
+  };
+}
 
 function runResult() {
   return {
@@ -190,6 +201,104 @@ test('collapses unknown or private diagnostic codes to the fixed catalog without
   assert.deepEqual(normalized.diagnostics, [{ code: 'AXE_DIAGNOSTIC_UNAVAILABLE', frameId: null }]);
   assert.equal(normalized.status, 'partial');
   assert.doesNotMatch(JSON.stringify(normalized), /PATIENT|HIV|POSITIVE|Oliveira/iu);
+});
+
+test('fails closed when a successful run has no own readable diagnostics array', () => {
+  let accessorCalls = 0;
+  const cases = [
+    ['missing', input => { delete input.diagnostics; return input; }],
+    ['null', input => { input.diagnostics = null; return input; }],
+    ['ordinary object', input => { input.diagnostics = {}; return input; }],
+    ['ordinary scalar', input => { input.diagnostics = 'not-an-array'; return input; }],
+    ['inherited array', input => {
+      delete input.diagnostics;
+      Object.setPrototypeOf(input, { diagnostics: [] });
+      return input;
+    }],
+    ['accessor-backed', input => {
+      Object.defineProperty(input, 'diagnostics', {
+        enumerable: true,
+        get() { accessorCalls += 1; throw new Error('diagnostics getter must not execute'); },
+      });
+      return input;
+    }],
+    ['throwing property descriptor', input => new Proxy(input, {
+      getOwnPropertyDescriptor(target, property) {
+        if (property === 'diagnostics') throw new Error('diagnostics descriptor unavailable');
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+    })],
+  ];
+
+  for (const [label, makeInput] of cases) {
+    const normalized = normalizeAxeResults(makeInput(emptySuccessfulRun()), { pageId: 'page-1' });
+
+    assert.equal(normalized.status, 'partial', label);
+    assert.deepEqual(normalized.diagnostics, [{ code: 'AXE_DIAGNOSTIC_UNAVAILABLE', frameId: null }], label);
+    assert.deepEqual(normalized.limitations, [PARTIAL_LIMITATION], label);
+    assert.deepEqual(validateNormalizedAxeSupplemental(normalized, { rulesVersion: '1.0.0' }).errors, [], label);
+  }
+  assert.equal(accessorCalls, 0);
+});
+
+test('fails closed when a successful run diagnostics array is revoked or its length is unreadable', () => {
+  const revokedPair = Proxy.revocable([], {});
+  revokedPair.revoke();
+  const unreadableLength = new Proxy([], {
+    getOwnPropertyDescriptor(target, property) {
+      if (property === 'length') throw new Error('diagnostics length unavailable');
+      return Reflect.getOwnPropertyDescriptor(target, property);
+    },
+  });
+  const invalidLength = new Proxy([], {
+    getOwnPropertyDescriptor(target, property) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
+      return property === 'length' ? { ...descriptor, value: '0' } : descriptor;
+    },
+  });
+
+  for (const [label, diagnostics] of [
+    ['revoked', revokedPair.proxy],
+    ['unreadable length', unreadableLength],
+    ['invalid length descriptor', invalidLength],
+  ]) {
+    const input = emptySuccessfulRun();
+    input.diagnostics = diagnostics;
+    let normalized;
+
+    assert.doesNotThrow(() => { normalized = normalizeAxeResults(input, { pageId: 'page-1' }); }, label);
+    assert.equal(normalized.status, 'partial', label);
+    assert.deepEqual(normalized.diagnostics, [{ code: 'AXE_DIAGNOSTIC_UNAVAILABLE', frameId: null }], label);
+    assert.deepEqual(normalized.limitations, [PARTIAL_LIMITATION], label);
+    assert.deepEqual(validateNormalizedAxeSupplemental(normalized, { rulesVersion: '1.0.0' }).errors, [], label);
+  }
+});
+
+test('keeps disabled and provenance-invalid terminal states canonical with unreadable diagnostics', () => {
+  const disabled = normalizeAxeResults({
+    status: 'disabled', provenance: PROVENANCE, frames: [],
+  }, { pageId: 'page-1' });
+  const provenanceInvalid = normalizeAxeResults({
+    status: 'complete', provenance: { ...PROVENANCE, version: '99.0.0' },
+    frames: emptySuccessfulRun().frames,
+  }, { pageId: 'page-1' });
+
+  assert.equal(disabled.status, 'disabled');
+  assert.deepEqual(disabled.diagnostics, [{ code: 'AXE_FEATURE_DISABLED', frameId: null }]);
+  assert.deepEqual(validateNormalizedAxeSupplemental(disabled, { rulesVersion: '1.0.0' }).errors, []);
+  assert.equal(provenanceInvalid.status, 'partial');
+  assert.deepEqual(provenanceInvalid.diagnostics, [{ code: 'AXE_PROVENANCE_INVALID', frameId: null }]);
+  assert.deepEqual(provenanceInvalid.limitations, [PARTIAL_LIMITATION, PROVENANCE_LIMITATION]);
+  assert.deepEqual(validateNormalizedAxeSupplemental(provenanceInvalid, { rulesVersion: '1.0.0' }).errors, []);
+});
+
+test('keeps a genuine own readable empty diagnostics array eligible for complete coverage', () => {
+  const normalized = normalizeAxeResults(emptySuccessfulRun(), { pageId: 'page-1' });
+
+  assert.equal(normalized.status, 'complete');
+  assert.deepEqual(normalized.diagnostics, []);
+  assert.deepEqual(normalized.limitations, []);
+  assert.deepEqual(validateNormalizedAxeSupplemental(normalized, { rulesVersion: '1.0.0' }).errors, []);
 });
 
 test('contains hostile accessors and sparse result arrays without invoking page-controlled getters', () => {
