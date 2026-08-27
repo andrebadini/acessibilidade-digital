@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { runAudit } from '../../src/background/run-audit.js';
+import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
+import { renderHtmlReport } from '../../src/core/report/html.js';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
 
@@ -21,14 +23,59 @@ function rawPage() {
   };
 }
 
+function pageWithAxName(name) {
+  const page = rawPage();
+  page.nodes[0] = {
+    ...page.nodes[0],
+    attributes: {
+      ...page.nodes[0].attributes,
+      'aria-label': 'Fallback DOM',
+      'aria-selected': 'true',
+      'aria-expanded': 'false',
+      'aria-invalid': 'grammar',
+    },
+    checked: 'mixed',
+    disabled: true,
+    required: true,
+  };
+  page.axTree.nodes = [{
+    backendDOMNodeId: 1,
+    role: { value: 'button' },
+    name: { value: name },
+    description: { value: 'Envia o formulário' },
+    value: { value: 'Pronto' },
+  }];
+  return page;
+}
+
+function pageWithSensitiveControl(secret) {
+  const page = rawPage();
+  page.nodes[0] = {
+    ...page.nodes[0],
+    tagName: 'input',
+    attributes: { id: 'credential', type: 'password', autocomplete: 'current-password', value: secret },
+    text: secret,
+    visibleText: secret,
+    form: { type: 'password', value: secret, currentValue: secret },
+  };
+  page.axTree.nodes = [{
+    backendDOMNodeId: 1,
+    role: { value: 'textbox' },
+    name: { value: 'Senha da conta' },
+    value: { value: secret },
+  }];
+  return page;
+}
+
 function fakeAdapter(options = {}) {
   const events = [];
+  const page = options.page || rawPage();
   let screenshots = 0;
   let disconnects = 0;
   let removals = 0;
   const cdp = {
     async command(method, params = {}) {
-      if (method === 'Page.getLayoutMetrics') return rawPage().layoutMetrics;
+      if (method === 'Page.getLayoutMetrics') return page.layoutMetrics;
       if (method === 'Page.captureScreenshot') {
         screenshots += 1;
         const pristine = screenshots === 1;
@@ -41,7 +88,7 @@ function fakeAdapter(options = {}) {
       if (method === 'DOM.getOuterHTML') {
         if (options.snippetFailureNode === params.backendNodeId) throw new Error('node vanished');
         options.afterSnippet?.(params.backendNodeId);
-        return { outerHTML: `<button data-token="SECRET">Node ${params.backendNodeId}</button>` };
+        return { outerHTML: options.outerHtml?.(params.backendNodeId) ?? `<button data-token="SECRET">Node ${params.backendNodeId}</button>` };
       }
       return {};
     },
@@ -59,7 +106,7 @@ function fakeAdapter(options = {}) {
       return { url: 'https://example.test/final?token=REMOVE&view=public' };
     },
     async connectCdp() { events.push('connect-cdp'); return cdp; },
-    async collectPage() { events.push('collect'); options.afterCollect?.(); if (options.collectFailure) throw new Error('DOM unavailable'); return rawPage(); },
+    async collectPage() { events.push('collect'); options.afterCollect?.(); if (options.collectFailure) throw new Error('DOM unavailable'); return page; },
     async runDynamicProbes() { events.push('probes'); return options.rawProbes || { focus: { completed: false, events: [] }, warnings: [], actions: [] }; },
     async getEnvironment() { return { chromeVersion: 'Chrome/140.0', viewport: { width: 800, height: 600, deviceScaleFactor: 1 } }; },
     async getFinalUrl() { return 'https://example.test/final?token=REMOVE&view=public'; },
@@ -115,6 +162,73 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
   assert.equal(Object.isFrozen(model.occurrences), true);
   assert.doesNotThrow(() => JSON.stringify(model));
   assert.doesNotMatch(JSON.stringify(model), /REMOVE|SECRET|user:pass|password=/i);
+});
+
+test('attaches normalized AX accessibility to element evidence, its hash and the final HTML', async () => {
+  const first = await runAudit({
+    url: 'https://example.test/', chromeAdapter: fakeAdapter({ page: pageWithAxName('Confirmar pedido') }),
+    now: clock, idFactory: () => 'audit-accessibility',
+  });
+  const second = await runAudit({
+    url: 'https://example.test/', chromeAdapter: fakeAdapter({ page: pageWithAxName('Enviar pedido') }),
+    now: clock, idFactory: () => 'audit-accessibility',
+  });
+  const evidence = first.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
+  const changed = second.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
+
+  assert.deepEqual(evidence.accessibility, {
+    name: 'Confirmar pedido',
+    nameSource: 'accessibility-tree',
+    description: 'Envia o formulário',
+    descriptionSource: 'accessibility-tree',
+    role: 'button',
+    value: 'Pronto',
+    states: ['parcialmente marcado', 'selecionado', 'recolhido', 'indisponível', 'obrigatório', 'inválido'],
+    visibleText: 'OK',
+    announcementPreview: 'Confirmar pedido, botão, Envia o formulário, valor Pronto, parcialmente marcado, selecionado, recolhido, indisponível, obrigatório, inválido',
+  });
+  assert.notEqual(evidence.hash, changed.hash);
+
+  const report = await enrichAuditForReport(first, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  });
+  const html = renderHtmlReport(report);
+  assert.match(html, /Nome acessível<\/dt><dd>Confirmar pedido/iu);
+  assert.match(html, /Prévia de anúncio<\/dt><dd>Confirmar pedido, botão/iu);
+  assert.match(html, /não é transcrição literal/iu);
+});
+
+test('never discloses sensitive control values in accessibility, hashes or final HTML', async () => {
+  const firstSecret = 'TOPSECRET-current-password';
+  const secondSecret = 'OTHERSECRET-current-password';
+  const run = secret => runAudit({
+    url: 'https://example.test/',
+    chromeAdapter: fakeAdapter({
+      page: pageWithSensitiveControl(secret),
+      outerHtml: backendNodeId => backendNodeId === 1
+        ? `<input type="password" autocomplete="current-password" value="${secret}">`
+        : `<button>Node ${backendNodeId}</button>`,
+    }),
+    now: clock, idFactory: () => 'audit-sensitive-accessibility',
+  });
+  const [first, second] = await Promise.all([run(firstSecret), run(secondSecret)]);
+  const evidence = first.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
+  const changed = second.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
+
+  assert.equal(evidence.accessibility.name, 'Senha da conta');
+  assert.equal(Object.hasOwn(evidence.accessibility, 'value'), false);
+  assert.doesNotMatch(evidence.accessibility.announcementPreview, /TOPSECRET|current-password/iu);
+  assert.equal(evidence.hash, changed.hash);
+
+  const report = await enrichAuditForReport(first, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  });
+  const html = renderHtmlReport(report);
+  assert.doesNotMatch(`${JSON.stringify(first)}\n${evidence.hash}\n${html}`, /TOPSECRET-current-password/iu);
+  assert.match(html, /Nome acessível<\/dt><dd>Senha da conta/iu);
+  assert.match(html, /Prévia de anúncio/iu);
 });
 
 test('keeps a pristine capture timeout partial without retrying element screenshots', async () => {

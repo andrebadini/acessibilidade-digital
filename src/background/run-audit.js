@@ -2,8 +2,10 @@ import { captureElement, captureFullPage } from '../browser/capture-evidence.js'
 import { collectPage } from '../browser/collect-page.js';
 import {
   NBR17225_ITEMS,
+  buildAnnouncementPreview,
   buildSnapshotIndexes,
   buildStableSelector,
+  computeAccessibleText,
   mergeProbesIntoSnapshot,
   normalizeProbes,
   normalizeSnapshot,
@@ -91,6 +93,101 @@ function targetNodeId(target) {
   if (typeof target === 'string' || Number.isSafeInteger(target)) return String(target);
   if (target && (typeof target.nodeId === 'string' || Number.isSafeInteger(target.nodeId))) return String(target.nodeId);
   return null;
+}
+
+const SENSITIVE_AUTOCOMPLETE = new Set(['current-password', 'new-password', 'one-time-code']);
+
+function normalizedText(value) {
+  return typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '';
+}
+
+function nodeAttribute(node, name) {
+  const value = node?.attributes?.[name];
+  return typeof value === 'string' ? value : value === true ? '' : undefined;
+}
+
+function sensitiveControl(node) {
+  const inputType = normalizedText(nodeAttribute(node, 'type') || node?.form?.type).toLowerCase();
+  const autocomplete = normalizedText(nodeAttribute(node, 'autocomplete') || node?.form?.autocomplete).toLowerCase().split(' ').filter(Boolean);
+  return normalizedText(node?.tagName).toLowerCase() === 'input' && (
+    inputType === 'password' || autocomplete.some(token => SENSITIVE_AUTOCOMPLETE.has(token))
+  );
+}
+
+function observedBoolean(node, property, ariaName) {
+  const direct = Object.hasOwn(node || {}, property) ? node[property] : undefined;
+  if (direct === true || direct === false || (property === 'checked' && direct === 'mixed')) return direct;
+  const aria = normalizedText(nodeAttribute(node, ariaName)).toLowerCase();
+  if (aria === 'true') return true;
+  if (aria === 'false') return false;
+  if (property === 'checked' && aria === 'mixed') return 'mixed';
+  if (property === 'invalid' && ['grammar', 'spelling'].includes(aria)) return true;
+  return undefined;
+}
+
+function observedPresence(node, property, ariaName, nativeName = property) {
+  const observed = observedBoolean(node, property, ariaName);
+  if (observed !== undefined) return observed;
+  return Object.hasOwn(node?.attributes || {}, nativeName) ? true : undefined;
+}
+
+function nativeRole(node) {
+  const tag = normalizedText(node?.tagName).toLowerCase();
+  const type = normalizedText(nodeAttribute(node, 'type')).toLowerCase();
+  if (tag === 'button') return 'button';
+  if (tag === 'a' && nodeAttribute(node, 'href') !== undefined) return 'link';
+  if (tag === 'select') return 'combobox';
+  if (tag === 'textarea') return 'textbox';
+  if (tag === 'img') return 'img';
+  if (tag === 'input') {
+    if (type === 'checkbox') return 'checkbox';
+    if (type === 'radio') return 'radio';
+    if (['button', 'reset', 'submit'].includes(type)) return 'button';
+    if (type !== 'hidden') return 'textbox';
+  }
+  return '';
+}
+
+function elementAccessibility(node, indexes) {
+  const text = computeAccessibleText(node, indexes, {
+    name: normalizedText(node?.accessibleName),
+    description: normalizedText(node?.accessibleDescription),
+  });
+  const role = normalizedText(node?.axRole || node?.role || nodeAttribute(node, 'role') || nativeRole(node)).toLowerCase();
+  const sensitive = sensitiveControl(node);
+  const value = sensitive ? '' : normalizedText(node?.axValue);
+  const checked = observedBoolean(node, 'checked', 'aria-checked');
+  const selected = observedBoolean(node, 'selected', 'aria-selected');
+  const expanded = observedBoolean(node, 'expanded', 'aria-expanded');
+  const disabled = observedPresence(node, 'disabled', 'aria-disabled');
+  const required = observedPresence(node, 'required', 'aria-required');
+  const invalid = observedBoolean(node, 'invalid', 'aria-invalid');
+  const previewProperties = {
+    ...text, role, checked, selected, expanded, disabled, required, invalid,
+    sensitive,
+    inputType: nodeAttribute(node, 'type') || node?.form?.type || '',
+    autocomplete: nodeAttribute(node, 'autocomplete') || node?.form?.autocomplete || '',
+    ...(value ? { value, valueDisclosure: 'safe' } : {}),
+  };
+  const states = [];
+  if (checked === true) states.push('marcado');
+  if (checked === false) states.push('desmarcado');
+  if (checked === 'mixed') states.push('parcialmente marcado');
+  if (selected === true) states.push('selecionado');
+  if (selected === false) states.push('não selecionado');
+  if (expanded === true) states.push('expandido');
+  if (expanded === false) states.push('recolhido');
+  if (disabled === true) states.push('indisponível');
+  if (required === true) states.push('obrigatório');
+  if (invalid === true) states.push('inválido');
+  return {
+    ...text,
+    role,
+    ...(value ? { value } : {}),
+    states,
+    visibleText: sensitive ? '' : normalizedText(node?.visibleText),
+    announcementPreview: buildAnnouncementPreview(previewProperties).text,
+  };
 }
 
 function makeOccurrences(auditId, ruleResults, itemResults) {
@@ -355,14 +452,15 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
           }
         }
         const selector = buildStableSelector(node, indexes);
+        const accessibility = elementAccessibility(node, indexes);
         const artifact = {
           evidenceId: `element-${stableHash(`${auditId}\u0000${node.nodeId}`)}`,
           kind: 'element', nodeId: node.nodeId, backendNodeId: node.backendNodeId,
-          selector, snippet,
+          selector, snippet, accessibility,
           ...(thumbnail?.status === 'captured' ? { dataUrl: thumbnail.dataUrl, fullPageEvidenceId: thumbnail.fullPageEvidenceId } : {}),
           ...(node.media?.currentSrc ? { mediaUrl: safeUrl(node.media.currentSrc) } : {}),
         };
-        artifact.hash = stableHash({ selector, snippet, thumbnail: thumbnail?.evidenceId || null, mediaUrl: artifact.mediaUrl || null });
+        artifact.hash = stableHash({ selector, snippet, thumbnail: thumbnail?.evidenceId || null, mediaUrl: artifact.mediaUrl || null, accessibility });
         artifactByNode.set(node.nodeId, artifact);
         state.artifacts.push(artifact);
         occurrence.evidenceIds.push(artifact.evidenceId);
