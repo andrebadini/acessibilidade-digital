@@ -116,3 +116,66 @@ Implementado o modelo canônico de relatório V2, com migração explícita de e
 - Os aliases V1 permanecem para os renderizadores/revisão atuais; tarefas posteriores podem migrar integralmente a UI para os campos V2, mas removê-los agora quebraria consumidores existentes sem necessidade.
 - O modelo e o enriquecimento já aceitam lote explícito; a execução/orquestração real de até 20 URLs continua pertencendo à Task 12.
 - O ZIP de release foi regenerado pelo teste de entrega e inclui o runtime atual. A Task 14 ainda deverá atualizar versão, documentação e verificação final do pacote completo.
+
+## Fix round 1
+
+### Resultado
+
+Corrigidas as quatro invariantes vinculantes apontadas na revisão e removido do escopo da Task 3 o artefato de release gerado pela suíte. Esta seção substitui a afirmação anterior de que o ZIP regenerado faria parte desta tarefa.
+
+### Implementação
+
+- Evidências V1, V2 nativas e enriquecidas agora atravessam `sanitizeEvidenceArtifactUrls`. A fronteira aplica o sanitizador de URL já existente recursivamente a campos nomeados como URL/URI e atributos URL conhecidos (`src`, `href`, `currentSrc`, `poster`, entre outros), inclusive metadados aninhados. Query params sensíveis, userinfo, hashes sensíveis e protocolos inseguros não sobrevivem; `dataUrl` de imagem continua sendo o conteúdo de evidência permitido pelo contrato.
+- O enriquecimento calcula o hash de cada artefato somente após essa sanitização, impedindo divergência entre o conteúdo canônico persistido e seu hash.
+- Uma regra `passed` só pode vincular um item ABNT quando seu `ruleId` pertence ao `item.ruleIds` autoritativo. Uma ocorrência ABNT `passed` também exige a mesma regra autoritativa com resultado `passed`; um item agregado `passed` exige resultado autoritativo correspondente ou revisão humana registrada.
+- Na fronteira V1, uma alegação `passed` suplementar é migrada conservadoramente para `cantTell` na regra, ocorrência e item afetado, em vez de aprovar ou rejeitar todo o registro legado. Falhas e `cantTell` suplementares continuam aceitos.
+- Evidência derivada e sua `fullPageEvidenceId` agora devem ter o mesmo `pageId`, além de o alvo existir e ser `full-page`.
+- `integrity.evidenceManifestHash` passou a ser calculado depois da normalização/migração V2, usando os `pageId` finais e os artefatos já sanitizados. O hash canônico final é então calculado sobre esse modelo com o manifesto definitivo.
+- A fixture V2 e o helper V1 foram corrigidos para que o único passe automático demonstrativo use IDs de regras autoritativas; a fixture mantém cobertura de todos os outcomes EARL sem passes suplementares.
+- `release/audita-acessibilidade-1.0.1.zip` foi restaurado exatamente do blob de `c19a9dd`, em vez de manter a saída produzida pelo teste de release.
+
+### TDD — RED observado
+
+1. Quatro regressões da revisão:
+
+   `node --test test/report/audit-model-v2.test.js test/report/enrich-audit.test.js`
+
+   Saída: exit `1`, `10/14` passaram e `4/14` falharam. Falhas observadas: `mediaUrl` ainda continha `token=TOPSECRET`; a regra/ocorrência suplementar `passed` não lançou exceção; a evidência derivada entre páginas não lançou exceção; o manifesto armazenado `c39baa...` diferiu do manifesto do V2 final `a40a18...`.
+
+2. Compatibilidade V1 conservadora para passe suplementar:
+
+   `node --test --test-name-pattern='conservatively downgrades' test/report/audit-model-v2.test.js`
+
+   Saída: exit `1`, `0/1`; a ocorrência migrada falhou com `possui vínculo de item incoerente` em vez de ser aceita como `cantTell`.
+
+### TDD — GREEN observado
+
+- Regressões focadas: `node --test test/report/audit-model-v2.test.js test/report/enrich-audit.test.js` → exit `0`, `15/15`.
+- Cobertura integrada de relatório, revisão e fixtures: `node --test test/report/*.test.js test/review/decisions.test.js test/integration/audit-fixtures.test.js` → exit `0`, `59/59`.
+- `git diff --check` → exit `0`, sem erros.
+
+### Suíte completa
+
+- Execução única após os GREENs focados: `npm test` → exit `0`, `405/405`, `0` falhas, `0` ignorados, duração `3197.209333 ms`.
+- A suíte regenerou o ZIP como esperado. Depois dela, `git checkout c19a9dd -- release/audita-acessibilidade-1.0.1.zip` restaurou o binário autorizado.
+- Verificação de blob: `git hash-object release/audita-acessibilidade-1.0.1.zip` e `git rev-parse c19a9dd:release/audita-acessibilidade-1.0.1.zip` retornaram ambos `091a60566be173834d1fbeaa3042151601469598`.
+
+### Arquivos do fix
+
+- Produção: `src/core/report/audit-model.js`, `src/core/report/enrich-audit.js`.
+- Fixture/helper: `fixtures/audits/sample-audit.js`, `test/report/helpers.js`.
+- Regressões: `test/report/audit-model-v2.test.js`, `test/report/enrich-audit.test.js`.
+- Restauração exata: `release/audita-acessibilidade-1.0.1.zip`.
+
+### Auto-revisão e decisões de migração
+
+- O sanitizador é aplicado na fronteira canônica V2 e antes do hash no enriquecimento; a operação é idempotente, não muta a entrada e continua sujeita ao deep freeze final.
+- Campos terminados em `dataUrl` foram deliberadamente tratados como bytes incorporados de evidência, não como navegação. URLs de recurso em `mediaUrl`, `resourceUrl`, `src`, `currentSrc`, `href`, `poster` e equivalentes continuam sanitizadas pelo comportamento de privacidade existente.
+- O downgrade V1 para `cantTell` é a escolha de compatibilidade mais estreita: conserva o registro legado e sua proveniência sem transformar uma regra suplementar em autoridade normativa.
+- Regras suplementares continuam livres para relatar `failed`/`cantTell` e ocorrências editoriais; somente a elevação automática a `passed` ABNT foi bloqueada.
+- A validação 130→146, as 146 asserções EARL, a base consumerista fixa para falhas conclusivas, referências Section 508 separadas, imutabilidade, serialização canônica e o grafo ocorrência→evidência permaneceram cobertos pela suíte.
+
+### Preocupações
+
+- O reconhecimento de campos URL-bearing é estrutural por nomes canônicos/convencionais. Novos campos de evidência com nomes opacos deverão ser incluídos explicitamente no contrato ou normalizados antes dessa fronteira.
+- O teste de release continuará regenerando o ZIP durante suítes futuras; tarefas que não sejam de release devem restaurar/verificar o blob deliberadamente antes do commit.

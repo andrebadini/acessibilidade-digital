@@ -4,6 +4,7 @@ import test from 'node:test';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
 import { SECTION508_REVISED_CROSSWALK } from '../../src/core/normative/section508.js';
+import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import {
   V1_MIGRATION_DEFAULTS,
   createAuditModel,
@@ -51,6 +52,49 @@ test('explicitly migrates V1 into the canonical single-page V2 contract without 
     algorithm: 'unavailable', status: 'not-recorded-v1',
   });
   assert.equal(Object.isFrozen(model), true);
+});
+
+test('sanitizes every URL-bearing evidence field at the V1 and technical JSON boundary', () => {
+  const input = reportInput();
+  const safeDataUrl = 'data:image/png;base64,iVBORw0KGgo=';
+  input.evidence.artifacts[0] = {
+    ...input.evidence.artifacts[0],
+    mediaUrl: 'https://cdn.example.test/video.mp4?token=TOPSECRET&view=public',
+    resourceUrl: 'https://cdn.example.test/resource?api_key=TOPSECRET&lang=pt-BR',
+    dataUrl: safeDataUrl,
+    media: {
+      currentSrc: 'https://images.example.test/poster.png?session=TOPSECRET&size=large',
+    },
+  };
+
+  const model = migrateAuditV1ToV2(input);
+  const artifact = model.evidence[0];
+  assert.equal(artifact.mediaUrl, 'https://cdn.example.test/video.mp4?view=public');
+  assert.equal(artifact.resourceUrl, 'https://cdn.example.test/resource?lang=pt-BR');
+  assert.equal(artifact.media.currentSrc, 'https://images.example.test/poster.png?size=large');
+  assert.equal(artifact.dataUrl, safeDataUrl);
+  assert.doesNotMatch(renderTechnicalJson(model), /TOPSECRET|token=|api_key=|session=/u);
+});
+
+test('conservatively downgrades a V1 supplemental pass instead of treating it as ABNT approval', () => {
+  const input = reportInput();
+  input.itemResults.find(item => item.id === '5.1.2').outcome = 'passed';
+  input.ruleResults.push({
+    ruleId: 'supplemental.legacy-pass', outcome: 'passed', mode: 'automated',
+    nbrItems: ['5.1.2'], targets: [], summary: 'Aprovação V1 suplementar.', limitations: [],
+  });
+  input.occurrences.push({
+    occurrenceId: 'occ-legacy-supplemental-pass', itemId: '5.1.2',
+    ruleId: 'supplemental.legacy-pass', outcome: 'passed', mode: 'automated',
+    nodeId: null, evidenceIds: [], justification: 'Aprovação V1 suplementar.',
+  });
+
+  const model = migrateAuditV1ToV2(input);
+  assert.equal(model.ruleResults.find(rule => rule.ruleId === 'supplemental.legacy-pass').outcome, 'cantTell');
+  assert.equal(model.itemResults.find(item => item.id === '5.1.2').outcome, 'cantTell');
+  const occurrence = model.occurrences.find(entry => entry.occurrenceId === 'occ-legacy-supplemental-pass');
+  assert.equal(occurrence.outcome, 'cantTell');
+  assert.equal(occurrence.legalAnalysis, null);
 });
 
 test('createAuditModel is the explicit V1 migration boundary and accepts native multipage V2', () => {
@@ -111,6 +155,8 @@ test('conclusive failed requirements and recommendations use the same catalog re
     itemId: item.id, ruleId, mode: item.evaluation, nodeId: null,
     evidenceIds: [], justification: 'Falha conclusiva.',
   });
+  model.ruleResults = model.ruleResults.filter(rule => rule.ruleId !== 'focus-visible');
+  model.itemResults.find(item => item.id === requirement.id).outcome = 'failed';
   model.ruleResults.push(makeRule(requirement, 'focus-visible'));
   model.ruleResults.push(makeRule(recommendation, 'focus-fully-visible'));
   model.occurrences.push(makeOccurrence(requirement, 'focus-visible', 'occ-requirement'));
@@ -160,6 +206,57 @@ test('allows supplemental and editorial rules without weakening the exact 130-co
 
   model.methodology.coreRuleCount = 129;
   assert.throws(() => createAuditModel(model), /130|core|regra/i);
+});
+
+test('rejects a supplemental passed rule and occurrence that try to auto-approve an ABNT item', () => {
+  const model = structuredClone(createAuditModel(reportInput()));
+  const item = NBR17225_ITEMS.find(entry => entry.id === '5.1.2');
+  model.methodology = {
+    ...model.methodology,
+    supplementalRuleCount: model.methodology.supplementalRuleCount + 1,
+    ruleCount: model.methodology.ruleCount + 1,
+  };
+  model.itemResults.find(entry => entry.id === item.id).outcome = 'passed';
+  model.ruleResults.push({
+    ruleId: 'supplemental.fabricated-pass', outcome: 'passed', mode: 'automated',
+    nbrItems: [item.id], targets: [], summary: 'Aprovação suplementar.', limitations: [],
+  });
+  model.occurrences.push({
+    occurrenceId: 'occ-supplemental-pass', pageId: 'page-1', outcome: 'passed',
+    classification: item.classification, impact: 'minor', confidence: 'high',
+    source: { engine: 'third-party-engine', ruleId: 'supplemental.fabricated-pass', version: '9.9.9' },
+    nbrItemRef: item.id, wcagRefs: item.wcag.map(reference => reference.id),
+    foreignBenchmarkRefs: [], target: { nodeId: null, selector: null, framePath: [] },
+    accessiblePreview: null, evidenceRefs: [], legalAnalysis: null,
+    itemId: item.id, ruleId: 'supplemental.fabricated-pass', mode: 'automated',
+    nodeId: null, evidenceIds: [], justification: 'Aprovação suplementar.',
+  });
+
+  assert.throws(() => createAuditModel(model), /passad|aprova|autorit|ABNT|suplementar/i);
+});
+
+test('rejects derived evidence whose full-page capture belongs to another page', () => {
+  const model = structuredClone(createAuditModel(reportInput()));
+  model.requestedScope = {
+    mode: 'batch',
+    urls: [...model.requestedScope.urls, 'https://second.example.test/'],
+  };
+  model.pages.push({
+    pageId: 'page-2', requestedUrl: 'https://second.example.test/',
+    finalUrl: 'https://second.example.test/final', status: 'complete',
+    timestamps: {
+      startedAt: '2026-08-26T14:02:00.000Z', endedAt: '2026-08-26T14:02:01.000Z',
+      generatedAt: '2026-08-26T14:02:02.000Z',
+    },
+    viewport: { width: 1280, height: 720, deviceScaleFactor: 1 },
+  });
+  model.evidence.push({ evidenceId: 'ev-page-1-full', pageId: 'page-1', kind: 'full-page' });
+  model.evidence.push({
+    evidenceId: 'ev-page-2-element', pageId: 'page-2', kind: 'element',
+    fullPageEvidenceId: 'ev-page-1-full',
+  });
+
+  assert.throws(() => createAuditModel(model), /captura integral|evidência|outra página/i);
 });
 
 test('projects legacy aliases only from native V2 facts and requires an explicit integrity record', () => {

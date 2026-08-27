@@ -68,6 +68,28 @@ test('enriches a raw partial audit without inventing unavailable viewport data',
   assert.match(renderHtmlReport(model), /Viewport<\/dt><dd>não disponível/iu);
 });
 
+test('hashes the evidence manifest after V1 migration assigns final page IDs', async () => {
+  const model = await enrichAuditForReport(rawAudit(), {
+    now: () => '2026-08-26T15:00:00.000Z',
+    timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0',
+    rulesVersion: '1.0.0',
+    browserVersion: 'Chrome/147.0.0.0',
+  });
+  const finalManifest = model.evidence.map(artifact => ({
+    evidenceId: artifact.evidenceId,
+    pageId: artifact.pageId,
+    kind: artifact.kind,
+    nodeId: artifact.nodeId ?? null,
+    hash: artifact.hash ?? null,
+    fullPageEvidenceId: artifact.fullPageEvidenceId ?? null,
+  }));
+  const expected = await sha256Hex(canonicalStringify(finalManifest));
+
+  assert.equal(model.evidence[0].pageId, 'page-1');
+  assert.equal(model.integrity.evidenceManifestHash, expected);
+});
+
 test('preserves failed and cancelled outcomes while deriving explicit limitations', async () => {
   for (const status of ['failed', 'cancelled']) {
     const input = rawAudit({ session: { status, diagnostics: [], partial: false } });

@@ -28,7 +28,7 @@ export function reportInput(overrides = {}) {
     session: { status: 'partial', diagnostics: [{ code: 'FRAME_LIMITED', message: 'Um frame não pôde ser lido.', at: '2026-08-26T14:00:30.000Z', recoverable: true }], partial: true },
     limitations: ['A auditoria cobre somente a página e o estado observados.'],
     ruleResults: [
-      { ruleId: 'rule-passed', outcome: 'passed', mode: 'automated', nbrItems: ['5.1.1'], targets: [], summary: 'Verificação concluída.', limitations: [] },
+      { ruleId: 'focus-visible', outcome: 'passed', mode: 'automated', nbrItems: ['5.1.1'], targets: [], summary: 'Verificação concluída.', limitations: [] },
       { ruleId: 'rule-assisted', outcome: 'cantTell', mode: 'assisted', nbrItems: ['5.1.4'], targets: ['n-1'], summary: 'Exige revisão humana.', limitations: [] },
       { ruleId: 'rule-manual', outcome: 'untested', mode: 'manual', nbrItems: ['5.7.5'], targets: [], summary: 'Depende de outras páginas.', limitations: ['Escopo de página única.'] },
     ],

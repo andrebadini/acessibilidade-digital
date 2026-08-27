@@ -4,13 +4,14 @@ import { section508ReferencesForWcag } from '../../src/core/normative/section508
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
-const CYCLE = ['passed', 'failed', 'cantTell', 'inapplicable', 'untested'];
+const CYCLE = ['failed', 'cantTell', 'inapplicable', 'untested'];
 
 const itemResults = NBR17225_ITEMS.map((item, index) => ({
   ...item,
   wcag: item.wcag.map(reference => ({ ...reference })),
   ruleIds: [...item.ruleIds],
-  outcome: item.id === '5.1.1' ? 'failed' : ['5.1.4', '5.7.5'].includes(item.id) ? 'cantTell' : CYCLE[index % CYCLE.length],
+  outcome: item.id === '5.1.1' ? 'failed' : item.id === '5.1.2' ? 'passed' :
+    ['5.1.4', '5.7.5'].includes(item.id) ? 'cantTell' : CYCLE[index % CYCLE.length],
   ruleResults: item.ruleIds,
 }));
 
@@ -96,6 +97,7 @@ export const SAMPLE_AUDIT = createAuditModel({
   ],
   ruleResults: [
     { ruleId: 'focus-visible', outcome: 'failed', mode: 'automated', nbrItems: ['5.1.1'], targets: ['n-1'], summary: 'O foco não foi distinguido visualmente.', limitations: [] },
+    { ruleId: 'focus-fully-visible', outcome: 'passed', mode: 'automated', nbrItems: ['5.1.2'], targets: [], summary: 'O foco permaneceu totalmente visível.', limitations: [] },
     { ruleId: 'focus-order', outcome: 'cantTell', mode: 'assisted', nbrItems: ['5.1.4'], targets: ['n-1'], summary: 'A previsibilidade depende do fluxo da tarefa.', limitations: [] },
     { ruleId: 'consistent-link-identification', outcome: 'untested', mode: 'manual', nbrItems: ['5.7.5'], targets: [], summary: 'São necessárias outras páginas.', limitations: ['Escopo de página única.'] },
   ],

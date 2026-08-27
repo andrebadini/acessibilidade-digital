@@ -16,6 +16,7 @@ const SESSION_STATUSES = new Set(['complete', 'partial', 'failed', 'cancelled'])
 const REVIEW_STATUSES = new Set(['unanswered', 'answered']);
 const METHODOLOGY_NAME = 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2';
 const EXPECTED_RULE_COUNT = 130;
+const URL_VALUE_KEYS = new Set(['action', 'cite', 'formaction', 'href', 'poster', 'src', 'currentsrc']);
 
 export const V1_MIGRATION_DEFAULTS = Object.freeze({
   pageId: 'page-1',
@@ -47,10 +48,14 @@ export function createAuditModel(input) {
   validateLimitations(model.limitations);
   validateIntegrity(model.integrity);
   model.itemResults = validateItems(model.itemResults);
-  const ruleById = validateRules(model.ruleResults, new Set(model.itemResults.map(item => item.id)));
+  const ruleById = validateRules(model.ruleResults, new Map(model.itemResults.map(item => [item.id, item])));
   projectOccurrenceCompatibility(model.occurrences, ruleById);
+  if (Array.isArray(model.evidence)) {
+    model.evidence = model.evidence.map(artifact => sanitizeEvidenceArtifactUrls(artifact));
+  }
   const graph = validateEvidenceAndOccurrences(model, ruleById, pageById);
   validateReview(model, graph);
+  validatePassedItemAuthority(model.itemResults, ruleById);
   validateNormative(model.normative);
   return deepFreeze(model);
 }
@@ -70,8 +75,24 @@ function migrateV1Record(model) {
   const evidenceInput = Array.isArray(model.evidence)
     ? model.evidence
     : model.evidence?.artifacts ?? [];
-  const evidence = evidenceInput.map(artifact => ({ ...artifact, pageId: artifact.pageId ?? pageId }));
+  const evidence = evidenceInput.map(artifact => sanitizeEvidenceArtifactUrls({
+    ...artifact,
+    pageId: artifact.pageId ?? pageId,
+  }));
   const evidenceById = new Map(evidence.map(artifact => [artifact.evidenceId, artifact]));
+  const ruleResults = (model.ruleResults ?? []).map(rule => {
+    const nbrItems = [...(rule.nbrItems ?? [])];
+    const unsupportedPass = rule.outcome === 'passed' &&
+      nbrItems.some(itemId => !itemById.get(itemId)?.ruleIds.includes(rule.ruleId));
+    return { ...rule, outcome: unsupportedPass ? 'cantTell' : rule.outcome, nbrItems };
+  });
+  const authoritativePassedItems = new Set(ruleResults
+    .filter(rule => rule.outcome === 'passed')
+    .flatMap(rule => rule.nbrItems));
+  const itemResults = (model.itemResults ?? []).map(item => item.outcome === 'passed' &&
+    item.reviewedOutcome !== 'passed' && !authoritativePassedItems.has(item.id)
+    ? { ...item, outcome: 'cantTell' }
+    : item);
   const sourceVersion = model.versions?.rules ?? model.methodology?.version ?? 'unknown';
   const occurrences = (model.occurrences ?? []).map(occurrence => {
     const item = itemById.get(occurrence.itemId);
@@ -81,12 +102,15 @@ function migrateV1Record(model) {
       ?? evidenceRefs.map(id => evidenceById.get(id)).find(Boolean);
     const ruleId = occurrence.ruleId ?? `manual:${occurrence.itemId ?? occurrence.occurrenceId}`;
     const wcagRefs = item?.wcag.map(reference => reference.id) ?? [];
+    const outcome = occurrence.outcome === 'passed' &&
+      (!item || !item.ruleIds.includes(ruleId)) ? 'cantTell' : occurrence.outcome;
     const legalBasis = consumerBasisForOccurrence({
-      outcome: occurrence.outcome,
+      outcome,
       nbrItemRef: item?.id ?? null,
     });
     return {
       ...occurrence,
+      outcome,
       pageId,
       classification: item?.classification ?? 'editorial',
       impact: V1_MIGRATION_DEFAULTS.impact,
@@ -131,11 +155,35 @@ function migrateV1Record(model) {
         ? Math.max(0, ruleCount - EXPECTED_RULE_COUNT)
         : 0,
     },
+    ruleResults,
+    itemResults,
     occurrences,
     evidence,
     evidenceStateCount: Array.isArray(model.evidence) ? model.evidenceStateCount ?? 0 : model.evidence?.stateCount ?? 0,
     integrity: model.integrity ?? { algorithm: 'unavailable', status: 'not-recorded-v1' },
   };
+}
+
+/** Privacy boundary for persisted evidence metadata; embedded image payloads remain evidence content. */
+export function sanitizeEvidenceArtifactUrls(input, ancestors = new WeakSet()) {
+  if (input === null || typeof input !== 'object') return input;
+  if (ancestors.has(input)) return null;
+  ancestors.add(input);
+  try {
+    if (Array.isArray(input)) return input.map(value => sanitizeEvidenceArtifactUrls(value, ancestors));
+    const output = {};
+    for (const [key, value] of Object.entries(input)) {
+      const lowerKey = key.toLowerCase();
+      const embeddedDataUrl = lowerKey.endsWith('dataurl');
+      const urlBearing = !embeddedDataUrl && (URL_VALUE_KEYS.has(lowerKey) || lowerKey.endsWith('url') || lowerKey.endsWith('uri'));
+      output[key] = urlBearing && typeof value === 'string'
+        ? sanitizeResourceUrl(value)
+        : sanitizeEvidenceArtifactUrls(value, ancestors);
+    }
+    return output;
+  } finally {
+    ancestors.delete(input);
+  }
 }
 
 function projectPrimaryPageCompatibility(model) {
@@ -352,7 +400,7 @@ function validateItems(items) {
   return NBR17225_ITEMS.map(expected => byId.get(expected.id));
 }
 
-function validateRules(rules, itemIds) {
+function validateRules(rules, itemById) {
   if (!Array.isArray(rules)) throw new TypeError('ruleResults deve ser lista.');
   const byId = new Map();
   for (const rule of rules) {
@@ -363,8 +411,12 @@ function validateRules(rules, itemIds) {
     const linked = new Set();
     for (const itemId of rule.nbrItems) {
       const canonicalItemId = requiredId(itemId, `Regra ${id}.nbrItems`);
-      if (!itemIds.has(canonicalItemId)) throw new TypeError(`Regra ${id} referencia item desconhecido.`);
+      const item = itemById.get(canonicalItemId);
+      if (!item) throw new TypeError(`Regra ${id} referencia item desconhecido.`);
       if (linked.has(canonicalItemId)) throw new TypeError(`Regra ${id} contém vínculo de item duplicado.`);
+      if (rule.outcome === 'passed' && !item.ruleIds.includes(id)) {
+        throw new TypeError(`Regra suplementar ${id} não pode aprovar automaticamente o item ABNT ${canonicalItemId}.`);
+      }
       linked.add(canonicalItemId);
     }
     if (rule.classification !== undefined && !CLASSIFICATIONS.includes(rule.classification)) {
@@ -414,7 +466,9 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById) {
   for (const artifact of model.evidence) {
     if (artifact.fullPageEvidenceId !== undefined) {
       const fullPageId = requiredId(artifact.fullPageEvidenceId, `Evidência ${artifact.evidenceId}.fullPageEvidenceId`);
-      if (artifactById.get(fullPageId)?.kind !== 'full-page') throw new TypeError(`Evidência ${artifact.evidenceId} referencia captura integral desconhecida.`);
+      const fullPage = artifactById.get(fullPageId);
+      if (fullPage?.kind !== 'full-page') throw new TypeError(`Evidência ${artifact.evidenceId} referencia captura integral desconhecida.`);
+      if (fullPage.pageId !== artifact.pageId) throw new TypeError(`Evidência ${artifact.evidenceId} referencia captura integral de outra página.`);
     }
   }
   if (!Array.isArray(model.occurrences)) throw new TypeError('occurrences deve ser lista.');
@@ -451,6 +505,10 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById) {
     if (sourceRule && item && !sourceRule.nbrItems.includes(item.id)) {
       throw new TypeError(`Ocorrência ${id} possui vínculo de item incoerente.`);
     }
+    if (occurrence.outcome === 'passed' && item &&
+      (!sourceRule || sourceRule.outcome !== 'passed' || !item.ruleIds.includes(sourceRule.ruleId))) {
+      throw new TypeError(`Ocorrência ${id} não pode aprovar item ABNT sem resultado autoritativo aprovado.`);
+    }
     if (occurrence.itemId !== undefined && occurrence.itemId !== occurrence.nbrItemRef) {
       throw new TypeError(`Ocorrência ${id} possui item legado incoerente.`);
     }
@@ -478,6 +536,20 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById) {
     occurrenceById.set(id, occurrence);
   }
   return { itemIds, ruleById, occurrenceById, evidenceIds };
+}
+
+function validatePassedItemAuthority(items, ruleById) {
+  for (const item of items) {
+    if (item.outcome !== 'passed') continue;
+    const reviewedPass = item.reviewedOutcome === 'passed' && Array.isArray(item.review?.decisionIds) && item.review.decisionIds.length > 0;
+    const authoritativePass = item.ruleIds.some(ruleId => {
+      const rule = ruleById.get(ruleId);
+      return rule?.outcome === 'passed' && rule.nbrItems.includes(item.id);
+    });
+    if (!reviewedPass && !authoritativePass) {
+      throw new TypeError(`Item ABNT ${item.id} não pode ser aprovado sem resultado autoritativo ou revisão humana.`);
+    }
+  }
 }
 
 function validateSource(source, label) {

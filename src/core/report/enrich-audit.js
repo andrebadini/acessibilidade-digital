@@ -1,7 +1,7 @@
 import { sanitizeResourceUrl } from '../normalize-snapshot.js';
 import { hashEvidenceArtifact } from '../evidence/artifact-hash.js';
 import { NBR17225_EDITORIAL_NOTES } from '../normative/nbr17225.js';
-import { createAuditModel } from './audit-model.js';
+import { createAuditModel, sanitizeEvidenceArtifactUrls } from './audit-model.js';
 import { canonicalStringify } from './canonical-json.js';
 import { sha256Hex } from './hash.js';
 
@@ -24,20 +24,12 @@ export async function enrichAuditForReport(input, options = {}) {
     : raw.evidence?.stateCount ?? 0;
   const evidenceArtifacts = [];
   for (const artifact of sourceEvidence) {
-    evidenceArtifacts.push({ ...artifact, hash: await hashEvidenceArtifact(artifact) });
+    const sanitized = sanitizeEvidenceArtifactUrls(artifact);
+    evidenceArtifacts.push({ ...sanitized, hash: await hashEvidenceArtifact(sanitized) });
   }
   raw.evidence = Array.isArray(raw.evidence)
     ? evidenceArtifacts
     : { ...(raw.evidence ?? {}), artifacts: evidenceArtifacts };
-  const evidenceManifest = evidenceArtifacts.map(artifact => ({
-    evidenceId: artifact.evidenceId,
-    pageId: artifact.pageId ?? null,
-    kind: artifact.kind,
-    nodeId: artifact.nodeId ?? null,
-    hash: artifact.hash ?? null,
-    fullPageEvidenceId: artifact.fullPageEvidenceId ?? null,
-  }));
-  const evidenceManifestHash = await sha256Hex(canonicalStringify(evidenceManifest));
   const pages = Array.isArray(raw.pages)
     ? raw.pages.map(page => ({
       ...page,
@@ -78,18 +70,31 @@ export async function enrichAuditForReport(input, options = {}) {
       methodologyVersion: rulesVersion,
       capturedStateCount: raw.reproducibility?.capturedStateCount ?? evidenceStateCount,
     },
-    integrity: { algorithm: 'SHA-256', evidenceManifestHash, hashBase: REPORT_HASH_BASE },
+    integrity: { algorithm: 'SHA-256', evidenceManifestHash: 'pending', hashBase: REPORT_HASH_BASE },
   };
   const normalized = createAuditModel({
     ...base,
     integrity: { ...base.integrity, canonicalModelHash: 'pending' },
   });
-  const hashInput = structuredClone(normalized);
+  const evidenceManifest = normalized.evidence.map(artifact => ({
+    evidenceId: artifact.evidenceId,
+    pageId: artifact.pageId,
+    kind: artifact.kind,
+    nodeId: artifact.nodeId ?? null,
+    hash: artifact.hash ?? null,
+    fullPageEvidenceId: artifact.fullPageEvidenceId ?? null,
+  }));
+  const evidenceManifestHash = await sha256Hex(canonicalStringify(evidenceManifest));
+  const withManifest = createAuditModel({
+    ...normalized,
+    integrity: { ...normalized.integrity, evidenceManifestHash, canonicalModelHash: 'pending' },
+  });
+  const hashInput = structuredClone(withManifest);
   delete hashInput.integrity.canonicalModelHash;
   const canonicalModelHash = await sha256Hex(canonicalStringify(hashInput));
   return createAuditModel({
-    ...normalized,
-    integrity: { ...normalized.integrity, canonicalModelHash },
+    ...withManifest,
+    integrity: { ...withManifest.integrity, canonicalModelHash },
   });
 }
 
