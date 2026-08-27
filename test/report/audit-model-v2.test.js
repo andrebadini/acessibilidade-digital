@@ -1,16 +1,30 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
 import { SECTION508_REVISED_CROSSWALK } from '../../src/core/normative/section508.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
+import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import {
   V1_MIGRATION_DEFAULTS,
   createAuditModel,
   migrateAuditV1ToV2,
 } from '../../src/core/report/audit-model.js';
 import { reportInput } from './helpers.js';
+
+function reviewDecision(occurrenceId, itemId, answer, mode) {
+  return createReviewDecision({
+    auditId: SAMPLE_AUDIT.auditId,
+    itemId,
+    occurrenceId,
+    answer,
+    evaluator: 'Fiscal de teste',
+    decidedAt: '2026-08-26T15:00:00.000Z',
+    mode,
+  });
+}
 
 test('explicitly migrates V1 into the canonical single-page V2 contract without inventing source facts', () => {
   const input = reportInput();
@@ -233,6 +247,64 @@ test('rejects a supplemental passed rule and occurrence that try to auto-approve
   });
 
   assert.throws(() => createAuditModel(model), /passad|aprova|autorit|ABNT|suplementar/i);
+});
+
+test('rejects a third-party engine that claims an authoritative rule ID to approve ABNT', () => {
+  const ruleClaim = structuredClone(createAuditModel(reportInput()));
+  const rule = ruleClaim.ruleResults.find(entry => entry.ruleId === 'focus-visible');
+  rule.source = { engine: 'third-party-engine', ruleId: rule.ruleId, version: ruleClaim.versions.rules };
+  assert.throws(() => createAuditModel(ruleClaim), /audita-core|proveniência|fonte|aprova|autorit/i);
+
+  const occurrenceClaim = structuredClone(createAuditModel(reportInput()));
+  const item = NBR17225_ITEMS.find(entry => entry.id === '5.1.1');
+  occurrenceClaim.occurrences.push({
+    occurrenceId: 'occ-third-party-pass', pageId: 'page-1', outcome: 'passed',
+    classification: item.classification, impact: 'minor', confidence: 'high',
+    source: { engine: 'third-party-engine', ruleId: 'focus-visible', version: occurrenceClaim.versions.rules },
+    nbrItemRef: item.id, wcagRefs: item.wcag.map(reference => reference.id),
+    foreignBenchmarkRefs: [], target: { nodeId: null, selector: null, framePath: [] },
+    accessiblePreview: null, evidenceRefs: [], legalAnalysis: null,
+    itemId: item.id, ruleId: 'focus-visible', mode: 'automated', nodeId: null,
+    evidenceIds: [], justification: 'Aprovação de fonte externa.',
+  });
+  assert.throws(() => createAuditModel(occurrenceClaim), /audita-core|proveniência|fonte|aprova|autorit/i);
+});
+
+test('rejects an authoritative passed rule whose source version differs from the model rules version', () => {
+  const model = structuredClone(createAuditModel(reportInput()));
+  const rule = model.ruleResults.find(entry => entry.ruleId === 'focus-visible');
+  rule.source = { engine: 'audita-core', ruleId: rule.ruleId, version: '9.9.9' };
+
+  assert.throws(() => createAuditModel(model), /versão|version|proveniência|fonte|aprova|autorit/i);
+});
+
+test('rejects an unknown decision ID used to justify a reviewed ABNT pass', () => {
+  const model = structuredClone(applyReviewDecisions(SAMPLE_AUDIT, [
+    reviewDecision('occ-cross-page', '5.7.5', 'conforme', 'manual'),
+  ]));
+  model.itemResults.find(item => item.id === '5.7.5').review.decisionIds = ['decision-unknown'];
+
+  assert.throws(() => createAuditModel(model), /decisão|decision|revisão|aprova|autorit/i);
+});
+
+test('rejects reviewed ABNT passes backed by another item or a nonconformity decision', () => {
+  const otherItem = structuredClone(applyReviewDecisions(SAMPLE_AUDIT, [
+    reviewDecision('occ-focus-review', '5.1.4', 'conforme', 'assisted'),
+  ]));
+  const borrowedDecisionId = otherItem.reviewDecisions[0].decisionId;
+  const borrowedPass = otherItem.itemResults.find(item => item.id === '5.7.5');
+  borrowedPass.outcome = 'passed';
+  borrowedPass.reviewedOutcome = 'passed';
+  borrowedPass.review = { mode: 'manual', evaluator: 'Fiscal de teste', decidedAt: '2026-08-26T15:00:00.000Z', decisionIds: [borrowedDecisionId] };
+  assert.throws(() => createAuditModel(otherItem), /decisão|decision|item|revisão|aprova|autorit/i);
+
+  const nonconformity = structuredClone(applyReviewDecisions(SAMPLE_AUDIT, [
+    reviewDecision('occ-cross-page', '5.7.5', 'não conforme', 'manual'),
+  ]));
+  const forgedPass = nonconformity.itemResults.find(item => item.id === '5.7.5');
+  forgedPass.outcome = 'passed';
+  forgedPass.reviewedOutcome = 'passed';
+  assert.throws(() => createAuditModel(nonconformity), /decisão|decision|conforme|revisão|aprova|autorit/i);
 });
 
 test('rejects derived evidence whose full-page capture belongs to another page', () => {

@@ -179,3 +179,67 @@ Corrigidas as quatro invariantes vinculantes apontadas na revisão e removido do
 
 - O reconhecimento de campos URL-bearing é estrutural por nomes canônicos/convencionais. Novos campos de evidência com nomes opacos deverão ser incluídos explicitamente no contrato ou normalizados antes dessa fronteira.
 - O teste de release continuará regenerando o ZIP durante suítes futuras; tarefas que não sejam de release devem restaurar/verificar o blob deliberadamente antes do commit.
+
+## Fix round 2
+
+### Resultado
+
+Fechados os dois bypasses remanescentes de autoridade de aprovação: colisão de `ruleId` por fonte externa/versão divergente e uso de IDs de decisão não resolvidos, emprestados de outro item ou não conformes.
+
+### Implementação
+
+- Uma regra automática `passed` vinculada a item ABNT agora exige simultaneamente: relacionamento `item.ruleIds` autoritativo, `source.engine === 'audita-core'`, `source.ruleId === rule.ruleId` e `source.version === model.versions.rules`.
+- Uma ocorrência ABNT `passed` exige a mesma proveniência `audita-core` e versão do modelo, além de apontar para uma regra autoritativa também `passed`. Regras/ocorrências externas com IDs colidentes continuam permitidas para falhas e revisão, mas não aprovam itens.
+- A migração V1 passa a projetar a proveniência pública documentada também nos `ruleResults`. Se uma entrada V1 trouxer proveniência explícita divergente, um `passed` é rebaixado conservadoramente para `cantTell`; a migração preserva fontes explícitas em vez de sobrescrevê-las.
+- A validação de revisão agora devolve o grafo de decisões canônicas já verificadas. Para justificar `reviewedOutcome: 'passed'`, os `item.review.decisionIds` devem corresponder exatamente às decisões validadas das entradas de revisão daquele item, sem duplicatas, e todas devem ter resposta `conforme`.
+- IDs inexistentes, decisões de outro item/ocorrência e respostas `não conforme` ou inconclusivas não autorizam passe humano. Os passes reais produzidos por `applyReviewDecisions` permanecem aceitos.
+- A fixture V2 passou a declarar proveniência completa na regra automática aprovada de exemplo.
+
+### TDD — RED observado
+
+Comando:
+
+`node --test --test-name-pattern='third-party engine|source version|unknown decision ID|backed by another item' test/report/audit-model-v2.test.js`
+
+Saída: exit `1`, `0/4` passaram e `4/4` falharam com `Missing expected exception`:
+
+1. motor `third-party-engine` usando o ID autoritativo `focus-visible` foi aceito tanto na regra quanto na ocorrência;
+2. `audita-core` com `source.version: 9.9.9` foi aceito contra `model.versions.rules: 1.0.0`;
+3. `decision-unknown` em `item.review.decisionIds` autorizou passe;
+4. decisão conforme de outro item e decisão `não conforme` do próprio item autorizaram passes forjados.
+
+### TDD — GREEN observado
+
+- Mesmo comando focado → exit `0`, `4/4`, duração `116.086916 ms`.
+- Cobertura expandida de modelo, enriquecimento, HTML e revisão:
+
+  `node --test test/report/audit-model-v2.test.js test/report/enrich-audit.test.js test/report/html.test.js test/review/decisions.test.js`
+
+  Saída: exit `0`, `41/41`, duração `232.273833 ms`.
+- `git diff --check` → exit `0`, sem erros.
+
+### Suíte completa e ZIP
+
+- Execução única após os GREENs focados: `npm test` → exit `0`, `409/409`, `0` falhas, `0` ignorados, duração `3264.601625 ms`.
+- Após a suíte, `git checkout c19a9dd -- release/audita-acessibilidade-1.0.1.zip` restaurou o artefato de release.
+- `git hash-object release/audita-acessibilidade-1.0.1.zip` e `git rev-parse c19a9dd:release/audita-acessibilidade-1.0.1.zip` retornaram o mesmo blob: `091a60566be173834d1fbeaa3042151601469598`.
+
+### Arquivos
+
+- `src/core/report/audit-model.js`
+- `fixtures/audits/sample-audit.js`
+- `test/report/audit-model-v2.test.js`
+- `.superpowers/sdd/2026-08-27-audita-acessibilidade-2/task-3-report.md`
+
+### Auto-revisão e decisões de migração
+
+- A checagem de proveniência é aplicada em três níveis — regra, ocorrência e item agregado — para que remover uma das validações não reabra silenciosamente todos os caminhos de aprovação.
+- A versão comparada é a autoridade já validada `model.versions.rules`, que também deve coincidir com `methodology.version`.
+- A fronteira V1 usa somente o default explícito `V1_MIGRATION_DEFAULTS.sourceEngine` quando o schema antigo não possui `source`; uma fonte V1 explicitamente presente é preservada e não ganha confiança por migração.
+- A autoridade humana deriva exclusivamente de `createReviewDecision` + vínculos validados de auditoria/item/ocorrência/fila e resposta literal `conforme`; texto livre de `item.review` não concede aprovação.
+- A suíte preservou a migração V1 conservadora, 130 regras core, 146 itens/asserções EARL, rulings jurídicos, hashes e imutabilidade.
+
+### Preocupações
+
+- Registros V1 genuínos não carregavam proveniência de regra; o default `audita-core` permanece uma decisão explícita de compatibilidade da migração. Entradas com `source` próprio não podem se beneficiar desse default.
+- A suíte de release continua regenerando o ZIP durante `npm test`; o blob precisa ser restaurado após futuras execuções fora de tarefas de release.

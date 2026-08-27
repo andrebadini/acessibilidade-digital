@@ -97,7 +97,11 @@ export const SAMPLE_AUDIT = createAuditModel({
   ],
   ruleResults: [
     { ruleId: 'focus-visible', outcome: 'failed', mode: 'automated', nbrItems: ['5.1.1'], targets: ['n-1'], summary: 'O foco não foi distinguido visualmente.', limitations: [] },
-    { ruleId: 'focus-fully-visible', outcome: 'passed', mode: 'automated', nbrItems: ['5.1.2'], targets: [], summary: 'O foco permaneceu totalmente visível.', limitations: [] },
+    {
+      ruleId: 'focus-fully-visible', outcome: 'passed', mode: 'automated', nbrItems: ['5.1.2'],
+      targets: [], summary: 'O foco permaneceu totalmente visível.', limitations: [],
+      source: { engine: 'audita-core', ruleId: 'focus-fully-visible', version: '1.0.0' },
+    },
     { ruleId: 'focus-order', outcome: 'cantTell', mode: 'assisted', nbrItems: ['5.1.4'], targets: ['n-1'], summary: 'A previsibilidade depende do fluxo da tarefa.', limitations: [] },
     { ruleId: 'consistent-link-identification', outcome: 'untested', mode: 'manual', nbrItems: ['5.7.5'], targets: [], summary: 'São necessárias outras páginas.', limitations: ['Escopo de página única.'] },
   ],
