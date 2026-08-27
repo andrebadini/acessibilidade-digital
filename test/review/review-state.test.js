@@ -1,18 +1,40 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { commitReviewDecision, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId, recordReviewDecision } from '../../src/review/review-state.js';
+import { commitReviewDecision, createReviewDecisionCommitter, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId, recordReviewDecision } from '../../src/review/review-state.js';
 
-function reviewModel() {
+function reviewModel({ withSecondOccurrence = false } = {}) {
   const evidence = Object.freeze({ artifacts: Object.freeze([]) });
+  const occurrences = [
+    Object.freeze({ occurrenceId: 'occ-1', itemId: '5.1.1', ruleId: 'r', outcome: 'cantTell', evidenceIds: Object.freeze([]) }),
+    ...(withSecondOccurrence ? [Object.freeze({ occurrenceId: 'occ-2', itemId: '5.1.1', ruleId: 'r', outcome: 'cantTell', evidenceIds: Object.freeze([]) })] : []),
+  ];
+  const manualReview = occurrences.map(occurrence => Object.freeze({ occurrenceId: occurrence.occurrenceId, itemId: '5.1.1', status: 'unanswered' }));
   return Object.freeze({
     auditId: 'audit-1', evidence, reproducibility: Object.freeze({ evidenceHash: 'same' }),
     ruleResults: Object.freeze([Object.freeze({ ruleId: 'r', outcome: 'cantTell', mode: 'assisted', nbrItems: Object.freeze(['5.1.1']) })]),
     itemResults: Object.freeze([Object.freeze({ id: '5.1.1', outcome: 'cantTell', evaluation: 'assisted' })]),
-    occurrences: Object.freeze([Object.freeze({ occurrenceId: 'occ-1', itemId: '5.1.1', ruleId: 'r', outcome: 'cantTell', evidenceIds: Object.freeze([]) })]),
-    manualReview: Object.freeze([Object.freeze({ occurrenceId: 'occ-1', itemId: '5.1.1', status: 'unanswered' })]),
+    occurrences: Object.freeze(occurrences),
+    manualReview: Object.freeze(manualReview),
     reviewDecisions: Object.freeze([]),
   });
+}
+
+function reviewInput(occurrenceId = 'occ-1', answer = 'conforme') {
+  return {
+    auditId: 'audit-1', itemId: '5.1.1', occurrenceId, answer,
+    evaluator: 'Pessoa avaliadora', decidedAt: '2026-08-26T16:00:00.000Z', mode: 'assisted',
+  };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 test('allows only valid PNG data or same-extension blob evidence images', () => {
@@ -49,10 +71,7 @@ test('records a decision by applying conservative review aggregation to the stor
 
 test('keeps a failed decision persistence retryable and publishes the model only after storage succeeds', async () => {
   const original = reviewModel();
-  const input = {
-    auditId: 'audit-1', itemId: '5.1.1', occurrenceId: 'occ-1',
-    answer: 'conforme', evaluator: 'Pessoa avaliadora', decidedAt: '2026-08-26T16:00:00.000Z', mode: 'assisted',
-  };
+  const input = reviewInput();
   let attempts = 0;
   const store = {
     async setAudit(auditId, next) {
@@ -69,4 +88,105 @@ test('keeps a failed decision persistence retryable and publishes the model only
   assert.equal(attempts, 2);
   assert.equal(committed.reviewDecisions.length, 1);
   assert.equal(original.reviewDecisions.length, 0);
+});
+
+test('locks every card control synchronously and deduplicates contradictory concurrent decisions', async () => {
+  const original = reviewModel();
+  const pendingWrite = deferred();
+  const controls = [{ disabled: false }, { disabled: false }, { disabled: false }, { disabled: false }];
+  const duplicateControls = [{ disabled: false }];
+  const pendingStates = [];
+  let writes = 0;
+  const commit = createReviewDecisionCommitter();
+  const store = { setAudit: async () => { writes += 1; return pendingWrite.promise; } };
+
+  const first = commit({
+    auditModel: original, input: reviewInput('occ-1', 'conforme'), store, controls,
+    onPendingChange: pending => pendingStates.push(pending),
+  });
+  assert.deepEqual(controls.map(control => control.disabled), [true, true, true, true]);
+  const duplicate = await commit({
+    auditModel: original, input: reviewInput('occ-1', 'não conforme'), store, controls: duplicateControls,
+  });
+  assert.deepEqual(duplicate, { status: 'duplicate', model: original });
+  assert.equal(duplicateControls[0].disabled, false);
+  assert.equal(writes, 1);
+
+  pendingWrite.resolve();
+  const committed = await first;
+  assert.equal(committed.status, 'committed');
+  assert.equal(committed.model.reviewDecisions[0].answer, 'conforme');
+  assert.deepEqual(controls.map(control => control.disabled), [true, true, true, true]);
+  assert.deepEqual(pendingStates, [true]);
+});
+
+test('serializes independent occurrences against the latest committed model without losing a decision', async () => {
+  const original = reviewModel({ withSecondOccurrence: true });
+  const firstWrite = deferred();
+  const secondWrite = deferred();
+  const firstControls = [{ disabled: false }, { disabled: false }];
+  const independentControls = [{ disabled: false }];
+  const persisted = [];
+  let writes = 0;
+  const commit = createReviewDecisionCommitter();
+  const store = {
+    setAudit: async (_auditId, model) => {
+      writes += 1;
+      persisted.push(model);
+      return writes === 1 ? firstWrite.promise : secondWrite.promise;
+    },
+  };
+
+  const first = commit({
+    auditModel: original, input: reviewInput('occ-1'), store, controls: firstControls,
+  });
+  const independent = commit({
+    auditModel: original, input: reviewInput('occ-2'), store, controls: independentControls,
+  });
+  assert.equal(writes, 1);
+  assert.equal(firstControls.every(control => control.disabled), true);
+  assert.equal(independentControls.every(control => control.disabled), true);
+
+  firstWrite.resolve();
+  assert.equal((await first).model.reviewDecisions.length, 1);
+  await Promise.resolve();
+  assert.equal(writes, 2);
+  secondWrite.resolve();
+  const committed = await independent;
+  assert.equal(committed.model.reviewDecisions.length, 2);
+  assert.deepEqual(committed.model.reviewDecisions.map(decision => decision.occurrenceId), ['occ-1', 'occ-2']);
+  assert.equal(persisted[0].reviewDecisions.length, 1);
+  assert.equal(persisted[1].reviewDecisions.length, 2);
+});
+
+test('unlocks and focuses a failed card so the same occurrence can retry', async () => {
+  const original = reviewModel();
+  const firstWrite = deferred();
+  const retryControls = [{ disabled: false }, { disabled: false }];
+  const retryFocus = { calls: 0, focus() { this.calls += 1; } };
+  const pendingStates = [];
+  let writes = 0;
+  const commit = createReviewDecisionCommitter();
+  const store = { setAudit: async () => { writes += 1; return firstWrite.promise; } };
+
+  const failed = commit({
+    auditModel: original, input: reviewInput('occ-1'), store, controls: retryControls, retryFocus,
+    onPendingChange: pending => pendingStates.push(pending),
+  });
+  assert.equal(writes, 1);
+  assert.equal(retryControls.every(control => control.disabled), true);
+  firstWrite.reject(new Error('IDB indisponível'));
+  await assert.rejects(failed, /IDB indisponível/);
+  assert.equal(retryControls.every(control => control.disabled === false), true);
+  assert.equal(retryFocus.calls, 1);
+  assert.deepEqual(pendingStates, [true, false]);
+
+  const retryWrite = deferred();
+  store.setAudit = async () => { writes += 1; return retryWrite.promise; };
+  const retry = commit({ auditModel: original, input: reviewInput('occ-1'), store, controls: retryControls });
+  await Promise.resolve();
+  assert.equal(writes, 2);
+  assert.equal(retryControls.every(control => control.disabled), true);
+  retryWrite.resolve();
+  assert.equal((await retry).status, 'committed');
 });

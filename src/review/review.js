@@ -1,6 +1,6 @@
 import { createReviewDecision } from '../core/review/decisions.js';
 import { createAuditStore } from '../storage/audit-store.js';
-import { commitReviewDecision, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId } from './review-state.js';
+import { createReviewDecisionCommitter, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId } from './review-state.js';
 
 const ANSWERS = ['conforme', 'não conforme', 'não foi possível determinar'];
 const list = document.querySelector('#review-list');
@@ -8,6 +8,7 @@ const status = document.querySelector('#review-status');
 const evaluator = document.querySelector('#review-evaluator');
 const regenerate = document.querySelector('#regenerate-report');
 const store = createAuditStore();
+const commitDecision = createReviewDecisionCommitter();
 let auditModel;
 
 regenerate.addEventListener('click', () => {
@@ -52,7 +53,7 @@ function nextUnanswered(card) {
   (next?.querySelector('button') || document.querySelector('a[href="../panel/index.html"]'))?.focus();
 }
 
-async function saveDecision(occurrence, answer, note, card) {
+async function saveDecision(occurrence, answer, note, card, trigger) {
   const evaluatorName = evaluator.value.trim();
   if (!evaluatorName) {
     status.textContent = 'Informe o nome da pessoa avaliadora antes de responder.';
@@ -63,10 +64,21 @@ async function saveDecision(occurrence, answer, note, card) {
     auditId: auditModel.auditId, itemId: occurrence.itemId, occurrenceId: occurrence.occurrenceId,
     answer, evaluator: evaluatorName, note, decidedAt: new Date().toISOString(), mode: occurrence.mode === 'manual' ? 'manual' : 'assisted',
   });
-  const committedModel = await commitReviewDecision(auditModel, decision, store);
-  auditModel = committedModel;
+  const committed = await commitDecision({
+    auditModel,
+    input: decision,
+    store,
+    controls: card.querySelectorAll('button'),
+    retryFocus: trigger,
+    onPendingChange(pending) {
+      card.toggleAttribute('aria-busy', pending);
+      if (pending) status.textContent = `Salvando decisão para o item ${occurrence.itemId}.`;
+    },
+  });
+  if (committed.status === 'duplicate') return;
+  auditModel = committed.model;
+  card.removeAttribute('aria-busy');
   card.classList.add('answered');
-  for (const button of card.querySelectorAll('button')) button.disabled = true;
   status.textContent = `Decisão salva para o item ${occurrence.itemId}.`;
   nextUnanswered(card);
 }
@@ -105,7 +117,7 @@ function renderCard(entry) {
     button.type = 'button';
     button.textContent = answer;
     button.addEventListener('click', () => {
-      void saveDecision(occurrence, answer, note.value, card).catch(() => { status.textContent = 'Não foi possível salvar a decisão.'; });
+      void saveDecision(occurrence, answer, note.value, card, button).catch(() => { status.textContent = 'Não foi possível salvar a decisão.'; });
     });
     answers.append(button);
   }

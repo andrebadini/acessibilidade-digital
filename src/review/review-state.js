@@ -49,3 +49,41 @@ export async function commitReviewDecision(auditModel, input, store) {
   await store.setAudit(nextModel.auditId, nextModel);
   return nextModel;
 }
+
+/** Creates an occurrence-scoped UI gate with serialized persistence per audit. */
+export function createReviewDecisionCommitter() {
+  const pendingOccurrences = new Set();
+  const auditQueues = new Map();
+  return async function commitOnce({ auditModel, input, store, controls = [], retryFocus, onPendingChange } = {}) {
+    const occurrenceId = typeof input?.occurrenceId === 'string' ? input.occurrenceId : '';
+    const auditId = typeof input?.auditId === 'string' ? input.auditId : auditModel?.auditId;
+    const pendingKey = `${auditId}\u0000${occurrenceId}`;
+    if (pendingOccurrences.has(pendingKey)) return { status: 'duplicate', model: auditModel };
+    pendingOccurrences.add(pendingKey);
+    const cardControls = Array.from(controls).filter(control => control && typeof control === 'object');
+    for (const control of cardControls) control.disabled = true;
+    const queue = auditQueues.get(auditId) || { tail: null, confirmedModel: null };
+    auditQueues.set(auditId, queue);
+    const persist = async () => {
+      const model = await commitReviewDecision(queue.confirmedModel || auditModel, input, store);
+      queue.confirmedModel = model;
+      return model;
+    };
+    const operation = queue.tail ? queue.tail.then(persist) : persist();
+    const tail = operation.then(() => undefined, () => undefined);
+    queue.tail = tail;
+    try {
+      try { onPendingChange?.(true); } catch { /* UI notification must not affect persistence. */ }
+      const model = await operation;
+      return { status: 'committed', model };
+    } catch (error) {
+      for (const control of cardControls) control.disabled = false;
+      try { onPendingChange?.(false); } catch { /* UI notification must not mask the storage error. */ }
+      try { retryFocus?.focus?.(); } catch { /* Focus recovery is best effort. */ }
+      throw error;
+    } finally {
+      pendingOccurrences.delete(pendingKey);
+      if (queue.tail === tail) queue.tail = null;
+    }
+  };
+}
