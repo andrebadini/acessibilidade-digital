@@ -9,14 +9,21 @@ import { scanNeutralIdentity } from '../../scripts/verify-neutral-identity.mjs';
 
 const read = path => readFile(new URL(`../../${path}`, import.meta.url), 'utf8');
 
-test('plain-language usage docs cover unpacked install, permissions, local processing and honest limitations', async () => {
+test('plain-language usage docs report the completed real-browser and visual validation accurately', async () => {
   const [readme, guide] = await Promise.all([read('README.md'), read('docs/USO-FISCAL.md')]);
   const combined = `${readme}\n${guide}`;
-  for (const phrase of ['Carregar sem compactação', 'debugger', 'downloads', 'processamento local', 'revisão', 'PDF']) {
+  for (const phrase of [
+    'Carregar sem compactação', 'debugger', 'downloads', 'processamento local', 'revisão',
+    'JSON-LD', 'EARL', 'HTML', 'PDF', 'E2E', 'Chrome', 'Chromium', 'QA visual',
+    'desktop', 'móvel', 'impressão',
+  ]) {
     assert.match(combined, new RegExp(phrase, 'iu'));
   }
-  assert.match(combined, /Chromium.*(?:pendente|não executad)/iu);
-  assert.doesNotMatch(combined, /E2E (?:aprovado|concluído)|QA visual (?:aprovado|concluído)/iu);
+  assert.match(combined, /E2E[^.]*Chrome\/Chromium real[^.]*executad/iu);
+  assert.match(combined, /QA visual[^.]*executad/iu);
+  assert.match(combined, /instalação[^.]*auditoria[^.]*revisão[^.]*HTML[^.]*JSON-LD[^.]*PDF/iu);
+  assert.match(combined, /repetid[ao]s?[^.]*ambiente[^.]*alvo/iu);
+  assert.doesNotMatch(combined, /(?:E2E|QA visual)[^.]*\b(?:pendente|não executad)/iu);
 });
 
 test('neutral identity scanner rejects a forbidden identity in package content or file names', async () => {

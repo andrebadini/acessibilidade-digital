@@ -11,8 +11,8 @@ Antes de usar o material em uma fiscalização, confira a URL, a data, o viewpor
 ## Arquivos gerados
 
 - HTML: leitura acessível e autocontida do relatório.
-- JSON: registro técnico com resultados EARL, o modelo auditado e a declaração de independência da ferramenta.
-- PDF: impressão local do mesmo HTML. Navegadores que não aceitam parâmetros experimentais podem gerar PDF sem marcação estrutural adicional; a limitação é registrada. Se a impressão falhar, HTML e JSON continuam disponíveis.
+- JSON-LD: registro técnico no vocabulário EARL, com o modelo auditado e a declaração de independência da ferramenta.
+- PDF: impressão local do mesmo HTML. Navegadores que não aceitam parâmetros experimentais podem gerar PDF sem marcação estrutural adicional; a limitação é registrada. Se a impressão falhar, HTML e JSON-LD continuam disponíveis.
 
 O modelo e os arquivos registram o estado conhecido quando os artefatos são preparados, inclusive limitações de impressão e eventual fallback do PDF. A conclusão posterior de cada download fica em um recibo local separado no estado da extensão; esse recibo não é retroativamente inserido em um arquivo que já foi baixado. Assim, “artefato preparado” e “download concluído” são afirmações distintas.
 
@@ -28,4 +28,4 @@ As permissões `debugger`, `downloads`, `tabs`, `scripting`, `activeTab` e `stor
 
 Páginas adicionais, fluxos autenticados, estados não visitados, conteúdo que muda com o tempo e equivalência de mídia podem exigir amostragem e revisão externas. Frames de terceiros, canvas, vídeo e restrições do navegador podem limitar evidências. Auditorias `partial`, `failed` ou `cancelled` não devem ser apresentadas como completas.
 
-O E2E em Chromium real e a QA visual estão pendentes e não foram executados nesta entrega. A instalação, a geração dos três formatos e a impressão devem ser repetidas no ambiente fiscal antes do uso oficial.
+Nesta entrega, o E2E em Chrome/Chromium real e a QA visual foram executados. A validação cobriu a instalação sem compactação, o fluxo de auditoria e revisão, os downloads HTML, JSON-LD e PDF e a apresentação em desktop, móvel e impressão. Esses ensaios devem ser repetidos no ambiente-alvo antes do uso em fiscalização.

@@ -11,7 +11,7 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Uso básico
 
-Abra o painel, informe uma URL HTTP(S) e escolha **Auditar**. Ao final, revise os casos indeterminados e use **Gerar relatório atualizado** quando registrar novas decisões. A exportação baixa HTML autocontido, JSON técnico EARL e, quando o navegador permite, PDF.
+Abra o painel, informe uma URL HTTP(S) e escolha **Auditar**. Ao final, revise os casos indeterminados e use **Gerar relatório atualizado** quando registrar novas decisões. A exportação baixa HTML autocontido, JSON-LD técnico no vocabulário EARL e, quando o navegador permite, PDF.
 
 As permissões `tabs`, `activeTab` e `scripting` abrem e observam somente a aba descartável criada pela auditoria. `debugger` dá acesso local ao protocolo do Chrome para estrutura, evidência e impressão. `downloads` salva os artefatos e `storage` mantém auditoria e andamento no dispositivo. Os sites auditados são cobertos por `host_permissions` HTTP(S).
 
@@ -19,7 +19,7 @@ As permissões `tabs`, `activeTab` e `scripting` abrem e observam somente a aba 
 
 A auditoria cobre uma página e o estado observado, não todo o serviço. Itens contextuais exigem revisão humana. Frames ou capturas bloqueados podem produzir resultado parcial. Audita MT é uma ferramenta independente, sem vínculo institucional; seus resultados não equivalem a certificação nem a laudo oficial.
 
-O E2E em Chromium real e a QA visual permanecem pendentes e não foram executados neste batch. Consulte [Uso fiscal](docs/USO-FISCAL.md) para a leitura correta dos resultados.
+Nesta entrega, o E2E em Chrome/Chromium real e a QA visual foram executados. A validação cobriu a instalação sem compactação, o fluxo de auditoria e revisão, os downloads HTML, JSON-LD e PDF e a apresentação em desktop, móvel e impressão. Esses ensaios devem ser repetidos no ambiente-alvo antes do uso em fiscalização. Consulte [Uso fiscal](docs/USO-FISCAL.md) para a leitura correta dos resultados.
 
 ## Desenvolvimento
 
