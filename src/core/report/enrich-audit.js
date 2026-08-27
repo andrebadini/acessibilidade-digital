@@ -18,21 +18,36 @@ export async function enrichAuditForReport(input, options = {}) {
   if (!raw.timestamps?.endedAt) limitations.push('O instante de término da auditoria não estava disponível; o instante de geração foi usado somente para fechar o registro temporal do relatório.');
   const rulesVersion = cleanVersion(options.rulesVersion ?? raw.methodology?.version, 'rulesVersion');
   const browserVersion = cleanVersion(options.browserVersion || raw.environment?.chromeVersion || 'não disponível', 'browserVersion');
+  const sourceEvidence = Array.isArray(raw.evidence) ? raw.evidence : raw.evidence?.artifacts ?? [];
+  const evidenceStateCount = Array.isArray(raw.evidence)
+    ? raw.evidenceStateCount ?? raw.reproducibility?.capturedStateCount ?? 0
+    : raw.evidence?.stateCount ?? 0;
   const evidenceArtifacts = [];
-  for (const artifact of raw.evidence?.artifacts ?? []) {
+  for (const artifact of sourceEvidence) {
     evidenceArtifacts.push({ ...artifact, hash: await hashEvidenceArtifact(artifact) });
   }
-  raw.evidence = { ...(raw.evidence ?? {}), artifacts: evidenceArtifacts };
+  raw.evidence = Array.isArray(raw.evidence)
+    ? evidenceArtifacts
+    : { ...(raw.evidence ?? {}), artifacts: evidenceArtifacts };
   const evidenceManifest = evidenceArtifacts.map(artifact => ({
     evidenceId: artifact.evidenceId,
+    pageId: artifact.pageId ?? null,
     kind: artifact.kind,
     nodeId: artifact.nodeId ?? null,
     hash: artifact.hash ?? null,
     fullPageEvidenceId: artifact.fullPageEvidenceId ?? null,
   }));
   const evidenceManifestHash = await sha256Hex(canonicalStringify(evidenceManifest));
+  const pages = Array.isArray(raw.pages)
+    ? raw.pages.map(page => ({
+      ...page,
+      timestamps: { ...page.timestamps, generatedAt },
+    }))
+    : undefined;
+  const isBatch = raw.schemaVersion === 2 && raw.requestedScope?.mode === 'batch';
   const base = {
     ...raw,
+    ...(pages ? { pages } : {}),
     requestedUrl: sanitizeResourceUrl(raw.requestedUrl),
     finalUrl: sanitizeResourceUrl(raw.finalUrl),
     timestamps: { startedAt: raw.timestamps?.startedAt, endedAt, generatedAt },
@@ -43,10 +58,15 @@ export async function enrichAuditForReport(input, options = {}) {
       browser: browserVersion,
     },
     environment: { chromeVersion: browserVersion, viewport },
-    scope: {
-      kind: 'single-page-observed-state',
-      description: 'Página única e estado observado no instante da coleta; outras páginas, etapas e estados não foram inferidos.',
-    },
+    scope: isBatch
+      ? {
+        kind: 'explicit-url-batch',
+        description: `${raw.pages.length} páginas correspondentes à lista explícita de ${raw.requestedScope.urls.length} URLs; páginas e estados não solicitados não foram inferidos.`,
+      }
+      : {
+        kind: 'single-page-observed-state',
+        description: 'Página única e estado observado no instante da coleta; outras páginas, etapas e estados não foram inferidos.',
+      },
     limitations: [...new Set(limitations)],
     normative: {
       edition: 'ABNT NBR 17225:2025',
@@ -56,12 +76,21 @@ export async function enrichAuditForReport(input, options = {}) {
     reproducibility: {
       ...(raw.reproducibility ?? {}),
       methodologyVersion: rulesVersion,
-      capturedStateCount: raw.reproducibility?.capturedStateCount ?? raw.evidence?.stateCount ?? 0,
+      capturedStateCount: raw.reproducibility?.capturedStateCount ?? evidenceStateCount,
     },
     integrity: { algorithm: 'SHA-256', evidenceManifestHash, hashBase: REPORT_HASH_BASE },
   };
-  const canonicalModelHash = await sha256Hex(canonicalStringify(base));
-  return createAuditModel({ ...base, integrity: { ...base.integrity, canonicalModelHash } });
+  const normalized = createAuditModel({
+    ...base,
+    integrity: { ...base.integrity, canonicalModelHash: 'pending' },
+  });
+  const hashInput = structuredClone(normalized);
+  delete hashInput.integrity.canonicalModelHash;
+  const canonicalModelHash = await sha256Hex(canonicalStringify(hashInput));
+  return createAuditModel({
+    ...normalized,
+    integrity: { ...normalized.integrity, canonicalModelHash },
+  });
 }
 
 function canonicalNow(now) {
@@ -92,7 +121,9 @@ function normalizedViewport(value) {
 
 function deriveLimitations(raw) {
   const limitations = Array.isArray(raw.limitations) ? raw.limitations.filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()) : [];
-  limitations.push('O relatório cobre somente uma página e o estado observado; não constitui declaração de conformidade do site inteiro.');
+  limitations.push(raw.schemaVersion === 2 && raw.requestedScope?.mode === 'batch'
+    ? 'O relatório cobre somente a lista explícita de URLs e os estados observados; não constitui declaração de conformidade do site inteiro.'
+    : 'O relatório cobre somente uma página e o estado observado; não constitui declaração de conformidade do site inteiro.');
   if (raw.session?.status === 'partial') limitations.push('A auditoria foi concluída parcialmente e contém limitações técnicas registradas nos diagnósticos.');
   if (raw.session?.status === 'failed') limitations.push('A auditoria falhou antes de ser concluída; resultados disponíveis devem ser interpretados como parciais.');
   if (raw.session?.status === 'cancelled') limitations.push('A auditoria foi cancelada; resultados disponíveis permanecem incompletos.');

@@ -35,7 +35,7 @@ test('renders a neutral independent identity in the real HTML and technical JSON
 });
 
 test('keeps strict PNG validation for audit evidence without a brand image', () => {
-  const fixtureData = SAMPLE_AUDIT.evidence.artifacts.find(artifact => artifact.dataUrl)?.dataUrl;
+  const fixtureData = SAMPLE_AUDIT.evidence.find(artifact => artifact.dataUrl)?.dataUrl;
   const valid = Buffer.from(fixtureData.slice('data:image/png;base64,'.length), 'base64');
   const corrupted = Buffer.from(valid);
   corrupted[corrupted.indexOf('IDAT') + 4] ^= 1;
@@ -46,7 +46,7 @@ test('keeps strict PNG validation for audit evidence without a brand image', () 
     Buffer.concat([valid, Buffer.from([0])]),
   ]) {
     const input = structuredClone(SAMPLE_AUDIT);
-    input.evidence.artifacts[0].dataUrl = `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`;
+    input.evidence[0].dataUrl = `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`;
     const html = renderHtmlReport(input);
     assert.equal((html.match(/<svg\b[^>]*class="evidence-media"/gu) || []).length, 3);
     assert.equal((html.match(/<image\b[^>]*href="data:image\/png;base64,/gu) || []).length, 1);

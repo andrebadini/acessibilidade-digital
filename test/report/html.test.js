@@ -50,7 +50,7 @@ test('renders all report sections, 146 items, occurrences and evidence records',
   assert.equal((html.match(/data-report-item=/gu) || []).length, 146);
   for (const item of SAMPLE_AUDIT.itemResults) assert.match(html, new RegExp(`>${item.id.replaceAll('.', '\\.')}(?:<| —)`, 'u'));
   for (const occurrence of SAMPLE_AUDIT.occurrences) assert.match(html, new RegExp(occurrence.occurrenceId, 'u'));
-  for (const evidence of SAMPLE_AUDIT.evidence.artifacts) assert.match(html, new RegExp(evidence.evidenceId, 'u'));
+  for (const evidence of SAMPLE_AUDIT.evidence) assert.match(html, new RegExp(evidence.evidenceId, 'u'));
   assert.match(html, /Prévia de anúncio/u);
   assert.match(html, /não é transcrição literal|pode variar conforme o navegador/iu);
   assert.match(html, /relógio local[^.]*não[^.]*carimbo[^.]*certificado/iu);
@@ -81,7 +81,7 @@ test('embeds occurrence-specific marked screenshots and raw evidence with useful
 
 test('positions the automatic highlight from capture metadata without using color alone', () => {
   const input = structuredClone(SAMPLE_AUDIT);
-  input.evidence.artifacts[1].metadata = {
+  input.evidence[1].metadata = {
     width: 128, height: 88,
     highlightBox: { x: 24, y: 24, width: 80, height: 40, coordinateSpace: 'capture-css-px' },
   };
@@ -128,8 +128,8 @@ test('keeps occurrence evidence amber after an inconclusive review decision', ()
 test('embeds a shared large PNG once when fifty occurrences reuse it', () => {
   const input = structuredClone(SAMPLE_AUDIT);
   const dataUrl = `data:image/png;base64,${readFileSync(new URL('../../store-assets/screenshot-panel.png', import.meta.url)).toString('base64')}`;
-  input.evidence.artifacts = [{
-    ...input.evidence.artifacts[0],
+  input.evidence = [{
+    ...input.evidence[0],
     dataUrl,
   }];
   const sourceOccurrence = input.occurrences.find(value => value.occurrenceId === 'occ-focus-review');
@@ -138,6 +138,7 @@ test('embeds a shared large PNG once when fifty occurrences reuse it', () => {
     ...sourceOccurrence,
     occurrenceId: `occ-shared-${index + 1}`,
     evidenceIds: ['ev-full'],
+    evidenceRefs: ['ev-full'],
   }));
   input.manualReview = input.occurrences.map(occurrence => ({
     ...sourceReview,
@@ -162,11 +163,11 @@ test('escapes hostile audited strings in text, attributes, code, URLs and media'
   const input = structuredClone(SAMPLE_AUDIT);
   input.scope.description = hostile;
   input.occurrences[0].justification = hostile;
-  input.evidence.artifacts[1].snippet = `<button aria-label="${hostile}">x</button>`;
-  input.evidence.artifacts[1].selector.css = `#x"]{background:url(https://evil.test/x)}`;
-  input.evidence.artifacts[1].backendNodeId = `41</dd><script>alert(5)</script>`;
-  input.evidence.artifacts[1].mediaUrl = 'javascript:alert(3)';
-  input.evidence.artifacts[1].dataUrl = 'data:image/svg+xml,<svg onload=alert(4)>';
+  input.evidence[1].snippet = `<button aria-label="${hostile}">x</button>`;
+  input.evidence[1].selector.css = `#x"]{background:url(https://evil.test/x)}`;
+  input.evidence[1].backendNodeId = `41</dd><script>alert(5)</script>`;
+  input.evidence[1].mediaUrl = 'javascript:alert(3)';
+  input.evidence[1].dataUrl = 'data:image/svg+xml,<svg onload=alert(4)>';
   const html = renderHtmlReport(createAuditModel(input));
   assert.doesNotMatch(html, /<script\b|<img\s+src=x|\s(?:onerror|onload)=["'][^>]*>|(?:src|href)=["']javascript:|>javascript:/iu);
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/u);

@@ -43,8 +43,8 @@ function appendText(parent, tag, value, className) {
 }
 
 function evidenceFor(occurrence) {
-  const ids = new Set(occurrence.evidenceIds || []);
-  return (auditModel.evidence?.artifacts || []).filter(item => ids.has(item.evidenceId));
+  const ids = new Set(occurrence.evidenceRefs || occurrence.evidenceIds || []);
+  return (Array.isArray(auditModel.evidence) ? auditModel.evidence : []).filter(item => ids.has(item.evidenceId));
 }
 
 function nextUnanswered(card) {

@@ -67,7 +67,11 @@ function normalizeRuleResult(value) {
       mode: value.mode,
       targets: cloneJsonSafeArray(value.targets),
       summary: value.summary,
-      limitations: cloneJsonSafeArray(value.limitations)
+      limitations: cloneJsonSafeArray(value.limitations),
+      ...(hasOwn(value, 'classification') ? { classification: value.classification } : {}),
+      ...(hasOwn(value, 'impact') ? { impact: value.impact } : {}),
+      ...(hasOwn(value, 'confidence') ? { confidence: value.confidence } : {}),
+      ...(hasOwn(value, 'source') ? { source: value.source } : {}),
     });
     const wcag = hasOwn(value, 'wcag') ? normalizeItemIds(value.wcag) : null;
     if (wcag !== null && wcag.length === 0) return null;

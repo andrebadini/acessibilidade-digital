@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
+import { canonicalStringify } from '../../src/core/report/canonical-json.js';
+import { sha256Hex } from '../../src/core/report/hash.js';
 import { reportInput } from './helpers.js';
 
 function rawAudit(overrides = {}) {
@@ -43,7 +45,9 @@ test('enriches a raw partial audit without inventing unavailable viewport data',
   });
   assert.deepEqual(input, original);
   assert.equal(Object.isFrozen(input), false);
-  assert.deepEqual(model.environment.viewport, { width: null, height: null, deviceScaleFactor: null });
+  assert.equal(model.schemaVersion, 2);
+  assert.deepEqual(model.pages[0].viewport, { width: null, height: null, deviceScaleFactor: null });
+  assert.equal(model.pages[0].pageId, 'page-1');
   assert.equal(model.timestamps.generatedAt, '2026-08-26T15:00:00.000Z');
   assert.equal(model.timezone, 'America/Cuiaba');
   assert.deepEqual(model.versions, { extension: '0.1.0', rules: '1.0.0', browser: 'Chrome/147.0.0.0' });
@@ -52,10 +56,10 @@ test('enriches a raw partial audit without inventing unavailable viewport data',
   assert.match(model.limitations.join(' '), /parcial|limitaç/iu);
   assert.equal(model.itemResults[0].outcome, input.itemResults[0].outcome);
   assert.deepEqual(
-    model.evidence.artifacts.map(({ hash: _hash, ...artifact }) => artifact),
+    model.evidence.map(({ hash: _hash, pageId: _pageId, ...artifact }) => artifact),
     input.evidence.artifacts.map(({ hash: _hash, ...artifact }) => artifact),
   );
-  assert.ok(model.evidence.artifacts.every(artifact => /^[a-f0-9]{64}$/u.test(artifact.hash)));
+  assert.ok(model.evidence.every(artifact => /^[a-f0-9]{64}$/u.test(artifact.hash)));
   assert.deepEqual(model.reviewDecisions, input.reviewDecisions);
   assert.match(model.integrity.canonicalModelHash, /^[a-f0-9]{64}$/u);
   assert.match(model.integrity.evidenceManifestHash, /^[a-f0-9]{64}$/u);
@@ -92,9 +96,59 @@ test('recomputes evidence hashes from real PNG content and ignores forged input 
   };
   const first = await enrichAuditForReport(withPng(png(1)), options);
   const second = await enrichAuditForReport(withPng(png(2)), options);
-  assert.match(first.evidence.artifacts[0].hash, /^[a-f0-9]{64}$/u);
-  assert.match(second.evidence.artifacts[0].hash, /^[a-f0-9]{64}$/u);
-  assert.notEqual(first.evidence.artifacts[0].hash, second.evidence.artifacts[0].hash);
+  assert.match(first.evidence[0].hash, /^[a-f0-9]{64}$/u);
+  assert.match(second.evidence[0].hash, /^[a-f0-9]{64}$/u);
+  assert.notEqual(first.evidence[0].hash, second.evidence[0].hash);
   assert.notEqual(first.integrity.evidenceManifestHash, second.integrity.evidenceManifestHash);
   assert.notEqual(first.integrity.canonicalModelHash, second.integrity.canonicalModelHash);
+});
+
+test('re-enriches native V2 pages and evidence without letting compatibility projections stale the integrity input', async () => {
+  const options = {
+    now: () => '2026-08-26T15:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  };
+  const first = await enrichAuditForReport(rawAudit(), options);
+  const firstHashInput = structuredClone(first);
+  delete firstHashInput.integrity.canonicalModelHash;
+  assert.equal(first.integrity.canonicalModelHash, await sha256Hex(canonicalStringify(firstHashInput)));
+  const second = await enrichAuditForReport(first, {
+    ...options,
+    now: () => '2026-08-26T16:00:00.000Z',
+  });
+
+  assert.equal(Array.isArray(second.evidence), true);
+  assert.equal(second.timestamps.generatedAt, '2026-08-26T16:00:00.000Z');
+  assert.equal(second.pages[0].timestamps.generatedAt, '2026-08-26T16:00:00.000Z');
+  assert.notEqual(second.integrity.canonicalModelHash, first.integrity.canonicalModelHash);
+  const hashInput = structuredClone(second);
+  delete hashInput.integrity.canonicalModelHash;
+  assert.equal(second.integrity.canonicalModelHash, await sha256Hex(canonicalStringify(hashInput)));
+});
+
+test('preserves an explicit V2 batch scope instead of relabeling it as one page', async () => {
+  const options = {
+    now: () => '2026-08-26T15:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  };
+  const input = structuredClone(await enrichAuditForReport(rawAudit(), options));
+  input.limitations = [];
+  input.requestedScope = {
+    mode: 'batch',
+    urls: [...input.requestedScope.urls, 'https://second.example.test/'],
+  };
+  input.pages.push({
+    pageId: 'page-2', requestedUrl: 'https://second.example.test/',
+    finalUrl: 'https://second.example.test/final', status: 'failed',
+    timestamps: {
+      startedAt: '2026-08-26T14:02:00.000Z', endedAt: '2026-08-26T14:02:01.000Z',
+      generatedAt: '2026-08-26T15:00:00.000Z',
+    },
+    viewport: { width: null, height: null, deviceScaleFactor: null },
+  });
+
+  const model = await enrichAuditForReport(input, options);
+  assert.equal(model.scope.kind, 'explicit-url-batch');
+  assert.match(model.scope.description, /2 páginas|2 URLs/iu);
+  assert.doesNotMatch(model.limitations.join(' '), /somente uma página/iu);
 });

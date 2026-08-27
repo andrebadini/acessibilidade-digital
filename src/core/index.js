@@ -1,4 +1,11 @@
-export { OUTCOMES, TEST_MODES, createRuleResult } from './result.js';
+export {
+  CLASSIFICATIONS,
+  CONFIDENCE_LEVELS,
+  IMPACT_LEVELS,
+  OUTCOMES,
+  TEST_MODES,
+  createRuleResult,
+} from './result.js';
 export { WCAG22_LEVELS } from './normative/wcag22.js';
 export { NBR17225_EDITORIAL_NOTES, NBR17225_ITEMS } from './normative/nbr17225.js';
 export { validateNormativeData } from './normative/validate-normative-data.js';

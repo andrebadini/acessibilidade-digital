@@ -10,25 +10,33 @@ const OUTCOME = Object.freeze({
 
 export function renderTechnicalJson(input) {
   const model = createAuditModel(input);
-  const artifacts = new Map(model.evidence.artifacts.map(artifact => [artifact.evidenceId, artifact]));
+  const artifacts = new Map(model.evidence.map(artifact => [artifact.evidenceId, artifact]));
   const occurrencesByItem = new Map();
   for (const occurrence of model.occurrences) {
-    const entries = occurrencesByItem.get(occurrence.itemId) || [];
+    if (!occurrence.nbrItemRef) continue;
+    const entries = occurrencesByItem.get(occurrence.nbrItemRef) || [];
     entries.push(occurrence);
-    occurrencesByItem.set(occurrence.itemId, entries);
+    occurrencesByItem.set(occurrence.nbrItemRef, entries);
   }
+  const subject = model.requestedScope.mode === 'single'
+    ? { id: model.pages[0].finalUrl }
+    : {
+      id: `urn:audita-mt:audit:${model.auditId}:scope`,
+      pages: model.pages.map(page => ({ pageId: page.pageId, id: page.finalUrl })),
+    };
   const assertions = model.itemResults.map(item => {
     const occurrences = occurrencesByItem.get(item.id) || [];
-    const evidenceIds = [...new Set(occurrences.flatMap(occurrence => occurrence.evidenceIds))];
+    const evidenceIds = [...new Set(occurrences.flatMap(occurrence => occurrence.evidenceRefs))];
     return {
       assertor: { id: 'urn:audita-mt:software', type: `${EARL}Software`, name: 'Audita Acessibilidade' },
-      subject: { id: model.finalUrl },
+      subject,
       test: { id: `urn:abnt:nbr17225:${item.id}`, title: item.title, wcag: item.wcag.map(reference => reference.id) },
       mode: MODE[item.evaluation],
       result: { outcome: OUTCOME[item.outcome] },
       pointer: occurrences.map(occurrence => ({
         occurrenceId: occurrence.occurrenceId,
-        ...(occurrence.nodeId ? { nodeId: occurrence.nodeId } : {}),
+        pageId: occurrence.pageId,
+        ...(occurrence.target.nodeId ? { nodeId: occurrence.target.nodeId } : {}),
         ...(selectorFor(occurrence, artifacts) ? { selector: selectorFor(occurrence, artifacts) } : {}),
       })),
       info: occurrences.map(occurrence => occurrence.justification).filter(Boolean).join(' ')
@@ -38,7 +46,7 @@ export function renderTechnicalJson(input) {
   });
   return canonicalStringify({
     '@context': { earl: EARL, dct: 'http://purl.org/dc/terms/' },
-    schemaVersion: 1,
+    schemaVersion: 2,
     identity: {
       name: 'Audita Acessibilidade',
       description: 'Auditoria independente de acessibilidade',
@@ -51,7 +59,8 @@ export function renderTechnicalJson(input) {
 }
 
 function selectorFor(occurrence, artifacts) {
-  for (const evidenceId of occurrence.evidenceIds) {
+  if (occurrence.target.selector) return occurrence.target.selector;
+  for (const evidenceId of occurrence.evidenceRefs) {
     const css = artifacts.get(evidenceId)?.selector?.css;
     if (typeof css === 'string' && css) return css;
   }

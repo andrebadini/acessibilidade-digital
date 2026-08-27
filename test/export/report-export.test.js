@@ -44,7 +44,7 @@ test('prints one inactive blob tab, cleans exact resources, and exports one shar
 });
 
 test('ignores image branding input and exports only the neutral independent identity', async () => {
-  const dataUrl = SAMPLE_AUDIT.evidence.artifacts.find(artifact => artifact.dataUrl)?.dataUrl;
+  const dataUrl = SAMPLE_AUDIT.evidence.find(artifact => artifact.dataUrl)?.dataUrl;
   let printBlob;
   const result = await runReportExport({
     auditModel: clone(SAMPLE_AUDIT),

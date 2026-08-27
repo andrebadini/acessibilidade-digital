@@ -15,6 +15,7 @@ test('technical JSON exports one assertion per ABNT item and maps every EARL out
     `${EARL}passed`, `${EARL}failed`, `${EARL}cantTell`, `${EARL}inapplicable`, `${EARL}untested`,
   ]));
   assert.deepEqual(document.audit, model);
+  assert.equal(document.schemaVersion, 2);
 });
 
 test('EARL serialization maps internal assisted only at the boundary and preserves evidence pointers', () => {
@@ -26,6 +27,7 @@ test('EARL serialization maps internal assisted only at the boundary and preserv
   assert.equal(assertion.assertor.id, 'urn:audita-mt:software');
   assert.equal(assertion.subject.id, 'https://example.test/final?view=public');
   assert.equal(assertion.pointer[0].occurrenceId, 'occ-1');
+  assert.equal(assertion.pointer[0].pageId, 'page-1');
   assert.equal(assertion.pointer[0].selector, '#conteudo');
   assert.deepEqual(assertion.evidenceIds, ['ev-1']);
   assert.match(assertion.info, /ordem|pessoa/i);
@@ -38,4 +40,31 @@ test('technical JSON is deterministic and keeps hostile text inert JSON data', (
   const second = renderTechnicalJson(createAuditModel({ ...input, scope: { description: hostile, kind: 'single-page' } }));
   assert.equal(first, second);
   assert.equal(JSON.parse(first).audit.scope.description, hostile);
+});
+
+test('multipage EARL keeps 146 ABNT assertions against an explicit consolidated subject', () => {
+  const input = structuredClone(createAuditModel(reportInput()));
+  input.requestedScope = {
+    mode: 'batch', urls: [...input.requestedScope.urls, 'https://second.example.test/'],
+  };
+  input.pages.push({
+    pageId: 'page-2', requestedUrl: 'https://second.example.test/',
+    finalUrl: 'https://second.example.test/final', status: 'failed',
+    timestamps: {
+      startedAt: '2026-08-26T14:02:00.000Z', endedAt: '2026-08-26T14:02:01.000Z',
+      generatedAt: '2026-08-26T14:02:02.000Z',
+    },
+    viewport: { width: null, height: null, deviceScaleFactor: null },
+  });
+
+  const document = JSON.parse(renderTechnicalJson(input));
+  assert.equal(document.assertions.length, 146);
+  assert.ok(document.assertions.every(assertion =>
+    assertion.test.id.startsWith('urn:abnt:nbr17225:')));
+  assert.ok(document.assertions.every(assertion =>
+    assertion.subject.id === 'urn:audita-mt:audit:audit-report-1:scope'));
+  assert.deepEqual(document.assertions[0].subject.pages, [
+    { pageId: 'page-1', id: 'https://example.test/final?view=public' },
+    { pageId: 'page-2', id: 'https://second.example.test/final' },
+  ]);
 });

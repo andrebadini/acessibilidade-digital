@@ -20,8 +20,8 @@ export function renderHtmlReport(input) {
   const model = createAuditModel(input);
   const counts = Object.fromEntries(Object.keys(STATUS).map(outcome => [outcome, model.itemResults.filter(item => item.outcome === outcome).length]));
   const itemById = new Map(model.itemResults.map(item => [item.id, item]));
-  const artifactById = new Map(model.evidence.artifacts.map(artifact => [artifact.evidenceId, artifact]));
-  const imageRegistry = createImageRegistry(model.evidence.artifacts);
+  const artifactById = new Map(model.evidence.map(artifact => [artifact.evidenceId, artifact]));
+  const imageRegistry = createImageRegistry(model.evidence);
   const decisionByOccurrence = new Map(model.reviewDecisions.map(decision => [decision.occurrenceId, decision]));
   return `<!doctype html>
 <html lang="pt-BR">
@@ -92,7 +92,7 @@ function occurrences(model, itemById, artifactById, imageByEvidenceId, decisionB
 }
 
 function evidence(model, imageByEvidenceId) {
-  return `<section class="major-section" aria-labelledby="evidencias"><h2 id="evidencias">Evidências originais</h2><p>As imagens desta seção são os PNGs originais, sem a camada de anotação visual apresentada nas ocorrências.</p><div class="evidence-list">${model.evidence.artifacts.map((artifact, index) => {
+  return `<section class="major-section" aria-labelledby="evidencias"><h2 id="evidencias">Evidências originais</h2><p>As imagens desta seção são os PNGs originais, sem a camada de anotação visual apresentada nas ocorrências.</p><div class="evidence-list">${model.evidence.map((artifact, index) => {
     const image = imageByEvidenceId.get(artifact.evidenceId);
     return `<article class="evidence-card" aria-labelledby="evidencia-${index}"><h3 id="evidencia-${index}">${escapeHtml(artifact.evidenceId)}</h3><dl class="meta"><dt>Tipo</dt><dd>${escapeHtml(artifact.kind)}</dd><dt>Hash</dt><dd><code>${escapeHtml(artifact.hash || 'não disponível')}</code></dd>${artifact.backendNodeId ? `<dt>Backend node</dt><dd>${escapeHtml(artifact.backendNodeId)}</dd>` : ''}${artifact.mediaUrl ? `<dt>URL da mídia</dt><dd>${safeMediaText(artifact.mediaUrl)}</dd>` : ''}</dl>${artifact.snippet ? `<details open><summary>Trecho HTML sanitizado</summary><pre><code>${escapeHtml(artifact.snippet)}</code></pre></details>` : ''}${accessibility(artifact.accessibility)}${image ? `<figure>${renderEvidenceImage(image, evidenceAlt(artifact))}<figcaption>${artifact.kind === 'full-page' ? 'PNG original da captura integral do estado observado.' : `PNG original da captura do elemento ${escapeHtml(artifact.nodeId || '')}.`}</figcaption></figure>` : '<p>Imagem não incluída: formato ausente ou não permitido.</p>'}</article>`;
   }).join('')}</div></section>`;

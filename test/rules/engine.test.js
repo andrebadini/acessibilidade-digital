@@ -266,6 +266,25 @@ test('aggregateItems keeps linked RuleResults and evidence separate from normati
   assert.equal(Object.isFrozen(value.ruleResults), true);
 });
 
+test('aggregateItems preserves V2 provenance on authoritative linked results', () => {
+  const ruleResult = Object.freeze({
+    ...createRuleResult({
+      ruleId: 'accessible-name', outcome: 'failed', mode: 'automated',
+      classification: 'requirement', impact: 'serious', confidence: 'high',
+      source: { engine: 'audita-core', ruleId: 'accessible-name', version: '2.0.0' },
+    }),
+    nbrItems: Object.freeze(['5.13.10']),
+  });
+
+  const [value] = aggregateItems([ruleResult], [item('5.13.10', '', ['accessible-name'])]);
+  assert.deepEqual(value.ruleResults[0].source, {
+    engine: 'audita-core', ruleId: 'accessible-name', version: '2.0.0',
+  });
+  assert.equal(value.ruleResults[0].classification, 'requirement');
+  assert.equal(value.ruleResults[0].impact, 'serious');
+  assert.equal(value.ruleResults[0].confidence, 'high');
+});
+
 test('aggregateItems marks an unlinked item cantTell with its stored or safe human reason', () => {
   const values = aggregateItems([], [
     item('stored', 'A finalidade deste requisito depende de avaliação humana.'),
