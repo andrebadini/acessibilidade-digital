@@ -1,4 +1,9 @@
-import { AXE_PROVENANCE, AXE_TARGET_UNAVAILABLE, sanitizeAxeStructuralSelector } from '../../browser/axe-adapter.js';
+import {
+  AXE_PROVENANCE,
+  AXE_TARGET_UNAVAILABLE,
+  canonicalizeAxeDiagnostics,
+  sanitizeAxeStructuralSelector,
+} from '../../browser/axe-adapter.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
 import { axeNbrMappingForRule } from '../normative/axe-nbr-crosswalk.js';
@@ -116,12 +121,6 @@ function sameDataRecord(actual, expected, seen = new WeakMap()) {
   return true;
 }
 
-function diagnostic(value) {
-  const code = canonicalId(safeRead(value, 'code'), 'AXE_DIAGNOSTIC_UNAVAILABLE');
-  const frameId = safeRead(value, 'frameId');
-  return { code, frameId: Number.isSafeInteger(frameId) && frameId >= 0 ? frameId : null };
-}
-
 function summaryCounts(frames) {
   const summary = {};
   for (const resultType of ['violations', 'incomplete', 'passes', 'inapplicable']) {
@@ -129,12 +128,23 @@ function summaryCounts(frames) {
     let nodes = 0;
     for (const frame of frames) {
       const entries = safeArray(safeRead(frame, 'result'), resultType, MAX_GROUPS_PER_TYPE);
-      groups += entries.length;
-      nodes += entries.reduce((count, group) => count + safeArray(group, 'nodes', MAX_NODES_PER_GROUP).length, 0);
+      for (const group of entries) {
+        const nodeCount = safeArray(group, 'nodes', MAX_NODES_PER_GROUP).length;
+        if ((resultType === 'violations' || resultType === 'incomplete') && nodeCount === 0) continue;
+        groups += 1;
+        nodes += nodeCount;
+      }
     }
     summary[resultType] = { groups, nodes };
   }
   return summary;
+}
+
+function publishedFindingCounts(occurrences, resultType) {
+  const retained = occurrences.filter(occurrence => occurrence.engineResultType === resultType);
+  const groups = new Set(retained.map(occurrence =>
+    `${occurrence.source.engineRuleId}\u0000${occurrence.framePath.join('/')}`));
+  return { groups: groups.size, nodes: retained.length };
 }
 
 function derivedApplicability(options, { axeRuleId, mapping, pageId, frameId, selector }) {
@@ -194,19 +204,37 @@ function containsTruncationMetadata(value) {
   return false;
 }
 
+function hasNestedResultTruncation(result) {
+  if (containsTruncationMetadata(result)) return true;
+  for (const resultType of ['violations', 'incomplete', 'passes', 'inapplicable']) {
+    if (declaredArrayLength(result, resultType) > MAX_GROUPS_PER_TYPE) return true;
+    for (const group of safeArray(result, resultType, MAX_GROUPS_PER_TYPE)) {
+      if (containsTruncationMetadata(group) || declaredArrayLength(group, 'nodes') > MAX_NODES_PER_GROUP) return true;
+      for (const node of safeArray(group, 'nodes', MAX_NODES_PER_GROUP)) {
+        if (containsTruncationMetadata(node)) return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function normalizeAxeResults(input, options = {}) {
   const pageId = typeof options.pageId === 'string' && /^[A-Za-z0-9._:-]{1,200}$/u.test(options.pageId)
     ? options.pageId
     : 'page-1';
   const inputStatus = safeRead(input, 'status');
   const requestedStatus = ['complete', 'partial', 'disabled'].includes(inputStatus) ? inputStatus : 'partial';
-  const diagnostics = safeArray(input, 'diagnostics', 64).map(diagnostic);
+  const rawDiagnostics = canonicalizeAxeDiagnostics(safeArray(input, 'diagnostics', 64));
+  const diagnostics = [...canonicalizeAxeDiagnostics(rawDiagnostics.map(entry =>
+    ['AXE_FEATURE_DISABLED', 'AXE_PROVENANCE_INVALID'].includes(entry.code)
+      ? { code: 'AXE_DIAGNOSTIC_UNAVAILABLE', frameId: entry.frameId }
+      : entry))];
   const limitations = [];
 
   if (!validProvenance(safeRead(input, 'provenance'))) {
-    diagnostics.push({ code: 'AXE_PROVENANCE_INVALID', frameId: null });
     return deepFreeze({
-      status: 'partial', provenance: structuredClone(AXE_PROVENANCE), diagnostics,
+      status: 'partial', provenance: structuredClone(AXE_PROVENANCE),
+      diagnostics: [{ code: 'AXE_PROVENANCE_INVALID', frameId: null }],
       limitations: [limitationText('partial'), 'A proveniência do resultado axe não corresponde ao pacote verificado; nenhum achado foi publicado.'],
       ruleResults: [], occurrences: [],
       technicalSummary: {
@@ -217,9 +245,9 @@ export function normalizeAxeResults(input, options = {}) {
   }
 
   if (requestedStatus === 'disabled') {
-    if (!diagnostics.some(entry => entry.code === 'AXE_FEATURE_DISABLED')) diagnostics.push({ code: 'AXE_FEATURE_DISABLED', frameId: null });
     return deepFreeze({
-      status: 'disabled', provenance: structuredClone(AXE_PROVENANCE), diagnostics, limitations: [limitationText('disabled')],
+      status: 'disabled', provenance: structuredClone(AXE_PROVENANCE),
+      diagnostics: [{ code: 'AXE_FEATURE_DISABLED', frameId: null }], limitations: [limitationText('disabled')],
       ruleResults: [], occurrences: [],
       technicalSummary: {
         violations: { groups: 0, nodes: 0 }, incomplete: { groups: 0, nodes: 0 },
@@ -262,8 +290,10 @@ export function normalizeAxeResults(input, options = {}) {
     frames.push(frame);
   }
   if (frames.length === 0) topologyPartial = true;
-  if (diagnostics.some(entry => /TIMEOUT|FAIL|MISSING|MISMATCH|TOPOLOGY|UNAVAILABLE|INVALID|TRUNCAT/iu.test(entry.code))) topologyPartial = true;
-  let truncated = declaredArrayLength(input, 'frames') > MAX_FRAMES || declaredArrayLength(input, 'diagnostics') > 64;
+  if (diagnostics.length > 0) topologyPartial = true;
+  let truncated = diagnostics.some(entry => entry.code === 'AXE_RESULTS_TRUNCATED') ||
+    declaredArrayLength(input, 'frames') > MAX_FRAMES || declaredArrayLength(input, 'diagnostics') > 64;
+  if (frames.some(frame => hasNestedResultTruncation(safeRead(frame, 'result')))) truncated = true;
   const technicalSummary = summaryCounts(frames);
   const occurrences = [];
   const ruleById = new Map();
@@ -303,7 +333,7 @@ export function normalizeAxeResults(input, options = {}) {
           const occurrenceId = `occurrence-axe-${stableHash([options.auditId ?? '', pageId, frameId, axeRuleId, selector, resultType, groupIndex, nodeIndex].join('\u0000'))}`;
           occurrences.push({
             occurrenceId, pageId, itemId: mapping?.nbrItemRef ?? null,
-            ruleId: source.ruleId, engineRuleId: axeRuleId, outcome, mode: 'automated',
+            ruleId: source.ruleId, engineRuleId: axeRuleId, engineResultType: resultType, outcome, mode: 'automated',
             classification, impact, confidence: outcome === 'failed' ? 'high' : 'low',
             source, nodeId: null, selector, framePath: frameId === 0 ? [] : [`frame:${frameId}`],
             equivalenceKey: mapping?.equivalenceKey ?? `axe:${axeRuleId}`,
@@ -344,13 +374,16 @@ export function normalizeAxeResults(input, options = {}) {
       }
     }
   }
+  technicalSummary.violations = publishedFindingCounts(occurrences, 'violations');
+  technicalSummary.incomplete = publishedFindingCounts(occurrences, 'incomplete');
   if (truncated && !diagnostics.some(entry => entry.code === 'AXE_RESULTS_TRUNCATED')) diagnostics.push({ code: 'AXE_RESULTS_TRUNCATED', frameId: null });
+  const canonicalDiagnostics = canonicalizeAxeDiagnostics(diagnostics);
   const status = topologyPartial || truncated ? 'partial' : 'complete';
   if (status === 'partial') limitations.push(limitationText('partial'));
   if (truncated) limitations.push('Os resultados axe excederam limites locais de segurança; contagens e achados publicados são truncados.');
 
   return deepFreeze({
-    status, provenance: structuredClone(AXE_PROVENANCE), diagnostics, limitations,
+    status, provenance: structuredClone(AXE_PROVENANCE), diagnostics: canonicalDiagnostics, limitations,
     ruleResults: [...ruleById.values()], occurrences, technicalSummary,
   });
 }

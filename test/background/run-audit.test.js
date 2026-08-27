@@ -359,6 +359,12 @@ test('integrates a confirmed top-frame axe violation with provenance, ABNT outco
   assert.equal(reportOccurrence.confidence, 'high');
   assert.deepEqual(reportOccurrence.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v1' });
   assert.equal(reportOccurrence.foreignBenchmarkRefs[0].benchmarkId, 'us.revised-508.wcag20-aa.v1');
+  const forgedResultType = structuredClone(report);
+  forgedResultType.occurrences.find(occurrence => occurrence.source.engine === 'axe-core').engineResultType = 'incomplete';
+  await assert.rejects(enrichAuditForReport(forgedResultType, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  }), /axe|suplement|diverge|inválid/i);
 
   const mutations = [
     value => { value.ruleResults.find(rule => rule.source?.engine === 'axe-core').summary = 'Prontuário privado Oliveira'; },
@@ -500,12 +506,26 @@ test('keeps the Audita core running when axe throws and records a bounded partia
   });
 
   assert.equal(model.session.status, 'partial');
+  assert.equal(model.axe.status, 'partial', 'partial supplemental coverage deterministically marks the audit recoverable/partial');
   assert.equal(model.ruleResults.length, 130);
   assert.equal(model.itemResults.length, 146);
   assert.ok(model.session.diagnostics.some(entry => entry.code === 'AXE_EXECUTION_FAILED'));
   assert.doesNotMatch(JSON.stringify(model), /PRIVATE axe failure details/iu);
   assert.ok(adapter.events.includes('collect'));
   assert.ok(adapter.events.includes('probes'));
+
+  const enrichOptions = {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  };
+  const forgedSession = structuredClone(model);
+  forgedSession.session.status = 'complete';
+  await assert.rejects(enrichAuditForReport(forgedSession, enrichOptions), /axe|partial|parcial|session|cobertura/i);
+
+  const report = await enrichAuditForReport(model, enrichOptions);
+  const forgedPage = structuredClone(report);
+  forgedPage.pages[0].status = 'complete';
+  await assert.rejects(enrichAuditForReport(forgedPage, enrichOptions), /axe|partial|parcial|página|cobertura/i);
 });
 
 test('normalizes a revoked raw axe collection before report enrichment without proxy exceptions', async () => {

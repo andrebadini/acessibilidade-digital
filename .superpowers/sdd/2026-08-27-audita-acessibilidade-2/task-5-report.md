@@ -120,3 +120,30 @@ GREEN final:
 - o repositório não contém `scripts/verify.sh`; o verificador disponível e autoritativo é `scripts/verify-project.mjs`, executado por `npm run verify`.
 
 O gate axe e `target-size` continuam desativados, sem mutação da Web Store ou introdução de rede, telemetria, login, backend, código remoto ou `unsafe-eval`.
+
+## Fix round 3 — vínculo dos metadados de cobertura parcial
+
+O contrato suplementar passou a usar um único catálogo fechado para todos os diagnósticos que o adaptador e o normalizador podem publicar. Códigos externos ou inventados são reduzidos pelo normalizador a `AXE_DIAGNOSTIC_UNAVAILABLE`, sem conservar o código ou texto privado de origem; um modelo canônico que tente fornecer diretamente um código fora do catálogo é rejeitado integralmente. Os diagnósticos são deduplicados e ordenados por catálogo/frame, com limite fixo e preservação obrigatória do marcador de truncamento.
+
+As limitações agora são comparadas ao conjunto exato derivado do estado, sempre na ordem `[parcial, truncamento, proveniência]` aplicável, sem duplicatas ou ordenação escolhida pelo chamador. Estados `complete`, `disabled` e de proveniência inválida também possuem combinações exatas. Cada ocorrência registra `engineResultType` como `violations` ou `incomplete`, e o resumo técnico desses dois tipos é derivado exatamente das ocorrências publicadas e de seus grupos regra/frame — inclusive quando há truncamento. Assim, não existe exceção de contagem no limite de 256 ocorrências, nem é possível trocar violações por incompletos ou declarar zero grupos com nós publicados. Metadados `original` recebidos do adaptador só sinalizam perda; as contagens publicadas são recalculadas das coleções locais já limitadas, de modo que números hostis não entram no relatório. Truncamento aninhado em qualquer um dos quatro tipos de resultado, inclusive `passes` e `inapplicable`, também torna a cobertura parcial.
+
+O acoplamento de estado permanece determinístico no limite correto: cobertura axe `partial` marca a execução Audita como recuperável/`partial`, e a fronteira do relatório rejeita sessão `complete` ou, no escopo de página única, página `complete` com suplemento parcial. O gate `disabled` continua sendo uma limitação suplementar e não interrompe nem rebaixa sozinho o motor próprio. A cobertura multipágina continua validada sem inventar qual página originou um suplemento parcial sem identificador próprio.
+
+### Evidência TDD do fix round 3
+
+RED observado antes da implementação:
+
+- o payload parcial com diagnóstico `AXE_PATIENT_HIV_POSITIVE` e 6.400 grupos/640.000 nós de violações e incompletos foi aceito com zero erros;
+- resumos parciais não truncados divergentes, grupos maiores que nós e contagens truncadas menores que as ocorrências foram aceitos;
+- limitação de truncamento duplicada e diagnósticos equivalentes em ordens diferentes atravessaram a fronteira.
+- diagnósticos reservados em um estado incompatível geraram clusters normalizados não autoconsistentes, e IDs de ocorrência duplicados podiam acompanhar resumos forjados coerentes.
+- uma troca entre contagens `violations`/`incomplete`, o bypass de 640.000 nós com exatamente 256 IDs, truncamento aninhado em `passes`/`inapplicable` e sessão/página completa com axe parcial foram reproduzidos e inicialmente aceitos.
+
+GREEN final:
+
+- focados (`normalize-axe-results`, `validate-supplemental` e `run-audit`): 61/61;
+- `npm test`: 475 aprovados, 0 falhas e 1 skip explícito de E2E MV3/CSP, 476 testes no total;
+- `npm run verify`: exit 0 com os mesmos 475 aprovados/1 skip e confirmação de manifesto/CSP, axe 4.13.0 gated, 130 regras próprias/146 itens, identidade neutra, artefatos e privacidade;
+- ZIP rastreado restaurado byte a byte após as duas execuções que o regeneraram: SHA-256 `987acb65524093d0cae4b263277786ab7718d375e53112b4e63bbf0687a56e9a`.
+
+O gate de produção e `target-size` permanecem desativados. Nenhuma Web Store, CDN, telemetria, login, backend, código remoto ou `unsafe-eval` foi alterado.

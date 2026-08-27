@@ -47,6 +47,7 @@ export function createAuditModel(input) {
   validateEnvironment(model.environment);
   validateScope(model.scope);
   validateSession(model.session);
+  validateAxeCoverageStatus(model, validatedAxe);
   validateProgress(model.progress, model.auditId);
   validateLimitations(model.limitations);
   validateIntegrity(model.integrity);
@@ -199,7 +200,7 @@ function axeOccurrencesFrom(model) {
 function authoritativeAxeOccurrence(value) {
   return {
     occurrenceId: value.occurrenceId, pageId: value.pageId, ruleId: value.ruleId,
-    engineRuleId: value.engineRuleId, outcome: value.outcome,
+    engineRuleId: value.engineRuleId, engineResultType: value.engineResultType, outcome: value.outcome,
     itemId: value.itemId ?? value.nbrItemRef, nbrItemRef: value.nbrItemRef ?? value.itemId,
     classification: value.classification, impact: value.impact, confidence: value.confidence,
     source: value.source,
@@ -276,6 +277,16 @@ function validateAxeEvidenceBinding(model, checked) {
       canonicalStringify(Object.keys(entry).sort()) === canonicalStringify(['at', 'code', 'message', 'recoverable'])) ||
       model.limitations?.some(value => value === 'A captura integral original da página não estava disponível para vinculação ao achado axe conclusivo.');
     if (!explicitAbsence) throw new TypeError(`Ocorrência axe conclusiva ${occurrence.occurrenceId} não possui captura integral original nem limitação explícita.`);
+  }
+}
+
+function validateAxeCoverageStatus(model, checked) {
+  if (!checked || model.axe?.status !== 'partial') return;
+  if (model.session?.status === 'complete') {
+    throw new TypeError('Cobertura axe parcial não pode pertencer a uma sessão declarada completa.');
+  }
+  if (model.requestedScope?.mode === 'single' && model.pages?.[0]?.status === 'complete') {
+    throw new TypeError('Cobertura axe parcial não pode pertencer a uma página única declarada completa.');
   }
 }
 

@@ -5,6 +5,7 @@ import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consumer-basis.js';
 import { SECTION508_REVISED_CROSSWALK } from '../../src/core/normative/section508.js';
 import { normalizeAxeResults } from '../../src/core/axe/normalize-axe-results.js';
+import { validateNormalizedAxeSupplemental } from '../../src/core/axe/validate-supplemental.js';
 
 const PROVENANCE = AXE_PROVENANCE;
 
@@ -179,6 +180,18 @@ test('rejects mismatched provenance without publishing normative findings', () =
   assert.ok(normalized.diagnostics.some(item => item.code === 'AXE_PROVENANCE_INVALID'));
 });
 
+test('collapses unknown or private diagnostic codes to the fixed catalog without leaking them', () => {
+  const input = runResult();
+  input.status = 'partial';
+  input.diagnostics = [{ code: 'AXE_PATIENT_HIV_POSITIVE', frameId: null, detail: 'Família Oliveira' }];
+
+  const normalized = normalizeAxeResults(input, { pageId: 'page-1' });
+
+  assert.deepEqual(normalized.diagnostics, [{ code: 'AXE_DIAGNOSTIC_UNAVAILABLE', frameId: null }]);
+  assert.equal(normalized.status, 'partial');
+  assert.doesNotMatch(JSON.stringify(normalized), /PATIENT|HIV|POSITIVE|Oliveira/iu);
+});
+
 test('contains hostile accessors and sparse result arrays without invoking page-controlled getters', () => {
   let getterCalls = 0;
   const violations = [];
@@ -198,7 +211,21 @@ test('contains hostile accessors and sparse result arrays without invoking page-
 
   assert.equal(getterCalls, 0);
   assert.deepEqual(normalized.occurrences, []);
-  assert.deepEqual(normalized.technicalSummary.violations, { groups: 1, nodes: 0 });
+  assert.deepEqual(validateNormalizedAxeSupplemental(normalized, { rulesVersion: '1.0.0' }).errors, []);
+});
+
+test('normalizes reserved diagnostics from a hostile raw adapter into a self-consistent partial cluster', () => {
+  for (const code of ['AXE_FEATURE_DISABLED', 'AXE_PROVENANCE_INVALID', 'AXE_RESULTS_TRUNCATED']) {
+    const normalized = normalizeAxeResults({
+      status: 'complete', provenance: PROVENANCE, diagnostics: [{ code, frameId: null }],
+      frames: [{ frameId: 0, status: 'success', result: {
+        violations: [], incomplete: [], passes: [], inapplicable: [],
+      } }],
+    }, { pageId: 'page-1' });
+
+    assert.equal(normalized.status, 'partial');
+    assert.deepEqual(validateNormalizedAxeSupplemental(normalized, { rulesVersion: '1.0.0' }).errors, [], code);
+  }
 });
 
 test('bounds huge sparse arrays before allocation and never invokes a frame result accessor', () => {
@@ -242,6 +269,39 @@ test('derives partial coverage from frame topology, diagnostics, duplicates and 
   assert.ok(normalized.diagnostics.some(item => item.code === 'AXE_RESULTS_TRUNCATED'));
   assert.equal(new Set(normalized.occurrences.map(item => item.occurrenceId)).size, normalized.occurrences.length);
   assert.equal(normalized.technicalSummary.violations.groups, 3, 'duplicate frame is deterministically collapsed');
+});
+
+test('derives bounded technical counts from retained collections instead of hostile original-count metadata', () => {
+  const input = runResult();
+  input.frames[0].result.truncation = {
+    violations: { original: 10_000_000, retained: 100, truncated: true },
+    incomplete: { original: 1, retained: 1, truncated: false },
+    passes: { original: 1, retained: 1, truncated: false },
+    inapplicable: { original: 1, retained: 1, truncated: false },
+  };
+
+  const normalized = normalizeAxeResults(input, { pageId: 'page-1' });
+
+  assert.equal(normalized.status, 'partial');
+  assert.deepEqual(normalized.technicalSummary.violations, { groups: 3, nodes: 3 });
+  assert.equal(normalized.occurrences.length, 4);
+  assert.ok(normalized.diagnostics.some(item => item.code === 'AXE_RESULTS_TRUNCATED'));
+  assert.doesNotMatch(JSON.stringify(normalized), /10000000/u);
+});
+
+test('propagates nested truncation from passes and inapplicable groups into canonical partial coverage', () => {
+  for (const resultType of ['passes', 'inapplicable']) {
+    const input = runResult();
+    input.frames[0].result[resultType][0].truncation = {
+      tags: { original: 33, retained: 32, truncated: true },
+      nodes: { original: 0, retained: 0, truncated: false },
+    };
+    const normalized = normalizeAxeResults(input, { pageId: 'page-1' });
+
+    assert.equal(normalized.status, 'partial', resultType);
+    assert.ok(normalized.diagnostics.some(entry => entry.code === 'AXE_RESULTS_TRUNCATED'), resultType);
+    assert.deepEqual(validateNormalizedAxeSupplemental(normalized, { rulesVersion: '1.0.0' }).errors, [], resultType);
+  }
 });
 
 test('never invokes nested target index accessors and contains revoked proxies', () => {

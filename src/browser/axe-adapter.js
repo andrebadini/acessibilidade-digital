@@ -24,6 +24,63 @@ export const AXE_PROVENANCE = Object.freeze({
   gate: AXE_MV3_CSP_GATE,
 });
 
+// This is the complete, stable catalog that may cross the adapter boundary.
+// Runtime-only and thrown-error codes are deliberately not report diagnostics.
+export const AXE_DIAGNOSTIC_CODES = Object.freeze([
+  'AXE_FEATURE_DISABLED',
+  'AXE_PROVENANCE_INVALID',
+  'AXE_TIMEOUT',
+  'AXE_INJECTION_FAILED',
+  'AXE_EXECUTION_FAILED',
+  'AXE_FRAME_TOPOLOGY_CHANGED',
+  'AXE_FRAME_MISSING',
+  'AXE_FRAME_RUNTIME_UNAVAILABLE',
+  'AXE_FRAME_RUN_FAILED',
+  'AXE_VERSION_MISMATCH',
+  'AXE_FRAME_INVALID',
+  'AXE_FRAME_DUPLICATE',
+  'AXE_FRAME_FAILED',
+  'AXE_FRAME_RESULT_INVALID',
+  'AXE_RESULTS_TRUNCATED',
+  'AXE_DIAGNOSTIC_UNAVAILABLE',
+]);
+const AXE_DIAGNOSTIC_RANK = new Map(AXE_DIAGNOSTIC_CODES.map((code, index) => [code, index]));
+
+function diagnosticOwn(value, key) {
+  try {
+    if (!value || (typeof value !== 'object' && typeof value !== 'function')) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch { return undefined; }
+}
+
+/** Drops private diagnostic fields, closes unknown codes and returns a unique stable order. */
+export function canonicalizeAxeDiagnostics(value) {
+  let isArray = false;
+  try { isArray = Array.isArray(value); } catch { return Object.freeze([]); }
+  if (!isArray) return Object.freeze([]);
+  const declaredLength = diagnosticOwn(value, 'length');
+  const length = Number.isSafeInteger(declaredLength) && declaredLength >= 0 ? Math.min(declaredLength, 256) : 0;
+  const unique = new Map();
+  for (let index = 0; index < length; index += 1) {
+    const entry = diagnosticOwn(value, String(index));
+    const rawCode = diagnosticOwn(entry, 'code');
+    const code = AXE_DIAGNOSTIC_RANK.has(rawCode) ? rawCode : 'AXE_DIAGNOSTIC_UNAVAILABLE';
+    const rawFrameId = diagnosticOwn(entry, 'frameId');
+    const frameId = Number.isSafeInteger(rawFrameId) && rawFrameId >= 0 ? rawFrameId : null;
+    unique.set(`${code}\u0000${frameId ?? ''}`, { code, frameId });
+  }
+  const sorted = [...unique.values()].sort((left, right) =>
+    AXE_DIAGNOSTIC_RANK.get(left.code) - AXE_DIAGNOSTIC_RANK.get(right.code) ||
+    (left.frameId ?? -1) - (right.frameId ?? -1));
+  let retained = sorted.slice(0, 64);
+  const truncation = sorted.find(entry => entry.code === 'AXE_RESULTS_TRUNCATED');
+  if (truncation && !retained.includes(truncation)) retained = [...retained.slice(0, 63), truncation].sort((left, right) =>
+    AXE_DIAGNOSTIC_RANK.get(left.code) - AXE_DIAGNOSTIC_RANK.get(right.code) ||
+    (left.frameId ?? -1) - (right.frameId ?? -1));
+  return Object.freeze(retained.map(entry => Object.freeze(entry)));
+}
+
 const MAX_GROUPS = 100;
 const MAX_NODES = 100;
 const MAX_CHECKS = 32;

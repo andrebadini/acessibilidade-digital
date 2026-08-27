@@ -1,4 +1,10 @@
-import { AXE_PROVENANCE, AXE_TARGET_UNAVAILABLE, sanitizeAxeStructuralSelector } from '../../browser/axe-adapter.js';
+import {
+  AXE_DIAGNOSTIC_CODES,
+  AXE_PROVENANCE,
+  AXE_TARGET_UNAVAILABLE,
+  canonicalizeAxeDiagnostics,
+  sanitizeAxeStructuralSelector,
+} from '../../browser/axe-adapter.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../legal/consumer-basis.js';
 import { axeNbrMappingForRule } from '../normative/axe-nbr-crosswalk.js';
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
@@ -7,7 +13,7 @@ import { section508ReferencesForWcag } from '../normative/section508.js';
 const ITEM_BY_ID = new Map(NBR17225_ITEMS.map(item => [item.id, item]));
 const PRIORITY = Object.freeze({ cantTell: 1, failed: 2 });
 const RULE_KEYS = Object.freeze(['classification', 'confidence', 'engineRuleId', 'impact', 'limitations', 'mode', 'nbrItems', 'outcome', 'ruleId', 'source', 'summary', 'targets', 'wcag']);
-const OCCURRENCE_KEYS = Object.freeze(['accessiblePreview', 'applicabilityEvidence', 'classification', 'confidence', 'engineRuleId', 'equivalenceKey', 'evidenceIds', 'evidenceRefs', 'foreignBenchmarkRefs', 'framePath', 'impact', 'itemId', 'justification', 'legalAnalysis', 'mode', 'nbrItemRef', 'nodeId', 'occurrenceId', 'outcome', 'pageId', 'presentationTargetKey', 'ruleId', 'selector', 'source', 'target', 'wcagRefs']);
+const OCCURRENCE_KEYS = Object.freeze(['accessiblePreview', 'applicabilityEvidence', 'classification', 'confidence', 'engineResultType', 'engineRuleId', 'equivalenceKey', 'evidenceIds', 'evidenceRefs', 'foreignBenchmarkRefs', 'framePath', 'impact', 'itemId', 'justification', 'legalAnalysis', 'mode', 'nbrItemRef', 'nodeId', 'occurrenceId', 'outcome', 'pageId', 'presentationTargetKey', 'ruleId', 'selector', 'source', 'target', 'wcagRefs']);
 const UNMAPPED_RATIONALE = 'Achado suplementar do axe-core sem vínculo curado com item ABNT.';
 const CONFIRMATION_SUFFIX = ' A aplicabilidade ao item ABNT ainda exige confirmação pelo motor próprio ou revisão.';
 const TOP_LEVEL_KEYS = Object.freeze(['diagnostics', 'limitations', 'occurrences', 'provenance', 'ruleResults', 'status', 'technicalSummary']);
@@ -16,6 +22,8 @@ const PARTIAL_LIMITATION = 'O motor suplementar axe-core teve cobertura parcial;
 const DISABLED_LIMITATION = 'O motor suplementar axe-core está desativado pelo gate MV3/CSP; o motor próprio Audita continuou sem sondar o axe.';
 const TRUNCATED_LIMITATION = 'Os resultados axe excederam limites locais de segurança; contagens e achados publicados são truncados.';
 const PROVENANCE_LIMITATION = 'A proveniência do resultado axe não corresponde ao pacote verificado; nenhum achado foi publicado.';
+const DIAGNOSTIC_CODE_SET = new Set(AXE_DIAGNOSTIC_CODES);
+const MAX_NORMALIZED_OCCURRENCES = 256;
 
 function own(value, key) {
   try {
@@ -98,21 +106,36 @@ function validateTopLevel(input, errors) {
   const diagnostics = boundedArray(input, 'diagnostics', 64);
   const limitations = boundedArray(input, 'limitations', 4);
   if (!diagnostics || diagnostics.some(entry => !exactKeys(entry, ['code', 'frameId']) ||
-    typeof own(entry, 'code') !== 'string' || !/^AXE_[A-Z0-9_]{1,120}$/u.test(own(entry, 'code')) ||
+    !DIAGNOSTIC_CODE_SET.has(own(entry, 'code')) ||
     (own(entry, 'frameId') !== null && (!Number.isSafeInteger(own(entry, 'frameId')) || own(entry, 'frameId') < 0)))) {
     errors.push('Diagnósticos axe inválidos.');
+  }
+  if (diagnostics && !exactData(diagnostics, canonicalizeAxeDiagnostics(diagnostics))) {
+    errors.push('Diagnósticos axe não estão no conjunto único e na ordem canônica.');
   }
   if (!limitations || limitations.some(value => ![PARTIAL_LIMITATION, DISABLED_LIMITATION, TRUNCATED_LIMITATION, PROVENANCE_LIMITATION].includes(value))) {
     errors.push('Limitações axe inválidas.');
   }
   const diagnosticCodes = (diagnostics ?? []).map(entry => own(entry, 'code'));
-  if (status === 'complete' && ((diagnostics?.length ?? 0) !== 0 || !exactData(limitations, []))) errors.push('Execução axe completa contém limitações ou diagnósticos.');
-  if (status === 'disabled' && (!exactData(diagnostics, [{ code: 'AXE_FEATURE_DISABLED', frameId: null }]) || !exactData(limitations, [DISABLED_LIMITATION]))) {
+  const truncated = diagnosticCodes.includes('AXE_RESULTS_TRUNCATED');
+  const provenanceInvalid = diagnosticCodes.includes('AXE_PROVENANCE_INVALID');
+  let expectedLimitations = null;
+  if (status === 'complete') expectedLimitations = [];
+  if (status === 'disabled') expectedLimitations = [DISABLED_LIMITATION];
+  if (status === 'partial') {
+    expectedLimitations = [PARTIAL_LIMITATION];
+    if (truncated) expectedLimitations.push(TRUNCATED_LIMITATION);
+    if (provenanceInvalid) expectedLimitations.push(PROVENANCE_LIMITATION);
+  }
+  if (!expectedLimitations || !exactData(limitations, expectedLimitations)) errors.push('Limitações axe não formam o conjunto canônico para o estado declarado.');
+  if (status === 'complete' && (diagnostics?.length ?? 0) !== 0) errors.push('Execução axe completa contém diagnósticos.');
+  if (status === 'disabled' && !exactData(diagnostics, [{ code: 'AXE_FEATURE_DISABLED', frameId: null }])) {
     errors.push('Execução axe desativada diverge do estado canônico.');
   }
-  if (status === 'partial' && limitations?.[0] !== PARTIAL_LIMITATION) errors.push('Execução axe parcial não declara sua limitação canônica.');
-  if (diagnosticCodes.includes('AXE_RESULTS_TRUNCATED') !== (limitations ?? []).includes(TRUNCATED_LIMITATION)) errors.push('Truncamento axe incoerente.');
-  if (diagnosticCodes.includes('AXE_PROVENANCE_INVALID') !== (limitations ?? []).includes(PROVENANCE_LIMITATION)) errors.push('Diagnóstico de proveniência axe incoerente.');
+  if (status !== 'disabled' && diagnosticCodes.includes('AXE_FEATURE_DISABLED')) errors.push('Diagnóstico de gate axe diverge do estado declarado.');
+  if (provenanceInvalid && !exactData(diagnostics, [{ code: 'AXE_PROVENANCE_INVALID', frameId: null }])) {
+    errors.push('Diagnóstico de proveniência axe não forma o estado canônico isolado.');
+  }
 
   const summary = own(input, 'technicalSummary');
   if (!exactKeys(summary, RESULT_TYPES)) {
@@ -126,13 +149,13 @@ function validateTopLevel(input, errors) {
       }
     }
   }
-  const rules = boundedArray(input, 'ruleResults');
-  const occurrences = boundedArray(input, 'occurrences', 1024);
+  const rules = boundedArray(input, 'ruleResults', MAX_NORMALIZED_OCCURRENCES);
+  const occurrences = boundedArray(input, 'occurrences', MAX_NORMALIZED_OCCURRENCES);
   if (status === 'disabled' && (((rules?.length ?? 0) !== 0) || ((occurrences?.length ?? 0) !== 0) ||
     RESULT_TYPES.some(type => own(own(summary, type), 'groups') !== 0 || own(own(summary, type), 'nodes') !== 0))) {
     errors.push('Execução axe desativada publicou resultados.');
   }
-  return { rules, occurrences, status, summary };
+  return { rules, occurrences, status, summary, truncated, provenanceInvalid };
 }
 
 function exactSource(source, ruleId, engineRuleId) {
@@ -199,10 +222,13 @@ function validateOccurrence(occurrence, validatedRule, options, errors) {
     return false;
   }
   const outcome = own(occurrence, 'outcome');
+  const engineResultType = own(occurrence, 'engineResultType');
   const itemId = mapping?.nbrItemRef ?? null;
   const wcag = mapping ? [...mapping.wcagRefs] : [];
   const classification = mapping ? ITEM_BY_ID.get(itemId)?.classification : 'best-practice';
-  if (!Object.hasOwn(PRIORITY, outcome) || own(occurrence, 'nbrItemRef') !== itemId || own(occurrence, 'itemId') !== itemId ||
+  if (!['violations', 'incomplete'].includes(engineResultType) || !Object.hasOwn(PRIORITY, outcome) ||
+    (engineResultType === 'incomplete' && outcome !== 'cantTell') || (outcome === 'failed' && engineResultType !== 'violations') ||
+    own(occurrence, 'nbrItemRef') !== itemId || own(occurrence, 'itemId') !== itemId ||
     own(occurrence, 'classification') !== classification || !exactStrings(own(occurrence, 'wcagRefs'), wcag) ||
     !exactData(own(occurrence, 'foreignBenchmarkRefs'), [...section508ReferencesForWcag(wcag)])) {
     errors.push(`Ocorrência de ${ruleId} diverge do crosswalk curado.`);
@@ -213,7 +239,10 @@ function validateOccurrence(occurrence, validatedRule, options, errors) {
   const target = own(occurrence, 'target');
   const selector = own(target, 'selector');
   const framePath = own(target, 'framePath');
-  if (!new Set([rationale, `${rationale}${CONFIRMATION_SUFFIX}`]).has(justification) ||
+  const expectedJustification = engineResultType === 'violations' && mapping && outcome === 'cantTell'
+    ? `${rationale}${CONFIRMATION_SUFFIX}`
+    : rationale;
+  if (justification !== expectedJustification ||
     !exactKeys(target, ['framePath', 'nodeId', 'selector']) || own(target, 'nodeId') !== null ||
     own(occurrence, 'nodeId') !== null || own(occurrence, 'selector') !== selector ||
     !exactData(own(occurrence, 'framePath'), framePath) || !validFramePath(framePath) || !validSelector(selector) ||
@@ -271,7 +300,7 @@ function validateOccurrence(occurrence, validatedRule, options, errors) {
  */
 export function validateNormalizedAxeSupplemental(input, options = {}) {
   const errors = [];
-  const { rules, occurrences, status, summary } = validateTopLevel(input, errors);
+  const { rules, occurrences, status, summary, truncated, provenanceInvalid } = validateTopLevel(input, errors);
   if (!exactData(own(input, 'provenance'), AXE_PROVENANCE)) errors.push('Proveniência/configuração axe inválida.');
   if (!rules || !occurrences) errors.push('Coleções suplementares axe inválidas ou acima do limite.');
   const validatedRules = new Map();
@@ -282,7 +311,15 @@ export function validateNormalizedAxeSupplemental(input, options = {}) {
   }
   const strongest = new Map();
   const acceptedByRule = new Map();
+  const acceptedByResultType = new Map([['violations', []], ['incomplete', []]]);
+  const occurrenceIds = new Set();
   for (const occurrence of occurrences ?? []) {
+    const occurrenceId = own(occurrence, 'occurrenceId');
+    if (occurrenceIds.has(occurrenceId)) {
+      errors.push('Ocorrência axe duplicada.');
+      continue;
+    }
+    occurrenceIds.add(occurrenceId);
     const checkedRule = validatedRules.get(own(occurrence, 'ruleId'));
     if (!checkedRule || !validateOccurrence(occurrence, checkedRule, options, errors)) continue;
     const previous = strongest.get(checkedRule.ruleId);
@@ -291,6 +328,7 @@ export function validateNormalizedAxeSupplemental(input, options = {}) {
     const accepted = acceptedByRule.get(checkedRule.ruleId) ?? [];
     accepted.push(occurrence);
     acceptedByRule.set(checkedRule.ruleId, accepted);
+    acceptedByResultType.get(own(occurrence, 'engineResultType')).push(occurrence);
   }
   for (const checked of validatedRules.values()) {
     if (strongest.get(checked.ruleId) !== checked.outcome) errors.push(`Agregação declarada de ${checked.ruleId} não corresponde às ocorrências.`);
@@ -309,13 +347,25 @@ export function validateNormalizedAxeSupplemental(input, options = {}) {
       errors.push(`Resumo da regra ${checked.ruleId} não foi derivado das ocorrências aceitas.`);
     }
   }
-  if (status === 'complete' && summary && occurrences) {
-    const violations = own(summary, 'violations');
-    const incomplete = own(summary, 'incomplete');
-    if (own(violations, 'nodes') + own(incomplete, 'nodes') !== occurrences.length ||
-      own(violations, 'groups') > own(violations, 'nodes') || own(incomplete, 'groups') > own(incomplete, 'nodes')) {
-      errors.push('Resumo técnico axe não corresponde ao conjunto completo de ocorrências.');
+  const summaryIsNumeric = summary && RESULT_TYPES.every(type => {
+    const value = own(summary, type);
+    return Number.isSafeInteger(own(value, 'groups')) && Number.isSafeInteger(own(value, 'nodes'));
+  });
+  if (summaryIsNumeric && occurrences) {
+    const mismatch = ['violations', 'incomplete'].some(resultType => {
+      const accepted = acceptedByResultType.get(resultType);
+      const expectedGroups = new Set(accepted.map(occurrence =>
+        `${own(occurrence, 'engineRuleId')}\u0000${frameIdFor(occurrence)}`)).size;
+      const declared = own(summary, resultType);
+      return own(declared, 'nodes') !== accepted.length || own(declared, 'groups') !== expectedGroups;
+    });
+    if (mismatch) {
+      errors.push('Resumo técnico axe não corresponde às ocorrências retidas e ao estado de truncamento.');
     }
+  }
+  if (provenanceInvalid && ((rules?.length ?? 0) !== 0 || (occurrences?.length ?? 0) !== 0 ||
+    RESULT_TYPES.some(type => own(own(summary, type), 'groups') !== 0 || own(own(summary, type), 'nodes') !== 0))) {
+    errors.push('Falha de proveniência axe publicou contagens ou achados.');
   }
   if (errors.length > 0) return Object.freeze({ errors: Object.freeze(errors), ruleResults: Object.freeze([]), occurrences: Object.freeze([]) });
   return Object.freeze({
