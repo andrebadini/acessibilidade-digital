@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { createSessionStore, isAuthorizedExtensionSender, isAuthorizedPanelSender, registerServiceWorker } from '../../src/background/service-worker.js';
+import { commitReviewDecision } from '../../src/review/review-state.js';
+import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 
 const createChrome = () => {
   const action = {};
@@ -25,10 +27,62 @@ const createChrome = () => {
 
 async function waitUntil(predicate, timeoutMs = 500) {
   const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
+  while (!await predicate()) {
     if (Date.now() >= deadline) throw new Error('Condição de teste não foi atendida no prazo.');
     await new Promise(resolve => setTimeout(resolve, 5));
   }
+}
+
+function withAuditRevisions(store) {
+  const models = new Map();
+  const revisions = new Map();
+  const capabilityRevisions = new WeakMap();
+  const commit = typeof store.commitAudit === 'function' ? store.commitAudit.bind(store) : null;
+  const read = typeof store.getAudit === 'function' ? store.getAudit.bind(store) : null;
+  const readLatest = typeof store.getLatest === 'function' ? store.getLatest.bind(store) : null;
+  const writeLatest = typeof store.setLatest === 'function' ? store.setLatest.bind(store) : null;
+  let latestState;
+  const write = async (id, model, latest, snapshotCapability) => {
+    const revision = revisions.get(id) ?? 0;
+    const expectedRevision = snapshotCapability === undefined
+      ? undefined
+      : (typeof snapshotCapability === 'object' && snapshotCapability !== null
+          ? capabilityRevisions.get(snapshotCapability)
+          : undefined);
+    if (snapshotCapability !== undefined && expectedRevision === undefined) {
+      throw new TypeError('invalid snapshot capability');
+    }
+    if (expectedRevision !== undefined && revision !== expectedRevision) {
+      throw Object.assign(new Error('revision conflict'), { code: 'AUDIT_REVISION_CONFLICT' });
+    }
+    const value = commit ? await commit(id, model, latest) : undefined;
+    models.set(id, model);
+    revisions.set(id, revision + 1);
+    if (latest !== undefined) latestState = latest;
+    return value ?? { revision: revision + 1 };
+  };
+  return {
+    ...store,
+    async getAuditSnapshot(id) {
+      const model = models.has(id) ? models.get(id) : await read?.(id);
+      const revision = revisions.get(id) ?? 0;
+      if (model === undefined) return { model, revision, capability: null };
+      const issuer = createInMemoryAuditStore();
+      await issuer.setAudit(id, model);
+      const issued = await issuer.getAuditSnapshot(id);
+      capabilityRevisions.set(issued.capability, revision);
+      return { model, revision, capability: issued.capability };
+    },
+    async getLatest() { return readLatest ? readLatest() : latestState; },
+    async setLatest(value) {
+      if (writeLatest) await writeLatest(value);
+      latestState = value;
+    },
+    commitAudit(id, model, latest) { return write(id, model, latest); },
+    commitAuditIfRevision(id, model, latest, snapshotCapability) {
+      return write(id, model, latest, snapshotCapability);
+    },
+  };
 }
 
 test('opens the local panel in one tab when the action is clicked', async () => {
@@ -135,7 +189,7 @@ test('runs the audit in background, persists the model and sends correlated prog
     return { auditId: 'audit-1', session: { status: 'complete' }, report: { reviewUrl: 'chrome-extension://test/src/review/index.html?auditId=audit-1' } };
   };
   registerServiceWorker(chromeApi, {
-    createId: () => 'audit-1', runner, auditStore,
+    createId: () => 'audit-1', runner, auditStore: withAuditRevisions(auditStore),
     chromeAdapterFactory: () => ({ async emitProgress() {} }),
   });
   let response;
@@ -160,7 +214,7 @@ test('regenerates only a known audit from review and deduplicates persisted queu
     async getLatest() { return latest; },
     async setLatest(value) { latest = value; },
   };
-  registerServiceWorker(chromeApi, { auditStore, now: () => '2026-08-26T15:00:00.000Z' });
+  registerServiceWorker(chromeApi, { auditStore: withAuditRevisions(auditStore), now: () => '2026-08-26T15:00:00.000Z' });
   const sender = { id: 'test', url: 'chrome-extension://test/src/review/index.html?auditId=audit-1' };
   let first;
   chromeApi.listeners.message.listener({ type: 'REQUEST_EXPORT', auditId: 'audit-1' }, sender, value => { first = value; });
@@ -185,7 +239,7 @@ test('serializes concurrent REQUEST_EXPORT so only one inactive export tab opens
     async getLatest() { await readGate; return latest; },
     async setLatest(value) { latest = value; },
   };
-  registerServiceWorker(chromeApi, { auditStore, now: () => '2026-08-26T15:00:00.000Z' });
+  registerServiceWorker(chromeApi, { auditStore: withAuditRevisions(auditStore), now: () => '2026-08-26T15:00:00.000Z' });
   const sender = { id: 'test', url: 'chrome-extension://test/src/review/index.html?auditId=audit-1' };
   const responses = [];
   chromeApi.listeners.message.listener({ type: 'REQUEST_EXPORT', auditId: 'audit-1' }, sender, value => responses.push(value));
@@ -200,12 +254,12 @@ test('serializes concurrent REQUEST_EXPORT so only one inactive export tab opens
 test('recovers an orphaned queued export after worker restart but keeps a fresh queue deduplicated', async () => {
   for (const [queuedAt, shouldOpen] of [[undefined, true], ['not-an-iso-date', true], ['2026-08-26T14:59:30.000Z', false]]) {
     const chromeApi = createChrome();
-    let latest = { auditId: 'audit-1', status: 'complete', exportStatus: 'queued', ...(queuedAt ? { exportQueuedAt: queuedAt } : {}) };
+    let latest = { auditId: 'audit-1', status: 'complete', exportStatus: 'queued', exportRevision: 0, ...(queuedAt ? { exportQueuedAt: queuedAt } : {}) };
     const auditStore = {
       async getAudit() { return { auditId: 'audit-1' }; }, async getLatest() { return latest; },
       async setLatest(value) { latest = value; },
     };
-    registerServiceWorker(chromeApi, { auditStore, now: () => '2026-08-26T15:00:00.000Z' });
+    registerServiceWorker(chromeApi, { auditStore: withAuditRevisions(auditStore), now: () => '2026-08-26T15:00:00.000Z' });
     let response;
     chromeApi.listeners.message.listener(
       { type: 'REQUEST_EXPORT', auditId: 'audit-1' },
@@ -240,7 +294,7 @@ test('never carries latest state from audit B into an export request for audit A
     async getLatest() { return { auditId: 'audit-B', reviewUrl: 'chrome-extension://test/private-B', secretMarker: 'audit-B-only' }; },
     async setLatest(value) { written = value; },
   };
-  registerServiceWorker(chromeApi, { auditStore, now: () => '2026-08-26T15:00:00.000Z' });
+  registerServiceWorker(chromeApi, { auditStore: withAuditRevisions(auditStore), now: () => '2026-08-26T15:00:00.000Z' });
   let response;
   chromeApi.listeners.message.listener(
     { type: 'REQUEST_EXPORT', auditId: 'audit-A' },
@@ -257,7 +311,7 @@ test('never carries latest state from audit B into an export request for audit A
 test('rejects a stored model whose correlated auditId is inherited', async () => {
   const chromeApi = createChrome();
   const inherited = Object.create({ auditId: 'audit-A' });
-  registerServiceWorker(chromeApi, { auditStore: { async getAudit() { return inherited; }, async getLatest() { return null; } } });
+  registerServiceWorker(chromeApi, { auditStore: withAuditRevisions({ async getAudit() { return inherited; }, async getLatest() { return null; } }) });
   let response;
   chromeApi.listeners.message.listener(
     { type: 'REQUEST_EXPORT', auditId: 'audit-A' },
@@ -286,7 +340,7 @@ test('deduplicates concurrent START_AUDIT messages from the same panel sender', 
   const chromeApi = createChrome();
   let finish;
   const runner = () => new Promise(resolve => { finish = resolve; });
-  registerServiceWorker(chromeApi, { createId: () => 'audit-1', runner, auditStore: { async setLatest() {}, async commitAudit() {} }, chromeAdapterFactory: () => ({}) });
+  registerServiceWorker(chromeApi, { createId: () => 'audit-1', runner, auditStore: withAuditRevisions({ async setLatest() {}, async commitAudit() {} }), chromeAdapterFactory: () => ({}) });
   const sender = { id: 'test', url: 'chrome-extension://test/src/panel/index.html', documentId: 'panel-1' };
   let first;
   let second;
@@ -307,7 +361,7 @@ test('stores only a sanitized URL before execution while runner keeps the full n
     async commitAudit(_id, _model, latest) { stored.push(latest); },
   };
   registerServiceWorker(chromeApi, {
-    createId: () => 'audit-private', sessions, auditStore,
+    createId: () => 'audit-private', sessions, auditStore: withAuditRevisions(auditStore),
     chromeAdapterFactory: () => ({}),
     runner: async ({ url }) => { runnerUrl = url; return { auditId: 'audit-private', session: { status: 'complete' }, report: {} }; },
   });
@@ -330,7 +384,7 @@ test('notification failure after atomic commit never rewrites committed complete
     async commitAudit(id, model, latest) { writes.push(['commit', id, model, latest]); },
   };
   registerServiceWorker(chromeApi, {
-    createId: () => 'audit-notify', auditStore, chromeAdapterFactory: () => ({}),
+    createId: () => 'audit-notify', auditStore: withAuditRevisions(auditStore), chromeAdapterFactory: () => ({}),
     runner: async () => ({ auditId: 'audit-notify', session: { status: 'complete' }, report: {} }),
   });
   chromeApi.listeners.message.listener({ type: 'START_AUDIT', url: 'https://example.test/' }, { id: 'test', url: 'chrome-extension://test/src/panel/index.html' }, () => {});
@@ -352,7 +406,7 @@ test('automatic export tab failure atomically persists a controlled partial mode
   };
   const model = structuredClone(SAMPLE_AUDIT);
   model.limitations.push('TOPSECRET https://origin.test/?token=x blob:chrome-extension://test/private');
-  registerServiceWorker(chromeApi, { createId: () => model.auditId, auditStore, chromeAdapterFactory: () => ({}), runner: async () => model, now: () => '2026-08-26T16:00:00.000Z' });
+  registerServiceWorker(chromeApi, { createId: () => model.auditId, auditStore: withAuditRevisions(auditStore), chromeAdapterFactory: () => ({}), runner: async () => model, now: () => '2026-08-26T16:00:00.000Z' });
   chromeApi.listeners.message.listener({ type: 'START_AUDIT', url: 'https://example.test/' }, { id: 'test', url: 'chrome-extension://test/src/panel/index.html' }, () => {});
   await waitUntil(() => writes.filter(([kind]) => kind === 'commit').length === 2);
   const commits = writes.filter(([kind]) => kind === 'commit');
@@ -375,7 +429,7 @@ test('requested export tab failure atomically replaces queued state with a contr
     async setLatest(value) { latest = value; },
     async commitAudit(...values) { commits.push(values); latest = values[2]; },
   };
-  registerServiceWorker(chromeApi, { auditStore, now: () => '2026-08-26T16:00:00.000Z' });
+  registerServiceWorker(chromeApi, { auditStore: withAuditRevisions(auditStore), now: () => '2026-08-26T16:00:00.000Z' });
   let response;
   chromeApi.listeners.message.listener(
     { type: 'REQUEST_EXPORT', auditId: model.auditId },
@@ -390,6 +444,56 @@ test('requested export tab failure atomically replaces queued state with a contr
   assert.doesNotMatch(JSON.stringify(commits), /TOPSECRET|origin\.test|blob:|chrome-extension:/iu);
 });
 
+test('a newer review makes an old queued export marker stale and never blocks the immediate retry', async () => {
+  const chromeApi = createChrome();
+  let releaseFirstTab;
+  let exportTabCalls = 0;
+  chromeApi.tabs.create = async options => {
+    exportTabCalls += 1;
+    if (exportTabCalls === 1) {
+      await new Promise(resolve => { releaseFirstTab = resolve; });
+      throw new Error('tab denied after review');
+    }
+    chromeApi.createdTabs.push(options);
+  };
+  const store = createInMemoryAuditStore();
+  const model = structuredClone(SAMPLE_AUDIT);
+  await store.setAudit(model.auditId, model);
+  await store.setLatest({ auditId: model.auditId, status: 'complete', exportStatus: 'complete' });
+  registerServiceWorker(chromeApi, { auditStore: store, now: () => '2026-08-26T16:00:00.000Z' });
+  const sender = { id: 'test', url: `chrome-extension://test/src/review/index.html?auditId=${model.auditId}` };
+  let first;
+  chromeApi.listeners.message.listener(
+    { type: 'REQUEST_EXPORT', auditId: model.auditId },
+    sender,
+    value => { first = value; },
+  );
+  await waitUntil(async () => (await store.getLatest())?.exportStatus === 'queued');
+  await commitReviewDecision(model, {
+    auditId: model.auditId,
+    itemId: '5.1.4',
+    occurrenceId: 'occ-focus-review',
+    answer: 'não foi possível determinar',
+    evaluator: 'Pessoa avaliadora',
+    decidedAt: '2026-08-26T16:01:00.000Z',
+    mode: 'assisted',
+  }, store);
+  releaseFirstTab();
+  await waitUntil(() => first !== undefined);
+  assert.equal(first.ok, false);
+  assert.equal((await store.getAudit(model.auditId)).reviewDecisions.length, 1);
+
+  let second;
+  chromeApi.listeners.message.listener(
+    { type: 'REQUEST_EXPORT', auditId: model.auditId },
+    sender,
+    value => { second = value; },
+  );
+  await waitUntil(() => second !== undefined);
+  assert.deepEqual(second, { ok: true, auditId: model.auditId, state: 'queued' });
+  assert.equal(exportTabCalls, 2);
+});
+
 test('commit failure sends no completion and persists only best-effort failed latest', async () => {
   const chromeApi = createChrome();
   const latest = [];
@@ -398,7 +502,7 @@ test('commit failure sends no completion and persists only best-effort failed la
     async commitAudit() { throw new Error('transaction aborted'); },
   };
   registerServiceWorker(chromeApi, {
-    createId: () => 'audit-commit-fail', auditStore, chromeAdapterFactory: () => ({}),
+    createId: () => 'audit-commit-fail', auditStore: withAuditRevisions(auditStore), chromeAdapterFactory: () => ({}),
     runner: async () => ({ auditId: 'audit-commit-fail', session: { status: 'complete' }, report: {} }),
   });
   chromeApi.listeners.message.listener({ type: 'START_AUDIT', url: 'https://example.test/' }, { id: 'test', url: 'chrome-extension://test/src/panel/index.html' }, () => {});
@@ -420,6 +524,35 @@ test('restores the latest persisted audit state to a reopened authorized panel',
   assert.equal(keepOpen, true);
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(response, { ok: true, state: latest });
+});
+
+test('restored complete or partial exports become stale after a newer audit revision', async () => {
+  for (const exportStatus of ['complete', 'partial']) {
+    const chromeApi = createChrome();
+    const auditStore = createInMemoryAuditStore();
+    await auditStore.setAudit('audit-stale-export', { auditId: 'audit-stale-export', reviewDecisions: [] });
+    await auditStore.setLatest({
+      auditId: 'audit-stale-export',
+      status: 'complete',
+      exportStatus,
+      exportRevision: 1,
+      message: 'Arquivos do relatório gerados.',
+    });
+    await auditStore.setAudit('audit-stale-export', {
+      auditId: 'audit-stale-export',
+      reviewDecisions: [{ decisionId: 'newer-human-decision' }],
+    });
+    registerServiceWorker(chromeApi, { auditStore });
+    let response;
+    chromeApi.listeners.message.listener(
+      { type: 'GET_LAST_AUDIT' },
+      { id: 'test', url: 'chrome-extension://test/src/panel/index.html' },
+      value => { response = value; },
+    );
+    await waitUntil(() => response !== undefined);
+    assert.equal(response.state.exportStatus, 'failed');
+    assert.match(response.state.message, /atualizada|desatualizado|gere.+novamente/iu);
+  }
 });
 
 test('handles rejected panel-tab creation without an unhandled rejection', async () => {

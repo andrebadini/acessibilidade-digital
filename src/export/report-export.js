@@ -2,15 +2,17 @@ import { downloadArtifacts, buildArtifactBaseName } from '../browser/download-ar
 import { renderPdf } from '../browser/render-pdf.js';
 import { renderOccurrenceCsv } from '../core/report/csv.js';
 import { canonicalStringify } from '../core/report/canonical-json.js';
+import { sha256Hex } from '../core/report/hash.js';
 import { renderTechnicalJson } from '../core/report/earl-json.js';
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { renderHtmlReport } from '../core/report/html.js';
+import { inspectAuditSnapshotCapability } from '../storage/audit-store.js';
 import { createExportIssue, issueForPrintStage, PDF_GENERATION_FAILURE_CODES } from './export-issues.js';
-import { attestReportExportResult } from './export-provenance.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const PDF_COMMAND_TIMEOUT_MS = 45_000;
 const MAX_FINALIZATION_PASSES = 6;
+const GENERATED_REPORT_RESULTS = new WeakMap();
 
 class OwnershipTransferTimeoutError extends DOMException {
   constructor() {
@@ -20,8 +22,22 @@ class OwnershipTransferTimeoutError extends DOMException {
 
 export async function runReportExport(request, dependencies) {
   validateDependencies(dependencies);
-  const original = sanitizeReportMessages(request?.auditModel);
   const at = canonicalNow(request?.now);
+  let snapshotCapability = null;
+  let sourceModel = request?.auditModel;
+  if (request?.auditSnapshotCapability !== undefined) {
+    const snapshot = inspectAuditSnapshotCapability(request.auditSnapshotCapability);
+    if (!snapshot) throw new TypeError('Capacidade de snapshot da auditoria inválida para geração.');
+    snapshotCapability = request.auditSnapshotCapability;
+    sourceModel = await enrichAuditForReport(snapshot.model, {
+      now: () => at,
+      timezone: request.timezone ?? snapshot.model.timezone,
+      manifestVersion: request.manifestVersion,
+      rulesVersion: snapshot.model.methodology?.version ?? snapshot.model.versions?.rules,
+      browserVersion: request.browserVersion ?? snapshot.model.environment?.chromeVersion,
+    });
+  }
+  const original = sanitizeReportMessages(sourceModel);
   const timeoutMs = request?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('Timeout de exportação inválido.');
   const generationIssues = [];
@@ -106,6 +122,24 @@ export async function runReportExport(request, dependencies) {
     json = renderTechnicalJson(model);
   }
 
+  if (snapshotCapability !== null) {
+    if (typeof dependencies.reserveDelivery !== 'function') {
+      throw new TypeError('Reserva atômica de entrega indisponível para o snapshot persistido.');
+    }
+    const previousSnapshot = inspectAuditSnapshotCapability(snapshotCapability);
+    const reservation = await dependencies.reserveDelivery({
+      model: JSON.parse(canonicalStringify(model)),
+    });
+    const reservedCapability = safeReservationCapability(reservation);
+    const reservedSnapshot = inspectAuditSnapshotCapability(reservedCapability);
+    if (!previousSnapshot || !reservedSnapshot || reservedSnapshot.auditId !== previousSnapshot.auditId ||
+      reservedSnapshot.revision !== previousSnapshot.revision + 1 ||
+      canonicalStringify(reservedSnapshot.model) !== canonicalStringify(model)) {
+      throw new TypeError('Reserva atômica de entrega não corresponde ao relatório preparado.');
+    }
+    snapshotCapability = reservedCapability;
+  }
+
   const baseName = buildArtifactBaseName(model.finalUrl, at);
   const downloads = await downloadArtifacts({
     baseName, html, json, ...(csv === null ? {} : { csv }), ...(pdf ? { pdf } : {}),
@@ -143,7 +177,91 @@ export async function runReportExport(request, dependencies) {
     ])],
     pdfFallback,
   };
-  return attestReportExportResult(result);
+  return attestReportExportResult(result, snapshotCapability);
+}
+
+/** Safe identity probe used before any reflection on a caller-provided result. */
+export function isGeneratedReportExportResult(value) {
+  return (typeof value === 'object' && value !== null) ? GENERATED_REPORT_RESULTS.has(value) : false;
+}
+
+/** Returns the privately bound audit snapshot capability without minting one. */
+export function generatedReportExportSnapshotCapability(result) {
+  const provenance = (typeof result === 'object' && result !== null) ? GENERATED_REPORT_RESULTS.get(result) : null;
+  return provenance?.snapshotCapability ?? null;
+}
+
+/** Verifies a persistence-owned snapshot against the private generation record. */
+export async function verifyGeneratedReportExportResult(result, snapshot) {
+  try {
+    const provenance = GENERATED_REPORT_RESULTS.get(result);
+    if (!provenance || canonicalStringify(await projectGeneratedResult(snapshot)) !== canonicalStringify(provenance.projection)) {
+      throw new TypeError();
+    }
+    return provenance.snapshotCapability;
+  } catch {
+    throw new TypeError('Proveniência dos artefatos HTML/JSON/CSV/PDF inválida ou ausente.');
+  }
+}
+
+async function attestReportExportResult(result, snapshotCapability) {
+  try {
+    const provenance = Object.freeze({
+      projection: Object.freeze(await projectGeneratedResult(result)),
+      snapshotCapability,
+    });
+    GENERATED_REPORT_RESULTS.set(result, provenance);
+    return result;
+  } catch {
+    throw new TypeError('Resultado final de exportação não pôde ser atestado.');
+  }
+}
+
+async function projectGeneratedResult(value) {
+  return {
+    model: await sha256Hex(canonicalStringify(value.model)),
+    html: await generatedTextHash(value.html, false),
+    json: await generatedTextHash(value.json, false),
+    csv: await generatedTextHash(value.csv, true),
+    pdf: await generatedBinaryHash(value.pdf, true),
+    formats: await sha256Hex(canonicalStringify(value.formats)),
+    deliveryReceipt: await sha256Hex(canonicalStringify(value.deliveryReceipt)),
+    limitations: await sha256Hex(canonicalStringify(value.limitations)),
+    pdfFallback: value.pdfFallback === true ? true : value.pdfFallback === false ? false : invalidGeneratedValue(),
+  };
+}
+
+async function generatedTextHash(value, nullable) {
+  if (nullable && value === null) return null;
+  if (typeof value !== 'string') throw new TypeError();
+  return sha256Hex(value);
+}
+
+async function generatedBinaryHash(value, nullable) {
+  if (nullable && value === null) return null;
+  if (!(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value)) throw new TypeError();
+  return sha256Hex(value);
+}
+
+function invalidGeneratedValue() {
+  throw new TypeError();
+}
+
+function safeReservationCapability(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
+      throw new TypeError();
+    }
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== 2 || !keys.includes('revision') || !keys.includes('capability')) throw new TypeError();
+    const revision = Object.getOwnPropertyDescriptor(value, 'revision');
+    const capability = Object.getOwnPropertyDescriptor(value, 'capability');
+    if (!revision?.enumerable || !Object.hasOwn(revision, 'value') || !Number.isSafeInteger(revision.value) || revision.value < 1 ||
+      !capability?.enumerable || !Object.hasOwn(capability, 'value')) throw new TypeError();
+    return capability.value;
+  } catch {
+    throw new TypeError('Reserva atômica de entrega inválida.');
+  }
 }
 
 async function printFinalHtml(html, dependencies, timeoutMs, forceCompatible) {

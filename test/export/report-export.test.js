@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { runReportExport } from '../../src/export/report-export.js';
+import { commitReviewDecision } from '../../src/review/review-state.js';
+import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 
 const PDF = new TextEncoder().encode('%PDF-1.7\nlocal');
 const FALLBACK_PDF = new TextEncoder().encode('%PDF-1.7\nfinal-fallback');
@@ -48,6 +50,43 @@ test('prints one inactive blob tab, cleans exact resources, and exports one shar
     assert.ok(technical.audit.occurrences.some(entry => entry.occurrenceId === occurrence.occurrenceId));
   }
   assert.doesNotMatch(JSON.stringify(result), /blob:chrome-extension/u);
+});
+
+test('a newer human review that wins the pre-delivery CAS prevents every stale download', async () => {
+  const store = createInMemoryAuditStore();
+  await store.setAudit(SAMPLE_AUDIT.auditId, clone(SAMPLE_AUDIT));
+  const snapshot = await store.getAuditSnapshot(SAMPLE_AUDIT.auditId);
+  const events = [];
+
+  await assert.rejects(runReportExport({
+    auditSnapshotCapability: snapshot.capability,
+    now: () => '2026-08-26T15:00:00.000Z',
+  }, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+    downloadsAdapter: fakeDownloads(events),
+    async reserveDelivery({ model }) {
+      await commitReviewDecision(snapshot.model, {
+        auditId: SAMPLE_AUDIT.auditId,
+        itemId: '5.1.4',
+        occurrenceId: 'occ-focus-review',
+        answer: 'não foi possível determinar',
+        evaluator: 'Pessoa avaliadora',
+        decidedAt: '2026-08-26T15:01:00.000Z',
+        mode: 'assisted',
+      }, store);
+      return store.commitAuditIfRevision(
+        SAMPLE_AUDIT.auditId,
+        model,
+        { auditId: SAMPLE_AUDIT.auditId, exportStatus: 'delivering' },
+        snapshot.capability,
+      );
+    },
+  }), error => error?.code === 'AUDIT_REVISION_CONFLICT');
+
+  assert.equal(events.some(entry => entry[0] === 'download'), false);
+  assert.equal((await store.getAuditSnapshot(SAMPLE_AUDIT.auditId)).model.reviewDecisions.length, 1);
 });
 
 test('ignores image branding input and exports only the neutral independent identity', async () => {
@@ -315,6 +354,39 @@ test('contains CSV preparation failure, records it in the final correlated model
     limitations: ['O CSV não foi gerado devido a uma limitação técnica local.'],
   });
   assert.doesNotMatch(`${result.html}\n${result.json}\n${JSON.stringify(result)}`, /PRIVATE_SENTINEL|origin\.test|token=/iu);
+});
+
+test('marks CSV unavailable when an occurrence has more than 256 evidence references without downloading a partial row', async () => {
+  const input = clone(SAMPLE_AUDIT);
+  const source = input.evidence.find(entry => entry.evidenceId === 'ev-full');
+  const extra = Array.from({ length: 255 }, (_, index) => ({
+    ...clone(source),
+    evidenceId: `ev-export-boundary-${String(index).padStart(3, '0')}`,
+  }));
+  input.evidence.push(...extra);
+  input.occurrences[0].evidenceRefs = [
+    ...input.occurrences[0].evidenceRefs,
+    ...extra.map(entry => entry.evidenceId),
+  ];
+  input.occurrences[0].evidenceIds = [...input.occurrences[0].evidenceRefs];
+  const events = [];
+
+  const result = await runReportExport({
+    auditModel: input, now: () => '2026-08-26T15:00:00.000Z',
+  }, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+    downloadsAdapter: fakeDownloads(events),
+  });
+
+  assert.equal(result.csv, null);
+  assert.equal(result.model.session.status, 'partial');
+  assert.deepEqual(result.model.report.artifact.formats.map(entry => entry.format), ['html', 'json', 'pdf']);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'pdf']);
+  assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'REPORT_CSV_UNAVAILABLE'));
+  assert.deepEqual(result.deliveryReceipt.limitations, ['O CSV não foi gerado devido a uma limitação técnica local.']);
+  assert.equal(events.some(entry => entry[0] === 'download' && entry[1].endsWith('.csv')), false);
 });
 
 test('prints the exact final canonical HTML after CSV availability is known, including timestamp, hash and limitation', async () => {

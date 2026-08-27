@@ -4,7 +4,7 @@ import { createChromeAdapter } from './chrome-adapter.js';
 import { runAudit } from './run-audit.js';
 import { createAuditStore } from '../storage/audit-store.js';
 import { sanitizeResourceUrl } from '../core/normalize-snapshot.js';
-import { persistExportFailure } from '../export/export-controller.js';
+import { createExportFailureRequest, persistExportFailure } from '../export/export-controller.js';
 
 const PANEL_PATH = '/src/panel/index.html';
 const REVIEW_PATH = '/src/review/index.html';
@@ -105,7 +105,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
       return true;
     }
     if (message.type === 'GET_LAST_AUDIT') {
-      void auditStore.getLatest().then(value => sendResponse({ ok: true, state: value ?? null }), () => sendResponse({ ok: false, error: 'Não foi possível restaurar a última auditoria.' }));
+      void restorableLatestState().then(value => sendResponse({ ok: true, state: value ?? null }), () => sendResponse({ ok: false, error: 'Não foi possível restaurar a última auditoria.' }));
       return true;
     }
     try {
@@ -155,7 +155,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
       if (canExport) {
         await Promise.allSettled([
           sendRuntimeMessage(chromeApi, { type: 'AUDIT_COMPLETE', auditId, sessionId: auditId, status, reviewUrl, exportStatus: 'queued' }),
-          startAutomaticExport(auditId, latestState, model),
+          startAutomaticExport(auditId),
         ]);
       } else {
         await sendRuntimeMessage(chromeApi, { type: 'AUDIT_FAILED', auditId, sessionId: auditId, status, error: status === 'cancelled' ? 'A auditoria foi cancelada.' : 'A auditoria não pôde ser concluída.' }).catch(() => {});
@@ -174,27 +174,53 @@ export function registerServiceWorker(chromeApi, options = {}) {
   }
 
   async function queueRequestedExport(auditId) {
-    const [model, latest] = await Promise.all([auditStore.getAudit(auditId), auditStore.getLatest()]);
+    const [snapshot, latest] = await Promise.all([auditStore.getAuditSnapshot(auditId), auditStore.getLatest()]);
+    const { model, revision } = snapshot;
     if (!model || !Object.hasOwn(model, 'auditId') || model.auditId !== auditId) return { ok: false, error: 'Auditoria não encontrada.' };
-    if (latest?.auditId === auditId && ['queued', 'running'].includes(latest.exportStatus) && queueIsFresh(latest.exportQueuedAt)) {
+    if (latest?.auditId === auditId && latest.exportRevision === revision &&
+      ['queued', 'running', 'delivering'].includes(latest.exportStatus) && queueIsFresh(latest.exportQueuedAt)) {
       return { ok: true, auditId, state: latest.exportStatus, duplicate: true };
     }
     const correlatedLatest = latest?.auditId === auditId ? latest : {};
-    await auditStore.setLatest({ ...correlatedLatest, auditId, exportStatus: 'queued', exportQueuedAt: queueTime(), message: 'Relatório na fila de geração.' });
+    await auditStore.setLatest({
+      ...correlatedLatest,
+      auditId,
+      exportStatus: 'queued',
+      exportRevision: revision,
+      exportQueuedAt: queueTime(),
+      message: 'Relatório na fila de geração.',
+    });
     try {
       await openExportPage(auditId);
       return { ok: true, auditId, state: 'queued' };
     } catch (error) {
-      await persistExportFailure({ auditId, model, latest, at: queueTime() }, auditStore);
+      await persistExportFailure(createExportFailureRequest({
+        snapshotCapability: snapshot.capability,
+        latest,
+        at: queueTime(),
+      }), auditStore);
       throw error;
     }
   }
 
-  async function startAutomaticExport(auditId, latestState, model) {
+  async function startAutomaticExport(auditId) {
+    const [snapshot, latest] = await Promise.all([auditStore.getAuditSnapshot(auditId), auditStore.getLatest()]);
+    await auditStore.setLatest({
+      ...(latest?.auditId === auditId ? latest : {}),
+      auditId,
+      exportStatus: 'queued',
+      exportRevision: snapshot.revision,
+      exportQueuedAt: queueTime(),
+      message: 'Relatório na fila de geração.',
+    });
     try {
       await openExportPage(auditId);
     } catch {
-      const failed = await persistExportFailure({ auditId, model, latest: latestState, at: queueTime() }, auditStore);
+      const failed = await persistExportFailure(createExportFailureRequest({
+        snapshotCapability: snapshot.capability,
+        latest,
+        at: queueTime(),
+      }), auditStore);
       await sendRuntimeMessage(chromeApi, { type: 'EXPORT_FAILED', auditId, status: 'failed', error: failed.latest.message }).catch(() => {});
     }
   }
@@ -222,6 +248,19 @@ export function registerServiceWorker(chromeApi, options = {}) {
     } catch {
       return false;
     }
+  }
+
+  async function restorableLatestState() {
+    const latest = await auditStore.getLatest();
+    if (!latest || !['queued', 'running', 'delivering', 'complete', 'partial'].includes(latest.exportStatus) ||
+      typeof auditStore.getAuditSnapshot !== 'function' || !validAuditId(latest.auditId)) return latest;
+    const snapshot = await auditStore.getAuditSnapshot(latest.auditId);
+    if (latest.exportRevision === snapshot.revision) return latest;
+    return {
+      ...latest,
+      exportStatus: 'failed',
+      message: 'A auditoria foi atualizada durante a exportação; gere o relatório novamente.',
+    };
   }
 }
 

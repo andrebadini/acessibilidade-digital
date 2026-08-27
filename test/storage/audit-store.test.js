@@ -21,6 +21,64 @@ test('in-memory commitAudit clones both values before atomically changing state'
   assert.deepEqual(await store.getLatest(), { auditId: 'audit-1', status: 'partial' });
 });
 
+test('in-memory snapshots carry a monotonic revision and compare-and-swap never overwrites a newer model', async () => {
+  const store = createInMemoryAuditStore();
+  await store.setAudit('audit-cas', { auditId: 'audit-cas', revisionMarker: 'initial' });
+  const snapshot = await store.getAuditSnapshot('audit-cas');
+  assert.equal(snapshot.revision, 1);
+
+  await store.setAudit('audit-cas', { auditId: 'audit-cas', revisionMarker: 'human-review' });
+  await assert.rejects(
+    store.commitAuditIfRevision(
+      'audit-cas',
+      { auditId: 'audit-cas', revisionMarker: 'stale-export' },
+      { auditId: 'audit-cas', exportStatus: 'complete' },
+      snapshot.capability,
+    ),
+    error => error?.code === 'AUDIT_REVISION_CONFLICT',
+  );
+
+  assert.equal((await store.getAudit('audit-cas')).revisionMarker, 'human-review');
+  assert.equal((await store.getAuditSnapshot('audit-cas')).revision, 2);
+});
+
+test('only one concurrent compare-and-swap can commit the same expected revision', async () => {
+  const store = createInMemoryAuditStore();
+  await store.setAudit('audit-race', { auditId: 'audit-race', winner: null });
+  const { revision, capability } = await store.getAuditSnapshot('audit-race');
+
+  const outcomes = await Promise.allSettled([
+    store.commitAuditIfRevision('audit-race', { auditId: 'audit-race', winner: 'first' }, { auditId: 'audit-race' }, capability),
+    store.commitAuditIfRevision('audit-race', { auditId: 'audit-race', winner: 'second' }, { auditId: 'audit-race' }, capability),
+  ]);
+
+  assert.equal(outcomes.filter(entry => entry.status === 'fulfilled').length, 1);
+  assert.equal(outcomes.filter(entry => entry.status === 'rejected' && entry.reason?.code === 'AUDIT_REVISION_CONFLICT').length, 1);
+  assert.ok(['first', 'second'].includes((await store.getAudit('audit-race')).winner));
+  assert.equal((await store.getAuditSnapshot('audit-race')).revision, revision + 1);
+});
+
+test('in-memory revisions survive store recreation over the same fallback backing map', async () => {
+  const backing = new Map();
+  const first = createInMemoryAuditStore(backing);
+  const recreated = createInMemoryAuditStore(backing);
+  await first.setAudit('audit-retained', { auditId: 'audit-retained', marker: 'initial' });
+  const snapshot = await recreated.getAuditSnapshot('audit-retained');
+  assert.equal(snapshot.revision, 1);
+
+  await first.setAudit('audit-retained', { auditId: 'audit-retained', marker: 'human-review' });
+  await assert.rejects(
+    recreated.commitAuditIfRevision(
+      'audit-retained',
+      { auditId: 'audit-retained', marker: 'stale-export' },
+      { auditId: 'audit-retained', exportStatus: 'complete' },
+      snapshot.capability,
+    ),
+    error => error?.code === 'AUDIT_REVISION_CONFLICT',
+  );
+  assert.equal((await recreated.getAudit('audit-retained')).marker, 'human-review');
+});
+
 test('IndexedDB audit storage uses a dedicated object store and persists a large model', async () => {
   const fake = createFakeIndexedDb();
   const store = createAuditStore({ indexedDB: fake });
@@ -39,6 +97,125 @@ test('IndexedDB commitAudit writes model and latest in one transaction', async (
   assert.equal(fake.transactionModes.filter(mode => mode === 'readwrite').length, 1);
   assert.deepEqual(await store.getAudit('audit-atomic'), { auditId: 'audit-atomic', bytes: 'model' });
   assert.deepEqual(await store.getLatest(), { auditId: 'audit-atomic', status: 'complete' });
+});
+
+test('IndexedDB compare-and-swap checks and updates the revision in the same readwrite transaction', async () => {
+  const fake = createFakeIndexedDb();
+  const store = createAuditStore({ indexedDB: fake });
+  await store.setAudit('audit-idb-cas', { auditId: 'audit-idb-cas', marker: 'initial' });
+  const snapshot = await store.getAuditSnapshot('audit-idb-cas');
+  await store.commitAuditIfRevision(
+    'audit-idb-cas',
+    { auditId: 'audit-idb-cas', marker: 'exported' },
+    { auditId: 'audit-idb-cas', exportStatus: 'complete' },
+    snapshot.capability,
+  );
+
+  await assert.rejects(
+    store.commitAuditIfRevision(
+      'audit-idb-cas',
+      { auditId: 'audit-idb-cas', marker: 'stale' },
+      { auditId: 'audit-idb-cas', exportStatus: 'failed' },
+      snapshot.capability,
+    ),
+    error => error?.code === 'AUDIT_REVISION_CONFLICT',
+  );
+  assert.equal((await store.getAudit('audit-idb-cas')).marker, 'exported');
+  assert.equal((await store.getAuditSnapshot('audit-idb-cas')).revision, snapshot.revision + 1);
+});
+
+test('two IndexedDB store connections cannot both commit capabilities for the same revision', async () => {
+  const fake = createFakeIndexedDb();
+  const first = createAuditStore({ indexedDB: fake });
+  const second = createAuditStore({ indexedDB: fake });
+  await first.setAudit('audit-idb-race', { auditId: 'audit-idb-race', winner: null });
+  const [firstSnapshot, secondSnapshot] = await Promise.all([
+    first.getAuditSnapshot('audit-idb-race'),
+    second.getAuditSnapshot('audit-idb-race'),
+  ]);
+  assert.equal(firstSnapshot.revision, secondSnapshot.revision);
+
+  const outcomes = await Promise.allSettled([
+    first.commitAuditIfRevision(
+      'audit-idb-race',
+      { auditId: 'audit-idb-race', winner: 'first' },
+      { auditId: 'audit-idb-race', exportStatus: 'complete' },
+      firstSnapshot.capability,
+    ),
+    second.commitAuditIfRevision(
+      'audit-idb-race',
+      { auditId: 'audit-idb-race', winner: 'second' },
+      { auditId: 'audit-idb-race', exportStatus: 'complete' },
+      secondSnapshot.capability,
+    ),
+  ]);
+
+  assert.equal(outcomes.filter(entry => entry.status === 'fulfilled').length, 1);
+  assert.equal(outcomes.filter(entry => entry.status === 'rejected' && entry.reason?.code === 'AUDIT_REVISION_CONFLICT').length, 1);
+  assert.ok(['first', 'second'].includes((await first.getAudit('audit-idb-race')).winner));
+});
+
+test('compare-and-swap accepts only a capability minted by the same store and audit snapshot', async () => {
+  const store = createInMemoryAuditStore();
+  const other = createInMemoryAuditStore();
+  await store.setAudit('audit-capability', { auditId: 'audit-capability', marker: 'current' });
+  await other.setAudit('audit-capability', { auditId: 'audit-capability', marker: 'other' });
+  const snapshot = await store.getAuditSnapshot('audit-capability');
+  const otherSnapshot = await other.getAuditSnapshot('audit-capability');
+
+  for (const forged of [snapshot.revision, {}, otherSnapshot.capability]) {
+    await assert.rejects(
+      store.commitAuditIfRevision(
+        'audit-capability',
+        { auditId: 'audit-capability', marker: 'forged' },
+        { auditId: 'audit-capability', exportStatus: 'failed' },
+        forged,
+      ),
+      /capacidade|snapshot|inválid/iu,
+    );
+  }
+  assert.equal((await store.getAudit('audit-capability')).marker, 'current');
+  assert.equal((await store.getAuditSnapshot('audit-capability')).revision, snapshot.revision);
+});
+
+test('a successful CAS returns the next store-owned capability for finalization', async () => {
+  const store = createInMemoryAuditStore();
+  await store.setAudit('audit-reserve', { auditId: 'audit-reserve', phase: 'prepared' });
+  const prepared = await store.getAuditSnapshot('audit-reserve');
+  const reserved = await store.commitAuditIfRevision(
+    'audit-reserve',
+    { auditId: 'audit-reserve', phase: 'reserved' },
+    { auditId: 'audit-reserve', exportStatus: 'delivering' },
+    prepared.capability,
+  );
+
+  assert.equal(reserved.revision, prepared.revision + 1);
+  assert.ok(reserved.capability);
+  await assert.rejects(
+    store.commitAuditIfRevision(
+      'audit-reserve',
+      { auditId: 'audit-reserve', phase: 'stale' },
+      {},
+      prepared.capability,
+    ),
+    error => error?.code === 'AUDIT_REVISION_CONFLICT',
+  );
+  await store.commitAuditIfRevision(
+    'audit-reserve',
+    { auditId: 'audit-reserve', phase: 'final' },
+    { auditId: 'audit-reserve', exportStatus: 'complete' },
+    reserved.capability,
+  );
+  assert.equal((await store.getAudit('audit-reserve')).phase, 'final');
+});
+
+test('audit identifiers cannot collide with private latest or revision records', async () => {
+  const store = createInMemoryAuditStore();
+  for (const auditId of ['__latest__', '__audit_revision__:audit-1']) {
+    await assert.rejects(store.setAudit(auditId, { auditId }), /identificador|reservad|inválid/iu);
+    await assert.rejects(store.getAuditSnapshot(auditId), /identificador|reservad|inválid/iu);
+  }
+  assert.equal(await store.getLatest(), undefined);
 });
 
 test('caches the open promise, rejects blocked opens, and reopens after versionchange', async () => {
@@ -86,7 +263,7 @@ function createFakeIndexedDb(options = {}) {
                 };
               },
             };
-            queueMicrotask(() => transaction.oncomplete?.());
+            queueMicrotask(() => queueMicrotask(() => transaction.oncomplete?.()));
             return transaction;
           },
         };

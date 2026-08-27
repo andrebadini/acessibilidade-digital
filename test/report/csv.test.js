@@ -154,6 +154,60 @@ test('uses only local catalog titles and fixed outcome descriptions', () => {
   assert.doesNotMatch(JSON.stringify(first), /customer prose/iu);
 });
 
+test('derives engine and version from the trusted local rule instead of occurrence-controlled text', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.occurrences[0].source.engine = 'PRIVATE_OCCURRENCE_ENGINE';
+  input.occurrences[0].source.version = 'PRIVATE_OCCURRENCE_VERSION';
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.source_engine, 'audita-core');
+  assert.equal(first.source_version, '1.0.0');
+  assert.doesNotMatch(renderOccurrenceCsv(input), /PRIVATE_OCCURRENCE_(?:ENGINE|VERSION)/u);
+});
+
+test('fails the whole CSV projection instead of silently emptying a list above 256 evidence references', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const source = input.evidence.find(entry => entry.evidenceId === 'ev-full');
+  const extra = Array.from({ length: 255 }, (_, index) => ({
+    ...structuredClone(source),
+    evidenceId: `ev-list-boundary-${String(index).padStart(3, '0')}`,
+  }));
+  input.evidence.push(...extra);
+  input.occurrences[0].evidenceRefs = [
+    ...input.occurrences[0].evidenceRefs,
+    ...extra.map(entry => entry.evidenceId),
+  ];
+  input.occurrences[0].evidenceIds = [...input.occurrences[0].evidenceRefs];
+
+  assert.equal(input.occurrences[0].evidenceRefs.length, 257);
+  assert.throws(
+    () => renderOccurrenceCsv(input),
+    error => error instanceof RangeError && /CSV|lista|256|evid/iu.test(error.message),
+  );
+});
+
+test('fails a 256-item reference list that would otherwise be truncated inside a CSV cell', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const source = input.evidence.find(entry => entry.evidenceId === 'ev-full');
+  const extra = Array.from({ length: 254 }, (_, index) => ({
+    ...structuredClone(source),
+    evidenceId: `ev-${String(index).padStart(3, '0')}-${'x'.repeat(180)}`,
+  }));
+  input.evidence.push(...extra);
+  input.occurrences[0].evidenceRefs = [
+    ...input.occurrences[0].evidenceRefs,
+    ...extra.map(entry => entry.evidenceId),
+  ];
+  input.occurrences[0].evidenceIds = [...input.occurrences[0].evidenceRefs];
+
+  assert.equal(input.occurrences[0].evidenceRefs.length, 256);
+  assert.throws(
+    () => renderOccurrenceCsv(input),
+    error => error instanceof RangeError && /CSV|lista|célula|perda|trunc/iu.test(error.message),
+  );
+});
+
 test('does not expose invalid or non-attested hash-shaped values', () => {
   const input = structuredClone(SAMPLE_AUDIT);
   for (const artifact of input.evidence) artifact.hash = 'a'.repeat(64);

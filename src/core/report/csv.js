@@ -1,4 +1,5 @@
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
+import { AXE_PROVENANCE } from '../../browser/axe-adapter.js';
 import { createAuditModel } from './audit-model.js';
 import { isAuditIntegrityVerified } from './integrity.js';
 
@@ -24,6 +25,15 @@ const SAFE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const ENCODER = new TextEncoder();
 const CATALOG_ITEM_BY_ID = new Map(NBR17225_ITEMS.map(item => [item.id, item]));
+const CORE_RULE_ITEM_IDS = new Map();
+for (const item of NBR17225_ITEMS) {
+  for (const ruleId of item.ruleIds) {
+    const itemIds = CORE_RULE_ITEM_IDS.get(ruleId) ?? new Set();
+    itemIds.add(item.id);
+    CORE_RULE_ITEM_IDS.set(ruleId, itemIds);
+  }
+}
+const AUDITA_RULES_VERSION = '1.0.0';
 const CLASSIFICATION_LABEL = Object.freeze({
   requirement: 'Requisito',
   recommendation: 'Recomendação',
@@ -49,6 +59,8 @@ export function renderOccurrenceCsv(input) {
   }
   const pageById = new Map(model.pages.map(page => [page.pageId, page]));
   const evidenceById = new Map(model.evidence.map(evidence => [evidence.evidenceId, evidence]));
+  const axeRuleByOccurrenceId = new Map((model.axe?.occurrences ?? [])
+    .map(occurrence => [occurrence.occurrenceId, occurrence.source?.ruleId]));
   const records = [serializeRecord(OCCURRENCE_CSV_COLUMNS)];
   let byteLength = ENCODER.encode(`\uFEFF${records[0]}\r\n`).byteLength;
 
@@ -62,6 +74,7 @@ export function renderOccurrenceCsv(input) {
     const previewEvidence = referencedEvidence.find(evidence =>
       evidence.nodeId === occurrence.target.nodeId && typeof evidence.accessibility?.nameSource === 'string')
       ?? referencedEvidence.find(evidence => typeof evidence.accessibility?.nameSource === 'string');
+    const source = trustedOccurrenceSource(occurrence, axeRuleByOccurrenceId);
     const values = [
       OCCURRENCE_CSV_VERSION,
       strictToken(model.auditId),
@@ -73,8 +86,8 @@ export function renderOccurrenceCsv(input) {
       strictToken(occurrence.classification),
       strictToken(occurrence.impact),
       strictToken(occurrence.confidence),
-      strictToken(occurrence.source.engine),
-      strictToken(occurrence.source.version),
+      source.engine,
+      source.version,
       strictToken(occurrence.source.ruleId),
       strictToken(occurrence.nbrItemRef),
       strictTokenList(occurrence.wcagRefs, ';'),
@@ -114,20 +127,58 @@ function strictSha256(value) {
 }
 
 function strictTokenList(values, separator) {
-  if (!Array.isArray(values) || values.length > MAX_LIST_ITEMS) return '';
+  assertProjectableList(values);
   const projected = values.map(strictToken);
-  return projected.some((value, index) => value === '' && values[index] !== '') ? '' : projected.join(separator);
+  if (projected.some((value, index) => value === '' && values[index] !== '')) {
+    throw new TypeError('Uma lista do CSV contém referência fora da gramática permitida.');
+  }
+  return completeListCell(projected, separator);
 }
 
 function foreignReferenceList(references) {
-  if (!Array.isArray(references) || references.length > MAX_LIST_ITEMS) return '';
+  assertProjectableList(references);
   const projected = references.map(reference => {
     const benchmarkId = strictToken(reference?.benchmarkId);
     const criterionId = strictToken(reference?.criterionId);
     const level = strictToken(reference?.level);
     return benchmarkId && criterionId && level ? `${benchmarkId}:${criterionId}:${level}` : '';
   });
-  return projected.some(value => value === '') ? '' : projected.join(';');
+  if (projected.some(value => value === '')) {
+    throw new TypeError('Uma lista do CSV contém referência estrangeira fora da gramática permitida.');
+  }
+  return completeListCell(projected, ';');
+}
+
+function assertProjectableList(values) {
+  if (!Array.isArray(values)) throw new TypeError('Uma lista obrigatória do CSV é inválida.');
+  if (values.length > MAX_LIST_ITEMS) {
+    throw new RangeError(`O CSV não representa listas acima de ${MAX_LIST_ITEMS} referências sem perda.`);
+  }
+}
+
+function completeListCell(values, separator) {
+  const projected = values.join(separator);
+  if ([...projected].length > MAX_CELL_CODE_POINTS) {
+    throw new RangeError('O CSV não representa uma lista que exceda a célula sem perda ou truncamento.');
+  }
+  return projected;
+}
+
+function trustedOccurrenceSource(occurrence, axeRuleByOccurrenceId) {
+  const ruleId = occurrence.source.ruleId;
+  if (CORE_RULE_ITEM_IDS.get(ruleId)?.has(occurrence.nbrItemRef)) {
+    return { engine: 'audita-core', version: AUDITA_RULES_VERSION };
+  }
+  if (occurrence.classification === 'editorial' && ruleId === 'editorial.placeholder-text') {
+    return { engine: 'audita-editorial', version: AUDITA_RULES_VERSION };
+  }
+  if (occurrence.ruleId === null && occurrence.nbrItemRef && ruleId === `manual:${occurrence.nbrItemRef}`) {
+    return { engine: 'audita-manual-review', version: AUDITA_RULES_VERSION };
+  }
+  if (axeRuleByOccurrenceId.get(occurrence.occurrenceId) === ruleId) {
+    return { engine: AXE_PROVENANCE.engine, version: AXE_PROVENANCE.version };
+  }
+  return { engine: 'supplemental', version: '' };
 }
 
 function httpOrigin(value) {
@@ -162,16 +213,20 @@ function projectedDetail(value) {
 }
 
 function verifiedEvidenceHashList(evidenceRefs, evidence) {
-  if (!Array.isArray(evidenceRefs) || !Array.isArray(evidence) || evidenceRefs.length !== evidence.length ||
-    evidenceRefs.length > MAX_LIST_ITEMS) return '';
+  assertProjectableList(evidenceRefs);
+  if (!Array.isArray(evidence) || evidenceRefs.length !== evidence.length) {
+    throw new TypeError('Evidências do CSV não correspondem às referências projetadas.');
+  }
   const pairs = [];
   for (let index = 0; index < evidenceRefs.length; index += 1) {
     const evidenceId = strictToken(evidenceRefs[index]);
     const hash = strictSha256(evidence[index]?.hash);
-    if (!evidenceId || !hash) return '';
+    if (!evidenceId || !hash) {
+      throw new TypeError('Um par de evidência do CSV não possui identificador e hash íntegros.');
+    }
     pairs.push(`${evidenceId}=${hash}`);
   }
-  return pairs.join(';');
+  return completeListCell(pairs, ';');
 }
 
 function boundedScalar(value) {

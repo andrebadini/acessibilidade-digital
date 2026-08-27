@@ -4,16 +4,18 @@ import {
   REPORT_GENERATION_ISSUE_CODES,
 } from './export-issues.js';
 import { canonicalStringify } from '../core/report/canonical-json.js';
-import { finalizeGeneratedModel } from './report-export.js';
+import {
+  finalizeGeneratedModel,
+  generatedReportExportSnapshotCapability,
+  isGeneratedReportExportResult,
+  verifyGeneratedReportExportResult,
+} from './report-export.js';
+import { inspectAuditSnapshotCapability } from '../storage/audit-store.js';
 import { renderOccurrenceCsv } from '../core/report/csv.js';
 import { renderTechnicalJson } from '../core/report/earl-json.js';
 import { renderHtmlReport } from '../core/report/html.js';
 import { sha256Hex } from '../core/report/hash.js';
 import { verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
-import {
-  captureReportExportProvenance,
-  verifyReportExportProvenance,
-} from './export-provenance.js';
 import {
   ARTIFACT_FAILURE_CONTRACT,
   artifactCleanupLimitation,
@@ -27,51 +29,103 @@ const PRINT_CLEANUP_LIMITATION = createExportIssue('REPORT_PRINT_CLEANUP_LIMITED
 const RESULT_KEYS = new Set([
   'model', 'html', 'json', 'csv', 'pdf', 'formats', 'deliveryReceipt', 'limitations', 'pdfFallback',
 ]);
+const SUCCESS_REQUESTS = new WeakMap();
+const FAILURE_REQUESTS = new WeakMap();
 
-export async function persistExportFailure(request, store) {
-  if (!store || typeof store.commitAudit !== 'function') throw new TypeError('Store de auditoria inválido.');
+/**
+ * Creates the only request capability accepted by failure persistence. Callers
+ * never get access to the persistence snapshot stored behind this token.
+ */
+export function createExportFailureRequest(request) {
   const outer = cloneOuterRecord(
     request,
-    new Set(['auditId', 'model', 'latest', 'at']),
-    ['auditId', 'model'],
+    new Set(['snapshotCapability', 'latest', 'at']),
+    ['snapshotCapability'],
     'Solicitação de falha de exportação',
   );
+  const snapshot = inspectAuditSnapshotCapability(outer.snapshotCapability);
+  if (!snapshot) throw new TypeError('Capacidade de snapshot da auditoria inválida para persistência.');
+  const auditId = validAuditId(snapshot.auditId);
   let envelope;
   try {
-    const source = { auditId: outer.auditId, model: outer.model };
+    const source = { auditId, model: snapshot.model };
     if (outer.latest !== undefined) source.latest = outer.latest;
     if (outer.at !== undefined) source.at = outer.at;
     envelope = JSON.parse(canonicalStringify(source));
-    assertNoProxy(request, 'Solicitação de falha de exportação');
   } catch {
     throw new TypeError('Solicitação de falha de exportação contém proxy, propriedade não segura ou valor inválido.');
   }
-  const auditId = validAuditId(envelope.auditId);
   if (!envelope.model || !Object.hasOwn(envelope.model, 'auditId') || envelope.model.auditId !== auditId) {
     throw new TypeError('Modelo e auditId de exportação não estão correlacionados.');
   }
-  const at = canonicalAt(envelope.at);
+  const token = Object.freeze(Object.create(null));
+  FAILURE_REQUESTS.set(token, Object.freeze({
+    auditId,
+    model: envelope.model,
+    latest: safeLatest(envelope.latest, auditId),
+    at: canonicalAt(envelope.at),
+    expectedRevision: snapshot.revision,
+    snapshotCapability: outer.snapshotCapability,
+  }));
+  return token;
+}
+
+/**
+ * Creates a single-use persistence capability for one exact, privately issued
+ * report result and one captured audit revision.
+ */
+export function createExportSuccessRequest(request) {
+  const outer = cloneOuterRecord(
+    request,
+    new Set(['auditId', 'result', 'latest']),
+    ['auditId', 'result'],
+    'Solicitação de exportação',
+  );
+  const auditId = validAuditId(outer.auditId);
+  if (!isGeneratedReportExportResult(outer.result)) {
+    throw new TypeError('Resultado de exportação não foi emitido pela geração local confiável.');
+  }
+  const snapshotCapability = generatedReportExportSnapshotCapability(outer.result);
+  const snapshot = inspectAuditSnapshotCapability(snapshotCapability);
+  if (!snapshot || snapshot.auditId !== auditId) {
+    throw new TypeError('Resultado e capacidade de snapshot da auditoria não estão correlacionados.');
+  }
+  const token = Object.freeze(Object.create(null));
+  SUCCESS_REQUESTS.set(token, Object.freeze({
+    auditId,
+    result: outer.result,
+    latest: snapshotLatest(outer.latest, auditId),
+    expectedRevision: snapshot.revision,
+    snapshotCapability,
+  }));
+  return token;
+}
+
+export async function persistExportFailure(request, store) {
+  const envelope = consumeOpaqueRequest(FAILURE_REQUESTS, request, 'Solicitação de falha de exportação');
+  assertRevisionStore(store);
+  const { auditId, expectedRevision } = envelope;
   const issue = createExportIssue('REPORT_EXPORT_PREPARATION_FAILED');
-  const model = await finalizeGeneratedModel(envelope.model, at, [issue], false, false, false);
+  const model = await finalizeGeneratedModel(envelope.model, envelope.at, [issue], false, false, false);
   const latest = {
-    ...(safeLatest(envelope.latest, auditId)),
+    ...envelope.latest,
     auditId,
     status: model.session.status,
     percent: 100,
     exportStatus: 'failed',
+    exportRevision: expectedRevision + 1,
     message: issue.message,
     deliveryReceipt: { status: 'failed', formats: [], limitations: [issue.message] },
   };
-  await store.commitAudit(auditId, model, latest);
+  await store.commitAuditIfRevision(auditId, model, latest, envelope.snapshotCapability);
   return { model, latest };
 }
 
 export async function persistExportSuccess(request, store) {
-  if (!store || typeof store.commitAudit !== 'function') throw new TypeError('Store de auditoria inválido.');
-  const envelope = cloneOuterRecord(request, new Set(['auditId', 'result', 'latest']), ['auditId', 'result'], 'Solicitação de exportação');
-  const auditId = validAuditId(envelope.auditId);
+  const envelope = consumeOpaqueRequest(SUCCESS_REQUESTS, request, 'Solicitação de exportação');
+  assertRevisionStore(store);
+  const { auditId, expectedRevision } = envelope;
   const outerResult = cloneOuterRecord(envelope.result, RESULT_KEYS, [...RESULT_KEYS], 'Resultado de exportação');
-  const exportProvenance = captureReportExportProvenance(outerResult.model);
   let result;
   try {
     result = JSON.parse(canonicalStringify({
@@ -89,9 +143,7 @@ export async function persistExportSuccess(request, store) {
   const pdf = outerResult.pdf === null ? null : snapshotPdfArtifact(outerResult.pdf);
   if (typeof outerResult.pdfFallback !== 'boolean') throw new TypeError('Estado de fallback PDF inválido no resultado de exportação.');
   const pdfFallback = outerResult.pdfFallback;
-  const latestSnapshot = snapshotLatest(envelope.latest, auditId);
-  assertNoProxy(envelope.result, 'Resultado de exportação');
-  assertNoProxy(request, 'Solicitação de exportação');
+  const latestSnapshot = envelope.latest;
   let serializedModel;
   try { serializedModel = JSON.parse(result.json).audit; } catch {
     throw new TypeError('JSON técnico do resultado de exportação inválido.');
@@ -116,7 +168,7 @@ export async function persistExportSuccess(request, store) {
     prepared,
   });
   await validateArtifactHashes({ html, json: result.json, csv, pdf }, receipt.formats);
-  await verifyReportExportProvenance(exportProvenance, {
+  const verifiedCapability = await verifyGeneratedReportExportResult(envelope.result, {
     model: verifiedModel,
     html,
     json: result.json,
@@ -127,6 +179,9 @@ export async function persistExportSuccess(request, store) {
     limitations: result.limitations,
     pdfFallback,
   });
+  if (verifiedCapability !== envelope.snapshotCapability) {
+    throw new TypeError('Proveniência do snapshot de exportação inválida ou ausente.');
+  }
   const exportStatus = prepared.missing.length > 0 || verifiedModel.report.artifact.status === 'partial' || receipt.status !== 'complete'
     ? 'partial'
     : 'complete';
@@ -136,10 +191,11 @@ export async function persistExportSuccess(request, store) {
     status: verifiedModel.session.status,
     percent: 100,
     exportStatus,
+    exportRevision: expectedRevision + 1,
     message: exportStatus === 'complete' ? 'Arquivos do relatório gerados.' : 'Relatório gerado com limitações.',
     deliveryReceipt: receipt,
   };
-  await store.commitAudit(auditId, verifiedModel, latest);
+  await store.commitAuditIfRevision(auditId, verifiedModel, latest, envelope.snapshotCapability);
   return { model: verifiedModel, latest };
 }
 
@@ -390,9 +446,19 @@ function snapshotPdfArtifact(value) {
   return bytes;
 }
 
-function assertNoProxy(value, label) {
-  try { structuredClone(value); } catch {
-    throw new TypeError(`${label} contém proxy, propriedade não segura ou valor inválido.`);
+function consumeOpaqueRequest(registry, request, label) {
+  if (!request || typeof request !== 'object') {
+    throw new TypeError(`${label} inválida ou já consumida.`);
+  }
+  const envelope = registry.get(request);
+  if (!envelope) throw new TypeError(`${label} inválida ou já consumida.`);
+  registry.delete(request);
+  return envelope;
+}
+
+function assertRevisionStore(store) {
+  if (!store || typeof store.commitAuditIfRevision !== 'function') {
+    throw new TypeError('Store de auditoria sem compare-and-swap de revisão.');
   }
 }
 
