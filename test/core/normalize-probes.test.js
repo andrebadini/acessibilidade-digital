@@ -46,7 +46,7 @@ test('normalizes exact 320 px, 200%, 24/44 boundaries and reduced motion', () =>
   const probes = normalizeProbes(completeRaw());
   assert.equal(probes.reflow.outcome, 'failed');
   assert.equal(probes.reflow.testedWidthCssPx, 320);
-  assert.equal(probes.textResize.outcome, 'passed');
+  assert.equal(probes.textResize.outcome, 'cantTell');
   assert.equal(probes.textResize.scalePercent, 200);
   assert.deepEqual(probes.targetSizes.minimum24.failedNodeIds, ['n-201']);
   assert.deepEqual(probes.targetSizes.enhanced44.failedNodeIds, ['n-201', 'n-202', 'n-203']);
@@ -274,7 +274,7 @@ test('merges probe observations into a fresh serializable SnapshotV1 consumed by
   const merged = mergeProbesIntoSnapshot(snapshot, normalizeProbes(completeRaw()));
   assert.notEqual(merged, snapshot);
   assert.deepEqual(merged.document.reflowObservation, { testedWidthCssPx: 320, twoDimensionalScroll: true, exception: 'none' });
-  assert.deepEqual(merged.document.textResizeObservation, { scalePercent: 200, lossOfContent: false });
+  assert.equal(merged.document.textResizeObservation, null);
   assert.deepEqual(merged.nodes.find(node => node.nodeId === 'n-202').targetSize, { width: 24, height: 24, exception: 'none' });
   assert.deepEqual(merged.nodes.find(node => node.nodeId === 'n-102').focusObservation, {
     indicatorVisible: false, fullyVisible: false, partiallyVisible: true, areaSufficient: false
@@ -285,9 +285,28 @@ test('merges probe observations into a fresh serializable SnapshotV1 consumed by
   const audit = await runCoreAudit(merged);
   const result = ruleId => audit.ruleResults.find(item => item.ruleId === ruleId).outcome;
   assert.equal(result('responsive-reflow'), 'failed');
-  assert.equal(result('text-resizing'), 'passed');
+  assert.equal(result('text-resizing'), 'cantTell');
   assert.equal(result('target-size-minimum'), 'failed');
   assert.equal(result('focus-visible'), 'failed');
+});
+
+test('a width-only 200% text probe never claims conformity or failure', async () => {
+  const snapshot = {
+    schemaVersion: 1,
+    document: { nodeId: 'document', title: 'Fixture' },
+    nodes: [],
+  };
+  for (const lossOfContent of [false, true]) {
+    const probes = normalizeProbes({ textResize: { scalePercent: 200, lossOfContent } });
+    assert.equal(probes.textResize.outcome, 'cantTell');
+    assert.equal(probes.probeCoverage.textResize, 'cantTell');
+    const merged = mergeProbesIntoSnapshot(snapshot, probes);
+    assert.equal(merged.document.textResizeObservation, null);
+    const audit = await runCoreAudit(merged);
+    const result = audit.ruleResults.find(item => item.ruleId === 'text-resizing');
+    assert.equal(result.outcome, 'cantTell');
+    assert.match(result.summary, /recorte vertical[^.]*sobreposição[^.]*perda funcional[^.]*revisão humana/iu);
+  }
 });
 
 test('merge preserves unknown focus observations as cantTell instead of fabricating false', async () => {

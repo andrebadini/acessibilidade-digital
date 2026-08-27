@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 
 import { captureElement, captureFullPage } from '../../src/browser/capture-evidence.js';
 
@@ -26,8 +27,20 @@ test('captures and validates one deterministic full-page PNG evidence record', a
   }]]);
   assert.equal(first.status, 'captured');
   assert.equal(first.dataUrl, `data:image/png;base64,${PNG_1PX}`);
+  assert.equal(first.hash, createHash('sha256').update(Buffer.from(PNG_1PX, 'base64')).digest('hex'));
+  assert.match(first.hash, /^[a-f0-9]{64}$/u);
   assert.equal(first.evidenceId, second.evidenceId);
   assert.deepEqual(first.metadata, { kind: 'full-page', mimeType: 'image/png', width: 800, height: 1200 });
+});
+
+test('hashes the decoded PNG bytes instead of a short stable identifier', async () => {
+  const firstBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+  const secondBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 2]);
+  const first = await captureFullPage(fakeCdp(firstBytes.toString('base64')), {});
+  const second = await captureFullPage(fakeCdp(secondBytes.toString('base64')), {});
+  assert.equal(first.hash, createHash('sha256').update(firstBytes).digest('hex'));
+  assert.equal(second.hash, createHash('sha256').update(secondBytes).digest('hex'));
+  assert.notEqual(first.hash, second.hash);
 });
 
 test('converts an explicitly viewport-relative rect to document coordinates before clipping', async () => {

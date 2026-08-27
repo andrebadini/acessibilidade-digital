@@ -1,6 +1,6 @@
 import { createReviewDecision } from '../core/review/decisions.js';
 import { createAuditStore } from '../storage/audit-store.js';
-import { getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId, recordReviewDecision } from './review-state.js';
+import { commitReviewDecision, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId } from './review-state.js';
 
 const ANSWERS = ['conforme', 'não conforme', 'não foi possível determinar'];
 const list = document.querySelector('#review-list');
@@ -63,8 +63,8 @@ async function saveDecision(occurrence, answer, note, card) {
     auditId: auditModel.auditId, itemId: occurrence.itemId, occurrenceId: occurrence.occurrenceId,
     answer, evaluator: evaluatorName, note, decidedAt: new Date().toISOString(), mode: occurrence.mode === 'manual' ? 'manual' : 'assisted',
   });
-  auditModel = recordReviewDecision(auditModel, decision);
-  await store.setAudit(auditModel.auditId, auditModel);
+  const committedModel = await commitReviewDecision(auditModel, decision, store);
+  auditModel = committedModel;
   card.classList.add('answered');
   for (const button of card.querySelectorAll('button')) button.disabled = true;
   status.textContent = `Decisão salva para o item ${occurrence.itemId}.`;

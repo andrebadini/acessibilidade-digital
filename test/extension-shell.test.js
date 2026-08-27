@@ -29,6 +29,13 @@ test('panel is an accessible local document with no inline code', async () => {
   assert.match(html, /<button[^>]*type="submit"[^>]*>\s*Auditar\s*<\/button>/i);
   assert.match(html, /aria-live="polite"/i);
   assert.match(html, /hidden[^>]*id="latest-report"|id="latest-report"[^>]*hidden/i);
+  const privacyNotice = html.match(/<p[^>]+id="audit-privacy-notice"[^>]*>([\s\S]*?)<\/p>/i);
+  assert.ok(privacyNotice, 'o aviso de privacidade deve ser um texto visível antes do formulário');
+  assert.ok(html.indexOf(privacyNotice[0]) < html.indexOf('<form'), 'o aviso deve anteceder o envio da auditoria');
+  assert.match(privacyNotice[1], /captura[^.]*página inteira[^.]*elementos/iu);
+  assert.match(privacyNotice[1], /pixels[^.]*dados sensíveis visíveis/iu);
+  assert.match(privacyNotice[1], /armazenad[^.]*localmente[^.]*relatórios/iu);
+  assert.match(privacyNotice[1], /ocult(?:e|ar)|remov(?:a|er)/iu);
   assert.doesNotMatch(html, /<script(?![^>]+src=)/i);
   assert.doesNotMatch(html, /<style\b|\sstyle=/i);
   assert.doesNotMatch(html, /<(?:script|link)[^>]+(?:src|href)="https?:\/\//i);

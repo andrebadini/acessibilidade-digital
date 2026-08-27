@@ -240,6 +240,10 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
   assert.equal(adapter.counts.disconnects, 1);
   assert.equal(adapter.counts.removals, 1);
   assert.equal(model.evidence.artifacts.filter(item => item.kind === 'full-page').length, 1);
+  assert.ok(model.evidence.artifacts.every(item => /^[a-f0-9]{64}$/u.test(item.hash)));
+  for (const key of ['snapshotHash', 'ruleResultsHash', 'evidenceHash']) {
+    assert.match(model.reproducibility[key], /^[a-f0-9]{64}$/u, key);
+  }
   assert.equal(model.evidence.artifacts.filter(item => item.nodeId === 'n-1').length, 1);
   assert.ok(model.occurrences.length > 0);
   for (const occurrence of model.occurrences) {

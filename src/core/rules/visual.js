@@ -250,16 +250,18 @@ function textSpacing(snapshot) {
 
 function textResize(snapshot) {
   return visualResult(snapshot, ({ document }) => {
-    if (probeCoverageCantTell(document, 'textResize')) return result('cantTell', 'A cobertura do redimensionamento de texto está incompleta.');
+    if (probeCoverageCantTell(document, 'textResize')) {
+      return result('cantTell', 'A medição automática de largura não cobre recorte vertical, sobreposição ou perda funcional; é necessária revisão humana.');
+    }
     const observation = document.textResizeObservation;
     if (!observation || !finite(observation.scalePercent) || observation.scalePercent < 200 || typeof observation.lossOfContent !== 'boolean') {
       return result('cantTell', 'O redimensionamento de texto a 200% não foi observado completamente.', [], [
         'Amplie apenas o texto a 200% e registre perda de conteúdo ou funcionalidade.'
       ]);
     }
-    return observation.lossOfContent
-      ? result('failed', 'Houve perda de conteúdo ou funcionalidade com texto a 200%.', [documentTarget(document, 'Corrija a perda observada com texto redimensionado.', { reason: 'text-resize-content-loss' })])
-      : result('passed', 'O texto a 200% não causou perda observável.');
+    return result('cantTell', 'A medição automática de largura não determina perda de conteúdo ou funcionalidade com texto a 200%.', [], [
+      'Revise a página com apenas o texto ampliado a 200%, incluindo recorte vertical, sobreposição e perda de controles.'
+    ]);
   });
 }
 

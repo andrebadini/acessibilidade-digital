@@ -18,3 +18,4 @@ export { normalizeSnapshot, sanitizeResourceUrl } from './normalize-snapshot.js'
 export { mergeProbesIntoSnapshot, normalizeProbes } from './normalize-probes.js';
 export { buildStableSelector, escapeCssIdentifier } from './evidence/selector.js';
 export { sanitizeHtmlSnippet, sanitizeHtmlSnippetSource } from './evidence/snippet.js';
+export { hashEvidenceArtifact } from './evidence/artifact-hash.js';

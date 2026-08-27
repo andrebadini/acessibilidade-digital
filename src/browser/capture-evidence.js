@@ -1,3 +1,5 @@
+import { sha256Hex } from '../core/report/hash.js';
+
 function dimensions(metrics = {}) {
   const size = metrics.cssContentSize || metrics.contentSize || {};
   return {
@@ -10,7 +12,7 @@ function validBase64(value) {
   return typeof value === 'string' && value.length >= 12 && value.length % 4 !== 1 && /^[A-Za-z0-9+/]*={0,2}$/u.test(value);
 }
 
-function pngDataUrl(value) {
+function pngPayload(value) {
   if (!validBase64(value)) throw new TypeError('A captura não contém base64 PNG válido.');
   let binary;
   try {
@@ -22,7 +24,10 @@ function pngDataUrl(value) {
   if (binary.length < signature.length || signature.some((byte, index) => binary.charCodeAt(index) !== byte)) {
     throw new TypeError('A captura retornada não possui assinatura PNG.');
   }
-  return `data:image/png;base64,${value}`;
+  return {
+    dataUrl: `data:image/png;base64,${value}`,
+    bytes: Uint8Array.from(binary, character => character.charCodeAt(0)),
+  };
 }
 
 function stableId(prefix, value) {
@@ -37,11 +42,12 @@ function stableId(prefix, value) {
 async function capture(cdp, params, kind, metadata = {}) {
   if (!cdp || typeof cdp.command !== 'function') throw new TypeError('O cliente CDP de captura é inválido.');
   const response = await cdp.command('Page.captureScreenshot', params);
-  const dataUrl = pngDataUrl(response?.data);
+  const png = pngPayload(response?.data);
   return {
     status: 'captured',
     evidenceId: stableId(kind, `${response.data}\u0000${JSON.stringify(metadata)}`),
-    dataUrl,
+    dataUrl: png.dataUrl,
+    hash: await sha256Hex(png.bytes),
     metadata: { kind, mimeType: 'image/png', ...metadata }
   };
 }

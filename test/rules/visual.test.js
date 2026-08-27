@@ -222,7 +222,10 @@ test('orientation, reflow, resizing and text spacing require completed observati
   }
   assert.equal((await evaluate('text-resizing', snapshot([], {
     textResizeObservation: { scalePercent: 200, lossOfContent: false }
-  }))).outcome, 'passed');
+  }))).outcome, 'cantTell');
+  assert.equal((await evaluate('text-resizing', snapshot([], {
+    textResizeObservation: { scalePercent: 200, lossOfContent: true }
+  }))).outcome, 'cantTell');
 
   for (const ruleId of ['line-spacing', 'paragraph-spacing', 'letter-spacing', 'word-spacing']) {
     assert.equal((await evaluate(ruleId, snapshot([], {

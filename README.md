@@ -13,6 +13,8 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 Abra o painel, informe uma URL HTTP(S) e escolha **Auditar**. Ao final, revise os casos indeterminados e use **Gerar relatório atualizado** quando registrar novas decisões. A exportação baixa HTML autocontido, JSON-LD técnico no vocabulário EARL e, quando o navegador permite, PDF.
 
+A auditoria captura a página inteira e elementos, incluindo pixels e dados sensíveis que estejam visíveis. Essas evidências permanecem no dispositivo e são incorporadas aos relatórios; oculte ou remova dados sensíveis antes de iniciar.
+
 As permissões `tabs`, `activeTab` e `scripting` abrem e observam somente a aba descartável criada pela auditoria. `debugger` dá acesso local ao protocolo do Chrome para estrutura, evidência e impressão. `downloads` salva os artefatos e `storage` mantém auditoria e andamento no dispositivo. Os sites auditados são cobertos por `host_permissions` HTTP(S).
 
 ## Limites atuais

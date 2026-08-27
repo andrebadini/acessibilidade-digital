@@ -6,6 +6,7 @@ import {
   buildSnapshotIndexes,
   buildStableSelector,
   computeAccessibleText,
+  hashEvidenceArtifact,
   mergeProbesIntoSnapshot,
   normalizeProbes,
   normalizeSnapshot,
@@ -13,6 +14,8 @@ import {
   sanitizeHtmlSnippetSource,
   sanitizeResourceUrl,
 } from '../core/index.js';
+import { canonicalStringify } from '../core/report/canonical-json.js';
+import { sha256Hex } from '../core/report/hash.js';
 import { normalizeAuditUrl } from '../core/url.js';
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
 
@@ -276,7 +279,12 @@ function manualQueue(occurrences, itemResults) {
   });
 }
 
-function draftModel(state) {
+async function draftModel(state) {
+  const snapshotHash = await sha256Hex(canonicalStringify(state.snapshot || null));
+  const ruleResultsHash = await sha256Hex(canonicalStringify(state.ruleResults));
+  const evidenceHash = await sha256Hex(canonicalStringify(state.artifacts.map(artifact => ({
+    evidenceId: artifact.evidenceId, kind: artifact.kind, nodeId: artifact.nodeId || null, hash: artifact.hash,
+  }))));
   const model = {
     schemaVersion: SCHEMA_VERSION,
     auditId: state.auditId,
@@ -303,9 +311,9 @@ function draftModel(state) {
     report: state.report,
     reproducibility: {
       methodologyVersion: METHODOLOGY.version,
-      snapshotHash: stableHash(state.snapshot || null),
-      ruleResultsHash: stableHash(state.ruleResults),
-      evidenceHash: stableHash(state.artifacts.map(artifact => ({ evidenceId: artifact.evidenceId, kind: artifact.kind, nodeId: artifact.nodeId || null, hash: artifact.hash }))),
+      snapshotHash,
+      ruleResultsHash,
+      evidenceHash,
       capturedStateCount: state.fullPage ? 1 : 0,
     },
   };
@@ -383,7 +391,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
         state: 'pristine',
         dataUrl: state.fullPage.dataUrl,
         metadata: state.fullPage.metadata,
-        hash: stableHash(state.fullPage.dataUrl),
+        hash: state.fullPage.hash,
       };
       state.artifacts.push(artifact);
     } catch (error) {
@@ -497,7 +505,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
           ...(thumbnail?.status === 'captured' ? { dataUrl: thumbnail.dataUrl, fullPageEvidenceId: thumbnail.fullPageEvidenceId } : {}),
           ...(node.media?.currentSrc ? { mediaUrl: safeUrl(node.media.currentSrc) } : {}),
         };
-        artifact.hash = stableHash({ selector, snippet, thumbnail: thumbnail?.evidenceId || null, mediaUrl: artifact.mediaUrl || null, accessibility });
+        artifact.hash = await awaitStep(() => hashEvidenceArtifact(artifact));
         artifactByNode.set(node.nodeId, artifact);
         state.artifacts.push(artifact);
         occurrence.evidenceIds.push(artifact.evidenceId);
@@ -513,7 +521,8 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     throwIfAborted(signal);
     state.status = recoverableFailure ? 'partial' : 'complete';
     try {
-      const handoff = await awaitStep(() => chromeAdapter.handoffReport?.(draftModel({ ...state, endedAt: canonicalNow(now) })));
+      const handoffModel = await awaitStep(() => draftModel({ ...state, endedAt: canonicalNow(now) }));
+      const handoff = await awaitStep(() => chromeAdapter.handoffReport?.(handoffModel));
       state.report = {
         status: 'review-ready',
         reviewUrl: safeInternalUrl(handoff?.reviewUrl),

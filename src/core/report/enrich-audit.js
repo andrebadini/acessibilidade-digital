@@ -1,4 +1,5 @@
 import { sanitizeResourceUrl } from '../normalize-snapshot.js';
+import { hashEvidenceArtifact } from '../evidence/artifact-hash.js';
 import { NBR17225_EDITORIAL_NOTES } from '../normative/nbr17225.js';
 import { createAuditModel } from './audit-model.js';
 import { canonicalStringify } from './canonical-json.js';
@@ -17,7 +18,12 @@ export async function enrichAuditForReport(input, options = {}) {
   if (!raw.timestamps?.endedAt) limitations.push('O instante de término da auditoria não estava disponível; o instante de geração foi usado somente para fechar o registro temporal do relatório.');
   const rulesVersion = cleanVersion(options.rulesVersion ?? raw.methodology?.version, 'rulesVersion');
   const browserVersion = cleanVersion(options.browserVersion || raw.environment?.chromeVersion || 'não disponível', 'browserVersion');
-  const evidenceManifest = (raw.evidence?.artifacts ?? []).map(artifact => ({
+  const evidenceArtifacts = [];
+  for (const artifact of raw.evidence?.artifacts ?? []) {
+    evidenceArtifacts.push({ ...artifact, hash: await hashEvidenceArtifact(artifact) });
+  }
+  raw.evidence = { ...(raw.evidence ?? {}), artifacts: evidenceArtifacts };
+  const evidenceManifest = evidenceArtifacts.map(artifact => ({
     evidenceId: artifact.evidenceId,
     kind: artifact.kind,
     nodeId: artifact.nodeId ?? null,

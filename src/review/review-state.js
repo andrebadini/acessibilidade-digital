@@ -42,3 +42,10 @@ export function recordReviewDecision(auditModel, input) {
   const decision = createReviewDecision(input);
   return applyReviewDecisions(auditModel, [decision]);
 }
+
+export async function commitReviewDecision(auditModel, input, store) {
+  if (!store || typeof store.setAudit !== 'function') throw new TypeError('Store de auditoria inválido.');
+  const nextModel = recordReviewDecision(auditModel, input);
+  await store.setAudit(nextModel.auditId, nextModel);
+  return nextModel;
+}

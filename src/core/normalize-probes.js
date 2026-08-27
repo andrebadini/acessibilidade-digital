@@ -143,7 +143,7 @@ export function normalizeProbes(raw = {}) {
       exception: typeof raw.reflow?.exception === 'string' ? raw.reflow.exception : 'none'
     },
     textResize: {
-      outcome: resizeValid ? outcome(!raw.textResize.lossOfContent) : 'cantTell',
+      outcome: 'cantTell',
       scalePercent: resizeValid ? raw.textResize.scalePercent : null,
       lossOfContent: resizeValid ? raw.textResize.lossOfContent : null
     },
