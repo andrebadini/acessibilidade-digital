@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Audita MT",
   "version": "0.1.0",
-  "description": "Auditoria local de acessibilidade para fiscalização.",
+  "description": "Auditoria independente de acessibilidade de páginas web.",
   "permissions": [
     "activeTab",
     "debugger",

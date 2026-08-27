@@ -37,7 +37,7 @@
 
 ```js
 test('adds https to a host and rejects restricted schemes', () => {
-  assert.equal(normalizeAuditUrl('procon.mt.gov.br'), 'https://procon.mt.gov.br/');
+  assert.equal(normalizeAuditUrl('exemplo.mt.gov.br'), 'https://exemplo.mt.gov.br/');
   assert.throws(() => normalizeAuditUrl('chrome://settings'), /HTTP ou HTTPS/);
 });
 ```

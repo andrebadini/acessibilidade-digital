@@ -1,6 +1,5 @@
 import { createDownloadsAdapter } from '../browser/download-artifacts.js';
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
-import { createBrandAsset } from '../core/report/html.js';
 import { normalizeReviewAuditId } from '../review/review-state.js';
 import { createAuditStore } from '../storage/audit-store.js';
 import { createExportTabAdapter } from './chrome-export-adapter.js';
@@ -45,10 +44,7 @@ async function generate() {
     timezone: raw.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
   });
   sourceModel = model;
-  const brandResponse = await fetch(chrome.runtime.getURL('assets/gov-mt-logo.png'), { signal: AbortSignal.timeout(15_000) });
-  if (!brandResponse.ok) throw new Error('Não foi possível carregar a marca local.');
-  const brand = await createBrandAsset(await brandResponse.arrayBuffer());
-  const result = await runReportExport({ auditModel: model, brand }, {
+  const result = await runReportExport({ auditModel: model }, {
     urlApi: globalThis.URL,
     tabAdapter: createExportTabAdapter(chrome),
     downloadsAdapter: createDownloadsAdapter(chrome),

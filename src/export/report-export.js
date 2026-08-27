@@ -15,7 +15,7 @@ export async function runReportExport(request, dependencies) {
   const timeoutMs = request?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('Timeout de exportação inválido.');
   let model = original;
-  let html = renderHtmlReport(model, request?.brand ? { brand: request.brand } : {});
+  let html = renderHtmlReport(model);
   let pdf = null;
   let printResult = null;
   const generationIssues = [];
@@ -56,7 +56,7 @@ export async function runReportExport(request, dependencies) {
   }
 
   model = await finalizeGeneratedModel(model, at, generationIssues, Boolean(pdf), Boolean(printResult?.usedFallback));
-  html = renderHtmlReport(model, request?.brand ? { brand: request.brand } : {});
+  html = renderHtmlReport(model);
   const json = renderTechnicalJson(model);
   const baseName = buildArtifactBaseName(model.finalUrl, at);
   const downloads = await downloadArtifacts({ baseName, html, json, ...(pdf ? { pdf } : {}) }, dependencies.downloadsAdapter, { timeoutMs });

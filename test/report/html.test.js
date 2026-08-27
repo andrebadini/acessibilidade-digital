@@ -6,7 +6,7 @@ import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 
 test('renders a complete pt-BR report with one accessible heading hierarchy', () => {
-  const html = renderHtmlReport(SAMPLE_AUDIT, {});
+  const html = renderHtmlReport(SAMPLE_AUDIT);
   assert.match(html, /^<!doctype html>/iu);
   assert.match(html, /<html lang="pt-BR">/u);
   assert.match(html, /<title>Relatório de auditoria — Audita MT<\/title>/u);
@@ -18,7 +18,7 @@ test('renders a complete pt-BR report with one accessible heading hierarchy', ()
 });
 
 test('renders all report sections, 146 items, occurrences and evidence records', () => {
-  const html = renderHtmlReport(SAMPLE_AUDIT, {});
+  const html = renderHtmlReport(SAMPLE_AUDIT);
   for (const label of [
     'Sumário executivo', 'Escopo', 'Metodologia', 'Resultados por item', 'Ocorrências e evidências',
     'Revisão humana', 'Limitações', 'Notas de integridade normativa', 'Fundamentação normativa', 'Manifesto de integridade',
@@ -34,7 +34,7 @@ test('renders all report sections, 146 items, occurrences and evidence records',
 });
 
 test('embeds only valid PNG evidence with useful alt and self-contained A4 CSS', () => {
-  const html = renderHtmlReport(SAMPLE_AUDIT, {});
+  const html = renderHtmlReport(SAMPLE_AUDIT);
   const images = [...html.matchAll(/<img\b[^>]*>/gu)].map(match => match[0]);
   assert.equal(images.length, 2);
   for (const image of images) {
@@ -57,14 +57,14 @@ test('escapes hostile audited strings in text, attributes, code, URLs and media'
   input.evidence.artifacts[1].backendNodeId = `41</dd><script>alert(5)</script>`;
   input.evidence.artifacts[1].mediaUrl = 'javascript:alert(3)';
   input.evidence.artifacts[1].dataUrl = 'data:image/svg+xml,<svg onload=alert(4)>';
-  const html = renderHtmlReport(createAuditModel(input), {});
+  const html = renderHtmlReport(createAuditModel(input));
   assert.doesNotMatch(html, /<script\b|<img\s+src=x|\s(?:onerror|onload)=["'][^>]*>|(?:src|href)=["']javascript:|>javascript:/iu);
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/u);
   assert.match(html, /&lt;button aria-label=&quot;/u);
   assert.equal((html.match(/<img\b[^>]*>/gu) || []).length, 1);
   const forgedTitle = structuredClone(SAMPLE_AUDIT);
   forgedTitle.itemResults[0].title = `Título ${hostile}`;
-  assert.throws(() => renderHtmlReport(forgedTitle, {}), /normativ|title|item/i);
+  assert.throws(() => renderHtmlReport(forgedTitle), /normativ|title|item/i);
 });
 
 test('rejects exact script and style breakout payloads in report counts', () => {
@@ -74,14 +74,14 @@ test('rejects exact script and style breakout payloads in report counts', () => 
   ]) {
     const input = structuredClone(SAMPLE_AUDIT);
     input.methodology.ruleCount = payload;
-    assert.throws(() => renderHtmlReport(input, {}), /metodologia|regra|inteiro|count/i);
+    assert.throws(() => renderHtmlReport(input), /metodologia|regra|inteiro|count/i);
   }
-  const html = renderHtmlReport(SAMPLE_AUDIT, {});
+  const html = renderHtmlReport(SAMPLE_AUDIT);
   assert.doesNotMatch(html, /<\/style><(?:script|style)>/iu);
 });
 
 test('communicates every state with visible icon and text rather than color alone', () => {
-  const html = renderHtmlReport(SAMPLE_AUDIT, {});
+  const html = renderHtmlReport(SAMPLE_AUDIT);
   for (const label of ['Aprovado', 'Reprovado', 'Revisar', 'Não aplicável', 'Não testado']) {
     assert.match(html, new RegExp(`<span[^>]*class="status[^>]*><span[^>]*aria-hidden="true"[^>]*>[^<]+</span><span>${label}</span>`, 'u'));
   }

@@ -1,10 +1,7 @@
 import { sanitizeResourceUrl } from '../normalize-snapshot.js';
 import { createAuditModel } from './audit-model.js';
-import { sha256Hex } from './hash.js';
 import { REPORT_CSS } from './report.css.js';
 
-const BRAND_SOURCE_URL = 'https://www.secom.mt.gov.br/documents/21013/0/_govmt_manual_de_identidade_oficial_expandido_abril_2026.pdf/7921f56c-66a0-15a1-37d7-3f04c37fadfc';
-const BRAND_SHA256 = '1736ccf3c3783a42e9ebc7649a3fa473774b4c5f413ba1a09616cbd2e76cac7d';
 const PNG_SIGNATURE = Object.freeze([137, 80, 78, 71, 13, 10, 26, 10]);
 const MAX_PNG_BYTES = 64 * 1024 * 1024;
 const MAX_PNG_DIMENSION = 100_000;
@@ -19,22 +16,7 @@ const STATUS = Object.freeze({
   untested: { label: 'Não testado', icon: '!' },
 });
 
-export async function createBrandAsset(value) {
-  const bytes = toBytes(value);
-  const { width, height } = pngDimensions(bytes);
-  const sha256 = await sha256Hex(bytes);
-  if (width !== 1120 || height !== 440 || sha256 !== BRAND_SHA256) throw new TypeError('O ativo de marca não corresponde ao PNG oficial renderizado e verificado.');
-  return Object.freeze({
-    dataUrl: `data:image/png;base64,${base64(bytes)}`,
-    sha256,
-    sourceUrl: BRAND_SOURCE_URL,
-    alt: 'Governo de Mato Grosso',
-    width,
-    height,
-  });
-}
-
-export function renderHtmlReport(input, assets = {}) {
+export function renderHtmlReport(input) {
   const model = createAuditModel(input);
   const counts = Object.fromEntries(Object.keys(STATUS).map(outcome => [outcome, model.itemResults.filter(item => item.outcome === outcome).length]));
   const itemById = new Map(model.itemResults.map(item => [item.id, item]));
@@ -50,10 +32,11 @@ export function renderHtmlReport(input, assets = {}) {
 </head>
 <body>
 <a class="skip-link" href="#conteudo">Ir para o conteúdo principal</a>
-${header(assets)}
+${header()}
 <main id="conteudo">
 <h1>Relatório de auditoria de acessibilidade</h1>
 <p class="lead">Auditoria automatizada e assistida da página e do estado observados. Este relatório não é, isoladamente, uma declaração de conformidade do site inteiro.</p>
+<p class="independence-notice"><strong>Independência:</strong> esta é uma ferramenta independente, sem vínculo institucional, e seu resultado não equivale a certificação ou laudo oficial.</p>
 <p class="notice"><strong>Integridade temporal:</strong> os horários usam o relógio local do dispositivo e não constituem carimbo de tempo certificado. Os hashes demonstram integridade entre artefatos, não autoria ou assinatura digital.</p>
 ${summary(model, counts)}
 ${scope(model)}
@@ -72,13 +55,8 @@ ${integrity(model)}
 </html>`;
 }
 
-function header(assets) {
-  const brand = assets?.brand;
-  const logo = brand && isPngDataUrl(brand.dataUrl)
-    ? `<img class="brand-logo" src="${escapeHtml(brand.dataUrl)}" alt="Governo de Mato Grosso" width="1120" height="440">`
-    : '';
-  const agency = brand ? '<p class="agency">PROCON-MT — Secretaria Adjunta de Proteção e Defesa dos Direitos do Consumidor</p>' : '<p class="agency">Audita MT</p>';
-  return `<header class="report-header"><div class="report-header__inner">${logo}${agency}</div></header>`;
+function header() {
+  return '<header class="report-header"><div class="report-header__inner"><p class="product-name">Audita MT</p><p class="product-description">Auditoria independente de acessibilidade</p></div></header>';
 }
 
 function summary(model, counts) {
@@ -182,24 +160,6 @@ function isPngDataUrl(value) {
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/gu, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
-}
-
-function toBytes(value) {
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  throw new TypeError('O ativo de marca deve ser fornecido como bytes PNG.');
-}
-
-function pngDimensions(bytes) {
-  return parsePng(bytes);
-}
-
-function base64(bytes) {
-  let binary = '';
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + 0x8000, bytes.length)));
-  }
-  return btoa(binary);
 }
 
 function parsePng(bytes) {

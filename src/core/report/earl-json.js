@@ -39,6 +39,12 @@ export function renderTechnicalJson(input) {
   return canonicalStringify({
     '@context': { earl: EARL, dct: 'http://purl.org/dc/terms/' },
     schemaVersion: 1,
+    identity: {
+      name: 'Audita MT',
+      description: 'Auditoria independente de acessibilidade',
+      independent: true,
+      disclaimer: 'Ferramenta independente, sem vínculo institucional; não equivale a certificação nem a laudo oficial.',
+    },
     audit: model,
     assertions,
   });

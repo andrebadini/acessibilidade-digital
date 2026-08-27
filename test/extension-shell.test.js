@@ -7,6 +7,7 @@ const readWorkspaceFile = (path) => readFile(new URL(`../${path}`, import.meta.u
 test('declares a minimal MV3 extension shell without remote executable code', async () => {
   const manifest = JSON.parse(await readWorkspaceFile('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
+  assert.equal(manifest.description, 'Auditoria independente de acessibilidade de páginas web.');
   assert.deepEqual(manifest.permissions, [
     'activeTab', 'debugger', 'downloads', 'scripting', 'storage', 'tabs',
   ]);

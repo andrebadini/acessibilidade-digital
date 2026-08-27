@@ -43,6 +43,26 @@ test('prints one inactive blob tab, cleans exact resources, and exports one shar
   assert.doesNotMatch(JSON.stringify(result), /blob:chrome-extension/u);
 });
 
+test('ignores image branding input and exports only the neutral independent identity', async () => {
+  const dataUrl = SAMPLE_AUDIT.evidence.artifacts.find(artifact => artifact.dataUrl)?.dataUrl;
+  let printBlob;
+  const result = await runReportExport({
+    auditModel: clone(SAMPLE_AUDIT),
+    brand: { dataUrl, alt: 'External agency identity', width: 1, height: 1 },
+    now: () => '2026-08-26T15:00:00.000Z',
+  }, {
+    urlApi: { createObjectURL(blob) { printBlob = blob; return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+    downloadsAdapter: fakeDownloads([]),
+  });
+  assert.match(result.html, /Auditoria independente de acessibilidade/iu);
+  assert.match(result.html, /sem vínculo institucional/iu);
+  assert.doesNotMatch(result.html, /brand-logo|External agency identity/iu);
+  assert.match(await printBlob.text(), /Auditoria independente de acessibilidade/iu);
+  assert.deepEqual(JSON.parse(result.json).audit, result.model);
+});
+
 test('keeps HTML and JSON when PDF fails, records a partial limitation, and still cleans exact tab/CDP', async () => {
   const events = [];
   const result = await runReportExport({ auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z' }, {

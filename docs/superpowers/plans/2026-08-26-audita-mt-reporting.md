@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Gerar relatórios HTML/PDF/JSON auditáveis, aplicar a identidade do Governo de Mato Grosso e concluir a integração e a verificação do produto.
+**Goal:** Gerar relatórios HTML/PDF/JSON auditáveis, aplicar a identidade neutra do Audita MT e concluir a integração e a verificação do produto.
+
+**Supersessão de identidade (26 de agosto de 2026):** qualquer decisão anterior de associar o produto a uma identidade externa foi substituída por apresentação tipográfica própria, sem imagem de marca, com aviso explícito de independência e ausência de certificação oficial.
 
 **Architecture:** Um modelo canônico é serializado e assinado com SHA-256. Renderizadores puros produzem HTML autocontido e JSON técnico; o service worker imprime o HTML via CDP e baixa os três artefatos.
 
@@ -14,8 +16,8 @@
 
 - HTML legível sem JavaScript e navegável por teclado.
 - PDF e HTML derivam do mesmo modelo, sem divergência de achados.
-- Marca oficial do Governo de Mato Grosso empacotada localmente, sem IA, sem hotlink e sem deformação.
-- Identificação textual: “PROCON-MT — Secretaria Adjunta de Proteção e Defesa dos Direitos do Consumidor”.
+- Identidade tipográfica: “Audita MT” e “Auditoria independente de acessibilidade”, sem imagem de marca externa.
+- Painel e relatório declaram que a ferramenta é independente, sem vínculo institucional e sem equivaler a certificação ou laudo oficial.
 - O relatório sempre declara escopo, limitações e que o relógio local não é carimbo certificado.
 
 ---
@@ -79,7 +81,7 @@ git commit -m "feat: create canonical hashed audit model"
 - Create: `fixtures/audits/sample-audit.js`
 
 **Interfaces:**
-- `renderHtmlReport(model, assets)` returns a complete HTML string.
+- `renderHtmlReport(model)` returns a complete HTML string without external identity assets.
 
 - [ ] **Step 1: Write structural report tests**
 
@@ -110,46 +112,44 @@ git add src/core/report fixtures/audits test/report/html.test.js
 git commit -m "feat: render self-contained accessible reports"
 ```
 
-### Task 3: Marca institucional e acabamento do painel
+### Task 3: Identidade neutra e acabamento do painel
 
 **Files:**
-- Create: `assets/gov-mt-logo.png`
-- Create: `assets/BRAND-SOURCE.md`
 - Modify: `src/panel/index.html`
 - Modify: `src/panel/panel.css`
 - Modify: `src/core/report/html.js`
-- Create: `test/report/brand.test.js`
+- Create: `test/report/identity.test.js`
 
 **Interfaces:**
-- Produces packaged asset `{ dataUrl, sha256, sourceUrl, alt: 'Governo de Mato Grosso' }`.
+- Produz cabeçalho tipográfico local, sem imagem: “Audita MT” e “Auditoria independente de acessibilidade”.
 
-- [ ] **Step 1: Acquire and verify the official asset**
+- [ ] **Step 1: Definir identidade tipográfica neutra**
 
-Use the mark displayed on an official `mt.gov.br` domain and validate visually against https://www.secom.mt.gov.br/fotos. Preserve aspect ratio, use a lossless PNG, record access date, original URL, original dimensions and SHA-256 in `assets/BRAND-SOURCE.md`. Do not trace, redraw or generate the coat of arms.
+Use somente texto e a paleta local existente. Não carregue imagem de identidade, hotlink ou recurso remoto. Inclua aviso inequívoco de independência e de que o resultado não é certificação nem laudo oficial.
 
-- [ ] **Step 2: Write brand tests**
+- [ ] **Step 2: Write neutral identity tests**
 
-Assert the PNG signature, nonzero dimensions, local asset path, exact alt text, source metadata and that rendered HTML contains a data URL rather than the source URL.
+Renderize HTML e JSON reais, execute a exportação por adapters e confirme a identidade neutra, o aviso de independência e a ausência de imagem no cabeçalho. A validação PNG continua aplicada somente às evidências da auditoria.
 
 - [ ] **Step 3: Run and confirm failure before integration**
 
-Run: `node --test test/report/brand.test.js`  
+Run: `node --test test/report/identity.test.js`
 Expected: FAIL until the asset loader and renderer integration exist.
 
-- [ ] **Step 4: Integrate accessible branding and minimal visual system**
+- [ ] **Step 4: Integrate accessible neutral identity and minimal visual system**
 
-Use the logo on report cover/header with adjacent PROCON-MT identification. Panel copy remains action-first. Colors must meet 4.5:1 for normal text and 3:1 for controls/focus; status never relies on color alone.
+Use nome e descrição neutros no painel e relatório. Panel copy remains action-first. Colors must meet 4.5:1 for normal text and 3:1 for controls/focus; status never relies on color alone.
 
-- [ ] **Step 5: Run brand and report tests**
+- [ ] **Step 5: Run identity and report tests**
 
-Run: `node --test test/report/brand.test.js test/report/html.test.js`  
+Run: `node --test test/report/identity.test.js test/report/html.test.js`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add assets src/panel src/core/report/html.js test/report
-git commit -m "feat: apply Governo de Mato Grosso report identity"
+git commit -m "feat: apply neutral Audita MT report identity"
 ```
 
 ### Task 4: PDF e downloads automáticos
@@ -214,7 +214,7 @@ Expected: FAIL until adapters and report handoff are wired.
 
 - [ ] **Step 3: Wire remaining interfaces and add verifier**
 
-Verifier checks: valid manifest; no remote executable code; 146/96/50 counts; zero normative validation errors; logo source/hash; fixture outcomes; self-contained report; HTML/PDF/JSON signatures; secret-pattern scan; all tests passing.
+Verifier checks: valid manifest; no remote executable code; 146/96/50 counts; zero normative validation errors; neutral identity gate; fixture outcomes; self-contained report; HTML/PDF/JSON signatures; secret-pattern scan; all tests passing.
 
 - [ ] **Step 4: Write operator documentation**
 
@@ -227,7 +227,7 @@ Expected: exit 0 and a summary covering every acceptance criterion.
 
 - [ ] **Step 6: Perform browser visual and interaction QA**
 
-Load the unpacked extension, audit the local fixture server and `https://www.procon.mt.gov.br/`, inspect panel states, element/full-page images, HTML at desktop/mobile widths and every PDF page. Record observed limitations in the report and documentation.
+Load the unpacked extension, audit the local fixture server and uma URL pública autorizada pelo operador, inspect panel states, element/full-page images, HTML at desktop/mobile widths and every PDF page. Record observed limitations in the report and documentation.
 
 - [ ] **Step 7: Commit**
 
@@ -235,4 +235,3 @@ Load the unpacked extension, audit the local fixture server and `https://www.pro
 git add README.md docs/USO-FISCAL.md fixtures test/integration scripts
 git commit -m "test: verify complete Audita MT workflow"
 ```
-

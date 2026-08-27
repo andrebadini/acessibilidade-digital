@@ -1,13 +1,13 @@
 # Audita MT — especificação de desenho
 
 Data: 26 de agosto de 2026  
-Público principal: fiscais do PROCON-MT sem formação técnica  
+Público principal: pessoas responsáveis por avaliações de acessibilidade, inclusive sem formação técnica
 Ambiente-alvo: Chrome e Microsoft Edge baseados em Chromium  
 Base normativa: WCAG 2.2 e ABNT NBR 17225:2025
 
 ## 1. Objetivo e limites da alegação
 
-Audita MT será uma extensão Manifest V3, feita somente com HTML, CSS e JavaScript empacotados. O fiscal informará uma URL e receberá uma auditoria local, acompanhada de evidências reproduzíveis e relatórios HTML e PDF.
+Audita MT será uma extensão Manifest V3, feita somente com HTML, CSS e JavaScript empacotados. A pessoa operadora informará uma URL e receberá uma auditoria local, acompanhada de evidências reproduzíveis e relatórios HTML e PDF.
 
 O produto buscará automaticamente todas as falhas que possam ser determinadas com segurança a partir do DOM, CSS calculado, árvore de acessibilidade, comportamento observado e pixels renderizados. Ele não apresentará ausência de falhas automáticas como prova de conformidade integral. Cada verificação terá um destes resultados:
 
@@ -42,7 +42,7 @@ Cada unidade terá interface explícita e poderá ser testada isoladamente. Nenh
 
 ## 3. Fluxo da auditoria
 
-1. O fiscal abre o painel, informa uma URL HTTP/HTTPS e seleciona “Auditar”.
+1. A pessoa operadora abre o painel, informa uma URL HTTP/HTTPS e seleciona “Auditar”.
 2. A extensão valida e normaliza a URL, cria uma aba dedicada e registra o instante inicial em ISO 8601, fuso local, versão do navegador e versão das regras.
 3. O service worker navega até o endereço, registra URL final e erros, espera `DOMContentLoaded`, `load` e um intervalo curto de estabilidade. A auditoria continua com aviso se a página nunca ficar estável.
 4. O coletor anexa o CDP, obtém o estado original e gera uma captura integral sem marcações.
@@ -93,7 +93,7 @@ Uma regra automática somente marcará `aprovado` quando sua aplicabilidade e ex
 
 O sistema coletará candidatos e evidências para qualidade de texto alternativo, finalidade de imagens e controles, equivalência de legendas/transcrições/audiodescrição, linguagem simples, instruções sensoriais, significado da sequência, consistência entre páginas, prevenção de erro, autenticação, gestos, movimento, tempo, interrupções e processos completos.
 
-O fiscal verá uma pergunta simples e específica, por exemplo: “O texto alternativo transmite a mesma informação visível nesta imagem?”. A resposta humana será registrada com nome do avaliador, instante e observação opcional.
+A pessoa avaliadora verá uma pergunta simples e específica, por exemplo: “O texto alternativo transmite a mesma informação visível nesta imagem?”. A resposta humana será registrada com nome do avaliador, instante e observação opcional.
 
 ### 5.3 Não automatizável no estado observado
 
@@ -156,11 +156,11 @@ O JSON conterá o modelo canônico completo e asserções compatíveis com os co
 
 O painel terá uma única ação principal. A linguagem será direta: “Endereço do site”, “Auditar”, “Preparando evidências”, “Relatório pronto”. Detalhes técnicos ficarão progressivamente revelados.
 
-O relatório usará a marca do Governo de Mato Grosso na capa e no cabeçalho, acompanhada da identificação textual “PROCON-MT — Secretaria Adjunta de Proteção e Defesa dos Direitos do Consumidor”. A marca será empacotada localmente, sem deformação, sobre fundo de contraste adequado, com texto alternativo “Governo de Mato Grosso”. A proveniência e o hash do arquivo serão registrados nos metadados do projeto.
+**Supersessão de identidade (26 de agosto de 2026):** a decisão anterior de associar o produto a uma identidade externa foi substituída integralmente por identidade tipográfica própria e neutra.
 
-Fonte institucional selecionada: ativo exibido em domínio oficial do Governo de Mato Grosso, validado contra a página da SECOM-MT antes do empacotamento. Nenhuma imagem gerada por IA será usada para representar a marca.
+Painel, relatório e artefatos usarão somente “Audita MT” e a descrição “Auditoria independente de acessibilidade”, sem imagem de marca. Um aviso visível declara que a ferramenta é independente, sem vínculo institucional, e que seus resultados não equivalem a certificação nem a laudo oficial.
 
-A paleta do produto usará azul institucional, branco, cinzas neutros e cores semânticas que não dependam apenas de cor. O próprio painel e os relatórios deverão atender WCAG 2.2 AA.
+A paleta do produto manterá azul principal, branco, cinzas neutros e cores semânticas que não dependam apenas de cor. O próprio painel e os relatórios deverão atender WCAG 2.2 AA.
 
 ## 10. Segurança, privacidade e permissões
 
@@ -203,7 +203,7 @@ Implementação de funcionalidade seguirá TDD: primeiro teste falhando, depois 
 9. HTML, PDF e JSON são gerados localmente e têm hashes verificáveis.
 10. Itens manuais exibem razão objetiva e evidência assistida.
 11. Relatório inclui capa, sumário, metodologia, achados, evidências, fundamentação, limitações e integridade.
-12. Logo do Governo de Mato Grosso está empacotada e aplicada de modo acessível no relatório do PROCON-MT.
+12. Painel e relatórios apresentam identidade neutra, sem imagem de marca externa, e aviso claro de independência.
 13. Testes unitários, normativos, de integração e de relatório passam.
 14. Nenhuma alegação excede o escopo realmente avaliado.
 
@@ -217,4 +217,3 @@ Implementação de funcionalidade seguirá TDD: primeiro teste falhando, depois 
 - correção automática do site auditado.
 
 Esses itens podem ser adicionados posteriormente sem alterar o modelo de regras e evidências.
-

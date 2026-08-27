@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { readFile, readdir } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 
@@ -10,8 +9,8 @@ import { NBR17225_ITEMS } from '../src/core/normative/nbr17225.js';
 import { renderTechnicalJson } from '../src/core/report/earl-json.js';
 import { renderHtmlReport } from '../src/core/report/html.js';
 import { renderPdf } from '../src/browser/render-pdf.js';
+import { scanNeutralIdentity } from './verify-neutral-identity.mjs';
 
-const expectedLogoHash = '1736ccf3c3783a42e9ebc7649a3fa473774b4c5f413ba1a09616cbd2e76cac7d';
 const root = new URL('../', import.meta.url);
 const text = path => readFile(new URL(path, root), 'utf8');
 
@@ -26,11 +25,7 @@ assert.equal(NBR17225_ITEMS.filter(item => item.classification === 'requirement'
 assert.equal(NBR17225_ITEMS.filter(item => item.classification === 'recommendation').length, 50);
 assert.deepEqual(validateCoreRuleComposition(), [], 'zero erros normativos esperados');
 
-const logo = await readFile(new URL('assets/gov-mt-logo.png', root));
-assert.equal(createHash('sha256').update(logo).digest('hex'), expectedLogoHash, 'hash de gov-mt-logo.png');
-const brandSource = await text('assets/BRAND-SOURCE.md');
-assert.match(brandSource, /manual_de_identidade_oficial/iu);
-assert.match(brandSource, new RegExp(expectedLogoHash, 'u'));
+assert.deepEqual(await scanNeutralIdentity(root), [], 'pacote precisa manter identidade neutra');
 
 const html = renderHtmlReport(SAMPLE_AUDIT);
 const json = renderTechnicalJson(SAMPLE_AUDIT);
@@ -58,7 +53,7 @@ if (process.env.AUDITA_VERIFY_SKIP_TESTS !== '1') {
   assert.equal(suite.status, 0, 'npm test precisa passar');
 }
 
-console.log('verify-project: manifest, 130/146 (96/50), marca, HTML/JSON/PDF, fixtures, privacidade e suíte GREEN');
+console.log('verify-project: manifest, 130/146 (96/50), identidade neutra, HTML/JSON/PDF, fixtures, privacidade e suíte GREEN');
 
 async function sourceFiles(directoryUrl) {
   const directory = directoryUrl.pathname;

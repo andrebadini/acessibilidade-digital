@@ -22,7 +22,7 @@ body {
   color: var(--ink);
 }
 
-.institutional-header {
+.product-header {
   display: flex;
   align-items: center;
   gap: 1rem;
@@ -31,19 +31,15 @@ body {
   color: #ffffff;
 }
 
-.institutional-header p {
+.product-header p {
   max-width: 31rem;
   margin: 0;
   font-weight: 700;
 }
 
-.institutional-logo {
-  display: block;
-  width: min(14rem, 38vw);
-  height: auto;
-  padding: 0.35rem;
-  background: #ffffff;
-  object-fit: contain;
+.product-header .product-name {
+  font-size: 1.45rem;
+  font-weight: 800;
 }
 
 main {
@@ -136,13 +132,9 @@ a {
 }
 
 @media (max-width: 36rem) {
-  .institutional-header {
+  .product-header {
     align-items: flex-start;
     flex-direction: column;
-  }
-
-  .institutional-logo {
-    width: min(15rem, 75vw);
   }
 }
 

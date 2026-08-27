@@ -17,7 +17,7 @@ As permissões `tabs`, `activeTab` e `scripting` abrem e observam somente a aba 
 
 ## Limites atuais
 
-A auditoria cobre uma página e o estado observado, não todo o serviço. Itens contextuais exigem revisão humana. Frames ou capturas bloqueados podem produzir resultado parcial. A marca empacotada é um recorte rasterizado derivado do manual oficial, não o arquivo original da marca.
+A auditoria cobre uma página e o estado observado, não todo o serviço. Itens contextuais exigem revisão humana. Frames ou capturas bloqueados podem produzir resultado parcial. Audita MT é uma ferramenta independente, sem vínculo institucional; seus resultados não equivalem a certificação nem a laudo oficial.
 
 O E2E em Chromium real e a QA visual permanecem pendentes e não foram executados neste batch. Consulte [Uso fiscal](docs/USO-FISCAL.md) para a leitura correta dos resultados.
 

@@ -58,9 +58,7 @@ Os relatórios AMAWeb demonstram a experiência atual, mas não cobrem WCAG 2.2,
 | EARL define modos e resultados interoperáveis | W3C, EARL 1.0 Schema | Working Group Note de 2 fev. 2017 | https://www.w3.org/TR/EARL10-Schema/ | Alta para vocabulário; não é Recommendation |
 | Web Crypto calcula SHA-256 localmente | Web Cryptography API / MDN | acesso em 26 ago. 2026 | https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/digest | Alta |
 | Acessibilidade em sites é obrigatória nas condições do art. 63 | Presidência da República, Lei 13.146/2015 | texto vigente acessado em 26 ago. 2026 | https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2015/lei/l13146.htm | Alta; o relatório não substitui análise jurídica |
-| A marca institucional está disponível em domínio oficial do Governo de MT | SECOM-MT | acesso em 26 ago. 2026 | https://www.secom.mt.gov.br/fotos | Alta para proveniência institucional; ativo final será validado visualmente |
 
 ## Critério de parada da pesquisa
 
 A pesquisa foi encerrada porque as decisões consequenciais possuem suporte primário: arquitetura, conformance, limites da automação, algoritmo de nome, variabilidade da fala, modelo de resultados, APIs de evidência, integridade e base legal. Novas buscas genéricas tenderiam a repetir fontes; questões restantes são de implementação e teste contra o navegador-alvo.
-
