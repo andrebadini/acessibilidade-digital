@@ -5,20 +5,21 @@ function deepFreeze(value, seen = new WeakSet()) {
   return Object.freeze(value);
 }
 
-const WCAG20_AA_CRITERIA = [
-  ['1.1.1', 'A'],
-  ['1.2.1', 'A'], ['1.2.2', 'A'], ['1.2.3', 'A'], ['1.2.4', 'AA'], ['1.2.5', 'AA'],
-  ['1.3.1', 'A'], ['1.3.2', 'A'], ['1.3.3', 'A'],
-  ['1.4.1', 'A'], ['1.4.2', 'A'], ['1.4.3', 'AA'], ['1.4.4', 'AA'], ['1.4.5', 'AA'],
-  ['2.1.1', 'A'], ['2.1.2', 'A'],
-  ['2.2.1', 'A'], ['2.2.2', 'A'],
-  ['2.3.1', 'A'],
-  ['2.4.1', 'A'], ['2.4.2', 'A'], ['2.4.3', 'A'], ['2.4.4', 'A'], ['2.4.5', 'AA'], ['2.4.6', 'AA'], ['2.4.7', 'AA'],
-  ['3.1.1', 'A'], ['3.1.2', 'AA'],
-  ['3.2.1', 'A'], ['3.2.2', 'A'], ['3.2.3', 'AA'], ['3.2.4', 'AA'],
-  ['3.3.1', 'A'], ['3.3.2', 'A'], ['3.3.3', 'AA'], ['3.3.4', 'AA'],
-  ['4.1.1', 'A'], ['4.1.2', 'A']
-];
+/** The complete WCAG 2.0 A/AA set incorporated by the revised 508 standard. */
+export const WCAG20_AA_CRITERIA = deepFreeze([
+  { id: '1.1.1', level: 'A' },
+  { id: '1.2.1', level: 'A' }, { id: '1.2.2', level: 'A' }, { id: '1.2.3', level: 'A' }, { id: '1.2.4', level: 'AA' }, { id: '1.2.5', level: 'AA' },
+  { id: '1.3.1', level: 'A' }, { id: '1.3.2', level: 'A' }, { id: '1.3.3', level: 'A' },
+  { id: '1.4.1', level: 'A' }, { id: '1.4.2', level: 'A' }, { id: '1.4.3', level: 'AA' }, { id: '1.4.4', level: 'AA' }, { id: '1.4.5', level: 'AA' },
+  { id: '2.1.1', level: 'A' }, { id: '2.1.2', level: 'A' },
+  { id: '2.2.1', level: 'A' }, { id: '2.2.2', level: 'A' },
+  { id: '2.3.1', level: 'A' },
+  { id: '2.4.1', level: 'A' }, { id: '2.4.2', level: 'A' }, { id: '2.4.3', level: 'A' }, { id: '2.4.4', level: 'A' }, { id: '2.4.5', level: 'AA' }, { id: '2.4.6', level: 'AA' }, { id: '2.4.7', level: 'AA' },
+  { id: '3.1.1', level: 'A' }, { id: '3.1.2', level: 'AA' },
+  { id: '3.2.1', level: 'A' }, { id: '3.2.2', level: 'A' }, { id: '3.2.3', level: 'AA' }, { id: '3.2.4', level: 'AA' },
+  { id: '3.3.1', level: 'A' }, { id: '3.3.2', level: 'A' }, { id: '3.3.3', level: 'AA' }, { id: '3.3.4', level: 'AA' },
+  { id: '4.1.1', level: 'A' }, { id: '4.1.2', level: 'A' }
+]);
 
 export const SECTION508_REVISED_CROSSWALK = deepFreeze({
   id: 'us.revised-508.wcag20-aa.v1',
@@ -30,7 +31,7 @@ export const SECTION508_REVISED_CROSSWALK = deepFreeze({
     { id: 'us.access-board.ict', publisher: 'U.S. Access Board', title: 'Revised 508 Standards and Section 255 Guidelines' },
     { id: 'us.revised508.applicability', publisher: 'Section 508.gov', title: 'Applicability and Conformance' }
   ],
-  criteria: WCAG20_AA_CRITERIA.map(([id, level]) => ({ id, level }))
+  criteria: WCAG20_AA_CRITERIA
 });
 
 /** Foreign technical benchmarks are kept independent of Brazilian legal bases. */

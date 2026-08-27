@@ -1,7 +1,7 @@
 import { TEST_MODES } from '../result.js';
 import { BRAZILIAN_LEGAL_BASIS } from '../legal/consumer-basis.js';
 import { NBR17225_ITEMS } from './nbr17225.js';
-import { FOREIGN_BENCHMARKS } from './section508.js';
+import { FOREIGN_BENCHMARKS, WCAG20_AA_CRITERIA } from './section508.js';
 import { WCAG22_LEVELS } from './wcag22.js';
 
 const CLASSIFICATIONS = Object.freeze(['requirement', 'recommendation']);
@@ -124,14 +124,26 @@ function validateWcag20Criteria(catalog, label, key, errors) {
     errors.push(`Crosswalk WCAG 2.0 ausente em ${label}: ${key}.`);
     return;
   }
+  const expectedLevels = new Map(WCAG20_AA_CRITERIA.map(criterion => [criterion.id, criterion.level]));
+  if (catalog.criteria.length !== WCAG20_AA_CRITERIA.length) {
+    errors.push(`Quantidade de critérios WCAG 2.0 divergente em ${label}: esperado ${WCAG20_AA_CRITERIA.length}, recebido ${catalog.criteria.length}.`);
+  }
   const ids = new Set();
   for (const criterion of catalog.criteria) {
     if (!criterion || typeof criterion.id !== 'string' || !/^\d\.\d\.\d$/u.test(criterion.id) || !['A', 'AA'].includes(criterion.level)) {
       errors.push(`Critério WCAG 2.0 inválido em ${label}: ${key}.`);
       continue;
     }
+    const expectedLevel = expectedLevels.get(criterion.id);
+    if (expectedLevel === undefined) {
+      errors.push(`Critério WCAG 2.0 não incorporado em ${label}: ${criterion.id}.`);
+    } else if (criterion.level !== expectedLevel) {
+      errors.push(`Nível WCAG 2.0 divergente em ${label} para ${criterion.id}: esperado ${expectedLevel}, recebido ${criterion.level}.`);
+    }
     if (ids.has(criterion.id)) errors.push(`Critério WCAG 2.0 duplicado em ${label}: ${criterion.id}.`);
     ids.add(criterion.id);
   }
-  if (!ids.has('4.1.1')) errors.push(`Critério WCAG 2.0 obrigatório ausente em ${label}: 4.1.1.`);
+  for (const criterion of WCAG20_AA_CRITERIA) {
+    if (!ids.has(criterion.id)) errors.push(`Critério WCAG 2.0 ausente em ${label}: ${criterion.id}.`);
+  }
 }
