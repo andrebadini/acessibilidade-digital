@@ -101,8 +101,15 @@ function pageWithFormCheckbox() {
 
 function pageWithContentEditableSecret(secret) {
   const page = rawPage();
+  page.nodes.push({
+    backendNodeId: 8, tagName: 'div', parentBackendNodeId: null,
+    attributes: { role: 'button', tabindex: '0', 'aria-label': 'Painel público' },
+    text: 'Estrutura pública', visibleText: `Conteúdo público ${secret}`,
+    focusable: true, interactive: true, interaction: 'button',
+    rect: { x: 8, y: 8, width: 160, height: 96 },
+  });
   page.nodes[0] = {
-    ...page.nodes[0], tagName: 'div',
+    ...page.nodes[0], tagName: 'div', parentBackendNodeId: 8,
     attributes: {
       id: secret, name: secret, contenteditable: 'true', role: 'textbox', tabindex: '0',
       title: secret, 'aria-label': secret, 'aria-description': secret,
@@ -136,6 +143,7 @@ function pageWithContentEditableSecret(secret) {
     { backendNodeId: 7, tagName: 'span', parentBackendNodeId: null, attributes: { id: 'editor-description' }, text: 'Descrição externa segura' },
   );
   page.axTree.nodes = [
+    { backendDOMNodeId: 8, role: { value: 'button' }, name: { value: 'Painel público' } },
     { backendDOMNodeId: 1, role: { value: 'textbox' }, name: { value: secret }, description: { value: secret }, value: { value: secret } },
     { backendDOMNodeId: 4, role: { value: 'generic' }, name: { value: secret }, description: { value: secret }, value: { value: secret } },
     { backendDOMNodeId: 5, role: { value: 'textbox' }, name: { value: 'Campo interno seguro' }, description: { value: 'Descrição do campo segura' }, value: { value: secret } },
@@ -378,10 +386,17 @@ test('removes a nested contenteditable secret from model, evidence, preview, has
   });
   const [first, second] = await Promise.all([run('TOPSECRET-editor-one'), run('TOPSECRET-editor-two')]);
   const evidence = first.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
+  const ancestor = first.snapshot.nodes.find(node => node.nodeId === 'n-8');
+  const ancestorEvidence = first.evidence.artifacts.find(artifact => artifact.nodeId === 'n-8');
   const changed = second.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
   const descendantEvidence = first.evidence.artifacts.find(artifact => artifact.nodeId === 'n-4');
   const nestedControlEvidence = first.evidence.artifacts.find(artifact => artifact.nodeId === 'n-5');
 
+  assert.equal(ancestor.text, 'Estrutura pública');
+  assert.equal(ancestor.visibleText, '');
+  assert.ok(ancestorEvidence);
+  assert.equal(ancestorEvidence.accessibility.name, 'Painel público');
+  assert.equal(ancestorEvidence.accessibility.visibleText, '');
   assert.equal(evidence.snippet, '<div contenteditable="true" role="textbox" tabindex="0" aria-labelledby="editor-label" aria-describedby="editor-description"></div>');
   assert.equal(evidence.accessibility.name, 'Editor externo seguro');
   assert.equal(evidence.accessibility.nameSource, 'aria-labelledby');

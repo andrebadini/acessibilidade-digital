@@ -144,6 +144,7 @@ export function redactNormalizedNode(input, {
   privateText = false,
   privateTextRoot = false,
   privateTextDescendant = false,
+  privateTextAncestor = false,
   preserveAccessibleText = false,
 } = {}) {
   const node = sanitizeJsonData(input);
@@ -182,6 +183,7 @@ export function redactNormalizedNode(input, {
       delete node.accessibleDescription;
     }
   }
+  if (privateTextAncestor) node.visibleText = '';
   if (privateTextRoot && contentEditableControl(node)) {
     node.attributes = contentEditableRootAttributes(node.attributes);
     node.selectorHint = '';

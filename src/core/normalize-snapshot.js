@@ -29,6 +29,21 @@ function privateTextElement(tagName, attributes) {
   return tagName === 'textarea' || (editableElement(tagName, attributes) && !['input', 'select'].includes(tagName));
 }
 
+function ancestorsOfMatching(items, matches, parentOf) {
+  const ancestors = new Set();
+  for (const item of items) {
+    if (!matches(item)) continue;
+    const visited = new Set();
+    let current = parentOf(item);
+    while (current && !visited.has(current)) {
+      visited.add(current);
+      ancestors.add(current);
+      current = parentOf(current);
+    }
+  }
+  return ancestors;
+}
+
 function sanitizeAttributes(input, tagName, base) {
   const output = {};
   const normalizedInput = Object.fromEntries(Object.entries(input || {}).map(([name, value]) => [String(name).toLowerCase(), value]));
@@ -159,6 +174,8 @@ function normalizeSimplified(raw) {
   for (const node of nodes) if (node.parentId && byId.has(node.parentId)) byId.get(node.parentId).children.push(node.nodeId);
   const executableById = new Map(nodes.map(node => [node.nodeId, EXECUTABLE_TEXT_PARENTS.has(node.tagName)]));
   const privateTextById = new Map(nodes.map(node => [node.nodeId, privateTextElement(node.tagName, node.attributes)]));
+  const parentOfNode = node => node.parentId ? byId.get(node.parentId) : null;
+  const privateTextAncestors = ancestorsOfMatching(nodes, node => privateTextById.get(node.nodeId), parentOfNode);
   const inExecutableSubtree = node => {
     const visited = new Set();
     let current = node;
@@ -194,6 +211,7 @@ function normalizeSimplified(raw) {
     privateText: inPrivateTextSubtree(node),
     privateTextRoot: privateTextById.get(node.nodeId) && !hasPrivateTextAncestor(node),
     privateTextDescendant: hasPrivateTextAncestor(node),
+    privateTextAncestor: privateTextAncestors.has(node),
     preserveAccessibleText: ['input', 'select', 'textarea'].includes(node.tagName),
   }));
   return assertSnapshotV1({
@@ -381,6 +399,12 @@ function normalizeColumnar(raw) {
   const outputByRecord = new Map();
   const executableMemo = new Map();
   const privateTextMemo = new Map();
+  const parentOfRecord = record => byDocumentAndIndex.get(`${record.documentIndex}:${record.parentIndex}`);
+  const privateTextAncestors = ancestorsOfMatching(
+    records,
+    record => privateTextElement(record.tagName, record.attributes),
+    parentOfRecord,
+  );
   const inExecutableSubtree = record => {
     if (executableMemo.has(record)) return executableMemo.get(record);
     let current = record;
@@ -526,6 +550,7 @@ function normalizeColumnar(raw) {
     privateText: inPrivateTextSubtree(record),
     privateTextRoot: privateTextElement(record.tagName, record.attributes) && !hasPrivateTextAncestor(record),
     privateTextDescendant: hasPrivateTextAncestor(record),
+    privateTextAncestor: privateTextAncestors.has(record),
     preserveAccessibleText: ['input', 'select', 'textarea'].includes(record.tagName),
   }));
 

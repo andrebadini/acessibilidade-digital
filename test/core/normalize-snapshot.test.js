@@ -128,6 +128,45 @@ function columnarContentEditable(secret) {
   };
 }
 
+function columnarPrivateTextAncestorLeak(secret) {
+  const strings = [
+    '#document', 'HTML', 'BODY', 'SECTION', 'P', '#text', 'DIV', 'ASIDE',
+    'contenteditable', 'true', secret, 'Conteúdo público', 'Rodapé público',
+    'https://example.test/', 'Fixture',
+  ];
+  const s = value => strings.indexOf(value);
+  return {
+    domSnapshot: {
+      strings,
+      computedStyles: [],
+      documents: [{
+        frameId: 0,
+        documentURL: s('https://example.test/'),
+        title: s('Fixture'),
+        nodes: {
+          parentIndex: [-1, 0, 1, 2, 3, 4, 3, 6, 2, 8],
+          nodeType: [9, 1, 1, 1, 1, 3, 1, 3, 1, 3],
+          nodeName: [s('#document'), s('HTML'), s('BODY'), s('SECTION'), s('P'), s('#text'), s('DIV'), s('#text'), s('ASIDE'), s('#text')],
+          nodeValue: [0, 0, 0, 0, 0, s('Conteúdo público'), 0, s(secret), 0, s('Rodapé público')],
+          backendNodeId: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+          attributes: [[], [], [], [], [], [], [s('contenteditable'), s('true')], [], [], []],
+        },
+        layout: { nodeIndex: [], bounds: [], styles: [] },
+      }],
+    },
+    axTree: { nodes: [] },
+    pageData: [{ frameId: '0', result: { nodes: [
+      { backendNodeId: 2, visibleText: `Conteúdo público ${secret} Rodapé público` },
+      { backendNodeId: 3, visibleText: `Conteúdo público ${secret} Rodapé público` },
+      { backendNodeId: 4, visibleText: `Conteúdo público ${secret}` },
+      { backendNodeId: 5, visibleText: 'Conteúdo público' },
+      { backendNodeId: 7, visibleText: secret },
+      { backendNodeId: 9, visibleText: 'Rodapé público' },
+    ] } }],
+    warnings: [],
+  };
+}
+
 function privateEditorRaw(secret) {
   return {
     format: 'simplified-v1',
@@ -397,6 +436,42 @@ test('removes AX-derived content from a contenteditable root and every private d
   const nestedInput = simplified.nodes.find(node => node.backendNodeId === 4);
   assert.equal(nestedInput.accessibleName, 'Rótulo estático seguro');
   assert.equal(nestedInput.accessibleDescription, 'Descrição estática segura');
+});
+
+test('redacts aggregated visibleText only on ancestors of private text roots in simplified and columnar snapshots', () => {
+  const simplifiedSecret = 'TOPSECRET-private-ancestor-simplified';
+  const simplified = normalizeSnapshot({
+    format: 'simplified-v1',
+    document: { url: 'https://example.test/', title: 'Privacy' },
+    nodes: [
+      { backendNodeId: 1, tagName: 'body', parentBackendNodeId: null, attributes: { 'data-public': 'shell' }, text: 'Estrutura pública', visibleText: `Conteúdo público ${simplifiedSecret} Rodapé público` },
+      { backendNodeId: 2, tagName: 'section', parentBackendNodeId: 1, attributes: { 'aria-label': 'Seção pública' }, text: 'Estrutura da seção', visibleText: `Conteúdo público ${simplifiedSecret}` },
+      { backendNodeId: 3, tagName: 'p', parentBackendNodeId: 2, attributes: {}, text: 'Conteúdo público', visibleText: 'Conteúdo público' },
+      { backendNodeId: 4, tagName: 'div', parentBackendNodeId: 2, attributes: { contenteditable: 'true' }, text: simplifiedSecret, visibleText: simplifiedSecret },
+      { backendNodeId: 5, tagName: 'span', parentBackendNodeId: 4, attributes: {}, text: simplifiedSecret, visibleText: simplifiedSecret },
+      { backendNodeId: 6, tagName: 'aside', parentBackendNodeId: 1, attributes: {}, text: 'Rodapé público', visibleText: 'Rodapé público' },
+    ],
+    axTree: { nodes: [] },
+  });
+  const columnarSecret = 'TOPSECRET-private-ancestor-columnar';
+  const columnar = normalizeSnapshot(columnarPrivateTextAncestorLeak(columnarSecret));
+
+  for (const [snapshot, ancestorBackends, publicBackends, secret] of [
+    [simplified, [1, 2], [[3, 'Conteúdo público'], [6, 'Rodapé público']], simplifiedSecret],
+    [columnar, [2, 3, 4], [[5, 'Conteúdo público'], [9, 'Rodapé público']], columnarSecret],
+  ]) {
+    for (const backendNodeId of ancestorBackends) {
+      const ancestor = snapshot.nodes.find(node => node.backendNodeId === backendNodeId);
+      assert.equal(ancestor.visibleText, '');
+      assert.notEqual(ancestor.text, '');
+    }
+    for (const [backendNodeId, visibleText] of publicBackends) {
+      assert.equal(snapshot.nodes.find(node => node.backendNodeId === backendNodeId).visibleText, visibleText);
+    }
+    assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(secret));
+  }
+  assert.equal(simplified.nodes.find(node => node.backendNodeId === 1).attributes['data-public'], 'shell');
+  assert.equal(simplified.nodes.find(node => node.backendNodeId === 2).attributes['aria-label'], 'Seção pública');
 });
 
 test('strictly redacts contenteditable root and descendant attributes while preserving external references and control labels', () => {
