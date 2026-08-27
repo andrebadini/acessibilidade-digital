@@ -17,4 +17,4 @@ export { CORE_RULES, runCoreAudit, validateCoreRuleComposition } from './audit.j
 export { normalizeSnapshot, sanitizeResourceUrl } from './normalize-snapshot.js';
 export { mergeProbesIntoSnapshot, normalizeProbes } from './normalize-probes.js';
 export { buildStableSelector, escapeCssIdentifier } from './evidence/selector.js';
-export { sanitizeHtmlSnippet } from './evidence/snippet.js';
+export { sanitizeHtmlSnippet, sanitizeHtmlSnippetSource } from './evidence/snippet.js';

@@ -231,6 +231,50 @@ test('never discloses sensitive control values in accessibility, hashes or final
   assert.match(html, /Prévia de anúncio/iu);
 });
 
+test('stores readable sanitized snippets and the report encodes them exactly once', async () => {
+  const secret = 'TOPSECRET-snippet';
+  const run = outerHtml => runAudit({
+    url: 'https://example.test/',
+    chromeAdapter: fakeAdapter({
+      outerHtml: backendNodeId => backendNodeId === 1
+        ? outerHtml
+        : `<button>Node ${backendNodeId}</button>`,
+    }),
+    now: clock,
+    idFactory: () => 'audit-readable-snippet',
+  });
+  const model = await run(`<iframe title="Mapa" src="javascript:${secret}" onload="steal()"></iframe><button aria-label="Abrir">Abrir</button></code><script>${secret}</script>`);
+  const changed = await run('<iframe title="Mapa"></iframe><button aria-label="Abrir">Outro texto</button></code>');
+  const evidence = model.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
+  const changedEvidence = changed.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
+
+  assert.equal(evidence.snippet, '<iframe title="Mapa"></iframe><button aria-label="Abrir">Abrir</button></code>');
+  assert.notEqual(evidence.hash, changedEvidence.hash);
+  assert.doesNotMatch(JSON.stringify(model), /TOPSECRET|javascript:|onload=|<script/iu);
+
+  const report = await enrichAuditForReport(model, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  });
+  const html = renderHtmlReport(report);
+  const encodedSnippet = html.match(/<pre><code>([^]*?)<\/code><\/pre>/u)?.[1];
+
+  assert.match(html, /&lt;iframe title=&quot;Mapa&quot;&gt;&lt;\/iframe&gt;/u);
+  assert.match(html, /&lt;button aria-label=&quot;Abrir&quot;&gt;Abrir&lt;\/button&gt;/u);
+  assert.doesNotMatch(html, /&amp;lt;(?:iframe|button)/u);
+  assert.doesNotMatch(html, /TOPSECRET|javascript:|onload=|<script/iu);
+  assert.equal(decodeHtmlText(encodedSnippet), evidence.snippet);
+});
+
+function decodeHtmlText(value) {
+  return value
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&quot;', '"')
+    .replaceAll('&#39;', "'")
+    .replaceAll('&amp;', '&');
+}
+
 test('keeps a pristine capture timeout partial without retrying element screenshots', async () => {
   const adapter = fakeAdapter({ fullPageFailure: new DOMException('capture timeout', 'TimeoutError'), snippetFailureNode: 1 });
   const model = await runAudit({ url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'audit-partial' });

@@ -1,7 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { sanitizeHtmlSnippet } from '../../src/core/evidence/snippet.js';
+import { sanitizeHtmlSnippet, sanitizeHtmlSnippetSource } from '../../src/core/evidence/snippet.js';
+
+test('exposes sanitized readable source while preserving the encoded compatibility API', () => {
+  const html = '<iframe title="Mapa" src="javascript:bad()" onload="bad()"></iframe><button aria-label="Abrir">Abrir</button>';
+  const source = sanitizeHtmlSnippetSource(html);
+
+  assert.equal(source, '<iframe title="Mapa"></iframe><button aria-label="Abrir">Abrir</button>');
+  assert.equal(
+    sanitizeHtmlSnippet(html),
+    '&lt;iframe title=&quot;Mapa&quot;&gt;&lt;/iframe&gt;&lt;button aria-label=&quot;Abrir&quot;&gt;Abrir&lt;/button&gt;',
+  );
+});
+
+test('keeps adversarial source inert and free of executable surfaces and secrets', () => {
+  const source = sanitizeHtmlSnippetSource(
+    '<button onclick="steal()" formaction="javascript:TOPSECRET">Abrir</button></code><script>TOPSECRET</script><style>TOPSECRET</style>',
+  );
+
+  assert.equal(source, '<button>Abrir</button></code>');
+  assert.doesNotMatch(source, /script|style|onclick|formaction|javascript:|TOPSECRET/iu);
+});
 
 test('removes executable elements and inline execution attributes while preserving structure and ARIA', () => {
   const html = '<DIV aria-label="Abrir" OnClick="steal()" style="background:url(data:text/plain,STYLE_MARKER)"><script>bad()</script><style>body{display:none}</style><template><img onerror=bad()></template><span role="img">Ícone</span></DIV>';

@@ -114,8 +114,11 @@ function escapeHtmlText(value) {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 
-/** Sanitizes untrusted HTML source without DOMParser or third-party code. */
-export function sanitizeHtmlSnippet(html) {
+/**
+ * Sanitizes untrusted HTML into readable source for a later text-encoding boundary.
+ * The result must never be inserted as markup; report renderers must HTML-escape it.
+ */
+export function sanitizeHtmlSnippetSource(html) {
   if (typeof html !== 'string') return '';
   let output = '';
   let position = 0;
@@ -159,5 +162,10 @@ export function sanitizeHtmlSnippet(html) {
     output += sanitizeTag(parsed);
     position = token.end;
   }
-  return escapeHtmlText(output.replace(/\s+/gu, ' ').trim());
+  return output.replace(/\s+/gu, ' ').trim();
+}
+
+/** Sanitizes and HTML-encodes untrusted source for inert direct display. */
+export function sanitizeHtmlSnippet(html) {
+  return escapeHtmlText(sanitizeHtmlSnippetSource(html));
 }

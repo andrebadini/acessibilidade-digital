@@ -10,7 +10,7 @@ import {
   normalizeProbes,
   normalizeSnapshot,
   runCoreAudit,
-  sanitizeHtmlSnippet,
+  sanitizeHtmlSnippetSource,
   sanitizeResourceUrl,
 } from '../core/index.js';
 import { normalizeAuditUrl } from '../core/url.js';
@@ -431,7 +431,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
         let snippet = '';
         try {
           const response = await awaitStep(() => cdp.command('DOM.getOuterHTML', { backendNodeId: node.backendNodeId }));
-          snippet = sanitizeHtmlSnippet(typeof response?.outerHTML === 'string' ? response.outerHTML : '');
+          snippet = sanitizeHtmlSnippetSource(typeof response?.outerHTML === 'string' ? response.outerHTML : '');
         } catch (error) {
           rethrowAbort(error, signal);
           recoverable('SNIPPET_CAPTURE_FAILED', 'O trecho de código do elemento não pôde ser capturado.', { occurrenceId: occurrence.occurrenceId });
