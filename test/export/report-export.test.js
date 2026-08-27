@@ -89,9 +89,34 @@ test('keeps HTML and JSON when PDF fails, records a partial limitation, and stil
   assert.equal(result.model.session.status, 'partial');
   assert.match(result.model.limitations.join(' '), /PDF|impressão/iu);
   assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
+  assert.deepEqual(result.deliveryReceipt, {
+    status: 'partial',
+    formats: result.formats,
+    limitations: ['O PDF não foi gerado devido a uma limitação técnica local.'],
+  });
   assert.equal(JSON.parse(result.json).audit.session.status, 'partial');
   assert.deepEqual(events.filter(entry => entry[0] === 'disconnect'), [['disconnect']]);
   assert.deepEqual(events.filter(entry => entry[0] === 'remove'), [['remove', 44]]);
+});
+
+test('contains a hostile print failure name accessor without invoking or serializing it', async () => {
+  let accessed = false;
+  const hostile = {};
+  Object.defineProperty(hostile, 'name', {
+    enumerable: true,
+    get() { accessed = true; throw new Error('PRIVATE_SENTINEL'); },
+  });
+  const result = await runReportExport({ auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z' }, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer() { throw hostile; },
+    downloadsAdapter: fakeDownloads([]),
+  });
+
+  assert.equal(accessed, false);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
+  assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'REPORT_PDF_UNAVAILABLE'));
+  assert.doesNotMatch(`${result.html}\n${result.json}\n${JSON.stringify(result)}`, /PRIVATE_SENTINEL/u);
 });
 
 test('contains readiness failures and cleanup errors without leaking a print URL', async () => {
@@ -114,6 +139,97 @@ test('contains readiness failures and cleanup errors without leaking a print URL
   assert.equal(result.model.session.status, 'partial');
   assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
   assert.deepEqual(events.filter(entry => entry[0] === 'revoke'), [['revoke', 'blob:chrome-extension://test/print']]);
+});
+
+test('descriptor-validates the temporary print tab without invoking ID accessors or accepting proxies', async () => {
+  let accessed = false;
+  const accessorTab = {};
+  Object.defineProperty(accessorTab, 'id', {
+    enumerable: true,
+    get() { accessed = true; return 93; },
+  });
+  const invalidTabs = [accessorTab, new Proxy({ id: 94 }, {})];
+
+  for (const tab of invalidTabs) {
+    const events = [];
+    const result = await runReportExport({ auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z' }, {
+      urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+      tabAdapter: {
+        async createPrintTab() { return tab; },
+        async waitForReady() { events.push(['unexpected-ready']); },
+        async connectCdp() { events.push(['unexpected-connect']); },
+        async waitForAssets() {},
+        async removeTab(id) { events.push(['unexpected-remove', id]); },
+      },
+      async pdfRenderer() { events.push(['unexpected-pdf']); return { bytes: PDF, usedFallback: false, limitations: [] }; },
+      downloadsAdapter: fakeDownloads(events),
+    });
+
+    assert.equal(accessed, false);
+    assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
+    assert.deepEqual(events.filter(entry => entry[0].startsWith('unexpected')), []);
+    assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'REPORT_PRINT_TAB_FAILED'));
+  }
+});
+
+test('contains print Blob URL preparation failure as a PDF omission and still exports HTML JSON and CSV', async () => {
+  const events = [];
+  const result = await runReportExport({ auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z' }, {
+    urlApi: {
+      createObjectURL() { throw new Error('PRIVATE_SENTINEL blob:https://origin.test/private'); },
+      revokeObjectURL() { events.push(['unexpected-revoke']); },
+    },
+    tabAdapter: {
+      async createPrintTab() { events.push(['unexpected-tab']); },
+      async waitForReady() {}, async connectCdp() {}, async waitForAssets() {}, async removeTab() {},
+    },
+    downloadsAdapter: fakeDownloads(events),
+  });
+
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
+  assert.equal(result.model.session.status, 'partial');
+  assert.equal(result.model.report.artifact.pdfFallback, false);
+  assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'REPORT_PDF_UNAVAILABLE'));
+  assert.deepEqual(result.deliveryReceipt.limitations, ['O PDF não foi gerado devido a uma limitação técnica local.']);
+  assert.deepEqual(events.filter(entry => entry[0].startsWith('unexpected')), []);
+  assert.doesNotMatch(`${result.html}\n${result.json}\n${JSON.stringify(result)}`, /PRIVATE_SENTINEL|origin\.test|blob:/iu);
+});
+
+test('descriptor-validates and snapshots PDF renderer output before reading fallback state or bytes', async () => {
+  let getterAccessed = false;
+  const accessorResult = { bytes: PDF };
+  Object.defineProperty(accessorResult, 'usedFallback', {
+    enumerable: true,
+    get() { getterAccessed = true; throw new Error('PRIVATE_SENTINEL'); },
+  });
+  const activeProxy = new Proxy({ bytes: PDF, usedFallback: false, limitations: [] }, {});
+  const revoked = Proxy.revocable({ bytes: PDF, usedFallback: false, limitations: [] }, {});
+  revoked.revoke();
+  const invalidResults = [
+    accessorResult,
+    activeProxy,
+    revoked.proxy,
+    { bytes: { private: 'PRIVATE_SENTINEL' }, usedFallback: false },
+    { bytes: new TextEncoder().encode('NOT-A-PDF PRIVATE_SENTINEL'), usedFallback: false },
+    { bytes: PDF, usedFallback: 'false' },
+  ];
+
+  for (const rendered of invalidResults) {
+    const events = [];
+    const result = await runReportExport({ auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z' }, {
+      urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+      tabAdapter: successfulTabAdapter(),
+      async pdfRenderer() { return rendered; },
+      downloadsAdapter: fakeDownloads(events),
+    });
+
+    assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
+    assert.equal(result.model.report.artifact.pdfFallback, false);
+    assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'REPORT_PDF_UNAVAILABLE'));
+    assert.ok(events.every(entry => entry[0] !== 'download' || !entry[1].endsWith('.pdf')));
+    assert.doesNotMatch(`${result.html}\n${result.json}\n${JSON.stringify(result)}`, /PRIVATE_SENTINEL|NOT-A-PDF/u);
+  }
+  assert.equal(getterAccessed, false);
 });
 
 test('records PDF fallback in the final model and the exact final HTML and JSON', async () => {
@@ -167,7 +283,39 @@ test('contains CSV preparation failure, records it in the final correlated model
   assert.deepEqual(result.model.report.artifact.formats.map(format => format.format), ['html', 'json', 'pdf']);
   assert.deepEqual(JSON.parse(result.json).audit, result.model);
   assert.equal(result.csv, null);
+  assert.deepEqual(result.deliveryReceipt, {
+    status: 'partial',
+    formats: result.formats,
+    limitations: ['O CSV não foi gerado devido a uma limitação técnica local.'],
+  });
   assert.doesNotMatch(`${result.html}\n${result.json}\n${JSON.stringify(result)}`, /PRIVATE_SENTINEL|origin\.test|token=/iu);
+});
+
+test('treats non-string, non-BOM or noncanonical CSV renderer output as a generation failure and still downloads PDF', async () => {
+  for (const rendered of [
+    new Uint8Array([0x50, 0x52, 0x49, 0x56, 0x41, 0x54, 0x45]),
+    '"id"\r\n"PRIVATE_SENTINEL"\r\n',
+    '\uFEFF"description"\r\n"token=PRIVATE_SENTINEL"\r\n',
+  ]) {
+    const events = [];
+    const result = await runReportExport({ auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z' }, {
+      urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+      tabAdapter: successfulTabAdapter(),
+      async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+      csvRenderer() { return rendered; },
+      downloadsAdapter: fakeDownloads(events),
+    });
+
+    assert.equal(result.csv, null);
+    assert.equal(result.model.session.status, 'partial');
+    assert.deepEqual(result.model.report.artifact.formats.map(entry => entry.format), ['html', 'json', 'pdf']);
+    assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'pdf']);
+    assert.deepEqual(result.deliveryReceipt.limitations, ['O CSV não foi gerado devido a uma limitação técnica local.']);
+    assert.equal(result.deliveryReceipt.status, 'partial');
+    assert.ok(events.some(entry => entry[0] === 'download' && entry[1].endsWith('.pdf')));
+    assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'REPORT_CSV_UNAVAILABLE'));
+    assert.doesNotMatch(`${result.html}\n${result.json}\n${JSON.stringify(result)}`, /PRIVATE_SENTINEL/u);
+  }
 });
 
 test('sanitizes primary and cleanup failures into controlled codes before rendering', async () => {

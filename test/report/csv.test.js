@@ -64,6 +64,16 @@ test('serializes one deterministic RFC 4180 row per canonical occurrence with a 
   assert.equal(csv.replace(/\r\n/gu, '').includes('\n'), false);
 });
 
+test('preserves canonical structural IDs containing privacy-like words for cross-artifact correlation', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.occurrences[0].occurrenceId = 'occ-PRIVATE-record';
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.occurrence_id, 'occ-PRIVATE-record');
+  assert.notEqual(first.occurrence_id, '[conteúdo sensível omitido]');
+});
+
 test('quotes commas, quotes, multiline Unicode text and replaces unsafe controls without exporting evidence pixels or nested records', () => {
   const input = structuredClone(SAMPLE_AUDIT);
   input.occurrences[0].justification = 'Linha 1, “ação”\r\n"citada"\u0000\u0007\n終わり';
@@ -78,6 +88,226 @@ test('quotes commas, quotes, multiline Unicode text and replaces unsafe controls
   assert.equal(first.description, 'Linha 1, “ação”\r\n"citada"��\n終わり');
   assert.match(csv, /"Linha 1, “ação”\r\n""citada""��\n終わり"/u);
   assert.doesNotMatch(csv, /PRIVATE_SENTINEL|<script|data:image|iVBOR|privatePayload/iu);
+});
+
+test('projects every page-derived scalar through one privacy boundary before writing CSV bytes', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const hostileUrl = 'https://user:pass@servico.exemplo.test/consulta/inicio?token=URL_PRIVATE&view=public';
+  input.requestedScope.urls[0] = hostileUrl;
+  input.pages[0].requestedUrl = hostileUrl;
+  input.pages[0].finalUrl = hostileUrl;
+  input.requestedUrl = hostileUrl;
+  input.finalUrl = hostileUrl;
+  input.occurrences[0].justification = '<script>DESCRIPTION_PRIVATE()</script>';
+  input.occurrences[0].target.selector = 'button[data-icon="data:image/png;base64,SELECTOR_PRIVATE"]';
+  input.occurrences[0].target.framePath = [
+    'blob:https://origin.test/FRAME_PRIVATE',
+    'resource:FRAME_PAYLOAD',
+  ];
+  input.occurrences[0].accessiblePreview = `authorization=PREVIEW_PRIVATE dados ${'QUJD'.repeat(100)}`;
+  input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource =
+    '<img src=x onerror=SOURCE_PRIVATE()>';
+  const original = structuredClone(input);
+
+  const csv = renderOccurrenceCsv(input);
+  const first = asRecord(parseQuotedCsv(csv)[1]);
+
+  assert.deepEqual(input, original);
+  assert.equal(first.page_url, 'https://servico.exemplo.test/consulta/inicio?view=public');
+  assert.equal(first.description, '[marcação omitida]');
+  assert.equal(first.selector, '[recurso omitido]');
+  assert.equal(first.frame_path, '[recurso omitido]');
+  assert.equal(first.accessible_preview, '[recurso omitido]');
+  assert.equal(first.accessible_preview_source, '[marcação omitida]');
+  assert.doesNotMatch(csv, /URL_PRIVATE|DESCRIPTION_PRIVATE|SELECTOR_PRIVATE|FRAME_PRIVATE|FRAME_PAYLOAD|PREVIEW_PRIVATE|SOURCE_PRIVATE|data:|blob:|resource:|<script|<img|QUJDQUJD/iu);
+});
+
+test('preserves ordinary human prose containing less-than signs while omitting tag-like markup', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.occurrences[0].justification = 'Use x<y quando comparar; 2 < 3 e 5 > 4.';
+  input.occurrences[0].accessiblePreview = 'valor <limite superior, botão';
+  input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource = 'texto < contexto';
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.description, 'Use x<y quando comparar; 2 < 3 e 5 > 4.');
+  assert.equal(first.accessible_preview, 'valor <limite superior, botão');
+  assert.equal(first.accessible_preview_source, 'texto < contexto');
+});
+
+test('distinguishes chained comparison prose from incomplete custom-element markup', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.occurrences[0].justification =
+    'Use x<b>c ao comparar. Se x<y e z=1, então continue. Compare x<y-z quando necessário. ' +
+    'Se a<b e c=1, mantenha o intervalo. Se a<b e disabled estiver falso, prossiga. ' +
+    'Em x\u0301<b>c, preserve o identificador decomposto. Compare x<time quando necessário. ' +
+    'Compare x<time. Use x<code>y ao comparar.';
+  input.occurrences[0].accessiblePreview = 'Texto antes<my-widget data-customer=Alice';
+  input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource =
+    'Texto antes<my-widget>';
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.description,
+    'Use x<b>c ao comparar. Se x<y e z=1, então continue. Compare x<y-z quando necessário. ' +
+    'Se a<b e c=1, mantenha o intervalo. Se a<b e disabled estiver falso, prossiga. ' +
+    'Em x\u0301<b>c, preserve o identificador decomposto. Compare x<time quando necessário. ' +
+    'Compare x<time. Use x<code>y ao comparar.');
+  assert.equal(first.accessible_preview, '[marcação omitida]');
+  assert.equal(first.accessible_preview_source, '[marcação omitida]');
+  assert.doesNotMatch(first.accessible_preview, /my-widget|data-customer|Alice/iu);
+});
+
+test('omits explicit self-closing and void-element markup even when adjacent to text', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.occurrences[0].justification = 'Texto<span/>seguinte';
+  input.occurrences[0].accessiblePreview = 'Texto<span />seguinte';
+  input.occurrences[0].target.selector = 'Texto<br/>seguinte';
+  input.occurrences[0].target.framePath = ['Texto<br>seguinte'];
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.description, '[marcação omitida]');
+  assert.equal(first.accessible_preview, '[marcação omitida]');
+  assert.equal(first.selector, '[marcação omitida]');
+  assert.equal(first.frame_path, '[marcação omitida]');
+});
+
+test('omits short bounded base64 layers that hide resources, markup, pixels and credentials', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const encode = value => globalThis.btoa(value);
+  const encodeLayers = (value, layers) => Array.from({ length: layers }).reduce(current => encode(current), value);
+  const encodeUrl = value => globalThis.btoa(String.fromCharCode(...new TextEncoder().encode(value)))
+    .replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=+$/u, '');
+  const pixel = String.fromCharCode(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00);
+  input.occurrences[0].accessiblePreview = encode('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB');
+  input.occurrences[0].justification = encode(encode('<script>NESTED_MARKUP_SENTINEL'));
+  input.occurrences[0].target.selector = encode(encode(pixel));
+  input.occurrences[0].target.framePath = [encodeUrl('data:text/plain,ÿ')];
+  const targetEvidence = input.evidence.find(entry => entry.evidenceId === 'ev-control');
+  targetEvidence.accessibility.nameSource = encode('auth=NESTED_CREDENTIAL_SENTINEL');
+  targetEvidence.hash = encode('to\u0000ken=CONTROL_SPLIT_SENTINEL');
+  input.integrity.canonicalModelHash = encodeLayers('data:x', 4);
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.accessible_preview, '[recurso omitido]');
+  assert.equal(first.description, '[marcação omitida]');
+  assert.equal(first.selector, '[recurso omitido]');
+  assert.equal(first.frame_path, '[recurso omitido]');
+  assert.equal(first.accessible_preview_source, '[conteúdo sensível omitido]');
+  assert.equal(first.evidence_hashes, '[conteúdo sensível omitido]');
+  assert.equal(first.canonical_model_hash, '[recurso omitido]');
+  assert.doesNotMatch(JSON.stringify(first), /ZGF0YT|UE5H|NESTED|SENTINEL|iVBOR|<script/iu);
+});
+
+test('preserves canonical base64 text whose decoded view is ordinary public prose', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const safeToken = globalThis.btoa('ordinary public announcement');
+  input.occurrences[0].accessiblePreview = safeToken;
+
+  const preview = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]).accessible_preview;
+
+  assert.equal(preview, safeToken);
+});
+
+test('omits incomplete generic markup without treating mathematical less-than prose as HTML', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.occurrences[0].justification = '<div data-customer=Alice';
+  input.occurrences[0].accessiblePreview = 'A comparação observada foi 2 < 3, botão';
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.description, '[marcação omitida]');
+  assert.equal(first.accessible_preview, 'A comparação observada foi 2 < 3, botão');
+  assert.doesNotMatch(first.description, /data-customer|Alice/iu);
+});
+
+test('classifies encoded resources, control-split credentials, incomplete markup and selected private metadata', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.pages[0].finalUrl =
+    'https://servico.exemplo.test/final?preview=data%3Aimage%2Fpng%3Bbase64%2CQ1NWX1VSTF9TRU5USU5FTA%3D%3D';
+  input.occurrences[0].justification = '<script DESCRIPTION_PRIVATE_SENTINEL';
+  input.occurrences[0].target.selector = 'javascript:SELECTOR_PRIVATE_SENTINEL';
+  input.occurrences[0].target.framePath = ['resource:public FRAME_PRIVATE_SENTINEL'];
+  input.occurrences[0].accessiblePreview = 'to\u0000ken=PREVIEW_PRIVATE_SENTINEL';
+  const targetEvidence = input.evidence.find(entry => entry.evidenceId === 'ev-control');
+  targetEvidence.accessibility.nameSource = [
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB',
+    'QUJD'.repeat(20),
+    'REVG'.repeat(20),
+    'SOURCE_PRIVATE_SENTINEL',
+  ].join('\n');
+  targetEvidence.hash = 'PRIVATE_EVIDENCE_HASH_SENTINEL';
+  input.integrity.canonicalModelHash = 'auth=MODEL_HASH_PRIVATE_SENTINEL';
+  input.integrity.evidenceManifestHash = 'PRIVATE_MANIFEST_HASH_SENTINEL';
+  const original = structuredClone(input);
+
+  const csv = renderOccurrenceCsv(input);
+  const first = asRecord(parseQuotedCsv(csv)[1]);
+
+  assert.deepEqual(input, original);
+  assert.equal(first.page_url, '[recurso omitido]');
+  assert.equal(first.description, '[marcação omitida]');
+  assert.equal(first.selector, '[marcação omitida]');
+  assert.equal(first.frame_path, '[recurso omitido]');
+  assert.equal(first.accessible_preview, '[conteúdo sensível omitido]');
+  assert.equal(first.accessible_preview_source, '[recurso omitido]');
+  assert.equal(first.evidence_hashes, '[conteúdo sensível omitido]');
+  assert.equal(first.canonical_model_hash, 'auth=[redacted]');
+  assert.equal(first.evidence_manifest_hash, '[conteúdo sensível omitido]');
+  assert.doesNotMatch(csv, /PRIVATE|SENTINEL|iVBOR|QUJD|REVG|data(?::|%3A)|resource:|javascript:|<script/iu);
+});
+
+test('keeps scanning valid percent escapes when a different escape is malformed', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.pages[0].finalUrl =
+    'https://servico.exemplo.test/final?bad=%ZZ&preview=data%3Atext%2Fplain%3Bbase64%2CSGVsbG8';
+
+  const pageUrl = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]).page_url;
+
+  assert.equal(pageUrl, '[recurso omitido]');
+  assert.doesNotMatch(pageUrl, /%ZZ|data|SGVsbG8/iu);
+});
+
+test('omits resource payloads hidden behind nested percent encoding', () => {
+  for (const encoded of [
+    'data%253Atext%252Fplain%253Bbase64%252CSGVsbG8',
+    '%252564%252561%252574%252561%25253Atext%25252Fplain%25253Bbase64%25252CSGVsbG8',
+  ]) {
+    const input = structuredClone(SAMPLE_AUDIT);
+    input.pages[0].finalUrl = `https://servico.exemplo.test/final?preview=${encoded}`;
+
+    const pageUrl = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]).page_url;
+
+    assert.equal(pageUrl, '[recurso omitido]');
+    assert.doesNotMatch(pageUrl, /data|base64|SGVsbG8|%25/iu);
+  }
+});
+
+test('omits long base64 payloads split by spaces without collapsing ordinary prose', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.occurrences[0].accessiblePreview = Array.from({ length: 40 }, () => 'QUJD').join(' ');
+  input.occurrences[0].justification =
+    'This ordinary announcement preserves a long human sentence with common words and natural spaces for every reader. '.repeat(3);
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.accessible_preview, '[recurso omitido]');
+  assert.match(first.description, /^This ordinary announcement/iu);
+  assert.doesNotMatch(first.accessible_preview, /QUJD/iu);
+});
+
+test('bounds the emitted scalar before hostile classification so an omitted tail cannot affect safe visible prose', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.occurrences[0].justification = `${'texto humano '.repeat(4_000)}<script>TAIL_PRIVATE_SENTINEL</script>`;
+
+  const description = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]).description;
+
+  assert.equal([...description].length, 32_000);
+  assert.match(description, /^texto humano /u);
+  assert.match(description, /…\[truncated\]$/u);
+  assert.doesNotMatch(description, /TAIL_PRIVATE_SENTINEL|<script|marcação omitida/iu);
 });
 
 test('neutralizes every spreadsheet-danger prefix once in CSV only and leaves safe leading characters unchanged', () => {
@@ -164,7 +394,7 @@ test('exports only the header for zero occurrences and keeps a realistic 512-occ
 
 test('bounds individual text deterministically and rejects oversized total output explicitly', () => {
   const input = structuredClone(SAMPLE_AUDIT);
-  input.occurrences[0].accessiblePreview = 'A'.repeat(40_000);
+  input.occurrences[0].accessiblePreview = 'texto humano '.repeat(4_000);
   const preview = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]).accessible_preview;
   assert.equal([...preview].length, 32_000);
   assert.match(preview, /…\[truncated\]$/u);
@@ -173,7 +403,7 @@ test('bounds individual text deterministically and rejects oversized total outpu
   huge.occurrences = Array.from({ length: 264 }, (_, index) => ({
     ...structuredClone(SAMPLE_AUDIT.occurrences[0]),
     occurrenceId: `occ-huge-${index}`,
-    accessiblePreview: 'A'.repeat(32_000),
+    accessiblePreview: 'texto humano '.repeat(4_000),
   }));
   huge.manualReview = [];
   huge.reviewDecisions = [];

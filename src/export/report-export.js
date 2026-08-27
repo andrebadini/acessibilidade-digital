@@ -4,7 +4,7 @@ import { renderOccurrenceCsv } from '../core/report/csv.js';
 import { renderTechnicalJson } from '../core/report/earl-json.js';
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { renderHtmlReport } from '../core/report/html.js';
-import { createExportIssue, issueForPrintStage } from './export-issues.js';
+import { createExportIssue, issueForPrintStage, PDF_GENERATION_FAILURE_CODES } from './export-issues.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const PDF_COMMAND_TIMEOUT_MS = 45_000;
@@ -18,19 +18,25 @@ export async function runReportExport(request, dependencies) {
   let model = original;
   let html = renderHtmlReport(model);
   let pdf = null;
-  let printResult = null;
+  let pdfFallback = false;
   const generationIssues = [];
-  const printUrl = dependencies.urlApi.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+  let printUrl = null;
   let tabId = null;
   let cdp = null;
-  let stage = 'tab';
+  let stage = 'blob';
   try {
+    printUrl = dependencies.urlApi.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+    if (typeof printUrl !== 'string' || !printUrl.startsWith('blob:')) {
+      throw new TypeError('A preparação da impressão não forneceu Blob URL válido.');
+    }
+    stage = 'tab';
     const tab = await adoptBoundary(
       dependencies.tabAdapter.createPrintTab({ url: printUrl, active: false }), timeoutMs,
-      lateTab => Number.isSafeInteger(lateTab?.id) ? dependencies.tabAdapter.removeTab(lateTab.id) : undefined,
+      lateTab => {
+        try { return dependencies.tabAdapter.removeTab(snapshotTabId(lateTab)); } catch { return undefined; }
+      },
     );
-    if (!Number.isSafeInteger(tab?.id)) throw new TypeError('A aba de impressão não forneceu ID válido.');
-    tabId = tab.id;
+    tabId = snapshotTabId(tab);
     stage = 'load';
     await boundary(dependencies.tabAdapter.waitForReady(tabId, { timeoutMs }), timeoutMs, 'A preparação da aba de impressão excedeu o tempo limite.');
     stage = 'cdp';
@@ -41,9 +47,11 @@ export async function runReportExport(request, dependencies) {
     stage = 'assets';
     await boundary(dependencies.tabAdapter.waitForAssets(cdp, { timeoutMs }), timeoutMs, 'A preparação de fontes e imagens excedeu o tempo limite.');
     stage = 'pdf';
-    printResult = await boundary((dependencies.pdfRenderer ?? renderPdf)(cdp), Math.max(timeoutMs, PDF_COMMAND_TIMEOUT_MS + 5_000), 'A impressão do PDF excedeu o tempo limite.');
-    pdf = printResult.bytes;
-    if (printResult.usedFallback) generationIssues.push(createExportIssue('REPORT_PDF_TAGGING_UNSUPPORTED'));
+    const renderedPdf = await boundary((dependencies.pdfRenderer ?? renderPdf)(cdp), Math.max(timeoutMs, PDF_COMMAND_TIMEOUT_MS + 5_000), 'A impressão do PDF excedeu o tempo limite.');
+    const checkedPdf = snapshotPdfResult(renderedPdf);
+    pdf = checkedPdf.bytes;
+    pdfFallback = checkedPdf.usedFallback;
+    if (pdfFallback) generationIssues.push(createExportIssue('REPORT_PDF_TAGGING_UNSUPPORTED'));
   } catch (error) {
     generationIssues.push(issueForPrintStage(stage, error));
   } finally {
@@ -53,16 +61,23 @@ export async function runReportExport(request, dependencies) {
     if (tabId !== null) {
       try { await boundary(dependencies.tabAdapter.removeTab(tabId), timeoutMs, 'A remoção da aba de impressão excedeu o tempo limite.'); } catch { generationIssues.push(createExportIssue('REPORT_PRINT_CLEANUP_LIMITED')); }
     }
-    try { dependencies.urlApi.revokeObjectURL(printUrl); } catch { generationIssues.push(createExportIssue('REPORT_PRINT_CLEANUP_LIMITED')); }
+    if (printUrl !== null) {
+      try { dependencies.urlApi.revokeObjectURL(printUrl); } catch { generationIssues.push(createExportIssue('REPORT_PRINT_CLEANUP_LIMITED')); }
+    }
   }
 
-  model = await finalizeGeneratedModel(original, at, generationIssues, Boolean(pdf), Boolean(printResult?.usedFallback));
+  model = await finalizeGeneratedModel(original, at, generationIssues, Boolean(pdf), pdfFallback);
   let csv = null;
   try {
-    csv = (dependencies.csvRenderer ?? renderOccurrenceCsv)(model);
+    const canonicalCsv = renderOccurrenceCsv(model);
+    const renderedCsv = dependencies.csvRenderer ? dependencies.csvRenderer(model) : canonicalCsv;
+    if (typeof renderedCsv !== 'string' || renderedCsv !== canonicalCsv) {
+      throw new TypeError('O renderizador CSV não retornou a projeção canônica esperada.');
+    }
+    csv = renderedCsv;
   } catch {
     generationIssues.push(createExportIssue('REPORT_CSV_UNAVAILABLE'));
-    model = await finalizeGeneratedModel(original, at, generationIssues, Boolean(pdf), Boolean(printResult?.usedFallback), true, false);
+    model = await finalizeGeneratedModel(original, at, generationIssues, Boolean(pdf), pdfFallback, true, false);
   }
   html = renderHtmlReport(model);
   const json = renderTechnicalJson(model);
@@ -70,20 +85,30 @@ export async function runReportExport(request, dependencies) {
   const downloads = await downloadArtifacts({
     baseName, html, json, ...(csv === null ? {} : { csv }), ...(pdf ? { pdf } : {}),
   }, dependencies.downloadsAdapter, { timeoutMs });
+  const missingGenerationLimitations = [];
+  if (csv === null) missingGenerationLimitations.push(createExportIssue('REPORT_CSV_UNAVAILABLE').message);
+  if (!pdf) {
+    const pdfIssue = generationIssues.find(issue => PDF_GENERATION_FAILURE_CODES.includes(issue.code));
+    missingGenerationLimitations.push((pdfIssue ?? createExportIssue('REPORT_PDF_UNAVAILABLE')).message);
+  }
+  const deliveryLimitations = [...new Set([...missingGenerationLimitations, ...downloads.limitations])];
   const deliveryReceipt = {
-    status: downloads.formats.every(format => format.status === 'complete') && downloads.limitations.length === 0 ? 'complete' : 'partial',
+    status: downloads.formats.length === 4 && downloads.formats.every(format => format.status === 'complete') && deliveryLimitations.length === 0
+      ? 'complete'
+      : 'partial',
     formats: downloads.formats,
-    limitations: downloads.limitations,
+    limitations: deliveryLimitations,
   };
   return {
     model,
     html,
     json,
     csv,
+    pdf,
     formats: downloads.formats,
     deliveryReceipt,
     limitations: [...new Set([...generationIssues.map(issue => issue.message), ...downloads.limitations])],
-    pdfFallback: Boolean(printResult?.usedFallback),
+    pdfFallback,
   };
 }
 
@@ -138,6 +163,86 @@ function validateDependencies(dependencies) {
     if (typeof dependencies.tabAdapter?.[method] !== 'function') throw new TypeError(`Adaptador de aba sem ${method}.`);
   }
   if (!dependencies.downloadsAdapter) throw new TypeError('Adaptador de downloads indisponível.');
+}
+
+function snapshotPdfResult(value) {
+  if (value === null || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new TypeError('O renderizador PDF não retornou um registro válido.');
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== 3 || !['bytes', 'usedFallback', 'limitations'].every(key => keys.includes(key))) {
+    throw new TypeError('O renderizador PDF não retornou o esquema esperado.');
+  }
+  const fields = Object.create(null);
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (typeof key !== 'string' || !descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) {
+      throw new TypeError('O renderizador PDF retornou campos inseguros.');
+    }
+    fields[key] = descriptor.value;
+  }
+  if (typeof fields.usedFallback !== 'boolean' || !Array.isArray(fields.limitations)) {
+    throw new TypeError('O renderizador PDF retornou metadados inválidos.');
+  }
+  const limitations = snapshotStringArray(fields.limitations);
+  if (!fields.usedFallback && limitations.length !== 0) {
+    throw new TypeError('O renderizador PDF retornou limitações incompatíveis.');
+  }
+  const bytes = snapshotPdfBytes(fields.bytes);
+  try { structuredClone(value); } catch { throw new TypeError('O renderizador PDF retornou proxy ou valor inseguro.'); }
+  return { bytes, usedFallback: fields.usedFallback };
+}
+
+function snapshotTabId(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new TypeError('A aba de impressão não forneceu registro válido.');
+  }
+  const keys = Reflect.ownKeys(value);
+  if (!keys.includes('id')) throw new TypeError('A aba de impressão não forneceu ID válido.');
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (typeof key !== 'string' || !descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) {
+      throw new TypeError('A aba de impressão retornou propriedade insegura.');
+    }
+  }
+  const id = Object.getOwnPropertyDescriptor(value, 'id').value;
+  if (!Number.isSafeInteger(id) || id < 0) throw new TypeError('A aba de impressão não forneceu ID válido.');
+  try { structuredClone(value); } catch { throw new TypeError('A aba de impressão retornou proxy ou valor inseguro.'); }
+  return id;
+}
+
+function snapshotStringArray(value) {
+  if (Object.getPrototypeOf(value) !== Array.prototype) throw new TypeError('Lista de limitações PDF inválida.');
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+  if (!lengthDescriptor || !Object.hasOwn(lengthDescriptor, 'value') || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0 || lengthDescriptor.value > 8) {
+    throw new TypeError('Lista de limitações PDF inválida.');
+  }
+  const values = [];
+  for (let index = 0; index < lengthDescriptor.value; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable || typeof descriptor.value !== 'string') {
+      throw new TypeError('Lista de limitações PDF inválida.');
+    }
+    values.push(descriptor.value);
+  }
+  if (Reflect.ownKeys(value).length !== lengthDescriptor.value + 1) throw new TypeError('Lista de limitações PDF inválida.');
+  return values;
+}
+
+function snapshotPdfBytes(value) {
+  let source;
+  if (value instanceof ArrayBuffer) {
+    source = new Uint8Array(value);
+  } else if (ArrayBuffer.isView(value)) {
+    source = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  } else {
+    throw new TypeError('O renderizador PDF não retornou bytes válidos.');
+  }
+  const bytes = Uint8Array.from(source);
+  if (bytes.length < 5 || bytes[0] !== 0x25 || bytes[1] !== 0x50 || bytes[2] !== 0x44 || bytes[3] !== 0x46 || bytes[4] !== 0x2d) {
+    throw new TypeError('O renderizador PDF não retornou assinatura válida.');
+  }
+  return bytes;
 }
 
 function boundary(promise, timeoutMs, message) {

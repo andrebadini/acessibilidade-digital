@@ -18,6 +18,21 @@ const MESSAGES = Object.freeze({
   REPORT_EXPORT_PREPARATION_FAILED: 'Não foi possível preparar os artefatos do relatório.',
 });
 
+export const PDF_GENERATION_FAILURE_CODES = Object.freeze([
+  'REPORT_PRINT_TAB_TIMEOUT', 'REPORT_PRINT_TAB_FAILED',
+  'REPORT_PRINT_LOAD_TIMEOUT', 'REPORT_PRINT_LOAD_FAILED',
+  'REPORT_PRINT_CDP_TIMEOUT', 'REPORT_PRINT_CDP_FAILED',
+  'REPORT_PRINT_ASSETS_TIMEOUT', 'REPORT_PRINT_ASSETS_FAILED',
+  'REPORT_PDF_UNAVAILABLE',
+]);
+
+export const REPORT_GENERATION_ISSUE_CODES = Object.freeze([
+  ...PDF_GENERATION_FAILURE_CODES,
+  'REPORT_CSV_UNAVAILABLE',
+  'REPORT_PDF_TAGGING_UNSUPPORTED',
+  'REPORT_PRINT_CLEANUP_LIMITED',
+]);
+
 export function createExportIssue(code, format) {
   if (!Object.hasOwn(MESSAGES, code)) throw new TypeError('Código de limitação de exportação desconhecido.');
   const suffix = typeof format === 'string' && /^(?:html|json|csv|pdf)$/u.test(format) ? ` Formato: ${format.toUpperCase()}.` : '';
@@ -25,7 +40,7 @@ export function createExportIssue(code, format) {
 }
 
 export function issueForPrintStage(stage, error) {
-  const timeout = error?.name === 'TimeoutError';
+  const timeout = safeErrorName(error) === 'TimeoutError';
   const code = ({
     tab: timeout ? 'REPORT_PRINT_TAB_TIMEOUT' : 'REPORT_PRINT_TAB_FAILED',
     load: timeout ? 'REPORT_PRINT_LOAD_TIMEOUT' : 'REPORT_PRINT_LOAD_FAILED',
@@ -34,4 +49,23 @@ export function issueForPrintStage(stage, error) {
     pdf: 'REPORT_PDF_UNAVAILABLE',
   })[stage] ?? 'REPORT_PDF_UNAVAILABLE';
   return createExportIssue(code);
+}
+
+function safeErrorName(value) {
+  if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return '';
+  try {
+    let current = value;
+    for (let depth = 0; current && depth < 8; depth += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, 'name');
+      if (descriptor) {
+        if (Object.hasOwn(descriptor, 'value')) return typeof descriptor.value === 'string' ? descriptor.value : '';
+        if (current === globalThis.DOMException?.prototype && typeof descriptor.get === 'function') {
+          try { return Reflect.apply(descriptor.get, value, []); } catch { return ''; }
+        }
+        return '';
+      }
+      current = Object.getPrototypeOf(current);
+    }
+  } catch {}
+  return '';
 }
