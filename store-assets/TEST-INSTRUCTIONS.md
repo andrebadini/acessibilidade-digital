@@ -14,7 +14,7 @@ A extensão não exige conta, credencial, assinatura ou serviço externo.
 6. Em uma ocorrência de revisão, informe um nome de avaliador, selecione uma das três respostas, acrescente uma nota opcional e salve.
 7. Selecione “Gerar relatório atualizado”.
 8. Confirme os downloads HTML, JSON-LD/EARL e PDF.
-9. No relatório, confirme a moldura vermelha nas não conformidades, a moldura âmbar nos itens de revisão e a seção separada de PNGs originais com hashes.
+9. No relatório, confirme a moldura vermelha nas não conformidades, a moldura âmbar nos itens pendentes, a moldura verde após uma resposta humana “conforme” e a seção separada de PNGs originais com hashes.
 
 ## Permissão debugger
 

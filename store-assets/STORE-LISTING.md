@@ -18,7 +18,7 @@ Principais recursos:
 - verificações automatizadas e indicação transparente dos itens que exigem julgamento humano;
 - associação de ocorrências aos itens da ABNT e aos critérios WCAG correspondentes;
 - captura da página inteira e de elementos relacionados às ocorrências;
-- moldura vermelha para não conformidades e moldura âmbar para revisão humana;
+- moldura vermelha para não conformidades, âmbar para revisão pendente e verde após conformidade confirmada;
 - trecho HTML sanitizado, seletor e propriedades de acessibilidade;
 - cálculo do nome acessível e prévia explicativa do anúncio esperado por tecnologia assistiva;
 - revisão assistida com registro do avaliador, decisão, data e nota;

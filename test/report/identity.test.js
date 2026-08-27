@@ -48,7 +48,8 @@ test('keeps strict PNG validation for audit evidence without a brand image', () 
     const input = structuredClone(SAMPLE_AUDIT);
     input.evidence.artifacts[0].dataUrl = `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`;
     const html = renderHtmlReport(input);
-    assert.equal((html.match(/<img\b[^>]*>/gu) || []).length, 3);
+    assert.equal((html.match(/<svg\b[^>]*class="evidence-media"/gu) || []).length, 3);
+    assert.equal((html.match(/<image\b[^>]*href="data:image\/png;base64,/gu) || []).length, 1);
     assert.doesNotMatch(html, new RegExp(Buffer.from(bytes).toString('base64').replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
   }
 });

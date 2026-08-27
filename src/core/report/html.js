@@ -21,6 +21,8 @@ export function renderHtmlReport(input) {
   const counts = Object.fromEntries(Object.keys(STATUS).map(outcome => [outcome, model.itemResults.filter(item => item.outcome === outcome).length]));
   const itemById = new Map(model.itemResults.map(item => [item.id, item]));
   const artifactById = new Map(model.evidence.artifacts.map(artifact => [artifact.evidenceId, artifact]));
+  const imageRegistry = createImageRegistry(model.evidence.artifacts);
+  const decisionByOccurrence = new Map(model.reviewDecisions.map(decision => [decision.occurrenceId, decision]));
   return `<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -31,6 +33,7 @@ export function renderHtmlReport(input) {
 <style>${REPORT_CSS}</style>
 </head>
 <body>
+${imageDefinitions(imageRegistry.definitions)}
 <a class="skip-link" href="#conteudo">Ir para o conteúdo principal</a>
 ${header()}
 <main id="conteudo">
@@ -42,8 +45,8 @@ ${summary(model, counts)}
 ${scope(model)}
 ${methodology(model)}
 ${items(model)}
-${occurrences(model, itemById, artifactById)}
-${evidence(model)}
+${occurrences(model, itemById, artifactById, imageRegistry.byEvidenceId, decisionByOccurrence)}
+${evidence(model, imageRegistry.byEvidenceId)}
 ${review(model, itemById)}
 ${limitations(model)}
 ${editorial(model)}
@@ -79,31 +82,44 @@ function items(model) {
   return `<section class="major-section" aria-labelledby="itens"><h2 id="itens">Resultados por item</h2><div class="item-list">${model.itemResults.map((item, index) => `<article class="item-card" data-report-item="${escapeHtml(item.id)}" aria-labelledby="item-${index}"><div class="item-card__heading"><h3 id="item-${index}">${escapeHtml(item.id)} — ${escapeHtml(item.title)}</h3>${statusMarkup(item.outcome)}</div><dl class="meta"><dt>Classificação</dt><dd>${item.classification === 'requirement' ? 'Requisito' : 'Recomendação'}</dd><dt>Modo interno</dt><dd>${modeLabel(item.evaluation)}</dd><dt>WCAG 2.2</dt><dd>${item.wcag.length ? item.wcag.map(reference => `${escapeHtml(reference.id)} (${escapeHtml(reference.level)})`).join(', ') : 'Sem critério vinculado'}</dd><dt>Justificativa humana</dt><dd>${escapeHtml(item.humanReason || 'Não se aplica a este resultado.')}</dd></dl></article>`).join('')}</div></section>`;
 }
 
-function occurrences(model, itemById, artifactById) {
+function occurrences(model, itemById, artifactById, imageByEvidenceId, decisionByOccurrence) {
   return `<section class="major-section" aria-labelledby="ocorrencias"><h2 id="ocorrencias">Ocorrências e evidências</h2><p class="evidence-annotation-note"><strong>Marcação automática:</strong> a moldura é uma anotação visual aplicada no relatório; o PNG original permanece preservado e o respectivo hash continua verificável na seção de evidências.</p><div class="occurrence-list">${model.occurrences.map((occurrence, index) => {
     const item = itemById.get(occurrence.itemId);
     const selectors = occurrence.evidenceIds.map(id => artifactById.get(id)?.selector?.css).filter(Boolean);
-    return `<article class="occurrence-card" aria-labelledby="ocorrencia-${index}"><h3 id="ocorrencia-${index}">${escapeHtml(occurrence.occurrenceId)}</h3>${statusMarkup(occurrence.outcome)}<dl class="meta"><dt>Item ABNT</dt><dd>${escapeHtml(occurrence.itemId)} — ${escapeHtml(item?.title || '')}</dd><dt>Regra</dt><dd>${escapeHtml(occurrence.ruleId || 'revisão no nível da página')}</dd><dt>Modo</dt><dd>${modeLabel(occurrence.mode)}</dd><dt>Razão</dt><dd>${escapeHtml(occurrence.justification)}</dd><dt>Seletor</dt><dd>${selectors.length ? selectors.map(selector => `<code>${escapeHtml(selector)}</code>`).join(' ') : 'Página inteira ou seletor indisponível'}</dd><dt>Evidências</dt><dd>${occurrence.evidenceIds.map(id => `<code>${escapeHtml(id)}</code>`).join(' ') || 'Sem arquivo; consulte a limitação registrada.'}</dd></dl>${occurrenceEvidence(occurrence, artifactById)}</article>`;
+    const outcome = effectiveOccurrenceOutcome(occurrence, decisionByOccurrence.get(occurrence.occurrenceId));
+    return `<article class="occurrence-card" aria-labelledby="ocorrencia-${index}"><h3 id="ocorrencia-${index}">${escapeHtml(occurrence.occurrenceId)}</h3>${statusMarkup(outcome)}<dl class="meta"><dt>Item ABNT</dt><dd>${escapeHtml(occurrence.itemId)} — ${escapeHtml(item?.title || '')}</dd><dt>Regra</dt><dd>${escapeHtml(occurrence.ruleId || 'revisão no nível da página')}</dd><dt>Modo</dt><dd>${modeLabel(occurrence.mode)}</dd><dt>Razão</dt><dd>${escapeHtml(occurrence.justification)}</dd><dt>Seletor</dt><dd>${selectors.length ? selectors.map(selector => `<code>${escapeHtml(selector)}</code>`).join(' ') : 'Página inteira ou seletor indisponível'}</dd><dt>Evidências</dt><dd>${occurrence.evidenceIds.map(id => `<code>${escapeHtml(id)}</code>`).join(' ') || 'Sem arquivo; consulte a limitação registrada.'}</dd></dl>${occurrenceEvidence(occurrence, artifactById, imageByEvidenceId, outcome)}</article>`;
   }).join('')}</div></section>`;
 }
 
-function evidence(model) {
-  return `<section class="major-section" aria-labelledby="evidencias"><h2 id="evidencias">Evidências originais</h2><p>As imagens desta seção são os PNGs originais, sem a camada de anotação visual apresentada nas ocorrências.</p><div class="evidence-list">${model.evidence.artifacts.map((artifact, index) => `<article class="evidence-card" aria-labelledby="evidencia-${index}"><h3 id="evidencia-${index}">${escapeHtml(artifact.evidenceId)}</h3><dl class="meta"><dt>Tipo</dt><dd>${escapeHtml(artifact.kind)}</dd><dt>Hash</dt><dd><code>${escapeHtml(artifact.hash || 'não disponível')}</code></dd>${artifact.backendNodeId ? `<dt>Backend node</dt><dd>${escapeHtml(artifact.backendNodeId)}</dd>` : ''}${artifact.mediaUrl ? `<dt>URL da mídia</dt><dd>${safeMediaText(artifact.mediaUrl)}</dd>` : ''}</dl>${artifact.snippet ? `<details open><summary>Trecho HTML sanitizado</summary><pre><code>${escapeHtml(artifact.snippet)}</code></pre></details>` : ''}${accessibility(artifact.accessibility)}${isPngDataUrl(artifact.dataUrl) ? `<figure><img class="evidence-media" src="${escapeHtml(artifact.dataUrl)}" alt="${evidenceAlt(artifact)}"><figcaption>${artifact.kind === 'full-page' ? 'PNG original da captura integral do estado observado.' : `PNG original da captura do elemento ${escapeHtml(artifact.nodeId || '')}.`}</figcaption></figure>` : '<p>Imagem não incluída: formato ausente ou não permitido.</p>'}</article>`).join('')}</div></section>`;
+function evidence(model, imageByEvidenceId) {
+  return `<section class="major-section" aria-labelledby="evidencias"><h2 id="evidencias">Evidências originais</h2><p>As imagens desta seção são os PNGs originais, sem a camada de anotação visual apresentada nas ocorrências.</p><div class="evidence-list">${model.evidence.artifacts.map((artifact, index) => {
+    const image = imageByEvidenceId.get(artifact.evidenceId);
+    return `<article class="evidence-card" aria-labelledby="evidencia-${index}"><h3 id="evidencia-${index}">${escapeHtml(artifact.evidenceId)}</h3><dl class="meta"><dt>Tipo</dt><dd>${escapeHtml(artifact.kind)}</dd><dt>Hash</dt><dd><code>${escapeHtml(artifact.hash || 'não disponível')}</code></dd>${artifact.backendNodeId ? `<dt>Backend node</dt><dd>${escapeHtml(artifact.backendNodeId)}</dd>` : ''}${artifact.mediaUrl ? `<dt>URL da mídia</dt><dd>${safeMediaText(artifact.mediaUrl)}</dd>` : ''}</dl>${artifact.snippet ? `<details open><summary>Trecho HTML sanitizado</summary><pre><code>${escapeHtml(artifact.snippet)}</code></pre></details>` : ''}${accessibility(artifact.accessibility)}${image ? `<figure>${renderEvidenceImage(image, evidenceAlt(artifact))}<figcaption>${artifact.kind === 'full-page' ? 'PNG original da captura integral do estado observado.' : `PNG original da captura do elemento ${escapeHtml(artifact.nodeId || '')}.`}</figcaption></figure>` : '<p>Imagem não incluída: formato ausente ou não permitido.</p>'}</article>`;
+  }).join('')}</div></section>`;
 }
 
-function occurrenceEvidence(occurrence, artifactById) {
+function occurrenceEvidence(occurrence, artifactById, imageByEvidenceId, outcome) {
   const artifacts = occurrence.evidenceIds.map(id => artifactById.get(id)).filter(Boolean);
-  const artifact = artifacts.find(value => value.kind === 'element' && isPngDataUrl(value.dataUrl))
-    || artifacts.find(value => value.kind === 'full-page' && isPngDataUrl(value.dataUrl));
+  const artifact = artifacts.find(value => value.kind === 'element' && imageByEvidenceId.has(value.evidenceId))
+    || artifacts.find(value => value.kind === 'full-page' && imageByEvidenceId.has(value.evidenceId));
   if (!artifact) return '<p>Captura marcada indisponível; consulte a limitação e os demais registros da ocorrência.</p>';
-  const failed = occurrence.outcome === 'failed';
-  const tone = failed ? 'failed' : 'review';
+  const image = imageByEvidenceId.get(artifact.evidenceId);
+  const tone = outcome === 'failed' ? 'failed' : outcome === 'passed' ? 'passed' : 'review';
   const frame = highlightStyle(artifact);
-  const legend = failed
+  const legend = tone === 'failed'
     ? 'Moldura vermelha: não conformidade detectada ou confirmada.'
-    : 'Moldura âmbar: elemento ou página que depende de revisão humana.';
-  const subject = artifact.kind === 'element' ? `elemento ${artifact.nodeId || 'auditado'}` : 'página auditada';
-  return `<figure class="occurrence-evidence"><div class="evidence-highlight-frame"><img class="evidence-media" src="${escapeHtml(artifact.dataUrl)}" alt="Captura do ${escapeHtml(subject)}; ${escapeHtml(legend)}"><span class="evidence-highlight evidence-highlight--${tone}" style="${frame}" aria-hidden="true"></span></div><figcaption><strong>${escapeHtml(legend)}</strong> ${artifact.kind === 'full-page' ? 'Não foi identificado um alvo elementar; a moldura delimita a evidência no nível da página.' : 'A caixa acompanha automaticamente as coordenadas do alvo dentro do recorte.'}</figcaption></figure>`;
+    : tone === 'passed'
+      ? 'Moldura verde: conformidade confirmada na revisão humana.'
+      : 'Moldura âmbar: elemento ou página que depende de revisão humana.';
+  const subject = artifact.kind === 'element' ? `do elemento ${artifact.nodeId || 'auditado'}` : 'da página auditada';
+  return `<figure class="occurrence-evidence"><div class="evidence-highlight-frame">${renderEvidenceImage(image, `Captura ${subject}; ${legend}`)}<span class="evidence-highlight evidence-highlight--${tone}" style="${frame}" aria-hidden="true"></span></div><figcaption><strong>${escapeHtml(legend)}</strong> ${artifact.kind === 'full-page' ? 'Não foi identificado um alvo elementar; a moldura delimita a evidência no nível da página.' : 'A caixa acompanha automaticamente as coordenadas do alvo dentro do recorte.'}</figcaption></figure>`;
+}
+
+function effectiveOccurrenceOutcome(occurrence, decision) {
+  if (occurrence.outcome === 'failed' || decision?.answer === 'não conforme') return 'failed';
+  if (decision?.answer === 'conforme') return 'passed';
+  if (decision?.answer === 'não foi possível determinar') return 'cantTell';
+  return occurrence.outcome;
 }
 
 function highlightStyle(artifact) {
@@ -177,7 +193,7 @@ function modeLabel(mode) {
 }
 
 function evidenceAlt(artifact) {
-  return escapeHtml(artifact.kind === 'full-page' ? 'Captura integral da página auditada' : `Captura do elemento auditado ${artifact.nodeId || ''}`);
+  return artifact.kind === 'full-page' ? 'Captura integral da página auditada' : `Captura do elemento auditado ${artifact.nodeId || ''}`;
 }
 
 function safeMediaText(value) {
@@ -185,7 +201,34 @@ function safeMediaText(value) {
   return /^https?:\/\//u.test(sanitized) ? `<code>${escapeHtml(sanitized)}</code>` : 'URL omitida por segurança.';
 }
 
-function isPngDataUrl(value) {
+function createImageRegistry(artifacts) {
+  const definitions = [];
+  const byEvidenceId = new Map();
+  for (const artifact of artifacts) {
+    const metadata = pngMetadata(artifact.dataUrl);
+    if (!metadata) continue;
+    const image = Object.freeze({
+      id: `evidence-image-${definitions.length}`,
+      dataUrl: artifact.dataUrl,
+      width: metadata.width,
+      height: metadata.height,
+    });
+    definitions.push(image);
+    byEvidenceId.set(artifact.evidenceId, image);
+  }
+  return { definitions, byEvidenceId };
+}
+
+function imageDefinitions(definitions) {
+  if (definitions.length === 0) return '';
+  return `<svg class="evidence-definitions" aria-hidden="true" width="0" height="0" focusable="false"><defs>${definitions.map(image => `<image id="${image.id}" href="${escapeHtml(image.dataUrl)}" width="${image.width}" height="${image.height}" preserveAspectRatio="xMidYMid meet"></image>`).join('')}</defs></svg>`;
+}
+
+function renderEvidenceImage(image, accessibleName) {
+  return `<svg class="evidence-media" role="img" aria-label="${escapeHtml(accessibleName)}" viewBox="0 0 ${image.width} ${image.height}" width="${image.width}" height="${image.height}" preserveAspectRatio="xMidYMid meet" focusable="false"><use href="#${image.id}"></use></svg>`;
+}
+
+function pngMetadata(value) {
   if (typeof value !== 'string' || !value.startsWith('data:image/png;base64,')) return false;
   const encoded = value.slice('data:image/png;base64,'.length);
   if (!/^[A-Za-z0-9+/]+={0,2}$/u.test(encoded)) return false;
@@ -193,8 +236,7 @@ function isPngDataUrl(value) {
     const binary = atob(encoded);
     if (binary.length > MAX_PNG_BYTES) return false;
     const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
-    parsePng(bytes);
-    return true;
+    return parsePng(bytes);
   } catch {
     return false;
   }

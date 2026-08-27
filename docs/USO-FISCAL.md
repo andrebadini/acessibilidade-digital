@@ -20,7 +20,7 @@ Os hashes SHA-256 ajudam a comparar bytes e manifestos, mas não são assinatura
 
 ## Destaques automáticos nas capturas
 
-Cada ocorrência apresentada no HTML e no PDF inclui uma prévia marcada quando existe evidência visual. A moldura vermelha, acompanhada do texto “não conformidade detectada ou confirmada”, identifica falhas. A moldura âmbar, acompanhada do texto “depende de revisão humana”, identifica itens que ainda exigem julgamento. Quando não há alvo elementar confiável, a moldura delimita a evidência da página inteira e o relatório informa essa limitação.
+Cada ocorrência apresentada no HTML e no PDF inclui uma prévia marcada quando existe evidência visual. A moldura vermelha, acompanhada do texto “não conformidade detectada ou confirmada”, identifica falhas. A moldura âmbar, acompanhada do texto “depende de revisão humana”, identifica itens que ainda exigem julgamento. Após uma decisão humana, “conforme” produz moldura verde, “não conforme” produz moldura vermelha e “não foi possível determinar” conserva a moldura âmbar. Quando não há alvo elementar confiável, a moldura delimita a evidência da página inteira e o relatório informa essa limitação.
 
 A marcação é uma camada de apresentação do relatório. O PNG original, sem sobreposição, permanece na seção de evidências originais com seu hash. Essa separação permite comparar a imagem-fonte com a versão destacada sem alterar a evidência coletada.
 

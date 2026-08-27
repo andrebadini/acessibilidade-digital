@@ -17,7 +17,7 @@ Abra o painel, informe uma URL HTTP(S) e escolha **Auditar**. Ao final, revise o
 
 A auditoria captura a página inteira e elementos, incluindo pixels e dados sensíveis que estejam visíveis. Essas evidências permanecem no dispositivo e são incorporadas aos relatórios; oculte ou remova dados sensíveis antes de iniciar.
 
-Nos relatórios, cada ocorrência com alvo recebe automaticamente uma moldura: vermelha para não conformidade e âmbar para revisão humana. A miniatura inclui margem ao redor do alvo; a anotação é aplicada na apresentação HTML/PDF, enquanto o PNG original e o hash permanecem preservados na seção de evidências.
+Nos relatórios, cada ocorrência com alvo recebe automaticamente uma moldura: vermelha para não conformidade e âmbar enquanto depende de revisão humana. Depois da revisão, uma resposta “conforme” muda a moldura para verde e uma resposta “não conforme” para vermelha; uma resposta inconclusiva permanece âmbar. A miniatura inclui margem ao redor do alvo; a anotação é aplicada na apresentação HTML/PDF, enquanto o PNG original e o hash permanecem preservados na seção de evidências.
 
 As permissões `tabs` e `scripting` abrem e observam somente a aba descartável criada pela auditoria. `debugger` dá acesso local ao protocolo do Chrome para estrutura, evidência e impressão. `downloads` salva os artefatos e `storage` mantém auditoria e andamento no dispositivo. Os sites auditados são cobertos por `host_permissions` HTTP(S).
 
