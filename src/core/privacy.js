@@ -81,13 +81,13 @@ export function sanitizeJsonData(value, ancestors = new WeakSet()) {
   }
 }
 
-function sensitiveControl(node) {
-  if (String(node?.tagName || '').toLowerCase() !== 'input') return false;
+function editableControl(node) {
+  const tagName = String(node?.tagName || '').toLowerCase();
   const attributes = node?.attributes && typeof node.attributes === 'object' ? node.attributes : {};
-  const type = String(attributes.type || node?.form?.type || 'text').trim().toLowerCase();
-  const autocomplete = String(attributes.autocomplete || '').trim().toLowerCase();
-  return type === 'password' || ['current-password', 'new-password', 'one-time-code'].includes(autocomplete) ||
-    (type === 'hidden' && SENSITIVE_KEY.test(`${attributes.id || ''} ${attributes.name || ''} ${autocomplete}`));
+  const contenteditable = String(attributes.contenteditable ?? '').trim().toLowerCase();
+  return ['input', 'select', 'textarea'].includes(tagName) || (
+    Object.hasOwn(attributes, 'contenteditable') && !['false', 'inherit'].includes(contenteditable)
+  );
 }
 
 function removeRuntimeValues(value, ancestors = new WeakSet()) {
@@ -104,16 +104,34 @@ function removeRuntimeValues(value, ancestors = new WeakSet()) {
 }
 
 /** Final privacy boundary for a fully merged normalized node. */
-export function redactNormalizedNode(input, { executable = false } = {}) {
+export function redactNormalizedNode(input, { executable = false, privateText = false } = {}) {
   const node = sanitizeJsonData(input);
   node.attributes = node.attributes && typeof node.attributes === 'object' ? node.attributes : {};
   for (const name of Object.keys(node.attributes)) {
     if (name === 'style' || name === 'srcdoc' || /^on/iu.test(name)) delete node.attributes[name];
   }
-  const sensitive = sensitiveControl(node);
-  if (sensitive) {
+  const editable = editableControl(node);
+  if (editable) {
     delete node.attributes.value;
+    delete node.attributes['aria-valuenow'];
+    delete node.attributes['aria-valuetext'];
     delete node.axValue;
+    node.text = '';
+    node.visibleText = '';
+    removeRuntimeValues(node);
+    delete node.form?.selectedIndex;
+    delete node.form?.selectionStart;
+    delete node.form?.selectionEnd;
+    node.valueStatus = 'omitted-privacy';
+  }
+  if (node.tagName === 'option') {
+    delete node.attributes.value;
+    delete node.attributes.selected;
+    delete node.attributes['aria-selected'];
+    delete node.selected;
+    delete node.form?.selected;
+  }
+  if (privateText) {
     node.text = '';
     node.visibleText = '';
     removeRuntimeValues(node);

@@ -95,8 +95,6 @@ function targetNodeId(target) {
   return null;
 }
 
-const SENSITIVE_AUTOCOMPLETE = new Set(['current-password', 'new-password', 'one-time-code']);
-
 function normalizedText(value) {
   return typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '';
 }
@@ -106,17 +104,19 @@ function nodeAttribute(node, name) {
   return typeof value === 'string' ? value : value === true ? '' : undefined;
 }
 
-function sensitiveControl(node) {
-  const inputType = normalizedText(nodeAttribute(node, 'type') || node?.form?.type).toLowerCase();
-  const autocomplete = normalizedText(nodeAttribute(node, 'autocomplete') || node?.form?.autocomplete).toLowerCase().split(' ').filter(Boolean);
-  return normalizedText(node?.tagName).toLowerCase() === 'input' && (
-    inputType === 'password' || autocomplete.some(token => SENSITIVE_AUTOCOMPLETE.has(token))
+function editableControl(node) {
+  const tag = normalizedText(node?.tagName).toLowerCase();
+  const contenteditable = normalizedText(nodeAttribute(node, 'contenteditable')).toLowerCase();
+  return ['input', 'select', 'textarea'].includes(tag) || (
+    Object.hasOwn(node?.attributes || {}, 'contenteditable') && !['false', 'inherit'].includes(contenteditable)
   );
 }
 
 function observedBoolean(node, property, ariaName) {
   const direct = Object.hasOwn(node || {}, property) ? node[property] : undefined;
   if (direct === true || direct === false || (property === 'checked' && direct === 'mixed')) return direct;
+  const form = Object.hasOwn(node?.form || {}, property) ? node.form[property] : undefined;
+  if (form === true || form === false || (property === 'checked' && form === 'mixed')) return form;
   const aria = normalizedText(nodeAttribute(node, ariaName)).toLowerCase();
   if (aria === 'true') return true;
   if (aria === 'false') return false;
@@ -133,7 +133,7 @@ function observedPresence(node, property, ariaName, nativeName = property) {
 
 function nativeRole(node) {
   const tag = normalizedText(node?.tagName).toLowerCase();
-  const type = normalizedText(nodeAttribute(node, 'type')).toLowerCase();
+  const type = normalizedText(nodeAttribute(node, 'type') || node?.form?.type || 'text').toLowerCase();
   if (tag === 'button') return 'button';
   if (tag === 'a' && nodeAttribute(node, 'href') !== undefined) return 'link';
   if (tag === 'select') return 'combobox';
@@ -142,10 +142,24 @@ function nativeRole(node) {
   if (tag === 'input') {
     if (type === 'checkbox') return 'checkbox';
     if (type === 'radio') return 'radio';
-    if (['button', 'reset', 'submit'].includes(type)) return 'button';
-    if (type !== 'hidden') return 'textbox';
+    if (['button', 'image', 'reset', 'submit'].includes(type)) return 'button';
+    if (type === 'range') return 'slider';
+    if (type === 'number') return 'spinbutton';
+    if (['', 'email', 'password', 'search', 'tel', 'text', 'url'].includes(type)) return 'textbox';
   }
   return '';
+}
+
+const CHECKED_ROLES = new Set(['checkbox', 'menuitemcheckbox', 'menuitemradio', 'radio', 'switch']);
+const SELECTED_ROLES = new Set(['gridcell', 'option', 'row', 'tab', 'treeitem']);
+const EXPANDED_ROLES = new Set(['button', 'combobox', 'link', 'menuitem', 'row', 'treeitem']);
+const DISABLED_ROLES = new Set(['button', 'checkbox', 'combobox', 'link', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'radio', 'slider', 'spinbutton', 'switch', 'tab', 'textbox', 'treeitem']);
+const REQUIRED_ROLES = new Set(['checkbox', 'combobox', 'radio', 'slider', 'spinbutton', 'switch', 'textbox']);
+const INVALID_ROLES = new Set(['checkbox', 'combobox', 'radio', 'slider', 'spinbutton', 'switch', 'textbox']);
+
+function compatibleState(node, role, property, ariaName, roles, presence = false) {
+  if (!roles.has(role)) return undefined;
+  return presence ? observedPresence(node, property, ariaName) : observedBoolean(node, property, ariaName);
 }
 
 function elementAccessibility(node, indexes) {
@@ -154,20 +168,15 @@ function elementAccessibility(node, indexes) {
     description: normalizedText(node?.accessibleDescription),
   });
   const role = normalizedText(node?.axRole || node?.role || nodeAttribute(node, 'role') || nativeRole(node)).toLowerCase();
-  const sensitive = sensitiveControl(node);
-  const value = sensitive ? '' : normalizedText(node?.axValue);
-  const checked = observedBoolean(node, 'checked', 'aria-checked');
-  const selected = observedBoolean(node, 'selected', 'aria-selected');
-  const expanded = observedBoolean(node, 'expanded', 'aria-expanded');
-  const disabled = observedPresence(node, 'disabled', 'aria-disabled');
-  const required = observedPresence(node, 'required', 'aria-required');
-  const invalid = observedBoolean(node, 'invalid', 'aria-invalid');
+  const editable = editableControl(node);
+  const checked = compatibleState(node, role, 'checked', 'aria-checked', CHECKED_ROLES);
+  const selected = compatibleState(node, role, 'selected', 'aria-selected', SELECTED_ROLES);
+  const expanded = compatibleState(node, role, 'expanded', 'aria-expanded', EXPANDED_ROLES);
+  const disabled = compatibleState(node, role, 'disabled', 'aria-disabled', DISABLED_ROLES, true);
+  const required = compatibleState(node, role, 'required', 'aria-required', REQUIRED_ROLES, true);
+  const invalid = compatibleState(node, role, 'invalid', 'aria-invalid', INVALID_ROLES);
   const previewProperties = {
     ...text, role, checked, selected, expanded, disabled, required, invalid,
-    sensitive,
-    inputType: nodeAttribute(node, 'type') || node?.form?.type || '',
-    autocomplete: nodeAttribute(node, 'autocomplete') || node?.form?.autocomplete || '',
-    ...(value ? { value, valueDisclosure: 'safe' } : {}),
   };
   const states = [];
   if (checked === true) states.push('marcado');
@@ -183,9 +192,9 @@ function elementAccessibility(node, indexes) {
   return {
     ...text,
     role,
-    ...(value ? { value } : {}),
+    ...(editable ? { valueStatus: 'omitted-privacy' } : {}),
     states,
-    visibleText: sensitive ? '' : normalizedText(node?.visibleText),
+    visibleText: editable ? '' : normalizedText(node?.visibleText),
     announcementPreview: buildAnnouncementPreview(previewProperties).text,
   };
 }

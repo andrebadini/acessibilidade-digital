@@ -23,6 +23,19 @@ test('keeps adversarial source inert and free of executable surfaces and secrets
   assert.doesNotMatch(source, /script|style|onclick|formaction|javascript:|TOPSECRET/iu);
 });
 
+test('omits current editable values while preserving static select option labels', () => {
+  const secret = 'TOPSECRET-editable';
+  const source = sanitizeHtmlSnippetSource([
+    `<input type=text name=api_key value="${secret}" aria-valuenow="${secret}" aria-valuetext="${secret}">`,
+    `<textarea>${secret}</textarea>`,
+    `<select value="${secret}"><option value="${secret}" selected>Rótulo público</option><option value=other>Outro</option></select>`,
+    `<div contenteditable=true>${secret}<span>${secret}</span></div>`,
+  ].join(''));
+
+  assert.equal(source, '<input type="text" name="api_key"><textarea></textarea><select><option>Rótulo público</option><option>Outro</option></select><div contenteditable="true"><span></span></div>');
+  assert.doesNotMatch(source, /TOPSECRET|\bvalue=|\bselected\b|aria-value/iu);
+});
+
 test('removes executable elements and inline execution attributes while preserving structure and ARIA', () => {
   const html = '<DIV aria-label="Abrir" OnClick="steal()" style="background:url(data:text/plain,STYLE_MARKER)"><script>bad()</script><style>body{display:none}</style><template><img onerror=bad()></template><span role="img">Ícone</span></DIV>';
   const snippet = sanitizeHtmlSnippet(html);

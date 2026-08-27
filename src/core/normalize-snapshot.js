@@ -19,12 +19,14 @@ export function sanitizeResourceUrl(value, base) {
   return sanitizeEvidenceUrl(value, base);
 }
 
-function sensitiveElement(tagName, attributes) {
-  if (tagName !== 'input') return false;
-  const type = cleanText(attributes.type || 'text').toLowerCase();
-  const autocomplete = cleanText(attributes.autocomplete).toLowerCase();
-  return type === 'password' || ['current-password', 'new-password', 'one-time-code'].includes(autocomplete) ||
-    (type === 'hidden' && SENSITIVE.test(`${attributes.id || ''} ${attributes.name || ''} ${autocomplete}`));
+function editableElement(tagName, attributes) {
+  if (['input', 'select', 'textarea'].includes(tagName)) return true;
+  const contenteditable = cleanText(attributes.contenteditable).toLowerCase();
+  return Object.hasOwn(attributes, 'contenteditable') && !['false', 'inherit'].includes(contenteditable);
+}
+
+function privateTextElement(tagName, attributes) {
+  return tagName === 'textarea' || (editableElement(tagName, attributes) && !['input', 'select'].includes(tagName));
 }
 
 function sanitizeAttributes(input, tagName, base) {
@@ -32,7 +34,9 @@ function sanitizeAttributes(input, tagName, base) {
   const normalizedInput = Object.fromEntries(Object.entries(input || {}).map(([name, value]) => [String(name).toLowerCase(), value]));
   for (const [name, rawValue] of Object.entries(normalizedInput)) {
     if (/^on/iu.test(name) || name === 'srcdoc' || name === 'style') continue;
-    if (name === 'value' && sensitiveElement(tagName, normalizedInput)) continue;
+    if (editableElement(tagName, normalizedInput) && ['value', 'aria-valuenow', 'aria-valuetext'].includes(name)) continue;
+    if (tagName === 'option' && name === 'value') continue;
+    if (tagName === 'option' && (name === 'selected' || name === 'aria-selected')) continue;
     let value = typeof rawValue === 'string' ? rawValue : rawValue === true ? '' : String(rawValue ?? '');
     if (URL_ATTRIBUTES.has(name)) value = sanitizeResourceUrl(value, base);
     output[name] = value;
@@ -120,7 +124,7 @@ function normalizeSimplified(raw) {
   const nodes = raw.nodes.map((node, index) => {
     const tagName = cleanText(node.tagName).toLowerCase();
     const attributes = sanitizeAttributes(node.attributes, tagName, base);
-    const sensitive = sensitiveElement(tagName, attributes);
+    const editable = editableElement(tagName, attributes);
     const runtimeData = copyRuntime(node, base);
     const normalized = {
       nodeId: idByBackend.get(node.backendNodeId) || `n-fixture-${index + 1}`,
@@ -132,8 +136,8 @@ function normalizeSimplified(raw) {
       frameId: cleanText(node.frameId || 'main'),
       framePath: Array.isArray(node.framePath) ? node.framePath.map(String) : [],
       selectorHint: typeof node.selectorHint === 'string' && !SENSITIVE.test(node.selectorHint) ? node.selectorHint : '',
-      text: sensitive || EXECUTABLE_TEXT_PARENTS.has(tagName) ? '' : cleanText(node.text),
-      visibleText: sensitive ? '' : cleanText(node.visibleText ?? node.text),
+      text: editable || EXECUTABLE_TEXT_PARENTS.has(tagName) ? '' : cleanText(node.text),
+      visibleText: editable ? '' : cleanText(node.visibleText ?? node.text),
       hidden: node.hidden === true || (tagName === 'input' && cleanText(attributes.type).toLowerCase() === 'hidden'),
       ...(copyRect(node.rect) ? { rect: copyRect(node.rect) } : {}),
       ...runtimeData
@@ -143,7 +147,7 @@ function normalizeSimplified(raw) {
       const role = axString(ax.role);
       const name = axString(ax.name);
       const description = axString(ax.description);
-      const value = sensitive ? '' : axString(ax.value);
+      const value = editable ? '' : axString(ax.value);
       if (role) normalized.axRole = role;
       if (name) normalized.accessibleName = name;
       if (description) normalized.accessibleDescription = description;
@@ -154,6 +158,7 @@ function normalizeSimplified(raw) {
   const byId = new Map(nodes.map(node => [node.nodeId, node]));
   for (const node of nodes) if (node.parentId && byId.has(node.parentId)) byId.get(node.parentId).children.push(node.nodeId);
   const executableById = new Map(nodes.map(node => [node.nodeId, EXECUTABLE_TEXT_PARENTS.has(node.tagName)]));
+  const privateTextById = new Map(nodes.map(node => [node.nodeId, privateTextElement(node.tagName, node.attributes)]));
   const inExecutableSubtree = node => {
     const visited = new Set();
     let current = node;
@@ -164,7 +169,20 @@ function normalizeSimplified(raw) {
     }
     return false;
   };
-  const redactedNodes = nodes.map(node => redactNormalizedNode(node, { executable: inExecutableSubtree(node) }));
+  const inPrivateTextSubtree = node => {
+    const visited = new Set();
+    let current = node;
+    while (current && !visited.has(current.nodeId)) {
+      visited.add(current.nodeId);
+      if (privateTextById.get(current.nodeId)) return true;
+      current = current.parentId ? byId.get(current.parentId) : null;
+    }
+    return false;
+  };
+  const redactedNodes = nodes.map(node => redactNormalizedNode(node, {
+    executable: inExecutableSubtree(node),
+    privateText: inPrivateTextSubtree(node),
+  }));
   return assertSnapshotV1({
     schemaVersion: 1,
     document: {
@@ -349,6 +367,7 @@ function normalizeColumnar(raw) {
 
   const outputByRecord = new Map();
   const executableMemo = new Map();
+  const privateTextMemo = new Map();
   const inExecutableSubtree = record => {
     if (executableMemo.has(record)) return executableMemo.get(record);
     let current = record;
@@ -364,8 +383,23 @@ function normalizeColumnar(raw) {
     executableMemo.set(record, false);
     return false;
   };
+  const inPrivateTextSubtree = record => {
+    if (privateTextMemo.has(record)) return privateTextMemo.get(record);
+    let current = record;
+    const visited = new Set();
+    while (current && !visited.has(current)) {
+      visited.add(current);
+      if (privateTextElement(current.tagName, current.attributes)) {
+        privateTextMemo.set(record, true);
+        return true;
+      }
+      current = byDocumentAndIndex.get(`${current.documentIndex}:${current.parentIndex}`);
+    }
+    privateTextMemo.set(record, false);
+    return false;
+  };
   const descendantText = (record) => {
-    if (inExecutableSubtree(record) || sensitiveElement(record.tagName, record.attributes)) return '';
+    if (inExecutableSubtree(record) || inPrivateTextSubtree(record)) return '';
     const parts = [record.rawText];
     for (const child of childrenByRecord.get(record) || []) parts.push(descendantText(child));
     return cleanText(parts.join(' '));
@@ -399,7 +433,7 @@ function normalizeColumnar(raw) {
       uniqueMatch(runtimeByUrlSelector, recordsByUrlSelector, idSelector ? `${record.base}:${idSelector}` : '') ||
       uniqueMatch(runtimeByUrlOrder, recordsByUrlOrder, Number.isSafeInteger(record.elementOrder) ? `${record.base}:${record.elementOrder}:${record.tagName}` : '') || null;
     const runtimeData = runtime ? copyRuntime(runtime, record.base) : {};
-    const sensitive = sensitiveElement(record.tagName, record.attributes);
+    const editable = editableElement(record.tagName, record.attributes);
     const ax = axByBackend.get(record.backendNodeId);
     const selectorHint = runtimeData.selectorHint || (record.attributes.id && !SENSITIVE.test(record.attributes.id) ? `#${record.attributes.id}` : '');
     const node = {
@@ -413,7 +447,7 @@ function normalizeColumnar(raw) {
       framePath: framePaths.get(record) || [],
       selectorHint,
       text: descendantText(record),
-      visibleText: sensitive ? '' : cleanText(runtimeData.visibleText ?? descendantText(record)),
+      visibleText: editable ? '' : cleanText(runtimeData.visibleText ?? descendantText(record)),
       hidden: runtimeData.hidden === true || Object.hasOwn(record.attributes, 'hidden') || record.attributes['aria-hidden'] === 'true' ||
         (record.tagName === 'input' && cleanText(record.attributes.type).toLowerCase() === 'hidden') ||
         record.layout.styles?.display === 'none' || record.layout.styles?.visibility === 'hidden',
@@ -438,7 +472,7 @@ function normalizeColumnar(raw) {
       const role = axString(ax.role);
       const name = axString(ax.name);
       const description = axString(ax.description);
-      const value = sensitive ? '' : axString(ax.value);
+      const value = editable ? '' : axString(ax.value);
       if (role) node.axRole = role;
       if (name) node.accessibleName = name;
       if (description) node.accessibleDescription = description;
@@ -465,7 +499,8 @@ function normalizeColumnar(raw) {
   }
 
   const redactedNodes = ordered.map(record => redactNormalizedNode(outputByRecord.get(record), {
-    executable: inExecutableSubtree(record)
+    executable: inExecutableSubtree(record),
+    privateText: inPrivateTextSubtree(record),
   }));
 
   const primary = documents[0] || {};

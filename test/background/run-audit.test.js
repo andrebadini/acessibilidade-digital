@@ -67,6 +67,45 @@ function pageWithSensitiveControl(secret) {
   return page;
 }
 
+function pageWithEditableSecret(secret) {
+  const page = rawPage();
+  page.nodes[0] = {
+    ...page.nodes[0],
+    tagName: 'input',
+    attributes: { id: 'api-field', type: 'text', name: 'api_key', value: secret },
+    text: secret,
+    visibleText: secret,
+    form: { type: 'text', value: secret, currentValue: secret, rawValue: secret, inputValue: secret },
+  };
+  page.axTree.nodes = [{
+    backendDOMNodeId: 1,
+    role: { value: 'textbox' },
+    name: { value: 'Chave da API' },
+    description: { value: 'Informe a chave' },
+    value: { value: secret },
+  }];
+  return page;
+}
+
+function pageWithFormCheckbox() {
+  const page = rawPage();
+  page.nodes[0] = {
+    ...page.nodes[0],
+    tagName: 'input',
+    attributes: { id: 'terms', type: 'checkbox', 'aria-invalid': 'true' },
+    form: { type: 'checkbox', checked: true, disabled: true, required: true },
+  };
+  page.axTree.nodes = [{ backendDOMNodeId: 1, role: { value: 'checkbox' }, name: { value: 'Aceito os termos' } }];
+  return page;
+}
+
+function pageWithFallbackInput(type) {
+  const page = rawPage();
+  page.nodes[0] = { ...page.nodes[0], tagName: 'input', attributes: { id: `field-${type}`, type }, form: { type } };
+  page.axTree.nodes = [];
+  return page;
+}
+
 function fakeAdapter(options = {}) {
   const events = [];
   const page = options.page || rawPage();
@@ -182,10 +221,9 @@ test('attaches normalized AX accessibility to element evidence, its hash and the
     description: 'Envia o formulário',
     descriptionSource: 'accessibility-tree',
     role: 'button',
-    value: 'Pronto',
-    states: ['parcialmente marcado', 'selecionado', 'recolhido', 'indisponível', 'obrigatório', 'inválido'],
+    states: ['recolhido', 'indisponível'],
     visibleText: 'OK',
-    announcementPreview: 'Confirmar pedido, botão, Envia o formulário, valor Pronto, parcialmente marcado, selecionado, recolhido, indisponível, obrigatório, inválido',
+    announcementPreview: 'Confirmar pedido, botão, Envia o formulário, recolhido, indisponível',
   });
   assert.notEqual(evidence.hash, changed.hash);
 
@@ -229,6 +267,76 @@ test('never discloses sensitive control values in accessibility, hashes or final
   assert.doesNotMatch(`${JSON.stringify(first)}\n${evidence.hash}\n${html}`, /TOPSECRET-current-password/iu);
   assert.match(html, /Nome acessível<\/dt><dd>Senha da conta/iu);
   assert.match(html, /Prévia de anúncio/iu);
+});
+
+test('removes an ordinary api_key current value from snapshot, evidence, preview, hash and HTML', async () => {
+  const run = secret => runAudit({
+    url: 'https://example.test/',
+    chromeAdapter: fakeAdapter({
+      page: pageWithEditableSecret(secret),
+      outerHtml: backendNodeId => backendNodeId === 1
+        ? `<input id="api-field" type="text" name="api_key" value="${secret}">`
+        : `<button>Node ${backendNodeId}</button>`,
+    }),
+    now: clock,
+    idFactory: () => 'audit-api-key-privacy',
+  });
+  const [first, second] = await Promise.all([run('TOPSECRET-one'), run('TOPSECRET-two')]);
+  const node = first.snapshot.nodes.find(item => item.nodeId === 'n-1');
+  const evidence = first.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
+  const changed = second.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
+
+  assert.equal(node.valueStatus, 'omitted-privacy');
+  assert.equal(Object.hasOwn(node.attributes, 'value'), false);
+  assert.equal(Object.hasOwn(node, 'axValue'), false);
+  for (const key of ['value', 'currentValue', 'rawValue', 'inputValue']) assert.equal(Object.hasOwn(node.form, key), false);
+  assert.equal(evidence.accessibility.valueStatus, 'omitted-privacy');
+  assert.equal(Object.hasOwn(evidence.accessibility, 'value'), false);
+  assert.doesNotMatch(evidence.accessibility.announcementPreview, /TOPSECRET|valor/iu);
+  assert.doesNotMatch(evidence.snippet, /TOPSECRET|\bvalue=/iu);
+  assert.equal(evidence.hash, changed.hash);
+  assert.doesNotMatch(JSON.stringify(first), /TOPSECRET/iu);
+
+  const report = await enrichAuditForReport(first, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  });
+  const html = renderHtmlReport(report);
+  assert.match(html, /Valor<\/dt><dd>não coletado por privacidade/iu);
+  assert.doesNotMatch(html, /TOPSECRET/iu);
+});
+
+test('reads compatible states from node.form and ignores aria-selected on a button', async () => {
+  const checkboxModel = await runAudit({
+    url: 'https://example.test/', chromeAdapter: fakeAdapter({ page: pageWithFormCheckbox() }),
+    now: clock, idFactory: () => 'audit-form-checkbox',
+  });
+  const buttonModel = await runAudit({
+    url: 'https://example.test/', chromeAdapter: fakeAdapter({ page: pageWithAxName('Continuar') }),
+    now: clock, idFactory: () => 'audit-button-states',
+  });
+  const checkbox = checkboxModel.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1').accessibility;
+  const button = buttonModel.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1').accessibility;
+
+  assert.deepEqual(checkbox.states, ['marcado', 'indisponível', 'obrigatório', 'inválido']);
+  assert.match(checkbox.announcementPreview, /marcado, indisponível, obrigatório, inválido/iu);
+  assert.doesNotMatch(button.states.join(' '), /selecionado|marcado|obrigatório|inválido/iu);
+  assert.deepEqual(button.states, ['recolhido', 'indisponível']);
+});
+
+test('uses conservative native roles for range, number, text-like and unknown inputs without AX', async () => {
+  const expected = new Map([
+    ['range', 'slider'], ['number', 'spinbutton'], ['checkbox', 'checkbox'], ['radio', 'radio'],
+    ['button', 'button'], ['text', 'textbox'], ['color', ''],
+  ]);
+  for (const [type, role] of expected) {
+    const model = await runAudit({
+      url: 'https://example.test/', chromeAdapter: fakeAdapter({ page: pageWithFallbackInput(type) }),
+      now: clock, idFactory: () => `audit-role-${type}`,
+    });
+    const evidence = model.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
+    assert.equal(evidence.accessibility.role, role, type);
+  }
 });
 
 test('stores readable sanitized snippets and the report encodes them exactly once', async () => {

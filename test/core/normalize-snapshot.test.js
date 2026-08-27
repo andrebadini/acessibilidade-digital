@@ -222,6 +222,66 @@ test('applies privacy redaction after runtime and AX merges and zeros executable
   assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(marker));
 });
 
+test('never persists current values from ordinary editable controls or runtime aliases', () => {
+  const firstSecret = 'TOPSECRET-api-key-one';
+  const raw = {
+    format: 'simplified-v1',
+    document: { url: 'https://example.test/', title: 'Privacy' },
+    nodes: [
+      {
+        backendNodeId: 1, tagName: 'input', parentBackendNodeId: null,
+        attributes: { type: 'text', name: 'api_key', value: firstSecret, 'aria-valuenow': firstSecret, 'aria-valuetext': firstSecret },
+        text: firstSecret, visibleText: firstSecret,
+        form: { type: 'text', value: firstSecret, currentValue: firstSecret, rawValue: firstSecret, inputValue: firstSecret },
+      },
+      {
+        backendNodeId: 2, tagName: 'textarea', parentBackendNodeId: null,
+        attributes: {}, text: firstSecret, visibleText: firstSecret,
+        form: { type: 'textarea', value: firstSecret, currentValue: firstSecret },
+      },
+      {
+        backendNodeId: 3, tagName: 'div', parentBackendNodeId: null,
+        attributes: { contenteditable: 'true' }, text: firstSecret, visibleText: firstSecret,
+        currentValue: firstSecret,
+      },
+      {
+        backendNodeId: 4, tagName: 'select', parentBackendNodeId: null,
+        attributes: { value: firstSecret }, form: { type: 'select', value: firstSecret, selectedIndex: 0 },
+      },
+      {
+        backendNodeId: 5, tagName: 'option', parentBackendNodeId: 4,
+        attributes: { value: firstSecret, selected: '' }, text: 'Rótulo público', visibleText: 'Rótulo público',
+      },
+    ],
+    axTree: { nodes: [
+      { backendDOMNodeId: 1, role: { value: 'textbox' }, name: { value: 'Chave da API' }, value: { value: firstSecret } },
+      { backendDOMNodeId: 2, role: { value: 'textbox' }, name: { value: 'Observação' }, value: { value: firstSecret } },
+      { backendDOMNodeId: 3, role: { value: 'textbox' }, name: { value: 'Editor' }, value: { value: firstSecret } },
+      { backendDOMNodeId: 4, role: { value: 'combobox' }, name: { value: 'Escolha' }, value: { value: firstSecret } },
+    ] },
+  };
+
+  const snapshot = normalizeSnapshot(raw);
+  for (const node of snapshot.nodes.filter(item => ['input', 'textarea', 'div', 'select'].includes(item.tagName))) {
+    assert.equal(node.valueStatus, 'omitted-privacy');
+    assert.equal(Object.hasOwn(node.attributes, 'value'), false);
+    assert.equal(Object.hasOwn(node.attributes, 'aria-valuenow'), false);
+    assert.equal(Object.hasOwn(node.attributes, 'aria-valuetext'), false);
+    assert.equal(Object.hasOwn(node, 'axValue'), false);
+    assert.equal(node.text, '');
+    assert.equal(node.visibleText, '');
+    assert.equal(Object.hasOwn(node.form || {}, 'value'), false);
+    assert.equal(Object.hasOwn(node.form || {}, 'currentValue'), false);
+    assert.equal(Object.hasOwn(node.form || {}, 'rawValue'), false);
+    assert.equal(Object.hasOwn(node.form || {}, 'inputValue'), false);
+  }
+  const option = snapshot.nodes.find(node => node.tagName === 'option');
+  assert.equal(Object.hasOwn(option.attributes, 'value'), false);
+  assert.equal(Object.hasOwn(option.attributes, 'selected'), false);
+  assert.equal(option.text, 'Rótulo público');
+  assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(firstSecret));
+});
+
 test('associates runtime data by sanitized document URL when Chrome and CDP frame IDs differ', () => {
   const raw = columnarRaw();
   raw.pageData = [{

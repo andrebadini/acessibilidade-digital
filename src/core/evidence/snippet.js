@@ -84,11 +84,9 @@ function sanitizeText(value) {
 function sanitizeTag(parsed) {
   if (parsed.closing) return `</${parsed.name}>`;
   const values = Object.fromEntries(parsed.attributes.map(attribute => [attribute.name, attribute.value ?? '']));
-  const types = parsed.attributes.filter(attribute => attribute.name === 'type').map(attribute => String(attribute.value || '').toLowerCase());
-  const inputSensitive = parsed.name === 'input' && (
-    types.includes('password') ||
-    /^(?:current-password|new-password|one-time-code)$/iu.test(values.autocomplete || '') ||
-    (String(values.type).toLowerCase() === 'hidden' && SENSITIVE.test(`${values.id || ''} ${values.name || ''} ${values.autocomplete || ''}`))
+  const contenteditable = String(values.contenteditable ?? '').trim().toLowerCase();
+  const editable = ['input', 'select', 'textarea'].includes(parsed.name) || (
+    Object.hasOwn(values, 'contenteditable') && !['false', 'inherit'].includes(contenteditable)
   );
   const output = [];
   for (const attribute of parsed.attributes) {
@@ -98,7 +96,9 @@ function sanitizeTag(parsed) {
     if ((parsed.name === 'object' && name === 'data') || (parsed.name === 'embed' && name === 'src')) continue;
     if (parsed.name === 'meta' && String(values['http-equiv']).toLowerCase() === 'refresh' && name === 'content') continue;
     if (SENSITIVE.test(name) && !['id', 'name', 'autocomplete'].includes(name)) continue;
-    if (name === 'value' && (inputSensitive || SENSITIVE.test(`${values.id || ''} ${values.name || ''} ${values.autocomplete || ''}`))) continue;
+    if (editable && ['value', 'aria-valuenow', 'aria-valuetext'].includes(name)) continue;
+    if (name === 'value' && (parsed.name === 'option' || SENSITIVE.test(`${values.id || ''} ${values.name || ''} ${values.autocomplete || ''}`))) continue;
+    if (parsed.name === 'option' && (name === 'selected' || name === 'aria-selected')) continue;
     let value = attribute.value;
     if (value !== null && (name === 'type' || name === 'autocomplete')) value = value.toLowerCase();
     if (URL_ATTRIBUTES.has(name)) {
@@ -122,13 +122,14 @@ export function sanitizeHtmlSnippetSource(html) {
   if (typeof html !== 'string') return '';
   let output = '';
   let position = 0;
+  const privateTextStack = [];
   while (position < html.length) {
     const opening = html.indexOf('<', position);
     if (opening < 0) {
-      output += sanitizeText(html.slice(position));
+      if (!privateTextStack.length) output += sanitizeText(html.slice(position));
       break;
     }
-    output += sanitizeText(html.slice(position, opening));
+    if (!privateTextStack.length) output += sanitizeText(html.slice(position, opening));
     if (html.startsWith('<!--', opening)) {
       const end = html.indexOf('-->', opening + 4);
       position = end < 0 ? html.length : end + 3;
@@ -160,6 +161,14 @@ export function sanitizeHtmlSnippetSource(html) {
       continue;
     }
     output += sanitizeTag(parsed);
+    if (parsed.closing && privateTextStack.at(-1) === parsed.name) privateTextStack.pop();
+    else if (!parsed.closing && !parsed.selfClosing) {
+      const values = Object.fromEntries(parsed.attributes.map(attribute => [attribute.name, attribute.value ?? '']));
+      const contenteditable = String(values.contenteditable ?? '').trim().toLowerCase();
+      if (parsed.name === 'textarea' || (
+        Object.hasOwn(values, 'contenteditable') && !['false', 'inherit'].includes(contenteditable)
+      )) privateTextStack.push(parsed.name);
+    }
     position = token.end;
   }
   return output.replace(/\s+/gu, ' ').trim();
