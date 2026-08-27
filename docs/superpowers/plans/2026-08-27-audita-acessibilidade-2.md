@@ -233,6 +233,7 @@
 **Arquivos:**
 
 - Criar: `src/personas/content.js`
+- Criar: `src/personas/screen-reader-module.js`
 - Criar: `src/personas/personas.css`
 - Criar: `src/background/persona-controller.js`
 - Modificar: `src/background/service-worker.js`
@@ -242,16 +243,17 @@
 - Modificar: `src/panel/panel.css`
 - Criar: `test/personas/persona-controller.test.js`
 - Criar: `test/personas/content.test.js`
+- Criar: `test/personas/screen-reader-module.test.js`
 - Modificar: `test/panel/panel-state.test.js`
 
 **Passos:**
 
 1. Testar máquina de estados por aba, exclusividade/combinação definida e limpeza em navegação/fechamento.
-2. Testar modo leitor: foco, cálculo de prévia, fala local, pausa e aviso de simulação.
+2. Testar o módulo Leitura simulada: fila determinística, foco e prévia, iniciar, pausar/continuar, parar, repetir, anterior/próximo, cancelamento de fala anterior, legenda sincronizada, voz/velocidade locais, indisponibilidade de `speechSynthesis` e exclusão de valores sensíveis.
 3. Testar acromatopsia: classe/filtro reversível e ausência de resultado normativo.
 4. Testar modo motor: bloqueio de pointer/mouse/touch/wheel, preservação do teclado e saída por três `Escape`.
 5. Implementar conteúdo injetado localmente e controlador no service worker.
-6. Adicionar painel simples com três toggles, instrução e estado ativo.
+6. Adicionar painel simples com três modos e, para Leitura simulada, controles de reprodução/navegação, voz, velocidade, instrução, legenda e estado ativo.
 7. Executar testes e E2E manual/automatizado na aba de fixture.
 8. Commit: `feat: add reversible accessibility persona previews`.
 

@@ -162,12 +162,18 @@ As personas são iniciadas pelo painel da extensão para a aba atual. O estado �
 
 ### 6.1 Prévia de leitor de tela
 
+O modo será um módulo dedicado chamado **Leitura simulada**, e não apenas um filtro da persona. Ele:
+
 - aplica camada escura sem remover a página da árvore de acessibilidade;
-- acompanha foco e anuncia localmente por `speechSynthesis` a prévia calculada;
-- mostra marcador visível do elemento atual e texto da prévia para quem acompanha o teste;
-- usa nome, função, descrição, valor e estados coletados;
-- oferece pausa, repetição e saída por `Escape` pressionado três vezes;
-- informa permanentemente: “Simulação; não substitui leitor de tela real”.
+- oferece controles locais de iniciar, pausar/continuar, parar, repetir, anterior e próximo;
+- acompanha o foco e anuncia localmente por `speechSynthesis` a prévia calculada;
+- percorre uma fila determinística de elementos significativos na ordem de foco/documento, sem acionar controles ou enviar formulários;
+- mostra marcador visível do elemento atual e legenda textual sincronizada para quem acompanha o teste;
+- usa nome, função, descrição, valor não sensível e estados coletados;
+- permite escolher uma voz disponibilizada pelo navegador e ajustar a velocidade dentro de limites seguros, mantendo preferências apenas localmente;
+- cancela a fala anterior antes de iniciar outra, trata indisponibilidade de voz como limitação e nunca lê senha, token ou valor de campo privado;
+- oferece saída de emergência por `Escape` pressionado três vezes e restaura foco/estilos ao encerrar;
+- informa permanentemente: “Simulação baseada na árvore de acessibilidade; não substitui VoiceOver, NVDA, JAWS ou teste com pessoas”.
 
 ### 6.2 Simulação de acromatopsia
 
@@ -336,7 +342,7 @@ Implementação seguirá TDD. Gates obrigatórios:
 5. Recomendações, revisões e alertas editoriais não são apresentados como infrações automáticas.
 6. A extensão audita uma página por painel e por menu de contexto.
 7. Um lote de até 20 URLs gera um relatório consolidado e identifica falhas individuais.
-8. As três personas funcionam, são reversíveis e declaram seus limites.
+8. As três personas funcionam, são reversíveis e declaram seus limites; o módulo Leitura simulada oferece iniciar, pausar/continuar, parar, repetir, anterior/próximo, legenda sincronizada e voz/velocidade locais.
 9. O relatório HTML filtra por impacto e nível sem perder conteúdo no fallback ou no PDF.
 10. HTML, PDF, JSON-LD e CSV são gerados localmente.
 11. O mapa visual une marcadores e prévias de anúncio, preservando a captura original.
