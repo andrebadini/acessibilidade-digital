@@ -718,16 +718,19 @@ function validateEditorialRuleResult(rule, id, rulesVersion) {
   ];
   const expectedSummary = rule.outcome === 'failed'
     ? 'Há conteúdo provisório inequívoco na página.'
-    : 'Não foi observado conteúdo provisório inequívoco.';
+    : rule.outcome === 'cantTell'
+      ? 'A verificação editorial ficou incompleta devido ao limite de varredura.'
+      : 'Não foi observado conteúdo provisório inequívoco.';
   if (id !== 'editorial.placeholder-text' || !exactKeys(rule, expectedKeys) ||
-    !['failed', 'inapplicable'].includes(rule.outcome) || rule.mode !== 'automated' ||
+    !['failed', 'cantTell', 'inapplicable'].includes(rule.outcome) || rule.mode !== 'automated' ||
     rule.classification !== 'editorial' || rule.impact !== 'minor' || rule.confidence !== 'high' ||
     rule.source.engine !== 'audita-editorial' || rule.source.ruleId !== id ||
     rule.source.version !== rulesVersion || !exactKeys(rule.source, ['engine', 'ruleId', 'version']) ||
     canonicalStringify(rule.nbrItems) !== '[]' || canonicalStringify(rule.wcag) !== '[]' ||
-    canonicalStringify(rule.limitations) !== '[]' || rule.summary !== expectedSummary ||
+    !validateEditorialLimitations(rule.limitations, rule.outcome, rule.targets) || rule.summary !== expectedSummary ||
     !Array.isArray(rule.targets) || rule.targets.length > 64 ||
-    (rule.outcome === 'failed') !== (rule.targets.length > 0)) {
+    (rule.outcome === 'failed') !== (rule.targets.length > 0) ||
+    (rule.outcome === 'cantTell' && rule.targets.length !== 0)) {
     throw new TypeError(`Regra editorial ${id} possui esquema inválido.`);
   }
   for (const target of rule.targets) {
@@ -738,6 +741,29 @@ function validateEditorialRuleResult(rule, id, rulesVersion) {
       throw new TypeError(`Regra editorial ${id} possui alvo inválido.`);
     }
   }
+}
+
+function validateEditorialLimitations(limitations, outcome, targets) {
+  if (!Array.isArray(limitations) || limitations.length > 2) return false;
+  const expectedOrder = ['EDITORIAL_NODE_SCAN_TRUNCATED', 'EDITORIAL_RESULT_LIMIT_REACHED'];
+  let previous = -1;
+  for (const limitation of limitations) {
+    if (!limitation || typeof limitation !== 'object' || Array.isArray(limitation)) return false;
+    const index = expectedOrder.indexOf(limitation.code);
+    if (index <= previous) return false;
+    previous = index;
+    if (limitation.code === 'EDITORIAL_NODE_SCAN_TRUNCATED') {
+      if (!exactKeys(limitation, ['code', 'retainedNodeCount']) || limitation.retainedNodeCount !== 5_000) return false;
+    } else if (limitation.code === 'EDITORIAL_RESULT_LIMIT_REACHED') {
+      if (!exactKeys(limitation, ['code', 'retainedResultCount']) || limitation.retainedResultCount !== 64 ||
+        outcome !== 'failed' || !Array.isArray(targets) || targets.length !== 64) return false;
+    } else return false;
+  }
+  if (outcome === 'inapplicable') return limitations.length === 0;
+  if (outcome === 'cantTell') {
+    return limitations.length === 1 && limitations[0].code === 'EDITORIAL_NODE_SCAN_TRUNCATED';
+  }
+  return true;
 }
 
 function validateEditorialOccurrence(occurrence, sourceRule, id) {

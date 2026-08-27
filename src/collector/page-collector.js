@@ -66,11 +66,32 @@ export function collectRuntimePageData() {
     const value = String(element.getAttribute?.('contenteditable') ?? '').trim().toLowerCase();
     return element.hasAttribute?.('contenteditable') === true && !['false', 'inherit'].includes(value);
   };
+  const contextState = element => {
+    let current = element;
+    const visited = new Set();
+    try {
+      while (current instanceof Element && !visited.has(current) && visited.size < 64) {
+        visited.add(current);
+        if (isSensitiveControl(current) || isEditable(current)) return 'private';
+        if (current.hasAttribute?.('hidden') === true || current.hasAttribute?.('inert') === true ||
+          String(current.getAttribute?.('aria-hidden') || '').trim().toLowerCase() === 'true') return 'inaccessible';
+        const computed = getComputedStyle(current);
+        if (String(computed.display || computed.getPropertyValue?.('display') || '').trim().toLowerCase() === 'none' ||
+          String(computed.visibility || computed.getPropertyValue?.('visibility') || '').trim().toLowerCase() === 'hidden') {
+          return 'inaccessible';
+        }
+        current = current.parentElement;
+      }
+      return current instanceof Element ? 'unknown' : 'accessible';
+    } catch {
+      return 'unknown';
+    }
+  };
   const safeContextText = element => {
-    if (!(element instanceof Element) || isSensitiveControl(element) || isEditable(element)) return '';
+    if (!(element instanceof Element) || contextState(element) !== 'accessible') return '';
     try { return String(element.innerText || '').replace(/\s+/gu, ' ').trim().slice(0, 512); } catch { return ''; }
   };
-  const contextReadable = element => element instanceof Element && !isSensitiveControl(element) && !isEditable(element);
+  const contextReadable = element => element instanceof Element && contextState(element) === 'accessible';
   const warningText = value => {
     const normalized = String(value || '').normalize('NFKC').toLocaleLowerCase('pt-BR').replace(/\s+/gu, ' ').trim();
     return ['nova aba', 'nova guia', 'nova janela', 'abre em nova aba', 'abre em nova guia', 'abre em nova janela']
@@ -78,7 +99,7 @@ export function collectRuntimePageData() {
   };
   const contextObservation = element => {
     const parent = element.parentElement;
-    if (!(parent instanceof Element) || isEditable(parent) || isSensitiveControl(parent)) return 'unknown-context';
+    if (!(parent instanceof Element) || contextState(element) !== 'accessible') return 'unknown-context';
     try {
       const siblings = [...(parent.children || [])].filter(candidate => candidate !== element);
       if (siblings.some(candidate => contextReadable(candidate) && safeContextText(candidate))) return 'potential-context';
@@ -89,21 +110,37 @@ export function collectRuntimePageData() {
   };
   const adjacentWarning = element => {
     try {
-      const adjacent = [element.previousElementSibling, element.nextElementSibling].filter(Boolean);
-      if (adjacent.some(candidate => contextReadable(candidate) && warningText(safeContextText(candidate)))) return true;
-      return adjacent.every(contextReadable) ? false : undefined;
+      if (contextState(element) !== 'accessible') return undefined;
+      const directions = [
+        ['previousSibling', 'previousSibling'],
+        ['nextSibling', 'nextSibling'],
+      ];
+      for (const [initialField, nextField] of directions) {
+        let current = element[initialField];
+        for (let count = 0; current && count < 4; count += 1) {
+          const elementNode = current instanceof Element;
+          const textNode = current?.nodeType === Node.TEXT_NODE;
+          if (!elementNode && !textNode) return undefined;
+          const state = contextState(elementNode ? current : current.parentElement);
+          if (state === 'private' || state === 'unknown') return undefined;
+          if (state === 'accessible') {
+            let value;
+            try {
+              value = elementNode ? current.innerText : current.nodeValue;
+            } catch {
+              return undefined;
+            }
+            if (warningText(String(value || '').slice(0, 512))) return true;
+          }
+          current = current[nextField];
+        }
+        if (current) return undefined;
+      }
+      return false;
     } catch {
       return undefined;
     }
   };
-  const ownGlobalPresent = names => names.some(name => {
-    try {
-      const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
-      return Boolean(descriptor && Object.hasOwn(descriptor, 'value') && descriptor.value !== null && descriptor.value !== undefined);
-    } catch {
-      return false;
-    }
-  });
   const cssEscape = value => {
     if (globalThis.CSS?.escape) return CSS.escape(value);
     return [...String(value)].map((char, index) => {
@@ -170,12 +207,10 @@ export function collectRuntimePageData() {
     vlibras: {
       dom: elements.some(element => signature(element, 'vlibras')),
       script: elements.some(element => scriptSignature(element, 'vlibras')),
-      global: ownGlobalPresent(['VLibras', 'VLibrasWidget']),
     },
     'hand-talk': {
       dom: elements.some(element => signature(element, 'hand-talk')),
       script: elements.some(element => scriptSignature(element, 'hand-talk')),
-      global: ownGlobalPresent(['HandTalk', 'HandTalkWidget', 'HT']),
     },
   };
 
@@ -204,7 +239,9 @@ export function collectRuntimePageData() {
     };
     const linkLike = element.localName === 'a' || String(element.getAttribute?.('role') || '').trim().toLowerCase() === 'link';
     if (linkLike) {
+      record.interaction = 'link';
       record.linkPurposeContext = contextObservation(element);
+      if (contextState(element) !== 'accessible') record.newWindowBehavior = 'unknown';
       const warning = adjacentWarning(element);
       if (typeof warning === 'boolean') record.adjacentNewWindowWarning = warning;
     }

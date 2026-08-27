@@ -84,8 +84,39 @@ test('excludes private, editable, executable and hidden content and bounds resul
   const [result] = await editorialModule.runEditorialRules(snapshot(values));
   assert.equal(result.outcome, 'failed');
   assert.equal(result.targets.length, 64);
+  assert.deepEqual(result.limitations, [{
+    code: 'EDITORIAL_RESULT_LIMIT_REACHED', retainedResultCount: 64,
+  }]);
   assert.ok(result.targets.every(target => target.nodeId.startsWith('match-')));
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE-|lorem|ipsum/iu);
+});
+
+test('reports node-scan truncation and never treats an unseen node as inapplicable', async () => {
+  const values = Array.from({ length: 5_001 }, (_, index) => node(`node-${index}`, 'p', {
+    text: index === 5_000 ? 'Lorem ipsum PRIVATE-BEYOND-CAP' : 'Conteúdo final.',
+  }));
+  const [result] = await editorialModule.runEditorialRules(snapshot(values));
+  assert.equal(result.outcome, 'cantTell');
+  assert.deepEqual(result.targets, []);
+  assert.equal(result.summary, 'A verificação editorial ficou incompleta devido ao limite de varredura.');
+  assert.deepEqual(result.limitations, [{
+    code: 'EDITORIAL_NODE_SCAN_TRUNCATED', retainedNodeCount: 5_000,
+  }]);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE-|lorem|ipsum/iu);
+});
+
+test('keeps a conclusive hit while declaring both fixed caps when applicable', async () => {
+  const values = [
+    ...Array.from({ length: 65 }, (_, index) => node(`match-${index}`, 'p', { text: 'Lorem ipsum' })),
+    ...Array.from({ length: 4_936 }, (_, index) => node(`final-${index}`, 'p', { text: 'Conteúdo final.' })),
+  ];
+  const [result] = await editorialModule.runEditorialRules(snapshot(values));
+  assert.equal(result.outcome, 'failed');
+  assert.equal(result.targets.length, 64);
+  assert.deepEqual(result.limitations, [
+    { code: 'EDITORIAL_NODE_SCAN_TRUNCATED', retainedNodeCount: 5_000 },
+    { code: 'EDITORIAL_RESULT_LIMIT_REACHED', retainedResultCount: 64 },
+  ]);
 });
 
 test('contains accessors, revoked proxies and malformed snapshots without leaking sentinel text', async () => {

@@ -274,6 +274,9 @@ test('strictly validates editorial and informational inventory schemas without a
     mode: 'automated', nodeId: 'n-1', evidenceIds: [],
     justification: 'Há conteúdo provisório inequívoco na página.',
   });
+  editorialBase.ruleResults.at(-1).limitations = [{
+    code: 'EDITORIAL_NODE_SCAN_TRUNCATED', retainedNodeCount: 5_000,
+  }];
   assert.doesNotThrow(() => createAuditModel(editorialBase));
   for (const mutate of [
     value => { value.ruleResults.at(-1).privateText = 'PRIVATE-RESULT'; },
@@ -283,6 +286,8 @@ test('strictly validates editorial and informational inventory schemas without a
     value => { value.occurrences.at(-1).target.selector = '#PRIVATE-AUTHOR-ID'; },
     value => { value.occurrences.at(-1).evidenceRefs = ['ev-1']; value.occurrences.at(-1).evidenceIds = ['ev-1']; },
     value => { value.occurrences.at(-1).accessiblePreview = 'PRIVATE-PREVIEW'; },
+    value => { value.ruleResults.at(-1).limitations[0].retainedNodeCount = 4_999; },
+    value => { value.ruleResults.at(-1).limitations[0].privateText = 'PRIVATE-LIMIT'; },
   ]) {
     const forged = structuredClone(editorialBase);
     mutate(forged);

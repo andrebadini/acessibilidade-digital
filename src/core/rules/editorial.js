@@ -9,6 +9,23 @@ const MAX_TEXT = 4_096;
 const EXECUTABLE_TAGS = new Set(['script', 'style', 'template']);
 const EDITABLE_TAGS = new Set(['input', 'select', 'textarea']);
 const CONTEXT_EDITABLE = new Set(['', 'true', 'plaintext-only']);
+const NODE_SCAN_LIMITATION = Object.freeze({
+  code: 'EDITORIAL_NODE_SCAN_TRUNCATED', retainedNodeCount: MAX_SCANNED_NODES,
+});
+const RESULT_LIMITATION = Object.freeze({
+  code: 'EDITORIAL_RESULT_LIMIT_REACHED', retainedResultCount: MAX_RESULTS,
+});
+
+function ownData(value, key) {
+  try {
+    const descriptor = value !== null && typeof value === 'object'
+      ? Object.getOwnPropertyDescriptor(value, key)
+      : null;
+    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function text(value) {
   return typeof value === 'string' ? value.slice(0, MAX_TEXT).replace(/\s+/gu, ' ').trim() : '';
@@ -47,13 +64,26 @@ function placeholder(node) {
 }
 
 function safeNodes(snapshot) {
-  const safe = cloneJsonSafe(snapshot);
-  if (!safe || typeof safe !== 'object' || !Array.isArray(safe.nodes)) return [];
-  return safe.nodes.slice(0, MAX_SCANNED_NODES).filter(node => node && typeof node === 'object' && !Array.isArray(node));
+  const rawNodes = ownData(snapshot, 'nodes');
+  let length;
+  try {
+    if (!Array.isArray(rawNodes)) return { nodes: [], truncated: false };
+    length = ownData(rawNodes, 'length');
+  } catch {
+    return { nodes: [], truncated: false };
+  }
+  if (!Number.isSafeInteger(length) || length < 0) return { nodes: [], truncated: false };
+  const nodes = [];
+  for (let index = 0; index < Math.min(length, MAX_SCANNED_NODES); index += 1) {
+    const node = cloneJsonSafe(ownData(rawNodes, String(index)));
+    if (node && typeof node === 'object' && !Array.isArray(node)) nodes.push(node);
+  }
+  return { nodes, truncated: length > MAX_SCANNED_NODES };
 }
 
 function evaluatePlaceholder(snapshot) {
-  const nodes = safeNodes(snapshot);
+  const safe = safeNodes(snapshot);
+  const { nodes } = safe;
   const byId = new Map(nodes.map(node => [typeof node.nodeId === 'string' ? node.nodeId : '', node]));
   const excluded = node => {
     let current = node;
@@ -80,27 +110,33 @@ function evaluatePlaceholder(snapshot) {
     }
     return false;
   };
-  const targets = [];
+  const candidates = [];
   for (const node of matches) {
-    if (targets.length >= MAX_RESULTS) break;
     if (hasMatchingDescendant(node)) continue;
     const nodeId = typeof node.nodeId === 'string' && /^[A-Za-z0-9._:-]{1,200}$/u.test(node.nodeId)
       ? node.nodeId
       : null;
-    targets.push(Object.freeze({
+    candidates.push(Object.freeze({
       nodeId,
       selectorHint: '',
       message: 'Substitua o conteúdo provisório antes da publicação.',
       data: Object.freeze({ reason: 'placeholder-text' }),
     }));
   }
+  const targets = Object.freeze(candidates.slice(0, MAX_RESULTS));
+  const limitations = [];
+  if (safe.truncated) limitations.push(NODE_SCAN_LIMITATION);
+  if (candidates.length > MAX_RESULTS) limitations.push(RESULT_LIMITATION);
+  const outcome = targets.length ? 'failed' : safe.truncated ? 'cantTell' : 'inapplicable';
   return Object.freeze({
-    outcome: targets.length ? 'failed' : 'inapplicable',
-    summary: targets.length
+    outcome,
+    summary: outcome === 'failed'
       ? 'Há conteúdo provisório inequívoco na página.'
-      : 'Não foi observado conteúdo provisório inequívoco.',
-    targets: Object.freeze(targets),
-    limitations: Object.freeze([]),
+      : outcome === 'cantTell'
+        ? 'A verificação editorial ficou incompleta devido ao limite de varredura.'
+        : 'Não foi observado conteúdo provisório inequívoco.',
+    targets,
+    limitations: Object.freeze(limitations),
   });
 }
 

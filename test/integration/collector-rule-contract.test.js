@@ -160,7 +160,7 @@ test('a translucent text block remains an unreliable contrast observation', asyn
   assert.equal(audit.ruleResults.find(item => item.ruleId === 'text-contrast-minimum').outcome, 'cantTell');
 });
 
-test('the browser-world collector emits complete observed media and boolean-only widget signals', () => {
+test('the isolated browser-world collector emits media and only observable DOM/script widget booleans', () => {
   const names = ['Node', 'Element', 'ShadowRoot', 'HTMLInputElement', 'HTMLSelectElement', 'HTMLTextAreaElement', 'HTMLMediaElement', 'HTMLAudioElement', 'HTMLImageElement', 'HTMLCanvasElement', 'CSS', 'document', 'getComputedStyle', 'location', 'innerWidth', 'innerHeight', 'scrollX', 'scrollY', 'matchMedia', 'VLibras'];
   const saved = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   class FakeElement {}
@@ -202,6 +202,7 @@ test('the browser-world collector emits complete observed media and boolean-only
   });
   Object.assign(contextualLink, {
     localName: 'a', id: '', className: '', children: [], parentElement: linkParent,
+    previousSibling: null, nextSibling: privateSibling,
     previousElementSibling: null, nextElementSibling: privateSibling, shadowRoot: null,
     disabled: false, innerText: 'Saiba mais',
     getAttribute: name => name === 'role' ? 'link' : name === 'href' ? '/ajuda' : '', hasAttribute: () => false,
@@ -210,6 +211,7 @@ test('the browser-world collector emits complete observed media and boolean-only
   });
   Object.assign(privateSibling, {
     localName: 'div', id: '', className: '', children: [], parentElement: linkParent,
+    previousSibling: contextualLink, nextSibling: null,
     previousElementSibling: contextualLink, nextElementSibling: null, shadowRoot: null,
     disabled: false, innerText: 'PRIVATE-ADJACENT-SENTINEL nova aba',
     getAttribute: name => name === 'contenteditable' ? 'true' : '',
@@ -235,9 +237,10 @@ test('the browser-world collector emits complete observed media and boolean-only
       muted: false, autoplay: true, controls: false, captionTracks: [], hasAudio: true,
     });
     assert.deepEqual(collected.widgetSignals, {
-      vlibras: { dom: true, script: false, global: true },
-      'hand-talk': { dom: false, script: true, global: false },
+      vlibras: { dom: true, script: false },
+      'hand-talk': { dom: false, script: true },
     });
+    assert.equal(Object.hasOwn(collected.widgetSignals.vlibras, 'global'), false);
     assert.doesNotMatch(JSON.stringify(collected.widgetSignals), /PRIVATE-|src|selector|value/iu);
     const collectedLink = collected.nodes.find(item => item.tagName === 'a');
     assert.equal(collectedLink.linkPurposeContext, 'unknown-context');
