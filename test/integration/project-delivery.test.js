@@ -41,10 +41,12 @@ test('neutral identity scanner rejects government domains in URLs and plain text
   try {
     await writeFile(join(directory, 'fixture.json'), JSON.stringify({ url: `https://${governmentSuffix}/servico` }));
     await writeFile(join(directory, 'README.md'), `Consulte api.estado.${governmentSuffix} para detalhes.`);
+    await writeFile(join(directory, 'sentence.txt'), `Consulte ${governmentSuffix}.`);
+    await writeFile(join(directory, 'fqdn.json'), JSON.stringify({ url: `https://portal.${governmentSuffix}./` }));
 
-    const violations = await scanNeutralIdentity(directory, ['fixture.json', 'README.md']);
+    const violations = await scanNeutralIdentity(directory, ['fixture.json', 'README.md', 'sentence.txt', 'fqdn.json']);
 
-    assert.equal(violations.length, 2);
+    assert.equal(violations.length, 4);
     assert.ok(violations.every(violation => /conteúdo/iu.test(violation)));
   } finally {
     await rm(directory, { recursive: true, force: true });
