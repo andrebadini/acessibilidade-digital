@@ -117,3 +117,61 @@ test('preserves legitimate failed and cancelled terminal sessions without touchi
     assert.equal(Object.isFrozen(input), false);
   }
 });
+
+test('rejects whitespace and non-ISO instants across report and diagnostic timestamps', () => {
+  for (const key of ['startedAt', 'endedAt', 'generatedAt']) {
+    const input = reportInput();
+    input.timestamps[key] = ` ${input.timestamps[key]}`;
+    assert.throws(() => createAuditModel(input), /timestamp|ISO|data|canôn/i);
+  }
+  for (const at of [' 2026-08-26T14:00:30.000Z', '26 de agosto de 2026']) {
+    const input = reportInput();
+    input.session.diagnostics[0].at = at;
+    assert.throws(() => createAuditModel(input), /diagnóst|ISO|data|canôn/i);
+  }
+});
+
+test('validates diagnostic records while preserving serializable details without input mutation', () => {
+  const input = reportInput();
+  input.session.diagnostics[0].details = { frameId: 'frame-1', attempts: 2 };
+  const model = createAuditModel(input);
+  assert.deepEqual(model.session.diagnostics[0].details, { frameId: 'frame-1', attempts: 2 });
+  assert.notStrictEqual(model.session.diagnostics[0].details, input.session.diagnostics[0].details);
+  assert.equal(Object.isFrozen(input.session.diagnostics[0].details), false);
+
+  for (const diagnostic of [
+    null,
+    { code: '', message: 'Falha.', at: '2026-08-26T14:00:30.000Z', recoverable: true },
+    { code: 'FRAME_LIMITED', message: ' ', at: '2026-08-26T14:00:30.000Z', recoverable: true },
+    { code: 'FRAME_LIMITED', message: 'Falha.', at: '2026-08-26T14:00:30.000Z', recoverable: 'true' },
+  ]) {
+    const invalid = reportInput({ session: { status: 'partial', diagnostics: [diagnostic], partial: true } });
+    assert.throws(() => createAuditModel(invalid), /diagnóst|diagnostic|code|message|recoverable|texto|boolean/i);
+  }
+});
+
+test('validates coherent monotonic progress timestamps and audit correlation', () => {
+  const progress = [
+    { type: 'AUDIT_PROGRESS', sessionId: 'audit-report-1', auditId: 'audit-report-1', phase: 'opening', message: 'Abrindo o site', percent: 0, at: '2026-08-26T14:00:00.000Z' },
+    { type: 'AUDIT_PROGRESS', sessionId: 'audit-report-1', auditId: 'audit-report-1', phase: 'structure', message: 'Lendo a estrutura', percent: 40, at: '2026-08-26T14:00:20.000Z' },
+  ];
+  const input = reportInput({ progress });
+  const model = createAuditModel(input);
+  assert.deepEqual(model.progress, progress);
+  assert.notStrictEqual(model.progress, progress);
+
+  const invalidProgress = [
+    null,
+    [{ ...progress[0], type: 'OTHER' }],
+    [{ ...progress[0], auditId: 'other' }],
+    [{ ...progress[0], sessionId: 'other' }],
+    [{ ...progress[0], phase: ' ' }],
+    [{ ...progress[0], message: '' }],
+    [{ ...progress[0], percent: 101 }],
+    [{ ...progress[0], at: ` ${progress[0].at}` }],
+    [progress[1], { ...progress[0], percent: 20 }],
+  ];
+  for (const value of invalidProgress) {
+    assert.throws(() => createAuditModel(reportInput({ progress: value })), /progress|progresso|auditoria|sessão|percent|ISO|fase|mensagem|tipo/i);
+  }
+});

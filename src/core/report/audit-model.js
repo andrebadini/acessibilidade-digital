@@ -22,6 +22,7 @@ export function createAuditModel(input) {
   validateEnvironment(model.environment);
   validateScope(model.scope);
   validateSession(model.session);
+  validateProgress(model.progress, model.auditId);
   validateLimitations(model.limitations);
   model.itemResults = validateItems(model.itemResults);
   const ruleById = validateRules(model.ruleResults, new Set(model.itemResults.map(item => item.id)));
@@ -58,11 +59,14 @@ function reportUrl(value, label) {
 
 function validateTimestamps(timestamps) {
   if (!timestamps || typeof timestamps !== 'object' || Array.isArray(timestamps)) throw new TypeError('timestamps inválidos.');
-  for (const key of ['startedAt', 'endedAt', 'generatedAt']) {
-    const value = requiredText(timestamps[key], `timestamps.${key}`);
-    const date = new Date(value);
-    if (!Number.isFinite(date.getTime()) || date.toISOString() !== value) throw new TypeError(`timestamps.${key} deve ser ISO canônico.`);
-  }
+  for (const key of ['startedAt', 'endedAt', 'generatedAt']) canonicalInstant(timestamps[key], `timestamps.${key}`);
+}
+
+function canonicalInstant(value, label) {
+  if (typeof value !== 'string' || !value || value.trim() !== value) throw new TypeError(`${label} deve ser ISO canônico.`);
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime()) || date.toISOString() !== value) throw new TypeError(`${label} deve ser ISO canônico.`);
+  return value;
 }
 
 function validateVersions(versions) {
@@ -100,6 +104,34 @@ function validateScope(scope) {
 function validateSession(session) {
   if (!session || typeof session !== 'object' || Array.isArray(session) || !SESSION_STATUSES.has(session.status)) throw new TypeError('session inválida.');
   if (!Array.isArray(session.diagnostics)) throw new TypeError('session.diagnostics deve ser lista.');
+  for (const [index, diagnostic] of session.diagnostics.entries()) {
+    if (!diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) throw new TypeError(`session.diagnostics[${index}] deve ser objeto.`);
+    requiredId(diagnostic.code, `session.diagnostics[${index}].code`);
+    canonicalText(diagnostic.message, `session.diagnostics[${index}].message`);
+    canonicalInstant(diagnostic.at, `session.diagnostics[${index}].at`);
+    if (typeof diagnostic.recoverable !== 'boolean') throw new TypeError(`session.diagnostics[${index}].recoverable deve ser booleano.`);
+  }
+}
+
+function validateProgress(progress, auditId) {
+  if (progress === undefined) return;
+  if (!Array.isArray(progress)) throw new TypeError('progress deve ser lista.');
+  let previousPercent = -1;
+  for (const [index, entry] of progress.entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new TypeError(`progress[${index}] deve ser objeto.`);
+    if (entry.type !== 'AUDIT_PROGRESS') throw new TypeError(`progress[${index}].type inválido.`);
+    if (requiredId(entry.auditId, `progress[${index}].auditId`) !== auditId
+      || requiredId(entry.sessionId, `progress[${index}].sessionId`) !== auditId) {
+      throw new TypeError(`progress[${index}] pertence a outra auditoria ou sessão.`);
+    }
+    canonicalText(entry.phase, `progress[${index}].phase`);
+    canonicalText(entry.message, `progress[${index}].message`);
+    if (!Number.isFinite(entry.percent) || entry.percent < 0 || entry.percent > 100 || entry.percent < previousPercent) {
+      throw new TypeError(`progress[${index}].percent deve ser monotônico entre 0 e 100.`);
+    }
+    canonicalInstant(entry.at, `progress[${index}].at`);
+    previousPercent = entry.percent;
+  }
 }
 
 function validateLimitations(limitations) {
