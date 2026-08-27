@@ -77,3 +77,45 @@ test('continues later formats when starting one download rejects', async () => {
   assert.equal(Object.hasOwn(result.formats[0], 'downloadId'), false);
   assert.equal(revoked.length, 3);
 });
+
+test('cleanup failures are controlled and never stop subsequent formats', async () => {
+  let id = 0;
+  const adapter = {
+    createObjectURL() { return `blob:chrome-extension://test/${id}`; },
+    revokeObjectURL() { throw new Error('TOPSECRET https://origin.test/'); },
+    async download() { return ++id; },
+    async waitForDownload(downloadId) { return { id: downloadId, state: 'complete' }; },
+  };
+  const result = await downloadArtifacts({ baseName: 'audit', html: '<!doctype html>', json: '{}', pdf: new TextEncoder().encode('%PDF-1.7') }, adapter);
+  assert.equal(result.formats.length, 3);
+  assert.ok(result.formats.every(format => format.status === 'complete'));
+  assert.match(result.limitations.join(' '), /liberar|temporário|limpeza/iu);
+  assert.doesNotMatch(JSON.stringify(result), /TOPSECRET|origin\.test|blob:/iu);
+});
+
+test('cancels a download ID that resolves only after its start timeout and has already revoked its Blob URL', async () => {
+  let resolveStart;
+  let calls = 0;
+  const cancelled = [];
+  const revoked = [];
+  const adapter = {
+    createObjectURL() { return `blob:chrome-extension://test/${calls}`; },
+    revokeObjectURL(url) { revoked.push(url); },
+    download() {
+      calls += 1;
+      if (calls === 1) return new Promise(resolve => { resolveStart = resolve; });
+      return Promise.resolve(calls);
+    },
+    async cancelDownload(id) { cancelled.push(id); },
+    async waitForDownload(id) { return { id, state: 'complete' }; },
+  };
+  const resultPromise = downloadArtifacts({ baseName: 'audit', html: '<!doctype html>', json: '{}', pdf: new TextEncoder().encode('%PDF-1.7') }, adapter, { timeoutMs: 5 });
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(revoked.length >= 1);
+  assert.equal(revoked[0], 'blob:chrome-extension://test/0');
+  resolveStart(77);
+  const result = await resultPromise;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(cancelled, [77]);
+  assert.deepEqual(result.formats.map(format => format.status), ['timeout', 'complete', 'complete']);
+});

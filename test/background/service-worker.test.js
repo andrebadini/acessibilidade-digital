@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { createSessionStore, isAuthorizedExtensionSender, isAuthorizedPanelSender, registerServiceWorker } from '../../src/background/service-worker.js';
 
 const createChrome = () => {
@@ -21,6 +22,14 @@ const createChrome = () => {
     createdTabs,
   };
 };
+
+async function waitUntil(predicate, timeoutMs = 500) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Condição de teste não foi atendida no prazo.');
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}
 
 test('opens the local panel in one tab when the action is clicked', async () => {
   const chromeApi = createChrome();
@@ -151,18 +160,113 @@ test('regenerates only a known audit from review and deduplicates persisted queu
     async getLatest() { return latest; },
     async setLatest(value) { latest = value; },
   };
-  registerServiceWorker(chromeApi, { auditStore });
+  registerServiceWorker(chromeApi, { auditStore, now: () => '2026-08-26T15:00:00.000Z' });
   const sender = { id: 'test', url: 'chrome-extension://test/src/review/index.html?auditId=audit-1' };
   let first;
   chromeApi.listeners.message.listener({ type: 'REQUEST_EXPORT', auditId: 'audit-1' }, sender, value => { first = value; });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(first, { ok: true, auditId: 'audit-1', state: 'queued' });
   assert.equal(latest.exportStatus, 'queued');
+  assert.equal(latest.exportQueuedAt, '2026-08-26T15:00:00.000Z');
   assert.ok(chromeApi.createdTabs.some(tab => tab.url.endsWith('/src/export/index.html?auditId=audit-1') && tab.active === false));
   let duplicate;
   chromeApi.listeners.message.listener({ type: 'REQUEST_EXPORT', auditId: 'audit-1' }, sender, value => { duplicate = value; });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(duplicate, { ok: true, auditId: 'audit-1', state: 'queued', duplicate: true });
+});
+
+test('serializes concurrent REQUEST_EXPORT so only one inactive export tab opens', async () => {
+  const chromeApi = createChrome();
+  let latest = { auditId: 'audit-1', status: 'complete', exportStatus: 'complete' };
+  let releaseRead;
+  const readGate = new Promise(resolve => { releaseRead = resolve; });
+  const auditStore = {
+    async getAudit() { await readGate; return { auditId: 'audit-1' }; },
+    async getLatest() { await readGate; return latest; },
+    async setLatest(value) { latest = value; },
+  };
+  registerServiceWorker(chromeApi, { auditStore, now: () => '2026-08-26T15:00:00.000Z' });
+  const sender = { id: 'test', url: 'chrome-extension://test/src/review/index.html?auditId=audit-1' };
+  const responses = [];
+  chromeApi.listeners.message.listener({ type: 'REQUEST_EXPORT', auditId: 'audit-1' }, sender, value => responses.push(value));
+  chromeApi.listeners.message.listener({ type: 'REQUEST_EXPORT', auditId: 'audit-1' }, sender, value => responses.push(value));
+  releaseRead();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(chromeApi.createdTabs.filter(tab => tab.url.includes('/src/export/')).length, 1);
+  assert.equal(responses.length, 2);
+  assert.equal(responses.filter(response => response.duplicate).length, 1);
+});
+
+test('recovers an orphaned queued export after worker restart but keeps a fresh queue deduplicated', async () => {
+  for (const [queuedAt, shouldOpen] of [[undefined, true], ['not-an-iso-date', true], ['2026-08-26T14:59:30.000Z', false]]) {
+    const chromeApi = createChrome();
+    let latest = { auditId: 'audit-1', status: 'complete', exportStatus: 'queued', ...(queuedAt ? { exportQueuedAt: queuedAt } : {}) };
+    const auditStore = {
+      async getAudit() { return { auditId: 'audit-1' }; }, async getLatest() { return latest; },
+      async setLatest(value) { latest = value; },
+    };
+    registerServiceWorker(chromeApi, { auditStore, now: () => '2026-08-26T15:00:00.000Z' });
+    let response;
+    chromeApi.listeners.message.listener(
+      { type: 'REQUEST_EXPORT', auditId: 'audit-1' },
+      { id: 'test', url: 'chrome-extension://test/src/review/index.html?auditId=audit-1' },
+      value => { response = value; },
+    );
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(chromeApi.createdTabs.some(tab => tab.url.includes('/src/export/')), shouldOpen);
+    assert.equal(Boolean(response.duplicate), !shouldOpen);
+  }
+});
+
+test('never lets review audit A request export of audit B', () => {
+  const chromeApi = createChrome();
+  let reads = 0;
+  registerServiceWorker(chromeApi, { auditStore: { async getAudit() { reads += 1; } } });
+  let response;
+  chromeApi.listeners.message.listener(
+    { type: 'REQUEST_EXPORT', auditId: 'audit-B' },
+    { id: 'test', url: 'chrome-extension://test/src/review/index.html?auditId=audit-A' },
+    value => { response = value; },
+  );
+  assert.deepEqual(response, { ok: false, error: 'Pedido de exportação inválido.' });
+  assert.equal(reads, 0);
+});
+
+test('never carries latest state from audit B into an export request for audit A', async () => {
+  const chromeApi = createChrome();
+  let written;
+  const auditStore = {
+    async getAudit() { return { auditId: 'audit-A' }; },
+    async getLatest() { return { auditId: 'audit-B', reviewUrl: 'chrome-extension://test/private-B', secretMarker: 'audit-B-only' }; },
+    async setLatest(value) { written = value; },
+  };
+  registerServiceWorker(chromeApi, { auditStore, now: () => '2026-08-26T15:00:00.000Z' });
+  let response;
+  chromeApi.listeners.message.listener(
+    { type: 'REQUEST_EXPORT', auditId: 'audit-A' },
+    { id: 'test', url: 'chrome-extension://test/src/review/index.html?auditId=audit-A' },
+    value => { response = value; },
+  );
+  await waitUntil(() => response !== undefined);
+  assert.equal(response.ok, true);
+  assert.equal(written.auditId, 'audit-A');
+  assert.equal(Object.hasOwn(written, 'reviewUrl'), false);
+  assert.equal(Object.hasOwn(written, 'secretMarker'), false);
+});
+
+test('rejects a stored model whose correlated auditId is inherited', async () => {
+  const chromeApi = createChrome();
+  const inherited = Object.create({ auditId: 'audit-A' });
+  registerServiceWorker(chromeApi, { auditStore: { async getAudit() { return inherited; }, async getLatest() { return null; } } });
+  let response;
+  chromeApi.listeners.message.listener(
+    { type: 'REQUEST_EXPORT', auditId: 'audit-A' },
+    { id: 'test', url: 'chrome-extension://test/src/review/index.html?auditId=audit-A' },
+    value => { response = value; },
+  );
+  await waitUntil(() => response !== undefined);
+  assert.deepEqual(response, { ok: false, error: 'Auditoria não encontrada.' });
+  assert.equal(chromeApi.createdTabs.some(tab => tab.url.includes('/src/export/')), false);
 });
 
 test('rejects export requests from an audited web page', () => {
@@ -235,7 +339,7 @@ test('notification failure after atomic commit never rewrites committed complete
   assert.equal(writes.some(([kind, value]) => kind === 'latest' && value.status === 'failed'), false);
 });
 
-test('automatic export tab failure preserves the committed audit and reports only export failure', async () => {
+test('automatic export tab failure atomically persists a controlled partial model and latest state', async () => {
   const chromeApi = createChrome();
   chromeApi.tabs.create = async options => {
     if (options.url.includes('/src/export/')) throw new Error('tab denied');
@@ -246,14 +350,44 @@ test('automatic export tab failure preserves the committed audit and reports onl
     async setLatest(value) { writes.push(['latest', value]); },
     async commitAudit(id, model, latest) { writes.push(['commit', id, model, latest]); },
   };
-  const model = { auditId: 'audit-export-fail', session: { status: 'complete' }, report: {} };
-  registerServiceWorker(chromeApi, { createId: () => 'audit-export-fail', auditStore, chromeAdapterFactory: () => ({}), runner: async () => model });
+  const model = structuredClone(SAMPLE_AUDIT);
+  model.limitations.push('TOPSECRET https://origin.test/?token=x blob:chrome-extension://test/private');
+  registerServiceWorker(chromeApi, { createId: () => model.auditId, auditStore, chromeAdapterFactory: () => ({}), runner: async () => model, now: () => '2026-08-26T16:00:00.000Z' });
   chromeApi.listeners.message.listener({ type: 'START_AUDIT', url: 'https://example.test/' }, { id: 'test', url: 'chrome-extension://test/src/panel/index.html' }, () => {});
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(writes.filter(([kind]) => kind === 'commit').length, 1);
-  assert.equal(writes.find(([kind]) => kind === 'commit')[2], model);
-  assert.equal(writes.at(-1)[1].exportStatus, 'failed');
-  assert.ok(chromeApi.runtime.sent.some(message => message.type === 'EXPORT_FAILED' && message.auditId === 'audit-export-fail'));
+  await waitUntil(() => writes.filter(([kind]) => kind === 'commit').length === 2);
+  const commits = writes.filter(([kind]) => kind === 'commit');
+  assert.equal(commits.length, 2);
+  assert.equal(commits[1][2].session.status, 'partial');
+  assert.deepEqual(commits[1][2].report.artifact.formats, []);
+  assert.equal(commits[1][3].exportStatus, 'failed');
+  assert.doesNotMatch(JSON.stringify(commits[1]), /TOPSECRET|origin\.test|blob:|chrome-extension:/iu);
+  assert.ok(chromeApi.runtime.sent.some(message => message.type === 'EXPORT_FAILED' && message.auditId === model.auditId));
+});
+
+test('requested export tab failure atomically replaces queued state with a controlled partial model', async () => {
+  const chromeApi = createChrome();
+  chromeApi.tabs.create = async () => { throw new Error('TOPSECRET https://origin.test/?token=x'); };
+  const model = structuredClone(SAMPLE_AUDIT);
+  let latest = { auditId: model.auditId, status: 'complete', exportStatus: 'complete' };
+  const commits = [];
+  const auditStore = {
+    async getAudit() { return model; }, async getLatest() { return latest; },
+    async setLatest(value) { latest = value; },
+    async commitAudit(...values) { commits.push(values); latest = values[2]; },
+  };
+  registerServiceWorker(chromeApi, { auditStore, now: () => '2026-08-26T16:00:00.000Z' });
+  let response;
+  chromeApi.listeners.message.listener(
+    { type: 'REQUEST_EXPORT', auditId: model.auditId },
+    { id: 'test', url: `chrome-extension://test/src/review/index.html?auditId=${model.auditId}` },
+    value => { response = value; },
+  );
+  await waitUntil(() => response !== undefined);
+  assert.equal(response.ok, false);
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0][1].session.status, 'partial');
+  assert.equal(commits[0][2].exportStatus, 'failed');
+  assert.doesNotMatch(JSON.stringify(commits), /TOPSECRET|origin\.test|blob:|chrome-extension:/iu);
 });
 
 test('commit failure sends no completion and persists only best-effort failed latest', async () => {

@@ -36,18 +36,21 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
     try {
       let downloadId;
       try {
-        downloadId = await adapter.download({
+        downloadId = await adoptDownload(adapter.download({
           url: blobUrl,
           filename,
           conflictAction: 'uniquify',
           saveAs: false,
-        });
-      } catch {
-        formats.push({ format, filename, mimeType: MIME[format], status: 'interrupted', sha256 });
-        limitations.push(`O artefato ${format.toUpperCase()} não pôde iniciar o download.`);
+        }), timeoutMs, id => adapter.cancelDownload?.(id));
+        if (!Number.isSafeInteger(downloadId) || downloadId < 0) throw new TypeError('ID de download inválido.');
+      } catch (error) {
+        const status = error?.name === 'TimeoutError' ? 'timeout' : 'interrupted';
+        formats.push({ format, filename, mimeType: MIME[format], status, sha256 });
+        limitations.push(status === 'timeout'
+          ? `O artefato ${format.toUpperCase()} excedeu o tempo limite antes de iniciar o download.`
+          : `O artefato ${format.toUpperCase()} não pôde iniciar o download.`);
         continue;
       }
-      if (!Number.isSafeInteger(downloadId) || downloadId < 0) throw new TypeError('ID de download inválido.');
       try {
         const terminal = await adapter.waitForDownload(downloadId, { timeoutMs });
         if (terminal?.state !== 'complete') throw Object.assign(new Error('Download interrompido.'), { name: 'DownloadInterruptedError' });
@@ -58,7 +61,9 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
         limitations.push(`O artefato ${format.toUpperCase()} não concluiu o download (${status === 'timeout' ? 'tempo limite excedido' : 'interrompido'}).`);
       }
     } finally {
-      adapter.revokeObjectURL(blobUrl);
+      try { adapter.revokeObjectURL(blobUrl); } catch {
+        limitations.push(`A liberação do endereço temporário do artefato ${format.toUpperCase()} não pôde ser confirmada.`);
+      }
     }
   }
   return { formats, limitations };
@@ -70,6 +75,7 @@ export function createDownloadsAdapter(chromeApi, urlApi = globalThis.URL) {
     createObjectURL: blob => urlApi.createObjectURL(blob),
     revokeObjectURL: url => urlApi.revokeObjectURL(url),
     download: options => invokeChrome(chromeApi, callback => chromeApi.downloads.download(options, callback)),
+    cancelDownload: downloadId => invokeChrome(chromeApi, callback => chromeApi.downloads.cancel(downloadId, callback)),
     waitForDownload(downloadId, { timeoutMs }) {
       return new Promise((resolve, reject) => {
         let settled = false;
@@ -130,4 +136,21 @@ function invokeChrome(chromeApi, invoke) {
       settle(reject, error);
     }
   });
+}
+
+function adoptDownload(promise, timeoutMs, cancelLate) {
+  let timedOut = false;
+  let timer;
+  const source = Promise.resolve(promise);
+  void source.then(downloadId => {
+    if (!timedOut) return;
+    void Promise.resolve().then(() => cancelLate(downloadId)).catch(() => {});
+  }, () => {});
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      reject(new DOMException('O início do download excedeu o tempo limite.', 'TimeoutError'));
+    }, timeoutMs);
+  });
+  return Promise.race([source, timeout]).finally(() => clearTimeout(timer));
 }

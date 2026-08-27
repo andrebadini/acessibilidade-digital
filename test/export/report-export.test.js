@@ -90,6 +90,118 @@ test('contains readiness failures and cleanup errors without leaking a print URL
   assert.deepEqual(events.filter(entry => entry[0] === 'revoke'), [['revoke', 'blob:chrome-extension://test/print']]);
 });
 
+test('records PDF fallback in the final model and the exact final HTML and JSON', async () => {
+  const result = await runReportExport({ auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z' }, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer() { return { bytes: PDF, usedFallback: true, limitations: ['hostile TOPSECRET https://origin.test/'] }; },
+    downloadsAdapter: fakeDownloads([]),
+  });
+  assert.equal(result.model.session.status, 'partial');
+  assert.equal(result.model.report.artifact.pdfFallback, true);
+  assert.match(result.model.limitations.join(' '), /estrutura|marcação|outline/iu);
+  assert.deepEqual(JSON.parse(result.json).audit, result.model);
+  assert.match(result.html, /estrutura|marcação|outline/iu);
+  assert.doesNotMatch(JSON.stringify(result), /TOPSECRET|origin\.test/iu);
+});
+
+test('keeps delivery receipt separate so downloaded JSON and final model cannot disagree', async () => {
+  let id = 0;
+  const downloads = fakeDownloads([]);
+  downloads.waitForDownload = async downloadId => downloadId === 2
+    ? Promise.reject(new DOMException('TOPSECRET blob:chrome-extension://test/private', 'TimeoutError'))
+    : { id: downloadId, state: 'complete' };
+  downloads.download = async () => ++id;
+  const result = await runReportExport({ auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z' }, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+    downloadsAdapter: downloads,
+  });
+  assert.deepEqual(JSON.parse(result.json).audit, result.model);
+  assert.equal(result.deliveryReceipt.status, 'partial');
+  assert.deepEqual(result.deliveryReceipt.formats.map(format => format.status), ['complete', 'timeout', 'complete']);
+  assert.ok(result.model.report.artifact.formats.every(format => format.status === 'prepared'));
+  assert.equal(Object.hasOwn(result.model.report.artifact, 'deliveryReceipt'), false);
+  assert.doesNotMatch(JSON.stringify(result), /TOPSECRET|blob:|chrome-extension:/iu);
+});
+
+test('sanitizes primary and cleanup failures into controlled codes before rendering', async () => {
+  const result = await runReportExport({ auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z' }, {
+    urlApi: {
+      createObjectURL() { return 'blob:chrome-extension://test/print'; },
+      revokeObjectURL() { throw new Error('TOPSECRET https://origin.test blob:chrome-extension://test/private'); },
+    },
+    tabAdapter: {
+      async createPrintTab() { return { id: 8 }; },
+      async waitForReady() { throw new Error('TOPSECRET https://origin.test/?token=x'); },
+      async connectCdp() { throw new Error('unused'); },
+      async waitForAssets() {},
+      async removeTab() { throw new Error('TOPSECRET chrome-extension://test/private'); },
+    },
+    async pdfRenderer() { throw new Error('unused'); },
+    downloadsAdapter: fakeDownloads([]),
+  });
+  assert.equal(result.model.session.status, 'partial');
+  assert.ok(result.model.session.diagnostics.filter(entry => entry.at === '2026-08-26T15:00:00.000Z').every(entry => /^REPORT_[A-Z0-9_]+$/u.test(entry.code)));
+  assert.doesNotMatch(`${result.html}\n${result.json}\n${JSON.stringify(result)}`, /TOPSECRET|origin\.test|blob:|chrome-extension:/iu);
+});
+
+test('redacts inherited diagnostic and limitation secrets before the first print render', async () => {
+  const input = clone(SAMPLE_AUDIT);
+  input.limitations.push('Falha em https://origin.test/?token=TOPSECRET blob:chrome-extension://test/private');
+  input.session.diagnostics.push({
+    code: 'SOURCE_FAILURE', message: 'auth=TOPSECRET em chrome-extension://test/private',
+    at: '2026-08-26T14:01:00.000Z', recoverable: true,
+    details: { source: 'https://origin.test/private?session=TOPSECRET' },
+  });
+  const renderedBlobs = [];
+  const result = await runReportExport({ auditModel: input, now: () => '2026-08-26T15:00:00.000Z' }, {
+    urlApi: { createObjectURL(blob) { renderedBlobs.push(blob); return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+    downloadsAdapter: fakeDownloads([]),
+  });
+  assert.doesNotMatch(await renderedBlobs[0].text(), /TOPSECRET|origin\.test|blob:|chrome-extension:/iu);
+  assert.doesNotMatch(`${result.html}\n${result.json}`, /TOPSECRET|origin\.test|blob:|chrome-extension:/iu);
+});
+
+test('adopts and cleans a tab that resolves after its creation timeout', async () => {
+  const late = deferred();
+  const removed = [];
+  const resultPromise = runReportExport({ auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z', timeoutMs: 5 }, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: {
+      createPrintTab() { return late.promise; },
+      async waitForReady() {}, async connectCdp() {}, async waitForAssets() {},
+      async removeTab(id) { removed.push(id); throw new Error('TOPSECRET cleanup denied'); },
+    },
+    downloadsAdapter: fakeDownloads([]),
+  });
+  await resultPromise;
+  late.resolve({ id: 91 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(removed, [91]);
+});
+
+test('adopts and disconnects a CDP client that resolves after timeout without removing the tab twice', async () => {
+  const late = deferred();
+  const events = [];
+  const resultPromise = runReportExport({ auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z', timeoutMs: 5 }, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: {
+      async createPrintTab() { return { id: 92 }; }, async waitForReady() {},
+      connectCdp() { return late.promise; }, async waitForAssets() {},
+      async removeTab(id) { events.push(['remove', id]); },
+    },
+    downloadsAdapter: fakeDownloads([]),
+  });
+  await resultPromise;
+  late.resolve({ async disconnect() { events.push(['disconnect']); throw new Error('TOPSECRET cleanup denied'); } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, [['remove', 92], ['disconnect']]);
+});
+
 function fakeDownloads(events) {
   let id = 0;
   return {
@@ -98,4 +210,17 @@ function fakeDownloads(events) {
     async download(options) { id += 1; events.push(['download', options.filename]); return id; },
     async waitForDownload(downloadId) { events.push(['download-complete', downloadId]); return { id: downloadId, state: 'complete' }; },
   };
+}
+
+function successfulTabAdapter() {
+  return {
+    async createPrintTab() { return { id: 70 }; }, async waitForReady() {},
+    async connectCdp() { return { async disconnect() {} }; }, async waitForAssets() {}, async removeTab() {},
+  };
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(next => { resolve = next; });
+  return { promise, resolve };
 }
