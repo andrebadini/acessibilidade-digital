@@ -10,7 +10,7 @@
 
 ---
 
-## Tarefa 1 — Corrigir o contrato coletor → normalizador → regras
+## Task 1 — Corrigir o contrato coletor → normalizador → regras
 
 **Arquivos:**
 
@@ -33,7 +33,7 @@
 7. Executar os testes focados e depois `npm test`.
 8. Commit: `fix: align collected page data with audit rules`.
 
-## Tarefa 2 — Introduzir catálogos Section 508 e jurídico
+## Task 2 — Introduzir catálogos Section 508 e jurídico
 
 **Arquivos:**
 
@@ -54,7 +54,7 @@
 7. Executar testes focados e `npm test`.
 8. Commit: `feat: add fixed consumer basis and Section 508 crosswalk`.
 
-## Tarefa 3 — Evoluir o modelo canônico para V2
+## Task 3 — Evoluir o modelo canônico para V2
 
 **Arquivos:**
 
@@ -80,7 +80,7 @@
 7. Executar testes focados e `npm test`.
 8. Commit: `feat: introduce canonical multipage audit model v2`.
 
-## Tarefa 4 — Empacotar axe-core e provar compatibilidade MV3/CSP
+## Task 4 — Empacotar axe-core e provar compatibilidade MV3/CSP
 
 **Arquivos:**
 
@@ -108,7 +108,7 @@
 8. Executar teste unitário, E2E Chromium, `npm test` e `npm run verify`.
 9. Commit: `feat: bundle axe core with MV3 CSP gate`.
 
-## Tarefa 5 — Integrar resultados axe ao motor híbrido
+## Task 5 — Integrar resultados axe ao motor híbrido
 
 **Arquivos:**
 
@@ -133,7 +133,7 @@
 7. Executar testes focados e `npm test`.
 8. Commit: `feat: integrate supplemental axe findings`.
 
-## Tarefa 6 — Implementar regras complementares
+## Task 6 — Implementar regras complementares
 
 **Arquivos:**
 
@@ -160,7 +160,7 @@
 8. Executar testes focados e `npm test`.
 9. Commit: `feat: add contextual and editorial accessibility checks`.
 
-## Tarefa 7 — Adicionar CSV seguro
+## Task 7 — Adicionar CSV seguro
 
 **Arquivos:**
 
@@ -182,7 +182,7 @@
 6. Executar testes focados e `npm test`.
 7. Commit: `feat: export safe occurrence CSV`.
 
-## Tarefa 8 — Redesenhar o relatório HTML interativo e jurídico
+## Task 8 — Redesenhar o relatório HTML interativo e jurídico
 
 **Arquivos:**
 
@@ -205,7 +205,7 @@
 8. Executar testes, gerar amostra, revisar visualmente no navegador escolhido e corrigir desktop/impressão.
 9. Commit: `feat: prioritize and filter interactive audit report`.
 
-## Tarefa 9 — Criar mapa visual de prévias de anúncio
+## Task 9 — Criar mapa visual de prévias de anúncio
 
 **Arquivos:**
 
@@ -228,7 +228,7 @@
 7. Executar testes e revisão visual com fixture real.
 8. Commit: `feat: add annotated accessible announcement map`.
 
-## Tarefa 10 — Implementar personas reversíveis
+## Task 10 — Implementar personas reversíveis
 
 **Arquivos:**
 
@@ -255,7 +255,7 @@
 7. Executar testes e E2E manual/automatizado na aba de fixture.
 8. Commit: `feat: add reversible accessibility persona previews`.
 
-## Tarefa 11 — Adicionar menu de contexto
+## Task 11 — Adicionar menu de contexto
 
 **Arquivos:**
 
@@ -276,7 +276,7 @@
 5. Executar testes focados, `npm test` e inspeção do manifesto.
 6. Commit: `feat: start audits from the context menu`.
 
-## Tarefa 12 — Implementar lote explícito multipáginas
+## Task 12 — Implementar lote explícito multipáginas
 
 **Arquivos:**
 
@@ -304,7 +304,7 @@
 7. Executar testes focados, `npm test` e integração com três fixtures.
 8. Commit: `feat: audit explicit URL batches sequentially`.
 
-## Tarefa 13 — Implementar retenção e exclusão
+## Task 13 — Implementar retenção e exclusão
 
 **Arquivos:**
 
@@ -327,7 +327,7 @@
 6. Executar testes focados e `npm test`.
 7. Commit: `feat: limit local audit retention and add deletion controls`.
 
-## Tarefa 14 — Atualizar versão, documentação, E2E e pacote
+## Task 14 — Atualizar versão, documentação, E2E e pacote
 
 **Arquivos:**
 
@@ -352,7 +352,7 @@
 8. Inspecionar conteúdo do ZIP e ausência de código remoto/arquivos indevidos.
 9. Commit: `release: prepare Audita Acessibilidade 2.0.0`.
 
-## Tarefa 15 — Revisão independente e correções finais
+## Task 15 — Revisão independente e correções finais
 
 **Arquivos:** todos os alterados acima.
 
