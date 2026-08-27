@@ -173,6 +173,7 @@ test('cleanup failures are controlled and never stop subsequent formats', async 
 test('cancels a download ID that resolves only after its start timeout and has already revoked its Blob URL', async () => {
   let resolveStart;
   let calls = 0;
+  const startObserved = deferred();
   const cancelled = [];
   const revoked = [];
   const adapter = {
@@ -180,13 +181,17 @@ test('cancels a download ID that resolves only after its start timeout and has a
     revokeObjectURL(url) { revoked.push(url); },
     download() {
       calls += 1;
-      if (calls === 1) return new Promise(resolve => { resolveStart = resolve; });
+      if (calls === 1) {
+        startObserved.resolve();
+        return new Promise(resolve => { resolveStart = resolve; });
+      }
       return Promise.resolve(calls);
     },
     async cancelDownload(id) { cancelled.push(id); },
     async waitForDownload(id) { return { id, state: 'complete' }; },
   };
   const resultPromise = downloadArtifacts({ baseName: 'audit', html: '<!doctype html>', json: '{}', csv: '\uFEFF"id"\r\n', pdf: new TextEncoder().encode('%PDF-1.7') }, adapter, { timeoutMs: 5, hashBytes: FAST_SHA256 });
+  await startObserved.promise;
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.ok(revoked.length >= 1);
   assert.equal(revoked[0], 'blob:chrome-extension://test/0');
@@ -297,6 +302,53 @@ test('cancels once when the adapter itself reports a terminal wait timeout befor
   assert.deepEqual(events.filter(entry => entry[0] === 'cancel'), [['cancel', 1]]);
   assert.ok(events.findIndex(entry => entry[0] === 'cancel') < events.findIndex(entry => entry[0] === 'revoke'));
   assert.deepEqual(result.formats.slice(1).map(entry => entry.status), ['complete', 'complete', 'complete']);
+});
+
+test('attempts one contained cancellation after every terminal observer failure and still revokes once and continues', async () => {
+  for (const scenario of ['reject', 'invalid-terminal', 'throw']) {
+    const events = [];
+    let id = 0;
+    const adapter = {
+      createObjectURL(blob) {
+        const url = `blob:chrome-extension://test/${scenario}/${blob.type}`;
+        events.push(['create', url]);
+        return url;
+      },
+      revokeObjectURL(url) { events.push(['revoke', url]); },
+      async download(options) {
+        const downloadId = ++id;
+        events.push(['download', options.filename, downloadId]);
+        return downloadId;
+      },
+      cancelDownload(downloadId) {
+        events.push(['cancel', downloadId]);
+        return new Promise(() => {});
+      },
+      waitForDownload(downloadId) {
+        events.push(['wait', downloadId]);
+        if (downloadId !== 1) return Promise.resolve({ id: downloadId, state: 'complete' });
+        if (scenario === 'reject') return Promise.reject(new Error('PRIVATE_TERMINAL_SENTINEL'));
+        if (scenario === 'invalid-terminal') return Promise.resolve({ id: downloadId, state: 'interrupted' });
+        throw new Error('PRIVATE_TERMINAL_SENTINEL');
+      },
+    };
+
+    const result = await downloadArtifacts({
+      baseName: 'audit', html: '<!doctype html>', json: '{}', csv: '\uFEFF"id"\r\n',
+      pdf: new TextEncoder().encode('%PDF-1.7'),
+    }, adapter, { timeoutMs: 50, hashBytes: FAST_SHA256 });
+
+    assert.equal(result.formats[0].failureCode, 'DOWNLOAD_INTERRUPTED');
+    assert.deepEqual(result.formats.slice(1).map(entry => entry.status), ['complete', 'complete', 'complete']);
+    assert.deepEqual(events.filter(entry => entry[0] === 'cancel'), [['cancel', 1]]);
+    assert.equal(events.filter(entry => entry[0] === 'revoke').length, 4);
+    assert.equal(new Set(events.filter(entry => entry[0] === 'revoke').map(entry => entry[1])).size, 4);
+    assert.ok(events.findIndex(entry => entry[0] === 'cancel') < events.findIndex(entry => entry[0] === 'revoke'));
+    assert.deepEqual(events.filter(entry => entry[0] === 'download').map(entry => entry[1]), [
+      'audit.html', 'audit.json', 'audit.csv', 'audit.pdf',
+    ]);
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_TERMINAL_SENTINEL/u);
+  }
 });
 
 test('contains a throwing optional cancellation getter without invoking or leaking it', async () => {

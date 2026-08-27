@@ -109,7 +109,7 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
         formats.push({ format, filename, mimeType: MIME[format], status: 'complete', downloadId, sha256 });
       } catch (error) {
         const timedOut = safeErrorName(error) === 'TimeoutError';
-        if (timedOut) cancelWait();
+        cancelWait();
         appendFailure(formats, limitations, {
           format, filename, sha256, downloadId,
           failureCode: timedOut ? 'DOWNLOAD_WAIT_TIMEOUT' : 'DOWNLOAD_INTERRUPTED',

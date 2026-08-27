@@ -148,6 +148,38 @@ test('createAuditModel is the explicit V1 migration boundary and accepts native 
   }), /requestedScope|escopo|solicitad|URL/i);
 });
 
+test('rejects non-string occurrence justification and evidence hashes without coercing hostile values', () => {
+  const unsafeValues = [null, 42, true, [], { nested: 'PRIVATE_SENTINEL' }];
+  for (const value of unsafeValues) {
+    const occurrenceInput = structuredClone(SAMPLE_AUDIT);
+    occurrenceInput.occurrences[0].justification = value;
+    assert.throws(() => createAuditModel(occurrenceInput), /justification|justificativa|texto|schema|inválid/iu);
+
+    const evidenceInput = structuredClone(SAMPLE_AUDIT);
+    evidenceInput.evidence[0].hash = value;
+    assert.throws(() => createAuditModel(evidenceInput), /evidência|evidence|hash|texto|schema|inválid/iu);
+  }
+
+  let accessed = false;
+  const hostile = {};
+  Object.defineProperty(hostile, 'toString', {
+    enumerable: true,
+    get() { accessed = true; throw new Error('PRIVATE_SENTINEL'); },
+  });
+  const hostileOccurrence = structuredClone(SAMPLE_AUDIT);
+  hostileOccurrence.occurrences[0].justification = hostile;
+  assert.throws(() => createAuditModel(hostileOccurrence), /propriedade|segura|justification|valor|schema/iu);
+  assert.equal(accessed, false);
+
+  const hostileEvidence = structuredClone(SAMPLE_AUDIT);
+  Object.defineProperty(hostileEvidence.evidence[0], 'hash', {
+    enumerable: true,
+    get() { accessed = true; throw new Error('PRIVATE_SENTINEL'); },
+  });
+  assert.throws(() => createAuditModel(hostileEvidence), /propriedade|segura|hash|valor|schema/iu);
+  assert.equal(accessed, false);
+});
+
 test('conclusive failed requirements and recommendations use the same catalog reference without changing classification', () => {
   const model = structuredClone(createAuditModel(reportInput()));
   const requirement = NBR17225_ITEMS.find(item => item.id === '5.1.1');

@@ -9,24 +9,28 @@ const COMPATIBLE_PRINT_PARAMS = Object.freeze({
   printBackground: true,
   preferCSSPageSize: true,
 });
+const FALLBACK_LIMITATION = 'O navegador não aceitou os parâmetros experimentais de PDF marcado e outline; o PDF foi gerado sem essa estrutura adicional.';
 
-export async function renderPdf(cdp) {
+export async function renderPdf(cdp, options = {}) {
   if (!cdp || typeof cdp.command !== 'function') throw new TypeError('Cliente CDP inválido para impressão.');
+  const forceCompatible = options?.forceCompatible === true;
   let response;
-  let usedFallback = false;
-  try {
-    response = await cdp.command('Page.printToPDF', { ...ACCESSIBLE_PRINT_PARAMS });
-  } catch (error) {
-    if (!isUnsupportedAccessibilityParameter(error)) throw error;
-    usedFallback = true;
+  let usedFallback = forceCompatible;
+  if (forceCompatible) {
     response = await cdp.command('Page.printToPDF', { ...COMPATIBLE_PRINT_PARAMS });
+  } else {
+    try {
+      response = await cdp.command('Page.printToPDF', { ...ACCESSIBLE_PRINT_PARAMS });
+    } catch (error) {
+      if (!isUnsupportedAccessibilityParameter(error)) throw error;
+      usedFallback = true;
+      response = await cdp.command('Page.printToPDF', { ...COMPATIBLE_PRINT_PARAMS });
+    }
   }
   return {
     bytes: decodePdf(response?.data),
     usedFallback,
-    limitations: usedFallback
-      ? ['O navegador não aceitou os parâmetros experimentais de PDF marcado e outline; o PDF foi gerado sem essa estrutura adicional.']
-      : [],
+    limitations: usedFallback ? [FALLBACK_LIMITATION] : [],
   };
 }
 

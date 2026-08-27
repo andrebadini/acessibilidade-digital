@@ -30,7 +30,6 @@ export const REPORT_GENERATION_ISSUE_CODES = Object.freeze([
   ...PDF_GENERATION_FAILURE_CODES,
   'REPORT_CSV_UNAVAILABLE',
   'REPORT_PDF_TAGGING_UNSUPPORTED',
-  'REPORT_PRINT_CLEANUP_LIMITED',
 ]);
 
 export function createExportIssue(code, format) {

@@ -140,6 +140,25 @@ test('accepts controlled CSV or PDF generation omissions only as partial exports
   }
 });
 
+test('accepts one exact late print-cleanup limitation only in a partial delivery receipt', async () => {
+  const model = generatedModel(['html', 'json', 'csv', 'pdf']);
+  const formats = ['html', 'json', 'csv', 'pdf'].map((format, index) => receiptFormat(format, 'complete', index + 1));
+  const cleanup = 'A limpeza de um recurso temporário de impressão não pôde ser confirmada.';
+  const deliveryReceipt = { status: 'partial', formats, limitations: [cleanup] };
+  const result = exportResult(model, deliveryReceipt);
+  let committed = false;
+
+  const persisted = await persistExportSuccess({
+    auditId: model.auditId,
+    result,
+    latest: {},
+  }, { async commitAudit() { committed = true; } });
+
+  assert.equal(committed, true);
+  assert.equal(persisted.latest.exportStatus, 'partial');
+  assert.deepEqual(persisted.latest.deliveryReceipt, result.deliveryReceipt);
+});
+
 test('rejects artifact payloads that are present despite controlled CSV or PDF omission', async () => {
   const missingCsv = generatedModel(['html', 'json', 'pdf'], ['REPORT_CSV_UNAVAILABLE']);
   const missingPdf = generatedModel(['html', 'json', 'csv'], ['REPORT_PDF_UNAVAILABLE']);

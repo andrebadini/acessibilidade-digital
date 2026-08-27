@@ -18,6 +18,7 @@ import {
 
 const FORMAT_ORDER = Object.freeze(['html', 'json', 'csv', 'pdf']);
 const REQUIRED_FORMATS = new Set(['html', 'json']);
+const PRINT_CLEANUP_LIMITATION = createExportIssue('REPORT_PRINT_CLEANUP_LIMITED').message;
 const RESULT_KEYS = new Set([
   'model', 'html', 'json', 'csv', 'pdf', 'formats', 'deliveryReceipt', 'limitations', 'pdfFallback',
 ]);
@@ -176,6 +177,7 @@ function normalizeDeliveryReceipt(value, preparedFormats) {
   const allowedCleanup = new Set(formats
     .filter(entry => entry.status === 'complete' || entry.failureCode?.startsWith('DOWNLOAD_'))
     .map(entry => artifactCleanupLimitation(entry.format)));
+  allowedCleanup.add(PRINT_CLEANUP_LIMITATION);
   const seenLimitations = new Set();
   for (const limitation of receipt.limitations) {
     if (seenLimitations.has(limitation) || (!requiredLimitations.includes(limitation) && !allowedCleanup.has(limitation))) {

@@ -625,6 +625,9 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById) {
     if (evidenceIds.has(id)) throw new TypeError(`Evidência duplicada: ${id}.`);
     const pageId = requiredId(artifact?.pageId, `Evidência ${id}.pageId`);
     if (!pageById.has(pageId)) throw new TypeError(`Evidência ${id} referencia página desconhecida.`);
+    if (artifact.hash !== undefined && typeof artifact.hash !== 'string') {
+      throw new TypeError(`Evidência ${id}.hash deve ser texto quando presente.`);
+    }
     evidenceIds.add(id);
     artifactById.set(id, artifact);
   }
@@ -682,6 +685,9 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById) {
     validateTarget(occurrence.target, id);
     if (occurrence.accessiblePreview !== null && typeof occurrence.accessiblePreview !== 'string') {
       throw new TypeError(`Ocorrência ${id}.accessiblePreview inválida.`);
+    }
+    if (occurrence.justification !== undefined && typeof occurrence.justification !== 'string') {
+      throw new TypeError(`Ocorrência ${id}.justification deve ser texto quando presente.`);
     }
     validateLegalAnalysis(occurrence, id);
     if (occurrence.classification === 'editorial' || occurrence.source.engine === 'audita-editorial') {

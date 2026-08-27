@@ -201,6 +201,276 @@ test('omits short bounded base64 layers that hide resources, markup, pixels and 
   assert.doesNotMatch(JSON.stringify(first), /ZGF0YT|UE5H|NESTED|SENTINEL|iVBOR|<script/iu);
 });
 
+test('omits short whitespace-segmented base64 resources, markup, private text and real PNG bytes in every mutable projected text field', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2ZQAAAABJRU5ErkJggg==';
+  const splitEvery = (value, size) => value.match(new RegExp(`.{1,${size}}`, 'gu')).join(' ');
+  input.pages[0].finalUrl = 'https://servico.exemplo.test/final?payload=ZGF0%20YTp4';
+  input.occurrences[0].source.engine = 'Ymxv Yjp4';
+  input.occurrences[0].source.version = 'PHNj cmlwdD5BbGljZQ==';
+  input.occurrences[0].justification = 'UFJJ VkFU RQ==';
+  input.occurrences[0].target.selector = splitEvery(png, 2);
+  input.occurrences[0].target.framePath = [splitEvery(png, 5)];
+  input.occurrences[0].accessiblePreview = splitEvery(png, 7);
+  const targetEvidence = input.evidence.find(entry => entry.evidenceId === 'ev-control');
+  targetEvidence.accessibility.nameSource = splitEvery(png, 9);
+  targetEvidence.hash = 'ZGF0 YTp4';
+  input.integrity.canonicalModelHash = 'PHNj cmlwdD5BbGljZQ==';
+  input.integrity.evidenceManifestHash = 'UFJJ VkFU RQ==';
+  const original = structuredClone(input);
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.deepEqual(input, original);
+  assert.equal(first.page_url, '[recurso omitido]');
+  assert.equal(first.source_engine, '[recurso omitido]');
+  assert.equal(first.source_version, '[marcação omitida]');
+  assert.equal(first.description, '[conteúdo sensível omitido]');
+  assert.equal(first.selector, '[recurso omitido]');
+  assert.equal(first.frame_path, '[recurso omitido]');
+  assert.equal(first.accessible_preview, '[recurso omitido]');
+  assert.equal(first.accessible_preview_source, '[recurso omitido]');
+  assert.equal(first.evidence_hashes, '[recurso omitido]');
+  assert.equal(first.canonical_model_hash, '[marcação omitida]');
+  assert.equal(first.evidence_manifest_hash, '[conteúdo sensível omitido]');
+  assert.doesNotMatch(JSON.stringify(first), /Alice|PRIVATE|iVBOR|ZGF0|YTp4|Ymxv|Yjp4|PHNj|UFJJ/iu);
+});
+
+test('finds short segmented unsafe base64 inside surrounding base64-alphabet prose', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2ZQAAAABJRU5ErkJggg==';
+  const splitPng = png.match(/.{1,2}/gu).join(' ');
+  input.occurrences[0].justification = 'prefix ZGF0 YTp4 suffix';
+  input.occurrences[0].accessiblePreview = 'prefix PHNj cmlwdD5BbGljZQ== suffix';
+  input.occurrences[0].target.selector = `prefix ${splitPng} suffix`;
+  input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource =
+    'prefix UFJJ VkFU RQ== suffix';
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.description, '[recurso omitido]');
+  assert.equal(first.accessible_preview, '[marcação omitida]');
+  assert.equal(first.selector, '[recurso omitido]');
+  assert.equal(first.accessible_preview_source, '[conteúdo sensível omitido]');
+  assert.doesNotMatch(JSON.stringify(first), /ZGF0|YTp4|PHNj|Alice|iVBOR|UFJJ|PRIVATE/iu);
+});
+
+test('prioritizes unsafe segmented candidates after many benign decoy runs', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const decoys = Array.from({ length: 17 }, (_, index) =>
+    `hello word${String(index).padStart(3, '0')}`).join(', ');
+  input.occurrences[0].justification = `${decoys}, ZGF0 YTp4`;
+  input.occurrences[0].accessiblePreview = `${decoys}, PHNj cmlwdD5BbGljZQ==`;
+  input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource =
+    `${decoys}, UFJJ VkFU RQ==`;
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.description, '[recurso omitido]');
+  assert.equal(first.accessible_preview, '[marcação omitida]');
+  assert.equal(first.accessible_preview_source, '[conteúdo sensível omitido]');
+  assert.doesNotMatch(JSON.stringify(first), /ZGF0|YTp4|PHNj|Alice|UFJJ|PRIVATE/iu);
+});
+
+test('normalizes Unicode line and paragraph separators while scanning segmented base64', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.occurrences[0].justification = 'ZGF0\u2028YTp4';
+  input.occurrences[0].accessiblePreview = 'ZGF0\u2029YTp4';
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.description, '[recurso omitido]');
+  assert.equal(first.accessible_preview, '[recurso omitido]');
+});
+
+test('removes default-ignorable format separators while scanning segmented base64', () => {
+  for (const separator of ['\u200B', '\uFEFF', '\u2060', '\u00AD', '\u200C', '\u200D', '\u202A', '\uFE00']) {
+    const input = structuredClone(SAMPLE_AUDIT);
+    input.occurrences[0].justification = `ZGF0${separator}YTp4`;
+
+    const description = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]).description;
+
+    assert.equal(description, '[recurso omitido]', `separator U+${separator.codePointAt(0).toString(16)}`);
+  }
+});
+
+test('scans long segmented runs for nested resources, markup and private sentinels', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const prefix = 'hello '.repeat(500);
+  const splitOuter = value => globalThis.btoa(value).match(/.{1,4}/gu).join(' ');
+  input.occurrences[0].justification = `${prefix}${splitOuter('ZGF0 YTp4')}`;
+  input.occurrences[0].accessiblePreview = `${prefix}${splitOuter('PHNj cmlwdD5BbGljZQ==')}`;
+  input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource =
+    `${prefix}${splitOuter('UFJJ VkFU RQ==')}`;
+  input.occurrences[0].target.selector = `${prefix}VE9Q U0VD UkVU`;
+  input.occurrences[0].target.framePath = [`${prefix}U0VO VElO RUw=`];
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.description, '[recurso omitido]');
+  assert.equal(first.accessible_preview, '[marcação omitida]');
+  assert.equal(first.accessible_preview_source, '[conteúdo sensível omitido]');
+  assert.equal(first.selector, '[conteúdo sensível omitido]');
+  assert.equal(first.frame_path, '[conteúdo sensível omitido]');
+});
+
+test('finds no-padding nested unsafe candidates in the middle of a long segmented run', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const prefix = 'hello '.repeat(250);
+  const suffix = ' suffix'.repeat(250);
+  const splitOuter = value => globalThis.btoa(value).match(/.{1,4}/gu).join(' ');
+  input.occurrences[0].justification = `${prefix}${splitOuter('ZGF0 YTp4')}${suffix}`;
+  input.occurrences[0].accessiblePreview = `${prefix}${splitOuter('PHNj cmlwdD5BbGljZQ==')}${suffix}`;
+  input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource =
+    `${prefix}${splitOuter('U0VD UkVU')}${suffix}`;
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.description, '[recurso omitido]');
+  assert.equal(first.accessible_preview, '[marcação omitida]');
+  assert.equal(first.accessible_preview_source, '[conteúdo sensível omitido]');
+});
+
+test('finds directly decoded unsafe text at every alignment inside a long segmented run', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const prefix = 'hello '.repeat(250);
+  const suffix = ' suffix'.repeat(250);
+  const splitOuter = value => globalThis.btoa(value).match(/.{1,4}/gu).join(' ');
+  input.occurrences[0].justification = `${prefix}${splitOuter('X <script>AB')}${suffix}`;
+  input.occurrences[0].accessiblePreview = `${prefix}${splitOuter('X data:xABCD')}${suffix}`;
+  input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource =
+    `${prefix}${splitOuter('MYSECRETZ')}${suffix}`;
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.description, '[marcação omitida]');
+  assert.equal(first.accessible_preview, '[recurso omitido]');
+  assert.equal(first.accessible_preview_source, '[conteúdo sensível omitido]');
+  assert.doesNotMatch(JSON.stringify(first), /<script>|data:xABCD|MYSECRETZ|WCA8|WCBk|TVlT/u);
+});
+
+test('finds directly decoded unsafe text after an invalid binary prefix', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const splitOuter = value => globalThis.btoa(value).match(/.{1,4}/gu).join(' ');
+  input.occurrences[0].justification = splitOuter('\xFF<script>A');
+  input.occurrences[0].accessiblePreview = splitOuter('\xFFdata:x');
+  input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource =
+    splitOuter('\xFFPRIVATE');
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.description, '[marcação omitida]');
+  assert.equal(first.accessible_preview, '[recurso omitido]');
+  assert.equal(first.accessible_preview_source, '[conteúdo sensível omitido]');
+  assert.doesNotMatch(JSON.stringify(first), /<script>|data:x|PRIVATE|\/3Nj|\/2Rh|\/1BS/u);
+});
+
+test('covers an unsafe tail after more segmented runs than the decode-call budget', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const decoys = Array.from({ length: 1_100 }, (_, index) =>
+    `hello word${String(index).padStart(4, '0')}`).join(', ');
+  input.occurrences[0].justification = `${decoys}, ZGF0 YTp4`;
+
+  const description = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]).description;
+
+  assert.equal(description, '[recurso omitido]');
+});
+
+test('recursively classifies nested segmented base64 within the bounded scan depth', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const splitOuter = value => globalThis.btoa(value).match(/.{1,4}/gu).join(' ');
+  input.occurrences[0].justification = splitOuter('ZGF0 YTp4');
+  input.occurrences[0].accessiblePreview = splitOuter('PHNj cmlwdD5BbGljZQ==');
+  input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource =
+    splitOuter('UFJJ VkFU RQ==');
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.description, '[recurso omitido]');
+  assert.equal(first.accessible_preview, '[marcação omitida]');
+  assert.equal(first.accessible_preview_source, '[conteúdo sensível omitido]');
+  assert.doesNotMatch(JSON.stringify(first), /WkdG|PHNj|UFJJ|Alice|PRIVATE/iu);
+});
+
+test('classifies plus-separated base64 in URL query values using form-decoding semantics', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.pages[0].finalUrl = 'https://servico.exemplo.test/final?payload=ZGF0+YTp4';
+
+  const pageUrl = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]).page_url;
+
+  assert.equal(pageUrl, '[recurso omitido]');
+  assert.doesNotMatch(pageUrl, /ZGF0|YTp4/iu);
+});
+
+test('preserves many benign base64-alphabet phrases instead of treating candidate-budget exhaustion as a resource', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const prose = Array.from({ length: 33 }, (_, index) =>
+    `hello word${String(index).padStart(3, '0')}`).join(', ');
+  input.occurrences[0].justification = prose;
+
+  const description = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]).description;
+
+  assert.equal(description, prose);
+});
+
+test('preserves benign alphabet-only phrases whose non-UTF-8 phase shifts resemble markup', () => {
+  for (const prose of [
+    'psxwzkjqzsl xqtcjyn fspob xirej twvkpgj xwxir tqdcdutglun jwpmtmtql',
+    'pyn lyn nqxqhslez xwn veliv vihklgf lgp rwjqxgl',
+    'project jxw zebra status normal',
+    'object jxw zebra release status',
+  ]) {
+    const input = structuredClone(SAMPLE_AUDIT);
+    input.occurrences[0].justification = prose;
+
+    const description = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]).description;
+
+    assert.equal(description, prose);
+  }
+});
+
+test('preserves natural aligned four-letter prose instead of treating its shape alone as base64', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const prose = 'this text will show that each word fits well when many safe rows keep data open from user view with some more kind note over time also only good page link form name role aria';
+  input.occurrences[0].justification = prose;
+
+  const description = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]).description;
+
+  assert.equal(description, prose);
+});
+
+test('preserves many harmless canonical base64 tokens instead of treating scan-budget exhaustion as a resource', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const prose = Array.from({ length: 129 }, (_, index) =>
+    globalThis.btoa(`x${String(index).padStart(3, '0')}!!`)).join(', ');
+  input.occurrences[0].justification = prose;
+
+  const description = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]).description;
+
+  assert.equal(description, prose);
+});
+
+test('keeps segmented-base64 decoding work bounded for a dense benign scalar', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const prose = 'A '.repeat(16_000).trim();
+  input.occurrences[0].justification = prose;
+  const originalAtob = globalThis.atob;
+  let decodeCalls = 0;
+  globalThis.atob = (...args) => {
+    decodeCalls += 1;
+    return Reflect.apply(originalAtob, globalThis, args);
+  };
+
+  try {
+    const description = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]).description;
+
+    assert.equal(description, prose);
+    assert.ok(decodeCalls <= 64, `expected at most 64 bounded decodes, received ${decodeCalls}`);
+  } finally {
+    globalThis.atob = originalAtob;
+  }
+});
+
 test('preserves canonical base64 text whose decoded view is ordinary public prose', () => {
   const input = structuredClone(SAMPLE_AUDIT);
   const safeToken = globalThis.btoa('ordinary public announcement');
@@ -221,6 +491,65 @@ test('omits incomplete generic markup without treating mathematical less-than pr
   assert.equal(first.description, '[marcação omitida]');
   assert.equal(first.accessible_preview, 'A comparação observada foi 2 < 3, botão');
   assert.doesNotMatch(first.description, /data-customer|Alice/iu);
+});
+
+test('omits complete attributed tags adjacent to prose while preserving existing algebraic comparisons', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.occurrences[0].justification = 'prefix<a data-customer=Alice>';
+  input.occurrences[0].accessiblePreview = 'prefix<customer name=Alice>';
+  input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource =
+    'Use x<y e a<b>c ao comparar.';
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.description, '[marcação omitida]');
+  assert.equal(first.accessible_preview, '[marcação omitida]');
+  assert.equal(first.accessible_preview_source, 'Use x<y e a<b>c ao comparar.');
+  assert.doesNotMatch(`${first.description}${first.accessible_preview}`, /customer|Alice/iu);
+});
+
+test('omits adjacent complete tags with boolean or name-only attributes', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.occurrences[0].justification = 'prefix<a hidden>';
+  input.occurrences[0].accessiblePreview = 'prefix<customer name>';
+  input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource =
+    'Use x<a>y e a<b>c ao comparar.';
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.description, '[marcação omitida]');
+  assert.equal(first.accessible_preview, '[marcação omitida]');
+  assert.equal(first.accessible_preview_source, 'Use x<a>y e a<b>c ao comparar.');
+});
+
+test('omits adjacent incomplete tags with assigned, boolean or name-only attributes', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.occurrences[0].justification = 'prefix<a data-customer=Alice';
+  input.occurrences[0].accessiblePreview = 'prefix<a hidden';
+  input.occurrences[0].target.selector = 'prefix<a name';
+  input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource =
+    'prefix<customer name=Alice';
+
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+  assert.equal(first.description, '[marcação omitida]');
+  assert.equal(first.accessible_preview, '[marcação omitida]');
+  assert.equal(first.selector, '[marcação omitida]');
+  assert.equal(first.accessible_preview_source, '[marcação omitida]');
+  assert.doesNotMatch(JSON.stringify(first), /customer|Alice/iu);
+});
+
+test('preserves a whitespace scan boundary when controls separate tag attributes', () => {
+  for (const separator of ['\t', '\n', '\r', '\0']) {
+    const input = structuredClone(SAMPLE_AUDIT);
+    input.occurrences[0].justification = `prefix<a${separator}href=Alice>`;
+    input.occurrences[0].accessiblePreview = `prefix<customer${separator}name=Alice>`;
+
+    const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+
+    assert.equal(first.description, '[marcação omitida]');
+    assert.equal(first.accessible_preview, '[marcação omitida]');
+  }
 });
 
 test('classifies encoded resources, control-split credentials, incomplete markup and selected private metadata', () => {
@@ -330,6 +659,19 @@ test('neutralizes every spreadsheet-danger prefix once in CSV only and leaves sa
   ]);
 });
 
+test('keeps formula neutralization inside the 32,000-code-point cell cap', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.occurrences[0].accessiblePreview = `=${'texto humano '.repeat(3_000)}`.slice(0, 32_000);
+  const original = structuredClone(input);
+
+  const preview = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]).accessible_preview;
+
+  assert.deepEqual(input, original);
+  assert.equal([...preview].length, 32_000);
+  assert.match(preview, /^'=/u);
+  assert.match(preview, /…\[truncated\]$/u);
+});
+
 test('resolves each page URL by pageId and rejects unknown or cross-page links instead of guessing', () => {
   const input = structuredClone(SAMPLE_AUDIT);
   input.requestedScope = {
@@ -407,7 +749,22 @@ test('bounds individual text deterministically and rejects oversized total outpu
   }));
   huge.manualReview = [];
   huge.reviewDecisions = [];
-  assert.throws(() => renderOccurrenceCsv(huge), /CSV|limite|tamanho/iu);
+  const charCodeAtDescriptor = Object.getOwnPropertyDescriptor(String.prototype, 'charCodeAt');
+  let decodedSourceCharacters = 0;
+  Object.defineProperty(String.prototype, 'charCodeAt', {
+    ...charCodeAtDescriptor,
+    value(index) {
+      decodedSourceCharacters += 1;
+      return Reflect.apply(charCodeAtDescriptor.value, this, [index]);
+    },
+  });
+  try {
+    assert.throws(() => renderOccurrenceCsv(huge), /CSV|limite|tamanho/iu);
+  } finally {
+    Object.defineProperty(String.prototype, 'charCodeAt', charCodeAtDescriptor);
+  }
+  assert.ok(decodedSourceCharacters <= 4_000_000,
+    `expected at most 4,000,000 decoded source characters, received ${decodedSourceCharacters}`);
 });
 
 test('fails closed on accessors and revoked proxies without evaluating private values', () => {

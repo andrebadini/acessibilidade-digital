@@ -36,6 +36,20 @@ test('retries exactly once without only tagged PDF and outline when experimental
   assert.match(result.limitations.join(' '), /marcado|outline|estrutura/iu);
 });
 
+test('prints directly in forced compatible mode for a final fallback-model rerender', async () => {
+  const calls = [];
+  const result = await renderPdf({
+    async command(method, params) { calls.push([method, params]); return { data: validPdf }; },
+  }, { forceCompatible: true });
+
+  assert.deepEqual(calls, [['Page.printToPDF', {
+    printBackground: true,
+    preferCSSPageSize: true,
+  }]]);
+  assert.equal(result.usedFallback, true);
+  assert.match(result.limitations.join(' '), /marcado|outline|estrutura/iu);
+});
+
 test('does not retry unrelated failures and rejects malformed PDF payloads', async () => {
   let calls = 0;
   await assert.rejects(renderPdf({ async command() { calls += 1; throw new Error('Target closed'); } }), /Target closed/);

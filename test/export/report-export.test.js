@@ -5,6 +5,7 @@ import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { runReportExport } from '../../src/export/report-export.js';
 
 const PDF = new TextEncoder().encode('%PDF-1.7\nlocal');
+const FALLBACK_PDF = new TextEncoder().encode('%PDF-1.7\nfinal-fallback');
 
 function clone(value) { return structuredClone(value); }
 
@@ -291,6 +292,122 @@ test('contains CSV preparation failure, records it in the final correlated model
   assert.doesNotMatch(`${result.html}\n${result.json}\n${JSON.stringify(result)}`, /PRIVATE_SENTINEL|origin\.test|token=/iu);
 });
 
+test('prints the exact final canonical HTML after CSV availability is known, including timestamp, hash and limitation', async () => {
+  const printBlobs = [];
+  const result = await runReportExport({
+    auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z',
+  }, {
+    urlApi: {
+      createObjectURL(blob) { printBlobs.push(blob); return `blob:chrome-extension://test/print-${printBlobs.length}`; },
+      revokeObjectURL() {},
+    },
+    tabAdapter: successfulTabAdapter(),
+    csvRenderer() { throw new Error('PRIVATE_SENTINEL'); },
+    async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+    downloadsAdapter: fakeDownloads([]),
+  });
+
+  assert.equal(printBlobs.length, 1);
+  const printedHtml = await printBlobs[0].text();
+  assert.equal(printedHtml, result.html);
+  assert.match(printedHtml, /2026-08-26T15:00:00\.000Z/u);
+  assert.match(printedHtml, new RegExp(result.model.integrity.canonicalModelHash, 'u'));
+  assert.match(printedHtml, /CSV não foi gerado/iu);
+  assert.deepEqual(JSON.parse(result.json).audit, result.model);
+  assert.equal(result.csv, null);
+  assert.doesNotMatch(printedHtml, /PRIVATE_SENTINEL/u);
+});
+
+test('discards a provisional fallback PDF and rerenders the exact final fallback model in compatible mode', async () => {
+  const printBlobs = [];
+  const renderOptions = [];
+  const result = await runReportExport({
+    auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z',
+  }, {
+    urlApi: {
+      createObjectURL(blob) { printBlobs.push(blob); return `blob:chrome-extension://test/print-${printBlobs.length}`; },
+      revokeObjectURL() {},
+    },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer(_cdp, options) {
+      renderOptions.push(options ?? null);
+      return renderOptions.length === 1
+        ? { bytes: PDF, usedFallback: true, limitations: ['controlled provisional fallback'] }
+        : { bytes: FALLBACK_PDF, usedFallback: true, limitations: ['controlled final fallback'] };
+    },
+    downloadsAdapter: fakeDownloads([]),
+  });
+
+  assert.deepEqual(renderOptions, [null, { forceCompatible: true }]);
+  assert.equal(printBlobs.length, 2);
+  assert.notEqual(await printBlobs[0].text(), result.html);
+  assert.equal(await printBlobs[1].text(), result.html);
+  assert.deepEqual(result.pdf, FALLBACK_PDF);
+  assert.equal(result.pdfFallback, true);
+  assert.equal(result.model.report.artifact.pdfFallback, true);
+  assert.match(result.html, new RegExp(result.model.integrity.canonicalModelHash, 'u'));
+  assert.match(result.html, /estrutura|marcação|outline/iu);
+  assert.equal(result.csv, (await import('../../src/core/report/csv.js')).renderOccurrenceCsv(result.model));
+});
+
+test('fails closed and omits PDF when a final fallback rerender diverges from its declared mode', async () => {
+  const printBlobs = [];
+  let renders = 0;
+  const result = await runReportExport({
+    auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z',
+  }, {
+    urlApi: {
+      createObjectURL(blob) { printBlobs.push(blob); return `blob:chrome-extension://test/print-${printBlobs.length}`; },
+      revokeObjectURL() {},
+    },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer() {
+      renders += 1;
+      return renders === 1
+        ? { bytes: PDF, usedFallback: true, limitations: ['controlled provisional fallback'] }
+        : { bytes: FALLBACK_PDF, usedFallback: false, limitations: [] };
+    },
+    downloadsAdapter: fakeDownloads([]),
+  });
+
+  assert.equal(renders, 2);
+  assert.equal(result.pdf, null);
+  assert.equal(result.pdfFallback, false);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
+  assert.deepEqual(result.model.report.artifact.formats.map(entry => entry.format), ['html', 'json', 'csv']);
+  assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'REPORT_PDF_UNAVAILABLE'));
+  assert.deepEqual(JSON.parse(result.json).audit, result.model);
+  assert.equal(result.csv, (await import('../../src/core/report/csv.js')).renderOccurrenceCsv(result.model));
+  assert.notEqual(await printBlobs.at(-1).text(), result.html);
+});
+
+test('keeps late print cleanup outside the printed model and marks the controlled delivery receipt partial', async () => {
+  const printBlobs = [];
+  const result = await runReportExport({
+    auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z',
+  }, {
+    urlApi: {
+      createObjectURL(blob) { printBlobs.push(blob); return 'blob:chrome-extension://test/print'; },
+      revokeObjectURL() {},
+    },
+    tabAdapter: {
+      async createPrintTab() { return { id: 81 }; }, async waitForReady() {},
+      async connectCdp() { return { async disconnect() {} }; }, async waitForAssets() {},
+      async removeTab() { throw new Error('PRIVATE_CLEANUP_SENTINEL'); },
+    },
+    async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+    downloadsAdapter: fakeDownloads([]),
+  });
+
+  assert.equal(await printBlobs[0].text(), result.html);
+  assert.equal(result.deliveryReceipt.status, 'partial');
+  assert.deepEqual(result.deliveryReceipt.limitations, [
+    'A limpeza de um recurso temporário de impressão não pôde ser confirmada.',
+  ]);
+  assert.deepEqual(JSON.parse(result.json).audit, result.model);
+  assert.doesNotMatch(`${result.html}\n${result.json}\n${JSON.stringify(result)}`, /PRIVATE_CLEANUP_SENTINEL/u);
+});
+
 test('treats non-string, non-BOM or noncanonical CSV renderer output as a generation failure and still downloads PDF', async () => {
   for (const rendered of [
     new Uint8Array([0x50, 0x52, 0x49, 0x56, 0x41, 0x54, 0x45]),
@@ -370,7 +487,11 @@ test('adopts and cleans a tab that resolves after its creation timeout', async (
     },
     downloadsAdapter: fakeDownloads([]),
   });
-  await resultPromise;
+  const result = await resultPromise;
+  assert.equal(result.deliveryReceipt.status, 'partial');
+  assert.ok(result.deliveryReceipt.limitations.includes(
+    'A limpeza de um recurso temporário de impressão não pôde ser confirmada.',
+  ));
   late.resolve({ id: 91 });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(removed, [91]);
@@ -388,7 +509,11 @@ test('adopts and disconnects a CDP client that resolves after timeout without re
     },
     downloadsAdapter: fakeDownloads([]),
   });
-  await resultPromise;
+  const result = await resultPromise;
+  assert.equal(result.deliveryReceipt.status, 'partial');
+  assert.ok(result.deliveryReceipt.limitations.includes(
+    'A limpeza de um recurso temporário de impressão não pôde ser confirmada.',
+  ));
   late.resolve({ async disconnect() { events.push(['disconnect']); throw new Error('TOPSECRET cleanup denied'); } });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(events, [['remove', 92], ['disconnect']]);

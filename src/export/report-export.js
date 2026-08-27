@@ -8,6 +8,13 @@ import { createExportIssue, issueForPrintStage, PDF_GENERATION_FAILURE_CODES } f
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const PDF_COMMAND_TIMEOUT_MS = 45_000;
+const MAX_FINALIZATION_PASSES = 6;
+
+class OwnershipTransferTimeoutError extends DOMException {
+  constructor() {
+    super('Operação excedeu o tempo limite.', 'TimeoutError');
+  }
+}
 
 export async function runReportExport(request, dependencies) {
   validateDependencies(dependencies);
@@ -15,11 +22,132 @@ export async function runReportExport(request, dependencies) {
   const at = canonicalNow(request?.now);
   const timeoutMs = request?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('Timeout de exportação inválido.');
-  let model = original;
-  let html = renderHtmlReport(model);
+  const generationIssues = [];
+  const printCleanupLimitations = [];
+  let hasCsv = true;
+  let hasPdf = true;
+  let expectedPdfFallback = false;
+  let model = null;
+  let html = null;
+  let json = null;
+  let csv = null;
   let pdf = null;
   let pdfFallback = false;
-  const generationIssues = [];
+  let settled = false;
+
+  for (let pass = 0; pass < MAX_FINALIZATION_PASSES; pass += 1) {
+    model = await finalizeGeneratedModel(original, at, generationIssues, hasPdf, expectedPdfFallback, true, hasCsv);
+    html = renderHtmlReport(model);
+    json = renderTechnicalJson(model);
+
+    if (hasCsv) {
+      try {
+        csv = renderCanonicalCsv(model, dependencies.csvRenderer);
+      } catch {
+        csv = null;
+        hasCsv = false;
+        addIssue(generationIssues, createExportIssue('REPORT_CSV_UNAVAILABLE'));
+        continue;
+      }
+    } else {
+      csv = null;
+    }
+
+    if (!hasPdf) {
+      pdf = null;
+      pdfFallback = false;
+      settled = true;
+      break;
+    }
+
+    const printed = await printFinalHtml(html, dependencies, timeoutMs, expectedPdfFallback);
+    if (printed.cleanupLimited) {
+      addUnique(printCleanupLimitations, createExportIssue('REPORT_PRINT_CLEANUP_LIMITED').message);
+    }
+    if (printed.issue) {
+      hasPdf = false;
+      expectedPdfFallback = false;
+      removeIssue(generationIssues, 'REPORT_PDF_TAGGING_UNSUPPORTED');
+      addIssue(generationIssues, printed.issue);
+      continue;
+    }
+    if (printed.usedFallback !== expectedPdfFallback) {
+      if (!expectedPdfFallback && printed.usedFallback) {
+        expectedPdfFallback = true;
+        addIssue(generationIssues, createExportIssue('REPORT_PDF_TAGGING_UNSUPPORTED'));
+      } else {
+        hasPdf = false;
+        expectedPdfFallback = false;
+        removeIssue(generationIssues, 'REPORT_PDF_TAGGING_UNSUPPORTED');
+        addIssue(generationIssues, createExportIssue('REPORT_PDF_UNAVAILABLE'));
+      }
+      continue;
+    }
+    pdf = printed.bytes;
+    pdfFallback = expectedPdfFallback;
+    settled = true;
+    break;
+  }
+
+  if (!settled) {
+    hasCsv = false;
+    hasPdf = false;
+    expectedPdfFallback = false;
+    csv = null;
+    pdf = null;
+    pdfFallback = false;
+    removeIssue(generationIssues, 'REPORT_PDF_TAGGING_UNSUPPORTED');
+    addIssue(generationIssues, createExportIssue('REPORT_CSV_UNAVAILABLE'));
+    addIssue(generationIssues, createExportIssue('REPORT_PDF_UNAVAILABLE'));
+    model = await finalizeGeneratedModel(original, at, generationIssues, false, false, true, false);
+    html = renderHtmlReport(model);
+    json = renderTechnicalJson(model);
+  }
+
+  const baseName = buildArtifactBaseName(model.finalUrl, at);
+  const downloads = await downloadArtifacts({
+    baseName, html, json, ...(csv === null ? {} : { csv }), ...(pdf ? { pdf } : {}),
+  }, dependencies.downloadsAdapter, { timeoutMs });
+  const missingGenerationLimitations = [];
+  if (csv === null) missingGenerationLimitations.push(createExportIssue('REPORT_CSV_UNAVAILABLE').message);
+  if (!pdf) {
+    const pdfIssue = generationIssues.find(issue => PDF_GENERATION_FAILURE_CODES.includes(issue.code));
+    missingGenerationLimitations.push((pdfIssue ?? createExportIssue('REPORT_PDF_UNAVAILABLE')).message);
+  }
+  const deliveryLimitations = [...new Set([
+    ...missingGenerationLimitations,
+    ...printCleanupLimitations,
+    ...downloads.limitations,
+  ])];
+  const deliveryReceipt = {
+    status: downloads.formats.length === 4 && downloads.formats.every(format => format.status === 'complete') && deliveryLimitations.length === 0
+      ? 'complete'
+      : 'partial',
+    formats: downloads.formats,
+    limitations: deliveryLimitations,
+  };
+  return {
+    model,
+    html,
+    json,
+    csv,
+    pdf,
+    formats: downloads.formats,
+    deliveryReceipt,
+    limitations: [...new Set([
+      ...generationIssues.map(issue => issue.message),
+      ...printCleanupLimitations,
+      ...downloads.limitations,
+    ])],
+    pdfFallback,
+  };
+}
+
+async function printFinalHtml(html, dependencies, timeoutMs, forceCompatible) {
+  let bytes = null;
+  let usedFallback = false;
+  let issue = null;
+  let cleanupLimited = false;
   let printUrl = null;
   let tabId = null;
   let cdp = null;
@@ -47,69 +175,38 @@ export async function runReportExport(request, dependencies) {
     stage = 'assets';
     await boundary(dependencies.tabAdapter.waitForAssets(cdp, { timeoutMs }), timeoutMs, 'A preparação de fontes e imagens excedeu o tempo limite.');
     stage = 'pdf';
-    const renderedPdf = await boundary((dependencies.pdfRenderer ?? renderPdf)(cdp), Math.max(timeoutMs, PDF_COMMAND_TIMEOUT_MS + 5_000), 'A impressão do PDF excedeu o tempo limite.');
+    const renderedPdf = await boundary(
+      (dependencies.pdfRenderer ?? renderPdf)(cdp, forceCompatible ? { forceCompatible: true } : undefined),
+      Math.max(timeoutMs, PDF_COMMAND_TIMEOUT_MS + 5_000),
+      'A impressão do PDF excedeu o tempo limite.',
+    );
     const checkedPdf = snapshotPdfResult(renderedPdf);
-    pdf = checkedPdf.bytes;
-    pdfFallback = checkedPdf.usedFallback;
-    if (pdfFallback) generationIssues.push(createExportIssue('REPORT_PDF_TAGGING_UNSUPPORTED'));
+    bytes = checkedPdf.bytes;
+    usedFallback = checkedPdf.usedFallback;
   } catch (error) {
-    generationIssues.push(issueForPrintStage(stage, error));
+    if (error instanceof OwnershipTransferTimeoutError) cleanupLimited = true;
+    issue = issueForPrintStage(stage, error);
   } finally {
     if (cdp) {
-      try { await boundary(cdp.disconnect(), timeoutMs, 'A desconexão de impressão excedeu o tempo limite.'); } catch { generationIssues.push(createExportIssue('REPORT_PRINT_CLEANUP_LIMITED')); }
+      try { await boundary(cdp.disconnect(), timeoutMs, 'A desconexão de impressão excedeu o tempo limite.'); } catch { cleanupLimited = true; }
     }
     if (tabId !== null) {
-      try { await boundary(dependencies.tabAdapter.removeTab(tabId), timeoutMs, 'A remoção da aba de impressão excedeu o tempo limite.'); } catch { generationIssues.push(createExportIssue('REPORT_PRINT_CLEANUP_LIMITED')); }
+      try { await boundary(dependencies.tabAdapter.removeTab(tabId), timeoutMs, 'A remoção da aba de impressão excedeu o tempo limite.'); } catch { cleanupLimited = true; }
     }
     if (printUrl !== null) {
-      try { dependencies.urlApi.revokeObjectURL(printUrl); } catch { generationIssues.push(createExportIssue('REPORT_PRINT_CLEANUP_LIMITED')); }
+      try { dependencies.urlApi.revokeObjectURL(printUrl); } catch { cleanupLimited = true; }
     }
   }
+  return { bytes, usedFallback, issue, cleanupLimited };
+}
 
-  model = await finalizeGeneratedModel(original, at, generationIssues, Boolean(pdf), pdfFallback);
-  let csv = null;
-  try {
-    const canonicalCsv = renderOccurrenceCsv(model);
-    const renderedCsv = dependencies.csvRenderer ? dependencies.csvRenderer(model) : canonicalCsv;
-    if (typeof renderedCsv !== 'string' || renderedCsv !== canonicalCsv) {
-      throw new TypeError('O renderizador CSV não retornou a projeção canônica esperada.');
-    }
-    csv = renderedCsv;
-  } catch {
-    generationIssues.push(createExportIssue('REPORT_CSV_UNAVAILABLE'));
-    model = await finalizeGeneratedModel(original, at, generationIssues, Boolean(pdf), pdfFallback, true, false);
+function renderCanonicalCsv(model, csvRenderer) {
+  const canonicalCsv = renderOccurrenceCsv(model);
+  const renderedCsv = csvRenderer ? csvRenderer(model) : canonicalCsv;
+  if (typeof renderedCsv !== 'string' || renderedCsv !== canonicalCsv) {
+    throw new TypeError('O renderizador CSV não retornou a projeção canônica esperada.');
   }
-  html = renderHtmlReport(model);
-  const json = renderTechnicalJson(model);
-  const baseName = buildArtifactBaseName(model.finalUrl, at);
-  const downloads = await downloadArtifacts({
-    baseName, html, json, ...(csv === null ? {} : { csv }), ...(pdf ? { pdf } : {}),
-  }, dependencies.downloadsAdapter, { timeoutMs });
-  const missingGenerationLimitations = [];
-  if (csv === null) missingGenerationLimitations.push(createExportIssue('REPORT_CSV_UNAVAILABLE').message);
-  if (!pdf) {
-    const pdfIssue = generationIssues.find(issue => PDF_GENERATION_FAILURE_CODES.includes(issue.code));
-    missingGenerationLimitations.push((pdfIssue ?? createExportIssue('REPORT_PDF_UNAVAILABLE')).message);
-  }
-  const deliveryLimitations = [...new Set([...missingGenerationLimitations, ...downloads.limitations])];
-  const deliveryReceipt = {
-    status: downloads.formats.length === 4 && downloads.formats.every(format => format.status === 'complete') && deliveryLimitations.length === 0
-      ? 'complete'
-      : 'partial',
-    formats: downloads.formats,
-    limitations: deliveryLimitations,
-  };
-  return {
-    model,
-    html,
-    json,
-    csv,
-    pdf,
-    formats: downloads.formats,
-    deliveryReceipt,
-    limitations: [...new Set([...generationIssues.map(issue => issue.message), ...downloads.limitations])],
-    pdfFallback,
-  };
+  return renderedCsv;
 }
 
 export async function finalizeGeneratedModel(model, at, issues, hasPdf, pdfFallback = false, artifactsPrepared = true, hasCsv = true) {
@@ -264,7 +361,7 @@ function adoptBoundary(promise, timeoutMs, disposeLate) {
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
       timedOut = true;
-      reject(new DOMException('Operação excedeu o tempo limite.', 'TimeoutError'));
+      reject(new OwnershipTransferTimeoutError());
     }, timeoutMs);
   });
   return Promise.race([source, timeout]).finally(() => clearTimeout(timer));
@@ -274,6 +371,19 @@ function dedupeIssues(issues) {
   const byCode = new Map();
   for (const issue of issues) if (issue?.code && issue?.message && !byCode.has(issue.code)) byCode.set(issue.code, issue);
   return [...byCode.values()];
+}
+
+function addIssue(issues, issue) {
+  if (!issues.some(current => current.code === issue.code)) issues.push(issue);
+}
+
+function removeIssue(issues, code) {
+  const index = issues.findIndex(issue => issue.code === code);
+  if (index >= 0) issues.splice(index, 1);
+}
+
+function addUnique(values, value) {
+  if (!values.includes(value)) values.push(value);
 }
 
 function sanitizeReportMessages(value) {
