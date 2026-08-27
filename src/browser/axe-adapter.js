@@ -31,8 +31,16 @@ const MAX_TAGS = 32;
 const MAX_TARGET_PARTS = 16;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const CATALOG_IDENTIFIER = /^[a-z][a-z0-9._:-]{0,127}$/iu;
-const SELECTOR_ALLOWED_CHARACTERS = /^[a-z0-9_.#():>\- \t]+$/iu;
-const SELECTOR_SENSITIVE_IDENTIFIER = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|api[-_]?key)/iu;
+const SELECTOR_ALLOWED_CHARACTERS = /^[a-z0-9():>\- \t]+$/iu;
+const SAFE_TARGET_TAGS = new Set([
+  'a', 'abbr', 'address', 'area', 'article', 'aside', 'audio', 'b', 'base', 'bdi', 'bdo', 'blockquote', 'body', 'br', 'button',
+  'canvas', 'caption', 'cite', 'code', 'col', 'colgroup', 'data', 'datalist', 'dd', 'del', 'details', 'dfn', 'dialog', 'div', 'dl', 'dt',
+  'em', 'embed', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header', 'hgroup',
+  'hr', 'html', 'i', 'iframe', 'img', 'input', 'ins', 'kbd', 'label', 'legend', 'li', 'link', 'main', 'map', 'mark', 'menu', 'meta',
+  'meter', 'nav', 'noscript', 'object', 'ol', 'optgroup', 'option', 'output', 'p', 'picture', 'pre', 'progress', 'q', 'rp', 'rt', 'ruby',
+  's', 'samp', 'script', 'search', 'section', 'select', 'slot', 'small', 'source', 'span', 'strong', 'style', 'sub', 'summary', 'sup',
+  'table', 'tbody', 'td', 'template', 'textarea', 'tfoot', 'th', 'thead', 'time', 'title', 'tr', 'track', 'u', 'ul', 'var', 'video', 'wbr',
+]);
 const DEFAULT_TIMERS = Object.freeze({
   set: (callback, timeoutMs) => setTimeout(callback, timeoutMs),
   clear: timer => clearTimeout(timer),
@@ -49,39 +57,9 @@ function safeImpact(value) {
   return ['minor', 'moderate', 'serious', 'critical'].includes(value) ? value : null;
 }
 
-function unsafeSelectorIdentifier(value) {
-  return SELECTOR_SENSITIVE_IDENTIFIER.test(value)
-    || /\d{6,}/u.test(value)
-    || (value.length >= 16 && /[a-z]/iu.test(value) && /\d/u.test(value));
-}
-
 function safeSelectorCompound(compound) {
-  let remaining = compound;
-  const identifiers = [];
-  let observed = false;
-  const tag = remaining.match(/^[a-z][a-z0-9-]{0,31}/iu)?.[0];
-  if (tag) {
-    observed = true;
-    identifiers.push(tag);
-    remaining = remaining.slice(tag.length);
-  }
-  while (remaining) {
-    const named = remaining.match(/^[.#]([a-z_][a-z0-9_-]{0,31})/iu);
-    if (named) {
-      observed = true;
-      identifiers.push(named[1]);
-      remaining = remaining.slice(named[0].length);
-      continue;
-    }
-    const position = remaining.match(/^:nth-of-type\(([1-9]\d{0,3})\)/iu);
-    if (position) {
-      observed = true;
-      remaining = remaining.slice(position[0].length);
-      continue;
-    }
-    return false;
-  }
-  return observed && identifiers.every(identifier => !unsafeSelectorIdentifier(identifier));
+  const match = compound.match(/^([a-z][a-z0-9-]{0,31})(?::nth-of-type\(([1-9]\d{0,3})\))?$/iu);
+  return Boolean(match && SAFE_TARGET_TAGS.has(match[1].toLowerCase()));
 }
 
 function safeStructuralSelector(value) {
@@ -259,7 +237,7 @@ export async function probeAxeInTab(tabId, { executeScript = defaultExecuteScrip
 
 export async function runAxeInTab(tabId, options = {}) {
   if (!Number.isSafeInteger(tabId) || tabId < 0) throw new TypeError('O tabId do axe é inválido.');
-  if (!AXE_MV3_CSP_GATE.enabled) {
+  if (resolveAxeGateState(AXE_MV3_CSP_GATE) === 'disabled') {
     return {
       status: 'disabled',
       provenance: AXE_PROVENANCE,
@@ -268,4 +246,14 @@ export async function runAxeInTab(tabId, options = {}) {
     };
   }
   return probeAxeInTab(tabId, options);
+}
+
+export function resolveAxeGateState(gate) {
+  if (typeof gate?.enabled !== 'boolean' || typeof gate?.targetSizeEnabled !== 'boolean') {
+    throw Object.assign(new TypeError('A configuração do gate axe é inválida.'), { code: 'AXE_MV3_CSP_GATE_INVALID' });
+  }
+  if (gate.enabled !== gate.targetSizeEnabled) {
+    throw Object.assign(new TypeError('A configuração do gate axe é inválida.'), { code: 'AXE_MV3_CSP_GATE_INCONSISTENT' });
+  }
+  return gate.enabled ? 'enabled' : 'disabled';
 }

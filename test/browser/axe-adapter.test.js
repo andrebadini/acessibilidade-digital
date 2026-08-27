@@ -67,6 +67,25 @@ test('keeps the production feature gate off without a successful real MV3 CSP ru
   });
 });
 
+test('rejects every non-boolean or inconsistent production gate state', () => {
+  assert.equal(adapter.resolveAxeGateState({ enabled: false, targetSizeEnabled: false }), 'disabled');
+  assert.equal(adapter.resolveAxeGateState({ enabled: true, targetSizeEnabled: true }), 'enabled');
+  for (const gate of [
+    { enabled: 1, targetSizeEnabled: 1 },
+    { enabled: 0, targetSizeEnabled: 0 },
+    { enabled: 'true', targetSizeEnabled: 'true' },
+    { enabled: null, targetSizeEnabled: null },
+    { enabled: undefined, targetSizeEnabled: undefined },
+    { enabled: true, targetSizeEnabled: false },
+    { enabled: false, targetSizeEnabled: true },
+  ]) {
+    assert.throws(() => adapter.resolveAxeGateState(gate), {
+      name: 'TypeError',
+      message: 'A configuração do gate axe é inválida.',
+    });
+  }
+});
+
 test('returns a stable partial diagnostic when an injection exceeds its timeout', { timeout: 200 }, async () => {
   const result = await adapter.probeAxeInTab(9, {
     executeScript: async () => new Promise(() => {}),
@@ -160,8 +179,13 @@ test('allows only catalog metadata and narrow structural selectors across the ra
     impact: 'serious',
     html: '<input value="password=TOPSECRET">',
     target: [
-      '#safe',
-      'main > form.customer-form > input#email-field:nth-of-type(1)',
+      'main > button:nth-of-type(2)',
+      'article section > p:nth-of-type(3)',
+      '#alice-smith',
+      '#patient-hiv-positive',
+      '#project-phoenix',
+      '.ordinary-class',
+      'main > form.customer-form > button:nth-of-type(2)',
       '#customer-4111111111111111',
       'javascript:alert(1)',
       'javascript:alert(document.cookie)',
@@ -207,8 +231,13 @@ test('allows only catalog metadata and narrow structural selectors across the ra
   assert.deepEqual(Object.keys(raw.violations[0].nodes[0]).sort(), ['all', 'any', 'impact', 'none', 'target']);
   assert.deepEqual(Object.keys(raw.violations[0].nodes[0].any[0]).sort(), ['id', 'impact']);
   assert.deepEqual(raw.violations[0].nodes[0].target, [
-    '#safe',
-    'main > form.customer-form > input#email-field:nth-of-type(1)',
+    'main > button:nth-of-type(2)',
+    'article section > p:nth-of-type(3)',
+    adapter.AXE_TARGET_UNAVAILABLE,
+    adapter.AXE_TARGET_UNAVAILABLE,
+    adapter.AXE_TARGET_UNAVAILABLE,
+    adapter.AXE_TARGET_UNAVAILABLE,
+    adapter.AXE_TARGET_UNAVAILABLE,
     adapter.AXE_TARGET_UNAVAILABLE,
     adapter.AXE_TARGET_UNAVAILABLE,
     adapter.AXE_TARGET_UNAVAILABLE,
@@ -217,5 +246,5 @@ test('allows only catalog metadata and narrow structural selectors across the ra
     adapter.AXE_TARGET_UNAVAILABLE,
     adapter.AXE_TARGET_UNAVAILABLE,
   ]);
-  assert.doesNotMatch(JSON.stringify(raw), /TOPSECRET|private\.invalid|remote\.invalid|<input|customer-411|javascript:|document\.cookie|person@example|12345678901|a8F3kP9z|failureSummary|description|help|message|"data"/iu);
+  assert.doesNotMatch(JSON.stringify(raw), /TOPSECRET|private\.invalid|remote\.invalid|<input|alice-smith|patient-hiv-positive|project-phoenix|ordinary-class|customer-form|customer-411|javascript:|document\.cookie|person@example|12345678901|a8F3kP9z|failureSummary|description|help|message|"data"/iu);
 });
