@@ -5,8 +5,8 @@
 export function collectRuntimePageData() {
   const sensitive = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
   const styleNames = [
-    'display', 'visibility', 'opacity', 'color', 'background-color',
-    'font-size', 'font-weight', 'line-height',
+    'display', 'visibility', 'opacity', 'color', 'background-color', 'background-image',
+    'font-family', 'font-size', 'font-weight', 'line-height', 'text-align',
     'letter-spacing', 'word-spacing', 'outline-color', 'outline-style',
     'outline-width', 'box-shadow', 'text-decoration-color', 'overflow-x',
     'overflow-y', 'animation-duration', 'animation-iteration-count',
@@ -118,6 +118,9 @@ export function collectRuntimePageData() {
       };
     }
     if (element instanceof HTMLMediaElement) {
+      const captionTracks = [...element.textTracks]
+        .filter(track => track.kind === 'captions')
+        .map(track => ({ kind: track.kind, srclang: track.language }));
       record.media = {
         kind: element.localName,
         currentSrc: cleanUrl(element.currentSrc || element.getAttribute('src') || ''),
@@ -125,7 +128,9 @@ export function collectRuntimePageData() {
         muted: element.muted,
         autoplay: element.autoplay,
         controls: element.controls,
-        captionTracks: [...element.textTracks].filter(track => track.kind === 'captions').length
+        captionTracks,
+        ...(Number.isFinite(element.duration) ? { mediaTiming: 'prerecorded' } : {}),
+        ...(element instanceof HTMLAudioElement ? { hasAudio: true } : {})
       };
     } else if (element instanceof HTMLImageElement) {
       record.media = { kind: 'image', currentSrc: cleanUrl(element.currentSrc || element.src) };

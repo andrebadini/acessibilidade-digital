@@ -81,6 +81,59 @@ function axString(value) {
   return '';
 }
 
+function hasAxString(value) {
+  if (typeof value === 'string') return true;
+  return Boolean(value && typeof value === 'object' &&
+    (typeof value.value === 'string' || typeof value.value === 'number' || typeof value.value === 'boolean'));
+}
+
+const TEXT_BLOCK_TAGS = new Set(['article', 'aside', 'blockquote', 'dd', 'div', 'dt', 'figcaption', 'li', 'main', 'p', 'section', 'td', 'th']);
+const BLOCK_TEXT_DISPLAYS = new Set(['block', 'flow-root', 'flex', 'grid', 'list-item', 'table']);
+
+function cssPixels(value) {
+  const match = typeof value === 'string' && value.trim().match(/^(-?(?:\d+|\d*\.\d+))px$/u);
+  return match && Number.isFinite(Number(match[1])) ? Number(match[1]) : null;
+}
+
+function deriveRuleObservations(node) {
+  const styles = node.styles && typeof node.styles === 'object' ? node.styles : {};
+  const display = cleanText(styles.display).toLowerCase();
+  const text = cleanText(node.visibleText || node.text);
+  if (text && !node.hidden && (TEXT_BLOCK_TAGS.has(node.tagName) || BLOCK_TEXT_DISPLAYS.has(display))) {
+    node.textBlock = true;
+    const textAlign = cleanText(styles['text-align'] || styles.textAlign);
+    if (textAlign) node.textAlign = textAlign;
+  }
+  const foreground = cleanText(styles.color);
+  const background = cleanText(styles['background-color'] || styles.backgroundColor);
+  const fontSizePx = cssPixels(styles['font-size'] || styles.fontSize);
+  const fontWeight = cleanText(styles['font-weight'] || styles.fontWeight);
+  if (text && foreground && background && fontSizePx !== null && fontWeight && typeof node.backgroundImageKind === 'string') {
+    node.contrast = {
+      foreground,
+      background,
+      backgroundImage: node.backgroundImageKind,
+      ...(cleanText(styles['font-family'] || styles.fontFamily) ? { fontFamily: cleanText(styles['font-family'] || styles.fontFamily) } : {}),
+      fontSizePx,
+      fontWeight,
+      reliable: node.backgroundImageKind === 'none'
+    };
+  }
+  const media = node.media;
+  if (!media || typeof media !== 'object' || Array.isArray(media) || !['audio', 'video'].includes(node.tagName)) return;
+  for (const field of ['durationSeconds', 'muted', 'autoplay', 'hasAudio', 'mediaTiming']) {
+    if (Object.hasOwn(media, field)) node[field] = media[field];
+  }
+  if (Array.isArray(media.captionTracks)) node.captionTracks = media.captionTracks.map(track => ({ ...track }));
+  if (typeof media.controls === 'boolean') {
+    node.audioControl = {
+      canPause: media.controls,
+      canStop: false,
+      independentVolume: media.controls
+    };
+  }
+}
+
 function copyRect(value) {
   if (Array.isArray(value) && value.length >= 4 && value.slice(0, 4).every(Number.isFinite)) {
     return { x: value[0], y: value[1], width: value[2], height: value[3] };
@@ -116,6 +169,12 @@ function copyRuntime(record, base) {
     result.media = {};
     for (const [key, value] of Object.entries(record.media)) {
       if (key === 'currentSrc' || key === 'src') result.media[key] = sanitizeResourceUrl(value, base);
+      else if (key === 'captionTracks' && Array.isArray(value)) {
+        result.media.captionTracks = value.map(track => ({
+          ...(typeof track?.kind === 'string' ? { kind: cleanText(track.kind) } : {}),
+          ...(typeof track?.srclang === 'string' ? { srclang: cleanText(track.srclang) } : {})
+        }));
+      }
       else if (['string', 'boolean', 'number'].includes(typeof value) || value === null) result.media[key] = value;
     }
   }
@@ -164,10 +223,11 @@ function normalizeSimplified(raw) {
       const description = axString(ax.description);
       const value = editable ? '' : axString(ax.value);
       if (role) normalized.axRole = role;
-      if (name) normalized.accessibleName = name;
+      if (hasAxString(ax.name)) normalized.accessibleName = name;
       if (description) normalized.accessibleDescription = description;
       if (value) normalized.axValue = value;
     }
+    deriveRuleObservations(normalized);
     return normalized;
   });
   const byId = new Map(nodes.map(node => [node.nodeId, node]));
@@ -521,10 +581,11 @@ function normalizeColumnar(raw) {
       const description = axString(ax.description);
       const value = editable ? '' : axString(ax.value);
       if (role) node.axRole = role;
-      if (name) node.accessibleName = name;
+      if (hasAxString(ax.name)) node.accessibleName = name;
       if (description) node.accessibleDescription = description;
       if (value) node.axValue = value;
     }
+    deriveRuleObservations(node);
     outputByRecord.set(record, node);
     return node;
   });

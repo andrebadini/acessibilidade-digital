@@ -10,10 +10,13 @@ function outcome(value) {
 }
 
 function safeId(event) {
+  if (Number.isSafeInteger(event?.backendNodeId) && event.backendNodeId >= 0) return `n-${event.backendNodeId}`;
   const nodeId = typeof event?.nodeId === 'string' ? event.nodeId.trim() : '';
   if (/^(?:document|n-(?:(?:0|[1-9]\d*)|d(?:0|[1-9]\d*)-(?:0|[1-9]\d*)|fixture-[1-9]\d*))$/u.test(nodeId)) return nodeId;
+  const selector = typeof event?.selector === 'string' ? event.selector.trim() : '';
+  const frameId = event?.frameId == null ? '' : String(event.frameId).trim();
   const source = nodeId || (Number.isSafeInteger(event?.nodeId) ? String(event.nodeId) :
-    typeof event?.selector === 'string' ? event.selector.trim() : '');
+    selector ? `${frameId}:${selector}` : '');
   if (!source) return null;
   let hash = 2166136261;
   for (const character of redactSensitiveText(source.normalize('NFKC'))) {
@@ -21,6 +24,10 @@ function safeId(event) {
     hash = Math.imul(hash, 16777619) >>> 0;
   }
   return `probe-${hash.toString(16).padStart(8, '0')}`;
+}
+
+function selectorFrameId(selector, frameId) {
+  return safeId({ selector, frameId });
 }
 
 function unique(values) {
@@ -187,6 +194,27 @@ export function mergeProbesIntoSnapshot(snapshot, probes) {
     focusById.set(String(item.nodeId), current);
   }
   const targetById = new Map((normalized.targetSizes.observations || []).map(item => [String(item.nodeId), item]));
+  const nodesByFallback = new Map();
+  for (const node of snapshot.nodes) {
+    const fallback = selectorFrameId(node.selectorHint, node.frameId);
+    if (!fallback) continue;
+    const nodes = nodesByFallback.get(fallback) || [];
+    nodes.push(node);
+    nodesByFallback.set(fallback, nodes);
+  }
+  const observationsById = new Map();
+  for (const observation of normalized.targetSizes.observations || []) {
+    const id = String(observation.nodeId);
+    const observations = observationsById.get(id) || [];
+    observations.push(observation);
+    observationsById.set(id, observations);
+  }
+  for (const [fallback, nodes] of nodesByFallback) {
+    const observations = observationsById.get(fallback) || [];
+    if (nodes.length === 1 && observations.length === 1 && !targetById.has(String(nodes[0].nodeId))) {
+      targetById.set(String(nodes[0].nodeId), observations[0]);
+    }
+  }
 
   const nodes = snapshot.nodes.map(node => {
     const focus = probeCoverage.focusAppearance === 'complete' || probeCoverage.obscuredTargets === 'complete'

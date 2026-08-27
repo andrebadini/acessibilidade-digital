@@ -165,10 +165,32 @@ export function createChromeAdapter(chromeApi) {
           return { scalePercent: percent, lossOfContent: document.documentElement.scrollWidth > document.documentElement.clientWidth };
         }, [scalePercent]);
       },
-      measureTargetSizes: () => executeOne(() => [...document.querySelectorAll('a[href],button,input,select,textarea,[tabindex]:not([tabindex="-1"])')].map(element => {
-        const rect = element.getBoundingClientRect();
-        return { selector: element.id ? `#${CSS.escape(element.id)}` : element.localName, width: rect.width, height: rect.height, exception: 'none' };
-      })),
+      async measureTargetSizes() {
+        const [frameTree, observations] = await Promise.all([
+          cdp.command('Page.getFrameTree', {}),
+          executeOne(() => {
+            const selector = element => {
+              if (element.id) return `#${CSS.escape(element.id)}`;
+              const parts = [];
+              let current = element;
+              while (current instanceof Element && parts.length < 12) {
+                let part = current.localName;
+                const siblings = [...(current.parentElement?.children || [])].filter(item => item.localName === current.localName);
+                if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+                parts.unshift(part);
+                current = current.parentElement;
+              }
+              return parts.join(' > ');
+            };
+            return [...document.querySelectorAll('a[href],button,input,select,textarea,[tabindex]:not([tabindex="-1"])')].map(element => {
+              const rect = element.getBoundingClientRect();
+              return { selector: selector(element), width: rect.width, height: rect.height, exception: 'none' };
+            });
+          })
+        ]);
+        const frameId = typeof frameTree?.frameTree?.frame?.id === 'string' ? frameTree.frameTree.frame.id : '';
+        return Array.isArray(observations) ? observations.map(item => ({ ...item, ...(frameId ? { frameId } : {}) })) : [];
+      },
       async measureMotion(options) {
         await cdp.command('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
         return executeOne(preference => {
