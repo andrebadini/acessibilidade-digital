@@ -65,9 +65,9 @@ O produto manterá um catálogo `foreignBenchmarks` separado. A correspondência
 | Regras ACT são parciais e informativas | W3C/WAI, Understanding Test Rules | https://www.w3.org/WAI/WCAG22/Understanding/understanding-act-rules.html | Alta |
 | WCAG 2.2 e seus requisitos de conformidade | W3C Recommendation | https://www.w3.org/TR/WCAG22/ | Alta |
 | Section 508 revisada incorpora WCAG 2.0 A/AA | U.S. Access Board e Section508.gov | https://www.access-board.gov/ict/ ; https://www.section508.gov/develop/applicability-conformance/ | Alta; escopo estrangeiro específico |
-| Texto vigente dos arts. 7º, 20 e 39 do CDC | Presidência da República, Lei nº 8.078/1990 | https://www.planalto.gov.br/ccivil_03/leis/l8078compilado.htm | Alta; aplicação exige fatos do caso |
-| Texto vigente do art. 12, IX, “a” | Presidência da República, Decreto nº 2.181/1997 | https://www.planalto.gov.br/ccivil_03/decreto/d2181.htm | Alta; observar ressalva legal incorporada |
-| Dever de acessibilidade em sites no escopo do art. 63 | Presidência da República, Lei nº 13.146/2015 | https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2015/lei/l13146.htm | Alta; relação por item técnico é inferência fundamentada |
+| Texto vigente dos arts. 7º, 20 e 39 do CDC | Câmara dos Deputados, Lei nº 8.078/1990 | https://www2.camara.leg.br/legin/fed/lei/1990/lei-8078-11-setembro-1990-365086-normaatualizada-pl.html | Alta; aplicação exige fatos do caso |
+| Texto vigente do art. 12, IX, “a” | Câmara dos Deputados, Decreto nº 2.181/1997 | https://www2.camara.leg.br/legin/fed/decret/1997/decreto-2181-20-marco-1997-445015-normaatualizada-pe.html | Alta; observar ressalva legal incorporada |
+| Dever de acessibilidade em sites no escopo do art. 63 | Câmara dos Deputados, Lei nº 13.146/2015 | https://www2.camara.leg.br/legin/fed/lei/2015/lei-13146-6-julho-2015-781174-normaatualizada-pl.pdf | Alta; relação por item técnico é inferência fundamentada |
 
 ## Fonte normativa local
 
