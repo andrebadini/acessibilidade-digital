@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
 import { extname, join } from 'node:path';
@@ -9,6 +10,7 @@ import { NBR17225_ITEMS } from '../src/core/normative/nbr17225.js';
 import { renderTechnicalJson } from '../src/core/report/earl-json.js';
 import { renderHtmlReport } from '../src/core/report/html.js';
 import { renderPdf } from '../src/browser/render-pdf.js';
+import { AXE_MV3_CSP_GATE, AXE_PROVENANCE, AXE_RUN_CONFIG } from '../src/browser/axe-adapter.js';
 import { scanNeutralIdentity } from './verify-neutral-identity.mjs';
 
 const root = new URL('../', import.meta.url);
@@ -18,6 +20,29 @@ const manifest = JSON.parse(await text('manifest.json'));
 assert.equal(manifest.manifest_version, 3, 'manifest precisa ser MV3');
 assert.match(manifest.content_security_policy.extension_pages, /script-src 'self'/u);
 assert.doesNotMatch(manifest.content_security_policy.extension_pages, /https?:/u, 'CSP não pode autorizar origem remota');
+assert.doesNotMatch(manifest.content_security_policy.extension_pages, /unsafe-eval/iu, 'CSP não pode autorizar eval');
+
+const packageJson = JSON.parse(await text('package.json'));
+const lock = JSON.parse(await text('package-lock.json'));
+assert.equal(packageJson.devDependencies?.['axe-core'], '4.13.0', 'axe-core precisa de versão exata');
+assert.equal(lock.packages?.['']?.devDependencies?.['axe-core'], '4.13.0', 'lock raiz precisa fixar axe-core');
+assert.equal(lock.packages?.['node_modules/axe-core']?.version, '4.13.0', 'lock precisa resolver axe-core 4.13.0');
+const axeVendorHashes = Object.freeze({
+  'axe.min.js': 'c24f097bd2f451d4f933e8bc7d8d539f8672a2ebcb5cc9f9f3eec8ca9470a0c1',
+  'LICENSE': 'af175b9d96ee93c21a036152e1b905b0b95304d4ae8c2c921c7609100ba8df7e',
+  'LICENSE-3RD-PARTY.txt': '4f8563870d0fca38bbc3e00b6f670cb7fa9f380ba9f26a7f7d1184a6b18b1653',
+});
+assert.deepEqual((await readdir(new URL('../vendor/axe/', import.meta.url))).sort(), Object.keys(axeVendorHashes).sort(), 'vendor axe precisa conter somente runtime e licenças');
+for (const [name, expected] of Object.entries(axeVendorHashes)) {
+  const digest = createHash('sha256').update(await readFile(new URL(`../vendor/axe/${name}`, import.meta.url))).digest('hex');
+  assert.equal(digest, expected, `hash oficial divergente: vendor/axe/${name}`);
+}
+assert.equal(AXE_PROVENANCE.version, '4.13.0');
+assert.equal(AXE_PROVENANCE.runtimeSha256, axeVendorHashes['axe.min.js']);
+assert.equal(AXE_PROVENANCE.packageTarballSha256, '096912f6e77b4b695fc9304b7be65091db42d98de054da674ae222a11cb33f70');
+assert.equal(AXE_MV3_CSP_GATE.enabled, false, 'axe deve permanecer gated sem E2E MV3/CSP conclusivo');
+assert.equal(AXE_RUN_CONFIG.rules['target-size'].enabled, false, 'target-size depende de E2E MV3/CSP conclusivo');
+assert.doesNotMatch(JSON.stringify(AXE_RUN_CONFIG), /experimental|section508/iu);
 
 assert.equal(CORE_RULES.length, 130);
 assert.equal(NBR17225_ITEMS.length, 146);
@@ -53,7 +78,7 @@ if (process.env.AUDITA_VERIFY_SKIP_TESTS !== '1') {
   assert.equal(suite.status, 0, 'npm test precisa passar');
 }
 
-console.log('verify-project: manifest, 130/146 (96/50), identidade neutra, HTML/JSON/PDF, fixtures, privacidade e suíte GREEN');
+console.log('verify-project: manifest/CSP, axe 4.13.0 vendor verificado e gated, 130/146 (96/50), identidade neutra, HTML/JSON/PDF, fixtures, privacidade e suíte GREEN');
 
 async function sourceFiles(directoryUrl) {
   const directory = directoryUrl.pathname;

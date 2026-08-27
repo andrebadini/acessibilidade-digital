@@ -15,6 +15,7 @@ const releaseTimestamp = new Date('2026-08-27T00:00:00.000Z');
 try {
   await cp(join(root, 'manifest.json'), join(staging, 'manifest.json'));
   await cp(join(root, 'src'), join(staging, 'src'), { recursive: true });
+  await cp(join(root, 'vendor'), join(staging, 'vendor'), { recursive: true });
   await mkdir(join(staging, 'assets', 'icons'), { recursive: true });
   for (const size of [16, 32, 48, 128]) {
     await cp(join(root, 'assets', 'icons', `icon-${size}.png`), join(staging, 'assets', 'icons', `icon-${size}.png`));

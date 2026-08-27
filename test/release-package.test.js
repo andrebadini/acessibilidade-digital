@@ -45,6 +45,9 @@ test('builds the public ZIP reproducibly with only runtime files and manifest at
     assert.deepEqual(entries.filter(path => /assets\/icons\/icon-\d+\.png$/u.test(path)).sort(), [
       'assets/icons/icon-128.png', 'assets/icons/icon-16.png', 'assets/icons/icon-32.png', 'assets/icons/icon-48.png',
     ]);
+    assert.deepEqual(entries.filter(path => path.startsWith('vendor/axe/')).sort(), [
+      'vendor/axe/LICENSE', 'vendor/axe/LICENSE-3RD-PARTY.txt', 'vendor/axe/axe.min.js',
+    ]);
     assert.equal(entries.some(path => /(?:^|\/)(?:test|docs|store-assets|fixtures|node_modules)(?:\/|$)/u.test(path)), false);
   } finally {
     await rm(legacyOutput, { force: true });

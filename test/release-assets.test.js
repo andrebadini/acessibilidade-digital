@@ -1,9 +1,28 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { readFile, readdir } from 'node:fs/promises';
 import test from 'node:test';
 
 const root = new URL('../', import.meta.url);
 const read = path => readFile(new URL(path, root));
+
+test('pins and vendors only the verified axe-core 4.13.0 runtime and license files', async () => {
+  const packageJson = JSON.parse(await read('package.json'));
+  const lock = JSON.parse(await read('package-lock.json'));
+  assert.equal(packageJson.devDependencies['axe-core'], '4.13.0');
+  assert.equal(lock.packages[''].devDependencies['axe-core'], '4.13.0');
+  assert.equal(lock.packages['node_modules/axe-core'].version, '4.13.0');
+  assert.deepEqual((await readdir(new URL('../vendor/axe/', import.meta.url))).sort(), [
+    'LICENSE', 'LICENSE-3RD-PARTY.txt', 'axe.min.js',
+  ]);
+  for (const [path, expected] of Object.entries({
+    'vendor/axe/axe.min.js': 'c24f097bd2f451d4f933e8bc7d8d539f8672a2ebcb5cc9f9f3eec8ca9470a0c1',
+    'vendor/axe/LICENSE': 'af175b9d96ee93c21a036152e1b905b0b95304d4ae8c2c921c7609100ba8df7e',
+    'vendor/axe/LICENSE-3RD-PARTY.txt': '4f8563870d0fca38bbc3e00b6f670cb7fa9f380ba9f26a7f7d1184a6b18b1653',
+  })) {
+    assert.equal(createHash('sha256').update(await read(path)).digest('hex'), expected, path);
+  }
+});
 
 test('ships every manifest icon as a valid PNG with the declared square size', async () => {
   const manifest = JSON.parse(await read('manifest.json'));
