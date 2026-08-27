@@ -1,5 +1,6 @@
 import { downloadArtifacts, buildArtifactBaseName } from '../browser/download-artifacts.js';
 import { renderPdf } from '../browser/render-pdf.js';
+import { renderOccurrenceCsv } from '../core/report/csv.js';
 import { renderTechnicalJson } from '../core/report/earl-json.js';
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { renderHtmlReport } from '../core/report/html.js';
@@ -55,11 +56,20 @@ export async function runReportExport(request, dependencies) {
     try { dependencies.urlApi.revokeObjectURL(printUrl); } catch { generationIssues.push(createExportIssue('REPORT_PRINT_CLEANUP_LIMITED')); }
   }
 
-  model = await finalizeGeneratedModel(model, at, generationIssues, Boolean(pdf), Boolean(printResult?.usedFallback));
+  model = await finalizeGeneratedModel(original, at, generationIssues, Boolean(pdf), Boolean(printResult?.usedFallback));
+  let csv = null;
+  try {
+    csv = (dependencies.csvRenderer ?? renderOccurrenceCsv)(model);
+  } catch {
+    generationIssues.push(createExportIssue('REPORT_CSV_UNAVAILABLE'));
+    model = await finalizeGeneratedModel(original, at, generationIssues, Boolean(pdf), Boolean(printResult?.usedFallback), true, false);
+  }
   html = renderHtmlReport(model);
   const json = renderTechnicalJson(model);
   const baseName = buildArtifactBaseName(model.finalUrl, at);
-  const downloads = await downloadArtifacts({ baseName, html, json, ...(pdf ? { pdf } : {}) }, dependencies.downloadsAdapter, { timeoutMs });
+  const downloads = await downloadArtifacts({
+    baseName, html, json, ...(csv === null ? {} : { csv }), ...(pdf ? { pdf } : {}),
+  }, dependencies.downloadsAdapter, { timeoutMs });
   const deliveryReceipt = {
     status: downloads.formats.every(format => format.status === 'complete') && downloads.limitations.length === 0 ? 'complete' : 'partial',
     formats: downloads.formats,
@@ -69,6 +79,7 @@ export async function runReportExport(request, dependencies) {
     model,
     html,
     json,
+    csv,
     formats: downloads.formats,
     deliveryReceipt,
     limitations: [...new Set([...generationIssues.map(issue => issue.message), ...downloads.limitations])],
@@ -76,7 +87,7 @@ export async function runReportExport(request, dependencies) {
   };
 }
 
-export async function finalizeGeneratedModel(model, at, issues, hasPdf, pdfFallback = false, artifactsPrepared = true) {
+export async function finalizeGeneratedModel(model, at, issues, hasPdf, pdfFallback = false, artifactsPrepared = true, hasCsv = true) {
   const next = sanitizeReportMessages(model);
   const controlled = dedupeIssues(issues);
   if (controlled.length && !['failed', 'cancelled'].includes(next.session.status)) next.session.status = 'partial';
@@ -98,7 +109,8 @@ export async function finalizeGeneratedModel(model, at, issues, hasPdf, pdfFallb
       pdfFallback,
       limitations: messages,
       formats: artifactsPrepared
-        ? ['html', 'json', ...(hasPdf ? ['pdf'] : [])].map(format => ({ format, status: 'prepared' }))
+        ? ['html', 'json', ...(hasCsv ? ['csv'] : []), ...(hasPdf ? ['pdf'] : [])]
+          .map(format => ({ format, status: 'prepared' }))
         : [],
     },
   };

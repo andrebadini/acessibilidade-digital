@@ -13,4 +13,5 @@ test('internal export page is local, inactive-capable and exposes one live statu
   assert.doesNotMatch(script, /data:text|URL\.createObjectURL/u);
   assert.match(script, /runReportExport|createAuditStore/u);
   assert.match(script, /if \(!lock\)[\s\S]*closeOwnTab/u);
+  assert.match(html, /HTML[\s\S]*JSON-LD[\s\S]*CSV[\s\S]*PDF/iu);
 });

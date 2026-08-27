@@ -3,6 +3,7 @@ import { sha256Hex } from '../core/report/hash.js';
 const MIME = Object.freeze({
   html: 'text/html;charset=utf-8',
   json: 'application/json;charset=utf-8',
+  csv: 'text/csv;charset=utf-8',
   pdf: 'application/pdf',
 });
 
@@ -24,6 +25,7 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
   const artifacts = [
     ['html', payload.html],
     ['json', payload.json],
+    ['csv', payload.csv],
     ['pdf', payload.pdf],
   ].filter(([, value]) => value !== undefined && value !== null);
   const formats = [];
@@ -32,7 +34,14 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
     const bytes = toBytes(value);
     const filename = `${payload.baseName}.${format}`;
     const sha256 = await sha256Hex(bytes);
-    const blobUrl = adapter.createObjectURL(new Blob([bytes], { type: MIME[format] }));
+    let blobUrl;
+    try {
+      blobUrl = adapter.createObjectURL(new Blob([bytes], { type: MIME[format] }));
+    } catch {
+      formats.push({ format, filename, mimeType: MIME[format], status: 'interrupted', sha256 });
+      limitations.push(`O artefato ${format.toUpperCase()} não pôde ser preparado para download.`);
+      continue;
+    }
     try {
       let downloadId;
       try {

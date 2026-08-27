@@ -1,5 +1,6 @@
 const MESSAGES = Object.freeze({
   REPORT_PDF_UNAVAILABLE: 'O PDF não foi gerado devido a uma limitação técnica local.',
+  REPORT_CSV_UNAVAILABLE: 'O CSV não foi gerado devido a uma limitação técnica local.',
   REPORT_PDF_TAGGING_UNSUPPORTED: 'O PDF foi gerado sem marcação estrutural adicional e sem outline porque o navegador não aceitou esses parâmetros.',
   REPORT_PRINT_TAB_TIMEOUT: 'A criação da aba temporária de impressão excedeu o tempo limite.',
   REPORT_PRINT_TAB_FAILED: 'A aba temporária de impressão não pôde ser criada.',
@@ -19,7 +20,7 @@ const MESSAGES = Object.freeze({
 
 export function createExportIssue(code, format) {
   if (!Object.hasOwn(MESSAGES, code)) throw new TypeError('Código de limitação de exportação desconhecido.');
-  const suffix = typeof format === 'string' && /^(?:html|json|pdf)$/u.test(format) ? ` Formato: ${format.toUpperCase()}.` : '';
+  const suffix = typeof format === 'string' && /^(?:html|json|csv|pdf)$/u.test(format) ? ` Formato: ${format.toUpperCase()}.` : '';
   return Object.freeze({ code, message: `${MESSAGES[code]}${suffix}` });
 }
 

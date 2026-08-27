@@ -54,7 +54,7 @@ test('tracks export progress without regressing the terminal audit result', () =
   assert.equal(exporting.status, 'partial');
   assert.equal(exporting.percent, 100);
   assert.equal(exporting.exportStatus, 'running');
-  const complete = reducePanelState(exporting, { type: 'EXPORT_COMPLETE', auditId: 'a-1', status: 'complete', formats: ['html', 'json', 'pdf'] });
+  const complete = reducePanelState(exporting, { type: 'EXPORT_COMPLETE', auditId: 'a-1', status: 'complete', formats: ['html', 'json', 'csv', 'pdf'] });
   assert.equal(complete.status, 'partial');
   assert.equal(complete.exportStatus, 'complete');
   assert.match(complete.message, /relatório|arquivos/iu);

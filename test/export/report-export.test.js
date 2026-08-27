@@ -39,7 +39,13 @@ test('prints one inactive blob tab, cleans exact resources, and exports one shar
   const technical = JSON.parse(result.json);
   assert.equal(technical.assertions.length, 146);
   assert.equal(technical.audit.auditId, result.model.auditId);
-  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'pdf']);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv', 'pdf']);
+  assert.ok(result.csv.startsWith('\uFEFF'));
+  for (const occurrence of result.model.occurrences) {
+    assert.match(result.csv, new RegExp(`"${occurrence.occurrenceId}"`, 'u'));
+    assert.match(result.html, new RegExp(occurrence.occurrenceId, 'u'));
+    assert.ok(technical.audit.occurrences.some(entry => entry.occurrenceId === occurrence.occurrenceId));
+  }
   assert.doesNotMatch(JSON.stringify(result), /blob:chrome-extension/u);
 });
 
@@ -82,7 +88,7 @@ test('keeps HTML and JSON when PDF fails, records a partial limitation, and stil
   });
   assert.equal(result.model.session.status, 'partial');
   assert.match(result.model.limitations.join(' '), /PDF|impressão/iu);
-  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json']);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
   assert.equal(JSON.parse(result.json).audit.session.status, 'partial');
   assert.deepEqual(events.filter(entry => entry[0] === 'disconnect'), [['disconnect']]);
   assert.deepEqual(events.filter(entry => entry[0] === 'remove'), [['remove', 44]]);
@@ -106,7 +112,7 @@ test('contains readiness failures and cleanup errors without leaking a print URL
     downloadsAdapter: fakeDownloads(events),
   });
   assert.equal(result.model.session.status, 'partial');
-  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json']);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
   assert.deepEqual(events.filter(entry => entry[0] === 'revoke'), [['revoke', 'blob:chrome-extension://test/print']]);
 });
 
@@ -128,7 +134,7 @@ test('records PDF fallback in the final model and the exact final HTML and JSON'
 test('keeps delivery receipt separate so downloaded JSON and final model cannot disagree', async () => {
   let id = 0;
   const downloads = fakeDownloads([]);
-  downloads.waitForDownload = async downloadId => downloadId === 2
+  downloads.waitForDownload = async downloadId => downloadId === 3
     ? Promise.reject(new DOMException('TOPSECRET blob:chrome-extension://test/private', 'TimeoutError'))
     : { id: downloadId, state: 'complete' };
   downloads.download = async () => ++id;
@@ -140,10 +146,28 @@ test('keeps delivery receipt separate so downloaded JSON and final model cannot 
   });
   assert.deepEqual(JSON.parse(result.json).audit, result.model);
   assert.equal(result.deliveryReceipt.status, 'partial');
-  assert.deepEqual(result.deliveryReceipt.formats.map(format => format.status), ['complete', 'timeout', 'complete']);
+  assert.deepEqual(result.deliveryReceipt.formats.map(format => format.status), ['complete', 'complete', 'timeout', 'complete']);
+  assert.deepEqual(result.model.report.artifact.formats.map(format => format.format), ['html', 'json', 'csv', 'pdf']);
   assert.ok(result.model.report.artifact.formats.every(format => format.status === 'prepared'));
   assert.equal(Object.hasOwn(result.model.report.artifact, 'deliveryReceipt'), false);
   assert.doesNotMatch(JSON.stringify(result), /TOPSECRET|blob:|chrome-extension:/iu);
+});
+
+test('contains CSV preparation failure, records it in the final correlated model, and still downloads PDF', async () => {
+  const result = await runReportExport({ auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z' }, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+    csvRenderer() { throw new Error('PRIVATE_SENTINEL https://origin.test/?token=x'); },
+    downloadsAdapter: fakeDownloads([]),
+  });
+  assert.equal(result.model.session.status, 'partial');
+  assert.match(result.model.limitations.join(' '), /CSV/iu);
+  assert.deepEqual(result.formats.map(format => format.format), ['html', 'json', 'pdf']);
+  assert.deepEqual(result.model.report.artifact.formats.map(format => format.format), ['html', 'json', 'pdf']);
+  assert.deepEqual(JSON.parse(result.json).audit, result.model);
+  assert.equal(result.csv, null);
+  assert.doesNotMatch(`${result.html}\n${result.json}\n${JSON.stringify(result)}`, /PRIVATE_SENTINEL|origin\.test|token=/iu);
 });
 
 test('sanitizes primary and cleanup failures into controlled codes before rendering', async () => {

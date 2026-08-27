@@ -21,13 +21,18 @@ test('downloads large payloads only through Blob URLs and revokes them after ter
     baseName: 'example-test-20260826T140000000Z',
     html: `<!doctype html>${'x'.repeat(2_000_000)}`,
     json: '{"schemaVersion":1}',
+    csv: '\uFEFF"occurrence_id"\r\n"occ-1"\r\n',
     pdf: new TextEncoder().encode('%PDF-1.7\nreport'),
   }, adapter, { timeoutMs: 50 });
-  assert.equal(result.formats.length, 3);
-  assert.deepEqual(result.formats.map(item => item.status), ['complete', 'complete', 'complete']);
-  assert.deepEqual(result.formats.map(item => item.downloadId), [10, 11, 12]);
+  assert.equal(result.formats.length, 4);
+  assert.deepEqual(result.formats.map(item => item.status), ['complete', 'complete', 'complete', 'complete']);
+  assert.deepEqual(result.formats.map(item => item.downloadId), [10, 11, 12, 13]);
   assert.deepEqual(result.formats.map(item => item.filename), [
-    'example-test-20260826T140000000Z.html', 'example-test-20260826T140000000Z.json', 'example-test-20260826T140000000Z.pdf',
+    'example-test-20260826T140000000Z.html', 'example-test-20260826T140000000Z.json',
+    'example-test-20260826T140000000Z.csv', 'example-test-20260826T140000000Z.pdf',
+  ]);
+  assert.deepEqual(result.formats.map(item => item.mimeType), [
+    'text/html;charset=utf-8', 'application/json;charset=utf-8', 'text/csv;charset=utf-8', 'application/pdf',
   ]);
   assert.ok(result.formats.every(item => /^[a-f0-9]{64}$/u.test(item.sha256)));
   for (const event of events.filter(item => item[0] === 'download')) {
@@ -57,9 +62,9 @@ test('contains interrupted and timed-out downloads, revokes URLs, and continues 
       return { id: downloadId, state: 'complete' };
     },
   };
-  const result = await downloadArtifacts({ baseName: 'audit', html: '<!doctype html>', json: '{}', pdf: new TextEncoder().encode('%PDF-1.7') }, adapter, { timeoutMs: 5 });
-  assert.deepEqual(result.formats.map(item => item.status), ['interrupted', 'timeout', 'complete']);
-  assert.equal(revoked.length, 3);
+  const result = await downloadArtifacts({ baseName: 'audit', html: '<!doctype html>', json: '{}', csv: '\uFEFF"id"\r\n', pdf: new TextEncoder().encode('%PDF-1.7') }, adapter, { timeoutMs: 5 });
+  assert.deepEqual(result.formats.map(item => item.status), ['interrupted', 'timeout', 'complete', 'complete']);
+  assert.equal(revoked.length, 4);
   assert.equal(result.limitations.length, 2);
 });
 
@@ -72,10 +77,10 @@ test('continues later formats when starting one download rejects', async () => {
     async download() { started += 1; if (started === 1) throw new Error('downloads denied'); return started; },
     async waitForDownload(id) { return { id, state: 'complete' }; },
   };
-  const result = await downloadArtifacts({ baseName: 'audit', html: '<!doctype html>', json: '{}', pdf: new TextEncoder().encode('%PDF-1.7') }, adapter);
-  assert.deepEqual(result.formats.map(item => item.status), ['interrupted', 'complete', 'complete']);
+  const result = await downloadArtifacts({ baseName: 'audit', html: '<!doctype html>', json: '{}', csv: '\uFEFF"id"\r\n', pdf: new TextEncoder().encode('%PDF-1.7') }, adapter);
+  assert.deepEqual(result.formats.map(item => item.status), ['interrupted', 'complete', 'complete', 'complete']);
   assert.equal(Object.hasOwn(result.formats[0], 'downloadId'), false);
-  assert.equal(revoked.length, 3);
+  assert.equal(revoked.length, 4);
 });
 
 test('cleanup failures are controlled and never stop subsequent formats', async () => {
@@ -86,8 +91,8 @@ test('cleanup failures are controlled and never stop subsequent formats', async 
     async download() { return ++id; },
     async waitForDownload(downloadId) { return { id: downloadId, state: 'complete' }; },
   };
-  const result = await downloadArtifacts({ baseName: 'audit', html: '<!doctype html>', json: '{}', pdf: new TextEncoder().encode('%PDF-1.7') }, adapter);
-  assert.equal(result.formats.length, 3);
+  const result = await downloadArtifacts({ baseName: 'audit', html: '<!doctype html>', json: '{}', csv: '\uFEFF"id"\r\n', pdf: new TextEncoder().encode('%PDF-1.7') }, adapter);
+  assert.equal(result.formats.length, 4);
   assert.ok(result.formats.every(format => format.status === 'complete'));
   assert.match(result.limitations.join(' '), /liberar|temporário|limpeza/iu);
   assert.doesNotMatch(JSON.stringify(result), /TOPSECRET|origin\.test|blob:/iu);
@@ -109,7 +114,7 @@ test('cancels a download ID that resolves only after its start timeout and has a
     async cancelDownload(id) { cancelled.push(id); },
     async waitForDownload(id) { return { id, state: 'complete' }; },
   };
-  const resultPromise = downloadArtifacts({ baseName: 'audit', html: '<!doctype html>', json: '{}', pdf: new TextEncoder().encode('%PDF-1.7') }, adapter, { timeoutMs: 5 });
+  const resultPromise = downloadArtifacts({ baseName: 'audit', html: '<!doctype html>', json: '{}', csv: '\uFEFF"id"\r\n', pdf: new TextEncoder().encode('%PDF-1.7') }, adapter, { timeoutMs: 5 });
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.ok(revoked.length >= 1);
   assert.equal(revoked[0], 'blob:chrome-extension://test/0');
@@ -117,5 +122,28 @@ test('cancels a download ID that resolves only after its start timeout and has a
   const result = await resultPromise;
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(cancelled, [77]);
-  assert.deepEqual(result.formats.map(format => format.status), ['timeout', 'complete', 'complete']);
+  assert.deepEqual(result.formats.map(format => format.status), ['timeout', 'complete', 'complete', 'complete']);
+});
+
+test('contains CSV Blob preparation failure and still downloads the later PDF', async () => {
+  let id = 0;
+  const downloaded = [];
+  const adapter = {
+    createObjectURL(blob) {
+      if (blob.type === 'text/csv;charset=utf-8') throw new Error('PRIVATE_SENTINEL');
+      return `blob:chrome-extension://test/${blob.type}`;
+    },
+    revokeObjectURL() {},
+    async download(options) { downloaded.push(options.filename); return ++id; },
+    async waitForDownload(downloadId) { return { id: downloadId, state: 'complete' }; },
+  };
+  const result = await downloadArtifacts({
+    baseName: 'audit', html: '<!doctype html>', json: '{}', csv: '\uFEFF"id"\r\n',
+    pdf: new TextEncoder().encode('%PDF-1.7'),
+  }, adapter);
+  assert.deepEqual(result.formats.map(format => [format.format, format.status]), [
+    ['html', 'complete'], ['json', 'complete'], ['csv', 'interrupted'], ['pdf', 'complete'],
+  ]);
+  assert.deepEqual(downloaded, ['audit.html', 'audit.json', 'audit.pdf']);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_SENTINEL|blob:/u);
 });
