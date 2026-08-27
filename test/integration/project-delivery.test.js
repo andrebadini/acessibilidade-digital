@@ -39,13 +39,29 @@ test('neutral identity scanner rejects government domains in URLs and plain text
   const directory = await mkdtemp(join(tmpdir(), 'audita-neutral-domain-'));
   const governmentSuffix = ['go', 'v.br'].join('');
   try {
-    await writeFile(join(directory, 'fixture.json'), JSON.stringify({ url: `https://portal.${governmentSuffix}/servico` }));
+    await writeFile(join(directory, 'fixture.json'), JSON.stringify({ url: `https://${governmentSuffix}/servico` }));
     await writeFile(join(directory, 'README.md'), `Consulte api.estado.${governmentSuffix} para detalhes.`);
 
     const violations = await scanNeutralIdentity(directory, ['fixture.json', 'README.md']);
 
     assert.equal(violations.length, 2);
     assert.ok(violations.every(violation => /conteúdo/iu.test(violation)));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('neutral identity scanner accepts lookalike hosts with a longer suffix or hyphenated label', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'audita-neutral-lookalike-'));
+  const governmentSuffix = ['go', 'v.br'].join('');
+  try {
+    await writeFile(join(directory, 'longer-suffix.json'), JSON.stringify({ url: `https://portal.${governmentSuffix}.example/path` }));
+    await writeFile(join(directory, 'hyphenated-label.json'), JSON.stringify({ url: `https://anti-${governmentSuffix}/path` }));
+
+    assert.deepEqual(
+      await scanNeutralIdentity(directory, ['longer-suffix.json', 'hyphenated-label.json']),
+      [],
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
