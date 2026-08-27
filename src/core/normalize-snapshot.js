@@ -108,6 +108,7 @@ function deriveRuleObservations(node) {
   const background = cleanText(styles['background-color'] || styles.backgroundColor);
   const fontSizePx = cssPixels(styles['font-size'] || styles.fontSize);
   const fontWeight = cleanText(styles['font-weight'] || styles.fontWeight);
+  const fullyOpaque = Number(cleanText(styles.opacity)) === 1;
   if (text && foreground && background && fontSizePx !== null && fontWeight && typeof node.backgroundImageKind === 'string') {
     node.contrast = {
       foreground,
@@ -116,7 +117,7 @@ function deriveRuleObservations(node) {
       ...(cleanText(styles['font-family'] || styles.fontFamily) ? { fontFamily: cleanText(styles['font-family'] || styles.fontFamily) } : {}),
       fontSizePx,
       fontWeight,
-      reliable: node.backgroundImageKind === 'none'
+      reliable: node.contrastReliable === true && fullyOpaque
     };
   }
   const media = node.media;
@@ -125,7 +126,7 @@ function deriveRuleObservations(node) {
     if (Object.hasOwn(media, field)) node[field] = media[field];
   }
   if (Array.isArray(media.captionTracks)) node.captionTracks = media.captionTracks.map(track => ({ ...track }));
-  if (typeof media.controls === 'boolean') {
+  if (media.controls === true) {
     node.audioControl = {
       canPause: media.controls,
       canStop: false,
@@ -146,7 +147,7 @@ function copyRect(value) {
 
 function copyRuntime(record, base) {
   const result = {};
-  for (const key of ['visibleText', 'focusable', 'interaction', 'interactive', 'required', 'checked', 'disabled', 'active', 'hidden', 'shadowHost', 'shadowRootMode']) {
+  for (const key of ['visibleText', 'focusable', 'interaction', 'interactive', 'required', 'checked', 'disabled', 'active', 'hidden', 'shadowHost', 'shadowRootMode', 'contrastReliable']) {
     if (typeof record?.[key] === 'string' || typeof record?.[key] === 'boolean' || record?.[key] === null) result[key] = record[key];
   }
   if (typeof record?.selectorHint === 'string' && !SENSITIVE.test(record.selectorHint)) result.selectorHint = record.selectorHint;

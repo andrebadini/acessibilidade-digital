@@ -1,5 +1,5 @@
 import { assertSnapshotV1 } from './snapshot-schema.js';
-import { redactSensitiveText, sanitizeJsonData, sanitizeWarnings } from './privacy.js';
+import { sanitizeJsonData, sanitizeWarnings } from './privacy.js';
 
 function finite(value) {
   return typeof value === 'number' && Number.isFinite(value);
@@ -9,25 +9,34 @@ function outcome(value) {
   return value ? 'passed' : 'failed';
 }
 
-function safeId(event) {
-  if (Number.isSafeInteger(event?.backendNodeId) && event.backendNodeId >= 0) return `n-${event.backendNodeId}`;
-  const nodeId = typeof event?.nodeId === 'string' ? event.nodeId.trim() : '';
-  if (/^(?:document|n-(?:(?:0|[1-9]\d*)|d(?:0|[1-9]\d*)-(?:0|[1-9]\d*)|fixture-[1-9]\d*))$/u.test(nodeId)) return nodeId;
-  const selector = typeof event?.selector === 'string' ? event.selector.trim() : '';
-  const frameId = event?.frameId == null ? '' : String(event.frameId).trim();
-  const source = nodeId || (Number.isSafeInteger(event?.nodeId) ? String(event.nodeId) :
-    selector ? `${frameId}:${selector}` : '');
-  if (!source) return null;
-  let hash = 2166136261;
-  for (const character of redactSensitiveText(source.normalize('NFKC'))) {
-    hash ^= character.codePointAt(0);
-    hash = Math.imul(hash, 16777619) >>> 0;
-  }
-  return `probe-${hash.toString(16).padStart(8, '0')}`;
+const probeFallbacks = new WeakMap();
+
+function selectorFrameKey(selector, frameId) {
+  const normalizedSelector = typeof selector === 'string' ? selector.trim() : '';
+  if (!normalizedSelector) return null;
+  const normalizedFrameId = frameId == null ? '' : String(frameId).trim();
+  return `selector\u0000${normalizedFrameId}\u0000${normalizedSelector}`;
 }
 
-function selectorFrameId(selector, frameId) {
-  return safeId({ selector, frameId });
+function createProbeIdentity() {
+  const idsBySource = new Map();
+  const fallbacksById = new Map();
+  let next = 1;
+  return {
+    safeId(event) {
+      if (Number.isSafeInteger(event?.backendNodeId) && event.backendNodeId >= 0) return `n-${event.backendNodeId}`;
+      const nodeId = typeof event?.nodeId === 'string' ? event.nodeId.trim() : '';
+      if (/^(?:document|n-(?:(?:0|[1-9]\d*)|d(?:0|[1-9]\d*)-(?:0|[1-9]\d*)|fixture-[1-9]\d*))$/u.test(nodeId)) return nodeId;
+      const fallback = selectorFrameKey(event?.selector, event?.frameId);
+      const source = fallback || (nodeId ? `node\u0000${nodeId}` : Number.isSafeInteger(event?.nodeId) ? `node\u0000${event.nodeId}` : '');
+      if (!source) return null;
+      if (!idsBySource.has(source)) idsBySource.set(source, `probe-${next++}`);
+      const id = idsBySource.get(source);
+      if (fallback) fallbacksById.set(id, fallback);
+      return id;
+    },
+    fallbacksById
+  };
 }
 
 function unique(values) {
@@ -68,6 +77,8 @@ function sanitizeAction(action) {
 
 /** Converts raw probe events to a JSON-safe conservative tri-state contract. */
 export function normalizeProbes(raw = {}) {
+  const identity = createProbeIdentity();
+  const safeId = identity.safeId;
   const focusEvents = Array.isArray(raw.focus?.events) ? raw.focus.events : [];
   const focusIds = focusEvents.map(safeId).filter(Boolean);
   const focusComplete = raw.focus?.completed === true;
@@ -173,6 +184,7 @@ export function normalizeProbes(raw = {}) {
   ].map(key => [key, normalized[key].outcome === 'cantTell' ? 'cantTell' : 'complete']));
   normalized.probeCoverage.targetSizes = [normalized.targetSizes.minimum24, normalized.targetSizes.enhanced44]
     .some(item => item.outcome === 'cantTell') ? 'cantTell' : 'complete';
+  probeFallbacks.set(normalized, identity.fallbacksById);
   return normalized;
 }
 
@@ -194,9 +206,10 @@ export function mergeProbesIntoSnapshot(snapshot, probes) {
     focusById.set(String(item.nodeId), current);
   }
   const targetById = new Map((normalized.targetSizes.observations || []).map(item => [String(item.nodeId), item]));
+  const fallbackByProbeId = probeFallbacks.get(normalized) || new Map();
   const nodesByFallback = new Map();
   for (const node of snapshot.nodes) {
-    const fallback = selectorFrameId(node.selectorHint, node.frameId);
+    const fallback = selectorFrameKey(node.selectorHint, node.frameId);
     if (!fallback) continue;
     const nodes = nodesByFallback.get(fallback) || [];
     nodes.push(node);
@@ -204,10 +217,11 @@ export function mergeProbesIntoSnapshot(snapshot, probes) {
   }
   const observationsById = new Map();
   for (const observation of normalized.targetSizes.observations || []) {
-    const id = String(observation.nodeId);
-    const observations = observationsById.get(id) || [];
+    const fallback = fallbackByProbeId.get(String(observation.nodeId));
+    if (!fallback) continue;
+    const observations = observationsById.get(fallback) || [];
     observations.push(observation);
-    observationsById.set(id, observations);
+    observationsById.set(fallback, observations);
   }
   for (const [fallback, nodes] of nodesByFallback) {
     const observations = observationsById.get(fallback) || [];

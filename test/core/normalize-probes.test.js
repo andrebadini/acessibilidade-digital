@@ -74,7 +74,7 @@ test('small targets without an observed exception remain cantTell', () => {
   assert.equal(probes.targetSizes.observations[0].exception, 'unknown');
 });
 
-test('only preserves authoritative SnapshotV1 node IDs and hashes every arbitrary nodeId or selector', () => {
+test('only preserves authoritative SnapshotV1 node IDs and assigns opaque IDs to arbitrary nodeId or selector values', () => {
   const marker = 'PROBE_NODE_PRIVACY_MARKER';
   const raw = {
     focus: {
@@ -102,9 +102,17 @@ test('only preserves authoritative SnapshotV1 node IDs and hashes every arbitrar
     ...first.targetSizes.minimum24.failedNodeIds,
     ...first.targetSizes.enhanced44.failedNodeIds,
     ...first.targetSizes.observations.map(item => item.nodeId)
-  ]) assert.match(id, /^(?:n-42|probe-[0-9a-f]{8})$/u);
+  ]) assert.match(id, /^(?:n-42|probe-\d+)$/u);
   assert.deepEqual(first, second);
   assert.doesNotMatch(JSON.stringify(first), new RegExp(marker));
+});
+
+test('keeps two selectors that collide under the legacy 32-bit hash as distinct probe identities', () => {
+  const probes = normalizeProbes({ targetSizes: [
+    { selector: '#p-kinuqo', frameId: 'main', width: 20, height: 20, exception: 'none' },
+    { selector: '#p-1h27v3v', frameId: 'main', width: 44, height: 44, exception: 'none' },
+  ] });
+  assert.equal(new Set(probes.targetSizes.observations.map(item => item.nodeId)).size, 2);
 });
 
 test('runDynamicProbes caps Tab traversal at focusableCount plus two and records no destructive action', async () => {

@@ -189,7 +189,33 @@ export function createChromeAdapter(chromeApi) {
           })
         ]);
         const frameId = typeof frameTree?.frameTree?.frame?.id === 'string' ? frameTree.frameTree.frame.id : '';
-        return Array.isArray(observations) ? observations.map(item => ({ ...item, ...(frameId ? { frameId } : {}) })) : [];
+        if (!Array.isArray(observations)) return [];
+        let documentNodeId = null;
+        try {
+          const documentNode = await cdp.command('DOM.getDocument', { depth: 0, pierce: true });
+          documentNodeId = Number.isSafeInteger(documentNode?.root?.nodeId) ? documentNode.root.nodeId : null;
+        } catch { /* Selector+frame remains the conservative fallback. */ }
+        const backendBySelector = new Map();
+        const backendNodeId = async selector => {
+          if (!documentNodeId || typeof selector !== 'string' || !selector) return null;
+          if (!backendBySelector.has(selector)) backendBySelector.set(selector, (async () => {
+            try {
+              const selected = await cdp.command('DOM.querySelector', { nodeId: documentNodeId, selector });
+              if (!Number.isSafeInteger(selected?.nodeId)) return null;
+              const described = await cdp.command('DOM.describeNode', { nodeId: selected.nodeId, depth: 0, pierce: true });
+              return Number.isSafeInteger(described?.node?.backendNodeId) ? described.node.backendNodeId : null;
+            } catch { return null; }
+          })());
+          return backendBySelector.get(selector);
+        };
+        return Promise.all(observations.map(async item => {
+          const backendNodeIdValue = await backendNodeId(item.selector);
+          return {
+            ...item,
+            ...(frameId ? { frameId } : {}),
+            ...(backendNodeIdValue !== null ? { backendNodeId: backendNodeIdValue } : {})
+          };
+        }));
       },
       async measureMotion(options) {
         await cdp.command('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });

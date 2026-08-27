@@ -36,6 +36,23 @@ export function collectRuntimePageData() {
     const gradient = /(?:repeating-)?(?:linear|radial|conic)-gradient\s*\(/u.test(normalized);
     return url && gradient ? 'mixed' : url ? 'url' : gradient ? 'gradient' : 'mixed';
   };
+  const opaqueColor = value => {
+    const color = String(value || '').trim().toLowerCase();
+    return /^rgb\(/u.test(color) || /^#[0-9a-f]{6}$/u.test(color) || /^#[0-9a-f]{3}$/u.test(color) ||
+      /^rgba\([^)]*,\s*1\s*\)$/u.test(color);
+  };
+  const contrastReliable = element => {
+    let current = element;
+    const visited = new Set();
+    while (current instanceof Element && !visited.has(current)) {
+      visited.add(current);
+      const computed = getComputedStyle(current);
+      if (Number(computed.opacity) !== 1 || backgroundKind(computed.getPropertyValue('background-image')) !== 'none') return false;
+      if (opaqueColor(computed.getPropertyValue('background-color'))) return true;
+      current = current.parentElement;
+    }
+    return false;
+  };
   const identifierIsSensitive = (element) => sensitive.test([
     element.getAttribute('name'), element.id, element.getAttribute('autocomplete')
   ].filter(Boolean).join(' '));
@@ -99,6 +116,7 @@ export function collectRuntimePageData() {
       viewportRect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       documentRect: { x: rect.x + scrollX, y: rect.y + scrollY, width: rect.width, height: rect.height },
       styles,
+      contrastReliable: contrastReliable(element),
       backgroundImageKind: backgroundKind(computed.getPropertyValue('background-image')),
       hidden: !visible,
       visibleText: sensitiveControl ? '' : (element.innerText || '').replace(/\s+/gu, ' ').trim(),
@@ -129,7 +147,6 @@ export function collectRuntimePageData() {
         autoplay: element.autoplay,
         controls: element.controls,
         captionTracks,
-        ...(Number.isFinite(element.duration) ? { mediaTiming: 'prerecorded' } : {}),
         ...(element instanceof HTMLAudioElement ? { hasAudio: true } : {})
       };
     } else if (element instanceof HTMLImageElement) {

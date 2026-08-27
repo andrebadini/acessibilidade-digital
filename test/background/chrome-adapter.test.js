@@ -100,19 +100,27 @@ test('runs dynamic probes with viewport data captured inside the audited page', 
     {}, { selector: 'button', indicatorVisible: true, areaSufficient: true, intersectionRatio: 1, rect: { x: 0, y: 0, width: 44, height: 44 } },
     { testedWidthCssPx: 320, horizontalOverflow: false, exception: 'none' },
     { scalePercent: 200, lossOfContent: false },
-    [],
+    [{ selector: 'html > body > button:nth-of-type(2)', width: 44, height: 44, exception: 'none' }],
     { complete: true, preference: 'reduce', prefersReducedMotion: true, animatedCount: 0, reducedAnimatedCount: 0 },
     true, true, true, true,
   ];
   fake.chromeApi.scripting.executeScript = async () => [{ frameId: 0, result: scriptResults.shift() }];
   const adapter = createChromeAdapter(fake.chromeApi);
+  const cdpCalls = [];
   const cdp = {
-    async command(method) {
+    async command(method, params) {
+      cdpCalls.push([method, params]);
       if (method === 'Page.getLayoutMetrics') return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+      if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main-frame' } } };
+      if (method === 'DOM.getDocument') return { root: { nodeId: 100 } };
+      if (method === 'DOM.querySelector') return { nodeId: 101 };
+      if (method === 'DOM.describeNode') return { node: { backendNodeId: 42 } };
       return {};
     },
   };
   const result = await adapter.runDynamicProbes(17, cdp, {});
   assert.equal(result.focus.completed, true);
   assert.equal(result.warnings.length, 0);
+  assert.deepEqual(result.targetSizes, [{ selector: 'html > body > button:nth-of-type(2)', frameId: 'main-frame', backendNodeId: 42, width: 44, height: 44, exception: 'none' }]);
+  assert.deepEqual(cdpCalls.find(([method]) => method === 'DOM.querySelector'), ['DOM.querySelector', { nodeId: 100, selector: 'html > body > button:nth-of-type(2)' }]);
 });

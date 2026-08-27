@@ -45,3 +45,35 @@
 
 - O contraste é deliberadamente conservador: imagem/gradiente de fundo não é tratado como composição de pixels confiável.
 - Sem `backendNodeId`, medições só são associadas com seletor+frame único; casos ambíguos permanecem sem observação em vez de receberem uma associação incorreta.
+
+## Fix round 1 — revisão de contrato
+
+### Correções
+
+- `controls: false` não cria mais `audioControl` negativo. Sem observação de controles equivalentes, a regra de áudio retorna `cantTell`.
+- A confiabilidade de contraste agora exige contexto coletado como confiável e opacidade própria igual a 1. O coletor percorre o contexto de fundo/ancestrais, recusando opacidade, imagens/gradientes ou ausência de fundo opaco observável.
+- A medição de alvo consulta `DOM.getDocument` → `DOM.querySelector` → `DOM.describeNode` para emitir `backendNodeId` quando disponível; seletor estrutural + frame continua o fallback seguro.
+- A identidade de fallback deixou de usar hash de 32 bits. IDs públicos opacos sequenciais não carregam o seletor; a chave bruta `frame+selector` fica apenas em um `WeakMap` privado usado durante a mesma mesclagem e é comparada sem colisão.
+- O coletor não infere mais `mediaTiming: 'prerecorded'` a partir de duração finita.
+
+### TDD — RED
+
+`node --test test/integration/collector-rule-contract.test.js test/core/normalize-probes.test.js test/background/chrome-adapter.test.js`
+
+- 21/27 passaram; as seis falhas esperadas expuseram: ausência de `backendNodeId` no adaptador; tokens de hash de 32 bits e uma colisão FNV-1a real; controles ausentes tratados como negativos; opacidade 0,5 tratada como contraste confiável; e timing pré-gravado inferido de duração finita.
+
+### GREEN e verificação
+
+`node --test test/integration/collector-rule-contract.test.js test/core/normalize-probes.test.js test/background/chrome-adapter.test.js`
+
+- 27/27 passaram.
+
+`npm test`
+
+- 378/378 passaram; `fail 0`, duração aproximada de 3,1 s.
+
+### Auto-revisão
+
+- A fixture de integração agora espelha todos os campos de mídia observados pelo coletor corrigido (`kind`, URL sanitizada, duração, mudo, autoplay, controls, faixas e `hasAudio`) e verifica resultado conservador para controles ausentes.
+- A cobertura do adaptador verifica frame, seletor estrutural e o caminho CDP que produz o backend node ID.
+- O ZIP de release regenerado pela suíte foi restaurado e não integra a rodada.

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { mergeProbesIntoSnapshot, normalizeProbes, normalizeSnapshot, runCoreAudit } from '../../src/core/index.js';
+import { collectRuntimePageData } from '../../src/collector/page-collector.js';
 
 const STYLE_NAMES = [
   'display', 'visibility', 'opacity', 'color', 'background-color',
@@ -46,6 +47,7 @@ function collectorFixture() {
         {
           backendNodeId: 4, order: 2, tagName: 'p', selectorHint: '#copy',
           visibleText: 'Texto justificado',
+          contrastReliable: true,
           viewportRect: { x: 10, y: 10, width: 320, height: 48 },
           documentRect: { x: 10, y: 10, width: 320, height: 48 },
           styles: {
@@ -60,8 +62,8 @@ function collectorFixture() {
         {
           backendNodeId: 7, order: 5, tagName: 'audio', selectorHint: '#podcast',
           media: {
-            kind: 'audio', durationSeconds: 8, muted: false, autoplay: true,
-            controls: false, captionTracks: [],
+            kind: 'audio', currentSrc: 'https://example.test/podcast.mp3', durationSeconds: 8,
+            muted: false, autoplay: true, controls: false, captionTracks: [], hasAudio: true,
           },
         },
       ],
@@ -86,10 +88,12 @@ test('collector runtime records normalize into the observations consumed by the 
     backgroundImage: 'none', fontFamily: 'Arial, sans-serif', fontSizePx: 16,
     fontWeight: '400', reliable: true,
   });
-  assert.deepEqual(audio.audioControl, { canPause: false, canStop: false, independentVolume: false });
+  assert.equal(audio.audioControl, undefined);
   assert.deepEqual(audio.captionTracks, []);
   assert.equal(audio.autoplay, true);
   assert.equal(audio.durationSeconds, 8);
+  assert.equal(audio.hasAudio, true);
+  assert.equal(Object.hasOwn(audio, 'mediaTiming'), false);
 
   const merged = mergeProbesIntoSnapshot(snapshot, normalizeProbes({
     targetSizes: [{ backendNodeId: 6, selector: '#target', frameId: 'main', width: 20, height: 20, exception: 'none' }],
@@ -104,7 +108,54 @@ test('collector runtime records normalize into the observations consumed by the 
   assert.equal(outcome('text-block-alignment'), 'failed');
   assert.equal(outcome('text-contrast-minimum'), 'failed');
   assert.equal(outcome('target-size-minimum'), 'failed');
-  assert.equal(outcome('audio-control'), 'failed');
+  assert.equal(outcome('audio-control'), 'cantTell');
+});
+
+test('a translucent text block remains an unreliable contrast observation', async () => {
+  const raw = collectorFixture();
+  raw.pageData[0].result.nodes[0].styles.opacity = '0.5';
+  const snapshot = normalizeSnapshot(raw);
+  const paragraph = snapshot.nodes.find(node => node.backendNodeId === 4);
+  assert.equal(paragraph.contrast.reliable, false);
+  const audit = await runCoreAudit(snapshot);
+  assert.equal(audit.ruleResults.find(item => item.ruleId === 'text-contrast-minimum').outcome, 'cantTell');
+});
+
+test('the browser-world collector emits complete observed media without inferring timing from duration', () => {
+  const names = ['Node', 'Element', 'ShadowRoot', 'HTMLInputElement', 'HTMLSelectElement', 'HTMLTextAreaElement', 'HTMLMediaElement', 'HTMLAudioElement', 'HTMLImageElement', 'HTMLCanvasElement', 'CSS', 'document', 'getComputedStyle', 'location', 'innerWidth', 'innerHeight', 'scrollX', 'scrollY', 'matchMedia'];
+  const saved = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+  class FakeElement {}
+  class FakeMedia extends FakeElement {}
+  class FakeAudio extends FakeMedia {}
+  const audio = new FakeAudio();
+  Object.assign(audio, {
+    localName: 'audio', id: '', children: [], parentElement: null, shadowRoot: null,
+    currentSrc: 'https://example.test/podcast.mp3', duration: 8, muted: false, autoplay: true, controls: false,
+    textTracks: [], disabled: false, innerText: '',
+    getAttribute: () => '', getRootNode: () => globalThis.document, matches: () => false, getAnimations: () => [],
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: 120, height: 30 }),
+  });
+  try {
+    Object.assign(globalThis, {
+      Node: { ELEMENT_NODE: 1 }, Element: FakeElement, ShadowRoot: class {},
+      HTMLInputElement: class {}, HTMLSelectElement: class {}, HTMLTextAreaElement: class {},
+      HTMLMediaElement: FakeMedia, HTMLAudioElement: FakeAudio, HTMLImageElement: class {}, HTMLCanvasElement: class {},
+      CSS: { escape: value => value }, document: { baseURI: 'https://example.test/', children: [audio], activeElement: null },
+      getComputedStyle: () => ({ getPropertyValue: name => ({ display: 'block', visibility: 'visible', opacity: '1', 'background-image': 'none' }[name] || '') }),
+      location: { href: 'https://example.test/' }, innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
+      matchMedia: () => ({ matches: false }),
+    });
+    const media = collectRuntimePageData().nodes[0].media;
+    assert.deepEqual(media, {
+      kind: 'audio', currentSrc: 'https://example.test/podcast.mp3', durationSeconds: 8,
+      muted: false, autoplay: true, controls: false, captionTracks: [], hasAudio: true,
+    });
+  } finally {
+    for (const [name, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else delete globalThis[name];
+    }
+  }
 });
 
 test('probe selector and frame fallback shares the normalized node identity when no backend node is available', () => {
