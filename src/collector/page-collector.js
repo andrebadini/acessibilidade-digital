@@ -237,11 +237,11 @@ export function collectRuntimePageData() {
       shadowHost: Boolean(element.shadowRoot),
       shadowRootMode: element.shadowRoot?.mode || null
     };
-    const linkLike = element.localName === 'a' || String(element.getAttribute?.('role') || '').trim().toLowerCase() === 'link';
-    if (linkLike) {
-      record.interaction = 'link';
+    const nativeLink = element.localName === 'a' && element.hasAttribute?.('href') === true;
+    const roleLink = String(element.getAttribute?.('role') || '').trim().toLowerCase() === 'link';
+    const linkLike = nativeLink || roleLink;
+    if (linkLike && contextState(element) === 'accessible') {
       record.linkPurposeContext = contextObservation(element);
-      if (contextState(element) !== 'accessible') record.newWindowBehavior = 'unknown';
       const warning = adjacentWarning(element);
       if (typeof warning === 'boolean') record.adjacentNewWindowWarning = warning;
     }

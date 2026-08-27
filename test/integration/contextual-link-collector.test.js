@@ -6,6 +6,10 @@ import { collectRuntimePageData } from '../../src/collector/page-collector.js';
 import { detectAccessibilityWidgets, normalizeSnapshot, runCoreAudit } from '../../src/core/index.js';
 
 const NEW_WINDOW_RULE = 'new-window-link-warning';
+const LINK_RULES = Object.freeze([
+  'link-semantics', 'link-purpose-as-link', 'link-purpose-without-context',
+  'link-purpose-in-context', 'new-window-link-warning',
+]);
 const WARNING = 'abre em nova aba';
 
 class FakeElement {
@@ -85,13 +89,19 @@ function adjacentNode(kind) {
   return new FakeElement('span', options);
 }
 
-function fixture(kind, { privateAncestor = false, privateSource = false, hostile = false } = {}) {
+function fixture(kind, {
+  privateAncestor = false, privateSource = false, hostile = false,
+  anchorWithoutHref = false, roleLink = false,
+} = {}) {
   const parent = new FakeElement('div', {
     attributes: privateAncestor ? { contenteditable: 'true' } : {},
     innerText: privateAncestor ? `PRIVATE-ANCESTOR-SENTINEL ${WARNING}` : '',
   });
-  const link = new FakeElement('a', {
-    attributes: { href: '/ajuda', target: '_blank', ...(privateSource ? { contenteditable: 'true' } : {}) },
+  const link = new FakeElement(roleLink ? 'div' : 'a', {
+    attributes: {
+      ...(anchorWithoutHref ? { id: 'section' } : roleLink ? { role: 'link', target: '_blank' } : { href: '/ajuda', target: '_blank' }),
+      ...(privateSource ? { contenteditable: 'true' } : {}),
+    },
     innerText: privateSource ? 'PRIVATE-SOURCE-SENTINEL' : 'Ajuda',
   });
   const adjacent = adjacentNode(kind === 'beyond-cap' ? 'direct-text' : kind);
@@ -162,7 +172,8 @@ async function collectNormalizeAndEvaluate(kind, options = {}) {
   const normalized = normalizeSnapshot(raw);
   const audit = await runCoreAudit(normalized);
   return {
-    collected, normalized,
+    collected, normalized, audit,
+    linkNodeId: `n-${backendId.get(graph.link)}`,
     result: audit.ruleResults.find(rule => rule.ruleId === NEW_WINDOW_RULE),
   };
 }
@@ -184,7 +195,7 @@ test('collector→normalizer→rule rejects inaccessible adjacent warnings as ob
   }
 });
 
-test('private and hostile adjacency stays incomplete without retaining private text', async () => {
+test('private links are excluded while hostile or truncated public adjacency stays incomplete', async () => {
   for (const [kind, options] of [
     ['direct-text', { privateAncestor: true }],
     ['direct-text', { privateSource: true }],
@@ -192,10 +203,55 @@ test('private and hostile adjacency stays incomplete without retaining private t
     ['beyond-cap', {}],
   ]) {
     const { normalized, result } = await collectNormalizeAndEvaluate(kind, options);
-    assert.equal(result.outcome, 'cantTell', `${kind}: ${JSON.stringify(options)}`);
+    const expected = options.privateAncestor || options.privateSource ? 'inapplicable' : 'cantTell';
+    assert.equal(result.outcome, expected, `${kind}: ${JSON.stringify(options)}`);
     const link = normalized.nodes.find(node => node.tagName === 'a');
     assert.equal(Object.hasOwn(link, 'adjacentNewWindowWarning'), false);
     assert.doesNotMatch(JSON.stringify([normalized, result]), /PRIVATE-|HOSTILE-SENTINEL/u);
+  }
+});
+
+test('all 130 rules ignore anchors without href but still evaluate genuine native and ARIA links', async () => {
+  const anchor = await collectNormalizeAndEvaluate('direct-text', { anchorWithoutHref: true });
+  assert.equal(anchor.audit.ruleResults.length, 130);
+  assert.equal(anchor.audit.itemResults.length, 146);
+  const collectedAnchor = anchor.collected.nodes.find(node => node.tagName === 'a');
+  const normalizedAnchor = anchor.normalized.nodes.find(node => node.tagName === 'a');
+  assert.equal(Object.hasOwn(collectedAnchor, 'interaction'), false);
+  assert.equal(Object.hasOwn(normalizedAnchor, 'interaction'), false);
+  for (const ruleId of LINK_RULES) {
+    assert.equal(anchor.audit.ruleResults.find(rule => rule.ruleId === ruleId).outcome, 'inapplicable', ruleId);
+  }
+  assert.equal(anchor.audit.ruleResults.some(rule =>
+    rule.outcome === 'failed' && rule.targets.some(target => target.nodeId === anchor.linkNodeId)), false);
+
+  for (const options of [{}, { roleLink: true }]) {
+    const legitimate = await collectNormalizeAndEvaluate('direct-text', options);
+    assert.equal(legitimate.audit.ruleResults.length, 130);
+    assert.equal(legitimate.audit.ruleResults.find(rule => rule.ruleId === 'link-semantics').outcome, 'passed');
+    assert.equal(legitimate.result.outcome, 'passed');
+  }
+});
+
+test('all 130 rules create no link failure from private roots, descendants or hostile redacted paths', async () => {
+  for (const options of [
+    { privateSource: true },
+    { privateAncestor: true },
+    { privateAncestor: true, hostile: true },
+  ]) {
+    const value = await collectNormalizeAndEvaluate('direct-text', options);
+    assert.equal(value.audit.ruleResults.length, 130);
+    assert.equal(value.audit.itemResults.length, 146);
+    const collectedLink = value.collected.nodes.find(node => node.tagName === 'a');
+    const normalizedLink = value.normalized.nodes.find(node => node.tagName === 'a');
+    assert.equal(Object.hasOwn(collectedLink, 'interaction'), false);
+    assert.equal(Object.hasOwn(normalizedLink, 'interaction'), false);
+    for (const ruleId of LINK_RULES) {
+      assert.equal(value.audit.ruleResults.find(rule => rule.ruleId === ruleId).outcome, 'inapplicable', `${ruleId}: ${JSON.stringify(options)}`);
+    }
+    assert.equal(value.audit.ruleResults.some(rule =>
+      rule.outcome === 'failed' && rule.targets.some(target => target.nodeId === value.linkNodeId)), false);
+    assert.doesNotMatch(JSON.stringify([value.normalized, value.audit]), /PRIVATE-|HOSTILE-SENTINEL/u);
   }
 });
 
