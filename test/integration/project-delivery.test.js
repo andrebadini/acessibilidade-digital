@@ -35,6 +35,22 @@ test('neutral identity scanner rejects a forbidden identity in package content o
   }
 });
 
+test('neutral identity scanner rejects government domains in URLs and plain text', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'audita-neutral-domain-'));
+  const governmentSuffix = ['go', 'v.br'].join('');
+  try {
+    await writeFile(join(directory, 'fixture.json'), JSON.stringify({ url: `https://portal.${governmentSuffix}/servico` }));
+    await writeFile(join(directory, 'README.md'), `Consulte api.estado.${governmentSuffix} para detalhes.`);
+
+    const violations = await scanNeutralIdentity(directory, ['fixture.json', 'README.md']);
+
+    assert.equal(violations.length, 2);
+    assert.ok(violations.every(violation => /conteúdo/iu.test(violation)));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('the current package passes the neutral identity gate and the executable verifier', async () => {
   assert.deepEqual(await scanNeutralIdentity(new URL('../../', import.meta.url)), []);
   const result = spawnSync(process.execPath, ['scripts/verify-project.mjs'], {

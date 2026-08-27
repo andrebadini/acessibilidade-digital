@@ -57,7 +57,7 @@ Os relatórios AMAWeb demonstram a experiência atual, mas não cobrem WCAG 2.2,
 | CDP oferece DOMSnapshot, árvore AX, screenshot e PDF | Chromium DevTools Protocol | tip-of-tree de ago. 2026 | https://chromedevtools.github.io/devtools-protocol/tot/ | Alta para existência; APIs experimentais exigem feature detection |
 | EARL define modos e resultados interoperáveis | W3C, EARL 1.0 Schema | Working Group Note de 2 fev. 2017 | https://www.w3.org/TR/EARL10-Schema/ | Alta para vocabulário; não é Recommendation |
 | Web Crypto calcula SHA-256 localmente | Web Cryptography API / MDN | acesso em 26 ago. 2026 | https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/digest | Alta |
-| Acessibilidade em sites é obrigatória nas condições do art. 63 | Presidência da República, Lei 13.146/2015 | texto vigente acessado em 26 ago. 2026 | https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2015/lei/l13146.htm | Alta; o relatório não substitui análise jurídica |
+| Acessibilidade em sites é obrigatória nas condições do art. 63 | Lei 13.146/2015 | texto vigente acessado em 26 ago. 2026 | Referência legal consultada; URL omitida do pacote | Alta; o relatório não substitui análise jurídica |
 
 ## Critério de parada da pesquisa
 

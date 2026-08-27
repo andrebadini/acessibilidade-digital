@@ -14,6 +14,7 @@ const FORBIDDEN = Object.freeze([
   new RegExp(`\\b${'se' + 'com'}(?:-mt)?\\b`, 'iu'),
   new RegExp(`${'gov' + 'mt'}|${'gov' + '-mt-logo'}|${'brand' + '-source'}`, 'iu'),
   new RegExp(`${'marca'}[\\s_-]+${'oficial'}|${'manual'}[\\s_-]+${'oficial'}`, 'iu'),
+  new RegExp(`\\b(?:[a-z0-9-]+\\.)*${'go' + 'v'}\\.${'b' + 'r'}\\b`, 'iu'),
 ]);
 
 export async function scanNeutralIdentity(root, entries = DEFAULT_ENTRIES) {

@@ -15,8 +15,8 @@ const itemResults = NBR17225_ITEMS.map((item, index) => ({
 export const SAMPLE_AUDIT = createAuditModel({
   schemaVersion: 1,
   auditId: 'audit-sample-20260826',
-  requestedUrl: 'https://servico.mt.gov.br/consulta',
-  finalUrl: 'https://servico.mt.gov.br/consulta/inicio',
+  requestedUrl: 'https://servico.exemplo.test/consulta',
+  finalUrl: 'https://servico.exemplo.test/consulta/inicio',
   timestamps: {
     startedAt: '2026-08-26T14:00:00.000Z',
     endedAt: '2026-08-26T14:02:00.000Z',
@@ -53,7 +53,7 @@ export const SAMPLE_AUDIT = createAuditModel({
       {
         evidenceId: 'ev-control', kind: 'element', nodeId: 'n-1', backendNodeId: 41,
         selector: { css: '#continuar', framePath: [] }, snippet: '<button id="continuar" aria-label="Continuar">Avançar</button>',
-        dataUrl: PNG, fullPageEvidenceId: 'ev-full', mediaUrl: 'https://servico.mt.gov.br/assets/controle.png', hash: 'sha256-element-sample',
+        dataUrl: PNG, fullPageEvidenceId: 'ev-full', mediaUrl: 'https://servico.exemplo.test/assets/controle.png', hash: 'sha256-element-sample',
         accessibility: {
           name: 'Continuar', nameSource: 'aria-label', description: 'Avança para a próxima etapa', descriptionSource: 'aria-describedby',
           role: 'button', value: '', states: ['habilitado'], visibleText: 'Avançar', announcementPreview: 'Continuar, botão, Avança para a próxima etapa',

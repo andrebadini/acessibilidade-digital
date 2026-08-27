@@ -4,7 +4,7 @@ import test from 'node:test';
 import { buildArtifactBaseName, downloadArtifacts } from '../../src/browser/download-artifacts.js';
 
 test('builds sanitized host and canonical timestamp artifact names', () => {
-  assert.equal(buildArtifactBaseName('https://Serviço.MT.gov.br:8443/path', '2026-08-26T14:00:00.000Z'), 'xn-servio-0ua-mt-gov-br-20260826T140000000Z');
+  assert.equal(buildArtifactBaseName('https://Serviço.Exemplo.test:8443/path', '2026-08-26T14:00:00.000Z'), 'xn-servio-0ua-exemplo-test-20260826T140000000Z');
   assert.equal(buildArtifactBaseName('https://example.test/', '2026-08-26T14:00:00.000Z'), 'example-test-20260826T140000000Z');
 });
 

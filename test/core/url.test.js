@@ -5,8 +5,8 @@ import { normalizeAuditUrl } from '../../src/core/url.js';
 
 test('adds HTTPS to a trimmed hostname deterministically', () => {
   assert.equal(
-    normalizeAuditUrl('  exemplo.mt.gov.br  '),
-    'https://exemplo.mt.gov.br/',
+    normalizeAuditUrl('  exemplo.test  '),
+    'https://exemplo.test/',
   );
 });
 
