@@ -34,6 +34,6 @@ table{width:100%;border-collapse:collapse}th,td{border:1px solid #788896;padding
 .report-footer{margin-top:3rem;font-size:.9rem}.report-footer p{max-width:72rem;margin:.25rem auto}
 @page{size:A4;margin:18mm 15mm 20mm}
 @media print{html{scroll-behavior:auto}.skip-link{display:none}.report-header,.report-footer{background:#fff;color:#162330;border-bottom:2px solid #003b71;padding:.5rem 0}.report-footer{border-top:2px solid #003b71;border-bottom:0}.major-section{break-before:page}.item-card,.occurrence-card,.evidence-card,.review-card,figure,details{break-inside:avoid}thead{display:table-header-group}a{color:#162330;text-decoration:none}main{max-width:none;padding:0}.status{color:#162330!important}}
-@media (max-width:42rem){main{padding:1rem}.meta{grid-template-columns:1fr}.meta dd{margin-bottom:.5rem}.report-header__inner{align-items:flex-start;flex-direction:column}}
+@media (max-width:42rem){main{padding:1rem}.meta{grid-template-columns:1fr}.meta dd{margin-bottom:.5rem}.report-header__inner{align-items:flex-start;flex-direction:column}table{table-layout:fixed}th,td{overflow-wrap:anywhere}}
 @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 `;

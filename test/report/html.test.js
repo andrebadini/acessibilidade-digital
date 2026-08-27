@@ -47,6 +47,13 @@ test('embeds only valid PNG evidence with useful alt and self-contained A4 CSS',
   assert.doesNotMatch(html, /<script\b|<link\b|@import|url\(\s*["']?https?:|<(?:img|source)[^>]+src=["']https?:/iu);
 });
 
+test('keeps normative tables semantic and bounded by narrow report viewports', () => {
+  const html = renderHtmlReport(SAMPLE_AUDIT);
+  assert.match(html, /<table><thead><tr><th>Item<\/th>/u);
+  assert.match(html, /table\s*\{[^}]*width:\s*100%/iu);
+  assert.match(html, /@media\s*\(max-width:\s*42rem\)\{[^]*table\s*\{[^}]*table-layout:\s*fixed[^}]*\}[^]*th\s*,\s*td\s*\{[^}]*overflow-wrap:\s*anywhere/iu);
+});
+
 test('escapes hostile audited strings in text, attributes, code, URLs and media', () => {
   const hostile = '</style><script>alert(1)</script><img src=x onerror=alert(2)>';
   const input = structuredClone(SAMPLE_AUDIT);
