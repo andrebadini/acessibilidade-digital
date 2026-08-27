@@ -90,9 +90,9 @@ function validateEnvironment(environment) {
   if (!environment || typeof environment !== 'object' || Array.isArray(environment)) throw new TypeError('environment inválido.');
   const viewport = environment.viewport;
   if (!viewport || typeof viewport !== 'object' || Array.isArray(viewport)) throw new TypeError('viewport inválido.');
-  for (const key of ['width', 'height', 'deviceScaleFactor']) {
-    if (!Number.isFinite(viewport[key]) || viewport[key] <= 0) throw new TypeError(`viewport.${key} inválido.`);
-  }
+  const values = ['width', 'height', 'deviceScaleFactor'].map(key => viewport[key]);
+  if (values.every(value => value === null)) return;
+  if (!values.every(value => Number.isFinite(value) && value > 0)) throw new TypeError('viewport deve ser integralmente observado ou integralmente não disponível.');
 }
 
 function validateScope(scope) {

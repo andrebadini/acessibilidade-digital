@@ -93,7 +93,8 @@ function scope(model) {
 
 function methodology(model) {
   const viewport = model.environment.viewport;
-  return `<section class="major-section" aria-labelledby="metodologia"><h2 id="metodologia">Metodologia</h2><p>${escapeHtml(model.methodology.name)}. As verificações automáticas só aprovam quando aplicabilidade e expectativas foram observadas integralmente; itens contextuais permanecem para revisão.</p><dl class="meta"><dt>Extensão</dt><dd>${escapeHtml(model.versions.extension)}</dd><dt>Regras</dt><dd>${escapeHtml(model.versions.rules)}</dd><dt>Navegador</dt><dd>${escapeHtml(model.versions.browser)}</dd><dt>Viewport</dt><dd>${escapeHtml(viewport.width)} × ${escapeHtml(viewport.height)} CSS px; escala ${escapeHtml(viewport.deviceScaleFactor)}</dd><dt>Regras executadas</dt><dd>${escapeHtml(model.methodology.ruleCount)}</dd><dt>Itens normativos</dt><dd>${escapeHtml(model.methodology.itemCount)}</dd></dl></section>`;
+  const viewportText = viewport.width === null ? 'não disponível' : `${escapeHtml(viewport.width)} × ${escapeHtml(viewport.height)} CSS px; escala ${escapeHtml(viewport.deviceScaleFactor)}`;
+  return `<section class="major-section" aria-labelledby="metodologia"><h2 id="metodologia">Metodologia</h2><p>${escapeHtml(model.methodology.name)}. As verificações automáticas só aprovam quando aplicabilidade e expectativas foram observadas integralmente; itens contextuais permanecem para revisão.</p><dl class="meta"><dt>Extensão</dt><dd>${escapeHtml(model.versions.extension)}</dd><dt>Regras</dt><dd>${escapeHtml(model.versions.rules)}</dd><dt>Navegador</dt><dd>${escapeHtml(model.versions.browser)}</dd><dt>Viewport</dt><dd>${viewportText}</dd><dt>Regras executadas</dt><dd>${escapeHtml(model.methodology.ruleCount)}</dd><dt>Itens normativos</dt><dd>${escapeHtml(model.methodology.itemCount)}</dd></dl></section>`;
 }
 
 function items(model) {
