@@ -248,13 +248,13 @@
 
 **Passos:**
 
-1. Testar máquina de estados por aba, exclusividade/combinação definida e limpeza em navegação/fechamento.
-2. Testar o módulo Leitura simulada: fila determinística, foco e prévia, iniciar, pausar/continuar, parar, repetir, anterior/próximo, cancelamento de fala anterior, legenda sincronizada, voz/velocidade locais, indisponibilidade de `speechSynthesis` e exclusão de valores sensíveis.
+1. Testar máquina de estados por aba, registro explícito da aba de conteúdo alvo, exclusividade/combinação definida, autorização de mensagens por aba/frame e limpeza em navegação/fechamento/SPA.
+2. Testar o módulo Leitura simulada: fila determinística (`tabindex` positivo e depois ordem documental, sem foco exploratório), Shadow DOM aberto, limites explícitos de frames, foco e prévia, iniciar, pausar/continuar, parar, repetir, anterior/próximo, corrida/cancelamento de fala própria, legenda sincronizada, `voiceschanged`, voz removida, falha/ausência de `speechSynthesis`, voz/velocidade somente locais e exclusão de conteúdo oculto, `inert`, desabilitado ou sensível.
 3. Testar acromatopsia: classe/filtro reversível e ausência de resultado normativo.
 4. Testar modo motor: bloqueio de pointer/mouse/touch/wheel, preservação do teclado e saída por três `Escape`.
-5. Implementar conteúdo injetado localmente e controlador no service worker.
+5. Implementar conteúdo injetado localmente e controlador no service worker, sem importar ESM diretamente como script clássico; provar o artefato efetivamente carregado sob MV3/CSP e limpar fala/listeners/observadores/camadas/CSS por ciclo de vida.
 6. Adicionar painel simples com três modos e, para Leitura simulada, controles de reprodução/navegação, voz, velocidade, instrução, legenda e estado ativo.
-7. Executar testes e E2E manual/automatizado na aba de fixture.
+7. Executar testes e E2E automatizado na aba de fixture que demonstre injeção real, aba alvo correta, reversibilidade, saída segura e ausência de código remoto; limitações de fila de fala compartilhada, frames inacessíveis e tecnologias assistivas reais permanecem visíveis.
 8. Commit: `feat: add reversible accessibility persona previews`.
 
 ## Task 11 — Adicionar menu de contexto

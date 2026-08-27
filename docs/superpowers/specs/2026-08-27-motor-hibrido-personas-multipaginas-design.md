@@ -158,7 +158,7 @@ A extensão detecta localmente assinaturas de widgets, scripts, elementos, atrib
 
 ## 6. Suíte de personas
 
-As personas são iniciadas pelo painel da extensão para a aba atual. O estado é por aba e nunca é incluído como resultado normativo automático.
+As personas são iniciadas pelo painel da extensão para a aba de conteúdo explicitamente registrada como alvo. O painel nunca usa a própria aba `chrome-extension://` como alvo implícito. O estado é isolado por aba e nunca é incluído como resultado normativo automático.
 
 ### 6.1 Prévia de leitor de tela
 
@@ -168,11 +168,20 @@ O modo será um módulo dedicado chamado **Leitura simulada**, e não apenas um 
 - oferece controles locais de iniciar, pausar/continuar, parar, repetir, anterior e próximo;
 - acompanha o foco e anuncia localmente por `speechSynthesis` a prévia calculada;
 - percorre uma fila determinística de elementos significativos na ordem de foco/documento, sem acionar controles ou enviar formulários;
+- calcula essa ordem sem mover o foco para descobrir elementos: primeiro `tabindex` positivo em ordem numérica e, depois, elementos focalizáveis nativos/`tabindex="0"` em ordem documental, com desempate estável;
 - mostra marcador visível do elemento atual e legenda textual sincronizada para quem acompanha o teste;
 - usa nome, função, descrição, valor não sensível e estados coletados;
 - permite escolher uma voz disponibilizada pelo navegador e ajustar a velocidade dentro de limites seguros, mantendo preferências apenas localmente;
-- cancela a fala anterior antes de iniciar outra, trata indisponibilidade de voz como limitação e nunca lê senha, token ou valor de campo privado;
-- oferece saída de emergência por `Escape` pressionado três vezes e restaura foco/estilos ao encerrar;
+- cancela fala anterior somente quando o módulo controla uma elocução ativa; como `speechSynthesis` compartilha uma fila com a própria página, essa limitação é declarada e o módulo não chama `cancel()` preventivamente ao iniciar;
+- continua utilizável pela legenda quando `speechSynthesis` estiver ausente, `speak()` falhar, `voiceschanged` chegar tarde ou a voz preferida deixar de existir;
+- invalida callbacks assíncronos antigos para que término, erro ou mudança de voz de uma fala anterior não sobrescreva o item atual;
+- nunca lê, armazena ou transmite senha, OTP, token, valor de campo sensível, `textarea`/`contenteditable` privado ou conteúdo de subárvore marcada como privada; somente identificador de voz e velocidade podem ser persistidos localmente, fora de relatórios e evidências;
+- exclui da fila conteúdo oculto, `aria-hidden`, `inert`, desabilitado ou sem geometria útil, sem retirar a página real da árvore de acessibilidade;
+- percorre Shadow DOM aberto. Frames same-origin podem ser coordenados quando comprovados; frame inacessível, sandboxed, Shadow DOM fechado ou cobertura parcial gera limitação explícita, nunca aprovação silenciosa;
+- oferece saída de emergência por três `Escape` discretos, ignorando repetição automática da tecla, e restaura foco/estilos ao encerrar;
+- remove fala própria, listeners, observadores, camadas, marcadores, CSS e estado em parada, navegação, recarga, fechamento da aba e mutação SPA que invalide a fila; reiniciar não duplica artefatos;
+- usa artefatos visuais `aria-hidden`, não focalizáveis, e mensagens estritamente tipadas/correlacionadas à persona, aba e frame ativos;
+- a injeção local do módulo precisa ser provada em E2E sob MV3/CSP. Como `chrome.scripting.executeScript({ files })` carrega script clássico, módulos ESM só podem ser usados após empacotamento local comprovado, sem código remoto ou relaxamento da CSP;
 - informa permanentemente: “Simulação baseada na árvore de acessibilidade; não substitui VoiceOver, NVDA, JAWS ou teste com pessoas”.
 
 ### 6.2 Simulação de acromatopsia
