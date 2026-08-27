@@ -1,6 +1,7 @@
 const SENSITIVE = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
 const EXECUTABLE = new Set(['script', 'style', 'template']);
 const URL_ATTRIBUTES = new Set(['action', 'cite', 'formaction', 'href', 'poster', 'src']);
+const VOID_ELEMENTS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
 
 function scanTag(html, start) {
   let quote = '';
@@ -122,14 +123,14 @@ export function sanitizeHtmlSnippetSource(html) {
   if (typeof html !== 'string') return '';
   let output = '';
   let position = 0;
-  const privateTextStack = [];
+  const privateStructure = [];
   while (position < html.length) {
     const opening = html.indexOf('<', position);
     if (opening < 0) {
-      if (!privateTextStack.length) output += sanitizeText(html.slice(position));
+      if (!privateStructure.length) output += sanitizeText(html.slice(position));
       break;
     }
-    if (!privateTextStack.length) output += sanitizeText(html.slice(position, opening));
+    if (!privateStructure.length) output += sanitizeText(html.slice(position, opening));
     if (html.startsWith('<!--', opening)) {
       const end = html.indexOf('-->', opening + 4);
       position = end < 0 ? html.length : end + 3;
@@ -137,13 +138,13 @@ export function sanitizeHtmlSnippetSource(html) {
     }
     const token = scanTag(html, opening);
     if (!token) {
-      output += '&lt;';
+      if (!privateStructure.length) output += '&lt;';
       position = opening + 1;
       continue;
     }
     const parsed = parseTag(token.text);
     if (!parsed) {
-      output += '&lt;';
+      if (!privateStructure.length) output += '&lt;';
       position = opening + 1;
       continue;
     }
@@ -160,14 +161,25 @@ export function sanitizeHtmlSnippetSource(html) {
       position = token.end;
       continue;
     }
+    if (privateStructure.length) {
+      if (parsed.closing) {
+        if (privateStructure.at(-1) === parsed.name) {
+          privateStructure.pop();
+          if (!privateStructure.length) output += sanitizeTag(parsed);
+        }
+      } else if (!parsed.selfClosing && !VOID_ELEMENTS.has(parsed.name)) {
+        privateStructure.push(parsed.name);
+      }
+      position = token.end;
+      continue;
+    }
     output += sanitizeTag(parsed);
-    if (parsed.closing && privateTextStack.at(-1) === parsed.name) privateTextStack.pop();
-    else if (!parsed.closing && !parsed.selfClosing) {
+    if (!parsed.closing && !parsed.selfClosing && !VOID_ELEMENTS.has(parsed.name)) {
       const values = Object.fromEntries(parsed.attributes.map(attribute => [attribute.name, attribute.value ?? '']));
       const contenteditable = String(values.contenteditable ?? '').trim().toLowerCase();
       if (parsed.name === 'textarea' || (
         Object.hasOwn(values, 'contenteditable') && !['false', 'inherit'].includes(contenteditable)
-      )) privateTextStack.push(parsed.name);
+      )) privateStructure.push(parsed.name);
     }
     position = token.end;
   }

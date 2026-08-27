@@ -92,10 +92,39 @@ function pageWithFormCheckbox() {
   page.nodes[0] = {
     ...page.nodes[0],
     tagName: 'input',
-    attributes: { id: 'terms', type: 'checkbox', 'aria-invalid': 'true' },
-    form: { type: 'checkbox', checked: true, disabled: true, required: true },
+    attributes: { id: 'terms', type: 'checkbox', 'aria-disabled': 'true', 'aria-required': 'true', 'aria-invalid': 'true' },
+    form: { type: 'checkbox', checked: true, disabled: false, required: false },
   };
   page.axTree.nodes = [{ backendDOMNodeId: 1, role: { value: 'checkbox' }, name: { value: 'Aceito os termos' } }];
+  return page;
+}
+
+function pageWithContentEditableSecret(secret) {
+  const page = rawPage();
+  page.nodes[0] = {
+    ...page.nodes[0], tagName: 'div', attributes: { id: 'editor', contenteditable: 'true' },
+    text: secret, visibleText: secret, focusable: true, interactive: true, interaction: 'text-entry',
+  };
+  page.nodes.push({
+    backendNodeId: 4, tagName: 'div', parentBackendNodeId: 1,
+    attributes: { contenteditable: 'true' }, text: secret, visibleText: secret,
+    rect: { x: 12, y: 24, width: 40, height: 20 },
+  });
+  page.axTree.nodes = [1, 4].map(backendDOMNodeId => ({
+    backendDOMNodeId, role: { value: 'textbox' }, name: { value: secret },
+    description: { value: secret }, value: { value: secret },
+  }));
+  return page;
+}
+
+function pageWithSelect({ attributeMultiple = false, formMultiple = false, axRole = '' } = {}) {
+  const page = rawPage();
+  page.nodes[0] = {
+    ...page.nodes[0], tagName: 'select',
+    attributes: { id: 'choice', ...(attributeMultiple ? { multiple: '' } : {}) },
+    form: { type: 'select', multiple: formMultiple },
+  };
+  page.axTree.nodes = axRole ? [{ backendDOMNodeId: 1, role: { value: axRole }, name: { value: 'Escolha' } }] : [];
   return page;
 }
 
@@ -306,7 +335,42 @@ test('removes an ordinary api_key current value from snapshot, evidence, preview
   assert.doesNotMatch(html, /TOPSECRET/iu);
 });
 
-test('reads compatible states from node.form and ignores aria-selected on a button', async () => {
+test('removes a nested contenteditable secret from model, evidence, preview, hash, snippet and HTML', async () => {
+  const run = secret => runAudit({
+    url: 'https://example.test/',
+    chromeAdapter: fakeAdapter({
+      page: pageWithContentEditableSecret(secret),
+      outerHtml: backendNodeId => backendNodeId === 1
+        ? `<div id="editor" contenteditable="true"><div contenteditable="true" title="${secret}">${secret}</div></div>`
+        : backendNodeId === 4
+          ? `<div contenteditable="true" title="${secret}">${secret}</div>`
+          : '<button id="other">Outro</button>',
+    }),
+    now: clock,
+    idFactory: () => 'audit-contenteditable-privacy',
+  });
+  const [first, second] = await Promise.all([run('TOPSECRET-editor-one'), run('TOPSECRET-editor-two')]);
+  const evidence = first.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
+  const changed = second.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
+
+  assert.equal(evidence.snippet, '<div id="editor" contenteditable="true"></div>');
+  assert.equal(evidence.accessibility.name, '');
+  assert.equal(evidence.accessibility.description, '');
+  assert.equal(evidence.accessibility.announcementPreview, 'campo de texto');
+  assert.equal(evidence.hash, changed.hash);
+  const leakedContexts = [...JSON.stringify(first).matchAll(/.{0,80}TOPSECRET.{0,80}/giu)].map(match => match[0]);
+  assert.deepEqual(leakedContexts, []);
+
+  const report = await enrichAuditForReport(first, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  });
+  const html = renderHtmlReport(report);
+  assert.doesNotMatch(html, /TOPSECRET/iu);
+  assert.match(html, /Nome acessível<\/dt><dd>não disponível/iu);
+});
+
+test('lets true ARIA presence win over false node.form state and ignores aria-selected on a button', async () => {
   const checkboxModel = await runAudit({
     url: 'https://example.test/', chromeAdapter: fakeAdapter({ page: pageWithFormCheckbox() }),
     now: clock, idFactory: () => 'audit-form-checkbox',
@@ -336,6 +400,28 @@ test('uses conservative native roles for range, number, text-like and unknown in
     });
     const evidence = model.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
     assert.equal(evidence.accessibility.role, role, type);
+  }
+});
+
+test('maps multiple select to listbox, simple select to combobox and keeps AX role priority', async () => {
+  const formMultiple = pageWithSelect({ formMultiple: true });
+  formMultiple.nodes[0].form.disabled = true;
+  formMultiple.nodes[0].form.required = true;
+  const cases = [
+    ['attribute', pageWithSelect({ attributeMultiple: true }), 'listbox'],
+    ['form', formMultiple, 'listbox'],
+    ['simple', pageWithSelect(), 'combobox'],
+    ['ax-priority', pageWithSelect({ attributeMultiple: true, axRole: 'combobox' }), 'combobox'],
+  ];
+  for (const [label, page, expected] of cases) {
+    const model = await runAudit({
+      url: 'https://example.test/', chromeAdapter: fakeAdapter({ page }),
+      now: clock, idFactory: () => `audit-select-${label}`,
+    });
+    const accessibility = model.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1').accessibility;
+    assert.equal(accessibility.role, expected, label);
+    assert.match(accessibility.announcementPreview, expected === 'listbox' ? /caixa de listagem/iu : /caixa de combinação/iu);
+    if (label === 'form') assert.deepEqual(accessibility.states, ['indisponível', 'obrigatório']);
   }
 });
 

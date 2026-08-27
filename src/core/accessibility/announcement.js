@@ -5,6 +5,7 @@ const ROLE_LABELS = new Map([
   ['radio', 'botão de opção'],
   ['textbox', 'campo de texto'],
   ['combobox', 'caixa de combinação'],
+  ['listbox', 'caixa de listagem'],
   ['heading', 'cabeçalho'],
   ['img', 'imagem'],
   ['region', 'região'],

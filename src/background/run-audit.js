@@ -126,9 +126,14 @@ function observedBoolean(node, property, ariaName) {
 }
 
 function observedPresence(node, property, ariaName, nativeName = property) {
-  const observed = observedBoolean(node, property, ariaName);
-  if (observed !== undefined) return observed;
-  return Object.hasOwn(node?.attributes || {}, nativeName) ? true : undefined;
+  const direct = Object.hasOwn(node || {}, property) ? node[property] : undefined;
+  const form = Object.hasOwn(node?.form || {}, property) ? node.form[property] : undefined;
+  const aria = normalizedText(nodeAttribute(node, ariaName)).toLowerCase();
+  const native = Object.hasOwn(node?.attributes || {}, nativeName) ? true : undefined;
+  const sources = [direct, form, aria === 'true' ? true : aria === 'false' ? false : undefined, native];
+  if (sources.includes(true)) return true;
+  if (sources.includes(false)) return false;
+  return undefined;
 }
 
 function nativeRole(node) {
@@ -136,7 +141,9 @@ function nativeRole(node) {
   const type = normalizedText(nodeAttribute(node, 'type') || node?.form?.type || 'text').toLowerCase();
   if (tag === 'button') return 'button';
   if (tag === 'a' && nodeAttribute(node, 'href') !== undefined) return 'link';
-  if (tag === 'select') return 'combobox';
+  if (tag === 'select') {
+    return Object.hasOwn(node?.attributes || {}, 'multiple') || node?.form?.multiple === true ? 'listbox' : 'combobox';
+  }
   if (tag === 'textarea') return 'textbox';
   if (tag === 'img') return 'img';
   if (tag === 'input') {
@@ -153,9 +160,9 @@ function nativeRole(node) {
 const CHECKED_ROLES = new Set(['checkbox', 'menuitemcheckbox', 'menuitemradio', 'radio', 'switch']);
 const SELECTED_ROLES = new Set(['gridcell', 'option', 'row', 'tab', 'treeitem']);
 const EXPANDED_ROLES = new Set(['button', 'combobox', 'link', 'menuitem', 'row', 'treeitem']);
-const DISABLED_ROLES = new Set(['button', 'checkbox', 'combobox', 'link', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'radio', 'slider', 'spinbutton', 'switch', 'tab', 'textbox', 'treeitem']);
-const REQUIRED_ROLES = new Set(['checkbox', 'combobox', 'radio', 'slider', 'spinbutton', 'switch', 'textbox']);
-const INVALID_ROLES = new Set(['checkbox', 'combobox', 'radio', 'slider', 'spinbutton', 'switch', 'textbox']);
+const DISABLED_ROLES = new Set(['button', 'checkbox', 'combobox', 'link', 'listbox', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'radio', 'slider', 'spinbutton', 'switch', 'tab', 'textbox', 'treeitem']);
+const REQUIRED_ROLES = new Set(['checkbox', 'combobox', 'listbox', 'radio', 'slider', 'spinbutton', 'switch', 'textbox']);
+const INVALID_ROLES = new Set(['checkbox', 'combobox', 'listbox', 'radio', 'slider', 'spinbutton', 'switch', 'textbox']);
 
 function compatibleState(node, role, property, ariaName, roles, presence = false) {
   if (!roles.has(role)) return undefined;

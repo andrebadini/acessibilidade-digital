@@ -182,6 +182,7 @@ function normalizeSimplified(raw) {
   const redactedNodes = nodes.map(node => redactNormalizedNode(node, {
     executable: inExecutableSubtree(node),
     privateText: inPrivateTextSubtree(node),
+    preserveAccessibleText: ['input', 'select', 'textarea'].includes(node.tagName),
   }));
   return assertSnapshotV1({
     schemaVersion: 1,
@@ -501,6 +502,7 @@ function normalizeColumnar(raw) {
   const redactedNodes = ordered.map(record => redactNormalizedNode(outputByRecord.get(record), {
     executable: inExecutableSubtree(record),
     privateText: inPrivateTextSubtree(record),
+    preserveAccessibleText: ['input', 'select', 'textarea'].includes(record.tagName),
   }));
 
   const primary = documents[0] || {};

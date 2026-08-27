@@ -104,7 +104,7 @@ function removeRuntimeValues(value, ancestors = new WeakSet()) {
 }
 
 /** Final privacy boundary for a fully merged normalized node. */
-export function redactNormalizedNode(input, { executable = false, privateText = false } = {}) {
+export function redactNormalizedNode(input, { executable = false, privateText = false, preserveAccessibleText = false } = {}) {
   const node = sanitizeJsonData(input);
   node.attributes = node.attributes && typeof node.attributes === 'object' ? node.attributes : {};
   for (const name of Object.keys(node.attributes)) {
@@ -135,6 +135,11 @@ export function redactNormalizedNode(input, { executable = false, privateText = 
     node.text = '';
     node.visibleText = '';
     removeRuntimeValues(node);
+    if (!preserveAccessibleText) {
+      delete node.axValue;
+      delete node.accessibleName;
+      delete node.accessibleDescription;
+    }
   }
   if (executable) {
     node.text = '';

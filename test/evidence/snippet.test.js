@@ -29,11 +29,21 @@ test('omits current editable values while preserving static select option labels
     `<input type=text name=api_key value="${secret}" aria-valuenow="${secret}" aria-valuetext="${secret}">`,
     `<textarea>${secret}</textarea>`,
     `<select value="${secret}"><option value="${secret}" selected>Rótulo público</option><option value=other>Outro</option></select>`,
-    `<div contenteditable=true>${secret}<span>${secret}</span></div>`,
+    `<div contenteditable=true>${secret}<div title="${secret}"><span>${secret}</span></div></div>`,
   ].join(''));
 
-  assert.equal(source, '<input type="text" name="api_key"><textarea></textarea><select><option>Rótulo público</option><option>Outro</option></select><div contenteditable="true"><span></span></div>');
-  assert.doesNotMatch(source, /TOPSECRET|\bvalue=|\bselected\b|aria-value/iu);
+  assert.equal(source, '<input type="text" name="api_key"><textarea></textarea><select><option>Rótulo público</option><option>Outro</option></select><div contenteditable="true"></div>');
+  assert.doesNotMatch(source, /TOPSECRET|\bvalue=|\bselected\b|aria-value|\btitle=/iu);
+});
+
+test('suppresses a same-tag editable subtree until the structurally matching close tag', () => {
+  const secret = 'TOPSECRET-nested-editor';
+  const source = sanitizeHtmlSnippetSource(
+    `<div contenteditable=true><div title="${secret}"><div>${secret}</div></div></div><button>Depois</button>`,
+  );
+
+  assert.equal(source, '<div contenteditable="true"></div><button>Depois</button>');
+  assert.doesNotMatch(source, /TOPSECRET|title=|<div><div>/iu);
 });
 
 test('removes executable elements and inline execution attributes while preserving structure and ARIA', () => {

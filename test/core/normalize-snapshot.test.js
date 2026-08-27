@@ -94,6 +94,40 @@ function columnarRaw() {
   };
 }
 
+function columnarContentEditable(secret) {
+  const strings = ['#document', 'HTML', 'BODY', 'DIV', '#text', 'contenteditable', 'true', secret, 'https://example.test/', 'Fixture'];
+  const s = value => strings.indexOf(value);
+  return {
+    domSnapshot: {
+      strings,
+      computedStyles: [],
+      documents: [{
+        frameId: 0,
+        documentURL: s('https://example.test/'),
+        title: s('Fixture'),
+        nodes: {
+          parentIndex: [-1, 0, 1, 2, 3, 4],
+          nodeType: [9, 1, 1, 1, 1, 3],
+          nodeName: [s('#document'), s('HTML'), s('BODY'), s('DIV'), s('DIV'), s('#text')],
+          nodeValue: [0, 0, 0, 0, 0, s(secret)],
+          backendNodeId: [1, 2, 3, 4, 5, 6],
+          attributes: [[], [], [], [s('contenteditable'), s('true')], [s('contenteditable'), s('true')], []],
+        },
+        layout: { nodeIndex: [], bounds: [], styles: [] },
+      }],
+    },
+    axTree: { nodes: [4, 5].map(backendDOMNodeId => ({
+      backendDOMNodeId,
+      role: { value: 'textbox' },
+      name: { value: secret },
+      description: { value: secret },
+      value: { value: secret },
+    })) },
+    pageData: [],
+    warnings: [],
+  };
+}
+
 test('normalizes a real columnar DOMSnapshot in deterministic iframe and shadow order', () => {
   const snapshot = normalizeSnapshot(columnarRaw());
   assert.deepEqual(validateSnapshotV1(snapshot), []);
@@ -275,11 +309,52 @@ test('never persists current values from ordinary editable controls or runtime a
     assert.equal(Object.hasOwn(node.form || {}, 'rawValue'), false);
     assert.equal(Object.hasOwn(node.form || {}, 'inputValue'), false);
   }
+  assert.equal(snapshot.nodes.find(node => node.backendNodeId === 1).accessibleName, 'Chave da API');
+  assert.equal(snapshot.nodes.find(node => node.backendNodeId === 2).accessibleName, 'Observação');
+  assert.equal(Object.hasOwn(snapshot.nodes.find(node => node.backendNodeId === 3), 'accessibleName'), false);
+  assert.equal(snapshot.nodes.find(node => node.backendNodeId === 4).accessibleName, 'Escolha');
   const option = snapshot.nodes.find(node => node.tagName === 'option');
   assert.equal(Object.hasOwn(option.attributes, 'value'), false);
   assert.equal(Object.hasOwn(option.attributes, 'selected'), false);
   assert.equal(option.text, 'Rótulo público');
   assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(firstSecret));
+});
+
+test('removes AX-derived content from a contenteditable root and every private descendant', () => {
+  const simplifiedSecret = 'TOPSECRET-contenteditable-simplified';
+  const simplified = normalizeSnapshot({
+    format: 'simplified-v1',
+    document: { url: 'https://example.test/', title: 'Privacy' },
+    nodes: [
+      { backendNodeId: 1, tagName: 'div', parentBackendNodeId: null, attributes: { contenteditable: 'true' }, text: simplifiedSecret },
+      { backendNodeId: 2, tagName: 'div', parentBackendNodeId: 1, attributes: { contenteditable: 'true' }, text: simplifiedSecret },
+      { backendNodeId: 3, tagName: 'span', parentBackendNodeId: 2, attributes: {}, text: simplifiedSecret },
+      { backendNodeId: 4, tagName: 'input', parentBackendNodeId: 2, attributes: { type: 'text', value: simplifiedSecret }, text: simplifiedSecret },
+    ],
+    axTree: { nodes: [1, 2, 3].map(backendDOMNodeId => ({
+      backendDOMNodeId, role: { value: 'textbox' }, name: { value: simplifiedSecret },
+      description: { value: simplifiedSecret }, value: { value: simplifiedSecret },
+    })).concat({
+      backendDOMNodeId: 4, role: { value: 'textbox' }, name: { value: 'Rótulo estático seguro' },
+      description: { value: 'Descrição estática segura' }, value: { value: simplifiedSecret },
+    }) },
+  });
+  const columnarSecret = 'TOPSECRET-contenteditable-columnar';
+  const columnar = normalizeSnapshot(columnarContentEditable(columnarSecret));
+
+  for (const [snapshot, secret] of [[simplified, simplifiedSecret], [columnar, columnarSecret]]) {
+    assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(secret));
+    for (const node of snapshot.nodes.filter(item => ['div', 'span'].includes(item.tagName))) {
+      assert.equal(Object.hasOwn(node, 'axValue'), false);
+      assert.equal(Object.hasOwn(node, 'accessibleName'), false);
+      assert.equal(Object.hasOwn(node, 'accessibleDescription'), false);
+      assert.equal(node.text, '');
+      assert.equal(node.visibleText, '');
+    }
+  }
+  const nestedInput = simplified.nodes.find(node => node.backendNodeId === 4);
+  assert.equal(nestedInput.accessibleName, 'Rótulo estático seguro');
+  assert.equal(nestedInput.accessibleDescription, 'Descrição estática segura');
 });
 
 test('associates runtime data by sanitized document URL when Chrome and CDP frame IDs differ', () => {

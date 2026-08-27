@@ -54,7 +54,7 @@ test('supports every minimum role and avoids unknown claims or duplicate punctua
   const expectedRoles = {
     button: 'botão', link: 'link', checkbox: 'caixa de seleção', radio: 'botão de opção',
     textbox: 'campo de texto', combobox: 'caixa de combinação', heading: 'cabeçalho',
-    img: 'imagem', region: 'região', table: 'tabela', list: 'lista', listitem: 'item da lista'
+    listbox: 'caixa de listagem', img: 'imagem', region: 'região', table: 'tabela', list: 'lista', listitem: 'item da lista'
   };
 
   for (const [role, label] of Object.entries(expectedRoles)) {
