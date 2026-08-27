@@ -4,10 +4,14 @@ import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { buildArtifactBaseName } from '../../src/browser/download-artifacts.js';
+import { canonicalStringify } from '../../src/core/report/canonical-json.js';
 import { renderOccurrenceCsv } from '../../src/core/report/csv.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
+import { verifyAuditIntegritySnapshot } from '../../src/core/report/integrity.js';
 import { persistExportFailure, persistExportSuccess } from '../../src/export/export-controller.js';
+import { attestReportExportResult } from '../../src/export/export-provenance.js';
+import { runReportExport } from '../../src/export/report-export.js';
 
 const PDF = new TextEncoder().encode('%PDF-1.7\ncontroller-test');
 
@@ -20,8 +24,7 @@ test('atomically commits a controlled partial model and latest state for pre-res
     auditId: SAMPLE_AUDIT.auditId,
     model,
     latest: { auditId: SAMPLE_AUDIT.auditId, status: 'partial', exportStatus: 'running' },
-    now: () => '2026-08-26T16:00:00.000Z',
-    cause: new Error('TOPSECRET https://origin.test/?token=x blob:chrome-extension://test/private'),
+    at: '2026-08-26T16:00:00.000Z',
   }, store);
   assert.equal(commits.length, 1);
   assert.equal(commits[0][0], SAMPLE_AUDIT.auditId);
@@ -34,8 +37,118 @@ test('atomically commits a controlled partial model and latest state for pre-res
 
 test('rejects mismatched audit ID instead of committing another model', async () => {
   let committed = false;
-  await assert.rejects(persistExportFailure({ auditId: 'audit-other', model: structuredClone(SAMPLE_AUDIT), latest: {}, now: () => '2026-08-26T16:00:00.000Z' }, { async commitAudit() { committed = true; } }), /correla|auditId|auditoria/iu);
+  await assert.rejects(persistExportFailure({ auditId: 'audit-other', model: structuredClone(SAMPLE_AUDIT), latest: {}, at: '2026-08-26T16:00:00.000Z' }, { async commitAudit() { committed = true; } }), /correla|auditId|auditoria/iu);
   assert.equal(committed, false);
+});
+
+test('snapshots a failure request without repeatedly reading a hostile model accessor', async () => {
+  const request = {
+    auditId: SAMPLE_AUDIT.auditId,
+    latest: {},
+    at: '2026-08-26T16:00:00.000Z',
+  };
+  let modelReads = 0;
+  Object.defineProperty(request, 'model', {
+    enumerable: true,
+    get() {
+      modelReads += 1;
+      const model = structuredClone(SAMPLE_AUDIT);
+      if (modelReads > 1) model.auditId = 'audit-private-alternate';
+      return model;
+    },
+  });
+  let committed = false;
+
+  await assert.rejects(
+    persistExportFailure(request, { async commitAudit() { committed = true; } }),
+    /solicitação|propriedade|segur|esquema/iu,
+  );
+
+  assert.equal(modelReads, 0);
+  assert.equal(committed, false);
+});
+
+test('rejects nested failure-model accessors before structured cloning can invoke them', async () => {
+  const model = structuredClone(SAMPLE_AUDIT);
+  let nestedReads = 0;
+  Object.defineProperty(model.occurrences[0], 'privateValue', {
+    enumerable: true,
+    get() {
+      nestedReads += 1;
+      return 'PRIVATE_NESTED_FAILURE_SENTINEL';
+    },
+  });
+  let committed = false;
+
+  await assert.rejects(
+    persistExportFailure({
+      auditId: model.auditId,
+      model,
+      latest: {},
+      at: '2026-08-26T16:00:00.000Z',
+    }, { async commitAudit() { committed = true; } }),
+    /solicitação|propriedade|segur|esquema/iu,
+  );
+
+  assert.equal(nestedReads, 0);
+  assert.equal(committed, false);
+});
+
+test('sanitizes a hostile failure-request proxy before persistence', async () => {
+  let getTraps = 0;
+  const proxy = new Proxy({
+    auditId: SAMPLE_AUDIT.auditId,
+    model: structuredClone(SAMPLE_AUDIT),
+    latest: {},
+    at: '2026-08-26T16:00:00.000Z',
+  }, {
+    get() {
+      getTraps += 1;
+      throw new Error('PRIVATE_FAILURE_PROXY_SENTINEL');
+    },
+  });
+  let committed = false;
+
+  await assert.rejects(
+    persistExportFailure(proxy, { async commitAudit() { committed = true; } }),
+    error => error instanceof TypeError && !error.message.includes('PRIVATE_FAILURE_PROXY_SENTINEL'),
+  );
+
+  assert.equal(getTraps, 0);
+  assert.equal(committed, false);
+
+  const revocable = Proxy.revocable({
+    auditId: SAMPLE_AUDIT.auditId,
+    model: structuredClone(SAMPLE_AUDIT),
+    latest: {},
+    at: '2026-08-26T16:00:00.000Z',
+  }, {});
+  revocable.revoke();
+  await assert.rejects(
+    persistExportFailure(revocable.proxy, { async commitAudit() { committed = true; } }),
+    error => error instanceof TypeError && !/revoked|proxy/iu.test(error.message),
+  );
+  assert.equal(committed, false);
+});
+
+test('persists the initial failure latest snapshot despite mutation during finalization', async () => {
+  const request = {
+    auditId: SAMPLE_AUDIT.auditId,
+    model: structuredClone(SAMPLE_AUDIT),
+    latest: { auditId: SAMPLE_AUDIT.auditId, marker: 'initial' },
+    at: '2026-08-26T16:00:00.000Z',
+  };
+  const commits = [];
+
+  const pending = persistExportFailure(request, {
+    async commitAudit(...values) { commits.push(values); },
+  });
+  request.latest = { auditId: SAMPLE_AUDIT.auditId, marker: 'PRIVATE_AFTER_CALL' };
+  const persisted = await pending;
+
+  assert.equal(persisted.latest.marker, 'initial');
+  assert.equal(commits[0][2].marker, 'initial');
+  assert.doesNotMatch(JSON.stringify(commits), /PRIVATE_AFTER_CALL/u);
 });
 
 test('atomically persists the exact serialized model and a separate delivery receipt', async () => {
@@ -50,13 +163,121 @@ test('atomically persists the exact serialized model and a separate delivery rec
     ],
     limitations: ['O artefato CSV não concluiu o download (tempo limite excedido).'],
   };
-  const result = exportResult(model, receipt);
+  const result = await exportResult(model, receipt);
   const persisted = await persistExportSuccess({ auditId: SAMPLE_AUDIT.auditId, result, latest: { auditId: SAMPLE_AUDIT.auditId, status: 'partial' } }, { async commitAudit(...values) { commits.push(values); } });
   assert.equal(commits.length, 1);
   assert.deepEqual(commits[0][1], JSON.parse(result.json).audit);
   assert.deepEqual(commits[0][2].deliveryReceipt, result.deliveryReceipt);
   assert.equal(persisted.latest.exportStatus, 'partial');
   assert.equal(Object.hasOwn(commits[0][1].report.artifact, 'deliveryReceipt'), false);
+});
+
+test('rejects forged evidence bytes even when manifest and canonical claims were recomputed', async () => {
+  const model = generatedModel(['html', 'json', 'csv', 'pdf']);
+  model.evidence[0].dataUrl = `data:image/png;base64,${Buffer.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x63,
+  ]).toString('base64')}`;
+  model.evidence[0].hash = 'b'.repeat(64);
+  refreshDeclaredIntegrity(model);
+  const receipt = {
+    status: 'complete',
+    formats: ['html', 'json', 'csv', 'pdf'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
+    limitations: [],
+  };
+  let committed = false;
+
+  await assert.rejects(
+    persistExportSuccess({
+      auditId: model.auditId,
+      result: await exportResult(model, receipt),
+      latest: {},
+    }, { async commitAudit() { committed = true; } }),
+    /integridade|evidência|hash/iu,
+  );
+
+  assert.equal(committed, false);
+});
+
+test('rejects unavailable integrity in a final V2 export', async () => {
+  const model = generatedModel(['html', 'json', 'csv', 'pdf']);
+  model.integrity = { algorithm: 'unavailable', status: 'not-recorded-v1' };
+  const receipt = {
+    status: 'complete',
+    formats: ['html', 'json', 'csv', 'pdf'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
+    limitations: [],
+  };
+  let committed = false;
+
+  await assert.rejects(
+    persistExportSuccess({
+      auditId: model.auditId,
+      result: await exportResult(model, receipt),
+      latest: {},
+    }, { async commitAudit() { committed = true; } }),
+    /integridade|SHA-256|indisponível/iu,
+  );
+
+  assert.equal(committed, false);
+});
+
+test('persists only the initial success snapshot when the caller mutates its model later', async () => {
+  const model = generatedModel(['html', 'json', 'csv', 'pdf']);
+  const expected = structuredClone(model);
+  const receipt = {
+    status: 'complete',
+    formats: ['html', 'json', 'csv', 'pdf'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
+    limitations: [],
+  };
+  const result = await exportResult(model, receipt);
+  const commits = [];
+
+  const pending = persistExportSuccess({ auditId: model.auditId, result, latest: {} }, {
+    async commitAudit(...values) { commits.push(values); },
+  });
+  result.model.evidence[0].hash = 'c'.repeat(64);
+  result.model.auditId = 'audit-mutated-after-call';
+  const persisted = await pending;
+
+  assert.deepEqual(persisted.model, expected);
+  assert.deepEqual(commits[0][1], expected);
+});
+
+test('rejects forged PDF bytes and matching forged receipt hashes after a genuine final print', async () => {
+  const result = await genuineReportExport();
+  const forgedPdf = new TextEncoder().encode('%PDF-1.7\nPRIVATE_FORGED_PDF');
+  const forgedHash = artifactHash(forgedPdf);
+  result.pdf = forgedPdf;
+  result.formats = result.formats.map(entry => entry.format === 'pdf' ? { ...entry, sha256: forgedHash } : entry);
+  result.deliveryReceipt = {
+    ...result.deliveryReceipt,
+    formats: result.deliveryReceipt.formats.map(entry =>
+      entry.format === 'pdf' ? { ...entry, sha256: forgedHash } : entry),
+  };
+  let committed = false;
+
+  await assert.rejects(
+    persistExportSuccess({ auditId: result.model.auditId, result, latest: {} }, {
+      async commitAudit() { committed = true; },
+    }),
+    /proveniência|PDF|impressão|artefato|correla/iu,
+  );
+
+  assert.equal(committed, false);
+});
+
+test('accepts the untouched artifact set attested by genuine final report generation', async () => {
+  const result = await genuineReportExport();
+  const commits = [];
+
+  const persisted = await persistExportSuccess({
+    auditId: result.model.auditId,
+    result,
+    latest: {},
+  }, { async commitAudit(...values) { commits.push(values); } });
+
+  assert.equal(commits.length, 1);
+  assert.deepEqual(commits[0][1], result.model);
+  assert.equal(persisted.latest.exportStatus, 'complete');
 });
 
 test('requires correlated ordered unique receipt formats with exact MIME, filename, hash and status semantics', async () => {
@@ -84,7 +305,7 @@ test('requires correlated ordered unique receipt formats with exact MIME, filena
     let committed = false;
     await assert.rejects(persistExportSuccess({
       auditId: model.auditId,
-      result: exportResult(model, deliveryReceipt),
+      result: await exportResult(model, deliveryReceipt),
       latest: {},
     }, { async commitAudit() { committed = true; } }), /recibo|formato|MIME|arquivo|hash|ordem|status|correla/iu);
     assert.equal(committed, false);
@@ -110,7 +331,7 @@ test('requires the four-format model contract and exact generation evidence for 
     const formats = model.report.artifact.formats.map(entry => receiptFormat(entry.format, 'complete', 1));
     await assert.rejects(persistExportSuccess({
       auditId: model.auditId,
-      result: exportResult(model, { status: 'complete', formats, limitations: [] }),
+      result: await exportResult(model, { status: 'complete', formats, limitations: [] }),
       latest: {},
     }, { async commitAudit() { committed = true; } }), /formato|quatro|CSV|PDF|diagnóstico|limitação|parcial|relatório/iu);
     assert.equal(committed, false);
@@ -128,7 +349,7 @@ test('accepts controlled CSV or PDF generation omissions only as partial exports
     const formats = model.report.artifact.formats.map((entry, index) => receiptFormat(entry.format, 'complete', index + 1));
     const persisted = await persistExportSuccess({
       auditId: model.auditId,
-      result: exportResult(model, {
+      result: await exportResult(model, {
         status: 'partial',
         formats,
         limitations: model.report.artifact.limitations,
@@ -145,7 +366,7 @@ test('accepts one exact late print-cleanup limitation only in a partial delivery
   const formats = ['html', 'json', 'csv', 'pdf'].map((format, index) => receiptFormat(format, 'complete', index + 1));
   const cleanup = 'A limpeza de um recurso temporário de impressão não pôde ser confirmada.';
   const deliveryReceipt = { status: 'partial', formats, limitations: [cleanup] };
-  const result = exportResult(model, deliveryReceipt);
+  const result = await exportResult(model, deliveryReceipt);
   let committed = false;
 
   const persisted = await persistExportSuccess({
@@ -164,7 +385,7 @@ test('rejects artifact payloads that are present despite controlled CSV or PDF o
   const missingPdf = generatedModel(['html', 'json', 'csv'], ['REPORT_PDF_UNAVAILABLE']);
   for (const [model, format] of [[missingCsv, 'csv'], [missingPdf, 'pdf']]) {
     const formats = model.report.artifact.formats.map((entry, index) => receiptFormat(entry.format, 'complete', index + 1));
-    const valid = exportResult(model, {
+    const valid = await exportResult(model, {
       status: 'partial',
       formats,
       limitations: model.report.artifact.limitations,
@@ -200,7 +421,7 @@ test('rejects stale or bidirectionally inconsistent generation evidence and PDF 
     let committed = false;
     await assert.rejects(persistExportSuccess({
       auditId: model.auditId,
-      result: exportResult(model, { status: missing.length ? 'partial' : 'complete', formats, limitations }),
+      result: await exportResult(model, { status: missing.length ? 'partial' : 'complete', formats, limitations }),
       latest: {},
     }, { async commitAudit() { committed = true; } }), /diagnóstico|geração|formato|PDF|CSV|fallback|correla/iu);
     assert.equal(committed, false);
@@ -220,7 +441,7 @@ test('rejects unbacked artifact limitations and forged PDF fallback status in ot
 
   for (const model of [rawLimitation, forgedFallback, unsupportedWithoutFallback]) {
     const formats = model.report.artifact.formats.map((entry, index) => receiptFormat(entry.format, 'complete', index + 1));
-    const result = exportResult(model, { status: 'complete', formats, limitations: [] });
+    const result = await exportResult(model, { status: 'complete', formats, limitations: [] });
     let committed = false;
     await assert.rejects(persistExportSuccess({ auditId: model.auditId, result, latest: {} }, {
       async commitAudit() { committed = true; },
@@ -232,8 +453,9 @@ test('rejects unbacked artifact limitations and forged PDF fallback status in ot
 test('accepts PDF fallback only with one exact current tagging diagnostic and partial model status', async () => {
   const model = generatedModel(['html', 'json', 'csv', 'pdf'], ['REPORT_PDF_TAGGING_UNSUPPORTED']);
   model.report.artifact.pdfFallback = true;
+  refreshDeclaredIntegrity(model);
   const formats = model.report.artifact.formats.map((entry, index) => receiptFormat(entry.format, 'complete', index + 1));
-  const result = exportResult(model, { status: 'complete', formats, limitations: [] });
+  const result = await exportResult(model, { status: 'complete', formats, limitations: [] });
 
   const persisted = await persistExportSuccess({ auditId: model.auditId, result, latest: {} }, { async commitAudit() {} });
 
@@ -248,7 +470,7 @@ test('rejects forged top-level artifact correlation and well-formed but wrong ha
     formats: ['html', 'json', 'csv', 'pdf'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
     limitations: [],
   };
-  const valid = exportResult(model, receipt);
+  const valid = await exportResult(model, receipt);
   const wrongHashFormats = valid.formats.map((entry, index) => index === 0 ? { ...entry, sha256: 'b'.repeat(64) } : entry);
   const attempts = [
     { ...valid, formats: [] },
@@ -282,7 +504,7 @@ test('preserves fixed artifact failure stage and rejects incompatible failure sc
   };
   const persisted = await persistExportSuccess({
     auditId: model.auditId,
-    result: exportResult(model, blobFailure),
+    result: await exportResult(model, blobFailure),
     latest: {},
   }, { async commitAudit() {} });
   assert.equal(persisted.latest.deliveryReceipt.formats[2].failureCode, 'ARTIFACT_BLOB_FAILED');
@@ -306,7 +528,7 @@ test('preserves fixed artifact failure stage and rejects incompatible failure sc
   for (const deliveryReceipt of invalidReceipts) {
     await assert.rejects(persistExportSuccess({
       auditId: model.auditId,
-      result: exportResult(model, deliveryReceipt),
+      result: await exportResult(model, deliveryReceipt),
       latest: {},
     }, { async commitAudit() {} }), /recibo|falha|etapa|hash|download|limitação|status|formato/iu);
   }
@@ -314,7 +536,7 @@ test('preserves fixed artifact failure stage and rejects incompatible failure sc
 
 test('rejects an accessor or revoked delivery receipt without invoking private data', async () => {
   const model = generatedModel(['html', 'json', 'csv', 'pdf']);
-  const valid = exportResult(model, {
+  const valid = await exportResult(model, {
     status: 'complete',
     formats: ['html', 'json', 'csv', 'pdf'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
     limitations: [],
@@ -348,7 +570,7 @@ test('rejects hostile outer request and result accessors before invoking them', 
     formats: ['html', 'json', 'csv', 'pdf'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
     limitations: [],
   };
-  const valid = exportResult(model, deliveryReceipt);
+  const valid = await exportResult(model, deliveryReceipt);
   let resultGetterAccessed = false;
   const hostileResult = { ...valid };
   Object.defineProperty(hostileResult, 'json', {
@@ -389,7 +611,7 @@ test('rejects a technical JSON incompatible with the final model before persiste
   };
   const technical = JSON.parse(renderTechnicalJson(model));
   technical.audit.report.status = 'forged';
-  const result = { ...exportResult(model, receipt), json: JSON.stringify(technical) };
+  const result = { ...await exportResult(model, receipt), json: JSON.stringify(technical) };
   let committed = false;
   await assert.rejects(persistExportSuccess({
     auditId: model.auditId,
@@ -414,14 +636,17 @@ function receiptFormat(format, status, downloadId) {
   };
 }
 
-function exportResult(model, deliveryReceipt, overrides = {}) {
-  const html = renderHtmlReport(model);
-  const json = renderTechnicalJson(model);
-  const prepared = model.report.artifact.formats.map(entry => entry.format);
-  const csv = prepared.includes('csv') ? renderOccurrenceCsv(model) : null;
+async function exportResult(model, deliveryReceipt, overrides = {}) {
+  if (model.integrity?.algorithm === 'SHA-256') refreshDeclaredIntegrity(model);
+  let renderModel = model;
+  try { renderModel = await verifyAuditIntegritySnapshot(model); } catch {}
+  const html = renderHtmlReport(renderModel);
+  const json = renderTechnicalJson(renderModel);
+  const prepared = renderModel.report.artifact.formats.map(entry => entry.format);
+  const csv = prepared.includes('csv') ? renderOccurrenceCsv(renderModel) : null;
   const pdf = prepared.includes('pdf') ? Uint8Array.from(PDF) : null;
   const artifacts = { html, json, csv, pdf };
-  const baseName = buildArtifactBaseName(model.finalUrl, model.timestamps.generatedAt);
+  const baseName = buildArtifactBaseName(renderModel.finalUrl, renderModel.timestamps.generatedAt);
   const normalizedFormats = deliveryReceipt.formats.map(entry => ({
     ...entry,
     ...(entry.filename === `audit.${entry.format}` ? { filename: `${baseName}.${entry.format}` } : {}),
@@ -430,22 +655,96 @@ function exportResult(model, deliveryReceipt, overrides = {}) {
       : {}),
   }));
   const receipt = { ...deliveryReceipt, formats: normalizedFormats };
-  return {
-    model,
+  const result = {
+    model: structuredClone(renderModel),
     html,
     json,
     csv,
     pdf,
     formats: structuredClone(normalizedFormats),
     deliveryReceipt: receipt,
-    limitations: [...new Set([...model.report.artifact.limitations, ...receipt.limitations])],
-    pdfFallback: model.report.artifact.pdfFallback,
+    limitations: [...new Set([...renderModel.report.artifact.limitations, ...receipt.limitations])],
+    pdfFallback: renderModel.report.artifact.pdfFallback,
     ...overrides,
   };
+  return attestReportExportResult(result);
 }
 
 function artifactHash(value) {
   return createHash('sha256').update(typeof value === 'string' ? new TextEncoder().encode(value) : value).digest('hex');
+}
+
+const REPORT_HASH_BASE =
+  'SHA-256 do JSON canônico com integrity.canonicalModelHash omitido; evidenceManifestHash permanece incluído.';
+
+function evidenceArtifactHash(artifact) {
+  const content = structuredClone(artifact);
+  delete content.hash;
+  const prefix = 'data:image/png;base64,';
+  const isPng = typeof content.dataUrl === 'string' && content.dataUrl.startsWith(prefix);
+  const bytes = isPng ? Uint8Array.from(Buffer.from(content.dataUrl.slice(prefix.length), 'base64')) : null;
+  if (bytes && content.kind === 'full-page') return artifactHash(bytes);
+  if (bytes) {
+    content.binarySha256 = artifactHash(bytes);
+    delete content.dataUrl;
+  }
+  return artifactHash(canonicalStringify(content));
+}
+
+function evidenceManifest(model) {
+  return model.evidence.map(artifact => ({
+    evidenceId: artifact.evidenceId,
+    pageId: artifact.pageId,
+    kind: artifact.kind,
+    nodeId: artifact.nodeId ?? null,
+    hash: artifact.hash ?? null,
+    fullPageEvidenceId: artifact.fullPageEvidenceId ?? null,
+  }));
+}
+
+function refreshDeclaredIntegrity(model) {
+  model.integrity = {
+    algorithm: 'SHA-256',
+    evidenceManifestHash: artifactHash(canonicalStringify(evidenceManifest(model))),
+    hashBase: REPORT_HASH_BASE,
+    canonicalModelHash: 'pending',
+  };
+  const hashInput = structuredClone(model);
+  delete hashInput.integrity.canonicalModelHash;
+  model.integrity.canonicalModelHash = artifactHash(canonicalStringify(hashInput));
+  return model;
+}
+
+function refreshIntegrity(model) {
+  for (const artifact of model.evidence) artifact.hash = evidenceArtifactHash(artifact);
+  return refreshDeclaredIntegrity(model);
+}
+
+async function genuineReportExport() {
+  let downloadId = 0;
+  return runReportExport({
+    auditModel: structuredClone(SAMPLE_AUDIT),
+    now: () => '2026-08-26T16:00:00.000Z',
+  }, {
+    urlApi: {
+      createObjectURL() { return 'blob:chrome-extension://test/print'; },
+      revokeObjectURL() {},
+    },
+    tabAdapter: {
+      async createPrintTab() { return { id: 77 }; },
+      async waitForReady() {},
+      async connectCdp() { return { async disconnect() {} }; },
+      async waitForAssets() {},
+      async removeTab() {},
+    },
+    async pdfRenderer() { return { bytes: Uint8Array.from(PDF), usedFallback: false, limitations: [] }; },
+    downloadsAdapter: {
+      createObjectURL() { return `blob:chrome-extension://test/download-${downloadId}`; },
+      revokeObjectURL() {},
+      async download() { downloadId += 1; return downloadId; },
+      async waitForDownload(id) { return { id, state: 'complete' }; },
+    },
+  });
 }
 
 const GENERATION_MESSAGES = Object.freeze({
@@ -480,5 +779,5 @@ function generatedModel(formats, issueCodes = [], options = {}) {
       formats: formats.map(format => ({ format, status: 'prepared' })),
     },
   };
-  return model;
+  return refreshIntegrity(model);
 }

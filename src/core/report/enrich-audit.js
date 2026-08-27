@@ -4,11 +4,19 @@ import { NBR17225_EDITORIAL_NOTES } from '../normative/nbr17225.js';
 import { createAuditModel, sanitizeEvidenceArtifactUrls } from './audit-model.js';
 import { canonicalStringify } from './canonical-json.js';
 import { sha256Hex } from './hash.js';
+import {
+  projectEvidenceManifest,
+  REPORT_HASH_BASE,
+  verifyAuditIntegritySnapshot,
+} from './integrity.js';
 
-export const REPORT_HASH_BASE = 'SHA-256 do JSON canônico com integrity.canonicalModelHash omitido; evidenceManifestHash permanece incluído.';
+export { REPORT_HASH_BASE } from './integrity.js';
 
 export async function enrichAuditForReport(input, options = {}) {
-  const raw = structuredClone(input);
+  let raw;
+  try { raw = JSON.parse(canonicalStringify(input)); } catch {
+    throw new TypeError('Modelo de auditoria contém propriedade não segura ou valor inválido.');
+  }
   const generatedAt = canonicalNow(options.now);
   const timezone = validTimezone(options.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
   const limitations = deriveLimitations(raw);
@@ -25,7 +33,7 @@ export async function enrichAuditForReport(input, options = {}) {
   const evidenceArtifacts = [];
   for (const artifact of sourceEvidence) {
     const sanitized = sanitizeEvidenceArtifactUrls(artifact);
-    evidenceArtifacts.push({ ...sanitized, hash: await hashEvidenceArtifact(sanitized) });
+    evidenceArtifacts.push({ ...sanitized, hash: 'pending' });
   }
   raw.evidence = Array.isArray(raw.evidence)
     ? evidenceArtifacts
@@ -76,26 +84,25 @@ export async function enrichAuditForReport(input, options = {}) {
     ...base,
     integrity: { ...base.integrity, canonicalModelHash: 'pending' },
   });
-  const evidenceManifest = normalized.evidence.map(artifact => ({
-    evidenceId: artifact.evidenceId,
-    pageId: artifact.pageId,
-    kind: artifact.kind,
-    nodeId: artifact.nodeId ?? null,
-    hash: artifact.hash ?? null,
-    fullPageEvidenceId: artifact.fullPageEvidenceId ?? null,
-  }));
+  const evidence = [];
+  for (const artifact of normalized.evidence) {
+    evidence.push({ ...artifact, hash: await hashEvidenceArtifact(artifact) });
+  }
+  const withEvidenceHashes = createAuditModel({ ...normalized, evidence });
+  const evidenceManifest = projectEvidenceManifest(withEvidenceHashes.evidence);
   const evidenceManifestHash = await sha256Hex(canonicalStringify(evidenceManifest));
   const withManifest = createAuditModel({
-    ...normalized,
-    integrity: { ...normalized.integrity, evidenceManifestHash, canonicalModelHash: 'pending' },
+    ...withEvidenceHashes,
+    integrity: { ...withEvidenceHashes.integrity, evidenceManifestHash, canonicalModelHash: 'pending' },
   });
   const hashInput = structuredClone(withManifest);
   delete hashInput.integrity.canonicalModelHash;
   const canonicalModelHash = await sha256Hex(canonicalStringify(hashInput));
-  return createAuditModel({
+  const finalModel = createAuditModel({
     ...withManifest,
     integrity: { ...withManifest.integrity, canonicalModelHash },
   });
+  return verifyAuditIntegritySnapshot(finalModel);
 }
 
 function canonicalNow(now) {

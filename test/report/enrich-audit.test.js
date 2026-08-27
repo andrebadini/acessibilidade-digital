@@ -125,6 +125,25 @@ test('recomputes evidence hashes from real PNG content and ignores forged input 
   assert.notEqual(first.integrity.canonicalModelHash, second.integrity.canonicalModelHash);
 });
 
+test('rejects hostile raw audit accessors without invoking page-controlled values', async () => {
+  const input = rawAudit();
+  let accessed = false;
+  Object.defineProperty(input.occurrences[0], 'privateValue', {
+    enumerable: true,
+    get() {
+      accessed = true;
+      return 'PRIVATE_ENRICH_SENTINEL';
+    },
+  });
+
+  await assert.rejects(enrichAuditForReport(input, {
+    now: () => '2026-08-26T15:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  }), /modelo|auditoria|propriedade|segur/iu);
+
+  assert.equal(accessed, false);
+});
+
 test('re-enriches native V2 pages and evidence without letting compatibility projections stale the integrity input', async () => {
   const options = {
     now: () => '2026-08-26T15:00:00.000Z', timezone: 'America/Cuiaba',

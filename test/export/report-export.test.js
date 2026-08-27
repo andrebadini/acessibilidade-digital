@@ -70,6 +70,31 @@ test('ignores image branding input and exports only the neutral independent iden
   assert.deepEqual(JSON.parse(result.json).audit, result.model);
 });
 
+test('rejects hostile audit-model accessors before export cloning or rendering', async () => {
+  const input = clone(SAMPLE_AUDIT);
+  let accessed = false;
+  Object.defineProperty(input.occurrences[0], 'privateValue', {
+    enumerable: true,
+    get() {
+      accessed = true;
+      return 'PRIVATE_EXPORT_MODEL_SENTINEL';
+    },
+  });
+  const events = [];
+
+  await assert.rejects(runReportExport({
+    auditModel: input,
+    now: () => '2026-08-26T15:00:00.000Z',
+  }, {
+    urlApi: { createObjectURL() { events.push('url'); }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    downloadsAdapter: fakeDownloads(events),
+  }), /modelo|auditoria|propriedade|segur/iu);
+
+  assert.equal(accessed, false);
+  assert.deepEqual(events, []);
+});
+
 test('keeps HTML and JSON when PDF fails, records a partial limitation, and still cleans exact tab/CDP', async () => {
   const events = [];
   const result = await runReportExport({ auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z' }, {

@@ -9,6 +9,11 @@ import { renderOccurrenceCsv } from '../core/report/csv.js';
 import { renderTechnicalJson } from '../core/report/earl-json.js';
 import { renderHtmlReport } from '../core/report/html.js';
 import { sha256Hex } from '../core/report/hash.js';
+import { verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
+import {
+  captureReportExportProvenance,
+  verifyReportExportProvenance,
+} from './export-provenance.js';
 import {
   ARTIFACT_FAILURE_CONTRACT,
   artifactCleanupLimitation,
@@ -25,13 +30,31 @@ const RESULT_KEYS = new Set([
 
 export async function persistExportFailure(request, store) {
   if (!store || typeof store.commitAudit !== 'function') throw new TypeError('Store de auditoria inválido.');
-  const auditId = validAuditId(request?.auditId);
-  if (!request?.model || !Object.hasOwn(request.model, 'auditId') || request.model.auditId !== auditId) throw new TypeError('Modelo e auditId de exportação não estão correlacionados.');
-  const at = canonicalNow(request.now);
+  const outer = cloneOuterRecord(
+    request,
+    new Set(['auditId', 'model', 'latest', 'at']),
+    ['auditId', 'model'],
+    'Solicitação de falha de exportação',
+  );
+  let envelope;
+  try {
+    const source = { auditId: outer.auditId, model: outer.model };
+    if (outer.latest !== undefined) source.latest = outer.latest;
+    if (outer.at !== undefined) source.at = outer.at;
+    envelope = JSON.parse(canonicalStringify(source));
+    assertNoProxy(request, 'Solicitação de falha de exportação');
+  } catch {
+    throw new TypeError('Solicitação de falha de exportação contém proxy, propriedade não segura ou valor inválido.');
+  }
+  const auditId = validAuditId(envelope.auditId);
+  if (!envelope.model || !Object.hasOwn(envelope.model, 'auditId') || envelope.model.auditId !== auditId) {
+    throw new TypeError('Modelo e auditId de exportação não estão correlacionados.');
+  }
+  const at = canonicalAt(envelope.at);
   const issue = createExportIssue('REPORT_EXPORT_PREPARATION_FAILED');
-  const model = await finalizeGeneratedModel(request.model, at, [issue], false, false, false);
+  const model = await finalizeGeneratedModel(envelope.model, at, [issue], false, false, false);
   const latest = {
-    ...(safeLatest(request.latest, auditId)),
+    ...(safeLatest(envelope.latest, auditId)),
     auditId,
     status: model.session.status,
     percent: 100,
@@ -48,6 +71,7 @@ export async function persistExportSuccess(request, store) {
   const envelope = cloneOuterRecord(request, new Set(['auditId', 'result', 'latest']), ['auditId', 'result'], 'Solicitação de exportação');
   const auditId = validAuditId(envelope.auditId);
   const outerResult = cloneOuterRecord(envelope.result, RESULT_KEYS, [...RESULT_KEYS], 'Resultado de exportação');
+  const exportProvenance = captureReportExportProvenance(outerResult.model);
   let result;
   try {
     result = JSON.parse(canonicalStringify({
@@ -72,15 +96,15 @@ export async function persistExportSuccess(request, store) {
   try { serializedModel = JSON.parse(result.json).audit; } catch {
     throw new TypeError('JSON técnico do resultado de exportação inválido.');
   }
-  if (!result.model || !Object.hasOwn(result.model, 'auditId') || !Object.hasOwn(serializedModel, 'auditId')
-    || result.model.auditId !== auditId || serializedModel.auditId !== auditId
-    || canonicalStringify(serializedModel) !== canonicalStringify(result.model)) {
+  const verifiedModel = await verifyAuditIntegritySnapshot(result.model);
+  if (!Object.hasOwn(serializedModel, 'auditId') || verifiedModel.auditId !== auditId || serializedModel.auditId !== auditId
+    || canonicalStringify(serializedModel) !== canonicalStringify(verifiedModel)) {
     throw new TypeError('Resultado e auditId de exportação não estão correlacionados.');
   }
-  const prepared = preparedArtifactFormats(result.model);
+  const prepared = preparedArtifactFormats(verifiedModel);
   const receipt = normalizeDeliveryReceipt(result.deliveryReceipt, prepared);
   validateArtifactCorrelation({
-    model: result.model,
+    model: verifiedModel,
     html,
     json: result.json,
     csv,
@@ -92,20 +116,31 @@ export async function persistExportSuccess(request, store) {
     prepared,
   });
   await validateArtifactHashes({ html, json: result.json, csv, pdf }, receipt.formats);
-  const exportStatus = prepared.missing.length > 0 || result.model.report.artifact.status === 'partial' || receipt.status !== 'complete'
+  await verifyReportExportProvenance(exportProvenance, {
+    model: verifiedModel,
+    html,
+    json: result.json,
+    csv,
+    pdf,
+    formats: result.formats,
+    deliveryReceipt: result.deliveryReceipt,
+    limitations: result.limitations,
+    pdfFallback,
+  });
+  const exportStatus = prepared.missing.length > 0 || verifiedModel.report.artifact.status === 'partial' || receipt.status !== 'complete'
     ? 'partial'
     : 'complete';
   const latest = {
     ...latestSnapshot,
     auditId,
-    status: result.model.session.status,
+    status: verifiedModel.session.status,
     percent: 100,
     exportStatus,
     message: exportStatus === 'complete' ? 'Arquivos do relatório gerados.' : 'Relatório gerado com limitações.',
     deliveryReceipt: receipt,
   };
-  await store.commitAudit(auditId, result.model, latest);
-  return { model: result.model, latest };
+  await store.commitAudit(auditId, verifiedModel, latest);
+  return { model: verifiedModel, latest };
 }
 
 function normalizeDeliveryReceipt(value, preparedFormats) {
@@ -302,7 +337,9 @@ function safeLatest(value, auditId) {
   try { return snapshotLatest(value, auditId); } catch { return {}; }
 }
 
-function validateArtifactCorrelation({ model, html, json, csv, pdf, formats, limitations, pdfFallback, receipt, prepared }) {
+function validateArtifactCorrelation({
+  model, html, json, csv, pdf, formats, limitations, pdfFallback, receipt, prepared,
+}) {
   if (canonicalStringify(formats) !== canonicalStringify(receipt.formats)) {
     throw new TypeError('Formatos do resultado e do recibo de entrega não estão correlacionados.');
   }
@@ -384,8 +421,8 @@ function validAuditId(value) {
   return value;
 }
 
-function canonicalNow(now) {
-  const raw = typeof now === 'function' ? now() : new Date().toISOString();
+function canonicalAt(value) {
+  const raw = value ?? new Date().toISOString();
   const date = raw instanceof Date ? raw : new Date(raw);
   if (!Number.isFinite(date.getTime())) throw new TypeError('Instante de exportação inválido.');
   return date.toISOString();

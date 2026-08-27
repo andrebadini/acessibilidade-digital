@@ -61,7 +61,7 @@ async function fail(error) {
   if (auditId) {
     try {
       if (sourceModel) {
-        const persisted = await persistExportFailure({ auditId, model: sourceModel, latest: latestState, cause: error }, store);
+        const persisted = await persistExportFailure({ auditId, model: sourceModel, latest: latestState }, store);
         message = persisted.latest.message;
       } else {
         await store.setLatest({ auditId, exportStatus: 'failed', message });

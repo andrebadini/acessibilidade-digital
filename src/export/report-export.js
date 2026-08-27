@@ -1,10 +1,12 @@
 import { downloadArtifacts, buildArtifactBaseName } from '../browser/download-artifacts.js';
 import { renderPdf } from '../browser/render-pdf.js';
 import { renderOccurrenceCsv } from '../core/report/csv.js';
+import { canonicalStringify } from '../core/report/canonical-json.js';
 import { renderTechnicalJson } from '../core/report/earl-json.js';
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { renderHtmlReport } from '../core/report/html.js';
 import { createExportIssue, issueForPrintStage, PDF_GENERATION_FAILURE_CODES } from './export-issues.js';
+import { attestReportExportResult } from './export-provenance.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const PDF_COMMAND_TIMEOUT_MS = 45_000;
@@ -126,7 +128,7 @@ export async function runReportExport(request, dependencies) {
     formats: downloads.formats,
     limitations: deliveryLimitations,
   };
-  return {
+  const result = {
     model,
     html,
     json,
@@ -141,6 +143,7 @@ export async function runReportExport(request, dependencies) {
     ])],
     pdfFallback,
   };
+  return attestReportExportResult(result);
 }
 
 async function printFinalHtml(html, dependencies, timeoutMs, forceCompatible) {
@@ -387,7 +390,14 @@ function addUnique(values, value) {
 }
 
 function sanitizeReportMessages(value) {
-  const model = structuredClone(value);
+  let model;
+  try {
+    const serialized = canonicalStringify(value);
+    structuredClone(value);
+    model = JSON.parse(serialized);
+  } catch {
+    throw new TypeError('Modelo de auditoria contém propriedade não segura ou valor inválido.');
+  }
   if (Array.isArray(model?.limitations)) model.limitations = model.limitations.map(sanitizeFailureText);
   if (Array.isArray(model?.session?.diagnostics)) {
     model.session.diagnostics = model.session.diagnostics.map(entry => ({

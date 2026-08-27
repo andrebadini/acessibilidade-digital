@@ -185,7 +185,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
       await openExportPage(auditId);
       return { ok: true, auditId, state: 'queued' };
     } catch (error) {
-      await persistExportFailure({ auditId, model, latest, now }, auditStore);
+      await persistExportFailure({ auditId, model, latest, at: queueTime() }, auditStore);
       throw error;
     }
   }
@@ -194,7 +194,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
     try {
       await openExportPage(auditId);
     } catch {
-      const failed = await persistExportFailure({ auditId, model, latest: latestState, now }, auditStore);
+      const failed = await persistExportFailure({ auditId, model, latest: latestState, at: queueTime() }, auditStore);
       await sendRuntimeMessage(chromeApi, { type: 'EXPORT_FAILED', auditId, status: 'failed', error: failed.latest.message }).catch(() => {});
     }
   }
