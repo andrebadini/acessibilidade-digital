@@ -1,5 +1,7 @@
 import { sha256Hex } from '../core/report/hash.js';
 
+const ELEMENT_CONTEXT_MARGIN = 24;
+
 function dimensions(metrics = {}) {
   const size = metrics.cssContentSize || metrics.contentSize || {};
   return {
@@ -63,26 +65,40 @@ export async function captureFullPage(cdp, metrics = {}) {
   }, 'full-page', size);
 }
 
-function normalizedClip(rect, metrics) {
+function normalizedClip(rect, metrics, margin = ELEMENT_CONTEXT_MARGIN) {
   if (!rect || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(rect[key])) || rect.width <= 0 || rect.height <= 0) return null;
   const size = dimensions(metrics);
   const viewportRelative = rect.coordinateSpace === 'viewport';
   if (viewportRelative && (!Number.isFinite(metrics.scrollX) || !Number.isFinite(metrics.scrollY))) return null;
   const documentX = rect.x + (viewportRelative ? metrics.scrollX : 0);
   const documentY = rect.y + (viewportRelative ? metrics.scrollY : 0);
-  const left = Math.max(0, documentX);
-  const top = Math.max(0, documentY);
-  const right = size.width === null ? documentX + rect.width : Math.min(size.width, documentX + rect.width);
-  const bottom = size.height === null ? documentY + rect.height : Math.min(size.height, documentY + rect.height);
-  if (right <= left || bottom <= top) return null;
-  return { x: left, y: top, width: right - left, height: bottom - top, scale: 1 };
+  const targetLeft = Math.max(0, documentX);
+  const targetTop = Math.max(0, documentY);
+  const targetRight = size.width === null ? documentX + rect.width : Math.min(size.width, documentX + rect.width);
+  const targetBottom = size.height === null ? documentY + rect.height : Math.min(size.height, documentY + rect.height);
+  if (targetRight <= targetLeft || targetBottom <= targetTop) return null;
+  const clipLeft = Math.max(0, targetLeft - margin);
+  const clipTop = Math.max(0, targetTop - margin);
+  const clipRight = size.width === null ? targetRight + margin : Math.min(size.width, targetRight + margin);
+  const clipBottom = size.height === null ? targetBottom + margin : Math.min(size.height, targetBottom + margin);
+  return {
+    clip: { x: clipLeft, y: clipTop, width: clipRight - clipLeft, height: clipBottom - clipTop, scale: 1 },
+    highlightBox: {
+      x: targetLeft - clipLeft,
+      y: targetTop - clipTop,
+      width: targetRight - targetLeft,
+      height: targetBottom - targetTop,
+      coordinateSpace: 'capture-css-px',
+    },
+  };
 }
 
 export async function captureElement(cdp, rect, metrics = {}) {
-  const clip = normalizedClip(rect, metrics);
-  if (!clip) return { status: 'cantTell', reason: 'invalid-or-outside-rect', evidenceId: null, fullPageEvidenceId: metrics.fullPageEvidenceId ?? metrics.evidenceId ?? null };
+  const geometry = normalizedClip(rect, metrics);
+  if (!geometry) return { status: 'cantTell', reason: 'invalid-or-outside-rect', evidenceId: null, fullPageEvidenceId: metrics.fullPageEvidenceId ?? metrics.evidenceId ?? null };
+  const { clip, highlightBox } = geometry;
   const result = await capture(cdp, { format: 'png', captureBeyondViewport: true, fromSurface: true, clip }, 'thumbnail', {
-    width: clip.width, height: clip.height, clip
+    width: clip.width, height: clip.height, clip, highlightBox, annotationMargin: ELEMENT_CONTEXT_MARGIN,
   });
   return { ...result, fullPageEvidenceId: metrics.fullPageEvidenceId ?? metrics.evidenceId ?? null };
 }

@@ -48,8 +48,8 @@ test('converts an explicitly viewport-relative rect to document coordinates befo
   await captureElement(cdp, { x: 20, y: 500, width: 60, height: 40, coordinateSpace: 'viewport' }, {
     cssContentSize: { width: 1000, height: 2000 }, scrollX: 0, scrollY: 1000
   });
-  assert.equal(cdp.calls[0][1].clip.y, 1500);
-  assert.equal(cdp.calls[0][1].clip.x, 20);
+  assert.equal(cdp.calls[0][1].clip.y, 1476);
+  assert.equal(cdp.calls[0][1].clip.x, 0);
 });
 
 test('captures clamped element thumbnails and references the full-page evidence id', async () => {
@@ -59,10 +59,28 @@ test('captures clamped element thumbnails and references the full-page evidence 
   });
   assert.deepEqual(cdp.calls, [['Page.captureScreenshot', {
     format: 'png', captureBeyondViewport: true, fromSurface: true,
-    clip: { x: 0, y: 10, width: 40, height: 30, scale: 1 }
+    clip: { x: 0, y: 0, width: 64, height: 64, scale: 1 }
   }]]);
   assert.equal(capture.metadata.kind, 'thumbnail');
+  assert.deepEqual(capture.metadata.highlightBox, {
+    x: 0, y: 10, width: 40, height: 30,
+    coordinateSpace: 'capture-css-px',
+  });
+  assert.equal(capture.metadata.annotationMargin, 24);
   assert.equal(capture.fullPageEvidenceId, 'full-page-abc');
+});
+
+test('adds evidence context around an element and records its exact box inside the crop', async () => {
+  const cdp = fakeCdp();
+  const capture = await captureElement(cdp, { x: 200, y: 300, width: 80, height: 40 }, {
+    cssContentSize: { width: 800, height: 1000 }, fullPageEvidenceId: 'full-page-context'
+  });
+
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 176, y: 276, width: 128, height: 88, scale: 1 });
+  assert.deepEqual(capture.metadata.highlightBox, {
+    x: 24, y: 24, width: 80, height: 40,
+    coordinateSpace: 'capture-css-px',
+  });
 });
 
 test('returns explicit cantTell for empty, NaN and off-page rectangles without capturing', async () => {

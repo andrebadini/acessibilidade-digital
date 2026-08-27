@@ -502,7 +502,11 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
           evidenceId: `element-${stableHash(`${auditId}\u0000${node.nodeId}`)}`,
           kind: 'element', nodeId: node.nodeId, backendNodeId: node.backendNodeId,
           selector, snippet, accessibility,
-          ...(thumbnail?.status === 'captured' ? { dataUrl: thumbnail.dataUrl, fullPageEvidenceId: thumbnail.fullPageEvidenceId } : {}),
+          ...(thumbnail?.status === 'captured' ? {
+            dataUrl: thumbnail.dataUrl,
+            fullPageEvidenceId: thumbnail.fullPageEvidenceId,
+            metadata: thumbnail.metadata,
+          } : {}),
           ...(node.media?.currentSrc ? { mediaUrl: safeUrl(node.media.currentSrc) } : {}),
         };
         artifact.hash = await awaitStep(() => hashEvidenceArtifact(artifact));

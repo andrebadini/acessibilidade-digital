@@ -1,10 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Audita MT",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Auditoria independente de acessibilidade de páginas web.",
+  "icons": {
+    "16": "assets/icons/icon-16.png",
+    "32": "assets/icons/icon-32.png",
+    "48": "assets/icons/icon-48.png",
+    "128": "assets/icons/icon-128.png"
+  },
   "permissions": [
-    "activeTab",
     "debugger",
     "downloads",
     "scripting",
@@ -23,6 +28,12 @@
     "extension_pages": "script-src 'self'; object-src 'none'; img-src 'self' data: blob:; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'"
   },
   "action": {
-    "default_title": "Abrir Audita MT"
+    "default_title": "Abrir Audita MT",
+    "default_icon": {
+      "16": "assets/icons/icon-16.png",
+      "32": "assets/icons/icon-32.png",
+      "48": "assets/icons/icon-48.png",
+      "128": "assets/icons/icon-128.png"
+    }
   }
 }

@@ -7,15 +7,23 @@ const readWorkspaceFile = (path) => readFile(new URL(`../${path}`, import.meta.u
 test('declares a minimal MV3 extension shell without remote executable code', async () => {
   const manifest = JSON.parse(await readWorkspaceFile('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
+  assert.equal(manifest.version, '1.0.0');
   assert.equal(manifest.description, 'Auditoria independente de acessibilidade de páginas web.');
+  assert.deepEqual(manifest.icons, {
+    16: 'assets/icons/icon-16.png',
+    32: 'assets/icons/icon-32.png',
+    48: 'assets/icons/icon-48.png',
+    128: 'assets/icons/icon-128.png',
+  });
   assert.deepEqual(manifest.permissions, [
-    'activeTab', 'debugger', 'downloads', 'scripting', 'storage', 'tabs',
+    'debugger', 'downloads', 'scripting', 'storage', 'tabs',
   ]);
   assert.deepEqual(manifest.host_permissions, ['http://*/*', 'https://*/*']);
   assert.deepEqual(manifest.background, {
     service_worker: 'src/background/service-worker.js',
     type: 'module',
   });
+  assert.deepEqual(manifest.action.default_icon, manifest.icons);
   assert.equal(manifest.action.default_popup, undefined);
   assert.equal(manifest.content_security_policy.extension_pages,
     "script-src 'self'; object-src 'none'; img-src 'self' data: blob:; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'");

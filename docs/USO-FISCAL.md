@@ -18,11 +18,19 @@ O modelo e os arquivos registram o estado conhecido quando os artefatos são pre
 
 Os hashes SHA-256 ajudam a comparar bytes e manifestos, mas não são assinatura digital, carimbo de tempo certificado ou ata notarial. Os horários dependem do dispositivo.
 
+## Destaques automáticos nas capturas
+
+Cada ocorrência apresentada no HTML e no PDF inclui uma prévia marcada quando existe evidência visual. A moldura vermelha, acompanhada do texto “não conformidade detectada ou confirmada”, identifica falhas. A moldura âmbar, acompanhada do texto “depende de revisão humana”, identifica itens que ainda exigem julgamento. Quando não há alvo elementar confiável, a moldura delimita a evidência da página inteira e o relatório informa essa limitação.
+
+A marcação é uma camada de apresentação do relatório. O PNG original, sem sobreposição, permanece na seção de evidências originais com seu hash. Essa separação permite comparar a imagem-fonte com a versão destacada sem alterar a evidência coletada.
+
 ## Privacidade e permissões
 
 O processamento local não transmite o conteúdo coletado. URLs sensíveis são saneadas antes do armazenamento e da apresentação. Evidências grandes ficam no IndexedDB; Blob URLs temporárias são usadas somente durante impressão e download e depois revogadas.
 
-As permissões `debugger`, `downloads`, `tabs`, `scripting`, `activeTab` e `storage` são necessárias para coleta, impressão, download e persistência local. Instale como extensão não empacotada com **Carregar sem compactação** apenas em ambiente controlado e remova quando não for mais necessária.
+As permissões `debugger`, `downloads`, `tabs`, `scripting` e `storage`, além do acesso às páginas HTTP e HTTPS indicadas pelo usuário, são necessárias para coleta, impressão, download e persistência local.
+
+Para uso público, instale pela Chrome Web Store e fixe o ícone do Audita MT na barra do Chrome. A instalação sem compactação, por **Carregar sem compactação**, é reservada a desenvolvimento e testes controlados.
 
 ## Limitações operacionais
 

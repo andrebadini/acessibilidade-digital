@@ -245,6 +245,10 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
     assert.match(model.reproducibility[key], /^[a-f0-9]{64}$/u, key);
   }
   assert.equal(model.evidence.artifacts.filter(item => item.nodeId === 'n-1').length, 1);
+  assert.deepEqual(model.evidence.artifacts.find(item => item.nodeId === 'n-1').metadata.highlightBox, {
+    x: 10, y: 20, width: 80, height: 30,
+    coordinateSpace: 'capture-css-px',
+  });
   assert.ok(model.occurrences.length > 0);
   for (const occurrence of model.occurrences) {
     assert.ok(['failed', 'cantTell'].includes(occurrence.outcome));

@@ -30,6 +30,10 @@ code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#
 code{padding:.1rem .25rem}pre{padding:.75rem;white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto}
 details{margin-top:.75rem}summary{cursor:pointer;font-weight:700;color:#003b71;padding:.3rem}
 .evidence-media{display:block;max-width:100%;height:auto;border:1px solid #687887;background:#eef1f4;margin-top:.75rem}
+.evidence-annotation-note{border-left:.4rem solid #005a9c;background:#eef5fb;padding:1rem}
+.occurrence-evidence{margin:1rem 0 0}.evidence-highlight-frame{position:relative;display:inline-block;max-width:100%;line-height:0;background:#eef1f4}.evidence-highlight-frame .evidence-media{margin:0}
+.evidence-highlight{position:absolute;box-sizing:border-box;left:var(--highlight-left);top:var(--highlight-top);width:var(--highlight-width);height:var(--highlight-height);border:.5rem solid;pointer-events:none;print-color-adjust:exact;-webkit-print-color-adjust:exact}
+.evidence-highlight--failed{border-color:#d00000;box-shadow:0 0 0 2px #fff,0 0 0 4px #650000}.evidence-highlight--review{border-color:#d97706;box-shadow:0 0 0 2px #fff,0 0 0 4px #5c2d00}
 table{width:100%;border-collapse:collapse}th,td{border:1px solid #788896;padding:.5rem;text-align:left;vertical-align:top}th{background:#e4eef7;color:#162330}
 .report-footer{margin-top:3rem;font-size:.9rem}.report-footer p{max-width:72rem;margin:.25rem auto}
 @page{size:A4;margin:18mm 15mm 20mm}

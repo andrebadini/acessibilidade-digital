@@ -33,18 +33,37 @@ test('renders all report sections, 146 items, occurrences and evidence records',
   assert.match(html, /SHA-256/u);
 });
 
-test('embeds only valid PNG evidence with useful alt and self-contained A4 CSS', () => {
+test('embeds occurrence-specific marked screenshots and raw evidence with useful alt and self-contained A4 CSS', () => {
   const html = renderHtmlReport(SAMPLE_AUDIT);
   const images = [...html.matchAll(/<img\b[^>]*>/gu)].map(match => match[0]);
-  assert.equal(images.length, 2);
+  assert.equal(images.length, 5);
   for (const image of images) {
     assert.match(image, /src="data:image\/png;base64,[A-Za-z0-9+/=]+"/u);
     assert.match(image, /alt="[^"]+"/u);
     assert.doesNotMatch(image, /alt=""/u);
   }
+  assert.match(html, /class="evidence-highlight evidence-highlight--failed"/u);
+  assert.match(html, /Moldura vermelha[^<]*não conformidade/iu);
+  assert.match(html, /class="evidence-highlight evidence-highlight--review"/u);
+  assert.match(html, /Moldura âmbar[^<]*revisão humana/iu);
+  assert.match(html, /anotação visual[^.]*PNG original[^.]*hash/iu);
   assert.match(html, /<style>[^]*@page\s*\{[^}]*size:\s*A4/iu);
   assert.match(html, /thead\s*\{[^}]*display:\s*table-header-group/iu);
   assert.doesNotMatch(html, /<script\b|<link\b|@import|url\(\s*["']?https?:|<(?:img|source)[^>]+src=["']https?:/iu);
+});
+
+test('positions the automatic highlight from capture metadata without using color alone', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.evidence.artifacts[1].metadata = {
+    width: 128, height: 88,
+    highlightBox: { x: 24, y: 24, width: 80, height: 40, coordinateSpace: 'capture-css-px' },
+  };
+
+  const html = renderHtmlReport(createAuditModel(input));
+  assert.match(html, /--highlight-left:18\.75%;--highlight-top:27\.272727%;--highlight-width:62\.5%;--highlight-height:45\.454545%/u);
+  assert.match(html, /aria-hidden="true"/u);
+  assert.match(html, /Moldura vermelha[^<]*não conformidade/iu);
+  assert.match(html, /Moldura âmbar[^<]*revisão humana/iu);
 });
 
 test('keeps normative tables semantic and bounded by narrow report viewports', () => {
@@ -68,7 +87,7 @@ test('escapes hostile audited strings in text, attributes, code, URLs and media'
   assert.doesNotMatch(html, /<script\b|<img\s+src=x|\s(?:onerror|onload)=["'][^>]*>|(?:src|href)=["']javascript:|>javascript:/iu);
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/u);
   assert.match(html, /&lt;button aria-label=&quot;/u);
-  assert.equal((html.match(/<img\b[^>]*>/gu) || []).length, 1);
+  assert.equal((html.match(/<img\b[^>]*>/gu) || []).length, 4);
   const forgedTitle = structuredClone(SAMPLE_AUDIT);
   forgedTitle.itemResults[0].title = `Título ${hostile}`;
   assert.throws(() => renderHtmlReport(forgedTitle), /normativ|title|item/i);

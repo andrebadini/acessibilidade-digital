@@ -80,15 +80,56 @@ function items(model) {
 }
 
 function occurrences(model, itemById, artifactById) {
-  return `<section class="major-section" aria-labelledby="ocorrencias"><h2 id="ocorrencias">Ocorrências e evidências</h2><div class="occurrence-list">${model.occurrences.map((occurrence, index) => {
+  return `<section class="major-section" aria-labelledby="ocorrencias"><h2 id="ocorrencias">Ocorrências e evidências</h2><p class="evidence-annotation-note"><strong>Marcação automática:</strong> a moldura é uma anotação visual aplicada no relatório; o PNG original permanece preservado e o respectivo hash continua verificável na seção de evidências.</p><div class="occurrence-list">${model.occurrences.map((occurrence, index) => {
     const item = itemById.get(occurrence.itemId);
     const selectors = occurrence.evidenceIds.map(id => artifactById.get(id)?.selector?.css).filter(Boolean);
-    return `<article class="occurrence-card" aria-labelledby="ocorrencia-${index}"><h3 id="ocorrencia-${index}">${escapeHtml(occurrence.occurrenceId)}</h3>${statusMarkup(occurrence.outcome)}<dl class="meta"><dt>Item ABNT</dt><dd>${escapeHtml(occurrence.itemId)} — ${escapeHtml(item?.title || '')}</dd><dt>Regra</dt><dd>${escapeHtml(occurrence.ruleId || 'revisão no nível da página')}</dd><dt>Modo</dt><dd>${modeLabel(occurrence.mode)}</dd><dt>Razão</dt><dd>${escapeHtml(occurrence.justification)}</dd><dt>Seletor</dt><dd>${selectors.length ? selectors.map(selector => `<code>${escapeHtml(selector)}</code>`).join(' ') : 'Página inteira ou seletor indisponível'}</dd><dt>Evidências</dt><dd>${occurrence.evidenceIds.map(id => `<code>${escapeHtml(id)}</code>`).join(' ') || 'Sem arquivo; consulte a limitação registrada.'}</dd></dl></article>`;
+    return `<article class="occurrence-card" aria-labelledby="ocorrencia-${index}"><h3 id="ocorrencia-${index}">${escapeHtml(occurrence.occurrenceId)}</h3>${statusMarkup(occurrence.outcome)}<dl class="meta"><dt>Item ABNT</dt><dd>${escapeHtml(occurrence.itemId)} — ${escapeHtml(item?.title || '')}</dd><dt>Regra</dt><dd>${escapeHtml(occurrence.ruleId || 'revisão no nível da página')}</dd><dt>Modo</dt><dd>${modeLabel(occurrence.mode)}</dd><dt>Razão</dt><dd>${escapeHtml(occurrence.justification)}</dd><dt>Seletor</dt><dd>${selectors.length ? selectors.map(selector => `<code>${escapeHtml(selector)}</code>`).join(' ') : 'Página inteira ou seletor indisponível'}</dd><dt>Evidências</dt><dd>${occurrence.evidenceIds.map(id => `<code>${escapeHtml(id)}</code>`).join(' ') || 'Sem arquivo; consulte a limitação registrada.'}</dd></dl>${occurrenceEvidence(occurrence, artifactById)}</article>`;
   }).join('')}</div></section>`;
 }
 
 function evidence(model) {
-  return `<section class="major-section" aria-labelledby="evidencias"><h2 id="evidencias">Evidências</h2><div class="evidence-list">${model.evidence.artifacts.map((artifact, index) => `<article class="evidence-card" aria-labelledby="evidencia-${index}"><h3 id="evidencia-${index}">${escapeHtml(artifact.evidenceId)}</h3><dl class="meta"><dt>Tipo</dt><dd>${escapeHtml(artifact.kind)}</dd><dt>Hash</dt><dd><code>${escapeHtml(artifact.hash || 'não disponível')}</code></dd>${artifact.backendNodeId ? `<dt>Backend node</dt><dd>${escapeHtml(artifact.backendNodeId)}</dd>` : ''}${artifact.mediaUrl ? `<dt>URL da mídia</dt><dd>${safeMediaText(artifact.mediaUrl)}</dd>` : ''}</dl>${artifact.snippet ? `<details open><summary>Trecho HTML sanitizado</summary><pre><code>${escapeHtml(artifact.snippet)}</code></pre></details>` : ''}${accessibility(artifact.accessibility)}${isPngDataUrl(artifact.dataUrl) ? `<figure><img class="evidence-media" src="${escapeHtml(artifact.dataUrl)}" alt="${evidenceAlt(artifact)}"><figcaption>${artifact.kind === 'full-page' ? 'Captura integral do estado original observado.' : `Captura do elemento ${escapeHtml(artifact.nodeId || '')}.`}</figcaption></figure>` : '<p>Imagem não incluída: formato ausente ou não permitido.</p>'}</article>`).join('')}</div></section>`;
+  return `<section class="major-section" aria-labelledby="evidencias"><h2 id="evidencias">Evidências originais</h2><p>As imagens desta seção são os PNGs originais, sem a camada de anotação visual apresentada nas ocorrências.</p><div class="evidence-list">${model.evidence.artifacts.map((artifact, index) => `<article class="evidence-card" aria-labelledby="evidencia-${index}"><h3 id="evidencia-${index}">${escapeHtml(artifact.evidenceId)}</h3><dl class="meta"><dt>Tipo</dt><dd>${escapeHtml(artifact.kind)}</dd><dt>Hash</dt><dd><code>${escapeHtml(artifact.hash || 'não disponível')}</code></dd>${artifact.backendNodeId ? `<dt>Backend node</dt><dd>${escapeHtml(artifact.backendNodeId)}</dd>` : ''}${artifact.mediaUrl ? `<dt>URL da mídia</dt><dd>${safeMediaText(artifact.mediaUrl)}</dd>` : ''}</dl>${artifact.snippet ? `<details open><summary>Trecho HTML sanitizado</summary><pre><code>${escapeHtml(artifact.snippet)}</code></pre></details>` : ''}${accessibility(artifact.accessibility)}${isPngDataUrl(artifact.dataUrl) ? `<figure><img class="evidence-media" src="${escapeHtml(artifact.dataUrl)}" alt="${evidenceAlt(artifact)}"><figcaption>${artifact.kind === 'full-page' ? 'PNG original da captura integral do estado observado.' : `PNG original da captura do elemento ${escapeHtml(artifact.nodeId || '')}.`}</figcaption></figure>` : '<p>Imagem não incluída: formato ausente ou não permitido.</p>'}</article>`).join('')}</div></section>`;
+}
+
+function occurrenceEvidence(occurrence, artifactById) {
+  const artifacts = occurrence.evidenceIds.map(id => artifactById.get(id)).filter(Boolean);
+  const artifact = artifacts.find(value => value.kind === 'element' && isPngDataUrl(value.dataUrl))
+    || artifacts.find(value => value.kind === 'full-page' && isPngDataUrl(value.dataUrl));
+  if (!artifact) return '<p>Captura marcada indisponível; consulte a limitação e os demais registros da ocorrência.</p>';
+  const failed = occurrence.outcome === 'failed';
+  const tone = failed ? 'failed' : 'review';
+  const frame = highlightStyle(artifact);
+  const legend = failed
+    ? 'Moldura vermelha: não conformidade detectada ou confirmada.'
+    : 'Moldura âmbar: elemento ou página que depende de revisão humana.';
+  const subject = artifact.kind === 'element' ? `elemento ${artifact.nodeId || 'auditado'}` : 'página auditada';
+  return `<figure class="occurrence-evidence"><div class="evidence-highlight-frame"><img class="evidence-media" src="${escapeHtml(artifact.dataUrl)}" alt="Captura do ${escapeHtml(subject)}; ${escapeHtml(legend)}"><span class="evidence-highlight evidence-highlight--${tone}" style="${frame}" aria-hidden="true"></span></div><figcaption><strong>${escapeHtml(legend)}</strong> ${artifact.kind === 'full-page' ? 'Não foi identificado um alvo elementar; a moldura delimita a evidência no nível da página.' : 'A caixa acompanha automaticamente as coordenadas do alvo dentro do recorte.'}</figcaption></figure>`;
+}
+
+function highlightStyle(artifact) {
+  const width = finitePositive(artifact.metadata?.width);
+  const height = finitePositive(artifact.metadata?.height);
+  const box = artifact.metadata?.highlightBox;
+  if (!width || !height || !box || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(box[key]))) {
+    return '--highlight-left:0%;--highlight-top:0%;--highlight-width:100%;--highlight-height:100%';
+  }
+  const left = clamp(box.x, 0, width);
+  const top = clamp(box.y, 0, height);
+  const right = clamp(box.x + Math.max(0, box.width), left, width);
+  const bottom = clamp(box.y + Math.max(0, box.height), top, height);
+  return `--highlight-left:${percent(left, width)}%;--highlight-top:${percent(top, height)}%;--highlight-width:${percent(right - left, width)}%;--highlight-height:${percent(bottom - top, height)}%`;
+}
+
+function finitePositive(value) {
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function clamp(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function percent(value, total) {
+  return String(Number(((value / total) * 100).toFixed(6)));
 }
 
 function accessibility(value) {
