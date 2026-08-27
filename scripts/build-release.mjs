@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(await readFile(join(root, 'manifest.json'), 'utf8'));
 const output = join(root, 'release', `audita-acessibilidade-${manifest.version}.zip`);
+const releaseDirectory = dirname(output);
 const staging = await mkdtemp(join(tmpdir(), 'audita-mt-release-'));
 const releaseTimestamp = new Date('2026-08-27T00:00:00.000Z');
 
@@ -21,8 +22,12 @@ try {
   const discovered = await runtimeFiles(staging);
   const files = ['manifest.json', ...discovered.filter(path => path !== 'manifest.json')];
   for (const path of files) await utimes(join(staging, path), releaseTimestamp, releaseTimestamp);
-  await mkdir(dirname(output), { recursive: true });
-  await rm(output, { force: true });
+  await mkdir(releaseDirectory, { recursive: true });
+  for (const entry of await readdir(releaseDirectory, { withFileTypes: true })) {
+    if (entry.isFile() && /^audita-(?:acessibilidade|mt)-\d+\.\d+\.\d+\.zip$/u.test(entry.name)) {
+      await rm(join(releaseDirectory, entry.name), { force: true });
+    }
+  }
   const zip = spawnSync('zip', ['-X', '-q', output, ...files], {
     cwd: staging, encoding: 'utf8', env: { ...process.env, TZ: 'UTC' },
   });

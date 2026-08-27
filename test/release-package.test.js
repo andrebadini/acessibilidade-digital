@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
@@ -20,6 +20,10 @@ async function digest() {
 
 test('builds the public ZIP reproducibly with only runtime files and manifest at root', async () => {
   build();
+  assert.deepEqual(
+    (await readdir(new URL('../release/', import.meta.url))).filter(name => name.endsWith('.zip')).sort(),
+    ['audita-acessibilidade-1.0.1.zip'],
+  );
   const first = await digest();
   await new Promise(resolve => setTimeout(resolve, 2_100));
   build();
