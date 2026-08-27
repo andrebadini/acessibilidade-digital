@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Fixture local — falhas observáveis</title>
+  <style>
+    body{font-family:system-ui,sans-serif;color:#222;background:#fff}
+    .low-contrast{color:#aaa;background:#fff}
+    .small-target{display:inline-block;width:20px;height:20px;padding:0}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Falhas observáveis</h1>
+    <img data-expected-rule="content-image-alternative" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
+    <button data-expected-rule="accessible-component-name"></button>
+    <h3 data-expected-rule="heading-order">Subtítulo que salta o nível dois</h3>
+    <input data-expected-rule="form-field-label" type="text" name="consulta">
+    <p class="low-contrast" data-expected-rule="text-contrast-minimum">Texto cinza-claro em fundo branco.</p>
+    <button class="small-target" data-expected-rule="target-size-minimum" aria-label="Alvo pequeno">+</button>
+    <iframe data-expected-rule="frame-title" srcdoc="<!doctype html><html lang='pt-BR'><body>Frame local sem título</body></html>"></iframe>
+    <audio data-expected-rule="audio-control" autoplay src="data:audio/wav;base64,UklGRg=="></audio>
+  </main>
+</body>
+</html>

@@ -32,7 +32,7 @@ export async function renderPdf(cdp) {
 
 function isUnsupportedAccessibilityParameter(error) {
   const message = String(error?.message ?? error);
-  return /(?:invalid|unknown|unexpected|unsupported)\s+(?:parameter|parameters|param)|generateTaggedPDF|generateDocumentOutline/iu.test(message);
+  return /(?:invalid|unknown|unexpected|unsupported)[^\n]*(?:parameter|generateTaggedPDF|generateDocumentOutline)|(?:generateTaggedPDF|generateDocumentOutline)[^\n]*(?:invalid|unknown|unexpected|unsupported)/iu.test(message);
 }
 
 function decodePdf(value) {

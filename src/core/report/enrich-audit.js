@@ -16,7 +16,7 @@ export async function enrichAuditForReport(input, options = {}) {
   const endedAt = raw.timestamps?.endedAt ?? generatedAt;
   if (!raw.timestamps?.endedAt) limitations.push('O instante de término da auditoria não estava disponível; o instante de geração foi usado somente para fechar o registro temporal do relatório.');
   const rulesVersion = cleanVersion(options.rulesVersion ?? raw.methodology?.version, 'rulesVersion');
-  const browserVersion = cleanVersion(options.browserVersion ?? raw.environment?.chromeVersion ?? 'não disponível', 'browserVersion');
+  const browserVersion = cleanVersion(options.browserVersion || raw.environment?.chromeVersion || 'não disponível', 'browserVersion');
   const evidenceManifest = (raw.evidence?.artifacts ?? []).map(artifact => ({
     evidenceId: artifact.evidenceId,
     kind: artifact.kind,

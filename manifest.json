@@ -20,7 +20,7 @@
     "type": "module"
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'none'; img-src 'self' data: blob:; style-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'"
+    "extension_pages": "script-src 'self'; object-src 'none'; img-src 'self' data: blob:; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'"
   },
   "action": {
     "default_title": "Abrir Audita MT"

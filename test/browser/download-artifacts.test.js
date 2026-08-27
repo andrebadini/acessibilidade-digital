@@ -62,3 +62,18 @@ test('contains interrupted and timed-out downloads, revokes URLs, and continues 
   assert.equal(revoked.length, 3);
   assert.equal(result.limitations.length, 2);
 });
+
+test('continues later formats when starting one download rejects', async () => {
+  let started = 0;
+  const revoked = [];
+  const adapter = {
+    createObjectURL() { return `blob:chrome-extension://test/${started}`; },
+    revokeObjectURL(url) { revoked.push(url); },
+    async download() { started += 1; if (started === 1) throw new Error('downloads denied'); return started; },
+    async waitForDownload(id) { return { id, state: 'complete' }; },
+  };
+  const result = await downloadArtifacts({ baseName: 'audit', html: '<!doctype html>', json: '{}', pdf: new TextEncoder().encode('%PDF-1.7') }, adapter);
+  assert.deepEqual(result.formats.map(item => item.status), ['interrupted', 'complete', 'complete']);
+  assert.equal(Object.hasOwn(result.formats[0], 'downloadId'), false);
+  assert.equal(revoked.length, 3);
+});

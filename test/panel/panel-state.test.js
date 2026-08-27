@@ -47,3 +47,15 @@ test('ignores every progress event after a terminal state', () => {
     assert.deepEqual(reducePanelState(terminal, { type: 'AUDIT_PROGRESS', auditId: 'a-1', percent: 100, message: 'Atrasado' }), terminal);
   }
 });
+
+test('tracks export progress without regressing the terminal audit result', () => {
+  const audited = { auditId: 'a-1', status: 'partial', percent: 100, message: 'Auditoria concluída com limitações.', exportStatus: 'queued' };
+  const exporting = reducePanelState(audited, { type: 'EXPORT_PROGRESS', auditId: 'a-1', status: 'running', message: 'Gerando arquivos.' });
+  assert.equal(exporting.status, 'partial');
+  assert.equal(exporting.percent, 100);
+  assert.equal(exporting.exportStatus, 'running');
+  const complete = reducePanelState(exporting, { type: 'EXPORT_COMPLETE', auditId: 'a-1', status: 'complete', formats: ['html', 'json', 'pdf'] });
+  assert.equal(complete.status, 'partial');
+  assert.equal(complete.exportStatus, 'complete');
+  assert.match(complete.message, /relatório|arquivos/iu);
+});

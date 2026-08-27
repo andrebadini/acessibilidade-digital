@@ -11,6 +11,7 @@ test('review page is local, keyboard-friendly and has one live status and one h1
   assert.match(html, /aria-live="polite"/i);
   assert.match(html, /id="review-list"/i);
   assert.match(html, /id="review-evaluator"/i);
+  assert.match(html, /id="regenerate-report"/i);
   assert.doesNotMatch(html, /<script(?![^>]+src=)|<style\b|\sstyle=/i);
   assert.doesNotMatch(html, /(?:src|href)="https?:\/\//i);
 });
@@ -23,5 +24,6 @@ test('review script renders snippets inertly, offers exactly three answers and n
   assert.doesNotMatch(source, /innerHTML/);
   for (const answer of ['conforme', 'não conforme', 'não foi possível determinar']) assert.match(source, new RegExp(answer, 'u'));
   assert.match(source, /Pular revisão/);
+  assert.match(source, /REQUEST_EXPORT/);
   assert.doesNotMatch(source, /\.checked\s*=\s*true|\.click\(\)/);
 });

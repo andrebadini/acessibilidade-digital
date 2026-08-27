@@ -34,12 +34,19 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
     const sha256 = await sha256Hex(bytes);
     const blobUrl = adapter.createObjectURL(new Blob([bytes], { type: MIME[format] }));
     try {
-      const downloadId = await adapter.download({
-        url: blobUrl,
-        filename,
-        conflictAction: 'uniquify',
-        saveAs: false,
-      });
+      let downloadId;
+      try {
+        downloadId = await adapter.download({
+          url: blobUrl,
+          filename,
+          conflictAction: 'uniquify',
+          saveAs: false,
+        });
+      } catch {
+        formats.push({ format, filename, mimeType: MIME[format], status: 'interrupted', sha256 });
+        limitations.push(`O artefato ${format.toUpperCase()} não pôde iniciar o download.`);
+        continue;
+      }
       if (!Number.isSafeInteger(downloadId) || downloadId < 0) throw new TypeError('ID de download inválido.');
       try {
         const terminal = await adapter.waitForDownload(downloadId, { timeoutMs });

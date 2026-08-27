@@ -40,6 +40,9 @@ test('does not retry unrelated failures and rejects malformed PDF payloads', asy
   let calls = 0;
   await assert.rejects(renderPdf({ async command() { calls += 1; throw new Error('Target closed'); } }), /Target closed/);
   assert.equal(calls, 1);
+  calls = 0;
+  await assert.rejects(renderPdf({ async command() { calls += 1; throw new Error('Target closed while generateTaggedPDF was active'); } }), /Target closed/);
+  assert.equal(calls, 1);
   await assert.rejects(renderPdf({ async command() { return { data: Buffer.from('not pdf').toString('base64') }; } }), /PDF|assinatura/i);
   await assert.rejects(renderPdf({ async command() { return { data: '***' }; } }), /base64|PDF/i);
 });

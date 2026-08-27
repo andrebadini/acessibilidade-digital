@@ -22,22 +22,23 @@ export async function runReportExport(request, dependencies) {
   let tabId = null;
   let cdp = null;
   try {
-    const tab = await dependencies.tabAdapter.createPrintTab({ url: printUrl, active: false });
+    const tab = await boundary(dependencies.tabAdapter.createPrintTab({ url: printUrl, active: false }), timeoutMs, 'A criação da aba de impressão excedeu o tempo limite.');
     if (!Number.isSafeInteger(tab?.id)) throw new TypeError('A aba de impressão não forneceu ID válido.');
     tabId = tab.id;
-    await dependencies.tabAdapter.waitForReady(tabId, { timeoutMs });
-    cdp = await dependencies.tabAdapter.connectCdp(tabId, { commandTimeoutMs: PDF_COMMAND_TIMEOUT_MS });
-    printResult = await (dependencies.pdfRenderer ?? renderPdf)(cdp);
+    await boundary(dependencies.tabAdapter.waitForReady(tabId, { timeoutMs }), timeoutMs, 'A preparação da aba de impressão excedeu o tempo limite.');
+    cdp = await boundary(dependencies.tabAdapter.connectCdp(tabId, { commandTimeoutMs: PDF_COMMAND_TIMEOUT_MS }), timeoutMs, 'A conexão de impressão excedeu o tempo limite.');
+    await boundary(dependencies.tabAdapter.waitForAssets(cdp, { timeoutMs }), timeoutMs, 'A preparação de fontes e imagens excedeu o tempo limite.');
+    printResult = await boundary((dependencies.pdfRenderer ?? renderPdf)(cdp), Math.max(timeoutMs, PDF_COMMAND_TIMEOUT_MS + 5_000), 'A impressão do PDF excedeu o tempo limite.');
     pdf = printResult.bytes;
     exportLimitations.push(...(printResult.limitations ?? []));
   } catch (error) {
     exportLimitations.push(`O PDF não foi gerado: ${safeErrorMessage(error)}.`);
   } finally {
     if (cdp) {
-      try { await cdp.disconnect(); } catch (error) { exportLimitations.push(`A conexão de impressão exigiu limpeza adicional: ${safeErrorMessage(error)}.`); }
+      try { await boundary(cdp.disconnect(), timeoutMs, 'A desconexão de impressão excedeu o tempo limite.'); } catch (error) { exportLimitations.push(`A conexão de impressão exigiu limpeza adicional: ${safeErrorMessage(error)}.`); }
     }
     if (tabId !== null) {
-      try { await dependencies.tabAdapter.removeTab(tabId); } catch (error) { exportLimitations.push(`A aba temporária de impressão já não estava disponível: ${safeErrorMessage(error)}.`); }
+      try { await boundary(dependencies.tabAdapter.removeTab(tabId), timeoutMs, 'A remoção da aba de impressão excedeu o tempo limite.'); } catch (error) { exportLimitations.push(`A aba temporária de impressão já não estava disponível: ${safeErrorMessage(error)}.`); }
     }
     dependencies.urlApi.revokeObjectURL(printUrl);
   }
@@ -101,8 +102,16 @@ function validateDependencies(dependencies) {
   if (!dependencies?.urlApi || typeof dependencies.urlApi.createObjectURL !== 'function' || typeof dependencies.urlApi.revokeObjectURL !== 'function') {
     throw new TypeError('API de Blob URL indisponível.');
   }
-  for (const method of ['createPrintTab', 'waitForReady', 'connectCdp', 'removeTab']) {
+  for (const method of ['createPrintTab', 'waitForReady', 'connectCdp', 'waitForAssets', 'removeTab']) {
     if (typeof dependencies.tabAdapter?.[method] !== 'function') throw new TypeError(`Adaptador de aba sem ${method}.`);
   }
   if (!dependencies.downloadsAdapter) throw new TypeError('Adaptador de downloads indisponível.');
+}
+
+function boundary(promise, timeoutMs, message) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new DOMException(message, 'TimeoutError')), timeoutMs); }),
+  ]).finally(() => clearTimeout(timer));
 }

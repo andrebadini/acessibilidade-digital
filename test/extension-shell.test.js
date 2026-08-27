@@ -17,7 +17,7 @@ test('declares a minimal MV3 extension shell without remote executable code', as
   });
   assert.equal(manifest.action.default_popup, undefined);
   assert.equal(manifest.content_security_policy.extension_pages,
-    "script-src 'self'; object-src 'none'; img-src 'self' data: blob:; style-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'");
+    "script-src 'self'; object-src 'none'; img-src 'self' data: blob:; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'");
 });
 
 test('panel is an accessible local document with no inline code', async () => {

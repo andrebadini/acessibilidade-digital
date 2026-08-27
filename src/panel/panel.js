@@ -76,7 +76,7 @@ form.addEventListener('submit', (event) => {
 });
 
 chrome.runtime.onMessage.addListener((message) => {
-  if (!message || typeof message !== 'object' || !isMessageForAudit(message, activeAuditId)) return;
+  if (!message || typeof message !== 'object' || !isMessageForAudit(message, activeAuditId ?? panelState?.auditId)) return;
   panelState = reducePanelState(panelState, message, chrome.runtime.getURL('/'));
   setStatus(panelState.message);
   if (message.type === 'AUDIT_PROGRESS') return;
@@ -104,6 +104,7 @@ function restoreLatest() {
         percent: Number.isFinite(saved.percent) ? saved.percent : 0,
         message: saved.message || 'Auditoria em andamento.',
         reviewUrl: isSafeReportUrl(saved.reviewUrl, chrome.runtime.getURL('/')) ? saved.reviewUrl : null,
+        exportStatus: saved.exportStatus || 'unavailable',
       };
       setStatus(panelState.message);
       if (['running', 'idle'].includes(panelState.status)) {

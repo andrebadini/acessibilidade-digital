@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createSessionStore, isAuthorizedPanelSender, registerServiceWorker } from '../../src/background/service-worker.js';
+import { createSessionStore, isAuthorizedExtensionSender, isAuthorizedPanelSender, registerServiceWorker } from '../../src/background/service-worker.js';
 
 const createChrome = () => {
   const action = {};
@@ -62,6 +62,18 @@ test('authorizes only this extension panel origin and exact path', () => {
   assert.equal(isAuthorizedPanelSender({ id: 'test', url: 'chrome-extension://test/src/other.html' }, 'test'), false);
   assert.equal(isAuthorizedPanelSender({ id: 'test', url: 'https://example.test/src/panel/index.html' }, 'test'), false);
   assert.equal(isAuthorizedPanelSender({ id: 'other', url: 'chrome-extension://test/src/panel/index.html' }, 'test'), false);
+});
+
+test('authorizes exact panel, review and correlated export pages but never audited web pages', () => {
+  for (const path of ['/src/panel/index.html', '/src/review/index.html?auditId=audit-1', '/src/export/index.html?auditId=audit-1']) {
+    assert.equal(isAuthorizedExtensionSender({ id: 'test', url: `chrome-extension://test${path}` }, 'test'), true);
+  }
+  for (const url of [
+    'https://example.test/src/review/index.html?auditId=audit-1',
+    'chrome-extension://test/src/review/index.html?auditId=../escape',
+    'chrome-extension://test/src/export/index.html?auditId=audit-1&extra=x',
+    'chrome-extension://other/src/export/index.html?auditId=audit-1',
+  ]) assert.equal(isAuthorizedExtensionSender({ id: 'test', url }, 'test'), false);
 });
 
 test('persists sessions with storage.session and falls back to an injected map', async () => {
@@ -128,6 +140,42 @@ test('runs the audit in background, persists the model and sends correlated prog
   assert.ok(chromeApi.runtime.sent.some(message => message.type === 'AUDIT_PROGRESS' && message.auditId === 'audit-1'));
   assert.ok(chromeApi.runtime.sent.some(message => message.type === 'AUDIT_COMPLETE' && message.auditId === 'audit-1'));
   assert.ok(writes.some(([kind, id]) => kind === 'commit' && id === 'audit-1'));
+  assert.ok(chromeApi.createdTabs.some(tab => tab.active === false && tab.url === 'chrome-extension://test/src/export/index.html?auditId=audit-1'));
+});
+
+test('regenerates only a known audit from review and deduplicates persisted queued export state', async () => {
+  const chromeApi = createChrome();
+  let latest = { auditId: 'audit-1', status: 'partial', exportStatus: 'complete' };
+  const auditStore = {
+    async getAudit(id) { return id === 'audit-1' ? { auditId: id } : undefined; },
+    async getLatest() { return latest; },
+    async setLatest(value) { latest = value; },
+  };
+  registerServiceWorker(chromeApi, { auditStore });
+  const sender = { id: 'test', url: 'chrome-extension://test/src/review/index.html?auditId=audit-1' };
+  let first;
+  chromeApi.listeners.message.listener({ type: 'REQUEST_EXPORT', auditId: 'audit-1' }, sender, value => { first = value; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(first, { ok: true, auditId: 'audit-1', state: 'queued' });
+  assert.equal(latest.exportStatus, 'queued');
+  assert.ok(chromeApi.createdTabs.some(tab => tab.url.endsWith('/src/export/index.html?auditId=audit-1') && tab.active === false));
+  let duplicate;
+  chromeApi.listeners.message.listener({ type: 'REQUEST_EXPORT', auditId: 'audit-1' }, sender, value => { duplicate = value; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(duplicate, { ok: true, auditId: 'audit-1', state: 'queued', duplicate: true });
+});
+
+test('rejects export requests from an audited web page', () => {
+  const chromeApi = createChrome();
+  registerServiceWorker(chromeApi, { auditStore: {} });
+  let response;
+  const keepOpen = chromeApi.listeners.message.listener(
+    { type: 'REQUEST_EXPORT', auditId: 'audit-1' },
+    { id: 'test', url: 'https://example.test/' },
+    value => { response = value; },
+  );
+  assert.equal(keepOpen, true);
+  assert.deepEqual(response, { ok: false, error: 'Origem da mensagem não autorizada.' });
 });
 
 test('deduplicates concurrent START_AUDIT messages from the same panel sender', () => {
@@ -185,6 +233,27 @@ test('notification failure after atomic commit never rewrites committed complete
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(writes.filter(([kind]) => kind === 'commit').length, 1);
   assert.equal(writes.some(([kind, value]) => kind === 'latest' && value.status === 'failed'), false);
+});
+
+test('automatic export tab failure preserves the committed audit and reports only export failure', async () => {
+  const chromeApi = createChrome();
+  chromeApi.tabs.create = async options => {
+    if (options.url.includes('/src/export/')) throw new Error('tab denied');
+    chromeApi.createdTabs.push(options);
+  };
+  const writes = [];
+  const auditStore = {
+    async setLatest(value) { writes.push(['latest', value]); },
+    async commitAudit(id, model, latest) { writes.push(['commit', id, model, latest]); },
+  };
+  const model = { auditId: 'audit-export-fail', session: { status: 'complete' }, report: {} };
+  registerServiceWorker(chromeApi, { createId: () => 'audit-export-fail', auditStore, chromeAdapterFactory: () => ({}), runner: async () => model });
+  chromeApi.listeners.message.listener({ type: 'START_AUDIT', url: 'https://example.test/' }, { id: 'test', url: 'chrome-extension://test/src/panel/index.html' }, () => {});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(writes.filter(([kind]) => kind === 'commit').length, 1);
+  assert.equal(writes.find(([kind]) => kind === 'commit')[2], model);
+  assert.equal(writes.at(-1)[1].exportStatus, 'failed');
+  assert.ok(chromeApi.runtime.sent.some(message => message.type === 'EXPORT_FAILED' && message.auditId === 'audit-export-fail'));
 });
 
 test('commit failure sends no completion and persists only best-effort failed latest', async () => {

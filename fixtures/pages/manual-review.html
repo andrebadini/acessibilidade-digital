@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Fixture local — revisão contextual</title>
+</head>
+<body>
+  <header><h1>Casos de revisão humana</h1></header>
+  <nav aria-label="Serviços">
+    <a href="#etapa" data-review-rule="focus-order" data-review-outcome="cantTell">Iniciar atendimento</a>
+    <a href="#ajuda" data-review-rule="consistent-navigation" data-review-outcome="cantTell">Ajuda</a>
+  </nav>
+  <main id="etapa">
+    <button data-review-rule="accessible-component-purpose" data-review-outcome="cantTell">Continuar</button>
+    <video controls data-review-rule="video-captions" data-review-outcome="cantTell">
+      <track kind="captions" srclang="pt-BR" label="Português">
+    </video>
+    <section aria-labelledby="resultado">
+      <h2 id="resultado">Resultado contextual</h2>
+      <p>A adequação depende do processo completo e do significado no serviço.</p>
+    </section>
+  </main>
+  <footer id="ajuda">Conteúdo local, sem recursos remotos.</footer>
+</body>
+</html>

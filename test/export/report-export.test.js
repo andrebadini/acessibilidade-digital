@@ -21,6 +21,7 @@ test('prints one inactive blob tab, cleans exact resources, and exports one shar
       async createPrintTab(options) { events.push(['tab-create', options]); return { id: 31 }; },
       async waitForReady(id, options) { events.push(['tab-ready', id, options]); },
       async connectCdp(id, options) { events.push(['cdp-connect', id, options]); return { async disconnect() { events.push(['cdp-disconnect']); } }; },
+      async waitForAssets() { events.push(['assets-ready']); },
       async removeTab(id) { events.push(['tab-remove', id]); },
     },
     async pdfRenderer() { events.push(['pdf']); return { bytes: PDF, usedFallback: false, limitations: [] }; },
@@ -30,6 +31,8 @@ test('prints one inactive blob tab, cleans exact resources, and exports one shar
   assert.equal(Object.isFrozen(input), false);
   assert.deepEqual(events.filter(entry => entry[0] === 'tab-create'), [['tab-create', { url: 'blob:chrome-extension://test/print', active: false }]]);
   assert.equal(events.filter(entry => entry[0] === 'cdp-disconnect').length, 1);
+  assert.ok(events.findIndex(entry => entry[0] === 'assets-ready') >= 0);
+  assert.ok(events.findIndex(entry => entry[0] === 'assets-ready') < events.findIndex(entry => entry[0] === 'pdf'));
   assert.deepEqual(events.filter(entry => entry[0] === 'tab-remove'), [['tab-remove', 31]]);
   assert.ok(events.findIndex(entry => entry[0] === 'revoke-print-url') > events.findIndex(entry => entry[0] === 'tab-remove'));
   assert.equal((result.html.match(/data-report-item=/gu) ?? []).length, 146);
@@ -51,6 +54,7 @@ test('keeps HTML and JSON when PDF fails, records a partial limitation, and stil
       async createPrintTab() { return { id: 44 }; },
       async waitForReady() {},
       async connectCdp() { return { async disconnect() { events.push(['disconnect']); } }; },
+      async waitForAssets() {},
       async removeTab(id) { events.push(['remove', id]); },
     },
     async pdfRenderer() { throw new Error('print failed'); },
@@ -75,6 +79,7 @@ test('contains readiness failures and cleanup errors without leaking a print URL
       async createPrintTab() { return { id: 55 }; },
       async waitForReady() { throw new DOMException('timeout', 'TimeoutError'); },
       async connectCdp() { throw new Error('must not connect'); },
+      async waitForAssets() { throw new Error('must not wait'); },
       async removeTab() { throw new Error('already closed'); },
     },
     async pdfRenderer() { throw new Error('must not print'); },

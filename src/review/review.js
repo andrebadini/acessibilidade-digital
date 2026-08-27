@@ -6,8 +6,27 @@ const ANSWERS = ['conforme', 'não conforme', 'não foi possível determinar'];
 const list = document.querySelector('#review-list');
 const status = document.querySelector('#review-status');
 const evaluator = document.querySelector('#review-evaluator');
+const regenerate = document.querySelector('#regenerate-report');
 const store = createAuditStore();
 let auditModel;
+
+regenerate.addEventListener('click', () => {
+  if (!auditModel?.auditId) return;
+  regenerate.disabled = true;
+  status.textContent = 'Relatório atualizado na fila de geração.';
+  chrome.runtime.sendMessage({ type: 'REQUEST_EXPORT', auditId: auditModel.auditId }, response => {
+    regenerate.disabled = false;
+    if (chrome.runtime.lastError || !response?.ok) status.textContent = response?.error || 'Não foi possível gerar o relatório atualizado.';
+    else status.textContent = response.duplicate ? 'A geração do relatório já está em andamento.' : 'Relatório atualizado na fila de geração.';
+  });
+});
+
+chrome.runtime.onMessage.addListener(message => {
+  if (!auditModel || message?.auditId !== auditModel.auditId) return;
+  if (message.type === 'EXPORT_PROGRESS') status.textContent = message.message || 'Gerando os arquivos do relatório.';
+  if (message.type === 'EXPORT_COMPLETE') status.textContent = message.status === 'partial' ? 'Relatório gerado com limitações.' : 'Arquivos do relatório gerados.';
+  if (message.type === 'EXPORT_FAILED') status.textContent = message.error || 'Não foi possível gerar os arquivos do relatório.';
+});
 
 function safeAuditId() {
   const value = new URL(location.href).searchParams.get('auditId');

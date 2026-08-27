@@ -63,5 +63,14 @@ export function reducePanelState(current, message, extensionBaseUrl = '') {
       reviewUrl: null,
     };
   }
+  if (message.type === 'EXPORT_PROGRESS') {
+    return { ...current, exportStatus: 'running', message: typeof message.message === 'string' ? message.message : 'Gerando os arquivos do relatório.' };
+  }
+  if (message.type === 'EXPORT_COMPLETE') {
+    return { ...current, exportStatus: message.status === 'partial' ? 'partial' : 'complete', message: message.status === 'partial' ? 'Relatório gerado com limitações.' : 'Arquivos do relatório gerados.' };
+  }
+  if (message.type === 'EXPORT_FAILED') {
+    return { ...current, exportStatus: 'failed', message: typeof message.error === 'string' ? message.error : 'Não foi possível gerar os arquivos do relatório.' };
+  }
   return current;
 }
