@@ -117,3 +117,56 @@ test('contains revoked proxies and nested accessors without throwing or executin
     provenance: AXE_PROVENANCE, ruleResults: proxy, occurrences: [],
   }, { rulesVersion: '1.0.0' }));
 });
+
+test('requires the exact complete normalized top-level axe payload even when disabled and empty', () => {
+  const disabled = structuredClone(normalizeAxeResults({
+    status: 'disabled', provenance: AXE_PROVENANCE, diagnostics: [{ code: 'AXE_FEATURE_DISABLED', frameId: null }], frames: [],
+  }, { pageId: 'page-1' }));
+  assert.deepEqual(validateNormalizedAxeSupplemental(disabled, { rulesVersion: '1.0.0' }).errors, []);
+
+  for (const mutate of [
+    value => { value.privateText = 'Paciente HIV positivo'; },
+    value => { value.status = 'complete'; },
+    value => { value.diagnostics[0].privateText = 'Paciente HIV positivo'; },
+    value => { value.limitations = []; },
+    value => { value.technicalSummary.violations.groups = 1; },
+    value => { delete value.technicalSummary.passes; },
+  ]) {
+    const hostile = structuredClone(disabled);
+    mutate(hostile);
+    const checked = validateNormalizedAxeSupplemental(hostile, { rulesVersion: '1.0.0' });
+    assert.ok(checked.errors.length > 0);
+    assert.doesNotMatch(JSON.stringify(checked), /Paciente|HIV/iu);
+  }
+});
+
+test('uses the adapter structural-selector allowlist and rejects hostile tag-shaped private selectors', () => {
+  const supplemental = structuredClone(normalizeAxeResults({
+    status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],
+    frames: [{ frameId: 0, status: 'success', result: {
+      violations: [],
+      incomplete: [{ id: 'input-image-alt', impact: 'serious', nodes: [{ impact: 'serious', target: ['input'] }] }],
+      passes: [], inapplicable: [],
+    } }],
+  }, { pageId: 'page-1', rulesVersion: '1.0.0' }));
+  const occurrence = supplemental.occurrences[0];
+  occurrence.selector = 'patient-hiv-positive';
+  occurrence.target.selector = 'patient-hiv-positive';
+  occurrence.presentationTargetKey = 'selector:0:patient-hiv-positive';
+  supplemental.ruleResults[0].targets[0].selector = 'patient-hiv-positive';
+
+  const checked = validateNormalizedAxeSupplemental(supplemental, { rulesVersion: '1.0.0' });
+  assert.ok(checked.errors.length > 0);
+  assert.doesNotMatch(JSON.stringify(checked), /patient-hiv-positive/iu);
+});
+
+test('rejects internally inconsistent technical-summary counts for a complete finding set', () => {
+  for (const mutate of [
+    value => { value.technicalSummary.violations.nodes += 1; },
+    value => { value.technicalSummary.violations.groups = value.technicalSummary.violations.nodes + 1; },
+  ]) {
+    const hostile = validSupplemental();
+    mutate(hostile);
+    assert.ok(validateNormalizedAxeSupplemental(hostile, { rulesVersion: '1.0.0' }).errors.length > 0);
+  }
+});

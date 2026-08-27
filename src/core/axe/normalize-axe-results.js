@@ -1,4 +1,4 @@
-import { AXE_PROVENANCE, AXE_TARGET_UNAVAILABLE } from '../../browser/axe-adapter.js';
+import { AXE_PROVENANCE, AXE_TARGET_UNAVAILABLE, sanitizeAxeStructuralSelector } from '../../browser/axe-adapter.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
 import { axeNbrMappingForRule } from '../normative/axe-nbr-crosswalk.js';
@@ -10,12 +10,6 @@ const MAX_NODES_PER_GROUP = 100;
 const MAX_OCCURRENCES = 256;
 const AUDITA_RULES_VERSION = '1.0.0';
 const SAFE_ID = /^[a-z][a-z0-9._:-]{0,127}$/iu;
-const SAFE_TAGS = new Set([
-  'a', 'area', 'article', 'aside', 'audio', 'body', 'button', 'canvas', 'caption', 'dd', 'details', 'dialog', 'div', 'dl', 'dt',
-  'fieldset', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'html', 'iframe', 'img', 'input',
-  'label', 'legend', 'li', 'main', 'nav', 'object', 'ol', 'option', 'p', 'select', 'section', 'span', 'svg', 'table', 'tbody',
-  'td', 'textarea', 'tfoot', 'th', 'thead', 'tr', 'ul', 'video',
-]);
 const OUTCOME_PRIORITY = Object.freeze({ failed: 3, cantTell: 2, untested: 1 });
 const ITEM_BY_ID = new Map(NBR17225_ITEMS.map(item => [item.id, item]));
 
@@ -34,9 +28,13 @@ function safeRead(value, property) {
   } catch { return undefined; }
 }
 
+function safeIsArray(value) {
+  try { return Array.isArray(value); } catch { return false; }
+}
+
 function safeArray(value, property, max = MAX_OCCURRENCES) {
   const candidate = safeRead(value, property);
-  if (!Array.isArray(candidate)) return [];
+  if (!safeIsArray(candidate)) return [];
   let length;
   try {
     const descriptor = Object.getOwnPropertyDescriptor(candidate, 'length');
@@ -52,7 +50,7 @@ function safeArray(value, property, max = MAX_OCCURRENCES) {
 
 function declaredArrayLength(value, property) {
   const candidate = safeRead(value, property);
-  if (!Array.isArray(candidate)) return 0;
+  if (!safeIsArray(candidate)) return 0;
   try {
     const descriptor = Object.getOwnPropertyDescriptor(candidate, 'length');
     return descriptor && Object.hasOwn(descriptor, 'value') && Number.isSafeInteger(descriptor.value) && descriptor.value >= 0
@@ -78,30 +76,8 @@ function stableHash(value) {
   return hash.toString(16).padStart(8, '0');
 }
 
-function safeStructuralSelector(value) {
-  if (typeof value !== 'string' || value.length === 0 || value.length > 256 || /[#.[\],+~='"\\]/u.test(value)) {
-    return AXE_TARGET_UNAVAILABLE;
-  }
-  const normalized = value.trim().replace(/\s*>\s*/gu, ' > ').replace(/\s+/gu, ' ');
-  if (!normalized || normalized.startsWith('>') || normalized.endsWith('>')) return AXE_TARGET_UNAVAILABLE;
-  const tokens = normalized.split(' ');
-  let needsCompound = true;
-  for (const token of tokens) {
-    if (token === '>') {
-      if (needsCompound) return AXE_TARGET_UNAVAILABLE;
-      needsCompound = true;
-      continue;
-    }
-    if (!needsCompound) return AXE_TARGET_UNAVAILABLE;
-    const match = token.match(/^([a-z][a-z0-9-]{0,31})(?::nth-of-type\(([1-9]\d{0,3})\))?$/iu);
-    if (!match || !SAFE_TAGS.has(match[1].toLowerCase())) return AXE_TARGET_UNAVAILABLE;
-    needsCompound = false;
-  }
-  return needsCompound ? AXE_TARGET_UNAVAILABLE : normalized;
-}
-
 function selectorFromTarget(value, depth = 0) {
-  if (typeof value === 'string') return safeStructuralSelector(value);
+  if (typeof value === 'string') return sanitizeAxeStructuralSelector(value);
   let isArray = false;
   try { isArray = Array.isArray(value); } catch { return AXE_TARGET_UNAVAILABLE; }
   if (!isArray || depth > 3) return AXE_TARGET_UNAVAILABLE;
@@ -121,7 +97,7 @@ function validProvenance(input) {
 function sameDataRecord(actual, expected, seen = new WeakMap()) {
   if (actual === expected) return true;
   if (actual === null || expected === null || typeof actual !== 'object' || typeof expected !== 'object') return actual === expected;
-  if (Array.isArray(actual) !== Array.isArray(expected)) return false;
+  if (safeIsArray(actual) !== safeIsArray(expected)) return false;
   if (seen.get(actual) === expected) return true;
   seen.set(actual, expected);
   let actualKeys;
@@ -165,15 +141,16 @@ function derivedApplicability(options, { axeRuleId, mapping, pageId, frameId, se
   if (selector === AXE_TARGET_UNAVAILABLE || frameId !== 0 || options.rulesVersion !== AUDITA_RULES_VERSION) return null;
   const item = ITEM_BY_ID.get(mapping.nbrItemRef);
   const snapshot = options.snapshot;
-  if (!snapshot || typeof snapshot !== 'object' || !snapshot.document || typeof snapshot.document !== 'object') return null;
+  const document = safeRead(snapshot, 'document');
+  if (!snapshot || typeof snapshot !== 'object' || !document || typeof document !== 'object') return null;
   let ruleId = null;
   let confirmed = false;
   if (axeRuleId === 'html-has-lang' && selector === 'html' &&
-    Object.hasOwn(snapshot.document, 'language') && snapshot.document.language === '') {
+    safeRead(document, 'language') === '') {
     ruleId = 'page-language';
     confirmed = true;
   } else if (axeRuleId === 'document-title' && selector === 'html' &&
-    Object.hasOwn(snapshot.document, 'title') && snapshot.document.title === '') {
+    safeRead(document, 'title') === '') {
     ruleId = 'page-title';
     confirmed = true;
   }

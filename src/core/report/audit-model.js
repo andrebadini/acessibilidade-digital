@@ -61,6 +61,7 @@ export function createAuditModel(input) {
     model.evidence = model.evidence.map(artifact => sanitizeEvidenceArtifactUrls(artifact));
   }
   const graph = validateEvidenceAndOccurrences(model, ruleById, pageById);
+  validateAxeEvidenceBinding(model, validatedAxe);
   const reviewGraph = validateReview(model, graph);
   validateAxeItemAggregation(model, validatedAxe, reviewGraph);
   validatePassedItemAuthority(model.itemResults, ruleById, reviewGraph);
@@ -202,7 +203,6 @@ function authoritativeAxeOccurrence(value) {
     itemId: value.itemId ?? value.nbrItemRef, nbrItemRef: value.nbrItemRef ?? value.itemId,
     classification: value.classification, impact: value.impact, confidence: value.confidence,
     source: value.source,
-    wcagRefs: value.wcagRefs, foreignBenchmarkRefs: value.foreignBenchmarkRefs,
     equivalenceKey: value.equivalenceKey,
     presentationTargetKey: value.presentationTargetKey,
     mode: value.mode, nodeId: value.nodeId, selector: value.selector, framePath: value.framePath,
@@ -216,7 +216,7 @@ function authoritativeAxeOccurrence(value) {
 function assertAxeSupplementalIntegrity(model, rulesVersion) {
   const reportRules = axeRulesFrom(model);
   const reportOccurrences = axeOccurrencesFrom(model);
-  if (reportRules.length === 0 && reportOccurrences.length === 0) return null;
+  if (reportRules.length === 0 && reportOccurrences.length === 0 && model.axe === undefined) return null;
   const checked = validateNormalizedAxeSupplemental(model.axe, { rulesVersion });
   if (checked.errors.length > 0) throw new TypeError(`Suplemento axe inválido: ${checked.errors.join('; ')}`);
   if (reportRules.length !== checked.ruleResults.length || reportOccurrences.length !== checked.occurrences.length) {
@@ -225,24 +225,58 @@ function assertAxeSupplementalIntegrity(model, rulesVersion) {
   const checkedRules = new Map(checked.ruleResults.map(rule => [rule.ruleId, rule]));
   for (const rule of reportRules) {
     const expected = checkedRules.get(rule.ruleId);
-    const fields = value => ({
-      ruleId: value?.ruleId, engineRuleId: value?.engineRuleId, outcome: value?.outcome, mode: value?.mode,
-      nbrItems: value?.nbrItems, wcag: value?.wcag, classification: value?.classification,
-      impact: value?.impact, confidence: value?.confidence, source: value?.source,
-      summary: value?.summary, targets: value?.targets, limitations: value?.limitations,
-    });
-    if (!expected || canonicalStringify(fields(rule)) !== canonicalStringify(fields(expected))) {
+    if (!expected || canonicalStringify(rule) !== canonicalStringify(expected)) {
       throw new TypeError(`Regra suplementar ${rule.ruleId} diverge do cluster axe validado.`);
     }
   }
   const checkedOccurrences = new Map(checked.occurrences.map(value => [value.occurrenceId, value]));
   for (const occurrence of reportOccurrences) {
     const expected = checkedOccurrences.get(occurrence.occurrenceId);
-    if (!expected || canonicalStringify(authoritativeAxeOccurrence(occurrence)) !== canonicalStringify(authoritativeAxeOccurrence(expected))) {
+    const actualKeys = Object.keys(occurrence).sort();
+    const expectedKeys = Object.keys(expected ?? {}).sort();
+    if (!expected || canonicalStringify(actualKeys) !== canonicalStringify(expectedKeys) ||
+      canonicalStringify(authoritativeAxeOccurrence(occurrence)) !== canonicalStringify(authoritativeAxeOccurrence(expected))) {
       throw new TypeError(`Ocorrência suplementar ${occurrence.occurrenceId} diverge do cluster axe validado.`);
+    }
+    if (model.schemaVersion === 1) {
+      if (canonicalStringify(occurrence.wcagRefs) !== canonicalStringify(expected.wcagRefs) ||
+        canonicalStringify(occurrence.foreignBenchmarkRefs) !== canonicalStringify(expected.foreignBenchmarkRefs)) {
+        throw new TypeError(`Ocorrência suplementar ${occurrence.occurrenceId} diverge das referências originais do mapeamento axe.`);
+      }
+    } else {
+      const item = NBR17225_ITEMS.find(entry => entry.id === expected.nbrItemRef);
+      const fullWcag = item?.wcag.map(reference => reference.id) ?? [];
+      if (!expected.wcagRefs.every(reference => fullWcag.includes(reference)) ||
+        canonicalStringify(occurrence.wcagRefs) !== canonicalStringify(fullWcag) ||
+        canonicalStringify(occurrence.foreignBenchmarkRefs) !== canonicalStringify([...section508ReferencesForWcag(fullWcag)])) {
+        throw new TypeError(`Ocorrência suplementar ${occurrence.occurrenceId} possui expansão WCAG/estrangeira incompatível com o item ABNT.`);
+      }
     }
   }
   return checked;
+}
+
+function validateAxeEvidenceBinding(model, checked) {
+  if (!checked) return;
+  const conclusiveIds = new Set(checked.occurrences
+    .filter(occurrence => occurrence.outcome === 'failed' && occurrence.legalAnalysis?.basisRef === CONSUMER_ACCESSIBILITY_FIXED_BASIS.id)
+    .map(occurrence => occurrence.occurrenceId));
+  for (const occurrence of model.occurrences ?? []) {
+    if (!conclusiveIds.has(occurrence.occurrenceId)) continue;
+    const pristine = (model.evidence ?? []).filter(artifact => artifact.pageId === occurrence.pageId &&
+      artifact.kind === 'full-page' && artifact.state === 'pristine');
+    if (pristine.length > 0) {
+      if (!pristine.some(artifact => occurrence.evidenceRefs.includes(artifact.evidenceId))) {
+        throw new TypeError(`Ocorrência axe conclusiva ${occurrence.occurrenceId} não referencia a captura integral original da mesma página.`);
+      }
+      continue;
+    }
+    const explicitAbsence = model.session?.diagnostics?.some(entry => entry.code === 'FULL_PAGE_CAPTURE_FAILED' &&
+      entry.message === 'Não foi possível capturar a página completa no estado original.' && entry.recoverable === true &&
+      canonicalStringify(Object.keys(entry).sort()) === canonicalStringify(['at', 'code', 'message', 'recoverable'])) ||
+      model.limitations?.some(value => value === 'A captura integral original da página não estava disponível para vinculação ao achado axe conclusivo.');
+    if (!explicitAbsence) throw new TypeError(`Ocorrência axe conclusiva ${occurrence.occurrenceId} não possui captura integral original nem limitação explícita.`);
+  }
 }
 
 function validateAxeItemAggregation(model, checked, reviewGraph) {

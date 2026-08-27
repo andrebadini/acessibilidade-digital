@@ -273,3 +273,37 @@ test('treats a success frame with a missing result record as partial coverage', 
   assert.equal(normalized.status, 'partial');
   assert.ok(normalized.diagnostics.some(item => item.code === 'AXE_FRAME_RESULT_INVALID'));
 });
+
+test('contains revoked proxies at every top-level axe collection and provenance boundary', () => {
+  function revoked(target) {
+    const pair = Proxy.revocable(target, {});
+    pair.revoke();
+    return pair.proxy;
+  }
+  const cases = [
+    { status: 'complete', provenance: PROVENANCE, diagnostics: [], frames: revoked([]) },
+    { status: 'complete', provenance: PROVENANCE, diagnostics: revoked([]), frames: [] },
+    { status: 'complete', provenance: revoked({}), diagnostics: [], frames: [] },
+    ...['violations', 'incomplete', 'passes', 'inapplicable'].map(name => ({
+      status: 'complete', provenance: PROVENANCE, diagnostics: [],
+      frames: [{ frameId: 0, status: 'success', result: {
+        violations: [], incomplete: [], passes: [], inapplicable: [], [name]: revoked([]),
+      } }],
+    })),
+    {
+      status: 'complete', provenance: PROVENANCE, diagnostics: [],
+      frames: [{ frameId: 0, status: 'success', result: {
+        violations: [{ id: 'image-alt', nodes: revoked([]) }], incomplete: [], passes: [], inapplicable: [],
+      } }],
+    },
+  ];
+
+  for (const input of cases) {
+    let normalized;
+    assert.doesNotThrow(() => { normalized = normalizeAxeResults(input, { pageId: 'page-1' }); });
+    assert.deepEqual(normalized.occurrences, []);
+  }
+  assert.doesNotThrow(() => normalizeAxeResults(runResult(), {
+    pageId: 'page-1', rulesVersion: '1.0.0', snapshot: revoked({}),
+  }));
+});

@@ -32,7 +32,7 @@ const MAX_TARGET_PARTS = 16;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const CATALOG_IDENTIFIER = /^[a-z][a-z0-9._:-]{0,127}$/iu;
 const SELECTOR_ALLOWED_CHARACTERS = /^[a-z0-9():>\- \t]+$/iu;
-const SAFE_TARGET_TAGS = new Set([
+export const AXE_STRUCTURAL_SELECTOR_TAGS = Object.freeze([
   'a', 'abbr', 'address', 'area', 'article', 'aside', 'audio', 'b', 'base', 'bdi', 'bdo', 'blockquote', 'body', 'br', 'button',
   'canvas', 'caption', 'cite', 'code', 'col', 'colgroup', 'data', 'datalist', 'dd', 'del', 'details', 'dfn', 'dialog', 'div', 'dl', 'dt',
   'em', 'embed', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header', 'hgroup',
@@ -41,6 +41,7 @@ const SAFE_TARGET_TAGS = new Set([
   's', 'samp', 'script', 'search', 'section', 'select', 'slot', 'small', 'source', 'span', 'strong', 'style', 'sub', 'summary', 'sup',
   'table', 'tbody', 'td', 'template', 'textarea', 'tfoot', 'th', 'thead', 'time', 'title', 'tr', 'track', 'u', 'ul', 'var', 'video', 'wbr',
 ]);
+const SAFE_TARGET_TAGS = new Set(AXE_STRUCTURAL_SELECTOR_TAGS);
 const DEFAULT_TIMERS = Object.freeze({
   set: (callback, timeoutMs) => setTimeout(callback, timeoutMs),
   clear: timer => clearTimeout(timer),
@@ -62,7 +63,7 @@ function safeSelectorCompound(compound) {
   return Boolean(match && SAFE_TARGET_TAGS.has(match[1].toLowerCase()));
 }
 
-function safeStructuralSelector(value) {
+export function sanitizeAxeStructuralSelector(value) {
   if (typeof value !== 'string' || value.length === 0 || value.length > 256) return AXE_TARGET_UNAVAILABLE;
   if (!SELECTOR_ALLOWED_CHARACTERS.test(value) || /[\u0000-\u001f\u007f]/u.test(value) || /(?:javascript|data|blob|file|https?):/iu.test(value)) return AXE_TARGET_UNAVAILABLE;
   const normalized = value.trim().replace(/\s*>\s*/gu, ' > ').replace(/[ \t]+/gu, ' ');
@@ -82,7 +83,7 @@ function safeStructuralSelector(value) {
 }
 
 function sanitizeTarget(value, depth = 0) {
-  if (typeof value === 'string') return safeStructuralSelector(value);
+  if (typeof value === 'string') return sanitizeAxeStructuralSelector(value);
   if (!Array.isArray(value) || depth >= 3 || value.length === 0) return AXE_TARGET_UNAVAILABLE;
   return value.slice(0, MAX_TARGET_PARTS).map(item => sanitizeTarget(item, depth + 1));
 }

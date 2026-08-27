@@ -288,6 +288,25 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
   assert.doesNotMatch(JSON.stringify(model), /REMOVE|SECRET|user:pass|password=/i);
 });
 
+test('rejects a forged disabled axe payload even when the report has no axe findings', async () => {
+  const model = await runAudit({
+    url: 'https://example.test/', chromeAdapter: fakeAdapter(),
+    now: clock, idFactory: () => 'audit-disabled-axe-boundary',
+  });
+  for (const mutate of [
+    value => { value.axe.privateText = 'Paciente HIV positivo'; },
+    value => { value.axe.diagnostics[0].privateText = 'Paciente HIV positivo'; },
+    value => { value.axe.technicalSummary.passes.nodes = 1; },
+  ]) {
+    const forged = structuredClone(model);
+    mutate(forged);
+    await assert.rejects(enrichAuditForReport(forged, {
+      now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+      manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+    }), /axe|inválid|esquema|resumo/i);
+  }
+});
+
 test('integrates a confirmed top-frame axe violation with provenance, ABNT outcome and fixed legal reference', async () => {
   const page = rawPage();
   page.document.language = '';
@@ -344,6 +363,22 @@ test('integrates a confirmed top-frame axe violation with provenance, ABNT outco
   const mutations = [
     value => { value.ruleResults.find(rule => rule.source?.engine === 'axe-core').summary = 'Prontuário privado Oliveira'; },
     value => { value.occurrences.find(item => item.source?.engine === 'axe-core').justification = 'Prontuário privado Oliveira'; },
+    value => { value.ruleResults.find(rule => rule.source?.engine === 'axe-core').privateText = 'Prontuário privado Oliveira'; },
+    value => { value.occurrences.find(item => item.source?.engine === 'axe-core').privateText = 'Prontuário privado Oliveira'; },
+    value => { value.occurrences.find(item => item.source?.engine === 'axe-core').target.privateText = 'Prontuário privado Oliveira'; },
+    value => {
+      const occurrence = value.occurrences.find(item => item.source?.engine === 'axe-core');
+      const fullPage = value.evidence.artifacts.find(item => item.kind === 'full-page' && item.state === 'pristine');
+      occurrence.evidenceIds = occurrence.evidenceIds.filter(id => id !== fullPage.evidenceId);
+    },
+    value => { value.evidence.artifacts.find(item => item.kind === 'full-page').state = 'annotated'; },
+    value => {
+      value.evidence.artifacts.find(item => item.kind === 'full-page').state = 'annotated';
+      value.session.diagnostics.push({
+        code: 'FULL_PAGE_CAPTURE_FAILED', message: 'Paciente HIV positivo',
+        at: '2026-08-26T15:00:00.000Z', recoverable: true,
+      });
+    },
     value => { value.itemResults.find(item => item.id === '5.13.2').outcome = 'cantTell'; },
     value => {
       const rule = value.ruleResults.find(item => item.source?.engine === 'axe-core');
@@ -368,6 +403,29 @@ test('integrates a confirmed top-frame axe violation with provenance, ABNT outco
       manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
     }), /axe|suplement|autoritativ|diverge|inválid/i);
   }
+});
+
+test('keeps a conclusive axe occurrence auditable when pristine capture absence has the fixed bounded diagnostic', async () => {
+  const page = rawPage();
+  page.document.language = '';
+  const axeRun = {
+    status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],
+    frames: [{ frameId: 0, status: 'success', result: {
+      violations: [{ id: 'html-has-lang', impact: 'serious', nodes: [{ impact: 'serious', target: ['html'] }] }],
+      incomplete: [], passes: [], inapplicable: [],
+    } }],
+  };
+  const model = await runAudit({
+    url: 'https://example.test/', chromeAdapter: fakeAdapter({ page, axeRun, fullPageFailure: new Error('capture') }),
+    now: clock, idFactory: () => 'audit-axe-no-pristine',
+  });
+  assert.equal(model.evidence.artifacts.some(item => item.kind === 'full-page' && item.state === 'pristine'), false);
+  assert.ok(model.session.diagnostics.some(item => item.code === 'FULL_PAGE_CAPTURE_FAILED' &&
+    item.message === 'Não foi possível capturar a página completa no estado original.'));
+  await assert.doesNotReject(enrichAuditForReport(model, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  }));
 });
 
 test('rejects a forged failed item when validated axe evidence is only cantTell', async () => {
@@ -401,6 +459,39 @@ test('rejects a forged failed item when validated axe evidence is only cantTell'
   await assert.rejects(enrichAuditForReport(forgedReview, enrichOptions), /revis|decis|diverge/i);
 });
 
+for (const fixture of [
+  { ruleId: 'input-image-alt', target: 'input', itemId: '5.2.2', wcag: ['1.1.1', '2.4.4', '2.4.9'], foreign: ['1.1.1', '2.4.4'] },
+  { ruleId: 'meta-viewport', target: 'meta', itemId: '5.13.5', wcag: ['1.4.4', '1.4.10'], foreign: ['1.4.4'] },
+  { ruleId: 'aria-roles', target: 'div', itemId: '5.13.12', wcag: ['1.3.1', '4.1.2'], foreign: ['1.3.1', '4.1.2'] },
+  { ruleId: 'frame-title', target: 'iframe', itemId: '5.13.4', wcag: ['1.3.1', '4.1.2'], foreign: ['1.3.1', '4.1.2'] },
+]) {
+  test(`enriches mapped incomplete ${fixture.ruleId} with every WCAG reference from its ABNT item`, async () => {
+    const axeRun = {
+      status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],
+      frames: [{ frameId: 0, status: 'success', result: {
+        violations: [], incomplete: [{
+          id: fixture.ruleId, impact: 'serious',
+          nodes: [{ impact: 'serious', target: [fixture.target] }],
+        }], passes: [], inapplicable: [],
+      } }],
+    };
+    const model = await runAudit({
+      url: 'https://example.test/', chromeAdapter: fakeAdapter({ axeRun }), now: clock,
+      idFactory: () => `audit-axe-${fixture.ruleId}`,
+    });
+    const report = await enrichAuditForReport(model, {
+      now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+      manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+    });
+    const occurrence = report.occurrences.find(item => item.source?.engine === 'axe-core');
+    assert.equal(occurrence.nbrItemRef, fixture.itemId);
+    assert.deepEqual(occurrence.wcagRefs, fixture.wcag);
+    assert.deepEqual(occurrence.foreignBenchmarkRefs.map(reference => reference.criterionId), fixture.foreign);
+    assert.equal(occurrence.outcome, 'cantTell');
+    assert.equal(occurrence.legalAnalysis, null);
+  });
+}
+
 test('keeps the Audita core running when axe throws and records a bounded partial diagnostic', async () => {
   const adapter = fakeAdapter({ axeFailure: new Error('PRIVATE axe failure details') });
   const model = await runAudit({
@@ -415,6 +506,23 @@ test('keeps the Audita core running when axe throws and records a bounded partia
   assert.doesNotMatch(JSON.stringify(model), /PRIVATE axe failure details/iu);
   assert.ok(adapter.events.includes('collect'));
   assert.ok(adapter.events.includes('probes'));
+});
+
+test('normalizes a revoked raw axe collection before report enrichment without proxy exceptions', async () => {
+  const pair = Proxy.revocable([], {});
+  pair.revoke();
+  const model = await runAudit({
+    url: 'https://example.test/', chromeAdapter: fakeAdapter({
+      axeRun: { status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [], frames: pair.proxy },
+    }),
+    now: clock, idFactory: () => 'audit-axe-revoked-raw',
+  });
+  assert.equal(model.axe.status, 'partial');
+  assert.deepEqual(model.axe.occurrences, []);
+  await assert.doesNotReject(enrichAuditForReport(model, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  }));
 });
 
 test('attaches normalized AX accessibility to element evidence, its hash and the final HTML', async () => {

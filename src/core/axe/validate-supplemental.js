@@ -1,4 +1,4 @@
-import { AXE_PROVENANCE } from '../../browser/axe-adapter.js';
+import { AXE_PROVENANCE, AXE_TARGET_UNAVAILABLE, sanitizeAxeStructuralSelector } from '../../browser/axe-adapter.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../legal/consumer-basis.js';
 import { axeNbrMappingForRule } from '../normative/axe-nbr-crosswalk.js';
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
@@ -10,6 +10,12 @@ const RULE_KEYS = Object.freeze(['classification', 'confidence', 'engineRuleId',
 const OCCURRENCE_KEYS = Object.freeze(['accessiblePreview', 'applicabilityEvidence', 'classification', 'confidence', 'engineRuleId', 'equivalenceKey', 'evidenceIds', 'evidenceRefs', 'foreignBenchmarkRefs', 'framePath', 'impact', 'itemId', 'justification', 'legalAnalysis', 'mode', 'nbrItemRef', 'nodeId', 'occurrenceId', 'outcome', 'pageId', 'presentationTargetKey', 'ruleId', 'selector', 'source', 'target', 'wcagRefs']);
 const UNMAPPED_RATIONALE = 'Achado suplementar do axe-core sem vínculo curado com item ABNT.';
 const CONFIRMATION_SUFFIX = ' A aplicabilidade ao item ABNT ainda exige confirmação pelo motor próprio ou revisão.';
+const TOP_LEVEL_KEYS = Object.freeze(['diagnostics', 'limitations', 'occurrences', 'provenance', 'ruleResults', 'status', 'technicalSummary']);
+const RESULT_TYPES = Object.freeze(['violations', 'incomplete', 'passes', 'inapplicable']);
+const PARTIAL_LIMITATION = 'O motor suplementar axe-core teve cobertura parcial; somente resultados vinculados a frames concluídos foram considerados.';
+const DISABLED_LIMITATION = 'O motor suplementar axe-core está desativado pelo gate MV3/CSP; o motor próprio Audita continuou sem sondar o axe.';
+const TRUNCATED_LIMITATION = 'Os resultados axe excederam limites locais de segurança; contagens e achados publicados são truncados.';
+const PROVENANCE_LIMITATION = 'A proveniência do resultado axe não corresponde ao pacote verificado; nenhum achado foi publicado.';
 
 function own(value, key) {
   try {
@@ -82,9 +88,51 @@ function validTarget(target, rationale) {
 }
 
 function validSelector(value) {
-  if (value === '[target-unavailable]') return true;
-  if (typeof value !== 'string' || value.length === 0 || value.length > 256 || /[#.[\],+~='"\\]/u.test(value)) return false;
-  return value.split(/\s*>\s*|\s+/u).every(token => /^[a-z][a-z0-9-]{0,31}(?::nth-of-type\([1-9]\d{0,3}\))?$/iu.test(token));
+  return value === AXE_TARGET_UNAVAILABLE || sanitizeAxeStructuralSelector(value) === value;
+}
+
+function validateTopLevel(input, errors) {
+  if (!exactKeys(input, TOP_LEVEL_KEYS)) errors.push('Payload axe superior possui esquema inválido.');
+  const status = own(input, 'status');
+  if (!['complete', 'partial', 'disabled'].includes(status)) errors.push('Status axe inválido.');
+  const diagnostics = boundedArray(input, 'diagnostics', 64);
+  const limitations = boundedArray(input, 'limitations', 4);
+  if (!diagnostics || diagnostics.some(entry => !exactKeys(entry, ['code', 'frameId']) ||
+    typeof own(entry, 'code') !== 'string' || !/^AXE_[A-Z0-9_]{1,120}$/u.test(own(entry, 'code')) ||
+    (own(entry, 'frameId') !== null && (!Number.isSafeInteger(own(entry, 'frameId')) || own(entry, 'frameId') < 0)))) {
+    errors.push('Diagnósticos axe inválidos.');
+  }
+  if (!limitations || limitations.some(value => ![PARTIAL_LIMITATION, DISABLED_LIMITATION, TRUNCATED_LIMITATION, PROVENANCE_LIMITATION].includes(value))) {
+    errors.push('Limitações axe inválidas.');
+  }
+  const diagnosticCodes = (diagnostics ?? []).map(entry => own(entry, 'code'));
+  if (status === 'complete' && ((diagnostics?.length ?? 0) !== 0 || !exactData(limitations, []))) errors.push('Execução axe completa contém limitações ou diagnósticos.');
+  if (status === 'disabled' && (!exactData(diagnostics, [{ code: 'AXE_FEATURE_DISABLED', frameId: null }]) || !exactData(limitations, [DISABLED_LIMITATION]))) {
+    errors.push('Execução axe desativada diverge do estado canônico.');
+  }
+  if (status === 'partial' && limitations?.[0] !== PARTIAL_LIMITATION) errors.push('Execução axe parcial não declara sua limitação canônica.');
+  if (diagnosticCodes.includes('AXE_RESULTS_TRUNCATED') !== (limitations ?? []).includes(TRUNCATED_LIMITATION)) errors.push('Truncamento axe incoerente.');
+  if (diagnosticCodes.includes('AXE_PROVENANCE_INVALID') !== (limitations ?? []).includes(PROVENANCE_LIMITATION)) errors.push('Diagnóstico de proveniência axe incoerente.');
+
+  const summary = own(input, 'technicalSummary');
+  if (!exactKeys(summary, RESULT_TYPES)) {
+    errors.push('Resumo técnico axe possui esquema inválido.');
+  } else {
+    for (const type of RESULT_TYPES) {
+      const count = own(summary, type);
+      if (!exactKeys(count, ['groups', 'nodes']) || !Number.isSafeInteger(own(count, 'groups')) || !Number.isSafeInteger(own(count, 'nodes')) ||
+        own(count, 'groups') < 0 || own(count, 'groups') > 6_400 || own(count, 'nodes') < 0 || own(count, 'nodes') > 640_000) {
+        errors.push(`Resumo técnico axe inválido para ${type}.`);
+      }
+    }
+  }
+  const rules = boundedArray(input, 'ruleResults');
+  const occurrences = boundedArray(input, 'occurrences', 1024);
+  if (status === 'disabled' && (((rules?.length ?? 0) !== 0) || ((occurrences?.length ?? 0) !== 0) ||
+    RESULT_TYPES.some(type => own(own(summary, type), 'groups') !== 0 || own(own(summary, type), 'nodes') !== 0))) {
+    errors.push('Execução axe desativada publicou resultados.');
+  }
+  return { rules, occurrences, status, summary };
 }
 
 function exactSource(source, ruleId, engineRuleId) {
@@ -223,9 +271,8 @@ function validateOccurrence(occurrence, validatedRule, options, errors) {
  */
 export function validateNormalizedAxeSupplemental(input, options = {}) {
   const errors = [];
+  const { rules, occurrences, status, summary } = validateTopLevel(input, errors);
   if (!exactData(own(input, 'provenance'), AXE_PROVENANCE)) errors.push('Proveniência/configuração axe inválida.');
-  const rules = boundedArray(input, 'ruleResults');
-  const occurrences = boundedArray(input, 'occurrences', 1024);
   if (!rules || !occurrences) errors.push('Coleções suplementares axe inválidas ou acima do limite.');
   const validatedRules = new Map();
   for (const rule of rules ?? []) {
@@ -260,6 +307,14 @@ export function validateNormalizedAxeSupplemental(input, options = {}) {
       own(checked.rule, 'confidence') !== (checked.outcome === 'failed' ? 'high' : 'low') ||
       !exactData(own(checked.rule, 'targets'), expectedTargets)) {
       errors.push(`Resumo da regra ${checked.ruleId} não foi derivado das ocorrências aceitas.`);
+    }
+  }
+  if (status === 'complete' && summary && occurrences) {
+    const violations = own(summary, 'violations');
+    const incomplete = own(summary, 'incomplete');
+    if (own(violations, 'nodes') + own(incomplete, 'nodes') !== occurrences.length ||
+      own(violations, 'groups') > own(violations, 'nodes') || own(incomplete, 'groups') > own(incomplete, 'nodes')) {
+      errors.push('Resumo técnico axe não corresponde ao conjunto completo de ocorrências.');
     }
   }
   if (errors.length > 0) return Object.freeze({ errors: Object.freeze(errors), ruleResults: Object.freeze([]), occurrences: Object.freeze([]) });

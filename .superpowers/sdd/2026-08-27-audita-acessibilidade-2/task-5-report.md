@@ -90,3 +90,33 @@ GREEN final:
 - ZIP rastreado restaurado exatamente: SHA-256 `987acb65524093d0cae4b263277786ab7718d375e53112b4e63bbf0687a56e9a`.
 
 O gate de produção e `target-size` permanecem desativados. Nenhuma Web Store, CDN, telemetria, login, backend, código remoto ou `unsafe-eval` foi alterado.
+
+## Fix round 2 — fechamento do payload canônico
+
+O normalizador passou a conter proxies revogados também nas coleções superiores (`frames`, `diagnostics`, grupos de resultado e `nodes`), na proveniência e no Snapshot usado para confirmar aplicabilidade. Todas as decisões sobre arrays usam leitura protegida; um payload bruto hostil é reduzido a um resultado canônico parcial antes de entrar no relatório.
+
+O contrato `model.axe` agora é completo mesmo sem achados ou com o gate desativado: sete chaves superiores exatas, proveniência/configuração fixas, status, diagnósticos sem campos adicionais, limitações de catálogo, quatro contagens técnicas limitadas e coerentes, regras e ocorrências. Campos desconhecidos ou texto privado invalidam o cluster inteiro. O sanitizador estrutural e a lista nativa de tags do adaptador foram exportados e reutilizados pelo normalizador e pelo validador; seletores com tags inventadas, como `patient-hiv-positive`, não atravessam a fronteira.
+
+Regras do relatório devem ser idênticas ao registro normalizado. Ocorrências permitem diferenças apenas nos vínculos de evidência e na expansão normativa V2 validada. A migração preserva o subconjunto WCAG curado do axe como origem e expande a ocorrência V2 para todas as referências WCAG do item ABNT, derivando Section 508 somente pelo catálogo revisado separado. Foram cobertos `input-image-alt`, `meta-viewport`, `aria-roles` e `frame-title`.
+
+Uma ocorrência axe conclusiva com a base consumerista fixa deve referenciar uma captura integral `pristine` da mesma página quando ela existe. A ausência só é aceita com o diagnóstico fixo e limitado de falha da captura, ou com a limitação fixa prevista no contrato; códigos acompanhados de texto arbitrário não autorizam a ausência da evidência.
+
+### Evidência TDD do fix round 2
+
+RED observado:
+
+- `Array.isArray` lançou `TypeError` em `frames` revogado antes da normalização;
+- payload axe desativado com campo privado, diagnóstico adulterado, status/limitação divergentes ou resumo técnico forjado foi aceito;
+- o validador aceitou `patient-hiv-positive` como seletor estrutural;
+- regras/ocorrências do relatório aceitaram campos privados adicionais;
+- a ocorrência jurídica continuou válida após remoção da captura integral original;
+- os quatro mapeamentos incompletos com referências WCAG adicionais no item ABNT falharam na migração V2.
+
+GREEN final:
+
+- focados de axe, adaptador, core, runner e relatório: 86/86;
+- `npm test`: 463 aprovados, 0 falhas e 1 skip explícito de E2E MV3/CSP, 464 testes no total;
+- `npm run verify`: exit 0 com os mesmos 463 aprovados/1 skip e confirmação de manifesto/CSP, axe 4.13.0 gated, 130/146, identidade neutra, artefatos e privacidade;
+- o repositório não contém `scripts/verify.sh`; o verificador disponível e autoritativo é `scripts/verify-project.mjs`, executado por `npm run verify`.
+
+O gate axe e `target-size` continuam desativados, sem mutação da Web Store ou introdução de rede, telemetria, login, backend, código remoto ou `unsafe-eval`.
