@@ -15,7 +15,7 @@ import {
 const COMPUTED_STYLES = [
   'display', 'visibility', 'opacity', 'color', 'background-color',
   'background-image', 'font-size', 'font-weight', 'line-height',
-  'letter-spacing', 'word-spacing', 'outline-color', 'outline-style',
+  'letter-spacing', 'word-spacing', 'text-align', 'outline-color', 'outline-style',
   'outline-width', 'box-shadow', 'text-decoration-color', 'overflow-x',
   'overflow-y', 'animation-duration', 'animation-iteration-count',
   'transition-duration'

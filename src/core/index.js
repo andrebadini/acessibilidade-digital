@@ -18,6 +18,12 @@ export {
   validateSnapshotV1
 } from './snapshot-schema.js';
 export { createRuleRegistry, registerRule } from './rules/registry.js';
+export { EDITORIAL_RULES, runEditorialRules, validateEditorialRuleComposition } from './rules/editorial.js';
+export {
+  ACCESSIBILITY_WIDGET_DETECTOR,
+  detectAccessibilityWidgets,
+  unknownAccessibilityWidgetInventory,
+} from './detection/accessibility-widgets.js';
 export { runRules } from './rules/run-rules.js';
 export { aggregateItems } from './rules/aggregate-items.js';
 export { CORE_RULES, mergeAxeSupplementalResults, runCoreAudit, validateCoreRuleComposition } from './audit.js';

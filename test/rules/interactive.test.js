@@ -47,6 +47,7 @@ test('interactive rules declare exact ABNT, WCAG and mode metadata', () => {
     'link-purpose-as-link': ['assisted', ['5.7.2'], ['1.3.1']],
     'link-purpose-without-context': ['assisted', ['5.7.3'], ['2.4.4', '2.4.9']],
     'link-purpose-in-context': ['assisted', ['5.7.4'], ['2.4.4']],
+    'new-window-link-warning': ['assisted', ['5.7.6'], ['2.4.4', '2.4.9', '3.2.5']],
     'button-semantics': ['automated', ['5.8.1'], ['1.3.1']],
     'button-purpose-as-button': ['assisted', ['5.8.2'], ['1.3.1']],
     'button-purpose': ['assisted', ['5.8.3'], ['4.1.2', '2.4.6']],
@@ -119,6 +120,102 @@ test('assisted link and button purpose rules reject objective missing semantics 
     assert.equal((await evaluate(ruleId, namedButton)).outcome, 'cantTell');
     assert.equal((await evaluate(ruleId, snapshot())).outcome, 'inapplicable');
   }
+});
+
+test('generic link names remain bounded review candidates for every structural context state', async () => {
+  const cases = [
+    ['missing-context', '  CLIQUE\u00a0AQUI  '],
+    ['potential-context', 'Saiba mais'],
+    ['unknown-context', 'VEJA   MAIS'],
+  ];
+  for (const [contextObservation, accessibleName] of cases) {
+    const value = await evaluate('link-purpose-without-context', snapshot([
+      record(`generic-${contextObservation}`, 'a', {
+        attributes: { href: '/conta' }, role: 'link', accessibleName,
+        linkPurposeContext: contextObservation,
+      }),
+    ]));
+    assert.equal(value.outcome, 'cantTell', contextObservation);
+    assert.equal(value.targets.length, 1, contextObservation);
+    assert.deepEqual(value.targets[0].data, {
+      reason: 'generic-link-purpose', contextObservation,
+    });
+    assert.doesNotMatch(JSON.stringify(value), /clique|saiba|veja|PRIVATE-CONTEXT/iu);
+  }
+
+  const meaningful = await evaluate('link-purpose-without-context', snapshot([
+    record('meaningful', 'a', {
+      attributes: { href: '/relatorio' }, role: 'link', accessibleName: 'Relatório anual',
+      linkPurposeContext: 'missing-context',
+    }),
+  ]));
+  assert.equal(meaningful.outcome, 'cantTell');
+  assert.deepEqual(meaningful.targets, []);
+
+  const missing = await evaluate('link-purpose-without-context', snapshot([
+    record('missing', 'a', {
+      attributes: { href: '/relatorio' }, role: 'link', accessibleName: '',
+      linkPurposeContext: 'potential-context',
+    }),
+  ]));
+  assert.equal(missing.outcome, 'failed');
+  assert.equal(missing.targets[0].data.reason, 'missing-accessible-name');
+});
+
+test('new-window warning uses only explicit static or probe observations and never persists warning text', async () => {
+  const link = overrides => record('new-window', 'a', {
+    attributes: { href: '/ajuda', target: '_blank' }, role: 'link',
+    accessibleName: 'Ajuda', adjacentNewWindowWarning: false, ...overrides,
+  });
+
+  assert.equal((await evaluate('new-window-link-warning', snapshot([
+    link({ accessibleName: 'Ajuda (abre em nova aba)' }),
+  ]))).outcome, 'passed');
+  assert.equal((await evaluate('new-window-link-warning', snapshot([
+    link({ adjacentNewWindowWarning: true }),
+  ]))).outcome, 'passed');
+
+  const failed = await evaluate('new-window-link-warning', snapshot([
+    link({ attributes: { href: '/ajuda', target: '  _BLANK  ' } }),
+  ]));
+  assert.equal(failed.outcome, 'failed');
+  assert.equal(failed.targets[0].data.reason, 'missing-new-window-warning');
+  assert.doesNotMatch(JSON.stringify(failed), /Ajuda|PRIVATE-ADJACENT/iu);
+
+  const unknownName = link();
+  delete unknownName.accessibleName;
+  assert.equal((await evaluate('new-window-link-warning', snapshot([unknownName]))).outcome, 'cantTell');
+  const unknownAdjacent = link();
+  delete unknownAdjacent.adjacentNewWindowWarning;
+  assert.equal((await evaluate('new-window-link-warning', snapshot([unknownAdjacent]))).outcome, 'cantTell');
+
+  assert.equal((await evaluate('new-window-link-warning', snapshot([
+    link({ attributes: { href: '/ajuda' }, newWindowBehavior: 'new-window' }),
+  ]))).outcome, 'failed');
+  assert.equal((await evaluate('new-window-link-warning', snapshot([
+    link({ attributes: { href: '/ajuda' }, newWindowBehavior: 'unknown' }),
+  ]))).outcome, 'cantTell');
+  assert.equal((await evaluate('new-window-link-warning', snapshot([
+    link({ attributes: { href: '/ajuda' }, newWindowBehavior: 'same-window' }),
+  ]))).outcome, 'inapplicable');
+  assert.equal((await evaluate('new-window-link-warning', snapshot([
+    link({ attributes: { href: '/ajuda' } }),
+  ]))).outcome, 'inapplicable');
+  assert.equal((await evaluate('new-window-link-warning', snapshot())).outcome, 'inapplicable');
+});
+
+test('contextual link observations never execute hostile accessors', async () => {
+  let reads = 0;
+  const hostile = record('hostile', 'a', { attributes: { href: '/ajuda' }, role: 'link' });
+  Object.defineProperties(hostile, {
+    accessibleName: { enumerable: true, get() { reads += 1; return 'PRIVATE-NAME'; } },
+    linkPurposeContext: { enumerable: true, get() { reads += 1; return 'potential-context'; } },
+    adjacentNewWindowWarning: { enumerable: true, get() { reads += 1; return true; } },
+  });
+  const result = await evaluate('link-purpose-without-context', snapshot([hostile]));
+  assert.equal(reads, 0);
+  assert.equal(result.outcome, 'cantTell');
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE-NAME/u);
 });
 
 test('accessible component name reports all unnamed components and missing input as cantTell', async () => {

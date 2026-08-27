@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { mergeProbesIntoSnapshot, normalizeProbes, normalizeSnapshot, runCoreAudit } from '../../src/core/index.js';
 import { collectRuntimePageData } from '../../src/collector/page-collector.js';
+import { COMPUTED_STYLE_PROPERTIES } from '../../src/browser/collect-page.js';
 
 const STYLE_NAMES = [
   'display', 'visibility', 'opacity', 'color', 'background-color',
@@ -111,6 +112,44 @@ test('collector runtime records normalize into the observations consumed by the 
   assert.equal(outcome('audio-control'), 'cantTell');
 });
 
+test('the actual structural collector requests text-align for the existing justified-text evaluator', () => {
+  assert.ok(COMPUTED_STYLE_PROPERTIES.includes('text-align'));
+});
+
+test('normalizer retains only bounded contextual and widget observations', () => {
+  const raw = {
+    format: 'simplified-v1',
+    document: { url: 'https://example.test/', title: 'Contexto', language: 'pt-BR' },
+    coverage: { runtime: { outcome: 'complete' }, accessibility: { outcome: 'complete' } },
+    widgetObservations: {
+      coverage: 'complete', widgets: {
+        vlibras: { dom: true, script: false, global: false },
+        'hand-talk': { dom: false, script: false, global: false },
+      },
+      privateText: 'PRIVATE-WIDGET-SENTINEL',
+    },
+    nodes: [{
+      backendNodeId: 1, tagName: 'a', attributes: { href: '/ajuda', target: '_blank' },
+      text: 'Ajuda', visibleText: 'Ajuda', parentBackendNodeId: null,
+      linkPurposeContext: 'potential-context', adjacentNewWindowWarning: true,
+      newWindowBehavior: 'new-window', neighboringText: 'PRIVATE-ADJACENT-SENTINEL',
+    }],
+    axTree: { nodes: [{ backendDOMNodeId: 1, role: { value: 'link' }, name: { value: 'Ajuda' } }] },
+  };
+  const normalized = normalizeSnapshot(raw);
+  const link = normalized.nodes[0];
+  assert.equal(link.linkPurposeContext, 'potential-context');
+  assert.equal(link.adjacentNewWindowWarning, true);
+  assert.equal(link.newWindowBehavior, 'new-window');
+  assert.deepEqual(normalized.document.accessibilityWidgetSignals, {
+    coverage: 'complete', widgets: {
+      vlibras: { dom: true, script: false, global: false },
+      'hand-talk': { dom: false, script: false, global: false },
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(normalized), /PRIVATE-|neighboringText|privateText/u);
+});
+
 test('a translucent text block remains an unreliable contrast observation', async () => {
   const raw = collectorFixture();
   raw.pageData[0].result.nodes[0].styles.opacity = '0.5';
@@ -121,8 +160,8 @@ test('a translucent text block remains an unreliable contrast observation', asyn
   assert.equal(audit.ruleResults.find(item => item.ruleId === 'text-contrast-minimum').outcome, 'cantTell');
 });
 
-test('the browser-world collector emits complete observed media without inferring timing from duration', () => {
-  const names = ['Node', 'Element', 'ShadowRoot', 'HTMLInputElement', 'HTMLSelectElement', 'HTMLTextAreaElement', 'HTMLMediaElement', 'HTMLAudioElement', 'HTMLImageElement', 'HTMLCanvasElement', 'CSS', 'document', 'getComputedStyle', 'location', 'innerWidth', 'innerHeight', 'scrollX', 'scrollY', 'matchMedia'];
+test('the browser-world collector emits complete observed media and boolean-only widget signals', () => {
+  const names = ['Node', 'Element', 'ShadowRoot', 'HTMLInputElement', 'HTMLSelectElement', 'HTMLTextAreaElement', 'HTMLMediaElement', 'HTMLAudioElement', 'HTMLImageElement', 'HTMLCanvasElement', 'CSS', 'document', 'getComputedStyle', 'location', 'innerWidth', 'innerHeight', 'scrollX', 'scrollY', 'matchMedia', 'VLibras'];
   const saved = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   class FakeElement {}
   class FakeMedia extends FakeElement {}
@@ -135,21 +174,74 @@ test('the browser-world collector emits complete observed media without inferrin
     getAttribute: () => '', getRootNode: () => globalThis.document, matches: () => false, getAnimations: () => [],
     getBoundingClientRect: () => ({ x: 0, y: 0, width: 120, height: 30 }),
   });
+  const handTalkScript = new FakeElement();
+  Object.assign(handTalkScript, {
+    localName: 'script', id: '', children: [], parentElement: null, shadowRoot: null,
+    className: '', disabled: false, innerText: 'PRIVATE-SCRIPT-CONTENT',
+    getAttribute: name => name === 'src' ? 'https://cdn.example.test/handtalk/widget.js?private=PRIVATE-SRC' : '',
+    getRootNode: () => globalThis.document, matches: () => false, getAnimations: () => [],
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: 1, height: 1 }),
+  });
+  const vlibrasWidget = new FakeElement();
+  Object.assign(vlibrasWidget, {
+    localName: 'div', id: '', children: [], parentElement: null, shadowRoot: null,
+    className: 'vw', disabled: false, innerText: '',
+    getAttribute: name => name === 'vw' ? '' : '',
+    hasAttribute: name => name === 'vw',
+    getRootNode: () => globalThis.document, matches: () => false, getAnimations: () => [],
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: 1, height: 1 }),
+  });
+  const privateSibling = new FakeElement();
+  const contextualLink = new FakeElement();
+  const linkParent = new FakeElement();
+  Object.assign(linkParent, {
+    localName: 'div', id: '', className: '', children: [contextualLink, privateSibling], parentElement: null,
+    shadowRoot: null, disabled: false, innerText: '', getAttribute: () => '', hasAttribute: () => false,
+    getRootNode: () => globalThis.document, matches: () => false, getAnimations: () => [],
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: 1, height: 1 }),
+  });
+  Object.assign(contextualLink, {
+    localName: 'a', id: '', className: '', children: [], parentElement: linkParent,
+    previousElementSibling: null, nextElementSibling: privateSibling, shadowRoot: null,
+    disabled: false, innerText: 'Saiba mais',
+    getAttribute: name => name === 'role' ? 'link' : name === 'href' ? '/ajuda' : '', hasAttribute: () => false,
+    getRootNode: () => globalThis.document, matches: () => true, getAnimations: () => [],
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: 80, height: 20 }),
+  });
+  Object.assign(privateSibling, {
+    localName: 'div', id: '', className: '', children: [], parentElement: linkParent,
+    previousElementSibling: contextualLink, nextElementSibling: null, shadowRoot: null,
+    disabled: false, innerText: 'PRIVATE-ADJACENT-SENTINEL nova aba',
+    getAttribute: name => name === 'contenteditable' ? 'true' : '',
+    hasAttribute: name => name === 'contenteditable',
+    getRootNode: () => globalThis.document, matches: () => false, getAnimations: () => [],
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: 80, height: 20 }),
+  });
   try {
     Object.assign(globalThis, {
       Node: { ELEMENT_NODE: 1 }, Element: FakeElement, ShadowRoot: class {},
       HTMLInputElement: class {}, HTMLSelectElement: class {}, HTMLTextAreaElement: class {},
       HTMLMediaElement: FakeMedia, HTMLAudioElement: FakeAudio, HTMLImageElement: class {}, HTMLCanvasElement: class {},
-      CSS: { escape: value => value }, document: { baseURI: 'https://example.test/', children: [audio], activeElement: null },
+      CSS: { escape: value => value }, document: { baseURI: 'https://example.test/', children: [audio, handTalkScript, vlibrasWidget, linkParent], activeElement: null },
       getComputedStyle: () => ({ getPropertyValue: name => ({ display: 'block', visibility: 'visible', opacity: '1', 'background-image': 'none' }[name] || '') }),
       location: { href: 'https://example.test/' }, innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
       matchMedia: () => ({ matches: false }),
+      VLibras: { privateValue: 'PRIVATE-GLOBAL-VALUE' },
     });
-    const media = collectRuntimePageData().nodes[0].media;
+    const collected = collectRuntimePageData();
+    const media = collected.nodes[0].media;
     assert.deepEqual(media, {
       kind: 'audio', currentSrc: 'https://example.test/podcast.mp3', durationSeconds: 8,
       muted: false, autoplay: true, controls: false, captionTracks: [], hasAudio: true,
     });
+    assert.deepEqual(collected.widgetSignals, {
+      vlibras: { dom: true, script: false, global: true },
+      'hand-talk': { dom: false, script: true, global: false },
+    });
+    assert.doesNotMatch(JSON.stringify(collected.widgetSignals), /PRIVATE-|src|selector|value/iu);
+    const collectedLink = collected.nodes.find(item => item.tagName === 'a');
+    assert.equal(collectedLink.linkPurposeContext, 'unknown-context');
+    assert.equal(Object.hasOwn(collectedLink, 'adjacentNewWindowWarning'), false);
   } finally {
     for (const [name, descriptor] of saved) {
       if (descriptor) Object.defineProperty(globalThis, name, descriptor);

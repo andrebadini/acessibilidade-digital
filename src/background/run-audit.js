@@ -14,7 +14,9 @@ import {
   mergeAxeSupplementalResults,
   normalizeProbes,
   normalizeSnapshot,
+  detectAccessibilityWidgets,
   runCoreAudit,
+  runEditorialRules,
   sanitizeHtmlSnippetSource,
   sanitizeResourceUrl,
 } from '../core/index.js';
@@ -285,6 +287,39 @@ function makeOccurrences(auditId, ruleResults, itemResults) {
   return occurrences;
 }
 
+function makeEditorialOccurrences(auditId, ruleResults) {
+  const occurrences = [];
+  for (const rule of ruleResults) {
+    if (rule.ruleId !== 'editorial.placeholder-text' || rule.outcome !== 'failed') continue;
+    for (const value of rule.targets.slice(0, 64)) {
+      const nodeId = targetNodeId(value);
+      const signature = [auditId, rule.ruleId, nodeId || 'document', occurrences.length].join('\u0000');
+      occurrences.push({
+        occurrenceId: `occurrence-${stableHash(signature)}`,
+        itemId: null,
+        nbrItemRef: null,
+        ruleId: rule.ruleId,
+        outcome: 'failed',
+        mode: 'automated',
+        classification: 'editorial',
+        impact: 'minor',
+        confidence: 'high',
+        nodeId,
+        pageId: 'page-1',
+        source: { engine: 'audita-editorial', ruleId: rule.ruleId, version: METHODOLOGY.version },
+        target: { nodeId, selector: null, framePath: [] },
+        wcagRefs: [],
+        foreignBenchmarkRefs: [],
+        accessiblePreview: null,
+        evidenceIds: [],
+        legalAnalysis: null,
+        justification: 'Há conteúdo provisório inequívoco na página.',
+      });
+    }
+  }
+  return occurrences;
+}
+
 function resolvePresentationTargets(occurrences, artifacts) {
   const selectorToNodeIds = new Map();
   for (const artifact of artifacts) {
@@ -295,6 +330,7 @@ function resolvePresentationTargets(occurrences, artifacts) {
     selectorToNodeIds.set(selector, ids);
   }
   for (const occurrence of occurrences) {
+    if (occurrence.classification === 'editorial') continue;
     if (occurrence.presentationTargetKey === 'document') continue;
     if (occurrence.nodeId) {
       occurrence.presentationTargetKey = `node:${occurrence.nodeId}`;
@@ -357,6 +393,7 @@ async function draftModel(state) {
     manualReview: state.manualReview,
     reviewDecisions: [],
     axe: state.axe,
+    accessibilityWidgets: state.accessibilityWidgets,
     limitations: state.limitations,
     presentation: state.presentation,
     progress: state.progress,
@@ -388,8 +425,10 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     environment: { chromeVersion: '', viewport: { width: null, height: null, deviceScaleFactor: null } },
     status: 'running', diagnostics: [], progress: [], snapshot: null,
     ruleResults: [], coreRuleResults: [], itemResults: fallbackItems(), occurrences: [], manualReview: [],
+    editorialRuleResults: [],
     axe: normalizeAxeResults({ status: 'disabled', provenance: AXE_PROVENANCE, frames: [], diagnostics: [{ code: 'AXE_FEATURE_DISABLED' }] }, { pageId: 'page-1' }),
     rawAxe: null, limitations: [], presentation: { groups: [], occurrenceCount: 0, hiddenOccurrenceCount: 0 },
+    accessibilityWidgets: detectAccessibilityWidgets(null),
     artifacts: [], fullPage: null,
     report: { status: 'pending', reviewUrl: null, artifact: { status: 'pending', formats: [] } },
   };
@@ -488,6 +527,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
         ? await awaitStep(() => chromeAdapter.collectPage(cdp, tab.id, { signal }))
         : await awaitStep(() => collectPage(cdp, tab.id, { executeScript: chromeAdapter.executeScript, signal }));
       state.snapshot = normalizeSnapshot(raw);
+      state.accessibilityWidgets = detectAccessibilityWidgets(state.snapshot.document?.accessibilityWidgetSignals);
     } catch (error) {
       fail('COLLECTION_FAILED', 'A estrutura da página não pôde ser coletada com segurança.', error);
     }
@@ -526,7 +566,8 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
       const core = await awaitStep(() => runCoreAudit(state.snapshot));
       state.coreRuleResults = [...core.ruleResults];
       const hybrid = mergeAxeSupplementalResults(core, state.axe);
-      state.ruleResults = [...hybrid.ruleResults];
+      state.editorialRuleResults = [...await runEditorialRules(state.snapshot)];
+      state.ruleResults = [...hybrid.ruleResults, ...state.editorialRuleResults];
       state.itemResults = [...hybrid.itemResults];
     } catch (error) {
       fail('CORE_AUDIT_FAILED', 'O núcleo de regras não pôde concluir a auditoria.', error);
@@ -606,6 +647,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
       }
       throwIfAborted(signal);
     }
+    state.occurrences.push(...makeEditorialOccurrences(auditId, state.editorialRuleResults));
     state.manualReview = manualQueue(state.occurrences, state.itemResults);
     resolvePresentationTargets(state.occurrences, state.artifacts);
     state.presentation = dedupeFindingsForPresentation(state.occurrences);

@@ -10,9 +10,61 @@ import {
 const SENSITIVE = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
 const URL_ATTRIBUTES = new Set(['action', 'cite', 'formaction', 'href', 'poster', 'src']);
 const EXECUTABLE_TEXT_PARENTS = new Set(['script', 'style', 'template']);
+const LINK_CONTEXT_STATES = new Set(['potential-context', 'missing-context', 'unknown-context']);
+const NEW_WINDOW_BEHAVIORS = new Set(['new-window', 'same-window', 'unknown']);
 
 function cleanText(value) {
   return typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '';
+}
+
+function ownData(value, key) {
+  try {
+    const descriptor = value !== null && typeof value === 'object'
+      ? Object.getOwnPropertyDescriptor(value, key)
+      : null;
+    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizedWidgetSignals(raw) {
+  const input = ownData(raw, 'widgetObservations');
+  const coverage = ownData(input, 'coverage');
+  const rawWidgets = ownData(input, 'widgets');
+  let complete = ['complete', 'partial', 'unavailable'].includes(coverage);
+  const widgets = {};
+  for (const id of ['vlibras', 'hand-talk']) {
+    const rawWidget = ownData(rawWidgets, id);
+    widgets[id] = {};
+    for (const field of ['dom', 'script', 'global']) {
+      const value = ownData(rawWidget, field);
+      if (typeof value === 'boolean') widgets[id][field] = value;
+      else {
+        widgets[id][field] = false;
+        complete = false;
+      }
+    }
+  }
+  return {
+    coverage: complete ? coverage : coverage === 'complete' ? 'partial' : 'unavailable',
+    widgets,
+  };
+}
+
+function placeholderMatch(value) {
+  const normalized = cleanText(value).slice(0, 4096).normalize('NFKC').toLocaleLowerCase('pt-BR');
+  return /(?:^|[^\p{L}])lorem\s+ipsum(?:[^\p{L}]|$)/u.test(normalized);
+}
+
+function redactPlaceholderText(node) {
+  if (!node || node.hidden || editableElement(node.tagName, node.attributes) || EXECUTABLE_TEXT_PARENTS.has(node.tagName) ||
+    (!placeholderMatch(node.text) && !placeholderMatch(node.visibleText))) return node;
+  const output = { ...node, text: '', visibleText: '', placeholderTextCandidate: true };
+  for (const field of ['accessibleName', 'accessibleDescription', 'axValue']) {
+    if (placeholderMatch(output[field])) output[field] = '';
+  }
+  return output;
 }
 
 export function sanitizeResourceUrl(value, base) {
@@ -185,6 +237,12 @@ function copyRuntime(record, base) {
       currentTime: Number.isFinite(item?.currentTime) ? item.currentTime : null
     }));
   }
+  const linkPurposeContext = ownData(record, 'linkPurposeContext');
+  if (LINK_CONTEXT_STATES.has(linkPurposeContext)) result.linkPurposeContext = linkPurposeContext;
+  const adjacentNewWindowWarning = ownData(record, 'adjacentNewWindowWarning');
+  if (typeof adjacentNewWindowWarning === 'boolean') result.adjacentNewWindowWarning = adjacentNewWindowWarning;
+  const newWindowBehavior = ownData(record, 'newWindowBehavior');
+  if (NEW_WINDOW_BEHAVIORS.has(newWindowBehavior)) result.newWindowBehavior = newWindowBehavior;
   return result;
 }
 
@@ -267,14 +325,14 @@ function normalizeSimplified(raw) {
     }
     return false;
   };
-  const redactedNodes = nodes.map(node => redactNormalizedNode(node, {
+  const redactedNodes = nodes.map(node => redactPlaceholderText(redactNormalizedNode(node, {
     executable: inExecutableSubtree(node),
     privateText: inPrivateTextSubtree(node),
     privateTextRoot: privateTextById.get(node.nodeId) && !hasPrivateTextAncestor(node),
     privateTextDescendant: hasPrivateTextAncestor(node),
     privateTextAncestor: privateTextAncestors.has(node),
     preserveAccessibleText: ['input', 'select', 'textarea'].includes(node.tagName),
-  }));
+  })));
   return assertSnapshotV1({
     schemaVersion: 1,
     document: {
@@ -283,6 +341,7 @@ function normalizeSimplified(raw) {
       url: sanitizeResourceUrl(raw.document?.url || ''),
       language: cleanText(raw.document?.language),
       warnings: sanitizeWarnings(raw.warnings),
+      accessibilityWidgetSignals: normalizedWidgetSignals(raw),
       ...(raw.coverage && typeof raw.coverage === 'object' ? { coverage: sanitizeJsonData(raw.coverage) } : {})
     },
     nodes: redactedNodes
@@ -607,14 +666,14 @@ function normalizeColumnar(raw) {
     }
   }
 
-  const redactedNodes = ordered.map(record => redactNormalizedNode(outputByRecord.get(record), {
+  const redactedNodes = ordered.map(record => redactPlaceholderText(redactNormalizedNode(outputByRecord.get(record), {
     executable: inExecutableSubtree(record),
     privateText: inPrivateTextSubtree(record),
     privateTextRoot: privateTextElement(record.tagName, record.attributes) && !hasPrivateTextAncestor(record),
     privateTextDescendant: hasPrivateTextAncestor(record),
     privateTextAncestor: privateTextAncestors.has(record),
     preserveAccessibleText: ['input', 'select', 'textarea'].includes(record.tagName),
-  }));
+  })));
 
   const primary = documents[0] || {};
   const primaryRoot = (rootsByDocument.get(0) || []).find(record => record.nodeType === 9);
@@ -629,6 +688,7 @@ function normalizeColumnar(raw) {
       ...(Array.isArray(raw.warnings) ? raw.warnings : []),
       ...(ambiguousRuntimeMatch ? [{ code: 'RUNTIME_MATCH_AMBIGUOUS' }] : [])
     ]),
+    accessibilityWidgetSignals: normalizedWidgetSignals(raw),
     ...(raw.coverage && typeof raw.coverage === 'object' ? { coverage: sanitizeJsonData(raw.coverage) } : {})
   };
   return assertSnapshotV1({ schemaVersion: 1, document, nodes: redactedNodes });

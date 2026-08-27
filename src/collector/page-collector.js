@@ -61,6 +61,49 @@ export function collectRuntimePageData() {
     /^(?:current-password|new-password|one-time-code)$/iu.test(element.autocomplete || '') ||
     (element.type === 'hidden' && identifierIsSensitive(element))
   );
+  const isEditable = element => {
+    if (element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement) return true;
+    const value = String(element.getAttribute?.('contenteditable') ?? '').trim().toLowerCase();
+    return element.hasAttribute?.('contenteditable') === true && !['false', 'inherit'].includes(value);
+  };
+  const safeContextText = element => {
+    if (!(element instanceof Element) || isSensitiveControl(element) || isEditable(element)) return '';
+    try { return String(element.innerText || '').replace(/\s+/gu, ' ').trim().slice(0, 512); } catch { return ''; }
+  };
+  const contextReadable = element => element instanceof Element && !isSensitiveControl(element) && !isEditable(element);
+  const warningText = value => {
+    const normalized = String(value || '').normalize('NFKC').toLocaleLowerCase('pt-BR').replace(/\s+/gu, ' ').trim();
+    return ['nova aba', 'nova guia', 'nova janela', 'abre em nova aba', 'abre em nova guia', 'abre em nova janela']
+      .some(phrase => normalized.includes(phrase));
+  };
+  const contextObservation = element => {
+    const parent = element.parentElement;
+    if (!(parent instanceof Element) || isEditable(parent) || isSensitiveControl(parent)) return 'unknown-context';
+    try {
+      const siblings = [...(parent.children || [])].filter(candidate => candidate !== element);
+      if (siblings.some(candidate => contextReadable(candidate) && safeContextText(candidate))) return 'potential-context';
+      return siblings.every(contextReadable) ? 'missing-context' : 'unknown-context';
+    } catch {
+      return 'unknown-context';
+    }
+  };
+  const adjacentWarning = element => {
+    try {
+      const adjacent = [element.previousElementSibling, element.nextElementSibling].filter(Boolean);
+      if (adjacent.some(candidate => contextReadable(candidate) && warningText(safeContextText(candidate)))) return true;
+      return adjacent.every(contextReadable) ? false : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const ownGlobalPresent = names => names.some(name => {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+      return Boolean(descriptor && Object.hasOwn(descriptor, 'value') && descriptor.value !== null && descriptor.value !== undefined);
+    } catch {
+      return false;
+    }
+  });
   const cssEscape = value => {
     if (globalThis.CSS?.escape) return CSS.escape(value);
     return [...String(value)].map((char, index) => {
@@ -102,6 +145,40 @@ export function collectRuntimePageData() {
   };
   visit(document);
 
+  const signature = (element, token) => {
+    try {
+      const tag = String(element.localName || '').toLowerCase();
+      const id = String(element.id || '').toLowerCase();
+      const classes = typeof element.className === 'string' ? element.className.toLowerCase() : '';
+      if (token === 'vlibras') return tag === 'vlibras-widget' || element.hasAttribute?.('vw') === true ||
+        /(?:^|[\s_-])vlibras(?:$|[\s_-])/u.test(`${id} ${classes}`) || /(?:^|\s)vw(?:$|\s)/u.test(classes);
+      return element.hasAttribute?.('data-handtalk') === true || /hand[\s_-]?talk/u.test(`${tag} ${id} ${classes}`);
+    } catch {
+      return false;
+    }
+  };
+  const scriptSignature = (element, token) => {
+    if (String(element?.localName || '').toLowerCase() !== 'script') return false;
+    try {
+      const source = String(element.getAttribute?.('src') || '').normalize('NFKC').toLowerCase().slice(0, 2048);
+      return token === 'vlibras' ? /(?:^|[/.?&_-])vlibras(?:[/.?&=_-]|$)/u.test(source) : /hand[\s_-]?talk/u.test(source);
+    } catch {
+      return false;
+    }
+  };
+  const widgetSignals = {
+    vlibras: {
+      dom: elements.some(element => signature(element, 'vlibras')),
+      script: elements.some(element => scriptSignature(element, 'vlibras')),
+      global: ownGlobalPresent(['VLibras', 'VLibrasWidget']),
+    },
+    'hand-talk': {
+      dom: elements.some(element => signature(element, 'hand-talk')),
+      script: elements.some(element => scriptSignature(element, 'hand-talk')),
+      global: ownGlobalPresent(['HandTalk', 'HandTalkWidget', 'HT']),
+    },
+  };
+
   const nodes = elements.map((element, order) => {
     const computed = getComputedStyle(element);
     const rect = element.getBoundingClientRect();
@@ -125,6 +202,12 @@ export function collectRuntimePageData() {
       shadowHost: Boolean(element.shadowRoot),
       shadowRootMode: element.shadowRoot?.mode || null
     };
+    const linkLike = element.localName === 'a' || String(element.getAttribute?.('role') || '').trim().toLowerCase() === 'link';
+    if (linkLike) {
+      record.linkPurposeContext = contextObservation(element);
+      const warning = adjacentWarning(element);
+      if (typeof warning === 'boolean') record.adjacentNewWindowWarning = warning;
+    }
     if (element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement) {
       record.form = {
         type: element instanceof HTMLInputElement ? element.type : element.localName,
@@ -167,6 +250,7 @@ export function collectRuntimePageData() {
     viewport: { width: innerWidth, height: innerHeight, scrollX, scrollY },
     focusedSelector: document.activeElement instanceof Element ? selector(document.activeElement) : '',
     prefersReducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
+    widgetSignals,
     nodes
   };
 }

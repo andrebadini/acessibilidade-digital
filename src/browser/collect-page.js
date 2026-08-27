@@ -4,7 +4,7 @@ import { sanitizeEvidenceUrl, sanitizeWarning } from '../core/privacy.js';
 export const COMPUTED_STYLE_PROPERTIES = Object.freeze([
   'display', 'visibility', 'opacity', 'color', 'background-color',
   'background-image', 'font-size', 'font-weight', 'line-height',
-  'letter-spacing', 'word-spacing', 'outline-color', 'outline-style',
+  'letter-spacing', 'word-spacing', 'text-align', 'outline-color', 'outline-style',
   'outline-width', 'box-shadow', 'text-decoration-color', 'overflow-x',
   'overflow-y', 'animation-duration', 'animation-iteration-count',
   'transition-duration'
@@ -76,15 +76,20 @@ export async function collectPage(cdp, tabId, options = {}) {
       world: 'ISOLATED',
       func: collectRuntimePageData
     });
-    pageData = Array.isArray(results) ? results.filter(entry => entry && !entry.error && entry.result) : [];
-    for (const entry of Array.isArray(results) ? results : []) {
-      if (entry?.error) warnings.push(sanitizeWarning({ code: 'FRAME_RUNTIME_BLOCKED', frameId: entry.frameId ?? null }));
+    const extracted = safeScriptEntries(results);
+    pageData = extracted.entries;
+    if (extracted.malformed) warnings.push(sanitizeWarning({ code: 'FRAME_RUNTIME_BLOCKED', frameId: null }));
+    for (const entry of extracted.blocked) {
+      warnings.push(sanitizeWarning({ code: 'FRAME_RUNTIME_BLOCKED', frameId: ownData(entry, 'frameId') ?? null }));
     }
   } catch {
     warnings.push(sanitizeWarning({ code: 'FRAME_RUNTIME_BLOCKED', frameId: null }));
   }
 
-  const observedFrameIds = new Set(pageData.map(entry => typeof entry.frameId === 'string' ? entry.frameId : '').filter(Boolean));
+  const observedFrameIds = new Set(pageData.map(entry => {
+    const frameId = ownData(entry, 'frameId');
+    return typeof frameId === 'string' ? frameId : '';
+  }).filter(Boolean));
   const expectedByUrl = new Map();
   const observedByUrl = new Map();
   const addByUrl = (map, url, value) => {
@@ -94,7 +99,10 @@ export async function collectPage(cdp, tabId, options = {}) {
     map.set(url, values);
   };
   for (const frame of expectedFrames) addByUrl(expectedByUrl, frame.url, frame.frameId);
-  for (const entry of pageData) addByUrl(observedByUrl, sanitizeEvidenceUrl(entry.result?.url || ''), entry);
+  for (const entry of pageData) {
+    const result = ownData(entry, 'result');
+    addByUrl(observedByUrl, sanitizeEvidenceUrl(ownData(result, 'url') || ''), entry);
+  }
   let matchedRuntimeFrames = 0;
   for (const frame of expectedFrames) {
     const explicit = observedFrameIds.has(frame.frameId);
@@ -115,5 +123,73 @@ export async function collectPage(cdp, tabId, options = {}) {
       observedFrameCount: observedAxFrames
     }
   };
-  return { domSnapshot, axTree, layoutMetrics, pageData, warnings, coverage };
+  const widgetObservations = aggregateWidgetSignals(pageData, coverage.runtime.outcome);
+  return { domSnapshot, axTree, layoutMetrics, pageData, warnings, coverage, widgetObservations };
+}
+
+function ownData(value, key) {
+  try {
+    const descriptor = value !== null && typeof value === 'object'
+      ? Object.getOwnPropertyDescriptor(value, key)
+      : null;
+    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function safeScriptEntries(value) {
+  let length;
+  try {
+    if (!Array.isArray(value)) return { entries: [], blocked: [], malformed: true };
+    length = ownData(value, 'length');
+  } catch {
+    return { entries: [], blocked: [], malformed: true };
+  }
+  if (!Number.isSafeInteger(length) || length < 0 || length > 256) {
+    return { entries: [], blocked: [], malformed: true };
+  }
+  const entries = [];
+  const blocked = [];
+  let malformed = false;
+  for (let index = 0; index < length; index += 1) {
+    const entry = ownData(value, String(index));
+    if (!entry || typeof entry !== 'object') {
+      malformed = true;
+      continue;
+    }
+    const error = ownData(entry, 'error');
+    const result = ownData(entry, 'result');
+    if (error !== undefined && error !== null && error !== false) blocked.push(entry);
+    else if (result && typeof result === 'object') entries.push(entry);
+    else malformed = true;
+  }
+  return { entries, blocked, malformed };
+}
+
+function aggregateWidgetSignals(pageData, runtimeCoverage) {
+  const aggregate = {
+    vlibras: { dom: false, script: false, global: false },
+    'hand-talk': { dom: false, script: false, global: false },
+  };
+  let readable = Array.isArray(pageData);
+  const length = readable ? ownData(pageData, 'length') : 0;
+  readable &&= Number.isSafeInteger(length) && length >= 0 && length <= 256;
+  for (let index = 0; readable && index < length; index += 1) {
+    const entry = ownData(pageData, String(index));
+    const result = ownData(entry, 'result');
+    const signals = ownData(result, 'widgetSignals');
+    for (const id of ['vlibras', 'hand-talk']) {
+      const widget = ownData(signals, id);
+      for (const field of ['dom', 'script', 'global']) {
+        const value = ownData(widget, field);
+        if (value === true) aggregate[id][field] = true;
+        else if (value !== false) readable = false;
+      }
+    }
+  }
+  return {
+    coverage: readable && runtimeCoverage === 'complete' ? 'complete' : readable ? 'partial' : 'unavailable',
+    widgets: aggregate,
+  };
 }

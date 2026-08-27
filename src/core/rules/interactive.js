@@ -10,6 +10,7 @@ import {
   isNativeControl,
   missingSnapshotResult,
   normalizeText,
+  normalizedComparableText,
   normalizedLabelText,
   orderTargets,
   result,
@@ -84,6 +85,7 @@ function assistedPurpose(snapshot, kind) {
     }
     const semantic = kind === 'link' ? hasLinkSemantics : hasButtonSemantics;
     const failures = [];
+    const reviewTargets = [];
     let incomplete = false;
     for (const node of candidates) {
       if (!semantic(node)) {
@@ -96,6 +98,12 @@ function assistedPurpose(snapshot, kind) {
         failures.push(target(node, `Forneça um nome acessível para este ${kind === 'link' ? 'link' : 'botão'}.`, {
           reason: 'missing-accessible-name'
         }));
+      } else if (kind === 'link' && genericLinkName(node.accessibleName)) {
+        const observed = normalizeText(node?.linkPurposeContext);
+        const contextObservation = LINK_CONTEXT_STATES.has(observed) ? observed : 'unknown-context';
+        reviewTargets.push(target(node, 'Confirme a finalidade deste link genérico no contexto observado.', {
+          reason: 'generic-link-purpose', contextObservation
+        }));
       }
     }
     if (failures.length > 0) {
@@ -106,12 +114,88 @@ function assistedPurpose(snapshot, kind) {
         'Colete o nome acessível calculado de todos os componentes.'
       ]);
     }
+    if (reviewTargets.length > 0) {
+      return result(
+        'cantTell',
+        'Há links genéricos cuja finalidade exige revisão contextual.',
+        reviewTargets,
+        ['A qualidade da finalidade permanece sob revisão humana, inclusive quando há contexto estrutural potencial.']
+      );
+    }
     return result(
       'cantTell',
       `Os ${kind === 'link' ? 'links' : 'botões'} possuem identificação; confirme se a finalidade está clara.`,
       [],
       ['A finalidade do componente e sua adequação ao contexto exigem revisão humana.']
     );
+  });
+}
+
+const GENERIC_LINK_NAMES = new Set([
+  'clique aqui', 'saiba mais', 'veja mais', 'leia mais', 'conheca mais'
+]);
+const LINK_CONTEXT_STATES = new Set(['potential-context', 'missing-context', 'unknown-context']);
+const NEW_WINDOW_BEHAVIORS = new Set(['new-window', 'same-window', 'unknown']);
+const UNAVAILABLE_TEXT = new Set(['[unavailable]', '[error]', '[circular]']);
+
+function genericLinkName(value) {
+  return GENERIC_LINK_NAMES.has(normalizedLabelText(value));
+}
+
+function hasNewWindowWarning(value) {
+  const name = normalizedLabelText(value);
+  if (!name || UNAVAILABLE_TEXT.has(name)) return false;
+  return ['nova aba', 'nova guia', 'nova janela', 'abre em nova aba', 'abre em nova guia',
+    'abre em nova janela', 'abrira em nova aba', 'abrira em nova guia', 'abrira em nova janela']
+    .some(phrase => name.includes(phrase));
+}
+
+function newWindowWarning(snapshot) {
+  return interactiveResult(snapshot, ({ nodes }) => {
+    const links = nodes.filter(isLink);
+    const candidates = [];
+    let unknownBehavior = false;
+    for (const node of links) {
+      const targetValue = normalizedComparableText(attribute(node, 'target'));
+      const observedBehavior = normalizeText(node?.newWindowBehavior);
+      if (targetValue === '_blank' || observedBehavior === 'new-window') candidates.push(node);
+      else if (observedBehavior === 'unknown') unknownBehavior = true;
+      else if (observedBehavior && !NEW_WINDOW_BEHAVIORS.has(observedBehavior)) unknownBehavior = true;
+    }
+    if (candidates.length === 0) {
+      return unknownBehavior
+        ? result('cantTell', 'O comportamento programático de abertura não foi observado conclusivamente.', [], [
+          'Somente uma sondagem explícita e não atuante pode confirmar abertura programática em nova janela ou guia.'
+        ])
+        : result('inapplicable', 'Não há links observados que abram em nova janela ou guia.');
+    }
+
+    const failures = [];
+    const incomplete = [];
+    for (const node of candidates) {
+      const nameKnown = hasOwn(node, 'accessibleName') && typeof node.accessibleName === 'string' &&
+        !UNAVAILABLE_TEXT.has(normalizeText(node.accessibleName));
+      const adjacentKnown = hasOwn(node, 'adjacentNewWindowWarning') &&
+        typeof node.adjacentNewWindowWarning === 'boolean';
+      if ((nameKnown && hasNewWindowWarning(node.accessibleName)) || node.adjacentNewWindowWarning === true) continue;
+      if (!nameKnown || !adjacentKnown) {
+        incomplete.push(target(node, 'Complete a observação do aviso acessível de nova janela ou guia.', {
+          reason: 'new-window-warning-observation-incomplete'
+        }));
+      } else {
+        failures.push(target(node, 'Avise acessivelmente que este link abre em nova janela ou guia.', {
+          reason: 'missing-new-window-warning'
+        }));
+      }
+    }
+    if (failures.length > 0) return result('failed', 'Há link que abre em nova janela ou guia sem aviso acessível observado.', failures);
+    if (incomplete.length > 0 || unknownBehavior) return result(
+      'cantTell',
+      'A observação do aviso de nova janela ou guia está incompleta.',
+      incomplete,
+      ['Colete o nome acessível e a observação booleana de aviso adjacente sem persistir o texto da página.']
+    );
+    return result('passed', 'Todos os links observados que abrem em nova janela ou guia possuem aviso acessível.');
   });
 }
 
@@ -295,6 +379,7 @@ export const INTERACTIVE_RULES = createRuleRegistry([
   { id: 'link-purpose-as-link', mode: 'assisted', nbrItems: ['5.7.2'], wcag: ['1.3.1'], evaluate: snapshot => assistedPurpose(snapshot, 'link') },
   { id: 'link-purpose-without-context', mode: 'assisted', nbrItems: ['5.7.3'], wcag: ['2.4.4', '2.4.9'], evaluate: snapshot => assistedPurpose(snapshot, 'link') },
   { id: 'link-purpose-in-context', mode: 'assisted', nbrItems: ['5.7.4'], wcag: ['2.4.4'], evaluate: snapshot => assistedPurpose(snapshot, 'link') },
+  { id: 'new-window-link-warning', mode: 'assisted', nbrItems: ['5.7.6'], wcag: ['2.4.4', '2.4.9', '3.2.5'], evaluate: newWindowWarning },
   { id: 'button-semantics', mode: 'automated', nbrItems: ['5.8.1'], wcag: ['1.3.1'], evaluate: snapshot => semantics(snapshot, 'button') },
   { id: 'button-purpose-as-button', mode: 'assisted', nbrItems: ['5.8.2'], wcag: ['1.3.1'], evaluate: snapshot => assistedPurpose(snapshot, 'button') },
   { id: 'button-purpose', mode: 'assisted', nbrItems: ['5.8.3'], wcag: ['4.1.2', '2.4.6'], evaluate: snapshot => assistedPurpose(snapshot, 'button') },

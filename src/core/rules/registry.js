@@ -1,6 +1,9 @@
 import { TEST_MODES } from '../result.js';
 
 const RULE_FIELDS = Object.freeze(['id', 'mode', 'nbrItems', 'evaluate']);
+const EDITORIAL_RULE_FIELDS = Object.freeze([
+  'id', 'mode', 'classification', 'impact', 'confidence', 'source', 'evaluate'
+]);
 
 function hasOwn(value, field) {
   return value !== null && typeof value === 'object' && Object.hasOwn(value, field);
@@ -119,6 +122,66 @@ export function createRuleRegistry(definitions = []) {
   const rules = [];
   for (const definition of definitions) {
     rules.push(registerRule(definition, rules));
+  }
+  return Object.freeze(rules);
+}
+
+function ownData(value, field) {
+  try {
+    const descriptor = value !== null && typeof value === 'object'
+      ? Object.getOwnPropertyDescriptor(value, field)
+      : null;
+    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function registerEditorialRule(definition, existingIds) {
+  if (!definition || typeof definition !== 'object' ||
+    !EDITORIAL_RULE_FIELDS.every(field => ownData(definition, field) !== undefined)) {
+    throw new TypeError('Editorial rule fields must be own data properties');
+  }
+  const id = normalizedString(ownData(definition, 'id'), 'Editorial rule ID');
+  if (existingIds.has(id)) throw new TypeError(`Duplicate editorial rule ID: ${id}`);
+  if (ownData(definition, 'mode') !== 'automated' || ownData(definition, 'classification') !== 'editorial' ||
+    ownData(definition, 'impact') !== 'minor' || ownData(definition, 'confidence') !== 'high') {
+    throw new TypeError('Editorial rule metadata is invalid');
+  }
+  const source = ownData(definition, 'source');
+  if (!source || typeof source !== 'object' || ownData(source, 'engine') !== 'audita-editorial' ||
+    ownData(source, 'version') !== '1.0.0') {
+    throw new TypeError('Editorial rule source is invalid');
+  }
+  const evaluate = ownData(definition, 'evaluate');
+  if (typeof evaluate !== 'function') throw new TypeError('Editorial rule evaluator must be a function');
+  return Object.freeze({
+    id,
+    mode: 'automated',
+    classification: 'editorial',
+    impact: 'minor',
+    confidence: 'high',
+    source: Object.freeze({ engine: 'audita-editorial', version: '1.0.0' }),
+    evaluate,
+  });
+}
+
+/** Keeps non-normative editorial definitions outside the NBR rule contract. */
+export function createEditorialRuleRegistry(definitions = []) {
+  if (!Array.isArray(definitions)) throw new TypeError('Editorial definitions must be an array');
+  const ids = new Set();
+  const rules = [];
+  for (let index = 0; index < definitions.length; index += 1) {
+    let definition;
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(definitions, String(index));
+      definition = descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+    } catch {
+      definition = undefined;
+    }
+    const rule = registerEditorialRule(definition, ids);
+    ids.add(rule.id);
+    rules.push(rule);
   }
   return Object.freeze(rules);
 }

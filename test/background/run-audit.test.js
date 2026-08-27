@@ -239,7 +239,10 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
     now: clock, idFactory: () => 'audit-1', closeAuditTab: true,
   });
   assert.equal(model.auditId, 'audit-1');
-  assert.equal(model.ruleResults.length, 130);
+  assert.equal(model.ruleResults.length, 131);
+  assert.equal(model.methodology.coreRuleCount, 130);
+  assert.equal(model.methodology.supplementalRuleCount, 1);
+  assert.equal(model.ruleResults.find(rule => rule.ruleId === 'editorial.placeholder-text').outcome, 'inapplicable');
   assert.equal(model.itemResults.length, 146);
   assert.equal(model.session.status, 'complete');
   assert.equal(model.axe.status, 'disabled');
@@ -288,6 +291,78 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
   assert.doesNotMatch(JSON.stringify(model), /REMOVE|SECRET|user:pass|password=/i);
 });
 
+test('integrates the recommendation failure, editorial occurrence and informational widget inventory without cross-contamination', async () => {
+  const page = rawPage();
+  page.nodes.push(
+    {
+      backendNodeId: 20, tagName: 'a', attributes: { href: '/ajuda', target: '  _BLANK  ' },
+      text: 'Ajuda', visibleText: 'Ajuda', parentBackendNodeId: null,
+      adjacentNewWindowWarning: false, linkPurposeContext: 'missing-context',
+      rect: { x: 10, y: 200, width: 80, height: 24 },
+    },
+    {
+      backendNodeId: 21, tagName: 'p', attributes: {},
+      text: 'Lorem ipsum PRIVATE-MATCH-SENTINEL', visibleText: 'Lorem ipsum PRIVATE-MATCH-SENTINEL',
+      parentBackendNodeId: null, rect: { x: 10, y: 240, width: 300, height: 40 },
+    },
+  );
+  page.axTree.nodes.push({
+    backendDOMNodeId: 20, role: { value: 'link' }, name: { value: 'Ajuda' },
+  });
+  page.widgetObservations = {
+    coverage: 'complete', widgets: {
+      vlibras: { dom: true, script: false, global: false },
+      'hand-talk': { dom: false, script: false, global: false },
+    },
+  };
+  const snippetNodeIds = [];
+  const model = await runAudit({
+    url: 'https://example.test/',
+    chromeAdapter: fakeAdapter({ page, afterSnippet: backendNodeId => snippetNodeIds.push(backendNodeId) }),
+    now: clock, idFactory: () => 'audit-complementary',
+  });
+
+  assert.equal(model.methodology.coreRuleCount, 130);
+  assert.equal(model.itemResults.length, 146);
+  assert.equal(model.itemResults.find(item => item.id === '5.7.6').outcome, 'failed');
+  assert.deepEqual(model.accessibilityWidgets, {
+    detector: 'audita.accessibility-widgets', version: '1.0.0', coverage: 'complete',
+    widgets: [
+      { id: 'vlibras', status: 'present', signals: ['dom-signature'] },
+      { id: 'hand-talk', status: 'absent', signals: [] },
+    ],
+  });
+  assert.equal(model.ruleResults.some(rule => rule.ruleId === 'vlibras' || rule.ruleId === 'hand-talk'), false);
+
+  const editorialRule = model.ruleResults.find(rule => rule.ruleId === 'editorial.placeholder-text');
+  const editorial = model.occurrences.find(occurrence => occurrence.ruleId === 'editorial.placeholder-text');
+  const newWindow = model.occurrences.find(occurrence => occurrence.ruleId === 'new-window-link-warning');
+  assert.equal(editorialRule.outcome, 'failed');
+  assert.equal(editorial.itemId, null);
+  assert.equal(editorial.nbrItemRef, null);
+  assert.deepEqual(editorial.evidenceIds, []);
+  assert.deepEqual(editorial.target, { nodeId: 'n-21', selector: null, framePath: [] });
+  assert.equal(model.manualReview.some(entry => entry.occurrenceId === editorial.occurrenceId), false);
+  assert.equal(snippetNodeIds.includes(21), false);
+  assert.equal(newWindow.itemId, '5.7.6');
+  assert.equal(newWindow.outcome, 'failed');
+
+  const report = await enrichAuditForReport(model, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  });
+  const reportEditorial = report.occurrences.find(occurrence => occurrence.ruleId === 'editorial.placeholder-text');
+  const reportNewWindow = report.occurrences.find(occurrence => occurrence.ruleId === 'new-window-link-warning');
+  assert.deepEqual(reportEditorial.wcagRefs, []);
+  assert.deepEqual(reportEditorial.foreignBenchmarkRefs, []);
+  assert.deepEqual(reportEditorial.evidenceRefs, []);
+  assert.equal(reportEditorial.accessiblePreview, null);
+  assert.equal(reportEditorial.legalAnalysis, null);
+  assert.equal(reportNewWindow.classification, 'recommendation');
+  assert.deepEqual(reportNewWindow.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v1' });
+  assert.doesNotMatch(JSON.stringify(report), /PRIVATE-MATCH-SENTINEL/iu);
+});
+
 test('rejects a forged disabled axe payload even when the report has no axe findings', async () => {
   const model = await runAudit({
     url: 'https://example.test/', chromeAdapter: fakeAdapter(),
@@ -328,7 +403,7 @@ test('integrates a confirmed top-frame axe violation with provenance, ABNT outco
   const axeOccurrence = model.occurrences.find(occurrence => occurrence.source?.engine === 'axe-core');
   const coreOccurrence = model.occurrences.find(occurrence => occurrence.ruleId === 'page-language');
 
-  assert.equal(model.ruleResults.length, 131);
+  assert.equal(model.ruleResults.length, 132);
   assert.equal(model.itemResults.find(item => item.id === '5.13.2').outcome, 'failed');
   assert.equal(axeOccurrence.outcome, 'failed');
   assert.equal(axeOccurrence.itemId, '5.13.2');
@@ -507,7 +582,7 @@ test('keeps the Audita core running when axe throws and records a bounded partia
 
   assert.equal(model.session.status, 'partial');
   assert.equal(model.axe.status, 'partial', 'partial supplemental coverage deterministically marks the audit recoverable/partial');
-  assert.equal(model.ruleResults.length, 130);
+  assert.equal(model.ruleResults.length, 131);
   assert.equal(model.itemResults.length, 146);
   assert.ok(model.session.diagnostics.some(entry => entry.code === 'AXE_EXECUTION_FAILED'));
   assert.doesNotMatch(JSON.stringify(model), /PRIVATE axe failure details/iu);

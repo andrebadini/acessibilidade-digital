@@ -13,6 +13,7 @@ import { createReviewDecision, REVIEW_MODES } from '../review/decisions.js';
 import { canonicalStringify } from './canonical-json.js';
 import { validateNormalizedAxeSupplemental } from '../axe/validate-supplemental.js';
 import { aggregateItems } from '../rules/aggregate-items.js';
+import { unknownAccessibilityWidgetInventory } from '../detection/accessibility-widgets.js';
 
 const SESSION_STATUSES = new Set(['complete', 'partial', 'failed', 'cancelled']);
 const REVIEW_STATUSES = new Set(['unanswered', 'answered']);
@@ -32,6 +33,7 @@ export function createAuditModel(input) {
   const source = JSON.parse(canonicalStringify(input));
   const model = source.schemaVersion === 1 ? migrateV1Record(source) : source;
   if (model.schemaVersion !== 2) throw new TypeError('schemaVersion de relatório inválida.');
+  if (model.accessibilityWidgets === undefined) model.accessibilityWidgets = unknownAccessibilityWidgetInventory();
   const validatedAxe = assertAxeSupplementalIntegrity(model, model.versions?.rules ?? model.methodology?.version);
   requiredId(model.auditId, 'auditId');
   validateRequestedScope(model.requestedScope);
@@ -50,6 +52,7 @@ export function createAuditModel(input) {
   validateAxeCoverageStatus(model, validatedAxe);
   validateProgress(model.progress, model.auditId);
   validateLimitations(model.limitations);
+  validateAccessibilityWidgets(model.accessibilityWidgets);
   validateIntegrity(model.integrity);
   model.itemResults = validateItems(model.itemResults);
   const ruleById = validateRules(
@@ -179,6 +182,7 @@ function migrateV1Record(model) {
     ruleResults,
     itemResults,
     occurrences,
+    accessibilityWidgets: model.accessibilityWidgets ?? unknownAccessibilityWidgetInventory(),
     evidence,
     evidenceStateCount: Array.isArray(model.evidence) ? model.evidenceStateCount ?? 0 : model.evidence?.stateCount ?? 0,
     integrity: model.integrity ?? { algorithm: 'unavailable', status: 'not-recorded-v1' },
@@ -583,6 +587,9 @@ function validateRules(rules, itemById, rulesVersion) {
     if (rule.impact !== undefined && !IMPACT_LEVELS.includes(rule.impact)) throw new TypeError(`Regra ${id} possui impacto inválido.`);
     if (rule.confidence !== undefined && !CONFIDENCE_LEVELS.includes(rule.confidence)) throw new TypeError(`Regra ${id} possui confiança inválida.`);
     if (rule.source !== undefined) validateSource(rule.source, `Regra ${id}.source`);
+    if (id.startsWith('editorial.') || rule.classification === 'editorial' || rule.source?.engine === 'audita-editorial') {
+      validateEditorialRuleResult(rule, id, rulesVersion);
+    }
     byId.set(id, rule);
   }
   return byId;
@@ -677,6 +684,9 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById) {
       throw new TypeError(`Ocorrência ${id}.accessiblePreview inválida.`);
     }
     validateLegalAnalysis(occurrence, id);
+    if (occurrence.classification === 'editorial' || occurrence.source.engine === 'audita-editorial') {
+      validateEditorialOccurrence(occurrence, sourceRule, id);
+    }
     for (const forbidden of ['violatedLaw', 'illegal', 'liability', 'sanction']) {
       if (Object.hasOwn(occurrence, forbidden)) throw new TypeError(`Ocorrência ${id} contém conclusão jurídica proibida.`);
     }
@@ -695,6 +705,88 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById) {
     occurrenceById.set(id, occurrence);
   }
   return { itemIds, ruleById, occurrenceById, evidenceIds };
+}
+
+function exactKeys(value, expected) {
+  return canonicalStringify(Object.keys(value).sort()) === canonicalStringify([...expected].sort());
+}
+
+function validateEditorialRuleResult(rule, id, rulesVersion) {
+  const expectedKeys = [
+    'ruleId', 'outcome', 'mode', 'classification', 'impact', 'confidence', 'source',
+    'nbrItems', 'wcag', 'targets', 'summary', 'limitations',
+  ];
+  const expectedSummary = rule.outcome === 'failed'
+    ? 'Há conteúdo provisório inequívoco na página.'
+    : 'Não foi observado conteúdo provisório inequívoco.';
+  if (id !== 'editorial.placeholder-text' || !exactKeys(rule, expectedKeys) ||
+    !['failed', 'inapplicable'].includes(rule.outcome) || rule.mode !== 'automated' ||
+    rule.classification !== 'editorial' || rule.impact !== 'minor' || rule.confidence !== 'high' ||
+    rule.source.engine !== 'audita-editorial' || rule.source.ruleId !== id ||
+    rule.source.version !== rulesVersion || !exactKeys(rule.source, ['engine', 'ruleId', 'version']) ||
+    canonicalStringify(rule.nbrItems) !== '[]' || canonicalStringify(rule.wcag) !== '[]' ||
+    canonicalStringify(rule.limitations) !== '[]' || rule.summary !== expectedSummary ||
+    !Array.isArray(rule.targets) || rule.targets.length > 64 ||
+    (rule.outcome === 'failed') !== (rule.targets.length > 0)) {
+    throw new TypeError(`Regra editorial ${id} possui esquema inválido.`);
+  }
+  for (const target of rule.targets) {
+    if (!target || typeof target !== 'object' || !exactKeys(target, ['nodeId', 'selectorHint', 'message', 'data']) ||
+      requiredId(target.nodeId, `Regra editorial ${id}.target.nodeId`) !== target.nodeId ||
+      target.selectorHint !== '' || target.message !== 'Substitua o conteúdo provisório antes da publicação.' ||
+      !target.data || !exactKeys(target.data, ['reason']) || target.data.reason !== 'placeholder-text') {
+      throw new TypeError(`Regra editorial ${id} possui alvo inválido.`);
+    }
+  }
+}
+
+function validateEditorialOccurrence(occurrence, sourceRule, id) {
+  const expectedKeys = [
+    'occurrenceId', 'pageId', 'outcome', 'classification', 'impact', 'confidence', 'source',
+    'nbrItemRef', 'wcagRefs', 'foreignBenchmarkRefs', 'target', 'accessiblePreview',
+    'evidenceRefs', 'legalAnalysis', 'itemId', 'ruleId', 'mode', 'nodeId', 'evidenceIds',
+    'justification',
+  ];
+  if (!exactKeys(occurrence, expectedKeys) || occurrence.outcome !== 'failed' ||
+    occurrence.classification !== 'editorial' || occurrence.impact !== 'minor' ||
+    occurrence.confidence !== 'high' || occurrence.source.engine !== 'audita-editorial' ||
+    occurrence.source.ruleId !== 'editorial.placeholder-text' || occurrence.ruleId !== occurrence.source.ruleId ||
+    occurrence.mode !== 'automated' || occurrence.nbrItemRef !== null || occurrence.itemId !== null ||
+    occurrence.nodeId !== occurrence.target.nodeId || occurrence.target.selector !== null ||
+    canonicalStringify(occurrence.target.framePath) !== '[]' || occurrence.accessiblePreview !== null ||
+    canonicalStringify(occurrence.wcagRefs) !== '[]' || canonicalStringify(occurrence.foreignBenchmarkRefs) !== '[]' ||
+    canonicalStringify(occurrence.evidenceRefs) !== '[]' || canonicalStringify(occurrence.evidenceIds) !== '[]' ||
+    occurrence.legalAnalysis !== null || occurrence.justification !== 'Há conteúdo provisório inequívoco na página.' ||
+    !sourceRule || sourceRule.outcome !== 'failed') {
+    throw new TypeError(`Ocorrência editorial ${id} possui esquema inválido.`);
+  }
+}
+
+function validateAccessibilityWidgets(inventory) {
+  if (!inventory || typeof inventory !== 'object' || Array.isArray(inventory) ||
+    !exactKeys(inventory, ['detector', 'version', 'coverage', 'widgets']) ||
+    inventory.detector !== 'audita.accessibility-widgets' || inventory.version !== '1.0.0' ||
+    !['complete', 'partial', 'unavailable'].includes(inventory.coverage) ||
+    !Array.isArray(inventory.widgets) || inventory.widgets.length !== 2) {
+    throw new TypeError('Inventário de widgets de acessibilidade inválido.');
+  }
+  const ids = ['vlibras', 'hand-talk'];
+  const signalOrder = ['dom-signature', 'script-signature', 'global-signature'];
+  for (let index = 0; index < ids.length; index += 1) {
+    const widget = inventory.widgets[index];
+    if (!widget || typeof widget !== 'object' || Array.isArray(widget) ||
+      !exactKeys(widget, ['id', 'status', 'signals']) || widget.id !== ids[index] ||
+      !['present', 'absent', 'unknown'].includes(widget.status) || !Array.isArray(widget.signals)) {
+      throw new TypeError('Inventário de widgets possui item, ordem ou campo inválido.');
+    }
+    const positions = widget.signals.map(signal => signalOrder.indexOf(signal));
+    if (positions.some(position => position < 0) || new Set(positions).size !== positions.length ||
+      positions.some((position, signalIndex) => signalIndex > 0 && position <= positions[signalIndex - 1])) {
+      throw new TypeError('Inventário de widgets possui sinal inválido ou fora de ordem.');
+    }
+    const expectedStatus = positions.length > 0 ? 'present' : inventory.coverage === 'complete' ? 'absent' : 'unknown';
+    if (widget.status !== expectedStatus) throw new TypeError('Inventário de widgets possui status incoerente com cobertura e sinais.');
+  }
 }
 
 function validatePassedItemAuthority(items, ruleById, reviewGraph) {

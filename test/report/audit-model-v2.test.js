@@ -199,17 +199,24 @@ test('allows supplemental and editorial rules without weakening the exact 130-co
   };
   model.ruleResults.push({
     ruleId: 'editorial.placeholder-text', outcome: 'failed', mode: 'automated',
-    nbrItems: [], targets: [], summary: 'Conteúdo provisório.', limitations: [],
+    classification: 'editorial', impact: 'minor', confidence: 'high',
+    source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
+    nbrItems: [], wcag: [], targets: [{
+      nodeId: 'n-1', selectorHint: '',
+      message: 'Substitua o conteúdo provisório antes da publicação.',
+      data: { reason: 'placeholder-text' },
+    }],
+    summary: 'Há conteúdo provisório inequívoco na página.', limitations: [],
   });
   model.occurrences.push({
     occurrenceId: 'occ-editorial', pageId: 'page-1', outcome: 'failed',
     classification: 'editorial', impact: 'minor', confidence: 'high',
     source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
     nbrItemRef: null, wcagRefs: [], foreignBenchmarkRefs: [],
-    target: { nodeId: null, selector: 'main p', framePath: [] },
+    target: { nodeId: 'n-1', selector: null, framePath: [] },
     accessiblePreview: null, evidenceRefs: [], legalAnalysis: null,
-    itemId: null, ruleId: 'editorial.placeholder-text', mode: 'automated', nodeId: null,
-    evidenceIds: [], justification: 'Conteúdo provisório.',
+    itemId: null, ruleId: 'editorial.placeholder-text', mode: 'automated', nodeId: 'n-1',
+    evidenceIds: [], justification: 'Há conteúdo provisório inequívoco na página.',
   });
 
   const canonical = createAuditModel(model);
@@ -220,6 +227,67 @@ test('allows supplemental and editorial rules without weakening the exact 130-co
 
   model.methodology.coreRuleCount = 129;
   assert.throws(() => createAuditModel(model), /130|core|regra/i);
+});
+
+test('strictly validates editorial and informational inventory schemas without accepting private extension fields', () => {
+  const base = structuredClone(createAuditModel(reportInput()));
+  assert.deepEqual(base.accessibilityWidgets, {
+    detector: 'audita.accessibility-widgets', version: '1.0.0', coverage: 'unavailable',
+    widgets: [
+      { id: 'vlibras', status: 'unknown', signals: [] },
+      { id: 'hand-talk', status: 'unknown', signals: [] },
+    ],
+  });
+
+  for (const mutate of [
+    value => { value.accessibilityWidgets.privateText = 'PRIVATE-INVENTORY'; },
+    value => { value.accessibilityWidgets.widgets[0].selector = '#PRIVATE-WIDGET'; },
+    value => { value.accessibilityWidgets.widgets.reverse(); },
+    value => { value.accessibilityWidgets.widgets[0].status = 'absent'; },
+    value => { value.accessibilityWidgets.widgets[0].signals = ['script-src']; },
+  ]) {
+    const forged = structuredClone(base);
+    mutate(forged);
+    assert.throws(() => createAuditModel(forged), /widget|invent|schema|sinal|status|ordem|campo|inválid/i);
+  }
+
+  const editorialBase = structuredClone(base);
+  editorialBase.methodology.supplementalRuleCount += 1;
+  editorialBase.methodology.ruleCount += 1;
+  editorialBase.ruleResults.push({
+    ruleId: 'editorial.placeholder-text', outcome: 'failed', mode: 'automated',
+    classification: 'editorial', impact: 'minor', confidence: 'high',
+    source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
+    nbrItems: [], wcag: [], targets: [{
+      nodeId: 'n-1', selectorHint: '', message: 'Substitua o conteúdo provisório antes da publicação.',
+      data: { reason: 'placeholder-text' },
+    }],
+    summary: 'Há conteúdo provisório inequívoco na página.', limitations: [],
+  });
+  editorialBase.occurrences.push({
+    occurrenceId: 'occ-editorial-strict', pageId: 'page-1', outcome: 'failed',
+    classification: 'editorial', impact: 'minor', confidence: 'high',
+    source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
+    nbrItemRef: null, wcagRefs: [], foreignBenchmarkRefs: [],
+    target: { nodeId: 'n-1', selector: null, framePath: [] }, accessiblePreview: null,
+    evidenceRefs: [], legalAnalysis: null, itemId: null, ruleId: 'editorial.placeholder-text',
+    mode: 'automated', nodeId: 'n-1', evidenceIds: [],
+    justification: 'Há conteúdo provisório inequívoco na página.',
+  });
+  assert.doesNotThrow(() => createAuditModel(editorialBase));
+  for (const mutate of [
+    value => { value.ruleResults.at(-1).privateText = 'PRIVATE-RESULT'; },
+    value => { value.ruleResults.at(-1).source.version = '9.9.9'; },
+    value => { value.ruleResults.at(-1).nbrItems = ['5.1.1']; },
+    value => { value.occurrences.at(-1).privateText = 'PRIVATE-OCCURRENCE'; },
+    value => { value.occurrences.at(-1).target.selector = '#PRIVATE-AUTHOR-ID'; },
+    value => { value.occurrences.at(-1).evidenceRefs = ['ev-1']; value.occurrences.at(-1).evidenceIds = ['ev-1']; },
+    value => { value.occurrences.at(-1).accessiblePreview = 'PRIVATE-PREVIEW'; },
+  ]) {
+    const forged = structuredClone(editorialBase);
+    mutate(forged);
+    assert.throws(() => createAuditModel(forged), /editorial|privad|schema|fonte|versão|evidência|seletor|item|preview|campo|inválid/i);
+  }
 });
 
 test('rejects a supplemental passed rule and occurrence that try to auto-approve an ABNT item', () => {
