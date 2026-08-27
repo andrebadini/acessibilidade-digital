@@ -21,7 +21,7 @@ export function renderTechnicalJson(input) {
     const occurrences = occurrencesByItem.get(item.id) || [];
     const evidenceIds = [...new Set(occurrences.flatMap(occurrence => occurrence.evidenceIds))];
     return {
-      assertor: { id: 'urn:audita-mt:software', type: `${EARL}Software`, name: 'Audita MT' },
+      assertor: { id: 'urn:audita-mt:software', type: `${EARL}Software`, name: 'Audita Acessibilidade' },
       subject: { id: model.finalUrl },
       test: { id: `urn:abnt:nbr17225:${item.id}`, title: item.title, wcag: item.wcag.map(reference => reference.id) },
       mode: MODE[item.evaluation],
@@ -40,7 +40,7 @@ export function renderTechnicalJson(input) {
     '@context': { earl: EARL, dct: 'http://purl.org/dc/terms/' },
     schemaVersion: 1,
     identity: {
-      name: 'Audita MT',
+      name: 'Audita Acessibilidade',
       description: 'Auditoria independente de acessibilidade',
       independent: true,
       disclaimer: 'Ferramenta independente, sem vínculo institucional; não equivale a certificação nem a laudo oficial.',

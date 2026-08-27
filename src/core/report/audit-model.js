@@ -6,7 +6,7 @@ import { canonicalStringify } from './canonical-json.js';
 
 const SESSION_STATUSES = new Set(['complete', 'partial', 'failed', 'cancelled']);
 const REVIEW_STATUSES = new Set(['unanswered', 'answered']);
-const METHODOLOGY_NAME = 'Audita MT — ABNT NBR 17225 e WCAG 2.2';
+const METHODOLOGY_NAME = 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2';
 const EXPECTED_RULE_COUNT = 130;
 
 export function createAuditModel(input) {

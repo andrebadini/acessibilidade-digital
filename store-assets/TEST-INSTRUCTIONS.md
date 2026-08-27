@@ -6,7 +6,7 @@ A extensão não exige conta, credencial, assinatura ou serviço externo.
 
 ## Fluxo principal
 
-1. Instale a extensão e clique no ícone Audita MT.
+1. Instale a extensão e clique no ícone Audita Acessibilidade.
 2. No campo “Endereço do site”, informe `https://www.w3.org/WAI/demos/bad/before/home.html`.
 3. Selecione “Auditar”.
 4. Aguarde a conclusão. A extensão cria uma aba descartável inativa, executa a coleta local, fecha essa aba e abre a tela de revisão.

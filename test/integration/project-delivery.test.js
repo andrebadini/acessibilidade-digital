@@ -29,7 +29,7 @@ test('plain-language usage docs report the completed real-browser and visual val
 test('neutral identity scanner rejects a forbidden identity in package content or file names', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'audita-neutral-'));
   try {
-    await writeFile(join(directory, 'README.md'), 'Audita MT — ferramenta independente.');
+    await writeFile(join(directory, 'README.md'), 'Audita Acessibilidade — ferramenta independente.');
     assert.deepEqual(await scanNeutralIdentity(directory, ['README.md']), []);
     await writeFile(join(directory, ['gov', '-mt-logo.png'].join('')), 'fixture');
     await writeFile(join(directory, 'legacy.txt'), [['go' + 'verno', 'mt'].join(' '), 'identity'].join(' '));

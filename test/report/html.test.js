@@ -33,7 +33,7 @@ test('renders a complete pt-BR report with one accessible heading hierarchy', ()
   const html = renderHtmlReport(SAMPLE_AUDIT);
   assert.match(html, /^<!doctype html>/iu);
   assert.match(html, /<html lang="pt-BR">/u);
-  assert.match(html, /<title>Relatório de auditoria — Audita MT<\/title>/u);
+  assert.match(html, /<title>Relatório de auditoria — Audita Acessibilidade<\/title>/u);
   assert.match(html, /href="#conteudo"[^>]*>Ir para o conteúdo principal/u);
   assert.equal((html.match(/<h1\b/gu) || []).length, 1);
   const levels = [...html.matchAll(/<h([1-6])\b/gu)].map(match => Number(match[1]));

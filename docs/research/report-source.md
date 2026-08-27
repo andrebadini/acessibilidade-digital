@@ -1,4 +1,4 @@
-# Base de pesquisa — Audita MT
+# Base de pesquisa — Audita Acessibilidade
 
 Data de acesso e síntese: 26 de agosto de 2026  
 Uso: fundamentação interna do produto e da especificação

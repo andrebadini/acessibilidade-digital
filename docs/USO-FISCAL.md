@@ -1,10 +1,10 @@
-# Uso fiscal do Audita MT
+# Uso fiscal do Audita Acessibilidade
 
 ## O que o resultado significa
 
-O Audita MT registra o que conseguiu observar em uma única página, naquele momento. “Aprovado” indica que a expectativa automatizável foi observada no recorte coletado. “Reprovado” indica uma falha observável. “Revisar” ou `cantTell` exige julgamento; ausência de falha automática não prova conformidade integral.
+O Audita Acessibilidade registra o que conseguiu observar em uma única página, naquele momento. “Aprovado” indica que a expectativa automatizável foi observada no recorte coletado. “Reprovado” indica uma falha observável. “Revisar” ou `cantTell` exige julgamento; ausência de falha automática não prova conformidade integral.
 
-Audita MT é uma ferramenta independente, sem vínculo institucional. O relatório apoia a análise técnica, mas não equivale a certificação nem a laudo oficial.
+Audita Acessibilidade é uma ferramenta independente, sem vínculo institucional. O relatório apoia a análise técnica, mas não equivale a certificação nem a laudo oficial.
 
 Antes de usar o material em uma fiscalização, confira a URL, a data, o viewport quando disponível, os avisos de cobertura, as evidências e cada decisão de revisão. Identifique a pessoa avaliadora e descreva o contexto necessário. “Pular revisão” mantém o caso indeterminado.
 
@@ -30,7 +30,7 @@ O processamento local não transmite o conteúdo coletado. URLs sensíveis são 
 
 As permissões `debugger`, `downloads`, `tabs`, `scripting` e `storage`, além do acesso às páginas HTTP e HTTPS indicadas pelo usuário, são necessárias para coleta, impressão, download e persistência local.
 
-Para uso público, instale pela Chrome Web Store e fixe o ícone do Audita MT na barra do Chrome. A instalação sem compactação, por **Carregar sem compactação**, é reservada a desenvolvimento e testes controlados.
+Para uso público, instale pela Chrome Web Store e fixe o ícone do Audita Acessibilidade na barra do Chrome. A instalação sem compactação, por **Carregar sem compactação**, é reservada a desenvolvimento e testes controlados.
 
 ## Limitações operacionais
 

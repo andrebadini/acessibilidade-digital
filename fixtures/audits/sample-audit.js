@@ -26,7 +26,7 @@ export const SAMPLE_AUDIT = createAuditModel({
   versions: { extension: '0.1.0', rules: '1.0.0', browser: 'Chrome/147.0.0.0' },
   environment: { chromeVersion: 'Chrome/147.0.0.0', viewport: { width: 1280, height: 720, deviceScaleFactor: 1 } },
   scope: { kind: 'single-page', description: 'Página final e estado observado após o carregamento; não inclui outras etapas do serviço.' },
-  methodology: { name: 'Audita MT — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 130, itemCount: 146 },
+  methodology: { name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 130, itemCount: 146 },
   session: {
     status: 'partial', partial: true,
     diagnostics: [{ code: 'FRAME_LIMITED', message: 'Um frame de terceiro não pôde ser coletado.', at: '2026-08-26T14:00:30.000Z', recoverable: true }],

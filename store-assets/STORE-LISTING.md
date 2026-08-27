@@ -1,8 +1,8 @@
-# Conteúdo da Chrome Web Store — Audita MT 1.0.0
+# Conteúdo da Chrome Web Store — Audita Acessibilidade 1.0.1
 
 ## Nome
 
-Audita MT
+Audita Acessibilidade
 
 ## Resumo
 
@@ -10,7 +10,7 @@ Audita páginas web conforme WCAG 2.2 e ABNT NBR 17225, com evidências, revisã
 
 ## Descrição detalhada
 
-Audita MT ajuda a examinar a acessibilidade de uma página web de forma automatizada e assistida. A extensão relaciona resultados à WCAG 2.2 e à ABNT NBR 17225:2025 e reúne as evidências necessárias para uma revisão técnica rastreável.
+Audita Acessibilidade ajuda a examinar a acessibilidade de uma página web de forma automatizada e assistida. A extensão relaciona resultados à WCAG 2.2 e à ABNT NBR 17225:2025 e reúne as evidências necessárias para uma revisão técnica rastreável.
 
 Principais recursos:
 
@@ -29,15 +29,15 @@ Importante: a auditoria representa somente a página e o estado observados. Iten
 
 Antes de auditar, oculte dados pessoais ou sigilosos visíveis. As capturas são incorporadas aos relatórios baixados.
 
-Audita MT é uma ferramenta independente, sem vínculo institucional.
+Audita Acessibilidade é uma ferramenta independente, sem vínculo institucional.
 
 ## Finalidade única
 
 Auditar localmente a acessibilidade da página indicada pelo usuário, coletar evidências técnicas e gerar relatórios para revisão humana.
 
-## Categoria sugerida
+## Categoria
 
-Ferramentas para desenvolvedores. Se o console oferecer uma categoria específica de acessibilidade, preferir essa categoria.
+Acessibilidade.
 
 ## Idioma principal
 
@@ -77,11 +77,13 @@ Não. Todo JavaScript executável está incluído no pacote Manifest V3. A polí
 
 A extensão trata localmente conteúdo do site auditado, incluindo URL, DOM, árvore de acessibilidade, estilos necessários às regras, seletores, trechos sanitizados, capturas e URLs de mídia sanitizadas. Também trata o nome e as decisões que o avaliador informar na revisão.
 
+Categorias declaradas na Chrome Web Store: **Histórico da Web** e **Conteúdo do site**. O tratamento local também deve ser divulgado conforme a política oficial da loja.
+
 Os dados não são transmitidos ao desenvolvedor, vendidos, usados em publicidade ou usados fora da finalidade única. Relatórios só deixam o armazenamento local quando o próprio usuário os compartilha.
 
 ## Público e regiões
 
-- Visibilidade inicial: não listada para validação final; depois pública.
+- Visibilidade: pública.
 - Regiões: Brasil na primeira publicação.
 - Público principal: profissionais de acessibilidade, auditoria, qualidade, desenvolvimento e fiscalização técnica.
 

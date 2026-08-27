@@ -1,10 +1,10 @@
-# Política de Privacidade — Audita MT
+# Política de Privacidade — Audita Acessibilidade
 
-Versão 1.0, atualizada em 27 de agosto de 2026.
+Versão 1.0.1, atualizada em 27 de agosto de 2026.
 
 ## 1. Finalidade
 
-Audita MT é uma extensão independente que audita localmente a acessibilidade de uma página web indicada pelo usuário. A extensão coleta evidências técnicas, executa verificações automatizadas e assistidas e gera relatórios para revisão humana.
+Audita Acessibilidade é uma extensão independente que audita localmente a acessibilidade de uma página web indicada pelo usuário. A extensão coleta evidências técnicas, executa verificações automatizadas e assistidas e gera relatórios para revisão humana.
 
 O resultado cobre apenas a página e o estado observados. Ele não constitui certificação de conformidade de um site inteiro.
 
@@ -20,13 +20,15 @@ Durante uma auditoria, a extensão pode tratar:
 - nomes acessíveis, funções, estados e prévias explicativas do anúncio esperado por tecnologia assistiva;
 - respostas de revisão, notas, data da decisão e nome informado pelo avaliador.
 
+Para as categorias da Chrome Web Store, esse tratamento corresponde a **Histórico da Web** (a URL escolhida e os horários da auditoria) e **Conteúdo do site** (texto, estrutura, imagens, mídia e demais recursos da página auditada). Esses dados são processados e armazenados localmente mesmo quando não são transmitidos a terceiros.
+
 As capturas podem conter dados pessoais ou sigilosos que estejam visíveis na página. Por isso, o usuário deve ocultar ou remover informações sensíveis antes de iniciar a auditoria.
 
 ## 3. Processamento local e transmissão
 
-O processamento da auditoria ocorre no dispositivo do usuário. Audita MT não possui servidor próprio, não executa código remoto e não envia o conteúdo coletado para o desenvolvedor ou para serviços de análise, publicidade ou comercialização de dados.
+O processamento da auditoria ocorre no dispositivo do usuário. Audita Acessibilidade não possui servidor próprio, não executa código remoto e não envia o conteúdo coletado para o desenvolvedor ou para serviços de análise, publicidade ou comercialização de dados.
 
-Ao abrir a URL indicada, o navegador se comunica normalmente com o site auditado e com os recursos que esse site carregar. Essas comunicações são determinadas pelo próprio site e estão sujeitas às políticas dele, não à Audita MT.
+Ao abrir a URL indicada, o navegador se comunica normalmente com o site auditado e com os recursos que esse site carregar. Essas comunicações são determinadas pelo próprio site e estão sujeitas às políticas dele, não à Audita Acessibilidade.
 
 ## 4. Armazenamento e retenção
 
@@ -43,7 +45,7 @@ Os dados são usados somente para:
 - permitir revisão humana de itens não automatizáveis;
 - gerar e baixar os relatórios.
 
-Audita MT não vende, aluga ou compartilha esses dados com terceiros. Os dados não são usados para publicidade, perfil comportamental, avaliação de crédito ou qualquer finalidade incompatível com a auditoria de acessibilidade.
+Audita Acessibilidade não vende, aluga ou compartilha esses dados com terceiros. Os dados não são usados para publicidade, perfil comportamental, avaliação de crédito ou qualquer finalidade incompatível com a auditoria de acessibilidade.
 
 O usuário controla o compartilhamento posterior dos relatórios que baixar.
 
@@ -80,4 +82,4 @@ Alterações materiais desta política serão acompanhadas de nova data e versã
 
 ## 10. Contato
 
-Solicitações sobre privacidade, suporte ou exclusão de dados podem ser enviadas pelo endereço público de contato do desenvolvedor exibido na página da Audita MT na Chrome Web Store.
+Solicitações sobre privacidade, suporte ou exclusão de dados podem ser enviadas pelo endereço público de contato do desenvolvedor exibido na página da Audita Acessibilidade na Chrome Web Store.

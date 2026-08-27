@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(await readFile(join(root, 'manifest.json'), 'utf8'));
-const output = join(root, 'release', `audita-mt-${manifest.version}.zip`);
+const output = join(root, 'release', `audita-acessibilidade-${manifest.version}.zip`);
 const staging = await mkdtemp(join(tmpdir(), 'audita-mt-release-'));
 const releaseTimestamp = new Date('2026-08-27T00:00:00.000Z');
 

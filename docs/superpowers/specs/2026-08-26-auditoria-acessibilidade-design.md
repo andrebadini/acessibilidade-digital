@@ -1,4 +1,4 @@
-# Audita MT — especificação de desenho
+# Audita Acessibilidade — especificação de desenho
 
 Data: 26 de agosto de 2026  
 Público principal: pessoas responsáveis por avaliações de acessibilidade, inclusive sem formação técnica
@@ -7,7 +7,7 @@ Base normativa: WCAG 2.2 e ABNT NBR 17225:2025
 
 ## 1. Objetivo e limites da alegação
 
-Audita MT será uma extensão Manifest V3, feita somente com HTML, CSS e JavaScript empacotados. A pessoa operadora informará uma URL e receberá uma auditoria local, acompanhada de evidências reproduzíveis e relatórios HTML e PDF.
+Audita Acessibilidade será uma extensão Manifest V3, feita somente com HTML, CSS e JavaScript empacotados. A pessoa operadora informará uma URL e receberá uma auditoria local, acompanhada de evidências reproduzíveis e relatórios HTML e PDF.
 
 O produto buscará automaticamente todas as falhas que possam ser determinadas com segurança a partir do DOM, CSS calculado, árvore de acessibilidade, comportamento observado e pixels renderizados. Ele não apresentará ausência de falhas automáticas como prova de conformidade integral. Cada verificação terá um destes resultados:
 
@@ -158,7 +158,7 @@ O painel terá uma única ação principal. A linguagem será direta: “Endere�
 
 **Supersessão de identidade (26 de agosto de 2026):** a decisão anterior de associar o produto a uma identidade externa foi substituída integralmente por identidade tipográfica própria e neutra.
 
-Painel, relatório e artefatos usarão somente “Audita MT” e a descrição “Auditoria independente de acessibilidade”, sem imagem de marca. Um aviso visível declara que a ferramenta é independente, sem vínculo institucional, e que seus resultados não equivalem a certificação nem a laudo oficial.
+Painel, relatório e artefatos usarão somente “Audita Acessibilidade” e a descrição “Auditoria independente de acessibilidade”, sem imagem de marca. Um aviso visível declara que a ferramenta é independente, sem vínculo institucional, e que seus resultados não equivalem a certificação nem a laudo oficial.
 
 A paleta do produto manterá azul principal, branco, cinzas neutros e cores semânticas que não dependam apenas de cor. O próprio painel e os relatórios deverão atender WCAG 2.2 AA.
 

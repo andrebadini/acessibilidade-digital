@@ -83,10 +83,10 @@ test('validates coherent methodology and the optional normative editorial record
   };
   assert.doesNotThrow(() => createAuditModel(reportInput({ normative })));
   for (const methodology of [
-    { name: 'Audita MT', version: '1.0.0', ruleCount: 129, itemCount: 146 },
-    { name: 'Audita MT', version: '9.9.9', ruleCount: 130, itemCount: 146 },
-    { name: 'Audita MT ', version: '1.0.0', ruleCount: 130, itemCount: 146 },
-    { name: 'Audita MT', version: '1.0.0', ruleCount: 130, itemCount: 145 },
+    { name: 'Audita Acessibilidade', version: '1.0.0', ruleCount: 129, itemCount: 146 },
+    { name: 'Audita Acessibilidade', version: '9.9.9', ruleCount: 130, itemCount: 146 },
+    { name: 'Audita Acessibilidade ', version: '1.0.0', ruleCount: 130, itemCount: 146 },
+    { name: 'Audita Acessibilidade', version: '1.0.0', ruleCount: 130, itemCount: 145 },
   ]) assert.throws(() => createAuditModel(reportInput({ methodology })), /metodologia|methodology|regra|item|versão|canôn/i);
 
   const alteredNote = structuredClone(normative);

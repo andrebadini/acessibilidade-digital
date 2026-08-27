@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 const root = new URL('../', import.meta.url);
-const output = new URL('../release/audita-mt-1.0.0.zip', import.meta.url);
+const output = new URL('../release/audita-acessibilidade-1.0.1.zip', import.meta.url);
 
 function build() {
   const result = spawnSync(process.execPath, ['scripts/build-release.mjs'], {

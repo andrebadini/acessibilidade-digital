@@ -20,7 +20,7 @@ import { normalizeAuditUrl } from '../core/url.js';
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
 
 const SCHEMA_VERSION = 1;
-const METHODOLOGY = Object.freeze({ name: 'Audita MT — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 130, itemCount: 146 });
+const METHODOLOGY = Object.freeze({ name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 130, itemCount: 146 });
 
 function deepFreeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value) || Object.isFrozen(value)) return value;

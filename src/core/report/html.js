@@ -29,7 +29,7 @@ export function renderHtmlReport(input) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
-<title>Relatório de auditoria — Audita MT</title>
+<title>Relatório de auditoria — Audita Acessibilidade</title>
 <style>${REPORT_CSS}</style>
 </head>
 <body>
@@ -53,13 +53,13 @@ ${editorial(model)}
 ${foundation(model)}
 ${integrity(model)}
 </main>
-<footer class="report-footer"><p>Audita MT — relatório local da auditoria ${escapeHtml(model.auditId)}.</p><p>Gerado em ${escapeHtml(model.timestamps.generatedAt)} (${escapeHtml(model.timezone)}).</p></footer>
+<footer class="report-footer"><p>Audita Acessibilidade — relatório local da auditoria ${escapeHtml(model.auditId)}.</p><p>Gerado em ${escapeHtml(model.timestamps.generatedAt)} (${escapeHtml(model.timezone)}).</p></footer>
 </body>
 </html>`;
 }
 
 function header() {
-  return '<header class="report-header"><div class="report-header__inner"><p class="product-name">Audita MT</p><p class="product-description">Auditoria independente de acessibilidade</p></div></header>';
+  return '<header class="report-header"><div class="report-header__inner"><p class="product-name">Audita Acessibilidade</p><p class="product-description">Auditoria independente de acessibilidade</p></div></header>';
 }
 
 function summary(model, counts) {

@@ -1,8 +1,8 @@
-# Audita MT Reporting Implementation Plan
+# Audita Acessibilidade Reporting Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Gerar relatórios HTML/PDF/JSON auditáveis, aplicar a identidade neutra do Audita MT e concluir a integração e a verificação do produto.
+**Goal:** Gerar relatórios HTML/PDF/JSON auditáveis, aplicar a identidade neutra do Audita Acessibilidade e concluir a integração e a verificação do produto.
 
 **Supersessão de identidade (26 de agosto de 2026):** qualquer decisão anterior de associar o produto a uma identidade externa foi substituída por apresentação tipográfica própria, sem imagem de marca, com aviso explícito de independência e ausência de certificação oficial.
 
@@ -16,7 +16,7 @@
 
 - HTML legível sem JavaScript e navegável por teclado.
 - PDF e HTML derivam do mesmo modelo, sem divergência de achados.
-- Identidade tipográfica: “Audita MT” e “Auditoria independente de acessibilidade”, sem imagem de marca externa.
+- Identidade tipográfica: “Audita Acessibilidade” e “Auditoria independente de acessibilidade”, sem imagem de marca externa.
 - Painel e relatório declaram que a ferramenta é independente, sem vínculo institucional e sem equivaler a certificação ou laudo oficial.
 - O relatório sempre declara escopo, limitações e que o relógio local não é carimbo certificado.
 
@@ -121,7 +121,7 @@ git commit -m "feat: render self-contained accessible reports"
 - Create: `test/report/identity.test.js`
 
 **Interfaces:**
-- Produz cabeçalho tipográfico local, sem imagem: “Audita MT” e “Auditoria independente de acessibilidade”.
+- Produz cabeçalho tipográfico local, sem imagem: “Audita Acessibilidade” e “Auditoria independente de acessibilidade”.
 
 - [ ] **Step 1: Definir identidade tipográfica neutra**
 
@@ -149,7 +149,7 @@ Expected: PASS.
 
 ```bash
 git add assets src/panel src/core/report/html.js test/report
-git commit -m "feat: apply neutral Audita MT report identity"
+git commit -m "feat: apply neutral Audita Acessibilidade report identity"
 ```
 
 ### Task 4: PDF e downloads automáticos
@@ -233,5 +233,5 @@ Load the unpacked extension, audit the local fixture server and uma URL pública
 
 ```bash
 git add README.md docs/USO-FISCAL.md fixtures test/integration scripts
-git commit -m "test: verify complete Audita MT workflow"
+git commit -m "test: verify complete Audita Acessibilidade workflow"
 ```

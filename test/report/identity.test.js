@@ -20,13 +20,13 @@ test('renders a neutral independent identity in the real HTML and technical JSON
   const html = renderHtmlReport(SAMPLE_AUDIT);
   const json = renderTechnicalJson(SAMPLE_AUDIT);
   const technical = JSON.parse(json);
-  assert.match(html, /<header[^>]*>[\s\S]*Audita MT[\s\S]*Auditoria independente de acessibilidade[\s\S]*<\/header>/iu);
+  assert.match(html, /<header[^>]*>[\s\S]*Audita Acessibilidade[\s\S]*Auditoria independente de acessibilidade[\s\S]*<\/header>/iu);
   assert.match(html, /ferramenta independente[^.]*sem vínculo institucional[^.]*não (?:é|equivale a) (?:uma? )?(?:certificação|laudo oficial)/iu);
   assert.doesNotMatch(`${html}\n${json}`, forbiddenIdentity);
   const reportHeader = html.match(/<header[^>]*>[\s\S]*?<\/header>/iu)?.[0] ?? '';
   assert.doesNotMatch(reportHeader, /brand-logo|<img\b/iu);
   assert.deepEqual(technical.identity, {
-    name: 'Audita MT',
+    name: 'Audita Acessibilidade',
     description: 'Auditoria independente de acessibilidade',
     independent: true,
     disclaimer: 'Ferramenta independente, sem vínculo institucional; não equivale a certificação nem a laudo oficial.',
@@ -58,7 +58,7 @@ test('keeps the panel action-first with neutral identity and the existing AA pal
   const html = await read('src/panel/index.html');
   const css = await read('src/panel/panel.css');
   assert.equal((html.match(/<h1\b/giu) || []).length, 1);
-  assert.match(html, /Audita MT/iu);
+  assert.match(html, /Audita Acessibilidade/iu);
   assert.match(html, /Auditoria independente de acessibilidade/iu);
   assert.match(html, /ferramenta independente[^.]*sem vínculo institucional/iu);
   assert.doesNotMatch(html, /<img\b|\.\.\/\.\.\/assets\//iu);
