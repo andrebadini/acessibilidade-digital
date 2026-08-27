@@ -9,6 +9,7 @@ import { runRules } from './rules/run-rules.js';
 import { STRUCTURE_RULES } from './rules/structure.js';
 import { VISUAL_RULES } from './rules/visual.js';
 import { assertSnapshotV1 } from './snapshot-schema.js';
+import { validateNormalizedAxeSupplemental } from './axe/validate-supplemental.js';
 
 const RULE_FAMILIES = Object.freeze([
   STRUCTURE_RULES,
@@ -97,20 +98,6 @@ function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function supplementalOccurrenceCanAffectItem(occurrence, ruleById) {
-  if (!occurrence || typeof occurrence !== 'object' || typeof occurrence.nbrItemRef !== 'string') return false;
-  const rule = ruleById.get(occurrence.ruleId);
-  if (!rule || !Array.isArray(rule.nbrItems) || !rule.nbrItems.includes(occurrence.nbrItemRef)) return false;
-  if (occurrence.outcome === 'cantTell') return true;
-  const item = NBR17225_ITEMS.find(entry => entry.id === occurrence.nbrItemRef);
-  return occurrence.outcome === 'failed' && occurrence.source?.engine === 'axe-core' &&
-    occurrence.applicabilityEvidence?.confirmed === true &&
-    occurrence.applicabilityEvidence?.nbrItemRef === occurrence.nbrItemRef &&
-    occurrence.applicabilityEvidence?.source?.engine === 'audita-core' &&
-    occurrence.applicabilityEvidence?.source?.version === '1.0.0' &&
-    item?.ruleIds.includes(occurrence.applicabilityEvidence?.source?.ruleId);
-}
-
 /**
  * Adds sanitized supplemental rule records while the ABNT item registry stays
  * authoritative. A pass is summary-only and can never enter this boundary.
@@ -119,16 +106,14 @@ export function mergeAxeSupplementalResults(coreAudit, supplemental) {
   if (!coreAudit || typeof coreAudit !== 'object' || !Array.isArray(coreAudit.ruleResults) || !Array.isArray(coreAudit.itemResults)) {
     throw new TypeError('O resultado do motor próprio é inválido.');
   }
-  const incomingRules = Array.isArray(supplemental?.ruleResults)
-    ? supplemental.ruleResults.filter(rule => rule && typeof rule === 'object' && rule.outcome !== 'passed')
-    : [];
+  const validated = validateNormalizedAxeSupplemental(supplemental, { rulesVersion: '1.0.0' });
+  const incomingRules = validated.ruleResults;
   const existingIds = new Set(coreAudit.ruleResults.map(rule => rule.ruleId));
   const supplementalRules = incomingRules.filter(rule => typeof rule.ruleId === 'string' &&
     rule.ruleId.startsWith('axe.') && !existingIds.has(rule.ruleId));
-  const ruleById = new Map(supplementalRules.map(rule => [rule.ruleId, rule]));
   const occurrenceOutcomes = new Map();
-  for (const occurrence of Array.isArray(supplemental?.occurrences) ? supplemental.occurrences : []) {
-    if (!supplementalOccurrenceCanAffectItem(occurrence, ruleById)) continue;
+  for (const occurrence of validated.occurrences) {
+    if (!occurrence.nbrItemRef) continue;
     const previous = occurrenceOutcomes.get(occurrence.nbrItemRef);
     if (occurrence.outcome === 'failed' || previous !== 'failed') {
       occurrenceOutcomes.set(occurrence.nbrItemRef, occurrence.outcome);

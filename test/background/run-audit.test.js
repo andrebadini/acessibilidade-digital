@@ -340,6 +340,65 @@ test('integrates a confirmed top-frame axe violation with provenance, ABNT outco
   assert.equal(reportOccurrence.confidence, 'high');
   assert.deepEqual(reportOccurrence.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v1' });
   assert.equal(reportOccurrence.foreignBenchmarkRefs[0].benchmarkId, 'us.revised-508.wcag20-aa.v1');
+
+  const mutations = [
+    value => { value.ruleResults.find(rule => rule.source?.engine === 'axe-core').summary = 'Prontuário privado Oliveira'; },
+    value => { value.occurrences.find(item => item.source?.engine === 'axe-core').justification = 'Prontuário privado Oliveira'; },
+    value => { value.itemResults.find(item => item.id === '5.13.2').outcome = 'cantTell'; },
+    value => {
+      const rule = value.ruleResults.find(item => item.source?.engine === 'axe-core');
+      const occurrence = value.occurrences.find(item => item.source?.engine === 'axe-core');
+      const normalizedRule = value.axe.ruleResults[0];
+      const normalizedOccurrence = value.axe.occurrences[0];
+      for (const target of [rule, normalizedRule]) {
+        target.ruleId = 'axe.fake-rule'; target.engineRuleId = 'fake-rule';
+        target.source.ruleId = 'axe.fake-rule'; target.source.engineRuleId = 'fake-rule';
+      }
+      for (const target of [occurrence, normalizedOccurrence]) {
+        target.ruleId = 'axe.fake-rule'; target.engineRuleId = 'fake-rule';
+        target.source.ruleId = 'axe.fake-rule'; target.source.engineRuleId = 'fake-rule';
+      }
+    },
+  ];
+  for (const mutate of mutations) {
+    const forged = structuredClone(model);
+    mutate(forged);
+    await assert.rejects(enrichAuditForReport(forged, {
+      now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+      manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+    }), /axe|suplement|autoritativ|diverge|inválid/i);
+  }
+});
+
+test('rejects a forged failed item when validated axe evidence is only cantTell', async () => {
+  const axeRun = {
+    status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],
+    frames: [{ frameId: 0, status: 'success', result: {
+      violations: [],
+      incomplete: [{ id: 'document-title', impact: 'serious', nodes: [{ impact: 'serious', target: ['html'] }] }],
+      passes: [], inapplicable: [],
+    } }],
+  };
+  const model = await runAudit({
+    url: 'https://example.test/', chromeAdapter: fakeAdapter({ axeRun }),
+    now: clock, idFactory: () => 'audit-axe-cant-tell',
+  });
+  assert.equal(model.itemResults.find(item => item.id === '5.13.1').outcome, 'cantTell');
+  const enrichOptions = {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  };
+  await assert.doesNotReject(enrichAuditForReport(model, enrichOptions));
+  const forged = structuredClone(model);
+  forged.itemResults.find(item => item.id === '5.13.1').outcome = 'failed';
+  await assert.rejects(enrichAuditForReport(forged, enrichOptions), /autoritativ|diverge|axe|inválid/i);
+
+  const forgedReview = structuredClone(model);
+  Object.assign(forgedReview.itemResults.find(item => item.id === '5.13.1'), {
+    originalOutcome: 'cantTell', reviewedOutcome: 'failed', outcome: 'failed',
+    review: { mode: 'assisted', evaluator: 'forjado', decidedAt: '2026-08-26T15:00:00.000Z', decisionIds: [] },
+  });
+  await assert.rejects(enrichAuditForReport(forgedReview, enrichOptions), /revis|decis|diverge/i);
 });
 
 test('keeps the Audita core running when axe throws and records a bounded partial diagnostic', async () => {

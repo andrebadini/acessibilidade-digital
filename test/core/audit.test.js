@@ -7,6 +7,15 @@ import {
   runCoreAudit,
   validateCoreRuleComposition
 } from '../../src/core/index.js';
+import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
+import { normalizeAxeResults } from '../../src/core/axe/normalize-axe-results.js';
+
+function normalizedSupplemental({ violations = [], incomplete = [], snapshot: axeSnapshot = snapshot() } = {}) {
+  return structuredClone(normalizeAxeResults({
+    status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],
+    frames: [{ frameId: 0, status: 'success', result: { violations, incomplete, passes: [], inapplicable: [] } }],
+  }, { pageId: 'page-1', snapshot: axeSnapshot, rulesVersion: '1.0.0' }));
+}
 
 function snapshot() {
   return {
@@ -54,24 +63,10 @@ test('public audit aborts before execution for invalid snapshot or composition',
 test('merges supplemental axe failures conservatively without treating passes as ABNT approval', async () => {
   const core = await runCoreAudit(snapshot());
   const original = structuredClone(core);
-  const merged = mergeAxeSupplementalResults(core, {
-    status: 'complete',
-    ruleResults: [{
-      ruleId: 'axe.html-has-lang', outcome: 'failed', mode: 'automated', targets: [{ selector: 'html' }],
-      summary: 'Idioma principal ausente.', limitations: [], nbrItems: ['5.13.2'], wcag: ['3.1.1'],
-      classification: 'requirement', impact: 'serious', confidence: 'high',
-      source: { engine: 'axe-core', ruleId: 'axe.html-has-lang', version: '4.13.0', engineRuleId: 'html-has-lang' },
-    }],
-    occurrences: [{
-      outcome: 'failed', nbrItemRef: '5.13.2', ruleId: 'axe.html-has-lang',
-      source: { engine: 'axe-core', ruleId: 'axe.html-has-lang', version: '4.13.0' },
-      applicabilityEvidence: {
-        confirmed: true, nbrItemRef: '5.13.2',
-        source: { engine: 'audita-core', ruleId: 'page-language', version: '1.0.0' },
-      },
-    }],
-    technicalSummary: { passes: { groups: 7, nodes: 14 } },
-  });
+  const merged = mergeAxeSupplementalResults(core, normalizedSupplemental({
+    violations: [{ id: 'html-has-lang', impact: 'serious', nodes: [{ impact: 'serious', target: ['html'] }] }],
+    snapshot: { document: { language: '' }, nodes: [] },
+  }));
 
   assert.deepEqual(core, original);
   assert.equal(merged.ruleResults.length, 131);
@@ -84,17 +79,10 @@ test('merges supplemental axe failures conservatively without treating passes as
 test('mapped axe cantTell can block an ABNT pass but an unmapped finding cannot change items', async () => {
   const core = structuredClone(await runCoreAudit(snapshot()));
   core.itemResults.find(item => item.id === '5.13.10').outcome = 'passed';
-  const merged = mergeAxeSupplementalResults(core, {
-    status: 'complete',
-    ruleResults: [
-      { ruleId: 'axe.button-name', outcome: 'cantTell', mode: 'automated', targets: [], summary: '', limitations: [], nbrItems: ['5.13.10'] },
-      { ruleId: 'axe.custom', outcome: 'failed', mode: 'automated', targets: [], summary: '', limitations: [], nbrItems: [] },
-    ],
-    occurrences: [
-      { outcome: 'cantTell', nbrItemRef: '5.13.10', ruleId: 'axe.button-name' },
-      { outcome: 'failed', nbrItemRef: null, ruleId: 'axe.custom' },
-    ],
-  });
+  const merged = mergeAxeSupplementalResults(core, normalizedSupplemental({
+    violations: [{ id: 'custom', impact: 'minor', nodes: [{ target: ['main'] }] }],
+    incomplete: [{ id: 'button-name', impact: 'serious', nodes: [{ target: ['button'] }] }],
+  }));
 
   assert.equal(merged.itemResults.find(item => item.id === '5.13.10').outcome, 'cantTell');
   assert.equal(merged.itemResults.filter(item => item.outcome === 'failed').length,
@@ -103,26 +91,36 @@ test('mapped axe cantTell can block an ABNT pass but an unmapped finding cannot 
 
 test('rejects forged applicability proof from an unrelated core rule or rules version', async () => {
   const core = await runCoreAudit(snapshot());
-  const makeSupplemental = applicabilityEvidence => ({
-    ruleResults: [{
-      ruleId: 'axe.html-has-lang', outcome: 'failed', mode: 'automated', targets: [], summary: '', limitations: [],
-      nbrItems: ['5.13.2'], source: { engine: 'axe-core', ruleId: 'axe.html-has-lang', version: '4.13.0' },
-    }],
-    occurrences: [{
-      outcome: 'failed', nbrItemRef: '5.13.2', ruleId: 'axe.html-has-lang',
-      source: { engine: 'axe-core', ruleId: 'axe.html-has-lang', version: '4.13.0' },
-      applicabilityEvidence,
-    }],
-  });
+  const makeSupplemental = applicabilityEvidence => {
+    const supplemental = normalizedSupplemental({
+      violations: [{ id: 'html-has-lang', impact: 'serious', nodes: [{ target: ['html'] }] }],
+      snapshot: { document: { language: '' }, nodes: [] },
+    });
+    supplemental.occurrences[0].applicabilityEvidence = applicabilityEvidence;
+    return supplemental;
+  };
   const wrongRule = mergeAxeSupplementalResults(core, makeSupplemental({
-    confirmed: true, nbrItemRef: '5.13.2',
+    confirmed: true, pageId: 'page-1', frameId: 0, target: 'html', nbrItemRef: '5.13.2',
     source: { engine: 'audita-core', ruleId: 'content-image-alternative', version: '1.0.0' },
   }));
   const wrongVersion = mergeAxeSupplementalResults(core, makeSupplemental({
-    confirmed: true, nbrItemRef: '5.13.2',
+    confirmed: true, pageId: 'page-1', frameId: 0, target: 'html', nbrItemRef: '5.13.2',
     source: { engine: 'audita-core', ruleId: 'page-language', version: '99.0.0' },
   }));
 
   assert.notEqual(wrongRule.itemResults.find(item => item.id === '5.13.2').outcome, 'failed');
   assert.notEqual(wrongVersion.itemResults.find(item => item.id === '5.13.2').outcome, 'failed');
+});
+
+test('merge drops the whole hostile axe cluster without persisting private prose', async () => {
+  const core = await runCoreAudit(snapshot());
+  const hostile = normalizedSupplemental({
+    incomplete: [{ id: 'button-name', impact: 'serious', nodes: [{ target: ['button'] }] }],
+  });
+  hostile.ruleResults[0].privateText = 'Família Oliveira prontuário confidencial';
+  hostile.occurrences[0].justification = 'Família Oliveira prontuário confidencial';
+
+  const merged = mergeAxeSupplementalResults(core, hostile);
+  assert.equal(merged.composition.supplementalRuleCount, 0);
+  assert.doesNotMatch(JSON.stringify(merged), /Oliveira|prontuário/iu);
 });

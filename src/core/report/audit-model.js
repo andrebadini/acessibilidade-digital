@@ -11,6 +11,8 @@ import {
 } from '../result.js';
 import { createReviewDecision, REVIEW_MODES } from '../review/decisions.js';
 import { canonicalStringify } from './canonical-json.js';
+import { validateNormalizedAxeSupplemental } from '../axe/validate-supplemental.js';
+import { aggregateItems } from '../rules/aggregate-items.js';
 
 const SESSION_STATUSES = new Set(['complete', 'partial', 'failed', 'cancelled']);
 const REVIEW_STATUSES = new Set(['unanswered', 'answered']);
@@ -30,6 +32,7 @@ export function createAuditModel(input) {
   const source = JSON.parse(canonicalStringify(input));
   const model = source.schemaVersion === 1 ? migrateV1Record(source) : source;
   if (model.schemaVersion !== 2) throw new TypeError('schemaVersion de relatório inválida.');
+  const validatedAxe = assertAxeSupplementalIntegrity(model, model.versions?.rules ?? model.methodology?.version);
   requiredId(model.auditId, 'auditId');
   validateRequestedScope(model.requestedScope);
   const pageById = validatePages(model.pages);
@@ -59,6 +62,7 @@ export function createAuditModel(input) {
   }
   const graph = validateEvidenceAndOccurrences(model, ruleById, pageById);
   const reviewGraph = validateReview(model, graph);
+  validateAxeItemAggregation(model, validatedAxe, reviewGraph);
   validatePassedItemAuthority(model.itemResults, ruleById, reviewGraph);
   validateNormative(model.normative);
   return deepFreeze(model);
@@ -72,6 +76,7 @@ export function migrateAuditV1ToV2(input) {
 }
 
 function migrateV1Record(model) {
+  assertAxeSupplementalIntegrity(model, model.versions?.rules ?? model.methodology?.version);
   const pageId = V1_MIGRATION_DEFAULTS.pageId;
   const requestedUrl = sanitizeResourceUrl(model.requestedUrl);
   const finalUrl = sanitizeResourceUrl(model.finalUrl);
@@ -176,6 +181,97 @@ function migrateV1Record(model) {
     evidenceStateCount: Array.isArray(model.evidence) ? model.evidenceStateCount ?? 0 : model.evidence?.stateCount ?? 0,
     integrity: model.integrity ?? { algorithm: 'unavailable', status: 'not-recorded-v1' },
   };
+}
+
+function axeRulesFrom(model) {
+  return Array.isArray(model.ruleResults)
+    ? model.ruleResults.filter(rule => rule?.source?.engine === 'axe-core' || String(rule?.ruleId ?? '').startsWith('axe.'))
+    : [];
+}
+
+function axeOccurrencesFrom(model) {
+  return Array.isArray(model.occurrences)
+    ? model.occurrences.filter(occurrence => occurrence?.source?.engine === 'axe-core' || String(occurrence?.ruleId ?? '').startsWith('axe.'))
+    : [];
+}
+
+function authoritativeAxeOccurrence(value) {
+  return {
+    occurrenceId: value.occurrenceId, pageId: value.pageId, ruleId: value.ruleId,
+    engineRuleId: value.engineRuleId, outcome: value.outcome,
+    itemId: value.itemId ?? value.nbrItemRef, nbrItemRef: value.nbrItemRef ?? value.itemId,
+    classification: value.classification, impact: value.impact, confidence: value.confidence,
+    source: value.source,
+    wcagRefs: value.wcagRefs, foreignBenchmarkRefs: value.foreignBenchmarkRefs,
+    equivalenceKey: value.equivalenceKey,
+    presentationTargetKey: value.presentationTargetKey,
+    mode: value.mode, nodeId: value.nodeId, selector: value.selector, framePath: value.framePath,
+    target: value.target, accessiblePreview: value.accessiblePreview,
+    justification: value.justification,
+    applicabilityEvidence: value.applicabilityEvidence ?? null,
+    legalAnalysis: value.legalAnalysis ?? null,
+  };
+}
+
+function assertAxeSupplementalIntegrity(model, rulesVersion) {
+  const reportRules = axeRulesFrom(model);
+  const reportOccurrences = axeOccurrencesFrom(model);
+  if (reportRules.length === 0 && reportOccurrences.length === 0) return null;
+  const checked = validateNormalizedAxeSupplemental(model.axe, { rulesVersion });
+  if (checked.errors.length > 0) throw new TypeError(`Suplemento axe inválido: ${checked.errors.join('; ')}`);
+  if (reportRules.length !== checked.ruleResults.length || reportOccurrences.length !== checked.occurrences.length) {
+    throw new TypeError('Suplemento axe do relatório diverge do cluster normalizado.');
+  }
+  const checkedRules = new Map(checked.ruleResults.map(rule => [rule.ruleId, rule]));
+  for (const rule of reportRules) {
+    const expected = checkedRules.get(rule.ruleId);
+    const fields = value => ({
+      ruleId: value?.ruleId, engineRuleId: value?.engineRuleId, outcome: value?.outcome, mode: value?.mode,
+      nbrItems: value?.nbrItems, wcag: value?.wcag, classification: value?.classification,
+      impact: value?.impact, confidence: value?.confidence, source: value?.source,
+      summary: value?.summary, targets: value?.targets, limitations: value?.limitations,
+    });
+    if (!expected || canonicalStringify(fields(rule)) !== canonicalStringify(fields(expected))) {
+      throw new TypeError(`Regra suplementar ${rule.ruleId} diverge do cluster axe validado.`);
+    }
+  }
+  const checkedOccurrences = new Map(checked.occurrences.map(value => [value.occurrenceId, value]));
+  for (const occurrence of reportOccurrences) {
+    const expected = checkedOccurrences.get(occurrence.occurrenceId);
+    if (!expected || canonicalStringify(authoritativeAxeOccurrence(occurrence)) !== canonicalStringify(authoritativeAxeOccurrence(expected))) {
+      throw new TypeError(`Ocorrência suplementar ${occurrence.occurrenceId} diverge do cluster axe validado.`);
+    }
+  }
+  return checked;
+}
+
+function validateAxeItemAggregation(model, checked, reviewGraph) {
+  if (!checked) return;
+  const coreRules = (model.ruleResults ?? []).filter(rule => rule?.source?.engine !== 'axe-core');
+  const aggregate = new Map(aggregateItems(coreRules, NBR17225_ITEMS).map(item => [item.id, item.outcome]));
+  for (const occurrence of checked.occurrences) {
+    if (!occurrence.nbrItemRef) continue;
+    const previous = aggregate.get(occurrence.nbrItemRef);
+    if (occurrence.outcome === 'failed' || (occurrence.outcome === 'cantTell' && previous !== 'failed')) {
+      aggregate.set(occurrence.nbrItemRef, occurrence.outcome);
+    }
+  }
+  for (const item of model.itemResults ?? []) {
+    const expected = aggregate.get(item.id);
+    if (!expected) continue;
+    if (item.reviewedOutcome === undefined) {
+      if (item.outcome === expected) continue;
+      throw new TypeError(`Resultado do item ${item.id} diverge das fontes autoritativas aceitas.`);
+    }
+    const queue = [...reviewGraph.queueByOccurrence.entries()].filter(([, entry]) => entry.itemId === item.id);
+    const decisions = queue.map(([occurrenceId]) => reviewGraph.decisionByOccurrence.get(occurrenceId)).filter(Boolean);
+    let reviewedExpected = 'cantTell';
+    if (expected === 'failed' || decisions.some(decision => decision.answer === 'não conforme')) reviewedExpected = 'failed';
+    else if (queue.length > 0 && decisions.length === queue.length && decisions.every(decision => decision.answer === 'conforme')) reviewedExpected = 'passed';
+    if (item.originalOutcome !== expected || item.reviewedOutcome !== reviewedExpected || item.outcome !== reviewedExpected) {
+      throw new TypeError(`Revisão do item ${item.id} diverge das fontes e decisões validadas.`);
+    }
+  }
 }
 
 /** Privacy boundary for persisted evidence metadata; embedded image payloads remain evidence content. */

@@ -220,3 +220,56 @@ test('bounds huge sparse arrays before allocation and never invokes a frame resu
   assert.deepEqual(normalized.occurrences, []);
   assert.ok(normalized.diagnostics.some(item => item.code === 'AXE_RESULTS_TRUNCATED'));
 });
+
+test('derives partial coverage from frame topology, diagnostics, duplicates and adapter truncation', () => {
+  const input = runResult();
+  input.status = 'complete';
+  input.diagnostics = [{ code: 'AXE_TIMEOUT', frameId: null }];
+  input.frames.push({ frameId: 0, status: 'success', result: input.frames[0].result });
+  input.frames.push({ frameId: 2, status: 'failed' });
+  input.frames.push({ frameId: 3, status: 'missing' });
+  input.frames[0].result.truncation = {
+    violations: { original: 101, retained: 100, truncated: true },
+  };
+
+  const normalized = normalizeAxeResults(input, { pageId: 'page-1' });
+
+  assert.equal(normalized.status, 'partial');
+  assert.match(normalized.limitations.join(' '), /parcial|truncad|frame/i);
+  assert.ok(normalized.diagnostics.some(item => item.code === 'AXE_FRAME_DUPLICATE'));
+  assert.ok(normalized.diagnostics.some(item => item.code === 'AXE_FRAME_FAILED'));
+  assert.ok(normalized.diagnostics.some(item => item.code === 'AXE_FRAME_MISSING'));
+  assert.ok(normalized.diagnostics.some(item => item.code === 'AXE_RESULTS_TRUNCATED'));
+  assert.equal(new Set(normalized.occurrences.map(item => item.occurrenceId)).size, normalized.occurrences.length);
+  assert.equal(normalized.technicalSummary.violations.groups, 3, 'duplicate frame is deterministically collapsed');
+});
+
+test('never invokes nested target index accessors and contains revoked proxies', () => {
+  let getterCalls = 0;
+  const nested = [];
+  Object.defineProperty(nested, '0', {
+    enumerable: true,
+    get() { getterCalls += 1; throw new Error('nested page getter executed'); },
+  });
+  nested.length = 1;
+  const { proxy, revoke } = Proxy.revocable([], {});
+  revoke();
+  const input = runResult();
+  input.frames[0].result.violations[0].nodes[0].target = [nested];
+  input.frames[0].result.violations[1].nodes[0].target = proxy;
+
+  let normalized;
+  assert.doesNotThrow(() => { normalized = normalizeAxeResults(input, { pageId: 'page-1' }); });
+  assert.equal(getterCalls, 0);
+  assert.equal(normalized.occurrences.find(item => item.engineRuleId === 'image-alt').selector, '[target-unavailable]');
+  assert.equal(normalized.occurrences.find(item => item.engineRuleId === 'html-has-lang').selector, '[target-unavailable]');
+});
+
+test('treats a success frame with a missing result record as partial coverage', () => {
+  const normalized = normalizeAxeResults({
+    status: 'complete', provenance: PROVENANCE, diagnostics: [],
+    frames: [{ frameId: 0, status: 'success' }],
+  }, { pageId: 'page-1' });
+  assert.equal(normalized.status, 'partial');
+  assert.ok(normalized.diagnostics.some(item => item.code === 'AXE_FRAME_RESULT_INVALID'));
+});

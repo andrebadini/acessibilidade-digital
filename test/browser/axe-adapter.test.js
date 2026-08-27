@@ -226,9 +226,9 @@ test('allows only catalog metadata and narrow structural selectors across the ra
 
   assert.equal(raw.violations.length, 100);
   assert.equal(raw.violations[0].nodes.length, 100);
-  assert.deepEqual(Object.keys(raw).sort(), ['inapplicable', 'incomplete', 'passes', 'violations']);
-  assert.deepEqual(Object.keys(raw.violations[0]).sort(), ['id', 'impact', 'nodes', 'tags']);
-  assert.deepEqual(Object.keys(raw.violations[0].nodes[0]).sort(), ['all', 'any', 'impact', 'none', 'target']);
+  assert.deepEqual(Object.keys(raw).sort(), ['inapplicable', 'incomplete', 'passes', 'truncation', 'violations']);
+  assert.deepEqual(Object.keys(raw.violations[0]).sort(), ['id', 'impact', 'nodes', 'tags', 'truncation']);
+  assert.deepEqual(Object.keys(raw.violations[0].nodes[0]).sort(), ['all', 'any', 'impact', 'none', 'target', 'truncation']);
   assert.deepEqual(Object.keys(raw.violations[0].nodes[0].any[0]).sort(), ['id', 'impact']);
   assert.deepEqual(raw.violations[0].nodes[0].target, [
     'main > button:nth-of-type(2)',
@@ -247,4 +247,7 @@ test('allows only catalog metadata and narrow structural selectors across the ra
     adapter.AXE_TARGET_UNAVAILABLE,
   ]);
   assert.doesNotMatch(JSON.stringify(raw), /TOPSECRET|private\.invalid|remote\.invalid|<input|alice-smith|patient-hiv-positive|project-phoenix|ordinary-class|customer-form|customer-411|javascript:|document\.cookie|person@example|12345678901|a8F3kP9z|failureSummary|description|help|message|"data"/iu);
+  assert.deepEqual(raw.truncation.violations, { original: 120, retained: 100, truncated: true });
+  assert.deepEqual(raw.violations[0].truncation.nodes, { original: 120, retained: 100, truncated: true });
+  assert.deepEqual(raw.violations[0].nodes[0].truncation.any, { original: 1, retained: 1, truncated: false });
 });

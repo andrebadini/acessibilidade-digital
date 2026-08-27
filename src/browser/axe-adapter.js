@@ -94,29 +94,51 @@ function sanitizeCheck(check) {
   };
 }
 
+function boundedCount(value, limit) {
+  const original = Array.isArray(value) ? value.length : 0;
+  const retained = Math.min(original, limit);
+  return { original, retained, truncated: original > limit };
+}
+
 function sanitizeNode(node) {
+  const any = Array.isArray(node?.any) ? node.any : [];
+  const all = Array.isArray(node?.all) ? node.all : [];
+  const none = Array.isArray(node?.none) ? node.none : [];
   return {
     impact: safeImpact(node?.impact),
     target: sanitizeTarget(node?.target),
-    any: (Array.isArray(node?.any) ? node.any : []).slice(0, MAX_CHECKS).map(sanitizeCheck),
-    all: (Array.isArray(node?.all) ? node.all : []).slice(0, MAX_CHECKS).map(sanitizeCheck),
-    none: (Array.isArray(node?.none) ? node.none : []).slice(0, MAX_CHECKS).map(sanitizeCheck),
+    any: any.slice(0, MAX_CHECKS).map(sanitizeCheck),
+    all: all.slice(0, MAX_CHECKS).map(sanitizeCheck),
+    none: none.slice(0, MAX_CHECKS).map(sanitizeCheck),
+    truncation: {
+      any: boundedCount(any, MAX_CHECKS),
+      all: boundedCount(all, MAX_CHECKS),
+      none: boundedCount(none, MAX_CHECKS),
+    },
   };
 }
 
 function sanitizeGroup(group) {
+  const tags = Array.isArray(group?.tags) ? group.tags : [];
+  const nodes = Array.isArray(group?.nodes) ? group.nodes : [];
   return {
     id: safeCatalogIdentifier(group?.id, AXE_CATALOG_ID_UNAVAILABLE),
     impact: safeImpact(group?.impact),
-    tags: (Array.isArray(group?.tags) ? group.tags : []).slice(0, MAX_TAGS).map(tag => safeCatalogIdentifier(tag)).filter(Boolean),
-    nodes: (Array.isArray(group?.nodes) ? group.nodes : []).slice(0, MAX_NODES).map(sanitizeNode),
+    tags: tags.slice(0, MAX_TAGS).map(tag => safeCatalogIdentifier(tag)).filter(Boolean),
+    nodes: nodes.slice(0, MAX_NODES).map(sanitizeNode),
+    truncation: {
+      tags: boundedCount(tags, MAX_TAGS),
+      nodes: boundedCount(nodes, MAX_NODES),
+    },
   };
 }
 
 function sanitizeAxeResults(results) {
-  const output = {};
+  const output = { truncation: {} };
   for (const name of ['violations', 'incomplete', 'passes', 'inapplicable']) {
-    output[name] = (Array.isArray(results?.[name]) ? results[name] : []).slice(0, MAX_GROUPS).map(sanitizeGroup);
+    const groups = Array.isArray(results?.[name]) ? results[name] : [];
+    output[name] = groups.slice(0, MAX_GROUPS).map(sanitizeGroup);
+    output.truncation[name] = boundedCount(groups, MAX_GROUPS);
   }
   return output;
 }
