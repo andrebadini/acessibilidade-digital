@@ -200,9 +200,9 @@ export function createChromeAdapter(chromeApi) {
           if (!documentNodeId || typeof selector !== 'string' || !selector) return null;
           if (!backendBySelector.has(selector)) backendBySelector.set(selector, (async () => {
             try {
-              const selected = await cdp.command('DOM.querySelector', { nodeId: documentNodeId, selector });
-              if (!Number.isSafeInteger(selected?.nodeId)) return null;
-              const described = await cdp.command('DOM.describeNode', { nodeId: selected.nodeId, depth: 0, pierce: true });
+              const selected = await cdp.command('DOM.querySelectorAll', { nodeId: documentNodeId, selector });
+              if (!Array.isArray(selected?.nodeIds) || selected.nodeIds.length !== 1 || !Number.isSafeInteger(selected.nodeIds[0])) return null;
+              const described = await cdp.command('DOM.describeNode', { nodeId: selected.nodeIds[0], depth: 0, pierce: true });
               return Number.isSafeInteger(described?.node?.backendNodeId) ? described.node.backendNodeId : null;
             } catch { return null; }
           })());

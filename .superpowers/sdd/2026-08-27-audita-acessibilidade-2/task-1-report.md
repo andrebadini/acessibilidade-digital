@@ -77,3 +77,30 @@
 - A fixture de integração agora espelha todos os campos de mídia observados pelo coletor corrigido (`kind`, URL sanitizada, duração, mudo, autoplay, controls, faixas e `hasAudio`) e verifica resultado conservador para controles ausentes.
 - A cobertura do adaptador verifica frame, seletor estrutural e o caminho CDP que produz o backend node ID.
 - O ZIP de release regenerado pela suíte foi restaurado e não integra a rodada.
+
+## Fix round 2 — identidade de target-size não ambígua
+
+### Correção
+
+- O adaptador deixou de promover o primeiro retorno de `DOM.querySelector` para `backendNodeId`. Agora usa `DOM.querySelectorAll` e só chama `DOM.describeNode` quando há exatamente um `nodeId`; IDs duplicados e seletores estruturais não únicos permanecem somente com `selector` + `frameId`.
+
+### TDD — RED
+
+`node --test test/background/chrome-adapter.test.js`
+
+- 4/6 passaram; falharam como esperado o caso único (a implementação anterior não consultava `querySelectorAll`) e o caso de `#duplicate` (a implementação anterior emitia indevidamente `backendNodeId: 42`).
+
+### GREEN e verificação
+
+`node --test test/background/chrome-adapter.test.js test/integration/collector-rule-contract.test.js test/core/normalize-probes.test.js`
+
+- 28/28 passaram.
+
+`npm test`
+
+- 379/379 passaram; `fail 0`, duração aproximada de 3,2 s.
+
+### Auto-revisão
+
+- A cobertura de adaptador verifica tanto a promoção por seletor único quanto a retenção conservadora do fallback para um ID DOM duplicado; no caso ambíguo, `DOM.describeNode` não é chamado.
+- O ZIP de release regenerado pela suíte foi restaurado e não integra a rodada.
