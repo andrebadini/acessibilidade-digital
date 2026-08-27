@@ -147,3 +147,25 @@ GREEN final:
 - ZIP rastreado restaurado byte a byte após as duas execuções que o regeneraram: SHA-256 `987acb65524093d0cae4b263277786ab7718d375e53112b4e63bbf0687a56e9a`.
 
 O gate de produção e `target-size` permanecem desativados. Nenhuma Web Store, CDN, telemetria, login, backend, código remoto ou `unsafe-eval` foi alterado.
+
+## Fix round 4 — truncamento após diagnósticos derivados
+
+O normalizador agora reúne primeiro os diagnósticos limitados recebidos do adaptador e todos os diagnósticos derivados da topologia de frames. Uma única autoridade de canonicalização fecha o catálogo, sanitiza, deduplica, ordena e limita o conjunto, além de informar quando entradas únicas foram omitidas. Essa informação ativa o estado parcial e a limitação de truncamento; o marcador `AXE_RESULTS_TRUNCATED` é então inserido e o conjunto é canonicalizado novamente, com retenção determinística do marcador dentro do limite de 64.
+
+O limite foi exercitado em 63, 64 e 65 entradas únicas. Duplicatas, inclusive 64 diagnósticos de frame já presentes entre os 64 diagnósticos do adaptador, não geram truncamento por si só. Quando o marcador ocupa a última vaga de um conjunto cheio, a omissão adicional já está contabilizada no estado truncado. O catálogo fechado, a ordem estável, a unicidade e o limite permanecem inalterados; os resultados normalizados continuam aceitos pelo validador estrito e os testes de payloads forjados/não canônicos continuam rejeitando o cluster.
+
+### Evidência TDD do fix round 4
+
+RED observado antes da implementação:
+
+- 64 diagnósticos `AXE_FRAME_RUN_FAILED` do adaptador, vinculados aos mesmos 64 frames falhos, produziam 64 diagnósticos publicados, nenhum `AXE_FRAME_FAILED`, nenhum `AXE_RESULTS_TRUNCATED`, apenas a limitação parcial e zero erros no validador estrito;
+- 65 candidatos duplicados do adaptador acionavam truncamento somente pelo comprimento bruto, embora nenhuma entrada única fosse omitida.
+
+GREEN final:
+
+- focados (`axe-adapter`, `normalize-axe-results` e `validate-supplemental`): 45/45;
+- `npm test`: 478 aprovados, 0 falhas e 1 skip explícito de E2E MV3/CSP, 479 testes no total;
+- `npm run verify`: exit 0 com os mesmos 478 aprovados/1 skip e confirmação de manifesto/CSP, axe 4.13.0 gated, 130 regras próprias/146 itens, identidade neutra, artefatos e privacidade;
+- ZIP rastreado restaurado byte a byte: SHA-256 `987acb65524093d0cae4b263277786ab7718d375e53112b4e63bbf0687a56e9a`.
+
+O gate axe e `target-size` continuam desativados. Nenhum estado da Web Store ou superfície pública foi alterado.

@@ -228,6 +228,67 @@ test('normalizes reserved diagnostics from a hostile raw adapter into a self-con
   }
 });
 
+test('marks truncation when 64 adapter diagnostics plus 64 frame diagnostics exceed the unique canonical cap', () => {
+  const normalized = normalizeAxeResults({
+    status: 'complete',
+    provenance: PROVENANCE,
+    diagnostics: Array.from({ length: 64 }, (_, index) => ({
+      code: 'AXE_FRAME_RUN_FAILED', frameId: index,
+    })),
+    frames: Array.from({ length: 64 }, (_, frameId) => ({ frameId, status: 'failed' })),
+  }, { pageId: 'page-1' });
+
+  assert.equal(normalized.diagnostics.length, 64);
+  assert.equal(normalized.diagnostics.filter(entry => entry.code === 'AXE_FRAME_RUN_FAILED').length, 63,
+    'the retained marker may displace one diagnostic only after that omission is recorded');
+  assert.ok(normalized.diagnostics.some(entry => entry.code === 'AXE_RESULTS_TRUNCATED'));
+  assert.match(normalized.limitations.join(' '), /truncados/iu);
+  assert.deepEqual(validateNormalizedAxeSupplemental(normalized, { rulesVersion: '1.0.0' }).errors, []);
+});
+
+test('applies the unique diagnostic cap exactly at 63, 64 and 65 entries', () => {
+  for (const [count, expectedTruncated] of [[63, false], [64, false], [65, true]]) {
+    const normalized = normalizeAxeResults({
+      status: 'complete',
+      provenance: PROVENANCE,
+      diagnostics: Array.from({ length: count }, (_, index) => ({
+        code: 'AXE_TIMEOUT', frameId: 1_000 + index,
+      })),
+      frames: [{ frameId: 0, status: 'success', result: {
+        violations: [], incomplete: [], passes: [], inapplicable: [],
+      } }],
+    }, { pageId: 'page-1' });
+
+    assert.equal(normalized.diagnostics.length, Math.min(count, 64), `count ${count}`);
+    assert.equal(normalized.diagnostics.some(entry => entry.code === 'AXE_RESULTS_TRUNCATED'), expectedTruncated, `count ${count}`);
+    assert.equal(normalized.limitations.some(limitation => /truncados/iu.test(limitation)), expectedTruncated, `count ${count}`);
+    assert.deepEqual(validateNormalizedAxeSupplemental(normalized, { rulesVersion: '1.0.0' }).errors, [], `count ${count}`);
+  }
+});
+
+test('does not infer truncation from duplicate diagnostic candidates', () => {
+  const duplicateAdapterDiagnostics = normalizeAxeResults({
+    status: 'complete',
+    provenance: PROVENANCE,
+    diagnostics: Array.from({ length: 65 }, () => ({ code: 'AXE_TIMEOUT', frameId: 7 })),
+    frames: [{ frameId: 0, status: 'success', result: {
+      violations: [], incomplete: [], passes: [], inapplicable: [],
+    } }],
+  }, { pageId: 'page-1' });
+  const duplicateDerivedDiagnostics = normalizeAxeResults({
+    status: 'complete',
+    provenance: PROVENANCE,
+    diagnostics: Array.from({ length: 64 }, (_, frameId) => ({ code: 'AXE_FRAME_FAILED', frameId })),
+    frames: Array.from({ length: 64 }, (_, frameId) => ({ frameId, status: 'failed' })),
+  }, { pageId: 'page-1' });
+
+  for (const normalized of [duplicateAdapterDiagnostics, duplicateDerivedDiagnostics]) {
+    assert.equal(normalized.diagnostics.some(entry => entry.code === 'AXE_RESULTS_TRUNCATED'), false);
+    assert.equal(normalized.limitations.some(limitation => /truncados/iu.test(limitation)), false);
+    assert.deepEqual(validateNormalizedAxeSupplemental(normalized, { rulesVersion: '1.0.0' }).errors, []);
+  }
+});
+
 test('bounds huge sparse arrays before allocation and never invokes a frame result accessor', () => {
   let getterCalls = 0;
   const hostileFrame = { frameId: 0, status: 'success' };

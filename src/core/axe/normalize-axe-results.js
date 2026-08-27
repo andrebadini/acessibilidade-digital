@@ -1,7 +1,7 @@
 import {
   AXE_PROVENANCE,
   AXE_TARGET_UNAVAILABLE,
-  canonicalizeAxeDiagnostics,
+  canonicalizeAxeDiagnosticsWithMetadata,
   sanitizeAxeStructuralSelector,
 } from '../../browser/axe-adapter.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../legal/consumer-basis.js';
@@ -13,6 +13,7 @@ const MAX_FRAMES = 64;
 const MAX_GROUPS_PER_TYPE = 100;
 const MAX_NODES_PER_GROUP = 100;
 const MAX_OCCURRENCES = 256;
+const MAX_RAW_DIAGNOSTICS = 256;
 const AUDITA_RULES_VERSION = '1.0.0';
 const SAFE_ID = /^[a-z][a-z0-9._:-]{0,127}$/iu;
 const OUTCOME_PRIORITY = Object.freeze({ failed: 3, cantTell: 2, untested: 1 });
@@ -224,11 +225,15 @@ export function normalizeAxeResults(input, options = {}) {
     : 'page-1';
   const inputStatus = safeRead(input, 'status');
   const requestedStatus = ['complete', 'partial', 'disabled'].includes(inputStatus) ? inputStatus : 'partial';
-  const rawDiagnostics = canonicalizeAxeDiagnostics(safeArray(input, 'diagnostics', 64));
-  const diagnostics = [...canonicalizeAxeDiagnostics(rawDiagnostics.map(entry =>
-    ['AXE_FEATURE_DISABLED', 'AXE_PROVENANCE_INVALID'].includes(entry.code)
-      ? { code: 'AXE_DIAGNOSTIC_UNAVAILABLE', frameId: entry.frameId }
-      : entry))];
+  const diagnostics = safeArray(input, 'diagnostics', MAX_RAW_DIAGNOSTICS).map(entry => {
+    const code = safeRead(entry, 'code');
+    return {
+      code: ['AXE_FEATURE_DISABLED', 'AXE_PROVENANCE_INVALID'].includes(code)
+        ? 'AXE_DIAGNOSTIC_UNAVAILABLE'
+        : code,
+      frameId: safeRead(entry, 'frameId'),
+    };
+  });
   const limitations = [];
 
   if (!validProvenance(safeRead(input, 'provenance'))) {
@@ -292,7 +297,7 @@ export function normalizeAxeResults(input, options = {}) {
   if (frames.length === 0) topologyPartial = true;
   if (diagnostics.length > 0) topologyPartial = true;
   let truncated = diagnostics.some(entry => entry.code === 'AXE_RESULTS_TRUNCATED') ||
-    declaredArrayLength(input, 'frames') > MAX_FRAMES || declaredArrayLength(input, 'diagnostics') > 64;
+    declaredArrayLength(input, 'frames') > MAX_FRAMES || declaredArrayLength(input, 'diagnostics') > MAX_RAW_DIAGNOSTICS;
   if (frames.some(frame => hasNestedResultTruncation(safeRead(frame, 'result')))) truncated = true;
   const technicalSummary = summaryCounts(frames);
   const occurrences = [];
@@ -376,8 +381,10 @@ export function normalizeAxeResults(input, options = {}) {
   }
   technicalSummary.violations = publishedFindingCounts(occurrences, 'violations');
   technicalSummary.incomplete = publishedFindingCounts(occurrences, 'incomplete');
+  const combinedDiagnostics = canonicalizeAxeDiagnosticsWithMetadata(diagnostics);
+  if (combinedDiagnostics.truncated) truncated = true;
   if (truncated && !diagnostics.some(entry => entry.code === 'AXE_RESULTS_TRUNCATED')) diagnostics.push({ code: 'AXE_RESULTS_TRUNCATED', frameId: null });
-  const canonicalDiagnostics = canonicalizeAxeDiagnostics(diagnostics);
+  const canonicalDiagnostics = canonicalizeAxeDiagnosticsWithMetadata(diagnostics).diagnostics;
   const status = topologyPartial || truncated ? 'partial' : 'complete';
   if (status === 'partial') limitations.push(limitationText('partial'));
   if (truncated) limitations.push('Os resultados axe excederam limites locais de segurança; contagens e achados publicados são truncados.');

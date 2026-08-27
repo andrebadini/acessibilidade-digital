@@ -45,6 +45,8 @@ export const AXE_DIAGNOSTIC_CODES = Object.freeze([
   'AXE_DIAGNOSTIC_UNAVAILABLE',
 ]);
 const AXE_DIAGNOSTIC_RANK = new Map(AXE_DIAGNOSTIC_CODES.map((code, index) => [code, index]));
+const MAX_CANONICAL_DIAGNOSTICS = 64;
+const MAX_DIAGNOSTIC_CANDIDATES = 321;
 
 function diagnosticOwn(value, key) {
   try {
@@ -54,13 +56,17 @@ function diagnosticOwn(value, key) {
   } catch { return undefined; }
 }
 
-/** Drops private diagnostic fields, closes unknown codes and returns a unique stable order. */
-export function canonicalizeAxeDiagnostics(value) {
+/** Drops private diagnostic fields and reports when the unique stable set exceeds the canonical cap. */
+export function canonicalizeAxeDiagnosticsWithMetadata(value) {
   let isArray = false;
-  try { isArray = Array.isArray(value); } catch { return Object.freeze([]); }
-  if (!isArray) return Object.freeze([]);
+  try { isArray = Array.isArray(value); } catch {
+    return Object.freeze({ diagnostics: Object.freeze([]), truncated: false });
+  }
+  if (!isArray) return Object.freeze({ diagnostics: Object.freeze([]), truncated: false });
   const declaredLength = diagnosticOwn(value, 'length');
-  const length = Number.isSafeInteger(declaredLength) && declaredLength >= 0 ? Math.min(declaredLength, 256) : 0;
+  const length = Number.isSafeInteger(declaredLength) && declaredLength >= 0
+    ? Math.min(declaredLength, MAX_DIAGNOSTIC_CANDIDATES)
+    : 0;
   const unique = new Map();
   for (let index = 0; index < length; index += 1) {
     const entry = diagnosticOwn(value, String(index));
@@ -73,12 +79,20 @@ export function canonicalizeAxeDiagnostics(value) {
   const sorted = [...unique.values()].sort((left, right) =>
     AXE_DIAGNOSTIC_RANK.get(left.code) - AXE_DIAGNOSTIC_RANK.get(right.code) ||
     (left.frameId ?? -1) - (right.frameId ?? -1));
-  let retained = sorted.slice(0, 64);
+  let retained = sorted.slice(0, MAX_CANONICAL_DIAGNOSTICS);
   const truncation = sorted.find(entry => entry.code === 'AXE_RESULTS_TRUNCATED');
-  if (truncation && !retained.includes(truncation)) retained = [...retained.slice(0, 63), truncation].sort((left, right) =>
+  if (truncation && !retained.includes(truncation)) retained = [...retained.slice(0, MAX_CANONICAL_DIAGNOSTICS - 1), truncation].sort((left, right) =>
     AXE_DIAGNOSTIC_RANK.get(left.code) - AXE_DIAGNOSTIC_RANK.get(right.code) ||
     (left.frameId ?? -1) - (right.frameId ?? -1));
-  return Object.freeze(retained.map(entry => Object.freeze(entry)));
+  return Object.freeze({
+    diagnostics: Object.freeze(retained.map(entry => Object.freeze(entry))),
+    truncated: sorted.length > MAX_CANONICAL_DIAGNOSTICS || declaredLength > MAX_DIAGNOSTIC_CANDIDATES,
+  });
+}
+
+/** Compatibility projection for callers that only need the canonical entries. */
+export function canonicalizeAxeDiagnostics(value) {
+  return canonicalizeAxeDiagnosticsWithMetadata(value).diagnostics;
 }
 
 const MAX_GROUPS = 100;
