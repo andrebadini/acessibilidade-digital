@@ -51,7 +51,6 @@ test('escapes hostile audited strings in text, attributes, code, URLs and media'
   const hostile = '</style><script>alert(1)</script><img src=x onerror=alert(2)>';
   const input = structuredClone(SAMPLE_AUDIT);
   input.scope.description = hostile;
-  input.itemResults[0].title = `Título ${hostile}`;
   input.occurrences[0].justification = hostile;
   input.evidence.artifacts[1].snippet = `<button aria-label="${hostile}">x</button>`;
   input.evidence.artifacts[1].selector.css = `#x"]{background:url(https://evil.test/x)}`;
@@ -63,6 +62,22 @@ test('escapes hostile audited strings in text, attributes, code, URLs and media'
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/u);
   assert.match(html, /&lt;button aria-label=&quot;/u);
   assert.equal((html.match(/<img\b[^>]*>/gu) || []).length, 1);
+  const forgedTitle = structuredClone(SAMPLE_AUDIT);
+  forgedTitle.itemResults[0].title = `Título ${hostile}`;
+  assert.throws(() => renderHtmlReport(forgedTitle, {}), /normativ|title|item/i);
+});
+
+test('rejects exact script and style breakout payloads in report counts', () => {
+  for (const payload of [
+    '</style><script>alert(1)</script>',
+    '</style><style>body{display:none}</style>',
+  ]) {
+    const input = structuredClone(SAMPLE_AUDIT);
+    input.methodology.ruleCount = payload;
+    assert.throws(() => renderHtmlReport(input, {}), /metodologia|regra|inteiro|count/i);
+  }
+  const html = renderHtmlReport(SAMPLE_AUDIT, {});
+  assert.doesNotMatch(html, /<\/style><(?:script|style)>/iu);
 });
 
 test('communicates every state with visible icon and text rather than color alone', () => {

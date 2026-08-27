@@ -23,6 +23,29 @@ test('packages the verified rendered PNG with exact provenance and dimensions', 
   assert.match(brand.dataUrl, /^data:image\/png;base64,/u);
 });
 
+test('rejects truncated, CRC-corrupt, signature-only and trailing PNG data', async () => {
+  const logo = await read('assets/gov-mt-logo.png');
+  const fixtureData = SAMPLE_AUDIT.evidence.artifacts.find(artifact => artifact.dataUrl)?.dataUrl;
+  const valid = Buffer.from(fixtureData.slice('data:image/png;base64,'.length), 'base64');
+  const corrupted = Buffer.from(valid);
+  corrupted[corrupted.indexOf('IDAT') + 4] ^= 1;
+  const invalid = [
+    valid.subarray(0, 8),
+    valid.subarray(0, valid.length - 1),
+    corrupted,
+    Buffer.concat([valid, Buffer.from([0])]),
+  ];
+  for (const bytes of invalid) {
+    const input = structuredClone(SAMPLE_AUDIT);
+    input.evidence.artifacts[0].dataUrl = `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`;
+    const html = renderHtmlReport(input, {});
+    assert.equal((html.match(/<img\b[^>]*>/gu) || []).length, 1);
+  }
+  for (const bytes of [logo.subarray(0, 24), Buffer.concat([logo, Buffer.from([0])])]) {
+    await assert.rejects(createBrandAsset(bytes), /PNG|integridade|estrutura/i);
+  }
+});
+
 test('documents the official manual and the rasterization/crop without calling it an original asset', async () => {
   const source = (await read('assets/BRAND-SOURCE.md')).toString('utf8');
   for (const value of [

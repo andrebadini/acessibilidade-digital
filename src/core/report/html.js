@@ -5,6 +5,11 @@ import { REPORT_CSS } from './report.css.js';
 
 const BRAND_SOURCE_URL = 'https://www.secom.mt.gov.br/documents/21013/0/_govmt_manual_de_identidade_oficial_expandido_abril_2026.pdf/7921f56c-66a0-15a1-37d7-3f04c37fadfc';
 const BRAND_SHA256 = '1736ccf3c3783a42e9ebc7649a3fa473774b4c5f413ba1a09616cbd2e76cac7d';
+const PNG_SIGNATURE = Object.freeze([137, 80, 78, 71, 13, 10, 26, 10]);
+const MAX_PNG_BYTES = 64 * 1024 * 1024;
+const MAX_PNG_DIMENSION = 100_000;
+const MAX_PNG_PIXELS = 268_435_456;
+const CRC_TABLE = makeCrcTable();
 
 const STATUS = Object.freeze({
   passed: { label: 'Aprovado', icon: '✓' },
@@ -78,8 +83,8 @@ function header(assets) {
 
 function summary(model, counts) {
   return `<section aria-labelledby="sumario"><h2 id="sumario">Sumário executivo</h2>
-<dl class="meta"><dt>Auditoria</dt><dd>${escapeHtml(model.auditId)}</dd><dt>Status da sessão</dt><dd>${escapeHtml(model.session.status)}</dd><dt>URL final</dt><dd><code>${escapeHtml(model.finalUrl)}</code></dd><dt>Itens avaliados</dt><dd>${model.itemResults.length}</dd></dl>
-<ul class="summary-grid">${Object.entries(STATUS).map(([outcome, status]) => `<li class="summary-card">${statusMarkup(outcome)}<strong>${counts[outcome]}</strong><span>itens</span></li>`).join('')}</ul></section>`;
+<dl class="meta"><dt>Auditoria</dt><dd>${escapeHtml(model.auditId)}</dd><dt>Status da sessão</dt><dd>${escapeHtml(model.session.status)}</dd><dt>URL final</dt><dd><code>${escapeHtml(model.finalUrl)}</code></dd><dt>Itens avaliados</dt><dd>${escapeHtml(model.itemResults.length)}</dd></dl>
+<ul class="summary-grid">${Object.entries(STATUS).map(([outcome, status]) => `<li class="summary-card">${statusMarkup(outcome)}<strong>${escapeHtml(counts[outcome])}</strong><span>itens</span></li>`).join('')}</ul></section>`;
 }
 
 function scope(model) {
@@ -88,7 +93,7 @@ function scope(model) {
 
 function methodology(model) {
   const viewport = model.environment.viewport;
-  return `<section class="major-section" aria-labelledby="metodologia"><h2 id="metodologia">Metodologia</h2><p>${escapeHtml(model.methodology.name)}. As verificações automáticas só aprovam quando aplicabilidade e expectativas foram observadas integralmente; itens contextuais permanecem para revisão.</p><dl class="meta"><dt>Extensão</dt><dd>${escapeHtml(model.versions.extension)}</dd><dt>Regras</dt><dd>${escapeHtml(model.versions.rules)}</dd><dt>Navegador</dt><dd>${escapeHtml(model.versions.browser)}</dd><dt>Viewport</dt><dd>${viewport.width} × ${viewport.height} CSS px; escala ${viewport.deviceScaleFactor}</dd><dt>Regras executadas</dt><dd>${model.methodology.ruleCount}</dd><dt>Itens normativos</dt><dd>${model.methodology.itemCount}</dd></dl></section>`;
+  return `<section class="major-section" aria-labelledby="metodologia"><h2 id="metodologia">Metodologia</h2><p>${escapeHtml(model.methodology.name)}. As verificações automáticas só aprovam quando aplicabilidade e expectativas foram observadas integralmente; itens contextuais permanecem para revisão.</p><dl class="meta"><dt>Extensão</dt><dd>${escapeHtml(model.versions.extension)}</dd><dt>Regras</dt><dd>${escapeHtml(model.versions.rules)}</dd><dt>Navegador</dt><dd>${escapeHtml(model.versions.browser)}</dd><dt>Viewport</dt><dd>${escapeHtml(viewport.width)} × ${escapeHtml(viewport.height)} CSS px; escala ${escapeHtml(viewport.deviceScaleFactor)}</dd><dt>Regras executadas</dt><dd>${escapeHtml(model.methodology.ruleCount)}</dd><dt>Itens normativos</dt><dd>${escapeHtml(model.methodology.itemCount)}</dd></dl></section>`;
 }
 
 function items(model) {
@@ -164,9 +169,11 @@ function isPngDataUrl(value) {
   const encoded = value.slice('data:image/png;base64,'.length);
   if (!/^[A-Za-z0-9+/]+={0,2}$/u.test(encoded)) return false;
   try {
-    const bytes = atob(encoded);
-    return bytes.length >= 8 && bytes.charCodeAt(0) === 0x89 && bytes.slice(1, 4) === 'PNG'
-      && bytes.charCodeAt(4) === 0x0d && bytes.charCodeAt(5) === 0x0a && bytes.charCodeAt(6) === 0x1a && bytes.charCodeAt(7) === 0x0a;
+    const binary = atob(encoded);
+    if (binary.length > MAX_PNG_BYTES) return false;
+    const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+    parsePng(bytes);
+    return true;
   } catch {
     return false;
   }
@@ -183,11 +190,7 @@ function toBytes(value) {
 }
 
 function pngDimensions(bytes) {
-  if (bytes.length < 24 || ![137, 80, 78, 71, 13, 10, 26, 10].every((byte, index) => bytes[index] === byte)) {
-    throw new TypeError('O ativo de marca deve ser PNG válido.');
-  }
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  return { width: view.getUint32(16), height: view.getUint32(20) };
+  return parsePng(bytes);
 }
 
 function base64(bytes) {
@@ -196,4 +199,78 @@ function base64(bytes) {
     binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + 0x8000, bytes.length)));
   }
   return btoa(binary);
+}
+
+function parsePng(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.length < 57 || bytes.length > MAX_PNG_BYTES
+    || !PNG_SIGNATURE.every((byte, index) => bytes[index] === byte)) {
+    throw new TypeError('Estrutura PNG inválida ou fora dos limites.');
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = PNG_SIGNATURE.length;
+  let chunkIndex = 0;
+  let width = 0;
+  let height = 0;
+  let sawIdat = false;
+  let endedIdat = false;
+  let idatBytes = 0;
+  while (offset < bytes.length) {
+    if (bytes.length - offset < 12) throw new TypeError('Chunk PNG truncado.');
+    const length = view.getUint32(offset);
+    if (length > bytes.length - offset - 12) throw new TypeError('Comprimento de chunk PNG excede o buffer.');
+    const typeStart = offset + 4;
+    const dataStart = offset + 8;
+    const crcOffset = dataStart + length;
+    const typeBytes = bytes.subarray(typeStart, dataStart);
+    if (![...typeBytes].every(byte => (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122))) throw new TypeError('Tipo de chunk PNG inválido.');
+    const type = String.fromCharCode(...typeBytes);
+    if (crc32(bytes.subarray(typeStart, crcOffset)) !== view.getUint32(crcOffset)) throw new TypeError(`CRC PNG inválido no chunk ${type}.`);
+
+    if (chunkIndex === 0) {
+      if (type !== 'IHDR' || length !== 13) throw new TypeError('IHDR deve ser o primeiro chunk PNG e conter 13 bytes.');
+      width = view.getUint32(dataStart);
+      height = view.getUint32(dataStart + 4);
+      const bitDepth = bytes[dataStart + 8];
+      const colorType = bytes[dataStart + 9];
+      const allowedDepths = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
+      if (!width || !height || width > MAX_PNG_DIMENSION || height > MAX_PNG_DIMENSION || width * height > MAX_PNG_PIXELS
+        || !allowedDepths[colorType]?.includes(bitDepth) || bytes[dataStart + 10] !== 0 || bytes[dataStart + 11] !== 0
+        || ![0, 1].includes(bytes[dataStart + 12])) {
+        throw new TypeError('IHDR PNG contém dimensões ou parâmetros inválidos.');
+      }
+    } else if (type === 'IHDR') {
+      throw new TypeError('PNG contém mais de um IHDR.');
+    }
+
+    if (type === 'IDAT') {
+      if (endedIdat) throw new TypeError('Chunks IDAT PNG devem ser consecutivos.');
+      sawIdat = true;
+      idatBytes += length;
+    } else if (sawIdat && type !== 'IEND') {
+      endedIdat = true;
+    }
+    offset = crcOffset + 4;
+    chunkIndex += 1;
+    if (type === 'IEND') {
+      if (length !== 0 || !sawIdat || idatBytes === 0 || offset !== bytes.length) throw new TypeError('IEND PNG inválido, prematuro ou seguido por dados.');
+      return { width, height };
+    }
+  }
+  throw new TypeError('PNG sem IEND final.');
+}
+
+function makeCrcTable() {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < table.length; index += 1) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) value = (value & 1) ? (0xedb88320 ^ (value >>> 1)) : (value >>> 1);
+    table[index] = value >>> 0;
+  }
+  return table;
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
 }

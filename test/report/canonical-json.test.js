@@ -4,6 +4,7 @@ import test from 'node:test';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { canonicalStringify } from '../../src/core/report/canonical-json.js';
 import { sha256Hex } from '../../src/core/report/hash.js';
+import { NBR17225_EDITORIAL_NOTES } from '../../src/core/normative/nbr17225.js';
 import { reportInput } from './helpers.js';
 
 test('canonical JSON is independent of insertion order at every object depth', () => {
@@ -53,4 +54,66 @@ test('rejects incomplete models and broken item, occurrence or evidence links', 
   assert.throws(() => createAuditModel(missingItem), /146|item/i);
   assert.throws(() => createAuditModel(unknownItem), /item|ocorrência/i);
   assert.throws(() => createAuditModel(unknownEvidence), /evidência/i);
+});
+
+test('rejects a forged 146-item catalogue and every altered normative field', () => {
+  const mutations = [
+    input => { input.itemResults[0].id = '9.9.9'; },
+    input => { input.itemResults[0].printedId = '5.1.0'; },
+    input => { input.itemResults[0].title = 'Indicador de foco adulterado'; },
+    input => { input.itemResults[0].title += ' '; },
+    input => { input.itemResults[0].classification = 'recommendation'; },
+    input => { input.itemResults[0].wcag[0].level = 'AAA'; },
+    input => { input.itemResults[0].evaluation = 'assisted'; },
+    input => { input.itemResults[0].ruleIds = ['forged-rule']; },
+    input => { input.itemResults[0].humanReason = 'Texto normativo inventado.'; },
+  ];
+  for (const mutate of mutations) {
+    const input = reportInput();
+    mutate(input);
+    assert.throws(() => createAuditModel(input), /catálogo|normativ|item|canôn/i);
+  }
+});
+
+test('validates coherent methodology and the optional normative editorial record', () => {
+  const normative = {
+    edition: 'ABNT NBR 17225:2025',
+    wcag: 'WCAG 2.2',
+    editorialNotes: structuredClone(NBR17225_EDITORIAL_NOTES),
+  };
+  assert.doesNotThrow(() => createAuditModel(reportInput({ normative })));
+  for (const methodology of [
+    { name: 'Audita MT', version: '1.0.0', ruleCount: 129, itemCount: 146 },
+    { name: 'Audita MT', version: '9.9.9', ruleCount: 130, itemCount: 146 },
+    { name: 'Audita MT ', version: '1.0.0', ruleCount: 130, itemCount: 146 },
+    { name: 'Audita MT', version: '1.0.0', ruleCount: 130, itemCount: 145 },
+  ]) assert.throws(() => createAuditModel(reportInput({ methodology })), /metodologia|methodology|regra|item|versão|canôn/i);
+
+  const alteredNote = structuredClone(normative);
+  alteredNote.editorialNotes[0].rationale = 'Errata oficial inexistente.';
+  assert.throws(() => createAuditModel(reportInput({ normative: alteredNote })), /normativ|editorial/i);
+});
+
+test('validates every rule, occurrence, evidence and review graph link', () => {
+  const probes = [
+    reportInput({ ruleResults: [{ ruleId: 'rule-x', outcome: 'passed', mode: 'automated', nbrItems: ['unknown'], targets: [], summary: 'x', limitations: [] }] }),
+    reportInput({ occurrences: [{ occurrenceId: 'occ-x', itemId: '5.1.4', ruleId: 'unknown', outcome: 'cantTell', mode: 'assisted', nodeId: null, evidenceIds: [], justification: 'Revisão.' }] }),
+    reportInput({ occurrences: [{ occurrenceId: 'occ-x', itemId: '5.1.4', ruleId: null, outcome: 'cantTell', mode: 'assisted', nodeId: null, evidenceIds: [], justification: 'Revisão.' }] }),
+    reportInput({ evidence: { stateCount: 1, artifacts: [{ evidenceId: 'ev-1', kind: 'element', fullPageEvidenceId: 'missing', hash: 'sha' }] } }),
+    reportInput({ manualReview: [{ occurrenceId: 'unknown', itemId: '5.1.4', ruleId: 'rule-assisted', mode: 'assisted', status: 'unanswered', question: 'Pergunta?', reason: 'Razão.' }] }),
+    reportInput({ manualReview: [{ occurrenceId: 'occ-1', itemId: '5.1.4', ruleId: 'rule-assisted', mode: 'assisted', status: 'forged', question: 'Pergunta?', reason: 'Razão.' }] }),
+    reportInput({ reviewDecisions: [{ decisionId: 'decision-forged', auditId: 'audit-report-1', itemId: '5.1.4', occurrenceId: 'unknown', answer: 'conforme', evaluator: 'Fiscal', decidedAt: '2026-08-26T14:00:00.000Z', mode: 'assisted' }] }),
+    reportInput({ reviewDecisions: [{ decisionId: 'decision-forged', auditId: 'audit-report-1', itemId: '5.1.4', occurrenceId: 'occ-1', answer: 'sim', evaluator: 'Fiscal', decidedAt: 'amanhã', mode: 'assisted' }] }),
+  ];
+  for (const input of probes) assert.throws(() => createAuditModel(input), /regra|item|ocorrência|evidência|revisão|decisão|status|resposta|data/i);
+});
+
+test('preserves legitimate failed and cancelled terminal sessions without touching input', () => {
+  for (const status of ['failed', 'cancelled']) {
+    const input = reportInput({ session: { status, diagnostics: [], partial: false } });
+    const model = createAuditModel(input);
+    assert.equal(model.session.status, status);
+    assert.equal(input.session.status, status);
+    assert.equal(Object.isFrozen(input), false);
+  }
 });
