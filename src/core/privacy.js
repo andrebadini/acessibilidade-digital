@@ -90,6 +90,41 @@ function editableControl(node) {
   );
 }
 
+function contentEditableControl(node) {
+  const tagName = String(node?.tagName || '').toLowerCase();
+  if (['input', 'select', 'textarea'].includes(tagName)) return false;
+  const attributes = node?.attributes && typeof node.attributes === 'object' ? node.attributes : {};
+  const value = String(attributes.contenteditable ?? '').trim().toLowerCase();
+  return Object.hasOwn(attributes, 'contenteditable') && !['false', 'inherit'].includes(value);
+}
+
+function safeIdRefs(value) {
+  const tokens = String(value ?? '').trim().split(/\s+/u).filter(Boolean);
+  return tokens.length > 0 && tokens.every(token => /^[a-z_][a-z0-9_.:-]*$/iu.test(token) && !SENSITIVE_KEY.test(token))
+    ? tokens.join(' ')
+    : '';
+}
+
+function contentEditableRootAttributes(attributes) {
+  const output = {};
+  for (const [name, rawValue] of Object.entries(attributes || {})) {
+    const value = String(rawValue ?? '').trim();
+    if (name === 'contenteditable') {
+      const normalized = value.toLowerCase();
+      if (['', 'true', 'plaintext-only'].includes(normalized)) output[name] = normalized;
+    } else if (name === 'role') {
+      const normalized = value.toLowerCase();
+      if (/^[a-z][a-z0-9-]*(?:\s+[a-z][a-z0-9-]*)*$/u.test(normalized) && !SENSITIVE_KEY.test(normalized)) output[name] = normalized;
+    } else if (name === 'tabindex') {
+      if (/^-?\d+$/u.test(value)) output[name] = String(Number(value));
+    } else if (name === 'aria-labelledby' || name === 'aria-describedby') {
+      const references = safeIdRefs(value);
+      if (references) output[name] = references;
+    }
+  }
+  return output;
+}
+
 function removeRuntimeValues(value, ancestors = new WeakSet()) {
   if (!value || typeof value !== 'object' || ancestors.has(value)) return;
   ancestors.add(value);
@@ -104,7 +139,13 @@ function removeRuntimeValues(value, ancestors = new WeakSet()) {
 }
 
 /** Final privacy boundary for a fully merged normalized node. */
-export function redactNormalizedNode(input, { executable = false, privateText = false, preserveAccessibleText = false } = {}) {
+export function redactNormalizedNode(input, {
+  executable = false,
+  privateText = false,
+  privateTextRoot = false,
+  privateTextDescendant = false,
+  preserveAccessibleText = false,
+} = {}) {
   const node = sanitizeJsonData(input);
   node.attributes = node.attributes && typeof node.attributes === 'object' ? node.attributes : {};
   for (const name of Object.keys(node.attributes)) {
@@ -137,6 +178,25 @@ export function redactNormalizedNode(input, { executable = false, privateText = 
     removeRuntimeValues(node);
     if (!preserveAccessibleText) {
       delete node.axValue;
+      delete node.accessibleName;
+      delete node.accessibleDescription;
+    }
+  }
+  if (privateTextRoot && contentEditableControl(node)) {
+    node.attributes = contentEditableRootAttributes(node.attributes);
+    node.selectorHint = '';
+    delete node.media;
+  }
+  if (privateTextDescendant) {
+    node.attributes = {};
+    node.selectorHint = '';
+    delete node.media;
+    delete node.form;
+    delete node.styles;
+    delete node.animations;
+    delete node.backgroundImageKind;
+    delete node.axValue;
+    if (!preserveAccessibleText) {
       delete node.accessibleName;
       delete node.accessibleDescription;
     }

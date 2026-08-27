@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { runRules } from '../../src/core/rules/run-rules.js';
 import { FORM_RULES } from '../../src/core/rules/forms.js';
+import { normalizeSnapshot } from '../../src/core/normalize-snapshot.js';
 
 function record(nodeId, tagName, overrides = {}) {
   return {
@@ -111,6 +112,33 @@ test('form label association accepts explicit unique for and fails missing or am
     'missing-idref', 'ambiguous-idref', 'ambiguous-idref', 'missing-association'
   ]);
   assert.equal((await evaluate('form-label-association', snapshot())).outcome, 'inapplicable');
+});
+
+test('normalization preserves an ordinary textarea explicit label association outside private regions', async () => {
+  const normalized = normalizeSnapshot({
+    format: 'simplified-v1',
+    document: { url: 'https://example.test/', title: 'Formulário' },
+    nodes: [
+      { backendNodeId: 1, tagName: 'label', parentBackendNodeId: null, attributes: { for: 'message' }, text: 'Mensagem' },
+      {
+        backendNodeId: 2, tagName: 'textarea', parentBackendNodeId: null,
+        attributes: { id: 'message', name: 'message', 'aria-labelledby': 'message-label', placeholder: 'Comentário' },
+        text: 'TOPSECRET-current-text', form: { type: 'textarea', value: 'TOPSECRET-current-text' },
+      },
+      { backendNodeId: 3, tagName: 'span', parentBackendNodeId: null, attributes: { id: 'message-label' }, text: 'Mensagem' },
+    ],
+    axTree: { nodes: [{
+      backendDOMNodeId: 2, role: { value: 'textbox' }, name: { value: 'Mensagem' }, value: { value: 'TOPSECRET-current-text' },
+    }] },
+  });
+  const textarea = normalized.nodes.find(node => node.backendNodeId === 2);
+
+  assert.deepEqual(textarea.attributes, {
+    id: 'message', name: 'message', 'aria-labelledby': 'message-label', placeholder: 'Comentário',
+  });
+  assert.equal(textarea.accessibleName, 'Mensagem');
+  assert.doesNotMatch(JSON.stringify(normalized), /TOPSECRET/iu);
+  assert.equal((await evaluate('form-label-association', normalized)).outcome, 'passed');
 });
 
 test('form label association validates every normalized labels reference and its field relationship', async () => {

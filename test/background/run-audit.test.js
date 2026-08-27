@@ -102,18 +102,44 @@ function pageWithFormCheckbox() {
 function pageWithContentEditableSecret(secret) {
   const page = rawPage();
   page.nodes[0] = {
-    ...page.nodes[0], tagName: 'div', attributes: { id: 'editor', contenteditable: 'true' },
+    ...page.nodes[0], tagName: 'div',
+    attributes: {
+      id: secret, name: secret, contenteditable: 'true', role: 'textbox', tabindex: '0',
+      title: secret, 'aria-label': secret, 'aria-description': secret,
+      'aria-labelledby': 'editor-label', 'aria-describedby': 'editor-description',
+      'data-private': secret, href: `https://example.test/editor?view=${secret}`,
+    },
+    selectorHint: `#${secret}`,
     text: secret, visibleText: secret, focusable: true, interactive: true, interaction: 'text-entry',
+    media: { kind: 'video', currentSrc: `https://example.test/editor-media?view=${secret}` },
   };
   page.nodes.push({
     backendNodeId: 4, tagName: 'div', parentBackendNodeId: 1,
-    attributes: { contenteditable: 'true' }, text: secret, visibleText: secret,
+    attributes: {
+      id: secret, name: secret, title: secret, 'aria-label': secret,
+      'data-private': secret, src: `https://example.test/child?view=${secret}`,
+    },
+    selectorHint: `#${secret}`, text: secret, visibleText: secret,
+    interactive: true, interaction: 'button',
+    media: { kind: 'video', currentSrc: `https://example.test/child-media?view=${secret}` },
     rect: { x: 12, y: 24, width: 40, height: 20 },
   });
-  page.axTree.nodes = [1, 4].map(backendDOMNodeId => ({
-    backendDOMNodeId, role: { value: 'textbox' }, name: { value: secret },
-    description: { value: secret }, value: { value: secret },
-  }));
+  page.nodes.push({
+    backendNodeId: 5, tagName: 'input', parentBackendNodeId: 1,
+    attributes: { id: secret, name: secret, type: 'text', title: secret, 'data-private': secret, value: secret },
+    selectorHint: `#${secret}`, text: secret, visibleText: secret,
+    form: { type: 'text', value: secret, currentValue: secret },
+    rect: { x: 12, y: 48, width: 80, height: 24 },
+  });
+  page.nodes.push(
+    { backendNodeId: 6, tagName: 'span', parentBackendNodeId: null, attributes: { id: 'editor-label' }, text: 'Editor externo seguro' },
+    { backendNodeId: 7, tagName: 'span', parentBackendNodeId: null, attributes: { id: 'editor-description' }, text: 'Descrição externa segura' },
+  );
+  page.axTree.nodes = [
+    { backendDOMNodeId: 1, role: { value: 'textbox' }, name: { value: secret }, description: { value: secret }, value: { value: secret } },
+    { backendDOMNodeId: 4, role: { value: 'generic' }, name: { value: secret }, description: { value: secret }, value: { value: secret } },
+    { backendDOMNodeId: 5, role: { value: 'textbox' }, name: { value: 'Campo interno seguro' }, description: { value: 'Descrição do campo segura' }, value: { value: secret } },
+  ];
   return page;
 }
 
@@ -340,11 +366,12 @@ test('removes a nested contenteditable secret from model, evidence, preview, has
     url: 'https://example.test/',
     chromeAdapter: fakeAdapter({
       page: pageWithContentEditableSecret(secret),
-      outerHtml: backendNodeId => backendNodeId === 1
-        ? `<div id="editor" contenteditable="true"><div contenteditable="true" title="${secret}">${secret}</div></div>`
-        : backendNodeId === 4
-          ? `<div contenteditable="true" title="${secret}">${secret}</div>`
-          : '<button id="other">Outro</button>',
+      outerHtml: backendNodeId => {
+        if (backendNodeId === 1) return `<div id="${secret}" name="${secret}" contenteditable="true" role="textbox" tabindex="0" aria-labelledby="editor-label" aria-describedby="editor-description" aria-label="${secret}" title="${secret}" data-private="${secret}" href="https://example.test/?view=${secret}"><div title="${secret}">${secret}</div></div>`;
+        if (backendNodeId === 4) return `<div id="${secret}" title="${secret}" data-private="${secret}">${secret}</div>`;
+        if (backendNodeId === 5) return `<input id="${secret}" name="${secret}" type="text" title="${secret}" data-private="${secret}" value="${secret}">`;
+        return '<button id="other">Outro</button>';
+      },
     }),
     now: clock,
     idFactory: () => 'audit-contenteditable-privacy',
@@ -352,12 +379,27 @@ test('removes a nested contenteditable secret from model, evidence, preview, has
   const [first, second] = await Promise.all([run('TOPSECRET-editor-one'), run('TOPSECRET-editor-two')]);
   const evidence = first.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
   const changed = second.evidence.artifacts.find(artifact => artifact.nodeId === 'n-1');
+  const descendantEvidence = first.evidence.artifacts.find(artifact => artifact.nodeId === 'n-4');
+  const nestedControlEvidence = first.evidence.artifacts.find(artifact => artifact.nodeId === 'n-5');
 
-  assert.equal(evidence.snippet, '<div id="editor" contenteditable="true"></div>');
-  assert.equal(evidence.accessibility.name, '');
-  assert.equal(evidence.accessibility.description, '');
-  assert.equal(evidence.accessibility.announcementPreview, 'campo de texto');
+  assert.equal(evidence.snippet, '<div contenteditable="true" role="textbox" tabindex="0" aria-labelledby="editor-label" aria-describedby="editor-description"></div>');
+  assert.equal(evidence.accessibility.name, 'Editor externo seguro');
+  assert.equal(evidence.accessibility.nameSource, 'aria-labelledby');
+  assert.equal(evidence.accessibility.description, 'Descrição externa segura');
+  assert.equal(evidence.accessibility.descriptionSource, 'aria-describedby');
+  assert.match(evidence.accessibility.announcementPreview, /Editor externo seguro, campo de texto, Descrição externa segura/iu);
+  assert.ok(descendantEvidence);
+  assert.equal(descendantEvidence.snippet, '<div></div>');
+  assert.ok(nestedControlEvidence);
+  assert.equal(nestedControlEvidence.snippet, '<input>');
+  assert.equal(nestedControlEvidence.accessibility.name, 'Campo interno seguro');
+  assert.equal(nestedControlEvidence.accessibility.description, 'Descrição do campo segura');
   assert.equal(evidence.hash, changed.hash);
+  assert.deepEqual(
+    first.evidence.artifacts.map(artifact => artifact.hash),
+    second.evidence.artifacts.map(artifact => artifact.hash),
+  );
+  for (const artifact of first.evidence.artifacts) assert.doesNotMatch(JSON.stringify(artifact), /TOPSECRET/iu);
   const leakedContexts = [...JSON.stringify(first).matchAll(/.{0,80}TOPSECRET.{0,80}/giu)].map(match => match[0]);
   assert.deepEqual(leakedContexts, []);
 
@@ -367,7 +409,8 @@ test('removes a nested contenteditable secret from model, evidence, preview, has
   });
   const html = renderHtmlReport(report);
   assert.doesNotMatch(html, /TOPSECRET/iu);
-  assert.match(html, /Nome acessível<\/dt><dd>não disponível/iu);
+  assert.match(html, /Nome acessível<\/dt><dd>Editor externo seguro/iu);
+  assert.match(html, /Prévia de anúncio<\/dt><dd>Editor externo seguro, campo de texto, Descrição externa segura/iu);
 });
 
 test('lets true ARIA presence win over false node.form state and ignores aria-selected on a button', async () => {

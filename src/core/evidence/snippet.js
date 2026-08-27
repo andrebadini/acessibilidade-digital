@@ -82,7 +82,21 @@ function sanitizeText(value) {
     .replace(/\b(authorization|password|passwd|token|secret|api[-_ ]?key|csrf|xsrf|otp)\b(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s<]+)/giu, '$1$2[redacted]');
 }
 
-function sanitizeTag(parsed) {
+function contentEditableTag(parsed) {
+  if (parsed.closing || ['input', 'select', 'textarea'].includes(parsed.name)) return false;
+  const values = Object.fromEntries(parsed.attributes.map(attribute => [attribute.name, attribute.value ?? '']));
+  const value = String(values.contenteditable ?? '').trim().toLowerCase();
+  return Object.hasOwn(values, 'contenteditable') && !['false', 'inherit'].includes(value);
+}
+
+function safeIdRefs(value) {
+  const tokens = String(value ?? '').trim().split(/\s+/u).filter(Boolean);
+  return tokens.length > 0 && tokens.every(token => /^[a-z_][a-z0-9_.:-]*$/iu.test(token) && !SENSITIVE.test(token))
+    ? tokens.join(' ')
+    : null;
+}
+
+function sanitizeTag(parsed, { contentEditableRoot = false, stripAttributes = false } = {}) {
   if (parsed.closing) return `</${parsed.name}>`;
   const values = Object.fromEntries(parsed.attributes.map(attribute => [attribute.name, attribute.value ?? '']));
   const contenteditable = String(values.contenteditable ?? '').trim().toLowerCase();
@@ -92,6 +106,8 @@ function sanitizeTag(parsed) {
   const output = [];
   for (const attribute of parsed.attributes) {
     const { name } = attribute;
+    if (stripAttributes) continue;
+    if (contentEditableRoot && !['contenteditable', 'role', 'tabindex', 'aria-labelledby', 'aria-describedby'].includes(name)) continue;
     if (/^on/iu.test(name) || name === 'srcdoc' || name === 'style') continue;
     if (name === 'xlink:href' || name === 'ping' || name === 'srcset') continue;
     if ((parsed.name === 'object' && name === 'data') || (parsed.name === 'embed' && name === 'src')) continue;
@@ -102,6 +118,25 @@ function sanitizeTag(parsed) {
     if (parsed.name === 'option' && (name === 'selected' || name === 'aria-selected')) continue;
     let value = attribute.value;
     if (value !== null && (name === 'type' || name === 'autocomplete')) value = value.toLowerCase();
+    if (contentEditableRoot && name === 'contenteditable') {
+      const normalized = String(value ?? '').trim().toLowerCase();
+      if (!['', 'true', 'plaintext-only'].includes(normalized)) continue;
+      value = normalized;
+    }
+    if (contentEditableRoot && name === 'role') {
+      const normalized = String(value ?? '').trim().toLowerCase();
+      if (!/^[a-z][a-z0-9-]*(?:\s+[a-z][a-z0-9-]*)*$/u.test(normalized) || SENSITIVE.test(normalized)) continue;
+      value = normalized;
+    }
+    if (contentEditableRoot && name === 'tabindex') {
+      const normalized = String(value ?? '').trim();
+      if (!/^-?\d+$/u.test(normalized)) continue;
+      value = String(Number(normalized));
+    }
+    if (contentEditableRoot && (name === 'aria-labelledby' || name === 'aria-describedby')) {
+      value = safeIdRefs(value);
+      if (value === null) continue;
+    }
     if (URL_ATTRIBUTES.has(name)) {
       value = sanitizeUrl(value);
       if (value === null) continue;
@@ -119,18 +154,20 @@ function escapeHtmlText(value) {
  * Sanitizes untrusted HTML into readable source for a later text-encoding boundary.
  * The result must never be inserted as markup; report renderers must HTML-escape it.
  */
-export function sanitizeHtmlSnippetSource(html) {
+export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false } = {}) {
   if (typeof html !== 'string') return '';
   let output = '';
   let position = 0;
   const privateStructure = [];
+  let pendingPrivateRoot = privateTextDescendant === true;
+  const privateOnly = pendingPrivateRoot;
   while (position < html.length) {
     const opening = html.indexOf('<', position);
     if (opening < 0) {
-      if (!privateStructure.length) output += sanitizeText(html.slice(position));
+      if (!privateStructure.length && !pendingPrivateRoot) output += sanitizeText(html.slice(position));
       break;
     }
-    if (!privateStructure.length) output += sanitizeText(html.slice(position, opening));
+    if (!privateStructure.length && !pendingPrivateRoot) output += sanitizeText(html.slice(position, opening));
     if (html.startsWith('<!--', opening)) {
       const end = html.indexOf('-->', opening + 4);
       position = end < 0 ? html.length : end + 3;
@@ -138,13 +175,13 @@ export function sanitizeHtmlSnippetSource(html) {
     }
     const token = scanTag(html, opening);
     if (!token) {
-      if (!privateStructure.length) output += '&lt;';
+      if (!privateStructure.length && !pendingPrivateRoot) output += '&lt;';
       position = opening + 1;
       continue;
     }
     const parsed = parseTag(token.text);
     if (!parsed) {
-      if (!privateStructure.length) output += '&lt;';
+      if (!privateStructure.length && !pendingPrivateRoot) output += '&lt;';
       position = opening + 1;
       continue;
     }
@@ -165,7 +202,10 @@ export function sanitizeHtmlSnippetSource(html) {
       if (parsed.closing) {
         if (privateStructure.at(-1) === parsed.name) {
           privateStructure.pop();
-          if (!privateStructure.length) output += sanitizeTag(parsed);
+          if (!privateStructure.length) {
+            output += sanitizeTag(parsed);
+            if (privateOnly) break;
+          }
         }
       } else if (!parsed.selfClosing && !VOID_ELEMENTS.has(parsed.name)) {
         privateStructure.push(parsed.name);
@@ -173,14 +213,24 @@ export function sanitizeHtmlSnippetSource(html) {
       position = token.end;
       continue;
     }
-    output += sanitizeTag(parsed);
+    if (pendingPrivateRoot && parsed.closing) {
+      position = token.end;
+      continue;
+    }
+    const forcedPrivateRoot = pendingPrivateRoot;
+    output += sanitizeTag(parsed, {
+      contentEditableRoot: contentEditableTag(parsed),
+      stripAttributes: forcedPrivateRoot,
+    });
+    if (forcedPrivateRoot) pendingPrivateRoot = false;
     if (!parsed.closing && !parsed.selfClosing && !VOID_ELEMENTS.has(parsed.name)) {
       const values = Object.fromEntries(parsed.attributes.map(attribute => [attribute.name, attribute.value ?? '']));
       const contenteditable = String(values.contenteditable ?? '').trim().toLowerCase();
       if (parsed.name === 'textarea' || (
         Object.hasOwn(values, 'contenteditable') && !['false', 'inherit'].includes(contenteditable)
-      )) privateStructure.push(parsed.name);
+      ) || forcedPrivateRoot) privateStructure.push(parsed.name);
     }
+    if (forcedPrivateRoot && (parsed.selfClosing || VOID_ELEMENTS.has(parsed.name))) break;
     position = token.end;
   }
   return output.replace(/\s+/gu, ' ').trim();

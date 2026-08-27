@@ -179,9 +179,21 @@ function normalizeSimplified(raw) {
     }
     return false;
   };
+  const hasPrivateTextAncestor = node => {
+    const visited = new Set();
+    let current = node.parentId ? byId.get(node.parentId) : null;
+    while (current && !visited.has(current.nodeId)) {
+      visited.add(current.nodeId);
+      if (privateTextById.get(current.nodeId)) return true;
+      current = current.parentId ? byId.get(current.parentId) : null;
+    }
+    return false;
+  };
   const redactedNodes = nodes.map(node => redactNormalizedNode(node, {
     executable: inExecutableSubtree(node),
     privateText: inPrivateTextSubtree(node),
+    privateTextRoot: privateTextById.get(node.nodeId) && !hasPrivateTextAncestor(node),
+    privateTextDescendant: hasPrivateTextAncestor(node),
     preserveAccessibleText: ['input', 'select', 'textarea'].includes(node.tagName),
   }));
   return assertSnapshotV1({
@@ -399,6 +411,16 @@ function normalizeColumnar(raw) {
     privateTextMemo.set(record, false);
     return false;
   };
+  const hasPrivateTextAncestor = record => {
+    let current = byDocumentAndIndex.get(`${record.documentIndex}:${record.parentIndex}`);
+    const visited = new Set();
+    while (current && !visited.has(current)) {
+      visited.add(current);
+      if (privateTextElement(current.tagName, current.attributes)) return true;
+      current = byDocumentAndIndex.get(`${current.documentIndex}:${current.parentIndex}`);
+    }
+    return false;
+  };
   const descendantText = (record) => {
     if (inExecutableSubtree(record) || inPrivateTextSubtree(record)) return '';
     const parts = [record.rawText];
@@ -502,6 +524,8 @@ function normalizeColumnar(raw) {
   const redactedNodes = ordered.map(record => redactNormalizedNode(outputByRecord.get(record), {
     executable: inExecutableSubtree(record),
     privateText: inPrivateTextSubtree(record),
+    privateTextRoot: privateTextElement(record.tagName, record.attributes) && !hasPrivateTextAncestor(record),
+    privateTextDescendant: hasPrivateTextAncestor(record),
     preserveAccessibleText: ['input', 'select', 'textarea'].includes(record.tagName),
   }));
 

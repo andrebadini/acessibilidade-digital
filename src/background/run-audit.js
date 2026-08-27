@@ -112,6 +112,25 @@ function editableControl(node) {
   );
 }
 
+function privateTextElement(node) {
+  const tag = normalizedText(node?.tagName).toLowerCase();
+  if (tag === 'textarea') return true;
+  if (['input', 'select'].includes(tag)) return false;
+  const contenteditable = normalizedText(nodeAttribute(node, 'contenteditable')).toLowerCase();
+  return Object.hasOwn(node?.attributes || {}, 'contenteditable') && !['false', 'inherit'].includes(contenteditable);
+}
+
+function hasPrivateTextAncestor(node, indexes) {
+  const visited = new Set();
+  let current = node?.parentId ? indexes.byNodeId.get(node.parentId) : null;
+  while (current && !visited.has(current.nodeId)) {
+    visited.add(current.nodeId);
+    if (privateTextElement(current)) return true;
+    current = current.parentId ? indexes.byNodeId.get(current.parentId) : null;
+  }
+  return false;
+}
+
 function observedBoolean(node, property, ariaName) {
   const direct = Object.hasOwn(node || {}, property) ? node[property] : undefined;
   if (direct === true || direct === false || (property === 'checked' && direct === 'mixed')) return direct;
@@ -447,7 +466,9 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
         let snippet = '';
         try {
           const response = await awaitStep(() => cdp.command('DOM.getOuterHTML', { backendNodeId: node.backendNodeId }));
-          snippet = sanitizeHtmlSnippetSource(typeof response?.outerHTML === 'string' ? response.outerHTML : '');
+          snippet = sanitizeHtmlSnippetSource(typeof response?.outerHTML === 'string' ? response.outerHTML : '', {
+            privateTextDescendant: hasPrivateTextAncestor(node, indexes),
+          });
         } catch (error) {
           rethrowAbort(error, signal);
           recoverable('SNIPPET_CAPTURE_FAILED', 'O trecho de código do elemento não pôde ser capturado.', { occurrenceId: occurrence.occurrenceId });

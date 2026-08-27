@@ -46,6 +46,20 @@ test('suppresses a same-tag editable subtree until the structurally matching clo
   assert.doesNotMatch(source, /TOPSECRET|title=|<div><div>/iu);
 });
 
+test('keeps only structural attributes on a contenteditable root but retains ordinary textarea labeling', () => {
+  const secret = 'TOPSECRET-editor-attributes';
+  const editor = sanitizeHtmlSnippetSource(
+    `<div id="${secret}" name="${secret}" contenteditable="true" role="textbox" tabindex="0" aria-labelledby="safe-label" aria-describedby="safe-description" aria-label="${secret}" aria-description="${secret}" title="${secret}" data-private="${secret}" href="https://example.test/?view=${secret}"><span title="${secret}">${secret}</span></div>`,
+  );
+  const textarea = sanitizeHtmlSnippetSource(
+    `<textarea id="message" name="message" aria-labelledby="message-label" placeholder="Comentário">${secret}</textarea>`,
+  );
+
+  assert.equal(editor, '<div contenteditable="true" role="textbox" tabindex="0" aria-labelledby="safe-label" aria-describedby="safe-description"></div>');
+  assert.equal(textarea, '<textarea id="message" name="message" aria-labelledby="message-label" placeholder="Comentário"></textarea>');
+  assert.doesNotMatch(`${editor}${textarea}`, /TOPSECRET|title=|data-private=|href=|aria-label=/iu);
+});
+
 test('removes executable elements and inline execution attributes while preserving structure and ARIA', () => {
   const html = '<DIV aria-label="Abrir" OnClick="steal()" style="background:url(data:text/plain,STYLE_MARKER)"><script>bad()</script><style>body{display:none}</style><template><img onerror=bad()></template><span role="img">Ícone</span></DIV>';
   const snippet = sanitizeHtmlSnippet(html);

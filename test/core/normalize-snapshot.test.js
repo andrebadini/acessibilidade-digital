@@ -128,6 +128,48 @@ function columnarContentEditable(secret) {
   };
 }
 
+function privateEditorRaw(secret) {
+  return {
+    format: 'simplified-v1',
+    document: { url: 'https://example.test/', title: 'Privacy' },
+    nodes: [
+      {
+        backendNodeId: 1, tagName: 'div', parentBackendNodeId: null,
+        attributes: {
+          id: secret, name: secret, contenteditable: 'true', role: 'textbox', tabindex: '0',
+          title: secret, 'aria-label': secret, 'aria-description': secret,
+          'aria-labelledby': 'editor-label', 'aria-describedby': 'editor-description',
+          'data-private': secret, href: `https://example.test/editor?view=${secret}`,
+        },
+        selectorHint: `#${secret}`, text: secret, visibleText: secret,
+        media: { kind: 'video', currentSrc: `https://example.test/media?view=${secret}` },
+      },
+      {
+        backendNodeId: 2, tagName: 'div', parentBackendNodeId: 1,
+        attributes: {
+          id: secret, name: secret, title: secret, 'aria-label': secret,
+          'data-private': secret, src: `https://example.test/private?view=${secret}`,
+        },
+        selectorHint: `#${secret}`, text: secret, visibleText: secret,
+        media: { kind: 'video', currentSrc: `https://example.test/private-media?view=${secret}` },
+      },
+      {
+        backendNodeId: 3, tagName: 'input', parentBackendNodeId: 1,
+        attributes: { id: secret, name: secret, type: 'text', title: secret, 'data-private': secret, value: secret },
+        selectorHint: `#${secret}`, text: secret, visibleText: secret,
+        form: { type: 'text', value: secret, currentValue: secret },
+      },
+      { backendNodeId: 4, tagName: 'span', parentBackendNodeId: null, attributes: { id: 'editor-label' }, text: 'Editor externo seguro' },
+      { backendNodeId: 5, tagName: 'span', parentBackendNodeId: null, attributes: { id: 'editor-description' }, text: 'Descrição externa segura' },
+    ],
+    axTree: { nodes: [
+      { backendDOMNodeId: 1, role: { value: 'textbox' }, name: { value: secret }, description: { value: secret }, value: { value: secret } },
+      { backendDOMNodeId: 2, role: { value: 'generic' }, name: { value: secret }, description: { value: secret }, value: { value: secret } },
+      { backendDOMNodeId: 3, role: { value: 'textbox' }, name: { value: 'Campo interno seguro' }, description: { value: 'Descrição do campo segura' }, value: { value: secret } },
+    ] },
+  };
+}
+
 test('normalizes a real columnar DOMSnapshot in deterministic iframe and shadow order', () => {
   const snapshot = normalizeSnapshot(columnarRaw());
   assert.deepEqual(validateSnapshotV1(snapshot), []);
@@ -355,6 +397,38 @@ test('removes AX-derived content from a contenteditable root and every private d
   const nestedInput = simplified.nodes.find(node => node.backendNodeId === 4);
   assert.equal(nestedInput.accessibleName, 'Rótulo estático seguro');
   assert.equal(nestedInput.accessibleDescription, 'Descrição estática segura');
+});
+
+test('strictly redacts contenteditable root and descendant attributes while preserving external references and control labels', () => {
+  const first = normalizeSnapshot(privateEditorRaw('TOPSECRET-A'));
+  const second = normalizeSnapshot(privateEditorRaw('TOPSECRET-B'));
+  const root = first.nodes.find(node => node.backendNodeId === 1);
+  const descendant = first.nodes.find(node => node.backendNodeId === 2);
+  const nestedInput = first.nodes.find(node => node.backendNodeId === 3);
+
+  assert.deepEqual(root.attributes, {
+    contenteditable: 'true', role: 'textbox', tabindex: '0',
+    'aria-labelledby': 'editor-label', 'aria-describedby': 'editor-description',
+  });
+  assert.equal(root.selectorHint, '');
+  assert.equal(Object.hasOwn(root, 'media'), false);
+  for (const property of ['accessibleName', 'accessibleDescription', 'axValue']) {
+    assert.equal(Object.hasOwn(root, property), false);
+  }
+  assert.deepEqual(descendant.attributes, {});
+  assert.equal(descendant.selectorHint, '');
+  assert.equal(Object.hasOwn(descendant, 'media'), false);
+  assert.equal(Object.hasOwn(descendant, 'accessibleName'), false);
+  assert.equal(Object.hasOwn(descendant, 'accessibleDescription'), false);
+  assert.deepEqual(nestedInput.attributes, {});
+  assert.equal(nestedInput.selectorHint, '');
+  assert.equal(Object.hasOwn(nestedInput, 'media'), false);
+  assert.equal(Object.hasOwn(nestedInput, 'form'), false);
+  assert.equal(nestedInput.accessibleName, 'Campo interno seguro');
+  assert.equal(nestedInput.accessibleDescription, 'Descrição do campo segura');
+  assert.equal(Object.hasOwn(nestedInput, 'axValue'), false);
+  assert.doesNotMatch(JSON.stringify(first), /TOPSECRET/iu);
+  assert.deepEqual(first, second);
 });
 
 test('associates runtime data by sanitized document URL when Chrome and CDP frame IDs differ', () => {
