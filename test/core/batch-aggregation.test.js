@@ -7,7 +7,6 @@ import {
   aggregateBatchAudits,
 } from '../../src/core/batch/aggregate-audits.js';
 import { remapAuditPage } from '../../src/core/batch/remap-audit.js';
-import { createBatchScopedId } from '../../src/core/batch/remap-audit.js';
 import { applyBatchEvidenceBudget } from '../../src/core/batch/evidence-budget.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createAnnotationMapFixture, createPristineMapSource } from '../report/annotation-map-fixture.js';
@@ -16,6 +15,11 @@ import { normalizeAxeResults } from '../../src/core/axe/normalize-axe-results.js
 import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
 import { pngDataUrlDecodedByteLength } from '../../src/core/evidence/png.js';
 import { mergeAxeSupplementalResults } from '../../src/core/audit.js';
+import { aggregateItems } from '../../src/core/rules/aggregate-items.js';
+import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
+import { canonicalStringify } from '../../src/core/report/canonical-json.js';
+import { sha256Hex } from '../../src/core/report/hash.js';
+import { verifyAuditIntegritySnapshot } from '../../src/core/report/integrity.js';
 
 const OPTIONS = Object.freeze({
   now: () => '2026-08-28T12:00:00.000Z',
@@ -46,6 +50,11 @@ async function childModel(auditId, url, { axe = false } = {}) {
     pageId: 'page-1', rulesVersion: '1.0.0', snapshot: raw.snapshot,
   });
   if (axe === 'finding') {
+    const aggregated = new Map(aggregateItems(raw.ruleResults, NBR17225_ITEMS).map(item => [item.id, item]));
+    raw.itemResults = NBR17225_ITEMS.map(item => ({
+      ...structuredClone(item), outcome: aggregated.get(item.id).outcome,
+      ruleResults: structuredClone(aggregated.get(item.id).ruleResults),
+    }));
     const hybrid = mergeAxeSupplementalResults(raw, raw.axe);
     raw.ruleResults = hybrid.ruleResults;
     raw.itemResults = hybrid.itemResults;
@@ -54,7 +63,7 @@ async function childModel(auditId, url, { axe = false } = {}) {
   return enrichAuditForReport(raw, OPTIONS);
 }
 
-test('remaps identical local graphs with deterministic page-qualified SHA-256 identities', async () => {
+test('remaps identical local graphs with deterministic page-qualified sequential occurrence identities', async () => {
   const firstChild = await childModel('child-a', 'https://one.example.test/?token=SECRET_A&view=public');
   const secondChild = await childModel('child-b', 'https://two.example.test/?token=SECRET_B&view=public');
   const first = await remapAuditPage(firstChild, { batchAuditId: 'batch-1', pageId: 'page-1' });
@@ -63,7 +72,10 @@ test('remaps identical local graphs with deterministic page-qualified SHA-256 id
 
   assert.deepEqual(first, repeated);
   assert.notEqual(first.occurrences[0].occurrenceId, second.occurrences[0].occurrenceId);
-  assert.match(first.occurrences[0].occurrenceId, /^occurrence-[a-f0-9]{32}$/u);
+  assert.equal(first.occurrences[0].occurrenceId, 'occurrence-page-1-000001');
+  assert.equal(second.occurrences[0].occurrenceId, 'occurrence-page-2-000001');
+  assert.deepEqual(first.occurrences.map(value => value.occurrenceId), first.occurrences.map((_value, index) =>
+    `occurrence-page-1-${String(index + 1).padStart(6, '0')}`));
   assert.match(first.evidence[0].evidenceId, /^evidence-[a-f0-9]{32}$/u);
   assert.match(first.occurrences[0].nodeId, /^node-[a-f0-9]{32}$/u);
   assert.notEqual(first.occurrences[0].nodeId, second.occurrences[0].nodeId);
@@ -172,6 +184,39 @@ test('validates each batch axe envelope against its exact page and rejects tampe
   await assert.rejects(enrichAuditForReport(partialRaw, OPTIONS), /axe parcial|cobertura axe/iu);
 });
 
+test('migrates legacy normative fields inside nested axe only after preserving the verified occurrence identity', async () => {
+  const current = await childModel('child-axe-legacy', 'https://axe-legacy.example.test/', { axe: 'finding' });
+  const legacy = structuredClone(current);
+  const legacyId = legacy.occurrences.find(value => value.source.engine === 'axe-core').occurrenceId;
+  for (const collection of [legacy.occurrences, legacy.axe.occurrences]) {
+    for (const occurrence of collection) for (const field of ['itemWcagRefs', 'sourceWcagRefs', 'testedWcagRefs']) delete occurrence[field];
+  }
+  const hashInput = structuredClone(legacy);
+  delete hashInput.integrity.canonicalModelHash;
+  legacy.integrity.canonicalModelHash = await sha256Hex(canonicalStringify(hashInput));
+
+  const migrated = await verifyAuditIntegritySnapshot(legacy);
+  assert.equal(migrated.occurrences.find(value => value.source.engine === 'axe-core').occurrenceId, legacyId);
+  assert.deepEqual(migrated.occurrences.find(value => value.source.engine === 'axe-core').testedWcagRefs, []);
+  assert.deepEqual(migrated.axe.occurrences[0].testedWcagRefs, []);
+
+  const page = await remapAuditPage(current, { batchAuditId: 'batch-axe-legacy', pageId: 'page-1' });
+  const batchRaw = aggregateBatchAudits({
+    batchAuditId: 'batch-axe-legacy', pageResults: [page],
+    startedAt: '2026-08-28T11:00:00.000Z', endedAt: '2026-08-28T11:01:00.000Z', status: page.page.status,
+  });
+  const batchCurrent = await enrichAuditForReport(batchRaw, OPTIONS);
+  const batchLegacy = structuredClone(batchCurrent);
+  for (const collection of [batchLegacy.occurrences, ...batchLegacy.axePages.map(entry => entry.result.occurrences)]) {
+    for (const occurrence of collection) for (const field of ['itemWcagRefs', 'sourceWcagRefs', 'testedWcagRefs']) delete occurrence[field];
+  }
+  const batchHashInput = structuredClone(batchLegacy);
+  delete batchHashInput.integrity.canonicalModelHash;
+  batchLegacy.integrity.canonicalModelHash = await sha256Hex(canonicalStringify(batchHashInput));
+  const batchMigrated = await verifyAuditIntegritySnapshot(batchLegacy);
+  assert.deepEqual(batchMigrated.axePages[0].result.occurrences[0].testedWcagRefs, []);
+});
+
 test('aggregates pages in requested order with unique rules, 146 items and conservative pass semantics', async () => {
   const first = await remapAuditPage(
     await childModel('child-a', 'https://one.example.test/?token=SECRET_A&view=public'),
@@ -271,13 +316,22 @@ test('uses the strongest rule metadata and derives conservative status and summa
   assert.equal(partial.itemResults.find(item => item.ruleIds.includes(ruleId)).outcome, 'cantTell');
 });
 
-test('uses at least 128 bits for batch axe identities even for the reported 32-bit collision pair', async () => {
-  const first = await createBatchScopedId('batch-collision', 'page-1', 'occurrence-axe', 'occurrence-axe-0001179a');
-  const second = await createBatchScopedId('batch-collision', 'page-2', 'occurrence-axe', 'occurrence-axe-0001e467');
-  assert.match(first, /^occurrence-axe-[a-f0-9]{32}$/u);
-  assert.match(second, /^occurrence-axe-[a-f0-9]{32}$/u);
-  assert.notEqual(first, second);
+test('allocates distinct stable ordinals for the reported legacy 32-bit collision pair', async () => {
+  const child = structuredClone(await childModel('child-collision', 'https://collision.example.test/'));
+  const firstOccurrence = child.occurrences[0];
+  const firstReview = child.manualReview[0];
+  firstOccurrence.occurrenceId = 'occurrence-axe-0001179a';
+  firstReview.occurrenceId = firstOccurrence.occurrenceId;
+  child.occurrences.push({ ...structuredClone(firstOccurrence), occurrenceId: 'occurrence-axe-0001e467' });
+  child.manualReview.push({ ...structuredClone(firstReview), occurrenceId: 'occurrence-axe-0001e467' });
 
+  const first = await remapAuditPage(child, { batchAuditId: 'batch-collision', pageId: 'page-1' });
+  const repeated = await remapAuditPage(child, { batchAuditId: 'batch-collision', pageId: 'page-1' });
+  assert.deepEqual(first.occurrences.map(value => value.occurrenceId), [
+    'occurrence-page-1-000001', 'occurrence-page-1-000002',
+  ]);
+  assert.deepEqual(first.occurrences.map(value => value.occurrenceId), repeated.occurrences.map(value => value.occurrenceId));
+  assert.deepEqual(first.manualReview.map(value => value.occurrenceId), first.occurrences.map(value => value.occurrenceId));
 });
 
 test('represents never-started cancellation without pixels, findings or observed redirect', () => {

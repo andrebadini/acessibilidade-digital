@@ -30,7 +30,12 @@ export function renderTechnicalJson(input) {
     return {
       assertor: { id: 'urn:audita-mt:software', type: `${EARL}Software`, name: 'Audita Acessibilidade' },
       subject,
-      test: { id: `urn:abnt:nbr17225:${item.id}`, title: item.title, wcag: item.wcag.map(reference => reference.id) },
+      test: {
+        id: `urn:abnt:nbr17225:${item.id}`, title: item.title,
+        itemWcagRefs: item.wcag.map(reference => reference.id),
+        sourceWcagRefs: [...new Set(occurrences.flatMap(occurrence => occurrence.sourceWcagRefs))],
+        testedWcagRefs: [...new Set(occurrences.flatMap(occurrence => occurrence.testedWcagRefs))],
+      },
       mode: MODE[item.evaluation],
       result: { outcome: OUTCOME[item.outcome] },
       pointer: occurrences.map(occurrence => ({

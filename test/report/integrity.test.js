@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { canonicalStringify } from '../../src/core/report/canonical-json.js';
+import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { sha256Hex } from '../../src/core/report/hash.js';
 import {
@@ -44,6 +45,32 @@ test('never attests unavailable V1 integrity as a final V2 export snapshot', asy
 
   await assert.rejects(verifyAuditIntegritySnapshot(input), /integridade|indisponível/iu);
   assert.equal(isAuditIntegrityVerified(input), false);
+});
+
+test('validates a legacy V2 integrity chain before conservative normative migration and re-attestation', async () => {
+  const current = await verifiedFixture();
+  const legacy = structuredClone(current);
+  const legacyId = legacy.occurrences[0].occurrenceId;
+  for (const occurrence of legacy.occurrences) {
+    delete occurrence.itemWcagRefs;
+    delete occurrence.sourceWcagRefs;
+    delete occurrence.testedWcagRefs;
+  }
+  delete legacy.normative.sources;
+  const hashInput = structuredClone(legacy);
+  delete hashInput.integrity.canonicalModelHash;
+  legacy.integrity.canonicalModelHash = await sha256Hex(canonicalStringify(hashInput));
+
+  assert.throws(() => createAuditModel(legacy), /integridade.*antes.*migra|migra.*integridade/iu);
+  const migrated = await verifyAuditIntegritySnapshot(legacy);
+  assert.equal(migrated.occurrences[0].occurrenceId, legacyId);
+  assert.deepEqual(migrated.occurrences[0].testedWcagRefs, []);
+  assert.deepEqual(migrated.occurrences[0].wcagRefs, []);
+  assert.deepEqual(migrated.occurrences[0].foreignBenchmarkRefs, []);
+  assert.equal(migrated.normative.sources[0].localCopy.sha256, '1c3ee66b7fd606367e3de087e6a55fea90f4d368d8a1f769141d5e3b96d32afc');
+  assert.match(migrated.limitations.join(' '), /proveniência legada|critérios WCAG testados/iu);
+  assert.notEqual(migrated.integrity.canonicalModelHash, legacy.integrity.canonicalModelHash);
+  assert.equal(isAuditIntegrityVerified(migrated), true);
 });
 
 async function verifiedFixture() {

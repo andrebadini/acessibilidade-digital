@@ -2,6 +2,7 @@ import { dedupeFindingsForPresentation } from '../axe/dedupe-findings.js';
 import { unknownAccessibilityWidgetInventory } from '../detection/accessibility-widgets.js';
 import { sanitizeResourceUrl } from '../normalize-snapshot.js';
 import { NBR17225_EDITORIAL_NOTES, NBR17225_ITEMS } from '../normative/nbr17225.js';
+import { NORMATIVE_SOURCE_LEDGER } from '../normative/source-ledger.js';
 import { aggregateItems } from '../rules/aggregate-items.js';
 import { canonicalStringify } from '../report/canonical-json.js';
 
@@ -28,6 +29,7 @@ export function createBatchReportTemplate({ timezone, manifestVersion, rulesVers
     normative: {
       edition: 'ABNT NBR 17225:2025', wcag: 'WCAG 2.2',
       editorialNotes: NBR17225_EDITORIAL_NOTES.map(note => ({ ...note })),
+      sources: structuredClone(NORMATIVE_SOURCE_LEDGER),
     },
   });
 }

@@ -1,6 +1,7 @@
 import { sanitizeResourceUrl } from '../normalize-snapshot.js';
 import { hashEvidenceArtifact } from '../evidence/artifact-hash.js';
 import { NBR17225_EDITORIAL_NOTES } from '../normative/nbr17225.js';
+import { NORMATIVE_SOURCE_LEDGER } from '../normative/source-ledger.js';
 import { createAuditModel, sanitizeEvidenceArtifactUrls } from './audit-model.js';
 import { canonicalStringify } from './canonical-json.js';
 import { sha256Hex } from './hash.js';
@@ -87,6 +88,7 @@ export async function enrichAuditForReport(input, options = {}) {
       edition: 'ABNT NBR 17225:2025',
       wcag: 'WCAG 2.2',
       editorialNotes: NBR17225_EDITORIAL_NOTES.map(note => ({ ...note })),
+      sources: structuredClone(NORMATIVE_SOURCE_LEDGER),
     },
     reproducibility: {
       ...(raw.reproducibility ?? {}),

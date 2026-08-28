@@ -180,6 +180,7 @@ test('new-window warning uses only explicit static or probe observations and nev
   ]));
   assert.equal(failed.outcome, 'failed');
   assert.equal(failed.targets[0].data.reason, 'missing-new-window-warning');
+  assert.equal(failed.targets[0].data.behavior, 'target-blank');
   assert.doesNotMatch(JSON.stringify(failed), /Ajuda|PRIVATE-ADJACENT/iu);
 
   const unknownName = link();
@@ -189,9 +190,11 @@ test('new-window warning uses only explicit static or probe observations and nev
   delete unknownAdjacent.adjacentNewWindowWarning;
   assert.equal((await evaluate('new-window-link-warning', snapshot([unknownAdjacent]))).outcome, 'cantTell');
 
-  assert.equal((await evaluate('new-window-link-warning', snapshot([
+  const observedNewWindow = await evaluate('new-window-link-warning', snapshot([
     link({ attributes: { href: '/ajuda' }, newWindowBehavior: 'new-window' }),
-  ]))).outcome, 'failed');
+  ]));
+  assert.equal(observedNewWindow.outcome, 'failed');
+  assert.equal(observedNewWindow.targets[0].data.behavior, 'observed-new-window');
   assert.equal((await evaluate('new-window-link-warning', snapshot([
     link({ attributes: { href: '/ajuda' }, newWindowBehavior: 'unknown' }),
   ]))).outcome, 'cantTell');

@@ -4,7 +4,6 @@ import test from 'node:test';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
-import { SECTION508_REVISED_CROSSWALK } from '../../src/core/normative/section508.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import {
@@ -13,6 +12,42 @@ import {
   migrateAuditV1ToV2,
 } from '../../src/core/report/audit-model.js';
 import { reportInput } from './helpers.js';
+
+test('separates ABNT item context, source mapping and occurrence-tested WCAG without expanding the alias', () => {
+  const input = reportInput();
+  input.ruleResults[1].wcag = ['2.4.3'];
+  const model = migrateAuditV1ToV2(input);
+  const occurrence = model.occurrences[0];
+  assert.deepEqual(occurrence.itemWcagRefs, ['2.4.3']);
+  assert.deepEqual(occurrence.sourceWcagRefs, ['2.4.3']);
+  assert.deepEqual(occurrence.testedWcagRefs, []);
+  assert.deepEqual(occurrence.wcagRefs, occurrence.testedWcagRefs);
+  assert.deepEqual(occurrence.foreignBenchmarkRefs, []);
+});
+
+test('rejects partially present normative occurrence fields', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  delete input.occurrences[0].testedWcagRefs;
+  assert.throws(() => createAuditModel(input), /WCAG|campos|parcial|integridade|ocorrência/iu);
+});
+
+test('exposes the exact frozen normative source ledger without paths or query-bearing URLs', async () => {
+  const { NORMATIVE_SOURCE_LEDGER } = await import('../../src/core/normative/source-ledger.js');
+  assert.equal(Object.isFrozen(NORMATIVE_SOURCE_LEDGER), true);
+  assert.deepEqual(NORMATIVE_SOURCE_LEDGER, [
+    {
+      id: 'abnt.nbr17225.2025', version: '2025', title: 'ABNT NBR 17225:2025',
+      localCopy: {
+        fileName: 'ABNT-NBR-17225-Acessibilidade-Digital.pdf',
+        sha256: '1c3ee66b7fd606367e3de087e6a55fea90f4d368d8a1f769141d5e3b96d32afc',
+      },
+    },
+    { id: 'w3c.wcag22', version: '2.2', title: 'Web Content Accessibility Guidelines (WCAG) 2.2', url: 'https://www.w3.org/TR/WCAG22/' },
+    { id: 'us.access-board.revised-508', version: '2017', title: 'Revised 508 Standards and Section 255 Guidelines', url: 'https://www.access-board.gov/ict/' },
+    { id: 'us.section508.applicability-conformance', version: 'current', title: 'Applicability and Conformance', url: 'https://www.section508.gov/develop/applicability-conformance/' },
+  ]);
+  assert.doesNotMatch(JSON.stringify(NORMATIVE_SOURCE_LEDGER), /[?#]|(?:^|["'])\/(?:Users|Volumes|private)\//u);
+});
 
 function reviewDecision(occurrenceId, itemId, answer, mode) {
   return createReviewDecision({
@@ -55,9 +90,11 @@ test('explicitly migrates V1 into the canonical single-page V2 contract without 
     engine: 'audita-core', ruleId: 'focus-order', version: '1.0.0',
   });
   assert.equal(occurrence.nbrItemRef, '5.1.4');
-  assert.deepEqual(occurrence.wcagRefs, ['2.4.3']);
-  assert.ok(occurrence.foreignBenchmarkRefs.every(reference =>
-    reference.benchmarkId === SECTION508_REVISED_CROSSWALK.id));
+  assert.deepEqual(occurrence.itemWcagRefs, ['2.4.3']);
+  assert.deepEqual(occurrence.sourceWcagRefs, ['2.4.3']);
+  assert.deepEqual(occurrence.testedWcagRefs, []);
+  assert.deepEqual(occurrence.wcagRefs, occurrence.testedWcagRefs);
+  assert.deepEqual(occurrence.foreignBenchmarkRefs, []);
   assert.deepEqual(occurrence.target, { nodeId: 'n-1', selector: '#conteudo', framePath: [] });
   assert.equal(occurrence.accessiblePreview, null);
   assert.deepEqual(occurrence.evidenceRefs, ['ev-1']);

@@ -158,7 +158,8 @@ function newWindowWarning(snapshot) {
     for (const node of links) {
       const targetValue = normalizedComparableText(attribute(node, 'target'));
       const observedBehavior = normalizeText(node?.newWindowBehavior);
-      if (targetValue === '_blank' || observedBehavior === 'new-window') candidates.push(node);
+      if (targetValue === '_blank') candidates.push({ node, behavior: 'target-blank' });
+      else if (observedBehavior === 'new-window') candidates.push({ node, behavior: 'observed-new-window' });
       else if (observedBehavior === 'unknown') unknownBehavior = true;
       else if (observedBehavior && !NEW_WINDOW_BEHAVIORS.has(observedBehavior)) unknownBehavior = true;
     }
@@ -172,7 +173,8 @@ function newWindowWarning(snapshot) {
 
     const failures = [];
     const incomplete = [];
-    for (const node of candidates) {
+    for (const candidate of candidates) {
+      const { node, behavior } = candidate;
       const nameKnown = hasOwn(node, 'accessibleName') && typeof node.accessibleName === 'string' &&
         !UNAVAILABLE_TEXT.has(normalizeText(node.accessibleName));
       const adjacentKnown = hasOwn(node, 'adjacentNewWindowWarning') &&
@@ -180,11 +182,11 @@ function newWindowWarning(snapshot) {
       if ((nameKnown && hasNewWindowWarning(node.accessibleName)) || node.adjacentNewWindowWarning === true) continue;
       if (!nameKnown || !adjacentKnown) {
         incomplete.push(target(node, 'Complete a observação do aviso acessível de nova janela ou guia.', {
-          reason: 'new-window-warning-observation-incomplete'
+          reason: 'new-window-warning-observation-incomplete', behavior,
         }));
       } else {
         failures.push(target(node, 'Avise acessivelmente que este link abre em nova janela ou guia.', {
-          reason: 'missing-new-window-warning'
+          reason: 'missing-new-window-warning', behavior,
         }));
       }
     }

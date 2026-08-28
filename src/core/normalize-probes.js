@@ -9,6 +9,16 @@ function outcome(value) {
   return value ? 'passed' : 'failed';
 }
 
+const REFLOW_EXCEPTIONS = new Set(['essential']);
+const MINIMUM_TARGET_EXCEPTIONS = new Set(['equivalent', 'inline', 'user-agent', 'essential', 'spacing']);
+const ENHANCED_TARGET_EXCEPTIONS = new Set(['equivalent', 'inline', 'user-agent', 'essential']);
+
+function normalizedException(observation, allowed) {
+  const value = typeof observation?.exception === 'string' ? observation.exception : 'unknown';
+  if (value === 'none') return observation?.exceptionProof === 'complete' ? 'none' : 'unknown';
+  return allowed.has(value) ? value : 'unknown';
+}
+
 const probeFallbacks = new WeakMap();
 
 function selectorFrameKey(selector, frameId) {
@@ -109,6 +119,7 @@ export function normalizeProbes(raw = {}) {
 
   const reflowValid = finite(raw.reflow?.testedWidthCssPx) && raw.reflow.testedWidthCssPx > 0 && raw.reflow.testedWidthCssPx <= 320 &&
     typeof raw.reflow?.horizontalOverflow === 'boolean';
+  const reflowException = normalizedException(raw.reflow, REFLOW_EXCEPTIONS);
   const resizeValid = finite(raw.textResize?.scalePercent) && raw.textResize.scalePercent >= 200 &&
     typeof raw.textResize?.lossOfContent === 'boolean';
 
@@ -116,16 +127,15 @@ export function normalizeProbes(raw = {}) {
     safeId(item) && finite(item.width) && item.width >= 0 && finite(item.height) && item.height >= 0
   ).map(item => ({
     nodeId: safeId(item), width: item.width, height: item.height,
-    exception: typeof item.exception === 'string' ? item.exception : 'unknown',
+    exception: normalizedException(item, MINIMUM_TARGET_EXCEPTIONS),
     minimum24: item.width >= 24 && item.height >= 24,
     enhanced44: item.width >= 44 && item.height >= 44
   }));
   const minimumFailures = targetObservations.filter(item => !item.minimum24 && item.exception === 'none').map(item => item.nodeId);
   const enhancedFailures = targetObservations.filter(item => !item.enhanced44 && item.exception === 'none').map(item => item.nodeId);
-  const minimumExceptions = new Set(['equivalent', 'inline', 'user-agent', 'essential', 'spacing']);
-  const enhancedExceptions = new Set(['equivalent', 'inline', 'user-agent', 'essential']);
-  const minimumUnknown = targetObservations.some(item => !item.minimum24 && item.exception !== 'none' && !minimumExceptions.has(item.exception));
-  const enhancedUnknown = targetObservations.some(item => !item.enhanced44 && item.exception !== 'none' && !enhancedExceptions.has(item.exception));
+  const minimumUnknown = targetObservations.some(item => !item.minimum24 && item.exception === 'unknown');
+  const enhancedUnknown = targetObservations.some(item => !item.enhanced44 &&
+    normalizedException({ exception: item.exception, exceptionProof: 'complete' }, ENHANCED_TARGET_EXCEPTIONS) === 'unknown');
 
   const reducedPreferenceExecuted = raw.motion?.prefersReducedMotion === true ||
     (raw.motion?.prefersReducedMotion === undefined && raw.motion?.preference === 'reduce');
@@ -155,10 +165,12 @@ export function normalizeProbes(raw = {}) {
       observations: visibilityObservations
     },
     reflow: {
-      outcome: reflowValid ? outcome(!raw.reflow.horizontalOverflow) : 'cantTell',
+      outcome: reflowValid
+        ? (!raw.reflow.horizontalOverflow ? 'passed' : reflowException === 'none' ? 'failed' : 'cantTell')
+        : 'cantTell',
       testedWidthCssPx: reflowValid ? raw.reflow.testedWidthCssPx : null,
       horizontalOverflow: reflowValid ? raw.reflow.horizontalOverflow : null,
-      exception: typeof raw.reflow?.exception === 'string' ? raw.reflow.exception : 'none'
+      exception: reflowException
     },
     textResize: {
       outcome: 'cantTell',

@@ -99,9 +99,9 @@ test('runs dynamic probes with viewport data captured inside the audited page', 
     '', true, 0,
     {}, { selector: 'button', indicatorVisible: true, areaSufficient: true, intersectionRatio: 1, rect: { x: 0, y: 0, width: 44, height: 44 } },
     {}, { selector: 'button', indicatorVisible: true, areaSufficient: true, intersectionRatio: 1, rect: { x: 0, y: 0, width: 44, height: 44 } },
-    { testedWidthCssPx: 320, horizontalOverflow: false, exception: 'none' },
+    { testedWidthCssPx: 320, horizontalOverflow: false, exception: 'unknown' },
     { scalePercent: 200, lossOfContent: false },
-    [{ selector: 'html > body > button:nth-of-type(2)', width: 44, height: 44, exception: 'none' }],
+    [{ selector: 'html > body > button:nth-of-type(2)', width: 44, height: 44, exception: 'unknown' }],
     { complete: true, preference: 'reduce', prefersReducedMotion: true, animatedCount: 0, reducedAnimatedCount: 0 },
     true, true, true, true,
   ];
@@ -122,7 +122,7 @@ test('runs dynamic probes with viewport data captured inside the audited page', 
   const result = await adapter.runDynamicProbes(17, cdp, {});
   assert.equal(result.focus.completed, true);
   assert.equal(result.warnings.length, 0);
-  assert.deepEqual(result.targetSizes, [{ selector: 'html > body > button:nth-of-type(2)', frameId: 'main-frame', backendNodeId: 42, width: 44, height: 44, exception: 'none' }]);
+  assert.deepEqual(result.targetSizes, [{ selector: 'html > body > button:nth-of-type(2)', frameId: 'main-frame', backendNodeId: 42, width: 44, height: 44, exception: 'unknown' }]);
   assert.deepEqual(cdpCalls.find(([method]) => method === 'DOM.querySelectorAll'), ['DOM.querySelectorAll', { nodeId: 100, selector: 'html > body > button:nth-of-type(2)' }]);
 });
 
@@ -133,9 +133,9 @@ test('keeps selector and frame fallback when duplicate IDs prevent target backen
     '', true, 0,
     {}, { selector: 'button', indicatorVisible: true, areaSufficient: true, intersectionRatio: 1, rect: { x: 0, y: 0, width: 44, height: 44 } },
     {}, { selector: 'button', indicatorVisible: true, areaSufficient: true, intersectionRatio: 1, rect: { x: 0, y: 0, width: 44, height: 44 } },
-    { testedWidthCssPx: 320, horizontalOverflow: false, exception: 'none' },
+    { testedWidthCssPx: 320, horizontalOverflow: false, exception: 'unknown' },
     { scalePercent: 200, lossOfContent: false },
-    [{ selector: '#duplicate', width: 20, height: 20, exception: 'none' }],
+    [{ selector: '#duplicate', width: 20, height: 20, exception: 'unknown' }],
     { complete: true, preference: 'reduce', prefersReducedMotion: true, animatedCount: 0, reducedAnimatedCount: 0 },
     true, true, true, true,
   ];
@@ -155,6 +155,6 @@ test('keeps selector and frame fallback when duplicate IDs prevent target backen
     },
   };
   const result = await adapter.runDynamicProbes(17, cdp, {});
-  assert.deepEqual(result.targetSizes, [{ selector: '#duplicate', frameId: 'main-frame', width: 20, height: 20, exception: 'none' }]);
+  assert.deepEqual(result.targetSizes, [{ selector: '#duplicate', frameId: 'main-frame', width: 20, height: 20, exception: 'unknown' }]);
   assert.equal(cdpCalls.some(([method]) => method === 'DOM.describeNode'), false);
 });

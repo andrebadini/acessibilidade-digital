@@ -2,6 +2,7 @@ import { NBR17225_EDITORIAL_NOTES, NBR17225_ITEMS } from '../../src/core/normati
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consumer-basis.js';
 import { section508ReferencesForWcag } from '../../src/core/normative/section508.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
+import { NORMATIVE_SOURCE_LEDGER } from '../../src/core/normative/source-ledger.js';
 
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const CYCLE = ['failed', 'cantTell', 'inapplicable', 'untested'];
@@ -43,7 +44,9 @@ function canonicalOccurrence(legacy) {
   const item = itemById.get(legacy.itemId);
   const targetEvidence = legacy.evidenceIds.map(id => evidenceById.get(id)).find(evidence => evidence?.nodeId === legacy.nodeId)
     ?? legacy.evidenceIds.map(id => evidenceById.get(id)).find(Boolean);
-  const wcagRefs = item.wcag.map(reference => reference.id);
+  const itemWcagRefs = item.wcag.map(reference => reference.id);
+  const sourceWcagRefs = legacy.ruleId === null ? [] : [...itemWcagRefs];
+  const testedWcagRefs = legacy.outcome === 'failed' ? [...sourceWcagRefs] : [];
   return {
     ...legacy,
     pageId: 'page-1',
@@ -54,8 +57,9 @@ function canonicalOccurrence(legacy) {
       ? { engine: 'audita-manual-review', ruleId: `manual:${item.id}`, version: '1.0.0' }
       : { engine: 'audita-core', ruleId: legacy.ruleId, version: '1.0.0' },
     nbrItemRef: item.id,
-    wcagRefs,
-    foreignBenchmarkRefs: [...section508ReferencesForWcag(wcagRefs)],
+    itemWcagRefs, sourceWcagRefs, testedWcagRefs,
+    wcagRefs: [...testedWcagRefs],
+    foreignBenchmarkRefs: [...section508ReferencesForWcag(testedWcagRefs)],
     target: {
       nodeId: legacy.nodeId,
       selector: targetEvidence?.selector?.css ?? null,
@@ -126,5 +130,6 @@ export const SAMPLE_AUDIT = createAuditModel({
   normative: {
     edition: 'ABNT NBR 17225:2025', wcag: 'WCAG 2.2',
     editorialNotes: NBR17225_EDITORIAL_NOTES.map(note => ({ ...note })),
+    sources: structuredClone(NORMATIVE_SOURCE_LEDGER),
   },
 });

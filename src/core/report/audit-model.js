@@ -1,6 +1,7 @@
 import { sanitizeResourceUrl } from '../normalize-snapshot.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS, consumerBasisForOccurrence } from '../legal/consumer-basis.js';
 import { NBR17225_EDITORIAL_NOTES, NBR17225_ITEMS } from '../normative/nbr17225.js';
+import { NORMATIVE_SOURCE_LEDGER } from '../normative/source-ledger.js';
 import { section508ReferencesForWcag, SECTION508_REVISED_CROSSWALK } from '../normative/section508.js';
 import {
   CLASSIFICATIONS,
@@ -27,6 +28,8 @@ const REVIEW_STATUSES = new Set(['unanswered', 'answered']);
 const METHODOLOGY_NAME = 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2';
 const EXPECTED_RULE_COUNT = 130;
 const URL_VALUE_KEYS = new Set(['action', 'cite', 'formaction', 'href', 'poster', 'src', 'currentsrc']);
+export const LEGACY_V2_NORMATIVE_LIMITATION = 'Proveniência legada: a separação entre contexto do item, mapeamento da fonte e critérios WCAG testados não foi registrada; nenhuma cobertura WCAG ou Section 508 foi inferida na migração.';
+const NORMATIVE_FIELDS = Object.freeze(['itemWcagRefs', 'sourceWcagRefs', 'testedWcagRefs']);
 
 export const V1_MIGRATION_DEFAULTS = Object.freeze({
   pageId: 'page-1',
@@ -37,11 +40,25 @@ export const V1_MIGRATION_DEFAULTS = Object.freeze({
 });
 
 export function createAuditModel(input) {
+  return createAuditModelInternal(input, false);
+}
+
+/** Internal boundary used only after the legacy SHA-256 chain has been recomputed successfully. */
+export function migrateAuditV2AfterIntegrityVerification(input) {
+  return createAuditModelInternal(input, true);
+}
+
+function createAuditModelInternal(input, legacyIntegrityVerified) {
   const source = JSON.parse(canonicalStringify(input));
+  if (source.schemaVersion === 2 && hasFullyLegacyNormativeOccurrence(source) &&
+    /^[a-f0-9]{64}$/u.test(source.integrity?.canonicalModelHash ?? '') && !legacyIntegrityVerified) {
+    throw new TypeError('A integridade V2 legada deve ser validada antes da migração normativa.');
+  }
   const model = source.schemaVersion === 1 ? migrateV1Record(source) : source;
   if (model.schemaVersion !== 2) throw new TypeError('schemaVersion de relatório inválida.');
+  const legacyNormativeIds = migrateLegacyV2NormativeFields(model);
   if (model.accessibilityWidgets === undefined) model.accessibilityWidgets = unknownAccessibilityWidgetInventory();
-  const validatedAxe = assertAxeSupplementalIntegrity(model, model.versions?.rules ?? model.methodology?.version);
+  const validatedAxe = assertAxeSupplementalIntegrity(model, model.versions?.rules ?? model.methodology?.version, legacyNormativeIds);
   requiredId(model.auditId, 'auditId');
   validateRequestedScope(model.requestedScope);
   const pageById = validatePages(model.pages);
@@ -79,6 +96,60 @@ export function createAuditModel(input) {
   validatePassedItemAuthority(model.itemResults, ruleById, reviewGraph);
   validateNormative(model.normative);
   return deepFreeze(model);
+}
+
+function hasFullyLegacyNormativeOccurrence(model) {
+  return allOccurrenceCollections(model).some(collection => collection.some(occurrence => occurrence &&
+    typeof occurrence === 'object' && !Array.isArray(occurrence) &&
+    NORMATIVE_FIELDS.every(field => !Object.hasOwn(occurrence, field))));
+}
+
+function allOccurrenceCollections(model) {
+  const collections = [];
+  if (Array.isArray(model.occurrences)) collections.push(model.occurrences);
+  if (Array.isArray(model.axe?.occurrences)) collections.push(model.axe.occurrences);
+  if (Array.isArray(model.axePages)) {
+    for (const page of model.axePages) if (Array.isArray(page?.result?.occurrences)) collections.push(page.result.occurrences);
+  }
+  return collections;
+}
+
+function migrateLegacyV2NormativeFields(model) {
+  let migrated = false;
+  const occurrenceIds = new Set();
+  for (const collection of allOccurrenceCollections(model)) {
+    for (const occurrence of collection) {
+      if (!occurrence || typeof occurrence !== 'object' || Array.isArray(occurrence)) continue;
+      const present = NORMATIVE_FIELDS.filter(field => Object.hasOwn(occurrence, field));
+      if (present.length > 0 && present.length < NORMATIVE_FIELDS.length) {
+        throw new TypeError(`Ocorrência ${occurrence.occurrenceId ?? 'sem-identificador'} possui separação normativa parcial.`);
+      }
+      if (present.length === NORMATIVE_FIELDS.length) continue;
+      const item = NBR17225_ITEMS.find(entry => entry.id === (occurrence.nbrItemRef ?? occurrence.itemId));
+      occurrence.itemWcagRefs = item?.wcag.map(reference => reference.id) ?? [];
+      occurrence.sourceWcagRefs = [];
+      occurrence.testedWcagRefs = [];
+      occurrence.wcagRefs = [];
+      occurrence.foreignBenchmarkRefs = [];
+      if (typeof occurrence.occurrenceId === 'string') occurrenceIds.add(occurrence.occurrenceId);
+      migrated = true;
+    }
+  }
+  if (migrated) {
+    if (!Array.isArray(model.limitations)) model.limitations = [];
+    if (!model.limitations.includes(LEGACY_V2_NORMATIVE_LIMITATION)) model.limitations.push(LEGACY_V2_NORMATIVE_LIMITATION);
+    if (model.normative === undefined) {
+      model.normative = {
+        edition: 'ABNT NBR 17225:2025', wcag: 'WCAG 2.2',
+        editorialNotes: NBR17225_EDITORIAL_NOTES.map(note => ({ ...note })),
+        sources: structuredClone(NORMATIVE_SOURCE_LEDGER),
+      };
+    } else if (model.normative && typeof model.normative === 'object' && !Array.isArray(model.normative) &&
+      model.normative.sources === undefined) {
+      model.normative.sources = structuredClone(NORMATIVE_SOURCE_LEDGER);
+    }
+  }
+  return occurrenceIds;
 }
 
 function validateBatchSessionStatus(model) {
@@ -141,7 +212,6 @@ function migrateV1Record(model) {
       occurrence.nodeId && artifact?.nodeId === occurrence.nodeId)
       ?? evidenceRefs.map(id => evidenceById.get(id)).find(Boolean);
     const ruleId = occurrence.ruleId ?? `manual:${occurrence.itemId ?? occurrence.occurrenceId}`;
-    const wcagRefs = item?.wcag.map(reference => reference.id) ?? [];
     const source = occurrence.source ?? {
       engine: occurrence.ruleId === null
         ? V1_MIGRATION_DEFAULTS.manualSourceEngine
@@ -149,6 +219,19 @@ function migrateV1Record(model) {
       ruleId,
       version: sourceVersion,
     };
+    const itemWcagRefs = item?.wcag.map(reference => reference.id) ?? [];
+    const sourceWcagRefs = ruleId === 'new-window-link-warning'
+      ? []
+      : Array.isArray(occurrence.sourceWcagRefs)
+      ? occurrence.sourceWcagRefs.filter(reference => itemWcagRefs.includes(reference))
+      : Array.isArray(ruleById.get(ruleId)?.wcag)
+        ? ruleById.get(ruleId).wcag.filter(reference => itemWcagRefs.includes(reference))
+        : source?.engine === V1_MIGRATION_DEFAULTS.sourceEngine && item?.ruleIds.includes(ruleId)
+          ? [...itemWcagRefs]
+          : [];
+    const testedWcagRefs = Array.isArray(occurrence.testedWcagRefs)
+      ? occurrence.testedWcagRefs.filter(reference => sourceWcagRefs.includes(reference))
+      : [];
     const supportedPass = item?.ruleIds.includes(ruleId) &&
       ruleById.get(ruleId)?.outcome === 'passed' &&
       hasCorePassProvenance(source, ruleId, sourceVersion);
@@ -168,8 +251,14 @@ function migrateV1Record(model) {
       confidence: CONFIDENCE_LEVELS.includes(occurrence.confidence) ? occurrence.confidence : V1_MIGRATION_DEFAULTS.confidence,
       source,
       nbrItemRef: item?.id ?? null,
-      wcagRefs,
-      foreignBenchmarkRefs: [...section508ReferencesForWcag(wcagRefs)],
+      itemWcagRefs, sourceWcagRefs, testedWcagRefs,
+      wcagRefs: [...testedWcagRefs],
+      foreignBenchmarkRefs: [...section508ReferencesForWcag(testedWcagRefs)],
+      ...(ruleId === 'new-window-link-warning' ? {
+        reason: occurrence.reason ?? (outcome === 'failed'
+          ? { code: 'missing-new-window-warning', context: { behavior: 'unknown', warning: 'absent' } }
+          : { code: 'new-window-warning-observation-incomplete', context: { behavior: 'unknown', warning: 'unknown' } }),
+      } : {}),
       target: {
         nodeId: occurrence.target?.nodeId ?? occurrence.nodeId ?? null,
         selector: occurrence.target?.selector ?? occurrence.selector ?? targetEvidence?.selector?.css ?? null,
@@ -236,19 +325,24 @@ function authoritativeAxeOccurrence(value) {
     justification: value.justification,
     applicabilityEvidence: value.applicabilityEvidence ?? null,
     legalAnalysis: value.legalAnalysis ?? null,
+    itemWcagRefs: value.itemWcagRefs,
+    sourceWcagRefs: value.sourceWcagRefs,
+    testedWcagRefs: value.testedWcagRefs,
+    wcagRefs: value.wcagRefs,
+    foreignBenchmarkRefs: value.foreignBenchmarkRefs,
   };
 }
 
-function assertAxeSupplementalIntegrity(model, rulesVersion) {
+function assertAxeSupplementalIntegrity(model, rulesVersion, legacyNormativeIds = new Set()) {
   const reportRules = axeRulesFrom(model);
   const reportOccurrences = axeOccurrencesFrom(model);
   const batchChecked = model.requestedScope?.mode === 'batch' && model.axePages !== undefined
-    ? validateBatchAxePages(model, rulesVersion)
+    ? validateBatchAxePages(model, rulesVersion, legacyNormativeIds)
     : undefined;
   if (reportRules.length === 0 && reportOccurrences.length === 0 && model.axe === undefined) {
     if (batchChecked === undefined || (batchChecked.occurrences.length === 0 && batchChecked.status !== 'partial')) return null;
   }
-  const checked = batchChecked ?? validateNormalizedAxeSupplemental(model.axe, { rulesVersion });
+  const checked = batchChecked ?? validateNormalizedAxeSupplemental(model.axe, { rulesVersion, legacyNormativeIds });
   if (checked.errors.length > 0) throw new TypeError(`Suplemento axe inválido: ${checked.errors.join('; ')}`);
   if (reportRules.length !== checked.ruleResults.length || reportOccurrences.length !== checked.occurrences.length) {
     throw new TypeError('Suplemento axe do relatório diverge do cluster normalizado.');
@@ -278,9 +372,11 @@ function assertAxeSupplementalIntegrity(model, rulesVersion) {
     } else {
       const item = NBR17225_ITEMS.find(entry => entry.id === expected.nbrItemRef);
       const fullWcag = item?.wcag.map(reference => reference.id) ?? [];
-      if (!expected.wcagRefs.every(reference => fullWcag.includes(reference)) ||
-        canonicalStringify(occurrence.wcagRefs) !== canonicalStringify(fullWcag) ||
-        canonicalStringify(occurrence.foreignBenchmarkRefs) !== canonicalStringify([...section508ReferencesForWcag(fullWcag)])) {
+      if (canonicalStringify(occurrence.itemWcagRefs) !== canonicalStringify(fullWcag) ||
+        canonicalStringify(occurrence.sourceWcagRefs) !== canonicalStringify(expected.sourceWcagRefs) ||
+        canonicalStringify(occurrence.testedWcagRefs) !== canonicalStringify(expected.testedWcagRefs) ||
+        canonicalStringify(occurrence.wcagRefs) !== canonicalStringify(expected.testedWcagRefs) ||
+        canonicalStringify(occurrence.foreignBenchmarkRefs) !== canonicalStringify([...section508ReferencesForWcag(expected.testedWcagRefs)])) {
         throw new TypeError(`Ocorrência suplementar ${occurrence.occurrenceId} possui expansão WCAG/estrangeira incompatível com o item ABNT.`);
       }
     }
@@ -304,7 +400,7 @@ function validAxeTargetBinding(occurrence, expected, schemaVersion) {
   return v2Target || normalizedTarget;
 }
 
-function validateBatchAxePages(model, rulesVersion) {
+function validateBatchAxePages(model, rulesVersion, legacyNormativeIds) {
   if (!Array.isArray(model.axePages) || model.axePages.length > 20) {
     throw new TypeError('Envelopes axe do lote inválidos.');
   }
@@ -318,7 +414,7 @@ function validateBatchAxePages(model, rulesVersion) {
       throw new TypeError('Envelope axe do lote referencia página inválida ou duplicada.');
     }
     seen.add(entry.pageId);
-    const checked = validateNormalizedAxeSupplemental(entry.result, { rulesVersion, batch: true });
+    const checked = validateNormalizedAxeSupplemental(entry.result, { rulesVersion, batch: true, legacyNormativeIds });
     if (checked.errors.length > 0) throw new TypeError(`Envelope axe da página ${entry.pageId} possui payload inválido.`);
     if (checked.occurrences.some(value => value.pageId !== entry.pageId)) throw new TypeError(`Envelope axe da página ${entry.pageId} possui ocorrência cruzada.`);
     if (pageById.get(entry.pageId).axeStatus !== entry.result.status) throw new TypeError(`Envelope axe da página ${entry.pageId} diverge do estado da página.`);
@@ -800,6 +896,7 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById) {
     if (occurrence.justification !== undefined && typeof occurrence.justification !== 'string') {
       throw new TypeError(`Ocorrência ${id}.justification deve ser texto quando presente.`);
     }
+    validateOccurrenceReason(occurrence, sourceRule, id);
     validateLegalAnalysis(occurrence, id);
     if (occurrence.classification === 'editorial' || occurrence.source.engine === 'audita-editorial') {
       validateEditorialOccurrence(occurrence, sourceRule, id);
@@ -825,6 +922,30 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById) {
     occurrenceById.set(id, occurrence);
   }
   return { itemIds, ruleById, occurrenceById, evidenceIds };
+}
+
+function validateOccurrenceReason(occurrence, sourceRule, occurrenceId) {
+  if (occurrence.source?.ruleId !== 'new-window-link-warning') {
+    if (occurrence.reason !== undefined) throw new TypeError(`Ocorrência ${occurrenceId} possui razão estruturada não autorizada.`);
+    return;
+  }
+  const reason = occurrence.reason;
+  const expectedCode = occurrence.outcome === 'failed'
+    ? 'missing-new-window-warning'
+    : 'new-window-warning-observation-incomplete';
+  const expectedWarning = occurrence.outcome === 'failed' ? 'absent' : 'unknown';
+  const sourceTarget = sourceRule?.targets?.find(target => target && typeof target === 'object' &&
+    (target.nodeId ?? null) === (occurrence.nodeId ?? null));
+  const expectedBehavior = ['target-blank', 'observed-new-window'].includes(sourceTarget?.data?.behavior)
+    ? sourceTarget.data.behavior
+    : 'unknown';
+  if (!reason || !exactKeys(reason, ['code', 'context']) || reason.code !== expectedCode ||
+    !reason.context || !exactKeys(reason.context, ['behavior', 'warning']) ||
+    reason.context.behavior !== expectedBehavior || reason.context.warning !== expectedWarning ||
+    canonicalStringify(occurrence.sourceWcagRefs) !== '[]' || canonicalStringify(occurrence.testedWcagRefs) !== '[]' ||
+    canonicalStringify(occurrence.wcagRefs) !== '[]' || canonicalStringify(occurrence.foreignBenchmarkRefs) !== '[]') {
+    throw new TypeError(`Ocorrência ${occurrenceId} de nova janela possui razão ou alegação normativa inválida.`);
+  }
 }
 
 function exactKeys(value, expected) {
@@ -891,7 +1012,7 @@ function validateEditorialLimitations(limitations, outcome, targets) {
 function validateEditorialOccurrence(occurrence, sourceRule, id) {
   const expectedKeys = [
     'occurrenceId', 'pageId', 'outcome', 'classification', 'impact', 'confidence', 'source',
-    'nbrItemRef', 'wcagRefs', 'foreignBenchmarkRefs', 'target', 'accessiblePreview',
+    'nbrItemRef', 'itemWcagRefs', 'sourceWcagRefs', 'testedWcagRefs', 'wcagRefs', 'foreignBenchmarkRefs', 'target', 'accessiblePreview',
     'evidenceRefs', 'legalAnalysis', 'itemId', 'ruleId', 'mode', 'nodeId', 'evidenceIds',
     'justification',
   ];
@@ -902,7 +1023,9 @@ function validateEditorialOccurrence(occurrence, sourceRule, id) {
     occurrence.mode !== 'automated' || occurrence.nbrItemRef !== null || occurrence.itemId !== null ||
     occurrence.nodeId !== occurrence.target.nodeId || occurrence.target.selector !== null ||
     canonicalStringify(occurrence.target.framePath) !== '[]' || occurrence.accessiblePreview !== null ||
-    canonicalStringify(occurrence.wcagRefs) !== '[]' || canonicalStringify(occurrence.foreignBenchmarkRefs) !== '[]' ||
+    canonicalStringify(occurrence.itemWcagRefs) !== '[]' || canonicalStringify(occurrence.sourceWcagRefs) !== '[]' ||
+    canonicalStringify(occurrence.testedWcagRefs) !== '[]' || canonicalStringify(occurrence.wcagRefs) !== '[]' ||
+    canonicalStringify(occurrence.foreignBenchmarkRefs) !== '[]' ||
     canonicalStringify(occurrence.evidenceRefs) !== '[]' || canonicalStringify(occurrence.evidenceIds) !== '[]' ||
     occurrence.legalAnalysis !== null || occurrence.justification !== 'Há conteúdo provisório inequívoco na página.' ||
     !sourceRule || sourceRule.outcome !== 'failed') {
@@ -980,21 +1103,24 @@ function validateSource(source, label) {
 }
 
 function validateWcagAndForeignReferences(occurrence, item, occurrenceId) {
-  if (!Array.isArray(occurrence.wcagRefs)) throw new TypeError(`Ocorrência ${occurrenceId}.wcagRefs deve ser lista.`);
-  const expectedWcag = item?.wcag.map(reference => reference.id) ?? [];
-  if (canonicalStringify(occurrence.wcagRefs) !== canonicalStringify(expectedWcag)) {
-    throw new TypeError(`Ocorrência ${occurrenceId} possui referências WCAG incoerentes.`);
+  for (const field of [...NORMATIVE_FIELDS, 'wcagRefs']) {
+    if (!Array.isArray(occurrence[field])) throw new TypeError(`Ocorrência ${occurrenceId}.${field} deve ser lista.`);
+    if (new Set(occurrence[field]).size !== occurrence[field].length || occurrence[field].some(reference => typeof reference !== 'string')) {
+      throw new TypeError(`Ocorrência ${occurrenceId}.${field} possui referência inválida ou duplicada.`);
+    }
+  }
+  const expectedItemWcag = item?.wcag.map(reference => reference.id) ?? [];
+  if (canonicalStringify(occurrence.itemWcagRefs) !== canonicalStringify(expectedItemWcag) ||
+    occurrence.sourceWcagRefs.some(reference => !expectedItemWcag.includes(reference)) ||
+    occurrence.testedWcagRefs.some(reference => !occurrence.sourceWcagRefs.includes(reference)) ||
+    canonicalStringify(occurrence.wcagRefs) !== canonicalStringify(occurrence.testedWcagRefs)) {
+    throw new TypeError(`Ocorrência ${occurrenceId} possui separação WCAG incoerente.`);
   }
   if (!Array.isArray(occurrence.foreignBenchmarkRefs)) throw new TypeError(`Ocorrência ${occurrenceId}.foreignBenchmarkRefs deve ser lista.`);
-  const allowed = new Map(section508ReferencesForWcag(expectedWcag).map(reference => [reference.criterionId, reference]));
-  const seen = new Set();
-  for (const reference of occurrence.foreignBenchmarkRefs) {
-    const expected = allowed.get(reference?.criterionId);
-    if (!expected || reference.benchmarkId !== SECTION508_REVISED_CROSSWALK.id ||
-      reference.level !== expected.level || seen.has(reference.criterionId)) {
-      throw new TypeError(`Ocorrência ${occurrenceId} possui referência estrangeira inválida.`);
-    }
-    seen.add(reference.criterionId);
+  const expectedForeign = [...section508ReferencesForWcag(occurrence.testedWcagRefs)];
+  if (canonicalStringify(occurrence.foreignBenchmarkRefs) !== canonicalStringify(expectedForeign) ||
+    occurrence.foreignBenchmarkRefs.some(reference => reference.benchmarkId !== SECTION508_REVISED_CROSSWALK.id)) {
+    throw new TypeError(`Ocorrência ${occurrenceId} possui referência estrangeira que não deriva dos critérios testados.`);
   }
 }
 
@@ -1076,6 +1202,9 @@ function validateNormative(normative) {
   if (normative.editorialNotes !== undefined
     && canonicalStringify(normative.editorialNotes) !== canonicalStringify(NBR17225_EDITORIAL_NOTES)) {
     throw new TypeError('Notas editoriais normativas adulteradas.');
+  }
+  if (canonicalStringify(normative.sources) !== canonicalStringify(NORMATIVE_SOURCE_LEDGER)) {
+    throw new TypeError('Ledger de fontes normativas adulterado ou ausente.');
   }
 }
 

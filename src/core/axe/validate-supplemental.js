@@ -13,7 +13,7 @@ import { section508ReferencesForWcag } from '../normative/section508.js';
 const ITEM_BY_ID = new Map(NBR17225_ITEMS.map(item => [item.id, item]));
 const PRIORITY = Object.freeze({ cantTell: 1, failed: 2 });
 const RULE_KEYS = Object.freeze(['classification', 'confidence', 'engineRuleId', 'impact', 'limitations', 'mode', 'nbrItems', 'outcome', 'ruleId', 'source', 'summary', 'targets', 'wcag']);
-const OCCURRENCE_KEYS = Object.freeze(['accessiblePreview', 'applicabilityEvidence', 'classification', 'confidence', 'engineResultType', 'engineRuleId', 'equivalenceKey', 'evidenceIds', 'evidenceRefs', 'foreignBenchmarkRefs', 'framePath', 'impact', 'itemId', 'justification', 'legalAnalysis', 'mode', 'nbrItemRef', 'nodeId', 'occurrenceId', 'outcome', 'pageId', 'presentationTargetKey', 'ruleId', 'selector', 'source', 'target', 'wcagRefs']);
+const OCCURRENCE_KEYS = Object.freeze(['accessiblePreview', 'applicabilityEvidence', 'classification', 'confidence', 'engineResultType', 'engineRuleId', 'equivalenceKey', 'evidenceIds', 'evidenceRefs', 'foreignBenchmarkRefs', 'framePath', 'impact', 'itemId', 'itemWcagRefs', 'justification', 'legalAnalysis', 'mode', 'nbrItemRef', 'nodeId', 'occurrenceId', 'outcome', 'pageId', 'presentationTargetKey', 'ruleId', 'selector', 'source', 'sourceWcagRefs', 'target', 'testedWcagRefs', 'wcagRefs']);
 const UNMAPPED_RATIONALE = 'Achado suplementar do axe-core sem vínculo curado com item ABNT.';
 const CONFIRMATION_SUFFIX = ' A aplicabilidade ao item ABNT ainda exige confirmação pelo motor próprio ou revisão.';
 const TOP_LEVEL_KEYS = Object.freeze(['diagnostics', 'limitations', 'occurrences', 'provenance', 'ruleResults', 'status', 'technicalSummary']);
@@ -224,13 +224,22 @@ function validateOccurrence(occurrence, validatedRule, options, errors) {
   const outcome = own(occurrence, 'outcome');
   const engineResultType = own(occurrence, 'engineResultType');
   const itemId = mapping?.nbrItemRef ?? null;
-  const wcag = mapping ? [...mapping.wcagRefs] : [];
+  const sourceWcag = mapping ? [...mapping.wcagRefs] : [];
+  const itemWcag = itemId ? ITEM_BY_ID.get(itemId)?.wcag.map(reference => reference.id) ?? [] : [];
+  const testedWcag = outcome === 'failed' ? sourceWcag : [];
+  const legacyNormative = options?.legacyNormativeIds instanceof Set && options.legacyNormativeIds.has(own(occurrence, 'occurrenceId'));
+  const expectedSourceWcag = legacyNormative ? [] : sourceWcag;
+  const expectedTestedWcag = legacyNormative ? [] : testedWcag;
   const classification = mapping ? ITEM_BY_ID.get(itemId)?.classification : 'best-practice';
   if (!['violations', 'incomplete'].includes(engineResultType) || !Object.hasOwn(PRIORITY, outcome) ||
     (engineResultType === 'incomplete' && outcome !== 'cantTell') || (outcome === 'failed' && engineResultType !== 'violations') ||
     own(occurrence, 'nbrItemRef') !== itemId || own(occurrence, 'itemId') !== itemId ||
-    own(occurrence, 'classification') !== classification || !exactStrings(own(occurrence, 'wcagRefs'), wcag) ||
-    !exactData(own(occurrence, 'foreignBenchmarkRefs'), [...section508ReferencesForWcag(wcag)])) {
+    own(occurrence, 'classification') !== classification ||
+    !exactStrings(own(occurrence, 'itemWcagRefs'), itemWcag) ||
+    !exactStrings(own(occurrence, 'sourceWcagRefs'), expectedSourceWcag) ||
+    !exactStrings(own(occurrence, 'testedWcagRefs'), expectedTestedWcag) ||
+    !exactStrings(own(occurrence, 'wcagRefs'), expectedTestedWcag) ||
+    !exactData(own(occurrence, 'foreignBenchmarkRefs'), [...section508ReferencesForWcag(expectedTestedWcag)])) {
     errors.push(`Ocorrência de ${ruleId} diverge do crosswalk curado.`);
     return false;
   }
@@ -246,9 +255,8 @@ function validateOccurrence(occurrence, validatedRule, options, errors) {
     !exactKeys(target, ['framePath', 'nodeId', 'selector']) || own(target, 'nodeId') !== null ||
     own(occurrence, 'nodeId') !== null || own(occurrence, 'selector') !== selector ||
     !exactData(own(occurrence, 'framePath'), framePath) || !validFramePath(framePath) || !validSelector(selector) ||
-    !(options?.batch === true
-      ? /^occurrence-axe-[0-9a-f]{32}$/u
-      : /^occurrence-axe-[0-9a-f]{8}$/u).test(own(occurrence, 'occurrenceId')) ||
+    !(/^(?:occurrence-axe-[0-9a-f]{8}|occurrence-[A-Za-z0-9._:-]{1,200}-\d{6})$/u.test(own(occurrence, 'occurrenceId')) ||
+      (options?.batch === true && /^occurrence-axe-[0-9a-f]{32}$/u.test(own(occurrence, 'occurrenceId')))) ||
     !/^[A-Za-z0-9._:-]{1,200}$/u.test(own(occurrence, 'pageId')) ||
     own(occurrence, 'accessiblePreview') !== null || !exactData(own(occurrence, 'evidenceIds'), []) ||
     !exactData(own(occurrence, 'evidenceRefs'), []) || own(occurrence, 'mode') !== 'automated' ||

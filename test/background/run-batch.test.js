@@ -177,7 +177,10 @@ test('integrates three controlled fixtures through runBatch and runAudit into on
   assert.deepEqual(removed.length, 3);
   assert.equal(model.auditId, 'batch-integration');
   assert.equal(childModels.length, 3);
-  assert.ok(model.axePages.flatMap(value => value.result.occurrences).every(value => /^occurrence-axe-[a-f0-9]{32}$/u.test(value.occurrenceId)));
+  const occurrenceIds = new Set(model.occurrences.map(value => value.occurrenceId));
+  assert.ok(model.occurrences.every(value => /^occurrence-[A-Za-z0-9._:-]+-\d{6}$/u.test(value.occurrenceId)));
+  assert.ok(model.axePages.flatMap(value => value.result.occurrences)
+    .every(value => occurrenceIds.has(value.occurrenceId)));
   for (const [field, forgedValue] of [
     ['nodeId', 'node-forged'],
     ['selector', '#forged'],

@@ -358,6 +358,9 @@ export function normalizeAxeResults(input, options = {}) {
             ? `${conditionText} A aplicabilidade ao item ABNT ainda exige confirmação pelo motor próprio ou revisão.`
             : conditionText;
           const occurrenceId = `occurrence-axe-${stableHash([options.auditId ?? '', pageId, frameId, axeRuleId, selector, resultType, groupIndex, nodeIndex].join('\u0000'))}`;
+          const itemWcagRefs = item?.wcag.map(reference => reference.id) ?? [];
+          const sourceWcagRefs = mapping ? [...mapping.wcagRefs] : [];
+          const testedWcagRefs = outcome === 'failed' ? [...sourceWcagRefs] : [];
           occurrences.push({
             occurrenceId, pageId, itemId: mapping?.nbrItemRef ?? null,
             ruleId: source.ruleId, engineRuleId: axeRuleId, engineResultType: resultType, outcome, mode: 'automated',
@@ -369,8 +372,9 @@ export function normalizeAxeResults(input, options = {}) {
               : `selector:${frameId}:${selector}`,
             target: { nodeId: null, selector, framePath: frameId === 0 ? [] : [`frame:${frameId}`] },
             nbrItemRef: mapping?.nbrItemRef ?? null,
-            wcagRefs: mapping ? [...mapping.wcagRefs] : [],
-            foreignBenchmarkRefs: mapping ? [...section508ReferencesForWcag(mapping.wcagRefs)] : [],
+            itemWcagRefs, sourceWcagRefs, testedWcagRefs,
+            wcagRefs: [...testedWcagRefs],
+            foreignBenchmarkRefs: [...section508ReferencesForWcag(testedWcagRefs)],
             accessiblePreview: null, evidenceIds: [], evidenceRefs: [],
             justification,
             applicabilityEvidence,

@@ -189,7 +189,8 @@ function occurrenceCard(occurrence, index, context) {
   const review = context.reviewByOccurrence.get(occurrence.occurrenceId);
   const decision = context.decisionByOccurrence.get(occurrence.occurrenceId);
   const consolidated = effectiveOccurrenceOutcome(occurrence, decision);
-  const wcagLevels = item ? unique(item.wcag.map(reference => reference.level)).join(' ') : '';
+  const wcagLevels = item ? unique(item.wcag.filter(reference => occurrence.testedWcagRefs.includes(reference.id))
+    .map(reference => reference.level)).join(' ') : '';
   const title = occurrenceTitle(occurrence, item, rule);
   const abntToken = occurrence.nbrItemRef ?? '__none__';
   const decisionLabel = decision ? reviewAnswerLabel(decision.answer) : review ? 'Pendente' : 'Não se aplica';
@@ -228,11 +229,14 @@ function occurrenceTitle(occurrence, item, rule) {
 
 function normativeMapping(occurrence, item) {
   if (!item) return '<div class="normative-map"><h4>Mapeamento normativo</h4><p>Sem mapeamento normativo atribuído.</p></div>';
-  const wcag = item.wcag.length ? item.wcag.map(reference => `${reference.id} (nível ${reference.level})`).join(', ') : 'Sem critério WCAG vinculado';
+  const levelById = new Map(item.wcag.map(reference => [reference.id, reference.level]));
+  const format = references => references.length
+    ? references.map(reference => `${reference}${levelById.has(reference) ? ` (nível ${levelById.get(reference)})` : ''}`).join(', ')
+    : 'Nenhum critério registrado';
   const foreign = occurrence.foreignBenchmarkRefs.length
     ? `${occurrence.foreignBenchmarkRefs.map(reference => `${reference.criterionId} (${reference.level})`).join(', ')}. ${SECTION508_REVISED_CROSSWALK.qualification}`
-    : 'Sem correspondência técnica atribuída para este item.';
-  return `<div class="normative-map"><h4>Mapeamento normativo</h4><p><strong>ABNT NBR 17225:2025:</strong> item ${escapeHtml(item.id)} — ${escapeHtml(item.title)} (${escapeHtml(CLASSIFICATION[item.classification])}).</p><p><strong>WCAG 2.2:</strong> ${escapeHtml(wcag)}.</p><p><strong>${escapeHtml(SECTION508_REVISED_CROSSWALK.label)}:</strong> ${escapeHtml(foreign)}</p></div>`;
+    : 'Nenhuma correspondência: somente critérios efetivamente testados podem gerar esta referência.';
+  return `<div class="normative-map"><h4>Mapeamento normativo</h4><p><strong>ABNT NBR 17225:2025:</strong> item ${escapeHtml(item.id)} — ${escapeHtml(item.title)} (${escapeHtml(CLASSIFICATION[item.classification])}).</p><dl class="meta"><dt>Contexto integral do item ABNT</dt><dd>${escapeHtml(format(occurrence.itemWcagRefs))}</dd><dt>Critérios mapeados pela fonte</dt><dd>${escapeHtml(format(occurrence.sourceWcagRefs))}</dd><dt>Critérios efetivamente testados</dt><dd>${escapeHtml(format(occurrence.testedWcagRefs))}</dd><dt>${escapeHtml(SECTION508_REVISED_CROSSWALK.label)}</dt><dd>${escapeHtml(foreign)}</dd></dl></div>`;
 }
 
 function legalAnalysis(occurrence, item, anchor, displayOutcome, decision) {
@@ -352,11 +356,18 @@ function methodologySection(model) {
   const sources = unique(model.occurrences.map(occurrence => `${occurrence.source.engine} — ${occurrence.source.version}`));
   const diagnostics = model.session.diagnostics.map(entry => `${entry.code}: ${entry.message}`);
   const notes = model.normative?.editorialNotes || [];
+  const normativeSources = model.normative?.sources || [];
+  const sourceLedger = normativeSources.map(source => {
+    const locator = source.localCopy
+      ? `arquivo <code>${escapeHtml(source.localCopy.fileName)}</code>; SHA-256 <code>${escapeHtml(source.localCopy.sha256)}</code>`
+      : `<a href="${escapeHtml(source.url)}">${escapeHtml(source.url)}</a>`;
+    return `<li><strong>${escapeHtml(source.title)}</strong> — versão ${escapeHtml(source.version)}; identificador <code>${escapeHtml(source.id)}</code>; ${locator}.</li>`;
+  }).join('');
   return `<section id="metodologia" class="major-section" aria-labelledby="metodologia-titulo"><h2 id="metodologia-titulo">Metodologia, proveniência e integridade</h2><div class="method-grid">
 <article class="method-card"><h3>Método e ambiente</h3><p>${escapeHtml(model.methodology.name)}. Aprovação automática exige aplicabilidade e expectativas integralmente observadas; itens contextuais permanecem inconclusivos.</p><dl class="meta"><dt>Extensão</dt><dd>${escapeHtml(model.versions.extension)}</dd><dt>Regras</dt><dd>${escapeHtml(model.versions.rules)}</dd><dt>Navegador</dt><dd>${escapeHtml(model.versions.browser)}</dd><dt>Viewport</dt><dd>${escapeHtml(viewportText)}</dd><dt>Regras próprias</dt><dd>${escapeHtml(model.methodology.coreRuleCount)}</dd><dt>Regras suplementares</dt><dd>${escapeHtml(model.methodology.supplementalRuleCount)}</dd><dt>Itens normativos</dt><dd>${escapeHtml(model.methodology.itemCount)}</dd></dl></article>
 <article class="method-card"><h3>Proveniência dos motores</h3><ul class="compact-list">${sources.map(source => `<li>${escapeHtml(source)}</li>`).join('') || '<li>Nenhuma ocorrência de motor registrada.</li>'}</ul><p>axe-core, quando habilitado por gate técnico, é suplementar e não aprova item ABNT por si só.</p></article>
 <article class="method-card"><h3>Limitações e diagnósticos</h3><ul class="compact-list">${[...model.limitations, ...diagnostics].map(value => `<li>${escapeHtml(value)}</li>`).join('') || '<li>Nenhuma limitação adicional registrada.</li>'}</ul><p>A ausência de falha automática não comprova conformidade integral.</p></article>
-<article class="method-card"><h3>Fundamentação e fontes</h3><ul class="compact-list"><li>${escapeHtml(model.normative?.edition || 'ABNT NBR 17225:2025')} — itens, títulos, classificação e referências.</li><li>${escapeHtml(model.normative?.wcag || 'WCAG 2.2')} — critérios e níveis oficiais.</li><li>WCAG-EM — referência metodológica para escopo e limites de alegação.</li><li>${escapeHtml(SECTION508_REVISED_CROSSWALK.label)} — ${escapeHtml(SECTION508_REVISED_CROSSWALK.qualification)}</li><li>${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.label)} — ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.display)} ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification)}</li><li>Ressalva ao texto vigente: ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.currentTextCaveatRef)}.</li></ul></article>
+<article class="method-card"><h3>Fundamentação e fontes</h3><p>Ledger normativo congelado e reproduzível:</p><ul class="compact-list">${sourceLedger}</ul><p><strong>${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.label)}:</strong> ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.display)} ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification)} Ressalva ao texto vigente: ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.currentTextCaveatRef)}.</p></article>
 <article class="method-card"><h3>Notas de integridade normativa</h3><p>Informação impressa e normalização adotada permanecem separadas; o relatório não atribui à ABNT errata não localizada.</p><ul class="compact-list">${notes.map(note => `<li><strong>${escapeHtml(note.itemId)}:</strong> impresso “${escapeHtml(note.printed)}”; normalização “${escapeHtml(note.normalized)}”. ${escapeHtml(note.rationale)}</li>`).join('') || '<li>Nenhuma nota editorial registrada.</li>'}</ul></article>
 <article class="method-card"><h3>Manifesto de integridade</h3>${integrityList(model)}<p>SHA-256 permite verificar igualdade dos artefatos, mas não substitui assinatura digital, carimbo certificado ou ata notarial.</p></article>
 </div></section>`;

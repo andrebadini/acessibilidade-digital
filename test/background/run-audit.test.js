@@ -274,6 +274,8 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
     coordinateSpace: 'capture-css-px',
   });
   assert.ok(model.occurrences.length > 0);
+  assert.deepEqual(model.occurrences.map(value => value.occurrenceId), model.occurrences.map((_value, index) =>
+    `occurrence-page-1-${String(index + 1).padStart(6, '0')}`));
   for (const occurrence of model.occurrences) {
     assert.ok(['failed', 'cantTell'].includes(occurrence.outcome));
     assert.ok(occurrence.evidenceIds.length > 0 || occurrence.justification);
@@ -425,6 +427,16 @@ test('integrates the recommendation failure, editorial occurrence and informatio
   assert.deepEqual(reportEditorial.evidenceRefs, []);
   assert.equal(reportEditorial.accessiblePreview, null);
   assert.equal(reportEditorial.legalAnalysis, null);
+  assert.deepEqual(reportNewWindow.reason, {
+    code: 'missing-new-window-warning',
+    context: { behavior: 'target-blank', warning: 'absent' },
+  });
+  assert.deepEqual(reportNewWindow.itemWcagRefs, ['2.4.4', '2.4.9', '3.2.5']);
+  assert.deepEqual(reportNewWindow.sourceWcagRefs, []);
+  assert.deepEqual(reportNewWindow.testedWcagRefs, []);
+  assert.deepEqual(reportNewWindow.wcagRefs, []);
+  assert.deepEqual(reportNewWindow.foreignBenchmarkRefs, []);
+  assert.deepEqual(reportNewWindow.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v1' });
   assert.equal(reportNewWindow.classification, 'recommendation');
   assert.deepEqual(reportNewWindow.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v1' });
   assert.doesNotMatch(JSON.stringify(report), /PRIVATE-MATCH-SENTINEL/iu);
@@ -500,7 +512,8 @@ test('integrates a confirmed top-frame axe violation with provenance, ABNT outco
   assert.equal(reportOccurrence.impact, 'serious');
   assert.equal(reportOccurrence.confidence, 'high');
   assert.deepEqual(reportOccurrence.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v1' });
-  assert.equal(reportOccurrence.foreignBenchmarkRefs[0].benchmarkId, 'us.revised-508.wcag20-aa.v1');
+  assert.deepEqual(reportOccurrence.wcagRefs, reportOccurrence.testedWcagRefs);
+  assert.deepEqual(reportOccurrence.foreignBenchmarkRefs.map(reference => reference.criterionId), reportOccurrence.testedWcagRefs);
   const forgedResultType = structuredClone(report);
   forgedResultType.occurrences.find(occurrence => occurrence.source.engine === 'axe-core').engineResultType = 'incomplete';
   await assert.rejects(enrichAuditForReport(forgedResultType, {
@@ -608,12 +621,12 @@ test('rejects a forged failed item when validated axe evidence is only cantTell'
 });
 
 for (const fixture of [
-  { ruleId: 'input-image-alt', target: 'input', itemId: '5.2.2', wcag: ['1.1.1', '2.4.4', '2.4.9'], foreign: ['1.1.1', '2.4.4'] },
-  { ruleId: 'meta-viewport', target: 'meta', itemId: '5.13.5', wcag: ['1.4.4', '1.4.10'], foreign: ['1.4.4'] },
-  { ruleId: 'aria-roles', target: 'div', itemId: '5.13.12', wcag: ['1.3.1', '4.1.2'], foreign: ['1.3.1', '4.1.2'] },
-  { ruleId: 'frame-title', target: 'iframe', itemId: '5.13.4', wcag: ['1.3.1', '4.1.2'], foreign: ['1.3.1', '4.1.2'] },
+  { ruleId: 'input-image-alt', target: 'input', itemId: '5.2.2', wcag: ['1.1.1', '2.4.4', '2.4.9'], sourceWcag: ['1.1.1'] },
+  { ruleId: 'meta-viewport', target: 'meta', itemId: '5.13.5', wcag: ['1.4.4', '1.4.10'], sourceWcag: ['1.4.4'] },
+  { ruleId: 'aria-roles', target: 'div', itemId: '5.13.12', wcag: ['1.3.1', '4.1.2'], sourceWcag: ['4.1.2'] },
+  { ruleId: 'frame-title', target: 'iframe', itemId: '5.13.4', wcag: ['1.3.1', '4.1.2'], sourceWcag: ['4.1.2'] },
 ]) {
-  test(`enriches mapped incomplete ${fixture.ruleId} with every WCAG reference from its ABNT item`, async () => {
+  test(`keeps item context but claims no tested WCAG/508 coverage for incomplete ${fixture.ruleId}`, async () => {
     const axeRun = {
       status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],
       frames: [{ frameId: 0, status: 'success', result: {
@@ -633,8 +646,11 @@ for (const fixture of [
     });
     const occurrence = report.occurrences.find(item => item.source?.engine === 'axe-core');
     assert.equal(occurrence.nbrItemRef, fixture.itemId);
-    assert.deepEqual(occurrence.wcagRefs, fixture.wcag);
-    assert.deepEqual(occurrence.foreignBenchmarkRefs.map(reference => reference.criterionId), fixture.foreign);
+    assert.deepEqual(occurrence.itemWcagRefs, fixture.wcag);
+    assert.deepEqual(occurrence.sourceWcagRefs, fixture.sourceWcag);
+    assert.deepEqual(occurrence.testedWcagRefs, []);
+    assert.deepEqual(occurrence.wcagRefs, []);
+    assert.deepEqual(occurrence.foreignBenchmarkRefs, []);
     assert.equal(occurrence.outcome, 'cantTell');
     assert.equal(occurrence.legalAnalysis, null);
   });
@@ -1033,6 +1049,8 @@ test('stops the occurrence loop immediately when evidence capture observes abort
   assert.equal(model.progress.some(entry => entry.percent === 100), false);
   assert.equal(adapter.events.includes('handoff'), false);
   assert.equal(model.evidence.artifacts.some(item => item.nodeId === 'n-2'), false);
+  assert.ok(model.occurrences.every((occurrence, index) =>
+    occurrence.occurrenceId === `occurrence-page-1-${String(index + 1).padStart(6, '0')}`));
   assert.equal(adapter.counts.disconnects, 1);
   assert.equal(adapter.counts.removals, 1);
 });

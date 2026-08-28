@@ -24,6 +24,7 @@ import { sha256Hex } from '../core/report/hash.js';
 import { normalizeAuditUrl } from '../core/url.js';
 import { axeEquivalenceForAuditaRule } from '../core/normative/axe-nbr-crosswalk.js';
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
+import { section508ReferencesForWcag } from '../core/normative/section508.js';
 
 const SCHEMA_VERSION = 1;
 const METHODOLOGY = Object.freeze({ name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 130, itemCount: 146 });
@@ -148,6 +149,7 @@ function hasPrivateTextAncestor(node, indexes) {
 }
 
 function makeOccurrences(auditId, ruleResults, itemResults) {
+  const itemById = new Map(NBR17225_ITEMS.map(item => [item.id, item]));
   const occurrences = [];
   const add = input => {
     const signature = [auditId, input.itemId, input.ruleId || 'manual', input.nodeId || 'document', occurrences.length].join('\u0000');
@@ -160,6 +162,9 @@ function makeOccurrences(auditId, ruleResults, itemResults) {
     for (const itemId of itemIds) for (const target of targets) {
       const nodeId = targetNodeId(target);
       const equivalence = axeEquivalenceForAuditaRule(result.ruleId);
+      const itemWcagRefs = itemById.get(itemId)?.wcag.map(reference => reference.id) ?? [];
+      const sourceWcagRefs = result.ruleId === 'new-window-link-warning' ? [] : [...itemWcagRefs];
+      const testedWcagRefs = result.outcome === 'failed' ? [...sourceWcagRefs] : [];
       add({
         itemId,
         nbrItemRef: itemId,
@@ -179,6 +184,20 @@ function makeOccurrences(auditId, ruleResults, itemResults) {
           ? 'document'
           : nodeId && nodeId !== 'document' ? `node:${nodeId}` : null,
         evidenceIds: [],
+        itemWcagRefs, sourceWcagRefs, testedWcagRefs,
+        wcagRefs: [...testedWcagRefs],
+        foreignBenchmarkRefs: [...section508ReferencesForWcag(testedWcagRefs)],
+        ...(result.ruleId === 'new-window-link-warning' ? {
+          reason: result.outcome === 'failed'
+            ? { code: 'missing-new-window-warning', context: {
+              behavior: ['target-blank', 'observed-new-window'].includes(target?.data?.behavior) ? target.data.behavior : 'unknown',
+              warning: 'absent',
+            } }
+            : { code: 'new-window-warning-observation-incomplete', context: {
+              behavior: ['target-blank', 'observed-new-window'].includes(target?.data?.behavior) ? target.data.behavior : 'unknown',
+              warning: 'unknown',
+            } },
+        } : {}),
         justification: typeof target?.message === 'string' && target.message.trim() ? target.message.trim() : result.summary || 'A ocorrência exige verificação humana.',
       });
     }
@@ -193,6 +212,8 @@ function makeOccurrences(auditId, ruleResults, itemResults) {
       source: { engine: 'audita-manual-review', ruleId: `manual:${item.id}`, version: METHODOLOGY.version },
       target: { nodeId: null, selector: null, framePath: [] },
       equivalenceKey: `manual:${item.id}`, presentationTargetKey: null,
+      itemWcagRefs: item.wcag.map(reference => reference.id), sourceWcagRefs: [], testedWcagRefs: [],
+      wcagRefs: [], foreignBenchmarkRefs: [],
       justification: item.humanReason || 'O item depende de revisão humana no nível da página.',
     });
   }
@@ -220,6 +241,9 @@ function makeEditorialOccurrences(auditId, ruleResults) {
         pageId: 'page-1',
         source: { engine: 'audita-editorial', ruleId: rule.ruleId, version: METHODOLOGY.version },
         target: { nodeId, selector: null, framePath: [] },
+        itemWcagRefs: [],
+        sourceWcagRefs: [],
+        testedWcagRefs: [],
         wcagRefs: [],
         foreignBenchmarkRefs: [],
         accessiblePreview: null,
@@ -230,6 +254,26 @@ function makeEditorialOccurrences(auditId, ruleResults) {
     }
   }
   return occurrences;
+}
+
+function allocateOccurrenceIds(state) {
+  if (state.occurrenceIdsAllocated) return;
+  const oldToNew = new Map();
+  state.occurrences = state.occurrences.map((occurrence, index) => {
+    const occurrenceId = `occurrence-${occurrence.pageId}-${String(index + 1).padStart(6, '0')}`;
+    oldToNew.set(occurrence.occurrenceId, occurrenceId);
+    return { ...occurrence, occurrenceId };
+  });
+  if (state.axe) {
+    const axeIds = state.occurrences.filter(occurrence => occurrence.source?.engine === 'axe-core').map(occurrence => occurrence.occurrenceId);
+    const axe = structuredClone(state.axe);
+    axe.occurrences = axe.occurrences.map((occurrence, index) => ({ ...occurrence, occurrenceId: axeIds[index] }));
+    state.axe = deepFreeze(axe);
+  }
+  state.diagnostics = state.diagnostics.map(entry => entry.occurrenceId && oldToNew.has(entry.occurrenceId)
+    ? { ...entry, occurrenceId: oldToNew.get(entry.occurrenceId) }
+    : entry);
+  state.occurrenceIdsAllocated = true;
 }
 
 function resolvePresentationTargets(occurrences, artifacts) {
@@ -336,6 +380,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     endedAt: '',
     environment: { chromeVersion: '', viewport: { width: null, height: null, deviceScaleFactor: null } },
     status: 'running', diagnostics: [], progress: [], snapshot: null,
+    occurrenceIdsAllocated: false,
     ruleResults: [], coreRuleResults: [], itemResults: fallbackItems(), occurrences: [], manualReview: [],
     editorialRuleResults: [],
     axe: normalizeAxeResults({ status: 'disabled', provenance: AXE_PROVENANCE, frames: [], diagnostics: [{ code: 'AXE_FEATURE_DISABLED' }] }, { pageId: 'page-1' }),
@@ -596,6 +641,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
       }
     }
     state.occurrences.push(...makeEditorialOccurrences(auditId, state.editorialRuleResults));
+    allocateOccurrenceIds(state);
     state.manualReview = manualQueue(state.occurrences, state.itemResults);
     resolvePresentationTargets(state.occurrences, state.artifacts);
     state.presentation = dedupeFindingsForPresentation(state.occurrences);
@@ -633,7 +679,10 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
   async function finalize() {
     if (state.status === 'running') state.status = recoverableFailure ? 'partial' : fatal ? 'failed' : 'complete';
     state.endedAt = canonicalNow(now);
-    if (!state.occurrences.length && state.coreRuleResults.length) state.occurrences = makeOccurrences(auditId, state.coreRuleResults, state.itemResults);
+    if (!state.occurrences.length && state.coreRuleResults.length) {
+      state.occurrences = makeOccurrences(auditId, state.coreRuleResults, state.itemResults);
+    }
+    if (state.occurrences.length) allocateOccurrenceIds(state);
     if (!state.manualReview.length && state.occurrences.length) state.manualReview = manualQueue(state.occurrences, state.itemResults);
     return draftModel(state);
   }

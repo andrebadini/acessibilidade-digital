@@ -5,6 +5,7 @@ import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { canonicalStringify } from '../../src/core/report/canonical-json.js';
 import { sha256Hex } from '../../src/core/report/hash.js';
 import { NBR17225_EDITORIAL_NOTES } from '../../src/core/normative/nbr17225.js';
+import { NORMATIVE_SOURCE_LEDGER } from '../../src/core/normative/source-ledger.js';
 import { reportInput } from './helpers.js';
 
 test('canonical JSON is independent of insertion order at every object depth', () => {
@@ -80,6 +81,7 @@ test('validates coherent methodology and the optional normative editorial record
     edition: 'ABNT NBR 17225:2025',
     wcag: 'WCAG 2.2',
     editorialNotes: structuredClone(NBR17225_EDITORIAL_NOTES),
+    sources: structuredClone(NORMATIVE_SOURCE_LEDGER),
   };
   assert.doesNotThrow(() => createAuditModel(reportInput({ normative })));
   for (const methodology of [

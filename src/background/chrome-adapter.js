@@ -153,7 +153,7 @@ export function createChromeAdapter(chromeApi) {
       },
       async measureReflow(width) {
         await cdp.command('Emulation.setDeviceMetricsOverride', { width, height: 800, deviceScaleFactor: 1, mobile: false });
-        return executeOne(testedWidthCssPx => ({ testedWidthCssPx, horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth, exception: 'none' }), [width]);
+        return executeOne(testedWidthCssPx => ({ testedWidthCssPx, horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth, exception: 'unknown' }), [width]);
       },
       async measureTextResize(scalePercent) {
         return executeOne(percent => {
@@ -185,7 +185,7 @@ export function createChromeAdapter(chromeApi) {
             };
             return [...document.querySelectorAll('a[href],button,input,select,textarea,[tabindex]:not([tabindex="-1"])')].map(element => {
               const rect = element.getBoundingClientRect();
-              return { selector: selector(element), width: rect.width, height: rect.height, exception: 'none' };
+              return { selector: selector(element), width: rect.width, height: rect.height, exception: 'unknown' };
             });
           })
         ]);

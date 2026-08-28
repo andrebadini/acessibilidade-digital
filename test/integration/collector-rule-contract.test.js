@@ -99,16 +99,14 @@ test('collector runtime records normalize into the observations consumed by the 
   const merged = mergeProbesIntoSnapshot(snapshot, normalizeProbes({
     targetSizes: [{ backendNodeId: 6, selector: '#target', frameId: 'main', width: 20, height: 20, exception: 'none' }],
   }));
-  assert.deepEqual(merged.nodes.find(node => node.backendNodeId === 6).targetSize, {
-    width: 20, height: 20, exception: 'none'
-  });
+  assert.equal(merged.nodes.find(node => node.backendNodeId === 6).targetSize, undefined);
 
   const audit = await runCoreAudit(merged);
   const outcome = ruleId => audit.ruleResults.find(item => item.ruleId === ruleId).outcome;
   assert.equal(outcome('accessible-component-name'), 'failed');
   assert.equal(outcome('text-block-alignment'), 'failed');
   assert.equal(outcome('text-contrast-minimum'), 'failed');
-  assert.equal(outcome('target-size-minimum'), 'failed');
+  assert.equal(outcome('target-size-minimum'), 'cantTell');
   assert.equal(outcome('audio-control'), 'cantTell');
 });
 
@@ -259,7 +257,7 @@ test('probe selector and frame fallback shares the normalized node identity when
   const probes = normalizeProbes(raw);
   const merged = mergeProbesIntoSnapshot(snapshot, probes);
   assert.deepEqual(merged.nodes.find(node => node.backendNodeId === 6).targetSize, {
-    width: 44, height: 44, exception: 'none'
+    width: 44, height: 44, exception: 'unknown'
   });
 });
 

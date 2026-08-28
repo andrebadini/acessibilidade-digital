@@ -22,12 +22,8 @@ export async function remapAuditPage(input, { batchAuditId, pageId }) {
   }
 
   const occurrenceIds = new Map();
-  for (const occurrence of model.occurrences) {
-    occurrenceIds.set(occurrence.occurrenceId, await createBatchScopedId(
-      batchAuditId, pageId,
-      occurrence.source?.engine === 'axe-core' ? 'occurrence-axe' : 'occurrence',
-      occurrence.occurrenceId,
-    ));
+  for (const [index, occurrence] of model.occurrences.entries()) {
+    occurrenceIds.set(occurrence.occurrenceId, `occurrence-${pageId}-${String(index + 1).padStart(6, '0')}`);
   }
   assertUnique([...occurrenceIds.values()], 'ocorrência');
 
@@ -141,14 +137,6 @@ export async function remapAuditPage(input, { batchAuditId, pageId }) {
   };
   assertSamePageGraph(result);
   return deepFreeze(result);
-}
-
-export async function createBatchScopedId(batchAuditId, pageId, kind, localId) {
-  assertId(batchAuditId, 'batchAuditId');
-  assertId(pageId, 'pageId');
-  if (!['occurrence', 'occurrence-axe'].includes(kind)) throw new TypeError('Namespace de identidade batch inválido.');
-  const digest = await scopedDigest(batchAuditId, pageId, kind, localId);
-  return `${kind}-${digest.slice(0, 32)}`;
 }
 
 function remapRule(rule, remapNode) {

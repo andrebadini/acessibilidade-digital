@@ -16,13 +16,13 @@ function completeRaw() {
         { nodeId: 'n-102', selector: '#b', beforeCss: { outlineWidth: '0px' }, afterCss: { outlineWidth: '0px' }, rect: { x: 10, y: 10, width: 44, height: 44 }, intersectionRatio: 0.5, areaSufficient: false }
       ]
     },
-    reflow: { testedWidthCssPx: 320, horizontalOverflow: true, exception: 'none' },
+    reflow: { testedWidthCssPx: 320, horizontalOverflow: true, exception: 'none', exceptionProof: 'complete' },
     textResize: { scalePercent: 200, lossOfContent: false },
     targetSizes: [
-      { nodeId: 'n-201', width: 23.99, height: 24, exception: 'none' },
-      { nodeId: 'n-202', width: 24, height: 24, exception: 'none' },
-      { nodeId: 'n-203', width: 43.99, height: 44, exception: 'none' },
-      { nodeId: 'n-204', width: 44, height: 44, exception: 'none' }
+      { nodeId: 'n-201', width: 23.99, height: 24, exception: 'none', exceptionProof: 'complete' },
+      { nodeId: 'n-202', width: 24, height: 24, exception: 'none', exceptionProof: 'complete' },
+      { nodeId: 'n-203', width: 43.99, height: 44, exception: 'none', exceptionProof: 'complete' },
+      { nodeId: 'n-204', width: 44, height: 44, exception: 'none', exceptionProof: 'complete' }
     ],
     motion: { prefersReducedMotion: true, animatedCount: 2, reducedAnimatedCount: 1, complete: true },
     warnings: [],
@@ -72,6 +72,21 @@ test('small targets without an observed exception remain cantTell', () => {
   assert.equal(probes.targetSizes.minimum24.outcome, 'cantTell');
   assert.equal(probes.targetSizes.enhanced44.outcome, 'cantTell');
   assert.equal(probes.targetSizes.observations[0].exception, 'unknown');
+});
+
+test('fails closed when reflow and target-size exception states are absent or hostile', () => {
+  for (const exception of [undefined, 'none', 'PRIVATE-exception', '<script>']) {
+    const probes = normalizeProbes({
+      reflow: { testedWidthCssPx: 320, horizontalOverflow: true, ...(exception === undefined ? {} : { exception }) },
+      targetSizes: [{ nodeId: 'n-201', width: 20, height: 20, ...(exception === undefined ? {} : { exception }) }],
+      warnings: [], actions: [],
+    });
+    assert.equal(probes.reflow.outcome, 'cantTell');
+    assert.equal(probes.reflow.exception, 'unknown');
+    assert.equal(probes.targetSizes.minimum24.outcome, 'cantTell');
+    assert.equal(probes.targetSizes.observations[0].exception, 'unknown');
+    assert.doesNotMatch(JSON.stringify(probes), /PRIVATE|script/iu);
+  }
 });
 
 test('only preserves authoritative SnapshotV1 node IDs and assigns opaque IDs to arbitrary nodeId or selector values', () => {

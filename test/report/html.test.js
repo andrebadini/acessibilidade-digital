@@ -138,6 +138,21 @@ test('renders all report sections, 146 items, occurrences and evidence records',
   assert.match(html, /SHA-256/u);
 });
 
+test('renders item context separately from source and tested WCAG plus the frozen source ledger', () => {
+  const html = renderHtmlReport(SAMPLE_AUDIT);
+  const occurrence = SAMPLE_AUDIT.occurrences.find(value => value.occurrenceId === 'occ-focus-review');
+  const card = occurrenceCard(html, occurrence.occurrenceId);
+  assert.match(card, /Contexto integral do item ABNT/iu);
+  assert.match(card, /Critérios mapeados pela fonte/iu);
+  assert.match(card, /Critérios efetivamente testados[\s\S]{0,80}Nenhum/iu);
+  assert.doesNotMatch(card, /Section 508[^<]*2\.4\.3/iu);
+  assert.match(html, /ABNT-NBR-17225-Acessibilidade-Digital\.pdf/u);
+  assert.match(html, /1c3ee66b7fd606367e3de087e6a55fea90f4d368d8a1f769141d5e3b96d32afc/u);
+  assert.match(html, /https:\/\/www\.w3\.org\/TR\/WCAG22\//u);
+  assert.match(html, /https:\/\/www\.access-board\.gov\/ict\//u);
+  assert.match(html, /https:\/\/www\.section508\.gov\/develop\/applicability-conformance\//u);
+});
+
 test('embeds occurrence-specific marked screenshots and raw evidence with useful alt and self-contained A4 CSS', () => {
   const html = renderHtmlReport(SAMPLE_AUDIT);
   const images = [...html.matchAll(/<svg\b[^>]*class="evidence-media"[^>]*>[\s\S]*?<\/svg>/gu)].map(match => match[0]);
@@ -373,7 +388,7 @@ test('uses curated supplemental summaries and never attaches legal or normative 
 test('keeps ABNT, WCAG and qualified Section 508 mapping distinct from the consumer-analysis block', () => {
   const card = occurrenceCard(renderHtmlReport(SAMPLE_AUDIT), 'occ-focus-failed');
   assert.match(card, /ABNT NBR 17225:2025:<\/strong> item 5\.1\.1/u);
-  assert.match(card, /WCAG 2\.2:<\/strong> 2\.4\.7 \(nível AA\)/u);
+  assert.match(card, /Critérios efetivamente testados<\/dt><dd>2\.4\.7 \(nível AA\)/u);
   assert.match(card, new RegExp(SECTION508_REVISED_CROSSWALK.label, 'u'));
   assert.match(card, new RegExp(SECTION508_REVISED_CROSSWALK.qualification.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
   assert.match(card, /class="legal-analysis"/u);
