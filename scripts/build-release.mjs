@@ -1,14 +1,20 @@
 import { createHash } from 'node:crypto';
-import { cp, mkdtemp, mkdir, readFile, readdir, rm, utimes } from 'node:fs/promises';
+import { cp, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(await readFile(join(root, 'manifest.json'), 'utf8'));
-const output = join(root, 'release', `audita-acessibilidade-${manifest.version}.zip`);
-const releaseDirectory = dirname(output);
+const cli = process.argv.slice(2);
+const usesTemporaryReleaseDirectory = cli.length !== 0;
+const releaseDirectory = usesTemporaryReleaseDirectory
+  ? await resolveTemporaryReleaseDirectory(cli)
+  : join(root, 'release');
+const output = resolveReleaseOutput(releaseDirectory, manifest.version);
+if (!usesTemporaryReleaseDirectory) await mkdir(releaseDirectory, { recursive: true });
+await validateCanonicalReleaseDirectory(releaseDirectory);
 const staging = await mkdtemp(join(tmpdir(), 'audita-mt-release-'));
 const releaseTimestamp = new Date('2026-08-27T00:00:00.000Z');
 
@@ -23,12 +29,9 @@ try {
   const discovered = await runtimeFiles(staging);
   const files = ['manifest.json', ...discovered.filter(path => path !== 'manifest.json')];
   for (const path of files) await utimes(join(staging, path), releaseTimestamp, releaseTimestamp);
-  await mkdir(releaseDirectory, { recursive: true });
-  for (const entry of await readdir(releaseDirectory, { withFileTypes: true })) {
-    if (entry.isFile() && /^audita-(?:acessibilidade|mt)-\d+\.\d+\.\d+\.zip$/u.test(entry.name)) {
-      await rm(join(releaseDirectory, entry.name), { force: true });
-    }
-  }
+  await validateCanonicalReleaseDirectory(releaseDirectory);
+  await rm(output, { force: true });
+  await validateCanonicalReleaseDirectory(releaseDirectory);
   const zip = spawnSync('zip', ['-X', '-q', output, ...files], {
     cwd: staging, encoding: 'utf8', env: { ...process.env, TZ: 'UTC' },
   });
@@ -48,4 +51,76 @@ async function runtimeFiles(directory, prefix = '') {
     else if (entry.isFile()) files.push(relative);
   }
   return files.sort((a, b) => a.localeCompare(b, 'en'));
+}
+
+async function resolveTemporaryReleaseDirectory(args) {
+  if (args.length !== 2 || args[0] !== '--temporary-release-directory' || args[1].length === 0) {
+    throw new Error('Argumentos inválidos para o diretório temporário de release.');
+  }
+  return validateTemporaryReleaseDirectory(args[1]);
+}
+
+async function validateTemporaryReleaseDirectory(candidate) {
+  if (!isAbsolute(candidate) || resolve(candidate) !== candidate
+      || !/^audita-release-test-[A-Za-z0-9]{6}$/u.test(basename(candidate))) {
+    throw new Error('Diretório temporário de release inválido.');
+  }
+  const [temporaryRoot, candidateParent, entry] = await Promise.all([
+    realpath(tmpdir()),
+    realpath(dirname(candidate)),
+    lstat(candidate),
+  ]);
+  if (candidateParent !== temporaryRoot || !entry.isDirectory() || entry.isSymbolicLink()) {
+    throw new Error('Diretório temporário de release inseguro.');
+  }
+  const canonicalCandidate = await realpath(candidate);
+  if (dirname(canonicalCandidate) !== temporaryRoot || basename(canonicalCandidate) !== basename(candidate)) {
+    throw new Error('Diretório temporário de release inseguro.');
+  }
+  return canonicalCandidate;
+}
+
+async function validateCanonicalReleaseDirectory(candidate) {
+  if (!isAbsolute(candidate) || resolve(candidate) !== candidate) {
+    throw new Error('Diretório de release não canônico.');
+  }
+  const entry = await lstat(candidate);
+  if (!entry.isDirectory() || entry.isSymbolicLink()) {
+    throw new Error('Diretório de release inseguro.');
+  }
+  const canonicalCandidate = await realpath(candidate);
+  if (canonicalCandidate !== candidate) throw new Error('Diretório de release inseguro.');
+  return canonicalCandidate;
+}
+
+function resolveReleaseOutput(releaseDirectory, version) {
+  const safeVersion = validateChromeVersion(version);
+  const canonicalReleaseDirectory = resolve(releaseDirectory);
+  if (!isAbsolute(releaseDirectory) || canonicalReleaseDirectory !== releaseDirectory) {
+    throw new Error('Diretório de release não canônico.');
+  }
+  const expectedBasename = `audita-acessibilidade-${safeVersion}.zip`;
+  const output = resolve(canonicalReleaseDirectory, expectedBasename);
+  if (dirname(resolve(output)) !== canonicalReleaseDirectory || basename(output) !== expectedBasename) {
+    throw new Error('Caminho de saída do release escapou do diretório autorizado.');
+  }
+  return output;
+}
+
+function validateChromeVersion(version) {
+  if (typeof version !== 'string') throw new Error('Versão do manifesto inválida.');
+  const components = version.split('.');
+  if (components.length < 1 || components.length > 4) throw new Error('Versão do manifesto inválida.');
+  const values = components.map(component => {
+    const hasOnlyAsciiDigits = component.length > 0
+      && [...component].every(character => character >= '0' && character <= '9');
+    if (!hasOnlyAsciiDigits || component.length > 5 || (component.length > 1 && component.startsWith('0'))) {
+      throw new Error('Versão do manifesto inválida.');
+    }
+    const value = Number(component);
+    if (!Number.isSafeInteger(value) || value > 65_535) throw new Error('Versão do manifesto inválida.');
+    return value;
+  });
+  if (values.every(value => value === 0)) throw new Error('Versão do manifesto inválida.');
+  return version;
 }
