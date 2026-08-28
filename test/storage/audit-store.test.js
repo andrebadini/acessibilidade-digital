@@ -609,6 +609,71 @@ test('every synchronous IndexedDB boundary is sanitized and remains retryable', 
   });
 });
 
+test('every synchronous IndexedDB operation aborts its transaction and exposes only the fixed error', async t => {
+  const sensitive = 'OperationError: db=audita-mt url=https://private.invalid/?token=never-log';
+  const assertFixedAbort = async (fake, boundary, operation) => {
+    const before = fake.abortCalls;
+    fake.failNext(boundary);
+    await assert.rejects(operation(), error => {
+      assert.ok(error instanceof AuditStorageUnavailableError, boundary);
+      assert.equal(error.code, 'AUDIT_STORAGE_UNAVAILABLE', boundary);
+      assert.doesNotMatch(error.message, /operation|database|audita-mt|private|token/iu, boundary);
+      return true;
+    });
+    assert.equal(fake.abortCalls, before + 1, `${boundary}: a transação precisa ser abortada`);
+  };
+
+  await t.test('object-store request matrix', async () => {
+    const fake = createFakeIndexedDb({ syncError: new Error(sensitive) });
+    const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+    await store.commitAudit('operation-matrix', { auditId: 'operation-matrix' }, { auditId: 'operation-matrix' }, { now: T0 });
+    const snapshot = await store.getAuditSnapshot('operation-matrix');
+    await assertFixedAbort(fake, 'store.put', () => store.setLatest({ auditId: 'operation-matrix' }));
+    await assertFixedAbort(fake, 'store.get', () => store.getLatest());
+    await assertFixedAbort(fake, 'store.delete', () => store.deleteAudit('operation-matrix', snapshot.capability, { now: T29 }));
+    await assertFixedAbort(fake, 'store.getAllKeys', () => store.deleteAllAudits({ now: T29 }));
+    await assertFixedAbort(fake, 'store.clear', () => store.deleteAllAudits({ now: T29 }));
+  });
+
+  for (const boundary of ['keyRange.upperBound', 'index.count', 'index.openCursor', 'cursor.continue']) {
+    await t.test(boundary, async () => {
+      const fake = createFakeIndexedDb({ syncError: new Error(sensitive) });
+      const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+      for (const id of ['cursor-a', 'cursor-b']) {
+        await store.commitAudit(id, { auditId: id }, { auditId: id }, { now: T0 });
+      }
+      await assertFixedAbort(fake, boundary, () => store.cleanupExpiredAudits({ now: T30, limit: 25 }));
+    });
+  }
+
+  await t.test('cursor.continuePrimaryKey', async () => {
+    const fake = createFakeIndexedDb({ syncError: new Error(sensitive) });
+    const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+    for (const id of ['marker-b', 'marker-c']) {
+      await store.commitAudit(id, { auditId: id }, { auditId: id }, { now: T0 });
+    }
+    await store.cleanupExpiredAudits({ now: T30, limit: 1 });
+    await store.commitAudit('marker-a', { auditId: 'marker-a' }, { auditId: 'marker-a' }, { now: T0 });
+    await assertFixedAbort(fake, 'cursor.continuePrimaryKey', () =>
+      store.cleanupExpiredAudits({ now: T30, limit: 25 }));
+  });
+
+  for (const boundary of ['store.createIndex', 'store.openCursor']) {
+    await t.test(boundary, async () => {
+      const fake = createFakeIndexedDb({
+        version: 1,
+        initialStores: { audits: [['legacy-operation', { auditId: 'legacy-operation' }]] },
+        syncError: new Error(sensitive),
+      });
+      const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+      fake.failNext(boundary);
+      await assert.rejects(store.getLatest(), error => error instanceof AuditStorageUnavailableError &&
+        !/operation|database|audita-mt|private|token/iu.test(error.message));
+      assert.ok(fake.abortCalls >= 1, boundary);
+    });
+  }
+});
+
 test('IndexedDB commitAudit writes model and latest in one transaction', async () => {
   const fake = createFakeIndexedDb();
   const store = createAuditStore({ indexedDB: fake });
@@ -1383,9 +1448,10 @@ function createFakeIndexedDb(options = {}) {
     transaction: options.syncTransactionFailures ?? 0,
     objectStore: options.syncObjectStoreFailures ?? 0,
     index: options.syncIndexFailures ?? 0,
+    ...(options.syncOperationFailures ?? {}),
   };
   const throwSynchronousFailure = boundary => {
-    if (syncFailures[boundary] < 1) return;
+    if ((syncFailures[boundary] ?? 0) < 1) return;
     syncFailures[boundary] -= 1;
     throw options.syncError ?? new Error(`Sensitive ${boundary} failure`);
   };
@@ -1408,6 +1474,7 @@ function createFakeIndexedDb(options = {}) {
       },
       abort() {
         if (completed) return;
+        fake.abortCalls += 1;
         completed = true;
         transaction.error ??= new Error('AbortError');
         queueMicrotask(() => {
@@ -1497,12 +1564,14 @@ function createFakeIndexedDb(options = {}) {
             primaryKey,
             value: cloneValue(value),
             continue() {
+              throwSynchronousFailure('cursor.continue');
               if (continued) throw new Error('Cursor already continued');
               continued = true;
               index += 1;
               dispatch();
             },
             continuePrimaryKey(targetKey, targetPrimaryKey) {
+              throwSynchronousFailure('cursor.continuePrimaryKey');
               if (continued) throw new Error('Cursor already continued');
               continued = true;
               index = entries.findIndex((entry, candidateIndex) => candidateIndex > index &&
@@ -1529,6 +1598,7 @@ function createFakeIndexedDb(options = {}) {
       keyPath: definition.keyPath,
       indexNames: { contains: indexName => definition.indexes.has(indexName) },
       createIndex(indexName, keyPath, indexOptions = {}) {
+        throwSynchronousFailure('store.createIndex');
         definition.indexes.set(indexName, { keyPath, unique: indexOptions.unique === true });
         return this.index(indexName);
       },
@@ -1538,10 +1608,12 @@ function createFakeIndexedDb(options = {}) {
         if (!indexDefinition) throw new Error(`Unknown index ${indexName}`);
         return {
           count(range) {
+            throwSynchronousFailure('index.count');
             return request(() => [...definition.records.values()]
               .filter(value => range?.upper === undefined || value?.[indexDefinition.keyPath] <= range.upper).length);
           },
           openCursor(range) {
+            throwSynchronousFailure('index.openCursor');
             return cursorRequest(() => [...definition.records.entries()]
               .filter(([, value]) => range?.upper === undefined || value?.[indexDefinition.keyPath] <= range.upper)
               .map(([primaryKey, value]) => [value?.[indexDefinition.keyPath], value, primaryKey])
@@ -1550,6 +1622,7 @@ function createFakeIndexedDb(options = {}) {
         };
       },
       put(value, explicitKey) {
+        throwSynchronousFailure('store.put');
         const key = keyFor(value, explicitKey);
         return request(() => {
           if (options.failWrites) throw options.writeError ?? new Error('QuotaExceededError');
@@ -1558,30 +1631,37 @@ function createFakeIndexedDb(options = {}) {
         });
       },
       delete(key) {
+        throwSynchronousFailure('store.delete');
         return request(() => {
           if (options.failWrites) throw options.writeError ?? new Error('AbortError');
           return definition.records.delete(key);
         });
       },
       clear() {
+        throwSynchronousFailure('store.clear');
         return request(() => {
           if (options.failWrites) throw options.writeError ?? new Error('AbortError');
           return definition.records.clear();
         });
       },
       get(key) {
+        throwSynchronousFailure('store.get');
         return request(() => {
           if (options.failReads) throw options.readError ?? new Error('UnknownError');
           return cloneValue(definition.records.get(key));
         });
       },
       getAllKeys() {
+        throwSynchronousFailure('store.getAllKeys');
         return request(() => {
           if (options.failReads) throw options.readError ?? new Error('UnknownError');
           return [...definition.records.keys()];
         });
       },
-      openCursor() { return cursorRequest(() => [...definition.records.entries()]); },
+      openCursor() {
+        throwSynchronousFailure('store.openCursor');
+        return cursorRequest(() => [...definition.records.entries()]);
+      },
     };
   };
 
@@ -1591,9 +1671,16 @@ function createFakeIndexedDb(options = {}) {
     transactionModes: [],
     transactionStores: [],
     openCalls: 0,
+    abortCalls: 0,
     database: null,
     versions: [],
-    IDBKeyRange: { upperBound: upper => ({ upper }) },
+    IDBKeyRange: {
+      upperBound(upper) {
+        throwSynchronousFailure('keyRange.upperBound');
+        return { upper };
+      },
+    },
+    failNext(boundary, count = 1) { syncFailures[boundary] = count; },
     inspectStore(name) {
       const store = stores.get(name);
       return store ? new Map([...store.records].map(([key, value]) => [key, cloneValue(value)])) : undefined;
@@ -1652,7 +1739,13 @@ function createFakeIndexedDb(options = {}) {
           request.transaction.objectStore = name => createStoreFacade(name, request.transaction);
           request.onupgradeneeded?.({ oldVersion, newVersion: requestedVersion });
           databaseVersion = requestedVersion;
-          request.transaction._whenDone(() => request.onsuccess?.());
+          request.transaction._whenDone(() => {
+            if (request.transaction.error) request.onerror?.();
+            else {
+              databaseVersion = requestedVersion;
+              request.onsuccess?.();
+            }
+          });
         } else request.onsuccess?.();
       });
       return request;
