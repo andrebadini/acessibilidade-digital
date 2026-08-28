@@ -383,7 +383,10 @@ test('in-memory audit storage round-trips models and latest panel state without 
 test('in-memory commitAudit clones both values before atomically changing state', async () => {
   const store = createInMemoryAuditStore();
   await store.commitAudit('audit-1', { auditId: 'audit-1', version: 1 }, { auditId: 'audit-1', status: 'partial' });
-  await assert.rejects(store.commitAudit('audit-1', { auditId: 'audit-1', version: 2 }, { invalid: () => {} }), /clone|cloned|function/i);
+  await assert.rejects(
+    store.commitAudit('audit-1', { auditId: 'audit-1', version: 2 }, { invalid: () => {} }),
+    error => error instanceof AuditStorageUnavailableError && error.code === 'AUDIT_STORAGE_UNAVAILABLE',
+  );
   assert.deepEqual(await store.getAudit('audit-1'), { auditId: 'audit-1', version: 1 });
   assert.deepEqual(await store.getLatest(), { auditId: 'audit-1', status: 'partial' });
 });
@@ -513,6 +516,33 @@ test('IndexedDB v1 migration creates metadata only for normal audit records and 
   assert.doesNotMatch(JSON.stringify(fake.inspectStore('audit-retention')), /sensitive|token|pixel/iu);
 });
 
+test('v1 migration removes a legacy URL key instead of copying its query into retention metadata', async () => {
+  const rawQueryKey = 'https://legacy.invalid/a?ordinary_parameter=raw-query-value';
+  const fake = createFakeIndexedDb({
+    version: 1,
+    initialStores: {
+      audits: [[rawQueryKey, {
+        auditId: rawQueryKey,
+        timestamps: { endedAt: '2026-01-02T03:04:05.006Z' },
+      }],
+      [`__audit_revision__:${rawQueryKey}`, 1],
+      ['__latest__', { auditId: rawQueryKey, status: 'complete' }]],
+    },
+  });
+  const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+
+  await store.getLatest();
+
+  assert.equal(fake.inspectStore('audits').has(rawQueryKey), false);
+  assert.equal(
+    [...fake.inspectStore('audits').keys()].some(key => String(key).includes('raw-query-value')),
+    false,
+  );
+  assert.equal(fake.inspectStore('audits').has('__latest__'), false);
+  assert.equal(fake.inspectStore('audit-retention').size, 0);
+  assert.doesNotMatch(JSON.stringify([...fake.inspectStore('audit-retention')]), /ordinary_parameter|raw-query-value/iu);
+});
+
 test('IndexedDB retention expiration remains absolute through revision and cleans incrementally', async () => {
   const fake = createFakeIndexedDb();
   const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
@@ -565,6 +595,135 @@ test('IndexedDB request failures never expose native database details', async ()
     assert.equal(error.message, 'Não foi possível salvar a auditoria no armazenamento local. Libere espaço ou verifique as permissões e tente novamente.');
     assert.doesNotMatch(error.message, /database|audita-mt|private|token/iu);
     return true;
+  });
+});
+
+test('persistent storage clone failures are fixed, accessor-safe and retryable across mutation boundaries', async t => {
+  const nativeDetail = 'NATIVE_DATA_CLONE_DETAIL_49';
+  const fixedFailure = error => {
+    assert.ok(error instanceof AuditStorageUnavailableError);
+    assert.equal(error.code, 'AUDIT_STORAGE_UNAVAILABLE');
+    assert.equal(error.message, 'Não foi possível salvar a auditoria no armazenamento local. Libere espaço ou verifique as permissões e tente novamente.');
+    assert.doesNotMatch(error.message, /NATIVE_DATA_CLONE_DETAIL_49|DataCloneError/iu);
+    return true;
+  };
+  const hostileValue = (auditId, extra = {}) => {
+    let accessorReads = 0;
+    const value = { auditId, ...extra };
+    Object.defineProperty(value, 'payload', {
+      enumerable: true,
+      get() {
+        accessorReads += 1;
+        throw new Error(nativeDetail);
+      },
+    });
+    return { value, reads: () => accessorReads };
+  };
+  const createPersistentStore = () => {
+    const fake = createFakeIndexedDb();
+    return createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+  };
+
+  await t.test('direct put', async () => {
+    const store = createPersistentStore();
+    const hostile = hostileValue('clone-put');
+    await assert.rejects(Promise.resolve().then(() => store.setLatest(hostile.value)), fixedFailure);
+    assert.equal(hostile.reads(), 0);
+    await store.setLatest({ auditId: 'clone-put', status: 'complete' });
+    assert.equal((await store.getLatest()).status, 'complete');
+  });
+
+  await t.test('audit mutation', async () => {
+    const store = createPersistentStore();
+    const hostile = hostileValue('clone-mutation');
+    await assert.rejects(
+      store.commitAudit('clone-mutation', hostile.value, { auditId: 'clone-mutation' }, { now: T0 }),
+      fixedFailure,
+    );
+    assert.equal(hostile.reads(), 0);
+    await store.commitAudit(
+      'clone-mutation', { auditId: 'clone-mutation' }, { auditId: 'clone-mutation' }, { now: T0 },
+    );
+    assert.equal((await store.getAudit('clone-mutation')).auditId, 'clone-mutation');
+  });
+
+  await t.test('interrupted-checkpoint settlement', async () => {
+    const store = createPersistentStore();
+    const auditId = 'clone-interrupted';
+    await store.commitAudit(
+      auditId,
+      { auditId, session: { status: 'running' } },
+      { auditId, status: 'running' },
+      { now: T0 },
+    );
+    const hostile = hostileValue(auditId, { status: 'failed' });
+    await assert.rejects(
+      store.markAuditInterrupted(auditId, hostile.value, { now: '2026-08-01T00:00:01.000Z' }),
+      fixedFailure,
+    );
+    assert.equal(hostile.reads(), 0);
+    assert.deepEqual(
+      await store.markAuditInterrupted(
+        auditId, { auditId, status: 'failed' }, { now: '2026-08-01T00:00:01.100Z' },
+      ),
+      { updated: true, reason: 'interrupted' },
+    );
+  });
+
+  await t.test('atomic export finalization', async () => {
+    const store = createPersistentStore();
+    const auditId = 'clone-finalization';
+    await store.commitAudit(auditId, { auditId }, { auditId, status: 'complete' }, { now: T0 });
+    const source = await store.getAuditSnapshot(auditId);
+    const acquired = await store.acquireExportLease(auditId, source.capability, {
+      ownerId: 'clone-owner', now: '2026-08-01T00:00:01.000Z',
+      latestState: { auditId, exportStatus: 'queued', exportRevision: source.revision },
+    });
+    await store.claimExportLease(auditId, source.capability, {
+      ownerId: 'clone-owner', exportAttempt: acquired.exportAttempt,
+      now: '2026-08-01T00:00:01.100Z',
+      latestState: { auditId, exportStatus: 'running', exportRevision: source.revision },
+    });
+    const reserved = await store.commitAuditIfRevisionWithExportLease(
+      auditId,
+      { auditId, session: { status: 'partial' } },
+      { auditId, exportStatus: 'delivering', exportRevision: source.revision + 1 },
+      source.capability,
+      {
+        ownerId: 'clone-owner', exportAttempt: acquired.exportAttempt,
+        now: '2026-08-01T00:00:01.200Z', phase: 'delivering',
+      },
+    );
+    let downloadId = 70;
+    for (const format of ['html', 'json', 'csv', 'pdf']) {
+      await store.recordExportDelivery(auditId, reserved.capability, {
+        ownerId: 'clone-owner', exportAttempt: acquired.exportAttempt,
+        now: `2026-08-01T00:00:02.${String(downloadId).padStart(3, '0')}Z`,
+        format, filename: `clone-finalization.${format}`, state: 'terminal', downloadId,
+      });
+      downloadId += 1;
+    }
+    const hostile = hostileValue(auditId, { session: { status: 'partial' } });
+    const options = {
+      ownerId: 'clone-owner', exportAttempt: acquired.exportAttempt,
+      now: '2026-08-01T00:00:03.000Z', clearDeliveryJournal: true,
+      deleteAfterCompleteExport: false,
+    };
+    await assert.rejects(
+      store.finalizeExportAndMaybeDelete(
+        auditId, hostile.value, { auditId, exportStatus: 'partial' }, reserved.capability, options,
+      ),
+      fixedFailure,
+    );
+    assert.equal(hostile.reads(), 0);
+    const finalized = await store.finalizeExportAndMaybeDelete(
+      auditId,
+      { auditId, session: { status: 'partial' } },
+      { auditId, exportStatus: 'partial' },
+      reserved.capability,
+      options,
+    );
+    assert.equal(finalized.deleted, false);
   });
 });
 
@@ -806,6 +965,29 @@ test('audit identifiers cannot collide with private latest, revision, lease, att
     await assert.rejects(store.getAuditSnapshot(auditId), /identificador|reservad|inválid/iu);
   }
   assert.equal(await store.getLatest(), undefined);
+});
+
+test('all store backends reject audit identifiers outside the shared strict grammar', async () => {
+  for (const store of [
+    createInMemoryAuditStore(),
+    createAuditStore({ indexedDB: createFakeIndexedDb() }),
+  ]) {
+    for (const auditId of [
+      'https://site.invalid/path?ordinary_parameter=raw-query-value',
+      'audit id with spaces',
+      'audit/with/slashes',
+      `audit-${'x'.repeat(200)}`,
+    ]) {
+      await assert.rejects(
+        store.setAudit(auditId, { auditId }),
+        /identificador|inválido/iu,
+      );
+      await assert.rejects(
+        Promise.resolve().then(() => store.getAudit(auditId)),
+        /identificador|inválido/iu,
+      );
+    }
+  }
 });
 
 test('export attempts remain monotonic per audit when another audit becomes latest', async () => {
@@ -1283,7 +1465,7 @@ test('in-memory review and journal mutations stay atomic when the stored latest 
   await assert.rejects(store.recordExportDelivery(auditId, snapshot.capability, {
     ownerId: 'owner-latest-atomic', exportAttempt: lease.exportAttempt,
     now: '2026-08-27T12:30:00.300Z', format: 'html', filename: 'audit.html', state: 'starting',
-  }), /clone|function/iu);
+  }), error => error instanceof AuditStorageUnavailableError && error.code === 'AUDIT_STORAGE_UNAVAILABLE');
   assert.deepEqual(await store.getExportDeliveryJournal(auditId), []);
 
   await store.setLatest({ auditId, exportStatus: 'delivering', exportRevision: snapshot.revision });
@@ -1296,12 +1478,12 @@ test('in-memory review and journal mutations stay atomic when the stored latest 
   await assert.rejects(store.resolveExportDelivery(auditId, {
     ownerId: 'owner-latest-atomic', exportAttempt: lease.exportAttempt,
     now: '2026-08-27T12:30:00.500Z', format: 'html', filename: 'audit.html', outcome: 'cleanup-failed',
-  }), /clone|function/iu);
+  }), error => error instanceof AuditStorageUnavailableError && error.code === 'AUDIT_STORAGE_UNAVAILABLE');
   assert.deepEqual(await store.getExportDeliveryJournal(auditId), journalBefore);
 
   await assert.rejects(store.commitAuditReviewIfRevision(
     auditId, { auditId, marker: 'human-review' }, snapshot.capability,
-  ), /clone|function/iu);
+  ), error => error instanceof AuditStorageUnavailableError && error.code === 'AUDIT_STORAGE_UNAVAILABLE');
   const after = await store.getAuditSnapshot(auditId);
   assert.equal(after.revision, snapshot.revision);
   assert.equal(after.model.marker, 'delivering');

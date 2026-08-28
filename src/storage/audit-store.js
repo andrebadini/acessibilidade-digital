@@ -1,4 +1,5 @@
 import {
+  canonicalAuditId,
   canonicalRetentionInstant,
   createRetentionMetadata,
   isPrivateAuditKey,
@@ -25,19 +26,50 @@ const INTERRUPTIBLE_AUDIT_STATUSES = new Set(['idle', 'validating', 'queued', 'r
 const AUDIT_SNAPSHOT_CAPABILITIES = new WeakMap();
 const IN_MEMORY_RETENTION = new WeakMap();
 
-function clone(value) {
-  return value === undefined ? undefined : structuredClone(value);
+function assertStorageCloneSafe(root) {
+  const pending = [root];
+  const seen = new WeakSet();
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (value === null || value === undefined ||
+      (typeof value !== 'object' && typeof value !== 'function')) {
+      if (typeof value === 'function' || typeof value === 'symbol') {
+        throw new TypeError('Valor não clonável.');
+      }
+      continue;
+    }
+    if (seen.has(value)) continue;
+    seen.add(value);
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    for (const key of Reflect.ownKeys(descriptors)) {
+      const descriptor = descriptors[key];
+      if (!Object.hasOwn(descriptor, 'value')) throw new TypeError('Acessor não clonável.');
+      pending.push(descriptor.value);
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype === Map.prototype || Map.prototype.isPrototypeOf(value)) {
+      Map.prototype.forEach.call(value, (entryValue, entryKey) => {
+        pending.push(entryKey, entryValue);
+      });
+    } else if (prototype === Set.prototype || Set.prototype.isPrototypeOf(value)) {
+      Set.prototype.forEach.call(value, entryValue => pending.push(entryValue));
+    }
+  }
+}
+
+function storageClone(value, transaction = null) {
+  if (value === undefined) return undefined;
+  try {
+    assertStorageCloneSafe(value);
+    return structuredClone(value);
+  } catch {
+    abortIndexedDbTransaction(transaction);
+    throw new AuditStorageUnavailableError();
+  }
 }
 
 function validId(id) {
-  if (typeof id !== 'string' || !id.trim()) throw new TypeError('Identificador de auditoria inválido.');
-  const value = id.trim();
-  if (value === LATEST_KEY || value === RETENTION_CLEANUP_CURSOR_KEY || value.startsWith(REVISION_KEY_PREFIX) ||
-    value.startsWith(EXPORT_LEASE_KEY_PREFIX) || value.startsWith(EXPORT_ATTEMPT_KEY_PREFIX) ||
-    value.startsWith(EXPORT_DELIVERY_KEY_PREFIX)) {
-    throw new TypeError('Identificador de auditoria reservado ou inválido.');
-  }
-  return value;
+  return canonicalAuditId(id);
 }
 
 function cleanupCursorRecord(value) {
@@ -72,6 +104,32 @@ function ownedAuditId(value) {
   }
 }
 
+function legacyPrivateAuditKeyIsSafe(key, value) {
+  if (key === LATEST_KEY) {
+    try {
+      return canonicalAuditId(ownedAuditId(value)) === ownedAuditId(value);
+    } catch {
+      return false;
+    }
+  }
+  if (key === RETENTION_CLEANUP_CURSOR_KEY) return cleanupCursorRecord(value) !== null;
+  for (const prefix of [
+    REVISION_KEY_PREFIX,
+    EXPORT_LEASE_KEY_PREFIX,
+    EXPORT_ATTEMPT_KEY_PREFIX,
+    EXPORT_DELIVERY_KEY_PREFIX,
+  ]) {
+    if (!key?.startsWith?.(prefix)) continue;
+    try {
+      canonicalAuditId(key.slice(prefix.length));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 function assertFinalizationCorrelation(auditId, model, latestState) {
   if (ownedAuditId(model) !== auditId ||
     (latestState !== undefined && ownedAuditId(latestState) !== auditId)) {
@@ -83,7 +141,7 @@ function interruptedLatest(auditId, latestState) {
   if (ownedAuditId(latestState) !== auditId || latestState?.status !== 'failed') {
     throw new TypeError('Estado de interrupção não corresponde à auditoria.');
   }
-  return clone(latestState);
+  return storageClone(latestState);
 }
 
 function isTerminalAuditStatus(status) {
@@ -170,7 +228,7 @@ function canonicalLeaseOptions(options, revision, defaultPhase = 'queued') {
     phase,
     revision: storedRevision(revision),
     exportAttempt,
-    latestState: options?.latestState === undefined ? undefined : clone(options.latestState),
+    latestState: options?.latestState === undefined ? undefined : storageClone(options.latestState),
     release: options?.release === true,
     clearDeliveryJournal: options?.clearDeliveryJournal === true,
   };
@@ -249,12 +307,12 @@ function canonicalDeliveryJournal(value, auditId) {
 }
 
 function deliveryJournalRecord(auditId, entries) {
-  return { schemaVersion: 1, auditId, entries: clone(entries) };
+  return { schemaVersion: 1, auditId, entries: storageClone(entries) };
 }
 
 function pendingCleanupLatest(latest, entries) {
   if (latest === undefined || !latest || typeof latest !== 'object' || Array.isArray(latest)) return latest;
-  const next = clone(latest);
+  const next = storageClone(latest);
   if (entries.length > 0) {
     next.exportCleanupPending = true;
     next.exportCleanupMessage = EXPORT_CLEANUP_MESSAGE;
@@ -368,7 +426,7 @@ function monotonicLeaseTransition(options, existing) {
 
 function reviewLatestState(value, auditId, model, revision) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.auditId !== auditId) return undefined;
-  const latest = clone(value);
+  const latest = storageClone(value);
   latest.auditId = auditId;
   if (typeof model?.session?.status === 'string') latest.status = model.session.status;
   latest.exportStatus = 'preparing';
@@ -384,7 +442,7 @@ function reviewLatestState(value, auditId, model, revision) {
 function mintAuditSnapshot(owner, auditId, model, revision) {
   const canonicalRevision = storedRevision(revision);
   if (model === undefined) return { model: undefined, revision: canonicalRevision, capability: null };
-  const privateModel = clone(model);
+  const privateModel = storageClone(model);
   const capability = Object.freeze(Object.create(null));
   AUDIT_SNAPSHOT_CAPABILITIES.set(capability, Object.freeze({
     owner,
@@ -392,7 +450,7 @@ function mintAuditSnapshot(owner, auditId, model, revision) {
     revision: canonicalRevision,
     model: privateModel,
   }));
-  return { model: clone(privateModel), revision: canonicalRevision, capability };
+  return { model: storageClone(privateModel), revision: canonicalRevision, capability };
 }
 
 function capabilityRevision(capability, owner, auditId) {
@@ -410,7 +468,7 @@ export function inspectAuditSnapshotCapability(capability) {
   const record = (typeof capability === 'object' && capability !== null)
     ? AUDIT_SNAPSHOT_CAPABILITIES.get(capability)
     : null;
-  return record ? { auditId: record.auditId, revision: record.revision, model: clone(record.model) } : null;
+  return record ? { auditId: record.auditId, revision: record.revision, model: storageClone(record.model) } : null;
 }
 
 export class AuditRevisionConflictError extends Error {
@@ -516,8 +574,14 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   if (!retention) {
     retention = new Map();
     for (const [auditId, model] of initial) {
-      if (typeof auditId === 'string' && !isPrivateAuditKey(auditId)) {
+      if (isPrivateAuditKey(auditId)) {
+        if (!legacyPrivateAuditKeyIsSafe(auditId, model)) initial.delete(auditId);
+        continue;
+      }
+      try {
         retention.set(auditId, migrateRetentionMetadata(auditId, model));
+      } catch {
+        initial.delete(auditId);
       }
     }
     IN_MEMORY_RETENTION.set(initial, retention);
@@ -532,8 +596,8 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   };
   const writeAudit = (id, model, latestState, snapshotCapability, options = {}) => {
     const key = validId(id);
-    const modelClone = clone(model);
-    const latestClone = latestState === undefined ? undefined : clone(latestState);
+    const modelClone = storageClone(model);
+    const latestClone = latestState === undefined ? undefined : storageClone(latestState);
     const currentRevision = storedRevision(initial.get(revisionKey(key)));
     const expectedRevision = snapshotCapability === undefined
       ? undefined
@@ -628,7 +692,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     const latestWithAttempt = latestState === undefined
       ? undefined
       : pendingCleanupLatest(
-          { ...clone(latestState), exportAttempt: existing.exportAttempt },
+          { ...storageClone(latestState), exportAttempt: existing.exportAttempt },
           normalized.clearDeliveryJournal ? [] : deliveryEntries,
         );
     if (normalized.clearDeliveryJournal && (!normalized.release || deliveryEntries.some(entry =>
@@ -703,7 +767,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     const nextLatest = latest?.auditId === key ? pendingCleanupLatest(latest, entries) : undefined;
     initial.set(exportDeliveryKey(key), deliveryJournalRecord(key, entries));
     if (nextLatest !== undefined) initial.set(LATEST_KEY, nextLatest);
-    return clone(entries.find(entry => entry.ownerId === normalized.ownerId &&
+    return storageClone(entries.find(entry => entry.ownerId === normalized.ownerId &&
       entry.exportAttempt === normalized.exportAttempt && entry.format === normalized.format));
   };
   const resolveExportDelivery = (id, options) => {
@@ -782,8 +846,8 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       options.deleteAfterCompleteExport === true &&
       isCompleteTerminalDelivery(entries, existing.ownerId, existing.exportAttempt);
     if (shouldDelete) {
-      clone(model);
-      if (latestState !== undefined) clone(latestState);
+      storageClone(model);
+      if (latestState !== undefined) storageClone(latestState);
       deleteStoredAudit(key);
       return { deleted: true };
     }
@@ -800,8 +864,8 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     async setAudit(id, model, options) { return writeAudit(id, model, undefined, undefined, options); },
     async getAudit(id) { return snapshot(id).model; },
     async getAuditSnapshot(id) { return snapshot(id); },
-    async setLatest(state) { initial.set(LATEST_KEY, clone(state)); },
-    async getLatest() { return clone(initial.get(LATEST_KEY)); },
+    async setLatest(state) { initial.set(LATEST_KEY, storageClone(state)); },
+    async getLatest() { return storageClone(initial.get(LATEST_KEY)); },
     async markAuditInterrupted(id, latestState, options) {
       return markAuditInterrupted(id, latestState, options);
     },
@@ -832,11 +896,11 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       return recordExportDelivery(id, snapshotCapability, options);
     },
     async resolveExportDelivery(id, options) { return resolveExportDelivery(id, options); },
-    async getExportDeliveryJournal(id) { return clone(getExportDeliveryJournal(id)); },
+    async getExportDeliveryJournal(id) { return storageClone(getExportDeliveryJournal(id)); },
     async getAuditRetention(id) {
       const key = validId(id);
       const value = retention.get(key);
-      return value === undefined ? undefined : clone(validateRetentionMetadata(value, key));
+      return value === undefined ? undefined : storageClone(validateRetentionMetadata(value, key));
     },
     async setRetentionIntent(id, snapshotCapability, options) {
       const key = validId(id);
@@ -856,7 +920,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       return {
         revision,
         capability: mintAuditSnapshot(owner, key, initial.get(key), revision).capability,
-        retention: clone(next),
+        retention: storageClone(next),
       };
     },
     async cleanupExpiredAudits(options) {
@@ -999,8 +1063,16 @@ export function createAuditStore(options = {}) {
               const cursor = cursorRequest.result;
               if (!cursor) return;
               const auditId = cursor.key;
-              if (typeof auditId === 'string' && !isPrivateAuditKey(auditId)) {
-                retentionStore.put(migrateRetentionMetadata(auditId, cursor.value));
+              if (isPrivateAuditKey(auditId)) {
+                if (!legacyPrivateAuditKeyIsSafe(auditId, cursor.value)) {
+                  indexedDbBoundary(() => cursor.delete(), transaction);
+                }
+              } else {
+                try {
+                  retentionStore.put(migrateRetentionMetadata(auditId, cursor.value));
+                } catch {
+                  indexedDbBoundary(() => cursor.delete(), transaction);
+                }
               }
               continueIndexedDbCursor(transaction, cursor, 'continue');
             };
@@ -1046,7 +1118,7 @@ export function createAuditStore(options = {}) {
       transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
     });
   };
-  const put = (key, value) => write([[key, clone(value)]]);
+  const put = (key, value) => write([[key, storageClone(value)]]);
   const readKeys = async keys => {
     const db = await open();
     return new Promise((resolve, reject) => {
@@ -1057,7 +1129,7 @@ export function createAuditStore(options = {}) {
       const values = new Map();
       for (const key of keys) {
         const request = store.get(key);
-        request.onsuccess = () => values.set(key, clone(request.result));
+        request.onsuccess = () => values.set(key, storageClone(request.result, transaction));
         request.onerror = () => finish(reject, new AuditStorageUnavailableError());
       }
       transaction.oncomplete = () => finish(resolve, values);
@@ -1076,8 +1148,8 @@ export function createAuditStore(options = {}) {
     const expected = snapshotCapability === undefined
       ? undefined
       : capabilityRevision(snapshotCapability, owner, key);
-    const modelClone = clone(model);
-    const latestClone = latestState === undefined ? undefined : clone(latestState);
+    const modelClone = storageClone(model);
+    const latestClone = latestState === undefined ? undefined : storageClone(latestState);
     const db = await open();
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -1266,8 +1338,8 @@ export function createAuditStore(options = {}) {
       expected,
       claimOnly ? 'running' : 'delivering',
     );
-    const modelClone = claimOnly ? null : clone(model);
-    const latestClone = latestState === undefined ? undefined : clone(latestState);
+    const modelClone = claimOnly ? null : storageClone(model);
+    const latestClone = latestState === undefined ? undefined : storageClone(latestState);
     const db = await open();
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -1490,7 +1562,7 @@ export function createAuditStore(options = {}) {
         } catch (error) { finish(reject, error); return; }
         store.put(deliveryJournalRecord(key, entries), exportDeliveryKey(key));
         if (currentLatest?.auditId === key) store.put(pendingCleanupLatest(currentLatest, entries), LATEST_KEY);
-        result = clone(entries.find(entry => entry.ownerId === normalized.ownerId &&
+        result = storageClone(entries.find(entry => entry.ownerId === normalized.ownerId &&
           entry.exportAttempt === normalized.exportAttempt && entry.format === normalized.format));
       };
       modelRequest.onsuccess = () => { modelRead = true; currentModel = modelRequest.result; apply(); };
@@ -1569,7 +1641,7 @@ export function createAuditStore(options = {}) {
       request.onerror = () => reject(new AuditStorageUnavailableError());
       transaction.oncomplete = () => {
         try {
-          resolve(value === undefined ? undefined : clone(validateRetentionMetadata(value, key)));
+          resolve(value === undefined ? undefined : storageClone(validateRetentionMetadata(value, key)));
         } catch (error) { reject(error); }
       };
       transaction.onerror = () => reject(new AuditStorageUnavailableError());
@@ -1617,7 +1689,11 @@ export function createAuditStore(options = {}) {
           deleteAfterCompleteExport: intentOptions.deleteAfterCompleteExport,
         };
         retentionStore.put(retentionMetadata);
-        result = { revision, model: clone(modelValue), retention: clone(retentionMetadata) };
+        result = {
+          revision,
+          model: storageClone(modelValue, transaction),
+          retention: storageClone(retentionMetadata, transaction),
+        };
       };
       modelRequest.onsuccess = () => { modelRead = true; modelValue = modelRequest.result; apply(); };
       revisionRequest.onsuccess = () => { revisionRead = true; revisionValue = revisionRequest.result; apply(); };
@@ -1840,8 +1916,8 @@ export function createAuditStore(options = {}) {
     }
     const expected = capabilityRevision(snapshotCapability, owner, key);
     const normalized = canonicalLeaseOptions({ ...finalizeOptions, release: true }, expected);
-    const modelClone = clone(model);
-    const latestClone = latestState === undefined ? undefined : clone(latestState);
+    const modelClone = storageClone(model);
+    const latestClone = latestState === undefined ? undefined : storageClone(latestState);
     const db = await open();
     return new Promise((resolve, reject) => {
       let pending = 6;

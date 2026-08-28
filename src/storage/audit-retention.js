@@ -22,9 +22,10 @@ export function isPrivateAuditKey(value) {
     PRIVATE_PREFIXES.some(prefix => value?.startsWith?.(prefix));
 }
 
-function canonicalAuditId(value) {
-  if (typeof value !== 'string' || value !== value.trim() || !value || isPrivateAuditKey(value)) {
-    throw new TypeError('Identificador do metadado de retenção inválido.');
+export function canonicalAuditId(value) {
+  if (typeof value !== 'string' || value !== value.trim() ||
+    !/^[A-Za-z0-9._:-]{1,200}$/u.test(value) || isPrivateAuditKey(value)) {
+    throw new TypeError('Identificador de auditoria inválido.');
   }
   return value;
 }

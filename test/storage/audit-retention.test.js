@@ -71,3 +71,22 @@ test('private audit keys never become retention records', () => {
   ]) assert.equal(isPrivateAuditKey(key), true);
   assert.equal(isPrivateAuditKey('batch-audit-1'), false);
 });
+
+test('retention accepts only the shared bounded audit identifier grammar', () => {
+  for (const auditId of [
+    'https://legacy.invalid/a?ordinary_parameter=raw-query-value',
+    'audit id with spaces',
+    'audit/with/slashes',
+    `audit-${'x'.repeat(200)}`,
+  ]) {
+    assert.throws(
+      () => createRetentionMetadata(auditId, '2026-08-01T00:00:00.000Z'),
+      /identificador|inválido/iu,
+    );
+  }
+
+  assert.equal(
+    createRetentionMetadata('Audit_2.release:2026-08-28', '2026-08-01T00:00:00.000Z').auditId,
+    'Audit_2.release:2026-08-28',
+  );
+});

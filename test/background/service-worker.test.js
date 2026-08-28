@@ -1375,10 +1375,11 @@ test('clears a stale active marker without replacing a newer single-page latest 
   assert.deepEqual(writes, []);
 });
 
-test('stores only a sanitized URL before execution while runner keeps the full navigation URL', async () => {
+test('single-audit checkpoints strip every query and hash while runner keeps the full navigation URL', async () => {
   const chromeApi = createChrome();
   const sessions = new Map();
   const stored = [];
+  const logs = [];
   let runnerUrl;
   let finishRunner;
   const auditStore = {
@@ -1387,20 +1388,25 @@ test('stores only a sanitized URL before execution while runner keeps the full n
   };
   registerServiceWorker(chromeApi, {
     createId: () => 'audit-private', sessions, auditStore: withAuditRevisions(auditStore),
+    logger: { error(value) { logs.push(value); } },
     chromeAdapterFactory: () => ({}),
     runner: ({ url }) => {
       runnerUrl = url;
       return new Promise(resolve => { finishRunner = resolve; });
     },
   });
+  const fullNavigationUrl = 'https://example.test/path?ordinary_parameter=PRIVATE_QUERY_VALUE#ordinary-fragment';
   chromeApi.listeners.message.listener(
-    { type: 'START_AUDIT', url: 'https://example.test/path?token=TOPSECRET&view=public#auth=TOPSECRET' },
+    { type: 'START_AUDIT', url: fullNavigationUrl },
     { id: 'test', url: 'chrome-extension://test/src/panel/index.html' }, () => {},
   );
   await new Promise(resolve => setImmediate(resolve));
-  assert.match(runnerUrl, /TOPSECRET/);
-  assert.doesNotMatch(JSON.stringify([...sessions.values(), ...stored]), /TOPSECRET|token=|auth=/i);
-  assert.match(sessions.get('audit-private').requestedUrl, /view=public/);
+  assert.equal(runnerUrl, fullNavigationUrl);
+  assert.equal(sessions.get('audit-private').requestedUrl, 'https://example.test/path');
+  assert.doesNotMatch(
+    JSON.stringify([...sessions.values(), ...stored, ...logs]),
+    /PRIVATE_QUERY_VALUE|ordinary_parameter|ordinary-fragment/iu,
+  );
   finishRunner?.({ auditId: 'audit-private', session: { status: 'complete' }, report: {} });
 });
 

@@ -411,7 +411,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
         completion: activeJob.completion,
       };
     }
-    const storedUrl = sanitizeResourceUrl(requestedUrl);
+    const storedUrl = checkpointResourceIdentity(requestedUrl);
     const auditId = createId();
     const session = createAuditSession({ id: auditId, requestedUrl: storedUrl, startedAt: now() });
     const entry = { auditId, senderKey, mode: 'single', phase: 'running', deleteAfterCompleteExport, controller: new AbortController(), completion: null };
@@ -915,6 +915,13 @@ function retentionIntent(message) {
   if (value === undefined) return false;
   if (typeof value !== 'boolean') throw new TypeError('Opção de retenção inválida.');
   return value;
+}
+
+function checkpointResourceIdentity(value) {
+  const identity = new URL(sanitizeResourceUrl(value));
+  identity.search = '';
+  identity.hash = '';
+  return identity.href;
 }
 
 function panelOwnerKey(sender) {

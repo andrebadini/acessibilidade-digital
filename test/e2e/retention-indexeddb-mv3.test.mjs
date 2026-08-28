@@ -39,7 +39,9 @@ test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', {
     }
   });
 
-  const browser = new PipeCdp(chrome.stdio[3], chrome.stdio[4]);
+  const browser = new PipeCdp(chrome.stdio[3], chrome.stdio[4], [
+    sensitiveMarker, '?token=', '?auth=',
+  ]);
   t.after(() => browser.close());
   try { await browser.command('Browser.getVersion'); }
   catch (error) {
@@ -65,6 +67,12 @@ test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', {
   await harness.command('Runtime.enable');
   await harness.command('Page.enable');
   await waitForValue(harness, 'document.readyState === "complete"', Boolean);
+  const runtimeLogProbe = browser.waitForEvent(
+    'Runtime.consoleAPICalled',
+    event => JSON.stringify(event.params).includes('AUDITA_RUNTIME_LOG_PROBE'),
+  );
+  await evaluate(harness, `console.debug('AUDITA_RUNTIME_LOG_PROBE'); true`);
+  await runtimeLogProbe;
   const indexedDbPreflight = await evaluate(harness, `(async () => {
     try {
       const { createAuditStore } = await import(chrome.runtime.getURL('src/storage/audit-store.js'));
@@ -154,9 +162,12 @@ test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', {
     ]);
     const local = await chrome.storage.local.get(null);
     const session = await chrome.storage.session.get(null);
+    const allowedLocalKeys = new Set(['audita:persona:voiceId', 'audita:persona:rate']);
     return {
       everyAuditDeleted: one === undefined && allA === undefined && allB === undefined && latest === undefined,
-      localKeysAllowed: Object.keys(local).every(key => /voice|rate/iu.test(key)),
+      localKeysAllowed: allowedLocalKeys.size === 2 &&
+        !allowedLocalKeys.has('audita:persona:voiceId-backup') &&
+        Object.keys(local).every(key => allowedLocalKeys.has(key)),
       sessionHasPrivateMarker: JSON.stringify(session).includes(${JSON.stringify(sensitiveMarker)}),
     };
   })`, true, 20_000);
@@ -592,7 +603,8 @@ async function runPublicBatchRetentionProof({ browser, harness, extensionId, loo
     reviewResponsiveAtTwoHundredPercent: reviewResponsive,
     storageReportsAndLogsSanitized: !localAndSession.includes(sensitiveMarker) &&
       reportBytes.every(bytes => !bytes.includes(Buffer.from(sensitiveMarker))) &&
-      pageTextSanitized.every(value => value === false) && !chromeStderr().includes(sensitiveMarker),
+      pageTextSanitized.every(value => value === false) && !chromeStderr().includes(sensitiveMarker) &&
+      browser.runtimeLogsSanitized(),
   };
 }
 
@@ -1018,6 +1030,7 @@ async function runRealStorageProof(page) {
     const unauthorized = await chrome.runtime.sendMessage({ type: 'REQUEST_DELETE_ALL_AUDITS' });
     const local = await chrome.storage.local.get(null);
     const session = await chrome.storage.session.get(null);
+    const allowedLocalKeys = new Set(['audita:persona:voiceId', 'audita:persona:rate']);
 
     return {
       databaseVersion,
@@ -1041,7 +1054,10 @@ async function runRealStorageProof(page) {
       completeDeleted,
       batchSingleMetadata: uiMetadata.length === 3 && uiMetadata.every(value => value && Object.keys(value).length === 5),
       unauthorizedDeleteRejected: unauthorized?.ok === false,
-      localStorageLimited: Object.keys(local).every(key => /voice|rate/iu.test(key)) && !JSON.stringify(local).includes(marker),
+      localStorageLimited: allowedLocalKeys.size === 2 &&
+        !allowedLocalKeys.has('audita:persona:voiceId-backup') &&
+        Object.keys(local).every(key => allowedLocalKeys.has(key)) &&
+        !JSON.stringify(local).includes(marker),
       sessionStorageSanitized: !JSON.stringify(session).includes(marker) && !JSON.stringify(session).includes('127.0.0.1'),
     };
   })()`, true, 35_000);
@@ -1242,11 +1258,15 @@ class SessionCdp {
 }
 
 class PipeCdp {
-  constructor(commandPipe, responsePipe) {
+  constructor(commandPipe, responsePipe, runtimeLogNeedles = []) {
     this.commandPipe = commandPipe;
     this.responsePipe = responsePipe;
     this.nextId = 1;
     this.pending = new Map();
+    this.eventWaiters = new Set();
+    this.runtimeLogNeedles = [...runtimeLogNeedles];
+    this.runtimeLogEventCount = 0;
+    this.runtimeLogLeak = false;
     this.buffer = Buffer.alloc(0);
     responsePipe.on('data', chunk => {
       this.buffer = Buffer.concat([this.buffer, chunk]);
@@ -1256,7 +1276,11 @@ class PipeCdp {
         this.buffer = this.buffer.subarray(delimiter + 1);
         if (!frame.length) continue;
         const message = JSON.parse(frame.toString('utf8'));
-        if (!message.id || !this.pending.has(message.id)) continue;
+        if (!message.id) {
+          this.captureEvent(message);
+          continue;
+        }
+        if (!this.pending.has(message.id)) continue;
         const pending = this.pending.get(message.id);
         this.pending.delete(message.id);
         clearTimeout(pending.timer);
@@ -1270,7 +1294,48 @@ class PipeCdp {
         pending.reject(new Error('CDP encerrado.'));
       }
       this.pending.clear();
+      for (const waiter of this.eventWaiters) {
+        clearTimeout(waiter.timer);
+        waiter.reject(new Error('CDP encerrado.'));
+      }
+      this.eventWaiters.clear();
     });
+  }
+
+  captureEvent(message) {
+    if (message.method === 'Runtime.consoleAPICalled' || message.method === 'Runtime.exceptionThrown') {
+      this.runtimeLogEventCount += 1;
+      try {
+        const serialized = JSON.stringify(message.params);
+        if (this.runtimeLogNeedles.some(needle => serialized.includes(needle))) this.runtimeLogLeak = true;
+      } catch {
+        this.runtimeLogLeak = true;
+      }
+    }
+    for (const waiter of [...this.eventWaiters]) {
+      if (waiter.method !== message.method) continue;
+      let matched = false;
+      try { matched = waiter.predicate(message); } catch { matched = false; }
+      if (!matched) continue;
+      this.eventWaiters.delete(waiter);
+      clearTimeout(waiter.timer);
+      waiter.resolve(message);
+    }
+  }
+
+  waitForEvent(method, predicate, timeoutMs = 10_000) {
+    return new Promise((resolveEvent, rejectEvent) => {
+      const waiter = { method, predicate, resolve: resolveEvent, reject: rejectEvent, timer: null };
+      waiter.timer = setTimeout(() => {
+        this.eventWaiters.delete(waiter);
+        rejectEvent(new Error(`CDP timeout em evento ${method}.`));
+      }, timeoutMs);
+      this.eventWaiters.add(waiter);
+    });
+  }
+
+  runtimeLogsSanitized() {
+    return this.runtimeLogEventCount > 0 && this.runtimeLogLeak === false;
   }
 
   command(method, params = {}, timeoutMs = 10_000, sessionId = undefined) {
