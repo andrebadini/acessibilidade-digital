@@ -12,6 +12,7 @@ import { renderHtmlReport } from '../src/core/report/html.js';
 import { renderPdf } from '../src/browser/render-pdf.js';
 import { AXE_MV3_CSP_GATE, AXE_PROVENANCE, AXE_RUN_CONFIG } from '../src/browser/axe-adapter.js';
 import { scanNeutralIdentity } from './verify-neutral-identity.mjs';
+import { verifyStaticReportSecurity } from './verify-report-security.mjs';
 
 const root = new URL('../', import.meta.url);
 const text = path => readFile(new URL(path, root), 'utf8');
@@ -57,7 +58,7 @@ const json = renderTechnicalJson(SAMPLE_AUDIT);
 const technical = JSON.parse(json);
 assert.match(html, /^<!doctype html>/u, 'assinatura HTML');
 assert.equal(technical.assertions.length, 146, 'assinatura JSON e assertions');
-assert.doesNotMatch(html, /<script\b|(?:src|href)="https?:/iu, 'relatório autocontido e sem execução remota');
+verifyStaticReportSecurity(html);
 const pdf = await renderPdf({ async command() { return { data: Buffer.from('%PDF-1.7\nfixture adapter').toString('base64') }; } });
 assert.equal(new TextDecoder().decode(pdf.bytes.subarray(0, 5)), '%PDF-', 'assinatura %PDF- via adapter');
 

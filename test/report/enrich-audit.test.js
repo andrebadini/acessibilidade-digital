@@ -103,7 +103,10 @@ test('preserves failed and cancelled outcomes while deriving explicit limitation
 });
 
 test('recomputes evidence hashes from real PNG content and ignores forged input hashes', async () => {
-  const png = lastByte => `data:image/png;base64,${Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, lastByte]).toString('base64')}`;
+  const strictPngFixtures = [
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=',
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==',
+  ];
   const input = rawAudit();
   const withPng = dataUrl => ({
     ...input,
@@ -116,8 +119,8 @@ test('recomputes evidence hashes from real PNG content and ignores forged input 
     now: () => '2026-08-26T15:00:00.000Z', timezone: 'America/Cuiaba',
     manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
   };
-  const first = await enrichAuditForReport(withPng(png(1)), options);
-  const second = await enrichAuditForReport(withPng(png(2)), options);
+  const first = await enrichAuditForReport(withPng(strictPngFixtures[0]), options);
+  const second = await enrichAuditForReport(withPng(strictPngFixtures[1]), options);
   assert.match(first.evidence[0].hash, /^[a-f0-9]{64}$/u);
   assert.match(second.evidence[0].hash, /^[a-f0-9]{64}$/u);
   assert.notEqual(first.evidence[0].hash, second.evidence[0].hash);

