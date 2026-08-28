@@ -223,6 +223,7 @@ export async function persistExportSuccess(request, store) {
     envelope.snapshotCapability,
     {
       ownerId: envelope.leaseOwnerId,
+      exportAttempt: envelope.exportAttempt,
       now: new Date().toISOString(),
       release: true,
       clearDeliveryJournal: true,

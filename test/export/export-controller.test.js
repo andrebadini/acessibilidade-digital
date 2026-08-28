@@ -365,6 +365,26 @@ test('successful persistence delegates deletion only to the atomic four-format f
   assert.equal(persisted.latest.exportStatus, 'complete');
 });
 
+test('passes the attested export attempt into atomic four-terminal finalization', async () => {
+  const store = createInMemoryAuditStore();
+  const result = await genuineReportExport({ store, persistentJournal: true });
+  const pending = await store.getExportDeliveryJournal(result.model.auditId);
+  assert.equal(pending.length, 4);
+  assert.equal(pending.every(entry => entry.state === 'terminal'), true);
+
+  const persisted = await persistOpaqueExportSuccess(createExportSuccessRequest({
+    auditId: result.model.auditId,
+    result,
+    latest: {},
+  }), store);
+
+  assert.equal(persisted.latest.exportStatus, 'complete');
+  assert.deepEqual(await store.getExportDeliveryJournal(result.model.auditId), []);
+  assert.equal((await store.getExportLeaseState(result.model.auditId, {
+    now: new Date().toISOString(),
+  })).active, false);
+});
+
 test('keeps the attestation issuer private and rejects a substituted rehashed PDF without a caller reissue path', async () => {
   const controller = await import('../../src/export/export-controller.js');
   const provenance = await import('../../src/export/export-provenance.js');
@@ -1069,7 +1089,18 @@ async function genuineReportExport(options = {}) {
         phase: 'delivering',
       });
     },
-    async recordDelivery() {},
+    recordDelivery({ snapshotCapability, exportLeaseOwnerId, state, format, filename, downloadId }) {
+      if (options.persistentJournal !== true) return undefined;
+      return issuer.recordExportDelivery(SAMPLE_AUDIT.auditId, snapshotCapability, {
+        ownerId: exportLeaseOwnerId,
+        exportAttempt: acquired.exportAttempt,
+        now: new Date().toISOString(),
+        state,
+        format,
+        filename,
+        ...(downloadId === undefined ? {} : { downloadId }),
+      });
+    },
   });
 }
 
