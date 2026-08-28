@@ -5,6 +5,7 @@ import { access, mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/pro
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -20,37 +21,97 @@ const runtimeProbeByRole = Object.freeze({
   export: 'AUDITA_RUNTIME_LOG_PROBE_EXPORT',
 });
 
-test('runtime log verdict includes a marker emitted late by the service worker', () => {
+test('auto-attached runtime capture is independent from target URL lifecycle', async t => {
   const extensionId = 'abcdefghijklmnopabcdefghijklmnop';
-  assert.equal(runtimeRoleForTarget({
-    type: 'page', url: `chrome-extension://${extensionId}/src/export/index.html?auditId=probe`,
-  }, extensionId), 'export');
-  const audit = new RuntimeLogAudit([sensitiveMarker]);
-  audit.monitor('harness-session');
-  audit.capture({
-    method: 'Runtime.consoleAPICalled', sessionId: 'harness-session',
-    params: { args: [{ type: 'string', value: 'AUDITA_RUNTIME_LOG_PROBE_HARNESS' }] },
-  });
-  assert.deepEqual(audit.finalVerdict(['harness', 'service-worker']), {
-    sinksReady: false, sanitized: false,
+  const extensionUrl = path => `chrome-extension://${extensionId}${path}`;
+
+  await t.test('blank target is enabled before resume and later promoted to panel', async t => {
+    const capture = createRuntimeCaptureHarness(t);
+    await capture.start(extensionId);
+    const resumed = capture.nextCommand(command => command.sessionId === 'blank-panel' &&
+      command.method === 'Runtime.runIfWaitingForDebugger');
+    capture.attach('target-blank-panel', 'blank-panel', 'page', 'about:blank');
+    await resumed;
+    capture.change('target-blank-panel', 'page', extensionUrl('/src/panel/index.html'));
+    assert.deepEqual(await capture.final(['panel']), { sinksReady: true, sanitized: true });
+    assert.deepEqual(capture.runtimeMethods('blank-panel').slice(0, 2), [
+      'Runtime.enable', 'Runtime.runIfWaitingForDebugger',
+    ]);
   });
 
-  audit.monitor('worker-session');
-  audit.capture({
-    method: 'Runtime.consoleAPICalled', sessionId: 'worker-session',
-    params: { args: [{ type: 'string', value: 'AUDITA_RUNTIME_LOG_PROBE_SERVICE_WORKER' }] },
-  });
-  assert.deepEqual(audit.finalVerdict(['harness', 'service-worker']), {
-    sinksReady: true, sanitized: true,
+  await t.test('exception captured before targetInfoChanged fails after extension promotion', async t => {
+    const capture = createRuntimeCaptureHarness(t);
+    await capture.start(extensionId);
+    const resumed = capture.nextCommand(command => command.sessionId === 'preclassified-leak' &&
+      command.method === 'Runtime.runIfWaitingForDebugger');
+    capture.attach('target-preclassified-leak', 'preclassified-leak', 'page', 'about:blank');
+    await resumed;
+    capture.exception('preclassified-leak', sensitiveMarker);
+    capture.change('target-preclassified-leak', 'page', extensionUrl('/src/panel/index.html'));
+    assert.deepEqual(await capture.final(['panel']), { sinksReady: true, sanitized: false });
   });
 
-  audit.capture({
-    method: 'Runtime.exceptionThrown', sessionId: 'worker-session',
-    params: { exceptionDetails: { text: sensitiveMarker } },
+  await t.test('one session proves panel and review after navigation', async t => {
+    const capture = createRuntimeCaptureHarness(t);
+    await capture.start(extensionId);
+    capture.attach('target-panel-review', 'panel-review', 'page', extensionUrl('/src/panel/index.html'));
+    assert.deepEqual(await capture.final(['panel']), { sinksReady: true, sanitized: true });
+    capture.change('target-panel-review', 'page', extensionUrl('/src/review/index.html?auditId=probe'));
+    assert.deepEqual(await capture.final(['panel', 'review']), { sinksReady: true, sanitized: true });
   });
-  assert.deepEqual(audit.finalVerdict(['harness', 'service-worker']), {
-    sinksReady: true, sanitized: false,
+
+  await t.test('non-extension marker is ignored only after pre-resume monitoring', async t => {
+    const capture = createRuntimeCaptureHarness(t);
+    await capture.start(extensionId);
+    const resumed = capture.nextCommand(command => command.sessionId === 'external-page' &&
+      command.method === 'Runtime.runIfWaitingForDebugger');
+    capture.attach('target-external-page', 'external-page', 'page', 'https://example.test/page');
+    await resumed;
+    capture.exception('external-page', sensitiveMarker);
+    capture.attach('target-clean-panel', 'clean-panel', 'page', extensionUrl('/src/panel/index.html'));
+    assert.deepEqual(await capture.final(['panel']), { sinksReady: true, sanitized: true });
+    assert.deepEqual(capture.runtimeMethods('external-page').slice(0, 2), [
+      'Runtime.enable', 'Runtime.runIfWaitingForDebugger',
+    ]);
   });
+
+  await t.test('setup failure still resumes the target and fails extension readiness', async t => {
+    const capture = createRuntimeCaptureHarness(t, { failRuntimeEnableFor: ['setup-failure'] });
+    await capture.start(extensionId);
+    const resumed = capture.nextCommand(command => command.sessionId === 'setup-failure' &&
+      command.method === 'Runtime.runIfWaitingForDebugger');
+    capture.attach('target-setup-failure', 'setup-failure', 'page', 'about:blank');
+    await resumed;
+    capture.change('target-setup-failure', 'page', extensionUrl('/src/panel/index.html'));
+    assert.deepEqual(await capture.final(['panel']), { sinksReady: false, sanitized: false });
+    assert.deepEqual(capture.runtimeMethods('setup-failure').slice(0, 2), [
+      'Runtime.enable', 'Runtime.runIfWaitingForDebugger',
+    ]);
+  });
+
+  await t.test('late extension leak invalidates an already ready role', async t => {
+    const capture = createRuntimeCaptureHarness(t);
+    await capture.start(extensionId);
+    capture.attach('target-late-panel', 'late-panel', 'page', extensionUrl('/src/panel/index.html'));
+    assert.deepEqual(await capture.final(['panel']), { sinksReady: true, sanitized: true });
+    capture.exception('late-panel', sensitiveMarker);
+    assert.deepEqual(await capture.final(['panel']), { sinksReady: true, sanitized: false });
+  });
+});
+
+test('Chrome teardown stops waiting when a killed process emits no exit event', async () => {
+  const listeners = new Map();
+  let killSignal = '';
+  const chrome = {
+    exitCode: null,
+    once(event, listener) { listeners.set(event, listener); },
+    off(event, listener) { if (listeners.get(event) === listener) listeners.delete(event); },
+    kill(signal) { killSignal = signal; return true; },
+  };
+  const started = Date.now();
+  assert.equal(await terminateChromeProcess(chrome, 10), false);
+  assert.equal(killSignal, 'SIGKILL');
+  assert.ok(Date.now() - started < 1_000, 'o teardown deve ter limite explícito');
 });
 
 test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', { timeout: 300_000 }, async t => {
@@ -68,11 +129,7 @@ test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', {
   chrome.stderr.on('data', chunk => { chromeStderr = `${chromeStderr}${chunk}`.slice(-12_000); });
   t.after(async () => {
     try {
-      if (chrome.exitCode === null) {
-        const exited = new Promise(resolveExit => chrome.once('exit', resolveExit));
-        chrome.kill('SIGKILL');
-        await exited;
-      }
+      await terminateChromeProcess(chrome);
     } finally {
       await loopback.close();
       await rm(profile, { recursive: true, force: true });
@@ -89,10 +146,11 @@ test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', {
     throw new Error(`Chrome real não iniciou o CDP: ${error.message}; exit=${chrome.exitCode}; stderr=${chromeStderr}`);
   }
   await browser.command('Target.setDiscoverTargets', { discover: true });
+  await browser.startRuntimeTargetCapture();
   const loaded = await browser.command('Extensions.loadUnpacked', { path: root }, 15_000);
   const extensionId = loaded?.id;
   assert.match(extensionId || '', /^[a-p]{32}$/u);
-  await browser.captureExtensionRuntimeTargets(extensionId);
+  await browser.setRuntimeExtensionId(extensionId);
   await browser.command('Browser.setDownloadBehavior', {
     behavior: 'allow', downloadPath: downloadDir, eventsEnabled: true,
   });
@@ -105,7 +163,7 @@ test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', {
     chromeStderr,
   );
   const harness = await attach(browser, harnessInfo.targetId);
-  await probeRuntimeSink(browser, harness, 'harness');
+  await harness.command('Runtime.enable');
   await harness.command('Page.enable');
   await waitForValue(harness, 'document.readyState === "complete"', Boolean);
   const indexedDbPreflight = await evaluate(harness, `(async () => {
@@ -183,11 +241,11 @@ test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', {
   });
 
   const reviewUrl = `chrome-extension://${extensionId}/src/review/index.html?auditId=ui-one`;
-  const review = await openExtensionPage(browser, reviewUrl, chromeStderr, 'review');
+  const review = await openExtensionPage(browser, reviewUrl, chromeStderr);
   await exerciseDeleteOneDialog(review);
 
   const panelUrl = `chrome-extension://${extensionId}/src/panel/index.html`;
-  const panel = await openExtensionPage(browser, panelUrl, chromeStderr, 'panel');
+  const panel = await openExtensionPage(browser, panelUrl, chromeStderr);
   await exerciseDeleteAllDialogAndResponsiveUi(panel);
 
   const finalProof = await evaluate(panel, `import(chrome.runtime.getURL('src/storage/audit-store.js')).then(async ({ createAuditStore }) => {
@@ -222,6 +280,106 @@ test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', {
     chromeStderrSanitized: true,
   });
 });
+
+function terminateChromeProcess(chrome, timeoutMs = 5_000) {
+  if (chrome.exitCode !== null) return Promise.resolve(true);
+  return new Promise(resolveExit => {
+    let settled = false;
+    const finish = exited => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.off?.('exit', onExit);
+      resolveExit(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    chrome.once('exit', onExit);
+    if (chrome.exitCode !== null) {
+      finish(true);
+      return;
+    }
+    try { chrome.kill('SIGKILL'); } catch { finish(false); }
+  });
+}
+
+function createRuntimeCaptureHarness(t, { failRuntimeEnableFor = [] } = {}) {
+  const commandPipe = new PassThrough();
+  const responsePipe = new PassThrough();
+  const browser = new PipeCdp(commandPipe, responsePipe, [sensitiveMarker]);
+  const failures = new Set(failRuntimeEnableFor);
+  const commands = [];
+  const commandWaiters = new Set();
+  let commandBuffer = Buffer.alloc(0);
+  const send = message => responsePipe.write(`${JSON.stringify(message)}\0`);
+  const record = command => {
+    commands.push({ method: command.method, sessionId: command.sessionId });
+    for (const waiter of [...commandWaiters]) {
+      if (!waiter.predicate(command)) continue;
+      commandWaiters.delete(waiter);
+      waiter.resolve(command);
+    }
+  };
+  commandPipe.on('data', chunk => {
+    commandBuffer = Buffer.concat([commandBuffer, chunk]);
+    let delimiter;
+    while ((delimiter = commandBuffer.indexOf(0)) >= 0) {
+      const frame = commandBuffer.subarray(0, delimiter);
+      commandBuffer = commandBuffer.subarray(delimiter + 1);
+      if (!frame.length) continue;
+      const command = JSON.parse(frame.toString('utf8'));
+      record(command);
+      if (command.method === 'Runtime.enable' && failures.has(command.sessionId)) {
+        send({ id: command.id, sessionId: command.sessionId, error: { code: -32_000, message: 'setup failed' } });
+        continue;
+      }
+      if (command.method === 'Runtime.evaluate') {
+        const probe = Object.values(runtimeProbeByRole).find(value => command.params?.expression?.includes(value));
+        if (probe) send({
+          method: 'Runtime.consoleAPICalled', sessionId: command.sessionId,
+          params: { args: [{ type: 'string', value: probe }] },
+        });
+        send({
+          id: command.id, sessionId: command.sessionId,
+          result: { result: { type: 'boolean', value: true } },
+        });
+        continue;
+      }
+      send({
+        id: command.id, sessionId: command.sessionId,
+        result: command.method === 'Target.getTargets' ? { targetInfos: [] } : {},
+      });
+    }
+  });
+  t.after(() => browser.close());
+
+  return {
+    start: extensionId => browser.captureExtensionRuntimeTargets(extensionId),
+    attach(targetId, sessionId, type, url) {
+      send({ method: 'Target.attachedToTarget', params: {
+        sessionId, targetInfo: { targetId, type, url }, waitingForDebugger: true,
+      } });
+    },
+    change(targetId, type, url) {
+      send({ method: 'Target.targetInfoChanged', params: { targetInfo: { targetId, type, url } } });
+    },
+    exception(sessionId, marker) {
+      send({
+        method: 'Runtime.exceptionThrown', sessionId,
+        params: { exceptionDetails: { text: marker } },
+      });
+    },
+    final: roles => browser.finalRuntimeLogVerdict(roles),
+    runtimeMethods(sessionId) {
+      return commands.filter(command => command.sessionId === sessionId).map(command => command.method);
+    },
+    nextCommand(predicate) {
+      const existing = commands.find(predicate);
+      if (existing) return Promise.resolve(existing);
+      return new Promise(resolveCommand => commandWaiters.add({ predicate, resolve: resolveCommand }));
+    },
+  };
+}
 
 async function startLoopbackSite() {
   const [pixelA, pixelB] = await Promise.all([
@@ -433,7 +591,7 @@ async function runPublicBatchRetentionProof({ browser, harness, extensionId, loo
     marker: JSON.stringify(session).includes(${JSON.stringify(sensitiveMarker)})
   }))`, value => value && value.active === false && value.correlated === false, 20_000);
 
-  const review = await followLatestReportLink(browser, firstPanel, auditId);
+  const review = await followLatestReportLink(firstPanel, auditId);
   const reviewResponsive = await responsiveAtTwoHundredPercent(review, '#delete-audit');
   const mismatch = await evaluate(review, `new Promise(resolve => chrome.runtime.sendMessage({
     type: 'REQUEST_DELETE_AUDIT', auditId: 'mismatch-audit'
@@ -672,7 +830,7 @@ async function openPanelThroughAction(browser, extensionId, sourceUrl, stderr) {
     stderr(),
   );
   const worker = await attach(browser, workerInfo.targetId);
-  await probeRuntimeSink(browser, worker, 'service-worker');
+  await worker.command('Runtime.enable');
   await waitForValue(worker, 'chrome.action.onClicked.hasListeners()', value => value === true, 15_000);
   const sourceChromeTabId = await evaluate(worker, `chrome.tabs.query({}).then(tabs =>
     tabs.find(tab => tab.url === ${JSON.stringify(sourceUrl)})?.id)`, true);
@@ -691,7 +849,7 @@ async function openPanelThroughAction(browser, extensionId, sourceUrl, stderr) {
   );
   await browser.command('Target.activateTarget', { targetId: panelInfo.targetId });
   const panel = await attach(browser, panelInfo.targetId);
-  await probeRuntimeSink(browser, panel, 'panel');
+  await panel.command('Runtime.enable');
   await panel.command('Page.enable');
   await panel.command('Accessibility.enable');
   await waitForValue(panel, 'document.readyState === "complete"', Boolean);
@@ -889,7 +1047,7 @@ async function waitForDownloadedFiles(directory, expected, timeoutMs) {
   throw new Error(`Arquivos físicos não chegaram ao total esperado; contagem segura=${files.length}`);
 }
 
-async function followLatestReportLink(browser, panel, auditId) {
+async function followLatestReportLink(panel, auditId) {
   await waitForValue(panel, `(() => {
     const link = document.querySelector('#latest-report');
     return !link.hidden && link.href.includes('auditId=' + encodeURIComponent(${JSON.stringify(auditId)}));
@@ -899,7 +1057,6 @@ async function followLatestReportLink(browser, panel, auditId) {
   await waitForValue(panel, `location.pathname === '/src/review/index.html' &&
     new URL(location.href).searchParams.get('auditId') === ${JSON.stringify(auditId)} &&
     !document.querySelector('#delete-audit')?.disabled`, Boolean, 20_000);
-  await probeRuntimeSink(browser, panel, 'review');
   await panel.command('Accessibility.enable');
   return panel;
 }
@@ -1203,12 +1360,12 @@ async function exerciseDeleteAllDialogAndResponsiveUi(panel) {
   await assertLiveStatusInAxTree(panel, /todas as auditorias locais foram excluídas/iu);
 }
 
-async function openExtensionPage(browser, url, stderr, runtimeRole) {
+async function openExtensionPage(browser, url, stderr) {
   await browser.command('Target.createTarget', { url });
   const info = await waitForTargetInfo(browser, target => target.type === 'page' && target.url === url, stderr);
   await browser.command('Target.activateTarget', { targetId: info.targetId });
   const page = await attach(browser, info.targetId);
-  await probeRuntimeSink(browser, page, runtimeRole);
+  await page.command('Runtime.enable');
   await page.command('Page.enable');
   await page.command('Accessibility.enable');
   await waitForValue(page, 'document.readyState === "complete"', Boolean);
@@ -1260,33 +1417,6 @@ async function waitForValue(page, expression, predicate, timeoutMs = 10_000) {
   throw new Error(`Condição E2E não satisfeita; último valor seguro=${JSON.stringify(latest)}`);
 }
 
-async function probeRuntimeSink(browser, page, role, { resume = false } = {}) {
-  const probe = runtimeProbeByRole[role];
-  assert.equal(typeof probe, 'string', `papel de Runtime desconhecido: ${role}`);
-  browser.monitorRuntimeSession(page.sessionId);
-  let enableFailure;
-  try {
-    await page.command('Runtime.enable');
-  } catch (error) {
-    enableFailure = error;
-  } finally {
-    if (resume) await page.command('Runtime.runIfWaitingForDebugger');
-  }
-  if (enableFailure) throw enableFailure;
-  const observed = browser.waitForEvent(
-    'Runtime.consoleAPICalled',
-    event => event.sessionId === page.sessionId && Array.isArray(event.params?.args) &&
-      event.params.args.some(argument => argument?.type === 'string' && argument.value === probe),
-  );
-  try {
-    await evaluate(page, `console.debug(${JSON.stringify(probe)}); true`);
-    await observed;
-  } catch (error) {
-    observed.catch(() => undefined);
-    throw error;
-  }
-}
-
 async function attach(browser, targetId) {
   const attached = await browser.command('Target.attachToTarget', { targetId, flatten: true });
   assert.match(attached.sessionId || '', /^[A-Fa-f0-9-]+$/u);
@@ -1318,64 +1448,233 @@ function delay(ms) {
   return new Promise(resolveDelay => setTimeout(resolveDelay, ms));
 }
 
-function runtimeRoleForTarget(targetInfo, extensionId) {
-  try {
-    const url = new URL(targetInfo?.url);
-    if (url.protocol !== 'chrome-extension:' || url.hostname !== extensionId) return null;
-    if (targetInfo.type === 'service_worker' && url.pathname === '/src/background/service-worker.js') {
-      return 'service-worker';
-    }
-    if (targetInfo.type !== 'page') return null;
-    if (url.pathname === `/${harnessPath}`) return 'harness';
-    if (url.pathname === '/src/panel/index.html') return 'panel';
-    if (url.pathname === '/src/review/index.html') return 'review';
-    if (url.pathname === '/src/export/index.html') return 'export';
-  } catch { /* alvo ainda sem URL canônica */ }
-  return null;
+function classifyRuntimeTarget(targetInfo, extensionId) {
+  if (!targetInfo || !['page', 'service_worker'].includes(targetInfo.type)) return { scope: 'discard' };
+  if (!extensionId || targetInfo.url === '' || targetInfo.url === 'about:blank') return { scope: 'pending' };
+  let url;
+  try { url = new URL(targetInfo.url); } catch { return { scope: 'pending' }; }
+  if (url.protocol !== 'chrome-extension:' || url.hostname !== extensionId) return { scope: 'discard' };
+  let role = null;
+  if (targetInfo.type === 'service_worker' && url.pathname === '/src/background/service-worker.js') {
+    role = 'service-worker';
+  } else if (targetInfo.type === 'page') {
+    if (url.pathname === `/${harnessPath}`) role = 'harness';
+    else if (url.pathname === '/src/panel/index.html') role = 'panel';
+    else if (url.pathname === '/src/review/index.html') role = 'review';
+    else if (url.pathname === '/src/export/index.html') role = 'export';
+  }
+  return { scope: 'extension', role };
 }
 
-class RuntimeLogAudit {
-  constructor(needles = []) {
+class RuntimeTargetCapture {
+  constructor({ command, waitForEvent, needles = [] }) {
+    this.command = command;
+    this.waitForEvent = waitForEvent;
     this.needles = [...needles];
-    this.monitoredSessions = new Set();
-    this.probedRoles = new Map();
-    this.eventCount = 0;
-    this.leak = false;
-    this.setupFailed = false;
+    this.extensionId = '';
+    this.sessions = new Map();
+    this.targetSessions = new Map();
+    this.tasks = new Set();
+    this.readyRoles = new Set();
+    this.extensionEventSeen = false;
+    this.extensionLeak = false;
+    this.extensionSetupFailed = false;
   }
 
-  monitor(sessionId) {
-    if (typeof sessionId === 'string' && sessionId.length > 0) this.monitoredSessions.add(sessionId);
+  start() {
+    return this.command('Target.setAutoAttach', {
+      autoAttach: true,
+      waitForDebuggerOnStart: true,
+      flatten: true,
+      filter: [
+        { type: 'page', exclude: false },
+        { type: 'service_worker', exclude: false },
+        { exclude: true },
+      ],
+    });
   }
 
-  failSetup() {
-    this.setupFailed = true;
+  async setExtensionId(extensionId) {
+    if (typeof extensionId !== 'string' || !/^[a-p]{32}$/u.test(extensionId)) {
+      throw new TypeError('Identificador da extensão inválido.');
+    }
+    this.extensionId = extensionId;
+    const targets = await this.command('Target.getTargets');
+    for (const targetInfo of Array.isArray(targets?.targetInfos) ? targets.targetInfos : []) {
+      this.classify(targetInfo);
+    }
   }
 
   capture(message) {
-    if (!this.monitoredSessions.has(message.sessionId) ||
-      (message.method !== 'Runtime.consoleAPICalled' && message.method !== 'Runtime.exceptionThrown')) return;
-    this.eventCount += 1;
+    if (message.method === 'Runtime.consoleAPICalled' || message.method === 'Runtime.exceptionThrown') {
+      this.captureRuntimeEvent(message);
+      return;
+    }
+    if (message.method === 'Target.attachedToTarget') {
+      this.attach(message.params);
+      return;
+    }
+    if (message.method === 'Target.targetInfoChanged') {
+      this.classify(message.params?.targetInfo);
+      return;
+    }
+    if (message.method === 'Target.detachedFromTarget') this.detach(message.params?.sessionId);
+  }
+
+  attach(params) {
+    const sessionId = params?.sessionId;
+    const targetInfo = params?.targetInfo;
+    const targetId = targetInfo?.targetId;
+    if (typeof sessionId !== 'string' || typeof targetId !== 'string' ||
+      !['page', 'service_worker'].includes(targetInfo?.type)) return;
+    const state = this.sessions.get(sessionId) ?? {
+      sessionId,
+      scope: 'pending',
+      roles: new Set(),
+      eventSeen: false,
+      leak: false,
+      probeHits: new Set(),
+      probeInFlight: new Set(),
+      runtimeEnabled: false,
+      resumeAttempted: false,
+      resumeSucceeded: false,
+      setupFailed: false,
+      detached: false,
+    };
+    this.sessions.set(sessionId, state);
+    this.targetSessions.set(targetId, sessionId);
+    this.track(this.setup(state));
+    this.classify(targetInfo);
+  }
+
+  classify(targetInfo) {
+    const sessionId = this.targetSessions.get(targetInfo?.targetId);
+    const state = this.sessions.get(sessionId);
+    if (!state) return;
+    const classification = classifyRuntimeTarget(targetInfo, this.extensionId);
+    if (classification.scope === 'pending') return;
+    if (classification.scope === 'discard') {
+      state.scope = 'discard';
+      state.roles.clear();
+      state.eventSeen = false;
+      state.leak = false;
+      state.probeHits.clear();
+      return;
+    }
+    state.scope = 'extension';
+    if (classification.role) state.roles.add(classification.role);
+    this.promote(state);
+    this.scheduleProbes(state);
+  }
+
+  async setup(state) {
+    try {
+      await this.command('Runtime.enable', {}, 10_000, state.sessionId);
+      state.runtimeEnabled = true;
+    } catch {
+      state.setupFailed = true;
+    }
+    state.resumeAttempted = true;
+    try {
+      await this.command('Runtime.runIfWaitingForDebugger', {}, 10_000, state.sessionId);
+      state.resumeSucceeded = true;
+    } catch {
+      state.setupFailed = true;
+    }
+    this.promote(state);
+    this.scheduleProbes(state);
+  }
+
+  captureRuntimeEvent(message) {
+    const state = this.sessions.get(message.sessionId);
+    if (!state || state.scope === 'discard' || state.detached) return;
+    state.eventSeen = true;
     if (message.method === 'Runtime.consoleAPICalled' && Array.isArray(message.params?.args)) {
       for (const [role, probe] of Object.entries(runtimeProbeByRole)) {
-        if (!message.params.args.some(argument => argument?.type === 'string' && argument.value === probe)) continue;
-        if (!this.probedRoles.has(role)) this.probedRoles.set(role, new Set());
-        this.probedRoles.get(role).add(message.sessionId);
+        if (message.params.args.some(argument => argument?.type === 'string' && argument.value === probe)) {
+          state.probeHits.add(role);
+        }
       }
     }
     try {
       const serialized = JSON.stringify(message.params);
-      if (this.needles.some(needle => serialized.includes(needle))) this.leak = true;
+      if (this.needles.some(needle => serialized.includes(needle))) state.leak = true;
     } catch {
-      this.leak = true;
+      state.leak = true;
+    }
+    this.promote(state);
+  }
+
+  promote(state) {
+    if (state.scope !== 'extension') return;
+    this.extensionEventSeen ||= state.eventSeen;
+    this.extensionLeak ||= state.leak;
+    this.extensionSetupFailed ||= state.setupFailed;
+    if (!state.runtimeEnabled || !state.resumeAttempted || !state.resumeSucceeded || state.setupFailed) return;
+    for (const role of state.roles) {
+      if (state.probeHits.has(role)) this.readyRoles.add(role);
     }
   }
 
-  finalVerdict(requiredRoles) {
-    const sinksReady = requiredRoles.every(role => (this.probedRoles.get(role)?.size ?? 0) > 0);
+  scheduleProbes(state) {
+    if (state.scope !== 'extension' || state.detached || !state.runtimeEnabled ||
+      !state.resumeAttempted || !state.resumeSucceeded || state.setupFailed) return;
+    for (const role of state.roles) {
+      if (state.probeHits.has(role) || state.probeInFlight.has(role)) continue;
+      state.probeInFlight.add(role);
+      this.track(this.probe(state, role));
+    }
+  }
+
+  async probe(state, role) {
+    const probe = runtimeProbeByRole[role];
+    const observed = this.waitForEvent(
+      'Runtime.consoleAPICalled',
+      event => event.sessionId === state.sessionId && Array.isArray(event.params?.args) &&
+        event.params.args.some(argument => argument?.type === 'string' && argument.value === probe),
+    );
+    try {
+      const evaluated = await this.command('Runtime.evaluate', {
+        expression: `console.debug(${JSON.stringify(probe)}); true`,
+        returnByValue: true,
+      }, 10_000, state.sessionId);
+      if (evaluated?.exceptionDetails) throw new Error('Probe Runtime não executado.');
+      await observed;
+    } catch {
+      observed.catch(() => undefined);
+      if (state.scope === 'extension') this.extensionSetupFailed = true;
+    } finally {
+      state.probeInFlight.delete(role);
+      this.promote(state);
+    }
+  }
+
+  detach(sessionId) {
+    const state = this.sessions.get(sessionId);
+    if (state) {
+      state.detached = true;
+      state.roles.clear();
+      state.probeHits.clear();
+    }
+    this.sessions.delete(sessionId);
+    for (const [targetId, correlatedSessionId] of this.targetSessions) {
+      if (correlatedSessionId === sessionId) this.targetSessions.delete(targetId);
+    }
+  }
+
+  track(promise) {
+    const task = Promise.resolve(promise).finally(() => this.tasks.delete(task));
+    this.tasks.add(task);
+    return task;
+  }
+
+  async finalVerdict(requiredRoles) {
+    while (this.tasks.size > 0) await Promise.allSettled([...this.tasks]);
+    const sinksReady = requiredRoles.every(role => this.readyRoles.has(role));
     return {
       sinksReady,
-      sanitized: sinksReady && this.eventCount > 0 && !this.setupFailed && !this.leak,
+      sanitized: sinksReady && this.extensionEventSeen &&
+        !this.extensionSetupFailed && !this.extensionLeak,
     };
   }
 }
@@ -1398,11 +1697,13 @@ class PipeCdp {
     this.nextId = 1;
     this.pending = new Map();
     this.eventWaiters = new Set();
-    this.runtimeLogAudit = new RuntimeLogAudit(runtimeLogNeedles);
-    this.runtimeExtensionId = '';
-    this.runtimeTargetSessions = new Map();
-    this.runtimeCaptureSessions = new Set();
-    this.runtimeCaptureTasks = new Set();
+    this.runtimeTargetCapture = new RuntimeTargetCapture({
+      command: (method, params = {}, timeoutMs = 10_000, sessionId = undefined) =>
+        this.command(method, params, timeoutMs, sessionId),
+      waitForEvent: (method, predicate, timeoutMs = 10_000) =>
+        this.waitForEvent(method, predicate, timeoutMs),
+      needles: runtimeLogNeedles,
+    });
     this.buffer = Buffer.alloc(0);
     responsePipe.on('data', chunk => {
       this.buffer = Buffer.concat([this.buffer, chunk]);
@@ -1439,24 +1740,7 @@ class PipeCdp {
   }
 
   captureEvent(message) {
-    this.runtimeLogAudit.capture(message);
-    if (message.method === 'Target.attachedToTarget') {
-      const targetId = message.params?.targetInfo?.targetId;
-      const sessionId = message.params?.sessionId;
-      if (typeof targetId === 'string' && typeof sessionId === 'string') {
-        this.runtimeTargetSessions.set(targetId, sessionId);
-        this.captureRuntimeTarget(sessionId, message.params.targetInfo);
-      }
-    } else if (message.method === 'Target.targetInfoChanged') {
-      const targetId = message.params?.targetInfo?.targetId;
-      const sessionId = this.runtimeTargetSessions.get(targetId);
-      if (sessionId) this.captureRuntimeTarget(sessionId, message.params.targetInfo);
-    } else if (message.method === 'Target.detachedFromTarget') {
-      const sessionId = message.params?.sessionId;
-      for (const [targetId, correlatedSessionId] of this.runtimeTargetSessions) {
-        if (correlatedSessionId === sessionId) this.runtimeTargetSessions.delete(targetId);
-      }
-    }
+    this.runtimeTargetCapture.capture(message);
     for (const waiter of [...this.eventWaiters]) {
       if (waiter.method !== message.method) continue;
       let matched = false;
@@ -1479,44 +1763,21 @@ class PipeCdp {
     });
   }
 
-  monitorRuntimeSession(sessionId) {
-    this.runtimeLogAudit.monitor(sessionId);
+  startRuntimeTargetCapture() {
+    return this.runtimeTargetCapture.start();
   }
 
   async captureExtensionRuntimeTargets(extensionId) {
-    this.runtimeExtensionId = extensionId;
-    await this.command('Target.setAutoAttach', {
-      autoAttach: true,
-      waitForDebuggerOnStart: true,
-      flatten: true,
-      filter: [
-        { type: 'page', exclude: false },
-        { type: 'service_worker', exclude: false },
-        { exclude: true },
-      ],
-    });
+    await this.startRuntimeTargetCapture();
+    await this.setRuntimeExtensionId(extensionId);
   }
 
-  captureRuntimeTarget(sessionId, targetInfo) {
-    if (!this.runtimeExtensionId || this.runtimeCaptureSessions.has(sessionId)) return;
-    const role = runtimeRoleForTarget(targetInfo, this.runtimeExtensionId);
-    if (!role) {
-      this.command('Runtime.runIfWaitingForDebugger', {}, 10_000, sessionId).catch(() => undefined);
-      return;
-    }
-    this.runtimeCaptureSessions.add(sessionId);
-    const page = new SessionCdp(this, sessionId);
-    const task = probeRuntimeSink(this, page, role, { resume: true })
-      .catch(() => this.runtimeLogAudit.failSetup())
-      .finally(() => this.runtimeCaptureTasks.delete(task));
-    this.runtimeCaptureTasks.add(task);
+  setRuntimeExtensionId(extensionId) {
+    return this.runtimeTargetCapture.setExtensionId(extensionId);
   }
 
-  async finalRuntimeLogVerdict(requiredRoles) {
-    while (this.runtimeCaptureTasks.size > 0) {
-      await Promise.allSettled([...this.runtimeCaptureTasks]);
-    }
-    return this.runtimeLogAudit.finalVerdict(requiredRoles);
+  finalRuntimeLogVerdict(requiredRoles) {
+    return this.runtimeTargetCapture.finalVerdict(requiredRoles);
   }
 
   command(method, params = {}, timeoutMs = 10_000, sessionId = undefined) {
