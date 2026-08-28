@@ -454,6 +454,47 @@ test('IndexedDB request failures never expose native database details', async ()
   });
 });
 
+test('every synchronous IndexedDB boundary is sanitized and remains retryable', async t => {
+  const sensitive = 'SecurityError: db=audita-mt url=https://private.invalid/?token=never-log';
+  const assertFixedTwice = async operation => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await assert.rejects(operation(), error => {
+        assert.ok(error instanceof AuditStorageUnavailableError);
+        assert.equal(error.code, 'AUDIT_STORAGE_UNAVAILABLE');
+        assert.equal(error.message, 'Não foi possível salvar a auditoria no armazenamento local. Libere espaço ou verifique as permissões e tente novamente.');
+        assert.doesNotMatch(error.message, /database|audita-mt|private|token/iu);
+        return true;
+      });
+    }
+  };
+
+  await t.test('indexedDB.open', async () => {
+    const fake = createFakeIndexedDb({ syncOpenFailures: 2, syncError: new Error(sensitive) });
+    const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+    await assertFixedTwice(() => store.getLatest());
+    assert.equal(fake.openCalls, 2);
+  });
+
+  await t.test('db.transaction', async () => {
+    const fake = createFakeIndexedDb({ syncTransactionFailures: 2, syncError: new Error(sensitive) });
+    const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+    await assertFixedTwice(() => store.getLatest());
+  });
+
+  await t.test('transaction.objectStore', async () => {
+    const fake = createFakeIndexedDb({ syncObjectStoreFailures: 2, syncError: new Error(sensitive) });
+    const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+    await assertFixedTwice(() => store.getLatest());
+  });
+
+  await t.test('objectStore.index', async () => {
+    const fake = createFakeIndexedDb({ syncIndexFailures: 2, syncError: new Error(sensitive) });
+    const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+    await store.commitAudit('sync-index-audit', { auditId: 'sync-index-audit' }, { auditId: 'sync-index-audit' }, { now: T0 });
+    await assertFixedTwice(() => store.cleanupExpiredAudits({ now: T30, limit: 25 }));
+  });
+});
+
 test('IndexedDB commitAudit writes model and latest in one transaction', async () => {
   const fake = createFakeIndexedDb();
   const store = createAuditStore({ indexedDB: fake });
@@ -1223,6 +1264,17 @@ function createFakeIndexedDb(options = {}) {
   }
   let writeActive = false;
   const writeQueue = [];
+  const syncFailures = {
+    open: options.syncOpenFailures ?? 0,
+    transaction: options.syncTransactionFailures ?? 0,
+    objectStore: options.syncObjectStoreFailures ?? 0,
+    index: options.syncIndexFailures ?? 0,
+  };
+  const throwSynchronousFailure = boundary => {
+    if (syncFailures[boundary] < 1) return;
+    syncFailures[boundary] -= 1;
+    throw options.syncError ?? new Error(`Sensitive ${boundary} failure`);
+  };
 
   const cloneValue = value => value === undefined ? undefined : structuredClone(value);
   const createTransaction = (storeNames, mode = 'readonly', active = true) => {
@@ -1236,6 +1288,7 @@ function createFakeIndexedDb(options = {}) {
       mode,
       error: null,
       objectStore(name) {
+        throwSynchronousFailure('objectStore');
         if (!names.includes(name) || !stores.has(name)) throw new Error(`Unknown store ${name}`);
         return createStoreFacade(name, transaction);
       },
@@ -1356,6 +1409,7 @@ function createFakeIndexedDb(options = {}) {
         return this.index(indexName);
       },
       index(indexName) {
+        if (transaction.mode !== 'versionchange') throwSynchronousFailure('index');
         const indexDefinition = definition.indexes.get(indexName);
         if (!indexDefinition) throw new Error(`Unknown index ${indexName}`);
         return {
@@ -1426,6 +1480,7 @@ function createFakeIndexedDb(options = {}) {
     open(_name, requestedVersion) {
       fake.openCalls += 1;
       fake.versions.push(requestedVersion);
+      throwSynchronousFailure('open');
       const request = {};
       queueMicrotask(() => {
         if (options.blocked) { request.onblocked?.(); return; }
@@ -1441,6 +1496,7 @@ function createFakeIndexedDb(options = {}) {
             return createStoreFacade(name, request.transaction);
           },
           transaction(storeNames, mode) {
+            throwSynchronousFailure('transaction');
             fake.transactionModes.push(mode);
             fake.transactionStores.push(Array.isArray(storeNames) ? [...storeNames] : [storeNames]);
             if (mode !== 'readwrite') return createTransaction(storeNames, mode);

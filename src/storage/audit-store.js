@@ -388,6 +388,14 @@ export class AuditDeleteBusyError extends Error {
   }
 }
 
+function indexedDbBoundary(operation) {
+  try {
+    return operation();
+  } catch {
+    throw new AuditStorageUnavailableError();
+  }
+}
+
 export function isAuditExportLeaseConflict(error) {
   return safeStoredErrorCode(error) === 'AUDIT_EXPORT_LEASE_CONFLICT';
 }
@@ -825,8 +833,14 @@ export function createAuditStore(options = {}) {
   const open = async () => {
     if (database) return database;
     if (opening) return opening;
+    let request;
+    try {
+      request = indexedDbBoundary(() => factory.open(DB_NAME, 2));
+    } catch (error) {
+      opening = null;
+      throw error;
+    }
     opening = new Promise((resolve, reject) => {
-      const request = factory.open(DB_NAME, 2);
       let settled = false;
       const fail = error => {
         if (settled) return;
@@ -839,13 +853,13 @@ export function createAuditStore(options = {}) {
           const db = request.result;
           const transaction = request.transaction;
           const auditStore = db.objectStoreNames.contains(STORE_NAME)
-            ? transaction.objectStore(STORE_NAME)
-            : db.createObjectStore(STORE_NAME);
+            ? indexedDbBoundary(() => transaction.objectStore(STORE_NAME))
+            : indexedDbBoundary(() => db.createObjectStore(STORE_NAME));
           const retentionStore = db.objectStoreNames.contains(RETENTION_STORE_NAME)
-            ? transaction.objectStore(RETENTION_STORE_NAME)
-            : db.createObjectStore(RETENTION_STORE_NAME, { keyPath: 'auditId' });
+            ? indexedDbBoundary(() => transaction.objectStore(RETENTION_STORE_NAME))
+            : indexedDbBoundary(() => db.createObjectStore(RETENTION_STORE_NAME, { keyPath: 'auditId' }));
           if (!retentionStore.indexNames.contains('byExpiresAt')) {
-            retentionStore.createIndex('byExpiresAt', 'expiresAt', { unique: false });
+            indexedDbBoundary(() => retentionStore.createIndex('byExpiresAt', 'expiresAt', { unique: false }));
           }
           if ((event?.oldVersion ?? 0) >= 1 && (event?.oldVersion ?? 0) < 2) {
             const cursorRequest = auditStore.openCursor();
@@ -892,8 +906,8 @@ export function createAuditStore(options = {}) {
     await new Promise((resolve, reject) => {
       let settled = false;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
-      const transaction = db.transaction(STORE_NAME, 'readwrite');
-      const store = transaction.objectStore(STORE_NAME);
+      const transaction = indexedDbBoundary(() => db.transaction(STORE_NAME, 'readwrite'));
+      const store = indexedDbBoundary(() => transaction.objectStore(STORE_NAME));
       for (const [key, value] of entries) store.put(value, key);
       transaction.oncomplete = () => finish(resolve);
       transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
@@ -906,8 +920,8 @@ export function createAuditStore(options = {}) {
     return new Promise((resolve, reject) => {
       let settled = false;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
-      const transaction = db.transaction(STORE_NAME, 'readonly');
-      const store = transaction.objectStore(STORE_NAME);
+      const transaction = indexedDbBoundary(() => db.transaction(STORE_NAME, 'readonly'));
+      const store = indexedDbBoundary(() => transaction.objectStore(STORE_NAME));
       const values = new Map();
       for (const key of keys) {
         const request = store.get(key);
@@ -946,9 +960,9 @@ export function createAuditStore(options = {}) {
       let nextRevision = null;
       let conflict = false;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
-      const transaction = db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite');
-      const store = transaction.objectStore(STORE_NAME);
-      const retentionStore = transaction.objectStore(RETENTION_STORE_NAME);
+      const transaction = indexedDbBoundary(() => db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite'));
+      const store = indexedDbBoundary(() => transaction.objectStore(STORE_NAME));
+      const retentionStore = indexedDbBoundary(() => transaction.objectStore(RETENTION_STORE_NAME));
       const currentRequest = store.get(key);
       const revisionRequest = store.get(revisionKey(key));
       const retentionRequest = retentionStore.get(key);
@@ -1053,8 +1067,8 @@ export function createAuditStore(options = {}) {
       let result = null;
       let revisionConflict = false;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
-      const transaction = db.transaction(STORE_NAME, 'readwrite');
-      const store = transaction.objectStore(STORE_NAME);
+      const transaction = indexedDbBoundary(() => db.transaction(STORE_NAME, 'readwrite'));
+      const store = indexedDbBoundary(() => transaction.objectStore(STORE_NAME));
       const modelRequest = store.get(key);
       const revisionRequest = store.get(revisionKey(key));
       const leaseRequest = store.get(exportLeaseKey(key));
@@ -1139,9 +1153,9 @@ export function createAuditStore(options = {}) {
       let revisionConflict = false;
       let leaseConflict = false;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
-      const transaction = db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite');
-      const store = transaction.objectStore(STORE_NAME);
-      const retentionStore = transaction.objectStore(RETENTION_STORE_NAME);
+      const transaction = indexedDbBoundary(() => db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite'));
+      const store = indexedDbBoundary(() => transaction.objectStore(STORE_NAME));
+      const retentionStore = indexedDbBoundary(() => transaction.objectStore(RETENTION_STORE_NAME));
       const modelRequest = store.get(key);
       const revisionRequest = store.get(revisionKey(key));
       const leaseRequest = store.get(exportLeaseKey(key));
@@ -1250,8 +1264,8 @@ export function createAuditStore(options = {}) {
       let leaseRead = false;
       let released = false;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
-      const transaction = db.transaction(STORE_NAME, 'readwrite');
-      const store = transaction.objectStore(STORE_NAME);
+      const transaction = indexedDbBoundary(() => db.transaction(STORE_NAME, 'readwrite'));
+      const store = indexedDbBoundary(() => transaction.objectStore(STORE_NAME));
       const revisionRequest = store.get(revisionKey(key));
       const leaseRequest = store.get(exportLeaseKey(key));
       const apply = () => {
@@ -1323,8 +1337,8 @@ export function createAuditStore(options = {}) {
       let revisionConflict = false;
       let leaseConflict = false;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
-      const transaction = db.transaction(STORE_NAME, 'readwrite');
-      const store = transaction.objectStore(STORE_NAME);
+      const transaction = indexedDbBoundary(() => db.transaction(STORE_NAME, 'readwrite'));
+      const store = indexedDbBoundary(() => transaction.objectStore(STORE_NAME));
       const modelRequest = store.get(key);
       const revisionRequest = store.get(revisionKey(key));
       const leaseRequest = store.get(exportLeaseKey(key));
@@ -1379,8 +1393,8 @@ export function createAuditStore(options = {}) {
       let currentLatest;
       let result = null;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
-      const transaction = db.transaction(STORE_NAME, 'readwrite');
-      const store = transaction.objectStore(STORE_NAME);
+      const transaction = indexedDbBoundary(() => db.transaction(STORE_NAME, 'readwrite'));
+      const store = indexedDbBoundary(() => transaction.objectStore(STORE_NAME));
       const deliveryRequest = store.get(exportDeliveryKey(key));
       const latestRequest = store.get(LATEST_KEY);
       const apply = () => {
@@ -1415,8 +1429,9 @@ export function createAuditStore(options = {}) {
     const key = validId(id);
     const db = await open();
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction(RETENTION_STORE_NAME, 'readonly');
-      const request = transaction.objectStore(RETENTION_STORE_NAME).get(key);
+      const transaction = indexedDbBoundary(() => db.transaction(RETENTION_STORE_NAME, 'readonly'));
+      const retentionStore = indexedDbBoundary(() => transaction.objectStore(RETENTION_STORE_NAME));
+      const request = retentionStore.get(key);
       let value;
       request.onsuccess = () => { value = request.result; };
       request.onerror = () => reject(new AuditStorageUnavailableError());
@@ -1448,9 +1463,9 @@ export function createAuditStore(options = {}) {
       let conflict = false;
       let settled = false;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
-      const transaction = db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite');
-      const auditStore = transaction.objectStore(STORE_NAME);
-      const retentionStore = transaction.objectStore(RETENTION_STORE_NAME);
+      const transaction = indexedDbBoundary(() => db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite'));
+      const auditStore = indexedDbBoundary(() => transaction.objectStore(STORE_NAME));
+      const retentionStore = indexedDbBoundary(() => transaction.objectStore(RETENTION_STORE_NAME));
       const modelRequest = auditStore.get(key);
       const revisionRequest = auditStore.get(revisionKey(key));
       const retentionRequest = retentionStore.get(key);
@@ -1506,9 +1521,9 @@ export function createAuditStore(options = {}) {
       let applied = false;
       let settled = false;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
-      const transaction = db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite');
-      const auditStore = transaction.objectStore(STORE_NAME);
-      const retentionStore = transaction.objectStore(RETENTION_STORE_NAME);
+      const transaction = indexedDbBoundary(() => db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite'));
+      const auditStore = indexedDbBoundary(() => transaction.objectStore(STORE_NAME));
+      const retentionStore = indexedDbBoundary(() => transaction.objectStore(RETENTION_STORE_NAME));
       const apply = () => {
         pending -= 1;
         if (pending !== 0 || applied) return;
@@ -1562,9 +1577,9 @@ export function createAuditStore(options = {}) {
       let deleted = null;
       let settled = false;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
-      const transaction = db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite');
-      const auditStore = transaction.objectStore(STORE_NAME);
-      const retentionStore = transaction.objectStore(RETENTION_STORE_NAME);
+      const transaction = indexedDbBoundary(() => db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite'));
+      const auditStore = indexedDbBoundary(() => transaction.objectStore(STORE_NAME));
+      const retentionStore = indexedDbBoundary(() => transaction.objectStore(RETENTION_STORE_NAME));
       const auditKeysRequest = auditStore.getAllKeys();
       const retentionKeysRequest = retentionStore.getAllKeys();
       const decide = () => {
@@ -1639,9 +1654,9 @@ export function createAuditStore(options = {}) {
       let result = null;
       let settled = false;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
-      const transaction = db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite');
-      const auditStore = transaction.objectStore(STORE_NAME);
-      const retentionStore = transaction.objectStore(RETENTION_STORE_NAME);
+      const transaction = indexedDbBoundary(() => db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite'));
+      const auditStore = indexedDbBoundary(() => transaction.objectStore(STORE_NAME));
+      const retentionStore = indexedDbBoundary(() => transaction.objectStore(RETENTION_STORE_NAME));
       const apply = () => {
         pending -= 1;
         if (pending !== 0 || result || conflict || leaseConflict) return;
@@ -1731,11 +1746,11 @@ export function createAuditStore(options = {}) {
       const finish = (handler, value) => {
         if (!settled) { settled = true; handler(value); }
       };
-      const transaction = db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite');
-      const auditStore = transaction.objectStore(STORE_NAME);
-      const retentionStore = transaction.objectStore(RETENTION_STORE_NAME);
+      const transaction = indexedDbBoundary(() => db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite'));
+      const auditStore = indexedDbBoundary(() => transaction.objectStore(STORE_NAME));
+      const retentionStore = indexedDbBoundary(() => transaction.objectStore(RETENTION_STORE_NAME));
       const range = keyRange.upperBound(instant.iso);
-      const index = retentionStore.index('byExpiresAt');
+      const index = indexedDbBoundary(() => retentionStore.index('byExpiresAt'));
       const countRequest = index.count(range);
       const cursorRequest = index.openCursor(range);
       countRequest.onsuccess = () => {
