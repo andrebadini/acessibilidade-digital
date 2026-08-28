@@ -94,6 +94,26 @@ function withAuditRevisions(store) {
       if (writeLatest) await writeLatest(value);
       latestState = value;
     },
+    async markAuditInterrupted(id, value, options) {
+      if (typeof store.markAuditInterrupted === 'function') {
+        return store.markAuditInterrupted(id, value, options);
+      }
+      const [snapshot, latest] = await Promise.all([this.getAuditSnapshot(id), this.getLatest()]);
+      if (latest?.auditId !== id) return { updated: false, reason: 'stale' };
+      if (['complete', 'partial', 'failed', 'cancelled'].includes(snapshot?.model?.session?.status) ||
+        ['complete', 'partial', 'failed', 'cancelled'].includes(latest.status)) {
+        return { updated: false, reason: 'terminal' };
+      }
+      if (!['idle', 'validating', 'queued', 'running', 'cancelling'].includes(latest.status)) {
+        return { updated: false, reason: 'stale' };
+      }
+      const lease = exportLeases.get(id);
+      if (lease && new Date(lease.expiresAt).getTime() > new Date(options.now).getTime()) {
+        return { updated: false, reason: 'delivery-active' };
+      }
+      await this.setLatest(value);
+      return { updated: true, reason: 'interrupted' };
+    },
     commitAudit(id, model, latest) { return write(id, model, latest); },
     commitAuditIfRevision(id, model, latest, snapshotCapability) {
       return write(id, model, latest, snapshotCapability);
@@ -1029,7 +1049,7 @@ test('turns a running batch checkpoint into an explanatory non-resumable interru
   };
   let savedCheckpoint;
   let cleared = false;
-  let latest;
+  let latest = { auditId: checkpoint.id, mode: 'batch', status: 'running', percent: 50 };
   registerServiceWorker(chromeApi, {
     now: () => '2026-08-28T10:02:00.000Z',
     sessionStore: {
@@ -1037,9 +1057,12 @@ test('turns a running batch checkpoint into an explanatory non-resumable interru
       async set(_id, value) { savedCheckpoint = value; }, async get() {},
       async clearActiveBatch() { cleared = true; },
     },
-    auditStore: withAuditRevisions({ async setLatest(value) { latest = value; } }),
+    auditStore: withAuditRevisions({
+      async getLatest() { return latest; },
+      async setLatest(value) { latest = value; },
+    }),
   });
-  await waitUntil(() => latest !== undefined);
+  await waitUntil(() => latest?.status === 'failed' && savedCheckpoint !== undefined);
   assert.equal(savedCheckpoint.state, 'failed');
   assert.equal(savedCheckpoint.resumable, false);
   assert.equal(latest.auditId, 'batch-restart');
@@ -1048,6 +1071,54 @@ test('turns a running batch checkpoint into an explanatory non-resumable interru
   assert.equal(cleared, true);
   assert.match(latest.message, /interrompid[oa]|reinício/iu);
   assert.doesNotMatch(JSON.stringify([savedCheckpoint, latest]), /https?:|token=|session=/iu);
+});
+
+test('restart leaves a terminal audit and its queued export lease intact behind a stale running checkpoint', async () => {
+  const chromeApi = createChrome();
+  const auditId = 'batch-terminal-lease-restart';
+  const checkpoint = {
+    id: auditId, mode: 'batch', state: 'running', total: 2, currentIndex: 2,
+    completedCount: 2, statusCounts: { complete: 2, partial: 0, failed: 0, cancelled: 0 },
+    cancelRequested: false, startedAt: '2026-08-28T09:00:00.000Z',
+    updatedAt: '2026-08-28T09:01:00.000Z', resumable: false,
+  };
+  const store = createInMemoryAuditStore();
+  await store.commitAudit(auditId, {
+    auditId, session: { status: 'complete' }, report: {},
+  }, {
+    auditId, mode: 'batch', status: 'complete', exportStatus: 'preparing',
+  }, { now: '2026-08-28T09:01:00.000Z' });
+  const before = await store.getAuditSnapshot(auditId);
+  const lease = await store.acquireExportLease(auditId, before.capability, {
+    ownerId: 'owner-terminal-restart', now: '2026-08-28T09:01:30.000Z',
+    latestState: {
+      auditId, mode: 'batch', status: 'complete', exportStatus: 'queued',
+      exportRevision: before.revision, leaseOwnerId: 'owner-terminal-restart',
+    },
+  });
+  let activeCheckpoint = checkpoint;
+  registerServiceWorker(chromeApi, {
+    auditStore: store,
+    sessionStore: {
+      async getActiveBatch() { return activeCheckpoint; },
+      async set() {}, async get() {}, async remove() { activeCheckpoint = undefined; },
+      async clearActiveBatch() { activeCheckpoint = undefined; },
+    },
+    now: () => '2026-08-28T09:01:31.000Z',
+  });
+  await waitUntil(() => activeCheckpoint === undefined);
+
+  const after = await store.getAuditSnapshot(auditId);
+  assert.equal(after.revision, before.revision);
+  assert.equal(after.model.session.status, 'complete');
+  assert.equal((await store.getLatest()).exportStatus, 'queued');
+  assert.deepEqual(await store.getExportLeaseState(auditId, {
+    now: '2026-08-28T09:01:31.000Z',
+  }), {
+    active: true, phase: 'queued', retryAt: lease.expiresAt,
+    revision: before.revision, exportAttempt: lease.exportAttempt,
+    ownerId: 'owner-terminal-restart',
+  });
 });
 
 test('a delayed restart restoration can never overwrite a newly accepted audit', async () => {
@@ -1102,21 +1173,16 @@ test('serializes delete-one after startup restoration and never resurrects a sta
   }, {
     auditId, mode: 'batch', status: 'running', percent: 50,
   }, { now: '2026-08-28T09:01:00.000Z' });
-  let releaseStaleLatest;
-  const staleLatestGate = new Promise(resolve => { releaseStaleLatest = resolve; });
-  let staleLatestCaptured = false;
-  let latestReads = 0;
+  let releaseInterruptionDecision;
+  const interruptionGate = new Promise(resolve => { releaseInterruptionDecision = resolve; });
+  let interruptionDecisionEntered = false;
   let deleteEntered = false;
   const auditStore = {
     ...store,
-    async getLatest() {
-      const value = await store.getLatest();
-      latestReads += 1;
-      if (latestReads === 1) {
-        staleLatestCaptured = true;
-        await staleLatestGate;
-      }
-      return value;
+    async markAuditInterrupted(...args) {
+      interruptionDecisionEntered = true;
+      await interruptionGate;
+      return store.markAuditInterrupted(...args);
     },
     async deleteAudit(...args) {
       deleteEntered = true;
@@ -1139,7 +1205,7 @@ test('serializes delete-one after startup restoration and never resurrects a sta
     },
     now: () => '2026-08-28T09:02:00.000Z',
   });
-  await waitUntil(() => staleLatestCaptured);
+  await waitUntil(() => interruptionDecisionEntered);
 
   let response;
   chromeApi.listeners.message.listener(
@@ -1150,7 +1216,7 @@ test('serializes delete-one after startup restoration and never resurrects a sta
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(deleteEntered, false, 'delete-one must wait for startup restoration');
 
-  releaseStaleLatest();
+  releaseInterruptionDecision();
   await waitUntil(() => response !== undefined);
   assert.deepEqual(response, { ok: true, auditId, deleted: true });
   assert.equal(await store.getAudit(auditId), undefined);
@@ -1174,21 +1240,16 @@ test('serializes delete-all after startup restoration and leaves no stale durabl
   }, {
     auditId, mode: 'batch', status: 'running', percent: 50,
   }, { now: '2026-08-28T09:01:00.000Z' });
-  let releaseStaleLatest;
-  const staleLatestGate = new Promise(resolve => { releaseStaleLatest = resolve; });
-  let staleLatestCaptured = false;
-  let latestReads = 0;
+  let releaseInterruptionDecision;
+  const interruptionGate = new Promise(resolve => { releaseInterruptionDecision = resolve; });
+  let interruptionDecisionEntered = false;
   let deleteAllEntered = false;
   const auditStore = {
     ...store,
-    async getLatest() {
-      const value = await store.getLatest();
-      latestReads += 1;
-      if (latestReads === 1) {
-        staleLatestCaptured = true;
-        await staleLatestGate;
-      }
-      return value;
+    async markAuditInterrupted(...args) {
+      interruptionDecisionEntered = true;
+      await interruptionGate;
+      return store.markAuditInterrupted(...args);
     },
     async deleteAllAudits(...args) {
       deleteAllEntered = true;
@@ -1215,7 +1276,7 @@ test('serializes delete-all after startup restoration and leaves no stale durabl
     },
     now: () => '2026-08-28T09:02:00.000Z',
   });
-  await waitUntil(() => staleLatestCaptured);
+  await waitUntil(() => interruptionDecisionEntered);
 
   let response;
   chromeApi.listeners.message.listener(
@@ -1226,7 +1287,7 @@ test('serializes delete-all after startup restoration and leaves no stale durabl
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(deleteAllEntered, false, 'delete-all must wait for startup restoration');
 
-  releaseStaleLatest();
+  releaseInterruptionDecision();
   await waitUntil(() => response !== undefined);
   assert.deepEqual(response, { ok: true, deleted: 1 });
   assert.equal(await store.getAudit(auditId), undefined);
@@ -1288,10 +1349,7 @@ test('restart treats an absent terminal checkpoint as deleted and never recreate
   const latestWrites = [];
   registerServiceWorker(chromeApi, {
     auditStore: {
-      async getAuditSnapshot() { return { model: undefined, revision: 0, capability: null }; },
-      async getAuditRetention() { return undefined; },
-      async getLatest() { return undefined; },
-      async setLatest(value) { latestWrites.push(value); },
+      async markAuditInterrupted() { return { updated: false, reason: 'stale' }; },
     },
   });
   await waitUntil(() => sessionValues['audita-mt:session:active-batch'] === undefined);
@@ -2108,7 +2166,7 @@ test('queues complete-export confirmation behind startup restoration', async () 
   });
 });
 
-test('fences restart failure persistence against an export-tab deletion after stale startup reads', async () => {
+test('fences restart interruption atomically against an export-tab deletion', async () => {
   const chromeApi = createChrome();
   const auditId = 'batch-export-delete-startup-race';
   const checkpoint = {
@@ -2123,20 +2181,15 @@ test('fences restart failure persistence against an export-tab deletion after st
   }, {
     auditId, mode: 'batch', status: 'running', percent: 50,
   }, { now: '2026-08-28T09:01:00.000Z', deleteAfterCompleteExport: true });
-  let releaseStaleLatest;
-  const staleLatestGate = new Promise(resolve => { releaseStaleLatest = resolve; });
-  let staleLatestCaptured = false;
-  let latestReads = 0;
+  let releaseInterruptionDecision;
+  const interruptionGate = new Promise(resolve => { releaseInterruptionDecision = resolve; });
+  let interruptionDecisionEntered = false;
   const auditStore = {
     ...store,
-    async getLatest() {
-      const value = await store.getLatest();
-      latestReads += 1;
-      if (latestReads === 1) {
-        staleLatestCaptured = true;
-        await staleLatestGate;
-      }
-      return value;
+    async markAuditInterrupted(...args) {
+      interruptionDecisionEntered = true;
+      await interruptionGate;
+      return store.markAuditInterrupted(...args);
     },
   };
   const sessionValues = new Map([[auditId, checkpoint]]);
@@ -2155,7 +2208,7 @@ test('fences restart failure persistence against an export-tab deletion after st
     },
     now: () => '2026-08-28T09:02:00.000Z',
   });
-  await waitUntil(() => staleLatestCaptured);
+  await waitUntil(() => interruptionDecisionEntered);
 
   const externalSnapshot = await store.getAuditSnapshot(auditId);
   assert.equal((await store.deleteAudit(auditId, externalSnapshot.capability, {
@@ -2175,7 +2228,7 @@ test('fences restart failure persistence against an export-tab deletion after st
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(response, undefined);
 
-  releaseStaleLatest();
+  releaseInterruptionDecision();
   await waitUntil(() => response !== undefined);
   await waitUntil(() => chromeApi.runtime.sent.some(value => value.type === 'AUDIT_DELETED'));
   assert.deepEqual(response, { ok: true });
@@ -2186,4 +2239,54 @@ test('fences restart failure persistence against an export-tab deletion after st
   assert.deepEqual(chromeApi.runtime.sent.filter(value => value.type === 'AUDIT_DELETED'), [{
     type: 'AUDIT_DELETED', auditId, reason: 'complete-export',
   }]);
+});
+
+test('restart never recreates latest when deletion wins before its atomic interruption decision', async () => {
+  const chromeApi = createChrome();
+  const auditId = 'batch-delete-before-interruption-decision';
+  const checkpoint = {
+    id: auditId, mode: 'batch', state: 'running', total: 2, currentIndex: 1,
+    completedCount: 1, statusCounts: { complete: 1, partial: 0, failed: 0, cancelled: 0 },
+    cancelRequested: false, startedAt: '2026-08-28T09:00:00.000Z',
+    updatedAt: '2026-08-28T09:01:00.000Z', resumable: false,
+  };
+  const store = createInMemoryAuditStore();
+  await store.commitAudit(auditId, {
+    auditId, session: { status: 'running' }, report: {},
+  }, {
+    auditId, mode: 'batch', status: 'running', percent: 50,
+  }, { now: '2026-08-28T09:01:00.000Z' });
+  let releaseInterruptionDecision;
+  const interruptionGate = new Promise(resolve => { releaseInterruptionDecision = resolve; });
+  let interruptionDecisionEntered = false;
+  const auditStore = {
+    ...store,
+    async markAuditInterrupted(...args) {
+      interruptionDecisionEntered = true;
+      await interruptionGate;
+      return store.markAuditInterrupted(...args);
+    },
+  };
+  let activeCheckpoint = checkpoint;
+  registerServiceWorker(chromeApi, {
+    auditStore,
+    sessionStore: {
+      async getActiveBatch() { return activeCheckpoint; },
+      async set() {}, async get() {}, async remove() { activeCheckpoint = undefined; },
+      async clearActiveBatch() { activeCheckpoint = undefined; },
+    },
+    now: () => '2026-08-28T09:02:00.000Z',
+  });
+  await waitUntil(() => interruptionDecisionEntered);
+  const deletionSnapshot = await store.getAuditSnapshot(auditId);
+  await store.deleteAudit(auditId, deletionSnapshot.capability, {
+    now: '2026-08-28T09:02:00.000Z',
+  });
+  releaseInterruptionDecision();
+  await waitUntil(() => activeCheckpoint === undefined);
+
+  assert.equal(await store.getAudit(auditId), undefined);
+  assert.equal(await store.getAuditRetention(auditId), undefined);
+  assert.equal(await store.getLatest(), undefined);
+  assert.deepEqual(await store.getExportDeliveryJournal(auditId), []);
 });

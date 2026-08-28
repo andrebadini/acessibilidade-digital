@@ -868,6 +868,123 @@ test('a persistent export lease lets only one in-memory store instance own physi
   assert.equal((await first.getLatest()).exportAttempt, 1);
 });
 
+test('interrupted-checkpoint settlement preserves terminal models and queued export ownership in memory and IndexedDB', async () => {
+  for (const store of [
+    createInMemoryAuditStore(),
+    createAuditStore({ indexedDB: createFakeIndexedDb() }),
+  ]) {
+    const auditId = 'batch-terminal-export-owned';
+    await store.commitAudit(auditId, {
+      auditId, session: { status: 'complete' }, report: {},
+    }, {
+      auditId, mode: 'batch', status: 'complete', exportStatus: 'preparing',
+    }, { now: T0 });
+    const snapshot = await store.getAuditSnapshot(auditId);
+    const lease = await store.acquireExportLease(auditId, snapshot.capability, {
+      ownerId: 'owner-terminal-export', now: '2026-08-27T10:00:00.000Z',
+      latestState: {
+        auditId, mode: 'batch', status: 'complete', exportStatus: 'queued',
+        exportRevision: snapshot.revision, leaseOwnerId: 'owner-terminal-export',
+      },
+    });
+
+    const result = await store.markAuditInterrupted(auditId, {
+      auditId, mode: 'batch', status: 'failed', exportStatus: 'unavailable',
+      message: 'Lote interrompido.',
+    }, { now: '2026-08-27T10:00:00.100Z' });
+
+    assert.deepEqual(result, { updated: false, reason: 'terminal' });
+    const after = await store.getAuditSnapshot(auditId);
+    assert.equal(after.revision, snapshot.revision);
+    assert.equal(after.model.session.status, 'complete');
+    assert.equal((await store.getLatest()).exportStatus, 'queued');
+    assert.deepEqual(await store.getExportLeaseState(auditId, {
+      now: '2026-08-27T10:00:00.100Z',
+    }), {
+      active: true, phase: 'queued', retryAt: lease.expiresAt,
+      revision: snapshot.revision, exportAttempt: lease.exportAttempt,
+      ownerId: 'owner-terminal-export',
+    });
+  }
+});
+
+test('interrupted-checkpoint settlement updates only a still-current non-terminal audit in memory and IndexedDB', async () => {
+  for (const createStore of [
+    () => createInMemoryAuditStore(),
+    () => createAuditStore({ indexedDB: createFakeIndexedDb() }),
+  ]) {
+    const liveStore = createStore();
+    const liveId = 'batch-interrupted-live';
+    await liveStore.commitAudit(liveId, {
+      auditId: liveId, session: { status: 'running' }, report: {},
+    }, {
+      auditId: liveId, mode: 'batch', status: 'running', percent: 50,
+    }, { now: T0 });
+    const liveBefore = await liveStore.getAuditSnapshot(liveId);
+    const retentionBefore = await liveStore.getAuditRetention(liveId);
+    assert.deepEqual(await liveStore.markAuditInterrupted(liveId, {
+      auditId: liveId, mode: 'batch', status: 'failed', exportStatus: 'unavailable',
+      message: 'Lote interrompido.',
+    }, { now: '2026-08-27T10:00:00.000Z' }), {
+      updated: true, reason: 'interrupted',
+    });
+    const liveAfter = await liveStore.getAuditSnapshot(liveId);
+    assert.equal(liveAfter.revision, liveBefore.revision);
+    assert.deepEqual(liveAfter.model, liveBefore.model);
+    assert.deepEqual(await liveStore.getAuditRetention(liveId), retentionBefore);
+    assert.equal((await liveStore.getLatest()).status, 'failed');
+    assert.deepEqual(await liveStore.getExportDeliveryJournal(liveId), []);
+
+    const deletedStore = createStore();
+    const deletedId = 'batch-interrupted-deleted';
+    await deletedStore.commitAudit(deletedId, {
+      auditId: deletedId, session: { status: 'running' }, report: {},
+    }, {
+      auditId: deletedId, mode: 'batch', status: 'running', percent: 50,
+    }, { now: T0 });
+    const deletedSnapshot = await deletedStore.getAuditSnapshot(deletedId);
+    await deletedStore.deleteAudit(deletedId, deletedSnapshot.capability, {
+      now: '2026-08-27T10:00:00.000Z',
+    });
+    assert.deepEqual(await deletedStore.markAuditInterrupted(deletedId, {
+      auditId: deletedId, mode: 'batch', status: 'failed', exportStatus: 'unavailable',
+      message: 'Lote interrompido.',
+    }, { now: '2026-08-27T10:00:00.100Z' }), {
+      updated: false, reason: 'stale',
+    });
+    assert.equal(await deletedStore.getAudit(deletedId), undefined);
+    assert.equal(await deletedStore.getAuditRetention(deletedId), undefined);
+    assert.equal(await deletedStore.getLatest(), undefined);
+    assert.deepEqual(await deletedStore.getExportDeliveryJournal(deletedId), []);
+
+    await deletedStore.setLatest({ auditId: 'newer-audit', status: 'complete' });
+    assert.deepEqual(await deletedStore.markAuditInterrupted(deletedId, {
+      auditId: deletedId, mode: 'batch', status: 'failed', exportStatus: 'unavailable',
+      message: 'Lote interrompido.',
+    }, { now: '2026-08-27T10:00:00.200Z' }), {
+      updated: false, reason: 'stale',
+    });
+    assert.deepEqual(await deletedStore.getLatest(), {
+      auditId: 'newer-audit', status: 'complete',
+    });
+
+    const malformedStore = createStore();
+    const malformedId = 'batch-interrupted-malformed';
+    await malformedStore.commitAudit(malformedId, {
+      auditId: malformedId, session: { status: 'running' }, report: {},
+    }, {
+      auditId: malformedId, mode: 'batch', status: 'unknown-state',
+    }, { now: T0 });
+    assert.deepEqual(await malformedStore.markAuditInterrupted(malformedId, {
+      auditId: malformedId, mode: 'batch', status: 'failed', exportStatus: 'unavailable',
+      message: 'Lote interrompido.',
+    }, { now: '2026-08-27T10:00:00.300Z' }), {
+      updated: false, reason: 'stale',
+    });
+    assert.equal((await malformedStore.getLatest()).status, 'unknown-state');
+  }
+});
+
 test('an expired/crashed export lease is reclaimable and its former owner cannot reserve delivery', async () => {
   const backing = new Map();
   const first = createInMemoryAuditStore(backing);

@@ -20,6 +20,8 @@ const DEFAULT_EXPORT_LEASE_TTL_MS = 2 * 60 * 1000;
 const MAX_EXPORT_LEASE_TTL_MS = 10 * 60 * 1000;
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
 const EXPORT_FORMATS = new Set(['html', 'json', 'csv', 'pdf']);
+const TERMINAL_AUDIT_STATUSES = new Set(['complete', 'partial', 'failed', 'cancelled']);
+const INTERRUPTIBLE_AUDIT_STATUSES = new Set(['idle', 'validating', 'queued', 'running', 'cancelling']);
 const AUDIT_SNAPSHOT_CAPABILITIES = new WeakMap();
 const IN_MEMORY_RETENTION = new WeakMap();
 
@@ -75,6 +77,21 @@ function assertFinalizationCorrelation(auditId, model, latestState) {
     (latestState !== undefined && ownedAuditId(latestState) !== auditId)) {
     throw new TypeError('Modelo ou estado final não corresponde à auditoria.');
   }
+}
+
+function interruptedLatest(auditId, latestState) {
+  if (ownedAuditId(latestState) !== auditId || latestState?.status !== 'failed') {
+    throw new TypeError('Estado de interrupção não corresponde à auditoria.');
+  }
+  return clone(latestState);
+}
+
+function isTerminalAuditStatus(status) {
+  return typeof status === 'string' && TERMINAL_AUDIT_STATUSES.has(status);
+}
+
+function isInterruptibleAuditStatus(status) {
+  return typeof status === 'string' && INTERRUPTIBLE_AUDIT_STATUSES.has(status);
 }
 
 function storedRevision(value) {
@@ -723,6 +740,22 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     const journal = canonicalDeliveryJournal(initial.get(exportDeliveryKey(key)), key);
     return Boolean(lease) || journal.length > 0;
   };
+  const markAuditInterrupted = (id, latestState, options) => {
+    const key = validId(id);
+    const failedLatest = interruptedLatest(key, latestState);
+    const instant = canonicalLeaseNow(options?.now);
+    const model = initial.get(key);
+    const currentLatest = initial.get(LATEST_KEY);
+    if (currentLatest?.auditId !== key) return { updated: false, reason: 'stale' };
+    if (isTerminalAuditStatus(model?.session?.status) ||
+      isTerminalAuditStatus(currentLatest.status)) {
+      return { updated: false, reason: 'terminal' };
+    }
+    if (!isInterruptibleAuditStatus(currentLatest.status)) return { updated: false, reason: 'stale' };
+    if (hasDeliveryWork(key, instant.nowMs)) return { updated: false, reason: 'delivery-active' };
+    initial.set(LATEST_KEY, failedLatest);
+    return { updated: true, reason: 'interrupted' };
+  };
   const finalizeExportAndMaybeDelete = (id, model, latestState, snapshotCapability, options) => {
     const key = validId(id);
     assertFinalizationCorrelation(key, model, latestState);
@@ -769,6 +802,9 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     async getAuditSnapshot(id) { return snapshot(id); },
     async setLatest(state) { initial.set(LATEST_KEY, clone(state)); },
     async getLatest() { return clone(initial.get(LATEST_KEY)); },
+    async markAuditInterrupted(id, latestState, options) {
+      return markAuditInterrupted(id, latestState, options);
+    },
     async commitAudit(id, model, latestState, options) {
       return writeAudit(id, model, latestState, undefined, options);
     },
@@ -896,6 +932,7 @@ function createUnavailableAuditStore() {
     getAuditSnapshot: unavailable,
     setLatest: unavailable,
     getLatest: unavailable,
+    markAuditInterrupted: unavailable,
     commitAudit: unavailable,
     commitAuditIfRevision: unavailable,
     commitAuditReviewIfRevision: unavailable,
@@ -1599,6 +1636,75 @@ export function createAuditStore(options = {}) {
       transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
     });
   };
+  const markAuditInterrupted = async (id, latestState, options) => {
+    const key = validId(id);
+    const failedLatest = interruptedLatest(key, latestState);
+    const instant = canonicalLeaseNow(options?.now);
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      let pending = 5;
+      let modelValue;
+      let revisionValue;
+      let latestValue;
+      let leaseValue;
+      let deliveryValue;
+      let result = null;
+      let settled = false;
+      const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
+      const transaction = indexedDbBoundary(() => db.transaction(STORE_NAME, 'readwrite'));
+      const store = indexedDbObjectStore(transaction, () => transaction.objectStore(STORE_NAME));
+      const apply = () => {
+        pending -= 1;
+        if (pending !== 0 || result) return;
+        let revision;
+        let entries;
+        try {
+          revision = storedRevision(revisionValue);
+          entries = canonicalDeliveryJournal(deliveryValue, key);
+        } catch (error) {
+          finish(reject, error);
+          try { transaction.abort(); } catch {}
+          return;
+        }
+        if (latestValue?.auditId !== key) {
+          result = { updated: false, reason: 'stale' };
+          return;
+        }
+        if (isTerminalAuditStatus(modelValue?.session?.status) ||
+          isTerminalAuditStatus(latestValue.status)) {
+          result = { updated: false, reason: 'terminal' };
+          return;
+        }
+        if (!isInterruptibleAuditStatus(latestValue.status)) {
+          result = { updated: false, reason: 'stale' };
+          return;
+        }
+        if (activeExportLease(leaseValue, key, revision, instant.nowMs) || entries.length > 0) {
+          result = { updated: false, reason: 'delivery-active' };
+          return;
+        }
+        store.put(failedLatest, LATEST_KEY);
+        result = { updated: true, reason: 'interrupted' };
+      };
+      const requests = [
+        [store.get(key), value => { modelValue = value; }],
+        [store.get(revisionKey(key)), value => { revisionValue = value; }],
+        [store.get(LATEST_KEY), value => { latestValue = value; }],
+        [store.get(exportLeaseKey(key)), value => { leaseValue = value; }],
+        [store.get(exportDeliveryKey(key)), value => { deliveryValue = value; }],
+      ];
+      for (const [request, receive] of requests) {
+        request.onsuccess = () => { receive(request.result); apply(); };
+        request.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      }
+      transaction.oncomplete = () => result
+        ? finish(resolve, result)
+        : finish(reject, new AuditStorageUnavailableError());
+      transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
+    });
+  };
+
   const deleteAudit = async (id, snapshotCapability, deleteOptions) => {
     const key = validId(id);
     const instant = canonicalRetentionInstant(deleteOptions?.now);
@@ -1959,6 +2065,7 @@ export function createAuditStore(options = {}) {
     getAuditSnapshot,
     setLatest(state) { return put(LATEST_KEY, state); },
     getLatest() { return get(LATEST_KEY); },
+    markAuditInterrupted,
     commitAudit(id, model, latestState, options) {
       return mutateAudit(id, model, latestState, undefined, options);
     },

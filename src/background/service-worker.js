@@ -608,46 +608,25 @@ export function registerServiceWorker(chromeApi, options = {}) {
     try {
       const checkpoint = await sessions.getActiveBatch?.();
       if (!checkpoint || checkpoint.mode !== 'batch') return;
-      const [snapshot, retention, latest] = await Promise.all([
-        auditStore.getAuditSnapshot?.(checkpoint.id),
-        auditStore.getAuditRetention?.(checkpoint.id),
-        auditStore.getLatest?.(),
-      ]);
-      const terminal = ['complete', 'partial', 'failed', 'cancelled'].includes(checkpoint.state);
-      const active = ['idle', 'validating', 'queued', 'running', 'cancelling'].includes(checkpoint.state);
-      const committed = terminal && snapshot?.model?.auditId === checkpoint.id &&
-        snapshot.model?.session?.status === checkpoint.state &&
-        latest?.auditId === checkpoint.id && latest.status === checkpoint.state;
-      const durablyAbsent = (terminal || !active) && snapshot?.model === undefined &&
-        retention === undefined && latest == null;
-      if (committed || durablyAbsent || (latest?.auditId && latest.auditId !== checkpoint.id)) {
-        await clearActiveCheckpointIfCurrent(checkpoint);
-        return;
+      if (typeof auditStore.markAuditInterrupted !== 'function') {
+        throw new AuditStorageUnavailableError();
       }
-      const interrupted = interruptBatchCheckpoint(checkpoint, queueTime());
-      await sessions.set(interrupted.id, interrupted);
-      const currentLatest = await auditStore.getLatest?.();
-      if (currentLatest?.auditId && currentLatest.auditId !== interrupted.id) {
-        await clearActiveCheckpointIfCurrent(checkpoint);
-        return;
-      }
+      const interruptedAt = queueTime();
+      const interrupted = interruptBatchCheckpoint(checkpoint, interruptedAt);
       const failedLatest = {
         auditId: interrupted.id, mode: 'batch', status: 'failed', percent: 0,
         message: 'O lote foi interrompido por reinício do worker e não pode ser retomado automaticamente.',
         total: interrupted.total, statusCounts: interrupted.statusCounts, exportStatus: 'unavailable',
       };
-      if (snapshot?.model?.auditId === interrupted.id && snapshot.capability &&
-        typeof auditStore.commitAuditIfRevision === 'function') {
-        try {
-          await auditStore.commitAuditIfRevision(
-            interrupted.id, snapshot.model, failedLatest, snapshot.capability,
-          );
-        } catch (error) {
-          if (!isAuditRevisionConflict(error)) throw error;
-        }
-      } else {
-        await auditStore.setLatest(failedLatest);
+      const result = await auditStore.markAuditInterrupted(
+        interrupted.id, failedLatest, { now: interruptedAt },
+      );
+      if (!result || typeof result.updated !== 'boolean' ||
+        !['interrupted', 'terminal', 'delivery-active', 'stale'].includes(result.reason) ||
+        result.updated !== (result.reason === 'interrupted')) {
+        throw new AuditStorageUnavailableError();
       }
+      if (result.updated) await sessions.set(interrupted.id, interrupted);
       await clearActiveCheckpointIfCurrent(checkpoint);
     } catch {
       logger.error('Não foi possível registrar a interrupção do lote anterior.');
