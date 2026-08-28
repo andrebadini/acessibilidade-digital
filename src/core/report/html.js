@@ -1,6 +1,9 @@
+import { consumerBasisForOccurrence, CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../legal/consumer-basis.js';
 import { sanitizeResourceUrl } from '../normalize-snapshot.js';
+import { SECTION508_REVISED_CROSSWALK } from '../normative/section508.js';
 import { createAuditModel } from './audit-model.js';
-import { REPORT_CSS } from './report.css.js';
+import { REPORT_CSS, REPORT_CSS_CSP_HASH } from './report.css.js';
+import { REPORT_SCRIPT, REPORT_SCRIPT_CSP_HASH } from './report.js.js';
 
 const PNG_SIGNATURE = Object.freeze([137, 80, 78, 71, 13, 10, 26, 10]);
 const MAX_PNG_BYTES = 64 * 1024 * 1024;
@@ -8,27 +11,54 @@ const MAX_PNG_DIMENSION = 100_000;
 const MAX_PNG_PIXELS = 268_435_456;
 const CRC_TABLE = makeCrcTable();
 
-const STATUS = Object.freeze({
-  passed: { label: 'Aprovado', icon: '✓' },
-  failed: { label: 'Reprovado', icon: '✕' },
-  cantTell: { label: 'Revisar', icon: '?' },
-  inapplicable: { label: 'Não aplicável', icon: '—' },
+const OUTCOME = Object.freeze({
+  passed: { label: 'Atendido no escopo observado', icon: '✓' },
+  failed: { label: 'Não atendido neste teste', icon: '✕' },
+  cantTell: { label: 'Requer revisão humana', icon: '?' },
   untested: { label: 'Não testado', icon: '!' },
+  inapplicable: { label: 'Não aplicável', icon: '—' },
 });
+
+const CLASSIFICATION = Object.freeze({
+  requirement: 'Requisito ABNT',
+  recommendation: 'Recomendação ABNT',
+  'best-practice': 'Boa prática suplementar',
+  editorial: 'Alerta editorial',
+});
+
+const IMPACT = Object.freeze({
+  critical: 'Crítico', serious: 'Alto', moderate: 'Moderado', minor: 'Menor',
+});
+
+const PAGE_STATUS = Object.freeze({
+  complete: 'Completa', partial: 'Parcial', failed: 'Falhou', cancelled: 'Cancelada',
+});
+
+const OUTCOME_PRIORITY = Object.freeze({ failed: 0, cantTell: 1, passed: 2, untested: 3, inapplicable: 4 });
+const IMPACT_PRIORITY = Object.freeze({ critical: 0, serious: 1, moderate: 2, minor: 3 });
 
 export function renderHtmlReport(input) {
   const model = createAuditModel(input);
-  const counts = Object.fromEntries(Object.keys(STATUS).map(outcome => [outcome, model.itemResults.filter(item => item.outcome === outcome).length]));
   const itemById = new Map(model.itemResults.map(item => [item.id, item]));
+  const pageById = new Map(model.pages.map(page => [page.pageId, page]));
+  const ruleById = new Map(model.ruleResults.map(rule => [rule.ruleId, rule]));
   const artifactById = new Map(model.evidence.map(artifact => [artifact.evidenceId, artifact]));
-  const imageRegistry = createImageRegistry(model.evidence);
+  const reviewByOccurrence = new Map(model.manualReview.map(entry => [entry.occurrenceId, entry]));
   const decisionByOccurrence = new Map(model.reviewDecisions.map(decision => [decision.occurrenceId, decision]));
+  const imageRegistry = createImageRegistry(model.evidence);
+  const orderedOccurrences = prioritizeOccurrences(model.occurrences, model.pages, decisionByOccurrence);
+  const csp = [
+    "default-src 'none'", "img-src data:", `style-src '${REPORT_CSS_CSP_HASH}'`, `script-src '${REPORT_SCRIPT_CSP_HASH}'`,
+    "connect-src 'none'", "object-src 'none'", "frame-src 'none'", "font-src 'none'", "media-src 'none'",
+    "worker-src 'none'", "base-uri 'none'", "form-action 'none'",
+  ].join('; ');
+
   return `<!doctype html>
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="${csp}">
 <title>Relatório de auditoria — Audita Acessibilidade</title>
 <style>${REPORT_CSS}</style>
 </head>
@@ -38,22 +68,21 @@ ${imageDefinitions(imageRegistry.definitions)}
 ${header()}
 <main id="conteudo">
 <h1>Relatório de auditoria de acessibilidade</h1>
-<p class="lead">Auditoria automatizada e assistida da página e do estado observados. Este relatório não é, isoladamente, uma declaração de conformidade do site inteiro.</p>
-<p class="independence-notice"><strong>Independência:</strong> esta é uma ferramenta independente, sem vínculo institucional, e seu resultado não equivale a certificação ou laudo oficial.</p>
-<p class="notice"><strong>Integridade temporal:</strong> os horários usam o relógio local do dispositivo e não constituem carimbo de tempo certificado. Os hashes demonstram integridade entre artefatos, não autoria ou assinatura digital.</p>
-${summary(model, counts)}
-${scope(model)}
-${methodology(model)}
-${items(model)}
-${occurrences(model, itemById, artifactById, imageRegistry.byEvidenceId, decisionByOccurrence)}
-${evidence(model, imageRegistry.byEvidenceId)}
-${review(model, itemById)}
-${limitations(model)}
-${editorial(model)}
-${foundation(model)}
-${integrity(model)}
+<p class="lead">Resultados técnicos, evidências e pendências de revisão do escopo observado. Este relatório não declara conformidade integral, não gera indicador numérico e não substitui avaliação humana.</p>
+${sectionNavigation()}
+${scopeSection(model)}
+${executiveSummary(model, decisionByOccurrence)}
+${filterSection(model, orderedOccurrences)}
+${occurrenceSection(orderedOccurrences, { itemById, pageById, ruleById, artifactById, reviewByOccurrence, decisionByOccurrence, imageByEvidenceId: imageRegistry.byEvidenceId })}
+${announcementMaps(model, imageRegistry.byEvidenceId)}
+${humanReviewSection(model, itemById, decisionByOccurrence, orderedOccurrences)}
+${widgetInventory(model)}
+${itemMatrix(model)}
+${evidenceAnnex(model, imageRegistry.byEvidenceId)}
+${methodologySection(model)}
 </main>
 <footer class="report-footer"><p>Audita Acessibilidade — relatório local da auditoria ${escapeHtml(model.auditId)}.</p><p>Gerado em ${escapeHtml(model.timestamps.generatedAt)} (${escapeHtml(model.timezone)}).</p></footer>
+<script>${REPORT_SCRIPT}</script>
 </body>
 </html>`;
 }
@@ -62,57 +91,260 @@ function header() {
   return '<header class="report-header"><div class="report-header__inner"><p class="product-name">Audita Acessibilidade</p><p class="product-description">Auditoria independente de acessibilidade</p></div></header>';
 }
 
-function summary(model, counts) {
-  return `<section aria-labelledby="sumario"><h2 id="sumario">Sumário executivo</h2>
-<dl class="meta"><dt>Auditoria</dt><dd>${escapeHtml(model.auditId)}</dd><dt>Status da sessão</dt><dd>${escapeHtml(model.session.status)}</dd><dt>URL final</dt><dd><code>${escapeHtml(model.finalUrl)}</code></dd><dt>Itens avaliados</dt><dd>${escapeHtml(model.itemResults.length)}</dd></dl>
-<ul class="summary-grid">${Object.entries(STATUS).map(([outcome, status]) => `<li class="summary-card">${statusMarkup(outcome)}<strong>${escapeHtml(counts[outcome])}</strong><span>itens</span></li>`).join('')}</ul></section>`;
+function sectionNavigation() {
+  return `<nav class="section-nav" aria-label="Seções do relatório"><strong>Navegue pelo relatório</strong><ul>
+<li><a href="#ocorrencias">Ocorrências</a></li><li><a href="#revisao">Revisão humana</a></li><li><a href="#matriz">Matriz ABNT</a></li><li><a href="#anexos">Evidências</a></li><li><a href="#metodologia">Metodologia</a></li>
+</ul></nav>`;
 }
 
-function scope(model) {
-  return `<section aria-labelledby="escopo"><h2 id="escopo">Escopo</h2><dl class="meta"><dt>Tipo</dt><dd>${escapeHtml(model.scope.kind)}</dd><dt>Descrição</dt><dd>${escapeHtml(model.scope.description)}</dd><dt>URL solicitada</dt><dd><code>${escapeHtml(model.requestedUrl)}</code></dd><dt>URL final</dt><dd><code>${escapeHtml(model.finalUrl)}</code></dd><dt>Início</dt><dd>${escapeHtml(model.timestamps.startedAt)}</dd><dt>Fim</dt><dd>${escapeHtml(model.timestamps.endedAt)}</dd><dt>Fuso</dt><dd>${escapeHtml(model.timezone)}</dd></dl></section>`;
+function scopeSection(model) {
+  return `<section id="escopo" aria-labelledby="escopo-titulo"><h2 id="escopo-titulo">Identidade, escopo e estado da auditoria</h2>
+<p class="independence-notice"><strong>Independência:</strong> ferramenta independente, sem vínculo institucional; o resultado não equivale a certificação nem a laudo oficial.</p>
+<p class="notice"><strong>Integridade temporal:</strong> os horários usam o relógio local do dispositivo e não constituem carimbo de tempo certificado. Os hashes demonstram igualdade entre artefatos, não autoria ou assinatura digital.</p>
+<div class="scope-grid">
+<article class="scope-card"><h3>Registro</h3><dl class="meta"><dt>Auditoria</dt><dd><code>${escapeHtml(model.auditId)}</code></dd><dt>Status da sessão</dt><dd>${pageStatus(model.session.status)}</dd><dt>Modo solicitado</dt><dd>${model.requestedScope.mode === 'batch' ? 'Lista explícita de páginas' : 'Página única'}</dd></dl></article>
+<article class="scope-card"><h3>Período observado</h3><dl class="meta"><dt>Início</dt><dd>${escapeHtml(model.timestamps.startedAt)}</dd><dt>Observada até</dt><dd>${escapeHtml(model.timestamps.endedAt)}</dd><dt>Fuso</dt><dd>${escapeHtml(model.timezone)}</dd></dl></article>
+<article class="scope-card"><h3>Cobertura declarada</h3><p>${escapeHtml(model.scope.description)}</p><p><strong>${model.pages.length}</strong> ${model.pages.length === 1 ? 'página registrada' : 'páginas registradas'}.</p></article>
+</div>
+<div class="page-grid">${model.pages.map((page, index) => pageCard(page, index)).join('')}</div></section>`;
 }
 
-function methodology(model) {
-  const viewport = model.environment.viewport;
-  const viewportText = viewport.width === null ? 'não disponível' : `${escapeHtml(viewport.width)} × ${escapeHtml(viewport.height)} CSS px; escala ${escapeHtml(viewport.deviceScaleFactor)}`;
-  return `<section class="major-section" aria-labelledby="metodologia"><h2 id="metodologia">Metodologia</h2><p>${escapeHtml(model.methodology.name)}. As verificações automáticas só aprovam quando aplicabilidade e expectativas foram observadas integralmente; itens contextuais permanecem para revisão.</p><dl class="meta"><dt>Extensão</dt><dd>${escapeHtml(model.versions.extension)}</dd><dt>Regras</dt><dd>${escapeHtml(model.versions.rules)}</dd><dt>Navegador</dt><dd>${escapeHtml(model.versions.browser)}</dd><dt>Viewport</dt><dd>${viewportText}</dd><dt>Regras executadas</dt><dd>${escapeHtml(model.methodology.ruleCount)}</dd><dt>Itens normativos</dt><dd>${escapeHtml(model.methodology.itemCount)}</dd></dl></section>`;
+function pageCard(page, index) {
+  return `<article class="page-card" data-page-summary="${escapeHtml(page.pageId)}"><h3>Página ${index + 1}</h3><p class="page-status">${pageStatus(page.status)}</p><dl class="meta"><dt>Identificador</dt><dd><code>${escapeHtml(page.pageId)}</code></dd><dt>URL solicitada</dt><dd><code>${escapeHtml(page.requestedUrl)}</code></dd><dt>URL final</dt><dd><code>${escapeHtml(page.finalUrl)}</code></dd><dt>Observada até</dt><dd>${escapeHtml(page.timestamps.endedAt)}</dd></dl></article>`;
 }
 
-function items(model) {
-  return `<section class="major-section" aria-labelledby="itens"><h2 id="itens">Resultados por item</h2><div class="item-list">${model.itemResults.map((item, index) => `<article class="item-card" data-report-item="${escapeHtml(item.id)}" aria-labelledby="item-${index}"><div class="item-card__heading"><h3 id="item-${index}">${escapeHtml(item.id)} — ${escapeHtml(item.title)}</h3>${statusMarkup(item.outcome)}</div><dl class="meta"><dt>Classificação</dt><dd>${item.classification === 'requirement' ? 'Requisito' : 'Recomendação'}</dd><dt>Modo interno</dt><dd>${modeLabel(item.evaluation)}</dd><dt>WCAG 2.2</dt><dd>${item.wcag.length ? item.wcag.map(reference => `${escapeHtml(reference.id)} (${escapeHtml(reference.level)})`).join(', ') : 'Sem critério vinculado'}</dd><dt>Justificativa humana</dt><dd>${escapeHtml(item.humanReason || 'Não se aplica a este resultado.')}</dd></dl></article>`).join('')}</div></section>`;
+function executiveSummary(model, decisionByOccurrence) {
+  const displayOutcome = occurrence => effectiveOccurrenceOutcome(occurrence, decisionByOccurrence.get(occurrence.occurrenceId));
+  const failed = model.occurrences.filter(occurrence => displayOutcome(occurrence) === 'failed' && ['requirement', 'recommendation'].includes(occurrence.classification)).length;
+  const review = model.occurrences.filter(occurrence => displayOutcome(occurrence) === 'cantTell').length;
+  const supplemental = model.occurrences.filter(occurrence => ['editorial', 'best-practice'].includes(occurrence.classification)).length;
+  const constrainedPages = model.pages.filter(page => page.status !== 'complete').length;
+  return `<section id="resumo" aria-labelledby="resumo-titulo"><h2 id="resumo-titulo">Sumário executivo</h2>
+<p class="section-intro">O sumário conta ocorrências e estados observados; não constitui índice de conformidade ou certificação.</p>
+<div class="summary-grid">
+${summaryCard('Ocorrências', model.occurrences.length, 'Registros técnicos e editoriais', 'neutral')}
+${summaryCard('Não atendidas', failed, 'Desconformidades ABNT conclusivas', 'failed')}
+${summaryCard('Revisão humana', review, 'Resultados ainda inconclusivos', 'review')}
+${summaryCard('Informativas', supplemental, 'Boa prática ou alerta editorial', 'neutral')}
+${summaryCard('Páginas com ressalva', constrainedPages, `De ${model.pages.length} páginas registradas`, constrainedPages ? 'review' : 'neutral')}
+</div>
+${model.limitations.length || model.session.diagnostics.length ? `<p class="coverage-notice"><strong>Limitações materiais registradas:</strong> ${escapeHtml(model.limitations.length + model.session.diagnostics.length)}. Consulte a metodologia antes de concluir a análise.</p>` : ''}
+</section>`;
 }
 
-function occurrences(model, itemById, artifactById, imageByEvidenceId, decisionByOccurrence) {
-  return `<section class="major-section" aria-labelledby="ocorrencias"><h2 id="ocorrencias">Ocorrências e evidências</h2><p class="evidence-annotation-note"><strong>Marcação automática:</strong> a moldura é uma anotação visual aplicada no relatório; o PNG original permanece preservado e o respectivo hash continua verificável na seção de evidências.</p><div class="occurrence-list">${model.occurrences.map((occurrence, index) => {
-    const item = itemById.get(occurrence.itemId);
-    const selectors = occurrence.evidenceIds.map(id => artifactById.get(id)?.selector?.css).filter(Boolean);
-    const outcome = effectiveOccurrenceOutcome(occurrence, decisionByOccurrence.get(occurrence.occurrenceId));
-    return `<article class="occurrence-card" aria-labelledby="ocorrencia-${index}"><h3 id="ocorrencia-${index}">${escapeHtml(occurrence.occurrenceId)}</h3>${statusMarkup(outcome)}<dl class="meta"><dt>Item ABNT</dt><dd>${escapeHtml(occurrence.itemId)} — ${escapeHtml(item?.title || '')}</dd><dt>Regra</dt><dd>${escapeHtml(occurrence.ruleId || 'revisão no nível da página')}</dd><dt>Modo</dt><dd>${modeLabel(occurrence.mode)}</dd><dt>Razão</dt><dd>${escapeHtml(occurrence.justification)}</dd><dt>Seletor</dt><dd>${selectors.length ? selectors.map(selector => `<code>${escapeHtml(selector)}</code>`).join(' ') : 'Página inteira ou seletor indisponível'}</dd><dt>Evidências</dt><dd>${occurrence.evidenceIds.map(id => `<code>${escapeHtml(id)}</code>`).join(' ') || 'Sem arquivo; consulte a limitação registrada.'}</dd></dl>${occurrenceEvidence(occurrence, artifactById, imageByEvidenceId, outcome)}</article>`;
-  }).join('')}</div></section>`;
+function summaryCard(label, value, description, tone) {
+  return `<article class="summary-card summary-card--${tone}"><h3>${escapeHtml(label)}</h3><strong>${escapeHtml(value)}</strong><span>${escapeHtml(description)}</span></article>`;
 }
 
-function evidence(model, imageByEvidenceId) {
-  return `<section class="major-section" aria-labelledby="evidencias"><h2 id="evidencias">Evidências originais</h2><p>As imagens desta seção são os PNGs originais, sem a camada de anotação visual apresentada nas ocorrências.</p><div class="evidence-list">${model.evidence.map((artifact, index) => {
-    const image = imageByEvidenceId.get(artifact.evidenceId);
-    return `<article class="evidence-card" aria-labelledby="evidencia-${index}"><h3 id="evidencia-${index}">${escapeHtml(artifact.evidenceId)}</h3><dl class="meta"><dt>Tipo</dt><dd>${escapeHtml(artifact.kind)}</dd><dt>Hash</dt><dd><code>${escapeHtml(artifact.hash || 'não disponível')}</code></dd>${artifact.backendNodeId ? `<dt>Backend node</dt><dd>${escapeHtml(artifact.backendNodeId)}</dd>` : ''}${artifact.mediaUrl ? `<dt>URL da mídia</dt><dd>${safeMediaText(artifact.mediaUrl)}</dd>` : ''}</dl>${artifact.snippet ? `<details open><summary>Trecho HTML sanitizado</summary><pre><code>${escapeHtml(artifact.snippet)}</code></pre></details>` : ''}${accessibility(artifact.accessibility)}${image ? `<figure>${renderEvidenceImage(image, evidenceAlt(artifact))}<figcaption>${artifact.kind === 'full-page' ? 'PNG original da captura integral do estado observado.' : `PNG original da captura do elemento ${escapeHtml(artifact.nodeId || '')}.`}</figcaption></figure>` : '<p>Imagem não incluída: formato ausente ou não permitido.</p>'}</article>`;
-  }).join('')}</div></section>`;
+function filterSection(model, occurrences) {
+  const engines = unique(occurrences.map(occurrence => occurrence.source.engine));
+  const pages = model.pages.map(page => ({ value: page.pageId, label: page.pageId }));
+  const items = unique(occurrences.map(occurrence => occurrence.nbrItemRef).filter(Boolean)).map(id => ({ value: id, label: id }));
+  return `<section id="acoes" aria-labelledby="acoes-titulo"><h2 id="acoes-titulo">Ações e filtros</h2>
+<p class="section-intro">Combine os filtros para localizar ocorrências. A ordem de prioridade do relatório permanece estável.</p>
+<form id="report-filters" class="filters-shell" aria-describedby="filters-help filter-status">
+<div class="filters-grid">
+${selectFilter('filter-impact', 'Impacto', [['', 'Todos'], ...Object.entries(IMPACT).map(([value, label]) => [value, label])])}
+${selectFilter('filter-wcag', 'Nível WCAG', [['', 'Todos'], ['A', 'A'], ['AA', 'AA'], ['AAA', 'AAA']])}
+${selectFilter('filter-outcome', 'Resultado do motor', [['', 'Todos'], ...Object.entries(OUTCOME).map(([value, entry]) => [value, entry.label])])}
+${selectFilter('filter-classification', 'Classificação', [['', 'Todas'], ...Object.entries(CLASSIFICATION).map(([value, label]) => [value, label])])}
+${selectFilter('filter-page', 'Página', [['', 'Todas'], ...pages.map(page => [page.value, page.label])])}
+${selectFilter('filter-engine', 'Motor', [['', 'Todos'], ...engines.map(value => [value, value])])}
+${selectFilter('filter-abnt', 'Item ABNT', [['', 'Todos'], ['__none__', 'Sem item ABNT'], ...items.map(item => [item.value, item.label])])}
+</div>
+<div class="filter-actions"><button type="button" data-clear-filters disabled>Limpar filtros</button><button type="button" id="expand-details" disabled>Expandir detalhes</button><button type="button" id="collapse-details" disabled>Recolher detalhes</button></div>
+<p id="filters-help" class="filters-noscript">Os filtros precisam de JavaScript. Sem JavaScript, todas as ocorrências e todos os detalhes permanecem abertos e legíveis.</p>
+<p id="filter-status" class="filter-status" role="status" aria-live="polite" aria-atomic="true">${occurrences.length} de ${occurrences.length} ocorrências exibidas.</p>
+</form>
+<div id="filter-empty" class="empty-state" hidden><h3>Nenhuma ocorrência corresponde aos filtros</h3><p>Limpe os filtros para retornar ao conjunto completo.</p><button type="button" data-clear-filters disabled>Limpar filtros</button></div>
+</section>`;
 }
 
-function occurrenceEvidence(occurrence, artifactById, imageByEvidenceId, outcome) {
-  const artifacts = occurrence.evidenceIds.map(id => artifactById.get(id)).filter(Boolean);
+function selectFilter(id, label, options) {
+  return `<div class="filter-field"><label for="${id}">${escapeHtml(label)}</label><select id="${id}" name="${id}" disabled>${options.map(([value, text]) => `<option value="${escapeHtml(value)}">${escapeHtml(text)}</option>`).join('')}</select></div>`;
+}
+
+function occurrenceSection(occurrences, context) {
+  const content = occurrences.length
+    ? occurrences.map((occurrence, index) => occurrenceCard(occurrence, index, context)).join('')
+    : '<p>Nenhuma ocorrência foi registrada no escopo observado.</p>';
+  return `<section id="ocorrencias" class="major-section" aria-labelledby="ocorrencias-titulo"><h2 id="ocorrencias-titulo">Ocorrências priorizadas</h2>
+<p class="section-intro">Falhas técnicas aparecem antes de revisões humanas; impacto, página e ordem original resolvem os demais empates.</p><div class="occurrence-list">${content}</div></section>`;
+}
+
+function occurrenceCard(occurrence, index, context) {
+  const item = occurrence.nbrItemRef ? context.itemById.get(occurrence.nbrItemRef) : null;
+  const page = context.pageById.get(occurrence.pageId);
+  const rule = context.ruleById.get(occurrence.source.ruleId);
+  const review = context.reviewByOccurrence.get(occurrence.occurrenceId);
+  const decision = context.decisionByOccurrence.get(occurrence.occurrenceId);
+  const consolidated = effectiveOccurrenceOutcome(occurrence, decision);
+  const wcagLevels = item ? unique(item.wcag.map(reference => reference.level)).join(' ') : '';
+  const title = occurrenceTitle(occurrence, item, rule);
+  const abntToken = occurrence.nbrItemRef ?? '__none__';
+  const decisionLabel = decision ? reviewAnswerLabel(decision.answer) : review ? 'Pendente' : 'Não se aplica';
+  const selector = occurrence.target?.selector;
+  const frame = occurrence.target?.framePath?.length ? occurrence.target.framePath.join(' › ') : 'Documento principal';
+  const evidence = occurrence.evidenceRefs.map(id => context.artifactById.get(id)).filter(Boolean);
+  const accessibilityArtifact = evidence.find(artifact => artifact.accessibility);
+  const preview = occurrence.accessiblePreview || accessibilityArtifact?.accessibility?.announcementPreview;
+  const nameSource = accessibilityArtifact?.accessibility?.nameSource;
+  const anchor = `ocorrencia-${index + 1}`;
+
+  return `<article id="${anchor}" class="occurrence-card" data-occurrence-card data-occurrence-id="${escapeHtml(occurrence.occurrenceId)}" data-impact="${escapeHtml(occurrence.impact)}" data-wcag-levels="${escapeHtml(wcagLevels)}" data-outcome="${escapeHtml(occurrence.outcome)}" data-display-outcome="${escapeHtml(consolidated)}" data-classification="${escapeHtml(occurrence.classification)}" data-page="${escapeHtml(occurrence.pageId)}" data-engine="${escapeHtml(occurrence.source.engine)}" data-abnt-item="${escapeHtml(abntToken)}" aria-labelledby="${anchor}-titulo">
+<div class="occurrence-heading"><h3 id="${anchor}-titulo">${escapeHtml(title)}</h3>${statusMarkup(consolidated)}</div>
+<div class="chip-row">${impactMarkup(occurrence.impact)}${classificationMarkup(occurrence.classification)}</div>
+<p><strong>Página:</strong> ${escapeHtml(occurrence.pageId)} — ${pageStatus(page.status)}. <strong>Observada até:</strong> ${escapeHtml(page.timestamps.endedAt)}.</p>
+<div class="decision-strip"><p>Resultado do motor: ${escapeHtml(outcomeLabel(occurrence.outcome))}</p><p>Decisão humana: ${escapeHtml(decisionLabel)}</p><p>Estado consolidado: ${escapeHtml(outcomeLabel(consolidated))}</p></div>
+<div class="observed"><h4>O que foi observado</h4><p>${escapeHtml(occurrence.justification || rule?.summary || 'O motor registrou esta ocorrência sem descrição adicional.')}</p></div>
+<div class="confirm"><h4>Como confirmar</h4><p>${escapeHtml(review?.question || confirmationInstruction(occurrence, item))}</p></div>
+${normativeMapping(occurrence, item)}
+<details open data-collapsible><summary>Detalhes técnicos e evidências</summary>
+<section aria-labelledby="${anchor}-anuncio"><h4 id="${anchor}-anuncio">Prévia de anúncio</h4><p>${escapeHtml(preview || 'Prévia não disponível para este alvo.')}</p><p><strong>Origem do nome:</strong> ${escapeHtml(nameSource || 'não registrada')}.</p><p>Prévia calculada a partir dos dados observados; não é transcrição literal de VoiceOver, NVDA, JAWS ou outro leitor de tela.</p></section>
+${occurrenceEvidence(occurrence, context.artifactById, context.imageByEvidenceId, consolidated, index)}
+<section aria-labelledby="${anchor}-alvo"><h4 id="${anchor}-alvo">Alvo e trecho de código</h4><dl class="meta"><dt>Seletor</dt><dd>${selector ? `<code>${escapeHtml(selector)}</code>` : 'Alvo elementar não localizado'}</dd><dt>Frame</dt><dd>${escapeHtml(frame)}</dd><dt>Evidências</dt><dd>${occurrence.evidenceRefs.length ? occurrence.evidenceRefs.map(id => `<a href="#evidencia-${escapeHtml(evidenceIndex(context.artifactById, id) + 1)}"><code>${escapeHtml(id)}</code></a>`).join(' ') : 'Sem evidência anexada'}</dd></dl>${evidence.map(artifact => artifact.snippet ? `<pre><code>${escapeHtml(artifact.snippet)}</code></pre>` : '').join('')}</section>
+${legalAnalysis(occurrence, item, anchor, consolidated, decision)}
+<section aria-labelledby="${anchor}-proveniencia"><h4 id="${anchor}-proveniencia">Proveniência técnica</h4><dl class="meta"><dt>Motor</dt><dd>${escapeHtml(occurrence.source.engine)}</dd><dt>Regra</dt><dd><code>${escapeHtml(occurrence.source.ruleId)}</code></dd><dt>Versão</dt><dd>${escapeHtml(occurrence.source.version)}</dd><dt>Modo</dt><dd>${modeLabel(occurrence.mode)}</dd><dt>Confiança</dt><dd>${confidenceLabel(occurrence.confidence)}</dd><dt>Frame</dt><dd>${escapeHtml(frame)}</dd><dt>Hashes</dt><dd>${evidence.map(artifact => `<code>${escapeHtml(artifact.hash || 'não disponível')}</code>`).join(' ') || 'não disponíveis'}</dd></dl></section>
+<p><strong>ID da ocorrência:</strong> <code>${escapeHtml(occurrence.occurrenceId)}</code></p>
+</details></article>`;
+}
+
+function occurrenceTitle(occurrence, item, rule) {
+  if (item) return item.title;
+  if (occurrence.classification === 'editorial') return rule?.summary || 'Alerta editorial identificado';
+  if (occurrence.classification === 'best-practice') return rule?.summary || 'Boa prática suplementar identificada';
+  return rule?.summary || 'Ocorrência suplementar';
+}
+
+function normativeMapping(occurrence, item) {
+  if (!item) return '<div class="normative-map"><h4>Mapeamento normativo</h4><p>Sem mapeamento normativo atribuído.</p></div>';
+  const wcag = item.wcag.length ? item.wcag.map(reference => `${reference.id} (nível ${reference.level})`).join(', ') : 'Sem critério WCAG vinculado';
+  const foreign = occurrence.foreignBenchmarkRefs.length
+    ? `${occurrence.foreignBenchmarkRefs.map(reference => `${reference.criterionId} (${reference.level})`).join(', ')}. ${SECTION508_REVISED_CROSSWALK.qualification}`
+    : 'Sem correspondência técnica atribuída para este item.';
+  return `<div class="normative-map"><h4>Mapeamento normativo</h4><p><strong>ABNT NBR 17225:2025:</strong> item ${escapeHtml(item.id)} — ${escapeHtml(item.title)} (${escapeHtml(CLASSIFICATION[item.classification])}).</p><p><strong>WCAG 2.2:</strong> ${escapeHtml(wcag)}.</p><p><strong>${escapeHtml(SECTION508_REVISED_CROSSWALK.label)}:</strong> ${escapeHtml(foreign)}</p></div>`;
+}
+
+function legalAnalysis(occurrence, item, anchor, displayOutcome, decision) {
+  if (displayOutcome !== 'failed' || !item || !['requirement', 'recommendation'].includes(item.classification)) return '';
+  const automaticBasis = consumerBasisForOccurrence(occurrence);
+  const reviewedFailure = occurrence.outcome === 'cantTell' && decision?.answer === 'não conforme';
+  if ((!automaticBasis && !reviewedFailure) || (automaticBasis && occurrence.legalAnalysis?.basisRef !== automaticBasis.id)) return '';
+  const basis = automaticBasis || CONSUMER_ACCESSIBILITY_FIXED_BASIS;
+  return `<section class="legal-analysis" aria-labelledby="${anchor}-juridico"><h4 id="${anchor}-juridico">${escapeHtml(basis.label)}</h4><p><strong>Referência técnica variável:</strong> ABNT NBR 17225:2025, item ${escapeHtml(item.id)} — ${escapeHtml(item.title)} (${escapeHtml(CLASSIFICATION[item.classification])}).</p><p>${escapeHtml(basis.display)}</p><p>${escapeHtml(basis.qualification)}</p><p><strong>Ressalva ao texto vigente:</strong> consulte a referência ${escapeHtml(basis.currentTextCaveatRef)} antes da qualificação jurídica do caso concreto.</p></section>`;
+}
+
+function occurrenceEvidence(occurrence, artifactById, imageByEvidenceId, outcome, occurrenceIndex) {
+  const artifacts = occurrence.evidenceRefs.map(id => artifactById.get(id)).filter(Boolean);
   const artifact = artifacts.find(value => value.kind === 'element' && imageByEvidenceId.has(value.evidenceId))
     || artifacts.find(value => value.kind === 'full-page' && imageByEvidenceId.has(value.evidenceId));
-  if (!artifact) return '<p>Captura marcada indisponível; consulte a limitação e os demais registros da ocorrência.</p>';
+  if (!artifact) return '<section><h4>Evidência visual</h4><p>Captura marcada indisponível; consulte as limitações e os demais registros da ocorrência.</p></section>';
   const image = imageByEvidenceId.get(artifact.evidenceId);
   const tone = outcome === 'failed' ? 'failed' : outcome === 'passed' ? 'passed' : 'review';
-  const frame = highlightStyle(artifact);
   const legend = tone === 'failed'
-    ? 'Moldura vermelha: não conformidade detectada ou confirmada.'
+    ? 'Símbolo ✕ e moldura sólida: não atendimento técnico observado.'
     : tone === 'passed'
-      ? 'Moldura verde: conformidade confirmada na revisão humana.'
-      : 'Moldura âmbar: elemento ou página que depende de revisão humana.';
-  const subject = artifact.kind === 'element' ? `do elemento ${artifact.nodeId || 'auditado'}` : 'da página auditada';
-  return `<figure class="occurrence-evidence"><div class="evidence-highlight-frame">${renderEvidenceImage(image, `Captura ${subject}; ${legend}`)}<span class="evidence-highlight evidence-highlight--${tone}" style="${frame}" aria-hidden="true"></span></div><figcaption><strong>${escapeHtml(legend)}</strong> ${artifact.kind === 'full-page' ? 'Não foi identificado um alvo elementar; a moldura delimita a evidência no nível da página.' : 'A caixa acompanha automaticamente as coordenadas do alvo dentro do recorte.'}</figcaption></figure>`;
+      ? 'Símbolo ✓ e moldura dupla: atendimento confirmado na revisão.'
+      : 'Símbolo ? e moldura tracejada: evidência pendente de revisão humana.';
+  const annex = `#evidencia-${evidenceIndex(artifactById, artifact.evidenceId) + 1}`;
+  if (artifact.kind === 'full-page') {
+    return `<section aria-labelledby="evidencia-ocorrencia-${occurrenceIndex + 1}"><h4 id="evidencia-ocorrencia-${occurrenceIndex + 1}">Evidência visual</h4><p class="evidence-scope-banner"><strong>Alvo elementar não localizado; evidência registrada no nível da página.</strong> A captura fornece contexto e não indica que cada pixel represente a desconformidade.</p><figure class="occurrence-evidence page-level-evidence page-level-evidence--${tone}">${renderEvidenceImage(image, `Captura integral usada como contexto da ocorrência. ${legend}`)}<figcaption>${escapeHtml(legend)} <a href="${annex}">Consultar o arquivo original no anexo</a>.</figcaption></figure></section>`;
+  }
+  return `<section aria-labelledby="evidencia-ocorrencia-${occurrenceIndex + 1}"><h4 id="evidencia-ocorrencia-${occurrenceIndex + 1}">Evidência visual</h4><figure class="occurrence-evidence">${renderMarkedEvidenceImage(image, artifact, `Captura do elemento ${artifact.nodeId || 'auditado'}. ${legend}`, tone)}<figcaption>${escapeHtml(legend)} A marcação é derivada para localização; <a href="${annex}">o PNG original e seu hash estão no anexo</a>.</figcaption></figure></section>`;
+}
+
+function announcementMaps(model, imageByEvidenceId) {
+  const maps = model.evidence.filter(artifact => artifact.kind === 'announcement-map');
+  return `<section id="mapas" class="major-section" aria-labelledby="mapas-titulo"><h2 id="mapas-titulo">Mapa visual da prévia de anúncios</h2>
+<p class="section-intro">Mapa derivado para relacionar elementos e prévias calculadas. Ele não representa uma transcrição literal de tecnologia assistiva.</p><div class="map-list">${model.pages.map((page, index) => {
+    const artifact = maps.find(value => value.pageId === page.pageId);
+    const image = artifact ? imageByEvidenceId.get(artifact.evidenceId) : null;
+    if (!artifact || !image) return `<article class="map-card" data-announcement-map-page="${escapeHtml(page.pageId)}"><h3>Página ${index + 1} — ${escapeHtml(page.pageId)}</h3><div class="map-unavailable"><p><strong>Mapa indisponível nesta auditoria.</strong></p><p>Nenhum artefato derivado validado foi registrado; a captura original permanece no anexo quando disponível.</p></div></article>`;
+    return `<article class="map-card" data-announcement-map-page="${escapeHtml(page.pageId)}"><h3>Página ${index + 1} — ${escapeHtml(page.pageId)}</h3><figure>${renderEvidenceImage(image, `Mapa visual da prévia de anúncios da página ${index + 1}`)}<figcaption>Artefato derivado <code>${escapeHtml(artifact.evidenceId)}</code>; hash <code>${escapeHtml(artifact.hash || 'não disponível')}</code>. A numeração e os limites devem ser lidos com a legenda técnica do artefato.</figcaption></figure></article>`;
+  }).join('')}</div></section>`;
+}
+
+function humanReviewSection(model, itemById, decisionByOccurrence, orderedOccurrences) {
+  const pending = model.manualReview.filter(entry => entry.status === 'unanswered').length;
+  const completed = model.manualReview.filter(entry => entry.status === 'answered').length;
+  const reviewSummary = `${pending} ${pending === 1 ? 'pendente' : 'pendentes'}; ${completed} ${completed === 1 ? 'concluída' : 'concluídas'}.`;
+  const cards = model.manualReview.map((entry, index) => {
+    const item = itemById.get(entry.itemId);
+    const occurrence = model.occurrences.find(value => value.occurrenceId === entry.occurrenceId);
+    const decision = decisionByOccurrence.get(entry.occurrenceId);
+    return `<article class="review-card" data-review-state="${escapeHtml(entry.status)}" aria-labelledby="revisao-${index + 1}"><h3 id="revisao-${index + 1}">${escapeHtml(item?.title || entry.itemId)}</h3><p><strong>Item:</strong> ${escapeHtml(entry.itemId)} (${escapeHtml(item ? CLASSIFICATION[item.classification] : 'sem classificação')}).</p><p><strong>Resultado original do motor:</strong> ${escapeHtml(outcomeLabel(occurrence?.outcome || 'cantTell'))}.</p><p><strong>Pergunta:</strong> ${escapeHtml(entry.question)}</p><p><strong>Justificativa:</strong> ${escapeHtml(entry.reason)}</p><p><strong>Decisão humana:</strong> ${escapeHtml(decision ? reviewAnswerLabel(decision.answer) : 'Pendente')}.</p>${decision ? `<p><strong>Avaliador e instante:</strong> ${escapeHtml(decision.evaluator)}, ${escapeHtml(decision.decidedAt)}.</p>` : ''}<p><a href="#${escapeHtml(occurrenceAnchor(orderedOccurrences, entry.occurrenceId))}">Ir para a ocorrência relacionada</a></p></article>`;
+  }).join('');
+  return `<section id="revisao" class="major-section" aria-labelledby="revisao-titulo"><h2 id="revisao-titulo">Revisão humana</h2><p>${escapeHtml(reviewSummary)} Respostas pendentes nunca são tratadas como conformidade. Resultado do motor e decisão humana permanecem separados.</p><div class="review-list">${cards || '<p>Nenhuma revisão humana foi registrada para este escopo.</p>'}</div></section>`;
+}
+
+function widgetInventory(model) {
+  const inventory = model.accessibilityWidgets;
+  const pageIds = model.pages.map(page => page.pageId).join(', ');
+  const coverage = inventory.coverage === 'complete' ? 'Cobertura local completa' : inventory.coverage === 'partial' ? 'Cobertura local parcial' : 'Inventário não registrado';
+  const names = { vlibras: 'VLibras', 'hand-talk': 'Hand Talk' };
+  const signalLabels = { 'dom-signature': 'assinatura no DOM', 'script-signature': 'assinatura de script', 'global-signature': 'assinatura global' };
+  return `<section id="inventario" class="major-section" aria-labelledby="inventario-titulo"><h2 id="inventario-titulo">Inventário de recursos de acessibilidade</h2><p class="section-intro">Inventário informativo; presença ou ausência de widget não aprova nem reprova item normativo e não altera contagens.</p><p class="coverage-notice"><strong>Cobertura:</strong> ${escapeHtml(coverage)}.</p><div class="widget-grid">${inventory.widgets.map(widget => {
+    const state = widget.status === 'present' ? 'Assinatura detectada' : widget.status === 'absent' ? 'Assinatura não detectada com cobertura completa' : 'Não foi possível determinar';
+    const signals = widget.signals.length ? widget.signals.map(signal => signalLabels[signal]).join(', ') : 'nenhum sinal seguro registrado';
+    return `<article class="widget-card" data-widget-state="${escapeHtml(widget.status)}"><h3>${escapeHtml(names[widget.id] || widget.id)}</h3><p class="widget-state">${escapeHtml(state)}</p><dl class="meta"><dt>Escopo de detecção</dt><dd>Agregado da sessão; não localizado por página.</dd><dt>Páginas incluídas</dt><dd>${escapeHtml(pageIds)}</dd><dt>Cobertura</dt><dd>${escapeHtml(coverage)}</dd><dt>Sinais seguros</dt><dd>${escapeHtml(signals)}</dd></dl></article>`;
+  }).join('')}</div></section>`;
+}
+
+function itemMatrix(model) {
+  return `<section id="matriz" class="major-section" aria-labelledby="matriz-titulo"><h2 id="matriz-titulo">Matriz completa dos 146 itens</h2><p>A matriz registra todos os itens sem transformar ausência de falha em conformidade integral.</p><div class="matrix-scroll" role="region" aria-label="Matriz completa dos 146 itens ABNT; use rolagem horizontal quando necessário" tabindex="0"><table><thead><tr><th scope="col">Item</th><th scope="col">Título</th><th scope="col">Classificação</th><th scope="col">Resultado</th><th scope="col">Modo</th><th scope="col">WCAG 2.2</th></tr></thead><tbody>${model.itemResults.map(item => `<tr data-report-item="${escapeHtml(item.id)}"><th scope="row">${escapeHtml(item.id)}</th><td>${escapeHtml(item.title)}</td><td>${escapeHtml(CLASSIFICATION[item.classification])}</td><td>${escapeHtml(outcomeLabel(item.outcome))}</td><td>${modeLabel(item.evaluation)}</td><td>${item.wcag.length ? item.wcag.map(reference => `${escapeHtml(reference.id)} (${escapeHtml(reference.level)})`).join(', ') : 'Sem critério vinculado'}</td></tr>`).join('')}</tbody></table></div></section>`;
+}
+
+function evidenceAnnex(model, imageByEvidenceId) {
+  return `<section id="anexos" class="major-section" aria-labelledby="anexos-titulo"><h2 id="anexos-titulo">Anexos de evidências</h2><p>Capturas originais e artefatos derivados são identificados separadamente. Cada PNG validado é incorporado uma única vez e reutilizado por referência.</p>${model.pages.map((page, pageIndex) => {
+    const artifacts = model.evidence.filter(artifact => artifact.pageId === page.pageId);
+    const original = artifacts.filter(artifact => artifact.kind !== 'announcement-map');
+    const derived = artifacts.filter(artifact => artifact.kind === 'announcement-map');
+    return `<section class="evidence-group" aria-labelledby="anexos-pagina-${pageIndex + 1}"><h3 id="anexos-pagina-${pageIndex + 1}">Página ${pageIndex + 1} — ${escapeHtml(page.pageId)}</h3><h4>Registros originais</h4><div class="evidence-list">${original.map(artifact => evidenceCard(artifact, model.evidence, imageByEvidenceId)).join('') || '<p>Nenhuma evidência original registrada.</p>'}</div><h4>Registros derivados</h4><div class="evidence-list">${derived.map(artifact => evidenceCard(artifact, model.evidence, imageByEvidenceId)).join('') || '<p>Nenhuma evidência derivada registrada.</p>'}</div></section>`;
+  }).join('')}</section>`;
+}
+
+function evidenceCard(artifact, allEvidence, imageByEvidenceId) {
+  const index = allEvidence.findIndex(value => value.evidenceId === artifact.evidenceId);
+  const image = imageByEvidenceId.get(artifact.evidenceId);
+  const relation = artifact.fullPageEvidenceId ? `Deriva ou localiza conteúdo da captura integral ${artifact.fullPageEvidenceId}.` : artifact.kind === 'full-page' ? 'Captura integral original do estado observado.' : 'Evidência elementar original, quando disponível.';
+  return `<article id="evidencia-${index + 1}" class="evidence-card" aria-labelledby="evidencia-${index + 1}-titulo"><h4 id="evidencia-${index + 1}-titulo">${escapeHtml(artifact.evidenceId)}</h4><dl class="meta"><dt>Tipo</dt><dd>${escapeHtml(artifact.kind)}</dd><dt>Hash</dt><dd><code>${escapeHtml(artifact.hash || 'não disponível')}</code></dd>${artifact.selector?.css ? `<dt>Seletor</dt><dd><code>${escapeHtml(artifact.selector.css)}</code></dd>` : ''}${artifact.backendNodeId ? `<dt>Backend node</dt><dd>${escapeHtml(artifact.backendNodeId)}</dd>` : ''}${artifact.mediaUrl ? `<dt>URL da mídia</dt><dd>${safeMediaText(artifact.mediaUrl)}</dd>` : ''}</dl><p class="evidence-relation">${escapeHtml(relation)}</p>${artifact.snippet ? `<details open data-collapsible><summary>Trecho HTML sanitizado</summary><pre><code>${escapeHtml(artifact.snippet)}</code></pre></details>` : ''}${accessibility(artifact.accessibility)}${image ? `<figure>${renderEvidenceImage(image, evidenceAlt(artifact))}<figcaption>${artifact.kind === 'full-page' ? 'PNG original da captura integral do estado observado.' : artifact.kind === 'announcement-map' ? 'PNG derivado do mapa visual; consulte relação, algoritmo e limites registrados.' : `PNG original da captura do elemento ${escapeHtml(artifact.nodeId || '')}.`}</figcaption></figure>` : '<p><strong>Imagem não incluída:</strong> PNG ausente, inválido ou fora dos limites; o registro textual e a limitação permanecem visíveis.</p>'}</article>`;
+}
+
+function methodologySection(model) {
+  const viewport = model.environment.viewport;
+  const viewportText = viewport.width === null ? 'não disponível' : `${viewport.width} × ${viewport.height} CSS px; escala ${viewport.deviceScaleFactor}`;
+  const sources = unique(model.occurrences.map(occurrence => `${occurrence.source.engine} — ${occurrence.source.version}`));
+  const diagnostics = model.session.diagnostics.map(entry => `${entry.code}: ${entry.message}`);
+  const notes = model.normative?.editorialNotes || [];
+  return `<section id="metodologia" class="major-section" aria-labelledby="metodologia-titulo"><h2 id="metodologia-titulo">Metodologia, proveniência e integridade</h2><div class="method-grid">
+<article class="method-card"><h3>Método e ambiente</h3><p>${escapeHtml(model.methodology.name)}. Aprovação automática exige aplicabilidade e expectativas integralmente observadas; itens contextuais permanecem inconclusivos.</p><dl class="meta"><dt>Extensão</dt><dd>${escapeHtml(model.versions.extension)}</dd><dt>Regras</dt><dd>${escapeHtml(model.versions.rules)}</dd><dt>Navegador</dt><dd>${escapeHtml(model.versions.browser)}</dd><dt>Viewport</dt><dd>${escapeHtml(viewportText)}</dd><dt>Regras próprias</dt><dd>${escapeHtml(model.methodology.coreRuleCount)}</dd><dt>Regras suplementares</dt><dd>${escapeHtml(model.methodology.supplementalRuleCount)}</dd><dt>Itens normativos</dt><dd>${escapeHtml(model.methodology.itemCount)}</dd></dl></article>
+<article class="method-card"><h3>Proveniência dos motores</h3><ul class="compact-list">${sources.map(source => `<li>${escapeHtml(source)}</li>`).join('') || '<li>Nenhuma ocorrência de motor registrada.</li>'}</ul><p>axe-core, quando habilitado por gate técnico, é suplementar e não aprova item ABNT por si só.</p></article>
+<article class="method-card"><h3>Limitações e diagnósticos</h3><ul class="compact-list">${[...model.limitations, ...diagnostics].map(value => `<li>${escapeHtml(value)}</li>`).join('') || '<li>Nenhuma limitação adicional registrada.</li>'}</ul><p>A ausência de falha automática não comprova conformidade integral.</p></article>
+<article class="method-card"><h3>Fundamentação e fontes</h3><ul class="compact-list"><li>${escapeHtml(model.normative?.edition || 'ABNT NBR 17225:2025')} — itens, títulos, classificação e referências.</li><li>${escapeHtml(model.normative?.wcag || 'WCAG 2.2')} — critérios e níveis oficiais.</li><li>WCAG-EM — referência metodológica para escopo e limites de alegação.</li><li>${escapeHtml(SECTION508_REVISED_CROSSWALK.label)} — ${escapeHtml(SECTION508_REVISED_CROSSWALK.qualification)}</li><li>${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.label)} — ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.display)} ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification)}</li><li>Ressalva ao texto vigente: ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.currentTextCaveatRef)}.</li></ul></article>
+<article class="method-card"><h3>Notas de integridade normativa</h3><p>Informação impressa e normalização adotada permanecem separadas; o relatório não atribui à ABNT errata não localizada.</p><ul class="compact-list">${notes.map(note => `<li><strong>${escapeHtml(note.itemId)}:</strong> impresso “${escapeHtml(note.printed)}”; normalização “${escapeHtml(note.normalized)}”. ${escapeHtml(note.rationale)}</li>`).join('') || '<li>Nenhuma nota editorial registrada.</li>'}</ul></article>
+<article class="method-card"><h3>Manifesto de integridade</h3>${integrityList(model)}<p>SHA-256 permite verificar igualdade dos artefatos, mas não substitui assinatura digital, carimbo certificado ou ata notarial.</p></article>
+</div></section>`;
+}
+
+function integrityList(model) {
+  const entries = {
+    Algoritmo: model.integrity?.algorithm || 'SHA-256',
+    'Modelo canônico': model.integrity?.canonicalModelHash || 'pendente da etapa de exportação',
+    'Manifesto de evidências': model.integrity?.evidenceManifestHash || model.reproducibility?.evidenceHash || 'não disponível',
+    Snapshot: model.reproducibility?.snapshotHash || 'não disponível',
+    'Resultados de regras': model.reproducibility?.ruleResultsHash || 'não disponível',
+  };
+  return `<dl class="meta">${Object.entries(entries).map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd><code>${escapeHtml(value)}</code></dd>`).join('')}</dl>`;
+}
+
+function prioritizeOccurrences(occurrences, pages, decisionByOccurrence) {
+  const pageIndex = new Map(pages.map((page, index) => [page.pageId, index]));
+  return occurrences.map((occurrence, index) => ({ occurrence, index })).sort((left, right) =>
+    (OUTCOME_PRIORITY[effectiveOccurrenceOutcome(left.occurrence, decisionByOccurrence.get(left.occurrence.occurrenceId))] ?? 99)
+      - (OUTCOME_PRIORITY[effectiveOccurrenceOutcome(right.occurrence, decisionByOccurrence.get(right.occurrence.occurrenceId))] ?? 99)
+    || (IMPACT_PRIORITY[left.occurrence.impact] ?? 99) - (IMPACT_PRIORITY[right.occurrence.impact] ?? 99)
+    || (pageIndex.get(left.occurrence.pageId) ?? 99) - (pageIndex.get(right.occurrence.pageId) ?? 99)
+    || left.index - right.index).map(entry => entry.occurrence);
 }
 
 function effectiveOccurrenceOutcome(occurrence, decision) {
@@ -122,78 +354,65 @@ function effectiveOccurrenceOutcome(occurrence, decision) {
   return occurrence.outcome;
 }
 
-function highlightStyle(artifact) {
-  const width = finitePositive(artifact.metadata?.width);
-  const height = finitePositive(artifact.metadata?.height);
-  const box = artifact.metadata?.highlightBox;
-  if (!width || !height || !box || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(box[key]))) {
-    return '--highlight-left:0%;--highlight-top:0%;--highlight-width:100%;--highlight-height:100%';
-  }
-  const left = clamp(box.x, 0, width);
-  const top = clamp(box.y, 0, height);
-  const right = clamp(box.x + Math.max(0, box.width), left, width);
-  const bottom = clamp(box.y + Math.max(0, box.height), top, height);
-  return `--highlight-left:${percent(left, width)}%;--highlight-top:${percent(top, height)}%;--highlight-width:${percent(right - left, width)}%;--highlight-height:${percent(bottom - top, height)}%`;
-}
-
-function finitePositive(value) {
-  return Number.isFinite(value) && value > 0 ? value : null;
-}
-
-function clamp(value, minimum, maximum) {
-  return Math.min(maximum, Math.max(minimum, value));
-}
-
-function percent(value, total) {
-  return String(Number(((value / total) * 100).toFixed(6)));
-}
-
-function accessibility(value) {
-  if (!value || typeof value !== 'object') return '';
-  const displayedValue = value.valueStatus === 'omitted-privacy' ? 'não coletado por privacidade' : value.value || 'não disponível';
-  return `<section aria-label="Propriedades de acessibilidade"><h4>Nome, função e prévia</h4><dl class="meta"><dt>Nome acessível</dt><dd>${escapeHtml(value.name || 'não disponível')}</dd><dt>Origem do nome</dt><dd>${escapeHtml(value.nameSource || 'não disponível')}</dd><dt>Descrição acessível</dt><dd>${escapeHtml(value.description || 'não disponível')}</dd><dt>Origem da descrição</dt><dd>${escapeHtml(value.descriptionSource || 'não disponível')}</dd><dt>Função</dt><dd>${escapeHtml(value.role || 'não disponível')}</dd><dt>Valor</dt><dd>${escapeHtml(displayedValue)}</dd><dt>Estados</dt><dd>${escapeHtml((value.states || []).join(', ') || 'não disponíveis')}</dd><dt>Texto visível</dt><dd>${escapeHtml(value.visibleText || 'não disponível')}</dd><dt>Prévia de anúncio</dt><dd>${escapeHtml(value.announcementPreview || 'não disponível')}</dd></dl><p><strong>Variação esperada:</strong> esta prévia não é transcrição literal de tecnologia assistiva e pode variar conforme o navegador, a API da plataforma, o leitor, o modo e as preferências.</p></section>`;
-}
-
-function review(model, itemById) {
-  return `<section class="major-section" aria-labelledby="revisao"><h2 id="revisao">Revisão humana</h2><p>Respostas pendentes não são tratadas como conformidade.</p><div class="review-list">${model.manualReview.map((entry, index) => `<article class="review-card" aria-labelledby="revisao-${index}"><h3 id="revisao-${index}">${escapeHtml(entry.itemId)} — ${escapeHtml(itemById.get(entry.itemId)?.title || '')}</h3><p><strong>Pergunta:</strong> ${escapeHtml(entry.question)}</p><p><strong>Razão:</strong> ${escapeHtml(entry.reason)}</p><p><strong>Status:</strong> ${escapeHtml(entry.status === 'answered' ? 'Respondida' : 'Não respondida')}</p></article>`).join('')}</div></section>`;
-}
-
-function limitations(model) {
-  const diagnostics = model.session.diagnostics.map(entry => `${entry.code}: ${entry.message}`);
-  return `<section class="major-section" aria-labelledby="limitacoes"><h2 id="limitacoes">Limitações</h2><ul>${[...model.limitations, ...diagnostics].map(value => `<li>${escapeHtml(value)}</li>`).join('')}</ul><p>A ausência de falha automática não comprova conformidade integral. Processos completos, páginas não visitadas, tecnologias suportadas e não interferência permanecem fora da alegação desta auditoria de página.</p></section>`;
-}
-
-function editorial(model) {
-  const notes = model.normative?.editorialNotes || [];
-  return `<section class="major-section" aria-labelledby="editorial"><h2 id="editorial">Notas de integridade normativa</h2><p>A informação impressa é preservada separadamente da normalização adotada; este relatório não atribui à ABNT uma errata não localizada.</p><table><thead><tr><th>Item</th><th>Impresso</th><th>Normalização adotada</th><th>Fundamento</th></tr></thead><tbody>${notes.map(note => `<tr><td>${escapeHtml(note.itemId)}</td><td>${escapeHtml(note.printed)}</td><td>${escapeHtml(note.normalized)}</td><td>${escapeHtml(note.rationale)}</td></tr>`).join('')}</tbody></table></section>`;
-}
-
-function foundation(model) {
-  return `<section class="major-section" aria-labelledby="fundamentacao"><h2 id="fundamentacao">Fundamentação normativa</h2><ul><li>${escapeHtml(model.normative?.edition || 'ABNT NBR 17225:2025')} — códigos, títulos, classificação e referências usadas sem reprodução extensa do texto protegido.</li><li>${escapeHtml(model.normative?.wcag || 'WCAG 2.2')} — critérios e níveis oficiais.</li><li>WCAG-EM — referência metodológica para escopo, amostragem e limites de alegação.</li><li>Lei Brasileira de Inclusão, Lei nº 13.146/2015, art. 63 — contexto legal; este relatório não substitui análise jurídica.</li></ul></section>`;
-}
-
-function integrity(model) {
-  const entries = {
-    'Algoritmo': model.integrity?.algorithm || 'SHA-256',
-    'Modelo canônico': model.integrity?.canonicalModelHash || 'pendente da etapa de exportação',
-    'Manifesto de evidências': model.integrity?.evidenceManifestHash || model.reproducibility?.evidenceHash || 'não disponível',
-    'Snapshot': model.reproducibility?.snapshotHash || 'não disponível',
-    'Resultados de regras': model.reproducibility?.ruleResultsHash || 'não disponível',
-  };
-  return `<section class="major-section" aria-labelledby="integridade"><h2 id="integridade">Manifesto de integridade</h2><dl class="meta">${Object.entries(entries).map(([key, value]) => `<dt>${key}</dt><dd><code>${escapeHtml(value)}</code></dd>`).join('')}</dl><p>SHA-256 permite verificar igualdade dos artefatos, mas não substitui assinatura digital, carimbo certificado ou ata notarial.</p></section>`;
+function confirmationInstruction(occurrence, item) {
+  if (item?.humanReason) return item.humanReason;
+  if (!item) return 'Repita a verificação no estado e viewport registrados e confirme a condição descrita pelo motor suplementar.';
+  if (occurrence.outcome === 'failed') return `Repita a verificação no estado e viewport registrados e compare o alvo com o item ${item?.id || 'ABNT indicado'}.`;
+  return 'Confirme o comportamento no fluxo completo e registre a decisão sem alterar o resultado original do motor.';
 }
 
 function statusMarkup(outcome) {
-  const status = STATUS[outcome] || STATUS.untested;
-  return `<span class="status status--${outcome}"><span aria-hidden="true">${status.icon}</span><span>${status.label}</span></span>`;
+  const status = OUTCOME[outcome] || OUTCOME.untested;
+  return `<span class="status status--${escapeHtml(outcome)}"><span aria-hidden="true">${status.icon}</span><span>${status.label}</span></span>`;
+}
+
+function impactMarkup(impact) {
+  return `<span class="chip"><span aria-hidden="true">◆</span><span>Impacto ${escapeHtml(IMPACT[impact] || impact)}</span></span>`;
+}
+
+function classificationMarkup(classification) {
+  return `<span class="chip chip--${escapeHtml(classification)}"><span>${escapeHtml(CLASSIFICATION[classification] || classification)}</span></span>`;
+}
+
+function outcomeLabel(outcome) {
+  return (OUTCOME[outcome] || OUTCOME.untested).label;
+}
+
+function pageStatus(status) {
+  return PAGE_STATUS[status] || escapeHtml(status);
+}
+
+function reviewAnswerLabel(answer) {
+  return ({ conforme: 'Conforme', 'não conforme': 'Não conforme', 'não foi possível determinar': 'Não foi possível determinar' })[answer] || 'Pendente';
 }
 
 function modeLabel(mode) {
   return ({ automated: 'Automatizado', assisted: 'Assistido', manual: 'Manual' })[mode] || 'Não informado';
 }
 
+function confidenceLabel(confidence) {
+  return ({ high: 'Alta', medium: 'Média', low: 'Baixa' })[confidence] || 'Não informada';
+}
+
+function occurrenceAnchor(occurrences, occurrenceId) {
+  const index = occurrences.findIndex(value => value.occurrenceId === occurrenceId);
+  return index >= 0 ? `ocorrencia-${index + 1}` : 'ocorrencias';
+}
+
+function evidenceIndex(artifactById, evidenceId) {
+  return [...artifactById.keys()].indexOf(evidenceId);
+}
+
+function accessibility(value) {
+  if (!value || typeof value !== 'object') return '';
+  const displayedValue = 'não coletado por privacidade';
+  return `<section aria-label="Propriedades de acessibilidade"><h4>Nome, função e prévia</h4><dl class="meta"><dt>Nome acessível</dt><dd>${escapeHtml(value.name || 'não disponível')}</dd><dt>Origem do nome</dt><dd>${escapeHtml(value.nameSource || 'não disponível')}</dd><dt>Descrição acessível</dt><dd>${escapeHtml(value.description || 'não disponível')}</dd><dt>Origem da descrição</dt><dd>${escapeHtml(value.descriptionSource || 'não disponível')}</dd><dt>Função</dt><dd>${escapeHtml(value.role || 'não disponível')}</dd><dt>Valor</dt><dd>${escapeHtml(displayedValue)}</dd><dt>Estados</dt><dd>${escapeHtml((value.states || []).join(', ') || 'não disponíveis')}</dd><dt>Texto visível</dt><dd>${escapeHtml(value.visibleText || 'não disponível')}</dd><dt>Prévia de anúncio</dt><dd>${escapeHtml(value.announcementPreview || 'não disponível')}</dd></dl><p><strong>Variação esperada:</strong> esta prévia não é transcrição literal de tecnologia assistiva e pode variar conforme o navegador, a API da plataforma, o leitor, o modo e as preferências.</p></section>`;
+}
+
 function evidenceAlt(artifact) {
-  return artifact.kind === 'full-page' ? 'Captura integral da página auditada' : `Captura do elemento auditado ${artifact.nodeId || ''}`;
+  if (artifact.kind === 'full-page') return 'Captura integral original da página auditada';
+  if (artifact.kind === 'announcement-map') return 'Mapa visual derivado da prévia de anúncios';
+  return `Captura original do elemento auditado ${artifact.nodeId || ''}`;
 }
 
 function safeMediaText(value) {
@@ -204,16 +423,16 @@ function safeMediaText(value) {
 function createImageRegistry(artifacts) {
   const definitions = [];
   const byEvidenceId = new Map();
+  const byDataUrl = new Map();
   for (const artifact of artifacts) {
     const metadata = pngMetadata(artifact.dataUrl);
     if (!metadata) continue;
-    const image = Object.freeze({
-      id: `evidence-image-${definitions.length}`,
-      dataUrl: artifact.dataUrl,
-      width: metadata.width,
-      height: metadata.height,
-    });
-    definitions.push(image);
+    let image = byDataUrl.get(artifact.dataUrl);
+    if (!image) {
+      image = Object.freeze({ id: `evidence-image-${definitions.length}`, dataUrl: artifact.dataUrl, width: metadata.width, height: metadata.height });
+      definitions.push(image);
+      byDataUrl.set(artifact.dataUrl, image);
+    }
     byEvidenceId.set(artifact.evidenceId, image);
   }
   return { definitions, byEvidenceId };
@@ -225,7 +444,36 @@ function imageDefinitions(definitions) {
 }
 
 function renderEvidenceImage(image, accessibleName) {
-  return `<svg class="evidence-media" role="img" aria-label="${escapeHtml(accessibleName)}" viewBox="0 0 ${image.width} ${image.height}" width="${image.width}" height="${image.height}" preserveAspectRatio="xMidYMid meet" focusable="false"><use href="#${image.id}"></use></svg>`;
+  return `<svg class="evidence-media" role="img" aria-label="${escapeHtml(accessibleName)}" viewBox="0 0 ${image.width} ${image.height}" width="${image.width}" height="${image.height}" preserveAspectRatio="xMidYMid meet" focusable="false"><use href="#${image.id}" width="${image.width}" height="${image.height}"></use></svg>`;
+}
+
+function renderMarkedEvidenceImage(image, artifact, accessibleName, tone) {
+  const captureWidth = finitePositive(artifact.metadata?.width) || image.width;
+  const captureHeight = finitePositive(artifact.metadata?.height) || image.height;
+  const box = highlightBox(artifact, captureWidth, captureHeight);
+  return `<svg class="evidence-media" role="img" aria-label="${escapeHtml(accessibleName)}" viewBox="0 0 ${captureWidth} ${captureHeight}" width="${captureWidth}" height="${captureHeight}" preserveAspectRatio="xMidYMid meet" focusable="false"><use href="#${image.id}" width="${captureWidth}" height="${captureHeight}"></use><rect class="evidence-highlight evidence-highlight--${tone}" x="${box.x}" y="${box.y}" width="${box.width}" height="${box.height}" aria-hidden="true"></rect></svg>`;
+}
+
+function highlightBox(artifact, width, height) {
+  const box = artifact.metadata?.highlightBox;
+  if (!box || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(box[key]))) return { x: 0, y: 0, width, height };
+  const x = clamp(box.x, 0, width);
+  const y = clamp(box.y, 0, height);
+  const right = clamp(box.x + Math.max(0, box.width), x, width);
+  const bottom = clamp(box.y + Math.max(0, box.height), y, height);
+  return { x, y, width: right - x, height: bottom - y };
+}
+
+function finitePositive(value) {
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function clamp(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function unique(values) {
+  return [...new Set(values)];
 }
 
 function pngMetadata(value) {
@@ -270,7 +518,6 @@ function parsePng(bytes) {
     if (![...typeBytes].every(byte => (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122))) throw new TypeError('Tipo de chunk PNG inválido.');
     const type = String.fromCharCode(...typeBytes);
     if (crc32(bytes.subarray(typeStart, crcOffset)) !== view.getUint32(crcOffset)) throw new TypeError(`CRC PNG inválido no chunk ${type}.`);
-
     if (chunkIndex === 0) {
       if (type !== 'IHDR' || length !== 13) throw new TypeError('IHDR deve ser o primeiro chunk PNG e conter 13 bytes.');
       width = view.getUint32(dataStart);
@@ -280,20 +527,13 @@ function parsePng(bytes) {
       const allowedDepths = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
       if (!width || !height || width > MAX_PNG_DIMENSION || height > MAX_PNG_DIMENSION || width * height > MAX_PNG_PIXELS
         || !allowedDepths[colorType]?.includes(bitDepth) || bytes[dataStart + 10] !== 0 || bytes[dataStart + 11] !== 0
-        || ![0, 1].includes(bytes[dataStart + 12])) {
-        throw new TypeError('IHDR PNG contém dimensões ou parâmetros inválidos.');
-      }
-    } else if (type === 'IHDR') {
-      throw new TypeError('PNG contém mais de um IHDR.');
-    }
-
+        || ![0, 1].includes(bytes[dataStart + 12])) throw new TypeError('IHDR PNG contém dimensões ou parâmetros inválidos.');
+    } else if (type === 'IHDR') throw new TypeError('PNG contém mais de um IHDR.');
     if (type === 'IDAT') {
       if (endedIdat) throw new TypeError('Chunks IDAT PNG devem ser consecutivos.');
       sawIdat = true;
       idatBytes += length;
-    } else if (sawIdat && type !== 'IEND') {
-      endedIdat = true;
-    }
+    } else if (sawIdat && type !== 'IEND') endedIdat = true;
     offset = crcOffset + 4;
     chunkIndex += 1;
     if (type === 'IEND') {

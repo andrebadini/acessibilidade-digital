@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
@@ -6,14 +7,16 @@ import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
+import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consumer-basis.js';
+import { SECTION508_REVISED_CROSSWALK, section508ReferencesForWcag } from '../../src/core/normative/section508.js';
 
 function occurrenceCard(html, occurrenceId) {
-  const heading = `>${occurrenceId}</h3>`;
-  const headingIndex = html.indexOf(heading);
-  assert.notEqual(headingIndex, -1, `título da ocorrência ${occurrenceId} ausente`);
-  const start = html.lastIndexOf('<article class="occurrence-card"', headingIndex);
-  const end = html.indexOf('</article>', headingIndex);
-  assert.ok(start >= 0 && end > headingIndex, `cartão da ocorrência ${occurrenceId} ausente`);
+  const marker = `data-occurrence-id="${occurrenceId}"`;
+  const markerIndex = html.indexOf(marker);
+  assert.notEqual(markerIndex, -1, `ocorrência ${occurrenceId} ausente`);
+  const start = html.lastIndexOf('<article', markerIndex);
+  const end = html.indexOf('</article>', markerIndex);
+  assert.ok(start >= 0 && end > markerIndex, `cartão da ocorrência ${occurrenceId} ausente`);
   return html.slice(start, end + '</article>'.length);
 }
 
@@ -27,6 +30,72 @@ function reviewDecision(occurrenceId, itemId, answer, mode) {
     decidedAt: '2026-08-26T15:00:00.000Z',
     mode,
   });
+}
+
+function withFailedRecommendation() {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const item = input.itemResults.find(value => value.id === '5.1.5');
+  input.ruleResults.push({
+    ruleId: 'focusable-elements-interactive', outcome: 'failed', mode: 'assisted', nbrItems: ['5.1.5'],
+    targets: [], summary: 'O uso do foco observado requer correção.', limitations: [],
+    source: { engine: 'audita-core', ruleId: 'focusable-elements-interactive', version: '1.0.0' },
+  });
+  const wcagRefs = item.wcag.map(reference => reference.id);
+  input.occurrences.push({
+    occurrenceId: 'occ-recommendation-failed', pageId: 'page-1', outcome: 'failed',
+    classification: 'recommendation', impact: 'serious', confidence: 'high',
+    source: { engine: 'audita-core', ruleId: 'focusable-elements-interactive', version: '1.0.0' },
+    nbrItemRef: item.id, wcagRefs, foreignBenchmarkRefs: [...section508ReferencesForWcag(wcagRefs)],
+    target: { nodeId: null, selector: null, framePath: [] }, accessiblePreview: null,
+    evidenceRefs: ['ev-full'], legalAnalysis: { basisRef: CONSUMER_ACCESSIBILITY_FIXED_BASIS.id },
+    itemId: item.id, ruleId: 'focusable-elements-interactive', mode: 'assisted', nodeId: null,
+    evidenceIds: ['ev-full'], justification: 'O uso do foco observado requer correção.',
+  });
+  return input;
+}
+
+function withEditorialFailure() {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.methodology.supplementalRuleCount += 1;
+  input.methodology.ruleCount += 1;
+  input.ruleResults.push({
+    ruleId: 'editorial.placeholder-text', outcome: 'failed', mode: 'automated',
+    classification: 'editorial', impact: 'minor', confidence: 'high',
+    source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
+    nbrItems: [], wcag: [], targets: [{
+      nodeId: 'n-editorial', selectorHint: '',
+      message: 'Substitua o conteúdo provisório antes da publicação.',
+      data: { reason: 'placeholder-text' },
+    }],
+    summary: 'Há conteúdo provisório inequívoco na página.', limitations: [],
+  });
+  input.occurrences.push({
+    occurrenceId: 'occ-editorial', pageId: 'page-1', outcome: 'failed',
+    classification: 'editorial', impact: 'minor', confidence: 'high',
+    source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
+    nbrItemRef: null, wcagRefs: [], foreignBenchmarkRefs: [],
+    target: { nodeId: 'n-editorial', selector: null, framePath: [] }, accessiblePreview: null,
+    evidenceRefs: [], legalAnalysis: null, itemId: null, ruleId: 'editorial.placeholder-text',
+    mode: 'automated', nodeId: 'n-editorial', evidenceIds: [],
+    justification: 'Há conteúdo provisório inequívoco na página.',
+  });
+  return input;
+}
+
+function withPages(count) {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const statuses = ['complete', 'partial', 'failed', 'cancelled'];
+  input.pages = Array.from({ length: count }, (_, index) => ({
+    ...input.pages[0],
+    pageId: `page-${index + 1}`,
+    requestedUrl: `https://example.test/${index === count - 1 ? 'segmento-muito-longo-'.repeat(30) : ''}${index + 1}`,
+    finalUrl: `https://example.test/final-${index + 1}`,
+    status: statuses[index % statuses.length],
+  }));
+  input.requestedScope = count === 1
+    ? { mode: 'single', urls: [input.pages[0].requestedUrl] }
+    : { mode: 'batch', urls: input.pages.map(page => page.requestedUrl) };
+  return input;
 }
 
 test('renders a complete pt-BR report with one accessible heading hierarchy', () => {
@@ -44,8 +113,9 @@ test('renders a complete pt-BR report with one accessible heading hierarchy', ()
 test('renders all report sections, 146 items, occurrences and evidence records', () => {
   const html = renderHtmlReport(SAMPLE_AUDIT);
   for (const label of [
-    'Sumário executivo', 'Escopo', 'Metodologia', 'Resultados por item', 'Ocorrências e evidências',
-    'Revisão humana', 'Limitações', 'Notas de integridade normativa', 'Fundamentação normativa', 'Manifesto de integridade',
+    'Identidade, escopo e estado da auditoria', 'Sumário executivo', 'Ações e filtros', 'Ocorrências priorizadas',
+    'Mapa visual da prévia de anúncios', 'Revisão humana', 'Inventário de recursos de acessibilidade',
+    'Matriz completa dos 146 itens', 'Anexos de evidências', 'Metodologia, proveniência e integridade',
   ]) assert.match(html, new RegExp(label, 'u'));
   assert.equal((html.match(/data-report-item=/gu) || []).length, 146);
   for (const item of SAMPLE_AUDIT.itemResults) assert.match(html, new RegExp(`>${item.id.replaceAll('.', '\\.')}(?:<| —)`, 'u'));
@@ -65,18 +135,19 @@ test('embeds occurrence-specific marked screenshots and raw evidence with useful
     assert.match(image, /role="img"/u);
     assert.match(image, /aria-label="[^"]+"/u);
     assert.doesNotMatch(image, /aria-label=""/u);
-    assert.match(image, /<use href="#evidence-image-\d+"><\/use>/u);
+    assert.match(image, /<use href="#evidence-image-\d+"[^>]*><\/use>/u);
   }
-  assert.equal((html.match(/data:image\/png;base64,/gu) || []).length, 2);
-  assert.equal((html.match(/<image\b[^>]*href="data:image\/png;base64,[A-Za-z0-9+/=]+"/gu) || []).length, 2);
+  assert.equal((html.match(/data:image\/png;base64,/gu) || []).length, 1);
+  assert.equal((html.match(/<image\b[^>]*href="data:image\/png;base64,[A-Za-z0-9+/=]+"/gu) || []).length, 1);
   assert.match(html, /class="evidence-highlight evidence-highlight--failed"/u);
-  assert.match(html, /Moldura vermelha[^<]*não conformidade/iu);
+  assert.match(html, /Símbolo ✕ e moldura sólida[^<]*não atendimento técnico/iu);
   assert.match(html, /class="evidence-highlight evidence-highlight--review"/u);
-  assert.match(html, /Moldura âmbar[^<]*revisão humana/iu);
-  assert.match(html, /anotação visual[^.]*PNG original[^.]*hash/iu);
+  assert.match(html, /Símbolo \? e moldura tracejada[^<]*revisão humana/iu);
+  assert.match(html, /marcação é derivada[^.]*PNG original[^.]*hash/iu);
   assert.match(html, /<style>[^]*@page\s*\{[^}]*size:\s*A4/iu);
   assert.match(html, /thead\s*\{[^}]*display:\s*table-header-group/iu);
-  assert.doesNotMatch(html, /<script\b|<link\b|@import|url\(\s*["']?https?:|<(?:img|source)[^>]+src=["']https?:/iu);
+  assert.equal((html.match(/<script>/gu) || []).length, 1);
+  assert.doesNotMatch(html, /<script[^>]+src=|<link\b|@import|url\(\s*["']?https?:|<(?:img|source)[^>]+src=["']https?:/iu);
 });
 
 test('positions the automatic highlight from capture metadata without using color alone', () => {
@@ -87,21 +158,36 @@ test('positions the automatic highlight from capture metadata without using colo
   };
 
   const html = renderHtmlReport(createAuditModel(input));
-  assert.match(html, /--highlight-left:18\.75%;--highlight-top:27\.272727%;--highlight-width:62\.5%;--highlight-height:45\.454545%/u);
+  assert.match(html, /<rect class="evidence-highlight evidence-highlight--(?:failed|review)" x="24" y="24" width="80" height="40" aria-hidden="true"><\/rect>/u);
   assert.match(html, /aria-hidden="true"/u);
-  assert.match(html, /Moldura vermelha[^<]*não conformidade/iu);
-  assert.match(html, /Moldura âmbar[^<]*revisão humana/iu);
+  assert.match(html, /Símbolo ✕ e moldura sólida[^<]*não atendimento técnico/iu);
+  assert.match(html, /Símbolo \? e moldura tracejada[^<]*revisão humana/iu);
 });
 
 test('changes occurrence evidence from review to red after a nonconformity decision', () => {
   const reviewed = applyReviewDecisions(SAMPLE_AUDIT, [
     reviewDecision('occ-focus-review', '5.1.4', 'não conforme', 'assisted'),
   ]);
-  const card = occurrenceCard(renderHtmlReport(reviewed), 'occ-focus-review');
-  assert.match(card, /status--failed[\s\S]*Reprovado/u);
+  const html = renderHtmlReport(reviewed);
+  const card = occurrenceCard(html, 'occ-focus-review');
+  assert.equal(reviewed.occurrences.find(value => value.occurrenceId === 'occ-focus-review').legalAnalysis, null);
+  assert.match(card, /data-outcome="cantTell"[^>]*data-display-outcome="failed"/u);
+  assert.match(card, /status--failed[\s\S]*Não atendido neste teste/u);
   assert.match(card, /evidence-highlight--failed/u);
-  assert.match(card, /Moldura vermelha[^<]*não conformidade/iu);
+  assert.match(card, /Símbolo ✕ e moldura sólida[^<]*não atendimento técnico/iu);
+  assert.match(card, /class="legal-analysis"/u);
+  for (const fixedText of [
+    CONSUMER_ACCESSIBILITY_FIXED_BASIS.label,
+    CONSUMER_ACCESSIBILITY_FIXED_BASIS.display,
+    CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification,
+    CONSUMER_ACCESSIBILITY_FIXED_BASIS.currentTextCaveatRef,
+  ]) assert.match(card, new RegExp(fixedText.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
   assert.doesNotMatch(card, /evidence-highlight--review/u);
+  assert.ok(html.indexOf('data-occurrence-id="occ-focus-review"') < html.indexOf('data-occurrence-id="occ-cross-page"'));
+  assert.match(html, /<h3>Não atendidas<\/h3><strong>2<\/strong>/u);
+  assert.match(html, /<h3>Revisão humana<\/h3><strong>1<\/strong>/u);
+  assert.match(html, /<h2 id="revisao-titulo">Revisão humana<\/h2>/u);
+  assert.match(html, /1 pendente[^<]*1 concluída/iu);
 });
 
 test('changes occurrence evidence from review to green after a conformity decision', () => {
@@ -109,10 +195,10 @@ test('changes occurrence evidence from review to green after a conformity decisi
     reviewDecision('occ-cross-page', '5.7.5', 'conforme', 'manual'),
   ]);
   const card = occurrenceCard(renderHtmlReport(reviewed), 'occ-cross-page');
-  assert.match(card, /status--passed[\s\S]*Aprovado/u);
-  assert.match(card, /evidence-highlight--passed/u);
-  assert.match(card, /Moldura verde[^<]*conformidade confirmada/iu);
-  assert.doesNotMatch(card, /evidence-highlight--review/u);
+  assert.match(card, /status--passed[\s\S]*Atendido no escopo observado/u);
+  assert.match(card, /page-level-evidence--passed/u);
+  assert.match(card, /Símbolo ✓ e moldura dupla[^<]*atendimento confirmado/iu);
+  assert.doesNotMatch(card, /page-level-evidence--review/u);
 });
 
 test('keeps occurrence evidence amber after an inconclusive review decision', () => {
@@ -120,9 +206,9 @@ test('keeps occurrence evidence amber after an inconclusive review decision', ()
     reviewDecision('occ-focus-review', '5.1.4', 'não foi possível determinar', 'assisted'),
   ]);
   const card = occurrenceCard(renderHtmlReport(reviewed), 'occ-focus-review');
-  assert.match(card, /status--cantTell[\s\S]*Revisar/u);
+  assert.match(card, /status--cantTell[\s\S]*Requer revisão humana/u);
   assert.match(card, /evidence-highlight--review/u);
-  assert.match(card, /Moldura âmbar[^<]*revisão humana/iu);
+  assert.match(card, /Símbolo \? e moldura tracejada[^<]*revisão humana/iu);
 });
 
 test('embeds a shared large PNG once when fifty occurrences reuse it', () => {
@@ -148,14 +234,16 @@ test('embeds a shared large PNG once when fifty occurrences reuse it', () => {
   const html = renderHtmlReport(createAuditModel(input));
   assert.equal((html.match(/class="occurrence-card"/gu) || []).length, 50);
   assert.equal(html.split(dataUrl).length - 1, 1);
-  assert.equal((html.match(/<use href="#evidence-image-0"><\/use>/gu) || []).length, 51);
+  assert.equal((html.match(/<use href="#evidence-image-0"[^>]*><\/use>/gu) || []).length, 51);
 });
 
 test('keeps normative tables semantic and bounded by narrow report viewports', () => {
   const html = renderHtmlReport(SAMPLE_AUDIT);
-  assert.match(html, /<table><thead><tr><th>Item<\/th>/u);
+  assert.match(html, /<div class="matrix-scroll" role="region"[^>]*tabindex="0"><table><thead><tr><th scope="col">Item<\/th>/u);
   assert.match(html, /table\s*\{[^}]*width:\s*100%/iu);
-  assert.match(html, /@media\s*\(max-width:\s*42rem\)\{[^]*table\s*\{[^}]*table-layout:\s*fixed[^}]*\}[^]*th\s*,\s*td\s*\{[^}]*overflow-wrap:\s*anywhere/iu);
+  assert.match(html, /\.matrix-scroll\{[^}]*overflow-x:\s*auto/iu);
+  assert.match(html, /p,li,dd,dt,th,td,code\{[^}]*overflow-wrap:\s*anywhere/iu);
+  assert.match(html, /\.meta\{[^}]*grid-template-columns:minmax\([^,]+,[^)]+\) minmax\(0,1fr\)/u);
 });
 
 test('escapes hostile audited strings in text, attributes, code, URLs and media', () => {
@@ -169,7 +257,8 @@ test('escapes hostile audited strings in text, attributes, code, URLs and media'
   input.evidence[1].mediaUrl = 'javascript:alert(3)';
   input.evidence[1].dataUrl = 'data:image/svg+xml,<svg onload=alert(4)>';
   const html = renderHtmlReport(createAuditModel(input));
-  assert.doesNotMatch(html, /<script\b|<img\s+src=x|\s(?:onerror|onload)=["'][^>]*>|(?:src|href)=["']javascript:|>javascript:/iu);
+  assert.equal((html.match(/<script>/gu) || []).length, 1);
+  assert.doesNotMatch(html, /<img\s+src=x|\s(?:onerror|onload)=["'][^>]*>|(?:src|href)=["']javascript:|>javascript:/iu);
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/u);
   assert.match(html, /&lt;button aria-label=&quot;/u);
   assert.equal((html.match(/<svg\b[^>]*class="evidence-media"/gu) || []).length, 4);
@@ -192,8 +281,232 @@ test('rejects exact script and style breakout payloads in report counts', () => 
 });
 
 test('communicates every state with visible icon and text rather than color alone', () => {
-  const html = renderHtmlReport(SAMPLE_AUDIT);
-  for (const label of ['Aprovado', 'Reprovado', 'Revisar', 'Não aplicável', 'Não testado']) {
-    assert.match(html, new RegExp(`<span[^>]*class="status[^>]*><span[^>]*aria-hidden="true"[^>]*>[^<]+</span><span>${label}</span>`, 'u'));
+  const states = {
+    passed: 'Atendido no escopo observado', failed: 'Não atendido neste teste',
+    cantTell: 'Requer revisão humana', inapplicable: 'Não aplicável', untested: 'Não testado',
+  };
+  for (const [outcome, label] of Object.entries(states)) {
+    const input = structuredClone(SAMPLE_AUDIT);
+    const occurrence = input.occurrences[0];
+    occurrence.outcome = outcome;
+    occurrence.legalAnalysis = outcome === 'failed' ? occurrence.legalAnalysis : null;
+    input.ruleResults.find(rule => rule.ruleId === occurrence.ruleId).outcome = outcome;
+    input.itemResults.find(item => item.id === occurrence.itemId).outcome = outcome;
+    const html = renderHtmlReport(input);
+    assert.match(html, new RegExp(`<span class="status status--${outcome}"><span aria-hidden="true">[^<]+</span><span>${label}</span>`, 'u'));
   }
+});
+
+test('renders the approved ten-section information hierarchy before technical methodology', () => {
+  const html = renderHtmlReport(SAMPLE_AUDIT);
+  const headings = [
+    'Identidade, escopo e estado da auditoria',
+    'Sumário executivo',
+    'Ações e filtros',
+    'Ocorrências priorizadas',
+    'Mapa visual da prévia de anúncios',
+    'Revisão humana',
+    'Inventário de recursos de acessibilidade',
+    'Matriz completa dos 146 itens',
+    'Anexos de evidências',
+    'Metodologia, proveniência e integridade',
+  ];
+  let previous = -1;
+  for (const heading of headings) {
+    const index = html.indexOf(`>${heading}</h2>`);
+    assert.ok(index > previous, `${heading} deve aparecer na ordem aprovada`);
+    previous = index;
+  }
+  assert.ok(html.indexOf('occ-focus-failed') < html.indexOf('data-report-item="5.1.1"'));
+  assert.match(html, /não gera indicador numérico/iu);
+  assert.doesNotMatch(html, /percentual de conformidade/iu);
+});
+
+test('resolves the immutable consumer basis for every failed ABNT occurrence including recommendations', () => {
+  const html = renderHtmlReport(withFailedRecommendation());
+  const failedRequirement = occurrenceCard(html, 'occ-focus-failed');
+  const failedRecommendation = occurrenceCard(html, 'occ-recommendation-failed');
+  const humanReview = occurrenceCard(html, 'occ-focus-review');
+  for (const card of [failedRequirement, failedRecommendation]) {
+    assert.match(card, new RegExp(CONSUMER_ACCESSIBILITY_FIXED_BASIS.label, 'u'));
+    assert.match(card, new RegExp(CONSUMER_ACCESSIBILITY_FIXED_BASIS.display.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+    assert.match(card, new RegExp(CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+    assert.match(card, /Ressalva ao texto vigente/iu);
+  }
+  assert.match(failedRecommendation, /Recomendação ABNT/u);
+  assert.doesNotMatch(humanReview, /Base consumerista padronizada para análise/u);
+  assert.equal((html.match(/class="legal-analysis"/gu) || []).length, 2);
+});
+
+test('keeps engine result, human decision and derived display state visibly separate', () => {
+  const reviewed = applyReviewDecisions(SAMPLE_AUDIT, [
+    reviewDecision('occ-focus-review', '5.1.4', 'não conforme', 'assisted'),
+  ]);
+  const card = occurrenceCard(renderHtmlReport(reviewed), 'occ-focus-review');
+  assert.match(card, /Resultado do motor[^<]*Requer revisão humana/iu);
+  assert.match(card, /Decisão humana[^<]*Não conforme/iu);
+  assert.match(card, /Estado consolidado[^<]*Não atendido neste teste/iu);
+});
+
+test('uses curated supplemental summaries and never attaches legal or normative claims to editorial findings', () => {
+  const html = renderHtmlReport(withEditorialFailure());
+  const card = occurrenceCard(html, 'occ-editorial');
+  assert.match(card, /<h3[^>]*>Há conteúdo provisório inequívoco na página\.<\/h3>/u);
+  assert.match(card, /chip--editorial[\s\S]*Alerta editorial/u);
+  assert.match(card, /Sem mapeamento normativo atribuído/iu);
+  assert.doesNotMatch(card, /legal-analysis|Base consumerista padronizada|ABNT NBR 17225:2025:<\/strong> item/iu);
+  assert.match(html, /<option value="best-practice">Boa prática suplementar<\/option>/u);
+  assert.match(html, /\.chip--best-practice\{[^}]*border-color:#738596/u);
+});
+
+test('keeps ABNT, WCAG and qualified Section 508 mapping distinct from the consumer-analysis block', () => {
+  const card = occurrenceCard(renderHtmlReport(SAMPLE_AUDIT), 'occ-focus-failed');
+  assert.match(card, /ABNT NBR 17225:2025:<\/strong> item 5\.1\.1/u);
+  assert.match(card, /WCAG 2\.2:<\/strong> 2\.4\.7 \(nível AA\)/u);
+  assert.match(card, new RegExp(SECTION508_REVISED_CROSSWALK.label, 'u'));
+  assert.match(card, new RegExp(SECTION508_REVISED_CROSSWALK.qualification.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+  assert.match(card, /class="legal-analysis"/u);
+});
+
+test('renders a complete no-JS source, one live region and independent print safeguards', () => {
+  const html = renderHtmlReport(SAMPLE_AUDIT);
+  assert.equal((html.match(/<select\b[^>]* disabled>/gu) || []).length, 7);
+  assert.equal((html.match(/role="status"/gu) || []).length, 1);
+  assert.equal((html.match(/aria-live="polite"/gu) || []).length, 1);
+  assert.equal((html.match(/<details open data-collapsible>/gu) || []).length, 4);
+  assert.match(html, /Sem JavaScript, todas as ocorrências e todos os detalhes permanecem abertos e legíveis/u);
+  assert.match(html, /<button type="button" data-clear-filters disabled>Limpar filtros<\/button>/u);
+  assert.match(html, /\.occurrence-card\[hidden\]\{display:block!important\}/u);
+  assert.match(html, /details:not\(\[open\]\)>\*:not\(summary\)\{display:block!important\}/u);
+  assert.match(html, /@media \(forced-colors:active\)/u);
+  assert.match(html, /@media \(prefers-reduced-motion:reduce\)/u);
+  assert.match(html, /select,button\{[^}]*min-height:44px/u);
+});
+
+test('renders present, absent, unknown, partial and not-recorded widget inventory states without changing findings', () => {
+  const complete = structuredClone(SAMPLE_AUDIT);
+  complete.accessibilityWidgets = {
+    detector: 'audita.accessibility-widgets', version: '1.0.0', coverage: 'complete',
+    widgets: [
+      { id: 'vlibras', status: 'present', signals: ['dom-signature'] },
+      { id: 'hand-talk', status: 'absent', signals: [] },
+    ],
+  };
+  const completeHtml = renderHtmlReport(complete);
+  assert.match(completeHtml, /data-widget-state="present"[\s\S]*Assinatura detectada/u);
+  assert.match(completeHtml, /data-widget-state="absent"[\s\S]*Assinatura não detectada com cobertura completa/u);
+  assert.match(completeHtml, /<dt>Escopo de detecção<\/dt><dd>Agregado da sessão; não localizado por página\.<\/dd>/u);
+  assert.match(completeHtml, /<dt>Páginas incluídas<\/dt><dd>page-1<\/dd>/u);
+
+  const partial = structuredClone(SAMPLE_AUDIT);
+  partial.accessibilityWidgets = {
+    detector: 'audita.accessibility-widgets', version: '1.0.0', coverage: 'partial',
+    widgets: [
+      { id: 'vlibras', status: 'present', signals: ['script-signature'] },
+      { id: 'hand-talk', status: 'unknown', signals: [] },
+    ],
+  };
+  const partialHtml = renderHtmlReport(partial);
+  assert.match(partialHtml, /Cobertura local parcial/u);
+  assert.match(partialHtml, /data-widget-state="unknown"[\s\S]*Não foi possível determinar/u);
+
+  const missing = structuredClone(SAMPLE_AUDIT);
+  delete missing.accessibilityWidgets;
+  const missingHtml = renderHtmlReport(missing);
+  assert.match(missingHtml, /Inventário não registrado/u);
+  assert.equal((missingHtml.match(/class="widget-card" data-widget-state="unknown"/gu) || []).length, 2);
+  for (const html of [completeHtml, partialHtml, missingHtml]) {
+    assert.match(html, /3 de 3 ocorrências exibidas/u);
+  }
+});
+
+test('keeps page states, long URLs and stable map slots for one, three and twenty pages', () => {
+  for (const count of [1, 3, 20]) {
+    const html = renderHtmlReport(withPages(count));
+    assert.equal((html.match(/data-page-summary=/gu) || []).length, count);
+    assert.equal((html.match(/data-announcement-map-page=/gu) || []).length, count);
+    assert.equal((html.match(/Mapa indisponível nesta auditoria/gu) || []).length, count);
+    assert.match(html, new RegExp(`segmento-muito-longo-${count > 1 ? 'segmento-muito-longo-'.repeat(29) : 'segmento-muito-longo-'.repeat(29)}`, 'u'));
+  }
+  const batch = renderHtmlReport(withPages(20));
+  for (const label of ['Completa', 'Parcial', 'Falhou', 'Cancelada']) assert.match(batch, new RegExp(label, 'u'));
+
+  const mapped = structuredClone(SAMPLE_AUDIT);
+  mapped.evidence.push({
+    ...mapped.evidence[0], evidenceId: 'ev-map', kind: 'announcement-map', state: 'derived',
+    fullPageEvidenceId: 'ev-full', hash: 'sha256-announcement-map',
+  });
+  const mappedHtml = renderHtmlReport(mapped);
+  assert.match(mappedHtml, /aria-label="Mapa visual da prévia de anúncios da página 1"/u);
+  assert.match(mappedHtml, /Registros derivados[\s\S]*ev-map/u);
+  assert.doesNotMatch(mappedHtml, /Mapa indisponível nesta auditoria/u);
+});
+
+test('prioritizes 750 occurrences in the real DOM across twenty pages while reusing one PNG payload', () => {
+  const input = withPages(20);
+  const source = input.occurrences[0];
+  input.occurrences = Array.from({ length: 750 }, (_, index) => {
+    const onFirstPage = index % 20 === 0;
+    return {
+      ...source,
+      occurrenceId: `occ-stress-${index + 1}`,
+      pageId: `page-${(index % 20) + 1}`,
+      impact: ['critical', 'serious', 'moderate', 'minor'][index % 4],
+      evidenceRefs: onFirstPage ? source.evidenceRefs : [],
+      evidenceIds: onFirstPage ? source.evidenceIds : [],
+    };
+  });
+  input.manualReview = [];
+  const html = renderHtmlReport(input);
+  assert.equal((html.match(/class="occurrence-card"/gu) || []).length, 750);
+  assert.equal((html.match(/data:image\/png;base64,/gu) || []).length, 1);
+  const first = html.indexOf('data-occurrence-id="occ-stress-1"');
+  const secondImpact = html.indexOf('data-occurrence-id="occ-stress-2"');
+  assert.ok(first >= 0 && secondImpact > first, 'impacto critical deve preceder serious no DOM');
+});
+
+test('uses exact CSP hashes for static CSS and script with no executable audited content', async () => {
+  const runtime = await import('../../src/core/report/report.js.js').catch(() => ({}));
+  assert.equal(typeof runtime.REPORT_SCRIPT, 'string');
+  const html = renderHtmlReport(SAMPLE_AUDIT);
+  const style = html.match(/<style>([^]*?)<\/style>/u)?.[1];
+  const script = html.match(/<script>([^]*?)<\/script>/u)?.[1];
+  assert.ok(style && script, 'CSS e script estáticos devem estar incorporados');
+  const styleHash = createHash('sha256').update(style).digest('base64');
+  const scriptHash = createHash('sha256').update(script).digest('base64');
+  const csp = html.match(/Content-Security-Policy" content="([^"]+)"/u)?.[1] ?? '';
+  assert.match(csp, new RegExp(`style-src 'sha256-${styleHash.replace(/[+\/]/gu, '\\$&')}'`, 'u'));
+  assert.match(csp, new RegExp(`script-src 'sha256-${scriptHash.replace(/[+\/]/gu, '\\$&')}'`, 'u'));
+  assert.match(csp, /default-src 'none'/u);
+  for (const directive of ['connect-src', 'object-src', 'frame-src', 'font-src', 'media-src', 'worker-src']) {
+    assert.match(csp, new RegExp(`${directive} 'none'`, 'u'));
+  }
+  assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval/iu);
+  assert.doesNotMatch(script, /\b(?:eval|Function|fetch|XMLHttpRequest|WebSocket|Worker|innerHTML|insertAdjacentHTML|document\.write)\b/u);
+  assert.doesNotMatch(html, /<script[^>]+src=|<link\b|@import|url\(\s*["']?https?:/iu);
+});
+
+test('escapes hostile text in filter datasets and never turns audited data into selectors', () => {
+  const hostile = `x\" data-engine=\"evil\"><script>alert(1)</script>`;
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.occurrences[0].justification = hostile;
+  const html = renderHtmlReport(input);
+  const card = occurrenceCard(html, 'occ-focus-failed');
+  assert.match(card, /data-impact="moderate"/u);
+  assert.match(card, /data-page="page-1"/u);
+  assert.match(card, /data-engine="audita-core"/u);
+  assert.match(card, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/u);
+  assert.doesNotMatch(card, /data-engine="evil"|<script>alert/u);
+});
+
+test('fails closed when accessibility evidence contains an untrusted current control value', () => {
+  const secret = 'TOPSECRET-current-control';
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.evidence[1].accessibility.value = secret;
+  delete input.evidence[1].accessibility.valueStatus;
+
+  const html = renderHtmlReport(input);
+
+  assert.doesNotMatch(html, new RegExp(secret, 'u'));
+  assert.match(html, /<dt>Valor<\/dt><dd>não coletado por privacidade<\/dd>/u);
 });
