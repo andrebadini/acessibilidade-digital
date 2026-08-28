@@ -12,6 +12,7 @@ import {
 } from '../result.js';
 import { createReviewDecision, REVIEW_MODES } from '../review/decisions.js';
 import { canonicalStringify } from './canonical-json.js';
+import { assertClosedAuditShape } from './closed-schema.js';
 import { projectEvidenceManifest, REPORT_HASH_BASE, verifyIntegrityLinks } from './integrity-chain.js';
 import { sha256Hex } from './hash.js';
 import { validateNormalizedAxeSupplemental } from '../axe/validate-supplemental.js';
@@ -37,7 +38,7 @@ const CORE_RULE_METADATA = new Map(NBR17225_ITEMS.flatMap(item => item.ruleIds.m
   mode: item.evaluation,
   wcag: Object.freeze(item.wcag.map(reference => reference.id)),
 })])));
-const VERIFIED_LEGACY_LINEAGES = new WeakMap();
+const VERIFIED_LEGACY_SNAPSHOTS = new WeakMap();
 
 export const V1_MIGRATION_DEFAULTS = Object.freeze({
   pageId: 'page-1',
@@ -48,9 +49,9 @@ export const V1_MIGRATION_DEFAULTS = Object.freeze({
 });
 
 export function createAuditModel(input) {
-  const lineage = VERIFIED_LEGACY_LINEAGES.get(input);
-  const model = createAuditModelInternal(input, lineage?.legacyIds);
-  if (lineage) VERIFIED_LEGACY_LINEAGES.set(model, lineage);
+  const legacyIds = VERIFIED_LEGACY_SNAPSHOTS.get(input);
+  const model = createAuditModelInternal(input, legacyIds ?? new Set(), legacyIds !== undefined);
+  if (legacyIds) VERIFIED_LEGACY_SNAPSHOTS.set(model, legacyIds);
   return model;
 }
 
@@ -77,29 +78,20 @@ export async function verifyAndMigrateLegacyAuditV2(input) {
   const legacyIds = scan.legacyIds;
   migrateLegacyV2NormativeFields(source, legacyIds);
   source = await rehashLegacyIntegrityLinks(source);
-  const model = createAuditModelInternal(source, legacyIds);
+  const model = createAuditModelInternal(source, legacyIds, true);
   await verifyIntegrityLinks(model);
-  VERIFIED_LEGACY_LINEAGES.set(model, createLegacyLineage(model, legacyIds));
+  VERIFIED_LEGACY_SNAPSHOTS.set(model, new Set(legacyIds));
   return model;
 }
 
-/** Uses only a proof-bearing snapshot issued by verifyAndMigrateLegacyAuditV2. */
-export function createAuditModelFromVerifiedLegacyLineage(input, verifiedSnapshot) {
-  const lineage = VERIFIED_LEGACY_LINEAGES.get(verifiedSnapshot);
-  if (!lineage) throw new TypeError('Prova de migração normativa legada ausente.');
-  let source;
-  try { source = JSON.parse(canonicalStringify(input)); } catch {
-    throw new TypeError('Modelo derivado da migração contém propriedade não segura ou valor inválido.');
-  }
-  assertLegacyLineage(source, lineage);
-  const model = createAuditModelInternal(source, lineage.legacyIds);
-  VERIFIED_LEGACY_LINEAGES.set(model, lineage);
-  return model;
-}
-
-function createAuditModelInternal(input, legacyNormativeIds = new Set()) {
+function createAuditModelInternal(input, legacyNormativeIds = new Set(), verifiedLegacyLineage = false) {
   const source = JSON.parse(canonicalStringify(input));
+  assertClosedAuditShape(source);
   if (source.schemaVersion === 2) {
+    if (!verifiedLegacyLineage && Array.isArray(source.limitations) &&
+      source.limitations.includes(LEGACY_V2_NORMATIVE_LIMITATION)) {
+      throw new TypeError('Snapshot derivado de migração V2 exige a linhagem exata verificada no processo.');
+    }
     const scan = scanNormativeFieldPresence(source);
     if (scan.hasLegacy) {
       throw new TypeError('A integridade V2 legada deve ser verificada antes da migração normativa.');
@@ -142,7 +134,10 @@ function createAuditModelInternal(input, legacyNormativeIds = new Set()) {
   if (Array.isArray(model.evidence)) {
     model.evidence = model.evidence.map(artifact => sanitizeEvidenceArtifactUrls(artifact));
   }
-  const graph = validateEvidenceAndOccurrences(model, ruleById, pageById, legacyNormativeIds);
+  const graph = validateEvidenceAndOccurrences(
+    model, ruleById, pageById, legacyNormativeIds, model.requestedScope.mode,
+  );
+  validateSinglePageCoreOccurrenceCompleteness(model, ruleById);
   validateAxeEvidenceBinding(model, validatedAxe);
   const reviewGraph = validateReview(model, graph);
   validateAxeItemAggregation(model, validatedAxe, reviewGraph);
@@ -223,38 +218,6 @@ async function rehashLegacyIntegrityLinks(input) {
   return model;
 }
 
-function legacyBinding(occurrence) {
-  return canonicalStringify(occurrence);
-}
-
-function createLegacyLineage(model, legacyIds) {
-  const bindings = new Map();
-  for (const collection of allOccurrenceCollections(model)) for (const occurrence of collection) {
-    if (!legacyIds.has(occurrence?.occurrenceId)) continue;
-    const values = bindings.get(occurrence.occurrenceId) ?? new Set();
-    values.add(legacyBinding(occurrence));
-    bindings.set(occurrence.occurrenceId, values);
-  }
-  return Object.freeze({ auditId: model.auditId, legacyIds: new Set(legacyIds), bindings });
-}
-
-function assertLegacyLineage(model, lineage) {
-  if (model.schemaVersion !== 2 || model.auditId !== lineage.auditId) {
-    throw new TypeError('Modelo derivado não pertence à migração normativa verificada.');
-  }
-  const seen = new Set();
-  for (const collection of allOccurrenceCollections(model)) for (const occurrence of collection) {
-    if (!lineage.legacyIds.has(occurrence?.occurrenceId)) continue;
-    if (!lineage.bindings.get(occurrence.occurrenceId)?.has(legacyBinding(occurrence))) {
-      throw new TypeError('Identidade de ocorrência legada diverge da cadeia verificada.');
-    }
-    seen.add(occurrence.occurrenceId);
-  }
-  if (seen.size !== lineage.legacyIds.size) {
-    throw new TypeError('Modelo derivado omitiu ocorrência da migração normativa verificada.');
-  }
-}
-
 function validateBatchSessionStatus(model) {
   if (model.requestedScope?.mode !== 'batch') return;
   const statuses = model.pages.map(page => page.status);
@@ -318,6 +281,11 @@ function migrateV1Record(model) {
     ? { ...item, outcome: 'cantTell' }
     : item);
   const occurrences = (model.occurrences ?? []).map(occurrence => {
+    const {
+      selector: legacySelector,
+      framePath: legacyFramePath,
+      ...canonicalOccurrenceInput
+    } = occurrence;
     const item = itemById.get(occurrence.itemId);
     const evidenceRefs = [...(occurrence.evidenceIds ?? [])];
     const targetEvidence = evidenceRefs.map(id => evidenceById.get(id)).find(artifact =>
@@ -362,7 +330,7 @@ function migrateV1Record(model) {
       nbrItemRef: item?.id ?? null,
     });
     return {
-      ...occurrence,
+      ...canonicalOccurrenceInput,
       outcome,
       pageId,
       classification: source.engine === 'axe-core' && CLASSIFICATIONS.includes(occurrence.classification)
@@ -371,6 +339,10 @@ function migrateV1Record(model) {
       impact: IMPACT_LEVELS.includes(occurrence.impact) ? occurrence.impact : V1_MIGRATION_DEFAULTS.impact,
       confidence: CONFIDENCE_LEVELS.includes(occurrence.confidence) ? occurrence.confidence : V1_MIGRATION_DEFAULTS.confidence,
       source,
+      ...(source.engine === 'axe-core' ? {
+        selector: legacySelector,
+        framePath: legacyFramePath,
+      } : {}),
       nbrItemRef: item?.id ?? null,
       itemWcagRefs, sourceWcagRefs, testedWcagRefs,
       wcagRefs: [...testedWcagRefs],
@@ -382,8 +354,8 @@ function migrateV1Record(model) {
       } : {}),
       target: {
         nodeId: occurrence.target?.nodeId ?? occurrence.nodeId ?? null,
-        selector: occurrence.target?.selector ?? occurrence.selector ?? targetEvidence?.selector?.css ?? null,
-        framePath: [...(occurrence.target?.framePath ?? occurrence.framePath ?? targetEvidence?.selector?.framePath ?? [])],
+        selector: occurrence.target?.selector ?? legacySelector ?? targetEvidence?.selector?.css ?? null,
+        framePath: [...(occurrence.target?.framePath ?? legacyFramePath ?? targetEvidence?.selector?.framePath ?? [])],
       },
       accessiblePreview: occurrence.accessiblePreview ?? targetEvidence?.accessibility?.announcementPreview ?? null,
       evidenceRefs,
@@ -498,19 +470,20 @@ function assertAxeSupplementalIntegrity(model, rulesVersion, legacyNormativeIds 
     }
   }
   const checkedOccurrences = new Map(checked.occurrences.map(value => [value.occurrenceId, value]));
-  for (const occurrence of reportOccurrences) {
+  for (const [occurrenceIndex, occurrence] of reportOccurrences.entries()) {
+    const label = `Ocorrência suplementar #${occurrenceIndex + 1}`;
     const expected = checkedOccurrences.get(occurrence.occurrenceId);
     const actualKeys = Object.keys(occurrence).sort();
     const expectedKeys = Object.keys(expected ?? {}).sort();
     if (!expected || !validAxeTargetBinding(occurrence, expected, model.schemaVersion) ||
       canonicalStringify(actualKeys) !== canonicalStringify(expectedKeys) ||
       canonicalStringify(authoritativeAxeOccurrence(occurrence)) !== canonicalStringify(authoritativeAxeOccurrence(expected))) {
-      throw new TypeError(`Ocorrência suplementar ${occurrence.occurrenceId} diverge do cluster axe validado.`);
+      throw new TypeError(`${label} diverge do cluster axe validado.`);
     }
     if (model.schemaVersion === 1) {
       if (canonicalStringify(occurrence.wcagRefs) !== canonicalStringify(expected.wcagRefs) ||
         canonicalStringify(occurrence.foreignBenchmarkRefs) !== canonicalStringify(expected.foreignBenchmarkRefs)) {
-        throw new TypeError(`Ocorrência suplementar ${occurrence.occurrenceId} diverge das referências originais do mapeamento axe.`);
+        throw new TypeError(`${label} diverge das referências originais do mapeamento axe.`);
       }
     } else {
       const item = NBR17225_ITEMS.find(entry => entry.id === expected.nbrItemRef);
@@ -520,7 +493,7 @@ function assertAxeSupplementalIntegrity(model, rulesVersion, legacyNormativeIds 
         canonicalStringify(occurrence.testedWcagRefs) !== canonicalStringify(expected.testedWcagRefs) ||
         canonicalStringify(occurrence.wcagRefs) !== canonicalStringify(expected.testedWcagRefs) ||
         canonicalStringify(occurrence.foreignBenchmarkRefs) !== canonicalStringify([...section508ReferencesForWcag(expected.testedWcagRefs)])) {
-        throw new TypeError(`Ocorrência suplementar ${occurrence.occurrenceId} possui expansão WCAG/estrangeira incompatível com o item ABNT.`);
+        throw new TypeError(`${label} possui expansão WCAG/estrangeira incompatível com o item ABNT.`);
       }
     }
   }
@@ -591,13 +564,13 @@ function validateAxeEvidenceBinding(model, checked) {
   const conclusiveIds = new Set(checked.occurrences
     .filter(occurrence => occurrence.outcome === 'failed' && occurrence.legalAnalysis?.basisRef === CONSUMER_ACCESSIBILITY_FIXED_BASIS.id)
     .map(occurrence => occurrence.occurrenceId));
-  for (const occurrence of model.occurrences ?? []) {
+  for (const [occurrenceIndex, occurrence] of (model.occurrences ?? []).entries()) {
     if (!conclusiveIds.has(occurrence.occurrenceId)) continue;
     const pristine = (model.evidence ?? []).filter(artifact => artifact.pageId === occurrence.pageId &&
       artifact.kind === 'full-page' && artifact.state === 'pristine');
     if (pristine.length > 0) {
       if (!pristine.some(artifact => occurrence.evidenceRefs.includes(artifact.evidenceId))) {
-        throw new TypeError(`Ocorrência axe conclusiva ${occurrence.occurrenceId} não referencia a captura integral original da mesma página.`);
+        throw new TypeError(`Ocorrência axe conclusiva #${occurrenceIndex + 1} não referencia a captura integral original da mesma página.`);
       }
       continue;
     }
@@ -605,7 +578,7 @@ function validateAxeEvidenceBinding(model, checked) {
       entry.message === 'Não foi possível capturar a página completa no estado original.' && entry.recoverable === true &&
       canonicalStringify(Object.keys(entry).sort()) === canonicalStringify(['at', 'code', 'message', 'recoverable'])) ||
       model.limitations?.some(value => value === 'A captura integral original da página não estava disponível para vinculação ao achado axe conclusivo.');
-    if (!explicitAbsence) throw new TypeError(`Ocorrência axe conclusiva ${occurrence.occurrenceId} não possui captura integral original nem limitação explícita.`);
+    if (!explicitAbsence) throw new TypeError(`Ocorrência axe conclusiva #${occurrenceIndex + 1} não possui captura integral original nem limitação explícita.`);
   }
 }
 
@@ -961,7 +934,7 @@ function projectOccurrenceCompatibility(occurrences, ruleById) {
   }
 }
 
-function validateEvidenceAndOccurrences(model, ruleById, pageById, legacyNormativeIds = new Set()) {
+function validateEvidenceAndOccurrences(model, ruleById, pageById, legacyNormativeIds = new Set(), scopeMode = 'single') {
   if (!Array.isArray(model.evidence)) throw new TypeError('evidence deve ser lista no modelo V2.');
   const evidenceIds = new Set();
   const artifactById = new Map();
@@ -996,91 +969,137 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById, legacyNormati
   const itemById = new Map(model.itemResults.map(item => [item.id, item]));
   const itemIds = new Set(itemById.keys());
   const occurrenceById = new Map();
-  for (const occurrence of model.occurrences) {
+  for (const [occurrenceIndex, occurrence] of model.occurrences.entries()) {
+    const label = `Ocorrência #${occurrenceIndex + 1}`;
     const id = requiredId(occurrence?.occurrenceId, 'occurrenceId');
-    if (occurrenceById.has(id)) throw new TypeError(`Ocorrência duplicada: ${id}.`);
-    const pageId = requiredId(occurrence.pageId, `Ocorrência ${id}.pageId`);
-    if (!pageById.has(pageId)) throw new TypeError(`Ocorrência ${id} referencia página desconhecida.`);
+    if (occurrenceById.has(id)) throw new TypeError(`${label} possui identidade duplicada.`);
+    const pageId = requiredId(occurrence.pageId, `${label}.pageId`);
+    if (!pageById.has(pageId)) throw new TypeError(`${label} referencia página desconhecida.`);
     if (!OUTCOMES.includes(occurrence.outcome) || !CLASSIFICATIONS.includes(occurrence.classification) ||
       !IMPACT_LEVELS.includes(occurrence.impact) || !CONFIDENCE_LEVELS.includes(occurrence.confidence)) {
-      throw new TypeError(`Ocorrência ${id} possui resultado, classificação, impacto ou confiança inválidos.`);
+      throw new TypeError(`${label} possui resultado, classificação, impacto ou confiança inválidos.`);
     }
-    validateSource(occurrence.source, `Ocorrência ${id}.source`);
+    validateSource(occurrence.source, `${label}.source`);
     const registeredSource = registeredOccurrenceSource(occurrence, model.versions.rules);
     if (!registeredSource || !hasRegisteredSource(occurrence.source, registeredSource)) {
-      throw new TypeError(`Ocorrência ${id} possui proveniência incoerente com o registro local.`);
+      throw new TypeError(`${label} possui proveniência incoerente com o registro local.`);
     }
     const sourceRule = ruleById.get(occurrence.source.ruleId);
     const migratedManual = occurrence.source.engine === V1_MIGRATION_DEFAULTS.manualSourceEngine && occurrence.ruleId === null;
-    if (!sourceRule && !migratedManual) throw new TypeError(`Ocorrência ${id} referencia regra desconhecida.`);
+    if (!sourceRule && !migratedManual) throw new TypeError(`${label} referencia regra desconhecida.`);
     if (migratedManual && occurrence.outcome !== 'cantTell') {
-      throw new TypeError(`Ocorrência ${id} de revisão manual deve permanecer cantTell até a decisão humana.`);
+      throw new TypeError(`${label} de revisão manual deve permanecer cantTell até a decisão humana.`);
     }
     if (sourceRule && occurrence.mode !== undefined && sourceRule.mode !== occurrence.mode) {
-      throw new TypeError(`Ocorrência ${id} possui modo de regra incoerente.`);
+      throw new TypeError(`${label} possui modo de regra incoerente.`);
     }
     if ((!migratedManual && occurrence.ruleId !== occurrence.source.ruleId) ||
       (migratedManual && occurrence.ruleId !== null)) {
-      throw new TypeError(`Ocorrência ${id} possui regra legada incoerente.`);
+      throw new TypeError(`${label} possui regra legada incoerente.`);
     }
 
     const item = occurrence.nbrItemRef === null ? null : itemById.get(occurrence.nbrItemRef);
-    if (occurrence.nbrItemRef !== null && !item) throw new TypeError(`Ocorrência ${id} referencia item desconhecido.`);
+    if (occurrence.nbrItemRef !== null && !item) throw new TypeError(`${label} referencia item desconhecido.`);
     const normativeClassification = ['requirement', 'recommendation'].includes(occurrence.classification);
     if (normativeClassification && (!item || item.classification !== occurrence.classification)) {
-      throw new TypeError(`Ocorrência ${id} possui classificação normativa incoerente.`);
+      throw new TypeError(`${label} possui classificação normativa incoerente.`);
     }
-    if (!normativeClassification && item) throw new TypeError(`Ocorrência ${id} suplementar não pode inventar item ABNT.`);
+    if (!normativeClassification && item) throw new TypeError(`${label} suplementar não pode inventar item ABNT.`);
     if (sourceRule && item && !sourceRule.nbrItems.includes(item.id)) {
-      throw new TypeError(`Ocorrência ${id} possui vínculo de item incoerente.`);
+      throw new TypeError(`${label} possui vínculo de item incoerente.`);
     }
     if (occurrence.outcome === 'passed' && item &&
       (!sourceRule || sourceRule.outcome !== 'passed' || !item.ruleIds.includes(sourceRule.ruleId) ||
         !hasCorePassProvenance(occurrence.source, sourceRule.ruleId, model.versions.rules))) {
-      throw new TypeError(`Ocorrência ${id} não pode aprovar item ABNT sem resultado autoritativo aprovado.`);
+      throw new TypeError(`${label} não pode aprovar item ABNT sem resultado autoritativo aprovado.`);
     }
     if (occurrence.itemId !== undefined && occurrence.itemId !== occurrence.nbrItemRef) {
-      throw new TypeError(`Ocorrência ${id} possui item legado incoerente.`);
+      throw new TypeError(`${label} possui item legado incoerente.`);
     }
-    validateWcagAndForeignReferences(occurrence, item, sourceRule, id, legacyNormativeIds);
-    validateTarget(occurrence.target, id);
+    validateWcagAndForeignReferences(occurrence, item, sourceRule, label, legacyNormativeIds, scopeMode);
+    validateTarget(occurrence.target, label);
+    if (occurrence.nodeId !== occurrence.target.nodeId) {
+      throw new TypeError(`${label} possui identidade de alvo incoerente.`);
+    }
     if (occurrence.accessiblePreview !== null && typeof occurrence.accessiblePreview !== 'string') {
-      throw new TypeError(`Ocorrência ${id}.accessiblePreview inválida.`);
+      throw new TypeError(`${label}.accessiblePreview inválida.`);
     }
     if (occurrence.justification !== undefined && typeof occurrence.justification !== 'string') {
-      throw new TypeError(`Ocorrência ${id}.justification deve ser texto quando presente.`);
+      throw new TypeError(`${label}.justification deve ser texto quando presente.`);
     }
-    validateOccurrenceReason(occurrence, sourceRule, id);
-    validateLegalAnalysis(occurrence, id);
+    validateOccurrenceReason(occurrence, sourceRule, label);
+    validateLegalAnalysis(occurrence, label);
     if (occurrence.classification === 'editorial' || occurrence.source.engine === 'audita-editorial') {
-      validateEditorialOccurrence(occurrence, sourceRule, id);
+      validateEditorialOccurrence(occurrence, sourceRule, label);
     }
     for (const forbidden of ['violatedLaw', 'illegal', 'liability', 'sanction']) {
-      if (Object.hasOwn(occurrence, forbidden)) throw new TypeError(`Ocorrência ${id} contém conclusão jurídica proibida.`);
+      if (Object.hasOwn(occurrence, forbidden)) throw new TypeError(`${label} contém conclusão jurídica proibida.`);
     }
-    if (!Array.isArray(occurrence.evidenceRefs)) throw new TypeError(`Ocorrência ${id} deve listar evidências.`);
+    if (!Array.isArray(occurrence.evidenceRefs)) throw new TypeError(`${label} deve listar evidências.`);
     const links = new Set();
     for (const evidenceId of occurrence.evidenceRefs) {
-      const canonicalEvidenceId = requiredId(evidenceId, `Ocorrência ${id}.evidenceRefs`);
-      if (!evidenceIds.has(canonicalEvidenceId)) throw new TypeError(`Ocorrência ${id} referencia evidência desconhecida.`);
-      if (links.has(canonicalEvidenceId)) throw new TypeError(`Ocorrência ${id} contém evidência duplicada.`);
-      if (artifactById.get(canonicalEvidenceId).pageId !== pageId) throw new TypeError(`Ocorrência ${id} referencia evidência de outra página.`);
+      const canonicalEvidenceId = requiredId(evidenceId, `${label}.evidenceRefs`);
+      if (!evidenceIds.has(canonicalEvidenceId)) throw new TypeError(`${label} referencia evidência desconhecida.`);
+      if (links.has(canonicalEvidenceId)) throw new TypeError(`${label} contém evidência duplicada.`);
+      if (artifactById.get(canonicalEvidenceId).pageId !== pageId) throw new TypeError(`${label} referencia evidência de outra página.`);
       if (artifactById.get(canonicalEvidenceId).kind === 'announcement-map') {
-        throw new TypeError(`Ocorrência ${id} não pode vincular o mapa derivado da página.`);
+        throw new TypeError(`${label} não pode vincular o mapa derivado da página.`);
       }
       links.add(canonicalEvidenceId);
     }
     if (occurrence.evidenceIds !== undefined && canonicalStringify(occurrence.evidenceIds) !== canonicalStringify(occurrence.evidenceRefs)) {
-      throw new TypeError(`Ocorrência ${id} possui evidências legadas incoerentes.`);
+      throw new TypeError(`${label} possui evidências legadas incoerentes.`);
     }
     occurrenceById.set(id, occurrence);
   }
   return { itemIds, ruleById, occurrenceById, evidenceIds };
 }
 
-function validateOccurrenceReason(occurrence, sourceRule, occurrenceId) {
+function canonicalCoreTargetNodeId(target) {
+  let value = null;
+  if (typeof target === 'string' || Number.isSafeInteger(target)) value = String(target);
+  else if (target && (typeof target.nodeId === 'string' || Number.isSafeInteger(target.nodeId))) {
+    value = String(target.nodeId);
+  }
+  return value === 'document' ? null : value;
+}
+
+function coreOccurrenceTuple(ruleId, itemId, nodeId, outcome) {
+  return canonicalStringify([ruleId, itemId, nodeId, outcome]);
+}
+
+function validateSinglePageCoreOccurrenceCompleteness(model, ruleById) {
+  if (model.requestedScope.mode !== 'single') return;
+  const expected = new Map();
+  for (const rule of ruleById.values()) {
+    if (rule.source?.engine !== 'audita-core' || !['failed', 'cantTell'].includes(rule.outcome)) continue;
+    const targets = rule.targets.length > 0 ? rule.targets : [null];
+    for (const itemId of rule.nbrItems) for (const target of targets) {
+      const key = coreOccurrenceTuple(rule.ruleId, itemId, canonicalCoreTargetNodeId(target), rule.outcome);
+      expected.set(key, (expected.get(key) ?? 0) + 1);
+    }
+  }
+  if ([...expected.values()].some(count => count !== 1)) {
+    throw new TypeError('Regra core single-page possui produto item/alvo duplicado ou ambíguo.');
+  }
+
+  const actual = new Map();
+  for (const occurrence of model.occurrences) {
+    if (occurrence.source?.engine !== 'audita-core' || !['failed', 'cantTell'].includes(occurrence.outcome)) continue;
+    const key = coreOccurrenceTuple(
+      occurrence.source.ruleId, occurrence.nbrItemRef, occurrence.nodeId, occurrence.outcome,
+    );
+    actual.set(key, (actual.get(key) ?? 0) + 1);
+  }
+  if (actual.size !== expected.size || [...expected].some(([key, count]) => actual.get(key) !== count) ||
+    [...actual.values()].some(count => count !== 1)) {
+    throw new TypeError('Cobertura de ocorrências core single-page está incompleta ou duplicada.');
+  }
+}
+
+function validateOccurrenceReason(occurrence, sourceRule, occurrenceLabel) {
   if (occurrence.source?.ruleId !== 'new-window-link-warning') {
-    if (occurrence.reason !== undefined) throw new TypeError(`Ocorrência ${occurrenceId} possui razão estruturada não autorizada.`);
+    if (occurrence.reason !== undefined) throw new TypeError(`${occurrenceLabel} possui razão estruturada não autorizada.`);
     return;
   }
   const reason = occurrence.reason;
@@ -1098,7 +1117,7 @@ function validateOccurrenceReason(occurrence, sourceRule, occurrenceId) {
     reason.context.behavior !== expectedBehavior || reason.context.warning !== expectedWarning ||
     canonicalStringify(occurrence.sourceWcagRefs) !== '[]' || canonicalStringify(occurrence.testedWcagRefs) !== '[]' ||
     canonicalStringify(occurrence.wcagRefs) !== '[]' || canonicalStringify(occurrence.foreignBenchmarkRefs) !== '[]') {
-    throw new TypeError(`Ocorrência ${occurrenceId} de nova janela possui razão ou alegação normativa inválida.`);
+    throw new TypeError(`${occurrenceLabel} de nova janela possui razão ou alegação normativa inválida.`);
   }
 }
 
@@ -1163,7 +1182,7 @@ function validateEditorialLimitations(limitations, outcome, targets) {
   return true;
 }
 
-function validateEditorialOccurrence(occurrence, sourceRule, id) {
+function validateEditorialOccurrence(occurrence, sourceRule, occurrenceLabel) {
   const expectedKeys = [
     'occurrenceId', 'pageId', 'outcome', 'classification', 'impact', 'confidence', 'source',
     'nbrItemRef', 'itemWcagRefs', 'sourceWcagRefs', 'testedWcagRefs', 'wcagRefs', 'foreignBenchmarkRefs', 'target', 'accessiblePreview',
@@ -1183,7 +1202,7 @@ function validateEditorialOccurrence(occurrence, sourceRule, id) {
     canonicalStringify(occurrence.evidenceRefs) !== '[]' || canonicalStringify(occurrence.evidenceIds) !== '[]' ||
     occurrence.legalAnalysis !== null || occurrence.justification !== 'Há conteúdo provisório inequívoco na página.' ||
     !sourceRule || sourceRule.outcome !== 'failed') {
-    throw new TypeError(`Ocorrência editorial ${id} possui esquema inválido.`);
+    throw new TypeError(`${occurrenceLabel} editorial possui esquema inválido.`);
   }
 }
 
@@ -1256,11 +1275,11 @@ function validateSource(source, label) {
   for (const field of ['engine', 'ruleId', 'version']) canonicalText(source[field], `${label}.${field}`);
 }
 
-function validateWcagAndForeignReferences(occurrence, item, sourceRule, occurrenceId, legacyNormativeIds) {
+function validateWcagAndForeignReferences(occurrence, item, sourceRule, occurrenceLabel, legacyNormativeIds, scopeMode) {
   for (const field of [...NORMATIVE_FIELDS, 'wcagRefs']) {
-    if (!Array.isArray(occurrence[field])) throw new TypeError(`Ocorrência ${occurrenceId}.${field} deve ser lista.`);
+    if (!Array.isArray(occurrence[field])) throw new TypeError(`${occurrenceLabel}.${field} deve ser lista.`);
     if (new Set(occurrence[field]).size !== occurrence[field].length || occurrence[field].some(reference => typeof reference !== 'string')) {
-      throw new TypeError(`Ocorrência ${occurrenceId}.${field} possui referência inválida ou duplicada.`);
+      throw new TypeError(`${occurrenceLabel}.${field} possui referência inválida ou duplicada.`);
     }
   }
   const expectedItemWcag = item?.wcag.map(reference => reference.id) ?? [];
@@ -1272,77 +1291,80 @@ function validateWcagAndForeignReferences(occurrence, item, sourceRule, occurren
     authoritativeSourceWcag = [];
     authoritativeTestedWcag = [];
   } else if (occurrence.source.engine === 'audita-core') {
-    const legacy = legacyNormativeIds.has(occurrenceId);
+    const legacy = legacyNormativeIds.has(occurrence.occurrenceId);
     authoritativeSourceWcag = legacy || occurrence.source.ruleId === 'new-window-link-warning'
       ? []
       : [...new Set((sourceRule?.wcag ?? []).filter(reference => expectedItemWcag.includes(reference)))];
     authoritativeTestedWcag = !legacy && occurrence.source.ruleId !== 'new-window-link-warning' && occurrence.outcome === 'failed'
       ? [...authoritativeSourceWcag]
       : [];
-    const outcomeBound = sourceRule && (
-      (occurrence.outcome === 'failed' && sourceRule.outcome === 'failed') ||
-      (occurrence.outcome === 'cantTell' && ['failed', 'cantTell'].includes(sourceRule.outcome)) ||
-      (occurrence.outcome === 'passed' && sourceRule.outcome === 'passed') ||
-      (occurrence.outcome === 'inapplicable' && sourceRule.outcome === 'inapplicable') ||
-      (occurrence.outcome === 'untested' && sourceRule.outcome === 'untested')
-    );
+    const outcomeBound = sourceRule && (scopeMode === 'single'
+      ? occurrence.outcome === sourceRule.outcome
+      : (
+        (occurrence.outcome === 'failed' && sourceRule.outcome === 'failed') ||
+        (occurrence.outcome === 'cantTell' && ['failed', 'cantTell'].includes(sourceRule.outcome)) ||
+        (occurrence.outcome === 'passed' && sourceRule.outcome === 'passed') ||
+        (occurrence.outcome === 'inapplicable' && sourceRule.outcome === 'inapplicable') ||
+        (occurrence.outcome === 'untested' && sourceRule.outcome === 'untested')
+      ));
     if (!outcomeBound) {
-      throw new TypeError(`Ocorrência ${occurrenceId} possui resultado incoerente com a regra autoritativa.`);
+      throw new TypeError(`${occurrenceLabel} possui resultado incoerente com a regra autoritativa.`);
     }
   }
   if (canonicalStringify(occurrence.itemWcagRefs) !== canonicalStringify(authoritativeItemWcag) ||
     canonicalStringify(occurrence.sourceWcagRefs) !== canonicalStringify(authoritativeSourceWcag) ||
     canonicalStringify(occurrence.testedWcagRefs) !== canonicalStringify(authoritativeTestedWcag) ||
     canonicalStringify(occurrence.wcagRefs) !== canonicalStringify(authoritativeTestedWcag)) {
-    throw new TypeError(`Ocorrência ${occurrenceId} possui separação WCAG incoerente.`);
+    throw new TypeError(`${occurrenceLabel} possui separação WCAG incoerente.`);
   }
-  if (!Array.isArray(occurrence.foreignBenchmarkRefs)) throw new TypeError(`Ocorrência ${occurrenceId}.foreignBenchmarkRefs deve ser lista.`);
+  if (!Array.isArray(occurrence.foreignBenchmarkRefs)) throw new TypeError(`${occurrenceLabel}.foreignBenchmarkRefs deve ser lista.`);
   const expectedForeign = [...section508ReferencesForWcag(authoritativeTestedWcag)];
   if (canonicalStringify(occurrence.foreignBenchmarkRefs) !== canonicalStringify(expectedForeign) ||
     occurrence.foreignBenchmarkRefs.some(reference => reference.benchmarkId !== SECTION508_REVISED_CROSSWALK.id)) {
-    throw new TypeError(`Ocorrência ${occurrenceId} possui referência estrangeira que não deriva dos critérios testados.`);
+    throw new TypeError(`${occurrenceLabel} possui referência estrangeira que não deriva dos critérios testados.`);
   }
 }
 
-function validateTarget(target, occurrenceId) {
-  if (!target || typeof target !== 'object' || Array.isArray(target)) throw new TypeError(`Ocorrência ${occurrenceId}.target inválido.`);
-  if (target.nodeId !== null) requiredId(target.nodeId, `Ocorrência ${occurrenceId}.target.nodeId`);
+function validateTarget(target, occurrenceLabel) {
+  if (!target || typeof target !== 'object' || Array.isArray(target)) throw new TypeError(`${occurrenceLabel}.target inválido.`);
+  if (target.nodeId !== null) requiredId(target.nodeId, `${occurrenceLabel}.target.nodeId`);
   if (target.selector !== null && (typeof target.selector !== 'string' || target.selector.trim() !== target.selector)) {
-    throw new TypeError(`Ocorrência ${occurrenceId}.target.selector inválido.`);
+    throw new TypeError(`${occurrenceLabel}.target.selector inválido.`);
   }
   if (!Array.isArray(target.framePath) || target.framePath.some(value => typeof value !== 'string')) {
-    throw new TypeError(`Ocorrência ${occurrenceId}.target.framePath inválido.`);
+    throw new TypeError(`${occurrenceLabel}.target.framePath inválido.`);
   }
 }
 
-function validateLegalAnalysis(occurrence, occurrenceId) {
+function validateLegalAnalysis(occurrence, occurrenceLabel) {
   const expected = consumerBasisForOccurrence(occurrence);
   if (!expected) {
-    if (occurrence.legalAnalysis !== null) throw new TypeError(`Ocorrência ${occurrenceId} não pode conter análise jurídica.`);
+    if (occurrence.legalAnalysis !== null) throw new TypeError(`${occurrenceLabel} não pode conter análise jurídica.`);
     return;
   }
   if (canonicalStringify(occurrence.legalAnalysis) !== canonicalStringify({ basisRef: CONSUMER_ACCESSIBILITY_FIXED_BASIS.id })) {
-    throw new TypeError(`Ocorrência ${occurrenceId} deve referenciar a base consumerista fixa.`);
+    throw new TypeError(`${occurrenceLabel} deve referenciar a base consumerista fixa.`);
   }
 }
 
 function validateReview(model, { itemIds, occurrenceById }) {
   if (!Array.isArray(model.manualReview) || !Array.isArray(model.reviewDecisions)) throw new TypeError('Fila e decisões de revisão devem ser listas.');
   const queueByOccurrence = new Map();
-  for (const entry of model.manualReview) {
+  for (const [entryIndex, entry] of model.manualReview.entries()) {
+    const label = `Fila de revisão #${entryIndex + 1}`;
     const occurrenceId = requiredId(entry?.occurrenceId, 'manualReview.occurrenceId');
-    if (queueByOccurrence.has(occurrenceId)) throw new TypeError(`Fila de revisão duplicada para ${occurrenceId}.`);
+    if (queueByOccurrence.has(occurrenceId)) throw new TypeError(`${label} possui ocorrência duplicada.`);
     const occurrence = occurrenceById.get(occurrenceId);
-    if (!occurrence) throw new TypeError(`Fila de revisão referencia ocorrência desconhecida: ${occurrenceId}.`);
-    if (!itemIds.has(entry.itemId) || entry.itemId !== occurrence.itemId) throw new TypeError(`Fila de revisão ${occurrenceId} referencia item incoerente.`);
-    if (entry.ruleId !== occurrence.ruleId) throw new TypeError(`Fila de revisão ${occurrenceId} referencia regra incoerente.`);
-    if (!REVIEW_MODES.includes(entry.mode)) throw new TypeError(`Modo inválido na fila de revisão ${occurrenceId}.`);
+    if (!occurrence) throw new TypeError(`${label} referencia ocorrência desconhecida.`);
+    if (!itemIds.has(entry.itemId) || entry.itemId !== occurrence.itemId) throw new TypeError(`${label} referencia item incoerente.`);
+    if (entry.ruleId !== occurrence.ruleId) throw new TypeError(`${label} referencia regra incoerente.`);
+    if (!REVIEW_MODES.includes(entry.mode)) throw new TypeError(`${label} possui modo inválido.`);
     const expectedMode = occurrence.mode === 'manual' ? 'manual' : 'assisted';
-    if (entry.mode !== expectedMode) throw new TypeError(`Modo incoerente na fila de revisão ${occurrenceId}.`);
-    if (!REVIEW_STATUSES.has(entry.status)) throw new TypeError(`Status inválido na fila de revisão ${occurrenceId}.`);
-    canonicalText(entry.question, `manualReview ${occurrenceId}.question`);
-    canonicalText(entry.reason, `manualReview ${occurrenceId}.reason`);
-    if (entry.auditId !== undefined && entry.auditId !== model.auditId) throw new TypeError(`Fila de revisão ${occurrenceId} pertence a outra auditoria.`);
+    if (entry.mode !== expectedMode) throw new TypeError(`${label} possui modo incoerente.`);
+    if (!REVIEW_STATUSES.has(entry.status)) throw new TypeError(`${label} possui status inválido.`);
+    canonicalText(entry.question, `${label}.question`);
+    canonicalText(entry.reason, `${label}.reason`);
+    if (entry.auditId !== undefined && entry.auditId !== model.auditId) throw new TypeError(`${label} pertence a outra auditoria.`);
     queueByOccurrence.set(occurrenceId, entry);
   }
 
@@ -1367,9 +1389,9 @@ function validateReview(model, { itemIds, occurrenceById }) {
   for (const [occurrenceId, entry] of queueByOccurrence) {
     const decision = decisionByOccurrence.get(occurrenceId);
     if (entry.status === 'answered') {
-      if (!decision || entry.decisionId !== decision.decisionId) throw new TypeError(`Fila respondida ${occurrenceId} não referencia sua decisão.`);
+      if (!decision || entry.decisionId !== decision.decisionId) throw new TypeError('Fila respondida não referencia sua decisão.');
     } else if (decision || entry.decisionId !== undefined) {
-      throw new TypeError(`Fila não respondida ${occurrenceId} não pode conter decisão.`);
+      throw new TypeError('Fila não respondida não pode conter decisão.');
     }
   }
   return { decisionByOccurrence, queueByOccurrence };

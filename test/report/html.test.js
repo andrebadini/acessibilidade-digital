@@ -34,6 +34,18 @@ function reviewDecision(occurrenceId, itemId, answer, mode) {
   });
 }
 
+function setCoreRuleInapplicable(input, ruleId) {
+  const rule = input.ruleResults.find(value => value.ruleId === ruleId);
+  assert.ok(rule, `regra ${ruleId} ausente na fixture`);
+  rule.outcome = 'inapplicable';
+  rule.targets = [];
+  for (const itemId of rule.nbrItems) {
+    const item = input.itemResults.find(value => value.id === itemId);
+    assert.ok(item, `item ${itemId} ausente na fixture`);
+    item.outcome = 'inapplicable';
+  }
+}
+
 function withFailedRecommendation() {
   const input = structuredClone(SAMPLE_AUDIT);
   const item = input.itemResults.find(value => value.id === '5.1.5');
@@ -251,9 +263,17 @@ test('embeds a shared large PNG once when fifty occurrences reuse it', () => {
   input.occurrences = Array.from({ length: 50 }, (_, index) => ({
     ...sourceOccurrence,
     occurrenceId: `occ-shared-${index + 1}`,
+    nodeId: `n-shared-${index + 1}`,
+    target: {
+      ...structuredClone(sourceOccurrence.target),
+      nodeId: `n-shared-${index + 1}`,
+    },
     evidenceIds: ['ev-full'],
     evidenceRefs: ['ev-full'],
   }));
+  input.ruleResults.find(value => value.ruleId === 'focus-order').targets =
+    input.occurrences.map(occurrence => occurrence.nodeId);
+  setCoreRuleInapplicable(input, 'focus-visible');
   input.manualReview = input.occurrences.map(occurrence => ({
     ...sourceReview,
     occurrenceId: occurrence.occurrenceId,

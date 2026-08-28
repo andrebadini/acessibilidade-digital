@@ -5,7 +5,9 @@ import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { canonicalStringify } from '../../src/core/report/canonical-json.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
+import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { sha256Hex } from '../../src/core/report/hash.js';
+import { renderHtmlReport } from '../../src/core/report/html.js';
 import {
   isAuditIntegrityVerified,
   REPORT_HASH_BASE,
@@ -82,10 +84,101 @@ test('validates a legacy V2 integrity chain before conservative normative migrat
   assert.equal(isAuditIntegrityVerified(migrated), true);
 
   const detachedMigrationClaim = structuredClone(migrated);
+  assert.throws(() => createAuditModel(detachedMigrationClaim), /migra|integridade|linhagem|prova/iu);
+  assert.throws(() => renderHtmlReport(detachedMigrationClaim), /migra|integridade|linhagem|prova/iu);
+  assert.throws(() => renderTechnicalJson(detachedMigrationClaim), /migra|integridade|linhagem|prova/iu);
+  await assert.rejects(enrichAuditForReport(detachedMigrationClaim, ENRICH_OPTIONS), /migra|integridade|linhagem|prova/iu);
   await assert.rejects(
     verifyAuditIntegritySnapshot(detachedMigrationClaim),
     /integridade|indisponível/iu,
   );
+});
+
+test('legacy migration returns one exact renderable snapshot and exposes no derivation capability', async () => {
+  const current = await verifiedFixture();
+  const legacy = structuredClone(current);
+  for (const occurrence of legacy.occurrences) {
+    delete occurrence.itemWcagRefs;
+    delete occurrence.sourceWcagRefs;
+    delete occurrence.testedWcagRefs;
+  }
+  delete legacy.normative.sources;
+  await rehashCanonicalModel(legacy);
+
+  const migrated = await verifyAuditIntegritySnapshot(legacy);
+  assert.match(renderHtmlReport(migrated), /Relatório de auditoria/iu);
+  assert.equal(JSON.parse(renderTechnicalJson(migrated)).audit.auditId, migrated.auditId);
+
+  const auditModelModule = await import('../../src/core/report/audit-model.js');
+  const derivationCapability = auditModelModule.createAuditModelFromVerifiedLegacyLineage;
+  if (typeof derivationCapability === 'function') {
+    const forged = structuredClone(migrated);
+    forged.scope.description = 'Escopo alterado depois da prova RAW.';
+    forged.limitations.push('Limitação adicionada depois da prova RAW.');
+    forged.report.status = 'pending';
+    await rehashCanonicalModel(forged);
+    const laundered = derivationCapability(forged, migrated);
+    await assert.rejects(verifyAuditIntegritySnapshot(laundered), /integridade|linhagem|migra/iu);
+  }
+  assert.equal(derivationCapability, undefined);
+
+  for (const mutate of [
+    value => { value.scope.description = 'Escopo alterado depois da prova RAW.'; },
+    value => { value.limitations.push('Limitação adicionada depois da prova RAW.'); },
+    value => { value.report.status = 'pending'; },
+  ]) {
+    const detached = structuredClone(migrated);
+    mutate(detached);
+    await rehashCanonicalModel(detached);
+    assert.throws(() => createAuditModel(detached), /migra|integridade|WCAG|linhagem/iu);
+    assert.throws(() => renderHtmlReport(detached), /migra|integridade|WCAG|linhagem/iu);
+    assert.throws(() => renderTechnicalJson(detached), /migra|integridade|WCAG|linhagem/iu);
+    await assert.rejects(enrichAuditForReport(detached, ENRICH_OPTIONS), /migra|integridade|WCAG|linhagem/iu);
+    await assert.rejects(verifyAuditIntegritySnapshot(detached), /integridade|indisponível/iu);
+  }
+});
+
+test('legacy lineage remains process-local when migrated fields equal ordinary empty coverage', async () => {
+  const current = await verifiedFixture();
+  const legacy = structuredClone(current);
+  const manual = legacy.occurrences.find(occurrence => occurrence.source.engine === 'audita-manual-review');
+  delete manual.itemWcagRefs;
+  delete manual.sourceWcagRefs;
+  delete manual.testedWcagRefs;
+  await rehashCanonicalModel(legacy);
+
+  const migrated = await verifyAuditIntegritySnapshot(legacy);
+  const detached = structuredClone(migrated);
+  detached.scope.description = 'Escopo alterado após migração de cobertura originalmente vazia.';
+  await rehashCanonicalModel(detached);
+
+  assert.throws(() => createAuditModel(detached), /migra|integridade|linhagem|prova/iu);
+  assert.throws(() => renderHtmlReport(detached), /migra|integridade|linhagem|prova/iu);
+  assert.throws(() => renderTechnicalJson(detached), /migra|integridade|linhagem|prova/iu);
+  await assert.rejects(enrichAuditForReport(detached, ENRICH_OPTIONS), /migra|integridade|linhagem|prova/iu);
+  await assert.rejects(verifyAuditIntegritySnapshot(detached), /integridade|indisponível/iu);
+});
+
+test('legacy enrichment is exactly the verified migration and ignores post-proof options', async () => {
+  const current = await verifiedFixture();
+  const legacy = structuredClone(current);
+  for (const occurrence of legacy.occurrences) {
+    delete occurrence.itemWcagRefs;
+    delete occurrence.sourceWcagRefs;
+    delete occurrence.testedWcagRefs;
+  }
+  delete legacy.normative.sources;
+  await rehashCanonicalModel(legacy);
+
+  const direct = await verifyAuditIntegritySnapshot(legacy);
+  const enriched = await enrichAuditForReport(legacy, {
+    ...ENRICH_OPTIONS,
+    now: () => '2030-01-01T00:00:00.000Z',
+    timezone: 'UTC',
+    manifestVersion: '9.9.9',
+    browserVersion: 'Chrome/999.0.0.0',
+  });
+  assert.deepEqual(enriched, direct);
 });
 
 test('the public model constructor rejects every raw legacy V2 occurrence before any migration', async () => {
@@ -112,10 +205,7 @@ test('the public model constructor rejects every raw legacy V2 occurrence before
 
   const auditModelModule = await import('../../src/core/report/audit-model.js');
   assert.equal(Object.hasOwn(auditModelModule, 'migrateAuditV2AfterIntegrityVerification'), false);
-  assert.throws(
-    () => auditModelModule.createAuditModelFromVerifiedLegacyLineage(legacy, {}),
-    /prova|migra[cç][aã]o normativa/iu,
-  );
+  assert.equal(Object.hasOwn(auditModelModule, 'createAuditModelFromVerifiedLegacyLineage'), false);
 });
 
 test('enrichment verifies the untouched legacy V2 chain before migration and rejects laundering attempts', async () => {
@@ -159,4 +249,10 @@ test('enrichment verifies the untouched legacy V2 chain before migration and rej
 
 async function verifiedFixture() {
   return enrichAuditForReport(SAMPLE_AUDIT, ENRICH_OPTIONS);
+}
+
+async function rehashCanonicalModel(model) {
+  const hashInput = structuredClone(model);
+  delete hashInput.integrity.canonicalModelHash;
+  model.integrity.canonicalModelHash = await sha256Hex(canonicalStringify(hashInput));
 }

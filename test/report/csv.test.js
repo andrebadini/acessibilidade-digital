@@ -27,6 +27,24 @@ const VERIFIED_OPTIONS = Object.freeze({
   browserVersion: 'Chrome/147.0.0.0',
 });
 
+function setCoreRuleInapplicable(input, ruleId) {
+  const rule = input.ruleResults.find(value => value.ruleId === ruleId);
+  assert.ok(rule, `regra ${ruleId} ausente na fixture`);
+  rule.outcome = 'inapplicable';
+  rule.targets = [];
+  for (const itemId of rule.nbrItems) {
+    const item = input.itemResults.find(value => value.id === itemId);
+    assert.ok(item, `item ${itemId} ausente na fixture`);
+    item.outcome = 'inapplicable';
+  }
+}
+
+function bindCoreRuleTargets(input, ruleId, occurrences) {
+  const rule = input.ruleResults.find(value => value.ruleId === ruleId);
+  assert.ok(rule, `regra ${ruleId} ausente na fixture`);
+  rule.targets = occurrences.map(occurrence => occurrence.nodeId);
+}
+
 test('serializes a deterministic RFC 4180 occurrence table with fixed versioned columns', async () => {
   const verified = await verifiedAudit(SAMPLE_AUDIT);
   const csv = renderOccurrenceCsv(verified);
@@ -283,9 +301,16 @@ test('neutralizes the spreadsheet surface by projecting hostile prefixes out of 
   input.occurrences = prefixes.map((value, index) => ({
     ...structuredClone(input.occurrences[0]),
     occurrenceId: `occ-formula-${index}`,
+    nodeId: `n-formula-${index}`,
+    target: {
+      ...structuredClone(input.occurrences[0].target),
+      nodeId: `n-formula-${index}`,
+    },
     justification: value,
     accessiblePreview: value,
   }));
+  bindCoreRuleTargets(input, 'focus-visible', input.occurrences);
+  setCoreRuleInapplicable(input, 'focus-order');
   input.manualReview = [];
   input.reviewDecisions = [];
   const original = structuredClone(input);
@@ -351,15 +376,23 @@ test('fails closed on unknown page and cross-page evidence references', async ()
 
 test('exports header only for zero occurrences and preserves 512-occurrence canonical order', async () => {
   const empty = structuredClone(SAMPLE_AUDIT);
+  setCoreRuleInapplicable(empty, 'focus-visible');
+  setCoreRuleInapplicable(empty, 'focus-order');
   empty.occurrences = [];
   empty.manualReview = [];
   empty.reviewDecisions = [];
   assert.deepEqual(parseQuotedCsv(renderOccurrenceCsv(await verifiedAudit(empty))), [HEADERS]);
 
   const large = structuredClone(empty);
+  const manualOccurrence = SAMPLE_AUDIT.occurrences.find(value => value.source.engine === 'audita-manual-review');
+  const manualReview = SAMPLE_AUDIT.manualReview.find(value => value.occurrenceId === manualOccurrence.occurrenceId);
   large.occurrences = Array.from({ length: 512 }, (_, index) => ({
-    ...structuredClone(SAMPLE_AUDIT.occurrences[0]),
+    ...structuredClone(manualOccurrence),
     occurrenceId: `occ-realistic-${String(index).padStart(4, '0')}`,
+  }));
+  large.manualReview = large.occurrences.map(occurrence => ({
+    ...structuredClone(manualReview),
+    occurrenceId: occurrence.occurrenceId,
   }));
   const records = parseQuotedCsv(renderOccurrenceCsv(await verifiedAudit(large)));
   assert.equal(records.length, 513);
@@ -373,9 +406,16 @@ test('processes repeated long benign prose in bounded time without decoding or b
   input.occurrences = Array.from({ length: 32 }, (_, index) => ({
     ...structuredClone(input.occurrences[0]),
     occurrenceId: `occ-long-${index}`,
+    nodeId: `n-long-${index}`,
+    target: {
+      ...structuredClone(input.occurrences[0].target),
+      nodeId: `n-long-${index}`,
+    },
     justification: prose,
     accessiblePreview: prose,
   }));
+  bindCoreRuleTargets(input, 'focus-visible', input.occurrences);
+  setCoreRuleInapplicable(input, 'focus-order');
   input.manualReview = [];
   input.reviewDecisions = [];
 

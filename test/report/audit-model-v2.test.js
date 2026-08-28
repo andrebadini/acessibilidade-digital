@@ -5,7 +5,10 @@ import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
 import { section508ReferencesForWcag } from '../../src/core/normative/section508.js';
+import { renderOccurrenceCsv } from '../../src/core/report/csv.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
+import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
+import { renderHtmlReport } from '../../src/core/report/html.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import {
   V1_MIGRATION_DEFAULTS,
@@ -13,6 +16,28 @@ import {
   migrateAuditV1ToV2,
 } from '../../src/core/report/audit-model.js';
 import { reportInput } from './helpers.js';
+
+const ENRICH_OPTIONS = Object.freeze({
+  now: () => '2026-08-26T16:00:00.000Z',
+  timezone: 'America/Cuiaba',
+  manifestVersion: '0.1.0',
+  rulesVersion: '1.0.0',
+  browserVersion: 'Chrome/147.0.0.0',
+});
+
+function rejectsWithoutMarker(fn, marker) {
+  assert.throws(fn, error => {
+    assert.doesNotMatch(String(error?.message ?? error), new RegExp(marker, 'u'));
+    return true;
+  });
+}
+
+async function rejectsAsyncWithoutMarker(promise, marker) {
+  await assert.rejects(promise, error => {
+    assert.doesNotMatch(String(error?.message ?? error), new RegExp(marker, 'u'));
+    return true;
+  });
+}
 
 test('separates ABNT item context, source mapping and occurrence-tested WCAG without expanding the alias', () => {
   const input = reportInput();
@@ -51,6 +76,64 @@ test('requires the exact normative ledger on every current V2 model and technica
 
   const technical = JSON.parse(renderTechnicalJson(SAMPLE_AUDIT));
   assert.deepEqual(technical.audit.normative, SAMPLE_AUDIT.normative);
+});
+
+for (const [label, mutate] of [
+  ['root', (value, marker) => { value.privateContext = marker; }],
+  ['occurrence', (value, marker) => {
+    const occurrence = value.occurrences.find(item => item.source.ruleId === 'focus-visible');
+    occurrence.occurrenceId = marker;
+    occurrence.privateContext = marker;
+  }],
+  ['manual occurrence', (value, marker) => {
+    const occurrence = value.occurrences.find(item => item.source.engine === 'audita-manual-review');
+    occurrence.occurrenceId = marker;
+    occurrence.privateContext = marker;
+  }],
+  ['source', (value, marker) => {
+    const occurrence = value.occurrences.find(item => item.source.ruleId === 'focus-visible');
+    occurrence.occurrenceId = marker;
+    occurrence.source.privateContext = marker;
+  }],
+  ['target', (value, marker) => {
+    const occurrence = value.occurrences.find(item => item.source.ruleId === 'focus-visible');
+    occurrence.occurrenceId = marker;
+    occurrence.target.privateContext = marker;
+  }],
+  ['reason', (value, marker) => {
+    const occurrence = value.occurrences.find(item => item.source.ruleId === 'focus-visible');
+    occurrence.occurrenceId = marker;
+    occurrence.reason = { privateContext: marker };
+  }],
+  ['legalAnalysis', (value, marker) => {
+    const occurrence = value.occurrences.find(item => item.source.ruleId === 'focus-visible');
+    occurrence.occurrenceId = marker;
+    occurrence.legalAnalysis.privateContext = marker;
+  }],
+  ['normative', (value, marker) => {
+    value.normative.privateContext = marker;
+    value.normative.sources[0].privateContext = marker;
+  }],
+]) {
+  test(`rejects unknown ${label} fields without echoing private input`, async () => {
+    const marker = `PRIVATE${label.replace(/[^A-Za-z]/gu, '').toUpperCase()}MARKER9`;
+    const candidate = structuredClone(SAMPLE_AUDIT);
+    mutate(candidate, marker);
+    rejectsWithoutMarker(() => createAuditModel(candidate), marker);
+    await rejectsAsyncWithoutMarker(enrichAuditForReport(candidate, ENRICH_OPTIONS), marker);
+  });
+}
+
+test('unknown occurrence data cannot reach technical JSON, EARL, HTML or CSV', () => {
+  const marker = 'PRIVATEEXPORTMARKER9';
+  const candidate = structuredClone(SAMPLE_AUDIT);
+  const occurrence = candidate.occurrences.find(item => item.source.ruleId === 'focus-visible');
+  occurrence.occurrenceId = marker;
+  occurrence.privateContext = marker;
+
+  rejectsWithoutMarker(() => renderTechnicalJson(candidate), marker);
+  rejectsWithoutMarker(() => renderHtmlReport(candidate), marker);
+  rejectsWithoutMarker(() => renderOccurrenceCsv(candidate), marker);
 });
 
 test('binds core WCAG claims exactly to the authoritative rule, item and outcome', () => {
@@ -109,6 +192,39 @@ test('binds core WCAG claims exactly to the authoritative rule, item and outcome
   assert.throws(
     () => createAuditModel(manualFailure),
     /manual|revis[aã]o|resultado|cantTell|decis[aã]o/iu,
+  );
+});
+
+test('rejects a single-page failed core rule downgraded to a cantTell occurrence', () => {
+  const downgraded = structuredClone(SAMPLE_AUDIT);
+  const failed = downgraded.occurrences.find(value => value.source.ruleId === 'focus-visible');
+  failed.outcome = 'cantTell';
+  failed.confidence = 'low';
+  failed.testedWcagRefs = [];
+  failed.wcagRefs = [];
+  failed.foreignBenchmarkRefs = [];
+  failed.legalAnalysis = null;
+  assert.throws(
+    () => createAuditModel(downgraded),
+    /resultado|outcome|regra|autoritativ|complet/iu,
+  );
+});
+
+test('rejects a single-page failed core rule whose occurrence was deleted', () => {
+  const deletedFailure = structuredClone(SAMPLE_AUDIT);
+  deletedFailure.occurrences = deletedFailure.occurrences.filter(value => value.source.ruleId !== 'focus-visible');
+  assert.throws(
+    () => createAuditModel(deletedFailure),
+    /ocorrência|cobertura|complet|alvo|produto/iu,
+  );
+});
+
+test('rejects a single-page failed or cantTell core target omitted from occurrences', () => {
+  const omittedTarget = structuredClone(SAMPLE_AUDIT);
+  omittedTarget.ruleResults.find(value => value.ruleId === 'focus-order').targets.push('n-2');
+  assert.throws(
+    () => createAuditModel(omittedTarget),
+    /ocorrência|cobertura|complet|alvo|produto/iu,
   );
 });
 
@@ -187,6 +303,23 @@ test('explicitly migrates V1 into the canonical single-page V2 contract without 
   assert.equal(model.normative.wcag, 'WCAG 2.2');
   assert.equal(model.normative.sources[0].localCopy.sha256, '1c3ee66b7fd606367e3de087e6a55fea90f4d368d8a1f769141d5e3b96d32afc');
   assert.equal(Object.isFrozen(model), true);
+});
+
+test('consumes legitimate V1 selector aliases into the closed canonical target', () => {
+  const input = reportInput();
+  input.occurrences[0].selector = '#legacy-control';
+  input.occurrences[0].framePath = ['frame:0'];
+
+  const model = migrateAuditV1ToV2(input);
+  const occurrence = model.occurrences[0];
+
+  assert.deepEqual(occurrence.target, {
+    nodeId: occurrence.nodeId,
+    selector: '#legacy-control',
+    framePath: ['frame:0'],
+  });
+  assert.equal(Object.hasOwn(occurrence, 'selector'), false);
+  assert.equal(Object.hasOwn(occurrence, 'framePath'), false);
 });
 
 test('sanitizes every URL-bearing evidence field at the V1 and technical JSON boundary', () => {
@@ -334,12 +467,12 @@ test('conclusive failed requirements and recommendations use the same catalog re
   model.ruleResults.push(makeRule(recommendation, 'focus-fully-visible'));
   model.occurrences.push(makeOccurrence(requirement, 'focus-visible', 'occ-requirement'));
   model.occurrences.push(makeOccurrence(recommendation, 'focus-fully-visible', 'occ-recommendation'));
-  model.occurrences.push(makeOccurrence(recommendation, 'focus-fully-visible', 'occ-inconclusive', 'cantTell'));
 
   const canonical = createAuditModel(model);
-  const [requirementFailure, recommendationFailure, inconclusive] =
-    ['occ-requirement', 'occ-recommendation', 'occ-inconclusive']
+  const [requirementFailure, recommendationFailure] =
+    ['occ-requirement', 'occ-recommendation']
       .map(id => canonical.occurrences.find(occurrence => occurrence.occurrenceId === id));
+  const inconclusive = canonical.occurrences.find(occurrence => occurrence.outcome === 'cantTell');
   assert.equal(requirementFailure.legalAnalysis.basisRef, CONSUMER_ACCESSIBILITY_FIXED_BASIS.id);
   assert.equal(recommendationFailure.legalAnalysis.basisRef, CONSUMER_ACCESSIBILITY_FIXED_BASIS.id);
   assert.equal(requirementFailure.classification, 'requirement');

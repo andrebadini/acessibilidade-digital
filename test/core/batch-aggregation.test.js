@@ -17,6 +17,8 @@ import { pngDataUrlDecodedByteLength } from '../../src/core/evidence/png.js';
 import { mergeAxeSupplementalResults } from '../../src/core/audit.js';
 import { aggregateItems } from '../../src/core/rules/aggregate-items.js';
 import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
+import { section508ReferencesForWcag } from '../../src/core/normative/section508.js';
+import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consumer-basis.js';
 import { canonicalStringify } from '../../src/core/report/canonical-json.js';
 import { sha256Hex } from '../../src/core/report/hash.js';
 import { verifyAuditIntegritySnapshot } from '../../src/core/report/integrity.js';
@@ -316,13 +318,50 @@ test('uses the strongest rule metadata and derives conservative status and summa
   assert.equal(partial.itemResults.find(item => item.ruleIds.includes(ruleId)).outcome, 'cantTell');
 });
 
+test('preserves a legitimate batch mix of failed and cantTell page occurrences under one failed aggregate rule', async () => {
+  const first = structuredClone(await remapAuditPage(
+    await childModel('child-mixed-1', 'https://mixed-one.example.test/'),
+    { batchAuditId: 'batch-mixed', pageId: 'page-1' },
+  ));
+  const second = structuredClone(await remapAuditPage(
+    await childModel('child-mixed-2', 'https://mixed-two.example.test/'),
+    { batchAuditId: 'batch-mixed', pageId: 'page-2' },
+  ));
+  const ruleId = 'focus-order';
+  const secondRule = second.ruleResults.find(rule => rule.ruleId === ruleId);
+  const secondOccurrence = second.occurrences.find(occurrence => occurrence.ruleId === ruleId);
+  secondRule.outcome = 'failed';
+  secondRule.summary = 'Falha conclusiva observada somente na segunda página.';
+  secondOccurrence.outcome = 'failed';
+  secondOccurrence.confidence = 'high';
+  secondOccurrence.testedWcagRefs = [...secondOccurrence.sourceWcagRefs];
+  secondOccurrence.wcagRefs = [...secondOccurrence.testedWcagRefs];
+  secondOccurrence.foreignBenchmarkRefs = [...section508ReferencesForWcag(secondOccurrence.testedWcagRefs)];
+  secondOccurrence.legalAnalysis = { basisRef: CONSUMER_ACCESSIBILITY_FIXED_BASIS.id };
+
+  const raw = aggregateBatchAudits({
+    batchAuditId: 'batch-mixed', pageResults: [first, second],
+    startedAt: OPTIONS.now(), endedAt: OPTIONS.now(), status: 'partial',
+  });
+  const final = await enrichAuditForReport(raw, OPTIONS);
+  assert.equal(final.ruleResults.find(rule => rule.ruleId === ruleId).outcome, 'failed');
+  assert.deepEqual(final.occurrences.filter(value => value.ruleId === ruleId).map(value => value.outcome), [
+    'cantTell', 'failed',
+  ]);
+});
+
 test('allocates distinct stable ordinals for the reported legacy 32-bit collision pair', async () => {
   const child = structuredClone(await childModel('child-collision', 'https://collision.example.test/'));
   const firstOccurrence = child.occurrences[0];
   const firstReview = child.manualReview[0];
   firstOccurrence.occurrenceId = 'occurrence-axe-0001179a';
   firstReview.occurrenceId = firstOccurrence.occurrenceId;
-  child.occurrences.push({ ...structuredClone(firstOccurrence), occurrenceId: 'occurrence-axe-0001e467' });
+  const secondOccurrence = {
+    ...structuredClone(firstOccurrence), occurrenceId: 'occurrence-axe-0001e467', nodeId: 'n-2',
+    target: { ...structuredClone(firstOccurrence.target), nodeId: 'n-2' },
+  };
+  child.ruleResults.find(rule => rule.ruleId === firstOccurrence.ruleId).targets.push('n-2');
+  child.occurrences.push(secondOccurrence);
   child.manualReview.push({ ...structuredClone(firstReview), occurrenceId: 'occurrence-axe-0001e467' });
 
   const first = await remapAuditPage(child, { batchAuditId: 'batch-collision', pageId: 'page-1' });

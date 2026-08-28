@@ -4,10 +4,10 @@ import { NBR17225_EDITORIAL_NOTES } from '../normative/nbr17225.js';
 import { NORMATIVE_SOURCE_LEDGER } from '../normative/source-ledger.js';
 import {
   createAuditModel,
-  createAuditModelFromVerifiedLegacyLineage,
   sanitizeEvidenceArtifactUrls,
 } from './audit-model.js';
 import { canonicalStringify } from './canonical-json.js';
+import { assertClosedAuditShape } from './closed-schema.js';
 import { sha256Hex } from './hash.js';
 import {
   projectEvidenceManifest,
@@ -22,14 +22,10 @@ export async function enrichAuditForReport(input, options = {}) {
   try { raw = JSON.parse(canonicalStringify(input)); } catch {
     throw new TypeError('Modelo de auditoria contém propriedade não segura ou valor inválido.');
   }
-  let legacyProof = null;
+  assertClosedAuditShape(raw);
   if (raw.schemaVersion === 2 && hasLegacyNormativeOccurrences(raw)) {
-    legacyProof = await verifyAuditIntegritySnapshot(raw);
-    raw = structuredClone(legacyProof);
+    return verifyAuditIntegritySnapshot(raw);
   }
-  const makeModel = value => legacyProof
-    ? createAuditModelFromVerifiedLegacyLineage(value, legacyProof)
-    : createAuditModel(value);
   const generatedAt = canonicalNow(options.now);
   const timezone = validTimezone(options.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
   const limitations = deriveLimitations(raw);
@@ -109,7 +105,7 @@ export async function enrichAuditForReport(input, options = {}) {
     },
     integrity: { algorithm: 'SHA-256', evidenceManifestHash: 'pending', hashBase: REPORT_HASH_BASE },
   };
-  const normalized = makeModel({
+  const normalized = createAuditModel({
     ...base,
     integrity: { ...base.integrity, canonicalModelHash: 'pending' },
   });
@@ -125,17 +121,17 @@ export async function enrichAuditForReport(input, options = {}) {
       }),
     });
   }
-  const withEvidenceHashes = makeModel({ ...normalized, evidence });
+  const withEvidenceHashes = createAuditModel({ ...normalized, evidence });
   const evidenceManifest = projectEvidenceManifest(withEvidenceHashes.evidence);
   const evidenceManifestHash = await sha256Hex(canonicalStringify(evidenceManifest));
-  const withManifest = makeModel({
+  const withManifest = createAuditModel({
     ...withEvidenceHashes,
     integrity: { ...withEvidenceHashes.integrity, evidenceManifestHash, canonicalModelHash: 'pending' },
   });
   const hashInput = structuredClone(withManifest);
   delete hashInput.integrity.canonicalModelHash;
   const canonicalModelHash = await sha256Hex(canonicalStringify(hashInput));
-  const finalModel = makeModel({
+  const finalModel = createAuditModel({
     ...withManifest,
     integrity: { ...withManifest.integrity, canonicalModelHash },
   });
