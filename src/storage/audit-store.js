@@ -58,6 +58,25 @@ function compareRetentionPosition(metadata, marker) {
   return expiryOrder === 0 ? metadata.auditId.localeCompare(marker.auditId) : expiryOrder;
 }
 
+function ownedAuditId(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, 'auditId');
+    return descriptor && Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'string'
+      ? descriptor.value
+      : '';
+  } catch {
+    return '';
+  }
+}
+
+function assertFinalizationCorrelation(auditId, model, latestState) {
+  if (ownedAuditId(model) !== auditId ||
+    (latestState !== undefined && ownedAuditId(latestState) !== auditId)) {
+    throw new TypeError('Modelo ou estado final não corresponde à auditoria.');
+  }
+}
+
 function storedRevision(value) {
   if (value === undefined) return 0;
   if (!Number.isSafeInteger(value) || value < 0) throw new TypeError('Revisão armazenada da auditoria inválida.');
@@ -669,6 +688,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   };
   const finalizeExportAndMaybeDelete = (id, model, latestState, snapshotCapability, options) => {
     const key = validId(id);
+    assertFinalizationCorrelation(key, model, latestState);
     if (options?.clearDeliveryJournal !== true || typeof options?.deleteAfterCompleteExport !== 'boolean') {
       throw new TypeError('Finalização de exportação inválida.');
     }
@@ -1670,6 +1690,7 @@ export function createAuditStore(options = {}) {
     id, model, latestState, snapshotCapability, finalizeOptions,
   ) => {
     const key = validId(id);
+    assertFinalizationCorrelation(key, model, latestState);
     if (finalizeOptions?.clearDeliveryJournal !== true ||
       typeof finalizeOptions?.deleteAfterCompleteExport !== 'boolean') {
       throw new TypeError('Finalização de exportação inválida.');

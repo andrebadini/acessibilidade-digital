@@ -333,6 +333,43 @@ test('incomplete delivery receipt preserves the audit even when delete-after-exp
   assert.ok(await store.getAuditRetention(auditId));
 });
 
+test('store finalization rejects model or latest state correlated to another audit', async () => {
+  for (const createStore of [
+    () => createInMemoryAuditStore(),
+    () => {
+      const fake = createFakeIndexedDb();
+      return createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+    },
+  ]) {
+    const store = createStore();
+    const auditId = 'final-correlation';
+    await store.commitAudit(auditId, { auditId }, { auditId }, { now: T0 });
+    const snapshot = await store.getAuditSnapshot(auditId);
+    const lease = await store.acquireExportLease(auditId, snapshot.capability, {
+      ownerId: 'correlation-owner', now: '2026-08-30T10:00:00.000Z',
+    });
+    const options = {
+      ownerId: 'correlation-owner', exportAttempt: lease.exportAttempt,
+      now: '2026-08-30T10:00:00.100Z', clearDeliveryJournal: true,
+      deleteAfterCompleteExport: false,
+    };
+
+    await assert.rejects(
+      store.finalizeExportAndMaybeDelete(
+        auditId, { auditId: 'different-model' }, { auditId }, snapshot.capability, options,
+      ),
+      /não corresponde|correla/iu,
+    );
+    await assert.rejects(
+      store.finalizeExportAndMaybeDelete(
+        auditId, { auditId }, { auditId: 'different-latest' }, snapshot.capability, options,
+      ),
+      /não corresponde|correla/iu,
+    );
+    assert.equal((await store.getAudit(auditId)).auditId, auditId);
+  }
+});
+
 test('in-memory audit storage round-trips models and latest panel state without aliasing', async () => {
   const store = createInMemoryAuditStore();
   const model = { auditId: 'audit-1', payload: 'x'.repeat(1024 * 1024) };
