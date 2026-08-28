@@ -20,7 +20,8 @@ import { createAuditDeletedEvent } from '../core/audit-deleted-event.js';
 const PANEL_PATH = '/src/panel/index.html';
 const REVIEW_PATH = '/src/review/index.html';
 const EXPORT_PATH = '/src/export/index.html';
-const sessionKey = (id) => `audita-mt:session:${id}`;
+const SESSION_KEY_PREFIX = 'audita-mt:session:';
+const sessionKey = (id) => `${SESSION_KEY_PREFIX}${id}`;
 const ACTIVE_BATCH_KEY = 'audita-mt:session:active-batch';
 const EXPORT_BUSY_MESSAGE = 'Este relatório já está sendo gerado; tente novamente após a conclusão.';
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
@@ -55,6 +56,16 @@ export function isAuthorizedExtensionSender(sender, runtimeId, requiredPath) {
 
 export function createSessionStore(chromeApi, fallback = new Map()) {
   const storage = chromeApi?.storage?.session;
+  let mutationTail = Promise.resolve();
+  const serializeMutation = operation => {
+    const pending = mutationTail.then(operation, operation);
+    mutationTail = pending.catch(() => {});
+    return pending;
+  };
+  const afterMutations = async operation => {
+    await mutationTail;
+    return operation();
+  };
   const requireAuditId = id => {
     if (!validAuditId(id)) throw new TypeError('Identificador do checkpoint de sessão inválido.');
     return id;
@@ -64,76 +75,118 @@ export function createSessionStore(chromeApi, fallback = new Map()) {
     for (const [key, value] of fallback) {
       if (key === ACTIVE_BATCH_KEY) {
         if (!keep.has(value?.id)) fallback.delete(key);
-      } else if (validAuditId(key) && value?.id === key && !keep.has(key)) {
+      } else if (typeof key === 'string' && key.startsWith(SESSION_KEY_PREFIX)) {
+        fallback.delete(key);
+      } else if (validAuditId(key) && (value?.id !== key || !keep.has(key))) {
         fallback.delete(key);
       }
     }
   };
   if (!storage) {
     return {
-      async set(id, value) { fallback.set(requireAuditId(id), value); },
-      async get(id) { return fallback.get(requireAuditId(id)); },
-      async remove(id) { fallback.delete(requireAuditId(id)); },
-      async setActiveBatch(value) { fallback.set(ACTIVE_BATCH_KEY, value); },
-      async getActiveBatch() { return fallback.get(ACTIVE_BATCH_KEY); },
-      async clearActiveBatch() { fallback.delete(ACTIVE_BATCH_KEY); },
-      async clearAuditSessions(options) { removeFallbackSessions(keepSet(options)); },
+      set(id, value) {
+        return serializeMutation(async () => { fallback.set(requireAuditId(id), value); });
+      },
+      get(id) {
+        return afterMutations(() => fallback.get(requireAuditId(id)));
+      },
+      remove(id) {
+        return serializeMutation(async () => {
+          const auditId = requireAuditId(id);
+          fallback.delete(auditId);
+          if (fallback.get(ACTIVE_BATCH_KEY)?.id === auditId) fallback.delete(ACTIVE_BATCH_KEY);
+        });
+      },
+      setActiveBatch(value) {
+        return serializeMutation(async () => { fallback.set(ACTIVE_BATCH_KEY, value); });
+      },
+      getActiveBatch() {
+        return afterMutations(() => fallback.get(ACTIVE_BATCH_KEY));
+      },
+      clearActiveBatch() {
+        return serializeMutation(async () => { fallback.delete(ACTIVE_BATCH_KEY); });
+      },
+      clearAuditSessions(options) {
+        return serializeMutation(async () => { removeFallbackSessions(keepSet(options)); });
+      },
     };
   }
   return {
-    async set(id, value) {
-      requireAuditId(id);
-      fallback.set(id, value);
-      try { await invokeStorage(chromeApi, storage, 'set', { [sessionKey(id)]: value }); } catch { /* fallback efêmero */ }
+    set(id, value) {
+      return serializeMutation(async () => {
+        requireAuditId(id);
+        fallback.set(id, value);
+        try { await invokeStorage(chromeApi, storage, 'set', { [sessionKey(id)]: value }); } catch { /* fallback efêmero */ }
+      });
     },
     async get(id) {
       requireAuditId(id);
+      await mutationTail;
       try {
         const result = await invokeStorage(chromeApi, storage, 'get', sessionKey(id));
         return result?.[sessionKey(id)] ?? fallback.get(id);
       } catch { return fallback.get(id); }
     },
-    async remove(id) {
-      requireAuditId(id);
-      fallback.delete(id);
-      if (typeof storage.remove === 'function') {
-        try { await invokeStorage(chromeApi, storage, 'remove', sessionKey(id)); } catch { /* fallback efêmero */ }
-      }
+    remove(id) {
+      return serializeMutation(async () => {
+        const auditId = requireAuditId(id);
+        let storedActive;
+        if (typeof storage.get === 'function') {
+          try {
+            const result = await invokeStorage(chromeApi, storage, 'get', ACTIVE_BATCH_KEY);
+            storedActive = result?.[ACTIVE_BATCH_KEY];
+          } catch { /* sem correlação persistente segura */ }
+        }
+        fallback.delete(auditId);
+        if (fallback.get(ACTIVE_BATCH_KEY)?.id === auditId) fallback.delete(ACTIVE_BATCH_KEY);
+        if (typeof storage.remove === 'function') {
+          const keys = [sessionKey(auditId)];
+          if (storedActive?.id === auditId) keys.push(ACTIVE_BATCH_KEY);
+          try { await invokeStorage(chromeApi, storage, 'remove', keys); } catch { /* fallback efêmero */ }
+        }
+      });
     },
-    async setActiveBatch(value) {
-      fallback.set(ACTIVE_BATCH_KEY, value);
-      try { await invokeStorage(chromeApi, storage, 'set', { [ACTIVE_BATCH_KEY]: value }); } catch { /* fallback efêmero */ }
+    setActiveBatch(value) {
+      return serializeMutation(async () => {
+        fallback.set(ACTIVE_BATCH_KEY, value);
+        try { await invokeStorage(chromeApi, storage, 'set', { [ACTIVE_BATCH_KEY]: value }); } catch { /* fallback efêmero */ }
+      });
     },
     async getActiveBatch() {
+      await mutationTail;
       try {
         const result = await invokeStorage(chromeApi, storage, 'get', ACTIVE_BATCH_KEY);
         return result?.[ACTIVE_BATCH_KEY] ?? fallback.get(ACTIVE_BATCH_KEY);
       } catch { return fallback.get(ACTIVE_BATCH_KEY); }
     },
-    async clearActiveBatch() {
-      fallback.delete(ACTIVE_BATCH_KEY);
-      if (typeof storage.remove === 'function') {
-        try { await invokeStorage(chromeApi, storage, 'remove', ACTIVE_BATCH_KEY); } catch { /* fallback efêmero */ }
-      }
-    },
-    async clearAuditSessions(options) {
-      const keep = keepSet(options);
-      removeFallbackSessions(keep);
-      if (typeof storage.get !== 'function' || typeof storage.remove !== 'function') return;
-      try {
-        const values = await invokeStorage(chromeApi, storage, 'get', null);
-        const keys = [];
-        for (const [key, value] of Object.entries(values ?? {})) {
-          if (key === ACTIVE_BATCH_KEY) {
-            if (!keep.has(value?.id)) keys.push(key);
-            continue;
-          }
-          if (!key.startsWith('audita-mt:session:')) continue;
-          const auditId = key.slice('audita-mt:session:'.length);
-          if (validAuditId(auditId) && value?.id === auditId && !keep.has(auditId)) keys.push(key);
+    clearActiveBatch() {
+      return serializeMutation(async () => {
+        fallback.delete(ACTIVE_BATCH_KEY);
+        if (typeof storage.remove === 'function') {
+          try { await invokeStorage(chromeApi, storage, 'remove', ACTIVE_BATCH_KEY); } catch { /* fallback efêmero */ }
         }
-        if (keys.length > 0) await invokeStorage(chromeApi, storage, 'remove', keys);
-      } catch { /* fallback efêmero */ }
+      });
+    },
+    clearAuditSessions(options) {
+      return serializeMutation(async () => {
+        const keep = keepSet(options);
+        removeFallbackSessions(keep);
+        if (typeof storage.get !== 'function' || typeof storage.remove !== 'function') return;
+        try {
+          const values = await invokeStorage(chromeApi, storage, 'get', null);
+          const keys = [];
+          for (const [key, value] of Object.entries(values ?? {})) {
+            if (key === ACTIVE_BATCH_KEY) {
+              if (!keep.has(value?.id)) keys.push(key);
+              continue;
+            }
+            if (!key.startsWith(SESSION_KEY_PREFIX)) continue;
+            const auditId = key.slice(SESSION_KEY_PREFIX.length);
+            if (!validAuditId(auditId) || value?.id !== auditId || !keep.has(auditId)) keys.push(key);
+          }
+          if (keys.length > 0) await invokeStorage(chromeApi, storage, 'remove', keys);
+        } catch { /* fallback efêmero */ }
+      });
     },
   };
 }
@@ -553,15 +606,19 @@ export function registerServiceWorker(chromeApi, options = {}) {
     try {
       const checkpoint = await sessions.getActiveBatch?.();
       if (!checkpoint || checkpoint.mode !== 'batch') return;
-      const [snapshot, latest] = await Promise.all([
+      const [snapshot, retention, latest] = await Promise.all([
         auditStore.getAuditSnapshot?.(checkpoint.id),
+        auditStore.getAuditRetention?.(checkpoint.id),
         auditStore.getLatest?.(),
       ]);
       const terminal = ['complete', 'partial', 'failed', 'cancelled'].includes(checkpoint.state);
+      const active = ['idle', 'validating', 'queued', 'running', 'cancelling'].includes(checkpoint.state);
       const committed = terminal && snapshot?.model?.auditId === checkpoint.id &&
         snapshot.model?.session?.status === checkpoint.state &&
         latest?.auditId === checkpoint.id && latest.status === checkpoint.state;
-      if (committed || (latest?.auditId && latest.auditId !== checkpoint.id)) {
+      const durablyAbsent = (terminal || !active) && snapshot?.model === undefined &&
+        retention === undefined && latest == null;
+      if (committed || durablyAbsent || (latest?.auditId && latest.auditId !== checkpoint.id)) {
         await clearActiveCheckpointIfCurrent(checkpoint);
         return;
       }

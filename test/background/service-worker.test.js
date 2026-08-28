@@ -470,6 +470,62 @@ test('session store removes only correlated audit checkpoints and can prune its 
   assert.equal(localCalls, 0);
 });
 
+test('session remove clears only its correlated active marker and remains retryable after storage failure', async () => {
+  const sessionValues = {};
+  let failRemove = false;
+  const chromeApi = {
+    runtime: {},
+    storage: { session: {
+      async set(values) { Object.assign(sessionValues, structuredClone(values)); },
+      async get(key) {
+        return Object.hasOwn(sessionValues, key) ? { [key]: structuredClone(sessionValues[key]) } : {};
+      },
+      async remove(keys) {
+        if (failRemove) throw new Error('session unavailable');
+        for (const key of Array.isArray(keys) ? keys : [keys]) delete sessionValues[key];
+      },
+    } },
+  };
+  const store = createSessionStore(chromeApi);
+  await store.set('audit-a', { id: 'audit-a', state: 'complete' });
+  await store.setActiveBatch({ id: 'audit-a', mode: 'batch', state: 'complete' });
+  await store.remove('audit-a');
+  assert.equal(sessionValues['audita-mt:session:audit-a'], undefined);
+  assert.equal(sessionValues['audita-mt:session:active-batch'], undefined);
+
+  await store.set('audit-a', { id: 'audit-a', state: 'complete' });
+  await store.setActiveBatch({ id: 'audit-b', mode: 'batch', state: 'running' });
+  await store.remove('audit-a');
+  assert.equal(sessionValues['audita-mt:session:active-batch'].id, 'audit-b');
+
+  await store.set('audit-b', { id: 'audit-b', state: 'complete' });
+  await store.setActiveBatch({ id: 'audit-b', mode: 'batch', state: 'complete' });
+  failRemove = true;
+  await store.remove('audit-b');
+  assert.equal(sessionValues['audita-mt:session:active-batch'].id, 'audit-b');
+  failRemove = false;
+  const restarted = createSessionStore(chromeApi);
+  await restarted.remove('audit-b');
+  assert.equal(sessionValues['audita-mt:session:active-batch'], undefined);
+});
+
+test('session pruning removes malformed keys only from its own namespace', async () => {
+  const sessionValues = {
+    'audita-mt:session:': { id: '' },
+    'audita-mt:session:bad/value': { id: 'bad/value' },
+    'audita-mt:session:mismatch': { id: 'different' },
+    'persona-owned-elsewhere': { voice: 'pt-BR' },
+  };
+  const chromeApi = { runtime: {}, storage: { session: {
+    async get() { return structuredClone(sessionValues); },
+    async remove(keys) {
+      for (const key of Array.isArray(keys) ? keys : [keys]) delete sessionValues[key];
+    },
+  } } };
+  await createSessionStore(chromeApi).clearAuditSessions({ keepAuditIds: [] });
+  assert.deepEqual(sessionValues, { 'persona-owned-elsewhere': { voice: 'pt-BR' } });
+});
+
 test('falls back to memory when storage.session rejects without touching storage.local', async () => {
   const chromeApi = createChrome();
   chromeApi.storage = {
@@ -980,7 +1036,7 @@ test('a delayed restart restoration can never overwrite a newly accepted audit',
   finishRunner?.({ auditId: 'audit-new', session: { status: 'complete' }, report: {} });
 });
 
-test('accepts a terminal active marker only when snapshot and latest prove its commit', async () => {
+test('clears a terminal active marker when its commit is proved or its durable audit is absent', async () => {
   for (const proved of [false, true]) {
     const chromeApi = createChrome();
     const checkpoint = {
@@ -1003,10 +1059,45 @@ test('accepts a terminal active marker only when snapshot and latest prove its c
       }),
     });
     await waitUntil(() => cleared);
-    assert.equal(saved?.state, proved ? undefined : 'failed');
-    assert.equal(latest?.status, proved ? 'complete' : 'failed');
+    assert.equal(saved, undefined);
+    assert.equal(latest?.status, proved ? 'complete' : undefined);
     assert.deepEqual(removed, [checkpoint.id]);
   }
+});
+
+test('restart treats an absent terminal checkpoint as deleted and never recreates latest state', async () => {
+  const chromeApi = createChrome();
+  const sessionValues = {
+    'audita-mt:session:batch-deleted': {
+      id: 'batch-deleted', mode: 'batch', state: 'complete', total: 1, currentIndex: 1,
+      completedCount: 1, statusCounts: { complete: 1, partial: 0, failed: 0, cancelled: 0 },
+      cancelRequested: false, startedAt: '2026-08-28T10:00:00.000Z',
+      updatedAt: '2026-08-28T10:01:00.000Z', resumable: false,
+    },
+  };
+  sessionValues['audita-mt:session:active-batch'] = structuredClone(sessionValues['audita-mt:session:batch-deleted']);
+  chromeApi.storage = { session: {
+    async get(key) {
+      if (key === null) return structuredClone(sessionValues);
+      return Object.hasOwn(sessionValues, key) ? { [key]: structuredClone(sessionValues[key]) } : {};
+    },
+    async remove(keys) {
+      for (const key of Array.isArray(keys) ? keys : [keys]) delete sessionValues[key];
+    },
+    async set(values) { Object.assign(sessionValues, structuredClone(values)); },
+  } };
+  const latestWrites = [];
+  registerServiceWorker(chromeApi, {
+    auditStore: {
+      async getAuditSnapshot() { return { model: undefined, revision: 0, capability: null }; },
+      async getAuditRetention() { return undefined; },
+      async getLatest() { return undefined; },
+      async setLatest(value) { latestWrites.push(value); },
+    },
+  });
+  await waitUntil(() => sessionValues['audita-mt:session:active-batch'] === undefined);
+  assert.equal(sessionValues['audita-mt:session:batch-deleted'], undefined);
+  assert.deepEqual(latestWrites, []);
 });
 
 test('clears a stale active marker without replacing a newer single-page latest record', async () => {
@@ -1683,7 +1774,7 @@ test('destructive protocol accepts only correlated review and canonical panel se
   });
   await sessions.set('delete-protocol-a', { id: 'delete-protocol-a', state: 'complete' });
   await sessions.set('delete-protocol-b', { id: 'delete-protocol-b', state: 'complete' });
-  await sessions.setActiveBatch({ id: 'delete-protocol-b', mode: 'batch', state: 'complete' });
+  await sessions.setActiveBatch({ id: 'delete-protocol-a', mode: 'batch', state: 'complete' });
 
   for (const [message, sender] of [
     [{ type: 'REQUEST_DELETE_AUDIT', auditId: 'delete-protocol-a' }, { id: 'test', url: 'chrome-extension://test/src/export/index.html?auditId=delete-protocol-a&exportAttempt=1&leaseOwnerId=owner' }],
@@ -1708,10 +1799,12 @@ test('destructive protocol accepts only correlated review and canonical panel se
   assert.deepEqual(deletedOne, { ok: true, auditId: 'delete-protocol-a', deleted: true });
   assert.equal(await store.getAudit('delete-protocol-a'), undefined);
   assert.equal(await sessions.get('delete-protocol-a'), undefined);
+  assert.equal(await sessions.getActiveBatch(), undefined);
   assert.ok(await sessions.get('delete-protocol-b'));
   assert.ok(chromeApi.runtime.sent.some(message => message.type === 'AUDIT_DELETED' &&
     message.auditId === 'delete-protocol-a' && message.reason === 'delete-one'));
 
+  await sessions.setActiveBatch({ id: 'delete-protocol-b', mode: 'batch', state: 'complete' });
   let deletedAll;
   chromeApi.listeners.message.listener(
     { type: 'REQUEST_DELETE_ALL_AUDITS' },
@@ -1730,7 +1823,9 @@ test('destructive protocol accepts only correlated review and canonical panel se
 test('worker publishes complete-export deletion only after exact correlation and durable absence', async () => {
   const chromeApi = createChrome();
   const store = createInMemoryAuditStore();
-  registerServiceWorker(chromeApi, { auditStore: store });
+  const sessions = registerServiceWorker(chromeApi, { auditStore: store });
+  await sessions.set('export-deleted', { id: 'export-deleted', state: 'complete' });
+  await sessions.setActiveBatch({ id: 'export-deleted', mode: 'batch', state: 'complete' });
   const message = {
     type: 'EXPORT_COMPLETE',
     auditId: 'export-deleted',
@@ -1753,6 +1848,8 @@ test('worker publishes complete-export deletion only after exact correlation and
   assert.deepEqual(chromeApi.runtime.sent.find(value => value.type === 'AUDIT_DELETED'), {
     type: 'AUDIT_DELETED', auditId: 'export-deleted', reason: 'complete-export',
   });
+  assert.equal(await sessions.get('export-deleted'), undefined);
+  assert.equal(await sessions.getActiveBatch(), undefined);
 
   chromeApi.runtime.sent.length = 0;
   await store.commitAudit('still-present', { auditId: 'still-present' }, { auditId: 'still-present' }, {
