@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { constants as fsConstants } from 'node:fs';
-import { access, mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -19,6 +19,47 @@ const runtimeProbeByRole = Object.freeze({
   panel: 'AUDITA_RUNTIME_LOG_PROBE_PANEL',
   review: 'AUDITA_RUNTIME_LOG_PROBE_REVIEW',
   export: 'AUDITA_RUNTIME_LOG_PROBE_EXPORT',
+});
+
+test('physical download gate waits for Chrome temporary files to leave the correlated history set', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'audita-download-gate-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const expected = [
+    'fixture-delivery-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.csv',
+    'fixture-delivery-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.html',
+    'fixture-delivery-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json',
+    'fixture-delivery-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf',
+  ];
+  const temporary = ['browser-stage.html', 'browser-stage.tmp'];
+  await Promise.all([...expected, ...temporary].map(name => writeFile(join(directory, name), 'bytes')));
+  const cleanup = delay(30).then(() => Promise.all(temporary.map(name => rm(join(directory, name)))));
+
+  const files = await waitForDownloadedFiles(directory, expected, 1_000);
+  await cleanup;
+
+  assert.equal(files.length, expected.length);
+  assert.equal(files.every((name, index) => name === [...expected].sort()[index]), true);
+});
+
+test('physical download gate waits until every correlated file is nonempty', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'audita-download-size-gate-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const expected = [
+    'fixture-delivery-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.html',
+  ];
+  await writeFile(join(directory, expected[0]), '');
+  let filled = false;
+  const fill = delay(30).then(async () => {
+    await writeFile(join(directory, expected[0]), 'bytes');
+    filled = true;
+  });
+
+  try {
+    await waitForDownloadedFiles(directory, expected, 1_000);
+    assert.equal(filled, true);
+  } finally {
+    await fill;
+  }
 });
 
 test('auto-attached runtime capture is independent from target URL lifecycle', async t => {
@@ -582,7 +623,9 @@ async function runPublicBatchRetentionProof({ browser, harness, extensionId, loo
   assert.equal(retainedDelivery.journalSettled, true);
   assert.deepEqual(retainedDelivery.downloadStates, ['complete', 'complete', 'complete', 'complete']);
   const firstDownloads = await waitForCompletedDownloads(harness, 4, 60_000);
-  const firstFiles = await waitForDownloadedFiles(downloadDir, 4, 30_000);
+  const firstHistoryFiles = await completedDownloadBasenames(harness);
+  assert.equal(firstHistoryFiles.length, 4, 'o histórico Chrome não estabilizou em quatro downloads');
+  const firstFiles = await waitForDownloadedFiles(downloadDir, firstHistoryFiles, 30_000);
   const firstFileExtensions = firstFiles.map(name => name.split('.').at(-1)).sort();
   const firstFileStats = await Promise.all(firstFiles.map(name => stat(join(downloadDir, name))));
   const checkpointCleared = await waitForValue(harness, `chrome.storage.session.get(null).then(session => ({
@@ -739,7 +782,9 @@ async function runPublicBatchRetentionProof({ browser, harness, extensionId, loo
     };
   })()`, true, 20_000);
 
-  const files = await waitForDownloadedFiles(downloadDir, 8, 30_000);
+  const finalHistoryFiles = await completedDownloadBasenames(harness);
+  assert.equal(finalHistoryFiles.length, 8, 'o histórico Chrome não estabilizou em oito downloads');
+  const files = await waitForDownloadedFiles(downloadDir, finalHistoryFiles, 30_000);
   const fileExtensions = files.map(name => name.split('.').at(-1)).sort();
   const fileStats = await Promise.all(files.map(name => stat(join(downloadDir, name))));
   const firstFileSet = new Set(firstFiles);
@@ -1033,18 +1078,35 @@ async function waitForCompletedDownloads(page, expected, timeoutMs) {
       count: complete.length,
       formats: complete.map(item => item.filename.match(/\\.(html|json|csv|pdf)$/iu)?.[1].toLowerCase()).filter(Boolean).sort()
     };
-  })`, value => value?.count >= expected, timeoutMs);
+  })`, value => value?.count === expected, timeoutMs);
 }
 
-async function waitForDownloadedFiles(directory, expected, timeoutMs) {
+async function completedDownloadBasenames(page) {
+  return evaluate(page, `chrome.downloads.search({}).then(items => items
+    .filter(item => item.state === 'complete' && item.exists !== false &&
+      /\\.(?:html|json|csv|pdf)$/iu.test(item.filename || ''))
+    .map(item => String(item.filename).split(/[\\\\/]/u).at(-1)))`, true, 20_000);
+}
+
+async function waitForDownloadedFiles(directory, expectedBasenames, timeoutMs) {
+  if (!Array.isArray(expectedBasenames) || expectedBasenames.length === 0 ||
+    expectedBasenames.some(name => typeof name !== 'string' || name.length === 0)) {
+    throw new TypeError('Nomes físicos esperados inválidos.');
+  }
+  const expected = new Set(expectedBasenames);
   const started = Date.now();
   let files = [];
   while (Date.now() - started < timeoutMs) {
-    files = (await readdir(directory)).filter(name => /\.(?:html|json|csv|pdf)$/iu.test(name));
-    if (files.length >= expected) return files.sort();
+    files = await readdir(directory);
+    if (files.length === expected.size && files.every(name => expected.has(name))) {
+      try {
+        const stats = await Promise.all(files.map(name => stat(join(directory, name))));
+        if (stats.every(value => value.size > 0)) return files.sort();
+      } catch { /* o diretório ainda está convergindo */ }
+    }
     await delay(50);
   }
-  throw new Error(`Arquivos físicos não chegaram ao total esperado; contagem segura=${files.length}`);
+  throw new Error(`Arquivos físicos não convergiram com o histórico; contagem segura=${files.length}`);
 }
 
 async function followLatestReportLink(panel, auditId) {
