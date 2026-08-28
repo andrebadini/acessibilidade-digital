@@ -54,6 +54,7 @@ const deleteAuditController = createDestructiveDialog({
   confirmButton: deleteAuditConfirm,
   status,
   dialogStatus: deleteAuditDialogStatus,
+  stableFocus: status,
   async onConfirm() {
     if (!auditModel?.auditId) return { ok: false, error: 'Auditoria não encontrada ou já excluída.' };
     const response = await sendWorkerRequest({
@@ -90,8 +91,8 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     workerUrl: chrome.runtime.getURL('src/background/service-worker.js'),
   });
   if (deletion && (deletion.scope === 'all' || deletion.auditId === auditModel?.auditId)) {
+    deleteAuditController.completeSuccess();
     renderDeletedAudit();
-    status.textContent = 'Auditoria local excluída. Downloads já salvos foram preservados.';
     return;
   }
   if (message?.type === 'AUDIT_DELETED') return;

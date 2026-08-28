@@ -111,6 +111,7 @@ const deleteAllController = createDestructiveDialog({
   confirmButton: deleteAllConfirm,
   status,
   dialogStatus: deleteAllDialogStatus,
+  stableFocus: status,
   async onConfirm() {
     const response = await sendWorkerRequest({ type: 'REQUEST_DELETE_ALL_AUDITS' });
     if (response.ok === true) {
@@ -286,13 +287,14 @@ chrome.runtime.onMessage.addListener((message, sender) => {
       workerUrl: chrome.runtime.getURL('src/background/service-worker.js'),
     });
     if (deletion && (deletion.scope === 'all' || deletion.auditId === (activeAuditId ?? panelState?.auditId))) {
+      if (deletion.scope === 'all') deleteAllController.completeSuccess();
       activeAuditId = null;
       panelState = null;
       submissionGate.release();
       clearReport();
       renderBatchState(null);
       setSubmitting(false);
-      setStatus('A auditoria local foi excluída. Downloads já salvos foram preservados.');
+      if (deletion.scope !== 'all') setStatus('A auditoria local foi excluída. Downloads já salvos foram preservados.');
     }
     return false;
   }

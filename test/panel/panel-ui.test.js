@@ -47,11 +47,14 @@ test('panel exposes explicit 30-day retention controls and a confirmed delete-al
   assert.match(html, /<dialog[^>]+id="delete-all-dialog"[^>]+aria-labelledby="delete-all-title"[^>]+aria-describedby="delete-all-description"/iu);
   assert.match(html, /<dialog[^>]+id="delete-all-dialog"[^>]+aria-hidden="true"/iu);
   assert.match(html, /id="delete-all-dialog-status"[^>]+role="status"[^>]+aria-live="polite"/iu);
+  assert.match(html, /id="audit-status"[^>]+tabindex="-1"/iu);
   assert.match(html, /todas as auditorias locais[\s\S]*downloads/iu);
   assert.match(script, /createDestructiveDialog/u);
   assert.match(script, /deleteAfterCompleteExport:\s*deleteAfterExport\.checked/u);
   assert.match(script, /REQUEST_DELETE_ALL_AUDITS/u);
   assert.match(script, /parseAuditDeletedEvent/u);
+  assert.match(script, /stableFocus:\s*status/u);
+  assert.match(script, /deleteAllController\.completeSuccess\(\)/u);
   assert.doesNotMatch(script, /src\/export\/index\.html/u);
   assert.doesNotMatch(script, /window\.confirm|innerHTML/u);
   assert.match(css, /#delete-all-audits[^{]*\{[^}]*min-height:\s*2\.75rem/isu);

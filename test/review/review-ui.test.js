@@ -49,11 +49,14 @@ test('review offers a correlated accessible delete-one dialog without exposing t
   assert.match(html, /<dialog[^>]+id="delete-audit-dialog"[^>]+aria-labelledby="delete-audit-title"[^>]+aria-describedby="delete-audit-description"/iu);
   assert.match(html, /<dialog[^>]+id="delete-audit-dialog"[^>]+aria-hidden="true"/iu);
   assert.match(html, /id="delete-audit-dialog-status"[^>]+role="status"[^>]+aria-live="polite"/iu);
+  assert.match(html, /id="review-status"[^>]+tabindex="-1"/iu);
   assert.match(html, /evidências[\s\S]*pixels[\s\S]*revisões[\s\S]*downloads/iu);
   assert.match(script, /createDestructiveDialog/u);
   assert.match(script, /REQUEST_DELETE_AUDIT/u);
   assert.match(script, /auditId:\s*auditModel\.auditId/u);
   assert.match(script, /parseAuditDeletedEvent/u);
+  assert.match(script, /stableFocus:\s*status/u);
+  assert.match(script, /deleteAuditController\.completeSuccess\(\)/u);
   assert.doesNotMatch(script, /src\/export\/index\.html/u);
   assert.doesNotMatch(script, /window\.confirm|innerHTML/u);
   assert.match(css, /#delete-audit[^{]*\{[^}]*min-height:\s*2\.75rem/isu);
