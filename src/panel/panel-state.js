@@ -167,6 +167,9 @@ export function reducePanelState(current, message, extensionBaseUrl = '') {
       status: 'running',
       percent,
       message: typeof message.message === 'string' ? message.message : current.message,
+      ...(Number.isSafeInteger(message.pageNumber) && message.pageNumber >= 1 ? { pageNumber: message.pageNumber } : {}),
+      ...(Number.isSafeInteger(message.total) && message.total >= 1 && message.total <= 20 ? { total: message.total } : {}),
+      ...(validStatusCounts(message.statusCounts) ? { statusCounts: { ...message.statusCounts } } : {}),
     };
   }
   if (message.type === 'AUDIT_COMPLETE') {
@@ -175,10 +178,11 @@ export function reducePanelState(current, message, extensionBaseUrl = '') {
       : message.exportStatus === 'preparing' ? 'preparing' : current.exportStatus;
     return {
       ...current,
-      status: message.status === 'partial' ? 'partial' : 'complete',
+      status: ['complete', 'partial', 'failed', 'cancelled'].includes(message.status) ? message.status : 'complete',
       percent: 100,
-      message: message.status === 'partial' ? 'Auditoria concluída com limitações.' : 'Auditoria concluída.',
+      message: terminalAuditMessage(message.status),
       reviewUrl: isSafeReportUrl(message.reviewUrl, extensionBaseUrl) ? message.reviewUrl : null,
+      ...(validStatusCounts(message.statusCounts) ? { statusCounts: { ...message.statusCounts } } : {}),
       ...(preservedExportStatus ? { exportStatus: preservedExportStatus } : {}),
     };
   }
@@ -229,6 +233,20 @@ export function reducePanelState(current, message, extensionBaseUrl = '') {
     });
   }
   return current;
+}
+
+function validStatusCounts(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = ['cancelled', 'complete', 'failed', 'partial'];
+  if (Object.keys(value).sort().join(',') !== keys.join(',')) return false;
+  return keys.every(key => Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= 20);
+}
+
+function terminalAuditMessage(status) {
+  if (status === 'partial') return 'Auditoria concluída com limitações.';
+  if (status === 'failed') return 'Lote encerrado com falhas; o registro disponível pode ser revisado.';
+  if (status === 'cancelled') return 'Lote cancelado; os resultados disponíveis podem ser revisados.';
+  return 'Auditoria concluída.';
 }
 
 export function applyExportEvent(current, message, exportStatus, patch = {}) {

@@ -406,7 +406,7 @@ test('persists sessions with storage.session and falls back to an injected map',
   assert.deepEqual(await fallbackStore.get('audit-2'), { id: 'audit-2' });
 });
 
-test('ACKs immediately and reports a background persistence failure without an unhandled rejection', async () => {
+test('falls back to memory when storage.session rejects without touching storage.local', async () => {
   const chromeApi = createChrome();
   chromeApi.storage = {
     session: {
@@ -418,7 +418,8 @@ test('ACKs immediately and reports a background persistence failure without an u
     },
   };
   const store = createSessionStore(chromeApi);
-  await assert.rejects(store.set('audit-1', { id: 'audit-1' }), /storage denied/);
+  await assert.doesNotReject(store.set('audit-1', { id: 'audit-1' }));
+  assert.deepEqual(await store.get('audit-1'), { id: 'audit-1' });
 
   registerServiceWorker(chromeApi, { createId: () => 'audit-1' });
   let response;
@@ -618,6 +619,139 @@ test('deduplicates concurrent START_AUDIT messages from the same panel sender', 
   assert.equal(first.auditId, 'audit-1');
   assert.deepEqual(second, { ok: true, auditId: 'audit-1', state: 'running', duplicate: true });
   finish?.({ auditId: 'audit-1', session: { status: 'complete' }, report: {} });
+});
+
+test('never falls back to storage.local for ephemeral batch checkpoints', async () => {
+  let localCalls = 0;
+  const fallback = new Map();
+  const store = createSessionStore({ storage: { local: {
+    async set() { localCalls += 1; }, async get() { localCalls += 1; },
+  } } }, fallback);
+  await store.set('batch-ephemeral', { id: 'batch-ephemeral', mode: 'batch' });
+  assert.deepEqual(await store.get('batch-ephemeral'), { id: 'batch-ephemeral', mode: 'batch' });
+  assert.equal(localCalls, 0);
+});
+
+test('starts one normalized batch globally and only lets its owning panel cancel it', async () => {
+  const chromeApi = createChrome();
+  const checkpoints = [];
+  let batchInput;
+  let release;
+  const batchRunner = ({ entries, batchAuditId, signal, onCheckpoint }) => {
+    batchInput = { entries, batchAuditId, signal };
+    void onCheckpoint({ id: batchAuditId, mode: 'batch', state: 'running', total: entries.length });
+    return new Promise(resolve => { release = resolve; });
+  };
+  registerServiceWorker(chromeApi, {
+    createId: () => 'batch-global', batchRunner,
+    sessionStore: { async set(id, value) { checkpoints.push([id, value]); }, async get() {} },
+    auditStore: withAuditRevisions({ async setLatest() {}, async commitAudit() {} }),
+    chromeAdapterFactory: () => ({}),
+    reportOptions: { timezone: 'UTC', manifestVersion: '2.0.0', rulesVersion: '1.0.0', browserVersion: '152.0.0.0' },
+  });
+  const owner = { id: 'test', url: 'chrome-extension://test/src/panel/index.html', documentId: 'panel-owner' };
+  const other = { id: 'test', url: 'chrome-extension://test/src/panel/index.html', documentId: 'panel-other' };
+  let started;
+  chromeApi.listeners.message.listener({ type: 'START_BATCH', urls: 'https://example.test/a?token=SECRET\nhttps://example.org/b' }, owner, value => { started = value; });
+  assert.deepEqual(started, { ok: true, auditId: 'batch-global', state: 'idle', total: 2, warnings: [] });
+  await waitUntil(() => batchInput !== undefined);
+  assert.equal(batchInput.entries[0].navigationUrl.includes('SECRET'), true);
+  assert.equal(JSON.stringify(checkpoints).includes('SECRET'), false);
+
+  let busy;
+  chromeApi.listeners.message.listener({ type: 'START_AUDIT', url: 'https://third.test/' }, other, value => { busy = value; });
+  assert.deepEqual(busy, { ok: false, code: 'AUDIT_BUSY', error: 'Já existe uma auditoria em andamento.' });
+
+  let denied;
+  chromeApi.listeners.message.listener({ type: 'CANCEL_AUDIT', auditId: 'batch-global' }, other, value => { denied = value; });
+  assert.deepEqual(denied, { ok: false, error: 'Cancelamento não autorizado.' });
+  let cancelled;
+  chromeApi.listeners.message.listener({ type: 'CANCEL_AUDIT', auditId: 'batch-global' }, owner, value => { cancelled = value; });
+  assert.deepEqual(cancelled, { ok: true, auditId: 'batch-global', state: 'cancelling' });
+  assert.equal(batchInput.signal.aborted, true);
+  release?.({ auditId: 'batch-global', session: { status: 'cancelled' }, report: {} });
+});
+
+test('blocks a batch with line errors before allocating an audit id', () => {
+  const chromeApi = createChrome();
+  let allocated = 0;
+  registerServiceWorker(chromeApi, { createId() { allocated += 1; return 'must-not-run'; } });
+  let response;
+  chromeApi.listeners.message.listener(
+    { type: 'START_BATCH', urls: 'https://ok.test\nftp://invalid.test' },
+    { id: 'test', url: 'chrome-extension://test/src/panel/index.html', documentId: 'panel-1' },
+    value => { response = value; },
+  );
+  assert.equal(response.ok, false);
+  assert.equal(response.code, 'BATCH_INVALID');
+  assert.equal(response.errors[0].line, 2);
+  assert.equal(JSON.stringify(response).includes('ftp://'), false);
+  assert.equal(allocated, 0);
+});
+
+test('turns a running batch checkpoint into an explanatory non-resumable interruption after restart', async () => {
+  const chromeApi = createChrome();
+  const checkpoint = {
+    id: 'batch-restart', mode: 'batch', state: 'running', total: 3, currentIndex: 1,
+    completedCount: 1, statusCounts: { complete: 1, partial: 0, failed: 0, cancelled: 0 },
+    cancelRequested: false, startedAt: '2026-08-28T10:00:00.000Z',
+    updatedAt: '2026-08-28T10:01:00.000Z', resumable: false,
+  };
+  let savedCheckpoint;
+  let latest;
+  registerServiceWorker(chromeApi, {
+    now: () => '2026-08-28T10:02:00.000Z',
+    sessionStore: {
+      async getActiveBatch() { return checkpoint; },
+      async setActiveBatch(value) { savedCheckpoint = value; },
+      async set() {}, async get() {},
+    },
+    auditStore: withAuditRevisions({ async setLatest(value) { latest = value; } }),
+  });
+  await waitUntil(() => latest !== undefined);
+  assert.equal(savedCheckpoint.state, 'failed');
+  assert.equal(savedCheckpoint.resumable, false);
+  assert.equal(latest.auditId, 'batch-restart');
+  assert.equal(latest.mode, 'batch');
+  assert.equal(latest.status, 'failed');
+  assert.match(latest.message, /interrompid[oa]|reinício/iu);
+  assert.doesNotMatch(JSON.stringify([savedCheckpoint, latest]), /https?:|token=|session=/iu);
+});
+
+test('a delayed restart restoration can never overwrite a newly accepted audit', async () => {
+  const chromeApi = createChrome();
+  let releaseRestore;
+  const restoreGate = new Promise(resolve => { releaseRestore = resolve; });
+  const latestWrites = [];
+  let finishRunner;
+  registerServiceWorker(chromeApi, {
+    createId: () => 'audit-new',
+    sessionStore: {
+      async getActiveBatch() { await restoreGate; return {
+        id: 'batch-old', mode: 'batch', state: 'running', total: 2, currentIndex: 1, completedCount: 1,
+        statusCounts: { complete: 1, partial: 0, failed: 0, cancelled: 0 }, cancelRequested: false,
+        startedAt: '2026-08-28T09:00:00.000Z', updatedAt: '2026-08-28T09:01:00.000Z', resumable: false,
+      }; },
+      async set() {}, async get() {}, async setActiveBatch() {},
+    },
+    auditStore: withAuditRevisions({
+      async setLatest(value) { latestWrites.push(value); }, async commitAudit() {},
+    }),
+    chromeAdapterFactory: () => ({}),
+    runner: () => new Promise(resolve => { finishRunner = resolve; }),
+  });
+  let response;
+  chromeApi.listeners.message.listener(
+    { type: 'START_AUDIT', url: 'https://new.example.test/' },
+    { id: 'test', url: 'chrome-extension://test/src/panel/index.html', documentId: 'panel-new' },
+    value => { response = value; },
+  );
+  assert.equal(response.auditId, 'audit-new');
+  await waitUntil(() => latestWrites.some(value => value.auditId === 'audit-new'));
+  releaseRestore();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(latestWrites.some(value => value.auditId === 'batch-old'), false);
+  finishRunner?.({ auditId: 'audit-new', session: { status: 'complete' }, report: {} });
 });
 
 test('stores only a sanitized URL before execution while runner keeps the full navigation URL', async () => {

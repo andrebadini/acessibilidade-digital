@@ -24,6 +24,7 @@ body {
 
 .product-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 1rem;
   padding: 1rem max(1rem, calc((100% - 46rem) / 2));
@@ -87,18 +88,29 @@ label {
 
 input,
 select,
+textarea,
 button {
   min-height: 2.75rem;
   padding: 0.55rem 0.75rem;
   font: inherit;
 }
 
-input {
+input,
+textarea {
   border: 2px solid var(--border);
   border-radius: 0.3rem;
   background: var(--surface);
   color: var(--ink);
 }
+
+textarea { width: 100%; resize: vertical; }
+
+.audit-mode { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; padding: 0.75rem; border: 2px solid var(--border); }
+.audit-mode label { display: inline-flex; align-items: center; gap: 0.4rem; min-height: 2.75rem; padding: 0.35rem; cursor: pointer; }
+.audit-mode input { min-height: 1.5rem; }
+#single-fields, #batch-fields { display: grid; gap: 0.4rem; }
+#batch-errors { margin: 0; color: #8b2f00; }
+#cancel-audit { min-height: 2.75rem; background: #8b2f00; }
 
 select {
   width: 100%;
@@ -332,6 +344,8 @@ a {
   button,
   input,
   select,
+  textarea,
+  .audit-mode,
   .persona-card,
   .persona-reader-card,
   .persona-limitations,

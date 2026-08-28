@@ -1,7 +1,9 @@
-import { createAuditSession } from './session.js';
+import { createAuditSession, interruptBatchCheckpoint } from './session.js';
 import { normalizeAuditUrl } from '../core/url.js';
 import { createChromeAdapter } from './chrome-adapter.js';
 import { runAudit } from './run-audit.js';
+import { runBatch } from './run-batch.js';
+import { normalizeUrlList } from '../core/batch/normalize-url-list.js';
 import {
   createAuditStore,
   isAuditExportLeaseConflict,
@@ -16,6 +18,7 @@ const PANEL_PATH = '/src/panel/index.html';
 const REVIEW_PATH = '/src/review/index.html';
 const EXPORT_PATH = '/src/export/index.html';
 const sessionKey = (id) => `audita-mt:session:${id}`;
+const ACTIVE_BATCH_KEY = 'audita-mt:session:active-batch';
 const EXPORT_BUSY_MESSAGE = 'Este relatório já está sendo gerado; tente novamente após a conclusão.';
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
 
@@ -47,18 +50,42 @@ export function isAuthorizedExtensionSender(sender, runtimeId, requiredPath) {
 }
 
 export function createSessionStore(chromeApi, fallback = new Map()) {
-  const storage = chromeApi?.storage?.session ?? chromeApi?.storage?.local;
+  const storage = chromeApi?.storage?.session;
   if (!storage) {
     return {
       async set(id, value) { fallback.set(id, value); },
       async get(id) { return fallback.get(id); },
+      async setActiveBatch(value) { fallback.set(ACTIVE_BATCH_KEY, value); },
+      async getActiveBatch() { return fallback.get(ACTIVE_BATCH_KEY); },
+      async clearActiveBatch() { fallback.delete(ACTIVE_BATCH_KEY); },
     };
   }
   return {
-    async set(id, value) { await invokeStorage(chromeApi, storage, 'set', { [sessionKey(id)]: value }); },
+    async set(id, value) {
+      fallback.set(id, value);
+      try { await invokeStorage(chromeApi, storage, 'set', { [sessionKey(id)]: value }); } catch { /* fallback efêmero */ }
+    },
     async get(id) {
-      const result = await invokeStorage(chromeApi, storage, 'get', sessionKey(id));
-      return result?.[sessionKey(id)];
+      try {
+        const result = await invokeStorage(chromeApi, storage, 'get', sessionKey(id));
+        return result?.[sessionKey(id)] ?? fallback.get(id);
+      } catch { return fallback.get(id); }
+    },
+    async setActiveBatch(value) {
+      fallback.set(ACTIVE_BATCH_KEY, value);
+      try { await invokeStorage(chromeApi, storage, 'set', { [ACTIVE_BATCH_KEY]: value }); } catch { /* fallback efêmero */ }
+    },
+    async getActiveBatch() {
+      try {
+        const result = await invokeStorage(chromeApi, storage, 'get', ACTIVE_BATCH_KEY);
+        return result?.[ACTIVE_BATCH_KEY] ?? fallback.get(ACTIVE_BATCH_KEY);
+      } catch { return fallback.get(ACTIVE_BATCH_KEY); }
+    },
+    async clearActiveBatch() {
+      fallback.delete(ACTIVE_BATCH_KEY);
+      if (typeof storage.remove === 'function') {
+        try { await invokeStorage(chromeApi, storage, 'remove', ACTIVE_BATCH_KEY); } catch { /* fallback efêmero */ }
+      }
     },
   };
 }
@@ -72,10 +99,12 @@ export function registerServiceWorker(chromeApi, options = {}) {
   const now = options.now ?? (() => new Date().toISOString());
   const logger = options.logger ?? { error() {} };
   const runner = options.runner ?? runAudit;
+  const batchRunner = options.batchRunner ?? runBatch;
   const auditStore = options.auditStore ?? createAuditStore(options.auditStoreOptions);
   const chromeAdapterFactory = options.chromeAdapterFactory ?? createChromeAdapter;
   const createExportOwnerId = options.createExportOwnerId ?? (() => crypto.randomUUID());
-  const activeBySender = new Map();
+  let activeJob = null;
+  let jobGeneration = 0;
   const activeExports = new Map();
   const personaController = options.personaController ?? getPersonaController(chromeApi, { logger });
   const contextMenuController = options.contextMenuController ?? registerAuditContextMenus(chromeApi, {
@@ -96,6 +125,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
     },
     beginSingleAudit,
   });
+  const startupReady = restoreInterruptedBatchCheckpoint(jobGeneration);
 
   chromeApi.action.onClicked.addListener((sourceTab) => {
     void Promise.resolve()
@@ -112,13 +142,13 @@ export function registerServiceWorker(chromeApi, options = {}) {
 
   chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (contextMenuController?.handlePanelProtocolMessage(message, sender, sendResponse)) return true;
-    const knownTypes = ['START_AUDIT', 'GET_LAST_AUDIT', 'REQUEST_EXPORT', 'REVIEW_COMMITTED', 'EXPORT_PROGRESS', 'EXPORT_COMPLETE', 'EXPORT_FAILED', 'EXPORT_BUSY', 'EXPORT_INVALIDATED'];
+    const knownTypes = ['START_AUDIT', 'START_BATCH', 'CANCEL_AUDIT', 'GET_LAST_AUDIT', 'REQUEST_EXPORT', 'REVIEW_COMMITTED', 'EXPORT_PROGRESS', 'EXPORT_COMPLETE', 'EXPORT_FAILED', 'EXPORT_BUSY', 'EXPORT_INVALIDATED'];
     if (!message || !knownTypes.includes(message.type)) return false;
     if (!isAuthorizedExtensionSender(sender, chromeApi.runtime.id)) {
       sendResponse({ ok: false, error: 'Origem da mensagem não autorizada.' });
       return true;
     }
-    if (message.type === 'START_AUDIT' && !isAuthorizedPanelSender(sender, chromeApi.runtime.id)) {
+    if (['START_AUDIT', 'START_BATCH', 'CANCEL_AUDIT'].includes(message.type) && !isAuthorizedPanelSender(sender, chromeApi.runtime.id)) {
       sendResponse({ ok: false, error: 'Origem da mensagem não autorizada.' });
       return true;
     }
@@ -182,11 +212,29 @@ export function registerServiceWorker(chromeApi, options = {}) {
       return true;
     }
     if (message.type === 'GET_LAST_AUDIT') {
-      void restorableLatestState().then(value => sendResponse({ ok: true, state: value ?? null }), () => sendResponse({ ok: false, error: 'Não foi possível restaurar a última auditoria.' }));
+      void startupReady.then(() => restorableLatestState()).then(value => sendResponse({ ok: true, state: value ?? null }), () => sendResponse({ ok: false, error: 'Não foi possível restaurar a última auditoria.' }));
+      return true;
+    }
+    const senderKey = `${sender.id}:${sender.documentId || sender.tab?.id || sender.url}`;
+    if (message.type === 'CANCEL_AUDIT') {
+      if (!activeJob || activeJob.auditId !== message.auditId || activeJob.senderKey !== senderKey) {
+        sendResponse({ ok: false, error: 'Cancelamento não autorizado.' });
+      } else {
+        activeJob.controller.abort(new DOMException('Auditoria cancelada pela pessoa usuária.', 'AbortError'));
+        sendResponse({ ok: true, auditId: activeJob.auditId, state: 'cancelling' });
+      }
+      return true;
+    }
+    if (message.type === 'START_BATCH') {
+      try {
+        const started = beginBatchAudit({ input: message.urls, senderKey });
+        sendResponse(started.response);
+      } catch (error) {
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Não foi possível preparar o lote.' });
+      }
       return true;
     }
     try {
-      const senderKey = `${sender.id}:${sender.documentId || sender.tab?.id || sender.url}`;
       const started = beginSingleAudit({ navigationUrl: message.url, senderKey });
       sendResponse(started.response);
     } catch (error) {
@@ -202,18 +250,19 @@ export function registerServiceWorker(chromeApi, options = {}) {
       throw new TypeError('Correlação da auditoria inválida.');
     }
     const requestedUrl = normalizeAuditUrl(navigationUrl);
-    const existing = activeBySender.get(senderKey);
-    if (existing) {
+    if (activeJob) {
+      if (activeJob.senderKey !== senderKey || activeJob.mode !== 'single') return busyAudit();
       return {
-        response: { ok: true, auditId: existing.auditId, state: 'running', duplicate: true },
-        completion: existing.completion,
+        response: { ok: true, auditId: activeJob.auditId, state: 'running', duplicate: true },
+        completion: activeJob.completion,
       };
     }
     const storedUrl = sanitizeResourceUrl(requestedUrl);
     const auditId = createId();
+    jobGeneration += 1;
     const session = createAuditSession({ id: auditId, requestedUrl: storedUrl, startedAt: now() });
-    const entry = { auditId, completion: null };
-    activeBySender.set(senderKey, entry);
+    const entry = { auditId, senderKey, mode: 'single', controller: new AbortController(), completion: null };
+    activeJob = entry;
     entry.completion = runInBackground({ auditId, navigationUrl: requestedUrl, session, senderKey, entry });
     return { response: { ok: true, auditId, state: session.state }, completion: entry.completion };
   }
@@ -233,7 +282,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
           ]);
         },
       };
-      const model = await runner({ url: navigationUrl, chromeAdapter: pipelineAdapter, now, idFactory: () => auditId, closeAuditTab: true });
+      const model = await runner({ url: navigationUrl, chromeAdapter: pipelineAdapter, now, idFactory: () => auditId, closeAuditTab: true, signal: entry.controller.signal });
       const status = model?.session?.status || 'failed';
       const reviewUrl = model?.report?.reviewUrl || null;
       const canExport = ['complete', 'partial'].includes(status);
@@ -257,7 +306,118 @@ export function registerServiceWorker(chromeApi, options = {}) {
       }
       logger.error('A auditoria em segundo plano falhou de forma controlada.');
     } finally {
-      if (activeBySender.get(senderKey) === entry) activeBySender.delete(senderKey);
+      if (activeJob === entry) activeJob = null;
+    }
+  }
+
+  function beginBatchAudit({ input, senderKey }) {
+    if (typeof senderKey !== 'string' || senderKey.length === 0 || senderKey.length > 512) {
+      throw new TypeError('Correlação da auditoria inválida.');
+    }
+    if (activeJob) return busyAudit();
+    const normalized = normalizeUrlList(input);
+    if (normalized.errors.length > 0 || normalized.entries.length === 0) {
+      return {
+        response: {
+          ok: false, code: 'BATCH_INVALID',
+          errors: normalized.entries.length === 0 && normalized.errors.length === 0
+            ? [{ line: 0, code: 'BATCH_EMPTY', message: 'Informe ao menos uma URL.' }]
+            : normalized.errors,
+          warnings: normalized.warnings,
+        },
+        completion: null,
+      };
+    }
+    const auditId = createId();
+    jobGeneration += 1;
+    const entry = { auditId, senderKey, mode: 'batch', controller: new AbortController(), completion: null };
+    activeJob = entry;
+    entry.completion = runBatchInBackground({ auditId, normalized, entry });
+    return {
+      response: { ok: true, auditId, state: 'idle', total: normalized.entries.length, warnings: normalized.warnings },
+      completion: entry.completion,
+    };
+  }
+
+  async function runBatchInBackground({ auditId, normalized, entry }) {
+    let committed = false;
+    try {
+      await auditStore.setLatest({ auditId, mode: 'batch', status: 'running', percent: 0, message: 'Preparando o lote explícito.' });
+      const adapter = chromeAdapterFactory(chromeApi);
+      const pipelineAdapter = {
+        ...adapter,
+        async emitProgress(progress) {
+          await Promise.allSettled([
+            auditStore.setLatest({
+              auditId, mode: 'batch', status: 'running', percent: progress.percent,
+              message: progress.message, pageNumber: progress.pageNumber, total: progress.total,
+            }),
+            sendRuntimeMessage(chromeApi, progress),
+          ]);
+        },
+      };
+      const model = await batchRunner({
+        entries: normalized.entries, batchAuditId: auditId, chromeAdapter: pipelineAdapter,
+        now, signal: entry.controller.signal,
+        reportOptions: options.reportOptions ?? defaultBatchReportOptions(chromeApi),
+        onCheckpoint: async checkpoint => {
+          await sessions.set(auditId, checkpoint);
+          await sessions.setActiveBatch?.(checkpoint);
+        },
+      });
+      const status = model?.session?.status || 'failed';
+      const reviewUrl = model?.report?.reviewUrl || null;
+      const latestState = {
+        auditId, mode: 'batch', status, percent: 100,
+        message: batchTerminalMessage(status), reviewUrl, exportStatus: 'preparing',
+        total: model?.pages?.length ?? normalized.entries.length,
+        statusCounts: countPageStatuses(model?.pages),
+      };
+      await auditStore.commitAudit(auditId, model, latestState);
+      committed = true;
+      await sessions.clearActiveBatch?.();
+      await Promise.allSettled([
+        sendRuntimeMessage(chromeApi, {
+          type: 'AUDIT_COMPLETE', auditId, sessionId: auditId, status, reviewUrl,
+          exportStatus: 'preparing', total: latestState.total, statusCounts: latestState.statusCounts,
+        }),
+        startAutomaticExport(auditId),
+      ]);
+    } catch {
+      if (!committed) await Promise.allSettled([
+        auditStore.setLatest({ auditId, mode: 'batch', status: 'failed', percent: 0, message: 'O lote não pôde ser iniciado.' }),
+        sendRuntimeMessage(chromeApi, { type: 'AUDIT_FAILED', auditId, sessionId: auditId, status: 'failed', error: 'O lote não pôde ser iniciado.' }),
+      ]);
+      logger.error('O lote em segundo plano falhou de forma controlada.');
+    } finally {
+      if (activeJob === entry) activeJob = null;
+    }
+  }
+
+  function busyAudit() {
+    return {
+      response: { ok: false, code: 'AUDIT_BUSY', error: 'Já existe uma auditoria em andamento.' },
+      completion: activeJob?.completion ?? null,
+    };
+  }
+
+  async function restoreInterruptedBatchCheckpoint(startupGeneration) {
+    try {
+      const checkpoint = await sessions.getActiveBatch?.();
+      if (jobGeneration !== startupGeneration || activeJob) return;
+      if (!checkpoint || checkpoint.mode !== 'batch' || ['idle', 'complete', 'partial', 'failed', 'cancelled'].includes(checkpoint.state)) return;
+      const interrupted = interruptBatchCheckpoint(checkpoint, queueTime());
+      await sessions.setActiveBatch?.(interrupted);
+      if (jobGeneration !== startupGeneration || activeJob) return;
+      await sessions.set(interrupted.id, interrupted);
+      if (jobGeneration !== startupGeneration || activeJob) return;
+      await auditStore.setLatest({
+        auditId: interrupted.id, mode: 'batch', status: 'failed', percent: 0,
+        message: 'O lote foi interrompido por reinício do worker e não pode ser retomado automaticamente.',
+        total: interrupted.total, statusCounts: interrupted.statusCounts, exportStatus: 'unavailable',
+      });
+    } catch {
+      logger.error('Não foi possível registrar a interrupção do lote anterior.');
     }
   }
 
@@ -451,6 +611,36 @@ function validAuditId(value) {
 function validExportAttempt(value) {
   const attempt = typeof value === 'string' && /^[1-9][0-9]*$/u.test(value) ? Number(value) : value;
   return Number.isSafeInteger(attempt) && attempt >= 1;
+}
+
+function defaultBatchReportOptions(chromeApi) {
+  const manifestVersion = chromeApi?.runtime?.getManifest?.().version;
+  return {
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    manifestVersion: typeof manifestVersion === 'string' && manifestVersion ? manifestVersion : 'desconhecida',
+    rulesVersion: '1.0.0',
+    browserVersion: detectBrowserVersion(),
+  };
+}
+
+function detectBrowserVersion() {
+  const match = typeof navigator !== 'undefined' ? navigator.userAgent?.match(/(?:Chrome|Chromium)\/([0-9.]+)/u) : null;
+  return match?.[1] ?? 'não disponível';
+}
+
+function countPageStatuses(pages) {
+  const counts = { complete: 0, partial: 0, failed: 0, cancelled: 0 };
+  for (const page of Array.isArray(pages) ? pages : []) {
+    if (Object.hasOwn(counts, page?.status)) counts[page.status] += 1;
+  }
+  return counts;
+}
+
+function batchTerminalMessage(status) {
+  if (status === 'complete') return 'Lote concluído.';
+  if (status === 'cancelled') return 'Lote cancelado; os resultados disponíveis podem ser revisados.';
+  if (status === 'failed') return 'Lote encerrado sem páginas concluídas; o registro pode ser revisado.';
+  return 'Lote concluído com limitações.';
 }
 
 function sendRuntimeMessage(chromeApi, message) {

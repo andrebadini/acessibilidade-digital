@@ -228,8 +228,13 @@ function authoritativeAxeOccurrence(value) {
 function assertAxeSupplementalIntegrity(model, rulesVersion) {
   const reportRules = axeRulesFrom(model);
   const reportOccurrences = axeOccurrencesFrom(model);
-  if (reportRules.length === 0 && reportOccurrences.length === 0 && model.axe === undefined) return null;
-  const checked = validateNormalizedAxeSupplemental(model.axe, { rulesVersion });
+  const batchChecked = model.requestedScope?.mode === 'batch' && model.axePages !== undefined
+    ? validateBatchAxePages(model, rulesVersion)
+    : undefined;
+  if (reportRules.length === 0 && reportOccurrences.length === 0 && model.axe === undefined) {
+    if (batchChecked === undefined || (batchChecked.occurrences.length === 0 && batchChecked.status !== 'partial')) return null;
+  }
+  const checked = batchChecked ?? validateNormalizedAxeSupplemental(model.axe, { rulesVersion });
   if (checked.errors.length > 0) throw new TypeError(`Suplemento axe inválido: ${checked.errors.join('; ')}`);
   if (reportRules.length !== checked.ruleResults.length || reportOccurrences.length !== checked.occurrences.length) {
     throw new TypeError('Suplemento axe do relatório diverge do cluster normalizado.');
@@ -268,6 +273,48 @@ function assertAxeSupplementalIntegrity(model, rulesVersion) {
   return checked;
 }
 
+function validateBatchAxePages(model, rulesVersion) {
+  if (!Array.isArray(model.axePages) || model.axePages.length > 20) {
+    throw new TypeError('Envelopes axe do lote inválidos.');
+  }
+  const pageById = new Map(model.pages.map(page => [page.pageId, page]));
+  const seen = new Set();
+  const checkedPages = [];
+  for (const entry of model.axePages) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) ||
+      canonicalStringify(Object.keys(entry).sort()) !== canonicalStringify(['pageId', 'result']) ||
+      typeof entry.pageId !== 'string' || seen.has(entry.pageId) || !pageById.has(entry.pageId)) {
+      throw new TypeError('Envelope axe do lote referencia página inválida ou duplicada.');
+    }
+    seen.add(entry.pageId);
+    const checked = validateNormalizedAxeSupplemental(entry.result, { rulesVersion });
+    if (checked.errors.length > 0) throw new TypeError(`Envelope axe da página ${entry.pageId} possui payload inválido.`);
+    if (checked.occurrences.some(value => value.pageId !== entry.pageId)) throw new TypeError(`Envelope axe da página ${entry.pageId} possui ocorrência cruzada.`);
+    if (pageById.get(entry.pageId).axeStatus !== entry.result.status) throw new TypeError(`Envelope axe da página ${entry.pageId} diverge do estado da página.`);
+    checkedPages.push({ ...checked, status: entry.result.status });
+  }
+  const occurrences = checkedPages.flatMap(value => value.occurrences);
+  const grouped = new Map();
+  for (const rule of checkedPages.flatMap(value => value.ruleResults)) {
+    const values = grouped.get(rule.ruleId) ?? [];
+    values.push(rule);
+    grouped.set(rule.ruleId, values);
+  }
+  const ruleResults = [...grouped.values()].map(values => {
+    const outcome = values.some(value => value.outcome === 'failed') ? 'failed' : 'cantTell';
+    const impactOrder = { critical: 4, serious: 3, moderate: 2, minor: 1 };
+    const impact = values.reduce((best, value) => impactOrder[value.impact] > impactOrder[best] ? value.impact : best, 'minor');
+    const limitations = [];
+    for (const limitation of values.flatMap(value => value.limitations)) if (!limitations.includes(limitation)) limitations.push(limitation);
+    return {
+      ...structuredClone(values[0]), outcome,
+      targets: values.flatMap(value => structuredClone(value.targets)),
+      limitations, impact, confidence: outcome === 'failed' ? 'high' : 'low',
+    };
+  });
+  return { errors: [], occurrences, ruleResults, status: checkedPages.some(value => value.status === 'partial') ? 'partial' : 'complete' };
+}
+
 function validateAxeEvidenceBinding(model, checked) {
   if (!checked) return;
   const conclusiveIds = new Set(checked.occurrences
@@ -292,12 +339,17 @@ function validateAxeEvidenceBinding(model, checked) {
 }
 
 function validateAxeCoverageStatus(model, checked) {
-  if (!checked || model.axe?.status !== 'partial') return;
+  const partialPageIds = new Set((model.axePages ?? [])
+    .filter(entry => entry?.result?.status === 'partial').map(entry => entry.pageId));
+  if (!checked || (model.axe?.status !== 'partial' && partialPageIds.size === 0)) return;
   if (model.session?.status === 'complete') {
     throw new TypeError('Cobertura axe parcial não pode pertencer a uma sessão declarada completa.');
   }
   if (model.requestedScope?.mode === 'single' && model.pages?.[0]?.status === 'complete') {
     throw new TypeError('Cobertura axe parcial não pode pertencer a uma página única declarada completa.');
+  }
+  if (model.requestedScope?.mode === 'batch' && model.pages?.some(page => partialPageIds.has(page.pageId) && page.status === 'complete')) {
+    throw new TypeError('Cobertura axe parcial não pode pertencer a uma página do lote declarada completa.');
   }
 }
 

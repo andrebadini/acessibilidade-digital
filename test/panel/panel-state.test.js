@@ -246,6 +246,30 @@ test('keeps progress monotonic and restores a safe completed review link', () =>
   assert.equal(reducePanelState(progressed, { type: 'AUDIT_COMPLETE', auditId: 'a-1', reviewUrl: 'javascript:alert(1)' }, 'chrome-extension://test/').reviewUrl, null);
 });
 
+test('tracks batch page counts and keeps failed or cancelled consolidated reports reviewable', () => {
+  const base = {
+    auditId: 'batch-1', mode: 'batch', status: 'running', percent: 0,
+    message: 'Preparando.', reviewUrl: null,
+  };
+  const progressed = reducePanelState(base, {
+    type: 'AUDIT_PROGRESS', auditId: 'batch-1', percent: 40, message: 'Página 2 de 5.',
+    pageNumber: 2, total: 5, statusCounts: { complete: 1, partial: 0, failed: 0, cancelled: 0 },
+  });
+  assert.equal(progressed.pageNumber, 2);
+  assert.equal(progressed.total, 5);
+  assert.deepEqual(progressed.statusCounts, { complete: 1, partial: 0, failed: 0, cancelled: 0 });
+  for (const terminalStatus of ['failed', 'cancelled']) {
+    const completed = reducePanelState(progressed, {
+      type: 'AUDIT_COMPLETE', auditId: 'batch-1', status: terminalStatus,
+      reviewUrl: 'chrome-extension://test/src/review/index.html?auditId=batch-1',
+      statusCounts: { complete: 1, partial: 0, failed: terminalStatus === 'failed' ? 4 : 0, cancelled: terminalStatus === 'cancelled' ? 4 : 0 },
+    }, 'chrome-extension://test/');
+    assert.equal(completed.status, terminalStatus);
+    assert.equal(completed.reviewUrl?.includes('batch-1'), true);
+    assert.match(completed.message, terminalStatus === 'failed' ? /falhas|encerrado/iu : /cancelad/iu);
+  }
+});
+
 test('ignores every progress event after a terminal state', () => {
   for (const status of ['complete', 'partial', 'failed', 'cancelled']) {
     const terminal = { auditId: 'a-1', status, percent: status === 'failed' ? 72 : 100, message: 'Terminal', reviewUrl: null };

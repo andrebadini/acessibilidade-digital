@@ -1,4 +1,5 @@
 import { normalizeAuditUrl } from '../core/url.js';
+import { normalizeUrlList } from '../core/batch/normalize-url-list.js';
 import {
   createInitialPersonaState,
   createContextPrefillAck,
@@ -26,6 +27,13 @@ const input = document.querySelector('#audit-url');
 const submit = form.querySelector('button[type="submit"]');
 const status = document.querySelector('#audit-status');
 const latestReport = document.querySelector('#latest-report');
+const batchInput = document.querySelector('#audit-urls');
+const batchFields = document.querySelector('#batch-fields');
+const singleFields = document.querySelector('#single-fields');
+const batchErrors = document.querySelector('#batch-errors');
+const batchProgress = document.querySelector('#batch-progress');
+const batchSummary = document.querySelector('#batch-summary');
+const cancelAudit = document.querySelector('#cancel-audit');
 const submissionGate = createSubmissionGate();
 let activeAuditId = null;
 let panelState = null;
@@ -64,6 +72,42 @@ function setStatus(message) {
 
 function setSubmitting(isSubmitting) {
   submit.disabled = isSubmitting;
+  cancelAudit.hidden = !isSubmitting;
+}
+
+function selectedAuditMode() {
+  return form.elements['audit-mode']?.value === 'batch' ? 'batch' : 'single';
+}
+
+function selectAuditMode(mode) {
+  const radio = form.querySelector(`input[name="audit-mode"][value="${mode}"]`);
+  if (radio) radio.checked = true;
+  const batch = mode === 'batch';
+  batchFields.hidden = !batch;
+  singleFields.hidden = batch;
+  input.required = !batch;
+}
+
+for (const radio of form.querySelectorAll('input[name="audit-mode"]')) {
+  radio.addEventListener('change', () => selectAuditMode(selectedAuditMode()));
+}
+
+function renderBatchErrors(errors = []) {
+  batchErrors.replaceChildren(...errors.map(error => {
+    const item = document.createElement('li');
+    item.textContent = error.line > 0 ? `Linha ${error.line}: ${error.message}` : error.message;
+    return item;
+  }));
+}
+
+function renderBatchState(state) {
+  const batch = state?.mode === 'batch' || Number.isSafeInteger(state?.total);
+  batchProgress.hidden = !batch;
+  batchSummary.hidden = !batch;
+  if (!batch) return;
+  batchProgress.textContent = `${state.pageNumber ?? 0} de ${state.total ?? 0} páginas.`;
+  const counts = state.statusCounts ?? {};
+  batchSummary.textContent = `Concluídas: ${counts.complete ?? 0}; parciais: ${counts.partial ?? 0}; falhas: ${counts.failed ?? 0}; canceladas: ${counts.cancelled ?? 0}.`;
 }
 
 function clearReport() {
@@ -88,21 +132,33 @@ form.addEventListener('submit', (event) => {
   event.preventDefault();
   if (!submissionGate.tryAcquire()) return;
   panelLifecycleEpoch += 1;
-  let url;
-  try {
-    url = normalizeAuditUrl(input.value);
-  } catch (error) {
-    finishActiveAudit();
-    setStatus(error instanceof Error ? error.message : 'Não foi possível validar o endereço.');
-    input.focus();
-    return;
+  const mode = selectedAuditMode();
+  let request;
+  if (mode === 'batch') {
+    const normalized = normalizeUrlList(batchInput.value);
+    const errors = normalized.entries.length === 0 && normalized.errors.length === 0
+      ? [{ line: 0, message: 'Informe ao menos uma URL.' }]
+      : normalized.errors;
+    renderBatchErrors(errors);
+    if (errors.length > 0) {
+      finishActiveAudit(); setStatus('Corrija a lista antes de iniciar.'); batchInput.focus(); return;
+    }
+    request = { type: 'START_BATCH', urls: batchInput.value };
+  } else {
+    try { request = { type: 'START_AUDIT', url: normalizeAuditUrl(input.value) }; }
+    catch (error) {
+      finishActiveAudit();
+      setStatus(error instanceof Error ? error.message : 'Não foi possível validar o endereço.');
+      input.focus();
+      return;
+    }
   }
 
   clearReport();
   setSubmitting(true);
   setStatus('Preparando a auditoria.');
   try {
-    chrome.runtime.sendMessage({ type: 'START_AUDIT', url }, (response) => {
+    chrome.runtime.sendMessage(request, (response) => {
       const runtimeError = chrome.runtime.lastError;
       if (runtimeError) {
         finishActiveAudit();
@@ -115,13 +171,30 @@ form.addEventListener('submit', (event) => {
         return;
       }
       activeAuditId = response.auditId;
-      panelState = { auditId: activeAuditId, status: 'running', percent: 0, message: 'Auditoria preparada. A coleta será iniciada em breve.', reviewUrl: null };
+      panelState = {
+        auditId: activeAuditId, mode, status: 'running', percent: 0,
+        message: mode === 'batch' ? 'Lote preparado. A primeira página será iniciada em breve.' : 'Auditoria preparada. A coleta será iniciada em breve.',
+        reviewUrl: null, ...(mode === 'batch' ? { total: response.total, pageNumber: 0 } : {}),
+      };
       setStatus(panelState.message);
+      renderBatchState(panelState);
     });
   } catch (error) {
     finishActiveAudit();
     setStatus(error instanceof Error ? `Não foi possível iniciar a auditoria: ${error.message}` : 'Não foi possível iniciar a auditoria.');
   }
+});
+
+cancelAudit.addEventListener('click', () => {
+  if (!activeAuditId) return;
+  cancelAudit.disabled = true;
+  setStatus('Cancelamento solicitado; aguardando a limpeza da página ativa.');
+  chrome.runtime.sendMessage({ type: 'CANCEL_AUDIT', auditId: activeAuditId }, response => {
+    cancelAudit.disabled = false;
+    if (chrome.runtime.lastError || response?.ok !== true) {
+      setStatus(response?.error || 'Não foi possível solicitar o cancelamento.');
+    }
+  });
 });
 
 chrome.runtime.onMessage.addListener((message, sender) => {
@@ -138,6 +211,7 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   if (!message || typeof message !== 'object' || !isMessageForAudit(message, activeAuditId ?? panelState?.auditId)) return;
   panelState = reducePanelState(panelState, message, chrome.runtime.getURL('/'));
   setStatus(panelState.message);
+  renderBatchState(panelState);
   if (messageType === 'AUDIT_PROGRESS') return;
   if (messageType === 'AUDIT_COMPLETE') {
     if (panelState.reviewUrl) showReport(panelState.reviewUrl);
@@ -165,6 +239,7 @@ async function handleContextPrefill(message, sender) {
   seenContextPrefills.add(parsed.requestId);
   while (seenContextPrefills.size > 128) seenContextPrefills.delete(seenContextPrefills.values().next().value);
   contextPrefill = { requestId: parsed.requestId, panelTabId, committed: false };
+  selectAuditMode('single');
   input.value = parsed.url;
   clearReport();
   setSubmitting(true);
@@ -234,14 +309,17 @@ function restoreLatest() {
       const saved = response.state;
       panelState = {
         auditId: saved.auditId,
+        mode: saved.mode === 'batch' ? 'batch' : 'single',
         status: saved.status || 'running',
         percent: Number.isFinite(saved.percent) ? saved.percent : 0,
         message: saved.message || 'Auditoria em andamento.',
         reviewUrl: isSafeReportUrl(saved.reviewUrl, chrome.runtime.getURL('/')) ? saved.reviewUrl : null,
         exportStatus: saved.exportStatus || 'unavailable',
         ...restoreExportEventState(saved),
+        ...(Number.isSafeInteger(saved.total) ? { total: saved.total, pageNumber: saved.pageNumber ?? 0, statusCounts: saved.statusCounts } : {}),
       };
       setStatus(panelState.message);
+      renderBatchState(panelState);
       if (['running', 'idle'].includes(panelState.status)) {
         activeAuditId = panelState.auditId;
         setSubmitting(true);

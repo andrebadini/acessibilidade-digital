@@ -8,6 +8,30 @@ test('reopened panel hydrates the persisted export attempt correlation', async (
   assert.match(source, /GET_LAST_AUDIT/u);
 });
 
+test('panel exposes an explicit accessible single-page or URL-list audit form', async () => {
+  const [html, script, css] = await Promise.all([
+    readFile(new URL('../../src/panel/index.html', import.meta.url), 'utf8'),
+    readFile(new URL('../../src/panel/panel.js', import.meta.url), 'utf8'),
+    readFile(new URL('../../src/panel/panel.css', import.meta.url), 'utf8'),
+  ]);
+  const auditSection = html.match(/<form[^>]+id="audit-form"[\s\S]*?<\/form>/u)?.[0] ?? '';
+  assert.match(auditSection, /<fieldset[\s\S]*type="radio"[\s\S]*value="single"[\s\S]*value="batch"/iu);
+  assert.match(auditSection, /<textarea[^>]+id="audit-urls"[^>]+aria-describedby="batch-help batch-errors"/iu);
+  assert.match(auditSection, /uma por linha[^<]*até 20/iu);
+  assert.match(auditSection, /id="batch-errors"/u);
+  assert.match(html, /id="batch-progress"/u);
+  assert.match(html, /id="batch-summary"/u);
+  assert.match(html, /id="cancel-audit"/u);
+  assert.match(html, /sessão atual[\s\S]*URLs[\s\S]*pixels/iu);
+  assert.equal((html.match(/id="audit-status"[^>]*aria-live="polite"/gu) ?? []).length, 1);
+  assert.match(script, /START_BATCH/u);
+  assert.match(script, /CANCEL_AUDIT/u);
+  assert.match(script, /normalizeUrlList/u);
+  assert.match(css, /#cancel-audit[^{]*\{[^}]*min-height:\s*2\.75rem/isu);
+  assert.match(css, /\.audit-mode label[^{]*\{[^}]*min-height:\s*2\.75rem/isu);
+  assert.match(css, /\.product-header[^{]*\{[^}]*flex-wrap:\s*wrap/isu);
+});
+
 test('panel exposes three reversible persona modes and complete simulated-reader controls', async () => {
   const [html, script, css] = await Promise.all([
     readFile(new URL('../../src/panel/index.html', import.meta.url), 'utf8'),

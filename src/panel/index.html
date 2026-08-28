@@ -16,15 +16,31 @@
       <h1>Audita Acessibilidade</h1>
       <p class="intro">Audite uma página com evidências locais e revisão assistida. Nenhum conteúdo da auditoria é enviado a servidores.</p>
       <p class="independence-notice">Esta é uma ferramenta independente, sem vínculo institucional. Seus resultados não equivalem a certificação nem a laudo oficial.</p>
-      <p id="audit-privacy-notice" class="privacy-notice"><strong>Antes de auditar:</strong> a auditoria captura a página inteira e elementos, incluindo pixels e dados sensíveis visíveis. As evidências são armazenadas localmente e incorporadas aos relatórios. Oculte ou remova dados sensíveis antes de iniciar.</p>
+      <p id="audit-privacy-notice" class="privacy-notice"><strong>Antes de auditar:</strong> cada aba usa sua sessão atual. URLs e pixels podem conter dados pessoais visíveis. As evidências são armazenadas localmente e incorporadas aos relatórios. Oculte ou remova dados sensíveis antes de iniciar.</p>
       <form id="audit-form" novalidate>
-        <label for="audit-url">Endereço do site</label>
-        <input id="audit-url" name="audit-url" type="url" inputmode="url" autocomplete="url" required aria-describedby="audit-status" placeholder="https://exemplo.com.br">
+        <fieldset class="audit-mode">
+          <legend>Escopo da auditoria</legend>
+          <label><input type="radio" name="audit-mode" value="single" checked> Página única</label>
+          <label><input type="radio" name="audit-mode" value="batch"> Lista explícita</label>
+        </fieldset>
+        <div id="single-fields">
+          <label for="audit-url">Endereço do site</label>
+          <input id="audit-url" name="audit-url" type="url" inputmode="url" autocomplete="url" required aria-describedby="audit-status" placeholder="https://exemplo.com.br">
+        </div>
+        <div id="batch-fields" hidden>
+          <label for="audit-urls">Endereços das páginas</label>
+          <textarea id="audit-urls" name="audit-urls" rows="7" aria-describedby="batch-help batch-errors" placeholder="https://exemplo.com.br/&#10;https://exemplo.com.br/contato"></textarea>
+          <p id="batch-help">Uma por linha, até 20. A ferramenta não procura nem segue links.</p>
+          <ul id="batch-errors"></ul>
+        </div>
         <button type="submit">Auditar</button>
+        <button id="cancel-audit" type="button" hidden>Cancelar auditoria</button>
       </form>
       <section class="status-card" aria-labelledby="status-heading">
         <h2 id="status-heading">Andamento</h2>
         <p id="audit-status" role="status" aria-live="polite">Informe o endereço do site a auditar.</p>
+        <p id="batch-progress" hidden></p>
+        <p id="batch-summary" hidden></p>
         <a id="latest-report" hidden aria-disabled="true">Revisar ocorrências</a>
       </section>
       <section id="persona-section" class="persona-card" aria-labelledby="persona-heading">
