@@ -282,7 +282,13 @@ test('routes a context-menu audit through the shared single-audit boundary after
 test('validates START_AUDIT, stores an armed session, and keeps the response channel open', async () => {
   const chromeApi = createChrome();
   const sessions = new Map();
-  registerServiceWorker(chromeApi, { createId: () => 'audit-1', sessions });
+  let finishRunner;
+  registerServiceWorker(chromeApi, {
+    createId: () => 'audit-1', sessions,
+    auditStore: withAuditRevisions({ async setLatest() {}, async commitAudit() {} }),
+    chromeAdapterFactory: () => ({}),
+    runner: () => new Promise(resolve => { finishRunner = resolve; }),
+  });
   let response;
   const keepOpen = chromeApi.listeners.message.listener(
     { type: 'START_AUDIT', url: ' example.test/a ' },
@@ -294,6 +300,7 @@ test('validates START_AUDIT, stores an armed session, and keeps the response cha
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(response, { ok: true, auditId: 'audit-1', state: 'idle' });
   assert.equal(sessions.get('audit-1').requestedUrl, 'https://example.test/a');
+  finishRunner?.({ auditId: 'audit-1', session: { status: 'failed' }, report: {} });
 });
 
 test('rejects unknown, hostile, and malformed worker messages safely', () => {
@@ -418,6 +425,49 @@ test('persists sessions with storage.session and falls back to an injected map',
   const fallbackStore = createSessionStore({}, fallback);
   await fallbackStore.set('audit-2', { id: 'audit-2' });
   assert.deepEqual(await fallbackStore.get('audit-2'), { id: 'audit-2' });
+});
+
+test('session store removes only correlated audit checkpoints and can prune its own namespace', async () => {
+  const sessionValues = {
+    'persona-owned-elsewhere': { voice: 'pt-BR' },
+  };
+  let localCalls = 0;
+  const chromeApi = {
+    runtime: {},
+    storage: {
+      session: {
+        async set(values) { Object.assign(sessionValues, structuredClone(values)); },
+        async get(key) {
+          if (key === null) return structuredClone(sessionValues);
+          return Object.hasOwn(sessionValues, key) ? { [key]: structuredClone(sessionValues[key]) } : {};
+        },
+        async remove(keys) {
+          for (const key of Array.isArray(keys) ? keys : [keys]) delete sessionValues[key];
+        },
+      },
+      local: {
+        async get() { localCalls += 1; },
+        async set() { localCalls += 1; },
+        async remove() { localCalls += 1; },
+      },
+    },
+  };
+  const fallback = new Map();
+  const store = createSessionStore(chromeApi, fallback);
+  await store.set('audit-a', { id: 'audit-a', state: 'complete' });
+  await store.set('audit-b', { id: 'audit-b', state: 'running' });
+  await store.setActiveBatch({ id: 'audit-b', mode: 'batch', state: 'running' });
+
+  await store.remove('audit-a');
+  assert.equal(Object.hasOwn(sessionValues, 'audita-mt:session:audit-a'), false);
+  assert.equal(fallback.has('audit-a'), false);
+
+  await store.clearAuditSessions({ keepAuditIds: ['audit-b'] });
+  assert.ok(sessionValues['audita-mt:session:audit-b']);
+  assert.ok(sessionValues['audita-mt:session:active-batch']);
+  await store.clearAuditSessions({ keepAuditIds: [] });
+  assert.deepEqual(sessionValues, { 'persona-owned-elsewhere': { voice: 'pt-BR' } });
+  assert.equal(localCalls, 0);
 });
 
 test('falls back to memory when storage.session rejects without touching storage.local', async () => {
@@ -941,10 +991,11 @@ test('accepts a terminal active marker only when snapshot and latest prove its c
     let latest = proved ? { auditId: checkpoint.id, status: 'complete' } : undefined;
     let saved;
     let cleared = false;
+    const removed = [];
     registerServiceWorker(chromeApi, {
       sessionStore: {
         async getActiveBatch() { return checkpoint; }, async set(_id, value) { saved = value; },
-        async clearActiveBatch() { cleared = true; }, async get() {},
+        async clearActiveBatch() { cleared = true; }, async remove(id) { removed.push(id); }, async get() {},
       },
       auditStore: withAuditRevisions({
         async getAudit(id) { return proved && id === checkpoint.id ? { auditId: id, session: { status: 'complete' } } : undefined; },
@@ -954,6 +1005,7 @@ test('accepts a terminal active marker only when snapshot and latest prove its c
     await waitUntil(() => cleared);
     assert.equal(saved?.state, proved ? undefined : 'failed');
     assert.equal(latest?.status, proved ? 'complete' : 'failed');
+    assert.deepEqual(removed, [checkpoint.id]);
   }
 });
 
@@ -980,6 +1032,7 @@ test('stores only a sanitized URL before execution while runner keeps the full n
   const sessions = new Map();
   const stored = [];
   let runnerUrl;
+  let finishRunner;
   const auditStore = {
     async setLatest(value) { stored.push(value); },
     async commitAudit(_id, _model, latest) { stored.push(latest); },
@@ -987,7 +1040,10 @@ test('stores only a sanitized URL before execution while runner keeps the full n
   registerServiceWorker(chromeApi, {
     createId: () => 'audit-private', sessions, auditStore: withAuditRevisions(auditStore),
     chromeAdapterFactory: () => ({}),
-    runner: async ({ url }) => { runnerUrl = url; return { auditId: 'audit-private', session: { status: 'complete' }, report: {} }; },
+    runner: ({ url }) => {
+      runnerUrl = url;
+      return new Promise(resolve => { finishRunner = resolve; });
+    },
   });
   chromeApi.listeners.message.listener(
     { type: 'START_AUDIT', url: 'https://example.test/path?token=TOPSECRET&view=public#auth=TOPSECRET' },
@@ -997,6 +1053,7 @@ test('stores only a sanitized URL before execution while runner keeps the full n
   assert.match(runnerUrl, /TOPSECRET/);
   assert.doesNotMatch(JSON.stringify([...sessions.values(), ...stored]), /TOPSECRET|token=|auth=/i);
   assert.match(sessions.get('audit-private').requestedUrl, /view=public/);
+  finishRunner?.({ auditId: 'audit-private', session: { status: 'complete' }, report: {} });
 });
 
 test('notification failure after atomic commit never rewrites committed complete state', async () => {
@@ -1515,12 +1572,17 @@ test('GET_LAST runs one limited retention cleanup before restoring state', async
   const chromeApi = createChrome();
   const calls = [];
   const latest = { auditId: 'audit-cleanup-open', status: 'complete' };
+  const pruned = [];
   const auditStore = {
     async cleanupExpiredAudits(options) { calls.push(['cleanup', options]); return { scanned: 0, deleted: 0, remaining: 0, blocked: 0 }; },
     async getLatest() { calls.push(['latest']); return latest; },
   };
   registerServiceWorker(chromeApi, {
     auditStore,
+    sessionStore: {
+      async getActiveBatch() {},
+      async clearAuditSessions(options) { pruned.push(options); },
+    },
     now: () => '2026-08-28T11:22:33.444Z',
   });
   let response;
@@ -1532,6 +1594,57 @@ test('GET_LAST runs one limited retention cleanup before restoring state', async
   await waitUntil(() => response !== undefined);
   assert.deepEqual(response, { ok: true, state: latest });
   assert.deepEqual(calls[0], ['cleanup', { now: '2026-08-28T11:22:33.444Z', limit: 25 }]);
+  assert.deepEqual(pruned, [{ keepAuditIds: [] }]);
+});
+
+test('terminal single and batch executions remove their correlated session checkpoints', async () => {
+  for (const mode of ['single', 'batch']) {
+    const chromeApi = createChrome();
+    const removed = [];
+    let activeCleared = 0;
+    const sessionStore = {
+      async getActiveBatch() {},
+      async set() {},
+      async remove(id) { removed.push(id); },
+      async setActiveBatch() {},
+      async clearActiveBatch() { activeCleared += 1; },
+    };
+    const auditId = `terminal-${mode}`;
+    const runner = async ({ onCheckpoint } = {}) => {
+      await onCheckpoint?.({
+        id: auditId, mode: 'batch', state: 'running', total: 1, currentIndex: 0,
+        completedCount: 0, statusCounts: { complete: 0, partial: 0, failed: 0, cancelled: 0 },
+        cancelRequested: false, startedAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z', resumable: false,
+      });
+      return {
+        auditId,
+        pages: mode === 'batch' ? [] : undefined,
+        session: { status: mode === 'single' ? 'complete' : 'failed' },
+        report: {},
+      };
+    };
+    registerServiceWorker(chromeApi, {
+      createId: () => auditId,
+      sessionStore,
+      auditStore: createInMemoryAuditStore(),
+      chromeAdapterFactory: () => ({}),
+      runner: mode === 'single' ? runner : undefined,
+      batchRunner: mode === 'batch' ? runner : undefined,
+      now: () => '2026-08-01T00:00:00.000Z',
+      reportOptions: { timezone: 'UTC', manifestVersion: '2.0.0', rulesVersion: '1.0.0', browserVersion: '152' },
+    });
+    const message = mode === 'single'
+      ? { type: 'START_AUDIT', url: 'https://example.test/' }
+      : { type: 'START_BATCH', urls: 'https://example.test/' };
+    chromeApi.listeners.message.listener(
+      message,
+      { id: 'test', url: 'chrome-extension://test/src/panel/index.html', documentId: `panel-${mode}` },
+      () => {},
+    );
+    await waitUntil(() => removed.includes(auditId));
+    assert.deepEqual(removed, [auditId], mode);
+    assert.equal(activeCleared, mode === 'batch' ? 1 : 0, mode);
+  }
 });
 
 test('storage failure prevents AUDIT_COMPLETE and exposes only the fixed actionable message', async () => {
@@ -1564,10 +1677,13 @@ test('destructive protocol accepts only correlated review and canonical panel se
   for (const auditId of ['delete-protocol-a', 'delete-protocol-b']) {
     await store.commitAudit(auditId, { auditId }, { auditId }, { now: '2026-08-01T00:00:00.000Z' });
   }
-  registerServiceWorker(chromeApi, {
+  const sessions = registerServiceWorker(chromeApi, {
     auditStore: store,
     now: () => '2026-08-28T12:00:00.000Z',
   });
+  await sessions.set('delete-protocol-a', { id: 'delete-protocol-a', state: 'complete' });
+  await sessions.set('delete-protocol-b', { id: 'delete-protocol-b', state: 'complete' });
+  await sessions.setActiveBatch({ id: 'delete-protocol-b', mode: 'batch', state: 'complete' });
 
   for (const [message, sender] of [
     [{ type: 'REQUEST_DELETE_AUDIT', auditId: 'delete-protocol-a' }, { id: 'test', url: 'chrome-extension://test/src/export/index.html?auditId=delete-protocol-a&exportAttempt=1&leaseOwnerId=owner' }],
@@ -1591,6 +1707,8 @@ test('destructive protocol accepts only correlated review and canonical panel se
   await waitUntil(() => deletedOne !== undefined);
   assert.deepEqual(deletedOne, { ok: true, auditId: 'delete-protocol-a', deleted: true });
   assert.equal(await store.getAudit('delete-protocol-a'), undefined);
+  assert.equal(await sessions.get('delete-protocol-a'), undefined);
+  assert.ok(await sessions.get('delete-protocol-b'));
   assert.ok(chromeApi.runtime.sent.some(message => message.type === 'AUDIT_DELETED' && message.auditId === 'delete-protocol-a'));
 
   let deletedAll;
@@ -1602,5 +1720,7 @@ test('destructive protocol accepts only correlated review and canonical panel se
   await waitUntil(() => deletedAll !== undefined);
   assert.deepEqual(deletedAll, { ok: true, deleted: 1 });
   assert.equal(await store.getAudit('delete-protocol-b'), undefined);
+  assert.equal(await sessions.get('delete-protocol-b'), undefined);
+  assert.equal(await sessions.getActiveBatch(), undefined);
   assert.ok(chromeApi.runtime.sent.some(message => message.type === 'AUDIT_DELETED' && message.scope === 'all'));
 });

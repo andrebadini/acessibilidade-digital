@@ -54,25 +54,50 @@ export function isAuthorizedExtensionSender(sender, runtimeId, requiredPath) {
 
 export function createSessionStore(chromeApi, fallback = new Map()) {
   const storage = chromeApi?.storage?.session;
+  const requireAuditId = id => {
+    if (!validAuditId(id)) throw new TypeError('Identificador do checkpoint de sessão inválido.');
+    return id;
+  };
+  const keepSet = options => new Set((options?.keepAuditIds ?? []).map(requireAuditId));
+  const removeFallbackSessions = keep => {
+    for (const [key, value] of fallback) {
+      if (key === ACTIVE_BATCH_KEY) {
+        if (!keep.has(value?.id)) fallback.delete(key);
+      } else if (validAuditId(key) && value?.id === key && !keep.has(key)) {
+        fallback.delete(key);
+      }
+    }
+  };
   if (!storage) {
     return {
-      async set(id, value) { fallback.set(id, value); },
-      async get(id) { return fallback.get(id); },
+      async set(id, value) { fallback.set(requireAuditId(id), value); },
+      async get(id) { return fallback.get(requireAuditId(id)); },
+      async remove(id) { fallback.delete(requireAuditId(id)); },
       async setActiveBatch(value) { fallback.set(ACTIVE_BATCH_KEY, value); },
       async getActiveBatch() { return fallback.get(ACTIVE_BATCH_KEY); },
       async clearActiveBatch() { fallback.delete(ACTIVE_BATCH_KEY); },
+      async clearAuditSessions(options) { removeFallbackSessions(keepSet(options)); },
     };
   }
   return {
     async set(id, value) {
+      requireAuditId(id);
       fallback.set(id, value);
       try { await invokeStorage(chromeApi, storage, 'set', { [sessionKey(id)]: value }); } catch { /* fallback efêmero */ }
     },
     async get(id) {
+      requireAuditId(id);
       try {
         const result = await invokeStorage(chromeApi, storage, 'get', sessionKey(id));
         return result?.[sessionKey(id)] ?? fallback.get(id);
       } catch { return fallback.get(id); }
+    },
+    async remove(id) {
+      requireAuditId(id);
+      fallback.delete(id);
+      if (typeof storage.remove === 'function') {
+        try { await invokeStorage(chromeApi, storage, 'remove', sessionKey(id)); } catch { /* fallback efêmero */ }
+      }
     },
     async setActiveBatch(value) {
       fallback.set(ACTIVE_BATCH_KEY, value);
@@ -89,6 +114,25 @@ export function createSessionStore(chromeApi, fallback = new Map()) {
       if (typeof storage.remove === 'function') {
         try { await invokeStorage(chromeApi, storage, 'remove', ACTIVE_BATCH_KEY); } catch { /* fallback efêmero */ }
       }
+    },
+    async clearAuditSessions(options) {
+      const keep = keepSet(options);
+      removeFallbackSessions(keep);
+      if (typeof storage.get !== 'function' || typeof storage.remove !== 'function') return;
+      try {
+        const values = await invokeStorage(chromeApi, storage, 'get', null);
+        const keys = [];
+        for (const [key, value] of Object.entries(values ?? {})) {
+          if (key === ACTIVE_BATCH_KEY) {
+            if (!keep.has(value?.id)) keys.push(key);
+            continue;
+          }
+          if (!key.startsWith('audita-mt:session:')) continue;
+          const auditId = key.slice('audita-mt:session:'.length);
+          if (validAuditId(auditId) && value?.id === auditId && !keep.has(auditId)) keys.push(key);
+        }
+        if (keys.length > 0) await invokeStorage(chromeApi, storage, 'remove', keys);
+      } catch { /* fallback efêmero */ }
     },
   };
 }
@@ -250,6 +294,9 @@ export function registerServiceWorker(chromeApi, options = {}) {
         if (typeof auditStore.cleanupExpiredAudits === 'function') {
           await auditStore.cleanupExpiredAudits({ now: queueTime(), limit: 25 });
         }
+        await sessions.clearAuditSessions?.({
+          keepAuditIds: activeJob?.auditId ? [activeJob.auditId] : [],
+        });
         return restorableLatestState();
       }).then(value => sendResponse({ ok: true, state: value ?? null }), () => sendResponse({ ok: false, error: 'Não foi possível restaurar a última auditoria.' }));
       return true;
@@ -364,6 +411,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
       }
       logger.error('A auditoria em segundo plano falhou de forma controlada.');
     } finally {
+      await Promise.resolve(sessions.remove?.(auditId)).catch(() => {});
       if (activeJob === entry) activeJob = null;
     }
   }
@@ -455,7 +503,10 @@ export function registerServiceWorker(chromeApi, options = {}) {
         deleteAfterCompleteExport: entry.deleteAfterCompleteExport,
       });
       committed = true;
-      await sessions.clearActiveBatch?.();
+      await Promise.allSettled([
+        sessions.clearActiveBatch?.(),
+        sessions.remove?.(auditId),
+      ]);
       await Promise.allSettled([
         sendRuntimeMessage(chromeApi, {
           type: 'AUDIT_COMPLETE', auditId, sessionId: auditId, status, reviewUrl,
@@ -475,6 +526,12 @@ export function registerServiceWorker(chromeApi, options = {}) {
       }
       logger.error('O lote em segundo plano falhou de forma controlada.');
     } finally {
+      if (!committed) {
+        await Promise.allSettled([
+          sessions.clearActiveBatch?.(),
+          sessions.remove?.(auditId),
+        ]);
+      }
       if (activeJob === entry) activeJob = null;
     }
   }
@@ -524,6 +581,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
     const current = await sessions.getActiveBatch?.();
     if (!current || (current.id === checkpoint.id && current.updatedAt === checkpoint.updatedAt)) {
       await sessions.clearActiveBatch?.();
+      await sessions.remove?.(checkpoint.id);
     }
   }
 
@@ -535,6 +593,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
       }
       const result = await auditStore.deleteAudit(auditId, snapshot.capability, { now: queueTime() });
       if (result?.deleted !== true) return { ok: false, error: 'Não foi possível excluir a auditoria local.' };
+      await sessions.remove?.(auditId);
       await sendRuntimeMessage(chromeApi, { type: 'AUDIT_DELETED', auditId }).catch(() => {});
       return { ok: true, auditId, deleted: true };
     } catch (error) {
@@ -552,6 +611,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
     try {
       const result = await auditStore.deleteAllAudits({ now: queueTime() });
       const deleted = Number.isSafeInteger(result?.deleted) && result.deleted >= 0 ? result.deleted : 0;
+      await sessions.clearAuditSessions?.({ keepAuditIds: [] });
       await sendRuntimeMessage(chromeApi, { type: 'AUDIT_DELETED', scope: 'all' }).catch(() => {});
       return { ok: true, deleted };
     } catch (error) {
