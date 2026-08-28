@@ -12,6 +12,46 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const chromeBinary = process.env.CHROME_BIN || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const harnessPath = 'test/e2e/fixtures/retention-harness.html';
 const sensitiveMarker = 'RETENTION-PRIVATE-MARKER-641927';
+const runtimeProbeByRole = Object.freeze({
+  harness: 'AUDITA_RUNTIME_LOG_PROBE_HARNESS',
+  'service-worker': 'AUDITA_RUNTIME_LOG_PROBE_SERVICE_WORKER',
+  panel: 'AUDITA_RUNTIME_LOG_PROBE_PANEL',
+  review: 'AUDITA_RUNTIME_LOG_PROBE_REVIEW',
+  export: 'AUDITA_RUNTIME_LOG_PROBE_EXPORT',
+});
+
+test('runtime log verdict includes a marker emitted late by the service worker', () => {
+  const extensionId = 'abcdefghijklmnopabcdefghijklmnop';
+  assert.equal(runtimeRoleForTarget({
+    type: 'page', url: `chrome-extension://${extensionId}/src/export/index.html?auditId=probe`,
+  }, extensionId), 'export');
+  const audit = new RuntimeLogAudit([sensitiveMarker]);
+  audit.monitor('harness-session');
+  audit.capture({
+    method: 'Runtime.consoleAPICalled', sessionId: 'harness-session',
+    params: { args: [{ type: 'string', value: 'AUDITA_RUNTIME_LOG_PROBE_HARNESS' }] },
+  });
+  assert.deepEqual(audit.finalVerdict(['harness', 'service-worker']), {
+    sinksReady: false, sanitized: false,
+  });
+
+  audit.monitor('worker-session');
+  audit.capture({
+    method: 'Runtime.consoleAPICalled', sessionId: 'worker-session',
+    params: { args: [{ type: 'string', value: 'AUDITA_RUNTIME_LOG_PROBE_SERVICE_WORKER' }] },
+  });
+  assert.deepEqual(audit.finalVerdict(['harness', 'service-worker']), {
+    sinksReady: true, sanitized: true,
+  });
+
+  audit.capture({
+    method: 'Runtime.exceptionThrown', sessionId: 'worker-session',
+    params: { exceptionDetails: { text: sensitiveMarker } },
+  });
+  assert.deepEqual(audit.finalVerdict(['harness', 'service-worker']), {
+    sinksReady: true, sanitized: false,
+  });
+});
 
 test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', { timeout: 300_000 }, async t => {
   await access(chromeBinary, fsConstants.X_OK);
@@ -52,6 +92,7 @@ test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', {
   const loaded = await browser.command('Extensions.loadUnpacked', { path: root }, 15_000);
   const extensionId = loaded?.id;
   assert.match(extensionId || '', /^[a-p]{32}$/u);
+  await browser.captureExtensionRuntimeTargets(extensionId);
   await browser.command('Browser.setDownloadBehavior', {
     behavior: 'allow', downloadPath: downloadDir, eventsEnabled: true,
   });
@@ -64,15 +105,9 @@ test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', {
     chromeStderr,
   );
   const harness = await attach(browser, harnessInfo.targetId);
-  await harness.command('Runtime.enable');
+  await probeRuntimeSink(browser, harness, 'harness');
   await harness.command('Page.enable');
   await waitForValue(harness, 'document.readyState === "complete"', Boolean);
-  const runtimeLogProbe = browser.waitForEvent(
-    'Runtime.consoleAPICalled',
-    event => JSON.stringify(event.params).includes('AUDITA_RUNTIME_LOG_PROBE'),
-  );
-  await evaluate(harness, `console.debug('AUDITA_RUNTIME_LOG_PROBE'); true`);
-  await runtimeLogProbe;
   const indexedDbPreflight = await evaluate(harness, `(async () => {
     try {
       const { createAuditStore } = await import(chrome.runtime.getURL('src/storage/audit-store.js'));
@@ -120,7 +155,7 @@ test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', {
     downloadsPreserved: true,
     panelResponsiveAtTwoHundredPercent: true,
     reviewResponsiveAtTwoHundredPercent: true,
-    storageReportsAndLogsSanitized: true,
+    storageAndReportsSanitized: true,
   });
 
   const storageProof = await runRealStorageProof(harness);
@@ -148,11 +183,11 @@ test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', {
   });
 
   const reviewUrl = `chrome-extension://${extensionId}/src/review/index.html?auditId=ui-one`;
-  const review = await openExtensionPage(browser, reviewUrl, chromeStderr);
+  const review = await openExtensionPage(browser, reviewUrl, chromeStderr, 'review');
   await exerciseDeleteOneDialog(review);
 
   const panelUrl = `chrome-extension://${extensionId}/src/panel/index.html`;
-  const panel = await openExtensionPage(browser, panelUrl, chromeStderr);
+  const panel = await openExtensionPage(browser, panelUrl, chromeStderr, 'panel');
   await exerciseDeleteAllDialogAndResponsiveUi(panel);
 
   const finalProof = await evaluate(panel, `import(chrome.runtime.getURL('src/storage/audit-store.js')).then(async ({ createAuditStore }) => {
@@ -171,10 +206,20 @@ test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', {
       sessionHasPrivateMarker: JSON.stringify(session).includes(${JSON.stringify(sensitiveMarker)}),
     };
   })`, true, 20_000);
-  assert.deepEqual(finalProof, {
+  const runtimeLogProof = await browser.finalRuntimeLogVerdict([
+    'harness', 'service-worker', 'panel', 'review', 'export',
+  ]);
+  assert.deepEqual({
+    ...finalProof,
+    ...runtimeLogProof,
+    chromeStderrSanitized: !chromeStderr.includes(sensitiveMarker),
+  }, {
     everyAuditDeleted: true,
     localKeysAllowed: true,
     sessionHasPrivateMarker: false,
+    sinksReady: true,
+    sanitized: true,
+    chromeStderrSanitized: true,
   });
 });
 
@@ -388,7 +433,7 @@ async function runPublicBatchRetentionProof({ browser, harness, extensionId, loo
     marker: JSON.stringify(session).includes(${JSON.stringify(sensitiveMarker)})
   }))`, value => value && value.active === false && value.correlated === false, 20_000);
 
-  const review = await followLatestReportLink(firstPanel, auditId);
+  const review = await followLatestReportLink(browser, firstPanel, auditId);
   const reviewResponsive = await responsiveAtTwoHundredPercent(review, '#delete-audit');
   const mismatch = await evaluate(review, `new Promise(resolve => chrome.runtime.sendMessage({
     type: 'REQUEST_DELETE_AUDIT', auditId: 'mismatch-audit'
@@ -601,10 +646,9 @@ async function runPublicBatchRetentionProof({ browser, harness, extensionId, loo
       ['csv', 'html', 'json', 'pdf'].every(format => fileExtensions.filter(value => value === format).length === 2),
     panelResponsiveAtTwoHundredPercent: panelResponsive,
     reviewResponsiveAtTwoHundredPercent: reviewResponsive,
-    storageReportsAndLogsSanitized: !localAndSession.includes(sensitiveMarker) &&
+    storageAndReportsSanitized: !localAndSession.includes(sensitiveMarker) &&
       reportBytes.every(bytes => !bytes.includes(Buffer.from(sensitiveMarker))) &&
-      pageTextSanitized.every(value => value === false) && !chromeStderr().includes(sensitiveMarker) &&
-      browser.runtimeLogsSanitized(),
+      pageTextSanitized.every(value => value === false),
   };
 }
 
@@ -628,7 +672,7 @@ async function openPanelThroughAction(browser, extensionId, sourceUrl, stderr) {
     stderr(),
   );
   const worker = await attach(browser, workerInfo.targetId);
-  await worker.command('Runtime.enable');
+  await probeRuntimeSink(browser, worker, 'service-worker');
   await waitForValue(worker, 'chrome.action.onClicked.hasListeners()', value => value === true, 15_000);
   const sourceChromeTabId = await evaluate(worker, `chrome.tabs.query({}).then(tabs =>
     tabs.find(tab => tab.url === ${JSON.stringify(sourceUrl)})?.id)`, true);
@@ -647,7 +691,7 @@ async function openPanelThroughAction(browser, extensionId, sourceUrl, stderr) {
   );
   await browser.command('Target.activateTarget', { targetId: panelInfo.targetId });
   const panel = await attach(browser, panelInfo.targetId);
-  await panel.command('Runtime.enable');
+  await probeRuntimeSink(browser, panel, 'panel');
   await panel.command('Page.enable');
   await panel.command('Accessibility.enable');
   await waitForValue(panel, 'document.readyState === "complete"', Boolean);
@@ -845,7 +889,7 @@ async function waitForDownloadedFiles(directory, expected, timeoutMs) {
   throw new Error(`Arquivos físicos não chegaram ao total esperado; contagem segura=${files.length}`);
 }
 
-async function followLatestReportLink(panel, auditId) {
+async function followLatestReportLink(browser, panel, auditId) {
   await waitForValue(panel, `(() => {
     const link = document.querySelector('#latest-report');
     return !link.hidden && link.href.includes('auditId=' + encodeURIComponent(${JSON.stringify(auditId)}));
@@ -855,6 +899,7 @@ async function followLatestReportLink(panel, auditId) {
   await waitForValue(panel, `location.pathname === '/src/review/index.html' &&
     new URL(location.href).searchParams.get('auditId') === ${JSON.stringify(auditId)} &&
     !document.querySelector('#delete-audit')?.disabled`, Boolean, 20_000);
+  await probeRuntimeSink(browser, panel, 'review');
   await panel.command('Accessibility.enable');
   return panel;
 }
@@ -1158,12 +1203,12 @@ async function exerciseDeleteAllDialogAndResponsiveUi(panel) {
   await assertLiveStatusInAxTree(panel, /todas as auditorias locais foram excluídas/iu);
 }
 
-async function openExtensionPage(browser, url, stderr) {
+async function openExtensionPage(browser, url, stderr, runtimeRole) {
   await browser.command('Target.createTarget', { url });
   const info = await waitForTargetInfo(browser, target => target.type === 'page' && target.url === url, stderr);
   await browser.command('Target.activateTarget', { targetId: info.targetId });
   const page = await attach(browser, info.targetId);
-  await page.command('Runtime.enable');
+  await probeRuntimeSink(browser, page, runtimeRole);
   await page.command('Page.enable');
   await page.command('Accessibility.enable');
   await waitForValue(page, 'document.readyState === "complete"', Boolean);
@@ -1215,6 +1260,33 @@ async function waitForValue(page, expression, predicate, timeoutMs = 10_000) {
   throw new Error(`Condição E2E não satisfeita; último valor seguro=${JSON.stringify(latest)}`);
 }
 
+async function probeRuntimeSink(browser, page, role, { resume = false } = {}) {
+  const probe = runtimeProbeByRole[role];
+  assert.equal(typeof probe, 'string', `papel de Runtime desconhecido: ${role}`);
+  browser.monitorRuntimeSession(page.sessionId);
+  let enableFailure;
+  try {
+    await page.command('Runtime.enable');
+  } catch (error) {
+    enableFailure = error;
+  } finally {
+    if (resume) await page.command('Runtime.runIfWaitingForDebugger');
+  }
+  if (enableFailure) throw enableFailure;
+  const observed = browser.waitForEvent(
+    'Runtime.consoleAPICalled',
+    event => event.sessionId === page.sessionId && Array.isArray(event.params?.args) &&
+      event.params.args.some(argument => argument?.type === 'string' && argument.value === probe),
+  );
+  try {
+    await evaluate(page, `console.debug(${JSON.stringify(probe)}); true`);
+    await observed;
+  } catch (error) {
+    observed.catch(() => undefined);
+    throw error;
+  }
+}
+
 async function attach(browser, targetId) {
   const attached = await browser.command('Target.attachToTarget', { targetId, flatten: true });
   assert.match(attached.sessionId || '', /^[A-Fa-f0-9-]+$/u);
@@ -1246,6 +1318,68 @@ function delay(ms) {
   return new Promise(resolveDelay => setTimeout(resolveDelay, ms));
 }
 
+function runtimeRoleForTarget(targetInfo, extensionId) {
+  try {
+    const url = new URL(targetInfo?.url);
+    if (url.protocol !== 'chrome-extension:' || url.hostname !== extensionId) return null;
+    if (targetInfo.type === 'service_worker' && url.pathname === '/src/background/service-worker.js') {
+      return 'service-worker';
+    }
+    if (targetInfo.type !== 'page') return null;
+    if (url.pathname === `/${harnessPath}`) return 'harness';
+    if (url.pathname === '/src/panel/index.html') return 'panel';
+    if (url.pathname === '/src/review/index.html') return 'review';
+    if (url.pathname === '/src/export/index.html') return 'export';
+  } catch { /* alvo ainda sem URL canônica */ }
+  return null;
+}
+
+class RuntimeLogAudit {
+  constructor(needles = []) {
+    this.needles = [...needles];
+    this.monitoredSessions = new Set();
+    this.probedRoles = new Map();
+    this.eventCount = 0;
+    this.leak = false;
+    this.setupFailed = false;
+  }
+
+  monitor(sessionId) {
+    if (typeof sessionId === 'string' && sessionId.length > 0) this.monitoredSessions.add(sessionId);
+  }
+
+  failSetup() {
+    this.setupFailed = true;
+  }
+
+  capture(message) {
+    if (!this.monitoredSessions.has(message.sessionId) ||
+      (message.method !== 'Runtime.consoleAPICalled' && message.method !== 'Runtime.exceptionThrown')) return;
+    this.eventCount += 1;
+    if (message.method === 'Runtime.consoleAPICalled' && Array.isArray(message.params?.args)) {
+      for (const [role, probe] of Object.entries(runtimeProbeByRole)) {
+        if (!message.params.args.some(argument => argument?.type === 'string' && argument.value === probe)) continue;
+        if (!this.probedRoles.has(role)) this.probedRoles.set(role, new Set());
+        this.probedRoles.get(role).add(message.sessionId);
+      }
+    }
+    try {
+      const serialized = JSON.stringify(message.params);
+      if (this.needles.some(needle => serialized.includes(needle))) this.leak = true;
+    } catch {
+      this.leak = true;
+    }
+  }
+
+  finalVerdict(requiredRoles) {
+    const sinksReady = requiredRoles.every(role => (this.probedRoles.get(role)?.size ?? 0) > 0);
+    return {
+      sinksReady,
+      sanitized: sinksReady && this.eventCount > 0 && !this.setupFailed && !this.leak,
+    };
+  }
+}
+
 class SessionCdp {
   constructor(browser, sessionId) {
     this.browser = browser;
@@ -1264,9 +1398,11 @@ class PipeCdp {
     this.nextId = 1;
     this.pending = new Map();
     this.eventWaiters = new Set();
-    this.runtimeLogNeedles = [...runtimeLogNeedles];
-    this.runtimeLogEventCount = 0;
-    this.runtimeLogLeak = false;
+    this.runtimeLogAudit = new RuntimeLogAudit(runtimeLogNeedles);
+    this.runtimeExtensionId = '';
+    this.runtimeTargetSessions = new Map();
+    this.runtimeCaptureSessions = new Set();
+    this.runtimeCaptureTasks = new Set();
     this.buffer = Buffer.alloc(0);
     responsePipe.on('data', chunk => {
       this.buffer = Buffer.concat([this.buffer, chunk]);
@@ -1303,13 +1439,22 @@ class PipeCdp {
   }
 
   captureEvent(message) {
-    if (message.method === 'Runtime.consoleAPICalled' || message.method === 'Runtime.exceptionThrown') {
-      this.runtimeLogEventCount += 1;
-      try {
-        const serialized = JSON.stringify(message.params);
-        if (this.runtimeLogNeedles.some(needle => serialized.includes(needle))) this.runtimeLogLeak = true;
-      } catch {
-        this.runtimeLogLeak = true;
+    this.runtimeLogAudit.capture(message);
+    if (message.method === 'Target.attachedToTarget') {
+      const targetId = message.params?.targetInfo?.targetId;
+      const sessionId = message.params?.sessionId;
+      if (typeof targetId === 'string' && typeof sessionId === 'string') {
+        this.runtimeTargetSessions.set(targetId, sessionId);
+        this.captureRuntimeTarget(sessionId, message.params.targetInfo);
+      }
+    } else if (message.method === 'Target.targetInfoChanged') {
+      const targetId = message.params?.targetInfo?.targetId;
+      const sessionId = this.runtimeTargetSessions.get(targetId);
+      if (sessionId) this.captureRuntimeTarget(sessionId, message.params.targetInfo);
+    } else if (message.method === 'Target.detachedFromTarget') {
+      const sessionId = message.params?.sessionId;
+      for (const [targetId, correlatedSessionId] of this.runtimeTargetSessions) {
+        if (correlatedSessionId === sessionId) this.runtimeTargetSessions.delete(targetId);
       }
     }
     for (const waiter of [...this.eventWaiters]) {
@@ -1334,8 +1479,44 @@ class PipeCdp {
     });
   }
 
-  runtimeLogsSanitized() {
-    return this.runtimeLogEventCount > 0 && this.runtimeLogLeak === false;
+  monitorRuntimeSession(sessionId) {
+    this.runtimeLogAudit.monitor(sessionId);
+  }
+
+  async captureExtensionRuntimeTargets(extensionId) {
+    this.runtimeExtensionId = extensionId;
+    await this.command('Target.setAutoAttach', {
+      autoAttach: true,
+      waitForDebuggerOnStart: true,
+      flatten: true,
+      filter: [
+        { type: 'page', exclude: false },
+        { type: 'service_worker', exclude: false },
+        { exclude: true },
+      ],
+    });
+  }
+
+  captureRuntimeTarget(sessionId, targetInfo) {
+    if (!this.runtimeExtensionId || this.runtimeCaptureSessions.has(sessionId)) return;
+    const role = runtimeRoleForTarget(targetInfo, this.runtimeExtensionId);
+    if (!role) {
+      this.command('Runtime.runIfWaitingForDebugger', {}, 10_000, sessionId).catch(() => undefined);
+      return;
+    }
+    this.runtimeCaptureSessions.add(sessionId);
+    const page = new SessionCdp(this, sessionId);
+    const task = probeRuntimeSink(this, page, role, { resume: true })
+      .catch(() => this.runtimeLogAudit.failSetup())
+      .finally(() => this.runtimeCaptureTasks.delete(task));
+    this.runtimeCaptureTasks.add(task);
+  }
+
+  async finalRuntimeLogVerdict(requiredRoles) {
+    while (this.runtimeCaptureTasks.size > 0) {
+      await Promise.allSettled([...this.runtimeCaptureTasks]);
+    }
+    return this.runtimeLogAudit.finalVerdict(requiredRoles);
   }
 
   command(method, params = {}, timeoutMs = 10_000, sessionId = undefined) {
