@@ -772,7 +772,13 @@ test('never carries latest state from audit B into an export request for audit A
 test('rejects a stored model whose correlated auditId is inherited', async () => {
   const chromeApi = createChrome();
   const inherited = Object.create({ auditId: 'audit-A' });
-  registerServiceWorker(chromeApi, { auditStore: withAuditRevisions({ async getAudit() { return inherited; }, async getLatest() { return null; } }) });
+  const auditStore = {
+    async getAuditSnapshot() {
+      return { model: inherited, revision: 0, capability: Object.freeze(Object.create(null)) };
+    },
+    async getLatest() { return null; },
+  };
+  registerServiceWorker(chromeApi, { auditStore });
   let response;
   chromeApi.listeners.message.listener(
     { type: 'REQUEST_EXPORT', auditId: 'audit-A' },

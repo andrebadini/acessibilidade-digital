@@ -26,42 +26,74 @@ const INTERRUPTIBLE_AUDIT_STATUSES = new Set(['idle', 'validating', 'queued', 'r
 const AUDIT_SNAPSHOT_CAPABILITIES = new WeakMap();
 const IN_MEMORY_RETENTION = new WeakMap();
 
-function assertStorageCloneSafe(root) {
-  const pending = [root];
-  const seen = new WeakSet();
-  while (pending.length > 0) {
-    const value = pending.pop();
-    if (value === null || value === undefined ||
-      (typeof value !== 'object' && typeof value !== 'function')) {
-      if (typeof value === 'function' || typeof value === 'symbol') {
-        throw new TypeError('Valor não clonável.');
-      }
-      continue;
-    }
-    if (seen.has(value)) continue;
-    seen.add(value);
+function storageArrayIndex(key, length) {
+  if (typeof key !== 'string' || !/^(?:0|[1-9][0-9]*)$/u.test(key)) return false;
+  const index = Number(key);
+  return Number.isSafeInteger(index) && index >= 0 && index < length && index < 0xffff_ffff;
+}
+
+function snapshotStorageGraph(root) {
+  const snapshots = new WeakMap();
+  const capture = value => {
+    if (value === null || value === undefined) return value;
+    const valueType = typeof value;
+    if (valueType === 'string' || valueType === 'boolean' || valueType === 'number') return value;
+    if (valueType !== 'object') throw new TypeError('Valor não clonável.');
+    if (snapshots.has(value)) return snapshots.get(value);
+
     const descriptors = Object.getOwnPropertyDescriptors(value);
-    for (const key of Reflect.ownKeys(descriptors)) {
-      const descriptor = descriptors[key];
-      if (!Object.hasOwn(descriptor, 'value')) throw new TypeError('Acessor não clonável.');
-      pending.push(descriptor.value);
-    }
     const prototype = Object.getPrototypeOf(value);
-    if (prototype === Map.prototype || Map.prototype.isPrototypeOf(value)) {
-      Map.prototype.forEach.call(value, (entryValue, entryKey) => {
-        pending.push(entryKey, entryValue);
-      });
-    } else if (prototype === Set.prototype || Set.prototype.isPrototypeOf(value)) {
-      Set.prototype.forEach.call(value, entryValue => pending.push(entryValue));
+    const keys = Reflect.ownKeys(descriptors);
+    const isArray = Array.isArray(value);
+    if (isArray ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError('Tipo de armazenamento não suportado.');
     }
-  }
+
+    let snapshot;
+    let entries;
+    if (isArray) {
+      const lengthDescriptor = descriptors.length;
+      if (!lengthDescriptor || !Object.hasOwn(lengthDescriptor, 'value') ||
+        !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0 ||
+        lengthDescriptor.value > 0xffff_ffff) {
+        throw new TypeError('Array de armazenamento inválido.');
+      }
+      snapshot = new Array(lengthDescriptor.value);
+      entries = keys.filter(key => key !== 'length').map(key => {
+        if (!storageArrayIndex(key, lengthDescriptor.value)) {
+          throw new TypeError('Propriedade de array não suportada.');
+        }
+        return [key, descriptors[key]];
+      });
+    } else {
+      snapshot = prototype === null ? Object.create(null) : {};
+      entries = keys.map(key => {
+        if (typeof key !== 'string') throw new TypeError('Chave de armazenamento não suportada.');
+        return [key, descriptors[key]];
+      });
+    }
+
+    snapshots.set(value, snapshot);
+    for (const [key, descriptor] of entries) {
+      if (!descriptor || !Object.hasOwn(descriptor, 'value') || descriptor.enumerable !== true) {
+        throw new TypeError('Descritor de armazenamento não suportado.');
+      }
+      Object.defineProperty(snapshot, key, {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: capture(descriptor.value),
+      });
+    }
+    return snapshot;
+  };
+  return capture(root);
 }
 
 function storageClone(value, transaction = null) {
   if (value === undefined) return undefined;
   try {
-    assertStorageCloneSafe(value);
-    return structuredClone(value);
+    return snapshotStorageGraph(value);
   } catch {
     abortIndexedDbTransaction(transaction);
     throw new AuditStorageUnavailableError();

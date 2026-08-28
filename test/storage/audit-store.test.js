@@ -727,6 +727,52 @@ test('persistent storage clone failures are fixed, accessor-safe and retryable a
   });
 });
 
+test('storage clone does not re-traverse a graph after descriptor capture', async () => {
+  const nativeDetail = 'NESTED_PROXY_NATIVE_DETAIL_73';
+  let accessorReads = 0;
+  let prototypeWalks = 0;
+  const nested = { payload: 'captured-before-prototype-walk' };
+  const mutatingPrototype = new Proxy({}, {
+    getPrototypeOf() {
+      prototypeWalks += 1;
+      Object.defineProperty(nested, 'payload', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          accessorReads += 1;
+          throw new Error(nativeDetail);
+        },
+      });
+      return Object.prototype;
+    },
+  });
+  const mutator = Object.create(mutatingPrototype);
+  const hostile = { auditId: 'clone-toctou', mutator, nested };
+  const store = createInMemoryAuditStore();
+
+  await assert.rejects(store.setLatest(hostile), error => {
+    assert.ok(error instanceof AuditStorageUnavailableError);
+    assert.equal(error.code, 'AUDIT_STORAGE_UNAVAILABLE');
+    assert.equal(error.message, 'Não foi possível salvar a auditoria no armazenamento local. Libere espaço ou verifique as permissões e tente novamente.');
+    assert.doesNotMatch(error.message, /NESTED_PROXY_NATIVE_DETAIL_73/iu);
+    return true;
+  });
+  assert.equal(prototypeWalks, 0, 'a validação não deve caminhar por protótipos controlados pelo valor');
+  assert.equal(accessorReads, 0, 'nenhuma segunda travessia pode alcançar o acessor instalado depois');
+
+  await store.setLatest({ auditId: 'clone-toctou', status: 'complete' });
+  assert.deepEqual(await store.getLatest(), { auditId: 'clone-toctou', status: 'complete' });
+
+  const shared = { label: 'same-node' };
+  const cyclic = { auditId: 'clone-toctou', left: shared, right: shared };
+  cyclic.self = cyclic;
+  await store.setLatest(cyclic);
+  const detached = await store.getLatest();
+  assert.notEqual(detached, cyclic);
+  assert.equal(detached.left, detached.right, 'aliases permanecem correlacionados no snapshot');
+  assert.equal(detached.self, detached, 'ciclos suportados permanecem internos ao snapshot destacado');
+});
+
 test('every synchronous IndexedDB boundary is sanitized and remains retryable', async t => {
   const sensitive = 'SecurityError: db=audita-mt url=https://private.invalid/?token=never-log';
   const assertFixedTwice = async operation => {
