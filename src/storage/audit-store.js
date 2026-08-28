@@ -1,5 +1,15 @@
+import {
+  canonicalRetentionInstant,
+  createRetentionMetadata,
+  isPrivateAuditKey,
+  migrateRetentionMetadata,
+  validateRetentionMetadata,
+} from './audit-retention.js';
+import { AUDIT_STORAGE_UNAVAILABLE_MESSAGE as STORAGE_UNAVAILABLE_MESSAGE } from '../core/privacy.js';
+
 const DB_NAME = 'audita-mt';
 const STORE_NAME = 'audits';
+const RETENTION_STORE_NAME = 'audit-retention';
 const LATEST_KEY = '__latest__';
 const REVISION_KEY_PREFIX = '__audit_revision__:';
 const EXPORT_LEASE_KEY_PREFIX = '__audit_export_lease__:';
@@ -10,6 +20,7 @@ const MAX_EXPORT_LEASE_TTL_MS = 10 * 60 * 1000;
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
 const EXPORT_FORMATS = new Set(['html', 'json', 'csv', 'pdf']);
 const AUDIT_SNAPSHOT_CAPABILITIES = new WeakMap();
+const IN_MEMORY_RETENTION = new WeakMap();
 
 function clone(value) {
   return value === undefined ? undefined : structuredClone(value);
@@ -250,6 +261,17 @@ function resolveDeliveryEntries(entries, options) {
   return { entries: next, matched: true };
 }
 
+function isCompleteTerminalDelivery(entries, ownerId, exportAttempt) {
+  if (entries.length !== EXPORT_FORMATS.size) return false;
+  const formats = new Set();
+  for (const entry of entries) {
+    if (entry.ownerId !== ownerId || entry.exportAttempt !== exportAttempt || entry.state !== 'terminal' ||
+      !EXPORT_FORMATS.has(entry.format) || formats.has(entry.format)) return false;
+    formats.add(entry.format);
+  }
+  return formats.size === EXPORT_FORMATS.size;
+}
+
 function activeExportLease(value, auditId, revision, nowMs) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.schemaVersion !== 1 ||
     value.auditId !== auditId || typeof value.ownerId !== 'string' ||
@@ -350,6 +372,22 @@ export class AuditExportLeaseConflictError extends Error {
   }
 }
 
+export class AuditStorageUnavailableError extends Error {
+  constructor() {
+    super(STORAGE_UNAVAILABLE_MESSAGE);
+    this.name = 'AuditStorageUnavailableError';
+    this.code = 'AUDIT_STORAGE_UNAVAILABLE';
+  }
+}
+
+export class AuditDeleteBusyError extends Error {
+  constructor() {
+    super('A auditoria está sendo exportada ou possui uma entrega pendente. Tente novamente depois.');
+    this.name = 'AuditDeleteBusyError';
+    this.code = 'AUDIT_DELETE_BUSY';
+  }
+}
+
 export function isAuditExportLeaseConflict(error) {
   return safeStoredErrorCode(error) === 'AUDIT_EXPORT_LEASE_CONFLICT';
 }
@@ -371,7 +409,20 @@ function safeStoredErrorCode(value) {
   }
 }
 
-export function createInMemoryAuditStore(initial = new Map()) {
+export function createInMemoryAuditStore(initial = new Map(), storeOptions = {}) {
+  let retention = IN_MEMORY_RETENTION.get(initial);
+  if (!retention) {
+    retention = new Map();
+    for (const [auditId, model] of initial) {
+      if (typeof auditId === 'string' && !isPrivateAuditKey(auditId)) {
+        retention.set(auditId, migrateRetentionMetadata(auditId, model));
+      }
+    }
+    IN_MEMORY_RETENTION.set(initial, retention);
+  }
+  const clock = typeof storeOptions.now === 'function'
+    ? storeOptions.now
+    : () => new Date().toISOString();
   const owner = Object.freeze(Object.create(null));
   const snapshot = id => {
     const key = validId(id);
@@ -392,8 +443,17 @@ export function createInMemoryAuditStore(initial = new Map()) {
     const reviewLatest = options.review === true
       ? reviewLatestState(initial.get(LATEST_KEY), key, modelClone, revision)
       : undefined;
+    const currentRetention = retention.get(key);
+    const firstRetention = currentRetention === undefined
+      ? createRetentionMetadata(
+          key,
+          options.now ?? clock(),
+          options.deleteAfterCompleteExport === true,
+        )
+      : validateRetentionMetadata(currentRetention, key);
     initial.set(key, modelClone);
     initial.set(revisionKey(key), revision);
+    if (currentRetention === undefined) retention.set(key, firstRetention);
     if (options.keepExportLease !== true) initial.delete(exportLeaseKey(key));
     if (options.review === true) {
       if (reviewLatest !== undefined) initial.set(LATEST_KEY, reviewLatest);
@@ -563,14 +623,68 @@ export function createInMemoryAuditStore(initial = new Map()) {
     const key = validId(id);
     return canonicalDeliveryJournal(initial.get(exportDeliveryKey(key)), key);
   };
+  const deleteStoredAudit = key => {
+    initial.delete(key);
+    initial.delete(revisionKey(key));
+    initial.delete(exportLeaseKey(key));
+    initial.delete(exportAttemptKey(key));
+    initial.delete(exportDeliveryKey(key));
+    retention.delete(key);
+    if (initial.get(LATEST_KEY)?.auditId === key) initial.delete(LATEST_KEY);
+  };
+  const hasDeliveryWork = (key, nowMs) => {
+    const revision = storedRevision(initial.get(revisionKey(key)));
+    const lease = activeExportLease(initial.get(exportLeaseKey(key)), key, revision, nowMs);
+    const journal = canonicalDeliveryJournal(initial.get(exportDeliveryKey(key)), key);
+    return Boolean(lease) || journal.length > 0;
+  };
+  const finalizeExportAndMaybeDelete = (id, model, latestState, snapshotCapability, options) => {
+    const key = validId(id);
+    if (options?.clearDeliveryJournal !== true || typeof options?.deleteAfterCompleteExport !== 'boolean') {
+      throw new TypeError('Finalização de exportação inválida.');
+    }
+    const revision = capabilityRevision(snapshotCapability, owner, key);
+    const currentRevision = storedRevision(initial.get(revisionKey(key)));
+    if (!initial.has(key) || currentRevision !== revision) throw new AuditRevisionConflictError();
+    const normalized = canonicalLeaseOptions({ ...options, release: true }, revision);
+    const existing = activeExportLease(initial.get(exportLeaseKey(key)), key, revision, normalized.nowMs);
+    if (!existing || existing.ownerId !== normalized.ownerId ||
+      existing.exportAttempt !== normalized.exportAttempt ||
+      !['queued', 'running', 'delivering'].includes(existing.phase)) {
+      throw new AuditExportLeaseConflictError();
+    }
+    const entries = canonicalDeliveryJournal(initial.get(exportDeliveryKey(key)), key);
+    if (entries.some(entry => entry.ownerId !== existing.ownerId ||
+      entry.exportAttempt !== existing.exportAttempt || entry.state !== 'terminal')) {
+      throw new AuditExportLeaseConflictError('Existem arquivos obsoletos pendentes de reconciliação.');
+    }
+    const metadata = validateRetentionMetadata(retention.get(key), key);
+    const shouldDelete = metadata.deleteAfterCompleteExport === true &&
+      options.deleteAfterCompleteExport === true &&
+      isCompleteTerminalDelivery(entries, existing.ownerId, existing.exportAttempt);
+    if (shouldDelete) {
+      clone(model);
+      if (latestState !== undefined) clone(latestState);
+      deleteStoredAudit(key);
+      return { deleted: true };
+    }
+    const committed = commitAuditIfRevisionWithExportLease(
+      key,
+      model,
+      latestState,
+      snapshotCapability,
+      { ...options, release: true },
+    );
+    return { ...committed, deleted: false };
+  };
   return {
-    async setAudit(id, model) { return writeAudit(id, model); },
+    async setAudit(id, model, options) { return writeAudit(id, model, undefined, undefined, options); },
     async getAudit(id) { return snapshot(id).model; },
     async getAuditSnapshot(id) { return snapshot(id); },
     async setLatest(state) { initial.set(LATEST_KEY, clone(state)); },
     async getLatest() { return clone(initial.get(LATEST_KEY)); },
-    async commitAudit(id, model, latestState) {
-      return writeAudit(id, model, latestState);
+    async commitAudit(id, model, latestState, options) {
+      return writeAudit(id, model, latestState, undefined, options);
     },
     async commitAuditIfRevision(id, model, latestState, snapshotCapability) {
       return writeAudit(id, model, latestState, snapshotCapability);
@@ -597,12 +711,114 @@ export function createInMemoryAuditStore(initial = new Map()) {
     },
     async resolveExportDelivery(id, options) { return resolveExportDelivery(id, options); },
     async getExportDeliveryJournal(id) { return clone(getExportDeliveryJournal(id)); },
+    async getAuditRetention(id) {
+      const key = validId(id);
+      const value = retention.get(key);
+      return value === undefined ? undefined : clone(validateRetentionMetadata(value, key));
+    },
+    async setRetentionIntent(id, snapshotCapability, options) {
+      const key = validId(id);
+      canonicalRetentionInstant(options?.now);
+      if (typeof options?.deleteAfterCompleteExport !== 'boolean') {
+        throw new TypeError('Intenção de retenção inválida.');
+      }
+      const expected = capabilityRevision(snapshotCapability, owner, key);
+      const revision = storedRevision(initial.get(revisionKey(key)));
+      if (!initial.has(key) || revision !== expected) throw new AuditRevisionConflictError();
+      const current = validateRetentionMetadata(retention.get(key), key);
+      const next = Object.freeze({
+        ...current,
+        deleteAfterCompleteExport: options.deleteAfterCompleteExport,
+      });
+      retention.set(key, next);
+      return {
+        revision,
+        capability: mintAuditSnapshot(owner, key, initial.get(key), revision).capability,
+        retention: clone(next),
+      };
+    },
+    async cleanupExpiredAudits(options) {
+      const instant = canonicalRetentionInstant(options?.now);
+      const limit = options?.limit ?? 25;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 25) {
+        throw new TypeError('Limite de limpeza inválido.');
+      }
+      const expired = [...retention.values()]
+        .map(value => validateRetentionMetadata(value, value.auditId))
+        .filter(value => new Date(value.expiresAt).getTime() <= instant.milliseconds)
+        .sort((a, b) => a.expiresAt.localeCompare(b.expiresAt) || a.auditId.localeCompare(b.auditId));
+      const candidates = expired.slice(0, limit);
+      let deleted = 0;
+      let blocked = 0;
+      for (const candidate of candidates) {
+        if (hasDeliveryWork(candidate.auditId, instant.milliseconds)) {
+          blocked += 1;
+          continue;
+        }
+        deleteStoredAudit(candidate.auditId);
+        deleted += 1;
+      }
+      return { scanned: candidates.length, deleted, remaining: expired.length - deleted, blocked };
+    },
+    async deleteAudit(id, snapshotCapability, options) {
+      const key = validId(id);
+      const instant = canonicalRetentionInstant(options?.now);
+      const expected = capabilityRevision(snapshotCapability, owner, key);
+      const revision = storedRevision(initial.get(revisionKey(key)));
+      if (!initial.has(key) || revision !== expected) throw new AuditRevisionConflictError();
+      if (hasDeliveryWork(key, instant.milliseconds)) throw new AuditDeleteBusyError();
+      deleteStoredAudit(key);
+      return { deleted: true };
+    },
+    async deleteAllAudits(options) {
+      const instant = canonicalRetentionInstant(options?.now);
+      const auditIds = [...retention.keys()].filter(key => initial.has(key));
+      if (auditIds.some(key => hasDeliveryWork(key, instant.milliseconds))) {
+        throw new AuditDeleteBusyError();
+      }
+      for (const key of auditIds) deleteStoredAudit(key);
+      return { deleted: auditIds.length };
+    },
+    async finalizeExportAndMaybeDelete(id, model, latestState, snapshotCapability, options) {
+      return finalizeExportAndMaybeDelete(id, model, latestState, snapshotCapability, options);
+    },
   };
 }
 
+function createUnavailableAuditStore() {
+  const unavailable = async () => { throw new AuditStorageUnavailableError(); };
+  return Object.freeze({
+    setAudit: unavailable,
+    getAudit: unavailable,
+    getAuditSnapshot: unavailable,
+    setLatest: unavailable,
+    getLatest: unavailable,
+    commitAudit: unavailable,
+    commitAuditIfRevision: unavailable,
+    commitAuditReviewIfRevision: unavailable,
+    acquireExportLease: unavailable,
+    claimExportLease: unavailable,
+    commitAuditIfRevisionWithExportLease: unavailable,
+    releaseExportLease: unavailable,
+    getExportLeaseState: unavailable,
+    assertExportLease: unavailable,
+    recordExportDelivery: unavailable,
+    resolveExportDelivery: unavailable,
+    getExportDeliveryJournal: unavailable,
+    getAuditRetention: unavailable,
+    setRetentionIntent: unavailable,
+    cleanupExpiredAudits: unavailable,
+    deleteAudit: unavailable,
+    deleteAllAudits: unavailable,
+    finalizeExportAndMaybeDelete: unavailable,
+  });
+}
+
 export function createAuditStore(options = {}) {
-  const factory = options.indexedDB ?? globalThis.indexedDB;
-  if (!factory || typeof factory.open !== 'function') return createInMemoryAuditStore(options.fallback);
+  const factory = Object.hasOwn(options, 'indexedDB') ? options.indexedDB : globalThis.indexedDB;
+  if (!factory || typeof factory.open !== 'function') return createUnavailableAuditStore();
+  const clock = typeof options.now === 'function' ? options.now : () => new Date().toISOString();
+  const keyRange = options.IDBKeyRange ?? globalThis.IDBKeyRange;
   let database = null;
   let opening = null;
   const owner = Object.freeze(Object.create(null));
@@ -610,19 +826,48 @@ export function createAuditStore(options = {}) {
     if (database) return database;
     if (opening) return opening;
     opening = new Promise((resolve, reject) => {
-      const request = factory.open(DB_NAME, 1);
+      const request = factory.open(DB_NAME, 2);
       let settled = false;
       const fail = error => {
         if (settled) return;
         settled = true;
         opening = null;
-        reject(error);
+        reject(error instanceof AuditStorageUnavailableError ? error : new AuditStorageUnavailableError());
       };
-      request.onupgradeneeded = () => {
-        if (!request.result.objectStoreNames.contains(STORE_NAME)) request.result.createObjectStore(STORE_NAME);
+      request.onupgradeneeded = event => {
+        try {
+          const db = request.result;
+          const transaction = request.transaction;
+          const auditStore = db.objectStoreNames.contains(STORE_NAME)
+            ? transaction.objectStore(STORE_NAME)
+            : db.createObjectStore(STORE_NAME);
+          const retentionStore = db.objectStoreNames.contains(RETENTION_STORE_NAME)
+            ? transaction.objectStore(RETENTION_STORE_NAME)
+            : db.createObjectStore(RETENTION_STORE_NAME, { keyPath: 'auditId' });
+          if (!retentionStore.indexNames.contains('byExpiresAt')) {
+            retentionStore.createIndex('byExpiresAt', 'expiresAt', { unique: false });
+          }
+          if ((event?.oldVersion ?? 0) >= 1 && (event?.oldVersion ?? 0) < 2) {
+            const cursorRequest = auditStore.openCursor();
+            cursorRequest.onsuccess = () => {
+              const cursor = cursorRequest.result;
+              if (!cursor) return;
+              const auditId = cursor.key;
+              if (typeof auditId === 'string' && !isPrivateAuditKey(auditId)) {
+                retentionStore.put(migrateRetentionMetadata(auditId, cursor.value));
+              }
+              cursor.continue();
+            };
+            cursorRequest.onerror = () => {
+              try { transaction.abort(); } catch {}
+            };
+          }
+        } catch {
+          try { request.transaction?.abort(); } catch {}
+        }
       };
-      request.onblocked = () => fail(new Error('A abertura do armazenamento foi bloqueada.'));
-      request.onerror = () => fail(request.error || new Error('Não foi possível abrir o armazenamento de auditorias.'));
+      request.onblocked = () => fail(new AuditStorageUnavailableError());
+      request.onerror = () => fail(new AuditStorageUnavailableError());
       request.onsuccess = () => {
         const db = request.result;
         if (settled) {
@@ -651,8 +896,8 @@ export function createAuditStore(options = {}) {
       const store = transaction.objectStore(STORE_NAME);
       for (const [key, value] of entries) store.put(value, key);
       transaction.oncomplete = () => finish(resolve);
-      transaction.onerror = () => finish(reject, transaction.error || new Error('Não foi possível salvar a auditoria.'));
-      transaction.onabort = () => finish(reject, transaction.error || new Error('A transação de auditoria foi abortada.'));
+      transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
     });
   };
   const put = (key, value) => write([[key, clone(value)]]);
@@ -667,11 +912,11 @@ export function createAuditStore(options = {}) {
       for (const key of keys) {
         const request = store.get(key);
         request.onsuccess = () => values.set(key, clone(request.result));
-        request.onerror = () => finish(reject, request.error || new Error('Não foi possível ler a auditoria.'));
+        request.onerror = () => finish(reject, new AuditStorageUnavailableError());
       }
       transaction.oncomplete = () => finish(resolve, values);
-      transaction.onerror = () => finish(reject, transaction.error || new Error('Não foi possível ler a auditoria.'));
-      transaction.onabort = () => finish(reject, transaction.error || new Error('A leitura da auditoria foi abortada.'));
+      transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
     });
   };
   const get = async key => (await readKeys([key])).get(key);
@@ -692,20 +937,24 @@ export function createAuditStore(options = {}) {
       let settled = false;
       let currentModelRead = false;
       let revisionRead = false;
+      let retentionRead = false;
       let currentModel;
       let currentRevisionValue;
+      let currentRetention;
       let latestRead = options.review !== true;
       let currentLatest;
       let nextRevision = null;
       let conflict = false;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
-      const transaction = db.transaction(STORE_NAME, 'readwrite');
+      const transaction = db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite');
       const store = transaction.objectStore(STORE_NAME);
+      const retentionStore = transaction.objectStore(RETENTION_STORE_NAME);
       const currentRequest = store.get(key);
       const revisionRequest = store.get(revisionKey(key));
+      const retentionRequest = retentionStore.get(key);
       const latestRequest = options.review === true ? store.get(LATEST_KEY) : null;
       const apply = () => {
-        if (!currentModelRead || !revisionRead || !latestRead || nextRevision !== null || conflict) return;
+        if (!currentModelRead || !revisionRead || !retentionRead || !latestRead || nextRevision !== null || conflict) return;
         let currentRevision;
         try { currentRevision = storedRevision(currentRevisionValue); } catch (error) {
           finish(reject, error);
@@ -717,10 +966,18 @@ export function createAuditStore(options = {}) {
         }
         const candidateRevision = currentRevision + 1;
         let reviewLatest;
+        let nextRetention;
         try {
           reviewLatest = options.review === true
             ? reviewLatestState(currentLatest, key, modelClone, candidateRevision)
             : undefined;
+          nextRetention = currentRetention === undefined
+            ? createRetentionMetadata(
+                key,
+                options.now ?? clock(),
+                options.deleteAfterCompleteExport === true,
+              )
+            : validateRetentionMetadata(currentRetention, key);
         } catch (error) {
           finish(reject, error);
           try { transaction.abort(); } catch {}
@@ -729,6 +986,7 @@ export function createAuditStore(options = {}) {
         nextRevision = candidateRevision;
         store.put(modelClone, key);
         store.put(nextRevision, revisionKey(key));
+        if (currentRetention === undefined) retentionStore.put(nextRetention);
         store.delete(exportLeaseKey(key));
         if (options.review === true) {
           if (reviewLatest !== undefined) store.put(reviewLatest, LATEST_KEY);
@@ -744,26 +1002,32 @@ export function createAuditStore(options = {}) {
         currentRevisionValue = revisionRequest.result;
         apply();
       };
+      retentionRequest.onsuccess = () => {
+        retentionRead = true;
+        currentRetention = retentionRequest.result;
+        apply();
+      };
       if (latestRequest) {
         latestRequest.onsuccess = () => {
           latestRead = true;
           currentLatest = latestRequest.result;
           apply();
         };
-        latestRequest.onerror = () => finish(reject, latestRequest.error || new Error('Não foi possível ler o estado mais recente da auditoria.'));
+        latestRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       }
-      currentRequest.onerror = () => finish(reject, currentRequest.error || new Error('Não foi possível ler a auditoria atual.'));
-      revisionRequest.onerror = () => finish(reject, revisionRequest.error || new Error('Não foi possível ler a revisão da auditoria.'));
+      currentRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      revisionRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      retentionRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       transaction.oncomplete = () => {
         if (conflict) finish(reject, new AuditRevisionConflictError());
-        else if (nextRevision === null) finish(reject, new Error('A atualização da auditoria não foi concluída.'));
+        else if (nextRevision === null) finish(reject, new AuditStorageUnavailableError());
         else finish(resolve, {
           revision: nextRevision,
           capability: mintAuditSnapshot(owner, key, modelClone, nextRevision).capability,
         });
       };
-      transaction.onerror = () => finish(reject, transaction.error || new Error('Não foi possível salvar a auditoria.'));
-      transaction.onabort = () => finish(reject, transaction.error || new Error('A transação de auditoria foi abortada.'));
+      transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
     });
   };
 
@@ -834,17 +1098,17 @@ export function createAuditStore(options = {}) {
       latestRequest.onsuccess = () => { latestRead = true; currentLatest = latestRequest.result; apply(); };
       attemptRequest.onsuccess = () => { attemptRead = true; currentAttempt = attemptRequest.result; apply(); };
       deliveryRequest.onsuccess = () => { deliveryRead = true; currentDelivery = deliveryRequest.result; apply(); };
-      modelRequest.onerror = () => finish(reject, modelRequest.error || new Error('Não foi possível ler a auditoria atual.'));
-      revisionRequest.onerror = () => finish(reject, revisionRequest.error || new Error('Não foi possível ler a revisão da auditoria.'));
-      leaseRequest.onerror = () => finish(reject, leaseRequest.error || new Error('Não foi possível ler o lease da exportação.'));
-      latestRequest.onerror = () => finish(reject, latestRequest.error || new Error('Não foi possível ler o estado mais recente da auditoria.'));
-      attemptRequest.onerror = () => finish(reject, attemptRequest.error || new Error('Não foi possível ler a tentativa da exportação.'));
-      deliveryRequest.onerror = () => finish(reject, deliveryRequest.error || new Error('Não foi possível ler o journal da entrega.'));
+      modelRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      revisionRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      leaseRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      latestRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      attemptRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      deliveryRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       transaction.oncomplete = () => revisionConflict
         ? finish(reject, new AuditRevisionConflictError())
-        : result ? finish(resolve, result) : finish(reject, new Error('A reserva de exportação não foi concluída.'));
-      transaction.onerror = () => finish(reject, transaction.error || new Error('Não foi possível reservar a exportação.'));
-      transaction.onabort = () => finish(reject, transaction.error || new Error('A reserva de exportação foi abortada.'));
+        : result ? finish(resolve, result) : finish(reject, new AuditStorageUnavailableError());
+      transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
     });
   };
 
@@ -865,22 +1129,26 @@ export function createAuditStore(options = {}) {
       let revisionRead = false;
       let leaseRead = false;
       let deliveryRead = false;
+      let retentionRead = false;
       let currentModel;
       let currentRevisionValue;
       let currentLease;
       let currentDelivery;
+      let currentRetention;
       let result = null;
       let revisionConflict = false;
       let leaseConflict = false;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
-      const transaction = db.transaction(STORE_NAME, 'readwrite');
+      const transaction = db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite');
       const store = transaction.objectStore(STORE_NAME);
+      const retentionStore = transaction.objectStore(RETENTION_STORE_NAME);
       const modelRequest = store.get(key);
       const revisionRequest = store.get(revisionKey(key));
       const leaseRequest = store.get(exportLeaseKey(key));
       const deliveryRequest = store.get(exportDeliveryKey(key));
+      const retentionRequest = retentionStore.get(key);
       const apply = () => {
-        if (!modelRead || !revisionRead || !leaseRead || !deliveryRead || result || revisionConflict || leaseConflict) return;
+        if (!modelRead || !revisionRead || !leaseRead || !deliveryRead || !retentionRead || result || revisionConflict || leaseConflict) return;
         let revision;
         try { revision = storedRevision(currentRevisionValue); } catch (error) { finish(reject, error); return; }
         if (currentModel === undefined || revision !== expected) { revisionConflict = true; return; }
@@ -897,6 +1165,13 @@ export function createAuditStore(options = {}) {
           finish(reject, error);
           return;
         }
+        let retentionMetadata;
+        try {
+          retentionMetadata = currentRetention === undefined
+            ? createRetentionMetadata(key, normalized.now, false)
+            : validateRetentionMetadata(currentRetention, key);
+        } catch (error) { finish(reject, error); return; }
+        if (currentRetention === undefined) retentionStore.put(retentionMetadata);
         if (normalized.clearDeliveryJournal && (!normalized.release || deliveryEntries.some(entry =>
           entry.ownerId !== normalized.ownerId || entry.exportAttempt !== existing.exportAttempt || entry.state !== 'terminal'))) {
           leaseConflict = true;
@@ -946,18 +1221,20 @@ export function createAuditStore(options = {}) {
       revisionRequest.onsuccess = () => { revisionRead = true; currentRevisionValue = revisionRequest.result; apply(); };
       leaseRequest.onsuccess = () => { leaseRead = true; currentLease = leaseRequest.result; apply(); };
       deliveryRequest.onsuccess = () => { deliveryRead = true; currentDelivery = deliveryRequest.result; apply(); };
-      modelRequest.onerror = () => finish(reject, modelRequest.error || new Error('Não foi possível ler a auditoria atual.'));
-      revisionRequest.onerror = () => finish(reject, revisionRequest.error || new Error('Não foi possível ler a revisão da auditoria.'));
-      leaseRequest.onerror = () => finish(reject, leaseRequest.error || new Error('Não foi possível ler o lease da exportação.'));
-      deliveryRequest.onerror = () => finish(reject, deliveryRequest.error || new Error('Não foi possível ler o journal da entrega.'));
+      retentionRequest.onsuccess = () => { retentionRead = true; currentRetention = retentionRequest.result; apply(); };
+      modelRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      revisionRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      leaseRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      deliveryRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      retentionRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       transaction.oncomplete = () => {
         if (revisionConflict) finish(reject, new AuditRevisionConflictError());
         else if (leaseConflict) finish(reject, new AuditExportLeaseConflictError());
         else if (result) finish(resolve, result);
-        else finish(reject, new Error('A atualização exclusiva da exportação não foi concluída.'));
+        else finish(reject, new AuditStorageUnavailableError());
       };
-      transaction.onerror = () => finish(reject, transaction.error || new Error('Não foi possível atualizar a exportação.'));
-      transaction.onabort = () => finish(reject, transaction.error || new Error('A atualização da exportação foi abortada.'));
+      transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
     });
   };
 
@@ -986,11 +1263,11 @@ export function createAuditStore(options = {}) {
       };
       revisionRequest.onsuccess = () => { revisionRead = true; revisionValue = revisionRequest.result; apply(); };
       leaseRequest.onsuccess = () => { leaseRead = true; leaseValue = leaseRequest.result; apply(); };
-      revisionRequest.onerror = () => finish(reject, revisionRequest.error || new Error('Não foi possível ler a revisão da auditoria.'));
-      leaseRequest.onerror = () => finish(reject, leaseRequest.error || new Error('Não foi possível ler o lease da exportação.'));
+      revisionRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      leaseRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       transaction.oncomplete = () => finish(resolve, released);
-      transaction.onerror = () => finish(reject, transaction.error || new Error('Não foi possível liberar a exportação.'));
-      transaction.onabort = () => finish(reject, transaction.error || new Error('A liberação da exportação foi abortada.'));
+      transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
     });
   };
   const getExportLeaseState = async (id, options) => {
@@ -1075,19 +1352,19 @@ export function createAuditStore(options = {}) {
       leaseRequest.onsuccess = () => { leaseRead = true; currentLease = leaseRequest.result; apply(); };
       deliveryRequest.onsuccess = () => { deliveryRead = true; currentDelivery = deliveryRequest.result; apply(); };
       latestRequest.onsuccess = () => { latestRead = true; currentLatest = latestRequest.result; apply(); };
-      modelRequest.onerror = () => finish(reject, modelRequest.error || new Error('Não foi possível ler a auditoria atual.'));
-      revisionRequest.onerror = () => finish(reject, revisionRequest.error || new Error('Não foi possível ler a revisão da auditoria.'));
-      leaseRequest.onerror = () => finish(reject, leaseRequest.error || new Error('Não foi possível ler o lease da exportação.'));
-      deliveryRequest.onerror = () => finish(reject, deliveryRequest.error || new Error('Não foi possível ler o journal da entrega.'));
-      latestRequest.onerror = () => finish(reject, latestRequest.error || new Error('Não foi possível ler o estado mais recente da auditoria.'));
+      modelRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      revisionRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      leaseRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      deliveryRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      latestRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       transaction.oncomplete = () => {
         if (revisionConflict) finish(reject, new AuditRevisionConflictError());
         else if (leaseConflict) finish(reject, new AuditExportLeaseConflictError());
         else if (result) finish(resolve, result);
-        else finish(reject, new Error('O journal de entrega não foi atualizado.'));
+        else finish(reject, new AuditStorageUnavailableError());
       };
-      transaction.onerror = () => finish(reject, transaction.error || new Error('Não foi possível atualizar o journal da entrega.'));
-      transaction.onabort = () => finish(reject, transaction.error || new Error('A atualização do journal da entrega foi abortada.'));
+      transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
     });
   };
   const resolveExportDelivery = async (id, options) => {
@@ -1123,25 +1400,420 @@ export function createAuditStore(options = {}) {
       };
       deliveryRequest.onsuccess = () => { deliveryRead = true; currentDelivery = deliveryRequest.result; apply(); };
       latestRequest.onsuccess = () => { latestRead = true; currentLatest = latestRequest.result; apply(); };
-      deliveryRequest.onerror = () => finish(reject, deliveryRequest.error || new Error('Não foi possível ler o journal da entrega.'));
-      latestRequest.onerror = () => finish(reject, latestRequest.error || new Error('Não foi possível ler o estado mais recente da auditoria.'));
+      deliveryRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      latestRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       transaction.oncomplete = () => finish(resolve, result === true);
-      transaction.onerror = () => finish(reject, transaction.error || new Error('Não foi possível reconciliar o journal da entrega.'));
-      transaction.onabort = () => finish(reject, transaction.error || new Error('A reconciliação do journal foi abortada.'));
+      transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
     });
   };
   const getExportDeliveryJournal = async id => {
     const key = validId(id);
     return canonicalDeliveryJournal(await get(exportDeliveryKey(key)), key);
   };
+  const getAuditRetention = async id => {
+    const key = validId(id);
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(RETENTION_STORE_NAME, 'readonly');
+      const request = transaction.objectStore(RETENTION_STORE_NAME).get(key);
+      let value;
+      request.onsuccess = () => { value = request.result; };
+      request.onerror = () => reject(new AuditStorageUnavailableError());
+      transaction.oncomplete = () => {
+        try {
+          resolve(value === undefined ? undefined : clone(validateRetentionMetadata(value, key)));
+        } catch (error) { reject(error); }
+      };
+      transaction.onerror = () => reject(new AuditStorageUnavailableError());
+      transaction.onabort = () => reject(new AuditStorageUnavailableError());
+    });
+  };
+  const setRetentionIntent = async (id, snapshotCapability, intentOptions) => {
+    const key = validId(id);
+    canonicalRetentionInstant(intentOptions?.now);
+    if (typeof intentOptions?.deleteAfterCompleteExport !== 'boolean') {
+      throw new TypeError('Intenção de retenção inválida.');
+    }
+    const expected = capabilityRevision(snapshotCapability, owner, key);
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      let modelRead = false;
+      let revisionRead = false;
+      let retentionRead = false;
+      let modelValue;
+      let revisionValue;
+      let retentionValue;
+      let result = null;
+      let conflict = false;
+      let settled = false;
+      const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
+      const transaction = db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite');
+      const auditStore = transaction.objectStore(STORE_NAME);
+      const retentionStore = transaction.objectStore(RETENTION_STORE_NAME);
+      const modelRequest = auditStore.get(key);
+      const revisionRequest = auditStore.get(revisionKey(key));
+      const retentionRequest = retentionStore.get(key);
+      const apply = () => {
+        if (!modelRead || !revisionRead || !retentionRead || result || conflict) return;
+        let revision;
+        try { revision = storedRevision(revisionValue); } catch (error) { finish(reject, error); return; }
+        if (modelValue === undefined || revision !== expected) { conflict = true; return; }
+        let current;
+        try { current = validateRetentionMetadata(retentionValue, key); } catch (error) {
+          finish(reject, error);
+          try { transaction.abort(); } catch {}
+          return;
+        }
+        const retentionMetadata = {
+          ...current,
+          deleteAfterCompleteExport: intentOptions.deleteAfterCompleteExport,
+        };
+        retentionStore.put(retentionMetadata);
+        result = { revision, model: clone(modelValue), retention: clone(retentionMetadata) };
+      };
+      modelRequest.onsuccess = () => { modelRead = true; modelValue = modelRequest.result; apply(); };
+      revisionRequest.onsuccess = () => { revisionRead = true; revisionValue = revisionRequest.result; apply(); };
+      retentionRequest.onsuccess = () => { retentionRead = true; retentionValue = retentionRequest.result; apply(); };
+      modelRequest.onerror = revisionRequest.onerror = retentionRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.oncomplete = () => {
+        if (conflict) finish(reject, new AuditRevisionConflictError());
+        else if (!result) finish(reject, new AuditStorageUnavailableError());
+        else finish(resolve, {
+          revision: result.revision,
+          capability: mintAuditSnapshot(owner, key, result.model, result.revision).capability,
+          retention: result.retention,
+        });
+      };
+      transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
+    });
+  };
+  const deleteAudit = async (id, snapshotCapability, deleteOptions) => {
+    const key = validId(id);
+    const instant = canonicalRetentionInstant(deleteOptions?.now);
+    const expected = capabilityRevision(snapshotCapability, owner, key);
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      let pending = 5;
+      let modelValue;
+      let revisionValue;
+      let leaseValue;
+      let deliveryValue;
+      let latestValue;
+      let conflict = false;
+      let busy = false;
+      let applied = false;
+      let settled = false;
+      const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
+      const transaction = db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite');
+      const auditStore = transaction.objectStore(STORE_NAME);
+      const retentionStore = transaction.objectStore(RETENTION_STORE_NAME);
+      const apply = () => {
+        pending -= 1;
+        if (pending !== 0 || applied) return;
+        let revision;
+        try { revision = storedRevision(revisionValue); } catch (error) { finish(reject, error); return; }
+        if (modelValue === undefined || revision !== expected) { conflict = true; return; }
+        try {
+          busy = Boolean(activeExportLease(leaseValue, key, revision, instant.milliseconds)) ||
+            canonicalDeliveryJournal(deliveryValue, key).length > 0;
+        } catch { busy = true; }
+        if (busy) return;
+        applied = true;
+        auditStore.delete(key);
+        auditStore.delete(revisionKey(key));
+        auditStore.delete(exportLeaseKey(key));
+        auditStore.delete(exportAttemptKey(key));
+        auditStore.delete(exportDeliveryKey(key));
+        if (latestValue?.auditId === key) auditStore.delete(LATEST_KEY);
+        retentionStore.delete(key);
+      };
+      const requests = [
+        [auditStore.get(key), value => { modelValue = value; }],
+        [auditStore.get(revisionKey(key)), value => { revisionValue = value; }],
+        [auditStore.get(exportLeaseKey(key)), value => { leaseValue = value; }],
+        [auditStore.get(exportDeliveryKey(key)), value => { deliveryValue = value; }],
+        [auditStore.get(LATEST_KEY), value => { latestValue = value; }],
+      ];
+      for (const [request, receive] of requests) {
+        request.onsuccess = () => { receive(request.result); apply(); };
+        request.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      }
+      transaction.oncomplete = () => {
+        if (conflict) finish(reject, new AuditRevisionConflictError());
+        else if (busy) finish(reject, new AuditDeleteBusyError());
+        else if (!applied) finish(reject, new AuditStorageUnavailableError());
+        else finish(resolve, { deleted: true });
+      };
+      transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
+    });
+  };
+  const deleteAllAudits = async deleteOptions => {
+    const instant = canonicalRetentionInstant(deleteOptions?.now);
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      let auditKeys;
+      let retentionKeys;
+      let keyReads = 0;
+      let valueReadsPending = null;
+      let busy = false;
+      let deleted = null;
+      let settled = false;
+      const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
+      const transaction = db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite');
+      const auditStore = transaction.objectStore(STORE_NAME);
+      const retentionStore = transaction.objectStore(RETENTION_STORE_NAME);
+      const auditKeysRequest = auditStore.getAllKeys();
+      const retentionKeysRequest = retentionStore.getAllKeys();
+      const decide = () => {
+        if (keyReads !== 2 || valueReadsPending !== null) return;
+        const workKeys = auditKeys.filter(key => typeof key === 'string' &&
+          (key.startsWith(EXPORT_LEASE_KEY_PREFIX) || key.startsWith(EXPORT_DELIVERY_KEY_PREFIX)));
+        valueReadsPending = workKeys.length;
+        if (valueReadsPending === 0) {
+          deleted = retentionKeys.length;
+          auditStore.clear();
+          retentionStore.clear();
+          return;
+        }
+        for (const workKey of workKeys) {
+          const request = auditStore.get(workKey);
+          request.onsuccess = () => {
+            try {
+              if (workKey.startsWith(EXPORT_LEASE_KEY_PREFIX)) {
+                const auditId = workKey.slice(EXPORT_LEASE_KEY_PREFIX.length);
+                const lease = request.result;
+                if (lease && activeExportLease(lease, auditId, lease.revision, instant.milliseconds)) busy = true;
+              } else {
+                const auditId = workKey.slice(EXPORT_DELIVERY_KEY_PREFIX.length);
+                if (canonicalDeliveryJournal(request.result, auditId).length > 0) busy = true;
+              }
+            } catch { busy = true; }
+            valueReadsPending -= 1;
+            if (valueReadsPending === 0 && !busy) {
+              deleted = retentionKeys.length;
+              auditStore.clear();
+              retentionStore.clear();
+            }
+          };
+          request.onerror = () => finish(reject, new AuditStorageUnavailableError());
+        }
+      };
+      auditKeysRequest.onsuccess = () => { auditKeys = auditKeysRequest.result; keyReads += 1; decide(); };
+      retentionKeysRequest.onsuccess = () => { retentionKeys = retentionKeysRequest.result; keyReads += 1; decide(); };
+      auditKeysRequest.onerror = retentionKeysRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.oncomplete = () => {
+        if (busy) finish(reject, new AuditDeleteBusyError());
+        else if (deleted === null) finish(reject, new AuditStorageUnavailableError());
+        else finish(resolve, { deleted });
+      };
+      transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
+    });
+  };
+  const finalizeExportAndMaybeDelete = async (
+    id, model, latestState, snapshotCapability, finalizeOptions,
+  ) => {
+    const key = validId(id);
+    if (finalizeOptions?.clearDeliveryJournal !== true ||
+      typeof finalizeOptions?.deleteAfterCompleteExport !== 'boolean') {
+      throw new TypeError('Finalização de exportação inválida.');
+    }
+    const expected = capabilityRevision(snapshotCapability, owner, key);
+    const normalized = canonicalLeaseOptions({ ...finalizeOptions, release: true }, expected);
+    const modelClone = clone(model);
+    const latestClone = latestState === undefined ? undefined : clone(latestState);
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      let pending = 6;
+      let modelValue;
+      let revisionValue;
+      let leaseValue;
+      let deliveryValue;
+      let latestValue;
+      let retentionValue;
+      let conflict = false;
+      let leaseConflict = false;
+      let result = null;
+      let settled = false;
+      const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
+      const transaction = db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite');
+      const auditStore = transaction.objectStore(STORE_NAME);
+      const retentionStore = transaction.objectStore(RETENTION_STORE_NAME);
+      const apply = () => {
+        pending -= 1;
+        if (pending !== 0 || result || conflict || leaseConflict) return;
+        let revision;
+        let metadata;
+        let entries;
+        try {
+          revision = storedRevision(revisionValue);
+          metadata = validateRetentionMetadata(retentionValue, key);
+          entries = canonicalDeliveryJournal(deliveryValue, key);
+        } catch (error) { finish(reject, error); return; }
+        if (modelValue === undefined || revision !== expected) { conflict = true; return; }
+        const lease = activeExportLease(leaseValue, key, revision, normalized.nowMs);
+        if (!lease || lease.ownerId !== normalized.ownerId || lease.exportAttempt !== normalized.exportAttempt ||
+          !['queued', 'running', 'delivering'].includes(lease.phase) || entries.some(entry =>
+            entry.ownerId !== lease.ownerId || entry.exportAttempt !== lease.exportAttempt || entry.state !== 'terminal')) {
+          leaseConflict = true;
+          return;
+        }
+        const shouldDelete = metadata.deleteAfterCompleteExport === true &&
+          finalizeOptions.deleteAfterCompleteExport === true &&
+          isCompleteTerminalDelivery(entries, lease.ownerId, lease.exportAttempt);
+        if (shouldDelete) {
+          auditStore.delete(key);
+          auditStore.delete(revisionKey(key));
+          auditStore.delete(exportLeaseKey(key));
+          auditStore.delete(exportAttemptKey(key));
+          auditStore.delete(exportDeliveryKey(key));
+          if (latestValue?.auditId === key) auditStore.delete(LATEST_KEY);
+          retentionStore.delete(key);
+          result = { deleted: true };
+          return;
+        }
+        const nextRevision = revision + 1;
+        auditStore.put(modelClone, key);
+        auditStore.put(nextRevision, revisionKey(key));
+        auditStore.delete(exportLeaseKey(key));
+        auditStore.delete(exportDeliveryKey(key));
+        if (latestClone !== undefined) {
+          auditStore.put(pendingCleanupLatest({ ...latestClone, exportAttempt: lease.exportAttempt }, []), LATEST_KEY);
+        }
+        result = { deleted: false, revision: nextRevision, model: modelClone };
+      };
+      const requests = [
+        [auditStore.get(key), value => { modelValue = value; }],
+        [auditStore.get(revisionKey(key)), value => { revisionValue = value; }],
+        [auditStore.get(exportLeaseKey(key)), value => { leaseValue = value; }],
+        [auditStore.get(exportDeliveryKey(key)), value => { deliveryValue = value; }],
+        [auditStore.get(LATEST_KEY), value => { latestValue = value; }],
+        [retentionStore.get(key), value => { retentionValue = value; }],
+      ];
+      for (const [request, receive] of requests) {
+        request.onsuccess = () => { receive(request.result); apply(); };
+        request.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      }
+      transaction.oncomplete = () => {
+        if (conflict) finish(reject, new AuditRevisionConflictError());
+        else if (leaseConflict) finish(reject, new AuditExportLeaseConflictError());
+        else if (!result) finish(reject, new AuditStorageUnavailableError());
+        else if (result.deleted) finish(resolve, { deleted: true });
+        else finish(resolve, {
+          deleted: false,
+          revision: result.revision,
+          capability: mintAuditSnapshot(owner, key, result.model, result.revision).capability,
+        });
+      };
+      transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
+    });
+  };
+  const cleanupExpiredAudits = async optionsValue => {
+    const instant = canonicalRetentionInstant(optionsValue?.now);
+    const limit = optionsValue?.limit ?? 25;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 25) {
+      throw new TypeError('Limite de limpeza inválido.');
+    }
+    if (!keyRange || typeof keyRange.upperBound !== 'function') throw new AuditStorageUnavailableError();
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      let scanned = 0;
+      let deleted = 0;
+      let blocked = 0;
+      let initialCount = 0;
+      let countRead = false;
+      let cursorFinished = false;
+      let settled = false;
+      const finish = (handler, value) => {
+        if (!settled) { settled = true; handler(value); }
+      };
+      const transaction = db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite');
+      const auditStore = transaction.objectStore(STORE_NAME);
+      const retentionStore = transaction.objectStore(RETENTION_STORE_NAME);
+      const range = keyRange.upperBound(instant.iso);
+      const index = retentionStore.index('byExpiresAt');
+      const countRequest = index.count(range);
+      const cursorRequest = index.openCursor(range);
+      countRequest.onsuccess = () => {
+        initialCount = countRequest.result;
+        countRead = true;
+      };
+      countRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+        if (!cursor || scanned >= limit) {
+          cursorFinished = true;
+          return;
+        }
+        let metadata;
+        try { metadata = validateRetentionMetadata(cursor.value, cursor.primaryKey); } catch (error) {
+          finish(reject, error);
+          try { transaction.abort(); } catch {}
+          return;
+        }
+        scanned += 1;
+        if (scanned < limit) cursor.continue();
+        else cursorFinished = true;
+        const revisionRequest = auditStore.get(revisionKey(metadata.auditId));
+        const leaseRequest = auditStore.get(exportLeaseKey(metadata.auditId));
+        const deliveryRequest = auditStore.get(exportDeliveryKey(metadata.auditId));
+        let revisionRead = false;
+        let leaseRead = false;
+        let deliveryRead = false;
+        let revisionValue;
+        let leaseValue;
+        let deliveryValue;
+        const decide = () => {
+          if (!revisionRead || !leaseRead || !deliveryRead) return;
+          let busy = true;
+          try {
+            const revision = storedRevision(revisionValue);
+            busy = Boolean(activeExportLease(leaseValue, metadata.auditId, revision, instant.milliseconds)) ||
+              canonicalDeliveryJournal(deliveryValue, metadata.auditId).length > 0;
+          } catch {
+            busy = true;
+          }
+          if (busy) blocked += 1;
+          else {
+            auditStore.delete(metadata.auditId);
+            auditStore.delete(revisionKey(metadata.auditId));
+            auditStore.delete(exportLeaseKey(metadata.auditId));
+            auditStore.delete(exportAttemptKey(metadata.auditId));
+            auditStore.delete(exportDeliveryKey(metadata.auditId));
+            const latestRequest = auditStore.get(LATEST_KEY);
+            latestRequest.onsuccess = () => {
+              if (latestRequest.result?.auditId === metadata.auditId) auditStore.delete(LATEST_KEY);
+            };
+            retentionStore.delete(metadata.auditId);
+            deleted += 1;
+          }
+        };
+        revisionRequest.onsuccess = () => { revisionRead = true; revisionValue = revisionRequest.result; decide(); };
+        leaseRequest.onsuccess = () => { leaseRead = true; leaseValue = leaseRequest.result; decide(); };
+        deliveryRequest.onsuccess = () => { deliveryRead = true; deliveryValue = deliveryRequest.result; decide(); };
+        revisionRequest.onerror = leaseRequest.onerror = deliveryRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      };
+      cursorRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.oncomplete = () => {
+        if (!countRead || !cursorFinished) finish(reject, new AuditStorageUnavailableError());
+        else finish(resolve, { scanned, deleted, remaining: Math.max(0, initialCount - deleted), blocked });
+      };
+      transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
+    });
+  };
   return {
-    setAudit(id, model) { return mutateAudit(id, model); },
+    setAudit(id, model, options) { return mutateAudit(id, model, undefined, undefined, options); },
     getAudit(id) { return get(validId(id)); },
     getAuditSnapshot,
     setLatest(state) { return put(LATEST_KEY, state); },
     getLatest() { return get(LATEST_KEY); },
-    commitAudit(id, model, latestState) {
-      return mutateAudit(id, model, latestState);
+    commitAudit(id, model, latestState, options) {
+      return mutateAudit(id, model, latestState, undefined, options);
     },
     commitAuditIfRevision(id, model, latestState, snapshotCapability) {
       return mutateAudit(id, model, latestState, snapshotCapability);
@@ -1162,5 +1834,11 @@ export function createAuditStore(options = {}) {
     recordExportDelivery,
     resolveExportDelivery,
     getExportDeliveryJournal,
+    getAuditRetention,
+    setRetentionIntent,
+    cleanupExpiredAudits,
+    deleteAudit,
+    deleteAllAudits,
+    finalizeExportAndMaybeDelete,
   };
 }

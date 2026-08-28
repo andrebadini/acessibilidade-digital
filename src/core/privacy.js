@@ -1,5 +1,9 @@
 export const SENSITIVE_KEY = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
 
+// Public storage failures stay independent from browser/IndexedDB error details,
+// which may disclose URLs, database names or implementation-specific values.
+export const AUDIT_STORAGE_UNAVAILABLE_MESSAGE = 'Não foi possível salvar a auditoria no armazenamento local. Libere espaço ou verifique as permissões e tente novamente.';
+
 const URL_ATTRIBUTE_KEYS = new Set(['action', 'cite', 'formaction', 'href', 'poster', 'src', 'currentSrc']);
 
 const FIXED_WARNING_MESSAGES = Object.freeze({

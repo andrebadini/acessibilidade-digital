@@ -1,7 +1,260 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createAuditStore, createInMemoryAuditStore } from '../../src/storage/audit-store.js';
+import {
+  AuditDeleteBusyError,
+  AuditStorageUnavailableError,
+  createAuditStore,
+  createInMemoryAuditStore,
+} from '../../src/storage/audit-store.js';
+
+const T0 = '2026-08-01T00:00:00.000Z';
+const T29 = '2026-08-30T00:00:00.000Z';
+const T30 = '2026-08-31T00:00:00.000Z';
+
+test('production store fails visibly when IndexedDB is unavailable and never falls back to memory', async () => {
+  const store = createAuditStore({ indexedDB: {} });
+
+  await assert.rejects(store.getLatest(), error => {
+    assert.ok(error instanceof AuditStorageUnavailableError);
+    assert.equal(error.code, 'AUDIT_STORAGE_UNAVAILABLE');
+    assert.equal(error.message, 'Não foi possível salvar a auditoria no armazenamento local. Libere espaço ou verifique as permissões e tente novamente.');
+    return true;
+  });
+});
+
+test('first commit creates immutable absolute retention metadata and a batch remains one record', async () => {
+  const store = createInMemoryAuditStore();
+  const auditId = 'batch-retention';
+  await store.commitAudit(
+    auditId,
+    { auditId, pages: [{ pageId: 'p1' }, { pageId: 'p2' }, { pageId: 'p3' }] },
+    { auditId, status: 'complete' },
+    { now: T0, deleteAfterCompleteExport: true },
+  );
+  const first = await store.getAuditRetention(auditId);
+  assert.deepEqual(first, {
+    auditId, schemaVersion: 1, firstPersistedAt: T0, expiresAt: T30,
+    deleteAfterCompleteExport: true,
+  });
+
+  await store.commitAudit(
+    auditId,
+    { auditId, pages: [{ pageId: 'p1' }, { pageId: 'p2' }, { pageId: 'p3' }], reviewed: true },
+    { auditId, status: 'complete' },
+    { now: T29, deleteAfterCompleteExport: false },
+  );
+  assert.deepEqual(await store.getAuditRetention(auditId), first);
+  assert.equal(await store.getAuditRetention('p1'), undefined);
+});
+
+test('retention intent is changed only by a current store-owned snapshot capability', async () => {
+  const store = createInMemoryAuditStore();
+  const auditId = 'audit-retention-cas';
+  await store.commitAudit(auditId, { auditId, generation: 1 }, { auditId }, { now: T0 });
+  const stale = await store.getAuditSnapshot(auditId);
+  await store.setAudit(auditId, { auditId, generation: 2 });
+
+  await assert.rejects(
+    store.setRetentionIntent(auditId, stale.capability, { deleteAfterCompleteExport: true, now: T29 }),
+    error => error?.code === 'AUDIT_REVISION_CONFLICT',
+  );
+  const current = await store.getAuditSnapshot(auditId);
+  const changed = await store.setRetentionIntent(auditId, current.capability, {
+    deleteAfterCompleteExport: true,
+    now: T29,
+  });
+  assert.equal(changed.revision, current.revision);
+  assert.equal(changed.retention.firstPersistedAt, T0);
+  assert.equal(changed.retention.expiresAt, T30);
+  assert.equal(changed.retention.deleteAfterCompleteExport, true);
+});
+
+test('incremental cleanup deletes at most 25 expired records and continues without touching future records', async () => {
+  const store = createInMemoryAuditStore();
+  for (let index = 0; index < 26; index += 1) {
+    const auditId = `expired-${String(index).padStart(2, '0')}`;
+    await store.commitAudit(auditId, { auditId }, { auditId }, { now: T0 });
+  }
+  await store.commitAudit('future-audit', { auditId: 'future-audit' }, { auditId: 'future-audit' }, { now: T30 });
+
+  assert.deepEqual(await store.cleanupExpiredAudits({ now: T30, limit: 25 }), {
+    scanned: 25, deleted: 25, remaining: 1, blocked: 0,
+  });
+  assert.deepEqual(await store.cleanupExpiredAudits({ now: T30, limit: 25 }), {
+    scanned: 1, deleted: 1, remaining: 0, blocked: 0,
+  });
+  assert.ok(await store.getAudit('future-audit'));
+});
+
+test('delete-one enforces snapshot CAS and refuses active lease or delivery journal', async () => {
+  const store = createInMemoryAuditStore();
+  const auditId = 'delete-one';
+  await store.commitAudit(auditId, { auditId, generation: 1 }, { auditId }, { now: T0 });
+  const stale = await store.getAuditSnapshot(auditId);
+  await store.setAudit(auditId, { auditId, generation: 2 });
+  await assert.rejects(store.deleteAudit(auditId, stale.capability, { now: T29 }), error => error?.code === 'AUDIT_REVISION_CONFLICT');
+
+  const current = await store.getAuditSnapshot(auditId);
+  await store.acquireExportLease(auditId, current.capability, { ownerId: 'delete-owner', now: T29 });
+  await assert.rejects(store.deleteAudit(auditId, current.capability, { now: T29 }), error => {
+    assert.ok(error instanceof AuditDeleteBusyError);
+    assert.equal(error.code, 'AUDIT_DELETE_BUSY');
+    return true;
+  });
+  assert.ok(await store.getAudit(auditId));
+
+  await store.releaseExportLease(auditId, { ownerId: 'delete-owner', now: T29 });
+  assert.deepEqual(await store.deleteAudit(auditId, current.capability, { now: T29 }), { deleted: true });
+  assert.equal(await store.getAudit(auditId), undefined);
+  assert.equal(await store.getAuditRetention(auditId), undefined);
+});
+
+test('delete-all is all-or-none while any audit has delivery work', async () => {
+  const store = createInMemoryAuditStore();
+  for (const auditId of ['delete-all-a', 'delete-all-b']) {
+    await store.commitAudit(auditId, { auditId }, { auditId }, { now: T0 });
+  }
+  const snapshot = await store.getAuditSnapshot('delete-all-a');
+  await store.acquireExportLease('delete-all-a', snapshot.capability, { ownerId: 'all-owner', now: T29 });
+
+  await assert.rejects(store.deleteAllAudits({ now: T29 }), error => error?.code === 'AUDIT_DELETE_BUSY');
+  assert.ok(await store.getAudit('delete-all-a'));
+  assert.ok(await store.getAudit('delete-all-b'));
+  await store.releaseExportLease('delete-all-a', { ownerId: 'all-owner', now: T29 });
+  assert.deepEqual(await store.deleteAllAudits({ now: T29 }), { deleted: 2 });
+  assert.equal(await store.getAudit('delete-all-a'), undefined);
+  assert.equal(await store.getAudit('delete-all-b'), undefined);
+});
+
+test('retention CAS and destructive APIs have the same contract in IndexedDB', async () => {
+  const fake = createFakeIndexedDb();
+  const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+  for (const auditId of ['idb-delete-a', 'idb-delete-b']) {
+    await store.commitAudit(auditId, { auditId }, { auditId }, { now: T0 });
+  }
+  const snapshotA = await store.getAuditSnapshot('idb-delete-a');
+  const changed = await store.setRetentionIntent('idb-delete-a', snapshotA.capability, {
+    deleteAfterCompleteExport: true,
+    now: T29,
+  });
+  assert.equal(changed.retention.deleteAfterCompleteExport, true);
+  assert.equal(changed.retention.expiresAt, T30);
+
+  const lease = await store.acquireExportLease('idb-delete-a', changed.capability, {
+    ownerId: 'idb-delete-owner', now: T29,
+  });
+  assert.equal(lease.acquired, true);
+  await assert.rejects(store.deleteAllAudits({ now: T29 }), error => error?.code === 'AUDIT_DELETE_BUSY');
+  assert.ok(await store.getAudit('idb-delete-b'));
+  await store.releaseExportLease('idb-delete-a', { ownerId: 'idb-delete-owner', now: T29 });
+  assert.deepEqual(await store.deleteAudit('idb-delete-a', changed.capability, { now: T29 }), { deleted: true });
+  assert.equal(await store.getAudit('idb-delete-a'), undefined);
+  assert.deepEqual(await store.deleteAllAudits({ now: T29 }), { deleted: 1 });
+  assert.equal(fake.inspectStore('audits').size, 0);
+  assert.equal(fake.inspectStore('audit-retention').size, 0);
+});
+
+test('finalization deletes only after the exact four terminal formats for the current lease and intent', async () => {
+  for (const createStore of [
+    () => createInMemoryAuditStore(),
+    () => {
+      const fake = createFakeIndexedDb();
+      return createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+    },
+  ]) {
+    const store = createStore();
+    const auditId = 'final-delete';
+    await store.commitAudit(auditId, { auditId, phase: 'prepared' }, { auditId }, {
+      now: T0,
+      deleteAfterCompleteExport: true,
+    });
+    let snapshot = await store.getAuditSnapshot(auditId);
+    const lease = await store.acquireExportLease(auditId, snapshot.capability, {
+      ownerId: 'final-owner', now: '2026-08-30T10:00:00.000Z',
+    });
+    await store.claimExportLease(auditId, snapshot.capability, {
+      ownerId: 'final-owner', exportAttempt: lease.exportAttempt,
+      now: '2026-08-30T10:00:00.100Z',
+    });
+    const reserved = await store.commitAuditIfRevisionWithExportLease(
+      auditId,
+      { auditId, phase: 'delivering' },
+      { auditId, exportStatus: 'delivering' },
+      snapshot.capability,
+      {
+        ownerId: 'final-owner', exportAttempt: lease.exportAttempt,
+        now: '2026-08-30T10:00:00.200Z', phase: 'delivering',
+      },
+    );
+    snapshot = await store.getAuditSnapshot(auditId);
+    assert.equal(snapshot.revision, reserved.revision);
+    for (const [index, format] of ['html', 'json', 'csv', 'pdf'].entries()) {
+      await store.recordExportDelivery(auditId, snapshot.capability, {
+        ownerId: 'final-owner', exportAttempt: lease.exportAttempt,
+        now: `2026-08-30T10:00:01.${String(index).padStart(3, '0')}Z`,
+        format,
+        filename: `auditoria.${format}`,
+        state: 'terminal',
+        downloadId: index + 1,
+      });
+    }
+    const result = await store.finalizeExportAndMaybeDelete(
+      auditId,
+      { auditId, phase: 'complete' },
+      { auditId, exportStatus: 'complete' },
+      snapshot.capability,
+      {
+        ownerId: 'final-owner', exportAttempt: lease.exportAttempt,
+        now: '2026-08-30T10:00:02.000Z', clearDeliveryJournal: true,
+        deleteAfterCompleteExport: true,
+      },
+    );
+    assert.deepEqual(result, { deleted: true });
+    assert.equal(await store.getAudit(auditId), undefined);
+    assert.equal(await store.getAuditRetention(auditId), undefined);
+    assert.deepEqual(await store.getExportDeliveryJournal(auditId), []);
+  }
+});
+
+test('incomplete delivery receipt preserves the audit even when delete-after-export was selected', async () => {
+  const store = createInMemoryAuditStore();
+  const auditId = 'partial-retained';
+  await store.commitAudit(auditId, { auditId }, { auditId }, { now: T0, deleteAfterCompleteExport: true });
+  let snapshot = await store.getAuditSnapshot(auditId);
+  const lease = await store.acquireExportLease(auditId, snapshot.capability, {
+    ownerId: 'partial-owner', now: '2026-08-30T10:00:00.000Z',
+  });
+  await store.claimExportLease(auditId, snapshot.capability, {
+    ownerId: 'partial-owner', exportAttempt: lease.exportAttempt, now: '2026-08-30T10:00:00.100Z',
+  });
+  await store.commitAuditIfRevisionWithExportLease(
+    auditId, { auditId, phase: 'delivering' }, { auditId, exportStatus: 'delivering' }, snapshot.capability,
+    { ownerId: 'partial-owner', exportAttempt: lease.exportAttempt, now: '2026-08-30T10:00:00.200Z', phase: 'delivering' },
+  );
+  snapshot = await store.getAuditSnapshot(auditId);
+  for (const [index, format] of ['html', 'json', 'pdf'].entries()) {
+    await store.recordExportDelivery(auditId, snapshot.capability, {
+      ownerId: 'partial-owner', exportAttempt: lease.exportAttempt,
+      now: `2026-08-30T10:00:01.${String(index).padStart(3, '0')}Z`,
+      format, filename: `auditoria.${format}`, state: 'terminal', downloadId: index + 1,
+    });
+  }
+  const result = await store.finalizeExportAndMaybeDelete(
+    auditId,
+    { auditId, phase: 'partial' },
+    { auditId, exportStatus: 'partial' },
+    snapshot.capability,
+    {
+      ownerId: 'partial-owner', exportAttempt: lease.exportAttempt,
+      now: '2026-08-30T10:00:02.000Z', clearDeliveryJournal: true,
+      deleteAfterCompleteExport: true,
+    },
+  );
+  assert.equal(result.deleted, false);
+  assert.equal((await store.getAudit(auditId)).phase, 'partial');
+  assert.ok(await store.getAuditRetention(auditId));
+});
 
 test('in-memory audit storage round-trips models and latest panel state without aliasing', async () => {
   const store = createInMemoryAuditStore();
@@ -88,6 +341,117 @@ test('IndexedDB audit storage uses a dedicated object store and persists a large
   await store.setLatest({ auditId: 'audit-large', status: 'partial' });
   assert.deepEqual(await store.getLatest(), { auditId: 'audit-large', status: 'partial' });
   assert.equal(fake.createdStores.includes('audits'), true);
+});
+
+test('IndexedDB v2 persists limited retention metadata beside each model in one transaction', async () => {
+  const fake = createFakeIndexedDb();
+  const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+  const auditId = 'audit-idb-retention';
+  await store.commitAudit(
+    auditId,
+    { auditId, url: 'https://sensitive.invalid/?token=never-copy', pixels: 'secret-pixels' },
+    { auditId, status: 'complete' },
+    { now: T0, deleteAfterCompleteExport: true },
+  );
+
+  assert.equal(fake.versions[0], 2);
+  assert.equal(fake.createdStores.includes('audit-retention'), true);
+  assert.equal(fake.inspectIndexes('audit-retention').get('byExpiresAt').keyPath, 'expiresAt');
+  assert.ok(fake.transactionStores.some(names => names.length === 2 && names.includes('audits') && names.includes('audit-retention')));
+  assert.deepEqual(fake.inspectStore('audit-retention').get(auditId), {
+    auditId, schemaVersion: 1, firstPersistedAt: T0, expiresAt: T30,
+    deleteAfterCompleteExport: true,
+  });
+  assert.doesNotMatch(JSON.stringify(fake.inspectStore('audit-retention')), /sensitive|token|pixel/iu);
+});
+
+test('IndexedDB v1 migration creates metadata only for normal audit records and preserves private keys', async () => {
+  const auditId = 'legacy-batch';
+  const privateEntries = [
+    ['__latest__', { auditId }],
+    [`__audit_revision__:${auditId}`, 4],
+    [`__audit_export_lease__:${auditId}`, { ownerId: 'legacy-owner' }],
+    [`__audit_export_attempt__:${auditId}`, 2],
+    [`__audit_export_delivery__:${auditId}`, { schemaVersion: 1, auditId, entries: [] }],
+  ];
+  const fake = createFakeIndexedDb({
+    version: 1,
+    initialStores: {
+      audits: [[auditId, {
+        auditId,
+        timestamps: { endedAt: '2026-01-02T03:04:05.006Z' },
+        url: 'https://sensitive.invalid/?token=never-copy',
+        pixels: 'secret-pixels',
+      }], ...privateEntries],
+    },
+  });
+  const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+
+  assert.equal((await store.getAudit(auditId)).auditId, auditId);
+  assert.deepEqual(await store.getAuditRetention(auditId), {
+    auditId, schemaVersion: 1,
+    firstPersistedAt: '2026-01-02T03:04:05.006Z',
+    expiresAt: '2026-02-01T03:04:05.006Z',
+    deleteAfterCompleteExport: false,
+  });
+  assert.equal(fake.inspectStore('audit-retention').size, 1);
+  for (const [key, value] of privateEntries) assert.deepEqual(fake.inspectStore('audits').get(key), value);
+  assert.doesNotMatch(JSON.stringify(fake.inspectStore('audit-retention')), /sensitive|token|pixel/iu);
+});
+
+test('IndexedDB retention expiration remains absolute through revision and cleans incrementally', async () => {
+  const fake = createFakeIndexedDb();
+  const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+  for (let index = 0; index < 26; index += 1) {
+    const auditId = `idb-expired-${String(index).padStart(2, '0')}`;
+    await store.commitAudit(auditId, { auditId }, { auditId }, { now: T0 });
+  }
+  await store.commitAudit('idb-future', { auditId: 'idb-future' }, { auditId: 'idb-future' }, { now: T30 });
+  await store.commitAudit('idb-expired-25', { auditId: 'idb-expired-25', reviewed: true }, { auditId: 'idb-expired-25' }, { now: T29 });
+  assert.equal((await store.getAuditRetention('idb-expired-25')).expiresAt, T30);
+
+  assert.deepEqual(await store.cleanupExpiredAudits({ now: T30, limit: 25 }), {
+    scanned: 25, deleted: 25, remaining: 1, blocked: 0,
+  });
+  assert.deepEqual(await store.cleanupExpiredAudits({ now: T30, limit: 25 }), {
+    scanned: 1, deleted: 1, remaining: 0, blocked: 0,
+  });
+  assert.ok(await store.getAudit('idb-future'));
+});
+
+test('IndexedDB quota or transaction abort exposes only the fixed storage error and commits nothing', async () => {
+  const fake = createFakeIndexedDb({ failWrites: true, writeError: new Error('QuotaExceeded: db=audita-mt bytes=secret') });
+  const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+
+  await assert.rejects(
+    store.commitAudit(
+      'quota-audit',
+      { auditId: 'quota-audit', url: 'https://sensitive.invalid/?token=never-log' },
+      { auditId: 'quota-audit' },
+      { now: T0 },
+    ),
+    error => error instanceof AuditStorageUnavailableError &&
+      error.code === 'AUDIT_STORAGE_UNAVAILABLE' &&
+      error.message === 'Não foi possível salvar a auditoria no armazenamento local. Libere espaço ou verifique as permissões e tente novamente.',
+  );
+  assert.equal(fake.inspectStore('audits').size, 0);
+  assert.equal(fake.inspectStore('audit-retention').size, 0);
+});
+
+test('IndexedDB request failures never expose native database details', async () => {
+  const fake = createFakeIndexedDb({
+    failReads: true,
+    readError: new Error('UnknownError: db=audita-mt url=https://private.invalid/?token=never-log'),
+  });
+  const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+
+  await assert.rejects(store.getLatest(), error => {
+    assert.ok(error instanceof AuditStorageUnavailableError);
+    assert.equal(error.code, 'AUDIT_STORAGE_UNAVAILABLE');
+    assert.equal(error.message, 'Não foi possível salvar a auditoria no armazenamento local. Libere espaço ou verifique as permissões e tente novamente.');
+    assert.doesNotMatch(error.message, /database|audita-mt|private|token/iu);
+    return true;
+  });
 });
 
 test('IndexedDB commitAudit writes model and latest in one transaction', async () => {
@@ -845,49 +1209,270 @@ test('caches the open promise, rejects blocked opens, and reopens after versionc
   assert.equal(fake.openCalls, 2);
 
   const blocked = createFakeIndexedDb({ blocked: true });
-  await assert.rejects(createAuditStore({ indexedDB: blocked }).getLatest(), /bloquead|blocked/i);
+  await assert.rejects(
+    createAuditStore({ indexedDB: blocked }).getLatest(),
+    error => error?.code === 'AUDIT_STORAGE_UNAVAILABLE' && !/bloquead|database|audita-mt/iu.test(error.message),
+  );
 });
 
 function createFakeIndexedDb(options = {}) {
-  const records = new Map();
+  const stores = new Map();
+  let databaseVersion = options.version ?? 0;
+  for (const [name, entries] of Object.entries(options.initialStores ?? {})) {
+    stores.set(name, { keyPath: undefined, records: new Map(entries.map(([key, value]) => [key, structuredClone(value)])), indexes: new Map() });
+  }
+  let writeActive = false;
+  const writeQueue = [];
+
+  const cloneValue = value => value === undefined ? undefined : structuredClone(value);
+  const createTransaction = (storeNames, mode = 'readonly', active = true) => {
+    const names = Array.isArray(storeNames) ? storeNames : [storeNames];
+    let pending = 0;
+    let completionQueued = false;
+    let completed = false;
+    const waiters = [];
+    const scheduled = [];
+    const transaction = {
+      mode,
+      error: null,
+      objectStore(name) {
+        if (!names.includes(name) || !stores.has(name)) throw new Error(`Unknown store ${name}`);
+        return createStoreFacade(name, transaction);
+      },
+      abort() {
+        if (completed) return;
+        completed = true;
+        transaction.error ??= new Error('AbortError');
+        queueMicrotask(() => {
+          transaction.onabort?.();
+          for (const waiter of waiters.splice(0)) waiter();
+        });
+      },
+      _begin() { pending += 1; },
+      _schedule(operation) {
+        if (active) queueMicrotask(operation);
+        else scheduled.push(operation);
+      },
+      _activate() {
+        if (active || completed) return;
+        active = true;
+        for (const operation of scheduled.splice(0)) queueMicrotask(operation);
+        if (pending === 0) transaction._queueCompletion();
+      },
+      _end() {
+        pending -= 1;
+        if (pending === 0) transaction._queueCompletion();
+      },
+      _queueCompletion() {
+        if (!active || completionQueued || completed) return;
+        completionQueued = true;
+        queueMicrotask(() => queueMicrotask(() => {
+          completionQueued = false;
+          if (completed || pending !== 0) return;
+          completed = true;
+          transaction.oncomplete?.();
+          for (const waiter of waiters.splice(0)) waiter();
+        }));
+      },
+      _whenDone(callback) {
+        if (completed) queueMicrotask(callback);
+        else waiters.push(callback);
+      },
+    };
+    if (active) transaction._queueCompletion();
+    return transaction;
+  };
+
+  const createStoreFacade = (name, transaction) => {
+    const definition = stores.get(name);
+    const keyFor = (value, explicitKey) => {
+      if (explicitKey !== undefined) return explicitKey;
+      if (definition.keyPath && value && Object.hasOwn(value, definition.keyPath)) return value[definition.keyPath];
+      throw new Error('Key required');
+    };
+    const request = operation => {
+      const result = {};
+      transaction._begin();
+      transaction._schedule(() => {
+        if (transaction.error) { transaction._end(); return; }
+        try {
+          result.result = operation();
+          result.onsuccess?.({ target: result });
+        } catch (error) {
+          result.error = error;
+          result.onerror?.({ target: result });
+          transaction.error = error;
+          transaction.abort();
+        } finally {
+          transaction._end();
+        }
+      });
+      return result;
+    };
+    const cursorRequest = entriesFactory => {
+      const result = {};
+      transaction._begin();
+      let entries;
+      let index = 0;
+      const dispatch = () => transaction._schedule(() => {
+        try {
+          entries ??= entriesFactory();
+          if (index >= entries.length) {
+            result.result = null;
+            result.onsuccess?.({ target: result });
+            transaction._end();
+            return;
+          }
+          const [key, value] = entries[index];
+          let continued = false;
+          result.result = {
+            key,
+            primaryKey: key,
+            value: cloneValue(value),
+            continue() {
+              if (continued) throw new Error('Cursor already continued');
+              continued = true;
+              index += 1;
+              dispatch();
+            },
+            delete() { definition.records.delete(key); },
+          };
+          result.onsuccess?.({ target: result });
+          if (!continued) transaction._end();
+        } catch (error) {
+          result.error = error;
+          result.onerror?.({ target: result });
+          transaction._end();
+        }
+      });
+      dispatch();
+      return result;
+    };
+    return {
+      keyPath: definition.keyPath,
+      indexNames: { contains: indexName => definition.indexes.has(indexName) },
+      createIndex(indexName, keyPath, indexOptions = {}) {
+        definition.indexes.set(indexName, { keyPath, unique: indexOptions.unique === true });
+        return this.index(indexName);
+      },
+      index(indexName) {
+        const indexDefinition = definition.indexes.get(indexName);
+        if (!indexDefinition) throw new Error(`Unknown index ${indexName}`);
+        return {
+          count(range) {
+            return request(() => [...definition.records.values()]
+              .filter(value => range?.upper === undefined || value?.[indexDefinition.keyPath] <= range.upper).length);
+          },
+          openCursor(range) {
+            return cursorRequest(() => [...definition.records.entries()]
+              .filter(([, value]) => range?.upper === undefined || value?.[indexDefinition.keyPath] <= range.upper)
+              .sort((a, b) => String(a[1]?.[indexDefinition.keyPath]).localeCompare(String(b[1]?.[indexDefinition.keyPath]))));
+          },
+        };
+      },
+      put(value, explicitKey) {
+        const key = keyFor(value, explicitKey);
+        return request(() => {
+          if (options.failWrites) throw options.writeError ?? new Error('QuotaExceededError');
+          definition.records.set(key, cloneValue(value));
+          return key;
+        });
+      },
+      delete(key) {
+        return request(() => {
+          if (options.failWrites) throw options.writeError ?? new Error('AbortError');
+          return definition.records.delete(key);
+        });
+      },
+      clear() {
+        return request(() => {
+          if (options.failWrites) throw options.writeError ?? new Error('AbortError');
+          return definition.records.clear();
+        });
+      },
+      get(key) {
+        return request(() => {
+          if (options.failReads) throw options.readError ?? new Error('UnknownError');
+          return cloneValue(definition.records.get(key));
+        });
+      },
+      getAllKeys() {
+        return request(() => {
+          if (options.failReads) throw options.readError ?? new Error('UnknownError');
+          return [...definition.records.keys()];
+        });
+      },
+      openCursor() { return cursorRequest(() => [...definition.records.entries()]); },
+    };
+  };
+
   const fake = {
     createdStores: [],
+    createdIndexes: [],
     transactionModes: [],
+    transactionStores: [],
     openCalls: 0,
     database: null,
-    open() {
+    versions: [],
+    IDBKeyRange: { upperBound: upper => ({ upper }) },
+    inspectStore(name) {
+      const store = stores.get(name);
+      return store ? new Map([...store.records].map(([key, value]) => [key, cloneValue(value)])) : undefined;
+    },
+    inspectIndexes(name) {
+      const store = stores.get(name);
+      return store ? new Map([...store.indexes].map(([key, value]) => [key, { ...value }])) : undefined;
+    },
+    open(_name, requestedVersion) {
       fake.openCalls += 1;
+      fake.versions.push(requestedVersion);
       const request = {};
       queueMicrotask(() => {
         if (options.blocked) { request.onblocked?.(); return; }
         const db = {
+          version: requestedVersion,
           closed: false,
           close() { this.closed = true; },
-          objectStoreNames: { contains: name => fake.createdStores.includes(name) },
-          createObjectStore(name) { fake.createdStores.push(name); },
-          transaction(_store, mode) {
+          objectStoreNames: { contains: name => stores.has(name) },
+          createObjectStore(name, createOptions = {}) {
+            if (stores.has(name)) throw new Error(`Store ${name} already exists`);
+            stores.set(name, { keyPath: createOptions.keyPath, records: new Map(), indexes: new Map() });
+            fake.createdStores.push(name);
+            return createStoreFacade(name, request.transaction);
+          },
+          transaction(storeNames, mode) {
             fake.transactionModes.push(mode);
-            const transaction = {
-              objectStore() {
-                return {
-                  put(value, key) { records.set(key, structuredClone(value)); },
-                  delete(key) { records.delete(key); },
-                  get(key) {
-                    const result = {};
-                    queueMicrotask(() => { result.result = structuredClone(records.get(key)); result.onsuccess?.(); });
-                    return result;
-                  },
-                };
-              },
+            fake.transactionStores.push(Array.isArray(storeNames) ? [...storeNames] : [storeNames]);
+            if (mode !== 'readwrite') return createTransaction(storeNames, mode);
+            const transaction = createTransaction(storeNames, mode, false);
+            const release = () => {
+              writeActive = false;
+              const next = writeQueue.shift();
+              if (next) {
+                writeActive = true;
+                next._activate();
+              }
             };
-            queueMicrotask(() => queueMicrotask(() => transaction.oncomplete?.()));
+            transaction._whenDone(release);
+            if (writeActive) writeQueue.push(transaction);
+            else {
+              writeActive = true;
+              transaction._activate();
+            }
             return transaction;
           },
         };
         fake.database = db;
         request.result = db;
-        request.onupgradeneeded?.();
-        request.onsuccess?.();
+        const oldVersion = databaseVersion;
+        if ((requestedVersion ?? 1) > databaseVersion) {
+          request.transaction = createTransaction([...stores.keys(), 'audits', 'audit-retention'].filter((value, index, all) => all.indexOf(value) === index), 'versionchange');
+          const originalObjectStore = request.transaction.objectStore;
+          request.transaction.objectStore = name => createStoreFacade(name, request.transaction);
+          request.onupgradeneeded?.({ oldVersion, newVersion: requestedVersion });
+          databaseVersion = requestedVersion;
+          request.transaction._whenDone(() => request.onsuccess?.());
+        } else request.onsuccess?.();
       });
       return request;
     },
