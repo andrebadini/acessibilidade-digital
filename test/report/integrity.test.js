@@ -8,8 +8,17 @@ import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { sha256Hex } from '../../src/core/report/hash.js';
 import {
   isAuditIntegrityVerified,
+  REPORT_HASH_BASE,
   verifyAuditIntegritySnapshot,
 } from '../../src/core/report/integrity.js';
+
+const ENRICH_OPTIONS = Object.freeze({
+  now: () => '2026-08-26T16:00:00.000Z',
+  timezone: 'America/Cuiaba',
+  manifestVersion: '0.1.0',
+  rulesVersion: '1.0.0',
+  browserVersion: 'Chrome/147.0.0.0',
+});
 
 test('attests only an immutable snapshot whose complete integrity chain recomputes', async () => {
   const model = await verifiedFixture();
@@ -71,14 +80,83 @@ test('validates a legacy V2 integrity chain before conservative normative migrat
   assert.match(migrated.limitations.join(' '), /proveniência legada|critérios WCAG testados/iu);
   assert.notEqual(migrated.integrity.canonicalModelHash, legacy.integrity.canonicalModelHash);
   assert.equal(isAuditIntegrityVerified(migrated), true);
+
+  const detachedMigrationClaim = structuredClone(migrated);
+  await assert.rejects(
+    verifyAuditIntegritySnapshot(detachedMigrationClaim),
+    /integridade|indisponível/iu,
+  );
+});
+
+test('the public model constructor rejects every raw legacy V2 occurrence before any migration', async () => {
+  const current = await verifiedFixture();
+  const legacy = structuredClone(current);
+  for (const occurrence of legacy.occurrences) {
+    delete occurrence.itemWcagRefs;
+    delete occurrence.sourceWcagRefs;
+    delete occurrence.testedWcagRefs;
+  }
+
+  for (const integrity of [
+    { algorithm: 'SHA-256', evidenceManifestHash: 'pending', canonicalModelHash: 'pending', hashBase: REPORT_HASH_BASE },
+    { algorithm: 'unavailable', status: 'not-recorded-v1' },
+    { ...legacy.integrity, canonicalModelHash: 'a'.repeat(64) },
+  ]) {
+    const candidate = structuredClone(legacy);
+    candidate.integrity = integrity;
+    assert.throws(
+      () => createAuditModel(candidate),
+      /V2 legad|migra|separa[cç][aã]o normativa|integridade/iu,
+    );
+  }
+
+  const auditModelModule = await import('../../src/core/report/audit-model.js');
+  assert.equal(Object.hasOwn(auditModelModule, 'migrateAuditV2AfterIntegrityVerification'), false);
+  assert.throws(
+    () => auditModelModule.createAuditModelFromVerifiedLegacyLineage(legacy, {}),
+    /prova|migra[cç][aã]o normativa/iu,
+  );
+});
+
+test('enrichment verifies the untouched legacy V2 chain before migration and rejects laundering attempts', async () => {
+  const current = await verifiedFixture();
+  const legacy = structuredClone(current);
+  for (const occurrence of legacy.occurrences) {
+    delete occurrence.itemWcagRefs;
+    delete occurrence.sourceWcagRefs;
+    delete occurrence.testedWcagRefs;
+  }
+  delete legacy.normative.sources;
+  const oldHashInput = structuredClone(legacy);
+  delete oldHashInput.integrity.canonicalModelHash;
+  legacy.integrity.canonicalModelHash = await sha256Hex(canonicalStringify(oldHashInput));
+
+  const migrated = await enrichAuditForReport(legacy, ENRICH_OPTIONS);
+  assert.deepEqual(migrated.occurrences[0].sourceWcagRefs, []);
+  assert.deepEqual(migrated.occurrences[0].testedWcagRefs, []);
+  assert.match(migrated.limitations.join(' '), /proveniência legada|critérios WCAG testados/iu);
+
+  const staleCanonical = structuredClone(legacy);
+  staleCanonical.timestamps.generatedAt = '2026-08-26T16:00:01.000Z';
+  await assert.rejects(enrichAuditForReport(staleCanonical, ENRICH_OPTIONS), /integridade|indisponível/iu);
+
+  const unavailable = structuredClone(legacy);
+  unavailable.integrity = { algorithm: 'unavailable', status: 'not-recorded-v1' };
+  await assert.rejects(enrichAuditForReport(unavailable, ENRICH_OPTIONS), /integridade|indisponível/iu);
+
+  const missing = structuredClone(legacy);
+  delete missing.integrity;
+  await assert.rejects(enrichAuditForReport(missing, ENRICH_OPTIONS), /integridade|indisponível/iu);
+
+  const forgedEvidence = structuredClone(legacy);
+  forgedEvidence.evidence[0].dataUrl =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==';
+  const forgedHashInput = structuredClone(forgedEvidence);
+  delete forgedHashInput.integrity.canonicalModelHash;
+  forgedEvidence.integrity.canonicalModelHash = await sha256Hex(canonicalStringify(forgedHashInput));
+  await assert.rejects(enrichAuditForReport(forgedEvidence, ENRICH_OPTIONS), /integridade|indisponível/iu);
 });
 
 async function verifiedFixture() {
-  return enrichAuditForReport(SAMPLE_AUDIT, {
-    now: () => '2026-08-26T16:00:00.000Z',
-    timezone: 'America/Cuiaba',
-    manifestVersion: '0.1.0',
-    rulesVersion: '1.0.0',
-    browserVersion: 'Chrome/147.0.0.0',
-  });
+  return enrichAuditForReport(SAMPLE_AUDIT, ENRICH_OPTIONS);
 }

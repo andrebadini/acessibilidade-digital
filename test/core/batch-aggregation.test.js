@@ -40,16 +40,16 @@ async function childModel(auditId, url, { axe = false } = {}) {
     stateCount: 1,
     artifacts: [raw.evidence.artifacts[0], createPristineMapSource(), map],
   };
-  if (axe) raw.axe = normalizeAxeResults(axe === 'finding' ? {
+  if (axe) raw.axe = normalizeAxeResults(['finding', 'mapped'].includes(axe) ? {
     status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],
     frames: [{ frameId: 0, status: 'success', result: {
-      violations: [{ id: 'custom-batch-id', impact: 'serious', nodes: [{ impact: 'serious', target: ['html'] }] }],
+      violations: [{ id: axe === 'mapped' ? 'html-has-lang' : 'custom-batch-id', impact: 'serious', nodes: [{ impact: 'serious', target: ['html'] }] }],
       incomplete: [], passes: [], inapplicable: [],
     } }],
   } : { status: 'disabled', provenance: AXE_PROVENANCE, frames: [] }, {
     pageId: 'page-1', rulesVersion: '1.0.0', snapshot: raw.snapshot,
   });
-  if (axe === 'finding') {
+  if (['finding', 'mapped'].includes(axe)) {
     const aggregated = new Map(aggregateItems(raw.ruleResults, NBR17225_ITEMS).map(item => [item.id, item]));
     raw.itemResults = NBR17225_ITEMS.map(item => ({
       ...structuredClone(item), outcome: aggregated.get(item.id).outcome,
@@ -184,8 +184,8 @@ test('validates each batch axe envelope against its exact page and rejects tampe
   await assert.rejects(enrichAuditForReport(partialRaw, OPTIONS), /axe parcial|cobertura axe/iu);
 });
 
-test('migrates legacy normative fields inside nested axe only after preserving the verified occurrence identity', async () => {
-  const current = await childModel('child-axe-legacy', 'https://axe-legacy.example.test/', { axe: 'finding' });
+test('migrates mapped legacy normative fields inside nested axe only after preserving the verified occurrence identity', async () => {
+  const current = await childModel('child-axe-legacy', 'https://axe-legacy.example.test/', { axe: 'mapped' });
   const legacy = structuredClone(current);
   const legacyId = legacy.occurrences.find(value => value.source.engine === 'axe-core').occurrenceId;
   for (const collection of [legacy.occurrences, legacy.axe.occurrences]) {

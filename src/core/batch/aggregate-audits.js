@@ -65,6 +65,15 @@ export function aggregateBatchAudits({
   }
   const template = pageResults.find(result => result.template)?.template ?? explicitTemplate;
   if (!template) throw new TypeError('Lote sem página auditada exige template explícito do relatório.');
+  const expectedNormative = {
+    edition: 'ABNT NBR 17225:2025', wcag: 'WCAG 2.2',
+    editorialNotes: NBR17225_EDITORIAL_NOTES.map(note => ({ ...note })),
+    sources: structuredClone(NORMATIVE_SOURCE_LEDGER),
+  };
+  if (template.normative === undefined ||
+    canonicalStringify(template.normative) !== canonicalStringify(expectedNormative)) {
+    throw new TypeError('Template do lote não contém o ledger normativo exato.');
+  }
   const pages = pageResults.map(result => structuredClone(result.page));
   assertPageOrderAndIdentity(pages);
   const derivedStatus = deriveBatchStatus(pages);
@@ -130,7 +139,7 @@ export function aggregateBatchAudits({
       evidenceHash: 'pending',
       capturedStateCount,
     },
-    ...(template.normative === undefined ? {} : { normative: structuredClone(template.normative) }),
+    normative: structuredClone(template.normative),
     integrity: { algorithm: 'SHA-256', evidenceManifestHash: 'pending', canonicalModelHash: 'pending', hashBase: 'pending' },
   };
 }

@@ -44,7 +44,7 @@ function canonicalOccurrence(legacy) {
   const item = itemById.get(legacy.itemId);
   const targetEvidence = legacy.evidenceIds.map(id => evidenceById.get(id)).find(evidence => evidence?.nodeId === legacy.nodeId)
     ?? legacy.evidenceIds.map(id => evidenceById.get(id)).find(Boolean);
-  const itemWcagRefs = item.wcag.map(reference => reference.id);
+  const itemWcagRefs = legacy.ruleId === null ? [] : item.wcag.map(reference => reference.id);
   const sourceWcagRefs = legacy.ruleId === null ? [] : [...itemWcagRefs];
   const testedWcagRefs = legacy.outcome === 'failed' ? [...sourceWcagRefs] : [];
   return {
@@ -102,13 +102,13 @@ export const SAMPLE_AUDIT = createAuditModel({
     'Itens de contexto, processos completos e equivalência de mídia exigem revisão humana.',
   ],
   ruleResults: [
-    { ruleId: 'focus-visible', outcome: 'failed', mode: 'automated', nbrItems: ['5.1.1'], targets: ['n-1'], summary: 'O foco não foi distinguido visualmente.', limitations: [], source: { engine: 'audita-core', ruleId: 'focus-visible', version: '1.0.0' } },
+    { ruleId: 'focus-visible', outcome: 'failed', mode: 'automated', nbrItems: ['5.1.1'], wcag: itemById.get('5.1.1').wcag.map(reference => reference.id), targets: ['n-1'], summary: 'O foco não foi distinguido visualmente.', limitations: [], source: { engine: 'audita-core', ruleId: 'focus-visible', version: '1.0.0' } },
     {
       ruleId: 'focus-fully-visible', outcome: 'passed', mode: 'automated', nbrItems: ['5.1.2'],
-      targets: [], summary: 'O foco permaneceu totalmente visível.', limitations: [],
+      wcag: itemById.get('5.1.2').wcag.map(reference => reference.id), targets: [], summary: 'O foco permaneceu totalmente visível.', limitations: [],
       source: { engine: 'audita-core', ruleId: 'focus-fully-visible', version: '1.0.0' },
     },
-    { ruleId: 'focus-order', outcome: 'cantTell', mode: 'assisted', nbrItems: ['5.1.4'], targets: ['n-1'], summary: 'A previsibilidade depende do fluxo da tarefa.', limitations: [], source: { engine: 'audita-core', ruleId: 'focus-order', version: '1.0.0' } },
+    { ruleId: 'focus-order', outcome: 'cantTell', mode: 'assisted', nbrItems: ['5.1.4'], wcag: itemById.get('5.1.4').wcag.map(reference => reference.id), targets: ['n-1'], summary: 'A previsibilidade depende do fluxo da tarefa.', limitations: [], source: { engine: 'audita-core', ruleId: 'focus-order', version: '1.0.0' } },
   ],
   itemResults,
   occurrences: [

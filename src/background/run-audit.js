@@ -163,7 +163,10 @@ function makeOccurrences(auditId, ruleResults, itemResults) {
       const nodeId = targetNodeId(target);
       const equivalence = axeEquivalenceForAuditaRule(result.ruleId);
       const itemWcagRefs = itemById.get(itemId)?.wcag.map(reference => reference.id) ?? [];
-      const sourceWcagRefs = result.ruleId === 'new-window-link-warning' ? [] : [...itemWcagRefs];
+      const sourceWcagRefs = result.ruleId === 'new-window-link-warning'
+        ? []
+        : [...new Set((Array.isArray(result.wcag) ? result.wcag : [])
+          .filter(reference => itemWcagRefs.includes(reference)))];
       const testedWcagRefs = result.outcome === 'failed' ? [...sourceWcagRefs] : [];
       add({
         itemId,
@@ -212,7 +215,7 @@ function makeOccurrences(auditId, ruleResults, itemResults) {
       source: { engine: 'audita-manual-review', ruleId: `manual:${item.id}`, version: METHODOLOGY.version },
       target: { nodeId: null, selector: null, framePath: [] },
       equivalenceKey: `manual:${item.id}`, presentationTargetKey: null,
-      itemWcagRefs: item.wcag.map(reference => reference.id), sourceWcagRefs: [], testedWcagRefs: [],
+      itemWcagRefs: [], sourceWcagRefs: [], testedWcagRefs: [],
       wcagRefs: [], foreignBenchmarkRefs: [],
       justification: item.humanReason || 'O item depende de revisão humana no nível da página.',
     });
@@ -257,11 +260,8 @@ function makeEditorialOccurrences(auditId, ruleResults) {
 }
 
 function allocateOccurrenceIds(state) {
-  if (state.occurrenceIdsAllocated) return;
-  const oldToNew = new Map();
   state.occurrences = state.occurrences.map((occurrence, index) => {
     const occurrenceId = `occurrence-${occurrence.pageId}-${String(index + 1).padStart(6, '0')}`;
-    oldToNew.set(occurrence.occurrenceId, occurrenceId);
     return { ...occurrence, occurrenceId };
   });
   if (state.axe) {
@@ -270,10 +270,6 @@ function allocateOccurrenceIds(state) {
     axe.occurrences = axe.occurrences.map((occurrence, index) => ({ ...occurrence, occurrenceId: axeIds[index] }));
     state.axe = deepFreeze(axe);
   }
-  state.diagnostics = state.diagnostics.map(entry => entry.occurrenceId && oldToNew.has(entry.occurrenceId)
-    ? { ...entry, occurrenceId: oldToNew.get(entry.occurrenceId) }
-    : entry);
-  state.occurrenceIdsAllocated = true;
 }
 
 function resolvePresentationTargets(occurrences, artifacts) {
@@ -380,7 +376,6 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     endedAt: '',
     environment: { chromeVersion: '', viewport: { width: null, height: null, deviceScaleFactor: null } },
     status: 'running', diagnostics: [], progress: [], snapshot: null,
-    occurrenceIdsAllocated: false,
     ruleResults: [], coreRuleResults: [], itemResults: fallbackItems(), occurrences: [], manualReview: [],
     editorialRuleResults: [],
     axe: normalizeAxeResults({ status: 'disabled', provenance: AXE_PROVENANCE, frames: [], diagnostics: [{ code: 'AXE_FEATURE_DISABLED' }] }, { pageId: 'page-1' }),
@@ -536,6 +531,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
       ...makeOccurrences(auditId, state.coreRuleResults, state.itemResults),
       ...structuredClone(state.axe.occurrences),
     ];
+    allocateOccurrenceIds(state);
     const indexes = buildSnapshotIndexes(state.snapshot);
     const artifactByNode = new Map();
     const canCaptureElements = Boolean(state.fullPage);

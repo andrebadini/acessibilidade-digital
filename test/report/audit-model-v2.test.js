@@ -4,6 +4,7 @@ import test from 'node:test';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
+import { section508ReferencesForWcag } from '../../src/core/normative/section508.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import {
@@ -29,6 +30,86 @@ test('rejects partially present normative occurrence fields', () => {
   const input = structuredClone(SAMPLE_AUDIT);
   delete input.occurrences[0].testedWcagRefs;
   assert.throws(() => createAuditModel(input), /WCAG|campos|parcial|integridade|ocorrência/iu);
+
+  const privateMarker = 'PRIVATE_OCCURRENCE_MARKER';
+  input.occurrences[0].occurrenceId = privateMarker;
+  assert.throws(() => createAuditModel(input), error => {
+    assert.doesNotMatch(error.message, new RegExp(privateMarker, 'u'));
+    return true;
+  });
+});
+
+test('requires the exact normative ledger on every current V2 model and technical JSON export', () => {
+  for (const mutate of [
+    value => { delete value.normative; },
+    value => { delete value.normative.sources; },
+  ]) {
+    const input = structuredClone(SAMPLE_AUDIT);
+    mutate(input);
+    assert.throws(() => createAuditModel(input), /normativ|ledger|fontes|sources|ausente/iu);
+  }
+
+  const technical = JSON.parse(renderTechnicalJson(SAMPLE_AUDIT));
+  assert.deepEqual(technical.audit.normative, SAMPLE_AUDIT.normative);
+});
+
+test('binds core WCAG claims exactly to the authoritative rule, item and outcome', () => {
+  const failedCoverageErased = structuredClone(SAMPLE_AUDIT);
+  const failed = failedCoverageErased.occurrences.find(value => value.source.ruleId === 'focus-visible');
+  failed.sourceWcagRefs = [];
+  failed.testedWcagRefs = [];
+  failed.wcagRefs = [];
+  failed.foreignBenchmarkRefs = [];
+  assert.throws(
+    () => createAuditModel(failedCoverageErased),
+    /WCAG|cobertura|fonte|regra|autoritativ|testad/iu,
+  );
+
+  const cantTellInventedCoverage = structuredClone(SAMPLE_AUDIT);
+  const inconclusive = cantTellInventedCoverage.occurrences.find(value => value.source.ruleId === 'focus-order');
+  inconclusive.testedWcagRefs = [...inconclusive.sourceWcagRefs];
+  inconclusive.wcagRefs = [...inconclusive.testedWcagRefs];
+  inconclusive.foreignBenchmarkRefs = [...section508ReferencesForWcag(inconclusive.testedWcagRefs)];
+  assert.throws(
+    () => createAuditModel(cantTellInventedCoverage),
+    /WCAG|508|cobertura|resultado|autoritativ|testad/iu,
+  );
+
+  for (const mutate of [
+    value => { delete value.ruleResults.find(rule => rule.ruleId === 'focus-order').wcag; },
+    value => { value.ruleResults.find(rule => rule.ruleId === 'focus-order').wcag = ['1.1.1']; },
+    value => { value.occurrences.find(item => item.source.ruleId === 'focus-order').sourceWcagRefs = []; },
+  ]) {
+    const forged = structuredClone(SAMPLE_AUDIT);
+    mutate(forged);
+    assert.throws(
+      () => createAuditModel(forged),
+      /WCAG|fonte|regra|registro|autoritativ|mapeamento/iu,
+    );
+  }
+
+  const outcomeDrift = structuredClone(SAMPLE_AUDIT);
+  outcomeDrift.ruleResults.find(rule => rule.ruleId === 'focus-order').outcome = 'passed';
+  assert.throws(
+    () => createAuditModel(outcomeDrift),
+    /resultado|outcome|regra|autoritativ|incoerente/iu,
+  );
+
+  const manual = SAMPLE_AUDIT.occurrences.find(value => value.source.engine === 'audita-manual-review');
+  assert.deepEqual(manual.itemWcagRefs, []);
+  assert.deepEqual(manual.sourceWcagRefs, []);
+  assert.deepEqual(manual.testedWcagRefs, []);
+  assert.deepEqual(manual.wcagRefs, []);
+  assert.deepEqual(manual.foreignBenchmarkRefs, []);
+
+  const manualFailure = structuredClone(SAMPLE_AUDIT);
+  const forgedManual = manualFailure.occurrences.find(value => value.source.engine === 'audita-manual-review');
+  forgedManual.outcome = 'failed';
+  forgedManual.legalAnalysis = { basisRef: CONSUMER_ACCESSIBILITY_FIXED_BASIS.id };
+  assert.throws(
+    () => createAuditModel(manualFailure),
+    /manual|revis[aã]o|resultado|cantTell|decis[aã]o/iu,
+  );
 });
 
 test('exposes the exact frozen normative source ledger without paths or query-bearing URLs', async () => {
@@ -102,6 +183,9 @@ test('explicitly migrates V1 into the canonical single-page V2 contract without 
   assert.deepEqual(model.integrity, {
     algorithm: 'unavailable', status: 'not-recorded-v1',
   });
+  assert.equal(model.normative.edition, 'ABNT NBR 17225:2025');
+  assert.equal(model.normative.wcag, 'WCAG 2.2');
+  assert.equal(model.normative.sources[0].localCopy.sha256, '1c3ee66b7fd606367e3de087e6a55fea90f4d368d8a1f769141d5e3b96d32afc');
   assert.equal(Object.isFrozen(model), true);
 });
 
@@ -222,15 +306,20 @@ test('conclusive failed requirements and recommendations use the same catalog re
   const recommendation = NBR17225_ITEMS.find(item => item.id === '5.1.2');
   const makeRule = (item, ruleId) => ({
     ruleId, outcome: 'failed', mode: item.evaluation, nbrItems: [item.id],
+    wcag: item.wcag.map(reference => reference.id),
     targets: [], summary: 'Falha conclusiva.', limitations: [],
     source: { engine: 'audita-core', ruleId, version: '1.0.0' },
   });
-  const makeOccurrence = (item, ruleId, occurrenceId, outcome = 'failed') => ({
+  const makeOccurrence = (item, ruleId, occurrenceId, outcome = 'failed') => {
+    const sourceWcagRefs = item.wcag.map(reference => reference.id);
+    const testedWcagRefs = outcome === 'failed' ? [...sourceWcagRefs] : [];
+    return ({
     occurrenceId, pageId: 'page-1', outcome, classification: item.classification,
     impact: 'moderate', confidence: 'high',
     source: { engine: 'audita-core', ruleId, version: '1.0.0' },
-    nbrItemRef: item.id, wcagRefs: item.wcag.map(reference => reference.id),
-    foreignBenchmarkRefs: [], target: { nodeId: null, selector: null, framePath: [] },
+    nbrItemRef: item.id, itemWcagRefs: [...sourceWcagRefs], sourceWcagRefs, testedWcagRefs,
+    wcagRefs: [...testedWcagRefs],
+    foreignBenchmarkRefs: [...section508ReferencesForWcag(testedWcagRefs)], target: { nodeId: null, selector: null, framePath: [] },
     accessiblePreview: null, evidenceRefs: [],
     legalAnalysis: outcome === 'failed'
       ? { basisRef: CONSUMER_ACCESSIBILITY_FIXED_BASIS.id }
@@ -238,6 +327,7 @@ test('conclusive failed requirements and recommendations use the same catalog re
     itemId: item.id, ruleId, mode: item.evaluation, nodeId: null,
     evidenceIds: [], justification: 'Falha conclusiva.',
   });
+  };
   model.ruleResults = model.ruleResults.filter(rule => rule.ruleId !== 'focus-visible');
   model.itemResults.find(item => item.id === requirement.id).outcome = 'failed';
   model.ruleResults.push(makeRule(requirement, 'focus-visible'));
@@ -281,7 +371,7 @@ test('allows supplemental and editorial rules without weakening the exact 130-co
     occurrenceId: 'occ-editorial', pageId: 'page-1', outcome: 'failed',
     classification: 'editorial', impact: 'minor', confidence: 'high',
     source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
-    nbrItemRef: null, wcagRefs: [], foreignBenchmarkRefs: [],
+    nbrItemRef: null, itemWcagRefs: [], sourceWcagRefs: [], testedWcagRefs: [], wcagRefs: [], foreignBenchmarkRefs: [],
     target: { nodeId: 'n-1', selector: null, framePath: [] },
     accessiblePreview: null, evidenceRefs: [], legalAnalysis: null,
     itemId: null, ruleId: 'editorial.placeholder-text', mode: 'automated', nodeId: 'n-1',
@@ -337,7 +427,7 @@ test('strictly validates editorial and informational inventory schemas without a
     occurrenceId: 'occ-editorial-strict', pageId: 'page-1', outcome: 'failed',
     classification: 'editorial', impact: 'minor', confidence: 'high',
     source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
-    nbrItemRef: null, wcagRefs: [], foreignBenchmarkRefs: [],
+    nbrItemRef: null, itemWcagRefs: [], sourceWcagRefs: [], testedWcagRefs: [], wcagRefs: [], foreignBenchmarkRefs: [],
     target: { nodeId: 'n-1', selector: null, framePath: [] }, accessiblePreview: null,
     evidenceRefs: [], legalAnalysis: null, itemId: null, ruleId: 'editorial.placeholder-text',
     mode: 'automated', nodeId: 'n-1', evidenceIds: [],
@@ -381,7 +471,8 @@ test('rejects a supplemental passed rule and occurrence that try to auto-approve
     occurrenceId: 'occ-supplemental-pass', pageId: 'page-1', outcome: 'passed',
     classification: item.classification, impact: 'minor', confidence: 'high',
     source: { engine: 'third-party-engine', ruleId: 'supplemental.fabricated-pass', version: '9.9.9' },
-    nbrItemRef: item.id, wcagRefs: item.wcag.map(reference => reference.id),
+    nbrItemRef: item.id, itemWcagRefs: item.wcag.map(reference => reference.id),
+    sourceWcagRefs: item.wcag.map(reference => reference.id), testedWcagRefs: [], wcagRefs: [],
     foreignBenchmarkRefs: [], target: { nodeId: null, selector: null, framePath: [] },
     accessiblePreview: null, evidenceRefs: [], legalAnalysis: null,
     itemId: item.id, ruleId: 'supplemental.fabricated-pass', mode: 'automated',
@@ -403,7 +494,8 @@ test('rejects a third-party engine that claims an authoritative rule ID to appro
     occurrenceId: 'occ-third-party-pass', pageId: 'page-1', outcome: 'passed',
     classification: item.classification, impact: 'minor', confidence: 'high',
     source: { engine: 'third-party-engine', ruleId: 'focus-visible', version: occurrenceClaim.versions.rules },
-    nbrItemRef: item.id, wcagRefs: item.wcag.map(reference => reference.id),
+    nbrItemRef: item.id, itemWcagRefs: item.wcag.map(reference => reference.id),
+    sourceWcagRefs: item.wcag.map(reference => reference.id), testedWcagRefs: [], wcagRefs: [],
     foreignBenchmarkRefs: [], target: { nodeId: null, selector: null, framePath: [] },
     accessiblePreview: null, evidenceRefs: [], legalAnalysis: null,
     itemId: item.id, ruleId: 'focus-visible', mode: 'automated', nodeId: null,

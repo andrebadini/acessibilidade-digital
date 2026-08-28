@@ -13,9 +13,20 @@ const REFLOW_EXCEPTIONS = new Set(['essential']);
 const MINIMUM_TARGET_EXCEPTIONS = new Set(['equivalent', 'inline', 'user-agent', 'essential', 'spacing']);
 const ENHANCED_TARGET_EXCEPTIONS = new Set(['equivalent', 'inline', 'user-agent', 'essential']);
 
+function ownData(value, field) {
+  try {
+    if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, field);
+    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizedException(observation, allowed) {
-  const value = typeof observation?.exception === 'string' ? observation.exception : 'unknown';
-  if (value === 'none') return observation?.exceptionProof === 'complete' ? 'none' : 'unknown';
+  const observed = ownData(observation, 'exception');
+  const value = typeof observed === 'string' ? observed : 'unknown';
+  if (value === 'none') return ownData(observation, 'exceptionProof') === 'complete' ? 'none' : 'unknown';
   return allowed.has(value) ? value : 'unknown';
 }
 
@@ -34,11 +45,13 @@ function createProbeIdentity() {
   let next = 1;
   return {
     safeId(event) {
-      if (Number.isSafeInteger(event?.backendNodeId) && event.backendNodeId >= 0) return `n-${event.backendNodeId}`;
-      const nodeId = typeof event?.nodeId === 'string' ? event.nodeId.trim() : '';
+      const backendNodeId = ownData(event, 'backendNodeId');
+      if (Number.isSafeInteger(backendNodeId) && backendNodeId >= 0) return `n-${backendNodeId}`;
+      const rawNodeId = ownData(event, 'nodeId');
+      const nodeId = typeof rawNodeId === 'string' ? rawNodeId.trim() : '';
       if (/^(?:document|n-(?:(?:0|[1-9]\d*)|d(?:0|[1-9]\d*)-(?:0|[1-9]\d*)|fixture-[1-9]\d*))$/u.test(nodeId)) return nodeId;
-      const fallback = selectorFrameKey(event?.selector, event?.frameId);
-      const source = fallback || (nodeId ? `node\u0000${nodeId}` : Number.isSafeInteger(event?.nodeId) ? `node\u0000${event.nodeId}` : '');
+      const fallback = selectorFrameKey(ownData(event, 'selector'), ownData(event, 'frameId'));
+      const source = fallback || (nodeId ? `node\u0000${nodeId}` : Number.isSafeInteger(rawNodeId) ? `node\u0000${rawNodeId}` : '');
       if (!source) return null;
       if (!idsBySource.has(source)) idsBySource.set(source, `probe-${next++}`);
       const id = idsBySource.get(source);
@@ -117,20 +130,31 @@ export function normalizeProbes(raw = {}) {
   const knownVisibility = visibilityObservations.filter(item => item.intersectionRatio !== null);
   const obscured = unique(knownVisibility.filter(item => item.intersectionRatio < 1).map(item => item.nodeId));
 
-  const reflowValid = finite(raw.reflow?.testedWidthCssPx) && raw.reflow.testedWidthCssPx > 0 && raw.reflow.testedWidthCssPx <= 320 &&
-    typeof raw.reflow?.horizontalOverflow === 'boolean';
-  const reflowException = normalizedException(raw.reflow, REFLOW_EXCEPTIONS);
+  const reflow = ownData(raw, 'reflow');
+  const reflowWidth = ownData(reflow, 'testedWidthCssPx');
+  const horizontalOverflow = ownData(reflow, 'horizontalOverflow');
+  const reflowValid = finite(reflowWidth) && reflowWidth > 0 && reflowWidth <= 320 &&
+    typeof horizontalOverflow === 'boolean';
+  const reflowException = normalizedException(reflow, REFLOW_EXCEPTIONS);
   const resizeValid = finite(raw.textResize?.scalePercent) && raw.textResize.scalePercent >= 200 &&
     typeof raw.textResize?.lossOfContent === 'boolean';
 
-  const targetObservations = (Array.isArray(raw.targetSizes) ? raw.targetSizes : []).filter(item =>
-    safeId(item) && finite(item.width) && item.width >= 0 && finite(item.height) && item.height >= 0
-  ).map(item => ({
-    nodeId: safeId(item), width: item.width, height: item.height,
-    exception: normalizedException(item, MINIMUM_TARGET_EXCEPTIONS),
-    minimum24: item.width >= 24 && item.height >= 24,
-    enhanced44: item.width >= 44 && item.height >= 44
-  }));
+  const rawTargetSizes = ownData(raw, 'targetSizes');
+  let targetSizes = [];
+  try { if (Array.isArray(rawTargetSizes)) targetSizes = rawTargetSizes; } catch { /* Revoked collections are unavailable. */ }
+  const targetObservations = [];
+  for (const item of targetSizes) {
+    const nodeId = safeId(item);
+    const width = ownData(item, 'width');
+    const height = ownData(item, 'height');
+    if (!nodeId || !finite(width) || width < 0 || !finite(height) || height < 0) continue;
+    targetObservations.push({
+      nodeId, width, height,
+      exception: normalizedException(item, MINIMUM_TARGET_EXCEPTIONS),
+      minimum24: width >= 24 && height >= 24,
+      enhanced44: width >= 44 && height >= 44,
+    });
+  }
   const minimumFailures = targetObservations.filter(item => !item.minimum24 && item.exception === 'none').map(item => item.nodeId);
   const enhancedFailures = targetObservations.filter(item => !item.enhanced44 && item.exception === 'none').map(item => item.nodeId);
   const minimumUnknown = targetObservations.some(item => !item.minimum24 && item.exception === 'unknown');
@@ -166,10 +190,10 @@ export function normalizeProbes(raw = {}) {
     },
     reflow: {
       outcome: reflowValid
-        ? (!raw.reflow.horizontalOverflow ? 'passed' : reflowException === 'none' ? 'failed' : 'cantTell')
+        ? (!horizontalOverflow ? 'passed' : reflowException === 'none' ? 'failed' : 'cantTell')
         : 'cantTell',
-      testedWidthCssPx: reflowValid ? raw.reflow.testedWidthCssPx : null,
-      horizontalOverflow: reflowValid ? raw.reflow.horizontalOverflow : null,
+      testedWidthCssPx: reflowValid ? reflowWidth : null,
+      horizontalOverflow: reflowValid ? horizontalOverflow : null,
       exception: reflowException
     },
     textResize: {

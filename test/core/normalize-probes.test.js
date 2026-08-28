@@ -89,6 +89,55 @@ test('fails closed when reflow and target-size exception states are absent or ho
   }
 });
 
+test('reads exception evidence only from own data descriptors without invoking hostile getters', () => {
+  let getterReads = 0;
+  const accessorReflow = { testedWidthCssPx: 320, horizontalOverflow: true };
+  Object.defineProperty(accessorReflow, 'exception', {
+    enumerable: true,
+    get() { getterReads += 1; return 'none'; },
+  });
+  Object.defineProperty(accessorReflow, 'exceptionProof', {
+    enumerable: true,
+    get() { getterReads += 1; return 'complete'; },
+  });
+  const inheritedTarget = Object.create({ exception: 'none', exceptionProof: 'complete' });
+  Object.assign(inheritedTarget, { nodeId: 'n-201', width: 20, height: 20 });
+
+  const probes = normalizeProbes({
+    reflow: accessorReflow,
+    targetSizes: [inheritedTarget],
+    warnings: [], actions: [],
+  });
+
+  assert.equal(getterReads, 0);
+  assert.equal(probes.reflow.exception, 'unknown');
+  assert.equal(probes.reflow.outcome, 'cantTell');
+  assert.equal(probes.targetSizes.observations[0].exception, 'unknown');
+  assert.equal(probes.targetSizes.minimum24.outcome, 'cantTell');
+});
+
+test('treats revoked reflow and target observations as unknown without executing or throwing', () => {
+  const reflowPair = Proxy.revocable({
+    testedWidthCssPx: 320, horizontalOverflow: true, exception: 'none', exceptionProof: 'complete',
+  }, {});
+  const targetPair = Proxy.revocable({
+    nodeId: 'n-201', width: 20, height: 20, exception: 'none', exceptionProof: 'complete',
+  }, {});
+  reflowPair.revoke();
+  targetPair.revoke();
+
+  const probes = normalizeProbes({
+    reflow: reflowPair.proxy,
+    targetSizes: [targetPair.proxy],
+    warnings: [], actions: [],
+  });
+
+  assert.equal(probes.reflow.exception, 'unknown');
+  assert.equal(probes.reflow.outcome, 'cantTell');
+  assert.equal(probes.targetSizes.minimum24.outcome, 'cantTell');
+  assert.deepEqual(probes.targetSizes.observations, []);
+});
+
 test('only preserves authoritative SnapshotV1 node IDs and assigns opaque IDs to arbitrary nodeId or selector values', () => {
   const marker = 'PROBE_NODE_PRIVACY_MARKER';
   const raw = {

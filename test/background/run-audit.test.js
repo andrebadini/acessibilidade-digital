@@ -239,6 +239,66 @@ const clock = (() => {
   return () => new Date(Date.UTC(2026, 7, 26, 14, 0, tick++)).toISOString();
 })();
 
+function legacyOccurrenceHash(value) {
+  let hash = 0x811c9dc5;
+  for (const character of value) {
+    hash ^= character.codePointAt(0);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
+test('keeps diagnostics and evidence correlated when two new findings have the same legacy hash ID', async () => {
+  const auditId = 'audit-real-collision';
+  const firstBackendId = 180154;
+  const secondBackendId = 300601;
+  const signature = (backendId, ordinal) => [
+    auditId, '5.8.6', 'target-size-enhanced', `n-${backendId}`, ordinal,
+  ].join('\u0000');
+  assert.equal(legacyOccurrenceHash(signature(firstBackendId, 10)), legacyOccurrenceHash(signature(secondBackendId, 11)));
+
+  const page = rawPage();
+  page.nodes = [firstBackendId, secondBackendId].map((backendNodeId, index) => ({
+    backendNodeId,
+    tagName: 'button',
+    attributes: {},
+    text: `Alvo ${index + 1}`,
+    parentBackendNodeId: null,
+    rect: { x: index * 30, y: 0, width: 20, height: 20 },
+  }));
+  const model = await runAudit({
+    url: 'https://example.test/',
+    chromeAdapter: fakeAdapter({
+      page,
+      snippetFailureNode: firstBackendId,
+      rawProbes: {
+        focus: { completed: false, events: [] },
+        targetSizes: [firstBackendId, secondBackendId].map(backendNodeId => ({
+          nodeId: `n-${backendNodeId}`, width: 20, height: 20,
+          exception: 'none', exceptionProof: 'complete',
+        })),
+        warnings: [], actions: [],
+      },
+    }),
+    now: clock,
+    idFactory: () => auditId,
+  });
+
+  const occurrences = model.occurrences.filter(value => value.ruleId === 'target-size-enhanced');
+  assert.equal(occurrences.length, 2);
+  assert.equal(new Set(occurrences.map(value => value.occurrenceId)).size, 2);
+  const first = occurrences.find(value => value.nodeId === `n-${firstBackendId}`);
+  const second = occurrences.find(value => value.nodeId === `n-${secondBackendId}`);
+  const diagnostic = model.session.diagnostics.find(value => value.code === 'SNIPPET_CAPTURE_FAILED');
+  assert.equal(diagnostic.occurrenceId, first.occurrenceId);
+  assert.notEqual(diagnostic.occurrenceId, second.occurrenceId);
+  for (const occurrence of occurrences) {
+    const elementEvidence = model.evidence.artifacts.find(value => value.nodeId === occurrence.nodeId);
+    assert.ok(elementEvidence);
+    assert.ok(occurrence.evidenceIds.includes(elementEvidence.evidenceId));
+  }
+});
+
 test('runs the 130→146 pipeline with pristine capture before collection, probes and rules', async () => {
   const adapter = fakeAdapter();
   const model = await runAudit({

@@ -2,7 +2,11 @@ import { sanitizeResourceUrl } from '../normalize-snapshot.js';
 import { hashEvidenceArtifact } from '../evidence/artifact-hash.js';
 import { NBR17225_EDITORIAL_NOTES } from '../normative/nbr17225.js';
 import { NORMATIVE_SOURCE_LEDGER } from '../normative/source-ledger.js';
-import { createAuditModel, sanitizeEvidenceArtifactUrls } from './audit-model.js';
+import {
+  createAuditModel,
+  createAuditModelFromVerifiedLegacyLineage,
+  sanitizeEvidenceArtifactUrls,
+} from './audit-model.js';
 import { canonicalStringify } from './canonical-json.js';
 import { sha256Hex } from './hash.js';
 import {
@@ -18,6 +22,14 @@ export async function enrichAuditForReport(input, options = {}) {
   try { raw = JSON.parse(canonicalStringify(input)); } catch {
     throw new TypeError('Modelo de auditoria contém propriedade não segura ou valor inválido.');
   }
+  let legacyProof = null;
+  if (raw.schemaVersion === 2 && hasLegacyNormativeOccurrences(raw)) {
+    legacyProof = await verifyAuditIntegritySnapshot(raw);
+    raw = structuredClone(legacyProof);
+  }
+  const makeModel = value => legacyProof
+    ? createAuditModelFromVerifiedLegacyLineage(value, legacyProof)
+    : createAuditModel(value);
   const generatedAt = canonicalNow(options.now);
   const timezone = validTimezone(options.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
   const limitations = deriveLimitations(raw);
@@ -97,7 +109,7 @@ export async function enrichAuditForReport(input, options = {}) {
     },
     integrity: { algorithm: 'SHA-256', evidenceManifestHash: 'pending', hashBase: REPORT_HASH_BASE },
   };
-  const normalized = createAuditModel({
+  const normalized = makeModel({
     ...base,
     integrity: { ...base.integrity, canonicalModelHash: 'pending' },
   });
@@ -113,21 +125,29 @@ export async function enrichAuditForReport(input, options = {}) {
       }),
     });
   }
-  const withEvidenceHashes = createAuditModel({ ...normalized, evidence });
+  const withEvidenceHashes = makeModel({ ...normalized, evidence });
   const evidenceManifest = projectEvidenceManifest(withEvidenceHashes.evidence);
   const evidenceManifestHash = await sha256Hex(canonicalStringify(evidenceManifest));
-  const withManifest = createAuditModel({
+  const withManifest = makeModel({
     ...withEvidenceHashes,
     integrity: { ...withEvidenceHashes.integrity, evidenceManifestHash, canonicalModelHash: 'pending' },
   });
   const hashInput = structuredClone(withManifest);
   delete hashInput.integrity.canonicalModelHash;
   const canonicalModelHash = await sha256Hex(canonicalStringify(hashInput));
-  const finalModel = createAuditModel({
+  const finalModel = makeModel({
     ...withManifest,
     integrity: { ...withManifest.integrity, canonicalModelHash },
   });
   return verifyAuditIntegritySnapshot(finalModel);
+}
+
+function hasLegacyNormativeOccurrences(model) {
+  const collections = [model?.occurrences, model?.axe?.occurrences];
+  for (const page of Array.isArray(model?.axePages) ? model.axePages : []) collections.push(page?.result?.occurrences);
+  return collections.some(collection => Array.isArray(collection) && collection.some(occurrence =>
+    occurrence && typeof occurrence === 'object' &&
+    ['itemWcagRefs', 'sourceWcagRefs', 'testedWcagRefs'].every(field => !Object.hasOwn(occurrence, field))));
 }
 
 function canonicalNow(now) {

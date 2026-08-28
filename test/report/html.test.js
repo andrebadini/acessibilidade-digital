@@ -39,6 +39,7 @@ function withFailedRecommendation() {
   const item = input.itemResults.find(value => value.id === '5.1.5');
   input.ruleResults.push({
     ruleId: 'focusable-elements-interactive', outcome: 'failed', mode: 'assisted', nbrItems: ['5.1.5'],
+    wcag: item.wcag.map(reference => reference.id),
     targets: [], summary: 'O uso do foco observado requer correção.', limitations: [],
     source: { engine: 'audita-core', ruleId: 'focusable-elements-interactive', version: '1.0.0' },
   });
@@ -47,7 +48,8 @@ function withFailedRecommendation() {
     occurrenceId: 'occ-recommendation-failed', pageId: 'page-1', outcome: 'failed',
     classification: 'recommendation', impact: 'serious', confidence: 'high',
     source: { engine: 'audita-core', ruleId: 'focusable-elements-interactive', version: '1.0.0' },
-    nbrItemRef: item.id, wcagRefs, foreignBenchmarkRefs: [...section508ReferencesForWcag(wcagRefs)],
+    nbrItemRef: item.id, itemWcagRefs: [...wcagRefs], sourceWcagRefs: [...wcagRefs], testedWcagRefs: [...wcagRefs],
+    wcagRefs, foreignBenchmarkRefs: [...section508ReferencesForWcag(wcagRefs)],
     target: { nodeId: null, selector: null, framePath: [] }, accessiblePreview: null,
     evidenceRefs: ['ev-full'], legalAnalysis: { basisRef: CONSUMER_ACCESSIBILITY_FIXED_BASIS.id },
     itemId: item.id, ruleId: 'focusable-elements-interactive', mode: 'assisted', nodeId: null,
@@ -75,7 +77,7 @@ function withEditorialFailure() {
     occurrenceId: 'occ-editorial', pageId: 'page-1', outcome: 'failed',
     classification: 'editorial', impact: 'minor', confidence: 'high',
     source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
-    nbrItemRef: null, wcagRefs: [], foreignBenchmarkRefs: [],
+    nbrItemRef: null, itemWcagRefs: [], sourceWcagRefs: [], testedWcagRefs: [], wcagRefs: [], foreignBenchmarkRefs: [],
     target: { nodeId: 'n-editorial', selector: null, framePath: [] }, accessiblePreview: null,
     evidenceRefs: [], legalAnalysis: null, itemId: null, ruleId: 'editorial.placeholder-text',
     mode: 'automated', nodeId: 'n-editorial', evidenceIds: [],
@@ -316,6 +318,9 @@ test('communicates every state with visible icon and text rather than color alon
     const occurrence = input.occurrences[0];
     occurrence.outcome = outcome;
     occurrence.legalAnalysis = outcome === 'failed' ? occurrence.legalAnalysis : null;
+    occurrence.testedWcagRefs = outcome === 'failed' ? [...occurrence.sourceWcagRefs] : [];
+    occurrence.wcagRefs = [...occurrence.testedWcagRefs];
+    occurrence.foreignBenchmarkRefs = [...section508ReferencesForWcag(occurrence.testedWcagRefs)];
     input.ruleResults.find(rule => rule.ruleId === occurrence.ruleId).outcome = outcome;
     input.itemResults.find(item => item.id === occurrence.itemId).outcome = outcome;
     const html = renderHtmlReport(input);
