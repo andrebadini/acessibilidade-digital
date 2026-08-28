@@ -2,6 +2,7 @@ import { createReviewDecision } from '../core/review/decisions.js';
 import { applyExportEvent, restoreExportEventState } from '../panel/panel-state.js';
 import { createAuditStore } from '../storage/audit-store.js';
 import { createDestructiveDialog } from '../ui/destructive-dialog.js';
+import { parseAuditDeletedEvent } from '../core/audit-deleted-event.js';
 import { createReviewDecisionCommitter, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId } from './review-state.js';
 
 const ANSWERS = ['conforme', 'não conforme', 'não foi possível determinar'];
@@ -84,12 +85,16 @@ regenerate.addEventListener('click', () => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender) => {
-  if (message?.type === 'AUDIT_DELETED' && isAuthorizedDeletionMessage(sender) &&
-    (message.scope === 'all' || message.auditId === auditModel?.auditId)) {
+  const deletion = parseAuditDeletedEvent(message, sender, {
+    id: chrome.runtime.id,
+    workerUrl: chrome.runtime.getURL('src/background/service-worker.js'),
+  });
+  if (deletion && (deletion.scope === 'all' || deletion.auditId === auditModel?.auditId)) {
     renderDeletedAudit();
     status.textContent = 'Auditoria local excluída. Downloads já salvos foram preservados.';
     return;
   }
+  if (message?.type === 'AUDIT_DELETED') return;
   if (!auditModel || message?.auditId !== auditModel.auditId) return;
   let nextStatus = null;
   let text = null;
@@ -119,16 +124,6 @@ chrome.runtime.onMessage.addListener((message, sender) => {
 function safeAuditId() {
   const value = new URL(location.href).searchParams.get('auditId');
   return normalizeReviewAuditId(value);
-}
-
-function isAuthorizedDeletionMessage(sender) {
-  if (!sender || sender.id !== chrome.runtime.id) return false;
-  if (sender.url === undefined) return !sender.tab;
-  try {
-    const url = new URL(sender.url);
-    return url.protocol === 'chrome-extension:' && url.hostname === chrome.runtime.id && !url.hash &&
-      ['/src/background/service-worker.js', '/src/export/index.html'].includes(url.pathname);
-  } catch { return false; }
 }
 
 function appendText(parent, tag, value, className) {

@@ -29,6 +29,8 @@ test('internal export page claims a persistent lease before generation and keeps
   assert.match(script, /exportCleanupPending\s*===\s*true/u);
   assert.match(script, /arquivo obsoleto.*removido/iu);
   assert.match(script, /exportRevision:[\s\S]*exportAttempt[\s\S]*leaseOwnerId/u);
+  assert.doesNotMatch(script, /notify\(\{\s*type:\s*'AUDIT_DELETED'/u,
+    'somente o worker validado pode publicar o evento visual de exclusão');
   assert.match(html, /HTML[\s\S]*JSON-LD[\s\S]*CSV[\s\S]*PDF/iu);
   assert.match(html, /exclusão[^.]*escolhida antes[^.]*quatro downloads[^.]*sucesso/iu);
   assert.match(html, /arquivos já baixados[^.]*não são apagados/iu);

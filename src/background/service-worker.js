@@ -15,6 +15,7 @@ import { sanitizeResourceUrl } from '../core/normalize-snapshot.js';
 import { createExportFailureRequest, persistExportFailure } from '../export/export-controller.js';
 import { getPersonaController } from './persona-runtime.js';
 import { registerAuditContextMenus } from './context-menu.js';
+import { createAuditDeletedEvent } from '../core/audit-deleted-event.js';
 
 const PANEL_PATH = '/src/panel/index.html';
 const REVIEW_PATH = '/src/review/index.html';
@@ -269,6 +270,11 @@ export function registerServiceWorker(chromeApi, options = {}) {
         Number(exportSender.searchParams.get('exportAttempt')) !== message.exportAttempt ||
         !Number.isSafeInteger(message.exportRevision) || message.exportRevision < 0) {
         sendResponse({ ok: false, error: 'Exportação não correlacionada.' });
+      } else if (isCompleteExportDeletionClaim(message)) {
+        void confirmCompleteExportDeletion(message.auditId).then(
+          () => sendResponse({ ok: true }),
+          () => sendResponse({ ok: true }),
+        );
       } else sendResponse({ ok: true });
       return true;
     }
@@ -594,7 +600,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
       const result = await auditStore.deleteAudit(auditId, snapshot.capability, { now: queueTime() });
       if (result?.deleted !== true) return { ok: false, error: 'Não foi possível excluir a auditoria local.' };
       await sessions.remove?.(auditId);
-      await sendRuntimeMessage(chromeApi, { type: 'AUDIT_DELETED', auditId }).catch(() => {});
+      await sendRuntimeMessage(chromeApi, createAuditDeletedEvent({ auditId, reason: 'delete-one' })).catch(() => {});
       return { ok: true, auditId, deleted: true };
     } catch (error) {
       if (error?.code === 'AUDIT_DELETE_BUSY') {
@@ -612,7 +618,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
       const result = await auditStore.deleteAllAudits({ now: queueTime() });
       const deleted = Number.isSafeInteger(result?.deleted) && result.deleted >= 0 ? result.deleted : 0;
       await sessions.clearAuditSessions?.({ keepAuditIds: [] });
-      await sendRuntimeMessage(chromeApi, { type: 'AUDIT_DELETED', scope: 'all' }).catch(() => {});
+      await sendRuntimeMessage(chromeApi, createAuditDeletedEvent({ scope: 'all', reason: 'delete-all' })).catch(() => {});
       return { ok: true, deleted };
     } catch (error) {
       if (error?.code === 'AUDIT_DELETE_BUSY') {
@@ -622,6 +628,26 @@ export function registerServiceWorker(chromeApi, options = {}) {
         return { ok: false, code: 'AUDIT_STORAGE_UNAVAILABLE', error: STORAGE_UNAVAILABLE_MESSAGE };
       }
       return { ok: false, error: 'Não foi possível excluir as auditorias locais.' };
+    }
+  }
+
+  async function confirmCompleteExportDeletion(auditId) {
+    try {
+      if (typeof auditStore.getAuditSnapshot !== 'function' ||
+        typeof auditStore.getAuditRetention !== 'function' || typeof auditStore.getLatest !== 'function') return;
+      const [snapshot, retention, latest] = await Promise.all([
+        auditStore.getAuditSnapshot(auditId),
+        auditStore.getAuditRetention(auditId),
+        auditStore.getLatest(),
+      ]);
+      if (!snapshot || !Object.hasOwn(snapshot, 'model') || snapshot.model !== undefined ||
+        retention !== undefined || latest?.auditId === auditId) return;
+      await sessions.remove?.(auditId);
+      await sendRuntimeMessage(chromeApi, createAuditDeletedEvent({
+        auditId, reason: 'complete-export',
+      })).catch(() => {});
+    } catch {
+      logger.error('Não foi possível confirmar a exclusão local após a exportação.');
     }
   }
 
@@ -815,6 +841,22 @@ function validAuditId(value) {
 function validExportAttempt(value) {
   const attempt = typeof value === 'string' && /^[1-9][0-9]*$/u.test(value) ? Number(value) : value;
   return Number.isSafeInteger(attempt) && attempt >= 1;
+}
+
+function isCompleteExportDeletionClaim(message) {
+  try {
+    const keys = Object.keys(message).sort();
+    const expected = [
+      'auditId', 'exportAttempt', 'exportRevision', 'formats', 'leaseOwnerId',
+      'localAuditDeleted', 'status', 'type',
+    ].sort();
+    return keys.length === expected.length && keys.every((key, index) => key === expected[index]) &&
+      message.type === 'EXPORT_COMPLETE' && message.localAuditDeleted === true &&
+      ['complete', 'partial'].includes(message.status) && Array.isArray(message.formats) &&
+      message.formats.length === 4 && ['html', 'json', 'csv', 'pdf'].every((format, index) => message.formats[index] === format);
+  } catch {
+    return false;
+  }
 }
 
 function retentionIntent(message) {

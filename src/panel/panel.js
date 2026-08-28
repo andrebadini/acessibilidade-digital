@@ -1,6 +1,7 @@
 import { normalizeAuditUrl } from '../core/url.js';
 import { normalizeUrlList } from '../core/batch/normalize-url-list.js';
 import { createDestructiveDialog } from '../ui/destructive-dialog.js';
+import { parseAuditDeletedEvent } from '../core/audit-deleted-event.js';
 import {
   createInitialPersonaState,
   createContextPrefillAck,
@@ -279,8 +280,12 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     void handleContextPrefillCommit(message, sender);
     return false;
   }
-  if (messageType === 'AUDIT_DELETED' && isAuthorizedDeletionMessage(sender)) {
-    if (message.scope === 'all' || message.auditId === (activeAuditId ?? panelState?.auditId)) {
+  if (messageType === 'AUDIT_DELETED') {
+    const deletion = parseAuditDeletedEvent(message, sender, {
+      id: chrome.runtime.id,
+      workerUrl: chrome.runtime.getURL('src/background/service-worker.js'),
+    });
+    if (deletion && (deletion.scope === 'all' || deletion.auditId === (activeAuditId ?? panelState?.auditId))) {
       activeAuditId = null;
       panelState = null;
       submissionGate.release();
@@ -367,16 +372,6 @@ function isAuthorizedWorkerMessage(sender) {
   if (!sender || sender.id !== chrome.runtime.id || sender.tab) return false;
   if (sender.url === undefined) return true;
   return sender.url === chrome.runtime.getURL('src/background/service-worker.js');
-}
-
-function isAuthorizedDeletionMessage(sender) {
-  if (!sender || sender.id !== chrome.runtime.id) return false;
-  if (sender.url === undefined) return !sender.tab;
-  try {
-    const url = new URL(sender.url);
-    return url.protocol === 'chrome-extension:' && url.hostname === chrome.runtime.id && !url.hash &&
-      ['/src/background/service-worker.js', '/src/export/index.html'].includes(url.pathname);
-  } catch { return false; }
 }
 
 function currentPanelTabId() {

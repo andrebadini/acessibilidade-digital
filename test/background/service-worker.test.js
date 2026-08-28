@@ -1709,7 +1709,8 @@ test('destructive protocol accepts only correlated review and canonical panel se
   assert.equal(await store.getAudit('delete-protocol-a'), undefined);
   assert.equal(await sessions.get('delete-protocol-a'), undefined);
   assert.ok(await sessions.get('delete-protocol-b'));
-  assert.ok(chromeApi.runtime.sent.some(message => message.type === 'AUDIT_DELETED' && message.auditId === 'delete-protocol-a'));
+  assert.ok(chromeApi.runtime.sent.some(message => message.type === 'AUDIT_DELETED' &&
+    message.auditId === 'delete-protocol-a' && message.reason === 'delete-one'));
 
   let deletedAll;
   chromeApi.listeners.message.listener(
@@ -1722,5 +1723,49 @@ test('destructive protocol accepts only correlated review and canonical panel se
   assert.equal(await store.getAudit('delete-protocol-b'), undefined);
   assert.equal(await sessions.get('delete-protocol-b'), undefined);
   assert.equal(await sessions.getActiveBatch(), undefined);
-  assert.ok(chromeApi.runtime.sent.some(message => message.type === 'AUDIT_DELETED' && message.scope === 'all'));
+  assert.ok(chromeApi.runtime.sent.some(message => message.type === 'AUDIT_DELETED' &&
+    message.scope === 'all' && message.reason === 'delete-all'));
+});
+
+test('worker publishes complete-export deletion only after exact correlation and durable absence', async () => {
+  const chromeApi = createChrome();
+  const store = createInMemoryAuditStore();
+  registerServiceWorker(chromeApi, { auditStore: store });
+  const message = {
+    type: 'EXPORT_COMPLETE',
+    auditId: 'export-deleted',
+    status: 'complete',
+    formats: ['html', 'json', 'csv', 'pdf'],
+    exportRevision: 2,
+    exportAttempt: 1,
+    leaseOwnerId: 'owner-1',
+    localAuditDeleted: true,
+  };
+  const sender = {
+    id: 'test', frameId: 0,
+    url: 'chrome-extension://test/src/export/index.html?auditId=export-deleted&leaseOwnerId=owner-1&exportAttempt=1',
+  };
+  let response;
+  chromeApi.listeners.message.listener(message, sender, value => { response = value; });
+  await waitUntil(() => response !== undefined);
+  assert.deepEqual(response, { ok: true });
+  await waitUntil(() => chromeApi.runtime.sent.some(value => value.type === 'AUDIT_DELETED'));
+  assert.deepEqual(chromeApi.runtime.sent.find(value => value.type === 'AUDIT_DELETED'), {
+    type: 'AUDIT_DELETED', auditId: 'export-deleted', reason: 'complete-export',
+  });
+
+  chromeApi.runtime.sent.length = 0;
+  await store.commitAudit('still-present', { auditId: 'still-present' }, { auditId: 'still-present' }, {
+    now: '2026-08-28T12:00:00.000Z', deleteAfterCompleteExport: true,
+  });
+  chromeApi.listeners.message.listener({ ...message, auditId: 'still-present' }, {
+    ...sender,
+    url: 'chrome-extension://test/src/export/index.html?auditId=still-present&leaseOwnerId=owner-1&exportAttempt=1',
+  }, () => {});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(chromeApi.runtime.sent.some(value => value.type === 'AUDIT_DELETED'), false);
+
+  chromeApi.listeners.message.listener({ ...message, formats: ['html', 'json', 'csv'] }, sender, () => {});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(chromeApi.runtime.sent.some(value => value.type === 'AUDIT_DELETED'), false);
 });

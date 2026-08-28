@@ -51,6 +51,8 @@ test('panel exposes explicit 30-day retention controls and a confirmed delete-al
   assert.match(script, /createDestructiveDialog/u);
   assert.match(script, /deleteAfterCompleteExport:\s*deleteAfterExport\.checked/u);
   assert.match(script, /REQUEST_DELETE_ALL_AUDITS/u);
+  assert.match(script, /parseAuditDeletedEvent/u);
+  assert.doesNotMatch(script, /src\/export\/index\.html/u);
   assert.doesNotMatch(script, /window\.confirm|innerHTML/u);
   assert.match(css, /#delete-all-audits[^{]*\{[^}]*min-height:\s*2\.75rem/isu);
   assert.match(css, /dialog:not\(\[open\]\)[^{]*\{[^}]*display:\s*none/isu);

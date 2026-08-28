@@ -167,7 +167,6 @@ async function generate() {
     localAuditDeleted: persisted.deleted,
   });
   if (persisted.deleted) {
-    notify({ type: 'AUDIT_DELETED', auditId });
     status.textContent = 'Os quatro arquivos foram baixados e a auditoria local foi excluída. Os downloads permanecem no dispositivo.';
   } else status.textContent = persisted.latest.message;
   await closeOwnTab();
