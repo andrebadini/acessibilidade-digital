@@ -6,6 +6,7 @@ import { runAudit } from '../../src/background/run-audit.js';
 import { normalizeUrlList } from '../../src/core/batch/normalize-url-list.js';
 import { reportInput } from '../report/helpers.js';
 import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
+import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 
@@ -98,7 +99,7 @@ test('enters an explicit non-cancellable finalization boundary before aggregate 
       return rawChild({ auditId: options.idFactory(), url: options.url });
     },
     chromeAdapter: {
-      async enterFinalization() { events.push('finalization'); },
+      tryEnterFinalization() { events.push('finalization'); return true; },
       async handoffReport() { events.push('handoff'); return { reviewUrl: null }; },
     },
     now: clock(), reportOptions: REPORT_OPTIONS,
@@ -106,7 +107,26 @@ test('enters an explicit non-cancellable finalization boundary before aggregate 
   assert.deepEqual(events, ['child', 'finalization', 'handoff']);
 });
 
-test('integrates three controlled fixtures through runBatch and runAudit into one mixed model', async () => {
+test('materializes cancellation when abort wins the synchronous finalization claim', async () => {
+  const controller = new AbortController();
+  const entries = normalizeUrlList('https://cancel-wins.example.test/').entries;
+  const model = await runBatch({
+    entries, batchAuditId: 'batch-cancel-wins', signal: controller.signal,
+    runner: async options => rawChild({ auditId: options.idFactory(), url: options.url }),
+    chromeAdapter: {
+      tryEnterFinalization() {
+        controller.abort(new DOMException('Cancelamento venceu.', 'AbortError'));
+        return false;
+      },
+      async emitProgress() {}, async handoffReport() { return { reviewUrl: null }; },
+    },
+    now: clock(), reportOptions: REPORT_OPTIONS,
+  });
+  assert.equal(model.session.status, 'cancelled');
+  assert.deepEqual(model.pages.map(value => value.status), ['cancelled']);
+});
+
+test('integrates three controlled fixtures through runBatch and runAudit into one mixed model', async t => {
   const entries = normalizeUrlList([
     'https://fixture-one.example.test/', 'https://fixture-fail.example.test/', 'https://fixture-three.example.test/',
   ].join('\n')).entries;
@@ -158,6 +178,20 @@ test('integrates three controlled fixtures through runBatch and runAudit into on
   assert.equal(model.auditId, 'batch-integration');
   assert.equal(childModels.length, 3);
   assert.ok(model.axePages.flatMap(value => value.result.occurrences).every(value => /^occurrence-axe-[a-f0-9]{32}$/u.test(value.occurrenceId)));
+  for (const [field, forgedValue] of [
+    ['nodeId', 'node-forged'],
+    ['selector', '#forged'],
+    ['framePath', ['frame:99']],
+  ]) {
+    await t.test(`rejects a batch axe target whose ${field} diverges from its authoritative duplicate`, async () => {
+      const forged = structuredClone(model);
+      const occurrence = forged.occurrences.find(value => value.source?.engine === 'axe-core');
+      occurrence.target[field] = forgedValue;
+      await assert.rejects(enrichAuditForReport(forged, REPORT_OPTIONS), /axe|alvo|target|diverge|inválid/iu);
+    });
+  }
+  assert.match(model.ruleResults.find(value => value.ruleId === 'axe.custom-batch-fixture').summary,
+    /2 de 3 páginas.*falha confirmada/iu);
 });
 
 test('continues after timeout only after the aborted child confirms cleanup', async () => {

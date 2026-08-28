@@ -68,7 +68,7 @@ export function aggregateBatchAudits({
   const derivedStatus = deriveBatchStatus(pages);
   if (status !== derivedStatus) throw new TypeError(`Status da sessão diverge das páginas do lote: esperado ${derivedStatus}.`);
   const hasCoverageBlocker = pages.some(page => ['failed', 'cancelled'].includes(page.status));
-  const ruleResults = aggregateRules(pageResults.flatMap(result => result.ruleResults), hasCoverageBlocker);
+  const ruleResults = aggregateRules(pageResults.flatMap(result => result.ruleResults), hasCoverageBlocker, pages.length);
   const occurrences = pageResults.flatMap(result => result.occurrences.map(value => structuredClone(value)));
   const evidence = pageResults.flatMap(result => result.evidence.map(value => structuredClone(value)));
   const manualReview = pageResults.flatMap(result => result.manualReview.map(value => structuredClone(value)));
@@ -133,7 +133,7 @@ export function aggregateBatchAudits({
   };
 }
 
-function aggregateRules(rules, hasCoverageBlocker) {
+function aggregateRules(rules, hasCoverageBlocker, totalPages) {
   const grouped = new Map();
   for (const rule of rules) {
     const group = grouped.get(rule.ruleId) ?? [];
@@ -148,7 +148,7 @@ function aggregateRules(rules, hasCoverageBlocker) {
     const result = {
       ...structuredClone(strongest),
       outcome,
-      summary: aggregateSummary(outcome, group.length),
+      summary: aggregateSummary(outcome, group.length, totalPages),
       targets: group.flatMap(rule => structuredClone(rule.targets ?? [])),
       limitations: uniqueValues(group.flatMap(rule => rule.limitations ?? [])),
     };
@@ -162,12 +162,12 @@ function aggregateRules(rules, hasCoverageBlocker) {
   return output;
 }
 
-function aggregateSummary(outcome, count) {
+function aggregateSummary(outcome, count, totalPages) {
   const labels = {
     failed: 'falha confirmada', cantTell: 'não foi possível concluir', untested: 'não testado',
     passed: 'verificação aprovada', inapplicable: 'não aplicável',
   };
-  return `Resultado agregado de ${count} ${count === 1 ? 'página' : 'páginas'}: ${labels[outcome]}.`;
+  return `Resultado agregado de ${count} de ${totalPages} ${totalPages === 1 ? 'página' : 'páginas'}: ${labels[outcome]}.`;
 }
 
 function deriveBatchStatus(pages) {

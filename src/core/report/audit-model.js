@@ -265,7 +265,8 @@ function assertAxeSupplementalIntegrity(model, rulesVersion) {
     const expected = checkedOccurrences.get(occurrence.occurrenceId);
     const actualKeys = Object.keys(occurrence).sort();
     const expectedKeys = Object.keys(expected ?? {}).sort();
-    if (!expected || !validAxeTargetShape(occurrence.target) || canonicalStringify(actualKeys) !== canonicalStringify(expectedKeys) ||
+    if (!expected || !validAxeTargetBinding(occurrence, expected, model.schemaVersion) ||
+      canonicalStringify(actualKeys) !== canonicalStringify(expectedKeys) ||
       canonicalStringify(authoritativeAxeOccurrence(occurrence)) !== canonicalStringify(authoritativeAxeOccurrence(expected))) {
       throw new TypeError(`Ocorrência suplementar ${occurrence.occurrenceId} diverge do cluster axe validado.`);
     }
@@ -287,11 +288,20 @@ function assertAxeSupplementalIntegrity(model, rulesVersion) {
   return checked;
 }
 
-function validAxeTargetShape(target) {
+function validAxeTargetBinding(occurrence, expected, schemaVersion) {
+  const target = occurrence?.target;
   if (!target || typeof target !== 'object' || Array.isArray(target)) return false;
+  if (occurrence.nodeId !== expected.nodeId || occurrence.selector !== expected.selector ||
+    canonicalStringify(occurrence.framePath) !== canonicalStringify(expected.framePath)) return false;
   const keys = Object.keys(target).sort();
-  return canonicalStringify(keys) === canonicalStringify(['framePath', 'nodeId', 'selector']) ||
-    canonicalStringify(keys) === canonicalStringify(['framePath', 'message', 'selector']);
+  const v2Target = canonicalStringify(keys) === canonicalStringify(['framePath', 'nodeId', 'selector']) &&
+    target.nodeId === occurrence.nodeId && target.selector === occurrence.selector &&
+    canonicalStringify(target.framePath) === canonicalStringify(occurrence.framePath);
+  if (schemaVersion === 2) return v2Target;
+  const normalizedTarget = canonicalStringify(keys) === canonicalStringify(['framePath', 'message', 'selector']) &&
+    target.selector === occurrence.selector && target.message === occurrence.justification &&
+    canonicalStringify(target.framePath) === canonicalStringify(occurrence.framePath);
+  return v2Target || normalizedTarget;
 }
 
 function validateBatchAxePages(model, rulesVersion) {
@@ -331,7 +341,7 @@ function validateBatchAxePages(model, rulesVersion) {
       ...structuredClone(values[0]), outcome,
       targets: values.flatMap(value => structuredClone(value.targets)),
       limitations, impact, confidence: outcome === 'failed' ? 'high' : 'low',
-      summary: `Resultado agregado de ${values.length} ${values.length === 1 ? 'página' : 'páginas'}: ${outcome === 'failed' ? 'falha confirmada' : 'não foi possível concluir'}.`,
+      summary: `Resultado agregado de ${values.length} de ${model.pages.length} ${model.pages.length === 1 ? 'página' : 'páginas'}: ${outcome === 'failed' ? 'falha confirmada' : 'não foi possível concluir'}.`,
     };
   });
   return { errors: [], occurrences, ruleResults, status: checkedPages.some(value => value.status === 'partial') ? 'partial' : 'complete' };

@@ -5,6 +5,8 @@ import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { createSessionStore, isAuthorizedExtensionSender, isAuthorizedPanelSender, registerServiceWorker } from '../../src/background/service-worker.js';
 import { commitReviewDecision } from '../../src/review/review-state.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
+import { runBatch } from '../../src/background/run-batch.js';
+import { reportInput } from '../report/helpers.js';
 
 const createChrome = () => {
   const action = {};
@@ -723,6 +725,124 @@ test('rejects cancellation with a fixed too-late result once single or batch ent
     });
     releaseHandoff();
   }
+});
+
+test('closes cancellation atomically before persisting every terminal batch path', async t => {
+  const cases = [
+    {
+      name: 'last PAGE_FINISHED', urls: 'https://last.example.test/',
+      gate: value => value.state === 'running' && value.completedCount === 1,
+      runner: async options => reportInput({
+        auditId: options.idFactory(), requestedUrl: options.url, finalUrl: options.url,
+        session: { status: 'complete', diagnostics: [], partial: false },
+      }),
+      expectedStatus: 'complete',
+    },
+    {
+      name: 'FINISH', urls: 'https://finish.example.test/', gate: value => value.state === 'complete',
+      runner: async options => reportInput({
+        auditId: options.idFactory(), requestedUrl: options.url, finalUrl: options.url,
+        session: { status: 'complete', diagnostics: [], partial: false },
+      }),
+      expectedStatus: 'complete',
+    },
+    {
+      name: 'cleanup-unconfirmed early terminal',
+      urls: 'https://stuck.example.test/\nhttps://never.example.test/',
+      gate: value => value.state === 'running' && value.completedCount === 1,
+      runner: () => new Promise(() => {}), expectedStatus: 'failed',
+    },
+    {
+      name: 'cleanup diagnostic early terminal',
+      urls: 'https://cleanup.example.test/\nhttps://never.example.test/',
+      gate: value => value.state === 'running' && value.completedCount === 1,
+      runner: async options => reportInput({
+        auditId: options.idFactory(), requestedUrl: options.url, finalUrl: options.url,
+        session: {
+          status: 'partial', partial: true,
+          diagnostics: [{
+            code: 'TAB_CLOSE_FAILED', message: 'A aba descartável não pôde ser fechada automaticamente.',
+            at: '2026-08-28T12:00:00.000Z', recoverable: false,
+          }],
+        },
+      }),
+      expectedStatus: 'partial',
+    },
+  ];
+  for (const scenario of cases) await t.test(scenario.name, async () => {
+    const chromeApi = createChrome();
+    let releasePersistence;
+    const persistenceGate = new Promise(resolve => { releasePersistence = resolve; });
+    let enteredPersistence;
+    const persistenceEntered = new Promise(resolve => { enteredPersistence = resolve; });
+    let gated = false;
+    let committed;
+    registerServiceWorker(chromeApi, {
+      createId: () => `batch-boundary-${scenario.name.replaceAll(/[^a-z]+/giu, '-').toLowerCase()}`,
+      sessionStore: {
+        async getActiveBatch() {}, async get() {},
+        async set(_id, value) {
+          if (!gated && value?.mode === 'batch' && scenario.gate(value)) {
+            gated = true; enteredPersistence(); await persistenceGate;
+          }
+        },
+        async setActiveBatch() {}, async clearActiveBatch() {},
+      },
+      batchRunner: options => runBatch({
+        ...options, runner: scenario.runner, pageTimeoutMs: 5, cleanupTimeoutMs: 5,
+      }),
+      auditStore: withAuditRevisions({
+        async setLatest() {},
+        async commitAudit(_id, model) { committed = model; },
+      }),
+      chromeAdapterFactory: () => ({ async emitProgress() {}, async handoffReport() { return { reviewUrl: null }; } }),
+      reportOptions: { timezone: 'UTC', manifestVersion: '2.0.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/152' },
+    });
+    const sender = { id: 'test', url: 'chrome-extension://test/src/panel/index.html', tab: { id: 90 } };
+    let started;
+    chromeApi.listeners.message.listener({ type: 'START_BATCH', urls: scenario.urls }, sender, value => { started = value; });
+    await persistenceEntered;
+    let cancellation;
+    chromeApi.listeners.message.listener({ type: 'CANCEL_AUDIT', auditId: started.auditId }, sender, value => { cancellation = value; });
+    assert.deepEqual(cancellation, {
+      ok: false, code: 'AUDIT_CANCEL_TOO_LATE',
+      error: 'A auditoria já está na etapa final e não pode mais ser cancelada.',
+    });
+    releasePersistence();
+    await waitUntil(() => committed !== undefined);
+    assert.equal(committed.session.status, scenario.expectedStatus);
+  });
+});
+
+test('persists copied batch statusCounts so GET_LAST restores failures after panel reload', async () => {
+  const chromeApi = createChrome();
+  const writes = [];
+  let release;
+  const hold = new Promise(resolve => { release = resolve; });
+  registerServiceWorker(chromeApi, {
+    createId: () => 'batch-reload-counts',
+    batchRunner: async ({ chromeAdapter }) => {
+      const statusCounts = { complete: 0, partial: 0, failed: 1, cancelled: 0 };
+      await chromeAdapter.emitProgress({
+        type: 'AUDIT_PROGRESS', auditId: 'batch-reload-counts', sessionId: 'batch-reload-counts',
+        percent: 50, message: 'Página 1 encerrada.', pageNumber: 1, total: 2, statusCounts,
+      });
+      statusCounts.failed = 9;
+      await hold;
+    },
+    auditStore: withAuditRevisions({ async setLatest(value) { writes.push(structuredClone(value)); } }),
+    chromeAdapterFactory: () => ({}),
+    reportOptions: { timezone: 'UTC', manifestVersion: '2.0.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/152' },
+  });
+  const sender = { id: 'test', url: 'chrome-extension://test/src/panel/index.html', tab: { id: 91 } };
+  chromeApi.listeners.message.listener({ type: 'START_BATCH', urls: 'https://one.example.test/\nhttps://two.example.test/' }, sender, () => {});
+  await waitUntil(() => writes.length >= 2);
+  assert.deepEqual(writes[0].statusCounts, { complete: 0, partial: 0, failed: 0, cancelled: 0 });
+  let restored;
+  chromeApi.listeners.message.listener({ type: 'GET_LAST_AUDIT' }, sender, value => { restored = value; });
+  await waitUntil(() => restored !== undefined);
+  assert.deepEqual(restored.state.statusCounts, { complete: 0, partial: 0, failed: 1, cancelled: 0 });
+  release();
 });
 
 test('blocks a batch with line errors before allocating an audit id', () => {

@@ -350,22 +350,35 @@ export function registerServiceWorker(chromeApi, options = {}) {
 
   async function runBatchInBackground({ auditId, normalized, entry }) {
     let committed = false;
+    let persistedStatusCounts = emptyBatchStatusCounts();
     try {
       await startupReady;
-      await auditStore.setLatest({ auditId, mode: 'batch', status: 'running', percent: 0, message: 'Preparando o lote explícito.' });
+      await auditStore.setLatest({
+        auditId, mode: 'batch', status: 'running', percent: 0, message: 'Preparando o lote explícito.',
+        pageNumber: 0, total: normalized.entries.length, statusCounts: { ...persistedStatusCounts },
+      });
       const adapter = chromeAdapterFactory(chromeApi);
+      const closeCancellationBoundary = () => {
+        const cancellationWon = entry.controller.signal.aborted;
+        entry.phase = 'finalizing';
+        return !cancellationWon;
+      };
       const pipelineAdapter = {
         ...adapter,
-        async enterFinalization() { entry.phase = 'finalizing'; },
+        tryEnterFinalization: closeCancellationBoundary,
+        async enterFinalization() { return closeCancellationBoundary(); },
         async handoffReport(model) {
           entry.phase = 'finalizing';
           return adapter.handoffReport?.(model);
         },
         async emitProgress(progress) {
+          const nextCounts = copyBatchStatusCounts(progress.statusCounts, normalized.entries.length);
+          if (nextCounts) persistedStatusCounts = nextCounts;
           await Promise.allSettled([
             auditStore.setLatest({
               auditId, mode: 'batch', status: 'running', percent: progress.percent,
               message: progress.message, pageNumber: progress.pageNumber, total: progress.total,
+              statusCounts: { ...persistedStatusCounts },
             }),
             sendRuntimeMessage(chromeApi, progress),
           ]);
@@ -676,6 +689,24 @@ function countPageStatuses(pages) {
     if (Object.hasOwn(counts, page?.status)) counts[page.status] += 1;
   }
   return counts;
+}
+
+function emptyBatchStatusCounts() {
+  return { complete: 0, partial: 0, failed: 0, cancelled: 0 };
+}
+
+function copyBatchStatusCounts(value, total) {
+  const keys = ['cancelled', 'complete', 'failed', 'partial'];
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+    Object.keys(value).sort().join(',') !== keys.join(',')) return null;
+  const output = emptyBatchStatusCounts();
+  let sum = 0;
+  for (const key of keys) {
+    if (!Number.isSafeInteger(value[key]) || value[key] < 0 || value[key] > total) return null;
+    output[key] = value[key];
+    sum += value[key];
+  }
+  return sum <= total ? output : null;
 }
 
 function batchTerminalMessage(status) {

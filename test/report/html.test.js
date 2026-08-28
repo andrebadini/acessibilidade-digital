@@ -97,6 +97,15 @@ function withPages(count) {
   input.requestedScope = count === 1
     ? { mode: 'single', urls: [input.pages[0].requestedUrl] }
     : { mode: 'batch', urls: input.pages.map(page => page.requestedUrl) };
+  if (count > 1) {
+    const pageStatuses = input.pages.map(page => page.status);
+    input.session.status = pageStatuses.includes('cancelled')
+      ? 'cancelled'
+      : pageStatuses.every(status => status === 'complete')
+        ? 'complete'
+        : pageStatuses.every(status => status === 'failed') ? 'failed' : 'partial';
+    input.session.partial = input.session.status === 'partial';
+  }
   return input;
 }
 

@@ -265,7 +265,9 @@ test('uses the strongest rule metadata and derives conservative status and summa
     batchAuditId: 'batch-status-safe', pageResults: [first, failedPage],
     startedAt: OPTIONS.now(), endedAt: OPTIONS.now(), status: 'partial',
   });
-  assert.equal(partial.ruleResults.find(rule => rule.ruleId === ruleId).outcome, 'cantTell');
+  const partialRule = partial.ruleResults.find(rule => rule.ruleId === ruleId);
+  assert.equal(partialRule.outcome, 'cantTell');
+  assert.match(partialRule.summary, /1 de 2 páginas.*não foi possível concluir/iu);
   assert.equal(partial.itemResults.find(item => item.ruleIds.includes(ruleId)).outcome, 'cantTell');
 });
 

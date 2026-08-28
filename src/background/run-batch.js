@@ -45,6 +45,13 @@ export async function runBatch({
   let evidenceBytesUsed = 0;
   let evidenceBudgetExhausted = false;
 
+  const claimFinalization = () => {
+    if (terminal) return !signal?.aborted;
+    const claimed = chromeAdapter.tryEnterFinalization?.();
+    terminal = true;
+    return claimed !== false && !signal?.aborted;
+  };
+
   const saveCheckpoint = async () => {
     await onCheckpoint(checkpoint);
   };
@@ -116,6 +123,10 @@ export async function runBatch({
         break;
       }
       if (outcome.kind === 'cleanup-unconfirmed') {
+        if (!claimFinalization()) {
+          await cancelRemaining({ active: true, startedAt: pageStartedAt, endedAt: pageEndedAt });
+          break;
+        }
         pageResults.push(failureFor(entry, pageId, 'failed', true, pageStartedAt, pageEndedAt,
           'BATCH_PAGE_CLEANUP_UNCONFIRMED', 'A limpeza da página excedeu o prazo; o lote foi interrompido para evitar sobreposição.'));
         await move({ type: 'PAGE_FINISHED', status: 'failed', at: pageEndedAt });
@@ -156,6 +167,12 @@ export async function runBatch({
             'BATCH_PAGE_MODEL_INVALID', 'O resultado da página não pôde ser validado para o lote.');
         }
       }
+      const stopsForCleanup = pageResult.page.diagnostics?.some(value => CLEANUP_FAILURE_CODES.has(value.code));
+      const endsScheduling = index === entries.length - 1 || stopsForCleanup;
+      if (endsScheduling && !claimFinalization()) {
+        await cancelRemaining({ active: true, startedAt: pageStartedAt, endedAt: pageEndedAt });
+        break;
+      }
       pageResults.push(pageResult);
       await move({ type: 'PAGE_FINISHED', status: pageResult.page.status, at: pageEndedAt });
       await emitGlobalProgress({
@@ -163,7 +180,7 @@ export async function runBatch({
         pagePercent: 100,
         terminalMessage: `Página ${index + 1} de ${entries.length}: processamento encerrado.`,
       });
-      if (pageResult.page.diagnostics?.some(value => CLEANUP_FAILURE_CODES.has(value.code))) {
+      if (stopsForCleanup) {
         for (let pending = index + 1; pending < entries.length; pending += 1) {
           const pendingAt = canonicalNow(now);
           pageResults.push(failureFor(entries[pending], `page-${pending + 1}`, 'failed', false, pendingAt, pendingAt,
@@ -173,11 +190,13 @@ export async function runBatch({
         break;
       }
     }
-    if (checkpoint.state === 'running') await move({ type: 'FINISH', at: canonicalNow(now) });
+    if (checkpoint.state === 'running') {
+      if (!terminal) throw new Error('A fronteira terminal do lote não foi adquirida.');
+      await move({ type: 'FINISH', at: canonicalNow(now) });
+    }
   }
 
-  await chromeAdapter.enterFinalization?.();
-  terminal = true;
+  if (!terminal) claimFinalization();
   const aggregate = aggregateBatchAudits({
     batchAuditId,
     pageResults,
