@@ -9,6 +9,7 @@ import {
 } from '../storage/audit-store.js';
 import { sanitizeResourceUrl } from '../core/normalize-snapshot.js';
 import { createExportFailureRequest, persistExportFailure } from '../export/export-controller.js';
+import { getPersonaController } from './persona-runtime.js';
 
 const PANEL_PATH = '/src/panel/index.html';
 const REVIEW_PATH = '/src/review/index.html';
@@ -75,11 +76,19 @@ export function registerServiceWorker(chromeApi, options = {}) {
   const createExportOwnerId = options.createExportOwnerId ?? (() => crypto.randomUUID());
   const activeBySender = new Map();
   const activeExports = new Map();
+  const personaController = options.personaController ?? getPersonaController(chromeApi, { logger });
 
-  chromeApi.action.onClicked.addListener(() => {
+  chromeApi.action.onClicked.addListener((sourceTab) => {
     void Promise.resolve()
-      .then(() => chromeApi.tabs.create({ url: chromeApi.runtime.getURL('src/panel/index.html') }))
+      .then(() => {
+        if (!personaController) throw new Error('Controlador de personas indisponível.');
+        return personaController.openPanel({ sourceTab });
+      })
       .catch(() => logger.error('Não foi possível abrir o painel de auditoria.'));
+  });
+
+  chromeApi.runtime.onConnect?.addListener?.((port) => {
+    personaController?.attachPanelPort(port);
   });
 
   chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Fixture personas MV3 CSP</title>
+    <script src="/personas-csp.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <h1>Fixture de personas</h1>
+      <button id="positive-two" type="button" tabindex="2">Positivo dois</button>
+      <button id="natural" type="button">Ordem natural</button>
+      <div id="open-shadow-host"></div>
+      <button id="positive-one" type="button" tabindex="1">Positivo um</button>
+      <div id="closed-shadow-host"></div>
+      <div data-audita-private>
+        <span id="private-label">SEGREDO-PERSONA-E2E-918273</span>
+        <button id="private-button" type="button">SEGREDO-PERSONA-E2E-918273</button>
+      </div>
+      <button id="safe-private-reference" type="button" aria-labelledby="private-label">Continuar com segurança</button>
+      <label for="editable-secret">Campo privado</label>
+      <input id="editable-secret" value="SEGREDO-PERSONA-E2E-918273" autocomplete="one-time-code">
+      <div id="nested-container"></div>
+      <button id="input-target" type="button">Testar entrada confiável</button>
+      <p id="input-counts">Sem entrada.</p>
+      <iframe id="same-frame" title="Frame local não coordenado" src="/personas-frame.html"></iframe>
+      <iframe id="sandbox-frame" title="Frame sandbox não coordenado" sandbox src="/personas-frame.html"></iframe>
+      <iframe id="cross-frame" title="Frame de outra origem não coordenado" src="__CROSS_FRAME_URL__"></iframe>
+    </main>
+  </body>
+</html>

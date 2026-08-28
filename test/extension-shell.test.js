@@ -7,6 +7,7 @@ const readWorkspaceFile = (path) => readFile(new URL(`../${path}`, import.meta.u
 test('declares a minimal MV3 extension shell without remote executable code', async () => {
   const manifest = JSON.parse(await readWorkspaceFile('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
+  assert.equal(manifest.minimum_chrome_version, '106', 'documentIds da scripting API exige Chrome 106+');
   assert.equal(manifest.version, '1.0.1');
   assert.equal(manifest.description, 'Auditoria independente de acessibilidade de páginas web.');
   assert.deepEqual(manifest.icons, {
@@ -55,4 +56,32 @@ test('panel module sends normalized START_AUDIT requests and renders only text',
   assert.match(source, /type:\s*'START_AUDIT'/);
   assert.match(source, /textContent/);
   assert.doesNotMatch(source, /innerHTML/);
+});
+
+test('packages persona runtimes as local classic files without broadening the MV3 shell', async () => {
+  const [manifestSource, buildSource, runtime, reader, content, css] = await Promise.all([
+    readWorkspaceFile('manifest.json'),
+    readWorkspaceFile('scripts/build-release.mjs'),
+    readWorkspaceFile('src/core/accessibility/accessible-preview-runtime.classic.js'),
+    readWorkspaceFile('src/personas/screen-reader-module.js'),
+    readWorkspaceFile('src/personas/content.js'),
+    readWorkspaceFile('src/personas/personas.css'),
+  ]);
+  const manifest = JSON.parse(manifestSource);
+  assert.equal(manifest.content_scripts, undefined);
+  assert.equal(manifest.web_accessible_resources, undefined);
+  assert.deepEqual(manifest.permissions, ['debugger', 'downloads', 'scripting', 'storage', 'tabs']);
+  assert.equal(manifest.content_security_policy.extension_pages.includes("'unsafe-eval'"), false);
+  assert.match(buildSource, /cp\(join\(root, 'src'\), join\(staging, 'src'\), \{ recursive: true \}\)/u);
+  for (const [path, source] of [
+    ['accessible-preview-runtime.classic.js', runtime],
+    ['screen-reader-module.js', reader],
+    ['content.js', content],
+  ]) {
+    assert.ok(source.length > 100, `${path} precisa estar presente`);
+    assert.doesNotMatch(source, /^\s*(?:import|export)\s/mu, `${path} precisa permanecer clássico`);
+    assert.doesNotMatch(source, /\beval\s*\(|\bnew\s+Function\b/u);
+  }
+  assert.match(css, /audita-persona-achromatopsia/u);
+  assert.doesNotMatch(css, /@import|https?:|url\s*\(/iu);
 });

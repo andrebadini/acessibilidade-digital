@@ -16,7 +16,7 @@
 }
 
 body {
-  min-width: 20rem;
+  min-width: min(20rem, 100%);
   margin: 0;
   background: var(--surface);
   color: var(--ink);
@@ -86,6 +86,7 @@ label {
 }
 
 input,
+select,
 button {
   min-height: 2.75rem;
   padding: 0.55rem 0.75rem;
@@ -93,6 +94,14 @@ button {
 }
 
 input {
+  border: 2px solid var(--border);
+  border-radius: 0.3rem;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+select {
+  width: 100%;
   border: 2px solid var(--border);
   border-radius: 0.3rem;
   background: var(--surface);
@@ -121,6 +130,176 @@ button:disabled {
   background: var(--muted-surface);
 }
 
+.persona-card {
+  margin-top: 1.5rem;
+  padding: clamp(1rem, 3vw, 1.5rem);
+  border: 2px solid var(--border);
+  border-radius: 0.6rem;
+  background: #f8fbfd;
+}
+
+.persona-heading-row,
+.persona-primary-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.persona-heading-row h2,
+.persona-heading-row p {
+  margin: 0;
+}
+
+.persona-eyebrow {
+  color: #42586a;
+  font-size: 0.85rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.persona-preview-badge {
+  padding: 0.25rem 0.65rem;
+  border: 2px solid var(--brand);
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 800;
+}
+
+.persona-warning,
+.persona-disabled-reason {
+  padding: 0.75rem 1rem;
+  border-inline-start: 0.3rem solid var(--focus);
+  background: #fff8e7;
+}
+
+.persona-target {
+  font-weight: 700;
+}
+
+.persona-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11.5rem), 1fr));
+  gap: 0.75rem;
+}
+
+.persona-mode {
+  display: grid;
+  gap: 0.2rem;
+  align-content: center;
+  text-align: start;
+}
+
+.persona-mode small {
+  font-weight: 500;
+}
+
+.persona-mode[aria-pressed="true"]::after {
+  content: "Ativa";
+  margin-top: 0.3rem;
+  font-size: 0.8rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.persona-primary-actions {
+  justify-content: flex-start;
+}
+
+.secondary-action {
+  background: var(--surface);
+  color: var(--brand);
+}
+
+.persona-reader-card,
+.persona-limitations {
+  margin-top: 1.25rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--surface);
+}
+
+.persona-reader-card h3,
+.persona-limitations h3 {
+  margin-top: 0;
+  color: var(--brand);
+}
+
+.persona-reader-buttons {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
+  gap: 0.6rem;
+}
+
+.persona-preferences {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(10rem, 1fr);
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.persona-preferences > div {
+  display: grid;
+  gap: 0.45rem;
+  align-content: start;
+}
+
+.persona-preferences input[type="range"] {
+  width: 100%;
+}
+
+.persona-caption-box {
+  margin-top: 1rem;
+  padding: 0.8rem 1rem;
+  border: 2px solid var(--brand);
+  border-radius: 0.35rem;
+  background: var(--muted-surface);
+}
+
+.persona-caption-box p {
+  margin: 0;
+}
+
+.persona-caption-label {
+  margin-bottom: 0.35rem !important;
+  font-size: 0.85rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.persona-limitations ul {
+  padding-inline-start: 1.4rem;
+}
+
+.persona-card button:disabled,
+.persona-card select:disabled,
+.persona-card input:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.persona-card .secondary-action:disabled {
+  background: #e6edf2;
+  color: #2f3b45;
+  border-color: #5d6872;
+  opacity: 1;
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
 .status-card p {
   margin-bottom: 0.75rem;
 }
@@ -142,6 +321,27 @@ a {
   .product-header {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .persona-preferences {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (forced-colors: active) {
+  button,
+  input,
+  select,
+  .persona-card,
+  .persona-reader-card,
+  .persona-limitations,
+  .persona-caption-box {
+    border-color: CanvasText;
+  }
+
+  .persona-mode[aria-pressed="true"] {
+    outline: 3px solid Highlight;
+    outline-offset: -5px;
   }
 }
 

@@ -1,0 +1,52 @@
+html[data-audita-persona-root="audita-accessible-preview-v1"].audita-persona-achromatopsia {
+  filter: grayscale(1) !important;
+}
+
+html[data-audita-persona-root="audita-accessible-preview-v1"].audita-persona-motor,
+html[data-audita-persona-root="audita-accessible-preview-v1"].audita-persona-motor * {
+  cursor: none !important;
+}
+
+html[data-audita-persona-root="audita-accessible-preview-v1"].audita-persona-reader [data-audita-persona-owned="audita-accessible-preview-v1"].audita-persona-reader-overlay,
+html[data-audita-persona-root="audita-accessible-preview-v1"].audita-persona-reader [data-audita-persona-owned="audita-accessible-preview-v1"].audita-persona-reader-marker {
+  position: fixed !important;
+  z-index: 2147483646 !important;
+  box-sizing: border-box !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  pointer-events: none !important;
+}
+
+html[data-audita-persona-root="audita-accessible-preview-v1"].audita-persona-reader [data-audita-persona-owned="audita-accessible-preview-v1"].audita-persona-reader-overlay {
+  inset: 0 !important;
+  border: 0 !important;
+  background: #000000 !important;
+  opacity: 0.96 !important;
+}
+
+html[data-audita-persona-root="audita-accessible-preview-v1"].audita-persona-reader [data-audita-persona-owned="audita-accessible-preview-v1"].audita-persona-reader-marker {
+  top: var(--audita-marker-y, 0) !important;
+  left: var(--audita-marker-x, 0) !important;
+  width: var(--audita-marker-width, 1px) !important;
+  height: var(--audita-marker-height, 1px) !important;
+  border: 4px solid #ffcf33 !important;
+  background: transparent !important;
+  box-shadow: 0 0 0 3px #000000 !important;
+}
+
+@media (forced-colors: active) {
+  html[data-audita-persona-root="audita-accessible-preview-v1"].audita-persona-reader [data-audita-persona-owned="audita-accessible-preview-v1"].audita-persona-reader-marker {
+    border-color: Highlight !important;
+    box-shadow: none !important;
+    forced-color-adjust: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-audita-persona-root="audita-accessible-preview-v1"].audita-persona-reader [data-audita-persona-owned="audita-accessible-preview-v1"].audita-persona-reader-overlay,
+  html[data-audita-persona-root="audita-accessible-preview-v1"].audita-persona-reader [data-audita-persona-owned="audita-accessible-preview-v1"].audita-persona-reader-marker {
+    animation: none !important;
+    transition: none !important;
+  }
+}

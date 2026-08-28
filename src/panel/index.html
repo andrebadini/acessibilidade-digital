@@ -27,6 +27,72 @@
         <p id="audit-status" role="status" aria-live="polite">Informe o endereço do site a auditar.</p>
         <a id="latest-report" hidden aria-disabled="true">Revisar ocorrências</a>
       </section>
+      <section id="persona-section" class="persona-card" aria-labelledby="persona-heading">
+        <div class="persona-heading-row">
+          <div>
+            <p class="persona-eyebrow">Experimentação local</p>
+            <h2 id="persona-heading">Personas de acessibilidade</h2>
+          </div>
+          <span class="persona-preview-badge">Simulação</span>
+        </div>
+        <p class="persona-warning"><strong>Limite importante:</strong> esta prévia usa o fallback DOM disponível, não observa a árvore de acessibilidade do navegador e não substitui VoiceOver, NVDA, JAWS nem testes com pessoas com deficiência.</p>
+        <p id="persona-target" class="persona-target">Conectando à aba de origem.</p>
+        <div class="persona-mode-grid" role="group" aria-label="Escolher uma persona">
+          <button id="persona-mode-reader" type="button" class="persona-mode" data-persona-mode="reader" aria-pressed="false" disabled>
+            <span>Leitura simulada</span><small>Legenda e fala dos elementos navegáveis</small>
+          </button>
+          <button id="persona-mode-achromatopsia" type="button" class="persona-mode" data-persona-mode="achromatopsia" aria-pressed="false" disabled>
+            <span>Acromatopsia</span><small>Prévia qualitativa sem cores</small>
+          </button>
+          <button id="persona-mode-motor" type="button" class="persona-mode" data-persona-mode="motor" aria-pressed="false" disabled>
+            <span>Motor / teclado</span><small>Bloqueia apontador e preserva teclado</small>
+          </button>
+        </div>
+        <p id="persona-disabled-reason" class="persona-disabled-reason">Aguarde a conexão com a aba de origem.</p>
+        <div class="persona-primary-actions">
+          <button id="persona-go-target" type="button" class="secondary-action" disabled>Ir para a aba simulada</button>
+          <button id="persona-stop-all" type="button" class="secondary-action" disabled>Encerrar simulação</button>
+          <button id="persona-reconnect" type="button" class="secondary-action" hidden>Reconectar à página</button>
+        </div>
+
+        <div id="persona-reader-controls" class="persona-reader-card" aria-labelledby="persona-reader-heading">
+          <h3 id="persona-reader-heading">Módulo Leitura simulada</h3>
+          <p>O navegador anuncia a fila simulada e mantém uma legenda. A fila de fala é compartilhada com a página: a ferramenta nunca cancela preventivamente uma fala alheia, mas, ao parar ou substituir a fala própria, falas enfileiradas depois podem ser afetadas.</p>
+          <p>Por privacidade, campos editáveis e áreas marcadas como privadas são omitidos da fila e da legenda.</p>
+          <div class="persona-reader-buttons" role="group" aria-label="Reprodução da leitura simulada">
+            <button id="persona-reader-toggle" type="button" disabled>Iniciar leitura</button>
+            <button id="persona-reader-stop" type="button" disabled>Parar</button>
+            <button id="persona-reader-repeat" type="button" disabled>Repetir</button>
+            <button id="persona-reader-previous" type="button" disabled>Anterior</button>
+            <button id="persona-reader-next" type="button" disabled>Próximo</button>
+          </div>
+          <div class="persona-preferences">
+            <div>
+              <label for="persona-voice">Voz neste navegador</label>
+              <select id="persona-voice" disabled>
+                <option value="">Voz padrão do navegador</option>
+              </select>
+            </div>
+            <div>
+              <label for="persona-rate">Velocidade: <output id="persona-rate-output" for="persona-rate">1,0×</output></label>
+              <input id="persona-rate" type="range" min="0.5" max="2" step="0.1" value="1" disabled>
+            </div>
+          </div>
+          <div class="persona-caption-box">
+            <p class="persona-caption-label">Legenda do anúncio atual</p>
+            <p id="persona-caption" dir="auto">Nenhum anúncio disponível.</p>
+          </div>
+          <p id="persona-reader-position">Item 0 de 0.</p>
+        </div>
+
+        <div class="persona-limitations">
+          <h3>Cobertura e saída segura</h3>
+          <p id="persona-coverage">Documento principal e Shadow DOM aberto; frames e Shadow DOM fechado não são coordenados.</p>
+          <ul id="persona-limitations-list"><li>Nenhuma limitação adicional detectada.</li></ul>
+          <p><strong>Saída de emergência:</strong> pressione Escape três vezes, sem manter a tecla pressionada, para encerrar qualquer persona diretamente na página.</p>
+        </div>
+        <p id="persona-live-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true">Conectando as simulações.</p>
+      </section>
     </main>
   </body>
 </html>

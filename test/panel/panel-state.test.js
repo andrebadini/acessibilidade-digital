@@ -3,12 +3,32 @@ import test from 'node:test';
 
 import {
   applyExportEvent,
+  createInitialPersonaState,
+  createPersonaHello,
+  expectPersonaHello,
+  queuePersonaCommand,
+  reducePersonaState,
   createSubmissionGate,
   isMessageForAudit,
   isSafeReportUrl,
   reducePanelState,
   restoreExportEventState,
 } from '../../src/panel/panel-state.js';
+
+function personaWorkerState(overrides = {}) {
+  return {
+    protocol: 'audita-persona-panel', version: 1, type: 'state', requestId: 'hello-1',
+    ok: true, bound: true, targetTabId: 7, token: 'token-1', generation: 0,
+    activeMode: null,
+    reader: {
+      playback: 'idle', index: -1, total: 0, caption: '', canPrevious: false, canNext: false,
+      speechAvailability: 'available', voiceId: '', rate: 1,
+    },
+    limitations: [], coverage: 'dom-fallback-top-document-open-shadow',
+    preferences: { voiceId: '', rate: 1 },
+    ...overrides,
+  };
+}
 
 test('correlates audit messages using auditId or sessionId', () => {
   assert.equal(isMessageForAudit({ auditId: 'a-1' }, 'a-1'), true);
@@ -211,4 +231,117 @@ test('hydrates persisted export correlation while rejecting malformed stored mar
   assert.deepEqual(restoreExportEventState({
     exportStatus: 'complete', exportRevision: 5, exportAttempt: 0, leaseOwnerId: 'bad owner',
   }), { exportStatus: 'complete', exportRevision: 5 });
+});
+
+test('persona state is independent from audit state and changes only after a correlated worker ACK', () => {
+  const audit = { auditId: 'audit-immutable', occurrences: [{ id: 'occ-1', outcome: 'fail' }] };
+  const auditBytes = JSON.stringify(audit);
+  const initial = expectPersonaHello(createInitialPersonaState(), 'hello-1');
+  assert.equal(initial.connection, 'connecting');
+  assert.deepEqual(createPersonaHello('hello-1'), {
+    protocol: 'audita-persona-panel', version: 1, type: 'hello', requestId: 'hello-1',
+  });
+  const ready = reducePersonaState(initial, personaWorkerState());
+  assert.equal(ready.bound, true);
+  assert.equal(ready.activeMode, null);
+  assert.equal(queuePersonaCommand(ready, 'reader-start-1', 'reader-action', { action: 'start' }).message.args.action, 'start');
+
+  const queued = queuePersonaCommand(ready, 'activate-1', 'activate', { mode: 'reader' });
+  assert.equal(queued.state.pending.requestId, 'activate-1');
+  assert.equal(queued.state.activeMode, null, 'fila local não publica estado otimista');
+  const wrongAck = personaWorkerState({ requestId: 'other-request', generation: 1, activeMode: 'reader' });
+  assert.strictEqual(reducePersonaState(queued.state, wrongAck), queued.state);
+  const active = reducePersonaState(queued.state, personaWorkerState({
+    requestId: 'activate-1', generation: 2, activeMode: 'reader',
+    reader: { ...personaWorkerState().reader, playback: 'playing', index: 0, total: 2, caption: 'Enviar, botão', canNext: true },
+  }));
+  assert.equal(active.activeMode, 'reader');
+  assert.equal(active.pending, null);
+  assert.equal(active.reader.caption, 'Enviar, botão');
+  assert.equal(JSON.stringify(audit), auditBytes);
+  assert.equal(Object.hasOwn(active, 'auditId'), false);
+});
+
+test('a correlated hello failure leaves connecting and exposes a safe reconnect state', () => {
+  const connecting = expectPersonaHello(createInitialPersonaState(), 'hello-failed');
+  const failed = reducePersonaState(connecting, {
+    protocol: 'audita-persona-panel', version: 1, type: 'error', requestId: 'hello-failed',
+    ok: false, bound: true, code: 'PERSONA_TOKEN_FAILED', message: 'Não foi possível iniciar a sessão.',
+  });
+  assert.equal(failed.connection, 'error');
+  assert.equal(failed.token, null);
+  assert.equal(failed.code, 'PERSONA_TOKEN_FAILED');
+  assert.strictEqual(reducePersonaState(connecting, {
+    protocol: 'audita-persona-panel', version: 1, type: 'error', requestId: 'hello-other',
+    ok: false, bound: true, code: 'PERSONA_TOKEN_FAILED', message: 'Não foi possível iniciar a sessão.',
+  }), connecting);
+});
+
+test('connecting ignores an old-token state event until the exact hello ACK arrives', () => {
+  const connecting = expectPersonaHello(createInitialPersonaState(), 'hello-new-document');
+  const stale = personaWorkerState({
+    requestId: 'event-old-speech', token: 'token-old', generation: 9,
+    activeMode: 'reader',
+    reader: { ...personaWorkerState().reader, playback: 'playing', caption: 'Estado antigo' },
+  });
+  assert.strictEqual(reducePersonaState(connecting, stale), connecting);
+  const ready = reducePersonaState(connecting, personaWorkerState({
+    requestId: 'hello-new-document', token: 'token-new', generation: 0,
+  }));
+  assert.equal(ready.connection, 'ready');
+  assert.equal(ready.token, 'token-new');
+});
+
+test('persona state preserves a bounded truncation warning without claiming complete coverage', () => {
+  const limitation = { code: 'dom-traversal-truncated', count: 37, truncated: true };
+  const state = reducePersonaState(
+    expectPersonaHello(createInitialPersonaState(), 'hello-1'),
+    personaWorkerState({ limitations: [limitation] }),
+  );
+  assert.deepEqual(state.limitations, [limitation]);
+});
+
+test('persona reducer rejects extra fields, accessors, stale generations and uncorrelated errors', () => {
+  const ready = reducePersonaState(expectPersonaHello(createInitialPersonaState(), 'hello-1'), personaWorkerState());
+  const queued = queuePersonaCommand(ready, 'motor-1', 'activate', { mode: 'motor' });
+  let reads = 0;
+  const hostile = personaWorkerState({ requestId: 'motor-1' });
+  Object.defineProperty(hostile.reader, 'caption', {
+    enumerable: true, get() { reads += 1; return 'segredo'; },
+  });
+  assert.strictEqual(reducePersonaState(queued.state, hostile), queued.state);
+  assert.equal(reads, 0);
+  assert.strictEqual(reducePersonaState(queued.state, {
+    ...personaWorkerState({ requestId: 'motor-1', generation: 1, activeMode: 'motor' }), extra: true,
+  }), queued.state);
+  assert.strictEqual(reducePersonaState(queued.state, personaWorkerState({
+    requestId: 'motor-1', generation: -1, activeMode: 'motor',
+  })), queued.state);
+  assert.strictEqual(reducePersonaState(queued.state, {
+    protocol: 'audita-persona-panel', version: 1, type: 'error', requestId: 'other',
+    ok: false, bound: true, code: 'PERSONA_COMMAND_FAILED', message: 'Falhou.',
+  }), queued.state);
+});
+
+test('persona reducer never accepts a pending ACK that silently changes token or target', () => {
+  const ready = reducePersonaState(expectPersonaHello(createInitialPersonaState(), 'hello-1'), personaWorkerState());
+  const queued = queuePersonaCommand(ready, 'activate-correlated', 'activate', { mode: 'motor' });
+  const valid = personaWorkerState({
+    requestId: 'activate-correlated', generation: 1, activeMode: 'motor',
+  });
+  assert.strictEqual(reducePersonaState(queued.state, {
+    ...valid, token: 'token-retargeted',
+  }), queued.state);
+  assert.strictEqual(reducePersonaState(queued.state, {
+    ...valid, targetTabId: 99,
+  }), queued.state);
+  assert.strictEqual(reducePersonaState(queued.state, {
+    ...valid, generation: -1,
+  }), queued.state);
+  assert.equal(reducePersonaState(queued.state, valid).activeMode, 'motor');
+
+  const sameGeneration = queuePersonaCommand(ready, 'go-correlated', 'go-target');
+  assert.equal(reducePersonaState(sameGeneration.state, personaWorkerState({
+    requestId: 'go-correlated', generation: ready.generation,
+  })).pending, null, 'um ACK correlacionado pode manter a geração');
 });

@@ -9,6 +9,7 @@ import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 const createChrome = () => {
   const action = {};
   const message = {};
+  const connect = {};
   const createdTabs = [];
   return {
     action: { onClicked: { addListener(listener) { action.listener = listener; } } },
@@ -16,11 +17,12 @@ const createChrome = () => {
       id: 'test',
       getURL: (path) => `chrome-extension://test/${path}`,
       onMessage: { addListener(listener) { message.listener = listener; } },
+      onConnect: { addListener(listener) { connect.listener = listener; } },
       sent: [],
       async sendMessage(value) { this.sent.push(value); },
     },
     tabs: { create: async (options) => { createdTabs.push(options); } },
-    listeners: { action, message },
+    listeners: { action, message, connect },
     createdTabs,
   };
 };
@@ -155,11 +157,23 @@ function withAuditRevisions(store) {
   };
 }
 
-test('opens the local panel in one tab when the action is clicked', async () => {
+test('opens the local panel through the centralized persona binding with the explicit source tab', async () => {
   const chromeApi = createChrome();
-  registerServiceWorker(chromeApi, { createId: () => 'audit-1' });
-  await chromeApi.listeners.action.listener();
-  assert.deepEqual(chromeApi.createdTabs, [{ url: 'chrome-extension://test/src/panel/index.html' }]);
+  const opens = [];
+  const attached = [];
+  const personaController = {
+    async openPanel(value) { opens.push(value); return { id: 50 }; },
+    attachPanelPort(port) { attached.push(port); return true; },
+  };
+  registerServiceWorker(chromeApi, { createId: () => 'audit-1', personaController });
+  const sourceTab = { id: 7, url: 'https://alvo.test/pagina', title: 'não persistir' };
+  chromeApi.listeners.action.listener(sourceTab);
+  await waitUntil(() => opens.length === 1);
+  assert.deepEqual(opens, [{ sourceTab }]);
+  assert.deepEqual(chromeApi.createdTabs, []);
+  const port = { name: 'audita-persona-v1' };
+  chromeApi.listeners.connect.listener(port);
+  assert.deepEqual(attached, [port]);
 });
 
 test('validates START_AUDIT, stores an armed session, and keeps the response channel open', async () => {
