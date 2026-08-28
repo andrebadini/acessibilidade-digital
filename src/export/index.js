@@ -183,6 +183,7 @@ async function fail(error) {
         persistedFailure = await persistExportFailure(createExportFailureRequest({
           snapshotCapability: sourceSnapshotCapability,
           leaseOwnerId,
+          exportAttempt,
           latest: latestState,
         }), store);
         message = persistedFailure.latest.message;

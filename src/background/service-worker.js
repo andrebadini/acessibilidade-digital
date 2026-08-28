@@ -742,6 +742,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
       await persistExportFailure(createExportFailureRequest({
         snapshotCapability: snapshot.capability,
         leaseOwnerId: ownerId,
+        exportAttempt,
         latest: leasedLatest,
         at: queueTime(),
       }), auditStore);

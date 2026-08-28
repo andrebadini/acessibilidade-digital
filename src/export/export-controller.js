@@ -42,14 +42,15 @@ const FAILURE_REQUESTS = new WeakMap();
 export function createExportFailureRequest(request) {
   const outer = cloneOuterRecord(
     request,
-    new Set(['snapshotCapability', 'leaseOwnerId', 'latest', 'at']),
-    ['snapshotCapability', 'leaseOwnerId'],
+    new Set(['snapshotCapability', 'leaseOwnerId', 'exportAttempt', 'latest', 'at']),
+    ['snapshotCapability', 'leaseOwnerId', 'exportAttempt'],
     'Solicitação de falha de exportação',
   );
   const snapshot = inspectAuditSnapshotCapability(outer.snapshotCapability);
   if (!snapshot) throw new TypeError('Capacidade de snapshot da auditoria inválida para persistência.');
   const auditId = validAuditId(snapshot.auditId);
   const leaseOwnerId = validAuditId(outer.leaseOwnerId);
+  const exportAttempt = validExportAttempt(outer.exportAttempt);
   let envelope;
   try {
     const source = { auditId, model: snapshot.model };
@@ -71,6 +72,7 @@ export function createExportFailureRequest(request) {
     expectedRevision: snapshot.revision,
     snapshotCapability: outer.snapshotCapability,
     leaseOwnerId,
+    exportAttempt,
   }));
   return token;
 }
@@ -132,7 +134,12 @@ export async function persistExportFailure(request, store) {
     model,
     latest,
     envelope.snapshotCapability,
-    { ownerId: envelope.leaseOwnerId, now: new Date().toISOString(), release: true },
+    {
+      ownerId: envelope.leaseOwnerId,
+      exportAttempt: envelope.exportAttempt,
+      now: new Date().toISOString(),
+      release: true,
+    },
   );
   return { model, latest };
 }
@@ -525,6 +532,11 @@ function cloneOuterRecord(value, allowedKeys, requiredKeys, label) {
 
 function validAuditId(value) {
   if (typeof value !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/u.test(value)) throw new TypeError('auditId de exportação inválido.');
+  return value;
+}
+
+function validExportAttempt(value) {
+  if (!Number.isSafeInteger(value) || value < 1) throw new TypeError('Tentativa de exportação inválida.');
   return value;
 }
 

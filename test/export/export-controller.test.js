@@ -58,6 +58,7 @@ async function persistExportFailure(request, store) {
   return persistOpaqueExportFailure(createExportFailureRequest({
     snapshotCapability: snapshot.capability,
     leaseOwnerId: TEST_LEASE_OWNER,
+    exportAttempt: 1,
     ...(Object.hasOwn(outer, 'latest') ? { latest: outer.latest } : {}),
     ...(Object.hasOwn(outer, 'at') ? { at: outer.at } : {}),
   }), revisionStore(store));
@@ -441,6 +442,7 @@ test('a review after delivery reservation is preserved and final receipt persist
       : controller.createExportFailureRequest({
         snapshotCapability: before.capability,
         leaseOwnerId: TEST_LEASE_OWNER,
+        exportAttempt: 1,
         latest: {},
         at: '2026-08-26T16:11:00.000Z',
       });
@@ -500,6 +502,7 @@ test('only one concurrent success or failure export can commit one expected revi
   const failure = controller.createExportFailureRequest({
     snapshotCapability: capability,
     leaseOwnerId: TEST_LEASE_OWNER,
+    exportAttempt: 1,
     latest: {},
     at: '2026-08-26T16:12:00.000Z',
   });
@@ -514,6 +517,44 @@ test('only one concurrent success or failure export can commit one expected revi
   assert.equal((await store.getAuditSnapshot(result.model.auditId)).revision, revision + 1);
 });
 
+test('a stale failure cannot release a newer attempt that reused the same owner and revision', async () => {
+  const controller = await import('../../src/export/export-controller.js');
+  const store = createInMemoryAuditStore();
+  await store.setAudit(SAMPLE_AUDIT.auditId, structuredClone(SAMPLE_AUDIT));
+  const snapshot = await store.getAuditSnapshot(SAMPLE_AUDIT.auditId);
+  const expiredAt = new Date(Date.now() - 60_000).toISOString();
+  const currentAt = new Date().toISOString();
+  const first = await store.acquireExportLease(SAMPLE_AUDIT.auditId, snapshot.capability, {
+    ownerId: TEST_LEASE_OWNER,
+    now: expiredAt,
+    ttlMs: 1_000,
+    latestState: { auditId: SAMPLE_AUDIT.auditId, exportStatus: 'queued' },
+  });
+  const staleFailure = controller.createExportFailureRequest({
+    snapshotCapability: snapshot.capability,
+    leaseOwnerId: TEST_LEASE_OWNER,
+    exportAttempt: first.exportAttempt,
+    latest: { auditId: SAMPLE_AUDIT.auditId, exportAttempt: first.exportAttempt },
+    at: currentAt,
+  });
+  const current = await store.acquireExportLease(SAMPLE_AUDIT.auditId, snapshot.capability, {
+    ownerId: TEST_LEASE_OWNER,
+    now: currentAt,
+    ttlMs: 10 * 60 * 1_000,
+    latestState: { auditId: SAMPLE_AUDIT.auditId, exportStatus: 'queued' },
+  });
+  assert.notEqual(current.exportAttempt, first.exportAttempt);
+
+  await assert.rejects(
+    controller.persistExportFailure(staleFailure, store),
+    error => error?.code === 'AUDIT_EXPORT_LEASE_CONFLICT',
+  );
+  const remaining = await store.getExportLeaseState(SAMPLE_AUDIT.auditId, { now: currentAt });
+  assert.equal(remaining.active, true);
+  assert.equal(remaining.exportAttempt, current.exportAttempt);
+  assert.equal((await store.getAuditSnapshot(SAMPLE_AUDIT.auditId)).revision, snapshot.revision);
+});
+
 test('rejects a Proxy around an opaque persistence request before every meta-trap and without commit', async () => {
   const controller = await import('../../src/export/export-controller.js');
   assert.equal(typeof controller.createExportFailureRequest, 'function');
@@ -523,6 +564,7 @@ test('rejects a Proxy around an opaque persistence request before every meta-tra
   const request = controller.createExportFailureRequest({
     snapshotCapability: snapshot.capability,
     leaseOwnerId: TEST_LEASE_OWNER,
+    exportAttempt: 1,
     latest: {},
     at: '2026-08-26T16:00:00.000Z',
   });
