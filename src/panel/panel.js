@@ -7,6 +7,7 @@ import {
   createPersonaHello,
   contextProtocolMessageType,
   expectPersonaHello,
+  formatBatchWarning,
   createSubmissionGate,
   isMessageForAudit,
   isSafeReportUrl,
@@ -31,6 +32,7 @@ const batchInput = document.querySelector('#audit-urls');
 const batchFields = document.querySelector('#batch-fields');
 const singleFields = document.querySelector('#single-fields');
 const batchErrors = document.querySelector('#batch-errors');
+const batchWarnings = document.querySelector('#batch-warnings');
 const batchProgress = document.querySelector('#batch-progress');
 const batchSummary = document.querySelector('#batch-summary');
 const cancelAudit = document.querySelector('#cancel-audit');
@@ -100,6 +102,14 @@ function renderBatchErrors(errors = []) {
   }));
 }
 
+function renderBatchWarnings(warnings = []) {
+  batchWarnings.replaceChildren(...warnings.map(formatBatchWarning).filter(Boolean).map(text => {
+    const item = document.createElement('li');
+    item.textContent = text;
+    return item;
+  }));
+}
+
 function renderBatchState(state) {
   const batch = state?.mode === 'batch' || Number.isSafeInteger(state?.total);
   batchProgress.hidden = !batch;
@@ -140,6 +150,7 @@ form.addEventListener('submit', (event) => {
       ? [{ line: 0, message: 'Informe ao menos uma URL.' }]
       : normalized.errors;
     renderBatchErrors(errors);
+    renderBatchWarnings(normalized.warnings);
     if (errors.length > 0) {
       finishActiveAudit(); setStatus('Corrija a lista antes de iniciar.'); batchInput.focus(); return;
     }
@@ -171,6 +182,7 @@ form.addEventListener('submit', (event) => {
         return;
       }
       activeAuditId = response.auditId;
+      if (mode === 'batch') renderBatchWarnings(response.warnings ?? []);
       panelState = {
         auditId: activeAuditId, mode, status: 'running', percent: 0,
         message: mode === 'batch' ? 'Lote preparado. A primeira página será iniciada em breve.' : 'Auditoria preparada. A coleta será iniciada em breve.',

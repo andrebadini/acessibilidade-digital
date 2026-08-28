@@ -23,10 +23,11 @@ export async function remapAuditPage(input, { batchAuditId, pageId }) {
 
   const occurrenceIds = new Map();
   for (const occurrence of model.occurrences) {
-    const digest = await scopedDigest(batchAuditId, pageId, 'occurrence', occurrence.occurrenceId);
-    occurrenceIds.set(occurrence.occurrenceId, occurrence.source?.engine === 'axe-core'
-      ? `occurrence-axe-${digest.slice(0, 8)}`
-      : `occurrence-${digest.slice(0, 32)}`);
+    occurrenceIds.set(occurrence.occurrenceId, await createBatchScopedId(
+      batchAuditId, pageId,
+      occurrence.source?.engine === 'axe-core' ? 'occurrence-axe' : 'occurrence',
+      occurrence.occurrenceId,
+    ));
   }
   assertUnique([...occurrenceIds.values()], 'ocorrência');
 
@@ -76,10 +77,9 @@ export async function remapAuditPage(input, { batchAuditId, pageId }) {
     occurrenceId: remapOccurrence(occurrence.occurrenceId),
     pageId,
     nodeId: remapNode(occurrence.nodeId),
-    target: {
-      ...structuredClone(occurrence.target),
-      nodeId: remapNode(occurrence.target.nodeId),
-    },
+    target: occurrence.target && Object.hasOwn(occurrence.target, 'nodeId')
+      ? { ...structuredClone(occurrence.target), nodeId: remapNode(occurrence.target.nodeId) }
+      : structuredClone(occurrence.target),
     evidenceRefs: occurrence.evidenceRefs.map(remapEvidence),
     evidenceIds: occurrence.evidenceIds.map(remapEvidence),
     ...(occurrence.applicabilityEvidence ? {
@@ -141,6 +141,14 @@ export async function remapAuditPage(input, { batchAuditId, pageId }) {
   };
   assertSamePageGraph(result);
   return deepFreeze(result);
+}
+
+export async function createBatchScopedId(batchAuditId, pageId, kind, localId) {
+  assertId(batchAuditId, 'batchAuditId');
+  assertId(pageId, 'pageId');
+  if (!['occurrence', 'occurrence-axe'].includes(kind)) throw new TypeError('Namespace de identidade batch inválido.');
+  const digest = await scopedDigest(batchAuditId, pageId, kind, localId);
+  return `${kind}-${digest.slice(0, 32)}`;
 }
 
 function remapRule(rule, remapNode) {

@@ -44,3 +44,18 @@ test('drops a derived map atomically when one of its required PNGs exceeds the b
     evidenceId: 'map-1', kind: 'announcement-map', contentHash: 'c'.repeat(64), reason: 'budget',
   }]);
 });
+
+test('resolves map to source dependencies before budgeting even when the map is listed first', async () => {
+  const result = {
+    page: { pageId: 'page-1', status: 'complete', diagnostics: [], limitations: [] },
+    occurrences: [],
+    evidence: [
+      { evidenceId: 'map-1', pageId: 'page-1', kind: 'announcement-map', fullPageEvidenceId: 'source-1', hash: 'c'.repeat(64), segments: [{ dataUrl: pixel(1) }] },
+      { evidenceId: 'source-1', pageId: 'page-1', kind: 'full-page', state: 'pristine', hash: 'd'.repeat(64), dataUrl: pixel(20) },
+    ],
+  };
+  const applied = await applyBatchEvidenceBudget(result, { limitBytes: 10 });
+  assert.equal(applied.result.evidence.some(value => value.kind === 'announcement-map'), false);
+  assert.equal(applied.result.evidence.find(value => value.evidenceId === 'source-1').pixelState, 'omitted-budget');
+  assert.deepEqual(applied.result.page.omittedEvidence.map(value => value.evidenceId).sort(), ['map-1', 'source-1']);
+});

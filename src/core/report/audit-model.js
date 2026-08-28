@@ -56,6 +56,7 @@ export function createAuditModel(input) {
   validateEnvironment(model.environment);
   validateScope(model.scope);
   validateSession(model.session);
+  validateBatchSessionStatus(model);
   validateAxeCoverageStatus(model, validatedAxe);
   validateProgress(model.progress, model.auditId);
   validateLimitations(model.limitations);
@@ -78,6 +79,17 @@ export function createAuditModel(input) {
   validatePassedItemAuthority(model.itemResults, ruleById, reviewGraph);
   validateNormative(model.normative);
   return deepFreeze(model);
+}
+
+function validateBatchSessionStatus(model) {
+  if (model.requestedScope?.mode !== 'batch') return;
+  const statuses = model.pages.map(page => page.status);
+  const expected = statuses.some(value => value === 'cancelled')
+    ? 'cancelled'
+    : statuses.every(value => value === 'complete')
+      ? 'complete'
+      : statuses.every(value => value === 'failed') ? 'failed' : 'partial';
+  if (model.session.status !== expected) throw new TypeError(`Status da sessão diverge das páginas do lote: esperado ${expected}.`);
 }
 
 /** Explicit compatibility boundary. Every unknown V1 occurrence quality field is conservative. */
@@ -149,7 +161,9 @@ function migrateV1Record(model) {
       ...occurrence,
       outcome,
       pageId,
-      classification: item?.classification ?? 'editorial',
+      classification: source.engine === 'axe-core' && CLASSIFICATIONS.includes(occurrence.classification)
+        ? occurrence.classification
+        : item?.classification ?? 'editorial',
       impact: IMPACT_LEVELS.includes(occurrence.impact) ? occurrence.impact : V1_MIGRATION_DEFAULTS.impact,
       confidence: CONFIDENCE_LEVELS.includes(occurrence.confidence) ? occurrence.confidence : V1_MIGRATION_DEFAULTS.confidence,
       source,
@@ -218,7 +232,7 @@ function authoritativeAxeOccurrence(value) {
     equivalenceKey: value.equivalenceKey,
     presentationTargetKey: value.presentationTargetKey,
     mode: value.mode, nodeId: value.nodeId, selector: value.selector, framePath: value.framePath,
-    target: value.target, accessiblePreview: value.accessiblePreview,
+    accessiblePreview: value.accessiblePreview,
     justification: value.justification,
     applicabilityEvidence: value.applicabilityEvidence ?? null,
     legalAnalysis: value.legalAnalysis ?? null,
@@ -251,7 +265,7 @@ function assertAxeSupplementalIntegrity(model, rulesVersion) {
     const expected = checkedOccurrences.get(occurrence.occurrenceId);
     const actualKeys = Object.keys(occurrence).sort();
     const expectedKeys = Object.keys(expected ?? {}).sort();
-    if (!expected || canonicalStringify(actualKeys) !== canonicalStringify(expectedKeys) ||
+    if (!expected || !validAxeTargetShape(occurrence.target) || canonicalStringify(actualKeys) !== canonicalStringify(expectedKeys) ||
       canonicalStringify(authoritativeAxeOccurrence(occurrence)) !== canonicalStringify(authoritativeAxeOccurrence(expected))) {
       throw new TypeError(`Ocorrência suplementar ${occurrence.occurrenceId} diverge do cluster axe validado.`);
     }
@@ -273,6 +287,13 @@ function assertAxeSupplementalIntegrity(model, rulesVersion) {
   return checked;
 }
 
+function validAxeTargetShape(target) {
+  if (!target || typeof target !== 'object' || Array.isArray(target)) return false;
+  const keys = Object.keys(target).sort();
+  return canonicalStringify(keys) === canonicalStringify(['framePath', 'nodeId', 'selector']) ||
+    canonicalStringify(keys) === canonicalStringify(['framePath', 'message', 'selector']);
+}
+
 function validateBatchAxePages(model, rulesVersion) {
   if (!Array.isArray(model.axePages) || model.axePages.length > 20) {
     throw new TypeError('Envelopes axe do lote inválidos.');
@@ -287,7 +308,7 @@ function validateBatchAxePages(model, rulesVersion) {
       throw new TypeError('Envelope axe do lote referencia página inválida ou duplicada.');
     }
     seen.add(entry.pageId);
-    const checked = validateNormalizedAxeSupplemental(entry.result, { rulesVersion });
+    const checked = validateNormalizedAxeSupplemental(entry.result, { rulesVersion, batch: true });
     if (checked.errors.length > 0) throw new TypeError(`Envelope axe da página ${entry.pageId} possui payload inválido.`);
     if (checked.occurrences.some(value => value.pageId !== entry.pageId)) throw new TypeError(`Envelope axe da página ${entry.pageId} possui ocorrência cruzada.`);
     if (pageById.get(entry.pageId).axeStatus !== entry.result.status) throw new TypeError(`Envelope axe da página ${entry.pageId} diverge do estado da página.`);
@@ -310,6 +331,7 @@ function validateBatchAxePages(model, rulesVersion) {
       ...structuredClone(values[0]), outcome,
       targets: values.flatMap(value => structuredClone(value.targets)),
       limitations, impact, confidence: outcome === 'failed' ? 'high' : 'low',
+      summary: `Resultado agregado de ${values.length} ${values.length === 1 ? 'página' : 'páginas'}: ${outcome === 'failed' ? 'falha confirmada' : 'não foi possível concluir'}.`,
     };
   });
   return { errors: [], occurrences, ruleResults, status: checkedPages.some(value => value.status === 'partial') ? 'partial' : 'complete' };
@@ -833,7 +855,7 @@ function validateEditorialRuleResult(rule, id, rulesVersion) {
 
 function validateEditorialLimitations(limitations, outcome, targets) {
   if (!Array.isArray(limitations) || limitations.length > 2) return false;
-  const expectedOrder = ['EDITORIAL_NODE_SCAN_TRUNCATED', 'EDITORIAL_RESULT_LIMIT_REACHED'];
+  const expectedOrder = ['EDITORIAL_NODE_SCAN_TRUNCATED', 'BATCH_PAGE_COVERAGE_INCOMPLETE', 'EDITORIAL_RESULT_LIMIT_REACHED'];
   let previous = -1;
   for (const limitation of limitations) {
     if (!limitation || typeof limitation !== 'object' || Array.isArray(limitation)) return false;
@@ -842,6 +864,8 @@ function validateEditorialLimitations(limitations, outcome, targets) {
     previous = index;
     if (limitation.code === 'EDITORIAL_NODE_SCAN_TRUNCATED') {
       if (!exactKeys(limitation, ['code', 'retainedNodeCount']) || limitation.retainedNodeCount !== 5_000) return false;
+    } else if (limitation.code === 'BATCH_PAGE_COVERAGE_INCOMPLETE') {
+      if (!exactKeys(limitation, ['code']) || outcome !== 'cantTell') return false;
     } else if (limitation.code === 'EDITORIAL_RESULT_LIMIT_REACHED') {
       if (!exactKeys(limitation, ['code', 'retainedResultCount']) || limitation.retainedResultCount !== 64 ||
         outcome !== 'failed' || !Array.isArray(targets) || targets.length !== 64) return false;
@@ -849,7 +873,7 @@ function validateEditorialLimitations(limitations, outcome, targets) {
   }
   if (outcome === 'inapplicable') return limitations.length === 0;
   if (outcome === 'cantTell') {
-    return limitations.length === 1 && limitations[0].code === 'EDITORIAL_NODE_SCAN_TRUNCATED';
+    return limitations.length === 1 && ['EDITORIAL_NODE_SCAN_TRUNCATED', 'BATCH_PAGE_COVERAGE_INCOMPLETE'].includes(limitations[0].code);
   }
   return true;
 }

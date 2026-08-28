@@ -246,7 +246,9 @@ function validateOccurrence(occurrence, validatedRule, options, errors) {
     !exactKeys(target, ['framePath', 'nodeId', 'selector']) || own(target, 'nodeId') !== null ||
     own(occurrence, 'nodeId') !== null || own(occurrence, 'selector') !== selector ||
     !exactData(own(occurrence, 'framePath'), framePath) || !validFramePath(framePath) || !validSelector(selector) ||
-    !/^occurrence-axe-[0-9a-f]{8}$/u.test(own(occurrence, 'occurrenceId')) ||
+    !(options?.batch === true
+      ? /^occurrence-axe-[0-9a-f]{32}$/u
+      : /^occurrence-axe-[0-9a-f]{8}$/u).test(own(occurrence, 'occurrenceId')) ||
     !/^[A-Za-z0-9._:-]{1,200}$/u.test(own(occurrence, 'pageId')) ||
     own(occurrence, 'accessiblePreview') !== null || !exactData(own(occurrence, 'evidenceIds'), []) ||
     !exactData(own(occurrence, 'evidenceRefs'), []) || own(occurrence, 'mode') !== 'automated' ||

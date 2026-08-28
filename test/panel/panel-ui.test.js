@@ -16,9 +16,10 @@ test('panel exposes an explicit accessible single-page or URL-list audit form', 
   ]);
   const auditSection = html.match(/<form[^>]+id="audit-form"[\s\S]*?<\/form>/u)?.[0] ?? '';
   assert.match(auditSection, /<fieldset[\s\S]*type="radio"[\s\S]*value="single"[\s\S]*value="batch"/iu);
-  assert.match(auditSection, /<textarea[^>]+id="audit-urls"[^>]+aria-describedby="batch-help batch-errors"/iu);
+  assert.match(auditSection, /<textarea[^>]+id="audit-urls"[^>]+aria-describedby="batch-help batch-errors batch-warnings"/iu);
   assert.match(auditSection, /uma por linha[^<]*até 20/iu);
   assert.match(auditSection, /id="batch-errors"/u);
+  assert.match(auditSection, /id="batch-warnings"/u);
   assert.match(html, /id="batch-progress"/u);
   assert.match(html, /id="batch-summary"/u);
   assert.match(html, /id="cancel-audit"/u);
@@ -27,6 +28,7 @@ test('panel exposes an explicit accessible single-page or URL-list audit form', 
   assert.match(script, /START_BATCH/u);
   assert.match(script, /CANCEL_AUDIT/u);
   assert.match(script, /normalizeUrlList/u);
+  assert.match(script, /renderBatchWarnings/u);
   assert.match(css, /#cancel-audit[^{]*\{[^}]*min-height:\s*2\.75rem/isu);
   assert.match(css, /\.audit-mode label[^{]*\{[^}]*min-height:\s*2\.75rem/isu);
   assert.match(css, /\.product-header[^{]*\{[^}]*flex-wrap:\s*wrap/isu);

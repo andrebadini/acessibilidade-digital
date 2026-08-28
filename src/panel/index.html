@@ -29,9 +29,10 @@
         </div>
         <div id="batch-fields" hidden>
           <label for="audit-urls">Endereços das páginas</label>
-          <textarea id="audit-urls" name="audit-urls" rows="7" aria-describedby="batch-help batch-errors" placeholder="https://exemplo.com.br/&#10;https://exemplo.com.br/contato"></textarea>
+          <textarea id="audit-urls" name="audit-urls" rows="7" aria-describedby="batch-help batch-errors batch-warnings" placeholder="https://exemplo.com.br/&#10;https://exemplo.com.br/contato"></textarea>
           <p id="batch-help">Uma por linha, até 20. A ferramenta não procura nem segue links.</p>
           <ul id="batch-errors"></ul>
+          <ul id="batch-warnings" class="batch-warnings"></ul>
         </div>
         <button type="submit">Auditar</button>
         <button id="cancel-audit" type="button" hidden>Cancelar auditoria</button>

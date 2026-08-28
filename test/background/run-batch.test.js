@@ -2,8 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { runBatch } from '../../src/background/run-batch.js';
+import { runAudit } from '../../src/background/run-audit.js';
 import { normalizeUrlList } from '../../src/core/batch/normalize-url-list.js';
 import { reportInput } from '../report/helpers.js';
+import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
+
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 
 const REPORT_OPTIONS = Object.freeze({
   timezone: 'America/Cuiaba', manifestVersion: '0.1.0',
@@ -80,7 +84,80 @@ test('runs an explicit success → throw → success list strictly sequentially 
   assert.ok(progress.length > 0);
   assert.ok(progress.every((entry, index) => index === 0 || entry.percent >= progress[index - 1].percent));
   assert.ok(progress.every(entry => entry.auditId === 'batch-sequential' && entry.sessionId === 'batch-sequential'));
+  assert.ok(progress.every(entry => entry.statusCounts && Number.isSafeInteger(entry.statusCounts.complete)));
   assert.match(progress.find(entry => entry.pageNumber === 3)?.message ?? '', /3 de 3/iu);
+});
+
+test('enters an explicit non-cancellable finalization boundary before aggregate handoff', async () => {
+  const events = [];
+  const entries = normalizeUrlList('https://boundary.example.test/').entries;
+  await runBatch({
+    entries, batchAuditId: 'batch-boundary',
+    runner: async options => {
+      events.push('child');
+      return rawChild({ auditId: options.idFactory(), url: options.url });
+    },
+    chromeAdapter: {
+      async enterFinalization() { events.push('finalization'); },
+      async handoffReport() { events.push('handoff'); return { reviewUrl: null }; },
+    },
+    now: clock(), reportOptions: REPORT_OPTIONS,
+  });
+  assert.deepEqual(events, ['child', 'finalization', 'handoff']);
+});
+
+test('integrates three controlled fixtures through runBatch and runAudit into one mixed model', async () => {
+  const entries = normalizeUrlList([
+    'https://fixture-one.example.test/', 'https://fixture-fail.example.test/', 'https://fixture-three.example.test/',
+  ].join('\n')).entries;
+  const order = [];
+  const removed = [];
+  let finalHandoffs = 0;
+  const childModels = [];
+  let nextTabId = 40;
+  const urlByTab = new Map();
+  let currentUrl = '';
+  const page = url => ({
+    format: 'simplified-v1', document: { url, title: 'Fixture', language: 'pt-BR' }, warnings: [],
+    coverage: { runtime: { outcome: 'complete' }, accessibility: { outcome: 'complete' } },
+    layoutMetrics: { cssContentSize: { width: 800, height: 600 }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } },
+    nodes: [], axTree: { nodes: [] },
+  });
+  const adapter = {
+    async createTab() { nextTabId += 1; return { id: nextTabId }; },
+    async navigateTab(id, url) { urlByTab.set(id, url); currentUrl = url; order.push(url); },
+    async waitForStable(id) {
+      if (urlByTab.get(id).includes('fixture-fail')) throw new Error('controlled fixture failure');
+      return { url: urlByTab.get(id) };
+    },
+    async connectCdp() { return { async command(method) { return method === 'Page.captureScreenshot' ? { data: PNG } : method === 'Page.getLayoutMetrics' ? page('').layoutMetrics : {}; }, async disconnect() {} }; },
+    async runAxeInTab() { return {
+      status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [], frames: [{ frameId: 0, status: 'success', result: {
+        violations: [{ id: 'custom-batch-fixture', impact: 'minor', nodes: [{ impact: 'minor', target: ['html'] }] }],
+        incomplete: [], passes: [], inapplicable: [],
+      } }],
+    }; },
+    async collectPage() { return page(currentUrl); },
+    async runDynamicProbes() { return { focus: { completed: true, events: [] }, warnings: [], actions: [] }; },
+    async getEnvironment() { return { chromeVersion: 'Chrome/152', viewport: { width: 800, height: 600, deviceScaleFactor: 1 } }; },
+    async getFinalUrl() { return currentUrl; },
+    async emitProgress() {},
+    async handoffReport(model) { finalHandoffs += 1; return { reviewUrl: `chrome-extension://test/src/review/index.html?auditId=${model.auditId}` }; },
+    async removeTab(id) { removed.push(id); },
+  };
+  const model = await runBatch({
+    entries, batchAuditId: 'batch-integration', chromeAdapter: adapter,
+    runner: async options => { const child = await runAudit(options); childModels.push(child); return child; },
+    now: clock(), reportOptions: REPORT_OPTIONS, pageTimeoutMs: 1_000, cleanupTimeoutMs: 100,
+  });
+  assert.deepEqual(order, entries.map(entry => entry.navigationUrl));
+  assert.equal(model.pages.length, 3);
+  assert.deepEqual(model.pages.map(value => value.status), ['complete', 'failed', 'complete'], JSON.stringify(childModels.map(value => value.session)));
+  assert.equal(finalHandoffs, 1, 'handoffs filhos são no-op e só o modelo consolidado abre revisão');
+  assert.deepEqual(removed.length, 3);
+  assert.equal(model.auditId, 'batch-integration');
+  assert.equal(childModels.length, 3);
+  assert.ok(model.axePages.flatMap(value => value.result.occurrences).every(value => /^occurrence-axe-[a-f0-9]{32}$/u.test(value.occurrenceId)));
 });
 
 test('continues after timeout only after the aborted child confirms cleanup', async () => {

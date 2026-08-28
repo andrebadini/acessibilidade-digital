@@ -200,6 +200,8 @@ test('routes a context-menu audit through the shared single-audit boundary after
     queueMicrotask(() => callback?.());
   };
   let runnerUrl;
+  let runnerSignal;
+  let finishContextRunner;
   const sessions = new Map();
   const bindingLease = Object.freeze(Object.create(null));
   let bindingLeaseLive = false;
@@ -230,9 +232,10 @@ test('routes a context-menu audit through the shared single-audit boundary after
     personaController,
     auditStore: withAuditRevisions({ async setLatest() {}, async commitAudit() {} }),
     chromeAdapterFactory: () => ({}),
-    runner: async ({ url }) => {
+    runner: ({ url, signal }) => {
       runnerUrl = url;
-      return { auditId: 'audit-context-1', session: { status: 'failed' }, report: {} };
+      runnerSignal = signal;
+      return new Promise(resolve => { finishContextRunner = resolve; });
     },
   });
 
@@ -263,6 +266,15 @@ test('routes a context-menu audit through the shared single-audit boundary after
   assert.doesNotMatch(JSON.stringify([...sessions.values(), ...sent]), /TOPSECRET|token=|auth=/iu);
   assert.equal(sent.some(message => message.type === 'START_AUDIT'), false,
     'autoStarted nunca reenvia START_AUDIT pelo painel');
+  let cancelled;
+  chromeApi.listeners.message.listener(
+    { type: 'CANCEL_AUDIT', auditId: 'audit-context-1' },
+    { ...panelSender, documentId: 'panel-document-after-reload' },
+    value => { cancelled = value; },
+  );
+  assert.deepEqual(cancelled, { ok: true, auditId: 'audit-context-1', state: 'cancelling' });
+  assert.equal(runnerSignal.aborted, true);
+  finishContextRunner?.({ auditId: 'audit-context-1', session: { status: 'cancelled' }, report: {} });
 });
 
 test('validates START_AUDIT, stores an armed session, and keeps the response channel open', async () => {
@@ -672,6 +684,47 @@ test('starts one normalized batch globally and only lets its owning panel cancel
   release?.({ auditId: 'batch-global', session: { status: 'cancelled' }, report: {} });
 });
 
+test('rejects cancellation with a fixed too-late result once single or batch enters final handoff', async () => {
+  for (const mode of ['single', 'batch']) {
+    const chromeApi = createChrome();
+    let enteredHandoff;
+    const handoffEntered = new Promise(resolve => { enteredHandoff = resolve; });
+    let releaseHandoff;
+    const handoffGate = new Promise(resolve => { releaseHandoff = resolve; });
+    const runner = async ({ chromeAdapter }) => {
+      if (mode === 'batch') {
+        await chromeAdapter.enterFinalization();
+        enteredHandoff();
+        await handoffGate;
+      } else {
+        await chromeAdapter.handoffReport({});
+      }
+      return { auditId: `audit-${mode}`, pages: [], session: { status: mode === 'batch' ? 'failed' : 'complete' }, report: {} };
+    };
+    registerServiceWorker(chromeApi, {
+      createId: () => `audit-${mode}`,
+      runner: mode === 'single' ? runner : undefined,
+      batchRunner: mode === 'batch' ? runner : undefined,
+      reportOptions: { timezone: 'UTC', manifestVersion: '2.0.0', rulesVersion: '1.0.0', browserVersion: '152' },
+      chromeAdapterFactory: () => ({ async handoffReport() { enteredHandoff(); await handoffGate; return {}; } }),
+      auditStore: withAuditRevisions({ async setLatest() {}, async commitAudit() {} }),
+    });
+    const sender = { id: 'test', url: 'chrome-extension://test/src/panel/index.html', tab: { id: mode === 'single' ? 80 : 81 } };
+    let started;
+    chromeApi.listeners.message.listener(mode === 'single'
+      ? { type: 'START_AUDIT', url: 'https://late.example.test/' }
+      : { type: 'START_BATCH', urls: 'https://late.example.test/' }, sender, value => { started = value; });
+    await handoffEntered;
+    let cancelled;
+    chromeApi.listeners.message.listener({ type: 'CANCEL_AUDIT', auditId: started.auditId }, sender, value => { cancelled = value; });
+    assert.deepEqual(cancelled, {
+      ok: false, code: 'AUDIT_CANCEL_TOO_LATE',
+      error: 'A auditoria já está na etapa final e não pode mais ser cancelada.',
+    });
+    releaseHandoff();
+  }
+});
+
 test('blocks a batch with line errors before allocating an audit id', () => {
   const chromeApi = createChrome();
   let allocated = 0;
@@ -698,13 +751,14 @@ test('turns a running batch checkpoint into an explanatory non-resumable interru
     updatedAt: '2026-08-28T10:01:00.000Z', resumable: false,
   };
   let savedCheckpoint;
+  let cleared = false;
   let latest;
   registerServiceWorker(chromeApi, {
     now: () => '2026-08-28T10:02:00.000Z',
     sessionStore: {
       async getActiveBatch() { return checkpoint; },
-      async setActiveBatch(value) { savedCheckpoint = value; },
-      async set() {}, async get() {},
+      async set(_id, value) { savedCheckpoint = value; }, async get() {},
+      async clearActiveBatch() { cleared = true; },
     },
     auditStore: withAuditRevisions({ async setLatest(value) { latest = value; } }),
   });
@@ -714,6 +768,7 @@ test('turns a running batch checkpoint into an explanatory non-resumable interru
   assert.equal(latest.auditId, 'batch-restart');
   assert.equal(latest.mode, 'batch');
   assert.equal(latest.status, 'failed');
+  assert.equal(cleared, true);
   assert.match(latest.message, /interrompid[oa]|reinício/iu);
   assert.doesNotMatch(JSON.stringify([savedCheckpoint, latest]), /https?:|token=|session=/iu);
 });
@@ -723,6 +778,7 @@ test('a delayed restart restoration can never overwrite a newly accepted audit',
   let releaseRestore;
   const restoreGate = new Promise(resolve => { releaseRestore = resolve; });
   const latestWrites = [];
+  let latest;
   let finishRunner;
   registerServiceWorker(chromeApi, {
     createId: () => 'audit-new',
@@ -732,10 +788,11 @@ test('a delayed restart restoration can never overwrite a newly accepted audit',
         statusCounts: { complete: 1, partial: 0, failed: 0, cancelled: 0 }, cancelRequested: false,
         startedAt: '2026-08-28T09:00:00.000Z', updatedAt: '2026-08-28T09:01:00.000Z', resumable: false,
       }; },
-      async set() {}, async get() {}, async setActiveBatch() {},
+      async set() {}, async get() {}, async clearActiveBatch() {},
     },
     auditStore: withAuditRevisions({
-      async setLatest(value) { latestWrites.push(value); }, async commitAudit() {},
+      async getLatest() { return latest; },
+      async setLatest(value) { latest = value; latestWrites.push(value); }, async commitAudit(_id, _model, value) { latest = value; },
     }),
     chromeAdapterFactory: () => ({}),
     runner: () => new Promise(resolve => { finishRunner = resolve; }),
@@ -747,11 +804,55 @@ test('a delayed restart restoration can never overwrite a newly accepted audit',
     value => { response = value; },
   );
   assert.equal(response.auditId, 'audit-new');
-  await waitUntil(() => latestWrites.some(value => value.auditId === 'audit-new'));
   releaseRestore();
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(latestWrites.some(value => value.auditId === 'batch-old'), false);
+  await waitUntil(() => latest?.auditId === 'audit-new');
+  assert.equal(latest.auditId, 'audit-new');
   finishRunner?.({ auditId: 'audit-new', session: { status: 'complete' }, report: {} });
+});
+
+test('accepts a terminal active marker only when snapshot and latest prove its commit', async () => {
+  for (const proved of [false, true]) {
+    const chromeApi = createChrome();
+    const checkpoint = {
+      id: `batch-terminal-${proved}`, mode: 'batch', state: 'complete', total: 1, currentIndex: 1,
+      completedCount: 1, statusCounts: { complete: 1, partial: 0, failed: 0, cancelled: 0 },
+      cancelRequested: false, startedAt: '2026-08-28T10:00:00.000Z', updatedAt: '2026-08-28T10:01:00.000Z', resumable: false,
+    };
+    let latest = proved ? { auditId: checkpoint.id, status: 'complete' } : undefined;
+    let saved;
+    let cleared = false;
+    registerServiceWorker(chromeApi, {
+      sessionStore: {
+        async getActiveBatch() { return checkpoint; }, async set(_id, value) { saved = value; },
+        async clearActiveBatch() { cleared = true; }, async get() {},
+      },
+      auditStore: withAuditRevisions({
+        async getAudit(id) { return proved && id === checkpoint.id ? { auditId: id, session: { status: 'complete' } } : undefined; },
+        async getLatest() { return latest; }, async setLatest(value) { latest = value; },
+      }),
+    });
+    await waitUntil(() => cleared);
+    assert.equal(saved?.state, proved ? undefined : 'failed');
+    assert.equal(latest?.status, proved ? 'complete' : 'failed');
+  }
+});
+
+test('clears a stale active marker without replacing a newer single-page latest record', async () => {
+  const chromeApi = createChrome();
+  const checkpoint = {
+    id: 'batch-stale', mode: 'batch', state: 'idle', total: 1, currentIndex: 0, completedCount: 0,
+    statusCounts: { complete: 0, partial: 0, failed: 0, cancelled: 0 }, cancelRequested: false,
+    startedAt: '2026-08-28T10:00:00.000Z', updatedAt: '2026-08-28T10:00:00.000Z', resumable: false,
+  };
+  const latest = { auditId: 'single-newer', status: 'complete' };
+  const writes = [];
+  let cleared = false;
+  registerServiceWorker(chromeApi, {
+    sessionStore: { async getActiveBatch() { return checkpoint; }, async clearActiveBatch() { cleared = true; }, async set() {}, async get() {} },
+    auditStore: withAuditRevisions({ async getLatest() { return latest; }, async setLatest(value) { writes.push(value); } }),
+  });
+  await waitUntil(() => cleared);
+  assert.deepEqual(writes, []);
 });
 
 test('stores only a sanitized URL before execution while runner keeps the full navigation URL', async () => {

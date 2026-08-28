@@ -134,6 +134,7 @@ test('createAuditModel is the explicit V1 migration boundary and accepts native 
   const model = createAuditModel(batch);
   assert.equal(model.requestedScope.mode, 'batch');
   assert.deepEqual(model.pages.map(page => page.pageId), ['page-1', 'page-2']);
+  assert.throws(() => createAuditModel({ ...batch, session: { ...batch.session, status: 'complete' } }), /status|páginas|sessão/iu);
   assert.throws(() => createAuditModel({
     ...batch,
     pages: batch.pages.map(page => ({ ...page, pageId: 'page-1' })),

@@ -18,6 +18,7 @@ export async function applyBatchEvidenceBudget(pageResult, {
   const retained = [];
   const omitted = [];
   const omittedSources = new Set();
+  const initialUsedBytes = usedBytes;
   let consumed = usedBytes;
 
   for (const artifact of result.evidence) {
@@ -45,8 +46,20 @@ export async function applyBatchEvidenceBudget(pageResult, {
     retained.push(artifact);
   }
 
+  const omittedPixelSources = new Set(retained
+    .filter(artifact => artifact.kind === 'full-page' && artifact.pixelState === 'omitted-budget')
+    .map(artifact => artifact.evidenceId));
+  const dependencySafe = retained.filter(artifact => {
+    if (artifact.kind !== 'announcement-map' || !omittedPixelSources.has(artifact.fullPageEvidenceId)) return true;
+    if (!omitted.some(value => value.evidenceId === artifact.evidenceId)) omitted.push({
+      evidenceId: artifact.evidenceId, kind: artifact.kind,
+      contentHash: typeof artifact.hash === 'string' ? artifact.hash : null, reason: 'budget',
+    });
+    consumed = Math.max(initialUsedBytes, consumed - artifactBytes(artifact));
+    return false;
+  });
   const exceeded = omitted.length > 0;
-  result.evidence = retained;
+  result.evidence = dependencySafe;
   if (exceeded) {
     const message = 'O orçamento total de 256 MiB de PNGs foi atingido; novos pixels foram omitidos, preservando metadados e hashes de conteúdo.';
     result.page.status = ['failed', 'cancelled'].includes(result.page.status) ? result.page.status : 'partial';

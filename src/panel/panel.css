@@ -110,6 +110,7 @@ textarea { width: 100%; resize: vertical; }
 .audit-mode input { min-height: 1.5rem; }
 #single-fields, #batch-fields { display: grid; gap: 0.4rem; }
 #batch-errors { margin: 0; color: #8b2f00; }
+.batch-warnings { margin: 0; color: #6b4f00; }
 #cancel-audit { min-height: 2.75rem; background: #8b2f00; }
 
 select {

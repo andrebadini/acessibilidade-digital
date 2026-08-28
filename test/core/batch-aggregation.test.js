@@ -7,12 +7,15 @@ import {
   aggregateBatchAudits,
 } from '../../src/core/batch/aggregate-audits.js';
 import { remapAuditPage } from '../../src/core/batch/remap-audit.js';
+import { createBatchScopedId } from '../../src/core/batch/remap-audit.js';
 import { applyBatchEvidenceBudget } from '../../src/core/batch/evidence-budget.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createAnnotationMapFixture, createPristineMapSource } from '../report/annotation-map-fixture.js';
 import { reportInput } from '../report/helpers.js';
 import { normalizeAxeResults } from '../../src/core/axe/normalize-axe-results.js';
 import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
+import { pngDataUrlDecodedByteLength } from '../../src/core/evidence/png.js';
+import { mergeAxeSupplementalResults } from '../../src/core/audit.js';
 
 const OPTIONS = Object.freeze({
   now: () => '2026-08-28T12:00:00.000Z',
@@ -33,9 +36,21 @@ async function childModel(auditId, url, { axe = false } = {}) {
     stateCount: 1,
     artifacts: [raw.evidence.artifacts[0], createPristineMapSource(), map],
   };
-  if (axe) raw.axe = normalizeAxeResults({
-    status: 'disabled', provenance: AXE_PROVENANCE, frames: [],
-  }, { pageId: 'page-1', rulesVersion: '1.0.0' });
+  if (axe) raw.axe = normalizeAxeResults(axe === 'finding' ? {
+    status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],
+    frames: [{ frameId: 0, status: 'success', result: {
+      violations: [{ id: 'custom-batch-id', impact: 'serious', nodes: [{ impact: 'serious', target: ['html'] }] }],
+      incomplete: [], passes: [], inapplicable: [],
+    } }],
+  } : { status: 'disabled', provenance: AXE_PROVENANCE, frames: [] }, {
+    pageId: 'page-1', rulesVersion: '1.0.0', snapshot: raw.snapshot,
+  });
+  if (axe === 'finding') {
+    const hybrid = mergeAxeSupplementalResults(raw, raw.axe);
+    raw.ruleResults = hybrid.ruleResults;
+    raw.itemResults = hybrid.itemResults;
+    raw.occurrences = [...raw.occurrences, ...structuredClone(raw.axe.occurrences)];
+  }
   return enrichAuditForReport(raw, OPTIONS);
 }
 
@@ -94,10 +109,16 @@ test('keeps a valid cross-reference graph when the pixel budget omits a full-pag
     await childModel('child-budget', 'https://budget.example.test/'),
     { batchAuditId: 'batch-budget', pageId: 'page-1' },
   );
-  const budgeted = await applyBatchEvidenceBudget(remapped, { usedBytes: 0, limitBytes: 0 });
+  const map = remapped.evidence.find(artifact => artifact.kind === 'announcement-map');
+  const source = remapped.evidence.find(artifact => artifact.kind === 'full-page');
+  const rest = remapped.evidence.filter(artifact => ![map.evidenceId, source.evidenceId].includes(artifact.evidenceId));
+  const reversed = { ...remapped, evidence: [map, source, ...rest] };
+  const mapBytes = map.segments.reduce((total, segment) => total + pngDataUrlDecodedByteLength(segment.dataUrl), 0);
+  const budgeted = await applyBatchEvidenceBudget(reversed, { usedBytes: 0, limitBytes: mapBytes });
   assert.equal(budgeted.result.page.status, 'partial');
   assert.equal(budgeted.result.evidence.some(artifact => artifact.kind === 'announcement-map'), false);
   assert.ok(budgeted.result.evidence.every(artifact => !Object.hasOwn(artifact, 'dataUrl')));
+  assert.equal(budgeted.usedBytes, 0, 'a remoção dependente também libera os bytes do mapa já contado');
   const evidenceIds = new Set(budgeted.result.evidence.map(artifact => artifact.evidenceId));
   assert.ok(budgeted.result.occurrences.every(occurrence => occurrence.evidenceRefs.every(id => evidenceIds.has(id))));
 
@@ -126,8 +147,8 @@ test('validates each batch axe envelope against its exact page and rejects tampe
   }, { pageId, rulesVersion: '1.0.0' });
   const raw = aggregateBatchAudits({
     batchAuditId: 'batch-axe', pageResults: [
-      { ...first, page: { ...first.page, axeStatus: 'disabled' }, axe: disabledFor('page-1') },
-      { ...second, page: { ...second.page, axeStatus: 'disabled' }, axe: disabledFor('page-2') },
+      { ...first, page: { ...first.page, status: 'complete', axeStatus: 'disabled' }, axe: disabledFor('page-1') },
+      { ...second, page: { ...second.page, status: 'complete', axeStatus: 'disabled' }, axe: disabledFor('page-2') },
     ],
     startedAt: '2026-08-28T11:00:00.000Z', endedAt: '2026-08-28T11:01:00.000Z', status: 'complete',
   });
@@ -145,7 +166,7 @@ test('validates each batch axe envelope against its exact page and rejects tampe
   }, { pageId: 'page-1', rulesVersion: '1.0.0' });
   const partialRaw = aggregateBatchAudits({
     batchAuditId: 'batch-axe-partial',
-    pageResults: [{ ...first, page: { ...first.page, axeStatus: 'partial' }, axe: partialAxe }],
+    pageResults: [{ ...first, page: { ...first.page, status: 'complete', axeStatus: 'partial' }, axe: partialAxe }],
     startedAt: '2026-08-28T11:00:00.000Z', endedAt: '2026-08-28T11:01:00.000Z', status: 'complete',
   });
   await assert.rejects(enrichAuditForReport(partialRaw, OPTIONS), /axe parcial|cobertura axe/iu);
@@ -198,6 +219,63 @@ test('aggregates pages in requested order with unique rules, 146 items and conse
   assert.equal(final.itemResults.length, 146);
   assert.equal(final.session.status, 'partial');
   assert.match(final.integrity.canonicalModelHash, /^[a-f0-9]{64}$/u);
+});
+
+test('uses the strongest rule metadata and derives conservative status and summaries from every page', async () => {
+  const first = structuredClone(await remapAuditPage(
+    await childModel('child-meta-1', 'https://meta-one.example.test/'),
+    { batchAuditId: 'batch-meta', pageId: 'page-1' },
+  ));
+  const second = structuredClone(await remapAuditPage(
+    await childModel('child-meta-2', 'https://meta-two.example.test/'),
+    { batchAuditId: 'batch-meta', pageId: 'page-2' },
+  ));
+  const ruleId = 'focus-visible';
+  first.page.status = 'complete'; second.page.status = 'complete';
+  const firstRule = first.ruleResults.find(rule => rule.ruleId === ruleId);
+  const secondRule = second.ruleResults.find(rule => rule.ruleId === ruleId);
+  firstRule.outcome = 'passed'; firstRule.summary = 'Resumo passed da primeira página.';
+  secondRule.outcome = 'failed'; secondRule.summary = 'Resumo failed autoritativo.';
+  const raw = aggregateBatchAudits({
+    batchAuditId: 'batch-meta', pageResults: [first, second],
+    startedAt: OPTIONS.now(), endedAt: OPTIONS.now(), status: 'complete',
+  });
+  const aggregated = raw.ruleResults.find(rule => rule.ruleId === ruleId);
+  assert.equal(aggregated.outcome, 'failed');
+  assert.equal(aggregated.impact, secondRule.impact);
+  assert.match(aggregated.summary, /2 páginas.*falha/iu);
+  const one = structuredClone(first);
+  one.ruleResults.find(rule => rule.ruleId === ruleId).outcome = 'failed';
+  const onePage = aggregateBatchAudits({
+    batchAuditId: 'batch-meta-one', pageResults: [one],
+    startedAt: OPTIONS.now(), endedAt: OPTIONS.now(), status: 'complete',
+  });
+  assert.match(onePage.ruleResults.find(rule => rule.ruleId === ruleId).summary, /1 página(?!s).*falha/iu);
+
+  const failedPage = createBatchFailurePage({
+    pageId: 'page-2', requestedUrl: 'https://failed.example.test/', status: 'failed', attempted: true,
+    startedAt: OPTIONS.now(), endedAt: OPTIONS.now(), code: 'BATCH_PAGE_FAILED', message: 'Falha controlada.',
+  });
+  first.ruleResults.find(rule => rule.ruleId === ruleId).outcome = 'inapplicable';
+  assert.throws(() => aggregateBatchAudits({
+    batchAuditId: 'batch-status-tamper', pageResults: [first, failedPage],
+    startedAt: OPTIONS.now(), endedAt: OPTIONS.now(), status: 'complete',
+  }), /status|páginas|sessão/iu);
+  const partial = aggregateBatchAudits({
+    batchAuditId: 'batch-status-safe', pageResults: [first, failedPage],
+    startedAt: OPTIONS.now(), endedAt: OPTIONS.now(), status: 'partial',
+  });
+  assert.equal(partial.ruleResults.find(rule => rule.ruleId === ruleId).outcome, 'cantTell');
+  assert.equal(partial.itemResults.find(item => item.ruleIds.includes(ruleId)).outcome, 'cantTell');
+});
+
+test('uses at least 128 bits for batch axe identities even for the reported 32-bit collision pair', async () => {
+  const first = await createBatchScopedId('batch-collision', 'page-1', 'occurrence-axe', 'occurrence-axe-0001179a');
+  const second = await createBatchScopedId('batch-collision', 'page-2', 'occurrence-axe', 'occurrence-axe-0001e467');
+  assert.match(first, /^occurrence-axe-[a-f0-9]{32}$/u);
+  assert.match(second, /^occurrence-axe-[a-f0-9]{32}$/u);
+  assert.notEqual(first, second);
+
 });
 
 test('represents never-started cancellation without pixels, findings or observed redirect', () => {

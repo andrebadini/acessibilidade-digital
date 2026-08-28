@@ -63,6 +63,7 @@ export async function runBatch({
       type: 'AUDIT_PROGRESS', sessionId: batchAuditId, auditId: batchAuditId,
       phase: 'batch-page', message, percent: lastProgress, pageNumber,
       total: entries.length, at: canonicalNow(now),
+      statusCounts: { ...checkpoint.statusCounts },
     };
     try { await chromeAdapter.emitProgress?.(event); } catch { /* progresso não controla o lote */ }
   };
@@ -175,6 +176,7 @@ export async function runBatch({
     if (checkpoint.state === 'running') await move({ type: 'FINISH', at: canonicalNow(now) });
   }
 
+  await chromeAdapter.enterFinalization?.();
   terminal = true;
   const aggregate = aggregateBatchAudits({
     batchAuditId,

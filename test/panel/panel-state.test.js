@@ -22,6 +22,7 @@ import {
   resolveCurrentPanelTabId,
   sendContextProtocolAck,
   shouldApplyRestoredAudit,
+  formatBatchWarning,
 } from '../../src/panel/panel-state.js';
 
 function personaWorkerState(overrides = {}) {
@@ -64,6 +65,14 @@ test('uses a synchronous gate to reject reentrant submissions until released', (
   assert.equal(gate.tryAcquire(), false);
   gate.release();
   assert.equal(gate.tryAcquire(), true);
+});
+
+test('formats duplicate rows as explicit warnings without trusting message text', () => {
+  assert.equal(formatBatchWarning({ line: 4, firstLine: 1, code: 'DUPLICATE_URL', message: 'SECRET' }),
+    'Aviso — linha 4: a URL repete uma entrada anterior e não será auditada novamente. Primeira ocorrência na linha 1.');
+  assert.equal(formatBatchWarning({ line: 3, code: 'DUPLICATE_AFTER_REDACTION', message: 'SECRET' }),
+    'Aviso — linha 3: a URL tem a mesma identidade segura de uma entrada anterior e não será auditada novamente.');
+  assert.equal(formatBatchWarning({ line: 3, firstLine: 0, code: 'UNKNOWN', message: 'SECRET' }), null);
 });
 
 test('accepts only an exact sanitized auto-start prefill and creates one-shot protocol ACKs', () => {

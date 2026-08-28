@@ -34,6 +34,18 @@ export function createSubmissionGate() {
   };
 }
 
+export function formatBatchWarning(warning) {
+  const messages = {
+    DUPLICATE_URL: 'a URL repete uma entrada anterior e não será auditada novamente.',
+    DUPLICATE_AFTER_REDACTION: 'a URL tem a mesma identidade segura de uma entrada anterior e não será auditada novamente.',
+  };
+  if (!warning || !Number.isSafeInteger(warning.line) || warning.line < 1 || !messages[warning.code]) return null;
+  const first = Number.isSafeInteger(warning.firstLine) && warning.firstLine >= 1
+    ? ` Primeira ocorrência na linha ${warning.firstLine}.`
+    : '';
+  return `Aviso — linha ${warning.line}: ${messages[warning.code]}${first}`;
+}
+
 export function parseContextPrefillMessage(message, currentPanelTabId) {
   const parsed = clonePersonaRecord(message);
   if (!personaExactKeys(parsed, ['type', 'requestId', 'panelTabId', 'prefill']) ||

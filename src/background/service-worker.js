@@ -104,7 +104,6 @@ export function registerServiceWorker(chromeApi, options = {}) {
   const chromeAdapterFactory = options.chromeAdapterFactory ?? createChromeAdapter;
   const createExportOwnerId = options.createExportOwnerId ?? (() => crypto.randomUUID());
   let activeJob = null;
-  let jobGeneration = 0;
   const activeExports = new Map();
   const personaController = options.personaController ?? getPersonaController(chromeApi, { logger });
   const contextMenuController = options.contextMenuController ?? registerAuditContextMenus(chromeApi, {
@@ -125,7 +124,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
     },
     beginSingleAudit,
   });
-  const startupReady = restoreInterruptedBatchCheckpoint(jobGeneration);
+  const startupReady = restoreInterruptedBatchCheckpoint();
 
   chromeApi.action.onClicked.addListener((sourceTab) => {
     void Promise.resolve()
@@ -215,10 +214,15 @@ export function registerServiceWorker(chromeApi, options = {}) {
       void startupReady.then(() => restorableLatestState()).then(value => sendResponse({ ok: true, state: value ?? null }), () => sendResponse({ ok: false, error: 'Não foi possível restaurar a última auditoria.' }));
       return true;
     }
-    const senderKey = `${sender.id}:${sender.documentId || sender.tab?.id || sender.url}`;
+    const senderKey = panelOwnerKey(sender);
     if (message.type === 'CANCEL_AUDIT') {
       if (!activeJob || activeJob.auditId !== message.auditId || activeJob.senderKey !== senderKey) {
         sendResponse({ ok: false, error: 'Cancelamento não autorizado.' });
+      } else if (activeJob.phase !== 'running') {
+        sendResponse({
+          ok: false, code: 'AUDIT_CANCEL_TOO_LATE',
+          error: 'A auditoria já está na etapa final e não pode mais ser cancelada.',
+        });
       } else {
         activeJob.controller.abort(new DOMException('Auditoria cancelada pela pessoa usuária.', 'AbortError'));
         sendResponse({ ok: true, auditId: activeJob.auditId, state: 'cancelling' });
@@ -259,9 +263,8 @@ export function registerServiceWorker(chromeApi, options = {}) {
     }
     const storedUrl = sanitizeResourceUrl(requestedUrl);
     const auditId = createId();
-    jobGeneration += 1;
     const session = createAuditSession({ id: auditId, requestedUrl: storedUrl, startedAt: now() });
-    const entry = { auditId, senderKey, mode: 'single', controller: new AbortController(), completion: null };
+    const entry = { auditId, senderKey, mode: 'single', phase: 'running', controller: new AbortController(), completion: null };
     activeJob = entry;
     entry.completion = runInBackground({ auditId, navigationUrl: requestedUrl, session, senderKey, entry });
     return { response: { ok: true, auditId, state: session.state }, completion: entry.completion };
@@ -270,11 +273,17 @@ export function registerServiceWorker(chromeApi, options = {}) {
   async function runInBackground({ auditId, navigationUrl, session, senderKey, entry }) {
     let committed = false;
     try {
+      await startupReady;
       await sessions.set(auditId, session);
       await auditStore.setLatest({ auditId, status: 'running', percent: 0, message: 'Preparando a auditoria.' });
       const adapter = chromeAdapterFactory(chromeApi);
       const pipelineAdapter = {
         ...adapter,
+        async enterFinalization() { entry.phase = 'finalizing'; },
+        async handoffReport(model) {
+          entry.phase = 'finalizing';
+          return adapter.handoffReport?.(model);
+        },
         async emitProgress(progress) {
           await Promise.allSettled([
             auditStore.setLatest({ auditId, status: 'running', percent: progress.percent, message: progress.message }),
@@ -283,6 +292,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
         },
       };
       const model = await runner({ url: navigationUrl, chromeAdapter: pipelineAdapter, now, idFactory: () => auditId, closeAuditTab: true, signal: entry.controller.signal });
+      entry.phase = 'finalizing';
       const status = model?.session?.status || 'failed';
       const reviewUrl = model?.report?.reviewUrl || null;
       const canExport = ['complete', 'partial'].includes(status);
@@ -329,8 +339,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
       };
     }
     const auditId = createId();
-    jobGeneration += 1;
-    const entry = { auditId, senderKey, mode: 'batch', controller: new AbortController(), completion: null };
+    const entry = { auditId, senderKey, mode: 'batch', phase: 'running', controller: new AbortController(), completion: null };
     activeJob = entry;
     entry.completion = runBatchInBackground({ auditId, normalized, entry });
     return {
@@ -342,10 +351,16 @@ export function registerServiceWorker(chromeApi, options = {}) {
   async function runBatchInBackground({ auditId, normalized, entry }) {
     let committed = false;
     try {
+      await startupReady;
       await auditStore.setLatest({ auditId, mode: 'batch', status: 'running', percent: 0, message: 'Preparando o lote explícito.' });
       const adapter = chromeAdapterFactory(chromeApi);
       const pipelineAdapter = {
         ...adapter,
+        async enterFinalization() { entry.phase = 'finalizing'; },
+        async handoffReport(model) {
+          entry.phase = 'finalizing';
+          return adapter.handoffReport?.(model);
+        },
         async emitProgress(progress) {
           await Promise.allSettled([
             auditStore.setLatest({
@@ -365,6 +380,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
           await sessions.setActiveBatch?.(checkpoint);
         },
       });
+      entry.phase = 'finalizing';
       const status = model?.session?.status || 'failed';
       const reviewUrl = model?.report?.reviewUrl || null;
       const latestState = {
@@ -401,23 +417,44 @@ export function registerServiceWorker(chromeApi, options = {}) {
     };
   }
 
-  async function restoreInterruptedBatchCheckpoint(startupGeneration) {
+  async function restoreInterruptedBatchCheckpoint() {
     try {
       const checkpoint = await sessions.getActiveBatch?.();
-      if (jobGeneration !== startupGeneration || activeJob) return;
-      if (!checkpoint || checkpoint.mode !== 'batch' || ['idle', 'complete', 'partial', 'failed', 'cancelled'].includes(checkpoint.state)) return;
+      if (!checkpoint || checkpoint.mode !== 'batch') return;
+      const [snapshot, latest] = await Promise.all([
+        auditStore.getAuditSnapshot?.(checkpoint.id),
+        auditStore.getLatest?.(),
+      ]);
+      const terminal = ['complete', 'partial', 'failed', 'cancelled'].includes(checkpoint.state);
+      const committed = terminal && snapshot?.model?.auditId === checkpoint.id &&
+        snapshot.model?.session?.status === checkpoint.state &&
+        latest?.auditId === checkpoint.id && latest.status === checkpoint.state;
+      if (committed || (latest?.auditId && latest.auditId !== checkpoint.id)) {
+        await clearActiveCheckpointIfCurrent(checkpoint);
+        return;
+      }
       const interrupted = interruptBatchCheckpoint(checkpoint, queueTime());
-      await sessions.setActiveBatch?.(interrupted);
-      if (jobGeneration !== startupGeneration || activeJob) return;
       await sessions.set(interrupted.id, interrupted);
-      if (jobGeneration !== startupGeneration || activeJob) return;
+      const currentLatest = await auditStore.getLatest?.();
+      if (currentLatest?.auditId && currentLatest.auditId !== interrupted.id) {
+        await clearActiveCheckpointIfCurrent(checkpoint);
+        return;
+      }
       await auditStore.setLatest({
         auditId: interrupted.id, mode: 'batch', status: 'failed', percent: 0,
         message: 'O lote foi interrompido por reinício do worker e não pode ser retomado automaticamente.',
         total: interrupted.total, statusCounts: interrupted.statusCounts, exportStatus: 'unavailable',
       });
+      await clearActiveCheckpointIfCurrent(checkpoint);
     } catch {
       logger.error('Não foi possível registrar a interrupção do lote anterior.');
+    }
+  }
+
+  async function clearActiveCheckpointIfCurrent(checkpoint) {
+    const current = await sessions.getActiveBatch?.();
+    if (!current || (current.id === checkpoint.id && current.updatedAt === checkpoint.updatedAt)) {
+      await sessions.clearActiveBatch?.();
     }
   }
 
@@ -611,6 +648,11 @@ function validAuditId(value) {
 function validExportAttempt(value) {
   const attempt = typeof value === 'string' && /^[1-9][0-9]*$/u.test(value) ? Number(value) : value;
   return Number.isSafeInteger(attempt) && attempt >= 1;
+}
+
+function panelOwnerKey(sender) {
+  if (Number.isSafeInteger(sender?.tab?.id) && sender.tab.id >= 0) return `panel-tab:${sender.tab.id}`;
+  return `panel-document:${sender?.id}:${sender?.documentId || sender?.url}`;
 }
 
 function defaultBatchReportOptions(chromeApi) {

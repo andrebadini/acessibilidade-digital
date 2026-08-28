@@ -143,7 +143,6 @@ export function transitionBatchSession(session, event) {
 
 export function interruptBatchCheckpoint(checkpoint, at) {
   assertBatchSession(checkpoint);
-  if (BATCH_TERMINAL_STATES.has(checkpoint.state) || checkpoint.state === 'idle') return freezeBatchSession(checkpoint);
   if (typeof at !== 'string' || !at) throw new TypeError('Instante de interrupção inválido.');
   return freezeBatchSession({ ...checkpoint, state: 'failed', updatedAt: at, resumable: false });
 }

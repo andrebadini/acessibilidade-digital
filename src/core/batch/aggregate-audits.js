@@ -65,6 +65,8 @@ export function aggregateBatchAudits({
   if (!template) throw new TypeError('Lote sem página auditada exige template explícito do relatório.');
   const pages = pageResults.map(result => structuredClone(result.page));
   assertPageOrderAndIdentity(pages);
+  const derivedStatus = deriveBatchStatus(pages);
+  if (status !== derivedStatus) throw new TypeError(`Status da sessão diverge das páginas do lote: esperado ${derivedStatus}.`);
   const hasCoverageBlocker = pages.some(page => ['failed', 'cancelled'].includes(page.status));
   const ruleResults = aggregateRules(pageResults.flatMap(result => result.ruleResults), hasCoverageBlocker);
   const occurrences = pageResults.flatMap(result => result.occurrences.map(value => structuredClone(value)));
@@ -142,10 +144,11 @@ function aggregateRules(rules, hasCoverageBlocker) {
   for (const group of grouped.values()) {
     const strongest = group.reduce((best, rule) => OUTCOME_PRIORITY[rule.outcome] > OUTCOME_PRIORITY[best.outcome] ? rule : best);
     let outcome = strongest.outcome;
-    if (hasCoverageBlocker && outcome === 'passed') outcome = 'cantTell';
+    if (hasCoverageBlocker && outcome !== 'failed') outcome = 'cantTell';
     const result = {
-      ...structuredClone(group[0]),
+      ...structuredClone(strongest),
       outcome,
+      summary: aggregateSummary(outcome, group.length),
       targets: group.flatMap(rule => structuredClone(rule.targets ?? [])),
       limitations: uniqueValues(group.flatMap(rule => rule.limitations ?? [])),
     };
@@ -159,6 +162,22 @@ function aggregateRules(rules, hasCoverageBlocker) {
   return output;
 }
 
+function aggregateSummary(outcome, count) {
+  const labels = {
+    failed: 'falha confirmada', cantTell: 'não foi possível concluir', untested: 'não testado',
+    passed: 'verificação aprovada', inapplicable: 'não aplicável',
+  };
+  return `Resultado agregado de ${count} ${count === 1 ? 'página' : 'páginas'}: ${labels[outcome]}.`;
+}
+
+function deriveBatchStatus(pages) {
+  const statuses = pages.map(page => page.status);
+  if (statuses.some(value => value === 'cancelled')) return 'cancelled';
+  if (statuses.every(value => value === 'complete')) return 'complete';
+  if (statuses.every(value => value === 'failed')) return 'failed';
+  return 'partial';
+}
+
 function normalizeEditorialRule(rule) {
   rule.targets = rule.targets.slice(0, 64);
   rule.outcome = rule.targets.length > 0 ? 'failed' : rule.outcome === 'cantTell' ? 'cantTell' : 'inapplicable';
@@ -170,6 +189,9 @@ function normalizeEditorialRule(rule) {
   const limitations = [];
   if (rule.limitations.some(value => value?.code === 'EDITORIAL_NODE_SCAN_TRUNCATED')) {
     limitations.push({ code: 'EDITORIAL_NODE_SCAN_TRUNCATED', retainedNodeCount: 5_000 });
+  }
+  if (rule.outcome === 'cantTell' && limitations.length === 0) {
+    limitations.push({ code: 'BATCH_PAGE_COVERAGE_INCOMPLETE' });
   }
   if (rule.targets.length === 64) limitations.push({ code: 'EDITORIAL_RESULT_LIMIT_REACHED', retainedResultCount: 64 });
   rule.limitations = limitations;

@@ -170,7 +170,7 @@ export function registerAuditContextMenus(chromeApi, options = {}) {
       if (consumeBindingLease(bindingLease) !== true) throw new Error('Vínculo do painel alterado.');
       const started = beginSingleAudit({
         navigationUrl: admission.auditUrl,
-        senderKey: `context:${admission.sourceTabId}`,
+        senderKey: `panel-tab:${panelId}`,
       });
       if (!started || !started.response || started.response.ok !== true ||
         !started.completion || typeof started.completion.then !== 'function') {

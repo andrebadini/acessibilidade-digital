@@ -173,5 +173,6 @@ test('turns an active restored checkpoint into an explanatory non-resumable fail
   assert.equal(interrupted.currentIndex, 1);
   assert.equal(interrupted.completedCount, 1);
   assert.doesNotMatch(JSON.stringify(interrupted), /https?:|token|pixel|cookie/iu);
-  assert.equal(interruptBatchCheckpoint({ ...running, state: 'complete' }, '2026-08-28T10:05:00.000Z').state, 'complete');
+  assert.equal(interruptBatchCheckpoint({ ...running, state: 'idle' }, '2026-08-28T10:05:00.000Z').state, 'failed');
+  assert.equal(interruptBatchCheckpoint({ ...running, state: 'complete' }, '2026-08-28T10:05:00.000Z').state, 'failed');
 });
