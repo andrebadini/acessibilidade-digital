@@ -640,6 +640,57 @@ test('serializes concurrent REQUEST_EXPORT so one wins and the retry receives BU
   assert.equal(responses.filter(response => response.code === 'EXPORT_BUSY' && response.retryable).length, 1);
 });
 
+test('queues REQUEST_EXPORT behind startup while installing same-audit deduplication synchronously', async () => {
+  const chromeApi = createChrome();
+  const auditId = 'audit-export-startup-gate';
+  const store = createInMemoryAuditStore();
+  await store.commitAudit(auditId, { auditId }, {
+    auditId, status: 'complete', exportStatus: 'complete',
+  }, { now: '2026-08-28T09:00:00.000Z' });
+  let releaseStartup;
+  const startupGate = new Promise(resolve => { releaseStartup = resolve; });
+  let snapshotReads = 0;
+  const auditStore = {
+    ...store,
+    async getAuditSnapshot(id) {
+      snapshotReads += 1;
+      return store.getAuditSnapshot(id);
+    },
+  };
+  registerServiceWorker(chromeApi, {
+    auditStore,
+    sessionStore: {
+      async getActiveBatch() { await startupGate; return undefined; },
+      async remove() {},
+    },
+    createExportOwnerId: () => 'owner-startup-gate',
+    now: () => '2026-08-28T09:02:00.000Z',
+  });
+  const sender = {
+    id: 'test', frameId: 0,
+    url: `chrome-extension://test/src/review/index.html?auditId=${auditId}`,
+  };
+  let first;
+  let duplicate;
+  chromeApi.listeners.message.listener(
+    { type: 'REQUEST_EXPORT', auditId }, sender, value => { first = value; },
+  );
+  chromeApi.listeners.message.listener(
+    { type: 'REQUEST_EXPORT', auditId }, sender, value => { duplicate = value; },
+  );
+  await waitUntil(() => duplicate !== undefined);
+  assert.equal(snapshotReads, 0, 'export storage reads must wait for startup');
+  assert.equal(chromeApi.createdTabs.length, 0);
+  assert.equal(duplicate.code, 'EXPORT_BUSY');
+
+  releaseStartup();
+  await waitUntil(() => first !== undefined);
+  assert.equal(first.ok, true);
+  assert.equal(first.state, 'queued');
+  assert.equal(snapshotReads, 1);
+  assert.equal(chromeApi.createdTabs.filter(tab => tab.url.includes('/src/export/')).length, 1);
+});
+
 test('never treats an uncorrelated queued marker as persistent exclusivity after restart', async () => {
   for (const queuedAt of [undefined, 'not-an-iso-date', '2026-08-26T14:59:30.000Z']) {
     const chromeApi = createChrome();
@@ -1034,6 +1085,154 @@ test('a delayed restart restoration can never overwrite a newly accepted audit',
   await waitUntil(() => latest?.auditId === 'audit-new');
   assert.equal(latest.auditId, 'audit-new');
   finishRunner?.({ auditId: 'audit-new', session: { status: 'complete' }, report: {} });
+});
+
+test('serializes delete-one after startup restoration and never resurrects a stale same-audit latest record', async () => {
+  const chromeApi = createChrome();
+  const auditId = 'batch-delete-startup-race';
+  const checkpoint = {
+    id: auditId, mode: 'batch', state: 'running', total: 2, currentIndex: 1,
+    completedCount: 1, statusCounts: { complete: 1, partial: 0, failed: 0, cancelled: 0 },
+    cancelRequested: false, startedAt: '2026-08-28T09:00:00.000Z',
+    updatedAt: '2026-08-28T09:01:00.000Z', resumable: false,
+  };
+  const store = createInMemoryAuditStore();
+  await store.commitAudit(auditId, {
+    auditId, session: { status: 'running' }, report: {},
+  }, {
+    auditId, mode: 'batch', status: 'running', percent: 50,
+  }, { now: '2026-08-28T09:01:00.000Z' });
+  let releaseStaleLatest;
+  const staleLatestGate = new Promise(resolve => { releaseStaleLatest = resolve; });
+  let staleLatestCaptured = false;
+  let latestReads = 0;
+  let deleteEntered = false;
+  const auditStore = {
+    ...store,
+    async getLatest() {
+      const value = await store.getLatest();
+      latestReads += 1;
+      if (latestReads === 1) {
+        staleLatestCaptured = true;
+        await staleLatestGate;
+      }
+      return value;
+    },
+    async deleteAudit(...args) {
+      deleteEntered = true;
+      return store.deleteAudit(...args);
+    },
+  };
+  const sessionValues = new Map([[auditId, checkpoint]]);
+  let activeCheckpoint = checkpoint;
+  registerServiceWorker(chromeApi, {
+    auditStore,
+    sessionStore: {
+      async getActiveBatch() { return activeCheckpoint; },
+      async set(id, value) { sessionValues.set(id, value); },
+      async get(id) { return sessionValues.get(id); },
+      async remove(id) {
+        sessionValues.delete(id);
+        if (activeCheckpoint?.id === id) activeCheckpoint = undefined;
+      },
+      async clearActiveBatch() { activeCheckpoint = undefined; },
+    },
+    now: () => '2026-08-28T09:02:00.000Z',
+  });
+  await waitUntil(() => staleLatestCaptured);
+
+  let response;
+  chromeApi.listeners.message.listener(
+    { type: 'REQUEST_DELETE_AUDIT', auditId },
+    { id: 'test', frameId: 0, url: `chrome-extension://test/src/review/index.html?auditId=${auditId}` },
+    value => { response = value; },
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(deleteEntered, false, 'delete-one must wait for startup restoration');
+
+  releaseStaleLatest();
+  await waitUntil(() => response !== undefined);
+  assert.deepEqual(response, { ok: true, auditId, deleted: true });
+  assert.equal(await store.getAudit(auditId), undefined);
+  assert.equal(await store.getLatest(), undefined);
+  assert.equal(sessionValues.has(auditId), false);
+  assert.equal(activeCheckpoint, undefined);
+});
+
+test('serializes delete-all after startup restoration and leaves no stale durable or session state', async () => {
+  const chromeApi = createChrome();
+  const auditId = 'batch-delete-all-startup-race';
+  const checkpoint = {
+    id: auditId, mode: 'batch', state: 'running', total: 2, currentIndex: 1,
+    completedCount: 1, statusCounts: { complete: 1, partial: 0, failed: 0, cancelled: 0 },
+    cancelRequested: false, startedAt: '2026-08-28T09:00:00.000Z',
+    updatedAt: '2026-08-28T09:01:00.000Z', resumable: false,
+  };
+  const store = createInMemoryAuditStore();
+  await store.commitAudit(auditId, {
+    auditId, session: { status: 'running' }, report: {},
+  }, {
+    auditId, mode: 'batch', status: 'running', percent: 50,
+  }, { now: '2026-08-28T09:01:00.000Z' });
+  let releaseStaleLatest;
+  const staleLatestGate = new Promise(resolve => { releaseStaleLatest = resolve; });
+  let staleLatestCaptured = false;
+  let latestReads = 0;
+  let deleteAllEntered = false;
+  const auditStore = {
+    ...store,
+    async getLatest() {
+      const value = await store.getLatest();
+      latestReads += 1;
+      if (latestReads === 1) {
+        staleLatestCaptured = true;
+        await staleLatestGate;
+      }
+      return value;
+    },
+    async deleteAllAudits(...args) {
+      deleteAllEntered = true;
+      return store.deleteAllAudits(...args);
+    },
+  };
+  const sessionValues = new Map([[auditId, checkpoint]]);
+  let activeCheckpoint = checkpoint;
+  registerServiceWorker(chromeApi, {
+    auditStore,
+    sessionStore: {
+      async getActiveBatch() { return activeCheckpoint; },
+      async set(id, value) { sessionValues.set(id, value); },
+      async get(id) { return sessionValues.get(id); },
+      async remove(id) {
+        sessionValues.delete(id);
+        if (activeCheckpoint?.id === id) activeCheckpoint = undefined;
+      },
+      async clearActiveBatch() { activeCheckpoint = undefined; },
+      async clearAuditSessions() {
+        sessionValues.clear();
+        activeCheckpoint = undefined;
+      },
+    },
+    now: () => '2026-08-28T09:02:00.000Z',
+  });
+  await waitUntil(() => staleLatestCaptured);
+
+  let response;
+  chromeApi.listeners.message.listener(
+    { type: 'REQUEST_DELETE_ALL_AUDITS' },
+    { id: 'test', frameId: 0, url: 'chrome-extension://test/src/panel/index.html' },
+    value => { response = value; },
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(deleteAllEntered, false, 'delete-all must wait for startup restoration');
+
+  releaseStaleLatest();
+  await waitUntil(() => response !== undefined);
+  assert.deepEqual(response, { ok: true, deleted: 1 });
+  assert.equal(await store.getAudit(auditId), undefined);
+  assert.equal(await store.getLatest(), undefined);
+  assert.equal(sessionValues.size, 0);
+  assert.equal(activeCheckpoint, undefined);
 });
 
 test('clears a terminal active marker when its commit is proved or its durable audit is absent', async () => {
@@ -1865,4 +2064,126 @@ test('worker publishes complete-export deletion only after exact correlation and
   chromeApi.listeners.message.listener({ ...message, formats: ['html', 'json', 'csv'] }, sender, () => {});
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(chromeApi.runtime.sent.some(value => value.type === 'AUDIT_DELETED'), false);
+});
+
+test('queues complete-export confirmation behind startup restoration', async () => {
+  const chromeApi = createChrome();
+  const auditId = 'export-complete-startup-gate';
+  let releaseStartup;
+  const startupGate = new Promise(resolve => { releaseStartup = resolve; });
+  const removed = [];
+  registerServiceWorker(chromeApi, {
+    sessionStore: {
+      async getActiveBatch() { await startupGate; return undefined; },
+      async remove(id) { removed.push(id); },
+    },
+    auditStore: {
+      async getAuditSnapshot() { return { model: undefined, revision: 1, capability: null }; },
+      async getAuditRetention() { return undefined; },
+      async getLatest() { return undefined; },
+    },
+  });
+  const message = {
+    type: 'EXPORT_COMPLETE', auditId, status: 'complete',
+    formats: ['html', 'json', 'csv', 'pdf'], exportRevision: 1,
+    exportAttempt: 1, leaseOwnerId: 'owner-startup-gate', localAuditDeleted: true,
+  };
+  const sender = {
+    id: 'test', frameId: 0,
+    url: `chrome-extension://test/src/export/index.html?auditId=${auditId}&leaseOwnerId=owner-startup-gate&exportAttempt=1`,
+  };
+  let response;
+  chromeApi.listeners.message.listener(message, sender, value => { response = value; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(response, undefined);
+  assert.deepEqual(removed, []);
+  assert.equal(chromeApi.runtime.sent.some(value => value.type === 'AUDIT_DELETED'), false);
+
+  releaseStartup();
+  await waitUntil(() => response !== undefined);
+  assert.deepEqual(response, { ok: true });
+  assert.deepEqual(removed, [auditId]);
+  assert.deepEqual(chromeApi.runtime.sent.find(value => value.type === 'AUDIT_DELETED'), {
+    type: 'AUDIT_DELETED', auditId, reason: 'complete-export',
+  });
+});
+
+test('fences restart failure persistence against an export-tab deletion after stale startup reads', async () => {
+  const chromeApi = createChrome();
+  const auditId = 'batch-export-delete-startup-race';
+  const checkpoint = {
+    id: auditId, mode: 'batch', state: 'running', total: 2, currentIndex: 1,
+    completedCount: 1, statusCounts: { complete: 1, partial: 0, failed: 0, cancelled: 0 },
+    cancelRequested: false, startedAt: '2026-08-28T09:00:00.000Z',
+    updatedAt: '2026-08-28T09:01:00.000Z', resumable: false,
+  };
+  const store = createInMemoryAuditStore();
+  await store.commitAudit(auditId, {
+    auditId, session: { status: 'running' }, report: {},
+  }, {
+    auditId, mode: 'batch', status: 'running', percent: 50,
+  }, { now: '2026-08-28T09:01:00.000Z', deleteAfterCompleteExport: true });
+  let releaseStaleLatest;
+  const staleLatestGate = new Promise(resolve => { releaseStaleLatest = resolve; });
+  let staleLatestCaptured = false;
+  let latestReads = 0;
+  const auditStore = {
+    ...store,
+    async getLatest() {
+      const value = await store.getLatest();
+      latestReads += 1;
+      if (latestReads === 1) {
+        staleLatestCaptured = true;
+        await staleLatestGate;
+      }
+      return value;
+    },
+  };
+  const sessionValues = new Map([[auditId, checkpoint]]);
+  let activeCheckpoint = checkpoint;
+  registerServiceWorker(chromeApi, {
+    auditStore,
+    sessionStore: {
+      async getActiveBatch() { return activeCheckpoint; },
+      async set(id, value) { sessionValues.set(id, value); },
+      async get(id) { return sessionValues.get(id); },
+      async remove(id) {
+        sessionValues.delete(id);
+        if (activeCheckpoint?.id === id) activeCheckpoint = undefined;
+      },
+      async clearActiveBatch() { activeCheckpoint = undefined; },
+    },
+    now: () => '2026-08-28T09:02:00.000Z',
+  });
+  await waitUntil(() => staleLatestCaptured);
+
+  const externalSnapshot = await store.getAuditSnapshot(auditId);
+  assert.equal((await store.deleteAudit(auditId, externalSnapshot.capability, {
+    now: '2026-08-28T09:02:00.000Z',
+  })).deleted, true);
+  const message = {
+    type: 'EXPORT_COMPLETE', auditId, status: 'complete',
+    formats: ['html', 'json', 'csv', 'pdf'], exportRevision: externalSnapshot.revision,
+    exportAttempt: 1, leaseOwnerId: 'owner-export-race', localAuditDeleted: true,
+  };
+  const sender = {
+    id: 'test', frameId: 0,
+    url: `chrome-extension://test/src/export/index.html?auditId=${auditId}&leaseOwnerId=owner-export-race&exportAttempt=1`,
+  };
+  let response;
+  chromeApi.listeners.message.listener(message, sender, value => { response = value; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(response, undefined);
+
+  releaseStaleLatest();
+  await waitUntil(() => response !== undefined);
+  await waitUntil(() => chromeApi.runtime.sent.some(value => value.type === 'AUDIT_DELETED'));
+  assert.deepEqual(response, { ok: true });
+  assert.equal(await store.getAudit(auditId), undefined);
+  assert.equal(await store.getLatest(), undefined);
+  assert.equal(sessionValues.has(auditId), false);
+  assert.equal(activeCheckpoint, undefined);
+  assert.deepEqual(chromeApi.runtime.sent.filter(value => value.type === 'AUDIT_DELETED'), [{
+    type: 'AUDIT_DELETED', auditId, reason: 'complete-export',
+  }]);
 });

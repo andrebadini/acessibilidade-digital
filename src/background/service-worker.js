@@ -263,7 +263,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
         sendResponse({ ok: false, error: 'Pedido de exclusão inválido.' });
         return true;
       }
-      void deleteOneAudit(message.auditId).then(sendResponse, () => {
+      void startupReady.then(() => deleteOneAudit(message.auditId)).then(sendResponse, () => {
         sendResponse({ ok: false, error: 'Não foi possível excluir a auditoria local.' });
       });
       return true;
@@ -278,7 +278,9 @@ export function registerServiceWorker(chromeApi, options = {}) {
       } else if (activeJob) {
         sendResponse({ ok: false, code: 'AUDIT_DELETE_BUSY', error: DELETE_BUSY_MESSAGE });
       } else {
-        void deleteEveryAudit().then(sendResponse, () => {
+        void startupReady.then(() => activeJob
+          ? { ok: false, code: 'AUDIT_DELETE_BUSY', error: DELETE_BUSY_MESSAGE }
+          : deleteEveryAudit()).then(sendResponse, () => {
           sendResponse({ ok: false, error: 'Não foi possível excluir as auditorias locais.' });
         });
       }
@@ -324,7 +326,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
         !Number.isSafeInteger(message.exportRevision) || message.exportRevision < 0) {
         sendResponse({ ok: false, error: 'Exportação não correlacionada.' });
       } else if (isCompleteExportDeletionClaim(message)) {
-        void confirmCompleteExportDeletion(message.auditId).then(
+        void startupReady.then(() => confirmCompleteExportDeletion(message.auditId)).then(
           () => sendResponse({ ok: true }),
           () => sendResponse({ ok: true }),
         );
@@ -342,7 +344,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
         sendResponse(exportBusyResponse(message.auditId));
         return true;
       }
-      const queued = queueRequestedExport(message.auditId);
+      const queued = startupReady.then(() => queueRequestedExport(message.auditId));
       activeExports.set(message.auditId, queued);
       void queued.then(sendResponse, error => sendResponse(exportQueueErrorResponse(message.auditId, error)))
         .finally(() => { if (activeExports.get(message.auditId) === queued) activeExports.delete(message.auditId); });
@@ -629,11 +631,23 @@ export function registerServiceWorker(chromeApi, options = {}) {
         await clearActiveCheckpointIfCurrent(checkpoint);
         return;
       }
-      await auditStore.setLatest({
+      const failedLatest = {
         auditId: interrupted.id, mode: 'batch', status: 'failed', percent: 0,
         message: 'O lote foi interrompido por reinício do worker e não pode ser retomado automaticamente.',
         total: interrupted.total, statusCounts: interrupted.statusCounts, exportStatus: 'unavailable',
-      });
+      };
+      if (snapshot?.model?.auditId === interrupted.id && snapshot.capability &&
+        typeof auditStore.commitAuditIfRevision === 'function') {
+        try {
+          await auditStore.commitAuditIfRevision(
+            interrupted.id, snapshot.model, failedLatest, snapshot.capability,
+          );
+        } catch (error) {
+          if (!isAuditRevisionConflict(error)) throw error;
+        }
+      } else {
+        await auditStore.setLatest(failedLatest);
+      }
       await clearActiveCheckpointIfCurrent(checkpoint);
     } catch {
       logger.error('Não foi possível registrar a interrupção do lote anterior.');
