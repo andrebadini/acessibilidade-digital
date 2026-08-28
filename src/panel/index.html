@@ -119,9 +119,10 @@
         </div>
         <p id="persona-live-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true">Conectando as simulações.</p>
       </section>
-      <dialog id="delete-all-dialog" aria-labelledby="delete-all-title" aria-describedby="delete-all-description">
+      <dialog id="delete-all-dialog" aria-labelledby="delete-all-title" aria-describedby="delete-all-description" aria-hidden="true">
         <h2 id="delete-all-title">Excluir todas as auditorias locais?</h2>
         <p id="delete-all-description">Esta ação apaga todas as auditorias, evidências, pixels e revisões armazenadas pela extensão neste navegador. Os downloads já salvos não serão apagados.</p>
+        <p id="delete-all-dialog-status" class="dialog-status" role="status" aria-live="polite" aria-atomic="true"></p>
         <div class="dialog-actions">
           <button id="delete-all-cancel" type="button" class="secondary-action">Cancelar</button>
           <button id="delete-all-confirm" type="button" class="danger-action">Excluir todas</button>

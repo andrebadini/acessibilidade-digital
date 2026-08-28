@@ -158,6 +158,8 @@ dialog {
 }
 
 dialog::backdrop { background: #14212bbf; }
+dialog:not([open]) { display: none; }
+.dialog-status:empty { display: none; }
 
 .dialog-actions {
   display: flex;

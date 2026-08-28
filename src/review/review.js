@@ -13,6 +13,7 @@ const deleteAudit = document.querySelector('#delete-audit');
 const deleteAuditDialog = document.querySelector('#delete-audit-dialog');
 const deleteAuditCancel = document.querySelector('#delete-audit-cancel');
 const deleteAuditConfirm = document.querySelector('#delete-audit-confirm');
+const deleteAuditDialogStatus = document.querySelector('#delete-audit-dialog-status');
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
 const store = createAuditStore();
 const commitDecision = createReviewDecisionCommitter();
@@ -51,6 +52,7 @@ const deleteAuditController = createDestructiveDialog({
   cancelButton: deleteAuditCancel,
   confirmButton: deleteAuditConfirm,
   status,
+  dialogStatus: deleteAuditDialogStatus,
   async onConfirm() {
     if (!auditModel?.auditId) return { ok: false, error: 'Auditoria não encontrada ou já excluída.' };
     const response = await sendWorkerRequest({

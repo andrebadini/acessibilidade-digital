@@ -42,6 +42,7 @@ const deleteAllAudits = document.querySelector('#delete-all-audits');
 const deleteAllDialog = document.querySelector('#delete-all-dialog');
 const deleteAllCancel = document.querySelector('#delete-all-cancel');
 const deleteAllConfirm = document.querySelector('#delete-all-confirm');
+const deleteAllDialogStatus = document.querySelector('#delete-all-dialog-status');
 const submissionGate = createSubmissionGate();
 let activeAuditId = null;
 let panelState = null;
@@ -108,6 +109,7 @@ const deleteAllController = createDestructiveDialog({
   cancelButton: deleteAllCancel,
   confirmButton: deleteAllConfirm,
   status,
+  dialogStatus: deleteAllDialogStatus,
   async onConfirm() {
     const response = await sendWorkerRequest({ type: 'REQUEST_DELETE_ALL_AUDITS' });
     if (response.ok === true) {

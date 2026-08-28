@@ -1,4 +1,5 @@
 :root { color-scheme: light; font: 100%/1.5 system-ui, sans-serif; color: #17202a; background: #f5f7f8; }
+* { box-sizing: border-box; }
 body { margin: 0; }
 main { max-width: 72rem; margin: auto; padding: 1.5rem; }
 .review-controls, .review-card { background: white; border: 1px solid #c8d0d6; border-radius: .5rem; padding: 1rem; margin-block: 1rem; }
@@ -15,6 +16,8 @@ code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: 
 .danger-action { border-color: #7d2100; background: #8b2f00; color: #fff; }
 dialog { inline-size: min(32rem, calc(100% - 2rem)); max-inline-size: calc(100% - 2rem); padding: clamp(1rem, 4vw, 1.5rem); border: 3px solid #155a8a; border-radius: .5rem; color: #17202a; background: #fff; overflow-wrap: anywhere; }
 dialog::backdrop { background: #17202abf; }
+dialog:not([open]) { display: none; }
+.dialog-status:empty { display: none; }
 .dialog-actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1.25rem; }
 .dialog-actions button { flex: 1 1 10rem; min-height: 2.75rem; }
 @media (max-width: 22rem) { main { padding: 1rem; } .dialog-actions { flex-direction: column; } }

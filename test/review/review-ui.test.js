@@ -47,12 +47,16 @@ test('review offers a correlated accessible delete-one dialog without exposing t
   ]);
   assert.match(html, /id="delete-audit"/u);
   assert.match(html, /<dialog[^>]+id="delete-audit-dialog"[^>]+aria-labelledby="delete-audit-title"[^>]+aria-describedby="delete-audit-description"/iu);
+  assert.match(html, /<dialog[^>]+id="delete-audit-dialog"[^>]+aria-hidden="true"/iu);
+  assert.match(html, /id="delete-audit-dialog-status"[^>]+role="status"[^>]+aria-live="polite"/iu);
   assert.match(html, /evidências[\s\S]*pixels[\s\S]*revisões[\s\S]*downloads/iu);
   assert.match(script, /createDestructiveDialog/u);
   assert.match(script, /REQUEST_DELETE_AUDIT/u);
   assert.match(script, /auditId:\s*auditModel\.auditId/u);
   assert.doesNotMatch(script, /window\.confirm|innerHTML/u);
   assert.match(css, /#delete-audit[^{]*\{[^}]*min-height:\s*2\.75rem/isu);
+  assert.match(css, /\*\s*\{[^}]*box-sizing:\s*border-box/isu);
+  assert.match(css, /dialog:not\(\[open\]\)[^{]*\{[^}]*display:\s*none/isu);
   assert.match(css, /@media\s*\(forced-colors:\s*active\)/iu);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/iu);
 });

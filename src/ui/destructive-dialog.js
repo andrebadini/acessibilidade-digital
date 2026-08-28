@@ -10,13 +10,21 @@ export function createDestructiveDialog(options) {
   const cancelButton = requiredControl(options?.cancelButton, 'Botão Cancelar');
   const confirmButton = requiredControl(options?.confirmButton, 'Botão de confirmação');
   const status = options?.status;
-  if (!status || typeof options?.onConfirm !== 'function' ||
+  const dialogStatus = options?.dialogStatus;
+  if (!status || !dialogStatus || typeof options?.onConfirm !== 'function' ||
     typeof options?.successMessage !== 'string' || typeof options?.failureMessage !== 'string') {
     throw new TypeError('Configuração do diálogo destrutivo inválida.');
   }
 
   let invoker = null;
   let pending = false;
+
+  const markClosed = () => {
+    dialog.setAttribute('aria-hidden', 'true');
+    dialog.inert = true;
+  };
+
+  if (!dialog.hasAttribute('open')) markClosed();
 
   const returnFocus = () => {
     const target = invoker;
@@ -26,13 +34,13 @@ export function createDestructiveDialog(options) {
 
   const close = ({ cancelled = false } = {}) => {
     if (pending) return false;
-    if (cancelled) status.textContent = 'Exclusão cancelada.';
     if (typeof dialog.close === 'function') dialog.close();
     else {
       dialog.removeAttribute('open');
-      dialog.setAttribute('aria-hidden', 'true');
+      markClosed();
       returnFocus();
     }
+    if (cancelled) status.textContent = 'Exclusão cancelada.';
     return true;
   };
 
@@ -41,7 +49,10 @@ export function createDestructiveDialog(options) {
     event.preventDefault();
     close({ cancelled: true });
   });
-  dialog.addEventListener('close', returnFocus);
+  dialog.addEventListener('close', () => {
+    markClosed();
+    returnFocus();
+  });
   dialog.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -66,17 +77,18 @@ export function createDestructiveDialog(options) {
     try {
       const result = await options.onConfirm();
       if (!result || result.ok !== true) {
-        status.textContent = typeof result?.error === 'string' ? result.error : options.failureMessage;
+        dialogStatus.textContent = typeof result?.error === 'string' ? result.error : options.failureMessage;
         return;
       }
-      status.textContent = options.successMessage;
+      dialogStatus.textContent = '';
       pending = false;
       cancelButton.disabled = false;
       confirmButton.disabled = false;
       close();
+      status.textContent = options.successMessage;
       return;
     } catch {
-      status.textContent = options.failureMessage;
+      dialogStatus.textContent = options.failureMessage;
     } finally {
       if (pending) {
         pending = false;
@@ -90,7 +102,9 @@ export function createDestructiveDialog(options) {
     open(trigger) {
       if (pending || dialog.hasAttribute('open')) return false;
       invoker = trigger ?? null;
+      dialogStatus.textContent = '';
       dialog.removeAttribute('aria-hidden');
+      dialog.inert = false;
       dialog.setAttribute('role', 'dialog');
       dialog.setAttribute('aria-modal', 'true');
       if (typeof dialog.showModal === 'function') dialog.showModal();

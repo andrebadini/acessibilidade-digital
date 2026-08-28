@@ -28,9 +28,10 @@ test('dialog focuses Cancel, Escape cancels, and focus returns to its invoker', 
   const cancelButton = element();
   const confirmButton = element();
   const status = { textContent: '' };
+  const dialogStatus = { textContent: '' };
   const invoker = element();
   const controller = createDestructiveDialog({
-    dialog, cancelButton, confirmButton, status,
+    dialog, cancelButton, confirmButton, status, dialogStatus,
     async onConfirm() { throw new Error('must not run'); },
     successMessage: 'Excluído.', failureMessage: 'Falhou.',
   });
@@ -45,6 +46,8 @@ test('dialog focuses Cancel, Escape cancels, and focus returns to its invoker', 
   assert.equal(dialog.hasAttribute('open'), false);
   assert.equal(invoker.focusCalls, 1);
   assert.equal(status.textContent, 'Exclusão cancelada.');
+  assert.equal(dialog.getAttribute('aria-hidden'), 'true');
+  assert.equal(dialog.inert, true);
 });
 
 test('confirmation is single-flight and disables both actions until completion', async () => {
@@ -54,11 +57,12 @@ test('confirmation is single-flight and disables both actions until completion',
   const cancelButton = element();
   const confirmButton = element();
   const status = { textContent: '' };
+  const dialogStatus = { textContent: '' };
   const invoker = element();
   let resolve;
   let calls = 0;
   const controller = createDestructiveDialog({
-    dialog, cancelButton, confirmButton, status,
+    dialog, cancelButton, confirmButton, status, dialogStatus,
     onConfirm() { calls += 1; return new Promise(done => { resolve = done; }); },
     successMessage: 'Auditoria local excluída; downloads preservados.',
     failureMessage: 'Não foi possível excluir.',
@@ -76,6 +80,7 @@ test('confirmation is single-flight and disables both actions until completion',
   assert.equal(cancelButton.disabled, false);
   assert.equal(confirmButton.disabled, false);
   assert.equal(status.textContent, 'Auditoria local excluída; downloads preservados.');
+  assert.equal(dialogStatus.textContent, '');
   assert.equal(invoker.focusCalls, 1);
 });
 
@@ -84,12 +89,15 @@ test('fallback dialog remains modal-labelled and keeps Tab within the two action
   const cancelButton = element();
   const confirmButton = element();
   const status = { textContent: '' };
+  const dialogStatus = { textContent: '' };
   const controller = createDestructiveDialog({
-    dialog, cancelButton, confirmButton, status,
+    dialog, cancelButton, confirmButton, status, dialogStatus,
     async onConfirm() { return { ok: false }; },
     successMessage: 'Excluído.', failureMessage: 'Não foi possível excluir.',
   });
 
+  assert.equal(dialog.getAttribute('aria-hidden'), 'true');
+  assert.equal(dialog.inert, true);
   controller.open(element());
   await Promise.resolve();
   assert.equal(dialog.getAttribute('role'), 'dialog');
@@ -111,6 +119,9 @@ test('fallback dialog remains modal-labelled and keeps Tab within the two action
   }
   click(confirmButton);
   await new Promise(done => setImmediate(done));
-  assert.equal(status.textContent, 'Não foi possível excluir.');
+  assert.equal(status.textContent, '');
+  assert.equal(dialogStatus.textContent, 'Não foi possível excluir.');
   assert.equal(dialog.hasAttribute('open'), true);
+  assert.equal(dialog.getAttribute('aria-hidden'), null);
+  assert.equal(dialog.inert, false);
 });
