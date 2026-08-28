@@ -67,6 +67,7 @@ test('private audit keys never become retention records', () => {
     '__audit_export_lease__:audit-1',
     '__audit_export_attempt__:audit-1',
     '__audit_export_delivery__:audit-1',
+    '__audit_retention_cleanup__',
   ]) assert.equal(isPrivateAuditKey(key), true);
   assert.equal(isPrivateAuditKey('batch-audit-1'), false);
 });

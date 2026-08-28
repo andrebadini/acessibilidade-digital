@@ -1,6 +1,7 @@
 export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 const LATEST_KEY = '__latest__';
+const RETENTION_CLEANUP_CURSOR_KEY = '__audit_retention_cleanup__';
 const PRIVATE_PREFIXES = Object.freeze([
   '__audit_revision__:',
   '__audit_export_lease__:',
@@ -17,7 +18,8 @@ const RETENTION_KEYS = Object.freeze([
 const UNIX_EPOCH = '1970-01-01T00:00:00.000Z';
 
 export function isPrivateAuditKey(value) {
-  return value === LATEST_KEY || PRIVATE_PREFIXES.some(prefix => value?.startsWith?.(prefix));
+  return value === LATEST_KEY || value === RETENTION_CLEANUP_CURSOR_KEY ||
+    PRIVATE_PREFIXES.some(prefix => value?.startsWith?.(prefix));
 }
 
 function canonicalAuditId(value) {

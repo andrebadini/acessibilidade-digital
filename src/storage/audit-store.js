@@ -15,6 +15,7 @@ const REVISION_KEY_PREFIX = '__audit_revision__:';
 const EXPORT_LEASE_KEY_PREFIX = '__audit_export_lease__:';
 const EXPORT_ATTEMPT_KEY_PREFIX = '__audit_export_attempt__:';
 const EXPORT_DELIVERY_KEY_PREFIX = '__audit_export_delivery__:';
+const RETENTION_CLEANUP_CURSOR_KEY = '__audit_retention_cleanup__';
 const DEFAULT_EXPORT_LEASE_TTL_MS = 2 * 60 * 1000;
 const MAX_EXPORT_LEASE_TTL_MS = 10 * 60 * 1000;
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
@@ -29,12 +30,32 @@ function clone(value) {
 function validId(id) {
   if (typeof id !== 'string' || !id.trim()) throw new TypeError('Identificador de auditoria inválido.');
   const value = id.trim();
-  if (value === LATEST_KEY || value.startsWith(REVISION_KEY_PREFIX) ||
+  if (value === LATEST_KEY || value === RETENTION_CLEANUP_CURSOR_KEY || value.startsWith(REVISION_KEY_PREFIX) ||
     value.startsWith(EXPORT_LEASE_KEY_PREFIX) || value.startsWith(EXPORT_ATTEMPT_KEY_PREFIX) ||
     value.startsWith(EXPORT_DELIVERY_KEY_PREFIX)) {
     throw new TypeError('Identificador de auditoria reservado ou inválido.');
   }
   return value;
+}
+
+function cleanupCursorRecord(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+    JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(['auditId', 'expiresAt', 'schemaVersion']) ||
+    value.schemaVersion !== 1) return null;
+  let expiresAt;
+  let auditId;
+  try {
+    expiresAt = canonicalRetentionInstant(value.expiresAt).iso;
+    auditId = validId(value.auditId);
+  } catch {
+    return null;
+  }
+  return Object.freeze({ schemaVersion: 1, expiresAt, auditId });
+}
+
+function compareRetentionPosition(metadata, marker) {
+  const expiryOrder = metadata.expiresAt.localeCompare(marker.expiresAt);
+  return expiryOrder === 0 ? metadata.auditId.localeCompare(marker.auditId) : expiryOrder;
 }
 
 function storedRevision(value) {
@@ -755,7 +776,14 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
         .map(value => validateRetentionMetadata(value, value.auditId))
         .filter(value => new Date(value.expiresAt).getTime() <= instant.milliseconds)
         .sort((a, b) => a.expiresAt.localeCompare(b.expiresAt) || a.auditId.localeCompare(b.auditId));
-      const candidates = expired.slice(0, limit);
+      const marker = cleanupCursorRecord(initial.get(RETENTION_CLEANUP_CURSOR_KEY));
+      let candidates = marker
+        ? expired.filter(value => compareRetentionPosition(value, marker) > 0).slice(0, limit)
+        : expired.slice(0, limit);
+      if (marker && candidates.length === 0 && expired.length > 0) {
+        initial.delete(RETENTION_CLEANUP_CURSOR_KEY);
+        candidates = expired.slice(0, limit);
+      }
       let deleted = 0;
       let blocked = 0;
       for (const candidate of candidates) {
@@ -765,6 +793,16 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
         }
         deleteStoredAudit(candidate.auditId);
         deleted += 1;
+      }
+      if (candidates.length === limit) {
+        const last = candidates.at(-1);
+        initial.set(RETENTION_CLEANUP_CURSOR_KEY, {
+          schemaVersion: 1,
+          expiresAt: last.expiresAt,
+          auditId: last.auditId,
+        });
+      } else {
+        initial.delete(RETENTION_CLEANUP_CURSOR_KEY);
       }
       return { scanned: candidates.length, deleted, remaining: expired.length - deleted, blocked };
     },
@@ -1741,6 +1779,8 @@ export function createAuditStore(options = {}) {
       let blocked = 0;
       let initialCount = 0;
       let countRead = false;
+      let markerRead = false;
+      let marker = null;
       let cursorFinished = false;
       let settled = false;
       const finish = (handler, value) => {
@@ -1752,16 +1792,42 @@ export function createAuditStore(options = {}) {
       const range = keyRange.upperBound(instant.iso);
       const index = indexedDbBoundary(() => retentionStore.index('byExpiresAt'));
       const countRequest = index.count(range);
-      const cursorRequest = index.openCursor(range);
+      const markerRequest = auditStore.get(RETENTION_CLEANUP_CURSOR_KEY);
+      let cursorRequest;
       countRequest.onsuccess = () => {
         initialCount = countRequest.result;
         countRead = true;
       };
       countRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
-      cursorRequest.onsuccess = () => {
+      markerRequest.onsuccess = () => {
+        markerRead = true;
+        marker = cleanupCursorRecord(markerRequest.result);
+        if (markerRequest.result !== undefined && marker === null) {
+          auditStore.delete(RETENTION_CLEANUP_CURSOR_KEY);
+        }
+        cursorRequest = index.openCursor(range);
+        cursorRequest.onsuccess = handleCursor;
+        cursorRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      };
+      markerRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      const handleCursor = () => {
         const cursor = cursorRequest.result;
+        if (marker && cursor) {
+          const current = { expiresAt: String(cursor.key), auditId: String(cursor.primaryKey) };
+          const order = compareRetentionPosition(current, marker);
+          if (order <= 0) {
+            if (order < 0 && typeof cursor.continuePrimaryKey === 'function') {
+              cursor.continuePrimaryKey(marker.expiresAt, marker.auditId);
+            } else {
+              cursor.continue();
+            }
+            return;
+          }
+          marker = null;
+        }
         if (!cursor || scanned >= limit) {
           cursorFinished = true;
+          if (scanned < limit) auditStore.delete(RETENTION_CLEANUP_CURSOR_KEY);
           return;
         }
         let metadata;
@@ -1772,7 +1838,14 @@ export function createAuditStore(options = {}) {
         }
         scanned += 1;
         if (scanned < limit) cursor.continue();
-        else cursorFinished = true;
+        else {
+          cursorFinished = true;
+          auditStore.put({
+            schemaVersion: 1,
+            expiresAt: metadata.expiresAt,
+            auditId: metadata.auditId,
+          }, RETENTION_CLEANUP_CURSOR_KEY);
+        }
         const revisionRequest = auditStore.get(revisionKey(metadata.auditId));
         const leaseRequest = auditStore.get(exportLeaseKey(metadata.auditId));
         const deliveryRequest = auditStore.get(exportDeliveryKey(metadata.auditId));
@@ -1812,9 +1885,8 @@ export function createAuditStore(options = {}) {
         deliveryRequest.onsuccess = () => { deliveryRead = true; deliveryValue = deliveryRequest.result; decide(); };
         revisionRequest.onerror = leaseRequest.onerror = deliveryRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       };
-      cursorRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       transaction.oncomplete = () => {
-        if (!countRead || !cursorFinished) finish(reject, new AuditStorageUnavailableError());
+        if (!countRead || !markerRead || !cursorFinished) finish(reject, new AuditStorageUnavailableError());
         else finish(resolve, { scanned, deleted, remaining: Math.max(0, initialCount - deleted), blocked });
       };
       transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());

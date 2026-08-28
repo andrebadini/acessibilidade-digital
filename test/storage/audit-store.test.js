@@ -87,6 +87,83 @@ test('incremental cleanup deletes at most 25 expired records and continues witho
   assert.ok(await store.getAudit('future-audit'));
 });
 
+test('cleanup resumes after 25 blocked audits across store recreation and then restarts its cycle', async () => {
+  for (const scenario of [
+    {
+      name: 'memory',
+      setup() {
+        const backing = new Map();
+        return {
+          backing,
+          first: createInMemoryAuditStore(backing),
+          reopen: () => createInMemoryAuditStore(backing),
+          inspectPrivate: () => [...backing.entries()],
+        };
+      },
+    },
+    {
+      name: 'indexeddb',
+      setup() {
+        const fake = createFakeIndexedDb();
+        return {
+          first: createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange }),
+          reopen: () => createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange }),
+          inspectPrivate: () => [...fake.inspectStore('audits').entries()],
+        };
+      },
+    },
+  ]) {
+    const context = scenario.setup();
+    for (let index = 0; index < 25; index += 1) {
+      const auditId = `blocked-${String(index).padStart(2, '0')}`;
+      const ownerId = `owner-${String(index).padStart(2, '0')}`;
+      await context.first.commitAudit(auditId, { auditId }, { auditId }, { now: T0 });
+      let snapshot = await context.first.getAuditSnapshot(auditId);
+      const lease = await context.first.acquireExportLease(auditId, snapshot.capability, {
+        ownerId, now: '2026-08-30T10:00:00.000Z',
+      });
+      await context.first.claimExportLease(auditId, snapshot.capability, {
+        ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-30T10:00:00.100Z',
+      });
+      await context.first.commitAuditIfRevisionWithExportLease(
+        auditId,
+        { auditId, phase: 'delivering' },
+        { auditId, exportStatus: 'delivering' },
+        snapshot.capability,
+        {
+          ownerId, exportAttempt: lease.exportAttempt,
+          now: '2026-08-30T10:00:00.200Z', phase: 'delivering',
+        },
+      );
+      snapshot = await context.first.getAuditSnapshot(auditId);
+      await context.first.recordExportDelivery(auditId, snapshot.capability, {
+        ownerId, exportAttempt: lease.exportAttempt,
+        now: '2026-08-30T10:00:00.300Z', format: 'html', filename: 'auditoria.html', state: 'starting',
+      });
+    }
+    await context.first.commitAudit('clean-after-blocked', { auditId: 'clean-after-blocked' }, { auditId: 'clean-after-blocked' }, { now: T0 });
+
+    assert.deepEqual(await context.first.cleanupExpiredAudits({ now: T30, limit: 25 }), {
+      scanned: 25, deleted: 0, remaining: 26, blocked: 25,
+    }, scenario.name);
+    const privateEntries = context.inspectPrivate()
+      .filter(([key]) => String(key).startsWith('__audit_retention_cleanup__'));
+    assert.equal(privateEntries.length, 1, scenario.name);
+    assert.doesNotMatch(JSON.stringify(privateEntries), /https?:|token|pixel|sentinel/iu, scenario.name);
+
+    const reopened = context.reopen();
+    assert.deepEqual(await reopened.cleanupExpiredAudits({ now: T30, limit: 25 }), {
+      scanned: 1, deleted: 1, remaining: 25, blocked: 0,
+    }, scenario.name);
+    assert.equal(await reopened.getAudit('clean-after-blocked'), undefined, scenario.name);
+    assert.equal((await reopened.getAuditRetention('blocked-00')).expiresAt, T30, scenario.name);
+
+    assert.deepEqual(await reopened.cleanupExpiredAudits({ now: T30, limit: 25 }), {
+      scanned: 25, deleted: 0, remaining: 25, blocked: 25,
+    }, scenario.name);
+  }
+});
+
 test('delete-one enforces snapshot CAS and refuses active lease or delivery journal', async () => {
   const store = createInMemoryAuditStore();
   const auditId = 'delete-one';
@@ -1376,11 +1453,11 @@ function createFakeIndexedDb(options = {}) {
             transaction._end();
             return;
           }
-          const [key, value] = entries[index];
+          const [key, value, primaryKey = key] = entries[index];
           let continued = false;
           result.result = {
             key,
-            primaryKey: key,
+            primaryKey,
             value: cloneValue(value),
             continue() {
               if (continued) throw new Error('Cursor already continued');
@@ -1388,7 +1465,17 @@ function createFakeIndexedDb(options = {}) {
               index += 1;
               dispatch();
             },
-            delete() { definition.records.delete(key); },
+            continuePrimaryKey(targetKey, targetPrimaryKey) {
+              if (continued) throw new Error('Cursor already continued');
+              continued = true;
+              index = entries.findIndex((entry, candidateIndex) => candidateIndex > index &&
+                (String(entry[0]).localeCompare(String(targetKey)) > 0 ||
+                  (String(entry[0]) === String(targetKey) &&
+                    String(entry[2] ?? entry[0]).localeCompare(String(targetPrimaryKey)) >= 0)));
+              if (index < 0) index = entries.length;
+              dispatch();
+            },
+            delete() { definition.records.delete(primaryKey); },
           };
           result.onsuccess?.({ target: result });
           if (!continued) transaction._end();
@@ -1420,7 +1507,8 @@ function createFakeIndexedDb(options = {}) {
           openCursor(range) {
             return cursorRequest(() => [...definition.records.entries()]
               .filter(([, value]) => range?.upper === undefined || value?.[indexDefinition.keyPath] <= range.upper)
-              .sort((a, b) => String(a[1]?.[indexDefinition.keyPath]).localeCompare(String(b[1]?.[indexDefinition.keyPath]))));
+              .map(([primaryKey, value]) => [value?.[indexDefinition.keyPath], value, primaryKey])
+              .sort((a, b) => String(a[0]).localeCompare(String(b[0])) || String(a[2]).localeCompare(String(b[2]))));
           },
         };
       },
