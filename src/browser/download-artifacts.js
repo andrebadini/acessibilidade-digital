@@ -265,6 +265,12 @@ export function createDownloadsAdapter(chromeApi, urlApi = globalThis.URL) {
     removeDownloadFile: typeof chromeApi.downloads.removeFile === 'function'
       ? downloadId => invokeChrome(chromeApi, callback => chromeApi.downloads.removeFile(downloadId, callback))
       : undefined,
+    inspectDownload: typeof chromeApi.downloads.search === 'function'
+      ? downloadId => invokeChrome(chromeApi, callback => chromeApi.downloads.search({ id: downloadId }, callback))
+      : undefined,
+    eraseDownload: typeof chromeApi.downloads.erase === 'function'
+      ? downloadId => invokeChrome(chromeApi, callback => chromeApi.downloads.erase({ id: downloadId }, callback))
+      : undefined,
     findDownloadsByFilename: typeof chromeApi.downloads.search === 'function'
       ? async filename => {
           const escaped = filename.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
@@ -465,6 +471,40 @@ async function cleanupPhysicalDownload(adapter, downloadId, cancelOperation, tim
       'O cancelamento do download excedeu o tempo limite.',
     );
   } catch {}
+  const inspect = ownOrPrototypeMethod(adapter, 'inspectDownload');
+  if (inspect) {
+    let inspection;
+    try {
+      inspection = snapshotDownloadInspection(await boundedOperation(
+        Promise.resolve().then(() => Reflect.apply(inspect, adapter, [downloadId])),
+        timeoutMs,
+        'A inspeção do download excedeu o tempo limite.',
+      ), downloadId);
+    } catch {
+      return { removed: false };
+    }
+    if (inspection === 'interrupted-user-cancelled-absent') {
+      const erase = ownOrPrototypeMethod(adapter, 'eraseDownload');
+      if (!erase) return { removed: false };
+      try {
+        const erased = await boundedOperation(
+          Promise.resolve().then(() => Reflect.apply(erase, adapter, [downloadId])),
+          timeoutMs,
+          'A remoção do histórico do download excedeu o tempo limite.',
+        );
+        if (!isExactErasure(erased, downloadId)) return { removed: false };
+        const confirmed = snapshotDownloadInspection(await boundedOperation(
+          Promise.resolve().then(() => Reflect.apply(inspect, adapter, [downloadId])),
+          timeoutMs,
+          'A confirmação da remoção do download excedeu o tempo limite.',
+        ), downloadId);
+        return { removed: confirmed === 'absent' };
+      } catch {
+        return { removed: false };
+      }
+    }
+    if (inspection !== 'complete') return { removed: false };
+  }
   const remove = ownOrPrototypeMethod(adapter, 'removeDownloadFile');
   if (!remove) return { removed: false };
   try {
@@ -476,6 +516,53 @@ async function cleanupPhysicalDownload(adapter, downloadId, cancelOperation, tim
     return { removed: true };
   } catch {
     return { removed: false };
+  }
+}
+
+function snapshotDownloadInspection(value, downloadId) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return 'invalid';
+    const length = Object.getOwnPropertyDescriptor(value, 'length');
+    if (!length || !Object.hasOwn(length, 'value') || !Number.isSafeInteger(length.value) ||
+      length.value < 0 || length.value > 1 || Reflect.ownKeys(value).length !== length.value + 1) return 'invalid';
+    if (length.value === 0) {
+      structuredClone(value);
+      return 'absent';
+    }
+    const entry = Object.getOwnPropertyDescriptor(value, '0');
+    if (!entry?.enumerable || !Object.hasOwn(entry, 'value')) return 'invalid';
+    const item = entry.value;
+    if (!item || typeof item !== 'object' || Array.isArray(item) || Object.getPrototypeOf(item) !== Object.prototype) return 'invalid';
+    for (const key of Reflect.ownKeys(item)) {
+      const descriptor = Object.getOwnPropertyDescriptor(item, key);
+      if (typeof key !== 'string' || !descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return 'invalid';
+    }
+    const field = key => Object.getOwnPropertyDescriptor(item, key)?.value;
+    if (field('id') !== downloadId) return 'invalid';
+    const state = field('state');
+    structuredClone(value);
+    if (state === 'complete') return 'complete';
+    if (state === 'interrupted' && field('error') === 'USER_CANCELED' &&
+      field('canResume') === false && field('exists') === false) {
+      return 'interrupted-user-cancelled-absent';
+    }
+    return 'invalid';
+  } catch {
+    return 'invalid';
+  }
+}
+
+function isExactErasure(value, downloadId) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || Reflect.ownKeys(value).length !== 2) return false;
+    const length = Object.getOwnPropertyDescriptor(value, 'length');
+    const entry = Object.getOwnPropertyDescriptor(value, '0');
+    if (!length || !Object.hasOwn(length, 'value') || length.value !== 1 ||
+      !entry?.enumerable || !Object.hasOwn(entry, 'value') || entry.value !== downloadId) return false;
+    structuredClone(value);
+    return true;
+  } catch {
+    return false;
   }
 }
 

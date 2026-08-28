@@ -618,6 +618,24 @@ test('accepts one exact late print-cleanup limitation only in a partial delivery
   assert.deepEqual(persisted.latest.deliveryReceipt, result.deliveryReceipt);
 });
 
+test('accepts a controlled fourth-artifact start failure as a partial export', async () => {
+  const result = await genuineReportExport({ pdfDownloadStartFailure: true });
+  assert.deepEqual(result.deliveryReceipt.formats.at(-1), {
+    format: 'pdf',
+    filename: result.deliveryReceipt.formats.at(-1).filename,
+    mimeType: 'application/pdf',
+    status: 'interrupted',
+    sha256: result.deliveryReceipt.formats.at(-1).sha256,
+    failureCode: 'DOWNLOAD_START_FAILED',
+  });
+
+  const persisted = await persistExportSuccess({
+    auditId: result.model.auditId, result, latest: {},
+  }, { async commitAudit() {} });
+  assert.equal(persisted.latest.exportStatus, 'partial');
+  assert.equal(persisted.latest.deliveryReceipt.status, 'partial');
+});
+
 test('rejects artifact payloads that are present despite controlled CSV or PDF omission', async () => {
   const missingCsv = generatedModel(['html', 'json', 'pdf'], ['REPORT_CSV_UNAVAILABLE']);
   const missingPdf = generatedModel(['html', 'json', 'csv'], ['REPORT_PDF_UNAVAILABLE']);
@@ -1018,7 +1036,11 @@ async function genuineReportExport(options = {}) {
         return `blob:chrome-extension://test/download-${artifactUrl}`;
       },
       revokeObjectURL() {},
-      async download() { downloadId += 1; return downloadId; },
+      async download() {
+        downloadId += 1;
+        if (options.pdfDownloadStartFailure && downloadId === 4) throw new Error('controlled start failure');
+        return downloadId;
+      },
       async cancelDownload() {},
       async removeDownloadFile() {},
       async waitForDownload(id) {

@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   buildArtifactBaseName,
   bindDeliveryArtifactBaseName,
+  createDownloadsAdapter,
   downloadArtifacts,
   reconcileStaleDownloads,
 } from '../../src/browser/download-artifacts.js';
@@ -245,6 +246,144 @@ test('bounds hanging cancel and remove operations, stops lease polling, and pers
   assert.deepEqual(journal.at(-1), {
     state: 'cleanup-failed', format: 'html', filename: 'audit.html', downloadId: 78,
   });
+});
+
+test('settles an interrupted artifact only after Chrome attests user cancellation, physical absence and exact history erasure', async () => {
+  const events = [];
+  const journal = [];
+  let inspections = 0;
+  const adapter = {
+    createObjectURL() { return 'blob:chrome-extension://test/interrupted-clean'; },
+    revokeObjectURL() {},
+    async download() { return 79; },
+    async waitForDownload() {
+      throw Object.assign(new Error('interrupted'), { name: 'DownloadInterruptedError' });
+    },
+    async cancelDownload(id) { events.push(['cancel', id]); },
+    async inspectDownload(id) {
+      events.push(['inspect', id]);
+      inspections += 1;
+      return inspections === 1
+        ? [{ id, state: 'interrupted', error: 'USER_CANCELED', canResume: false, exists: false }]
+        : [];
+    },
+    async eraseDownload(id) { events.push(['erase', id]); return [id]; },
+    async removeDownloadFile() { throw new Error('removeFile must not receive an interrupted item'); },
+  };
+
+  const result = await downloadArtifacts({ baseName: 'audit', html: '<!doctype html>' }, adapter, {
+    timeoutMs: 50,
+    hashBytes: FAST_SHA256,
+    async recordDeliveryState(entry) { journal.push(entry); },
+  });
+
+  assert.deepEqual(events, [
+    ['cancel', 79], ['inspect', 79], ['erase', 79], ['inspect', 79],
+  ]);
+  assert.deepEqual(result.formats.map(entry => [entry.status, entry.failureCode]), [
+    ['interrupted', 'DOWNLOAD_INTERRUPTED'],
+  ]);
+  assert.deepEqual(journal, [
+    { state: 'starting', format: 'html', filename: 'audit.html' },
+    { state: 'in-flight', format: 'html', filename: 'audit.html', downloadId: 79 },
+    { state: 'cleaned', format: 'html', filename: 'audit.html', downloadId: 79 },
+  ]);
+});
+
+test('keeps interrupted cleanup pending for ambiguous, resumable, residual or incompletely erased downloads', async () => {
+  const cancelled = id => ({ id, state: 'interrupted', error: 'USER_CANCELED', canResume: false, exists: false });
+  let accessorRead = false;
+  const accessorItem = cancelled(80);
+  Object.defineProperty(accessorItem, 'state', {
+    enumerable: true,
+    get() { accessorRead = true; return 'interrupted'; },
+  });
+  const scenarios = [
+    ['absent-before-erasure', { first: [] }],
+    ['ambiguous', { first: [cancelled(80), cancelled(80)] }],
+    ['wrong-id', { first: [cancelled(81)] }],
+    ['network-interruption', { first: [{ ...cancelled(80), error: 'NETWORK_FAILED' }] }],
+    ['resumable', { first: [{ ...cancelled(80), canResume: true }] }],
+    ['missing-can-resume', { first: [{ id: 80, state: 'interrupted', error: 'USER_CANCELED', exists: false }] }],
+    ['physical-residue', { first: [{ ...cancelled(80), exists: true }] }],
+    ['missing-exists', { first: [{ id: 80, state: 'interrupted', error: 'USER_CANCELED', canResume: false }] }],
+    ['accessor', { first: [accessorItem] }],
+    ['proxy', { first: new Proxy([cancelled(80)], {}) }],
+    ['erase-empty', { first: [cancelled(80)], erased: [] }],
+    ['erase-wrong-id', { first: [cancelled(80)], erased: [81] }],
+    ['erase-ambiguous', { first: [cancelled(80)], erased: [80, 81] }],
+    ['erase-rejected', { first: [cancelled(80)], eraseError: true }],
+    ['still-present', { first: [cancelled(80)], erased: [80], after: [cancelled(80)] }],
+    ['malformed-after-erasure', { first: [cancelled(80)], erased: [80], after: [{ id: 80 }] }],
+  ];
+
+  for (const [name, scenario] of scenarios) {
+    const journal = [];
+    let inspections = 0;
+    const adapter = {
+      createObjectURL() { return `blob:chrome-extension://test/${name}`; },
+      revokeObjectURL() {},
+      async download() { return 80; },
+      async waitForDownload() {
+        throw Object.assign(new Error('interrupted'), { name: 'DownloadInterruptedError' });
+      },
+      async cancelDownload() {},
+      async inspectDownload() {
+        inspections += 1;
+        return inspections === 1 ? scenario.first : scenario.after ?? [];
+      },
+      async eraseDownload() {
+        if (scenario.eraseError) throw new Error('PRIVATE_ERASE_SENTINEL');
+        return scenario.erased ?? [80];
+      },
+      async removeDownloadFile() { throw new Error('interrupted item cannot be removed as complete'); },
+    };
+    await assert.rejects(downloadArtifacts({ baseName: 'audit', html: '<!doctype html>' }, adapter, {
+      timeoutMs: 20,
+      hashBytes: FAST_SHA256,
+      async recordDeliveryState(entry) { journal.push(entry); },
+    }), error => error?.code === 'AUDIT_DOWNLOAD_CLEANUP_PENDING', name);
+    assert.deepEqual(journal.at(-1), {
+      state: 'cleanup-failed', format: 'html', filename: 'audit.html', downloadId: 80,
+    }, name);
+    assert.doesNotMatch(JSON.stringify(journal), /PRIVATE_ERASE_SENTINEL/u, name);
+  }
+  assert.equal(accessorRead, false);
+});
+
+test('exposes exact download inspection and history erasure through callback Chrome APIs', async () => {
+  const calls = [];
+  const chromeApi = {
+    runtime: { lastError: null },
+    downloads: {
+      search(query, callback) {
+        calls.push(['search', query]);
+        callback([{ id: query.id, state: 'interrupted', error: 'USER_CANCELED', canResume: false, exists: false }]);
+      },
+      erase(query, callback) { calls.push(['erase', query]); callback([query.id]); },
+      download(_options, callback) { callback(1); },
+      cancel(_id, callback) { callback(); },
+      removeFile(_id, callback) { callback(); },
+      onChanged: { addListener() {}, removeListener() {} },
+    },
+  };
+  const adapter = createDownloadsAdapter(chromeApi, {
+    createObjectURL() { return 'blob:chrome-extension://test/adapter'; },
+    revokeObjectURL() {},
+  });
+
+  assert.deepEqual(await adapter.inspectDownload(91), [
+    { id: 91, state: 'interrupted', error: 'USER_CANCELED', canResume: false, exists: false },
+  ]);
+  assert.deepEqual(await adapter.eraseDownload(91), [91]);
+  assert.deepEqual(calls, [['search', { id: 91 }], ['erase', { id: 91 }]]);
+
+  chromeApi.downloads.search = (_query, callback) => {
+    chromeApi.runtime.lastError = { message: 'PRIVATE_SEARCH_SENTINEL' };
+    callback(undefined);
+    chromeApi.runtime.lastError = null;
+  };
+  await assert.rejects(adapter.inspectDownload(91));
 });
 
 test('reconciles stale IDs and pre-ID starts before a retry can deliver new artifacts', async () => {
