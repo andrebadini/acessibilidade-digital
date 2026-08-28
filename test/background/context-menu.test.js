@@ -361,7 +361,7 @@ test('correlates one-shot panel ACKs to tab/document, confirms the same document
   await waitUntil(() => starts.length === 1);
 
   assert.equal(starts[0].navigationUrl, 'https://destino.test/alvo?token=TOPSECRET&view=public#auth=TOPSECRET');
-  assert.equal(starts[0].senderKey, 'context:7');
+  assert.equal(starts[0].senderKey, 'panel-tab:50');
   assert.deepEqual(panelStartResponse, { ok: true, auditId: 'audit-context', state: 'idle' });
   chromeApi.events.onClicked.fire(pageInfo, sourceTab);
   await tick();
