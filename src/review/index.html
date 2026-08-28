@@ -15,9 +15,18 @@
         <label for="review-evaluator">Nome da pessoa avaliadora</label>
         <input id="review-evaluator" autocomplete="name" required>
         <button id="regenerate-report" type="button">Gerar relatório atualizado</button>
+        <button id="delete-audit" type="button" class="danger-action" disabled>Excluir auditoria local</button>
         <a href="../panel/index.html">Voltar ao painel</a>
       </div>
       <section id="review-list" aria-label="Ocorrências para revisão"></section>
+      <dialog id="delete-audit-dialog" aria-labelledby="delete-audit-title" aria-describedby="delete-audit-description">
+        <h2 id="delete-audit-title">Excluir esta auditoria local?</h2>
+        <p id="delete-audit-description">Esta ação apaga as evidências, os pixels e as revisões locais desta auditoria. Os downloads já salvos não serão apagados.</p>
+        <div class="dialog-actions">
+          <button id="delete-audit-cancel" type="button">Cancelar</button>
+          <button id="delete-audit-confirm" type="button" class="danger-action">Excluir auditoria</button>
+        </div>
+      </dialog>
     </main>
   </body>
 </html>

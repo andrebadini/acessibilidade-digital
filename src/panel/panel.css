@@ -113,6 +113,61 @@ textarea { width: 100%; resize: vertical; }
 .batch-warnings { margin: 0; color: #6b4f00; }
 #cancel-audit { min-height: 2.75rem; background: #8b2f00; }
 
+.retention-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.65rem;
+  min-height: 2.75rem;
+  padding: 0.55rem;
+  border: 2px solid var(--border);
+  border-radius: 0.3rem;
+}
+
+.retention-option input[type="checkbox"] {
+  inline-size: 1.5rem;
+  min-height: 1.5rem;
+  margin: 0;
+}
+
+.storage-card {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  border: 2px solid var(--border);
+  border-radius: 0.3rem;
+  background: var(--surface);
+}
+
+#delete-all-audits { min-height: 2.75rem; }
+
+.danger-action {
+  border-color: #7d2100;
+  background: #8b2f00;
+  color: #ffffff;
+}
+
+dialog {
+  inline-size: min(32rem, calc(100% - 2rem));
+  max-inline-size: calc(100% - 2rem);
+  padding: clamp(1rem, 4vw, 1.5rem);
+  border: 3px solid var(--brand);
+  border-radius: 0.5rem;
+  color: var(--ink);
+  background: var(--surface);
+  overflow-wrap: anywhere;
+}
+
+dialog::backdrop { background: #14212bbf; }
+
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+}
+
+.dialog-actions button { flex: 1 1 10rem; min-height: 2.75rem; }
+
 select {
   width: 100%;
   border: 2px solid var(--border);
@@ -346,6 +401,9 @@ a {
   input,
   select,
   textarea,
+  dialog,
+  .storage-card,
+  .retention-option,
   .audit-mode,
   .persona-card,
   .persona-reader-card,

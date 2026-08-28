@@ -34,6 +34,27 @@ test('panel exposes an explicit accessible single-page or URL-list audit form', 
   assert.match(css, /\.product-header[^{]*\{[^}]*flex-wrap:\s*wrap/isu);
 });
 
+test('panel exposes explicit 30-day retention controls and a confirmed delete-all dialog', async () => {
+  const [html, script, css] = await Promise.all([
+    readFile(new URL('../../src/panel/index.html', import.meta.url), 'utf8'),
+    readFile(new URL('../../src/panel/panel.js', import.meta.url), 'utf8'),
+    readFile(new URL('../../src/panel/panel.css', import.meta.url), 'utf8'),
+  ]);
+  assert.match(html, /URLs sanitizadas[\s\S]*pixels[\s\S]*nada é enviado[\s\S]*até 30 dias[\s\S]*downloads/iu);
+  assert.match(html, /id="delete-after-export"[^>]*type="checkbox"/iu);
+  assert.match(html, /Excluir esta auditoria local depois que HTML, JSON-LD, CSV e PDF forem baixados com sucesso/iu);
+  assert.match(html, /id="delete-all-audits"/u);
+  assert.match(html, /<dialog[^>]+id="delete-all-dialog"[^>]+aria-labelledby="delete-all-title"[^>]+aria-describedby="delete-all-description"/iu);
+  assert.match(html, /todas as auditorias locais[\s\S]*downloads/iu);
+  assert.match(script, /createDestructiveDialog/u);
+  assert.match(script, /deleteAfterCompleteExport:\s*deleteAfterExport\.checked/u);
+  assert.match(script, /REQUEST_DELETE_ALL_AUDITS/u);
+  assert.doesNotMatch(script, /window\.confirm|innerHTML/u);
+  assert.match(css, /#delete-all-audits[^{]*\{[^}]*min-height:\s*2\.75rem/isu);
+  assert.match(css, /@media\s*\(forced-colors:\s*active\)/iu);
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/iu);
+});
+
 test('panel exposes three reversible persona modes and complete simulated-reader controls', async () => {
   const [html, script, css] = await Promise.all([
     readFile(new URL('../../src/panel/index.html', import.meta.url), 'utf8'),

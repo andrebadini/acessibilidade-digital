@@ -1,3 +1,6 @@
 :root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#162330;background:#f4f6f8;color-scheme:light}
-body{margin:0}main{max-width:46rem;margin:3rem auto;padding:2rem;background:#fff;border-top:.4rem solid #003b71;box-shadow:0 .25rem 1.25rem #16233018}
+*{box-sizing:border-box}
+body{margin:0;overflow-wrap:anywhere}main{max-width:46rem;margin:3rem auto;padding:2rem;background:#fff;border-top:.4rem solid #003b71;box-shadow:0 .25rem 1.25rem #16233018}
 h1{font-size:clamp(1.7rem,4vw,2.4rem);line-height:1.15;margin-top:0}p{font-size:1.05rem;line-height:1.6}
+@media (max-width:24rem){main{margin:0;padding:1.25rem;min-height:100vh;box-shadow:none}h1{font-size:1.7rem}}
+@media (forced-colors:active){main{border:1px solid CanvasText;border-top-width:.4rem;box-shadow:none}}

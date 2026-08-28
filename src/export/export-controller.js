@@ -139,7 +139,7 @@ export async function persistExportFailure(request, store) {
 
 export async function persistExportSuccess(request, store) {
   const envelope = consumeOpaqueRequest(SUCCESS_REQUESTS, request, 'Solicitação de exportação');
-  assertRevisionStore(store);
+  assertSuccessStore(store);
   const { auditId, expectedRevision } = envelope;
   const outerResult = cloneOuterRecord(envelope.result, RESULT_KEYS, [...RESULT_KEYS], 'Resultado de exportação');
   let result;
@@ -216,7 +216,7 @@ export async function persistExportSuccess(request, store) {
     message: exportStatus === 'complete' ? 'Arquivos do relatório gerados.' : 'Relatório gerado com limitações.',
     deliveryReceipt: receipt,
   };
-  await store.commitAuditIfRevisionWithExportLease(
+  const finalized = await store.finalizeExportAndMaybeDelete(
     auditId,
     verifiedModel,
     latest,
@@ -226,9 +226,10 @@ export async function persistExportSuccess(request, store) {
       now: new Date().toISOString(),
       release: true,
       clearDeliveryJournal: true,
+      deleteAfterCompleteExport: true,
     },
   );
-  return { model: verifiedModel, latest };
+  return { model: verifiedModel, latest, deleted: finalized?.deleted === true };
 }
 
 function normalizeDeliveryReceipt(value, preparedFormats) {
@@ -491,6 +492,13 @@ function consumeOpaqueRequest(registry, request, label) {
 function assertRevisionStore(store) {
   if (!store || typeof store.commitAuditIfRevisionWithExportLease !== 'function') {
     throw new TypeError('Store de auditoria sem lease e compare-and-swap de exportação.');
+  }
+}
+
+function assertSuccessStore(store) {
+  assertRevisionStore(store);
+  if (typeof store.finalizeExportAndMaybeDelete !== 'function') {
+    throw new TypeError('Store de auditoria sem finalização atômica de retenção.');
   }
 }
 

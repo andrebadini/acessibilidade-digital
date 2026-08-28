@@ -16,7 +16,7 @@
       <h1>Audita Acessibilidade</h1>
       <p class="intro">Audite uma página com evidências locais e revisão assistida. Nenhum conteúdo da auditoria é enviado a servidores.</p>
       <p class="independence-notice">Esta é uma ferramenta independente, sem vínculo institucional. Seus resultados não equivalem a certificação nem a laudo oficial.</p>
-      <p id="audit-privacy-notice" class="privacy-notice"><strong>Antes de auditar:</strong> cada aba usa sua sessão atual. URLs e pixels podem conter dados pessoais visíveis. As evidências são armazenadas localmente e incorporadas aos relatórios. Oculte ou remova dados sensíveis antes de iniciar.</p>
+      <p id="audit-privacy-notice" class="privacy-notice"><strong>Antes de auditar:</strong> cada aba usa sua sessão atual. URLs sanitizadas e pixels das capturas da página inteira e dos elementos podem conter dados pessoais ou dados sensíveis visíveis. Nada é enviado: evidências e revisões ficam armazenadas localmente por até 30 dias e são incorporadas aos relatórios. Downloads já salvos não são apagados pela ferramenta. Oculte ou remova dados sensíveis antes de iniciar.</p>
       <form id="audit-form" novalidate>
         <fieldset class="audit-mode">
           <legend>Escopo da auditoria</legend>
@@ -34,6 +34,10 @@
           <ul id="batch-errors"></ul>
           <ul id="batch-warnings" class="batch-warnings"></ul>
         </div>
+        <label class="retention-option" for="delete-after-export">
+          <input id="delete-after-export" name="delete-after-export" type="checkbox">
+          <span>Excluir esta auditoria local depois que HTML, JSON-LD, CSV e PDF forem baixados com sucesso</span>
+        </label>
         <button type="submit">Auditar</button>
         <button id="cancel-audit" type="button" hidden>Cancelar auditoria</button>
       </form>
@@ -43,6 +47,11 @@
         <p id="batch-progress" hidden></p>
         <p id="batch-summary" hidden></p>
         <a id="latest-report" hidden aria-disabled="true">Revisar ocorrências</a>
+      </section>
+      <section class="storage-card" aria-labelledby="storage-heading">
+        <h2 id="storage-heading">Dados locais</h2>
+        <p>Você pode excluir todas as auditorias armazenadas neste navegador. Os arquivos já baixados permanecem no dispositivo.</p>
+        <button id="delete-all-audits" type="button" class="danger-action">Excluir todas as auditorias locais</button>
       </section>
       <section id="persona-section" class="persona-card" aria-labelledby="persona-heading">
         <div class="persona-heading-row">
@@ -110,6 +119,14 @@
         </div>
         <p id="persona-live-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true">Conectando as simulações.</p>
       </section>
+      <dialog id="delete-all-dialog" aria-labelledby="delete-all-title" aria-describedby="delete-all-description">
+        <h2 id="delete-all-title">Excluir todas as auditorias locais?</h2>
+        <p id="delete-all-description">Esta ação apaga todas as auditorias, evidências, pixels e revisões armazenadas pela extensão neste navegador. Os downloads já salvos não serão apagados.</p>
+        <div class="dialog-actions">
+          <button id="delete-all-cancel" type="button" class="secondary-action">Cancelar</button>
+          <button id="delete-all-confirm" type="button" class="danger-action">Excluir todas</button>
+        </div>
+      </dialog>
     </main>
   </body>
 </html>

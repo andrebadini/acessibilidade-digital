@@ -1,6 +1,6 @@
 # Política de Privacidade — Audita Acessibilidade
 
-Versão 1.0.1, atualizada em 27 de agosto de 2026.
+Versão 1.1, atualizada em 28 de agosto de 2026.
 
 ## 1. Finalidade
 
@@ -32,9 +32,13 @@ Ao abrir a URL indicada, o navegador se comunica normalmente com o site auditado
 
 ## 4. Armazenamento e retenção
 
-O andamento, o modelo da auditoria e as decisões de revisão ficam no armazenamento local do perfil do navegador. Os relatórios HTML, PDF e JSON-LD/EARL são salvos na pasta de downloads escolhida pelo navegador.
+O andamento, o modelo da auditoria, as evidências — inclusive pixels de capturas — e as decisões de revisão ficam no armazenamento local do perfil do navegador. A URL armazenada é sanitizada, mas ainda pode identificar a página ou conter dados pessoais que não tenham sido reconhecidos automaticamente. Os relatórios HTML, JSON-LD/EARL, CSV e PDF são salvos na pasta de downloads escolhida pelo navegador.
 
-Os dados internos permanecem até que o usuário remova a extensão ou apague os dados dela no navegador. Os relatórios baixados permanecem no sistema de arquivos até serem excluídos pelo usuário.
+Cada auditoria local permanece por, no máximo, 30 dias absolutos contados da primeira persistência. Revisar ou exportar novamente não reinicia nem prolonga esse prazo. Ao abrir o painel, a extensão procura auditorias vencidas e faz uma limpeza local incremental; uma exportação ou entrega ativa pode adiar a exclusão daquele registro, sem estender o vencimento.
+
+Antes de iniciar, o usuário pode escolher excluir a auditoria local depois da exportação. Essa exclusão ocorre somente se os quatro arquivos — HTML, JSON-LD/EARL, CSV e PDF — tiverem sido baixados com sucesso. Download incompleto, interrompido ou com falha preserva a auditoria local para permitir nova tentativa.
+
+Os arquivos já baixados ficam fora do armazenamento interno da extensão. A limpeza por prazo, a exclusão de uma auditoria, a exclusão de todas e a opção após exportar não apagam esses arquivos da pasta de downloads; eles permanecem no sistema de arquivos até serem excluídos pelo usuário.
 
 ## 5. Uso e compartilhamento
 
@@ -73,8 +77,13 @@ O usuário pode:
 - deixar de iniciar ou cancelar uma auditoria;
 - ocultar dados antes da captura;
 - revisar cada ocorrência que dependa de julgamento humano;
+- excluir uma auditoria e todas as evidências, pixels e revisões locais pela respectiva página de revisão;
+- excluir todas as auditorias locais pelo painel, sempre após confirmação;
+- escolher, antes de iniciar, a exclusão local condicionada ao download bem-sucedido dos quatro formatos;
 - excluir relatórios baixados;
 - apagar os dados locais removendo a extensão ou limpando seus dados no Chrome.
+
+Essas ações destrutivas não apagam arquivos que já estejam na pasta de downloads.
 
 ## 9. Alterações
 

@@ -164,8 +164,12 @@ async function generate() {
     type: 'EXPORT_COMPLETE', auditId, status: persisted.latest.exportStatus,
     formats: result.formats.map(format => format.format),
     exportRevision: persisted.latest.exportRevision, exportAttempt, leaseOwnerId,
+    localAuditDeleted: persisted.deleted,
   });
-  status.textContent = persisted.latest.message;
+  if (persisted.deleted) {
+    notify({ type: 'AUDIT_DELETED', auditId });
+    status.textContent = 'Os quatro arquivos foram baixados e a auditoria local foi excluída. Os downloads permanecem no dispositivo.';
+  } else status.textContent = persisted.latest.message;
   await closeOwnTab();
 }
 

@@ -5,7 +5,9 @@ import test from 'node:test';
 const read = path => readFile(new URL(`../../${path}`, import.meta.url), 'utf8');
 
 test('internal export page claims a persistent lease before generation and keeps a BUSY duplicate visible', async () => {
-  const [html, script] = await Promise.all([read('src/export/index.html'), read('src/export/index.js')]);
+  const [html, script, css] = await Promise.all([
+    read('src/export/index.html'), read('src/export/index.js'), read('src/export/export.css'),
+  ]);
   assert.match(html, /lang="pt-BR"/u);
   assert.equal((html.match(/<h1\b/giu) ?? []).length, 1);
   assert.match(html, /aria-live="polite"/u);
@@ -28,4 +30,9 @@ test('internal export page claims a persistent lease before generation and keeps
   assert.match(script, /arquivo obsoleto.*removido/iu);
   assert.match(script, /exportRevision:[\s\S]*exportAttempt[\s\S]*leaseOwnerId/u);
   assert.match(html, /HTML[\s\S]*JSON-LD[\s\S]*CSV[\s\S]*PDF/iu);
+  assert.match(html, /exclusão[^.]*escolhida antes[^.]*quatro downloads[^.]*sucesso/iu);
+  assert.match(html, /arquivos já baixados[^.]*não são apagados/iu);
+  assert.doesNotMatch(html, /<button|<input/iu);
+  assert.match(css, /@media\s*\(max-width:\s*24rem\)/u);
+  assert.match(css, /@media\s*\(forced-colors:\s*active\)/u);
 });

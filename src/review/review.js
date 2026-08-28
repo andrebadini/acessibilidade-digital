@@ -1,6 +1,7 @@
 import { createReviewDecision } from '../core/review/decisions.js';
 import { applyExportEvent, restoreExportEventState } from '../panel/panel-state.js';
 import { createAuditStore } from '../storage/audit-store.js';
+import { createDestructiveDialog } from '../ui/destructive-dialog.js';
 import { createReviewDecisionCommitter, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId } from './review-state.js';
 
 const ANSWERS = ['conforme', 'não conforme', 'não foi possível determinar'];
@@ -8,11 +9,61 @@ const list = document.querySelector('#review-list');
 const status = document.querySelector('#review-status');
 const evaluator = document.querySelector('#review-evaluator');
 const regenerate = document.querySelector('#regenerate-report');
+const deleteAudit = document.querySelector('#delete-audit');
+const deleteAuditDialog = document.querySelector('#delete-audit-dialog');
+const deleteAuditCancel = document.querySelector('#delete-audit-cancel');
+const deleteAuditConfirm = document.querySelector('#delete-audit-confirm');
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
 const store = createAuditStore();
 const commitDecision = createReviewDecisionCommitter();
 let auditModel;
 let exportEventState = {};
+
+function sendWorkerRequest(message) {
+  return new Promise(resolve => {
+    try {
+      chrome.runtime.sendMessage(message, response => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, error: 'Não foi possível concluir a operação local.' });
+          return;
+        }
+        resolve(response && typeof response === 'object'
+          ? response
+          : { ok: false, error: 'Não foi possível concluir a operação local.' });
+      });
+    } catch {
+      resolve({ ok: false, error: 'Não foi possível concluir a operação local.' });
+    }
+  });
+}
+
+function renderDeletedAudit() {
+  auditModel = null;
+  exportEventState = {};
+  list.replaceChildren();
+  evaluator.disabled = true;
+  regenerate.disabled = true;
+  deleteAudit.disabled = true;
+}
+
+const deleteAuditController = createDestructiveDialog({
+  dialog: deleteAuditDialog,
+  cancelButton: deleteAuditCancel,
+  confirmButton: deleteAuditConfirm,
+  status,
+  async onConfirm() {
+    if (!auditModel?.auditId) return { ok: false, error: 'Auditoria não encontrada ou já excluída.' };
+    const response = await sendWorkerRequest({
+      type: 'REQUEST_DELETE_AUDIT', auditId: auditModel.auditId,
+    });
+    if (response.ok === true) renderDeletedAudit();
+    return response;
+  },
+  successMessage: 'Auditoria local excluída. Downloads já salvos foram preservados.',
+  failureMessage: 'Não foi possível excluir a auditoria local.',
+});
+
+deleteAudit.addEventListener('click', () => deleteAuditController.open(deleteAudit));
 
 regenerate.addEventListener('click', () => {
   if (!auditModel?.auditId) return;
@@ -30,7 +81,13 @@ regenerate.addEventListener('click', () => {
   });
 });
 
-chrome.runtime.onMessage.addListener(message => {
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (message?.type === 'AUDIT_DELETED' && isAuthorizedDeletionMessage(sender) &&
+    (message.scope === 'all' || message.auditId === auditModel?.auditId)) {
+    renderDeletedAudit();
+    status.textContent = 'Auditoria local excluída. Downloads já salvos foram preservados.';
+    return;
+  }
   if (!auditModel || message?.auditId !== auditModel.auditId) return;
   let nextStatus = null;
   let text = null;
@@ -60,6 +117,16 @@ chrome.runtime.onMessage.addListener(message => {
 function safeAuditId() {
   const value = new URL(location.href).searchParams.get('auditId');
   return normalizeReviewAuditId(value);
+}
+
+function isAuthorizedDeletionMessage(sender) {
+  if (!sender || sender.id !== chrome.runtime.id) return false;
+  if (sender.url === undefined) return !sender.tab;
+  try {
+    const url = new URL(sender.url);
+    return url.protocol === 'chrome-extension:' && url.hostname === chrome.runtime.id && !url.hash &&
+      ['/src/background/service-worker.js', '/src/export/index.html'].includes(url.pathname);
+  } catch { return false; }
 }
 
 function appendText(parent, tag, value, className) {
@@ -127,7 +194,10 @@ function renderCard(entry) {
   card.className = 'review-card';
   card.id = `review-${occurrence.occurrenceId.replace(/[^A-Za-z0-9_-]/gu, '-')}`;
   appendText(card, 'h2', entry.question || `O item “${item.title}” está conforme no contexto apresentado?`);
-  appendText(card, 'p', `ABNT NBR 17225 — item ${item.printedId || item.id} (${item.classification || 'classificação não informada'}).`);
+  appendText(card, 'p', `ABNT NBR 17225 — item ${item.id} (${item.classification || 'classificação não informada'}).`);
+  if (typeof item.printedId === 'string' && item.printedId !== item.id) {
+    appendText(card, 'p', `Nota editorial: a impressão consultada mostra “${item.printedId}”; esta ferramenta usa a referência normalizada “${item.id}” da Seção 5, sem atribuir errata à ABNT.`);
+  }
   const wcag = (item.wcag || []).map(reference => `${reference.id || reference} nível ${reference.level || ''}`.trim()).join(', ');
   appendText(card, 'p', `WCAG: ${wcag || 'sem referência vinculada'}.`);
   appendText(card, 'p', `Razão: ${entry.reason || occurrence.justification || item.humanReason || 'revisão humana necessária'}.`);
@@ -172,6 +242,7 @@ async function start() {
   if (!id) { status.textContent = 'Auditoria não identificada.'; return; }
   auditModel = await store.getAudit(id);
   if (!auditModel || auditModel.auditId !== id) { status.textContent = 'Auditoria não encontrada.'; return; }
+  deleteAudit.disabled = false;
   if (latest?.auditId === id) exportEventState = restoreExportEventState(latest);
   for (const entry of getPendingReviewEntries(auditModel)) renderCard(entry);
   status.textContent = latest?.auditId === id && latest?.exportCleanupPending === true

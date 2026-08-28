@@ -1,5 +1,6 @@
 import { normalizeAuditUrl } from '../core/url.js';
 import { normalizeUrlList } from '../core/batch/normalize-url-list.js';
+import { createDestructiveDialog } from '../ui/destructive-dialog.js';
 import {
   createInitialPersonaState,
   createContextPrefillAck,
@@ -36,6 +37,11 @@ const batchWarnings = document.querySelector('#batch-warnings');
 const batchProgress = document.querySelector('#batch-progress');
 const batchSummary = document.querySelector('#batch-summary');
 const cancelAudit = document.querySelector('#cancel-audit');
+const deleteAfterExport = document.querySelector('#delete-after-export');
+const deleteAllAudits = document.querySelector('#delete-all-audits');
+const deleteAllDialog = document.querySelector('#delete-all-dialog');
+const deleteAllCancel = document.querySelector('#delete-all-cancel');
+const deleteAllConfirm = document.querySelector('#delete-all-confirm');
 const submissionGate = createSubmissionGate();
 let activeAuditId = null;
 let panelState = null;
@@ -75,7 +81,50 @@ function setStatus(message) {
 function setSubmitting(isSubmitting) {
   submit.disabled = isSubmitting;
   cancelAudit.hidden = !isSubmitting;
+  deleteAfterExport.disabled = isSubmitting;
+  deleteAllAudits.disabled = isSubmitting;
 }
+
+function sendWorkerRequest(message) {
+  return new Promise(resolve => {
+    try {
+      chrome.runtime.sendMessage(message, response => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, error: 'Não foi possível concluir a operação local.' });
+          return;
+        }
+        resolve(response && typeof response === 'object'
+          ? response
+          : { ok: false, error: 'Não foi possível concluir a operação local.' });
+      });
+    } catch {
+      resolve({ ok: false, error: 'Não foi possível concluir a operação local.' });
+    }
+  });
+}
+
+const deleteAllController = createDestructiveDialog({
+  dialog: deleteAllDialog,
+  cancelButton: deleteAllCancel,
+  confirmButton: deleteAllConfirm,
+  status,
+  async onConfirm() {
+    const response = await sendWorkerRequest({ type: 'REQUEST_DELETE_ALL_AUDITS' });
+    if (response.ok === true) {
+      activeAuditId = null;
+      panelState = null;
+      submissionGate.release();
+      clearReport();
+      renderBatchState(null);
+      setSubmitting(false);
+    }
+    return response;
+  },
+  successMessage: 'Todas as auditorias locais foram excluídas. Downloads já salvos foram preservados.',
+  failureMessage: 'Não foi possível excluir as auditorias locais.',
+});
+
+deleteAllAudits.addEventListener('click', () => deleteAllController.open(deleteAllAudits));
 
 function selectedAuditMode() {
   return form.elements['audit-mode']?.value === 'batch' ? 'batch' : 'single';
@@ -154,9 +203,17 @@ form.addEventListener('submit', (event) => {
     if (errors.length > 0) {
       finishActiveAudit(); setStatus('Corrija a lista antes de iniciar.'); batchInput.focus(); return;
     }
-    request = { type: 'START_BATCH', urls: batchInput.value };
+    request = {
+      type: 'START_BATCH', urls: batchInput.value,
+      deleteAfterCompleteExport: deleteAfterExport.checked,
+    };
   } else {
-    try { request = { type: 'START_AUDIT', url: normalizeAuditUrl(input.value) }; }
+    try {
+      request = {
+        type: 'START_AUDIT', url: normalizeAuditUrl(input.value),
+        deleteAfterCompleteExport: deleteAfterExport.checked,
+      };
+    }
     catch (error) {
       finishActiveAudit();
       setStatus(error instanceof Error ? error.message : 'Não foi possível validar o endereço.');
@@ -218,6 +275,18 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   }
   if (messageType === 'AUDIT_CONTEXT_PREFILL_COMMIT') {
     void handleContextPrefillCommit(message, sender);
+    return false;
+  }
+  if (messageType === 'AUDIT_DELETED' && isAuthorizedDeletionMessage(sender)) {
+    if (message.scope === 'all' || message.auditId === (activeAuditId ?? panelState?.auditId)) {
+      activeAuditId = null;
+      panelState = null;
+      submissionGate.release();
+      clearReport();
+      renderBatchState(null);
+      setSubmitting(false);
+      setStatus('A auditoria local foi excluída. Downloads já salvos foram preservados.');
+    }
     return false;
   }
   if (!message || typeof message !== 'object' || !isMessageForAudit(message, activeAuditId ?? panelState?.auditId)) return;
@@ -296,6 +365,16 @@ function isAuthorizedWorkerMessage(sender) {
   if (!sender || sender.id !== chrome.runtime.id || sender.tab) return false;
   if (sender.url === undefined) return true;
   return sender.url === chrome.runtime.getURL('src/background/service-worker.js');
+}
+
+function isAuthorizedDeletionMessage(sender) {
+  if (!sender || sender.id !== chrome.runtime.id) return false;
+  if (sender.url === undefined) return !sender.tab;
+  try {
+    const url = new URL(sender.url);
+    return url.protocol === 'chrome-extension:' && url.hostname === chrome.runtime.id && !url.hash &&
+      ['/src/background/service-worker.js', '/src/export/index.html'].includes(url.pathname);
+  } catch { return false; }
 }
 
 function currentPanelTabId() {

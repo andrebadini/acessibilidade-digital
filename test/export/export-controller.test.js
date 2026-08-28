@@ -25,7 +25,7 @@ const TEST_LEASE_OWNER = 'owner-test-export';
 function revisionStore(store) {
   if (typeof store?.commitAuditIfRevisionWithExportLease === 'function') return store;
   if (typeof store?.commitAudit !== 'function') return store;
-  return {
+  const adapted = {
     ...store,
     commitAuditIfRevision(auditId, model, latest, snapshotCapability) {
       return store.commitAudit(auditId, model, latest, snapshotCapability);
@@ -36,6 +36,13 @@ function revisionStore(store) {
         : store.commitAudit(auditId, model, latest, snapshotCapability);
     },
   };
+  adapted.finalizeExportAndMaybeDelete = async (auditId, model, latest, snapshotCapability, options) => {
+    const committed = await adapted.commitAuditIfRevisionWithExportLease(
+      auditId, model, latest, snapshotCapability, options,
+    );
+    return { ...committed, deleted: false };
+  };
+  return adapted;
 }
 
 async function persistExportFailure(request, store) {
@@ -328,6 +335,33 @@ test('accepts the untouched artifact set attested by genuine final report genera
 
   assert.equal(commits.length, 1);
   assert.deepEqual(commits[0][1], result.model);
+  assert.equal(persisted.latest.exportStatus, 'complete');
+});
+
+test('successful persistence delegates deletion only to the atomic four-format finalizer', async () => {
+  const result = await genuineReportExport();
+  const calls = [];
+  const store = {
+    async commitAuditIfRevisionWithExportLease() {
+      throw new Error('legacy finalizer must not be used for success');
+    },
+    async finalizeExportAndMaybeDelete(...args) {
+      calls.push(args);
+      return { deleted: true };
+    },
+  };
+
+  const persisted = await persistOpaqueExportSuccess(createExportSuccessRequest({
+    auditId: result.model.auditId,
+    result,
+    latest: {},
+  }), store);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], result.model.auditId);
+  assert.equal(calls[0][4].clearDeliveryJournal, true);
+  assert.equal(calls[0][4].deleteAfterCompleteExport, true);
+  assert.equal(persisted.deleted, true);
   assert.equal(persisted.latest.exportStatus, 'complete');
 });
 

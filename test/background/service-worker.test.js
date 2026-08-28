@@ -4,7 +4,7 @@ import test from 'node:test';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { createSessionStore, isAuthorizedExtensionSender, isAuthorizedPanelSender, registerServiceWorker } from '../../src/background/service-worker.js';
 import { commitReviewDecision } from '../../src/review/review-state.js';
-import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
+import { AuditStorageUnavailableError, createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 import { runBatch } from '../../src/background/run-batch.js';
 import { reportInput } from '../report/helpers.js';
 
@@ -1471,4 +1471,136 @@ test('handles rejected panel-tab creation without an unhandled rejection', async
   chromeApi.listeners.action.listener();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(errors, ['Não foi possível abrir o painel de auditoria.']);
+});
+
+test('START_AUDIT persists the per-audit delete-after-export intent only on the first model commit', async () => {
+  const chromeApi = createChrome();
+  const store = createInMemoryAuditStore();
+  registerServiceWorker(chromeApi, {
+    createId: () => 'audit-retention-worker',
+    now: () => '2026-08-28T10:00:00.000Z',
+    auditStore: store,
+    chromeAdapterFactory: () => ({}),
+    runner: async () => ({
+      auditId: 'audit-retention-worker', session: { status: 'complete' },
+      report: { reviewUrl: 'chrome-extension://test/src/review/index.html?auditId=audit-retention-worker' },
+    }),
+  });
+  let response;
+  chromeApi.listeners.message.listener({
+    type: 'START_AUDIT', url: 'https://example.test/', deleteAfterCompleteExport: true,
+  }, {
+    id: 'test', url: 'chrome-extension://test/src/panel/index.html', documentId: 'panel-retention',
+  }, value => { response = value; });
+  assert.equal(response.ok, true);
+  await waitUntil(async () => (await store.getAuditRetention('audit-retention-worker')) !== undefined);
+  assert.equal((await store.getAuditRetention('audit-retention-worker')).deleteAfterCompleteExport, true);
+});
+
+test('START messages reject non-boolean retention intent before running any audit', () => {
+  const chromeApi = createChrome();
+  let calls = 0;
+  registerServiceWorker(chromeApi, { runner: async () => { calls += 1; } });
+  let response;
+  chromeApi.listeners.message.listener({
+    type: 'START_AUDIT', url: 'https://example.test/', deleteAfterCompleteExport: 'yes',
+  }, {
+    id: 'test', url: 'chrome-extension://test/src/panel/index.html', documentId: 'panel-invalid-retention',
+  }, value => { response = value; });
+  assert.equal(response.ok, false);
+  assert.equal(calls, 0);
+});
+
+test('GET_LAST runs one limited retention cleanup before restoring state', async () => {
+  const chromeApi = createChrome();
+  const calls = [];
+  const latest = { auditId: 'audit-cleanup-open', status: 'complete' };
+  const auditStore = {
+    async cleanupExpiredAudits(options) { calls.push(['cleanup', options]); return { scanned: 0, deleted: 0, remaining: 0, blocked: 0 }; },
+    async getLatest() { calls.push(['latest']); return latest; },
+  };
+  registerServiceWorker(chromeApi, {
+    auditStore,
+    now: () => '2026-08-28T11:22:33.444Z',
+  });
+  let response;
+  chromeApi.listeners.message.listener(
+    { type: 'GET_LAST_AUDIT' },
+    { id: 'test', url: 'chrome-extension://test/src/panel/index.html' },
+    value => { response = value; },
+  );
+  await waitUntil(() => response !== undefined);
+  assert.deepEqual(response, { ok: true, state: latest });
+  assert.deepEqual(calls[0], ['cleanup', { now: '2026-08-28T11:22:33.444Z', limit: 25 }]);
+});
+
+test('storage failure prevents AUDIT_COMPLETE and exposes only the fixed actionable message', async () => {
+  const chromeApi = createChrome();
+  const auditStore = {
+    async setLatest() {},
+    async commitAudit() { throw new AuditStorageUnavailableError(); },
+  };
+  registerServiceWorker(chromeApi, {
+    createId: () => 'audit-storage-failure',
+    auditStore,
+    chromeAdapterFactory: () => ({}),
+    runner: async () => ({ auditId: 'audit-storage-failure', session: { status: 'complete' }, report: {} }),
+  });
+  chromeApi.listeners.message.listener(
+    { type: 'START_AUDIT', url: 'https://example.test/' },
+    { id: 'test', url: 'chrome-extension://test/src/panel/index.html', documentId: 'panel-storage-failure' },
+    () => {},
+  );
+  await waitUntil(() => chromeApi.runtime.sent.some(message => message.type === 'AUDIT_FAILED'));
+  assert.equal(chromeApi.runtime.sent.some(message => message.type === 'AUDIT_COMPLETE'), false);
+  const failed = chromeApi.runtime.sent.find(message => message.type === 'AUDIT_FAILED');
+  assert.equal(failed.error, 'Não foi possível salvar a auditoria no armazenamento local. Libere espaço ou verifique as permissões e tente novamente.');
+  assert.doesNotMatch(JSON.stringify(failed), /database|quota|bytes|token/iu);
+});
+
+test('destructive protocol accepts only correlated review and canonical panel senders', async () => {
+  const chromeApi = createChrome();
+  const store = createInMemoryAuditStore();
+  for (const auditId of ['delete-protocol-a', 'delete-protocol-b']) {
+    await store.commitAudit(auditId, { auditId }, { auditId }, { now: '2026-08-01T00:00:00.000Z' });
+  }
+  registerServiceWorker(chromeApi, {
+    auditStore: store,
+    now: () => '2026-08-28T12:00:00.000Z',
+  });
+
+  for (const [message, sender] of [
+    [{ type: 'REQUEST_DELETE_AUDIT', auditId: 'delete-protocol-a' }, { id: 'test', url: 'chrome-extension://test/src/export/index.html?auditId=delete-protocol-a&exportAttempt=1&leaseOwnerId=owner' }],
+    [{ type: 'REQUEST_DELETE_AUDIT', auditId: 'delete-protocol-a' }, { id: 'test', url: 'chrome-extension://test/src/review/index.html?auditId=delete-protocol-b' }],
+    [{ type: 'REQUEST_DELETE_AUDIT', auditId: 'delete-protocol-a', confirmed: true }, { id: 'test', url: 'chrome-extension://test/src/review/index.html?auditId=delete-protocol-a' }],
+    [{ type: 'REQUEST_DELETE_ALL_AUDITS' }, { id: 'test', url: 'chrome-extension://test/src/panel/index.html?unexpected=1' }],
+  ]) {
+    let denied;
+    chromeApi.listeners.message.listener(message, sender, value => { denied = value; });
+    await waitUntil(() => denied !== undefined);
+    assert.equal(denied.ok, false);
+    assert.ok(await store.getAudit('delete-protocol-a'));
+  }
+
+  let deletedOne;
+  chromeApi.listeners.message.listener(
+    { type: 'REQUEST_DELETE_AUDIT', auditId: 'delete-protocol-a' },
+    { id: 'test', frameId: 0, url: 'chrome-extension://test/src/review/index.html?auditId=delete-protocol-a' },
+    value => { deletedOne = value; },
+  );
+  await waitUntil(() => deletedOne !== undefined);
+  assert.deepEqual(deletedOne, { ok: true, auditId: 'delete-protocol-a', deleted: true });
+  assert.equal(await store.getAudit('delete-protocol-a'), undefined);
+  assert.ok(chromeApi.runtime.sent.some(message => message.type === 'AUDIT_DELETED' && message.auditId === 'delete-protocol-a'));
+
+  let deletedAll;
+  chromeApi.listeners.message.listener(
+    { type: 'REQUEST_DELETE_ALL_AUDITS' },
+    { id: 'test', frameId: 0, url: 'chrome-extension://test/src/panel/index.html' },
+    value => { deletedAll = value; },
+  );
+  await waitUntil(() => deletedAll !== undefined);
+  assert.deepEqual(deletedAll, { ok: true, deleted: 1 });
+  assert.equal(await store.getAudit('delete-protocol-b'), undefined);
+  assert.ok(chromeApi.runtime.sent.some(message => message.type === 'AUDIT_DELETED' && message.scope === 'all'));
 });

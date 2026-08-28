@@ -4,7 +4,9 @@ import { createChromeAdapter } from './chrome-adapter.js';
 import { runAudit } from './run-audit.js';
 import { runBatch } from './run-batch.js';
 import { normalizeUrlList } from '../core/batch/normalize-url-list.js';
+import { AUDIT_STORAGE_UNAVAILABLE_MESSAGE as STORAGE_UNAVAILABLE_MESSAGE } from '../core/privacy.js';
 import {
+  AuditStorageUnavailableError,
   createAuditStore,
   isAuditExportLeaseConflict,
   isAuditRevisionConflict,
@@ -21,6 +23,7 @@ const sessionKey = (id) => `audita-mt:session:${id}`;
 const ACTIVE_BATCH_KEY = 'audita-mt:session:active-batch';
 const EXPORT_BUSY_MESSAGE = 'Este relatório já está sendo gerado; tente novamente após a conclusão.';
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
+const DELETE_BUSY_MESSAGE = 'A auditoria está sendo exportada ou possui uma entrega pendente. Tente novamente depois.';
 
 export function isAuthorizedPanelSender(sender, runtimeId) {
   return isAuthorizedExtensionSender(sender, runtimeId, PANEL_PATH);
@@ -141,7 +144,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
 
   chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (contextMenuController?.handlePanelProtocolMessage(message, sender, sendResponse)) return true;
-    const knownTypes = ['START_AUDIT', 'START_BATCH', 'CANCEL_AUDIT', 'GET_LAST_AUDIT', 'REQUEST_EXPORT', 'REVIEW_COMMITTED', 'EXPORT_PROGRESS', 'EXPORT_COMPLETE', 'EXPORT_FAILED', 'EXPORT_BUSY', 'EXPORT_INVALIDATED'];
+    const knownTypes = ['START_AUDIT', 'START_BATCH', 'CANCEL_AUDIT', 'GET_LAST_AUDIT', 'REQUEST_EXPORT', 'REQUEST_DELETE_AUDIT', 'REQUEST_DELETE_ALL_AUDITS', 'REVIEW_COMMITTED', 'EXPORT_PROGRESS', 'EXPORT_COMPLETE', 'EXPORT_FAILED', 'EXPORT_BUSY', 'EXPORT_INVALIDATED'];
     if (!message || !knownTypes.includes(message.type)) return false;
     if (!isAuthorizedExtensionSender(sender, chromeApi.runtime.id)) {
       sendResponse({ ok: false, error: 'Origem da mensagem não autorizada.' });
@@ -149,6 +152,38 @@ export function registerServiceWorker(chromeApi, options = {}) {
     }
     if (['START_AUDIT', 'START_BATCH', 'CANCEL_AUDIT'].includes(message.type) && !isAuthorizedPanelSender(sender, chromeApi.runtime.id)) {
       sendResponse({ ok: false, error: 'Origem da mensagem não autorizada.' });
+      return true;
+    }
+    if (message.type === 'REQUEST_DELETE_AUDIT') {
+      const keys = Object.keys(message).sort();
+      const senderUrl = new URL(sender.url);
+      const correlated = keys.length === 2 && keys[0] === 'auditId' && keys[1] === 'type' &&
+        senderUrl.pathname === REVIEW_PATH && validAuditId(message.auditId) &&
+        senderUrl.searchParams.get('auditId') === message.auditId &&
+        (!Number.isSafeInteger(sender.frameId) || sender.frameId === 0);
+      if (!correlated) {
+        sendResponse({ ok: false, error: 'Pedido de exclusão inválido.' });
+        return true;
+      }
+      void deleteOneAudit(message.auditId).then(sendResponse, () => {
+        sendResponse({ ok: false, error: 'Não foi possível excluir a auditoria local.' });
+      });
+      return true;
+    }
+    if (message.type === 'REQUEST_DELETE_ALL_AUDITS') {
+      const keys = Object.keys(message);
+      const correlated = keys.length === 1 && keys[0] === 'type' &&
+        isAuthorizedPanelSender(sender, chromeApi.runtime.id) &&
+        (!Number.isSafeInteger(sender.frameId) || sender.frameId === 0);
+      if (!correlated) {
+        sendResponse({ ok: false, error: 'Pedido de exclusão inválido.' });
+      } else if (activeJob) {
+        sendResponse({ ok: false, code: 'AUDIT_DELETE_BUSY', error: DELETE_BUSY_MESSAGE });
+      } else {
+        void deleteEveryAudit().then(sendResponse, () => {
+          sendResponse({ ok: false, error: 'Não foi possível excluir as auditorias locais.' });
+        });
+      }
       return true;
     }
     if (message.type === 'REVIEW_COMMITTED') {
@@ -211,7 +246,12 @@ export function registerServiceWorker(chromeApi, options = {}) {
       return true;
     }
     if (message.type === 'GET_LAST_AUDIT') {
-      void startupReady.then(() => restorableLatestState()).then(value => sendResponse({ ok: true, state: value ?? null }), () => sendResponse({ ok: false, error: 'Não foi possível restaurar a última auditoria.' }));
+      void startupReady.then(async () => {
+        if (typeof auditStore.cleanupExpiredAudits === 'function') {
+          await auditStore.cleanupExpiredAudits({ now: queueTime(), limit: 25 });
+        }
+        return restorableLatestState();
+      }).then(value => sendResponse({ ok: true, state: value ?? null }), () => sendResponse({ ok: false, error: 'Não foi possível restaurar a última auditoria.' }));
       return true;
     }
     const senderKey = panelOwnerKey(sender);
@@ -231,7 +271,8 @@ export function registerServiceWorker(chromeApi, options = {}) {
     }
     if (message.type === 'START_BATCH') {
       try {
-        const started = beginBatchAudit({ input: message.urls, senderKey });
+        const deleteAfterCompleteExport = retentionIntent(message);
+        const started = beginBatchAudit({ input: message.urls, senderKey, deleteAfterCompleteExport });
         sendResponse(started.response);
       } catch (error) {
         sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Não foi possível preparar o lote.' });
@@ -239,7 +280,8 @@ export function registerServiceWorker(chromeApi, options = {}) {
       return true;
     }
     try {
-      const started = beginSingleAudit({ navigationUrl: message.url, senderKey });
+      const deleteAfterCompleteExport = retentionIntent(message);
+      const started = beginSingleAudit({ navigationUrl: message.url, senderKey, deleteAfterCompleteExport });
       sendResponse(started.response);
     } catch (error) {
       sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Não foi possível preparar a auditoria.' });
@@ -249,7 +291,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
 
   return sessions;
 
-  function beginSingleAudit({ navigationUrl, senderKey }) {
+  function beginSingleAudit({ navigationUrl, senderKey, deleteAfterCompleteExport = false }) {
     if (typeof senderKey !== 'string' || senderKey.length === 0 || senderKey.length > 512) {
       throw new TypeError('Correlação da auditoria inválida.');
     }
@@ -264,7 +306,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
     const storedUrl = sanitizeResourceUrl(requestedUrl);
     const auditId = createId();
     const session = createAuditSession({ id: auditId, requestedUrl: storedUrl, startedAt: now() });
-    const entry = { auditId, senderKey, mode: 'single', phase: 'running', controller: new AbortController(), completion: null };
+    const entry = { auditId, senderKey, mode: 'single', phase: 'running', deleteAfterCompleteExport, controller: new AbortController(), completion: null };
     activeJob = entry;
     entry.completion = runInBackground({ auditId, navigationUrl: requestedUrl, session, senderKey, entry });
     return { response: { ok: true, auditId, state: session.state }, completion: entry.completion };
@@ -297,7 +339,10 @@ export function registerServiceWorker(chromeApi, options = {}) {
       const reviewUrl = model?.report?.reviewUrl || null;
       const canExport = ['complete', 'partial'].includes(status);
       const latestState = { auditId, status, percent: canExport ? 100 : model?.progress?.at?.(-1)?.percent || 0, message: status === 'partial' ? 'Auditoria concluída com limitações.' : status === 'complete' ? 'Auditoria concluída.' : 'A auditoria não pôde ser concluída.', reviewUrl, exportStatus: canExport ? 'preparing' : 'unavailable' };
-      await auditStore.commitAudit(auditId, model, latestState);
+      await auditStore.commitAudit(auditId, model, latestState, {
+        now: queueTime(),
+        deleteAfterCompleteExport: entry.deleteAfterCompleteExport,
+      });
       committed = true;
       if (canExport) {
         await Promise.allSettled([
@@ -307,11 +352,14 @@ export function registerServiceWorker(chromeApi, options = {}) {
       } else {
         await sendRuntimeMessage(chromeApi, { type: 'AUDIT_FAILED', auditId, sessionId: auditId, status, error: status === 'cancelled' ? 'A auditoria foi cancelada.' : 'A auditoria não pôde ser concluída.' }).catch(() => {});
       }
-    } catch {
+    } catch (error) {
       if (!committed) {
+        const failureMessage = error instanceof AuditStorageUnavailableError
+          ? STORAGE_UNAVAILABLE_MESSAGE
+          : 'A auditoria não pôde ser iniciada.';
         await Promise.allSettled([
-          auditStore.setLatest({ auditId, status: 'failed', percent: 0, message: 'A auditoria não pôde ser iniciada.' }),
-          sendRuntimeMessage(chromeApi, { type: 'AUDIT_FAILED', auditId, sessionId: auditId, status: 'failed', error: 'A auditoria não pôde ser iniciada.' }),
+          auditStore.setLatest({ auditId, status: 'failed', percent: 0, message: failureMessage }),
+          sendRuntimeMessage(chromeApi, { type: 'AUDIT_FAILED', auditId, sessionId: auditId, status: 'failed', error: failureMessage }),
         ]);
       }
       logger.error('A auditoria em segundo plano falhou de forma controlada.');
@@ -320,7 +368,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
     }
   }
 
-  function beginBatchAudit({ input, senderKey }) {
+  function beginBatchAudit({ input, senderKey, deleteAfterCompleteExport = false }) {
     if (typeof senderKey !== 'string' || senderKey.length === 0 || senderKey.length > 512) {
       throw new TypeError('Correlação da auditoria inválida.');
     }
@@ -339,7 +387,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
       };
     }
     const auditId = createId();
-    const entry = { auditId, senderKey, mode: 'batch', phase: 'running', controller: new AbortController(), completion: null };
+    const entry = { auditId, senderKey, mode: 'batch', phase: 'running', deleteAfterCompleteExport, controller: new AbortController(), completion: null };
     activeJob = entry;
     entry.completion = runBatchInBackground({ auditId, normalized, entry });
     return {
@@ -402,7 +450,10 @@ export function registerServiceWorker(chromeApi, options = {}) {
         total: model?.pages?.length ?? normalized.entries.length,
         statusCounts: countPageStatuses(model?.pages),
       };
-      await auditStore.commitAudit(auditId, model, latestState);
+      await auditStore.commitAudit(auditId, model, latestState, {
+        now: queueTime(),
+        deleteAfterCompleteExport: entry.deleteAfterCompleteExport,
+      });
       committed = true;
       await sessions.clearActiveBatch?.();
       await Promise.allSettled([
@@ -412,11 +463,16 @@ export function registerServiceWorker(chromeApi, options = {}) {
         }),
         startAutomaticExport(auditId),
       ]);
-    } catch {
-      if (!committed) await Promise.allSettled([
-        auditStore.setLatest({ auditId, mode: 'batch', status: 'failed', percent: 0, message: 'O lote não pôde ser iniciado.' }),
-        sendRuntimeMessage(chromeApi, { type: 'AUDIT_FAILED', auditId, sessionId: auditId, status: 'failed', error: 'O lote não pôde ser iniciado.' }),
-      ]);
+    } catch (error) {
+      if (!committed) {
+        const failureMessage = error instanceof AuditStorageUnavailableError
+          ? STORAGE_UNAVAILABLE_MESSAGE
+          : 'O lote não pôde ser iniciado.';
+        await Promise.allSettled([
+          auditStore.setLatest({ auditId, mode: 'batch', status: 'failed', percent: 0, message: failureMessage }),
+          sendRuntimeMessage(chromeApi, { type: 'AUDIT_FAILED', auditId, sessionId: auditId, status: 'failed', error: failureMessage }),
+        ]);
+      }
       logger.error('O lote em segundo plano falhou de forma controlada.');
     } finally {
       if (activeJob === entry) activeJob = null;
@@ -468,6 +524,44 @@ export function registerServiceWorker(chromeApi, options = {}) {
     const current = await sessions.getActiveBatch?.();
     if (!current || (current.id === checkpoint.id && current.updatedAt === checkpoint.updatedAt)) {
       await sessions.clearActiveBatch?.();
+    }
+  }
+
+  async function deleteOneAudit(auditId) {
+    try {
+      const snapshot = await auditStore.getAuditSnapshot(auditId);
+      if (!snapshot?.model || snapshot.model.auditId !== auditId || !snapshot.capability) {
+        return { ok: false, error: 'Auditoria não encontrada ou já excluída.' };
+      }
+      const result = await auditStore.deleteAudit(auditId, snapshot.capability, { now: queueTime() });
+      if (result?.deleted !== true) return { ok: false, error: 'Não foi possível excluir a auditoria local.' };
+      await sendRuntimeMessage(chromeApi, { type: 'AUDIT_DELETED', auditId }).catch(() => {});
+      return { ok: true, auditId, deleted: true };
+    } catch (error) {
+      if (error?.code === 'AUDIT_DELETE_BUSY') {
+        return { ok: false, code: 'AUDIT_DELETE_BUSY', error: DELETE_BUSY_MESSAGE };
+      }
+      if (error instanceof AuditStorageUnavailableError) {
+        return { ok: false, code: 'AUDIT_STORAGE_UNAVAILABLE', error: STORAGE_UNAVAILABLE_MESSAGE };
+      }
+      return { ok: false, error: 'Auditoria não encontrada ou já excluída.' };
+    }
+  }
+
+  async function deleteEveryAudit() {
+    try {
+      const result = await auditStore.deleteAllAudits({ now: queueTime() });
+      const deleted = Number.isSafeInteger(result?.deleted) && result.deleted >= 0 ? result.deleted : 0;
+      await sendRuntimeMessage(chromeApi, { type: 'AUDIT_DELETED', scope: 'all' }).catch(() => {});
+      return { ok: true, deleted };
+    } catch (error) {
+      if (error?.code === 'AUDIT_DELETE_BUSY') {
+        return { ok: false, code: 'AUDIT_DELETE_BUSY', error: DELETE_BUSY_MESSAGE };
+      }
+      if (error instanceof AuditStorageUnavailableError) {
+        return { ok: false, code: 'AUDIT_STORAGE_UNAVAILABLE', error: STORAGE_UNAVAILABLE_MESSAGE };
+      }
+      return { ok: false, error: 'Não foi possível excluir as auditorias locais.' };
     }
   }
 
@@ -661,6 +755,13 @@ function validAuditId(value) {
 function validExportAttempt(value) {
   const attempt = typeof value === 'string' && /^[1-9][0-9]*$/u.test(value) ? Number(value) : value;
   return Number.isSafeInteger(attempt) && attempt >= 1;
+}
+
+function retentionIntent(message) {
+  const value = message?.deleteAfterCompleteExport;
+  if (value === undefined) return false;
+  if (typeof value !== 'boolean') throw new TypeError('Opção de retenção inválida.');
+  return value;
 }
 
 function panelOwnerKey(sender) {

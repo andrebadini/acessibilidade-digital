@@ -6,8 +6,17 @@ label { display: block; font-weight: 700; }
 input, textarea, button { font: inherit; }
 input, textarea { box-sizing: border-box; width: 100%; max-width: 40rem; padding: .55rem; }
 .answers { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: 1rem; }
-button { padding: .6rem .8rem; border: 2px solid #155a8a; border-radius: .25rem; background: #fff; color: #123; cursor: pointer; }
+button { min-height: 2.75rem; padding: .6rem .8rem; border: 2px solid #155a8a; border-radius: .25rem; background: #fff; color: #123; cursor: pointer; }
 button:hover, button:focus-visible { background: #e6f3ff; outline: 3px solid #ffbf47; outline-offset: 2px; }
 code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: .75rem; background: #eef1f3; }
 .evidence-media { max-width: 100%; height: auto; border: 1px solid #65737e; }
 .answered { border-left: .4rem solid #287d3c; }
+#delete-audit { min-height: 2.75rem; }
+.danger-action { border-color: #7d2100; background: #8b2f00; color: #fff; }
+dialog { inline-size: min(32rem, calc(100% - 2rem)); max-inline-size: calc(100% - 2rem); padding: clamp(1rem, 4vw, 1.5rem); border: 3px solid #155a8a; border-radius: .5rem; color: #17202a; background: #fff; overflow-wrap: anywhere; }
+dialog::backdrop { background: #17202abf; }
+.dialog-actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1.25rem; }
+.dialog-actions button { flex: 1 1 10rem; min-height: 2.75rem; }
+@media (max-width: 22rem) { main { padding: 1rem; } .dialog-actions { flex-direction: column; } }
+@media (forced-colors: active) { button, input, textarea, .review-controls, .review-card, dialog { border-color: CanvasText; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
