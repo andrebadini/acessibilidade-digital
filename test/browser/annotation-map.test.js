@@ -1,0 +1,693 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { deflateSync } from 'node:zlib';
+
+import {
+  ANNOTATION_MAP_MV3_GATE,
+  ANNOTATION_MAP_LIMITS,
+  AnnotationMapError,
+  buildAnnotationMapPlan,
+  composeAnnouncementMap,
+  composeAnnouncementMapForProduction,
+  selectAnnouncementMapEntries,
+} from '../../src/browser/annotation-map.js';
+import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
+import { normalizeSnapshot } from '../../src/core/normalize-snapshot.js';
+import { createAuditModel } from '../../src/core/report/audit-model.js';
+import { sha256Hex } from '../../src/core/report/hash.js';
+import { renderHtmlReport } from '../../src/core/report/html.js';
+
+const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngBytes(width, height, raster) {
+  const chunk = (type, data) => {
+    const typeBytes = Buffer.from(type, 'ascii');
+    const length = Buffer.alloc(4); length.writeUInt32BE(data.length);
+    const checksum = Buffer.alloc(4); checksum.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])));
+    return Buffer.concat([length, typeBytes, data, checksum]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4);
+  header[8] = 8; header[9] = 6;
+  const scanlines = raster ?? Buffer.alloc(height * (1 + width * 4), 255);
+  if (!raster) for (let row = 0; row < height; row += 1) scanlines[row * (1 + width * 4)] = 0;
+  return new Uint8Array(Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk('IHDR', header), chunk('IDAT', deflateSync(scanlines)), chunk('IEND', Buffer.alloc(0)),
+  ]));
+}
+
+async function pristineSource(width, height, overrides = {}) {
+  const bytes = pngBytes(width, height);
+  return {
+    evidenceId: 'full', pageId: 'page-1', kind: 'full-page', state: 'pristine',
+    dataUrl: `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`,
+    hash: await sha256Hex(bytes), metadata: {}, ...overrides,
+  };
+}
+
+function snapshot(nodes) {
+  const normalized = nodes.map((node, index) => ({
+    nodeId: node.nodeId ?? `n-${index + 1}`,
+    parentId: node.parentId ?? null,
+    children: node.children ?? [],
+    tagName: node.tagName ?? 'button',
+    attributes: node.attributes ?? {},
+    framePath: node.framePath ?? [],
+    hidden: false,
+    ...node,
+  }));
+  const byId = new Map(normalized.map(node => [node.nodeId, node]));
+  for (const node of normalized) {
+    if (node.parentId && byId.has(node.parentId) && !byId.get(node.parentId).children.includes(node.nodeId)) {
+      byId.get(node.parentId).children.push(node.nodeId);
+    }
+  }
+  return { schemaVersion: 1, document: { nodeId: 'document', title: 'Fixture', url: 'https://example.test/' }, nodes: normalized };
+}
+
+test('selects a stable safe DOM/AX projection with structural selectors only', () => {
+  const input = snapshot([
+    { nodeId: 'root', tagName: 'main', children: ['disabled', 'hidden', 'inert', 'editable', 'private', 'open-host', 'frame', 'frame-child'] },
+    { nodeId: 'disabled', parentId: 'root', tagName: 'button', attributes: { id: 'SECRET-author-id', disabled: '' }, accessibleName: 'Salvar', axRole: 'button', disabled: true, rect: { x: 10, y: 10, width: 80, height: 30 } },
+    { nodeId: 'hidden', parentId: 'root', accessibleName: 'Oculto', axRole: 'button', hidden: true, rect: { x: 10, y: 50, width: 80, height: 30 } },
+    { nodeId: 'inert', parentId: 'root', tagName: 'section', attributes: { inert: 'false' }, children: ['inert-child'], rect: { x: 0, y: 0, width: 1, height: 1 } },
+    { nodeId: 'inert-child', parentId: 'inert', accessibleName: 'Inerte', axRole: 'button', rect: { x: 10, y: 90, width: 80, height: 30 } },
+    { nodeId: 'editable', parentId: 'root', tagName: 'input', attributes: { type: 'text', value: 'TOPSECRET' }, accessibleName: 'Chave', axRole: 'textbox', rect: { x: 10, y: 130, width: 80, height: 30 } },
+    { nodeId: 'private', parentId: 'root', tagName: 'div', attributes: { 'data-private': '' }, children: ['private-child'], rect: { x: 0, y: 0, width: 1, height: 1 } },
+    { nodeId: 'private-child', parentId: 'private', accessibleName: 'TOPSECRET', axRole: 'button', rect: { x: 10, y: 170, width: 80, height: 30 } },
+    { nodeId: 'open-host', parentId: 'root', tagName: 'x-actions', children: ['open-root'] },
+    { nodeId: 'open-root', parentId: 'open-host', tagName: '#document-fragment', shadowRootType: 'open', children: ['shadow-button'] },
+    { nodeId: 'shadow-button', parentId: 'open-root', tagName: 'button', shadowRootId: 'open-root', shadowHostId: 'open-host', accessibleName: 'Ajuda', axRole: 'button', rect: { x: 10, y: 210, width: 80, height: 30 } },
+    { nodeId: 'frame', parentId: 'root', tagName: 'iframe', accessibleName: 'Frame externo', axRole: 'iframe', framePath: ['frame-host'], rect: { x: 10, y: 250, width: 80, height: 30 } },
+    { nodeId: 'frame-child', parentId: 'root', tagName: 'button', accessibleName: 'Mesmo frame', axRole: 'button', framePath: ['frame-host'], rect: { x: 10, y: 280, width: 80, height: 30 } },
+    { nodeId: 'no-rect', parentId: 'root', tagName: 'a', attributes: { href: 'https://example.test/' }, accessibleName: 'Sem geometria', axRole: 'link' },
+  ]);
+
+  const result = selectAnnouncementMapEntries(input);
+
+  assert.deepEqual(result.entries.map(entry => [entry.number, entry.nodeId, entry.announcementPreview]), [
+    [1, 'disabled', 'Salvar, botão, indisponível'],
+    [2, 'shadow-button', 'Ajuda, botão'],
+  ]);
+  assert.deepEqual(result.counts, {
+    eligible: 3, annotated: 2, omittedNoRect: 1, omittedFrame: 1, omittedLimit: 0, unresolvedOverlap: 0,
+  });
+  assert.match(result.entries[0].selectorSummary, /^main > button:nth-of-type\(1\)$/u);
+  assert.match(result.entries[1].selectorSummary, /x-actions >>> button/u);
+  assert.doesNotMatch(JSON.stringify(result), /SECRET-author-id|TOPSECRET|data-private/u);
+  assert.ok(result.limitations.includes('frame-content-omitted'));
+});
+
+test('excludes an otherwise eligible ancestor when a private editable descendant can contaminate its AX name', () => {
+  const secret = 'TOPSECRET-descendant-name';
+  const normalized = normalizeSnapshot({
+    format: 'simplified-v1',
+    document: { url: 'https://example.test/', title: 'Privacy' },
+    nodes: [
+      { backendNodeId: 1, tagName: 'button', parentBackendNodeId: null, attributes: {}, rect: { x: 5, y: 5, width: 100, height: 30 } },
+      { backendNodeId: 2, tagName: 'div', parentBackendNodeId: 1, attributes: { contenteditable: 'true' }, text: secret, visibleText: secret },
+      { backendNodeId: 3, tagName: 'button', parentBackendNodeId: null, attributes: {}, rect: { x: 5, y: 45, width: 100, height: 30 } },
+    ],
+    axTree: { nodes: [
+      { backendDOMNodeId: 1, role: { value: 'button' }, name: { value: secret } },
+      { backendDOMNodeId: 2, role: { value: 'textbox' }, name: { value: secret }, value: { value: secret } },
+      { backendDOMNodeId: 3, role: { value: 'button' }, name: { value: 'Ação segura' } },
+    ] },
+  });
+
+  const selected = selectAnnouncementMapEntries(normalized);
+
+  assert.deepEqual(selected.entries.map(entry => entry.announcementPreview), ['Ação segura, botão']);
+  assert.doesNotMatch(JSON.stringify(selected), /TOPSECRET/iu);
+});
+
+test('keeps an editable descendant AX secret out of the composed artifact, hashes, canonical model and HTML report', async () => {
+  const secret = 'TOPSECRET-full-path-privacy';
+  const normalized = normalizeSnapshot({
+    format: 'simplified-v1',
+    document: { url: 'https://example.test/', title: 'Privacy' },
+    nodes: [
+      { backendNodeId: 1, tagName: 'button', parentBackendNodeId: null, attributes: {}, rect: { x: 5, y: 5, width: 80, height: 24 } },
+      { backendNodeId: 2, tagName: 'div', parentBackendNodeId: 1, attributes: { id: 'shared-private-reference', contenteditable: 'true' }, text: secret, visibleText: secret },
+      { backendNodeId: 3, tagName: 'button', parentBackendNodeId: null, attributes: {}, rect: { x: 5, y: 40, width: 80, height: 24 } },
+      { backendNodeId: 4, tagName: 'button', parentBackendNodeId: null, attributes: { 'aria-labelledby': 'shared-private-reference' }, rect: { x: 5, y: 70, width: 80, height: 24 } },
+      { backendNodeId: 5, tagName: 'button', parentBackendNodeId: null, attributes: { 'aria-describedby': 'shared-private-reference' }, rect: { x: 5, y: 70, width: 80, height: 24 } },
+      { backendNodeId: 6, tagName: 'span', parentBackendNodeId: null, attributes: { id: 'shared-private-reference' }, text: 'Texto público com ID duplicado' },
+      { backendNodeId: 7, tagName: 'label', parentBackendNodeId: null, attributes: { for: 'shared-native-target' }, text: secret },
+      { backendNodeId: 8, tagName: 'div', parentBackendNodeId: 7, attributes: { contenteditable: 'true' }, text: secret, visibleText: secret },
+      { backendNodeId: 9, tagName: 'button', parentBackendNodeId: null, attributes: { id: 'shared-native-target' }, rect: { x: 5, y: 70, width: 80, height: 24 } },
+      { backendNodeId: 10, tagName: 'button', parentBackendNodeId: null, attributes: { id: 'shared-native-target' }, rect: { x: 5, y: 70, width: 80, height: 24 } },
+    ],
+    axTree: { nodes: [
+      { backendDOMNodeId: 1, role: { value: 'button' }, name: { value: secret } },
+      { backendDOMNodeId: 2, role: { value: 'textbox' }, name: { value: secret }, value: { value: secret } },
+      { backendDOMNodeId: 3, role: { value: 'button' }, name: { value: 'Ação segura' } },
+      { backendDOMNodeId: 4, role: { value: 'button' }, name: { value: secret } },
+      { backendDOMNodeId: 5, role: { value: 'button' }, name: { value: 'Ação contaminada' }, description: { value: secret } },
+      { backendDOMNodeId: 9, role: { value: 'button' }, name: { value: secret } },
+      { backendDOMNodeId: 10, role: { value: 'button' }, name: { value: 'Rótulo público ambíguo' } },
+    ] },
+  });
+  class Canvas {
+    constructor(width, height) { this.width = width; this.height = height; }
+    getContext() {
+      return {
+        fillRect() {}, drawImage() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, arc() {}, fill() {}, fillText() {},
+        measureText(value) { return { width: [...String(value)].length * 7 }; },
+      };
+    }
+    async convertToBlob() { return new Blob([pngBytes(this.width, this.height)], { type: 'image/png' }); }
+  }
+  const source = await pristineSource(100, 100, { evidenceId: 'ev-full' });
+  const artifact = await composeAnnouncementMap({
+    pageId: 'page-1', snapshot: normalized, fullPageEvidence: source,
+    layoutMetrics: { cssContentSize: { width: 100, height: 100 } },
+    runtime: { OffscreenCanvas: Canvas, createImageBitmap: async () => ({ close() {} }) },
+  });
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.evidence[0] = source;
+  input.evidence.push(artifact);
+  const model = createAuditModel(input);
+  const html = renderHtmlReport(model);
+
+  assert.deepEqual(artifact.legend.map(entry => entry.announcementPreview), ['Ação segura, botão']);
+  for (const serialized of [JSON.stringify(artifact), JSON.stringify(model), html]) assert.doesNotMatch(serialized, /TOPSECRET/iu);
+});
+
+test('propagates privacy taint through explicit and implicit native label associations', () => {
+  const input = snapshot([
+    { nodeId: 'label-explicit', tagName: 'label', attributes: { for: 'target-explicit' }, children: ['editor-explicit'] },
+    { nodeId: 'editor-explicit', parentId: 'label-explicit', tagName: 'div', attributes: { contenteditable: 'true' } },
+    { nodeId: 'target-explicit', tagName: 'button', attributes: { id: 'target-explicit' }, labels: ['label-explicit'], accessibleName: 'TOPSECRET-explicit', axRole: 'button', rect: { x: 5, y: 5, width: 80, height: 24 } },
+    { nodeId: 'label-implicit', tagName: 'label', children: ['editor-implicit', 'target-implicit'] },
+    { nodeId: 'editor-implicit', parentId: 'label-implicit', tagName: 'div', attributes: { contenteditable: 'true' } },
+    { nodeId: 'target-implicit', parentId: 'label-implicit', tagName: 'button', accessibleName: 'TOPSECRET-implicit', axRole: 'button', rect: { x: 5, y: 35, width: 80, height: 24 } },
+    { nodeId: 'safe', tagName: 'button', accessibleName: 'Ação segura', axRole: 'button', rect: { x: 5, y: 65, width: 80, height: 24 } },
+  ]);
+
+  const selected = selectAnnouncementMapEntries(input);
+
+  assert.deepEqual(selected.entries.map(entry => entry.nodeId), ['safe']);
+  assert.doesNotMatch(JSON.stringify(selected), /TOPSECRET/iu);
+});
+
+test('keeps missing and duplicate-public ARIA references while tainting a duplicate with any private source', () => {
+  const input = snapshot([
+    { nodeId: 'missing', tagName: 'button', attributes: { 'aria-labelledby': 'absent' }, accessibleName: 'Salvar', axRole: 'button', rect: { x: 5, y: 5, width: 80, height: 24 } },
+    { nodeId: 'public-one', tagName: 'span', attributes: { id: 'duplicate-public' }, text: 'Primeiro' },
+    { nodeId: 'public-two', tagName: 'span', attributes: { id: 'duplicate-public' }, text: 'Segundo' },
+    { nodeId: 'duplicate-public-consumer', tagName: 'button', attributes: { 'aria-labelledby': 'duplicate-public' }, accessibleName: 'Nome público observado', axRole: 'button', rect: { x: 5, y: 35, width: 80, height: 24 } },
+    { nodeId: 'private-source', tagName: 'div', attributes: { id: 'duplicate-private', contenteditable: 'true' } },
+    { nodeId: 'public-collision', tagName: 'span', attributes: { id: 'duplicate-private' }, text: 'Colisão pública' },
+    { nodeId: 'private-consumer', tagName: 'button', attributes: { 'aria-labelledby': 'duplicate-private' }, accessibleName: 'TOPSECRET-duplicate-private', axRole: 'button', rect: { x: 5, y: 65, width: 80, height: 24 } },
+  ]);
+
+  const selected = selectAnnouncementMapEntries(input);
+
+  assert.deepEqual(selected.entries.map(entry => entry.nodeId), ['missing', 'duplicate-public-consumer']);
+  assert.doesNotMatch(JSON.stringify(selected), /TOPSECRET/iu);
+});
+
+test('counts every omitted frame context from normalized coverage even when no child node was captured', () => {
+  const input = snapshot([
+    { nodeId: 'frame-host', tagName: 'iframe', accessibleName: 'Conteúdo incorporado', axRole: 'iframe', rect: { x: 0, y: 0, width: 100, height: 80 } },
+    { nodeId: 'action', tagName: 'button', accessibleName: 'Continuar', axRole: 'button', rect: { x: 0, y: 90, width: 100, height: 30 } },
+  ]);
+  input.document.coverage = {
+    runtime: { outcome: 'partial', expectedFrameCount: 2, observedFrameCount: 1 },
+    accessibility: { outcome: 'partial', expectedFrameCount: 2, observedFrameCount: 1 },
+  };
+  input.document.warnings = [{ code: 'RUNTIME_FRAME_MISSING', frameId: 'child' }];
+
+  const selected = selectAnnouncementMapEntries(input);
+
+  assert.equal(selected.counts.omittedFrame, 1);
+  assert.ok(selected.limitations.includes('frame-content-omitted'));
+});
+
+test('plans document-CSS geometry, clipping, non-uniform scale and deterministic overlap', () => {
+  const input = snapshot([
+    { nodeId: 'one', tagName: 'button', accessibleName: 'Um', axRole: 'button', rect: { x: -10, y: 90, width: 40, height: 30 } },
+    { nodeId: 'two', tagName: 'button', accessibleName: 'Dois', axRole: 'button', rect: { x: -10, y: 90, width: 40, height: 30 } },
+  ]);
+
+  const plan = buildAnnotationMapPlan({
+    snapshot: input,
+    sourceMetadata: { width: 200, height: 300 },
+    layoutMetrics: { cssContentSize: { width: 100, height: 100 }, scrollX: 500, scrollY: 900 },
+  });
+
+  assert.deepEqual(plan.geometry, { cssWidth: 100, cssHeight: 100, scaleX: 2, scaleY: 3, deviceScaleFactor: null });
+  assert.deepEqual(plan.entries[0].bounds, { x: 0, y: 90, width: 30, height: 10 });
+  assert.equal(plan.entries[0].number, 1);
+  assert.equal(plan.entries[1].number, 2);
+  assert.ok(plan.counts.unresolvedOverlap >= 0);
+  assert.ok(plan.limitations.includes('non-atomic-source-geometry'));
+  assert.ok(plan.limitations.includes('non-uniform-pixel-scale'));
+  assert.equal(JSON.stringify(plan).includes('scrollX'), false, 'scroll não pode ser somado novamente aos bounds documentais');
+});
+
+test('uses a bounded deterministic spiral trail before declaring identical marker anchors unresolved', () => {
+  const nodes = Array.from({ length: 9 }, (_, index) => ({
+    nodeId: `overlap-${index + 1}`,
+    tagName: 'button',
+    accessibleName: `Ação ${index + 1}`,
+    axRole: 'button',
+    rect: { x: 135, y: 135, width: 30, height: 30 },
+  }));
+
+  const plan = buildAnnotationMapPlan({
+    snapshot: snapshot(nodes),
+    sourceMetadata: { width: 300, height: 300 },
+    layoutMetrics: { cssContentSize: { width: 300, height: 300 } },
+  });
+  const placements = plan.segments[0].placements;
+
+  assert.equal(plan.counts.unresolvedOverlap, 0);
+  assert.equal(new Set(placements.map(marker => `${marker.x}:${marker.y}`)).size, nodes.length);
+  assert.equal(placements.every(marker => marker.targetX === 150 && marker.targetY === 150), true);
+});
+
+test('wraps raster legend by measured width and exposes bidi controls as visible tokens', () => {
+  let measurements = 0;
+  const measureLegendText = value => {
+    measurements += 1;
+    return [...value].reduce((width, character) => width + (character === 'W' ? 20 : 7), 0);
+  };
+  const plan = buildAnnotationMapPlan({
+    snapshot: snapshot([{
+      nodeId: 'wide', tagName: 'button', accessibleName: `WWWWWWWWWW \u202Etexto`, axRole: 'button',
+      rect: { x: 5, y: 5, width: 80, height: 24 },
+    }]),
+    sourceMetadata: { width: 100, height: 100 },
+    layoutMetrics: { cssContentSize: { width: 100, height: 100 } },
+    measureLegendText,
+  });
+  const lines = plan.segments.flatMap(segment => segment.legendLines.map(line => line.text));
+
+  assert.ok(measurements > 0);
+  assert.equal(lines.every(line => measureLegendText(line) <= 68), true);
+  assert.doesNotMatch(lines.join('\n'), /\u202E/u);
+  assert.match(lines.join('\n'), /U\+202E/u);
+});
+
+test('freezes all declared limits and keeps global numbering across long segments without ellipsis', () => {
+  assert.deepEqual(ANNOTATION_MAP_LIMITS, {
+    maxNodes: 200,
+    maxSourcePixels: 32_000_000,
+    maxDimension: 8192,
+    maxCanvasPixels: 32_000_000,
+    maxSegments: 64,
+    maxDerivedBytes: 64 * 1024 * 1024,
+    maxLegendCodePoints: 256 * 1024,
+  });
+  assert.equal(Object.isFrozen(ANNOTATION_MAP_LIMITS), true);
+
+  const nodes = Array.from({ length: 12 }, (_, index) => ({
+    nodeId: `n-${index + 1}`, tagName: 'button', accessibleName: `Ação ${index + 1} ${'descrição '.repeat(12)}`,
+    axRole: 'button', rect: { x: 4, y: index * 80 + 4, width: 120, height: 30 },
+  }));
+  const plan = buildAnnotationMapPlan({
+    snapshot: snapshot(nodes),
+    sourceMetadata: { width: 400, height: 2000 },
+    layoutMetrics: { cssContentSize: { width: 200, height: 1000 } },
+    segmentCssHeight: 240,
+  });
+
+  assert.deepEqual(plan.legend.map(entry => entry.number), Array.from({ length: 12 }, (_, index) => index + 1));
+  assert.ok(plan.segments.length > 1);
+  assert.equal(plan.segments.every(segment => segment.entryNumbers.every(number => number >= 1 && number <= 12)), true);
+  assert.doesNotMatch(JSON.stringify(plan.legend), /…|\.\.\./u);
+});
+
+test('moves bounded legend overflow into white continuations and reports entries omitted by the segment cap', () => {
+  const nodes = Array.from({ length: 20 }, (_, index) => ({
+    nodeId: `long-${index + 1}`,
+    tagName: 'button',
+    accessibleName: `Ação ${index + 1} ${'conteúdo-sem-segredo '.repeat(50)}`,
+    axRole: 'button',
+    rect: { x: 5, y: 5 + index * 3, width: 80, height: 24 },
+  }));
+  const plan = buildAnnotationMapPlan({
+    snapshot: snapshot(nodes),
+    sourceMetadata: { width: 100, height: 200 },
+    layoutMetrics: { cssContentSize: { width: 100, height: 200 } },
+  });
+
+  assert.ok(plan.legend.length > 0 && plan.legend.length < 20);
+  assert.equal(plan.counts.omittedLimit, 20 - plan.legend.length);
+  assert.ok(plan.limitations.includes('legend-limit-reached'));
+  assert.ok(plan.segments.some(segment => segment.role === 'legend-continuation'));
+  assert.ok(plan.segments.length <= ANNOTATION_MAP_LIMITS.maxSegments);
+  assert.equal(plan.segments.filter(segment => segment.role === 'legend-continuation')
+    .every(segment => segment.sourceCssClip === null && segment.placements.length === 0), true);
+  const renderedLegend = plan.segments.flatMap(segment => segment.legendLines.map(line => line.text)).join('\n');
+  for (const entry of plan.legend) assert.match(renderedLegend, new RegExp(`^${entry.number} —|\\n${entry.number} —`, 'u'));
+  assert.doesNotMatch(renderedLegend, /…|\.\.\./u);
+});
+
+test('plans adjacent fractional CSS clips as contiguous non-overlapping source raster rows', () => {
+  const plan = buildAnnotationMapPlan({
+    snapshot: snapshot([{
+      nodeId: 'fractional', tagName: 'button', accessibleName: 'Ação', axRole: 'button',
+      rect: { x: 5, y: 5, width: 80, height: 24 },
+    }]),
+    sourceMetadata: { width: 100, height: 200 },
+    layoutMetrics: { cssContentSize: { width: 100, height: 200 } },
+    segmentCssHeight: 200 / 3,
+  });
+  const clips = plan.segments.filter(segment => segment.role === 'image-and-legend')
+    .map(segment => segment.sourcePixelClip);
+
+  assert.deepEqual(clips, [
+    { x: 0, y: 0, width: 100, height: 67 },
+    { x: 0, y: 67, width: 100, height: 66 },
+    { x: 0, y: 133, width: 100, height: 67 },
+  ]);
+  assert.equal(clips.at(-1).y + clips.at(-1).height, 200);
+});
+
+test('bounds every raster segment to a printable page ratio and splits legend continuations', () => {
+  const sourceWidth = 100;
+  const plan = buildAnnotationMapPlan({
+    snapshot: snapshot([{
+      nodeId: 'printable', tagName: 'button',
+      accessibleName: `Ação ${'conteúdo-sem-segredo '.repeat(25)}`, axRole: 'button',
+      rect: { x: 5, y: 5, width: 80, height: 24 },
+    }]),
+    sourceMetadata: { width: sourceWidth, height: 200 },
+    layoutMetrics: { cssContentSize: { width: sourceWidth, height: 200 } },
+  });
+  const plannedHeight = segment => (segment.sourcePixelClip?.height ?? 0) +
+    (segment.legendLines.length ? 34 + 16 * 2 + segment.legendLines.length * 22 : 0);
+
+  assert.ok(plan.segments.filter(segment => segment.role === 'legend-continuation').length > 1);
+  assert.equal(plan.segments.every(segment => plannedHeight(segment) <= Math.floor(sourceWidth * 1.3)), true);
+  assert.ok(plan.segments.length <= ANNOTATION_MAP_LIMITS.maxSegments);
+});
+
+test('fails explicitly when the source aspect cannot fit printable segments within the frozen segment cap', () => {
+  assert.throws(() => buildAnnotationMapPlan({
+    snapshot: snapshot([{
+      nodeId: 'too-tall', tagName: 'button', accessibleName: 'Ação', axRole: 'button',
+      rect: { x: 1, y: 1, width: 20, height: 20 },
+    }]),
+    sourceMetadata: { width: 33, height: 3295 },
+    layoutMetrics: { cssContentSize: { width: 33, height: 3295 } },
+  }), error => error instanceof AnnotationMapError && error.code === 'ANNOTATION_MAP_PRINT_SEGMENT_LIMIT');
+});
+
+test('fails explicitly without worker canvas APIs and never mutates the pristine source', async () => {
+  const source = Object.freeze({
+    evidenceId: 'full-page-source', pageId: 'page-1', kind: 'full-page', state: 'pristine', dataUrl: PNG,
+    hash: '8d9e23c8ce28148f4d51f47e9d933f82f84d3c6560c337266eb7a9bfbc8e441d',
+    metadata: { width: 1, height: 1 },
+  });
+  const before = JSON.stringify(source);
+
+  await assert.rejects(
+    composeAnnouncementMap({
+      pageId: 'page-1', snapshot: snapshot([]), fullPageEvidence: source,
+      runtime: { OffscreenCanvas: undefined, createImageBitmap: undefined },
+    }),
+    error => error instanceof AnnotationMapError && error.code === 'ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE',
+  );
+  assert.equal(JSON.stringify(source), before);
+});
+
+test('keeps production composition fail-closed while the real MV3 gate is inconclusive', async () => {
+  const source = Object.freeze({
+    evidenceId: 'full-page-source', pageId: 'page-1', kind: 'full-page', state: 'pristine', dataUrl: PNG,
+    hash: '431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460', metadata: {},
+  });
+  const before = JSON.stringify(source);
+
+  assert.deepEqual(ANNOTATION_MAP_MV3_GATE, {
+    enabled: false,
+    code: 'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE',
+    reason: 'O compositor não foi comprovado de forma conclusiva no worker MV3 real desta versão.',
+  });
+  assert.equal(Object.isFrozen(ANNOTATION_MAP_MV3_GATE), true);
+  await assert.rejects(composeAnnouncementMapForProduction({
+    pageId: 'page-1', snapshot: snapshot([]), fullPageEvidence: source,
+  }), error => error instanceof AnnotationMapError && error.code === ANNOTATION_MAP_MV3_GATE.code);
+  assert.equal(JSON.stringify(source), before);
+});
+
+test('composes and revalidates a strict PNG segment, records recalculable geometry and releases the bitmap', async () => {
+  let closes = 0;
+  const canvasSizes = [];
+  const canvases = [];
+  class Canvas {
+    constructor(width, height) { this.width = width; this.height = height; canvasSizes.push([width, height]); canvases.push(this); }
+    getContext() {
+      return {
+        fillRect() {}, drawImage() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, arc() {}, fill() {}, fillText() {},
+        measureText(value) { return { width: [...String(value)].length * 7 }; },
+      };
+    }
+    async convertToBlob() { return new Blob([pngBytes(this.width, this.height)], { type: 'image/png' }); }
+  }
+  const source = await pristineSource(100, 100);
+  const before = structuredClone(source);
+  const artifact = await composeAnnouncementMap({
+    pageId: 'page-1',
+    snapshot: snapshot([{ nodeId: 'action', accessibleName: 'Ação', axRole: 'button', rect: { x: 0, y: 0, width: 1, height: 1 } }]),
+    fullPageEvidence: source,
+    layoutMetrics: { cssContentSize: { width: 100, height: 100 }, deviceScaleFactor: 2 },
+    runtime: { OffscreenCanvas: Canvas, createImageBitmap: async () => ({ close() { closes += 1; } }) },
+  });
+
+  assert.equal(artifact.status, 'complete');
+  assert.ok(artifact.segments.length >= 1);
+  assert.deepEqual(artifact.derivation.geometry.sourceCssSize, { width: 100, height: 100 });
+  assert.deepEqual(artifact.derivation.geometry.sourcePixelSize, { width: 100, height: 100 });
+  assert.equal(artifact.derivation.geometry.annotations[0].nodeId, 'action');
+  assert.equal(artifact.derivation.geometry.annotations[0].marker.size, 28);
+  assert.equal(artifact.legend[0].segmentIndex, 1);
+  assert.equal(canvasSizes.length, artifact.segments.length + 1);
+  artifact.segments.forEach((segment, index) => {
+    assert.deepEqual([segment.width, segment.height], canvasSizes[index + 1]);
+  });
+  assert.equal(canvases.every(canvas => canvas.width === 0 && canvas.height === 0), true);
+  assert.equal(closes, 1);
+  assert.deepEqual(source, before);
+});
+
+test('uses real canvas text metrics and rasterizes visible bidi tokens without clipping legend lines', async () => {
+  let measurements = 0;
+  const rasterText = [];
+  const measuredWidth = value => [...value].reduce((width, character) => width + (character === 'W' ? 20 : 7), 0);
+  class Canvas {
+    constructor(width, height) { this.width = width; this.height = height; }
+    getContext() {
+      return {
+        fillRect() {}, drawImage() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, arc() {}, fill() {},
+        measureText(value) { measurements += 1; return { width: measuredWidth(value) }; },
+        fillText(value) { rasterText.push(value); },
+      };
+    }
+    async convertToBlob() { return new Blob([pngBytes(this.width, this.height)], { type: 'image/png' }); }
+  }
+  const artifact = await composeAnnouncementMap({
+    pageId: 'page-1', fullPageEvidence: await pristineSource(100, 100),
+    snapshot: snapshot([{
+      nodeId: 'wide', tagName: 'button', accessibleName: `WWWWWWWWWW \u202Etexto`, axRole: 'button',
+      rect: { x: 5, y: 5, width: 80, height: 24 },
+    }]),
+    layoutMetrics: { cssContentSize: { width: 100, height: 100 } },
+    runtime: { OffscreenCanvas: Canvas, createImageBitmap: async () => ({ close() {} }) },
+  });
+
+  assert.equal(artifact.status, 'complete');
+  assert.ok(measurements > 0);
+  assert.doesNotMatch(rasterText.join('\n'), /\u202E/u);
+  assert.match(rasterText.join('\n'), /U\+202E/u);
+  const legendLines = rasterText.filter(value => !/^\d+$/u.test(value));
+  assert.equal(legendLines.every(line => measuredWidth(line) <= 68), true);
+});
+
+test('marks an otherwise rendered map partial when a closed shadow root was omitted', async () => {
+  class Canvas {
+    constructor(width, height) { this.width = width; this.height = height; }
+    getContext() {
+      return {
+        fillRect() {}, drawImage() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, arc() {}, fill() {}, fillText() {},
+        measureText(value) { return { width: [...String(value)].length * 7 }; },
+      };
+    }
+    async convertToBlob() { return new Blob([pngBytes(this.width, this.height)], { type: 'image/png' }); }
+  }
+  const source = await pristineSource(100, 100);
+  const artifact = await composeAnnouncementMap({
+    pageId: 'page-1', fullPageEvidence: source,
+    snapshot: snapshot([
+      { nodeId: 'action', accessibleName: 'Ação segura', axRole: 'button', rect: { x: 0, y: 0, width: 1, height: 1 } },
+      { nodeId: 'closed-root', tagName: '#document-fragment', shadowRootType: 'closed' },
+    ]),
+    layoutMetrics: { cssContentSize: { width: 100, height: 100 } },
+    runtime: { OffscreenCanvas: Canvas, createImageBitmap: async () => ({ close() {} }) },
+  });
+
+  assert.equal(artifact.status, 'partial');
+  assert.ok(artifact.limitations.includes('closed-shadow-root-omitted'));
+});
+
+test('classifies invalid pristine input and hash mismatch before allocating a bitmap', async () => {
+  let bitmapCalls = 0;
+  const runtime = {
+    OffscreenCanvas: class {},
+    createImageBitmap: async () => { bitmapCalls += 1; return { close() {} }; },
+  };
+  const common = { pageId: 'page-1', snapshot: snapshot([]), runtime };
+
+  await assert.rejects(composeAnnouncementMap({
+    ...common,
+    fullPageEvidence: { evidenceId: 'full', pageId: 'page-1', kind: 'full-page', state: 'pristine', dataUrl: 'data:image/png;base64,AAAA', hash: '0'.repeat(64) },
+  }), error => error instanceof AnnotationMapError && error.code === 'ANNOTATION_MAP_SOURCE_INVALID');
+  await assert.rejects(composeAnnouncementMap({
+    ...common,
+    fullPageEvidence: { evidenceId: 'full', pageId: 'page-1', kind: 'full-page', state: 'pristine', dataUrl: PNG, hash: '0'.repeat(64) },
+  }), error => error instanceof AnnotationMapError && error.code === 'ANNOTATION_MAP_SOURCE_HASH_MISMATCH');
+  assert.equal(bitmapCalls, 0);
+});
+
+test('rejects a structurally valid source PNG inflate bomb before bitmap allocation', async () => {
+  const bytes = pngBytes(1, 1, new Uint8Array(10 * 1024 * 1024));
+  let bitmapCalls = 0;
+  await assert.rejects(composeAnnouncementMap({
+    pageId: 'page-1', snapshot: snapshot([]),
+    fullPageEvidence: {
+      evidenceId: 'full', pageId: 'page-1', kind: 'full-page', state: 'pristine',
+      dataUrl: `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`,
+      hash: await sha256Hex(bytes), metadata: {},
+    },
+    runtime: { OffscreenCanvas: class {}, createImageBitmap: async () => { bitmapCalls += 1; return { close() {} }; } },
+  }), error => error instanceof AnnotationMapError && error.code === 'ANNOTATION_MAP_SOURCE_INVALID');
+  assert.equal(bitmapCalls, 0);
+});
+
+test('rejects invalid compositor output with a fixed code and still releases the bitmap', async () => {
+  let closes = 0;
+  class InvalidCanvas {
+    constructor(width, height) { this.width = width; this.height = height; }
+    getContext() {
+      return {
+        fillRect() {}, drawImage() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, arc() {}, fill() {}, fillText() {},
+        measureText(value) { return { width: [...String(value)].length * 7 }; },
+      };
+    }
+    async convertToBlob() { return new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }); }
+  }
+  await assert.rejects(composeAnnouncementMap({
+    pageId: 'page-1',
+    snapshot: snapshot([{ nodeId: 'action', accessibleName: 'Ação', axRole: 'button', rect: { x: 0, y: 0, width: 1, height: 1 } }]),
+    fullPageEvidence: await pristineSource(100, 100),
+    layoutMetrics: { cssContentSize: { width: 100, height: 100 } },
+    runtime: { OffscreenCanvas: InvalidCanvas, createImageBitmap: async () => ({ close() { closes += 1; } }) },
+  }), error => error instanceof AnnotationMapError && error.code === 'ANNOTATION_MAP_OUTPUT_INVALID');
+  assert.equal(closes, 1);
+});
+
+test('rejects a dimension-matching compositor PNG inflate bomb before accepting derived bytes', async () => {
+  let closes = 0;
+  class BombCanvas {
+    constructor(width, height) { this.width = width; this.height = height; }
+    getContext() {
+      return {
+        fillRect() {}, drawImage() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, arc() {}, fill() {}, fillText() {},
+        measureText(value) { return { width: [...String(value)].length * 7 }; },
+      };
+    }
+    async convertToBlob() {
+      return new Blob([pngBytes(this.width, this.height, new Uint8Array(10 * 1024 * 1024))], { type: 'image/png' });
+    }
+  }
+  await assert.rejects(composeAnnouncementMap({
+    pageId: 'page-1',
+    snapshot: snapshot([{ nodeId: 'action', accessibleName: 'Ação', axRole: 'button', rect: { x: 0, y: 0, width: 1, height: 1 } }]),
+    fullPageEvidence: await pristineSource(100, 100),
+    layoutMetrics: { cssContentSize: { width: 100, height: 100 } },
+    runtime: { OffscreenCanvas: BombCanvas, createImageBitmap: async () => ({ close() { closes += 1; } }) },
+  }), error => error instanceof AnnotationMapError && error.code === 'ANNOTATION_MAP_OUTPUT_INVALID');
+  assert.equal(closes, 1);
+});
+
+test('honors an already-aborted signal before decoding or allocating a canvas', async () => {
+  const controller = new AbortController();
+  controller.abort(new DOMException('cancelado', 'AbortError'));
+  let allocations = 0;
+
+  await assert.rejects(composeAnnouncementMap({
+    pageId: 'page-1', snapshot: snapshot([]),
+    fullPageEvidence: { evidenceId: 'full', pageId: 'page-1', kind: 'full-page', state: 'pristine', dataUrl: PNG, hash: 'x', metadata: {} },
+    signal: controller.signal,
+    runtime: { OffscreenCanvas: class { constructor() { allocations += 1; } }, createImageBitmap: async () => ({ close() {} }) },
+  }), error => error?.name === 'AbortError');
+
+  assert.equal(allocations, 0);
+});
+
+test('times out a stalled bitmap allocation, closes the late bitmap and avoids a render canvas', async () => {
+  let resolveBitmap;
+  let closes = 0;
+  let allocations = 0;
+  const stalled = new Promise(resolve => { resolveBitmap = resolve; });
+  const source = await pristineSource(100, 100);
+
+  await assert.rejects(composeAnnouncementMap({
+    pageId: 'page-1',
+    snapshot: snapshot([{ nodeId: 'action', accessibleName: 'Ação', axRole: 'button', rect: { x: 0, y: 0, width: 1, height: 1 } }]),
+    fullPageEvidence: source,
+    layoutMetrics: { cssContentSize: { width: 100, height: 100 } },
+    timeoutMs: 5,
+    runtime: {
+      OffscreenCanvas: class {
+        constructor() { this.width = 1; this.height = 1; allocations += 1; }
+        getContext() { return { measureText(value) { return { width: [...String(value)].length * 7 }; } }; }
+      },
+      createImageBitmap: () => stalled,
+    },
+  }), error => error instanceof AnnotationMapError && error.code === 'ANNOTATION_MAP_TIMEOUT');
+
+  resolveBitmap({ close() { closes += 1; } });
+  await Promise.resolve();
+  assert.equal(closes, 1);
+  assert.equal(allocations, 1, 'somente o canvas transitório de métricas pode ter sido alocado');
+});
+
+test('cancels the active PNG inflate reader when the compositor deadline expires', async () => {
+  const OriginalDecompressionStream = globalThis.DecompressionStream;
+  let cancellations = 0;
+  globalThis.DecompressionStream = class {
+    constructor() {
+      this.readable = new ReadableStream({ cancel() { cancellations += 1; } });
+      this.writable = new WritableStream({ write() {}, close() {} });
+    }
+  };
+  try {
+    await assert.rejects(composeAnnouncementMap({
+      pageId: 'page-1', snapshot: snapshot([]),
+      fullPageEvidence: {
+        evidenceId: 'full', pageId: 'page-1', kind: 'full-page', state: 'pristine', dataUrl: PNG,
+        hash: '431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460', metadata: {},
+      },
+      timeoutMs: 5,
+      runtime: { OffscreenCanvas: class {}, createImageBitmap: async () => ({ close() {} }) },
+    }), error => error instanceof AnnotationMapError && error.code === 'ANNOTATION_MAP_TIMEOUT');
+    await Promise.resolve();
+    assert.equal(cancellations, 1);
+  } finally {
+    globalThis.DecompressionStream = OriginalDecompressionStream;
+  }
+});

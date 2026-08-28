@@ -4,12 +4,8 @@ import { SECTION508_REVISED_CROSSWALK } from '../normative/section508.js';
 import { createAuditModel } from './audit-model.js';
 import { REPORT_CSS, REPORT_CSS_CSP_HASH } from './report.css.js';
 import { REPORT_SCRIPT, REPORT_SCRIPT_CSP_HASH } from './report.js.js';
-
-const PNG_SIGNATURE = Object.freeze([137, 80, 78, 71, 13, 10, 26, 10]);
-const MAX_PNG_BYTES = 64 * 1024 * 1024;
-const MAX_PNG_DIMENSION = 100_000;
-const MAX_PNG_PIXELS = 268_435_456;
-const CRC_TABLE = makeCrcTable();
+import { decodePngDataUrl } from '../evidence/png.js';
+import { ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO } from '../evidence/annotation-map-artifact.js';
 
 const OUTCOME = Object.freeze({
   passed: { label: 'Atendido no escopo observado', icon: '✓' },
@@ -32,6 +28,20 @@ const IMPACT = Object.freeze({
 
 const PAGE_STATUS = Object.freeze({
   complete: 'Completa', partial: 'Parcial', failed: 'Falhou', cancelled: 'Cancelada',
+});
+
+const ANNOTATION_MAP_LIMITATION_LABELS = Object.freeze({
+  'observed-dom-ax-order-not-literal-assistive-technology': 'ordem DOM/AX observada; não representa fala literal nem ordem de foco',
+  'non-atomic-source-geometry': 'captura e geometria foram coletadas em instantes distintos',
+  'top-document-open-shadow-only': 'somente o documento superior e Shadow DOM aberto foram compostos',
+  'rasterization-browser-dependent': 'a rasterização pode variar conforme navegador e sistema operacional',
+  'source-capture-may-contain-personal-data': 'a captura original pode conter dados pessoais visíveis',
+  'frame-content-omitted': 'conteúdo de frames foi omitido',
+  'closed-shadow-root-omitted': 'conteúdo de Shadow DOM fechado foi omitido',
+  'node-limit-reached': 'o limite de elementos anotados foi atingido',
+  'legend-limit-reached': 'o limite de legenda ou segmentos foi atingido',
+  'unresolved-marker-overlap': 'uma ou mais sobreposições de marcadores permaneceram',
+  'non-uniform-pixel-scale': 'as escalas horizontal e vertical da captura não são uniformes',
 });
 
 const OUTCOME_PRIORITY = Object.freeze({ failed: 0, cantTell: 1, passed: 2, untested: 3, inapplicable: 4 });
@@ -256,11 +266,33 @@ function occurrenceEvidence(occurrence, artifactById, imageByEvidenceId, outcome
 function announcementMaps(model, imageByEvidenceId) {
   const maps = model.evidence.filter(artifact => artifact.kind === 'announcement-map');
   return `<section id="mapas" class="major-section" aria-labelledby="mapas-titulo"><h2 id="mapas-titulo">Mapa visual da prévia de anúncios</h2>
-<p class="section-intro">Mapa derivado para relacionar elementos e prévias calculadas. Ele não representa uma transcrição literal de tecnologia assistiva.</p><div class="map-list">${model.pages.map((page, index) => {
+<p class="section-intro">Evidência derivada para relacionar marcadores aos elementos e às prévias calculadas. Ordem observada DOM/AX não é ordem de foco, e a prévia não é transcrição literal de tecnologia assistiva.</p><div class="map-list">${model.pages.map((page, index) => {
     const artifact = maps.find(value => value.pageId === page.pageId);
-    const image = artifact ? imageByEvidenceId.get(artifact.evidenceId) : null;
-    if (!artifact || !image) return `<article class="map-card" data-announcement-map-page="${escapeHtml(page.pageId)}"><h3>Página ${index + 1} — ${escapeHtml(page.pageId)}</h3><div class="map-unavailable"><p><strong>Mapa indisponível nesta auditoria.</strong></p><p>Nenhum artefato derivado validado foi registrado; a captura original permanece no anexo quando disponível.</p></div></article>`;
-    return `<article class="map-card" data-announcement-map-page="${escapeHtml(page.pageId)}"><h3>Página ${index + 1} — ${escapeHtml(page.pageId)}</h3><figure>${renderEvidenceImage(image, `Mapa visual da prévia de anúncios da página ${index + 1}`)}<figcaption>Artefato derivado <code>${escapeHtml(artifact.evidenceId)}</code>; hash <code>${escapeHtml(artifact.hash || 'não disponível')}</code>. A numeração e os limites devem ser lidos com a legenda técnica do artefato.</figcaption></figure></article>`;
+    if (!artifact) return `<article id="mapa-${index + 1}" class="map-card" data-announcement-map-page="${escapeHtml(page.pageId)}" data-map-status="absent"><h3>Página ${index + 1} — ${escapeHtml(page.pageId)}</h3><div class="map-unavailable"><p><strong>Mapa indisponível nesta auditoria.</strong></p><p>Nenhum artefato derivado validado foi registrado; a captura original permanece separada no anexo quando disponível.</p></div></article>`;
+    const coverage = `${artifact.counts.annotated} de ${artifact.counts.eligible} elementos elegíveis anotados; ${artifact.counts.omittedFrame} contextos de frame, ${artifact.counts.omittedNoRect} elementos sem geometria, ${artifact.counts.omittedLimit} por limite e ${artifact.counts.unresolvedOverlap} sobreposições não resolvidas.`;
+    const printableAspectRatio = String(ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO).replace('.', ',');
+    const limits = `${groupedInteger(artifact.limits.maxNodes)} nós; ${groupedInteger(artifact.limits.maxSourcePixels)} pixels de origem; dimensão ${groupedInteger(artifact.limits.maxDimension)}; ${groupedInteger(artifact.limits.maxCanvasPixels)} pixels por segmento; ${groupedInteger(artifact.limits.maxSegments)} segmentos; ${groupedInteger(artifact.limits.maxDerivedBytes)} bytes derivados; ${groupedInteger(artifact.limits.maxLegendCodePoints)} pontos de código de legenda; proporção raster imprimível até ${printableAspectRatio}:1 (regra do algoritmo).`;
+    const limitations = artifact.limitations.length
+      ? artifact.limitations.map(code => `${code} — ${ANNOTATION_MAP_LIMITATION_LABELS[code]}`).join('; ')
+      : 'nenhuma limitação adicional';
+    const stateText = artifact.status === 'empty'
+      ? '<strong>Nenhum elemento elegível foi encontrado.</strong> O estado vazio foi registrado explicitamente; não significa conformidade da página.'
+      : artifact.status === 'partial'
+        ? '<strong>Mapa gerado com cobertura parcial.</strong> Consulte as omissões e limitações antes de usar a correlação.'
+        : '<strong>Mapa gerado.</strong> A correlação visual e a legenda semântica estão disponíveis abaixo.';
+    const caption = `Página ${index + 1} (${page.pageId}); cobertura: ${coverage} Algoritmo ${artifact.derivation.algorithm} ${artifact.derivation.version}; limites: ${limits} Origem ${artifact.fullPageEvidenceId}, hash ${artifact.derivation.sourceHash}; hash derivado ${artifact.hash}; limitações: ${limitations}.`;
+    const figures = artifact.segments.map(segment => {
+      const image = imageByEvidenceId.get(segment.segmentId);
+      const markers = artifact.derivation.geometry.annotations.filter(annotation => annotation.segmentIndex === segment.index).map(annotation => annotation.number);
+      const markerText = markers.length === 1
+        ? `com marcador ${markers[0]}`
+        : markers.length > 1 ? `com marcadores ${markers.join(', ')}` : 'sem marcadores neste recorte';
+      const roleText = segment.role === 'legend-continuation' ? 'continuação da legenda' : markerText;
+      const accessibleName = `Segmento ${segment.index} de ${segment.count} do mapa, ${roleText}`;
+      return `<figure class="announcement-map-segment" data-map-segment="${escapeHtml(segment.segmentId)}">${image ? renderEvidenceImage(image, accessibleName) : '<p><strong>PNG do segmento indisponível.</strong> Os metadados e a legenda semântica foram preservados.</p>'}<figcaption>${escapeHtml(caption)} Segmento ${segment.index} de ${segment.count}: ${escapeHtml(roleText)}; hash do segmento <code>${escapeHtml(segment.contentHash)}</code>.</figcaption></figure>`;
+    }).join('');
+    const legend = artifact.legend.length ? `<h4 id="mapa-${index + 1}-legenda">Legenda semântica completa</h4><ol class="announcement-map-legend" aria-labelledby="mapa-${index + 1}-legenda">${artifact.legend.map(entry => `<li><span class="legend-selector">Elemento <code>${escapeHtml(entry.selectorSummary)}</code></span><span>Prévia calculada: <bdi>${escapeAuditedText(entry.announcementPreview)}</bdi></span><span>Origem do nome: ${escapeHtml(entry.nameSource)}; marcador no segmento ${entry.segmentIndex}.</span></li>`).join('')}</ol>` : '';
+    return `<article id="mapa-${index + 1}" class="map-card" data-announcement-map-page="${escapeHtml(page.pageId)}" data-map-status="${escapeHtml(artifact.status)}"><h3>Página ${index + 1} — ${escapeHtml(page.pageId)}</h3><p class="map-state map-state--${escapeHtml(artifact.status)}">${stateText}</p><dl class="meta map-meta"><dt>Cobertura</dt><dd>${escapeHtml(coverage)}</dd><dt>Algoritmo</dt><dd><code>${escapeHtml(artifact.derivation.algorithm)}</code> ${escapeHtml(artifact.derivation.version)}</dd><dt>Captura original</dt><dd><code>${escapeHtml(artifact.fullPageEvidenceId)}</code> — <code>${escapeHtml(artifact.derivation.sourceHash)}</code></dd><dt>Hash derivado</dt><dd><code>${escapeHtml(artifact.hash)}</code></dd><dt>Limites</dt><dd>${escapeHtml(limits)}</dd><dt>Limitações</dt><dd>${escapeHtml(limitations)}</dd></dl><div class="announcement-map-segments">${figures}</div>${legend}</article>`;
   }).join('')}</div></section>`;
 }
 
@@ -299,12 +331,16 @@ function evidenceAnnex(model, imageByEvidenceId) {
     const artifacts = model.evidence.filter(artifact => artifact.pageId === page.pageId);
     const original = artifacts.filter(artifact => artifact.kind !== 'announcement-map');
     const derived = artifacts.filter(artifact => artifact.kind === 'announcement-map');
-    return `<section class="evidence-group" aria-labelledby="anexos-pagina-${pageIndex + 1}"><h3 id="anexos-pagina-${pageIndex + 1}">Página ${pageIndex + 1} — ${escapeHtml(page.pageId)}</h3><h4>Registros originais</h4><div class="evidence-list">${original.map(artifact => evidenceCard(artifact, model.evidence, imageByEvidenceId)).join('') || '<p>Nenhuma evidência original registrada.</p>'}</div><h4>Registros derivados</h4><div class="evidence-list">${derived.map(artifact => evidenceCard(artifact, model.evidence, imageByEvidenceId)).join('') || '<p>Nenhuma evidência derivada registrada.</p>'}</div></section>`;
+    return `<section class="evidence-group" aria-labelledby="anexos-pagina-${pageIndex + 1}"><h3 id="anexos-pagina-${pageIndex + 1}">Página ${pageIndex + 1} — ${escapeHtml(page.pageId)}</h3><h4>Evidências originais</h4><div class="evidence-list">${original.map(artifact => evidenceCard(artifact, model.evidence, imageByEvidenceId)).join('') || '<p>Nenhuma evidência original registrada.</p>'}</div><h4>Evidências derivadas</h4><div class="evidence-list">${derived.map(artifact => evidenceCard(artifact, model.evidence, imageByEvidenceId)).join('') || '<p>Nenhuma evidência derivada registrada.</p>'}</div></section>`;
   }).join('')}</section>`;
 }
 
 function evidenceCard(artifact, allEvidence, imageByEvidenceId) {
   const index = allEvidence.findIndex(value => value.evidenceId === artifact.evidenceId);
+  if (artifact.kind === 'announcement-map') {
+    const coverage = `${artifact.counts.annotated}/${artifact.counts.eligible} elegíveis anotados; ${artifact.segments.length} segmentos.`;
+    return `<article id="evidencia-${index + 1}" class="evidence-card evidence-card--derived" aria-labelledby="evidencia-${index + 1}-titulo"><h4 id="evidencia-${index + 1}-titulo">${escapeHtml(artifact.evidenceId)}</h4><dl class="meta"><dt>Tipo</dt><dd>announcement-map</dd><dt>Estado</dt><dd>${escapeHtml(artifact.status)}</dd><dt>Hash derivado</dt><dd><code>${escapeHtml(artifact.hash)}</code></dd><dt>Algoritmo</dt><dd><code>${escapeHtml(artifact.derivation.algorithm)}</code> ${escapeHtml(artifact.derivation.version)}</dd><dt>Origem pristine</dt><dd><code>${escapeHtml(artifact.fullPageEvidenceId)}</code> — <code>${escapeHtml(artifact.derivation.sourceHash)}</code></dd><dt>Cobertura</dt><dd>${escapeHtml(coverage)}</dd></dl><p class="evidence-relation">Artefato derivado localmente; os PNGs segmentados, a legenda completa, os limites e as limitações estão na seção <a href="#mapas">Mapa visual da prévia de anúncios</a>. A captura original permanece separada.</p></article>`;
+  }
   const image = imageByEvidenceId.get(artifact.evidenceId);
   const relation = artifact.fullPageEvidenceId ? `Deriva ou localiza conteúdo da captura integral ${artifact.fullPageEvidenceId}.` : artifact.kind === 'full-page' ? 'Captura integral original do estado observado.' : 'Evidência elementar original, quando disponível.';
   return `<article id="evidencia-${index + 1}" class="evidence-card" aria-labelledby="evidencia-${index + 1}-titulo"><h4 id="evidencia-${index + 1}-titulo">${escapeHtml(artifact.evidenceId)}</h4><dl class="meta"><dt>Tipo</dt><dd>${escapeHtml(artifact.kind)}</dd><dt>Hash</dt><dd><code>${escapeHtml(artifact.hash || 'não disponível')}</code></dd>${artifact.selector?.css ? `<dt>Seletor</dt><dd><code>${escapeHtml(artifact.selector.css)}</code></dd>` : ''}${artifact.backendNodeId ? `<dt>Backend node</dt><dd>${escapeHtml(artifact.backendNodeId)}</dd>` : ''}${artifact.mediaUrl ? `<dt>URL da mídia</dt><dd>${safeMediaText(artifact.mediaUrl)}</dd>` : ''}</dl><p class="evidence-relation">${escapeHtml(relation)}</p>${artifact.snippet ? `<details open data-collapsible><summary>Trecho HTML sanitizado</summary><pre><code>${escapeHtml(artifact.snippet)}</code></pre></details>` : ''}${accessibility(artifact.accessibility)}${image ? `<figure>${renderEvidenceImage(image, evidenceAlt(artifact))}<figcaption>${artifact.kind === 'full-page' ? 'PNG original da captura integral do estado observado.' : artifact.kind === 'announcement-map' ? 'PNG derivado do mapa visual; consulte relação, algoritmo e limites registrados.' : `PNG original da captura do elemento ${escapeHtml(artifact.nodeId || '')}.`}</figcaption></figure>` : '<p><strong>Imagem não incluída:</strong> PNG ausente, inválido ou fora dos limites; o registro textual e a limitação permanecem visíveis.</p>'}</article>`;
@@ -424,16 +460,20 @@ function createImageRegistry(artifacts) {
   const definitions = [];
   const byEvidenceId = new Map();
   const byDataUrl = new Map();
-  for (const artifact of artifacts) {
-    const metadata = pngMetadata(artifact.dataUrl);
-    if (!metadata) continue;
-    let image = byDataUrl.get(artifact.dataUrl);
+  const register = (key, dataUrl) => {
+    const metadata = pngMetadata(dataUrl);
+    if (!metadata) return;
+    let image = byDataUrl.get(dataUrl);
     if (!image) {
-      image = Object.freeze({ id: `evidence-image-${definitions.length}`, dataUrl: artifact.dataUrl, width: metadata.width, height: metadata.height });
+      image = Object.freeze({ id: `evidence-image-${definitions.length}`, dataUrl, width: metadata.width, height: metadata.height });
       definitions.push(image);
-      byDataUrl.set(artifact.dataUrl, image);
+      byDataUrl.set(dataUrl, image);
     }
-    byEvidenceId.set(artifact.evidenceId, image);
+    byEvidenceId.set(key, image);
+  };
+  for (const artifact of artifacts) {
+    register(artifact.evidenceId, artifact.dataUrl);
+    for (const segment of artifact.kind === 'announcement-map' ? artifact.segments : []) register(segment.segmentId, segment.dataUrl);
   }
   return { definitions, byEvidenceId };
 }
@@ -477,85 +517,23 @@ function unique(values) {
 }
 
 function pngMetadata(value) {
-  if (typeof value !== 'string' || !value.startsWith('data:image/png;base64,')) return false;
-  const encoded = value.slice('data:image/png;base64,'.length);
-  if (!/^[A-Za-z0-9+/]+={0,2}$/u.test(encoded)) return false;
   try {
-    const binary = atob(encoded);
-    if (binary.length > MAX_PNG_BYTES) return false;
-    const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
-    return parsePng(bytes);
+    const { width, height } = decodePngDataUrl(value);
+    return { width, height };
   } catch {
     return false;
   }
 }
 
+function groupedInteger(value) {
+  return String(value).replace(/\B(?=(?:\d{3})+(?!\d))/gu, '.');
+}
+
+function escapeAuditedText(value) {
+  const visible = String(value ?? '').replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu, character => `⟦U+${character.codePointAt(0).toString(16).toUpperCase()}⟧`);
+  return escapeHtml(visible);
+}
+
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/gu, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
-}
-
-function parsePng(bytes) {
-  if (!(bytes instanceof Uint8Array) || bytes.length < 57 || bytes.length > MAX_PNG_BYTES
-    || !PNG_SIGNATURE.every((byte, index) => bytes[index] === byte)) {
-    throw new TypeError('Estrutura PNG inválida ou fora dos limites.');
-  }
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let offset = PNG_SIGNATURE.length;
-  let chunkIndex = 0;
-  let width = 0;
-  let height = 0;
-  let sawIdat = false;
-  let endedIdat = false;
-  let idatBytes = 0;
-  while (offset < bytes.length) {
-    if (bytes.length - offset < 12) throw new TypeError('Chunk PNG truncado.');
-    const length = view.getUint32(offset);
-    if (length > bytes.length - offset - 12) throw new TypeError('Comprimento de chunk PNG excede o buffer.');
-    const typeStart = offset + 4;
-    const dataStart = offset + 8;
-    const crcOffset = dataStart + length;
-    const typeBytes = bytes.subarray(typeStart, dataStart);
-    if (![...typeBytes].every(byte => (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122))) throw new TypeError('Tipo de chunk PNG inválido.');
-    const type = String.fromCharCode(...typeBytes);
-    if (crc32(bytes.subarray(typeStart, crcOffset)) !== view.getUint32(crcOffset)) throw new TypeError(`CRC PNG inválido no chunk ${type}.`);
-    if (chunkIndex === 0) {
-      if (type !== 'IHDR' || length !== 13) throw new TypeError('IHDR deve ser o primeiro chunk PNG e conter 13 bytes.');
-      width = view.getUint32(dataStart);
-      height = view.getUint32(dataStart + 4);
-      const bitDepth = bytes[dataStart + 8];
-      const colorType = bytes[dataStart + 9];
-      const allowedDepths = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
-      if (!width || !height || width > MAX_PNG_DIMENSION || height > MAX_PNG_DIMENSION || width * height > MAX_PNG_PIXELS
-        || !allowedDepths[colorType]?.includes(bitDepth) || bytes[dataStart + 10] !== 0 || bytes[dataStart + 11] !== 0
-        || ![0, 1].includes(bytes[dataStart + 12])) throw new TypeError('IHDR PNG contém dimensões ou parâmetros inválidos.');
-    } else if (type === 'IHDR') throw new TypeError('PNG contém mais de um IHDR.');
-    if (type === 'IDAT') {
-      if (endedIdat) throw new TypeError('Chunks IDAT PNG devem ser consecutivos.');
-      sawIdat = true;
-      idatBytes += length;
-    } else if (sawIdat && type !== 'IEND') endedIdat = true;
-    offset = crcOffset + 4;
-    chunkIndex += 1;
-    if (type === 'IEND') {
-      if (length !== 0 || !sawIdat || idatBytes === 0 || offset !== bytes.length) throw new TypeError('IEND PNG inválido, prematuro ou seguido por dados.');
-      return { width, height };
-    }
-  }
-  throw new TypeError('PNG sem IEND final.');
-}
-
-function makeCrcTable() {
-  const table = new Uint32Array(256);
-  for (let index = 0; index < table.length; index += 1) {
-    let value = index;
-    for (let bit = 0; bit < 8; bit += 1) value = (value & 1) ? (0xedb88320 ^ (value >>> 1)) : (value >>> 1);
-    table[index] = value >>> 0;
-  }
-  return table;
-}
-
-function crc32(bytes) {
-  let crc = 0xffffffff;
-  for (const byte of bytes) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
-  return (crc ^ 0xffffffff) >>> 0;
 }

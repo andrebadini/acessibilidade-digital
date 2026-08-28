@@ -11,6 +11,7 @@ export { NBR17225_EDITORIAL_NOTES, NBR17225_ITEMS } from './normative/nbr17225.j
 export { validateNormativeData } from './normative/validate-normative-data.js';
 export { computeAccessibleText } from './accessibility/accessible-name.js';
 export { buildAnnouncementPreview } from './accessibility/announcement.js';
+export { isEditableAccessibilityNode, projectElementAccessibility } from './accessibility/element-accessibility.js';
 export {
   SNAPSHOT_SCHEMA_VERSION,
   assertSnapshotV1,

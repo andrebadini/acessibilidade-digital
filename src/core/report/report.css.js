@@ -79,6 +79,17 @@ pre{padding:.75rem;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden}
 .page-level-evidence--failed{border-color:#8b1e1e}.page-level-evidence--review{border-style:dashed;border-color:#6b4e00}.page-level-evidence--passed{border-color:#003b71}
 .evidence-scope-banner{border-left-color:#005a9c}
 .map-unavailable{border:2px dashed #738596;border-radius:.3rem;padding:1rem;background:#eef4f8}
+.map-card,.announcement-map-segment,.announcement-map-legend{min-width:0}
+.map-card[data-map-status="complete"]{border-left:.4rem solid #003b71}.map-card[data-map-status="partial"]{border-left:.4rem dashed #6b4e00}.map-card[data-map-status="empty"],.map-card[data-map-status="absent"]{border-left:.4rem double #738596}
+.map-state{border-left:.3rem solid #003b71;background:#eef4f8;padding:.75rem}.map-state--partial{border-left-color:#6b4e00}.map-state--empty{border-left-color:#738596}
+.map-meta{border-top:1px solid #738596;border-bottom:1px solid #738596;padding:.75rem 0}
+.announcement-map-segments{display:grid;gap:1rem;margin-top:1rem}
+.announcement-map-segment{margin:0;border:1px solid #738596;border-radius:.3rem;padding:.75rem;background:#eef4f8;break-inside:avoid}
+.announcement-map-segment figcaption{margin-top:.6rem;font-size:.92rem}
+.map-meta code,.announcement-map-segment figcaption code,.legend-selector code{word-break:break-all}
+.announcement-map-legend{display:grid;gap:.65rem;padding-left:2rem}
+.announcement-map-legend li{padding:.65rem;border-bottom:1px solid #738596;break-inside:avoid}
+.announcement-map-legend li span{display:block}.legend-selector{font-weight:750;margin-bottom:.25rem}
 .review-card[data-review-state="answered"]{border-left:.4rem solid #003b71}.review-card[data-review-state="unanswered"]{border-left:.4rem dashed #6b4e00}
 .widget-state{font-weight:750}.widget-card[data-widget-state="present"]{border-left:.4rem solid #003b71}.widget-card[data-widget-state="absent"]{border-left:.4rem double #738596}.widget-card[data-widget-state="unknown"]{border-left:.4rem dashed #6b4e00}
 .matrix-scroll{overflow-x:auto;border:1px solid #738596;border-radius:.3rem}
@@ -96,11 +107,11 @@ th{background:#eef4f8;color:#14212b}
 @media (min-width:42rem){.filters-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.scope-grid,.page-grid,.widget-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media (min-width:64rem){.filters-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.scope-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.summary-grid{grid-template-columns:repeat(5,minmax(0,1fr))}.page-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.method-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @page{size:A4 portrait;margin:18mm 15mm 20mm}
-@media print{html{scroll-behavior:auto}.skip-link,.section-nav,.filters-shell,.filter-actions,.empty-state{display:none!important}.report-header,.report-footer{background:#fff;color:#14212b;border-bottom:2px solid #003b71;padding:.5rem 0}.report-footer{border-top:2px solid #003b71;border-bottom:0}.major-section{break-before:page}.scope-card,.summary-card,.page-card,.occurrence-card,.review-card,.widget-card,.evidence-card,.map-card,.method-card,figure,details{break-inside:avoid}.occurrence-card[hidden]{display:block!important}details:not([open])>*:not(summary){display:block!important}thead{display:table-header-group}a{color:#14212b;text-decoration:none}main{max-width:none;padding:0}.status,.chip{color:#14212b!important;background:#fff!important;border-color:#14212b!important}.matrix-scroll{overflow:visible}.matrix-scroll table{min-width:0;font-size:8.5pt}.report-enhanced .filters-noscript{display:block}.filters-noscript::after{content:" Todos os registros foram incluídos na impressão."}}
+@media print{html{scroll-behavior:auto}.skip-link,.section-nav,.filters-shell,.filter-actions,.empty-state{display:none!important}.report-header,.report-footer{background:#fff;color:#14212b;border-bottom:2px solid #003b71;padding:.5rem 0}.report-footer{border-top:2px solid #003b71;border-bottom:0}.major-section{break-before:page}.scope-card,.summary-card,.page-card,.occurrence-card,.review-card,.widget-card,.evidence-card,.method-card,.announcement-map-segment,.announcement-map-legend li,details{break-inside:avoid}.occurrence-card[hidden]{display:block!important}details:not([open])>*:not(summary){display:block!important}thead{display:table-header-group}a{color:#14212b;text-decoration:none}main{max-width:none;padding:0}.status,.chip{color:#14212b!important;background:#fff!important;border-color:#14212b!important}.matrix-scroll{overflow:visible}.matrix-scroll table{min-width:0;font-size:8.5pt}.report-enhanced .filters-noscript{display:block}.filters-noscript::after{content:" Todos os registros foram incluídos na impressão."}}
 @media (max-width:42rem){main{padding:1rem}.meta{grid-template-columns:1fr}.meta dd{margin-bottom:.5rem}.report-header__inner{align-items:flex-start;flex-direction:column}.filter-actions{display:grid}.filter-actions button{width:100%}.occurrence-heading{display:block}}
 @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 @media (forced-colors:active){*{forced-color-adjust:auto}.status,.chip,.scope-card,.summary-card,.page-card,.occurrence-card,.review-card,.widget-card,.evidence-card,.map-card,.method-card,.filters-shell,.legal-analysis,.page-level-evidence{border-color:CanvasText}.occurrence-card[data-display-outcome="failed"]{border-left-style:double}.occurrence-card[data-display-outcome="cantTell"]{border-left-style:dashed}.evidence-highlight{stroke:CanvasText}.evidence-highlight--review{stroke-dasharray:14 9}a:focus-visible,button:focus-visible,select:focus-visible,summary:focus-visible,[tabindex]:focus-visible{outline-color:Highlight;box-shadow:none}}
 `;
 
 // Updated by the CSP integrity test whenever the static stylesheet changes.
-export const REPORT_CSS_CSP_HASH = 'sha256-nq8EjN38lj42UdtunHU0BfezhxgJhLTm/pqAadG2Swo=';
+export const REPORT_CSS_CSP_HASH = 'sha256-VrYeXfgzigfqTduxBXCLFryR9dhRZoIZZPTvRON4WC0=';

@@ -5,8 +5,9 @@ import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
 import { runAudit } from '../../src/background/run-audit.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
+import { createAnnotationMapFixture } from '../report/annotation-map-fixture.js';
 
-const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 
 function rawPage() {
   return {
@@ -197,7 +198,7 @@ function fakeAdapter(options = {}) {
     },
     async disconnect() { disconnects += 1; events.push('disconnect'); },
   };
-  return {
+  const adapter = {
     events,
     get counts() { return { screenshots, disconnects, removals }; },
     async createTab() { events.push('create-tab'); return { id: 42 }; },
@@ -225,6 +226,12 @@ function fakeAdapter(options = {}) {
     async handoffReport(model) { events.push('handoff'); return options.handoff || { reviewUrl: `chrome-extension://test/src/review/index.html?auditId=${model.auditId}`, artifact: { status: 'pending', formats: [] } }; },
     async removeTab(id) { assert.equal(id, 42); removals += 1; events.push('remove-tab'); },
   };
+  if (options.composeMap || options.mapFailure) adapter.composeAnnouncementMap = async input => {
+    events.push('map');
+    if (options.mapFailure) throw options.mapFailure;
+    return options.composeMap(input);
+  };
+  return adapter;
 }
 
 const clock = (() => {
@@ -289,6 +296,66 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
   assert.equal(Object.isFrozen(model.occurrences), true);
   assert.doesNotThrow(() => JSON.stringify(model));
   assert.doesNotMatch(JSON.stringify(model), /REMOVE|SECRET|user:pass|password=/i);
+});
+
+test('creates one page-level derived map after structural evidence without mutating or linking the pristine source', async () => {
+  let pristineBefore;
+  let pristineAfter;
+  let observedDeviceScaleFactor;
+  const adapter = fakeAdapter({
+    composeMap: async input => {
+      observedDeviceScaleFactor = input.layoutMetrics.deviceScaleFactor;
+      pristineBefore = JSON.stringify(input.fullPageEvidence);
+      const artifact = await createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId });
+      pristineAfter = JSON.stringify(input.fullPageEvidence);
+      return artifact;
+    },
+  });
+  const model = await runAudit({
+    url: 'https://example.test/', chromeAdapter: adapter,
+    now: clock, idFactory: () => 'audit-annotation-map',
+  });
+  const map = model.evidence.artifacts.find(artifact => artifact.kind === 'announcement-map');
+  const pristine = model.evidence.artifacts.find(artifact => artifact.kind === 'full-page');
+
+  assert.equal(map.status, 'complete');
+  assert.equal(map.fullPageEvidenceId, pristine.evidenceId);
+  assert.equal(pristineBefore, pristineAfter);
+  assert.equal(observedDeviceScaleFactor, 1);
+  assert.ok(adapter.events.indexOf('map') > adapter.events.findLastIndex(event => event.startsWith('thumbnail:')));
+  assert.ok(adapter.events.indexOf('map') < adapter.events.indexOf('handoff'));
+  assert.equal(model.occurrences.some(occurrence => occurrence.evidenceIds.includes(map.evidenceId)), false);
+  assert.equal(model.session.status, 'complete');
+});
+
+test('keeps the pristine evidence and reports a fixed recoverable diagnostic when the local map compositor fails', async () => {
+  const adapter = fakeAdapter({
+    mapFailure: Object.assign(new Error('PRIVATE-RAW-ERROR'), { code: 'ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE' }),
+  });
+  const model = await runAudit({
+    url: 'https://example.test/', chromeAdapter: adapter,
+    now: clock, idFactory: () => 'audit-annotation-map-failure',
+  });
+
+  assert.equal(model.evidence.artifacts.some(artifact => artifact.kind === 'full-page'), true);
+  assert.equal(model.evidence.artifacts.some(artifact => artifact.kind === 'announcement-map'), false);
+  assert.equal(model.session.status, 'partial');
+  assert.ok(model.session.diagnostics.some(entry => entry.code === 'ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE'));
+  assert.doesNotMatch(JSON.stringify(model), /PRIVATE-RAW-ERROR/u);
+});
+
+test('preserves the explicit printable-segment limit diagnostic from the map compositor', async () => {
+  const adapter = fakeAdapter({
+    mapFailure: Object.assign(new Error('PRIVATE-RAW-ERROR'), { code: 'ANNOTATION_MAP_PRINT_SEGMENT_LIMIT' }),
+  });
+  const model = await runAudit({
+    url: 'https://example.test/', chromeAdapter: adapter,
+    now: clock, idFactory: () => 'audit-annotation-map-print-limit',
+  });
+
+  assert.equal(model.session.status, 'partial');
+  assert.ok(model.session.diagnostics.some(entry => entry.code === 'ANNOTATION_MAP_PRINT_SEGMENT_LIMIT'));
+  assert.doesNotMatch(JSON.stringify(model), /PRIVATE-RAW-ERROR/u);
 });
 
 test('integrates the recommendation failure, editorial occurrence and informational widget inventory without cross-contamination', async () => {
@@ -868,7 +935,8 @@ test('stores readable sanitized snippets and the report encodes them exactly onc
   assert.match(html, /&lt;iframe title=&quot;Mapa&quot;&gt;&lt;\/iframe&gt;/u);
   assert.match(html, /&lt;button aria-label=&quot;Abrir&quot;&gt;Abrir&lt;\/button&gt;/u);
   assert.doesNotMatch(html, /&amp;lt;(?:iframe|button)/u);
-  assert.doesNotMatch(html, /TOPSECRET|javascript:|onload=|<script/iu);
+  assert.doesNotMatch(html, /TOPSECRET|javascript:|onload=/iu);
+  assert.equal((html.match(/<script>/gu) || []).length, 1, 'somente o script estático do relatório é permitido');
   assert.equal(decodeHtmlText(encodedSnippet), evidence.snippet);
 });
 

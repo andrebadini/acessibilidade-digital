@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
+import { hashAnnotationMapArtifact } from '../../src/core/evidence/annotation-map-artifact.js';
+import { createAnnotationMapFixture, createPristineMapSource, TEST_PNG } from './annotation-map-fixture.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
@@ -420,7 +422,7 @@ test('renders present, absent, unknown, partial and not-recorded widget inventor
   }
 });
 
-test('keeps page states, long URLs and stable map slots for one, three and twenty pages', () => {
+test('keeps page states, long URLs and stable map slots for one, three and twenty pages', async () => {
   for (const count of [1, 3, 20]) {
     const html = renderHtmlReport(withPages(count));
     assert.equal((html.match(/data-page-summary=/gu) || []).length, count);
@@ -432,14 +434,69 @@ test('keeps page states, long URLs and stable map slots for one, three and twent
   for (const label of ['Completa', 'Parcial', 'Falhou', 'Cancelada']) assert.match(batch, new RegExp(label, 'u'));
 
   const mapped = structuredClone(SAMPLE_AUDIT);
-  mapped.evidence.push({
-    ...mapped.evidence[0], evidenceId: 'ev-map', kind: 'announcement-map', state: 'derived',
-    fullPageEvidenceId: 'ev-full', hash: 'sha256-announcement-map',
-  });
+  mapped.evidence[0] = createPristineMapSource();
+  mapped.evidence.push(await createAnnotationMapFixture());
   const mappedHtml = renderHtmlReport(mapped);
-  assert.match(mappedHtml, /aria-label="Mapa visual da prévia de anúncios da página 1"/u);
-  assert.match(mappedHtml, /Registros derivados[\s\S]*ev-map/u);
+  assert.match(mappedHtml, /data-map-status="complete"/u);
+  assert.match(mappedHtml, /class="announcement-map-segment"/u);
+  assert.match(mappedHtml, /<ol class="announcement-map-legend"/u);
+  assert.match(mappedHtml, /<bdi>Salvar, botão<\/bdi>/u);
+  assert.match(mappedHtml, /Evidências derivadas[\s\S]*ev-map/u);
   assert.doesNotMatch(mappedHtml, /Mapa indisponível nesta auditoria/u);
+});
+
+test('renders absent, empty, partial, complete and legend-continuation map states honestly and without filter dependence', async () => {
+  const renderState = async status => {
+    const input = structuredClone(SAMPLE_AUDIT);
+    input.evidence[0] = createPristineMapSource();
+    if (status !== 'absent') input.evidence.push(await createAnnotationMapFixture({ status }));
+    return renderHtmlReport(input);
+  };
+  const absent = await renderState('absent');
+  const empty = await renderState('empty');
+  const partial = await renderState('partial');
+  const complete = await renderState('complete');
+
+  assert.match(absent, /data-map-status="absent"[\s\S]*Mapa indisponível nesta auditoria/u);
+  assert.match(empty, /data-map-status="empty"[\s\S]*Nenhum elemento elegível/u);
+  assert.match(partial, /data-map-status="partial"[\s\S]*cobertura parcial/iu);
+  assert.match(complete, /data-map-status="complete"[\s\S]*audita\.annotation-map[\s\S]*1\.0\.0/u);
+  assert.match(complete, /200 nós[\s\S]*32.000.000 pixels[\s\S]*64 segmentos/u);
+  assert.match(complete, /proporção raster imprimível[^.]*1,3:1/iu);
+  assert.match(complete, /non-atomic-source-geometry — captura e geometria foram coletadas/iu);
+  assert.match(complete, /com marcador 1/iu);
+  assert.doesNotMatch(complete, /marcadores 1 a 1/iu);
+  assert.match(complete, /Ordem observada DOM\/AX[\s\S]*não é ordem de foco/iu);
+  assert.match(complete, /\.map-card,\.announcement-map-segment,\.announcement-map-legend\{min-width:0\}/u);
+  assert.match(complete, /\.map-meta code,\.announcement-map-segment figcaption code,\.legend-selector code\{word-break:break-all\}/u);
+  assert.doesNotMatch(complete.match(/<section id="mapas"[^]*?<\/section>/u)?.[0] ?? '', /data-impact=|data-wcag=/u);
+
+  const continued = structuredClone(SAMPLE_AUDIT);
+  continued.evidence[0] = createPristineMapSource();
+  const map = await createAnnotationMapFixture();
+  map.segments[0].count = 2;
+  map.segments.push({
+    segmentId: 'ev-map-segment-2', index: 2, count: 2, role: 'legend-continuation', sourceCssClip: null,
+    width: 1, height: 1, dataUrl: TEST_PNG, contentHash: map.segments[0].contentHash,
+  });
+  map.hash = await hashAnnotationMapArtifact(map);
+  continued.evidence.push(map);
+  const continuedHtml = renderHtmlReport(continued);
+  assert.equal((continuedHtml.match(/class="announcement-map-segment"/gu) || []).length, 2);
+  assert.match(continuedHtml, /continuação da legenda/iu);
+  assert.equal((continuedHtml.match(/data:image\/png;base64,/gu) || []).length, 1);
+});
+
+test('isolates and escapes hostile audited legend text, including bidi controls', async () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  input.evidence[0] = createPristineMapSource();
+  input.evidence.push(await createAnnotationMapFixture({ preview: '<img src=x onerror=alert(1)>\u202Etexto' }));
+  const html = renderHtmlReport(input);
+  const mapSection = html.match(/<section id="mapas"[^]*?<\/section>/u)?.[0] ?? '';
+
+  assert.match(mapSection, /<bdi>&lt;img src=x onerror=alert\(1\)&gt;/u);
+  assert.doesNotMatch(mapSection, /<img src=x|\u202E/u);
+  assert.match(mapSection, /U\+202E/u);
 });
 
 test('prioritizes 750 occurrences in the real DOM across twenty pages while reusing one PNG payload', () => {

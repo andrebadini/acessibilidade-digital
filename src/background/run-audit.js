@@ -5,15 +5,14 @@ import { dedupeFindingsForPresentation } from '../core/axe/dedupe-findings.js';
 import { normalizeAxeResults } from '../core/axe/normalize-axe-results.js';
 import {
   NBR17225_ITEMS,
-  buildAnnouncementPreview,
   buildSnapshotIndexes,
   buildStableSelector,
-  computeAccessibleText,
   hashEvidenceArtifact,
   mergeProbesIntoSnapshot,
   mergeAxeSupplementalResults,
   normalizeProbes,
   normalizeSnapshot,
+  projectElementAccessibility,
   detectAccessibilityWidgets,
   runCoreAudit,
   runEditorialRules,
@@ -28,6 +27,21 @@ import { runDynamicProbes } from '../collector/dynamic-probes.js';
 
 const SCHEMA_VERSION = 1;
 const METHODOLOGY = Object.freeze({ name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 130, itemCount: 146 });
+const ANNOTATION_MAP_DIAGNOSTIC_CODES = new Set([
+  'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE',
+  'ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE',
+  'ANNOTATION_MAP_SOURCE_INVALID',
+  'ANNOTATION_MAP_SOURCE_HASH_MISMATCH',
+  'ANNOTATION_MAP_SOURCE_LIMIT',
+  'ANNOTATION_MAP_GEOMETRY_INVALID',
+  'ANNOTATION_MAP_SEGMENT_LIMIT',
+  'ANNOTATION_MAP_PRINT_SEGMENT_LIMIT',
+  'ANNOTATION_MAP_LEGEND_PRINT_LIMIT',
+  'ANNOTATION_MAP_LEGEND_WIDTH_LIMIT',
+  'ANNOTATION_MAP_DERIVED_BYTES_LIMIT',
+  'ANNOTATION_MAP_OUTPUT_INVALID',
+  'ANNOTATION_MAP_TIMEOUT',
+]);
 
 function deepFreeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value) || Object.isFrozen(value)) return value;
@@ -114,14 +128,6 @@ function nodeAttribute(node, name) {
   return typeof value === 'string' ? value : value === true ? '' : undefined;
 }
 
-function editableControl(node) {
-  const tag = normalizedText(node?.tagName).toLowerCase();
-  const contenteditable = normalizedText(nodeAttribute(node, 'contenteditable')).toLowerCase();
-  return ['input', 'select', 'textarea'].includes(tag) || (
-    Object.hasOwn(node?.attributes || {}, 'contenteditable') && !['false', 'inherit'].includes(contenteditable)
-  );
-}
-
 function privateTextElement(node) {
   const tag = normalizedText(node?.tagName).toLowerCase();
   if (tag === 'textarea') return true;
@@ -139,100 +145,6 @@ function hasPrivateTextAncestor(node, indexes) {
     current = current.parentId ? indexes.byNodeId.get(current.parentId) : null;
   }
   return false;
-}
-
-function observedBoolean(node, property, ariaName) {
-  const direct = Object.hasOwn(node || {}, property) ? node[property] : undefined;
-  if (direct === true || direct === false || (property === 'checked' && direct === 'mixed')) return direct;
-  const form = Object.hasOwn(node?.form || {}, property) ? node.form[property] : undefined;
-  if (form === true || form === false || (property === 'checked' && form === 'mixed')) return form;
-  const aria = normalizedText(nodeAttribute(node, ariaName)).toLowerCase();
-  if (aria === 'true') return true;
-  if (aria === 'false') return false;
-  if (property === 'checked' && aria === 'mixed') return 'mixed';
-  if (property === 'invalid' && ['grammar', 'spelling'].includes(aria)) return true;
-  return undefined;
-}
-
-function observedPresence(node, property, ariaName, nativeName = property) {
-  const direct = Object.hasOwn(node || {}, property) ? node[property] : undefined;
-  const form = Object.hasOwn(node?.form || {}, property) ? node.form[property] : undefined;
-  const aria = normalizedText(nodeAttribute(node, ariaName)).toLowerCase();
-  const native = Object.hasOwn(node?.attributes || {}, nativeName) ? true : undefined;
-  const sources = [direct, form, aria === 'true' ? true : aria === 'false' ? false : undefined, native];
-  if (sources.includes(true)) return true;
-  if (sources.includes(false)) return false;
-  return undefined;
-}
-
-function nativeRole(node) {
-  const tag = normalizedText(node?.tagName).toLowerCase();
-  const type = normalizedText(nodeAttribute(node, 'type') || node?.form?.type || 'text').toLowerCase();
-  if (tag === 'button') return 'button';
-  if (tag === 'a' && nodeAttribute(node, 'href') !== undefined) return 'link';
-  if (tag === 'select') {
-    return Object.hasOwn(node?.attributes || {}, 'multiple') || node?.form?.multiple === true ? 'listbox' : 'combobox';
-  }
-  if (tag === 'textarea') return 'textbox';
-  if (tag === 'img') return 'img';
-  if (tag === 'input') {
-    if (type === 'checkbox') return 'checkbox';
-    if (type === 'radio') return 'radio';
-    if (['button', 'image', 'reset', 'submit'].includes(type)) return 'button';
-    if (type === 'range') return 'slider';
-    if (type === 'number') return 'spinbutton';
-    if (['', 'email', 'password', 'search', 'tel', 'text', 'url'].includes(type)) return 'textbox';
-  }
-  return '';
-}
-
-const CHECKED_ROLES = new Set(['checkbox', 'menuitemcheckbox', 'menuitemradio', 'radio', 'switch']);
-const SELECTED_ROLES = new Set(['gridcell', 'option', 'row', 'tab', 'treeitem']);
-const EXPANDED_ROLES = new Set(['button', 'combobox', 'link', 'menuitem', 'row', 'treeitem']);
-const DISABLED_ROLES = new Set(['button', 'checkbox', 'combobox', 'link', 'listbox', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'radio', 'slider', 'spinbutton', 'switch', 'tab', 'textbox', 'treeitem']);
-const REQUIRED_ROLES = new Set(['checkbox', 'combobox', 'listbox', 'radio', 'slider', 'spinbutton', 'switch', 'textbox']);
-const INVALID_ROLES = new Set(['checkbox', 'combobox', 'listbox', 'radio', 'slider', 'spinbutton', 'switch', 'textbox']);
-
-function compatibleState(node, role, property, ariaName, roles, presence = false) {
-  if (!roles.has(role)) return undefined;
-  return presence ? observedPresence(node, property, ariaName) : observedBoolean(node, property, ariaName);
-}
-
-function elementAccessibility(node, indexes) {
-  const text = computeAccessibleText(node, indexes, {
-    name: normalizedText(node?.accessibleName),
-    description: normalizedText(node?.accessibleDescription),
-  });
-  const role = normalizedText(node?.axRole || node?.role || nodeAttribute(node, 'role') || nativeRole(node)).toLowerCase();
-  const editable = editableControl(node);
-  const checked = compatibleState(node, role, 'checked', 'aria-checked', CHECKED_ROLES);
-  const selected = compatibleState(node, role, 'selected', 'aria-selected', SELECTED_ROLES);
-  const expanded = compatibleState(node, role, 'expanded', 'aria-expanded', EXPANDED_ROLES);
-  const disabled = compatibleState(node, role, 'disabled', 'aria-disabled', DISABLED_ROLES, true);
-  const required = compatibleState(node, role, 'required', 'aria-required', REQUIRED_ROLES, true);
-  const invalid = compatibleState(node, role, 'invalid', 'aria-invalid', INVALID_ROLES);
-  const previewProperties = {
-    ...text, role, checked, selected, expanded, disabled, required, invalid,
-  };
-  const states = [];
-  if (checked === true) states.push('marcado');
-  if (checked === false) states.push('desmarcado');
-  if (checked === 'mixed') states.push('parcialmente marcado');
-  if (selected === true) states.push('selecionado');
-  if (selected === false) states.push('não selecionado');
-  if (expanded === true) states.push('expandido');
-  if (expanded === false) states.push('recolhido');
-  if (disabled === true) states.push('indisponível');
-  if (required === true) states.push('obrigatório');
-  if (invalid === true) states.push('inválido');
-  return {
-    ...text,
-    role,
-    ...(editable ? { valueStatus: 'omitted-privacy' } : {}),
-    states,
-    visibleText: editable ? '' : normalizedText(node?.visibleText),
-    announcementPreview: buildAnnouncementPreview(previewProperties).text,
-  };
 }
 
 function makeOccurrences(auditId, ruleResults, itemResults) {
@@ -625,7 +537,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
           }
         }
         const selector = buildStableSelector(node, indexes);
-        const accessibility = elementAccessibility(node, indexes);
+        const accessibility = projectElementAccessibility(node, indexes);
         const artifact = {
           evidenceId: `element-${stableHash(`${auditId}\u0000${node.nodeId}`)}`,
           kind: 'element', nodeId: node.nodeId, backendNodeId: node.backendNodeId,
@@ -646,6 +558,42 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
         recoverable('EVIDENCE_CAPTURE_FAILED', 'As evidências de uma ocorrência não puderam ser preparadas.', { occurrenceId: occurrence.occurrenceId });
       }
       throwIfAborted(signal);
+    }
+    if (state.fullPage && typeof chromeAdapter.composeAnnouncementMap === 'function') {
+      const pristineArtifact = state.artifacts.find(artifact => artifact.kind === 'full-page' && artifact.state === 'pristine');
+      const sourceBefore = canonicalStringify(pristineArtifact);
+      const observedMapMetrics = state.snapshot.document?.layoutMetrics || raw.layoutMetrics || pristineMetrics;
+      try {
+        const map = await awaitStep(() => chromeAdapter.composeAnnouncementMap({
+          pageId: 'page-1',
+          snapshot: state.snapshot,
+          fullPageEvidence: structuredClone({ ...pristineArtifact, pageId: 'page-1' }),
+          layoutMetrics: {
+            ...observedMapMetrics,
+            deviceScaleFactor: Number.isFinite(observedMapMetrics?.deviceScaleFactor)
+              ? observedMapMetrics.deviceScaleFactor
+              : state.environment.viewport.deviceScaleFactor,
+          },
+          signal,
+        }));
+        if (canonicalStringify(pristineArtifact) !== sourceBefore) {
+          throw Object.assign(new Error('A captura pristine foi alterada durante a derivação.'), { code: 'ANNOTATION_MAP_SOURCE_INVALID' });
+        }
+        const recomputedMapHash = await awaitStep(() => hashEvidenceArtifact(map, {
+          sourceArtifact: structuredClone({ ...pristineArtifact, pageId: 'page-1' }),
+        }));
+        if (map?.hash !== recomputedMapHash) {
+          throw Object.assign(new Error('O hash do mapa derivado não corresponde ao conteúdo.'), { code: 'ANNOTATION_MAP_OUTPUT_INVALID' });
+        }
+        state.artifacts.push(structuredClone(map));
+        if (map.status === 'partial') {
+          recoverable('ANNOTATION_MAP_PARTIAL', 'O mapa visual foi gerado com cobertura parcial e limitações explícitas.');
+        }
+      } catch (error) {
+        rethrowAbort(error, signal);
+        const code = ANNOTATION_MAP_DIAGNOSTIC_CODES.has(error?.code) ? error.code : 'ANNOTATION_MAP_OUTPUT_INVALID';
+        recoverable(code, 'O mapa visual derivado não pôde ser gerado localmente; a captura original foi preservada.');
+      }
     }
     state.occurrences.push(...makeEditorialOccurrences(auditId, state.editorialRuleResults));
     state.manualReview = manualQueue(state.occurrences, state.itemResults);

@@ -71,6 +71,7 @@ test('creates, navigates, waits, scripts all frames, connects CDP and removes on
   await adapter.executeScript({ target: { tabId: tab.id, allFrames: true }, func() {} });
   const cdp = await adapter.connectCdp(tab.id);
   assert.equal(typeof adapter.captureFullPage, 'function');
+  assert.equal(typeof adapter.composeAnnouncementMap, 'function');
   assert.equal(typeof adapter.captureElement, 'function');
   const environment = await adapter.getEnvironment(tab.id, cdp);
   await cdp.disconnect();

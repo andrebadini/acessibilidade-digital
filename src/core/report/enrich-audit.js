@@ -30,10 +30,25 @@ export async function enrichAuditForReport(input, options = {}) {
   const evidenceStateCount = Array.isArray(raw.evidence)
     ? raw.evidenceStateCount ?? raw.reproducibility?.capturedStateCount ?? 0
     : raw.evidence?.stateCount ?? 0;
-  const evidenceArtifacts = [];
+  const sanitizedArtifacts = [];
   for (const artifact of sourceEvidence) {
     const sanitized = sanitizeEvidenceArtifactUrls(artifact);
-    evidenceArtifacts.push({ ...sanitized, hash: 'pending' });
+    sanitizedArtifacts.push({
+      ...sanitized,
+      ...(raw.schemaVersion === 1 && sanitized.pageId === undefined ? { pageId: 'page-1' } : {}),
+    });
+  }
+  const sanitizedArtifactById = new Map(sanitizedArtifacts.map(artifact => [artifact.evidenceId, artifact]));
+  const evidenceArtifacts = [];
+  for (const artifact of sanitizedArtifacts) {
+    evidenceArtifacts.push({
+      ...artifact,
+      hash: await hashEvidenceArtifact(artifact, {
+        sourceArtifact: artifact.kind === 'announcement-map'
+          ? sanitizedArtifactById.get(artifact.fullPageEvidenceId)
+          : undefined,
+      }),
+    });
   }
   raw.evidence = Array.isArray(raw.evidence)
     ? evidenceArtifacts
@@ -84,9 +99,17 @@ export async function enrichAuditForReport(input, options = {}) {
     ...base,
     integrity: { ...base.integrity, canonicalModelHash: 'pending' },
   });
+  const normalizedArtifactById = new Map(normalized.evidence.map(artifact => [artifact.evidenceId, artifact]));
   const evidence = [];
   for (const artifact of normalized.evidence) {
-    evidence.push({ ...artifact, hash: await hashEvidenceArtifact(artifact) });
+    evidence.push({
+      ...artifact,
+      hash: await hashEvidenceArtifact(artifact, {
+        sourceArtifact: artifact.kind === 'announcement-map'
+          ? normalizedArtifactById.get(artifact.fullPageEvidenceId)
+          : undefined,
+      }),
+    });
   }
   const withEvidenceHashes = createAuditModel({ ...normalized, evidence });
   const evidenceManifest = projectEvidenceManifest(withEvidenceHashes.evidence);

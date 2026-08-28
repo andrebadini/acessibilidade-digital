@@ -1,5 +1,6 @@
 import { collectPage } from '../browser/collect-page.js';
 import { captureElement, captureFullPage } from '../browser/capture-evidence.js';
+import { composeAnnouncementMapForProduction as composeAnnouncementMap } from '../browser/annotation-map.js';
 import { createCdpClient, createChromeDebuggerTransport } from '../browser/cdp-client.js';
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
 
@@ -272,6 +273,7 @@ export function createChromeAdapter(chromeApi) {
     collectPage(cdp, tabId) { return collectPage(cdp, tabId, { executeScript }); },
     captureFullPage,
     captureElement,
+    composeAnnouncementMap,
     runDynamicProbes(tabId, cdp, options = {}) { return runDynamicProbes({ adapter: createProbeAdapter(tabId, cdp), signal: options.signal }); },
     async getEnvironment(_tabId, cdp) {
       const [version, viewport] = await Promise.all([

@@ -14,6 +14,7 @@ import { canonicalStringify } from './canonical-json.js';
 import { validateNormalizedAxeSupplemental } from '../axe/validate-supplemental.js';
 import { aggregateItems } from '../rules/aggregate-items.js';
 import { unknownAccessibilityWidgetInventory } from '../detection/accessibility-widgets.js';
+import { validateAnnotationMapArtifact } from '../evidence/annotation-map-artifact.js';
 import {
   AUDITA_RULES_VERSION,
   hasRegisteredSource,
@@ -633,6 +634,7 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById) {
   if (!Array.isArray(model.evidence)) throw new TypeError('evidence deve ser lista no modelo V2.');
   const evidenceIds = new Set();
   const artifactById = new Map();
+  const announcementMapByPage = new Map();
   for (const artifact of model.evidence) {
     const id = requiredId(artifact?.evidenceId, 'evidenceId');
     if (evidenceIds.has(id)) throw new TypeError(`Evidência duplicada: ${id}.`);
@@ -643,6 +645,10 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById) {
     }
     evidenceIds.add(id);
     artifactById.set(id, artifact);
+    if (artifact.kind === 'announcement-map') {
+      if (announcementMapByPage.has(pageId)) throw new TypeError(`Mapa de anúncios duplicado na página ${pageId}.`);
+      announcementMapByPage.set(pageId, artifact);
+    }
   }
   for (const artifact of model.evidence) {
     if (artifact.fullPageEvidenceId !== undefined) {
@@ -650,6 +656,9 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById) {
       const fullPage = artifactById.get(fullPageId);
       if (fullPage?.kind !== 'full-page') throw new TypeError(`Evidência ${artifact.evidenceId} referencia captura integral desconhecida.`);
       if (fullPage.pageId !== artifact.pageId) throw new TypeError(`Evidência ${artifact.evidenceId} referencia captura integral de outra página.`);
+    }
+    if (artifact.kind === 'announcement-map') {
+      validateAnnotationMapArtifact(artifact, { sourceArtifact: artifactById.get(artifact.fullPageEvidenceId) });
     }
   }
   if (!Array.isArray(model.occurrences)) throw new TypeError('occurrences deve ser lista.');
@@ -721,6 +730,9 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById) {
       if (!evidenceIds.has(canonicalEvidenceId)) throw new TypeError(`Ocorrência ${id} referencia evidência desconhecida.`);
       if (links.has(canonicalEvidenceId)) throw new TypeError(`Ocorrência ${id} contém evidência duplicada.`);
       if (artifactById.get(canonicalEvidenceId).pageId !== pageId) throw new TypeError(`Ocorrência ${id} referencia evidência de outra página.`);
+      if (artifactById.get(canonicalEvidenceId).kind === 'announcement-map') {
+        throw new TypeError(`Ocorrência ${id} não pode vincular o mapa derivado da página.`);
+      }
       links.add(canonicalEvidenceId);
     }
     if (occurrence.evidenceIds !== undefined && canonicalStringify(occurrence.evidenceIds) !== canonicalStringify(occurrence.evidenceRefs)) {

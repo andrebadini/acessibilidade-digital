@@ -40,8 +40,13 @@ export async function verifyAuditIntegritySnapshot(input) {
       !SHA256.test(model.integrity.canonicalModelHash) || !SHA256.test(model.integrity.evidenceManifestHash)) {
       throw new TypeError('Metadados de integridade inválidos.');
     }
+    const artifactById = new Map(model.evidence.map(artifact => [artifact.evidenceId, artifact]));
     for (const artifact of model.evidence) {
-      if (!SHA256.test(artifact.hash ?? '') || await hashEvidenceArtifact(artifact) !== artifact.hash) {
+      if (!SHA256.test(artifact.hash ?? '') || await hashEvidenceArtifact(artifact, {
+        sourceArtifact: artifact.kind === 'announcement-map'
+          ? artifactById.get(artifact.fullPageEvidenceId)
+          : undefined,
+      }) !== artifact.hash) {
         throw new TypeError('Hash de evidência inválido.');
       }
     }

@@ -81,6 +81,23 @@ function privateTextElement(tagName, attributes) {
   return tagName === 'textarea' || (editableElement(tagName, attributes) && !['input', 'select'].includes(tagName));
 }
 
+function markPrivateReferenceConsumers(nodes, privateReferenceIds) {
+  if (privateReferenceIds.size === 0) return;
+  for (const node of nodes) {
+    let contaminated = false;
+    for (const attribute of ['aria-labelledby', 'aria-describedby']) {
+      const references = cleanText(node.attributes?.[attribute]).split(' ').filter(Boolean);
+      if (!references.some(reference => privateReferenceIds.has(reference))) continue;
+      delete node.attributes[attribute];
+      contaminated = true;
+    }
+    if (!contaminated) continue;
+    delete node.accessibleName;
+    delete node.accessibleDescription;
+    node.privacyReferenceStatus = 'omitted-privacy';
+  }
+}
+
 function ancestorsOfMatching(items, matches, parentOf) {
   const ancestors = new Set();
   for (const item of items) {
@@ -325,6 +342,11 @@ function normalizeSimplified(raw) {
     }
     return false;
   };
+  const privateReferenceIds = new Set(nodes
+    .filter(inPrivateTextSubtree)
+    .map(node => cleanText(node.attributes?.id))
+    .filter(Boolean));
+  markPrivateReferenceConsumers(nodes, privateReferenceIds);
   const redactedNodes = nodes.map(node => redactPlaceholderText(redactNormalizedNode(node, {
     executable: inExecutableSubtree(node),
     privateText: inPrivateTextSubtree(node),
@@ -665,6 +687,12 @@ function normalizeColumnar(raw) {
       }
     }
   }
+
+  const privateReferenceIds = new Set(ordered
+    .filter(inPrivateTextSubtree)
+    .map(record => cleanText(record.attributes?.id))
+    .filter(Boolean));
+  markPrivateReferenceConsumers(nodes, privateReferenceIds);
 
   const redactedNodes = ordered.map(record => redactPlaceholderText(redactNormalizedNode(outputByRecord.get(record), {
     executable: inExecutableSubtree(record),
