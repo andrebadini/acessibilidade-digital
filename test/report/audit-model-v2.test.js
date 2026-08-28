@@ -52,7 +52,7 @@ test('explicitly migrates V1 into the canonical single-page V2 contract without 
   assert.equal(occurrence.impact, V1_MIGRATION_DEFAULTS.impact);
   assert.equal(occurrence.confidence, V1_MIGRATION_DEFAULTS.confidence);
   assert.deepEqual(occurrence.source, {
-    engine: 'audita-core', ruleId: 'rule-assisted', version: '1.0.0',
+    engine: 'audita-core', ruleId: 'focus-order', version: '1.0.0',
   });
   assert.equal(occurrence.nbrItemRef, '5.1.4');
   assert.deepEqual(occurrence.wcagRefs, ['2.4.3']);
@@ -90,7 +90,7 @@ test('sanitizes every URL-bearing evidence field at the V1 and technical JSON bo
   assert.doesNotMatch(renderTechnicalJson(model), /TOPSECRET|token=|api_key=|session=/u);
 });
 
-test('conservatively downgrades a V1 supplemental pass instead of treating it as ABNT approval', () => {
+test('rejects an unregistered V1 supplemental rule instead of inventing trustworthy provenance', () => {
   const input = reportInput();
   input.itemResults.find(item => item.id === '5.1.2').outcome = 'passed';
   input.ruleResults.push({
@@ -103,12 +103,10 @@ test('conservatively downgrades a V1 supplemental pass instead of treating it as
     nodeId: null, evidenceIds: [], justification: 'Aprovação V1 suplementar.',
   });
 
-  const model = migrateAuditV1ToV2(input);
-  assert.equal(model.ruleResults.find(rule => rule.ruleId === 'supplemental.legacy-pass').outcome, 'cantTell');
-  assert.equal(model.itemResults.find(item => item.id === '5.1.2').outcome, 'cantTell');
-  const occurrence = model.occurrences.find(entry => entry.occurrenceId === 'occ-legacy-supplemental-pass');
-  assert.equal(occurrence.outcome, 'cantTell');
-  assert.equal(occurrence.legalAnalysis, null);
+  assert.throws(
+    () => migrateAuditV1ToV2(input),
+    /proveniência|fonte|registro|suplementar|aprova/iu,
+  );
 });
 
 test('createAuditModel is the explicit V1 migration boundary and accepts native multipage V2', () => {
@@ -187,6 +185,7 @@ test('conclusive failed requirements and recommendations use the same catalog re
   const makeRule = (item, ruleId) => ({
     ruleId, outcome: 'failed', mode: item.evaluation, nbrItems: [item.id],
     targets: [], summary: 'Falha conclusiva.', limitations: [],
+    source: { engine: 'audita-core', ruleId, version: '1.0.0' },
   });
   const makeOccurrence = (item, ruleId, occurrenceId, outcome = 'failed') => ({
     occurrenceId, pageId: 'page-1', outcome, classification: item.classification,
@@ -381,6 +380,83 @@ test('rejects an authoritative passed rule whose source version differs from the
   rule.source = { engine: 'audita-core', ruleId: rule.ruleId, version: '9.9.9' };
 
   assert.throws(() => createAuditModel(model), /versão|version|proveniência|fonte|aprova|autorit/i);
+});
+
+test('rejects incoherent core provenance for every outcome instead of relabeling it downstream', () => {
+  for (const [engine, version] of [
+    ['third-party-engine', '1.0.0'],
+    ['audita-core', '9.9.9'],
+  ]) {
+    const model = structuredClone(SAMPLE_AUDIT);
+    const rule = model.ruleResults.find(entry => entry.ruleId === 'focus-visible');
+    const occurrence = model.occurrences.find(entry => entry.source.ruleId === 'focus-visible');
+    rule.source = { engine, ruleId: 'focus-visible', version };
+    occurrence.source = { engine, ruleId: 'focus-visible', version };
+
+    assert.throws(
+      () => createAuditModel(model),
+      /audita-core|proveniência|fonte|engine|versão|version|registro/i,
+    );
+  }
+
+  const coherent = structuredClone(SAMPLE_AUDIT);
+  coherent.ruleResults.find(entry => entry.ruleId === 'focus-visible').source = {
+    engine: 'audita-core', ruleId: 'focus-visible', version: coherent.versions.rules,
+  };
+  assert.deepEqual(createAuditModel(coherent).occurrences[0].source, {
+    engine: 'audita-core', ruleId: 'focus-visible', version: '1.0.0',
+  });
+});
+
+test('rejects a globally coherent forged methodology version outside the local provenance registry', () => {
+  const forged = structuredClone(SAMPLE_AUDIT);
+  forged.versions.rules = '9.9.9';
+  forged.methodology.version = '9.9.9';
+  forged.reproducibility.methodologyVersion = '9.9.9';
+  for (const rule of forged.ruleResults) {
+    if (rule.source.engine !== 'axe-core') rule.source.version = '9.9.9';
+  }
+  for (const occurrence of forged.occurrences) {
+    if (occurrence.source.engine !== 'axe-core') occurrence.source.version = '9.9.9';
+  }
+
+  assert.throws(
+    () => createAuditModel(forged),
+    /proveniência|registro|versão|version|metodologia/iu,
+  );
+});
+
+test('rejects a forged global rules version even when no source-bearing result remains', () => {
+  const forged = structuredClone(SAMPLE_AUDIT);
+  forged.versions.rules = '9.9.9';
+  forged.methodology.version = '9.9.9';
+  forged.reproducibility.methodologyVersion = '9.9.9';
+  forged.ruleResults = [];
+  forged.occurrences = [];
+  forged.manualReview = [];
+  forged.reviewDecisions = [];
+  forged.itemResults.find(item => item.id === '5.1.2').outcome = 'cantTell';
+
+  assert.throws(
+    () => createAuditModel(forged),
+    /versão|version|proveniência|registro|metodologia/iu,
+  );
+});
+
+test('requires each legacy occurrence identity to agree with its registered core or manual source', () => {
+  const coreIdentityDrift = structuredClone(SAMPLE_AUDIT);
+  coreIdentityDrift.occurrences[0].ruleId = null;
+  assert.throws(
+    () => createAuditModel(coreIdentityDrift),
+    /regra|rule|proveniência|fonte|incoerente/iu,
+  );
+
+  const manualVersionDrift = structuredClone(SAMPLE_AUDIT);
+  manualVersionDrift.occurrences.find(entry => entry.ruleId === null).source.version = '9.9.9';
+  assert.throws(
+    () => createAuditModel(manualVersionDrift),
+    /manual|proveniência|fonte|versão|version|registro/iu,
+  );
 });
 
 test('rejects an unknown decision ID used to justify a reviewed ABNT pass', () => {

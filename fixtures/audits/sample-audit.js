@@ -50,7 +50,9 @@ function canonicalOccurrence(legacy) {
     classification: item.classification,
     impact: 'moderate',
     confidence: legacy.outcome === 'failed' ? 'high' : 'low',
-    source: { engine: 'audita-core', ruleId: legacy.ruleId, version: '1.0.0' },
+    source: legacy.ruleId === null
+      ? { engine: 'audita-manual-review', ruleId: `manual:${item.id}`, version: '1.0.0' }
+      : { engine: 'audita-core', ruleId: legacy.ruleId, version: '1.0.0' },
     nbrItemRef: item.id,
     wcagRefs,
     foreignBenchmarkRefs: [...section508ReferencesForWcag(wcagRefs)],
@@ -96,26 +98,25 @@ export const SAMPLE_AUDIT = createAuditModel({
     'Itens de contexto, processos completos e equivalência de mídia exigem revisão humana.',
   ],
   ruleResults: [
-    { ruleId: 'focus-visible', outcome: 'failed', mode: 'automated', nbrItems: ['5.1.1'], targets: ['n-1'], summary: 'O foco não foi distinguido visualmente.', limitations: [] },
+    { ruleId: 'focus-visible', outcome: 'failed', mode: 'automated', nbrItems: ['5.1.1'], targets: ['n-1'], summary: 'O foco não foi distinguido visualmente.', limitations: [], source: { engine: 'audita-core', ruleId: 'focus-visible', version: '1.0.0' } },
     {
       ruleId: 'focus-fully-visible', outcome: 'passed', mode: 'automated', nbrItems: ['5.1.2'],
       targets: [], summary: 'O foco permaneceu totalmente visível.', limitations: [],
       source: { engine: 'audita-core', ruleId: 'focus-fully-visible', version: '1.0.0' },
     },
-    { ruleId: 'focus-order', outcome: 'cantTell', mode: 'assisted', nbrItems: ['5.1.4'], targets: ['n-1'], summary: 'A previsibilidade depende do fluxo da tarefa.', limitations: [] },
-    { ruleId: 'consistent-link-identification', outcome: 'untested', mode: 'manual', nbrItems: ['5.7.5'], targets: [], summary: 'São necessárias outras páginas.', limitations: ['Escopo de página única.'] },
+    { ruleId: 'focus-order', outcome: 'cantTell', mode: 'assisted', nbrItems: ['5.1.4'], targets: ['n-1'], summary: 'A previsibilidade depende do fluxo da tarefa.', limitations: [], source: { engine: 'audita-core', ruleId: 'focus-order', version: '1.0.0' } },
   ],
   itemResults,
   occurrences: [
     { occurrenceId: 'occ-focus-failed', itemId: '5.1.1', ruleId: 'focus-visible', outcome: 'failed', mode: 'automated', nodeId: 'n-1', evidenceIds: ['ev-full', 'ev-control'], justification: 'O indicador de foco observado não tem contraste suficiente.' },
     { occurrenceId: 'occ-focus-review', itemId: '5.1.4', ruleId: 'focus-order', outcome: 'cantTell', mode: 'assisted', nodeId: 'n-1', evidenceIds: ['ev-full', 'ev-control'], justification: 'A ordem precisa ser confirmada no contexto da tarefa.' },
-    { occurrenceId: 'occ-cross-page', itemId: '5.7.5', ruleId: 'consistent-link-identification', outcome: 'cantTell', mode: 'manual', nodeId: null, evidenceIds: ['ev-full'], justification: 'É necessário comparar o componente em outras páginas.' },
+    { occurrenceId: 'occ-cross-page', itemId: '5.7.5', ruleId: null, outcome: 'cantTell', mode: 'manual', nodeId: null, evidenceIds: ['ev-full'], justification: 'É necessário comparar o componente em outras páginas.' },
   ].map(canonicalOccurrence),
   evidence: EVIDENCE,
   evidenceStateCount: 1,
   manualReview: [
     { occurrenceId: 'occ-focus-review', itemId: '5.1.4', ruleId: 'focus-order', mode: 'assisted', status: 'unanswered', question: 'A ordem de foco acompanha a sequência esperada da tarefa?', reason: 'A finalidade da sequência exige julgamento humano.' },
-    { occurrenceId: 'occ-cross-page', itemId: '5.7.5', ruleId: 'consistent-link-identification', mode: 'manual', status: 'unanswered', question: 'Links com a mesma função são identificados de forma consistente nas páginas?', reason: 'É preciso comparar páginas.' },
+    { occurrenceId: 'occ-cross-page', itemId: '5.7.5', ruleId: null, mode: 'manual', status: 'unanswered', question: 'Links com a mesma função são identificados de forma consistente nas páginas?', reason: 'É preciso comparar páginas.' },
   ],
   reviewDecisions: [],
   progress: [],

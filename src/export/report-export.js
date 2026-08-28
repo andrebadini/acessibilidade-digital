@@ -1,4 +1,8 @@
-import { downloadArtifacts, buildArtifactBaseName } from '../browser/download-artifacts.js';
+import {
+  bindDeliveryArtifactBaseName,
+  buildArtifactBaseName,
+  downloadArtifacts,
+} from '../browser/download-artifacts.js';
 import { renderPdf } from '../browser/render-pdf.js';
 import { renderOccurrenceCsv } from '../core/report/csv.js';
 import { canonicalStringify } from '../core/report/canonical-json.js';
@@ -24,11 +28,21 @@ export async function runReportExport(request, dependencies) {
   validateDependencies(dependencies);
   const at = canonicalNow(request?.now);
   let snapshotCapability = null;
+  let exportLeaseOwnerId = null;
+  let exportAttempt = null;
   let sourceModel = request?.auditModel;
   if (request?.auditSnapshotCapability !== undefined) {
     const snapshot = inspectAuditSnapshotCapability(request.auditSnapshotCapability);
     if (!snapshot) throw new TypeError('Capacidade de snapshot da auditoria inválida para geração.');
     snapshotCapability = request.auditSnapshotCapability;
+    exportLeaseOwnerId = validLeaseOwnerId(request?.exportLeaseOwnerId);
+    exportAttempt = validExportAttempt(request?.exportAttempt);
+    if (typeof dependencies.assertDelivery !== 'function') {
+      throw new TypeError('Revalidação da exclusividade de entrega indisponível para o snapshot persistido.');
+    }
+    if (typeof dependencies.recordDelivery !== 'function') {
+      throw new TypeError('Journal persistente de entrega indisponível para o snapshot persistido.');
+    }
     sourceModel = await enrichAuditForReport(snapshot.model, {
       now: () => at,
       timezone: request.timezone ?? snapshot.model.timezone,
@@ -140,10 +154,28 @@ export async function runReportExport(request, dependencies) {
     snapshotCapability = reservedCapability;
   }
 
-  const baseName = buildArtifactBaseName(model.finalUrl, at);
+  let baseName = buildArtifactBaseName(model.finalUrl, at);
+  if (snapshotCapability !== null) {
+    baseName = await bindDeliveryArtifactBaseName(baseName, exportLeaseOwnerId, exportAttempt);
+  }
+  const downloadOptions = {
+    timeoutMs,
+    ...(snapshotCapability === null ? {} : {
+      assertCanDownload: ({ format }) => dependencies.assertDelivery({
+        snapshotCapability,
+        exportLeaseOwnerId,
+        format,
+      }),
+      recordDeliveryState: entry => dependencies.recordDelivery({
+        snapshotCapability,
+        exportLeaseOwnerId,
+        ...entry,
+      }),
+    }),
+  };
   const downloads = await downloadArtifacts({
     baseName, html, json, ...(csv === null ? {} : { csv }), ...(pdf ? { pdf } : {}),
-  }, dependencies.downloadsAdapter, { timeoutMs });
+  }, dependencies.downloadsAdapter, downloadOptions);
   const missingGenerationLimitations = [];
   if (csv === null) missingGenerationLimitations.push(createExportIssue('REPORT_CSV_UNAVAILABLE').message);
   if (!pdf) {
@@ -177,7 +209,7 @@ export async function runReportExport(request, dependencies) {
     ])],
     pdfFallback,
   };
-  return attestReportExportResult(result, snapshotCapability);
+  return attestReportExportResult(result, snapshotCapability, exportLeaseOwnerId, exportAttempt);
 }
 
 /** Safe identity probe used before any reflection on a caller-provided result. */
@@ -189,6 +221,18 @@ export function isGeneratedReportExportResult(value) {
 export function generatedReportExportSnapshotCapability(result) {
   const provenance = (typeof result === 'object' && result !== null) ? GENERATED_REPORT_RESULTS.get(result) : null;
   return provenance?.snapshotCapability ?? null;
+}
+
+/** Returns the privately bound persistent delivery-lease owner. */
+export function generatedReportExportLeaseOwnerId(result) {
+  const provenance = (typeof result === 'object' && result !== null) ? GENERATED_REPORT_RESULTS.get(result) : null;
+  return provenance?.exportLeaseOwnerId ?? null;
+}
+
+/** Returns the privately bound monotonically allocated export attempt. */
+export function generatedReportExportAttempt(result) {
+  const provenance = (typeof result === 'object' && result !== null) ? GENERATED_REPORT_RESULTS.get(result) : null;
+  return provenance?.exportAttempt ?? null;
 }
 
 /** Verifies a persistence-owned snapshot against the private generation record. */
@@ -204,17 +248,26 @@ export async function verifyGeneratedReportExportResult(result, snapshot) {
   }
 }
 
-async function attestReportExportResult(result, snapshotCapability) {
+async function attestReportExportResult(result, snapshotCapability, exportLeaseOwnerId, exportAttempt) {
   try {
     const provenance = Object.freeze({
       projection: Object.freeze(await projectGeneratedResult(result)),
       snapshotCapability,
+      exportLeaseOwnerId,
+      exportAttempt,
     });
     GENERATED_REPORT_RESULTS.set(result, provenance);
     return result;
   } catch {
     throw new TypeError('Resultado final de exportação não pôde ser atestado.');
   }
+}
+
+function validLeaseOwnerId(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/u.test(value)) {
+    throw new TypeError('Identificador de exclusividade da exportação inválido.');
+  }
+  return value;
 }
 
 async function projectGeneratedResult(value) {
@@ -371,6 +424,11 @@ function canonicalNow(now) {
   const date = raw instanceof Date ? raw : new Date(raw);
   if (!Number.isFinite(date.getTime())) throw new TypeError('Instante de exportação inválido.');
   return date.toISOString();
+}
+
+function validExportAttempt(value) {
+  if (!Number.isSafeInteger(value) || value < 1) throw new TypeError('Tentativa da exportação inválida.');
+  return value;
 }
 
 function validateDependencies(dependencies) {

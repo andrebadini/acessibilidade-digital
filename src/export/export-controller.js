@@ -6,6 +6,8 @@ import {
 import { canonicalStringify } from '../core/report/canonical-json.js';
 import {
   finalizeGeneratedModel,
+  generatedReportExportAttempt,
+  generatedReportExportLeaseOwnerId,
   generatedReportExportSnapshotCapability,
   isGeneratedReportExportResult,
   verifyGeneratedReportExportResult,
@@ -20,6 +22,7 @@ import {
   ARTIFACT_FAILURE_CONTRACT,
   artifactCleanupLimitation,
   artifactFailureLimitation,
+  bindDeliveryArtifactBaseName,
   buildArtifactBaseName,
 } from '../browser/download-artifacts.js';
 
@@ -39,13 +42,14 @@ const FAILURE_REQUESTS = new WeakMap();
 export function createExportFailureRequest(request) {
   const outer = cloneOuterRecord(
     request,
-    new Set(['snapshotCapability', 'latest', 'at']),
-    ['snapshotCapability'],
+    new Set(['snapshotCapability', 'leaseOwnerId', 'latest', 'at']),
+    ['snapshotCapability', 'leaseOwnerId'],
     'Solicitação de falha de exportação',
   );
   const snapshot = inspectAuditSnapshotCapability(outer.snapshotCapability);
   if (!snapshot) throw new TypeError('Capacidade de snapshot da auditoria inválida para persistência.');
   const auditId = validAuditId(snapshot.auditId);
+  const leaseOwnerId = validAuditId(outer.leaseOwnerId);
   let envelope;
   try {
     const source = { auditId, model: snapshot.model };
@@ -66,6 +70,7 @@ export function createExportFailureRequest(request) {
     at: canonicalAt(envelope.at),
     expectedRevision: snapshot.revision,
     snapshotCapability: outer.snapshotCapability,
+    leaseOwnerId,
   }));
   return token;
 }
@@ -86,8 +91,11 @@ export function createExportSuccessRequest(request) {
     throw new TypeError('Resultado de exportação não foi emitido pela geração local confiável.');
   }
   const snapshotCapability = generatedReportExportSnapshotCapability(outer.result);
+  const leaseOwnerId = generatedReportExportLeaseOwnerId(outer.result);
+  const exportAttempt = generatedReportExportAttempt(outer.result);
   const snapshot = inspectAuditSnapshotCapability(snapshotCapability);
-  if (!snapshot || snapshot.auditId !== auditId) {
+  if (!snapshot || snapshot.auditId !== auditId || !leaseOwnerId ||
+    !Number.isSafeInteger(exportAttempt) || exportAttempt < 1) {
     throw new TypeError('Resultado e capacidade de snapshot da auditoria não estão correlacionados.');
   }
   const token = Object.freeze(Object.create(null));
@@ -97,6 +105,8 @@ export function createExportSuccessRequest(request) {
     latest: snapshotLatest(outer.latest, auditId),
     expectedRevision: snapshot.revision,
     snapshotCapability,
+    leaseOwnerId,
+    exportAttempt,
   }));
   return token;
 }
@@ -117,7 +127,13 @@ export async function persistExportFailure(request, store) {
     message: issue.message,
     deliveryReceipt: { status: 'failed', formats: [], limitations: [issue.message] },
   };
-  await store.commitAuditIfRevision(auditId, model, latest, envelope.snapshotCapability);
+  await store.commitAuditIfRevisionWithExportLease(
+    auditId,
+    model,
+    latest,
+    envelope.snapshotCapability,
+    { ownerId: envelope.leaseOwnerId, now: new Date().toISOString(), release: true },
+  );
   return { model, latest };
 }
 
@@ -154,6 +170,11 @@ export async function persistExportSuccess(request, store) {
     throw new TypeError('Resultado e auditId de exportação não estão correlacionados.');
   }
   const prepared = preparedArtifactFormats(verifiedModel);
+  prepared.baseName = await bindDeliveryArtifactBaseName(
+    prepared.baseName,
+    envelope.leaseOwnerId,
+    envelope.exportAttempt,
+  );
   const receipt = normalizeDeliveryReceipt(result.deliveryReceipt, prepared);
   validateArtifactCorrelation({
     model: verifiedModel,
@@ -195,7 +216,18 @@ export async function persistExportSuccess(request, store) {
     message: exportStatus === 'complete' ? 'Arquivos do relatório gerados.' : 'Relatório gerado com limitações.',
     deliveryReceipt: receipt,
   };
-  await store.commitAuditIfRevision(auditId, verifiedModel, latest, envelope.snapshotCapability);
+  await store.commitAuditIfRevisionWithExportLease(
+    auditId,
+    verifiedModel,
+    latest,
+    envelope.snapshotCapability,
+    {
+      ownerId: envelope.leaseOwnerId,
+      now: new Date().toISOString(),
+      release: true,
+      clearDeliveryJournal: true,
+    },
+  );
   return { model: verifiedModel, latest };
 }
 
@@ -252,7 +284,7 @@ function normalizeDeliveryReceipt(value, preparedFormats) {
     const baseName = entry.filename.slice(0, -(entry.format.length + 1));
     if (commonBaseName === null) commonBaseName = baseName;
     else if (baseName !== commonBaseName) throw new TypeError('Arquivos do recibo de entrega não compartilham o mesmo nome-base.');
-    if (baseName !== preparedFormats.baseName) throw new TypeError('Nome-base do recibo de entrega não corresponde ao relatório.');
+    if (baseName !== preparedFormats.baseName) throw new TypeError('Nome-base do artefato no recibo de entrega não corresponde ao relatório.');
     seen.add(entry.format);
     return { ...entry };
   });
@@ -457,8 +489,8 @@ function consumeOpaqueRequest(registry, request, label) {
 }
 
 function assertRevisionStore(store) {
-  if (!store || typeof store.commitAuditIfRevision !== 'function') {
-    throw new TypeError('Store de auditoria sem compare-and-swap de revisão.');
+  if (!store || typeof store.commitAuditIfRevisionWithExportLease !== 'function') {
+    throw new TypeError('Store de auditoria sem lease e compare-and-swap de exportação.');
   }
 }
 

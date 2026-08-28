@@ -20,14 +20,20 @@ import { commitReviewDecision } from '../../src/review/review-state.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 
 const PDF = new TextEncoder().encode('%PDF-1.7\ncontroller-test');
+const TEST_LEASE_OWNER = 'owner-test-export';
 
 function revisionStore(store) {
-  if (typeof store?.commitAuditIfRevision === 'function') return store;
+  if (typeof store?.commitAuditIfRevisionWithExportLease === 'function') return store;
   if (typeof store?.commitAudit !== 'function') return store;
   return {
     ...store,
     commitAuditIfRevision(auditId, model, latest, snapshotCapability) {
       return store.commitAudit(auditId, model, latest, snapshotCapability);
+    },
+    commitAuditIfRevisionWithExportLease(auditId, model, latest, snapshotCapability) {
+      return typeof store.commitAuditIfRevision === 'function'
+        ? store.commitAuditIfRevision(auditId, model, latest, snapshotCapability)
+        : store.commitAudit(auditId, model, latest, snapshotCapability);
     },
   };
 }
@@ -44,6 +50,7 @@ async function persistExportFailure(request, store) {
   const snapshot = await issuer.getAuditSnapshot(outer.auditId);
   return persistOpaqueExportFailure(createExportFailureRequest({
     snapshotCapability: snapshot.capability,
+    leaseOwnerId: TEST_LEASE_OWNER,
     ...(Object.hasOwn(outer, 'latest') ? { latest: outer.latest } : {}),
     ...(Object.hasOwn(outer, 'at') ? { at: outer.at } : {}),
   }), revisionStore(store));
@@ -379,6 +386,7 @@ test('a review after delivery reservation is preserved and final receipt persist
       })
       : controller.createExportFailureRequest({
         snapshotCapability: before.capability,
+        leaseOwnerId: TEST_LEASE_OWNER,
         latest: {},
         at: '2026-08-26T16:11:00.000Z',
       });
@@ -395,7 +403,9 @@ test('a review after delivery reservation is preserved and final receipt persist
     assert.equal(after.revision, before.revision + 1);
     assert.equal(after.model.reviewDecisions.length, 1);
     assert.equal(after.model.reviewDecisions[0].answer, 'não foi possível determinar');
-    assert.equal((await store.getLatest()).exportStatus, 'delivering');
+    const latest = await store.getLatest();
+    assert.equal(latest.exportStatus, 'preparing');
+    assert.equal(latest.exportRevision, after.revision);
   }
 });
 
@@ -406,6 +416,7 @@ test('a caller cannot preselect a future revision to roll a later human decision
   await store.setAudit(staleModel.auditId, staleModel);
   assert.throws(() => controller.createExportFailureRequest({
     snapshotCapability: {},
+    leaseOwnerId: TEST_LEASE_OWNER,
     latest: {},
     expectedRevision: 2,
   }), /capacidade|snapshot|solicitação|esquema|inválid/iu);
@@ -434,6 +445,7 @@ test('only one concurrent success or failure export can commit one expected revi
   });
   const failure = controller.createExportFailureRequest({
     snapshotCapability: capability,
+    leaseOwnerId: TEST_LEASE_OWNER,
     latest: {},
     at: '2026-08-26T16:12:00.000Z',
   });
@@ -456,6 +468,7 @@ test('rejects a Proxy around an opaque persistence request before every meta-tra
   const snapshot = await issuer.getAuditSnapshot(SAMPLE_AUDIT.auditId);
   const request = controller.createExportFailureRequest({
     snapshotCapability: snapshot.capability,
+    leaseOwnerId: TEST_LEASE_OWNER,
     latest: {},
     at: '2026-08-26T16:00:00.000Z',
   });
@@ -834,7 +847,10 @@ async function exportResult(model, deliveryReceipt, overrides = {}) {
   const html = renderHtmlReport(renderModel);
   const json = renderTechnicalJson(renderModel);
   const prepared = renderModel.report.artifact.formats.map(entry => entry.format);
-  const csv = prepared.includes('csv') ? renderOccurrenceCsv(renderModel) : null;
+  let csv = null;
+  if (prepared.includes('csv')) {
+    try { csv = renderOccurrenceCsv(renderModel); } catch {}
+  }
   const pdf = prepared.includes('pdf') ? Uint8Array.from(PDF) : null;
   const artifacts = { html, json, csv, pdf };
   const baseName = buildArtifactBaseName(renderModel.finalUrl, renderModel.timestamps.generatedAt);
@@ -921,8 +937,24 @@ async function genuineReportExport(options = {}) {
     await issuer.setAudit(SAMPLE_AUDIT.auditId, structuredClone(SAMPLE_AUDIT));
   }
   const snapshot = await issuer.getAuditSnapshot(SAMPLE_AUDIT.auditId);
+  const leaseOwnerId = options.leaseOwnerId ?? TEST_LEASE_OWNER;
+  const leaseNow = new Date().toISOString();
+  const acquired = await issuer.acquireExportLease(SAMPLE_AUDIT.auditId, snapshot.capability, {
+    ownerId: leaseOwnerId,
+    now: leaseNow,
+    ttlMs: 10 * 60 * 1000,
+    latestState: { auditId: SAMPLE_AUDIT.auditId, exportStatus: 'queued', exportRevision: snapshot.revision },
+  });
+  await issuer.claimExportLease(SAMPLE_AUDIT.auditId, snapshot.capability, {
+    ownerId: leaseOwnerId,
+    now: new Date().toISOString(),
+    ttlMs: 10 * 60 * 1000,
+    latestState: { auditId: SAMPLE_AUDIT.auditId, exportStatus: 'running', exportRevision: snapshot.revision },
+  });
   return runReportExport({
     auditSnapshotCapability: snapshot.capability,
+    exportLeaseOwnerId: leaseOwnerId,
+    exportAttempt: acquired.exportAttempt,
     now: () => '2026-08-26T16:00:00.000Z',
   }, {
     urlApi: {
@@ -953,19 +985,35 @@ async function genuineReportExport(options = {}) {
       },
       revokeObjectURL() {},
       async download() { downloadId += 1; return downloadId; },
+      async cancelDownload() {},
+      async removeDownloadFile() {},
       async waitForDownload(id) {
         if (options.csvDownloadTimeout && id === 3) throw new DOMException('timeout', 'TimeoutError');
         return { id, state: 'complete' };
       },
     },
     reserveDelivery({ model }) {
-      return issuer.commitAuditIfRevision(
+      return issuer.commitAuditIfRevisionWithExportLease(
         SAMPLE_AUDIT.auditId,
         model,
         { auditId: SAMPLE_AUDIT.auditId, exportStatus: 'delivering' },
         snapshot.capability,
+        {
+          ownerId: leaseOwnerId,
+          now: new Date().toISOString(),
+          ttlMs: 10 * 60 * 1000,
+          phase: 'delivering',
+        },
       );
     },
+    assertDelivery({ snapshotCapability, exportLeaseOwnerId }) {
+      return issuer.assertExportLease(SAMPLE_AUDIT.auditId, snapshotCapability, {
+        ownerId: exportLeaseOwnerId,
+        now: new Date().toISOString(),
+        phase: 'delivering',
+      });
+    },
+    async recordDelivery() {},
   });
 }
 

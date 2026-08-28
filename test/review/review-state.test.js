@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { commitReviewDecision, createReviewDecisionCommitter, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId, recordReviewDecision } from '../../src/review/review-state.js';
+import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 
 function reviewModel({ withSecondOccurrence = false } = {}) {
   const evidence = Object.freeze({ artifacts: Object.freeze([]) });
@@ -88,6 +89,91 @@ test('keeps a failed decision persistence retryable and publishes the model only
   assert.equal(attempts, 2);
   assert.equal(committed.reviewDecisions.length, 1);
   assert.equal(original.reviewDecisions.length, 0);
+});
+
+test('merges decisions from two stale review tabs through revision CAS without losing either answer', async () => {
+  const initial = reviewModel({ withSecondOccurrence: true });
+  const store = createInMemoryAuditStore();
+  await store.setAudit(initial.auditId, initial);
+
+  await commitReviewDecision(initial, reviewInput('occ-1'), store);
+  await commitReviewDecision(initial, reviewInput('occ-2'), store);
+
+  const stored = await store.getAudit(initial.auditId);
+  assert.deepEqual(stored.reviewDecisions.map(decision => decision.occurrenceId), ['occ-1', 'occ-2']);
+  assert.equal(stored.manualReview.every(entry => entry.status === 'answered'), true);
+});
+
+test('returns the exact committed review revision for a correlated live panel refresh', async () => {
+  const initial = reviewModel();
+  const store = createInMemoryAuditStore();
+  await store.setAudit(initial.auditId, initial);
+  await store.setLatest({
+    auditId: initial.auditId, exportStatus: 'complete', exportRevision: 1,
+    exportAttempt: 1, leaseOwnerId: 'owner-complete',
+  });
+  const commit = createReviewDecisionCommitter();
+  const committed = await commit({ auditModel: initial, input: reviewInput(), store });
+
+  assert.equal(committed.status, 'committed');
+  assert.equal(committed.exportRevision, 2);
+  const latest = await store.getLatest();
+  assert.equal(latest.exportRevision, committed.exportRevision);
+  assert.equal(latest.exportStatus, 'preparing');
+  assert.equal(Object.hasOwn(latest, 'exportAttempt'), false);
+  assert.equal(Object.hasOwn(latest, 'leaseOwnerId'), false);
+});
+
+test('a review after delivery reservation preserves the prepared model and atomically revokes its lease marker', async () => {
+  const initial = reviewModel();
+  const store = createInMemoryAuditStore();
+  await store.setAudit(initial.auditId, initial);
+  const snapshot = await store.getAuditSnapshot(initial.auditId);
+  await store.acquireExportLease(initial.auditId, snapshot.capability, {
+    ownerId: 'owner-review-race', now: '2026-08-27T10:00:00.000Z',
+    latestState: {
+      auditId: initial.auditId,
+      exportStatus: 'queued',
+      exportRevision: snapshot.revision,
+      leaseOwnerId: 'owner-review-race',
+    },
+  });
+  await store.claimExportLease(initial.auditId, snapshot.capability, {
+    ownerId: 'owner-review-race', now: '2026-08-27T10:00:00.100Z',
+    latestState: {
+      auditId: initial.auditId,
+      exportStatus: 'running',
+      exportRevision: snapshot.revision,
+      leaseOwnerId: 'owner-review-race',
+    },
+  });
+  const reservedModel = { ...structuredClone(initial), reservedReportMarker: 'prepared-current-model' };
+  const reservation = await store.commitAuditIfRevisionWithExportLease(
+    initial.auditId,
+    reservedModel,
+    {
+      auditId: initial.auditId,
+      exportStatus: 'delivering',
+      exportRevision: snapshot.revision + 1,
+      leaseOwnerId: 'owner-review-race',
+    },
+    snapshot.capability,
+    { ownerId: 'owner-review-race', now: '2026-08-27T10:00:00.200Z', phase: 'delivering' },
+  );
+
+  const reviewed = await commitReviewDecision(initial, reviewInput(), store);
+  const stored = await store.getAudit(initial.auditId);
+  const latest = await store.getLatest();
+  assert.equal(stored.reservedReportMarker, 'prepared-current-model');
+  assert.equal(stored.reviewDecisions.length, 1);
+  assert.equal(reviewed.reservedReportMarker, 'prepared-current-model');
+  assert.equal((await store.getAuditSnapshot(initial.auditId)).revision, reservation.revision + 1);
+  assert.deepEqual(await store.getExportLeaseState(initial.auditId, {
+    now: '2026-08-27T10:00:00.300Z',
+  }), { active: false, revision: reservation.revision + 1 });
+  assert.equal(latest.exportStatus, 'preparing');
+  assert.equal(latest.exportRevision, reservation.revision + 1);
+  assert.equal(Object.hasOwn(latest, 'leaseOwnerId'), false);
 });
 
 test('locks every card control synchronously and deduplicates contradictory concurrent decisions', async () => {

@@ -56,16 +56,31 @@ test('a newer human review that wins the pre-delivery CAS prevents every stale d
   const store = createInMemoryAuditStore();
   await store.setAudit(SAMPLE_AUDIT.auditId, clone(SAMPLE_AUDIT));
   const snapshot = await store.getAuditSnapshot(SAMPLE_AUDIT.auditId);
+  const leaseOwnerId = 'owner-stale-review';
+  const acquired = await store.acquireExportLease(SAMPLE_AUDIT.auditId, snapshot.capability, {
+    ownerId: leaseOwnerId,
+    now: '2026-08-26T14:59:58.000Z',
+    latestState: { auditId: SAMPLE_AUDIT.auditId, exportStatus: 'queued', exportRevision: snapshot.revision },
+  });
+  await store.claimExportLease(SAMPLE_AUDIT.auditId, snapshot.capability, {
+    ownerId: leaseOwnerId,
+    now: '2026-08-26T14:59:59.000Z',
+    latestState: { auditId: SAMPLE_AUDIT.auditId, exportStatus: 'running', exportRevision: snapshot.revision },
+  });
   const events = [];
 
   await assert.rejects(runReportExport({
     auditSnapshotCapability: snapshot.capability,
+    exportLeaseOwnerId: leaseOwnerId,
+    exportAttempt: acquired.exportAttempt,
     now: () => '2026-08-26T15:00:00.000Z',
   }, {
     urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
     tabAdapter: successfulTabAdapter(),
     async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
     downloadsAdapter: fakeDownloads(events),
+    async assertDelivery() {},
+    async recordDelivery() {},
     async reserveDelivery({ model }) {
       await commitReviewDecision(snapshot.model, {
         auditId: SAMPLE_AUDIT.auditId,
@@ -76,17 +91,82 @@ test('a newer human review that wins the pre-delivery CAS prevents every stale d
         decidedAt: '2026-08-26T15:01:00.000Z',
         mode: 'assisted',
       }, store);
-      return store.commitAuditIfRevision(
+      return store.commitAuditIfRevisionWithExportLease(
         SAMPLE_AUDIT.auditId,
         model,
         { auditId: SAMPLE_AUDIT.auditId, exportStatus: 'delivering' },
         snapshot.capability,
+        { ownerId: leaseOwnerId, now: '2026-08-26T15:01:01.000Z', phase: 'delivering' },
       );
     },
   }), error => error?.code === 'AUDIT_REVISION_CONFLICT');
 
   assert.equal(events.some(entry => entry[0] === 'download'), false);
   assert.equal((await store.getAuditSnapshot(SAMPLE_AUDIT.auditId)).model.reviewDecisions.length, 1);
+});
+
+test('a review immediately after reservation revokes delivery before the first physical download', async () => {
+  const store = createInMemoryAuditStore();
+  await store.setAudit(SAMPLE_AUDIT.auditId, clone(SAMPLE_AUDIT));
+  const snapshot = await store.getAuditSnapshot(SAMPLE_AUDIT.auditId);
+  const leaseOwnerId = 'owner-post-reservation-review';
+  const acquired = await store.acquireExportLease(SAMPLE_AUDIT.auditId, snapshot.capability, {
+    ownerId: leaseOwnerId,
+    now: '2026-08-26T14:59:58.000Z',
+    latestState: { auditId: SAMPLE_AUDIT.auditId, exportStatus: 'queued', exportRevision: snapshot.revision },
+  });
+  await store.claimExportLease(SAMPLE_AUDIT.auditId, snapshot.capability, {
+    ownerId: leaseOwnerId,
+    now: '2026-08-26T14:59:59.000Z',
+    latestState: { auditId: SAMPLE_AUDIT.auditId, exportStatus: 'running', exportRevision: snapshot.revision },
+  });
+  const events = [];
+
+  await assert.rejects(runReportExport({
+    auditSnapshotCapability: snapshot.capability,
+    exportLeaseOwnerId: leaseOwnerId,
+    exportAttempt: acquired.exportAttempt,
+    now: () => '2026-08-26T15:00:00.000Z',
+  }, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+    downloadsAdapter: fakeDownloads(events),
+    async recordDelivery() {},
+    async reserveDelivery({ model }) {
+      const reservation = await store.commitAuditIfRevisionWithExportLease(
+        SAMPLE_AUDIT.auditId,
+        model,
+        { auditId: SAMPLE_AUDIT.auditId, exportStatus: 'delivering', exportRevision: snapshot.revision + 1 },
+        snapshot.capability,
+        { ownerId: leaseOwnerId, now: '2026-08-26T15:00:01.000Z', phase: 'delivering' },
+      );
+      await commitReviewDecision(snapshot.model, {
+        auditId: SAMPLE_AUDIT.auditId,
+        itemId: '5.1.4',
+        occurrenceId: 'occ-focus-review',
+        answer: 'não foi possível determinar',
+        evaluator: 'Pessoa avaliadora',
+        decidedAt: '2026-08-26T15:00:01.100Z',
+        mode: 'assisted',
+      }, store);
+      return reservation;
+    },
+    async assertDelivery() {
+      const lease = await store.getExportLeaseState(SAMPLE_AUDIT.auditId, {
+        now: '2026-08-26T15:00:01.200Z',
+      });
+      if (!lease.active) {
+        throw Object.assign(new Error('delivery lease revoked'), { code: 'AUDIT_EXPORT_LEASE_CONFLICT' });
+      }
+    },
+  }), error => error?.code === 'AUDIT_EXPORT_LEASE_CONFLICT');
+
+  assert.equal(events.some(entry => entry[0] === 'download'), false);
+  const stored = await store.getAudit(SAMPLE_AUDIT.auditId);
+  assert.equal(stored.reviewDecisions.length, 1);
+  assert.notEqual(stored.report?.artifact?.status, 'pending');
+  assert.equal((await store.getLatest()).exportStatus, 'preparing');
 });
 
 test('ignores image branding input and exports only the neutral independent identity', async () => {

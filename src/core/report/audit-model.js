@@ -14,6 +14,12 @@ import { canonicalStringify } from './canonical-json.js';
 import { validateNormalizedAxeSupplemental } from '../axe/validate-supplemental.js';
 import { aggregateItems } from '../rules/aggregate-items.js';
 import { unknownAccessibilityWidgetInventory } from '../detection/accessibility-widgets.js';
+import {
+  AUDITA_RULES_VERSION,
+  hasRegisteredSource,
+  registeredOccurrenceSource,
+  registeredRuleSource,
+} from '../provenance.js';
 
 const SESSION_STATUSES = new Set(['complete', 'partial', 'failed', 'cancelled']);
 const REVIEW_STATUSES = new Set(['unanswered', 'answered']);
@@ -437,6 +443,9 @@ function canonicalInstant(value, label) {
 function validateVersions(versions) {
   if (!versions || typeof versions !== 'object' || Array.isArray(versions)) throw new TypeError('versions inválido.');
   for (const key of ['extension', 'rules', 'browser']) requiredText(versions[key], `versions.${key}`);
+  if (versions.rules !== AUDITA_RULES_VERSION) {
+    throw new TypeError('Versão das regras não registrada pela metodologia local.');
+  }
 }
 
 function validateMethodology(methodology, versions, reproducibility) {
@@ -586,7 +595,11 @@ function validateRules(rules, itemById, rulesVersion) {
     }
     if (rule.impact !== undefined && !IMPACT_LEVELS.includes(rule.impact)) throw new TypeError(`Regra ${id} possui impacto inválido.`);
     if (rule.confidence !== undefined && !CONFIDENCE_LEVELS.includes(rule.confidence)) throw new TypeError(`Regra ${id} possui confiança inválida.`);
-    if (rule.source !== undefined) validateSource(rule.source, `Regra ${id}.source`);
+    validateSource(rule.source, `Regra ${id}.source`);
+    const registeredSource = registeredRuleSource(rule, rulesVersion);
+    if (!registeredSource || !hasRegisteredSource(rule.source, registeredSource)) {
+      throw new TypeError(`Regra ${id} possui proveniência incoerente com o registro local.`);
+    }
     if (id.startsWith('editorial.') || rule.classification === 'editorial' || rule.source?.engine === 'audita-editorial') {
       validateEditorialRuleResult(rule, id, rulesVersion);
     }
@@ -653,13 +666,18 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById) {
       throw new TypeError(`Ocorrência ${id} possui resultado, classificação, impacto ou confiança inválidos.`);
     }
     validateSource(occurrence.source, `Ocorrência ${id}.source`);
+    const registeredSource = registeredOccurrenceSource(occurrence, model.versions.rules);
+    if (!registeredSource || !hasRegisteredSource(occurrence.source, registeredSource)) {
+      throw new TypeError(`Ocorrência ${id} possui proveniência incoerente com o registro local.`);
+    }
     const sourceRule = ruleById.get(occurrence.source.ruleId);
     const migratedManual = occurrence.source.engine === V1_MIGRATION_DEFAULTS.manualSourceEngine && occurrence.ruleId === null;
     if (!sourceRule && !migratedManual) throw new TypeError(`Ocorrência ${id} referencia regra desconhecida.`);
     if (sourceRule && occurrence.mode !== undefined && sourceRule.mode !== occurrence.mode) {
       throw new TypeError(`Ocorrência ${id} possui modo de regra incoerente.`);
     }
-    if (occurrence.ruleId !== undefined && occurrence.ruleId !== null && occurrence.ruleId !== occurrence.source.ruleId) {
+    if ((!migratedManual && occurrence.ruleId !== occurrence.source.ruleId) ||
+      (migratedManual && occurrence.ruleId !== null)) {
       throw new TypeError(`Ocorrência ${id} possui regra legada incoerente.`);
     }
 

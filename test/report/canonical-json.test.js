@@ -100,8 +100,8 @@ test('validates every rule, occurrence, evidence and review graph link', () => {
     reportInput({ occurrences: [{ occurrenceId: 'occ-x', itemId: '5.1.4', ruleId: 'unknown', outcome: 'cantTell', mode: 'assisted', nodeId: null, evidenceIds: [], justification: 'Revisão.' }] }),
     reportInput({ occurrences: [{ occurrenceId: 'occ-x', itemId: '5.1.4', ruleId: null, outcome: 'cantTell', mode: 'assisted', nodeId: null, evidenceIds: [], justification: 'Revisão.' }] }),
     reportInput({ evidence: { stateCount: 1, artifacts: [{ evidenceId: 'ev-1', kind: 'element', fullPageEvidenceId: 'missing', hash: 'sha' }] } }),
-    reportInput({ manualReview: [{ occurrenceId: 'unknown', itemId: '5.1.4', ruleId: 'rule-assisted', mode: 'assisted', status: 'unanswered', question: 'Pergunta?', reason: 'Razão.' }] }),
-    reportInput({ manualReview: [{ occurrenceId: 'occ-1', itemId: '5.1.4', ruleId: 'rule-assisted', mode: 'assisted', status: 'forged', question: 'Pergunta?', reason: 'Razão.' }] }),
+    reportInput({ manualReview: [{ occurrenceId: 'unknown', itemId: '5.1.4', ruleId: 'focus-order', mode: 'assisted', status: 'unanswered', question: 'Pergunta?', reason: 'Razão.' }] }),
+    reportInput({ manualReview: [{ occurrenceId: 'occ-1', itemId: '5.1.4', ruleId: 'focus-order', mode: 'assisted', status: 'forged', question: 'Pergunta?', reason: 'Razão.' }] }),
     reportInput({ reviewDecisions: [{ decisionId: 'decision-forged', auditId: 'audit-report-1', itemId: '5.1.4', occurrenceId: 'unknown', answer: 'conforme', evaluator: 'Fiscal', decidedAt: '2026-08-26T14:00:00.000Z', mode: 'assisted' }] }),
     reportInput({ reviewDecisions: [{ decisionId: 'decision-forged', auditId: 'audit-report-1', itemId: '5.1.4', occurrenceId: 'occ-1', answer: 'sim', evaluator: 'Fiscal', decidedAt: 'amanhã', mode: 'assisted' }] }),
   ];

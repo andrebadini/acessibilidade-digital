@@ -40,6 +40,9 @@ test('authoritative core runs exactly 130 rules into all 146 JSON-safe items', a
   });
   assert.doesNotThrow(() => JSON.stringify(audit));
   assert.equal(Object.isFrozen(audit), true);
+  assert.equal(Object.isFrozen(audit.ruleResults), true);
+  assert.equal(Object.isFrozen(audit.ruleResults[0]), true);
+  assert.equal(Object.isFrozen(audit.ruleResults[0].source), true);
   assert.doesNotMatch(JSON.stringify(audit), /byNodeId|byDomId/);
 });
 

@@ -2,15 +2,20 @@ import { createAuditSession } from './session.js';
 import { normalizeAuditUrl } from '../core/url.js';
 import { createChromeAdapter } from './chrome-adapter.js';
 import { runAudit } from './run-audit.js';
-import { createAuditStore } from '../storage/audit-store.js';
+import {
+  createAuditStore,
+  isAuditExportLeaseConflict,
+  isAuditRevisionConflict,
+} from '../storage/audit-store.js';
 import { sanitizeResourceUrl } from '../core/normalize-snapshot.js';
 import { createExportFailureRequest, persistExportFailure } from '../export/export-controller.js';
 
 const PANEL_PATH = '/src/panel/index.html';
 const REVIEW_PATH = '/src/review/index.html';
 const EXPORT_PATH = '/src/export/index.html';
-const EXPORT_QUEUE_TTL_MS = 2 * 60 * 1000;
 const sessionKey = (id) => `audita-mt:session:${id}`;
+const EXPORT_BUSY_MESSAGE = 'Este relatório já está sendo gerado; tente novamente após a conclusão.';
+const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
 
 export function isAuthorizedPanelSender(sender, runtimeId) {
   return isAuthorizedExtensionSender(sender, runtimeId, PANEL_PATH);
@@ -25,8 +30,15 @@ export function isAuthorizedExtensionSender(sender, runtimeId, requiredPath) {
     if (!paths.includes(url.pathname)) return false;
     if (url.pathname === PANEL_PATH) return !url.search;
     if (!url.search) return url.pathname === REVIEW_PATH;
-    if ([...url.searchParams.keys()].length !== 1 || !url.searchParams.has('auditId')) return false;
-    return validAuditId(url.searchParams.get('auditId'));
+    const keys = [...url.searchParams.keys()].sort();
+    if (url.pathname === REVIEW_PATH) {
+      return keys.length === 1 && keys[0] === 'auditId' && validAuditId(url.searchParams.get('auditId'));
+    }
+    return url.pathname === EXPORT_PATH && keys.length === 3 && keys[0] === 'auditId' &&
+      keys[1] === 'exportAttempt' && keys[2] === 'leaseOwnerId' &&
+      validAuditId(url.searchParams.get('auditId')) &&
+      validExportAttempt(url.searchParams.get('exportAttempt')) &&
+      validAuditId(url.searchParams.get('leaseOwnerId'));
   } catch {
     return false;
   }
@@ -60,6 +72,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
   const runner = options.runner ?? runAudit;
   const auditStore = options.auditStore ?? createAuditStore(options.auditStoreOptions);
   const chromeAdapterFactory = options.chromeAdapterFactory ?? createChromeAdapter;
+  const createExportOwnerId = options.createExportOwnerId ?? (() => crypto.randomUUID());
   const activeBySender = new Map();
   const activeExports = new Map();
 
@@ -70,7 +83,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
   });
 
   chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    const knownTypes = ['START_AUDIT', 'GET_LAST_AUDIT', 'REQUEST_EXPORT', 'EXPORT_PROGRESS', 'EXPORT_COMPLETE', 'EXPORT_FAILED'];
+    const knownTypes = ['START_AUDIT', 'GET_LAST_AUDIT', 'REQUEST_EXPORT', 'REVIEW_COMMITTED', 'EXPORT_PROGRESS', 'EXPORT_COMPLETE', 'EXPORT_FAILED', 'EXPORT_BUSY', 'EXPORT_INVALIDATED'];
     if (!message || !knownTypes.includes(message.type)) return false;
     if (!isAuthorizedExtensionSender(sender, chromeApi.runtime.id)) {
       sendResponse({ ok: false, error: 'Origem da mensagem não autorizada.' });
@@ -80,9 +93,44 @@ export function registerServiceWorker(chromeApi, options = {}) {
       sendResponse({ ok: false, error: 'Origem da mensagem não autorizada.' });
       return true;
     }
+    if (message.type === 'REVIEW_COMMITTED') {
+      const reviewSender = new URL(sender.url);
+      if (reviewSender.pathname !== REVIEW_PATH || !validAuditId(message.auditId) ||
+        reviewSender.searchParams.get('auditId') !== message.auditId ||
+        !Number.isSafeInteger(message.exportRevision) || message.exportRevision < 0) {
+        sendResponse({ ok: false, error: 'Revisão não correlacionada.' });
+        return true;
+      }
+      void Promise.all([auditStore.getAuditSnapshot(message.auditId), auditStore.getLatest()]).then(
+        async ([snapshot, latest]) => {
+          if (snapshot?.model?.auditId !== message.auditId || snapshot.revision !== message.exportRevision ||
+            latest?.auditId !== message.auditId || latest.exportRevision !== message.exportRevision) {
+            sendResponse({ ok: false, error: 'Revisão não correlacionada.' });
+            return;
+          }
+          try {
+            await sendRuntimeMessage(chromeApi, {
+              type: 'AUDIT_REVIEW_UPDATED', auditId: message.auditId,
+              exportRevision: message.exportRevision,
+            });
+            sendResponse({ ok: true });
+          } catch {
+            sendResponse({ ok: false, error: 'Não foi possível notificar a revisão.' });
+          }
+        },
+        () => sendResponse({ ok: false, error: 'Não foi possível confirmar a revisão.' }),
+      );
+      return true;
+    }
     if (message.type.startsWith('EXPORT_')) {
-      if (new URL(sender.url).pathname !== EXPORT_PATH || !validAuditId(message.auditId)
-        || new URL(sender.url).searchParams.get('auditId') !== message.auditId) {
+      const exportSender = new URL(sender.url);
+      if (exportSender.pathname !== EXPORT_PATH || !validAuditId(message.auditId) ||
+        exportSender.searchParams.get('auditId') !== message.auditId ||
+        !validAuditId(message.leaseOwnerId) ||
+        exportSender.searchParams.get('leaseOwnerId') !== message.leaseOwnerId ||
+        !validExportAttempt(message.exportAttempt) ||
+        Number(exportSender.searchParams.get('exportAttempt')) !== message.exportAttempt ||
+        !Number.isSafeInteger(message.exportRevision) || message.exportRevision < 0) {
         sendResponse({ ok: false, error: 'Exportação não correlacionada.' });
       } else sendResponse({ ok: true });
       return true;
@@ -95,12 +143,12 @@ export function registerServiceWorker(chromeApi, options = {}) {
         return true;
       }
       if (activeExports.has(message.auditId)) {
-        sendResponse({ ok: true, auditId: message.auditId, state: 'queued', duplicate: true });
+        sendResponse(exportBusyResponse(message.auditId));
         return true;
       }
       const queued = queueRequestedExport(message.auditId);
       activeExports.set(message.auditId, queued);
-      void queued.then(sendResponse, () => sendResponse({ ok: false, error: 'Não foi possível preparar o relatório.' }))
+      void queued.then(sendResponse, error => sendResponse(exportQueueErrorResponse(message.auditId, error)))
         .finally(() => { if (activeExports.get(message.auditId) === queued) activeExports.delete(message.auditId); });
       return true;
     }
@@ -149,12 +197,12 @@ export function registerServiceWorker(chromeApi, options = {}) {
       const status = model?.session?.status || 'failed';
       const reviewUrl = model?.report?.reviewUrl || null;
       const canExport = ['complete', 'partial'].includes(status);
-      const latestState = { auditId, status, percent: canExport ? 100 : model?.progress?.at?.(-1)?.percent || 0, message: status === 'partial' ? 'Auditoria concluída com limitações.' : status === 'complete' ? 'Auditoria concluída.' : 'A auditoria não pôde ser concluída.', reviewUrl, exportStatus: canExport ? 'queued' : 'unavailable', ...(canExport ? { exportQueuedAt: queueTime() } : {}) };
+      const latestState = { auditId, status, percent: canExport ? 100 : model?.progress?.at?.(-1)?.percent || 0, message: status === 'partial' ? 'Auditoria concluída com limitações.' : status === 'complete' ? 'Auditoria concluída.' : 'A auditoria não pôde ser concluída.', reviewUrl, exportStatus: canExport ? 'preparing' : 'unavailable' };
       await auditStore.commitAudit(auditId, model, latestState);
       committed = true;
       if (canExport) {
         await Promise.allSettled([
-          sendRuntimeMessage(chromeApi, { type: 'AUDIT_COMPLETE', auditId, sessionId: auditId, status, reviewUrl, exportStatus: 'queued' }),
+          sendRuntimeMessage(chromeApi, { type: 'AUDIT_COMPLETE', auditId, sessionId: auditId, status, reviewUrl, exportStatus: 'preparing' }),
           startAutomaticExport(auditId),
         ]);
       } else {
@@ -177,26 +225,44 @@ export function registerServiceWorker(chromeApi, options = {}) {
     const [snapshot, latest] = await Promise.all([auditStore.getAuditSnapshot(auditId), auditStore.getLatest()]);
     const { model, revision } = snapshot;
     if (!model || !Object.hasOwn(model, 'auditId') || model.auditId !== auditId) return { ok: false, error: 'Auditoria não encontrada.' };
-    if (latest?.auditId === auditId && latest.exportRevision === revision &&
-      ['queued', 'running', 'delivering'].includes(latest.exportStatus) && queueIsFresh(latest.exportQueuedAt)) {
-      return { ok: true, auditId, state: latest.exportStatus, duplicate: true };
+    if (typeof auditStore.acquireExportLease !== 'function') {
+      throw new TypeError('Armazenamento sem exclusividade persistente de exportação.');
     }
+    const ownerId = createExportOwnerIdOnce(createExportOwnerId);
+    if (!ownerId) throw new TypeError('Identificador de exclusividade da exportação inválido.');
     const correlatedLatest = latest?.auditId === auditId ? latest : {};
-    await auditStore.setLatest({
+    const queuedLatest = {
       ...correlatedLatest,
       auditId,
       exportStatus: 'queued',
       exportRevision: revision,
       exportQueuedAt: queueTime(),
+      leaseOwnerId: ownerId,
       message: 'Relatório na fila de geração.',
+    };
+    delete queuedLatest.exportAttempt;
+    const lease = await auditStore.acquireExportLease(auditId, snapshot.capability, {
+      ownerId,
+      now: queuedLatest.exportQueuedAt,
+      latestState: queuedLatest,
     });
+    if (!lease?.acquired) return exportBusyResponse(auditId, lease?.retryAt);
+    if (!validExportAttempt(lease.exportAttempt)) {
+      throw new TypeError('Tentativa persistente da exportação inválida.');
+    }
+    const exportAttempt = lease.exportAttempt;
+    const leasedLatest = { ...queuedLatest, exportAttempt };
     try {
-      await openExportPage(auditId);
-      return { ok: true, auditId, state: 'queued' };
+      await openExportPage(auditId, ownerId, exportAttempt);
+      return {
+        ok: true, auditId, state: 'queued', exportRevision: revision,
+        exportAttempt, leaseOwnerId: ownerId,
+      };
     } catch (error) {
       await persistExportFailure(createExportFailureRequest({
         snapshotCapability: snapshot.capability,
-        latest,
+        leaseOwnerId: ownerId,
+        latest: leasedLatest,
         at: queueTime(),
       }), auditStore);
       throw error;
@@ -204,30 +270,27 @@ export function registerServiceWorker(chromeApi, options = {}) {
   }
 
   async function startAutomaticExport(auditId) {
-    const [snapshot, latest] = await Promise.all([auditStore.getAuditSnapshot(auditId), auditStore.getLatest()]);
-    await auditStore.setLatest({
-      ...(latest?.auditId === auditId ? latest : {}),
-      auditId,
-      exportStatus: 'queued',
-      exportRevision: snapshot.revision,
-      exportQueuedAt: queueTime(),
-      message: 'Relatório na fila de geração.',
-    });
     try {
-      await openExportPage(auditId);
+      await queueRequestedExport(auditId);
     } catch {
-      const failed = await persistExportFailure(createExportFailureRequest({
-        snapshotCapability: snapshot.capability,
-        latest,
-        at: queueTime(),
-      }), auditStore);
-      await sendRuntimeMessage(chromeApi, { type: 'EXPORT_FAILED', auditId, status: 'failed', error: failed.latest.message }).catch(() => {});
+      const latest = await auditStore.getLatest().catch(() => null);
+      if (latest?.auditId === auditId && latest.exportStatus === 'failed' &&
+        validAuditId(latest.leaseOwnerId) && validExportAttempt(latest.exportAttempt) &&
+        Number.isSafeInteger(latest.exportRevision) && latest.exportRevision >= 0) {
+        await sendRuntimeMessage(chromeApi, {
+          type: 'EXPORT_FAILED', auditId, status: 'failed',
+          error: typeof latest.message === 'string' ? latest.message : 'Não foi possível preparar o relatório.',
+          exportRevision: latest.exportRevision,
+          exportAttempt: latest.exportAttempt,
+          leaseOwnerId: latest.leaseOwnerId,
+        }).catch(() => {});
+      }
     }
   }
 
-  async function openExportPage(auditId) {
+  async function openExportPage(auditId, leaseOwnerId, exportAttempt) {
     return chromeApi.tabs.create({
-      url: chromeApi.runtime.getURL(`src/export/index.html?auditId=${encodeURIComponent(auditId)}`),
+      url: chromeApi.runtime.getURL(`src/export/index.html?auditId=${encodeURIComponent(auditId)}&leaseOwnerId=${encodeURIComponent(leaseOwnerId)}&exportAttempt=${exportAttempt}`),
       active: false,
     });
   }
@@ -239,23 +302,64 @@ export function registerServiceWorker(chromeApi, options = {}) {
     return date.toISOString();
   }
 
-  function queueIsFresh(value) {
-    if (typeof value !== 'string') return false;
-    try {
-      if (new Date(value).toISOString() !== value) return false;
-      const age = new Date(queueTime()).getTime() - new Date(value).getTime();
-      return age >= 0 && age <= EXPORT_QUEUE_TTL_MS;
-    } catch {
-      return false;
+  async function restorableLatestState() {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const latest = await auditStore.getLatest();
+      const resolved = await resolveRestorableLatestState(latest);
+      const confirmedLatest = await auditStore.getLatest();
+      if (sameStoredLatest(latest, confirmedLatest)) return resolved;
     }
+    const latest = await auditStore.getLatest();
+    if (latest && ['queued', 'running', 'delivering'].includes(latest.exportStatus)) {
+      return {
+        ...latest,
+        exportStatus: 'preparing',
+        message: latest.exportCleanupPending === true
+          ? EXPORT_CLEANUP_MESSAGE
+          : 'O estado da geração está sendo atualizado; aguarde ou tente novamente.',
+      };
+    }
+    return latest;
   }
 
-  async function restorableLatestState() {
-    const latest = await auditStore.getLatest();
-    if (!latest || !['queued', 'running', 'delivering', 'complete', 'partial'].includes(latest.exportStatus) ||
+  async function resolveRestorableLatestState(latest) {
+    if (!latest || !['preparing', 'queued', 'running', 'delivering', 'complete', 'partial'].includes(latest.exportStatus) ||
       typeof auditStore.getAuditSnapshot !== 'function' || !validAuditId(latest.auditId)) return latest;
+    if (latest.exportStatus === 'preparing') return latest.exportCleanupPending === true
+      ? { ...latest, message: EXPORT_CLEANUP_MESSAGE }
+      : latest;
+    if (!Number.isSafeInteger(latest.exportRevision) || latest.exportRevision < 0) {
+      return {
+        ...latest,
+        exportStatus: 'preparing',
+        message: 'Preparando a geração do relatório; tente novamente se ela não iniciar.',
+      };
+    }
     const snapshot = await auditStore.getAuditSnapshot(latest.auditId);
-    if (latest.exportRevision === snapshot.revision) return latest;
+    if (latest.exportRevision === snapshot.revision) {
+      if (['queued', 'running', 'delivering'].includes(latest.exportStatus) &&
+        typeof auditStore.getExportLeaseState === 'function') {
+        if (!validExportAttempt(latest.exportAttempt) || !validAuditId(latest.leaseOwnerId)) {
+          return {
+            ...latest,
+            exportStatus: 'preparing',
+            message: 'A geração anterior não possui correlação válida; solicite o relatório novamente.',
+          };
+        }
+        const lease = await auditStore.getExportLeaseState(latest.auditId, { now: queueTime() });
+        if (!lease?.active || lease.revision !== snapshot.revision || lease.phase !== latest.exportStatus ||
+          lease.exportAttempt !== latest.exportAttempt || lease.ownerId !== latest.leaseOwnerId) {
+          return {
+            ...latest,
+            exportStatus: 'preparing',
+            message: latest.exportCleanupPending === true
+              ? EXPORT_CLEANUP_MESSAGE
+              : 'A geração anterior foi interrompida; solicite o relatório novamente.',
+          };
+        }
+      }
+      return latest;
+    }
     return {
       ...latest,
       exportStatus: 'failed',
@@ -264,8 +368,49 @@ export function registerServiceWorker(chromeApi, options = {}) {
   }
 }
 
+function sameStoredLatest(first, second) {
+  try { return JSON.stringify(first) === JSON.stringify(second); } catch { return false; }
+}
+
+function createExportOwnerIdOnce(factory) {
+  const value = factory();
+  return validAuditId(value) ? value : null;
+}
+
+function exportBusyResponse(auditId, retryAt) {
+  return {
+    ok: false,
+    auditId,
+    state: 'busy',
+    code: 'EXPORT_BUSY',
+    retryable: true,
+    ...(typeof retryAt === 'string' ? { retryAt } : {}),
+    error: EXPORT_BUSY_MESSAGE,
+  };
+}
+
+function exportQueueErrorResponse(auditId, error) {
+  if (isAuditExportLeaseConflict(error)) return exportBusyResponse(auditId);
+  if (isAuditRevisionConflict(error)) {
+    return {
+      ok: false,
+      auditId,
+      state: 'stale',
+      code: 'AUDIT_REVISION_CONFLICT',
+      retryable: true,
+      error: 'A auditoria foi atualizada; solicite novamente o relatório revisado.',
+    };
+  }
+  return { ok: false, auditId, state: 'failed', retryable: true, error: 'Não foi possível preparar o relatório.' };
+}
+
 function validAuditId(value) {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,200}$/u.test(value);
+}
+
+function validExportAttempt(value) {
+  const attempt = typeof value === 'string' && /^[1-9][0-9]*$/u.test(value) ? Number(value) : value;
+  return Number.isSafeInteger(attempt) && attempt >= 1;
 }
 
 function sendRuntimeMessage(chromeApi, message) {

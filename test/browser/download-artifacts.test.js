@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildArtifactBaseName, downloadArtifacts } from '../../src/browser/download-artifacts.js';
+import {
+  buildArtifactBaseName,
+  bindDeliveryArtifactBaseName,
+  downloadArtifacts,
+  reconcileStaleDownloads,
+} from '../../src/browser/download-artifacts.js';
 
 const FAST_SHA256 = () => '0'.repeat(64);
 
@@ -49,6 +54,365 @@ test('downloads large payloads only through Blob URLs and revokes them after ter
   }
   assert.deepEqual(result.limitations, []);
   assert.doesNotMatch(JSON.stringify(result), /blob:/u);
+});
+
+test('revalidates delivery immediately before each physical download and aborts on revocation', async () => {
+  const started = [];
+  const checked = [];
+  const revoked = [];
+  let nextId = 1;
+  const adapter = {
+    createObjectURL(blob) { return `blob:chrome-extension://test/${blob.type}`; },
+    revokeObjectURL(url) { revoked.push(url); },
+    async download(options) { started.push(options.filename); return nextId++; },
+    async waitForDownload(id) { return { id, state: 'complete' }; },
+  };
+
+  await assert.rejects(downloadArtifacts({
+    baseName: 'audit',
+    html: '<!doctype html>',
+    json: '{}',
+    csv: '\uFEFF"id"\r\n',
+    pdf: new TextEncoder().encode('%PDF-1.7'),
+  }, adapter, {
+    hashBytes: FAST_SHA256,
+    async assertCanDownload({ format }) {
+      checked.push(format);
+      if (format === 'csv') {
+        throw Object.assign(new Error('lease revoked'), { code: 'AUDIT_EXPORT_LEASE_CONFLICT' });
+      }
+    },
+  }), error => error?.code === 'AUDIT_EXPORT_LEASE_CONFLICT');
+
+  assert.deepEqual(checked, ['html', 'html', 'html', 'html', 'json', 'json', 'json', 'json', 'csv']);
+  assert.deepEqual(started, ['audit.html', 'audit.json']);
+  assert.equal(revoked.length, 3);
+});
+
+test('revalidates after journaling and never starts a physical download revoked during the journal write', async () => {
+  const journal = [];
+  let revoked = false;
+  let physicalStarts = 0;
+  const adapter = {
+    createObjectURL() { return 'blob:chrome-extension://test/revoked-after-journal'; },
+    revokeObjectURL() {},
+    async download() { physicalStarts += 1; return 7; },
+    async waitForDownload(downloadId) { return { id: downloadId, state: 'complete' }; },
+    async cancelDownload() {},
+    async removeDownloadFile() {},
+  };
+
+  await assert.rejects(downloadArtifacts({ baseName: 'audit', html: '<!doctype html>' }, adapter, {
+    timeoutMs: 20,
+    hashBytes: FAST_SHA256,
+    async assertCanDownload() {
+      if (revoked) throw Object.assign(new Error('review won'), { code: 'AUDIT_REVISION_CONFLICT' });
+    },
+    async recordDeliveryState(entry) {
+      journal.push(entry);
+      if (entry.state === 'starting') revoked = true;
+    },
+  }), error => error?.code === 'AUDIT_REVISION_CONFLICT');
+
+  assert.equal(physicalStarts, 0);
+  assert.deepEqual(journal, [
+    { state: 'starting', format: 'html', filename: 'audit.html' },
+    { state: 'cleaned', format: 'html', filename: 'audit.html' },
+  ]);
+});
+
+test('cancels and removes an in-flight artifact when review revokes delivery before its terminal acceptance', async () => {
+  const started = [];
+  const cancelled = [];
+  const removed = [];
+  const checks = [];
+  let revoked = false;
+  const adapter = {
+    createObjectURL() { return 'blob:chrome-extension://test/html'; },
+    revokeObjectURL() {},
+    async download(options) { started.push(options.filename); return 1; },
+    async waitForDownload(id) {
+      revoked = true;
+      return { id, state: 'complete' };
+    },
+    async cancelDownload(id) { cancelled.push(id); },
+    async removeDownloadFile(id) { removed.push(id); },
+  };
+
+  await assert.rejects(downloadArtifacts({
+    baseName: 'audit',
+    html: '<!doctype html>',
+    json: '{}',
+  }, adapter, {
+    hashBytes: FAST_SHA256,
+    async assertCanDownload({ format, stage }) {
+      checks.push([format, stage]);
+      if (revoked) throw Object.assign(new Error('lease revoked'), { code: 'AUDIT_EXPORT_LEASE_CONFLICT' });
+    },
+  }), error => error?.code === 'AUDIT_EXPORT_LEASE_CONFLICT');
+
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(started, ['audit.html']);
+  assert.deepEqual(cancelled, [1]);
+  assert.deepEqual(removed, [1]);
+  assert.deepEqual(checks, [
+    ['html', 'before-start'],
+    ['html', 'before-physical-start'],
+    ['html', 'started'],
+    ['html', 'terminal'],
+  ]);
+});
+
+test('journals a physical download before start and exposes a durable cleanup failure after revocation', async () => {
+  const journal = [];
+  let revoked = false;
+  const adapter = {
+    createObjectURL() { return 'blob:chrome-extension://test/journalled'; },
+    revokeObjectURL() {},
+    async download() { return 77; },
+    async waitForDownload(downloadId) {
+      revoked = true;
+      return { id: downloadId, state: 'complete' };
+    },
+    async cancelDownload() { throw new Error('cancel denied'); },
+    async removeDownloadFile() { throw new Error('remove denied'); },
+  };
+
+  await assert.rejects(downloadArtifacts({
+    baseName: 'audit', html: '<!doctype html>',
+  }, adapter, {
+    hashBytes: FAST_SHA256,
+    async assertCanDownload({ stage }) {
+      if (stage === 'terminal' && revoked) {
+        throw Object.assign(new Error('review won'), { code: 'AUDIT_REVISION_CONFLICT' });
+      }
+    },
+    async recordDeliveryState(entry) { journal.push(entry); },
+  }), error => error?.code === 'AUDIT_DOWNLOAD_CLEANUP_PENDING' && error?.causeCode === 'AUDIT_REVISION_CONFLICT');
+
+  assert.deepEqual(journal, [
+    { state: 'starting', format: 'html', filename: 'audit.html' },
+    { state: 'in-flight', format: 'html', filename: 'audit.html', downloadId: 77 },
+    { state: 'terminal', format: 'html', filename: 'audit.html', downloadId: 77 },
+    { state: 'cleanup-failed', format: 'html', filename: 'audit.html', downloadId: 77 },
+  ]);
+});
+
+test('bounds hanging cancel and remove operations, stops lease polling, and persists cleanup-failed', { timeout: 500 }, async () => {
+  const cancelGate = deferred();
+  const removeGate = deferred();
+  const journal = [];
+  let revoked = false;
+  let inFlightChecks = 0;
+  const adapter = {
+    createObjectURL() { return 'blob:chrome-extension://test/hanging-cleanup'; },
+    revokeObjectURL() {},
+    async download() { return 78; },
+    async waitForDownload(downloadId) {
+      revoked = true;
+      return { id: downloadId, state: 'complete' };
+    },
+    cancelDownload() { return cancelGate.promise; },
+    removeDownloadFile() { return removeGate.promise; },
+  };
+
+  const operation = downloadArtifacts({ baseName: 'audit', html: '<!doctype html>' }, adapter, {
+    timeoutMs: 10,
+    hashBytes: FAST_SHA256,
+    async assertCanDownload({ stage }) {
+      if (stage === 'in-flight') inFlightChecks += 1;
+      if (stage === 'terminal' && revoked) {
+        throw Object.assign(new Error('review won'), { code: 'AUDIT_REVISION_CONFLICT' });
+      }
+    },
+    async recordDeliveryState(entry) { journal.push(entry); },
+  }).then(
+    value => ({ status: 'resolved', value }),
+    error => ({ status: 'rejected', error }),
+  );
+  const outcome = await Promise.race([
+    operation,
+    new Promise(resolve => setTimeout(() => resolve({ status: 'still-pending' }), 70)),
+  ]);
+  cancelGate.resolve();
+  removeGate.resolve();
+  await operation;
+
+  assert.equal(outcome.status, 'rejected');
+  assert.equal(outcome.error?.code, 'AUDIT_DOWNLOAD_CLEANUP_PENDING');
+  assert.equal(outcome.error?.causeCode, 'AUDIT_REVISION_CONFLICT');
+  assert.ok(inFlightChecks <= 1, `monitor continuou ativo durante a limpeza: ${inFlightChecks}`);
+  assert.deepEqual(journal.at(-1), {
+    state: 'cleanup-failed', format: 'html', filename: 'audit.html', downloadId: 78,
+  });
+});
+
+test('reconciles stale IDs and pre-ID starts before a retry can deliver new artifacts', async () => {
+  const operations = [];
+  const resolved = [];
+  const adapter = {
+    async findDownloadsByFilename(filename) {
+      operations.push(['find', filename]);
+      return filename.endsWith('.json') ? [{ id: 12 }] : [];
+    },
+    async cancelDownload(downloadId) { operations.push(['cancel', downloadId]); },
+    async removeDownloadFile(downloadId) { operations.push(['remove', downloadId]); },
+  };
+  const deliveryBase = await bindDeliveryArtifactBaseName('audit', 'owner-old', 1);
+  const entries = [
+    {
+      ownerId: 'owner-old', exportAttempt: 1, state: 'in-flight',
+      format: 'html', filename: `${deliveryBase}.html`, downloadId: 11,
+    },
+    {
+      ownerId: 'owner-old', exportAttempt: 1, state: 'starting',
+      format: 'json', filename: `${deliveryBase}.json`,
+    },
+  ];
+
+  await reconcileStaleDownloads(entries, adapter, async entry => { resolved.push(entry); });
+
+  assert.deepEqual(operations, [
+    ['cancel', 11], ['remove', 11],
+    ['find', `${deliveryBase}.json`], ['cancel', 12], ['remove', 12],
+  ]);
+  assert.deepEqual(resolved, entries);
+});
+
+test('never deletes an ambiguous or absent pre-ID download by filename alone', async () => {
+  const base = await bindDeliveryArtifactBaseName('audit', 'owner-old', 1);
+  for (const found of [[], [10, 11]]) {
+    const removed = [];
+    const outcomes = [];
+    await assert.rejects(reconcileStaleDownloads([{
+      ownerId: 'owner-old', exportAttempt: 1, state: 'starting',
+      format: 'html', filename: `${base}.html`,
+    }], {
+      async findDownloadsByFilename() { return found; },
+      async cancelDownload() {},
+      async removeDownloadFile(id) { removed.push(id); },
+    }, async (_entry, outcome) => { outcomes.push(outcome); }), error =>
+      error?.code === 'AUDIT_DOWNLOAD_CLEANUP_PENDING');
+    assert.deepEqual(removed, []);
+    assert.deepEqual(outcomes, ['cleanup-failed']);
+  }
+});
+
+test('bounds hanging cleanup while reconciling a stale persisted download', { timeout: 500 }, async () => {
+  const cancelGate = deferred();
+  const removeGate = deferred();
+  const outcomes = [];
+  const base = await bindDeliveryArtifactBaseName('audit', 'owner-old', 1);
+  const operation = reconcileStaleDownloads([{
+    ownerId: 'owner-old', exportAttempt: 1, state: 'terminal',
+    format: 'html', filename: `${base}.html`, downloadId: 99,
+  }], {
+    cancelDownload() { return cancelGate.promise; },
+    removeDownloadFile() { return removeGate.promise; },
+  }, async (_entry, outcome) => { outcomes.push(outcome); }, { timeoutMs: 10 }).then(
+    value => ({ status: 'resolved', value }),
+    error => ({ status: 'rejected', error }),
+  );
+  const outcome = await Promise.race([
+    operation,
+    new Promise(resolve => setTimeout(() => resolve({ status: 'still-pending' }), 70)),
+  ]);
+  cancelGate.resolve();
+  removeGate.resolve();
+  await operation;
+
+  assert.equal(outcome.status, 'rejected');
+  assert.equal(outcome.error?.code, 'AUDIT_DOWNLOAD_CLEANUP_PENDING');
+  assert.deepEqual(outcomes, ['cleanup-failed']);
+});
+
+test('bounds a hanging pre-ID filename lookup and records cleanup-failed', { timeout: 500 }, async () => {
+  const findGate = deferred();
+  const outcomes = [];
+  const base = await bindDeliveryArtifactBaseName('audit', 'owner-old', 1);
+  const operation = reconcileStaleDownloads([{
+    ownerId: 'owner-old', exportAttempt: 1, state: 'starting',
+    format: 'html', filename: `${base}.html`,
+  }], {
+    findDownloadsByFilename() { return findGate.promise; },
+  }, async (_entry, outcome) => { outcomes.push(outcome); }, { timeoutMs: 10 }).then(
+    value => ({ status: 'resolved', value }),
+    error => ({ status: 'rejected', error }),
+  );
+  const outcome = await Promise.race([
+    operation,
+    new Promise(resolve => setTimeout(() => resolve({ status: 'still-pending' }), 70)),
+  ]);
+  findGate.resolve([]);
+  await operation;
+
+  assert.equal(outcome.status, 'rejected');
+  assert.equal(outcome.error?.code, 'AUDIT_DOWNLOAD_CLEANUP_PENDING');
+  assert.deepEqual(outcomes, ['cleanup-failed']);
+});
+
+test('bounds a hanging journal resolution after physical stale cleanup', { timeout: 500 }, async () => {
+  const resolutionGate = deferred();
+  const outcomes = [];
+  const base = await bindDeliveryArtifactBaseName('audit', 'owner-old', 1);
+  const operation = reconcileStaleDownloads([{
+    ownerId: 'owner-old', exportAttempt: 1, state: 'terminal',
+    format: 'html', filename: `${base}.html`, downloadId: 101,
+  }], {
+    async cancelDownload() {},
+    async removeDownloadFile() {},
+  }, async (_entry, outcome) => {
+    outcomes.push(outcome);
+    return resolutionGate.promise;
+  }, { timeoutMs: 10 }).then(
+    value => ({ status: 'resolved', value }),
+    error => ({ status: 'rejected', error }),
+  );
+  const outcome = await Promise.race([
+    operation,
+    new Promise(resolve => setTimeout(() => resolve({ status: 'still-pending' }), 70)),
+  ]);
+  resolutionGate.resolve();
+  await operation;
+
+  assert.equal(outcome.status, 'rejected');
+  assert.equal(outcome.error?.code, 'AUDIT_DOWNLOAD_CLEANUP_PENDING');
+  assert.deepEqual(outcomes, ['cleaned', 'cleanup-failed']);
+});
+
+test('polls delivery ownership and cancels while the terminal observer is still pending', async () => {
+  const waitStarted = deferred();
+  const terminal = deferred();
+  const cancelled = [];
+  const removed = [];
+  let revoked = false;
+  const adapter = {
+    createObjectURL() { return 'blob:chrome-extension://test/html-pending'; },
+    revokeObjectURL() {},
+    async download() { return 9; },
+    waitForDownload() {
+      waitStarted.resolve();
+      return terminal.promise;
+    },
+    async cancelDownload(id) { cancelled.push(id); },
+    async removeDownloadFile(id) { removed.push(id); },
+  };
+  const result = downloadArtifacts({ baseName: 'audit', html: '<!doctype html>' }, adapter, {
+    timeoutMs: 40,
+    hashBytes: FAST_SHA256,
+    async assertCanDownload({ stage }) {
+      if (stage === 'in-flight' && revoked) {
+        throw Object.assign(new Error('lease revoked while waiting'), { code: 'AUDIT_EXPORT_LEASE_CONFLICT' });
+      }
+    },
+  });
+  await waitStarted.promise;
+  revoked = true;
+  await assert.rejects(result, error => error?.code === 'AUDIT_EXPORT_LEASE_CONFLICT');
+  terminal.resolve({ id: 9, state: 'complete' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(cancelled, [9]);
+  assert.deepEqual(removed, [9]);
 });
 
 test('contains interrupted and timed-out downloads, revokes URLs, and continues other formats', async () => {
@@ -203,6 +567,34 @@ test('cancels a download ID that resolves only after its start timeout and has a
   assert.equal(result.formats[0].failureCode, 'DOWNLOAD_START_TIMEOUT');
 });
 
+test('keeps the pre-ID journal entry until a late start is physically removed', async () => {
+  const late = deferred();
+  const states = [];
+  const removed = [];
+  const adapter = {
+    createObjectURL() { return 'blob:chrome-extension://test/late-journal'; },
+    revokeObjectURL() {},
+    download() { return late.promise; },
+    async cancelDownload() {},
+    async removeDownloadFile(id) { removed.push(id); },
+    async waitForDownload(id) { return { id, state: 'complete' }; },
+  };
+  const result = await downloadArtifacts({ baseName: 'audit', html: '<!doctype html>' }, adapter, {
+    timeoutMs: 5,
+    hashBytes: FAST_SHA256,
+    async recordDeliveryState(entry) { states.push(entry); },
+  });
+  assert.equal(result.formats[0].failureCode, 'DOWNLOAD_START_TIMEOUT');
+  assert.deepEqual(states, [{ state: 'starting', format: 'html', filename: 'audit.html' }]);
+
+  late.resolve(88);
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.deepEqual(removed, [88]);
+  assert.deepEqual(states.at(-1), {
+    state: 'cleaned', format: 'html', filename: 'audit.html', downloadId: 88,
+  });
+});
+
 test('does not pass an invalid late start result to the cancellation adapter', async () => {
   let resolveStart;
   let calls = 0;
@@ -222,9 +614,8 @@ test('does not pass an invalid late start result to the cancellation adapter', a
     baseName: 'audit', html: '<!doctype html>', json: '{}', csv: '\uFEFF"id"\r\n',
     pdf: new TextEncoder().encode('%PDF-1.7'),
   }, adapter, { timeoutMs: 5, hashBytes: FAST_SHA256 });
-  await new Promise(resolve => setTimeout(resolve, 10));
-  resolveStart({ private: 'PRIVATE_SENTINEL' });
   const result = await resultPromise;
+  resolveStart({ private: 'PRIVATE_SENTINEL' });
   await new Promise(resolve => setImmediate(resolve));
 
   assert.deepEqual(cancelled, []);

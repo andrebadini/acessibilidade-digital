@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
-import { createAuditModel } from '../../src/core/report/audit-model.js';
 import {
   OCCURRENCE_CSV_COLUMNS,
   OCCURRENCE_CSV_VERSION,
@@ -20,25 +19,33 @@ const HEADERS = [
   'canonical_model_hash', 'evidence_manifest_hash',
 ];
 const DETAIL_MARKER = '[detalhe disponível somente no HTML/JSON]';
+const VERIFIED_OPTIONS = Object.freeze({
+  now: () => '2026-08-26T16:00:00.000Z',
+  timezone: 'America/Cuiaba',
+  manifestVersion: '0.1.0',
+  rulesVersion: '1.0.0',
+  browserVersion: 'Chrome/147.0.0.0',
+});
 
-test('serializes a deterministic RFC 4180 occurrence table with fixed versioned columns', () => {
-  const csv = renderOccurrenceCsv(SAMPLE_AUDIT);
+test('serializes a deterministic RFC 4180 occurrence table with fixed versioned columns', async () => {
+  const verified = await verifiedAudit(SAMPLE_AUDIT);
+  const csv = renderOccurrenceCsv(verified);
   const records = parseQuotedCsv(csv);
 
   assert.equal(OCCURRENCE_CSV_VERSION, 'audita-occurrences-v1');
   assert.deepEqual(OCCURRENCE_CSV_COLUMNS, HEADERS);
-  assert.equal(renderOccurrenceCsv(SAMPLE_AUDIT), csv);
+  assert.equal(renderOccurrenceCsv(verified), csv);
   assert.deepEqual([...new TextEncoder().encode(csv).subarray(0, 3)], [0xef, 0xbb, 0xbf]);
-  assert.equal(records.length, SAMPLE_AUDIT.occurrences.length + 1);
+  assert.equal(records.length, verified.occurrences.length + 1);
   assert.deepEqual(records[0], HEADERS);
-  assert.deepEqual(records.slice(1).map(row => row[2]), SAMPLE_AUDIT.occurrences.map(value => value.occurrenceId));
+  assert.deepEqual(records.slice(1).map(row => row[2]), verified.occurrences.map(value => value.occurrenceId));
   assert.deepEqual(asRecord(records[1]), {
     csv_schema_version: 'audita-occurrences-v1',
     audit_id: 'audit-sample-20260826',
     occurrence_id: 'occ-focus-failed',
     page_id: 'page-1',
     page_url: 'https://servico.exemplo.test',
-    observed_at: '2026-08-26T14:02:01.000Z',
+    observed_at: '2026-08-26T16:00:00.000Z',
     outcome: 'failed',
     classification: 'requirement',
     impact: 'moderate',
@@ -57,24 +64,24 @@ test('serializes a deterministic RFC 4180 occurrence table with fixed versioned 
     accessible_preview_source: DETAIL_MARKER,
     evidence_refs: 'ev-full;ev-control',
     consumer_basis_ref: 'br.consumer.accessibility.fixed.v1',
-    evidence_hashes: '',
-    canonical_model_hash: '',
-    evidence_manifest_hash: '',
+    evidence_hashes: `ev-full=${verified.evidence[0].hash};ev-control=${verified.evidence[1].hash}`,
+    canonical_model_hash: verified.integrity.canonicalModelHash,
+    evidence_manifest_hash: verified.integrity.evidenceManifestHash,
   });
   assert.ok(csv.endsWith('\r\n'));
   assert.equal(csv.replace(/\r\n/gu, '').includes('\n'), false);
 });
 
-test('preserves canonical structural IDs for cross-artifact correlation', () => {
+test('preserves canonical structural IDs for cross-artifact correlation', async () => {
   const input = structuredClone(SAMPLE_AUDIT);
   input.occurrences[0].occurrenceId = 'occ-PRIVATE-record';
 
-  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(await verifiedAudit(input)))[1]);
 
   assert.equal(first.occurrence_id, 'occ-PRIVATE-record');
 });
 
-test('projects every rich page-derived field to one fixed marker without mutating the model', () => {
+test('projects every rich page-derived field to one fixed marker without mutating the model', async () => {
   const input = structuredClone(SAMPLE_AUDIT);
   const nested = Array.from({ length: 5 }).reduce(value => globalThis.btoa(value), '<script>PRIVATE_NESTED()</script>');
   const png = 'Qk1G AAAAAAAA ADYAAAAo AAAA AQAAAAEA AAABABgA AAAQAAAA CwAA AAsA AAAAAAAAAAAAAAAA';
@@ -86,7 +93,7 @@ test('projects every rich page-derived field to one fixed marker without mutatin
     `${globalThis.btoa('\xffPRIVATEzz')}\u2028\u2029`;
   const original = structuredClone(input);
 
-  const csv = renderOccurrenceCsv(input);
+  const csv = renderOccurrenceCsv(await verifiedAudit(input));
   const first = asRecord(parseQuotedCsv(csv)[1]);
 
   assert.deepEqual(input, original);
@@ -99,7 +106,7 @@ test('projects every rich page-derived field to one fixed marker without mutatin
   assert.doesNotMatch(csv, /PRIVATE|NESTED|Alice|ZGF0|Ymxv|UFJJ|Qk1G|<script|<strong|<customer|\u2028|\u2029/iu);
 });
 
-test('omits raw HTML, resource URLs, encoded pixels and credential prose in every rich projection', () => {
+test('omits raw HTML, resource URLs, encoded pixels and credential prose in every rich projection', async () => {
   const payloads = [
     '<script data-customer="Alice">PRIVATE</script>',
     'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB',
@@ -119,7 +126,7 @@ test('omits raw HTML, resource URLs, encoded pixels and credential prose in ever
     input.occurrences[0].accessiblePreview = payload;
     input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource = payload;
 
-    const csv = renderOccurrenceCsv(input);
+    const csv = renderOccurrenceCsv(await verifiedAudit(input));
     const first = asRecord(parseQuotedCsv(csv)[1]);
 
     assert.equal(first.selector, DETAIL_MARKER);
@@ -132,21 +139,22 @@ test('omits raw HTML, resource URLs, encoded pixels and credential prose in ever
   }
 });
 
-test('exports only an HTTP(S) origin and removes credentials, path, query and fragment', () => {
+test('exports only an HTTP(S) origin and removes credentials, path, query and fragment', async () => {
   const input = structuredClone(SAMPLE_AUDIT);
   input.pages[0].finalUrl = 'https://user:pass@servico.exemplo.test:8443/private?token=PRIVATE#secret';
 
-  const pageUrl = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]).page_url;
+  const verified = await verifiedAudit(input);
+  const pageUrl = asRecord(parseQuotedCsv(renderOccurrenceCsv(verified))[1]).page_url;
 
   assert.equal(pageUrl, 'https://servico.exemplo.test:8443');
-  assert.doesNotMatch(renderOccurrenceCsv(input), /user|pass|private|token|secret/iu);
+  assert.doesNotMatch(renderOccurrenceCsv(verified), /user|pass|private|token|secret/iu);
 });
 
-test('uses only local catalog titles and fixed outcome descriptions', () => {
+test('uses only local catalog titles and fixed outcome descriptions', async () => {
   const input = structuredClone(SAMPLE_AUDIT);
   input.occurrences[0].justification = 'PRIVATE customer prose';
 
-  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(await verifiedAudit(input)))[1]);
 
   assert.equal(first.title, 'Indicador de foco visível');
   assert.equal(first.description,
@@ -154,19 +162,17 @@ test('uses only local catalog titles and fixed outcome descriptions', () => {
   assert.doesNotMatch(JSON.stringify(first), /customer prose/iu);
 });
 
-test('derives engine and version from the trusted local rule instead of occurrence-controlled text', () => {
-  const input = structuredClone(SAMPLE_AUDIT);
-  input.occurrences[0].source.engine = 'PRIVATE_OCCURRENCE_ENGINE';
-  input.occurrences[0].source.version = 'PRIVATE_OCCURRENCE_VERSION';
-
-  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
-
-  assert.equal(first.source_engine, 'audita-core');
-  assert.equal(first.source_version, '1.0.0');
-  assert.doesNotMatch(renderOccurrenceCsv(input), /PRIVATE_OCCURRENCE_(?:ENGINE|VERSION)/u);
+test('derives CSV provenance exclusively from the same registry accepted by canonical JSON', async () => {
+  const verified = await verifiedAudit(SAMPLE_AUDIT);
+  const rows = parseQuotedCsv(renderOccurrenceCsv(verified)).slice(1).map(asRecord);
+  verified.occurrences.forEach((occurrence, index) => {
+    assert.equal(rows[index].source_engine, occurrence.source.engine);
+    assert.equal(rows[index].source_version, occurrence.source.version);
+    assert.equal(rows[index].source_rule_id, occurrence.source.ruleId);
+  });
 });
 
-test('fails the whole CSV projection instead of silently emptying a list above 256 evidence references', () => {
+test('fails the whole CSV projection instead of silently emptying a list above 256 evidence references', async () => {
   const input = structuredClone(SAMPLE_AUDIT);
   const source = input.evidence.find(entry => entry.evidenceId === 'ev-full');
   const extra = Array.from({ length: 255 }, (_, index) => ({
@@ -181,13 +187,14 @@ test('fails the whole CSV projection instead of silently emptying a list above 2
   input.occurrences[0].evidenceIds = [...input.occurrences[0].evidenceRefs];
 
   assert.equal(input.occurrences[0].evidenceRefs.length, 257);
+  const verified = await verifiedAudit(input);
   assert.throws(
-    () => renderOccurrenceCsv(input),
+    () => renderOccurrenceCsv(verified),
     error => error instanceof RangeError && /CSV|lista|256|evid/iu.test(error.message),
   );
 });
 
-test('fails a 256-item reference list that would otherwise be truncated inside a CSV cell', () => {
+test('fails a 256-item reference list that would otherwise be truncated inside a CSV cell', async () => {
   const input = structuredClone(SAMPLE_AUDIT);
   const source = input.evidence.find(entry => entry.evidenceId === 'ev-full');
   const extra = Array.from({ length: 254 }, (_, index) => ({
@@ -202,13 +209,47 @@ test('fails a 256-item reference list that would otherwise be truncated inside a
   input.occurrences[0].evidenceIds = [...input.occurrences[0].evidenceRefs];
 
   assert.equal(input.occurrences[0].evidenceRefs.length, 256);
+  const verified = await verifiedAudit(input);
   assert.throws(
-    () => renderOccurrenceCsv(input),
+    () => renderOccurrenceCsv(verified),
     error => error instanceof RangeError && /CSV|lista|célula|perda|trunc/iu.test(error.message),
   );
 });
 
-test('does not expose invalid or non-attested hash-shaped values', () => {
+test('never truncates a complete correlation list to add spreadsheet neutralization', async () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const ids = Array.from({ length: 256 }, (_, index) => {
+    const prefix = index === 0 ? `-ev-${index}-` : `ev-${index}-`;
+    const length = index === 0 ? 60 : 59;
+    return `${prefix}${'x'.repeat(length - prefix.length)}`;
+  });
+  assert.equal(ids.reduce((sum, id) => sum + id.length, 0), 15_105);
+
+  const fullPageSource = structuredClone(input.evidence[0]);
+  input.evidence[0].evidenceId = ids[0];
+  input.evidence[1].evidenceId = ids[1];
+  input.evidence[1].fullPageEvidenceId = ids[0];
+  input.evidence.push(...ids.slice(2).map(evidenceId => ({
+    ...structuredClone(fullPageSource),
+    evidenceId,
+  })));
+  for (const occurrence of input.occurrences) {
+    occurrence.evidenceRefs = occurrence.evidenceRefs.map(id => id === 'ev-full' ? ids[0] : ids[1]);
+    occurrence.evidenceIds = [...occurrence.evidenceRefs];
+  }
+  input.occurrences[0].evidenceRefs.push(...ids.slice(2));
+  input.occurrences[0].evidenceIds = [...input.occurrences[0].evidenceRefs];
+
+  const verified = await verifiedAudit(input);
+  const projectedHashLength = ids.reduce((sum, id) => sum + id.length + 1 + 64, 0) + ids.length - 1;
+  assert.equal(projectedHashLength, 32_000);
+  assert.throws(
+    () => renderOccurrenceCsv(verified),
+    error => error instanceof RangeError && /CSV|lista|célula|perda|neutraliza|trunc/iu.test(error.message),
+  );
+});
+
+test('recomputes attacker-supplied hash-shaped values before any CSV projection', async () => {
   const input = structuredClone(SAMPLE_AUDIT);
   for (const artifact of input.evidence) artifact.hash = 'a'.repeat(64);
   input.integrity = {
@@ -216,21 +257,17 @@ test('does not expose invalid or non-attested hash-shaped values', () => {
     canonicalModelHash: 'b'.repeat(64),
     evidenceManifestHash: 'c'.repeat(64),
   };
-  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(input))[1]);
+  const verified = await verifiedAudit(input);
+  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(verified))[1]);
 
-  assert.equal(first.evidence_hashes, '');
-  assert.equal(first.canonical_model_hash, '');
-  assert.equal(first.evidence_manifest_hash, '');
+  assert.notEqual(verified.evidence[0].hash, 'a'.repeat(64));
+  assert.match(first.evidence_hashes, /^ev-full=[a-f0-9]{64};ev-control=[a-f0-9]{64}$/u);
+  assert.equal(first.canonical_model_hash, verified.integrity.canonicalModelHash);
+  assert.equal(first.evidence_manifest_hash, verified.integrity.evidenceManifestHash);
 });
 
 test('emits correlated hashes only from an integrity-verified immutable snapshot', async () => {
-  const verified = await enrichAuditForReport(SAMPLE_AUDIT, {
-    now: () => '2026-08-26T16:00:00.000Z',
-    timezone: 'America/Cuiaba',
-    manifestVersion: '0.1.0',
-    rulesVersion: '1.0.0',
-    browserVersion: 'Chrome/147.0.0.0',
-  });
+  const verified = await verifiedAudit(SAMPLE_AUDIT);
 
   const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(verified))[1]);
 
@@ -240,7 +277,7 @@ test('emits correlated hashes only from an integrity-verified immutable snapshot
   assert.equal(first.evidence_manifest_hash, verified.integrity.evidenceManifestHash);
 });
 
-test('neutralizes the spreadsheet surface by projecting hostile prefixes out of every rich cell', () => {
+test('neutralizes the spreadsheet surface by projecting hostile prefixes out of every rich cell', async () => {
   const prefixes = ['=SUM(1,1)', '+cmd', '-2+3', '@formula', '\tprivate', '\rprivate'];
   const input = structuredClone(SAMPLE_AUDIT);
   input.occurrences = prefixes.map((value, index) => ({
@@ -253,7 +290,7 @@ test('neutralizes the spreadsheet surface by projecting hostile prefixes out of 
   input.reviewDecisions = [];
   const original = structuredClone(input);
 
-  const rows = parseQuotedCsv(renderOccurrenceCsv(input)).slice(1).map(asRecord);
+  const rows = parseQuotedCsv(renderOccurrenceCsv(await verifiedAudit(input))).slice(1).map(asRecord);
 
   assert.deepEqual(input, original);
   for (const row of rows) {
@@ -262,7 +299,7 @@ test('neutralizes the spreadsheet surface by projecting hostile prefixes out of 
   }
 });
 
-test('resolves each occurrence URL and timestamp by pageId', () => {
+test('resolves each occurrence URL and timestamp by pageId', async () => {
   const input = structuredClone(SAMPLE_AUDIT);
   input.requestedScope = {
     mode: 'batch',
@@ -287,20 +324,20 @@ test('resolves each occurrence URL and timestamp by pageId', () => {
     evidenceRefs: [],
     evidenceIds: [],
   });
-  const canonical = createAuditModel(input);
+  const canonical = await verifiedAudit(input);
 
   const pageTwo = parseQuotedCsv(renderOccurrenceCsv(canonical)).slice(1).map(asRecord)
     .find(row => row.occurrence_id === 'occ-page-2');
 
   assert.equal(pageTwo.page_url, 'https://segunda.example.test');
-  assert.equal(pageTwo.observed_at, '2026-08-26T14:03:02.000Z');
+  assert.equal(pageTwo.observed_at, '2026-08-26T16:00:00.000Z');
 });
 
-test('fails closed on unknown page and cross-page evidence references', () => {
+test('fails closed on unknown page and cross-page evidence references', async () => {
   const input = structuredClone(SAMPLE_AUDIT);
   const unknown = structuredClone(input);
   unknown.occurrences[0].pageId = 'page-missing';
-  assert.throws(() => renderOccurrenceCsv(unknown), TypeError);
+  await assert.rejects(() => verifiedAudit(unknown), TypeError);
 
   const crossPage = structuredClone(input);
   crossPage.pages.push({
@@ -309,28 +346,28 @@ test('fails closed on unknown page and cross-page evidence references', () => {
   });
   crossPage.requestedScope = { mode: 'batch', urls: [...crossPage.requestedScope.urls, crossPage.pages[1].requestedUrl] };
   crossPage.occurrences[0].pageId = 'page-2';
-  assert.throws(() => renderOccurrenceCsv(crossPage), TypeError);
+  await assert.rejects(() => verifiedAudit(crossPage), TypeError);
 });
 
-test('exports header only for zero occurrences and preserves 512-occurrence canonical order', () => {
+test('exports header only for zero occurrences and preserves 512-occurrence canonical order', async () => {
   const empty = structuredClone(SAMPLE_AUDIT);
   empty.occurrences = [];
   empty.manualReview = [];
   empty.reviewDecisions = [];
-  assert.deepEqual(parseQuotedCsv(renderOccurrenceCsv(empty)), [HEADERS]);
+  assert.deepEqual(parseQuotedCsv(renderOccurrenceCsv(await verifiedAudit(empty))), [HEADERS]);
 
   const large = structuredClone(empty);
   large.occurrences = Array.from({ length: 512 }, (_, index) => ({
     ...structuredClone(SAMPLE_AUDIT.occurrences[0]),
     occurrenceId: `occ-realistic-${String(index).padStart(4, '0')}`,
   }));
-  const records = parseQuotedCsv(renderOccurrenceCsv(large));
+  const records = parseQuotedCsv(renderOccurrenceCsv(await verifiedAudit(large)));
   assert.equal(records.length, 513);
   assert.equal(records[1][2], 'occ-realistic-0000');
   assert.equal(records.at(-1)[2], 'occ-realistic-0511');
 });
 
-test('processes repeated long benign prose in bounded time without decoding or budget exhaustion', () => {
+test('processes repeated long benign prose in bounded time without decoding or budget exhaustion', async () => {
   const input = structuredClone(SAMPLE_AUDIT);
   const prose = 'A data: da reunião será amanhã; use x < y para comparar. '.repeat(20_000);
   input.occurrences = Array.from({ length: 32 }, (_, index) => ({
@@ -342,8 +379,9 @@ test('processes repeated long benign prose in bounded time without decoding or b
   input.manualReview = [];
   input.reviewDecisions = [];
 
+  const verified = await verifiedAudit(input);
   const startedAt = performance.now();
-  const records = parseQuotedCsv(renderOccurrenceCsv(input));
+  const records = parseQuotedCsv(renderOccurrenceCsv(verified));
 
   assert.equal(records.length, 33);
   assert.ok(performance.now() - startedAt < 5_000);
@@ -359,7 +397,7 @@ test('fails closed on accessors and hostile proxies with a fixed non-sensitive e
   });
   assert.throws(
     () => renderOccurrenceCsv(accessor),
-    error => error instanceof TypeError && error.message === 'Modelo CSV inválido ou contém propriedade insegura.',
+    error => error instanceof TypeError && error.message === 'O CSV exige snapshot canônico com integridade verificada.',
   );
   assert.equal(accessed, false);
 
@@ -376,8 +414,88 @@ test('fails closed on accessors and hostile proxies with a fixed non-sensitive e
   assert.throws(() => renderOccurrenceCsv(revocable.proxy), TypeError);
 });
 
+test('requires a privately integrity-verified snapshot before inspecting any top-level or nested proxy', async () => {
+  let traps = 0;
+  const trap = () => {
+    traps += 1;
+    throw new Error('PRIVATE_PROXY_TRAP');
+  };
+  const topLevel = new Proxy(structuredClone(SAMPLE_AUDIT), {
+    get: trap,
+    getOwnPropertyDescriptor: trap,
+    getPrototypeOf: trap,
+    ownKeys: trap,
+  });
+  assert.throws(
+    () => renderOccurrenceCsv(topLevel),
+    error => error instanceof TypeError && !error.message.includes('PRIVATE_PROXY_TRAP'),
+  );
+  assert.equal(traps, 0);
+
+  const nested = structuredClone(SAMPLE_AUDIT);
+  nested.occurrences[0] = new Proxy(nested.occurrences[0], {
+    get: trap,
+    getOwnPropertyDescriptor: trap,
+    getPrototypeOf: trap,
+    ownKeys: trap,
+  });
+  assert.throws(
+    () => renderOccurrenceCsv(nested),
+    error => error instanceof TypeError && !error.message.includes('PRIVATE_PROXY_TRAP'),
+  );
+  assert.equal(traps, 0);
+
+  assert.throws(() => renderOccurrenceCsv(structuredClone(SAMPLE_AUDIT)), /integridade|verificad|snapshot|CSV/i);
+  const verified = await verifiedAudit(SAMPLE_AUDIT);
+  assert.match(renderOccurrenceCsv(verified), /^\uFEFF"csv_schema_version"/u);
+});
+
+test('preserves every canonical leading ID character without losing correlations', async () => {
+  for (const prefix of ['-', '_', '.', ':']) {
+    const input = structuredClone(SAMPLE_AUDIT);
+    const auditId = `${prefix}audit-id`;
+    const pageId = `${prefix}page-id`;
+    const occurrenceId = `${prefix}occurrence-id`;
+    const evidenceIds = [`${prefix}evidence-full`, `${prefix}evidence-control`];
+    input.auditId = auditId;
+    input.pages[0].pageId = pageId;
+    input.progress = input.progress.map(entry => ({ ...entry, auditId, sessionId: auditId }));
+    input.occurrences[0].occurrenceId = occurrenceId;
+    input.occurrences[0].pageId = pageId;
+    input.occurrences[0].evidenceRefs = evidenceIds;
+    input.occurrences[0].evidenceIds = evidenceIds;
+    input.evidence[0].evidenceId = evidenceIds[0];
+    input.evidence[0].pageId = pageId;
+    input.evidence[1].evidenceId = evidenceIds[1];
+    input.evidence[1].pageId = pageId;
+    input.evidence[1].fullPageEvidenceId = evidenceIds[0];
+    for (const occurrence of input.occurrences.slice(1)) {
+      occurrence.pageId = pageId;
+      occurrence.evidenceRefs = occurrence.evidenceRefs.map(id => id === 'ev-full' ? evidenceIds[0] : evidenceIds[1]);
+      occurrence.evidenceIds = [...occurrence.evidenceRefs];
+    }
+    for (const entry of input.manualReview) {
+      if (entry.occurrenceId === 'occ-focus-review') entry.occurrenceId = input.occurrences[1].occurrenceId;
+      if (entry.occurrenceId === 'occ-cross-page') entry.occurrenceId = input.occurrences[2].occurrenceId;
+    }
+
+    const verified = await verifiedAudit(input);
+    const row = asRecord(parseQuotedCsv(renderOccurrenceCsv(verified))[1]);
+    const formulaPrefix = prefix === '-' ? "'" : '';
+    assert.equal(row.audit_id, `${formulaPrefix}${auditId}`);
+    assert.equal(row.page_id, `${formulaPrefix}${pageId}`);
+    assert.equal(row.occurrence_id, `${formulaPrefix}${occurrenceId}`);
+    assert.equal(row.evidence_refs, `${formulaPrefix}${evidenceIds.join(';')}`);
+    assert.match(row.evidence_hashes, new RegExp(`^${formulaPrefix ? "'" : ''}${escapeRegExp(evidenceIds[0])}=[a-f0-9]{64};${escapeRegExp(evidenceIds[1])}=[a-f0-9]{64}$`, 'u'));
+  }
+});
+
 function asRecord(row) {
   return Object.fromEntries(HEADERS.map((header, index) => [header, row[index]]));
+}
+
+function verifiedAudit(input) {
+  return enrichAuditForReport(input, VERIFIED_OPTIONS);
 }
 
 function parseQuotedCsv(csv) {
@@ -415,4 +533,8 @@ function parseQuotedCsv(csv) {
   }
   assert.deepEqual(row, []);
   return records;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }

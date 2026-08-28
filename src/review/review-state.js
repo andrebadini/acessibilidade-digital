@@ -1,5 +1,7 @@
 import { applyReviewDecisions, createReviewDecision } from '../core/review/decisions.js';
 
+const REVIEW_COMMIT_REVISIONS = new WeakMap();
+
 export function normalizeReviewAuditId(value) {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/u.test(value) ? value : null;
 }
@@ -45,8 +47,27 @@ export function recordReviewDecision(auditModel, input) {
 
 export async function commitReviewDecision(auditModel, input, store) {
   if (!store || typeof store.setAudit !== 'function') throw new TypeError('Store de auditoria inválido.');
+  if (typeof store.getAuditSnapshot === 'function' && typeof store.commitAuditReviewIfRevision === 'function') {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const snapshot = await store.getAuditSnapshot(auditModel?.auditId);
+      if (!snapshot?.model || snapshot.model.auditId !== auditModel?.auditId || !snapshot.capability) {
+        throw new TypeError('Snapshot atual da auditoria inválido para revisão.');
+      }
+      const nextModel = recordReviewDecision(snapshot.model, input);
+      try {
+        const committed = await store.commitAuditReviewIfRevision(nextModel.auditId, nextModel, snapshot.capability);
+        rememberReviewRevision(nextModel, committed);
+        return nextModel;
+      } catch (error) {
+        if (error?.code === 'AUDIT_REVISION_CONFLICT') continue;
+        throw error;
+      }
+    }
+    throw new Error('A auditoria mudou repetidamente durante a revisão; tente salvar a decisão novamente.');
+  }
   const nextModel = recordReviewDecision(auditModel, input);
-  await store.setAudit(nextModel.auditId, nextModel);
+  const committed = await store.setAudit(nextModel.auditId, nextModel);
+  rememberReviewRevision(nextModel, committed);
   return nextModel;
 }
 
@@ -75,7 +96,11 @@ export function createReviewDecisionCommitter() {
     try {
       try { onPendingChange?.(true); } catch { /* UI notification must not affect persistence. */ }
       const model = await operation;
-      return { status: 'committed', model };
+      const exportRevision = REVIEW_COMMIT_REVISIONS.get(model);
+      return {
+        status: 'committed', model,
+        ...(Number.isSafeInteger(exportRevision) && exportRevision >= 0 ? { exportRevision } : {}),
+      };
     } catch (error) {
       for (const control of cardControls) control.disabled = false;
       try { onPendingChange?.(false); } catch { /* UI notification must not mask the storage error. */ }
@@ -86,4 +111,10 @@ export function createReviewDecisionCommitter() {
       if (queue.tail === tail) queue.tail = null;
     }
   };
+}
+
+function rememberReviewRevision(model, committed) {
+  if (model && typeof model === 'object' && Number.isSafeInteger(committed?.revision) && committed.revision >= 0) {
+    REVIEW_COMMIT_REVISIONS.set(model, committed.revision);
+  }
 }

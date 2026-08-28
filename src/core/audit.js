@@ -10,6 +10,7 @@ import { STRUCTURE_RULES } from './rules/structure.js';
 import { VISUAL_RULES } from './rules/visual.js';
 import { assertSnapshotV1 } from './snapshot-schema.js';
 import { validateNormalizedAxeSupplemental } from './axe/validate-supplemental.js';
+import { AUDITA_RULES_VERSION, registeredRuleSource } from './provenance.js';
 
 const RULE_FAMILIES = Object.freeze([
   STRUCTURE_RULES,
@@ -80,7 +81,11 @@ export async function runCoreAudit(snapshot, context = {}, rules = CORE_RULES) {
     throw new TypeError(`Invalid core composition: ${compositionErrors.join('; ')}`);
   }
   assertSnapshotV1(snapshot);
-  const ruleResults = await runRules(snapshot, context, rules);
+  const evaluated = await runRules(snapshot, context, rules);
+  const ruleResults = Object.freeze(evaluated.map(result => Object.freeze({
+    ...result,
+    source: registeredRuleSource(result, AUDITA_RULES_VERSION),
+  })));
   const itemResults = aggregateItems(ruleResults, NBR17225_ITEMS);
   return Object.freeze({
     schemaVersion: 1,

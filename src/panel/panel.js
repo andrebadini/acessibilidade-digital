@@ -1,5 +1,11 @@
 import { normalizeAuditUrl } from '../core/url.js';
-import { createSubmissionGate, isMessageForAudit, isSafeReportUrl, reducePanelState } from './panel-state.js';
+import {
+  createSubmissionGate,
+  isMessageForAudit,
+  isSafeReportUrl,
+  reducePanelState,
+  restoreExportEventState,
+} from './panel-state.js';
 
 const form = document.querySelector('#audit-form');
 const input = document.querySelector('#audit-url');
@@ -105,6 +111,7 @@ function restoreLatest() {
         message: saved.message || 'Auditoria em andamento.',
         reviewUrl: isSafeReportUrl(saved.reviewUrl, chrome.runtime.getURL('/')) ? saved.reviewUrl : null,
         exportStatus: saved.exportStatus || 'unavailable',
+        ...restoreExportEventState(saved),
       };
       setStatus(panelState.message);
       if (['running', 'idle'].includes(panelState.status)) {

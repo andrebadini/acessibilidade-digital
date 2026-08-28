@@ -1,4 +1,5 @@
 import { createReviewDecision } from '../core/review/decisions.js';
+import { applyExportEvent, restoreExportEventState } from '../panel/panel-state.js';
 import { createAuditStore } from '../storage/audit-store.js';
 import { createReviewDecisionCommitter, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId } from './review-state.js';
 
@@ -7,26 +8,53 @@ const list = document.querySelector('#review-list');
 const status = document.querySelector('#review-status');
 const evaluator = document.querySelector('#review-evaluator');
 const regenerate = document.querySelector('#regenerate-report');
+const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
 const store = createAuditStore();
 const commitDecision = createReviewDecisionCommitter();
 let auditModel;
+let exportEventState = {};
 
 regenerate.addEventListener('click', () => {
   if (!auditModel?.auditId) return;
   regenerate.disabled = true;
-  status.textContent = 'Relatório atualizado na fila de geração.';
+  status.textContent = 'Solicitando a geração do relatório.';
   chrome.runtime.sendMessage({ type: 'REQUEST_EXPORT', auditId: auditModel.auditId }, response => {
     regenerate.disabled = false;
     if (chrome.runtime.lastError || !response?.ok) status.textContent = response?.error || 'Não foi possível gerar o relatório atualizado.';
-    else status.textContent = response.duplicate ? 'A geração do relatório já está em andamento.' : 'Relatório atualizado na fila de geração.';
+    else {
+      const next = applyExportEvent(exportEventState, response, 'queued');
+      if (next === exportEventState) return;
+      exportEventState = next;
+      status.textContent = 'Relatório atualizado na fila de geração.';
+    }
   });
 });
 
 chrome.runtime.onMessage.addListener(message => {
   if (!auditModel || message?.auditId !== auditModel.auditId) return;
-  if (message.type === 'EXPORT_PROGRESS') status.textContent = message.message || 'Gerando os arquivos do relatório.';
-  if (message.type === 'EXPORT_COMPLETE') status.textContent = message.status === 'partial' ? 'Relatório gerado com limitações.' : 'Arquivos do relatório gerados.';
-  if (message.type === 'EXPORT_FAILED') status.textContent = message.error || 'Não foi possível gerar os arquivos do relatório.';
+  let nextStatus = null;
+  let text = null;
+  if (message.type === 'EXPORT_PROGRESS') {
+    nextStatus = 'running';
+    text = message.message || 'Gerando os arquivos do relatório.';
+  }
+  if (message.type === 'EXPORT_COMPLETE') {
+    nextStatus = message.status === 'partial' ? 'partial' : 'complete';
+    text = nextStatus === 'partial' ? 'Relatório gerado com limitações.' : 'Arquivos do relatório gerados.';
+  }
+  if (message.type === 'EXPORT_FAILED') {
+    nextStatus = 'failed';
+    text = message.error || 'Não foi possível gerar os arquivos do relatório.';
+  }
+  if (message.type === 'EXPORT_INVALIDATED') {
+    nextStatus = 'preparing';
+    text = message.error || 'A auditoria foi atualizada; gere o relatório novamente.';
+  }
+  if (!nextStatus) return;
+  const next = applyExportEvent(exportEventState, message, nextStatus);
+  if (next === exportEventState) return;
+  exportEventState = next;
+  status.textContent = text;
 });
 
 function safeAuditId() {
@@ -77,6 +105,14 @@ async function saveDecision(occurrence, answer, note, card, trigger) {
   });
   if (committed.status === 'duplicate') return;
   auditModel = committed.model;
+  if (Number.isSafeInteger(committed.exportRevision) && committed.exportRevision >= 0) {
+    try {
+      chrome.runtime.sendMessage({
+        type: 'REVIEW_COMMITTED', auditId: auditModel.auditId,
+        exportRevision: committed.exportRevision,
+      }, () => { void chrome.runtime.lastError; });
+    } catch {}
+  }
   card.removeAttribute('aria-busy');
   card.classList.add('answered');
   status.textContent = `Decisão salva para o item ${occurrence.itemId}.`;
@@ -131,12 +167,16 @@ function renderCard(entry) {
 }
 
 async function start() {
-  const id = safeAuditId() || normalizeReviewAuditId((await store.getLatest())?.auditId);
+  const latest = await store.getLatest();
+  const id = safeAuditId() || normalizeReviewAuditId(latest?.auditId);
   if (!id) { status.textContent = 'Auditoria não identificada.'; return; }
   auditModel = await store.getAudit(id);
   if (!auditModel || auditModel.auditId !== id) { status.textContent = 'Auditoria não encontrada.'; return; }
+  if (latest?.auditId === id) exportEventState = restoreExportEventState(latest);
   for (const entry of getPendingReviewEntries(auditModel)) renderCard(entry);
-  status.textContent = list.childElementCount ? `${list.childElementCount} ocorrências aguardam revisão.` : 'Não há ocorrências para revisar.';
+  status.textContent = latest?.auditId === id && latest?.exportCleanupPending === true
+    ? EXPORT_CLEANUP_MESSAGE
+    : list.childElementCount ? `${list.childElementCount} ocorrências aguardam revisão.` : 'Não há ocorrências para revisar.';
 }
 
 void start().catch(() => { status.textContent = 'Não foi possível carregar a revisão.'; });

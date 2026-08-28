@@ -35,6 +35,15 @@ export function buildArtifactBaseName(pageUrl, timestamp) {
   return `${host}-${timestamp.replace(/[-:.]/gu, '')}`;
 }
 
+export async function bindDeliveryArtifactBaseName(baseName, ownerId, exportAttempt) {
+  if (typeof baseName !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9-]{0,159}$/u.test(baseName) ||
+    typeof ownerId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/u.test(ownerId) ||
+    !Number.isSafeInteger(exportAttempt) || exportAttempt < 1) {
+    throw new TypeError('Identidade do nome de entrega inválida.');
+  }
+  return `${baseName}-delivery-${await deliveryToken(ownerId, exportAttempt)}`;
+}
+
 export async function downloadArtifacts(payload, adapter, options = {}) {
   validateAdapter(adapter);
   if (!payload || typeof payload.baseName !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9-]*$/u.test(payload.baseName)) {
@@ -44,6 +53,14 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('Timeout de download inválido.');
   const hashBytes = options.hashBytes ?? sha256Hex;
   if (typeof hashBytes !== 'function') throw new TypeError('Calculador de integridade inválido.');
+  const assertCanDownload = options.assertCanDownload;
+  if (assertCanDownload !== undefined && typeof assertCanDownload !== 'function') {
+    throw new TypeError('Validador de exclusividade do download inválido.');
+  }
+  const recordDeliveryState = options.recordDeliveryState;
+  if (recordDeliveryState !== undefined && typeof recordDeliveryState !== 'function') {
+    throw new TypeError('Journal persistente de entrega inválido.');
+  }
   const artifacts = [
     ['html', payload.html],
     ['json', payload.json],
@@ -82,6 +99,42 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
       continue;
     }
     try {
+      let deliveryFailure = null;
+      let journalFailure = null;
+      const assertDelivery = async stage => {
+        if (!assertCanDownload) return;
+        try {
+          await boundedOperation(
+            Promise.resolve().then(() => assertCanDownload({ format, stage })),
+            timeoutMs,
+            'A validação da exclusividade do download excedeu o tempo limite.',
+          );
+        } catch (error) {
+          deliveryFailure = error;
+          throw error;
+        }
+      };
+      const recordDelivery = async entry => {
+        if (!recordDeliveryState) return;
+        try {
+          await boundedOperation(
+            Promise.resolve().then(() => recordDeliveryState(entry)),
+            timeoutMs,
+            'A atualização do journal de entrega excedeu o tempo limite.',
+          );
+        } catch (error) {
+          journalFailure = error;
+          throw error;
+        }
+      };
+      await assertDelivery('before-start');
+      await recordDelivery({ state: 'starting', format, filename });
+      try {
+        await assertDelivery('before-physical-start');
+      } catch (error) {
+        try { await recordDelivery({ state: 'cleaned', format, filename }); } catch {}
+        throw error;
+      }
       let downloadId;
       try {
         downloadId = await adoptDownload(adapter.download({
@@ -89,31 +142,97 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
           filename,
           conflictAction: 'uniquify',
           saveAs: false,
-        }), timeoutMs, id => Number.isSafeInteger(id) && id >= 0 ? cancelContained(adapter, id) : undefined);
+        }), timeoutMs, async id => {
+          if (!Number.isSafeInteger(id) || id < 0) return;
+          const cleanup = await cleanupPhysicalDownload(adapter, id, undefined, timeoutMs);
+          try {
+            await recordDelivery({
+              state: cleanup.removed ? 'cleaned' : 'cleanup-failed',
+              format,
+              filename,
+              downloadId: id,
+            });
+          } catch {}
+        });
         if (!Number.isSafeInteger(downloadId) || downloadId < 0) throw new TypeError('ID de download inválido.');
       } catch (error) {
+        const timedOut = safeErrorName(error) === 'TimeoutError';
+        if (!timedOut) {
+          try { await recordDelivery({ state: 'cleaned', format, filename }); } catch {}
+        }
         appendFailure(formats, limitations, {
           format, filename, sha256,
-          failureCode: safeErrorName(error) === 'TimeoutError' ? 'DOWNLOAD_START_TIMEOUT' : 'DOWNLOAD_START_FAILED',
+          failureCode: timedOut ? 'DOWNLOAD_START_TIMEOUT' : 'DOWNLOAD_START_FAILED',
         });
         continue;
       }
-      const cancelWait = once(() => cancelContained(adapter, downloadId));
       try {
-        const terminal = await boundedDownloadWait(
-          adapter.waitForDownload(downloadId, { timeoutMs }),
-          timeoutMs,
-          cancelWait,
+        await recordDelivery({ state: 'in-flight', format, filename, downloadId });
+      } catch (error) {
+        const cleanup = await cleanupPhysicalDownload(adapter, downloadId, undefined, timeoutMs);
+        try {
+          await recordDelivery({
+            state: cleanup.removed ? 'cleaned' : 'cleanup-failed', format, filename, downloadId,
+          });
+        } catch {}
+        if (!cleanup.removed) throw downloadCleanupPendingError(error);
+        throw error;
+      }
+      const cancelWait = once(() => cancelContained(adapter, downloadId));
+      const containRevokedDownload = async cause => {
+        const cleanup = await cleanupPhysicalDownload(adapter, downloadId, cancelWait, timeoutMs);
+        if (cleanup.removed) {
+          try {
+            await recordDelivery({ state: 'cleaned', format, filename, downloadId });
+          } catch (error) {
+            try { await recordDelivery({ state: 'cleanup-failed', format, filename, downloadId }); } catch {}
+            throw downloadCleanupPendingError(cause ?? error);
+          }
+          return;
+        }
+        try {
+          await recordDelivery({ state: 'cleanup-failed', format, filename, downloadId });
+        } catch {}
+        throw downloadCleanupPendingError(cause);
+      };
+      try {
+        await assertDelivery('started');
+      } catch (error) {
+        await containRevokedDownload(error);
+        throw error;
+      }
+      let monitor = null;
+      try {
+        const terminalWait = boundedDownloadWait(
+          adapter.waitForDownload(downloadId, { timeoutMs }), timeoutMs, cancelWait,
         );
+        monitor = assertCanDownload
+          ? createDeliveryMonitor(() => assertDelivery('in-flight'), timeoutMs)
+          : null;
+        const terminal = await (monitor ? Promise.race([terminalWait, monitor.promise]) : terminalWait);
         if (!isCompleteTerminal(terminal, downloadId)) throw Object.assign(new Error('Download interrompido.'), { name: 'DownloadInterruptedError' });
+        await recordDelivery({ state: 'terminal', format, filename, downloadId });
+        await assertDelivery('terminal');
         formats.push({ format, filename, mimeType: MIME[format], status: 'complete', downloadId, sha256 });
       } catch (error) {
+        monitor?.stop();
+        monitor = null;
+        if (error === deliveryFailure || error === journalFailure) {
+          await containRevokedDownload(error);
+          throw error;
+        }
         const timedOut = safeErrorName(error) === 'TimeoutError';
-        cancelWait();
+        if (recordDeliveryState) {
+          await containRevokedDownload(error);
+        } else {
+          cancelWait();
+        }
         appendFailure(formats, limitations, {
           format, filename, sha256, downloadId,
           failureCode: timedOut ? 'DOWNLOAD_WAIT_TIMEOUT' : 'DOWNLOAD_INTERRUPTED',
         });
+      } finally {
+        monitor?.stop();
       }
     } finally {
       try { adapter.revokeObjectURL(blobUrl); } catch {
@@ -143,6 +262,20 @@ export function createDownloadsAdapter(chromeApi, urlApi = globalThis.URL) {
     revokeObjectURL: url => urlApi.revokeObjectURL(url),
     download: options => invokeChrome(chromeApi, callback => chromeApi.downloads.download(options, callback)),
     cancelDownload: downloadId => invokeChrome(chromeApi, callback => chromeApi.downloads.cancel(downloadId, callback)),
+    removeDownloadFile: typeof chromeApi.downloads.removeFile === 'function'
+      ? downloadId => invokeChrome(chromeApi, callback => chromeApi.downloads.removeFile(downloadId, callback))
+      : undefined,
+    findDownloadsByFilename: typeof chromeApi.downloads.search === 'function'
+      ? async filename => {
+          const escaped = filename.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+          const items = await invokeChrome(chromeApi, callback => chromeApi.downloads.search({
+            filenameRegex: `(?:^|[\\\\/])${escaped}$`,
+          }, callback));
+          return Array.isArray(items)
+            ? items.filter(item => Number.isSafeInteger(item?.id) && item.id >= 0).map(item => item.id)
+            : [];
+        }
+      : undefined,
     waitForDownload(downloadId, { timeoutMs }) {
       return new Promise((resolve, reject) => {
         let settled = false;
@@ -168,6 +301,62 @@ export function createDownloadsAdapter(chromeApi, urlApi = globalThis.URL) {
       });
     },
   };
+}
+
+export async function reconcileStaleDownloads(entries, adapter, resolveEntry, options = {}) {
+  if (!Array.isArray(entries) || typeof resolveEntry !== 'function') {
+    throw new TypeError('Journal de entregas pendentes inválido.');
+  }
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('Timeout de limpeza inválido.');
+  const resolvePersistedEntry = (entry, outcome) => boundedOperation(
+    Promise.resolve().then(() => resolveEntry(entry, outcome)),
+    timeoutMs,
+    'A atualização do journal reconciliado excedeu o tempo limite.',
+  );
+  for (const entry of entries) {
+    const canonical = canonicalStaleEntry(entry);
+    const expectedSuffix = `-delivery-${await deliveryToken(canonical.ownerId, canonical.exportAttempt)}.${canonical.format}`;
+    if (!canonical.filename.endsWith(expectedSuffix)) throw downloadCleanupPendingError();
+    let ids = canonical.downloadId === undefined ? [] : [canonical.downloadId];
+    if (ids.length === 0) {
+      const find = ownOrPrototypeMethod(adapter, 'findDownloadsByFilename');
+      if (!find) throw downloadCleanupPendingError();
+      let found;
+      try {
+        found = await boundedOperation(
+          Promise.resolve().then(() => Reflect.apply(find, adapter, [canonical.filename])),
+          timeoutMs,
+          'A busca do download obsoleto excedeu o tempo limite.',
+        );
+      } catch {
+        try { await resolvePersistedEntry(canonical, 'cleanup-failed'); } catch {}
+        throw downloadCleanupPendingError();
+      }
+      if (!Array.isArray(found)) throw downloadCleanupPendingError();
+      ids = found.map(value => typeof value === 'object' && value !== null ? value.id : value)
+        .filter((value, index, all) => Number.isSafeInteger(value) && value >= 0 && all.indexOf(value) === index);
+      if (ids.length !== 1) {
+        try { await resolvePersistedEntry(canonical, 'cleanup-failed'); } catch {}
+        throw downloadCleanupPendingError();
+      }
+    }
+    try {
+      for (const downloadId of ids) {
+        const cleanup = await cleanupPhysicalDownload(adapter, downloadId, undefined, timeoutMs);
+        if (!cleanup.removed) throw downloadCleanupPendingError();
+      }
+      await resolvePersistedEntry(canonical, 'cleaned');
+    } catch (error) {
+      try { await resolvePersistedEntry(canonical, 'cleanup-failed'); } catch {}
+      if (safeErrorCode(error) === 'AUDIT_DOWNLOAD_CLEANUP_PENDING') throw error;
+      throw downloadCleanupPendingError(error);
+    }
+  }
+}
+
+async function deliveryToken(ownerId, exportAttempt) {
+  return sha256Hex(new TextEncoder().encode(`${ownerId}\u0000${exportAttempt}`));
 }
 
 function validateAdapter(adapter) {
@@ -217,19 +406,136 @@ function boundedOperation(promise, timeoutMs, message) {
   return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));
 }
 
+function createDeliveryMonitor(assertDelivery, timeoutMs) {
+  let timer = null;
+  let stopped = false;
+  let rejectMonitor;
+  const intervalMs = Math.min(250, Math.max(1, Math.floor(timeoutMs / 4)));
+  const promise = new Promise((_, reject) => { rejectMonitor = reject; });
+  const schedule = () => {
+    if (stopped) return;
+    timer = setTimeout(async () => {
+      try {
+        await assertDelivery();
+        schedule();
+      } catch (error) {
+        rejectMonitor(error);
+      }
+    }, intervalMs);
+  };
+  schedule();
+  return {
+    promise,
+    stop() {
+      stopped = true;
+      if (timer !== null) clearTimeout(timer);
+    },
+  };
+}
+
 function cancelContained(adapter, downloadId) {
   try {
     let current = adapter;
     for (let depth = 0; current && depth < 8; depth += 1) {
       const descriptor = Object.getOwnPropertyDescriptor(current, 'cancelDownload');
       if (descriptor) {
-        if (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'function') return;
-        void Promise.resolve(Reflect.apply(descriptor.value, adapter, [downloadId])).catch(() => {});
-        return;
+        if (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'function') return Promise.resolve();
+        return Promise.resolve(Reflect.apply(descriptor.value, adapter, [downloadId])).catch(() => {});
       }
       current = Object.getPrototypeOf(current);
     }
   } catch {}
+  return Promise.resolve();
+}
+
+function removeContained(adapter, downloadId) {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(adapter, 'removeDownloadFile');
+    if (!descriptor || !Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'function') return Promise.resolve();
+    return Promise.resolve(Reflect.apply(descriptor.value, adapter, [downloadId])).catch(() => {});
+  } catch {}
+  return Promise.resolve();
+}
+
+async function cleanupPhysicalDownload(adapter, downloadId, cancelOperation, timeoutMs = 30_000) {
+  try {
+    await boundedOperation(
+      Promise.resolve().then(() => cancelOperation ? cancelOperation() : cancelContained(adapter, downloadId)),
+      timeoutMs,
+      'O cancelamento do download excedeu o tempo limite.',
+    );
+  } catch {}
+  const remove = ownOrPrototypeMethod(adapter, 'removeDownloadFile');
+  if (!remove) return { removed: false };
+  try {
+    await boundedOperation(
+      Promise.resolve().then(() => Reflect.apply(remove, adapter, [downloadId])),
+      timeoutMs,
+      'A remoção do download excedeu o tempo limite.',
+    );
+    return { removed: true };
+  } catch {
+    return { removed: false };
+  }
+}
+
+function ownOrPrototypeMethod(value, key) {
+  try {
+    let current = value;
+    for (let depth = 0; current && depth < 8; depth += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, key);
+      if (descriptor) return Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'function'
+        ? descriptor.value
+        : null;
+      current = Object.getPrototypeOf(current);
+    }
+  } catch {}
+  return null;
+}
+
+function canonicalStaleEntry(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError();
+    const ownerId = value.ownerId;
+    const exportAttempt = value.exportAttempt;
+    const state = value.state;
+    const format = value.format;
+    const filename = value.filename;
+    const downloadId = value.downloadId;
+    if (typeof ownerId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/u.test(ownerId) ||
+      !Number.isSafeInteger(exportAttempt) || exportAttempt < 1 ||
+      !['starting', 'in-flight', 'terminal', 'cleanup-failed'].includes(state) ||
+      !Object.hasOwn(MIME, format) || typeof filename !== 'string' ||
+      filename !== filename.trim() || filename.length > 240 ||
+      !filename.endsWith(`.${format}`) ||
+      (downloadId !== undefined && (!Number.isSafeInteger(downloadId) || downloadId < 0))) throw new TypeError();
+    return { ownerId, exportAttempt, state, format, filename, ...(downloadId === undefined ? {} : { downloadId }) };
+  } catch {
+    throw new TypeError('Entrada do journal de entrega inválida.');
+  }
+}
+
+function downloadCleanupPendingError(cause) {
+  const error = new Error('Um arquivo de exportação obsoleto não pôde ter sua remoção confirmada; tente novamente.');
+  error.name = 'AuditDownloadCleanupPendingError';
+  error.code = 'AUDIT_DOWNLOAD_CLEANUP_PENDING';
+  const code = safeErrorCode(cause);
+  if (code) error.causeCode = code;
+  return error;
+}
+
+function safeErrorCode(value) {
+  try {
+    const descriptor = value && (typeof value === 'object' || typeof value === 'function')
+      ? Object.getOwnPropertyDescriptor(value, 'code')
+      : null;
+    return descriptor && Object.hasOwn(descriptor, 'value') &&
+      ['AUDIT_REVISION_CONFLICT', 'AUDIT_EXPORT_LEASE_CONFLICT', 'AUDIT_DOWNLOAD_CLEANUP_PENDING'].includes(descriptor.value)
+      ? descriptor.value
+      : '';
+  } catch {
+    return '';
+  }
 }
 
 function once(operation) {
@@ -237,7 +543,7 @@ function once(operation) {
   return () => {
     if (called) return;
     called = true;
-    operation();
+    return operation();
   };
 }
 

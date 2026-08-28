@@ -1,6 +1,5 @@
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
-import { AXE_PROVENANCE } from '../../browser/axe-adapter.js';
-import { createAuditModel } from './audit-model.js';
+import { registeredOccurrenceSource } from '../provenance.js';
 import { isAuditIntegrityVerified } from './integrity.js';
 
 export const OCCURRENCE_CSV_VERSION = 'audita-occurrences-v1';
@@ -21,19 +20,10 @@ const MAX_LIST_ITEMS = 256;
 const TRUNCATION_MARKER = '…[truncated]';
 const DETAIL_MARKER = '[detalhe disponível somente no HTML/JSON]';
 const DANGEROUS_FIRST_CHARACTER = /^[=+\-@\t\r]/u;
-const SAFE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
+const SAFE_TOKEN = /^[A-Za-z0-9._:-]{1,200}$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const ENCODER = new TextEncoder();
 const CATALOG_ITEM_BY_ID = new Map(NBR17225_ITEMS.map(item => [item.id, item]));
-const CORE_RULE_ITEM_IDS = new Map();
-for (const item of NBR17225_ITEMS) {
-  for (const ruleId of item.ruleIds) {
-    const itemIds = CORE_RULE_ITEM_IDS.get(ruleId) ?? new Set();
-    itemIds.add(item.id);
-    CORE_RULE_ITEM_IDS.set(ruleId, itemIds);
-  }
-}
-const AUDITA_RULES_VERSION = '1.0.0';
 const CLASSIFICATION_LABEL = Object.freeze({
   requirement: 'Requisito',
   recommendation: 'Recomendação',
@@ -48,19 +38,14 @@ const OUTCOME_LABEL = Object.freeze({
   untested: 'não testado',
 });
 
-/** Pure, fixed-column projection of a canonicalizable V2 audit model. */
+/** Pure, fixed-column projection of an integrity-verified canonical V2 snapshot. */
 export function renderOccurrenceCsv(input) {
-  const integrityVerified = isAuditIntegrityVerified(input);
-  let model;
-  try {
-    model = createAuditModel(input);
-  } catch {
-    throw new TypeError('Modelo CSV inválido ou contém propriedade insegura.');
+  if (!isAuditIntegrityVerified(input)) {
+    throw new TypeError('O CSV exige snapshot canônico com integridade verificada.');
   }
+  const model = input;
   const pageById = new Map(model.pages.map(page => [page.pageId, page]));
   const evidenceById = new Map(model.evidence.map(evidence => [evidence.evidenceId, evidence]));
-  const axeRuleByOccurrenceId = new Map((model.axe?.occurrences ?? [])
-    .map(occurrence => [occurrence.occurrenceId, occurrence.source?.ruleId]));
   const records = [serializeRecord(OCCURRENCE_CSV_COLUMNS)];
   let byteLength = ENCODER.encode(`\uFEFF${records[0]}\r\n`).byteLength;
 
@@ -74,7 +59,7 @@ export function renderOccurrenceCsv(input) {
     const previewEvidence = referencedEvidence.find(evidence =>
       evidence.nodeId === occurrence.target.nodeId && typeof evidence.accessibility?.nameSource === 'string')
       ?? referencedEvidence.find(evidence => typeof evidence.accessibility?.nameSource === 'string');
-    const source = trustedOccurrenceSource(occurrence, axeRuleByOccurrenceId);
+    const source = trustedOccurrenceSource(occurrence, model.versions.rules);
     const values = [
       OCCURRENCE_CSV_VERSION,
       strictToken(model.auditId),
@@ -88,7 +73,7 @@ export function renderOccurrenceCsv(input) {
       strictToken(occurrence.confidence),
       source.engine,
       source.version,
-      strictToken(occurrence.source.ruleId),
+      strictToken(source.ruleId),
       strictToken(occurrence.nbrItemRef),
       strictTokenList(occurrence.wcagRefs, ';'),
       foreignReferenceList(occurrence.foreignBenchmarkRefs),
@@ -100,9 +85,9 @@ export function renderOccurrenceCsv(input) {
       projectedDetail(previewEvidence?.accessibility?.nameSource),
       strictTokenList(occurrence.evidenceRefs, ';'),
       strictToken(occurrence.legalAnalysis?.basisRef),
-      integrityVerified ? verifiedEvidenceHashList(occurrence.evidenceRefs, referencedEvidence) : '',
-      integrityVerified ? strictSha256(model.integrity?.canonicalModelHash) : '',
-      integrityVerified ? strictSha256(model.integrity?.evidenceManifestHash) : '',
+      verifiedEvidenceHashList(occurrence.evidenceRefs, referencedEvidence),
+      strictSha256(model.integrity?.canonicalModelHash),
+      strictSha256(model.integrity?.evidenceManifestHash),
     ];
     const record = serializeRecord(values);
     byteLength += ENCODER.encode(`${record}\r\n`).byteLength;
@@ -158,27 +143,17 @@ function assertProjectableList(values) {
 
 function completeListCell(values, separator) {
   const projected = values.join(separator);
-  if ([...projected].length > MAX_CELL_CODE_POINTS) {
+  const neutralizationLength = DANGEROUS_FIRST_CHARACTER.test(projected) ? 1 : 0;
+  if ([...projected].length + neutralizationLength > MAX_CELL_CODE_POINTS) {
     throw new RangeError('O CSV não representa uma lista que exceda a célula sem perda ou truncamento.');
   }
   return projected;
 }
 
-function trustedOccurrenceSource(occurrence, axeRuleByOccurrenceId) {
-  const ruleId = occurrence.source.ruleId;
-  if (CORE_RULE_ITEM_IDS.get(ruleId)?.has(occurrence.nbrItemRef)) {
-    return { engine: 'audita-core', version: AUDITA_RULES_VERSION };
-  }
-  if (occurrence.classification === 'editorial' && ruleId === 'editorial.placeholder-text') {
-    return { engine: 'audita-editorial', version: AUDITA_RULES_VERSION };
-  }
-  if (occurrence.ruleId === null && occurrence.nbrItemRef && ruleId === `manual:${occurrence.nbrItemRef}`) {
-    return { engine: 'audita-manual-review', version: AUDITA_RULES_VERSION };
-  }
-  if (axeRuleByOccurrenceId.get(occurrence.occurrenceId) === ruleId) {
-    return { engine: AXE_PROVENANCE.engine, version: AXE_PROVENANCE.version };
-  }
-  return { engine: 'supplemental', version: '' };
+function trustedOccurrenceSource(occurrence, rulesVersion) {
+  const source = registeredOccurrenceSource(occurrence, rulesVersion);
+  if (!source) throw new TypeError('Ocorrência sem proveniência registrada para o CSV.');
+  return { engine: source.engine, version: source.version, ruleId: source.ruleId };
 }
 
 function httpOrigin(value) {

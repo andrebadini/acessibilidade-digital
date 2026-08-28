@@ -25,5 +25,11 @@ test('review script renders snippets inertly, offers exactly three answers and n
   for (const answer of ['conforme', 'não conforme', 'não foi possível determinar']) assert.match(source, new RegExp(answer, 'u'));
   assert.match(source, /Pular revisão/);
   assert.match(source, /REQUEST_EXPORT/);
+  assert.match(source, /REVIEW_COMMITTED/u);
+  assert.match(source, /exportRevision:\s*committed\.exportRevision/u);
+  assert.match(source, /restoreExportEventState\(latest\)/u);
+  assert.match(source, /latest\?\.exportCleanupPending\s*===\s*true/u);
+  assert.match(source, /arquivo obsoleto.*removido/iu);
+  assert.match(source, /Solicitando a geração do relatório/u);
   assert.doesNotMatch(source, /\.checked\s*=\s*true|\.click\(\)/);
 });
