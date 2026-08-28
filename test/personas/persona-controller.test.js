@@ -332,6 +332,78 @@ test('openPanel binds one explicit HTTP tab with forward/reverse ownership despi
   assert.deepEqual(sessionData[PERSONA_SESSION_KEY], [{ panelTabId: 50, targetTabId: 7 }]);
 });
 
+test('issues an opaque one-shot binding lease and invalidates it when proof is reinstalled in the same document', async () => {
+  let trackFinalProof = false;
+  let proofObserved = false;
+  let endpointReadsAfterProof = 0;
+  const { chromeApi, calls, tabsById } = createChrome({
+    afterProofCheck() { if (trackFinalProof) proofObserved = true; },
+  });
+  const originalGet = chromeApi.tabs.get.bind(chromeApi.tabs);
+  chromeApi.tabs.get = async tabId => {
+    if (trackFinalProof && proofObserved) endpointReadsAfterProof += 1;
+    return originalGet(tabId);
+  };
+  const controller = createPersonaController(chromeApi);
+  const source = { id: 7, url: 'https://alvo.test/pagina' };
+  await controller.openPanel({ sourceTab: source });
+  const panelPort = createPort(50, 'panel-document-1');
+  controller.attachPanelPort(panelPort);
+  await flush();
+  const leaseRequest = {
+    panelTabId: 50, targetTabId: 7, sourceUrl: source.url, panelDocumentId: 'panel-document-1',
+  };
+
+  assert.equal(typeof controller.issueBindingLease, 'function');
+  assert.equal(typeof controller.consumeBindingLease, 'function');
+  trackFinalProof = true;
+  const lease = await controller.issueBindingLease(leaseRequest);
+  trackFinalProof = false;
+  assert.ok(lease);
+  assert.equal(endpointReadsAfterProof, 0,
+    'a observação isolada da prova deve ser o último await antes de emitir a capacidade');
+  assert.deepEqual(Reflect.ownKeys(lease), [], 'a capacidade não expõe IDs, URL ou prova');
+  assert.equal(Object.getPrototypeOf(lease), null);
+  assert.equal(Object.isFrozen(lease), true);
+  assert.equal(controller.consumeBindingLease(lease), true);
+  assert.equal(controller.consumeBindingLease(lease), false, 'replay é recusado');
+
+  const staleLease = await controller.issueBindingLease(leaseRequest);
+  const installsBefore = calls.execute.filter(call => call.func?.name === 'installPersonaBindingProof').length;
+  await controller.openPanel({ sourceTab: source });
+  assert.equal(calls.execute.filter(call => call.func?.name === 'installPersonaBindingProof').length, installsBefore + 1);
+  assert.equal(controller.consumeBindingLease(staleLease), false,
+    'uma reinstalação forçada no mesmo documentId invalida o proofEpoch anterior');
+
+  tabsById.set(7, { ...tabsById.get(7), pendingUrl: source.url });
+  assert.equal(await controller.issueBindingLease(leaseRequest), null);
+  tabsById.set(7, { id: 7, url: source.url, status: 'complete' });
+  tabsById.set(50, { ...tabsById.get(50), pendingUrl: 'chrome-extension://test-extension/src/panel/index.html' });
+  assert.equal(await controller.issueBindingLease(leaseRequest), null);
+  tabsById.set(50, { id: 50, url: 'chrome-extension://test-extension/src/panel/index.html', status: 'complete' });
+
+  const navigationLease = await controller.issueBindingLease(leaseRequest);
+  controller.handleTabUpdated(7, { status: 'loading' }, tabsById.get(7));
+  assert.equal(controller.consumeBindingLease(navigationLease), false,
+    'uma navegação invalida a capacidade antes do cleanup assíncrono');
+  await controller.openPanel({ sourceTab: source });
+  const portLease = await controller.issueBindingLease(leaseRequest);
+  controller.attachPanelPort(createPort(50, 'panel-document-1'));
+  await flush();
+  assert.equal(controller.consumeBindingLease(portLease), false,
+    'reconexão do mesmo documentId ainda invalida o portEpoch anterior');
+  const releaseLease = await controller.issueBindingLease(leaseRequest);
+  controller.handleTabRemoved(50);
+  assert.equal(controller.consumeBindingLease(releaseLease), false,
+    'remoção/release do owner invalida a capacidade sincronamente');
+
+  let accessorReads = 0;
+  const hostile = { targetTabId: 7, sourceUrl: source.url, panelDocumentId: 'panel-document-1' };
+  Object.defineProperty(hostile, 'panelTabId', { enumerable: true, get() { accessorReads += 1; return 50; } });
+  assert.equal(await controller.issueBindingLease(hostile), null);
+  assert.equal(accessorReads, 0);
+});
+
 test('a source closed while panel creation is pending can never be persisted as a dead binding', async () => {
   const createGate = deferred();
   const { chromeApi, calls, tabsById, sessionData } = createChrome({ createGate });

@@ -13,6 +13,15 @@ import {
   isSafeReportUrl,
   reducePanelState,
   restoreExportEventState,
+  parseContextPrefillMessage,
+  createContextPrefillAck,
+  createContextPrefillCommitAck,
+  contextProtocolMessageType,
+  parseContextPrefillCommitMessage,
+  reduceContextCommitDelivery,
+  resolveCurrentPanelTabId,
+  sendContextProtocolAck,
+  shouldApplyRestoredAudit,
 } from '../../src/panel/panel-state.js';
 
 function personaWorkerState(overrides = {}) {
@@ -55,6 +64,175 @@ test('uses a synchronous gate to reject reentrant submissions until released', (
   assert.equal(gate.tryAcquire(), false);
   gate.release();
   assert.equal(gate.tryAcquire(), true);
+});
+
+test('accepts only an exact sanitized auto-start prefill and creates one-shot protocol ACKs', () => {
+  const message = {
+    type: 'AUDIT_CONTEXT_PREFILL', requestId: 'context-1', panelTabId: 50,
+    prefill: { kind: 'link', url: 'https://example.test/path?view=public', autoStarted: true },
+  };
+  assert.deepEqual(parseContextPrefillMessage(message, 50), {
+    requestId: 'context-1', panelTabId: 50, kind: 'link',
+    url: 'https://example.test/path?view=public', autoStarted: true,
+  });
+  assert.deepEqual(createContextPrefillAck('context-1', 50, true), {
+    type: 'CONTEXT_PREFILL_ACK', requestId: 'context-1', panelTabId: 50, accepted: true,
+  });
+  assert.deepEqual(createContextPrefillCommitAck('context-1', 50, true), {
+    type: 'CONTEXT_PREFILL_COMMIT_ACK', requestId: 'context-1', panelTabId: 50, accepted: true,
+  });
+  assert.deepEqual(parseContextPrefillCommitMessage({
+    type: 'AUDIT_CONTEXT_PREFILL_COMMIT', requestId: 'context-1', panelTabId: 50,
+  }, 50), { requestId: 'context-1', panelTabId: 50 });
+
+  for (const hostile of [
+    { ...message, extra: true },
+    { ...message, panelTabId: 51 },
+    { ...message, prefill: { ...message.prefill, autoStarted: false } },
+    { ...message, prefill: { ...message.prefill, url: '' } },
+    { ...message, prefill: { ...message.prefill, url: '   ' } },
+    { ...message, prefill: { ...message.prefill, url: 'https://example.test/?token=TOPSECRET' } },
+    { ...message, prefill: { ...message.prefill, url: 'javascript:alert(1)' } },
+  ]) assert.equal(parseContextPrefillMessage(hostile, 50), null);
+
+  let reads = 0;
+  const prefill = { kind: 'page', autoStarted: true };
+  Object.defineProperty(prefill, 'url', { enumerable: true, get() { reads += 1; return 'https://example.test/'; } });
+  assert.equal(parseContextPrefillMessage({ ...message, prefill }, 50), null);
+  assert.equal(reads, 0);
+});
+
+test('rejects accessor, extra-field and wrong-tab context commit envelopes without reading them', () => {
+  for (const message of [
+    { type: 'AUDIT_CONTEXT_PREFILL_COMMIT', requestId: 'context-1', panelTabId: 51 },
+    { type: 'AUDIT_CONTEXT_PREFILL_COMMIT', requestId: 'context-1', panelTabId: 50, extra: true },
+    { type: 'AUDIT_CONTEXT_PREFILL_COMMIT', requestId: 'bad id', panelTabId: 50 },
+  ]) assert.equal(parseContextPrefillCommitMessage(message, 50), null);
+  let reads = 0;
+  const message = { type: 'AUDIT_CONTEXT_PREFILL_COMMIT', requestId: 'context-1' };
+  Object.defineProperty(message, 'panelTabId', { enumerable: true, get() { reads += 1; return 50; } });
+  assert.equal(parseContextPrefillCommitMessage(message, 50), null);
+  assert.equal(reads, 0);
+
+  const accessorType = {};
+  Object.defineProperty(accessorType, 'type', { enumerable: true, get() { reads += 1; return 'AUDIT_CONTEXT_PREFILL'; } });
+  assert.equal(contextProtocolMessageType(accessorType), null);
+  assert.equal(reads, 0);
+  assert.equal(contextProtocolMessageType({ type: 'AUDIT_CONTEXT_PREFILL' }), 'AUDIT_CONTEXT_PREFILL');
+});
+
+test('a late restore response cannot overwrite a context prefill or a newer active audit', () => {
+  assert.equal(shouldApplyRestoredAudit({
+    requestedEpoch: 2, currentEpoch: 2, contextPending: false, activeAuditId: null,
+  }), true);
+  for (const state of [
+    { requestedEpoch: 1, currentEpoch: 2, contextPending: false, activeAuditId: null },
+    { requestedEpoch: 2, currentEpoch: 2, contextPending: true, activeAuditId: null },
+    { requestedEpoch: 2, currentEpoch: 2, contextPending: false, activeAuditId: 'audit-context' },
+  ]) assert.equal(shouldApplyRestoredAudit(state), false);
+});
+
+test('a lost commit ACK releases the one-shot context transaction so a manual audit can proceed', () => {
+  const gate = createSubmissionGate();
+  assert.equal(gate.tryAcquire(), true);
+  const pending = { requestId: 'context-1', panelTabId: 50, committed: true };
+  for (const failure of [
+    { response: undefined, runtimeFailed: false },
+    { response: { ok: false }, runtimeFailed: false },
+    { response: { ok: true }, runtimeFailed: true },
+  ]) {
+    const outcome = reduceContextCommitDelivery(pending, 'context-1', failure);
+    assert.deepEqual(outcome, { contextPrefill: null, releaseGate: true });
+  }
+  const interrupted = reduceContextCommitDelivery(pending, 'context-1', {
+    response: undefined, runtimeFailed: true,
+  });
+  if (interrupted.releaseGate) gate.release();
+  assert.equal(gate.tryAcquire(), true, 'o formulário manual volta a funcionar após reinício do worker');
+  assert.deepEqual(reduceContextCommitDelivery(interrupted.contextPrefill, 'context-1', {
+    response: { ok: true }, runtimeFailed: false,
+  }), { contextPrefill: null, releaseGate: false }, 'callback tardio não reexecuta o contexto');
+
+  const successful = reduceContextCommitDelivery(pending, 'context-1', {
+    response: { ok: true }, runtimeFailed: false,
+  });
+  assert.equal(successful.contextPrefill, pending);
+  assert.equal(successful.releaseGate, false);
+  assert.equal(reduceContextCommitDelivery(pending, 'other-request', {
+    response: undefined, runtimeFailed: true,
+  }).contextPrefill, pending, 'falha não correlacionada não libera outra transação');
+
+  let reads = 0;
+  const hostile = {};
+  Object.defineProperty(hostile, 'ok', { enumerable: true, get() { reads += 1; return true; } });
+  assert.equal(reduceContextCommitDelivery(pending, 'context-1', {
+    response: hostile, runtimeFailed: false,
+  }).releaseGate, true);
+  assert.equal(reads, 0);
+});
+
+test('context ACK transport consumes callback lastError and settles callback-plus-Promise exactly once', async () => {
+  for (const scenario of ['valid-callback-and-promise', 'callback-error-and-promise', 'promise-only', 'throw']) {
+    const deliveries = [];
+    const chromeApi = {
+      runtime: {
+        lastError: null,
+        sendMessage(_message, callback) {
+          if (scenario === 'throw') throw new Error('worker gone');
+          if (scenario.startsWith('valid-callback') || scenario.startsWith('callback-error')) {
+            setTimeout(() => {
+              chromeApi.runtime.lastError = scenario === 'callback-error-and-promise'
+                ? { message: 'raw private browser failure' }
+                : null;
+              callback({ ok: true });
+              chromeApi.runtime.lastError = null;
+            }, 5);
+          }
+          return Promise.resolve({ ok: true });
+        },
+      },
+    };
+    sendContextProtocolAck(chromeApi, { type: 'ACK' }, (response, runtimeFailed) => {
+      deliveries.push({ response, runtimeFailed });
+    });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    if (scenario === 'promise-only') {
+      assert.deepEqual(deliveries, [], 'um Promise híbrido sem callback nunca autoriza nem libera o gate');
+      continue;
+    }
+    assert.equal(deliveries.length, 1, scenario);
+    assert.deepEqual(deliveries[0], {
+      response: scenario === 'throw' ? undefined : { ok: true },
+      runtimeFailed: scenario !== 'valid-callback-and-promise',
+    });
+    assert.doesNotMatch(JSON.stringify(deliveries), /raw private browser failure/u);
+  }
+});
+
+test('current panel lookup ignores an early Promise and authorizes only its finite lastError-free callback', async () => {
+  for (const scenario of ['valid', 'late-error', 'promise-only', 'accessor']) {
+    let reads = 0;
+    const chromeApi = {
+      runtime: { lastError: null },
+      tabs: {
+        getCurrent(callback) {
+          if (scenario !== 'promise-only') setTimeout(() => {
+            chromeApi.runtime.lastError = scenario === 'late-error' ? { message: 'private failure' } : null;
+            const tab = {};
+            if (scenario === 'accessor') {
+              Object.defineProperty(tab, 'id', { enumerable: true, get() { reads += 1; return 50; } });
+            } else tab.id = 50;
+            callback(tab);
+            chromeApi.runtime.lastError = null;
+          }, 5);
+          return Promise.resolve({ id: 99 });
+        },
+      },
+    };
+    const tabId = await resolveCurrentPanelTabId(chromeApi, 10);
+    assert.equal(tabId, scenario === 'valid' ? 50 : null, scenario);
+    assert.equal(reads, 0);
+  }
 });
 
 test('keeps progress monotonic and restores a safe completed review link', () => {

@@ -186,6 +186,7 @@ export function createPersonaController(chromeApi, options = {}) {
   const pendingPanelPorts = new Map();
   const operationQueues = new Map();
   const proofQueues = new Map();
+  const bindingLeases = new WeakMap();
   let ownershipQueue = Promise.resolve();
   let persistenceQueue = Promise.resolve();
   const earlyTabEvents = [];
@@ -209,6 +210,8 @@ export function createPersonaController(chromeApi, options = {}) {
 
   return Object.freeze({
     openPanel,
+    issueBindingLease,
+    consumeBindingLease,
     attachPanelPort,
     handleTabUpdated,
     handleTabRemoved,
@@ -423,6 +426,66 @@ export function createPersonaController(chromeApi, options = {}) {
       isExactPanelTab(panel) && isCompleteHttpTab(target, binding.targetTabId);
   }
 
+  async function validateBindingLeaseEndpoints(binding, sourceUrl) {
+    let panel;
+    let target;
+    try {
+      [panel, target] = await Promise.all([
+        chromeApi.tabs.get(binding.panelTabId),
+        chromeApi.tabs.get(binding.targetTabId),
+      ]);
+    } catch { return false; }
+    return bindings.get(binding.panelTabId) === binding && owners.get(binding.targetTabId) === binding.panelTabId &&
+      !binding.releaseRequested && isExactPanelTab(panel) && !hasPendingNavigation(panel) &&
+      isCompleteHttpTab(target, binding.targetTabId, sourceUrl) && !hasPendingNavigation(target);
+  }
+
+  async function issueBindingLease(value) {
+    await ready;
+    const request = parseBindingLeaseRequest(value);
+    if (!request) return null;
+    const binding = bindings.get(request.panelTabId);
+    if (!binding || binding.targetTabId !== request.targetTabId ||
+      owners.get(request.targetTabId) !== request.panelTabId || binding.releaseRequested ||
+      !binding.port || binding.panelDocumentId !== request.panelDocumentId ||
+      binding.proofRequired || !boundedIdentifier(binding.proofDocumentId) ||
+      !await validateBindingLeaseEndpoints(binding, request.sourceUrl)) return null;
+    const proofDocumentId = binding.proofDocumentId;
+    const proofEpoch = binding.proofEpoch;
+    const portEpoch = binding.portEpoch;
+    // A observação pinada no documento alvo é a última operação assíncrona; daqui até a emissão só há checks locais.
+    if (await checkBindingProof(binding.panelTabId, binding.targetTabId, proofDocumentId) !== proofDocumentId ||
+      bindings.get(request.panelTabId) !== binding || owners.get(request.targetTabId) !== request.panelTabId ||
+      binding.releaseRequested || !binding.port || binding.panelDocumentId !== request.panelDocumentId ||
+      binding.portEpoch !== portEpoch || binding.proofRequired || binding.proofDocumentId !== proofDocumentId ||
+      binding.proofEpoch !== proofEpoch) return null;
+    const lease = Object.freeze(Object.create(null));
+    bindingLeases.set(lease, {
+      binding,
+      panelTabId: request.panelTabId,
+      targetTabId: request.targetTabId,
+      panelDocumentId: request.panelDocumentId,
+      proofDocumentId,
+      proofEpoch,
+      portEpoch,
+    });
+    return lease;
+  }
+
+  function consumeBindingLease(lease) {
+    if (!lease || typeof lease !== 'object') return false;
+    const capability = bindingLeases.get(lease);
+    if (!capability) return false;
+    bindingLeases.delete(lease);
+    const binding = capability.binding;
+    return bindings.get(capability.panelTabId) === binding &&
+      owners.get(capability.targetTabId) === capability.panelTabId &&
+      binding.panelTabId === capability.panelTabId && binding.targetTabId === capability.targetTabId &&
+      !binding.releaseRequested && binding.port && binding.panelDocumentId === capability.panelDocumentId &&
+      binding.portEpoch === capability.portEpoch && !binding.proofRequired &&
+      binding.proofDocumentId === capability.proofDocumentId && binding.proofEpoch === capability.proofEpoch;
+  }
+
   function establishCurrentBindingProof(binding, expectedSourceUrl = null, forceInstall = false) {
     return serializeProof(binding.targetTabId, async () => {
       if (!await validateBindingEndpoints(binding)) return false;
@@ -439,6 +502,10 @@ export function createPersonaController(chromeApi, options = {}) {
       }
       const oldDocumentId = binding.proofDocumentId;
       if (oldDocumentId) {
+        binding.proofDocumentId = null;
+        binding.proofRequired = true;
+        advanceProofEpoch(binding);
+        advanceProofEpoch(binding);
         await executeBindingProof(
           binding.targetTabId, binding.panelTabId, clearPersonaBindingProof, oldDocumentId,
         );
@@ -447,6 +514,7 @@ export function createPersonaController(chromeApi, options = {}) {
         binding.targetTabId, binding.panelTabId, installPersonaBindingProof,
       );
       if (!proofDocumentId) return false;
+      advanceProofEpoch(binding);
       if (!await validateBindingEndpoints(binding) ||
         !await executeBindingProof(
           binding.targetTabId, binding.panelTabId, checkPersonaBindingProof, proofDocumentId,
@@ -454,6 +522,7 @@ export function createPersonaController(chromeApi, options = {}) {
         await executeBindingProof(
           binding.targetTabId, binding.panelTabId, clearPersonaBindingProof, proofDocumentId,
         );
+        advanceProofEpoch(binding);
         return false;
       }
       binding.proofDocumentId = proofDocumentId;
@@ -1304,7 +1373,9 @@ export function createPersonaController(chromeApi, options = {}) {
     const proofDocumentId = binding.proofDocumentId;
     binding.proofDocumentId = null;
     binding.proofRequired = true;
+    advanceProofEpoch(binding);
     if (proofDocumentId) {
+      advanceProofEpoch(binding);
       void clearBindingProof(binding.panelTabId, binding.targetTabId, proofDocumentId);
     }
   }
@@ -1346,6 +1417,7 @@ export function createPersonaController(chromeApi, options = {}) {
   function requestBindingRelease(binding, notice) {
     if (bindings.get(binding.panelTabId) !== binding || binding.releaseRequested) return;
     binding.releaseRequested = true;
+    advanceProofEpoch(binding);
     binding.portEpoch += 1;
     if (binding.port && notice) safePost(binding.port, unboundState(notice.requestId, notice.message, notice.code));
     const stalePort = binding.port;
@@ -1364,10 +1436,12 @@ export function createPersonaController(chromeApi, options = {}) {
     const proofDocumentId = binding.proofDocumentId;
     binding.proofDocumentId = null;
     binding.proofRequired = true;
+    advanceProofEpoch(binding);
     try { await persistBindings(); }
     catch { logger.error('Não foi possível atualizar o vínculo local de persona.'); }
     finally {
       if (proofDocumentId) {
+        advanceProofEpoch(binding);
         await clearBindingProof(binding.panelTabId, binding.targetTabId, proofDocumentId);
       }
     }
@@ -1416,8 +1490,13 @@ function createBinding(panelTabId, targetTabId, proofDocumentId = null) {
   return {
     panelTabId, targetTabId, port: null, panelDocumentId: null,
     proofDocumentId, proofRequired: !proofDocumentId,
+    proofEpoch: proofDocumentId ? 1n : 0n,
     portEpoch: 0, seenRequests: new Set(), detachPort: null, releaseRequested: false,
   };
+}
+
+function advanceProofEpoch(binding) {
+  binding.proofEpoch += 1n;
 }
 
 function createTarget(targetTabId, ownerPanelTabId) {
@@ -1435,6 +1514,14 @@ function parseSourceTab(value) {
   return { id: record.id, url: record.url };
 }
 
+function parseBindingLeaseRequest(value) {
+  const record = copyExactRecord(value, ['panelTabId', 'targetTabId', 'sourceUrl', 'panelDocumentId']);
+  if (!record || !Number.isSafeInteger(record.panelTabId) || record.panelTabId < 0 ||
+    !Number.isSafeInteger(record.targetTabId) || record.targetTabId < 0 || !isHttpUrl(record.sourceUrl) ||
+    !boundedIdentifier(record.panelDocumentId)) return null;
+  return record;
+}
+
 function parseNumericBinding(value) {
   const record = copyExactRecord(value, ['panelTabId', 'targetTabId']);
   if (!record || !Number.isSafeInteger(record.panelTabId) || record.panelTabId < 0 ||
@@ -1446,6 +1533,15 @@ function isCompleteHttpTab(value, expectedId, expectedUrl = null) {
   const record = copyAllowedRecord(value, ['id', 'url', 'status']);
   return Boolean(record && record.id === expectedId && record.status === 'complete' && isHttpUrl(record.url) &&
     (expectedUrl === null || record.url === expectedUrl));
+}
+
+function hasPendingNavigation(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return true;
+  let descriptors;
+  try { descriptors = Object.getOwnPropertyDescriptors(value); } catch { return true; }
+  if (Object.values(descriptors).some(descriptor => !Object.hasOwn(descriptor, 'value'))) return true;
+  const descriptor = descriptors.pendingUrl;
+  return Boolean(descriptor && descriptor.value !== undefined && descriptor.value !== '');
 }
 
 function isHttpUrl(value) {

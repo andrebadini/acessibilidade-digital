@@ -10,6 +10,7 @@ import {
 import { sanitizeResourceUrl } from '../core/normalize-snapshot.js';
 import { createExportFailureRequest, persistExportFailure } from '../export/export-controller.js';
 import { getPersonaController } from './persona-runtime.js';
+import { registerAuditContextMenus } from './context-menu.js';
 
 const PANEL_PATH = '/src/panel/index.html';
 const REVIEW_PATH = '/src/review/index.html';
@@ -77,6 +78,24 @@ export function registerServiceWorker(chromeApi, options = {}) {
   const activeBySender = new Map();
   const activeExports = new Map();
   const personaController = options.personaController ?? getPersonaController(chromeApi, { logger });
+  const contextMenuController = options.contextMenuController ?? registerAuditContextMenus(chromeApi, {
+    logger,
+    createRequestId: options.createContextRequestId,
+    prefillTimeoutMs: options.contextPrefillTimeoutMs,
+    openPanel(value) {
+      if (!personaController) throw new Error('Controlador de personas indisponível.');
+      return personaController.openPanel(value);
+    },
+    issueBindingLease(value) {
+      if (typeof personaController?.issueBindingLease !== 'function') throw new Error('Controlador de personas indisponível.');
+      return personaController.issueBindingLease(value);
+    },
+    consumeBindingLease(value) {
+      if (typeof personaController?.consumeBindingLease !== 'function') throw new Error('Controlador de personas indisponível.');
+      return personaController.consumeBindingLease(value);
+    },
+    beginSingleAudit,
+  });
 
   chromeApi.action.onClicked.addListener((sourceTab) => {
     void Promise.resolve()
@@ -92,6 +111,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
   });
 
   chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (contextMenuController?.handlePanelProtocolMessage(message, sender, sendResponse)) return true;
     const knownTypes = ['START_AUDIT', 'GET_LAST_AUDIT', 'REQUEST_EXPORT', 'REVIEW_COMMITTED', 'EXPORT_PROGRESS', 'EXPORT_COMPLETE', 'EXPORT_FAILED', 'EXPORT_BUSY', 'EXPORT_INVALIDATED'];
     if (!message || !knownTypes.includes(message.type)) return false;
     if (!isAuthorizedExtensionSender(sender, chromeApi.runtime.id)) {
@@ -166,19 +186,9 @@ export function registerServiceWorker(chromeApi, options = {}) {
       return true;
     }
     try {
-      const requestedUrl = normalizeAuditUrl(message.url);
-      const storedUrl = sanitizeResourceUrl(requestedUrl);
       const senderKey = `${sender.id}:${sender.documentId || sender.tab?.id || sender.url}`;
-      const existing = activeBySender.get(senderKey);
-      if (existing) {
-        sendResponse({ ok: true, auditId: existing, state: 'running', duplicate: true });
-        return true;
-      }
-      const auditId = createId();
-      const session = createAuditSession({ id: auditId, requestedUrl: storedUrl, startedAt: now() });
-      activeBySender.set(senderKey, auditId);
-      sendResponse({ ok: true, auditId, state: session.state });
-      void runInBackground({ auditId, navigationUrl: requestedUrl, session, senderKey });
+      const started = beginSingleAudit({ navigationUrl: message.url, senderKey });
+      sendResponse(started.response);
     } catch (error) {
       sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Não foi possível preparar a auditoria.' });
     }
@@ -187,7 +197,28 @@ export function registerServiceWorker(chromeApi, options = {}) {
 
   return sessions;
 
-  async function runInBackground({ auditId, navigationUrl, session, senderKey }) {
+  function beginSingleAudit({ navigationUrl, senderKey }) {
+    if (typeof senderKey !== 'string' || senderKey.length === 0 || senderKey.length > 512) {
+      throw new TypeError('Correlação da auditoria inválida.');
+    }
+    const requestedUrl = normalizeAuditUrl(navigationUrl);
+    const existing = activeBySender.get(senderKey);
+    if (existing) {
+      return {
+        response: { ok: true, auditId: existing.auditId, state: 'running', duplicate: true },
+        completion: existing.completion,
+      };
+    }
+    const storedUrl = sanitizeResourceUrl(requestedUrl);
+    const auditId = createId();
+    const session = createAuditSession({ id: auditId, requestedUrl: storedUrl, startedAt: now() });
+    const entry = { auditId, completion: null };
+    activeBySender.set(senderKey, entry);
+    entry.completion = runInBackground({ auditId, navigationUrl: requestedUrl, session, senderKey, entry });
+    return { response: { ok: true, auditId, state: session.state }, completion: entry.completion };
+  }
+
+  async function runInBackground({ auditId, navigationUrl, session, senderKey, entry }) {
     let committed = false;
     try {
       await sessions.set(auditId, session);
@@ -226,7 +257,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
       }
       logger.error('A auditoria em segundo plano falhou de forma controlada.');
     } finally {
-      if (activeBySender.get(senderKey) === auditId) activeBySender.delete(senderKey);
+      if (activeBySender.get(senderKey) === entry) activeBySender.delete(senderKey);
     }
   }
 

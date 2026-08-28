@@ -11,6 +11,7 @@
     "128": "assets/icons/icon-128.png"
   },
   "permissions": [
+    "contextMenus",
     "debugger",
     "downloads",
     "scripting",

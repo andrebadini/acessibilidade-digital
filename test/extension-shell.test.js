@@ -17,7 +17,7 @@ test('declares a minimal MV3 extension shell without remote executable code', as
     128: 'assets/icons/icon-128.png',
   });
   assert.deepEqual(manifest.permissions, [
-    'debugger', 'downloads', 'scripting', 'storage', 'tabs',
+    'contextMenus', 'debugger', 'downloads', 'scripting', 'storage', 'tabs',
   ]);
   assert.deepEqual(manifest.host_permissions, ['http://*/*', 'https://*/*']);
   assert.deepEqual(manifest.background, {
@@ -56,6 +56,12 @@ test('panel module sends normalized START_AUDIT requests and renders only text',
   assert.match(source, /type:\s*'START_AUDIT'/);
   assert.match(source, /textContent/);
   assert.doesNotMatch(source, /innerHTML/);
+  assert.match(source, /AUDIT_CONTEXT_PREFILL/u);
+  assert.match(source, /createContextPrefillAck/u);
+  assert.match(source, /AUDIT_CONTEXT_PREFILL_COMMIT/u);
+  assert.match(source, /createContextPrefillCommitAck/u);
+  assert.match(source, /autoStarted/u);
+  assert.match(source, /shouldApplyRestoredAudit/u);
 });
 
 test('packages persona runtimes as local classic files without broadening the MV3 shell', async () => {
@@ -70,7 +76,7 @@ test('packages persona runtimes as local classic files without broadening the MV
   const manifest = JSON.parse(manifestSource);
   assert.equal(manifest.content_scripts, undefined);
   assert.equal(manifest.web_accessible_resources, undefined);
-  assert.deepEqual(manifest.permissions, ['debugger', 'downloads', 'scripting', 'storage', 'tabs']);
+  assert.deepEqual(manifest.permissions, ['contextMenus', 'debugger', 'downloads', 'scripting', 'storage', 'tabs']);
   assert.equal(manifest.content_security_policy.extension_pages.includes("'unsafe-eval'"), false);
   assert.match(buildSource, /cp\(join\(root, 'src'\), join\(staging, 'src'\), \{ recursive: true \}\)/u);
   for (const [path, source] of [

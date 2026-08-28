@@ -1,3 +1,5 @@
+import { sanitizeEvidenceUrl } from '../core/privacy.js';
+
 export function isMessageForAudit(message, auditId) {
   return Boolean(auditId)
     && Boolean(message)
@@ -30,6 +32,127 @@ export function createSubmissionGate() {
     },
     release() { held = false; },
   };
+}
+
+export function parseContextPrefillMessage(message, currentPanelTabId) {
+  const parsed = clonePersonaRecord(message);
+  if (!personaExactKeys(parsed, ['type', 'requestId', 'panelTabId', 'prefill']) ||
+    parsed.type !== 'AUDIT_CONTEXT_PREFILL' || !personaIdentifier(parsed.requestId) ||
+    !Number.isSafeInteger(parsed.panelTabId) || parsed.panelTabId < 0 ||
+    parsed.panelTabId !== currentPanelTabId ||
+    !personaExactKeys(parsed.prefill, ['kind', 'url', 'autoStarted']) ||
+    !['page', 'link'].includes(parsed.prefill.kind) || parsed.prefill.autoStarted !== true ||
+    typeof parsed.prefill.url !== 'string' || parsed.prefill.url.length === 0 || parsed.prefill.url.length > 4_096 ||
+    sanitizeEvidenceUrl(parsed.prefill.url) !== parsed.prefill.url) return null;
+  return {
+    requestId: parsed.requestId, panelTabId: parsed.panelTabId,
+    kind: parsed.prefill.kind, url: parsed.prefill.url, autoStarted: true,
+  };
+}
+
+export function contextProtocolMessageType(message) {
+  if (!message || typeof message !== 'object' || Array.isArray(message)) return null;
+  let descriptor;
+  try { descriptor = Object.getOwnPropertyDescriptor(message, 'type'); } catch { return null; }
+  return descriptor && Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'string'
+    ? descriptor.value
+    : null;
+}
+
+export function createContextPrefillAck(requestId, panelTabId, accepted) {
+  return createContextProtocolAck('CONTEXT_PREFILL_ACK', requestId, panelTabId, accepted);
+}
+
+export function createContextPrefillCommitAck(requestId, panelTabId, accepted) {
+  return createContextProtocolAck('CONTEXT_PREFILL_COMMIT_ACK', requestId, panelTabId, accepted);
+}
+
+export function shouldApplyRestoredAudit({ requestedEpoch, currentEpoch, contextPending, activeAuditId }) {
+  return Number.isSafeInteger(requestedEpoch) && requestedEpoch >= 0 && requestedEpoch === currentEpoch &&
+    contextPending === false && activeAuditId === null;
+}
+
+export function reduceContextCommitDelivery(contextPrefill, requestId, delivery) {
+  if (!contextPrefill || contextPrefill.requestId !== requestId) {
+    return { contextPrefill: contextPrefill ?? null, releaseGate: false };
+  }
+  let descriptors;
+  try { descriptors = Object.getOwnPropertyDescriptors(delivery); } catch { descriptors = null; }
+  const exactDelivery = descriptors && Object.keys(descriptors).sort().join(',') === 'response,runtimeFailed' &&
+    Object.values(descriptors).every(descriptor => Object.hasOwn(descriptor, 'value'));
+  const response = exactDelivery ? clonePersonaRecord(descriptors.response.value) : null;
+  const successful = exactDelivery && descriptors.runtimeFailed.value === false &&
+    personaExactKeys(response, ['ok']) && response.ok === true;
+  return successful
+    ? { contextPrefill, releaseGate: false }
+    : { contextPrefill: null, releaseGate: true };
+}
+
+export function sendContextProtocolAck(chromeApi, message, callback) {
+  if (typeof chromeApi?.runtime?.sendMessage !== 'function' || typeof callback !== 'function') {
+    throw new TypeError('Transporte do protocolo de contexto indisponível.');
+  }
+  let settled = false;
+  const finish = (value, runtimeFailed) => {
+    if (settled) return;
+    settled = true;
+    callback(value, runtimeFailed);
+  };
+  const chromeCallback = value => {
+    let runtimeFailed = true;
+    try { runtimeFailed = Boolean(chromeApi.runtime.lastError); } catch { /* falha fechada */ }
+    finish(value, runtimeFailed);
+  };
+  try {
+    const result = chromeApi.runtime.sendMessage(message, chromeCallback);
+    if (result && typeof result.then === 'function') {
+      result.catch(() => {});
+    }
+  } catch {
+    finish(undefined, true);
+  }
+}
+
+export function resolveCurrentPanelTabId(chromeApi, timeoutMs = 3_000) {
+  if (typeof chromeApi?.tabs?.getCurrent !== 'function') return Promise.resolve(null);
+  return new Promise(resolve => {
+    let settled = false;
+    const timer = setTimeout(() => finish(null), Math.max(1, timeoutMs));
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const callback = tab => {
+      try {
+        if (chromeApi.runtime?.lastError) return finish(null);
+      } catch { return finish(null); }
+      let descriptor;
+      try { descriptor = Object.getOwnPropertyDescriptor(tab, 'id'); } catch { return finish(null); }
+      const tabId = descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : null;
+      finish(Number.isSafeInteger(tabId) && tabId >= 0 ? tabId : null);
+    };
+    try {
+      const result = chromeApi.tabs.getCurrent(callback);
+      if (result && typeof result.then === 'function') result.catch(() => {});
+    } catch { finish(null); }
+  });
+}
+
+export function parseContextPrefillCommitMessage(message, currentPanelTabId) {
+  const parsed = clonePersonaRecord(message);
+  if (!personaExactKeys(parsed, ['type', 'requestId', 'panelTabId']) ||
+    parsed.type !== 'AUDIT_CONTEXT_PREFILL_COMMIT' || !personaIdentifier(parsed.requestId) ||
+    !Number.isSafeInteger(parsed.panelTabId) || parsed.panelTabId < 0 ||
+    parsed.panelTabId !== currentPanelTabId) return null;
+  return { requestId: parsed.requestId, panelTabId: parsed.panelTabId };
+}
+
+function createContextProtocolAck(type, requestId, panelTabId, accepted) {
+  if (!personaIdentifier(requestId) || !Number.isSafeInteger(panelTabId) || panelTabId < 0 ||
+    typeof accepted !== 'boolean') return null;
+  return { type, requestId, panelTabId, accepted };
 }
 
 export function reducePanelState(current, message, extensionBaseUrl = '') {

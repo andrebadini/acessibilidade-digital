@@ -1,15 +1,24 @@
 import { normalizeAuditUrl } from '../core/url.js';
 import {
   createInitialPersonaState,
+  createContextPrefillAck,
+  createContextPrefillCommitAck,
   createPersonaHello,
+  contextProtocolMessageType,
   expectPersonaHello,
   createSubmissionGate,
   isMessageForAudit,
   isSafeReportUrl,
+  parseContextPrefillCommitMessage,
+  parseContextPrefillMessage,
   queuePersonaCommand,
+  reduceContextCommitDelivery,
   reducePersonaState,
   reducePanelState,
   restoreExportEventState,
+  resolveCurrentPanelTabId,
+  sendContextProtocolAck,
+  shouldApplyRestoredAudit,
 } from './panel-state.js';
 
 const form = document.querySelector('#audit-form');
@@ -23,6 +32,10 @@ let panelState = null;
 let personaState = createInitialPersonaState();
 let personaPort = null;
 let personaRequestSequence = 0;
+let contextPrefill = null;
+let currentPanelTabIdPromise = null;
+const seenContextPrefills = new Set();
+let panelLifecycleEpoch = 0;
 
 const personaSection = document.querySelector('#persona-section');
 const personaModeButtons = Array.from(document.querySelectorAll('[data-persona-mode]'));
@@ -74,6 +87,7 @@ function finishActiveAudit() {
 form.addEventListener('submit', (event) => {
   event.preventDefault();
   if (!submissionGate.tryAcquire()) return;
+  panelLifecycleEpoch += 1;
   let url;
   try {
     url = normalizeAuditUrl(input.value);
@@ -110,28 +124,113 @@ form.addEventListener('submit', (event) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, sender) => {
+  const messageType = contextProtocolMessageType(message);
+  if (messageType === null) return false;
+  if (messageType === 'AUDIT_CONTEXT_PREFILL') {
+    void handleContextPrefill(message, sender);
+    return false;
+  }
+  if (messageType === 'AUDIT_CONTEXT_PREFILL_COMMIT') {
+    void handleContextPrefillCommit(message, sender);
+    return false;
+  }
   if (!message || typeof message !== 'object' || !isMessageForAudit(message, activeAuditId ?? panelState?.auditId)) return;
   panelState = reducePanelState(panelState, message, chrome.runtime.getURL('/'));
   setStatus(panelState.message);
-  if (message.type === 'AUDIT_PROGRESS') return;
-  if (message.type === 'AUDIT_COMPLETE') {
+  if (messageType === 'AUDIT_PROGRESS') return;
+  if (messageType === 'AUDIT_COMPLETE') {
     if (panelState.reviewUrl) showReport(panelState.reviewUrl);
     else clearReport();
     finishActiveAudit();
     return;
   }
-  if (message.type === 'AUDIT_FAILED') {
+  if (messageType === 'AUDIT_FAILED') {
     clearReport();
     setStatus(typeof message.error === 'string' ? message.error : 'A auditoria não pôde ser concluída.');
     finishActiveAudit();
   }
 });
 
+async function handleContextPrefill(message, sender) {
+  if (!isAuthorizedWorkerMessage(sender)) return;
+  const panelTabId = await currentPanelTabId();
+  const parsed = parseContextPrefillMessage(message, panelTabId);
+  if (!parsed) return;
+  if (seenContextPrefills.has(parsed.requestId) || contextPrefill || !submissionGate.tryAcquire()) {
+    sendContextAck(createContextPrefillAck(parsed.requestId, panelTabId, false));
+    return;
+  }
+  panelLifecycleEpoch += 1;
+  seenContextPrefills.add(parsed.requestId);
+  while (seenContextPrefills.size > 128) seenContextPrefills.delete(seenContextPrefills.values().next().value);
+  contextPrefill = { requestId: parsed.requestId, panelTabId, committed: false };
+  input.value = parsed.url;
+  clearReport();
+  setSubmitting(true);
+  setStatus(parsed.kind === 'link'
+    ? 'Preparando a auditoria do link solicitado pelo menu de contexto.'
+    : 'Preparando a auditoria da página solicitada pelo menu de contexto.');
+  sendContextAck(createContextPrefillAck(parsed.requestId, panelTabId, parsed.autoStarted), (response, runtimeFailed) => {
+    if (!contextPrefill || contextPrefill.requestId !== parsed.requestId) return;
+    contextPrefill = null;
+    if (runtimeFailed || !response || response.ok !== true || typeof response.auditId !== 'string') {
+      finishActiveAudit();
+      setStatus(response?.error || 'Não foi possível iniciar a auditoria pelo menu de contexto.');
+      return;
+    }
+    activeAuditId = response.auditId;
+    panelState = {
+      auditId: activeAuditId, status: 'running', percent: 0,
+      message: 'Auditoria preparada. A coleta será iniciada em breve.', reviewUrl: null,
+    };
+    setStatus(panelState.message);
+  });
+}
+
+async function handleContextPrefillCommit(message, sender) {
+  if (!isAuthorizedWorkerMessage(sender)) return;
+  const panelTabId = await currentPanelTabId();
+  const parsed = parseContextPrefillCommitMessage(message, panelTabId);
+  const accepted = Boolean(parsed && contextPrefill && !contextPrefill.committed &&
+    contextPrefill.requestId === parsed.requestId && contextPrefill.panelTabId === parsed.panelTabId);
+  if (accepted) contextPrefill.committed = true;
+  const requestId = parsed?.requestId;
+  if (requestId) sendContextAck(createContextPrefillCommitAck(requestId, panelTabId, accepted), (response, runtimeFailed) => {
+    const outcome = reduceContextCommitDelivery(contextPrefill, requestId, { response, runtimeFailed });
+    contextPrefill = outcome.contextPrefill;
+    if (!outcome.releaseGate) return;
+    finishActiveAudit();
+    setStatus('A conexão com a auditoria do menu foi interrompida; o formulário está disponível novamente.');
+  });
+}
+
+function isAuthorizedWorkerMessage(sender) {
+  if (!sender || sender.id !== chrome.runtime.id || sender.tab) return false;
+  if (sender.url === undefined) return true;
+  return sender.url === chrome.runtime.getURL('src/background/service-worker.js');
+}
+
+function currentPanelTabId() {
+  if (currentPanelTabIdPromise) return currentPanelTabIdPromise;
+  currentPanelTabIdPromise = resolveCurrentPanelTabId(chrome);
+  return currentPanelTabIdPromise;
+}
+
+function sendContextAck(message, callback = () => {}) {
+  if (!message) return;
+  sendContextProtocolAck(chrome, message, callback);
+}
+
 function restoreLatest() {
+  const requestedEpoch = panelLifecycleEpoch;
   try {
     chrome.runtime.sendMessage({ type: 'GET_LAST_AUDIT' }, response => {
       if (chrome.runtime.lastError || !response?.ok || !response.state?.auditId) return;
+      if (!shouldApplyRestoredAudit({
+        requestedEpoch, currentEpoch: panelLifecycleEpoch,
+        contextPending: Boolean(contextPrefill), activeAuditId,
+      })) return;
       const saved = response.state;
       panelState = {
         auditId: saved.auditId,

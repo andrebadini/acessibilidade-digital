@@ -32,7 +32,7 @@ test('runs reversible personas in the explicit target under real MV3 and strict 
   const strictCsp = `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-src 'self' ${new URL(crossUrl).origin}; base-uri 'none'; form-action 'none'; connect-src 'none'`;
   const fixtureTemplate = await readFile(join(fixtures, 'personas-csp.html'), 'utf8');
   const fixtureHtml = fixtureTemplate.replace('__CROSS_FRAME_URL__', crossUrl);
-  const fixtureScript = await readFile(join(fixtures, 'personas-csp.js'));
+  const fixtureScript = await readFile(join(fixtures, 'personas-csp.fixture'));
   const frameHtml = await readFile(join(fixtures, 'personas-frame.html'));
   const mainServer = createServer((request, response) => {
     const pathname = new URL(request.url, 'http://fixture.invalid').pathname;
@@ -134,6 +134,20 @@ test('runs reversible personas in the explicit target under real MV3 and strict 
   let worker = await attach(browser, workerInfo.targetId);
   await worker.command('Runtime.enable');
   await waitForValue(worker, `chrome.action.onClicked.hasListeners()`, value => value === true, 15_000);
+  await waitForValue(worker, `chrome.contextMenus.onClicked.hasListeners()`, value => value === true, 15_000);
+  const registeredContextMenus = await evaluate(worker, `Promise.all([
+    'audita.accessibility.audit-page',
+    'audita.accessibility.audit-link'
+  ].map(id => new Promise(resolve => {
+    chrome.contextMenus.update(id, { visible: true }, () => {
+      const failed = Boolean(chrome.runtime.lastError);
+      resolve({ id, registered: !failed });
+    });
+  })))`, true);
+  assert.deepEqual(registeredContextMenus, [
+    { id: 'audita.accessibility.audit-page', registered: true },
+    { id: 'audita.accessibility.audit-link', registered: true },
+  ], 'o Chrome real precisa manter os dois IDs instalados pelo callback de onInstalled');
   debug('production chrome.action listener ready');
   await waitForValue(target, `location.href === ${JSON.stringify(fixtureUrl)} && document.readyState === 'complete' && Boolean(globalThis.__personaFixtureState)`, Boolean, 15_000);
   const sourceTabs = await evaluate(worker, `chrome.tabs.query({}).then(tabs => tabs.map(tab => ({ id: tab.id, url: tab.url })))`, true);

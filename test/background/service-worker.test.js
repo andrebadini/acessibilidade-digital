@@ -10,6 +10,8 @@ const createChrome = () => {
   const action = {};
   const message = {};
   const connect = {};
+  const installed = {};
+  const context = {};
   const createdTabs = [];
   return {
     action: { onClicked: { addListener(listener) { action.listener = listener; } } },
@@ -18,11 +20,20 @@ const createChrome = () => {
       getURL: (path) => `chrome-extension://test/${path}`,
       onMessage: { addListener(listener) { message.listener = listener; } },
       onConnect: { addListener(listener) { connect.listener = listener; } },
+      onInstalled: { addListener(listener) { installed.listener = listener; } },
       sent: [],
       async sendMessage(value) { this.sent.push(value); },
     },
-    tabs: { create: async (options) => { createdTabs.push(options); } },
-    listeners: { action, message, connect },
+    contextMenus: {
+      onClicked: { addListener(listener) { context.listener = listener; } },
+      removeAll(callback) { callback?.(); },
+      create(_item, callback) { callback?.(); },
+    },
+    tabs: {
+      create: async (options) => { createdTabs.push(options); },
+      async get() { throw new Error('No tab with id'); },
+    },
+    listeners: { action, message, connect, installed, context },
     createdTabs,
   };
 };
@@ -174,6 +185,84 @@ test('opens the local panel through the centralized persona binding with the exp
   const port = { name: 'audita-persona-v1' };
   chromeApi.listeners.connect.listener(port);
   assert.deepEqual(attached, [port]);
+});
+
+test('routes a context-menu audit through the shared single-audit boundary after a correlated panel ACK', async () => {
+  const chromeApi = createChrome();
+  const tabs = new Map([
+    [7, { id: 7, url: 'https://origem.test/pagina', status: 'complete' }],
+    [50, { id: 50, url: 'chrome-extension://test/src/panel/index.html', status: 'complete' }],
+  ]);
+  chromeApi.tabs.get = async tabId => structuredClone(tabs.get(tabId));
+  const sent = [];
+  chromeApi.runtime.sendMessage = (message, callback) => {
+    sent.push(structuredClone(message));
+    queueMicrotask(() => callback?.());
+  };
+  let runnerUrl;
+  const sessions = new Map();
+  const bindingLease = Object.freeze(Object.create(null));
+  let bindingLeaseLive = false;
+  const personaController = {
+    async openPanel({ sourceTab }) {
+      assert.deepEqual(sourceTab, { id: 7, url: 'https://origem.test/pagina' });
+      return { id: 50 };
+    },
+    async issueBindingLease(value) {
+      assert.deepEqual(value, {
+        panelTabId: 50, targetTabId: 7, sourceUrl: 'https://origem.test/pagina',
+        panelDocumentId: 'panel-document-1',
+      });
+      bindingLeaseLive = true;
+      return bindingLease;
+    },
+    consumeBindingLease(value) {
+      if (value !== bindingLease || !bindingLeaseLive) return false;
+      bindingLeaseLive = false;
+      return true;
+    },
+    attachPanelPort() {},
+  };
+  registerServiceWorker(chromeApi, {
+    createId: () => 'audit-context-1',
+    createContextRequestId: () => 'context-request-1',
+    sessions,
+    personaController,
+    auditStore: withAuditRevisions({ async setLatest() {}, async commitAudit() {} }),
+    chromeAdapterFactory: () => ({}),
+    runner: async ({ url }) => {
+      runnerUrl = url;
+      return { auditId: 'audit-context-1', session: { status: 'failed' }, report: {} };
+    },
+  });
+
+  chromeApi.listeners.context.listener({
+    menuItemId: 'audita.accessibility.audit-link', frameId: 0,
+    pageUrl: 'https://origem.test/pagina',
+    linkUrl: 'https://destino.test/alvo?token=TOPSECRET&view=public#auth=TOPSECRET',
+  }, { id: 7, url: 'https://origem.test/pagina' });
+  await waitUntil(() => sent.some(message => message.type === 'AUDIT_CONTEXT_PREFILL'));
+  const prefill = sent.find(message => message.type === 'AUDIT_CONTEXT_PREFILL');
+  assert.equal(prefill.prefill.url, 'https://destino.test/alvo?view=public');
+  let startResponse;
+  const panelSender = {
+    id: 'test', frameId: 0, documentId: 'panel-document-1',
+    url: 'chrome-extension://test/src/panel/index.html', tab: { id: 50 },
+  };
+  assert.equal(chromeApi.listeners.message.listener({
+    type: 'CONTEXT_PREFILL_ACK', requestId: 'context-request-1', panelTabId: 50, accepted: true,
+  }, panelSender, value => { startResponse = value; }), true);
+  await waitUntil(() => sent.some(message => message.type === 'AUDIT_CONTEXT_PREFILL_COMMIT'));
+  assert.equal(chromeApi.listeners.message.listener({
+    type: 'CONTEXT_PREFILL_COMMIT_ACK', requestId: 'context-request-1', panelTabId: 50, accepted: true,
+  }, panelSender, () => {}), true);
+  await waitUntil(() => runnerUrl !== undefined);
+
+  assert.equal(runnerUrl, 'https://destino.test/alvo?token=TOPSECRET&view=public#auth=TOPSECRET');
+  assert.deepEqual(startResponse, { ok: true, auditId: 'audit-context-1', state: 'idle' });
+  assert.doesNotMatch(JSON.stringify([...sessions.values(), ...sent]), /TOPSECRET|token=|auth=/iu);
+  assert.equal(sent.some(message => message.type === 'START_AUDIT'), false,
+    'autoStarted nunca reenvia START_AUDIT pelo painel');
 });
 
 test('validates START_AUDIT, stores an armed session, and keeps the response channel open', async () => {
