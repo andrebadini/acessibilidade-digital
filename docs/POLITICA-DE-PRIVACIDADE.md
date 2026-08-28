@@ -1,6 +1,6 @@
 # Política de Privacidade — Audita Acessibilidade
 
-Versão 1.1, atualizada em 28 de agosto de 2026.
+Versão 1.2, atualizada em 28 de agosto de 2026.
 
 ## 1. Finalidade
 
@@ -20,7 +20,7 @@ Durante uma auditoria, a extensão pode tratar:
 - nomes acessíveis, funções, estados e prévias explicativas do anúncio esperado por tecnologia assistiva;
 - respostas de revisão, notas, data da decisão e nome informado pelo avaliador.
 
-Para as categorias da Chrome Web Store, esse tratamento corresponde a **Histórico da Web** (a URL escolhida e os horários da auditoria) e **Conteúdo do site** (texto, estrutura, imagens, mídia e demais recursos da página auditada). Esses dados são processados e armazenados localmente mesmo quando não são transmitidos a terceiros.
+Esse tratamento inclui dados de navegação (a URL escolhida e os horários da auditoria) e conteúdo do site (texto, estrutura, imagens, mídia e demais recursos da página auditada). Esses dados são processados e armazenados localmente mesmo quando não são transmitidos a terceiros.
 
 As capturas podem conter dados pessoais ou sigilosos que estejam visíveis na página. Por isso, o usuário deve ocultar ou remover informações sensíveis antes de iniciar a auditoria.
 
@@ -87,8 +87,8 @@ Essas ações destrutivas não apagam arquivos que já estejam na pasta de downl
 
 ## 9. Alterações
 
-Alterações materiais desta política serão acompanhadas de nova data e versão. A versão aplicável deve permanecer disponível na página pública informada na Chrome Web Store.
+Alterações materiais desta política serão acompanhadas de nova data e versão. A versão aplicável deve permanecer disponível junto ao canal público de distribuição da extensão.
 
 ## 10. Contato
 
-Solicitações sobre privacidade, suporte ou exclusão de dados podem ser enviadas pelo endereço público de contato do desenvolvedor exibido na página da Audita Acessibilidade na Chrome Web Store.
+Solicitações sobre privacidade, suporte ou exclusão de dados podem ser enviadas pelo canal público de contato informado junto ao pacote ou à página de distribuição da Audita Acessibilidade.

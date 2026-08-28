@@ -70,5 +70,7 @@ test('publishes a complete privacy policy in Markdown and standalone HTML', asyn
       /controle do usuário/iu,
       /contato/iu,
     ]) assert.match(policy, expectation, `${path}: ${expectation}`);
+    assert.doesNotMatch(policy, /Chrome Web Store/iu,
+      `${path}: a política não pode prometer publicação ou contato por uma loja específica`);
   }
 });
