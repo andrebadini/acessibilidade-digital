@@ -46,7 +46,9 @@ Fontes públicas consultadas:
 - `https://accessmonitor.acessibilidade.gov.pt/`;
 - `https://github.com/amagovpt/accessmonitor-ce/blob/main/user_guide.md`;
 - `https://chromewebstore.google.com/detail/acessibilidade-auditoria/adddfplfbobbfpfgnejjnhajmlgdifpp`;
-- `https://developer.chrome.com/docs/extensions/reference/api/sidePanel`.
+- `https://developer.chrome.com/docs/extensions/reference/api/sidePanel`;
+- `https://www2.camara.leg.br/legin/fed/lei/1990/lei-8078-11-setembro-1990-365086-normaatualizada-pl.html`;
+- `https://www2.camara.leg.br/legin/fed/decret/1997/decreto-2181-20-marco-1997-445015-normaatualizada-pe.html`.
 
 ## 3. Princípios de experiência
 
@@ -81,7 +83,7 @@ O popup prepara `windowId` e as capacidades antes de habilitar os botões e as r
 
 O menu de contexto permanece como atalho para página ou link HTTP/HTTPS e abre o mesmo painel no próprio `onClicked`, antes de operações assíncronas. Depois o worker prepara a capacidade ou valida a URL do link e enfileira a intenção; falha de preparo deixa o painel aberto com explicação, sem auditoria parcial. Ele não será a única forma de iniciar funções.
 
-O primeiro controle de persona reclama a capacidade `start-persona` e cria um `PersonaTargetLeaseV1` do mesmo `tabId` + `documentId`. Alternar ou desativar Leitura simulada, Acromatopsia e Somente teclado usa somente esse lease, com transições fechadas, sem reutilizar a capacidade inicial. O lease não depende de o popup permanecer aberto nem de uma aba artificial do painel; ao reabrir, um contexto autorizado pode reidratá-lo depois de validar novamente o documento. Ele termina no menor valor entre fim da sessão, fim do documento e 30 minutos desde a última ação explícita de persona; cada extensão de prazo exige nova interação em controle de persona. Navegação, fechamento, expiração ou início de auditoria revogam o lease e limpam a simulação. Auditoria e persona disputando o mesmo alvo são serializadas: iniciar auditoria primeiro encerra e confirma a limpeza da persona e só então reclama uma capacidade `start-audit` ainda válida.
+O primeiro controle de persona reclama a capacidade `start-persona` e cria um `PersonaLeaseV1` do mesmo `tabId` + `documentId`. Alternar ou desativar Leitura simulada, Acromatopsia e Somente teclado usa somente esse lease, com transições fechadas, sem reutilizar a capacidade inicial. O lease não depende de o popup permanecer aberto nem de uma aba artificial do painel; ao reabrir, um contexto autorizado pode reidratá-lo depois de validar novamente o documento. Ele termina no menor valor entre fim da sessão, fim do documento e 30 minutos desde a última ação explícita de persona; cada extensão de prazo exige nova interação em controle de persona. Navegação, fechamento, expiração ou início de auditoria revogam o lease e limpam a simulação. Auditoria e persona disputando o mesmo alvo são serializadas: iniciar auditoria primeiro encerra e confirma a limpeza da persona e só então reclama uma capacidade `start-audit` ainda válida.
 
 ### 4.2 Painel lateral persistente
 
@@ -91,7 +93,7 @@ O popup abre o painel para a janela corrente, de modo que ele permaneça visíve
 
 Uma capacidade interna `AuditTargetCapabilityV1` vincula o gesto a um alvo:
 
-```js
+```text
 {
   capabilityId, kind: 'attached' | 'disposable', tabId, windowId,
   documentId, initialUrlEvidence, initialUrlSessionDigest,
@@ -104,7 +106,7 @@ Uma capacidade interna `AuditTargetCapabilityV1` vincula o gesto a um alvo:
 
 O objeto real fica em `chrome.storage.session`; a UI recebe apenas `capabilityId`. Cada ID contém pelo menos 128 bits aleatórios gerados por CSPRNG e nunca aparece em log, diagnóstico, nome de arquivo ou exportação. Na inicialização, o worker aplica `chrome.storage.session.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'})`. A capacidade é de uso único, expira 60 segundos após emissão e é invalidada em navegação, troca de documento, remoção de aba, mudança de janela incompatível ou consumo. O claim é atômico e, na mesma transação, valida `port.sender`/`MessageSender`, o emissor discriminado, caminho interno exato quando aplicável, janela, intenção permitida, documento, estado e prazo. Um ID apresentado por outra página interna ou por intenção diferente falha fechado. Eventos confiáveis do próprio worker, como menu de contexto, usam `worker-event` em vez de fingir um documento emissor e continuam sujeitos à mesma intenção, alvo, prazo e atomicidade. Abas `attached` nunca são navegadas, fechadas ou reutilizadas pela extensão; abas `disposable` só podem ser controladas pela sessão que as criou.
 
-Ao reclamar uma capacidade para auditoria, o worker cria `AuditSessionCapabilityV1`, também com pelo menos 128 bits aleatórios, vinculada a `auditId`, janela, modo, consumidores internos autorizados, intenções permitidas e estado `running|result|view-only|revoked`. `cancel` existe apenas em `running`; `highlight` apenas em `result` com binding vivo; `open-report` em `result` ou `view-only`; nenhuma ação existe em `revoked`. O painel recebe apenas o ID e pode reidratá-lo somente quando o worker correlacionar o remetente atual, seu caminho interno, a janela e a auditoria. Ao abrir o relatório, o worker cria a aba e registra internamente seu `tabId`; a primeira conexão autoriza o `documentId` observado, sem bearer em URL. Após reinício do navegador, uma auditoria persistida pode receber nova capacidade **view-only** depois da validação do modelo; ela não ressuscita execução nem binding de destaque perdido.
+Ao reclamar uma capacidade para auditoria, o worker cria `AuditSessionCapabilityV1`, também com pelo menos 128 bits aleatórios, vinculada a `auditId`, janela, modo, consumidores internos autorizados, intenções permitidas e estado `running|privacy-paused|result|view-only|revoked`. `cancel` existe em `running` e `privacy-paused`; `confirm-pixels` existe somente em `privacy-paused`; `highlight` apenas em `result` com binding vivo; `open-report` em `result` ou `view-only`; nenhuma ação existe em `revoked`. O painel recebe apenas o ID e pode reidratá-lo somente quando o worker correlacionar o remetente atual, seu caminho interno, a janela e a auditoria. Ao abrir o relatório, o worker cria a aba e registra internamente seu `tabId`; a primeira conexão autoriza o `documentId` observado, sem bearer em URL. Após reinício do navegador, uma auditoria persistida pode receber nova capacidade **view-only** depois da validação do modelo; ela não ressuscita execução nem binding de destaque perdido.
 
 #### Estado inicial
 
@@ -183,6 +185,8 @@ Uma ocorrência expandida mostra, nesta ordem:
 
 A referência consumerista só aparece para estado consolidado `failed`, item ABNT oficial, mapeamento normativo congelado e `basisRef` validada pelo catálogo local. Revisão humana exige autor/identificador local, instante e justificativa. Todos os formatos chamam esse bloco de **“referência técnica e jurídica qualificada”** e preservam a ressalva de que não constitui conclusão de infração, responsabilidade, sanção ou certificação.
 
+Quando elegível, o texto-base é fixo e varia somente o item oficial da ABNT: **“A referida desconformidade infringe o disposto nos arts. 7º, caput, 20, § 2º, e 39, VIII, da Lei nº 8.078/1990, c/c o art. 12, IX, “a”, do Decreto nº 2.181/1997, e no item {itemABNT} da ABNT NBR 17225:2025.”** Os dispositivos da lei e do decreto nunca são escolhidos dinamicamente; o catálogo local apenas substitui `{itemABNT}` depois das validações de elegibilidade acima.
+
 A ação **“Ver e destacar na página”** aparece somente quando a resolução segura informa um alvo disponível. Ocorrências de página/processo, alvos sem seletor, binding expirado ou frame inacessível usam **“Consultar evidências”** e mostram a razão objetiva: **“Esta verificação não possui um elemento único destacável no estado atual.”** Revisões manuais exibem também a pergunta objetiva e os controles de decisão humana, preservando separadamente resultado do motor, decisão e estado consolidado.
 
 ### 4.3 Relatório em aba própria
@@ -224,7 +228,7 @@ Popup, painel e relatório nunca enviam seletor, URL, `tabId`, `frameId` ou `doc
 
 O modelo normativo V2 não recebe IDs efêmeros do Chrome. Um `HighlightBindingV1`, mantido separadamente em `chrome.storage.session`, liga a sessão viva à evidência:
 
-```js
+```text
 {
   auditId, pageId, tabId, windowId, topDocumentId,
   topUrlEvidence, topUrlSessionDigest,
@@ -277,7 +281,7 @@ A captura integral original permanece sem marcações e com hash próprio. A cap
 
 ### Página aberta
 
-`START_AUDIT_OPEN_TAB` aceita somente uma `AuditTargetCapabilityV1` válida. O worker revalida aba, janela, URL HTTP/HTTPS e `documentId`, reclama a capacidade atomicamente e chama um runner anexado com `{mode:'open-tab', tabId, expectedDocumentId, closeAuditTab:false}`. Esse runner nunca usa `tabs.update()` ou `tabs.remove()` na aba anexada, inclusive em cancelamento, falha de CDP, timeout ou suspensão. Debugger já anexado por outra ferramenta produz erro controlado antes de efeitos.
+`POPUP_START_AUDIT` e `PANEL_START_ATTACHED_AUDIT` aceitam somente uma `AuditTargetCapabilityV1` válida. O worker revalida aba, janela, URL HTTP/HTTPS e `documentId`, reclama a capacidade atomicamente e chama o runner com um target `attached`. Esse runner nunca usa `tabs.update()` ou `tabs.remove()` na aba anexada, inclusive em cancelamento, falha de CDP, timeout ou suspensão. Debugger já anexado por outra ferramenta produz erro controlado antes de efeitos.
 
 A auditoria observa a aba sem navegar ou fechá-la. Isso preserva o estado visível e permite destaque confiável após o resultado. A coleta não aciona controles nem envia formulários. Aba fechada ou documento alterado entre preparo e claim invalida a capacidade e não inicia auditoria.
 
@@ -285,11 +289,11 @@ Antes da captura original, a extensão remove e confirma a limpeza de qualquer d
 
 ### URL informada
 
-`START_AUDIT_URL` aceita somente URL normalizada pelo worker. O runner cria uma aba visível `disposable`, registra a propriedade antes de navegar e pode atualizá-la. Em sucesso ou resultado parcial com documento observado, transfere a aba para estado `retained-for-review` e não a fecha sem ação explícita. Em falha anterior à observação, cancela e remove apenas a aba que ele comprovadamente criou. O painel acompanha o binding do documento observado para destaque.
+`PANEL_START_URL_AUDIT` aceita somente URL normalizada pelo worker. O runner cria uma aba visível `disposable`, registra a propriedade antes de navegar e pode atualizá-la. Em sucesso ou resultado parcial com documento observado, transfere a aba para estado `retained-for-review` e não a fecha sem ação explícita. Em falha anterior à observação, cancela e remove apenas a aba que ele comprovadamente criou. O painel acompanha o binding do documento observado para destaque.
 
 ### Lote
 
-`START_BATCH` usa abas `disposable` sequenciais e as fecha depois de confirmar cleanup. Para uma ocorrência sem binding vivo, a ação muda para **“Abrir estado atual e tentar localizar”** e exige gesto explícito. A extensão abre a URL final em aba nova, marca a operação como `current-state-assist` e tenta criar uma nova identidade CDP + assinatura para o estado corrente; ela nunca a apresenta como o documento histórico. A interface mantém visível: **“Estado atual da página; a captura do relatório é a evidência da auditoria.”** Falha ou ambiguidade não produz destaque.
+`PANEL_START_BATCH_AUDIT` usa abas `disposable` sequenciais e as fecha depois de confirmar cleanup. Para uma ocorrência sem binding vivo, a ação muda para **“Informar URL e tentar localizar no estado atual”** e exige gesto explícito mais uma URL nova fornecida pela pessoa. `EvidenceUrlV1` nunca é reutilizada como URL de navegação: ela pode estar redigida e a URL bruta original já deve ter sido apagada. O worker normaliza a nova URL, guarda-a no raw vault apenas até o consumo e abre uma aba própria marcada `current-state-assist`. Nessa aba, tenta provar uma correspondência única usando somente o seletor conservador da ocorrência histórica, cria identidade CDP + assinatura novas para o estado corrente e aplica um overlay transitório; esse proof não entra no modelo, não substitui evidência e nunca é apresentado como o documento histórico. A interface mantém visível: **“Estado atual da página; a captura do relatório é a evidência da auditoria.”** Falha, ambiguidade ou seletor histórico inseguro encerra o auxílio sem produzir destaque.
 
 Páginas protegidas (`chrome://`, loja, PDF nativo, DRM), frames inacessíveis e estados autenticados não reproduzíveis geram limitação, nunca aprovação.
 
@@ -308,17 +312,19 @@ A troca das superfícies não reduz o núcleo funcional aprovado. Permanecem obr
 
 ## 7. Modelo de apresentação
 
-O modelo V2 validado permanece a autoridade. A reformulação adiciona uma projeção pura e determinística, `buildReportView(model)`, sem persistir fatos novos:
+O modelo V2 validado permanece a autoridade. A reformulação adiciona uma projeção pura e determinística, `buildReportView({model,summary,modelRevision,modelHash})`, sem persistir fatos novos:
 
 ```text
 AuditModel V2 validado
         │
-        ├── buildPanelSummaryV1(model, progress, verifiedCoreRuleInventory)
-        ├── buildReportView(model)
+        ├── buildPanelSummary({model,executionCheckpoint,inventory})
+        ├── buildReportView({model,summary,modelRevision,modelHash})
         └── resolveHighlightTarget(model, HighlightBindingV1, occurrenceId)
 ```
 
-`buildPanelSummaryV1` materializa os pares e checkKeys definidos na seção 4.2, com versão, arredondamento, contagens de alvos e estados indisponíveis explícitos.
+`buildPanelSummary` materializa os pares e checkKeys definidos na seção 4.2, com versão, arredondamento, contagens de alvos e estados indisponíveis explícitos. A classificação visual é a união fechada `failed|alert|manual-review|passed`; o contexto comprovável é `page-or-process|top-document|same-origin-frame|open-shadow-root|mixed`. Conteúdo cross-origin, sandbox ou Shadow DOM fechado que não tenha sido observado aparece como limitação explícita, nunca como ocorrência inventada.
+
+Cartões e detalhe expõem somente essas projeções seguras em `data-classification` e `data-context`. Os filtros do painel têm seletores estáveis separados para `data-filter-dimension="impact"`, `"wcag"` e `"abnt"`, e valores provenientes apenas das distribuições validadas; seletor técnico, URL, IDs Chrome e autoridades opacas nunca entram nesses atributos.
 
 `buildReportView` produz:
 
@@ -362,12 +368,12 @@ O manifesto passa a conter, entre os demais campos existentes:
     "storage",
     "tabs"
   ],
-  "side_panel": { "default_path": "src/sidepanel/index.html" },
+  "side_panel": { "default_path": "src/panel/index.html" },
   "action": { "default_popup": "src/popup/index.html" }
 }
 ```
 
-Os campos são incorporados às permissões existentes; `alarms`, `tabs`, `scripting`, `debugger`, `downloads`, `storage`, `contextMenus` e hosts HTTP/HTTPS continuam necessários. `alarms` agenda somente retenção local. Não haverá `content_scripts` permanentes, `web_accessible_resources`, código remoto ou relaxamento de CSP. Destaque e personas são injetados localmente sob demanda.
+Os campos são incorporados às permissões existentes; `alarms`, `tabs`, `scripting`, `debugger`, `downloads`, `storage`, `contextMenus` e hosts HTTP/HTTPS continuam necessários. Existe um único `chrome.alarms.onAlarm` registrado pelo service worker; ele aceita somente os nomes fechados `audita-persona-expiry-v1`, `audita-highlight-expiry-v1`, `audita-pixel-consent-expiry-v1` e `audita-retention-cleanup-v1` e delega, respectivamente, a expiração/limpeza segura de personas, destaques, consentimentos de pixel suspensos e retenção local. Nome desconhecido não produz efeito, e nenhum módulo registra listener próprio. Não haverá `content_scripts` permanentes, `web_accessible_resources`, código remoto ou relaxamento de CSP. Destaque e personas são injetados localmente sob demanda.
 
 Junto à ação de avaliar, a interface informa: **“A auditoria pode capturar pixels e conteúdo visível, inclusive dados pessoais. Tudo permanece neste dispositivo.”** O clique inicia com essa informação presente e oferece **Opções de privacidade**:
 
@@ -441,7 +447,7 @@ Textos, documentação e pequenos ajustes visuais:
 - `sidePanel.open()` é a primeira operação no handler elegível e falha não inicia auditoria;
 - acesso de `chrome.storage.session` fica em `TRUSTED_CONTEXTS`; capabilities têm pelo menos 128 bits CSPRNG, não vazam em diagnóstico e rejeitam remetente, contexto, janela ou intenção divergentes;
 - emissão, claim atômico único, expiração e invalidação de `AuditTargetCapabilityV1`, incluindo reload na mesma URL;
-- `PersonaTargetLeaseV1` cobre Leitura simulada → Acromatopsia → Somente teclado → auditoria, sem reutilizar capability, sem dois owners e sem overlay residual;
+- `PersonaLeaseV1` cobre Leitura simulada → Acromatopsia → Somente teclado → auditoria, sem reutilizar capability, sem dois owners e sem overlay residual;
 - `AuditSessionCapabilityV1` limita cancelar/destacar/abrir relatório; após reinício, reidratação é somente leitura e não ressuscita execução ou binding;
 - runner `attached` nunca navega/fecha a aba; runner `disposable` só remove aba de propriedade comprovada;
 - reidratação do painel após fechamento e suspensão do worker, sem retomada inventada;
@@ -460,10 +466,10 @@ Textos, documentação e pequenos ajustes visuais:
 - caixa sólida vermelha e caixa tracejada âmbar com símbolo/texto;
 - overlay não muda o hash/captura pristine nem atributos/estilos do alvo;
 - original, decisão humana e estado consolidado preservados;
-- HTML/CSV/JSON/PDF concordam em status, item, WCAG e IDs de evidência;
+- HTML/PDF/CSV/JSON concordam em status, item, WCAG e IDs de evidência e preservam essa ordem canônica;
 - `ExportReceiptV1` não é circular, registra hashes dos bytes pré-download e estados/IDs observados pelo Chrome antes de autorizar exclusão;
 - `EvidenceUrlV1` remove credenciais, fragmento e query padrão, redige segmentos objetivos, protege digest com chave de sessão e não usa URL em nomes de arquivo;
-- modos de privacidade, sinais objetivos sem leitura de valor, confirmação por `auditId`, expiração por `firstPersistedAt`, alarme de limpeza e exclusão pendente.
+- modos de privacidade, sinais objetivos sem leitura de valor, confirmação por `auditId`, expiração por `firstPersistedAt`, alarmes fechados de segurança/retenção e exclusão pendente.
 
 ### Integração e E2E Chrome
 
