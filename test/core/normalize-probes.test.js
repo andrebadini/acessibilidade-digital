@@ -138,6 +138,147 @@ test('treats revoked reflow and target observations as unknown without executing
   assert.deepEqual(probes.targetSizes.observations, []);
 });
 
+test('snapshots target-size arrays without consulting a hostile iterator', () => {
+  const marker = 'PRIVATE_TARGET_ITERATOR_MESSAGE';
+  let iteratorGetterReads = 0;
+  let iteratorGetTraps = 0;
+  const targetSizes = [{
+    nodeId: 'n-201', width: 20, height: 20, exception: 'none', exceptionProof: 'complete',
+  }];
+  Object.defineProperty(targetSizes, Symbol.iterator, {
+    configurable: true,
+    get() {
+      iteratorGetterReads += 1;
+      throw new Error(marker);
+    },
+  });
+  const proxiedTargets = new Proxy(targetSizes, {
+    get(target, property, receiver) {
+      if (property === Symbol.iterator) iteratorGetTraps += 1;
+      return Reflect.get(target, property, receiver);
+    },
+  });
+
+  const probes = normalizeProbes({ targetSizes: proxiedTargets, warnings: [], actions: [] });
+
+  assert.equal(iteratorGetterReads, 0);
+  assert.equal(iteratorGetTraps, 0);
+  assert.equal(probes.targetSizes.minimum24.outcome, 'cantTell');
+  assert.equal(probes.targetSizes.enhanced44.outcome, 'cantTell');
+  assert.deepEqual(probes.targetSizes.observations, []);
+  assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
+});
+
+test('rejects sparse and accessor target-size slots without reading an index value', () => {
+  const marker = 'PRIVATE_TARGET_INDEX_MESSAGE';
+  let indexGetterReads = 0;
+  const sparse = new Array(1);
+  const accessor = new Array(1);
+  Object.defineProperty(accessor, '0', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      indexGetterReads += 1;
+      throw new Error(marker);
+    },
+  });
+
+  for (const targetSizes of [sparse, accessor]) {
+    const probes = normalizeProbes({ targetSizes, warnings: [], actions: [] });
+    assert.equal(probes.targetSizes.minimum24.outcome, 'cantTell');
+    assert.equal(probes.targetSizes.enhanced44.outcome, 'cantTell');
+    assert.deepEqual(probes.targetSizes.observations, []);
+    assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
+  }
+  assert.equal(indexGetterReads, 0);
+});
+
+test('contains target-size length descriptor failures without propagating private errors', () => {
+  const marker = 'PRIVATE_TARGET_LENGTH_MESSAGE';
+  const targetSizes = new Proxy([{
+    nodeId: 'n-201', width: 20, height: 20, exception: 'none', exceptionProof: 'complete',
+  }], {
+    getOwnPropertyDescriptor(target, property) {
+      if (property === 'length') throw new Error(marker);
+      return Reflect.getOwnPropertyDescriptor(target, property);
+    },
+  });
+
+  const probes = normalizeProbes({ targetSizes, warnings: [], actions: [] });
+
+  assert.equal(probes.targetSizes.minimum24.outcome, 'cantTell');
+  assert.equal(probes.targetSizes.enhanced44.outcome, 'cantTell');
+  assert.deepEqual(probes.targetSizes.observations, []);
+  assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
+});
+
+test('bounds dense target-size collections before copying their slots', () => {
+  const targetSizes = new Array(5_001).fill({
+    nodeId: 'n-201', width: 20, height: 20, exception: 'none', exceptionProof: 'complete',
+  });
+
+  const probes = normalizeProbes({ targetSizes, warnings: [], actions: [] });
+
+  assert.equal(probes.targetSizes.minimum24.outcome, 'cantTell');
+  assert.equal(probes.targetSizes.enhanced44.outcome, 'cantTell');
+  assert.deepEqual(probes.targetSizes.observations, []);
+});
+
+test('uses the same dense boundary for other raw probe collections', () => {
+  const marker = 'PRIVATE_OTHER_COLLECTION_MESSAGE';
+  let getterReads = 0;
+  const focusEvents = new Array(1);
+  const actions = new Array(1);
+  const warnings = new Array(1);
+  for (const values of [focusEvents, actions, warnings]) {
+    Object.defineProperty(values, '0', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        throw new Error(marker);
+      },
+    });
+  }
+
+  const probes = normalizeProbes({
+    focus: { completed: true, focusableCount: 1, events: focusEvents },
+    targetSizes: [], actions, warnings,
+  });
+
+  assert.equal(getterReads, 0);
+  assert.equal(probes.focusOrder.outcome, 'cantTell');
+  assert.equal(probes.keyboardTraps.outcome, 'cantTell');
+  assert.equal(probes.focusAppearance.outcome, 'cantTell');
+  assert.equal(probes.obscuredTargets.outcome, 'cantTell');
+  assert.deepEqual(probes.actions, []);
+  assert.deepEqual(probes.warnings, []);
+  assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
+});
+
+test('does not read accessor slots in nested action threshold collections', () => {
+  const marker = 'PRIVATE_ACTION_THRESHOLD_MESSAGE';
+  let getterReads = 0;
+  const thresholdsCssPx = new Array(1);
+  Object.defineProperty(thresholdsCssPx, '0', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      throw new Error(marker);
+    },
+  });
+
+  const probes = normalizeProbes({
+    targetSizes: [], warnings: [],
+    actions: [{ type: 'measure-targets', thresholdsCssPx }],
+  });
+
+  assert.equal(getterReads, 0);
+  assert.deepEqual(probes.actions, [{ type: 'measure-targets' }]);
+  assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
+});
+
 test('only preserves authoritative SnapshotV1 node IDs and assigns opaque IDs to arbitrary nodeId or selector values', () => {
   const marker = 'PROBE_NODE_PRIVACY_MARKER';
   const raw = {

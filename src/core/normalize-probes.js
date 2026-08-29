@@ -12,6 +12,8 @@ function outcome(value) {
 const REFLOW_EXCEPTIONS = new Set(['essential']);
 const MINIMUM_TARGET_EXCEPTIONS = new Set(['equivalent', 'inline', 'user-agent', 'essential', 'spacing']);
 const ENHANCED_TARGET_EXCEPTIONS = new Set(['equivalent', 'inline', 'user-agent', 'essential']);
+const MAX_PROBE_COLLECTION_ITEMS = 5_000;
+const MAX_TARGET_THRESHOLDS = 16;
 
 function ownData(value, field) {
   try {
@@ -20,6 +22,33 @@ function ownData(value, field) {
     return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
   } catch {
     return undefined;
+  }
+}
+
+function denseOwnDataArray(value, maxItems = MAX_PROBE_COLLECTION_ITEMS) {
+  try {
+    if (!Array.isArray(value)) return { available: false, values: [] };
+    const iteratorDescriptor = Object.getOwnPropertyDescriptor(value, Symbol.iterator);
+    if (iteratorDescriptor && !Object.hasOwn(iteratorDescriptor, 'value')) {
+      return { available: false, values: [] };
+    }
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+    if (!lengthDescriptor || !Object.hasOwn(lengthDescriptor, 'value') ||
+      !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0 ||
+      lengthDescriptor.value > maxItems) {
+      return { available: false, values: [] };
+    }
+    const values = new Array(lengthDescriptor.value);
+    for (let index = 0; index < lengthDescriptor.value; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) {
+        return { available: false, values: [] };
+      }
+      values[index] = descriptor.value;
+    }
+    return { available: true, values };
+  } catch {
+    return { available: false, values: [] };
   }
 }
 
@@ -84,17 +113,26 @@ function jsonData(value, fallback) {
 const ACTION_TYPES = new Set(['guard-navigation', 'key', 'viewport', 'text-resize', 'measure-targets', 'motion', 'restore']);
 
 function sanitizeAction(action) {
-  const type = ACTION_TYPES.has(action?.type) ? action.type : 'probe';
+  const observedType = ownData(action, 'type');
+  const type = ACTION_TYPES.has(observedType) ? observedType : 'probe';
+  const key = ownData(action, 'key');
+  const index = ownData(action, 'index');
+  const widthCssPx = ownData(action, 'widthCssPx');
+  const scalePercent = ownData(action, 'scalePercent');
+  const thresholds = denseOwnDataArray(ownData(action, 'thresholdsCssPx'), MAX_TARGET_THRESHOLDS);
+  const operation = ownData(action, 'operation');
+  const target = ownData(action, 'target');
+  const preference = ownData(action, 'preference');
   return {
     type,
-    ...(type === 'key' && action?.key === 'Tab' ? { key: 'Tab' } : {}),
-    ...(type === 'key' && Number.isSafeInteger(action?.index) ? { index: action.index } : {}),
-    ...(type === 'viewport' && finite(action?.widthCssPx) ? { widthCssPx: action.widthCssPx } : {}),
-    ...(type === 'text-resize' && finite(action?.scalePercent) ? { scalePercent: action.scalePercent } : {}),
-    ...(type === 'measure-targets' && Array.isArray(action?.thresholdsCssPx) ? { thresholdsCssPx: action.thresholdsCssPx.filter(finite) } : {}),
-    ...(type === 'guard-navigation' && action?.operation === 'install' ? { operation: 'install' } : {}),
-    ...(type === 'restore' && ['listeners', 'styles', 'viewport', 'scroll', 'focus'].includes(action?.target) ? { target: action.target } : {}),
-    ...(type === 'motion' && action?.preference === 'reduce' ? { preference: 'reduce' } : {})
+    ...(type === 'key' && key === 'Tab' ? { key: 'Tab' } : {}),
+    ...(type === 'key' && Number.isSafeInteger(index) ? { index } : {}),
+    ...(type === 'viewport' && finite(widthCssPx) ? { widthCssPx } : {}),
+    ...(type === 'text-resize' && finite(scalePercent) ? { scalePercent } : {}),
+    ...(type === 'measure-targets' && thresholds.available ? { thresholdsCssPx: thresholds.values.filter(finite) } : {}),
+    ...(type === 'guard-navigation' && operation === 'install' ? { operation: 'install' } : {}),
+    ...(type === 'restore' && ['listeners', 'styles', 'viewport', 'scroll', 'focus'].includes(target) ? { target } : {}),
+    ...(type === 'motion' && preference === 'reduce' ? { preference: 'reduce' } : {})
   };
 }
 
@@ -102,9 +140,12 @@ function sanitizeAction(action) {
 export function normalizeProbes(raw = {}) {
   const identity = createProbeIdentity();
   const safeId = identity.safeId;
-  const focusEvents = Array.isArray(raw.focus?.events) ? raw.focus.events : [];
+  const focus = ownData(raw, 'focus');
+  const focusCollection = denseOwnDataArray(ownData(focus, 'events'));
+  const focusEvents = focusCollection.values;
   const focusIds = focusEvents.map(safeId).filter(Boolean);
-  const focusComplete = raw.focus?.completed === true;
+  const focusComplete = focusCollection.available && ownData(focus, 'completed') === true;
+  const focusableCount = ownData(focus, 'focusableCount');
   const repeated = [];
   for (let index = 1; index < focusIds.length; index += 1) {
     if (focusIds[index] === focusIds[index - 1]) repeated.push(focusIds[index]);
@@ -140,8 +181,7 @@ export function normalizeProbes(raw = {}) {
     typeof raw.textResize?.lossOfContent === 'boolean';
 
   const rawTargetSizes = ownData(raw, 'targetSizes');
-  let targetSizes = [];
-  try { if (Array.isArray(rawTargetSizes)) targetSizes = rawTargetSizes; } catch { /* Revoked collections are unavailable. */ }
+  const targetSizes = denseOwnDataArray(rawTargetSizes).values;
   const targetObservations = [];
   for (const item of targetSizes) {
     const nodeId = safeId(item);
@@ -172,7 +212,7 @@ export function normalizeProbes(raw = {}) {
     focusOrder: {
       outcome: focusComplete ? 'passed' : 'cantTell',
       targets: focusIds,
-      focusableCount: Number.isSafeInteger(raw.focus?.focusableCount) ? raw.focus.focusableCount : null
+      focusableCount: Number.isSafeInteger(focusableCount) ? focusableCount : null
     },
     keyboardTraps: {
       outcome: repeated.length ? 'failed' : focusComplete ? 'passed' : 'cantTell',
@@ -212,8 +252,8 @@ export function normalizeProbes(raw = {}) {
       animatedCount: motionValid ? raw.motion.animatedCount : null,
       reducedAnimatedCount: motionValid ? raw.motion.reducedAnimatedCount : null
     },
-    warnings: sanitizeWarnings(raw.warnings),
-    actions: sanitizeJsonData((Array.isArray(raw.actions) ? raw.actions : []).map(sanitizeAction))
+    warnings: sanitizeWarnings(denseOwnDataArray(ownData(raw, 'warnings')).values),
+    actions: sanitizeJsonData(denseOwnDataArray(ownData(raw, 'actions')).values.map(sanitizeAction))
   };
   normalized.probeCoverage = Object.fromEntries([
     'focusOrder', 'keyboardTraps', 'focusAppearance', 'obscuredTargets', 'reflow', 'textResize', 'motion'
