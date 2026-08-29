@@ -1,4 +1,5 @@
 import {
+  AXE_ALLOWED_RULE_IDS,
   AXE_PROVENANCE,
   AXE_TARGET_UNAVAILABLE,
   canonicalizeAxeDiagnosticsWithMetadata,
@@ -18,6 +19,7 @@ const AUDITA_RULES_VERSION = '1.0.0';
 const SAFE_ID = /^[a-z][a-z0-9._:-]{0,127}$/iu;
 const OUTCOME_PRIORITY = Object.freeze({ failed: 3, cantTell: 2, untested: 1 });
 const ITEM_BY_ID = new Map(NBR17225_ITEMS.map(item => [item.id, item]));
+const ALLOWED_RULE_IDS = new Set(AXE_ALLOWED_RULE_IDS);
 
 function deepFreeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value) || Object.isFrozen(value)) return value;
@@ -147,6 +149,7 @@ function summaryCounts(frames) {
     for (const frame of frames) {
       const entries = safeArray(safeRead(frame, 'result'), resultType, MAX_GROUPS_PER_TYPE);
       for (const group of entries) {
+        if (!ALLOWED_RULE_IDS.has(safeRead(group, 'id'))) continue;
         const nodeCount = safeArray(group, 'nodes', MAX_NODES_PER_GROUP).length;
         if ((resultType === 'violations' || resultType === 'incomplete') && nodeCount === 0) continue;
         groups += 1;
@@ -156,6 +159,95 @@ function summaryCounts(frames) {
     summary[resultType] = { groups, nodes };
   }
   return summary;
+}
+
+function exactStringArray(value, expected) {
+  let array = false;
+  try { array = Array.isArray(value); } catch { return false; }
+  if (!array || safeRead(value, 'length') !== expected.length) return false;
+  return expected.every((entry, index) => safeRead(value, String(index)) === entry);
+}
+
+function targetNodeIdForStructuralSelector(snapshot, selector) {
+  if (selector === AXE_TARGET_UNAVAILABLE || sanitizeAxeStructuralSelector(selector) !== selector) return null;
+  const inspected = inspectArray(snapshot, 'nodes', 50_000);
+  if (!inspected.valid || !inspected.readable || inspected.declaredLength > 50_000) return null;
+  const byId = new Map();
+  for (const node of inspected.values) {
+    const nodeId = safeRead(node, 'nodeId');
+    if ((typeof nodeId !== 'string' && !Number.isSafeInteger(nodeId)) || byId.has(String(nodeId))) return null;
+    byId.set(String(nodeId), node);
+  }
+  const documentNodeId = safeRead(safeRead(snapshot, 'document'), 'nodeId');
+  const selectorNodes = new Map();
+  for (const node of inspected.values) {
+    const path = inspectArray(node, 'framePath', 2);
+    if (!path.valid || !path.readable || path.declaredLength !== 0) continue;
+    const compounds = [];
+    const visited = new Set();
+    let current = node;
+    let valid = true;
+    while (current && compounds.length < 12) {
+      const nodeId = safeRead(current, 'nodeId');
+      const nodeKey = String(nodeId);
+      if (visited.has(nodeKey)) { valid = false; break; }
+      visited.add(nodeKey);
+      const tag = typeof safeRead(current, 'tagName') === 'string' ? safeRead(current, 'tagName').toLowerCase() : '';
+      if (sanitizeAxeStructuralSelector(tag) !== tag || tag.includes('>')) { valid = false; break; }
+      let compound = tag;
+      const parentId = safeRead(current, 'parentId');
+      const parent = parentId === null || parentId === undefined ? null : byId.get(String(parentId));
+      if (parent) {
+        const children = inspectArray(parent, 'children', 2_048);
+        if (!children.valid || !children.readable || children.declaredLength > 2_048) { valid = false; break; }
+        let sameTag = 0;
+        let position = 0;
+        let occurrencesOfCurrent = 0;
+        for (const childId of children.values) {
+          const child = byId.get(String(childId));
+          if (!child) { valid = false; break; }
+          if (String(childId) === nodeKey) occurrencesOfCurrent += 1;
+          const childTag = typeof safeRead(child, 'tagName') === 'string' ? safeRead(child, 'tagName').toLowerCase() : '';
+          if (childTag === tag) {
+            sameTag += 1;
+            if (String(childId) === nodeKey) position = sameTag;
+          }
+        }
+        if (!valid || occurrencesOfCurrent !== 1 || position === 0) { valid = false; break; }
+        if (sameTag > 1) compound += `:nth-of-type(${position})`;
+      } else if (!(tag === 'html' && (parentId === null || parentId === undefined || String(parentId) === String(documentNodeId)))) {
+        valid = false;
+        break;
+      }
+      compounds.unshift(compound);
+      if (tag === 'html') break;
+      current = parent;
+    }
+    if (!valid || compounds[0] !== 'html' || compounds.length === 0 || compounds.length > 12) continue;
+    const structural = compounds.join(' > ');
+    if (structural.length > 256 || sanitizeAxeStructuralSelector(structural) !== structural) continue;
+    const matches = selectorNodes.get(structural) ?? [];
+    matches.push(safeRead(node, 'nodeId'));
+    selectorNodes.set(structural, matches);
+  }
+  const matches = selectorNodes.get(selector) ?? [];
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function authoritativeCoreTarget(options, mapping, nodeId) {
+  const inspected = inspectArray(options, 'coreRuleResults', 256);
+  if (!inspected.valid || !inspected.readable || inspected.declaredLength > 256) return false;
+  const candidates = inspected.values.filter(rule => safeRead(rule, 'ruleId') === mapping.auditaRuleId);
+  if (candidates.length !== 1) return false;
+  const rule = candidates[0];
+  if (safeRead(rule, 'outcome') !== 'failed' || safeRead(rule, 'mode') !== 'automated' ||
+    !sameDataRecord(safeRead(rule, 'source'), {
+      engine: 'audita-core', ruleId: mapping.auditaRuleId, version: AUDITA_RULES_VERSION,
+    }) || !exactStringArray(safeRead(rule, 'nbrItems'), [mapping.nbrItemRef]) ||
+    !exactStringArray(safeRead(rule, 'wcag'), [...mapping.wcagRefs])) return false;
+  const targets = inspectArray(rule, 'targets', 256);
+  if (!targets.valid || !targets.readable || targets.declaredLength > 256) return false;
+  return targets.values.filter(target => String(safeRead(target, 'nodeId')) === String(nodeId)).length === 1;
 }
 
 function publishedFindingCounts(occurrences, resultType) {
@@ -169,6 +261,15 @@ function derivedApplicability(options, { axeRuleId, mapping, pageId, frameId, se
   if (selector === AXE_TARGET_UNAVAILABLE || frameId !== 0 || options.rulesVersion !== AUDITA_RULES_VERSION) return null;
   const item = ITEM_BY_ID.get(mapping.nbrItemRef);
   const snapshot = options.snapshot;
+  if (mapping.targetScope === 'node') {
+    if (axeRuleId !== 'target-size') return null;
+    const nodeId = targetNodeIdForStructuralSelector(snapshot, selector);
+    if (nodeId === null || !authoritativeCoreTarget(options, mapping, nodeId) || !item?.ruleIds.includes(mapping.auditaRuleId)) return null;
+    return deepFreeze({
+      confirmed: true, pageId, frameId, target: selector, nodeId, nbrItemRef: mapping.nbrItemRef,
+      source: { engine: 'audita-core', ruleId: mapping.auditaRuleId, version: AUDITA_RULES_VERSION },
+    });
+  }
   const document = safeRead(snapshot, 'document');
   if (!snapshot || typeof snapshot !== 'object' || !document || typeof document !== 'object') return null;
   let ruleId = null;
@@ -334,6 +435,7 @@ export function normalizeAxeResults(input, options = {}) {
       if (declaredArrayLength(frameResult, resultType) > MAX_GROUPS_PER_TYPE) truncated = true;
       for (const [groupIndex, group] of rawGroups.entries()) {
         const axeRuleId = canonicalId(safeRead(group, 'id'), 'axe-id-unavailable');
+        if (!ALLOWED_RULE_IDS.has(axeRuleId)) continue;
         const mapping = axeNbrMappingForRule(axeRuleId);
         const item = mapping ? ITEM_BY_ID.get(mapping.nbrItemRef) : null;
         const rawNodes = safeArray(group, 'nodes', MAX_NODES_PER_GROUP);
@@ -345,6 +447,9 @@ export function normalizeAxeResults(input, options = {}) {
           if (containsTruncationMetadata(node)) truncated = true;
           const applicabilityEvidence = resultType === 'violations' && mapping
             ? derivedApplicability(options, { axeRuleId, mapping, pageId, frameId, selector })
+            : null;
+          const correlatedNodeId = mapping?.targetScope === 'node' && applicabilityEvidence
+            ? applicabilityEvidence.nodeId
             : null;
           const mappedOutcome = resultType === 'incomplete' || (mapping && !applicabilityEvidence) || selector === AXE_TARGET_UNAVAILABLE
             ? 'cantTell'
@@ -365,12 +470,12 @@ export function normalizeAxeResults(input, options = {}) {
             occurrenceId, pageId, itemId: mapping?.nbrItemRef ?? null,
             ruleId: source.ruleId, engineRuleId: axeRuleId, engineResultType: resultType, outcome, mode: 'automated',
             classification, impact, confidence: outcome === 'failed' ? 'high' : 'low',
-            source, nodeId: null, selector, framePath: frameId === 0 ? [] : [`frame:${frameId}`],
+            source, nodeId: correlatedNodeId, selector, framePath: frameId === 0 ? [] : [`frame:${frameId}`],
             equivalenceKey: mapping?.equivalenceKey ?? `axe:${axeRuleId}`,
             presentationTargetKey: mapping?.targetScope === 'document'
               ? 'document'
-              : `selector:${frameId}:${selector}`,
-            target: { nodeId: null, selector, framePath: frameId === 0 ? [] : [`frame:${frameId}`] },
+              : correlatedNodeId !== null ? `node:${correlatedNodeId}` : `selector:${frameId}:${selector}`,
+            target: { nodeId: correlatedNodeId, selector, framePath: frameId === 0 ? [] : [`frame:${frameId}`] },
             nbrItemRef: mapping?.nbrItemRef ?? null,
             itemWcagRefs, sourceWcagRefs, testedWcagRefs,
             wcagRefs: [...testedWcagRefs],
@@ -384,7 +489,7 @@ export function normalizeAxeResults(input, options = {}) {
           });
 
           const existing = ruleById.get(source.ruleId);
-          const target = { selector, framePath: frameId === 0 ? [] : [`frame:${frameId}`], message: justification };
+          const target = { nodeId: correlatedNodeId, selector, framePath: frameId === 0 ? [] : [`frame:${frameId}`], message: justification };
           if (!existing) {
             ruleById.set(source.ruleId, {
               ruleId: source.ruleId, engineRuleId: axeRuleId, outcome, mode: 'automated',

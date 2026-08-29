@@ -31,7 +31,7 @@ test('injects pinned axe locally in every isolated frame before running its pack
   assert.deepEqual(calls[1].target, { tabId: 42, allFrames: true });
   assert.equal(calls[1].world, 'ISOLATED');
   assert.equal(calls[1].func, adapter.runAxeInFrame);
-  assert.deepEqual(calls[1].args, [adapter.AXE_RUN_CONFIG]);
+  assert.deepEqual(calls[1].args, [adapter.AXE_RUN_CONFIG, adapter.AXE_FRAME_PROJECTION_POLICY]);
   assert.equal(result.status, 'complete');
   assert.deepEqual(result.frames.map(frame => [frame.frameId, frame.status]), [[0, 'success'], [7, 'success']]);
   assert.deepEqual(result.provenance, adapter.AXE_PROVENANCE);
@@ -46,7 +46,107 @@ test('uses a bounded explicit ruleset without legacy Section 508 or experimental
   });
   assert.deepEqual(adapter.AXE_RUN_CONFIG.rules, { 'target-size': { enabled: false } });
   assert.deepEqual(adapter.AXE_RUN_CONFIG.resultTypes, ['violations', 'incomplete', 'passes', 'inapplicable']);
+  assert.equal(adapter.AXE_RUN_CONFIG.preload, false);
+  assert.equal(adapter.AXE_RUN_CONFIG.iframes, false);
   assert.doesNotMatch(JSON.stringify(adapter.AXE_RUN_CONFIG), /experimental|section508/iu);
+});
+
+test('projects and sanitizes axe results inside runAxeInFrame before they cross the isolated-world boundary', async t => {
+  const originalAxe = globalThis.axe;
+  const originalDocument = globalThis.document;
+  t.after(() => {
+    if (originalAxe === undefined) delete globalThis.axe;
+    else globalThis.axe = originalAxe;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  });
+
+  const html = { localName: 'html', parentElement: null, children: [] };
+  const body = { localName: 'body', parentElement: html, children: [] };
+  const main = { localName: 'main', parentElement: body, children: [] };
+  const first = { localName: 'button', parentElement: main, children: [] };
+  const second = { localName: 'button', parentElement: main, children: [] };
+  html.children = [body];
+  body.children = [main];
+  main.children = [first, second];
+  const structural = 'html > body > main > button:nth-of-type(2)';
+  globalThis.document = {
+    documentElement: html,
+    querySelectorAll(selector) {
+      if (selector === '#private-customer-42' || selector === structural) return [second];
+      if (selector === '.ambiguous-customer') return [first, second];
+      return [];
+    },
+  };
+  globalThis.axe = {
+    version: '4.13.0',
+    async run() {
+      return {
+        violations: [{
+          id: 'target-size', impact: 'serious', tags: ['wcag258', 'PRIVATE-TAG'],
+          helpUrl: 'https://private.invalid/TOPSECRET',
+          nodes: [
+            { impact: 'serious', target: ['#private-customer-42'], html: '<button>Cliente Alfa</button>', failureSummary: 'TOPSECRET', any: [{ id: 'PRIVATE-CHECK', message: 'TOPSECRET' }] },
+            { impact: 'serious', target: ['.ambiguous-customer'], html: '<button>Cliente Beta</button>' },
+            { impact: 'serious', target: [['#shadow-private']], html: '<button>Cliente Gama</button>' },
+          ],
+        }, {
+          id: 'private-rule-not-in-catalog', impact: 'critical',
+          nodes: [{ impact: 'critical', target: ['#private-customer-42'], html: '<p>TOPSECRET</p>' }],
+        }],
+        incomplete: [], passes: [], inapplicable: [],
+        url: 'https://private.invalid/?token=TOPSECRET', arbitrarySecret: 'TOPSECRET',
+      };
+    },
+  };
+
+  const projected = await adapter.runAxeInFrame(adapter.AXE_RUN_CONFIG, adapter.AXE_FRAME_PROJECTION_POLICY);
+
+  assert.equal(projected.ok, true);
+  assert.equal(projected.version, '4.13.0');
+  assert.deepEqual(Object.keys(projected.results).sort(), ['inapplicable', 'incomplete', 'passes', 'truncation', 'violations']);
+  assert.equal(projected.results.violations.length, 1, 'unknown rule IDs are dropped in-frame');
+  assert.deepEqual(Object.keys(projected.results.violations[0]).sort(), ['id', 'impact', 'nodes', 'truncation']);
+  assert.deepEqual(Object.keys(projected.results.violations[0].nodes[0]).sort(), ['impact', 'target']);
+  assert.equal(projected.results.violations[0].nodes[0].target, structural);
+  assert.equal(projected.results.violations[0].nodes[1].target, adapter.AXE_TARGET_UNAVAILABLE);
+  assert.equal(projected.results.violations[0].nodes[2].target, adapter.AXE_TARGET_UNAVAILABLE);
+  assert.deepEqual(projected.results.truncation.violations, { original: 2, retained: 1, truncated: true });
+  assert.doesNotMatch(JSON.stringify(projected), /TOPSECRET|private\.invalid|private-customer|ambiguous-customer|shadow-private|PRIVATE-TAG|PRIVATE-CHECK|Cliente/iu);
+});
+
+test('drops sparse or accessor-backed axe nodes in-frame without executing page-controlled getters', async t => {
+  const originalAxe = globalThis.axe;
+  const originalDocument = globalThis.document;
+  t.after(() => {
+    if (originalAxe === undefined) delete globalThis.axe;
+    else globalThis.axe = originalAxe;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  });
+  let getterCalls = 0;
+  const nodes = [];
+  Object.defineProperty(nodes, '0', {
+    enumerable: true,
+    get() { getterCalls += 1; throw new Error('private getter must not execute'); },
+  });
+  nodes.length = 1;
+  globalThis.document = { querySelectorAll: () => [] };
+  globalThis.axe = {
+    version: '4.13.0',
+    async run() {
+      return {
+        violations: [{ id: 'image-alt', impact: 'critical', nodes }],
+        incomplete: [], passes: [], inapplicable: [],
+      };
+    },
+  };
+
+  const projected = await adapter.runAxeInFrame(adapter.AXE_RUN_CONFIG, adapter.AXE_FRAME_PROJECTION_POLICY);
+
+  assert.equal(getterCalls, 0);
+  assert.deepEqual(projected.results.violations[0].nodes, []);
+  assert.deepEqual(projected.results.violations[0].truncation.nodes, { original: 1, retained: 0, truncated: true });
 });
 
 test('diagnostic canonicalization distinguishes a readable empty array from invalid and unreadable collections', () => {
@@ -206,7 +306,7 @@ test('never starts the run phase when a timed-out injection resolves late', asyn
   assert.equal(calls.length, 1, 'a segunda chamada executeScript não pode iniciar após o deadline');
 });
 
-test('allows only catalog metadata and narrow structural selectors across the raw axe boundary', async () => {
+test('revalidates the projected frame envelope with a closed catalog and saturated bounds', async () => {
   const hostileNode = {
     impact: 'serious',
     html: '<input value="password=TOPSECRET">',
@@ -232,8 +332,8 @@ test('allows only catalog metadata and narrow structural selectors across the ra
     none: [],
     unknown: 'TOPSECRET',
   };
-  const rules = Array.from({ length: 120 }, (_, index) => ({
-    id: `rule-${index}`,
+  const rules = Array.from({ length: 120 }, () => ({
+    id: 'image-alt',
     impact: 'serious',
     tags: ['wcag2a'],
     description: 'password=TOPSECRET',
@@ -259,27 +359,10 @@ test('allows only catalog metadata and narrow structural selectors across the ra
   assert.equal(raw.violations.length, 100);
   assert.equal(raw.violations[0].nodes.length, 100);
   assert.deepEqual(Object.keys(raw).sort(), ['inapplicable', 'incomplete', 'passes', 'truncation', 'violations']);
-  assert.deepEqual(Object.keys(raw.violations[0]).sort(), ['id', 'impact', 'nodes', 'tags', 'truncation']);
-  assert.deepEqual(Object.keys(raw.violations[0].nodes[0]).sort(), ['all', 'any', 'impact', 'none', 'target', 'truncation']);
-  assert.deepEqual(Object.keys(raw.violations[0].nodes[0].any[0]).sort(), ['id', 'impact']);
-  assert.deepEqual(raw.violations[0].nodes[0].target, [
-    'main > button:nth-of-type(2)',
-    'article section > p:nth-of-type(3)',
-    adapter.AXE_TARGET_UNAVAILABLE,
-    adapter.AXE_TARGET_UNAVAILABLE,
-    adapter.AXE_TARGET_UNAVAILABLE,
-    adapter.AXE_TARGET_UNAVAILABLE,
-    adapter.AXE_TARGET_UNAVAILABLE,
-    adapter.AXE_TARGET_UNAVAILABLE,
-    adapter.AXE_TARGET_UNAVAILABLE,
-    adapter.AXE_TARGET_UNAVAILABLE,
-    adapter.AXE_TARGET_UNAVAILABLE,
-    adapter.AXE_TARGET_UNAVAILABLE,
-    adapter.AXE_TARGET_UNAVAILABLE,
-    adapter.AXE_TARGET_UNAVAILABLE,
-  ]);
+  assert.deepEqual(Object.keys(raw.violations[0]).sort(), ['id', 'impact', 'nodes', 'truncation']);
+  assert.deepEqual(Object.keys(raw.violations[0].nodes[0]).sort(), ['impact', 'target']);
+  assert.equal(raw.violations[0].nodes[0].target, adapter.AXE_TARGET_UNAVAILABLE);
   assert.doesNotMatch(JSON.stringify(raw), /TOPSECRET|private\.invalid|remote\.invalid|<input|alice-smith|patient-hiv-positive|project-phoenix|ordinary-class|customer-form|customer-411|javascript:|document\.cookie|person@example|12345678901|a8F3kP9z|failureSummary|description|help|message|"data"/iu);
-  assert.deepEqual(raw.truncation.violations, { original: 120, retained: 100, truncated: true });
-  assert.deepEqual(raw.violations[0].truncation.nodes, { original: 120, retained: 100, truncated: true });
-  assert.deepEqual(raw.violations[0].nodes[0].truncation.any, { original: 1, retained: 1, truncated: false });
+  assert.deepEqual(raw.truncation.violations, { original: 101, retained: 100, truncated: true });
+  assert.deepEqual(raw.violations[0].truncation.nodes, { original: 101, retained: 100, truncated: true });
 });

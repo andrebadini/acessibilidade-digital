@@ -34,7 +34,9 @@ function curatedIdentity(occurrence, index, canonicalNodeByOccurrenceId) {
   } else {
     const canonicalNode = canonicalNodeByOccurrenceId instanceof Map
       ? text(canonicalNodeByOccurrenceId.get(text(occurrence.occurrenceId))) : '';
-    if (canonicalNode) targetKey = `node:${canonicalNode}`;
+    const persistedNode = text(occurrence.nodeId);
+    if (canonicalNode && persistedNode === canonicalNode && target.nodeId === canonicalNode &&
+      text(occurrence.presentationTargetKey) === `node:${canonicalNode}`) targetKey = `node:${canonicalNode}`;
   }
   if (!targetKey) return { key: `unique:${index}` };
   return {

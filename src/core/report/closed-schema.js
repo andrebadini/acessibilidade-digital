@@ -232,7 +232,8 @@ function assertRuleTarget(target, rule) {
   if (typeof target === 'string' || Number.isSafeInteger(target) || target === null) return;
   assertRecord(target);
   if (rule.source?.engine === 'axe-core') {
-    assertExact(target, set('framePath message selector'));
+    assertExact(target, set('framePath message nodeId selector'));
+    if (target.nodeId !== null) assertTargetIdentity(target.nodeId);
     assertString(target.message);
     assertString(target.selector);
     assertStringArray(target.framePath);
@@ -315,7 +316,13 @@ function assertOccurrence(occurrence, schemaVersion) {
     if (value !== undefined && value !== null && (typeof value !== 'string' || value.length < 1 || value.length > 512)) throw new TypeError();
   }
   if (occurrence.applicabilityEvidence !== undefined && occurrence.applicabilityEvidence !== null) {
-    assertExact(occurrence.applicabilityEvidence, set('confirmed pageId frameId target nbrItemRef source'));
+    const proofKeys = occurrence.nodeId === null
+      ? set('confirmed pageId frameId target nbrItemRef source')
+      : set('confirmed pageId frameId target nodeId nbrItemRef source');
+    assertExact(occurrence.applicabilityEvidence, proofKeys);
+    if (occurrence.applicabilityEvidence.nodeId !== undefined) {
+      assertTargetIdentity(occurrence.applicabilityEvidence.nodeId);
+    }
     assertSource(occurrence.applicabilityEvidence.source, false);
   }
 }
@@ -529,7 +536,8 @@ function assertPresentation(value) {
 function assertAxe(axe) {
   assertExact(axe, set('diagnostics limitations occurrences provenance ruleResults status technicalSummary'));
   assertExact(axe.provenance, set('config engine gate packageTarballSha256 runtimePath runtimeSha256 version'));
-  assertExact(axe.provenance.config, set('resultTypes rules runOnly'));
+  assertExact(axe.provenance.config, set('iframes preload resultTypes rules runOnly'));
+  if (axe.provenance.config.preload !== false || axe.provenance.config.iframes !== false) throw new TypeError();
   assertExact(axe.provenance.config.runOnly, set('type values'));
   assertArray(axe.provenance.config.runOnly.values);
   assertArray(axe.provenance.config.resultTypes);

@@ -51,3 +51,38 @@ test('keeps ambiguous selectors, fake keys, different items and unrelated rule c
   assert.equal(result.groups.length, 4);
   assert.deepEqual(result.groups.map(group => group.occurrenceIds), [['allowed'], ['required'], ['wrong-item'], ['wrong-version']]);
 });
+
+function targetSizeOccurrence({ id, engine, nodeId = 'node-1' }) {
+  const axe = engine === 'axe-core';
+  return {
+    occurrenceId: id, pageId: 'page-1', outcome: 'failed', nbrItemRef: '5.8.7',
+    ruleId: axe ? 'axe.target-size' : 'target-size-minimum',
+    equivalenceKey: 'minimum-target-size', presentationTargetKey: `node:${nodeId}`, nodeId,
+    target: { nodeId, selector: axe ? 'html > body > button' : null, framePath: [] },
+    source: axe
+      ? { engine, ruleId: 'axe.target-size', engineRuleId: 'target-size', version: '4.13.0' }
+      : { engine, ruleId: 'target-size-minimum', version: '1.0.0' },
+  };
+}
+
+test('deduplicates node-scoped target-size only with an independent exact canonical-node binding', () => {
+  const core = targetSizeOccurrence({ id: 'occ-core', engine: 'audita-core' });
+  const axe = targetSizeOccurrence({ id: 'occ-axe', engine: 'axe-core' });
+  const canonical = new Map([['occ-core', 'node-1'], ['occ-axe', 'node-1']]);
+
+  const combined = dedupeFindingsForPresentation([core, axe], { canonicalNodeByOccurrenceId: canonical });
+  assert.equal(combined.groups.length, 1);
+  assert.deepEqual(combined.groups[0].occurrenceIds, ['occ-core', 'occ-axe']);
+  assert.equal(combined.groups[0].equivalenceKey, 'minimum-target-size');
+  assert.equal(combined.groups[0].presentationTargetKey, 'node:node-1');
+
+  assert.equal(dedupeFindingsForPresentation([core, axe]).groups.length, 2, 'no external node authority');
+  assert.equal(dedupeFindingsForPresentation([core, axe], {
+    canonicalNodeByOccurrenceId: new Map([['occ-core', 'node-1'], ['occ-axe', 'node-2']]),
+  }).groups.length, 2, 'different canonical nodes');
+
+  const forged = targetSizeOccurrence({ id: 'occ-forged', engine: 'axe-core', nodeId: 'node-2' });
+  assert.equal(dedupeFindingsForPresentation([core, forged], {
+    canonicalNodeByOccurrenceId: new Map([['occ-core', 'node-1'], ['occ-forged', 'node-1']]),
+  }).groups.length, 2, 'caller map cannot override the persisted node binding');
+});

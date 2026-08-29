@@ -42,16 +42,53 @@ async function childModel(auditId, url, { axe = false } = {}) {
     stateCount: 1,
     artifacts: [raw.evidence.artifacts[0], createPristineMapSource(), map],
   };
-  if (axe) raw.axe = normalizeAxeResults(['finding', 'mapped'].includes(axe) ? {
+  if (axe === 'target-size') {
+    raw.snapshot = {
+      schemaVersion: 1, document: { nodeId: 'document', coverage: {}, warnings: [] },
+      nodes: [
+        { nodeId: 'n-html', parentId: null, children: ['n-body'], tagName: 'html', attributes: {}, framePath: [] },
+        { nodeId: 'n-body', parentId: 'n-html', children: ['n-1'], tagName: 'body', attributes: {}, framePath: [] },
+        { nodeId: 'n-1', parentId: 'n-body', children: [], tagName: 'button', attributes: {}, framePath: [] },
+      ],
+    };
+    raw.ruleResults = raw.ruleResults.map(rule => ({
+      ...rule,
+      ...(rule.ruleId === 'target-size-minimum' ? {
+        outcome: 'failed',
+        targets: [{
+          nodeId: 'n-1', selectorHint: '', message: 'Aumente a área de acionamento para pelo menos 24 por 24 CSS px.',
+          data: { reason: 'target-too-small', width: 20, height: 20, threshold: 24 },
+        }],
+        summary: 'Há alvos abaixo do tamanho mínimo aplicável.',
+      } : {}),
+      source: { engine: 'audita-core', ruleId: rule.ruleId, version: '1.0.0' },
+    }));
+    raw.itemResults = aggregateItems(raw.ruleResults, NBR17225_ITEMS).map(item => ({
+      ...structuredClone(item), wcag: item.wcag.map(reference => ({ ...reference })),
+      ruleIds: [...item.ruleIds], ruleResults: item.ruleResults.map(rule => rule.ruleId),
+    }));
+    raw.occurrences.push({
+      occurrenceId: 'occ-target-size-core', itemId: '5.8.7', ruleId: 'target-size-minimum', outcome: 'failed',
+      mode: 'automated', nodeId: 'n-1', evidenceIds: ['ev-1'],
+      classification: 'requirement', impact: 'minor', confidence: 'high',
+      source: { engine: 'audita-core', ruleId: 'target-size-minimum', version: '1.0.0' },
+      itemWcagRefs: ['2.5.8'], sourceWcagRefs: ['2.5.8'], testedWcagRefs: ['2.5.8'], wcagRefs: ['2.5.8'],
+      justification: 'Aumente a área de acionamento para pelo menos 24 por 24 CSS px.',
+    });
+  }
+  if (axe) raw.axe = normalizeAxeResults(['finding', 'mapped', 'target-size'].includes(axe) ? {
     status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],
     frames: [{ frameId: 0, status: 'success', result: {
-      violations: [{ id: axe === 'mapped' ? 'html-has-lang' : 'custom-batch-id', impact: 'serious', nodes: [{ impact: 'serious', target: ['html'] }] }],
+      violations: [{
+        id: axe === 'mapped' ? 'html-has-lang' : axe === 'target-size' ? 'target-size' : 'custom-batch-id',
+        impact: 'serious', nodes: [{ impact: 'serious', target: axe === 'target-size' ? 'html > body > button' : ['html'] }],
+      }],
       incomplete: [], passes: [], inapplicable: [],
     } }],
   } : { status: 'disabled', provenance: AXE_PROVENANCE, frames: [] }, {
-    pageId: 'page-1', rulesVersion: '1.0.0', snapshot: raw.snapshot,
+    pageId: 'page-1', rulesVersion: '1.0.0', snapshot: raw.snapshot, coreRuleResults: raw.ruleResults,
   });
-  if (['finding', 'mapped'].includes(axe)) {
+  if (['finding', 'mapped', 'target-size'].includes(axe)) {
     const aggregated = new Map(aggregateItems(raw.ruleResults, NBR17225_ITEMS).map(item => [item.id, item]));
     raw.itemResults = NBR17225_ITEMS.map(item => ({
       ...structuredClone(item), outcome: aggregated.get(item.id).outcome,
@@ -60,10 +97,34 @@ async function childModel(auditId, url, { axe = false } = {}) {
     const hybrid = mergeAxeSupplementalResults(raw, raw.axe);
     raw.ruleResults = hybrid.ruleResults;
     raw.itemResults = hybrid.itemResults;
-    raw.occurrences = [...raw.occurrences, ...structuredClone(raw.axe.occurrences)];
+    const supplementalOccurrences = structuredClone(raw.axe.occurrences);
+    if (axe === 'target-size') {
+      for (const occurrence of supplementalOccurrences) occurrence.evidenceIds = ['ev-full'];
+    }
+    raw.occurrences = [...raw.occurrences, ...supplementalOccurrences];
   }
   return enrichAuditForReport(raw, OPTIONS);
 }
+
+test('remaps every target-size node binding in the page graph and nested axe envelope', async () => {
+  const child = await childModel('child-target-size', 'https://target-size.example.test/', { axe: 'target-size' });
+  const remapped = await remapAuditPage(child, { batchAuditId: 'batch-target-size', pageId: 'page-1' });
+  const reportOccurrence = remapped.occurrences.find(value => value.ruleId === 'axe.target-size');
+  const nestedOccurrence = remapped.axe.occurrences.find(value => value.ruleId === 'axe.target-size');
+  const reportRule = remapped.ruleResults.find(value => value.ruleId === 'axe.target-size');
+  const nestedRule = remapped.axe.ruleResults.find(value => value.ruleId === 'axe.target-size');
+
+  assert.match(reportOccurrence.nodeId, /^node-[a-f0-9]{32}$/u);
+  assert.notEqual(reportOccurrence.nodeId, 'n-1');
+  for (const occurrence of [reportOccurrence, nestedOccurrence]) {
+    assert.equal(occurrence.nodeId, reportOccurrence.nodeId);
+    assert.equal(occurrence.target.nodeId, reportOccurrence.nodeId);
+    assert.equal(occurrence.applicabilityEvidence.nodeId, reportOccurrence.nodeId);
+    assert.equal(occurrence.presentationTargetKey, `node:${reportOccurrence.nodeId}`);
+  }
+  assert.equal(reportRule.targets[0].nodeId, reportOccurrence.nodeId);
+  assert.equal(nestedRule.targets[0].nodeId, reportOccurrence.nodeId);
+});
 
 test('remaps identical local graphs with deterministic page-qualified sequential occurrence identities', async () => {
   const firstChild = await childModel('child-a', 'https://one.example.test/?token=SECRET_A&view=public');

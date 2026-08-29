@@ -111,7 +111,9 @@ export function mergeAxeSupplementalResults(coreAudit, supplemental) {
   if (!coreAudit || typeof coreAudit !== 'object' || !Array.isArray(coreAudit.ruleResults) || !Array.isArray(coreAudit.itemResults)) {
     throw new TypeError('O resultado do motor próprio é inválido.');
   }
-  const validated = validateNormalizedAxeSupplemental(supplemental, { rulesVersion: '1.0.0' });
+  const validated = validateNormalizedAxeSupplemental(supplemental, {
+    rulesVersion: '1.0.0', coreRuleResults: coreAudit.ruleResults,
+  });
   const incomingRules = validated.ruleResults;
   const existingIds = new Set(coreAudit.ruleResults.map(rule => rule.ruleId));
   const supplementalRules = incomingRules.filter(rule => typeof rule.ruleId === 'string' &&

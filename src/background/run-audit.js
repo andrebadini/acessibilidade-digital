@@ -484,20 +484,6 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
       fail('COLLECTION_FAILED', 'A estrutura da página não pôde ser coletada com segurança.', error);
     }
 
-    state.axe = normalizeAxeResults(state.rawAxe, {
-      pageId: 'page-1', auditId, snapshot: state.snapshot, rulesVersion: METHODOLOGY.version,
-    });
-    state.rawAxe = null;
-    state.limitations.push(...state.axe.limitations);
-    if (state.axe.status === 'disabled') {
-      state.diagnostics.push(diagnostic(
-        'AXE_FEATURE_DISABLED',
-        'O motor suplementar axe-core permaneceu desativado pelo gate MV3/CSP; o motor próprio continuou normalmente.',
-        canonicalNow(now), true,
-      ));
-    } else if (state.axe.status === 'partial') {
-      recoverable('AXE_EXECUTION_FAILED', 'O motor suplementar axe-core teve cobertura parcial; o motor próprio continuou normalmente.');
-    }
     if (fatal) throw Object.assign(new Error('AUDIT_FATAL_HANDLED'), { auditHandled: true });
 
     try {
@@ -517,12 +503,28 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     try {
       const core = await awaitStep(() => runCoreAudit(state.snapshot));
       state.coreRuleResults = [...core.ruleResults];
+      state.axe = normalizeAxeResults(state.rawAxe, {
+        pageId: 'page-1', auditId, snapshot: state.snapshot,
+        coreRuleResults: state.coreRuleResults, rulesVersion: METHODOLOGY.version,
+      });
+      state.limitations.push(...state.axe.limitations);
+      if (state.axe.status === 'disabled') {
+        state.diagnostics.push(diagnostic(
+          'AXE_FEATURE_DISABLED',
+          'O motor suplementar axe-core permaneceu desativado pelo gate MV3/CSP; o motor próprio continuou normalmente.',
+          canonicalNow(now), true,
+        ));
+      } else if (state.axe.status === 'partial') {
+        recoverable('AXE_EXECUTION_FAILED', 'O motor suplementar axe-core teve cobertura parcial; o motor próprio continuou normalmente.');
+      }
       const hybrid = mergeAxeSupplementalResults(core, state.axe);
       state.editorialRuleResults = [...await runEditorialRules(state.snapshot)];
       state.ruleResults = [...hybrid.ruleResults, ...state.editorialRuleResults];
       state.itemResults = [...hybrid.itemResults];
     } catch (error) {
       fail('CORE_AUDIT_FAILED', 'O núcleo de regras não pôde concluir a auditoria.', error);
+    } finally {
+      state.rawAxe = null;
     }
     if (fatal) throw Object.assign(new Error('AUDIT_FATAL_HANDLED'), { auditHandled: true });
 
@@ -640,7 +642,11 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     allocateOccurrenceIds(state);
     state.manualReview = manualQueue(state.occurrences, state.itemResults);
     resolvePresentationTargets(state.occurrences, state.artifacts);
-    state.presentation = dedupeFindingsForPresentation(state.occurrences);
+    const canonicalNodeByOccurrenceId = new Map(state.occurrences
+      .filter(occurrence => occurrence.nodeId && occurrence.target?.nodeId === occurrence.nodeId &&
+        occurrence.presentationTargetKey === `node:${occurrence.nodeId}`)
+      .map(occurrence => [occurrence.occurrenceId, occurrence.nodeId]));
+    state.presentation = dedupeFindingsForPresentation(state.occurrences, { canonicalNodeByOccurrenceId });
 
     await progress('reporting', 'Gerando relatório', 92);
     throwIfAborted(signal);
@@ -663,6 +669,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
   } catch (error) {
     if (!error?.auditHandled) fail('NAVIGATION_FAILED', error?.name === 'AbortError' || signal?.aborted ? 'A auditoria foi cancelada.' : 'O site não pôde ser aberto de forma estável.', error);
   } finally {
+    state.rawAxe = null;
     if (cdp) {
       try { await cdp.disconnect(); } catch { state.diagnostics.push(diagnostic('CDP_DISCONNECT_FAILED', 'A sessão de depuração não pôde ser encerrada automaticamente.', canonicalNow(now), false)); if (state.status === 'complete') state.status = 'partial'; }
     }

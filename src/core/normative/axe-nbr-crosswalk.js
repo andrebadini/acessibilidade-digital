@@ -57,6 +57,9 @@ export const AXE_NBR_CROSSWALK = deepFreeze([
   mapping('role-img-alt', '5.2.1', ['1.1.1'], 'Elemento com função de imagem sem alternativa textual programaticamente determinável.'),
   mapping('select-name', '5.13.10', ['4.1.2'], 'Caixa de seleção sem nome acessível programaticamente determinável.'),
   mapping('svg-img-alt', '5.2.1', ['1.1.1'], 'SVG com função de imagem sem alternativa textual programaticamente determinável.'),
+  mapping('target-size', '5.8.7', ['2.5.8'], 'Alvo de acionamento observado abaixo do tamanho mínimo automatizável.', {
+    auditaRuleId: 'target-size-minimum', equivalenceKey: 'minimum-target-size', targetScope: 'node',
+  }),
   mapping('td-headers-attr', '5.6.3', ['1.3.1'], 'Célula de dados referencia cabeçalhos de tabela de forma inválida.'),
   mapping('th-has-data-cells', '5.6.3', ['1.3.1'], 'Cabeçalho de tabela não está associado a células de dados.'),
 ]);
@@ -108,7 +111,7 @@ export function validateAxeNbrCrosswalk(entries = AXE_NBR_CROSSWALK) {
     if (equivalenceFields.length > 0) {
       if (equivalenceFields.length !== 3 || !item?.ruleIds.includes(entry.auditaRuleId) ||
         typeof entry.equivalenceKey !== 'string' || !SAFE_EQUIVALENCE_KEY.test(entry.equivalenceKey) ||
-        entry.targetScope !== 'document') {
+        !['document', 'node'].includes(entry.targetScope)) {
         errors.push(`${label} possui equivalência entre motores inválida.`);
       }
     }

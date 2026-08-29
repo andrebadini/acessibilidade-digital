@@ -1,4 +1,5 @@
 import {
+  AXE_ALLOWED_RULE_IDS,
   AXE_DIAGNOSTIC_CODES,
   AXE_PROVENANCE,
   AXE_TARGET_UNAVAILABLE,
@@ -11,10 +12,10 @@ import { NBR17225_ITEMS } from '../normative/nbr17225.js';
 import { section508ReferencesForWcag } from '../normative/section508.js';
 
 const ITEM_BY_ID = new Map(NBR17225_ITEMS.map(item => [item.id, item]));
+const ALLOWED_RULE_IDS = new Set(AXE_ALLOWED_RULE_IDS);
 const PRIORITY = Object.freeze({ cantTell: 1, failed: 2 });
 const RULE_KEYS = Object.freeze(['classification', 'confidence', 'engineRuleId', 'impact', 'limitations', 'mode', 'nbrItems', 'outcome', 'ruleId', 'source', 'summary', 'targets', 'wcag']);
 const OCCURRENCE_KEYS = Object.freeze(['accessiblePreview', 'applicabilityEvidence', 'classification', 'confidence', 'engineResultType', 'engineRuleId', 'equivalenceKey', 'evidenceIds', 'evidenceRefs', 'foreignBenchmarkRefs', 'framePath', 'impact', 'itemId', 'itemWcagRefs', 'justification', 'legalAnalysis', 'mode', 'nbrItemRef', 'nodeId', 'occurrenceId', 'outcome', 'pageId', 'presentationTargetKey', 'ruleId', 'selector', 'source', 'sourceWcagRefs', 'target', 'testedWcagRefs', 'wcagRefs']);
-const UNMAPPED_RATIONALE = 'Achado suplementar do axe-core sem vínculo curado com item ABNT.';
 const CONFIRMATION_SUFFIX = ' A aplicabilidade ao item ABNT ainda exige confirmação pelo motor próprio ou revisão.';
 const TOP_LEVEL_KEYS = Object.freeze(['diagnostics', 'limitations', 'occurrences', 'provenance', 'ruleResults', 'status', 'technicalSummary']);
 const RESULT_TYPES = Object.freeze(['violations', 'incomplete', 'passes', 'inapplicable']);
@@ -91,8 +92,10 @@ function validFramePath(value) {
 }
 
 function validTarget(target, rationale) {
-  if (!exactKeys(target, ['framePath', 'message', 'selector'])) return false;
-  return validSelector(own(target, 'selector')) && validFramePath(own(target, 'framePath')) && own(target, 'message') === rationale;
+  if (!exactKeys(target, ['framePath', 'message', 'nodeId', 'selector'])) return false;
+  const nodeId = own(target, 'nodeId');
+  return (nodeId === null || typeof nodeId === 'string' || Number.isSafeInteger(nodeId)) &&
+    validSelector(own(target, 'selector')) && validFramePath(own(target, 'framePath')) && own(target, 'message') === rationale;
 }
 
 function validSelector(value) {
@@ -178,6 +181,20 @@ function frameIdFor(occurrence) {
   return match && Number.isSafeInteger(Number(match[1])) ? Number(match[1]) : null;
 }
 
+function authoritativeCoreTarget(options, mapping, nodeId) {
+  const coreRules = boundedArray(options, 'coreRuleResults', 256);
+  if (!coreRules) return false;
+  const candidates = coreRules.filter(rule => own(rule, 'ruleId') === mapping.auditaRuleId);
+  if (candidates.length !== 1) return false;
+  const rule = candidates[0];
+  const expectedSource = { engine: 'audita-core', ruleId: mapping.auditaRuleId, version: '1.0.0' };
+  const targets = boundedArray(rule, 'targets', 256);
+  return own(rule, 'outcome') === 'failed' && own(rule, 'mode') === 'automated' &&
+    exactData(own(rule, 'source'), expectedSource) && exactStrings(own(rule, 'nbrItems'), [mapping.nbrItemRef]) &&
+    exactStrings(own(rule, 'wcag'), [...mapping.wcagRefs]) && targets !== null &&
+    targets.filter(target => String(own(target, 'nodeId')) === String(nodeId)).length === 1;
+}
+
 function validateRule(rule, errors) {
   const ruleId = own(rule, 'ruleId');
   const engineRuleId = own(rule, 'engineRuleId');
@@ -191,15 +208,19 @@ function validateRule(rule, errors) {
     return null;
   }
   const mapping = axeNbrMappingForRule(engineRuleId);
-  const expectedItems = mapping ? [mapping.nbrItemRef] : [];
-  const expectedWcag = mapping ? [...mapping.wcagRefs] : [];
-  const expectedClassification = mapping ? ITEM_BY_ID.get(mapping.nbrItemRef)?.classification : 'best-practice';
+  if (!ALLOWED_RULE_IDS.has(engineRuleId) || !mapping) {
+    errors.push(`Regra ${ruleId} não pertence ao catálogo axe fechado.`);
+    return null;
+  }
+  const expectedItems = [mapping.nbrItemRef];
+  const expectedWcag = [...mapping.wcagRefs];
+  const expectedClassification = ITEM_BY_ID.get(mapping.nbrItemRef)?.classification;
   if (!exactStrings(own(rule, 'nbrItems'), expectedItems) || !exactStrings(own(rule, 'wcag'), expectedWcag) ||
     own(rule, 'classification') !== expectedClassification || !exactKeys(rule, RULE_KEYS)) {
     errors.push(`Regra ${ruleId} diverge do crosswalk curado.`);
     return null;
   }
-  const rationale = mapping?.rationale ?? UNMAPPED_RATIONALE;
+  const rationale = mapping.rationale;
   const targets = boundedArray(rule, 'targets', 256);
   const limitations = boundedArray(rule, 'limitations', 4);
   const allowedJustifications = new Set([rationale, `${rationale}${CONFIRMATION_SUFFIX}`]);
@@ -245,12 +266,20 @@ function validateOccurrence(occurrence, validatedRule, options, errors) {
   const target = own(occurrence, 'target');
   const selector = own(target, 'selector');
   const framePath = own(target, 'framePath');
+  const occurrenceNodeId = own(occurrence, 'nodeId');
+  const targetNodeId = own(target, 'nodeId');
+  const nodeScopedConclusion = mapping?.targetScope === 'node' && outcome === 'failed';
+  const expectedPresentationTargetKey = mapping?.targetScope === 'document'
+    ? 'document'
+    : nodeScopedConclusion ? `node:${occurrenceNodeId}` : `selector:${frameIdFor(occurrence)}:${selector}`;
   const expectedJustification = engineResultType === 'violations' && mapping && outcome === 'cantTell'
     ? `${rationale}${CONFIRMATION_SUFFIX}`
     : rationale;
   if (justification !== expectedJustification ||
-    !exactKeys(target, ['framePath', 'nodeId', 'selector']) || own(target, 'nodeId') !== null ||
-    own(occurrence, 'nodeId') !== null || own(occurrence, 'selector') !== selector ||
+    !exactKeys(target, ['framePath', 'nodeId', 'selector']) || targetNodeId !== occurrenceNodeId ||
+    (nodeScopedConclusion
+      ? !(typeof occurrenceNodeId === 'string' || Number.isSafeInteger(occurrenceNodeId))
+      : occurrenceNodeId !== null) || own(occurrence, 'selector') !== selector ||
     !exactData(own(occurrence, 'framePath'), framePath) || !validFramePath(framePath) || !validSelector(selector) ||
     !(/^(?:occurrence-axe-[0-9a-f]{8}|occurrence-[A-Za-z0-9._:-]{1,200}-\d{6})$/u.test(own(occurrence, 'occurrenceId')) ||
       (options?.batch === true && /^occurrence-axe-[0-9a-f]{32}$/u.test(own(occurrence, 'occurrenceId')))) ||
@@ -260,7 +289,7 @@ function validateOccurrence(occurrence, validatedRule, options, errors) {
     !['minor', 'moderate', 'serious', 'critical'].includes(own(occurrence, 'impact')) ||
     own(occurrence, 'confidence') !== (outcome === 'failed' ? 'high' : 'low') ||
     own(occurrence, 'equivalenceKey') !== (mapping?.equivalenceKey ?? `axe:${engineRuleId}`) ||
-    own(occurrence, 'presentationTargetKey') !== (mapping?.targetScope === 'document' ? 'document' : `selector:${frameIdFor(occurrence)}:${selector}`)) {
+    own(occurrence, 'presentationTargetKey') !== expectedPresentationTargetKey) {
     errors.push(`Ocorrência de ${ruleId} contém payload não canônico.`);
     return false;
   }
@@ -271,10 +300,6 @@ function validateOccurrence(occurrence, validatedRule, options, errors) {
       return false;
     }
     return true;
-  }
-  if (!mapping) {
-    if (legal !== null) errors.push(`Achado não mapeado ${ruleId} contém base jurídica.`);
-    return legal === null;
   }
   if (!mapping.auditaRuleId || !mapping.equivalenceKey) {
     errors.push(`Ocorrência ${ruleId} não possui equivalência curada para conclusão automática.`);
@@ -287,11 +312,13 @@ function validateOccurrence(occurrence, validatedRule, options, errors) {
     pageId: own(occurrence, 'pageId'),
     frameId,
     target: selector,
+    ...(mapping.targetScope === 'node' ? { nodeId: occurrenceNodeId } : {}),
     nbrItemRef: mapping.nbrItemRef,
     source: { engine: 'audita-core', ruleId: mapping.auditaRuleId, version: options.rulesVersion },
   };
   if (options.rulesVersion !== '1.0.0' || own(occurrence, 'equivalenceKey') !== mapping.equivalenceKey ||
     (mapping.targetScope === 'document' && (frameId !== 0 || selector !== 'html')) ||
+    (mapping.targetScope === 'node' && (frameId !== 0 || !authoritativeCoreTarget(options, mapping, occurrenceNodeId))) ||
     frameId === null || typeof selector !== 'string' || !exactData(proof, expectedProof) ||
     !ITEM_BY_ID.get(mapping.nbrItemRef)?.ruleIds.includes(mapping.auditaRuleId) ||
     !exactData(legal, { basisRef: CONSUMER_ACCESSIBILITY_FIXED_BASIS.id })) {
@@ -320,6 +347,7 @@ export function validateNormalizedAxeSupplemental(input, options = {}) {
   const acceptedByRule = new Map();
   const acceptedByResultType = new Map([['violations', []], ['incomplete', []]]);
   const occurrenceIds = new Set();
+  const conclusiveNodeBindings = new Set();
   for (const occurrence of occurrences ?? []) {
     const occurrenceId = own(occurrence, 'occurrenceId');
     if (occurrenceIds.has(occurrenceId)) {
@@ -329,6 +357,15 @@ export function validateNormalizedAxeSupplemental(input, options = {}) {
     occurrenceIds.add(occurrenceId);
     const checkedRule = validatedRules.get(own(occurrence, 'ruleId'));
     if (!checkedRule || !validateOccurrence(occurrence, checkedRule, options, errors)) continue;
+    if (checkedRule.mapping?.targetScope === 'node' && own(occurrence, 'outcome') === 'failed') {
+      const binding = [checkedRule.engineRuleId, own(occurrence, 'pageId'), frameIdFor(occurrence),
+        own(occurrence, 'nodeId'), own(occurrence, 'selector')].join('\u0000');
+      if (conclusiveNodeBindings.has(binding)) {
+        errors.push('Conclusão axe por nó está duplicada.');
+        continue;
+      }
+      conclusiveNodeBindings.add(binding);
+    }
     const previous = strongest.get(checkedRule.ruleId);
     const outcome = own(occurrence, 'outcome');
     if (!previous || PRIORITY[outcome] > PRIORITY[previous]) strongest.set(checkedRule.ruleId, outcome);
@@ -344,6 +381,7 @@ export function validateNormalizedAxeSupplemental(input, options = {}) {
     const strongestImpact = accepted.reduce((current, occurrence) =>
       impactOrder.indexOf(own(occurrence, 'impact')) > impactOrder.indexOf(current) ? own(occurrence, 'impact') : current, 'minor');
     const expectedTargets = accepted.map(occurrence => ({
+      nodeId: own(occurrence, 'nodeId'),
       selector: own(own(occurrence, 'target'), 'selector'),
       framePath: own(own(occurrence, 'target'), 'framePath'),
       message: own(occurrence, 'justification'),

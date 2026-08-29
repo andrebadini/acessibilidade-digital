@@ -4,6 +4,8 @@ import test from 'node:test';
 import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
 import { runAudit } from '../../src/background/run-audit.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
+import { createAuditModel } from '../../src/core/report/audit-model.js';
+import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { createAnnotationMapFixture } from '../report/annotation-map-fixture.js';
 
@@ -360,6 +362,96 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
   assert.doesNotMatch(JSON.stringify(model), /REMOVE|SECRET|user:pass|password=/i);
 });
 
+test('orders capture→axe→collect→probes→core→normalize, correlates target-size by node and drops raw axe', async () => {
+  const page = rawPage();
+  page.nodes = [
+    { backendNodeId: 10, tagName: 'html', attributes: {}, text: '', parentBackendNodeId: null, rect: { x: 0, y: 0, width: 800, height: 600 } },
+    { backendNodeId: 11, tagName: 'body', attributes: {}, text: '', parentBackendNodeId: 10, rect: { x: 0, y: 0, width: 800, height: 600 } },
+    { backendNodeId: 12, tagName: 'button', attributes: {}, text: 'Continuar', parentBackendNodeId: 11, rect: { x: 10, y: 20, width: 20, height: 20 } },
+  ];
+  const options = {
+    page,
+    rawProbes: {
+      focus: { completed: false, events: [] },
+      targetSizes: [{ nodeId: 'n-12', width: 20, height: 20, exception: 'none', exceptionProof: 'complete' }],
+      warnings: [], actions: [],
+    },
+  };
+  const adapter = fakeAdapter(options);
+  let normalizeObserved = false;
+  options.axeRun = new Proxy({
+    status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [], privateRaw: 'AXE_RAW_PRIVATE_SENTINEL',
+    frames: [{ frameId: 0, status: 'success', result: {
+      violations: [{ id: 'target-size', impact: 'serious', nodes: [{ impact: 'serious', target: 'html > body > button' }] }],
+      incomplete: [], passes: [], inapplicable: [],
+    } }],
+  }, {
+    getOwnPropertyDescriptor(target, property) {
+      if (!normalizeObserved) {
+        normalizeObserved = true;
+        adapter.events.push('normalize-axe');
+      }
+      return Reflect.getOwnPropertyDescriptor(target, property);
+    },
+  });
+
+  const model = await runAudit({
+    url: 'https://example.test/', chromeAdapter: adapter,
+    now: clock, idFactory: () => 'audit-target-size-order',
+  });
+  const axe = model.occurrences.find(occurrence => occurrence.ruleId === 'axe.target-size');
+  const core = model.occurrences.find(occurrence => occurrence.ruleId === 'target-size-minimum');
+
+  assert.ok(adapter.events.indexOf('full-page') < adapter.events.indexOf('axe'));
+  assert.ok(adapter.events.indexOf('axe') < adapter.events.indexOf('collect'));
+  assert.ok(adapter.events.indexOf('collect') < adapter.events.indexOf('probes'));
+  assert.ok(adapter.events.indexOf('probes') < adapter.events.indexOf('normalize-axe'));
+  assert.equal(core.outcome, 'failed');
+  assert.equal(core.nodeId, 'n-12');
+  assert.equal(axe.outcome, 'failed', 'conclusion proves core authority existed before axe normalization');
+  assert.equal(axe.nodeId, 'n-12');
+  assert.equal(axe.applicabilityEvidence.nodeId, 'n-12');
+  const group = model.presentation.groups.find(entry => entry.occurrenceIds.includes(core.occurrenceId));
+  assert.deepEqual(group.occurrenceIds, [core.occurrenceId, axe.occurrenceId]);
+  assert.doesNotMatch(JSON.stringify(model), /AXE_RAW_PRIVATE_SENTINEL/u);
+
+  const reportOptions = {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  };
+  const report = await enrichAuditForReport(model, reportOptions);
+  assert.doesNotThrow(() => createAuditModel(report));
+  assert.doesNotThrow(() => renderHtmlReport(report));
+  const technical = JSON.parse(renderTechnicalJson(report));
+  assert.equal(technical.assertions.length, 146);
+  assert.deepEqual(technical.audit, report);
+
+  const attacks = [
+    candidate => {
+      candidate.occurrences.find(value => value.ruleId === 'axe.target-size').applicabilityEvidence.nodeId = 'n-11';
+      candidate.axe.occurrences.find(value => value.ruleId === 'axe.target-size').applicabilityEvidence.nodeId = 'n-11';
+    },
+    candidate => {
+      candidate.occurrences.push(structuredClone(candidate.occurrences.find(value => value.ruleId === 'axe.target-size')));
+      candidate.axe.occurrences.push(structuredClone(candidate.axe.occurrences.find(value => value.ruleId === 'axe.target-size')));
+    },
+    candidate => {
+      candidate.occurrences.find(value => value.ruleId === 'axe.target-size').outcome = 'cantTell';
+      candidate.axe.occurrences.find(value => value.ruleId === 'axe.target-size').outcome = 'cantTell';
+    },
+  ];
+  for (const mutate of attacks) {
+    const candidate = structuredClone(report);
+    mutate(candidate);
+    candidate.integrity.canonicalModelHash = 'pending';
+    candidate.integrity.evidenceManifestHash = 'pending';
+    assert.throws(() => createAuditModel(candidate), /modelo|axe|inválid|ocorrência/iu);
+    await assert.rejects(enrichAuditForReport(candidate, reportOptions), /modelo|axe|inválid|ocorrência/iu);
+    assert.throws(() => renderHtmlReport(candidate), /modelo|axe|inválid|ocorrência/iu);
+    assert.throws(() => renderTechnicalJson(candidate), /modelo|axe|inválid|ocorrência/iu);
+  }
+});
+
 test('creates one page-level derived map after structural evidence without mutating or linking the pristine source', async () => {
   let pristineBefore;
   let pristineAfter;
@@ -677,7 +769,11 @@ test('rejects a forged failed item when validated axe evidence is only cantTell'
     originalOutcome: 'cantTell', reviewedOutcome: 'failed', outcome: 'failed',
     review: { mode: 'assisted', evaluator: 'forjado', decidedAt: '2026-08-26T15:00:00.000Z', decisionIds: [] },
   });
-  await assert.rejects(enrichAuditForReport(forgedReview, enrichOptions), /revis|decis|diverge/i);
+  const projectedReview = await enrichAuditForReport(forgedReview, enrichOptions);
+  const projectedItem = projectedReview.itemResults.find(item => item.id === '5.13.1');
+  assert.equal(projectedItem.outcome, 'cantTell');
+  assert.equal(Object.hasOwn(projectedItem, 'reviewedOutcome'), false);
+  assert.equal(Object.hasOwn(projectedItem, 'review'), false);
 });
 
 for (const fixture of [

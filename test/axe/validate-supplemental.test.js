@@ -44,6 +44,76 @@ function partialSupplemental({ truncated = false } = {}) {
   }));
 }
 
+function targetSizeSupplemental() {
+  const coreRuleResults = [{
+    ruleId: 'target-size-minimum', outcome: 'failed', mode: 'automated',
+    targets: [{ nodeId: 'n-button' }], summary: 'Há alvos abaixo do tamanho mínimo aplicável.', limitations: [],
+    nbrItems: ['5.8.7'], wcag: ['2.5.8'],
+    source: { engine: 'audita-core', ruleId: 'target-size-minimum', version: '1.0.0' },
+  }];
+  const snapshot = {
+    schemaVersion: 1, document: { nodeId: 'document' },
+    nodes: [
+      { nodeId: 'n-html', parentId: null, children: ['n-body'], tagName: 'html', attributes: {}, framePath: [] },
+      { nodeId: 'n-body', parentId: 'n-html', children: ['n-button'], tagName: 'body', attributes: {}, framePath: [] },
+      { nodeId: 'n-button', parentId: 'n-body', children: [], tagName: 'button', attributes: {}, framePath: [] },
+    ],
+  };
+  const cluster = structuredClone(normalizeAxeResults({
+    status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],
+    frames: [{ frameId: 0, status: 'success', result: {
+      violations: [{ id: 'target-size', impact: 'serious', nodes: [{ impact: 'serious', target: 'html > body > button' }] }],
+      incomplete: [], passes: [], inapplicable: [],
+    } }],
+  }, { pageId: 'page-1', rulesVersion: '1.0.0', snapshot, coreRuleResults }));
+  return { cluster, coreRuleResults };
+}
+
+test('revalidates target-size node authority and rejects duplicate or forged conclusions', () => {
+  const { cluster, coreRuleResults } = targetSizeSupplemental();
+  assert.deepEqual(validateNormalizedAxeSupplemental(cluster, {
+    rulesVersion: '1.0.0', coreRuleResults,
+  }).errors, []);
+
+  for (const [label, mutateCluster, mutateCore = value => value] of [
+    ['missing core', value => value, () => []],
+    ['duplicate core', value => value, value => [...value, structuredClone(value[0])]],
+    ['different proof node', value => { value.occurrences[0].applicabilityEvidence.nodeId = 'n-body'; return value; }],
+    ['different occurrence node', value => {
+      value.occurrences[0].nodeId = 'n-body';
+      value.occurrences[0].target.nodeId = 'n-body';
+      value.occurrences[0].presentationTargetKey = 'node:n-body';
+      value.occurrences[0].applicabilityEvidence.nodeId = 'n-body';
+      value.ruleResults[0].targets[0].nodeId = 'n-body';
+      return value;
+    }],
+    ['inconclusive legal claim', value => {
+      value.occurrences[0].outcome = 'cantTell';
+      value.occurrences[0].testedWcagRefs = [];
+      value.occurrences[0].wcagRefs = [];
+      value.occurrences[0].foreignBenchmarkRefs = [];
+      value.ruleResults[0].outcome = 'cantTell';
+      return value;
+    }],
+    ['duplicate same-node conclusion', value => {
+      const duplicate = structuredClone(value.occurrences[0]);
+      duplicate.occurrenceId = 'occurrence-axe-deadbeef';
+      value.occurrences.push(duplicate);
+      value.ruleResults[0].targets.push(structuredClone(value.ruleResults[0].targets[0]));
+      value.technicalSummary.violations.nodes = 2;
+      return value;
+    }],
+  ]) {
+    const hostile = mutateCluster(structuredClone(cluster));
+    const hostileCore = mutateCore(structuredClone(coreRuleResults));
+    const checked = validateNormalizedAxeSupplemental(hostile, {
+      rulesVersion: '1.0.0', coreRuleResults: hostileCore,
+    });
+    assert.ok(checked.errors.length > 0, label);
+    assert.deepEqual(checked.occurrences, [], label);
+  }
+});
+
 test('strict supplemental validator accepts only the exact normalized axe contract', () => {
   const valid = validateNormalizedAxeSupplemental(validSupplemental(), { rulesVersion: '1.0.0' });
   assert.deepEqual(valid.errors, []);

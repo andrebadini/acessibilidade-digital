@@ -68,20 +68,30 @@ export async function remapAuditPage(input, { batchAuditId, pageId }) {
     evidence.push(artifact);
   }
 
-  const occurrences = model.occurrences.map(occurrence => ({
-    ...structuredClone(occurrence),
-    occurrenceId: remapOccurrence(occurrence.occurrenceId),
-    pageId,
-    nodeId: remapNode(occurrence.nodeId),
-    target: occurrence.target && Object.hasOwn(occurrence.target, 'nodeId')
-      ? { ...structuredClone(occurrence.target), nodeId: remapNode(occurrence.target.nodeId) }
-      : structuredClone(occurrence.target),
-    evidenceRefs: occurrence.evidenceRefs.map(remapEvidence),
-    evidenceIds: occurrence.evidenceIds.map(remapEvidence),
-    ...(occurrence.applicabilityEvidence ? {
-      applicabilityEvidence: { ...structuredClone(occurrence.applicabilityEvidence), pageId },
-    } : {}),
-  }));
+  const occurrences = model.occurrences.map(occurrence => {
+    const remappedNodeId = remapNode(occurrence.nodeId);
+    return {
+      ...structuredClone(occurrence),
+      occurrenceId: remapOccurrence(occurrence.occurrenceId),
+      pageId,
+      nodeId: remappedNodeId,
+      target: occurrence.target && Object.hasOwn(occurrence.target, 'nodeId')
+        ? { ...structuredClone(occurrence.target), nodeId: remapNode(occurrence.target.nodeId) }
+        : structuredClone(occurrence.target),
+      ...(Object.hasOwn(occurrence, 'presentationTargetKey') ? {
+        presentationTargetKey: remapPresentationTargetKey(
+          occurrence.presentationTargetKey, occurrence.nodeId, remappedNodeId,
+        ),
+      } : {}),
+      evidenceRefs: occurrence.evidenceRefs.map(remapEvidence),
+      evidenceIds: occurrence.evidenceIds.map(remapEvidence),
+      ...(occurrence.applicabilityEvidence ? {
+        applicabilityEvidence: remapApplicabilityEvidence(
+          occurrence.applicabilityEvidence, pageId, remapNode,
+        ),
+      } : {}),
+    };
+  });
   const manualReview = model.manualReview.map(entry => ({
     ...structuredClone(entry),
     occurrenceId: remapOccurrence(entry.occurrenceId),
@@ -173,15 +183,39 @@ function remapEvidenceArtifact(artifact, pageId, remapEvidence, remapNode) {
 function remapAxe(axe, pageId, occurrenceIds, remapNode) {
   const output = structuredClone(axe);
   output.ruleResults = output.ruleResults.map(rule => remapRule(rule, remapNode));
-  output.occurrences = output.occurrences.map(occurrence => ({
-    ...occurrence,
-    occurrenceId: requiredMapped(occurrenceIds, occurrence.occurrenceId, 'ocorrência axe'),
-    pageId,
-    ...(occurrence.applicabilityEvidence ? {
-      applicabilityEvidence: { ...occurrence.applicabilityEvidence, pageId },
-    } : {}),
-  }));
+  output.occurrences = output.occurrences.map(occurrence => {
+    const remappedNodeId = remapNode(occurrence.nodeId);
+    return {
+      ...occurrence,
+      occurrenceId: requiredMapped(occurrenceIds, occurrence.occurrenceId, 'ocorrência axe'),
+      pageId,
+      nodeId: remappedNodeId,
+      target: occurrence.target && Object.hasOwn(occurrence.target, 'nodeId')
+        ? { ...occurrence.target, nodeId: remapNode(occurrence.target.nodeId) }
+        : occurrence.target,
+      presentationTargetKey: remapPresentationTargetKey(
+        occurrence.presentationTargetKey, occurrence.nodeId, remappedNodeId,
+      ),
+      ...(occurrence.applicabilityEvidence ? {
+        applicabilityEvidence: remapApplicabilityEvidence(
+          occurrence.applicabilityEvidence, pageId, remapNode,
+        ),
+      } : {}),
+    };
+  });
   return output;
+}
+
+function remapApplicabilityEvidence(proof, pageId, remapNode) {
+  const output = { ...structuredClone(proof), pageId };
+  if (Object.hasOwn(output, 'nodeId')) output.nodeId = remapNode(output.nodeId);
+  return output;
+}
+
+function remapPresentationTargetKey(value, localNodeId, remappedNodeId) {
+  return localNodeId !== null && localNodeId !== undefined && value === `node:${localNodeId}`
+    ? `node:${remappedNodeId}`
+    : value;
 }
 
 function collectNodeIds(model) {
@@ -191,7 +225,16 @@ function collectNodeIds(model) {
     if (typeof target === 'string') add(target);
     else add(target?.nodeId);
   }
-  for (const occurrence of model.occurrences) { add(occurrence.nodeId); add(occurrence.target?.nodeId); }
+  for (const occurrence of model.occurrences) {
+    add(occurrence.nodeId);
+    add(occurrence.target?.nodeId);
+    add(occurrence.applicabilityEvidence?.nodeId);
+  }
+  for (const occurrence of model.axe?.occurrences ?? []) {
+    add(occurrence.nodeId);
+    add(occurrence.target?.nodeId);
+    add(occurrence.applicabilityEvidence?.nodeId);
+  }
   for (const artifact of model.evidence) {
     add(artifact.nodeId);
     for (const annotation of artifact.derivation?.geometry?.annotations ?? []) add(annotation.nodeId);

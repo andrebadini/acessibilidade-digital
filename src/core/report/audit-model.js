@@ -253,7 +253,9 @@ function migrateV1Record(model) {
       selector: occurrence.target?.selector ?? legacySelector ?? targetEvidence?.selector?.css ?? null,
       framePath: [...(occurrence.target?.framePath ?? legacyFramePath ?? targetEvidence?.selector?.framePath ?? [])],
     };
-    output.accessiblePreview = occurrence.accessiblePreview ?? targetEvidence?.accessibility?.announcementPreview ?? null;
+    output.accessiblePreview = source.engine === 'axe-core'
+      ? null
+      : occurrence.accessiblePreview ?? targetEvidence?.accessibility?.announcementPreview ?? null;
     output.evidenceRefs = evidenceRefs;
     output.legalAnalysis = legalBasis ? { basisRef: legalBasis.id } : null;
     if (source.engine === 'axe-core') {
@@ -621,6 +623,12 @@ function axeOccurrencesFrom(model) {
     : [];
 }
 
+function coreRulesFrom(model) {
+  return Array.isArray(model.ruleResults)
+    ? model.ruleResults.filter(rule => rule?.source?.engine === 'audita-core')
+    : [];
+}
+
 function authoritativeAxeOccurrence(value) {
   return {
     occurrenceId: value.occurrenceId, pageId: value.pageId, ruleId: value.ruleId,
@@ -646,13 +654,14 @@ function authoritativeAxeOccurrence(value) {
 function assertAxeSupplementalIntegrity(model, rulesVersion) {
   const reportRules = axeRulesFrom(model);
   const reportOccurrences = axeOccurrencesFrom(model);
+  const coreRuleResults = coreRulesFrom(model);
   const batchChecked = model.requestedScope?.mode === 'batch' && model.axePages !== undefined
-    ? validateBatchAxePages(model, rulesVersion)
+    ? validateBatchAxePages(model, rulesVersion, coreRuleResults)
     : undefined;
   if (reportRules.length === 0 && reportOccurrences.length === 0 && model.axe === undefined) {
     if (batchChecked === undefined || (batchChecked.occurrences.length === 0 && batchChecked.status !== 'partial')) return null;
   }
-  const checked = batchChecked ?? validateNormalizedAxeSupplemental(model.axe, { rulesVersion });
+  const checked = batchChecked ?? validateNormalizedAxeSupplemental(model.axe, { rulesVersion, coreRuleResults });
   if (checked.errors.length > 0) throw new TypeError(`Suplemento axe inválido: ${checked.errors.join('; ')}`);
   if (reportRules.length !== checked.ruleResults.length || reportOccurrences.length !== checked.occurrences.length) {
     throw new TypeError('Suplemento axe do relatório diverge do cluster normalizado.');
@@ -711,7 +720,7 @@ function validAxeTargetBinding(occurrence, expected, schemaVersion) {
   return v2Target || normalizedTarget;
 }
 
-function validateBatchAxePages(model, rulesVersion) {
+function validateBatchAxePages(model, rulesVersion, coreRuleResults) {
   if (!Array.isArray(model.axePages) || model.axePages.length > 20) {
     throw new TypeError('Envelopes axe do lote inválidos.');
   }
@@ -725,7 +734,7 @@ function validateBatchAxePages(model, rulesVersion) {
       throw new TypeError('Envelope axe do lote referencia página inválida ou duplicada.');
     }
     seen.add(entry.pageId);
-    const checked = validateNormalizedAxeSupplemental(entry.result, { rulesVersion, batch: true });
+    const checked = validateNormalizedAxeSupplemental(entry.result, { rulesVersion, batch: true, coreRuleResults });
     if (checked.errors.length > 0) throw new TypeError(`Envelope axe da página ${entry.pageId} possui payload inválido.`);
     if (checked.occurrences.some(value => value.pageId !== entry.pageId)) throw new TypeError(`Envelope axe da página ${entry.pageId} possui ocorrência cruzada.`);
     if (pageById.get(entry.pageId).axeStatus !== entry.result.status) throw new TypeError(`Envelope axe da página ${entry.pageId} diverge do estado da página.`);

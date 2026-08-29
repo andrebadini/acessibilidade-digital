@@ -12,6 +12,8 @@ export const AXE_RUN_CONFIG = Object.freeze({
   }),
   rules: Object.freeze({ 'target-size': Object.freeze({ enabled: AXE_MV3_CSP_GATE.targetSizeEnabled }) }),
   resultTypes: Object.freeze(['violations', 'incomplete', 'passes', 'inapplicable']),
+  preload: false,
+  iframes: false,
 });
 
 export const AXE_PROVENANCE = Object.freeze({
@@ -114,11 +116,7 @@ export function canonicalizeAxeDiagnostics(value) {
 
 const MAX_GROUPS = 100;
 const MAX_NODES = 100;
-const MAX_CHECKS = 32;
-const MAX_TAGS = 32;
-const MAX_TARGET_PARTS = 16;
 const DEFAULT_TIMEOUT_MS = 30_000;
-const CATALOG_IDENTIFIER = /^[a-z][a-z0-9._:-]{0,127}$/iu;
 const SELECTOR_ALLOWED_CHARACTERS = /^[a-z0-9():>\- \t]+$/iu;
 export const AXE_STRUCTURAL_SELECTOR_TAGS = Object.freeze([
   'a', 'abbr', 'address', 'area', 'article', 'aside', 'audio', 'b', 'base', 'bdi', 'bdo', 'blockquote', 'body', 'br', 'button',
@@ -130,17 +128,30 @@ export const AXE_STRUCTURAL_SELECTOR_TAGS = Object.freeze([
   'table', 'tbody', 'td', 'template', 'textarea', 'tfoot', 'th', 'thead', 'time', 'title', 'tr', 'track', 'u', 'ul', 'var', 'video', 'wbr',
 ]);
 const SAFE_TARGET_TAGS = new Set(AXE_STRUCTURAL_SELECTOR_TAGS);
+export const AXE_ALLOWED_RULE_IDS = Object.freeze([
+  'area-alt', 'aria-allowed-attr', 'aria-command-name', 'aria-input-field-name', 'aria-meter-name',
+  'aria-progressbar-name', 'aria-required-attr', 'aria-roles', 'aria-toggle-field-name', 'aria-tooltip-name',
+  'aria-valid-attr-value', 'aria-valid-attr', 'button-name', 'color-contrast', 'definition-list', 'dlitem',
+  'document-title', 'frame-title', 'html-has-lang', 'html-lang-valid', 'image-alt', 'input-button-name',
+  'input-image-alt', 'label', 'label-content-name-mismatch', 'link-name', 'list', 'listitem', 'meta-viewport',
+  'object-alt', 'role-img-alt', 'select-name', 'svg-img-alt', 'target-size', 'td-headers-attr', 'th-has-data-cells',
+]);
+const ALLOWED_RULE_ID_SET = new Set(AXE_ALLOWED_RULE_IDS);
+export const AXE_FRAME_PROJECTION_POLICY = Object.freeze({
+  allowedRuleIds: AXE_ALLOWED_RULE_IDS,
+  allowedTags: AXE_STRUCTURAL_SELECTOR_TAGS,
+  maxGroupsPerType: MAX_GROUPS,
+  maxNodesPerGroup: MAX_NODES,
+  maxSelectorLength: 256,
+  maxSelectorParts: 12,
+  targetUnavailable: '[target-unavailable]',
+});
 const DEFAULT_TIMERS = Object.freeze({
   set: (callback, timeoutMs) => setTimeout(callback, timeoutMs),
   clear: timer => clearTimeout(timer),
 });
 
 export const AXE_TARGET_UNAVAILABLE = '[target-unavailable]';
-const AXE_CATALOG_ID_UNAVAILABLE = 'axe-id-unavailable';
-
-function safeCatalogIdentifier(value, fallback = null) {
-  return typeof value === 'string' && CATALOG_IDENTIFIER.test(value) ? value : fallback;
-}
 
 function safeImpact(value) {
   return ['minor', 'moderate', 'serious', 'critical'].includes(value) ? value : null;
@@ -170,54 +181,57 @@ export function sanitizeAxeStructuralSelector(value) {
   return previousWasCombinator ? AXE_TARGET_UNAVAILABLE : normalized;
 }
 
-function sanitizeTarget(value, depth = 0) {
-  if (typeof value === 'string') return sanitizeAxeStructuralSelector(value);
-  if (!Array.isArray(value) || depth >= 3 || value.length === 0) return AXE_TARGET_UNAVAILABLE;
-  return value.slice(0, MAX_TARGET_PARTS).map(item => sanitizeTarget(item, depth + 1));
+function ownData(value, key) {
+  try {
+    if (!value || (typeof value !== 'object' && typeof value !== 'function')) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch { return undefined; }
 }
 
-function sanitizeCheck(check) {
+function projectedArray(value, key, limit) {
+  const candidate = ownData(value, key);
+  let isArray = false;
+  try { isArray = Array.isArray(candidate); } catch { return { entries: [], length: 0, valid: false }; }
+  if (!isArray) return { entries: [], length: 0, valid: false };
+  const rawLength = ownData(candidate, 'length');
+  if (!Number.isSafeInteger(rawLength) || rawLength < 0) return { entries: [], length: 0, valid: false };
+  const entries = [];
+  for (let index = 0; index < Math.min(rawLength, limit); index += 1) entries.push(ownData(candidate, String(index)));
+  return { entries, length: rawLength, valid: true };
+}
+
+function projectedCount(metadata, rawLength, retained, limit, dropped = false) {
+  const claimedOriginal = ownData(metadata, 'original');
+  const claimedRetained = ownData(metadata, 'retained');
+  const claimedTruncated = ownData(metadata, 'truncated');
+  const claimValid = Number.isSafeInteger(claimedOriginal) && claimedOriginal >= 0 && claimedOriginal <= limit + 1 &&
+    claimedRetained === retained && typeof claimedTruncated === 'boolean';
+  const original = Math.max(Math.min(rawLength, limit + 1), retained, claimValid ? claimedOriginal : 0);
   return {
-    id: safeCatalogIdentifier(check?.id, AXE_CATALOG_ID_UNAVAILABLE),
-    impact: safeImpact(check?.impact),
+    original,
+    retained,
+    truncated: dropped || rawLength > limit || (claimValid && claimedTruncated) || original > retained,
   };
 }
 
-function boundedCount(value, limit) {
-  const original = Array.isArray(value) ? value.length : 0;
-  const retained = Math.min(original, limit);
-  return { original, retained, truncated: original > limit };
-}
-
-function sanitizeNode(node) {
-  const any = Array.isArray(node?.any) ? node.any : [];
-  const all = Array.isArray(node?.all) ? node.all : [];
-  const none = Array.isArray(node?.none) ? node.none : [];
+function sanitizeProjectedGroup(group) {
+  const id = ownData(group, 'id');
+  if (!ALLOWED_RULE_ID_SET.has(id)) return null;
+  const inspected = projectedArray(group, 'nodes', MAX_NODES);
+  const nodes = inspected.entries.filter(node => {
+    try { return Boolean(node && typeof node === 'object' && !Array.isArray(node)); } catch { return false; }
+  }).map(node => ({
+      impact: safeImpact(ownData(node, 'impact')),
+      target: sanitizeAxeStructuralSelector(ownData(node, 'target')),
+    }));
   return {
-    impact: safeImpact(node?.impact),
-    target: sanitizeTarget(node?.target),
-    any: any.slice(0, MAX_CHECKS).map(sanitizeCheck),
-    all: all.slice(0, MAX_CHECKS).map(sanitizeCheck),
-    none: none.slice(0, MAX_CHECKS).map(sanitizeCheck),
+    id,
+    impact: safeImpact(ownData(group, 'impact')),
+    nodes,
     truncation: {
-      any: boundedCount(any, MAX_CHECKS),
-      all: boundedCount(all, MAX_CHECKS),
-      none: boundedCount(none, MAX_CHECKS),
-    },
-  };
-}
-
-function sanitizeGroup(group) {
-  const tags = Array.isArray(group?.tags) ? group.tags : [];
-  const nodes = Array.isArray(group?.nodes) ? group.nodes : [];
-  return {
-    id: safeCatalogIdentifier(group?.id, AXE_CATALOG_ID_UNAVAILABLE),
-    impact: safeImpact(group?.impact),
-    tags: tags.slice(0, MAX_TAGS).map(tag => safeCatalogIdentifier(tag)).filter(Boolean),
-    nodes: nodes.slice(0, MAX_NODES).map(sanitizeNode),
-    truncation: {
-      tags: boundedCount(tags, MAX_TAGS),
-      nodes: boundedCount(nodes, MAX_NODES),
+      nodes: projectedCount(ownData(ownData(group, 'truncation'), 'nodes'), inspected.length, nodes.length, MAX_NODES,
+        !inspected.valid || nodes.length !== inspected.entries.length),
     },
   };
 }
@@ -225,20 +239,134 @@ function sanitizeGroup(group) {
 function sanitizeAxeResults(results) {
   const output = { truncation: {} };
   for (const name of ['violations', 'incomplete', 'passes', 'inapplicable']) {
-    const groups = Array.isArray(results?.[name]) ? results[name] : [];
-    output[name] = groups.slice(0, MAX_GROUPS).map(sanitizeGroup);
-    output.truncation[name] = boundedCount(groups, MAX_GROUPS);
+    const inspected = projectedArray(results, name, MAX_GROUPS);
+    const groups = inspected.entries.map(sanitizeProjectedGroup).filter(Boolean);
+    output[name] = groups;
+    output.truncation[name] = projectedCount(
+      ownData(ownData(results, 'truncation'), name),
+      inspected.length,
+      groups.length,
+      MAX_GROUPS,
+      !inspected.valid || groups.length !== inspected.entries.length,
+    );
   }
   return output;
 }
 
 /** Runs inside each isolated frame after the separately packaged axe runtime is injected. */
-export async function runAxeInFrame(config) {
+export async function runAxeInFrame(config, policy) {
   try {
+    // Everything below is intentionally local to this function: Chrome
+    // serializes only this function and its explicit arguments into each frame.
+    const read = (value, key) => {
+      try {
+        if (!value || (typeof value !== 'object' && typeof value !== 'function')) return undefined;
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+      } catch { return undefined; }
+    };
+    const inspect = (value, key, limit) => {
+      const candidate = read(value, key);
+      let array = false;
+      try { array = Array.isArray(candidate); } catch { return { entries: [], length: 0, valid: false }; }
+      if (!array) return { entries: [], length: 0, valid: false };
+      const length = read(candidate, 'length');
+      if (!Number.isSafeInteger(length) || length < 0) return { entries: [], length: 0, valid: false };
+      const entries = [];
+      for (let index = 0; index < Math.min(length, limit); index += 1) entries.push(read(candidate, String(index)));
+      return { entries, length, valid: true };
+    };
+    const allowedRules = new Set(read(policy, 'allowedRuleIds'));
+    const allowedTags = new Set(read(policy, 'allowedTags'));
+    const maxGroups = read(policy, 'maxGroupsPerType');
+    const maxNodes = read(policy, 'maxNodesPerGroup');
+    const maxSelectorLength = read(policy, 'maxSelectorLength');
+    const maxSelectorParts = read(policy, 'maxSelectorParts');
+    const unavailable = read(policy, 'targetUnavailable');
+    if (!Number.isSafeInteger(maxGroups) || !Number.isSafeInteger(maxNodes) ||
+      !Number.isSafeInteger(maxSelectorLength) || !Number.isSafeInteger(maxSelectorParts) ||
+      typeof unavailable !== 'string') return { ok: false, code: 'AXE_RUN_FAILED' };
+    const impact = value => ['minor', 'moderate', 'serious', 'critical'].includes(value) ? value : null;
+    const count = (length, retained, limit, dropped) => ({
+      original: Math.min(Number.isSafeInteger(length) && length >= 0 ? length : 0, limit + 1),
+      retained,
+      truncated: dropped || !Number.isSafeInteger(length) || length < 0 || length > limit || retained !== length,
+    });
+    const resolveUnique = rawTarget => {
+      const target = inspect({ target: rawTarget }, 'target', 2);
+      if (!target.valid || target.length !== 1 || typeof target.entries[0] !== 'string' ||
+        target.entries[0].length === 0 || target.entries[0].length > maxSelectorLength) return unavailable;
+      let matches;
+      try { matches = globalThis.document.querySelectorAll(target.entries[0]); } catch { return unavailable; }
+      if (!matches || matches.length !== 1) return unavailable;
+      const element = matches[0];
+      try {
+        if (typeof element.getRootNode === 'function' && element.getRootNode() !== globalThis.document) return unavailable;
+        const compounds = [];
+        let current = element;
+        while (current && compounds.length < maxSelectorParts) {
+          const tag = typeof current.localName === 'string' ? current.localName.toLowerCase() : '';
+          if (!allowedTags.has(tag)) return unavailable;
+          let compound = tag;
+          const parent = current.parentElement;
+          if (parent) {
+            const siblings = parent.children;
+            let sameTag = 0;
+            let position = 0;
+            const siblingLength = Math.min(Number.isSafeInteger(siblings?.length) ? siblings.length : 0, 2_048);
+            for (let index = 0; index < siblingLength; index += 1) {
+              const sibling = siblings[index];
+              if (typeof sibling?.localName === 'string' && sibling.localName.toLowerCase() === tag) {
+                sameTag += 1;
+                if (sibling === current) position = sameTag;
+              }
+            }
+            if (sameTag > 1) {
+              if (position === 0) return unavailable;
+              compound += `:nth-of-type(${position})`;
+            }
+          }
+          compounds.unshift(compound);
+          if (tag === 'html') break;
+          current = parent;
+        }
+        if (compounds.length === 0 || compounds[0] !== 'html' || current?.localName?.toLowerCase() !== 'html') return unavailable;
+        const selector = compounds.join(' > ');
+        if (selector.length > maxSelectorLength) return unavailable;
+        const verified = globalThis.document.querySelectorAll(selector);
+        return verified?.length === 1 && verified[0] === element ? selector : unavailable;
+      } catch { return unavailable; }
+    };
+    const projectGroup = group => {
+      const id = read(group, 'id');
+      if (!allowedRules.has(id)) return null;
+      const rawNodes = inspect(group, 'nodes', maxNodes);
+      const nodes = rawNodes.entries.filter(node => {
+        try { return Boolean(node && typeof node === 'object' && !Array.isArray(node)); } catch { return false; }
+      }).map(node => ({
+        impact: impact(read(node, 'impact')),
+        target: resolveUnique(read(node, 'target')),
+      }));
+      return {
+        id,
+        impact: impact(read(group, 'impact')),
+        nodes,
+        truncation: { nodes: count(rawNodes.length, nodes.length, maxNodes,
+          !rawNodes.valid || nodes.length !== rawNodes.entries.length) },
+      };
+    };
     const engine = globalThis.axe;
     if (!engine || typeof engine.run !== 'function') return { ok: false, code: 'AXE_RUNTIME_UNAVAILABLE' };
     const results = await engine.run(globalThis.document, config);
-    return { ok: true, version: engine.version, results };
+    const projected = { truncation: {} };
+    for (const name of ['violations', 'incomplete', 'passes', 'inapplicable']) {
+      const rawGroups = inspect(results, name, maxGroups);
+      const groups = rawGroups.entries.map(projectGroup).filter(Boolean);
+      projected[name] = groups;
+      projected.truncation[name] = count(rawGroups.length, groups.length, maxGroups,
+        !rawGroups.valid || groups.length !== rawGroups.entries.length);
+    }
+    return { ok: true, version: engine.version, results: projected };
   } catch {
     return { ok: false, code: 'AXE_RUN_FAILED' };
   }
@@ -296,7 +424,7 @@ async function executeAxe(tabId, executeScript, deadline) {
   let runs;
   assertDeadline(deadline);
   try {
-    runs = await executeScript({ target, world: 'ISOLATED', func: runAxeInFrame, args: [AXE_RUN_CONFIG] });
+    runs = await executeScript({ target, world: 'ISOLATED', func: runAxeInFrame, args: [AXE_RUN_CONFIG, AXE_FRAME_PROJECTION_POLICY] });
   } catch {
     assertDeadline(deadline);
     return { status: 'partial', provenance: AXE_PROVENANCE, frames: [], diagnostics: [diagnostic('AXE_EXECUTION_FAILED')] };

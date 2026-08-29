@@ -55,7 +55,41 @@ function runResult() {
   };
 }
 
-test('normalizes confirmed mapped violations as conclusive ABNT failures and keeps unmapped findings supplemental', () => {
+function targetSizeRun({ frameId = 0, selector = 'html > body > button' } = {}) {
+  return {
+    status: 'complete', provenance: PROVENANCE, diagnostics: [],
+    frames: [{ frameId, status: 'success', result: {
+      violations: [{
+        id: 'target-size', impact: 'serious',
+        nodes: [{ impact: 'serious', target: selector }],
+      }],
+      incomplete: [], passes: [], inapplicable: [],
+    } }],
+  };
+}
+
+function targetSizeSnapshot() {
+  return {
+    schemaVersion: 1,
+    document: { nodeId: 'document', language: 'pt-BR' },
+    nodes: [
+      { nodeId: 'n-html', parentId: null, children: ['n-body'], tagName: 'html', attributes: {}, framePath: [] },
+      { nodeId: 'n-body', parentId: 'n-html', children: ['n-button'], tagName: 'body', attributes: {}, framePath: [] },
+      { nodeId: 'n-button', parentId: 'n-body', children: [], tagName: 'button', attributes: {}, framePath: [] },
+    ],
+  };
+}
+
+function targetSizeCore({ outcome = 'failed', targets = [{ nodeId: 'n-button' }] } = {}) {
+  return {
+    ruleId: 'target-size-minimum', outcome, mode: 'automated',
+    targets, summary: 'Há alvos abaixo do tamanho mínimo aplicável.', limitations: [],
+    nbrItems: ['5.8.7'], wcag: ['2.5.8'],
+    source: { engine: 'audita-core', ruleId: 'target-size-minimum', version: '1.0.0' },
+  };
+}
+
+test('normalizes confirmed mapped violations and drops rule IDs outside the closed adapter catalog', () => {
   const normalized = normalizeAxeResults(runResult(), {
     pageId: 'page-1',
     snapshot: { document: { language: '' }, nodes: [] },
@@ -78,10 +112,62 @@ test('normalizes confirmed mapped violations as conclusive ABNT failures and kee
   assert.deepEqual(mapped.source, {
     engine: 'axe-core', ruleId: 'axe.html-has-lang', version: '4.13.0', engineRuleId: 'html-has-lang',
   });
-  assert.equal(unmapped.itemId, null);
-  assert.equal(unmapped.classification, 'best-practice');
-  assert.equal(unmapped.legalAnalysis, null);
-  assert.deepEqual(normalized.ruleResults.find(rule => rule.ruleId === 'axe.custom-unknown').nbrItems, []);
+  assert.equal(unmapped, undefined);
+  assert.equal(normalized.ruleResults.some(rule => rule.ruleId === 'axe.custom-unknown'), false);
+});
+
+test('concludes target-size only from one top-frame structural node and one authoritative failed core target', () => {
+  const coreRuleResults = [targetSizeCore()];
+  const normalized = normalizeAxeResults(targetSizeRun(), {
+    pageId: 'page-1', snapshot: targetSizeSnapshot(), coreRuleResults, rulesVersion: '1.0.0',
+  });
+  const occurrence = normalized.occurrences[0];
+
+  assert.equal(occurrence.engineRuleId, 'target-size');
+  assert.equal(occurrence.outcome, 'failed');
+  assert.equal(occurrence.itemId, '5.8.7');
+  assert.equal(occurrence.nodeId, 'n-button');
+  assert.deepEqual(occurrence.target, {
+    nodeId: 'n-button', selector: 'html > body > button', framePath: [],
+  });
+  assert.equal(occurrence.equivalenceKey, 'minimum-target-size');
+  assert.equal(occurrence.presentationTargetKey, 'node:n-button');
+  assert.deepEqual(occurrence.testedWcagRefs, ['2.5.8']);
+  assert.deepEqual(occurrence.applicabilityEvidence, {
+    confirmed: true, pageId: 'page-1', frameId: 0, target: 'html > body > button', nodeId: 'n-button', nbrItemRef: '5.8.7',
+    source: { engine: 'audita-core', ruleId: 'target-size-minimum', version: '1.0.0' },
+  });
+  assert.deepEqual(validateNormalizedAxeSupplemental(normalized, {
+    rulesVersion: '1.0.0', coreRuleResults,
+  }).errors, []);
+});
+
+test('keeps target-size inconclusive for every frame, selector and core-authority divergence', () => {
+  const snapshot = targetSizeSnapshot();
+  const cases = [
+    ['child frame', targetSizeRun({ frameId: 7 }), [targetSizeCore()]],
+    ['missing core result', targetSizeRun(), []],
+    ['duplicate core result', targetSizeRun(), [targetSizeCore(), targetSizeCore()]],
+    ['non-failed core result', targetSizeRun(), [targetSizeCore({ outcome: 'cantTell', targets: [] })]],
+    ['different core node', targetSizeRun(), [targetSizeCore({ targets: [{ nodeId: 'n-body' }] })]],
+    ['duplicate correlated target', targetSizeRun(), [targetSizeCore({ targets: [{ nodeId: 'n-button' }, { nodeId: 'n-button' }] })]],
+    ['unavailable selector', targetSizeRun({ selector: '[target-unavailable]' }), [targetSizeCore()]],
+    ['non-canonical selector', targetSizeRun({ selector: 'body > button' }), [targetSizeCore()]],
+  ];
+
+  for (const [label, input, coreRuleResults] of cases) {
+    const normalized = normalizeAxeResults(input, {
+      pageId: 'page-1', snapshot, coreRuleResults, rulesVersion: '1.0.0',
+    });
+    const occurrence = normalized.occurrences[0];
+    assert.equal(occurrence.outcome, 'cantTell', label);
+    assert.equal(occurrence.nodeId, null, label);
+    assert.equal(occurrence.target.nodeId, null, label);
+    assert.deepEqual(occurrence.testedWcagRefs, [], label);
+    assert.deepEqual(occurrence.foreignBenchmarkRefs, [], label);
+    assert.equal(occurrence.legalAnalysis, null, label);
+    assert.equal(occurrence.applicabilityEvidence, null, label);
+  }
 });
 
 test('derives applicability internally and scopes it to the exact top-frame normalized target', () => {
@@ -136,10 +222,10 @@ test('turns incomplete into cantTell, summarizes passes only and never grants AB
   assert.equal(incomplete.legalAnalysis, null);
   assert.equal(normalized.ruleResults.some(rule => rule.outcome === 'passed'), false);
   assert.deepEqual(normalized.technicalSummary, {
-    violations: { groups: 3, nodes: 3 },
+    violations: { groups: 2, nodes: 2 },
     incomplete: { groups: 1, nodes: 1 },
     passes: { groups: 1, nodes: 0 },
-    inapplicable: { groups: 1, nodes: 0 },
+    inapplicable: { groups: 0, nodes: 0 },
   });
 });
 
@@ -438,7 +524,7 @@ test('derives partial coverage from frame topology, diagnostics, duplicates and 
   assert.ok(normalized.diagnostics.some(item => item.code === 'AXE_FRAME_MISSING'));
   assert.ok(normalized.diagnostics.some(item => item.code === 'AXE_RESULTS_TRUNCATED'));
   assert.equal(new Set(normalized.occurrences.map(item => item.occurrenceId)).size, normalized.occurrences.length);
-  assert.equal(normalized.technicalSummary.violations.groups, 3, 'duplicate frame is deterministically collapsed');
+  assert.equal(normalized.technicalSummary.violations.groups, 2, 'duplicate frame is deterministically collapsed and unknown IDs stay dropped');
 });
 
 test('derives bounded technical counts from retained collections instead of hostile original-count metadata', () => {
@@ -453,8 +539,8 @@ test('derives bounded technical counts from retained collections instead of host
   const normalized = normalizeAxeResults(input, { pageId: 'page-1' });
 
   assert.equal(normalized.status, 'partial');
-  assert.deepEqual(normalized.technicalSummary.violations, { groups: 3, nodes: 3 });
-  assert.equal(normalized.occurrences.length, 4);
+  assert.deepEqual(normalized.technicalSummary.violations, { groups: 2, nodes: 2 });
+  assert.equal(normalized.occurrences.length, 3);
   assert.ok(normalized.diagnostics.some(item => item.code === 'AXE_RESULTS_TRUNCATED'));
   assert.doesNotMatch(JSON.stringify(normalized), /10000000/u);
 });
