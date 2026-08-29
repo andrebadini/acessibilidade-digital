@@ -1,5 +1,6 @@
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
 import { registeredOccurrenceSource } from '../provenance.js';
+import { auditModelInputError } from './audit-input.js';
 import { isAuditIntegrityVerified } from './integrity.js';
 
 export const OCCURRENCE_CSV_VERSION = 'audita-occurrences-v1';
@@ -41,7 +42,7 @@ const OUTCOME_LABEL = Object.freeze({
 /** Pure, fixed-column projection of an integrity-verified canonical V2 snapshot. */
 export function renderOccurrenceCsv(input) {
   if (!isAuditIntegrityVerified(input)) {
-    throw new TypeError('O CSV exige snapshot canônico com integridade verificada.');
+    throw auditModelInputError();
   }
   const model = input;
   const pageById = new Map(model.pages.map(page => [page.pageId, page]));

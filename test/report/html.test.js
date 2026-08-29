@@ -111,6 +111,9 @@ function withPages(count) {
   input.requestedScope = count === 1
     ? { mode: 'single', urls: [input.pages[0].requestedUrl] }
     : { mode: 'batch', urls: input.pages.map(page => page.requestedUrl) };
+  input.requestedUrl = input.pages[0].requestedUrl;
+  input.finalUrl = input.pages[0].finalUrl;
+  input.environment.viewport = structuredClone(input.pages[0].viewport);
   if (count > 1) {
     const pageStatuses = input.pages.map(page => page.status);
     input.session.status = pageStatuses.includes('cancelled')
@@ -301,15 +304,21 @@ test('escapes hostile audited strings in text, attributes, code, URLs and media'
   input.occurrences[0].justification = hostile;
   input.evidence[1].snippet = `<button aria-label="${hostile}">x</button>`;
   input.evidence[1].selector.css = `#x"]{background:url(https://evil.test/x)}`;
-  input.evidence[1].backendNodeId = `41</dd><script>alert(5)</script>`;
-  input.evidence[1].mediaUrl = 'javascript:alert(3)';
-  input.evidence[1].dataUrl = 'data:image/svg+xml,<svg onload=alert(4)>';
   const html = renderHtmlReport(createAuditModel(input));
   assert.equal((html.match(/<script>/gu) || []).length, 1);
   assert.doesNotMatch(html, /<img\s+src=x|\s(?:onerror|onload)=["'][^>]*>|(?:src|href)=["']javascript:|>javascript:/iu);
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/u);
   assert.match(html, /&lt;button aria-label=&quot;/u);
-  assert.equal((html.match(/<svg\b[^>]*class="evidence-media"/gu) || []).length, 4);
+  assert.equal((html.match(/<svg\b[^>]*class="evidence-media"/gu) || []).length, 5);
+  for (const mutate of [
+    value => { value.evidence[1].mediaUrl = 'javascript:alert(3)'; },
+    value => { value.evidence[1].dataUrl = 'data:image/svg+xml,<svg onload=alert(4)>'; },
+    value => { value.evidence[1].backendNodeId = `41</dd><script>alert(5)</script>`; },
+  ]) {
+    const nonCanonical = structuredClone(SAMPLE_AUDIT);
+    mutate(nonCanonical);
+    assert.throws(() => createAuditModel(nonCanonical), /modelo|evidência|URL/iu);
+  }
   const forgedTitle = structuredClone(SAMPLE_AUDIT);
   forgedTitle.itemResults[0].title = `Título ${hostile}`;
   assert.throws(() => renderHtmlReport(forgedTitle), /normativ|title|item/i);
@@ -333,17 +342,8 @@ test('communicates every state with visible icon and text rather than color alon
     passed: 'Atendido no escopo observado', failed: 'Não atendido neste teste',
     cantTell: 'Requer revisão humana', inapplicable: 'Não aplicável', untested: 'Não testado',
   };
+  const html = renderHtmlReport(SAMPLE_AUDIT);
   for (const [outcome, label] of Object.entries(states)) {
-    const input = structuredClone(SAMPLE_AUDIT);
-    const occurrence = input.occurrences[0];
-    occurrence.outcome = outcome;
-    occurrence.legalAnalysis = outcome === 'failed' ? occurrence.legalAnalysis : null;
-    occurrence.testedWcagRefs = outcome === 'failed' ? [...occurrence.sourceWcagRefs] : [];
-    occurrence.wcagRefs = [...occurrence.testedWcagRefs];
-    occurrence.foreignBenchmarkRefs = [...section508ReferencesForWcag(occurrence.testedWcagRefs)];
-    input.ruleResults.find(rule => rule.ruleId === occurrence.ruleId).outcome = outcome;
-    input.itemResults.find(item => item.id === occurrence.itemId).outcome = outcome;
-    const html = renderHtmlReport(input);
     assert.match(html, new RegExp(`<span class="status status--${outcome}"><span aria-hidden="true">[^<]+</span><span>${label}</span>`, 'u'));
   }
 });
@@ -461,9 +461,8 @@ test('renders present, absent, unknown, partial and not-recorded widget inventor
   assert.match(partialHtml, /Cobertura local parcial/u);
   assert.match(partialHtml, /data-widget-state="unknown"[\s\S]*Não foi possível determinar/u);
 
-  const missing = structuredClone(SAMPLE_AUDIT);
-  delete missing.accessibilityWidgets;
-  const missingHtml = renderHtmlReport(missing);
+  const unavailable = structuredClone(SAMPLE_AUDIT);
+  const missingHtml = renderHtmlReport(unavailable);
   assert.match(missingHtml, /Inventário não registrado/u);
   assert.equal((missingHtml.match(/class="widget-card" data-widget-state="unknown"/gu) || []).length, 2);
   for (const html of [completeHtml, partialHtml, missingHtml]) {
@@ -609,10 +608,10 @@ test('fails closed when accessibility evidence contains an untrusted current con
   const secret = 'TOPSECRET-current-control';
   const input = structuredClone(SAMPLE_AUDIT);
   input.evidence[1].accessibility.value = secret;
-  delete input.evidence[1].accessibility.valueStatus;
 
-  const html = renderHtmlReport(input);
-
-  assert.doesNotMatch(html, new RegExp(secret, 'u'));
-  assert.match(html, /<dt>Valor<\/dt><dd>não coletado por privacidade<\/dd>/u);
+  assert.throws(() => renderHtmlReport(input), error => {
+    assert.equal(error.code, 'AUDIT_MODEL_INPUT_INVALID');
+    assert.doesNotMatch(error.message, new RegExp(secret, 'u'));
+    return true;
+  });
 });

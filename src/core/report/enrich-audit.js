@@ -6,25 +6,32 @@ import {
   createAuditModel,
   sanitizeEvidenceArtifactUrls,
 } from './audit-model.js';
+import { auditModelInputError, captureAuditInput } from './audit-input.js';
 import { canonicalStringify } from './canonical-json.js';
-import { assertClosedAuditShape } from './closed-schema.js';
 import { sha256Hex } from './hash.js';
 import {
   projectEvidenceManifest,
   REPORT_HASH_BASE,
   verifyAuditIntegritySnapshot,
 } from './integrity.js';
+import { verifyIntegrityLinks } from './integrity-chain.js';
 
 export { REPORT_HASH_BASE } from './integrity.js';
 
 export async function enrichAuditForReport(input, options = {}) {
-  let raw;
-  try { raw = JSON.parse(canonicalStringify(input)); } catch {
-    throw new TypeError('Modelo de auditoria contém propriedade não segura ou valor inválido.');
+  try {
+    return await enrichCapturedAudit(captureAuditInput(input), options);
+  } catch {
+    throw auditModelInputError();
   }
-  assertClosedAuditShape(raw);
-  if (raw.schemaVersion === 2 && hasLegacyNormativeOccurrences(raw)) {
-    return verifyAuditIntegritySnapshot(raw);
+}
+
+async function enrichCapturedAudit(captured, options) {
+  let raw = captured.schemaVersion === 1 ? structuredClone(captured) : captured;
+  if (raw.schemaVersion === 2) {
+    const canonical = createAuditModel(raw);
+    if (declaresCompleteIntegrity(canonical.integrity)) await verifyIntegrityLinks(canonical);
+    raw = structuredClone(canonical);
   }
   const generatedAt = canonicalNow(options.now);
   const timezone = validTimezone(options.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
@@ -69,6 +76,7 @@ export async function enrichAuditForReport(input, options = {}) {
     }))
     : undefined;
   const isBatch = raw.schemaVersion === 2 && raw.requestedScope?.mode === 'batch';
+  const handoffReviewUrl = ownDataOption(options, 'handoffReviewUrl');
   const base = {
     ...raw,
     ...(pages ? { pages } : {}),
@@ -92,9 +100,14 @@ export async function enrichAuditForReport(input, options = {}) {
         description: 'Página única e estado observado no instante da coleta; outras páginas, etapas e estados não foram inferidos.',
       },
     limitations: [...new Set(limitations)],
-    normative: {
-      edition: 'ABNT NBR 17225:2025',
-      wcag: 'WCAG 2.2',
+    ...(handoffReviewUrl.present ? {
+      report: {
+        status: 'review-ready', reviewUrl: canonicalHandoffReviewUrl(handoffReviewUrl.value),
+        artifact: { status: 'pending', formats: [] },
+      },
+    } : {}),
+    normative: raw.schemaVersion === 2 ? structuredClone(raw.normative) : {
+      edition: 'ABNT NBR 17225:2025', wcag: 'WCAG 2.2',
       editorialNotes: NBR17225_EDITORIAL_NOTES.map(note => ({ ...note })),
       sources: structuredClone(NORMATIVE_SOURCE_LEDGER),
     },
@@ -138,12 +151,26 @@ export async function enrichAuditForReport(input, options = {}) {
   return verifyAuditIntegritySnapshot(finalModel);
 }
 
-function hasLegacyNormativeOccurrences(model) {
-  const collections = [model?.occurrences, model?.axe?.occurrences];
-  for (const page of Array.isArray(model?.axePages) ? model.axePages : []) collections.push(page?.result?.occurrences);
-  return collections.some(collection => Array.isArray(collection) && collection.some(occurrence =>
-    occurrence && typeof occurrence === 'object' &&
-    ['itemWcagRefs', 'sourceWcagRefs', 'testedWcagRefs'].every(field => !Object.hasOwn(occurrence, field))));
+function ownDataOption(options, key) {
+  if (!options || (typeof options !== 'object' && typeof options !== 'function')) return { present: false };
+  const descriptor = Object.getOwnPropertyDescriptor(options, key);
+  if (!descriptor) return { present: false };
+  if (!Object.hasOwn(descriptor, 'value')) throw new TypeError();
+  return { present: true, value: descriptor.value };
+}
+
+function canonicalHandoffReviewUrl(value) {
+  if (value === null) return null;
+  if (typeof value !== 'string' || value.length < 1 || value.length > 2_048) throw new TypeError();
+  const parsed = new URL(value);
+  if (!['chrome-extension:', 'blob:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new TypeError();
+  return parsed.href;
+}
+
+function declaresCompleteIntegrity(integrity) {
+  return integrity?.algorithm === 'SHA-256' &&
+    /^[a-f0-9]{64}$/u.test(integrity.canonicalModelHash ?? '') &&
+    /^[a-f0-9]{64}$/u.test(integrity.evidenceManifestHash ?? '');
 }
 
 function canonicalNow(now) {

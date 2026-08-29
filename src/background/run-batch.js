@@ -211,13 +211,7 @@ export async function runBatch({
   let handoff = null;
   try { handoff = await chromeAdapter.handoffReport?.(finalModel); } catch { handoff = null; }
   const reviewUrl = safeInternalUrl(handoff?.reviewUrl);
-  finalModel = await enrichAuditForReport({
-    ...structuredClone(finalModel),
-    report: {
-      status: 'review-ready', reviewUrl,
-      artifact: { status: 'pending', formats: [] },
-    },
-  }, { ...reportOptions, now });
+  finalModel = await enrichAuditForReport(finalModel, { ...reportOptions, now, handoffReviewUrl: reviewUrl });
   return finalModel;
 
   async function cancelRemaining({ active, startedAt: activeStartedAt, endedAt: activeEndedAt }) {

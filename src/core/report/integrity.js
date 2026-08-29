@@ -1,8 +1,5 @@
-import {
-  createAuditModel,
-  verifyAndMigrateLegacyAuditV2,
-} from './audit-model.js';
-import { canonicalStringify } from './canonical-json.js';
+import { createAuditModel } from './audit-model.js';
+import { auditModelInputError } from './audit-input.js';
 import {
   projectEvidenceManifest,
   REPORT_HASH_BASE,
@@ -22,25 +19,11 @@ export function isAuditIntegrityVerified(value) {
  */
 export async function verifyAuditIntegritySnapshot(input) {
   try {
-    const raw = JSON.parse(canonicalStringify(input));
-    if (hasLegacyNormativeOccurrences(raw)) {
-      const migrated = await verifyAndMigrateLegacyAuditV2(raw);
-      VERIFIED_SNAPSHOTS.add(migrated);
-      return migrated;
-    }
     const model = createAuditModel(input);
     await verifyIntegrityLinks(model);
     VERIFIED_SNAPSHOTS.add(model);
     return model;
   } catch {
-    throw new TypeError('Cadeia de integridade do relatório inválida ou indisponível.');
+    throw auditModelInputError();
   }
-}
-
-function hasLegacyNormativeOccurrences(model) {
-  const collections = [model?.occurrences, model?.axe?.occurrences];
-  for (const page of Array.isArray(model?.axePages) ? model.axePages : []) collections.push(page?.result?.occurrences);
-  return collections.some(collection => Array.isArray(collection) && collection.some(occurrence =>
-    occurrence && typeof occurrence === 'object' &&
-    ['itemWcagRefs', 'sourceWcagRefs', 'testedWcagRefs'].every(field => !Object.hasOwn(occurrence, field))));
 }

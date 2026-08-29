@@ -157,15 +157,16 @@ test('omits raw HTML, resource URLs, encoded pixels and credential prose in ever
   }
 });
 
-test('exports only an HTTP(S) origin and removes credentials, path, query and fragment', async () => {
+test('exports only an HTTP(S) origin from a canonical page URL', async () => {
   const input = structuredClone(SAMPLE_AUDIT);
-  input.pages[0].finalUrl = 'https://user:pass@servico.exemplo.test:8443/private?token=PRIVATE#secret';
+  input.pages[0].finalUrl = 'https://servico.exemplo.test:8443/private?view=public';
+  input.finalUrl = input.pages[0].finalUrl;
 
   const verified = await verifiedAudit(input);
   const pageUrl = asRecord(parseQuotedCsv(renderOccurrenceCsv(verified))[1]).page_url;
 
   assert.equal(pageUrl, 'https://servico.exemplo.test:8443');
-  assert.doesNotMatch(renderOccurrenceCsv(verified), /user|pass|private|token|secret/iu);
+  assert.doesNotMatch(renderOccurrenceCsv(verified), /private|view=public/iu);
 });
 
 test('uses only local catalog titles and fixed outcome descriptions', async () => {
@@ -267,7 +268,7 @@ test('never truncates a complete correlation list to add spreadsheet neutralizat
   );
 });
 
-test('recomputes attacker-supplied hash-shaped values before any CSV projection', async () => {
+test('rejects attacker-supplied hash-shaped V2 claims before any CSV projection', async () => {
   const input = structuredClone(SAMPLE_AUDIT);
   for (const artifact of input.evidence) artifact.hash = 'a'.repeat(64);
   input.integrity = {
@@ -275,13 +276,7 @@ test('recomputes attacker-supplied hash-shaped values before any CSV projection'
     canonicalModelHash: 'b'.repeat(64),
     evidenceManifestHash: 'c'.repeat(64),
   };
-  const verified = await verifiedAudit(input);
-  const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(verified))[1]);
-
-  assert.notEqual(verified.evidence[0].hash, 'a'.repeat(64));
-  assert.match(first.evidence_hashes, /^ev-full=[a-f0-9]{64};ev-control=[a-f0-9]{64}$/u);
-  assert.equal(first.canonical_model_hash, verified.integrity.canonicalModelHash);
-  assert.equal(first.evidence_manifest_hash, verified.integrity.evidenceManifestHash);
+  await assert.rejects(verifiedAudit(input), /modelo|integridade|hash/iu);
 });
 
 test('emits correlated hashes only from an integrity-verified immutable snapshot', async () => {
@@ -333,7 +328,7 @@ test('resolves each occurrence URL and timestamp by pageId', async () => {
   input.pages.push({
     pageId: 'page-2',
     requestedUrl: 'https://segunda.example.test/solicitada',
-    finalUrl: 'https://segunda.example.test/final/private?token=hidden',
+    finalUrl: 'https://segunda.example.test/final/private?view=public',
     status: 'failed',
     timestamps: {
       startedAt: '2026-08-26T14:03:00.000Z',
@@ -437,7 +432,8 @@ test('fails closed on accessors and hostile proxies with a fixed non-sensitive e
   });
   assert.throws(
     () => renderOccurrenceCsv(accessor),
-    error => error instanceof TypeError && error.message === 'O CSV exige snapshot canônico com integridade verificada.',
+    error => error instanceof TypeError && error.code === 'AUDIT_MODEL_INPUT_INVALID' &&
+      !error.message.includes('PRIVATE_SENTINEL'),
   );
   assert.equal(accessed, false);
 
@@ -499,7 +495,7 @@ test('preserves every canonical leading ID character without losing correlations
     const evidenceIds = [`${prefix}evidence-full`, `${prefix}evidence-control`];
     input.auditId = auditId;
     input.pages[0].pageId = pageId;
-    input.progress = input.progress.map(entry => ({ ...entry, auditId, sessionId: auditId }));
+    assert.equal(Object.hasOwn(input, 'progress'), false);
     input.occurrences[0].occurrenceId = occurrenceId;
     input.occurrences[0].pageId = pageId;
     input.occurrences[0].evidenceRefs = evidenceIds;

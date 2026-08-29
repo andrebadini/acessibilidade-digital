@@ -227,19 +227,16 @@ function validateOccurrence(occurrence, validatedRule, options, errors) {
   const sourceWcag = mapping ? [...mapping.wcagRefs] : [];
   const itemWcag = itemId ? ITEM_BY_ID.get(itemId)?.wcag.map(reference => reference.id) ?? [] : [];
   const testedWcag = outcome === 'failed' ? sourceWcag : [];
-  const legacyNormative = options?.legacyNormativeIds instanceof Set && options.legacyNormativeIds.has(own(occurrence, 'occurrenceId'));
-  const expectedSourceWcag = legacyNormative ? [] : sourceWcag;
-  const expectedTestedWcag = legacyNormative ? [] : testedWcag;
   const classification = mapping ? ITEM_BY_ID.get(itemId)?.classification : 'best-practice';
   if (!['violations', 'incomplete'].includes(engineResultType) || !Object.hasOwn(PRIORITY, outcome) ||
     (engineResultType === 'incomplete' && outcome !== 'cantTell') || (outcome === 'failed' && engineResultType !== 'violations') ||
     own(occurrence, 'nbrItemRef') !== itemId || own(occurrence, 'itemId') !== itemId ||
     own(occurrence, 'classification') !== classification ||
     !exactStrings(own(occurrence, 'itemWcagRefs'), itemWcag) ||
-    !exactStrings(own(occurrence, 'sourceWcagRefs'), expectedSourceWcag) ||
-    !exactStrings(own(occurrence, 'testedWcagRefs'), expectedTestedWcag) ||
-    !exactStrings(own(occurrence, 'wcagRefs'), expectedTestedWcag) ||
-    !exactData(own(occurrence, 'foreignBenchmarkRefs'), [...section508ReferencesForWcag(expectedTestedWcag)])) {
+    !exactStrings(own(occurrence, 'sourceWcagRefs'), sourceWcag) ||
+    !exactStrings(own(occurrence, 'testedWcagRefs'), testedWcag) ||
+    !exactStrings(own(occurrence, 'wcagRefs'), testedWcag) ||
+    !exactData(own(occurrence, 'foreignBenchmarkRefs'), [...section508ReferencesForWcag(testedWcag)])) {
     errors.push(`Ocorrência de ${ruleId} diverge do crosswalk curado.`);
     return false;
   }

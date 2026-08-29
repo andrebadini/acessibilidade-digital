@@ -633,7 +633,7 @@ test('sanitizes primary and cleanup failures into controlled codes before render
   assert.doesNotMatch(`${result.html}\n${result.json}\n${JSON.stringify(result)}`, /TOPSECRET|origin\.test|blob:|chrome-extension:/iu);
 });
 
-test('redacts inherited diagnostic and limitation secrets before the first print render', async () => {
+test('rejects non-canonical inherited diagnostic data before the first print render', async () => {
   const input = clone(SAMPLE_AUDIT);
   input.limitations.push('Falha em https://origin.test/?token=TOPSECRET blob:chrome-extension://test/private');
   input.session.diagnostics.push({
@@ -642,14 +642,36 @@ test('redacts inherited diagnostic and limitation secrets before the first print
     details: { source: 'https://origin.test/private?session=TOPSECRET' },
   });
   const renderedBlobs = [];
-  const result = await runReportExport({ auditModel: input, now: () => '2026-08-26T15:00:00.000Z' }, {
+  await assert.rejects(runReportExport({ auditModel: input, now: () => '2026-08-26T15:00:00.000Z' }, {
     urlApi: { createObjectURL(blob) { renderedBlobs.push(blob); return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
     tabAdapter: successfulTabAdapter(),
     async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
     downloadsAdapter: fakeDownloads([]),
+  }), error => error instanceof TypeError && !error.message.includes('TOPSECRET'));
+  assert.equal(renderedBlobs.length, 0);
+});
+
+test('rejects accessor-backed audit input at the export ingress with the fixed private error', async () => {
+  const marker = 'PRIVATE_EXPORT_ACCESSOR_7Q9Z';
+  const input = clone(SAMPLE_AUDIT);
+  let getterReads = 0;
+  Object.defineProperty(input.evidence[0], 'privateContext', {
+    enumerable: true,
+    get() { getterReads += 1; throw new Error(marker); },
   });
-  assert.doesNotMatch(await renderedBlobs[0].text(), /TOPSECRET|origin\.test|blob:|chrome-extension:/iu);
-  assert.doesNotMatch(`${result.html}\n${result.json}`, /TOPSECRET|origin\.test|blob:|chrome-extension:/iu);
+  const renderedBlobs = [];
+  await assert.rejects(runReportExport({ auditModel: input, now: () => '2026-08-26T15:00:00.000Z' }, {
+    urlApi: { createObjectURL(blob) { renderedBlobs.push(blob); return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+    downloadsAdapter: fakeDownloads([]),
+  }), error => {
+    assert.equal(error.code, 'AUDIT_MODEL_INPUT_INVALID');
+    assert.doesNotMatch(error.message, new RegExp(marker, 'u'));
+    return true;
+  });
+  assert.equal(getterReads, 0);
+  assert.equal(renderedBlobs.length, 0);
 });
 
 test('adopts and cleans a tab that resolves after its creation timeout', async () => {

@@ -87,6 +87,20 @@ test('forged cantTell and legal claims are rejected rather than influencing ABNT
   assert.deepEqual(checked.occurrences, []);
 });
 
+test('does not expose a legacy option that can erase authoritative tested coverage', () => {
+  const forged = validSupplemental();
+  const occurrence = forged.occurrences[0];
+  occurrence.sourceWcagRefs = [];
+  occurrence.testedWcagRefs = [];
+  occurrence.wcagRefs = [];
+  occurrence.foreignBenchmarkRefs = [];
+  const checked = validateNormalizedAxeSupplemental(forged, {
+    rulesVersion: '1.0.0', legacyNormativeIds: new Set([occurrence.occurrenceId]),
+  });
+  assert.ok(checked.errors.length > 0);
+  assert.deepEqual(checked.occurrences, []);
+});
+
 test('rejects extra private prose and oversized target collections at the integrity boundary', () => {
   const privateText = validSupplemental();
   privateText.ruleResults[0].privatePageText = 'Família Oliveira, prontuário confidencial';

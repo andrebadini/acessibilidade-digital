@@ -322,7 +322,7 @@ test('consumes legitimate V1 selector aliases into the closed canonical target',
   assert.equal(Object.hasOwn(occurrence, 'framePath'), false);
 });
 
-test('sanitizes every URL-bearing evidence field at the V1 and technical JSON boundary', () => {
+test('projects V1 evidence onto the closed canonical URL-bearing schema', () => {
   const input = reportInput();
   const safeDataUrl = 'data:image/png;base64,iVBORw0KGgo=';
   input.evidence.artifacts[0] = {
@@ -338,9 +338,9 @@ test('sanitizes every URL-bearing evidence field at the V1 and technical JSON bo
   const model = migrateAuditV1ToV2(input);
   const artifact = model.evidence[0];
   assert.equal(artifact.mediaUrl, 'https://cdn.example.test/video.mp4?view=public');
-  assert.equal(artifact.resourceUrl, 'https://cdn.example.test/resource?lang=pt-BR');
-  assert.equal(artifact.media.currentSrc, 'https://images.example.test/poster.png?size=large');
   assert.equal(artifact.dataUrl, safeDataUrl);
+  assert.equal(Object.hasOwn(artifact, 'resourceUrl'), false);
+  assert.equal(Object.hasOwn(artifact, 'media'), false);
   assert.doesNotMatch(renderTechnicalJson(model), /TOPSECRET|token=|api_key=|session=/u);
 });
 
@@ -775,17 +775,12 @@ test('rejects derived evidence whose full-page capture belongs to another page',
   assert.throws(() => createAuditModel(model), /captura integral|evidência|outra página/i);
 });
 
-test('projects legacy aliases only from native V2 facts and requires an explicit integrity record', () => {
+test('requires every canonical alias and integrity field on native V2', () => {
   const model = structuredClone(createAuditModel(reportInput()));
   const occurrence = model.occurrences[0];
   for (const key of ['itemId', 'ruleId', 'mode', 'nodeId', 'evidenceIds']) delete occurrence[key];
 
-  const canonical = createAuditModel(model);
-  assert.equal(canonical.occurrences[0].itemId, canonical.occurrences[0].nbrItemRef);
-  assert.equal(canonical.occurrences[0].ruleId, canonical.occurrences[0].source.ruleId);
-  assert.equal(canonical.occurrences[0].mode, 'assisted');
-  assert.equal(canonical.occurrences[0].nodeId, canonical.occurrences[0].target.nodeId);
-  assert.deepEqual(canonical.occurrences[0].evidenceIds, canonical.occurrences[0].evidenceRefs);
+  assert.throws(() => createAuditModel(model), /modelo|ocorrência|esquema/iu);
 
   delete model.integrity;
   assert.throws(() => createAuditModel(model), /integrity|integridade/i);

@@ -5,11 +5,13 @@ import {
 } from '../browser/download-artifacts.js';
 import { renderPdf } from '../browser/render-pdf.js';
 import { renderOccurrenceCsv } from '../core/report/csv.js';
+import { createAuditModel } from '../core/report/audit-model.js';
 import { canonicalStringify } from '../core/report/canonical-json.js';
 import { sha256Hex } from '../core/report/hash.js';
 import { renderTechnicalJson } from '../core/report/earl-json.js';
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { renderHtmlReport } from '../core/report/html.js';
+import { REPORT_HASH_BASE, verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
 import { inspectAuditSnapshotCapability } from '../storage/audit-store.js';
 import { createExportIssue, issueForPrintStage, PDF_GENERATION_FAILURE_CODES } from './export-issues.js';
 
@@ -51,7 +53,7 @@ export async function runReportExport(request, dependencies) {
       browserVersion: request.browserVersion ?? snapshot.model.environment?.chromeVersion,
     });
   }
-  const original = sanitizeReportMessages(sourceModel);
+  const original = sanitizeReportMessages(createAuditModel(sourceModel));
   const timeoutMs = request?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('Timeout de exportação inválido.');
   const generationIssues = [];
@@ -384,7 +386,12 @@ function renderCanonicalCsv(model, csvRenderer) {
 }
 
 export async function finalizeGeneratedModel(model, at, issues, hasPdf, pdfFallback = false, artifactsPrepared = true, hasCsv = true) {
-  const next = sanitizeReportMessages(model);
+  const canonical = createAuditModel(model);
+  if (/^[a-f0-9]{64}$/u.test(canonical.integrity?.canonicalModelHash ?? '') &&
+    /^[a-f0-9]{64}$/u.test(canonical.integrity?.evidenceManifestHash ?? '')) {
+    await verifyAuditIntegritySnapshot(canonical);
+  }
+  const next = sanitizeReportMessages(canonical);
   const controlled = dedupeIssues(issues);
   if (controlled.length && !['failed', 'cancelled'].includes(next.session.status)) next.session.status = 'partial';
   next.session.partial = next.session.status === 'partial';
@@ -409,6 +416,9 @@ export async function finalizeGeneratedModel(model, at, issues, hasPdf, pdfFallb
           .map(format => ({ format, status: 'prepared' }))
         : [],
     },
+  };
+  next.integrity = {
+    algorithm: 'SHA-256', evidenceManifestHash: 'pending', canonicalModelHash: 'pending', hashBase: REPORT_HASH_BASE,
   };
   return enrichAuditForReport(next, {
     now: () => at,

@@ -736,6 +736,14 @@ test('rejects stale or bidirectionally inconsistent generation evidence and PDF 
     const limitations = missing.map(format => format === 'csv'
       ? GENERATION_MESSAGES.REPORT_CSV_UNAVAILABLE
       : GENERATION_MESSAGES.REPORT_PDF_UNAVAILABLE);
+    if (model === extraDiagnostic) {
+      await assert.rejects(exportResult(model, { status: missing.length ? 'partial' : 'complete', formats, limitations }), error => {
+        assert.equal(error.code, 'AUDIT_MODEL_INPUT_INVALID');
+        assert.doesNotMatch(error.message, /PRIVATE_DIAGNOSTIC_SENTINEL/u);
+        return true;
+      });
+      continue;
+    }
     let committed = false;
     await assert.rejects(persistExportSuccess({
       auditId: model.auditId,

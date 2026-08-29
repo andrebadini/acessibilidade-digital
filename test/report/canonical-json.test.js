@@ -133,12 +133,12 @@ test('rejects whitespace and non-ISO instants across report and diagnostic times
   }
 });
 
-test('validates diagnostic records while preserving serializable details without input mutation', () => {
+test('projects V1 diagnostics onto the closed summary without retaining arbitrary details', () => {
   const input = reportInput();
-  input.session.diagnostics[0].details = { frameId: 'frame-1', attempts: 2 };
+  input.session.diagnostics[0].details = { frameId: 'frame-1', attempts: 2, privateContextMarker: 'PRIVATE_DIAGNOSTIC' };
   const model = createAuditModel(input);
-  assert.deepEqual(model.session.diagnostics[0].details, { frameId: 'frame-1', attempts: 2 });
-  assert.notStrictEqual(model.session.diagnostics[0].details, input.session.diagnostics[0].details);
+  assert.equal(Object.hasOwn(model.session.diagnostics[0], 'details'), false);
+  assert.doesNotMatch(JSON.stringify(model), /PRIVATE_DIAGNOSTIC/u);
   assert.equal(Object.isFrozen(input.session.diagnostics[0].details), false);
 
   for (const diagnostic of [
@@ -148,19 +148,18 @@ test('validates diagnostic records while preserving serializable details without
     { code: 'FRAME_LIMITED', message: 'Falha.', at: '2026-08-26T14:00:30.000Z', recoverable: 'true' },
   ]) {
     const invalid = reportInput({ session: { status: 'partial', diagnostics: [diagnostic], partial: true } });
-    assert.throws(() => createAuditModel(invalid), /diagnóst|diagnostic|code|message|recoverable|texto|boolean/i);
+    assert.throws(() => createAuditModel(invalid), /modelo|status|sessão|diagnóst|diagnostic|code|message|recoverable|texto|boolean/i);
   }
 });
 
-test('validates coherent monotonic progress timestamps and audit correlation', () => {
+test('omits V1 progress rather than retaining caller-controlled messages', () => {
   const progress = [
     { type: 'AUDIT_PROGRESS', sessionId: 'audit-report-1', auditId: 'audit-report-1', phase: 'opening', message: 'Abrindo o site', percent: 0, at: '2026-08-26T14:00:00.000Z' },
     { type: 'AUDIT_PROGRESS', sessionId: 'audit-report-1', auditId: 'audit-report-1', phase: 'structure', message: 'Lendo a estrutura', percent: 40, at: '2026-08-26T14:00:20.000Z' },
   ];
   const input = reportInput({ progress });
   const model = createAuditModel(input);
-  assert.deepEqual(model.progress, progress);
-  assert.notStrictEqual(model.progress, progress);
+  assert.equal(Object.hasOwn(model, 'progress'), false);
 
   const invalidProgress = [
     null,
@@ -173,7 +172,5 @@ test('validates coherent monotonic progress timestamps and audit correlation', (
     [{ ...progress[0], at: ` ${progress[0].at}` }],
     [progress[1], { ...progress[0], percent: 20 }],
   ];
-  for (const value of invalidProgress) {
-    assert.throws(() => createAuditModel(reportInput({ progress: value })), /progress|progresso|auditoria|sessão|percent|ISO|fase|mensagem|tipo/i);
-  }
+  for (const value of invalidProgress) assert.equal(Object.hasOwn(createAuditModel(reportInput({ progress: value })), 'progress'), false);
 });

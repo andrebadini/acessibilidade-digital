@@ -186,10 +186,9 @@ test('validates each batch axe envelope against its exact page and rejects tampe
   await assert.rejects(enrichAuditForReport(partialRaw, OPTIONS), /axe parcial|cobertura axe/iu);
 });
 
-test('migrates mapped legacy normative fields inside nested axe only after preserving the verified occurrence identity', async () => {
+test('rejects historical V2 normative shapes in nested axe and batch envelopes', async () => {
   const current = await childModel('child-axe-legacy', 'https://axe-legacy.example.test/', { axe: 'mapped' });
   const legacy = structuredClone(current);
-  const legacyId = legacy.occurrences.find(value => value.source.engine === 'axe-core').occurrenceId;
   for (const collection of [legacy.occurrences, legacy.axe.occurrences]) {
     for (const occurrence of collection) for (const field of ['itemWcagRefs', 'sourceWcagRefs', 'testedWcagRefs']) delete occurrence[field];
   }
@@ -197,10 +196,7 @@ test('migrates mapped legacy normative fields inside nested axe only after prese
   delete hashInput.integrity.canonicalModelHash;
   legacy.integrity.canonicalModelHash = await sha256Hex(canonicalStringify(hashInput));
 
-  const migrated = await verifyAuditIntegritySnapshot(legacy);
-  assert.equal(migrated.occurrences.find(value => value.source.engine === 'axe-core').occurrenceId, legacyId);
-  assert.deepEqual(migrated.occurrences.find(value => value.source.engine === 'axe-core').testedWcagRefs, []);
-  assert.deepEqual(migrated.axe.occurrences[0].testedWcagRefs, []);
+  await assert.rejects(verifyAuditIntegritySnapshot(legacy), /modelo|integridade|WCAG/iu);
 
   const page = await remapAuditPage(current, { batchAuditId: 'batch-axe-legacy', pageId: 'page-1' });
   const batchRaw = aggregateBatchAudits({
@@ -215,8 +211,7 @@ test('migrates mapped legacy normative fields inside nested axe only after prese
   const batchHashInput = structuredClone(batchLegacy);
   delete batchHashInput.integrity.canonicalModelHash;
   batchLegacy.integrity.canonicalModelHash = await sha256Hex(canonicalStringify(batchHashInput));
-  const batchMigrated = await verifyAuditIntegritySnapshot(batchLegacy);
-  assert.deepEqual(batchMigrated.axePages[0].result.occurrences[0].testedWcagRefs, []);
+  await assert.rejects(verifyAuditIntegritySnapshot(batchLegacy), /modelo|integridade|WCAG/iu);
 });
 
 test('aggregates pages in requested order with unique rules, 146 items and conservative pass semantics', async () => {
@@ -256,7 +251,7 @@ test('aggregates pages in requested order with unique rules, 146 items and conse
   assert.equal(raw.itemResults.find(item => item.id === '5.1.1').outcome, 'cantTell');
   assert.equal(raw.methodology.coreRuleCount, 130);
   assert.equal(raw.methodology.itemCount, 146);
-  assert.equal(raw.presentation.occurrenceCount, raw.occurrences.length);
+  assert.equal(Object.hasOwn(raw, 'presentation'), false);
   assert.doesNotMatch(JSON.stringify(raw), /SECRET_A|token=/u);
 
   const final = await enrichAuditForReport(raw, OPTIONS);

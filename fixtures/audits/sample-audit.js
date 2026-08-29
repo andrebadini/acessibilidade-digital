@@ -3,6 +3,8 @@ import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consume
 import { section508ReferencesForWcag } from '../../src/core/normative/section508.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { NORMATIVE_SOURCE_LEDGER } from '../../src/core/normative/source-ledger.js';
+import { unknownAccessibilityWidgetInventory } from '../../src/core/detection/accessibility-widgets.js';
+import { REPORT_HASH_BASE } from '../../src/core/report/integrity-chain.js';
 
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const CYCLE = ['failed', 'cantTell', 'inapplicable', 'untested'];
@@ -32,7 +34,7 @@ const EVIDENCE = [
     dataUrl: PNG, fullPageEvidenceId: 'ev-full', mediaUrl: 'https://servico.exemplo.test/assets/controle.png', hash: 'sha256-element-sample',
     accessibility: {
       name: 'Continuar', nameSource: 'aria-label', description: 'Avança para a próxima etapa', descriptionSource: 'aria-describedby',
-      role: 'button', value: '', states: ['habilitado'], visibleText: 'Avançar', announcementPreview: 'Continuar, botão, Avança para a próxima etapa',
+      role: 'button', states: ['habilitado'], visibleText: 'Avançar', announcementPreview: 'Continuar, botão, Avança para a próxima etapa',
     },
   },
 ];
@@ -118,6 +120,7 @@ export const SAMPLE_AUDIT = createAuditModel({
   ].map(canonicalOccurrence),
   evidence: EVIDENCE,
   evidenceStateCount: 1,
+  accessibilityWidgets: unknownAccessibilityWidgetInventory(),
   manualReview: [
     { occurrenceId: 'occ-focus-review', itemId: '5.1.4', ruleId: 'focus-order', mode: 'assisted', status: 'unanswered', question: 'A ordem de foco acompanha a sequência esperada da tarefa?', reason: 'A finalidade da sequência exige julgamento humano.' },
     { occurrenceId: 'occ-cross-page', itemId: '5.7.5', ruleId: null, mode: 'manual', status: 'unanswered', question: 'Links com a mesma função são identificados de forma consistente nas páginas?', reason: 'É preciso comparar páginas.' },
@@ -126,7 +129,7 @@ export const SAMPLE_AUDIT = createAuditModel({
   progress: [],
   report: { status: 'review-ready', reviewUrl: null, artifact: { status: 'pending', formats: [] } },
   reproducibility: { methodologyVersion: '1.0.0', snapshotHash: 'snapshot-hash-sample', ruleResultsHash: 'rules-hash-sample', evidenceHash: 'evidence-hash-sample', capturedStateCount: 1 },
-  integrity: { algorithm: 'SHA-256', canonicalModelHash: 'model-hash-pending-export', evidenceManifestHash: 'evidence-hash-sample' },
+  integrity: { algorithm: 'SHA-256', canonicalModelHash: 'pending', evidenceManifestHash: 'pending', hashBase: REPORT_HASH_BASE },
   normative: {
     edition: 'ABNT NBR 17225:2025', wcag: 'WCAG 2.2',
     editorialNotes: NBR17225_EDITORIAL_NOTES.map(note => ({ ...note })),

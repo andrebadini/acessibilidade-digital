@@ -57,7 +57,10 @@ test('enriches a raw partial audit without inventing unavailable viewport data',
   assert.equal(model.itemResults[0].outcome, input.itemResults[0].outcome);
   assert.deepEqual(
     model.evidence.map(({ hash: _hash, pageId: _pageId, ...artifact }) => artifact),
-    input.evidence.artifacts.map(({ hash: _hash, ...artifact }) => artifact),
+    input.evidence.artifacts.map(({ hash: _hash, ...artifact }) => ({
+      ...artifact,
+      ...(artifact.selector ? { selector: { ...artifact.selector, framePath: artifact.selector.framePath ?? [] } } : {}),
+    })),
   );
   assert.ok(model.evidence.every(artifact => /^[a-f0-9]{64}$/u.test(artifact.hash)));
   assert.deepEqual(model.reviewDecisions, input.reviewDecisions);
@@ -170,7 +173,7 @@ test('re-enriches native V2 pages and evidence without letting compatibility pro
   assert.equal(second.integrity.canonicalModelHash, await sha256Hex(canonicalStringify(hashInput)));
 });
 
-test('preserves an explicit V2 batch scope instead of relabeling it as one page', async () => {
+test('rejects mutation of a finalized V2 batch scope before enrichment', async () => {
   const options = {
     now: () => '2026-08-26T15:00:00.000Z', timezone: 'America/Cuiaba',
     manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
@@ -191,8 +194,5 @@ test('preserves an explicit V2 batch scope instead of relabeling it as one page'
     viewport: { width: null, height: null, deviceScaleFactor: null },
   });
 
-  const model = await enrichAuditForReport(input, options);
-  assert.equal(model.scope.kind, 'explicit-url-batch');
-  assert.match(model.scope.description, /2 páginas|2 URLs/iu);
-  assert.doesNotMatch(model.limitations.join(' '), /somente uma página/iu);
+  await assert.rejects(enrichAuditForReport(input, options), /integridade|hash/iu);
 });

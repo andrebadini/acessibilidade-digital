@@ -1,10 +1,10 @@
-import { dedupeFindingsForPresentation } from '../axe/dedupe-findings.js';
 import { unknownAccessibilityWidgetInventory } from '../detection/accessibility-widgets.js';
 import { sanitizeResourceUrl } from '../normalize-snapshot.js';
 import { NBR17225_EDITORIAL_NOTES, NBR17225_ITEMS } from '../normative/nbr17225.js';
 import { NORMATIVE_SOURCE_LEDGER } from '../normative/source-ledger.js';
 import { aggregateItems } from '../rules/aggregate-items.js';
 import { canonicalStringify } from '../report/canonical-json.js';
+import { REPORT_HASH_BASE } from '../report/integrity-chain.js';
 
 const OUTCOME_PRIORITY = Object.freeze({ failed: 5, cantTell: 4, untested: 3, passed: 2, inapplicable: 1 });
 const IMPACT_PRIORITY = Object.freeze({ critical: 4, serious: 3, moderate: 2, minor: 1 });
@@ -46,7 +46,7 @@ export function createBatchFailurePage({
   return deepFreeze({
     page: {
       pageId, requestedUrl: reportUrl, finalUrl: reportUrl, finalUrlObserved: false,
-      attempted, status, timestamps: { startedAt, endedAt },
+      attempted, status, timestamps: { startedAt, endedAt, generatedAt: endedAt },
       viewport: { width: null, height: null, deviceScaleFactor: null },
       diagnostics: [diagnostic], limitations: [message], coverage: {},
       accessibilityWidgets: unknownAccessibilityWidgetInventory(), axeStatus: 'not-run',
@@ -74,7 +74,11 @@ export function aggregateBatchAudits({
     canonicalStringify(template.normative) !== canonicalStringify(expectedNormative)) {
     throw new TypeError('Template do lote não contém o ledger normativo exato.');
   }
-  const pages = pageResults.map(result => structuredClone(result.page));
+  const pages = pageResults.map(result => {
+    const page = structuredClone(result.page);
+    if (!Object.hasOwn(page.timestamps, 'generatedAt')) page.timestamps.generatedAt = endedAt;
+    return page;
+  });
   assertPageOrderAndIdentity(pages);
   const derivedStatus = deriveBatchStatus(pages);
   if (status !== derivedStatus) throw new TypeError(`Status da sessão diverge das páginas do lote: esperado ${derivedStatus}.`);
@@ -90,7 +94,7 @@ export function aggregateBatchAudits({
   const itemResults = NBR17225_ITEMS.map(item => ({
     ...structuredClone(item),
     outcome: aggregatedItems.get(item.id)?.outcome ?? 'cantTell',
-    ruleResults: structuredClone(aggregatedItems.get(item.id)?.ruleResults ?? []),
+    ruleResults: (aggregatedItems.get(item.id)?.ruleResults ?? []).map(rule => rule.ruleId),
   }));
   applyAxeItemOutcomes(itemResults, occurrences);
   const supplementalRuleCount = ruleResults.filter(rule => rule.source?.engine !== 'audita-core').length;
@@ -105,10 +109,14 @@ export function aggregateBatchAudits({
     pages,
     requestedUrl: primary.requestedUrl,
     finalUrl: primary.finalUrl,
-    timestamps: { startedAt, endedAt },
+    timestamps: { startedAt, endedAt, generatedAt: endedAt },
     timezone: template.timezone,
     versions: structuredClone(template.versions),
     environment: { ...structuredClone(template.environment), viewport: structuredClone(primary.viewport) },
+    scope: {
+      kind: 'explicit-url-batch',
+      description: `${pages.length} páginas correspondentes à lista explícita de ${pages.length} URLs; páginas e estados não solicitados não foram inferidos.`,
+    },
     methodology: {
       ...structuredClone(template.methodology),
       coreRuleCount: 130,
@@ -129,8 +137,6 @@ export function aggregateBatchAudits({
     })),
     accessibilityWidgets: structuredClone(primary.accessibilityWidgets),
     limitations,
-    presentation: structuredClone(dedupeFindingsForPresentation(occurrences)),
-    progress: progress.map(value => structuredClone(value)),
     report: { status: 'pending', reviewUrl: null, artifact: { status: 'pending', formats: [] } },
     reproducibility: {
       methodologyVersion: template.versions.rules,
@@ -140,7 +146,7 @@ export function aggregateBatchAudits({
       capturedStateCount,
     },
     normative: structuredClone(template.normative),
-    integrity: { algorithm: 'SHA-256', evidenceManifestHash: 'pending', canonicalModelHash: 'pending', hashBase: 'pending' },
+    integrity: { algorithm: 'SHA-256', evidenceManifestHash: 'pending', canonicalModelHash: 'pending', hashBase: REPORT_HASH_BASE },
   };
 }
 
