@@ -93,9 +93,46 @@ test('hashes the evidence manifest after V1 migration assigns final page IDs', a
   assert.equal(model.integrity.evidenceManifestHash, expected);
 });
 
+test('recomputes reproducibility hashes only from the canonical migrated report sources', async () => {
+  const input = rawAudit({
+    reproducibility: {
+      methodologyVersion: '1.0.0', snapshotHash: 'a'.repeat(64),
+      ruleResultsHash: 'b'.repeat(64), evidenceHash: 'c'.repeat(64), capturedStateCount: 1,
+    },
+  });
+  const model = await enrichAuditForReport(input, {
+    now: () => '2026-08-26T15:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  });
+  const evidenceManifest = model.evidence.map(artifact => ({
+    evidenceId: artifact.evidenceId,
+    pageId: artifact.pageId,
+    kind: artifact.kind,
+    nodeId: artifact.nodeId ?? null,
+    hash: artifact.hash ?? null,
+    fullPageEvidenceId: artifact.fullPageEvidenceId ?? null,
+  }));
+
+  assert.equal(model.reproducibility.snapshotHash, await sha256Hex(canonicalStringify(model.snapshot)));
+  assert.equal(model.reproducibility.ruleResultsHash, await sha256Hex(canonicalStringify(model.ruleResults)));
+  assert.equal(model.reproducibility.evidenceHash, await sha256Hex(canonicalStringify(evidenceManifest)));
+  assert.equal(model.reproducibility.evidenceHash, model.integrity.evidenceManifestHash);
+  assert.equal(model.reproducibility.capturedStateCount, model.evidenceStateCount);
+  assert.doesNotMatch(JSON.stringify(model), new RegExp(`${'a'.repeat(64)}|${'b'.repeat(64)}|${'c'.repeat(64)}`, 'u'));
+});
+
 test('preserves failed and cancelled outcomes while deriving explicit limitations', async () => {
   for (const status of ['failed', 'cancelled']) {
-    const input = rawAudit({ session: { status, diagnostics: [], partial: false } });
+    const input = rawAudit({ session: {
+      status, partial: false,
+      diagnostics: [{
+        code: status === 'failed' ? 'CORE_AUDIT_FAILED' : 'NAVIGATION_FAILED',
+        message: status === 'failed'
+          ? 'O núcleo de regras não pôde concluir a auditoria.'
+          : 'A auditoria foi cancelada.',
+        at: '2026-08-26T14:00:30.000Z', recoverable: false,
+      }],
+    } });
     const model = await enrichAuditForReport(input, {
       now: () => '2026-08-26T15:00:00.000Z', timezone: 'America/Cuiaba',
       manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'não disponível',

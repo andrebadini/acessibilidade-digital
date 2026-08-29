@@ -50,6 +50,15 @@ test('rejects manifest and canonical claims independently even when the other li
   await assert.rejects(verifyAuditIntegritySnapshot(forgedCanonical), /integridade|indisponível/iu);
 });
 
+test('rejects a forged reproducibility hash even when the canonical model hash is recomputed', async () => {
+  const source = await verifiedFixture();
+  const forged = structuredClone(source);
+  forged.reproducibility.ruleResultsHash = 'f'.repeat(64);
+  await rehashCanonicalModel(forged);
+
+  await assert.rejects(verifyAuditIntegritySnapshot(forged), /integridade|indisponível/iu);
+});
+
 test('never attests unavailable V1 integrity as a final V2 export snapshot', async () => {
   const input = structuredClone(await verifiedFixture());
   input.integrity = { algorithm: 'unavailable', status: 'not-recorded-v1' };

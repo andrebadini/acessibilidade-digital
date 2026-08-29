@@ -394,7 +394,8 @@ test('builds a valid revisable model when every page failed or was cancelled bef
     const pageResults = ['one', 'two'].map((name, index) => createBatchFailurePage({
       pageId: `page-${index + 1}`, requestedUrl: `https://${name}.example.test/?token=REMOVE&view=public`,
       status: scenario.pageStatus, attempted: scenario.attempted,
-      startedAt: '2026-08-28T11:00:00.000Z', endedAt: '2026-08-28T11:00:01.000Z',
+      startedAt: '2026-08-28T11:00:00.000Z',
+      endedAt: scenario.attempted ? '2026-08-28T11:00:01.000Z' : '2026-08-28T11:00:00.000Z',
       code: scenario.code,
       message: scenario.status === 'cancelled'
         ? 'A página não foi iniciada porque o lote foi cancelado.'

@@ -128,6 +128,15 @@ function withPages(count) {
         ? 'complete'
         : pageStatuses.every(status => status === 'failed') ? 'failed' : 'partial';
     input.session.partial = input.session.status === 'partial';
+    if (['failed', 'cancelled'].includes(input.session.status)) {
+      input.session.diagnostics.push({
+        code: input.session.status === 'failed' ? 'BATCH_PAGE_FAILED' : 'BATCH_CANCELLED',
+        message: input.session.status === 'failed'
+          ? 'As páginas do lote não puderam ser auditadas.'
+          : 'O lote foi cancelado antes da conclusão.',
+        at: '2026-08-26T14:00:30.000Z', recoverable: false,
+      });
+    }
   }
   return input;
 }

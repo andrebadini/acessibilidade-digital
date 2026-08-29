@@ -1034,6 +1034,13 @@ function evidenceManifest(model) {
 }
 
 function refreshDeclaredIntegrity(model) {
+  model.reproducibility = {
+    methodologyVersion: model.versions.rules,
+    snapshotHash: artifactHash(canonicalStringify(model.snapshot ?? null)),
+    ruleResultsHash: artifactHash(canonicalStringify(model.ruleResults)),
+    evidenceHash: artifactHash(canonicalStringify(evidenceManifest(model))),
+    capturedStateCount: model.evidenceStateCount,
+  };
   model.integrity = {
     algorithm: 'SHA-256',
     evidenceManifestHash: artifactHash(canonicalStringify(evidenceManifest(model))),

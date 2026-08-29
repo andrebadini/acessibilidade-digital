@@ -87,6 +87,7 @@ function createAuditModelInternal(captured) {
   validateEnvironment(model.environment);
   validateScope(model.scope);
   validateSession(model.session);
+  validateTerminalDiagnostics(model);
   validateSinglePageSessionStatus(model);
   validateBatchSessionStatus(model);
   validateAxeCoverageStatus(model, validatedAxe);
@@ -111,6 +112,7 @@ function createAuditModelInternal(captured) {
     });
   }
   const graph = validateEvidenceAndOccurrences(model, ruleById, pageById, model.requestedScope.mode);
+  validateUnattemptedPages(model);
   validateSinglePageCoreOccurrenceCompleteness(model, ruleById);
   validateAxeEvidenceBinding(model, validatedAxe);
   const reviewGraph = validateReview(model, graph);
@@ -265,10 +267,16 @@ function migrateV1Record(model) {
     }
     return output;
   });
-  const itemResults = deriveMigratedItemResults(
+  const migratedItemResults = deriveMigratedItemResults(
     projectedItemResults, ruleResults, validatedAxe, downgradedRuleIds,
   );
-  const manualReview = projectManualReview(model.manualReview ?? []);
+  const conclusiveOccurrenceIds = new Set(occurrences
+    .filter(occurrence => occurrence.outcome !== 'cantTell')
+    .map(occurrence => occurrence.occurrenceId));
+  const manualReview = projectManualReview(model.manualReview ?? [])
+    .filter(entry => !conclusiveOccurrenceIds.has(entry.occurrenceId));
+  const reviewDecisions = projectReviewDecisions(model.reviewDecisions ?? [])
+    .filter(decision => !conclusiveOccurrenceIds.has(decision.occurrenceId));
   const queuedOccurrenceIds = new Set(manualReview.map(entry => entry.occurrenceId));
   for (const occurrence of occurrences) {
     const migratedManual = occurrence.source.engine === V1_MIGRATION_DEFAULTS.manualSourceEngine;
@@ -291,8 +299,14 @@ function migrateV1Record(model) {
     queuedOccurrenceIds.add(occurrence.occurrenceId);
   }
   const supplementalRuleCount = ruleResults.filter(rule => rule.source?.engine !== V1_MIGRATION_DEFAULTS.sourceEngine).length;
+  const itemResults = reconcileMigratedItemReview(
+    migratedItemResults, ruleResults, occurrences, reviewDecisions, validatedAxe,
+  );
   const timestamps = projectTimestamps(model.timestamps);
   const viewport = projectViewport(model.environment?.viewport);
+  const evidenceStateCount = Array.isArray(model.evidence)
+    ? model.evidenceStateCount ?? 0
+    : model.evidence?.stateCount ?? 0;
   const output = {
     schemaVersion: 2,
     auditId: model.auditId,
@@ -316,11 +330,17 @@ function migrateV1Record(model) {
     session: projectSession(model.session),
     limitations: projectStringArray(model.limitations),
     ruleResults, itemResults, occurrences, evidence,
-    evidenceStateCount: Array.isArray(model.evidence) ? model.evidenceStateCount ?? 0 : model.evidence?.stateCount ?? 0,
+    evidenceStateCount,
     manualReview,
-    reviewDecisions: projectReviewDecisions(model.reviewDecisions ?? []),
+    reviewDecisions,
     report: projectReport(model.report),
-    reproducibility: projectReproducibility(model.reproducibility),
+    reproducibility: {
+      methodologyVersion: sourceVersion,
+      snapshotHash: 'not-recorded-v1',
+      ruleResultsHash: 'not-recorded-v1',
+      evidenceHash: 'not-recorded-v1',
+      capturedStateCount: evidenceStateCount,
+    },
     normative: migrateV1NormativeRecord(model.normative),
     integrity: { algorithm: 'unavailable', status: 'not-recorded-v1' },
   };
@@ -510,12 +530,6 @@ function projectReport(value) {
   outputArtifact.formats = (artifact.formats ?? []).map(format => typeof format === 'string'
     ? format : projectRecord(format, ['format', 'status']));
   return { status: value?.status, reviewUrl: value?.reviewUrl ?? null, artifact: outputArtifact };
-}
-
-function projectReproducibility(value) {
-  return projectRecord(value ?? {}, [
-    'methodologyVersion', 'snapshotHash', 'ruleResultsHash', 'evidenceHash', 'capturedStateCount',
-  ]);
 }
 
 function projectAccessibilityWidgets(value) {
@@ -814,6 +828,37 @@ function deriveMigratedItemResults(items, ruleResults, checkedAxe, downgradedRul
   });
 }
 
+function reconcileMigratedItemReview(items, ruleResults, occurrences, decisions, checkedAxe) {
+  const states = deriveAuthoritativeItemStates(ruleResults, checkedAxe);
+  const occurrencesByItem = new Map();
+  for (const occurrence of occurrences) {
+    const itemOccurrences = occurrencesByItem.get(occurrence.itemId) ?? [];
+    itemOccurrences.push(occurrence);
+    occurrencesByItem.set(occurrence.itemId, itemOccurrences);
+  }
+  const decisionByOccurrence = new Map(decisions.map(decision => [decision.occurrenceId, decision]));
+  return items.map(item => {
+    const output = { ...item };
+    delete output.originalOutcome;
+    delete output.reviewedOutcome;
+    delete output.review;
+    const state = states.get(item.id);
+    if (!state) return output;
+    const itemOccurrences = occurrencesByItem.get(item.id) ?? [];
+    const itemDecisions = itemOccurrences
+      .map(occurrence => decisionByOccurrence.get(occurrence.occurrenceId))
+      .filter(Boolean);
+    output.outcome = state.outcome;
+    if (itemDecisions.length === 0) return output;
+    const reviewedOutcome = deriveReviewedItemOutcome(state.outcome, itemOccurrences, itemDecisions);
+    output.originalOutcome = state.outcome;
+    output.reviewedOutcome = reviewedOutcome;
+    output.outcome = reviewedOutcome;
+    output.review = deriveItemReviewSummary(itemDecisions);
+    return output;
+  });
+}
+
 function validateItemAuthority(model, ruleById, checkedAxe, reviewGraph) {
   const states = deriveAuthoritativeItemStates(model.ruleResults, checkedAxe);
   const checkedFailedAxeIds = new Set((checkedAxe?.occurrences ?? [])
@@ -1009,6 +1054,9 @@ function validatePagesMatchRequestedScope(pages, requestedScope) {
 function validateTimestamps(timestamps, label = 'timestamps') {
   if (!timestamps || typeof timestamps !== 'object' || Array.isArray(timestamps)) throw new TypeError(`${label} inválidos.`);
   for (const key of ['startedAt', 'endedAt', 'generatedAt']) canonicalInstant(timestamps[key], `${label}.${key}`);
+  if (timestamps.startedAt > timestamps.endedAt || timestamps.endedAt > timestamps.generatedAt) {
+    throw new TypeError(`${label} deve respeitar a ordem cronológica de observação e geração.`);
+  }
 }
 
 function canonicalInstant(value, label) {
@@ -1076,6 +1124,23 @@ function validateSession(session) {
     canonicalText(diagnostic.message, `session.diagnostics[${index}].message`);
     canonicalInstant(diagnostic.at, `session.diagnostics[${index}].at`);
     if (typeof diagnostic.recoverable !== 'boolean') throw new TypeError(`session.diagnostics[${index}].recoverable deve ser booleano.`);
+  }
+}
+
+function validateTerminalDiagnostics(model) {
+  const fatal = diagnostic => diagnostic?.recoverable === false;
+  if (model.session.status === 'complete' && (
+    model.session.diagnostics.some(fatal) ||
+    model.pages.some(page => page.status === 'complete' && (page.diagnostics ?? []).some(fatal))
+  )) {
+    throw new TypeError('Sessão ou página completa não pode conter diagnóstico fatal.');
+  }
+  if (!['failed', 'cancelled'].includes(model.session.status)) return;
+  const compatibleCodes = INCOMPLETE_CORE_DIAGNOSTICS[model.session.status];
+  const compatibleDiagnostic = model.session.diagnostics.some(diagnostic =>
+    fatal(diagnostic) && compatibleCodes?.has(diagnostic.code));
+  if (!compatibleDiagnostic) {
+    throw new TypeError('Sessão encerrada exige diagnóstico fatal compatível com o status terminal.');
   }
 }
 
@@ -1216,12 +1281,23 @@ function validateRuleInventory(model, ruleById) {
     return;
   }
   if (completeCoreInventory) return;
+}
 
-  const compatibleCodes = INCOMPLETE_CORE_DIAGNOSTICS[model.session.status];
-  const compatibleDiagnostic = model.session.diagnostics.some(diagnostic =>
-    diagnostic.recoverable === false && compatibleCodes?.has(diagnostic.code));
-  if (!compatibleDiagnostic) {
-    throw new TypeError('Inventário core incompleto exige diagnóstico fatal compatível com a fase interrompida.');
+function validateUnattemptedPages(model) {
+  const occurrencePageIds = new Set(model.occurrences.map(occurrence => occurrence.pageId));
+  const evidencePageIds = new Set(model.evidence.map(artifact => artifact.pageId));
+  const axePageIds = new Set((model.axePages ?? []).map(entry => entry.pageId));
+  for (const page of model.pages) {
+    if (page.attempted !== false) continue;
+    const hasExecution = !['failed', 'cancelled'].includes(page.status) ||
+      page.finalUrlObserved !== false || page.finalUrl !== page.requestedUrl ||
+      page.timestamps.startedAt !== page.timestamps.endedAt ||
+      (page.axeStatus !== undefined && page.axeStatus !== 'not-run') ||
+      Object.keys(page.coverage ?? {}).length > 0 || (page.omittedEvidence?.length ?? 0) > 0 ||
+      occurrencePageIds.has(page.pageId) || evidencePageIds.has(page.pageId) || axePageIds.has(page.pageId);
+    if (hasExecution) {
+      throw new TypeError('Página não iniciada não pode conter resultados, evidências ou alegações de execução.');
+    }
   }
 }
 
@@ -1665,6 +1741,9 @@ function validateReview(model, { itemIds, occurrenceById }) {
     if (decisionId !== normalized.decisionId) throw new TypeError(`Identificador de decisão incoerente: ${decisionId}.`);
     if (decisionIds.has(decisionId) || decisionByOccurrence.has(normalized.occurrenceId)) throw new TypeError('Decisão de revisão duplicada ou ambígua.');
     if (normalized.auditId !== model.auditId) throw new TypeError('Decisão pertence a outra auditoria.');
+    if (normalized.decidedAt < model.timestamps.endedAt) {
+      throw new TypeError('Decisão de revisão não pode anteceder o término da observação técnica.');
+    }
     const occurrence = occurrenceById.get(normalized.occurrenceId);
     if (!occurrence || occurrence.itemId !== normalized.itemId) throw new TypeError('Decisão referencia item ou ocorrência desconhecidos.');
     const queue = queueByOccurrence.get(normalized.occurrenceId);

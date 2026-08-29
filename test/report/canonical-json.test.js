@@ -112,7 +112,16 @@ test('validates every rule, occurrence, evidence and review graph link', () => {
 
 test('preserves legitimate failed and cancelled terminal sessions without touching input', () => {
   for (const status of ['failed', 'cancelled']) {
-    const input = reportInput({ session: { status, diagnostics: [], partial: false } });
+    const input = reportInput({ session: {
+      status, partial: false,
+      diagnostics: [{
+        code: status === 'failed' ? 'CORE_AUDIT_FAILED' : 'NAVIGATION_FAILED',
+        message: status === 'failed'
+          ? 'O núcleo de regras não pôde concluir a auditoria.'
+          : 'A auditoria foi cancelada.',
+        at: '2026-08-26T14:00:30.000Z', recoverable: false,
+      }],
+    } });
     const model = createAuditModel(input);
     assert.equal(model.session.status, status);
     assert.equal(input.session.status, status);

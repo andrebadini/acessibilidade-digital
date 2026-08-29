@@ -321,6 +321,34 @@ function setSingleStatus(model, status, { diagnostics = model.session.diagnostic
   return model;
 }
 
+function batchWithUnattemptedPage() {
+  const model = structuredClone(migrateAuditV1ToV2(reportInput()));
+  const requestedUrl = 'https://not-started.example.test/';
+  const diagnostic = {
+    code: 'BATCH_NOT_STARTED_CLEANUP_UNCONFIRMED',
+    message: 'A página não foi iniciada porque a limpeza anterior não foi confirmada.',
+    at: '2026-08-26T14:00:45.000Z',
+    recoverable: false,
+  };
+  model.requestedScope = { mode: 'batch', urls: [...model.requestedScope.urls, requestedUrl] };
+  model.pages.push({
+    pageId: 'page-2', requestedUrl, finalUrl: requestedUrl, finalUrlObserved: false,
+    status: 'failed', attempted: false,
+    timestamps: {
+      startedAt: '2026-08-26T14:00:45.000Z',
+      endedAt: '2026-08-26T14:00:45.000Z',
+      generatedAt: '2026-08-26T14:00:45.000Z',
+    },
+    viewport: { width: null, height: null, deviceScaleFactor: null },
+    diagnostics: [diagnostic], limitations: [diagnostic.message], coverage: {}, axeStatus: 'not-run',
+  });
+  model.session = {
+    status: 'partial', partial: true,
+    diagnostics: [...model.session.diagnostics, diagnostic],
+  };
+  return model;
+}
+
 function editorialInapplicableRule() {
   return {
     ruleId: 'editorial.placeholder-text', outcome: 'inapplicable', mode: 'automated',
@@ -395,10 +423,133 @@ test('allows a failed or cancelled pre-execution subset only with a compatible f
   }
 });
 
+test('binds complete, failed and cancelled terminal states to compatible fatal diagnostics with a full core inventory', () => {
+  const fatal = (code, message) => ({
+    code, message, at: '2026-08-26T14:00:30.000Z', recoverable: false,
+  });
+
+  const completeWithFatal = authorityConsistentSample();
+  setSingleStatus(completeWithFatal, 'complete', {
+    diagnostics: [fatal('COLLECTION_FAILED', 'A estrutura da página não pôde ser coletada com segurança.')],
+  });
+  assert.throws(() => createAuditModel(completeWithFatal), /status|sessão|diagnóst|fatal|modelo/iu);
+
+  for (const [status, code, message] of [
+    ['failed', 'CORE_AUDIT_FAILED', 'O núcleo de regras não pôde concluir a auditoria.'],
+    ['cancelled', 'NAVIGATION_FAILED', 'A auditoria foi cancelada.'],
+  ]) {
+    const missingFatal = authorityConsistentSample();
+    setSingleStatus(missingFatal, status, { diagnostics: [] });
+    assert.throws(() => createAuditModel(missingFatal), /status|sessão|diagnóst|fatal|modelo/iu);
+
+    const recoverableOnly = authorityConsistentSample();
+    setSingleStatus(recoverableOnly, status, {
+      diagnostics: [{
+        code: 'FRAME_LIMITED', message: 'Um frame não pôde ser lido.',
+        at: '2026-08-26T14:00:30.000Z', recoverable: true,
+      }],
+    });
+    assert.throws(() => createAuditModel(recoverableOnly), /status|sessão|diagnóst|fatal|modelo/iu);
+
+    const compatible = authorityConsistentSample();
+    setSingleStatus(compatible, status, { diagnostics: [fatal(code, message)] });
+    assert.doesNotThrow(() => createAuditModel(compatible));
+  }
+});
+
+test('rejects results, evidence or execution claims for a page explicitly marked as not attempted', () => {
+  const canonical = batchWithUnattemptedPage();
+  assert.doesNotThrow(() => createAuditModel(canonical));
+
+  const withOccurrence = structuredClone(canonical);
+  const occurrence = structuredClone(withOccurrence.occurrences[0]);
+  occurrence.occurrenceId = 'occ-unattempted';
+  occurrence.pageId = 'page-2';
+  occurrence.evidenceRefs = [];
+  occurrence.evidenceIds = [];
+  withOccurrence.occurrences.push(occurrence);
+  withOccurrence.manualReview.push({
+    ...structuredClone(withOccurrence.manualReview[0]), occurrenceId: occurrence.occurrenceId,
+  });
+
+  const withEvidence = structuredClone(canonical);
+  withEvidence.evidence.push({
+    evidenceId: 'ev-unattempted', pageId: 'page-2', kind: 'element', nodeId: null,
+  });
+
+  const withExecution = structuredClone(canonical);
+  withExecution.pages[1].axeStatus = 'complete';
+
+  const withObservedNavigation = structuredClone(canonical);
+  withObservedNavigation.pages[1].finalUrlObserved = true;
+
+  const withElapsedExecution = structuredClone(canonical);
+  withElapsedExecution.pages[1].timestamps.endedAt = '2026-08-26T14:00:46.000Z';
+  withElapsedExecution.pages[1].timestamps.generatedAt = '2026-08-26T14:00:46.000Z';
+
+  for (const candidate of [
+    withOccurrence, withEvidence, withExecution, withObservedNavigation, withElapsedExecution,
+  ]) {
+    assert.throws(() => createAuditModel(candidate), /attempted|iniciada|execução|resultado|evidência|modelo/iu);
+  }
+});
+
+test('enforces observation chronology while preserving human decisions made after report generation', () => {
+  for (const timestamps of [
+    {
+      startedAt: '2026-08-26T14:03:00.000Z',
+      endedAt: '2026-08-26T14:02:00.000Z',
+      generatedAt: '2026-08-26T14:04:00.000Z',
+    },
+    {
+      startedAt: '2026-08-26T14:00:00.000Z',
+      endedAt: '2026-08-26T14:02:00.000Z',
+      generatedAt: '2026-08-26T14:01:00.000Z',
+    },
+  ]) {
+    const reversed = authorityConsistentSample();
+    reversed.timestamps = timestamps;
+    reversed.pages[0].timestamps = structuredClone(timestamps);
+    assert.throws(() => createAuditModel(reversed), /data|página|modelo|cronolog/iu);
+  }
+
+  const reversedPage = batchWithUnattemptedPage();
+  reversedPage.pages[1].timestamps.generatedAt = '2026-08-26T14:00:44.000Z';
+  assert.throws(() => createAuditModel(reversedPage), /data|página|modelo|cronolog/iu);
+
+  const earlyDecision = createReviewDecision({
+    auditId: SAMPLE_AUDIT.auditId, itemId: '5.1.4', occurrenceId: 'occ-focus-review',
+    answer: 'conforme', evaluator: 'Fiscal de teste',
+    decidedAt: '2026-08-26T14:01:59.000Z', mode: 'assisted',
+  });
+  assert.throws(
+    () => createAuditModel(applyReviewDecisions(authorityConsistentSample(), [earlyDecision])),
+    /data|revisão|decisão|modelo/iu,
+  );
+
+  const laterDecision = createReviewDecision({
+    auditId: SAMPLE_AUDIT.auditId, itemId: '5.1.4', occurrenceId: 'occ-focus-review',
+    answer: 'conforme', evaluator: 'Fiscal de teste',
+    decidedAt: '2026-08-26T15:00:00.000Z', mode: 'assisted',
+  });
+  const reviewed = createAuditModel(applyReviewDecisions(authorityConsistentSample(), [laterDecision]));
+  assert.equal(reviewed.reviewDecisions[0].decidedAt, '2026-08-26T15:00:00.000Z');
+  assert.equal(reviewed.timestamps.generatedAt, '2026-08-26T14:02:01.000Z');
+});
+
 test('binds a single page status and the partial flag exactly to the session status', () => {
   for (const status of ['complete', 'partial', 'failed', 'cancelled']) {
     const canonical = authorityConsistentSample();
-    setSingleStatus(canonical, status, { diagnostics: status === 'complete' ? [] : canonical.session.diagnostics });
+    const diagnostics = status === 'complete' ? [] : status === 'partial'
+      ? canonical.session.diagnostics
+      : [{
+        code: status === 'failed' ? 'CORE_AUDIT_FAILED' : 'NAVIGATION_FAILED',
+        message: status === 'failed'
+          ? 'O núcleo de regras não pôde concluir a auditoria.'
+          : 'A auditoria foi cancelada.',
+        at: '2026-08-26T14:00:30.000Z', recoverable: false,
+      }];
+    setSingleStatus(canonical, status, { diagnostics });
     assert.doesNotThrow(() => createAuditModel(canonical));
 
     const pageDrift = structuredClone(canonical);
@@ -574,6 +725,92 @@ test('never carries a claimed V1 SHA-256 block into migration, technical JSON or
   const hashInput = structuredClone(enriched);
   delete hashInput.integrity.canonicalModelHash;
   assert.equal(enriched.integrity.canonicalModelHash, await sha256Hex(canonicalStringify(hashInput)));
+});
+
+test('drops every claimed V1 reproducibility hash from migration and report consumers', () => {
+  const input = reportInput();
+  const claimedSnapshot = 'a'.repeat(64);
+  const claimedRules = 'b'.repeat(64);
+  const claimedEvidence = 'c'.repeat(64);
+  input.reproducibility = {
+    methodologyVersion: '1.0.0', snapshotHash: claimedSnapshot,
+    ruleResultsHash: claimedRules, evidenceHash: claimedEvidence, capturedStateCount: 1,
+  };
+
+  const migrated = migrateAuditV1ToV2(input);
+
+  assert.deepEqual(migrated.reproducibility, {
+    methodologyVersion: '1.0.0',
+    snapshotHash: 'not-recorded-v1',
+    ruleResultsHash: 'not-recorded-v1',
+    evidenceHash: 'not-recorded-v1',
+    capturedStateCount: 1,
+  });
+  for (const claim of [claimedSnapshot, claimedRules, claimedEvidence]) {
+    const marker = new RegExp(claim, 'u');
+    assert.doesNotMatch(renderTechnicalJson(migrated), marker);
+    assert.doesNotMatch(renderHtmlReport(migrated), marker);
+  }
+});
+
+test('drops historical V1 review queues for conclusive occurrences and retains only legitimate cantTell work', () => {
+  const input = reportInput();
+  const legitimateDecision = createReviewDecision({
+    auditId: input.auditId, itemId: '5.1.4', occurrenceId: 'occ-1',
+    answer: 'conforme', evaluator: 'Fiscal atual', mode: 'assisted',
+    decidedAt: '2026-08-26T14:01:20.000Z',
+  });
+  input.manualReview[0].status = 'answered';
+  input.manualReview[0].decisionId = legitimateDecision.decisionId;
+  const legitimateItem = input.itemResults.find(item => item.id === '5.1.4');
+  legitimateItem.originalOutcome = 'cantTell';
+  legitimateItem.reviewedOutcome = 'passed';
+  legitimateItem.outcome = 'passed';
+  legitimateItem.review = {
+    mode: 'assisted', evaluator: legitimateDecision.evaluator,
+    decidedAt: legitimateDecision.decidedAt, decisionIds: [legitimateDecision.decisionId],
+  };
+  const rule = input.ruleResults.find(value => value.ruleId === 'focus-visible');
+  rule.outcome = 'failed';
+  const reviewedItem = input.itemResults.find(item => item.id === '5.1.1');
+  reviewedItem.outcome = 'failed';
+  input.occurrences.push({
+    occurrenceId: 'occ-conclusive', itemId: '5.1.1', ruleId: 'focus-visible',
+    outcome: 'failed', mode: 'automated', nodeId: null, evidenceIds: ['ev-1'],
+    justification: 'Falha conclusiva registrada pela regra autoritativa.',
+    source: { engine: 'audita-core', ruleId: 'focus-visible', version: '1.0.0' },
+    itemWcagRefs: ['2.4.7'], sourceWcagRefs: ['2.4.7'],
+    testedWcagRefs: ['2.4.7'], wcagRefs: ['2.4.7'],
+  });
+  const historicalDecision = createReviewDecision({
+    auditId: input.auditId, itemId: '5.1.1', occurrenceId: 'occ-conclusive',
+    answer: 'não conforme', evaluator: 'Fiscal histórico', mode: 'assisted',
+    decidedAt: '2026-08-26T14:01:30.000Z',
+  });
+  input.manualReview.push({
+    occurrenceId: 'occ-conclusive', itemId: '5.1.1', ruleId: 'focus-visible',
+    mode: 'assisted', status: 'answered', decisionId: historicalDecision.decisionId,
+    question: 'A falha conclusiva deve ser revista?',
+    reason: 'Fila histórica incompatível com o resultado conclusivo.',
+  });
+  input.reviewDecisions.push(legitimateDecision, historicalDecision);
+  reviewedItem.originalOutcome = 'failed';
+  reviewedItem.reviewedOutcome = 'failed';
+  reviewedItem.review = {
+    mode: 'assisted', evaluator: historicalDecision.evaluator,
+    decidedAt: historicalDecision.decidedAt, decisionIds: [historicalDecision.decisionId],
+  };
+
+  const migrated = migrateAuditV1ToV2(input);
+
+  assert.deepEqual(migrated.manualReview.map(entry => entry.occurrenceId), ['occ-1']);
+  assert.deepEqual(migrated.reviewDecisions.map(decision => decision.decisionId), [legitimateDecision.decisionId]);
+  assert.equal(migrated.manualReview[0].decisionId, legitimateDecision.decisionId);
+  assert.equal(migrated.itemResults.find(item => item.id === '5.1.4').outcome, 'passed');
+  assert.equal(migrated.itemResults.find(item => item.id === '5.1.1').outcome, 'failed');
+  assert.equal(Object.hasOwn(migrated.itemResults.find(item => item.id === '5.1.1'), 'review'), false);
+  assert.ok(migrated.manualReview.every(entry =>
+    migrated.occurrences.find(occurrence => occurrence.occurrenceId === entry.occurrenceId)?.outcome === 'cantTell'));
 });
 
 test('consumes legitimate V1 selector aliases into the closed canonical target', () => {

@@ -14,7 +14,10 @@ import {
   REPORT_HASH_BASE,
   verifyAuditIntegritySnapshot,
 } from './integrity.js';
-import { verifyIntegrityLinks } from './integrity-chain.js';
+import {
+  computeCanonicalReproducibility,
+  verifyIntegrityLinks,
+} from './integrity-chain.js';
 
 export { REPORT_HASH_BASE } from './integrity.js';
 
@@ -112,9 +115,11 @@ async function enrichCapturedAudit(captured, options) {
       sources: structuredClone(NORMATIVE_SOURCE_LEDGER),
     },
     reproducibility: {
-      ...(raw.reproducibility ?? {}),
       methodologyVersion: rulesVersion,
-      capturedStateCount: raw.reproducibility?.capturedStateCount ?? evidenceStateCount,
+      snapshotHash: 'pending',
+      ruleResultsHash: 'pending',
+      evidenceHash: 'pending',
+      capturedStateCount: evidenceStateCount,
     },
     integrity: { algorithm: 'SHA-256', evidenceManifestHash: 'pending', hashBase: REPORT_HASH_BASE },
   };
@@ -144,11 +149,13 @@ async function enrichCapturedAudit(captured, options) {
     });
   }
   const withEvidenceHashes = createAuditModel({ ...normalized, evidence });
-  const evidenceManifest = projectEvidenceManifest(withEvidenceHashes.evidence);
+  const reproducibility = await computeCanonicalReproducibility(withEvidenceHashes);
+  const withReproducibility = createAuditModel({ ...withEvidenceHashes, reproducibility });
+  const evidenceManifest = projectEvidenceManifest(withReproducibility.evidence);
   const evidenceManifestHash = await sha256Hex(canonicalStringify(evidenceManifest));
   const withManifest = createAuditModel({
-    ...withEvidenceHashes,
-    integrity: { ...withEvidenceHashes.integrity, evidenceManifestHash, canonicalModelHash: 'pending' },
+    ...withReproducibility,
+    integrity: { ...withReproducibility.integrity, evidenceManifestHash, canonicalModelHash: 'pending' },
   });
   const hashInput = structuredClone(withManifest);
   delete hashInput.integrity.canonicalModelHash;

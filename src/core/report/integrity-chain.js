@@ -31,6 +31,23 @@ export function projectEvidenceManifest(evidence) {
   }));
 }
 
+/** Derives every auxiliary reproducibility claim from the closed canonical model. */
+export async function computeCanonicalReproducibility(model) {
+  if (!model || typeof model !== 'object' || !Array.isArray(model.ruleResults) ||
+    !Array.isArray(model.evidence) || !Number.isSafeInteger(model.evidenceStateCount) ||
+    model.evidenceStateCount < 0 || typeof model.versions?.rules !== 'string') {
+    throw new TypeError('Fontes canônicas de reprodutibilidade inválidas.');
+  }
+  const output = {
+    methodologyVersion: model.versions.rules,
+    snapshotHash: await sha256Hex(canonicalStringify(model.snapshot ?? null)),
+    ruleResultsHash: await sha256Hex(canonicalStringify(model.ruleResults)),
+    evidenceHash: await sha256Hex(canonicalStringify(projectEvidenceManifest(model.evidence))),
+    capturedStateCount: model.evidenceStateCount,
+  };
+  return output;
+}
+
 /** Recomputes every persisted integrity link without trusting model validation. */
 export async function verifyIntegrityLinks(model) {
   const integrity = model?.integrity;
@@ -53,6 +70,10 @@ export async function verifyIntegrityLinks(model) {
   const manifestHash = await sha256Hex(canonicalStringify(projectEvidenceManifest(model.evidence)));
   if (manifestHash !== integrity.evidenceManifestHash) {
     throw new TypeError('Hash do manifesto de evidências inválido.');
+  }
+  const reproducibility = await computeCanonicalReproducibility(model);
+  if (canonicalStringify(model.reproducibility) !== canonicalStringify(reproducibility)) {
+    throw new TypeError('Hashes de reprodutibilidade inválidos.');
   }
   const hashInput = structuredClone(model);
   delete hashInput.integrity.canonicalModelHash;
