@@ -240,14 +240,15 @@ function sanitizeAxeResults(results) {
   const output = { truncation: {} };
   for (const name of ['violations', 'incomplete', 'passes', 'inapplicable']) {
     const inspected = projectedArray(results, name, MAX_GROUPS);
-    const groups = inspected.entries.map(sanitizeProjectedGroup).filter(Boolean);
+    const permitted = inspected.entries.filter(group => ALLOWED_RULE_ID_SET.has(ownData(group, 'id')));
+    const groups = permitted.map(sanitizeProjectedGroup).filter(Boolean);
     output[name] = groups;
     output.truncation[name] = projectedCount(
       ownData(ownData(results, 'truncation'), name),
-      inspected.length,
+      inspected.length > MAX_GROUPS ? MAX_GROUPS + 1 : permitted.length,
       groups.length,
       MAX_GROUPS,
-      !inspected.valid || groups.length !== inspected.entries.length,
+      !inspected.valid || inspected.length > MAX_GROUPS || groups.length !== permitted.length,
     );
   }
   return output;
@@ -361,10 +362,11 @@ export async function runAxeInFrame(config, policy) {
     const projected = { truncation: {} };
     for (const name of ['violations', 'incomplete', 'passes', 'inapplicable']) {
       const rawGroups = inspect(results, name, maxGroups);
-      const groups = rawGroups.entries.map(projectGroup).filter(Boolean);
+      const permitted = rawGroups.entries.filter(group => allowedRules.has(read(group, 'id')));
+      const groups = permitted.map(projectGroup).filter(Boolean);
       projected[name] = groups;
-      projected.truncation[name] = count(rawGroups.length, groups.length, maxGroups,
-        !rawGroups.valid || groups.length !== rawGroups.entries.length);
+      projected.truncation[name] = count(rawGroups.length > maxGroups ? maxGroups + 1 : permitted.length, groups.length, maxGroups,
+        !rawGroups.valid || rawGroups.length > maxGroups || groups.length !== permitted.length);
     }
     return { ok: true, version: engine.version, results: projected };
   } catch {

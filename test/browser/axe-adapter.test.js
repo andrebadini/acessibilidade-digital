@@ -111,7 +111,8 @@ test('projects and sanitizes axe results inside runAxeInFrame before they cross 
   assert.equal(projected.results.violations[0].nodes[0].target, structural);
   assert.equal(projected.results.violations[0].nodes[1].target, adapter.AXE_TARGET_UNAVAILABLE);
   assert.equal(projected.results.violations[0].nodes[2].target, adapter.AXE_TARGET_UNAVAILABLE);
-  assert.deepEqual(projected.results.truncation.violations, { original: 2, retained: 1, truncated: true });
+  assert.deepEqual(projected.results.truncation.violations, { original: 1, retained: 1, truncated: false },
+    'regras fora do catálogo são removidas por política, não perdidas por truncamento');
   assert.doesNotMatch(JSON.stringify(projected), /TOPSECRET|private\.invalid|private-customer|ambiguous-customer|shadow-private|PRIVATE-TAG|PRIVATE-CHECK|Cliente/iu);
 });
 

@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -42,7 +41,6 @@ test('runs pinned local axe in every isolated frame under real MV3 and strict pa
   const chrome = spawn(chromeBinary, [
     '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
     `--user-data-dir=${profile}`, '--remote-debugging-port=0',
-    `--disable-extensions-except=${root}`, `--load-extension=${root}`,
     'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
   let chromeStderr = '';
@@ -63,7 +61,9 @@ test('runs pinned local axe in every isolated frame under real MV3 and strict pa
   debug('browser CDP connected');
   t.after(() => cdp.close());
 
-  const id = extensionId(root);
+  const loaded = await cdp.command('Extensions.loadUnpacked', { path: root });
+  const id = loaded?.id;
+  assert.match(id || '', /^[a-p]{32}$/u, `extensão real não carregou: ${chromeStderr}`);
   const extensionUrl = `chrome-extension://${id}/src/panel/index.html`;
   debug(`expected extension id: ${id}`);
   const created = await cdp.command('Target.createTarget', { url: extensionUrl });
@@ -76,6 +76,18 @@ test('runs pinned local axe in every isolated frame under real MV3 and strict pa
   assert.ok(listedExtension, `página real da extensão não carregou: ${chromeStderr}`);
   const extensionCdp = await Cdp.connect(listedExtension.webSocketDebuggerUrl);
   t.after(() => extensionCdp.close());
+  await extensionCdp.command('Runtime.enable');
+  await extensionCdp.command('Page.enable');
+  const readyContext = await waitForExtensionContext(extensionCdp, {
+    extensionUrl,
+    extensionId: id,
+    timeoutMs: 10_000,
+  });
+  assert.deepEqual(readyContext, {
+    href: extensionUrl,
+    readyState: 'complete',
+    extensionId: id,
+  });
   debug('real extension panel CDP connected');
   const expression = `(() => {
     globalThis.__axeE2eResult = null;
@@ -121,6 +133,8 @@ test('runs pinned local axe in every isolated frame under real MV3 and strict pa
   const started = await extensionCdp.command('Runtime.evaluate', {
     expression, returnByValue: true,
   });
+  assert.equal(started.exceptionDetails, undefined,
+    started.exceptionDetails?.exception?.description || started.exceptionDetails?.text);
   assert.deepEqual(started.result.value, { started: true });
   let state;
   for (let attempt = 0; attempt < 60 && state?.stage !== 'adapter-returned' && state?.stage !== 'adapter-rejected'; attempt += 1) {
@@ -161,14 +175,31 @@ async function waitForDevToolsPort(profile, chrome) {
   throw new Error('Chrome não publicou DevToolsActivePort.');
 }
 
-function delay(ms) {
-  return new Promise(resolveDelay => setTimeout(resolveDelay, ms));
+async function waitForExtensionContext(cdp, { extensionUrl, extensionId, timeoutMs }) {
+  const startedAt = Date.now();
+  let latest = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const observed = await cdp.command('Runtime.evaluate', {
+        expression: `(() => ({
+          href: globalThis.location?.href || '',
+          readyState: globalThis.document?.readyState || '',
+          extensionId: globalThis.chrome?.runtime?.id || null
+        }))()`,
+        returnByValue: true,
+      });
+      if (!observed.exceptionDetails) latest = observed.result?.value ?? null;
+    } catch { latest = null; }
+    if (latest?.href === extensionUrl && latest.readyState === 'complete' && latest.extensionId === extensionId) {
+      return latest;
+    }
+    await delay(50);
+  }
+  throw new Error(`contexto da extensão não estabilizou: ${JSON.stringify(latest)}`);
 }
 
-function extensionId(path) {
-  const alphabet = 'abcdefghijklmnop';
-  return [...createHash('sha256').update(path).digest().subarray(0, 16)]
-    .map(byte => `${alphabet[byte >> 4]}${alphabet[byte & 15]}`).join('');
+function delay(ms) {
+  return new Promise(resolveDelay => setTimeout(resolveDelay, ms));
 }
 
 class Cdp {

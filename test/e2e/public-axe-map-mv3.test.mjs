@@ -95,13 +95,23 @@ test('audits through action → real panel → Auditar and downloads axe/map pro
     const form = document.querySelector('#audit-form');
     const input = document.querySelector('#audit-url');
     const submit = form?.querySelector('button[type="submit"]');
-    if (!form || !input || !submit || submit.disabled || submit.textContent.trim() !== 'Auditar') return false;
+    if (!form || !input || !submit || submit.disabled || submit.textContent.trim() !== 'Auditar') return {
+      submitted: false,
+      form: Boolean(form),
+      input: Boolean(input),
+      submit: Boolean(submit),
+      disabled: submit?.disabled ?? null,
+      label: submit?.textContent?.trim() ?? null,
+      href: location.href,
+      readyState: document.readyState,
+    };
     input.value = ${JSON.stringify(fixtureUrl)};
     input.dispatchEvent(new Event('input', { bubbles: true }));
     submit.click();
-    return true;
+    return { submitted: true };
   })()`);
-  assert.equal(submitted, true, 'o botão público Auditar não iniciou a URL única');
+  assert.equal(submitted?.submitted, true,
+    `o botão público Auditar não iniciou a URL única: ${JSON.stringify(submitted)}`);
 
   const files = await waitForDownloadedFiles(downloadDir, panel, 240_000);
   assert.deepEqual(files.map(name => extname(name)).sort(), ['.csv', '.html', '.json', '.pdf']);
@@ -119,6 +129,13 @@ test('audits through action → real panel → Auditar and downloads axe/map pro
   assert.equal(audit.schemaVersion, 2);
   assert.equal(audit.requestedScope.mode, 'single');
   assert.equal(audit.pages.length, 1);
+  assert.equal(audit.axe.status, 'complete', JSON.stringify({
+    diagnostics: audit.axe.diagnostics,
+    limitations: audit.axe.limitations,
+  }));
+  assert.deepEqual(audit.axe.diagnostics, []);
+  assert.deepEqual(audit.axe.limitations, []);
+  assert.equal(JSON.stringify(audit.axe).includes('AXE_RESULTS_TRUNCATED'), false);
   assert.equal(audit.axe.provenance.version, '4.13.0');
   assert.equal(audit.axe.provenance.config.preload, false);
   assert.equal(audit.axe.provenance.config.iframes, false);
