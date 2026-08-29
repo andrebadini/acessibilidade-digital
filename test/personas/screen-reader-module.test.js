@@ -5,6 +5,95 @@ import vm from 'node:vm';
 
 const namespaceExpression = 'globalThis[Symbol.for("audita.accessible-preview.runtime.v1")]';
 
+const trustedVoiceState = new WeakMap();
+const trustedSynthesisState = new WeakMap();
+const trustedUtteranceState = new WeakMap();
+
+function requireBrand(state, value, label) {
+  const record = state.get(value);
+  if (!record) throw new TypeError(`${label} inválido`);
+  return record;
+}
+
+class TrustedSpeechSynthesisVoice {
+  constructor(values = {}) { trustedVoiceState.set(this, { ...values }); }
+  get voiceURI() { return requireBrand(trustedVoiceState, this, 'voz').voiceURI; }
+  get name() { return requireBrand(trustedVoiceState, this, 'voz').name; }
+  get lang() { return requireBrand(trustedVoiceState, this, 'voz').lang; }
+  get localService() { return requireBrand(trustedVoiceState, this, 'voz').localService; }
+}
+
+class TrustedSpeechSynthesis {
+  constructor(options = {}) {
+    trustedSynthesisState.set(this, {
+      voices: options.voices ?? [], events: options.events ?? [], speakThrows: options.speakThrows === true,
+      cancelEndsSynchronously: options.cancelEndsSynchronously === true,
+      speaking: false, pending: false, paused: false, cancelCalls: 0, pauseCalls: 0, resumeCalls: 0,
+      current: null,
+    });
+  }
+  get speaking() { return requireBrand(trustedSynthesisState, this, 'síntese').speaking; }
+  get pending() { return requireBrand(trustedSynthesisState, this, 'síntese').pending; }
+  get paused() { return requireBrand(trustedSynthesisState, this, 'síntese').paused; }
+  get voices() { return requireBrand(trustedSynthesisState, this, 'síntese').voices; }
+  set voices(value) { requireBrand(trustedSynthesisState, this, 'síntese').voices = value; }
+  get cancelCalls() { return requireBrand(trustedSynthesisState, this, 'síntese').cancelCalls; }
+  get pauseCalls() { return requireBrand(trustedSynthesisState, this, 'síntese').pauseCalls; }
+  get resumeCalls() { return requireBrand(trustedSynthesisState, this, 'síntese').resumeCalls; }
+  get current() { return requireBrand(trustedSynthesisState, this, 'síntese').current; }
+  getVoices() { return requireBrand(trustedSynthesisState, this, 'síntese').voices; }
+  speak(utterance) {
+    const state = requireBrand(trustedSynthesisState, this, 'síntese');
+    state.events.push(`speak:${utterance.text}`);
+    if (state.speakThrows) throw new Error('speech unavailable');
+    state.speaking = true;
+    state.current = utterance;
+  }
+  cancel() {
+    const state = requireBrand(trustedSynthesisState, this, 'síntese');
+    state.events.push('cancel');
+    state.cancelCalls += 1;
+    state.speaking = false;
+    state.pending = false;
+    if (state.cancelEndsSynchronously) state.current?.onend?.();
+  }
+  pause() {
+    const state = requireBrand(trustedSynthesisState, this, 'síntese');
+    state.pauseCalls += 1;
+    state.paused = true;
+  }
+  resume() {
+    const state = requireBrand(trustedSynthesisState, this, 'síntese');
+    state.resumeCalls += 1;
+    state.paused = false;
+  }
+}
+
+class TrustedSpeechSynthesisUtterance {
+  constructor(text) {
+    trustedUtteranceState.set(this, {
+      text, voice: null, lang: '', rate: 1, onend: null, onerror: null, onVoiceAssignment: null,
+    });
+  }
+  get text() { return requireBrand(trustedUtteranceState, this, 'enunciado').text; }
+  get voice() { return requireBrand(trustedUtteranceState, this, 'enunciado').voice; }
+  set voice(value) {
+    const state = requireBrand(trustedUtteranceState, this, 'enunciado');
+    if (state.onVoiceAssignment?.(value) === false) return;
+    state.voice = value;
+  }
+  get lang() { return requireBrand(trustedUtteranceState, this, 'enunciado').lang; }
+  set lang(value) { requireBrand(trustedUtteranceState, this, 'enunciado').lang = value; }
+  get rate() { return requireBrand(trustedUtteranceState, this, 'enunciado').rate; }
+  set rate(value) { requireBrand(trustedUtteranceState, this, 'enunciado').rate = value; }
+  get onend() { return requireBrand(trustedUtteranceState, this, 'enunciado').onend; }
+  set onend(value) { requireBrand(trustedUtteranceState, this, 'enunciado').onend = value; }
+  get onerror() { return requireBrand(trustedUtteranceState, this, 'enunciado').onerror; }
+  set onerror(value) { requireBrand(trustedUtteranceState, this, 'enunciado').onerror = value; }
+}
+
+function trustedVoice(values) { return new TrustedSpeechSynthesisVoice(values); }
+
 async function loadReaderFactory(contextGlobals = {}) {
   const runtime = await readFile(new URL('../../src/core/accessibility/accessible-preview-runtime.classic.js', import.meta.url), 'utf8');
   let reader = '';
@@ -14,7 +103,12 @@ async function loadReaderFactory(contextGlobals = {}) {
     // Keep the first missing-feature result as an assertion failure.
   }
   assert.notEqual(reader, '', 'o módulo clássico dedicado de leitura precisa existir');
-  const context = vm.createContext({ ...contextGlobals });
+  const context = vm.createContext({
+    SpeechSynthesisVoice: TrustedSpeechSynthesisVoice,
+    SpeechSynthesis: TrustedSpeechSynthesis,
+    SpeechSynthesisUtterance: TrustedSpeechSynthesisUtterance,
+    ...contextGlobals,
+  });
   new vm.Script(runtime).runInContext(context);
   new vm.Script(reader).runInContext(context);
   return vm.runInContext(namespaceExpression, context);
@@ -32,39 +126,23 @@ function fixtureEnvironment(options = {}) {
     { element: { id: 'second' }, caption: 'Segundo, link' },
     { element: { id: 'third' }, caption: 'Terceiro, caixa de seleção' },
   ];
-  class Utterance {
-    constructor(text) {
-      this.text = text;
-      utterances.push(this);
-      events.push(`utterance:${text}`);
-      options.onUtterance?.(this, speech);
-    }
+  const speech = options.speechObject ?? (options.speech === null ? null : new TrustedSpeechSynthesis({
+    voices: options.voices ?? [trustedVoice({
+      voiceURI: 'voice-a', name: 'Voz A', lang: 'pt-BR', localService: true,
+    })],
+    events,
+    speakThrows: options.speakThrows,
+    cancelEndsSynchronously: options.cancelEndsSynchronously,
+  }));
+  function Utterance(text) {
+    const utterance = new TrustedSpeechSynthesisUtterance(text);
+    const state = requireBrand(trustedUtteranceState, utterance, 'enunciado');
+    state.onVoiceAssignment = value => options.onVoiceAssignment?.(utterance, speech, value);
+    utterances.push(utterance);
+    events.push(`utterance:${text}`);
+    options.onUtterance?.(utterance, speech);
+    return utterance;
   }
-  const speech = options.speechObject ?? (options.speech === null ? null : {
-    speaking: false,
-    pending: false,
-    paused: false,
-    cancelCalls: 0,
-    pauseCalls: 0,
-    resumeCalls: 0,
-    voices: options.voices ?? [{ voiceURI: 'voice-a', name: 'Voz A', lang: 'pt-BR', localService: true }],
-    getVoices() { return this.voices; },
-    speak(utterance) {
-      events.push(`speak:${utterance.text}`);
-      if (options.speakThrows) throw new Error('speech unavailable');
-      this.speaking = true;
-      this.current = utterance;
-    },
-    cancel() {
-      events.push('cancel');
-      this.cancelCalls += 1;
-      this.speaking = false;
-      this.pending = false;
-      if (options.cancelEndsSynchronously) this.current?.onend?.();
-    },
-    pause() { this.pauseCalls += 1; this.paused = true; },
-    resume() { this.resumeCalls += 1; this.paused = false; },
-  });
   const originalFocus = { id: 'original', connected: true };
   const environment = {
     collectCandidates() { events.push('collect'); return candidates; },
@@ -83,6 +161,7 @@ function fixtureEnvironment(options = {}) {
   };
   return {
     environment, speech, events, utterances, get candidates() { return candidates; },
+    setSpeechState(patch) { Object.assign(requireBrand(trustedSynthesisState, speech, 'síntese'), patch); },
     setCandidates(value) { candidates = value; },
     listenerState() { return { focus: Boolean(focusListener), voices: Boolean(voicesListener), focusUnsubscribes, voicesUnsubscribes }; },
     captureFocusListener() { return focusListener; },
@@ -140,14 +219,14 @@ test('pause/resume owns only its utterance and external focus while paused stays
 test('never cancels foreign speech and ignores stale synchronous callbacks from owned speech', async () => {
   const namespace = await loadReaderFactory();
   const fixture = fixtureEnvironment({ cancelEndsSynchronously: true });
-  fixture.speech.speaking = true;
+  fixture.setSpeechState({ speaking: true });
   const reader = namespace.createScreenReaderModule(fixture.environment);
   reader.start({ voiceId: 'voice-a', rate: 1 });
   assert.equal(fixture.utterances.length, 0);
   assert.equal(fixture.speech.cancelCalls, 0);
   assert.equal(reader.getState().speechAvailability, 'busy');
 
-  fixture.speech.speaking = false;
+  fixture.setSpeechState({ speaking: false });
   reader.repeat();
   assert.equal(fixture.utterances.length, 1);
   const stale = fixture.utterances[0];
@@ -174,7 +253,7 @@ test('keeps caption/navigation when synthesis is missing, throws, or loses a pre
   const fixture = fixtureEnvironment({ voices: [] });
   const reader = namespace.createScreenReaderModule(fixture.environment);
   reader.start({ voiceId: 'voice-a', rate: 1 });
-  fixture.speech.voices = [{ voiceURI: 'voice-b', name: 'Voz B', lang: 'pt-BR', localService: true }];
+  fixture.speech.voices = [trustedVoice({ voiceURI: 'voice-b', name: 'Voz B', lang: 'pt-BR', localService: true })];
   fixture.voicesChanged();
   assert.equal(reader.getState().voiceId, '');
   assert.equal(reader.getState().caption, 'Primeiro, botão');
@@ -233,15 +312,15 @@ test('never speaks an implicit default, remote voice or voice without explicit l
   const scenarios = [
     {
       preference: '',
-      voices: [{ voiceURI: 'local-default', name: 'Local padrão', lang: 'pt-BR', localService: true, default: true }],
+      voices: [trustedVoice({ voiceURI: 'local-default', name: 'Local padrão', lang: 'pt-BR', localService: true })],
     },
     {
       preference: 'remote-default',
-      voices: [{ voiceURI: 'remote-default', name: 'Remota', lang: 'pt-BR', localService: false, default: true }],
+      voices: [trustedVoice({ voiceURI: 'remote-default', name: 'Remota', lang: 'pt-BR', localService: false })],
     },
     {
       preference: 'unknown-service',
-      voices: [{ voiceURI: 'unknown-service', name: 'Sem origem', lang: 'pt-BR' }],
+      voices: [trustedVoice({ voiceURI: 'unknown-service', name: 'Sem origem', lang: 'pt-BR' })],
     },
     { preference: 'missing', voices: [] },
   ];
@@ -259,9 +338,9 @@ test('never speaks an implicit default, remote voice or voice without explicit l
   }
 });
 
-test('uses only the explicitly selected descriptor-safe local voice', async () => {
+test('uses only the explicitly selected trusted local voice', async () => {
   const namespace = await loadReaderFactory();
-  const local = { voiceURI: 'local-a', name: 'Voz local', lang: 'pt-BR', localService: true };
+  const local = trustedVoice({ voiceURI: 'local-a', name: 'Voz local', lang: 'pt-BR', localService: true });
   const fixture = fixtureEnvironment({ voices: [local] });
   const reader = namespace.createScreenReaderModule(fixture.environment);
 
@@ -302,6 +381,40 @@ test('supports the trusted SpeechSynthesisVoice prototype without accepting arbi
 
   assert.equal(synthesis.spoken.length, 1);
   assert.equal(synthesis.spoken[0].voice, local);
+});
+
+test('rejects an ordinary synthesis before traversing proxy-controlled voice lists or speaking', async () => {
+  const namespace = await loadReaderFactory();
+  let listTraps = 0;
+  let voiceTraps = 0;
+  let spoken = 0;
+  const voice = new Proxy({
+    voiceURI: 'proxy-local', name: 'Voz proxy', lang: 'pt-BR', localService: true,
+  }, {
+    ownKeys(target) { voiceTraps += 1; return Reflect.ownKeys(target); },
+    getOwnPropertyDescriptor(target, key) { voiceTraps += 1; return Reflect.getOwnPropertyDescriptor(target, key); },
+  });
+  const voices = new Proxy([voice], {
+    ownKeys(target) { listTraps += 1; return Reflect.ownKeys(target); },
+    getOwnPropertyDescriptor(target, key) { listTraps += 1; return Reflect.getOwnPropertyDescriptor(target, key); },
+  });
+  const synthesis = {
+    speaking: false, pending: false, paused: false,
+    getVoices() { return voices; },
+    speak() { spoken += 1; },
+    cancel() {}, pause() {}, resume() {},
+  };
+  const fixture = fixtureEnvironment({ speechObject: synthesis });
+  const reader = namespace.createScreenReaderModule(fixture.environment);
+
+  const started = reader.start({ voiceId: 'proxy-local', rate: 1 });
+
+  assert.equal(spoken, 0);
+  assert.equal(listTraps, 0);
+  assert.equal(voiceTraps, 0);
+  assert.equal(started.caption, 'Primeiro, botão');
+  assert.equal(reader.next().index, 1, 'o fallback visual continua navegável');
+  assert.match(reader.getState().speechAvailability, /unavailable|error/iu);
 });
 
 test('does not execute voice, array-slot or getVoices accessors and never echoes their data', async () => {
@@ -388,7 +501,7 @@ test('does not execute synthesis state or speak accessors before deciding whethe
 
 test('revalidates a selected local voice immediately before speak and on voiceschanged', async () => {
   const namespace = await loadReaderFactory();
-  const local = { voiceURI: 'local-a', name: 'Voz local', lang: 'pt-BR', localService: true };
+  const local = trustedVoice({ voiceURI: 'local-a', name: 'Voz local', lang: 'pt-BR', localService: true });
   const removedDuringConstruction = fixtureEnvironment({
     voices: [local],
     onUtterance(_utterance, speech) { speech.voices = []; },
@@ -404,7 +517,7 @@ test('revalidates a selected local voice immediately before speak and on voicesc
   repeatReader.start({ voiceId: 'local-a', rate: 1 });
   assert.equal(repeatFixture.events.filter(value => value.startsWith('speak:')).length, 1);
   repeatFixture.speech.voices = [];
-  repeatFixture.speech.speaking = false;
+  repeatFixture.setSpeechState({ speaking: false });
   repeatReader.repeat();
   assert.equal(repeatFixture.events.filter(value => value.startsWith('speak:')).length, 1);
   assert.equal(repeatReader.getState().voiceId, '');
@@ -418,4 +531,29 @@ test('revalidates a selected local voice immediately before speak and on voicesc
   assert.equal(changedFixture.speech.cancelCalls, 1);
   assert.equal(changedReader.getState().voiceId, '');
   assert.equal(changedReader.getState().speechAvailability, 'unavailable');
+});
+
+test('never falls back to a default when assignment removes or does not retain the selected voice', async () => {
+  const namespace = await loadReaderFactory();
+  const removed = fixtureEnvironment({
+    onVoiceAssignment(_utterance, synthesis) { synthesis.voices = []; },
+  });
+  const removedReader = namespace.createScreenReaderModule(removed.environment);
+
+  removedReader.start({ voiceId: 'voice-a', rate: 1 });
+
+  assert.equal(removed.events.some(value => value.startsWith('speak:')), false);
+  assert.equal(removedReader.getState().voiceId, '');
+  assert.equal(removedReader.getState().speechAvailability, 'unavailable');
+  assert.equal(removedReader.getState().caption, 'Primeiro, botão');
+  assert.equal(removedReader.next().index, 1);
+
+  const ignored = fixtureEnvironment({ onVoiceAssignment() { return false; } });
+  const ignoredReader = namespace.createScreenReaderModule(ignored.environment);
+  ignoredReader.start({ voiceId: 'voice-a', rate: 1 });
+
+  assert.equal(ignored.events.some(value => value.startsWith('speak:')), false);
+  assert.equal(ignoredReader.getState().caption, 'Primeiro, botão');
+  assert.equal(ignoredReader.next().index, 1);
+  assert.match(ignoredReader.getState().speechAvailability, /unavailable|error/iu);
 });

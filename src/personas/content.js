@@ -9,6 +9,62 @@
     throw new Error('Runtime de prévia acessível ausente ou incompatível.');
   }
 
+  function ownDataProperty(holder, key) {
+    try {
+      var descriptor = Object.getOwnPropertyDescriptor(holder, key);
+      if (!descriptor) return { present: false, value: null };
+      return Object.hasOwn(descriptor, 'value')
+        ? { present: true, value: descriptor.value }
+        : { present: true, value: null };
+    } catch (_error) { return { present: true, value: null }; }
+  }
+
+  function safePlatformProperty(holder, key) {
+    if (!holder || (typeof holder !== 'object' && typeof holder !== 'function')) return null;
+    try {
+      var own = Object.getOwnPropertyDescriptor(holder, key);
+      if (own) return Object.hasOwn(own, 'value') ? own.value : null;
+      var current = Object.getPrototypeOf(holder);
+      for (var depth = 0; current && depth < 6; depth += 1) {
+        var descriptor = Object.getOwnPropertyDescriptor(current, key);
+        if (descriptor) {
+          if (Object.hasOwn(descriptor, 'value')) return descriptor.value;
+          if (typeof descriptor.get !== 'function' || descriptor.set !== undefined) return null;
+          return descriptor.get.call(holder);
+        }
+        current = Object.getPrototypeOf(current);
+      }
+    } catch (_error) { return null; }
+    return null;
+  }
+
+  function trustedPlatformPrototype(name) {
+    var Constructor = safePlatformProperty(root, name);
+    if (typeof Constructor !== 'function') return null;
+    try {
+      var descriptor = Object.getOwnPropertyDescriptor(Constructor, 'prototype');
+      return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : null;
+    } catch (_error) { return null; }
+  }
+
+  function trustedPlatformMethod(value, prototype, key) {
+    if (!value || !prototype || typeof value !== 'object') return null;
+    try {
+      if (Object.getPrototypeOf(value) !== prototype || Object.getOwnPropertyDescriptor(value, key)) return null;
+      var current = prototype;
+      for (var depth = 0; current && depth < 5; depth += 1) {
+        var descriptor = Object.getOwnPropertyDescriptor(current, key);
+        if (descriptor) {
+          return Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'function'
+            ? descriptor.value
+            : null;
+        }
+        current = Object.getPrototypeOf(current);
+      }
+    } catch (_error) { return null; }
+    return null;
+  }
+
   namespace.registerContentFactory(function createContentRuntime(environment) {
     if (!environment || typeof environment !== 'object' || !environment.document) {
       throw new TypeError('Ambiente de conteúdo da persona inválido.');
@@ -16,10 +72,15 @@
     var document = environment.document;
     var windowObject = environment.window || document.defaultView || root;
     var previewRuntime = namespace.createRuntime();
-    var speechSynthesis = environment.speechSynthesis === null
-      ? null
-      : (environment.speechSynthesis || windowObject.speechSynthesis || null);
-    var Utterance = environment.Utterance || windowObject.SpeechSynthesisUtterance || root.SpeechSynthesisUtterance;
+    var environmentSpeech = ownDataProperty(environment, 'speechSynthesis');
+    var environmentUtterance = ownDataProperty(environment, 'Utterance');
+    var speechSynthesis = environmentSpeech.present
+      ? (environmentSpeech.value || null)
+      : (safePlatformProperty(windowObject, 'speechSynthesis') || null);
+    var Utterance = environmentUtterance.present
+      ? environmentUtterance.value
+      : safePlatformProperty(windowObject, 'SpeechSynthesisUtterance');
+    var speechSynthesisPrototype = trustedPlatformPrototype('SpeechSynthesis');
     var now = typeof environment.now === 'function' ? environment.now : Date.now;
     var emitEvent = typeof environment.emitEvent === 'function' ? environment.emitEvent : function noop() {};
     var MutationObserverConstructor = environment.MutationObserver || windowObject.MutationObserver || root.MutationObserver;
@@ -631,9 +692,14 @@
           return function removeFocus() { document.removeEventListener('focusin', handler, true); };
         },
         onVoicesChanged: function onVoicesChanged(listener) {
-          if (!speechSynthesis?.addEventListener) return function noop() {};
-          speechSynthesis.addEventListener('voiceschanged', listener);
-          return function removeVoices() { speechSynthesis.removeEventListener?.('voiceschanged', listener); };
+          var add = trustedPlatformMethod(speechSynthesis, speechSynthesisPrototype, 'addEventListener');
+          var remove = trustedPlatformMethod(speechSynthesis, speechSynthesisPrototype, 'removeEventListener');
+          if (!add || !remove) return function noop() {};
+          try { add.call(speechSynthesis, 'voiceschanged', listener); }
+          catch (_error) { return function noop() {}; }
+          return function removeVoices() {
+            try { remove.call(speechSynthesis, 'voiceschanged', listener); } catch (_error) { /* detached platform */ }
+          };
         },
         speechSynthesis: speechSynthesis,
         Utterance: Utterance
@@ -1190,8 +1256,8 @@
       var singleton = namespace.createContentRuntime({
         document: root.document,
         window: root,
-        speechSynthesis: root.speechSynthesis || null,
-        Utterance: root.SpeechSynthesisUtterance
+        speechSynthesis: safePlatformProperty(root, 'speechSynthesis') || null,
+        Utterance: safePlatformProperty(root, 'SpeechSynthesisUtterance')
       });
       namespace.setContentSingleton(singleton);
       singleton.installMessaging(root.chrome);

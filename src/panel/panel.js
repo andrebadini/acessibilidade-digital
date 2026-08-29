@@ -52,7 +52,7 @@ let personaPort = null;
 let personaRequestSequence = 0;
 let personaLocalVoiceIds = new Set();
 let personaVoiceInventoryStatus = 'unavailable';
-let personaVoiceClearPending = '';
+let personaVoiceClear = { voiceId: '', attempts: 0, requestId: null };
 let contextPrefill = null;
 let currentPanelTabIdPromise = null;
 const seenContextPrefills = new Set();
@@ -432,6 +432,7 @@ function nextPersonaRequestId(prefix = 'panel') {
 }
 
 function connectPersonas() {
+  personaVoiceClear = { voiceId: '', attempts: 0, requestId: null };
   personaState = createInitialPersonaState();
   renderPersonas();
   try {
@@ -439,7 +440,13 @@ function connectPersonas() {
     personaPort = port;
     port.onMessage.addListener(message => {
       if (personaPort !== port) return;
-      personaState = reducePersonaState(personaState, message);
+      const previous = personaState;
+      const reduced = reducePersonaState(previous, message);
+      if (reduced !== previous && personaVoiceClear.requestId &&
+        previous.pending?.requestId === personaVoiceClear.requestId && reduced.pending === null) {
+        personaVoiceClear = { ...personaVoiceClear, requestId: null };
+      }
+      personaState = reduced;
       renderPersonas();
     });
     port.onDisconnect.addListener(() => {
@@ -467,6 +474,7 @@ function connectPersonas() {
 }
 
 function reconnectPersonas() {
+  personaVoiceClear = { voiceId: '', attempts: 0, requestId: null };
   if (!personaPort) {
     connectPersonas();
     return;
@@ -482,9 +490,9 @@ function reconnectPersonas() {
 }
 
 function sendPersonaCommand(command, args = {}) {
-  if (!personaPort) return;
+  if (!personaPort) return null;
   const queued = queuePersonaCommand(personaState, nextPersonaRequestId(command), command, args);
-  if (!queued) return;
+  if (!queued) return null;
   personaState = queued.state;
   renderPersonas();
   try { personaPort.postMessage(queued.message); }
@@ -495,6 +503,7 @@ function sendPersonaCommand(command, args = {}) {
     };
     renderPersonas();
   }
+  return queued.message.requestId;
 }
 
 function renderPersonas() {
@@ -559,13 +568,17 @@ function syncPersonaPreferences() {
   personaRate.value = String(safeRate);
   personaRateOutput.value = `${safeRate.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}×`;
   if (!storedVoiceId || voiceId) {
-    personaVoiceClearPending = '';
+    personaVoiceClear = { voiceId: '', attempts: 0, requestId: null };
     return;
   }
+  if (personaVoiceClear.voiceId !== storedVoiceId) {
+    personaVoiceClear = { voiceId: storedVoiceId, attempts: 0, requestId: null };
+  }
   const ready = personaState.connection === 'ready' && personaState.bound && Boolean(personaState.token);
-  if (!ready || personaState.pending || personaVoiceClearPending === storedVoiceId) return;
-  personaVoiceClearPending = storedVoiceId;
-  sendPersonaCommand('preferences', { voiceId: '', rate: safeRate });
+  if (!ready || personaState.pending || personaVoiceClear.requestId || personaVoiceClear.attempts >= 2) return;
+  personaVoiceClear = { ...personaVoiceClear, attempts: personaVoiceClear.attempts + 1 };
+  const requestId = sendPersonaCommand('preferences', { voiceId: '', rate: safeRate });
+  personaVoiceClear = { ...personaVoiceClear, requestId };
 }
 
 function renderPersonaLimitations() {

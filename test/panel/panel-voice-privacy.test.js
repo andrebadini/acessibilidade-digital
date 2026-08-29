@@ -54,6 +54,13 @@ function personaState(requestId, voiceId) {
   };
 }
 
+function personaError(requestId) {
+  return {
+    protocol: 'audita-persona-panel', version: 1, type: 'error', requestId,
+    ok: false, bound: true, code: 'PERSONA_COMMAND_FAILED', message: 'Falha transitória ao limpar a preferência.',
+  };
+}
+
 test('panel lists only descriptor-safe local voices and clears a persisted remote selection', async t => {
   const original = {
     document: globalThis.document,
@@ -138,10 +145,19 @@ test('panel lists only descriptor-safe local voices and clears a persisted remot
   const hello = posted.find(message => message.type === 'hello');
   assert.ok(hello);
   panelMessage(personaState(hello.requestId, 'remote-default'));
-  const clear = posted.find(message => message.type === 'command' && message.command === 'preferences');
-  assert.equal(clear?.args?.voiceId, '');
+  const firstClear = posted.find(message => message.type === 'command' && message.command === 'preferences');
+  assert.equal(firstClear?.args?.voiceId, '');
   assert.equal(voiceSelect.value, '');
-  const clearedState = personaState(clear.requestId, '');
+  panelMessage(personaError(firstClear.requestId));
+  let clears = posted.filter(message => message.type === 'command' && message.command === 'preferences');
+  assert.equal(clears.length, 2, 'uma falha correlacionada permite uma única nova tentativa automática');
+  assert.equal(clears[1].args.voiceId, '');
+  panelMessage(personaError(clears[1].requestId));
+  panelMessage(personaState('event-after-clear-retries', 'remote-default'));
+  clears = posted.filter(message => message.type === 'command' && message.command === 'preferences');
+  assert.equal(clears.length, 2, 'a limpeza automática é limitada e não entra em ciclo');
+
+  const clearedState = personaState('event-cleared-preference', '');
   clearedState.activeMode = 'reader';
   clearedState.reader.playback = 'playing';
   clearedState.reader.speechAvailability = 'available';

@@ -130,7 +130,7 @@ class FakeDocument {
   dispatchWindow(type, event = {}) { for (const listener of [...(this.windowListeners.get(type) ?? [])]) listener(event); }
 }
 
-async function loadContentFactory() {
+async function loadContentFactory(contextGlobals = {}) {
   const runtime = await readFile(new URL('../../src/core/accessibility/accessible-preview-runtime.classic.js', import.meta.url), 'utf8');
   const reader = await readFile(new URL('../../src/personas/screen-reader-module.js', import.meta.url), 'utf8');
   let content = '';
@@ -139,6 +139,7 @@ async function loadContentFactory() {
   structuredCloneCalls = 0;
   const context = vm.createContext({
     structuredClone() { structuredCloneCalls += 1; throw new Error('structuredClone não deve tocar a mensagem'); },
+    ...contextGlobals,
   });
   for (const source of [runtime, reader, content]) new vm.Script(source).runInContext(context);
   return vm.runInContext(namespaceExpression, context);
@@ -804,6 +805,71 @@ test('reader with an empty queue can explicitly recollect and start after safe D
   assert.equal(restarted.reader.caption, 'Botão adicionado, botão');
   content.stop('done');
   assert.equal(document.body.children.filter(node => node.hasAttribute('data-audita-persona-owned')).length, 0);
+});
+
+test('hostile speech bootstrap is never evaluated and visual reader fallback remains usable', async () => {
+  const namespace = await loadContentFactory();
+  const fixture = fixturePage();
+  let speechReads = 0;
+  let utteranceReads = 0;
+  const environment = {
+    document: fixture.document,
+    window: fixture.document.defaultView,
+    emitEvent() {},
+  };
+  Object.defineProperty(environment, 'speechSynthesis', {
+    enumerable: true,
+    get() { speechReads += 1; throw new Error('PRIVATE_SPEECH_BOOTSTRAP'); },
+  });
+  Object.defineProperty(environment, 'Utterance', {
+    enumerable: true,
+    get() { utteranceReads += 1; throw new Error('PRIVATE_UTTERANCE_BOOTSTRAP'); },
+  });
+
+  let content;
+  assert.doesNotThrow(() => { content = namespace.createContentRuntime(environment); });
+  const active = content.activate('reader', { voiceId: '', rate: 1 });
+
+  assert.equal(speechReads, 0);
+  assert.equal(utteranceReads, 0);
+  assert.equal(active.activeMode, 'reader');
+  assert.equal(active.reader.playback, 'playing');
+  assert.equal(active.reader.caption, 'Positivo um, botão');
+  assert.equal(active.reader.speechAvailability, 'unavailable');
+  assert.equal(fixture.document.body.children.filter(node => node.hasAttribute('data-audita-persona-owned')).length, 2);
+  assert.equal(content.readerAction('next').reader.index, 1);
+});
+
+test('voice inventory changes use the trusted inherited EventTarget listener', async () => {
+  const listeners = new Map();
+  class FakeEventTarget {
+    addEventListener(type, listener) { listeners.set(type, listener); }
+    removeEventListener(type, listener) { if (listeners.get(type) === listener) listeners.delete(type); }
+  }
+  class SpeechSynthesis extends FakeEventTarget {
+    getVoices() { return []; }
+    speak() {}
+    cancel() {}
+    pause() {}
+    resume() {}
+    get speaking() { return false; }
+    get pending() { return false; }
+    get paused() { return false; }
+  }
+  const namespace = await loadContentFactory({ SpeechSynthesis });
+  const fixture = fixturePage();
+  const synthesis = new SpeechSynthesis();
+  const content = namespace.createContentRuntime({
+    document: fixture.document,
+    window: fixture.document.defaultView,
+    emitEvent() {},
+    speechSynthesis: synthesis,
+  });
+
+  content.activate('reader', { voiceId: '', rate: 1 });
+  assert.equal(typeof listeners.get('voiceschanged'), 'function');
+  content.stop('done');
+  assert.equal(listeners.has('voiceschanged'), false);
 });
 
 function event(init) {

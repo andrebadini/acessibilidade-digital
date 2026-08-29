@@ -31,29 +31,32 @@
     var suppressFocusElement = null;
     var sessionActive = false;
     var lifecycleGeneration = 0;
-    var nativeVoicePrototype = trustedNativeVoicePrototype();
-    var nativeSynthesisPrototype = trustedNativeSynthesisPrototype();
+    var nativeVoicePrototype = trustedNativePrototype('SpeechSynthesisVoice');
+    var nativeSynthesisPrototype = trustedNativePrototype('SpeechSynthesis');
+    var nativeUtterancePrototype = trustedNativePrototype('SpeechSynthesisUtterance');
+    var speechSynthesis = ownDataValue(environment, 'speechSynthesis');
+    var Utterance = ownDataValue(environment, 'Utterance');
 
-    function trustedNativeVoicePrototype() {
+    function ownDataValue(holder, key) {
       try {
-        var constructorDescriptor = Object.getOwnPropertyDescriptor(root, 'SpeechSynthesisVoice');
-        var Constructor = constructorDescriptor && Object.hasOwn(constructorDescriptor, 'value')
-          ? constructorDescriptor.value
-          : null;
-        if (typeof Constructor !== 'function') return null;
-        var prototypeDescriptor = Object.getOwnPropertyDescriptor(Constructor, 'prototype');
-        return prototypeDescriptor && Object.hasOwn(prototypeDescriptor, 'value')
-          ? prototypeDescriptor.value
-          : null;
+        var descriptor = Object.getOwnPropertyDescriptor(holder, key);
+        return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : null;
       } catch (_error) { return null; }
     }
 
-    function trustedNativeSynthesisPrototype() {
+    function trustedNativePrototype(name) {
       try {
-        var constructorDescriptor = Object.getOwnPropertyDescriptor(root, 'SpeechSynthesis');
-        var Constructor = constructorDescriptor && Object.hasOwn(constructorDescriptor, 'value')
-          ? constructorDescriptor.value
-          : null;
+        var current = root;
+        var Constructor = null;
+        for (var depth = 0; current && depth < 6; depth += 1) {
+          var constructorDescriptor = Object.getOwnPropertyDescriptor(current, name);
+          if (constructorDescriptor) {
+            if (!Object.hasOwn(constructorDescriptor, 'value')) return null;
+            Constructor = constructorDescriptor.value;
+            break;
+          }
+          current = Object.getPrototypeOf(current);
+        }
         if (typeof Constructor !== 'function') return null;
         var prototypeDescriptor = Object.getOwnPropertyDescriptor(Constructor, 'prototype');
         return prototypeDescriptor && Object.hasOwn(prototypeDescriptor, 'value')
@@ -115,34 +118,24 @@
       return snapshot;
     }
 
-    function dataMethod(value, key) {
-      if (!value || (typeof value !== 'object' && typeof value !== 'function')) return null;
+    function nativeMethod(value, prototype, key) {
+      if (!value || !prototype || typeof value !== 'object') return null;
       try {
-        var current = value;
-        for (var depth = 0; current && depth < 4; depth += 1) {
-          var descriptor = Object.getOwnPropertyDescriptor(current, key);
-          if (descriptor) {
-            return Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'function'
-              ? descriptor.value
-              : null;
-          }
-          current = Object.getPrototypeOf(current);
-        }
+        if (Object.getPrototypeOf(value) !== prototype) return null;
+        if (Object.getOwnPropertyDescriptor(value, key)) return null;
+        var descriptor = Object.getOwnPropertyDescriptor(prototype, key);
+        return descriptor && Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'function'
+          ? descriptor.value
+          : null;
       } catch (_error) { return null; }
-      return null;
     }
 
     function synthesisBoolean(synthesis, key) {
       try {
-        var own = Object.getOwnPropertyDescriptor(synthesis, key);
-        if (own) {
-          return Object.hasOwn(own, 'value') && typeof own.value === 'boolean'
-            ? { ok: true, value: own.value }
-            : { ok: false, value: false };
-        }
         if (!nativeSynthesisPrototype || Object.getPrototypeOf(synthesis) !== nativeSynthesisPrototype) {
           return { ok: false, value: false };
         }
+        if (Object.getOwnPropertyDescriptor(synthesis, key)) return { ok: false, value: false };
         var descriptor = Object.getOwnPropertyDescriptor(nativeSynthesisPrototype, key);
         if (!descriptor || typeof descriptor.get !== 'function' || descriptor.set !== undefined) {
           return { ok: false, value: false };
@@ -178,17 +171,11 @@
       } catch (_error) { return null; }
     }
 
-    function ownVoiceValue(descriptors, key) {
-      var descriptor = descriptors[key];
-      if (!descriptor) return { present: false, value: undefined };
-      if (!Object.hasOwn(descriptor, 'value')) return null;
-      return { present: true, value: descriptor.value };
-    }
-
     function nativeVoiceValue(voice, key) {
       if (!nativeVoicePrototype) return null;
       try {
         if (Object.getPrototypeOf(voice) !== nativeVoicePrototype) return null;
+        if (Object.getOwnPropertyDescriptor(voice, key)) return null;
         var descriptor = Object.getOwnPropertyDescriptor(nativeVoicePrototype, key);
         if (!descriptor || typeof descriptor.get !== 'function' || descriptor.set !== undefined) return null;
         return { present: true, value: descriptor.get.call(voice) };
@@ -197,20 +184,10 @@
 
     function projectVoice(voice) {
       if (!voice || typeof voice !== 'object') return null;
-      var descriptors;
       try {
-        descriptors = Object.getOwnPropertyDescriptors(voice);
+        if (!nativeVoicePrototype || Object.getPrototypeOf(voice) !== nativeVoicePrototype) return { local: false };
       } catch (_error) { return null; }
-      var ownLocal = ownVoiceValue(descriptors, 'localService');
-      if (!ownLocal) return null;
-      var read;
-      if (ownLocal.present) read = function readOwn(key) { return ownVoiceValue(descriptors, key); };
-      else {
-        try {
-          if (!nativeVoicePrototype || Object.getPrototypeOf(voice) !== nativeVoicePrototype) return { local: false };
-        } catch (_error) { return null; }
-        read = function readNative(key) { return nativeVoiceValue(voice, key); };
-      }
+      var read = function readNative(key) { return nativeVoiceValue(voice, key); };
       var local = read('localService');
       if (!local) return null;
       if (!local.present || local.value !== true) return { local: false };
@@ -226,9 +203,9 @@
     }
 
     function localVoiceInventory() {
-      var synthesis = environment.speechSynthesis;
+      var synthesis = speechSynthesis;
       if (!synthesis) return { status: 'unavailable', voices: [] };
-      var getVoices = dataMethod(synthesis, 'getVoices');
+      var getVoices = nativeMethod(synthesis, nativeSynthesisPrototype, 'getVoices');
       if (!getVoices) return { status: 'error', voices: [] };
       try {
         var entries = denseVoiceEntries(getVoices.call(synthesis));
@@ -266,12 +243,12 @@
     }
 
     function invalidateOwnedSpeech(cancelOwned) {
-      var synthesis = environment.speechSynthesis;
+      var synthesis = speechSynthesis;
       var owned = ownUtterance;
       speechGeneration += 1;
       ownUtterance = null;
       if (!cancelOwned || !owned || !synthesis) return;
-      var cancel = dataMethod(synthesis, 'cancel');
+      var cancel = nativeMethod(synthesis, nativeSynthesisPrototype, 'cancel');
       if (!cancel) { speechAvailability = 'error'; return; }
       try { cancel.call(synthesis); } catch (_error) { speechAvailability = 'error'; }
     }
@@ -279,8 +256,7 @@
     function speakCurrent() {
       var current = queue[index];
       if (!current || playback !== 'playing') return state();
-      var synthesis = environment.speechSynthesis;
-      var Utterance = environment.Utterance;
+      var synthesis = speechSynthesis;
       if (!synthesis || typeof Utterance !== 'function') {
         speechAvailability = 'unavailable';
         return publish(current);
@@ -290,7 +266,7 @@
         if (ownUtterance) invalidateOwnedSpeech(true);
         return publish(current);
       }
-      var speak = dataMethod(synthesis, 'speak');
+      var speak = nativeMethod(synthesis, nativeSynthesisPrototype, 'speak');
       if (!speak) {
         speechAvailability = 'error';
         return publish(current);
@@ -328,6 +304,12 @@
           speechAvailability = 'error';
           publish(queue[index]);
         };
+        var confirmedVoice = selectedVoice();
+        if (!confirmedVoice || confirmedVoice !== voice || assignedUtteranceVoice(utterance) !== confirmedVoice) {
+          ownUtterance = null;
+          if (confirmedVoice) speechAvailability = 'error';
+          return publish(current);
+        }
         ownUtterance = utterance;
         speechAvailability = 'available';
         speak.call(synthesis, utterance);
@@ -337,6 +319,17 @@
         return publish(current);
       }
       return state();
+    }
+
+    function assignedUtteranceVoice(utterance) {
+      if (!nativeUtterancePrototype) return null;
+      try {
+        if (Object.getPrototypeOf(utterance) !== nativeUtterancePrototype) return null;
+        if (Object.getOwnPropertyDescriptor(utterance, 'voice')) return null;
+        var descriptor = Object.getOwnPropertyDescriptor(nativeUtterancePrototype, 'voice');
+        if (!descriptor || typeof descriptor.get !== 'function') return null;
+        return descriptor.get.call(utterance);
+      } catch (_error) { return null; }
     }
 
     function show(position, options) {
@@ -424,8 +417,8 @@
     function pause() {
       if (playback !== 'playing') return state();
       playback = 'paused';
-      var synthesis = environment.speechSynthesis;
-      var pauseSpeech = dataMethod(synthesis, 'pause');
+      var synthesis = speechSynthesis;
+      var pauseSpeech = nativeMethod(synthesis, nativeSynthesisPrototype, 'pause');
       if (ownUtterance && synthesis && pauseSpeech) {
         try { pauseSpeech.call(synthesis); } catch (_error) { speechAvailability = 'error'; }
       }
@@ -435,9 +428,9 @@
     function resume() {
       if (playback !== 'paused') return state();
       playback = 'playing';
-      var synthesis = environment.speechSynthesis;
+      var synthesis = speechSynthesis;
       var paused = synthesis ? synthesisBoolean(synthesis, 'paused') : null;
-      var resumeSpeech = dataMethod(synthesis, 'resume');
+      var resumeSpeech = nativeMethod(synthesis, nativeSynthesisPrototype, 'resume');
       if (ownUtterance && synthesis && paused?.ok && paused.value && resumeSpeech) {
         try { resumeSpeech.call(synthesis); } catch (_error) { speechAvailability = 'error'; }
         return publish(queue[index]);
