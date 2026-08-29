@@ -916,6 +916,47 @@ test('invalid dimensions and a non-reduce motion run remain cantTell', () => {
   assert.equal(normalizeProbes({ motion: { complete: true, prefersReducedMotion: false, preference: 'reduce', animatedCount: 0, reducedAnimatedCount: 0 } }).motion.outcome, 'cantTell');
 });
 
+test('merge treats untrusted probe objects as raw input without reading accessors or revoked proxies', () => {
+  const marker = 'PRIVATE_MERGE_PROBE_ACCESSOR';
+  let getterReads = 0;
+  const hostile = {};
+  Object.defineProperty(hostile, 'focusOrder', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      throw new Error(marker);
+    },
+  });
+  const snapshot = {
+    schemaVersion: 1,
+    document: { nodeId: 'document', title: 'Fixture' },
+    nodes: [],
+  };
+
+  let merged;
+  let mergeError;
+  try {
+    merged = mergeProbesIntoSnapshot(snapshot, hostile);
+  } catch (error) {
+    mergeError = error;
+  }
+
+  assert.equal(getterReads, 0);
+  assert.ifError(mergeError);
+  assert.equal(merged.document.probeCoverage.focusOrder, 'cantTell');
+  assert.equal(merged.document.probeCoverage.targetSizes, 'cantTell');
+  assert.doesNotMatch(JSON.stringify(merged), new RegExp(marker));
+
+  const revoked = Proxy.revocable({}, {});
+  revoked.revoke();
+  assert.doesNotThrow(() => {
+    const unavailable = mergeProbesIntoSnapshot(snapshot, revoked.proxy);
+    assert.equal(unavailable.document.probeCoverage.focusAppearance, 'cantTell');
+    assert.equal(unavailable.document.probeCoverage.targetSizes, 'cantTell');
+  });
+});
+
 test('merges probe observations into a fresh serializable SnapshotV1 consumed by core rules', async () => {
   const snapshot = {
     schemaVersion: 1,

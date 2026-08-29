@@ -1,30 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
+import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { commitReviewDecision, createReviewDecisionCommitter, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId, recordReviewDecision } from '../../src/review/review-state.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 
-function reviewModel({ withSecondOccurrence = false } = {}) {
-  const evidence = Object.freeze({ artifacts: Object.freeze([]) });
-  const occurrences = [
-    Object.freeze({ occurrenceId: 'occ-1', itemId: '5.1.1', ruleId: 'r', outcome: 'cantTell', evidenceIds: Object.freeze([]) }),
-    ...(withSecondOccurrence ? [Object.freeze({ occurrenceId: 'occ-2', itemId: '5.1.1', ruleId: 'r', outcome: 'cantTell', evidenceIds: Object.freeze([]) })] : []),
-  ];
-  const manualReview = occurrences.map(occurrence => Object.freeze({ occurrenceId: occurrence.occurrenceId, itemId: '5.1.1', status: 'unanswered' }));
-  return Object.freeze({
-    auditId: 'audit-1', evidence, reproducibility: Object.freeze({ evidenceHash: 'same' }),
-    ruleResults: Object.freeze([Object.freeze({ ruleId: 'r', outcome: 'cantTell', mode: 'assisted', nbrItems: Object.freeze(['5.1.1']) })]),
-    itemResults: Object.freeze([Object.freeze({ id: '5.1.1', outcome: 'cantTell', evaluation: 'assisted' })]),
-    occurrences: Object.freeze(occurrences),
-    manualReview: Object.freeze(manualReview),
-    reviewDecisions: Object.freeze([]),
-  });
+const FIRST_REVIEW = SAMPLE_AUDIT.manualReview[0];
+const SECOND_REVIEW = SAMPLE_AUDIT.manualReview[1];
+
+function reviewModel() {
+  return structuredClone(SAMPLE_AUDIT);
 }
 
-function reviewInput(occurrenceId = 'occ-1', answer = 'conforme') {
+function reviewInput(occurrenceId = FIRST_REVIEW.occurrenceId, answer = 'conforme') {
+  const queue = SAMPLE_AUDIT.manualReview.find(entry => entry.occurrenceId === occurrenceId);
+  if (!queue) throw new TypeError('Fixture de revisão desconhecida.');
   return {
-    auditId: 'audit-1', itemId: '5.1.1', occurrenceId, answer,
-    evaluator: 'Pessoa avaliadora', decidedAt: '2026-08-26T16:00:00.000Z', mode: 'assisted',
+    auditId: SAMPLE_AUDIT.auditId, itemId: queue.itemId, occurrenceId, answer,
+    evaluator: 'Pessoa avaliadora', decidedAt: '2026-08-26T16:00:00.000Z', mode: queue.mode,
   };
 }
 
@@ -59,15 +53,36 @@ test('records a decision by applying conservative review aggregation to the stor
   const model = reviewModel();
   const { evidence } = model;
   const reviewed = recordReviewDecision(model, {
-    auditId: 'audit-1', itemId: '5.1.1', occurrenceId: 'occ-1', answer: 'conforme',
-    evaluator: 'Fiscal', decidedAt: '2026-08-26T14:00:00.000Z', mode: 'assisted',
+    ...reviewInput(), evaluator: 'Fiscal', decidedAt: '2026-08-26T16:00:00.000Z',
   });
-  assert.equal(reviewed.itemResults[0].outcome, 'passed');
+  assert.equal(reviewed.itemResults.find(item => item.id === FIRST_REVIEW.itemId).outcome, 'passed');
   assert.equal(reviewed.manualReview[0].status, 'answered');
   assert.equal(reviewed.reviewDecisions.length, 1);
   assert.notStrictEqual(reviewed.evidence, evidence);
   assert.deepEqual(reviewed.evidence, evidence);
-  assert.deepEqual(getPendingReviewEntries(reviewed), []);
+  assert.deepEqual(getPendingReviewEntries(reviewed).map(entry => entry.occurrenceId), [SECOND_REVIEW.occurrenceId]);
+  assert.doesNotThrow(() => createAuditModel(reviewed));
+});
+
+test('rejects a noncanonical reviewed model before any persistence call', async () => {
+  const invalid = reviewModel();
+  const marker = 'PRIVATE_INVALID_NORMATIVE_EDITION';
+  invalid.normative.edition = marker;
+  let writes = 0;
+
+  await assert.rejects(
+    commitReviewDecision(invalid, reviewInput(), {
+      async setAudit() {
+        writes += 1;
+      },
+    }),
+    error => {
+      assert.equal(error?.code, 'AUDIT_MODEL_INPUT_INVALID');
+      assert.doesNotMatch(String(error?.message), new RegExp(marker));
+      return true;
+    },
+  );
+  assert.equal(writes, 0);
 });
 
 test('keeps a failed decision persistence retryable and publishes the model only after storage succeeds', async () => {
@@ -77,7 +92,7 @@ test('keeps a failed decision persistence retryable and publishes the model only
   const store = {
     async setAudit(auditId, next) {
       attempts += 1;
-      assert.equal(auditId, 'audit-1');
+      assert.equal(auditId, SAMPLE_AUDIT.auditId);
       assert.equal(next.reviewDecisions.length, 1);
       if (attempts === 1) throw new Error('IDB indisponível');
     },
@@ -92,15 +107,15 @@ test('keeps a failed decision persistence retryable and publishes the model only
 });
 
 test('merges decisions from two stale review tabs through revision CAS without losing either answer', async () => {
-  const initial = reviewModel({ withSecondOccurrence: true });
+  const initial = reviewModel();
   const store = createInMemoryAuditStore();
   await store.setAudit(initial.auditId, initial);
 
-  await commitReviewDecision(initial, reviewInput('occ-1'), store);
-  await commitReviewDecision(initial, reviewInput('occ-2'), store);
+  await commitReviewDecision(initial, reviewInput(FIRST_REVIEW.occurrenceId), store);
+  await commitReviewDecision(initial, reviewInput(SECOND_REVIEW.occurrenceId), store);
 
   const stored = await store.getAudit(initial.auditId);
-  assert.deepEqual(stored.reviewDecisions.map(decision => decision.occurrenceId), ['occ-1', 'occ-2']);
+  assert.deepEqual(stored.reviewDecisions.map(decision => decision.occurrenceId), [FIRST_REVIEW.occurrenceId, SECOND_REVIEW.occurrenceId]);
   assert.equal(stored.manualReview.every(entry => entry.status === 'answered'), true);
 });
 
@@ -147,7 +162,8 @@ test('a review after delivery reservation preserves the prepared model and atomi
       leaseOwnerId: 'owner-review-race',
     },
   });
-  const reservedModel = { ...structuredClone(initial), reservedReportMarker: 'prepared-current-model' };
+  const reservedModel = structuredClone(initial);
+  reservedModel.limitations = [...reservedModel.limitations, 'Modelo preparado antes da revisão.'];
   const reservation = await store.commitAuditIfRevisionWithExportLease(
     initial.auditId,
     reservedModel,
@@ -164,9 +180,9 @@ test('a review after delivery reservation preserves the prepared model and atomi
   const reviewed = await commitReviewDecision(initial, reviewInput(), store);
   const stored = await store.getAudit(initial.auditId);
   const latest = await store.getLatest();
-  assert.equal(stored.reservedReportMarker, 'prepared-current-model');
+  assert.equal(stored.limitations.includes('Modelo preparado antes da revisão.'), true);
   assert.equal(stored.reviewDecisions.length, 1);
-  assert.equal(reviewed.reservedReportMarker, 'prepared-current-model');
+  assert.equal(reviewed.limitations.includes('Modelo preparado antes da revisão.'), true);
   assert.equal((await store.getAuditSnapshot(initial.auditId)).revision, reservation.revision + 1);
   assert.deepEqual(await store.getExportLeaseState(initial.auditId, {
     now: '2026-08-27T10:00:00.300Z',
@@ -187,12 +203,12 @@ test('locks every card control synchronously and deduplicates contradictory conc
   const store = { setAudit: async () => { writes += 1; return pendingWrite.promise; } };
 
   const first = commit({
-    auditModel: original, input: reviewInput('occ-1', 'conforme'), store, controls,
+    auditModel: original, input: reviewInput(FIRST_REVIEW.occurrenceId, 'conforme'), store, controls,
     onPendingChange: pending => pendingStates.push(pending),
   });
   assert.deepEqual(controls.map(control => control.disabled), [true, true, true, true]);
   const duplicate = await commit({
-    auditModel: original, input: reviewInput('occ-1', 'não conforme'), store, controls: duplicateControls,
+    auditModel: original, input: reviewInput(FIRST_REVIEW.occurrenceId, 'não conforme'), store, controls: duplicateControls,
   });
   assert.deepEqual(duplicate, { status: 'duplicate', model: original });
   assert.equal(duplicateControls[0].disabled, false);
@@ -207,7 +223,7 @@ test('locks every card control synchronously and deduplicates contradictory conc
 });
 
 test('serializes independent occurrences against the latest committed model without losing a decision', async () => {
-  const original = reviewModel({ withSecondOccurrence: true });
+  const original = reviewModel();
   const firstWrite = deferred();
   const secondWrite = deferred();
   const firstControls = [{ disabled: false }, { disabled: false }];
@@ -224,10 +240,10 @@ test('serializes independent occurrences against the latest committed model with
   };
 
   const first = commit({
-    auditModel: original, input: reviewInput('occ-1'), store, controls: firstControls,
+    auditModel: original, input: reviewInput(FIRST_REVIEW.occurrenceId), store, controls: firstControls,
   });
   const independent = commit({
-    auditModel: original, input: reviewInput('occ-2'), store, controls: independentControls,
+    auditModel: original, input: reviewInput(SECOND_REVIEW.occurrenceId), store, controls: independentControls,
   });
   assert.equal(writes, 1);
   assert.equal(firstControls.every(control => control.disabled), true);
@@ -240,7 +256,7 @@ test('serializes independent occurrences against the latest committed model with
   secondWrite.resolve();
   const committed = await independent;
   assert.equal(committed.model.reviewDecisions.length, 2);
-  assert.deepEqual(committed.model.reviewDecisions.map(decision => decision.occurrenceId), ['occ-1', 'occ-2']);
+  assert.deepEqual(committed.model.reviewDecisions.map(decision => decision.occurrenceId), [FIRST_REVIEW.occurrenceId, SECOND_REVIEW.occurrenceId]);
   assert.equal(persisted[0].reviewDecisions.length, 1);
   assert.equal(persisted[1].reviewDecisions.length, 2);
 });
@@ -256,7 +272,7 @@ test('unlocks and focuses a failed card so the same occurrence can retry', async
   const store = { setAudit: async () => { writes += 1; return firstWrite.promise; } };
 
   const failed = commit({
-    auditModel: original, input: reviewInput('occ-1'), store, controls: retryControls, retryFocus,
+    auditModel: original, input: reviewInput(FIRST_REVIEW.occurrenceId), store, controls: retryControls, retryFocus,
     onPendingChange: pending => pendingStates.push(pending),
   });
   assert.equal(writes, 1);
@@ -269,7 +285,7 @@ test('unlocks and focuses a failed card so the same occurrence can retry', async
 
   const retryWrite = deferred();
   store.setAudit = async () => { writes += 1; return retryWrite.promise; };
-  const retry = commit({ auditModel: original, input: reviewInput('occ-1'), store, controls: retryControls });
+  const retry = commit({ auditModel: original, input: reviewInput(FIRST_REVIEW.occurrenceId), store, controls: retryControls });
   await Promise.resolve();
   assert.equal(writes, 2);
   assert.equal(retryControls.every(control => control.disabled), true);

@@ -7,6 +7,8 @@ import {
   validateRetentionMetadata,
 } from './audit-retention.js';
 import { AUDIT_STORAGE_UNAVAILABLE_MESSAGE as STORAGE_UNAVAILABLE_MESSAGE } from '../core/privacy.js';
+import { createAuditModel } from '../core/report/audit-model.js';
+import { auditModelInputError } from '../core/report/audit-input.js';
 
 const DB_NAME = 'audita-mt';
 const STORE_NAME = 'audits';
@@ -25,6 +27,12 @@ const TERMINAL_AUDIT_STATUSES = new Set(['complete', 'partial', 'failed', 'cance
 const INTERRUPTIBLE_AUDIT_STATUSES = new Set(['idle', 'validating', 'queued', 'running', 'cancelling']);
 const AUDIT_SNAPSHOT_CAPABILITIES = new WeakMap();
 const IN_MEMORY_RETENTION = new WeakMap();
+
+function canonicalReviewModel(id, model) {
+  const canonical = createAuditModel(model);
+  if (canonical.auditId !== validId(id)) throw auditModelInputError();
+  return canonical;
+}
 
 function storageArrayIndex(key, length) {
   if (typeof key !== 'string' || !/^(?:0|[1-9][0-9]*)$/u.test(key)) return false;
@@ -908,7 +916,13 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       return writeAudit(id, model, latestState, snapshotCapability);
     },
     async commitAuditReviewIfRevision(id, model, snapshotCapability) {
-      return writeAudit(id, model, undefined, snapshotCapability, { review: true });
+      return writeAudit(
+        id,
+        canonicalReviewModel(id, model),
+        undefined,
+        snapshotCapability,
+        { review: true },
+      );
     },
     async acquireExportLease(id, snapshotCapability, options) {
       return acquireExportLease(id, snapshotCapability, options);
@@ -2180,8 +2194,14 @@ export function createAuditStore(options = {}) {
     commitAuditIfRevision(id, model, latestState, snapshotCapability) {
       return mutateAudit(id, model, latestState, snapshotCapability);
     },
-    commitAuditReviewIfRevision(id, model, snapshotCapability) {
-      return mutateAudit(id, model, undefined, snapshotCapability, { review: true });
+    async commitAuditReviewIfRevision(id, model, snapshotCapability) {
+      return mutateAudit(
+        id,
+        canonicalReviewModel(id, model),
+        undefined,
+        snapshotCapability,
+        { review: true },
+      );
     },
     acquireExportLease,
     claimExportLease(id, snapshotCapability, options) {

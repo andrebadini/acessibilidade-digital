@@ -27,12 +27,12 @@ export function captureAuditInput(input) {
   try {
     const budget = { nodes: 0 };
     const captured = captureValue(input, new WeakSet(), budget, 0);
-    // Structured clone rejects transparent/revoked proxies. Descriptor capture
-    // above has already proved that no accessor can execute during this check.
-    structuredClone(input);
-    deepFreeze(captured);
-    CAPTURED_AUDIT_INPUTS.add(captured);
-    return captured;
+    // Materialize only the inert descriptor snapshot. Returning to the source
+    // graph here would create a second traversal after proxy traps have run.
+    const materialized = structuredClone(captured);
+    deepFreeze(materialized);
+    CAPTURED_AUDIT_INPUTS.add(materialized);
+    return materialized;
   } catch {
     throw auditModelInputError();
   }

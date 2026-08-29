@@ -20,13 +20,13 @@ function model(overrides = {}) {
       Object.freeze({ id: '5.1.2', outcome: 'cantTell', evaluation: 'assisted' }),
     ]),
     occurrences: Object.freeze([
-      Object.freeze({ occurrenceId: 'occ-auto', itemId: '5.1.1', ruleId: 'auto-rule', outcome: 'failed', evidenceIds: Object.freeze(['ev-node']) }),
-      Object.freeze({ occurrenceId: 'occ-a', itemId: '5.1.2', ruleId: 'assist-rule', outcome: 'cantTell', evidenceIds: Object.freeze(['ev-full']) }),
-      Object.freeze({ occurrenceId: 'occ-b', itemId: '5.1.2', ruleId: 'assist-rule', outcome: 'cantTell', evidenceIds: Object.freeze(['ev-node']) }),
+      Object.freeze({ occurrenceId: 'occ-auto', itemId: '5.1.1', ruleId: 'auto-rule', mode: 'automated', outcome: 'failed', evidenceIds: Object.freeze(['ev-node']) }),
+      Object.freeze({ occurrenceId: 'occ-a', itemId: '5.1.2', ruleId: 'assist-rule', mode: 'assisted', outcome: 'cantTell', evidenceIds: Object.freeze(['ev-full']) }),
+      Object.freeze({ occurrenceId: 'occ-b', itemId: '5.1.2', ruleId: 'assist-rule', mode: 'assisted', outcome: 'cantTell', evidenceIds: Object.freeze(['ev-node']) }),
     ]),
     manualReview: Object.freeze([
-      Object.freeze({ occurrenceId: 'occ-a', itemId: '5.1.2' }),
-      Object.freeze({ occurrenceId: 'occ-b', itemId: '5.1.2' }),
+      Object.freeze({ auditId: 'audit-1', occurrenceId: 'occ-a', itemId: '5.1.2', ruleId: 'assist-rule', mode: 'assisted', status: 'unanswered' }),
+      Object.freeze({ auditId: 'audit-1', occurrenceId: 'occ-b', itemId: '5.1.2', ruleId: 'assist-rule', mode: 'assisted', status: 'unanswered' }),
     ]),
     reviewDecisions: Object.freeze([]),
     ...overrides,
@@ -48,6 +48,14 @@ test('creates a canonical frozen JSON-safe review decision', () => {
   assert.match(value.decisionId, /^decision-/);
   assert.equal(Object.isFrozen(value), true);
   assert.doesNotThrow(() => JSON.stringify(value));
+});
+
+test('rejects an existing decision whose identifier is not its exact canonical digest', () => {
+  const canonical = decision('occ-a');
+  assert.throws(
+    () => createReviewDecision({ ...canonical, decisionId: 'decision-forged' }),
+    /decisão|identificador|canônic|íntegro/i,
+  );
 });
 
 test('rejects invalid IDs, answers, evaluator, timestamps and modes', () => {
@@ -85,6 +93,101 @@ test('requires known audit, item and occurrence links and rejects ambiguous dupl
   assert.throws(() => applyReviewDecisions(model(), [decision('occ-a', 'conforme', { itemId: 'unknown' })]), /item/i);
   assert.throws(() => applyReviewDecisions(model(), [decision('unknown')]), /ocorrência/i);
   assert.throws(() => applyReviewDecisions(model(), [decision('occ-a'), decision('occ-a', 'não conforme')]), /duplic|ambígua/i);
+});
+
+test('snapshots a bounded dense decision list without invoking accessor slots or exposing their errors', () => {
+  const marker = 'PRIVATE_REVIEW_DECISION_SLOT';
+  let getterReads = 0;
+  const hostile = new Array(1);
+  Object.defineProperty(hostile, '0', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      throw new Error(marker);
+    },
+  });
+
+  let caught;
+  try {
+    applyReviewDecisions(model(), hostile);
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.equal(getterReads, 0);
+  assert.ok(caught instanceof TypeError);
+  assert.doesNotMatch(String(caught?.message), new RegExp(marker));
+
+  const sparse = new Array(1);
+  assert.throws(() => applyReviewDecisions(model(), sparse), /decis|lista|densa|inválid/i);
+  assert.throws(
+    () => applyReviewDecisions(model(), new Array(10_001).fill(decision('occ-a'))),
+    /decis|lista|limit|inválid/i,
+  );
+  const revoked = Proxy.revocable([], {});
+  revoked.revoke();
+  assert.throws(() => applyReviewDecisions(model(), revoked.proxy), error => {
+    assert.equal(error instanceof TypeError, true);
+    assert.doesNotMatch(String(error?.message), /proxy|revoked|private/iu);
+    return true;
+  });
+});
+
+test('requires the review queue to match the audit, rule and mode exactly', () => {
+  for (const change of [
+    { auditId: 'audit-other' },
+    { ruleId: 'rule-other' },
+    { mode: 'manual' },
+  ]) {
+    const corrupted = structuredClone(model());
+    Object.assign(corrupted.manualReview[0], change);
+    assert.throws(
+      () => applyReviewDecisions(corrupted, [decision('occ-a')]),
+      /auditoria|fila|regra|modo|correspond/i,
+    );
+  }
+});
+
+test('rejects a queue and occurrence forged together onto a rule outside the original rule inventory', () => {
+  const corrupted = structuredClone(model());
+  corrupted.occurrences.find(entry => entry.occurrenceId === 'occ-a').ruleId = 'rule-forged';
+  corrupted.manualReview.find(entry => entry.occurrenceId === 'occ-a').ruleId = 'rule-forged';
+
+  assert.throws(
+    () => applyReviewDecisions(corrupted, [decision('occ-a')]),
+    /regra|inventário|ocorrência|fila/i,
+  );
+});
+
+test('rejects an answered queue that has no exact prior decision', () => {
+  const corrupted = structuredClone(model());
+  corrupted.manualReview[0].status = 'answered';
+  corrupted.manualReview[0].decisionId = 'decision-forged';
+
+  assert.throws(
+    () => applyReviewDecisions(corrupted, [decision('occ-a')]),
+    /respond|histórico|decisão|fila/i,
+  );
+});
+
+test('rejects a decision whose mode differs from its exact review queue', () => {
+  assert.throws(
+    () => applyReviewDecisions(model(), [decision('occ-a', 'conforme', { mode: 'manual' })]),
+    /fila|modo|correspond/i,
+  );
+});
+
+test('preserves every original failed item when a cantTell occurrence is reviewed as conforming', () => {
+  const original = structuredClone(model());
+  const item = original.itemResults.find(entry => entry.id === '5.1.2');
+  item.outcome = 'failed';
+  item.originalOutcome = 'failed';
+
+  const reviewed = applyReviewDecisions(original, [decision('occ-a'), decision('occ-b')]);
+
+  assert.equal(reviewed.itemResults.find(entry => entry.id === '5.1.2').outcome, 'failed');
+  assert.equal(reviewed.itemResults.find(entry => entry.id === '5.1.2').originalOutcome, 'failed');
 });
 
 test('validates the integrity of previously stored decisions before applying new ones', () => {

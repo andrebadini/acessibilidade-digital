@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
+import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import {
   AuditDeleteBusyError,
   AuditStorageUnavailableError,
@@ -11,6 +13,47 @@ import {
 const T0 = '2026-08-01T00:00:00.000Z';
 const T29 = '2026-08-30T00:00:00.000Z';
 const T30 = '2026-08-31T00:00:00.000Z';
+
+function reviewedAuditFixture() {
+  const queue = SAMPLE_AUDIT.manualReview[0];
+  return applyReviewDecisions(structuredClone(SAMPLE_AUDIT), [createReviewDecision({
+    auditId: SAMPLE_AUDIT.auditId,
+    itemId: queue.itemId,
+    occurrenceId: queue.occurrenceId,
+    answer: 'conforme',
+    evaluator: 'Pessoa avaliadora',
+    decidedAt: '2026-08-26T16:00:00.000Z',
+    mode: queue.mode,
+  })]);
+}
+
+test('review CAS rejects a noncanonical model before mutating memory or IndexedDB', async () => {
+  for (const createStore of [
+    () => createInMemoryAuditStore(),
+    () => createAuditStore({ indexedDB: createFakeIndexedDb() }),
+  ]) {
+    const store = createStore();
+    const model = structuredClone(SAMPLE_AUDIT);
+    await store.setAudit(model.auditId, model);
+    const snapshot = await store.getAuditSnapshot(model.auditId);
+    const invalid = structuredClone(model);
+    const marker = 'PRIVATE_INVALID_REVIEW_MODEL';
+    invalid.normative.edition = marker;
+
+    await assert.rejects(
+      store.commitAuditReviewIfRevision(model.auditId, invalid, snapshot.capability),
+      error => {
+        assert.equal(error?.code, 'AUDIT_MODEL_INPUT_INVALID');
+        assert.doesNotMatch(String(error?.message), new RegExp(marker));
+        return true;
+      },
+    );
+
+    const after = await store.getAuditSnapshot(model.auditId);
+    assert.equal(after.revision, snapshot.revision);
+    assert.equal(after.model.normative.edition, model.normative.edition);
+  }
+});
 
 test('production store fails visibly when IndexedDB is unavailable and never falls back to memory', async () => {
   const store = createAuditStore({ indexedDB: {} });
@@ -1316,7 +1359,7 @@ test('a persistent delivery journal survives crash and review until the next own
     () => createAuditStore({ indexedDB: createFakeIndexedDb() }),
   ]) {
     const store = createStore();
-    const auditId = 'audit-delivery-journal';
+    const auditId = SAMPLE_AUDIT.auditId;
     await store.setAudit(auditId, { auditId, phase: 'review-ready' });
     let snapshot = await store.getAuditSnapshot(auditId);
     const lease = await store.acquireExportLease(auditId, snapshot.capability, {
@@ -1351,7 +1394,7 @@ test('a persistent delivery journal survives crash and review until the next own
     });
 
     const reviewed = await store.commitAuditReviewIfRevision(
-      auditId, { auditId, phase: 'human-review' }, snapshot.capability,
+      auditId, reviewedAuditFixture(), snapshot.capability,
     );
     assert.equal(reviewed.revision, snapshot.revision + 1);
     assert.equal((await store.getLatest()).exportCleanupPending, true);
@@ -1379,7 +1422,7 @@ test('a persistent delivery journal survives crash and review until the next own
 
 test('cleanup failure remains visible without rolling back a newer human review', async () => {
   const store = createInMemoryAuditStore();
-  const auditId = 'audit-cleanup-marker';
+  const auditId = SAMPLE_AUDIT.auditId;
   await store.setAudit(auditId, { auditId, phase: 'initial' });
   let snapshot = await store.getAuditSnapshot(auditId);
   const lease = await store.acquireExportLease(auditId, snapshot.capability, {
@@ -1402,13 +1445,13 @@ test('cleanup failure remains visible without rolling back a newer human review'
     ownerId: 'owner-export', exportAttempt: 1, now: '2026-08-27T10:00:00.300Z',
     format: 'pdf', filename: 'audit.pdf', state: 'in-flight', downloadId: 99,
   });
-  await store.commitAuditReviewIfRevision(auditId, { auditId, phase: 'human-review' }, snapshot.capability);
+  await store.commitAuditReviewIfRevision(auditId, reviewedAuditFixture(), snapshot.capability);
   await store.resolveExportDelivery(auditId, {
     ownerId: 'owner-export', exportAttempt: 1, now: '2026-08-27T10:00:00.400Z',
     format: 'pdf', filename: 'audit.pdf', downloadId: 99, outcome: 'cleanup-failed',
   });
 
-  assert.equal((await store.getAudit(auditId)).phase, 'human-review');
+  assert.equal((await store.getAudit(auditId)).reviewDecisions.length, 1);
   assert.match((await store.getLatest()).exportCleanupMessage, /arquivo.*remov/u);
   assert.equal((await store.getLatest()).exportCleanupPending, true);
   assert.equal((await store.getExportDeliveryJournal(auditId))[0].state, 'cleanup-failed');
@@ -1484,7 +1527,7 @@ test('a malformed private journal cannot partially acquire or advance a lease', 
 test('in-memory review and journal mutations stay atomic when the stored latest state cannot be cloned', async () => {
   const backing = new Map();
   const store = createInMemoryAuditStore(backing);
-  const auditId = 'audit-latest-atomic';
+  const auditId = SAMPLE_AUDIT.auditId;
   await store.setAudit(auditId, { auditId, marker: 'initial' });
   let snapshot = await store.getAuditSnapshot(auditId);
   const lease = await store.acquireExportLease(auditId, snapshot.capability, {
@@ -1528,7 +1571,7 @@ test('in-memory review and journal mutations stay atomic when the stored latest 
   assert.deepEqual(await store.getExportDeliveryJournal(auditId), journalBefore);
 
   await assert.rejects(store.commitAuditReviewIfRevision(
-    auditId, { auditId, marker: 'human-review' }, snapshot.capability,
+    auditId, reviewedAuditFixture(), snapshot.capability,
   ), error => error instanceof AuditStorageUnavailableError && error.code === 'AUDIT_STORAGE_UNAVAILABLE');
   const after = await store.getAuditSnapshot(auditId);
   assert.equal(after.revision, snapshot.revision);
@@ -1709,7 +1752,7 @@ test('two IndexedDB connections serialize export lease acquisition before either
 test('IndexedDB review CAS preserves the current model and atomically clears delivery ownership and latest marker', async () => {
   const fake = createFakeIndexedDb();
   const store = createAuditStore({ indexedDB: fake });
-  const auditId = 'audit-idb-review-race';
+  const auditId = SAMPLE_AUDIT.auditId;
   await store.setAudit(auditId, { auditId, phase: 'review-ready' });
   const source = await store.getAuditSnapshot(auditId);
   await store.acquireExportLease(auditId, source.capability, {
@@ -1746,13 +1789,14 @@ test('IndexedDB review CAS preserves the current model and atomically clears del
     ownerId: 'owner-idb-review', now: '2026-08-27T10:00:00.250Z', phase: 'delivering',
   })).active, true);
 
+  const nextModel = reviewedAuditFixture();
   await store.commitAuditReviewIfRevision(
     auditId,
-    { auditId, phase: 'prepared-report', reviewed: true },
+    nextModel,
     reserved.capability,
   );
   const reviewed = await store.getAuditSnapshot(auditId);
-  assert.deepEqual(reviewed.model, { auditId, phase: 'prepared-report', reviewed: true });
+  assert.deepEqual(reviewed.model, nextModel);
   assert.equal(reviewed.revision, reserved.revision + 1);
   assert.deepEqual(await store.getExportLeaseState(auditId, {
     now: '2026-08-27T10:00:00.300Z',

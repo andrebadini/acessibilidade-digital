@@ -378,36 +378,41 @@ test('accepts export events only with the exact lease owner, attempt and revisio
 test('validates a committed review against storage before broadcasting its exact new revision', async () => {
   const chromeApi = createChrome();
   const auditStore = createInMemoryAuditStore();
-  await auditStore.setAudit('audit-review-event', { auditId: 'audit-review-event' });
+  const model = structuredClone(SAMPLE_AUDIT);
+  const queue = model.manualReview[0];
+  const auditId = model.auditId;
+  await auditStore.setAudit(auditId, model);
   await auditStore.setLatest({
-    auditId: 'audit-review-event', exportStatus: 'complete', exportRevision: 1,
+    auditId, exportStatus: 'complete', exportRevision: 1,
     exportAttempt: 1, leaseOwnerId: 'owner-old',
   });
-  const snapshot = await auditStore.getAuditSnapshot('audit-review-event');
-  const committed = await auditStore.commitAuditReviewIfRevision(
-    'audit-review-event', { auditId: 'audit-review-event', reviewed: true }, snapshot.capability,
-  );
+  await commitReviewDecision(model, {
+    auditId, itemId: queue.itemId, occurrenceId: queue.occurrenceId,
+    answer: 'conforme', evaluator: 'Pessoa avaliadora',
+    decidedAt: '2026-08-26T16:00:00.000Z', mode: queue.mode,
+  }, auditStore);
+  const committed = await auditStore.getAuditSnapshot(auditId);
   await auditStore.setLatest({
-    auditId: 'audit-review-event', exportStatus: 'queued', exportRevision: committed.revision,
+    auditId, exportStatus: 'queued', exportRevision: committed.revision,
     exportAttempt: 2, leaseOwnerId: 'owner-retry-after-review',
   });
   registerServiceWorker(chromeApi, { auditStore });
   let response;
   const keepOpen = chromeApi.listeners.message.listener({
-    type: 'REVIEW_COMMITTED', auditId: 'audit-review-event', exportRevision: committed.revision,
+    type: 'REVIEW_COMMITTED', auditId, exportRevision: committed.revision,
   }, {
-    id: 'test', url: 'chrome-extension://test/src/review/index.html?auditId=audit-review-event',
+    id: 'test', url: `chrome-extension://test/src/review/index.html?auditId=${auditId}`,
   }, value => { response = value; });
   assert.equal(keepOpen, true);
   await waitUntil(() => response !== undefined);
   assert.deepEqual(response, { ok: true });
   assert.deepEqual(chromeApi.runtime.sent.filter(message => message.type === 'AUDIT_REVIEW_UPDATED'), [{
-    type: 'AUDIT_REVIEW_UPDATED', auditId: 'audit-review-event', exportRevision: committed.revision,
+    type: 'AUDIT_REVIEW_UPDATED', auditId, exportRevision: committed.revision,
   }]);
 
   response = undefined;
   chromeApi.listeners.message.listener({
-    type: 'REVIEW_COMMITTED', auditId: 'audit-review-event', exportRevision: committed.revision + 1,
+    type: 'REVIEW_COMMITTED', auditId, exportRevision: committed.revision + 1,
   }, {
     id: 'test', url: 'chrome-extension://test/src/review/index.html?auditId=other-audit',
   }, value => { response = value; });
@@ -418,18 +423,23 @@ test('contains a failed review-update broadcast and always settles the response 
   const chromeApi = createChrome();
   chromeApi.runtime.sendMessage = async () => { throw new Error('broadcast failed'); };
   const auditStore = createInMemoryAuditStore();
-  await auditStore.setAudit('audit-review-notify', { auditId: 'audit-review-notify' });
-  await auditStore.setLatest({ auditId: 'audit-review-notify', exportStatus: 'complete', exportRevision: 1 });
-  const snapshot = await auditStore.getAuditSnapshot('audit-review-notify');
-  const committed = await auditStore.commitAuditReviewIfRevision(
-    'audit-review-notify', { auditId: 'audit-review-notify', reviewed: true }, snapshot.capability,
-  );
+  const model = structuredClone(SAMPLE_AUDIT);
+  const queue = model.manualReview[0];
+  const auditId = model.auditId;
+  await auditStore.setAudit(auditId, model);
+  await auditStore.setLatest({ auditId, exportStatus: 'complete', exportRevision: 1 });
+  await commitReviewDecision(model, {
+    auditId, itemId: queue.itemId, occurrenceId: queue.occurrenceId,
+    answer: 'conforme', evaluator: 'Pessoa avaliadora',
+    decidedAt: '2026-08-26T16:00:00.000Z', mode: queue.mode,
+  }, auditStore);
+  const committed = await auditStore.getAuditSnapshot(auditId);
   registerServiceWorker(chromeApi, { auditStore });
   let response;
   chromeApi.listeners.message.listener({
-    type: 'REVIEW_COMMITTED', auditId: 'audit-review-notify', exportRevision: committed.revision,
+    type: 'REVIEW_COMMITTED', auditId, exportRevision: committed.revision,
   }, {
-    id: 'test', url: 'chrome-extension://test/src/review/index.html?auditId=audit-review-notify',
+    id: 'test', url: `chrome-extension://test/src/review/index.html?auditId=${auditId}`,
   }, value => { response = value; });
   await waitUntil(() => response !== undefined);
   assert.deepEqual(response, { ok: false, error: 'Não foi possível notificar a revisão.' });

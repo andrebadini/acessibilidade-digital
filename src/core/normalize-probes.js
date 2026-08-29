@@ -260,6 +260,15 @@ function normalizedException(observation, allowed) {
 
 const probeFallbacks = new WeakMap();
 
+function freezeNormalizedProbes(value, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object' || seen.has(value) || Object.isFrozen(value)) return value;
+  seen.add(value);
+  for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+    if (descriptor && Object.hasOwn(descriptor, 'value')) freezeNormalizedProbes(descriptor.value, seen);
+  }
+  return Object.freeze(value);
+}
+
 function selectorFrameKey(selector, frameId) {
   const normalizedSelector = typeof selector === 'string' ? selector.trim() : '';
   if (!normalizedSelector) return null;
@@ -468,13 +477,13 @@ export function normalizeProbes(raw = {}) {
   normalized.probeCoverage.targetSizes = [normalized.targetSizes.minimum24, normalized.targetSizes.enhanced44]
     .some(item => item.outcome === 'cantTell') ? 'cantTell' : 'complete';
   probeFallbacks.set(normalized, identity.fallbacksById);
-  return normalized;
+  return freezeNormalizedProbes(normalized);
 }
 
 /** Merges normalized observations without mutating the public snapshot. */
 export function mergeProbesIntoSnapshot(snapshot, probes) {
   assertSnapshotV1(snapshot);
-  const normalized = probes && probes.focusOrder && probes.targetSizes ? probes : normalizeProbes(probes);
+  const normalized = probeFallbacks.has(probes) ? probes : normalizeProbes(probes);
   const runtimeOutcome = snapshot.document?.coverage?.runtime?.outcome;
   const runtimeIncomplete = typeof runtimeOutcome === 'string' && runtimeOutcome !== 'complete';
   const probeCoverage = { ...(normalized.probeCoverage || {}) };

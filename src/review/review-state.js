@@ -1,4 +1,5 @@
 import { applyReviewDecisions, createReviewDecision } from '../core/review/decisions.js';
+import { createAuditModel } from '../core/report/audit-model.js';
 
 const REVIEW_COMMIT_REVISIONS = new WeakMap();
 
@@ -42,7 +43,7 @@ export function getPendingReviewEntries(auditModel) {
 
 export function recordReviewDecision(auditModel, input) {
   const decision = createReviewDecision(input);
-  return applyReviewDecisions(auditModel, [decision]);
+  return createAuditModel(applyReviewDecisions(auditModel, [decision]));
 }
 
 export async function commitReviewDecision(auditModel, input, store) {
