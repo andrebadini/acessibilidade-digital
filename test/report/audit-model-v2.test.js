@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
+import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
+import { normalizeAxeResults } from '../../src/core/axe/normalize-axe-results.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
 import { section508ReferencesForWcag } from '../../src/core/normative/section508.js';
@@ -10,6 +12,7 @@ import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
+import { aggregateItems } from '../../src/core/rules/aggregate-items.js';
 import {
   V1_MIGRATION_DEFAULTS,
   createAuditModel,
@@ -258,6 +261,106 @@ function reviewDecision(occurrenceId, itemId, answer, mode) {
   });
 }
 
+function authorityConsistentSample({ axe = false } = {}) {
+  const model = structuredClone(SAMPLE_AUDIT);
+  const aggregate = new Map(aggregateItems(
+    model.ruleResults.filter(rule => rule.source.engine === 'audita-core'),
+    NBR17225_ITEMS,
+  ).map(item => [item.id, item]));
+  for (const item of model.itemResults) {
+    const expected = aggregate.get(item.id);
+    item.outcome = expected.outcome;
+    item.ruleResults = expected.ruleResults.map(rule => rule.ruleId);
+    delete item.originalOutcome;
+    delete item.reviewedOutcome;
+    delete item.review;
+  }
+  if (axe) {
+    model.axe = structuredClone(normalizeAxeResults({
+      status: 'disabled', provenance: AXE_PROVENANCE, frames: [],
+    }, { pageId: 'page-1', rulesVersion: '1.0.0' }));
+  }
+  return model;
+}
+
+test('derives every ABNT item outcome from authoritative rules and occurrences even when axe is absent', async () => {
+  for (const axe of [false, true]) {
+    const candidate = authorityConsistentSample({ axe });
+    candidate.itemResults.find(item => item.id === '5.1.2').outcome = 'failed';
+
+    assert.throws(() => createAuditModel(candidate), /item|resultado|fonte|ocorrência|autoritativ/iu);
+    assert.throws(() => renderTechnicalJson(candidate), /item|resultado|fonte|ocorrência|autoritativ/iu);
+    assert.throws(() => renderHtmlReport(candidate), /item|resultado|fonte|ocorrência|autoritativ/iu);
+
+    let optionReads = 0;
+    const options = {};
+    Object.defineProperty(options, 'now', {
+      enumerable: true,
+      get() { optionReads += 1; return ENRICH_OPTIONS.now; },
+    });
+    await assert.rejects(
+      enrichAuditForReport(candidate, options),
+      /item|resultado|fonte|ocorrência|autoritativ/iu,
+    );
+    assert.equal(optionReads, 0, 'V2 adulterado deve falhar antes de opções ou rehash');
+  }
+});
+
+test('binds every reviewed item outcome and review summary to its exact validated decision graph', () => {
+  const noDecision = authorityConsistentSample();
+  const noDecisionItem = noDecision.itemResults.find(item => item.id === '5.1.4');
+  noDecisionItem.originalOutcome = 'cantTell';
+  noDecisionItem.reviewedOutcome = 'failed';
+  noDecisionItem.outcome = 'failed';
+  noDecisionItem.review = {
+    mode: 'assisted', evaluator: 'Fiscal de teste', decidedAt: '2026-08-26T15:00:00.000Z',
+    decisionIds: ['decision-inexistente'],
+  };
+
+  const reviewedPass = structuredClone(applyReviewDecisions(authorityConsistentSample(), [
+    reviewDecision('occ-cross-page', '5.7.5', 'conforme', 'manual'),
+  ]));
+  const passItem = reviewedPass.itemResults.find(item => item.id === '5.7.5');
+
+  const forgedPassSummary = structuredClone(reviewedPass);
+  forgedPassSummary.itemResults.find(item => item.id === '5.7.5').review.evaluator = 'Avaliador inventado';
+
+  const forgedCantTell = structuredClone(reviewedPass);
+  forgedCantTell.itemResults.find(item => item.id === '5.7.5').outcome = 'cantTell';
+  forgedCantTell.itemResults.find(item => item.id === '5.7.5').reviewedOutcome = 'cantTell';
+
+  const forgedFailed = structuredClone(reviewedPass);
+  forgedFailed.itemResults.find(item => item.id === '5.7.5').outcome = 'failed';
+  forgedFailed.itemResults.find(item => item.id === '5.7.5').reviewedOutcome = 'failed';
+
+  const reviewedFailure = structuredClone(applyReviewDecisions(authorityConsistentSample(), [
+    reviewDecision('occ-cross-page', '5.7.5', 'não conforme', 'manual'),
+  ]));
+  const extraDecision = structuredClone(reviewedFailure);
+  extraDecision.itemResults.find(item => item.id === '5.7.5').review.decisionIds.push('decision-extra');
+  const staleDecision = structuredClone(reviewedFailure);
+  staleDecision.itemResults.find(item => item.id === '5.7.5').review.decisionIds = ['decision-stale'];
+
+  const reviewedWithoutGraph = authorityConsistentSample();
+  reviewedWithoutGraph.itemResults.find(item => item.id === '5.1.4').reviewedOutcome = 'cantTell';
+
+  assert.equal(passItem.outcome, 'passed', 'a referência de teste deve ser uma revisão legítima');
+  for (const candidate of [
+    noDecision,
+    forgedPassSummary,
+    forgedCantTell,
+    forgedFailed,
+    extraDecision,
+    staleDecision,
+    reviewedWithoutGraph,
+  ]) {
+    assert.throws(() => createAuditModel(candidate), /item|revisão|decisão|resultado|autoritativ/iu);
+  }
+
+  assert.throws(() => renderTechnicalJson(noDecision), /item|revisão|decisão|resultado|autoritativ/iu);
+  assert.throws(() => renderHtmlReport(noDecision), /item|revisão|decisão|resultado|autoritativ/iu);
+});
+
 test('explicitly migrates V1 into the canonical single-page V2 contract without inventing source facts', () => {
   const input = reportInput();
   const original = structuredClone(input);
@@ -462,7 +565,12 @@ test('conclusive failed requirements and recommendations use the same catalog re
   });
   };
   model.ruleResults = model.ruleResults.filter(rule => rule.ruleId !== 'focus-visible');
-  model.itemResults.find(item => item.id === requirement.id).outcome = 'failed';
+  const requirementItem = model.itemResults.find(item => item.id === requirement.id);
+  requirementItem.outcome = 'failed';
+  requirementItem.ruleResults = ['focus-visible'];
+  const recommendationItem = model.itemResults.find(item => item.id === recommendation.id);
+  recommendationItem.outcome = 'failed';
+  recommendationItem.ruleResults = ['focus-fully-visible'];
   model.ruleResults.push(makeRule(requirement, 'focus-visible'));
   model.ruleResults.push(makeRule(recommendation, 'focus-fully-visible'));
   model.occurrences.push(makeOccurrence(requirement, 'focus-visible', 'occ-requirement'));

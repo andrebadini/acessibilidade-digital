@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { reportInput } from './helpers.js';
@@ -8,7 +9,7 @@ import { reportInput } from './helpers.js';
 const EARL = 'http://www.w3.org/ns/earl#';
 
 test('technical JSON exports one assertion per ABNT item and maps every EARL outcome', () => {
-  const model = createAuditModel(reportInput());
+  const model = createAuditModel(SAMPLE_AUDIT);
   const document = JSON.parse(renderTechnicalJson(model));
   assert.equal(document.assertions.length, 146);
   assert.deepEqual(new Set(document.assertions.map(assertion => assertion.result.outcome)), new Set([

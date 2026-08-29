@@ -49,6 +49,8 @@ function setCoreRuleInapplicable(input, ruleId) {
 function withFailedRecommendation() {
   const input = structuredClone(SAMPLE_AUDIT);
   const item = input.itemResults.find(value => value.id === '5.1.5');
+  item.outcome = 'failed';
+  item.ruleResults = ['focusable-elements-interactive'];
   input.ruleResults.push({
     ruleId: 'focusable-elements-interactive', outcome: 'failed', mode: 'assisted', nbrItems: ['5.1.5'],
     wcag: item.wcag.map(reference => reference.id),

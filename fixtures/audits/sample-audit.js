@@ -7,16 +7,25 @@ import { unknownAccessibilityWidgetInventory } from '../../src/core/detection/ac
 import { REPORT_HASH_BASE } from '../../src/core/report/integrity-chain.js';
 
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
-const CYCLE = ['failed', 'cantTell', 'inapplicable', 'untested'];
+const SAMPLE_RULE_OUTCOMES = Object.freeze(new Map([
+  ['focus-visible', 'failed'],
+  ['focus-fully-visible', 'passed'],
+  ['focus-partially-visible', 'inapplicable'],
+  ['focus-order', 'cantTell'],
+  ['keyboard-focus-trap', 'untested'],
+]));
 
-const itemResults = NBR17225_ITEMS.map((item, index) => ({
-  ...item,
-  wcag: item.wcag.map(reference => ({ ...reference })),
-  ruleIds: [...item.ruleIds],
-  outcome: item.id === '5.1.1' ? 'failed' : item.id === '5.1.2' ? 'passed' :
-    ['5.1.4', '5.7.5'].includes(item.id) ? 'cantTell' : CYCLE[index % CYCLE.length],
-  ruleResults: item.ruleIds,
-}));
+const itemResults = NBR17225_ITEMS.map(item => {
+  const ruleResults = item.ruleIds.filter(ruleId => SAMPLE_RULE_OUTCOMES.has(ruleId));
+  const outcome = ruleResults.length === 0 ? 'cantTell' : SAMPLE_RULE_OUTCOMES.get(ruleResults[0]);
+  return {
+    ...item,
+    wcag: item.wcag.map(reference => ({ ...reference })),
+    ruleIds: [...item.ruleIds],
+    outcome,
+    ruleResults,
+  };
+});
 
 const TIMESTAMPS = {
   startedAt: '2026-08-26T14:00:00.000Z',
@@ -110,7 +119,17 @@ export const SAMPLE_AUDIT = createAuditModel({
       wcag: itemById.get('5.1.2').wcag.map(reference => reference.id), targets: [], summary: 'O foco permaneceu totalmente visível.', limitations: [],
       source: { engine: 'audita-core', ruleId: 'focus-fully-visible', version: '1.0.0' },
     },
+    {
+      ruleId: 'focus-partially-visible', outcome: 'inapplicable', mode: 'automated', nbrItems: ['5.1.3'],
+      wcag: itemById.get('5.1.3').wcag.map(reference => reference.id), targets: [], summary: 'Não havia alvo aplicável no estado observado.', limitations: [],
+      source: { engine: 'audita-core', ruleId: 'focus-partially-visible', version: '1.0.0' },
+    },
     { ruleId: 'focus-order', outcome: 'cantTell', mode: 'assisted', nbrItems: ['5.1.4'], wcag: itemById.get('5.1.4').wcag.map(reference => reference.id), targets: ['n-1'], summary: 'A previsibilidade depende do fluxo da tarefa.', limitations: [], source: { engine: 'audita-core', ruleId: 'focus-order', version: '1.0.0' } },
+    {
+      ruleId: 'keyboard-focus-trap', outcome: 'untested', mode: 'assisted', nbrItems: ['5.1.6'],
+      wcag: itemById.get('5.1.6').wcag.map(reference => reference.id), targets: [], summary: 'O teste não foi executado neste estado.', limitations: [],
+      source: { engine: 'audita-core', ruleId: 'keyboard-focus-trap', version: '1.0.0' },
+    },
   ],
   itemResults,
   occurrences: [

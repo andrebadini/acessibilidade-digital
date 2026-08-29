@@ -1,15 +1,16 @@
 import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
 
-const OUTCOMES = ['passed', 'failed', 'cantTell', 'inapplicable', 'untested'];
-
 export function reportInput(overrides = {}) {
-  const itemResults = NBR17225_ITEMS.map((item, index) => ({
-    ...item,
-    wcag: item.wcag.map(reference => ({ ...reference })),
-    ruleIds: [...item.ruleIds],
-    outcome: OUTCOMES[index % OUTCOMES.length],
-    ruleResults: [],
-  }));
+  const itemResults = NBR17225_ITEMS.map(item => {
+    const linked = item.ruleIds.filter(ruleId => ['focus-visible', 'focus-order'].includes(ruleId));
+    return {
+      ...item,
+      wcag: item.wcag.map(reference => ({ ...reference })),
+      ruleIds: [...item.ruleIds],
+      outcome: linked.includes('focus-visible') ? 'passed' : 'cantTell',
+      ruleResults: linked,
+    };
+  });
   return {
     schemaVersion: 1,
     auditId: 'audit-report-1',

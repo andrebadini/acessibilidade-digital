@@ -103,8 +103,7 @@ function createAuditModelInternal(captured) {
   validateSinglePageCoreOccurrenceCompleteness(model, ruleById);
   validateAxeEvidenceBinding(model, validatedAxe);
   const reviewGraph = validateReview(model, graph);
-  validateAxeItemAggregation(model, validatedAxe, reviewGraph);
-  validatePassedItemAuthority(model.itemResults, ruleById, reviewGraph);
+  validateItemAuthority(model, ruleById, validatedAxe, reviewGraph);
   validateNormative(model.normative);
   return deepFreeze(model);
 }
@@ -132,7 +131,7 @@ export function migrateAuditV1ToV2(input) {
 }
 
 function migrateV1Record(model) {
-  assertAxeSupplementalIntegrity(model, model.versions?.rules ?? model.methodology?.version);
+  const validatedAxe = assertAxeSupplementalIntegrity(model, model.versions?.rules ?? model.methodology?.version);
   const pageId = V1_MIGRATION_DEFAULTS.pageId;
   const requestedUrl = sanitizeResourceUrl(model.requestedUrl);
   const finalUrl = sanitizeResourceUrl(model.finalUrl);
@@ -165,20 +164,7 @@ function migrateV1Record(model) {
     return output;
   });
   const ruleById = new Map(ruleResults.map(rule => [rule.ruleId, rule]));
-  const authoritativePassedItems = new Set(ruleResults
-    .filter(rule => rule.outcome === 'passed')
-    .flatMap(rule => rule.nbrItems));
-  const downgradedItemIds = new Set(ruleResults
-    .filter(rule => downgradedRuleIds.has(rule.ruleId)).flatMap(rule => rule.nbrItems));
-  const itemResults = (model.itemResults ?? []).map(item => {
-    const output = projectItemResult(item);
-    const hasOtherFailure = ruleResults.some(rule => rule.outcome === 'failed' && rule.nbrItems.includes(item.id));
-    if (downgradedItemIds.has(item.id) && !hasOtherFailure) output.outcome = 'cantTell';
-    else if (output.outcome === 'passed' && output.reviewedOutcome !== 'passed' && !authoritativePassedItems.has(item.id)) {
-      output.outcome = 'cantTell';
-    }
-    return output;
-  });
+  const projectedItemResults = (model.itemResults ?? []).map(projectItemResult);
   const occurrences = (model.occurrences ?? []).map(occurrence => {
     const legacySelector = occurrence.selector;
     const legacyFramePath = occurrence.framePath;
@@ -261,11 +247,18 @@ function migrateV1Record(model) {
     }
     return output;
   });
+  const itemResults = deriveMigratedItemResults(
+    projectedItemResults, ruleResults, validatedAxe, downgradedRuleIds,
+  );
   const manualReview = projectManualReview(model.manualReview ?? []);
   const queuedOccurrenceIds = new Set(manualReview.map(entry => entry.occurrenceId));
   for (const occurrence of occurrences) {
     const migratedManual = occurrence.source.engine === V1_MIGRATION_DEFAULTS.manualSourceEngine;
-    if ((!migratedManual && !downgradedRuleIds.has(occurrence.ruleId)) || queuedOccurrenceIds.has(occurrence.occurrenceId)) continue;
+    const sourceRule = ruleById.get(occurrence.source.ruleId);
+    const reviewableCantTell = occurrence.outcome === 'cantTell' && (migratedManual ||
+      downgradedRuleIds.has(occurrence.ruleId) ||
+      (occurrence.source.engine === V1_MIGRATION_DEFAULTS.sourceEngine && sourceRule?.mode !== 'automated'));
+    if (!reviewableCantTell || queuedOccurrenceIds.has(occurrence.occurrenceId)) continue;
     const item = itemById.get(occurrence.itemId);
     manualReview.push({
       occurrenceId: occurrence.occurrenceId, itemId: occurrence.itemId, ruleId: occurrence.ruleId,
@@ -273,8 +266,11 @@ function migrateV1Record(model) {
       question: `O item “${item?.title ?? occurrence.itemId}” está conforme no contexto observado?`,
       reason: migratedManual
         ? 'A ocorrência V1 depende de uma decisão humana explícita.'
-        : 'A evidência V1 não registra cobertura normativa autoritativa completa.',
+        : downgradedRuleIds.has(occurrence.ruleId)
+          ? 'A evidência V1 não registra cobertura normativa autoritativa completa.'
+          : 'A ocorrência V1 inconclusiva depende de uma decisão humana explícita.',
     });
+    queuedOccurrenceIds.add(occurrence.occurrenceId);
   }
   const ruleCount = model.methodology?.ruleCount;
   const timestamps = projectTimestamps(model.timestamps);
@@ -766,33 +762,134 @@ function validateAxeCoverageStatus(model, checked) {
   }
 }
 
-function validateAxeItemAggregation(model, checked, reviewGraph) {
-  if (!checked) return;
-  const coreRules = (model.ruleResults ?? []).filter(rule => rule?.source?.engine !== 'axe-core');
-  const aggregate = new Map(aggregateItems(coreRules, NBR17225_ITEMS).map(item => [item.id, item.outcome]));
-  for (const occurrence of checked.occurrences) {
+function deriveAuthoritativeItemStates(ruleResults, checkedAxe) {
+  const coreRules = (ruleResults ?? []).filter(rule => rule?.source?.engine === 'audita-core');
+  const states = new Map(aggregateItems(coreRules, NBR17225_ITEMS).map(item => [item.id, {
+    outcome: item.outcome,
+    ruleResults: item.ruleResults.map(rule => rule.ruleId),
+  }]));
+  for (const occurrence of checkedAxe?.occurrences ?? []) {
+    if (!occurrence.nbrItemRef || !states.has(occurrence.nbrItemRef)) continue;
+    const state = states.get(occurrence.nbrItemRef);
+    if (occurrence.outcome === 'failed' || (occurrence.outcome === 'cantTell' && state.outcome !== 'failed')) {
+      state.outcome = occurrence.outcome;
+    }
+  }
+  return states;
+}
+
+function deriveMigratedItemResults(items, ruleResults, checkedAxe, downgradedRuleIds) {
+  const states = deriveAuthoritativeItemStates(ruleResults, checkedAxe);
+  return items.map(item => {
+    const state = states.get(item.id);
+    if (!state) return item;
+    const output = { ...item };
+    const hasReviewState = ['originalOutcome', 'reviewedOutcome', 'review'].some(field =>
+      Object.hasOwn(output, field));
+    const coordinatedDowngrade = item.outcome === 'failed' && state.outcome === 'cantTell' &&
+      state.ruleResults.some(ruleId => downgradedRuleIds.has(ruleId));
+    if (canonicalStringify(item.ruleResults) !== canonicalStringify(state.ruleResults) ||
+      (!hasReviewState && item.outcome !== state.outcome && !coordinatedDowngrade)) {
+      throw new TypeError('Resultado de item V1 diverge das fontes autoritativas capturadas.');
+    }
+    output.ruleResults = [...state.ruleResults];
+    if (!hasReviewState || coordinatedDowngrade) output.outcome = state.outcome;
+    return output;
+  });
+}
+
+function validateItemAuthority(model, ruleById, checkedAxe, reviewGraph) {
+  const states = deriveAuthoritativeItemStates(model.ruleResults, checkedAxe);
+  const checkedFailedAxeIds = new Set((checkedAxe?.occurrences ?? [])
+    .filter(occurrence => occurrence.outcome === 'failed' && occurrence.nbrItemRef)
+    .map(occurrence => occurrence.occurrenceId));
+  const occurrencesByItem = new Map();
+  for (const occurrence of model.occurrences) {
     if (!occurrence.nbrItemRef) continue;
-    const previous = aggregate.get(occurrence.nbrItemRef);
-    if (occurrence.outcome === 'failed' || (occurrence.outcome === 'cantTell' && previous !== 'failed')) {
-      aggregate.set(occurrence.nbrItemRef, occurrence.outcome);
+    const occurrences = occurrencesByItem.get(occurrence.nbrItemRef) ?? [];
+    occurrences.push(occurrence);
+    occurrencesByItem.set(occurrence.nbrItemRef, occurrences);
+  }
+
+  for (const item of model.itemResults) {
+    const state = states.get(item.id);
+    if (!state || canonicalStringify(item.ruleResults) !== canonicalStringify(state.ruleResults)) {
+      throw new TypeError('Resultado de item diverge das regras autoritativas.');
+    }
+    const itemOccurrences = occurrencesByItem.get(item.id) ?? [];
+    if (state.outcome === 'failed' && !hasAuthoritativeFailedOccurrence(
+      itemOccurrences, ruleById, checkedFailedAxeIds,
+    )) {
+      throw new TypeError('Resultado de item falho não possui ocorrência conclusiva autoritativa.');
+    }
+    validateCantTellOrigins(itemOccurrences, ruleById, reviewGraph);
+
+    const decisions = itemOccurrences
+      .map(occurrence => reviewGraph.decisionByOccurrence.get(occurrence.occurrenceId))
+      .filter(Boolean);
+    const reviewFields = ['originalOutcome', 'reviewedOutcome', 'review'];
+    const presentReviewFields = reviewFields.filter(field => Object.hasOwn(item, field));
+    if (decisions.length === 0) {
+      if (presentReviewFields.length > 0 || item.outcome !== state.outcome) {
+        throw new TypeError('Resultado de item diverge das fontes autoritativas ou possui revisão sem decisão.');
+      }
+      continue;
+    }
+    if (presentReviewFields.length !== reviewFields.length) {
+      throw new TypeError('Resultado de item possui revisão incompleta ou sem grafo de decisões válido.');
+    }
+
+    const reviewedOutcome = deriveReviewedItemOutcome(state.outcome, itemOccurrences, decisions);
+    const expectedReview = deriveItemReviewSummary(decisions);
+    if (item.originalOutcome !== state.outcome || item.reviewedOutcome !== reviewedOutcome ||
+      item.outcome !== reviewedOutcome || canonicalStringify(item.review) !== canonicalStringify(expectedReview)) {
+      throw new TypeError('Revisão do item diverge das fontes e decisões autoritativas validadas.');
     }
   }
-  for (const item of model.itemResults ?? []) {
-    const expected = aggregate.get(item.id);
-    if (!expected) continue;
-    if (item.reviewedOutcome === undefined) {
-      if (item.outcome === expected) continue;
-      throw new TypeError(`Resultado do item ${item.id} diverge das fontes autoritativas aceitas.`);
-    }
-    const queue = [...reviewGraph.queueByOccurrence.entries()].filter(([, entry]) => entry.itemId === item.id);
-    const decisions = queue.map(([occurrenceId]) => reviewGraph.decisionByOccurrence.get(occurrenceId)).filter(Boolean);
-    let reviewedExpected = 'cantTell';
-    if (expected === 'failed' || decisions.some(decision => decision.answer === 'não conforme')) reviewedExpected = 'failed';
-    else if (queue.length > 0 && decisions.length === queue.length && decisions.every(decision => decision.answer === 'conforme')) reviewedExpected = 'passed';
-    if (item.originalOutcome !== expected || item.reviewedOutcome !== reviewedExpected || item.outcome !== reviewedExpected) {
-      throw new TypeError(`Revisão do item ${item.id} diverge das fontes e decisões validadas.`);
+}
+
+function hasAuthoritativeFailedOccurrence(occurrences, ruleById, checkedFailedAxeIds) {
+  return occurrences.some(occurrence => {
+    if (occurrence.outcome !== 'failed') return false;
+    if (occurrence.source.engine === 'axe-core') return checkedFailedAxeIds.has(occurrence.occurrenceId);
+    if (occurrence.source.engine !== 'audita-core') return false;
+    const sourceRule = ruleById.get(occurrence.source.ruleId);
+    return sourceRule?.outcome === 'failed' && sourceRule.nbrItems.includes(occurrence.nbrItemRef);
+  });
+}
+
+function validateCantTellOrigins(occurrences, ruleById, { queueByOccurrence }) {
+  for (const occurrence of occurrences) {
+    if (occurrence.outcome !== 'cantTell') continue;
+    const sourceRule = ruleById.get(occurrence.source.ruleId);
+    const requiresQueue = occurrence.source.engine === 'audita-manual-review' ||
+      (occurrence.source.engine === 'audita-core' && sourceRule?.mode !== 'automated');
+    if (requiresQueue && !queueByOccurrence.has(occurrence.occurrenceId)) {
+      throw new TypeError('Ocorrência inconclusiva revisável não possui fila humana coerente.');
     }
   }
+}
+
+function deriveReviewedItemOutcome(originalOutcome, occurrences, decisions) {
+  if (originalOutcome === 'failed' || decisions.some(decision => decision.answer === 'não conforme')) {
+    return 'failed';
+  }
+  if (decisions.length === occurrences.length && decisions.every(decision => decision.answer === 'conforme')) {
+    return 'passed';
+  }
+  return 'cantTell';
+}
+
+function deriveItemReviewSummary(decisions) {
+  const modes = [...new Set(decisions.map(decision => decision.mode))];
+  const evaluators = [...new Set(decisions.map(decision => decision.evaluator))];
+  const latest = [...decisions].sort((a, b) => a.decidedAt.localeCompare(b.decidedAt)).at(-1);
+  return {
+    mode: modes.length === 1 ? modes[0] : 'manual',
+    evaluator: evaluators.join(', '),
+    decidedAt: latest.decidedAt,
+    decisionIds: decisions.map(decision => decision.decisionId),
+  };
 }
 
 /** Privacy boundary for persisted evidence metadata; embedded image payloads remain evidence content. */
@@ -1409,38 +1506,6 @@ function validateAccessibilityWidgets(inventory) {
     const expectedStatus = positions.length > 0 ? 'present' : inventory.coverage === 'complete' ? 'absent' : 'unknown';
     if (widget.status !== expectedStatus) throw new TypeError('Inventário de widgets possui status incoerente com cobertura e sinais.');
   }
-}
-
-function validatePassedItemAuthority(items, ruleById, reviewGraph) {
-  for (const item of items) {
-    if (item.outcome !== 'passed') continue;
-    const reviewedPass = item.reviewedOutcome === 'passed' && hasValidatedConformityReview(item, reviewGraph);
-    if (item.reviewedOutcome === 'passed' && !reviewedPass) {
-      throw new TypeError(`Item ABNT ${item.id} não pode ser aprovado por revisão sem decisões conformes válidas do mesmo item.`);
-    }
-    const authoritativePass = item.ruleIds.some(ruleId => {
-      const rule = ruleById.get(ruleId);
-      return rule?.outcome === 'passed' && rule.nbrItems.includes(item.id);
-    });
-    if (!reviewedPass && !authoritativePass) {
-      throw new TypeError(`Item ABNT ${item.id} não pode ser aprovado sem resultado autoritativo ou revisão humana.`);
-    }
-  }
-}
-
-function hasValidatedConformityReview(item, { decisionByOccurrence, queueByOccurrence }) {
-  if (!Array.isArray(item.review?.decisionIds) || item.review.decisionIds.length === 0) return false;
-  const declaredIds = new Set(item.review.decisionIds);
-  if (declaredIds.size !== item.review.decisionIds.length) return false;
-  const actualIds = new Set();
-  for (const [occurrenceId, entry] of queueByOccurrence) {
-    if (entry.itemId !== item.id) continue;
-    const decision = decisionByOccurrence.get(occurrenceId);
-    if (!decision || decision.itemId !== item.id || decision.answer !== 'conforme') return false;
-    actualIds.add(decision.decisionId);
-  }
-  return actualIds.size > 0 && actualIds.size === declaredIds.size &&
-    [...actualIds].every(decisionId => declaredIds.has(decisionId));
 }
 
 function hasCorePassProvenance(source, ruleId, rulesVersion) {
