@@ -553,7 +553,7 @@ function renderPersonas() {
   } else if (personaState.reader.speechAvailability === 'unavailable' || personaLocalVoiceIds.size === 0) {
     personaDisabledReason.textContent = 'Nenhuma voz local validada está disponível; legenda e navegação continuam funcionando.';
   } else if (personaState.reader.speechAvailability === 'busy') {
-    personaDisabledReason.textContent = 'A página já usa a fila de fala; a ferramenta preserva essa fala e mantém a legenda.';
+    personaDisabledReason.textContent = 'A fila de fala está ocupada; a ferramenta a preserva e mantém a legenda.';
   } else personaDisabledReason.textContent = 'Controles disponíveis para a leitura simulada.';
 }
 

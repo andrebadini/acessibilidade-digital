@@ -242,15 +242,9 @@
       return selected.voice;
     }
 
-    function invalidateOwnedSpeech(cancelOwned) {
-      var synthesis = speechSynthesis;
-      var owned = ownUtterance;
+    function invalidateOwnedSpeech() {
       speechGeneration += 1;
       ownUtterance = null;
-      if (!cancelOwned || !owned || !synthesis) return;
-      var cancel = nativeMethod(synthesis, nativeSynthesisPrototype, 'cancel');
-      if (!cancel) { speechAvailability = 'error'; return; }
-      try { cancel.call(synthesis); } catch (_error) { speechAvailability = 'error'; }
     }
 
     function speakCurrent() {
@@ -263,7 +257,7 @@
       }
       var voice = selectedVoice();
       if (!voice) {
-        if (ownUtterance) invalidateOwnedSpeech(true);
+        if (ownUtterance) invalidateOwnedSpeech();
         return publish(current);
       }
       var speak = nativeMethod(synthesis, nativeSynthesisPrototype, 'speak');
@@ -271,18 +265,18 @@
         speechAvailability = 'error';
         return publish(current);
       }
-      if (!ownUtterance) {
-        var busy = synthesisBusy(synthesis);
-        if (busy === null) {
-          speechAvailability = 'error';
-          return publish(current);
-        }
-        if (busy) {
-          speechAvailability = 'busy';
-          return publish(current);
-        }
+      // Web Speech exposes one global queue and no per-utterance stop. A reference
+      // to our utterance is therefore not proof that cancel/pause/resume is safe.
+      if (ownUtterance) invalidateOwnedSpeech();
+      var busy = synthesisBusy(synthesis);
+      if (busy === null) {
+        speechAvailability = 'error';
+        return publish(current);
       }
-      if (ownUtterance) invalidateOwnedSpeech(true);
+      if (busy) {
+        speechAvailability = 'busy';
+        return publish(current);
+      }
       var generation = ++speechGeneration;
       var utterance;
       try {
@@ -361,7 +355,11 @@
     function handleVoicesChanged() {
       if (!sessionActive) return state();
       var selected = selectedVoice();
-      if (!selected && ownUtterance) invalidateOwnedSpeech(true);
+      if (!selected && ownUtterance) invalidateOwnedSpeech();
+      if (selected && !ownUtterance) {
+        var busy = synthesisBusy(speechSynthesis);
+        speechAvailability = busy === null ? 'error' : (busy ? 'busy' : 'available');
+      }
       publish(queue[index]);
     }
 
@@ -417,10 +415,10 @@
     function pause() {
       if (playback !== 'playing') return state();
       playback = 'paused';
-      var synthesis = speechSynthesis;
-      var pauseSpeech = nativeMethod(synthesis, nativeSynthesisPrototype, 'pause');
-      if (ownUtterance && synthesis && pauseSpeech) {
-        try { pauseSpeech.call(synthesis); } catch (_error) { speechAvailability = 'error'; }
+      if (ownUtterance) {
+        invalidateOwnedSpeech();
+        var busy = synthesisBusy(speechSynthesis);
+        speechAvailability = busy === null ? 'error' : (busy ? 'busy' : speechAvailability);
       }
       return publish(queue[index]);
     }
@@ -428,13 +426,6 @@
     function resume() {
       if (playback !== 'paused') return state();
       playback = 'playing';
-      var synthesis = speechSynthesis;
-      var paused = synthesis ? synthesisBoolean(synthesis, 'paused') : null;
-      var resumeSpeech = nativeMethod(synthesis, nativeSynthesisPrototype, 'resume');
-      if (ownUtterance && synthesis && paused?.ok && paused.value && resumeSpeech) {
-        try { resumeSpeech.call(synthesis); } catch (_error) { speechAvailability = 'error'; }
-        return publish(queue[index]);
-      }
       publish(queue[index]);
       return speakCurrent();
     }
@@ -447,7 +438,7 @@
     function clearSession(restoreOriginalFocus) {
       sessionActive = false;
       lifecycleGeneration += 1;
-      invalidateOwnedSpeech(true);
+      invalidateOwnedSpeech();
       unsubscribe();
       var focusToRestore = originalFocus;
       queue = [];

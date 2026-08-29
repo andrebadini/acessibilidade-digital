@@ -218,6 +218,14 @@ test('panel lists only descriptor-safe local voices and clears a persisted remot
   panelMessage(clearedState);
   assert.equal(voiceSelect.disabled, false);
 
+  const busyState = personaState('event-shared-queue-busy', '');
+  busyState.activeMode = 'reader';
+  busyState.reader.playback = 'playing';
+  busyState.reader.speechAvailability = 'busy';
+  panelMessage(busyState);
+  assert.match(element('persona-disabled-reason').textContent, /fila de fala está ocupada[^.]*preserva[^.]*legenda/iu);
+  assert.doesNotMatch(element('persona-disabled-reason').textContent, /a página já usa/iu);
+
   listed = [{
     voiceURI: 'plain-local-claim', name: 'Voz comum', lang: 'pt-BR', localService: true,
   }];

@@ -83,7 +83,8 @@ test('panel exposes three reversible persona modes and complete simulated-reader
   assert.match(personaSection, /não substitui/iu);
   assert.match(personaSection, /Escape[^<]*três|três[^<]*Escape/iu);
   assert.match(personaSection, /campos editáveis e áreas marcadas como privadas são omitidos/iu);
-  assert.match(personaSection, /ao parar ou substituir a fala própria[^.]*falas enfileiradas depois podem ser afetadas/iu);
+  assert.match(personaSection, /não usa os comandos globais de cancelar, pausar ou retomar/iu);
+  assert.match(personaSection, /a fala já iniciada pode terminar[^.]*legenda e os controles continuam disponíveis/iu);
   assert.equal((personaSection.match(/aria-live="polite"/gu) ?? []).length, 1);
   assert.doesNotMatch(personaSection.match(/id="persona-caption"[^>]*>/u)?.[0] ?? '', /aria-live/iu);
   assert.match(personaSection.match(/id="persona-caption"[^>]*>/u)?.[0] ?? '', /dir="auto"/iu);

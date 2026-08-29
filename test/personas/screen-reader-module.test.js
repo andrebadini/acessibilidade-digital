@@ -29,7 +29,7 @@ class TrustedSpeechSynthesis {
       voices: options.voices ?? [], events: options.events ?? [], speakThrows: options.speakThrows === true,
       cancelEndsSynchronously: options.cancelEndsSynchronously === true,
       speaking: false, pending: false, paused: false, cancelCalls: 0, pauseCalls: 0, resumeCalls: 0,
-      current: null,
+      current: null, foreignQueue: [],
     });
   }
   get speaking() { return requireBrand(trustedSynthesisState, this, 'síntese').speaking; }
@@ -53,6 +53,8 @@ class TrustedSpeechSynthesis {
     const state = requireBrand(trustedSynthesisState, this, 'síntese');
     state.events.push('cancel');
     state.cancelCalls += 1;
+    for (const utterance of state.foreignQueue) utterance.cancelled = true;
+    state.foreignQueue = [];
     state.speaking = false;
     state.pending = false;
     if (state.cancelEndsSynchronously) state.current?.onend?.();
@@ -162,6 +164,14 @@ function fixtureEnvironment(options = {}) {
   return {
     environment, speech, events, utterances, get candidates() { return candidates; },
     setSpeechState(patch) { Object.assign(requireBrand(trustedSynthesisState, speech, 'síntese'), patch); },
+    enqueueForeignSpeech(text = 'Fala da página') {
+      const state = requireBrand(trustedSynthesisState, speech, 'síntese');
+      const utterance = { text, cancelled: false };
+      state.foreignQueue.push(utterance);
+      state.pending = true;
+      events.push(`foreign:${text}`);
+      return utterance;
+    },
     setCandidates(value) { candidates = value; },
     listenerState() { return { focus: Boolean(focusListener), voices: Boolean(voicesListener), focusUnsubscribes, voicesUnsubscribes }; },
     captureFocusListener() { return focusListener; },
@@ -193,13 +203,14 @@ test('starts caption-first, navigates exact bounds and focuses only selected ite
   assert.equal(reader.getState().canNext, false);
 });
 
-test('pause/resume owns only its utterance and external focus while paused stays silent', async () => {
+test('pause/resume change only Audita state and never pause or resume the shared page queue', async () => {
   const namespace = await loadReaderFactory();
   const fixture = fixtureEnvironment();
   const reader = namespace.createScreenReaderModule(fixture.environment);
   reader.start({ voiceId: 'voice-a', rate: 1 });
+  const foreign = fixture.enqueueForeignSpeech('Fala da página após Audita');
   assert.equal(reader.pause().playback, 'paused');
-  assert.equal(fixture.speech.pauseCalls, 1);
+  assert.equal(fixture.speech.pauseCalls, 0, 'pause é global e não pode afetar a página');
   const utteranceCount = fixture.utterances.length;
 
   fixture.focus(fixture.candidates[2].element);
@@ -207,11 +218,12 @@ test('pause/resume owns only its utterance and external focus while paused stays
   assert.equal(reader.getState().caption, 'Terceiro, caixa de seleção');
   assert.equal(fixture.utterances.length, utteranceCount, 'foco pausado não cria fala');
   assert.equal(reader.resume().playback, 'playing');
-  assert.equal(fixture.speech.resumeCalls, 1);
+  assert.equal(fixture.speech.resumeCalls, 0, 'resume é global e não pode afetar a página');
+  assert.equal(foreign.cancelled, false);
 
   const stopped = reader.stop('requested');
   assert.equal(stopped.playback, 'idle');
-  assert.equal(fixture.speech.cancelCalls, 1);
+  assert.equal(fixture.speech.cancelCalls, 0);
   assert.ok(fixture.events.includes('restore:original:true'));
   assert.deepEqual(reader.stop('again'), stopped, 'parar duas vezes é idempotente');
 });
@@ -236,6 +248,46 @@ test('never cancels foreign speech and ignores stale synchronous callbacks from 
   stale.onerror?.();
   stale.onend?.();
   assert.deepEqual(reader.getState(), afterNext);
+});
+
+test('next, repeat, stop and voiceschanged never cancel speech queued by the page after Audita starts', async () => {
+  const namespace = await loadReaderFactory();
+  for (const action of ['next', 'repeat', 'stop', 'voiceschanged']) {
+    const fixture = fixtureEnvironment();
+    const reader = namespace.createScreenReaderModule(fixture.environment);
+    reader.start({ voiceId: 'voice-a', rate: 1 });
+    assert.equal(fixture.utterances.length, 1, `${action}: a fala Audita precisa estar ativa`);
+    const foreign = fixture.enqueueForeignSpeech(`Página depois de ${action}`);
+
+    if (action === 'voiceschanged') {
+      fixture.speech.voices = [];
+      fixture.voicesChanged();
+    } else {
+      reader[action]();
+    }
+
+    assert.equal(fixture.speech.cancelCalls, 0, `${action}: cancel é global e não pode ser usado`);
+    assert.equal(foreign.cancelled, false, `${action}: a fala alheia precisa permanecer na fila`);
+    assert.equal(fixture.utterances.length, 1, `${action}: nenhuma fala Audita obsoleta pode entrar depois da fala alheia`);
+    if (action === 'next') assert.equal(reader.getState().caption, 'Segundo, link');
+    if (action === 'stop') assert.equal(reader.getState().playback, 'idle');
+    else assert.notEqual(reader.getState().playback, 'idle');
+  }
+});
+
+test('voiceschanged cannot hide that the shared queue remains busy after Audita abandons its utterance', async () => {
+  const namespace = await loadReaderFactory();
+  const fixture = fixtureEnvironment();
+  const reader = namespace.createScreenReaderModule(fixture.environment);
+  reader.start({ voiceId: 'voice-a', rate: 1 });
+  fixture.enqueueForeignSpeech();
+  reader.next();
+  assert.equal(reader.getState().speechAvailability, 'busy');
+
+  fixture.voicesChanged();
+
+  assert.equal(reader.getState().speechAvailability, 'busy');
+  assert.equal(fixture.speech.cancelCalls, 0);
 });
 
 test('keeps caption/navigation when synthesis is missing, throws, or loses a preferred voice', async () => {
@@ -528,7 +580,7 @@ test('revalidates a selected local voice immediately before speak and on voicesc
   changedReader.start({ voiceId: 'local-a', rate: 1 });
   changedFixture.speech.voices = [];
   changedFixture.voicesChanged();
-  assert.equal(changedFixture.speech.cancelCalls, 1);
+  assert.equal(changedFixture.speech.cancelCalls, 0, 'a perda da voz não autoriza cancelar a fila global');
   assert.equal(changedReader.getState().voiceId, '');
   assert.equal(changedReader.getState().speechAvailability, 'unavailable');
 });
