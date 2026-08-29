@@ -50,6 +50,9 @@ let panelState = null;
 let personaState = createInitialPersonaState();
 let personaPort = null;
 let personaRequestSequence = 0;
+let personaLocalVoiceIds = new Set();
+let personaVoiceInventoryStatus = 'unavailable';
+let personaVoiceClearPending = '';
 let contextPrefill = null;
 let currentPanelTabIdPromise = null;
 const seenContextPrefills = new Set();
@@ -522,7 +525,7 @@ function renderPersonas() {
   personaReaderRepeat.disabled = !ready || pending || !readerActive || personaState.reader.total === 0;
   personaReaderPrevious.disabled = !ready || pending || !readerActive || !personaState.reader.canPrevious;
   personaReaderNext.disabled = !ready || pending || !readerActive || !personaState.reader.canNext;
-  personaVoice.disabled = !ready || pending;
+  personaVoice.disabled = !ready || pending || personaLocalVoiceIds.size === 0;
   personaRate.disabled = !ready || pending;
   syncPersonaPreferences();
   personaCaption.textContent = personaState.reader.caption || 'Nenhum anúncio disponível.';
@@ -536,26 +539,33 @@ function renderPersonas() {
   if (!ready) personaDisabledReason.textContent = personaState.message;
   else if (pending) personaDisabledReason.textContent = 'Aguarde a confirmação da página antes de enviar outro controle.';
   else if (!readerActive) personaDisabledReason.textContent = 'Os controles de reprodução ficam disponíveis ao ativar Leitura simulada.';
-  else if (['unavailable', 'error'].includes(personaState.reader.speechAvailability)) {
-    personaDisabledReason.textContent = 'A fala não está disponível; legenda e navegação continuam funcionando.';
+  else if (personaState.reader.speechAvailability === 'error' || personaVoiceInventoryStatus === 'error') {
+    personaDisabledReason.textContent = 'Não foi possível validar uma voz local; legenda e navegação continuam funcionando.';
+  } else if (personaState.reader.speechAvailability === 'unavailable' || personaLocalVoiceIds.size === 0) {
+    personaDisabledReason.textContent = 'Nenhuma voz local validada está disponível; legenda e navegação continuam funcionando.';
   } else if (personaState.reader.speechAvailability === 'busy') {
     personaDisabledReason.textContent = 'A página já usa a fila de fala; a ferramenta preserva essa fala e mantém a legenda.';
   } else personaDisabledReason.textContent = 'Controles disponíveis para a leitura simulada.';
 }
 
 function syncPersonaPreferences() {
-  const voiceId = personaState.preferences?.voiceId || '';
-  if (!Array.from(personaVoice.options).some(option => option.value === voiceId) && voiceId) {
-    const unavailable = document.createElement('option');
-    unavailable.value = voiceId;
-    unavailable.textContent = 'Voz salva indisponível nesta sessão';
-    personaVoice.appendChild(unavailable);
-  }
+  const storedVoiceId = typeof personaState.preferences?.voiceId === 'string'
+    ? personaState.preferences.voiceId
+    : '';
+  const voiceId = personaLocalVoiceIds.has(storedVoiceId) ? storedVoiceId : '';
   personaVoice.value = voiceId;
   const rate = Number(personaState.preferences?.rate);
   const safeRate = Number.isFinite(rate) && rate >= 0.5 && rate <= 2 ? rate : 1;
   personaRate.value = String(safeRate);
   personaRateOutput.value = `${safeRate.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}×`;
+  if (!storedVoiceId || voiceId) {
+    personaVoiceClearPending = '';
+    return;
+  }
+  const ready = personaState.connection === 'ready' && personaState.bound && Boolean(personaState.token);
+  if (!ready || personaState.pending || personaVoiceClearPending === storedVoiceId) return;
+  personaVoiceClearPending = storedVoiceId;
+  sendPersonaCommand('preferences', { voiceId: '', rate: safeRate });
 }
 
 function renderPersonaLimitations() {
@@ -587,25 +597,166 @@ function personaLimitationText(limitation) {
   return `${limitation.count} ocorrência(s): ${label}.${suffix}`;
 }
 
+function panelDataMethod(value, key) {
+  if (!value || (typeof value !== 'object' && typeof value !== 'function')) return null;
+  try {
+    let current = value;
+    for (let depth = 0; current && depth < 4; depth += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, key);
+      if (descriptor) {
+        return Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'function'
+          ? descriptor.value
+          : null;
+      }
+      current = Object.getPrototypeOf(current);
+    }
+  } catch { return null; }
+  return null;
+}
+
+function readPanelSpeechSynthesis() {
+  try {
+    const own = Object.getOwnPropertyDescriptor(globalThis, 'speechSynthesis');
+    if (own) {
+      return Object.hasOwn(own, 'value')
+        ? { status: own.value ? 'available' : 'unavailable', synthesis: own.value || null }
+        : { status: 'error', synthesis: null };
+    }
+    let current = Object.getPrototypeOf(globalThis);
+    for (let depth = 0; current && depth < 3; depth += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, 'speechSynthesis');
+      if (descriptor) {
+        if (typeof descriptor.get !== 'function' || descriptor.set !== undefined) {
+          return { status: 'error', synthesis: null };
+        }
+        const synthesis = descriptor.get.call(globalThis);
+        return { status: synthesis ? 'available' : 'unavailable', synthesis: synthesis || null };
+      }
+      current = Object.getPrototypeOf(current);
+    }
+  } catch { return { status: 'error', synthesis: null }; }
+  return { status: 'unavailable', synthesis: null };
+}
+
+function densePanelVoiceEntries(value) {
+  try {
+    if (!Array.isArray(value)) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const length = descriptors.length;
+    if (!length || !Object.hasOwn(length, 'value') || !Number.isSafeInteger(length.value) ||
+      length.value < 0 || length.value > 128 || Reflect.ownKeys(descriptors).length !== length.value + 1) return null;
+    const entries = new Array(length.value);
+    for (let index = 0; index < length.value; index += 1) {
+      const descriptor = descriptors[String(index)];
+      if (!descriptor || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) return null;
+      entries[index] = descriptor.value;
+    }
+    return entries;
+  } catch { return null; }
+}
+
+function panelNativeVoicePrototype() {
+  try {
+    const constructorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'SpeechSynthesisVoice');
+    const Constructor = constructorDescriptor && Object.hasOwn(constructorDescriptor, 'value')
+      ? constructorDescriptor.value
+      : null;
+    if (typeof Constructor !== 'function') return null;
+    const prototypeDescriptor = Object.getOwnPropertyDescriptor(Constructor, 'prototype');
+    return prototypeDescriptor && Object.hasOwn(prototypeDescriptor, 'value')
+      ? prototypeDescriptor.value
+      : null;
+  } catch { return null; }
+}
+
+function projectPanelVoice(voice, nativePrototype) {
+  if (!voice || typeof voice !== 'object') return null;
+  let descriptors;
+  try { descriptors = Object.getOwnPropertyDescriptors(voice); } catch { return null; }
+  const ownLocal = descriptors.localService;
+  if (ownLocal && !Object.hasOwn(ownLocal, 'value')) return null;
+  let read;
+  if (ownLocal) {
+    read = key => {
+      const descriptor = descriptors[key];
+      if (!descriptor) return { present: false, value: undefined };
+      return Object.hasOwn(descriptor, 'value') ? { present: true, value: descriptor.value } : null;
+    };
+  } else {
+    try {
+      if (!nativePrototype || Object.getPrototypeOf(voice) !== nativePrototype) return { local: false };
+    } catch { return null; }
+    read = key => {
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(nativePrototype, key);
+        if (!descriptor || typeof descriptor.get !== 'function' || descriptor.set !== undefined) return null;
+        return { present: true, value: descriptor.get.call(voice) };
+      } catch { return null; }
+    };
+  }
+  const local = read('localService');
+  if (!local) return null;
+  if (!local.present || local.value !== true) return { local: false };
+  const uri = read('voiceURI');
+  if (!uri || !uri.present || typeof uri.value !== 'string' || uri.value !== uri.value.trim() ||
+    Array.from(uri.value).length < 1 || Array.from(uri.value).length > 200 ||
+    /[\u0000-\u001f\u007f]/u.test(uri.value)) return null;
+  const name = read('name');
+  const language = read('lang');
+  if (!name || !language || (name.present && typeof name.value !== 'string') ||
+    (language.present && typeof language.value !== 'string')) return null;
+  const safeName = name.present
+    ? Array.from(name.value.replace(/\s+/gu, ' ').trim()).slice(0, 120).join('')
+    : '';
+  const safeLanguage = language.present
+    ? language.value.replace(/[^A-Za-z0-9-]/gu, '').slice(0, 35)
+    : '';
+  return { local: true, voiceId: uri.value, name: safeName || 'Voz local', language: safeLanguage };
+}
+
+function readPanelLocalVoices() {
+  const speech = readPanelSpeechSynthesis();
+  if (!speech.synthesis) return { status: speech.status, voices: [] };
+  const synthesis = speech.synthesis;
+  const getVoices = panelDataMethod(synthesis, 'getVoices');
+  if (!getVoices) return { status: 'error', voices: [] };
+  try {
+    const entries = densePanelVoiceEntries(getVoices.call(synthesis));
+    if (!entries) return { status: 'error', voices: [] };
+    const voices = [];
+    const ids = new Set();
+    const nativePrototype = panelNativeVoicePrototype();
+    for (const entry of entries) {
+      const projected = projectPanelVoice(entry, nativePrototype);
+      if (!projected) return { status: 'error', voices: [] };
+      if (!projected.local) continue;
+      if (ids.has(projected.voiceId)) return { status: 'error', voices: [] };
+      ids.add(projected.voiceId);
+      voices.push(projected);
+    }
+    return { status: 'available', voices };
+  } catch { return { status: 'error', voices: [] }; }
+}
+
 function loadPersonaVoices() {
   if (!personaVoice) return;
-  let voices = [];
-  try { voices = globalThis.speechSynthesis?.getVoices?.() || []; } catch { voices = []; }
-  const safe = voices.filter(voice => typeof voice?.voiceURI === 'string' &&
-    Array.from(voice.voiceURI).length <= 200 && !/[\u0000-\u001f\u007f]/u.test(voice.voiceURI));
+  const inventory = readPanelLocalVoices();
+  personaVoiceInventoryStatus = inventory.status;
+  personaLocalVoiceIds = new Set(inventory.voices.map(voice => voice.voiceId));
   const defaultOption = document.createElement('option');
   defaultOption.value = '';
-  defaultOption.textContent = 'Voz padrão do navegador';
+  defaultOption.textContent = inventory.status === 'error'
+    ? 'Não foi possível validar vozes locais'
+    : (inventory.voices.length ? 'Selecione uma voz local' : 'Nenhuma voz local disponível');
   personaVoice.replaceChildren(defaultOption);
-  for (const voice of safe.slice(0, 128)) {
+  for (const voice of inventory.voices) {
     const option = document.createElement('option');
-    option.value = voice.voiceURI;
-    const name = typeof voice.name === 'string' ? voice.name.replace(/\s+/gu, ' ').trim().slice(0, 120) : 'Voz disponível';
-    const language = typeof voice.lang === 'string' ? voice.lang.replace(/[^A-Za-z0-9-]/gu, '').slice(0, 35) : '';
-    option.textContent = language ? `${name} (${language})` : name;
+    option.value = voice.voiceId;
+    option.textContent = voice.language ? `${voice.name} (${voice.language})` : voice.name;
     personaVoice.appendChild(option);
   }
   syncPersonaPreferences();
+  renderPersonas();
 }
 
 for (const button of personaModeButtons) {
@@ -631,16 +782,22 @@ personaReaderRepeat?.addEventListener('click', () => sendPersonaCommand('reader-
 personaReaderPrevious?.addEventListener('click', () => sendPersonaCommand('reader-action', { action: 'previous' }));
 personaReaderNext?.addEventListener('click', () => sendPersonaCommand('reader-action', { action: 'next' }));
 personaVoice?.addEventListener('change', () => sendPersonaCommand('preferences', {
-  voiceId: personaVoice.value, rate: Number(personaRate.value),
+  voiceId: personaLocalVoiceIds.has(personaVoice.value) ? personaVoice.value : '',
+  rate: Number(personaRate.value),
 }));
 personaRate?.addEventListener('input', () => {
   const value = Number(personaRate.value);
   personaRateOutput.value = `${value.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}×`;
 });
 personaRate?.addEventListener('change', () => sendPersonaCommand('preferences', {
-  voiceId: personaVoice.value, rate: Number(personaRate.value),
+  voiceId: personaLocalVoiceIds.has(personaVoice.value) ? personaVoice.value : '',
+  rate: Number(personaRate.value),
 }));
-globalThis.speechSynthesis?.addEventListener?.('voiceschanged', loadPersonaVoices);
+try {
+  const synthesis = readPanelSpeechSynthesis().synthesis;
+  const addVoicesListener = panelDataMethod(synthesis, 'addEventListener');
+  addVoicesListener?.call(synthesis, 'voiceschanged', loadPersonaVoices);
+} catch { /* absence of a safe listener keeps the inventory fail-closed */ }
 
 loadPersonaVoices();
 connectPersonas();

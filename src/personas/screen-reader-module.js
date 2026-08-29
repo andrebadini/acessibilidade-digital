@@ -20,7 +20,7 @@
     var index = -1;
     var playback = 'idle';
     var caption = '';
-    var speechAvailability = environment.speechSynthesis ? 'available' : 'unavailable';
+    var speechAvailability = 'unavailable';
     var voiceId = '';
     var rate = 1;
     var originalFocus = null;
@@ -31,6 +31,36 @@
     var suppressFocusElement = null;
     var sessionActive = false;
     var lifecycleGeneration = 0;
+    var nativeVoicePrototype = trustedNativeVoicePrototype();
+    var nativeSynthesisPrototype = trustedNativeSynthesisPrototype();
+
+    function trustedNativeVoicePrototype() {
+      try {
+        var constructorDescriptor = Object.getOwnPropertyDescriptor(root, 'SpeechSynthesisVoice');
+        var Constructor = constructorDescriptor && Object.hasOwn(constructorDescriptor, 'value')
+          ? constructorDescriptor.value
+          : null;
+        if (typeof Constructor !== 'function') return null;
+        var prototypeDescriptor = Object.getOwnPropertyDescriptor(Constructor, 'prototype');
+        return prototypeDescriptor && Object.hasOwn(prototypeDescriptor, 'value')
+          ? prototypeDescriptor.value
+          : null;
+      } catch (_error) { return null; }
+    }
+
+    function trustedNativeSynthesisPrototype() {
+      try {
+        var constructorDescriptor = Object.getOwnPropertyDescriptor(root, 'SpeechSynthesis');
+        var Constructor = constructorDescriptor && Object.hasOwn(constructorDescriptor, 'value')
+          ? constructorDescriptor.value
+          : null;
+        if (typeof Constructor !== 'function') return null;
+        var prototypeDescriptor = Object.getOwnPropertyDescriptor(Constructor, 'prototype');
+        return prototypeDescriptor && Object.hasOwn(prototypeDescriptor, 'value')
+          ? prototypeDescriptor.value
+          : null;
+      } catch (_error) { return null; }
+    }
 
     function boundedCaption(value) {
       return typeof value === 'string'
@@ -85,23 +115,154 @@
       return snapshot;
     }
 
-    function voices() {
-      var synthesis = environment.speechSynthesis;
-      if (!synthesis || typeof synthesis.getVoices !== 'function') return [];
+    function dataMethod(value, key) {
+      if (!value || (typeof value !== 'object' && typeof value !== 'function')) return null;
       try {
-        var listed = synthesis.getVoices();
-        return Array.isArray(listed) ? listed.slice(0, 128) : [];
+        var current = value;
+        for (var depth = 0; current && depth < 4; depth += 1) {
+          var descriptor = Object.getOwnPropertyDescriptor(current, key);
+          if (descriptor) {
+            return Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'function'
+              ? descriptor.value
+              : null;
+          }
+          current = Object.getPrototypeOf(current);
+        }
+      } catch (_error) { return null; }
+      return null;
+    }
+
+    function synthesisBoolean(synthesis, key) {
+      try {
+        var own = Object.getOwnPropertyDescriptor(synthesis, key);
+        if (own) {
+          return Object.hasOwn(own, 'value') && typeof own.value === 'boolean'
+            ? { ok: true, value: own.value }
+            : { ok: false, value: false };
+        }
+        if (!nativeSynthesisPrototype || Object.getPrototypeOf(synthesis) !== nativeSynthesisPrototype) {
+          return { ok: false, value: false };
+        }
+        var descriptor = Object.getOwnPropertyDescriptor(nativeSynthesisPrototype, key);
+        if (!descriptor || typeof descriptor.get !== 'function' || descriptor.set !== undefined) {
+          return { ok: false, value: false };
+        }
+        var value = descriptor.get.call(synthesis);
+        return typeof value === 'boolean' ? { ok: true, value: value } : { ok: false, value: false };
+      } catch (_error) { return { ok: false, value: false }; }
+    }
+
+    function synthesisBusy(synthesis) {
+      var speaking = synthesisBoolean(synthesis, 'speaking');
+      var pending = synthesisBoolean(synthesis, 'pending');
+      var paused = synthesisBoolean(synthesis, 'paused');
+      if (!speaking.ok || !pending.ok || !paused.ok) return null;
+      return speaking.value || pending.value || paused.value;
+    }
+
+    function denseVoiceEntries(value) {
+      try {
+        if (!Array.isArray(value)) return null;
+        var descriptors = Object.getOwnPropertyDescriptors(value);
+        var lengthDescriptor = descriptors.length;
+        if (!lengthDescriptor || !Object.hasOwn(lengthDescriptor, 'value') ||
+          !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0 ||
+          lengthDescriptor.value > 128 || Reflect.ownKeys(descriptors).length !== lengthDescriptor.value + 1) return null;
+        var entries = new Array(lengthDescriptor.value);
+        for (var position = 0; position < lengthDescriptor.value; position += 1) {
+          var descriptor = descriptors[String(position)];
+          if (!descriptor || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) return null;
+          entries[position] = descriptor.value;
+        }
+        return entries;
+      } catch (_error) { return null; }
+    }
+
+    function ownVoiceValue(descriptors, key) {
+      var descriptor = descriptors[key];
+      if (!descriptor) return { present: false, value: undefined };
+      if (!Object.hasOwn(descriptor, 'value')) return null;
+      return { present: true, value: descriptor.value };
+    }
+
+    function nativeVoiceValue(voice, key) {
+      if (!nativeVoicePrototype) return null;
+      try {
+        if (Object.getPrototypeOf(voice) !== nativeVoicePrototype) return null;
+        var descriptor = Object.getOwnPropertyDescriptor(nativeVoicePrototype, key);
+        if (!descriptor || typeof descriptor.get !== 'function' || descriptor.set !== undefined) return null;
+        return { present: true, value: descriptor.get.call(voice) };
+      } catch (_error) { return null; }
+    }
+
+    function projectVoice(voice) {
+      if (!voice || typeof voice !== 'object') return null;
+      var descriptors;
+      try {
+        descriptors = Object.getOwnPropertyDescriptors(voice);
+      } catch (_error) { return null; }
+      var ownLocal = ownVoiceValue(descriptors, 'localService');
+      if (!ownLocal) return null;
+      var read;
+      if (ownLocal.present) read = function readOwn(key) { return ownVoiceValue(descriptors, key); };
+      else {
+        try {
+          if (!nativeVoicePrototype || Object.getPrototypeOf(voice) !== nativeVoicePrototype) return { local: false };
+        } catch (_error) { return null; }
+        read = function readNative(key) { return nativeVoiceValue(voice, key); };
+      }
+      var local = read('localService');
+      if (!local) return null;
+      if (!local.present || local.value !== true) return { local: false };
+      var uri = read('voiceURI');
+      if (!uri || !uri.present) return null;
+      var canonicalId = boundedVoiceId(uri.value);
+      if (!canonicalId || canonicalId !== uri.value) return null;
+      for (var optionalKey of ['name', 'lang']) {
+        var optional = read(optionalKey);
+        if (!optional || (optional.present && typeof optional.value !== 'string')) return null;
+      }
+      return { local: true, voiceId: canonicalId, voice: voice };
+    }
+
+    function localVoiceInventory() {
+      var synthesis = environment.speechSynthesis;
+      if (!synthesis) return { status: 'unavailable', voices: [] };
+      var getVoices = dataMethod(synthesis, 'getVoices');
+      if (!getVoices) return { status: 'error', voices: [] };
+      try {
+        var entries = denseVoiceEntries(getVoices.call(synthesis));
+        if (!entries) return { status: 'error', voices: [] };
+        var projected = [];
+        var ids = new Set();
+        for (var entry of entries) {
+          var voice = projectVoice(entry);
+          if (!voice) return { status: 'error', voices: [] };
+          if (!voice.local) continue;
+          if (ids.has(voice.voiceId)) return { status: 'error', voices: [] };
+          ids.add(voice.voiceId);
+          projected.push(voice);
+        }
+        return { status: 'available', voices: projected };
       } catch (_error) {
-        speechAvailability = 'error';
-        return [];
+        return { status: 'error', voices: [] };
       }
     }
 
     function selectedVoice() {
-      if (!voiceId) return null;
-      return voices().find(function matchesVoice(voice) {
-        return voice && typeof voice.voiceURI === 'string' && voice.voiceURI === voiceId;
-      }) || null;
+      var inventory = localVoiceInventory();
+      if (!voiceId) {
+        speechAvailability = inventory.status === 'error' ? 'error' : 'unavailable';
+        return null;
+      }
+      var selected = inventory.voices.find(function matchesVoice(voice) { return voice.voiceId === voiceId; }) || null;
+      if (!selected) {
+        voiceId = '';
+        speechAvailability = inventory.status === 'error' ? 'error' : 'unavailable';
+        return null;
+      }
+      speechAvailability = 'available';
+      return selected.voice;
     }
 
     function invalidateOwnedSpeech(cancelOwned) {
@@ -109,8 +270,10 @@
       var owned = ownUtterance;
       speechGeneration += 1;
       ownUtterance = null;
-      if (!cancelOwned || !owned || !synthesis || typeof synthesis.cancel !== 'function') return;
-      try { synthesis.cancel(); } catch (_error) { speechAvailability = 'error'; }
+      if (!cancelOwned || !owned || !synthesis) return;
+      var cancel = dataMethod(synthesis, 'cancel');
+      if (!cancel) { speechAvailability = 'error'; return; }
+      try { cancel.call(synthesis); } catch (_error) { speechAvailability = 'error'; }
     }
 
     function speakCurrent() {
@@ -118,13 +281,30 @@
       if (!current || playback !== 'playing') return state();
       var synthesis = environment.speechSynthesis;
       var Utterance = environment.Utterance;
-      if (!synthesis || typeof synthesis.speak !== 'function' || typeof Utterance !== 'function') {
+      if (!synthesis || typeof Utterance !== 'function') {
         speechAvailability = 'unavailable';
         return publish(current);
       }
-      if (!ownUtterance && (synthesis.speaking === true || synthesis.pending === true || synthesis.paused === true)) {
-        speechAvailability = 'busy';
+      var voice = selectedVoice();
+      if (!voice) {
+        if (ownUtterance) invalidateOwnedSpeech(true);
         return publish(current);
+      }
+      var speak = dataMethod(synthesis, 'speak');
+      if (!speak) {
+        speechAvailability = 'error';
+        return publish(current);
+      }
+      if (!ownUtterance) {
+        var busy = synthesisBusy(synthesis);
+        if (busy === null) {
+          speechAvailability = 'error';
+          return publish(current);
+        }
+        if (busy) {
+          speechAvailability = 'busy';
+          return publish(current);
+        }
       }
       if (ownUtterance) invalidateOwnedSpeech(true);
       var generation = ++speechGeneration;
@@ -133,8 +313,9 @@
         utterance = new Utterance(caption);
         utterance.lang = 'pt-BR';
         utterance.rate = rate;
-        var voice = selectedVoice();
-        if (voice) utterance.voice = voice;
+        voice = selectedVoice();
+        if (!voice) return publish(current);
+        utterance.voice = voice;
         utterance.onend = function onSpeechEnd() {
           if (generation !== speechGeneration || ownUtterance !== utterance) return;
           ownUtterance = null;
@@ -149,7 +330,7 @@
         };
         ownUtterance = utterance;
         speechAvailability = 'available';
-        synthesis.speak(utterance);
+        speak.call(synthesis, utterance);
       } catch (_error) {
         if (generation === speechGeneration) ownUtterance = null;
         speechAvailability = 'error';
@@ -186,11 +367,8 @@
 
     function handleVoicesChanged() {
       if (!sessionActive) return state();
-      var listed = voices();
-      if (voiceId && listed.length && !listed.some(function matchesVoice(voice) { return voice?.voiceURI === voiceId; })) {
-        voiceId = '';
-      }
-      if (environment.speechSynthesis && speechAvailability === 'unavailable') speechAvailability = 'available';
+      var selected = selectedVoice();
+      if (!selected && ownUtterance) invalidateOwnedSpeech(true);
       publish(queue[index]);
     }
 
@@ -232,8 +410,9 @@
       playback = queue.length ? 'playing' : 'idle';
       index = queue.length ? 0 : -1;
       caption = queue.length ? queue[0].caption : '';
-      speechAvailability = environment.speechSynthesis ? 'available' : 'unavailable';
+      speechAvailability = 'unavailable';
       subscribe();
+      selectedVoice();
       var snapshot = publish(queue[index]);
       if (playback === 'playing') {
         speakCurrent();
@@ -246,8 +425,9 @@
       if (playback !== 'playing') return state();
       playback = 'paused';
       var synthesis = environment.speechSynthesis;
-      if (ownUtterance && synthesis && typeof synthesis.pause === 'function') {
-        try { synthesis.pause(); } catch (_error) { speechAvailability = 'error'; }
+      var pauseSpeech = dataMethod(synthesis, 'pause');
+      if (ownUtterance && synthesis && pauseSpeech) {
+        try { pauseSpeech.call(synthesis); } catch (_error) { speechAvailability = 'error'; }
       }
       return publish(queue[index]);
     }
@@ -256,8 +436,10 @@
       if (playback !== 'paused') return state();
       playback = 'playing';
       var synthesis = environment.speechSynthesis;
-      if (ownUtterance && synthesis && synthesis.paused === true && typeof synthesis.resume === 'function') {
-        try { synthesis.resume(); } catch (_error) { speechAvailability = 'error'; }
+      var paused = synthesis ? synthesisBoolean(synthesis, 'paused') : null;
+      var resumeSpeech = dataMethod(synthesis, 'resume');
+      if (ownUtterance && synthesis && paused?.ok && paused.value && resumeSpeech) {
+        try { resumeSpeech.call(synthesis); } catch (_error) { speechAvailability = 'error'; }
         return publish(queue[index]);
       }
       publish(queue[index]);
@@ -298,8 +480,7 @@
     function setPreferences(preferences) {
       voiceId = boundedVoiceId(preferences?.voiceId);
       rate = boundedRate(preferences?.rate);
-      var listed = voices();
-      if (voiceId && listed.length && !listed.some(function matchesVoice(voice) { return voice?.voiceURI === voiceId; })) voiceId = '';
+      selectedVoice();
       return publish(queue[index]);
     }
 
