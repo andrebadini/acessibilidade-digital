@@ -1065,7 +1065,7 @@ test('closes cancellation atomically before persisting every terminal batch path
       expectedStatus: 'partial',
     },
   ];
-  for (const scenario of cases) await t.test(scenario.name, async () => {
+  for (const scenario of cases) await t.test(scenario.name, { timeout: 5_000 }, async () => {
     const chromeApi = createChrome();
     let releasePersistence;
     const persistenceGate = new Promise(resolve => { releasePersistence = resolve; });
@@ -1073,6 +1073,8 @@ test('closes cancellation atomically before persisting every terminal batch path
     const persistenceEntered = new Promise(resolve => { enteredPersistence = resolve; });
     let gated = false;
     let committed;
+    let resolveCommitted;
+    const committedReached = new Promise(resolve => { resolveCommitted = resolve; });
     registerServiceWorker(chromeApi, {
       createId: () => `batch-boundary-${scenario.name.replaceAll(/[^a-z]+/giu, '-').toLowerCase()}`,
       sessionStore: {
@@ -1089,7 +1091,7 @@ test('closes cancellation atomically before persisting every terminal batch path
       }),
       auditStore: withAuditRevisions({
         async setLatest() {},
-        async commitAudit(_id, model) { committed = model; },
+        async commitAudit(_id, model) { committed = model; resolveCommitted(); },
       }),
       chromeAdapterFactory: () => ({ async emitProgress() {}, async handoffReport() { return { reviewUrl: null }; } }),
       reportOptions: { timezone: 'UTC', manifestVersion: '2.0.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/152' },
@@ -1105,7 +1107,7 @@ test('closes cancellation atomically before persisting every terminal batch path
       error: 'A auditoria já está na etapa final e não pode mais ser cancelada.',
     });
     releasePersistence();
-    await waitUntil(() => committed !== undefined);
+    await committedReached;
     assert.equal(committed.session.status, scenario.expectedStatus);
   });
 });
