@@ -410,3 +410,95 @@ test('production default merges execution checkpoints and waits for owned cleanu
   assert.deepEqual(model.pages.map(value => value.status), ['failed', 'failed']);
   assert.doesNotMatch(JSON.stringify(model), /checkpoint|owner-|CONTROLLED_NAVIGATION_FAILURE/u);
 });
+
+function timedDefaultAdapter({ removalFails = false, settleDelayMs = 3 } = {}) {
+  const values = {};
+  const events = [];
+  let nextTab = 80;
+  let randomValue = 40;
+  const adapter = {
+    events,
+    async createTab() { const tab = { id: nextTab++, windowId: 9 }; events.push(`create:${tab.id}`); return tab; },
+    async navigateTab(id) { events.push(`navigate:${id}`); },
+    async waitForStable(id, { signal }) {
+      if (id !== 80) throw new Error('CONTROLLED_SECOND_PAGE_FAILURE');
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => {
+        events.push('abort:80');
+        setTimeout(() => { events.push('settle:80'); reject(signal.reason); }, settleDelayMs);
+      }, { once: true }));
+    },
+    async probeDocumentIdentity() { throw new Error('must not probe'); },
+    async removeTab(id) { events.push(`remove:${id}`); if (removalFails && id === 80) throw new Error('PRIVATE_REMOVE'); },
+    async emitProgress() {}, tryEnterFinalization() { return true; }, async handoffReport() { return { reviewUrl: null }; },
+  };
+  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, { enumerable: false, value: Object.freeze({
+    sessionArea: {
+      async get(key) { return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {}; },
+      async set(entries) { Object.assign(values, structuredClone(entries)); },
+      async remove(key) { delete values[key]; },
+    },
+    randomBytes(length) { return new Uint8Array(length).fill(++randomValue); },
+    epochNow: () => 1_788_000_000_000,
+  }) });
+  return adapter;
+}
+
+test('default timeout blocks the next page when the settled execution confirms cleanup-pending', async () => {
+  const adapter = timedDefaultAdapter({ removalFails: true });
+  const model = await runBatch({
+    entries: normalizeUrlList('https://slow.example.test/\nhttps://never.example.test/').entries,
+    batchAuditId: 'batch-timeout-pending', chromeAdapter: adapter, now: clock(),
+    reportOptions: REPORT_OPTIONS, pageTimeoutMs: 2, cleanupTimeoutMs: 30,
+  });
+  assert.equal(adapter.events.filter(event => event.startsWith('create:')).length, 1);
+  assert.equal(model.pages[1].attempted, false);
+  assert.match(model.pages[1].diagnostics[0].code, /CLEANUP_UNCONFIRMED/u);
+});
+
+test('default timeout merges the late factual checkpoint and starts the next page only after confirmed removal', async () => {
+  const adapter = timedDefaultAdapter();
+  const checkpoints = [];
+  const model = await runBatch({
+    entries: normalizeUrlList('https://slow.example.test/\nhttps://next.example.test/').entries,
+    batchAuditId: 'batch-timeout-removed', chromeAdapter: adapter, now: clock(),
+    reportOptions: REPORT_OPTIONS, pageTimeoutMs: 2, cleanupTimeoutMs: 30,
+    onExecutionCheckpoint: async value => checkpoints.push(value),
+  });
+  assert.ok(adapter.events.indexOf('settle:80') < adapter.events.indexOf('create:81'));
+  assert.deepEqual(checkpoints.at(-1).pages.map(page => page.pageId), ['page-1', 'page-2']);
+  assert.deepEqual(model.pages.map(page => page.attempted), [true, true]);
+});
+
+test('default batch blocks after persistent ownership registration and removal failure without fabricating a journal', async () => {
+  const values = {};
+  let creates = 0;
+  let randomValue = 70;
+  const adapter = {
+    async createTab() { creates += 1; return { id: 90, windowId: 7 }; },
+    async navigateTab() { throw new Error('must not navigate'); },
+    async waitForStable() { throw new Error('must not wait'); },
+    async probeDocumentIdentity() { throw new Error('must not probe'); },
+    async removeTab() { throw new Error('PRIVATE_REMOVE_FAILURE'); },
+    async emitProgress() {}, tryEnterFinalization() { return true; }, async handoffReport() { return { reviewUrl: null }; },
+  };
+  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, { enumerable: false, value: Object.freeze({
+    sessionArea: {
+      async get(key) { return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {}; },
+      async set(entries) {
+        if (Object.keys(entries).some(key => key.startsWith('audita:owned-tab:v1:'))) throw new Error('PRIVATE_SET_FAILURE');
+        Object.assign(values, structuredClone(entries));
+      },
+      async remove(key) { delete values[key]; },
+    },
+    randomBytes(length) { return new Uint8Array(length).fill(++randomValue); },
+    epochNow: () => 1_788_000_000_000,
+  }) });
+  const model = await runBatch({
+    entries: normalizeUrlList('https://one.example.test/?token=PRIVATE_TOKEN\nhttps://must-not-start.example.test/').entries,
+    batchAuditId: 'batch-registration-unconfirmed', chromeAdapter: adapter, now: clock(), reportOptions: REPORT_OPTIONS,
+  });
+  assert.equal(creates, 1);
+  assert.equal(model.pages[1].attempted, false);
+  assert.equal(Object.keys(values).some(key => key.startsWith('audita:owned-tab:v1:')), false);
+  assert.doesNotMatch(JSON.stringify(model), /PRIVATE_TOKEN|PRIVATE_SET|PRIVATE_REMOVE|owner-/u);
+});

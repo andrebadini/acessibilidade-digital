@@ -114,3 +114,33 @@ test('revalidates ownership immediately before the tab effect', async () => {
   }), /OWNERSHIP_DENIED/u);
   assert.deepEqual(calls, []);
 });
+
+test('serializes CAS across registry instances sharing one session area and owner', async () => {
+  const { sessionArea, adapter } = fixture();
+  let tick = 0;
+  const make = () => createOwnedTabRegistry({
+    sessionArea, chromeAdapter: adapter,
+    now: () => new Date(Date.UTC(2026, 7, 29, 11, 0, tick++)).toISOString(),
+  });
+  const first = make();
+  const second = make();
+  await first.registerCreated(created);
+  const results = await Promise.allSettled([
+    first.transition({ ownerId: 'owner-a', auditId: 'audit-a', tabId: 41, fromState: 'created', toState: 'observing' }),
+    second.transition({ ownerId: 'owner-a', auditId: 'audit-a', tabId: 41, fromState: 'created', toState: 'cleanup-pending' }),
+  ]);
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(results.filter(result => result.status === 'rejected' && /OWNERSHIP_DENIED/u.test(result.reason?.message)).length, 1);
+  assert.ok(['observing', 'cleanup-pending'].includes((await first.get('owner-a')).state));
+});
+
+test('does not serialize independent owners behind one shared owner queue', async () => {
+  const { sessionArea, adapter } = fixture();
+  const first = createOwnedTabRegistry({ sessionArea, chromeAdapter: adapter, now: () => '2026-08-29T11:00:00.000Z' });
+  const second = createOwnedTabRegistry({ sessionArea, chromeAdapter: adapter, now: () => '2026-08-29T11:00:00.000Z' });
+  const records = await Promise.all([
+    first.registerCreated(created),
+    second.registerCreated({ ...created, ownerId: 'owner-b', auditId: 'audit-b', tabId: 42 }),
+  ]);
+  assert.deepEqual(records.map(record => record.ownerId).sort(), ['owner-a', 'owner-b']);
+});

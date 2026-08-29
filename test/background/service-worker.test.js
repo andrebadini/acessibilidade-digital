@@ -393,6 +393,42 @@ test('validates START_AUDIT, stores an armed session, and keeps the response cha
   finishRunner?.({ auditId: 'audit-1', session: { status: 'failed' }, report: {} });
 });
 
+test('default worker runner preserves the real execution contract through ownership registration', async () => {
+  const chromeApi = createChrome();
+  const values = {};
+  const removed = [];
+  let committed = null;
+  chromeApi.storage = { session: {
+    async get(key) { return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {}; },
+    async set(entries) { Object.assign(values, structuredClone(entries)); },
+    async remove(key) { delete values[key]; },
+  } };
+  chromeApi.tabs.create = async () => ({ id: 77, windowId: 5 });
+  chromeApi.tabs.update = async () => { throw new Error('CONTROLLED_AFTER_OWNERSHIP'); };
+  chromeApi.tabs.remove = async id => removed.push(id);
+  chromeApi.tabs.onUpdated = { addListener() {}, removeListener() {} };
+  chromeApi.tabs.onRemoved = { addListener() {}, removeListener() {} };
+  chromeApi.scripting = { async executeScript() { return []; } };
+  chromeApi.debugger = { async attach() {}, async sendCommand() { return {}; }, async detach() {} };
+  registerServiceWorker(chromeApi, {
+    createId: () => 'audit-real-worker', sessions: new Map(),
+    auditStore: withAuditRevisions({
+      async setLatest() {},
+      async commitAudit(_auditId, model) { committed = model; },
+    }),
+    now: () => '2026-08-29T12:00:00.000Z',
+  });
+  chromeApi.listeners.message.listener(
+    { type: 'START_AUDIT', url: 'https://example.test/' },
+    { id: 'test', url: 'chrome-extension://test/src/panel/index.html' },
+    () => {},
+  );
+  await waitUntil(() => removed.length === 1 && committed !== null, 2_000);
+  assert.deepEqual(removed, [77]);
+  assert.equal(committed.auditId, 'audit-real-worker');
+  assert.doesNotMatch(JSON.stringify(committed), /AUDIT_EXECUTION_DENIED|CONTROLLED_AFTER_OWNERSHIP/u);
+});
+
 test('rejects unknown, hostile, and malformed worker messages safely', () => {
   const chromeApi = createChrome();
   registerServiceWorker(chromeApi, { createId: () => 'audit-1' });

@@ -1,6 +1,6 @@
 import { createAuditSession, interruptBatchCheckpoint } from './session.js';
 import { normalizeAuditUrl } from '../core/url.js';
-import { createChromeAdapter } from './chrome-adapter.js';
+import { composeChromeAdapter, createChromeAdapter } from './chrome-adapter.js';
 import { runAudit } from './run-audit.js';
 import { runBatch } from './run-batch.js';
 import { normalizeUrlList } from '../core/batch/normalize-url-list.js';
@@ -442,8 +442,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
       await sessions.set(auditId, session);
       await auditStore.setLatest({ auditId, status: 'running', percent: 0, message: 'Preparando a auditoria.' });
       const adapter = chromeAdapterFactory(chromeApi);
-      const pipelineAdapter = {
-        ...adapter,
+      const pipelineOverrides = {
         async enterFinalization() { entry.phase = 'finalizing'; },
         async handoffReport(model) {
           entry.phase = 'finalizing';
@@ -456,6 +455,9 @@ export function registerServiceWorker(chromeApi, options = {}) {
           ]);
         },
       };
+      const pipelineAdapter = runner === runAudit
+        ? composeChromeAdapter(adapter, pipelineOverrides)
+        : { ...adapter, ...pipelineOverrides };
       const model = await runner({
         url: navigationUrl, chromeAdapter: pipelineAdapter, now, idFactory: () => auditId,
         closeAuditTab: true, signal: entry.controller.signal, expectedExtensionId: chromeApi.runtime.id,
@@ -540,8 +542,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
         entry.phase = 'finalizing';
         return !cancellationWon;
       };
-      const pipelineAdapter = {
-        ...adapter,
+      const pipelineOverrides = {
         tryEnterFinalization: closeCancellationBoundary,
         async enterFinalization() { return closeCancellationBoundary(); },
         async handoffReport(model) {
@@ -561,6 +562,9 @@ export function registerServiceWorker(chromeApi, options = {}) {
           ]);
         },
       };
+      const pipelineAdapter = batchRunner === runBatch
+        ? composeChromeAdapter(adapter, pipelineOverrides)
+        : { ...adapter, ...pipelineOverrides };
       const model = await batchRunner({
         entries: normalized.entries, batchAuditId: auditId, chromeAdapter: pipelineAdapter,
         now, signal: entry.controller.signal,

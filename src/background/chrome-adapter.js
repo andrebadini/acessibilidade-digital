@@ -7,6 +7,48 @@ import { sanitizeResourceUrl } from '../core/normalize-snapshot.js';
 
 export const AUDIT_EXECUTION_INTERNAL = Symbol('audita.audit-execution-internal');
 
+const WORKER_OVERRIDE_NAMES = Object.freeze([
+  'enterFinalization', 'tryEnterFinalization', 'handoffReport', 'emitProgress',
+]);
+
+function compositionDenied() {
+  return new TypeError('AUDIT_ADAPTER_COMPOSITION_DENIED');
+}
+
+/** Copies a trusted adapter while preserving its single opaque execution contract. */
+export function composeChromeAdapter(base, overrides, allowedNames = WORKER_OVERRIDE_NAMES) {
+  if (!base || typeof base !== 'object' || !overrides || typeof overrides !== 'object' ||
+    (Object.getPrototypeOf(overrides) !== Object.prototype && Object.getPrototypeOf(overrides) !== null) ||
+    !Array.isArray(allowedNames) || allowedNames.some(name => typeof name !== 'string')) throw compositionDenied();
+  let baseKeys;
+  let overrideKeys;
+  try {
+    baseKeys = Reflect.ownKeys(base);
+    overrideKeys = Reflect.ownKeys(overrides);
+  } catch { throw compositionDenied(); }
+  const internal = Object.getOwnPropertyDescriptor(base, AUDIT_EXECUTION_INTERNAL);
+  if (!internal || internal.enumerable || !Object.hasOwn(internal, 'value') || internal.get || internal.set) throw compositionDenied();
+  const allowed = new Set(allowedNames);
+  if (overrideKeys.some(key => typeof key !== 'string' || !allowed.has(key))) throw compositionDenied();
+  const composed = {};
+  for (const key of baseKeys) {
+    if (key === AUDIT_EXECUTION_INTERNAL) continue;
+    if (typeof key !== 'string') throw compositionDenied();
+    const descriptor = Object.getOwnPropertyDescriptor(base, key);
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw compositionDenied();
+    Object.defineProperty(composed, key, descriptor);
+  }
+  for (const key of overrideKeys) {
+    const descriptor = Object.getOwnPropertyDescriptor(overrides, key);
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'function') throw compositionDenied();
+    Object.defineProperty(composed, key, descriptor);
+  }
+  Object.defineProperty(composed, AUDIT_EXECUTION_INTERNAL, {
+    enumerable: false, configurable: false, writable: false, value: internal.value,
+  });
+  return composed;
+}
+
 function timeoutError() {
   return new DOMException('A página não ficou estável dentro do tempo limite.', 'TimeoutError');
 }

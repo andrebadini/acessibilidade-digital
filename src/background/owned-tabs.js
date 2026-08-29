@@ -15,6 +15,23 @@ const TRANSITIONS = new Set([
   'retained-for-review:cleanup-pending',
   'cleanup-pending:removed',
 ]);
+const SESSION_OWNER_QUEUES = new WeakMap();
+
+function serializeForOwner(sessionArea, ownerId, operation) {
+  let owners = SESSION_OWNER_QUEUES.get(sessionArea);
+  if (!owners) {
+    owners = new Map();
+    SESSION_OWNER_QUEUES.set(sessionArea, owners);
+  }
+  const tail = owners.get(ownerId) ?? Promise.resolve();
+  const pending = tail.then(operation, operation);
+  const guarded = pending.catch(() => {});
+  owners.set(ownerId, guarded);
+  guarded.finally(() => {
+    if (owners.get(ownerId) === guarded) owners.delete(ownerId);
+  });
+  return pending;
+}
 
 function denied() {
   return new Error('OWNERSHIP_DENIED');
@@ -55,12 +72,7 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
     !chromeAdapter || typeof chromeAdapter.removeTab !== 'function' || typeof now !== 'function') {
     throw new TypeError('OWNERSHIP_DENIED');
   }
-  let tail = Promise.resolve();
-  const serialized = operation => {
-    const pending = tail.then(operation, operation);
-    tail = pending.catch(() => {});
-    return pending;
-  };
+  const serialized = (ownerId, operation) => serializeForOwner(sessionArea, ownerId, operation);
   const read = async ownerId => {
     if (!validId(ownerId)) throw denied();
     const key = `${PREFIX}${ownerId}`;
@@ -95,7 +107,7 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
 
   return Object.freeze({
     registerCreated(input) {
-      return serialized(async () => {
+      return serialized(input?.ownerId, async () => {
         if (!input || !validId(input.ownerId) || !validId(input.auditId) ||
           !validId(input.sessionCapabilityId) || !Number.isSafeInteger(input.tabId) || input.tabId < 0 ||
           !Number.isSafeInteger(input.windowId) || input.windowId < 0 || !CLEANUP_MODES.has(input.cleanupMode)) {
@@ -119,7 +131,7 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
       });
     },
     transition(input) {
-      return serialized(async () => {
+      return serialized(input?.ownerId, async () => {
         const current = await read(input?.ownerId);
         if (!current.record || !validId(input?.auditId) || !STATES.has(input?.fromState) ||
           !STATES.has(input?.toState) || !TRANSITIONS.has(`${input.fromState}:${input.toState}`)) throw denied();
@@ -128,7 +140,7 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
       });
     },
     removeOwned(input) {
-      return serialized(async () => {
+      return serialized(input?.ownerId, async () => {
         const current = await read(input?.ownerId);
         if (!current.record || current.record.state === 'removed') throw denied();
         compare(current.record, input ?? {});
@@ -151,7 +163,7 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
       });
     },
     markCleanupPending(input) {
-      return serialized(async () => {
+      return serialized(input?.ownerId, async () => {
         const current = await read(input?.ownerId);
         if (!current.record || current.record.state === 'removed') throw denied();
         compare(current.record, input);
@@ -159,7 +171,7 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
       });
     },
     get(ownerId) {
-      return serialized(async () => {
+      return serialized(ownerId, async () => {
         const { record } = await read(ownerId);
         return record ? frozen(record) : null;
       });

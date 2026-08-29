@@ -221,12 +221,30 @@ export async function runObservedTabAudit({
         code = 'PRIVACY_TARGET_CHANGED';
         throw new Error(code);
       }
+      if (target.kind === 'attached' && (
+        resumePause.observedTarget.kind !== 'attached' ||
+        target.tabId !== resumePause.observedTarget.tabId ||
+        target.windowId !== resumePause.observedTarget.windowId ||
+        target.documentId !== resumePause.observedTarget.documentId ||
+        target.initialUrlSessionDigest !== resumePause.observedTarget.urlSessionDigest
+      )) {
+        code = 'PRIVACY_TARGET_CHANGED';
+        throw new Error(code);
+      }
+      if (target.kind === 'disposable' && (
+        resumePause.observedTarget.kind !== 'disposable' ||
+        resumePause.observedTarget.ownerId !== target.ownerId
+      )) {
+        code = 'PRIVACY_TARGET_CHANGED';
+        throw new Error(code);
+      }
       tabId = resumePause.observedTarget.tabId;
       windowId = resumePause.observedTarget.windowId;
       urlEvidence = resumePause.observedTarget.urlEvidence;
       if (target.kind === 'disposable') {
         const owned = await ownedTabs.get(target.ownerId);
-        if (!owned || owned.auditId !== auditId || owned.tabId !== tabId || owned.state !== 'observing') {
+        if (!owned || owned.auditId !== auditId || owned.sessionCapabilityId !== sessionCapabilityId ||
+          owned.tabId !== tabId || owned.windowId !== windowId || owned.state !== 'observing') {
           code = 'PRIVACY_TARGET_CHANGED'; throw new Error(code);
         }
       }
@@ -247,7 +265,7 @@ export async function runObservedTabAudit({
         });
       } catch {
         try { await chromeAdapter.removeTab(tabId); ownershipState = 'removed'; }
-        catch { ownershipState = 'cleanup-pending'; }
+        catch { ownershipState = 'cleanup-unconfirmed'; }
         throw new Error('OWNERSHIP_REGISTRATION_FAILED');
       }
       if (registered.state !== 'created') {
@@ -343,7 +361,9 @@ export async function runObservedTabAudit({
   } catch (error) {
     if (error?.name === 'AbortError' || signal?.aborted) code = 'AUDIT_ABORTED';
     else if (!['TARGET_CHANGED', 'PRIVACY_TARGET_CHANGED'].includes(code)) code = 'AUDIT_FAILED';
-    try { await cleanupDisposable(); } catch { ownershipState = 'cleanup-pending'; }
+    try { await cleanupDisposable(); } catch {
+      if (ownershipState !== 'cleanup-unconfirmed') ownershipState = 'cleanup-pending';
+    }
     return Object.freeze({
       status: 'failed',
       model: await safeModel(failureModelFactory, auditId, code, diagnosticStatus(signal, code)),

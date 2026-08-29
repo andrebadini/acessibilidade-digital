@@ -82,6 +82,14 @@ function safeUrl(value) {
   return sanitizeResourceUrl(value);
 }
 
+function conservativeRequestedEvidence(value) {
+  try {
+    const parsed = new URL(value);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+    return `${parsed.protocol}//${parsed.host}/`;
+  } catch { return ''; }
+}
+
 function validateTransientReviewUrl(value, auditId, expectedExtensionId) {
   try { canonicalInternalReviewUrl(value ?? null, auditId, expectedExtensionId); } catch { /* capability descartada */ }
 }
@@ -478,6 +486,7 @@ async function runLegacyAudit({ url, chromeAdapter, now = () => new Date().toISO
     let pristineMetrics = {};
     try {
       pristineMetrics = await awaitStep(() => cdp.command('Page.getLayoutMetrics', {}));
+      if (chromeAdapter.captureFullPageEnabled === false) throw new Error('PIXEL_CAPTURE_OMITTED');
       state.fullPage = await awaitStep(() => (chromeAdapter.captureFullPage || captureFullPage)(cdp, pristineMetrics));
       const artifact = {
         evidenceId: state.fullPage.evidenceId,
@@ -594,7 +603,7 @@ async function runLegacyAudit({ url, chromeAdapter, now = () => new Date().toISO
     allocateOccurrenceIds(state);
     const indexes = buildSnapshotIndexes(state.snapshot);
     const artifactByNode = new Map();
-    const canCaptureElements = Boolean(state.fullPage);
+    const canCaptureElements = Boolean(state.fullPage) || chromeAdapter.captureElementsWithoutFullPage === true;
     if (!canCaptureElements && state.occurrences.some(occurrence => occurrence.nodeId)) {
       recoverable('ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE', 'As miniaturas de elementos não foram tentadas porque a captura original da página falhou.');
     }
@@ -627,7 +636,7 @@ async function runLegacyAudit({ url, chromeAdapter, now = () => new Date().toISO
           try {
             thumbnail = await awaitStep(() => (chromeAdapter.captureElement || captureElement)(cdp, node.rect, {
               ...(state.snapshot.document.layoutMetrics || raw.layoutMetrics || pristineMetrics),
-              fullPageEvidenceId: state.fullPage.evidenceId,
+              ...(state.fullPage ? { fullPageEvidenceId: state.fullPage.evidenceId } : {}),
             }));
             if (thumbnail.status !== 'captured') {
               recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: occurrence.occurrenceId });
@@ -645,7 +654,7 @@ async function runLegacyAudit({ url, chromeAdapter, now = () => new Date().toISO
           selector, snippet, accessibility,
           ...(thumbnail?.status === 'captured' ? {
             dataUrl: thumbnail.dataUrl,
-            fullPageEvidenceId: thumbnail.fullPageEvidenceId,
+            ...(thumbnail.fullPageEvidenceId ? { fullPageEvidenceId: thumbnail.fullPageEvidenceId } : {}),
             metadata: thumbnail.metadata,
           } : {}),
           ...(node.media?.currentSrc ? { mediaUrl: safeUrl(node.media.currentSrc) } : {}),
@@ -809,7 +818,7 @@ export async function runAuditExecution({
 }) {
   const internals = internalContract(chromeAdapter);
   let navigationUrl = normalizeAuditUrl(url);
-  const requestedEvidence = safeUrl(navigationUrl);
+  const requestedEvidence = conservativeRequestedEvidence(navigationUrl);
   const generatedId = idFactory('audit');
   const auditId = typeof generatedId === 'string' ? generatedId.trim() : '';
   if (!/^[A-Za-z0-9._:-]{1,160}$/u.test(auditId)) throw new TypeError('O identificador da auditoria é inválido.');
@@ -863,6 +872,9 @@ export async function runAuditExecution({
       async collectObservedPage({ observedTarget }) {
         const observedAdapter = {
           ...chromeAdapter,
+          captureFullPageEnabled: capturePolicy.captureFullPage,
+          captureElementsEnabled: capturePolicy.captureElements,
+          captureElementsWithoutFullPage: capturePolicy.mode === 'element-only',
           async createTab() { return { id: observedTarget.tabId, windowId: observedTarget.windowId }; },
           async navigateTab() {},
           async waitForStable() { return { url: observedTarget.urlEvidence || requestedEvidence }; },
@@ -874,9 +886,11 @@ export async function runAuditExecution({
           },
           ...(capturePolicy.captureFullPage ? {} : {
             async captureFullPage() { throw new Error('PIXEL_CAPTURE_OMITTED'); },
-            async captureElement() { throw new Error('PIXEL_CAPTURE_OMITTED'); },
-            composeAnnouncementMap: undefined,
           }),
+          ...(capturePolicy.captureElements ? {} : {
+            async captureElement() { throw new Error('PIXEL_CAPTURE_OMITTED'); },
+          }),
+          ...(capturePolicy.composeAnnouncementMap ? {} : { composeAnnouncementMap: undefined }),
         };
         const draft = await runLegacyAudit({
           url: requestedEvidence, chromeAdapter: observedAdapter, now,

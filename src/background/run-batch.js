@@ -18,7 +18,7 @@ import {
   applyBatchEvidenceBudget,
   DEFAULT_BATCH_EVIDENCE_BUDGET_BYTES,
 } from '../core/batch/evidence-budget.js';
-import { AUDIT_EXECUTION_INTERNAL } from './chrome-adapter.js';
+import { AUDIT_EXECUTION_INTERNAL, composeChromeAdapter } from './chrome-adapter.js';
 
 const DEFAULT_PAGE_TIMEOUT_MS = 120_000;
 const DEFAULT_CLEANUP_TIMEOUT_MS = 10_000;
@@ -99,8 +99,7 @@ export async function runBatch({
       const childAuditId = `${batchAuditId}:${pageId}`;
       const pageStartedAt = canonicalTime(now());
       let localPercent = 0;
-      const childAdapter = {
-        ...chromeAdapter,
+      const childOverrides = {
         async emitProgress(progress) {
           const next = Number.isFinite(progress?.percent) ? Math.max(localPercent, progress.percent) : localPercent;
           localPercent = Math.min(100, next);
@@ -110,12 +109,10 @@ export async function runBatch({
           return { reviewUrl: null, artifact: { status: 'pending', formats: [] } };
         },
       };
-      const executionInternals = Object.getOwnPropertyDescriptor(chromeAdapter, AUDIT_EXECUTION_INTERNAL);
-      if (executionInternals && Object.hasOwn(executionInternals, 'value')) {
-        Object.defineProperty(childAdapter, AUDIT_EXECUTION_INTERNAL, {
-          enumerable: false, value: executionInternals.value,
-        });
-      }
+      const hasExecutionContract = Boolean(Object.getOwnPropertyDescriptor(chromeAdapter, AUDIT_EXECUTION_INTERNAL));
+      const childAdapter = hasExecutionContract
+        ? composeChromeAdapter(chromeAdapter, childOverrides)
+        : { ...chromeAdapter, ...childOverrides };
       const outcome = await runPageWithBoundary({
         operation: ({ childSignal }) => runner({
           url: entry.navigationUrl,
@@ -158,9 +155,25 @@ export async function runBatch({
 
       let pageResult;
       let executionCleanupPending = false;
+      let executionCleanupUnconfirmed = false;
       if (outcome.kind === 'timeout') {
         pageResult = failureFor(entry, pageId, 'failed', true, pageStartedAt, pageEndedAt,
           'BATCH_PAGE_TIMEOUT', 'A página excedeu o tempo limite da auditoria.');
+        if (executionMode) {
+          const late = outcome.settled;
+          const execution = late?.kind === 'fulfilled' ? late.value : null;
+          if (!execution?.checkpoint || !['removed', 'cleanup-pending', 'cleanup-unconfirmed'].includes(execution.ownershipState)) {
+            executionCleanupUnconfirmed = true;
+          } else {
+            executionCheckpoint = mergeExecutionCheckpoint({
+              auditId: batchAuditId, prior: executionCheckpoint,
+              pageSnapshot: execution.checkpoint, pageOrder,
+            });
+            await onExecutionCheckpoint(executionCheckpoint);
+            executionCleanupPending = execution.ownershipState === 'cleanup-pending';
+            executionCleanupUnconfirmed = execution.ownershipState === 'cleanup-unconfirmed';
+          }
+        }
       } else if (outcome.kind === 'rejected') {
         pageResult = failureFor(entry, pageId, 'failed', true, pageStartedAt, pageEndedAt,
           'BATCH_PAGE_FAILED', 'A página não pôde ser auditada.');
@@ -169,7 +182,7 @@ export async function runBatch({
           const execution = executionMode ? outcome.value : null;
           const childValue = executionMode ? execution?.model : outcome.value;
           if (executionMode) {
-            if (!execution?.checkpoint || !['removed', 'cleanup-pending'].includes(execution.ownershipState)) {
+            if (!execution?.checkpoint || !['removed', 'cleanup-pending', 'cleanup-unconfirmed'].includes(execution.ownershipState)) {
               throw new TypeError('Execução filha sem fronteira terminal comprovada.');
             }
             executionCheckpoint = mergeExecutionCheckpoint({
@@ -178,6 +191,7 @@ export async function runBatch({
             });
             await onExecutionCheckpoint(executionCheckpoint);
             executionCleanupPending = execution.ownershipState === 'cleanup-pending';
+            executionCleanupUnconfirmed = execution.ownershipState === 'cleanup-unconfirmed';
           }
           if (childValue?.auditId !== childAuditId) throw new TypeError('Auditoria filha não correlacionada.');
           const child = await enrichAuditForReport(childValue, {
@@ -198,7 +212,11 @@ export async function runBatch({
             'BATCH_PAGE_MODEL_INVALID', 'O resultado da página não pôde ser validado para o lote.');
         }
       }
-      const stopsForCleanup = executionCleanupPending || pageResult.page.diagnostics?.some(value => CLEANUP_FAILURE_CODES.has(value.code));
+      if (executionCleanupUnconfirmed || (outcome.kind === 'timeout' && executionCleanupPending)) {
+        pageResult = failureFor(entry, pageId, 'failed', true, pageStartedAt, pageEndedAt,
+          'BATCH_PAGE_CLEANUP_UNCONFIRMED', 'A limpeza da página excedeu o prazo; o lote foi interrompido para evitar sobreposição.');
+      }
+      const stopsForCleanup = executionCleanupPending || executionCleanupUnconfirmed || pageResult.page.diagnostics?.some(value => CLEANUP_FAILURE_CODES.has(value.code));
       const endsScheduling = index === entries.length - 1 || stopsForCleanup;
       if (endsScheduling && !claimFinalization()) {
         await cancelRemaining({ active: true, startedAt: pageStartedAt, endedAt: pageEndedAt });

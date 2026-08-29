@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { AUDIT_EXECUTION_INTERNAL, captureFocusLocator, createChromeAdapter, resolveActiveNodeId, restoreFocusLocator } from '../../src/background/chrome-adapter.js';
+import * as chromeAdapterModule from '../../src/background/chrome-adapter.js';
 
 test('captures and restores focus for elements without DOM IDs', () => {
   const first = { localName: 'button', id: '', parentElement: null };
@@ -70,6 +71,40 @@ test('keeps the real session area and CSPRNG behind a non-enumerable execution c
   assert.equal(Object.getOwnPropertyDescriptor(adapter, AUDIT_EXECUTION_INTERNAL).enumerable, false);
   assert.equal(adapter[AUDIT_EXECUTION_INTERNAL].sessionArea, fake.chromeApi.storage.session);
   assert.equal(adapter[AUDIT_EXECUTION_INTERNAL].randomBytes(16).byteLength, 16);
+});
+
+test('composes the real adapter with exact single and batch worker overrides without exposing internals', () => {
+  assert.equal(typeof chromeAdapterModule.composeChromeAdapter, 'function');
+  const base = createChromeAdapter(chromeFake().chromeApi);
+  const contract = base[AUDIT_EXECUTION_INTERNAL];
+  const single = chromeAdapterModule.composeChromeAdapter(base, {
+    async enterFinalization() {}, async handoffReport() {}, async emitProgress() {},
+  });
+  const batch = chromeAdapterModule.composeChromeAdapter(base, {
+    tryEnterFinalization() { return true; }, async enterFinalization() {},
+    async handoffReport() {}, async emitProgress() {},
+  });
+  for (const adapter of [single, batch]) {
+    assert.equal(adapter[AUDIT_EXECUTION_INTERNAL], contract);
+    assert.equal(Object.getOwnPropertyDescriptor(adapter, AUDIT_EXECUTION_INTERNAL).enumerable, false);
+    assert.equal(Object.keys(adapter).some(key => /internal|session|random/iu.test(key)), false);
+    assert.doesNotMatch(JSON.stringify(adapter), /sessionArea|randomBytes|audit-execution-internal/u);
+  }
+});
+
+test('composed adapters reject symbols, accessors, extra overrides, and internal replacement', () => {
+  const compose = (...args) => chromeAdapterModule.composeChromeAdapter?.(...args);
+  const base = createChromeAdapter(chromeFake().chromeApi);
+  const hostileSymbol = { async emitProgress() {} };
+  hostileSymbol[Symbol('hostile')] = true;
+  const accessor = {};
+  Object.defineProperty(accessor, 'emitProgress', { enumerable: true, get() { throw new Error('GETTER_INVOKED'); } });
+  for (const overrides of [
+    hostileSymbol,
+    accessor,
+    { async emitProgress() {}, removeTab() {} },
+    { [AUDIT_EXECUTION_INTERNAL]: {} },
+  ]) assert.throws(() => compose(base, overrides), /AUDIT_ADAPTER_COMPOSITION_DENIED/u);
 });
 
 test('proves a fresh top document identity without returning its raw URL', async () => {

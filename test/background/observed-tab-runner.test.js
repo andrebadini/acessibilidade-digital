@@ -45,14 +45,14 @@ function privacyStore() {
 function attachedFixture({ proofs, pipelineError, decision, store = privacyStore(), signal } = {}) {
   const calls = {
     createTab: 0, navigateTab: 0, removeTab: 0, collect: 0, pixelOperations: 0,
-    readInputValue: 0, captureVisibleTab: 0, captureScreenshot: 0, order: [],
+    readInputValue: 0, captureVisibleTab: 0, captureScreenshot: 0, probe: 0, order: [],
   };
   const queue = [...(proofs ?? [{ tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST_A }, { tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST_A }])];
   const chromeAdapter = {
     async createTab() { calls.createTab += 1; },
     async navigateTab() { calls.navigateTab += 1; },
     async removeTab() { calls.removeTab += 1; },
-    async probeDocumentIdentity() { return structuredClone(queue.shift() ?? queue.at(-1)); },
+    async probeDocumentIdentity() { calls.probe += 1; return structuredClone(queue.shift() ?? queue.at(-1)); },
     async probePrivacySignals() {
       calls.order.push('probe-structure-without-values');
       return [{ category: 'password-field', count: 1 }];
@@ -154,6 +154,41 @@ test('privacy pause survives recreation and requires document reproving', async 
   assert.equal(resumed.status, 'failed');
   assert.equal(resumed.model.session.diagnostics.at(-1).code, 'PRIVACY_TARGET_CHANGED');
   assert.equal(resumedFixture.calls.pixelOperations, 0);
+});
+
+test('rejects an attached resume target swap before probing either tab', async () => {
+  const store = privacyStore();
+  const pausedFixture = attachedFixture({ decision: { status: 'privacy-paused', pauseId: 'pause-target' }, store });
+  pausedFixture.args.target = { ...pausedFixture.args.target, tabId: 99 };
+  pausedFixture.args.chromeAdapter.probeDocumentIdentity = async () => ({
+    tabId: 99, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST_A,
+  });
+  const paused = await runObservedTabAudit(pausedFixture.args);
+  assert.equal(paused.status, 'paused');
+
+  const resumed = attachedFixture({
+    decision: { status: 'allowed', consentCapabilityId: 'consent-a', documentId: 'document-a', urlSessionDigest: DIGEST_A },
+    store,
+  });
+  resumed.args.resumePauseId = 'pause-target';
+  const result = await runObservedTabAudit(resumed.args);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.model.session.diagnostics.at(-1).code, 'PRIVACY_TARGET_CHANGED');
+  assert.equal(resumed.calls.probe, 0);
+  assert.equal(resumed.calls.collect, 0);
+  assert.equal(resumed.calls.pixelOperations, 0);
+});
+
+test('rejects hostile resume target structure without invoking getters', async () => {
+  let getterCalls = 0;
+  const fixtureValue = attachedFixture();
+  const hostile = { ...fixtureValue.args.target };
+  Object.defineProperty(hostile, 'tabId', { enumerable: true, get() { getterCalls += 1; return 17; } });
+  hostile.extra = true;
+  hostile[Symbol('hidden')] = true;
+  await assert.rejects(() => runObservedTabAudit({ ...fixtureValue.args, target: hostile }), /OBSERVED_RUNNER_DENIED/u);
+  assert.equal(getterCalls, 0);
+  assert.equal(fixtureValue.calls.probe, 0);
 });
 
 test('never reads values or captures pixels before an allowed decision', async () => {
@@ -294,4 +329,34 @@ test('persists and rereads cleanup state when ownership registration storage fai
   assert.equal(result.ownershipState, 'removed');
   assert.deepEqual(calls, ['create', 'remove']);
   assert.equal((await ownedTabs.get('owner-a')).state, 'removed');
+});
+
+test('never claims cleanup-pending when neither ownership journal nor tab removal is confirmed', async () => {
+  const sessionArea = createSessionArea();
+  const vault = createRawNavigationVaultV1({
+    sessionArea, now: () => 1_788_000_000_000,
+    randomBytes: length => new Uint8Array(length).fill(12),
+  });
+  const issued = await vault.putInternal({ ownerId: 'owner-a', rawUrl: 'https://private.example.test/person/secret' });
+  sessionArea.set = async () => { throw new Error('PRIVATE_PERSISTENCE_FAILURE'); };
+  const adapter = {
+    async createTab() { return { id: 71, windowId: 8 }; },
+    async navigateTab() { throw new Error('must not navigate'); },
+    async waitForStable() { throw new Error('must not wait'); },
+    async probeDocumentIdentity() { throw new Error('must not probe'); },
+    async removeTab() { throw new Error('PRIVATE_REMOVE_FAILURE'); },
+  };
+  const ownedTabs = createOwnedTabRegistry({ sessionArea, chromeAdapter: adapter, now: () => '2026-08-29T10:00:00.000Z' });
+  const result = await runObservedTabAudit({
+    auditId: 'audit-a', sessionCapabilityId: 'session-a',
+    target: { kind: 'disposable', ownerId: 'owner-a', navigationToken: issued.navigationToken, cleanupMode: 'always' },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    privacyDecision: { status: 'no-pixels', limitationCode: 'PIXEL_CAPTURE_OMITTED' },
+    checkpointRecorder: checkpointRecorder(), chromeAdapter: adapter, ownedTabs, rawNavigationVault: vault,
+    pipeline: async () => { throw new Error('must not run'); }, failureModelFactory: safeFailureModel,
+    now: () => '2026-08-29T10:00:00.000Z',
+  });
+  assert.equal(result.ownershipState, 'cleanup-unconfirmed');
+  assert.equal(await ownedTabs.get('owner-a'), null);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE|private\.example|owner-a|71/u);
 });

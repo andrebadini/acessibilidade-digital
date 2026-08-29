@@ -11,6 +11,7 @@ import { remapAuditPage } from '../../src/core/batch/remap-audit.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { createAnnotationMapFixture } from '../report/annotation-map-fixture.js';
+import { captureElement as captureElementEvidence, captureFullPage as captureFullPageEvidence } from '../../src/browser/capture-evidence.js';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const TEST_EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
@@ -186,6 +187,8 @@ function fakeAdapter(options = {}) {
   const events = [];
   const page = options.page || rawPage();
   let screenshots = 0;
+  let fullPageCalls = 0;
+  let elementCalls = 0;
   let disconnects = 0;
   let removals = 0;
   const cdp = {
@@ -217,7 +220,7 @@ function fakeAdapter(options = {}) {
   let randomValue = 0;
   const adapter = {
     events,
-    get counts() { return { screenshots, disconnects, removals }; },
+    get counts() { return { screenshots, fullPageCalls, elementCalls, disconnects, removals }; },
     async createTab() {
       events.push('create-tab');
       if (options.createTabFailure) throw new Error('detalhe privado de criação');
@@ -265,6 +268,10 @@ function fakeAdapter(options = {}) {
       if (options.removeTabFailure) throw new Error('detalhe privado de fechamento');
     },
   };
+  if (options.trackCaptureCalls) {
+    adapter.captureFullPage = async (...args) => { fullPageCalls += 1; return captureFullPageEvidence(...args); };
+    adapter.captureElement = async (...args) => { elementCalls += 1; return captureElementEvidence(...args); };
+  }
   Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
     enumerable: false,
     value: Object.freeze({
@@ -275,14 +282,14 @@ function fakeAdapter(options = {}) {
       },
       randomBytes(length) { return new Uint8Array(length).fill(++randomValue); },
       epochNow: () => 1_788_000_000_000,
-      capturePolicy: createCapturePolicyV1({ mode: options.noPixels ? 'no-pixels' : 'full-evidence', includeQuery: false }),
-      privacyDecision: options.noPixels
+      capturePolicy: createCapturePolicyV1({ mode: options.mode ?? (options.noPixels ? 'no-pixels' : 'full-evidence'), includeQuery: false }),
+      privacyDecision: options.noPixels || options.mode === 'no-pixels'
         ? Object.freeze({ status: 'no-pixels', limitationCode: 'PIXEL_CAPTURE_OMITTED' })
         : Object.freeze({
           status: 'allowed', consentCapabilityId: 'consent-a', documentId: 'document-a',
           urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
         }),
-      ...(options.noPixels ? {} : { consentAuthority: Object.freeze({ async consume() { return true; } }) }),
+      ...(options.noPixels || options.mode === 'no-pixels' ? {} : { consentAuthority: Object.freeze({ async consume() { return true; } }) }),
     }),
   });
   if (options.composeMap || options.mapFailure) adapter.composeAnnouncementMap = async input => {
@@ -374,7 +381,7 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
   assert.equal(model.axe.status, 'disabled');
   assert.ok(model.limitations.some(value => /axe-core|MV3|CSP/i.test(value)));
   assert.ok(model.session.diagnostics.some(value => value.code === 'AXE_FEATURE_DISABLED'));
-  assert.equal(model.requestedUrl, 'https://example.test/start?view=public');
+  assert.equal(model.requestedUrl, 'https://example.test/');
   assert.equal(model.finalUrl, 'https://example.test/final?view=public');
   assert.ok(adapter.events.indexOf('full-page') < adapter.events.indexOf('collect'));
   assert.ok(adapter.events.indexOf('axe') < adapter.events.indexOf('collect'));
@@ -430,6 +437,45 @@ test('public compatibility path defaults to an owned proof boundary and performs
   assert.ok(adapter.events.findIndex(value => value.startsWith('navigate:')) < adapter.events.findIndex(value => value.startsWith('remove-tab:')));
   assert.equal(Object.hasOwn(model, 'checkpoint'), false);
   assert.doesNotMatch(JSON.stringify(model), /owner-|navigationToken|urlSessionDigest|ERASE/u);
+});
+
+test('uses one conservative durable URL projection for successful and failed no-pixels audits', async () => {
+  const rawUrl = 'https://example.test/pessoa/CPF-123456789?case=7&secret=x#fragmento';
+  const models = [
+    await runAudit({ url: rawUrl, chromeAdapter: fakeAdapter({ noPixels: true }), now: clock, idFactory: () => 'audit-safe-url-success' }),
+    await runAudit({ url: rawUrl, chromeAdapter: fakeAdapter({ noPixels: true, waitFailure: new Error('PRIVATE_NATIVE_URL') }), now: clock, idFactory: () => 'audit-safe-url-failure' }),
+  ];
+  const durable = JSON.stringify(models);
+  assert.match(durable, /https:\/\/example\.test/u);
+  assert.doesNotMatch(durable, /CPF-123456789|case=7|secret=x|fragmento|PRIVATE_NATIVE_URL|\?case=7|&secret=x/u);
+});
+
+test('routes element-only, no-pixels, and full-evidence capture independently', async () => {
+  const elementOnly = fakeAdapter({ mode: 'element-only', trackCaptureCalls: true });
+  const elementModel = await runAudit({
+    url: 'https://example.test/', chromeAdapter: elementOnly, now: clock, idFactory: () => 'audit-element-only',
+  });
+  assert.equal(elementOnly.counts.fullPageCalls, 0);
+  assert.ok(elementOnly.counts.elementCalls >= 1);
+  assert.equal(elementModel.evidence.artifacts.some(artifact => artifact.kind === 'full-page'), false);
+  assert.equal(elementModel.evidence.artifacts.some(artifact => artifact.kind === 'announcement-map'), false);
+  const element = elementModel.evidence.artifacts.find(artifact => artifact.kind === 'element' && artifact.dataUrl);
+  assert.ok(element);
+  assert.equal(Object.hasOwn(element, 'fullPageEvidenceId'), false);
+
+  const noPixels = fakeAdapter({ mode: 'no-pixels', trackCaptureCalls: true });
+  await runAudit({ url: 'https://example.test/', chromeAdapter: noPixels, now: clock, idFactory: () => 'audit-no-pixels-route' });
+  assert.equal(noPixels.counts.screenshots, 0);
+  assert.equal(noPixels.counts.fullPageCalls, 0);
+  assert.equal(noPixels.counts.elementCalls, 0);
+
+  const full = fakeAdapter({ mode: 'full-evidence', trackCaptureCalls: true });
+  const fullModel = await runAudit({ url: 'https://example.test/', chromeAdapter: full, now: clock, idFactory: () => 'audit-full-route' });
+  assert.ok(full.counts.screenshots >= 2);
+  assert.equal(full.counts.fullPageCalls, 1);
+  assert.ok(full.counts.elementCalls >= 1);
+  assert.equal(fullModel.evidence.artifacts.some(artifact => artifact.kind === 'full-page'), true);
+  assert.equal(fullModel.evidence.artifacts.some(artifact => artifact.kind === 'element' && artifact.dataUrl), true);
 });
 
 test('orders capture→axe→collect→probes→core→normalize, correlates target-size by node and drops raw axe', async () => {
