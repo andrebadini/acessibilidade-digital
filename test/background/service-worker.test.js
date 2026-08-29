@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
-import { createSessionStore, isAuthorizedExtensionSender, isAuthorizedPanelSender, registerServiceWorker } from '../../src/background/service-worker.js';
+import { createSessionStore, initializeServiceWorker, isAuthorizedExtensionSender, isAuthorizedPanelSender, registerServiceWorker } from '../../src/background/service-worker.js';
 import { commitReviewDecision } from '../../src/review/review-state.js';
 import { AuditStorageUnavailableError, createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 import { runBatch } from '../../src/background/run-batch.js';
@@ -39,6 +39,58 @@ const createChrome = () => {
     createdTabs,
   };
 };
+
+test('registers no operational listener before trusted session access is fulfilled', async () => {
+  let resolveAccess;
+  const access = new Promise(resolve => { resolveAccess = resolve; });
+  const listenerCounts = { message: 0, connect: 0, tabUpdated: 0, tabRemoved: 0, windowRemoved: 0, context: 0 };
+  const listener = name => ({ addListener() { listenerCounts[name] += 1; } });
+  const chromeApi = {
+    storage: { session: { setAccessLevel(options) { assert.deepEqual(options, { accessLevel: 'TRUSTED_CONTEXTS' }); return access; } } },
+    runtime: { onMessage: listener('message'), onConnect: listener('connect') },
+    tabs: { onUpdated: listener('tabUpdated'), onRemoved: listener('tabRemoved') },
+    windows: { onRemoved: listener('windowRemoved') },
+    contextMenus: { onClicked: listener('context') },
+  };
+  const pending = initializeServiceWorker(chromeApi, {
+    register(api) {
+      api.runtime.onMessage.addListener(() => {});
+      api.runtime.onConnect.addListener(() => {});
+      api.tabs.onUpdated.addListener(() => {});
+      api.tabs.onRemoved.addListener(() => {});
+      api.windows.onRemoved.addListener(() => {});
+      api.contextMenus.onClicked.addListener(() => {});
+      return 'registered';
+    },
+  });
+  await Promise.resolve();
+  assert.deepEqual(listenerCounts, { message: 0, connect: 0, tabUpdated: 0, tabRemoved: 0, windowRemoved: 0, context: 0 });
+  resolveAccess();
+  assert.equal(await pending, 'registered');
+  assert.deepEqual(listenerCounts, { message: 1, connect: 1, tabUpdated: 1, tabRemoved: 1, windowRemoved: 1, context: 1 });
+});
+
+test('fails closed with one fixed diagnostic when trusted session access is rejected', async () => {
+  const diagnostics = [];
+  let registrations = 0;
+  const chromeApi = { storage: { session: { async setAccessLevel() { throw new Error('private native detail'); } } } };
+  assert.equal(await initializeServiceWorker(chromeApi, {
+    register() { registrations += 1; },
+    diagnosticSink: { error(code) { diagnostics.push(code); } },
+  }), null);
+  assert.equal(registrations, 0);
+  assert.deepEqual(diagnostics, ['SESSION_ACCESS_LEVEL_DENIED']);
+});
+
+test('does not misreport a post-gate registration exception as access denial', async () => {
+  const diagnostics = [];
+  const chromeApi = { storage: { session: { async setAccessLevel() {} } } };
+  await assert.rejects(() => initializeServiceWorker(chromeApi, {
+    register() { throw new Error('REGISTER_FAILED'); },
+    diagnosticSink: { error(code) { diagnostics.push(code); } },
+  }), /REGISTER_FAILED/u);
+  assert.deepEqual(diagnostics, []);
+});
 
 async function waitUntil(predicate, timeoutMs = 500) {
   const deadline = Date.now() + timeoutMs;

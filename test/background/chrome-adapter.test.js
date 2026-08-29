@@ -62,6 +62,63 @@ function chromeFake() {
   return { chromeApi, calls, updated, removed };
 }
 
+test('proves a fresh top document identity without returning its raw URL', async () => {
+  const fake = chromeFake();
+  fake.chromeApi.tabs.get = async id => ({ id, windowId: 9, status: 'complete', url: 'https://example.test/path?token=private#fragment' });
+  fake.chromeApi.scripting.executeScript = async () => [{
+    frameId: 0,
+    documentId: 'target-document-1',
+    result: 'https://example.test/path?token=private#fragment',
+  }];
+  const digested = [];
+  const adapter = createChromeAdapter(fake.chromeApi, {
+    sessionUrlDigestManager: {
+      async digest(value) { digested.push(value); return `hmac-sha256:${'A'.repeat(43)}`; },
+    },
+  });
+  const proof = await adapter.probeDocumentIdentity(17);
+  assert.deepEqual(proof, {
+    tabId: 17,
+    windowId: 9,
+    documentId: 'target-document-1',
+    urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+  });
+  assert.deepEqual(digested, ['https://example.test/path?token=private#fragment']);
+  assert.doesNotMatch(JSON.stringify(proof), /private|example\.test/u);
+});
+
+test('rejects ambiguous, stale, or non-HTTP document probes', async () => {
+  const fake = chromeFake();
+  const manager = { async digest() { return `hmac-sha256:${'A'.repeat(43)}`; } };
+  const adapter = createChromeAdapter(fake.chromeApi, { sessionUrlDigestManager: manager });
+  fake.chromeApi.tabs.get = async id => ({ id, windowId: 9, url: 'https://example.test/' });
+  fake.chromeApi.scripting.executeScript = async () => [];
+  await assert.rejects(() => adapter.probeDocumentIdentity(17), /TARGET_DOCUMENT_UNAVAILABLE/u);
+  fake.chromeApi.scripting.executeScript = async () => [{ frameId: 0, documentId: 'doc-1', result: 'https://changed.test/' }];
+  await assert.rejects(() => adapter.probeDocumentIdentity(17), /TARGET_DOCUMENT_UNAVAILABLE/u);
+  fake.chromeApi.tabs.get = async id => ({ id, windowId: 9, url: 'chrome://settings/' });
+  fake.chromeApi.scripting.executeScript = async () => [{ frameId: 0, documentId: 'doc-1', result: 'chrome://settings/' }];
+  await assert.rejects(() => adapter.probeDocumentIdentity(17), /TARGET_DOCUMENT_UNAVAILABLE/u);
+});
+
+test('rechecks the tab after script proof and rejects an interleaved navigation', async () => {
+  const fake = chromeFake();
+  const tabs = [
+    { id: 17, windowId: 9, url: 'https://example.test/before' },
+    { id: 17, windowId: 9, url: 'https://example.test/after' },
+  ];
+  fake.chromeApi.tabs.get = async () => tabs.shift();
+  fake.chromeApi.scripting.executeScript = async () => [{
+    frameId: 0,
+    documentId: 'document-before',
+    result: 'https://example.test/before',
+  }];
+  const adapter = createChromeAdapter(fake.chromeApi, {
+    sessionUrlDigestManager: { async digest() { return `hmac-sha256:${'A'.repeat(43)}`; } },
+  });
+  await assert.rejects(() => adapter.probeDocumentIdentity(17), /TARGET_DOCUMENT_UNAVAILABLE/u);
+});
+
 test('creates, navigates, waits, scripts all frames, connects CDP and removes only the exact tab', async () => {
   const fake = chromeFake();
   const adapter = createChromeAdapter(fake.chromeApi);

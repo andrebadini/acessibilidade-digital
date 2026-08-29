@@ -86,12 +86,13 @@ export async function resolveActiveNodeId(cdp) {
   }
 }
 
-export function createChromeAdapter(chromeApi) {
+export function createChromeAdapter(chromeApi, options = {}) {
   if (!chromeApi?.tabs || !chromeApi?.scripting || !chromeApi?.debugger || !chromeApi?.runtime) {
     throw new TypeError('As APIs Chrome de auditoria não estão disponíveis.');
   }
   const executeScript = options => invoke(chromeApi, chromeApi.scripting, 'executeScript', options);
   const transport = createChromeDebuggerTransport(chromeApi);
+  const sessionUrlDigestManager = options.sessionUrlDigestManager;
 
   const createProbeAdapter = (tabId, cdp) => {
     const executeOne = async (func, args = []) => firstResult(await executeScript({
@@ -238,6 +239,42 @@ export function createChromeAdapter(chromeApi) {
   return {
     createTab(options) { return invoke(chromeApi, chromeApi.tabs, 'create', options); },
     navigateTab(tabId, url) { return invoke(chromeApi, chromeApi.tabs, 'update', tabId, { url }); },
+    async probeDocumentIdentity(tabId) {
+      if (!Number.isSafeInteger(tabId) || tabId < 0 || typeof sessionUrlDigestManager?.digest !== 'function') {
+        throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+      }
+      try {
+        const tab = await invoke(chromeApi, chromeApi.tabs, 'get', tabId);
+        if (tab?.id !== tabId || !Number.isSafeInteger(tab.windowId) || typeof tab.url !== 'string') {
+          throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+        }
+        const parsed = new URL(tab.url);
+        if (!['http:', 'https:'].includes(parsed.protocol) || parsed.href !== tab.url) {
+          throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+        }
+        const results = await executeScript({
+          target: { tabId, frameIds: [0] },
+          world: 'ISOLATED',
+          func: () => globalThis.location?.href,
+        });
+        if (!Array.isArray(results) || results.length !== 1) throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+        const [result] = results;
+        if (result?.frameId !== 0 || typeof result.documentId !== 'string' || !result.documentId || result.result !== tab.url) {
+          throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+        }
+        const confirmedTab = await invoke(chromeApi, chromeApi.tabs, 'get', tabId);
+        if (confirmedTab?.id !== tab.id || confirmedTab.windowId !== tab.windowId || confirmedTab.url !== tab.url) {
+          throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+        }
+        const urlSessionDigest = await sessionUrlDigestManager.digest(tab.url);
+        if (typeof urlSessionDigest !== 'string' || !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(urlSessionDigest)) {
+          throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+        }
+        return Object.freeze({ tabId, windowId: tab.windowId, documentId: result.documentId, urlSessionDigest });
+      } catch {
+        throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+      }
+    },
     executeScript,
     async waitForStable(tabId, options = {}) {
       const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 30_000;

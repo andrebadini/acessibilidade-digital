@@ -26,6 +26,21 @@ const ACTIVE_BATCH_KEY = 'audita-mt:session:active-batch';
 const EXPORT_BUSY_MESSAGE = 'Este relatório já está sendo gerado; tente novamente após a conclusão.';
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
 const DELETE_BUSY_MESSAGE = 'A auditoria está sendo exportada ou possui uma entrega pendente. Tente novamente depois.';
+export const SESSION_ACCESS_LEVEL_DENIED = 'SESSION_ACCESS_LEVEL_DENIED';
+
+export async function initializeServiceWorker(chromeApi, options = {}) {
+  const register = options.register ?? registerServiceWorker;
+  const diagnosticSink = options.diagnosticSink ?? { error(code) { console.error(code); } };
+  try {
+    const sessionArea = chromeApi?.storage?.session;
+    if (!sessionArea || typeof sessionArea.setAccessLevel !== 'function') throw new Error(SESSION_ACCESS_LEVEL_DENIED);
+    await invokeStorage(chromeApi, sessionArea, 'setAccessLevel', { accessLevel: 'TRUSTED_CONTEXTS' });
+  } catch {
+    diagnosticSink.error(SESSION_ACCESS_LEVEL_DENIED);
+    return null;
+  }
+  return register(chromeApi, options.registerOptions);
+}
 
 export function isAuthorizedPanelSender(sender, runtimeId) {
   return isAuthorizedExtensionSender(sender, runtimeId, PANEL_PATH);
@@ -1029,5 +1044,5 @@ function invokeStorage(chromeApi, storage, method, argument) {
 }
 
 if (typeof chrome !== 'undefined') {
-  registerServiceWorker(chrome);
+  await initializeServiceWorker(chrome);
 }
