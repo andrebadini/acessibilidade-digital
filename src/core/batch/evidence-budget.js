@@ -23,18 +23,18 @@ export async function applyBatchEvidenceBudget(pageResult, {
 
   for (const artifact of result.evidence) {
     const bytes = artifactBytes(artifact);
+    const hasPixels = hasPixelPayload(artifact);
     const mapDependsOnOmittedSource = artifact.kind === 'announcement-map' &&
       omittedSources.has(artifact.fullPageEvidenceId);
-    if (exhausted || mapDependsOnOmittedSource || consumed + bytes > limitBytes) {
+    if (hasPixels && (exhausted || mapDependsOnOmittedSource || consumed + bytes > limitBytes)) {
       exhausted = true;
+      const originalHash = artifact.hash;
       omitted.push({
         evidenceId: artifact.evidenceId, kind: artifact.kind,
-        contentHash: typeof artifact.hash === 'string' ? artifact.hash : null,
+        contentHash: typeof originalHash === 'string' ? originalHash : null,
         reason: 'budget',
       });
-      if (artifact.kind === 'announcement-map') continue;
-      const originalHash = artifact.hash;
-      delete artifact.dataUrl;
+      omitArtifactPixels(artifact);
       artifact.pixelState = 'omitted-budget';
       if (typeof originalHash === 'string') artifact.pixelContentHash = originalHash;
       artifact.hash = await hashEvidenceArtifact(artifact);
@@ -49,15 +49,29 @@ export async function applyBatchEvidenceBudget(pageResult, {
   const omittedPixelSources = new Set(retained
     .filter(artifact => artifact.kind === 'full-page' && artifact.pixelState === 'omitted-budget')
     .map(artifact => artifact.evidenceId));
-  const dependencySafe = retained.filter(artifact => {
-    if (artifact.kind !== 'announcement-map' || !omittedPixelSources.has(artifact.fullPageEvidenceId)) return true;
+  const dependencySafe = [];
+  for (const artifact of retained) {
+    if (artifact.kind !== 'announcement-map' || !omittedPixelSources.has(artifact.fullPageEvidenceId) ||
+      artifact.pixelState === 'omitted-budget' || !hasPixelPayload(artifact)) {
+      dependencySafe.push(artifact);
+      continue;
+    }
+    const originalHash = artifact.hash;
     if (!omitted.some(value => value.evidenceId === artifact.evidenceId)) omitted.push({
       evidenceId: artifact.evidenceId, kind: artifact.kind,
-      contentHash: typeof artifact.hash === 'string' ? artifact.hash : null, reason: 'budget',
+      contentHash: typeof originalHash === 'string' ? originalHash : null, reason: 'budget',
     });
     consumed = Math.max(initialUsedBytes, consumed - artifactBytes(artifact));
-    return false;
-  });
+    omitArtifactPixels(artifact);
+    artifact.pixelState = 'omitted-budget';
+    if (typeof originalHash === 'string') artifact.pixelContentHash = originalHash;
+    artifact.hash = await hashEvidenceArtifact(artifact, {
+      sourceArtifact: dependencySafe.find(value => value.evidenceId === artifact.fullPageEvidenceId),
+    });
+    dependencySafe.push(artifact);
+  }
+  const evidenceOrder = new Map(result.evidence.map((artifact, index) => [artifact.evidenceId, index]));
+  omitted.sort((left, right) => evidenceOrder.get(left.evidenceId) - evidenceOrder.get(right.evidenceId));
   const exceeded = omitted.length > 0;
   result.evidence = dependencySafe;
   if (exceeded) {
@@ -65,9 +79,8 @@ export async function applyBatchEvidenceBudget(pageResult, {
     result.page.status = ['failed', 'cancelled'].includes(result.page.status) ? result.page.status : 'partial';
     result.page.diagnostics = [...(result.page.diagnostics ?? []), {
       code: 'BATCH_EVIDENCE_BUDGET_EXCEEDED', message,
-      at: result.page.timestamps?.endedAt ?? new Date(0).toISOString(), recoverable: false,
+      at: result.page.timestamps?.endedAt ?? new Date(0).toISOString(), recoverable: true,
     }];
-    result.page.limitations = [...new Set([...(result.page.limitations ?? []), message])];
     result.page.omittedEvidence = [...(result.page.omittedEvidence ?? []), ...omitted];
   }
   return { result, usedBytes: consumed, exceeded, exhausted };
@@ -79,6 +92,19 @@ function artifactBytes(artifact) {
     for (const segment of artifact.segments ?? []) total += pngBytes(segment?.dataUrl);
   }
   return total;
+}
+
+function hasPixelPayload(artifact) {
+  if (typeof artifact?.dataUrl === 'string') return true;
+  return artifact?.kind === 'announcement-map' &&
+    Array.isArray(artifact.segments) && artifact.segments.some(segment => typeof segment?.dataUrl === 'string');
+}
+
+function omitArtifactPixels(artifact) {
+  delete artifact.dataUrl;
+  if (artifact.kind === 'announcement-map') {
+    for (const segment of artifact.segments ?? []) delete segment.dataUrl;
+  }
 }
 
 function pngBytes(value) {

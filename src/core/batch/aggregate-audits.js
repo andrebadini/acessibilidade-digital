@@ -4,7 +4,14 @@ import { NBR17225_EDITORIAL_NOTES, NBR17225_ITEMS } from '../normative/nbr17225.
 import { NORMATIVE_SOURCE_LEDGER } from '../normative/source-ledger.js';
 import { aggregateItems } from '../rules/aggregate-items.js';
 import { canonicalStringify } from '../report/canonical-json.js';
+import { applyReviewDecisions } from '../review/decisions.js';
 import { REPORT_HASH_BASE } from '../report/integrity-chain.js';
+import {
+  canonicalBatchRuleSummary,
+  canonicalCoreRuleLimitations,
+  canonicalScope,
+  deriveSystemLimitations,
+} from '../report/text-policy.js';
 
 const OUTCOME_PRIORITY = Object.freeze({ failed: 5, cantTell: 4, untested: 3, passed: 2, inapplicable: 1 });
 const IMPACT_PRIORITY = Object.freeze({ critical: 4, serious: 3, moderate: 2, minor: 1 });
@@ -48,7 +55,7 @@ export function createBatchFailurePage({
       pageId, requestedUrl: reportUrl, finalUrl: reportUrl, finalUrlObserved: false,
       attempted, status, timestamps: { startedAt, endedAt, generatedAt: endedAt },
       viewport: { width: null, height: null, deviceScaleFactor: null },
-      diagnostics: [diagnostic], limitations: [message], coverage: {},
+      diagnostics: [diagnostic], limitations: [], coverage: {}, warnings: [],
       accessibilityWidgets: unknownAccessibilityWidgetInventory(), axeStatus: 'not-run',
     },
     ruleResults: [], itemResults: [], occurrences: [], evidence: [], manualReview: [],
@@ -91,18 +98,28 @@ export function aggregateBatchAudits({
   assertGlobalGraph(pages, occurrences, evidence);
   const coreRules = ruleResults.filter(rule => rule.source?.engine !== 'axe-core');
   const aggregatedItems = new Map(aggregateItems(coreRules, NBR17225_ITEMS).map(item => [item.id, item]));
-  const itemResults = NBR17225_ITEMS.map(item => ({
+  let itemResults = NBR17225_ITEMS.map(item => ({
     ...structuredClone(item),
     outcome: aggregatedItems.get(item.id)?.outcome ?? 'cantTell',
     ruleResults: (aggregatedItems.get(item.id)?.ruleResults ?? []).map(rule => rule.ruleId),
   }));
   applyAxeItemOutcomes(itemResults, occurrences);
+  if (reviewDecisions.length > 0) {
+    itemResults = structuredClone(applyReviewDecisions({
+      auditId: batchAuditId,
+      itemResults,
+      ruleResults,
+      occurrences,
+      evidence,
+      manualReview,
+      reviewDecisions,
+    }, []).itemResults);
+  }
   const supplementalRuleCount = ruleResults.filter(rule => rule.source?.engine !== 'audita-core').length;
   const primary = pages[0];
   const pageDiagnostics = pages.flatMap(page => page.diagnostics ?? []);
-  const limitations = [...new Set(pages.flatMap(page => page.limitations ?? []))];
   const capturedStateCount = evidence.filter(artifact => artifact.kind === 'full-page' && artifact.state === 'pristine').length;
-  return {
+  const result = {
     schemaVersion: 2,
     auditId: batchAuditId,
     requestedScope: { mode: 'batch', urls: pages.map(page => page.requestedUrl) },
@@ -113,10 +130,7 @@ export function aggregateBatchAudits({
     timezone: template.timezone,
     versions: structuredClone(template.versions),
     environment: { ...structuredClone(template.environment), viewport: structuredClone(primary.viewport) },
-    scope: {
-      kind: 'explicit-url-batch',
-      description: `${pages.length} páginas correspondentes à lista explícita de ${pages.length} URLs; páginas e estados não solicitados não foram inferidos.`,
-    },
+    scope: canonicalScope('batch', pages.length),
     methodology: {
       ...structuredClone(template.methodology),
       coreRuleCount: 130,
@@ -136,7 +150,7 @@ export function aggregateBatchAudits({
       pageId: result.page.pageId, result: structuredClone(result.axe),
     })),
     accessibilityWidgets: structuredClone(primary.accessibilityWidgets),
-    limitations,
+    limitations: [],
     report: { status: 'pending', reviewUrl: null, artifact: { status: 'pending', formats: [] } },
     reproducibility: {
       methodologyVersion: template.versions.rules,
@@ -148,6 +162,8 @@ export function aggregateBatchAudits({
     normative: structuredClone(template.normative),
     integrity: { algorithm: 'SHA-256', evidenceManifestHash: 'pending', canonicalModelHash: 'pending', hashBase: REPORT_HASH_BASE },
   };
+  result.limitations = deriveSystemLimitations(result);
+  return result;
 }
 
 function aggregateRules(rules, hasCoverageBlocker, totalPages) {
@@ -165,10 +181,13 @@ function aggregateRules(rules, hasCoverageBlocker, totalPages) {
     const result = {
       ...structuredClone(strongest),
       outcome,
-      summary: aggregateSummary(outcome, group.length, totalPages),
+      summary: canonicalBatchRuleSummary(outcome),
       targets: group.flatMap(rule => structuredClone(rule.targets ?? [])),
       limitations: uniqueValues(group.flatMap(rule => rule.limitations ?? [])),
     };
+    if (result.source?.engine === 'audita-core') {
+      result.limitations = [...canonicalCoreRuleLimitations(outcome)];
+    }
     if (result.source?.engine === 'axe-core') {
       result.impact = group.reduce((best, rule) => IMPACT_PRIORITY[rule.impact] > IMPACT_PRIORITY[best] ? rule.impact : best, 'minor');
       result.confidence = outcome === 'failed' ? 'high' : 'low';
@@ -177,14 +196,6 @@ function aggregateRules(rules, hasCoverageBlocker, totalPages) {
     output.push(result);
   }
   return output;
-}
-
-function aggregateSummary(outcome, count, totalPages) {
-  const labels = {
-    failed: 'falha confirmada', cantTell: 'não foi possível concluir', untested: 'não testado',
-    passed: 'verificação aprovada', inapplicable: 'não aplicável',
-  };
-  return `Resultado agregado de ${count} de ${totalPages} ${totalPages === 1 ? 'página' : 'páginas'}: ${labels[outcome]}.`;
 }
 
 function deriveBatchStatus(pages) {

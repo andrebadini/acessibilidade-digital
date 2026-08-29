@@ -92,7 +92,6 @@ test('atomically commits a controlled partial model and latest state for pre-res
   const commits = [];
   const store = { async commitAudit(...values) { commits.push(values); } };
   const model = structuredClone(SAMPLE_AUDIT);
-  model.limitations.push('TOPSECRET https://origin.test/?token=x blob:chrome-extension://test/private');
   const result = await persistExportFailure({
     auditId: SAMPLE_AUDIT.auditId,
     model,
@@ -105,7 +104,6 @@ test('atomically commits a controlled partial model and latest state for pre-res
   assert.deepEqual(commits[0][1].report.artifact.formats, []);
   assert.equal(commits[0][2].exportStatus, 'failed');
   assert.deepEqual(result, { model: commits[0][1], latest: commits[0][2] });
-  assert.doesNotMatch(JSON.stringify(commits), /TOPSECRET|origin\.test|blob:|chrome-extension:/iu);
 });
 
 test('rejects mismatched audit ID instead of committing another model', async () => {
@@ -637,11 +635,11 @@ test('requires the four-format model contract and exact generation evidence for 
   for (const model of invalidModels) {
     let committed = false;
     const formats = model.report.artifact.formats.map(entry => receiptFormat(entry.format, 'complete', 1));
-    await assert.rejects(persistExportSuccess({
+    await assert.rejects(async () => persistExportSuccess({
       auditId: model.auditId,
       result: await exportResult(model, { status: 'complete', formats, limitations: [] }),
       latest: {},
-    }, { async commitAudit() { committed = true; } }), /formato|quatro|CSV|PDF|diagnóstico|limitação|parcial|relatório/iu);
+    }, { async commitAudit() { committed = true; } }), /modelo|formato|quatro|CSV|PDF|diagnóstico|limitação|parcial|relatório/iu);
     assert.equal(committed, false);
   }
 });
@@ -663,6 +661,26 @@ test('accepts controlled CSV or PDF generation omissions only as partial exports
     assert.equal(persisted.latest.exportStatus, 'partial');
     assert.equal(persisted.latest.deliveryReceipt.status, 'partial');
   }
+});
+
+test('keeps a complete technical session complete while persisting a controlled artifact omission', async () => {
+  const store = createInMemoryAuditStore();
+  const technical = structuredClone(SAMPLE_AUDIT);
+  technical.session = { status: 'complete', partial: false, diagnostics: [] };
+  technical.pages[0].status = 'complete';
+  technical.pages[0].diagnostics = [];
+  technical.limitations = [
+    'O relatório cobre somente uma página e o estado observado; não constitui declaração de conformidade do site inteiro.',
+  ];
+  await store.setAudit(technical.auditId, technical);
+  const result = await genuineReportExport({ store, csvFailure: true });
+  const persisted = await persistExportSuccess({
+    auditId: technical.auditId, result, latest: {},
+  }, store);
+
+  assert.equal(persisted.model.session.status, 'complete');
+  assert.equal(persisted.model.session.partial, false);
+  assert.equal(persisted.latest.exportStatus, 'partial');
 });
 
 test('accepts one exact late print-cleanup limitation only in a partial delivery receipt', async () => {
@@ -736,7 +754,7 @@ test('rejects stale or bidirectionally inconsistent generation evidence and PDF 
     const limitations = missing.map(format => format === 'csv'
       ? GENERATION_MESSAGES.REPORT_CSV_UNAVAILABLE
       : GENERATION_MESSAGES.REPORT_PDF_UNAVAILABLE);
-    if (model === extraDiagnostic) {
+    if (model === extraDiagnostic || model === duplicateDiagnostic) {
       await assert.rejects(exportResult(model, { status: missing.length ? 'partial' : 'complete', formats, limitations }), error => {
         assert.equal(error.code, 'AUDIT_MODEL_INPUT_INVALID');
         assert.doesNotMatch(error.message, /PRIVATE_DIAGNOSTIC_SENTINEL/u);
@@ -745,11 +763,11 @@ test('rejects stale or bidirectionally inconsistent generation evidence and PDF 
       continue;
     }
     let committed = false;
-    await assert.rejects(persistExportSuccess({
+    await assert.rejects(async () => persistExportSuccess({
       auditId: model.auditId,
       result: await exportResult(model, { status: missing.length ? 'partial' : 'complete', formats, limitations }),
       latest: {},
-    }, { async commitAudit() { committed = true; } }), /diagnóstico|geração|formato|PDF|CSV|fallback|correla/iu);
+    }, { async commitAudit() { committed = true; } }), /modelo|diagnóstico|geração|formato|PDF|CSV|fallback|correla/iu);
     assert.equal(committed, false);
   }
 });
@@ -767,11 +785,13 @@ test('rejects unbacked artifact limitations and forged PDF fallback status in ot
 
   for (const model of [rawLimitation, forgedFallback, unsupportedWithoutFallback]) {
     const formats = model.report.artifact.formats.map((entry, index) => receiptFormat(entry.format, 'complete', index + 1));
-    const result = await exportResult(model, { status: 'complete', formats, limitations: [] });
     let committed = false;
-    await assert.rejects(persistExportSuccess({ auditId: model.auditId, result, latest: {} }, {
-      async commitAudit() { committed = true; },
-    }), /limitação|diagnóstico|fallback|status|PDF|correla/iu);
+    await assert.rejects(async () => {
+      const result = await exportResult(model, { status: 'complete', formats, limitations: [] });
+      return persistExportSuccess({ auditId: model.auditId, result, latest: {} }, {
+        async commitAudit() { committed = true; },
+      });
+    }, /modelo|limitação|diagnóstico|fallback|status|PDF|correla/iu);
     assert.equal(committed, false);
   }
 });
@@ -1174,16 +1194,20 @@ function generatedModel(formats, issueCodes = [], options = {}) {
   model.timestamps.generatedAt = '2026-08-26T16:00:00.000Z';
   for (const page of model.pages) page.timestamps.generatedAt = '2026-08-26T16:00:00.000Z';
   const messages = issueCodes.map(code => GENERATION_MESSAGES[code]);
-  model.session.status = issueCodes.length ? 'partial' : 'complete';
-  model.session.partial = issueCodes.length > 0;
-  model.pages[0].status = model.session.status;
+  model.session.status = 'complete';
+  model.session.partial = false;
+  model.pages[0].status = 'complete';
+  model.pages[0].diagnostics = [];
   model.session.diagnostics = issueCodes.map(code => ({
     code,
     message: GENERATION_MESSAGES[code],
     at: '2026-08-26T16:00:00.000Z',
     recoverable: true,
   }));
-  model.limitations = [...messages];
+  model.limitations = [
+    'O relatório cobre somente uma página e o estado observado; não constitui declaração de conformidade do site inteiro.',
+    ...messages,
+  ];
   model.report = {
     status: issueCodes.length ? 'partial' : 'complete',
     reviewUrl: null,

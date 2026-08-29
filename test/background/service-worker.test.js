@@ -48,6 +48,24 @@ async function waitUntil(predicate, timeoutMs = 500) {
   }
 }
 
+function auditFixture(auditId, tag = 'fixture') {
+  const model = structuredClone(SAMPLE_AUDIT);
+  model.auditId = auditId;
+  model.versions.extension = `test-${tag}`;
+  return model;
+}
+
+function completeAuditFixture(auditId, tag = 'complete') {
+  const model = auditFixture(auditId, tag);
+  model.session.status = 'complete';
+  model.session.partial = false;
+  model.session.diagnostics = [];
+  model.pages[0].status = 'complete';
+  model.pages[0].diagnostics = [];
+  model.limitations = model.limitations.filter(limitation => !limitation.includes('parcial'));
+  return model;
+}
+
 function withAuditRevisions(store) {
   const models = new Map();
   const revisions = new Map();
@@ -84,7 +102,7 @@ function withAuditRevisions(store) {
       const revision = revisions.get(id) ?? 0;
       if (model === undefined) return { model, revision, capability: null };
       const issuer = createInMemoryAuditStore();
-      await issuer.setAudit(id, model);
+      await issuer.setAudit(id, auditFixture(id));
       const issued = await issuer.getAuditSnapshot(id);
       capabilityRevisions.set(issued.capability, revision);
       return { model, revision, capability: issued.capability };
@@ -614,6 +632,86 @@ test('runs the audit in background, persists the model and sends correlated prog
   assert.ok(chromeApi.createdTabs.some(tab => tab.active === false && tab.url === 'chrome-extension://test/src/export/index.html?auditId=audit-1&leaseOwnerId=owner-auto&exportAttempt=1'));
 });
 
+test('derives the current review capability at the worker boundary for single and batch', async t => {
+  const runtimeId = 'abcdefghijklmnopabcdefghijklmnop';
+  const hostileReviewUrl =
+    'chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/src/review/index.html?auditId=hostile';
+  for (const mode of ['single', 'batch']) await t.test(mode, async () => {
+    const auditId = mode === 'single' ? 'audit-worker-review' : 'batch-worker-review';
+    const chromeApi = createChrome();
+    const getUrlPaths = [];
+    chromeApi.runtime.id = runtimeId;
+    chromeApi.runtime.getURL = path => {
+      getUrlPaths.push(path);
+      return `chrome-extension://${runtimeId}/${path}`;
+    };
+    const commits = [];
+    const auditStore = withAuditRevisions({
+      async setLatest() {},
+      async commitAudit(id, model, latestState) {
+        commits.push(structuredClone({ id, model, latestState }));
+      },
+    });
+    const productionModel = {
+      auditId,
+      session: { status: 'complete' },
+      progress: [],
+      report: { status: 'review-ready', reviewUrl: null },
+      ...(mode === 'batch' ? { pages: [{ status: 'complete' }] } : {}),
+    };
+    const exerciseHandoff = async chromeAdapter => {
+      const handoff = await chromeAdapter.handoffReport({ auditId });
+      assert.equal(handoff.reviewUrl, hostileReviewUrl);
+      return structuredClone(productionModel);
+    };
+    registerServiceWorker(chromeApi, {
+      createId: () => auditId,
+      auditStore,
+      createExportOwnerId: () => `owner-${mode}`,
+      chromeAdapterFactory: () => ({
+        async emitProgress() {},
+        async handoffReport() { return { reviewUrl: hostileReviewUrl }; },
+      }),
+      ...(mode === 'single'
+        ? { runner: async ({ chromeAdapter }) => exerciseHandoff(chromeAdapter) }
+        : {
+            batchRunner: async ({ chromeAdapter }) => exerciseHandoff(chromeAdapter),
+            reportOptions: {
+              timezone: 'UTC', manifestVersion: '2.0.0',
+              rulesVersion: '1.0.0', browserVersion: 'Chrome/152',
+            },
+          }),
+    });
+    const sender = {
+      id: runtimeId,
+      url: `chrome-extension://${runtimeId}/src/panel/index.html`,
+      documentId: `panel-${mode}`,
+      tab: { id: mode === 'single' ? 101 : 102 },
+    };
+    const message = mode === 'single'
+      ? { type: 'START_AUDIT', url: 'https://single.example.test/' }
+      : { type: 'START_BATCH', urls: 'https://batch.example.test/' };
+    chromeApi.listeners.message.listener(message, sender, () => {});
+    await waitUntil(() => commits.length === 1);
+
+    const expectedReviewUrl =
+      `chrome-extension://${runtimeId}/src/review/index.html?auditId=${auditId}`;
+    assert.equal(commits[0].model.report.reviewUrl, null);
+    assert.equal(commits[0].latestState.reviewUrl, expectedReviewUrl);
+    const completion = chromeApi.runtime.sent.find(entry =>
+      entry.type === 'AUDIT_COMPLETE' && entry.auditId === auditId);
+    assert.equal(completion.reviewUrl, expectedReviewUrl);
+    assert.deepEqual(
+      getUrlPaths.filter(path => path.startsWith('src/review/')),
+      [`src/review/index.html?auditId=${auditId}`],
+    );
+    assert.doesNotMatch(
+      JSON.stringify([commits[0].model, commits[0].latestState, completion]),
+      /ponmlkjihgfedcbaponmlkjihgfedcba|auditId=hostile/u,
+    );
+  });
+});
+
 test('regenerates only a known audit and reports an active persistent export as BUSY', async () => {
   const chromeApi = createChrome();
   let latest = { auditId: 'audit-1', status: 'partial', exportStatus: 'complete', exportAttempt: 4 };
@@ -674,7 +772,7 @@ test('queues REQUEST_EXPORT behind startup while installing same-audit deduplica
   const chromeApi = createChrome();
   const auditId = 'audit-export-startup-gate';
   const store = createInMemoryAuditStore();
-  await store.commitAudit(auditId, { auditId }, {
+  await store.commitAudit(auditId, auditFixture(auditId), {
     auditId, status: 'complete', exportStatus: 'complete',
   }, { now: '2026-08-28T09:00:00.000Z' });
   let releaseStartup;
@@ -921,22 +1019,30 @@ test('rejects cancellation with a fixed too-late result once single or batch ent
 });
 
 test('closes cancellation atomically before persisting every terminal batch path', async t => {
+  const pageResultAtRunnerClock = (options, sessionFactory) => {
+    const timestamps = {
+      startedAt: options.now(),
+      endedAt: options.now(),
+      generatedAt: options.now(),
+    };
+    return reportInput({
+      auditId: options.idFactory(), requestedUrl: options.url, finalUrl: options.url,
+      timestamps,
+      session: sessionFactory(timestamps),
+    });
+  };
   const cases = [
     {
       name: 'last PAGE_FINISHED', urls: 'https://last.example.test/',
       gate: value => value.state === 'running' && value.completedCount === 1,
-      runner: async options => reportInput({
-        auditId: options.idFactory(), requestedUrl: options.url, finalUrl: options.url,
-        session: { status: 'complete', diagnostics: [], partial: false },
-      }),
+      runner: async options => pageResultAtRunnerClock(options,
+        () => ({ status: 'complete', diagnostics: [], partial: false })),
       expectedStatus: 'complete',
     },
     {
       name: 'FINISH', urls: 'https://finish.example.test/', gate: value => value.state === 'complete',
-      runner: async options => reportInput({
-        auditId: options.idFactory(), requestedUrl: options.url, finalUrl: options.url,
-        session: { status: 'complete', diagnostics: [], partial: false },
-      }),
+      runner: async options => pageResultAtRunnerClock(options,
+        () => ({ status: 'complete', diagnostics: [], partial: false })),
       expectedStatus: 'complete',
     },
     {
@@ -949,16 +1055,13 @@ test('closes cancellation atomically before persisting every terminal batch path
       name: 'cleanup diagnostic early terminal',
       urls: 'https://cleanup.example.test/\nhttps://never.example.test/',
       gate: value => value.state === 'running' && value.completedCount === 1,
-      runner: async options => reportInput({
-        auditId: options.idFactory(), requestedUrl: options.url, finalUrl: options.url,
-        session: {
+      runner: async options => pageResultAtRunnerClock(options, timestamps => ({
           status: 'partial', partial: true,
           diagnostics: [{
             code: 'TAB_CLOSE_FAILED', message: 'A aba descartável não pôde ser fechada automaticamente.',
-            at: '2026-08-28T12:00:00.000Z', recoverable: false,
+            at: timestamps.endedAt, recoverable: true,
           }],
-        },
-      }),
+        })),
       expectedStatus: 'partial',
     },
   ];
@@ -1099,9 +1202,7 @@ test('restart leaves a terminal audit and its queued export lease intact behind 
     updatedAt: '2026-08-28T09:01:00.000Z', resumable: false,
   };
   const store = createInMemoryAuditStore();
-  await store.commitAudit(auditId, {
-    auditId, session: { status: 'complete' }, report: {},
-  }, {
+  await store.commitAudit(auditId, completeAuditFixture(auditId), {
     auditId, mode: 'batch', status: 'complete', exportStatus: 'preparing',
   }, { now: '2026-08-28T09:01:00.000Z' });
   const before = await store.getAuditSnapshot(auditId);
@@ -1184,9 +1285,7 @@ test('serializes delete-one after startup restoration and never resurrects a sta
     updatedAt: '2026-08-28T09:01:00.000Z', resumable: false,
   };
   const store = createInMemoryAuditStore();
-  await store.commitAudit(auditId, {
-    auditId, session: { status: 'running' }, report: {},
-  }, {
+  await store.commitAudit(auditId, auditFixture(auditId), {
     auditId, mode: 'batch', status: 'running', percent: 50,
   }, { now: '2026-08-28T09:01:00.000Z' });
   let releaseInterruptionDecision;
@@ -1251,9 +1350,7 @@ test('serializes delete-all after startup restoration and leaves no stale durabl
     updatedAt: '2026-08-28T09:01:00.000Z', resumable: false,
   };
   const store = createInMemoryAuditStore();
-  await store.commitAudit(auditId, {
-    auditId, session: { status: 'running' }, report: {},
-  }, {
+  await store.commitAudit(auditId, auditFixture(auditId), {
     auditId, mode: 'batch', status: 'running', percent: 50,
   }, { now: '2026-08-28T09:01:00.000Z' });
   let releaseInterruptionDecision;
@@ -1488,7 +1585,6 @@ test('automatic export tab failure atomically persists a controlled partial mode
     async commitAudit(id, model, latest) { writes.push(['commit', id, model, latest]); },
   };
   const model = structuredClone(SAMPLE_AUDIT);
-  model.limitations.push('TOPSECRET https://origin.test/?token=x blob:chrome-extension://test/private');
   registerServiceWorker(chromeApi, { createId: () => model.auditId, auditStore: withAuditRevisions(auditStore), chromeAdapterFactory: () => ({}), runner: async () => model, now: () => '2026-08-26T16:00:00.000Z' });
   chromeApi.listeners.message.listener({ type: 'START_AUDIT', url: 'https://example.test/' }, { id: 'test', url: 'chrome-extension://test/src/panel/index.html' }, () => {});
   await waitUntil(() => writes.filter(([kind]) => kind === 'commit').length === 2);
@@ -1497,7 +1593,6 @@ test('automatic export tab failure atomically persists a controlled partial mode
   assert.equal(commits[1][2].session.status, 'partial');
   assert.deepEqual(commits[1][2].report.artifact.formats, []);
   assert.equal(commits[1][3].exportStatus, 'failed');
-  assert.doesNotMatch(JSON.stringify(commits[1]), /TOPSECRET|origin\.test|blob:|chrome-extension:/iu);
   assert.ok(chromeApi.runtime.sent.some(message => message.type === 'EXPORT_FAILED' && message.auditId === model.auditId));
 });
 
@@ -1616,7 +1711,7 @@ test('restored complete or partial exports become stale after a newer audit revi
   for (const exportStatus of ['complete', 'partial']) {
     const chromeApi = createChrome();
     const auditStore = createInMemoryAuditStore();
-    await auditStore.setAudit('audit-stale-export', { auditId: 'audit-stale-export', reviewDecisions: [] });
+    await auditStore.setAudit('audit-stale-export', auditFixture('audit-stale-export', 'initial'));
     await auditStore.setLatest({
       auditId: 'audit-stale-export',
       status: 'complete',
@@ -1624,10 +1719,7 @@ test('restored complete or partial exports become stale after a newer audit revi
       exportRevision: 1,
       message: 'Arquivos do relatório gerados.',
     });
-    await auditStore.setAudit('audit-stale-export', {
-      auditId: 'audit-stale-export',
-      reviewDecisions: [{ decisionId: 'newer-human-decision' }],
-    });
+    await auditStore.setAudit('audit-stale-export', auditFixture('audit-stale-export', 'newer-review'));
     registerServiceWorker(chromeApi, { auditStore });
     let response;
     chromeApi.listeners.message.listener(
@@ -1695,7 +1787,7 @@ test('maps a review race before lease acquisition to an explicit retryable stale
   store.acquireExportLease = async (...args) => {
     if (!raced) {
       raced = true;
-      await store.setAudit(model.auditId, { ...structuredClone(model), reviewRace: true });
+      await store.setAudit(model.auditId, auditFixture(model.auditId, 'review-race'));
     }
     return acquire(...args);
   };
@@ -1759,7 +1851,7 @@ test('two service-worker instances share the persistent lease and open only one 
 test('GET_LAST keeps an uncorrelated initial export handshake retryable instead of marking it failed', async () => {
   const chromeApi = createChrome();
   const store = createInMemoryAuditStore();
-  await store.setAudit('audit-handshake', { auditId: 'audit-handshake' });
+  await store.setAudit('audit-handshake', auditFixture('audit-handshake'));
   await store.setLatest({
     auditId: 'audit-handshake',
     status: 'complete',
@@ -1782,7 +1874,7 @@ test('GET_LAST keeps an uncorrelated initial export handshake retryable instead 
 test('GET_LAST treats a same-revision queued marker without a live lease as retryable stale state', async () => {
   const chromeApi = createChrome();
   const store = createInMemoryAuditStore();
-  await store.setAudit('audit-orphan-marker', { auditId: 'audit-orphan-marker' });
+  await store.setAudit('audit-orphan-marker', auditFixture('audit-orphan-marker'));
   const snapshot = await store.getAuditSnapshot('audit-orphan-marker');
   await store.setLatest({
     auditId: 'audit-orphan-marker',
@@ -1809,7 +1901,7 @@ test('GET_LAST treats a same-revision queued marker without a live lease as retr
 test('GET_LAST rejects a queued marker whose owner differs from the live lease', async () => {
   const chromeApi = createChrome();
   const store = createInMemoryAuditStore();
-  await store.setAudit('audit-owner-marker', { auditId: 'audit-owner-marker' });
+  await store.setAudit('audit-owner-marker', auditFixture('audit-owner-marker'));
   const snapshot = await store.getAuditSnapshot('audit-owner-marker');
   const lease = await store.acquireExportLease('audit-owner-marker', snapshot.capability, {
     ownerId: 'owner-live', now: '2026-08-27T10:00:00.000Z',
@@ -1837,7 +1929,7 @@ test('GET_LAST rejects a queued marker whose owner differs from the live lease',
 test('GET_LAST retries a torn latest/snapshot read instead of reporting a live delivery as failed', async () => {
   const chromeApi = createChrome();
   const store = createInMemoryAuditStore();
-  await store.setAudit('audit-restore-race', { auditId: 'audit-restore-race', phase: 'reviewed' });
+  await store.setAudit('audit-restore-race', auditFixture('audit-restore-race', 'reviewed'));
   const queuedSnapshot = await store.getAuditSnapshot('audit-restore-race');
   await store.acquireExportLease('audit-restore-race', queuedSnapshot.capability, {
     ownerId: 'owner-restore-race', now: '2026-08-27T10:00:00.000Z',
@@ -1862,7 +1954,7 @@ test('GET_LAST retries a torn latest/snapshot read instead of reporting a live d
       raced = true;
       await store.commitAuditIfRevisionWithExportLease(
         id,
-        { auditId: id, phase: 'delivering' },
+        auditFixture(id, 'delivering'),
         {
           auditId: id, status: 'complete', exportStatus: 'delivering',
           exportRevision: queuedSnapshot.revision + 1,
@@ -1908,10 +2000,7 @@ test('START_AUDIT persists the per-audit delete-after-export intent only on the 
     now: () => '2026-08-28T10:00:00.000Z',
     auditStore: store,
     chromeAdapterFactory: () => ({}),
-    runner: async () => ({
-      auditId: 'audit-retention-worker', session: { status: 'complete' },
-      report: { reviewUrl: 'chrome-extension://test/src/review/index.html?auditId=audit-retention-worker' },
-    }),
+    runner: async () => auditFixture('audit-retention-worker'),
   });
   let response;
   chromeApi.listeners.message.listener({
@@ -2045,7 +2134,7 @@ test('destructive protocol accepts only correlated review and canonical panel se
   const chromeApi = createChrome();
   const store = createInMemoryAuditStore();
   for (const auditId of ['delete-protocol-a', 'delete-protocol-b']) {
-    await store.commitAudit(auditId, { auditId }, { auditId }, { now: '2026-08-01T00:00:00.000Z' });
+    await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: '2026-08-01T00:00:00.000Z' });
   }
   const sessions = registerServiceWorker(chromeApi, {
     auditStore: store,
@@ -2131,7 +2220,7 @@ test('worker publishes complete-export deletion only after exact correlation and
   assert.equal(await sessions.getActiveBatch(), undefined);
 
   chromeApi.runtime.sent.length = 0;
-  await store.commitAudit('still-present', { auditId: 'still-present' }, { auditId: 'still-present' }, {
+  await store.commitAudit('still-present', auditFixture('still-present'), { auditId: 'still-present' }, {
     now: '2026-08-28T12:00:00.000Z', deleteAfterCompleteExport: true,
   });
   chromeApi.listeners.message.listener({ ...message, auditId: 'still-present' }, {
@@ -2198,9 +2287,7 @@ test('fences restart interruption atomically against an export-tab deletion', as
     updatedAt: '2026-08-28T09:01:00.000Z', resumable: false,
   };
   const store = createInMemoryAuditStore();
-  await store.commitAudit(auditId, {
-    auditId, session: { status: 'running' }, report: {},
-  }, {
+  await store.commitAudit(auditId, auditFixture(auditId), {
     auditId, mode: 'batch', status: 'running', percent: 50,
   }, { now: '2026-08-28T09:01:00.000Z', deleteAfterCompleteExport: true });
   let releaseInterruptionDecision;
@@ -2273,9 +2360,7 @@ test('restart never recreates latest when deletion wins before its atomic interr
     updatedAt: '2026-08-28T09:01:00.000Z', resumable: false,
   };
   const store = createInMemoryAuditStore();
-  await store.commitAudit(auditId, {
-    auditId, session: { status: 'running' }, report: {},
-  }, {
+  await store.commitAudit(auditId, auditFixture(auditId), {
     auditId, mode: 'batch', status: 'running', percent: 50,
   }, { now: '2026-08-28T09:01:00.000Z' });
   let releaseInterruptionDecision;

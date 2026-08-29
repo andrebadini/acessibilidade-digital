@@ -17,7 +17,7 @@ const AXE_OCCURRENCE_KEYS = set(
 );
 const RULE_KEYS = set('classification confidence engineRuleId impact limitations mode nbrItems outcome ruleId source summary targets wcag');
 const CORE_TARGET_DATA_KEYS = set(
-  'attribute behavior coverageKey declaredPurpose durationSeconds flashesPerSecond height itemId iterationCount largeText level previousLevel ratio reason role states threshold totalDurationSeconds width',
+  'attribute behavior contextObservation coverageKey declaredPurpose durationSeconds flashesPerSecond height itemId iterationCount largeText level previousLevel ratio reason role states threshold totalDurationSeconds width',
 );
 const EVIDENCE_BASE_KEYS = words('evidenceId pageId kind hash pixelState pixelContentHash');
 const FULL_PAGE_EVIDENCE_KEYS = new Set([...EVIDENCE_BASE_KEYS, 'state', 'dataUrl', 'metadata']);
@@ -29,7 +29,7 @@ const ACCESSIBILITY_EVIDENCE_KEYS = set(
   'announcementPreview description descriptionSource name nameSource role states valueStatus visibleText',
 );
 const MAP_EVIDENCE_KEYS = set(
-  'evidenceId pageId kind state fullPageEvidenceId derivation status segments legend counts limits limitations hash',
+  'evidenceId pageId kind state fullPageEvidenceId derivation status segments legend counts limits limitations hash pixelState pixelContentHash',
 );
 const MAP_DERIVATION_KEYS = set('type algorithm version sourceEvidenceId sourceHash geometrySnapshotHash geometry');
 const MAP_GEOMETRY_KEYS = set('coordinateSpace sourceCssSize sourcePixelSize scaleX scaleY deviceScaleFactor annotations');
@@ -39,6 +39,7 @@ const MAP_SEGMENT_KEYS = set('segmentId index count role sourceCssClip width hei
 const MAP_LEGEND_KEYS = set('number nodeId selectorSummary announcementPreview nameSource segmentIndex');
 const MAP_COUNT_KEYS = set('eligible annotated omittedNoRect omittedFrame omittedLimit unresolvedOverlap');
 const MAP_LIMIT_KEYS = set('maxNodes maxSourcePixels maxDimension maxCanvasPixels maxSegments maxDerivedBytes maxLegendCodePoints');
+const SHA256 = /^[a-f0-9]{64}$/u;
 
 /** Validates every retained V2 field. Unknown data is rejected, never stripped. */
 export function assertClosedAuditShape(model) {
@@ -145,10 +146,12 @@ function assertV1OccurrenceBoundary(model) {
 
 function assertPage(page) {
   const allowed = set(
-    'accessibilityWidgets attempted axeStatus coverage diagnostics finalUrl finalUrlObserved limitations omittedEvidence pageId requestedUrl status timestamps viewport',
+    'accessibilityWidgets attempted axeStatus coverage diagnostics finalUrl finalUrlObserved limitations omittedEvidence pageId requestedUrl status timestamps viewport warnings',
   );
   assertAllowedRecord(page, allowed);
-  for (const key of ['pageId', 'requestedUrl', 'finalUrl', 'status', 'timestamps', 'viewport']) requireOwn(page, key);
+  for (const key of [
+    'pageId', 'requestedUrl', 'finalUrl', 'status', 'attempted', 'finalUrlObserved', 'axeStatus', 'timestamps', 'viewport', 'warnings',
+  ]) requireOwn(page, key);
   for (const key of ['pageId', 'requestedUrl', 'finalUrl', 'status']) assertString(page[key]);
   assertTimestamps(page.timestamps);
   assertViewport(page.viewport);
@@ -157,9 +160,14 @@ function assertPage(page) {
     for (const diagnostic of page.diagnostics) assertDiagnostic(diagnostic);
   }
   if (page.limitations !== undefined) assertStringArray(page.limitations);
-  if (page.attempted !== undefined && typeof page.attempted !== 'boolean') throw new TypeError();
-  if (page.finalUrlObserved !== undefined && typeof page.finalUrlObserved !== 'boolean') throw new TypeError();
-  if (page.axeStatus !== undefined) assertString(page.axeStatus);
+  if (typeof page.attempted !== 'boolean') throw new TypeError();
+  if (typeof page.finalUrlObserved !== 'boolean') throw new TypeError();
+  assertString(page.axeStatus);
+  assertArray(page.warnings);
+  for (const warning of page.warnings) {
+    assertExact(warning, set('code'));
+    assertString(warning.code);
+  }
   if (page.coverage !== undefined) assertCoverage(page.coverage);
   if (page.accessibilityWidgets !== undefined) assertWidgets(page.accessibilityWidgets);
   if (page.omittedEvidence !== undefined) {
@@ -167,9 +175,8 @@ function assertPage(page) {
     for (const omitted of page.omittedEvidence) {
       assertExact(omitted, set('evidenceId kind contentHash reason'));
       assertString(omitted.evidenceId);
-      assertString(omitted.kind);
-      if (omitted.contentHash !== null) assertString(omitted.contentHash);
-      assertString(omitted.reason);
+      if (!['full-page', 'element', 'announcement-map'].includes(omitted.kind) ||
+        !SHA256.test(omitted.contentHash ?? '') || omitted.reason !== 'budget') throw new TypeError();
     }
   }
 }
@@ -195,11 +202,16 @@ function assertSession(value) {
 }
 
 function assertDiagnostic(value) {
-  assertExact(value, set('at code message recoverable'));
+  assertAllowedRecord(value, set('at code details message recoverable'));
+  for (const key of ['at', 'code', 'message', 'recoverable']) requireOwn(value, key);
   assertString(value.at);
   assertString(value.code);
   assertString(value.message);
   if (typeof value.recoverable !== 'boolean') throw new TypeError();
+  if (value.details !== undefined) {
+    assertExact(value.details, set('occurrenceId'));
+    assertString(value.details.occurrenceId);
+  }
 }
 
 function assertRule(rule) {
@@ -252,7 +264,8 @@ function assertRuleTarget(target, rule) {
   const original = canonicalStringify(keys) === canonicalStringify(['data', 'message', 'nodeId', 'selectorHint']);
   const minimal = canonicalStringify(keys) === canonicalStringify(['nodeId']);
   const contextual = canonicalStringify(keys) === canonicalStringify(['data', 'nodeId']);
-  if (!original && !minimal && !contextual) throw new TypeError();
+  const canonical = canonicalStringify(keys) === canonicalStringify(['data', 'message', 'nodeId']);
+  if (!original && !minimal && !contextual && !canonical) throw new TypeError();
   assertTargetIdentity(target.nodeId);
   if (target.selectorHint !== undefined) assertString(target.selectorHint);
   if (target.message !== undefined) assertString(target.message);
@@ -351,6 +364,13 @@ function assertEvidence(artifact) {
   for (const key of ['hash', 'pixelState', 'pixelContentHash', 'state', 'nodeId', 'snippet', 'fullPageEvidenceId', 'mediaUrl']) {
     if (artifact[key] !== undefined && artifact[key] !== null) assertString(artifact[key]);
   }
+  const hasPixelState = Object.hasOwn(artifact, 'pixelState');
+  const hasPixelHash = Object.hasOwn(artifact, 'pixelContentHash');
+  if (hasPixelState !== hasPixelHash || (hasPixelState &&
+    (artifact.pixelState !== 'omitted-budget' || !SHA256.test(artifact.pixelContentHash) ||
+      !SHA256.test(artifact.hash ?? '') || Object.hasOwn(artifact, 'dataUrl')))) {
+    throw new TypeError();
+  }
   if (artifact.backendNodeId !== undefined && artifact.backendNodeId !== null &&
     (!Number.isSafeInteger(artifact.backendNodeId) || artifact.backendNodeId < 0)) throw new TypeError();
   if (artifact.dataUrl !== undefined &&
@@ -394,7 +414,10 @@ function assertEvidenceMetadata(metadata) {
 }
 
 function assertAnnotationMap(artifact) {
-  assertExact(artifact, MAP_EVIDENCE_KEYS);
+  const expectedMapKeys = artifact.pixelState === 'omitted-budget'
+    ? MAP_EVIDENCE_KEYS
+    : new Set([...MAP_EVIDENCE_KEYS].filter(key => !['pixelState', 'pixelContentHash'].includes(key)));
+  assertExact(artifact, expectedMapKeys);
   assertExact(artifact.derivation, MAP_DERIVATION_KEYS);
   assertExact(artifact.derivation.geometry, MAP_GEOMETRY_KEYS);
   assertExact(artifact.derivation.geometry.sourceCssSize, set('width height'));
@@ -407,7 +430,9 @@ function assertAnnotationMap(artifact) {
   }
   assertArray(artifact.segments);
   for (const segment of artifact.segments) {
-    assertExact(segment, MAP_SEGMENT_KEYS);
+    assertExact(segment, artifact.pixelState === 'omitted-budget'
+      ? new Set([...MAP_SEGMENT_KEYS].filter(key => key !== 'dataUrl'))
+      : MAP_SEGMENT_KEYS);
     if (segment.sourceCssClip !== null) assertExact(segment.sourceCssClip, set('x y width height'));
   }
   assertArray(artifact.legend);

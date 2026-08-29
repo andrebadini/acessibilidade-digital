@@ -19,10 +19,10 @@ export function renderTechnicalJson(input) {
     occurrencesByItem.set(occurrence.nbrItemRef, entries);
   }
   const subject = model.requestedScope.mode === 'single'
-    ? { id: model.pages[0].finalUrl }
+    ? pageSubject(model.pages[0])
     : {
       id: `urn:audita-mt:audit:${model.auditId}:scope`,
-      pages: model.pages.map(page => ({ pageId: page.pageId, id: page.finalUrl })),
+      pages: model.pages.map(page => ({ pageId: page.pageId, ...pageSubject(page) })),
     };
   const assertions = model.itemResults.map(item => {
     const occurrences = occurrencesByItem.get(item.id) || [];
@@ -61,6 +61,12 @@ export function renderTechnicalJson(input) {
     audit: model,
     assertions,
   });
+}
+
+function pageSubject(page) {
+  return page.finalUrlObserved
+    ? { id: page.finalUrl }
+    : { id: page.requestedUrl, requestedUrl: page.requestedUrl, finalUrlObserved: false };
 }
 
 function selectorFor(occurrence, artifacts) {

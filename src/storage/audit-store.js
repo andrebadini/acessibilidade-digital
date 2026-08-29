@@ -8,7 +8,10 @@ import {
 } from './audit-retention.js';
 import { AUDIT_STORAGE_UNAVAILABLE_MESSAGE as STORAGE_UNAVAILABLE_MESSAGE } from '../core/privacy.js';
 import { createAuditModel } from '../core/report/audit-model.js';
-import { auditModelInputError } from '../core/report/audit-input.js';
+import { auditModelInputError, captureAuditInput } from '../core/report/audit-input.js';
+import { canonicalStringify } from '../core/report/canonical-json.js';
+import { verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
+import { applyReviewDecisions } from '../core/review/decisions.js';
 
 const DB_NAME = 'audita-mt';
 const STORE_NAME = 'audits';
@@ -28,10 +31,51 @@ const INTERRUPTIBLE_AUDIT_STATUSES = new Set(['idle', 'validating', 'queued', 'r
 const AUDIT_SNAPSHOT_CAPABILITIES = new WeakMap();
 const IN_MEMORY_RETENTION = new WeakMap();
 
-function canonicalReviewModel(id, model) {
-  const canonical = createAuditModel(model);
-  if (canonical.auditId !== validId(id)) throw auditModelInputError();
-  return canonical;
+function materializeCanonicalAuditModel(auditId, model, options = {}) {
+  if (model === undefined && options.allowMissing === true) return undefined;
+  try {
+    const canonical = createAuditModel(model);
+    if (canonical.auditId !== auditId) throw new TypeError();
+    return canonical;
+  } catch {
+    throw auditModelInputError();
+  }
+}
+
+async function canonicalReviewTransition(id, model, snapshotCapability, owner) {
+  try {
+    const capturedCandidate = captureAuditInput(model);
+    const auditId = validId(id);
+    const record = capabilityRecord(snapshotCapability, owner, auditId);
+    let base = createAuditModel(record.model);
+    if (base.integrity?.algorithm !== 'SHA-256') throw new TypeError();
+    const canonicalPending = base.integrity.canonicalModelHash === 'pending';
+    const completeSha = /^[a-f0-9]{64}$/u.test(base.integrity.canonicalModelHash) &&
+      /^[a-f0-9]{64}$/u.test(base.integrity.evidenceManifestHash);
+    if (!canonicalPending && !completeSha) throw new TypeError();
+    if (completeSha) base = await verifyAuditIntegritySnapshot(base);
+
+    const candidate = createAuditModel(capturedCandidate);
+    if (candidate.auditId !== auditId) throw new TypeError();
+    const baseByOccurrence = new Map(base.reviewDecisions.map(decision => [decision.occurrenceId, decision]));
+    const additions = [];
+    for (const decision of candidate.reviewDecisions) {
+      const prior = baseByOccurrence.get(decision.occurrenceId);
+      if (prior) {
+        if (canonicalStringify(prior) !== canonicalStringify(decision)) throw new TypeError();
+      } else {
+        additions.push(decision);
+      }
+    }
+    if (candidate.reviewDecisions.length !== base.reviewDecisions.length + additions.length || additions.length === 0) {
+      throw new TypeError();
+    }
+    const expected = createAuditModel(applyReviewDecisions(base, additions));
+    if (canonicalStringify(candidate) !== canonicalStringify(expected)) throw new TypeError();
+    return expected;
+  } catch {
+    throw auditModelInputError();
+  }
 }
 
 function storageArrayIndex(key, length) {
@@ -494,13 +538,17 @@ function mintAuditSnapshot(owner, auditId, model, revision) {
 }
 
 function capabilityRevision(capability, owner, auditId) {
+  return capabilityRecord(capability, owner, auditId).revision;
+}
+
+function capabilityRecord(capability, owner, auditId) {
   const record = (typeof capability === 'object' && capability !== null)
     ? AUDIT_SNAPSHOT_CAPABILITIES.get(capability)
     : null;
   if (!record || record.owner !== owner || record.auditId !== auditId) {
     throw new TypeError('Capacidade de snapshot da auditoria inválida.');
   }
-  return record.revision;
+  return record;
 }
 
 /** Returns an owned clone only for a capability minted by a local audit store. */
@@ -630,19 +678,25 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     ? storeOptions.now
     : () => new Date().toISOString();
   const owner = Object.freeze(Object.create(null));
+  const currentAudit = key => materializeCanonicalAuditModel(
+    key,
+    initial.get(key),
+    { allowMissing: true },
+  );
   const snapshot = id => {
     const key = validId(id);
-    return mintAuditSnapshot(owner, key, initial.get(key), initial.get(revisionKey(key)));
+    return mintAuditSnapshot(owner, key, currentAudit(key), initial.get(revisionKey(key)));
   };
   const writeAudit = (id, model, latestState, snapshotCapability, options = {}) => {
     const key = validId(id);
-    const modelClone = storageClone(model);
+    const modelClone = storageClone(materializeCanonicalAuditModel(key, model));
     const latestClone = latestState === undefined ? undefined : storageClone(latestState);
+    const currentModel = currentAudit(key);
     const currentRevision = storedRevision(initial.get(revisionKey(key)));
     const expectedRevision = snapshotCapability === undefined
       ? undefined
       : capabilityRevision(snapshotCapability, owner, key);
-    if (expectedRevision !== undefined && (!initial.has(key) || currentRevision !== expectedRevision)) {
+    if (expectedRevision !== undefined && (currentModel === undefined || currentRevision !== expectedRevision)) {
       throw new AuditRevisionConflictError();
     }
     const revision = currentRevision + 1;
@@ -669,8 +723,9 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   const acquireExportLease = (id, snapshotCapability, options) => {
     const key = validId(id);
     const revision = capabilityRevision(snapshotCapability, owner, key);
+    const currentModel = currentAudit(key);
     const currentRevision = storedRevision(initial.get(revisionKey(key)));
-    if (!initial.has(key) || currentRevision !== revision) throw new AuditRevisionConflictError();
+    if (currentModel === undefined || currentRevision !== revision) throw new AuditRevisionConflictError();
     const normalized = canonicalLeaseOptions(options, revision, 'queued');
     const existing = activeExportLease(initial.get(exportLeaseKey(key)), key, revision, normalized.nowMs);
     if (existing) {
@@ -694,8 +749,9 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   const claimExportLease = (id, snapshotCapability, options) => {
     const key = validId(id);
     const revision = capabilityRevision(snapshotCapability, owner, key);
+    const currentModel = currentAudit(key);
     const currentRevision = storedRevision(initial.get(revisionKey(key)));
-    if (!initial.has(key) || currentRevision !== revision) throw new AuditRevisionConflictError();
+    if (currentModel === undefined || currentRevision !== revision) throw new AuditRevisionConflictError();
     const normalized = canonicalLeaseOptions({ ...options, phase: 'running' }, revision, 'running');
     const existing = activeExportLease(initial.get(exportLeaseKey(key)), key, revision, normalized.nowMs);
     if (!existing || existing.ownerId !== normalized.ownerId || existing.phase !== 'queued' ||
@@ -718,8 +774,9 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   const commitAuditIfRevisionWithExportLease = (id, model, latestState, snapshotCapability, options) => {
     const key = validId(id);
     const revision = capabilityRevision(snapshotCapability, owner, key);
+    const currentModel = currentAudit(key);
     const currentRevision = storedRevision(initial.get(revisionKey(key)));
-    if (!initial.has(key) || currentRevision !== revision) throw new AuditRevisionConflictError();
+    if (currentModel === undefined || currentRevision !== revision) throw new AuditRevisionConflictError();
     const normalized = canonicalLeaseOptions(options, revision, options?.phase ?? 'delivering');
     const existing = activeExportLease(initial.get(exportLeaseKey(key)), key, revision, normalized.nowMs);
     if (!existing || existing.ownerId !== normalized.ownerId ||
@@ -754,6 +811,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   };
   const releaseExportLease = (id, options) => {
     const key = validId(id);
+    currentAudit(key);
     const revision = storedRevision(initial.get(revisionKey(key)));
     const normalized = canonicalLeaseOptions(options, revision);
     const existing = activeExportLease(initial.get(exportLeaseKey(key)), key, revision, normalized.nowMs);
@@ -763,9 +821,10 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   };
   const getExportLeaseState = (id, options) => {
     const key = validId(id);
+    const currentModel = currentAudit(key);
     const revision = storedRevision(initial.get(revisionKey(key)));
     const instant = canonicalLeaseNow(options?.now);
-    const existing = initial.has(key)
+    const existing = currentModel !== undefined
       ? activeExportLease(initial.get(exportLeaseKey(key)), key, revision, instant.nowMs)
       : null;
     return existing
@@ -778,8 +837,9 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   const assertExportLease = (id, snapshotCapability, options) => {
     const key = validId(id);
     const expected = capabilityRevision(snapshotCapability, owner, key);
+    const currentModel = currentAudit(key);
     const revision = storedRevision(initial.get(revisionKey(key)));
-    if (!initial.has(key) || revision !== expected) throw new AuditRevisionConflictError();
+    if (currentModel === undefined || revision !== expected) throw new AuditRevisionConflictError();
     const normalized = canonicalLeaseOptions(options, revision, options?.phase ?? 'delivering');
     const existing = activeExportLease(initial.get(exportLeaseKey(key)), key, revision, normalized.nowMs);
     if (!existing || existing.ownerId !== normalized.ownerId || existing.phase !== normalized.phase ||
@@ -794,8 +854,9 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   const recordExportDelivery = (id, snapshotCapability, options) => {
     const key = validId(id);
     const expected = capabilityRevision(snapshotCapability, owner, key);
+    const currentModel = currentAudit(key);
     const revision = storedRevision(initial.get(revisionKey(key)));
-    if (!initial.has(key) || revision !== expected) throw new AuditRevisionConflictError();
+    if (currentModel === undefined || revision !== expected) throw new AuditRevisionConflictError();
     const normalized = canonicalDeliveryOptions(options);
     const existing = activeExportLease(initial.get(exportLeaseKey(key)), key, revision, normalized.nowMs);
     if (!existing || existing.ownerId !== normalized.ownerId || existing.exportAttempt !== normalized.exportAttempt ||
@@ -812,6 +873,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   };
   const resolveExportDelivery = (id, options) => {
     const key = validId(id);
+    currentAudit(key);
     const normalized = canonicalDeliveryOptions(options, true);
     const current = canonicalDeliveryJournal(initial.get(exportDeliveryKey(key)), key);
     const resolved = resolveDeliveryEntries(current, normalized);
@@ -827,6 +889,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   };
   const getExportDeliveryJournal = id => {
     const key = validId(id);
+    currentAudit(key);
     return canonicalDeliveryJournal(initial.get(exportDeliveryKey(key)), key);
   };
   const deleteStoredAudit = key => {
@@ -839,6 +902,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     if (initial.get(LATEST_KEY)?.auditId === key) initial.delete(LATEST_KEY);
   };
   const hasDeliveryWork = (key, nowMs) => {
+    currentAudit(key);
     const revision = storedRevision(initial.get(revisionKey(key)));
     const lease = activeExportLease(initial.get(exportLeaseKey(key)), key, revision, nowMs);
     const journal = canonicalDeliveryJournal(initial.get(exportDeliveryKey(key)), key);
@@ -848,7 +912,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     const key = validId(id);
     const failedLatest = interruptedLatest(key, latestState);
     const instant = canonicalLeaseNow(options?.now);
-    const model = initial.get(key);
+    const model = currentAudit(key);
     const currentLatest = initial.get(LATEST_KEY);
     if (currentLatest?.auditId !== key) return { updated: false, reason: 'stale' };
     if (isTerminalAuditStatus(model?.session?.status) ||
@@ -862,13 +926,15 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   };
   const finalizeExportAndMaybeDelete = (id, model, latestState, snapshotCapability, options) => {
     const key = validId(id);
-    assertFinalizationCorrelation(key, model, latestState);
+    const canonicalModel = materializeCanonicalAuditModel(key, model);
+    const currentModel = currentAudit(key);
+    assertFinalizationCorrelation(key, canonicalModel, latestState);
     if (options?.clearDeliveryJournal !== true || typeof options?.deleteAfterCompleteExport !== 'boolean') {
       throw new TypeError('Finalização de exportação inválida.');
     }
     const revision = capabilityRevision(snapshotCapability, owner, key);
     const currentRevision = storedRevision(initial.get(revisionKey(key)));
-    if (!initial.has(key) || currentRevision !== revision) throw new AuditRevisionConflictError();
+    if (currentModel === undefined || currentRevision !== revision) throw new AuditRevisionConflictError();
     const normalized = canonicalLeaseOptions({ ...options, release: true }, revision);
     const existing = activeExportLease(initial.get(exportLeaseKey(key)), key, revision, normalized.nowMs);
     if (!existing || existing.ownerId !== normalized.ownerId ||
@@ -886,14 +952,14 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       options.deleteAfterCompleteExport === true &&
       isCompleteTerminalDelivery(entries, existing.ownerId, existing.exportAttempt);
     if (shouldDelete) {
-      storageClone(model);
+      storageClone(canonicalModel);
       if (latestState !== undefined) storageClone(latestState);
       deleteStoredAudit(key);
       return { deleted: true };
     }
     const committed = commitAuditIfRevisionWithExportLease(
       key,
-      model,
+      canonicalModel,
       latestState,
       snapshotCapability,
       { ...options, release: true },
@@ -916,9 +982,10 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       return writeAudit(id, model, latestState, snapshotCapability);
     },
     async commitAuditReviewIfRevision(id, model, snapshotCapability) {
+      const transition = await canonicalReviewTransition(id, model, snapshotCapability, owner);
       return writeAudit(
         id,
-        canonicalReviewModel(id, model),
+        transition,
         undefined,
         snapshotCapability,
         { review: true },
@@ -955,8 +1022,9 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
         throw new TypeError('Intenção de retenção inválida.');
       }
       const expected = capabilityRevision(snapshotCapability, owner, key);
+      const currentModel = currentAudit(key);
       const revision = storedRevision(initial.get(revisionKey(key)));
-      if (!initial.has(key) || revision !== expected) throw new AuditRevisionConflictError();
+      if (currentModel === undefined || revision !== expected) throw new AuditRevisionConflictError();
       const current = validateRetentionMetadata(retention.get(key), key);
       const next = Object.freeze({
         ...current,
@@ -965,7 +1033,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       retention.set(key, next);
       return {
         revision,
-        capability: mintAuditSnapshot(owner, key, initial.get(key), revision).capability,
+        capability: mintAuditSnapshot(owner, key, currentModel, revision).capability,
         retention: storageClone(next),
       };
     },
@@ -984,8 +1052,11 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
         ? expired.filter(value => compareRetentionPosition(value, marker) > 0).slice(0, limit)
         : expired.slice(0, limit);
       if (marker && candidates.length === 0 && expired.length > 0) {
-        initial.delete(RETENTION_CLEANUP_CURSOR_KEY);
         candidates = expired.slice(0, limit);
+      }
+      for (const candidate of candidates) currentAudit(candidate.auditId);
+      if (marker && compareRetentionPosition(candidates[0] ?? marker, marker) <= 0) {
+        initial.delete(RETENTION_CLEANUP_CURSOR_KEY);
       }
       let deleted = 0;
       let blocked = 0;
@@ -1013,8 +1084,9 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       const key = validId(id);
       const instant = canonicalRetentionInstant(options?.now);
       const expected = capabilityRevision(snapshotCapability, owner, key);
+      const currentModel = currentAudit(key);
       const revision = storedRevision(initial.get(revisionKey(key)));
-      if (!initial.has(key) || revision !== expected) throw new AuditRevisionConflictError();
+      if (currentModel === undefined || revision !== expected) throw new AuditRevisionConflictError();
       if (hasDeliveryWork(key, instant.milliseconds)) throw new AuditDeleteBusyError();
       deleteStoredAudit(key);
       return { deleted: true };
@@ -1022,6 +1094,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     async deleteAllAudits(options) {
       const instant = canonicalRetentionInstant(options?.now);
       const auditIds = [...retention.keys()].filter(key => initial.has(key));
+      for (const key of auditIds) currentAudit(key);
       if (auditIds.some(key => hasDeliveryWork(key, instant.milliseconds))) {
         throw new AuditDeleteBusyError();
       }
@@ -1187,14 +1260,15 @@ export function createAuditStore(options = {}) {
   const getAuditSnapshot = async id => {
     const key = validId(id);
     const values = await readKeys([key, revisionKey(key)]);
-    return mintAuditSnapshot(owner, key, values.get(key), values.get(revisionKey(key)));
+    const model = materializeCanonicalAuditModel(key, values.get(key), { allowMissing: true });
+    return mintAuditSnapshot(owner, key, model, values.get(revisionKey(key)));
   };
   const mutateAudit = async (id, model, latestState, snapshotCapability, options = {}) => {
     const key = validId(id);
     const expected = snapshotCapability === undefined
       ? undefined
       : capabilityRevision(snapshotCapability, owner, key);
-    const modelClone = storageClone(model);
+    const modelClone = storageClone(materializeCanonicalAuditModel(key, model));
     const latestClone = latestState === undefined ? undefined : storageClone(latestState);
     const db = await open();
     return new Promise((resolve, reject) => {
@@ -1220,11 +1294,18 @@ export function createAuditStore(options = {}) {
       const apply = () => {
         if (!currentModelRead || !revisionRead || !retentionRead || !latestRead || nextRevision !== null || conflict) return;
         let currentRevision;
-        try { currentRevision = storedRevision(currentRevisionValue); } catch (error) {
+        let canonicalCurrentModel;
+        try {
+          currentRevision = storedRevision(currentRevisionValue);
+          canonicalCurrentModel = materializeCanonicalAuditModel(
+            key, currentModel, { allowMissing: true },
+          );
+        } catch (error) {
           finish(reject, error);
+          try { transaction.abort(); } catch {}
           return;
         }
-        if (expected !== undefined && (currentModel === undefined || currentRevision !== expected)) {
+        if (expected !== undefined && (canonicalCurrentModel === undefined || currentRevision !== expected)) {
           conflict = true;
           return;
         }
@@ -1328,8 +1409,18 @@ export function createAuditStore(options = {}) {
       const apply = () => {
         if (!modelRead || !revisionRead || !leaseRead || !latestRead || !attemptRead || !deliveryRead || result || revisionConflict) return;
         let revision;
-        try { revision = storedRevision(currentRevisionValue); } catch (error) { finish(reject, error); return; }
-        if (currentModel === undefined || revision !== expected) { revisionConflict = true; return; }
+        let canonicalCurrentModel;
+        try {
+          revision = storedRevision(currentRevisionValue);
+          canonicalCurrentModel = materializeCanonicalAuditModel(
+            key, currentModel, { allowMissing: true },
+          );
+        } catch (error) {
+          finish(reject, error);
+          try { transaction.abort(); } catch {}
+          return;
+        }
+        if (canonicalCurrentModel === undefined || revision !== expected) { revisionConflict = true; return; }
         const existing = activeExportLease(currentLease, key, revision, normalized.nowMs);
         if (existing) {
           result = {
@@ -1384,7 +1475,7 @@ export function createAuditStore(options = {}) {
       expected,
       claimOnly ? 'running' : 'delivering',
     );
-    const modelClone = claimOnly ? null : storageClone(model);
+    const modelClone = claimOnly ? null : storageClone(materializeCanonicalAuditModel(key, model));
     const latestClone = latestState === undefined ? undefined : storageClone(latestState);
     const db = await open();
     return new Promise((resolve, reject) => {
@@ -1414,8 +1505,18 @@ export function createAuditStore(options = {}) {
       const apply = () => {
         if (!modelRead || !revisionRead || !leaseRead || !deliveryRead || !retentionRead || result || revisionConflict || leaseConflict) return;
         let revision;
-        try { revision = storedRevision(currentRevisionValue); } catch (error) { finish(reject, error); return; }
-        if (currentModel === undefined || revision !== expected) { revisionConflict = true; return; }
+        let canonicalCurrentModel;
+        try {
+          revision = storedRevision(currentRevisionValue);
+          canonicalCurrentModel = materializeCanonicalAuditModel(
+            key, currentModel, { allowMissing: true },
+          );
+        } catch (error) {
+          finish(reject, error);
+          try { transaction.abort(); } catch {}
+          return;
+        }
+        if (canonicalCurrentModel === undefined || revision !== expected) { revisionConflict = true; return; }
         const existing = activeExportLease(currentLease, key, revision, normalized.nowMs);
         const attemptMatches = normalized.exportAttempt === undefined || normalized.exportAttempt === existing?.exportAttempt;
         const allowed = claimOnly
@@ -1510,23 +1611,35 @@ export function createAuditStore(options = {}) {
       let settled = false;
       let revisionValue;
       let leaseValue;
+      let modelValue;
       let revisionRead = false;
       let leaseRead = false;
+      let modelRead = false;
       let released = false;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
       const transaction = indexedDbBoundary(() => db.transaction(STORE_NAME, 'readwrite'));
       const store = indexedDbObjectStore(transaction, () => transaction.objectStore(STORE_NAME));
+      const modelRequest = store.get(key);
       const revisionRequest = store.get(revisionKey(key));
       const leaseRequest = store.get(exportLeaseKey(key));
       const apply = () => {
-        if (!revisionRead || !leaseRead) return;
+        if (!modelRead || !revisionRead || !leaseRead) return;
         let revision;
-        try { revision = storedRevision(revisionValue); } catch (error) { finish(reject, error); return; }
+        try {
+          materializeCanonicalAuditModel(key, modelValue, { allowMissing: true });
+          revision = storedRevision(revisionValue);
+        } catch (error) {
+          finish(reject, error);
+          try { transaction.abort(); } catch {}
+          return;
+        }
         const existing = activeExportLease(leaseValue, key, revision, normalized.nowMs);
         if (existing?.ownerId === normalized.ownerId) { store.delete(exportLeaseKey(key)); released = true; }
       };
+      modelRequest.onsuccess = () => { modelRead = true; modelValue = modelRequest.result; apply(); };
       revisionRequest.onsuccess = () => { revisionRead = true; revisionValue = revisionRequest.result; apply(); };
       leaseRequest.onsuccess = () => { leaseRead = true; leaseValue = leaseRequest.result; apply(); };
+      modelRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       revisionRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       leaseRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       transaction.oncomplete = () => finish(resolve, released);
@@ -1538,8 +1651,9 @@ export function createAuditStore(options = {}) {
     const key = validId(id);
     const instant = canonicalLeaseNow(options?.now);
     const values = await readKeys([key, revisionKey(key), exportLeaseKey(key)]);
+    const model = materializeCanonicalAuditModel(key, values.get(key), { allowMissing: true });
     const revision = storedRevision(values.get(revisionKey(key)));
-    const existing = values.get(key) === undefined
+    const existing = model === undefined
       ? null
       : activeExportLease(values.get(exportLeaseKey(key)), key, revision, instant.nowMs);
     return existing
@@ -1554,8 +1668,9 @@ export function createAuditStore(options = {}) {
     const expected = capabilityRevision(snapshotCapability, owner, key);
     const normalized = canonicalLeaseOptions(options, expected, options?.phase ?? 'delivering');
     const values = await readKeys([key, revisionKey(key), exportLeaseKey(key)]);
+    const model = materializeCanonicalAuditModel(key, values.get(key), { allowMissing: true });
     const revision = storedRevision(values.get(revisionKey(key)));
-    if (values.get(key) === undefined || revision !== expected) throw new AuditRevisionConflictError();
+    if (model === undefined || revision !== expected) throw new AuditRevisionConflictError();
     const existing = activeExportLease(values.get(exportLeaseKey(key)), key, revision, normalized.nowMs);
     if (!existing || existing.ownerId !== normalized.ownerId || existing.phase !== normalized.phase ||
       (normalized.exportAttempt !== undefined && normalized.exportAttempt !== existing.exportAttempt)) {
@@ -1597,8 +1712,18 @@ export function createAuditStore(options = {}) {
       const apply = () => {
         if (!modelRead || !revisionRead || !leaseRead || !deliveryRead || !latestRead || result || revisionConflict || leaseConflict) return;
         let revision;
-        try { revision = storedRevision(currentRevisionValue); } catch (error) { finish(reject, error); return; }
-        if (currentModel === undefined || revision !== expected) { revisionConflict = true; return; }
+        let canonicalCurrentModel;
+        try {
+          revision = storedRevision(currentRevisionValue);
+          canonicalCurrentModel = materializeCanonicalAuditModel(
+            key, currentModel, { allowMissing: true },
+          );
+        } catch (error) {
+          finish(reject, error);
+          try { transaction.abort(); } catch {}
+          return;
+        }
+        if (canonicalCurrentModel === undefined || revision !== expected) { revisionConflict = true; return; }
         const lease = activeExportLease(currentLease, key, revision, normalized.nowMs);
         if (!lease || lease.ownerId !== normalized.ownerId || lease.exportAttempt !== normalized.exportAttempt ||
           lease.phase !== 'delivering') { leaseConflict = true; return; }
@@ -1637,20 +1762,30 @@ export function createAuditStore(options = {}) {
     const db = await open();
     return new Promise((resolve, reject) => {
       let settled = false;
+      let modelRead = false;
       let deliveryRead = false;
       let latestRead = false;
+      let currentModel;
       let currentDelivery;
       let currentLatest;
       let result = null;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
       const transaction = indexedDbBoundary(() => db.transaction(STORE_NAME, 'readwrite'));
       const store = indexedDbObjectStore(transaction, () => transaction.objectStore(STORE_NAME));
+      const modelRequest = store.get(key);
       const deliveryRequest = store.get(exportDeliveryKey(key));
       const latestRequest = store.get(LATEST_KEY);
       const apply = () => {
-        if (!deliveryRead || !latestRead || result !== null) return;
+        if (!modelRead || !deliveryRead || !latestRead || result !== null) return;
         let current;
-        try { current = canonicalDeliveryJournal(currentDelivery, key); } catch (error) { finish(reject, error); return; }
+        try {
+          materializeCanonicalAuditModel(key, currentModel, { allowMissing: true });
+          current = canonicalDeliveryJournal(currentDelivery, key);
+        } catch (error) {
+          finish(reject, error);
+          try { transaction.abort(); } catch {}
+          return;
+        }
         const resolved = resolveDeliveryEntries(current, normalized);
         result = resolved.matched;
         if (!resolved.matched) return;
@@ -1662,8 +1797,10 @@ export function createAuditStore(options = {}) {
           ), LATEST_KEY);
         }
       };
+      modelRequest.onsuccess = () => { modelRead = true; currentModel = modelRequest.result; apply(); };
       deliveryRequest.onsuccess = () => { deliveryRead = true; currentDelivery = deliveryRequest.result; apply(); };
       latestRequest.onsuccess = () => { latestRead = true; currentLatest = latestRequest.result; apply(); };
+      modelRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       deliveryRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       latestRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       transaction.oncomplete = () => finish(resolve, result === true);
@@ -1673,7 +1810,9 @@ export function createAuditStore(options = {}) {
   };
   const getExportDeliveryJournal = async id => {
     const key = validId(id);
-    return canonicalDeliveryJournal(await get(exportDeliveryKey(key)), key);
+    const values = await readKeys([key, exportDeliveryKey(key)]);
+    materializeCanonicalAuditModel(key, values.get(key), { allowMissing: true });
+    return canonicalDeliveryJournal(values.get(exportDeliveryKey(key)), key);
   };
   const getAuditRetention = async id => {
     const key = validId(id);
@@ -1722,8 +1861,16 @@ export function createAuditStore(options = {}) {
       const apply = () => {
         if (!modelRead || !revisionRead || !retentionRead || result || conflict) return;
         let revision;
-        try { revision = storedRevision(revisionValue); } catch (error) { finish(reject, error); return; }
-        if (modelValue === undefined || revision !== expected) { conflict = true; return; }
+        let canonicalModel;
+        try {
+          revision = storedRevision(revisionValue);
+          canonicalModel = materializeCanonicalAuditModel(key, modelValue, { allowMissing: true });
+        } catch (error) {
+          finish(reject, error);
+          try { transaction.abort(); } catch {}
+          return;
+        }
+        if (canonicalModel === undefined || revision !== expected) { conflict = true; return; }
         let current;
         try { current = validateRetentionMetadata(retentionValue, key); } catch (error) {
           finish(reject, error);
@@ -1737,7 +1884,7 @@ export function createAuditStore(options = {}) {
         retentionStore.put(retentionMetadata);
         result = {
           revision,
-          model: storageClone(modelValue, transaction),
+          model: storageClone(canonicalModel, transaction),
           retention: storageClone(retentionMetadata, transaction),
         };
       };
@@ -1782,6 +1929,7 @@ export function createAuditStore(options = {}) {
         let entries;
         try {
           revision = storedRevision(revisionValue);
+          modelValue = materializeCanonicalAuditModel(key, modelValue, { allowMissing: true });
           entries = canonicalDeliveryJournal(deliveryValue, key);
         } catch (error) {
           finish(reject, error);
@@ -1851,8 +1999,16 @@ export function createAuditStore(options = {}) {
         pending -= 1;
         if (pending !== 0 || applied) return;
         let revision;
-        try { revision = storedRevision(revisionValue); } catch (error) { finish(reject, error); return; }
-        if (modelValue === undefined || revision !== expected) { conflict = true; return; }
+        let canonicalModel;
+        try {
+          revision = storedRevision(revisionValue);
+          canonicalModel = materializeCanonicalAuditModel(key, modelValue, { allowMissing: true });
+        } catch (error) {
+          finish(reject, error);
+          try { transaction.abort(); } catch {}
+          return;
+        }
+        if (canonicalModel === undefined || revision !== expected) { conflict = true; return; }
         try {
           busy = Boolean(activeExportLease(leaseValue, key, revision, instant.milliseconds)) ||
             canonicalDeliveryJournal(deliveryValue, key).length > 0;
@@ -1907,28 +2063,42 @@ export function createAuditStore(options = {}) {
       const retentionKeysRequest = retentionStore.getAllKeys();
       const decide = () => {
         if (keyReads !== 2 || valueReadsPending !== null) return;
+        const modelKeys = auditKeys.filter(key => typeof key === 'string' && !isPrivateAuditKey(key));
         const workKeys = auditKeys.filter(key => typeof key === 'string' &&
           (key.startsWith(EXPORT_LEASE_KEY_PREFIX) || key.startsWith(EXPORT_DELIVERY_KEY_PREFIX)));
-        valueReadsPending = workKeys.length;
+        const reads = [
+          ...modelKeys.map(key => ({ key, kind: 'model' })),
+          ...workKeys.map(key => ({ key, kind: 'work' })),
+        ];
+        valueReadsPending = reads.length;
         if (valueReadsPending === 0) {
           deleted = retentionKeys.length;
           auditStore.clear();
           retentionStore.clear();
           return;
         }
-        for (const workKey of workKeys) {
-          const request = auditStore.get(workKey);
+        for (const read of reads) {
+          const request = auditStore.get(read.key);
           request.onsuccess = () => {
             try {
-              if (workKey.startsWith(EXPORT_LEASE_KEY_PREFIX)) {
-                const auditId = workKey.slice(EXPORT_LEASE_KEY_PREFIX.length);
+              if (read.kind === 'model') {
+                materializeCanonicalAuditModel(read.key, request.result);
+              } else if (read.key.startsWith(EXPORT_LEASE_KEY_PREFIX)) {
+                const auditId = read.key.slice(EXPORT_LEASE_KEY_PREFIX.length);
                 const lease = request.result;
                 if (lease && activeExportLease(lease, auditId, lease.revision, instant.milliseconds)) busy = true;
               } else {
-                const auditId = workKey.slice(EXPORT_DELIVERY_KEY_PREFIX.length);
+                const auditId = read.key.slice(EXPORT_DELIVERY_KEY_PREFIX.length);
                 if (canonicalDeliveryJournal(request.result, auditId).length > 0) busy = true;
               }
-            } catch { busy = true; }
+            } catch (error) {
+              if (read.kind === 'model') {
+                finish(reject, error);
+                try { transaction.abort(); } catch {}
+                return;
+              }
+              busy = true;
+            }
             valueReadsPending -= 1;
             if (valueReadsPending === 0 && !busy) {
               deleted = retentionKeys.length;
@@ -1955,14 +2125,15 @@ export function createAuditStore(options = {}) {
     id, model, latestState, snapshotCapability, finalizeOptions,
   ) => {
     const key = validId(id);
-    assertFinalizationCorrelation(key, model, latestState);
+    const canonicalModel = materializeCanonicalAuditModel(key, model);
+    assertFinalizationCorrelation(key, canonicalModel, latestState);
     if (finalizeOptions?.clearDeliveryJournal !== true ||
       typeof finalizeOptions?.deleteAfterCompleteExport !== 'boolean') {
       throw new TypeError('Finalização de exportação inválida.');
     }
     const expected = capabilityRevision(snapshotCapability, owner, key);
     const normalized = canonicalLeaseOptions({ ...finalizeOptions, release: true }, expected);
-    const modelClone = storageClone(model);
+    const modelClone = storageClone(canonicalModel);
     const latestClone = latestState === undefined ? undefined : storageClone(latestState);
     const db = await open();
     return new Promise((resolve, reject) => {
@@ -1989,6 +2160,7 @@ export function createAuditStore(options = {}) {
         let entries;
         try {
           revision = storedRevision(revisionValue);
+          modelValue = materializeCanonicalAuditModel(key, modelValue, { allowMissing: true });
           metadata = validateRetentionMetadata(retentionValue, key);
           entries = canonicalDeliveryJournal(deliveryValue, key);
         } catch (error) { finish(reject, error); return; }
@@ -2134,23 +2306,32 @@ export function createAuditStore(options = {}) {
             auditId: metadata.auditId,
           }, RETENTION_CLEANUP_CURSOR_KEY);
         }
+        const modelRequest = auditStore.get(metadata.auditId);
         const revisionRequest = auditStore.get(revisionKey(metadata.auditId));
         const leaseRequest = auditStore.get(exportLeaseKey(metadata.auditId));
         const deliveryRequest = auditStore.get(exportDeliveryKey(metadata.auditId));
+        let modelRead = false;
         let revisionRead = false;
         let leaseRead = false;
         let deliveryRead = false;
+        let modelValue;
         let revisionValue;
         let leaseValue;
         let deliveryValue;
         const decide = () => {
-          if (!revisionRead || !leaseRead || !deliveryRead) return;
+          if (!modelRead || !revisionRead || !leaseRead || !deliveryRead) return;
           let busy = true;
           try {
+            materializeCanonicalAuditModel(metadata.auditId, modelValue);
             const revision = storedRevision(revisionValue);
             busy = Boolean(activeExportLease(leaseValue, metadata.auditId, revision, instant.milliseconds)) ||
               canonicalDeliveryJournal(deliveryValue, metadata.auditId).length > 0;
-          } catch {
+          } catch (error) {
+            if (error?.code === 'AUDIT_MODEL_INPUT_INVALID') {
+              finish(reject, error);
+              try { transaction.abort(); } catch {}
+              return;
+            }
             busy = true;
           }
           if (busy) blocked += 1;
@@ -2168,10 +2349,11 @@ export function createAuditStore(options = {}) {
             deleted += 1;
           }
         };
+        modelRequest.onsuccess = () => { modelRead = true; modelValue = modelRequest.result; decide(); };
         revisionRequest.onsuccess = () => { revisionRead = true; revisionValue = revisionRequest.result; decide(); };
         leaseRequest.onsuccess = () => { leaseRead = true; leaseValue = leaseRequest.result; decide(); };
         deliveryRequest.onsuccess = () => { deliveryRead = true; deliveryValue = deliveryRequest.result; decide(); };
-        revisionRequest.onerror = leaseRequest.onerror = deliveryRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+        modelRequest.onerror = revisionRequest.onerror = leaseRequest.onerror = deliveryRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       };
       transaction.oncomplete = () => {
         if (!countRead || !markerRead || !cursorFinished) finish(reject, new AuditStorageUnavailableError());
@@ -2183,7 +2365,10 @@ export function createAuditStore(options = {}) {
   };
   return {
     setAudit(id, model, options) { return mutateAudit(id, model, undefined, undefined, options); },
-    getAudit(id) { return get(validId(id)); },
+    async getAudit(id) {
+      const key = validId(id);
+      return materializeCanonicalAuditModel(key, await get(key), { allowMissing: true });
+    },
     getAuditSnapshot,
     setLatest(state) { return put(LATEST_KEY, state); },
     getLatest() { return get(LATEST_KEY); },
@@ -2195,9 +2380,10 @@ export function createAuditStore(options = {}) {
       return mutateAudit(id, model, latestState, snapshotCapability);
     },
     async commitAuditReviewIfRevision(id, model, snapshotCapability) {
+      const transition = await canonicalReviewTransition(id, model, snapshotCapability, owner);
       return mutateAudit(
         id,
-        canonicalReviewModel(id, model),
+        transition,
         undefined,
         snapshotCapability,
         { review: true },

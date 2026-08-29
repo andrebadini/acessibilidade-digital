@@ -5,6 +5,12 @@ import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { NORMATIVE_SOURCE_LEDGER } from '../../src/core/normative/source-ledger.js';
 import { unknownAccessibilityWidgetInventory } from '../../src/core/detection/accessibility-widgets.js';
 import { REPORT_HASH_BASE } from '../../src/core/report/integrity-chain.js';
+import {
+  canonicalCoreRuleLimitations,
+  canonicalCoreRuleSummary,
+  canonicalReviewQuestion,
+  canonicalScope,
+} from '../../src/core/report/text-policy.js';
 import { CORE_RULES } from '../../src/core/audit.js';
 import { aggregateItems } from '../../src/core/rules/aggregate-items.js';
 
@@ -27,7 +33,8 @@ const ruleResults = CORE_RULES.map(rule => {
   return {
     ruleId: rule.id, outcome, mode: rule.mode, nbrItems: [...rule.nbrItems], wcag: [...rule.wcag],
     targets: [...(RULE_TARGETS.get(rule.id) ?? [])],
-    summary: `Resultado canônico de fixture: ${outcome}.`, limitations: [],
+    summary: canonicalCoreRuleSummary(rule.id, outcome),
+    limitations: [...canonicalCoreRuleLimitations(outcome)],
     source: { engine: 'audita-core', ruleId: rule.id, version: '1.0.0' },
   };
 });
@@ -85,8 +92,8 @@ function canonicalOccurrence(legacy) {
     foreignBenchmarkRefs: [...section508ReferencesForWcag(testedWcagRefs)],
     target: {
       nodeId: legacy.nodeId,
-      selector: targetEvidence?.selector?.css ?? null,
-      framePath: [...(targetEvidence?.selector?.framePath ?? [])],
+      selector: null,
+      framePath: [],
     },
     accessiblePreview: targetEvidence?.accessibility?.announcementPreview ?? null,
     evidenceRefs: [...legacy.evidenceIds],
@@ -104,9 +111,14 @@ export const SAMPLE_AUDIT = createAuditModel({
     pageId: 'page-1',
     requestedUrl: 'https://servico.exemplo.test/consulta',
     finalUrl: 'https://servico.exemplo.test/consulta/inicio',
-    status: 'partial',
+    status: 'partial', attempted: true, finalUrlObserved: true, axeStatus: 'not-run',
     timestamps: TIMESTAMPS,
     viewport: VIEWPORT,
+    warnings: [],
+    diagnostics: [{
+      code: 'DYNAMIC_PROBES_INCOMPLETE', message: 'As verificações dinâmicas atingiram o tempo limite.',
+      at: '2026-08-26T14:00:30.000Z', recoverable: true,
+    }],
   }],
   requestedUrl: 'https://servico.exemplo.test/consulta',
   finalUrl: 'https://servico.exemplo.test/consulta/inicio',
@@ -114,29 +126,32 @@ export const SAMPLE_AUDIT = createAuditModel({
   timezone: 'America/Cuiaba',
   versions: { extension: '0.1.0', rules: '1.0.0', browser: 'Chrome/147.0.0.0' },
   environment: { chromeVersion: 'Chrome/147.0.0.0', viewport: VIEWPORT },
-  scope: { kind: 'single-page', description: 'Página final e estado observado após o carregamento; não inclui outras etapas do serviço.' },
+  scope: canonicalScope('single', 1),
   methodology: { name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', coreRuleCount: 130, supplementalRuleCount: 0, ruleCount: 130, itemCount: 146 },
   session: {
     status: 'partial', partial: true,
-    diagnostics: [{ code: 'FRAME_LIMITED', message: 'Um frame de terceiro não pôde ser coletado.', at: '2026-08-26T14:00:30.000Z', recoverable: true }],
+    diagnostics: [{
+      code: 'DYNAMIC_PROBES_INCOMPLETE', message: 'As verificações dinâmicas atingiram o tempo limite.',
+      at: '2026-08-26T14:00:30.000Z', recoverable: true,
+    }],
   },
   limitations: [
-    'A auditoria cobre somente a página e o estado observados.',
-    'Itens de contexto, processos completos e equivalência de mídia exigem revisão humana.',
+    'O relatório cobre somente uma página e o estado observado; não constitui declaração de conformidade do site inteiro.',
+    'A auditoria foi concluída parcialmente e contém limitações técnicas registradas nos diagnósticos.',
   ],
   ruleResults,
   itemResults,
   occurrences: [
-    { occurrenceId: 'occ-focus-failed', itemId: '5.1.1', ruleId: 'focus-visible', outcome: 'failed', mode: 'automated', nodeId: 'n-1', evidenceIds: ['ev-full', 'ev-control'], justification: 'O indicador de foco observado não tem contraste suficiente.' },
-    { occurrenceId: 'occ-focus-review', itemId: '5.1.4', ruleId: 'focus-order', outcome: 'cantTell', mode: 'assisted', nodeId: 'n-1', evidenceIds: ['ev-full', 'ev-control'], justification: 'A ordem precisa ser confirmada no contexto da tarefa.' },
-    { occurrenceId: 'occ-cross-page', itemId: '5.7.5', ruleId: null, outcome: 'cantTell', mode: 'manual', nodeId: null, evidenceIds: ['ev-full'], justification: 'É necessário comparar o componente em outras páginas.' },
+    { occurrenceId: 'occ-focus-failed', itemId: '5.1.1', ruleId: 'focus-visible', outcome: 'failed', mode: 'automated', nodeId: 'n-1', evidenceIds: ['ev-full', 'ev-control'], justification: canonicalCoreRuleSummary('focus-visible', 'failed') },
+    { occurrenceId: 'occ-focus-review', itemId: '5.1.4', ruleId: 'focus-order', outcome: 'cantTell', mode: 'assisted', nodeId: 'n-1', evidenceIds: ['ev-full', 'ev-control'], justification: canonicalCoreRuleSummary('focus-order', 'cantTell') },
+    { occurrenceId: 'occ-cross-page', itemId: '5.7.5', ruleId: null, outcome: 'cantTell', mode: 'manual', nodeId: null, evidenceIds: ['ev-full'], justification: itemById.get('5.7.5').humanReason },
   ].map(canonicalOccurrence),
   evidence: EVIDENCE,
   evidenceStateCount: 1,
   accessibilityWidgets: unknownAccessibilityWidgetInventory(),
   manualReview: [
-    { occurrenceId: 'occ-focus-review', itemId: '5.1.4', ruleId: 'focus-order', mode: 'assisted', status: 'unanswered', question: 'A ordem de foco acompanha a sequência esperada da tarefa?', reason: 'A finalidade da sequência exige julgamento humano.' },
-    { occurrenceId: 'occ-cross-page', itemId: '5.7.5', ruleId: null, mode: 'manual', status: 'unanswered', question: 'Links com a mesma função são identificados de forma consistente nas páginas?', reason: 'É preciso comparar páginas.' },
+    { occurrenceId: 'occ-focus-review', itemId: '5.1.4', ruleId: 'focus-order', mode: 'assisted', status: 'unanswered', question: canonicalReviewQuestion(itemById.get('5.1.4')), reason: canonicalCoreRuleSummary('focus-order', 'cantTell') },
+    { occurrenceId: 'occ-cross-page', itemId: '5.7.5', ruleId: null, mode: 'manual', status: 'unanswered', question: canonicalReviewQuestion(itemById.get('5.7.5')), reason: itemById.get('5.7.5').humanReason },
   ],
   reviewDecisions: [],
   progress: [],

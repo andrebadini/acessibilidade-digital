@@ -5,11 +5,13 @@ import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
 import { runAudit } from '../../src/background/run-audit.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
+import { remapAuditPage } from '../../src/core/batch/remap-audit.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { createAnnotationMapFixture } from '../report/annotation-map-fixture.js';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+const TEST_EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
 
 function rawPage() {
   return {
@@ -198,12 +200,20 @@ function fakeAdapter(options = {}) {
       }
       return {};
     },
-    async disconnect() { disconnects += 1; events.push('disconnect'); },
+    async disconnect() {
+      disconnects += 1;
+      events.push('disconnect');
+      if (options.disconnectFailure) throw new Error('detalhe privado de desconexão');
+    },
   };
   const adapter = {
     events,
     get counts() { return { screenshots, disconnects, removals }; },
-    async createTab() { events.push('create-tab'); return { id: 42 }; },
+    async createTab() {
+      events.push('create-tab');
+      if (options.createTabFailure) throw new Error('detalhe privado de criação');
+      return Object.hasOwn(options, 'createTabResult') ? options.createTabResult : { id: 42 };
+    },
     async navigateTab(_id, url) { events.push(`navigate:${url}`); },
     async waitForStable(_id, { signal } = {}) {
       events.push('stable');
@@ -220,13 +230,28 @@ function fakeAdapter(options = {}) {
         diagnostics: [{ code: 'AXE_FEATURE_DISABLED', frameId: null }],
       };
     },
-    async collectPage() { events.push('collect'); options.afterCollect?.(); if (options.collectFailure) throw new Error('DOM unavailable'); return page; },
+    async collectPage() {
+      events.push('collect');
+      options.afterCollect?.();
+      if (options.collectError) throw options.collectError;
+      if (options.collectFailure) throw new Error('DOM unavailable');
+      return page;
+    },
     async runDynamicProbes() { events.push('probes'); return options.rawProbes || { focus: { completed: false, events: [] }, warnings: [], actions: [] }; },
-    async getEnvironment() { return { chromeVersion: 'Chrome/140.0', viewport: { width: 800, height: 600, deviceScaleFactor: 1 } }; },
+    async getEnvironment() {
+      return Object.hasOwn(options, 'environmentResult')
+        ? options.environmentResult
+        : { chromeVersion: 'Chrome/140.0', viewport: { width: 800, height: 600, deviceScaleFactor: 1 } };
+    },
     async getFinalUrl() { return 'https://example.test/final?token=REMOVE&view=public'; },
     async emitProgress(message) { events.push(`progress:${message.percent}`); },
-    async handoffReport(model) { events.push('handoff'); return options.handoff || { reviewUrl: `chrome-extension://test/src/review/index.html?auditId=${model.auditId}`, artifact: { status: 'pending', formats: [] } }; },
-    async removeTab(id) { assert.equal(id, 42); removals += 1; events.push('remove-tab'); },
+    async handoffReport(model) { events.push('handoff'); return options.handoff || { reviewUrl: `chrome-extension://${TEST_EXTENSION_ID}/src/review/index.html?auditId=${model.auditId}`, artifact: { status: 'pending', formats: [] } }; },
+    async removeTab(id) {
+      if (!Object.hasOwn(options, 'createTabResult')) assert.equal(id, 42);
+      removals += 1;
+      events.push(`remove-tab:${String(id)}`);
+      if (options.removeTabFailure) throw new Error('detalhe privado de fechamento');
+    },
   };
   if (options.composeMap || options.mapFailure) adapter.composeAnnouncementMap = async input => {
     events.push('map');
@@ -292,8 +317,8 @@ test('keeps diagnostics and evidence correlated when two new findings have the s
   const first = occurrences.find(value => value.nodeId === `n-${firstBackendId}`);
   const second = occurrences.find(value => value.nodeId === `n-${secondBackendId}`);
   const diagnostic = model.session.diagnostics.find(value => value.code === 'SNIPPET_CAPTURE_FAILED');
-  assert.equal(diagnostic.occurrenceId, first.occurrenceId);
-  assert.notEqual(diagnostic.occurrenceId, second.occurrenceId);
+  assert.equal(diagnostic.details.occurrenceId, first.occurrenceId);
+  assert.notEqual(diagnostic.details.occurrenceId, second.occurrenceId);
   for (const occurrence of occurrences) {
     const elementEvidence = model.evidence.artifacts.find(value => value.nodeId === occurrence.nodeId);
     assert.ok(elementEvidence);
@@ -1149,6 +1174,196 @@ test('returns failed on structural collection failure and still cleans only the 
   assert.equal(adapter.counts.removals, 1);
   assert.equal(adapter.events.includes('handoff'), false);
   assert.equal(model.progress.at(-1).percent < 100, true);
+  const report = await enrichAuditForReport(model, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  });
+  assert.equal(report.session.status, 'failed');
+  assert.equal(report.pages[0].axeStatus, report.axe?.status ?? 'not-run');
+  assert.equal(report.session.diagnostics.some(entry => entry.code === 'AXE_FEATURE_DISABLED'), false);
+});
+
+test('does not claim an axe fallback when collection fails before the core audit starts', async () => {
+  const model = await runAudit({
+    url: 'https://example.test/',
+    chromeAdapter: fakeAdapter({ collectFailure: true }),
+    now: clock,
+    idFactory: () => 'audit-collection-before-core',
+  });
+
+  assert.equal(model.session.status, 'failed');
+  assert.equal(Object.hasOwn(model, 'axe'), false);
+  assert.equal(model.session.diagnostics.some(entry => entry.code === 'AXE_FEATURE_DISABLED'), false);
+
+  const report = await enrichAuditForReport(model, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  });
+  assert.equal(report.pages[0].axeStatus, 'not-run');
+  assert.equal(Object.hasOwn(report, 'axe'), false);
+  assert.equal(report.session.diagnostics.some(entry => entry.code === 'AXE_FEATURE_DISABLED'), false);
+});
+
+test('labels requested URLs as not observed in HTML and EARL after a pre-execution failure', async () => {
+  const draft = await runAudit({
+    url: 'https://example.test/requested',
+    chromeAdapter: fakeAdapter({ createTabFailure: true }),
+    now: clock,
+    idFactory: () => 'audit-url-not-observed',
+  });
+  const report = await enrichAuditForReport(draft, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  });
+  const html = renderHtmlReport(report);
+  const technical = JSON.parse(renderTechnicalJson(report));
+
+  assert.equal(report.pages[0].attempted, false);
+  assert.equal(report.pages[0].finalUrlObserved, false);
+  assert.match(html, /URL final<\/dt><dd>Não observada/u);
+  assert.doesNotMatch(html, /URL final<\/dt><dd><code>https:\/\/example\.test\/requested/u);
+  assert.equal(technical.assertions.length, 146);
+  assert.deepEqual(technical.assertions[0].subject, {
+    id: report.pages[0].requestedUrl,
+    requestedUrl: report.pages[0].requestedUrl,
+    finalUrlObserved: false,
+  });
+});
+
+test('distinguishes a pre-execution tab failure from navigation that actually started', async t => {
+  const reportOptions = {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  };
+  for (const scenario of [
+    { name: 'createTab', options: { createTabFailure: true }, attempted: false, historicalAttempted: false },
+    {
+      name: 'navigation', options: { waitFailure: new Error('detalhe privado de navegação') },
+      attempted: true, historicalAttempted: false,
+    },
+  ]) await t.test(scenario.name, async () => {
+    const draft = await runAudit({
+      url: 'https://example.test/', chromeAdapter: fakeAdapter(scenario.options), now: clock,
+      idFactory: () => `audit-execution-${scenario.name.toLowerCase()}`,
+    });
+    const report = await enrichAuditForReport(draft, reportOptions);
+    const page = report.pages[0];
+
+    assert.equal(page.attempted, scenario.attempted);
+    assert.equal(page.finalUrlObserved, false);
+    if (!scenario.attempted) {
+      assert.equal(page.timestamps.startedAt, page.timestamps.endedAt);
+      assert.ok(page.timestamps.generatedAt >= page.timestamps.endedAt);
+      assert.deepEqual(page.viewport, { width: null, height: null, deviceScaleFactor: null });
+      assert.equal(page.axeStatus, 'not-run');
+      assert.equal(report.occurrences.some(value => value.pageId === page.pageId), false);
+      assert.equal(report.evidence.some(value => value.pageId === page.pageId), false);
+      const remapped = await remapAuditPage(report, {
+        batchAuditId: 'batch-pre-execution', pageId: 'page-1',
+      });
+      assert.equal(remapped.page.attempted, false);
+      assert.equal(remapped.page.finalUrlObserved, false);
+      assert.equal(remapped.page.timestamps.startedAt, remapped.page.timestamps.endedAt);
+      assert.equal(remapped.page.axeStatus, 'not-run');
+
+    }
+
+    const historicalDraft = structuredClone(draft);
+    delete historicalDraft.attempted;
+    delete historicalDraft.finalUrlObserved;
+    const historical = await enrichAuditForReport(historicalDraft, reportOptions);
+    assert.equal(historical.pages[0].attempted, scenario.historicalAttempted);
+    assert.equal(historical.pages[0].finalUrlObserved, false);
+
+    if (scenario.name === 'createTab') {
+      const navigationSignalled = structuredClone(historicalDraft);
+      navigationSignalled.progress.push({
+        ...navigationSignalled.progress[0], phase: 'navigating', message: 'Iniciando navegação', percent: 10,
+      });
+      const inferred = await enrichAuditForReport(navigationSignalled, reportOptions);
+      assert.equal(inferred.pages[0].attempted, true);
+      assert.equal(inferred.pages[0].finalUrlObserved, false);
+    }
+  });
+
+  await t.test('historical complete audit', async () => {
+    const draft = await runAudit({
+      url: 'https://example.test/', chromeAdapter: fakeAdapter(), now: clock,
+      idFactory: () => 'audit-execution-historical-complete',
+    });
+    const historicalDraft = structuredClone(draft);
+    delete historicalDraft.attempted;
+    delete historicalDraft.finalUrlObserved;
+    const historical = await enrichAuditForReport(historicalDraft, reportOptions);
+    assert.equal(historical.pages[0].attempted, true);
+    assert.equal(historical.pages[0].finalUrlObserved, true);
+  });
+});
+
+test('does not claim or clean ownership when createTab returns an invalid resource', async () => {
+  const adapter = fakeAdapter({ createTabResult: { id: 'PRIVATE_INVALID_TAB_ID' } });
+  const draft = await runAudit({
+    url: 'https://example.test/', chromeAdapter: adapter, now: clock,
+    idFactory: () => 'audit-invalid-tab-resource',
+  });
+  const report = await enrichAuditForReport(draft, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  });
+
+  assert.equal(adapter.counts.removals, 0);
+  assert.equal(adapter.events.some(entry => entry.startsWith('remove-tab:')), false);
+  assert.equal(report.pages[0].attempted, false);
+  assert.equal(report.pages[0].finalUrlObserved, false);
+  assert.deepEqual(report.session.diagnostics.map(entry => entry.code), ['NAVIGATION_FAILED']);
+});
+
+test('records a missing environment as a factual partial cause', async () => {
+  const draft = await runAudit({
+    url: 'https://example.test/', chromeAdapter: fakeAdapter({ environmentResult: undefined }), now: clock,
+    idFactory: () => 'audit-missing-environment',
+  });
+  assert.equal(draft.session.status, 'partial');
+  assert.equal(draft.session.diagnostics.some(entry => entry.code === 'ENVIRONMENT_UNAVAILABLE'), true);
+});
+
+test('maps an AbortError raised by collection to cancellation instead of collection failure', async () => {
+  const draft = await runAudit({
+    url: 'https://example.test/',
+    chromeAdapter: fakeAdapter({ collectError: new DOMException('cancelada', 'AbortError') }),
+    now: clock,
+    idFactory: () => 'audit-abort-during-collection',
+  });
+  assert.equal(draft.session.status, 'cancelled');
+  assert.equal(draft.session.diagnostics.some(entry => entry.code === 'COLLECTION_FAILED'), false);
+  assert.deepEqual(
+    draft.session.diagnostics.filter(entry => entry.recoverable === false).map(entry => entry.code),
+    ['NAVIGATION_FAILED'],
+  );
+});
+
+test('keeps cleanup failures explicit but recoverable in a valid partial audit model', async t => {
+  for (const scenario of [
+    { name: 'CDP', option: 'disconnectFailure', code: 'CDP_DISCONNECT_FAILED' },
+    { name: 'aba', option: 'removeTabFailure', code: 'TAB_CLOSE_FAILED' },
+  ]) await t.test(scenario.name, async () => {
+    const adapter = fakeAdapter({ [scenario.option]: true });
+    const model = await runAudit({
+      url: 'https://example.test/', chromeAdapter: adapter, now: clock,
+      idFactory: () => `audit-cleanup-${scenario.name.toLowerCase()}`,
+    });
+
+    assert.equal(model.session.status, 'partial');
+    assert.equal(model.session.partial, true);
+    const cleanupDiagnostic = model.session.diagnostics.find(entry => entry.code === scenario.code);
+    assert.ok(cleanupDiagnostic);
+    assert.equal(cleanupDiagnostic.recoverable, true);
+    assert.doesNotMatch(JSON.stringify(model), /detalhe privado/iu);
+    await assert.doesNotReject(() => enrichAuditForReport(model, {
+      now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+      manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+    }));
+  });
 });
 
 test('cancels conservatively during navigation and never reports complete', async () => {
@@ -1182,6 +1397,38 @@ test('accepts only a JSON-safe report placeholder and never copies handoff secre
   const model = await runAudit({ url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'audit-safe' });
   assert.deepEqual(model.report.artifact, { status: 'pending', formats: [] });
   assert.doesNotMatch(JSON.stringify(model), /REMOVE|Bearer|authorization|"pdf"|"html"/i);
+});
+
+test('validated handoff capability cannot be persisted by runAudit or alter report hashes', async () => {
+  const auditId = 'audit-transient-review';
+  const makeClock = () => {
+    let tick = 0;
+    return () => new Date(Date.UTC(2026, 7, 29, 10, 0, tick++)).toISOString();
+  };
+  const trustedReviewUrl =
+    `chrome-extension://${TEST_EXTENSION_ID}/src/review/index.html?auditId=${auditId}`;
+  const hostileReviewUrl =
+    `chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/src/review/index.html?auditId=${auditId}`;
+  const trusted = await runAudit({
+    url: 'https://example.test/',
+    chromeAdapter: fakeAdapter({ handoff: { reviewUrl: trustedReviewUrl } }),
+    now: makeClock(), idFactory: () => auditId, expectedExtensionId: TEST_EXTENSION_ID,
+  });
+  const hostile = await runAudit({
+    url: 'https://example.test/',
+    chromeAdapter: fakeAdapter({ handoff: { reviewUrl: hostileReviewUrl } }),
+    now: makeClock(), idFactory: () => auditId, expectedExtensionId: TEST_EXTENSION_ID,
+  });
+
+  for (const model of [trusted, hostile]) {
+    assert.deepEqual(model.report, {
+      status: 'review-ready',
+      reviewUrl: null,
+      artifact: { status: 'pending', formats: [] },
+    });
+  }
+  assert.deepEqual(trusted.reproducibility, hostile.reproducibility);
+  assert.doesNotMatch(JSON.stringify([trusted, hostile]), /abcdefghijklmnopabcdefghijklmnop|ponmlkjihgfedcbaponmlkjihgfedcba/u);
 });
 
 test('cancels immediately when the signal aborts after collection', async () => {

@@ -3,6 +3,7 @@ import { hashAnnotationMapGeometry } from '../evidence/annotation-map-artifact.j
 import { createAuditModel } from '../report/audit-model.js';
 import { canonicalStringify } from '../report/canonical-json.js';
 import { sha256Hex } from '../report/hash.js';
+import { derivePageLimitations } from '../report/text-policy.js';
 
 const ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 
@@ -41,13 +42,9 @@ export async function remapAuditPage(input, { batchAuditId, pageId }) {
   }
   assertUnique([...nodeIds.values()], 'nó');
 
-  const decisionIds = new Map();
-  for (const decision of model.reviewDecisions) {
-    const digest = await scopedDigest(batchAuditId, pageId, 'decision', decision.decisionId);
-    decisionIds.set(decision.decisionId, `decision-${digest.slice(0, 32)}`);
-  }
-
-  const remapNode = value => value === null || value === undefined ? value : requiredMapped(nodeIds, value, 'nó');
+  const remapNode = value => value === null || value === undefined || value === 'document'
+    ? value
+    : requiredMapped(nodeIds, value, 'nó');
   const remapEvidence = value => requiredMapped(evidenceIds, value, 'evidência');
   const remapOccurrence = value => requiredMapped(occurrenceIds, value, 'ocorrência');
   const ruleResults = model.ruleResults.map(rule => remapRule(rule, remapNode));
@@ -97,12 +94,12 @@ export async function remapAuditPage(input, { batchAuditId, pageId }) {
     occurrenceId: remapOccurrence(entry.occurrenceId),
     ...(entry.auditId === undefined ? {} : { auditId: batchAuditId }),
     ...(entry.decisionId === undefined ? {} : {
-      decisionId: requiredMapped(decisionIds, entry.decisionId, 'decisão'),
+      decisionId: remapOccurrence(entry.occurrenceId),
     }),
   }));
   const reviewDecisions = model.reviewDecisions.map(decision => ({
     ...structuredClone(decision),
-    decisionId: requiredMapped(decisionIds, decision.decisionId, 'decisão'),
+    decisionId: remapOccurrence(decision.occurrenceId),
     auditId: batchAuditId,
     occurrenceId: remapOccurrence(decision.occurrenceId),
   }));
@@ -111,23 +108,34 @@ export async function remapAuditPage(input, { batchAuditId, pageId }) {
     ...(item.review?.decisionIds ? {
       review: {
         ...structuredClone(item.review),
-        decisionIds: item.review.decisionIds.map(id => requiredMapped(decisionIds, id, 'decisão')),
+        decisionIds: item.review.decisionIds.map(id => remapOccurrence(id)),
       },
     } : {}),
   }));
-  const axe = model.axe ? remapAxe(model.axe, pageId, occurrenceIds, remapNode) : null;
   const sourcePage = model.pages[0];
+  const diagnostics = (sourcePage.diagnostics ?? model.session.diagnostics).map(diagnostic => ({
+    ...structuredClone(diagnostic),
+    ...(diagnostic.details?.occurrenceId ? {
+      details: { occurrenceId: remapOccurrence(diagnostic.details.occurrenceId) },
+    } : {}),
+  }));
+  const axe = sourcePage.finalUrlObserved && model.axe
+    ? remapAxe(model.axe, pageId, occurrenceIds, remapNode)
+    : null;
   const page = {
     ...structuredClone(sourcePage),
     pageId,
-    attempted: true,
-    finalUrlObserved: true,
-    diagnostics: structuredClone(model.session.diagnostics),
-    limitations: [...model.limitations],
-    coverage: structuredClone(model.snapshot?.coverage ?? sourcePage.coverage ?? {}),
+    diagnostics,
+    limitations: [],
+    coverage: structuredClone(sourcePage.coverage ?? model.snapshot?.coverage ?? {}),
+    warnings: structuredClone(sourcePage.warnings ?? model.snapshot?.warnings ?? []),
     accessibilityWidgets: structuredClone(model.accessibilityWidgets),
-    axeStatus: model.axe?.status ?? 'not-run',
+    axeStatus: sourcePage.axeStatus ?? model.axe?.status ?? 'not-run',
   };
+  page.limitations = derivePageLimitations({
+    requestedScope: { mode: 'batch' },
+    axePages: axe ? [{ pageId, result: axe }] : [],
+  }, page);
   const result = {
     page,
     ruleResults,

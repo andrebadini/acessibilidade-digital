@@ -22,6 +22,8 @@ import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consume
 import { canonicalStringify } from '../../src/core/report/canonical-json.js';
 import { sha256Hex } from '../../src/core/report/hash.js';
 import { verifyAuditIntegritySnapshot } from '../../src/core/report/integrity.js';
+import { canonicalCoreRuleSummary } from '../../src/core/report/text-policy.js';
+import { recordReviewDecision } from '../../src/review/review-state.js';
 
 const OPTIONS = Object.freeze({
   now: () => '2026-08-28T12:00:00.000Z',
@@ -30,17 +32,44 @@ const OPTIONS = Object.freeze({
   rulesVersion: '1.0.0',
   browserVersion: 'Chrome/151.0.0.0',
 });
+const CHILD_OPTIONS = Object.freeze({
+  ...OPTIONS,
+  now: () => '2026-08-28T11:00:45.000Z',
+});
 
-async function childModel(auditId, url, { axe = false } = {}) {
+async function childModel(auditId, url, { axe = false, occurrenceDiagnostic = false } = {}) {
   const map = await createAnnotationMapFixture();
   const raw = reportInput({
     auditId,
     requestedUrl: url,
     finalUrl: `${url}final?token=REMOVE&view=public`,
   });
+  raw.timestamps = {
+    startedAt: '2026-08-28T11:00:00.000Z',
+    endedAt: '2026-08-28T11:00:30.000Z',
+    generatedAt: '2026-08-28T11:00:45.000Z',
+  };
+  raw.session.diagnostics = raw.session.diagnostics.map(diagnostic => ({
+    ...diagnostic,
+    at: '2026-08-28T11:00:15.000Z',
+  }));
+  if (occurrenceDiagnostic) {
+    raw.session.diagnostics = [{
+      code: 'SNIPPET_CAPTURE_FAILED',
+      message: 'O trecho de código do elemento não pôde ser capturado.',
+      at: '2026-08-28T11:00:15.000Z',
+      recoverable: true,
+      details: { occurrenceId: 'occ-1' },
+    }];
+    delete raw.evidence.artifacts.find(artifact => artifact.evidenceId === 'ev-1').snippet;
+  }
   raw.evidence = {
     stateCount: 1,
-    artifacts: [raw.evidence.artifacts[0], createPristineMapSource(), map],
+    artifacts: [
+      raw.evidence.artifacts.find(artifact => artifact.evidenceId === 'ev-1'),
+      createPristineMapSource(),
+      map,
+    ],
   };
   if (axe === 'target-size') {
     raw.snapshot = {
@@ -103,7 +132,34 @@ async function childModel(auditId, url, { axe = false } = {}) {
     }
     raw.occurrences = [...raw.occurrences, ...supplementalOccurrences];
   }
-  return enrichAuditForReport(raw, OPTIONS);
+  return enrichAuditForReport(raw, CHILD_OPTIONS);
+}
+
+function withPageWindow(result, startedAt, endedAt) {
+  const output = structuredClone(result);
+  output.page.timestamps = { startedAt, endedAt, generatedAt: endedAt };
+  output.page.diagnostics = (output.page.diagnostics ?? []).map(diagnostic => ({
+    ...diagnostic, at: endedAt,
+  }));
+  return output;
+}
+
+function withAxeEnvelope(result, axe) {
+  const output = structuredClone(result);
+  const diagnostic = axe.status === 'disabled' ? {
+    code: 'AXE_FEATURE_DISABLED',
+    message: 'O motor suplementar axe-core permaneceu desativado pelo gate MV3/CSP; o motor próprio continuou normalmente.',
+    at: output.page.timestamps.endedAt, recoverable: true,
+  } : {
+    code: 'AXE_EXECUTION_FAILED',
+    message: 'O motor suplementar axe-core teve cobertura parcial; o motor próprio continuou normalmente.',
+    at: output.page.timestamps.endedAt, recoverable: true,
+  };
+  output.page.axeStatus = axe.status;
+  output.page.diagnostics = [...(output.page.diagnostics ?? []), diagnostic];
+  output.page.limitations = [...axe.limitations];
+  output.axe = structuredClone(axe);
+  return output;
 }
 
 test('remaps every target-size node binding in the page graph and nested axe envelope', async () => {
@@ -168,6 +224,53 @@ test('remaps identical local graphs with deterministic page-qualified sequential
   }
 });
 
+test('remaps an occurrence-scoped diagnostic to the same page-qualified occurrence identity', async () => {
+  const child = await childModel(
+    'child-occurrence-diagnostic',
+    'https://diagnostic.example.test/',
+    { occurrenceDiagnostic: true },
+  );
+  const remapped = await remapAuditPage(child, {
+    batchAuditId: 'batch-occurrence-diagnostic', pageId: 'page-1',
+  });
+  const diagnostic = remapped.page.diagnostics.find(entry => entry.code === 'SNIPPET_CAPTURE_FAILED');
+
+  assert.equal(diagnostic.details.occurrenceId, remapped.occurrences[0].occurrenceId);
+  assert.notEqual(diagnostic.details.occurrenceId, 'occ-1');
+});
+
+test('remaps a reviewed child with decision identity equal to its complete remapped occurrence identity', async () => {
+  const child = await childModel('child-reviewed', 'https://reviewed.example.test/');
+  const reviewed = recordReviewDecision(child, {
+    auditId: child.auditId,
+    itemId: '5.1.4',
+    occurrenceId: 'occ-1',
+    answer: 'conforme',
+    evaluator: 'Pessoa avaliadora',
+    decidedAt: '2026-08-28T11:01:00.000Z',
+    mode: 'assisted',
+  });
+
+  const remapped = await remapAuditPage(reviewed, {
+    batchAuditId: 'batch-reviewed', pageId: 'page-1',
+  });
+  const decision = remapped.reviewDecisions[0];
+  assert.equal(decision.decisionId, decision.occurrenceId);
+  assert.equal(remapped.manualReview[0].decisionId, decision.occurrenceId);
+  assert.deepEqual(
+    remapped.itemResults.find(item => item.id === decision.itemId).review.decisionIds,
+    [decision.occurrenceId],
+  );
+
+  const aggregate = aggregateBatchAudits({
+    batchAuditId: 'batch-reviewed', pageResults: [remapped],
+    startedAt: '2026-08-28T11:00:00.000Z', endedAt: '2026-08-28T11:01:00.000Z',
+    status: 'partial',
+  });
+  const final = await enrichAuditForReport(aggregate, OPTIONS);
+  assert.equal(final.reviewDecisions[0].decisionId, final.reviewDecisions[0].occurrenceId);
+});
+
 test('rejects an adulterated or unreadable child graph before allocating remapped IDs', async () => {
   const child = structuredClone(await childModel('child-a', 'https://one.example.test/'));
   child.occurrences[0].evidenceRefs = ['missing-evidence'];
@@ -191,7 +294,8 @@ test('keeps a valid cross-reference graph when the pixel budget omits a full-pag
   const mapBytes = map.segments.reduce((total, segment) => total + pngDataUrlDecodedByteLength(segment.dataUrl), 0);
   const budgeted = await applyBatchEvidenceBudget(reversed, { usedBytes: 0, limitBytes: mapBytes });
   assert.equal(budgeted.result.page.status, 'partial');
-  assert.equal(budgeted.result.evidence.some(artifact => artifact.kind === 'announcement-map'), false);
+  assert.equal(budgeted.result.evidence.some(artifact => artifact.kind === 'announcement-map'), true,
+    'o mapa permanece como metadado verificável mesmo quando seus pixels são omitidos');
   assert.ok(budgeted.result.evidence.every(artifact => !Object.hasOwn(artifact, 'dataUrl')));
   assert.equal(budgeted.usedBytes, 0, 'a remoção dependente também libera os bytes do mapa já contado');
   const evidenceIds = new Set(budgeted.result.evidence.map(artifact => artifact.evidenceId));
@@ -204,28 +308,34 @@ test('keeps a valid cross-reference graph when the pixel budget omits a full-pag
   });
   const final = await enrichAuditForReport(aggregate, OPTIONS);
   assert.equal(final.session.status, 'partial');
-  assert.equal(final.pages[0].diagnostics.some(value => value.code === 'BATCH_EVIDENCE_BUDGET_EXCEEDED'), true);
+  assert.equal(final.pages[0].diagnostics.some(value =>
+    value.code === 'BATCH_EVIDENCE_BUDGET_EXCEEDED' && value.recoverable === true), true);
   assert.ok(final.occurrences.every(occurrence => occurrence.evidenceRefs.every(id => final.evidence.some(value => value.evidenceId === id))));
 });
 
 test('validates each batch axe envelope against its exact page and rejects tampering', async () => {
-  const first = await remapAuditPage(
+  let first = await remapAuditPage(
     await childModel('child-axe-1', 'https://axe-one.example.test/'),
     { batchAuditId: 'batch-axe', pageId: 'page-1' },
   );
-  const second = await remapAuditPage(
+  let second = await remapAuditPage(
     await childModel('child-axe-2', 'https://axe-two.example.test/'),
     { batchAuditId: 'batch-axe', pageId: 'page-2' },
   );
   const disabledFor = pageId => normalizeAxeResults({
     status: 'disabled', provenance: AXE_PROVENANCE, frames: [],
   }, { pageId, rulesVersion: '1.0.0' });
+  first = withAxeEnvelope(first, disabledFor('page-1'));
+  second = withPageWindow(
+    withAxeEnvelope(second, disabledFor('page-2')),
+    '2026-08-28T11:00:30.000Z', '2026-08-28T11:01:00.000Z',
+  );
   const raw = aggregateBatchAudits({
     batchAuditId: 'batch-axe', pageResults: [
-      { ...first, page: { ...first.page, status: 'complete', axeStatus: 'disabled' }, axe: disabledFor('page-1') },
-      { ...second, page: { ...second.page, status: 'complete', axeStatus: 'disabled' }, axe: disabledFor('page-2') },
+      first,
+      second,
     ],
-    startedAt: '2026-08-28T11:00:00.000Z', endedAt: '2026-08-28T11:01:00.000Z', status: 'complete',
+    startedAt: '2026-08-28T11:00:00.000Z', endedAt: '2026-08-28T11:01:00.000Z', status: 'partial',
   });
   const final = await enrichAuditForReport(raw, OPTIONS);
   assert.equal(final.axePages.length, 2);
@@ -241,10 +351,22 @@ test('validates each batch axe envelope against its exact page and rejects tampe
   }, { pageId: 'page-1', rulesVersion: '1.0.0' });
   const partialRaw = aggregateBatchAudits({
     batchAuditId: 'batch-axe-partial',
-    pageResults: [{ ...first, page: { ...first.page, status: 'complete', axeStatus: 'partial' }, axe: partialAxe }],
-    startedAt: '2026-08-28T11:00:00.000Z', endedAt: '2026-08-28T11:01:00.000Z', status: 'complete',
+    pageResults: [withAxeEnvelope(
+      await remapAuditPage(
+        await childModel('child-axe-partial', 'https://axe-partial.example.test/'),
+        { batchAuditId: 'batch-axe-partial', pageId: 'page-1' },
+      ),
+      partialAxe,
+    )],
+    startedAt: '2026-08-28T11:00:00.000Z', endedAt: '2026-08-28T11:01:00.000Z', status: 'partial',
   });
-  await assert.rejects(enrichAuditForReport(partialRaw, OPTIONS), /axe parcial|cobertura axe/iu);
+  const partialFinal = await enrichAuditForReport(partialRaw, OPTIONS);
+  assert.equal(partialFinal.axePages[0].result.status, 'partial');
+  assert.equal(partialFinal.pages[0].axeStatus, 'partial');
+
+  const partialMismatch = structuredClone(partialRaw);
+  partialMismatch.pages[0].axeStatus = 'not-run';
+  await assert.rejects(enrichAuditForReport(partialMismatch, OPTIONS), /axe|página|status|modelo/iu);
 });
 
 test('rejects historical V2 normative shapes in nested axe and batch envelopes', async () => {
@@ -280,10 +402,10 @@ test('aggregates pages in requested order with unique rules, 146 items and conse
     await childModel('child-a', 'https://one.example.test/?token=SECRET_A&view=public'),
     { batchAuditId: 'batch-aggregate', pageId: 'page-1' },
   );
-  const second = await remapAuditPage(
+  const second = withPageWindow(await remapAuditPage(
     await childModel('child-b', 'https://two.example.test/'),
     { batchAuditId: 'batch-aggregate', pageId: 'page-2' },
-  );
+  ), '2026-08-28T11:00:30.000Z', '2026-08-28T11:01:00.000Z');
   const failed = createBatchFailurePage({
     pageId: 'page-3', requestedUrl: 'https://three.example.test/?view=public', status: 'failed',
     attempted: true, startedAt: '2026-08-28T11:02:00.000Z', endedAt: '2026-08-28T11:02:30.000Z',
@@ -346,18 +468,22 @@ test('uses the strongest rule metadata and derives conservative status and summa
   const aggregated = raw.ruleResults.find(rule => rule.ruleId === ruleId);
   assert.equal(aggregated.outcome, 'failed');
   assert.equal(aggregated.impact, secondRule.impact);
-  assert.match(aggregated.summary, /2 páginas.*falha/iu);
+  assert.equal(aggregated.summary, 'Resultado consolidado do lote: falha confirmada.');
   const one = structuredClone(first);
   one.ruleResults.find(rule => rule.ruleId === ruleId).outcome = 'failed';
   const onePage = aggregateBatchAudits({
     batchAuditId: 'batch-meta-one', pageResults: [one],
     startedAt: OPTIONS.now(), endedAt: OPTIONS.now(), status: 'complete',
   });
-  assert.match(onePage.ruleResults.find(rule => rule.ruleId === ruleId).summary, /1 página(?!s).*falha/iu);
+  assert.equal(
+    onePage.ruleResults.find(rule => rule.ruleId === ruleId).summary,
+    'Resultado consolidado do lote: falha confirmada.',
+  );
 
   const failedPage = createBatchFailurePage({
     pageId: 'page-2', requestedUrl: 'https://failed.example.test/', status: 'failed', attempted: true,
-    startedAt: OPTIONS.now(), endedAt: OPTIONS.now(), code: 'BATCH_PAGE_FAILED', message: 'Falha controlada.',
+    startedAt: OPTIONS.now(), endedAt: OPTIONS.now(),
+    code: 'BATCH_PAGE_FAILED', message: 'A página não pôde ser auditada.',
   });
   first.ruleResults.find(rule => rule.ruleId === ruleId).outcome = 'inapplicable';
   assert.throws(() => aggregateBatchAudits({
@@ -370,7 +496,7 @@ test('uses the strongest rule metadata and derives conservative status and summa
   });
   const partialRule = partial.ruleResults.find(rule => rule.ruleId === ruleId);
   assert.equal(partialRule.outcome, 'cantTell');
-  assert.match(partialRule.summary, /1 de 2 páginas.*não foi possível concluir/iu);
+  assert.equal(partialRule.summary, 'Resultado consolidado do lote: não foi possível concluir.');
   assert.equal(partial.itemResults.find(item => item.ruleIds.includes(ruleId)).outcome, 'cantTell');
 });
 
@@ -379,16 +505,17 @@ test('preserves a legitimate batch mix of failed and cantTell page occurrences u
     await childModel('child-mixed-1', 'https://mixed-one.example.test/'),
     { batchAuditId: 'batch-mixed', pageId: 'page-1' },
   ));
-  const second = structuredClone(await remapAuditPage(
+  const second = withPageWindow(await remapAuditPage(
     await childModel('child-mixed-2', 'https://mixed-two.example.test/'),
     { batchAuditId: 'batch-mixed', pageId: 'page-2' },
-  ));
+  ), '2026-08-28T11:00:30.000Z', '2026-08-28T11:01:00.000Z');
   const ruleId = 'focus-order';
   const secondRule = second.ruleResults.find(rule => rule.ruleId === ruleId);
   const secondOccurrence = second.occurrences.find(occurrence => occurrence.ruleId === ruleId);
   secondRule.outcome = 'failed';
-  secondRule.summary = 'Falha conclusiva observada somente na segunda página.';
+  secondRule.summary = canonicalCoreRuleSummary(ruleId, 'failed');
   secondOccurrence.outcome = 'failed';
+  secondOccurrence.justification = canonicalCoreRuleSummary(ruleId, 'failed');
   secondOccurrence.confidence = 'high';
   secondOccurrence.testedWcagRefs = [...secondOccurrence.sourceWcagRefs];
   secondOccurrence.wcagRefs = [...secondOccurrence.testedWcagRefs];
@@ -398,7 +525,7 @@ test('preserves a legitimate batch mix of failed and cantTell page occurrences u
 
   const raw = aggregateBatchAudits({
     batchAuditId: 'batch-mixed', pageResults: [first, second],
-    startedAt: OPTIONS.now(), endedAt: OPTIONS.now(), status: 'partial',
+    startedAt: '2026-08-28T11:00:00.000Z', endedAt: '2026-08-28T11:01:00.000Z', status: 'partial',
   });
   const final = await enrichAuditForReport(raw, OPTIONS);
   assert.equal(final.ruleResults.find(rule => rule.ruleId === ruleId).outcome, 'failed');
@@ -416,6 +543,7 @@ test('allocates distinct stable ordinals for the reported legacy 32-bit collisio
   const secondOccurrence = {
     ...structuredClone(firstOccurrence), occurrenceId: 'occurrence-axe-0001e467', nodeId: 'n-2',
     target: { ...structuredClone(firstOccurrence.target), nodeId: 'n-2' },
+    evidenceIds: [], evidenceRefs: [],
   };
   child.ruleResults.find(rule => rule.ruleId === firstOccurrence.ruleId).targets.push('n-2');
   child.occurrences.push(secondOccurrence);
@@ -455,8 +583,12 @@ test('builds a valid revisable model when every page failed or was cancelled bef
     const pageResults = ['one', 'two'].map((name, index) => createBatchFailurePage({
       pageId: `page-${index + 1}`, requestedUrl: `https://${name}.example.test/?token=REMOVE&view=public`,
       status: scenario.pageStatus, attempted: scenario.attempted,
-      startedAt: '2026-08-28T11:00:00.000Z',
-      endedAt: scenario.attempted ? '2026-08-28T11:00:01.000Z' : '2026-08-28T11:00:00.000Z',
+      startedAt: scenario.attempted
+        ? `2026-08-28T11:00:0${index}.000Z`
+        : '2026-08-28T11:00:00.000Z',
+      endedAt: scenario.attempted
+        ? `2026-08-28T11:00:0${index + 1}.000Z`
+        : '2026-08-28T11:00:00.000Z',
       code: scenario.code,
       message: scenario.status === 'cancelled'
         ? 'A página não foi iniciada porque o lote foi cancelado.'

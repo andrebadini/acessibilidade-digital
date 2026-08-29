@@ -18,6 +18,8 @@ import {
   computeCanonicalReproducibility,
   verifyIntegrityLinks,
 } from './integrity-chain.js';
+import { canonicalScope, deriveSystemLimitations } from './text-policy.js';
+import { canonicalInternalReviewUrl } from './report-policy.js';
 
 export { REPORT_HASH_BASE } from './integrity.js';
 
@@ -30,6 +32,15 @@ export async function enrichAuditForReport(input, options = {}) {
 }
 
 async function enrichCapturedAudit(captured, options) {
+  const handoffReviewUrl = ownDataOption(options, 'handoffReviewUrl');
+  const expectedExtensionId = ownDataOption(options, 'expectedExtensionId');
+  if (handoffReviewUrl.present) {
+    canonicalInternalReviewUrl(
+      handoffReviewUrl.value,
+      captured.auditId,
+      expectedExtensionId.present ? expectedExtensionId.value : undefined,
+    );
+  }
   let raw = captured.schemaVersion === 1 ? structuredClone(captured) : captured;
   if (raw.schemaVersion === 2) {
     const canonical = createAuditModel(raw);
@@ -40,7 +51,6 @@ async function enrichCapturedAudit(captured, options) {
   const timezone = validTimezone(options.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
   const limitations = deriveLimitations(raw);
   const viewport = normalizedViewport(raw.environment?.viewport);
-  if (viewport.width === null) limitations.push('Não foi possível registrar o viewport; dimensões e escala permanecem não disponíveis, sem valores estimados.');
   const endedAt = raw.timestamps?.endedAt ?? generatedAt;
   if (!raw.timestamps?.endedAt) limitations.push('O instante de término da auditoria não estava disponível; o instante de geração foi usado somente para fechar o registro temporal do relatório.');
   const rulesVersion = cleanVersion(options.rulesVersion ?? raw.methodology?.version, 'rulesVersion');
@@ -79,7 +89,6 @@ async function enrichCapturedAudit(captured, options) {
     }))
     : undefined;
   const isBatch = raw.schemaVersion === 2 && raw.requestedScope?.mode === 'batch';
-  const handoffReviewUrl = ownDataOption(options, 'handoffReviewUrl');
   const base = {
     ...raw,
     ...(pages ? { pages } : {}),
@@ -93,19 +102,12 @@ async function enrichCapturedAudit(captured, options) {
       browser: browserVersion,
     },
     environment: { chromeVersion: browserVersion, viewport },
-    scope: isBatch
-      ? {
-        kind: 'explicit-url-batch',
-        description: `${raw.pages.length} páginas correspondentes à lista explícita de ${raw.requestedScope.urls.length} URLs; páginas e estados não solicitados não foram inferidos.`,
-      }
-      : {
-        kind: 'single-page-observed-state',
-        description: 'Página única e estado observado no instante da coleta; outras páginas, etapas e estados não foram inferidos.',
-      },
+    scope: canonicalScope(isBatch ? 'batch' : 'single', isBatch ? raw.pages.length : 1),
     limitations: [...new Set(limitations)],
     ...(handoffReviewUrl.present ? {
       report: {
-        status: 'review-ready', reviewUrl: canonicalHandoffReviewUrl(handoffReviewUrl.value),
+        status: 'review-ready',
+        reviewUrl: null,
         artifact: { status: 'pending', formats: [] },
       },
     } : {}),
@@ -175,14 +177,6 @@ function ownDataOption(options, key) {
   return { present: true, value: descriptor.value };
 }
 
-function canonicalHandoffReviewUrl(value) {
-  if (value === null) return null;
-  if (typeof value !== 'string' || value.length < 1 || value.length > 2_048) throw new TypeError();
-  const parsed = new URL(value);
-  if (!['chrome-extension:', 'blob:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new TypeError();
-  return parsed.href;
-}
-
 function declaresCompleteIntegrity(integrity) {
   return integrity?.algorithm === 'SHA-256' &&
     /^[a-f0-9]{64}$/u.test(integrity.canonicalModelHash ?? '') &&
@@ -216,15 +210,10 @@ function normalizedViewport(value) {
 }
 
 function deriveLimitations(raw) {
-  const limitations = Array.isArray(raw.limitations) ? raw.limitations.filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()) : [];
-  limitations.push(raw.schemaVersion === 2 && raw.requestedScope?.mode === 'batch'
-    ? 'O relatório cobre somente a lista explícita de URLs e os estados observados; não constitui declaração de conformidade do site inteiro.'
-    : 'O relatório cobre somente uma página e o estado observado; não constitui declaração de conformidade do site inteiro.');
-  if (raw.session?.status === 'partial') limitations.push('A auditoria foi concluída parcialmente e contém limitações técnicas registradas nos diagnósticos.');
-  if (raw.session?.status === 'failed') limitations.push('A auditoria falhou antes de ser concluída; resultados disponíveis devem ser interpretados como parciais.');
-  if (raw.session?.status === 'cancelled') limitations.push('A auditoria foi cancelada; resultados disponíveis permanecem incompletos.');
-  if (raw.snapshot?.coverage?.frames === 'partial' || (raw.snapshot?.warnings?.length ?? 0) > 0) {
-    limitations.push('A cobertura estrutural contém avisos ou frames que não puderam ser observados integralmente.');
-  }
-  return limitations;
+  return deriveSystemLimitations({
+    ...raw,
+    requestedScope: raw.requestedScope ?? { mode: 'single' },
+    environment: raw.environment ?? { viewport: { width: null, height: null, deviceScaleFactor: null } },
+    pages: raw.pages ?? [],
+  });
 }

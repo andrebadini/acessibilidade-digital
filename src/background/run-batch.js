@@ -11,6 +11,7 @@ import {
 import { remapAuditPage } from '../core/batch/remap-audit.js';
 import { sanitizeResourceUrl } from '../core/normalize-snapshot.js';
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
+import { canonicalInternalReviewUrl } from '../core/report/report-policy.js';
 import { normalizeAuditUrl } from '../core/url.js';
 import {
   applyBatchEvidenceBudget,
@@ -107,6 +108,7 @@ export async function runBatch({
         operation: ({ childSignal }) => runner({
           url: entry.navigationUrl,
           chromeAdapter: childAdapter,
+          expectedExtensionId: reportOptions.expectedExtensionId,
           now,
           idFactory: () => childAuditId,
           signal: childSignal,
@@ -210,8 +212,15 @@ export async function runBatch({
   let finalModel = await enrichAuditForReport(aggregate, { ...reportOptions, now });
   let handoff = null;
   try { handoff = await chromeAdapter.handoffReport?.(finalModel); } catch { handoff = null; }
-  const reviewUrl = safeInternalUrl(handoff?.reviewUrl);
-  finalModel = await enrichAuditForReport(finalModel, { ...reportOptions, now, handoffReviewUrl: reviewUrl });
+  const reviewUrl = validateTransientReviewUrl(
+    handoff?.reviewUrl,
+    batchAuditId,
+    reportOptions.expectedExtensionId,
+  );
+  finalModel = await enrichAuditForReport(finalModel, {
+    ...reportOptions, now, handoffReviewUrl: reviewUrl,
+    expectedExtensionId: reportOptions.expectedExtensionId,
+  });
   return finalModel;
 
   async function cancelRemaining({ active, startedAt: activeStartedAt, endedAt: activeEndedAt }) {
@@ -300,18 +309,8 @@ function validateInputs({ entries, batchAuditId, chromeAdapter, runner, pageTime
   }
 }
 
-function safeInternalUrl(value) {
-  if (typeof value !== 'string' || !value) return null;
-  try {
-    const url = new URL(value);
-    if (!['chrome-extension:', 'blob:'].includes(url.protocol)) return null;
-    url.username = '';
-    url.password = '';
-    for (const key of [...url.searchParams.keys()]) {
-      if (/(?:pass|token|secret|auth|session|cookie|csrf|otp|key)/iu.test(key)) url.searchParams.delete(key);
-    }
-    return url.href;
-  } catch { return null; }
+function validateTransientReviewUrl(value, auditId, expectedExtensionId) {
+  try { return canonicalInternalReviewUrl(value ?? null, auditId, expectedExtensionId); } catch { return null; }
 }
 
 function canonicalNow(now) {

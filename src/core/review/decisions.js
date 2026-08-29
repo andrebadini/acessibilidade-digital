@@ -1,8 +1,12 @@
 import { captureAuditInput } from '../report/audit-input.js';
+import { canonicalStringify } from '../report/canonical-json.js';
+import { canonicalEvaluatorSummary } from '../report/text-policy.js';
 
 const ANSWERS = Object.freeze(['conforme', 'não conforme', 'não foi possível determinar']);
 const MODES = Object.freeze(['assisted', 'manual']);
 const MAX_REVIEW_DECISIONS = 10_000;
+const MAX_EVALUATOR_CODEPOINTS = 160;
+const MAX_NOTE_CODEPOINTS = 4_000;
 const DECISION_FIELDS = new Set([
   'decisionId', 'auditId', 'itemId', 'occurrenceId', 'answer', 'evaluator', 'decidedAt', 'mode', 'note',
 ]);
@@ -40,8 +44,11 @@ function assertJsonData(value, label = 'valor', ancestors = new WeakSet()) {
 }
 
 function required(value, label) {
-  if (typeof value !== 'string' || !value.trim()) throw new TypeError(`${label} deve ser um identificador não vazio.`);
-  return value.trim();
+  if (typeof value !== 'string' || value !== value.trim() ||
+    !/^[A-Za-z0-9._:-]{1,200}$/u.test(value)) {
+    throw new TypeError(`${label} deve ser um identificador canônico válido.`);
+  }
+  return value;
 }
 
 function ruleReference(value, label) {
@@ -57,13 +64,20 @@ function canonicalInstant(value) {
   return value;
 }
 
-function stableId(value) {
-  let hash = 0x811c9dc5;
-  for (const character of value) {
-    hash ^= character.codePointAt(0);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
+function boundedHumanText(value, maximum, message, { optional = false } = {}) {
+  if (typeof value !== 'string') throw new TypeError(message);
+  // A canonical value can use at most two UTF-16 code units per codepoint.
+  // Bound the raw envelope before trim/iteration so padding cannot force a
+  // large intermediate allocation at this public input boundary.
+  if (value.length > maximum * 2 + 2) throw new TypeError(message);
+  const canonical = value.trim();
+  if ((!optional && !canonical) || canonical.length > maximum * 2) throw new TypeError(message);
+  let codepoints = 0;
+  for (const _character of canonical) {
+    codepoints += 1;
+    if (codepoints > maximum) throw new TypeError(message);
   }
-  return `decision-${hash.toString(16).padStart(8, '0')}`;
+  return canonical;
 }
 
 function freeze(value, seen = new WeakSet()) {
@@ -89,16 +103,21 @@ export function createReviewDecision(input) {
   const occurrenceId = required(ownValue(captured, 'occurrenceId', 'O identificador da ocorrência'), 'O identificador da ocorrência');
   const answer = ownValue(captured, 'answer', 'A resposta de revisão');
   if (!ANSWERS.includes(answer)) throw new TypeError('Resposta de revisão inválida.');
-  const evaluator = required(ownValue(captured, 'evaluator', 'O avaliador'), 'O avaliador');
+  const evaluator = boundedHumanText(
+    ownValue(captured, 'evaluator', 'O avaliador'),
+    MAX_EVALUATOR_CODEPOINTS,
+    'Avaliador da decisão inválido.',
+  );
   const decidedAt = canonicalInstant(ownValue(captured, 'decidedAt', 'A data da decisão'));
   const mode = ownValue(captured, 'mode', 'O modo de revisão');
   if (!MODES.includes(mode)) throw new TypeError('Modo de revisão inválido.');
   const noteValue = Object.hasOwn(captured, 'note') ? ownValue(captured, 'note', 'A nota da decisão') : undefined;
-  if (noteValue !== undefined && typeof noteValue !== 'string') throw new TypeError('A nota da decisão deve ser texto.');
-  const note = noteValue?.trim() || '';
+  const note = noteValue === undefined
+    ? ''
+    : boundedHumanText(noteValue, MAX_NOTE_CODEPOINTS, 'Nota da decisão inválida.', { optional: true });
   const canonical = { auditId, itemId, occurrenceId, answer, evaluator, decidedAt, mode, ...(note ? { note } : {}) };
   assertJsonData(canonical, 'Decisão de revisão');
-  const decisionId = stableId(JSON.stringify(canonical));
+  const decisionId = occurrenceId;
   if (Object.hasOwn(captured, 'decisionId') && ownValue(captured, 'decisionId', 'O identificador da decisão') !== decisionId) {
     throw new TypeError('Identificador canônico da decisão de revisão inválido.');
   }
@@ -134,20 +153,26 @@ function snapshotDecisionList(value, label) {
 }
 
 export function applyReviewDecisions(auditModel, decisions) {
-  if (!isPlainRecord(auditModel)) throw new TypeError('Modelo de auditoria inválido.');
-  assertJsonData(auditModel, 'Modelo de auditoria');
-  const auditId = required(ownValue(auditModel, 'auditId', 'O identificador da auditoria'), 'O identificador da auditoria');
+  let capturedModel;
+  try {
+    capturedModel = captureAuditInput(auditModel);
+  } catch {
+    throw new TypeError('Modelo de auditoria inválido.');
+  }
+  if (!isPlainRecord(capturedModel)) throw new TypeError('Modelo de auditoria inválido.');
+  assertJsonData(capturedModel, 'Modelo de auditoria');
+  const auditId = required(ownValue(capturedModel, 'auditId', 'O identificador da auditoria'), 'O identificador da auditoria');
   const decisionInputs = snapshotDecisionList(decisions, 'As decisões');
-  const sourceItems = requireArray(auditModel, 'itemResults', 'Os resultados de itens');
-  const sourceOccurrences = requireArray(auditModel, 'occurrences', 'As ocorrências');
-  const sourceRules = requireArray(auditModel, 'ruleResults', 'Os resultados de regras');
-  const sourceManualReview = requireArray(auditModel, 'manualReview', 'A fila de revisão');
-  const sourcePrior = requireArray(auditModel, 'reviewDecisions', 'O histórico de decisões');
+  const sourceItems = requireArray(capturedModel, 'itemResults', 'Os resultados de itens');
+  const sourceOccurrences = requireArray(capturedModel, 'occurrences', 'As ocorrências');
+  const sourceRules = requireArray(capturedModel, 'ruleResults', 'Os resultados de regras');
+  const sourceManualReview = requireArray(capturedModel, 'manualReview', 'A fila de revisão');
+  const sourcePrior = requireArray(capturedModel, 'reviewDecisions', 'O histórico de decisões');
 
   const itemIds = new Set();
   for (const item of sourceItems) {
     const id = required(ownValue(item, 'id', 'O identificador do item'), 'O identificador do item');
-    if (itemIds.has(id)) throw new TypeError(`Item duplicado ou ambíguo: ${id}.`);
+    if (itemIds.has(id)) throw new TypeError('Inventário de itens duplicado ou ambíguo.');
     itemIds.add(id);
   }
   const sourceRuleById = new Map();
@@ -166,7 +191,7 @@ export function applyReviewDecisions(auditModel, decisions) {
     const ruleId = ruleReference(ownValue(occurrence, 'ruleId', 'A regra da ocorrência'), 'A regra da ocorrência');
     const mode = ownValue(occurrence, 'mode', 'O modo da ocorrência');
     if (!MODES.includes(mode) && mode !== 'automated') throw new TypeError('A ocorrência possui modo inválido.');
-    if (occurrenceIds.has(id)) throw new TypeError(`Ocorrência duplicada ou ambígua: ${id}.`);
+    if (occurrenceIds.has(id)) throw new TypeError('Inventário de ocorrências duplicado ou ambíguo.');
     occurrenceIds.add(id);
     sourceOccurrenceById.set(id, { occurrence, itemId, ruleId, mode });
   }
@@ -205,17 +230,37 @@ export function applyReviewDecisions(auditModel, decisions) {
   const normalized = [];
   for (const input of decisionInputs) normalized.push(createReviewDecision(input));
   const prior = [];
-  for (const input of snapshotDecisionList(sourcePrior, 'O histórico de decisões')) prior.push(createReviewDecision(input));
-  // Clone only after validation so accessors and exotic prototypes are never executed.
-  const cloned = structuredClone(auditModel);
+  for (const input of snapshotDecisionList(sourcePrior, 'O histórico de decisões')) {
+    const canonical = createReviewDecision(input);
+    if (canonicalStringify(input) !== canonicalStringify(canonical)) {
+      throw new TypeError('O histórico contém decisão não canônica ou alterada.');
+    }
+    prior.push(canonical);
+  }
+  const priorByOccurrence = new Map();
+  for (const decision of prior) {
+    if (priorByOccurrence.has(decision.occurrenceId)) {
+      throw new TypeError('Histórico de decisões duplicado ou ambíguo.');
+    }
+    priorByOccurrence.set(decision.occurrenceId, decision);
+  }
+  const normalizedByOccurrence = new Map();
+  for (const decision of normalized) {
+    if (normalizedByOccurrence.has(decision.occurrenceId)) {
+      throw new TypeError('Lista de novas decisões duplicada ou ambígua.');
+    }
+    normalizedByOccurrence.set(decision.occurrenceId, decision);
+  }
+  // From here onward only the inert snapshot crosses another traversal. Any
+  // decision Proxy trap may mutate its source graph, never this captured model.
+  const cloned = structuredClone(capturedModel);
   const itemById = new Map(cloned.itemResults.map(item => [item.id, item]));
   const occurrenceById = new Map(cloned.occurrences.map(occurrence => [occurrence.occurrenceId, occurrence]));
-  const seenOccurrences = new Set();
   for (const decision of [...prior, ...normalized]) {
     if (decision.auditId !== auditId) throw new TypeError('A decisão pertence a outra auditoria.');
-    if (!itemById.has(decision.itemId)) throw new TypeError(`Item de revisão desconhecido: ${decision.itemId}.`);
+    if (!itemById.has(decision.itemId)) throw new TypeError('Decisão referencia item de revisão desconhecido.');
     const occurrence = occurrenceById.get(decision.occurrenceId);
-    if (!occurrence) throw new TypeError(`Ocorrência de revisão desconhecida: ${decision.occurrenceId}.`);
+    if (!occurrence) throw new TypeError('Decisão referencia ocorrência de revisão desconhecida.');
     if (occurrence.itemId !== decision.itemId) throw new TypeError('A ocorrência não pertence ao item informado.');
     const queue = reviewQueueByOccurrence.get(decision.occurrenceId);
     if (occurrence.outcome !== 'cantTell' || !queue) {
@@ -224,12 +269,7 @@ export function applyReviewDecisions(auditModel, decisions) {
     if (queue.itemId !== decision.itemId || queue.mode !== decision.mode) {
       throw new TypeError('A decisão não corresponde exatamente à fila de revisão.');
     }
-    if (normalized.includes(decision)) {
-      if (seenOccurrences.has(decision.occurrenceId)) throw new TypeError('Decisão duplicada ou ambígua para a ocorrência.');
-      seenOccurrences.add(decision.occurrenceId);
-    }
   }
-  const priorByOccurrence = new Map(prior.map(decision => [decision.occurrenceId, decision]));
   for (const [occurrenceId, queue] of reviewQueueByOccurrence) {
     const priorDecision = priorByOccurrence.get(occurrenceId);
     if (queue.status === 'answered') {
@@ -241,11 +281,18 @@ export function applyReviewDecisions(auditModel, decisions) {
     }
   }
 
-  const combinedByOccurrence = new Map();
-  for (const decision of [...prior, ...normalized]) {
+  const combinedByOccurrence = new Map(priorByOccurrence);
+  let addedDecisionCount = 0;
+  for (const decision of normalized) {
     const existing = combinedByOccurrence.get(decision.occurrenceId);
-    if (existing && existing.decisionId !== decision.decisionId) throw new TypeError('Histórico contém decisão duplicada ou ambígua.');
+    if (existing) {
+      if (canonicalStringify(existing) !== canonicalStringify(decision)) {
+        throw new TypeError('A decisão imutável da ocorrência não pode ser substituída.');
+      }
+      continue;
+    }
     combinedByOccurrence.set(decision.occurrenceId, decision);
+    addedDecisionCount += 1;
   }
   const combined = [...combinedByOccurrence.values()];
   const reviewableByItem = new Map();
@@ -274,7 +321,7 @@ export function applyReviewDecisions(auditModel, decisions) {
       outcome: reviewedOutcome,
       review: {
         mode: modes.length === 1 ? modes[0] : 'manual',
-        evaluator: evaluators.join(', '),
+        evaluator: canonicalEvaluatorSummary(evaluators),
         decidedAt: latest.decidedAt,
         decisionIds: itemDecisions.map(decision => decision.decisionId),
       },
@@ -286,6 +333,16 @@ export function applyReviewDecisions(auditModel, decisions) {
     return decision ? { ...entry, status: 'answered', decisionId: decision.decisionId } : entry;
   });
   cloned.reviewDecisions = combined;
+  if (addedDecisionCount > 0 && cloned.integrity?.algorithm === 'SHA-256') {
+    cloned.integrity = { ...cloned.integrity, canonicalModelHash: 'pending' };
+  }
+  if (addedDecisionCount > 0 && cloned.report?.artifact) {
+    cloned.report = {
+      ...cloned.report,
+      status: 'review-ready',
+      artifact: { status: 'pending', formats: [] },
+    };
+  }
   assertJsonData(cloned, 'Modelo revisado');
   return freeze(cloned);
 }

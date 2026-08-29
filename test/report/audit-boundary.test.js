@@ -6,6 +6,10 @@ import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consume
 import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
 import { section508ReferencesForWcag } from '../../src/core/normative/section508.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
+import {
+  AUDIT_MODEL_INPUT_ERROR_CODE,
+  AUDIT_MODEL_INPUT_ERROR_MESSAGE,
+} from '../../src/core/report/audit-input.js';
 import { canonicalStringify } from '../../src/core/report/canonical-json.js';
 import { renderOccurrenceCsv } from '../../src/core/report/csv.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
@@ -13,6 +17,7 @@ import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { sha256Hex } from '../../src/core/report/hash.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { verifyAuditIntegritySnapshot } from '../../src/core/report/integrity.js';
+import { createReviewDecision } from '../../src/core/review/decisions.js';
 import { reportInput } from './helpers.js';
 
 const OPTIONS = Object.freeze({
@@ -27,10 +32,68 @@ const MARKER = 'PRIVATE_BOUNDARY_MARKER_7Q9Z';
 
 function assertFixedError(error) {
   assert.equal(error instanceof TypeError, true);
+  assert.equal(error.code, AUDIT_MODEL_INPUT_ERROR_CODE);
   assert.equal(error.code, INVALID_CODE);
+  assert.equal(error.message, AUDIT_MODEL_INPUT_ERROR_MESSAGE);
   assert.doesNotMatch(error.message, new RegExp(MARKER, 'u'));
   return true;
 }
+
+test('wraps post-capture validation failures identically across every public report consumer', async () => {
+  const marker = 'PRIVATE_DUPLICATE_PAGE_7Q9Z';
+  const duplicatePage = structuredClone(SAMPLE_AUDIT);
+  duplicatePage.pages[0].pageId = marker;
+  duplicatePage.pages.push({
+    ...structuredClone(duplicatePage.pages[0]),
+    requestedUrl: 'https://second.example.test/', finalUrl: 'https://second.example.test/',
+  });
+  duplicatePage.requestedScope = {
+    mode: 'batch', urls: [duplicatePage.requestedUrl, 'https://second.example.test/'],
+  };
+
+  for (const call of [
+    () => createAuditModel(duplicatePage),
+    () => renderHtmlReport(duplicatePage),
+    () => renderTechnicalJson(duplicatePage),
+    () => renderOccurrenceCsv(duplicatePage),
+  ]) assert.throws(call, assertFixedError);
+  await assert.rejects(enrichAuditForReport(duplicatePage, OPTIONS), assertFixedError);
+});
+
+test('rejects arbitrary and oversized systemic prose before HTML or technical JSON can retain it', async () => {
+  const marker = 'PRIVATE_SYSTEM_PROSE_MARKER_7Q9Z';
+  const variants = [
+    value => { value.scope.description = marker; },
+    value => { value.limitations = [marker]; },
+    value => { value.pages[0].limitations = [marker]; },
+    value => { value.report.artifact.limitations = [marker]; },
+    value => { value.session.diagnostics[0].message = marker; },
+    value => {
+      value.ruleResults.find(rule => rule.ruleId === 'focus-visible').targets = [{
+        nodeId: 'n-1', selectorHint: '', message: marker, data: { reason: 'private-marker' },
+      }];
+    },
+    value => { value.scope.description = 'x'.repeat(100_000); },
+    value => { value.limitations = ['x'.repeat(2_000_000)]; },
+  ];
+  for (const mutate of variants) {
+    const candidate = structuredClone(SAMPLE_AUDIT);
+    mutate(candidate);
+    for (const call of [
+      () => createAuditModel(candidate),
+      () => renderHtmlReport(candidate),
+      () => renderTechnicalJson(candidate),
+    ]) {
+      assert.throws(call, error => {
+        assert.equal(error.code, AUDIT_MODEL_INPUT_ERROR_CODE);
+        assert.equal(error.message, AUDIT_MODEL_INPUT_ERROR_MESSAGE);
+        assert.doesNotMatch(error.message, new RegExp(marker, 'u'));
+        return true;
+      });
+    }
+    await assert.rejects(enrichAuditForReport(candidate, OPTIONS), assertFixedError);
+  }
+});
 
 async function verifiedFixture() {
   return enrichAuditForReport(SAMPLE_AUDIT, OPTIONS);
@@ -91,7 +154,7 @@ test('validates complete current V2 normative metadata before reading enrichment
   }
 });
 
-test('captures hostile report input once without executing getters or echoing traps', async () => {
+test('contains hostile input with fixed errors without reading accessors, while local Proxy traps remain observable', async () => {
   let getterReads = 0;
   const accessor = structuredClone(SAMPLE_AUDIT);
   Object.defineProperty(accessor.methodology, 'privateContext', {
@@ -108,11 +171,13 @@ test('captures hostile report input once without executing getters or echoing tr
   await assert.rejects(verifyAuditIntegritySnapshot(accessor), assertFixedError);
   assert.equal(getterReads, 0);
 
+  let reflectiveTrapCalls = 0;
   const ownKeysTrap = new Proxy(structuredClone(SAMPLE_AUDIT), {
-    ownKeys() { throw new Error(MARKER); },
+    ownKeys() { reflectiveTrapCalls += 1; throw new Error(MARKER); },
   });
   assert.throws(() => createAuditModel(ownKeysTrap), assertFixedError);
   await assert.rejects(enrichAuditForReport(ownKeysTrap, OPTIONS), assertFixedError);
+  assert.ok(reflectiveTrapCalls > 0, 'Proxies locais podem executar traps reflexivos antes da contenção');
 
   const revoked = Proxy.revocable(structuredClone(SAMPLE_AUDIT), {});
   revoked.revoke();
@@ -166,6 +231,27 @@ test('rejects privateContext and unknown fields throughout the retained V2 graph
     renderTechnicalJson(verified),
     renderOccurrenceCsv(verified),
   ]) assert.doesNotMatch(output, new RegExp(MARKER, 'u'));
+});
+
+test('binds locally generated report prose and rejects arbitrary or unbounded retained text', async () => {
+  const variants = [
+    value => { value.manualReview[0].question = MARKER; },
+    value => { value.manualReview[0].reason = MARKER; },
+    value => { value.occurrences.find(entry => entry.occurrenceId === 'occ-focus-review').justification = MARKER; },
+    value => { value.ruleResults.find(entry => entry.ruleId === 'focus-order').summary = MARKER; },
+    value => { value.manualReview[0].reason = 'x'.repeat(2_000_000); },
+  ];
+  for (const mutate of variants) {
+    const candidate = structuredClone(SAMPLE_AUDIT);
+    mutate(candidate);
+    for (const call of [
+      () => createAuditModel(candidate),
+      () => renderHtmlReport(candidate),
+      () => renderTechnicalJson(candidate),
+      () => renderOccurrenceCsv(candidate),
+    ]) assert.throws(call, assertFixedError);
+    await assert.rejects(enrichAuditForReport(candidate, OPTIONS), assertFixedError);
+  }
 });
 
 for (const [label, mutate] of [
@@ -261,6 +347,24 @@ test('V1 migration downgrades an entire unproved failed rule and preserves a ful
       itemWcagRefs: wcag, sourceWcagRefs: wcag,
       ...(completeProof ? { testedWcagRefs: wcag, wcagRefs: wcag } : {}),
     });
+    const historicalDecision = createReviewDecision({
+      auditId: input.auditId, itemId: item.id, occurrenceId: 'occ-v1-failed',
+      answer: 'não conforme', evaluator: 'Fiscal histórico',
+      decidedAt: '2026-08-26T14:01:30.000Z', mode: 'assisted',
+    });
+    input.manualReview.push({
+      occurrenceId: 'occ-v1-failed', itemId: item.id, ruleId: 'focus-visible',
+      mode: 'assisted', status: 'answered', decisionId: historicalDecision.decisionId,
+      question: 'A falha original deve ser revista?', reason: 'Fila histórica inválida.',
+    });
+    input.reviewDecisions.push(historicalDecision);
+    const reviewedItem = input.itemResults.find(value => value.id === item.id);
+    reviewedItem.originalOutcome = 'failed';
+    reviewedItem.reviewedOutcome = 'failed';
+    reviewedItem.review = {
+      mode: 'assisted', evaluator: historicalDecision.evaluator,
+      decidedAt: historicalDecision.decidedAt, decisionIds: [historicalDecision.decisionId],
+    };
     return input;
   };
 
@@ -274,7 +378,9 @@ test('V1 migration downgrades an entire unproved failed rule and preserves a ful
   assert.deepEqual(downgradedOccurrence.foreignBenchmarkRefs, []);
   assert.equal(downgradedOccurrence.legalAnalysis, null);
   assert.equal(downgraded.itemResults.find(value => value.id === '5.1.1').outcome, 'cantTell');
-  assert.equal(downgraded.manualReview.some(value => value.occurrenceId === 'occ-v1-failed'), true);
+  assert.equal(downgraded.manualReview.some(value => value.occurrenceId === 'occ-v1-failed'), false);
+  assert.equal(downgraded.reviewDecisions.some(value => value.occurrenceId === 'occ-v1-failed'), false);
+  assert.equal(Object.hasOwn(downgraded.itemResults.find(value => value.id === '5.1.1'), 'review'), false);
 
   const preserved = createAuditModel(makeInput(true));
   const preservedOccurrence = preserved.occurrences.find(value => value.occurrenceId === 'occ-v1-failed');
@@ -283,6 +389,8 @@ test('V1 migration downgrades an entire unproved failed rule and preserves a ful
   assert.deepEqual(preservedOccurrence.testedWcagRefs, preservedOccurrence.sourceWcagRefs);
   assert.deepEqual(preservedOccurrence.foreignBenchmarkRefs, section508ReferencesForWcag(preservedOccurrence.testedWcagRefs));
   assert.deepEqual(preservedOccurrence.legalAnalysis, { basisRef: CONSUMER_ACCESSIBILITY_FIXED_BASIS.id });
+  assert.equal(preserved.manualReview.some(value => value.occurrenceId === 'occ-v1-failed'), false);
+  assert.equal(preserved.reviewDecisions.some(value => value.occurrenceId === 'occ-v1-failed'), false);
 });
 
 test('V1 migration makes a legacy manual finding inconclusive without normative or legal claims', () => {
@@ -303,14 +411,8 @@ test('V1 migration makes a legacy manual finding inconclusive without normative 
 
   const model = createAuditModel(input);
   const occurrence = model.occurrences.find(value => value.occurrenceId === 'occ-v1-manual');
-  assert.equal(occurrence.outcome, 'cantTell');
-  assert.deepEqual(occurrence.itemWcagRefs, []);
-  assert.deepEqual(occurrence.sourceWcagRefs, []);
-  assert.deepEqual(occurrence.testedWcagRefs, []);
-  assert.deepEqual(occurrence.wcagRefs, []);
-  assert.deepEqual(occurrence.foreignBenchmarkRefs, []);
-  assert.equal(occurrence.legalAnalysis, null);
-  assert.equal(model.manualReview.some(value => value.occurrenceId === occurrence.occurrenceId), true);
+  assert.equal(occurrence, undefined);
+  assert.equal(model.manualReview.some(value => value.occurrenceId === 'occ-v1-manual'), false);
 });
 
 test('V1 raw snapshots retain only a closed summary in canonical V2', () => {
@@ -330,8 +432,8 @@ test('V1 raw snapshots retain only a closed summary in canonical V2', () => {
     schemaVersion: 1,
     retention: 'summary-only',
     nodeCount: 1,
-    coverage: { frames: 'partial' },
-    warnings: [{ code: 'FRAME_LIMITED' }],
+    coverage: {},
+    warnings: [],
   });
   assert.equal(Object.hasOwn(model, 'presentation'), false);
   assert.equal(Object.hasOwn(model, 'progress'), false);

@@ -1,41 +1,69 @@
-const MESSAGES = Object.freeze({
-  REPORT_PDF_UNAVAILABLE: 'O PDF não foi gerado devido a uma limitação técnica local.',
-  REPORT_CSV_UNAVAILABLE: 'O CSV não foi gerado devido a uma limitação técnica local.',
-  REPORT_PDF_TAGGING_UNSUPPORTED: 'O PDF foi gerado sem marcação estrutural adicional e sem outline porque o navegador não aceitou esses parâmetros.',
-  REPORT_PRINT_TAB_TIMEOUT: 'A criação da aba temporária de impressão excedeu o tempo limite.',
-  REPORT_PRINT_TAB_FAILED: 'A aba temporária de impressão não pôde ser criada.',
-  REPORT_PRINT_LOAD_TIMEOUT: 'O carregamento da página de impressão excedeu o tempo limite.',
-  REPORT_PRINT_LOAD_FAILED: 'A página de impressão não pôde ser preparada.',
-  REPORT_PRINT_CDP_TIMEOUT: 'A conexão local de impressão excedeu o tempo limite.',
-  REPORT_PRINT_CDP_FAILED: 'A conexão local de impressão não pôde ser estabelecida.',
-  REPORT_PRINT_ASSETS_TIMEOUT: 'A preparação local de fontes e imagens excedeu o tempo limite.',
-  REPORT_PRINT_ASSETS_FAILED: 'Fontes e imagens do relatório não puderam ser confirmadas.',
-  REPORT_PRINT_CLEANUP_LIMITED: 'A limpeza de um recurso temporário de impressão não pôde ser confirmada.',
-  REPORT_DOWNLOAD_START_FAILED: 'Um artefato não pôde iniciar o download.',
-  REPORT_DOWNLOAD_TIMEOUT: 'Um artefato excedeu o tempo limite de download.',
-  REPORT_DOWNLOAD_INTERRUPTED: 'Um artefato teve o download interrompido.',
-  REPORT_DOWNLOAD_CLEANUP_LIMITED: 'A liberação de um endereço temporário de download não pôde ser confirmada.',
-  REPORT_EXPORT_PREPARATION_FAILED: 'Não foi possível preparar os artefatos do relatório.',
-});
+import {
+  EXPORT_ISSUE_MESSAGES,
+  PDF_GENERATION_FAILURE_CODES,
+  REPORT_GENERATION_ISSUE_CODES,
+  canonicalExportIssueMessage,
+} from '../core/report/diagnostic-policy.js';
 
-export const PDF_GENERATION_FAILURE_CODES = Object.freeze([
-  'REPORT_PRINT_TAB_TIMEOUT', 'REPORT_PRINT_TAB_FAILED',
-  'REPORT_PRINT_LOAD_TIMEOUT', 'REPORT_PRINT_LOAD_FAILED',
-  'REPORT_PRINT_CDP_TIMEOUT', 'REPORT_PRINT_CDP_FAILED',
-  'REPORT_PRINT_ASSETS_TIMEOUT', 'REPORT_PRINT_ASSETS_FAILED',
-  'REPORT_PDF_UNAVAILABLE',
-]);
+export { PDF_GENERATION_FAILURE_CODES, REPORT_GENERATION_ISSUE_CODES };
 
-export const REPORT_GENERATION_ISSUE_CODES = Object.freeze([
-  ...PDF_GENERATION_FAILURE_CODES,
-  'REPORT_CSV_UNAVAILABLE',
-  'REPORT_PDF_TAGGING_UNSUPPORTED',
-]);
+export const REPORT_EXPORT_INPUT_ERROR_CODE = 'REPORT_EXPORT_INPUT_INVALID';
+export const REPORT_EXPORT_INPUT_ERROR_MESSAGE = 'Solicitação de geração de relatório inválida.';
 
-export function createExportIssue(code, format) {
-  if (!Object.hasOwn(MESSAGES, code)) throw new TypeError('Código de limitação de exportação desconhecido.');
-  const suffix = typeof format === 'string' && /^(?:html|json|csv|pdf)$/u.test(format) ? ` Formato: ${format.toUpperCase()}.` : '';
-  return Object.freeze({ code, message: `${MESSAGES[code]}${suffix}` });
+const MAX_EXPORT_ISSUES = 32;
+const ISSUE_KEYS = Object.freeze(['code', 'message']);
+
+export function reportExportInputError() {
+  const error = new TypeError(REPORT_EXPORT_INPUT_ERROR_MESSAGE);
+  Object.defineProperty(error, 'code', {
+    value: REPORT_EXPORT_INPUT_ERROR_CODE, enumerable: true, configurable: false, writable: false,
+  });
+  return error;
+}
+
+export function createExportIssue(code) {
+  const message = canonicalExportIssueMessage(code);
+  if (message === null) throw reportExportInputError();
+  return Object.freeze({ code, message });
+}
+
+export function captureCanonicalExportIssues(input, { allowedCodes = null } = {}) {
+  try {
+    if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) throw new TypeError();
+    const descriptors = Object.getOwnPropertyDescriptors(input);
+    const length = descriptors.length?.value;
+    if (!Number.isSafeInteger(length) || length < 0 || length > MAX_EXPORT_ISSUES ||
+      Reflect.ownKeys(descriptors).length !== length + 1) throw new TypeError();
+    const allowed = allowedCodes === null ? null : new Set(allowedCodes);
+    const output = [];
+    const seen = new Set();
+    for (let index = 0; index < length; index += 1) {
+      const entry = descriptors[String(index)];
+      if (!entry?.enumerable || !Object.hasOwn(entry, 'value')) throw new TypeError();
+      const issue = entry.value;
+      if (!issue || typeof issue !== 'object' || Array.isArray(issue) ||
+        ![Object.prototype, null].includes(Object.getPrototypeOf(issue))) throw new TypeError();
+      const fields = Object.getOwnPropertyDescriptors(issue);
+      const keys = Reflect.ownKeys(fields);
+      if (keys.length !== ISSUE_KEYS.length || ISSUE_KEYS.some(key => !keys.includes(key)) ||
+        keys.some(key => typeof key !== 'string')) throw new TypeError();
+      const code = ownEnumerableData(fields, 'code');
+      const message = ownEnumerableData(fields, 'message');
+      if (typeof code !== 'string' || message !== canonicalExportIssueMessage(code) ||
+        (allowed && !allowed.has(code)) || seen.has(code)) throw new TypeError();
+      seen.add(code);
+      output.push(Object.freeze({ code, message }));
+    }
+    return Object.freeze(output);
+  } catch {
+    throw reportExportInputError();
+  }
+}
+
+function ownEnumerableData(descriptors, key) {
+  const descriptor = descriptors[key];
+  if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new TypeError();
+  return descriptor.value;
 }
 
 export function issueForPrintStage(stage, error) {
@@ -68,3 +96,5 @@ function safeErrorName(value) {
   } catch {}
   return '';
 }
+
+export const EXPORT_ISSUE_MESSAGE_CATALOG = EXPORT_ISSUE_MESSAGES;

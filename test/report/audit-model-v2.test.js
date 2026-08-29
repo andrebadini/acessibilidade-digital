@@ -14,6 +14,13 @@ import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { sha256Hex } from '../../src/core/report/hash.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { projectEvidenceManifest, REPORT_HASH_BASE } from '../../src/core/report/integrity.js';
+import {
+  canonicalBatchRuleSummary,
+  canonicalCoreRuleSummary,
+  canonicalScope,
+  derivePageLimitations,
+  deriveSystemLimitations,
+} from '../../src/core/report/text-policy.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { aggregateItems } from '../../src/core/rules/aggregate-items.js';
 import {
@@ -282,6 +289,24 @@ function authorityConsistentSample({ axe = false } = {}) {
     model.axe = structuredClone(normalizeAxeResults({
       status: 'disabled', provenance: AXE_PROVENANCE, frames: [],
     }, { pageId: 'page-1', rulesVersion: '1.0.0' }));
+    const diagnostic = {
+      code: 'AXE_FEATURE_DISABLED',
+      message: 'O motor suplementar axe-core permaneceu desativado pelo gate MV3/CSP; o motor próprio continuou normalmente.',
+      at: '2026-08-26T14:00:30.000Z', recoverable: true,
+    };
+    model.pages[0].diagnostics.push(diagnostic);
+    model.session.diagnostics.push(structuredClone(diagnostic));
+  }
+  syncDerivedClaims(model);
+  return model;
+}
+
+function syncDerivedClaims(model) {
+  model.limitations = deriveSystemLimitations(model);
+  for (const page of model.pages) {
+    const limitations = derivePageLimitations(model, page);
+    if (limitations.length > 0) page.limitations = limitations;
+    else delete page.limitations;
   }
   return model;
 }
@@ -315,10 +340,11 @@ function withoutCoreExecution(model = authorityConsistentSample()) {
 
 function setSingleStatus(model, status, { diagnostics = model.session.diagnostics } = {}) {
   model.pages[0].status = status;
+  model.pages[0].diagnostics = structuredClone(diagnostics);
   model.session.status = status;
   model.session.partial = status === 'partial';
   model.session.diagnostics = diagnostics;
-  return model;
+  return syncDerivedClaims(model);
 }
 
 function batchWithUnattemptedPage() {
@@ -327,26 +353,105 @@ function batchWithUnattemptedPage() {
   const diagnostic = {
     code: 'BATCH_NOT_STARTED_CLEANUP_UNCONFIRMED',
     message: 'A página não foi iniciada porque a limpeza anterior não foi confirmada.',
-    at: '2026-08-26T14:00:45.000Z',
+    at: '2026-08-26T14:01:00.000Z',
     recoverable: false,
   };
   model.requestedScope = { mode: 'batch', urls: [...model.requestedScope.urls, requestedUrl] };
+  model.scope = canonicalScope('batch', 2);
+  model.pages[0].coverage = {};
+  const pageRecoverable = {
+    code: 'TAB_CLOSE_FAILED', message: 'A aba descartável não pôde ser fechada automaticamente.',
+    at: '2026-08-26T14:01:00.000Z', recoverable: true,
+  };
+  model.pages[0].diagnostics = [pageRecoverable];
+  for (const rule of model.ruleResults) {
+    if (rule.source?.engine === 'audita-core') {
+      rule.summary = canonicalBatchRuleSummary(rule.outcome, 1, 2);
+    }
+  }
   model.pages.push({
     pageId: 'page-2', requestedUrl, finalUrl: requestedUrl, finalUrlObserved: false,
     status: 'failed', attempted: false,
     timestamps: {
-      startedAt: '2026-08-26T14:00:45.000Z',
-      endedAt: '2026-08-26T14:00:45.000Z',
-      generatedAt: '2026-08-26T14:00:45.000Z',
+      startedAt: '2026-08-26T14:01:00.000Z',
+      endedAt: '2026-08-26T14:01:00.000Z',
+      generatedAt: '2026-08-26T14:01:00.000Z',
     },
     viewport: { width: null, height: null, deviceScaleFactor: null },
-    diagnostics: [diagnostic], limitations: [diagnostic.message], coverage: {}, axeStatus: 'not-run',
+    diagnostics: [diagnostic], coverage: {}, warnings: [], axeStatus: 'not-run',
   });
   model.session = {
     status: 'partial', partial: true,
-    diagnostics: [...model.session.diagnostics, diagnostic],
+    diagnostics: [pageRecoverable, diagnostic],
   };
+  return syncDerivedClaims(model);
+}
+
+function singleUnattemptedAudit() {
+  const model = withoutCoreExecution();
+  const diagnostic = {
+    code: 'NAVIGATION_FAILED', message: 'O site não pôde ser aberto de forma estável.',
+    at: '2026-08-26T14:00:30.000Z', recoverable: false,
+  };
+  model.requestedScope = { mode: 'single', urls: [model.requestedUrl] };
+  model.finalUrl = model.requestedUrl;
+  model.pages = [{
+    pageId: 'page-1', requestedUrl: model.requestedUrl, finalUrl: model.requestedUrl,
+    finalUrlObserved: false, status: 'failed', attempted: false,
+    timestamps: {
+      startedAt: diagnostic.at, endedAt: diagnostic.at,
+      generatedAt: model.timestamps.generatedAt,
+    },
+    viewport: { width: null, height: null, deviceScaleFactor: null },
+    diagnostics: [diagnostic], warnings: [], axeStatus: 'not-run',
+  }];
+  model.environment.viewport = { width: null, height: null, deviceScaleFactor: null };
+  model.session = { status: 'failed', partial: false, diagnostics: [diagnostic] };
+  model.ruleResults = [];
+  model.methodology.ruleCount = 0;
+  model.methodology.supplementalRuleCount = 0;
+  model.occurrences = [];
+  model.evidence = [];
+  model.evidenceStateCount = 0;
+  model.manualReview = [];
+  model.reviewDecisions = [];
+  model.reproducibility.capturedStateCount = 0;
+  delete model.snapshot;
+  delete model.axe;
+  delete model.axePages;
+  delete model.presentation;
+  syncCoreItemAuthority(model);
+  return syncDerivedClaims(model);
+}
+
+function singleAttemptedUnobservedAudit() {
+  const model = singleUnattemptedAudit();
+  model.pages[0].attempted = true;
+  model.pages[0].timestamps = structuredClone(model.timestamps);
   return model;
+}
+
+function singleObservedTerminalWithoutResults(status, code, message) {
+  const model = withoutCoreExecution();
+  model.ruleResults = [];
+  model.occurrences = [];
+  model.evidence = [];
+  model.evidenceStateCount = 0;
+  model.manualReview = [];
+  model.reviewDecisions = [];
+  model.methodology.ruleCount = 0;
+  model.methodology.supplementalRuleCount = 0;
+  model.reproducibility.capturedStateCount = 0;
+  delete model.snapshot;
+  syncCoreItemAuthority(model);
+  return setSingleStatus(model, status, { diagnostics: [
+    { code, message, at: '2026-08-26T14:00:30.000Z', recoverable: false },
+    {
+      code: 'FULL_PAGE_CAPTURE_FAILED',
+      message: 'Não foi possível capturar a página completa no estado original.',
+      at: '2026-08-26T14:00:30.000Z', recoverable: true,
+    },
+  ] });
 }
 
 function editorialInapplicableRule() {
@@ -402,15 +507,7 @@ test('allows a failed or cancelled pre-execution subset only with a compatible f
     ['cancelled', 'NAVIGATION_FAILED', 'A auditoria foi cancelada.'],
   ];
   for (const [status, code, message] of scenarios) {
-    const candidate = withoutCoreExecution();
-    candidate.occurrences = [];
-    candidate.manualReview = [];
-    candidate.methodology.ruleCount = 0;
-    candidate.methodology.supplementalRuleCount = 0;
-    setSingleStatus(candidate, status, {
-      diagnostics: [{ code, message, at: '2026-08-26T14:00:30.000Z', recoverable: false }],
-    });
-    syncCoreItemAuthority(candidate);
+    const candidate = singleObservedTerminalWithoutResults(status, code, message);
 
     assert.doesNotThrow(() => createAuditModel(candidate));
 
@@ -423,7 +520,7 @@ test('allows a failed or cancelled pre-execution subset only with a compatible f
   }
 });
 
-test('binds complete, failed and cancelled terminal states to compatible fatal diagnostics with a full core inventory', () => {
+test('binds complete and cancelled terminal states while rejecting a failed terminal claim over a full core inventory', () => {
   const fatal = (code, message) => ({
     code, message, at: '2026-08-26T14:00:30.000Z', recoverable: false,
   });
@@ -451,9 +548,42 @@ test('binds complete, failed and cancelled terminal states to compatible fatal d
     });
     assert.throws(() => createAuditModel(recoverableOnly), /status|sessão|diagnóst|fatal|modelo/iu);
 
-    const compatible = authorityConsistentSample();
-    setSingleStatus(compatible, status, { diagnostics: [fatal(code, message)] });
-    assert.doesNotThrow(() => createAuditModel(compatible));
+    const candidateWithFullFacts = authorityConsistentSample();
+    setSingleStatus(candidateWithFullFacts, status, { diagnostics: [fatal(code, message)] });
+    if (status === 'failed') {
+      assert.throws(() => createAuditModel(candidateWithFullFacts), /fase|resultado|regra|modelo/iu);
+      const compatible = singleObservedTerminalWithoutResults(status, code, message);
+      assert.doesNotThrow(() => createAuditModel(compatible));
+    } else {
+      assert.doesNotThrow(() => createAuditModel(candidateWithFullFacts));
+    }
+  }
+});
+
+test('accepts terminal fatal diagnostics only from the exact code and message catalogue', () => {
+  const canonicalFatal = {
+    code: 'CORE_AUDIT_FAILED', message: 'O núcleo de regras não pôde concluir a auditoria.',
+    at: '2026-08-26T14:00:30.000Z', recoverable: false,
+  };
+  const canonical = singleObservedTerminalWithoutResults(
+    'failed', canonicalFatal.code, canonicalFatal.message,
+  );
+  assert.doesNotThrow(() => createAuditModel(canonical));
+
+  const forgedExtra = structuredClone(canonical);
+  const forged = {
+    code: 'FORGED_FATAL', message: 'PRIVATE_FORGED_FATAL_MESSAGE_7Q9Z',
+    at: '2026-08-26T14:00:30.000Z', recoverable: false,
+  };
+  forgedExtra.session.diagnostics.push(forged);
+  forgedExtra.pages[0].diagnostics.push(structuredClone(forged));
+
+  const alteredMessage = structuredClone(canonical);
+  alteredMessage.session.diagnostics[0].message = 'PRIVATE_ALTERED_CORE_MESSAGE_7Q9Z';
+  alteredMessage.pages[0].diagnostics[0].message = 'PRIVATE_ALTERED_CORE_MESSAGE_7Q9Z';
+
+  for (const candidate of [forgedExtra, alteredMessage]) {
+    assert.throws(() => createAuditModel(candidate), /modelo|diagnóst|fatal/iu);
   }
 });
 
@@ -487,11 +617,459 @@ test('rejects results, evidence or execution claims for a page explicitly marked
   withElapsedExecution.pages[1].timestamps.endedAt = '2026-08-26T14:00:46.000Z';
   withElapsedExecution.pages[1].timestamps.generatedAt = '2026-08-26T14:00:46.000Z';
 
+  const withViewport = structuredClone(canonical);
+  withViewport.pages[1].viewport = { width: 1280, height: 720, deviceScaleFactor: 1 };
+
+  const withPositiveWidgetObservation = structuredClone(canonical);
+  withPositiveWidgetObservation.pages[1].accessibilityWidgets = {
+    detector: 'audita.accessibility-widgets', version: '1.0.0', coverage: 'complete',
+    widgets: [
+      { id: 'vlibras', status: 'present', signals: ['dom-signature'] },
+      { id: 'hand-talk', status: 'absent', signals: [] },
+    ],
+  };
+
   for (const candidate of [
     withOccurrence, withEvidence, withExecution, withObservedNavigation, withElapsedExecution,
+    withViewport, withPositiveWidgetObservation,
   ]) {
     assert.throws(() => createAuditModel(candidate), /attempted|iniciada|execução|resultado|evidência|modelo/iu);
   }
+});
+
+test('rejects global single-page execution claims when the only page was not attempted', () => {
+  for (const canonical of [singleUnattemptedAudit(), singleAttemptedUnobservedAudit()]) {
+    assert.doesNotThrow(() => createAuditModel(canonical));
+
+    const withSnapshot = structuredClone(canonical);
+    withSnapshot.snapshot = {
+      schemaVersion: 1, retention: 'summary-only', nodeCount: 1,
+      coverage: { runtime: { outcome: 'complete', expectedFrameCount: 1, observedFrameCount: 1 } },
+      warnings: [],
+    };
+
+    const withWidgets = structuredClone(canonical);
+    withWidgets.accessibilityWidgets = {
+      detector: 'audita.accessibility-widgets', version: '1.0.0', coverage: 'complete',
+      widgets: [
+        { id: 'vlibras', status: 'present', signals: ['dom-signature'] },
+        { id: 'hand-talk', status: 'absent', signals: [] },
+      ],
+    };
+
+    const withRules = structuredClone(canonical);
+    withRules.ruleResults = structuredClone(authorityConsistentSample().ruleResults);
+    withRules.methodology.ruleCount = withRules.ruleResults.length;
+    syncCoreItemAuthority(withRules);
+
+    for (const candidate of [withSnapshot, withWidgets, withRules]) {
+      assert.throws(
+        () => createAuditModel(candidate),
+        /attempted|iniciada|observada|execução|resultado|snapshot|widget|regra|modelo/iu,
+      );
+    }
+  }
+});
+
+test('applies one declarative pre-observation matrix to attempted and unattempted pages', () => {
+  for (const canonical of [singleUnattemptedAudit(), singleAttemptedUnobservedAudit()]) {
+    assert.doesNotThrow(() => createAuditModel(canonical));
+    const variants = [];
+
+    const redirected = structuredClone(canonical);
+    redirected.pages[0].finalUrl = 'https://redirected.example.test/';
+    redirected.finalUrl = redirected.pages[0].finalUrl;
+    variants.push(redirected);
+
+    const withViewport = structuredClone(canonical);
+    withViewport.pages[0].viewport = { width: 1280, height: 720, deviceScaleFactor: 1 };
+    withViewport.environment.viewport = structuredClone(withViewport.pages[0].viewport);
+    variants.push(withViewport);
+
+    const withAxe = structuredClone(canonical);
+    withAxe.pages[0].axeStatus = 'complete';
+    variants.push(withAxe);
+
+    const withCoverage = structuredClone(canonical);
+    withCoverage.pages[0].coverage = { runtime: { outcome: 'complete' } };
+    variants.push(withCoverage);
+
+    const withWidgets = structuredClone(canonical);
+    withWidgets.pages[0].accessibilityWidgets = {
+      detector: 'audita.accessibility-widgets', version: '1.0.0', coverage: 'complete',
+      widgets: [
+        { id: 'vlibras', status: 'present', signals: ['dom-signature'] },
+        { id: 'hand-talk', status: 'absent', signals: [] },
+      ],
+    };
+    variants.push(withWidgets);
+
+    for (const candidate of variants) {
+      assert.throws(() => createAuditModel(candidate), /página|observad|execução|URL|modelo/iu);
+    }
+  }
+
+  const elapsedAttempt = singleAttemptedUnobservedAudit();
+  assert.notEqual(elapsedAttempt.pages[0].timestamps.startedAt, elapsedAttempt.pages[0].timestamps.endedAt);
+  assert.doesNotThrow(() => createAuditModel(elapsedAttempt));
+
+  const elapsedWithoutAttempt = singleUnattemptedAudit();
+  elapsedWithoutAttempt.pages[0].timestamps.startedAt = elapsedWithoutAttempt.timestamps.startedAt;
+  assert.throws(() => createAuditModel(elapsedWithoutAttempt), /página|duração|attempted|modelo/iu);
+});
+
+test('binds required page axeStatus exactly to the single or batch axe envelope', () => {
+  const missing = authorityConsistentSample();
+  delete missing.pages[0].axeStatus;
+  assert.throws(() => createAuditModel(missing), /axeStatus|axe|página|modelo/iu);
+
+  const withoutEnvelope = authorityConsistentSample();
+  withoutEnvelope.pages[0].axeStatus = 'complete';
+  assert.throws(() => createAuditModel(withoutEnvelope), /axeStatus|axe|página|modelo/iu);
+
+  const disabledEnvelope = authorityConsistentSample({ axe: true });
+  disabledEnvelope.pages[0].axeStatus = 'disabled';
+  assert.doesNotThrow(() => createAuditModel(disabledEnvelope));
+  disabledEnvelope.pages[0].axeStatus = 'not-run';
+  assert.throws(() => createAuditModel(disabledEnvelope), /axeStatus|axe|página|modelo/iu);
+
+  const batchWithoutEnvelope = batchWithUnattemptedPage();
+  batchWithoutEnvelope.pages[0].axeStatus = 'complete';
+  assert.throws(() => createAuditModel(batchWithoutEnvelope), /axeStatus|axe|página|modelo/iu);
+
+  const singleWithBatchEnvelope = authorityConsistentSample();
+  singleWithBatchEnvelope.axePages = [{
+    pageId: 'page-1', result: structuredClone(authorityConsistentSample({ axe: true }).axe),
+  }];
+  assert.throws(() => createAuditModel(singleWithBatchEnvelope), /axe|modo|single|lote|modelo/iu);
+
+  const batchWithSingleEnvelope = batchWithUnattemptedPage();
+  batchWithSingleEnvelope.axe = structuredClone(authorityConsistentSample({ axe: true }).axe);
+  assert.throws(() => createAuditModel(batchWithSingleEnvelope), /axe|modo|single|lote|modelo/iu);
+});
+
+test('binds the optional primary-page widget inventory to the authoritative root inventory', () => {
+  const contradictoryWidgets = {
+    detector: 'audita.accessibility-widgets', version: '1.0.0', coverage: 'complete',
+    widgets: [
+      { id: 'vlibras', status: 'absent', signals: [] },
+      { id: 'hand-talk', status: 'absent', signals: [] },
+    ],
+  };
+  for (const candidate of [authorityConsistentSample(), batchWithUnattemptedPage()]) {
+    candidate.pages[0].accessibilityWidgets = structuredClone(contradictoryWidgets);
+    assert.throws(() => createAuditModel(candidate), /widget|página|raiz|inventário|modelo/iu);
+  }
+
+  const matching = authorityConsistentSample();
+  matching.pages[0].accessibilityWidgets = structuredClone(matching.accessibilityWidgets);
+  assert.doesNotThrow(() => createAuditModel(matching));
+});
+
+test('requires every root fatal diagnostic to correspond to the terminal page facts', () => {
+  const hiddenSingleRecoverable = authorityConsistentSample();
+  hiddenSingleRecoverable.pages[0].diagnostics = structuredClone(hiddenSingleRecoverable.session.diagnostics);
+  hiddenSingleRecoverable.session.diagnostics = [];
+  assert.throws(() => createAuditModel(hiddenSingleRecoverable), /diagnóst|página|sessão|modelo/iu);
+
+  const single = authorityConsistentSample();
+  single.session.diagnostics.push({
+    code: 'CORE_AUDIT_FAILED', message: 'O núcleo de regras não pôde concluir a auditoria.',
+    at: single.timestamps.endedAt, recoverable: false,
+  });
+  assert.throws(() => createAuditModel(single), /diagnóst|fatal|página|status|modelo/iu);
+
+  const canonicalBatch = batchWithUnattemptedPage();
+  assert.doesNotThrow(() => createAuditModel(canonicalBatch));
+
+  const missing = structuredClone(canonicalBatch);
+  missing.session.diagnostics = missing.session.diagnostics.filter(diagnostic => diagnostic.recoverable !== false);
+
+  const duplicated = structuredClone(canonicalBatch);
+  duplicated.session.diagnostics.push(structuredClone(
+    duplicated.session.diagnostics.find(diagnostic => diagnostic.recoverable === false),
+  ));
+
+  const mismatched = structuredClone(canonicalBatch);
+  mismatched.session.diagnostics = mismatched.session.diagnostics.map(diagnostic => structuredClone(diagnostic));
+  const rootFatal = mismatched.session.diagnostics.find(diagnostic => diagnostic.recoverable === false);
+  rootFatal.code = 'BATCH_PAGE_FAILED';
+  rootFatal.message = 'A página não pôde ser auditada.';
+
+  const missingRecoverable = structuredClone(canonicalBatch);
+  missingRecoverable.session.diagnostics = missingRecoverable.session.diagnostics
+    .filter(diagnostic => diagnostic.recoverable === false);
+
+  const duplicatedRecoverable = structuredClone(canonicalBatch);
+  duplicatedRecoverable.session.diagnostics.push(structuredClone(
+    duplicatedRecoverable.session.diagnostics.find(diagnostic => diagnostic.recoverable === true),
+  ));
+
+  for (const candidate of [missing, duplicated, mismatched, missingRecoverable, duplicatedRecoverable]) {
+    assert.throws(() => createAuditModel(candidate), /diagnóst|fatal|página|correspond|modelo/iu);
+  }
+
+  const reordered = structuredClone(canonicalBatch);
+  reordered.session.diagnostics.reverse();
+  assert.doesNotThrow(() => createAuditModel(reordered));
+
+  const withSessionOnlyRecoverable = structuredClone(canonicalBatch);
+  const sessionOnlyRecoverable = {
+    code: 'REPORT_PDF_UNAVAILABLE', message: 'O PDF não foi gerado devido a uma limitação técnica local.',
+    at: withSessionOnlyRecoverable.timestamps.generatedAt, recoverable: true,
+  };
+  withSessionOnlyRecoverable.session.diagnostics.push(sessionOnlyRecoverable);
+  withSessionOnlyRecoverable.report = {
+    status: 'partial', reviewUrl: null,
+    artifact: {
+      status: 'partial', pdfFallback: false,
+      formats: [
+        { format: 'html', status: 'prepared' },
+        { format: 'json', status: 'prepared' },
+        { format: 'csv', status: 'prepared' },
+      ],
+      limitations: [sessionOnlyRecoverable.message],
+    },
+  };
+  syncDerivedClaims(withSessionOnlyRecoverable);
+  assert.doesNotThrow(() => createAuditModel(withSessionOnlyRecoverable));
+
+  const staleSessionOnlyRecoverable = structuredClone(withSessionOnlyRecoverable);
+  staleSessionOnlyRecoverable.session.diagnostics.find(
+    diagnostic => diagnostic.code === sessionOnlyRecoverable.code,
+  ).at = staleSessionOnlyRecoverable.timestamps.endedAt;
+  assert.throws(
+    () => createAuditModel(staleSessionOnlyRecoverable),
+    /diagnóst|geração|fechamento|sessão|modelo/iu,
+  );
+
+  const duplicatedSessionOnlyRecoverable = structuredClone(withSessionOnlyRecoverable);
+  duplicatedSessionOnlyRecoverable.session.diagnostics.push(structuredClone(sessionOnlyRecoverable));
+  assert.throws(
+    () => createAuditModel(duplicatedSessionOnlyRecoverable),
+    /diagnóst|duplicad|sessão|modelo/iu,
+  );
+});
+
+test('requires attempted on every page and binds each page status to its own fatal diagnostics', () => {
+  const missingAttempted = authorityConsistentSample();
+  delete missingAttempted.pages[0].attempted;
+  assert.throws(() => createAuditModel(missingAttempted), /página|attempted|tentativa|modelo/iu);
+
+  const missingFinalUrlObserved = authorityConsistentSample();
+  delete missingFinalUrlObserved.pages[0].finalUrlObserved;
+  assert.throws(() => createAuditModel(missingFinalUrlObserved), /página|finalUrlObserved|observad|modelo/iu);
+
+  const unobservedRedirect = authorityConsistentSample();
+  unobservedRedirect.pages[0].finalUrlObserved = false;
+  assert.throws(() => createAuditModel(unobservedRedirect), /página|URL|observad|modelo/iu);
+
+  const observedWithoutAttempt = singleUnattemptedAudit();
+  observedWithoutAttempt.pages[0].finalUrlObserved = true;
+  assert.throws(() => createAuditModel(observedWithoutAttempt), /página|attempted|observad|execução|modelo/iu);
+
+  const partialWithFatal = authorityConsistentSample();
+  partialWithFatal.pages[0].diagnostics = [{
+    code: 'BATCH_PAGE_FAILED', message: 'A página não pôde ser auditada.',
+    at: '2026-08-26T14:00:30.000Z', recoverable: false,
+  }];
+  assert.throws(() => createAuditModel(partialWithFatal), /página|fatal|status|diagnóstico|modelo/iu);
+
+  for (const pageDiagnostics of [
+    [],
+    [{
+      code: 'BATCH_CANCELLED', message: 'A página foi cancelada.',
+      at: '2026-08-26T14:00:30.000Z', recoverable: false,
+    }],
+  ]) {
+    const failed = authorityConsistentSample();
+    setSingleStatus(failed, 'failed', { diagnostics: [{
+      code: 'CORE_AUDIT_FAILED', message: 'O núcleo de regras não pôde concluir a auditoria.',
+      at: '2026-08-26T14:00:30.000Z', recoverable: false,
+    }] });
+    failed.pages[0].diagnostics = pageDiagnostics;
+    assert.throws(() => createAuditModel(failed), /página|fatal|status|diagnóstico|modelo/iu);
+  }
+});
+
+test('binds every diagnostic to one declared mode, role, execution stage, status and cardinality', () => {
+  const fatal = (code, message, at = '2026-08-26T14:00:30.000Z') => ({
+    code, message, at, recoverable: false,
+  });
+  const recoverable = (code, message) => ({
+    code, message, at: '2026-08-26T14:00:30.000Z', recoverable: true,
+  });
+
+  for (const diagnostic of [
+    fatal('COLLECTION_FAILED', 'A estrutura da página não pôde ser coletada com segurança.'),
+    fatal('CORE_AUDIT_FAILED', 'O núcleo de regras não pôde concluir a auditoria.'),
+    fatal('BATCH_PAGE_TIMEOUT', 'A página excedeu o tempo limite da auditoria.'),
+  ]) {
+    const candidate = singleUnattemptedAudit();
+    setSingleStatus(candidate, 'failed', { diagnostics: [diagnostic] });
+    assert.throws(() => createAuditModel(candidate), /diagnóst|fase|tentativa|modo|página|modelo/iu);
+  }
+
+  const activeCancellationBeforeStart = singleUnattemptedAudit();
+  setSingleStatus(activeCancellationBeforeStart, 'cancelled', { diagnostics: [
+    fatal('BATCH_CANCELLED', 'A página ativa foi cancelada e limpa antes do encerramento do lote.'),
+  ] });
+  assert.throws(() => createAuditModel(activeCancellationBeforeStart), /diagnóst|fase|tentativa|modo|página|modelo/iu);
+
+  for (const diagnostics of [
+    [
+      fatal('CORE_AUDIT_FAILED', 'O núcleo de regras não pôde concluir a auditoria.'),
+      fatal('COLLECTION_FAILED', 'A estrutura da página não pôde ser coletada com segurança.'),
+    ],
+    [
+      fatal('CORE_AUDIT_FAILED', 'O núcleo de regras não pôde concluir a auditoria.'),
+      fatal('CORE_AUDIT_FAILED', 'O núcleo de regras não pôde concluir a auditoria.'),
+    ],
+  ]) {
+    const candidate = authorityConsistentSample();
+    setSingleStatus(candidate, 'failed', { diagnostics });
+    assert.throws(() => createAuditModel(candidate), /diagnóst|fatal|cardinal|duplicad|modelo/iu);
+  }
+
+  for (const diagnostic of [
+    recoverable('DYNAMIC_PROBES_FAILED', 'As verificações dinâmicas não puderam ser concluídas.'),
+    recoverable('FULL_PAGE_CAPTURE_FAILED', 'Não foi possível capturar a página completa no estado original.'),
+    recoverable('REPORT_PDF_UNAVAILABLE', 'O PDF não foi gerado devido a uma limitação técnica local.'),
+  ]) {
+    const candidate = authorityConsistentSample();
+    setSingleStatus(candidate, 'complete', { diagnostics: [diagnostic] });
+    assert.throws(() => createAuditModel(candidate), /diagnóst|fase|papel|status|página|modelo/iu);
+  }
+
+  const occurrenceIds = authorityConsistentSample().occurrences.slice(0, 2)
+    .map(occurrence => occurrence.occurrenceId);
+  const occurrenceDiagnostics = occurrenceIds.map(occurrenceId => ({
+    code: 'SNIPPET_CAPTURE_FAILED',
+    message: 'O trecho de código do elemento não pôde ser capturado.',
+    at: '2026-08-26T14:00:30.000Z', recoverable: true,
+    details: { occurrenceId },
+  }));
+  const occurrenceScoped = authorityConsistentSample();
+  for (const artifact of occurrenceScoped.evidence) {
+    if (artifact.kind === 'element' && occurrenceIds.some(occurrenceId =>
+      occurrenceScoped.occurrences.find(occurrence => occurrence.occurrenceId === occurrenceId)?.nodeId === artifact.nodeId)) {
+      delete artifact.snippet;
+    }
+  }
+  setSingleStatus(occurrenceScoped, 'partial', { diagnostics: occurrenceDiagnostics });
+  assert.doesNotThrow(() => createAuditModel(occurrenceScoped));
+
+  const duplicateOccurrenceDiagnostic = structuredClone(occurrenceScoped);
+  duplicateOccurrenceDiagnostic.pages[0].diagnostics.push(
+    structuredClone(duplicateOccurrenceDiagnostic.pages[0].diagnostics[0]),
+  );
+  duplicateOccurrenceDiagnostic.session.diagnostics.push(
+    structuredClone(duplicateOccurrenceDiagnostic.session.diagnostics[0]),
+  );
+  assert.throws(
+    () => createAuditModel(duplicateOccurrenceDiagnostic),
+    /diagnóst|cardinal|duplicad|ocorrência|modelo/iu,
+  );
+
+  const crossPageOccurrenceDiagnostic = batchWithUnattemptedPage();
+  crossPageOccurrenceDiagnostic.pages[1].diagnostics[0].details = {
+    occurrenceId: crossPageOccurrenceDiagnostic.occurrences[0].occurrenceId,
+  };
+  crossPageOccurrenceDiagnostic.session.diagnostics = [
+    ...crossPageOccurrenceDiagnostic.pages[0].diagnostics.map(value => structuredClone(value)),
+    ...crossPageOccurrenceDiagnostic.pages[1].diagnostics.map(value => structuredClone(value)),
+  ];
+  assert.throws(
+    () => createAuditModel(crossPageOccurrenceDiagnostic),
+    /diagnóst|detalhe|ocorrência|página|modelo/iu,
+  );
+});
+
+test('uses a closed modal union for root snapshot and per-page coverage', () => {
+  const batchWithRootSnapshot = batchWithUnattemptedPage();
+  batchWithRootSnapshot.pages[0].coverage = {};
+  batchWithRootSnapshot.snapshot = {
+    schemaVersion: 1, retention: 'summary-only', nodeCount: 1,
+    coverage: { frames: 'complete' }, warnings: [],
+  };
+  assert.throws(() => createAuditModel(batchWithRootSnapshot), /snapshot|cobertura|coverage|lote|modo|modelo/iu);
+
+  const singleWithPageCoverage = authorityConsistentSample();
+  singleWithPageCoverage.pages[0].coverage = { frames: 'partial' };
+  assert.throws(() => createAuditModel(singleWithPageCoverage), /snapshot|cobertura|coverage|single|modo|modelo/iu);
+
+  const batchWithoutPageCoverage = batchWithUnattemptedPage();
+  batchWithoutPageCoverage.pages[0].coverage = {};
+  delete batchWithoutPageCoverage.pages[1].coverage;
+  assert.throws(() => createAuditModel(batchWithoutPageCoverage), /snapshot|cobertura|coverage|lote|modo|modelo/iu);
+});
+
+test('rejects an unverifiable historical page count embedded in a batch rule summary', () => {
+  const candidate = batchWithUnattemptedPage();
+  const rule = candidate.ruleResults.find(value => value.source.engine === 'audita-core');
+  rule.summary = `Resultado agregado de 2 de 2 páginas: ${rule.outcome}.`;
+  assert.throws(() => createAuditModel(candidate), /resumo|agregado|contagem|regra|modelo/iu);
+});
+
+test('keeps page and diagnostic observation times inside their pertinent root window', () => {
+  const pageBeforeRoot = authorityConsistentSample();
+  pageBeforeRoot.pages[0].timestamps.startedAt = '2026-08-26T13:59:59.999Z';
+
+  const pageAfterRoot = authorityConsistentSample();
+  pageAfterRoot.pages[0].timestamps.generatedAt = '2026-08-26T14:02:02.000Z';
+
+  const rootDiagnosticBeforeStart = authorityConsistentSample();
+  rootDiagnosticBeforeStart.session.diagnostics[0].at = '2026-08-26T13:59:59.999Z';
+  rootDiagnosticBeforeStart.pages[0].diagnostics[0].at = '2026-08-26T13:59:59.999Z';
+
+  const pageDiagnosticAfterGeneration = authorityConsistentSample();
+  pageDiagnosticAfterGeneration.pages[0].diagnostics = [{
+    code: 'DYNAMIC_PROBES_INCOMPLETE', message: 'As verificações dinâmicas atingiram o tempo limite.',
+    at: '2026-08-26T14:02:02.000Z', recoverable: true,
+  }];
+  pageDiagnosticAfterGeneration.session.diagnostics = structuredClone(pageDiagnosticAfterGeneration.pages[0].diagnostics);
+
+  const pageDiagnosticAfterEnd = authorityConsistentSample();
+  pageDiagnosticAfterEnd.pages[0].diagnostics = [{
+    code: 'DYNAMIC_PROBES_INCOMPLETE', message: 'As verificações dinâmicas atingiram o tempo limite.',
+    at: '2026-08-26T14:02:00.500Z', recoverable: true,
+  }];
+  pageDiagnosticAfterEnd.session.diagnostics = structuredClone(pageDiagnosticAfterEnd.pages[0].diagnostics);
+
+  const fatalAfterEnd = authorityConsistentSample();
+  const lateFatal = {
+    code: 'CORE_AUDIT_FAILED', message: 'O núcleo de regras não pôde concluir a auditoria.',
+    at: '2026-08-26T14:02:00.500Z', recoverable: false,
+  };
+  setSingleStatus(fatalAfterEnd, 'failed', { diagnostics: [lateFatal] });
+
+  for (const candidate of [
+    pageBeforeRoot, pageAfterRoot, rootDiagnosticBeforeStart, pageDiagnosticAfterGeneration,
+    pageDiagnosticAfterEnd, fatalAfterEnd,
+  ]) {
+    assert.throws(() => createAuditModel(candidate), /janela|tempo|data|diagnóstico|página|modelo/iu);
+  }
+
+  const sessionArtifactAfterEnd = authorityConsistentSample();
+  const generationDiagnostic = {
+    code: 'REPORT_PDF_UNAVAILABLE', message: 'O PDF não foi gerado devido a uma limitação técnica local.',
+    at: sessionArtifactAfterEnd.timestamps.generatedAt, recoverable: true,
+  };
+  sessionArtifactAfterEnd.session.diagnostics.push(generationDiagnostic);
+  sessionArtifactAfterEnd.report = {
+    status: 'partial', reviewUrl: null,
+    artifact: {
+      status: 'partial', pdfFallback: false,
+      formats: [
+        { format: 'html', status: 'prepared' },
+        { format: 'json', status: 'prepared' },
+        { format: 'csv', status: 'prepared' },
+      ],
+      limitations: [generationDiagnostic.message],
+    },
+  };
+  syncDerivedClaims(sessionArtifactAfterEnd);
+  assert.doesNotThrow(() => createAuditModel(sessionArtifactAfterEnd));
 });
 
 test('enforces observation chronology while preserving human decisions made after report generation', () => {
@@ -539,17 +1117,20 @@ test('enforces observation chronology while preserving human decisions made afte
 
 test('binds a single page status and the partial flag exactly to the session status', () => {
   for (const status of ['complete', 'partial', 'failed', 'cancelled']) {
-    const canonical = authorityConsistentSample();
-    const diagnostics = status === 'complete' ? [] : status === 'partial'
-      ? canonical.session.diagnostics
-      : [{
-        code: status === 'failed' ? 'CORE_AUDIT_FAILED' : 'NAVIGATION_FAILED',
-        message: status === 'failed'
-          ? 'O núcleo de regras não pôde concluir a auditoria.'
-          : 'A auditoria foi cancelada.',
-        at: '2026-08-26T14:00:30.000Z', recoverable: false,
-      }];
-    setSingleStatus(canonical, status, { diagnostics });
+    const canonical = status === 'failed'
+      ? singleObservedTerminalWithoutResults(
+        'failed', 'CORE_AUDIT_FAILED', 'O núcleo de regras não pôde concluir a auditoria.',
+      )
+      : authorityConsistentSample();
+    if (status !== 'failed') {
+      const diagnostics = status === 'complete' ? [] : status === 'partial'
+        ? canonical.session.diagnostics
+        : [{
+          code: 'NAVIGATION_FAILED', message: 'A auditoria foi cancelada.',
+          at: '2026-08-26T14:00:30.000Z', recoverable: false,
+        }];
+      setSingleStatus(canonical, status, { diagnostics });
+    }
     assert.doesNotThrow(() => createAuditModel(canonical));
 
     const pageDrift = structuredClone(canonical);
@@ -670,9 +1251,16 @@ test('explicitly migrates V1 into the canonical single-page V2 contract without 
     pageId: 'page-1',
     requestedUrl: 'https://example.test/path?view=public',
     finalUrl: 'https://example.test/final?view=public',
-    status: 'partial',
+      status: 'partial', attempted: true, finalUrlObserved: true,
+      axeStatus: 'not-run',
     timestamps: model.timestamps,
     viewport: { width: 1280, height: 720, deviceScaleFactor: 1 },
+    diagnostics: [{
+      code: 'DYNAMIC_PROBES_INCOMPLETE',
+      message: 'As verificações dinâmicas atingiram o tempo limite.',
+      at: '2026-08-26T14:00:30.000Z', recoverable: true,
+    }],
+    warnings: [],
   }]);
   assert.equal(Array.isArray(model.evidence), true);
   assert.equal(model.evidence[0].pageId, 'page-1');
@@ -689,7 +1277,7 @@ test('explicitly migrates V1 into the canonical single-page V2 contract without 
   assert.deepEqual(occurrence.testedWcagRefs, []);
   assert.deepEqual(occurrence.wcagRefs, occurrence.testedWcagRefs);
   assert.deepEqual(occurrence.foreignBenchmarkRefs, []);
-  assert.deepEqual(occurrence.target, { nodeId: 'n-1', selector: '#conteudo', framePath: [] });
+  assert.deepEqual(occurrence.target, { nodeId: 'n-1', selector: null, framePath: [] });
   assert.equal(occurrence.accessiblePreview, null);
   assert.deepEqual(occurrence.evidenceRefs, ['ev-1']);
   assert.equal(occurrence.legalAnalysis, null);
@@ -755,11 +1343,14 @@ test('drops every claimed V1 reproducibility hash from migration and report cons
 
 test('drops historical V1 review queues for conclusive occurrences and retains only legitimate cantTell work', () => {
   const input = reportInput();
-  const legitimateDecision = createReviewDecision({
-    auditId: input.auditId, itemId: '5.1.4', occurrenceId: 'occ-1',
-    answer: 'conforme', evaluator: 'Fiscal atual', mode: 'assisted',
-    decidedAt: '2026-08-26T14:01:20.000Z',
-  });
+  const legitimateDecision = {
+    ...createReviewDecision({
+      auditId: input.auditId, itemId: '5.1.4', occurrenceId: 'occ-1',
+      answer: 'conforme', evaluator: 'Fiscal atual', mode: 'assisted',
+      decidedAt: '2026-08-26T14:01:20.000Z',
+    }),
+    decisionId: 'decision-deadbeef',
+  };
   input.manualReview[0].status = 'answered';
   input.manualReview[0].decisionId = legitimateDecision.decisionId;
   const legitimateItem = input.itemResults.find(item => item.id === '5.1.4');
@@ -772,11 +1363,12 @@ test('drops historical V1 review queues for conclusive occurrences and retains o
   };
   const rule = input.ruleResults.find(value => value.ruleId === 'focus-visible');
   rule.outcome = 'failed';
+  rule.targets = ['n-1'];
   const reviewedItem = input.itemResults.find(item => item.id === '5.1.1');
   reviewedItem.outcome = 'failed';
   input.occurrences.push({
     occurrenceId: 'occ-conclusive', itemId: '5.1.1', ruleId: 'focus-visible',
-    outcome: 'failed', mode: 'automated', nodeId: null, evidenceIds: ['ev-1'],
+    outcome: 'failed', mode: 'automated', nodeId: 'n-1', evidenceIds: ['ev-1'],
     justification: 'Falha conclusiva registrada pela regra autoritativa.',
     source: { engine: 'audita-core', ruleId: 'focus-visible', version: '1.0.0' },
     itemWcagRefs: ['2.4.7'], sourceWcagRefs: ['2.4.7'],
@@ -804,8 +1396,10 @@ test('drops historical V1 review queues for conclusive occurrences and retains o
   const migrated = migrateAuditV1ToV2(input);
 
   assert.deepEqual(migrated.manualReview.map(entry => entry.occurrenceId), ['occ-1']);
-  assert.deepEqual(migrated.reviewDecisions.map(decision => decision.decisionId), [legitimateDecision.decisionId]);
-  assert.equal(migrated.manualReview[0].decisionId, legitimateDecision.decisionId);
+  assert.deepEqual(migrated.reviewDecisions.map(decision => decision.decisionId), ['occ-1']);
+  assert.equal(migrated.manualReview[0].decisionId, 'occ-1');
+  assert.deepEqual(migrated.itemResults.find(item => item.id === '5.1.4').review.decisionIds, ['occ-1']);
+  assert.doesNotMatch(JSON.stringify(migrated), /decision-deadbeef/u);
   assert.equal(migrated.itemResults.find(item => item.id === '5.1.4').outcome, 'passed');
   assert.equal(migrated.itemResults.find(item => item.id === '5.1.1').outcome, 'failed');
   assert.equal(Object.hasOwn(migrated.itemResults.find(item => item.id === '5.1.1'), 'review'), false);
@@ -823,8 +1417,8 @@ test('consumes legitimate V1 selector aliases into the closed canonical target',
 
   assert.deepEqual(occurrence.target, {
     nodeId: occurrence.nodeId,
-    selector: '#legacy-control',
-    framePath: ['frame:0'],
+    selector: null,
+    framePath: [],
   });
   assert.equal(Object.hasOwn(occurrence, 'selector'), false);
   assert.equal(Object.hasOwn(occurrence, 'framePath'), false);
@@ -833,8 +1427,9 @@ test('consumes legitimate V1 selector aliases into the closed canonical target',
 test('projects V1 evidence onto the closed canonical URL-bearing schema', () => {
   const input = reportInput();
   const safeDataUrl = 'data:image/png;base64,iVBORw0KGgo=';
-  input.evidence.artifacts[0] = {
-    ...input.evidence.artifacts[0],
+  const elementIndex = input.evidence.artifacts.findIndex(artifact => artifact.evidenceId === 'ev-1');
+  input.evidence.artifacts[elementIndex] = {
+    ...input.evidence.artifacts[elementIndex],
     mediaUrl: 'https://cdn.example.test/video.mp4?token=TOPSECRET&view=public',
     resourceUrl: 'https://cdn.example.test/resource?api_key=TOPSECRET&lang=pt-BR',
     dataUrl: safeDataUrl,
@@ -844,7 +1439,7 @@ test('projects V1 evidence onto the closed canonical URL-bearing schema', () => 
   };
 
   const model = migrateAuditV1ToV2(input);
-  const artifact = model.evidence[0];
+  const artifact = model.evidence.find(value => value.evidenceId === 'ev-1');
   assert.equal(artifact.mediaUrl, 'https://cdn.example.test/video.mp4?view=public');
   assert.equal(artifact.dataUrl, safeDataUrl);
   assert.equal(Object.hasOwn(artifact, 'resourceUrl'), false);
@@ -880,18 +1475,35 @@ test('createAuditModel is the explicit V1 migration boundary and accepts native 
     mode: 'batch',
     urls: [...batch.requestedScope.urls, 'https://second.example.test/'],
   };
-  batch.pages.push({
+  batch.scope = canonicalScope('batch', 2);
+  batch.pages[0].coverage = {};
+  const failedPage = {
     pageId: 'page-2',
     requestedUrl: 'https://second.example.test/',
-    finalUrl: 'https://second.example.test/final',
-    status: 'failed',
+    finalUrl: 'https://second.example.test/',
+    status: 'failed', attempted: true, finalUrlObserved: false,
+    axeStatus: 'not-run',
     timestamps: {
-      startedAt: '2026-08-26T14:02:00.000Z',
-      endedAt: '2026-08-26T14:02:01.000Z',
-      generatedAt: '2026-08-26T14:02:02.000Z',
+      startedAt: '2026-08-26T14:01:00.000Z',
+      endedAt: '2026-08-26T14:01:00.000Z',
+      generatedAt: '2026-08-26T14:01:01.000Z',
     },
     viewport: { width: null, height: null, deviceScaleFactor: null },
-  });
+    coverage: {},
+    warnings: [],
+    diagnostics: [{
+      code: 'BATCH_PAGE_FAILED', message: 'A página não pôde ser auditada.',
+      at: '2026-08-26T14:01:00.000Z', recoverable: false,
+    }],
+  };
+  batch.pages.push(failedPage);
+  batch.session.diagnostics.push(structuredClone(failedPage.diagnostics[0]));
+  for (const rule of batch.ruleResults) {
+    if (rule.source?.engine === 'audita-core') {
+      rule.summary = canonicalBatchRuleSummary(rule.outcome, 1, 2);
+    }
+  }
+  syncDerivedClaims(batch);
 
   const model = createAuditModel(batch);
   assert.equal(model.requestedScope.mode, 'batch');
@@ -945,13 +1557,13 @@ test('conclusive failed requirements and recommendations use the same catalog re
   const model = structuredClone(createAuditModel(reportInput()));
   const requirement = NBR17225_ITEMS.find(item => item.id === '5.1.1');
   const recommendation = NBR17225_ITEMS.find(item => item.id === '5.1.2');
-  const makeRule = (item, ruleId) => ({
+  const makeRule = (item, ruleId, nodeId) => ({
     ruleId, outcome: 'failed', mode: item.evaluation, nbrItems: [item.id],
     wcag: item.wcag.map(reference => reference.id),
-    targets: [], summary: 'Falha conclusiva.', limitations: [],
+    targets: [nodeId], summary: canonicalCoreRuleSummary(ruleId, 'failed'), limitations: [],
     source: { engine: 'audita-core', ruleId, version: '1.0.0' },
   });
-  const makeOccurrence = (item, ruleId, occurrenceId, outcome = 'failed') => {
+  const makeOccurrence = (item, ruleId, occurrenceId, nodeId, outcome = 'failed') => {
     const sourceWcagRefs = item.wcag.map(reference => reference.id);
     const testedWcagRefs = outcome === 'failed' ? [...sourceWcagRefs] : [];
     return ({
@@ -960,13 +1572,13 @@ test('conclusive failed requirements and recommendations use the same catalog re
     source: { engine: 'audita-core', ruleId, version: '1.0.0' },
     nbrItemRef: item.id, itemWcagRefs: [...sourceWcagRefs], sourceWcagRefs, testedWcagRefs,
     wcagRefs: [...testedWcagRefs],
-    foreignBenchmarkRefs: [...section508ReferencesForWcag(testedWcagRefs)], target: { nodeId: null, selector: null, framePath: [] },
+    foreignBenchmarkRefs: [...section508ReferencesForWcag(testedWcagRefs)], target: { nodeId, selector: null, framePath: [] },
     accessiblePreview: null, evidenceRefs: [],
     legalAnalysis: outcome === 'failed'
       ? { basisRef: CONSUMER_ACCESSIBILITY_FIXED_BASIS.id }
       : null,
-    itemId: item.id, ruleId, mode: item.evaluation, nodeId: null,
-    evidenceIds: [], justification: 'Falha conclusiva.',
+    itemId: item.id, ruleId, mode: item.evaluation, nodeId,
+    evidenceIds: [], justification: canonicalCoreRuleSummary(ruleId, outcome),
   });
   };
   model.ruleResults = model.ruleResults.filter(rule =>
@@ -977,10 +1589,10 @@ test('conclusive failed requirements and recommendations use the same catalog re
   const recommendationItem = model.itemResults.find(item => item.id === recommendation.id);
   recommendationItem.outcome = 'failed';
   recommendationItem.ruleResults = ['focus-fully-visible'];
-  model.ruleResults.push(makeRule(requirement, 'focus-visible'));
-  model.ruleResults.push(makeRule(recommendation, 'focus-fully-visible'));
-  model.occurrences.push(makeOccurrence(requirement, 'focus-visible', 'occ-requirement'));
-  model.occurrences.push(makeOccurrence(recommendation, 'focus-fully-visible', 'occ-recommendation'));
+  model.ruleResults.push(makeRule(requirement, 'focus-visible', 'n-requirement'));
+  model.ruleResults.push(makeRule(recommendation, 'focus-fully-visible', 'n-recommendation'));
+  model.occurrences.push(makeOccurrence(requirement, 'focus-visible', 'occ-requirement', 'n-requirement'));
+  model.occurrences.push(makeOccurrence(recommendation, 'focus-fully-visible', 'occ-recommendation', 'n-recommendation'));
 
   const canonical = createAuditModel(model);
   const [requirementFailure, recommendationFailure] =

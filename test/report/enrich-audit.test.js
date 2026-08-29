@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { migrateAuditV1ToV2 } from '../../src/core/report/audit-model.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { canonicalStringify } from '../../src/core/report/canonical-json.js';
@@ -32,6 +33,51 @@ function rawAudit(overrides = {}) {
   };
   return raw;
 }
+
+test('derives one factual environment diagnostic when an observed V1 viewport is wholly unavailable', async () => {
+  const expectedDerived = {
+    code: 'ENVIRONMENT_UNAVAILABLE',
+    message: 'Os metadados públicos do ambiente não puderam ser lidos.',
+    at: '2026-08-26T14:01:00.000Z',
+    recoverable: true,
+  };
+  const withoutDiagnostic = rawAudit({
+    timezone: 'America/Cuiaba',
+    versions: { extension: '0.1.0', rules: '1.0.0', browser: 'Chrome/147.0.0.0' },
+  });
+  const migrated = migrateAuditV1ToV2(withoutDiagnostic);
+
+  assert.deepEqual(
+    migrated.pages[0].diagnostics.filter(entry => entry.code === 'ENVIRONMENT_UNAVAILABLE'),
+    [expectedDerived],
+  );
+  assert.deepEqual(
+    migrated.session.diagnostics.filter(entry => entry.code === 'ENVIRONMENT_UNAVAILABLE'),
+    [expectedDerived],
+  );
+
+  const recordedAt = '2026-08-26T14:00:20.000Z';
+  const withDiagnostic = structuredClone(withoutDiagnostic);
+  withDiagnostic.session.diagnostics.push({ ...expectedDerived, at: recordedAt });
+  const preserved = migrateAuditV1ToV2(withDiagnostic);
+  assert.deepEqual(
+    preserved.pages[0].diagnostics.filter(entry => entry.code === 'ENVIRONMENT_UNAVAILABLE'),
+    [{ ...expectedDerived, at: recordedAt }],
+  );
+
+  const enriched = await enrichAuditForReport(withoutDiagnostic, {
+    now: () => '2026-08-26T15:00:00.000Z',
+    timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0',
+    rulesVersion: '1.0.0',
+    browserVersion: 'Chrome/147.0.0.0',
+  });
+  assert.deepEqual(
+    enriched.pages[0].diagnostics.filter(entry => entry.code === 'ENVIRONMENT_UNAVAILABLE'),
+    [expectedDerived],
+  );
+  assert.match(renderHtmlReport(enriched), /ENVIRONMENT_UNAVAILABLE/u);
+});
 
 test('enriches a raw partial audit without inventing unavailable viewport data', async () => {
   const input = rawAudit();
@@ -123,16 +169,29 @@ test('recomputes reproducibility hashes only from the canonical migrated report 
 
 test('preserves failed and cancelled outcomes while deriving explicit limitations', async () => {
   for (const status of ['failed', 'cancelled']) {
-    const input = rawAudit({ session: {
-      status, partial: false,
-      diagnostics: [{
-        code: status === 'failed' ? 'CORE_AUDIT_FAILED' : 'NAVIGATION_FAILED',
-        message: status === 'failed'
-          ? 'O núcleo de regras não pôde concluir a auditoria.'
-          : 'A auditoria foi cancelada.',
-        at: '2026-08-26T14:00:30.000Z', recoverable: false,
-      }],
-    } });
+    const base = rawAudit();
+    const input = rawAudit({
+      finalUrl: status === 'cancelled' ? base.requestedUrl : base.finalUrl,
+      session: {
+        status, partial: false,
+        diagnostics: [{
+          code: status === 'failed' ? 'CORE_AUDIT_FAILED' : 'NAVIGATION_FAILED',
+          message: status === 'failed'
+            ? 'O núcleo de regras não pôde concluir a auditoria.'
+            : 'A auditoria foi cancelada.',
+          at: '2026-08-26T14:00:30.000Z', recoverable: false,
+        }],
+      },
+      ruleResults: [],
+      itemResults: base.itemResults.map(item => ({ ...item, outcome: 'cantTell', ruleResults: [] })),
+      occurrences: [],
+      evidence: status === 'failed'
+        ? { stateCount: 1, artifacts: base.evidence.artifacts.filter(artifact => artifact.kind === 'full-page') }
+        : { stateCount: 0, artifacts: [] },
+      manualReview: [],
+      reviewDecisions: [],
+      ...(status === 'failed' ? {} : { snapshot: null }),
+    });
     const model = await enrichAuditForReport(input, {
       now: () => '2026-08-26T15:00:00.000Z', timezone: 'America/Cuiaba',
       manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'não disponível',

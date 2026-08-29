@@ -33,12 +33,14 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const STRUCTURAL_SELECTOR = /^(?:[a-z][a-z0-9-]{0,63})(?::nth-of-type\([1-9]\d*\))?(?:(?: > | >>> )[a-z][a-z0-9-]{0,63}(?::nth-of-type\([1-9]\d*\))?)*$/u;
 const MAP_KEYS = Object.freeze(['evidenceId', 'pageId', 'kind', 'state', 'fullPageEvidenceId', 'derivation', 'status', 'segments', 'legend', 'counts', 'limits', 'limitations', 'hash']);
+const OMITTED_MAP_KEYS = Object.freeze([...MAP_KEYS, 'pixelState', 'pixelContentHash']);
 const DERIVATION_KEYS = Object.freeze(['type', 'algorithm', 'version', 'sourceEvidenceId', 'sourceHash', 'geometrySnapshotHash', 'geometry']);
 const GEOMETRY_KEYS = Object.freeze(['coordinateSpace', 'sourceCssSize', 'sourcePixelSize', 'scaleX', 'scaleY', 'deviceScaleFactor', 'annotations']);
 const SIZE_KEYS = Object.freeze(['width', 'height']);
 const ANNOTATION_KEYS = Object.freeze(['number', 'nodeId', 'sourceRect', 'marker', 'segmentIndex']);
 const MARKER_KEYS = Object.freeze(['x', 'y', 'size', 'leaderX', 'leaderY']);
 const SEGMENT_KEYS = Object.freeze(['segmentId', 'index', 'count', 'role', 'sourceCssClip', 'width', 'height', 'dataUrl', 'contentHash']);
+const OMITTED_SEGMENT_KEYS = Object.freeze(SEGMENT_KEYS.filter(key => key !== 'dataUrl'));
 const LEGEND_KEYS = Object.freeze(['number', 'nodeId', 'selectorSummary', 'announcementPreview', 'nameSource', 'segmentIndex']);
 const COUNT_KEYS = Object.freeze(['eligible', 'annotated', 'omittedNoRect', 'omittedFrame', 'omittedLimit', 'unresolvedOverlap']);
 const LIMIT_KEYS = Object.freeze(['maxNodes', 'maxSourcePixels', 'maxDimension', 'maxCanvasPixels', 'maxSegments', 'maxDerivedBytes', 'maxLegendCodePoints']);
@@ -138,7 +140,10 @@ export async function hashAnnotationMapGeometry(geometry) {
 }
 
 export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {}) {
-  if (!exactKeys(artifact, MAP_KEYS) || artifact.kind !== 'announcement-map' || artifact.state !== 'derived') {
+  const pixelsOmitted = artifact?.pixelState === 'omitted-budget';
+  if (!exactKeys(artifact, pixelsOmitted ? OMITTED_MAP_KEYS : MAP_KEYS) ||
+    (pixelsOmitted && !SHA256.test(artifact.pixelContentHash)) ||
+    artifact.kind !== 'announcement-map' || artifact.state !== 'derived') {
     throw new TypeError('Esquema do mapa de anúncios inválido.');
   }
   canonicalId(artifact.evidenceId, 'evidenceId do mapa');
@@ -156,7 +161,9 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
   if (sourceArtifact) {
     if (sourceArtifact.kind !== 'full-page' || sourceArtifact.state !== 'pristine' ||
       sourceArtifact.evidenceId !== artifact.fullPageEvidenceId || sourceArtifact.pageId !== artifact.pageId ||
-      sourceArtifact.hash !== artifact.derivation.sourceHash) {
+      (sourceArtifact.pixelState === 'omitted-budget'
+        ? sourceArtifact.pixelContentHash
+        : sourceArtifact.hash) !== artifact.derivation.sourceHash) {
       throw new TypeError('Origem pristine do mapa inválida ou pertence a outra página.');
     }
   }
@@ -172,7 +179,8 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
   let declaredDerivedBytes = 0;
   for (const segment of artifact.segments) {
     let byteLength;
-    try { byteLength = pngDataUrlDecodedByteLength(segment?.dataUrl); } catch { throw new TypeError('Data URL PNG de segmento inválido.'); }
+    if (pixelsOmitted) byteLength = 0;
+    else try { byteLength = pngDataUrlDecodedByteLength(segment?.dataUrl); } catch { throw new TypeError('Data URL PNG de segmento inválido.'); }
     declaredDerivedBytes += byteLength;
     if (!Number.isSafeInteger(declaredDerivedBytes) || declaredDerivedBytes > ANNOTATION_MAP_LIMITS.maxDerivedBytes) {
       throw new TypeError('Bytes derivados do mapa excedem o limite antes da decodificação.');
@@ -183,7 +191,8 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
   let expectedClipY = 0;
   for (const [offset, segment] of artifact.segments.entries()) {
     const index = offset + 1;
-    if (!exactKeys(segment, SEGMENT_KEYS) || segment.index !== index || segment.count !== artifact.segments.length ||
+    if (!exactKeys(segment, pixelsOmitted ? OMITTED_SEGMENT_KEYS : SEGMENT_KEYS) ||
+      segment.index !== index || segment.count !== artifact.segments.length ||
       segment.segmentId !== `${artifact.evidenceId}-segment-${index}` || segmentIds.has(segment.segmentId) ||
       !['image-and-legend', 'legend-continuation'].includes(segment.role) || !SHA256.test(segment.contentHash)) {
       throw new TypeError(`Segmento ${index} do mapa inválido.`);
@@ -202,14 +211,17 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
       sawContinuation = true;
       if (segment.sourceCssClip !== null) throw new TypeError(`Segmento ${index} de continuação não pode declarar recorte.`);
     }
-    const remainingBytes = ANNOTATION_MAP_LIMITS.maxDerivedBytes - derivedBytes;
-    if (remainingBytes < 57) throw new TypeError('Bytes derivados do mapa excedem o limite.');
-    const png = decodePngDataUrl(segment.dataUrl, {
-      maxBytes: remainingBytes,
-      maxDimension: ANNOTATION_MAP_LIMITS.maxDimension,
-      maxPixels: ANNOTATION_MAP_LIMITS.maxCanvasPixels,
-    });
-    if (segment.width !== png.width || segment.height !== png.height ||
+    let png = null;
+    if (!pixelsOmitted) {
+      const remainingBytes = ANNOTATION_MAP_LIMITS.maxDerivedBytes - derivedBytes;
+      if (remainingBytes < 57) throw new TypeError('Bytes derivados do mapa excedem o limite.');
+      png = decodePngDataUrl(segment.dataUrl, {
+        maxBytes: remainingBytes,
+        maxDimension: ANNOTATION_MAP_LIMITS.maxDimension,
+        maxPixels: ANNOTATION_MAP_LIMITS.maxCanvasPixels,
+      });
+    }
+    if ((!pixelsOmitted && (segment.width !== png.width || segment.height !== png.height)) ||
       segment.width !== artifact.derivation.geometry.sourcePixelSize.width) {
       throw new TypeError(`Dimensões do segmento ${index} divergem do PNG ou da origem.`);
     }
@@ -226,7 +238,7 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
     if (segment.height > Math.max(1, Math.floor(segment.width * ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO))) {
       throw new TypeError(`Proporção imprimível do segmento ${index} excede o limite do algoritmo.`);
     }
-    derivedBytes += png.bytes.length;
+    if (png) derivedBytes += png.bytes.length;
   }
   if (imageSegmentCount > 0 && !nearlyEqual(expectedClipY, artifact.derivation.geometry.sourceCssSize.height)) {
     throw new TypeError('Recortes do mapa não cobrem a altura canônica da origem.');
@@ -311,7 +323,7 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
 
 export async function hashAnnotationMapArtifact(artifact, { sourceArtifact } = {}) {
   validateAnnotationMapArtifact(artifact, { sourceArtifact });
-  if (sourceArtifact) {
+  if (sourceArtifact && sourceArtifact.pixelState !== 'omitted-budget') {
     const source = decodePngDataUrl(sourceArtifact.dataUrl, {
       maxBytes: ANNOTATION_MAP_LIMITS.maxDerivedBytes,
       maxDimension: ANNOTATION_MAP_LIMITS.maxDimension,
@@ -332,18 +344,21 @@ export async function hashAnnotationMapArtifact(artifact, { sourceArtifact } = {
   if (geometrySnapshotHash !== artifact.derivation.geometrySnapshotHash) throw new TypeError('Hash da geometria do mapa inválido.');
   const segments = [];
   for (const segment of artifact.segments) {
-    const png = decodePngDataUrl(segment.dataUrl, {
-      maxBytes: ANNOTATION_MAP_LIMITS.maxDerivedBytes,
-      maxDimension: ANNOTATION_MAP_LIMITS.maxDimension,
-      maxPixels: ANNOTATION_MAP_LIMITS.maxCanvasPixels,
-    });
-    await validatePngRasterData(png.bytes, {
-      maxBytes: ANNOTATION_MAP_LIMITS.maxDerivedBytes,
-      maxDimension: ANNOTATION_MAP_LIMITS.maxDimension,
-      maxPixels: ANNOTATION_MAP_LIMITS.maxCanvasPixels,
-    });
-    const contentHash = await sha256Hex(png.bytes);
-    if (contentHash !== segment.contentHash) throw new TypeError('Hash de segmento do mapa inválido.');
+    let contentHash = segment.contentHash;
+    if (artifact.pixelState !== 'omitted-budget') {
+      const png = decodePngDataUrl(segment.dataUrl, {
+        maxBytes: ANNOTATION_MAP_LIMITS.maxDerivedBytes,
+        maxDimension: ANNOTATION_MAP_LIMITS.maxDimension,
+        maxPixels: ANNOTATION_MAP_LIMITS.maxCanvasPixels,
+      });
+      await validatePngRasterData(png.bytes, {
+        maxBytes: ANNOTATION_MAP_LIMITS.maxDerivedBytes,
+        maxDimension: ANNOTATION_MAP_LIMITS.maxDimension,
+        maxPixels: ANNOTATION_MAP_LIMITS.maxCanvasPixels,
+      });
+      contentHash = await sha256Hex(png.bytes);
+      if (contentHash !== segment.contentHash) throw new TypeError('Hash de segmento do mapa inválido.');
+    }
     segments.push({
       segmentId: segment.segmentId, index: segment.index, count: segment.count, role: segment.role,
       sourceCssClip: segment.sourceCssClip, width: segment.width, height: segment.height, contentHash,

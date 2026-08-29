@@ -16,6 +16,34 @@ import { canonicalStringify } from './canonical-json.js';
 import { projectClosedAuditShape } from './closed-schema.js';
 import { auditModelInputError, captureAuditInput } from './audit-input.js';
 import { REPORT_HASH_BASE } from './integrity-chain.js';
+import {
+  canonicalizeLegacyCoverage,
+  canonicalizeLegacyWarnings,
+  validateCoverageSummary,
+  validateSnapshotSummary,
+  validateStructuralWarnings,
+} from './observation-policy.js';
+import { validateReportState } from './report-policy.js';
+import {
+  canonicalCoreRemediation,
+  validateCoreRuleTargetInventory,
+} from './remediation-policy.js';
+import {
+  boundedRetainedText,
+  canonicalBatchRuleSummary,
+  canonicalCoreRuleLimitations,
+  canonicalCoreRuleSummary,
+  canonicalEvaluatorSummary,
+  canonicalReviewQuestion,
+  canonicalScope,
+  derivePageLimitations,
+  deriveSystemLimitations,
+  filterCanonicalSystemLimitations,
+  isCanonicalBatchRuleSummary,
+  isCanonicalScope,
+  isCanonicalSystemLimitation,
+} from './text-policy.js';
+import { diagnosticPolicyEntry, SYSTEM_DIAGNOSTIC_POLICY } from './diagnostic-policy.js';
 import { validateNormalizedAxeSupplemental } from '../axe/validate-supplemental.js';
 import { aggregateItems } from '../rules/aggregate-items.js';
 import { unknownAccessibilityWidgetInventory } from '../detection/accessibility-widgets.js';
@@ -28,6 +56,18 @@ import {
 } from '../provenance.js';
 
 const SESSION_STATUSES = new Set(['complete', 'partial', 'failed', 'cancelled']);
+const PAGE_EXECUTION_STATE_MATRIX = Object.freeze({
+  'false:false': Object.freeze({
+    statuses: Object.freeze(['failed', 'cancelled']), finalUrl: 'requested', duration: 'zero', observedFacts: false,
+  }),
+  'true:false': Object.freeze({
+    statuses: Object.freeze(['failed', 'cancelled']), finalUrl: 'requested', duration: 'elapsed-or-zero', observedFacts: false,
+  }),
+  'true:true': Object.freeze({
+    statuses: Object.freeze(['complete', 'partial', 'failed', 'cancelled']), finalUrl: 'observed',
+    duration: 'elapsed-or-zero', observedFacts: true,
+  }),
+});
 const REVIEW_STATUSES = new Set(['unanswered', 'answered']);
 const METHODOLOGY_NAME = 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2';
 const EXPECTED_RULE_COUNT = 130;
@@ -39,15 +79,6 @@ const CORE_RULE_METADATA = new Map(NBR17225_ITEMS.flatMap(item => item.ruleIds.m
   wcag: Object.freeze(item.wcag.map(reference => reference.id)),
 })])));
 const EXPECTED_CORE_RULE_IDS = Object.freeze([...CORE_RULE_METADATA.keys()]);
-const INCOMPLETE_CORE_DIAGNOSTICS = Object.freeze({
-  failed: new Set([
-    'NAVIGATION_FAILED', 'COLLECTION_FAILED', 'CORE_AUDIT_FAILED',
-    'BATCH_PAGE_FAILED', 'BATCH_PAGE_TIMEOUT', 'BATCH_PAGE_MODEL_INVALID',
-    'BATCH_PAGE_CLEANUP_UNCONFIRMED', 'BATCH_NOT_STARTED_CLEANUP_UNCONFIRMED',
-  ]),
-  cancelled: new Set(['NAVIGATION_FAILED', 'BATCH_CANCELLED']),
-});
-
 export const V1_MIGRATION_DEFAULTS = Object.freeze({
   pageId: 'page-1',
   impact: 'minor',
@@ -80,19 +111,19 @@ function createAuditModelInternal(captured) {
   validatePrimaryPageCompatibility(model);
   reportUrl(model.requestedUrl, 'requestedUrl');
   reportUrl(model.finalUrl, 'finalUrl');
-  validateTimestamps(model.timestamps);
   requiredText(model.timezone, 'timezone');
   validateVersions(model.versions);
   validateMethodology(model.methodology, model.versions, model.reproducibility);
   validateEnvironment(model.environment);
-  validateScope(model.scope);
+  validateScope(model.scope, model.requestedScope.mode, model.pages.length);
   validateSession(model.session);
-  validateTerminalDiagnostics(model);
   validateSinglePageSessionStatus(model);
   validateBatchSessionStatus(model);
   validateAxeCoverageStatus(model, validatedAxe);
-  validateProgress(model.progress, model.auditId);
-  validateLimitations(model.limitations);
+  validateLimitations(model.limitations, 'limitations');
+  if (model.report?.artifact?.limitations !== undefined) {
+    validateLimitations(model.report.artifact.limitations, 'report.artifact.limitations');
+  }
   validateAccessibilityWidgets(model.accessibilityWidgets);
   validateIntegrity(model.integrity);
   model.itemResults = validateItems(model.itemResults);
@@ -100,6 +131,7 @@ function createAuditModelInternal(captured) {
     model.ruleResults,
     new Map(model.itemResults.map(item => [item.id, item])),
     model.versions.rules,
+    { scopeMode: model.requestedScope.mode, pageCount: model.pages.length },
   );
   validateRuleInventory(model, ruleById);
   if (Array.isArray(model.evidence)) {
@@ -112,7 +144,10 @@ function createAuditModelInternal(captured) {
     });
   }
   const graph = validateEvidenceAndOccurrences(model, ruleById, pageById, model.requestedScope.mode);
-  validateUnattemptedPages(model);
+  validateExecutionStateMachine(model);
+  validateReportState(model);
+  validateDerivedLimitations(model);
+  validateProgress(model.progress, model.auditId, model.timestamps);
   validateSinglePageCoreOccurrenceCompleteness(model, ruleById);
   validateAxeEvidenceBinding(model, validatedAxe);
   const reviewGraph = validateReview(model, graph);
@@ -153,6 +188,15 @@ export function migrateAuditV1ToV2(input) {
 function migrateV1Record(model) {
   const validatedAxe = assertAxeSupplementalIntegrity(model, model.versions?.rules ?? model.methodology?.version);
   const pageId = V1_MIGRATION_DEFAULTS.pageId;
+  const originalOccurrenceOutcomeById = new Map((model.occurrences ?? [])
+    .map(occurrence => [occurrence?.occurrenceId, occurrence?.outcome]));
+  const originallyConclusiveOccurrenceIds = new Set([...originalOccurrenceOutcomeById]
+    .filter(([, outcome]) => outcome !== 'cantTell')
+    .map(([occurrenceId]) => occurrenceId));
+  const discardedOriginalManualOccurrenceIds = new Set((model.occurrences ?? [])
+    .filter(occurrence => occurrence?.outcome !== 'cantTell' &&
+      (occurrence?.ruleId === null || occurrence?.source?.engine === V1_MIGRATION_DEFAULTS.manualSourceEngine))
+    .map(occurrence => occurrence.occurrenceId));
   const requestedUrl = sanitizeResourceUrl(model.requestedUrl);
   const finalUrl = sanitizeResourceUrl(model.finalUrl);
   const itemById = new Map(NBR17225_ITEMS.map(item => [item.id, item]));
@@ -176,16 +220,22 @@ function migrateV1Record(model) {
     const unsupportedPass = rule.outcome === 'passed' &&
       (nbrItems.some(itemId => !itemById.get(itemId)?.ruleIds.includes(rule.ruleId)) ||
         !hasCorePassProvenance(source, rule.ruleId, sourceVersion));
-    const output = projectRuleResult(rule);
+    const output = projectRuleResult(rule, source.engine);
     output.outcome = unsupportedPass || downgradedRuleIds.has(rule.ruleId) ? 'cantTell' : rule.outcome;
     output.nbrItems = nbrItems;
     output.wcag = Array.isArray(rule.wcag) ? [...rule.wcag] : registered ? [...registered.wcag] : [];
     output.source = source;
+    if (source.engine === V1_MIGRATION_DEFAULTS.sourceEngine) {
+      output.summary = canonicalCoreRuleSummary(rule.ruleId, output.outcome);
+      output.limitations = [...canonicalCoreRuleLimitations(output.outcome)];
+    }
     return output;
   });
   const ruleById = new Map(ruleResults.map(rule => [rule.ruleId, rule]));
   const projectedItemResults = (model.itemResults ?? []).map(projectItemResult);
-  const occurrences = (model.occurrences ?? []).map(occurrence => {
+  const occurrences = (model.occurrences ?? [])
+    .filter(occurrence => !discardedOriginalManualOccurrenceIds.has(occurrence.occurrenceId))
+    .map(occurrence => {
     const legacySelector = occurrence.selector;
     const legacyFramePath = occurrence.framePath;
     const item = itemById.get(occurrence.itemId);
@@ -248,16 +298,25 @@ function migrateV1Record(model) {
     output.testedWcagRefs = testedWcagRefs;
     output.wcagRefs = [...testedWcagRefs];
     output.foreignBenchmarkRefs = [...section508ReferencesForWcag(testedWcagRefs)];
-    output.target = {
+    output.target = source.engine === 'axe-core' ? {
       nodeId: occurrence.target?.nodeId ?? occurrence.nodeId ?? null,
       selector: occurrence.target?.selector ?? legacySelector ?? targetEvidence?.selector?.css ?? null,
       framePath: [...(occurrence.target?.framePath ?? legacyFramePath ?? targetEvidence?.selector?.framePath ?? [])],
+    } : {
+      nodeId: occurrence.target?.nodeId ?? occurrence.nodeId ?? null,
+      selector: null,
+      framePath: [],
     };
     output.accessiblePreview = source.engine === 'axe-core'
       ? null
       : occurrence.accessiblePreview ?? targetEvidence?.accessibility?.announcementPreview ?? null;
     output.evidenceRefs = evidenceRefs;
     output.legalAnalysis = legalBasis ? { basisRef: legalBasis.id } : null;
+    if (source.engine === V1_MIGRATION_DEFAULTS.sourceEngine) {
+      output.justification = canonicalCoreRuleSummary(ruleId, outcome);
+    } else if (source.engine === V1_MIGRATION_DEFAULTS.manualSourceEngine) {
+      output.justification = item?.humanReason;
+    }
     if (source.engine === 'axe-core') {
       output.selector = legacySelector ?? output.target.selector;
       output.framePath = [...(legacyFramePath ?? output.target.framePath)];
@@ -272,18 +331,28 @@ function migrateV1Record(model) {
   const migratedItemResults = deriveMigratedItemResults(
     projectedItemResults, ruleResults, validatedAxe, downgradedRuleIds,
   );
-  const conclusiveOccurrenceIds = new Set(occurrences
-    .filter(occurrence => occurrence.outcome !== 'cantTell')
-    .map(occurrence => occurrence.occurrenceId));
+  const migratedOccurrenceById = new Map(occurrences.map(occurrence => [occurrence.occurrenceId, occurrence]));
   const manualReview = projectManualReview(model.manualReview ?? [])
-    .filter(entry => !conclusiveOccurrenceIds.has(entry.occurrenceId));
+    .filter(entry => !originallyConclusiveOccurrenceIds.has(entry.occurrenceId))
+    .map(entry => {
+      const occurrence = migratedOccurrenceById.get(entry.occurrenceId);
+      const item = itemById.get(occurrence?.itemId ?? entry.itemId);
+      return {
+        ...entry,
+        question: canonicalReviewQuestion(item),
+        reason: occurrence?.justification,
+        ...(entry.decisionId === undefined ? {} : { decisionId: entry.occurrenceId }),
+      };
+    });
   const reviewDecisions = projectReviewDecisions(model.reviewDecisions ?? [])
-    .filter(decision => !conclusiveOccurrenceIds.has(decision.occurrenceId));
+    .filter(decision => !originallyConclusiveOccurrenceIds.has(decision.occurrenceId))
+    .map(decision => ({ ...decision, decisionId: decision.occurrenceId }));
   const queuedOccurrenceIds = new Set(manualReview.map(entry => entry.occurrenceId));
   for (const occurrence of occurrences) {
     const migratedManual = occurrence.source.engine === V1_MIGRATION_DEFAULTS.manualSourceEngine;
     const sourceRule = ruleById.get(occurrence.source.ruleId);
-    const reviewableCantTell = occurrence.outcome === 'cantTell' && (migratedManual ||
+    const reviewableCantTell = originalOccurrenceOutcomeById.get(occurrence.occurrenceId) === 'cantTell' &&
+      occurrence.outcome === 'cantTell' && (migratedManual ||
       downgradedRuleIds.has(occurrence.ruleId) ||
       (occurrence.source.engine === V1_MIGRATION_DEFAULTS.sourceEngine && sourceRule?.mode !== 'automated'));
     if (!reviewableCantTell || queuedOccurrenceIds.has(occurrence.occurrenceId)) continue;
@@ -291,12 +360,8 @@ function migrateV1Record(model) {
     manualReview.push({
       occurrenceId: occurrence.occurrenceId, itemId: occurrence.itemId, ruleId: occurrence.ruleId,
       mode: occurrence.mode === 'manual' ? 'manual' : 'assisted', status: 'unanswered',
-      question: `O item “${item?.title ?? occurrence.itemId}” está conforme no contexto observado?`,
-      reason: migratedManual
-        ? 'A ocorrência V1 depende de uma decisão humana explícita.'
-        : downgradedRuleIds.has(occurrence.ruleId)
-          ? 'A evidência V1 não registra cobertura normativa autoritativa completa.'
-          : 'A ocorrência V1 inconclusiva depende de uma decisão humana explícita.',
+      question: canonicalReviewQuestion(item),
+      reason: occurrence.justification,
     });
     queuedOccurrenceIds.add(occurrence.occurrenceId);
   }
@@ -305,32 +370,68 @@ function migrateV1Record(model) {
     migratedItemResults, ruleResults, occurrences, reviewDecisions, validatedAxe,
   );
   const timestamps = projectTimestamps(model.timestamps);
+  const session = projectSession(model.session);
   const viewport = projectViewport(model.environment?.viewport);
+  const inferredExecution = inferV1Execution(model, { requestedUrl, finalUrl, viewport, evidenceInput });
+  const attempted = optionalV1Boolean(model, 'attempted', inferredExecution.attempted);
+  const finalUrlObserved = optionalV1Boolean(
+    model, 'finalUrlObserved', attempted && inferredExecution.finalUrlObserved,
+  );
+  if (!attempted && finalUrlObserved) throw new TypeError('Página V1 não iniciada não pode alegar URL final observada.');
+  if (finalUrlObserved && Object.values(viewport).every(value => value === null) &&
+    !session.diagnostics.some(diagnostic => diagnostic.code === 'ENVIRONMENT_UNAVAILABLE')) {
+    if (session.status === 'complete') {
+      session.status = 'partial';
+      session.partial = true;
+    }
+    const diagnostic = {
+      code: 'ENVIRONMENT_UNAVAILABLE',
+      message: 'Os metadados públicos do ambiente não puderam ser lidos.',
+      at: timestamps.endedAt,
+      recoverable: true,
+    };
+    const terminalIndex = session.diagnostics.findIndex(entry => entry.recoverable === false);
+    if (terminalIndex === -1) session.diagnostics.push(diagnostic);
+    else session.diagnostics.splice(terminalIndex, 0, diagnostic);
+  }
+  let pageTimestamps = timestamps;
+  if (!attempted) {
+    const terminal = session.diagnostics.find(diagnostic => diagnostic.recoverable === false &&
+      terminalFatalDiagnostic(diagnostic)?.statuses.includes(session.status));
+    const at = terminal?.at ?? timestamps.endedAt;
+    pageTimestamps = { startedAt: at, endedAt: at, generatedAt: timestamps.generatedAt };
+  }
   const evidenceStateCount = Array.isArray(model.evidence)
     ? model.evidenceStateCount ?? 0
     : model.evidence?.stateCount ?? 0;
+  const snapshotSummary = model.snapshot !== undefined && model.snapshot !== null
+    ? summarizeV1Snapshot(model.snapshot)
+    : undefined;
   const output = {
     schemaVersion: 2,
     auditId: model.auditId,
     requestedScope: { mode: 'single', urls: [requestedUrl] },
     pages: [{
       pageId, requestedUrl, finalUrl,
-      status: model.session?.status,
-      timestamps, viewport,
+      status: session.status, attempted, finalUrlObserved,
+      timestamps: pageTimestamps, viewport,
+      diagnostics: session.diagnostics,
+      axeStatus: finalUrlObserved ? model.axe?.status ?? 'not-run' : 'not-run',
+      warnings: structuredClone(snapshotSummary?.warnings ?? []),
     }],
     requestedUrl, finalUrl, timestamps,
     timezone: model.timezone,
     versions: projectVersions(model.versions),
     environment: { chromeVersion: model.environment?.chromeVersion, viewport },
-    scope: projectScope(model.scope),
+    scope: canonicalScope('single', 1),
     methodology: {
       name: model.methodology?.name, version: model.methodology?.version,
       coreRuleCount: EXPECTED_RULE_COUNT,
       supplementalRuleCount,
       ruleCount: ruleResults.length, itemCount: model.methodology?.itemCount,
     },
-    session: projectSession(model.session),
-    limitations: projectStringArray(model.limitations),
+    session,
+    limitations: filterCanonicalSystemLimitations(model.limitations),
     ruleResults, itemResults, occurrences, evidence,
     evidenceStateCount,
     manualReview,
@@ -346,9 +447,12 @@ function migrateV1Record(model) {
     normative: migrateV1NormativeRecord(model.normative),
     integrity: { algorithm: 'unavailable', status: 'not-recorded-v1' },
   };
-  if (model.snapshot !== undefined && model.snapshot !== null) output.snapshot = summarizeV1Snapshot(model.snapshot);
+  if (snapshotSummary !== undefined) output.snapshot = snapshotSummary;
   output.accessibilityWidgets = projectAccessibilityWidgets(model.accessibilityWidgets ?? unknownAccessibilityWidgetInventory());
-  if (model.axe !== undefined) output.axe = projectV1Axe(model.axe, ruleResults, occurrences);
+  if (finalUrlObserved && model.axe !== undefined) output.axe = projectV1Axe(model.axe, ruleResults, occurrences);
+  output.limitations = deriveSystemLimitations(output);
+  const pageLimitations = derivePageLimitations(output, output.pages[0]);
+  if (pageLimitations.length > 0) output.pages[0].limitations = pageLimitations;
   return output;
 }
 
@@ -401,25 +505,31 @@ function projectV1Evidence(artifact, pageId) {
   return sanitizeEvidenceArtifactUrls(output);
 }
 
-function projectRuleResult(rule) {
+function projectRuleResult(rule, engine = rule?.source?.engine) {
   const output = projectRecord(rule, [
     'ruleId', 'outcome', 'mode', 'classification', 'impact', 'confidence', 'engineRuleId',
     'summary', 'limitations',
   ]);
-  output.targets = (rule.targets ?? []).map(projectRuleTarget);
+  output.targets = (rule.targets ?? []).map(target => projectRuleTarget(target, engine, rule.ruleId));
   output.nbrItems = [...(rule.nbrItems ?? [])];
   output.wcag = [...(rule.wcag ?? [])];
   return output;
 }
 
-function projectRuleTarget(target) {
+function projectRuleTarget(target, engine, ruleId) {
   if (target === null || typeof target === 'string' || Number.isSafeInteger(target)) return target;
-  const output = projectRecord(target, ['nodeId', 'selectorHint', 'message', 'selector', 'framePath']);
+  const output = engine === V1_MIGRATION_DEFAULTS.sourceEngine
+    ? projectRecord(target, ['nodeId'])
+    : projectRecord(target, ['nodeId', 'selectorHint', 'message', 'selector', 'framePath']);
   if (target.data !== undefined) output.data = projectRecord(target.data, [
-    'attribute', 'behavior', 'coverageKey', 'declaredPurpose', 'durationSeconds', 'flashesPerSecond',
+    'attribute', 'behavior', 'contextObservation', 'coverageKey', 'declaredPurpose', 'durationSeconds', 'flashesPerSecond',
     'height', 'itemId', 'iterationCount', 'largeText', 'level', 'previousLevel', 'ratio', 'reason',
     'role', 'states', 'threshold', 'totalDurationSeconds', 'width',
   ]);
+  if (engine === V1_MIGRATION_DEFAULTS.sourceEngine && output.data !== undefined) {
+    const message = canonicalCoreRemediation(ruleId, output.data);
+    if (message !== null) output.message = message;
+  }
   return output;
 }
 
@@ -510,15 +620,54 @@ function projectVersions(value) {
   return { extension: value?.extension, rules: value?.rules, browser: value?.browser };
 }
 
-function projectScope(value) {
-  return { kind: value?.kind, description: value?.description };
+function projectSession(value) {
+  const status = value?.status;
+  return {
+    status,
+    diagnostics: (value?.diagnostics ?? [])
+      .map(entry => projectDiagnostic(entry))
+      .filter(entry => legacyDiagnosticPolicyEntry(entry, status)),
+    partial: value?.partial,
+  };
 }
 
-function projectSession(value) {
+function projectDiagnostic(entry) {
+  const output = projectRecord(entry, ['at', 'code', 'message', 'recoverable']);
+  const occurrenceId = entry?.details?.occurrenceId ?? entry?.occurrenceId;
+  if (typeof occurrenceId === 'string') output.details = { occurrenceId };
+  return output;
+}
+
+function legacyDiagnosticPolicyEntry(diagnostic, status) {
+  return SYSTEM_DIAGNOSTIC_POLICY.find(entry =>
+    entry.roles.includes('page') && entry.modes.includes('single') && entry.statuses.includes(status) &&
+    entry.code === diagnostic?.code && entry.message === diagnostic?.message &&
+    entry.recoverable === diagnostic?.recoverable) ?? null;
+}
+
+function optionalV1Boolean(model, key, fallback) {
+  if (!Object.hasOwn(model, key)) return fallback;
+  if (typeof model[key] !== 'boolean') throw new TypeError(`Campo V1 ${key} deve ser booleano.`);
+  return model[key];
+}
+
+function inferV1Execution(model, { requestedUrl, finalUrl, viewport, evidenceInput }) {
+  const evidenceStateCount = Array.isArray(model.evidence)
+    ? model.evidenceStateCount ?? model.reproducibility?.capturedStateCount ?? 0
+    : model.evidence?.stateCount ?? 0;
+  const postOpeningProgress = (model.progress ?? []).some(entry => entry?.phase !== 'opening');
+  const postNavigationDiagnostic = (model.session?.diagnostics ?? []).some(diagnostic =>
+    !['NAVIGATION_FAILED', 'TAB_CLOSE_FAILED'].includes(diagnostic?.code));
+  const axeObserved = model.axe !== undefined && model.axe !== null && model.axe.status !== 'disabled';
+  const observationFacts = model.snapshot !== undefined && model.snapshot !== null ||
+    (model.ruleResults?.length ?? 0) > 0 || (model.occurrences?.length ?? 0) > 0 ||
+    evidenceInput.length > 0 || evidenceStateCount > 0 ||
+    Object.values(viewport).some(value => value !== null) ||
+    hasPositiveWidgetObservation(model.accessibilityWidgets) || axeObserved ||
+    postNavigationDiagnostic || finalUrl !== requestedUrl;
   return {
-    status: value?.status,
-    diagnostics: (value?.diagnostics ?? []).map(entry => projectRecord(entry, ['at', 'code', 'message', 'recoverable'])),
-    partial: value?.partial,
+    attempted: observationFacts || postOpeningProgress,
+    finalUrlObserved: observationFacts,
   };
 }
 
@@ -531,7 +680,7 @@ function projectReport(value) {
   const outputArtifact = projectRecord(artifact, ['status', 'pdfFallback', 'limitations']);
   outputArtifact.formats = (artifact.formats ?? []).map(format => typeof format === 'string'
     ? format : projectRecord(format, ['format', 'status']));
-  return { status: value?.status, reviewUrl: value?.reviewUrl ?? null, artifact: outputArtifact };
+  return { status: value?.status, reviewUrl: null, artifact: outputArtifact };
 }
 
 function projectAccessibilityWidgets(value) {
@@ -543,12 +692,10 @@ function projectAccessibilityWidgets(value) {
 
 function summarizeV1Snapshot(snapshot) {
   const coverageSource = snapshot.coverage ?? snapshot.document?.coverage ?? {};
-  const coverage = projectRecord(coverageSource, ['runtime', 'accessibility', 'frames']);
-  const warnings = (snapshot.warnings ?? snapshot.document?.warnings ?? [])
-    .filter(value => value && typeof value.code === 'string' && /^[A-Z0-9_:-]{1,120}$/u.test(value.code))
-    .map(value => ({ code: value.code }));
+  const coverage = canonicalizeLegacyCoverage(coverageSource);
+  const warnings = canonicalizeLegacyWarnings(snapshot.warnings ?? snapshot.document?.warnings ?? []);
   return {
-    schemaVersion: Number.isSafeInteger(snapshot.schemaVersion) ? snapshot.schemaVersion : 1,
+    schemaVersion: 1,
     retention: 'summary-only',
     nodeCount: Array.isArray(snapshot.nodes) ? snapshot.nodes.length : 0,
     coverage, warnings,
@@ -652,6 +799,12 @@ function authoritativeAxeOccurrence(value) {
 }
 
 function assertAxeSupplementalIntegrity(model, rulesVersion) {
+  if (model.requestedScope?.mode === 'single' && model.axePages !== undefined) {
+    throw new TypeError('Auditoria single não pode conter envelope axePages de lote.');
+  }
+  if (model.requestedScope?.mode === 'batch' && model.axe !== undefined) {
+    throw new TypeError('Auditoria em lote não pode conter envelope axe de página única.');
+  }
   const reportRules = axeRulesFrom(model);
   const reportOccurrences = axeOccurrencesFrom(model);
   const coreRuleResults = coreRulesFrom(model);
@@ -757,7 +910,7 @@ function validateBatchAxePages(model, rulesVersion, coreRuleResults) {
       ...structuredClone(values[0]), outcome,
       targets: values.flatMap(value => structuredClone(value.targets)),
       limitations, impact, confidence: outcome === 'failed' ? 'high' : 'low',
-      summary: `Resultado agregado de ${values.length} de ${model.pages.length} ${model.pages.length === 1 ? 'página' : 'páginas'}: ${outcome === 'failed' ? 'falha confirmada' : 'não foi possível concluir'}.`,
+      summary: canonicalBatchRuleSummary(outcome),
     };
   });
   return { errors: [], occurrences, ruleResults, status: checkedPages.some(value => value.status === 'partial') ? 'partial' : 'complete' };
@@ -956,7 +1109,7 @@ function deriveItemReviewSummary(decisions) {
   const latest = [...decisions].sort((a, b) => a.decidedAt.localeCompare(b.decidedAt)).at(-1);
   return {
     mode: modes.length === 1 ? modes[0] : 'manual',
-    evaluator: evaluators.join(', '),
+    evaluator: canonicalEvaluatorSummary(evaluators),
     decidedAt: latest.decidedAt,
     decisionIds: decisions.map(decision => decision.decisionId),
   };
@@ -988,7 +1141,9 @@ function validatePrimaryPageCompatibility(model) {
   const primary = model.pages[0];
   if (model.requestedUrl !== primary.requestedUrl || model.finalUrl !== primary.finalUrl ||
     canonicalStringify(model.environment?.viewport) !== canonicalStringify(primary.viewport) ||
-    (model.requestedScope.mode === 'single' &&
+    (primary.accessibilityWidgets !== undefined &&
+      canonicalStringify(primary.accessibilityWidgets) !== canonicalStringify(model.accessibilityWidgets)) ||
+    (model.requestedScope.mode === 'single' && primary.attempted !== false &&
       canonicalStringify(model.timestamps) !== canonicalStringify(primary.timestamps))) {
     throw new TypeError('Campos primários do V2 divergem da página canônica.');
   }
@@ -1046,8 +1201,11 @@ function validatePages(pages) {
     reportUrl(page.requestedUrl, `pages[${index}].requestedUrl`);
     reportUrl(page.finalUrl, `pages[${index}].finalUrl`);
     if (!SESSION_STATUSES.has(page.status)) throw new TypeError(`pages[${index}].status inválido.`);
-    validateTimestamps(page.timestamps, `pages[${index}].timestamps`);
-    validateViewport(page.viewport, `pages[${index}].viewport`);
+    if (typeof page.attempted !== 'boolean') throw new TypeError(`pages[${index}].attempted deve ser booleano.`);
+    if (typeof page.finalUrlObserved !== 'boolean') {
+      throw new TypeError(`pages[${index}].finalUrlObserved deve ser booleano.`);
+    }
+    if (typeof page.axeStatus !== 'string') throw new TypeError(`pages[${index}].axeStatus deve ser texto.`);
     byId.set(pageId, page);
   }
   return byId;
@@ -1115,10 +1273,8 @@ function validateViewport(viewport, label) {
   if (!values.every(value => Number.isFinite(value) && value > 0)) throw new TypeError(`${label} deve ser integralmente observado ou integralmente não disponível.`);
 }
 
-function validateScope(scope) {
-  if (!scope || typeof scope !== 'object' || Array.isArray(scope)) throw new TypeError('scope inválido.');
-  requiredText(scope.kind, 'scope.kind');
-  requiredText(scope.description, 'scope.description');
+function validateScope(scope, mode, pageCount) {
+  if (!isCanonicalScope(scope, mode, pageCount)) throw new TypeError('scope diverge da descrição local canônica.');
 }
 
 function validateSession(session) {
@@ -1127,33 +1283,9 @@ function validateSession(session) {
     throw new TypeError('session.partial deve corresponder exatamente ao status partial.');
   }
   if (!Array.isArray(session.diagnostics)) throw new TypeError('session.diagnostics deve ser lista.');
-  for (const [index, diagnostic] of session.diagnostics.entries()) {
-    if (!diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) throw new TypeError(`session.diagnostics[${index}] deve ser objeto.`);
-    requiredId(diagnostic.code, `session.diagnostics[${index}].code`);
-    canonicalText(diagnostic.message, `session.diagnostics[${index}].message`);
-    canonicalInstant(diagnostic.at, `session.diagnostics[${index}].at`);
-    if (typeof diagnostic.recoverable !== 'boolean') throw new TypeError(`session.diagnostics[${index}].recoverable deve ser booleano.`);
-  }
 }
 
-function validateTerminalDiagnostics(model) {
-  const fatal = diagnostic => diagnostic?.recoverable === false;
-  if (model.session.status === 'complete' && (
-    model.session.diagnostics.some(fatal) ||
-    model.pages.some(page => page.status === 'complete' && (page.diagnostics ?? []).some(fatal))
-  )) {
-    throw new TypeError('Sessão ou página completa não pode conter diagnóstico fatal.');
-  }
-  if (!['failed', 'cancelled'].includes(model.session.status)) return;
-  const compatibleCodes = INCOMPLETE_CORE_DIAGNOSTICS[model.session.status];
-  const compatibleDiagnostic = model.session.diagnostics.some(diagnostic =>
-    fatal(diagnostic) && compatibleCodes?.has(diagnostic.code));
-  if (!compatibleDiagnostic) {
-    throw new TypeError('Sessão encerrada exige diagnóstico fatal compatível com o status terminal.');
-  }
-}
-
-function validateProgress(progress, auditId) {
+function validateProgress(progress, auditId, timestamps) {
   if (progress === undefined) return;
   if (!Array.isArray(progress)) throw new TypeError('progress deve ser lista.');
   let previousPercent = -1;
@@ -1169,14 +1301,36 @@ function validateProgress(progress, auditId) {
     if (!Number.isFinite(entry.percent) || entry.percent < 0 || entry.percent > 100 || entry.percent < previousPercent) {
       throw new TypeError(`progress[${index}].percent deve ser monotônico entre 0 e 100.`);
     }
-    canonicalInstant(entry.at, `progress[${index}].at`);
+    const at = canonicalInstant(entry.at, `progress[${index}].at`);
+    if (at < timestamps.startedAt || at > timestamps.generatedAt) {
+      throw new TypeError(`progress[${index}].at está fora da janela da auditoria.`);
+    }
     previousPercent = entry.percent;
   }
 }
 
-function validateLimitations(limitations) {
-  if (!Array.isArray(limitations) || limitations.some(value => typeof value !== 'string' || !value.trim())) {
-    throw new TypeError('limitations deve conter textos não vazios.');
+function validateLimitations(limitations, label = 'limitations') {
+  if (!Array.isArray(limitations) || limitations.length > 64) {
+    throw new TypeError(`${label} deve conter uma lista limitada de textos sistêmicos.`);
+  }
+  const seen = new Set();
+  for (const value of limitations) {
+    boundedRetainedText(value, 'systemicText', label);
+    if (!isCanonicalSystemLimitation(value) || seen.has(value)) {
+      throw new TypeError(`${label} contém prosa não canônica ou duplicada.`);
+    }
+    seen.add(value);
+  }
+}
+
+function validateDerivedLimitations(model) {
+  if (canonicalStringify(model.limitations) !== canonicalStringify(deriveSystemLimitations(model))) {
+    throw new TypeError('Limitações da auditoria divergem dos fatos autoritativos.');
+  }
+  for (const page of model.pages) {
+    if (canonicalStringify(page.limitations ?? []) !== canonicalStringify(derivePageLimitations(model, page))) {
+      throw new TypeError('Limitações da página divergem dos fatos autoritativos.');
+    }
   }
 }
 
@@ -1225,7 +1379,7 @@ function validateItems(items) {
   return items;
 }
 
-function validateRules(rules, itemById, rulesVersion) {
+function validateRules(rules, itemById, rulesVersion, { scopeMode, pageCount }) {
   if (!Array.isArray(rules)) throw new TypeError('ruleResults deve ser lista.');
   const byId = new Map();
   for (const rule of rules) {
@@ -1264,6 +1418,17 @@ function validateRules(rules, itemById, rulesVersion) {
         !Array.isArray(rule.wcag) || canonicalStringify(rule.wcag) !== canonicalStringify(metadata.wcag)) {
         throw new TypeError(`Regra ${id} possui mapeamento WCAG incoerente com o registro local.`);
       }
+      boundedRetainedText(rule.summary, 'ruleSummary', `Regra ${id}.summary`);
+      const summaryIsCanonical = scopeMode === 'batch'
+        ? isCanonicalBatchRuleSummary(rule.summary, rule.outcome)
+        : rule.summary === canonicalCoreRuleSummary(id, rule.outcome);
+      if (!summaryIsCanonical) throw new TypeError(`Regra ${id} possui resumo não canônico.`);
+      if (canonicalStringify(rule.limitations) !== canonicalStringify(canonicalCoreRuleLimitations(rule.outcome))) {
+        throw new TypeError(`Regra ${id} possui limitações core não canônicas.`);
+      }
+      validateCoreRuleTargets(rule.targets, id, rule.outcome);
+    } else {
+      boundedRetainedText(rule.summary, 'ruleSummary', `Regra ${id}.summary`);
     }
     if (id.startsWith('editorial.') || rule.classification === 'editorial' || rule.source?.engine === 'audita-editorial') {
       validateEditorialRuleResult(rule, id, rulesVersion);
@@ -1271,6 +1436,12 @@ function validateRules(rules, itemById, rulesVersion) {
     byId.set(id, rule);
   }
   return byId;
+}
+
+function validateCoreRuleTargets(targets, ruleId, outcome) {
+  if (!validateCoreRuleTargetInventory(ruleId, outcome, targets)) {
+    throw new TypeError(`Regra ${ruleId} contém alvo ou remediação core não autoritativa.`);
+  }
 }
 
 function validateRuleInventory(model, ruleById) {
@@ -1292,22 +1463,430 @@ function validateRuleInventory(model, ruleById) {
   if (completeCoreInventory) return;
 }
 
-function validateUnattemptedPages(model) {
+function validateExecutionStateMachine(model) {
+  validateTimestamps(model.timestamps);
+  validateModalObservationAuthority(model);
+
   const occurrencePageIds = new Set(model.occurrences.map(occurrence => occurrence.pageId));
   const evidencePageIds = new Set(model.evidence.map(artifact => artifact.pageId));
   const axePageIds = new Set((model.axePages ?? []).map(entry => entry.pageId));
+  for (const [index, page] of model.pages.entries()) {
+    validatePageExecutionState({
+      model, page, index, occurrencePageIds, evidencePageIds, axePageIds,
+    });
+  }
+  validateRootPageExecutionContract(model);
+}
+
+function validatePageExecutionState({ model, page, index, occurrencePageIds, evidencePageIds, axePageIds }) {
+  const label = `pages[${index}]`;
+  validateTimestamps(page.timestamps, `${label}.timestamps`);
+  validateViewport(page.viewport, `${label}.viewport`);
+  if (page.timestamps.startedAt < model.timestamps.startedAt ||
+    page.timestamps.endedAt > model.timestamps.endedAt ||
+    page.timestamps.generatedAt > model.timestamps.generatedAt) {
+    throw new TypeError(`${label} está fora da janela temporal da auditoria.`);
+  }
+  if (page.accessibilityWidgets !== undefined) validateAccessibilityWidgets(page.accessibilityWidgets);
+  if (page.limitations !== undefined) validateLimitations(page.limitations, `${label}.limitations`);
+
+  const contract = PAGE_EXECUTION_STATE_MATRIX[`${page.attempted}:${page.finalUrlObserved}`];
+  if (!contract || !contract.statuses.includes(page.status)) {
+    throw new TypeError(`${label} possui combinação incoerente de tentativa, observação final e status.`);
+  }
+  const diagnosticPolicies = validateExecutionDiagnostics({
+    label, mode: model.requestedScope.mode, role: 'page', status: page.status,
+    attempted: page.attempted, finalUrlObserved: page.finalUrlObserved,
+    diagnostics: page.diagnostics ?? [], timestamps: page.timestamps,
+    rootTimestamps: model.timestamps,
+    occurrenceIds: new Set(model.occurrences
+      .filter(occurrence => occurrence.pageId === page.pageId)
+      .map(occurrence => occurrence.occurrenceId)),
+  });
+  validatePageDiagnosticFacts(model, page, diagnosticPolicies);
+  if (contract.finalUrl === 'requested' && page.finalUrl !== page.requestedUrl) {
+    throw new TypeError(`${label} não pode alegar redirecionamento sem URL final observada.`);
+  }
+  if (contract.duration === 'zero' && page.timestamps.startedAt !== page.timestamps.endedAt) {
+    throw new TypeError(`${label} não iniciada deve ter duração zero.`);
+  }
+
+  const hasObservedFacts = page.axeStatus !== 'not-run' ||
+    !Object.values(page.viewport).every(value => value === null) ||
+    hasPositiveWidgetObservation(page.accessibilityWidgets) ||
+    Object.keys(page.coverage ?? {}).length > 0 || page.warnings.length > 0 ||
+    (page.omittedEvidence?.length ?? 0) > 0 ||
+    occurrencePageIds.has(page.pageId) || evidencePageIds.has(page.pageId) || axePageIds.has(page.pageId);
+  if (!contract.observedFacts && hasObservedFacts) {
+    throw new TypeError(`${label} sem URL final observada não pode conter fatos, resultados ou evidências da página.`);
+  }
+}
+
+function validateModalObservationAuthority(model) {
+  for (const page of model.pages) validateStructuralWarnings(page.warnings);
+  if (model.requestedScope.mode === 'single') {
+    if (model.pages.some(page => Object.hasOwn(page, 'coverage'))) {
+      throw new TypeError('Auditoria single usa somente snapshot raiz e não aceita coverage por página.');
+    }
+    if (model.snapshot !== undefined && model.snapshot !== null) validateSnapshotSummary(model.snapshot);
+    if (canonicalStringify(model.pages[0].warnings) !==
+      canonicalStringify(model.snapshot?.warnings ?? [])) {
+      throw new TypeError('Avisos estruturais da página single divergem do snapshot raiz.');
+    }
+    return;
+  }
+  if (Object.hasOwn(model, 'snapshot')) {
+    throw new TypeError('Auditoria batch usa somente coverage por página e não aceita snapshot raiz.');
+  }
+  if (model.pages.some(page => !Object.hasOwn(page, 'coverage'))) {
+    throw new TypeError('Toda página do lote deve declarar coverage, inclusive quando não observada.');
+  }
+  for (const page of model.pages) validateCoverageSummary(page.coverage, { allowEmpty: true });
+}
+
+function validateRootPageExecutionContract(model) {
+  validateRootPageDiagnosticCoherence(model);
+  validatePageAxeStatusCoherence(model);
+  validateBatchPageSequence(model);
+  if (model.requestedScope.mode === 'single' && model.pages[0].finalUrlObserved === false) {
+    validateSingleUnobservedRoot(model);
+  }
+}
+
+function validatePageAxeStatusCoherence(model) {
+  if (model.requestedScope.mode === 'single') {
+    const expected = model.axe?.status ?? 'not-run';
+    if (model.pages[0].axeStatus !== expected) {
+      throw new TypeError('axeStatus da página single diverge do envelope axe autoritativo.');
+    }
+    return;
+  }
+  const statusByPageId = new Map((model.axePages ?? []).map(entry => [entry.pageId, entry.result.status]));
   for (const page of model.pages) {
-    if (page.attempted !== false) continue;
-    const hasExecution = !['failed', 'cancelled'].includes(page.status) ||
-      page.finalUrlObserved !== false || page.finalUrl !== page.requestedUrl ||
-      page.timestamps.startedAt !== page.timestamps.endedAt ||
-      (page.axeStatus !== undefined && page.axeStatus !== 'not-run') ||
-      Object.keys(page.coverage ?? {}).length > 0 || (page.omittedEvidence?.length ?? 0) > 0 ||
-      occurrencePageIds.has(page.pageId) || evidencePageIds.has(page.pageId) || axePageIds.has(page.pageId);
-    if (hasExecution) {
-      throw new TypeError('Página não iniciada não pode conter resultados, evidências ou alegações de execução.');
+    const expected = statusByPageId.get(page.pageId) ?? 'not-run';
+    if (page.axeStatus !== expected) {
+      throw new TypeError('axeStatus de página do lote diverge do envelope axe autoritativo.');
     }
   }
+}
+
+function validateRootPageDiagnosticCoherence(model) {
+  const rootDiagnostics = model.session.diagnostics;
+  const pageDiagnostics = model.pages.flatMap(page => page.diagnostics ?? []);
+  if (!Array.isArray(rootDiagnostics)) throw new TypeError('session.diagnostics deve ser lista.');
+  const remainingRoot = new Map();
+  for (const diagnostic of rootDiagnostics) {
+    const signature = canonicalStringify(diagnostic);
+    remainingRoot.set(signature, (remainingRoot.get(signature) ?? 0) + 1);
+  }
+  for (const diagnostic of pageDiagnostics) {
+    const signature = canonicalStringify(diagnostic);
+    const remaining = remainingRoot.get(signature) ?? 0;
+    if (remaining === 0) throw new TypeError('Diagnóstico de página não está representado exatamente na sessão.');
+    remainingRoot.set(signature, remaining - 1);
+  }
+
+  const seenSessionOnly = new Set();
+  const seenSessionGroups = new Set();
+  const sessionPolicies = [];
+  for (const diagnostic of rootDiagnostics) {
+    const signature = canonicalStringify(diagnostic);
+    const remaining = remainingRoot.get(signature) ?? 0;
+    if (remaining === 0) continue;
+    validateDiagnosticRecord(diagnostic, 'session.diagnostics', model.timestamps, false);
+    const policy = diagnosticPolicyEntry(diagnostic, {
+      mode: model.requestedScope.mode, role: 'session', status: model.session.status,
+    });
+    const identity = `${diagnostic.code}\u0000${diagnostic.message}`;
+    if (!policy || policy.placement !== 'session-only' || seenSessionOnly.has(identity)) {
+      throw new TypeError('Diagnóstico adicional da sessão não pertence ao catálogo session-only ou está duplicado.');
+    }
+    if (policy.group !== null && seenSessionGroups.has(policy.group)) {
+      throw new TypeError('Diagnósticos adicionais da sessão excedem a cardinalidade do mesmo grupo de geração.');
+    }
+    validateDiagnosticDetails(diagnostic, policy, new Set(), 'session.diagnostics');
+    const at = canonicalInstant(diagnostic.at, 'session.diagnostics.at');
+    if (policy.cardinality === 'generation' && at !== model.timestamps.generatedAt) {
+      throw new TypeError('Diagnóstico session-only de geração não coincide com o fechamento público.');
+    }
+    if (at < model.timestamps.startedAt || at > model.timestamps.generatedAt) {
+      throw new TypeError('Diagnóstico session-only está fora da janela de geração.');
+    }
+    seenSessionOnly.add(identity);
+    if (policy.group !== null) seenSessionGroups.add(policy.group);
+    sessionPolicies.push(policy);
+    remainingRoot.set(signature, remaining - 1);
+  }
+  if ([...remainingRoot.values()].some(value => value !== 0)) {
+    throw new TypeError('A sessão contém diagnóstico não consumido pela matriz declarativa.');
+  }
+  if (sessionPolicies.some(policy => policy.code === 'REPORT_EXPORT_PREPARATION_FAILED') &&
+    sessionPolicies.length !== 1) {
+    throw new TypeError('Falha de preparação não pode coexistir com resultado de etapa de geração não executada.');
+  }
+}
+
+function validateSingleUnobservedRoot(model) {
+  const positivePresentation = model.presentation !== undefined &&
+    (model.presentation.occurrenceCount !== 0 || model.presentation.hiddenOccurrenceCount !== 0 ||
+      model.presentation.groups.length > 0);
+  const positiveAxe = model.axe !== undefined && model.axe !== null && model.axe.status !== 'disabled';
+  const hasGlobalExecution = model.snapshot !== undefined && model.snapshot !== null ||
+    model.ruleResults.length > 0 || model.occurrences.length > 0 || model.evidence.length > 0 ||
+    model.evidenceStateCount !== 0 || model.reproducibility.capturedStateCount !== 0 ||
+    hasPositiveWidgetObservation(model.accessibilityWidgets) || positiveAxe ||
+    (model.axePages?.length ?? 0) > 0 || positivePresentation;
+  if (hasGlobalExecution) {
+    throw new TypeError('Auditoria single sem URL final observada não pode conter fatos globais de execução.');
+  }
+}
+
+function validateExecutionDiagnostics({
+  label, mode, role, status, attempted, finalUrlObserved, diagnostics, timestamps, rootTimestamps, occurrenceIds,
+}) {
+  if (!Array.isArray(diagnostics)) throw new TypeError(`${label}.diagnostics deve ser lista.`);
+  let fatalCount = 0;
+  const seen = new Set();
+  const seenGroups = new Set();
+  const policies = [];
+  for (const [index, diagnostic] of diagnostics.entries()) {
+    const diagnosticLabel = `${label}.diagnostics[${index}]`;
+    validateDiagnosticRecord(diagnostic, diagnosticLabel, timestamps, true);
+    const policy = diagnosticPolicyEntry(diagnostic, {
+      mode, role, status, attempted, finalUrlObserved,
+    });
+    if (!policy || policy.placement !== 'page-root-copy') {
+      throw new TypeError(`${diagnosticLabel} não pertence à combinação declarada de modo, papel, estágio e status.`);
+    }
+    if (policy.group !== null && seenGroups.has(policy.group)) {
+      throw new TypeError(`${diagnosticLabel} contradiz outro diagnóstico da mesma operação.`);
+    }
+    if (policy.group !== null) seenGroups.add(policy.group);
+    validateDiagnosticDetails(diagnostic, policy, occurrenceIds, diagnosticLabel);
+    const identity = policy.cardinality === 'occurrence'
+      ? `${diagnostic.code}\u0000${diagnostic.details.occurrenceId}`
+      : `${diagnostic.code}\u0000${diagnostic.message}`;
+    if (seen.has(identity)) throw new TypeError(`${diagnosticLabel} excede a cardinalidade declarada.`);
+    seen.add(identity);
+    const at = canonicalInstant(diagnostic.at, `${diagnosticLabel}.at`);
+    const timing = policy.timestampScope === 'root' ? rootTimestamps : timestamps;
+    if (at < timing.startedAt || at > timing.endedAt) {
+      throw new TypeError(`${diagnosticLabel}.at está fora da janela pertinente.`);
+    }
+    if (diagnostic.recoverable === false) fatalCount += 1;
+    policies.push(policy);
+  }
+  const expectedFatalCount = ['failed', 'cancelled'].includes(status) ? 1 : 0;
+  if (fatalCount !== expectedFatalCount) {
+    throw new TypeError(`${label} deve conter exatamente ${expectedFatalCount} diagnóstico fatal compatível.`);
+  }
+  if (status === 'partial' && !policies.some(policy => policy.causePartial === true)) {
+    throw new TypeError(`${label} parcial não possui causa recuperável autoritativa.`);
+  }
+  return policies;
+}
+
+function validatePageDiagnosticFacts(model, page, policies) {
+  const pageArtifacts = model.evidence.filter(artifact => artifact.pageId === page.pageId);
+  const pageOccurrences = model.occurrences.filter(occurrence => occurrence.pageId === page.pageId);
+  const codes = new Set((page.diagnostics ?? []).map(entry => entry.code));
+  const pristine = pageArtifacts.filter(artifact => artifact.kind === 'full-page' && artifact.state === 'pristine');
+  const maps = pageArtifacts.filter(artifact => artifact.kind === 'announcement-map');
+  const annotationFailures = policies.filter(policy => policy.fact === 'annotation-failed');
+  const partialMaps = maps.filter(artifact => artifact.status === 'partial');
+  const hasFullPageFailure = codes.has('FULL_PAGE_CAPTURE_FAILED');
+
+  if (page.finalUrlObserved && ((pristine.length === 0) !== hasFullPageFailure || pristine.length > 1)) {
+    throw new TypeError('Captura integral pristine e diagnóstico de ausência devem formar uma equivalência exata.');
+  }
+  if (hasFullPageFailure && (maps.length > 0 ||
+    policies.some(policy => ['annotation-failed', 'annotation-partial'].includes(policy.fact)))) {
+    throw new TypeError('Falha de captura integral contradiz tentativa ou resultado de mapa.');
+  }
+  if (codes.has('ENVIRONMENT_UNAVAILABLE') && Object.values(page.viewport).some(value => value !== null)) {
+    throw new TypeError('Diagnóstico de ambiente indisponível contradiz o viewport observado.');
+  }
+  if (page.finalUrlObserved && Object.values(page.viewport).every(value => value === null) &&
+    !codes.has('ENVIRONMENT_UNAVAILABLE')) {
+    throw new TypeError('Viewport não observado exige diagnóstico factual de ambiente indisponível.');
+  }
+  if (codes.has('ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE') &&
+    (!hasFullPageFailure || !pageOccurrences.some(occurrence => occurrence.nodeId !== null))) {
+    throw new TypeError('Omissão de miniaturas não deriva dos fatos de captura e ocorrências.');
+  }
+  if ((partialMaps.length > 0) !== codes.has('ANNOTATION_MAP_PARTIAL')) {
+    throw new TypeError('Mapa parcial e diagnóstico correspondente devem formar uma equivalência exata.');
+  }
+  if (annotationFailures.length > 0 && maps.length > 0) {
+    throw new TypeError('Falha de geração do mapa não pode coexistir com mapa produzido.');
+  }
+  if ((annotationFailures.length > 0 || partialMaps.length > 0) && pristine.length !== 1) {
+    throw new TypeError('Tentativa de mapa exige uma captura pristine autoritativa da mesma página.');
+  }
+  validateOccurrenceDiagnosticFacts(page, pageArtifacts, pageOccurrences);
+  validatePageAxeDiagnosticFacts(model, page, codes);
+  validateOmittedEvidenceFacts(page, pageArtifacts, codes);
+  validateTerminalDiagnosticFacts(model, page, policies);
+  if (codes.has('REPORT_HANDOFF_FAILED') && page.pageId === model.pages[0].pageId &&
+    !['pending', 'review-ready'].includes(model.report.status)) {
+    throw new TypeError('Falha de handoff contradiz relatório já finalizado.');
+  }
+}
+
+function validateOccurrenceDiagnosticFacts(page, pageArtifacts, pageOccurrences) {
+  const occurrenceById = new Map(pageOccurrences.map(occurrence => [occurrence.occurrenceId, occurrence]));
+  const diagnostics = (page.diagnostics ?? []).filter(entry => entry.details?.occurrenceId);
+  const byOccurrence = new Map();
+  for (const entry of diagnostics) {
+    const values = byOccurrence.get(entry.details.occurrenceId) ?? [];
+    values.push(entry.code);
+    byOccurrence.set(entry.details.occurrenceId, values);
+  }
+  for (const entry of diagnostics) {
+    const occurrence = occurrenceById.get(entry.details.occurrenceId);
+    const elements = pageArtifacts.filter(artifact => artifact.kind === 'element' &&
+      artifact.nodeId === occurrence?.nodeId);
+    const hasSnippet = elements.some(artifact => typeof artifact.snippet === 'string' && artifact.snippet.length > 0);
+    const hasElementPixels = elements.some(artifact => Object.hasOwn(artifact, 'dataUrl') ||
+      artifact.pixelState === 'omitted-budget');
+    const siblingCodes = new Set(byOccurrence.get(entry.details.occurrenceId) ?? []);
+    if (entry.code === 'EVIDENCE_NODE_MISSING' &&
+      (!occurrence?.nodeId || elements.length > 0 || siblingCodes.size > 1)) {
+      throw new TypeError('Diagnóstico de nó ausente contradiz a evidência retida da ocorrência.');
+    }
+    if (entry.code === 'SNIPPET_CAPTURE_FAILED' && (elements.length === 0 || hasSnippet)) {
+      throw new TypeError('Diagnóstico de trecho ausente contradiz o artefato elementar retido.');
+    }
+    if (entry.code === 'ELEMENT_CAPTURE_FAILED' && (elements.length === 0 || hasElementPixels)) {
+      throw new TypeError('Diagnóstico de miniatura ausente contradiz os pixels elementares retidos.');
+    }
+    if (entry.code === 'EVIDENCE_CAPTURE_FAILED' && elements.length > 0) {
+      throw new TypeError('Diagnóstico de evidência ausente contradiz o artefato elementar retido.');
+    }
+  }
+}
+
+function validatePageAxeDiagnosticFacts(model, page, codes) {
+  const envelopeStatus = model.requestedScope.mode === 'single'
+    ? model.axe?.status ?? 'not-run'
+    : model.axePages?.find(entry => entry.pageId === page.pageId)?.result?.status ?? 'not-run';
+  const expectedCode = envelopeStatus === 'disabled' ? 'AXE_FEATURE_DISABLED'
+    : envelopeStatus === 'partial' ? 'AXE_EXECUTION_FAILED' : null;
+  const actual = ['AXE_FEATURE_DISABLED', 'AXE_EXECUTION_FAILED'].filter(code => codes.has(code));
+  if (canonicalStringify(actual) !== canonicalStringify(expectedCode === null ? [] : [expectedCode])) {
+    throw new TypeError('Diagnóstico axe diverge do envelope autoritativo da página.');
+  }
+}
+
+function validateOmittedEvidenceFacts(page, pageArtifacts, codes) {
+  const omitted = page.omittedEvidence ?? [];
+  const expected = pageArtifacts
+    .filter(artifact => artifact.pixelState === 'omitted-budget')
+    .map(artifact => ({
+      evidenceId: artifact.evidenceId,
+      kind: artifact.kind,
+      contentHash: artifact.pixelContentHash ?? null,
+      reason: 'budget',
+    }));
+  if (canonicalStringify(omitted) !== canonicalStringify(expected) ||
+    (omitted.length > 0) !== codes.has('BATCH_EVIDENCE_BUDGET_EXCEEDED')) {
+    throw new TypeError('Evidência omitida e diagnóstico de orçamento não formam uma bijeção verificável.');
+  }
+}
+
+function validateTerminalDiagnosticFacts(model, page, policies) {
+  if (model.requestedScope.mode !== 'single') return;
+  const fatal = policies.find(policy => policy.recoverable === false);
+  if (!fatal) return;
+  const hasRules = model.ruleResults.length > 0;
+  const hasOccurrences = model.occurrences.length > 0;
+  const hasEvidence = model.evidence.length > 0;
+  if (fatal.fact === 'navigation-failed' && (model.snapshot !== undefined || hasRules || hasOccurrences || hasEvidence)) {
+    throw new TypeError('Falha de navegação não pode alegar resultados de fases posteriores.');
+  }
+  if (fatal.fact === 'collection-failed' &&
+    (model.snapshot !== undefined || hasRules || hasOccurrences)) {
+    throw new TypeError('Falha de coleta não pode alegar snapshot ou resultados core concluídos.');
+  }
+  if (fatal.fact === 'core-failed' && (hasRules || hasOccurrences)) {
+    throw new TypeError('Falha do núcleo não pode alegar inventário core concluído.');
+  }
+}
+
+function validateBatchPageSequence(model) {
+  if (model.requestedScope.mode !== 'batch') return;
+  for (let index = 1; index < model.pages.length; index += 1) {
+    if (model.pages[index - 1].timestamps.endedAt > model.pages[index].timestamps.startedAt) {
+      throw new TypeError('Páginas do lote devem respeitar a ordem serial da execução.');
+    }
+  }
+  const codesAt = code => model.pages.map(page => (page.diagnostics ?? []).some(entry => entry.code === code));
+  const cleanupSuffix = codesAt('BATCH_NOT_STARTED_CLEANUP_UNCONFIRMED');
+  const cleanupBarrier = model.pages.map(page => (page.diagnostics ?? []).some(entry =>
+    ['BATCH_PAGE_CLEANUP_UNCONFIRMED', 'CDP_DISCONNECT_FAILED', 'TAB_CLOSE_FAILED'].includes(entry.code)));
+  const barrierIndexes = cleanupBarrier.map((value, index) => value ? index : -1).filter(index => index >= 0);
+  const suffixStart = cleanupSuffix.indexOf(true);
+  if (barrierIndexes.length > 1 || (suffixStart >= 0 &&
+    (suffixStart === 0 || barrierIndexes[0] !== suffixStart - 1 ||
+      cleanupSuffix.slice(suffixStart).some(value => value !== true))) ||
+    (barrierIndexes.length === 1 && barrierIndexes[0] < model.pages.length - 1 &&
+      suffixStart !== barrierIndexes[0] + 1) ||
+    (barrierIndexes.length === 1 && barrierIndexes[0] === model.pages.length - 1 && suffixStart >= 0) ||
+    (barrierIndexes.length === 0 && suffixStart >= 0)) {
+    throw new TypeError('Barreira de cleanup deve ser única e seguida imediatamente por todo o sufixo não iniciado.');
+  }
+
+  const cancelledIndexes = model.pages.map((page, index) => page.status === 'cancelled' ? index : -1).filter(index => index >= 0);
+  if (cancelledIndexes.length > 0) {
+    const first = cancelledIndexes[0];
+    if (cancelledIndexes.some((value, offset) => value !== first + offset) ||
+      model.pages.slice(first).some(page => page.status !== 'cancelled') ||
+      model.pages.slice(first).filter(page => page.attempted).length > 1 ||
+      cleanupSuffix.some(Boolean) || cleanupBarrier.some(Boolean)) {
+      throw new TypeError('Cancelamento do lote deve formar um único sufixo causal.');
+    }
+    for (const [offset, page] of model.pages.slice(first).entries()) {
+      if (offset > 0 && page.attempted) throw new TypeError('Somente a primeira página cancelada pode ter sido iniciada.');
+    }
+  }
+}
+
+function validateDiagnosticRecord(diagnostic, label) {
+  if (!diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) {
+    throw new TypeError(`${label} deve ser objeto.`);
+  }
+  const expected = Object.hasOwn(diagnostic, 'details')
+    ? ['at', 'code', 'details', 'message', 'recoverable']
+    : ['at', 'code', 'message', 'recoverable'];
+  if (!exactKeys(diagnostic, expected)) throw new TypeError(`${label} possui campos não declarados.`);
+  requiredId(diagnostic.code, `${label}.code`);
+  boundedRetainedText(diagnostic.message, 'systemicText', `${label}.message`);
+  if (typeof diagnostic.recoverable !== 'boolean') throw new TypeError(`${label}.recoverable deve ser booleano.`);
+  canonicalInstant(diagnostic.at, `${label}.at`);
+}
+
+function validateDiagnosticDetails(diagnostic, policy, occurrenceIds, label) {
+  if (policy.details === 'none') {
+    if (Object.hasOwn(diagnostic, 'details')) throw new TypeError(`${label} não aceita detalhes.`);
+    return;
+  }
+  if (policy.details !== 'occurrence' || !diagnostic.details ||
+    !exactKeys(diagnostic.details, ['occurrenceId'])) {
+    throw new TypeError(`${label} exige vínculo estruturado com ocorrência.`);
+  }
+  const occurrenceId = requiredId(diagnostic.details.occurrenceId, `${label}.details.occurrenceId`);
+  if (!occurrenceIds.has(occurrenceId)) throw new TypeError(`${label} referencia ocorrência de outra página ou inexistente.`);
+}
+
+function terminalFatalDiagnostic(diagnostic) {
+  return SYSTEM_DIAGNOSTIC_POLICY.find(entry => entry.recoverable === false &&
+    entry.code === diagnostic?.code && entry.message === diagnostic?.message);
+}
+
+function hasPositiveWidgetObservation(inventory) {
+  if (inventory === undefined) return false;
+  return inventory.coverage !== 'unavailable' || inventory.widgets.some(widget =>
+    widget.status !== 'unknown' || widget.signals.length > 0);
 }
 
 function validateEvidenceAndOccurrences(model, ruleById, pageById, scopeMode = 'single') {
@@ -1393,16 +1972,28 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById, scopeMode = '
       throw new TypeError(`${label} possui item legado incoerente.`);
     }
     validateWcagAndForeignReferences(occurrence, item, sourceRule, label, scopeMode);
-    validateTarget(occurrence.target, label);
+    validateTarget(occurrence.target, occurrence.source.engine, label);
     if (occurrence.nodeId !== occurrence.target.nodeId) {
       throw new TypeError(`${label} possui identidade de alvo incoerente.`);
+    }
+    if (occurrence.source.engine === V1_MIGRATION_DEFAULTS.sourceEngine) {
+      const authoritativeTargets = sourceRule?.targets?.length ? sourceRule.targets : [null];
+      if (!authoritativeTargets.some(target => canonicalCoreTargetNodeId(target) === occurrence.nodeId)) {
+        throw new TypeError(`${label} não corresponde a alvo autoritativo da regra core.`);
+      }
     }
     if (occurrence.accessiblePreview !== null && typeof occurrence.accessiblePreview !== 'string') {
       throw new TypeError(`${label}.accessiblePreview inválida.`);
     }
     validateEquivalenceIdentity(occurrence, artifactById);
-    if (occurrence.justification !== undefined && typeof occurrence.justification !== 'string') {
-      throw new TypeError(`${label}.justification deve ser texto quando presente.`);
+    boundedRetainedText(occurrence.justification, 'occurrenceJustification', `${label}.justification`);
+    if (occurrence.source.engine === V1_MIGRATION_DEFAULTS.sourceEngine &&
+      occurrence.justification !== canonicalCoreRuleSummary(occurrence.source.ruleId, occurrence.outcome)) {
+      throw new TypeError(`${label}.justification diverge do texto core autoritativo.`);
+    }
+    if (occurrence.source.engine === V1_MIGRATION_DEFAULTS.manualSourceEngine &&
+      occurrence.justification !== item?.humanReason) {
+      throw new TypeError(`${label}.justification diverge da justificativa normativa de revisão humana.`);
     }
     validateOccurrenceReason(occurrence, sourceRule, label);
     validateLegalAnalysis(occurrence, label);
@@ -1424,12 +2015,18 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById, scopeMode = '
       }
       links.add(canonicalEvidenceId);
     }
+    const nodeBearingEvidence = occurrence.evidenceRefs
+      .map(evidenceId => artifactById.get(evidenceId))
+      .filter(artifact => artifact?.nodeId !== undefined && artifact.nodeId !== null);
+    if (nodeBearingEvidence.some(artifact => artifact.nodeId !== occurrence.nodeId)) {
+      throw new TypeError(`${label} referencia evidência de outro nó.`);
+    }
     if (occurrence.evidenceIds !== undefined && canonicalStringify(occurrence.evidenceIds) !== canonicalStringify(occurrence.evidenceRefs)) {
       throw new TypeError(`${label} possui evidências legadas incoerentes.`);
     }
     occurrenceById.set(id, occurrence);
   }
-  return { itemIds, ruleById, occurrenceById, evidenceIds };
+  return { itemIds, itemById, ruleById, occurrenceById, evidenceIds };
 }
 
 function validateEquivalenceIdentity(occurrence, artifactById) {
@@ -1696,15 +2293,29 @@ function validateWcagAndForeignReferences(occurrence, item, sourceRule, occurren
   }
 }
 
-function validateTarget(target, occurrenceLabel) {
+function validateTarget(target, sourceEngine, occurrenceLabel) {
   if (!target || typeof target !== 'object' || Array.isArray(target)) throw new TypeError(`${occurrenceLabel}.target inválido.`);
   if (target.nodeId !== null) requiredId(target.nodeId, `${occurrenceLabel}.target.nodeId`);
-  if (target.selector !== null && (typeof target.selector !== 'string' || target.selector.trim() !== target.selector)) {
+  if (sourceEngine !== 'axe-core' && (target.selector !== null || canonicalStringify(target.framePath) !== '[]')) {
+    throw new TypeError(`${occurrenceLabel}.target retém locator não autorizado fora do envelope axe.`);
+  }
+  if (target.selector !== null && !boundedLocator(target.selector)) {
     throw new TypeError(`${occurrenceLabel}.target.selector inválido.`);
   }
-  if (!Array.isArray(target.framePath) || target.framePath.some(value => typeof value !== 'string')) {
+  if (!Array.isArray(target.framePath) || target.framePath.length > 16 ||
+    target.framePath.some(value => !boundedLocator(value))) {
     throw new TypeError(`${occurrenceLabel}.target.framePath inválido.`);
   }
+}
+
+function boundedLocator(value) {
+  if (typeof value !== 'string' || value !== value.trim() || value.length > 512) return false;
+  let count = 0;
+  for (const _character of value) {
+    count += 1;
+    if (count > 256) return false;
+  }
+  return true;
 }
 
 function validateLegalAnalysis(occurrence, occurrenceLabel) {
@@ -1718,7 +2329,7 @@ function validateLegalAnalysis(occurrence, occurrenceLabel) {
   }
 }
 
-function validateReview(model, { itemIds, occurrenceById }) {
+function validateReview(model, { itemIds, itemById, occurrenceById }) {
   if (!Array.isArray(model.manualReview) || !Array.isArray(model.reviewDecisions)) throw new TypeError('Fila e decisões de revisão devem ser listas.');
   const queueByOccurrence = new Map();
   for (const [entryIndex, entry] of model.manualReview.entries()) {
@@ -1730,14 +2341,20 @@ function validateReview(model, { itemIds, occurrenceById }) {
     if (occurrence.outcome !== 'cantTell') {
       throw new TypeError(`${label} só pode referenciar ocorrência originalmente cantTell.`);
     }
-    if (!itemIds.has(entry.itemId) || entry.itemId !== occurrence.itemId) throw new TypeError(`${label} referencia item incoerente.`);
+    const item = itemById.get(entry.itemId);
+    if (!itemIds.has(entry.itemId) || !item || entry.itemId !== occurrence.itemId) {
+      throw new TypeError(`${label} referencia item incoerente.`);
+    }
     if (entry.ruleId !== occurrence.ruleId) throw new TypeError(`${label} referencia regra incoerente.`);
     if (!REVIEW_MODES.includes(entry.mode)) throw new TypeError(`${label} possui modo inválido.`);
     const expectedMode = occurrence.mode === 'manual' ? 'manual' : 'assisted';
     if (entry.mode !== expectedMode) throw new TypeError(`${label} possui modo incoerente.`);
     if (!REVIEW_STATUSES.has(entry.status)) throw new TypeError(`${label} possui status inválido.`);
-    canonicalText(entry.question, `${label}.question`);
-    canonicalText(entry.reason, `${label}.reason`);
+    boundedRetainedText(entry.question, 'reviewQuestion', `${label}.question`);
+    boundedRetainedText(entry.reason, 'reviewReason', `${label}.reason`);
+    if (entry.question !== canonicalReviewQuestion(item) || entry.reason !== occurrence.justification) {
+      throw new TypeError(`${label} possui pergunta ou justificativa não derivada da ocorrência e do item.`);
+    }
     if (entry.auditId !== undefined && entry.auditId !== model.auditId) throw new TypeError(`${label} pertence a outra auditoria.`);
     queueByOccurrence.set(occurrenceId, entry);
   }

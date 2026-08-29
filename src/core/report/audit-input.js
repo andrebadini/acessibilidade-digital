@@ -25,6 +25,14 @@ export function isAuditModelInputError(error) {
 export function captureAuditInput(input) {
   if (input && typeof input === 'object' && CAPTURED_AUDIT_INPUTS.has(input)) return input;
   try {
+    // This boundary never reads accessors. Reflection on an in-process Proxy can
+    // still invoke its traps and a trap can mutate a sibling not yet visited;
+    // JavaScript offers no atomic graph snapshot that both detects transparent
+    // proxies and avoids accessors/another source traversal. Production Chrome
+    // messaging and IndexedDB structured-clone external/persisted payloads;
+    // internal run/batch producers also return structured-cloned, frozen
+    // snapshots. A transparent Proxy is therefore possible only for a direct
+    // in-process caller that already has authority to supply the same plain data.
     const budget = { nodes: 0 };
     const captured = captureValue(input, new WeakSet(), budget, 0);
     // Materialize only the inert descriptor snapshot. Returning to the source

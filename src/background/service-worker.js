@@ -441,10 +441,15 @@ export function registerServiceWorker(chromeApi, options = {}) {
           ]);
         },
       };
-      const model = await runner({ url: navigationUrl, chromeAdapter: pipelineAdapter, now, idFactory: () => auditId, closeAuditTab: true, signal: entry.controller.signal });
+      const model = await runner({
+        url: navigationUrl, chromeAdapter: pipelineAdapter, now, idFactory: () => auditId,
+        closeAuditTab: true, signal: entry.controller.signal, expectedExtensionId: chromeApi.runtime.id,
+      });
       entry.phase = 'finalizing';
       const status = model?.session?.status || 'failed';
-      const reviewUrl = model?.report?.reviewUrl || null;
+      const reviewUrl = model?.report?.status === 'review-ready'
+        ? chromeApi.runtime.getURL(`src/review/index.html?auditId=${encodeURIComponent(auditId)}`)
+        : null;
       const canExport = ['complete', 'partial'].includes(status);
       const latestState = { auditId, status, percent: canExport ? 100 : model?.progress?.at?.(-1)?.percent || 0, message: status === 'partial' ? 'Auditoria concluída com limitações.' : status === 'complete' ? 'Auditoria concluída.' : 'A auditoria não pôde ser concluída.', reviewUrl, exportStatus: canExport ? 'preparing' : 'unavailable' };
       await auditStore.commitAudit(auditId, model, latestState, {
@@ -544,7 +549,10 @@ export function registerServiceWorker(chromeApi, options = {}) {
       const model = await batchRunner({
         entries: normalized.entries, batchAuditId: auditId, chromeAdapter: pipelineAdapter,
         now, signal: entry.controller.signal,
-        reportOptions: options.reportOptions ?? defaultBatchReportOptions(chromeApi),
+        reportOptions: {
+          ...(options.reportOptions ?? defaultBatchReportOptions(chromeApi)),
+          expectedExtensionId: chromeApi.runtime.id,
+        },
         onCheckpoint: async checkpoint => {
           await sessions.set(auditId, checkpoint);
           await sessions.setActiveBatch?.(checkpoint);
@@ -552,7 +560,9 @@ export function registerServiceWorker(chromeApi, options = {}) {
       });
       entry.phase = 'finalizing';
       const status = model?.session?.status || 'failed';
-      const reviewUrl = model?.report?.reviewUrl || null;
+      const reviewUrl = model?.report?.status === 'review-ready'
+        ? chromeApi.runtime.getURL(`src/review/index.html?auditId=${encodeURIComponent(auditId)}`)
+        : null;
       const latestState = {
         auditId, mode: 'batch', status, percent: 100,
         message: batchTerminalMessage(status), reviewUrl, exportStatus: 'preparing',
@@ -936,6 +946,7 @@ function defaultBatchReportOptions(chromeApi) {
     manifestVersion: typeof manifestVersion === 'string' && manifestVersion ? manifestVersion : 'desconhecida',
     rulesVersion: '1.0.0',
     browserVersion: detectBrowserVersion(),
+    expectedExtensionId: chromeApi.runtime.id,
   };
 }
 

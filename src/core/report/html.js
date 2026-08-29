@@ -120,7 +120,10 @@ function scopeSection(model) {
 }
 
 function pageCard(page, index) {
-  return `<article class="page-card" data-page-summary="${escapeHtml(page.pageId)}"><h3>Página ${index + 1}</h3><p class="page-status">${pageStatus(page.status)}</p><dl class="meta"><dt>Identificador</dt><dd><code>${escapeHtml(page.pageId)}</code></dd><dt>URL solicitada</dt><dd><code>${escapeHtml(page.requestedUrl)}</code></dd><dt>URL final</dt><dd><code>${escapeHtml(page.finalUrl)}</code></dd><dt>Observada até</dt><dd>${escapeHtml(page.timestamps.endedAt)}</dd></dl></article>`;
+  const finalUrl = page.finalUrlObserved
+    ? `<code>${escapeHtml(page.finalUrl)}</code>`
+    : 'Não observada — a URL solicitada abaixo não foi tratada como URL final.';
+  return `<article class="page-card" data-page-summary="${escapeHtml(page.pageId)}"><h3>Página ${index + 1}</h3><p class="page-status">${pageStatus(page.status)}</p><dl class="meta"><dt>Identificador</dt><dd><code>${escapeHtml(page.pageId)}</code></dd><dt>URL solicitada</dt><dd><code>${escapeHtml(page.requestedUrl)}</code></dd><dt>URL final</dt><dd>${finalUrl}</dd><dt>Observada até</dt><dd>${escapeHtml(page.timestamps.endedAt)}</dd></dl></article>`;
 }
 
 function executiveSummary(model, decisionByOccurrence) {
@@ -129,6 +132,7 @@ function executiveSummary(model, decisionByOccurrence) {
   const review = model.occurrences.filter(occurrence => displayOutcome(occurrence) === 'cantTell').length;
   const supplemental = model.occurrences.filter(occurrence => ['editorial', 'best-practice'].includes(occurrence.classification)).length;
   const constrainedPages = model.pages.filter(page => page.status !== 'complete').length;
+  const materialEntries = materialLimitationEntries(model);
   return `<section id="resumo" aria-labelledby="resumo-titulo"><h2 id="resumo-titulo">Sumário executivo</h2>
 <p class="section-intro">O sumário conta ocorrências e estados observados; não constitui índice de conformidade ou certificação.</p>
 <div class="summary-grid">
@@ -138,7 +142,7 @@ ${summaryCard('Revisão humana', review, 'Resultados ainda inconclusivos', 'revi
 ${summaryCard('Informativas', supplemental, 'Boa prática ou alerta editorial', 'neutral')}
 ${summaryCard('Páginas com ressalva', constrainedPages, `De ${model.pages.length} páginas registradas`, constrainedPages ? 'review' : 'neutral')}
 </div>
-${model.limitations.length || model.session.diagnostics.length ? `<p class="coverage-notice"><strong>Limitações materiais registradas:</strong> ${escapeHtml(model.limitations.length + model.session.diagnostics.length)}. Consulte a metodologia antes de concluir a análise.</p>` : ''}
+${materialEntries.length ? `<p class="coverage-notice"><strong>Limitações materiais registradas:</strong> ${escapeHtml(materialEntries.length)}. Consulte a metodologia antes de concluir a análise.</p>` : ''}
 </section>`;
 }
 
@@ -200,6 +204,7 @@ function occurrenceCard(occurrence, index, context) {
   const accessibilityArtifact = evidence.find(artifact => artifact.accessibility);
   const preview = occurrence.accessiblePreview || accessibilityArtifact?.accessibility?.announcementPreview;
   const nameSource = accessibilityArtifact?.accessibility?.nameSource;
+  const remediation = coreRemediationForOccurrence(rule, occurrence);
   const anchor = `ocorrencia-${index + 1}`;
 
   return `<article id="${anchor}" class="occurrence-card" data-occurrence-card data-occurrence-id="${escapeHtml(occurrence.occurrenceId)}" data-impact="${escapeHtml(occurrence.impact)}" data-wcag-levels="${escapeHtml(wcagLevels)}" data-outcome="${escapeHtml(occurrence.outcome)}" data-display-outcome="${escapeHtml(consolidated)}" data-classification="${escapeHtml(occurrence.classification)}" data-page="${escapeHtml(occurrence.pageId)}" data-engine="${escapeHtml(occurrence.source.engine)}" data-abnt-item="${escapeHtml(abntToken)}" aria-labelledby="${anchor}-titulo">
@@ -208,6 +213,7 @@ function occurrenceCard(occurrence, index, context) {
 <p><strong>Página:</strong> ${escapeHtml(occurrence.pageId)} — ${pageStatus(page.status)}. <strong>Observada até:</strong> ${escapeHtml(page.timestamps.endedAt)}.</p>
 <div class="decision-strip"><p>Resultado do motor: ${escapeHtml(outcomeLabel(occurrence.outcome))}</p><p>Decisão humana: ${escapeHtml(decisionLabel)}</p><p>Estado consolidado: ${escapeHtml(outcomeLabel(consolidated))}</p></div>
 <div class="observed"><h4>O que foi observado</h4><p>${escapeHtml(occurrence.justification || rule?.summary || 'O motor registrou esta ocorrência sem descrição adicional.')}</p></div>
+${remediation ? `<div class="remediation"><h4>Como corrigir</h4><p>${escapeHtml(remediation)}</p></div>` : ''}
 <div class="confirm"><h4>Como confirmar</h4><p>${escapeHtml(review?.question || confirmationInstruction(occurrence, item))}</p></div>
 ${normativeMapping(occurrence, item)}
 <details open data-collapsible><summary>Detalhes técnicos e evidências</summary>
@@ -218,6 +224,17 @@ ${legalAnalysis(occurrence, item, anchor, consolidated, decision)}
 <section aria-labelledby="${anchor}-proveniencia"><h4 id="${anchor}-proveniencia">Proveniência técnica</h4><dl class="meta"><dt>Motor</dt><dd>${escapeHtml(occurrence.source.engine)}</dd><dt>Regra</dt><dd><code>${escapeHtml(occurrence.source.ruleId)}</code></dd><dt>Versão</dt><dd>${escapeHtml(occurrence.source.version)}</dd><dt>Modo</dt><dd>${modeLabel(occurrence.mode)}</dd><dt>Confiança</dt><dd>${confidenceLabel(occurrence.confidence)}</dd><dt>Frame</dt><dd>${escapeHtml(frame)}</dd><dt>Hashes</dt><dd>${evidence.map(artifact => `<code>${escapeHtml(artifact.hash || 'não disponível')}</code>`).join(' ') || 'não disponíveis'}</dd></dl></section>
 <p><strong>ID da ocorrência:</strong> <code>${escapeHtml(occurrence.occurrenceId)}</code></p>
 </details></article>`;
+}
+
+function coreRemediationForOccurrence(rule, occurrence) {
+  if (rule?.source?.engine !== 'audita-core' || !Array.isArray(rule.targets)) return null;
+  const occurrenceNode = occurrence.nodeId === null ? null : String(occurrence.nodeId);
+  for (const target of rule.targets) {
+    if (!target || typeof target !== 'object' || Array.isArray(target) || typeof target.message !== 'string') continue;
+    const targetNode = target.nodeId === 'document' ? null : String(target.nodeId);
+    if (targetNode === occurrenceNode) return target.message;
+  }
+  return null;
 }
 
 function occurrenceTitle(occurrence, item, rule) {
@@ -354,7 +371,7 @@ function methodologySection(model) {
   const viewport = model.environment.viewport;
   const viewportText = viewport.width === null ? 'não disponível' : `${viewport.width} × ${viewport.height} CSS px; escala ${viewport.deviceScaleFactor}`;
   const sources = unique(model.occurrences.map(occurrence => `${occurrence.source.engine} — ${occurrence.source.version}`));
-  const diagnostics = model.session.diagnostics.map(entry => `${entry.code}: ${entry.message}`);
+  const materialEntries = materialLimitationEntries(model);
   const notes = model.normative?.editorialNotes || [];
   const normativeSources = model.normative?.sources || [];
   const sourceLedger = normativeSources.map(source => {
@@ -366,11 +383,27 @@ function methodologySection(model) {
   return `<section id="metodologia" class="major-section" aria-labelledby="metodologia-titulo"><h2 id="metodologia-titulo">Metodologia, proveniência e integridade</h2><div class="method-grid">
 <article class="method-card"><h3>Método e ambiente</h3><p>${escapeHtml(model.methodology.name)}. Aprovação automática exige aplicabilidade e expectativas integralmente observadas; itens contextuais permanecem inconclusivos.</p><dl class="meta"><dt>Extensão</dt><dd>${escapeHtml(model.versions.extension)}</dd><dt>Regras</dt><dd>${escapeHtml(model.versions.rules)}</dd><dt>Navegador</dt><dd>${escapeHtml(model.versions.browser)}</dd><dt>Viewport</dt><dd>${escapeHtml(viewportText)}</dd><dt>Regras próprias</dt><dd>${escapeHtml(model.methodology.coreRuleCount)}</dd><dt>Regras suplementares</dt><dd>${escapeHtml(model.methodology.supplementalRuleCount)}</dd><dt>Itens normativos</dt><dd>${escapeHtml(model.methodology.itemCount)}</dd></dl></article>
 <article class="method-card"><h3>Proveniência dos motores</h3><ul class="compact-list">${sources.map(source => `<li>${escapeHtml(source)}</li>`).join('') || '<li>Nenhuma ocorrência de motor registrada.</li>'}</ul><p>axe-core, quando habilitado por gate técnico, é suplementar e não aprova item ABNT por si só.</p></article>
-<article class="method-card"><h3>Limitações e diagnósticos</h3><ul class="compact-list">${[...model.limitations, ...diagnostics].map(value => `<li>${escapeHtml(value)}</li>`).join('') || '<li>Nenhuma limitação adicional registrada.</li>'}</ul><p>A ausência de falha automática não comprova conformidade integral.</p></article>
+<article class="method-card"><h3>Limitações e diagnósticos</h3><ul class="compact-list">${materialEntries.map(value => `<li>${escapeHtml(value)}</li>`).join('') || '<li>Nenhuma limitação adicional registrada.</li>'}</ul><p>A ausência de falha automática não comprova conformidade integral.</p></article>
 <article class="method-card"><h3>Fundamentação e fontes</h3><p>Ledger normativo congelado e reproduzível:</p><ul class="compact-list">${sourceLedger}</ul><p><strong>${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.label)}:</strong> ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.display)} ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification)} Ressalva ao texto vigente: ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.currentTextCaveatRef)}.</p></article>
 <article class="method-card"><h3>Notas de integridade normativa</h3><p>Informação impressa e normalização adotada permanecem separadas; o relatório não atribui à ABNT errata não localizada.</p><ul class="compact-list">${notes.map(note => `<li><strong>${escapeHtml(note.itemId)}:</strong> impresso “${escapeHtml(note.printed)}”; normalização “${escapeHtml(note.normalized)}”. ${escapeHtml(note.rationale)}</li>`).join('') || '<li>Nenhuma nota editorial registrada.</li>'}</ul></article>
 <article class="method-card"><h3>Manifesto de integridade</h3>${integrityList(model)}<p>SHA-256 permite verificar igualdade dos artefatos, mas não substitui assinatura digital, carimbo certificado ou ata notarial.</p></article>
 </div></section>`;
+}
+
+function materialLimitationEntries(model) {
+  const diagnostics = [];
+  const diagnosticKeys = new Set();
+  const diagnosticMessages = new Set();
+  for (const entry of model.session.diagnostics) {
+    const key = `${entry.code}\u0000${entry.message}`;
+    if (diagnosticKeys.has(key)) continue;
+    diagnosticKeys.add(key);
+    diagnosticMessages.add(entry.message);
+    diagnostics.push(`${entry.code}: ${entry.message}`);
+  }
+  const limitations = [...new Set(model.limitations)]
+    .filter(value => !diagnosticMessages.has(value));
+  return [...limitations, ...diagnostics];
 }
 
 function integrityList(model) {

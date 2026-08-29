@@ -8,6 +8,13 @@ import {
   renderOccurrenceCsv,
 } from '../../src/core/report/csv.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
+import {
+  canonicalBatchRuleSummary,
+  canonicalCoreRuleSummary,
+  canonicalScope,
+  derivePageLimitations,
+  deriveSystemLimitations,
+} from '../../src/core/report/text-policy.js';
 
 const HEADERS = [
   'csv_schema_version', 'audit_id', 'occurrence_id', 'page_id', 'page_url',
@@ -32,6 +39,8 @@ function setCoreRuleInapplicable(input, ruleId) {
   assert.ok(rule, `regra ${ruleId} ausente na fixture`);
   rule.outcome = 'inapplicable';
   rule.targets = [];
+  rule.summary = canonicalCoreRuleSummary(ruleId, 'inapplicable');
+  rule.limitations = [];
   for (const itemId of rule.nbrItems) {
     const item = input.itemResults.find(value => value.id === itemId);
     assert.ok(item, `item ${itemId} ausente na fixture`);
@@ -103,9 +112,9 @@ test('projects every rich page-derived field to one fixed marker without mutatin
   const input = structuredClone(SAMPLE_AUDIT);
   const nested = Array.from({ length: 5 }).reduce(value => globalThis.btoa(value), '<script>PRIVATE_NESTED()</script>');
   const png = 'Qk1G AAAAAAAA ADYAAAAo AAAA AQAAAAEA AAABABgA AAAQAAAA CwAA AAsA AAAAAAAAAAAAAAAA';
-  input.occurrences[0].justification = `prefix<strong class PRIVATE_DESCRIPTION ${nested}`;
-  input.occurrences[0].target.selector = `ZGF0YQ== Og== eA== ${png}`;
-  input.occurrences[0].target.framePath = ['prefix<customer name=Alice', 'Ymxv Yjp4'];
+  const richEvidence = input.evidence.find(entry => entry.evidenceId === 'ev-control');
+  richEvidence.selector.css = `ZGF0YQ== Og== eA== ${png}`;
+  richEvidence.selector.framePath = ['prefix<customer name=Alice', 'Ymxv Yjp4'];
   input.occurrences[0].accessiblePreview = 'A data: da reunião será amanhã. UFJJVg== QVRF';
   input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource =
     `${globalThis.btoa('\xffPRIVATEzz')}\u2028\u2029`;
@@ -138,9 +147,9 @@ test('omits raw HTML, resource URLs, encoded pixels and credential prose in ever
 
   for (const payload of payloads) {
     const input = structuredClone(SAMPLE_AUDIT);
-    input.occurrences[0].justification = payload;
-    input.occurrences[0].target.selector = payload;
-    input.occurrences[0].target.framePath = [payload];
+    const richEvidence = input.evidence.find(entry => entry.evidenceId === 'ev-control');
+    richEvidence.selector.css = payload;
+    richEvidence.selector.framePath = [payload];
     input.occurrences[0].accessiblePreview = payload;
     input.evidence.find(entry => entry.evidenceId === 'ev-control').accessibility.nameSource = payload;
 
@@ -171,14 +180,13 @@ test('exports only an HTTP(S) origin from a canonical page URL', async () => {
 
 test('uses only local catalog titles and fixed outcome descriptions', async () => {
   const input = structuredClone(SAMPLE_AUDIT);
-  input.occurrences[0].justification = 'PRIVATE customer prose';
 
   const first = asRecord(parseQuotedCsv(renderOccurrenceCsv(await verifiedAudit(input)))[1]);
 
   assert.equal(first.title, 'Indicador de foco visível');
   assert.equal(first.description,
     'Requisito: não conformidade observada; detalhes disponíveis somente no HTML/JSON.');
-  assert.doesNotMatch(JSON.stringify(first), /customer prose/iu);
+  assert.doesNotMatch(JSON.stringify(first), /PRIVATE|customer prose/iu);
 });
 
 test('derives CSV provenance exclusively from the same registry accepted by canonical JSON', async () => {
@@ -193,7 +201,7 @@ test('derives CSV provenance exclusively from the same registry accepted by cano
 
 test('fails the whole CSV projection instead of silently emptying a list above 256 evidence references', async () => {
   const input = structuredClone(SAMPLE_AUDIT);
-  const source = input.evidence.find(entry => entry.evidenceId === 'ev-full');
+  const source = input.evidence.find(entry => entry.evidenceId === 'ev-control');
   const extra = Array.from({ length: 255 }, (_, index) => ({
     ...structuredClone(source),
     evidenceId: `ev-list-boundary-${String(index).padStart(3, '0')}`,
@@ -215,7 +223,7 @@ test('fails the whole CSV projection instead of silently emptying a list above 2
 
 test('fails a 256-item reference list that would otherwise be truncated inside a CSV cell', async () => {
   const input = structuredClone(SAMPLE_AUDIT);
-  const source = input.evidence.find(entry => entry.evidenceId === 'ev-full');
+  const source = input.evidence.find(entry => entry.evidenceId === 'ev-control');
   const extra = Array.from({ length: 254 }, (_, index) => ({
     ...structuredClone(source),
     evidenceId: `ev-${String(index).padStart(3, '0')}-${'x'.repeat(180)}`,
@@ -244,13 +252,13 @@ test('never truncates a complete correlation list to add spreadsheet neutralizat
   });
   assert.equal(ids.reduce((sum, id) => sum + id.length, 0), 15_105);
 
-  const fullPageSource = structuredClone(input.evidence[0]);
+  const elementSource = structuredClone(input.evidence[1]);
   input.evidence[0].evidenceId = ids[0];
   input.evidence[1].evidenceId = ids[1];
   input.evidence[1].fullPageEvidenceId = ids[0];
   input.evidence.push(...ids.slice(2).map(evidenceId => ({
-    ...structuredClone(fullPageSource),
-    evidenceId,
+    ...structuredClone(elementSource),
+    evidenceId, fullPageEvidenceId: ids[0],
   })));
   for (const occurrence of input.occurrences) {
     occurrence.evidenceRefs = occurrence.evidenceRefs.map(id => id === 'ev-full' ? ids[0] : ids[1]);
@@ -301,8 +309,10 @@ test('neutralizes the spreadsheet surface by projecting hostile prefixes out of 
       ...structuredClone(input.occurrences[0].target),
       nodeId: `n-formula-${index}`,
     },
-    justification: value,
+    justification: canonicalCoreRuleSummary('focus-visible', 'failed'),
     accessiblePreview: value,
+    evidenceRefs: ['ev-full'],
+    evidenceIds: ['ev-full'],
   }));
   bindCoreRuleTargets(input, 'focus-visible', input.occurrences);
   setCoreRuleInapplicable(input, 'focus-order');
@@ -325,18 +335,53 @@ test('resolves each occurrence URL and timestamp by pageId', async () => {
     mode: 'batch',
     urls: [...input.requestedScope.urls, 'https://segunda.example.test/solicitada'],
   };
-  input.pages.push({
+  input.scope = canonicalScope('batch', 2);
+  delete input.snapshot;
+  input.pages[0].coverage = {};
+  input.pages[0].timestamps = {
+    startedAt: '2026-08-26T14:00:00.000Z',
+    endedAt: '2026-08-26T14:00:30.000Z',
+    generatedAt: input.timestamps.generatedAt,
+  };
+  const failedPage = {
     pageId: 'page-2',
     requestedUrl: 'https://segunda.example.test/solicitada',
     finalUrl: 'https://segunda.example.test/final/private?view=public',
-    status: 'failed',
+    status: 'failed', attempted: true, finalUrlObserved: true,
+    axeStatus: 'not-run',
     timestamps: {
-      startedAt: '2026-08-26T14:03:00.000Z',
-      endedAt: '2026-08-26T14:03:01.000Z',
-      generatedAt: '2026-08-26T14:03:02.000Z',
+      startedAt: '2026-08-26T14:00:40.000Z',
+      endedAt: '2026-08-26T14:00:50.000Z',
+      generatedAt: '2026-08-26T14:01:00.000Z',
     },
     viewport: { width: null, height: null, deviceScaleFactor: null },
-  });
+    coverage: {},
+    warnings: [],
+    limitations: [],
+    diagnostics: [
+      {
+        code: 'ENVIRONMENT_UNAVAILABLE', message: 'Os metadados públicos do ambiente não puderam ser lidos.',
+        at: '2026-08-26T14:00:49.000Z', recoverable: true,
+      },
+      {
+        code: 'CORE_AUDIT_FAILED', message: 'O núcleo de regras não pôde concluir a auditoria.',
+        at: '2026-08-26T14:00:50.000Z', recoverable: false,
+      },
+    ],
+  };
+  input.pages.push(failedPage);
+  const secondPristine = structuredClone(input.evidence.find(entry => entry.evidenceId === 'ev-full'));
+  secondPristine.evidenceId = 'ev-full-page-2';
+  secondPristine.pageId = 'page-2';
+  input.evidence.push(secondPristine);
+  input.evidenceStateCount = 2;
+  input.reproducibility.capturedStateCount = 2;
+  input.session.diagnostics.push(...structuredClone(failedPage.diagnostics));
+  for (const rule of input.ruleResults) {
+    if (rule.source?.engine === 'audita-core') {
+      rule.summary = canonicalBatchRuleSummary(rule.outcome, 1, 2);
+    }
+  }
   input.occurrences.push({
     ...structuredClone(input.occurrences[0]),
     occurrenceId: 'occ-page-2',
@@ -344,6 +389,8 @@ test('resolves each occurrence URL and timestamp by pageId', async () => {
     evidenceRefs: [],
     evidenceIds: [],
   });
+  input.limitations = deriveSystemLimitations(input);
+  for (const page of input.pages) page.limitations = derivePageLimitations(input, page);
   const canonical = await verifiedAudit(input);
 
   const pageTwo = parseQuotedCsv(renderOccurrenceCsv(canonical)).slice(1).map(asRecord)
@@ -406,8 +453,10 @@ test('processes repeated long benign prose in bounded time without decoding or b
       ...structuredClone(input.occurrences[0].target),
       nodeId: `n-long-${index}`,
     },
-    justification: prose,
+    justification: canonicalCoreRuleSummary('focus-visible', 'failed'),
     accessiblePreview: prose,
+    evidenceRefs: ['ev-full'],
+    evidenceIds: ['ev-full'],
   }));
   bindCoreRuleTargets(input, 'focus-visible', input.occurrences);
   setCoreRuleInapplicable(input, 'focus-order');

@@ -12,13 +12,26 @@ import { renderTechnicalJson } from '../core/report/earl-json.js';
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { renderHtmlReport } from '../core/report/html.js';
 import { REPORT_HASH_BASE, verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
+import { preparedReportFormats } from '../core/report/report-policy.js';
+import { deriveSystemLimitations } from '../core/report/text-policy.js';
 import { inspectAuditSnapshotCapability } from '../storage/audit-store.js';
-import { createExportIssue, issueForPrintStage, PDF_GENERATION_FAILURE_CODES } from './export-issues.js';
+import {
+  captureCanonicalExportIssues,
+  createExportIssue,
+  issueForPrintStage,
+  PDF_GENERATION_FAILURE_CODES,
+  REPORT_GENERATION_ISSUE_CODES,
+  reportExportInputError,
+} from './export-issues.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const PDF_COMMAND_TIMEOUT_MS = 45_000;
 const MAX_FINALIZATION_PASSES = 6;
 const GENERATED_REPORT_RESULTS = new WeakMap();
+const REPORT_REQUEST_KEYS = new Set([
+  'auditModel', 'auditSnapshotCapability', 'exportLeaseOwnerId', 'exportAttempt',
+  'manifestVersion', 'browserVersion', 'timezone', 'now', 'timeoutMs', 'brand',
+]);
 
 class OwnershipTransferTimeoutError extends DOMException {
   constructor() {
@@ -27,34 +40,40 @@ class OwnershipTransferTimeoutError extends DOMException {
 }
 
 export async function runReportExport(request, dependencies) {
-  validateDependencies(dependencies);
-  const at = canonicalNow(request?.now);
+  const capturedRequest = captureReportExportRequest(request);
   let snapshotCapability = null;
   let exportLeaseOwnerId = null;
   let exportAttempt = null;
-  let sourceModel = request?.auditModel;
-  if (request?.auditSnapshotCapability !== undefined) {
-    const snapshot = inspectAuditSnapshotCapability(request.auditSnapshotCapability);
-    if (!snapshot) throw new TypeError('Capacidade de snapshot da auditoria inválida para geração.');
-    snapshotCapability = request.auditSnapshotCapability;
-    exportLeaseOwnerId = validLeaseOwnerId(request?.exportLeaseOwnerId);
-    exportAttempt = validExportAttempt(request?.exportAttempt);
+  let sourceModel;
+  if (capturedRequest.auditSnapshotCapability !== undefined) {
+    const snapshot = inspectAuditSnapshotCapability(capturedRequest.auditSnapshotCapability);
+    if (!snapshot) throw reportExportInputError();
+    snapshotCapability = capturedRequest.auditSnapshotCapability;
+    exportLeaseOwnerId = validLeaseOwnerId(capturedRequest.exportLeaseOwnerId);
+    exportAttempt = validExportAttempt(capturedRequest.exportAttempt);
+    sourceModel = createAuditModel(snapshot.model);
     if (typeof dependencies.assertDelivery !== 'function') {
       throw new TypeError('Revalidação da exclusividade de entrega indisponível para o snapshot persistido.');
     }
     if (typeof dependencies.recordDelivery !== 'function') {
       throw new TypeError('Journal persistente de entrega indisponível para o snapshot persistido.');
     }
-    sourceModel = await enrichAuditForReport(snapshot.model, {
+  } else {
+    sourceModel = createAuditModel(capturedRequest.auditModel);
+  }
+  validateDependencies(dependencies);
+  const at = safeCanonicalNow(capturedRequest.now);
+  if (snapshotCapability !== null) {
+    sourceModel = await enrichAuditForReport(sourceModel, {
       now: () => at,
-      timezone: request.timezone ?? snapshot.model.timezone,
-      manifestVersion: request.manifestVersion,
-      rulesVersion: snapshot.model.methodology?.version ?? snapshot.model.versions?.rules,
-      browserVersion: request.browserVersion ?? snapshot.model.environment?.chromeVersion,
+      timezone: capturedRequest.timezone ?? sourceModel.timezone,
+      manifestVersion: capturedRequest.manifestVersion,
+      rulesVersion: sourceModel.methodology?.version ?? sourceModel.versions?.rules,
+      browserVersion: capturedRequest.browserVersion ?? sourceModel.environment?.chromeVersion,
     });
   }
-  const original = sanitizeReportMessages(createAuditModel(sourceModel));
-  const timeoutMs = request?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const original = sanitizeReportMessages(sourceModel);
+  const timeoutMs = capturedRequest.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('Timeout de exportação inválido.');
   const generationIssues = [];
   const printCleanupLimitations = [];
@@ -387,41 +406,49 @@ function renderCanonicalCsv(model, csvRenderer) {
 
 export async function finalizeGeneratedModel(model, at, issues, hasPdf, pdfFallback = false, artifactsPrepared = true, hasCsv = true) {
   const canonical = createAuditModel(model);
+  const controlled = captureCanonicalExportIssues(issues, {
+    allowedCodes: [...REPORT_GENERATION_ISSUE_CODES, 'REPORT_EXPORT_PREPARATION_FAILED'],
+  });
   if (/^[a-f0-9]{64}$/u.test(canonical.integrity?.canonicalModelHash ?? '') &&
     /^[a-f0-9]{64}$/u.test(canonical.integrity?.evidenceManifestHash ?? '')) {
     await verifyAuditIntegritySnapshot(canonical);
   }
   const next = sanitizeReportMessages(canonical);
-  const controlled = dedupeIssues(issues);
-  if (controlled.length && !['failed', 'cancelled'].includes(next.session.status)) next.session.status = 'partial';
-  next.session.partial = next.session.status === 'partial';
-  const messages = controlled.map(issue => issue.message);
-  next.limitations = [...new Set([...(next.limitations ?? []), ...messages])];
-  next.session.diagnostics = [...(next.session.diagnostics ?? []), ...controlled.map(issue => ({
+  const generatedAt = canonicalGeneratedAt(at);
+  next.timestamps = { ...next.timestamps, generatedAt };
+  next.pages = next.pages.map(page => ({
+    ...page,
+    timestamps: { ...page.timestamps, generatedAt },
+  }));
+  const generationCode = code => REPORT_GENERATION_ISSUE_CODES.includes(code) ||
+    code === 'REPORT_EXPORT_PREPARATION_FAILED';
+  next.session.diagnostics = [
+    ...(next.session.diagnostics ?? []).filter(entry => !generationCode(entry.code)),
+    ...controlled.map(issue => ({
     code: issue.code,
     message: issue.message,
-    at,
+    at: generatedAt,
     recoverable: true,
-  }))];
+    })),
+  ];
+  const messages = controlled.map(issue => issue.message);
   const reportStatus = controlled.length || next.session.status !== 'complete' ? 'partial' : 'complete';
   next.report = {
-    ...(next.report ?? {}),
     status: reportStatus,
+    reviewUrl: null,
     artifact: {
       status: controlled.length ? 'partial' : 'complete',
       pdfFallback,
       limitations: messages,
-      formats: artifactsPrepared
-        ? ['html', 'json', ...(hasCsv ? ['csv'] : []), ...(hasPdf ? ['pdf'] : [])]
-          .map(format => ({ format, status: 'prepared' }))
-        : [],
+      formats: artifactsPrepared ? preparedReportFormats({ hasCsv, hasPdf }) : [],
     },
   };
+  next.limitations = deriveSystemLimitations(next);
   next.integrity = {
     algorithm: 'SHA-256', evidenceManifestHash: 'pending', canonicalModelHash: 'pending', hashBase: REPORT_HASH_BASE,
   };
   return enrichAuditForReport(next, {
-    now: () => at,
+    now: () => generatedAt,
     timezone: next.timezone,
     manifestVersion: next.versions?.extension,
     rulesVersion: next.versions?.rules,
@@ -436,9 +463,49 @@ function canonicalNow(now) {
   return date.toISOString();
 }
 
+function safeCanonicalNow(now) {
+  try { return canonicalNow(now); } catch { throw reportExportInputError(); }
+}
+
+function canonicalGeneratedAt(value) {
+  try {
+    if (typeof value !== 'string') throw new TypeError();
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime()) || date.toISOString() !== value) throw new TypeError();
+    return value;
+  } catch {
+    throw reportExportInputError();
+  }
+}
+
 function validExportAttempt(value) {
   if (!Number.isSafeInteger(value) || value < 1) throw new TypeError('Tentativa da exportação inválida.');
   return value;
+}
+
+function captureReportExportRequest(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new TypeError();
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    if (keys.some(key => typeof key !== 'string' || !REPORT_REQUEST_KEYS.has(key))) throw new TypeError();
+    const output = Object.create(null);
+    for (const key of keys) {
+      const descriptor = descriptors[key];
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new TypeError();
+      if (key !== 'brand') output[key] = descriptor.value;
+    }
+    const hasModel = Object.hasOwn(output, 'auditModel');
+    const hasCapability = Object.hasOwn(output, 'auditSnapshotCapability');
+    if (hasModel === hasCapability) throw new TypeError();
+    if (hasCapability && (!Object.hasOwn(output, 'exportLeaseOwnerId') || !Object.hasOwn(output, 'exportAttempt'))) {
+      throw new TypeError();
+    }
+    return Object.freeze(output);
+  } catch {
+    throw reportExportInputError();
+  }
 }
 
 function validateDependencies(dependencies) {
@@ -554,12 +621,6 @@ function adoptBoundary(promise, timeoutMs, disposeLate) {
     }, timeoutMs);
   });
   return Promise.race([source, timeout]).finally(() => clearTimeout(timer));
-}
-
-function dedupeIssues(issues) {
-  const byCode = new Map();
-  for (const issue of issues) if (issue?.code && issue?.message && !byCode.has(issue.code)) byCode.set(issue.code, issue);
-  return [...byCode.values()];
 }
 
 function addIssue(issues, issue) {

@@ -110,23 +110,27 @@ test('validates every rule, occurrence, evidence and review graph link', () => {
   for (const input of probes) assert.throws(() => createAuditModel(input), /regra|item|ocorrência|evidência|revisão|decisão|status|resposta|data/i);
 });
 
-test('preserves legitimate failed and cancelled terminal sessions without touching input', () => {
-  for (const status of ['failed', 'cancelled']) {
-    const input = reportInput({ session: {
-      status, partial: false,
-      diagnostics: [{
-        code: status === 'failed' ? 'CORE_AUDIT_FAILED' : 'NAVIGATION_FAILED',
-        message: status === 'failed'
-          ? 'O núcleo de regras não pôde concluir a auditoria.'
-          : 'A auditoria foi cancelada.',
-        at: '2026-08-26T14:00:30.000Z', recoverable: false,
-      }],
-    } });
-    const model = createAuditModel(input);
-    assert.equal(model.session.status, status);
-    assert.equal(input.session.status, status);
-    assert.equal(Object.isFrozen(input), false);
-  }
+test('preserves legitimate cancellation and rejects a core failure that claims completed core facts', () => {
+  const forgedFailure = reportInput({ session: {
+    status: 'failed', partial: false,
+    diagnostics: [{
+      code: 'CORE_AUDIT_FAILED', message: 'O núcleo de regras não pôde concluir a auditoria.',
+      at: '2026-08-26T14:00:30.000Z', recoverable: false,
+    }],
+  } });
+  assert.throws(() => createAuditModel(forgedFailure), /modelo de auditoria inválido/iu);
+
+  const input = reportInput({ session: {
+    status: 'cancelled', partial: false,
+    diagnostics: [{
+      code: 'NAVIGATION_FAILED', message: 'A auditoria foi cancelada.',
+      at: '2026-08-26T14:00:30.000Z', recoverable: false,
+    }],
+  } });
+  const model = createAuditModel(input);
+  assert.equal(model.session.status, 'cancelled');
+  assert.equal(input.session.status, 'cancelled');
+  assert.equal(Object.isFrozen(input), false);
 });
 
 test('rejects whitespace and non-ISO instants across report and diagnostic timestamps', () => {
@@ -137,6 +141,12 @@ test('rejects whitespace and non-ISO instants across report and diagnostic times
   }
   for (const at of [' 2026-08-26T14:00:30.000Z', '26 de agosto de 2026']) {
     const input = reportInput();
+    input.session.diagnostics[0] = {
+      code: 'DYNAMIC_PROBES_INCOMPLETE',
+      message: 'As verificações dinâmicas atingiram o tempo limite.',
+      at: '2026-08-26T14:00:30.000Z',
+      recoverable: true,
+    };
     input.session.diagnostics[0].at = at;
     assert.throws(() => createAuditModel(input), /diagnóst|ISO|data|canôn/i);
   }
@@ -144,6 +154,12 @@ test('rejects whitespace and non-ISO instants across report and diagnostic times
 
 test('projects V1 diagnostics onto the closed summary without retaining arbitrary details', () => {
   const input = reportInput();
+  input.session.diagnostics[0] = {
+    code: 'DYNAMIC_PROBES_INCOMPLETE',
+    message: 'As verificações dinâmicas atingiram o tempo limite.',
+    at: '2026-08-26T14:00:30.000Z',
+    recoverable: true,
+  };
   input.session.diagnostics[0].details = { frameId: 'frame-1', attempts: 2, privateContextMarker: 'PRIVATE_DIAGNOSTIC' };
   const model = createAuditModel(input);
   assert.equal(Object.hasOwn(model.session.diagnostics[0], 'details'), false);
@@ -153,11 +169,11 @@ test('projects V1 diagnostics onto the closed summary without retaining arbitrar
   for (const diagnostic of [
     null,
     { code: '', message: 'Falha.', at: '2026-08-26T14:00:30.000Z', recoverable: true },
-    { code: 'FRAME_LIMITED', message: ' ', at: '2026-08-26T14:00:30.000Z', recoverable: true },
-    { code: 'FRAME_LIMITED', message: 'Falha.', at: '2026-08-26T14:00:30.000Z', recoverable: 'true' },
+    { code: 'DYNAMIC_PROBES_INCOMPLETE', message: ' ', at: '2026-08-26T14:00:30.000Z', recoverable: true },
+    { code: 'DYNAMIC_PROBES_INCOMPLETE', message: 'As verificações dinâmicas atingiram o tempo limite.', at: '2026-08-26T14:00:30.000Z', recoverable: 'true' },
   ]) {
     const invalid = reportInput({ session: { status: 'partial', diagnostics: [diagnostic], partial: true } });
-    assert.throws(() => createAuditModel(invalid), /modelo|status|sessão|diagnóst|diagnostic|code|message|recoverable|texto|boolean/i);
+    assert.throws(() => createAuditModel(invalid), /modelo de auditoria inválido/iu);
   }
 });
 

@@ -2,6 +2,8 @@ import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
 import { CORE_RULES } from '../../src/core/audit.js';
 import { aggregateItems } from '../../src/core/rules/aggregate-items.js';
 
+const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
 export function reportInput(overrides = {}) {
   const ruleResults = CORE_RULES.map(rule => ({
     ruleId: rule.id,
@@ -34,7 +36,12 @@ export function reportInput(overrides = {}) {
     environment: { chromeVersion: 'Chrome/147.0.0.0', viewport: { width: 1280, height: 720, deviceScaleFactor: 1 } },
     scope: { kind: 'single-page', description: 'Página e estado observado após carregamento.' },
     methodology: { name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 130, itemCount: 146 },
-    session: { status: 'partial', diagnostics: [{ code: 'FRAME_LIMITED', message: 'Um frame não pôde ser lido.', at: '2026-08-26T14:00:30.000Z', recoverable: true }], partial: true },
+    session: { status: 'partial', diagnostics: [{
+      code: 'DYNAMIC_PROBES_INCOMPLETE',
+      message: 'As verificações dinâmicas atingiram o tempo limite.',
+      at: '2026-08-26T14:00:30.000Z',
+      recoverable: true,
+    }], partial: true },
     limitations: ['A auditoria cobre somente a página e o estado observados.'],
     ruleResults,
     itemResults,
@@ -42,7 +49,13 @@ export function reportInput(overrides = {}) {
       occurrenceId: 'occ-1', itemId: '5.1.4', ruleId: 'focus-order', outcome: 'cantTell', mode: 'assisted', nodeId: 'n-1',
       evidenceIds: ['ev-1'], justification: 'A ordem precisa ser confirmada por uma pessoa.',
     }],
-    evidence: { stateCount: 1, artifacts: [{ evidenceId: 'ev-1', kind: 'element', nodeId: 'n-1', selector: { css: '#conteudo' }, snippet: '<button>Continuar</button>', hash: 'sha-evidence' }] },
+    evidence: { stateCount: 1, artifacts: [
+      {
+        evidenceId: 'ev-full', kind: 'full-page', state: 'pristine', dataUrl: PNG,
+        metadata: { width: 1, height: 1 }, hash: 'sha256-full-page-fixture',
+      },
+      { evidenceId: 'ev-1', kind: 'element', nodeId: 'n-1', selector: { css: '#conteudo' }, snippet: '<button>Continuar</button>', hash: 'sha-evidence' },
+    ] },
     manualReview: [{ occurrenceId: 'occ-1', itemId: '5.1.4', ruleId: 'focus-order', mode: 'assisted', status: 'unanswered', question: 'A ordem de foco é previsível?', reason: 'Exige julgamento humano.' }],
     reviewDecisions: [],
     progress: [],

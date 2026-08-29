@@ -379,9 +379,8 @@ function preparedArtifactFormats(model) {
     throw new TypeError('Limitações do artefato não correspondem aos diagnósticos controlados da geração atual.');
   }
   if (currentGenerationIssues.length > 0) {
-    if (artifact.status !== 'partial' || report.status !== 'partial' ||
-      model.session?.status !== 'partial' || model.session.partial !== true) {
-      throw new TypeError('Diagnósticos de geração exigem artefato, relatório e sessão parciais.');
+    if (artifact.status !== 'partial' || report.status !== 'partial') {
+      throw new TypeError('Diagnósticos de geração exigem artefato e relatório parciais.');
     }
   } else {
     const expectedReportStatus = model.session?.status === 'complete' ? 'complete' : 'partial';
@@ -395,9 +394,8 @@ function preparedArtifactFormats(model) {
   }
   if (missing.length > 0) {
     if (artifact.status !== 'partial' || report.status !== 'partial' ||
-      model.session?.status !== 'partial' || model.session.partial !== true ||
       !Array.isArray(model.session.diagnostics) || !Array.isArray(model.limitations)) {
-      throw new TypeError('Omissão de formato exige relatório, artefato e sessão parciais.');
+      throw new TypeError('Omissão de formato exige relatório e artefato parciais.');
     }
     if (missing.includes('pdf') && artifact.pdfFallback !== false) {
       throw new TypeError('PDF ausente não pode declarar fallback gerado.');

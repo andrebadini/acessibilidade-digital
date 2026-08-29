@@ -2,14 +2,177 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
-import { runReportExport } from '../../src/export/report-export.js';
-import { commitReviewDecision } from '../../src/review/review-state.js';
+import { finalizeGeneratedModel, runReportExport } from '../../src/export/report-export.js';
+import { createExportIssue } from '../../src/export/export-issues.js';
+import { createAuditModel } from '../../src/core/report/audit-model.js';
+import { AUDIT_MODEL_INPUT_ERROR_CODE, AUDIT_MODEL_INPUT_ERROR_MESSAGE } from '../../src/core/report/audit-input.js';
+import { canonicalBatchRuleSummary, canonicalScope } from '../../src/core/report/text-policy.js';
+import { renderHtmlReport } from '../../src/core/report/html.js';
+import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
+import { renderOccurrenceCsv } from '../../src/core/report/csv.js';
+import { verifyAuditIntegritySnapshot } from '../../src/core/report/integrity.js';
+import { commitReviewDecision, recordReviewDecision } from '../../src/review/review-state.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 
 const PDF = new TextEncoder().encode('%PDF-1.7\nlocal');
 const FALLBACK_PDF = new TextEncoder().encode('%PDF-1.7\nfinal-fallback');
 
 function clone(value) { return structuredClone(value); }
+
+function completeSingleAudit() {
+  const model = clone(SAMPLE_AUDIT);
+  model.session.status = 'complete';
+  model.session.partial = false;
+  model.session.diagnostics = [];
+  model.pages[0].status = 'complete';
+  model.pages[0].diagnostics = [];
+  model.limitations = [
+    'O relatório cobre somente uma página e o estado observado; não constitui declaração de conformidade do site inteiro.',
+  ];
+  return model;
+}
+
+function completeBatchAudit() {
+  const model = completeSingleAudit();
+  const secondRequestedUrl = 'https://second.example.test/';
+  const second = {
+    ...clone(model.pages[0]), pageId: 'page-2', requestedUrl: secondRequestedUrl,
+    finalUrl: secondRequestedUrl, finalUrlObserved: true, diagnostics: [], coverage: {},
+    timestamps: {
+      startedAt: model.pages[0].timestamps.endedAt,
+      endedAt: model.pages[0].timestamps.endedAt,
+      generatedAt: model.timestamps.generatedAt,
+    },
+  };
+  model.pages[0].coverage = {};
+  model.requestedScope = { mode: 'batch', urls: [model.requestedUrl, secondRequestedUrl] };
+  model.pages.push(second);
+  const secondPristine = clone(model.evidence.find(artifact =>
+    artifact.pageId === 'page-1' && artifact.kind === 'full-page' && artifact.state === 'pristine'));
+  secondPristine.evidenceId = 'ev-full-page-2';
+  secondPristine.pageId = 'page-2';
+  model.evidence.push(secondPristine);
+  model.evidenceStateCount = 2;
+  model.reproducibility.capturedStateCount = 2;
+  model.scope = canonicalScope('batch', model.pages.length);
+  delete model.snapshot;
+  model.limitations = [
+    'O relatório cobre somente a lista explícita de URLs e os estados observados; não constitui declaração de conformidade do site inteiro.',
+  ];
+  for (const rule of model.ruleResults) {
+    if (rule.source.engine === 'audita-core') {
+      rule.summary = canonicalBatchRuleSummary(rule.outcome, 1, model.pages.length);
+    }
+  }
+  return model;
+}
+
+test('keeps technical single and batch status complete when an export artifact is partial', async () => {
+  const issue = createExportIssue('REPORT_PDF_UNAVAILABLE');
+  for (const input of [completeSingleAudit(), completeBatchAudit()]) {
+    const finalized = await finalizeGeneratedModel(
+      input, '2026-08-26T15:00:00.000Z', [issue], false, false, true, true,
+    );
+    assert.equal(finalized.session.status, 'complete');
+    assert.equal(finalized.session.partial, false);
+    assert.ok(finalized.pages.every(page => page.status === 'complete'));
+    assert.equal(finalized.report.status, 'partial');
+    assert.equal(finalized.report.artifact.status, 'partial');
+    assert.ok(finalized.session.diagnostics.some(diagnostic =>
+      diagnostic.code === issue.code && diagnostic.recoverable === true));
+    assert.doesNotThrow(() => createAuditModel(finalized));
+    assert.doesNotThrow(() => renderHtmlReport(finalized));
+    assert.doesNotThrow(() => renderTechnicalJson(finalized));
+    assert.doesNotThrow(() => renderOccurrenceCsv(finalized));
+  }
+});
+
+test('rejects noncanonical export issues and never invokes issue or request accessors', async () => {
+  const marker = 'PRIVATE_EXPORT_ISSUE_MARKER_7Q9Z';
+  await assert.rejects(
+    finalizeGeneratedModel(
+      clone(SAMPLE_AUDIT), '2026-08-26T15:00:00.000Z',
+      [{ code: 'REPORT_PDF_UNAVAILABLE', message: marker }], false,
+    ),
+    error => {
+      assert.doesNotMatch(String(error?.message ?? error), new RegExp(marker, 'u'));
+      return true;
+    },
+  );
+  await assert.rejects(
+    finalizeGeneratedModel(
+      clone(SAMPLE_AUDIT), '2026-08-26T15:00:00.000Z',
+      [{ code: 'REPORT_PDF_UNAVAILABLE', message: 'x'.repeat(2_000_000) }], false,
+    ),
+    error => {
+      assert.equal(error?.code, 'REPORT_EXPORT_INPUT_INVALID');
+      assert.doesNotMatch(String(error?.message ?? error), /x{32}/u);
+      return true;
+    },
+  );
+
+  let issueReads = 0;
+  const accessorIssue = { code: 'REPORT_PDF_UNAVAILABLE' };
+  Object.defineProperty(accessorIssue, 'message', {
+    enumerable: true,
+    get() { issueReads += 1; throw new Error(marker); },
+  });
+  await assert.rejects(
+    finalizeGeneratedModel(clone(SAMPLE_AUDIT), '2026-08-26T15:00:00.000Z', [accessorIssue], false),
+    error => {
+      assert.doesNotMatch(String(error?.message ?? error), new RegExp(marker, 'u'));
+      return true;
+    },
+  );
+  assert.equal(issueReads, 0);
+
+  let nowReads = 0;
+  const request = { auditModel: clone(SAMPLE_AUDIT) };
+  Object.defineProperty(request, 'now', {
+    enumerable: true,
+    get() { nowReads += 1; throw new Error(marker); },
+  });
+  await assert.rejects(runReportExport(request, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    downloadsAdapter: fakeDownloads([]),
+  }), error => {
+    assert.doesNotMatch(String(error?.message ?? error), new RegExp(marker, 'u'));
+    return true;
+  });
+  assert.equal(nowReads, 0);
+});
+
+test('snapshots the model before export callbacks or issue reflection can mutate the caller graph', async () => {
+  const marker = 'PRIVATE_EXPORT_TOCTOU_MARKER_7Q9Z';
+  const issueModel = clone(SAMPLE_AUDIT);
+  const issue = new Proxy(createExportIssue('REPORT_PDF_UNAVAILABLE'), {
+    getPrototypeOf(target) {
+      issueModel.scope.description = marker;
+      return Reflect.getPrototypeOf(target);
+    },
+  });
+  const finalized = await finalizeGeneratedModel(
+    issueModel, '2026-08-26T15:00:00.000Z', [issue], false,
+  );
+  assert.equal(issueModel.scope.description, marker);
+  assert.doesNotMatch(JSON.stringify(finalized), new RegExp(marker, 'u'));
+
+  const callbackModel = clone(SAMPLE_AUDIT);
+  const result = await runReportExport({
+    auditModel: callbackModel,
+    now() {
+      callbackModel.scope.description = marker;
+      return '2026-08-26T15:00:00.000Z';
+    },
+  }, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    downloadsAdapter: fakeDownloads([]),
+  });
+  assert.equal(callbackModel.scope.description, marker);
+  assert.doesNotMatch(JSON.stringify(result.model), new RegExp(marker, 'u'));
+});
 
 test('prints one inactive blob tab, cleans exact resources, and exports one shared 146-item model', async () => {
   const events = [];
@@ -50,6 +213,34 @@ test('prints one inactive blob tab, cleans exact resources, and exports one shar
     assert.ok(technical.audit.occurrences.some(entry => entry.occurrenceId === occurrence.occurrenceId));
   }
   assert.doesNotMatch(JSON.stringify(result), /blob:chrome-extension/u);
+});
+
+test('re-seals and exports a reviewed pending model without retaining its stale report claim', async () => {
+  const reviewed = recordReviewDecision(SAMPLE_AUDIT, {
+    auditId: SAMPLE_AUDIT.auditId,
+    itemId: '5.1.4',
+    occurrenceId: 'occ-focus-review',
+    answer: 'conforme',
+    evaluator: 'Pessoa avaliadora',
+    decidedAt: '2026-08-26T15:01:00.000Z',
+    mode: 'assisted',
+  });
+  assert.equal(reviewed.integrity.canonicalModelHash, 'pending');
+  assert.equal(reviewed.report.artifact.status, 'pending');
+
+  const result = await runReportExport({
+    auditModel: reviewed,
+    now: () => '2026-08-26T15:02:00.000Z',
+  }, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+    downloadsAdapter: fakeDownloads([]),
+  });
+
+  assert.match(result.model.integrity.canonicalModelHash, /^[a-f0-9]{64}$/u);
+  assert.notEqual(result.model.report.artifact.status, 'pending');
+  await assert.doesNotReject(verifyAuditIntegritySnapshot(result.model));
 });
 
 test('a newer human review that wins the pre-delivery CAS prevents every stale download', async () => {
@@ -165,7 +356,8 @@ test('a review immediately after reservation revokes delivery before the first p
   assert.equal(events.some(entry => entry[0] === 'download'), false);
   const stored = await store.getAudit(SAMPLE_AUDIT.auditId);
   assert.equal(stored.reviewDecisions.length, 1);
-  assert.notEqual(stored.report?.artifact?.status, 'pending');
+  assert.equal(stored.report?.artifact?.status, 'pending');
+  assert.equal(stored.integrity.canonicalModelHash, 'pending');
   assert.equal((await store.getLatest()).exportStatus, 'preparing');
 });
 
@@ -211,6 +403,31 @@ test('rejects hostile audit-model accessors before export cloning or rendering',
   }), /modelo|auditoria|propriedade|segur/iu);
 
   assert.equal(accessed, false);
+  assert.deepEqual(events, []);
+});
+
+test('wraps post-capture model validation at export ingress without echoing private identifiers', async () => {
+  const marker = 'PRIVATE_DUPLICATE_EXPORT_PAGE_7Q9Z';
+  const input = clone(SAMPLE_AUDIT);
+  input.pages[0].pageId = marker;
+  input.pages.push({
+    ...clone(input.pages[0]), requestedUrl: 'https://second.example.test/', finalUrl: 'https://second.example.test/',
+  });
+  input.requestedScope = { mode: 'batch', urls: [input.requestedUrl, 'https://second.example.test/'] };
+  const events = [];
+
+  await assert.rejects(runReportExport({
+    auditModel: input, now: () => '2026-08-26T15:00:00.000Z',
+  }, {
+    urlApi: { createObjectURL() { events.push('url'); }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    downloadsAdapter: fakeDownloads(events),
+  }), error => {
+    assert.equal(error.code, AUDIT_MODEL_INPUT_ERROR_CODE);
+    assert.equal(error.message, AUDIT_MODEL_INPUT_ERROR_MESSAGE);
+    assert.doesNotMatch(error.message, new RegExp(marker, 'u'));
+    return true;
+  });
   assert.deepEqual(events, []);
 });
 
@@ -438,7 +655,7 @@ test('contains CSV preparation failure, records it in the final correlated model
 
 test('marks CSV unavailable when an occurrence has more than 256 evidence references without downloading a partial row', async () => {
   const input = clone(SAMPLE_AUDIT);
-  const source = input.evidence.find(entry => entry.evidenceId === 'ev-full');
+  const source = input.evidence.find(entry => entry.evidenceId === 'ev-control');
   const extra = Array.from({ length: 255 }, (_, index) => ({
     ...clone(source),
     evidenceId: `ev-export-boundary-${String(index).padStart(3, '0')}`,
@@ -666,7 +883,8 @@ test('rejects accessor-backed audit input at the export ingress with the fixed p
     async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
     downloadsAdapter: fakeDownloads([]),
   }), error => {
-    assert.equal(error.code, 'AUDIT_MODEL_INPUT_INVALID');
+    assert.equal(error.code, AUDIT_MODEL_INPUT_ERROR_CODE);
+    assert.equal(error.message, AUDIT_MODEL_INPUT_ERROR_MESSAGE);
     assert.doesNotMatch(error.message, new RegExp(marker, 'u'));
     return true;
   });

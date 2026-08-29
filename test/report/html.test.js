@@ -8,6 +8,13 @@ import { hashAnnotationMapArtifact } from '../../src/core/evidence/annotation-ma
 import { createAnnotationMapFixture, createPristineMapSource, TEST_PNG } from './annotation-map-fixture.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
+import {
+  canonicalBatchRuleSummary,
+  canonicalCoreRuleSummary,
+  canonicalScope,
+  derivePageLimitations,
+  deriveSystemLimitations,
+} from '../../src/core/report/text-policy.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consumer-basis.js';
 import { SECTION508_REVISED_CROSSWALK, section508ReferencesForWcag } from '../../src/core/normative/section508.js';
@@ -39,6 +46,8 @@ function setCoreRuleInapplicable(input, ruleId) {
   assert.ok(rule, `regra ${ruleId} ausente na fixture`);
   rule.outcome = 'inapplicable';
   rule.targets = [];
+  rule.summary = canonicalCoreRuleSummary(ruleId, 'inapplicable');
+  rule.limitations = [];
   for (const itemId of rule.nbrItems) {
     const item = input.itemResults.find(value => value.id === itemId);
     assert.ok(item, `item ${itemId} ausente na fixture`);
@@ -48,28 +57,32 @@ function setCoreRuleInapplicable(input, ruleId) {
 
 function withFailedRecommendation() {
   const input = structuredClone(SAMPLE_AUDIT);
-  const item = input.itemResults.find(value => value.id === '5.1.5');
-  const rule = input.ruleResults.find(value => value.ruleId === 'focusable-elements-interactive');
-  assert.ok(rule, 'regra focusable-elements-interactive ausente na fixture');
+  const item = input.itemResults.find(value => value.id === '5.1.2');
+  const rule = input.ruleResults.find(value => value.ruleId === 'focus-fully-visible');
+  assert.ok(rule, 'regra focus-fully-visible ausente na fixture');
   item.outcome = 'failed';
-  item.ruleResults = ['focusable-elements-interactive'];
+  item.ruleResults = ['focus-fully-visible'];
   Object.assign(rule, {
-    ruleId: 'focusable-elements-interactive', outcome: 'failed', mode: 'assisted', nbrItems: ['5.1.5'],
+    ruleId: 'focus-fully-visible', outcome: 'failed', mode: 'automated', nbrItems: ['5.1.2'],
     wcag: item.wcag.map(reference => reference.id),
-    targets: [], summary: 'O uso do foco observado requer correção.', limitations: [],
-    source: { engine: 'audita-core', ruleId: 'focusable-elements-interactive', version: '1.0.0' },
+    targets: [{
+      nodeId: 'n-1', data: { reason: 'focus-not-fully-visible' },
+      message: 'Evite que outros conteúdos ocultem o elemento focado.',
+    }],
+    summary: canonicalCoreRuleSummary('focus-fully-visible', 'failed'), limitations: [],
+    source: { engine: 'audita-core', ruleId: 'focus-fully-visible', version: '1.0.0' },
   });
   const wcagRefs = item.wcag.map(reference => reference.id);
   input.occurrences.push({
     occurrenceId: 'occ-recommendation-failed', pageId: 'page-1', outcome: 'failed',
     classification: 'recommendation', impact: 'serious', confidence: 'high',
-    source: { engine: 'audita-core', ruleId: 'focusable-elements-interactive', version: '1.0.0' },
+    source: { engine: 'audita-core', ruleId: 'focus-fully-visible', version: '1.0.0' },
     nbrItemRef: item.id, itemWcagRefs: [...wcagRefs], sourceWcagRefs: [...wcagRefs], testedWcagRefs: [...wcagRefs],
     wcagRefs, foreignBenchmarkRefs: [...section508ReferencesForWcag(wcagRefs)],
-    target: { nodeId: null, selector: null, framePath: [] }, accessiblePreview: null,
+    target: { nodeId: 'n-1', selector: null, framePath: [] }, accessiblePreview: null,
     evidenceRefs: ['ev-full'], legalAnalysis: { basisRef: CONSUMER_ACCESSIBILITY_FIXED_BASIS.id },
-    itemId: item.id, ruleId: 'focusable-elements-interactive', mode: 'assisted', nodeId: null,
-    evidenceIds: ['ev-full'], justification: 'O uso do foco observado requer correção.',
+    itemId: item.id, ruleId: 'focus-fully-visible', mode: 'automated', nodeId: 'n-1',
+    evidenceIds: ['ev-full'], justification: canonicalCoreRuleSummary('focus-fully-visible', 'failed'),
   });
   return input;
 }
@@ -104,40 +117,93 @@ function withEditorialFailure() {
 
 function withPages(count) {
   const input = structuredClone(SAMPLE_AUDIT);
-  const statuses = ['complete', 'partial', 'failed', 'cancelled'];
-  input.pages = Array.from({ length: count }, (_, index) => ({
-    ...input.pages[0],
-    pageId: `page-${index + 1}`,
-    requestedUrl: `https://example.test/${index === count - 1 ? 'segmento-muito-longo-'.repeat(30) : ''}${index + 1}`,
-    finalUrl: `https://example.test/final-${index + 1}`,
-    status: statuses[index % statuses.length],
-  }));
-  input.requestedScope = count === 1
-    ? { mode: 'single', urls: [input.pages[0].requestedUrl] }
-    : { mode: 'batch', urls: input.pages.map(page => page.requestedUrl) };
+  if (count === 1) {
+    const longUrl = `https://example.test/${'segmento-muito-longo-'.repeat(30)}1`;
+    input.pages[0].requestedUrl = longUrl;
+    input.pages[0].finalUrl = `${longUrl}/final`;
+    input.requestedScope = { mode: 'single', urls: [longUrl] };
+    input.requestedUrl = longUrl;
+    input.finalUrl = input.pages[0].finalUrl;
+    return input;
+  }
+  const baseTime = Date.parse(input.timestamps.startedAt);
+  const instant = seconds => new Date(baseTime + seconds * 1_000).toISOString();
+  input.pages = Array.from({ length: count }, (_, index) => {
+    const status = index === 0 ? 'complete' : index === 1 ? 'partial' : index === 2 ? 'failed' : 'cancelled';
+    const attempted = index < 4;
+    const finalUrlObserved = index < 2;
+    const requestedUrl = `https://example.test/${index === count - 1 ? 'segmento-muito-longo-'.repeat(30) : ''}${index + 1}`;
+    const startedAt = instant(index * 3);
+    const endedAt = attempted ? instant(index * 3 + 2) : startedAt;
+    const diagnostic = status === 'partial'
+      ? {
+        code: 'DYNAMIC_PROBES_INCOMPLETE',
+        message: 'As verificações dinâmicas atingiram o tempo limite.',
+        at: endedAt, recoverable: true,
+      }
+      : status === 'failed'
+        ? {
+          code: 'BATCH_PAGE_FAILED',
+          message: 'A página não pôde ser auditada.',
+          at: endedAt, recoverable: false,
+        }
+        : status === 'cancelled'
+          ? {
+            code: 'BATCH_CANCELLED',
+            message: attempted
+              ? 'A página ativa foi cancelada e limpa antes do encerramento do lote.'
+              : 'A página não foi iniciada porque o lote foi cancelado.',
+            at: endedAt, recoverable: false,
+          }
+          : null;
+    return {
+      ...input.pages[0],
+      pageId: `page-${index + 1}`,
+      requestedUrl,
+      finalUrl: finalUrlObserved ? `https://example.test/final-${index + 1}` : requestedUrl,
+      status, attempted, finalUrlObserved,
+      timestamps: { startedAt, endedAt, generatedAt: input.timestamps.generatedAt },
+      viewport: finalUrlObserved
+        ? structuredClone(input.environment.viewport)
+        : { width: null, height: null, deviceScaleFactor: null },
+      coverage: {},
+      diagnostics: diagnostic ? [diagnostic] : [],
+      limitations: [],
+    };
+  });
+  input.requestedScope = { mode: 'batch', urls: input.pages.map(page => page.requestedUrl) };
+  input.scope = canonicalScope('batch', count);
+  delete input.snapshot;
   input.requestedUrl = input.pages[0].requestedUrl;
   input.finalUrl = input.pages[0].finalUrl;
   input.environment.viewport = structuredClone(input.pages[0].viewport);
-  if (count === 1) {
-    input.pages[0].status = input.session.status;
-  } else {
-    const pageStatuses = input.pages.map(page => page.status);
-    input.session.status = pageStatuses.includes('cancelled')
-      ? 'cancelled'
-      : pageStatuses.every(status => status === 'complete')
-        ? 'complete'
-        : pageStatuses.every(status => status === 'failed') ? 'failed' : 'partial';
-    input.session.partial = input.session.status === 'partial';
-    if (['failed', 'cancelled'].includes(input.session.status)) {
-      input.session.diagnostics.push({
-        code: input.session.status === 'failed' ? 'BATCH_PAGE_FAILED' : 'BATCH_CANCELLED',
-        message: input.session.status === 'failed'
-          ? 'As páginas do lote não puderam ser auditadas.'
-          : 'O lote foi cancelado antes da conclusão.',
-        at: '2026-08-26T14:00:30.000Z', recoverable: false,
-      });
+  const pristine = input.evidence.find(artifact =>
+    artifact.pageId === 'page-1' && artifact.kind === 'full-page' && artifact.state === 'pristine');
+  for (const page of input.pages.slice(1).filter(value => value.finalUrlObserved)) {
+    input.evidence.push({
+      ...structuredClone(pristine),
+      evidenceId: `ev-full-${page.pageId}`,
+      pageId: page.pageId,
+    });
+  }
+  input.evidenceStateCount = input.pages.filter(page => page.finalUrlObserved).length;
+  input.reproducibility.capturedStateCount = input.evidenceStateCount;
+  for (const rule of input.ruleResults) {
+    if (rule.source.engine === 'audita-core') {
+      rule.summary = canonicalBatchRuleSummary(rule.outcome);
     }
   }
+  const pageStatuses = input.pages.map(page => page.status);
+  input.session.status = pageStatuses.includes('cancelled')
+    ? 'cancelled'
+    : pageStatuses.every(status => status === 'complete')
+      ? 'complete'
+      : pageStatuses.every(status => status === 'failed') ? 'failed' : 'partial';
+  input.session.partial = input.session.status === 'partial';
+  input.session.diagnostics = input.pages.flatMap(page =>
+    page.diagnostics.map(diagnostic => structuredClone(diagnostic)));
+  input.limitations = deriveSystemLimitations(input);
+  for (const page of input.pages) page.limitations = derivePageLimitations(input, page);
   return input;
 }
 
@@ -315,8 +381,6 @@ test('keeps normative tables semantic and bounded by narrow report viewports', (
 test('escapes hostile audited strings in text, attributes, code, URLs and media', () => {
   const hostile = '</style><script>alert(1)</script><img src=x onerror=alert(2)>';
   const input = structuredClone(SAMPLE_AUDIT);
-  input.scope.description = hostile;
-  input.occurrences[0].justification = hostile;
   input.evidence[1].snippet = `<button aria-label="${hostile}">x</button>`;
   input.evidence[1].selector.css = `#x"]{background:url(https://evil.test/x)}`;
   const html = renderHtmlReport(createAuditModel(input));
@@ -513,6 +577,15 @@ test('renders absent, empty, partial, complete and legend-continuation map state
     const input = structuredClone(SAMPLE_AUDIT);
     input.evidence[0] = createPristineMapSource();
     if (status !== 'absent') input.evidence.push(await createAnnotationMapFixture({ status }));
+    if (status === 'partial') {
+      const diagnostic = {
+        code: 'ANNOTATION_MAP_PARTIAL',
+        message: 'O mapa visual foi gerado com cobertura parcial e limitações explícitas.',
+        at: '2026-08-26T14:00:31.000Z', recoverable: true,
+      };
+      input.pages[0].diagnostics.push(structuredClone(diagnostic));
+      input.session.diagnostics.push(diagnostic);
+    }
     return renderHtmlReport(input);
   };
   const absent = await renderState('absent');
@@ -566,14 +639,13 @@ test('prioritizes 750 occurrences in the real DOM across twenty pages while reus
   const input = withPages(20);
   const source = input.occurrences[0];
   input.occurrences = Array.from({ length: 750 }, (_, index) => {
-    const onFirstPage = index % 20 === 0;
     return {
       ...source,
       occurrenceId: `occ-stress-${index + 1}`,
-      pageId: `page-${(index % 20) + 1}`,
+      pageId: 'page-1',
       impact: ['critical', 'serious', 'moderate', 'minor'][index % 4],
-      evidenceRefs: onFirstPage ? source.evidenceRefs : [],
-      evidenceIds: onFirstPage ? source.evidenceIds : [],
+      evidenceRefs: source.evidenceRefs,
+      evidenceIds: source.evidenceIds,
     };
   });
   input.manualReview = [];
@@ -609,7 +681,7 @@ test('uses exact CSP hashes for static CSS and script with no executable audited
 test('escapes hostile text in filter datasets and never turns audited data into selectors', () => {
   const hostile = `x\" data-engine=\"evil\"><script>alert(1)</script>`;
   const input = structuredClone(SAMPLE_AUDIT);
-  input.occurrences[0].justification = hostile;
+  input.occurrences[0].accessiblePreview = hostile;
   const html = renderHtmlReport(input);
   const card = occurrenceCard(html, 'occ-focus-failed');
   assert.match(card, /data-impact="moderate"/u);

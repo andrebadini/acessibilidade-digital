@@ -21,6 +21,7 @@ import {
 } from '../core/index.js';
 import { canonicalStringify } from '../core/report/canonical-json.js';
 import { sha256Hex } from '../core/report/hash.js';
+import { canonicalInternalReviewUrl } from '../core/report/report-policy.js';
 import { normalizeAuditUrl } from '../core/url.js';
 import { axeEquivalenceForAuditaRule } from '../core/normative/axe-nbr-crosswalk.js';
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
@@ -73,22 +74,15 @@ function safeUrl(value) {
   return sanitizeResourceUrl(value);
 }
 
-function safeInternalUrl(value) {
-  if (typeof value !== 'string' || !value) return null;
-  try {
-    const url = new URL(value);
-    if (!['chrome-extension:', 'blob:'].includes(url.protocol)) return safeUrl(value) || null;
-    url.username = '';
-    url.password = '';
-    for (const key of [...url.searchParams.keys()]) if (/(?:pass|token|secret|auth|session|cookie|csrf|otp|key)/iu.test(key)) url.searchParams.delete(key);
-    return url.href;
-  } catch {
-    return null;
-  }
+function validateTransientReviewUrl(value, auditId, expectedExtensionId) {
+  try { canonicalInternalReviewUrl(value ?? null, auditId, expectedExtensionId); } catch { /* capability descartada */ }
 }
 
 function diagnostic(code, message, at, recoverable = false, details = {}) {
-  return { code, message, at, recoverable, ...details };
+  return {
+    code, message, at, recoverable,
+    ...(Object.keys(details).length > 0 ? { details: { ...details } } : {}),
+  };
 }
 
 function throwIfAborted(signal) {
@@ -322,6 +316,8 @@ async function draftModel(state) {
     auditId: state.auditId,
     requestedUrl: state.requestedUrl,
     finalUrl: state.finalUrl || state.requestedUrl,
+    attempted: state.attempted,
+    finalUrlObserved: state.finalUrlObserved,
     timestamps: { startedAt: state.startedAt, ...(state.endedAt ? { endedAt: state.endedAt } : {}) },
     environment: state.environment,
     methodology: {
@@ -344,7 +340,7 @@ async function draftModel(state) {
     evidence: { stateCount: state.fullPage ? 1 : 0, artifacts: state.artifacts },
     manualReview: state.manualReview,
     reviewDecisions: [],
-    axe: state.axe,
+    ...(state.axe === undefined ? {} : { axe: state.axe }),
     accessibilityWidgets: state.accessibilityWidgets,
     limitations: state.limitations,
     presentation: state.presentation,
@@ -362,7 +358,7 @@ async function draftModel(state) {
 }
 
 /** Runs one local audit in one disposable tab using only injected Chrome effects. */
-export async function runAudit({ url, chromeAdapter, now = () => new Date().toISOString(), idFactory = () => crypto.randomUUID(), signal, closeAuditTab = true }) {
+export async function runAudit({ url, chromeAdapter, now = () => new Date().toISOString(), idFactory = () => crypto.randomUUID(), signal, closeAuditTab = true, expectedExtensionId }) {
   if (!chromeAdapter || typeof chromeAdapter !== 'object') throw new TypeError('O adapter Chrome é obrigatório.');
   const navigationUrl = normalizeAuditUrl(url);
   const generatedId = idFactory('audit');
@@ -372,6 +368,8 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     auditId,
     requestedUrl: safeUrl(navigationUrl),
     finalUrl: '',
+    attempted: false,
+    finalUrlObserved: false,
     startedAt: canonicalNow(now),
     endedAt: '',
     environment: { chromeVersion: '', viewport: { width: null, height: null, deviceScaleFactor: null } },
@@ -406,7 +404,45 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
   };
   const recoverable = (code, message, details = {}) => {
     recoverableFailure = true;
-    state.diagnostics.push(diagnostic(code, message, canonicalNow(now), true, details));
+    const signature = canonicalStringify({ code, message, details });
+    if (!state.diagnostics.some(entry => canonicalStringify({
+      code: entry.code, message: entry.message, details: entry.details ?? {},
+    }) === signature)) {
+      state.diagnostics.push(diagnostic(code, message, canonicalNow(now), true, details));
+    }
+  };
+  const appendDiagnosticOnce = (code, message, recoverableValue) => {
+    if (!state.diagnostics.some(entry => entry.code === code && entry.message === message &&
+      entry.recoverable === recoverableValue)) {
+      state.diagnostics.push(diagnostic(code, message, canonicalNow(now), recoverableValue));
+    }
+  };
+  const settleFatalAxeObservation = () => {
+    if (state.coreRuleResults.length > 0) return;
+    if (state.diagnostics.some(entry => entry.code === 'COLLECTION_FAILED')) {
+      state.axe = undefined;
+      state.rawAxe = null;
+      return;
+    }
+    if (['disabled', 'partial'].includes(state.rawAxe?.status)) {
+      state.axe = normalizeAxeResults(state.rawAxe, {
+        pageId: 'page-1', auditId, snapshot: state.snapshot,
+        coreRuleResults: [], rulesVersion: METHODOLOGY.version,
+      });
+      if (state.axe.status === 'disabled') appendDiagnosticOnce(
+        'AXE_FEATURE_DISABLED',
+        'O motor suplementar axe-core permaneceu desativado pelo gate MV3/CSP; o motor próprio continuou normalmente.',
+        true,
+      );
+      if (state.axe.status === 'partial') appendDiagnosticOnce(
+        'AXE_EXECUTION_FAILED',
+        'O motor suplementar axe-core teve cobertura parcial; o motor próprio continuou normalmente.',
+        true,
+      );
+    } else {
+      state.axe = undefined;
+    }
+    state.rawAxe = null;
   };
   const fail = (code, message, error) => {
     fatal = true;
@@ -417,12 +453,17 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
   try {
     throwIfAborted(signal);
     await progress('opening', 'Abrindo o site', 5);
-    tab = await awaitStep(() => chromeAdapter.createTab({ url: 'about:blank', active: false }));
-    if (!Number.isInteger(tab?.id)) throw new Error('Tab inválida');
-    await awaitStep(() => chromeAdapter.navigateTab(tab.id, navigationUrl, { signal }));
+    const createdTab = await awaitStep(() => chromeAdapter.createTab({ url: 'about:blank', active: false }));
+    if (!Number.isInteger(createdTab?.id)) throw new Error('Tab inválida');
+    tab = createdTab;
+    await awaitStep(() => {
+      state.attempted = true;
+      return chromeAdapter.navigateTab(tab.id, navigationUrl, { signal });
+    });
     const navigation = await awaitStep(() => chromeAdapter.waitForStable(tab.id, { signal, timeoutMs: 30_000 }));
     const observedUrl = navigation?.url || await awaitStep(() => chromeAdapter.getFinalUrl?.(tab.id)) || navigationUrl;
     state.finalUrl = safeUrl(observedUrl);
+    state.finalUrlObserved = true;
     cdp = await awaitStep(() => chromeAdapter.connectCdp(tab.id, { signal }));
     if (!cdp || typeof cdp.command !== 'function') throw new Error('CDP inválido');
 
@@ -459,12 +500,18 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
 
     try {
       const environment = await awaitStep(() => chromeAdapter.getEnvironment?.(tab.id, cdp, pristineMetrics));
-      if (environment && typeof environment === 'object') state.environment = {
-        chromeVersion: typeof environment.chromeVersion === 'string' ? environment.chromeVersion : '',
+      const viewport = environment?.viewport;
+      if (!environment || typeof environment !== 'object' || typeof environment.chromeVersion !== 'string' ||
+        !environment.chromeVersion.trim() || !viewport ||
+        ![viewport.width, viewport.height, viewport.deviceScaleFactor].every(value => Number.isFinite(value) && value > 0)) {
+        throw new TypeError('Ambiente incompleto.');
+      }
+      state.environment = {
+        chromeVersion: environment.chromeVersion,
         viewport: {
-          width: Number.isFinite(environment.viewport?.width) ? environment.viewport.width : null,
-          height: Number.isFinite(environment.viewport?.height) ? environment.viewport.height : null,
-          deviceScaleFactor: Number.isFinite(environment.viewport?.deviceScaleFactor) ? environment.viewport.deviceScaleFactor : null,
+          width: viewport.width,
+          height: viewport.height,
+          deviceScaleFactor: viewport.deviceScaleFactor,
         },
       };
     } catch (error) {
@@ -481,6 +528,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
       state.snapshot = normalizeSnapshot(raw);
       state.accessibilityWidgets = detectAccessibilityWidgets(state.snapshot.document?.accessibilityWidgetSignals);
     } catch (error) {
+      rethrowAbort(error, signal);
       fail('COLLECTION_FAILED', 'A estrutura da página não pôde ser coletada com segurança.', error);
     }
 
@@ -522,7 +570,9 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
       state.ruleResults = [...hybrid.ruleResults, ...state.editorialRuleResults];
       state.itemResults = [...hybrid.itemResults];
     } catch (error) {
+      rethrowAbort(error, signal);
       fail('CORE_AUDIT_FAILED', 'O núcleo de regras não pôde concluir a auditoria.', error);
+      settleFatalAxeObservation();
     } finally {
       state.rawAxe = null;
     }
@@ -654,9 +704,10 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     try {
       const handoffModel = await awaitStep(() => draftModel({ ...state, endedAt: canonicalNow(now) }));
       const handoff = await awaitStep(() => chromeAdapter.handoffReport?.(handoffModel));
+      validateTransientReviewUrl(handoff?.reviewUrl, auditId, expectedExtensionId);
       state.report = {
         status: 'review-ready',
-        reviewUrl: safeInternalUrl(handoff?.reviewUrl),
+        reviewUrl: null,
         artifact: { status: 'pending', formats: [] },
       };
     } catch (error) {
@@ -669,18 +720,26 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
   } catch (error) {
     if (!error?.auditHandled) fail('NAVIGATION_FAILED', error?.name === 'AbortError' || signal?.aborted ? 'A auditoria foi cancelada.' : 'O site não pôde ser aberto de forma estável.', error);
   } finally {
-    state.rawAxe = null;
     if (cdp) {
-      try { await cdp.disconnect(); } catch { state.diagnostics.push(diagnostic('CDP_DISCONNECT_FAILED', 'A sessão de depuração não pôde ser encerrada automaticamente.', canonicalNow(now), false)); if (state.status === 'complete') state.status = 'partial'; }
+      try { await cdp.disconnect(); } catch { state.diagnostics.push(diagnostic('CDP_DISCONNECT_FAILED', 'A sessão de depuração não pôde ser encerrada automaticamente.', canonicalNow(now), true)); if (state.status === 'complete') state.status = 'partial'; }
     }
     if (tab && closeAuditTab !== false) {
-      try { await chromeAdapter.removeTab(tab.id); } catch { state.diagnostics.push(diagnostic('TAB_CLOSE_FAILED', 'A aba descartável não pôde ser fechada automaticamente.', canonicalNow(now), false)); if (state.status === 'complete') state.status = 'partial'; }
+      try { await chromeAdapter.removeTab(tab.id); } catch { state.diagnostics.push(diagnostic('TAB_CLOSE_FAILED', 'A aba descartável não pôde ser fechada automaticamente.', canonicalNow(now), true)); if (state.status === 'complete') state.status = 'partial'; }
     }
   }
   return finalize();
 
   async function finalize() {
     if (state.status === 'running') state.status = recoverableFailure ? 'partial' : fatal ? 'failed' : 'complete';
+    if (['failed', 'cancelled'].includes(state.status)) settleFatalAxeObservation();
+    if (state.finalUrlObserved && !state.fullPage &&
+      !state.diagnostics.some(entry => entry.code === 'FULL_PAGE_CAPTURE_FAILED')) {
+      appendDiagnosticOnce(
+        'FULL_PAGE_CAPTURE_FAILED',
+        'Não foi possível capturar a página completa no estado original.',
+        true,
+      );
+    }
     state.endedAt = canonicalNow(now);
     if (!state.occurrences.length && state.coreRuleResults.length) {
       state.occurrences = makeOccurrences(auditId, state.coreRuleResults, state.itemResults);

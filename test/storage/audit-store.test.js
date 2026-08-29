@@ -3,6 +3,9 @@ import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
+import { createAuditModel } from '../../src/core/report/audit-model.js';
+import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
+import { reportInput } from '../report/helpers.js';
 import {
   AuditDeleteBusyError,
   AuditStorageUnavailableError,
@@ -13,6 +16,272 @@ import {
 const T0 = '2026-08-01T00:00:00.000Z';
 const T29 = '2026-08-30T00:00:00.000Z';
 const T30 = '2026-08-31T00:00:00.000Z';
+const HOSTILE_REVIEW_URL =
+  'chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/src/review/index.html?auditId=audit-sample-20260826&token=PRIVATE_REVIEW_QUERY';
+const TRUSTED_REVIEW_URL =
+  'chrome-extension://abcdefghijklmnopabcdefghijklmnop/src/review/index.html?auditId=audit-sample-20260826';
+
+function storeFactories() {
+  return [
+    ['memory', () => createInMemoryAuditStore()],
+    ['IndexedDB', () => createAuditStore({ indexedDB: createFakeIndexedDb() })],
+  ];
+}
+
+function hostileReviewModel() {
+  const model = structuredClone(SAMPLE_AUDIT);
+  model.report.reviewUrl = HOSTILE_REVIEW_URL;
+  return model;
+}
+
+function auditFixture(auditId, tag = 'fixture') {
+  const model = structuredClone(SAMPLE_AUDIT);
+  model.auditId = auditId;
+  model.versions.extension = `test-${tag}`;
+  return model;
+}
+
+function assertSanitizedModelRejection(error) {
+  assert.equal(error?.code, 'AUDIT_MODEL_INPUT_INVALID');
+  assert.doesNotMatch(
+    String(error?.message),
+    /ponmlkjihgfedcbaponmlkjihgfedcba|chrome-extension:|PRIVATE_REVIEW_QUERY|token=/u,
+  );
+  return true;
+}
+
+function operationGateContexts() {
+  const memoryBacking = new Map();
+  const fakeIndexedDb = createFakeIndexedDb();
+  return [
+    ['memory', {
+      store: createInMemoryAuditStore(memoryBacking),
+      replaceModel(auditId, model) { memoryBacking.set(auditId, structuredClone(model)); },
+      inspectBacking() { return structuredClone([...memoryBacking]); },
+    }],
+    ['IndexedDB', {
+      store: createAuditStore({ indexedDB: fakeIndexedDb, IDBKeyRange: fakeIndexedDb.IDBKeyRange }),
+      replaceModel(auditId, model) { fakeIndexedDb.replaceRecord('audits', auditId, model); },
+      inspectBacking() {
+        return structuredClone({
+          audits: [...(fakeIndexedDb.inspectStore('audits') ?? [])],
+          retention: [...(fakeIndexedDb.inspectStore('audit-retention') ?? [])],
+        });
+      },
+    }],
+  ];
+}
+
+async function createLeaseState(context) {
+  const auditId = SAMPLE_AUDIT.auditId;
+  const latest = { auditId, reviewUrl: TRUSTED_REVIEW_URL, status: 'partial' };
+  await context.store.commitAudit(auditId, structuredClone(SAMPLE_AUDIT), latest, { now: T0 });
+  const snapshot = await context.store.getAuditSnapshot(auditId);
+  const acquired = await context.store.acquireExportLease(auditId, snapshot.capability, {
+    ownerId: 'operation-gate-owner', now: '2026-08-01T00:00:01.000Z',
+    latestState: { ...latest, exportStatus: 'queued', exportRevision: snapshot.revision },
+  });
+  return { auditId, latest, snapshot, acquired };
+}
+
+async function createClaimedLeaseState(context) {
+  const state = await createLeaseState(context);
+  await context.store.claimExportLease(state.auditId, state.snapshot.capability, {
+    ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+    now: '2026-08-01T00:00:01.100Z',
+    latestState: {
+      ...state.latest, exportStatus: 'running', exportRevision: state.snapshot.revision,
+    },
+  });
+  return state;
+}
+
+async function createReservedDeliveryState(context) {
+  const state = await createClaimedLeaseState(context);
+  const reserved = await context.store.commitAuditIfRevisionWithExportLease(
+    state.auditId,
+    auditFixture(state.auditId, 'delivering'),
+    { ...state.latest, exportStatus: 'delivering', exportRevision: state.snapshot.revision + 1 },
+    state.snapshot.capability,
+    {
+      ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+      now: '2026-08-01T00:00:01.200Z', phase: 'delivering',
+    },
+  );
+  return { ...state, reserved };
+}
+
+test('getAudit rejects a corrupted backing model without returning or rewriting it', async t => {
+  for (const [backend, context] of operationGateContexts()) await t.test(backend, async () => {
+    await context.store.setAudit(SAMPLE_AUDIT.auditId, structuredClone(SAMPLE_AUDIT));
+    context.replaceModel(SAMPLE_AUDIT.auditId, hostileReviewModel());
+    const before = context.inspectBacking();
+
+    await assert.rejects(context.store.getAudit(SAMPLE_AUDIT.auditId), assertSanitizedModelRejection);
+    assert.deepEqual(context.inspectBacking(), before);
+  });
+});
+
+test('getAuditSnapshot never mints a capability from a corrupted backing model', async t => {
+  for (const [backend, context] of operationGateContexts()) await t.test(backend, async () => {
+    await context.store.setAudit(SAMPLE_AUDIT.auditId, structuredClone(SAMPLE_AUDIT));
+    context.replaceModel(SAMPLE_AUDIT.auditId, hostileReviewModel());
+    const before = context.inspectBacking();
+
+    await assert.rejects(context.store.getAuditSnapshot(SAMPLE_AUDIT.auditId), assertSanitizedModelRejection);
+    assert.deepEqual(context.inspectBacking(), before);
+  });
+});
+
+test('acquireExportLease rejects a corrupted current model before lease, attempt or latest mutation', async t => {
+  for (const [backend, context] of operationGateContexts()) await t.test(backend, async () => {
+    const auditId = SAMPLE_AUDIT.auditId;
+    const latest = { auditId, reviewUrl: TRUSTED_REVIEW_URL, status: 'partial' };
+    await context.store.commitAudit(auditId, structuredClone(SAMPLE_AUDIT), latest, { now: T0 });
+    const snapshot = await context.store.getAuditSnapshot(auditId);
+    context.replaceModel(auditId, hostileReviewModel());
+    const before = context.inspectBacking();
+
+    await assert.rejects(context.store.acquireExportLease(auditId, snapshot.capability, {
+      ownerId: 'operation-gate-owner', now: '2026-08-01T00:00:01.000Z',
+      latestState: { ...latest, exportStatus: 'queued', exportRevision: snapshot.revision },
+    }), assertSanitizedModelRejection);
+    assert.deepEqual(context.inspectBacking(), before);
+
+    context.replaceModel(auditId, structuredClone(SAMPLE_AUDIT));
+    const retry = await context.store.acquireExportLease(auditId, snapshot.capability, {
+      ownerId: 'operation-gate-owner', now: '2026-08-01T00:00:01.100Z',
+      latestState: { ...latest, exportStatus: 'queued', exportRevision: snapshot.revision },
+    });
+    assert.equal(retry.acquired, true);
+    assert.equal((await context.store.getAudit(auditId)).report.reviewUrl, null);
+    assert.equal((await context.store.getLatest()).reviewUrl, TRUSTED_REVIEW_URL);
+  });
+});
+
+test('claimExportLease rejects a corrupted current model before renewing lease or latest', async t => {
+  for (const [backend, context] of operationGateContexts()) await t.test(backend, async () => {
+    const state = await createLeaseState(context);
+    context.replaceModel(state.auditId, hostileReviewModel());
+    const before = context.inspectBacking();
+
+    await assert.rejects(context.store.claimExportLease(state.auditId, state.snapshot.capability, {
+      ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+      now: '2026-08-01T00:00:01.100Z',
+      latestState: { ...state.latest, exportStatus: 'running', exportRevision: state.snapshot.revision },
+    }), assertSanitizedModelRejection);
+    assert.deepEqual(context.inspectBacking(), before);
+
+    context.replaceModel(state.auditId, structuredClone(SAMPLE_AUDIT));
+    const retry = await context.store.claimExportLease(state.auditId, state.snapshot.capability, {
+      ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+      now: '2026-08-01T00:00:01.200Z',
+      latestState: { ...state.latest, exportStatus: 'running', exportRevision: state.snapshot.revision },
+    });
+    assert.equal(retry.claimed, true);
+  });
+});
+
+test('delivery reservation rejects a corrupted current model before renewing model, revision, lease or latest', async t => {
+  for (const [backend, context] of operationGateContexts()) await t.test(backend, async () => {
+    const state = await createClaimedLeaseState(context);
+    context.replaceModel(state.auditId, hostileReviewModel());
+    const before = context.inspectBacking();
+
+    await assert.rejects(context.store.commitAuditIfRevisionWithExportLease(
+      state.auditId,
+      auditFixture(state.auditId, 'delivering'),
+      { ...state.latest, exportStatus: 'delivering', exportRevision: state.snapshot.revision + 1 },
+      state.snapshot.capability,
+      {
+        ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+        now: '2026-08-01T00:00:01.200Z', phase: 'delivering',
+      },
+    ), assertSanitizedModelRejection);
+    assert.deepEqual(context.inspectBacking(), before);
+  });
+});
+
+test('recordExportDelivery rejects a corrupted current model before journal or latest mutation', async t => {
+  for (const [backend, context] of operationGateContexts()) await t.test(backend, async () => {
+    const state = await createReservedDeliveryState(context);
+    context.replaceModel(state.auditId, hostileReviewModel());
+    const before = context.inspectBacking();
+
+    await assert.rejects(context.store.recordExportDelivery(state.auditId, state.reserved.capability, {
+      ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+      now: '2026-08-01T00:00:02.000Z', format: 'html', filename: 'report.html',
+      state: 'terminal', downloadId: 91,
+    }), assertSanitizedModelRejection);
+    assert.deepEqual(context.inspectBacking(), before);
+  });
+});
+
+test('finalizeExportAndMaybeDelete rejects a corrupted current model before commit, deletion or journal cleanup', async t => {
+  for (const [backend, context] of operationGateContexts()) await t.test(backend, async () => {
+    const state = await createReservedDeliveryState(context);
+    await context.store.recordExportDelivery(state.auditId, state.reserved.capability, {
+      ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+      now: '2026-08-01T00:00:02.000Z', format: 'html', filename: 'report.html',
+      state: 'terminal', downloadId: 92,
+    });
+    const current = await context.store.getAudit(state.auditId);
+    context.replaceModel(state.auditId, hostileReviewModel());
+    const before = context.inspectBacking();
+    const options = {
+      ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+      now: '2026-08-01T00:00:03.000Z', clearDeliveryJournal: true,
+      deleteAfterCompleteExport: false,
+    };
+
+    await assert.rejects(context.store.finalizeExportAndMaybeDelete(
+      state.auditId,
+      current,
+      { ...state.latest, exportStatus: 'partial' },
+      state.reserved.capability,
+      options,
+    ), assertSanitizedModelRejection);
+    assert.deepEqual(context.inspectBacking(), before);
+  });
+});
+
+test('historical V1 backing is exposed as canonical V2 without implicit rewrite', async t => {
+  for (const backend of ['memory', 'IndexedDB']) await t.test(backend, async () => {
+    const legacy = reportInput();
+    legacy.report.reviewUrl = HOSTILE_REVIEW_URL;
+    const auditId = legacy.auditId;
+    let context;
+    if (backend === 'memory') {
+      const backing = new Map([[auditId, structuredClone(legacy)], [`__audit_revision__:${auditId}`, 7]]);
+      context = {
+        store: createInMemoryAuditStore(backing),
+        inspectBacking: () => structuredClone([...backing]),
+      };
+    } else {
+      const fake = createFakeIndexedDb({
+        version: 2,
+        initialStores: {
+          audits: [[auditId, structuredClone(legacy)], [`__audit_revision__:${auditId}`, 7]],
+          'audit-retention': [],
+        },
+      });
+      context = {
+        store: createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange }),
+        inspectBacking: () => structuredClone([...fake.inspectStore('audits')]),
+      };
+    }
+    const before = context.inspectBacking();
+
+    const model = await context.store.getAudit(auditId);
+    const snapshot = await context.store.getAuditSnapshot(auditId);
+    assert.equal(model.schemaVersion, 2);
+    assert.equal(model.report.reviewUrl, null);
+    assert.equal(snapshot.revision, 7);
+    assert.deepEqual(snapshot.model, model);
+    assert.doesNotMatch(JSON.stringify(model), /PRIVATE_REVIEW_QUERY|chrome-extension:/u);
+    assert.deepEqual(context.inspectBacking(), before);
+  });
+});
 
 function reviewedAuditFixture() {
   const queue = SAMPLE_AUDIT.manualReview[0];
@@ -26,6 +295,84 @@ function reviewedAuditFixture() {
     mode: queue.mode,
   })]);
 }
+
+test('setAudit rejects a noncanonical review URL atomically in memory and IndexedDB', async t => {
+  for (const [backend, createStore] of storeFactories()) await t.test(backend, async () => {
+    const store = createStore();
+    const latest = { auditId: SAMPLE_AUDIT.auditId, reviewUrl: TRUSTED_REVIEW_URL, status: 'partial' };
+    await store.setLatest(latest);
+
+    await assert.rejects(
+      store.setAudit(SAMPLE_AUDIT.auditId, hostileReviewModel()),
+      assertSanitizedModelRejection,
+    );
+
+    assert.equal(await store.getAudit(SAMPLE_AUDIT.auditId), undefined);
+    assert.deepEqual(await store.getLatest(), latest);
+    await store.setAudit(SAMPLE_AUDIT.auditId, structuredClone(SAMPLE_AUDIT));
+    assert.equal((await store.getAudit(SAMPLE_AUDIT.auditId)).report.reviewUrl, null);
+  });
+});
+
+test('commitAudit rejects a noncanonical review URL without changing model, latest or revision', async t => {
+  for (const [backend, createStore] of storeFactories()) await t.test(backend, async () => {
+    const store = createStore();
+    const latest = { auditId: SAMPLE_AUDIT.auditId, reviewUrl: TRUSTED_REVIEW_URL, status: 'partial' };
+    await store.commitAudit(
+      SAMPLE_AUDIT.auditId,
+      structuredClone(SAMPLE_AUDIT),
+      latest,
+    );
+    const before = await store.getAuditSnapshot(SAMPLE_AUDIT.auditId);
+
+    await assert.rejects(
+      store.commitAudit(
+        SAMPLE_AUDIT.auditId,
+        hostileReviewModel(),
+        { auditId: SAMPLE_AUDIT.auditId, reviewUrl: HOSTILE_REVIEW_URL, status: 'complete' },
+      ),
+      assertSanitizedModelRejection,
+    );
+
+    const after = await store.getAuditSnapshot(SAMPLE_AUDIT.auditId);
+    assert.equal(after.revision, before.revision);
+    assert.deepEqual(after.model, before.model);
+    assert.deepEqual(await store.getLatest(), latest);
+  });
+});
+
+test('revision CAS cannot reintroduce reviewUrl while trusted latest state remains transient', async t => {
+  for (const [backend, createStore] of storeFactories()) await t.test(backend, async () => {
+    const store = createStore();
+    const latest = { auditId: SAMPLE_AUDIT.auditId, reviewUrl: TRUSTED_REVIEW_URL, status: 'partial' };
+    await store.commitAudit(SAMPLE_AUDIT.auditId, structuredClone(SAMPLE_AUDIT), latest);
+    const before = await store.getAuditSnapshot(SAMPLE_AUDIT.auditId);
+
+    await assert.rejects(
+      store.commitAuditIfRevision(
+        SAMPLE_AUDIT.auditId,
+        hostileReviewModel(),
+        { auditId: SAMPLE_AUDIT.auditId, reviewUrl: HOSTILE_REVIEW_URL, status: 'complete' },
+        before.capability,
+      ),
+      assertSanitizedModelRejection,
+    );
+
+    const unchanged = await store.getAuditSnapshot(SAMPLE_AUDIT.auditId);
+    assert.equal(unchanged.revision, before.revision);
+    assert.deepEqual(unchanged.model, before.model);
+    assert.deepEqual(await store.getLatest(), latest);
+
+    await store.commitAuditIfRevision(
+      SAMPLE_AUDIT.auditId,
+      structuredClone(SAMPLE_AUDIT),
+      latest,
+      unchanged.capability,
+    );
+    assert.equal((await store.getAudit(SAMPLE_AUDIT.auditId)).report.reviewUrl, null);
+    assert.deepEqual(await store.getLatest(), latest);
+  });
+});
 
 test('review CAS rejects a noncanonical model before mutating memory or IndexedDB', async () => {
   for (const createStore of [
@@ -55,6 +402,66 @@ test('review CAS rejects a noncanonical model before mutating memory or IndexedD
   }
 });
 
+test('review CAS derives the only permitted transition from its private capability model', async () => {
+  for (const createStore of [
+    () => createInMemoryAuditStore(),
+    () => createAuditStore({ indexedDB: createFakeIndexedDb() }),
+  ]) {
+    const store = createStore();
+    const base = structuredClone(SAMPLE_AUDIT);
+    await store.setAudit(base.auditId, base);
+    const snapshot = await store.getAuditSnapshot(base.auditId);
+    const forged = structuredClone(reviewedAuditFixture());
+    forged.pages[0].viewport = { width: 1024, height: 768, deviceScaleFactor: 2 };
+    forged.environment.viewport = structuredClone(forged.pages[0].viewport);
+    const selfConsistent = createAuditModel(forged);
+
+    await assert.rejects(
+      store.commitAuditReviewIfRevision(base.auditId, selfConsistent, snapshot.capability),
+      error => error?.code === 'AUDIT_MODEL_INPUT_INVALID',
+    );
+
+    const after = await store.getAuditSnapshot(base.auditId);
+    assert.equal(after.revision, snapshot.revision);
+    assert.deepEqual(after.model, base);
+  }
+});
+
+test('review CAS captures the candidate before SHA verification yields to caller mutation', async () => {
+  const sealed = await enrichAuditForReport(SAMPLE_AUDIT, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  });
+  const queue = sealed.manualReview[0];
+  const reviewedAs = answer => applyReviewDecisions(sealed, [createReviewDecision({
+    auditId: sealed.auditId, itemId: queue.itemId, occurrenceId: queue.occurrenceId,
+    answer, evaluator: 'Pessoa avaliadora', decidedAt: '2026-08-26T16:01:00.000Z',
+    mode: queue.mode,
+  })]);
+
+  for (const createStore of [
+    () => createInMemoryAuditStore(),
+    () => createAuditStore({ indexedDB: createFakeIndexedDb() }),
+  ]) {
+    const store = createStore();
+    await store.setAudit(sealed.auditId, sealed);
+    const snapshot = await store.getAuditSnapshot(sealed.auditId);
+    const candidate = structuredClone(reviewedAs('conforme'));
+    const lateMutation = structuredClone(reviewedAs('não conforme'));
+
+    const committed = store.commitAuditReviewIfRevision(
+      sealed.auditId, candidate, snapshot.capability,
+    );
+    for (const key of Object.keys(candidate)) delete candidate[key];
+    Object.assign(candidate, lateMutation);
+    await committed;
+
+    const after = await store.getAuditSnapshot(sealed.auditId);
+    assert.equal(after.model.reviewDecisions[0].answer, 'conforme');
+    assert.equal(after.model.itemResults.find(item => item.id === queue.itemId).outcome, 'passed');
+  }
+});
+
 test('production store fails visibly when IndexedDB is unavailable and never falls back to memory', async () => {
   const store = createAuditStore({ indexedDB: {} });
 
@@ -71,7 +478,7 @@ test('first commit creates immutable absolute retention metadata and a batch rem
   const auditId = 'batch-retention';
   await store.commitAudit(
     auditId,
-    { auditId, pages: [{ pageId: 'p1' }, { pageId: 'p2' }, { pageId: 'p3' }] },
+    auditFixture(auditId, 'batch-first'),
     { auditId, status: 'complete' },
     { now: T0, deleteAfterCompleteExport: true },
   );
@@ -83,7 +490,7 @@ test('first commit creates immutable absolute retention metadata and a batch rem
 
   await store.commitAudit(
     auditId,
-    { auditId, pages: [{ pageId: 'p1' }, { pageId: 'p2' }, { pageId: 'p3' }], reviewed: true },
+    auditFixture(auditId, 'batch-reviewed'),
     { auditId, status: 'complete' },
     { now: T29, deleteAfterCompleteExport: false },
   );
@@ -94,9 +501,9 @@ test('first commit creates immutable absolute retention metadata and a batch rem
 test('retention intent is changed only by a current store-owned snapshot capability', async () => {
   const store = createInMemoryAuditStore();
   const auditId = 'audit-retention-cas';
-  await store.commitAudit(auditId, { auditId, generation: 1 }, { auditId }, { now: T0 });
+  await store.commitAudit(auditId, auditFixture(auditId, 'generation-1'), { auditId }, { now: T0 });
   const stale = await store.getAuditSnapshot(auditId);
-  await store.setAudit(auditId, { auditId, generation: 2 });
+  await store.setAudit(auditId, auditFixture(auditId, 'generation-2'));
 
   await assert.rejects(
     store.setRetentionIntent(auditId, stale.capability, { deleteAfterCompleteExport: true, now: T29 }),
@@ -117,9 +524,9 @@ test('incremental cleanup deletes at most 25 expired records and continues witho
   const store = createInMemoryAuditStore();
   for (let index = 0; index < 26; index += 1) {
     const auditId = `expired-${String(index).padStart(2, '0')}`;
-    await store.commitAudit(auditId, { auditId }, { auditId }, { now: T0 });
+    await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0 });
   }
-  await store.commitAudit('future-audit', { auditId: 'future-audit' }, { auditId: 'future-audit' }, { now: T30 });
+  await store.commitAudit('future-audit', auditFixture('future-audit'), { auditId: 'future-audit' }, { now: T30 });
 
   assert.deepEqual(await store.cleanupExpiredAudits({ now: T30, limit: 25 }), {
     scanned: 25, deleted: 25, remaining: 1, blocked: 0,
@@ -160,7 +567,7 @@ test('cleanup resumes after 25 blocked audits across store recreation and then r
     for (let index = 0; index < 25; index += 1) {
       const auditId = `blocked-${String(index).padStart(2, '0')}`;
       const ownerId = `owner-${String(index).padStart(2, '0')}`;
-      await context.first.commitAudit(auditId, { auditId }, { auditId }, { now: T0 });
+      await context.first.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0 });
       let snapshot = await context.first.getAuditSnapshot(auditId);
       const lease = await context.first.acquireExportLease(auditId, snapshot.capability, {
         ownerId, now: '2026-08-30T10:00:00.000Z',
@@ -170,7 +577,7 @@ test('cleanup resumes after 25 blocked audits across store recreation and then r
       });
       await context.first.commitAuditIfRevisionWithExportLease(
         auditId,
-        { auditId, phase: 'delivering' },
+        auditFixture(auditId, 'delivering'),
         { auditId, exportStatus: 'delivering' },
         snapshot.capability,
         {
@@ -184,7 +591,7 @@ test('cleanup resumes after 25 blocked audits across store recreation and then r
         now: '2026-08-30T10:00:00.300Z', format: 'html', filename: 'auditoria.html', state: 'starting',
       });
     }
-    await context.first.commitAudit('clean-after-blocked', { auditId: 'clean-after-blocked' }, { auditId: 'clean-after-blocked' }, { now: T0 });
+    await context.first.commitAudit('clean-after-blocked', auditFixture('clean-after-blocked'), { auditId: 'clean-after-blocked' }, { now: T0 });
 
     assert.deepEqual(await context.first.cleanupExpiredAudits({ now: T30, limit: 25 }), {
       scanned: 25, deleted: 0, remaining: 26, blocked: 25,
@@ -210,9 +617,9 @@ test('cleanup resumes after 25 blocked audits across store recreation and then r
 test('delete-one enforces snapshot CAS and refuses active lease or delivery journal', async () => {
   const store = createInMemoryAuditStore();
   const auditId = 'delete-one';
-  await store.commitAudit(auditId, { auditId, generation: 1 }, { auditId }, { now: T0 });
+  await store.commitAudit(auditId, auditFixture(auditId, 'generation-1'), { auditId }, { now: T0 });
   const stale = await store.getAuditSnapshot(auditId);
-  await store.setAudit(auditId, { auditId, generation: 2 });
+  await store.setAudit(auditId, auditFixture(auditId, 'generation-2'));
   await assert.rejects(store.deleteAudit(auditId, stale.capability, { now: T29 }), error => error?.code === 'AUDIT_REVISION_CONFLICT');
 
   const current = await store.getAuditSnapshot(auditId);
@@ -233,7 +640,7 @@ test('delete-one enforces snapshot CAS and refuses active lease or delivery jour
 test('delete-all is all-or-none while any audit has delivery work', async () => {
   const store = createInMemoryAuditStore();
   for (const auditId of ['delete-all-a', 'delete-all-b']) {
-    await store.commitAudit(auditId, { auditId }, { auditId }, { now: T0 });
+    await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0 });
   }
   const snapshot = await store.getAuditSnapshot('delete-all-a');
   await store.acquireExportLease('delete-all-a', snapshot.capability, { ownerId: 'all-owner', now: T29 });
@@ -251,7 +658,7 @@ test('retention CAS and destructive APIs have the same contract in IndexedDB', a
   const fake = createFakeIndexedDb();
   const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
   for (const auditId of ['idb-delete-a', 'idb-delete-b']) {
-    await store.commitAudit(auditId, { auditId }, { auditId }, { now: T0 });
+    await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0 });
   }
   const snapshotA = await store.getAuditSnapshot('idb-delete-a');
   const changed = await store.setRetentionIntent('idb-delete-a', snapshotA.capability, {
@@ -285,7 +692,7 @@ test('finalization deletes only after the exact four terminal formats for the cu
   ]) {
     const store = createStore();
     const auditId = 'final-delete';
-    await store.commitAudit(auditId, { auditId, phase: 'prepared' }, { auditId }, {
+    await store.commitAudit(auditId, auditFixture(auditId, 'prepared'), { auditId }, {
       now: T0,
       deleteAfterCompleteExport: true,
     });
@@ -299,7 +706,7 @@ test('finalization deletes only after the exact four terminal formats for the cu
     });
     const reserved = await store.commitAuditIfRevisionWithExportLease(
       auditId,
-      { auditId, phase: 'delivering' },
+      auditFixture(auditId, 'delivering'),
       { auditId, exportStatus: 'delivering' },
       snapshot.capability,
       {
@@ -321,7 +728,7 @@ test('finalization deletes only after the exact four terminal formats for the cu
     }
     const result = await store.finalizeExportAndMaybeDelete(
       auditId,
-      { auditId, phase: 'complete' },
+      auditFixture(auditId, 'complete'),
       { auditId, exportStatus: 'complete' },
       snapshot.capability,
       {
@@ -340,7 +747,7 @@ test('finalization deletes only after the exact four terminal formats for the cu
 test('incomplete delivery receipt preserves the audit even when delete-after-export was selected', async () => {
   const store = createInMemoryAuditStore();
   const auditId = 'partial-retained';
-  await store.commitAudit(auditId, { auditId }, { auditId }, { now: T0, deleteAfterCompleteExport: true });
+  await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0, deleteAfterCompleteExport: true });
   let snapshot = await store.getAuditSnapshot(auditId);
   const lease = await store.acquireExportLease(auditId, snapshot.capability, {
     ownerId: 'partial-owner', now: '2026-08-30T10:00:00.000Z',
@@ -349,7 +756,7 @@ test('incomplete delivery receipt preserves the audit even when delete-after-exp
     ownerId: 'partial-owner', exportAttempt: lease.exportAttempt, now: '2026-08-30T10:00:00.100Z',
   });
   await store.commitAuditIfRevisionWithExportLease(
-    auditId, { auditId, phase: 'delivering' }, { auditId, exportStatus: 'delivering' }, snapshot.capability,
+    auditId, auditFixture(auditId, 'delivering'), { auditId, exportStatus: 'delivering' }, snapshot.capability,
     { ownerId: 'partial-owner', exportAttempt: lease.exportAttempt, now: '2026-08-30T10:00:00.200Z', phase: 'delivering' },
   );
   snapshot = await store.getAuditSnapshot(auditId);
@@ -362,7 +769,7 @@ test('incomplete delivery receipt preserves the audit even when delete-after-exp
   }
   const result = await store.finalizeExportAndMaybeDelete(
     auditId,
-    { auditId, phase: 'partial' },
+    auditFixture(auditId, 'partial'),
     { auditId, exportStatus: 'partial' },
     snapshot.capability,
     {
@@ -372,7 +779,7 @@ test('incomplete delivery receipt preserves the audit even when delete-after-exp
     },
   );
   assert.equal(result.deleted, false);
-  assert.equal((await store.getAudit(auditId)).phase, 'partial');
+  assert.equal((await store.getAudit(auditId)).versions.extension, 'test-partial');
   assert.ok(await store.getAuditRetention(auditId));
 });
 
@@ -386,7 +793,7 @@ test('store finalization rejects model or latest state correlated to another aud
   ]) {
     const store = createStore();
     const auditId = 'final-correlation';
-    await store.commitAudit(auditId, { auditId }, { auditId }, { now: T0 });
+    await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0 });
     const snapshot = await store.getAuditSnapshot(auditId);
     const lease = await store.acquireExportLease(auditId, snapshot.capability, {
       ownerId: 'correlation-owner', now: '2026-08-30T10:00:00.000Z',
@@ -399,13 +806,13 @@ test('store finalization rejects model or latest state correlated to another aud
 
     await assert.rejects(
       store.finalizeExportAndMaybeDelete(
-        auditId, { auditId: 'different-model' }, { auditId }, snapshot.capability, options,
+        auditId, auditFixture('different-model'), { auditId }, snapshot.capability, options,
       ),
-      /não corresponde|correla/iu,
+      error => error?.code === 'AUDIT_MODEL_INPUT_INVALID',
     );
     await assert.rejects(
       store.finalizeExportAndMaybeDelete(
-        auditId, { auditId }, { auditId: 'different-latest' }, snapshot.capability, options,
+        auditId, auditFixture(auditId), { auditId: 'different-latest' }, snapshot.capability, options,
       ),
       /não corresponde|correla/iu,
     );
@@ -415,59 +822,59 @@ test('store finalization rejects model or latest state correlated to another aud
 
 test('in-memory audit storage round-trips models and latest panel state without aliasing', async () => {
   const store = createInMemoryAuditStore();
-  const model = { auditId: 'audit-1', payload: 'x'.repeat(1024 * 1024) };
+  const model = auditFixture('audit-1', 'original');
   await store.setAudit('audit-1', model);
-  model.payload = 'mutated';
-  assert.equal((await store.getAudit('audit-1')).payload.length, 1024 * 1024);
+  model.versions.extension = 'test-mutated';
+  assert.equal((await store.getAudit('audit-1')).versions.extension, 'test-original');
   await store.setLatest({ auditId: 'audit-1', status: 'complete', percent: 100 });
   assert.deepEqual(await store.getLatest(), { auditId: 'audit-1', status: 'complete', percent: 100 });
 });
 
 test('in-memory commitAudit clones both values before atomically changing state', async () => {
   const store = createInMemoryAuditStore();
-  await store.commitAudit('audit-1', { auditId: 'audit-1', version: 1 }, { auditId: 'audit-1', status: 'partial' });
+  await store.commitAudit('audit-1', auditFixture('audit-1', 'version-1'), { auditId: 'audit-1', status: 'partial' });
   await assert.rejects(
-    store.commitAudit('audit-1', { auditId: 'audit-1', version: 2 }, { invalid: () => {} }),
+    store.commitAudit('audit-1', auditFixture('audit-1', 'version-2'), { invalid: () => {} }),
     error => error instanceof AuditStorageUnavailableError && error.code === 'AUDIT_STORAGE_UNAVAILABLE',
   );
-  assert.deepEqual(await store.getAudit('audit-1'), { auditId: 'audit-1', version: 1 });
+  assert.equal((await store.getAudit('audit-1')).versions.extension, 'test-version-1');
   assert.deepEqual(await store.getLatest(), { auditId: 'audit-1', status: 'partial' });
 });
 
 test('in-memory snapshots carry a monotonic revision and compare-and-swap never overwrites a newer model', async () => {
   const store = createInMemoryAuditStore();
-  await store.setAudit('audit-cas', { auditId: 'audit-cas', revisionMarker: 'initial' });
+  await store.setAudit('audit-cas', auditFixture('audit-cas', 'initial'));
   const snapshot = await store.getAuditSnapshot('audit-cas');
   assert.equal(snapshot.revision, 1);
 
-  await store.setAudit('audit-cas', { auditId: 'audit-cas', revisionMarker: 'human-review' });
+  await store.setAudit('audit-cas', auditFixture('audit-cas', 'human-review'));
   await assert.rejects(
     store.commitAuditIfRevision(
       'audit-cas',
-      { auditId: 'audit-cas', revisionMarker: 'stale-export' },
+      auditFixture('audit-cas', 'stale-export'),
       { auditId: 'audit-cas', exportStatus: 'complete' },
       snapshot.capability,
     ),
     error => error?.code === 'AUDIT_REVISION_CONFLICT',
   );
 
-  assert.equal((await store.getAudit('audit-cas')).revisionMarker, 'human-review');
+  assert.equal((await store.getAudit('audit-cas')).versions.extension, 'test-human-review');
   assert.equal((await store.getAuditSnapshot('audit-cas')).revision, 2);
 });
 
 test('only one concurrent compare-and-swap can commit the same expected revision', async () => {
   const store = createInMemoryAuditStore();
-  await store.setAudit('audit-race', { auditId: 'audit-race', winner: null });
+  await store.setAudit('audit-race', auditFixture('audit-race', 'initial'));
   const { revision, capability } = await store.getAuditSnapshot('audit-race');
 
   const outcomes = await Promise.allSettled([
-    store.commitAuditIfRevision('audit-race', { auditId: 'audit-race', winner: 'first' }, { auditId: 'audit-race' }, capability),
-    store.commitAuditIfRevision('audit-race', { auditId: 'audit-race', winner: 'second' }, { auditId: 'audit-race' }, capability),
+    store.commitAuditIfRevision('audit-race', auditFixture('audit-race', 'first'), { auditId: 'audit-race' }, capability),
+    store.commitAuditIfRevision('audit-race', auditFixture('audit-race', 'second'), { auditId: 'audit-race' }, capability),
   ]);
 
   assert.equal(outcomes.filter(entry => entry.status === 'fulfilled').length, 1);
   assert.equal(outcomes.filter(entry => entry.status === 'rejected' && entry.reason?.code === 'AUDIT_REVISION_CONFLICT').length, 1);
-  assert.ok(['first', 'second'].includes((await store.getAudit('audit-race')).winner));
+  assert.ok(['test-first', 'test-second'].includes((await store.getAudit('audit-race')).versions.extension));
   assert.equal((await store.getAuditSnapshot('audit-race')).revision, revision + 1);
 });
 
@@ -475,27 +882,27 @@ test('in-memory revisions survive store recreation over the same fallback backin
   const backing = new Map();
   const first = createInMemoryAuditStore(backing);
   const recreated = createInMemoryAuditStore(backing);
-  await first.setAudit('audit-retained', { auditId: 'audit-retained', marker: 'initial' });
+  await first.setAudit('audit-retained', auditFixture('audit-retained', 'initial'));
   const snapshot = await recreated.getAuditSnapshot('audit-retained');
   assert.equal(snapshot.revision, 1);
 
-  await first.setAudit('audit-retained', { auditId: 'audit-retained', marker: 'human-review' });
+  await first.setAudit('audit-retained', auditFixture('audit-retained', 'human-review'));
   await assert.rejects(
     recreated.commitAuditIfRevision(
       'audit-retained',
-      { auditId: 'audit-retained', marker: 'stale-export' },
+      auditFixture('audit-retained', 'stale-export'),
       { auditId: 'audit-retained', exportStatus: 'complete' },
       snapshot.capability,
     ),
     error => error?.code === 'AUDIT_REVISION_CONFLICT',
   );
-  assert.equal((await recreated.getAudit('audit-retained')).marker, 'human-review');
+  assert.equal((await recreated.getAudit('audit-retained')).versions.extension, 'test-human-review');
 });
 
-test('IndexedDB audit storage uses a dedicated object store and persists a large model', async () => {
+test('IndexedDB audit storage uses a dedicated object store and persists a canonical model', async () => {
   const fake = createFakeIndexedDb();
   const store = createAuditStore({ indexedDB: fake });
-  const value = { auditId: 'audit-large', image: `data:image/png;base64,${'A'.repeat(2_000_000)}` };
+  const value = auditFixture('audit-large');
   await store.setAudit('audit-large', value);
   assert.deepEqual(await store.getAudit('audit-large'), value);
   await store.setLatest({ auditId: 'audit-large', status: 'partial' });
@@ -509,7 +916,7 @@ test('IndexedDB v2 persists limited retention metadata beside each model in one 
   const auditId = 'audit-idb-retention';
   await store.commitAudit(
     auditId,
-    { auditId, url: 'https://sensitive.invalid/?token=never-copy', pixels: 'secret-pixels' },
+    auditFixture(auditId),
     { auditId, status: 'complete' },
     { now: T0, deleteAfterCompleteExport: true },
   );
@@ -547,7 +954,7 @@ test('IndexedDB v1 migration creates metadata only for normal audit records and 
   });
   const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
 
-  assert.equal((await store.getAudit(auditId)).auditId, auditId);
+  await store.getLatest();
   assert.deepEqual(await store.getAuditRetention(auditId), {
     auditId, schemaVersion: 1,
     firstPersistedAt: '2026-01-02T03:04:05.006Z',
@@ -591,10 +998,10 @@ test('IndexedDB retention expiration remains absolute through revision and clean
   const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
   for (let index = 0; index < 26; index += 1) {
     const auditId = `idb-expired-${String(index).padStart(2, '0')}`;
-    await store.commitAudit(auditId, { auditId }, { auditId }, { now: T0 });
+    await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0 });
   }
-  await store.commitAudit('idb-future', { auditId: 'idb-future' }, { auditId: 'idb-future' }, { now: T30 });
-  await store.commitAudit('idb-expired-25', { auditId: 'idb-expired-25', reviewed: true }, { auditId: 'idb-expired-25' }, { now: T29 });
+  await store.commitAudit('idb-future', auditFixture('idb-future'), { auditId: 'idb-future' }, { now: T30 });
+  await store.commitAudit('idb-expired-25', auditFixture('idb-expired-25', 'reviewed'), { auditId: 'idb-expired-25' }, { now: T29 });
   assert.equal((await store.getAuditRetention('idb-expired-25')).expiresAt, T30);
 
   assert.deepEqual(await store.cleanupExpiredAudits({ now: T30, limit: 25 }), {
@@ -613,7 +1020,7 @@ test('IndexedDB quota or transaction abort exposes only the fixed storage error 
   await assert.rejects(
     store.commitAudit(
       'quota-audit',
-      { auditId: 'quota-audit', url: 'https://sensitive.invalid/?token=never-log' },
+      auditFixture('quota-audit'),
       { auditId: 'quota-audit' },
       { now: T0 },
     ),
@@ -680,12 +1087,12 @@ test('persistent storage clone failures are fixed, accessor-safe and retryable a
     const store = createPersistentStore();
     const hostile = hostileValue('clone-mutation');
     await assert.rejects(
-      store.commitAudit('clone-mutation', hostile.value, { auditId: 'clone-mutation' }, { now: T0 }),
+      store.commitAudit('clone-mutation', auditFixture('clone-mutation'), hostile.value, { now: T0 }),
       fixedFailure,
     );
     assert.equal(hostile.reads(), 0);
     await store.commitAudit(
-      'clone-mutation', { auditId: 'clone-mutation' }, { auditId: 'clone-mutation' }, { now: T0 },
+      'clone-mutation', auditFixture('clone-mutation'), { auditId: 'clone-mutation' }, { now: T0 },
     );
     assert.equal((await store.getAudit('clone-mutation')).auditId, 'clone-mutation');
   });
@@ -693,12 +1100,7 @@ test('persistent storage clone failures are fixed, accessor-safe and retryable a
   await t.test('interrupted-checkpoint settlement', async () => {
     const store = createPersistentStore();
     const auditId = 'clone-interrupted';
-    await store.commitAudit(
-      auditId,
-      { auditId, session: { status: 'running' } },
-      { auditId, status: 'running' },
-      { now: T0 },
-    );
+    await store.setLatest({ auditId, status: 'running' });
     const hostile = hostileValue(auditId, { status: 'failed' });
     await assert.rejects(
       store.markAuditInterrupted(auditId, hostile.value, { now: '2026-08-01T00:00:01.000Z' }),
@@ -716,7 +1118,7 @@ test('persistent storage clone failures are fixed, accessor-safe and retryable a
   await t.test('atomic export finalization', async () => {
     const store = createPersistentStore();
     const auditId = 'clone-finalization';
-    await store.commitAudit(auditId, { auditId }, { auditId, status: 'complete' }, { now: T0 });
+    await store.commitAudit(auditId, auditFixture(auditId), { auditId, status: 'complete' }, { now: T0 });
     const source = await store.getAuditSnapshot(auditId);
     const acquired = await store.acquireExportLease(auditId, source.capability, {
       ownerId: 'clone-owner', now: '2026-08-01T00:00:01.000Z',
@@ -729,7 +1131,7 @@ test('persistent storage clone failures are fixed, accessor-safe and retryable a
     });
     const reserved = await store.commitAuditIfRevisionWithExportLease(
       auditId,
-      { auditId, session: { status: 'partial' } },
+      auditFixture(auditId, 'delivering'),
       { auditId, exportStatus: 'delivering', exportRevision: source.revision + 1 },
       source.capability,
       {
@@ -746,7 +1148,7 @@ test('persistent storage clone failures are fixed, accessor-safe and retryable a
       });
       downloadId += 1;
     }
-    const hostile = hostileValue(auditId, { session: { status: 'partial' } });
+    const hostile = hostileValue(auditId, { exportStatus: 'partial' });
     const options = {
       ownerId: 'clone-owner', exportAttempt: acquired.exportAttempt,
       now: '2026-08-01T00:00:03.000Z', clearDeliveryJournal: true,
@@ -754,14 +1156,14 @@ test('persistent storage clone failures are fixed, accessor-safe and retryable a
     };
     await assert.rejects(
       store.finalizeExportAndMaybeDelete(
-        auditId, hostile.value, { auditId, exportStatus: 'partial' }, reserved.capability, options,
+        auditId, auditFixture(auditId, 'partial'), hostile.value, reserved.capability, options,
       ),
       fixedFailure,
     );
     assert.equal(hostile.reads(), 0);
     const finalized = await store.finalizeExportAndMaybeDelete(
       auditId,
-      { auditId, session: { status: 'partial' } },
+      auditFixture(auditId, 'partial'),
       { auditId, exportStatus: 'partial' },
       reserved.capability,
       options,
@@ -852,7 +1254,7 @@ test('every synchronous IndexedDB boundary is sanitized and remains retryable', 
   await t.test('objectStore.index', async () => {
     const fake = createFakeIndexedDb({ syncIndexFailures: 2, syncError: new Error(sensitive) });
     const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
-    await store.commitAudit('sync-index-audit', { auditId: 'sync-index-audit' }, { auditId: 'sync-index-audit' }, { now: T0 });
+    await store.commitAudit('sync-index-audit', auditFixture('sync-index-audit'), { auditId: 'sync-index-audit' }, { now: T0 });
     await assertFixedTwice(() => store.cleanupExpiredAudits({ now: T30, limit: 25 }));
   });
 });
@@ -874,7 +1276,7 @@ test('every synchronous IndexedDB operation aborts its transaction and exposes o
   await t.test('object-store request matrix', async () => {
     const fake = createFakeIndexedDb({ syncError: new Error(sensitive) });
     const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
-    await store.commitAudit('operation-matrix', { auditId: 'operation-matrix' }, { auditId: 'operation-matrix' }, { now: T0 });
+    await store.commitAudit('operation-matrix', auditFixture('operation-matrix'), { auditId: 'operation-matrix' }, { now: T0 });
     const snapshot = await store.getAuditSnapshot('operation-matrix');
     await assertFixedAbort(fake, 'store.put', () => store.setLatest({ auditId: 'operation-matrix' }));
     await assertFixedAbort(fake, 'store.get', () => store.getLatest());
@@ -888,7 +1290,7 @@ test('every synchronous IndexedDB operation aborts its transaction and exposes o
       const fake = createFakeIndexedDb({ syncError: new Error(sensitive) });
       const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
       for (const id of ['cursor-a', 'cursor-b']) {
-        await store.commitAudit(id, { auditId: id }, { auditId: id }, { now: T0 });
+        await store.commitAudit(id, auditFixture(id), { auditId: id }, { now: T0 });
       }
       await assertFixedAbort(fake, boundary, () => store.cleanupExpiredAudits({ now: T30, limit: 25 }));
     });
@@ -898,10 +1300,10 @@ test('every synchronous IndexedDB operation aborts its transaction and exposes o
     const fake = createFakeIndexedDb({ syncError: new Error(sensitive) });
     const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
     for (const id of ['marker-b', 'marker-c']) {
-      await store.commitAudit(id, { auditId: id }, { auditId: id }, { now: T0 });
+      await store.commitAudit(id, auditFixture(id), { auditId: id }, { now: T0 });
     }
     await store.cleanupExpiredAudits({ now: T30, limit: 1 });
-    await store.commitAudit('marker-a', { auditId: 'marker-a' }, { auditId: 'marker-a' }, { now: T0 });
+    await store.commitAudit('marker-a', auditFixture('marker-a'), { auditId: 'marker-a' }, { now: T0 });
     await assertFixedAbort(fake, 'cursor.continuePrimaryKey', () =>
       store.cleanupExpiredAudits({ now: T30, limit: 25 }));
   });
@@ -925,20 +1327,20 @@ test('every synchronous IndexedDB operation aborts its transaction and exposes o
 test('IndexedDB commitAudit writes model and latest in one transaction', async () => {
   const fake = createFakeIndexedDb();
   const store = createAuditStore({ indexedDB: fake });
-  await store.commitAudit('audit-atomic', { auditId: 'audit-atomic', bytes: 'model' }, { auditId: 'audit-atomic', status: 'complete' });
+  await store.commitAudit('audit-atomic', auditFixture('audit-atomic'), { auditId: 'audit-atomic', status: 'complete' });
   assert.equal(fake.transactionModes.filter(mode => mode === 'readwrite').length, 1);
-  assert.deepEqual(await store.getAudit('audit-atomic'), { auditId: 'audit-atomic', bytes: 'model' });
+  assert.deepEqual(await store.getAudit('audit-atomic'), auditFixture('audit-atomic'));
   assert.deepEqual(await store.getLatest(), { auditId: 'audit-atomic', status: 'complete' });
 });
 
 test('IndexedDB compare-and-swap checks and updates the revision in the same readwrite transaction', async () => {
   const fake = createFakeIndexedDb();
   const store = createAuditStore({ indexedDB: fake });
-  await store.setAudit('audit-idb-cas', { auditId: 'audit-idb-cas', marker: 'initial' });
+  await store.setAudit('audit-idb-cas', auditFixture('audit-idb-cas', 'initial'));
   const snapshot = await store.getAuditSnapshot('audit-idb-cas');
   await store.commitAuditIfRevision(
     'audit-idb-cas',
-    { auditId: 'audit-idb-cas', marker: 'exported' },
+    auditFixture('audit-idb-cas', 'exported'),
     { auditId: 'audit-idb-cas', exportStatus: 'complete' },
     snapshot.capability,
   );
@@ -946,13 +1348,13 @@ test('IndexedDB compare-and-swap checks and updates the revision in the same rea
   await assert.rejects(
     store.commitAuditIfRevision(
       'audit-idb-cas',
-      { auditId: 'audit-idb-cas', marker: 'stale' },
+      auditFixture('audit-idb-cas', 'stale'),
       { auditId: 'audit-idb-cas', exportStatus: 'failed' },
       snapshot.capability,
     ),
     error => error?.code === 'AUDIT_REVISION_CONFLICT',
   );
-  assert.equal((await store.getAudit('audit-idb-cas')).marker, 'exported');
+  assert.equal((await store.getAudit('audit-idb-cas')).versions.extension, 'test-exported');
   assert.equal((await store.getAuditSnapshot('audit-idb-cas')).revision, snapshot.revision + 1);
 });
 
@@ -960,7 +1362,7 @@ test('two IndexedDB store connections cannot both commit capabilities for the sa
   const fake = createFakeIndexedDb();
   const first = createAuditStore({ indexedDB: fake });
   const second = createAuditStore({ indexedDB: fake });
-  await first.setAudit('audit-idb-race', { auditId: 'audit-idb-race', winner: null });
+  await first.setAudit('audit-idb-race', auditFixture('audit-idb-race', 'initial'));
   const [firstSnapshot, secondSnapshot] = await Promise.all([
     first.getAuditSnapshot('audit-idb-race'),
     second.getAuditSnapshot('audit-idb-race'),
@@ -970,13 +1372,13 @@ test('two IndexedDB store connections cannot both commit capabilities for the sa
   const outcomes = await Promise.allSettled([
     first.commitAuditIfRevision(
       'audit-idb-race',
-      { auditId: 'audit-idb-race', winner: 'first' },
+      auditFixture('audit-idb-race', 'first'),
       { auditId: 'audit-idb-race', exportStatus: 'complete' },
       firstSnapshot.capability,
     ),
     second.commitAuditIfRevision(
       'audit-idb-race',
-      { auditId: 'audit-idb-race', winner: 'second' },
+      auditFixture('audit-idb-race', 'second'),
       { auditId: 'audit-idb-race', exportStatus: 'complete' },
       secondSnapshot.capability,
     ),
@@ -984,14 +1386,14 @@ test('two IndexedDB store connections cannot both commit capabilities for the sa
 
   assert.equal(outcomes.filter(entry => entry.status === 'fulfilled').length, 1);
   assert.equal(outcomes.filter(entry => entry.status === 'rejected' && entry.reason?.code === 'AUDIT_REVISION_CONFLICT').length, 1);
-  assert.ok(['first', 'second'].includes((await first.getAudit('audit-idb-race')).winner));
+  assert.ok(['test-first', 'test-second'].includes((await first.getAudit('audit-idb-race')).versions.extension));
 });
 
 test('compare-and-swap accepts only a capability minted by the same store and audit snapshot', async () => {
   const store = createInMemoryAuditStore();
   const other = createInMemoryAuditStore();
-  await store.setAudit('audit-capability', { auditId: 'audit-capability', marker: 'current' });
-  await other.setAudit('audit-capability', { auditId: 'audit-capability', marker: 'other' });
+  await store.setAudit('audit-capability', auditFixture('audit-capability', 'current'));
+  await other.setAudit('audit-capability', auditFixture('audit-capability', 'other'));
   const snapshot = await store.getAuditSnapshot('audit-capability');
   const otherSnapshot = await other.getAuditSnapshot('audit-capability');
 
@@ -999,24 +1401,24 @@ test('compare-and-swap accepts only a capability minted by the same store and au
     await assert.rejects(
       store.commitAuditIfRevision(
         'audit-capability',
-        { auditId: 'audit-capability', marker: 'forged' },
+        auditFixture('audit-capability', 'forged'),
         { auditId: 'audit-capability', exportStatus: 'failed' },
         forged,
       ),
       /capacidade|snapshot|inválid/iu,
     );
   }
-  assert.equal((await store.getAudit('audit-capability')).marker, 'current');
+  assert.equal((await store.getAudit('audit-capability')).versions.extension, 'test-current');
   assert.equal((await store.getAuditSnapshot('audit-capability')).revision, snapshot.revision);
 });
 
 test('a successful CAS returns the next store-owned capability for finalization', async () => {
   const store = createInMemoryAuditStore();
-  await store.setAudit('audit-reserve', { auditId: 'audit-reserve', phase: 'prepared' });
+  await store.setAudit('audit-reserve', auditFixture('audit-reserve', 'prepared'));
   const prepared = await store.getAuditSnapshot('audit-reserve');
   const reserved = await store.commitAuditIfRevision(
     'audit-reserve',
-    { auditId: 'audit-reserve', phase: 'reserved' },
+    auditFixture('audit-reserve', 'reserved'),
     { auditId: 'audit-reserve', exportStatus: 'delivering' },
     prepared.capability,
   );
@@ -1026,7 +1428,7 @@ test('a successful CAS returns the next store-owned capability for finalization'
   await assert.rejects(
     store.commitAuditIfRevision(
       'audit-reserve',
-      { auditId: 'audit-reserve', phase: 'stale' },
+      auditFixture('audit-reserve', 'stale'),
       {},
       prepared.capability,
     ),
@@ -1034,11 +1436,11 @@ test('a successful CAS returns the next store-owned capability for finalization'
   );
   await store.commitAuditIfRevision(
     'audit-reserve',
-    { auditId: 'audit-reserve', phase: 'final' },
+    auditFixture('audit-reserve', 'final'),
     { auditId: 'audit-reserve', exportStatus: 'complete' },
     reserved.capability,
   );
-  assert.equal((await store.getAudit('audit-reserve')).phase, 'final');
+  assert.equal((await store.getAudit('audit-reserve')).versions.extension, 'test-final');
 });
 
 test('audit identifiers cannot collide with private latest, revision, lease, attempt or delivery records', async () => {
@@ -1084,16 +1486,16 @@ test('export attempts remain monotonic per audit when another audit becomes late
     createInMemoryAuditStore(),
     createAuditStore({ indexedDB: createFakeIndexedDb() }),
   ]) {
-    await store.setAudit('audit-attempt-a', { auditId: 'audit-attempt-a', generation: 1 });
+    await store.setAudit('audit-attempt-a', auditFixture('audit-attempt-a', 'generation-1'));
     let snapshotA = await store.getAuditSnapshot('audit-attempt-a');
     const firstA = await store.acquireExportLease('audit-attempt-a', snapshotA.capability, {
       ownerId: 'owner-attempt-a1', now: '2026-08-27T10:00:00.000Z',
       latestState: { auditId: 'audit-attempt-a', exportStatus: 'queued', exportRevision: snapshotA.revision },
     });
     assert.equal(firstA.exportAttempt, 1);
-    await store.setAudit('audit-attempt-a', { auditId: 'audit-attempt-a', generation: 2 });
+    await store.setAudit('audit-attempt-a', auditFixture('audit-attempt-a', 'generation-2'));
 
-    await store.setAudit('audit-attempt-b', { auditId: 'audit-attempt-b' });
+    await store.setAudit('audit-attempt-b', auditFixture('audit-attempt-b'));
     const snapshotB = await store.getAuditSnapshot('audit-attempt-b');
     const firstB = await store.acquireExportLease('audit-attempt-b', snapshotB.capability, {
       ownerId: 'owner-attempt-b1', now: '2026-08-27T10:00:00.100Z',
@@ -1114,7 +1516,7 @@ test('a persistent export lease lets only one in-memory store instance own physi
   const backing = new Map();
   const first = createInMemoryAuditStore(backing);
   const second = createInMemoryAuditStore(backing);
-  await first.setAudit('audit-lease-race', { auditId: 'audit-lease-race', phase: 'reviewed' });
+  await first.setAudit('audit-lease-race', auditFixture('audit-lease-race', 'reviewed'));
   const [firstSnapshot, secondSnapshot] = await Promise.all([
     first.getAuditSnapshot('audit-lease-race'),
     second.getAuditSnapshot('audit-lease-race'),
@@ -1145,9 +1547,7 @@ test('interrupted-checkpoint settlement preserves terminal models and queued exp
     createAuditStore({ indexedDB: createFakeIndexedDb() }),
   ]) {
     const auditId = 'batch-terminal-export-owned';
-    await store.commitAudit(auditId, {
-      auditId, session: { status: 'complete' }, report: {},
-    }, {
+    await store.commitAudit(auditId, auditFixture(auditId), {
       auditId, mode: 'batch', status: 'complete', exportStatus: 'preparing',
     }, { now: T0 });
     const snapshot = await store.getAuditSnapshot(auditId);
@@ -1167,7 +1567,7 @@ test('interrupted-checkpoint settlement preserves terminal models and queued exp
     assert.deepEqual(result, { updated: false, reason: 'terminal' });
     const after = await store.getAuditSnapshot(auditId);
     assert.equal(after.revision, snapshot.revision);
-    assert.equal(after.model.session.status, 'complete');
+    assert.equal(after.model.session.status, 'partial');
     assert.equal((await store.getLatest()).exportStatus, 'queued');
     assert.deepEqual(await store.getExportLeaseState(auditId, {
       now: '2026-08-27T10:00:00.100Z',
@@ -1186,31 +1586,23 @@ test('interrupted-checkpoint settlement updates only a still-current non-termina
   ]) {
     const liveStore = createStore();
     const liveId = 'batch-interrupted-live';
-    await liveStore.commitAudit(liveId, {
-      auditId: liveId, session: { status: 'running' }, report: {},
-    }, {
+    await liveStore.setLatest({
       auditId: liveId, mode: 'batch', status: 'running', percent: 50,
-    }, { now: T0 });
-    const liveBefore = await liveStore.getAuditSnapshot(liveId);
-    const retentionBefore = await liveStore.getAuditRetention(liveId);
+    });
     assert.deepEqual(await liveStore.markAuditInterrupted(liveId, {
       auditId: liveId, mode: 'batch', status: 'failed', exportStatus: 'unavailable',
       message: 'Lote interrompido.',
     }, { now: '2026-08-27T10:00:00.000Z' }), {
       updated: true, reason: 'interrupted',
     });
-    const liveAfter = await liveStore.getAuditSnapshot(liveId);
-    assert.equal(liveAfter.revision, liveBefore.revision);
-    assert.deepEqual(liveAfter.model, liveBefore.model);
-    assert.deepEqual(await liveStore.getAuditRetention(liveId), retentionBefore);
+    assert.equal(await liveStore.getAudit(liveId), undefined);
+    assert.equal(await liveStore.getAuditRetention(liveId), undefined);
     assert.equal((await liveStore.getLatest()).status, 'failed');
     assert.deepEqual(await liveStore.getExportDeliveryJournal(liveId), []);
 
     const deletedStore = createStore();
     const deletedId = 'batch-interrupted-deleted';
-    await deletedStore.commitAudit(deletedId, {
-      auditId: deletedId, session: { status: 'running' }, report: {},
-    }, {
+    await deletedStore.commitAudit(deletedId, auditFixture(deletedId), {
       auditId: deletedId, mode: 'batch', status: 'running', percent: 50,
     }, { now: T0 });
     const deletedSnapshot = await deletedStore.getAuditSnapshot(deletedId);
@@ -1241,11 +1633,9 @@ test('interrupted-checkpoint settlement updates only a still-current non-termina
 
     const malformedStore = createStore();
     const malformedId = 'batch-interrupted-malformed';
-    await malformedStore.commitAudit(malformedId, {
-      auditId: malformedId, session: { status: 'running' }, report: {},
-    }, {
+    await malformedStore.setLatest({
       auditId: malformedId, mode: 'batch', status: 'unknown-state',
-    }, { now: T0 });
+    });
     assert.deepEqual(await malformedStore.markAuditInterrupted(malformedId, {
       auditId: malformedId, mode: 'batch', status: 'failed', exportStatus: 'unavailable',
       message: 'Lote interrompido.',
@@ -1260,7 +1650,7 @@ test('an expired/crashed export lease is reclaimable and its former owner cannot
   const backing = new Map();
   const first = createInMemoryAuditStore(backing);
   const second = createInMemoryAuditStore(backing);
-  await first.setAudit('audit-lease-expiry', { auditId: 'audit-lease-expiry', phase: 'reviewed' });
+  await first.setAudit('audit-lease-expiry', auditFixture('audit-lease-expiry', 'reviewed'));
   const firstSnapshot = await first.getAuditSnapshot('audit-lease-expiry');
   const acquired = await first.acquireExportLease('audit-lease-expiry', firstSnapshot.capability, {
     ownerId: 'owner-crashed', now: '2026-08-27T10:00:00.000Z', ttlMs: 1_000,
@@ -1298,7 +1688,7 @@ test('an expired/crashed export lease is reclaimable and its former owner cannot
   await assert.rejects(
     first.commitAuditIfRevisionWithExportLease(
       'audit-lease-expiry',
-      { auditId: 'audit-lease-expiry', phase: 'stale-delivery' },
+      auditFixture('audit-lease-expiry', 'stale-delivery'),
       { auditId: 'audit-lease-expiry', exportStatus: 'delivering' },
       firstSnapshot.capability,
       { ownerId: 'owner-crashed', now: '2026-08-27T10:00:01.001Z', phase: 'delivering' },
@@ -1314,7 +1704,7 @@ test('clock rollback cannot invalidate an owned lease during claim or delivery r
   ]) {
     const store = createStore();
     const auditId = 'audit-lease-clock-rollback';
-    await store.setAudit(auditId, { auditId, phase: 'reviewed' });
+    await store.setAudit(auditId, auditFixture(auditId, 'reviewed'));
     const snapshot = await store.getAuditSnapshot(auditId);
     const acquired = await store.acquireExportLease(auditId, snapshot.capability, {
       ownerId: 'owner-clock-rollback', now: '2026-08-27T12:00:00.000Z', ttlMs: 600_000,
@@ -1335,7 +1725,7 @@ test('clock rollback cannot invalidate an owned lease during claim or delivery r
     });
 
     const reserved = await store.commitAuditIfRevisionWithExportLease(
-      auditId, { auditId, phase: 'delivering' },
+      auditId, auditFixture(auditId, 'delivering'),
       { auditId, exportStatus: 'delivering', exportRevision: snapshot.revision + 1 },
       snapshot.capability,
       {
@@ -1360,7 +1750,7 @@ test('a persistent delivery journal survives crash and review until the next own
   ]) {
     const store = createStore();
     const auditId = SAMPLE_AUDIT.auditId;
-    await store.setAudit(auditId, { auditId, phase: 'review-ready' });
+    await store.setAudit(auditId, structuredClone(SAMPLE_AUDIT));
     let snapshot = await store.getAuditSnapshot(auditId);
     const lease = await store.acquireExportLease(auditId, snapshot.capability, {
       ownerId: 'owner-crashed', now: '2026-08-27T10:00:00.000Z', ttlMs: 1_000,
@@ -1373,7 +1763,7 @@ test('a persistent delivery journal survives crash and review until the next own
     });
     const reserved = await store.commitAuditIfRevisionWithExportLease(
       auditId,
-      { auditId, phase: 'delivering' },
+      snapshot.model,
       { auditId, exportStatus: 'delivering', exportRevision: snapshot.revision + 1 },
       snapshot.capability,
       {
@@ -1423,7 +1813,7 @@ test('a persistent delivery journal survives crash and review until the next own
 test('cleanup failure remains visible without rolling back a newer human review', async () => {
   const store = createInMemoryAuditStore();
   const auditId = SAMPLE_AUDIT.auditId;
-  await store.setAudit(auditId, { auditId, phase: 'initial' });
+  await store.setAudit(auditId, structuredClone(SAMPLE_AUDIT));
   let snapshot = await store.getAuditSnapshot(auditId);
   const lease = await store.acquireExportLease(auditId, snapshot.capability, {
     ownerId: 'owner-export', now: '2026-08-27T10:00:00.000Z',
@@ -1433,7 +1823,7 @@ test('cleanup failure remains visible without rolling back a newer human review'
     ownerId: 'owner-export', exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.100Z',
   });
   const reserved = await store.commitAuditIfRevisionWithExportLease(
-    auditId, { auditId, phase: 'delivering' }, { auditId, exportStatus: 'delivering' }, snapshot.capability,
+    auditId, snapshot.model, { auditId, exportStatus: 'delivering' }, snapshot.capability,
     {
       ownerId: 'owner-export', exportAttempt: lease.exportAttempt,
       now: '2026-08-27T10:00:00.200Z', phase: 'delivering',
@@ -1469,7 +1859,7 @@ test('cleanup failure remains visible without rolling back a newer human review'
 test('wall-clock regression cannot corrupt record or cleanup journal timestamps', async () => {
   const store = createInMemoryAuditStore();
   const auditId = 'audit-journal-clock';
-  await store.setAudit(auditId, { auditId });
+  await store.setAudit(auditId, auditFixture(auditId));
   let snapshot = await store.getAuditSnapshot(auditId);
   const lease = await store.acquireExportLease(auditId, snapshot.capability, {
     ownerId: 'owner-clock', now: '2026-08-27T12:00:00.000Z',
@@ -1478,7 +1868,7 @@ test('wall-clock regression cannot corrupt record or cleanup journal timestamps'
     ownerId: 'owner-clock', exportAttempt: lease.exportAttempt, now: '2026-08-27T12:00:00.100Z',
   });
   await store.commitAuditIfRevisionWithExportLease(
-    auditId, { auditId }, { auditId, exportStatus: 'delivering' }, snapshot.capability,
+    auditId, auditFixture(auditId, 'delivering'), { auditId, exportStatus: 'delivering' }, snapshot.capability,
     { ownerId: 'owner-clock', exportAttempt: 1, now: '2026-08-27T12:00:00.200Z', phase: 'delivering' },
   );
   snapshot = await store.getAuditSnapshot(auditId);
@@ -1503,7 +1893,7 @@ test('a malformed private journal cannot partially acquire or advance a lease', 
   const store = createInMemoryAuditStore(backing);
   const auditId = 'audit-journal-atomic';
   const journalKey = `__audit_export_delivery__:${auditId}`;
-  await store.setAudit(auditId, { auditId });
+  await store.setAudit(auditId, auditFixture(auditId));
   let snapshot = await store.getAuditSnapshot(auditId);
   backing.set(journalKey, { schemaVersion: 1, auditId, entries: 'invalid' });
   await assert.rejects(store.acquireExportLease(auditId, snapshot.capability, {
@@ -1528,7 +1918,7 @@ test('in-memory review and journal mutations stay atomic when the stored latest 
   const backing = new Map();
   const store = createInMemoryAuditStore(backing);
   const auditId = SAMPLE_AUDIT.auditId;
-  await store.setAudit(auditId, { auditId, marker: 'initial' });
+  await store.setAudit(auditId, structuredClone(SAMPLE_AUDIT));
   let snapshot = await store.getAuditSnapshot(auditId);
   const lease = await store.acquireExportLease(auditId, snapshot.capability, {
     ownerId: 'owner-latest-atomic', now: '2026-08-27T12:30:00.000Z',
@@ -1539,7 +1929,7 @@ test('in-memory review and journal mutations stay atomic when the stored latest 
     now: '2026-08-27T12:30:00.100Z',
   });
   await store.commitAuditIfRevisionWithExportLease(
-    auditId, { auditId, marker: 'delivering' },
+    auditId, snapshot.model,
     { auditId, exportStatus: 'delivering', exportRevision: snapshot.revision + 1 },
     snapshot.capability,
     {
@@ -1575,7 +1965,7 @@ test('in-memory review and journal mutations stay atomic when the stored latest 
   ), error => error instanceof AuditStorageUnavailableError && error.code === 'AUDIT_STORAGE_UNAVAILABLE');
   const after = await store.getAuditSnapshot(auditId);
   assert.equal(after.revision, snapshot.revision);
-  assert.equal(after.model.marker, 'delivering');
+  assert.deepEqual(after.model, snapshot.model);
   assert.equal((await store.getExportLeaseState(auditId, {
     now: '2026-08-27T12:30:00.600Z',
   })).active, true);
@@ -1588,7 +1978,7 @@ test('successful persistence clears only its exact journal atomically with lease
   ]) {
     const store = createStore();
     const auditId = 'audit-journal-success';
-    await store.setAudit(auditId, { auditId, phase: 'initial' });
+    await store.setAudit(auditId, auditFixture(auditId, 'initial'));
     let snapshot = await store.getAuditSnapshot(auditId);
     const lease = await store.acquireExportLease(auditId, snapshot.capability, {
       ownerId: 'owner-success', now: '2026-08-27T10:00:00.000Z',
@@ -1598,7 +1988,7 @@ test('successful persistence clears only its exact journal atomically with lease
       ownerId: 'owner-success', exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.100Z',
     });
     await store.commitAuditIfRevisionWithExportLease(
-      auditId, { auditId, phase: 'delivering' }, { auditId, exportStatus: 'delivering' }, snapshot.capability,
+      auditId, auditFixture(auditId, 'delivering'), { auditId, exportStatus: 'delivering' }, snapshot.capability,
       {
         ownerId: 'owner-success', exportAttempt: lease.exportAttempt,
         now: '2026-08-27T10:00:00.200Z', phase: 'delivering',
@@ -1611,7 +2001,7 @@ test('successful persistence clears only its exact journal atomically with lease
       state: 'terminal', downloadId: 7,
     });
     await store.commitAuditIfRevisionWithExportLease(
-      auditId, { auditId, phase: 'complete' }, { auditId, exportStatus: 'complete' }, snapshot.capability,
+      auditId, auditFixture(auditId, 'complete'), { auditId, exportStatus: 'complete' }, snapshot.capability,
       {
         ownerId: 'owner-success', exportAttempt: lease.exportAttempt,
         now: '2026-08-27T10:00:00.400Z', release: true, clearDeliveryJournal: true,
@@ -1626,7 +2016,7 @@ test('successful persistence clears only its exact journal atomically with lease
 test('an unresolved pre-ID start cannot be erased by partial success persistence', async () => {
   const store = createInMemoryAuditStore();
   const auditId = 'audit-journal-starting';
-  await store.setAudit(auditId, { auditId, phase: 'initial' });
+  await store.setAudit(auditId, auditFixture(auditId, 'initial'));
   let snapshot = await store.getAuditSnapshot(auditId);
   const lease = await store.acquireExportLease(auditId, snapshot.capability, {
     ownerId: 'owner-starting', now: '2026-08-27T10:00:00.000Z',
@@ -1635,7 +2025,7 @@ test('an unresolved pre-ID start cannot be erased by partial success persistence
     ownerId: 'owner-starting', exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.100Z',
   });
   await store.commitAuditIfRevisionWithExportLease(
-    auditId, { auditId, phase: 'delivering' }, { auditId, exportStatus: 'delivering' }, snapshot.capability,
+    auditId, auditFixture(auditId, 'delivering'), { auditId, exportStatus: 'delivering' }, snapshot.capability,
     { ownerId: 'owner-starting', exportAttempt: 1, now: '2026-08-27T10:00:00.200Z', phase: 'delivering' },
   );
   snapshot = await store.getAuditSnapshot(auditId);
@@ -1644,7 +2034,7 @@ test('an unresolved pre-ID start cannot be erased by partial success persistence
     format: 'html', filename: 'audit.html', state: 'starting',
   });
   await assert.rejects(store.commitAuditIfRevisionWithExportLease(
-    auditId, { auditId, phase: 'partial' }, { auditId, exportStatus: 'partial' }, snapshot.capability,
+    auditId, auditFixture(auditId, 'partial'), { auditId, exportStatus: 'partial' }, snapshot.capability,
     {
       ownerId: 'owner-starting', exportAttempt: 1, now: '2026-08-27T10:00:00.400Z',
       release: true, clearDeliveryJournal: true,
@@ -1658,7 +2048,7 @@ test('human review never waits for an export lease and wins both before and afte
   for (const reviewPhase of ['before-reservation', 'after-reservation']) {
     const store = createInMemoryAuditStore();
     const auditId = `audit-review-${reviewPhase}`;
-    await store.setAudit(auditId, { auditId, phase: 'initial' });
+    await store.setAudit(auditId, auditFixture(auditId, 'initial'));
     let snapshot = await store.getAuditSnapshot(auditId);
     await store.acquireExportLease(auditId, snapshot.capability, {
       ownerId: 'owner-export', now: '2026-08-27T10:00:00.000Z',
@@ -1671,26 +2061,26 @@ test('human review never waits for an export lease and wins both before and afte
     if (reviewPhase === 'after-reservation') {
       const reserved = await store.commitAuditIfRevisionWithExportLease(
         auditId,
-        { auditId, phase: 'delivering' },
+        auditFixture(auditId, 'delivering'),
         { auditId, exportStatus: 'delivering', exportRevision: snapshot.revision + 1 },
         snapshot.capability,
         { ownerId: 'owner-export', now: '2026-08-27T10:00:01.000Z', phase: 'delivering' },
       );
-      snapshot = { ...reserved, model: { auditId, phase: 'delivering' } };
+      snapshot = { ...reserved, model: auditFixture(auditId, 'delivering') };
     }
 
-    await store.setAudit(auditId, { auditId, phase: 'human-review' });
+    await store.setAudit(auditId, auditFixture(auditId, 'human-review'));
     await assert.rejects(
       store.commitAuditIfRevisionWithExportLease(
         auditId,
-        { auditId, phase: 'stale-export-final' },
+        auditFixture(auditId, 'stale-export-final'),
         { auditId, exportStatus: 'complete' },
         snapshot.capability,
         { ownerId: 'owner-export', now: '2026-08-27T10:00:02.000Z', release: true },
       ),
       error => ['AUDIT_EXPORT_LEASE_CONFLICT', 'AUDIT_REVISION_CONFLICT'].includes(error?.code),
     );
-    assert.equal((await store.getAudit(auditId)).phase, 'human-review');
+    assert.equal((await store.getAudit(auditId)).versions.extension, 'test-human-review');
   }
 });
 
@@ -1698,7 +2088,7 @@ test('success and controlled failure atomically release an owned export lease fo
   for (const terminal of ['complete', 'failed']) {
     const store = createInMemoryAuditStore();
     const auditId = `audit-lease-${terminal}`;
-    await store.setAudit(auditId, { auditId, terminal: null });
+    await store.setAudit(auditId, auditFixture(auditId, 'initial'));
     const snapshot = await store.getAuditSnapshot(auditId);
     await store.acquireExportLease(auditId, snapshot.capability, {
       ownerId: 'owner-terminal', now: '2026-08-27T10:00:00.000Z',
@@ -1710,7 +2100,7 @@ test('success and controlled failure atomically release an owned export lease fo
     });
     const terminalCommit = await store.commitAuditIfRevisionWithExportLease(
       auditId,
-      { auditId, terminal },
+      auditFixture(auditId, terminal),
       { auditId, exportStatus: terminal, exportRevision: snapshot.revision + 1 },
       snapshot.capability,
       { ownerId: 'owner-terminal', now: '2026-08-27T10:00:01.000Z', release: true },
@@ -1729,7 +2119,7 @@ test('two IndexedDB connections serialize export lease acquisition before either
   const fake = createFakeIndexedDb();
   const first = createAuditStore({ indexedDB: fake });
   const second = createAuditStore({ indexedDB: fake });
-  await first.setAudit('audit-idb-lease', { auditId: 'audit-idb-lease' });
+  await first.setAudit('audit-idb-lease', auditFixture('audit-idb-lease'));
   const [firstSnapshot, secondSnapshot] = await Promise.all([
     first.getAuditSnapshot('audit-idb-lease'), second.getAuditSnapshot('audit-idb-lease'),
   ]);
@@ -1753,7 +2143,7 @@ test('IndexedDB review CAS preserves the current model and atomically clears del
   const fake = createFakeIndexedDb();
   const store = createAuditStore({ indexedDB: fake });
   const auditId = SAMPLE_AUDIT.auditId;
-  await store.setAudit(auditId, { auditId, phase: 'review-ready' });
+  await store.setAudit(auditId, structuredClone(SAMPLE_AUDIT));
   const source = await store.getAuditSnapshot(auditId);
   await store.acquireExportLease(auditId, source.capability, {
     ownerId: 'owner-idb-review', now: '2026-08-27T10:00:00.000Z',
@@ -1775,7 +2165,7 @@ test('IndexedDB review CAS preserves the current model and atomically clears del
   });
   const reserved = await store.commitAuditIfRevisionWithExportLease(
     auditId,
-    { auditId, phase: 'prepared-report' },
+    source.model,
     {
       auditId,
       exportStatus: 'delivering',
@@ -2073,6 +2463,11 @@ function createFakeIndexedDb(options = {}) {
     inspectStore(name) {
       const store = stores.get(name);
       return store ? new Map([...store.records].map(([key, value]) => [key, cloneValue(value)])) : undefined;
+    },
+    replaceRecord(name, key, value) {
+      const store = stores.get(name);
+      if (!store) throw new Error(`Unknown store ${name}`);
+      store.records.set(key, cloneValue(value));
     },
     inspectIndexes(name) {
       const store = stores.get(name);

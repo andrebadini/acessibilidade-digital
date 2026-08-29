@@ -60,6 +60,9 @@ export function renderOccurrenceCsv(input) {
     const previewEvidence = referencedEvidence.find(evidence =>
       evidence.nodeId === occurrence.target.nodeId && typeof evidence.accessibility?.nameSource === 'string')
       ?? referencedEvidence.find(evidence => typeof evidence.accessibility?.nameSource === 'string');
+    const locatorEvidence = referencedEvidence.find(evidence =>
+      evidence.nodeId === occurrence.target.nodeId && evidence.selector)
+      ?? referencedEvidence.find(evidence => evidence.selector);
     const source = trustedOccurrenceSource(occurrence, model.versions.rules);
     const values = [
       OCCURRENCE_CSV_VERSION,
@@ -80,8 +83,10 @@ export function renderOccurrenceCsv(input) {
       foreignReferenceList(occurrence.foreignBenchmarkRefs),
       localCatalogTitle(occurrence.nbrItemRef),
       fixedOccurrenceDescription(occurrence),
-      projectedDetail(occurrence.target.selector),
-      projectedDetail(occurrence.target.framePath),
+      projectedDetail(occurrence.target.selector ?? locatorEvidence?.selector?.css),
+      projectedDetail(occurrence.target.framePath.length > 0
+        ? occurrence.target.framePath
+        : locatorEvidence?.selector?.framePath ?? []),
       projectedDetail(occurrence.accessiblePreview),
       projectedDetail(previewEvidence?.accessibility?.nameSource),
       strictTokenList(occurrence.evidenceRefs, ';'),
