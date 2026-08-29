@@ -25,7 +25,6 @@ function model(overrides = {}) {
       Object.freeze({ occurrenceId: 'occ-b', itemId: '5.1.2', ruleId: 'assist-rule', outcome: 'cantTell', evidenceIds: Object.freeze(['ev-node']) }),
     ]),
     manualReview: Object.freeze([
-      Object.freeze({ occurrenceId: 'occ-auto', itemId: '5.1.1' }),
       Object.freeze({ occurrenceId: 'occ-a', itemId: '5.1.2' }),
       Object.freeze({ occurrenceId: 'occ-b', itemId: '5.1.2' }),
     ]),
@@ -96,12 +95,18 @@ test('validates the integrity of previously stored decisions before applying new
   assert.throws(() => applyReviewDecisions(corrupt, []), /item|ocorrência/i);
 });
 
-test('never promotes an automatic failure and never overwrites automatic rule results', () => {
+test('rejects human decisions for conclusive failed, passed, inapplicable or untested occurrences', () => {
   const original = model();
-  const reviewed = applyReviewDecisions(original, [decision('occ-auto')]);
-  assert.equal(reviewed.itemResults.find(item => item.id === '5.1.1').outcome, 'failed');
-  assert.deepEqual(reviewed.ruleResults, original.ruleResults);
-  assert.notEqual(reviewed, original);
+  assert.throws(() => applyReviewDecisions(original, [decision('occ-auto')]), /cantTell|inconclus|revis|resultado/i);
+
+  for (const outcome of ['passed', 'inapplicable', 'untested']) {
+    const conclusive = structuredClone(original);
+    conclusive.occurrences[0].outcome = outcome;
+    assert.throws(
+      () => applyReviewDecisions(conclusive, [decision('occ-auto')]),
+      /cantTell|inconclus|revis|resultado/i,
+    );
+  }
 });
 
 test('aggregates review answers conservatively across all reviewable occurrences', () => {

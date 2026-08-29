@@ -8,9 +8,12 @@ import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consume
 import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
 import { section508ReferencesForWcag } from '../../src/core/normative/section508.js';
 import { renderOccurrenceCsv } from '../../src/core/report/csv.js';
+import { canonicalStringify } from '../../src/core/report/canonical-json.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
+import { sha256Hex } from '../../src/core/report/hash.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
+import { projectEvidenceManifest, REPORT_HASH_BASE } from '../../src/core/report/integrity.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { aggregateItems } from '../../src/core/rules/aggregate-items.js';
 import {
@@ -44,7 +47,7 @@ async function rejectsAsyncWithoutMarker(promise, marker) {
 
 test('separates ABNT item context, source mapping and occurrence-tested WCAG without expanding the alias', () => {
   const input = reportInput();
-  input.ruleResults[1].wcag = ['2.4.3'];
+  input.ruleResults.find(rule => rule.ruleId === 'focus-order').wcag = ['2.4.3'];
   const model = migrateAuditV1ToV2(input);
   const occurrence = model.occurrences[0];
   assert.deepEqual(occurrence.itemWcagRefs, ['2.4.3']);
@@ -283,6 +286,146 @@ function authorityConsistentSample({ axe = false } = {}) {
   return model;
 }
 
+function syncCoreItemAuthority(model) {
+  const aggregate = new Map(aggregateItems(
+    model.ruleResults.filter(rule => rule.source.engine === 'audita-core'),
+    NBR17225_ITEMS,
+  ).map(item => [item.id, item]));
+  for (const item of model.itemResults) {
+    const expected = aggregate.get(item.id);
+    item.outcome = expected.outcome;
+    item.ruleResults = expected.ruleResults.map(rule => rule.ruleId);
+    delete item.originalOutcome;
+    delete item.reviewedOutcome;
+    delete item.review;
+  }
+  return model;
+}
+
+function withoutCoreExecution(model = authorityConsistentSample()) {
+  model.ruleResults = model.ruleResults.filter(rule => rule.source.engine !== 'audita-core');
+  const retainedOccurrenceIds = new Set(model.occurrences
+    .filter(occurrence => occurrence.source.engine !== 'audita-core')
+    .map(occurrence => occurrence.occurrenceId));
+  model.occurrences = model.occurrences.filter(occurrence => retainedOccurrenceIds.has(occurrence.occurrenceId));
+  model.manualReview = model.manualReview.filter(entry => retainedOccurrenceIds.has(entry.occurrenceId));
+  model.reviewDecisions = model.reviewDecisions.filter(decision => retainedOccurrenceIds.has(decision.occurrenceId));
+  return syncCoreItemAuthority(model);
+}
+
+function setSingleStatus(model, status, { diagnostics = model.session.diagnostics } = {}) {
+  model.pages[0].status = status;
+  model.session.status = status;
+  model.session.partial = status === 'partial';
+  model.session.diagnostics = diagnostics;
+  return model;
+}
+
+function editorialInapplicableRule() {
+  return {
+    ruleId: 'editorial.placeholder-text', outcome: 'inapplicable', mode: 'automated',
+    classification: 'editorial', impact: 'minor', confidence: 'high',
+    source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
+    nbrItems: [], wcag: [], targets: [],
+    summary: 'Não foi observado conteúdo provisório inequívoco.', limitations: [],
+  };
+}
+
+test('requires the exact 130-rule registered core inventory for complete and partial sessions', () => {
+  assert.equal(SAMPLE_AUDIT.ruleResults.filter(rule => rule.source.engine === 'audita-core').length, 130);
+
+  for (const status of ['complete', 'partial']) {
+    const zero = withoutCoreExecution();
+    zero.methodology.ruleCount = 0;
+    zero.methodology.supplementalRuleCount = 0;
+    setSingleStatus(zero, status, { diagnostics: status === 'partial' ? zero.session.diagnostics : [] });
+
+    const missingOne = authorityConsistentSample();
+    const removed = missingOne.ruleResults.find(rule =>
+      rule.source.engine === 'audita-core' && rule.outcome === 'inapplicable');
+    missingOne.ruleResults = missingOne.ruleResults.filter(rule => rule.ruleId !== removed.ruleId);
+    missingOne.methodology.ruleCount = missingOne.ruleResults.length;
+    syncCoreItemAuthority(missingOne);
+    setSingleStatus(missingOne, status, { diagnostics: status === 'partial' ? missingOne.session.diagnostics : [] });
+
+    const substituted = structuredClone(missingOne);
+    substituted.ruleResults.push(editorialInapplicableRule());
+    substituted.methodology.ruleCount = substituted.ruleResults.length;
+    substituted.methodology.supplementalRuleCount = 1;
+    syncCoreItemAuthority(substituted);
+
+    const duplicated = authorityConsistentSample();
+    duplicated.ruleResults.push(structuredClone(removed));
+    duplicated.methodology.ruleCount = duplicated.ruleResults.length;
+    setSingleStatus(duplicated, status, { diagnostics: status === 'partial' ? duplicated.session.diagnostics : [] });
+
+    for (const candidate of [zero, missingOne, substituted, duplicated]) {
+      assert.throws(
+        () => createAuditModel(candidate),
+        /130|inventário|regra|core|metodologia|duplicad|suplementar|quantidade/iu,
+      );
+    }
+  }
+});
+
+test('allows a failed or cancelled pre-execution subset only with a compatible fatal diagnostic', () => {
+  const scenarios = [
+    ['failed', 'COLLECTION_FAILED', 'A estrutura da página não pôde ser coletada com segurança.'],
+    ['cancelled', 'NAVIGATION_FAILED', 'A auditoria foi cancelada.'],
+  ];
+  for (const [status, code, message] of scenarios) {
+    const candidate = withoutCoreExecution();
+    candidate.occurrences = [];
+    candidate.manualReview = [];
+    candidate.methodology.ruleCount = 0;
+    candidate.methodology.supplementalRuleCount = 0;
+    setSingleStatus(candidate, status, {
+      diagnostics: [{ code, message, at: '2026-08-26T14:00:30.000Z', recoverable: false }],
+    });
+    syncCoreItemAuthority(candidate);
+
+    assert.doesNotThrow(() => createAuditModel(candidate));
+
+    const incompatible = structuredClone(candidate);
+    incompatible.session.diagnostics = [{
+      code: 'FRAME_LIMITED', message: 'Um frame não pôde ser lido.',
+      at: '2026-08-26T14:00:30.000Z', recoverable: true,
+    }];
+    assert.throws(() => createAuditModel(incompatible), /diagnóstico|fase|falha|cancel|incomplet|regra/iu);
+  }
+});
+
+test('binds a single page status and the partial flag exactly to the session status', () => {
+  for (const status of ['complete', 'partial', 'failed', 'cancelled']) {
+    const canonical = authorityConsistentSample();
+    setSingleStatus(canonical, status, { diagnostics: status === 'complete' ? [] : canonical.session.diagnostics });
+    assert.doesNotThrow(() => createAuditModel(canonical));
+
+    const pageDrift = structuredClone(canonical);
+    pageDrift.pages[0].status = status === 'complete' ? 'partial' : 'complete';
+    assert.throws(() => createAuditModel(pageDrift), /status|página|sessão/iu);
+
+    const partialDrift = structuredClone(canonical);
+    partialDrift.session.partial = !partialDrift.session.partial;
+    assert.throws(() => createAuditModel(partialDrift), /partial|status|sessão/iu);
+  }
+});
+
+test('permits human review only for an originally cantTell occurrence', () => {
+  const candidate = authorityConsistentSample();
+  candidate.manualReview.push({
+    occurrenceId: 'occ-focus-failed', itemId: '5.1.1', ruleId: 'focus-visible',
+    mode: 'assisted', status: 'unanswered',
+    question: 'A falha conclusiva deve ser reconsiderada?',
+    reason: 'Fila forjada para uma ocorrência conclusiva.',
+  });
+
+  assert.throws(() => createAuditModel(candidate), /cantTell|inconclus|revis|fila|resultado/iu);
+  assert.throws(() => applyReviewDecisions(candidate, [
+    reviewDecision('occ-focus-failed', '5.1.1', 'conforme', 'assisted'),
+  ]), /cantTell|inconclus|revis|fila|resultado/iu);
+});
+
 test('derives every ABNT item outcome from authoritative rules and occurrences even when axe is absent', async () => {
   for (const axe of [false, true]) {
     const candidate = authorityConsistentSample({ axe });
@@ -406,6 +549,31 @@ test('explicitly migrates V1 into the canonical single-page V2 contract without 
   assert.equal(model.normative.wcag, 'WCAG 2.2');
   assert.equal(model.normative.sources[0].localCopy.sha256, '1c3ee66b7fd606367e3de087e6a55fea90f4d368d8a1f769141d5e3b96d32afc');
   assert.equal(Object.isFrozen(model), true);
+});
+
+test('never carries a claimed V1 SHA-256 block into migration, technical JSON or enrichment', async () => {
+  const input = reportInput();
+  const claimedCanonical = 'a'.repeat(64);
+  const claimedEvidence = 'b'.repeat(64);
+  input.integrity = {
+    algorithm: 'SHA-256', canonicalModelHash: claimedCanonical,
+    evidenceManifestHash: claimedEvidence, hashBase: REPORT_HASH_BASE,
+  };
+
+  const migrated = migrateAuditV1ToV2(input);
+  assert.deepEqual(migrated.integrity, { algorithm: 'unavailable', status: 'not-recorded-v1' });
+  assert.doesNotMatch(renderTechnicalJson(migrated), new RegExp(`${claimedCanonical}|${claimedEvidence}`, 'u'));
+
+  const enriched = await enrichAuditForReport(input, ENRICH_OPTIONS);
+  assert.notEqual(enriched.integrity.canonicalModelHash, claimedCanonical);
+  assert.notEqual(enriched.integrity.evidenceManifestHash, claimedEvidence);
+  assert.doesNotMatch(renderTechnicalJson(enriched), new RegExp(`${claimedCanonical}|${claimedEvidence}`, 'u'));
+
+  const expectedManifestHash = await sha256Hex(canonicalStringify(projectEvidenceManifest(enriched.evidence)));
+  assert.equal(enriched.integrity.evidenceManifestHash, expectedManifestHash);
+  const hashInput = structuredClone(enriched);
+  delete hashInput.integrity.canonicalModelHash;
+  assert.equal(enriched.integrity.canonicalModelHash, await sha256Hex(canonicalStringify(hashInput)));
 });
 
 test('consumes legitimate V1 selector aliases into the closed canonical target', () => {
@@ -564,7 +732,8 @@ test('conclusive failed requirements and recommendations use the same catalog re
     evidenceIds: [], justification: 'Falha conclusiva.',
   });
   };
-  model.ruleResults = model.ruleResults.filter(rule => rule.ruleId !== 'focus-visible');
+  model.ruleResults = model.ruleResults.filter(rule =>
+    !['focus-visible', 'focus-fully-visible'].includes(rule.ruleId));
   const requirementItem = model.itemResults.find(item => item.id === requirement.id);
   requirementItem.outcome = 'failed';
   requirementItem.ruleResults = ['focus-visible'];
@@ -624,6 +793,12 @@ test('allows supplemental and editorial rules without weakening the exact 130-co
   assert.equal(canonical.methodology.coreRuleCount, 130);
   assert.equal(canonical.ruleResults.at(-1).nbrItems.length, 0);
   assert.equal(canonical.occurrences.at(-1).legalAnalysis, null);
+
+  for (const field of ['supplementalRuleCount', 'ruleCount']) {
+    const forgedCount = structuredClone(canonical);
+    forgedCount.methodology[field] += 1;
+    assert.throws(() => createAuditModel(forgedCount), /contagem|inventário|metodologia|regra/iu);
+  }
 
   model.methodology.coreRuleCount = 129;
   assert.throws(() => createAuditModel(model), /130|core|regra/i);

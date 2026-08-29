@@ -38,6 +38,15 @@ const CORE_RULE_METADATA = new Map(NBR17225_ITEMS.flatMap(item => item.ruleIds.m
   mode: item.evaluation,
   wcag: Object.freeze(item.wcag.map(reference => reference.id)),
 })])));
+const EXPECTED_CORE_RULE_IDS = Object.freeze([...CORE_RULE_METADATA.keys()]);
+const INCOMPLETE_CORE_DIAGNOSTICS = Object.freeze({
+  failed: new Set([
+    'NAVIGATION_FAILED', 'COLLECTION_FAILED', 'CORE_AUDIT_FAILED',
+    'BATCH_PAGE_FAILED', 'BATCH_PAGE_TIMEOUT', 'BATCH_PAGE_MODEL_INVALID',
+    'BATCH_PAGE_CLEANUP_UNCONFIRMED', 'BATCH_NOT_STARTED_CLEANUP_UNCONFIRMED',
+  ]),
+  cancelled: new Set(['NAVIGATION_FAILED', 'BATCH_CANCELLED']),
+});
 
 export const V1_MIGRATION_DEFAULTS = Object.freeze({
   pageId: 'page-1',
@@ -78,6 +87,7 @@ function createAuditModelInternal(captured) {
   validateEnvironment(model.environment);
   validateScope(model.scope);
   validateSession(model.session);
+  validateSinglePageSessionStatus(model);
   validateBatchSessionStatus(model);
   validateAxeCoverageStatus(model, validatedAxe);
   validateProgress(model.progress, model.auditId);
@@ -90,6 +100,7 @@ function createAuditModelInternal(captured) {
     new Map(model.itemResults.map(item => [item.id, item])),
     model.versions.rules,
   );
+  validateRuleInventory(model, ruleById);
   if (Array.isArray(model.evidence)) {
     model.evidence = model.evidence.map(artifact => {
       const sanitized = sanitizeEvidenceArtifactUrls(artifact);
@@ -117,6 +128,13 @@ function validateBatchSessionStatus(model) {
       ? 'complete'
       : statuses.every(value => value === 'failed') ? 'failed' : 'partial';
   if (model.session.status !== expected) throw new TypeError(`Status da sessão diverge das páginas do lote: esperado ${expected}.`);
+}
+
+function validateSinglePageSessionStatus(model) {
+  if (model.requestedScope?.mode !== 'single') return;
+  if (model.pages.length !== 1 || model.pages[0].status !== model.session.status) {
+    throw new TypeError('Status da página única deve coincidir exatamente com o status da sessão.');
+  }
 }
 
 /** Explicit compatibility boundary. Every unknown V1 occurrence quality field is conservative. */
@@ -272,7 +290,7 @@ function migrateV1Record(model) {
     });
     queuedOccurrenceIds.add(occurrence.occurrenceId);
   }
-  const ruleCount = model.methodology?.ruleCount;
+  const supplementalRuleCount = ruleResults.filter(rule => rule.source?.engine !== V1_MIGRATION_DEFAULTS.sourceEngine).length;
   const timestamps = projectTimestamps(model.timestamps);
   const viewport = projectViewport(model.environment?.viewport);
   const output = {
@@ -292,10 +310,8 @@ function migrateV1Record(model) {
     methodology: {
       name: model.methodology?.name, version: model.methodology?.version,
       coreRuleCount: EXPECTED_RULE_COUNT,
-      supplementalRuleCount: Number.isSafeInteger(ruleCount)
-        ? Math.max(0, ruleCount - EXPECTED_RULE_COUNT)
-        : 0,
-      ruleCount, itemCount: model.methodology?.itemCount,
+      supplementalRuleCount,
+      ruleCount: ruleResults.length, itemCount: model.methodology?.itemCount,
     },
     session: projectSession(model.session),
     limitations: projectStringArray(model.limitations),
@@ -306,7 +322,7 @@ function migrateV1Record(model) {
     report: projectReport(model.report),
     reproducibility: projectReproducibility(model.reproducibility),
     normative: migrateV1NormativeRecord(model.normative),
-    integrity: model.integrity ?? { algorithm: 'unavailable', status: 'not-recorded-v1' },
+    integrity: { algorithm: 'unavailable', status: 'not-recorded-v1' },
   };
   if (model.snapshot !== undefined && model.snapshot !== null) output.snapshot = summarizeV1Snapshot(model.snapshot);
   output.accessibilityWidgets = projectAccessibilityWidgets(model.accessibilityWidgets ?? unknownAccessibilityWidgetInventory());
@@ -1021,9 +1037,8 @@ function validateMethodology(methodology, versions, reproducibility) {
   if (!Number.isSafeInteger(methodology.supplementalRuleCount) || methodology.supplementalRuleCount < 0) {
     throw new TypeError('methodology.supplementalRuleCount inválido.');
   }
-  if (!Number.isSafeInteger(methodology.ruleCount) ||
-    methodology.ruleCount !== methodology.coreRuleCount + methodology.supplementalRuleCount) {
-    throw new TypeError('methodology.ruleCount deve somar regras próprias e suplementares.');
+  if (!Number.isSafeInteger(methodology.ruleCount) || methodology.ruleCount < 0) {
+    throw new TypeError('methodology.ruleCount inválido.');
   }
   if (!Number.isSafeInteger(methodology.itemCount) || methodology.itemCount !== NBR17225_ITEMS.length) throw new TypeError('methodology.itemCount deve registrar os 146 itens oficiais.');
   if (reproducibility?.methodologyVersion !== undefined && reproducibility.methodologyVersion !== version) {
@@ -1051,6 +1066,9 @@ function validateScope(scope) {
 
 function validateSession(session) {
   if (!session || typeof session !== 'object' || Array.isArray(session) || !SESSION_STATUSES.has(session.status)) throw new TypeError('session inválida.');
+  if (session.partial !== (session.status === 'partial')) {
+    throw new TypeError('session.partial deve corresponder exatamente ao status partial.');
+  }
   if (!Array.isArray(session.diagnostics)) throw new TypeError('session.diagnostics deve ser lista.');
   for (const [index, diagnostic] of session.diagnostics.entries()) {
     if (!diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) throw new TypeError(`session.diagnostics[${index}] deve ser objeto.`);
@@ -1179,6 +1197,32 @@ function validateRules(rules, itemById, rulesVersion) {
     byId.set(id, rule);
   }
   return byId;
+}
+
+function validateRuleInventory(model, ruleById) {
+  const coreRules = model.ruleResults.filter(rule => rule.source?.engine === V1_MIGRATION_DEFAULTS.sourceEngine);
+  const supplementalCount = model.ruleResults.length - coreRules.length;
+  if (model.methodology.supplementalRuleCount !== supplementalCount ||
+    model.methodology.ruleCount !== model.ruleResults.length) {
+    throw new TypeError('Contagens da metodologia divergem do inventário real de regras.');
+  }
+
+  const completeCoreInventory = coreRules.length === EXPECTED_RULE_COUNT &&
+    EXPECTED_CORE_RULE_IDS.every(ruleId => ruleById.get(ruleId)?.source?.engine === V1_MIGRATION_DEFAULTS.sourceEngine);
+  if (['complete', 'partial'].includes(model.session.status)) {
+    if (!completeCoreInventory) {
+      throw new TypeError('Sessão concluída deve conter exatamente as 130 regras core registradas.');
+    }
+    return;
+  }
+  if (completeCoreInventory) return;
+
+  const compatibleCodes = INCOMPLETE_CORE_DIAGNOSTICS[model.session.status];
+  const compatibleDiagnostic = model.session.diagnostics.some(diagnostic =>
+    diagnostic.recoverable === false && compatibleCodes?.has(diagnostic.code));
+  if (!compatibleDiagnostic) {
+    throw new TypeError('Inventário core incompleto exige diagnóstico fatal compatível com a fase interrompida.');
+  }
 }
 
 function validateEvidenceAndOccurrences(model, ruleById, pageById, scopeMode = 'single') {
@@ -1598,6 +1642,9 @@ function validateReview(model, { itemIds, occurrenceById }) {
     if (queueByOccurrence.has(occurrenceId)) throw new TypeError(`${label} possui ocorrência duplicada.`);
     const occurrence = occurrenceById.get(occurrenceId);
     if (!occurrence) throw new TypeError(`${label} referencia ocorrência desconhecida.`);
+    if (occurrence.outcome !== 'cantTell') {
+      throw new TypeError(`${label} só pode referenciar ocorrência originalmente cantTell.`);
+    }
     if (!itemIds.has(entry.itemId) || entry.itemId !== occurrence.itemId) throw new TypeError(`${label} referencia item incoerente.`);
     if (entry.ruleId !== occurrence.ruleId) throw new TypeError(`${label} referencia regra incoerente.`);
     if (!REVIEW_MODES.includes(entry.mode)) throw new TypeError(`${label} possui modo inválido.`);

@@ -333,6 +333,7 @@ test('preserves a legitimate batch mix of failed and cantTell page occurrences u
   secondOccurrence.wcagRefs = [...secondOccurrence.testedWcagRefs];
   secondOccurrence.foreignBenchmarkRefs = [...section508ReferencesForWcag(secondOccurrence.testedWcagRefs)];
   secondOccurrence.legalAnalysis = { basisRef: CONSUMER_ACCESSIBILITY_FIXED_BASIS.id };
+  second.manualReview = second.manualReview.filter(entry => entry.occurrenceId !== secondOccurrence.occurrenceId);
 
   const raw = aggregateBatchAudits({
     batchAuditId: 'batch-mixed', pageResults: [first, second],

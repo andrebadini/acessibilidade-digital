@@ -296,8 +296,8 @@ function resolvePresentationTargets(occurrences, artifacts) {
 
 function manualQueue(occurrences, itemResults) {
   const itemById = new Map(itemResults.map(item => [item.id, item]));
-  return occurrences.filter(occurrence => occurrence.itemId &&
-    (occurrence.outcome === 'cantTell' || occurrence.mode !== 'automated')).map(occurrence => {
+  return occurrences.filter(occurrence =>
+    occurrence.itemId && occurrence.outcome === 'cantTell').map(occurrence => {
     const item = itemById.get(occurrence.itemId);
     return {
       occurrenceId: occurrence.occurrenceId,

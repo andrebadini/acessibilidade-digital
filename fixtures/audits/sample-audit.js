@@ -5,6 +5,8 @@ import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { NORMATIVE_SOURCE_LEDGER } from '../../src/core/normative/source-ledger.js';
 import { unknownAccessibilityWidgetInventory } from '../../src/core/detection/accessibility-widgets.js';
 import { REPORT_HASH_BASE } from '../../src/core/report/integrity-chain.js';
+import { CORE_RULES } from '../../src/core/audit.js';
+import { aggregateItems } from '../../src/core/rules/aggregate-items.js';
 
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const SAMPLE_RULE_OUTCOMES = Object.freeze(new Map([
@@ -15,17 +17,27 @@ const SAMPLE_RULE_OUTCOMES = Object.freeze(new Map([
   ['keyboard-focus-trap', 'untested'],
 ]));
 
-const itemResults = NBR17225_ITEMS.map(item => {
-  const ruleResults = item.ruleIds.filter(ruleId => SAMPLE_RULE_OUTCOMES.has(ruleId));
-  const outcome = ruleResults.length === 0 ? 'cantTell' : SAMPLE_RULE_OUTCOMES.get(ruleResults[0]);
+const RULE_TARGETS = Object.freeze(new Map([
+  ['focus-visible', ['n-1']],
+  ['focus-order', ['n-1']],
+]));
+
+const ruleResults = CORE_RULES.map(rule => {
+  const outcome = SAMPLE_RULE_OUTCOMES.get(rule.id) ?? 'inapplicable';
   return {
-    ...item,
-    wcag: item.wcag.map(reference => ({ ...reference })),
-    ruleIds: [...item.ruleIds],
-    outcome,
-    ruleResults,
+    ruleId: rule.id, outcome, mode: rule.mode, nbrItems: [...rule.nbrItems], wcag: [...rule.wcag],
+    targets: [...(RULE_TARGETS.get(rule.id) ?? [])],
+    summary: `Resultado canônico de fixture: ${outcome}.`, limitations: [],
+    source: { engine: 'audita-core', ruleId: rule.id, version: '1.0.0' },
   };
 });
+
+const itemResults = aggregateItems(ruleResults, NBR17225_ITEMS).map(item => ({
+  ...item,
+  wcag: item.wcag.map(reference => ({ ...reference })),
+  ruleIds: [...item.ruleIds],
+  ruleResults: item.ruleResults.map(rule => rule.ruleId),
+}));
 
 const TIMESTAMPS = {
   startedAt: '2026-08-26T14:00:00.000Z',
@@ -112,25 +124,7 @@ export const SAMPLE_AUDIT = createAuditModel({
     'A auditoria cobre somente a página e o estado observados.',
     'Itens de contexto, processos completos e equivalência de mídia exigem revisão humana.',
   ],
-  ruleResults: [
-    { ruleId: 'focus-visible', outcome: 'failed', mode: 'automated', nbrItems: ['5.1.1'], wcag: itemById.get('5.1.1').wcag.map(reference => reference.id), targets: ['n-1'], summary: 'O foco não foi distinguido visualmente.', limitations: [], source: { engine: 'audita-core', ruleId: 'focus-visible', version: '1.0.0' } },
-    {
-      ruleId: 'focus-fully-visible', outcome: 'passed', mode: 'automated', nbrItems: ['5.1.2'],
-      wcag: itemById.get('5.1.2').wcag.map(reference => reference.id), targets: [], summary: 'O foco permaneceu totalmente visível.', limitations: [],
-      source: { engine: 'audita-core', ruleId: 'focus-fully-visible', version: '1.0.0' },
-    },
-    {
-      ruleId: 'focus-partially-visible', outcome: 'inapplicable', mode: 'automated', nbrItems: ['5.1.3'],
-      wcag: itemById.get('5.1.3').wcag.map(reference => reference.id), targets: [], summary: 'Não havia alvo aplicável no estado observado.', limitations: [],
-      source: { engine: 'audita-core', ruleId: 'focus-partially-visible', version: '1.0.0' },
-    },
-    { ruleId: 'focus-order', outcome: 'cantTell', mode: 'assisted', nbrItems: ['5.1.4'], wcag: itemById.get('5.1.4').wcag.map(reference => reference.id), targets: ['n-1'], summary: 'A previsibilidade depende do fluxo da tarefa.', limitations: [], source: { engine: 'audita-core', ruleId: 'focus-order', version: '1.0.0' } },
-    {
-      ruleId: 'keyboard-focus-trap', outcome: 'untested', mode: 'assisted', nbrItems: ['5.1.6'],
-      wcag: itemById.get('5.1.6').wcag.map(reference => reference.id), targets: [], summary: 'O teste não foi executado neste estado.', limitations: [],
-      source: { engine: 'audita-core', ruleId: 'keyboard-focus-trap', version: '1.0.0' },
-    },
-  ],
+  ruleResults,
   itemResults,
   occurrences: [
     { occurrenceId: 'occ-focus-failed', itemId: '5.1.1', ruleId: 'focus-visible', outcome: 'failed', mode: 'automated', nodeId: 'n-1', evidenceIds: ['ev-full', 'ev-control'], justification: 'O indicador de foco observado não tem contraste suficiente.' },

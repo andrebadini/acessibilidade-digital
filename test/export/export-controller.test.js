@@ -1169,6 +1169,7 @@ function generatedModel(formats, issueCodes = [], options = {}) {
   const messages = issueCodes.map(code => GENERATION_MESSAGES[code]);
   model.session.status = issueCodes.length ? 'partial' : 'complete';
   model.session.partial = issueCodes.length > 0;
+  model.pages[0].status = model.session.status;
   model.session.diagnostics = issueCodes.map(code => ({
     code,
     message: GENERATION_MESSAGES[code],

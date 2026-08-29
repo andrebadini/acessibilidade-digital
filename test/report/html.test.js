@@ -49,9 +49,11 @@ function setCoreRuleInapplicable(input, ruleId) {
 function withFailedRecommendation() {
   const input = structuredClone(SAMPLE_AUDIT);
   const item = input.itemResults.find(value => value.id === '5.1.5');
+  const rule = input.ruleResults.find(value => value.ruleId === 'focusable-elements-interactive');
+  assert.ok(rule, 'regra focusable-elements-interactive ausente na fixture');
   item.outcome = 'failed';
   item.ruleResults = ['focusable-elements-interactive'];
-  input.ruleResults.push({
+  Object.assign(rule, {
     ruleId: 'focusable-elements-interactive', outcome: 'failed', mode: 'assisted', nbrItems: ['5.1.5'],
     wcag: item.wcag.map(reference => reference.id),
     targets: [], summary: 'O uso do foco observado requer correção.', limitations: [],
@@ -116,7 +118,9 @@ function withPages(count) {
   input.requestedUrl = input.pages[0].requestedUrl;
   input.finalUrl = input.pages[0].finalUrl;
   input.environment.viewport = structuredClone(input.pages[0].viewport);
-  if (count > 1) {
+  if (count === 1) {
+    input.pages[0].status = input.session.status;
+  } else {
     const pageStatuses = input.pages.map(page => page.status);
     input.session.status = pageStatuses.includes('cancelled')
       ? 'cancelled'

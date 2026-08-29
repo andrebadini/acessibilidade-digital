@@ -103,11 +103,27 @@ export function applyReviewDecisions(auditModel, decisions) {
     itemIds.add(id);
   }
   const occurrenceIds = new Set();
+  const sourceOccurrenceById = new Map();
   for (const occurrence of sourceOccurrences) {
     const id = required(ownValue(occurrence, 'occurrenceId', 'O identificador da ocorrência'), 'O identificador da ocorrência');
     required(ownValue(occurrence, 'itemId', 'O vínculo da ocorrência'), 'O vínculo da ocorrência');
     if (occurrenceIds.has(id)) throw new TypeError(`Ocorrência duplicada ou ambígua: ${id}.`);
     occurrenceIds.add(id);
+    sourceOccurrenceById.set(id, occurrence);
+  }
+  const reviewableOccurrenceIds = new Set();
+  for (const entry of sourceManualReview) {
+    const occurrenceId = required(ownValue(entry, 'occurrenceId', 'O vínculo da fila'), 'O vínculo da fila');
+    const itemId = required(ownValue(entry, 'itemId', 'O item da fila'), 'O item da fila');
+    const occurrence = sourceOccurrenceById.get(occurrenceId);
+    if (!occurrence || ownValue(occurrence, 'itemId', 'O item da ocorrência') !== itemId) {
+      throw new TypeError('A fila de revisão referencia item ou ocorrência desconhecidos.');
+    }
+    if (ownValue(occurrence, 'outcome', 'O resultado da ocorrência') !== 'cantTell') {
+      throw new TypeError('A revisão humana exige ocorrência originalmente cantTell.');
+    }
+    if (reviewableOccurrenceIds.has(occurrenceId)) throw new TypeError('A fila de revisão é duplicada ou ambígua.');
+    reviewableOccurrenceIds.add(occurrenceId);
   }
 
   const normalized = decisions.map(createReviewDecision);
@@ -123,6 +139,9 @@ export function applyReviewDecisions(auditModel, decisions) {
     const occurrence = occurrenceById.get(decision.occurrenceId);
     if (!occurrence) throw new TypeError(`Ocorrência de revisão desconhecida: ${decision.occurrenceId}.`);
     if (occurrence.itemId !== decision.itemId) throw new TypeError('A ocorrência não pertence ao item informado.');
+    if (occurrence.outcome !== 'cantTell' || !reviewableOccurrenceIds.has(decision.occurrenceId)) {
+      throw new TypeError('A decisão humana exige ocorrência originalmente cantTell presente na fila.');
+    }
     if (normalized.includes(decision)) {
       if (seenOccurrences.has(decision.occurrenceId)) throw new TypeError('Decisão duplicada ou ambígua para a ocorrência.');
       seenOccurrences.add(decision.occurrenceId);

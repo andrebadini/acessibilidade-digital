@@ -121,7 +121,7 @@ export function aggregateBatchAudits({
       ...structuredClone(template.methodology),
       coreRuleCount: 130,
       supplementalRuleCount,
-      ruleCount: 130 + supplementalRuleCount,
+      ruleCount: ruleResults.length,
       itemCount: 146,
     },
     session: { status, diagnostics: [...diagnostics.map(value => structuredClone(value)), ...pageDiagnostics.map(value => structuredClone(value))], partial: status === 'partial' },

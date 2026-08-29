@@ -118,10 +118,19 @@ async function enrichCapturedAudit(captured, options) {
     },
     integrity: { algorithm: 'SHA-256', evidenceManifestHash: 'pending', hashBase: REPORT_HASH_BASE },
   };
-  const normalized = createAuditModel({
+  const migratedOrNormalized = createAuditModel({
     ...base,
     integrity: { ...base.integrity, canonicalModelHash: 'pending' },
   });
+  const normalized = raw.schemaVersion === 1
+    ? createAuditModel({
+      ...migratedOrNormalized,
+      integrity: {
+        algorithm: 'SHA-256', evidenceManifestHash: 'pending',
+        canonicalModelHash: 'pending', hashBase: REPORT_HASH_BASE,
+      },
+    })
+    : migratedOrNormalized;
   const normalizedArtifactById = new Map(normalized.evidence.map(artifact => [artifact.evidenceId, artifact]));
   const evidence = [];
   for (const artifact of normalized.evidence) {
