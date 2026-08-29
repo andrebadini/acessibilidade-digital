@@ -163,7 +163,8 @@ test('a review after delivery reservation preserves the prepared model and atomi
     },
   });
   const reservedModel = structuredClone(initial);
-  reservedModel.limitations = [...reservedModel.limitations, 'Modelo preparado antes da revisão.'];
+  const reservedSnippet = '<button id="continuar" aria-label="Continuar">Prosseguir</button>';
+  reservedModel.evidence.find(artifact => artifact.evidenceId === 'ev-control').snippet = reservedSnippet;
   const reservation = await store.commitAuditIfRevisionWithExportLease(
     initial.auditId,
     reservedModel,
@@ -180,9 +181,9 @@ test('a review after delivery reservation preserves the prepared model and atomi
   const reviewed = await commitReviewDecision(initial, reviewInput(), store);
   const stored = await store.getAudit(initial.auditId);
   const latest = await store.getLatest();
-  assert.equal(stored.limitations.includes('Modelo preparado antes da revisão.'), true);
+  assert.equal(stored.evidence.find(artifact => artifact.evidenceId === 'ev-control').snippet, reservedSnippet);
   assert.equal(stored.reviewDecisions.length, 1);
-  assert.equal(reviewed.limitations.includes('Modelo preparado antes da revisão.'), true);
+  assert.equal(reviewed.evidence.find(artifact => artifact.evidenceId === 'ev-control').snippet, reservedSnippet);
   assert.equal((await store.getAuditSnapshot(initial.auditId)).revision, reservation.revision + 1);
   assert.deepEqual(await store.getExportLeaseState(initial.auditId, {
     now: '2026-08-27T10:00:00.300Z',

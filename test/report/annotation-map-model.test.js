@@ -73,11 +73,16 @@ test('migrates a V1 page map to page-1 without inventing another page or occurre
   const map = await createAnnotationMapFixture();
   delete source.pageId;
   delete map.pageId;
-  input.evidence.artifacts.push(source, map);
+  const sourceIndex = input.evidence.artifacts.findIndex(artifact => artifact.evidenceId === source.evidenceId);
+  input.evidence.artifacts.splice(sourceIndex, 1, source);
+  input.evidence.artifacts.push(map);
 
   const model = createAuditModel(input);
   const migrated = model.evidence.find(artifact => artifact.kind === 'announcement-map');
   assert.equal(migrated.pageId, 'page-1');
+  assert.deepEqual(model.evidence.map(artifact => artifact.evidenceId), ['ev-full', 'ev-1', 'ev-map']);
+  assert.equal(new Set(model.evidence.map(artifact => artifact.evidenceId)).size, model.evidence.length);
+  assert.equal(migrated.derivation.sourceHash, model.evidence.find(artifact => artifact.evidenceId === 'ev-full').hash);
   assert.equal(model.pages.length, 1);
   assert.equal(model.occurrences.some(occurrence => occurrence.evidenceRefs.includes(migrated.evidenceId)), false);
 });

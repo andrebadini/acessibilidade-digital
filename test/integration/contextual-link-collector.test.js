@@ -190,7 +190,7 @@ test('collector→normalizer→rule rejects inaccessible adjacent warnings as ob
   for (const kind of ['hidden', 'aria-hidden', 'display-none', 'visibility-hidden', 'inert']) {
     const { result } = await collectNormalizeAndEvaluate(kind);
     assert.equal(result.outcome, 'failed', kind);
-    assert.deepEqual(result.targets[0].data, { reason: 'missing-new-window-warning' });
+    assert.deepEqual(result.targets[0].data, { reason: 'missing-new-window-warning', behavior: 'target-blank' });
     assert.doesNotMatch(JSON.stringify(result), /abre em nova aba/iu);
   }
 });

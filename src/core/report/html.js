@@ -377,7 +377,7 @@ function methodologySection(model) {
   const sourceLedger = normativeSources.map(source => {
     const locator = source.localCopy
       ? `arquivo <code>${escapeHtml(source.localCopy.fileName)}</code>; SHA-256 <code>${escapeHtml(source.localCopy.sha256)}</code>`
-      : `<a href="${escapeHtml(source.url)}">${escapeHtml(source.url)}</a>`;
+      : `<code>${escapeHtml(source.url)}</code>`;
     return `<li><strong>${escapeHtml(source.title)}</strong> — versão ${escapeHtml(source.version)}; identificador <code>${escapeHtml(source.id)}</code>; ${locator}.</li>`;
   }).join('');
   return `<section id="metodologia" class="major-section" aria-labelledby="metodologia-titulo"><h2 id="metodologia-titulo">Metodologia, proveniência e integridade</h2><div class="method-grid">

@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { CORE_RULES, validateCoreRuleComposition } from '../../src/core/audit.js';
 import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
+import { reportInput } from '../report/helpers.js';
 
 const fixture = name => readFile(new URL(`../../fixtures/pages/${name}`, import.meta.url), 'utf8');
 
@@ -28,7 +28,7 @@ test('manual fixture marks contextual cantTell cases without claiming automatic 
 });
 
 test('report artifacts share all 146 outcomes and occurrences without leaking sensitive URL data', async () => {
-  const raw = structuredClone(SAMPLE_AUDIT);
+  const raw = reportInput();
   raw.requestedUrl = 'https://servico.exemplo.test/?token=TOPSECRET&view=public';
   raw.finalUrl = 'https://servico.exemplo.test/final?session=TOPSECRET&view=public';
   const model = await enrichAuditForReport(raw, { now: () => '2026-08-26T15:00:00.000Z', timezone: 'America/Cuiaba', manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0' });

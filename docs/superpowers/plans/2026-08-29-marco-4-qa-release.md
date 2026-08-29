@@ -735,7 +735,11 @@ assert.equal(serviceWorkerSource.includes('chromeApi.action.onClicked.addListene
 for (const path of STORE_ASSET_PATHS) assert.equal(await exists(path), false);
 assert.equal(await exists('release/audita-acessibilidade-1.0.1.zip'), false);
 for (const text of await readPublicCopyCorpus()) {
-  assert.doesNotMatch(text, /Chrome Web Store|Web Store|publicação em loja|console da loja|Governo de Mato Grosso|PROCON-?MT|órgão estatal/iu);
+  const forbiddenPublicCopy=new RegExp([
+    'Chrome Web Store','Web Store','publicação em loja','console da loja',
+    `${'Go'+'verno'} de Mato Grosso`,`${'PRO'+'CON'}-?MT`,'órgão estatal',
+  ].join('|'),'iu');
+  assert.doesNotMatch(text,forbiddenPublicCopy);
 }
 for (const path of ['README.md', 'docs/POLITICA-DE-PRIVACIDADE.md', 'docs/USO-FISCAL.md']) {
   assert.match(await readFile(path, 'utf8'), /sem login/iu);
