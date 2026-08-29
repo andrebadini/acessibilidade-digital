@@ -82,6 +82,8 @@ test('runs an explicit success → throw → success list strictly sequentially 
   assert.equal(maxActive, 1);
   assert.deepEqual(starts, normalized.entries.map(entry => entry.navigationUrl));
   assert.equal(argumentsSeen.every(value => value.closeAuditTab === true), true);
+  assert.equal(argumentsSeen.every(value => value.cleanupMode === 'always'), true);
+  assert.deepEqual(argumentsSeen.map(value => value.pageId), ['page-1', 'page-2', 'page-3']);
   assert.deepEqual(argumentsSeen.map(value => value.idFactory()), [
     'batch-sequential:page-1', 'batch-sequential:page-2', 'batch-sequential:page-3',
   ]);

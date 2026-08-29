@@ -52,8 +52,7 @@ function deepFreeze(value, seen = new WeakSet()) {
   return Object.freeze(value);
 }
 
-function canonicalNow(now) {
-  const value = typeof now === 'function' ? now() : new Date().toISOString();
+export function canonicalTime(value = new Date().toISOString()) {
   const date = value instanceof Date ? value : new Date(value);
   if (!Number.isFinite(date.getTime())) throw new TypeError('O relógio da auditoria retornou uma data inválida.');
   return date.toISOString();
@@ -370,7 +369,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     finalUrl: '',
     attempted: false,
     finalUrlObserved: false,
-    startedAt: canonicalNow(now),
+    startedAt: canonicalTime(now()),
     endedAt: '',
     environment: { chromeVersion: '', viewport: { width: null, height: null, deviceScaleFactor: null } },
     status: 'running', diagnostics: [], progress: [], snapshot: null,
@@ -397,7 +396,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
   const progress = async (phase, message, percent) => {
     throwIfAborted(signal);
     const previous = state.progress.at(-1)?.percent ?? -1;
-    const entry = { type: 'AUDIT_PROGRESS', sessionId: auditId, auditId, phase, message, percent: Math.max(previous, percent), at: canonicalNow(now) };
+    const entry = { type: 'AUDIT_PROGRESS', sessionId: auditId, auditId, phase, message, percent: Math.max(previous, percent), at: canonicalTime(now()) };
     try { await chromeAdapter.emitProgress?.(entry); } catch { /* Progress transport must not abort the audit. */ }
     throwIfAborted(signal);
     state.progress.push(entry);
@@ -408,13 +407,13 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     if (!state.diagnostics.some(entry => canonicalStringify({
       code: entry.code, message: entry.message, details: entry.details ?? {},
     }) === signature)) {
-      state.diagnostics.push(diagnostic(code, message, canonicalNow(now), true, details));
+      state.diagnostics.push(diagnostic(code, message, canonicalTime(now()), true, details));
     }
   };
   const appendDiagnosticOnce = (code, message, recoverableValue) => {
     if (!state.diagnostics.some(entry => entry.code === code && entry.message === message &&
       entry.recoverable === recoverableValue)) {
-      state.diagnostics.push(diagnostic(code, message, canonicalNow(now), recoverableValue));
+      state.diagnostics.push(diagnostic(code, message, canonicalTime(now()), recoverableValue));
     }
   };
   const settleFatalAxeObservation = () => {
@@ -447,7 +446,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
   const fail = (code, message, error) => {
     fatal = true;
     state.status = error?.name === 'AbortError' || signal?.aborted ? 'cancelled' : 'failed';
-    state.diagnostics.push(diagnostic(code, message, canonicalNow(now), false));
+    state.diagnostics.push(diagnostic(code, message, canonicalTime(now()), false));
   };
 
   try {
@@ -560,7 +559,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
         state.diagnostics.push(diagnostic(
           'AXE_FEATURE_DISABLED',
           'O motor suplementar axe-core permaneceu desativado pelo gate MV3/CSP; o motor próprio continuou normalmente.',
-          canonicalNow(now), true,
+          canonicalTime(now()), true,
         ));
       } else if (state.axe.status === 'partial') {
         recoverable('AXE_EXECUTION_FAILED', 'O motor suplementar axe-core teve cobertura parcial; o motor próprio continuou normalmente.');
@@ -702,7 +701,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     throwIfAborted(signal);
     state.status = recoverableFailure ? 'partial' : 'complete';
     try {
-      const handoffModel = await awaitStep(() => draftModel({ ...state, endedAt: canonicalNow(now) }));
+      const handoffModel = await awaitStep(() => draftModel({ ...state, endedAt: canonicalTime(now()) }));
       const handoff = await awaitStep(() => chromeAdapter.handoffReport?.(handoffModel));
       validateTransientReviewUrl(handoff?.reviewUrl, auditId, expectedExtensionId);
       state.report = {
@@ -721,10 +720,10 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     if (!error?.auditHandled) fail('NAVIGATION_FAILED', error?.name === 'AbortError' || signal?.aborted ? 'A auditoria foi cancelada.' : 'O site não pôde ser aberto de forma estável.', error);
   } finally {
     if (cdp) {
-      try { await cdp.disconnect(); } catch { state.diagnostics.push(diagnostic('CDP_DISCONNECT_FAILED', 'A sessão de depuração não pôde ser encerrada automaticamente.', canonicalNow(now), true)); if (state.status === 'complete') state.status = 'partial'; }
+      try { await cdp.disconnect(); } catch { state.diagnostics.push(diagnostic('CDP_DISCONNECT_FAILED', 'A sessão de depuração não pôde ser encerrada automaticamente.', canonicalTime(now()), true)); if (state.status === 'complete') state.status = 'partial'; }
     }
     if (tab && closeAuditTab !== false) {
-      try { await chromeAdapter.removeTab(tab.id); } catch { state.diagnostics.push(diagnostic('TAB_CLOSE_FAILED', 'A aba descartável não pôde ser fechada automaticamente.', canonicalNow(now), true)); if (state.status === 'complete') state.status = 'partial'; }
+      try { await chromeAdapter.removeTab(tab.id); } catch { state.diagnostics.push(diagnostic('TAB_CLOSE_FAILED', 'A aba descartável não pôde ser fechada automaticamente.', canonicalTime(now()), true)); if (state.status === 'complete') state.status = 'partial'; }
     }
   }
   return finalize();
@@ -740,7 +739,7 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
         true,
       );
     }
-    state.endedAt = canonicalNow(now);
+    state.endedAt = canonicalTime(now());
     if (!state.occurrences.length && state.coreRuleResults.length) {
       state.occurrences = makeOccurrences(auditId, state.coreRuleResults, state.itemResults);
     }

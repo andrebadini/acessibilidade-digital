@@ -3,6 +3,7 @@ import { captureElement, captureFullPage } from '../browser/capture-evidence.js'
 import { composeAnnouncementMapForProduction as composeAnnouncementMap } from '../browser/annotation-map.js';
 import { createCdpClient, createChromeDebuggerTransport } from '../browser/cdp-client.js';
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
+import { sanitizeResourceUrl } from '../core/normalize-snapshot.js';
 
 function timeoutError() {
   return new DOMException('A página não ficou estável dentro do tempo limite.', 'TimeoutError');
@@ -289,6 +290,56 @@ export function createChromeAdapter(chromeApi, options = {}) {
         return Object.freeze({ tabId, windowId: tab.windowId, documentId: result.documentId, urlSessionDigest });
       } catch {
         throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+      }
+    },
+    async getEvidenceUrl(tabId, includeQuery = false) {
+      if (!Number.isSafeInteger(tabId) || tabId < 0 || typeof includeQuery !== 'boolean') return '';
+      try {
+        const rawUrl = (await invoke(chromeApi, chromeApi.tabs, 'get', tabId))?.url;
+        if (typeof rawUrl !== 'string') return '';
+        const parsed = new URL(rawUrl);
+        if (!['http:', 'https:'].includes(parsed.protocol) || parsed.href !== rawUrl) return '';
+        if (!includeQuery) parsed.search = '';
+        return sanitizeResourceUrl(parsed.href);
+      } catch {
+        return '';
+      }
+    },
+    async probePrivacySignals(tabId) {
+      if (!Number.isSafeInteger(tabId) || tabId < 0) throw new Error('PRIVACY_PROBE_UNAVAILABLE');
+      try {
+        const results = await executeScript({
+          target: { tabId, allFrames: true },
+          world: 'ISOLATED',
+          func: () => {
+            const selectors = [
+              ['password-field', 'input[type="password"]'],
+              ['credential-autocomplete', '[autocomplete="current-password"],[autocomplete="new-password"]'],
+              ['one-time-code', '[autocomplete="one-time-code"]'],
+              ['payment-card', '[autocomplete="cc-number"],[autocomplete="cc-csc"]'],
+              ['audita-private', '[data-audita-private]'],
+            ];
+            return selectors.map(([category, selector]) => ({
+              category,
+              count: document.querySelectorAll(selector).length,
+            })).filter(value => value.count > 0);
+          },
+        });
+        if (!Array.isArray(results)) throw new Error('PRIVACY_PROBE_UNAVAILABLE');
+        const counts = new Map();
+        for (const frame of results) {
+          if (frame?.error !== undefined || !Array.isArray(frame?.result)) throw new Error('PRIVACY_PROBE_UNAVAILABLE');
+          for (const value of frame.result) {
+            if (!value || typeof value.category !== 'string' || !Number.isSafeInteger(value.count) || value.count < 1) {
+              throw new Error('PRIVACY_PROBE_UNAVAILABLE');
+            }
+            counts.set(value.category, (counts.get(value.category) ?? 0) + value.count);
+          }
+        }
+        return Object.freeze([...counts].sort(([a], [b]) => a.localeCompare(b))
+          .map(([category, count]) => Object.freeze({ category, count })));
+      } catch {
+        throw new Error('PRIVACY_PROBE_UNAVAILABLE');
       }
     },
     executeScript,

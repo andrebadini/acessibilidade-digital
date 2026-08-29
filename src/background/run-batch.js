@@ -1,4 +1,4 @@
-import { runAudit } from './run-audit.js';
+import { canonicalTime, runAudit } from './run-audit.js';
 import {
   createBatchSession,
   transitionBatchSession,
@@ -38,7 +38,7 @@ export async function runBatch({
 }) {
   validateInputs({ entries, batchAuditId, chromeAdapter, runner, pageTimeoutMs, cleanupTimeoutMs, evidenceBudgetBytes, reportOptions });
   const template = createBatchReportTemplate(reportOptions);
-  const startedAt = canonicalNow(now);
+  const startedAt = canonicalTime(now());
   let checkpoint = createBatchSession({ id: batchAuditId, total: entries.length, startedAt });
   let lastProgress = 0;
   let terminal = false;
@@ -70,19 +70,19 @@ export async function runBatch({
     const event = {
       type: 'AUDIT_PROGRESS', sessionId: batchAuditId, auditId: batchAuditId,
       phase: 'batch-page', message, percent: lastProgress, pageNumber,
-      total: entries.length, at: canonicalNow(now),
+      total: entries.length, at: canonicalTime(now()),
       statusCounts: { ...checkpoint.statusCounts },
     };
     try { await chromeAdapter.emitProgress?.(event); } catch { /* progresso não controla o lote */ }
   };
 
   await saveCheckpoint();
-  await move({ type: 'VALIDATE', at: canonicalNow(now) });
-  await move({ type: 'QUEUE', at: canonicalNow(now) });
+  await move({ type: 'VALIDATE', at: canonicalTime(now()) });
+  await move({ type: 'QUEUE', at: canonicalTime(now()) });
   if (signal?.aborted) {
     await cancelRemaining({ active: false });
   } else {
-    await move({ type: 'START', at: canonicalNow(now) });
+    await move({ type: 'START', at: canonicalTime(now()) });
     for (let index = 0; index < entries.length; index += 1) {
       if (signal?.aborted) {
         await cancelRemaining({ active: false });
@@ -91,7 +91,7 @@ export async function runBatch({
       const entry = entries[index];
       const pageId = `page-${index + 1}`;
       const childAuditId = `${batchAuditId}:${pageId}`;
-      const pageStartedAt = canonicalNow(now);
+      const pageStartedAt = canonicalTime(now());
       let localPercent = 0;
       const childAdapter = {
         ...chromeAdapter,
@@ -113,12 +113,14 @@ export async function runBatch({
           idFactory: () => childAuditId,
           signal: childSignal,
           closeAuditTab: true,
+          pageId,
+          cleanupMode: 'always',
         }),
         externalSignal: signal,
         pageTimeoutMs,
         cleanupTimeoutMs,
       });
-      const pageEndedAt = canonicalNow(now);
+      const pageEndedAt = canonicalTime(now());
 
       if (outcome.kind === 'cancelled') {
         await cancelRemaining({ active: true, startedAt: pageStartedAt, endedAt: pageEndedAt });
@@ -133,7 +135,7 @@ export async function runBatch({
           'BATCH_PAGE_CLEANUP_UNCONFIRMED', 'A limpeza da página excedeu o prazo; o lote foi interrompido para evitar sobreposição.'));
         await move({ type: 'PAGE_FINISHED', status: 'failed', at: pageEndedAt });
         for (let pending = index + 1; pending < entries.length; pending += 1) {
-          const pendingAt = canonicalNow(now);
+          const pendingAt = canonicalTime(now());
           pageResults.push(failureFor(entries[pending], `page-${pending + 1}`, 'failed', false, pendingAt, pendingAt,
             'BATCH_NOT_STARTED_CLEANUP_UNCONFIRMED', 'A página não foi iniciada porque a limpeza anterior não foi confirmada.'));
           await move({ type: 'PAGE_FINISHED', status: 'failed', at: pendingAt });
@@ -184,7 +186,7 @@ export async function runBatch({
       });
       if (stopsForCleanup) {
         for (let pending = index + 1; pending < entries.length; pending += 1) {
-          const pendingAt = canonicalNow(now);
+          const pendingAt = canonicalTime(now());
           pageResults.push(failureFor(entries[pending], `page-${pending + 1}`, 'failed', false, pendingAt, pendingAt,
             'BATCH_NOT_STARTED_CLEANUP_UNCONFIRMED', 'A página não foi iniciada porque a limpeza anterior não foi confirmada.'));
           await move({ type: 'PAGE_FINISHED', status: 'failed', at: pendingAt });
@@ -194,7 +196,7 @@ export async function runBatch({
     }
     if (checkpoint.state === 'running') {
       if (!terminal) throw new Error('A fronteira terminal do lote não foi adquirida.');
-      await move({ type: 'FINISH', at: canonicalNow(now) });
+      await move({ type: 'FINISH', at: canonicalTime(now()) });
     }
   }
 
@@ -203,7 +205,7 @@ export async function runBatch({
     batchAuditId,
     pageResults,
     startedAt,
-    endedAt: canonicalNow(now),
+    endedAt: canonicalTime(now()),
     status: checkpoint.state,
     progress: [],
     diagnostics: [],
@@ -224,12 +226,12 @@ export async function runBatch({
   return finalModel;
 
   async function cancelRemaining({ active, startedAt: activeStartedAt, endedAt: activeEndedAt }) {
-    await move({ type: 'CANCEL', at: activeEndedAt ?? canonicalNow(now) });
+    await move({ type: 'CANCEL', at: activeEndedAt ?? canonicalTime(now()) });
     const firstPending = pageResults.length;
     for (let index = firstPending; index < entries.length; index += 1) {
       const at = index === firstPending && active
         ? activeEndedAt
-        : canonicalNow(now);
+        : canonicalTime(now());
       pageResults.push(failureFor(
         entries[index], `page-${index + 1}`, 'cancelled', index === firstPending && active,
         index === firstPending && active ? activeStartedAt : at,
@@ -243,7 +245,7 @@ export async function runBatch({
     await move({
       type: 'MARK_REMAINING_CANCELLED',
       count: entries.length - checkpoint.completedCount,
-      at: activeEndedAt ?? canonicalNow(now),
+      at: activeEndedAt ?? canonicalTime(now()),
     });
   }
 }
@@ -311,11 +313,4 @@ function validateInputs({ entries, batchAuditId, chromeAdapter, runner, pageTime
 
 function validateTransientReviewUrl(value, auditId, expectedExtensionId) {
   try { return canonicalInternalReviewUrl(value ?? null, auditId, expectedExtensionId); } catch { return null; }
-}
-
-function canonicalNow(now) {
-  const value = typeof now === 'function' ? now() : new Date().toISOString();
-  const date = value instanceof Date ? value : new Date(value);
-  if (!Number.isFinite(date.getTime())) throw new TypeError('Relógio do lote inválido.');
-  return date.toISOString();
 }

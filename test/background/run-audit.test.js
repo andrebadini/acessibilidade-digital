@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
-import { runAudit } from '../../src/background/run-audit.js';
+import { canonicalTime, runAudit } from '../../src/background/run-audit.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { remapAuditPage } from '../../src/core/batch/remap-audit.js';
@@ -12,6 +12,11 @@ import { createAnnotationMapFixture } from '../report/annotation-map-fixture.js'
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const TEST_EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
+
+test('exports the single canonical audit timestamp normalizer used by observed runners', () => {
+  assert.equal(canonicalTime('2026-08-29T10:00:00-04:00'), '2026-08-29T14:00:00.000Z');
+  assert.throws(() => canonicalTime('not-a-time'), /relógio/u);
+});
 
 function rawPage() {
   return {
