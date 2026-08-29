@@ -18,11 +18,14 @@ const DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
 
 function createStorageArea() {
   const values = {};
+  const unsafeValues = new Map();
   const writes = [];
   return {
     writes,
+    unsafeSet(key, value) { unsafeValues.set(key, value); },
     async get(key) {
-      if (key === null) return structuredClone(values);
+      if (key === null) return { ...structuredClone(values), ...Object.fromEntries(unsafeValues) };
+      if (unsafeValues.has(key)) return { [key]: unsafeValues.get(key) };
       if (typeof key === 'string') return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {};
       throw new TypeError('test key');
     },
@@ -169,6 +172,30 @@ test('prepares an exact one-use target and atomically persists its running sessi
   assert.deepEqual(await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId)), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
 });
 
+test('rejects expiry reached while fresh document proof is pending without a claim/session write', async () => {
+  let currentTime = 1_788_000_000_000;
+  let releaseProbe;
+  let probeStarted = false;
+  const probeGate = new Promise(resolve => { releaseProbe = resolve; });
+  const { authority, sessionArea } = authorityFixture({
+    now: () => currentTime,
+    probeDocument: async () => {
+      probeStarted = true;
+      await probeGate;
+      return { tabId: 41, windowId: 9, documentId: 'target-document-1', urlSessionDigest: DIGEST };
+    },
+  });
+  const prepared = await prepareAttached(authority);
+  const writesBeforeClaim = sessionArea.writes.length;
+  const pending = authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+  while (!probeStarted) await new Promise(resolve => setImmediate(resolve));
+  currentTime += 60_001;
+  releaseProbe();
+  assert.deepEqual(await pending, { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+  assert.equal(sessionArea.writes.length, writesBeforeClaim);
+  assert.equal((await sessionArea.get(targetCapabilityStorageKey(prepared.capabilityId)))[targetCapabilityStorageKey(prepared.capabilityId)].state, 'prepared');
+});
+
 test('fails closed when intent issuer window context or fresh document proof differs', async () => {
   const variants = [
     start => ({ ...start, allowedIntent: 'start-persona' }),
@@ -208,11 +235,29 @@ test('worker event nonce cannot be replayed by another click', async () => {
     mode: 'attached',
     allowedIntent: 'start-audit',
     eventNonce: nonce,
-    windowId: 9,
+    senderContext: null,
   };
   assert.equal((await authority.claimWorkerEventAndIssueAuditSession(first)).ok, true);
   assert.deepEqual(await authority.claimWorkerEventAndIssueAuditSession(first), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
   assert.deepEqual(await authority.claimWorkerEventAndIssueAuditSession({ ...first, eventNonce: 'nonce-09876543210987654321' }), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+});
+
+test('worker event claim rejects externally supplied window ownership and non-null sender context', async () => {
+  const nonce = 'nonce-12345678901234567890';
+  for (const extra of [{ windowId: 9 }, { senderContext: extensionContext() }]) {
+    const { authority } = authorityFixture();
+    const prepared = await prepareAttached(authority, { type: 'worker-event', event: 'context-menu', eventNonce: nonce });
+    const claim = {
+      capabilityId: prepared.capabilityId,
+      auditId: 'audit-worker-1',
+      mode: 'attached',
+      allowedIntent: 'start-audit',
+      eventNonce: nonce,
+      senderContext: null,
+      ...extra,
+    };
+    assert.deepEqual(await authority.claimWorkerEventAndIssueAuditSession(claim), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+  }
 });
 
 test('never upgrades a persona-only target capability into an audit session', async () => {
@@ -296,6 +341,106 @@ test('invalidates one exact capability without scanning unrelated records', asyn
   assert.deepEqual(sessionArea.writes.at(-1).keys, [targetCapabilityStorageKey(first.capabilityId)]);
   assert.equal(sessionArea.writes.length, writesBefore + 1);
   assert.equal((await sessionArea.get(targetCapabilityStorageKey(second.capabilityId)))[targetCapabilityStorageKey(second.capabilityId)].state, 'prepared');
+});
+
+test('binds embedded target and session IDs to their storage locators at every boundary', async () => {
+  const sender = { id: 'test', documentId: 'panel-document-1', url: 'chrome-extension://test/src/panel/index.html' };
+  const chromeApi = { runtime: { id: 'test', async getContexts() { return [{ documentId: sender.documentId, documentUrl: sender.url, contextType: 'SIDE_PANEL', windowId: 9 }]; } } };
+
+  {
+    const { authority, sessionArea } = authorityFixture({ chromeApi });
+    const first = await prepareAttached(authority);
+    const second = await prepareAttached(authority);
+    const firstKey = targetCapabilityStorageKey(first.capabilityId);
+    const secondRecord = (await sessionArea.get(targetCapabilityStorageKey(second.capabilityId)))[targetCapabilityStorageKey(second.capabilityId)];
+    await sessionArea.set({ [firstKey]: secondRecord });
+    const writesBefore = sessionArea.writes.length;
+    assert.deepEqual(await authority.claimAndIssueAuditSession(validStart(first.capabilityId)), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+    assert.equal(sessionArea.writes.length, writesBefore);
+  }
+
+  {
+    const { authority, sessionArea } = authorityFixture({ chromeApi });
+    const first = await prepareAttached(authority);
+    const second = await prepareAttached(authority);
+    const firstKey = targetCapabilityStorageKey(first.capabilityId);
+    const secondRecord = (await sessionArea.get(targetCapabilityStorageKey(second.capabilityId)))[targetCapabilityStorageKey(second.capabilityId)];
+    await sessionArea.set({ [firstKey]: secondRecord });
+    const writesBefore = sessionArea.writes.length;
+    assert.deepEqual(await authority.invalidateCapability(first.capabilityId, 'corrupt'), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+    assert.equal(sessionArea.writes.length, writesBefore);
+    assert.equal((await sessionArea.get(firstKey))[firstKey].capabilityId, second.capabilityId);
+  }
+
+  {
+    const { authority, sessionArea } = authorityFixture({ chromeApi });
+    const prepared = await prepareAttached(authority);
+    const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+    const realKey = sessionCapabilityStorageKey(claimed.sessionCapabilityId);
+    const transplantedId = '______________________';
+    const transplantedKey = sessionCapabilityStorageKey(transplantedId);
+    await sessionArea.set({ [transplantedKey]: (await sessionArea.get(realKey))[realKey] });
+    assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: transplantedId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender }), { ok: false, code: 'SESSION_DENIED' });
+    const writesBefore = sessionArea.writes.length;
+    assert.deepEqual(await authority.transitionAuditSession({ sessionCapabilityId: transplantedId, auditId: 'audit-1', nextState: 'result' }), { ok: false, code: 'SESSION_TRANSITION_DENIED' });
+    assert.equal(sessionArea.writes.length, writesBefore);
+  }
+});
+
+test('validates reordered closed intents structurally and rejects changed grants', async () => {
+  const sender = { id: 'test', documentId: 'panel-document-1', url: 'chrome-extension://test/src/panel/index.html' };
+  const chromeApi = { runtime: { id: 'test', async getContexts() { return [{ documentId: sender.documentId, documentUrl: sender.url, contextType: 'SIDE_PANEL', windowId: 9 }]; } } };
+  const { authority, sessionArea } = authorityFixture({ chromeApi });
+  const prepared = await prepareAttached(authority);
+  const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+  const key = sessionCapabilityStorageKey(claimed.sessionCapabilityId);
+  const session = (await sessionArea.get(key))[key];
+  const reordered = {
+    ...session,
+    intents: {
+      review: { 'view-only': ['export'], result: ['export'], running: [] },
+      panel: { 'view-only': ['open-report'], result: ['open-report'], running: ['cancel'] },
+    },
+  };
+  await sessionArea.set({ [key]: reordered });
+  assert.equal((await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender })).ok, true);
+  for (const intents of [
+    { ...reordered.intents, extra: {} },
+    { panel: { result: ['open-report'], 'view-only': ['open-report'] }, review: reordered.intents.review },
+    { panel: { ...reordered.intents.panel, running: ['open-report', 'cancel'] }, review: reordered.intents.review },
+  ]) {
+    await sessionArea.set({ [key]: { ...session, intents } });
+    assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender }), { ok: false, code: 'SESSION_DENIED' });
+  }
+});
+
+test('rejects hostile exact-shape accessors symbols and non-enumerable additions without invoking getters', async () => {
+  let getterCalls = 0;
+  const baseArgs = {
+    kind: 'attached', tabId: 41, windowId: 9, documentId: 'target-document-1',
+    initialUrlEvidence: 'https://example.test/path', initialUrlSessionDigest: DIGEST,
+    createdBy: 'user', allowedIntent: 'start-audit', issuer: extensionContext().issuer,
+  };
+  const accessorArgs = { ...baseArgs };
+  Object.defineProperty(accessorArgs, 'documentId', { enumerable: true, get() { getterCalls += 1; return 'target-document-1'; } });
+  const { authority: prepareAuthority } = authorityFixture();
+  await assert.rejects(() => prepareAuthority.prepare(accessorArgs), /CAPABILITY_PREPARE_DENIED/u);
+  assert.equal(getterCalls, 0);
+
+  for (const decorate of [
+    record => { record[Symbol('hidden')] = true; },
+    record => { Object.defineProperty(record, 'hidden', { value: true, enumerable: false }); },
+    record => { Object.defineProperty(record, 'state', { enumerable: true, get() { getterCalls += 1; return 'prepared'; } }); },
+  ]) {
+    const { authority, sessionArea } = authorityFixture();
+    const prepared = await prepareAttached(authority);
+    const key = targetCapabilityStorageKey(prepared.capabilityId);
+    const hostile = (await sessionArea.get(key))[key];
+    decorate(hostile);
+    sessionArea.unsafeSet(key, hostile);
+    assert.deepEqual(await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId)), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+  }
+  assert.equal(getterCalls, 0);
 });
 
 test('browser lifecycle scans revoke only records bound to the exact tab or window', async () => {

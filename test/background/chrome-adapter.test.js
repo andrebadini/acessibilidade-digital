@@ -87,16 +87,44 @@ test('proves a fresh top document identity without returning its raw URL', async
   assert.doesNotMatch(JSON.stringify(proof), /private|example\.test/u);
 });
 
+test('rejects navigation or document replacement while HMAC digest is pending', async () => {
+  const fake = chromeFake();
+  let current = { url: 'https://example.test/before', documentId: 'document-before', status: 'complete' };
+  let releaseDigest;
+  let digestStarted = false;
+  const digestGate = new Promise(resolve => { releaseDigest = resolve; });
+  fake.chromeApi.tabs.get = async id => ({ id, windowId: 9, status: current.status, url: current.url });
+  fake.chromeApi.scripting.executeScript = async () => [{
+    frameId: 0,
+    documentId: current.documentId,
+    result: current.url,
+  }];
+  const adapter = createChromeAdapter(fake.chromeApi, {
+    sessionUrlDigestManager: {
+      async digest() {
+        digestStarted = true;
+        await digestGate;
+        return `hmac-sha256:${'A'.repeat(43)}`;
+      },
+    },
+  });
+  const pending = adapter.probeDocumentIdentity(17);
+  while (!digestStarted) await new Promise(resolve => setImmediate(resolve));
+  current = { url: 'https://example.test/after', documentId: 'document-after', status: 'loading' };
+  releaseDigest();
+  await assert.rejects(() => pending, /TARGET_DOCUMENT_UNAVAILABLE/u);
+});
+
 test('rejects ambiguous, stale, or non-HTTP document probes', async () => {
   const fake = chromeFake();
   const manager = { async digest() { return `hmac-sha256:${'A'.repeat(43)}`; } };
   const adapter = createChromeAdapter(fake.chromeApi, { sessionUrlDigestManager: manager });
-  fake.chromeApi.tabs.get = async id => ({ id, windowId: 9, url: 'https://example.test/' });
+  fake.chromeApi.tabs.get = async id => ({ id, windowId: 9, status: 'complete', url: 'https://example.test/' });
   fake.chromeApi.scripting.executeScript = async () => [];
   await assert.rejects(() => adapter.probeDocumentIdentity(17), /TARGET_DOCUMENT_UNAVAILABLE/u);
   fake.chromeApi.scripting.executeScript = async () => [{ frameId: 0, documentId: 'doc-1', result: 'https://changed.test/' }];
   await assert.rejects(() => adapter.probeDocumentIdentity(17), /TARGET_DOCUMENT_UNAVAILABLE/u);
-  fake.chromeApi.tabs.get = async id => ({ id, windowId: 9, url: 'chrome://settings/' });
+  fake.chromeApi.tabs.get = async id => ({ id, windowId: 9, status: 'complete', url: 'chrome://settings/' });
   fake.chromeApi.scripting.executeScript = async () => [{ frameId: 0, documentId: 'doc-1', result: 'chrome://settings/' }];
   await assert.rejects(() => adapter.probeDocumentIdentity(17), /TARGET_DOCUMENT_UNAVAILABLE/u);
 });
@@ -104,8 +132,8 @@ test('rejects ambiguous, stale, or non-HTTP document probes', async () => {
 test('rechecks the tab after script proof and rejects an interleaved navigation', async () => {
   const fake = chromeFake();
   const tabs = [
-    { id: 17, windowId: 9, url: 'https://example.test/before' },
-    { id: 17, windowId: 9, url: 'https://example.test/after' },
+    { id: 17, windowId: 9, status: 'complete', url: 'https://example.test/before' },
+    { id: 17, windowId: 9, status: 'complete', url: 'https://example.test/after' },
   ];
   fake.chromeApi.tabs.get = async () => tabs.shift();
   fake.chromeApi.scripting.executeScript = async () => [{

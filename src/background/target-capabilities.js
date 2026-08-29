@@ -13,6 +13,12 @@ const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
 const TARGET_KEYS = ['version', 'capabilityId', 'kind', 'tabId', 'windowId', 'documentId', 'initialUrlEvidence', 'initialUrlSessionDigest', 'createdBy', 'allowedIntent', 'issuer', 'issuedAt', 'expiresAt', 'state'];
 const SESSION_KEYS = ['version', 'sessionCapabilityId', 'auditId', 'windowId', 'mode', 'targetBinding', 'consumers', 'intents', 'state', 'issuedAt', 'expiresAt'];
 const PROOF_KEYS = ['tabId', 'windowId', 'documentId', 'urlSessionDigest'];
+const PREPARE_KEYS = ['kind', 'tabId', 'windowId', 'documentId', 'initialUrlEvidence', 'initialUrlSessionDigest', 'createdBy', 'allowedIntent', 'issuer'];
+const EXTENSION_CLAIM_KEYS = ['capabilityId', 'auditId', 'mode', 'allowedIntent', 'senderContext'];
+const WORKER_CLAIM_KEYS = ['capabilityId', 'auditId', 'mode', 'allowedIntent', 'eventNonce', 'senderContext'];
+const AUTHORIZE_KEYS = ['sessionCapabilityId', 'auditId', 'consumer', 'intent', 'sender'];
+const TRANSITION_KEYS = ['sessionCapabilityId', 'auditId', 'nextState'];
+const REHYDRATE_KEYS = ['auditId', 'windowId', 'mode', 'targetBinding'];
 const CONSUMERS = deepFreeze([
   { name: 'panel', path: PANEL_SURFACE.path, contextType: PANEL_SURFACE.contextType },
   { name: 'review', path: REVIEW_SURFACE.path, contextType: REVIEW_SURFACE.contextType },
@@ -78,9 +84,11 @@ export function createTargetCapabilityAuthority({
   };
 
   const prepare = args => serialize(async () => {
+    const input = readDataRecord(args, PREPARE_KEYS);
+    if (!input) throw new TypeError('CAPABILITY_PREPARE_DENIED');
     const issuedAt = readNow(now);
     const capabilityId = createCapabilityId(randomBytes);
-    const record = createTargetRecord({ ...args, capabilityId, issuedAt, expiresAt: issuedAt + capabilityTtlMs, state: 'prepared' });
+    const record = createTargetRecord({ ...input, capabilityId, issuedAt, expiresAt: issuedAt + capabilityTtlMs, state: 'prepared' });
     await sessionArea.set({ [targetCapabilityStorageKey(capabilityId)]: record });
     return deepFreeze({ ok: true, capabilityId, expiresAt: record.expiresAt });
   });
@@ -89,34 +97,38 @@ export function createTargetCapabilityAuthority({
   const claimWorkerEventAndIssueAuditSession = args => serialize(() => claimCommon(args, true));
 
   async function claimCommon(args, workerEvent) {
-    if (!isPlainRecord(args) || !CAPABILITY_ID.test(args.capabilityId ?? '')) return unavailable();
-    const key = targetCapabilityStorageKey(args.capabilityId);
-    const target = (await sessionArea.get(key))?.[key];
-    const currentTime = readNow(now);
-    if (!validTargetRecord(target) || target.state !== 'prepared' || target.expiresAt <= currentTime ||
-      target.allowedIntent !== args.allowedIntent || args.allowedIntent !== 'start-audit' || !MODEL_ID.test(args.auditId ?? '') ||
-      typeof args.mode !== 'string' || !MODEL_ID.test(args.mode)) return unavailable();
+    const input = readDataRecord(args, workerEvent ? WORKER_CLAIM_KEYS : EXTENSION_CLAIM_KEYS);
+    if (!input || !CAPABILITY_ID.test(input.capabilityId ?? '') || (workerEvent && input.senderContext !== null)) return unavailable();
+    const key = targetCapabilityStorageKey(input.capabilityId);
+    const target = parseTargetRecord(readStoredValue(await sessionArea.get(key), key));
+    const proofStartedAt = readNow(now);
+    if (!target || target.capabilityId !== input.capabilityId ||
+      target.state !== 'prepared' || target.expiresAt <= proofStartedAt ||
+      target.allowedIntent !== input.allowedIntent || input.allowedIntent !== 'start-audit' || !MODEL_ID.test(input.auditId ?? '') ||
+      typeof input.mode !== 'string' || !MODEL_ID.test(input.mode)) return unavailable();
     if (workerEvent) {
-      if (!validWorkerIssuer(target.issuer) || args.eventNonce !== target.issuer.eventNonce ||
-        args.windowId !== target.windowId || args.senderContext !== undefined) return unavailable();
-    } else if (!validExtensionClaimContext(target, args.senderContext, chromeApi.runtime.id)) return unavailable();
+      if (!parseWorkerIssuer(target.issuer) || input.eventNonce !== target.issuer.eventNonce) return unavailable();
+    } else if (!validExtensionClaimContext(target, input.senderContext, chromeApi.runtime.id)) return unavailable();
     let proof;
     try { proof = await probeDocument(target.tabId); } catch { return unavailable(); }
-    if (!validProof(proof) || proof.tabId !== target.tabId || proof.windowId !== target.windowId ||
+    proof = parseProof(proof);
+    if (!proof || proof.tabId !== target.tabId || proof.windowId !== target.windowId ||
       proof.documentId !== target.documentId || proof.urlSessionDigest !== target.initialUrlSessionDigest) return unavailable();
     let sessionCapabilityId;
     try { sessionCapabilityId = createCapabilityId(randomBytes); } catch { return unavailable(); }
+    const issuedAt = readNow(now);
+    if (target.expiresAt <= issuedAt) return unavailable();
     const session = createSessionRecord({
       sessionCapabilityId,
-      auditId: args.auditId,
+      auditId: input.auditId,
       windowId: target.windowId,
-      mode: args.mode,
+      mode: input.mode,
       targetBinding: target.kind === 'attached'
         ? { kind: 'attached', tabId: target.tabId, documentId: target.documentId, urlSessionDigest: target.initialUrlSessionDigest }
         : { kind: 'disposable', ownerId: target.capabilityId },
       state: 'running',
-      issuedAt: currentTime,
-      expiresAt: currentTime + sessionTtlMs,
+      issuedAt,
+      expiresAt: issuedAt + sessionTtlMs,
     });
     const claimed = { ...target, state: 'claimed' };
     await sessionArea.set({
@@ -133,38 +145,42 @@ export function createTargetCapabilityAuthority({
   }
 
   const authorizeSession = args => serialize(async () => {
-    if (!isPlainRecord(args) || !CAPABILITY_ID.test(args.sessionCapabilityId ?? '') || !MODEL_ID.test(args.auditId ?? '') ||
-      !['panel', 'review'].includes(args.consumer) || typeof args.intent !== 'string') return sessionDenied();
-    const descriptor = CONSUMERS.find(value => value.name === args.consumer);
+    const input = readDataRecord(args, AUTHORIZE_KEYS);
+    if (!input || !CAPABILITY_ID.test(input.sessionCapabilityId ?? '') || !MODEL_ID.test(input.auditId ?? '') ||
+      !['panel', 'review'].includes(input.consumer) || typeof input.intent !== 'string') return sessionDenied();
+    const descriptor = CONSUMERS.find(value => value.name === input.consumer);
     const surface = SURFACE_BY_PATH.get(descriptor.path);
     let context;
-    try { context = await deriveTrustedExtensionContext({ sender: args.sender, chromeApi, surface }); }
+    try { context = await deriveTrustedExtensionContext({ sender: input.sender, chromeApi, surface }); }
     catch { return sessionDenied(); }
-    const key = sessionCapabilityStorageKey(args.sessionCapabilityId);
-    const session = (await sessionArea.get(key))?.[key];
+    const key = sessionCapabilityStorageKey(input.sessionCapabilityId);
+    const session = parseSessionRecord(readStoredValue(await sessionArea.get(key), key));
     const currentTime = readNow(now);
-    const allowed = validSessionRecord(session) && session.expiresAt > currentTime && session.auditId === args.auditId &&
+    const allowed = session && session.sessionCapabilityId === input.sessionCapabilityId &&
+      session.expiresAt > currentTime && session.auditId === input.auditId &&
       session.windowId === context.windowId && context.issuer.path === descriptor.path &&
       context.contextType === descriptor.contextType && session.consumers.some(value => sameConsumer(value, descriptor)) &&
-      session.intents[args.consumer]?.[session.state]?.includes(args.intent) === true;
+      session.intents[input.consumer]?.[session.state]?.includes(input.intent) === true;
     if (!allowed) return sessionDenied();
-    if (surface.allowQuery === 'auditId-only' && new URL(context.documentUrl).searchParams.get('auditId') !== args.auditId) {
+    if (surface.allowQuery === 'auditId-only' && new URL(context.documentUrl).searchParams.get('auditId') !== input.auditId) {
       return sessionDenied();
     }
     return deepFreeze({ ok: true, session: deepFreeze(structuredClone(session)), context });
   });
 
   const transitionAuditSession = args => serialize(async () => {
-    if (!isPlainRecord(args) || !CAPABILITY_ID.test(args.sessionCapabilityId ?? '') || !MODEL_ID.test(args.auditId ?? '')) {
+    const input = readDataRecord(args, TRANSITION_KEYS);
+    if (!input || !CAPABILITY_ID.test(input.sessionCapabilityId ?? '') || !MODEL_ID.test(input.auditId ?? '')) {
       return transitionDenied();
     }
-    const key = sessionCapabilityStorageKey(args.sessionCapabilityId);
-    const session = (await sessionArea.get(key))?.[key];
-    const allowed = validSessionRecord(session) && session.auditId === args.auditId && session.expiresAt > readNow(now) &&
-      ((session.state === 'running' && ['result', 'revoked'].includes(args.nextState)) ||
-        (['result', 'view-only'].includes(session.state) && args.nextState === 'revoked'));
+    const key = sessionCapabilityStorageKey(input.sessionCapabilityId);
+    const session = parseSessionRecord(readStoredValue(await sessionArea.get(key), key));
+    const allowed = session && session.sessionCapabilityId === input.sessionCapabilityId &&
+      session.auditId === input.auditId && session.expiresAt > readNow(now) &&
+      ((session.state === 'running' && ['result', 'revoked'].includes(input.nextState)) ||
+        (['result', 'view-only'].includes(session.state) && input.nextState === 'revoked'));
     if (!allowed) return transitionDenied();
-    const changed = { ...session, state: args.nextState };
+    const changed = { ...session, state: input.nextState };
     await sessionArea.set({ [key]: changed });
     return deepFreeze({ ok: true, sessionCapabilityId: session.sessionCapabilityId, auditId: session.auditId, state: changed.state });
   });
@@ -172,19 +188,19 @@ export function createTargetCapabilityAuthority({
   const invalidateCapability = (capabilityId, reason) => serialize(async () => {
     if (!CAPABILITY_ID.test(capabilityId ?? '') || typeof reason !== 'string' || !reason) return unavailable();
     const key = targetCapabilityStorageKey(capabilityId);
-    const target = (await sessionArea.get(key))?.[key];
-    if (!validTargetRecord(target)) return unavailable();
+    const target = parseTargetRecord(readStoredValue(await sessionArea.get(key), key));
+    if (!target || target.capabilityId !== capabilityId) return unavailable();
     if (target.state !== 'invalidated') await sessionArea.set({ [key]: { ...target, state: 'invalidated' } });
     return deepFreeze({ ok: true, capabilityId });
   });
 
   const invalidateForTab = (tabId, reason) => invalidateBy(
-    record => (validTargetRecord(record) && record.tabId === tabId) ||
-      (validSessionRecord(record) && record.targetBinding.kind === 'attached' && record.targetBinding.tabId === tabId),
+    record => (record.type === 'target' && record.value.tabId === tabId) ||
+      (record.type === 'session' && record.value.targetBinding.kind === 'attached' && record.value.targetBinding.tabId === tabId),
     reason,
   );
   const invalidateForWindow = (windowId, reason) => invalidateBy(
-    record => (validTargetRecord(record) || validSessionRecord(record)) && record.windowId === windowId,
+    record => record.value.windowId === windowId,
     reason,
   );
 
@@ -193,10 +209,17 @@ export function createTargetCapabilityAuthority({
       if (typeof reason !== 'string' || !reason) return unavailable();
       const all = await sessionArea.get(null);
       const changes = {};
-      for (const [key, record] of Object.entries(all ?? {})) {
-        if (!predicate(record)) continue;
-        if (validTargetRecord(record) && record.state !== 'invalidated') changes[key] = { ...record, state: 'invalidated' };
-        if (validSessionRecord(record) && record.state !== 'revoked') changes[key] = { ...record, state: 'revoked' };
+      for (const [key, rawRecord] of readStorageEntries(all)) {
+        const target = parseTargetRecord(rawRecord);
+        const session = parseSessionRecord(rawRecord);
+        const record = target && key === targetCapabilityStorageKey(target.capabilityId)
+          ? { type: 'target', value: target }
+          : session && key === sessionCapabilityStorageKey(session.sessionCapabilityId)
+            ? { type: 'session', value: session }
+            : null;
+        if (!record || !predicate(record)) continue;
+        if (record.type === 'target' && record.value.state !== 'invalidated') changes[key] = { ...record.value, state: 'invalidated' };
+        if (record.type === 'session' && record.value.state !== 'revoked') changes[key] = { ...record.value, state: 'revoked' };
       }
       if (Object.keys(changes).length > 0) await sessionArea.set(changes);
       return deepFreeze({ ok: true, invalidated: Object.keys(changes).length });
@@ -204,22 +227,24 @@ export function createTargetCapabilityAuthority({
   }
 
   const rehydrateViewOnly = args => serialize(async () => {
-    if (!isPlainRecord(args) || !MODEL_ID.test(args.auditId ?? '') || !MODEL_ID.test(args.mode ?? '') ||
-      !Number.isSafeInteger(args.windowId) || !validTargetBinding(args.targetBinding)) return sessionDenied();
+    const input = readDataRecord(args, REHYDRATE_KEYS);
+    const targetBinding = input && parseTargetBinding(input.targetBinding);
+    if (!input || !MODEL_ID.test(input.auditId ?? '') || !MODEL_ID.test(input.mode ?? '') ||
+      !Number.isSafeInteger(input.windowId) || !targetBinding) return sessionDenied();
     const currentTime = readNow(now);
     const sessionCapabilityId = createCapabilityId(randomBytes);
     const session = createSessionRecord({
       sessionCapabilityId,
-      auditId: args.auditId,
-      windowId: args.windowId,
-      mode: args.mode,
-      targetBinding: structuredClone(args.targetBinding),
+      auditId: input.auditId,
+      windowId: input.windowId,
+      mode: input.mode,
+      targetBinding,
       state: 'view-only',
       issuedAt: currentTime,
       expiresAt: currentTime + sessionTtlMs,
     });
     await sessionArea.set({ [sessionCapabilityStorageKey(sessionCapabilityId)]: session });
-    return deepFreeze({ ok: true, sessionCapabilityId, auditId: args.auditId, expiresAt: session.expiresAt });
+    return deepFreeze({ ok: true, sessionCapabilityId, auditId: input.auditId, expiresAt: session.expiresAt });
   });
 
   return Object.freeze({
@@ -236,12 +261,13 @@ export function createTargetCapabilityAuthority({
 }
 
 function createTargetRecord(value) {
-  if (!isPlainRecord(value) || !['attached', 'disposable'].includes(value.kind) ||
-    !CAPABILITY_ID.test(value.capabilityId ?? '') || !safeChromeId(value.tabId) || !safeChromeId(value.windowId) ||
-    !validDocumentId(value.documentId) || !validEvidenceUrl(value.initialUrlEvidence) ||
-    !DIGEST.test(value.initialUrlSessionDigest ?? '') || !['user', 'audit'].includes(value.createdBy) ||
-    !['start-audit', 'start-persona'].includes(value.allowedIntent) || !validIssuer(value.issuer) ||
-    !safeTime(value.issuedAt) || !safeTime(value.expiresAt) || value.expiresAt <= value.issuedAt || value.state !== 'prepared') {
+  const issuer = parseIssuer(value.issuer);
+  if (!['attached', 'disposable'].includes(value.kind) || !CAPABILITY_ID.test(value.capabilityId ?? '') ||
+    !safeChromeId(value.tabId) || !safeChromeId(value.windowId) || !validDocumentId(value.documentId) ||
+    !validEvidenceUrl(value.initialUrlEvidence) || !DIGEST.test(value.initialUrlSessionDigest ?? '') ||
+    !['user', 'audit'].includes(value.createdBy) || !['start-audit', 'start-persona'].includes(value.allowedIntent) ||
+    !issuer || !safeTime(value.issuedAt) || !safeTime(value.expiresAt) ||
+    value.expiresAt <= value.issuedAt || value.state !== 'prepared') {
     throw new TypeError('CAPABILITY_PREPARE_DENIED');
   }
   return {
@@ -255,7 +281,7 @@ function createTargetRecord(value) {
     initialUrlSessionDigest: value.initialUrlSessionDigest,
     createdBy: value.createdBy,
     allowedIntent: value.allowedIntent,
-    issuer: structuredClone(value.issuer),
+    issuer,
     issuedAt: value.issuedAt,
     expiresAt: value.expiresAt,
     state: value.state,
@@ -278,57 +304,95 @@ function createSessionRecord(value) {
   };
 }
 
-function validTargetRecord(value) {
-  return isPlainRecord(value) && hasExactKeys(value, TARGET_KEYS) && value.version === 1 &&
-    CAPABILITY_ID.test(value.capabilityId ?? '') && ['attached', 'disposable'].includes(value.kind) &&
-    safeChromeId(value.tabId) && safeChromeId(value.windowId) && validDocumentId(value.documentId) &&
-    validEvidenceUrl(value.initialUrlEvidence) && DIGEST.test(value.initialUrlSessionDigest ?? '') &&
-    ['user', 'audit'].includes(value.createdBy) && ['start-audit', 'start-persona'].includes(value.allowedIntent) &&
-    validIssuer(value.issuer) && safeTime(value.issuedAt) && safeTime(value.expiresAt) && value.expiresAt > value.issuedAt &&
-    ['prepared', 'claimed', 'invalidated'].includes(value.state);
+function parseTargetRecord(value) {
+  const record = readDataRecord(value, TARGET_KEYS);
+  if (!record) return null;
+  const issuer = parseIssuer(record.issuer);
+  if (record.version !== 1 || !CAPABILITY_ID.test(record.capabilityId ?? '') ||
+    !['attached', 'disposable'].includes(record.kind) || !safeChromeId(record.tabId) ||
+    !safeChromeId(record.windowId) || !validDocumentId(record.documentId) ||
+    !validEvidenceUrl(record.initialUrlEvidence) || !DIGEST.test(record.initialUrlSessionDigest ?? '') ||
+    !['user', 'audit'].includes(record.createdBy) || !['start-audit', 'start-persona'].includes(record.allowedIntent) ||
+    !issuer || !safeTime(record.issuedAt) || !safeTime(record.expiresAt) || record.expiresAt <= record.issuedAt ||
+    !['prepared', 'claimed', 'invalidated'].includes(record.state)) return null;
+  return { ...record, issuer };
 }
 
-function validSessionRecord(value) {
-  return isPlainRecord(value) && hasExactKeys(value, SESSION_KEYS) && value.version === 1 &&
-    CAPABILITY_ID.test(value.sessionCapabilityId ?? '') && MODEL_ID.test(value.auditId ?? '') &&
-    safeChromeId(value.windowId) && MODEL_ID.test(value.mode ?? '') && validTargetBinding(value.targetBinding) &&
-    Array.isArray(value.consumers) && value.consumers.length === CONSUMERS.length &&
-    value.consumers.every((entry, index) => sameConsumer(entry, CONSUMERS[index])) &&
-    sameJson(value.intents, INTENTS) && ['running', 'result', 'view-only', 'revoked'].includes(value.state) &&
-    safeTime(value.issuedAt) && safeTime(value.expiresAt) && value.expiresAt > value.issuedAt;
+function parseSessionRecord(value) {
+  const record = readDataRecord(value, SESSION_KEYS);
+  if (!record) return null;
+  const targetBinding = parseTargetBinding(record.targetBinding);
+  const consumers = parseConsumers(record.consumers);
+  const intents = parseIntents(record.intents);
+  if (record.version !== 1 || !CAPABILITY_ID.test(record.sessionCapabilityId ?? '') ||
+    !MODEL_ID.test(record.auditId ?? '') || !safeChromeId(record.windowId) || !MODEL_ID.test(record.mode ?? '') ||
+    !targetBinding || !consumers || !intents || !['running', 'result', 'view-only', 'revoked'].includes(record.state) ||
+    !safeTime(record.issuedAt) || !safeTime(record.expiresAt) || record.expiresAt <= record.issuedAt) return null;
+  return { ...record, targetBinding, consumers, intents };
 }
 
-function validTargetBinding(value) {
-  if (!isPlainRecord(value)) return false;
-  if (value.kind === 'attached') return hasExactKeys(value, ['kind', 'tabId', 'documentId', 'urlSessionDigest']) &&
-    safeChromeId(value.tabId) && validDocumentId(value.documentId) && DIGEST.test(value.urlSessionDigest ?? '');
-  return value.kind === 'disposable' && hasExactKeys(value, ['kind', 'ownerId']) && MODEL_ID.test(value.ownerId ?? '');
+function parseTargetBinding(value) {
+  const kind = readDataProperty(value, 'kind');
+  if (!kind.found) return null;
+  if (kind.value === 'attached') {
+    const binding = readDataRecord(value, ['kind', 'tabId', 'documentId', 'urlSessionDigest']);
+    return binding && safeChromeId(binding.tabId) && validDocumentId(binding.documentId) &&
+      DIGEST.test(binding.urlSessionDigest ?? '') ? binding : null;
+  }
+  const binding = readDataRecord(value, ['kind', 'ownerId']);
+  return binding && binding.kind === 'disposable' && MODEL_ID.test(binding.ownerId ?? '') ? binding : null;
 }
 
 function validExtensionClaimContext(target, context, runtimeId) {
-  if (!validExtensionIssuer(target.issuer) || !isPlainRecord(context) ||
-    !hasExactKeys(context, ['issuer', 'windowId', 'tabId', 'contextType', 'documentUrl']) ||
-    !validExtensionIssuer(context.issuer)) return false;
-  const surface = SURFACE_BY_PATH.get(target.issuer.path);
-  return Boolean(surface && context.issuer.documentId === target.issuer.documentId &&
-    context.issuer.path === target.issuer.path && context.windowId === target.windowId &&
-    context.contextType === surface.contextType &&
-    context.documentUrl === `chrome-extension://${runtimeId}${surface.path}`);
+  const targetIssuer = parseExtensionIssuer(target.issuer);
+  const parsedContext = readDataRecord(context, ['issuer', 'windowId', 'tabId', 'contextType', 'documentUrl']);
+  const contextIssuer = parsedContext && parseExtensionIssuer(parsedContext.issuer);
+  if (!targetIssuer || !parsedContext || !contextIssuer) return false;
+  const surface = SURFACE_BY_PATH.get(targetIssuer.path);
+  return Boolean(surface && contextIssuer.documentId === targetIssuer.documentId &&
+    contextIssuer.path === targetIssuer.path && parsedContext.windowId === target.windowId &&
+    parsedContext.contextType === surface.contextType &&
+    parsedContext.documentUrl === `chrome-extension://${runtimeId}${surface.path}`);
 }
 
-function validIssuer(value) { return validExtensionIssuer(value) || validWorkerIssuer(value); }
-function validExtensionIssuer(value) {
-  return isPlainRecord(value) && hasExactKeys(value, ['type', 'documentId', 'path']) &&
-    value.type === 'extension-document' && validDocumentId(value.documentId) && SURFACE_BY_PATH.has(value.path);
+function parseIssuer(value) { return parseExtensionIssuer(value) ?? parseWorkerIssuer(value); }
+function parseExtensionIssuer(value) {
+  const issuer = readDataRecord(value, ['type', 'documentId', 'path']);
+  return issuer && issuer.type === 'extension-document' && validDocumentId(issuer.documentId) &&
+    SURFACE_BY_PATH.has(issuer.path) ? issuer : null;
 }
-function validWorkerIssuer(value) {
-  return isPlainRecord(value) && hasExactKeys(value, ['type', 'event', 'eventNonce']) &&
-    value.type === 'worker-event' && value.event === 'context-menu' &&
-    typeof value.eventNonce === 'string' && /^[A-Za-z0-9._:-]{20,240}$/u.test(value.eventNonce);
+function parseWorkerIssuer(value) {
+  const issuer = readDataRecord(value, ['type', 'event', 'eventNonce']);
+  return issuer && issuer.type === 'worker-event' && issuer.event === 'context-menu' &&
+    typeof issuer.eventNonce === 'string' && /^[A-Za-z0-9._:-]{20,240}$/u.test(issuer.eventNonce) ? issuer : null;
 }
-function validProof(value) {
-  return isPlainRecord(value) && hasExactKeys(value, PROOF_KEYS) && safeChromeId(value.tabId) && safeChromeId(value.windowId) &&
-    validDocumentId(value.documentId) && DIGEST.test(value.urlSessionDigest ?? '');
+function parseProof(value) {
+  const proof = readDataRecord(value, PROOF_KEYS);
+  return proof && safeChromeId(proof.tabId) && safeChromeId(proof.windowId) &&
+    validDocumentId(proof.documentId) && DIGEST.test(proof.urlSessionDigest ?? '') ? proof : null;
+}
+function parseConsumers(value) {
+  const entries = readDataArray(value);
+  if (!entries || entries.length !== CONSUMERS.length) return null;
+  const consumers = entries.map((entry, index) => {
+    const consumer = readDataRecord(entry, ['name', 'path', 'contextType']);
+    return consumer && sameConsumer(consumer, CONSUMERS[index]) ? consumer : null;
+  });
+  return consumers.every(Boolean) ? consumers : null;
+}
+function parseIntents(value) {
+  const intents = readDataRecord(value, ['panel', 'review']);
+  if (!intents) return null;
+  const panel = readDataRecord(intents.panel, ['running', 'result', 'view-only']);
+  const review = readDataRecord(intents.review, ['running', 'result', 'view-only']);
+  if (!panel || !review || !sameDataArray(panel.running, ['cancel']) ||
+    !sameDataArray(panel.result, ['open-report']) || !sameDataArray(panel['view-only'], ['open-report']) ||
+    !sameDataArray(review.running, []) || !sameDataArray(review.result, ['export']) ||
+    !sameDataArray(review['view-only'], ['export'])) return null;
+  return {
+    panel: { running: ['cancel'], result: ['open-report'], 'view-only': ['open-report'] },
+    review: { running: [], result: ['export'], 'view-only': ['export'] },
+  };
 }
 function validDocumentId(value) { return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,240}$/u.test(value); }
 function validEvidenceUrl(value) {
@@ -359,20 +423,85 @@ function defaultRandomBytes(length) {
   return value;
 }
 function sameConsumer(first, second) {
-  return isPlainRecord(first) && hasExactKeys(first, ['name', 'path', 'contextType']) &&
-    first.name === second.name && first.path === second.path && first.contextType === second.contextType;
+  const consumer = readDataRecord(first, ['name', 'path', 'contextType']);
+  return Boolean(consumer && consumer.name === second.name && consumer.path === second.path &&
+    consumer.contextType === second.contextType);
 }
-function sameJson(first, second) {
-  try { return JSON.stringify(first) === JSON.stringify(second); } catch { return false; }
+function sameDataArray(value, expected) {
+  const entries = readDataArray(value);
+  return Boolean(entries && entries.length === expected.length && entries.every((entry, index) => entry === expected[index]));
 }
-function isPlainRecord(value) {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+function readDataRecord(value, expectedKeys) {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== expectedKeys.length || ownKeys.some(key => typeof key !== 'string' || !expectedKeys.includes(key))) {
+      return null;
+    }
+    const record = {};
+    for (const key of expectedKeys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) return null;
+      record[key] = descriptor.value;
+    }
+    return record;
+  } catch {
+    return null;
+  }
 }
-function hasExactKeys(value, keys) {
-  const actual = Object.keys(value);
-  return actual.length === keys.length && keys.every(key => Object.hasOwn(value, key));
+function readDataProperty(value, key) {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return { found: false };
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return { found: false };
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && descriptor.enumerable === true && Object.hasOwn(descriptor, 'value')
+      ? { found: true, value: descriptor.value }
+      : { found: false };
+  } catch {
+    return { found: false };
+  }
+}
+function readDataArray(value) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+    if (!lengthDescriptor || !Object.hasOwn(lengthDescriptor, 'value') || !Number.isSafeInteger(lengthDescriptor.value) ||
+      lengthDescriptor.value < 0) return null;
+    const expectedKeys = Array.from({ length: lengthDescriptor.value }, (_, index) => String(index));
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== expectedKeys.length + 1 || !ownKeys.includes('length') ||
+      ownKeys.some(key => typeof key !== 'string' || (key !== 'length' && !expectedKeys.includes(key)))) return null;
+    const entries = [];
+    for (const key of expectedKeys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) return null;
+      entries.push(descriptor.value);
+    }
+    return entries;
+  } catch {
+    return null;
+  }
+}
+function readStoredValue(envelope, key) {
+  const descriptor = readDataProperty(envelope, key);
+  return descriptor.found ? descriptor.value : undefined;
+}
+function readStorageEntries(value) {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return [];
+    const entries = [];
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') continue;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor?.enumerable === true && Object.hasOwn(descriptor, 'value')) entries.push([key, descriptor.value]);
+    }
+    return entries;
+  } catch {
+    return [];
+  }
 }
 function deepFreeze(value, seen = new WeakSet()) {
   if (value === null || typeof value !== 'object' || seen.has(value)) return value;

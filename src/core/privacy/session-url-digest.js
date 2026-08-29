@@ -29,6 +29,9 @@ export async function createSessionUrlDigest(rawUrl, sessionKey, subtle) {
     ['sign'],
   );
   const signature = await subtle.sign('HMAC', key, new TextEncoder().encode(rawUrl));
+  if (!(signature instanceof ArrayBuffer) || signature.byteLength !== KEY_BYTES) {
+    throw new TypeError('HMAC_SIGNATURE_INVALID');
+  }
   return `hmac-sha256:${encodeBase64Url(new Uint8Array(signature))}`;
 }
 
@@ -104,11 +107,11 @@ function requireCanonicalHttpUrl(value) {
 }
 
 function decodeKeyRecord(value) {
-  if (!isPlainRecord(value) || !hasExactKeys(value, KEY_RECORD_KEYS) || value.version !== 1 ||
-    !Number.isSafeInteger(value.createdAt) || value.createdAt < 0 ||
-    typeof value.keyBase64Url !== 'string' || !BASE64URL_32_BYTES.test(value.keyBase64Url)) return null;
+  const record = readDataRecord(value, KEY_RECORD_KEYS);
+  if (!record || record.version !== 1 || !Number.isSafeInteger(record.createdAt) || record.createdAt < 0 ||
+    typeof record.keyBase64Url !== 'string' || !BASE64URL_32_BYTES.test(record.keyBase64Url)) return null;
   try {
-    const decoded = decodeBase64Url(value.keyBase64Url);
+    const decoded = decodeBase64Url(record.keyBase64Url);
     return decoded.byteLength === KEY_BYTES ? decoded : null;
   } catch {
     return null;
@@ -127,13 +130,23 @@ function decodeBase64Url(value) {
   return Uint8Array.from(binary, character => character.charCodeAt(0));
 }
 
-function isPlainRecord(value) {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function hasExactKeys(value, keys) {
-  const actual = Object.keys(value);
-  return actual.length === keys.length && keys.every(key => Object.hasOwn(value, key));
+function readDataRecord(value, expectedKeys) {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== expectedKeys.length || ownKeys.some(key => typeof key !== 'string' || !expectedKeys.includes(key))) {
+      return null;
+    }
+    const record = {};
+    for (const key of expectedKeys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) return null;
+      record[key] = descriptor.value;
+    }
+    return record;
+  } catch {
+    return null;
+  }
 }

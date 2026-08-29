@@ -50,6 +50,40 @@ test('rejects a non-byte or wrong-length CSPRNG result and invalid digest keys',
   }
 });
 
+test('rejects non-ArrayBuffer and non-32-byte HMAC signatures', async () => {
+  const key = new Uint8Array(32).fill(7);
+  for (const signature of [new Uint8Array(32), new ArrayBuffer(31), new ArrayBuffer(33), 'not-bytes']) {
+    const subtle = {
+      async importKey() { return {}; },
+      async sign() { return signature; },
+    };
+    await assert.rejects(
+      () => createSessionUrlDigest('https://example.test/', key, subtle),
+      /HMAC_SIGNATURE_INVALID/u,
+    );
+  }
+});
+
+test('replaces a hostile key record without invoking accessors', async () => {
+  let getterCalls = 0;
+  const hostile = { version: 1, createdAt: 1 };
+  Object.defineProperty(hostile, 'keyBase64Url', {
+    enumerable: true,
+    get() { getterCalls += 1; return 'A'.repeat(43); },
+  });
+  const sessionArea = createSessionArea();
+  sessionArea.get = async key => key === SESSION_HMAC_KEY ? { [key]: hostile } : {};
+  const manager = createSessionUrlDigestManager({
+    sessionArea,
+    subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(31),
+    now: () => 10,
+  });
+  await manager.digest('https://example.test/');
+  assert.equal(getterCalls, 0);
+  assert.equal(sessionArea.writes.length, 1);
+});
+
 test('digests the complete canonical URL and never stores its plaintext', async () => {
   const sessionArea = createSessionArea();
   const manager = createSessionUrlDigestManager({

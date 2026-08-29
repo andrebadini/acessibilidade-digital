@@ -245,7 +245,7 @@ export function createChromeAdapter(chromeApi, options = {}) {
       }
       try {
         const tab = await invoke(chromeApi, chromeApi.tabs, 'get', tabId);
-        if (tab?.id !== tabId || !Number.isSafeInteger(tab.windowId) || typeof tab.url !== 'string') {
+        if (tab?.id !== tabId || !Number.isSafeInteger(tab.windowId) || tab.status !== 'complete' || typeof tab.url !== 'string') {
           throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
         }
         const parsed = new URL(tab.url);
@@ -263,11 +263,27 @@ export function createChromeAdapter(chromeApi, options = {}) {
           throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
         }
         const confirmedTab = await invoke(chromeApi, chromeApi.tabs, 'get', tabId);
-        if (confirmedTab?.id !== tab.id || confirmedTab.windowId !== tab.windowId || confirmedTab.url !== tab.url) {
+        if (confirmedTab?.id !== tab.id || confirmedTab.windowId !== tab.windowId ||
+          confirmedTab.status !== 'complete' || confirmedTab.url !== tab.url) {
           throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
         }
         const urlSessionDigest = await sessionUrlDigestManager.digest(tab.url);
         if (typeof urlSessionDigest !== 'string' || !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(urlSessionDigest)) {
+          throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+        }
+        const finalResults = await executeScript({
+          target: { tabId, frameIds: [0] },
+          world: 'ISOLATED',
+          func: () => globalThis.location?.href,
+        });
+        if (!Array.isArray(finalResults) || finalResults.length !== 1) throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+        const [finalResult] = finalResults;
+        if (finalResult?.frameId !== 0 || finalResult.documentId !== result.documentId || finalResult.result !== tab.url) {
+          throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+        }
+        const finalTab = await invoke(chromeApi, chromeApi.tabs, 'get', tabId);
+        if (finalTab?.id !== tab.id || finalTab.windowId !== tab.windowId ||
+          finalTab.status !== 'complete' || finalTab.url !== tab.url) {
           throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
         }
         return Object.freeze({ tabId, windowId: tab.windowId, documentId: result.documentId, urlSessionDigest });
