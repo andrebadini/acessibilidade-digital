@@ -61,20 +61,76 @@ function personaError(requestId) {
   };
 }
 
+function createSpeechPlatformAdapter(listProvider) {
+  const voiceValues = new WeakMap();
+  const synthesisProviders = new WeakMap();
+
+  class SpeechSynthesisVoice {
+    constructor({ voiceURI, name, lang, localService }) {
+      voiceValues.set(this, { voiceURI, name, lang, localService });
+    }
+
+    get voiceURI() {
+      const values = voiceValues.get(this);
+      if (!values) throw new TypeError('Illegal invocation');
+      return values.voiceURI;
+    }
+
+    get name() {
+      const values = voiceValues.get(this);
+      if (!values) throw new TypeError('Illegal invocation');
+      return values.name;
+    }
+
+    get lang() {
+      const values = voiceValues.get(this);
+      if (!values) throw new TypeError('Illegal invocation');
+      return values.lang;
+    }
+
+    get localService() {
+      const values = voiceValues.get(this);
+      if (!values) throw new TypeError('Illegal invocation');
+      return values.localService;
+    }
+  }
+
+  class SpeechSynthesis extends EventTarget {
+    constructor() {
+      super();
+      synthesisProviders.set(this, listProvider);
+    }
+
+    getVoices() {
+      const provider = synthesisProviders.get(this);
+      if (!provider) throw new TypeError('Illegal invocation');
+      return provider();
+    }
+  }
+
+  return {
+    SpeechSynthesis,
+    SpeechSynthesisVoice,
+    speechSynthesis: new SpeechSynthesis(),
+  };
+}
+
 test('panel lists only descriptor-safe local voices and clears a persisted remote selection', async t => {
   const original = {
     document: globalThis.document,
     chrome: globalThis.chrome,
-    speechSynthesis: globalThis.speechSynthesis,
-    SpeechSynthesisVoice: globalThis.SpeechSynthesisVoice,
+    speechSynthesis: Object.getOwnPropertyDescriptor(globalThis, 'speechSynthesis'),
+    SpeechSynthesis: Object.getOwnPropertyDescriptor(globalThis, 'SpeechSynthesis'),
+    SpeechSynthesisVoice: Object.getOwnPropertyDescriptor(globalThis, 'SpeechSynthesisVoice'),
   };
   t.after(() => {
     if (original.document === undefined) delete globalThis.document; else globalThis.document = original.document;
     if (original.chrome === undefined) delete globalThis.chrome; else globalThis.chrome = original.chrome;
-    if (original.speechSynthesis === undefined) delete globalThis.speechSynthesis;
-    else globalThis.speechSynthesis = original.speechSynthesis;
-    if (original.SpeechSynthesisVoice === undefined) delete globalThis.SpeechSynthesisVoice;
-    else globalThis.SpeechSynthesisVoice = original.SpeechSynthesisVoice;
+    for (const key of ['speechSynthesis', 'SpeechSynthesis', 'SpeechSynthesisVoice']) {
+      const descriptor = original[key];
+      if (descriptor === undefined) delete globalThis[key];
+      else Object.defineProperty(globalThis, key, descriptor);
+    }
     elements.clear();
   });
 
@@ -84,23 +140,18 @@ test('panel lists only descriptor-safe local voices and clears a persisted remot
     enumerable: true,
     get() { getterReads += 1; return 'PRIVATE_REMOTE_VOICE'; },
   });
-  class SpeechSynthesisVoice {
-    constructor() { this.values = ['local-a', 'Local A', 'pt-BR', true]; }
-    get voiceURI() { return this.values[0]; }
-    get name() { return this.values[1]; }
-    get lang() { return this.values[2]; }
-    get localService() { return this.values[3]; }
-  }
   let listed = [
-    { voiceURI: 'remote-default', name: 'Remota', lang: 'pt-BR', localService: false, default: true },
-    { voiceURI: 'missing-local-service', name: 'Incerta', lang: 'pt-BR' },
-    new SpeechSynthesisVoice(),
+    null,
   ];
-  let voicesChanged = null;
-  const speechSynthesis = {
-    getVoices() { return listed; },
-    addEventListener(type, listener) { if (type === 'voiceschanged') voicesChanged = listener; },
-  };
+  const speechPlatform = createSpeechPlatformAdapter(() => listed);
+  listed = [
+    new speechPlatform.SpeechSynthesisVoice({
+      voiceURI: 'remote-default', name: 'Remota', lang: 'pt-BR', localService: false,
+    }),
+    new speechPlatform.SpeechSynthesisVoice({
+      voiceURI: 'local-a', name: 'Local A', lang: 'pt-BR', localService: true,
+    }),
+  ];
   const document = {
     activeElement: null,
     querySelector(selector) { return element(selector.replace(/^#/u, '')); },
@@ -131,8 +182,11 @@ test('panel lists only descriptor-safe local voices and clears a persisted remot
   };
   globalThis.document = document;
   globalThis.chrome = chrome;
-  globalThis.speechSynthesis = speechSynthesis;
-  globalThis.SpeechSynthesisVoice = SpeechSynthesisVoice;
+  Object.defineProperties(globalThis, {
+    speechSynthesis: { configurable: true, writable: true, value: speechPlatform.speechSynthesis },
+    SpeechSynthesis: { configurable: true, writable: true, value: speechPlatform.SpeechSynthesis },
+    SpeechSynthesisVoice: { configurable: true, writable: true, value: speechPlatform.SpeechSynthesisVoice },
+  });
 
   await import(`../../src/panel/panel.js?voice-privacy=${Date.now()}`);
 
@@ -164,8 +218,16 @@ test('panel lists only descriptor-safe local voices and clears a persisted remot
   panelMessage(clearedState);
   assert.equal(voiceSelect.disabled, false);
 
+  listed = [{
+    voiceURI: 'plain-local-claim', name: 'Voz comum', lang: 'pt-BR', localService: true,
+  }];
+  speechPlatform.speechSynthesis.dispatchEvent(new Event('voiceschanged'));
+  assert.deepEqual(voiceSelect.options.map(option => option.value), ['']);
+  assert.match(voiceSelect.options[0].textContent, /não foi possível validar/iu);
+  assert.doesNotMatch(JSON.stringify(voiceSelect.options), /plain-local-claim|Voz comum/iu);
+
   listed = [accessor];
-  voicesChanged();
+  speechPlatform.speechSynthesis.dispatchEvent(new Event('voiceschanged'));
   assert.equal(getterReads, 0);
   assert.deepEqual(voiceSelect.options.map(option => option.value), ['']);
   assert.match(voiceSelect.options[0].textContent, /não foi possível validar/iu);
@@ -173,28 +235,84 @@ test('panel lists only descriptor-safe local voices and clears a persisted remot
   assert.equal(voiceSelect.disabled, true);
   assert.match(element('persona-disabled-reason').textContent, /validar[^.]*voz local[^.]*legenda/iu);
 
-  const { proxy: revokedVoices, revoke } = Proxy.revocable([], {});
-  revoke();
-  listed = revokedVoices;
-  assert.doesNotThrow(() => voicesChanged());
+  let listTrapCalls = 0;
+  let ordinaryGetVoicesCalls = 0;
+  const hostileList = new Proxy([], {
+    ownKeys(target) { listTrapCalls += 1; return Reflect.ownKeys(target); },
+    getOwnPropertyDescriptor(target, key) {
+      listTrapCalls += 1;
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+    get(target, key, receiver) { listTrapCalls += 1; return Reflect.get(target, key, receiver); },
+  });
+  globalThis.speechSynthesis = {
+    getVoices() { ordinaryGetVoicesCalls += 1; return hostileList; },
+  };
+  assert.doesNotThrow(() => speechPlatform.speechSynthesis.dispatchEvent(new Event('voiceschanged')));
+  assert.equal(ordinaryGetVoicesCalls, 0);
+  assert.equal(listTrapCalls, 0);
   assert.deepEqual(voiceSelect.options.map(option => option.value), ['']);
   assert.match(voiceSelect.options[0].textContent, /não foi possível validar/iu);
+
+  let synthesisTrapCalls = 0;
+  globalThis.speechSynthesis = new Proxy(speechPlatform.speechSynthesis, {
+    getOwnPropertyDescriptor(target, key) {
+      synthesisTrapCalls += 1;
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+    getPrototypeOf(target) { synthesisTrapCalls += 1; return Reflect.getPrototypeOf(target); },
+    get(target, key, receiver) { synthesisTrapCalls += 1; return Reflect.get(target, key, receiver); },
+  });
+  assert.doesNotThrow(() => speechPlatform.speechSynthesis.dispatchEvent(new Event('voiceschanged')));
+  assert.equal(synthesisTrapCalls, 0);
+  assert.deepEqual(voiceSelect.options.map(option => option.value), ['']);
+  assert.match(voiceSelect.options[0].textContent, /não foi possível validar/iu);
+
+  let voiceTrapCalls = 0;
+  const proxiedVoice = new Proxy(new speechPlatform.SpeechSynthesisVoice({
+    voiceURI: 'proxy-voice', name: 'Proxy privada', lang: 'pt-BR', localService: true,
+  }), {
+    ownKeys(target) { voiceTrapCalls += 1; return Reflect.ownKeys(target); },
+    getOwnPropertyDescriptor(target, key) {
+      voiceTrapCalls += 1;
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+    getPrototypeOf(target) { voiceTrapCalls += 1; return Reflect.getPrototypeOf(target); },
+    get(target, key, receiver) { voiceTrapCalls += 1; return Reflect.get(target, key, receiver); },
+  });
+  globalThis.speechSynthesis = speechPlatform.speechSynthesis;
+  listed = [proxiedVoice];
+  assert.doesNotThrow(() => speechPlatform.speechSynthesis.dispatchEvent(new Event('voiceschanged')));
+  assert.equal(voiceTrapCalls, 0);
+  assert.deepEqual(voiceSelect.options.map(option => option.value), ['']);
+  assert.match(voiceSelect.options[0].textContent, /não foi possível validar/iu);
+  const postedBeforeInvalidSelection = posted.length;
+  voiceSelect.value = 'proxy-voice';
+  voiceSelect.listeners.get('change')();
+  const invalidSelectionCommand = posted.slice(postedBeforeInvalidSelection)
+    .find(message => message.type === 'command' && message.command === 'preferences');
+  assert.equal(invalidSelectionCommand?.args?.voiceId, '');
+  const invalidSelectionSettled = personaState(invalidSelectionCommand.requestId, '');
+  invalidSelectionSettled.activeMode = 'reader';
+  invalidSelectionSettled.reader.playback = 'playing';
+  invalidSelectionSettled.reader.speechAvailability = 'available';
+  panelMessage(invalidSelectionSettled);
 
   let synthesisGetterReads = 0;
   Object.defineProperty(globalThis, 'speechSynthesis', {
     configurable: true,
-    get() { synthesisGetterReads += 1; return speechSynthesis; },
+    get() { synthesisGetterReads += 1; return speechPlatform.speechSynthesis; },
   });
-  assert.doesNotThrow(() => voicesChanged());
+  assert.doesNotThrow(() => speechPlatform.speechSynthesis.dispatchEvent(new Event('voiceschanged')));
   assert.equal(synthesisGetterReads, 0);
   assert.deepEqual(voiceSelect.options.map(option => option.value), ['']);
   assert.match(voiceSelect.options[0].textContent, /não foi possível validar/iu);
 
   Object.defineProperty(globalThis, 'speechSynthesis', {
-    configurable: true, writable: true, value: speechSynthesis,
+    configurable: true, writable: true, value: speechPlatform.speechSynthesis,
   });
   listed = [];
-  voicesChanged();
+  speechPlatform.speechSynthesis.dispatchEvent(new Event('voiceschanged'));
   assert.deepEqual(voiceSelect.options.map(option => option.value), ['']);
   assert.match(voiceSelect.options[0].textContent, /nenhuma voz local/iu);
   assert.match(element('persona-disabled-reason').textContent, /nenhuma voz local[^.]*legenda/iu);

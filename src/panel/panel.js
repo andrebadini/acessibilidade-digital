@@ -610,22 +610,52 @@ function personaLimitationText(limitation) {
   return `${limitation.count} ocorrência(s): ${label}.${suffix}`;
 }
 
-function panelDataMethod(value, key) {
-  if (!value || (typeof value !== 'object' && typeof value !== 'function')) return null;
+function panelPlatformPrototype(name) {
   try {
-    let current = value;
-    for (let depth = 0; current && depth < 4; depth += 1) {
-      const descriptor = Object.getOwnPropertyDescriptor(current, key);
-      if (descriptor) {
-        return Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'function'
-          ? descriptor.value
-          : null;
-      }
-      current = Object.getPrototypeOf(current);
-    }
+    const constructorDescriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+    if (!constructorDescriptor || !Object.hasOwn(constructorDescriptor, 'value') ||
+      typeof constructorDescriptor.value !== 'function') return null;
+    const prototypeDescriptor = Object.getOwnPropertyDescriptor(constructorDescriptor.value, 'prototype');
+    if (!prototypeDescriptor || !Object.hasOwn(prototypeDescriptor, 'value') ||
+      !prototypeDescriptor.value || typeof prototypeDescriptor.value !== 'object') return null;
+    return prototypeDescriptor.value;
   } catch { return null; }
-  return null;
 }
+
+function panelPlatformMethod(prototype, key) {
+  if (!prototype) return null;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, key);
+    return descriptor && Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'function'
+      ? descriptor.value
+      : null;
+  } catch { return null; }
+}
+
+function panelPlatformGetter(prototype, key) {
+  if (!prototype) return null;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, key);
+    return descriptor && typeof descriptor.get === 'function' && descriptor.set === undefined
+      ? descriptor.get
+      : null;
+  } catch { return null; }
+}
+
+// These methods/getters are captured from the extension page's platform prototypes once.
+// Calling them directly preserves the Web IDL brand check: ordinary objects and Proxy
+// wrappers fail before any attacker-controlled property or reflection trap is consulted.
+const PANEL_SPEECH_PROTOTYPE = panelPlatformPrototype('SpeechSynthesis');
+const PANEL_VOICE_PROTOTYPE = panelPlatformPrototype('SpeechSynthesisVoice');
+const PANEL_EVENT_TARGET_PROTOTYPE = panelPlatformPrototype('EventTarget');
+const PANEL_GET_VOICES = panelPlatformMethod(PANEL_SPEECH_PROTOTYPE, 'getVoices');
+const PANEL_ADD_EVENT_LISTENER = panelPlatformMethod(PANEL_EVENT_TARGET_PROTOTYPE, 'addEventListener');
+const PANEL_VOICE_GETTERS = Object.freeze({
+  localService: panelPlatformGetter(PANEL_VOICE_PROTOTYPE, 'localService'),
+  voiceURI: panelPlatformGetter(PANEL_VOICE_PROTOTYPE, 'voiceURI'),
+  name: panelPlatformGetter(PANEL_VOICE_PROTOTYPE, 'name'),
+  lang: panelPlatformGetter(PANEL_VOICE_PROTOTYPE, 'lang'),
+});
 
 function readPanelSpeechSynthesis() {
   try {
@@ -668,62 +698,26 @@ function densePanelVoiceEntries(value) {
   } catch { return null; }
 }
 
-function panelNativeVoicePrototype() {
-  try {
-    const constructorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'SpeechSynthesisVoice');
-    const Constructor = constructorDescriptor && Object.hasOwn(constructorDescriptor, 'value')
-      ? constructorDescriptor.value
-      : null;
-    if (typeof Constructor !== 'function') return null;
-    const prototypeDescriptor = Object.getOwnPropertyDescriptor(Constructor, 'prototype');
-    return prototypeDescriptor && Object.hasOwn(prototypeDescriptor, 'value')
-      ? prototypeDescriptor.value
-      : null;
-  } catch { return null; }
-}
-
-function projectPanelVoice(voice, nativePrototype) {
+function projectPanelVoice(voice) {
   if (!voice || typeof voice !== 'object') return null;
-  let descriptors;
-  try { descriptors = Object.getOwnPropertyDescriptors(voice); } catch { return null; }
-  const ownLocal = descriptors.localService;
-  if (ownLocal && !Object.hasOwn(ownLocal, 'value')) return null;
-  let read;
-  if (ownLocal) {
-    read = key => {
-      const descriptor = descriptors[key];
-      if (!descriptor) return { present: false, value: undefined };
-      return Object.hasOwn(descriptor, 'value') ? { present: true, value: descriptor.value } : null;
-    };
-  } else {
-    try {
-      if (!nativePrototype || Object.getPrototypeOf(voice) !== nativePrototype) return { local: false };
-    } catch { return null; }
-    read = key => {
-      try {
-        const descriptor = Object.getOwnPropertyDescriptor(nativePrototype, key);
-        if (!descriptor || typeof descriptor.get !== 'function' || descriptor.set !== undefined) return null;
-        return { present: true, value: descriptor.get.call(voice) };
-      } catch { return null; }
-    };
-  }
-  const local = read('localService');
-  if (!local) return null;
-  if (!local.present || local.value !== true) return { local: false };
-  const uri = read('voiceURI');
-  if (!uri || !uri.present || typeof uri.value !== 'string' || uri.value !== uri.value.trim() ||
+  if (!PANEL_VOICE_GETTERS.localService || !PANEL_VOICE_GETTERS.voiceURI ||
+    !PANEL_VOICE_GETTERS.name || !PANEL_VOICE_GETTERS.lang) return null;
+  const read = getter => {
+    try { return { ok: true, value: Reflect.apply(getter, voice, []) }; }
+    catch { return { ok: false, value: undefined }; }
+  };
+  const local = read(PANEL_VOICE_GETTERS.localService);
+  if (!local.ok) return null;
+  if (local.value !== true) return { local: false };
+  const uri = read(PANEL_VOICE_GETTERS.voiceURI);
+  if (!uri.ok || typeof uri.value !== 'string' || uri.value !== uri.value.trim() ||
     Array.from(uri.value).length < 1 || Array.from(uri.value).length > 200 ||
     /[\u0000-\u001f\u007f]/u.test(uri.value)) return null;
-  const name = read('name');
-  const language = read('lang');
-  if (!name || !language || (name.present && typeof name.value !== 'string') ||
-    (language.present && typeof language.value !== 'string')) return null;
-  const safeName = name.present
-    ? Array.from(name.value.replace(/\s+/gu, ' ').trim()).slice(0, 120).join('')
-    : '';
-  const safeLanguage = language.present
-    ? language.value.replace(/[^A-Za-z0-9-]/gu, '').slice(0, 35)
-    : '';
+  const name = read(PANEL_VOICE_GETTERS.name);
+  const language = read(PANEL_VOICE_GETTERS.lang);
+  if (!name.ok || !language.ok || typeof name.value !== 'string' || typeof language.value !== 'string') return null;
+  const safeName = Array.from(name.value.replace(/\s+/gu, ' ').trim()).slice(0, 120).join('');
+  const safeLanguage = language.value.replace(/[^A-Za-z0-9-]/gu, '').slice(0, 35);
   return { local: true, voiceId: uri.value, name: safeName || 'Voz local', language: safeLanguage };
 }
 
@@ -731,16 +725,14 @@ function readPanelLocalVoices() {
   const speech = readPanelSpeechSynthesis();
   if (!speech.synthesis) return { status: speech.status, voices: [] };
   const synthesis = speech.synthesis;
-  const getVoices = panelDataMethod(synthesis, 'getVoices');
-  if (!getVoices) return { status: 'error', voices: [] };
+  if (!PANEL_GET_VOICES) return { status: 'error', voices: [] };
   try {
-    const entries = densePanelVoiceEntries(getVoices.call(synthesis));
+    const entries = densePanelVoiceEntries(Reflect.apply(PANEL_GET_VOICES, synthesis, []));
     if (!entries) return { status: 'error', voices: [] };
     const voices = [];
     const ids = new Set();
-    const nativePrototype = panelNativeVoicePrototype();
     for (const entry of entries) {
-      const projected = projectPanelVoice(entry, nativePrototype);
+      const projected = projectPanelVoice(entry);
       if (!projected) return { status: 'error', voices: [] };
       if (!projected.local) continue;
       if (ids.has(projected.voiceId)) return { status: 'error', voices: [] };
@@ -808,8 +800,9 @@ personaRate?.addEventListener('change', () => sendPersonaCommand('preferences', 
 }));
 try {
   const synthesis = readPanelSpeechSynthesis().synthesis;
-  const addVoicesListener = panelDataMethod(synthesis, 'addEventListener');
-  addVoicesListener?.call(synthesis, 'voiceschanged', loadPersonaVoices);
+  if (synthesis && PANEL_ADD_EVENT_LISTENER) {
+    Reflect.apply(PANEL_ADD_EVENT_LISTENER, synthesis, ['voiceschanged', loadPersonaVoices]);
+  }
 } catch { /* absence of a safe listener keeps the inventory fail-closed */ }
 
 loadPersonaVoices();
