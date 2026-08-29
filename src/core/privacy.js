@@ -16,13 +16,48 @@ const FIXED_WARNING_MESSAGES = Object.freeze({
   PROBE_FAILED: 'Uma medição dinâmica não pôde ser concluída.'
 });
 
+const WARNING_FIELDS = new Set(['code', 'frameId', 'message']);
+const MAX_WARNING_CODE_LENGTH = 128;
+const MAX_WARNING_MESSAGE_LENGTH = 1_024;
+
+function projectWarning(input) {
+  try {
+    if (input === null || typeof input !== 'object') return null;
+    const prototype = Object.getPrototypeOf(input);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const keys = Reflect.ownKeys(input);
+    if (keys.length > WARNING_FIELDS.size ||
+      keys.some(key => typeof key !== 'string' || !WARNING_FIELDS.has(key))) return null;
+    const projected = {};
+    const present = new Set();
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(input, key);
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) return null;
+      projected[key] = descriptor.value;
+      present.add(key);
+    }
+    if (!present.has('code') || typeof projected.code !== 'string' ||
+      projected.code.length > MAX_WARNING_CODE_LENGTH ||
+      (present.has('message') && (typeof projected.message !== 'string' ||
+        projected.message.length > MAX_WARNING_MESSAGE_LENGTH)) ||
+      (present.has('frameId') && projected.frameId !== null &&
+        typeof projected.frameId !== 'string' && !Number.isSafeInteger(projected.frameId))) return null;
+    return { projected, present };
+  } catch {
+    return null;
+  }
+}
+
 export function sanitizeWarning(input) {
-  const requested = typeof input?.code === 'string' ? input.code.trim().toUpperCase() : '';
+  const observation = projectWarning(input);
+  const requested = observation ? observation.projected.code.trim().toUpperCase() : '';
   const code = Object.hasOwn(FIXED_WARNING_MESSAGES, requested) ? requested : 'PROBE_FAILED';
   const warning = { code, message: FIXED_WARNING_MESSAGES[code] };
-  if (typeof input?.frameId === 'string' && /^[a-z0-9_-]{1,128}$/iu.test(input.frameId) && !SENSITIVE_KEY.test(input.frameId)) warning.frameId = input.frameId;
-  else if (Number.isSafeInteger(input?.frameId)) warning.frameId = input.frameId;
-  else if (Object.hasOwn(input || {}, 'frameId')) warning.frameId = null;
+  if (!observation) return warning;
+  const { frameId } = observation.projected;
+  if (typeof frameId === 'string' && /^[a-z0-9_-]{1,128}$/iu.test(frameId) && !SENSITIVE_KEY.test(frameId)) warning.frameId = frameId;
+  else if (Number.isSafeInteger(frameId)) warning.frameId = frameId;
+  else if (observation.present.has('frameId')) warning.frameId = null;
   return warning;
 }
 

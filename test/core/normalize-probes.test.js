@@ -256,6 +256,341 @@ test('uses the same dense boundary for other raw probe collections', () => {
   assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
 });
 
+test('rejects accessor-backed focus-event leaves without invoking them', () => {
+  const values = {
+    indicatorVisible: true,
+    beforeCss: { outline: '0px none' },
+    afterCss: { outline: '2px solid' },
+    areaSufficient: true,
+    intersectionRatio: 1,
+    rect: { x: 0, y: 0, width: 24, height: 24 },
+  };
+
+  for (const [field, value] of Object.entries(values)) {
+    const marker = `PRIVATE_FOCUS_${field.toUpperCase()}_MESSAGE`;
+    let getterReads = 0;
+    const event = { nodeId: 'n-101', ...values };
+    Object.defineProperty(event, field, {
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        throw new Error(marker);
+      },
+    });
+
+    let probes;
+    assert.doesNotThrow(() => {
+      probes = normalizeProbes({
+        focus: { focusableCount: 1, completed: true, events: [event] },
+        warnings: [], actions: [], targetSizes: [],
+      });
+    }, field);
+    assert.equal(getterReads, 0, field);
+    for (const key of ['focusOrder', 'keyboardTraps', 'focusAppearance', 'obscuredTargets']) {
+      assert.equal(probes[key].outcome, 'cantTell', `${field}:${key}`);
+    }
+    assert.equal(probes.focusOrder.focusableCount, null, field);
+    assert.deepEqual(probes.focusAppearance.observations, [], field);
+    assert.deepEqual(probes.obscuredTargets.observations, [], field);
+    assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker), field);
+  }
+});
+
+test('rejects accessor, inherited and partial nested focus measurements without accepting fragments', () => {
+  const marker = 'PRIVATE_NESTED_FOCUS_MESSAGE';
+  let getterReads = 0;
+  const accessorCss = {};
+  Object.defineProperty(accessorCss, 'outline', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      throw new Error(marker);
+    },
+  });
+  const accessorRect = { y: 0, width: 24, height: 24 };
+  Object.defineProperty(accessorRect, 'x', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      throw new Error(marker);
+    },
+  });
+  const inherited = Object.create({
+    indicatorVisible: true,
+    beforeCss: { outline: '0px none' },
+    afterCss: { outline: '2px solid' },
+    areaSufficient: true,
+    intersectionRatio: 1,
+    rect: { x: 0, y: 0, width: 24, height: 24 },
+  });
+  inherited.nodeId = 'n-101';
+  const inheritedCss = Object.create({ outline: '0px none' });
+  const inheritedRect = Object.create({ x: 0, y: 0, width: 24, height: 24 });
+  const revokedCss = Proxy.revocable({ outline: '0px none' }, {});
+  revokedCss.revoke();
+  const revokedRect = Proxy.revocable({ x: 0, y: 0, width: 24, height: 24 }, {});
+  revokedRect.revoke();
+  const trappedCss = new Proxy({ outline: '0px none' }, {
+    ownKeys() { throw new Error(marker); },
+  });
+  const trappedRect = new Proxy({ x: 0, y: 0, width: 24, height: 24 }, {
+    getOwnPropertyDescriptor() { throw new Error(marker); },
+  });
+
+  const cases = [
+    {
+      nodeId: 'n-101', indicatorVisible: true,
+      beforeCss: accessorCss, afterCss: { outline: '2px solid' },
+      areaSufficient: true, intersectionRatio: 1,
+      rect: { x: 0, y: 0, width: 24, height: 24 },
+    },
+    {
+      nodeId: 'n-101', indicatorVisible: true,
+      beforeCss: { outline: '0px none' }, afterCss: { outline: '2px solid' },
+      areaSufficient: true, intersectionRatio: 1, rect: accessorRect,
+    },
+    inherited,
+    ...[inheritedCss, revokedCss.proxy, trappedCss].map(beforeCss => ({
+      nodeId: 'n-101', indicatorVisible: true,
+      beforeCss, afterCss: { outline: '2px solid' },
+      areaSufficient: true, intersectionRatio: 1,
+      rect: { x: 0, y: 0, width: 24, height: 24 },
+    })),
+    ...[inheritedRect, revokedRect.proxy, trappedRect].map(rect => ({
+      nodeId: 'n-101', indicatorVisible: true,
+      beforeCss: { outline: '0px none' }, afterCss: { outline: '2px solid' },
+      areaSufficient: true, intersectionRatio: 1, rect,
+    })),
+    {
+      nodeId: 'n-101', indicatorVisible: true,
+      beforeCss: { outline: '0px none' }, afterCss: { outline: '2px solid' },
+      areaSufficient: true, intersectionRatio: 1,
+      rect: { x: 0, y: 0, width: 24 },
+    },
+    {
+      nodeId: 'n-101', indicatorVisible: true,
+      beforeCss: { outline: '0px none' },
+      areaSufficient: true, intersectionRatio: 1,
+      rect: { x: 0, y: 0, width: 24, height: 24 },
+    },
+  ];
+
+  for (const event of cases) {
+    const probes = normalizeProbes({
+      focus: { focusableCount: 1, completed: true, events: [event] },
+      warnings: [], actions: [], targetSizes: [],
+    });
+    for (const key of ['focusOrder', 'keyboardTraps', 'focusAppearance', 'obscuredTargets']) {
+      assert.equal(probes[key].outcome, 'cantTell', key);
+    }
+    assert.equal(probes.focusOrder.focusableCount, null);
+    assert.deepEqual(probes.focusAppearance.observations, []);
+    assert.deepEqual(probes.obscuredTargets.observations, []);
+    assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
+  }
+  assert.equal(getterReads, 0);
+});
+
+test('contains revoked and throwing descriptor traps in focus leaves', () => {
+  const marker = 'PRIVATE_FOCUS_TRAP_MESSAGE';
+  const revoked = Proxy.revocable({
+    nodeId: 'n-101', indicatorVisible: true,
+    beforeCss: { outline: '0px none' }, afterCss: { outline: '2px solid' },
+    areaSufficient: true, intersectionRatio: 1,
+    rect: { x: 0, y: 0, width: 24, height: 24 },
+  }, {});
+  revoked.revoke();
+  const trapped = new Proxy({ nodeId: 'n-101' }, {
+    getOwnPropertyDescriptor() { throw new Error(marker); },
+  });
+
+  for (const event of [revoked.proxy, trapped]) {
+    const probes = normalizeProbes({
+      focus: { focusableCount: 1, completed: true, events: [event] },
+      warnings: [], actions: [], targetSizes: [],
+    });
+    for (const key of ['focusOrder', 'keyboardTraps', 'focusAppearance', 'obscuredTargets']) {
+      assert.equal(probes[key].outcome, 'cantTell', key);
+    }
+    assert.equal(probes.focusOrder.focusableCount, null);
+    assert.deepEqual(probes.focusAppearance.observations, []);
+    assert.deepEqual(probes.obscuredTargets.observations, []);
+    assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
+  }
+});
+
+test('rejects accessor-backed text-resize leaves without invoking them', () => {
+  for (const field of ['scalePercent', 'lossOfContent']) {
+    const marker = `PRIVATE_TEXT_RESIZE_${field.toUpperCase()}_MESSAGE`;
+    let getterReads = 0;
+    const textResize = { scalePercent: 200, lossOfContent: false };
+    Object.defineProperty(textResize, field, {
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        throw new Error(marker);
+      },
+    });
+    let probes;
+    assert.doesNotThrow(() => { probes = normalizeProbes({ textResize }); }, field);
+    assert.equal(getterReads, 0, field);
+    assert.deepEqual(probes.textResize, { outcome: 'cantTell', scalePercent: null, lossOfContent: null }, field);
+    assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker), field);
+  }
+
+  const marker = 'PRIVATE_TEXT_RESIZE_ROOT_MESSAGE';
+  let getterReads = 0;
+  const raw = {};
+  Object.defineProperty(raw, 'textResize', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      throw new Error(marker);
+    },
+  });
+  const probes = normalizeProbes(raw);
+  assert.equal(getterReads, 0);
+  assert.deepEqual(probes.textResize, { outcome: 'cantTell', scalePercent: null, lossOfContent: null });
+  assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
+});
+
+test('rejects inherited, revoked, trapped and partial text-resize records', () => {
+  const inherited = Object.create({ scalePercent: 200, lossOfContent: false });
+  const revoked = Proxy.revocable({ scalePercent: 200, lossOfContent: false }, {});
+  revoked.revoke();
+  const marker = 'PRIVATE_TEXT_RESIZE_TRAP_MESSAGE';
+  const trapped = new Proxy({ scalePercent: 200, lossOfContent: false }, {
+    getOwnPropertyDescriptor() { throw new Error(marker); },
+  });
+
+  for (const textResize of [inherited, revoked.proxy, trapped, { scalePercent: 200 }, { lossOfContent: false }]) {
+    const probes = normalizeProbes({ textResize });
+    assert.deepEqual(probes.textResize, { outcome: 'cantTell', scalePercent: null, lossOfContent: null });
+    assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
+  }
+});
+
+test('rejects accessor-backed motion leaves without invoking them', () => {
+  const cases = {
+    prefersReducedMotion: { complete: true, prefersReducedMotion: true, animatedCount: 2, reducedAnimatedCount: 1 },
+    preference: { complete: true, preference: 'reduce', animatedCount: 2, reducedAnimatedCount: 1 },
+    complete: { complete: true, prefersReducedMotion: true, animatedCount: 2, reducedAnimatedCount: 1 },
+    animatedCount: { complete: true, prefersReducedMotion: true, animatedCount: 2, reducedAnimatedCount: 1 },
+    reducedAnimatedCount: { complete: true, prefersReducedMotion: true, animatedCount: 2, reducedAnimatedCount: 1 },
+  };
+
+  for (const [field, motion] of Object.entries(cases)) {
+    const marker = `PRIVATE_MOTION_${field.toUpperCase()}_MESSAGE`;
+    let getterReads = 0;
+    Object.defineProperty(motion, field, {
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        throw new Error(marker);
+      },
+    });
+    let probes;
+    assert.doesNotThrow(() => { probes = normalizeProbes({ motion }); }, field);
+    assert.equal(getterReads, 0, field);
+    assert.deepEqual(probes.motion, {
+      outcome: 'cantTell', prefersReducedMotion: null, animatedCount: null, reducedAnimatedCount: null,
+    }, field);
+    assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker), field);
+  }
+});
+
+test('rejects inherited, revoked, trapped and partial motion records', () => {
+  const inherited = Object.create({
+    complete: true, preference: 'reduce', prefersReducedMotion: true,
+    animatedCount: 2, reducedAnimatedCount: 1,
+  });
+  const revoked = Proxy.revocable({
+    complete: true, preference: 'reduce', prefersReducedMotion: true,
+    animatedCount: 2, reducedAnimatedCount: 1,
+  }, {});
+  revoked.revoke();
+  const marker = 'PRIVATE_MOTION_TRAP_MESSAGE';
+  const trapped = new Proxy({
+    complete: true, preference: 'reduce', prefersReducedMotion: true,
+    animatedCount: 2, reducedAnimatedCount: 1,
+  }, {
+    getOwnPropertyDescriptor() { throw new Error(marker); },
+  });
+
+  for (const motion of [
+    inherited, revoked.proxy, trapped,
+    { complete: true, prefersReducedMotion: true, animatedCount: 2 },
+  ]) {
+    const probes = normalizeProbes({ motion });
+    assert.deepEqual(probes.motion, {
+      outcome: 'cantTell', prefersReducedMotion: null, animatedCount: null, reducedAnimatedCount: null,
+    });
+    assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
+  }
+});
+
+test('contains a revoked raw probe root as wholly unavailable', () => {
+  const revoked = Proxy.revocable(completeRaw(), {});
+  revoked.revoke();
+  let probes;
+  assert.doesNotThrow(() => { probes = normalizeProbes(revoked.proxy); });
+  for (const key of ['focusOrder', 'keyboardTraps', 'focusAppearance', 'obscuredTargets', 'reflow', 'textResize', 'motion']) {
+    assert.equal(probes[key].outcome, 'cantTell', key);
+  }
+  assert.equal(probes.targetSizes.minimum24.outcome, 'cantTell');
+  assert.equal(probes.targetSizes.enhanced44.outcome, 'cantTell');
+  assert.deepEqual(probes.warnings, []);
+  assert.deepEqual(probes.actions, []);
+});
+
+test('bounds focus leaf strings and never coerces hostile leaf values', () => {
+  const marker = 'PRIVATE_PROBE_COERCION_MESSAGE';
+  let coercions = 0;
+  const hostileValue = {
+    [Symbol.toPrimitive]() {
+      coercions += 1;
+      throw new Error(marker);
+    },
+  };
+  const focusEvents = [
+    {
+      nodeId: 'n-101', selector: '#a', frameId: hostileValue,
+      indicatorVisible: true, intersectionRatio: 1,
+    },
+    {
+      nodeId: 'n-101', selector: '#a',
+      beforeCss: { outline: hostileValue }, afterCss: { outline: '2px solid' },
+      intersectionRatio: 1,
+    },
+    {
+      nodeId: 'n-101', selector: '#a', indicatorVisible: true,
+      intersectionRatio: 1, rect: { x: hostileValue, y: 0, width: 24, height: 24 },
+    },
+    {
+      nodeId: 'n-101', selector: `#${'a'.repeat(4_097)}`,
+      indicatorVisible: true, intersectionRatio: 1,
+    },
+  ];
+
+  for (const event of focusEvents) {
+    const probes = normalizeProbes({
+      focus: { focusableCount: 1, completed: true, events: [event] },
+      textResize: { scalePercent: hostileValue, lossOfContent: false },
+      motion: {
+        complete: true, prefersReducedMotion: true,
+        animatedCount: hostileValue, reducedAnimatedCount: 0,
+      },
+    });
+    assert.equal(probes.focusOrder.outcome, 'cantTell');
+    assert.deepEqual(probes.textResize, { outcome: 'cantTell', scalePercent: null, lossOfContent: null });
+    assert.deepEqual(probes.motion, {
+      outcome: 'cantTell', prefersReducedMotion: null, animatedCount: null, reducedAnimatedCount: null,
+    });
+    assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
+  }
+  assert.equal(coercions, 0);
+});
+
 test('does not read accessor slots in nested action threshold collections', () => {
   const marker = 'PRIVATE_ACTION_THRESHOLD_MESSAGE';
   let getterReads = 0;

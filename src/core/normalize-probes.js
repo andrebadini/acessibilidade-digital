@@ -14,6 +14,21 @@ const MINIMUM_TARGET_EXCEPTIONS = new Set(['equivalent', 'inline', 'user-agent',
 const ENHANCED_TARGET_EXCEPTIONS = new Set(['equivalent', 'inline', 'user-agent', 'essential']);
 const MAX_PROBE_COLLECTION_ITEMS = 5_000;
 const MAX_TARGET_THRESHOLDS = 16;
+const MAX_PROBE_RECORD_FIELDS = 32;
+const MAX_PROBE_STRING_LENGTH = 4_096;
+const FOCUS_EVENT_FIELDS = new Set([
+  'backendNodeId', 'nodeId', 'selector', 'frameId',
+  'indicatorVisible', 'beforeCss', 'afterCss', 'areaSufficient',
+  'intersectionRatio', 'rect',
+]);
+const FOCUS_CSS_FIELDS = new Set([
+  'outline', 'outlineColor', 'outlineOffset', 'outlineStyle', 'outlineWidth', 'boxShadow',
+]);
+const RECT_FIELDS = new Set(['x', 'y', 'width', 'height']);
+const TEXT_RESIZE_FIELDS = new Set(['scalePercent', 'lossOfContent']);
+const MOTION_FIELDS = new Set([
+  'complete', 'preference', 'prefersReducedMotion', 'animatedCount', 'reducedAnimatedCount',
+]);
 
 function ownData(value, field) {
   try {
@@ -50,6 +65,132 @@ function denseOwnDataArray(value, maxItems = MAX_PROBE_COLLECTION_ITEMS) {
   } catch {
     return { available: false, values: [] };
   }
+}
+
+function ownDataRecord(value, allowedFields, { requiredFields = [], maxFields = MAX_PROBE_RECORD_FIELDS } = {}) {
+  try {
+    if (value === null || typeof value !== 'object') return { available: false, value: null, present: new Set() };
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return { available: false, value: null, present: new Set() };
+    const keys = Reflect.ownKeys(value);
+    if (keys.length > maxFields || keys.some(key => typeof key !== 'string' || !allowedFields.has(key))) {
+      return { available: false, value: null, present: new Set() };
+    }
+    const output = {};
+    const present = new Set();
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) {
+        return { available: false, value: null, present: new Set() };
+      }
+      output[key] = descriptor.value;
+      present.add(key);
+    }
+    if (requiredFields.some(field => !present.has(field))) {
+      return { available: false, value: null, present: new Set() };
+    }
+    return { available: true, value: output, present };
+  } catch {
+    return { available: false, value: null, present: new Set() };
+  }
+}
+
+function boundedString(value) {
+  return typeof value === 'string' && value.length <= MAX_PROBE_STRING_LENGTH;
+}
+
+function projectFocusCss(value) {
+  const projected = ownDataRecord(value, FOCUS_CSS_FIELDS, { maxFields: FOCUS_CSS_FIELDS.size });
+  if (!projected.available) return projected;
+  for (const item of Object.values(projected.value)) {
+    if (typeof item !== 'string' || item.length > MAX_PROBE_STRING_LENGTH) {
+      return { available: false, value: null, present: new Set() };
+    }
+  }
+  return projected;
+}
+
+function projectRect(value) {
+  const projected = ownDataRecord(value, RECT_FIELDS, {
+    requiredFields: [...RECT_FIELDS], maxFields: RECT_FIELDS.size,
+  });
+  if (!projected.available || [...RECT_FIELDS].some(field => !finite(projected.value[field]))) {
+    return { available: false, value: null, present: new Set() };
+  }
+  return projected;
+}
+
+function projectFocusEvent(value) {
+  const projected = ownDataRecord(value, FOCUS_EVENT_FIELDS, { maxFields: FOCUS_EVENT_FIELDS.size });
+  if (!projected.available) return projected;
+  const event = projected.value;
+  const present = projected.present;
+  const hasIdentity = (present.has('backendNodeId') && Number.isSafeInteger(event.backendNodeId) && event.backendNodeId >= 0) ||
+    (present.has('nodeId') && (boundedString(event.nodeId) || Number.isSafeInteger(event.nodeId))) ||
+    (present.has('selector') && boundedString(event.selector));
+  if (!hasIdentity ||
+    (present.has('backendNodeId') && (!Number.isSafeInteger(event.backendNodeId) || event.backendNodeId < 0)) ||
+    (present.has('nodeId') && !boundedString(event.nodeId) && !Number.isSafeInteger(event.nodeId)) ||
+    (present.has('selector') && !boundedString(event.selector)) ||
+    (present.has('frameId') && event.frameId !== null && !boundedString(event.frameId) && !Number.isSafeInteger(event.frameId)) ||
+    (present.has('indicatorVisible') && typeof event.indicatorVisible !== 'boolean') ||
+    (present.has('areaSufficient') && typeof event.areaSufficient !== 'boolean') ||
+    (present.has('intersectionRatio') && (!finite(event.intersectionRatio) || event.intersectionRatio < 0 || event.intersectionRatio > 1))) {
+    return { available: false, value: null, present: new Set() };
+  }
+  const hasBeforeCss = present.has('beforeCss');
+  const hasAfterCss = present.has('afterCss');
+  if (hasBeforeCss !== hasAfterCss) return { available: false, value: null, present: new Set() };
+  if (hasBeforeCss) {
+    const beforeCss = projectFocusCss(event.beforeCss);
+    const afterCss = projectFocusCss(event.afterCss);
+    if (!beforeCss.available || !afterCss.available) return { available: false, value: null, present: new Set() };
+    event.beforeCss = beforeCss.value;
+    event.afterCss = afterCss.value;
+  }
+  if (present.has('rect')) {
+    const rect = projectRect(event.rect);
+    if (!rect.available) return { available: false, value: null, present: new Set() };
+    event.rect = rect.value;
+  }
+  return projected;
+}
+
+function projectFocusEvents(collection) {
+  if (!collection.available) return collection;
+  const values = [];
+  for (const event of collection.values) {
+    const projected = projectFocusEvent(event);
+    if (!projected.available) return { available: false, values: [] };
+    values.push(projected.value);
+  }
+  return { available: true, values };
+}
+
+function projectTextResize(value) {
+  const projected = ownDataRecord(value, TEXT_RESIZE_FIELDS, {
+    requiredFields: [...TEXT_RESIZE_FIELDS], maxFields: TEXT_RESIZE_FIELDS.size,
+  });
+  if (!projected.available || !finite(projected.value.scalePercent) ||
+    typeof projected.value.lossOfContent !== 'boolean') {
+    return { available: false, value: null, present: new Set() };
+  }
+  return projected;
+}
+
+function projectMotion(value) {
+  const projected = ownDataRecord(value, MOTION_FIELDS, {
+    requiredFields: ['complete', 'prefersReducedMotion', 'animatedCount', 'reducedAnimatedCount'],
+    maxFields: MOTION_FIELDS.size,
+  });
+  if (!projected.available || typeof projected.value.complete !== 'boolean' ||
+    typeof projected.value.prefersReducedMotion !== 'boolean' ||
+    !Number.isSafeInteger(projected.value.animatedCount) || projected.value.animatedCount < 0 ||
+    !Number.isSafeInteger(projected.value.reducedAnimatedCount) || projected.value.reducedAnimatedCount < 0 ||
+    (projected.present.has('preference') && projected.value.preference !== 'reduce')) {
+    return { available: false, value: null, present: new Set() };
+  }
+  return projected;
 }
 
 function normalizedException(observation, allowed) {
@@ -141,11 +282,13 @@ export function normalizeProbes(raw = {}) {
   const identity = createProbeIdentity();
   const safeId = identity.safeId;
   const focus = ownData(raw, 'focus');
-  const focusCollection = denseOwnDataArray(ownData(focus, 'events'));
+  const focusCollection = projectFocusEvents(denseOwnDataArray(ownData(focus, 'events')));
   const focusEvents = focusCollection.values;
   const focusIds = focusEvents.map(safeId).filter(Boolean);
-  const focusComplete = focusCollection.available && ownData(focus, 'completed') === true;
-  const focusableCount = ownData(focus, 'focusableCount');
+  const observedFocusableCount = ownData(focus, 'focusableCount');
+  const focusableCount = focusCollection.available && Number.isSafeInteger(observedFocusableCount) &&
+    observedFocusableCount >= 0 ? observedFocusableCount : null;
+  const focusComplete = focusCollection.available && focusableCount !== null && ownData(focus, 'completed') === true;
   const repeated = [];
   for (let index = 1; index < focusIds.length; index += 1) {
     if (focusIds[index] === focusIds[index - 1]) repeated.push(focusIds[index]);
@@ -177,8 +320,9 @@ export function normalizeProbes(raw = {}) {
   const reflowValid = finite(reflowWidth) && reflowWidth > 0 && reflowWidth <= 320 &&
     typeof horizontalOverflow === 'boolean';
   const reflowException = normalizedException(reflow, REFLOW_EXCEPTIONS);
-  const resizeValid = finite(raw.textResize?.scalePercent) && raw.textResize.scalePercent >= 200 &&
-    typeof raw.textResize?.lossOfContent === 'boolean';
+  const textResizeProjection = projectTextResize(ownData(raw, 'textResize'));
+  const textResize = textResizeProjection.value;
+  const resizeValid = textResizeProjection.available && textResize.scalePercent >= 200;
 
   const rawTargetSizes = ownData(raw, 'targetSizes');
   const targetSizes = denseOwnDataArray(rawTargetSizes).values;
@@ -201,18 +345,18 @@ export function normalizeProbes(raw = {}) {
   const enhancedUnknown = targetObservations.some(item => !item.enhanced44 &&
     normalizedException({ exception: item.exception, exceptionProof: 'complete' }, ENHANCED_TARGET_EXCEPTIONS) === 'unknown');
 
-  const reducedPreferenceExecuted = raw.motion?.prefersReducedMotion === true ||
-    (raw.motion?.prefersReducedMotion === undefined && raw.motion?.preference === 'reduce');
-  const motionValid = raw.motion?.complete === true && reducedPreferenceExecuted &&
-    Number.isSafeInteger(raw.motion?.animatedCount) && raw.motion.animatedCount >= 0 &&
-    Number.isSafeInteger(raw.motion?.reducedAnimatedCount) && raw.motion.reducedAnimatedCount >= 0;
-  const motionFailed = motionValid && raw.motion.prefersReducedMotion && raw.motion.reducedAnimatedCount > 0;
+  const motionProjection = projectMotion(ownData(raw, 'motion'));
+  const motion = motionProjection.value;
+  const reducedPreferenceExecuted = motionProjection.available && (motion.prefersReducedMotion === true ||
+    (motion.prefersReducedMotion === undefined && motion.preference === 'reduce'));
+  const motionValid = motionProjection.available && motion.complete === true && reducedPreferenceExecuted;
+  const motionFailed = motionValid && motion.prefersReducedMotion && motion.reducedAnimatedCount > 0;
 
   const normalized = {
     focusOrder: {
       outcome: focusComplete ? 'passed' : 'cantTell',
       targets: focusIds,
-      focusableCount: Number.isSafeInteger(focusableCount) ? focusableCount : null
+      focusableCount
     },
     keyboardTraps: {
       outcome: repeated.length ? 'failed' : focusComplete ? 'passed' : 'cantTell',
@@ -238,8 +382,8 @@ export function normalizeProbes(raw = {}) {
     },
     textResize: {
       outcome: 'cantTell',
-      scalePercent: resizeValid ? raw.textResize.scalePercent : null,
-      lossOfContent: resizeValid ? raw.textResize.lossOfContent : null
+      scalePercent: resizeValid ? textResize.scalePercent : null,
+      lossOfContent: resizeValid ? textResize.lossOfContent : null
     },
     targetSizes: {
       minimum24: { outcome: minimumFailures.length ? 'failed' : targetObservations.length && !minimumUnknown ? 'passed' : 'cantTell', failedNodeIds: unique(minimumFailures) },
@@ -248,9 +392,9 @@ export function normalizeProbes(raw = {}) {
     },
     motion: {
       outcome: motionValid ? outcome(!motionFailed) : 'cantTell',
-      prefersReducedMotion: motionValid ? raw.motion.prefersReducedMotion : null,
-      animatedCount: motionValid ? raw.motion.animatedCount : null,
-      reducedAnimatedCount: motionValid ? raw.motion.reducedAnimatedCount : null
+      prefersReducedMotion: motionValid ? motion.prefersReducedMotion : null,
+      animatedCount: motionValid ? motion.animatedCount : null,
+      reducedAnimatedCount: motionValid ? motion.reducedAnimatedCount : null
     },
     warnings: sanitizeWarnings(denseOwnDataArray(ownData(raw, 'warnings')).values),
     actions: sanitizeJsonData(denseOwnDataArray(ownData(raw, 'actions')).values.map(sanitizeAction))
