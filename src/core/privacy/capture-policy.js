@@ -5,26 +5,25 @@ const MODES = Object.freeze({
   'no-pixels': Object.freeze([false, false, false]),
 });
 
-function ownData(value, key) {
+function captureExact(value, keys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   try {
-    const descriptor = value && typeof value === 'object'
-      ? Object.getOwnPropertyDescriptor(value, key)
-      : null;
-    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
-  } catch {
-    return undefined;
-  }
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== keys.length || keys.some(key => !ownKeys.includes(key))) return null;
+    const copy = {};
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      copy[key] = descriptor.value;
+    }
+    return copy;
+  } catch { return null; }
 }
 
 export function createCapturePolicyV1(input) {
-  let keys;
-  try { keys = Reflect.ownKeys(input); } catch { keys = []; }
-  if (!input || typeof input !== 'object' || Array.isArray(input) ||
-    keys.length !== POLICY_KEYS.length || POLICY_KEYS.some(key => !keys.includes(key))) {
-    throw new TypeError('CAPTURE_POLICY_INVALID');
-  }
-  const mode = ownData(input, 'mode');
-  const includeQuery = ownData(input, 'includeQuery');
+  const captured = captureExact(input, POLICY_KEYS);
+  if (!captured) throw new TypeError('CAPTURE_POLICY_INVALID');
+  const { mode, includeQuery } = captured;
   const flags = MODES[mode];
   if (!flags || typeof includeQuery !== 'boolean') throw new TypeError('CAPTURE_POLICY_INVALID');
   return Object.freeze({
@@ -35,9 +34,10 @@ export function createCapturePolicyV1(input) {
 
 export function isCapturePolicyV1(value) {
   try {
-    const expected = createCapturePolicyV1({ mode: ownData(value, 'mode'), includeQuery: ownData(value, 'includeQuery') });
-    const keys = Reflect.ownKeys(value);
-    return keys.length === 6 && Object.keys(expected).every(key => ownData(value, key) === expected[key]);
+    const captured = captureExact(value, ['version', 'mode', 'includeQuery', 'captureFullPage', 'captureElements', 'composeAnnouncementMap']);
+    if (!captured) return false;
+    const expected = createCapturePolicyV1({ mode: captured.mode, includeQuery: captured.includeQuery });
+    return Object.keys(expected).every(key => captured[key] === expected[key]);
   } catch {
     return false;
   }

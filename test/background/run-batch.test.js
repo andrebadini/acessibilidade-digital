@@ -7,6 +7,8 @@ import { normalizeUrlList } from '../../src/core/batch/normalize-url-list.js';
 import { reportInput } from '../report/helpers.js';
 import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
+import { AUDIT_EXECUTION_INTERNAL } from '../../src/background/chrome-adapter.js';
+import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const TEST_EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
@@ -181,7 +183,7 @@ test('integrates three controlled fixtures through runBatch and runAudit into on
     nodes: [], axTree: { nodes: [] },
   });
   const adapter = {
-    async createTab() { nextTabId += 1; return { id: nextTabId }; },
+    async createTab() { nextTabId += 1; return { id: nextTabId, windowId: 9 }; },
     async navigateTab(id, url) { urlByTab.set(id, url); currentUrl = url; order.push(url); },
     async waitForStable(id) {
       if (urlByTab.get(id).includes('fixture-fail')) throw new Error('controlled fixture failure');
@@ -198,10 +200,33 @@ test('integrates three controlled fixtures through runBatch and runAudit into on
     async runDynamicProbes() { return { focus: { completed: true, events: [] }, warnings: [], actions: [] }; },
     async getEnvironment() { return { chromeVersion: 'Chrome/152', viewport: { width: 800, height: 600, deviceScaleFactor: 1 } }; },
     async getFinalUrl() { return currentUrl; },
+    async getEvidenceUrl() { return currentUrl; },
+    async probeDocumentIdentity(tabId) { return { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}` }; },
+    async probePrivacySignals() { return []; },
     async emitProgress() {},
     async handoffReport(model) { finalHandoffs += 1; return { reviewUrl: `chrome-extension://${TEST_EXTENSION_ID}/src/review/index.html?auditId=${model.auditId}` }; },
     async removeTab(id) { removed.push(id); },
   };
+  const sessionValues = {};
+  let randomValue = 0;
+  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
+    enumerable: false,
+    value: Object.freeze({
+      sessionArea: {
+        async get(key) { return Object.hasOwn(sessionValues, key) ? { [key]: structuredClone(sessionValues[key]) } : {}; },
+        async set(entries) { Object.assign(sessionValues, structuredClone(entries)); },
+        async remove(key) { delete sessionValues[key]; },
+      },
+      randomBytes(length) { return new Uint8Array(length).fill(++randomValue); },
+      epochNow: () => 1_788_000_000_000,
+      capturePolicy: createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false }),
+      privacyDecision: Object.freeze({
+        status: 'allowed', consentCapabilityId: 'consent-a', documentId: 'document-a',
+        urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+      }),
+      consentAuthority: Object.freeze({ async consume() { return true; } }),
+    }),
+  });
   const model = await runBatch({
     entries, batchAuditId: 'batch-integration', chromeAdapter: adapter,
     runner: async options => { const child = await runAudit(options); childModels.push(child); return child; },
@@ -342,4 +367,46 @@ test('returns a valid all-cancelled report without starting any child when alrea
   assert.equal(model.session.status, 'cancelled');
   assert.ok(model.pages.every(page => page.status === 'cancelled' && page.attempted === false));
   assert.match(model.integrity.canonicalModelHash, /^[a-f0-9]{64}$/u);
+});
+
+test('production default merges execution checkpoints and waits for owned cleanup before scheduling', async () => {
+  const entries = normalizeUrlList('https://one.example.test/\nhttps://two.example.test/').entries;
+  const values = {};
+  const order = [];
+  let randomValue = 20;
+  const adapter = {
+    async createTab() { const id = order.length + 41; order.push(`create:${id}`); return { id, windowId: 9 }; },
+    async navigateTab(id) { order.push(`navigate:${id}`); },
+    async waitForStable(id) { order.push(`wait:${id}`); throw new Error('CONTROLLED_NAVIGATION_FAILURE'); },
+    async probeDocumentIdentity() { throw new Error('must not probe'); },
+    async removeTab(id) { order.push(`remove:${id}`); },
+    async emitProgress() {}, tryEnterFinalization() { return true; },
+    async handoffReport() { return { reviewUrl: null }; },
+  };
+  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
+    enumerable: false,
+    value: Object.freeze({
+      sessionArea: {
+        async get(key) { return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {}; },
+        async set(entriesToStore) { Object.assign(values, structuredClone(entriesToStore)); },
+        async remove(key) { delete values[key]; },
+      },
+      randomBytes(length) { return new Uint8Array(length).fill(++randomValue); },
+      epochNow: () => 1_788_000_000_000,
+    }),
+  });
+  const checkpoints = [];
+  const model = await runBatch({
+    entries, batchAuditId: 'batch-owned-default', chromeAdapter: adapter,
+    now: clock(), reportOptions: REPORT_OPTIONS,
+    onExecutionCheckpoint: async value => { checkpoints.push(value); },
+  });
+  assert.deepEqual(order, [
+    'create:41', 'navigate:41', 'wait:41', 'remove:41',
+    'create:45', 'navigate:45', 'wait:45', 'remove:45',
+  ]);
+  assert.deepEqual(checkpoints.map(value => value.pages.length), [1, 2]);
+  assert.deepEqual(checkpoints.at(-1).pages.map(value => value.pageId), ['page-1', 'page-2']);
+  assert.deepEqual(model.pages.map(value => value.status), ['failed', 'failed']);
+  assert.doesNotMatch(JSON.stringify(model), /checkpoint|owner-|CONTROLLED_NAVIGATION_FAILURE/u);
 });

@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
 import { canonicalTime, runAudit } from '../../src/background/run-audit.js';
+import { AUDIT_EXECUTION_INTERNAL } from '../../src/background/chrome-adapter.js';
+import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { remapAuditPage } from '../../src/core/batch/remap-audit.js';
@@ -211,13 +213,15 @@ function fakeAdapter(options = {}) {
       if (options.disconnectFailure) throw new Error('detalhe privado de desconexão');
     },
   };
+  const sessionValues = {};
+  let randomValue = 0;
   const adapter = {
     events,
     get counts() { return { screenshots, disconnects, removals }; },
     async createTab() {
       events.push('create-tab');
       if (options.createTabFailure) throw new Error('detalhe privado de criação');
-      return Object.hasOwn(options, 'createTabResult') ? options.createTabResult : { id: 42 };
+      return Object.hasOwn(options, 'createTabResult') ? options.createTabResult : { id: 42, windowId: 9 };
     },
     async navigateTab(_id, url) { events.push(`navigate:${url}`); },
     async waitForStable(_id, { signal } = {}) {
@@ -226,6 +230,9 @@ function fakeAdapter(options = {}) {
       if (signal?.aborted) throw signal.reason;
       return { url: 'https://example.test/final?token=REMOVE&view=public' };
     },
+    async probeDocumentIdentity(tabId) { return { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}` }; },
+    async getEvidenceUrl() { return 'https://example.test/final?view=public'; },
+    async probePrivacySignals() { return []; },
     async connectCdp() { events.push('connect-cdp'); return cdp; },
     async runAxeInTab() {
       events.push('axe');
@@ -258,6 +265,26 @@ function fakeAdapter(options = {}) {
       if (options.removeTabFailure) throw new Error('detalhe privado de fechamento');
     },
   };
+  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
+    enumerable: false,
+    value: Object.freeze({
+      sessionArea: {
+        async get(key) { return Object.hasOwn(sessionValues, key) ? { [key]: structuredClone(sessionValues[key]) } : {}; },
+        async set(entries) { Object.assign(sessionValues, structuredClone(entries)); },
+        async remove(key) { delete sessionValues[key]; },
+      },
+      randomBytes(length) { return new Uint8Array(length).fill(++randomValue); },
+      epochNow: () => 1_788_000_000_000,
+      capturePolicy: createCapturePolicyV1({ mode: options.noPixels ? 'no-pixels' : 'full-evidence', includeQuery: false }),
+      privacyDecision: options.noPixels
+        ? Object.freeze({ status: 'no-pixels', limitationCode: 'PIXEL_CAPTURE_OMITTED' })
+        : Object.freeze({
+          status: 'allowed', consentCapabilityId: 'consent-a', documentId: 'document-a',
+          urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+        }),
+      ...(options.noPixels ? {} : { consentAuthority: Object.freeze({ async consume() { return true; } }) }),
+    }),
+  });
   if (options.composeMap || options.mapFailure) adapter.composeAnnouncementMap = async input => {
     events.push('map');
     if (options.mapFailure) throw options.mapFailure;
@@ -390,6 +417,19 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
   assert.equal(Object.isFrozen(model.occurrences), true);
   assert.doesNotThrow(() => JSON.stringify(model));
   assert.doesNotMatch(JSON.stringify(model), /REMOVE|SECRET|user:pass|password=/i);
+});
+
+test('public compatibility path defaults to an owned proof boundary and performs no pixel operation without consent', async () => {
+  const adapter = fakeAdapter({ noPixels: true });
+  const model = await runAudit({
+    url: 'https://example.test/?secret=ERASE', chromeAdapter: adapter,
+    now: clock, idFactory: () => 'audit-owned-no-pixels',
+  });
+  assert.equal(adapter.counts.screenshots, 0);
+  assert.ok(adapter.events.indexOf('create-tab') < adapter.events.findIndex(value => value.startsWith('navigate:')));
+  assert.ok(adapter.events.findIndex(value => value.startsWith('navigate:')) < adapter.events.findIndex(value => value.startsWith('remove-tab:')));
+  assert.equal(Object.hasOwn(model, 'checkpoint'), false);
+  assert.doesNotMatch(JSON.stringify(model), /owner-|navigationToken|urlSessionDigest|ERASE/u);
 });
 
 test('orders capture→axe→collect→probes→core→normalize, correlates target-size by node and drops raw axe', async () => {

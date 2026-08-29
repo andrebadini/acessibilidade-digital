@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { captureFocusLocator, createChromeAdapter, resolveActiveNodeId, restoreFocusLocator } from '../../src/background/chrome-adapter.js';
+import { AUDIT_EXECUTION_INTERNAL, captureFocusLocator, createChromeAdapter, resolveActiveNodeId, restoreFocusLocator } from '../../src/background/chrome-adapter.js';
 
 test('captures and restores focus for elements without DOM IDs', () => {
   const first = { localName: 'button', id: '', parentElement: null };
@@ -58,9 +58,19 @@ function chromeFake() {
       },
       detach: async target => calls.push(['detach', target]),
     },
+    storage: { session: { async get() { return {}; }, async set() {}, async remove() {} } },
   };
   return { chromeApi, calls, updated, removed };
 }
+
+test('keeps the real session area and CSPRNG behind a non-enumerable execution contract', () => {
+  const fake = chromeFake();
+  const adapter = createChromeAdapter(fake.chromeApi);
+  assert.equal(Object.keys(adapter).includes(String(AUDIT_EXECUTION_INTERNAL)), false);
+  assert.equal(Object.getOwnPropertyDescriptor(adapter, AUDIT_EXECUTION_INTERNAL).enumerable, false);
+  assert.equal(adapter[AUDIT_EXECUTION_INTERNAL].sessionArea, fake.chromeApi.storage.session);
+  assert.equal(adapter[AUDIT_EXECUTION_INTERNAL].randomBytes(16).byteLength, 16);
+});
 
 test('proves a fresh top document identity without returning its raw URL', async () => {
   const fake = chromeFake();

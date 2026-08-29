@@ -26,6 +26,15 @@ import { normalizeAuditUrl } from '../core/url.js';
 import { axeEquivalenceForAuditaRule } from '../core/normative/axe-nbr-crosswalk.js';
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
 import { section508ReferencesForWcag } from '../core/normative/section508.js';
+import { AUDIT_EXECUTION_INTERNAL } from './chrome-adapter.js';
+import { createOwnedTabRegistry } from './owned-tabs.js';
+import { createRawNavigationVaultV1 } from './raw-navigation-vault.js';
+import { runObservedTabAudit } from './observed-tab-runner.js';
+import { executeObservedAuditPipeline } from './audit-pipeline.js';
+import { createPageCheckpointRecorder } from './execution-checkpoint.js';
+import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
+import { createCapturePolicyV1, isCapturePolicyV1 } from '../core/privacy/capture-policy.js';
+import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 
 const SCHEMA_VERSION = 1;
 const METHODOLOGY = Object.freeze({ name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 130, itemCount: 146 });
@@ -357,7 +366,7 @@ async function draftModel(state) {
 }
 
 /** Runs one local audit in one disposable tab using only injected Chrome effects. */
-export async function runAudit({ url, chromeAdapter, now = () => new Date().toISOString(), idFactory = () => crypto.randomUUID(), signal, closeAuditTab = true, expectedExtensionId }) {
+async function runLegacyAudit({ url, chromeAdapter, now = () => new Date().toISOString(), idFactory = () => crypto.randomUUID(), signal, closeAuditTab = true, expectedExtensionId }) {
   if (!chromeAdapter || typeof chromeAdapter !== 'object') throw new TypeError('O adapter Chrome é obrigatório.');
   const navigationUrl = normalizeAuditUrl(url);
   const generatedId = idFactory('audit');
@@ -747,4 +756,200 @@ export async function runAudit({ url, chromeAdapter, now = () => new Date().toIS
     if (!state.manualReview.length && state.occurrences.length) state.manualReview = manualQueue(state.occurrences, state.itemResults);
     return draftModel(state);
   }
+}
+
+function opaqueId(randomBytes, prefix) {
+  const bytes = randomBytes(16);
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== 16) throw new TypeError('AUDIT_EXECUTION_DENIED');
+  let text = '';
+  for (const byte of bytes) text += String.fromCharCode(byte);
+  return `${prefix}-${btoa(text).replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=+$/u, '')}`;
+}
+
+function createPauseStore(sessionArea) {
+  const prefix = 'audita:privacy-pause:v1:';
+  return Object.freeze({
+    async persistPause(record) {
+      const key = `${prefix}${record.pauseId}`;
+      try {
+        await sessionArea.set({ [key]: record });
+        const verified = (await sessionArea.get(key))?.[key];
+        if (!verified) throw new Error();
+      } catch { throw new Error('PRIVACY_STATE_UNAVAILABLE'); }
+    },
+    async getPause(pauseId) {
+      try { return (await sessionArea.get(`${prefix}${pauseId}`))?.[`${prefix}${pauseId}`] ?? null; }
+      catch { throw new Error('PRIVACY_STATE_UNAVAILABLE'); }
+    },
+  });
+}
+
+function internalContract(chromeAdapter) {
+  const descriptor = chromeAdapter && typeof chromeAdapter === 'object'
+    ? Object.getOwnPropertyDescriptor(chromeAdapter, AUDIT_EXECUTION_INTERNAL)
+    : null;
+  const value = descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : null;
+  if (!value?.sessionArea || typeof value.sessionArea.get !== 'function' || typeof value.sessionArea.set !== 'function' ||
+    typeof value.sessionArea.remove !== 'function' || typeof value.randomBytes !== 'function') {
+    throw new TypeError('AUDIT_EXECUTION_DENIED');
+  }
+  return value;
+}
+
+function ownValue(value, key) {
+  const descriptor = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key) : null;
+  return descriptor?.enumerable && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+}
+
+/** Internal orchestration result; its pipeline persists only a validated AuditModel V2. */
+export async function runAuditExecution({
+  url, chromeAdapter, now = () => new Date().toISOString(), idFactory = () => crypto.randomUUID(), signal,
+  closeAuditTab = true, expectedExtensionId, pageId = 'page-1', cleanupMode,
+  checkpointAuditId = null,
+}) {
+  const internals = internalContract(chromeAdapter);
+  let navigationUrl = normalizeAuditUrl(url);
+  const requestedEvidence = safeUrl(navigationUrl);
+  const generatedId = idFactory('audit');
+  const auditId = typeof generatedId === 'string' ? generatedId.trim() : '';
+  if (!/^[A-Za-z0-9._:-]{1,160}$/u.test(auditId)) throw new TypeError('O identificador da auditoria é inválido.');
+  const privacyState = internals.privacyState ?? createPauseStore(internals.sessionArea);
+  const resumeRecord = internals.resumePauseId
+    ? await privacyState.getPause(internals.resumePauseId)
+    : null;
+  const resumedOwnerId = ownValue(resumeRecord, 'ownerId');
+  const resumedSessionId = ownValue(resumeRecord, 'sessionCapabilityId');
+  const ownerId = resumeRecord ? resumedOwnerId : opaqueId(internals.randomBytes, 'owner');
+  const sessionCapabilityId = resumeRecord ? resumedSessionId : opaqueId(internals.randomBytes, 'session');
+  if (resumeRecord && (!/^[A-Za-z0-9._:-]{1,160}$/u.test(ownerId ?? '') || !/^[A-Za-z0-9._:-]{1,160}$/u.test(sessionCapabilityId ?? ''))) {
+    throw new TypeError('AUDIT_EXECUTION_DENIED');
+  }
+  const rawNavigationVault = createRawNavigationVaultV1({
+    sessionArea: internals.sessionArea, now: internals.epochNow ?? Date.now,
+    randomBytes: internals.randomBytes,
+  });
+  const issued = resumeRecord
+    ? { navigationToken: 'A'.repeat(22) }
+    : await rawNavigationVault.putInternal({ ownerId, rawUrl: navigationUrl });
+  navigationUrl = null;
+  const ownedTabs = createOwnedTabRegistry({ sessionArea: internals.sessionArea, chromeAdapter, now });
+  const inventory = await createInstalledCoreRuleInventory();
+  const resumeCheckpoint = ownValue(resumeRecord, 'checkpoint');
+  const resumePages = ownValue(resumeCheckpoint, 'pages');
+  const resumePage = ownValue(resumePages, '0');
+  const checkpointStartedAt = ownValue(resumePage, 'startedAt');
+  const checkpointRecorder = await createPageCheckpointRecorder({
+    auditId: checkpointAuditId ?? auditId, pageId,
+    startedAt: resumeRecord ? canonicalTime(checkpointStartedAt) : canonicalTime(now()),
+    rulesVersion: inventory.rulesVersion, inventory,
+    onCheckpoint: internals.onExecutionCheckpoint ?? (async () => {}),
+  });
+  const resumedPolicy = ownValue(resumeRecord, 'capturePolicy');
+  const capturePolicy = isCapturePolicyV1(internals.capturePolicy)
+    ? internals.capturePolicy
+    : isCapturePolicyV1(resumedPolicy) ? resumedPolicy
+    : createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false });
+  const privacyDecision = internals.privacyDecision ?? (
+    capturePolicy.mode === 'no-pixels'
+      ? Object.freeze({ status: 'no-pixels', limitationCode: 'PIXEL_CAPTURE_OMITTED' })
+      : null
+  );
+  if (!privacyDecision) throw new TypeError('AUDIT_EXECUTION_DENIED');
+  let legacyDraft = null;
+  let legacyModel = null;
+  const pipeline = args => executeObservedAuditPipeline({
+    ...args,
+    services: {
+      async collectObservedPage({ observedTarget }) {
+        const observedAdapter = {
+          ...chromeAdapter,
+          async createTab() { return { id: observedTarget.tabId, windowId: observedTarget.windowId }; },
+          async navigateTab() {},
+          async waitForStable() { return { url: observedTarget.urlEvidence || requestedEvidence }; },
+          async removeTab(tabId) {
+            if (closeAuditTab === false) return;
+            const current = await ownedTabs.get(ownerId);
+            const removed = await ownedTabs.removeOwned({ ownerId, auditId, tabId, fromState: current?.state });
+            if (removed.state !== 'removed') throw new Error('TAB_CLOSE_FAILED');
+          },
+          ...(capturePolicy.captureFullPage ? {} : {
+            async captureFullPage() { throw new Error('PIXEL_CAPTURE_OMITTED'); },
+            async captureElement() { throw new Error('PIXEL_CAPTURE_OMITTED'); },
+            composeAnnouncementMap: undefined,
+          }),
+        };
+        const draft = await runLegacyAudit({
+          url: requestedEvidence, chromeAdapter: observedAdapter, now,
+          idFactory: () => auditId, signal, closeAuditTab, expectedExtensionId,
+        });
+        legacyDraft = draft;
+        legacyModel = await enrichAuditForReport(draft, {
+          now, expectedExtensionId,
+          browserVersion: draft.environment?.chromeVersion || 'não disponível',
+          rulesVersion: draft.methodology?.version || '1.0.0',
+        });
+        return { version: 1, kind: 'legacy-observation' };
+      },
+      async runCoreRules() { return { ruleResults: legacyModel.ruleResults.filter(result => result.source?.engine === 'audita-core') }; },
+      async buildAuditModel() { return legacyModel; },
+      async persistAuditModel(model) { await internals.persistAuditModel?.(model); },
+    },
+  });
+  const failureModelFactory = async ({ code, status }) => {
+    const draft = await runLegacyAudit({
+      url: requestedEvidence,
+      chromeAdapter: { async createTab() { throw new Error('AUDIT_FAILED'); } },
+      now, idFactory: () => auditId, signal: undefined, closeAuditTab: false, expectedExtensionId,
+    });
+    const compatible = structuredClone(draft);
+    compatible.session.status = status;
+    compatible.session.partial = false;
+    if (code === 'AUDIT_ABORTED') compatible.session.diagnostics.push(diagnostic(
+      'AUDIT_ABORTED', 'A auditoria foi cancelada.', canonicalTime(now()), false,
+    ));
+    const failedDraft = deepFreeze(compatible);
+    if (!legacyDraft) legacyDraft = failedDraft;
+    return failedDraft;
+  };
+  let navigationAttempted = false;
+  const executionAdapter = {
+    ...chromeAdapter,
+    async navigateTab(...args) {
+      navigationAttempted = true;
+      return chromeAdapter.navigateTab(...args);
+    },
+  };
+  const resumedOwnership = resumeRecord ? await ownedTabs.get(ownerId) : null;
+  const observed = await runObservedTabAudit({
+    auditId, sessionCapabilityId,
+    target: { kind: 'disposable', ownerId, navigationToken: issued.navigationToken, cleanupMode: cleanupMode ?? resumedOwnership?.cleanupMode ?? (closeAuditTab === false ? 'retain-after-observation' : 'always') },
+    capturePolicy, privacyDecision, checkpointRecorder, signal, chromeAdapter: executionAdapter, ownedTabs, rawNavigationVault,
+    pipeline, privacyState,
+    consentAuthority: internals.consentAuthority, failureModelFactory,
+    resumePauseId: internals.resumePauseId, now,
+  });
+  let compatibleModel = legacyDraft ?? observed.model;
+  if (observed.ownershipState === 'cleanup-pending' && legacyModel) compatibleModel = legacyModel;
+  if (navigationAttempted && compatibleModel?.schemaVersion === 1 && compatibleModel.attempted !== true) {
+    const mutable = structuredClone(compatibleModel);
+    mutable.attempted = true;
+    compatibleModel = deepFreeze(mutable);
+  }
+  if (observed.ownershipState === 'cleanup-pending' && compatibleModel?.schemaVersion === 1 &&
+    !compatibleModel.session.diagnostics.some(value => value.code === 'TAB_CLOSE_FAILED')) {
+    const mutable = structuredClone(compatibleModel);
+    mutable.session.diagnostics.push(diagnostic(
+      'TAB_CLOSE_FAILED', 'A aba descartável não pôde ser fechada automaticamente.', canonicalTime(now()), true,
+    ));
+    if (mutable.session.status === 'complete') mutable.session.status = 'partial';
+    mutable.session.partial = mutable.session.status === 'partial';
+    compatibleModel = deepFreeze(mutable);
+  }
+  return Object.freeze({ ...observed, model: compatibleModel });
+}
+
+/** Compatibility façade: exact legacy call shape and model-only return. */
+export async function runAudit({ url, chromeAdapter, now = () => new Date().toISOString(), idFactory = () => crypto.randomUUID(), signal, closeAuditTab = true, expectedExtensionId }) {
+  const execution = await runAuditExecution({ url, chromeAdapter, now, idFactory, signal, closeAuditTab, expectedExtensionId });
+  return execution.model;
 }

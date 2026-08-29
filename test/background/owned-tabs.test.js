@@ -58,10 +58,10 @@ test('registers the exact owned-tab record and applies owner/audit/tab/state CAS
 test('refuses foreign tab removal and journals failed owned cleanup', async () => {
   const { adapter, calls, owned } = fixture();
   await owned.registerCreated(created);
-  await assert.rejects(() => owned.removeOwned({ ownerId: 'owner-a', tabId: 99 }), /OWNERSHIP_DENIED/u);
+  await assert.rejects(() => owned.removeOwned({ ownerId: 'owner-a', auditId: 'audit-a', tabId: 99, fromState: 'created' }), /OWNERSHIP_DENIED/u);
   assert.deepEqual(calls, []);
   adapter.removeError = true;
-  assert.equal((await owned.removeOwned({ ownerId: 'owner-a', tabId: 41 })).state, 'cleanup-pending');
+  assert.equal((await owned.removeOwned({ ownerId: 'owner-a', auditId: 'audit-a', tabId: 41, fromState: 'created' })).state, 'cleanup-pending');
   assert.deepEqual(calls, [41]);
   assert.equal((await owned.get('owner-a')).state, 'cleanup-pending');
 });
@@ -70,7 +70,7 @@ test('removes only the exact owned tab and never registers the same owner twice'
   const { calls, owned } = fixture();
   await owned.registerCreated(created);
   await assert.rejects(() => owned.registerCreated(created), /OWNERSHIP_DENIED/u);
-  const removed = await owned.removeOwned({ ownerId: 'owner-a', tabId: 41 });
+  const removed = await owned.removeOwned({ ownerId: 'owner-a', auditId: 'audit-a', tabId: 41, fromState: 'created' });
   assert.equal(removed.state, 'removed');
   assert.deepEqual(calls, [41]);
   assert.equal((await owned.get('owner-a')).state, 'removed');
@@ -80,6 +80,37 @@ test('rejects malformed or transplanted ownership records before any tab effect'
   const { sessionArea, calls, owned } = fixture();
   await owned.registerCreated(created);
   sessionArea.values['audita:owned-tab:v1:owner-a'].extra = true;
-  await assert.rejects(() => owned.removeOwned({ ownerId: 'owner-a', tabId: 41 }), /OWNERSHIP_DENIED/u);
+  await assert.rejects(() => owned.removeOwned({ ownerId: 'owner-a', auditId: 'audit-a', tabId: 41, fromState: 'created' }), /OWNERSHIP_DENIED/u);
+  assert.deepEqual(calls, []);
+});
+
+test('requires the full owner/audit/tab/state CAS for every cleanup mutation', async () => {
+  const { calls, owned } = fixture();
+  await owned.registerCreated(created);
+  for (const input of [
+    { ownerId: 'owner-a', tabId: 41, fromState: 'created' },
+    { ownerId: 'owner-a', auditId: 'audit-b', tabId: 41, fromState: 'created' },
+    { ownerId: 'owner-a', auditId: 'audit-a', tabId: 41, fromState: 'observing' },
+  ]) await assert.rejects(() => owned.removeOwned(input), /OWNERSHIP_DENIED/u);
+  assert.deepEqual(calls, []);
+  assert.equal((await owned.removeOwned({
+    ownerId: 'owner-a', auditId: 'audit-a', tabId: 41, fromState: 'created',
+  })).state, 'removed');
+});
+
+test('revalidates ownership immediately before the tab effect', async () => {
+  const { sessionArea, calls, owned } = fixture();
+  await owned.registerCreated(created);
+  const originalGet = sessionArea.get.bind(sessionArea);
+  let reads = 0;
+  sessionArea.get = async key => {
+    const result = await originalGet(key);
+    reads += 1;
+    if (reads === 2) sessionArea.values[key].auditId = 'audit-raced';
+    return result;
+  };
+  await assert.rejects(() => owned.removeOwned({
+    ownerId: 'owner-a', auditId: 'audit-a', tabId: 41, fromState: 'created',
+  }), /OWNERSHIP_DENIED/u);
   assert.deepEqual(calls, []);
 });

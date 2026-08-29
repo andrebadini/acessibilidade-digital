@@ -5,6 +5,8 @@ import { createCdpClient, createChromeDebuggerTransport } from '../browser/cdp-c
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
 import { sanitizeResourceUrl } from '../core/normalize-snapshot.js';
 
+export const AUDIT_EXECUTION_INTERNAL = Symbol('audita.audit-execution-internal');
+
 function timeoutError() {
   return new DOMException('A página não ficou estável dentro do tempo limite.', 'TimeoutError');
 }
@@ -237,7 +239,7 @@ export function createChromeAdapter(chromeApi, options = {}) {
     };
   };
 
-  return {
+  const adapter = {
     createTab(options) { return invoke(chromeApi, chromeApi.tabs, 'create', options); },
     navigateTab(tabId, url) { return invoke(chromeApi, chromeApi.tabs, 'update', tabId, { url }); },
     async probeDocumentIdentity(tabId) {
@@ -397,4 +399,23 @@ export function createChromeAdapter(chromeApi, options = {}) {
     },
     removeTab(tabId) { return invoke(chromeApi, chromeApi.tabs, 'remove', tabId); },
   };
+  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
+    enumerable: false,
+    value: Object.freeze({
+      sessionArea: chromeApi.storage?.session,
+      randomBytes(length) {
+        const bytes = new Uint8Array(length);
+        globalThis.crypto.getRandomValues(bytes);
+        return bytes;
+      },
+      ...(options.capturePolicy ? { capturePolicy: options.capturePolicy } : {}),
+      ...(options.privacyDecision ? { privacyDecision: options.privacyDecision } : {}),
+      ...(options.privacyState ? { privacyState: options.privacyState } : {}),
+      ...(options.consentAuthority ? { consentAuthority: options.consentAuthority } : {}),
+      ...(options.resumePauseId ? { resumePauseId: options.resumePauseId } : {}),
+      ...(options.onExecutionCheckpoint ? { onExecutionCheckpoint: options.onExecutionCheckpoint } : {}),
+      ...(options.persistAuditModel ? { persistAuditModel: options.persistAuditModel } : {}),
+    }),
+  });
+  return adapter;
 }

@@ -74,3 +74,18 @@ test('merges pages in declared order and rejects audit, duplicate, unknown, outc
     assert.throws(() => mergeExecutionCheckpoint(input), /CHECKPOINT_MERGE_DENIED/u);
   }
 });
+
+test('rejects hostile checkpoint accessors without invoking them', async () => {
+  const inventory = await createInstalledCoreRuleInventory();
+  let getterCalls = 0;
+  const hostile = { version: 1, auditId: 'audit-a' };
+  Object.defineProperty(hostile, 'pages', {
+    enumerable: true,
+    get() { getterCalls += 1; return []; },
+  });
+  assert.throws(() => mergeExecutionCheckpoint({
+    auditId: 'audit-a', prior: null, pageSnapshot: hostile, pageOrder: ['page-1'],
+  }), /CHECKPOINT_MERGE_DENIED/u);
+  assert.equal(getterCalls, 0);
+  assert.ok(inventory.ruleIds.length > 0);
+});

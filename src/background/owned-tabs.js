@@ -72,19 +72,26 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
     return { key, record };
   };
   const persist = async (key, record) => {
-    await sessionArea.set({ [key]: record });
-    const verified = exactRecord((await sessionArea.get(key))?.[key], record.ownerId);
+    try { await sessionArea.set({ [key]: record }); } catch { throw denied(); }
+    let verified;
+    try { verified = exactRecord((await sessionArea.get(key))?.[key], record.ownerId); } catch { throw denied(); }
     if (!verified || RECORD_KEYS.some(field => verified[field] !== record[field])) throw denied();
     return frozen(verified);
   };
   const compare = (record, { auditId, tabId, fromState }) => {
-    if (auditId !== undefined && record.auditId !== auditId) throw denied();
+    if (!validId(auditId) || record.auditId !== auditId) throw denied();
     if (!Number.isSafeInteger(tabId) || record.tabId !== tabId) throw denied();
-    if (fromState !== undefined && record.state !== fromState) throw denied();
+    if (!STATES.has(fromState) || record.state !== fromState) throw denied();
   };
-  const updateState = async ({ key, record }, state) => persist(key, {
-    ...record, state, updatedAt: canonicalTime(now()),
-  });
+  const updateState = async ({ key, record }, state, expected) => {
+    const fresh = await read(record.ownerId);
+    if (!fresh.record) throw denied();
+    compare(fresh.record, expected);
+    const confirmed = await read(record.ownerId);
+    if (!confirmed.record) throw denied();
+    compare(confirmed.record, expected);
+    return persist(key, { ...confirmed.record, state, updatedAt: canonicalTime(now()) });
+  };
 
   return Object.freeze({
     registerCreated(input) {
@@ -96,13 +103,19 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
         }
         const current = await read(input.ownerId);
         if (current.record) throw denied();
+        const confirmed = await read(input.ownerId);
+        if (confirmed.record) throw denied();
         const at = canonicalTime(now());
-        return persist(current.key, {
+        const base = {
           version: 1, ownerId: input.ownerId, auditId: input.auditId,
           sessionCapabilityId: input.sessionCapabilityId, tabId: input.tabId,
           windowId: input.windowId, cleanupMode: input.cleanupMode,
           state: 'created', createdAt: at, updatedAt: at,
-        });
+        };
+        try { return await persist(confirmed.key, base); } catch {
+          const journal = { ...base, state: 'cleanup-pending', updatedAt: canonicalTime(now()) };
+          return persist(confirmed.key, journal);
+        }
       });
     },
     transition(input) {
@@ -111,19 +124,29 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
         if (!current.record || !validId(input?.auditId) || !STATES.has(input?.fromState) ||
           !STATES.has(input?.toState) || !TRANSITIONS.has(`${input.fromState}:${input.toState}`)) throw denied();
         compare(current.record, input);
-        return updateState(current, input.toState);
+        return updateState(current, input.toState, input);
       });
     },
     removeOwned(input) {
       return serialized(async () => {
         const current = await read(input?.ownerId);
         if (!current.record || current.record.state === 'removed') throw denied();
-        compare(current.record, { tabId: input?.tabId });
+        compare(current.record, input ?? {});
+        if (!['created', 'observing', 'retained-for-review', 'cleanup-pending'].includes(input.fromState)) throw denied();
+        const pending = input.fromState === 'cleanup-pending'
+          ? current.record
+          : await updateState(current, 'cleanup-pending', input);
+        const effectRead = await read(input.ownerId);
+        compare(effectRead.record, { ...input, fromState: 'cleanup-pending' });
         try {
-          await chromeAdapter.removeTab(current.record.tabId);
-          return updateState(current, 'removed');
+          await chromeAdapter.removeTab(effectRead.record.tabId);
+          const afterEffect = await read(input.ownerId);
+          compare(afterEffect.record, { ...input, fromState: 'cleanup-pending' });
+          return updateState(afterEffect, 'removed', { ...input, fromState: 'cleanup-pending' });
         } catch {
-          return updateState(current, 'cleanup-pending');
+          const verified = await read(input.ownerId);
+          compare(verified.record, { ...input, fromState: 'cleanup-pending' });
+          return frozen(verified.record);
         }
       });
     },
@@ -132,7 +155,7 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
         const current = await read(input?.ownerId);
         if (!current.record || current.record.state === 'removed') throw denied();
         compare(current.record, input);
-        return updateState(current, 'cleanup-pending');
+        return updateState(current, 'cleanup-pending', input);
       });
     },
     get(ownerId) {

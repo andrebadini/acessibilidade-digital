@@ -28,3 +28,17 @@ test('rejects unknown modes and non-boolean query authority', () => {
     assert.throws(() => createCapturePolicyV1(input), /CAPTURE_POLICY_INVALID/u);
   }
 });
+
+test('rejects hostile accessors and symbols without invoking them', () => {
+  let getterCalls = 0;
+  const input = { includeQuery: false };
+  Object.defineProperty(input, 'mode', {
+    enumerable: true,
+    get() { getterCalls += 1; return 'no-pixels'; },
+  });
+  assert.throws(() => createCapturePolicyV1(input), /CAPTURE_POLICY_INVALID/u);
+  const symbolInput = { mode: 'no-pixels', includeQuery: false };
+  Object.defineProperty(symbolInput, Symbol('hidden'), { enumerable: true, value: true });
+  assert.throws(() => createCapturePolicyV1(symbolInput), /CAPTURE_POLICY_INVALID/u);
+  assert.equal(getterCalls, 0);
+});

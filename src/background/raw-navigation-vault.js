@@ -44,6 +44,17 @@ function unavailable() {
   return new Error('RAW_NAVIGATION_UNAVAILABLE');
 }
 
+function validClock(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+async function erased(sessionArea, key) {
+  try {
+    await sessionArea.remove(key);
+    return !Object.hasOwn(await sessionArea.get(key), key);
+  } catch { return false; }
+}
+
 export function createRawNavigationVaultV1({ sessionArea, now, randomBytes }) {
   if (!sessionArea || typeof sessionArea.get !== 'function' || typeof sessionArea.set !== 'function' ||
     typeof sessionArea.remove !== 'function' || typeof now !== 'function' || typeof randomBytes !== 'function') {
@@ -73,45 +84,43 @@ export function createRawNavigationVaultV1({ sessionArea, now, randomBytes }) {
     putInternal({ ownerId, rawUrl }) {
       return serialized(async () => {
         if (!validId(ownerId) || !validRawUrl(rawUrl)) throw new TypeError('RAW_NAVIGATION_INVALID');
-        const issuedAt = now();
-        if (!Number.isSafeInteger(issuedAt)) throw new TypeError('RAW_NAVIGATION_INVALID');
+        let issuedAt;
+        try { issuedAt = now(); } catch { throw new TypeError('RAW_NAVIGATION_INVALID'); }
+        if (!validClock(issuedAt) || issuedAt > Number.MAX_SAFE_INTEGER - TTL_MS) throw new TypeError('RAW_NAVIGATION_INVALID');
         const navigationToken = encodeToken(randomBytes(16));
         const expiresAt = issuedAt + TTL_MS;
         const key = `${PREFIX}${navigationToken}`;
-        if (Object.hasOwn(await sessionArea.get(key), key)) throw new Error('RAW_NAVIGATION_UNAVAILABLE');
-        await sessionArea.set({ [key]: {
+        try {
+          if (Object.hasOwn(await sessionArea.get(key), key)) throw unavailable();
+          await sessionArea.set({ [key]: {
           version: 1, navigationToken, ownerId, rawUrl, issuedAt, expiresAt, state: 'prepared',
-        } });
+          } });
+          const verified = exactOwnData((await sessionArea.get(key))?.[key], RECORD_KEYS);
+          if (!verified || RECORD_KEYS.some(field => verified[field] !== ({
+            version: 1, navigationToken, ownerId, rawUrl, issuedAt, expiresAt, state: 'prepared',
+          })[field])) throw unavailable();
+        } catch { throw unavailable(); }
         return Object.freeze({ navigationToken, expiresAt });
       });
     },
     takeInternal({ ownerId, navigationToken }) {
       return serialized(async () => {
         const { key, record } = await readValid(ownerId, navigationToken);
-        if (now() >= record.expiresAt) {
-          try { await sessionArea.remove(key); } catch { /* fail closed */ }
+        let current;
+        try { current = now(); } catch { throw unavailable(); }
+        if (!validClock(current)) throw unavailable();
+        if (current >= record.expiresAt) {
+          await erased(sessionArea, key);
           throw unavailable();
         }
-        try { await sessionArea.remove(key); } catch { throw unavailable(); }
-        try {
-          if (Object.hasOwn(await sessionArea.get(key), key)) throw unavailable();
-        } catch (error) {
-          if (error?.message === 'RAW_NAVIGATION_UNAVAILABLE') throw error;
-          throw unavailable();
-        }
+        if (!await erased(sessionArea, key)) throw unavailable();
         return record.rawUrl;
       });
     },
     invalidateInternal({ ownerId, navigationToken }) {
       return serialized(async () => {
         const { key } = await readValid(ownerId, navigationToken);
-        try { await sessionArea.remove(key); } catch { throw unavailable(); }
-        try {
-          if (Object.hasOwn(await sessionArea.get(key), key)) throw unavailable();
-        } catch (error) {
-          if (error?.message === 'RAW_NAVIGATION_UNAVAILABLE') throw error;
-          throw unavailable();
-        }
+        if (!await erased(sessionArea, key)) throw unavailable();
         return Object.freeze({ invalidated: true });
       });
     },

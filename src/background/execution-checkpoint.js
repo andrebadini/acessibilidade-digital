@@ -48,7 +48,10 @@ export async function createPageCheckpointRecorder({ auditId, pageId, startedAt,
       started = true;
       return enqueue(snapshot());
     },
-    record({ ruleId, outcome }) {
+    record(input) {
+      let captured;
+      try { captured = captureExact(input, ['ruleId', 'outcome']); } catch { throw new TypeError('CHECKPOINT_RESULT_DENIED'); }
+      const { ruleId, outcome } = captured;
       if (!started || outcomes.has(ruleId) || !verifiedInventory.ruleIds.includes(ruleId) || !CORE_OUTCOMES.has(outcome)) {
         throw new TypeError('CHECKPOINT_RESULT_DENIED');
       }
@@ -63,38 +66,61 @@ function denyMerge() {
   throw new TypeError('CHECKPOINT_MERGE_DENIED');
 }
 
-function copyPage(page, auditId) {
-  if (!page || typeof page !== 'object' || Array.isArray(page)) denyMerge();
-  const keys = ['pageId', 'attempted', 'startedAt', 'rulesVersion', 'inventoryVersion', 'inventoryHash', 'outcomes'];
+function captureExact(value, keys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) denyMerge();
   let ownKeys;
-  try { ownKeys = Reflect.ownKeys(page); } catch { denyMerge(); }
-  if (ownKeys.length !== keys.length || keys.some(key => !ownKeys.includes(key)) || !validId(page.pageId) ||
-    typeof page.attempted !== 'boolean' || typeof page.rulesVersion !== 'string' ||
-    typeof page.inventoryVersion !== 'string' || !/^[a-f0-9]{64}$/u.test(page.inventoryHash) ||
-    (page.attempted ? !validTime(page.startedAt) : page.startedAt !== null) || !Array.isArray(page.outcomes) ||
-    (!page.attempted && page.outcomes.length > 0)) denyMerge();
+  try { ownKeys = Reflect.ownKeys(value); } catch { denyMerge(); }
+  if (ownKeys.length !== keys.length || keys.some(key => !ownKeys.includes(key))) denyMerge();
+  const copy = {};
+  for (const key of keys) {
+    let descriptor;
+    try { descriptor = Object.getOwnPropertyDescriptor(value, key); } catch { denyMerge(); }
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) denyMerge();
+    copy[key] = descriptor.value;
+  }
+  return copy;
+}
+
+function captureArray(value) {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) denyMerge();
+  let keys;
+  try { keys = Reflect.ownKeys(value); } catch { denyMerge(); }
+  const expected = ['length', ...Array.from({ length: value.length }, (_v, index) => String(index))];
+  if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) denyMerge();
+  return Array.from({ length: value.length }, (_v, index) => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) denyMerge();
+    return descriptor.value;
+  });
+}
+
+function copyPage(page, auditId) {
+  const keys = ['pageId', 'attempted', 'startedAt', 'rulesVersion', 'inventoryVersion', 'inventoryHash', 'outcomes'];
+  const captured = captureExact(page, keys);
+  const rawOutcomes = captureArray(captured.outcomes);
+  if (!validId(captured.pageId) || typeof captured.attempted !== 'boolean' || typeof captured.rulesVersion !== 'string' ||
+    typeof captured.inventoryVersion !== 'string' || !/^[a-f0-9]{64}$/u.test(captured.inventoryHash) ||
+    (captured.attempted ? !validTime(captured.startedAt) : captured.startedAt !== null) ||
+    (!captured.attempted && rawOutcomes.length > 0)) denyMerge();
   const seen = new Set();
-  const outcomes = page.outcomes.map(row => {
-    if (!row || typeof row !== 'object' || Array.isArray(row) ||
-      Reflect.ownKeys(row).length !== 2 || !Object.hasOwn(row, 'ruleId') || !Object.hasOwn(row, 'outcome') ||
-      !validId(row.ruleId) || !CORE_OUTCOMES.has(row.outcome) || seen.has(row.ruleId)) denyMerge();
-    seen.add(row.ruleId);
-    return { ruleId: row.ruleId, outcome: row.outcome };
+  const outcomes = rawOutcomes.map(row => {
+    const capturedRow = captureExact(row, ['ruleId', 'outcome']);
+    if (!validId(capturedRow.ruleId) || !CORE_OUTCOMES.has(capturedRow.outcome) || seen.has(capturedRow.ruleId)) denyMerge();
+    seen.add(capturedRow.ruleId);
+    return { ruleId: capturedRow.ruleId, outcome: capturedRow.outcome };
   });
   if (outcomes.some((row, index) => index > 0 && outcomes[index - 1].ruleId.localeCompare(row.ruleId) >= 0)) denyMerge();
   return {
-    pageId: page.pageId, attempted: page.attempted, startedAt: page.startedAt,
-    rulesVersion: page.rulesVersion, inventoryVersion: page.inventoryVersion,
-    inventoryHash: page.inventoryHash, outcomes,
+    pageId: captured.pageId, attempted: captured.attempted, startedAt: captured.startedAt,
+    rulesVersion: captured.rulesVersion, inventoryVersion: captured.inventoryVersion,
+    inventoryHash: captured.inventoryHash, outcomes,
   };
 }
 
 function copyCheckpoint(value, auditId) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 ||
-    value.auditId !== auditId || !Array.isArray(value.pages) ||
-    Reflect.ownKeys(value).length !== 3 || !Object.hasOwn(value, 'version') ||
-    !Object.hasOwn(value, 'auditId') || !Object.hasOwn(value, 'pages')) denyMerge();
-  const pages = value.pages.map(page => copyPage(page, auditId));
+  const captured = captureExact(value, ['version', 'auditId', 'pages']);
+  if (captured.version !== 1 || captured.auditId !== auditId) denyMerge();
+  const pages = captureArray(captured.pages).map(page => copyPage(page, auditId));
   if (new Set(pages.map(page => page.pageId)).size !== pages.length) denyMerge();
   return pages;
 }

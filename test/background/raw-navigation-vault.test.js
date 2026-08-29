@@ -6,14 +6,23 @@ import { createRawNavigationVaultV1 } from '../../src/background/raw-navigation-
 function createSessionArea() {
   const values = {};
   let removeMode = 'normal';
+  let setMode = 'normal';
+  let getMode = 'normal';
   return {
     values,
     set removeMode(value) { removeMode = value; },
+    set setMode(value) { setMode = value; },
+    set getMode(value) { getMode = value; },
     async get(key) {
+      if (getMode === 'throw') throw new Error('PRIVATE_GET_FAILURE');
       if (key === null) return structuredClone(values);
       return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {};
     },
-    async set(entries) { Object.assign(values, structuredClone(entries)); },
+    async set(entries) {
+      if (setMode === 'throw') throw new Error('PRIVATE_SET_FAILURE');
+      if (setMode === 'noop') return;
+      Object.assign(values, structuredClone(entries));
+    },
     async remove(key) {
       if (removeMode === 'throw') throw new Error('PRIVATE_REMOVE_FAILURE');
       if (removeMode === 'noop') return;
@@ -90,6 +99,49 @@ test('rejects noncanonical URLs and malformed persisted records without exposing
   const issued = await vault.putInternal({ ownerId: 'owner-a', rawUrl: 'https://example.test/?secret=HIDDEN' });
   const key = `audita:raw-navigation:v1:${issued.navigationToken}`;
   sessionArea.values[key].extra = true;
+  await assert.rejects(
+    () => vault.takeInternal({ ownerId: 'owner-a', navigationToken: issued.navigationToken }),
+    error => error?.message === 'RAW_NAVIGATION_UNAVAILABLE',
+  );
+});
+
+test('fails closed on invalid clocks, overflow, and unverifiable put storage', async () => {
+  for (const clockValue of [NaN, Infinity, -1, Number.MAX_SAFE_INTEGER]) {
+    const sessionArea = createSessionArea();
+    const vault = createRawNavigationVaultV1({
+      sessionArea, now: () => clockValue,
+      randomBytes: length => new Uint8Array(length).fill(3),
+    });
+    await assert.rejects(
+      () => vault.putInternal({ ownerId: 'owner-a', rawUrl: 'https://example.test/' }),
+      /RAW_NAVIGATION_INVALID/u,
+    );
+  }
+  for (const setMode of ['throw', 'noop']) {
+    const { sessionArea, vault } = fixture();
+    sessionArea.setMode = setMode;
+    await assert.rejects(
+      () => vault.putInternal({ ownerId: 'owner-a', rawUrl: 'https://example.test/?secret=PRIVATE' }),
+      error => error?.message === 'RAW_NAVIGATION_UNAVAILABLE',
+    );
+  }
+});
+
+test('never returns a raw URL when the consumption clock or storage read fails', async () => {
+  let current = 1_788_000_000_000;
+  const sessionArea = createSessionArea();
+  const vault = createRawNavigationVaultV1({
+    sessionArea, now: () => current,
+    randomBytes: length => new Uint8Array(length).fill(4),
+  });
+  const issued = await vault.putInternal({ ownerId: 'owner-a', rawUrl: 'https://example.test/?secret=NEVER' });
+  current = NaN;
+  await assert.rejects(
+    () => vault.takeInternal({ ownerId: 'owner-a', navigationToken: issued.navigationToken }),
+    error => error?.message === 'RAW_NAVIGATION_UNAVAILABLE',
+  );
+  current = 1_788_000_000_001;
+  sessionArea.getMode = 'throw';
   await assert.rejects(
     () => vault.takeInternal({ ownerId: 'owner-a', navigationToken: issued.navigationToken }),
     error => error?.message === 'RAW_NAVIGATION_UNAVAILABLE',

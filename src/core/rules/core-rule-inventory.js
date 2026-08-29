@@ -32,6 +32,10 @@ function exactKeys(value, expected) {
 function validRuleIds(ruleIds) {
   if (!Array.isArray(ruleIds) || Object.getPrototypeOf(ruleIds) !== Array.prototype ||
     ruleIds.length !== INSTALLED_RULE_IDS.length) return false;
+  let keys;
+  try { keys = Reflect.ownKeys(ruleIds); } catch { return false; }
+  const expected = ['length', ...INSTALLED_RULE_IDS.map((_value, index) => String(index))];
+  if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) return false;
   for (let index = 0; index < ruleIds.length; index += 1) {
     if (ownData(ruleIds, String(index)) !== INSTALLED_RULE_IDS[index]) return false;
   }
@@ -65,7 +69,7 @@ export async function verifyCoreRuleInventory(inventory) {
       !validRuleIds(ruleIds) || typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(sha256)) {
       throw new TypeError();
     }
-    const copiedIds = [...ruleIds];
+    const copiedIds = Array.from({ length: ruleIds.length }, (_value, index) => ownData(ruleIds, String(index)));
     if (await inventoryHash(inventoryVersion, rulesVersion, copiedIds) !== sha256) throw new TypeError();
     return Object.freeze({
       inventoryVersion,

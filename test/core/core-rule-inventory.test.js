@@ -48,3 +48,14 @@ test('fails closed for wrong shapes, version, ordering, membership, duplicates, 
     await assert.rejects(() => verifyCoreRuleInventory(inventory), /CORE_INVENTORY_UNVERIFIED/u);
   }
 });
+
+test('rejects a hostile own iterator without invoking it', async () => {
+  const inventory = await handBuiltInventory();
+  let iteratorCalls = 0;
+  Object.defineProperty(inventory.ruleIds, Symbol.iterator, {
+    enumerable: true,
+    value() { iteratorCalls += 1; throw new Error('PRIVATE_ITERATOR'); },
+  });
+  await assert.rejects(() => verifyCoreRuleInventory(inventory), /CORE_INVENTORY_UNVERIFIED/u);
+  assert.equal(iteratorCalls, 0);
+});

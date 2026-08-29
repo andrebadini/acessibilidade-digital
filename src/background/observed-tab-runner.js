@@ -1,6 +1,7 @@
 import { canonicalTime } from './run-audit.js';
 import { isObservedTargetV1 } from './audit-pipeline.js';
 import { isCapturePolicyV1 } from '../core/privacy/capture-policy.js';
+import { canonicalStringify } from '../core/report/canonical-json.js';
 
 const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
 const TARGET_KEYS = Object.freeze({
@@ -21,18 +22,35 @@ function exactKeys(value, expected) {
   }
 }
 
-function validTarget(target) {
+function captureExact(value, expected) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  try {
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) return null;
+    const copy = {};
+    for (const key of expected) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      copy[key] = descriptor.value;
+    }
+    return copy;
+  } catch { return null; }
+}
+
+function captureTarget(target) {
   if (!target || typeof target !== 'object' || Array.isArray(target)) return false;
-  const keys = TARGET_KEYS[target.kind];
-  if (!keys || !exactKeys(target, keys)) return false;
-  if (target.kind === 'attached') {
-    return Number.isSafeInteger(target.tabId) && target.tabId >= 0 &&
-      Number.isSafeInteger(target.windowId) && target.windowId >= 0 && validId(target.documentId) &&
-      typeof target.initialUrlEvidence === 'string' && DIGEST.test(target.initialUrlSessionDigest);
+  const kind = Object.getOwnPropertyDescriptor(target, 'kind');
+  if (!kind?.enumerable || !Object.hasOwn(kind, 'value')) return null;
+  const copy = captureExact(target, TARGET_KEYS[kind.value] ?? []);
+  if (!copy) return null;
+  if (copy.kind === 'attached') {
+    return Number.isSafeInteger(copy.tabId) && copy.tabId >= 0 &&
+      Number.isSafeInteger(copy.windowId) && copy.windowId >= 0 && validId(copy.documentId) &&
+      typeof copy.initialUrlEvidence === 'string' && DIGEST.test(copy.initialUrlSessionDigest) ? Object.freeze(copy) : null;
   }
-  return validId(target.ownerId) && typeof target.navigationToken === 'string' &&
-    /^[A-Za-z0-9_-]{22}$/u.test(target.navigationToken) &&
-    ['always', 'retain-after-observation'].includes(target.cleanupMode);
+  return validId(copy.ownerId) && typeof copy.navigationToken === 'string' &&
+    /^[A-Za-z0-9_-]{22}$/u.test(copy.navigationToken) &&
+    ['always', 'retain-after-observation'].includes(copy.cleanupMode) ? Object.freeze(copy) : null;
 }
 
 function proofMatches(left, right) {
@@ -51,11 +69,11 @@ function makeObserved(target, proof, urlEvidence) {
   return Object.freeze(observed);
 }
 
-function diagnosticStatus(signal) {
-  return signal?.aborted ? 'cancelled' : 'failed';
+function diagnosticStatus(signal, code) {
+  return signal?.aborted || code === 'AUDIT_ABORTED' ? 'cancelled' : 'failed';
 }
 
-function safeModel(factory, auditId, code, status) {
+async function safeModel(factory, auditId, code, status) {
   if (typeof factory !== 'function') {
     return Object.freeze({
       schemaVersion: 2, auditId,
@@ -65,11 +83,66 @@ function safeModel(factory, auditId, code, status) {
   return factory({ auditId, code, status });
 }
 
+function captureDecision(value) {
+  const statusDescriptor = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'status') : null;
+  if (!statusDescriptor?.enumerable || !Object.hasOwn(statusDescriptor, 'value')) return null;
+  const keys = {
+    'no-pixels': ['status', 'limitationCode'],
+    'privacy-paused': ['status', 'pauseId'],
+    allowed: ['status', 'consentCapabilityId', 'documentId', 'urlSessionDigest'],
+    'target-changed': ['status'], aborted: ['status'],
+  }[statusDescriptor.value];
+  return keys ? captureExact(value, keys) : null;
+}
+
+function capturePause(value, disposable) {
+  const keys = ['version', 'auditId', 'pauseId', 'sessionCapabilityId', 'observedTarget', 'capturePolicy', 'signals', 'checkpoint', 'startedAt'];
+  if (disposable) keys.splice(4, 0, 'ownerId');
+  const copy = captureExact(value, keys);
+  if (!copy) return null;
+  try {
+    copy.signals = sanitizeSignals(copy.signals);
+    copy.checkpoint = safePlainData(copy.checkpoint);
+  } catch { return null; }
+  return copy;
+}
+
+function safePlainData(value, seen = new WeakSet()) {
+  if (value === null || ['string', 'boolean'].includes(typeof value)) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (!value || typeof value !== 'object' || seen.has(value)) throw new TypeError('OBSERVED_RUNNER_DENIED');
+  seen.add(value);
+  const keys = Reflect.ownKeys(value);
+  if (keys.some(key => typeof key !== 'string')) throw new TypeError('OBSERVED_RUNNER_DENIED');
+  if (Array.isArray(value)) {
+    const expected = ['length', ...Array.from({ length: value.length }, (_v, index) => String(index))];
+    if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) throw new TypeError('OBSERVED_RUNNER_DENIED');
+    return Array.from({ length: value.length }, (_v, index) => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new TypeError('OBSERVED_RUNNER_DENIED');
+      return safePlainData(descriptor.value, seen);
+    });
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) throw new TypeError('OBSERVED_RUNNER_DENIED');
+  const copy = {};
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new TypeError('OBSERVED_RUNNER_DENIED');
+    copy[key] = safePlainData(descriptor.value, seen);
+  }
+  return copy;
+}
+
 function sanitizeSignals(signals) {
-  if (!Array.isArray(signals)) throw new TypeError('PRIVACY_PROBE_INVALID');
-  return Object.freeze(signals.map(value => {
-    if (!value || typeof value !== 'object' || Array.isArray(value) || !exactKeys(value, ['category', 'count']) ||
-      !validId(value.category) || !Number.isSafeInteger(value.count) || value.count < 1) {
+  if (!Array.isArray(signals) || Object.getPrototypeOf(signals) !== Array.prototype) throw new TypeError('PRIVACY_PROBE_INVALID');
+  let keys;
+  try { keys = Reflect.ownKeys(signals); } catch { throw new TypeError('PRIVACY_PROBE_INVALID'); }
+  const expected = ['length', ...Array.from({ length: signals.length }, (_v, index) => String(index))];
+  if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) throw new TypeError('PRIVACY_PROBE_INVALID');
+  return Object.freeze(Array.from({ length: signals.length }, (_v, index) => {
+    const row = Object.getOwnPropertyDescriptor(signals, String(index));
+    const value = row?.enumerable && Object.hasOwn(row, 'value') ? captureExact(row.value, ['category', 'count']) : null;
+    if (!value || !validId(value.category) || !Number.isSafeInteger(value.count) || value.count < 1) {
       throw new TypeError('PRIVACY_PROBE_INVALID');
     }
     return Object.freeze({ category: value.category, count: value.count });
@@ -94,13 +167,17 @@ export async function runObservedTabAudit({
   resumePauseId,
   now = () => new Date().toISOString(),
 }) {
-  if (!validId(auditId) || !validId(sessionCapabilityId) || !validTarget(target) ||
-    !isCapturePolicyV1(capturePolicy) || !privacyDecision || typeof privacyDecision !== 'object' ||
+  const safeTarget = captureTarget(target);
+  const safeDecision = captureDecision(privacyDecision);
+  if (!validId(auditId) || !validId(sessionCapabilityId) || !safeTarget ||
+    !isCapturePolicyV1(capturePolicy) || !safeDecision ||
     !checkpointRecorder || typeof checkpointRecorder.snapshot !== 'function' ||
     !chromeAdapter || typeof chromeAdapter.probeDocumentIdentity !== 'function' || typeof pipeline !== 'function' ||
     (target.kind === 'disposable' && (!ownedTabs || !rawNavigationVault))) {
     throw new TypeError('OBSERVED_RUNNER_DENIED');
   }
+  target = safeTarget;
+  privacyDecision = safeDecision;
   const startedAt = canonicalTime(now());
   let tabId = target.kind === 'attached' ? target.tabId : null;
   let windowId = target.kind === 'attached' ? target.windowId : null;
@@ -124,14 +201,36 @@ export async function runObservedTabAudit({
       ownershipState = retained?.state === 'retained-for-review' ? 'retained-for-review' : 'cleanup-pending';
       return;
     }
-    const removed = await ownedTabs.removeOwned({ ownerId: target.ownerId, tabId });
+    const removed = await ownedTabs.removeOwned({ ownerId: target.ownerId, auditId, tabId, fromState: current?.state });
     ownershipState = removed.state;
   };
 
   try {
     if (signal?.aborted) throw signal.reason ?? new DOMException('Operação cancelada.', 'AbortError');
+    let resumePause = null;
     let urlEvidence = target.kind === 'attached' ? target.initialUrlEvidence : '';
-    if (target.kind === 'disposable') {
+    if (resumePauseId !== undefined) {
+      const rawPause = typeof privacyState?.getPause === 'function' ? await privacyState.getPause(resumePauseId) : null;
+      resumePause = capturePause(rawPause, target.kind === 'disposable');
+      if (!resumePause || resumePause.version !== 1 || resumePause.auditId !== auditId ||
+        resumePause.pauseId !== resumePauseId || resumePause.sessionCapabilityId !== sessionCapabilityId ||
+        (target.kind === 'disposable' && resumePause.ownerId !== target.ownerId) ||
+        !isObservedTargetV1(resumePause.observedTarget) || !isCapturePolicyV1(resumePause.capturePolicy) ||
+        canonicalStringify(resumePause.capturePolicy) !== canonicalStringify(capturePolicy) ||
+        canonicalStringify(resumePause.checkpoint) !== canonicalStringify(checkpointRecorder.snapshot())) {
+        code = 'PRIVACY_TARGET_CHANGED';
+        throw new Error(code);
+      }
+      tabId = resumePause.observedTarget.tabId;
+      windowId = resumePause.observedTarget.windowId;
+      urlEvidence = resumePause.observedTarget.urlEvidence;
+      if (target.kind === 'disposable') {
+        const owned = await ownedTabs.get(target.ownerId);
+        if (!owned || owned.auditId !== auditId || owned.tabId !== tabId || owned.state !== 'observing') {
+          code = 'PRIVACY_TARGET_CHANGED'; throw new Error(code);
+        }
+      }
+    } else if (target.kind === 'disposable') {
       if (typeof chromeAdapter.createTab !== 'function' || typeof chromeAdapter.navigateTab !== 'function' ||
         typeof chromeAdapter.waitForStable !== 'function') throw new TypeError('OBSERVED_RUNNER_DENIED');
       const created = await chromeAdapter.createTab({ url: 'about:blank', active: true });
@@ -140,10 +239,21 @@ export async function runObservedTabAudit({
       }
       tabId = created.id;
       windowId = created.windowId;
-      await ownedTabs.registerCreated({
-        ownerId: target.ownerId, auditId, sessionCapabilityId, tabId, windowId,
-        cleanupMode: target.cleanupMode,
-      });
+      let registered;
+      try {
+        registered = await ownedTabs.registerCreated({
+          ownerId: target.ownerId, auditId, sessionCapabilityId, tabId, windowId,
+          cleanupMode: target.cleanupMode,
+        });
+      } catch {
+        try { await chromeAdapter.removeTab(tabId); ownershipState = 'removed'; }
+        catch { ownershipState = 'cleanup-pending'; }
+        throw new Error('OWNERSHIP_REGISTRATION_FAILED');
+      }
+      if (registered.state !== 'created') {
+        ownershipState = 'cleanup-pending';
+        throw new Error('OWNERSHIP_REGISTRATION_FAILED');
+      }
       let navigationUrl = null;
       try {
         navigationUrl = await rawNavigationVault.takeInternal({ ownerId: target.ownerId, navigationToken: target.navigationToken });
@@ -163,9 +273,7 @@ export async function runObservedTabAudit({
       throw new Error(code);
     }
     if (resumePauseId !== undefined) {
-      const pause = typeof privacyState?.getPause === 'function' ? await privacyState.getPause(resumePauseId) : null;
-      if (!pause || pause.auditId !== auditId || pause.pauseId !== resumePauseId ||
-        !isObservedTargetV1(pause.observedTarget) || !proofMatches(pause.observedTarget, firstProof)) {
+      if (!proofMatches(resumePause.observedTarget, firstProof)) {
         code = 'PRIVACY_TARGET_CHANGED';
         throw new Error(code);
       }
@@ -176,7 +284,7 @@ export async function runObservedTabAudit({
     }
     observedTarget = makeObserved(target, firstProof, urlEvidence);
     observationState = 'observed';
-    if (target.kind === 'disposable') {
+    if (target.kind === 'disposable' && resumePauseId === undefined) {
       await ownedTabs.transition({ ownerId: target.ownerId, auditId, tabId, fromState: 'created', toState: 'observing' });
     }
 
@@ -189,7 +297,8 @@ export async function runObservedTabAudit({
         typeof privacyState?.persistPause !== 'function') throw new TypeError('PRIVACY_DECISION_DENIED');
       const signals = sanitizeSignals(await chromeAdapter.probePrivacySignals(tabId));
       await privacyState.persistPause({
-        version: 1, auditId, pauseId: privacyDecision.pauseId, observedTarget,
+        version: 1, auditId, pauseId: privacyDecision.pauseId, sessionCapabilityId,
+        ...(target.kind === 'disposable' ? { ownerId: target.ownerId } : {}), observedTarget,
         capturePolicy, signals, checkpoint: checkpointRecorder.snapshot(), startedAt,
       });
       paused = true;
@@ -229,7 +338,7 @@ export async function runObservedTabAudit({
     await cleanupDisposable();
     return Object.freeze({
       status: 'completed', model: piped.model, observedTarget,
-      observationState: 'observed', ownershipState,
+      checkpoint: piped.checkpoint, observationState: 'observed', ownershipState,
     });
   } catch (error) {
     if (error?.name === 'AbortError' || signal?.aborted) code = 'AUDIT_ABORTED';
@@ -237,7 +346,8 @@ export async function runObservedTabAudit({
     try { await cleanupDisposable(); } catch { ownershipState = 'cleanup-pending'; }
     return Object.freeze({
       status: 'failed',
-      model: safeModel(failureModelFactory, auditId, code, diagnosticStatus(signal)),
+      model: await safeModel(failureModelFactory, auditId, code, diagnosticStatus(signal, code)),
+      checkpoint: checkpointRecorder.snapshot(),
       observedTarget,
       observationState: observedTarget ? observationState : (tabId === null ? 'not-started' : 'pre-observation-failure'),
       ownershipState,

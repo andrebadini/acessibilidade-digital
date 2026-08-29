@@ -224,3 +224,74 @@ test('disposable pre-observation failure removes only owned tab and exposes clea
   assert.equal((await ownedTabs.get('owner-a')).state, 'cleanup-pending');
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE|example\.test|owner-a|navigationToken/u);
 });
+
+test('rehydrates a disposable pause without creating, navigating, or consuming its token again', async () => {
+  const sessionArea = createSessionArea();
+  const store = privacyStore();
+  const calls = { create: 0, navigate: 0, remove: 0, pipeline: 0 };
+  const adapter = {
+    async createTab() { calls.create += 1; return { id: 41, windowId: 9 }; },
+    async navigateTab() { calls.navigate += 1; }, async waitForStable() {},
+    async probeDocumentIdentity() { return { tabId: 41, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST_A }; },
+    async getEvidenceUrl() { return 'https://example.test/'; }, async probePrivacySignals() { return []; },
+    async removeTab() { calls.remove += 1; },
+  };
+  const ownedTabs = createOwnedTabRegistry({ sessionArea, chromeAdapter: adapter, now: () => '2026-08-29T10:00:00.000Z' });
+  const vault = createRawNavigationVaultV1({ sessionArea, now: () => 1_788_000_000_000, randomBytes: length => new Uint8Array(length).fill(9) });
+  const issued = await vault.putInternal({ ownerId: 'owner-a', rawUrl: 'https://example.test/?secret=ERASE' });
+  const policy = createCapturePolicyV1({ mode: 'element-only', includeQuery: false });
+  const base = {
+    auditId: 'audit-a', sessionCapabilityId: 'session-a',
+    target: { kind: 'disposable', ownerId: 'owner-a', navigationToken: issued.navigationToken, cleanupMode: 'always' },
+    capturePolicy: policy, checkpointRecorder: checkpointRecorder(), chromeAdapter: adapter,
+    ownedTabs, rawNavigationVault: vault, privacyState: store, failureModelFactory: safeFailureModel,
+    pipeline: async () => { calls.pipeline += 1; return { model: { auditId: 'audit-a' }, checkpoint: checkpointRecorder().snapshot() }; },
+    consentAuthority: { async consume() { return true; } }, now: () => '2026-08-29T10:00:00.000Z',
+  };
+  const paused = await runObservedTabAudit({ ...base, privacyDecision: { status: 'privacy-paused', pauseId: 'pause-a' } });
+  assert.equal(paused.status, 'paused');
+  assert.deepEqual(Object.keys(store.records.get('pause-a')), [
+    'version', 'auditId', 'pauseId', 'sessionCapabilityId', 'ownerId', 'observedTarget',
+    'capturePolicy', 'signals', 'checkpoint', 'startedAt',
+  ]);
+  const resumed = await runObservedTabAudit({
+    ...base, resumePauseId: 'pause-a',
+    privacyDecision: { status: 'allowed', consentCapabilityId: 'consent-a', documentId: 'document-a', urlSessionDigest: DIGEST_A },
+  });
+  assert.equal(resumed.status, 'completed', JSON.stringify(resumed));
+  assert.deepEqual(calls, { create: 1, navigate: 1, remove: 1, pipeline: 1 });
+});
+
+test('persists and rereads cleanup state when ownership registration storage fails once', async () => {
+  const sessionArea = createSessionArea();
+  const originalSet = sessionArea.set.bind(sessionArea);
+  let failed = false;
+  sessionArea.set = async entries => {
+    if (!failed && Object.keys(entries).some(key => key.startsWith('audita:owned-tab:v1:'))) {
+      failed = true; throw new Error('PRIVATE_SET_FAILURE');
+    }
+    return originalSet(entries);
+  };
+  const calls = [];
+  const adapter = {
+    async createTab() { calls.push('create'); return { id: 41, windowId: 9 }; },
+    async navigateTab() { calls.push('navigate'); }, async waitForStable() {},
+    async probeDocumentIdentity() { throw new Error('must not probe'); },
+    async removeTab() { calls.push('remove'); },
+  };
+  const ownedTabs = createOwnedTabRegistry({ sessionArea, chromeAdapter: adapter, now: () => '2026-08-29T10:00:00.000Z' });
+  const vault = createRawNavigationVaultV1({ sessionArea, now: () => 1_788_000_000_000, randomBytes: length => new Uint8Array(length).fill(10) });
+  const issued = await vault.putInternal({ ownerId: 'owner-a', rawUrl: 'https://example.test/' });
+  const result = await runObservedTabAudit({
+    auditId: 'audit-a', sessionCapabilityId: 'session-a',
+    target: { kind: 'disposable', ownerId: 'owner-a', navigationToken: issued.navigationToken, cleanupMode: 'always' },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    privacyDecision: { status: 'no-pixels', limitationCode: 'PIXEL_CAPTURE_OMITTED' },
+    checkpointRecorder: checkpointRecorder(), chromeAdapter: adapter, ownedTabs, rawNavigationVault: vault,
+    pipeline: async () => { throw new Error('must not run'); }, failureModelFactory: safeFailureModel,
+    now: () => '2026-08-29T10:00:00.000Z',
+  });
+  assert.equal(result.ownershipState, 'removed');
+  assert.deepEqual(calls, ['create', 'remove']);
+  assert.equal((await ownedTabs.get('owner-a')).state, 'removed');
+});
