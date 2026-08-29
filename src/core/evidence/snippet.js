@@ -1,4 +1,5 @@
 const SENSITIVE = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
+const PRIVATE_ATTRIBUTE = /(?:^(?:data-(?:audita-)?private|data-nosnippet)$|pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
 const EXECUTABLE = new Set(['script', 'style', 'template']);
 const URL_ATTRIBUTES = new Set(['action', 'cite', 'formaction', 'href', 'poster', 'src']);
 const VOID_ELEMENTS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
@@ -110,6 +111,7 @@ function sanitizeTag(parsed, { contentEditableRoot = false, stripAttributes = fa
     if (contentEditableRoot && !['contenteditable', 'role', 'tabindex', 'aria-labelledby', 'aria-describedby'].includes(name)) continue;
     if (/^on/iu.test(name) || name === 'srcdoc' || name === 'style') continue;
     if (name === 'xlink:href' || name === 'ping' || name === 'srcset') continue;
+    if (PRIVATE_ATTRIBUTE.test(name)) continue;
     if ((parsed.name === 'object' && name === 'data') || (parsed.name === 'embed' && name === 'src')) continue;
     if (parsed.name === 'meta' && String(values['http-equiv']).toLowerCase() === 'refresh' && name === 'content') continue;
     if (SENSITIVE.test(name) && !['id', 'name', 'autocomplete'].includes(name)) continue;
@@ -141,6 +143,7 @@ function sanitizeTag(parsed, { contentEditableRoot = false, stripAttributes = fa
       value = sanitizeUrl(value);
       if (value === null) continue;
     }
+    if (value !== null && !['type', 'autocomplete'].includes(name) && SENSITIVE.test(value)) continue;
     output.push(value === null ? name : `${name}="${escapeAttribute(value)}"`);
   }
   return `<${parsed.name}${output.length ? ` ${output.join(' ')}` : ''}${parsed.selfClosing ? ' /' : ''}>`;

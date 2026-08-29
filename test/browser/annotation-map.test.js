@@ -425,23 +425,14 @@ test('fails explicitly without worker canvas APIs and never mutates the pristine
   assert.equal(JSON.stringify(source), before);
 });
 
-test('keeps production composition fail-closed while the real MV3 gate is inconclusive', async () => {
-  const source = Object.freeze({
-    evidenceId: 'full-page-source', pageId: 'page-1', kind: 'full-page', state: 'pristine', dataUrl: PNG,
-    hash: '431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460', metadata: {},
-  });
-  const before = JSON.stringify(source);
-
+test('records the exact browser proof before enabling the production compositor gate', () => {
   assert.deepEqual(ANNOTATION_MAP_MV3_GATE, {
-    enabled: false,
-    code: 'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE',
-    reason: 'O compositor não foi comprovado de forma conclusiva no worker MV3 real desta versão.',
+    enabled: true,
+    code: 'ANNOTATION_MAP_MV3_E2E_PASSED',
+    reason: 'O compositor foi comprovado pelo fluxo público black-box desta versão.',
+    testedBrowser: 'Google Chrome 151.0.7922.174',
   });
   assert.equal(Object.isFrozen(ANNOTATION_MAP_MV3_GATE), true);
-  await assert.rejects(composeAnnouncementMapForProduction({
-    pageId: 'page-1', snapshot: snapshot([]), fullPageEvidence: source,
-  }), error => error instanceof AnnotationMapError && error.code === ANNOTATION_MAP_MV3_GATE.code);
-  assert.equal(JSON.stringify(source), before);
 });
 
 test('composes and revalidates a strict PNG segment, records recalculable geometry and releases the bitmap', async () => {

@@ -1,0 +1,15 @@
+html { color: #14212b; background: #fff; font-family: system-ui, sans-serif; }
+body { margin: 16px; }
+.tight-targets { display: flex; gap: 0; align-items: start; margin-block: 8px; }
+.small-target {
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #14212b;
+  font: 12px/1 system-ui, sans-serif;
+}
+iframe { display: block; width: 420px; height: 180px; border: 1px solid #14212b; }

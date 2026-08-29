@@ -9,12 +9,10 @@ export function decideAxeE2eExecution({ gate, chromeBinary }) {
   } catch (error) {
     return { action: 'fail', code: error?.code === 'AXE_MV3_CSP_GATE_INCONSISTENT' ? error.code : 'AXE_MV3_CSP_GATE_INVALID' };
   }
-  if (state === 'disabled') {
+  if (typeof chromeBinary !== 'string' || chromeBinary.trim() === '') {
+    if (state !== 'disabled') return { action: 'fail', code: 'AXE_MV3_CSP_BROWSER_REQUIRED' };
     const code = typeof gate?.code === 'string' && SAFE_CODE.test(gate.code) ? gate.code : 'AXE_MV3_CSP_E2E_DISABLED';
     return { action: 'skip', code };
-  }
-  if (typeof chromeBinary !== 'string' || chromeBinary.trim() === '') {
-    return { action: 'fail', code: 'AXE_MV3_CSP_BROWSER_REQUIRED' };
   }
   return { action: 'run', code: 'AXE_MV3_CSP_E2E_REQUIRED' };
 }

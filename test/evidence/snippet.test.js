@@ -32,7 +32,7 @@ test('omits current editable values while preserving static select option labels
     `<div contenteditable=true>${secret}<div title="${secret}"><span>${secret}</span></div></div>`,
   ].join(''));
 
-  assert.equal(source, '<input type="text" name="api_key"><textarea></textarea><select><option>Rótulo público</option><option>Outro</option></select><div contenteditable="true"></div>');
+  assert.equal(source, '<input type="text"><textarea></textarea><select><option>Rótulo público</option><option>Outro</option></select><div contenteditable="true"></div>');
   assert.doesNotMatch(source, /TOPSECRET|\bvalue=|\bselected\b|aria-value|\btitle=/iu);
 });
 
@@ -71,7 +71,7 @@ test('redacts password, token and authorization values across quote styles and c
   const html = "<INPUT TYPE=PASSWORD VALUE=fixture-pass autocomplete='current-password' data-token=fixture-token AUTHORIZATION=Bearer-fixture><input type=hidden name=csrf_token value=fixture-hidden><p data-safe='ok'>Texto</p>";
   const snippet = sanitizeHtmlSnippet(html);
   assert.match(snippet, /&lt;input type=&quot;password&quot; autocomplete=&quot;current-password&quot;&gt;/);
-  assert.match(snippet, /&lt;input type=&quot;hidden&quot; name=&quot;csrf_token&quot;&gt;/);
+  assert.match(snippet, /&lt;input type=&quot;hidden&quot;&gt;/);
   assert.match(snippet, /&lt;p data-safe=&quot;ok&quot;&gt;Texto&lt;\/p&gt;/);
   assert.doesNotMatch(snippet, /fixture-pass|fixture-token|fixture-hidden|Bearer-fixture|authorization|data-token/i);
 });
@@ -96,6 +96,18 @@ test('redacts credential-like values that appear in snippet text nodes', () => {
   const snippet = sanitizeHtmlSnippet('<p>authorization=fixture-auth token: fixture-token conteúdo público</p>');
   assert.equal(snippet, '&lt;p&gt;authorization=[redacted] token: [redacted] conteúdo público&lt;/p&gt;');
   assert.doesNotMatch(snippet, /fixture-auth|fixture-token/);
+});
+
+test('drops private marker attributes and credential-like values from otherwise structural attributes', () => {
+  const marker = 'AXE-MAP-PRIVATE-TOKEN-847261';
+  const privateMarker = 'AXE-MAP-PRIVATE-HTML-592314';
+  const source = sanitizeHtmlSnippetSource(
+    `<button id="token-${marker}" name="session-${marker}" aria-label="Abrir" data-audita-private="${privateMarker}">Abrir</button>`,
+  );
+
+  assert.equal(source, '<button aria-label="Abrir">Abrir</button>');
+  assert.equal(source.includes(marker), false);
+  assert.equal(source.includes(privateMarker), false);
 });
 
 test('is inert under innerHTML and removes duplicate-password and active URL surfaces', () => {

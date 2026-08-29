@@ -11,6 +11,7 @@ import { renderTechnicalJson } from '../src/core/report/earl-json.js';
 import { renderHtmlReport } from '../src/core/report/html.js';
 import { renderPdf } from '../src/browser/render-pdf.js';
 import { AXE_MV3_CSP_GATE, AXE_PROVENANCE, AXE_RUN_CONFIG } from '../src/browser/axe-adapter.js';
+import { ANNOTATION_MAP_MV3_GATE } from '../src/browser/annotation-map.js';
 import { scanNeutralIdentity } from './verify-neutral-identity.mjs';
 import { verifyStaticReportSecurity } from './verify-report-security.mjs';
 
@@ -41,8 +42,19 @@ for (const [name, expected] of Object.entries(axeVendorHashes)) {
 assert.equal(AXE_PROVENANCE.version, '4.13.0');
 assert.equal(AXE_PROVENANCE.runtimeSha256, axeVendorHashes['axe.min.js']);
 assert.equal(AXE_PROVENANCE.packageTarballSha256, '096912f6e77b4b695fc9304b7be65091db42d98de054da674ae222a11cb33f70');
-assert.equal(AXE_MV3_CSP_GATE.enabled, false, 'axe deve permanecer gated sem E2E MV3/CSP conclusivo');
-assert.equal(AXE_RUN_CONFIG.rules['target-size'].enabled, false, 'target-size depende de E2E MV3/CSP conclusivo');
+assert.deepEqual(AXE_MV3_CSP_GATE, {
+  enabled: true,
+  targetSizeEnabled: true,
+  code: 'AXE_MV3_CSP_E2E_PASSED',
+  testedBrowser: 'Google Chrome 151.0.7922.174',
+}, 'axe e target-size exigem a prova black-box pública desta versão');
+assert.deepEqual(AXE_RUN_CONFIG.rules['target-size'], { enabled: true }, 'target-size deve acompanhar o gate axe aprovado');
+assert.deepEqual(ANNOTATION_MAP_MV3_GATE, {
+  enabled: true,
+  code: 'ANNOTATION_MAP_MV3_E2E_PASSED',
+  reason: 'O compositor foi comprovado pelo fluxo público black-box desta versão.',
+  testedBrowser: 'Google Chrome 151.0.7922.174',
+}, 'mapa anotado exige a mesma prova black-box pública desta versão');
 assert.doesNotMatch(JSON.stringify(AXE_RUN_CONFIG), /experimental|section508/iu);
 
 assert.equal(CORE_RULES.length, 130);
@@ -79,7 +91,7 @@ if (process.env.AUDITA_VERIFY_SKIP_TESTS !== '1') {
   assert.equal(suite.status, 0, 'npm test precisa passar');
 }
 
-console.log('verify-project: manifest/CSP, axe 4.13.0 vendor verificado e gated, 130/146 (96/50), identidade neutra, HTML/JSON/PDF, fixtures, privacidade e suíte GREEN');
+console.log('verify-project: manifest/CSP, axe 4.13.0 e mapa aprovados no Chrome 151.0.7922.174, 130/146 (96/50), identidade neutra, HTML/JSON/PDF, fixtures, privacidade e suíte GREEN');
 
 async function sourceFiles(directoryUrl) {
   const directory = directoryUrl.pathname;

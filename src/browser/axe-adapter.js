@@ -1,8 +1,8 @@
 export const AXE_MV3_CSP_GATE = Object.freeze({
-  enabled: false,
-  targetSizeEnabled: false,
-  code: 'AXE_MV3_CSP_E2E_UNAVAILABLE',
-  testedBrowser: 'Chrome for Testing 151.0.7922.138',
+  enabled: true,
+  targetSizeEnabled: true,
+  code: 'AXE_MV3_CSP_E2E_PASSED',
+  testedBrowser: 'Google Chrome 151.0.7922.174',
 });
 
 export const AXE_RUN_CONFIG = Object.freeze({

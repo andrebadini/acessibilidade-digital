@@ -257,13 +257,17 @@ function publishedFindingCounts(occurrences, resultType) {
   return { groups: groups.size, nodes: retained.length };
 }
 
-function derivedApplicability(options, { axeRuleId, mapping, pageId, frameId, selector }) {
+function correlatedTargetNodeId(options, { axeRuleId, mapping, frameId, selector }) {
+  if (mapping?.targetScope !== 'node' || axeRuleId !== 'target-size' || frameId !== 0 || selector === AXE_TARGET_UNAVAILABLE) return null;
+  return targetNodeIdForStructuralSelector(options.snapshot, selector);
+}
+
+function derivedApplicability(options, { axeRuleId, mapping, pageId, frameId, selector, correlatedNodeId }) {
   if (selector === AXE_TARGET_UNAVAILABLE || frameId !== 0 || options.rulesVersion !== AUDITA_RULES_VERSION) return null;
   const item = ITEM_BY_ID.get(mapping.nbrItemRef);
   const snapshot = options.snapshot;
   if (mapping.targetScope === 'node') {
-    if (axeRuleId !== 'target-size') return null;
-    const nodeId = targetNodeIdForStructuralSelector(snapshot, selector);
+    const nodeId = correlatedNodeId;
     if (nodeId === null || !authoritativeCoreTarget(options, mapping, nodeId) || !item?.ruleIds.includes(mapping.auditaRuleId)) return null;
     return deepFreeze({
       confirmed: true, pageId, frameId, target: selector, nodeId, nbrItemRef: mapping.nbrItemRef,
@@ -445,11 +449,11 @@ export function normalizeAxeResults(input, options = {}) {
           if (occurrences.length >= MAX_OCCURRENCES) { truncated = true; break; }
           const selector = selectorFromTarget(safeRead(node, 'target'));
           if (containsTruncationMetadata(node)) truncated = true;
-          const applicabilityEvidence = resultType === 'violations' && mapping
-            ? derivedApplicability(options, { axeRuleId, mapping, pageId, frameId, selector })
+          const correlatedNodeId = mapping
+            ? correlatedTargetNodeId(options, { axeRuleId, mapping, frameId, selector })
             : null;
-          const correlatedNodeId = mapping?.targetScope === 'node' && applicabilityEvidence
-            ? applicabilityEvidence.nodeId
+          const applicabilityEvidence = resultType === 'violations' && mapping
+            ? derivedApplicability(options, { axeRuleId, mapping, pageId, frameId, selector, correlatedNodeId })
             : null;
           const mappedOutcome = resultType === 'incomplete' || (mapping && !applicabilityEvidence) || selector === AXE_TARGET_UNAVAILABLE
             ? 'cantTell'

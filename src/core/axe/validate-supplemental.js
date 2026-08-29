@@ -268,17 +268,19 @@ function validateOccurrence(occurrence, validatedRule, options, errors) {
   const framePath = own(target, 'framePath');
   const occurrenceNodeId = own(occurrence, 'nodeId');
   const targetNodeId = own(target, 'nodeId');
-  const nodeScopedConclusion = mapping?.targetScope === 'node' && outcome === 'failed';
+  const nodeScopedBinding = mapping?.targetScope === 'node' && occurrenceNodeId !== null;
+  const nodeScopedConclusion = nodeScopedBinding && outcome === 'failed';
   const expectedPresentationTargetKey = mapping?.targetScope === 'document'
     ? 'document'
-    : nodeScopedConclusion ? `node:${occurrenceNodeId}` : `selector:${frameIdFor(occurrence)}:${selector}`;
+    : nodeScopedBinding ? `node:${occurrenceNodeId}` : `selector:${frameIdFor(occurrence)}:${selector}`;
   const expectedJustification = engineResultType === 'violations' && mapping && outcome === 'cantTell'
     ? `${rationale}${CONFIRMATION_SUFFIX}`
     : rationale;
   if (justification !== expectedJustification ||
     !exactKeys(target, ['framePath', 'nodeId', 'selector']) || targetNodeId !== occurrenceNodeId ||
-    (nodeScopedConclusion
-      ? !(typeof occurrenceNodeId === 'string' || Number.isSafeInteger(occurrenceNodeId))
+    (nodeScopedBinding
+      ? (!(typeof occurrenceNodeId === 'string' || Number.isSafeInteger(occurrenceNodeId)) ||
+        engineRuleId !== 'target-size' || frameIdFor(occurrence) !== 0 || selector === AXE_TARGET_UNAVAILABLE)
       : occurrenceNodeId !== null) || own(occurrence, 'selector') !== selector ||
     !exactData(own(occurrence, 'framePath'), framePath) || !validFramePath(framePath) || !validSelector(selector) ||
     !(/^(?:occurrence-axe-[0-9a-f]{8}|occurrence-[A-Za-z0-9._:-]{1,200}-\d{6})$/u.test(own(occurrence, 'occurrenceId')) ||

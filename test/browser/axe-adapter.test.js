@@ -44,7 +44,7 @@ test('uses a bounded explicit ruleset without legacy Section 508 or experimental
     type: 'tag',
     values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-practice'],
   });
-  assert.deepEqual(adapter.AXE_RUN_CONFIG.rules, { 'target-size': { enabled: false } });
+  assert.deepEqual(adapter.AXE_RUN_CONFIG.rules, { 'target-size': { enabled: true } });
   assert.deepEqual(adapter.AXE_RUN_CONFIG.resultTypes, ['violations', 'incomplete', 'passes', 'inapplicable']);
   assert.equal(adapter.AXE_RUN_CONFIG.preload, false);
   assert.equal(adapter.AXE_RUN_CONFIG.iframes, false);
@@ -181,22 +181,14 @@ test('diagnostic canonicalization distinguishes a readable empty array from inva
   }
 });
 
-test('keeps the production feature gate off without a successful real MV3 CSP run', async () => {
+test('records the exact browser proof before enabling the coupled production gate', () => {
   assert.deepEqual(adapter.AXE_MV3_CSP_GATE, {
-    enabled: false,
-    targetSizeEnabled: false,
-    code: 'AXE_MV3_CSP_E2E_UNAVAILABLE',
-    testedBrowser: 'Chrome for Testing 151.0.7922.138',
+    enabled: true,
+    targetSizeEnabled: true,
+    code: 'AXE_MV3_CSP_E2E_PASSED',
+    testedBrowser: 'Google Chrome 151.0.7922.174',
   });
-  let executions = 0;
-  const result = await adapter.runAxeInTab(42, { executeScript: async () => { executions += 1; } });
-  assert.equal(executions, 0);
-  assert.deepEqual(result, {
-    status: 'disabled',
-    provenance: adapter.AXE_PROVENANCE,
-    frames: [],
-    diagnostics: [{ code: 'AXE_FEATURE_DISABLED', frameId: null }],
-  });
+  assert.equal(Object.isFrozen(adapter.AXE_MV3_CSP_GATE), true);
 });
 
 test('rejects every non-boolean or inconsistent production gate state', () => {

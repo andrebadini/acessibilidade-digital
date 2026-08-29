@@ -642,7 +642,7 @@ test('integrates a confirmed top-frame axe violation with provenance, ABNT outco
   assert.deepEqual(axeOccurrence.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v1' });
   assert.ok(axeOccurrence.evidenceIds.includes(model.evidence.artifacts.find(item => item.kind === 'full-page').evidenceId));
   assert.equal(model.axe.provenance.version, '4.13.0');
-  assert.equal(model.axe.provenance.config.rules['target-size'].enabled, false);
+  assert.equal(model.axe.provenance.config.rules['target-size'].enabled, true);
   assert.equal(model.ruleResults.some(rule => rule.outcome === 'passed' && rule.source?.engine === 'axe-core'), false);
   assert.doesNotMatch(JSON.stringify(model), /NÃO-PERSISTIR|section508/iu);
   assert.ok(adapter.events.indexOf('axe') < adapter.events.indexOf('collect'));

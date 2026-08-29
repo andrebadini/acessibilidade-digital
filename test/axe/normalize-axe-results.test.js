@@ -142,31 +142,36 @@ test('concludes target-size only from one top-frame structural node and one auth
   }).errors, []);
 });
 
-test('keeps target-size inconclusive for every frame, selector and core-authority divergence', () => {
+test('keeps target-size inconclusive while retaining only a unique top-frame snapshot-node correlation', () => {
   const snapshot = targetSizeSnapshot();
   const cases = [
-    ['child frame', targetSizeRun({ frameId: 7 }), [targetSizeCore()]],
-    ['missing core result', targetSizeRun(), []],
-    ['duplicate core result', targetSizeRun(), [targetSizeCore(), targetSizeCore()]],
-    ['non-failed core result', targetSizeRun(), [targetSizeCore({ outcome: 'cantTell', targets: [] })]],
-    ['different core node', targetSizeRun(), [targetSizeCore({ targets: [{ nodeId: 'n-body' }] })]],
-    ['duplicate correlated target', targetSizeRun(), [targetSizeCore({ targets: [{ nodeId: 'n-button' }, { nodeId: 'n-button' }] })]],
-    ['unavailable selector', targetSizeRun({ selector: '[target-unavailable]' }), [targetSizeCore()]],
-    ['non-canonical selector', targetSizeRun({ selector: 'body > button' }), [targetSizeCore()]],
+    ['child frame', targetSizeRun({ frameId: 7 }), [targetSizeCore()], null],
+    ['missing core result', targetSizeRun(), [], 'n-button'],
+    ['duplicate core result', targetSizeRun(), [targetSizeCore(), targetSizeCore()], 'n-button'],
+    ['non-failed core result', targetSizeRun(), [targetSizeCore({ outcome: 'cantTell', targets: [] })], 'n-button'],
+    ['different core node', targetSizeRun(), [targetSizeCore({ targets: [{ nodeId: 'n-body' }] })], 'n-button'],
+    ['duplicate correlated target', targetSizeRun(), [targetSizeCore({ targets: [{ nodeId: 'n-button' }, { nodeId: 'n-button' }] })], 'n-button'],
+    ['unavailable selector', targetSizeRun({ selector: '[target-unavailable]' }), [targetSizeCore()], null],
+    ['non-canonical selector', targetSizeRun({ selector: 'body > button' }), [targetSizeCore()], null],
   ];
 
-  for (const [label, input, coreRuleResults] of cases) {
+  for (const [label, input, coreRuleResults, expectedNodeId] of cases) {
     const normalized = normalizeAxeResults(input, {
       pageId: 'page-1', snapshot, coreRuleResults, rulesVersion: '1.0.0',
     });
     const occurrence = normalized.occurrences[0];
     assert.equal(occurrence.outcome, 'cantTell', label);
-    assert.equal(occurrence.nodeId, null, label);
-    assert.equal(occurrence.target.nodeId, null, label);
+    assert.equal(occurrence.nodeId, expectedNodeId, label);
+    assert.equal(occurrence.target.nodeId, expectedNodeId, label);
+    assert.equal(occurrence.presentationTargetKey,
+      expectedNodeId === null ? `selector:${input.frames[0].frameId}:${occurrence.selector}` : `node:${expectedNodeId}`, label);
     assert.deepEqual(occurrence.testedWcagRefs, [], label);
     assert.deepEqual(occurrence.foreignBenchmarkRefs, [], label);
     assert.equal(occurrence.legalAnalysis, null, label);
     assert.equal(occurrence.applicabilityEvidence, null, label);
+    assert.deepEqual(validateNormalizedAxeSupplemental(normalized, {
+      rulesVersion: '1.0.0', coreRuleResults,
+    }).errors, [], label);
   }
 });
 

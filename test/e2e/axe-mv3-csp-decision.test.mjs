@@ -51,3 +51,10 @@ test('requires the real harness whenever both production gates are enabled', () 
     gate: { enabled: true, targetSizeEnabled: true }, chromeBinary: '/opt/chromium',
   }), { action: 'run', code: 'AXE_MV3_CSP_E2E_REQUIRED' });
 });
+
+test('runs the decision harness when CHROME_BIN is present even before a disabled gate is approved', () => {
+  assert.deepEqual(decideAxeE2eExecution({
+    gate: { enabled: false, targetSizeEnabled: false, code: 'AXE_MV3_CSP_E2E_UNAVAILABLE' },
+    chromeBinary: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  }), { action: 'run', code: 'AXE_MV3_CSP_E2E_REQUIRED' });
+});
