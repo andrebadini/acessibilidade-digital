@@ -11,6 +11,7 @@ const FIXED_WARNING_MESSAGES = Object.freeze({
   RUNTIME_FRAME_MISSING: 'Um frame esperado não retornou dados runtime.',
   AX_FRAME_UNAVAILABLE: 'A árvore de acessibilidade de um frame não ficou disponível.',
   RUNTIME_MATCH_AMBIGUOUS: 'Dados runtime ambíguos não foram associados.',
+  WARNINGS_UNAVAILABLE: 'Os avisos de coleta não puderam ser normalizados com segurança.',
   TIMEOUT: 'Uma medição excedeu o tempo limite.',
   ABORTED: 'A medição foi cancelada.',
   PROBE_FAILED: 'Uma medição dinâmica não pôde ser concluída.'
@@ -19,6 +20,7 @@ const FIXED_WARNING_MESSAGES = Object.freeze({
 const WARNING_FIELDS = new Set(['code', 'frameId', 'message']);
 const MAX_WARNING_CODE_LENGTH = 128;
 const MAX_WARNING_MESSAGE_LENGTH = 1_024;
+const MAX_WARNING_ITEMS = 1_024;
 
 function projectWarning(input) {
   try {
@@ -48,8 +50,7 @@ function projectWarning(input) {
   }
 }
 
-export function sanitizeWarning(input) {
-  const observation = projectWarning(input);
+function sanitizeProjectedWarning(observation) {
   const requested = observation ? observation.projected.code.trim().toUpperCase() : '';
   const code = Object.hasOwn(FIXED_WARNING_MESSAGES, requested) ? requested : 'PROBE_FAILED';
   const warning = { code, message: FIXED_WARNING_MESSAGES[code] };
@@ -61,8 +62,44 @@ export function sanitizeWarning(input) {
   return warning;
 }
 
+function snapshotWarningCollection(input) {
+  if (input === undefined || input === null) return { available: true, values: [] };
+  try {
+    if (!Array.isArray(input)) return { available: false, values: [] };
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(input, 'length');
+    if (!lengthDescriptor || !Object.hasOwn(lengthDescriptor, 'value') ||
+      !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0 ||
+      lengthDescriptor.value > MAX_WARNING_ITEMS) return { available: false, values: [] };
+    const values = new Array(lengthDescriptor.value);
+    for (let index = 0; index < lengthDescriptor.value; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) return { available: false, values: [] };
+      values[index] = descriptor.value;
+    }
+    return { available: true, values };
+  } catch {
+    return { available: false, values: [] };
+  }
+}
+
+function unavailableWarnings() {
+  return [sanitizeProjectedWarning(projectWarning({ code: 'WARNINGS_UNAVAILABLE' }))];
+}
+
+export function sanitizeWarning(input) {
+  return sanitizeProjectedWarning(projectWarning(input));
+}
+
 export function sanitizeWarnings(input) {
-  return (Array.isArray(input) ? input : []).map(sanitizeWarning);
+  const collection = snapshotWarningCollection(input);
+  if (!collection.available) return unavailableWarnings();
+  const warnings = [];
+  for (const inputWarning of collection.values) {
+    const projected = projectWarning(inputWarning);
+    if (!projected) return unavailableWarnings();
+    warnings.push(sanitizeProjectedWarning(projected));
+  }
+  return warnings;
 }
 
 export function sanitizeEvidenceUrl(value, base = undefined) {

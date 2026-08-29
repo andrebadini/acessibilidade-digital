@@ -224,6 +224,52 @@ test('bounds dense target-size collections before copying their slots', () => {
   assert.deepEqual(probes.targetSizes.observations, []);
 });
 
+test('invalidates the entire target-size collection when any observation leaf is unsafe or partial', () => {
+  const marker = 'PRIVATE_TARGET_LEAF_MESSAGE';
+  let getterReads = 0;
+  const accessor = { nodeId: 'n-202', height: 44, exception: 'none', exceptionProof: 'complete' };
+  Object.defineProperty(accessor, 'width', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      throw new Error(marker);
+    },
+  });
+  const revoked = Proxy.revocable({
+    nodeId: 'n-202', width: 44, height: 44, exception: 'none', exceptionProof: 'complete',
+  }, {});
+  revoked.revoke();
+  const trapped = new Proxy({
+    nodeId: 'n-202', width: 44, height: 44, exception: 'none', exceptionProof: 'complete',
+  }, {
+    getOwnPropertyDescriptor() { throw new Error(marker); },
+  });
+  const invalidObservations = [
+    accessor,
+    revoked.proxy,
+    trapped,
+    { nodeId: 'n-202', width: 44 },
+    { nodeId: 'n-202', width: 44, height: 44, unexpected: marker },
+    { selector: `#${'a'.repeat(4_097)}`, width: 44, height: 44 },
+  ];
+  const valid = {
+    nodeId: 'n-201', width: 44, height: 44, exception: 'none', exceptionProof: 'complete',
+  };
+
+  for (const invalid of invalidObservations) {
+    let probes;
+    assert.doesNotThrow(() => {
+      probes = normalizeProbes({ targetSizes: [valid, invalid], warnings: [], actions: [] });
+    });
+    assert.equal(probes.targetSizes.minimum24.outcome, 'cantTell');
+    assert.equal(probes.targetSizes.enhanced44.outcome, 'cantTell');
+    assert.equal(probes.probeCoverage.targetSizes, 'cantTell');
+    assert.deepEqual(probes.targetSizes.observations, []);
+    assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
+  }
+  assert.equal(getterReads, 0);
+});
+
 test('uses the same dense boundary for other raw probe collections', () => {
   const marker = 'PRIVATE_OTHER_COLLECTION_MESSAGE';
   let getterReads = 0;
@@ -252,7 +298,32 @@ test('uses the same dense boundary for other raw probe collections', () => {
   assert.equal(probes.focusAppearance.outcome, 'cantTell');
   assert.equal(probes.obscuredTargets.outcome, 'cantTell');
   assert.deepEqual(probes.actions, []);
-  assert.deepEqual(probes.warnings, []);
+  assert.deepEqual(probes.warnings, [{
+    code: 'WARNINGS_UNAVAILABLE',
+    message: 'Os avisos de coleta não puderam ser normalizados com segurança.',
+  }]);
+  assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
+});
+
+test('marks an accessor-backed warnings property unavailable without invoking it', () => {
+  const marker = 'PRIVATE_WARNINGS_PROPERTY_MESSAGE';
+  let getterReads = 0;
+  const raw = {};
+  Object.defineProperty(raw, 'warnings', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      throw new Error(marker);
+    },
+  });
+
+  let probes;
+  assert.doesNotThrow(() => { probes = normalizeProbes(raw); });
+  assert.equal(getterReads, 0);
+  assert.deepEqual(probes.warnings, [{
+    code: 'WARNINGS_UNAVAILABLE',
+    message: 'Os avisos de coleta não puderam ser normalizados com segurança.',
+  }]);
   assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
 });
 
@@ -539,7 +610,10 @@ test('contains a revoked raw probe root as wholly unavailable', () => {
   }
   assert.equal(probes.targetSizes.minimum24.outcome, 'cantTell');
   assert.equal(probes.targetSizes.enhanced44.outcome, 'cantTell');
-  assert.deepEqual(probes.warnings, []);
+  assert.deepEqual(probes.warnings, [{
+    code: 'WARNINGS_UNAVAILABLE',
+    message: 'Os avisos de coleta não puderam ser normalizados com segurança.',
+  }]);
   assert.deepEqual(probes.actions, []);
 });
 
@@ -589,6 +663,37 @@ test('bounds focus leaf strings and never coerces hostile leaf values', () => {
     assert.doesNotMatch(JSON.stringify(probes), new RegExp(marker));
   }
   assert.equal(coercions, 0);
+});
+
+test('does not coerce an object frameId while correlating selector fallbacks during merge', () => {
+  const marker = 'PRIVATE_MERGE_FRAME_COERCION_MESSAGE';
+  let coercions = 0;
+  const hostileFrameId = {
+    [Symbol.toPrimitive]() {
+      coercions += 1;
+      throw new Error(marker);
+    },
+  };
+  const snapshot = {
+    schemaVersion: 1,
+    document: { nodeId: 'document', title: 'Fixture' },
+    nodes: [{
+      nodeId: 'n-301', parentId: null, children: [], tagName: 'button', attributes: {},
+      selectorHint: '#target', frameId: hostileFrameId, focusable: true,
+    }],
+  };
+  const probes = normalizeProbes({
+    targetSizes: [{
+      selector: '#target', frameId: 'main', width: 44, height: 44,
+      exception: 'none', exceptionProof: 'complete',
+    }],
+  });
+
+  let merged;
+  assert.doesNotThrow(() => { merged = mergeProbesIntoSnapshot(snapshot, probes); });
+  assert.equal(coercions, 0);
+  assert.equal(Object.hasOwn(merged.nodes[0], 'targetSize'), false);
+  assert.doesNotMatch(JSON.stringify(merged), new RegExp(marker));
 });
 
 test('does not read accessor slots in nested action threshold collections', () => {

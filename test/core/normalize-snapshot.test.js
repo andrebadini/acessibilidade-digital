@@ -271,6 +271,119 @@ function rawMetrics(snapshot) {
   return snapshot.document.layoutMetrics;
 }
 
+const UNAVAILABLE_WARNINGS = [{
+  code: 'WARNINGS_UNAVAILABLE',
+  message: 'Os avisos de coleta não puderam ser normalizados com segurança.',
+}];
+
+test('normalizes simplified and columnar warning properties before touching hostile collections', () => {
+  const marker = 'PRIVATE_SNAPSHOT_WARNINGS_MESSAGE';
+  let getterReads = 0;
+  const simplified = {
+    format: 'simplified-v1',
+    document: { url: 'https://example.test/', title: 'Fixture' },
+    nodes: [],
+  };
+  const columnar = columnarRaw();
+  for (const raw of [simplified, columnar]) {
+    Object.defineProperty(raw, 'warnings', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        throw new Error(marker);
+      },
+    });
+    let snapshot;
+    assert.doesNotThrow(() => { snapshot = normalizeSnapshot(raw); });
+    assert.deepEqual(snapshot.document.warnings, UNAVAILABLE_WARNINGS);
+    assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(marker));
+  }
+  assert.equal(getterReads, 0);
+});
+
+test('contains hostile external warning slots before simplified or columnar normalization', () => {
+  const marker = 'PRIVATE_SNAPSHOT_WARNING_SLOT_MESSAGE';
+  let getterReads = 0;
+  for (const raw of [
+    { format: 'simplified-v1', document: { url: 'https://example.test/' }, nodes: [] },
+    columnarRaw(),
+  ]) {
+    const warnings = new Array(1);
+    Object.defineProperty(warnings, '0', {
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        throw new Error(marker);
+      },
+    });
+    raw.warnings = warnings;
+    let snapshot;
+    assert.doesNotThrow(() => { snapshot = normalizeSnapshot(raw); });
+    assert.deepEqual(snapshot.document.warnings, UNAVAILABLE_WARNINGS);
+    assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(marker));
+  }
+  assert.equal(getterReads, 0);
+});
+
+test('normalizes frame identifiers from own primitive data without invoking object coercion', () => {
+  const marker = 'PRIVATE_SNAPSHOT_FRAME_COERCION_MESSAGE';
+  let coercions = 0;
+  const hostileFrameId = {
+    [Symbol.toPrimitive]() {
+      coercions += 1;
+      throw new Error(marker);
+    },
+  };
+  const columnar = columnarRaw();
+  columnar.domSnapshot.documents[0].frameId = hostileFrameId;
+  columnar.pageData[0].frameId = hostileFrameId;
+
+  let snapshot;
+  assert.doesNotThrow(() => { snapshot = normalizeSnapshot(columnar); });
+  assert.equal(coercions, 0);
+  assert.equal(snapshot.nodes.some(node => typeof node.frameId !== 'string'), false);
+  assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(marker));
+});
+
+test('normalizes frame paths from dense own primitive leaves without invoking hostile slots or coercion', () => {
+  const marker = 'PRIVATE_SNAPSHOT_FRAME_PATH_MESSAGE';
+  let getterReads = 0;
+  let coercions = 0;
+  const framePath = new Array(2);
+  Object.defineProperty(framePath, '0', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      throw new Error(marker);
+    },
+  });
+  framePath[1] = {
+    [Symbol.toPrimitive]() {
+      coercions += 1;
+      throw new Error(marker);
+    },
+  };
+  const raw = {
+    format: 'simplified-v1',
+    document: { url: 'https://example.test/', title: 'Fixture' },
+    nodes: [{
+      backendNodeId: 1,
+      parentBackendNodeId: null,
+      tagName: 'div',
+      attributes: {},
+      framePath,
+    }],
+  };
+
+  let snapshot;
+  assert.doesNotThrow(() => { snapshot = normalizeSnapshot(raw); });
+  assert.equal(getterReads, 0);
+  assert.equal(coercions, 0);
+  assert.deepEqual(snapshot.nodes[0].framePath, []);
+  assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(marker));
+});
+
 test('accepts only explicitly marked simplified fixtures', () => {
   const simplified = {
     format: 'simplified-v1',

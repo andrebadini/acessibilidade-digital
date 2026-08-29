@@ -7,6 +7,10 @@ const FALLBACK_WARNING = {
   code: 'PROBE_FAILED',
   message: 'Uma medição dinâmica não pôde ser concluída.',
 };
+const UNAVAILABLE_WARNINGS = [{
+  code: 'WARNINGS_UNAVAILABLE',
+  message: 'Os avisos de coleta não puderam ser normalizados com segurança.',
+}];
 
 test('sanitizes warning leaves through own data descriptors without invoking accessors', () => {
   for (const field of ['code', 'frameId', 'message']) {
@@ -70,8 +74,43 @@ test('contains hostile warning leaves when sanitizing a collection', () => {
   const sanitized = sanitizeWarnings([warning, revoked.proxy]);
 
   assert.equal(getterReads, 0);
-  assert.deepEqual(sanitized, [FALLBACK_WARNING, FALLBACK_WARNING]);
+  assert.deepEqual(sanitized, UNAVAILABLE_WARNINGS);
   assert.doesNotMatch(JSON.stringify(sanitized), new RegExp(marker));
+});
+
+test('snapshots warning collections by own index descriptors without reading hostile slots', () => {
+  const marker = 'PRIVATE_WARNING_SLOT_MESSAGE';
+  let getterReads = 0;
+  const warnings = new Array(1);
+  Object.defineProperty(warnings, '0', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      throw new Error(marker);
+    },
+  });
+
+  let sanitized;
+  assert.doesNotThrow(() => { sanitized = sanitizeWarnings(warnings); });
+  assert.equal(getterReads, 0);
+  assert.deepEqual(sanitized, UNAVAILABLE_WARNINGS);
+  assert.doesNotMatch(JSON.stringify(sanitized), new RegExp(marker));
+});
+
+test('contains revoked, sparse, oversized and ambiguous warning collections as one fixed limitation', () => {
+  const revoked = Proxy.revocable([{ code: 'TIMEOUT' }], {});
+  revoked.revoke();
+  const marker = 'PRIVATE_AMBIGUOUS_WARNING_MESSAGE';
+  const sparse = new Array(1);
+  const oversized = new Array(1_025).fill({ code: 'TIMEOUT' });
+  const ambiguous = [{ code: 'TIMEOUT' }, { code: 'ABORTED', unexpected: marker }];
+
+  for (const warnings of [revoked.proxy, sparse, oversized, ambiguous]) {
+    let sanitized;
+    assert.doesNotThrow(() => { sanitized = sanitizeWarnings(warnings); });
+    assert.deepEqual(sanitized, UNAVAILABLE_WARNINGS);
+    assert.doesNotMatch(JSON.stringify(sanitized), new RegExp(marker));
+  }
 });
 
 test('preserves supported warning codes and bounded frame identifiers', () => {

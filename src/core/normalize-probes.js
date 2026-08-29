@@ -29,6 +29,11 @@ const TEXT_RESIZE_FIELDS = new Set(['scalePercent', 'lossOfContent']);
 const MOTION_FIELDS = new Set([
   'complete', 'preference', 'prefersReducedMotion', 'animatedCount', 'reducedAnimatedCount',
 ]);
+const TARGET_SIZE_FIELDS = new Set([
+  'backendNodeId', 'nodeId', 'selector', 'frameId',
+  'width', 'height', 'exception', 'exceptionProof',
+]);
+const INVALID_WARNING_COLLECTION = Object.freeze({});
 
 function ownData(value, field) {
   try {
@@ -37,6 +42,17 @@ function ownData(value, field) {
     return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
   } catch {
     return undefined;
+  }
+}
+
+function warningCollectionInput(value) {
+  try {
+    if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, 'warnings');
+    if (!descriptor) return undefined;
+    return Object.hasOwn(descriptor, 'value') ? descriptor.value : INVALID_WARNING_COLLECTION;
+  } catch {
+    return INVALID_WARNING_COLLECTION;
   }
 }
 
@@ -67,11 +83,15 @@ function denseOwnDataArray(value, maxItems = MAX_PROBE_COLLECTION_ITEMS) {
   }
 }
 
-function ownDataRecord(value, allowedFields, { requiredFields = [], maxFields = MAX_PROBE_RECORD_FIELDS } = {}) {
+function ownDataRecord(value, allowedFields, {
+  requiredFields = [], maxFields = MAX_PROBE_RECORD_FIELDS, requirePlainPrototype = true,
+} = {}) {
   try {
     if (value === null || typeof value !== 'object') return { available: false, value: null, present: new Set() };
     const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) return { available: false, value: null, present: new Set() };
+    if (requirePlainPrototype && prototype !== Object.prototype && prototype !== null) {
+      return { available: false, value: null, present: new Set() };
+    }
     const keys = Reflect.ownKeys(value);
     if (keys.length > maxFields || keys.some(key => typeof key !== 'string' || !allowedFields.has(key))) {
       return { available: false, value: null, present: new Set() };
@@ -193,6 +213,44 @@ function projectMotion(value) {
   return projected;
 }
 
+function projectTargetSize(value) {
+  const projected = ownDataRecord(value, TARGET_SIZE_FIELDS, {
+    requiredFields: ['width', 'height'],
+    maxFields: TARGET_SIZE_FIELDS.size,
+    requirePlainPrototype: false,
+  });
+  if (!projected.available) return projected;
+  const item = projected.value;
+  const present = projected.present;
+  const nodeIdIsValid = present.has('nodeId') && ((boundedString(item.nodeId) && item.nodeId.trim() !== '') ||
+    Number.isSafeInteger(item.nodeId));
+  const selectorIsValid = present.has('selector') && boundedString(item.selector) && item.selector.trim() !== '';
+  const backendNodeIdIsValid = present.has('backendNodeId') && Number.isSafeInteger(item.backendNodeId) &&
+    item.backendNodeId >= 0;
+  if ((!backendNodeIdIsValid && !nodeIdIsValid && !selectorIsValid) ||
+    (present.has('backendNodeId') && !backendNodeIdIsValid) ||
+    (present.has('nodeId') && !nodeIdIsValid) ||
+    (present.has('selector') && !selectorIsValid) ||
+    (present.has('frameId') && item.frameId !== null && !boundedString(item.frameId) && !Number.isSafeInteger(item.frameId)) ||
+    !finite(item.width) || item.width < 0 || !finite(item.height) || item.height < 0 ||
+    (present.has('exception') && !boundedString(item.exception)) ||
+    (present.has('exceptionProof') && !boundedString(item.exceptionProof))) {
+    return { available: false, value: null, present: new Set() };
+  }
+  return projected;
+}
+
+function projectTargetSizes(collection) {
+  if (!collection.available) return collection;
+  const values = [];
+  for (const item of collection.values) {
+    const projected = projectTargetSize(item);
+    if (!projected.available) return { available: false, values: [] };
+    values.push(projected.value);
+  }
+  return { available: true, values };
+}
+
 function normalizedException(observation, allowed) {
   const observed = ownData(observation, 'exception');
   const value = typeof observed === 'string' ? observed : 'unknown';
@@ -205,7 +263,12 @@ const probeFallbacks = new WeakMap();
 function selectorFrameKey(selector, frameId) {
   const normalizedSelector = typeof selector === 'string' ? selector.trim() : '';
   if (!normalizedSelector) return null;
-  const normalizedFrameId = frameId == null ? '' : String(frameId).trim();
+  let normalizedFrameId = '';
+  if (frameId !== null && frameId !== undefined) {
+    if (typeof frameId === 'string' && frameId.length <= MAX_PROBE_STRING_LENGTH) normalizedFrameId = frameId.trim();
+    else if (Number.isSafeInteger(frameId)) normalizedFrameId = String(frameId);
+    else return null;
+  }
   return `selector\u0000${normalizedFrameId}\u0000${normalizedSelector}`;
 }
 
@@ -325,7 +388,7 @@ export function normalizeProbes(raw = {}) {
   const resizeValid = textResizeProjection.available && textResize.scalePercent >= 200;
 
   const rawTargetSizes = ownData(raw, 'targetSizes');
-  const targetSizes = denseOwnDataArray(rawTargetSizes).values;
+  const targetSizes = projectTargetSizes(denseOwnDataArray(rawTargetSizes)).values;
   const targetObservations = [];
   for (const item of targetSizes) {
     const nodeId = safeId(item);
@@ -396,7 +459,7 @@ export function normalizeProbes(raw = {}) {
       animatedCount: motionValid ? motion.animatedCount : null,
       reducedAnimatedCount: motionValid ? motion.reducedAnimatedCount : null
     },
-    warnings: sanitizeWarnings(denseOwnDataArray(ownData(raw, 'warnings')).values),
+    warnings: sanitizeWarnings(warningCollectionInput(raw)),
     actions: sanitizeJsonData(denseOwnDataArray(ownData(raw, 'actions')).values.map(sanitizeAction))
   };
   normalized.probeCoverage = Object.fromEntries([

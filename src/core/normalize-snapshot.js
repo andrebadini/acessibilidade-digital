@@ -12,6 +12,8 @@ const URL_ATTRIBUTES = new Set(['action', 'cite', 'formaction', 'href', 'poster'
 const EXECUTABLE_TEXT_PARENTS = new Set(['script', 'style', 'template']);
 const LINK_CONTEXT_STATES = new Set(['potential-context', 'missing-context', 'unknown-context']);
 const NEW_WINDOW_BEHAVIORS = new Set(['new-window', 'same-window', 'unknown']);
+const MAX_FRAME_ID_LENGTH = 256;
+const MAX_FRAME_PATH_ITEMS = 64;
 
 function cleanText(value) {
   return typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '';
@@ -26,6 +28,52 @@ function ownData(value, key) {
   } catch {
     return undefined;
   }
+}
+
+function primitiveFrameId(value, fallback = '') {
+  if (typeof value === 'string' && value.length <= MAX_FRAME_ID_LENGTH) return cleanText(value);
+  if (Number.isSafeInteger(value)) return String(value);
+  return fallback;
+}
+
+function primitiveFramePath(value) {
+  try {
+    if (!Array.isArray(value)) return [];
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+    if (!lengthDescriptor || !Object.hasOwn(lengthDescriptor, 'value') ||
+      !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0 ||
+      lengthDescriptor.value > MAX_FRAME_PATH_ITEMS) return [];
+    const output = new Array(lengthDescriptor.value);
+    for (let index = 0; index < lengthDescriptor.value; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) return [];
+      const frameId = primitiveFrameId(descriptor.value, null);
+      if (typeof frameId !== 'string' || frameId === '') return [];
+      output[index] = frameId;
+    }
+    return output;
+  } catch {
+    return [];
+  }
+}
+
+const INVALID_WARNING_COLLECTION = Object.freeze({});
+
+function normalizedWarnings(raw, internalWarnings = []) {
+  let input;
+  try {
+    const descriptor = raw !== null && typeof raw === 'object'
+      ? Object.getOwnPropertyDescriptor(raw, 'warnings')
+      : null;
+    input = !descriptor ? undefined
+      : Object.hasOwn(descriptor, 'value') ? descriptor.value
+        : INVALID_WARNING_COLLECTION;
+  } catch {
+    input = INVALID_WARNING_COLLECTION;
+  }
+  const external = sanitizeWarnings(input);
+  const internal = sanitizeWarnings(internalWarnings);
+  return external.concat(internal);
 }
 
 function normalizedWidgetSignals(raw) {
@@ -283,8 +331,8 @@ function normalizeSimplified(raw) {
       tagName,
       attributes,
       backendNodeId: Number.isFinite(node.backendNodeId) ? node.backendNodeId : null,
-      frameId: cleanText(node.frameId || 'main'),
-      framePath: Array.isArray(node.framePath) ? node.framePath.map(String) : [],
+      frameId: primitiveFrameId(ownData(node, 'frameId'), 'main'),
+      framePath: primitiveFramePath(ownData(node, 'framePath')),
       selectorHint: typeof node.selectorHint === 'string' && !SENSITIVE.test(node.selectorHint) ? node.selectorHint : '',
       text: editable || EXECUTABLE_TEXT_PARENTS.has(tagName) ? '' : cleanText(node.text),
       visibleText: editable ? '' : cleanText(node.visibleText ?? node.text),
@@ -362,7 +410,7 @@ function normalizeSimplified(raw) {
       title: cleanText(raw.document?.title),
       url: sanitizeResourceUrl(raw.document?.url || ''),
       language: cleanText(raw.document?.language),
-      warnings: sanitizeWarnings(raw.warnings),
+      warnings: normalizedWarnings(raw),
       accessibilityWidgetSignals: normalizedWidgetSignals(raw),
       ...(raw.coverage && typeof raw.coverage === 'object' ? { coverage: sanitizeJsonData(raw.coverage) } : {})
     },
@@ -394,7 +442,11 @@ function normalizeColumnar(raw) {
         contentDocumentByHost.set(`${documentIndex}:${hostIndex}`, childDocumentIndex);
       }
     }
-    const frameId = stringAt(strings, document.frameId) || String(document.frameId ?? (documentIndex === 0 ? 'main' : `frame-${documentIndex}`));
+    const rawFrameId = ownData(document, 'frameId');
+    const frameId = primitiveFrameId(
+      stringAt(strings, rawFrameId) || rawFrameId,
+      documentIndex === 0 ? 'main' : `frame-${documentIndex}`,
+    );
     const base = sanitizeResourceUrl(stringAt(strings, document.documentURL)) || 'https://invalid.local/';
     const layoutByNode = new Map();
     let elementOrder = 0;
@@ -461,8 +513,10 @@ function normalizeColumnar(raw) {
   const runtimeByUrlSelector = new Map();
   const runtimeByUrlOrder = new Map();
   for (const entry of Array.isArray(raw.pageData) ? raw.pageData : []) {
-    const data = entry?.result && typeof entry.result === 'object' ? entry.result : entry;
-    const frameId = String(entry?.frameId ?? data?.frameId ?? '');
+    const result = ownData(entry, 'result');
+    const data = result && typeof result === 'object' ? result : entry;
+    const entryFrameId = ownData(entry, 'frameId');
+    const frameId = primitiveFrameId(entryFrameId ?? ownData(data, 'frameId'));
     const runtimeUrl = sanitizeResourceUrl(data?.url || '');
     for (const node of Array.isArray(data?.nodes) ? data.nodes : []) {
       if (Number.isFinite(node.backendNodeId)) addMulti(runtimeByBackend, node.backendNodeId, node);
@@ -712,10 +766,7 @@ function normalizeColumnar(raw) {
     url: sanitizeResourceUrl(stringAt(strings, primary.documentURL)),
     language: cleanText(html?.attributes.lang || stringAt(strings, primary.contentLanguage)),
     layoutMetrics: raw.layoutMetrics && typeof raw.layoutMetrics === 'object' ? JSON.parse(JSON.stringify(raw.layoutMetrics)) : {},
-    warnings: sanitizeWarnings([
-      ...(Array.isArray(raw.warnings) ? raw.warnings : []),
-      ...(ambiguousRuntimeMatch ? [{ code: 'RUNTIME_MATCH_AMBIGUOUS' }] : [])
-    ]),
+    warnings: normalizedWarnings(raw, ambiguousRuntimeMatch ? [{ code: 'RUNTIME_MATCH_AMBIGUOUS' }] : []),
     accessibilityWidgetSignals: normalizedWidgetSignals(raw),
     ...(raw.coverage && typeof raw.coverage === 'object' ? { coverage: sanitizeJsonData(raw.coverage) } : {})
   };
