@@ -98,11 +98,16 @@ function evidenceIndex(model) {
   return new Map(model.evidence.map(evidence => [evidence.evidenceId, evidence]));
 }
 
+function accessibilityNodeMatches(occurrence, evidence) {
+  if (occurrence.nodeId !== null) return evidence.nodeId === occurrence.nodeId;
+  return evidence.nodeId === undefined || evidence.nodeId === null;
+}
+
 function firstAccessibility(occurrences, evidenceById) {
   for (const occurrence of occurrences) {
     for (const evidenceId of occurrence.evidenceRefs) {
       const evidence = evidenceById.get(evidenceId);
-      if (evidence?.nodeId !== undefined && evidence.nodeId !== null && evidence.nodeId !== occurrence.nodeId) continue;
+      if (!evidence || !accessibilityNodeMatches(occurrence, evidence)) continue;
       if (evidence?.accessibility) return evidence.accessibility;
     }
   }

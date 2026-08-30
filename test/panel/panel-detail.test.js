@@ -159,6 +159,23 @@ test('uses only correlated evidence accessibility and never falls back to occurr
   assert.doesNotMatch(JSON.stringify(detail), new RegExp(marker, 'u'));
 });
 
+for (const evidenceNodeState of ['absent', 'null']) {
+  test(`does not assign ${evidenceNodeState} evidence node accessibility to an element detail`, async () => {
+    const model = structuredClone(SAMPLE_AUDIT);
+    const artifact = model.evidence.find(value => value.evidenceId === 'ev-control');
+    if (evidenceNodeState === 'absent') delete artifact.nodeId;
+    else artifact.nodeId = null;
+    const summary = await summaryFixture(model);
+    const detail = buildPanelDetail({
+      model, summary, occurrenceId: 'occ-focus-failed', highlightAvailability: new Map(),
+    });
+
+    assert.deepEqual(detail.accessibility, {
+      name: null, nameSource: null, announcementPreview: null,
+    });
+  });
+}
+
 test('keeps the normative trio null only without an ABNT item and rejects partial card adulteration', async () => {
   const model = editorialModel();
   const summary = await summaryFixture(model);

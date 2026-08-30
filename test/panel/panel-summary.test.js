@@ -208,6 +208,25 @@ test('preserves every canonical occurrence impact and counts checkKeys in the or
   ]);
 });
 
+for (const evidenceNodeState of ['absent', 'null']) {
+  test(`does not assign ${evidenceNodeState} evidence node accessibility to an element card`, async () => {
+    const model = structuredClone(SAMPLE_AUDIT);
+    const artifact = model.evidence.find(value => value.evidenceId === 'ev-control');
+    if (evidenceNodeState === 'absent') delete artifact.nodeId;
+    else artifact.nodeId = null;
+    const inventory = await createInstalledCoreRuleInventory();
+    const summary = await buildPanelSummary({
+      model, executionCheckpoint: checkpointFor(model, inventory), inventory,
+    });
+    const card = allCards(summary).find(value => value.occurrenceIds.includes('occ-focus-failed'));
+
+    assert.deepEqual(
+      { accessibleName: card.accessibleName, announcement: card.announcement },
+      { accessibleName: null, announcement: null },
+    );
+  });
+}
+
 test('distinguishes zero denominator, started without outcomes, not-started pages and a partial batch', async () => {
   const inventory = await createInstalledCoreRuleInventory();
   const zeroModel = await failureBatch([false]);

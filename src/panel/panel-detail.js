@@ -113,9 +113,13 @@ function correlatedLocator(occurrence, evidence) {
   return { selector, framePath };
 }
 
+function accessibilityNodeMatches(occurrence, artifact) {
+  if (occurrence.nodeId !== null) return artifact.nodeId === occurrence.nodeId;
+  return artifact.nodeId === undefined || artifact.nodeId === null;
+}
+
 function accessibilityBlock(occurrence, evidence) {
-  const artifact = evidence.find(value => value.accessibility &&
-    (value.nodeId === undefined || value.nodeId === null || value.nodeId === occurrence.nodeId));
+  const artifact = evidence.find(value => value.accessibility && accessibilityNodeMatches(occurrence, value));
   return {
     name: artifact?.accessibility?.name ?? null,
     nameSource: artifact?.accessibility?.nameSource ?? null,
