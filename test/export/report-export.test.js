@@ -14,8 +14,10 @@ import { verifyAuditIntegritySnapshot } from '../../src/core/report/integrity.js
 import { commitReviewDecision, recordReviewDecision } from '../../src/review/review-state.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
+import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { buildPanelSummary } from '../../src/panel/panel-summary.js';
 import { buildReportView } from '../../src/review/report-view.js';
+import { createExportSuccessRequest, persistExportSuccess } from '../../src/export/export-controller.js';
 import { EXPORT_FORMATS_V1 } from '../../src/export/export-formats.js';
 
 const PDF = new TextEncoder().encode('%PDF-1.7\nlocal');
@@ -91,11 +93,14 @@ test('keeps technical single and batch status complete when an export artifact i
   }
 });
 
-test('authorized ReportView export keeps one stored revision across all four exact byte receipts', async () => {
-  const model = await finalizeGeneratedModel(
-    completeSingleAudit(), '2026-08-26T15:00:00.000Z', [], true, false, true, true,
-  );
+test('v1 review-ready pending revision persists four exact artifacts and rejects tampering', async () => {
+  const reviewed = await enrichAuditForReport(structuredClone(SAMPLE_AUDIT), { now:()=> '2026-08-26T15:00:00.000Z', timezone:SAMPLE_AUDIT.timezone, manifestVersion:SAMPLE_AUDIT.versions.manifest, rulesVersion:SAMPLE_AUDIT.versions.rules, browserVersion:SAMPLE_AUDIT.environment.chromeVersion });
   const inventory = await createInstalledCoreRuleInventory();
+  const store = createInMemoryAuditStore();
+  await store.setAudit(reviewed.auditId, reviewed);
+  const snapshot = await store.getAuditSnapshot(reviewed.auditId);
+  const model = snapshot.model;
+  assert.equal(model.report.status, 'review-ready'); assert.equal(model.report.artifact.status, 'pending');
   const checkpoint = {
     version: 1, auditId: model.auditId,
     pages: model.pages.map(page => ({
@@ -109,24 +114,22 @@ test('authorized ReportView export keeps one stored revision across all four exa
     })),
   };
   const summary = await buildPanelSummary({ model, executionCheckpoint: checkpoint, inventory });
-  const store = createInMemoryAuditStore();
-  await store.setAudit(model.auditId, model);
-  const snapshot = await store.getAuditSnapshot(model.auditId);
   const reportView = buildReportView({
     model, summary, modelRevision: snapshot.revision, modelHash: model.integrity.canonicalModelHash,
   });
-  const ownerId = 'export-authorized-test';
+  const ownerId = `export:${model.auditId}:pending`;
   const acquired = await store.acquireExportLease(model.auditId, snapshot.capability, {
-    ownerId, now: '2026-08-26T15:00:01.000Z',
+    ownerId, now: '2026-08-30T15:00:01.000Z',
   });
+  const deliveryOwnerId = `export:${model.auditId}:${acquired.exportAttempt}`;
   await store.claimExportLease(model.auditId, snapshot.capability, {
-    ownerId, exportAttempt: acquired.exportAttempt, now: '2026-08-26T15:00:02.000Z',
+    ownerId: deliveryOwnerId, exportAttempt: acquired.exportAttempt, now: '2026-08-30T15:00:02.000Z',
   });
   await store.beginExportDelivery(model.auditId, snapshot.capability, {
-    ownerId, exportAttempt: acquired.exportAttempt, now: '2026-08-26T15:00:03.000Z',
+    ownerId: deliveryOwnerId, exportAttempt: acquired.exportAttempt, now: '2026-08-30T15:00:03.000Z',
   });
   const result = await runReportExport({
-    auditSnapshotCapability: snapshot.capability, exportLeaseOwnerId: ownerId,
+    auditSnapshotCapability: snapshot.capability, exportLeaseOwnerId: deliveryOwnerId,
     exportAttempt: acquired.exportAttempt,
   }, {
     reportView,
@@ -137,19 +140,26 @@ test('authorized ReportView export keeps one stored revision across all four exa
     assertDelivery({ snapshotCapability, exportLeaseOwnerId }) {
       return store.assertExportLease(model.auditId, snapshotCapability, {
         ownerId: exportLeaseOwnerId, exportAttempt: acquired.exportAttempt,
-        now: '2026-08-26T15:00:04.000Z', phase: 'delivering',
+        now: '2026-08-30T15:00:04.000Z', phase: 'delivering',
       });
     },
     recordDelivery({ snapshotCapability, exportLeaseOwnerId, ...entry }) {
       return store.recordExportDelivery(model.auditId, snapshotCapability, {
         ownerId: exportLeaseOwnerId, exportAttempt: acquired.exportAttempt,
-        now: '2026-08-26T15:00:04.000Z', ...entry,
+        now: '2026-08-30T15:00:04.000Z', ...entry,
       });
     },
   });
   assert.equal((await store.getAuditSnapshot(model.auditId)).revision, snapshot.revision);
   assert.deepEqual(result.deliveryReceipt.formats.map(entry => entry.format), EXPORT_FORMATS_V1);
   assert.equal(result.deliveryReceipt.formats.every(entry => entry.byteSize > 0 && /^[a-f0-9]{64}$/u.test(entry.sha256)), true);
+  const persisted = await persistExportSuccess(createExportSuccessRequest({ auditId:model.auditId,result,latest:{auditId:model.auditId} }),store);
+  assert.equal(persisted.latest.exportStatus,'complete'); assert.equal(persisted.latest.exportRevision,snapshot.revision+1);
+  assert.deepEqual(persisted.latest.deliveryReceipt.formats.map(row=>row.format),EXPORT_FORMATS_V1);
+  const corrupt = structuredClone(result); corrupt.html += 'x';
+  assert.throws(() => createExportSuccessRequest({auditId:model.auditId,result:corrupt,latest:{}}));
+  const wrongIdentity = structuredClone(result); wrongIdentity.exportDeliveryIdentity.modelRevision += 1;
+  assert.throws(() => createExportSuccessRequest({auditId:model.auditId,result:wrongIdentity,latest:{}}));
   assert.equal((result.html.match(/<h2\b/gu) ?? []).length, 7);
   assert.equal((result.html.match(/Câmara dos Deputados/gu) ?? []).length, 2);
   const identity = {
