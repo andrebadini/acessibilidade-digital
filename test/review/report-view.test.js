@@ -325,6 +325,7 @@ test('review CSS keeps the summary and evidence usable from 320px through deskto
   assert.match(css, /\.matrix-scroll[^{]*\{[^}]*overflow-x:\s*auto/isu);
   assert.match(css, /\.matrix-scroll[^{]*\{[^}]*min-width:\s*0/isu);
   assert.match(css, /\.report-view[^{]*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/isu);
+  assert.match(css, /\.report-view\s+:is\(p,\s*li,\s*dd,\s*dt,\s*th,\s*td,\s*code\)[^{]*\{[^}]*min-width:\s*0[^}]*overflow-wrap:\s*anywhere/isu);
   assert.match(css, /\.report-metrics[^{]*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/isu);
   assert.match(css, /@media\s*\(min-width:\s*48rem\)[^]*?\.report-metrics[^{]*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)/isu);
   assert.match(css, /\[data-report-evidence-preview\][^{]*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/isu);
@@ -336,6 +337,7 @@ test('review CSS keeps the summary and evidence usable from 320px through deskto
   assert.match(css, /\[data-report-metric\][^{]*\{[^}]*border-inline-start/isu);
   assert.match(css, /\[data-report-metric\] \.metric-value[^{]*\{[^}]*font-size:\s*clamp/isu);
   assert.match(css, /@media\s*\(forced-colors:\s*active\)/iu);
+  assert.match(css, /@media\s*\(forced-colors:\s*active\)[^]*?\[data-report-executive-actions\] button\s*\{[^}]*background:\s*Canvas[^}]*color:\s*CanvasText[^}]*border-color:\s*ButtonText/isu);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/iu);
   assert.match(css, /@media\s+print[^]*?\[data-report-evidence-preview\] figure\[data-evidence-kind="full-page"\][^{]*\{[^}]*break-inside:\s*auto/isu);
   assert.match(css, /@media\s+print[^]*?\[data-evidence-kind="full-page"\]\s*>\s*\.evidence-media[^{]*\{[^}]*max-height:\s*210mm[^}]*object-fit:\s*contain/isu);

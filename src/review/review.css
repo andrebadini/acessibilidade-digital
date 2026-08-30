@@ -6,6 +6,7 @@ main { width: 100%; min-width: 0; max-width: 72rem; margin: auto; padding: 1rem 
 .review-page-title { margin: 0 0 .15rem; color: var(--brand); font-size: 1rem; line-height: 1.25; }
 #review-status { margin: 0 0 .65rem; color: #405465; }
 .report-view { display: grid; grid-template-columns: minmax(0, 1fr); gap: .75rem; }
+.report-view :is(p, li, dd, dt, th, td, code) { min-width: 0; overflow-wrap: anywhere; }
 .report-identity, .report-view > section { min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: .65rem; padding: 1rem; }
 .report-identity { border-top: .35rem solid var(--brand); padding-block: .65rem; }
 .report-identity p { margin-block: .15rem; overflow-wrap: anywhere; }
@@ -95,5 +96,5 @@ dialog:not([open]) { display: none; }
   [data-report-issue], [data-report-technical], [data-report-limitations], [data-report-evidence] { break-inside: auto; }
   [data-report-issue-heading], [data-report-evidence] > h4, summary { break-after: avoid; }
 }
-@media (forced-colors: active) { button, input, textarea, .review-controls, .review-card, dialog, .report-identity, .report-view > section, [data-report-metric], [data-report-issue], [data-report-evidence-preview] figure, [data-report-evidence], .section-nav a, .report-filters [role="group"], .report-view th, .report-view td { border-color: CanvasText; } .report-filters button[aria-pressed="true"], [data-report-executive-actions] button { background: Highlight; color: HighlightText; } }
+@media (forced-colors: active) { button, input, textarea, .review-controls, .review-card, dialog, .report-identity, .report-view > section, [data-report-metric], [data-report-issue], [data-report-evidence-preview] figure, [data-report-evidence], .section-nav a, .report-filters [role="group"], .report-view th, .report-view td { border-color: CanvasText; } .report-filters button[aria-pressed="true"] { background: Highlight; color: HighlightText; } [data-report-executive-actions] button { background: Canvas; color: CanvasText; border-color: ButtonText; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
