@@ -317,6 +317,72 @@ test('rejects the removed persona target intent without any session-area write',
   assert.deepEqual(await sessionArea.get(null), {});
 });
 
+test('rejects an injected persisted persona target at every parser-boundary consumer', async () => {
+  const capabilityId = 'P'.repeat(22);
+  const sessionCapabilityId = 'S'.repeat(22);
+  const currentTime = 1_788_000_000_000;
+  let probeCalls = 0;
+  const { authority, sessionArea } = authorityFixture({
+    now: () => currentTime,
+    probeDocument: async () => {
+      probeCalls += 1;
+      return { tabId: 41, windowId: 9, documentId: 'target-document-1', urlSessionDigest: DIGEST };
+    },
+  });
+  const targetKey = targetCapabilityStorageKey(capabilityId);
+  await sessionArea.set({
+    [targetKey]: {
+      version: 1,
+      capabilityId,
+      kind: 'attached',
+      tabId: 41,
+      windowId: 9,
+      documentId: 'target-document-1',
+      initialUrlEvidence: 'https://example.test/path',
+      initialUrlSessionDigest: DIGEST,
+      createdBy: 'user',
+      allowedIntent: 'start-persona',
+      issuer: extensionContext().issuer,
+      sessionCapabilityId: null,
+      issuedAt: currentTime,
+      expiresAt: currentTime + 60_000,
+      state: 'prepared',
+    },
+  });
+  assert.equal(sessionArea.writes.length, 1, 'the only write is the hostile test injection');
+
+  await assert.rejects(
+    () => readPreparedAttachedAuditFact({ sessionArea, capabilityId, epochNow: () => currentTime }),
+    /PREPARED_AUDIT_FACT_DENIED/u,
+  );
+  await assert.rejects(
+    () => readClaimedAttachedAuditGrant({
+      sessionArea, capabilityId, sessionCapabilityId, auditId: 'audit-persona', epochNow: () => currentTime,
+    }),
+    /CLAIMED_AUDIT_GRANT_DENIED/u,
+  );
+  await assert.rejects(
+    () => readAttachedAuditCorrelationForRecovery({ sessionArea, capabilityId, auditId: 'audit-persona' }),
+    /AUDIT_RECOVERY_CORRELATION_DENIED/u,
+  );
+  assert.deepEqual(await authority.claimAndIssueAuditSession({
+    capabilityId,
+    auditId: 'audit-persona',
+    mode: 'attached',
+    allowedIntent: 'start-audit',
+    senderContext: extensionContext(),
+  }), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+  assert.deepEqual(await authority.invalidateCapability(capabilityId, 'removed-intent'), {
+    ok: false, code: 'CAPABILITY_UNAVAILABLE',
+  });
+  assert.deepEqual(await authority.invalidateForTab(41, 'removed-intent'), { ok: true, invalidated: 0 });
+  assert.deepEqual(await authority.invalidateForWindow(9, 'removed-intent'), { ok: true, invalidated: 0 });
+
+  assert.equal(probeCalls, 0);
+  assert.equal(sessionArea.writes.length, 1, 'no parser consumer may rewrite or issue a session');
+  assert.deepEqual(Object.keys(await sessionArea.get(null)), [targetKey]);
+});
+
 test('rejects unsanitized evidence URLs before persistence', async () => {
   for (const initialUrlEvidence of [
     'https://user:password@example.test/path',
