@@ -79,7 +79,7 @@ async function queryTabs(chromeApi, queryInfo) {
         else finish(resolve, value);
       });
       if (returned && typeof returned.then === 'function') returned.then(value => finish(resolve, value), () => finish(reject, new Error('TARGET_UNAVAILABLE')));
-      else if (chromeApi.tabs.query.length < 2) finish(resolve, returned);
+      else if (returned !== undefined) finish(resolve, returned);
     } catch { finish(reject, new Error('TARGET_UNAVAILABLE')); }
   });
 }

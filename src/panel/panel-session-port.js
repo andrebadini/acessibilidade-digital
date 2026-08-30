@@ -192,11 +192,16 @@ export function createPanelSessionPortClient(raw) {
     const intent = exact(rawIntent, ['type']);
     if (!intent || !['PANEL_CANCEL_AUDIT', 'PANEL_OPEN_REPORT'].includes(intent.type) ||
       auditId === null || sessionId === null) return localUnavailable();
+    const expectedAuditId = auditId;
+    const expectedSessionId = sessionId;
     let windowId;
     try { windowId = await input.getWindowId(); }
     catch { return localUnavailable(); }
-    if (!Number.isSafeInteger(windowId) || windowId < 0) return localUnavailable();
-    const message = { type: intent.type, sessionCapabilityId: sessionId, auditId, windowId };
+    if (!Number.isSafeInteger(windowId) || windowId < 0 ||
+      auditId !== expectedAuditId || sessionId !== expectedSessionId) return localUnavailable();
+    const message = {
+      type: intent.type, sessionCapabilityId: expectedSessionId, auditId: expectedAuditId, windowId,
+    };
     try {
       return await new Promise(resolve => {
         let settled = false;

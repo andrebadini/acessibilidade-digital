@@ -156,6 +156,70 @@ test('prepares a panel capability and starts through the only attached starter w
   assert.equal(Object.isFrozen(begin.retentionPreference), true);
 });
 
+test('prepares from the native SIDE_PANEL sender after context and window proofs', async () => {
+  const { router, dependencies } = fixture();
+  const url = `chrome-extension://${RUNTIME_ID}/src/panel/index.html`;
+  dependencies.chromeApi.runtime.getContexts = async filter => [{
+    documentId: 'native-panel-document', documentUrl: filter.documentUrls?.[0] ?? url,
+    contextType: filter.contextTypes?.[0] ?? 'SIDE_PANEL', tabId: -1, windowId: -1,
+  }];
+
+  const response = await router.dispatch({
+    envelope: parsed({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-native-panel', windowId: 9 }),
+    sender: { id: RUNTIME_ID, url, origin: `chrome-extension://${RUNTIME_ID}` },
+  });
+
+  assert.deepEqual(response, {
+    ok: true, requestId: 'request-native-panel', capabilityId: CAPABILITY, expiresAt: 200,
+  });
+});
+
+test('awaits a callback result when tabs.query returns undefined regardless of declared arity', async () => {
+  const { router, dependencies } = fixture();
+  dependencies.chromeApi.tabs.query = function query(queryInfo) {
+    const callback = arguments[1];
+    if (typeof callback !== 'function') return Promise.resolve([{
+      id: 17, windowId: queryInfo.windowId, active: true, status: 'complete',
+      url: 'https://example.test/', pendingUrl: '',
+    }]);
+    setImmediate(() => callback([{
+      id: 17, windowId: queryInfo.windowId, active: true, status: 'complete',
+      url: 'https://example.test/', pendingUrl: '',
+    }]));
+  };
+
+  const response = await router.dispatch({
+    envelope: parsed({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-callback-query', windowId: 9 }),
+    sender: panelSender(),
+  });
+
+  assert.deepEqual(response, {
+    ok: true, requestId: 'request-callback-query', capabilityId: CAPABILITY, expiresAt: 200,
+  });
+});
+
+test('accepts a defined synchronous tabs.query result regardless of declared arity', async () => {
+  const { router, dependencies } = fixture();
+  dependencies.chromeApi.tabs.query = function query(queryInfo, callback) {
+    const result = [{
+      id: 17, windowId: queryInfo.windowId, active: true, status: 'complete',
+      url: 'https://example.test/', pendingUrl: '',
+    }];
+    if (typeof callback !== 'function') return Promise.resolve(result);
+    setImmediate(() => callback([]));
+    return result;
+  };
+
+  const response = await router.dispatch({
+    envelope: parsed({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-defined-query', windowId: 9 }),
+    sender: panelSender(),
+  });
+
+  assert.deepEqual(response, {
+    ok: true, requestId: 'request-defined-query', capabilityId: CAPABILITY, expiresAt: 200,
+  });
+});
+
 test('re-proves the panel window on start and denies a changed claim before the audit starter', async () => {
   const { router, calls } = fixture();
   assert.equal((await router.dispatch({

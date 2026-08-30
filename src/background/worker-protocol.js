@@ -33,29 +33,33 @@ function hasFlatPrimitiveShape(value) {
 
 function validWorkerEnvelope(value) {
   if (value.type === 'PREPARE_PANEL_CAPABILITY') {
-    return AUDIT_ID.test(value.requestId ?? '') && safeChromeId(value.windowId);
+    return validAuditId(value.requestId) && safeChromeId(value.windowId);
   }
   if (value.type === 'PANEL_START_ATTACHED_AUDIT') {
-    return OPAQUE_ID.test(value.capabilityId ?? '') && value.captureMode === 'no-pixels' &&
+    return validOpaqueId(value.capabilityId) && value.captureMode === 'no-pixels' &&
       value.includeQuery === false && value.deleteAfterCompleteExport === false && safeChromeId(value.windowId);
   }
   if (['PANEL_CANCEL_AUDIT', 'PANEL_OPEN_REPORT'].includes(value.type)) {
-    return OPAQUE_ID.test(value.sessionCapabilityId ?? '') && AUDIT_ID.test(value.auditId ?? '') &&
+    return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) &&
       safeChromeId(value.windowId);
   }
   if (value.type === 'REPORT_REQUEST_EXPORT') {
-    return OPAQUE_ID.test(value.sessionCapabilityId ?? '') && AUDIT_ID.test(value.auditId ?? '');
+    return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId);
   }
   if (value.type === 'EXPORT_COMPLETE') {
-    return OPAQUE_ID.test(value.sessionCapabilityId ?? '') && AUDIT_ID.test(value.auditId ?? '') &&
-      /^(?:[1-9][0-9]*)$/u.test(value.attemptId ?? '') && Number.isSafeInteger(Number(value.attemptId));
+    return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) && validAttemptId(value.attemptId);
   }
   if (value.type === 'PANEL_REHYDRATE_VIEW') {
-    return AUDIT_ID.test(value.auditId ?? '') && safeChromeId(value.windowId);
+    return validAuditId(value.auditId) && safeChromeId(value.windowId);
   }
-  return AUDIT_ID.test(value.auditId ?? '');
+  return validAuditId(value.auditId);
 }
 
+function validOpaqueId(value) { return typeof value === 'string' && OPAQUE_ID.test(value); }
+function validAuditId(value) { return typeof value === 'string' && AUDIT_ID.test(value); }
+function validAttemptId(value) {
+  return typeof value === 'string' && /^(?:[1-9][0-9]*)$/u.test(value) && Number.isSafeInteger(Number(value));
+}
 function safeChromeId(value) { return Number.isSafeInteger(value) && value >= 0; }
 
 export function readSafeOwnEnumerableDataType(value) {

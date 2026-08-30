@@ -79,6 +79,39 @@ test('connects once, sends one exact hello and never exposes the bearer to callb
   assert.deepEqual(env.windowReads, [9, 9]);
 });
 
+test('denies an in-flight session intent when bootstrap rotates its correlation', async () => {
+  const env = fixture();
+  let windowReads = 0;
+  let releaseWindow;
+  const client = createPanelSessionPortClient({
+    chromeApi: env.chromeApi,
+    getWindowId() {
+      windowReads += 1;
+      if (windowReads === 1) return 9;
+      return new Promise(resolve => { releaseWindow = resolve; });
+    },
+    onBootstrapResult() {}, onStatus() {}, setTimer: env.setTimer, clearTimer: env.clearTimer,
+  });
+  client.start();
+  await new Promise(resolve => setImmediate(resolve));
+  const port = env.ports[0];
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'running',
+    auditId: 'audit-before-rotation', sessionCapabilityId: SESSION_ID, result: null,
+  });
+
+  const pending = client.requestSessionIntent({ type: 'PANEL_CANCEL_AUDIT' });
+  await new Promise(resolve => setImmediate(resolve));
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'running',
+    auditId: 'audit-after-rotation', sessionCapabilityId: 'B'.repeat(22), result: null,
+  });
+  releaseWindow(9);
+
+  assert.deepEqual(await pending, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  assert.deepEqual(env.sent, []);
+});
+
 test('clears correlation before unavailable notification and follows the fixed reconnect schedule', async () => {
   const env = fixture();
   const observations = [];

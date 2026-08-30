@@ -40,6 +40,36 @@ test('accepts the full external opaque and audit identifier alphabets without a 
   }
 });
 
+test('rejects numeric coercion for every identifier while keeping windowId numeric', () => {
+  const twentyDigitNumber = Number('12345678901234567890');
+  const numericIdentifiers = [
+    { type: 'PREPARE_PANEL_CAPABILITY', requestId: 1, windowId: 9 },
+    {
+      type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: twentyDigitNumber,
+      captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9,
+    },
+    { type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: twentyDigitNumber, auditId: 'audit-1', windowId: 9 },
+    { type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION, auditId: 1, windowId: 9 },
+    { type: 'PANEL_OPEN_REPORT', sessionCapabilityId: twentyDigitNumber, auditId: 'audit-1', windowId: 9 },
+    { type: 'PANEL_OPEN_REPORT', sessionCapabilityId: SESSION, auditId: 1, windowId: 9 },
+    { type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: twentyDigitNumber, auditId: 'audit-1' },
+    { type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: SESSION, auditId: 1 },
+    { type: 'PANEL_REHYDRATE_VIEW', auditId: 1, windowId: 9 },
+    { type: 'REPORT_CONNECT', auditId: 1 },
+    { type: 'EXPORT_CONNECT', auditId: 1 },
+    { type: 'EXPORT_COMPLETE', sessionCapabilityId: twentyDigitNumber, auditId: 'audit-1', attemptId: '1' },
+    { type: 'EXPORT_COMPLETE', sessionCapabilityId: SESSION, auditId: 1, attemptId: '1' },
+    { type: 'EXPORT_COMPLETE', sessionCapabilityId: SESSION, auditId: 'audit-1', attemptId: 1 },
+  ];
+
+  for (const message of numericIdentifiers) {
+    assert.deepEqual(parseWorkerMessage(message), { ok: false, code: 'INVALID_MESSAGE' }, message.type);
+  }
+  assert.equal(parseWorkerMessage({
+    type: 'EXPORT_COMPLETE', sessionCapabilityId: SESSION, auditId: 'audit-1', attemptId: '1',
+  }).ok, true);
+});
+
 test('rejects wrong values and exact-key violations as recognized invalid messages', () => {
   const invalid = [
     { type: 'PREPARE_PANEL_CAPABILITY', requestId: 'a', windowId: 9, extra: true },
@@ -60,13 +90,14 @@ test('requires one safe data-only window claim on every panel envelope', () => {
   const missing = { type: base.type, requestId: base.requestId };
   const extra = { ...base, secondWindowId: 11 };
   const negative = { ...base, windowId: -1 };
+  const stringWindow = { ...base, windowId: '9' };
   const accessor = { type: base.type, requestId: base.requestId };
   let getterCalls = 0;
   Object.defineProperty(accessor, 'windowId', {
     enumerable: true,
     get() { getterCalls += 1; return 9; },
   });
-  for (const message of [missing, extra, negative, accessor]) {
+  for (const message of [missing, extra, negative, stringWindow, accessor]) {
     assert.deepEqual(parseWorkerMessage(message), { ok: false, code: 'INVALID_MESSAGE' });
   }
   assert.equal(getterCalls, 0);
