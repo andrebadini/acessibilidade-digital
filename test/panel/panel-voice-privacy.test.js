@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
+import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
+import { createPanelResultBundleV1 } from '../../src/panel/panel-result-bundle.js';
+import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
+
 function kebab(value) { return value.replace(/[A-Z]/gu, letter => `-${letter.toLowerCase()}`); }
 
 class FakeElement {
@@ -68,6 +73,34 @@ function event() {
     removeListener(listener) { const index = listeners.indexOf(listener); if (index >= 0) listeners.splice(index, 1); },
     emit(...args) { for (const listener of [...listeners]) listener(...args); },
   };
+}
+
+async function resultBundle(auditId) {
+  const inventory = await createInstalledCoreRuleInventory();
+  const draft = structuredClone(SAMPLE_AUDIT);
+  draft.auditId = auditId;
+  draft.integrity.canonicalModelHash = 'pending';
+  draft.integrity.evidenceManifestHash = 'pending';
+  const model = await enrichAuditForReport(draft, {
+    now: () => '2026-08-29T12:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '1.0.1', rulesVersion: inventory.rulesVersion, browserVersion: 'Chrome/147.0.0.0',
+  });
+  const checkpoint = {
+    version: 1, auditId,
+    pages: model.pages.map(page => ({
+      pageId: page.pageId, attempted: page.attempted,
+      startedAt: page.attempted ? page.timestamps.startedAt : null,
+      rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion,
+      inventoryHash: inventory.sha256, outcomes: [],
+    })),
+  };
+  return createPanelResultBundleV1({
+    reportRevision: {
+      version: 1, auditId, modelRevision: 1,
+      modelHash: model.integrity.canonicalModelHash, model, checkpoint,
+    },
+    inventory,
+  });
 }
 
 test('panel runtime never reads speech voices or Chrome target IDs and connects only audita-panel-v1', async t => {
@@ -152,4 +185,29 @@ test('panel runtime never reads speech voices or Chrome target IDs and connects 
   assert.doesNotMatch(document.root.textContent, new RegExp(capabilityId, 'u'));
   assert.doesNotMatch(JSON.stringify(document.root.dataset), /capability|session|tab|window|document|frame/iu);
   assert.equal(chromeTargetReads, 0);
+
+  const sessionCapabilityId = 'S'.repeat(22);
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'running',
+    auditId: 'audit-panel-1', sessionCapabilityId, result: null,
+  });
+  assert.equal(document.activeElement, document.root.querySelector('[data-focus-id="cancel-audit"]'));
+
+  const bundle = await resultBundle('audit-panel-1');
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'result',
+    auditId: 'audit-panel-1', sessionCapabilityId, result: bundle,
+  });
+  const resultSummary = document.root.querySelector('[data-focus-id="result-summary"]');
+  assert.ok(resultSummary);
+  assert.equal(document.activeElement, resultSummary, 'replaceChildren restores focus to a result semantic target');
+
+  document.root.scrollTop = 211;
+  const filter = document.root.querySelector('button[data-filter-dimension][data-filter-value]');
+  assert.ok(filter);
+  filter.focus();
+  const filterFocusId = filter.dataset.focusId;
+  await filter.click();
+  assert.equal(document.root.scrollTop, 211, 'the effective panel scroll position survives the re-render');
+  assert.equal(document.activeElement?.dataset?.focusId, filterFocusId, 'focus returns to the exact chip, not its dimension peer');
 });

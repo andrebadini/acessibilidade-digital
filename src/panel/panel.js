@@ -48,8 +48,11 @@ function transition(event) {
 }
 
 function handleEvent(event) {
-  if (event?.type !== 'FILTER_SET') return;
-  transition({ ...event, ...currentInteraction(`filter-${event.filter}`) });
+  if (!['FILTER_SET', 'EVIDENCE_TOGGLED'].includes(event?.type)) return;
+  const fallback = typeof event.focusId === 'string'
+    ? event.focusId
+    : (event.type === 'FILTER_SET' ? `filter-${event.filter}-all` : 'evidence-summary');
+  transition({ ...event, ...currentInteraction(fallback) });
 }
 
 async function handleIntent(intent) {
@@ -124,7 +127,7 @@ function selectOccurrence(occurrenceId) {
 function consultEvidence(occurrenceId, reason) {
   const detail = exactDetail(occurrenceId);
   if (!detail || reason !== detail.action.reason) return;
-  const scrollTop = Number.isSafeInteger(root?.scrollTop) && root.scrollTop >= 0 ? root.scrollTop : state.scrollTop;
+  const scrollTop = currentScrollTop();
   transition({ type: 'EVIDENCE_TOGGLED', expanded: true, focusId: 'evidence-summary', scrollTop });
   announce(detail.action.reason);
 }
@@ -174,8 +177,16 @@ function currentInteraction(fallbackFocusId) {
   const activeFocusId = document.activeElement?.dataset?.focusId;
   return {
     focusId: typeof activeFocusId === 'string' ? activeFocusId : fallbackFocusId,
-    scrollTop: Number.isSafeInteger(root?.scrollTop) && root.scrollTop >= 0 ? root.scrollTop : state.scrollTop,
+    scrollTop: currentScrollTop(),
   };
+}
+
+function currentScrollTop() {
+  if (Number.isSafeInteger(root?.scrollTop) && root.scrollTop >= 0) return root.scrollTop;
+  const scrollingElement = document.scrollingElement;
+  return Number.isSafeInteger(scrollingElement?.scrollTop) && scrollingElement.scrollTop >= 0
+    ? scrollingElement.scrollTop
+    : state.scrollTop;
 }
 
 function restoreFocus(focusId) {

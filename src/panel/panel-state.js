@@ -23,7 +23,9 @@ export function createInitialPanelState() {
 }
 
 export function reducePanelState(current, event) {
-  if (!panelState(current) || !event || typeof event !== 'object' || Array.isArray(event)) return current;
+  if (!panelState(current)) return current;
+  current = immutablePanelState(current);
+  if (!event || typeof event !== 'object' || Array.isArray(event)) return current;
   switch (event.type) {
     case 'BOOTSTRAP_INITIAL':
       return createInitialPanelState();
@@ -53,7 +55,7 @@ export function reducePanelState(current, event) {
         : (occurrenceIds[0] ?? null);
       return nextPanelState(current, {
         screen: 'result', auditId: event.auditId, selectedOccurrenceId: selected,
-        evidenceExpanded: false, focusId: current.focusId,
+        evidenceExpanded: false, focusId: 'result-summary',
         reason: null,
       });
     }
@@ -104,6 +106,22 @@ function panelState(value) {
   return Boolean(value) && value.version === 1 &&
     ['initial', 'running', 'result', 'unavailable'].includes(value.screen) &&
     value.filters && PANEL_FILTERS.every(filter => Array.isArray(value.filters[filter]));
+}
+
+function immutablePanelState(value) {
+  if (Object.isFrozen(value) && Object.isFrozen(value.filters) &&
+    PANEL_FILTERS.every(filter => Object.isFrozen(value.filters[filter]))) return value;
+  return deepFreezePanelState({
+    version: value.version,
+    screen: value.screen,
+    auditId: value.auditId,
+    filters: Object.fromEntries(PANEL_FILTERS.map(filter => [filter, [...value.filters[filter]]])),
+    selectedOccurrenceId: value.selectedOccurrenceId,
+    evidenceExpanded: value.evidenceExpanded,
+    focusId: value.focusId,
+    scrollTop: value.scrollTop,
+    reason: value.reason,
+  });
 }
 
 function nextPanelState(current, patch) {

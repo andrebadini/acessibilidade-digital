@@ -138,11 +138,20 @@ function renderResult(document, view, emit, onEvent) {
   root.append(identity);
 
   const coverage = section(document, 'coverage-block');
-  coverage.append(heading(document, 2, 'Cobertura automática'));
+  const coverageHeading = heading(document, 2, 'Cobertura automática');
+  coverageHeading.dataset.focusId = 'result-summary';
+  coverageHeading.setAttribute('tabindex', '-1');
+  coverage.append(coverageHeading);
   if (summary.coverage.status === 'available') {
+    const progress = document.createElement('progress');
+    progress.className = 'coverage-progress';
+    progress.setAttribute('value', String(summary.coverage.numerator));
+    progress.setAttribute('max', String(summary.coverage.denominator));
+    progress.setAttribute('aria-label', `Cobertura automática: ${summary.coverage.percent}`);
     coverage.append(
       paragraph(document, summary.coverage.percent, 'coverage-value'),
       paragraph(document, `${summary.coverage.numerator} de ${summary.coverage.denominator} testes aplicáveis`, 'coverage-ratio'),
+      progress,
     );
   } else {
     coverage.append(paragraph(document, 'Cobertura indisponível para esta execução.', 'coverage-value coverage-unavailable'));
@@ -159,7 +168,7 @@ function renderResult(document, view, emit, onEvent) {
 
   const groups = section(document, 'result-groups');
   for (const name of GROUPS) {
-    groups.append(renderGroup(document, name, result.groups[name], view, emit, result.detail));
+    groups.append(renderGroup(document, name, result.groups[name], view, emit, onEvent, result.detail));
   }
   root.append(groups);
 
@@ -196,22 +205,39 @@ function renderFilter(document, dimension, rows, selected, onEvent) {
   wrapper.setAttribute('aria-label', filterHeading(dimension));
   wrapper.append(heading(document, 3, filterHeading(dimension)));
   const buttons = section(document, 'filter-options');
-  for (const row of rows) {
+  const all = document.createElement('button');
+  all.setAttribute('type', 'button');
+  all.className = 'filter-chip filter-all';
+  all.dataset.filterDimension = dimension;
+  all.dataset.filterControl = 'all';
+  all.dataset.focusId = `filter-${dimension}-all`;
+  all.setAttribute('aria-pressed', String(selected.length === 0));
+  all.setAttribute('aria-label', `${filterHeading(dimension)}: mostrar todos`);
+  all.textContent = 'Todos';
+  all.addEventListener('click', event => {
+    const filter = event.currentTarget.dataset.filterDimension;
+    const focusId = event.currentTarget.dataset.focusId;
+    if (!FILTERS.includes(filter) || typeof focusId !== 'string') return;
+    onEvent(freezeRenderModel({ type: 'FILTER_SET', filter, values: [], focusId }));
+  });
+  buttons.append(all);
+  for (const [index, row] of rows.entries()) {
     const button = document.createElement('button');
     button.setAttribute('type', 'button');
     button.className = 'filter-chip';
     button.dataset.filterDimension = dimension;
     button.dataset.filterValue = row.id;
-    button.dataset.focusId = `filter-${dimension}`;
+    button.dataset.focusId = `filter-${dimension}-${index}`;
     button.setAttribute('aria-pressed', String(selected.includes(row.id)));
     button.setAttribute('aria-label', `${filterHeading(dimension)}: ${filterLabel(dimension, row.id)}, ${row.count}`);
     button.textContent = `${filterLabel(dimension, row.id)} ${row.count}`;
     button.addEventListener('click', event => {
       const filter = event.currentTarget.dataset.filterDimension;
       const value = event.currentTarget.dataset.filterValue;
-      if (!FILTERS.includes(filter) || typeof value !== 'string') return;
+      const focusId = event.currentTarget.dataset.focusId;
+      if (!FILTERS.includes(filter) || typeof value !== 'string' || typeof focusId !== 'string') return;
       const current = viewFilterSelection(selected, value);
-      onEvent(freezeRenderModel({ type: 'FILTER_SET', filter, values: current }));
+      onEvent(freezeRenderModel({ type: 'FILTER_SET', filter, values: current, focusId }));
     });
     buttons.append(button);
   }
@@ -219,7 +245,7 @@ function renderFilter(document, dimension, rows, selected, onEvent) {
   return wrapper;
 }
 
-function renderGroup(document, name, cards, view, emit, detail) {
+function renderGroup(document, name, cards, view, emit, onEvent, detail) {
   const wrapper = section(document, `result-group group-${name}`);
   wrapper.append(heading(document, 3, groupHeading(name)));
   if (cards.length === 0) {
@@ -229,7 +255,7 @@ function renderGroup(document, name, cards, view, emit, detail) {
   for (const card of cards) {
     wrapper.append(renderCard(document, card, view, emit));
     if (detail && card.occurrenceIds.includes(detail.occurrenceId)) {
-      wrapper.append(renderDetail(document, detail, view.evidenceExpanded, emit));
+      wrapper.append(renderDetail(document, detail, view.evidenceExpanded, emit, onEvent));
     }
   }
   return wrapper;
@@ -242,12 +268,27 @@ function renderCard(document, card, view, emit) {
   root.dataset.checkKey = card.checkKey;
   root.dataset.classification = card.classification;
   root.dataset.context = card.context;
-  const occurrenceId = card.occurrenceIds[0] ?? null;
-  if (occurrenceId) {
+  if (card.occurrenceIds.length === 1) {
+    const occurrenceId = card.occurrenceIds[0];
     const selected = view.selectedOccurrenceId === occurrenceId;
     const button = actionButton(document, card.title, 'SELECT_OCCURRENCE', `occurrence-${occurrenceId}`, emit, 'card-select', { occurrenceId });
     button.setAttribute('aria-pressed', String(selected));
     root.append(button);
+  } else if (card.occurrenceIds.length > 1) {
+    root.append(heading(document, 4, card.title));
+    const occurrences = section(document, 'occurrence-options');
+    occurrences.setAttribute('role', 'group');
+    occurrences.setAttribute('aria-label', `Ocorrências de ${card.title}`);
+    for (const [index, occurrenceId] of card.occurrenceIds.entries()) {
+      const selected = view.selectedOccurrenceId === occurrenceId;
+      const button = actionButton(
+        document, `Ocorrência ${index + 1} de ${card.occurrenceIds.length}`,
+        'SELECT_OCCURRENCE', `occurrence-${occurrenceId}`, emit, 'occurrence-select', { occurrenceId },
+      );
+      button.setAttribute('aria-pressed', String(selected));
+      occurrences.append(button);
+    }
+    root.append(occurrences);
   } else {
     root.append(heading(document, 4, card.title));
   }
@@ -261,7 +302,7 @@ function renderCard(document, card, view, emit) {
   return root;
 }
 
-function renderDetail(document, detail, expanded, emit) {
+function renderDetail(document, detail, expanded, emit, onEvent) {
   const root = section(document, 'result-detail');
   root.dataset.resultDetail = '';
   root.dataset.classification = detail.heading.classification;
@@ -288,8 +329,8 @@ function renderDetail(document, detail, expanded, emit) {
     detailBlock(document, 'legal', 'Referência legal', detail.legalReference ? [
       detail.legalReference.statement, detail.legalReference.qualification,
     ] : ['Não há referência legal específica para esta ocorrência.']),
-    previewBlock(document, detail.previews, expanded),
-    technicalBlock(document, detail.technical, expanded),
+    previewBlock(document, detail.previews, expanded, onEvent),
+    technicalBlock(document, detail.technical, expanded, onEvent),
   );
   root.append(actionButton(document, 'Consultar evidências', 'CONSULT_EVIDENCE', 'consult-evidence', emit, 'primary-action', {
     occurrenceId: detail.occurrenceId,
@@ -306,7 +347,7 @@ function detailBlock(document, name, title, values) {
   return block;
 }
 
-function previewBlock(document, previews, expanded) {
+function previewBlock(document, previews, expanded, onEvent) {
   const block = document.createElement('details');
   block.className = 'detail-block detail-previews';
   block.dataset.detailBlock = 'previews';
@@ -315,6 +356,7 @@ function previewBlock(document, previews, expanded) {
   summary.dataset.focusId = 'evidence-summary';
   summary.textContent = 'Evidências';
   block.append(summary);
+  bindDisclosure(block, expanded, 'evidence-summary', onEvent);
   if (previews.length === 0) block.append(paragraph(document, 'Nenhuma prévia visual foi armazenada.'));
   for (const preview of previews) {
     const item = section(document, 'evidence-preview');
@@ -327,14 +369,16 @@ function previewBlock(document, previews, expanded) {
   return block;
 }
 
-function technicalBlock(document, technical, expanded) {
+function technicalBlock(document, technical, expanded, onEvent) {
   const block = document.createElement('details');
   block.className = 'detail-block detail-technical';
   block.dataset.detailBlock = 'technical';
   block.open = expanded;
   const summary = document.createElement('summary');
+  summary.dataset.focusId = 'technical-summary';
   summary.textContent = 'Evidências técnicas';
   block.append(summary);
+  bindDisclosure(block, expanded, 'technical-summary', onEvent);
   block.append(
     paragraph(document, `Mecanismo: ${technical.engine} ${technical.version}`),
     paragraph(document, `Regra: ${technical.ruleId}`),
@@ -342,6 +386,15 @@ function technicalBlock(document, technical, expanded) {
   if (technical.selector) block.append(labeledCode(document, 'Seletor sanitizado', technical.selector));
   if (technical.snippet) block.append(labeledCode(document, 'Trecho sanitizado', technical.snippet));
   return block;
+}
+
+function bindDisclosure(block, expanded, focusId, onEvent) {
+  block.addEventListener('toggle', event => {
+    if (event.currentTarget.open === expanded) return;
+    onEvent(freezeRenderModel({
+      type: 'EVIDENCE_TOGGLED', expanded: event.currentTarget.open === true, focusId,
+    }));
+  });
 }
 
 function labeledCode(document, label, value) {

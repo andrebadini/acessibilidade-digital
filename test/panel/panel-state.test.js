@@ -83,11 +83,31 @@ test('implements the exact four-screen lifecycle and ignores unknown events', ()
   const result = reducePanelState(running, { type: 'AUDIT_RESULT', auditId: 'audit-1', result: resultBundle() });
   assert.equal(result.screen, 'result');
   assert.equal(result.selectedOccurrenceId, 'occ-1');
-  assert.equal(result.focusId, 'cancel-audit', 'an asynchronous result must not steal focus');
+  assert.equal(result.focusId, 'result-summary', 'the removed cancel control needs a semantic result destination');
   const restarted = reducePanelState(result, { type: 'BOOTSTRAP_INITIAL' });
   assert.equal(restarted.screen, 'initial');
   assert.strictEqual(reducePanelState(restarted, { type: 'NOT_A_PANEL_EVENT' }), restarted);
   assert.strictEqual(reducePanelState(restarted, null), restarted);
+});
+
+test('unknown and invalid events return a detached recursively frozen valid state', () => {
+  const mutable = {
+    version: 1, screen: 'result', auditId: 'audit-1',
+    filters: { impact: ['critical'], wcag: [], abnt: [] },
+    selectedOccurrenceId: 'occ-1', evidenceExpanded: false,
+    focusId: 'result-summary', scrollTop: 24, reason: null,
+  };
+  for (const event of [{ type: 'NOT_A_PANEL_EVENT' }, null]) {
+    const result = reducePanelState(mutable, event);
+    assert.notStrictEqual(result, mutable);
+    assert.deepEqual(result, mutable);
+    assert.equal(Object.isFrozen(result), true);
+    assert.equal(Object.isFrozen(result.filters), true);
+    assert.equal(Object.isFrozen(result.filters.impact), true);
+  }
+  assert.equal(Object.isFrozen(mutable), false, 'the reducer does not freeze caller-owned input');
+  const invalid = { ...mutable, screen: 'private-invalid-screen' };
+  assert.strictEqual(reducePanelState(invalid, { type: 'NOT_A_PANEL_EVENT' }), invalid);
 });
 
 test('every transition is recursively frozen and filters preserve selection focus and scroll', () => {

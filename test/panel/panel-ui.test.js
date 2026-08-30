@@ -83,7 +83,7 @@ test('visual system matches the approved option-2 hierarchy and accessibility br
 test('CSS contains explicit reflow coverage for the required 320 through 600 pixel panel widths and 200 percent zoom', async () => {
   const css = await panelFile('panel.css');
   assert.match(css, /min-width:\s*min\(20rem,\s*100%\)/iu);
-  assert.match(css, /max-width:\s*37\.5rem/iu);
+  assert.match(css, /max-width:\s*44rem/iu);
   assert.match(css, /overflow-wrap:\s*anywhere/iu);
   assert.doesNotMatch(css, /min-width:\s*(?:[4-9]\d\d|[1-9]\d{3,})px/iu);
   assert.doesNotMatch(css, /white-space:\s*nowrap/iu);

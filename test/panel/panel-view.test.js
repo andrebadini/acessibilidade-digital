@@ -48,6 +48,9 @@ class TestElement {
     if (!this.listeners.has(type)) this.listeners.set(type, []);
     this.listeners.get(type).push(listener);
   }
+  dispatch(type) {
+    for (const listener of this.listeners.get(type) ?? []) listener({ currentTarget: this, preventDefault() {} });
+  }
   click() { for (const listener of this.listeners.get('click') ?? []) listener({ currentTarget: this, preventDefault() {} }); }
   focus() { this.ownerDocument.activeElement = this; }
   scrollIntoView() { this.scrolledIntoView = true; }
@@ -79,15 +82,16 @@ function matchesSelector(node, selector) {
   return true;
 }
 
-function card({ checkKey, occurrenceId, impact, wcag, abnt, classification = 'failed', context = 'top-document' }) {
+function card({ checkKey, occurrenceId, occurrenceIds, impact, wcag, abnt, classification = 'failed', context = 'top-document' }) {
+  const ids = occurrenceIds ?? (occurrenceId ? [occurrenceId] : []);
   return {
     checkKey, pageId: 'page-1', engine: 'audita-core', ruleId: checkKey,
     originalOutcome: classification === 'passed' ? 'passed' : 'failed',
     displayOutcome: classification === 'passed' ? 'passed' : 'failed',
     title: checkKey === 'check-1' ? 'Imagem sem texto alternativo' : 'Ordem de foco não lógica',
-    impact, wcag: [wcag], abntItemIds: [abnt], occurrenceIds: occurrenceId ? [occurrenceId] : [],
+    impact, wcag: [wcag], abntItemIds: [abnt], occurrenceIds: ids,
     classification, context, accessibleName: null, announcement: null,
-    evidence: { evidenceIds: occurrenceId ? [`ev-${occurrenceId}`] : [], highlightAvailable: false },
+    evidence: { evidenceIds: ids.map(id => `ev-${id}`), highlightAvailable: false },
   };
 }
 
@@ -173,6 +177,21 @@ test('renders the exact ten detail blocks from PanelDetailV1', () => {
   assert.match(root.textContent, /<img src="\/hero\.png">/u);
 });
 
+test('renders native determinate coverage progress and a semantic result focus destination', () => {
+  const input = fixture();
+  const root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  const progress = root.querySelector('progress');
+  assert.ok(progress);
+  assert.equal(progress.getAttribute('value'), '78');
+  assert.equal(progress.getAttribute('max'), '100');
+  assert.match(progress.getAttribute('aria-label'), /78,0%/u);
+  const summary = root.querySelector('[data-focus-id="result-summary"]');
+  assert.equal(summary.tagName, 'H2');
+  assert.equal(summary.getAttribute('tabindex'), '-1');
+});
+
 test('places the selected detail directly after its result card', () => {
   const input = fixture();
   const root = renderPanelView({
@@ -181,6 +200,25 @@ test('places the selected detail directly after its result card', () => {
   const card = root.querySelector('[data-result-card]');
   const siblings = card.parentNode.children;
   assert.equal(siblings[siblings.indexOf(card) + 1]?.hasAttribute('data-result-detail'), true);
+});
+
+test('every occurrence in a multi-occurrence card is independently selectable', () => {
+  const input = fixture();
+  const first = input.summary.groups.failed[0];
+  first.occurrenceIds = ['occ-1', 'occ-1b'];
+  input.state.selectedOccurrenceId = 'occ-1b';
+  input.detail.occurrenceId = 'occ-1b';
+  const intents = [];
+  const root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent: intent => intents.push(intent), onEvent() {},
+  });
+  const failedCard = root.querySelector('[data-result-card][data-check-key="check-1"]');
+  const selectors = failedCard.querySelectorAll('button[data-intent="SELECT_OCCURRENCE"]');
+  assert.equal(selectors.length, 2);
+  selectors.forEach(button => button.click());
+  assert.deepEqual(intents.map(intent => intent.occurrenceId), ['occ-1', 'occ-1b']);
+  assert.equal(selectors[1].getAttribute('aria-pressed'), 'true');
+  assert.doesNotMatch(failedCard.textContent, /occ-1/iu, 'opaque occurrence IDs stay out of visible copy');
 });
 
 test('renders closed result metadata and stable impact WCAG and ABNT filter selectors', () => {
@@ -208,7 +246,48 @@ test('filter listeners read currentTarget data and emit a closed reducer event',
     view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent: event => events.push(event),
   });
   root.querySelector('button[data-filter-dimension="impact"][data-filter-value="critical"]').click();
-  assert.deepEqual(events, [{ type: 'FILTER_SET', filter: 'impact', values: ['critical'] }]);
+  assert.deepEqual(events, [{
+    type: 'FILTER_SET', filter: 'impact', values: ['critical'], focusId: 'filter-impact-0',
+  }]);
+});
+
+test('filters expose a compact Todos reset and one stable focus ID per option', () => {
+  const input = fixture();
+  input.state.filters.impact = ['critical'];
+  const events = [];
+  const root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent: event => events.push(event),
+  });
+  const controls = root.querySelectorAll('button[data-filter-dimension]');
+  const focusIds = controls.map(control => control.dataset.focusId);
+  assert.equal(new Set(focusIds).size, focusIds.length);
+  const all = root.querySelector('button[data-filter-dimension="impact"][data-filter-control="all"]');
+  assert.equal(all.getAttribute('aria-pressed'), 'false');
+  all.click();
+  assert.deepEqual(events, [{ type: 'FILTER_SET', filter: 'impact', values: [], focusId: 'filter-impact-all' }]);
+});
+
+test('manual evidence disclosure emits state and survives a re-render for both details', () => {
+  const input = fixture();
+  const events = [];
+  let root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent: event => events.push(event),
+  });
+  const previews = root.querySelector('[data-detail-block="previews"]');
+  previews.open = true;
+  previews.dispatch('toggle');
+  assert.deepEqual(events, [{ type: 'EVIDENCE_TOGGLED', expanded: true, focusId: 'evidence-summary' }]);
+
+  input.state.evidenceExpanded = true;
+  root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent: event => events.push(event),
+  });
+  assert.equal(root.querySelector('[data-detail-block="previews"]').open, true);
+  const technical = root.querySelector('[data-detail-block="technical"]');
+  assert.equal(technical.open, true);
+  technical.open = false;
+  technical.dispatch('toggle');
+  assert.deepEqual(events[1], { type: 'EVIDENCE_TOGGLED', expanded: false, focusId: 'technical-summary' });
 });
 
 test('all four screens emit only the exhaustive UI intent union', () => {

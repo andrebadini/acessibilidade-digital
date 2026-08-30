@@ -38,9 +38,32 @@ Command:
 node --test test/panel/panel-state.test.js test/panel/panel-view.test.js test/panel/panel-ui.test.js test/panel/panel-voice-privacy.test.js test/extension-shell.test.js
 ```
 
-Result: **29 passed, 0 failed**.
+Result before independent review: **29 passed, 0 failed**.
 
 Coverage includes the exact four screens and event/intent unions, recursive freezing, filter OR/AND semantics, selection/focus/scroll preservation, ten ordered detail blocks, closed datasets, one polite live region, 44 px primary targets, responsive CSS at 320/380/480–520/600 px and 200%, forced-colors/reduced-motion rules, no `innerHTML`, and the negative privacy/runtime boundary.
+
+### Independent-review correction RED
+
+Command:
+
+```text
+node --test test/panel/panel-state.test.js test/panel/panel-view.test.js test/panel/panel-ui.test.js test/panel/panel-voice-privacy.test.js test/extension-shell.test.js
+```
+
+Result: **26 passed, 8 failed**, as expected. The failures proved the missing semantic result focus destination, detached recursively frozen unknown-event output, native progress, multi-occurrence selection, stable per-chip focus identity, explicit filter reset, disclosure events, and real post-replacement focus behavior.
+
+A subsequent visual-density assertion was added before widening the panel content. Its focused RED was **6 passed, 1 failed**, on the former `37.5rem` maximum width.
+
+### Correction GREEN
+
+The exact five focused files above passed **34/34**. Behavioral coverage now proves:
+
+- `running → result` focuses the real result summary after `replaceChildren`;
+- every occurrence on a multi-occurrence card is independently selectable without visible opaque IDs;
+- manual evidence/technical disclosure emits `EVIDENCE_TOGGLED` and survives rerender;
+- the effective `#panel-root` scrolling container preserves its real `scrollTop`;
+- every filter option and `Todos` reset has a stable unique closed focus ID and exact focus restoration;
+- valid mutable reducer input is detached and recursively frozen even for invalid/unknown events, while structurally invalid state remains fail-closed.
 
 ## Compatibility evidence
 
@@ -50,7 +73,7 @@ Command:
 node --test test/panel/panel-session-port.test.js test/personas/persona-controller.test.js test/review/*.test.js
 ```
 
-Result: **92 passed, 0 failed**. The existing port client contract and Task 5 review/persona compatibility surfaces remain intact; there is no persona path in the Task 6 panel runtime.
+Correction result: **92 passed, 0 failed**. The existing port client contract and Task 5 review/persona compatibility surfaces remain intact; there is no persona path in the Task 6 panel runtime.
 
 ## Full nonlegacy gate
 
@@ -62,21 +85,17 @@ find test -type f -name '*.test.js' -print0 | sort -z | xargs -0 node --test --t
 
 The first gate produced **1440 passed, 1 failed**. The failure was a proven build-critical stale assertion in `test/report/identity.test.js` that still required the removed legacy form and identity prose. Its panel assertion was updated only to the new neutral four-state mount. The focused identity test then passed **3/3**.
 
-Final full gate: **1441 passed, 0 failed** in 74.2 seconds.
+Original implementation full gate: **1441 passed, 0 failed** in 74.2 seconds.
+
+Correction full gate, run once after the final focused and compatibility checks: **1446 passed, 0 failed** in 74.36 seconds.
 
 ## Visual and accessibility evidence
 
-The approved option-2 image and deterministic implementation render were viewed together. The comparison drove the inline-detail and no-focus-steal refinement described above. Deterministic page-level browser checks over the real panel HTML/CSS/JS recorded:
+The approved option-2 source and the previously rejected joint comparison at `.superpowers/task6-qa/reference-vs-implementation.png` were inspected. That comparison exposed excessive whitespace, text-only coverage, tall filters, detached detail presentation, and weak density relative to the source. The correction adds native determinate progress, increases useful width to `44rem`, compacts metrics/filters/cards, adds a clear `Todos` control, visually integrates detail with its card, and uses a responsive two-column grid for the ten blocks from 480 CSS pixels. Below that breakpoint—including effective narrow layouts at 200% zoom—the detail remains one column. Interactive controls retain the 44 CSS pixel minimum; forced-colors and reduced-motion rules remain explicit.
 
-- widths 320, 380, 480 and 600 px with `scrollWidth === clientWidth` at every width;
-- all interactive button heights at least 44 CSS px;
-- two-column metric reflow at 320/380 and four columns at 480/600;
-- all four screens with one `h1`, one polite live region and no horizontal overflow;
-- result state with exactly ten detail blocks and the selected detail immediately following its card;
-- evidence disclosure expanded both `<details>`, focused `evidence-summary`, announced the fixed safe reason and exposed no highlight control;
-- no page console errors or warnings during the deterministic result render.
+Focused behavioral tests cover semantic focus, root scroll, exact chip restoration, native progress, disclosure persistence, multi-occurrence selection, and the ten-block structure rather than relying only on CSS regular expressions.
 
-This was deterministic page-level evidence, not a packaged extension side-panel capture in the user's real Chrome. Existing E2E selectors are legacy and cannot evidence Task 6 unchanged. A bounded forced-colors/reduced-motion browser emulation attempt hung in browser infrastructure and was stopped; the implementation and focused source tests cover both media modes, but real Chrome side-panel comparison, 200% browser zoom, forced-colors and reduced-motion remain controller/Task 8 QA debt. No claim of completed real Chrome side-panel visual QA is made here.
+The in-app browser was unavailable during the correction and its browser inventory was empty, so a revised deterministic screenshot and normalized joint comparison could not be produced. The earlier rejected image is not claimed as post-fix evidence. `design-qa.md` therefore records `final result: blocked`; real Chrome side-panel comparison at 320/380/480–520/600, 200% zoom, forced colors, and reduced motion remains pending controller QA. Existing legacy E2E selectors still cannot evidence Task 6 unchanged.
 
 ## Scope and hygiene
 
