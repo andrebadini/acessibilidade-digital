@@ -65,34 +65,34 @@ test('popup is an accessible local launcher with no URL, retention or pixel cont
   assert.doesNotMatch(css, /@import|https?:|url\s*\(/iu);
 });
 
-test('panel is an accessible local document with no inline code', async () => {
+test('panel is an accessible local four-state mount with no legacy URL or persona surface', async () => {
   const html = await readWorkspaceFile('src/panel/index.html');
   assert.equal((html.match(/<h1\b/gi) ?? []).length, 1);
-  assert.match(html, /<label[^>]*for="audit-url"[^>]*>\s*Endereço do site\s*<\/label>/i);
-  assert.match(html, /<input[^>]*id="audit-url"[^>]*type="url"/i);
-  assert.match(html, /<button[^>]*type="submit"[^>]*>\s*Auditar\s*<\/button>/i);
-  assert.match(html, /aria-live="polite"/i);
-  assert.match(html, /hidden[^>]*id="latest-report"|id="latest-report"[^>]*hidden/i);
-  const privacyNotice = html.match(/<p[^>]+id="audit-privacy-notice"[^>]*>([\s\S]*?)<\/p>/i);
-  assert.ok(privacyNotice, 'o aviso de privacidade deve ser um texto visível antes do formulário');
-  assert.ok(html.indexOf(privacyNotice[0]) < html.indexOf('<form'), 'o aviso deve anteceder o envio da auditoria');
-  assert.match(privacyNotice[1], /captura[^.]*página inteira[^.]*elementos/iu);
-  assert.match(privacyNotice[1], /pixels[^.]*dados sensíveis visíveis/iu);
-  assert.match(privacyNotice[1], /armazenad[^.]*localmente[^.]*relatórios/iu);
-  assert.match(privacyNotice[1], /ocult(?:e|ar)|remov(?:a|er)/iu);
+  assert.match(html, /<main[^>]+id="panel-root"[^>]+tabindex="-1"/iu);
+  assert.doesNotMatch(html, /<form\b|<input\b|<textarea\b|audit-url|audit-urls|prefill/iu);
+  assert.doesNotMatch(html, /persona|speechSynthesis|audita-persona-v1/iu);
   assert.doesNotMatch(html, /<script(?![^>]+src=)/i);
   assert.doesNotMatch(html, /<style\b|\sstyle=/i);
   assert.doesNotMatch(html, /<(?:script|link)[^>]+(?:src|href)="https?:\/\//i);
 });
 
-test('panel module starts the closed session client and renders a fixed unavailable start state', async () => {
-  const source = await readWorkspaceFile('src/panel/panel.js');
+test('panel module renders the local lifecycle without a bearer or legacy side-panel runtime', async () => {
+  const [source, view] = await Promise.all([
+    readWorkspaceFile('src/panel/panel.js'),
+    readWorkspaceFile('src/panel/panel-view.js'),
+  ]);
   assert.match(source, /createPanelSessionPortClient/);
   assert.match(source, /sessionPortClient\.start\(\)/u);
-  assert.match(source, /textContent/);
-  assert.doesNotMatch(source, /innerHTML/);
-  assert.doesNotMatch(source, /START_AUDIT|START_BATCH|CANCEL_AUDIT|AUDIT_CONTEXT_PREFILL/u);
-  assert.doesNotMatch(source, /sessionCapabilityId/u);
+  assert.match(source, /PREPARE_PANEL_CAPABILITY/u);
+  assert.match(source, /PANEL_START_ATTACHED_AUDIT/u);
+  assert.match(source, /PANEL_REHYDRATE_VIEW/u);
+  assert.match(source, /requestSessionIntent/u);
+  assert.match(view, /initial|running|result|unavailable/u);
+  assert.match(view, /Disponível no Marco 3/u);
+  assert.doesNotMatch(`${source}\n${view}`, /innerHTML/);
+  assert.doesNotMatch(source, /START_AUDIT|START_BATCH|AUDIT_CONTEXT_PREFILL|GET_LAST_AUDIT/u);
+  assert.doesNotMatch(source, /speechSynthesis|audita-persona-v1|data-persona-mode/u);
+  assert.doesNotMatch(`${source}\n${view}`, /sessionCapabilityId/u);
 });
 
 test('packages persona runtimes as local classic files without broadening the MV3 shell', async () => {

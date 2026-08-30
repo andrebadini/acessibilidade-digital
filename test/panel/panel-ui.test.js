@@ -2,114 +2,89 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-test('reopened panel hydrates the persisted export attempt correlation', async () => {
-  const source = await readFile(new URL('../../src/panel/panel.js', import.meta.url), 'utf8');
-  assert.match(source, /restoreExportEventState\(saved\)/u);
-  assert.match(source, /GET_LAST_AUDIT/u);
+const panelFile = path => readFile(new URL(`../../src/panel/${path}`, import.meta.url), 'utf8');
+
+test('panel shell is a compact four-state mount with one heading and no legacy form or persona runtime', async () => {
+  const html = await panelFile('index.html');
+  assert.equal((html.match(/<h1\b/giu) ?? []).length, 1);
+  assert.match(html, /<header[^>]+class="product-header"[\s\S]*Audita Acessibilidade/iu);
+  assert.match(html, /<main[^>]+id="panel-root"[^>]+tabindex="-1"/iu);
+  assert.match(html, /<script[^>]+type="module"[^>]+src="panel\.js"/iu);
+  assert.doesNotMatch(html, /<form\b|<input\b|<textarea\b|audit-url|audit-urls|delete-after-export/iu);
+  assert.doesNotMatch(html, /persona|speech|audita-persona-v1/iu);
+  assert.doesNotMatch(html, /<script(?![^>]+src=)|<style\b|\sstyle=/iu);
+  assert.doesNotMatch(html, /<(?:script|link|img)[^>]+(?:src|href)="https?:\/\//iu);
 });
 
-test('panel exposes the temporary fixed unavailable audit state without legacy start or cancel sends', async () => {
-  const [html, script, css] = await Promise.all([
-    readFile(new URL('../../src/panel/index.html', import.meta.url), 'utf8'),
-    readFile(new URL('../../src/panel/panel.js', import.meta.url), 'utf8'),
-    readFile(new URL('../../src/panel/panel.css', import.meta.url), 'utf8'),
-  ]);
-  const auditSection = html.match(/<form[^>]+id="audit-form"[\s\S]*?<\/form>/u)?.[0] ?? '';
-  assert.match(auditSection, /<fieldset[\s\S]*type="radio"[\s\S]*value="single"[\s\S]*value="batch"/iu);
-  assert.match(auditSection, /<textarea[^>]+id="audit-urls"[^>]+aria-describedby="batch-help batch-errors batch-warnings"/iu);
-  assert.match(auditSection, /uma por linha[^<]*até 20/iu);
-  assert.match(auditSection, /id="batch-errors"/u);
-  assert.match(auditSection, /id="batch-warnings"/u);
-  assert.match(html, /id="batch-progress"/u);
-  assert.match(html, /id="batch-summary"/u);
-  assert.match(html, /id="cancel-audit"/u);
-  assert.match(html, /sessão atual[\s\S]*URLs[\s\S]*pixels/iu);
-  assert.equal((html.match(/id="audit-status"[^>]*aria-live="polite"/gu) ?? []).length, 1);
-  assert.match(script, /createPanelSessionPortClient/u);
-  assert.match(script, /Iniciar auditorias por este painel estará disponível na próxima etapa\./u);
-  assert.doesNotMatch(script, /START_AUDIT|START_BATCH|CANCEL_AUDIT/u);
-  assert.match(script, /auditForm\.addEventListener\('submit'/u);
-  assert.match(script, /submitButton\.disabled\s*=\s*true/u);
-  assert.match(css, /#cancel-audit[^{]*\{[^}]*min-height:\s*2\.75rem/isu);
-  assert.match(css, /\.audit-mode label[^{]*\{[^}]*min-height:\s*2\.75rem/isu);
-  assert.match(css, /\.product-header[^{]*\{[^}]*flex-wrap:\s*wrap/isu);
+test('renderer uses only DOM construction and the fixed exhaustive screen and intent switches', async () => {
+  const [view, runtime] = await Promise.all([panelFile('panel-view.js'), panelFile('panel.js')]);
+  assert.match(view, /document\.createElement/u);
+  assert.match(view, /textContent/u);
+  assert.doesNotMatch(view, /innerHTML|insertAdjacentHTML|outerHTML/u);
+  assert.doesNotMatch(runtime, /innerHTML|insertAdjacentHTML|outerHTML/u);
+  for (const screen of ['initial', 'running', 'result', 'unavailable']) {
+    assert.match(view, new RegExp(`case ['"]${screen}['"]`, 'u'));
+  }
+  for (const intent of [
+    'START_ATTACHED', 'OPEN_URL_FORM', 'OPEN_BATCH_FORM', 'CANCEL_AUDIT',
+    'OPEN_REPORT', 'SELECT_OCCURRENCE', 'CONSULT_EVIDENCE', 'RETRY',
+  ]) assert.match(runtime, new RegExp(`case ['"]${intent}['"]`, 'u'));
+  assert.doesNotMatch(runtime, /START_AUDIT|START_BATCH|AUDIT_CONTEXT_PREFILL|GET_LAST_AUDIT/u);
 });
 
-test('panel exposes explicit 30-day retention controls and a confirmed delete-all dialog', async () => {
-  const [html, script, css] = await Promise.all([
-    readFile(new URL('../../src/panel/index.html', import.meta.url), 'utf8'),
-    readFile(new URL('../../src/panel/panel.js', import.meta.url), 'utf8'),
-    readFile(new URL('../../src/panel/panel.css', import.meta.url), 'utf8'),
-  ]);
-  assert.match(html, /URLs sanitizadas[\s\S]*pixels[\s\S]*nada é enviado[\s\S]*até 30 dias[\s\S]*downloads/iu);
-  assert.match(html, /id="delete-after-export"[^>]*type="checkbox"/iu);
-  assert.match(html, /Excluir esta auditoria local depois que HTML, JSON-LD, CSV e PDF forem baixados com sucesso/iu);
-  assert.match(html, /id="delete-all-audits"/u);
-  assert.match(html, /<dialog[^>]+id="delete-all-dialog"[^>]+aria-labelledby="delete-all-title"[^>]+aria-describedby="delete-all-description"/iu);
-  assert.match(html, /<dialog[^>]+id="delete-all-dialog"[^>]+aria-hidden="true"/iu);
-  assert.match(html, /id="delete-all-dialog-status"[^>]+role="status"[^>]+aria-live="polite"/iu);
-  assert.match(html, /id="audit-status"[^>]+tabindex="-1"/iu);
-  assert.match(html, /todas as auditorias locais[\s\S]*downloads/iu);
-  assert.match(script, /createDestructiveDialog/u);
-  assert.match(script, /REQUEST_DELETE_ALL_AUDITS/u);
-  assert.match(script, /parseAuditDeletedEvent/u);
-  assert.match(script, /stableFocus:\s*status/u);
-  assert.match(script, /deleteAllController\.completeSuccess\(\)/u);
-  assert.doesNotMatch(script, /src\/export\/index\.html/u);
-  assert.doesNotMatch(script, /window\.confirm|innerHTML/u);
-  assert.match(css, /#delete-all-audits[^{]*\{[^}]*min-height:\s*2\.75rem/isu);
-  assert.match(css, /dialog:not\(\[open\]\)[^{]*\{[^}]*display:\s*none/isu);
+test('initial URL and batch choices remain visible but local to Marco 3', async () => {
+  const view = await panelFile('panel-view.js');
+  assert.match(view, /Auditar a página atual/u);
+  assert.match(view, /Outra URL/u);
+  assert.match(view, /Lote de páginas/u);
+  assert.match(view, /Disponível no Marco 3/u);
+  assert.doesNotMatch(view, /type="url"|placeholder=.*https|prefill/iu);
+});
+
+test('running screen presents the fixed explanatory phases without synthetic current progress', async () => {
+  const view = await panelFile('panel-view.js');
+  for (const phase of [
+    'Abrindo e estabilizando a página.',
+    'Lendo estrutura e acessibilidade.',
+    'Verificando regras automáticas.',
+    'Coletando evidências.',
+    'Preparando o resultado.',
+  ]) assert.match(view, new RegExp(phase.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+  assert.match(view, /aria-live['"], ['"]polite/u);
+  assert.doesNotMatch(view, /fase atual|concluída \d|\d+% conclu/iu);
+});
+
+test('result copy preserves the coverage limitation and four separate checkKey metrics', async () => {
+  const view = await panelFile('panel-view.js');
+  assert.match(view, /Percentual da execução automática concluída\. Não é nota, certificação ou declaração de conformidade\./u);
+  for (const label of ['Falhas confirmadas', 'Alertas', 'Revisão humana', 'Resultados positivos']) {
+    assert.match(view, new RegExp(label, 'u'));
+  }
+  assert.match(view, /ocorrência/u);
+  assert.match(view, /Abrir relatório completo/u);
+});
+
+test('visual system matches the approved option-2 hierarchy and accessibility breakpoints', async () => {
+  const css = await panelFile('panel.css');
+  for (const token of ['#003b71', '#005a9c', '#14212b', '#eef4f8', '#738596', '#8b1e1e', '#6b4e00', '#1b6e3c']) {
+    assert.match(css, new RegExp(token, 'iu'));
+  }
+  assert.match(css, /font-family:\s*system-ui/iu);
+  assert.match(css, /min-(?:block-size|height):\s*44px/iu);
+  assert.match(css, /min-(?:inline-size|width):\s*44px/iu);
+  assert.match(css, /@media\s*\(max-width:\s*380px\)/iu);
+  assert.match(css, /grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/iu);
   assert.match(css, /@media\s*\(forced-colors:\s*active\)/iu);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/iu);
+  assert.match(css, /:focus-visible/iu);
+  assert.doesNotMatch(css, /@import|https?:|url\s*\(/iu);
 });
 
-test('panel exposes three reversible persona modes and complete simulated-reader controls', async () => {
-  const [html, script, css] = await Promise.all([
-    readFile(new URL('../../src/panel/index.html', import.meta.url), 'utf8'),
-    readFile(new URL('../../src/panel/panel.js', import.meta.url), 'utf8'),
-    readFile(new URL('../../src/panel/panel.css', import.meta.url), 'utf8'),
-  ]);
-  const personaSection = html.match(/<section[^>]+id="persona-section"[\s\S]*?<\/section>/u)?.[0] ?? '';
-  assert.notEqual(personaSection, '');
-  assert.equal((personaSection.match(/aria-pressed="false"/gu) ?? []).length, 3);
-  for (const id of [
-    'persona-mode-reader', 'persona-mode-achromatopsia', 'persona-mode-motor',
-    'persona-reader-toggle', 'persona-reader-stop', 'persona-reader-repeat',
-    'persona-reader-previous', 'persona-reader-next', 'persona-voice', 'persona-rate',
-    'persona-caption', 'persona-go-target', 'persona-live-status', 'persona-disabled-reason',
-  ]) assert.match(personaSection, new RegExp(`id="${id}"`, 'u'));
-  assert.match(personaSection, /fallback DOM/iu);
-  assert.match(personaSection, /VoiceOver[\s\S]*NVDA[\s\S]*JAWS/iu);
-  assert.match(personaSection, /não substitui/iu);
-  assert.match(personaSection, /Escape[^<]*três|três[^<]*Escape/iu);
-  assert.match(personaSection, /campos editáveis e áreas marcadas como privadas são omitidos/iu);
-  assert.match(personaSection, /não usa os comandos globais de cancelar, pausar ou retomar/iu);
-  assert.match(personaSection, /a fala já iniciada pode terminar[^.]*legenda e os controles continuam disponíveis/iu);
-  assert.equal((personaSection.match(/aria-live="polite"/gu) ?? []).length, 1);
-  assert.doesNotMatch(personaSection.match(/id="persona-caption"[^>]*>/u)?.[0] ?? '', /aria-live/iu);
-  assert.match(personaSection.match(/id="persona-caption"[^>]*>/u)?.[0] ?? '', /dir="auto"/iu);
-
-  assert.match(script, /chrome\.runtime\.connect\(\{\s*name:\s*'audita-persona-v1'/u);
-  assert.match(script, /queuePersonaCommand/u);
-  assert.match(script, /reducePersonaState/u);
-  assert.match(script, /playback\s*===\s*'idle'[\s\S]{0,180}Iniciar novamente/u);
-  assert.match(css, /min-height:\s*2\.75rem/iu);
-  assert.match(css, /\.persona-card\s+\.secondary-action:disabled\s*\{[^}]*background:\s*#e6edf2[^}]*color:\s*#2f3b45[^}]*opacity:\s*1/isu);
-  assert.match(css, /body\s*\{[^}]*min-width:\s*min\(20rem,\s*100%\)/isu,
-    'a largura mínima deve ceder ao espaço útil quando a barra vertical reduz o viewport');
-  assert.match(css, /@media\s*\(forced-colors:\s*active\)/iu);
-});
-
-test('injected persona stylesheet is local, reversible and pointer-transparent', async () => {
-  const source = await readFile(new URL('../../src/personas/personas.css', import.meta.url), 'utf8');
-  for (const className of [
-    'audita-persona-reader', 'audita-persona-reader-overlay', 'audita-persona-reader-marker',
-    'audita-persona-achromatopsia', 'audita-persona-motor',
-  ]) assert.match(source, new RegExp(`\\.${className}`, 'u'));
-  assert.match(source, /filter:\s*grayscale\(1\)/iu);
-  assert.match(source, /html\[data-audita-persona-root="audita-accessible-preview-v1"\]\.audita-persona-achromatopsia/iu);
-  assert.match(source, /html\[data-audita-persona-root="audita-accessible-preview-v1"\]\.audita-persona-motor/iu);
-  assert.match(source, /html\[data-audita-persona-root="audita-accessible-preview-v1"\][\s\S]*\[data-audita-persona-owned="audita-accessible-preview-v1"\]/iu);
-  assert.match(source, /pointer-events:\s*none/iu);
-  assert.doesNotMatch(source, /https?:|@import|url\s*\(/iu);
+test('CSS contains explicit reflow coverage for the required 320 through 600 pixel panel widths and 200 percent zoom', async () => {
+  const css = await panelFile('panel.css');
+  assert.match(css, /min-width:\s*min\(20rem,\s*100%\)/iu);
+  assert.match(css, /max-width:\s*37\.5rem/iu);
+  assert.match(css, /overflow-wrap:\s*anywhere/iu);
+  assert.doesNotMatch(css, /min-width:\s*(?:[4-9]\d\d|[1-9]\d{3,})px/iu);
+  assert.doesNotMatch(css, /white-space:\s*nowrap/iu);
 });

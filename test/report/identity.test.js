@@ -54,18 +54,16 @@ test('keeps strict PNG validation for audit evidence without a brand image', () 
   }
 });
 
-test('keeps the panel action-first with neutral identity and the existing AA palette', async () => {
+test('keeps the four-state panel mount neutral with the existing AA palette', async () => {
   const html = await read('src/panel/index.html');
   const css = await read('src/panel/panel.css');
   assert.equal((html.match(/<h1\b/giu) || []).length, 1);
   assert.match(html, /Audita Acessibilidade/iu);
-  assert.match(html, /Auditoria independente de acessibilidade/iu);
-  assert.match(html, /ferramenta independente[^.]*sem vínculo institucional/iu);
   assert.doesNotMatch(html, /<img\b|\.\.\/\.\.\/assets\//iu);
   assert.doesNotMatch(html, forbiddenIdentity);
-  assert.ok(html.indexOf('<form') < html.indexOf('id="audit-status"'));
-  assert.match(html, /<button[^>]*type="submit"[^>]*>\s*Auditar\s*<\/button>/iu);
-  assert.match(html, /role="status"[^>]+aria-live="polite"/iu);
+  assert.match(html, /<main[^>]+id="panel-root"[^>]+tabindex="-1"/iu);
+  assert.match(html, /<script[^>]+type="module"[^>]+src="panel\.js"/iu);
+  assert.doesNotMatch(html, /<form\b|audit-status|persona/iu);
   const palette = Object.fromEntries([...css.matchAll(/--([a-z-]+):\s*(#[0-9a-f]{6})/giu)].map(match => [match[1], match[2]]));
   assert.ok(contrast(palette.ink, palette.surface) >= 4.5);
   assert.ok(contrast('#ffffff', palette.action) >= 4.5);

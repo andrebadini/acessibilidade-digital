@@ -1,579 +1,270 @@
-import { createDestructiveDialog } from '../ui/destructive-dialog.js';
-import { parseAuditDeletedEvent } from '../core/audit-deleted-event.js';
 import { createPanelSessionPortClient } from './panel-session-port.js';
-import {
-  createInitialPersonaState,
-  createPersonaHello,
-  expectPersonaHello,
-  isSafeReportUrl,
-  queuePersonaCommand,
-  reducePersonaState,
-  restoreExportEventState,
-} from './panel-state.js';
+import { buildPanelView, renderPanelView } from './panel-view.js';
+import { createInitialPanelState, reducePanelState } from './panel-state.js';
 
-const auditForm = document.querySelector('#audit-form');
-const input = document.querySelector('#audit-url');
-const submitButton = auditForm.querySelector('button[type="submit"]');
-const status = document.querySelector('#audit-status');
-const latestReport = document.querySelector('#latest-report');
-const batchInput = document.querySelector('#audit-urls');
-const batchFields = document.querySelector('#batch-fields');
-const singleFields = document.querySelector('#single-fields');
-const batchErrors = document.querySelector('#batch-errors');
-const batchWarnings = document.querySelector('#batch-warnings');
-const batchProgress = document.querySelector('#batch-progress');
-const batchSummary = document.querySelector('#batch-summary');
-const cancelAudit = document.querySelector('#cancel-audit');
-const deleteAfterExport = document.querySelector('#delete-after-export');
-const deleteAllAudits = document.querySelector('#delete-all-audits');
-const deleteAllDialog = document.querySelector('#delete-all-dialog');
-const deleteAllCancel = document.querySelector('#delete-all-cancel');
-const deleteAllConfirm = document.querySelector('#delete-all-confirm');
-const deleteAllDialogStatus = document.querySelector('#delete-all-dialog-status');
-let activeAuditId = null;
-let panelState = null;
-let personaState = createInitialPersonaState();
-let personaPort = null;
-let personaRequestSequence = 0;
-let personaLocalVoiceIds = new Set();
-let personaVoiceInventoryStatus = 'unavailable';
-let personaVoiceClear = { voiceId: '', attempts: 0, requestId: null };
+const root = document.querySelector('#panel-root');
+const chromeApi = globalThis.chrome ?? null;
+const OPAQUE_CAPABILITY = /^[A-Za-z0-9_-]{20,240}$/u;
+const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
+let state = createInitialPanelState();
+let resultBundle = null;
+let requestSequence = 0;
 
-const personaSection = document.querySelector('#persona-section');
-const personaModeButtons = Array.from(document.querySelectorAll('[data-persona-mode]'));
-const personaTarget = document.querySelector('#persona-target');
-const personaDisabledReason = document.querySelector('#persona-disabled-reason');
-const personaLiveStatus = document.querySelector('#persona-live-status');
-const personaGoTarget = document.querySelector('#persona-go-target');
-const personaStopAll = document.querySelector('#persona-stop-all');
-const personaReconnect = document.querySelector('#persona-reconnect');
-const personaReaderToggle = document.querySelector('#persona-reader-toggle');
-const personaReaderStop = document.querySelector('#persona-reader-stop');
-const personaReaderRepeat = document.querySelector('#persona-reader-repeat');
-const personaReaderPrevious = document.querySelector('#persona-reader-previous');
-const personaReaderNext = document.querySelector('#persona-reader-next');
-const personaVoice = document.querySelector('#persona-voice');
-const personaRate = document.querySelector('#persona-rate');
-const personaRateOutput = document.querySelector('#persona-rate-output');
-const personaCaption = document.querySelector('#persona-caption');
-const personaReaderPosition = document.querySelector('#persona-reader-position');
-const personaCoverage = document.querySelector('#persona-coverage');
-const personaLimitationsList = document.querySelector('#persona-limitations-list');
-
-function setStatus(message) {
-  status.textContent = message;
-}
-
-function renderStartUnavailable() {
-  submitButton.disabled = true;
-  cancelAudit.hidden = true;
-  cancelAudit.disabled = true;
-  input.disabled = true;
-  batchInput.disabled = true;
-  deleteAfterExport.disabled = true;
-  for (const radio of auditForm.querySelectorAll('input[name="audit-mode"]')) radio.disabled = true;
-  setStatus('Iniciar auditorias por este painel estará disponível na próxima etapa.');
-}
-
-function sendWorkerRequest(message) {
-  return new Promise(resolve => {
-    try {
-      chrome.runtime.sendMessage(message, response => {
-        if (chrome.runtime.lastError) {
-          resolve({ ok: false, error: 'Não foi possível concluir a operação local.' });
-          return;
-        }
-        resolve(response && typeof response === 'object'
-          ? response
-          : { ok: false, error: 'Não foi possível concluir a operação local.' });
+function render() {
+  if (!root) return;
+  let summary = null;
+  let detail = null;
+  if (state.screen === 'result') {
+    if (!resultBundle || resultBundle.auditId !== state.auditId) {
+      state = reducePanelState(state, {
+        type: 'AUDIT_UNAVAILABLE', auditId: state.auditId,
+        reason: 'O resultado local não pôde ser exibido com segurança.',
       });
-    } catch {
-      resolve({ ok: false, error: 'Não foi possível concluir a operação local.' });
-    }
-  });
-}
-
-const deleteAllController = createDestructiveDialog({
-  dialog: deleteAllDialog,
-  cancelButton: deleteAllCancel,
-  confirmButton: deleteAllConfirm,
-  status,
-  dialogStatus: deleteAllDialogStatus,
-  stableFocus: status,
-  async onConfirm() {
-    const response = await sendWorkerRequest({ type: 'REQUEST_DELETE_ALL_AUDITS' });
-    if (response.ok === true) {
-      activeAuditId = null;
-      panelState = null;
-      clearReport();
-      renderBatchState(null);
-      renderStartUnavailable();
-    }
-    return response;
-  },
-  successMessage: 'Todas as auditorias locais foram excluídas. Downloads já salvos foram preservados.',
-  failureMessage: 'Não foi possível excluir as auditorias locais.',
-});
-
-deleteAllAudits.addEventListener('click', () => deleteAllController.open(deleteAllAudits));
-
-function renderBatchState(state) {
-  const batch = state?.mode === 'batch' || Number.isSafeInteger(state?.total);
-  batchProgress.hidden = !batch;
-  batchSummary.hidden = !batch;
-  if (!batch) return;
-  batchProgress.textContent = `${state.pageNumber ?? 0} de ${state.total ?? 0} páginas.`;
-  const counts = state.statusCounts ?? {};
-  batchSummary.textContent = `Concluídas: ${counts.complete ?? 0}; parciais: ${counts.partial ?? 0}; falhas: ${counts.failed ?? 0}; canceladas: ${counts.cancelled ?? 0}.`;
-}
-
-function clearReport() {
-  latestReport.removeAttribute('href');
-  latestReport.hidden = true;
-  latestReport.setAttribute('aria-disabled', 'true');
-}
-
-function showReport(url) {
-  latestReport.href = url;
-  latestReport.hidden = false;
-  latestReport.removeAttribute('aria-disabled');
-}
-
-auditForm.addEventListener('submit', event => {
-  event.preventDefault();
-  renderStartUnavailable();
-});
-
-chrome.runtime.onMessage.addListener((message, sender) => {
-  const deletion = parseAuditDeletedEvent(message, sender, {
-    id: chrome.runtime.id,
-    workerUrl: chrome.runtime.getURL('src/background/service-worker.js'),
-  });
-  if (!deletion || (deletion.scope !== 'all' && deletion.auditId !== (activeAuditId ?? panelState?.auditId))) return false;
-  if (deletion.scope === 'all') deleteAllController.completeSuccess();
-  activeAuditId = null;
-  panelState = null;
-  clearReport();
-  renderBatchState(null);
-  renderStartUnavailable();
-  return false;
-});
-
-function restoreLatest() {
-  try {
-    chrome.runtime.sendMessage({ type: 'GET_LAST_AUDIT' }, response => {
-      if (chrome.runtime.lastError || !response?.ok || !response.state?.auditId) return;
-      const saved = response.state;
-      panelState = {
-        auditId: saved.auditId,
-        mode: saved.mode === 'batch' ? 'batch' : 'single',
-        status: saved.status || 'running',
-        percent: Number.isFinite(saved.percent) ? saved.percent : 0,
-        message: saved.message || 'Auditoria em andamento.',
-        reviewUrl: isSafeReportUrl(saved.reviewUrl, chrome.runtime.getURL('/')) ? saved.reviewUrl : null,
-        exportStatus: saved.exportStatus || 'unavailable',
-        ...restoreExportEventState(saved),
-        ...(Number.isSafeInteger(saved.total) ? { total: saved.total, pageNumber: saved.pageNumber ?? 0, statusCounts: saved.statusCounts } : {}),
-      };
-      renderBatchState(panelState);
-      if (panelState.reviewUrl) showReport(panelState.reviewUrl);
-      renderStartUnavailable();
-    });
-  } catch {
-    // A restauração é opcional; o formulário permanece utilizável.
-  }
-}
-
-restoreLatest();
-
-const sessionPortClient = createPanelSessionPortClient({
-  chromeApi: chrome,
-  onBootstrapResult() { renderStartUnavailable(); },
-  onStatus() { /* Task 6 installs the production session renderer. */ },
-  setTimer: globalThis.setTimeout.bind(globalThis),
-  clearTimer: globalThis.clearTimeout.bind(globalThis),
-});
-renderStartUnavailable();
-sessionPortClient.start();
-
-function nextPersonaRequestId(prefix = 'panel') {
-  personaRequestSequence += 1;
-  return `${prefix}-${Date.now()}-${personaRequestSequence}`;
-}
-
-function connectPersonas() {
-  personaVoiceClear = { voiceId: '', attempts: 0, requestId: null };
-  personaState = createInitialPersonaState();
-  renderPersonas();
-  try {
-    const port = chrome.runtime.connect({ name: 'audita-persona-v1' });
-    personaPort = port;
-    port.onMessage.addListener(message => {
-      if (personaPort !== port) return;
-      const previous = personaState;
-      const reduced = reducePersonaState(previous, message);
-      if (reduced !== previous && personaVoiceClear.requestId &&
-        previous.pending?.requestId === personaVoiceClear.requestId && reduced.pending === null) {
-        personaVoiceClear = { ...personaVoiceClear, requestId: null };
+    } else {
+      summary = resultBundle.summary;
+      if (state.selectedOccurrenceId !== null) {
+        const matches = resultBundle.details.filter(row => row.occurrenceId === state.selectedOccurrenceId);
+        if (matches.length !== 1) {
+          state = reducePanelState(state, {
+            type: 'AUDIT_UNAVAILABLE', auditId: state.auditId,
+            reason: 'O resultado local não pôde ser exibido com segurança.',
+          });
+          summary = null;
+        } else detail = matches[0];
       }
-      personaState = reduced;
-      renderPersonas();
-    });
-    port.onDisconnect.addListener(() => {
-      if (personaPort !== port) return;
-      personaPort = null;
-      personaState = {
-        ...createInitialPersonaState(), connection: 'error',
-        message: 'A conexão com a aba simulada foi encerrada.', code: 'PERSONA_PORT_DISCONNECTED',
-      };
-      renderPersonas();
-    });
-    const hello = createPersonaHello(nextPersonaRequestId('hello'));
-    if (hello) {
-      personaState = expectPersonaHello(personaState, hello.requestId);
-      port.postMessage(hello);
     }
-  } catch {
-    personaPort = null;
-    personaState = {
-      ...createInitialPersonaState(), connection: 'error',
-      message: 'Não foi possível conectar as simulações à aba de origem.', code: 'PERSONA_PORT_FAILED',
-    };
-    renderPersonas();
+  }
+
+  const view = buildPanelView({ state, summary, detail });
+  const screen = renderPanelView({ view, document, onIntent: handleIntent, onEvent: handleEvent });
+  root.replaceChildren(screen);
+  root.scrollTop = state.scrollTop;
+  restoreFocus(state.focusId);
+}
+
+function transition(event) {
+  state = reducePanelState(state, event);
+  render();
+}
+
+function handleEvent(event) {
+  if (event?.type !== 'FILTER_SET') return;
+  transition({ ...event, ...currentInteraction(`filter-${event.filter}`) });
+}
+
+async function handleIntent(intent) {
+  switch (intent.type) {
+    case 'START_ATTACHED':
+      await startAttachedAudit();
+      return;
+    case 'OPEN_URL_FORM':
+    case 'OPEN_BATCH_FORM':
+      announce('Disponível no Marco 3');
+      return;
+    case 'CANCEL_AUDIT':
+      await requestSessionAction('PANEL_CANCEL_AUDIT');
+      return;
+    case 'OPEN_REPORT':
+      await requestSessionAction('PANEL_OPEN_REPORT');
+      return;
+    case 'SELECT_OCCURRENCE':
+      selectOccurrence(intent.occurrenceId);
+      return;
+    case 'CONSULT_EVIDENCE':
+      consultEvidence(intent.occurrenceId, intent.reason);
+      return;
+    case 'RETRY':
+      await retryAudit();
+      return;
+    default:
+      return;
   }
 }
 
-function reconnectPersonas() {
-  personaVoiceClear = { voiceId: '', attempts: 0, requestId: null };
-  if (!personaPort) {
-    connectPersonas();
+async function startAttachedAudit() {
+  transition({ type: 'START_REQUESTED' });
+  const requestId = nextRequestId();
+  const prepared = parsePreparedCapability(await sendWorkerMessage({ type: 'PREPARE_PANEL_CAPABILITY', requestId }), requestId);
+  if (!prepared) {
+    transition({ type: 'AUDIT_UNAVAILABLE', reason: 'Não foi possível concluir a operação local.' });
     return;
   }
-  personaState = createInitialPersonaState();
-  renderPersonas();
-  const hello = createPersonaHello(nextPersonaRequestId('hello'));
-  personaState = expectPersonaHello(personaState, hello?.requestId);
-  try { personaPort.postMessage(hello); }
-  catch {
-    try { personaPort.disconnect(); } catch { /* a renderização já permanece fail-closed */ }
+  const response = await sendWorkerMessage({
+    type: 'PANEL_START_ATTACHED_AUDIT',
+    capabilityId: prepared.capabilityId,
+    captureMode: 'no-pixels',
+    includeQuery: false,
+    deleteAfterCompleteExport: false,
+  });
+  if (!parseStartedAudit(response)) {
+    transition({ type: 'AUDIT_UNAVAILABLE', reason: 'Não foi possível concluir a operação local.' });
   }
 }
 
-function sendPersonaCommand(command, args = {}) {
-  if (!personaPort) return null;
-  const queued = queuePersonaCommand(personaState, nextPersonaRequestId(command), command, args);
-  if (!queued) return null;
-  personaState = queued.state;
-  renderPersonas();
-  try { personaPort.postMessage(queued.message); }
-  catch {
-    personaState = {
-      ...personaState, connection: 'error', token: null, activeMode: null, pending: null,
-      message: 'Não foi possível enviar o controle à aba simulada.', code: 'PERSONA_PORT_FAILED',
-    };
-    renderPersonas();
-  }
-  return queued.message.requestId;
-}
-
-function renderPersonas() {
-  if (!personaSection) return;
-  const ready = personaState.connection === 'ready' && personaState.bound && Boolean(personaState.token);
-  const pending = Boolean(personaState.pending);
-  personaSection.setAttribute('aria-busy', pending ? 'true' : 'false');
-  personaTarget.textContent = ready ? 'A aba de origem está vinculada a este painel.' : personaState.message;
-  personaLiveStatus.textContent = personaState.message;
-  for (const button of personaModeButtons) {
-    const pressed = personaState.activeMode === button.dataset.personaMode;
-    button.setAttribute('aria-pressed', String(pressed));
-    button.disabled = !ready || pending;
-  }
-  personaGoTarget.disabled = !ready || pending;
-  personaStopAll.disabled = !ready || pending || personaState.activeMode === null;
-  personaReconnect.hidden = !['error'].includes(personaState.connection);
-  personaReconnect.disabled = pending;
-
-  const readerActive = personaState.activeMode === 'reader';
-  personaReaderToggle.disabled = !ready || pending;
-  personaReaderToggle.textContent = readerActive
-    ? (personaState.reader.playback === 'idle'
-        ? 'Iniciar novamente'
-        : (personaState.reader.playback === 'paused' ? 'Continuar leitura' : 'Pausar leitura'))
-    : 'Iniciar leitura';
-  personaReaderStop.disabled = !ready || pending || !readerActive;
-  personaReaderRepeat.disabled = !ready || pending || !readerActive || personaState.reader.total === 0;
-  personaReaderPrevious.disabled = !ready || pending || !readerActive || !personaState.reader.canPrevious;
-  personaReaderNext.disabled = !ready || pending || !readerActive || !personaState.reader.canNext;
-  personaVoice.disabled = !ready || pending || personaLocalVoiceIds.size === 0;
-  personaRate.disabled = !ready || pending;
-  syncPersonaPreferences();
-  personaCaption.textContent = personaState.reader.caption || 'Nenhum anúncio disponível.';
-  const currentPosition = personaState.reader.index >= 0 ? personaState.reader.index + 1 : 0;
-  personaReaderPosition.textContent = `Item ${currentPosition} de ${personaState.reader.total}.`;
-  personaCoverage.textContent = personaState.coverage
-    ? 'Fallback DOM: documento principal e Shadow DOM aberto. Frames e Shadow DOM fechado não são coordenados.'
-    : 'A cobertura será informada após conectar à página.';
-  renderPersonaLimitations();
-
-  if (!ready) personaDisabledReason.textContent = personaState.message;
-  else if (pending) personaDisabledReason.textContent = 'Aguarde a confirmação da página antes de enviar outro controle.';
-  else if (!readerActive) personaDisabledReason.textContent = 'Os controles de reprodução ficam disponíveis ao ativar Leitura simulada.';
-  else if (personaState.reader.speechAvailability === 'error' || personaVoiceInventoryStatus === 'error') {
-    personaDisabledReason.textContent = 'Não foi possível validar uma voz local; legenda e navegação continuam funcionando.';
-  } else if (personaState.reader.speechAvailability === 'unavailable' || personaLocalVoiceIds.size === 0) {
-    personaDisabledReason.textContent = 'Nenhuma voz local validada está disponível; legenda e navegação continuam funcionando.';
-  } else if (personaState.reader.speechAvailability === 'busy') {
-    personaDisabledReason.textContent = 'A fila de fala está ocupada; a ferramenta a preserva e mantém a legenda.';
-  } else personaDisabledReason.textContent = 'Controles disponíveis para a leitura simulada.';
-}
-
-function syncPersonaPreferences() {
-  const storedVoiceId = typeof personaState.preferences?.voiceId === 'string'
-    ? personaState.preferences.voiceId
-    : '';
-  const voiceId = personaLocalVoiceIds.has(storedVoiceId) ? storedVoiceId : '';
-  personaVoice.value = voiceId;
-  const rate = Number(personaState.preferences?.rate);
-  const safeRate = Number.isFinite(rate) && rate >= 0.5 && rate <= 2 ? rate : 1;
-  personaRate.value = String(safeRate);
-  personaRateOutput.value = `${safeRate.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}×`;
-  if (!storedVoiceId || voiceId) {
-    personaVoiceClear = { voiceId: '', attempts: 0, requestId: null };
+async function requestSessionAction(type) {
+  if (!sessionPortClient) return;
+  const response = await sessionPortClient.requestSessionIntent({ type });
+  if (response?.ok === true) {
+    announce(type === 'PANEL_CANCEL_AUDIT' ? 'Cancelamento solicitado.' : 'Relatório solicitado.');
     return;
   }
-  if (personaVoiceClear.voiceId !== storedVoiceId) {
-    personaVoiceClear = { voiceId: storedVoiceId, attempts: 0, requestId: null };
-  }
-  const ready = personaState.connection === 'ready' && personaState.bound && Boolean(personaState.token);
-  if (!ready || personaState.pending || personaVoiceClear.requestId || personaVoiceClear.attempts >= 2) return;
-  personaVoiceClear = { ...personaVoiceClear, attempts: personaVoiceClear.attempts + 1 };
-  const requestId = sendPersonaCommand('preferences', { voiceId: '', rate: safeRate });
-  personaVoiceClear = { ...personaVoiceClear, requestId };
-}
-
-function renderPersonaLimitations() {
-  personaLimitationsList.replaceChildren();
-  const limitations = personaState.limitations || [];
-  if (!limitations.length) {
-    const item = document.createElement('li');
-    item.textContent = 'Frames permanecem fora da fila; Shadow DOM fechado pode ser indetectável.';
-    personaLimitationsList.appendChild(item);
+  if (type === 'PANEL_OPEN_REPORT' && response?.code === 'FEATURE_UNAVAILABLE') {
+    announce('Abrir relatório completo estará disponível na próxima etapa.');
     return;
   }
-  for (const limitation of limitations) {
-    const item = document.createElement('li');
-    item.textContent = personaLimitationText(limitation);
-    personaLimitationsList.appendChild(item);
-  }
+  transition({ type: 'AUDIT_UNAVAILABLE', auditId: state.auditId, reason: 'Não foi possível concluir a operação local.' });
 }
 
-function personaLimitationText(limitation) {
-  const labels = {
-    'frame-uncoordinated': 'frame não coordenado',
-    'frame-sandboxed': 'frame isolado por sandbox',
-    'dom-traversal-truncated': 'elementos não inspecionados porque a varredura DOM atingiu o limite seguro',
+function selectOccurrence(occurrenceId) {
+  if (!exactDetail(occurrenceId)) return;
+  const interaction = currentInteraction(`occurrence-${occurrenceId}`);
+  transition({ type: 'OCCURRENCE_SELECTED', occurrenceId, ...interaction });
+}
+
+function consultEvidence(occurrenceId, reason) {
+  const detail = exactDetail(occurrenceId);
+  if (!detail || reason !== detail.action.reason) return;
+  const scrollTop = Number.isSafeInteger(root?.scrollTop) && root.scrollTop >= 0 ? root.scrollTop : state.scrollTop;
+  transition({ type: 'EVIDENCE_TOGGLED', expanded: true, focusId: 'evidence-summary', scrollTop });
+  announce(detail.action.reason);
+}
+
+async function retryAudit() {
+  const auditId = state.auditId;
+  transition({ type: 'RETRY_REQUESTED' });
+  if (!auditId) {
+    await startAttachedAudit();
+    return;
+  }
+  const response = await sendWorkerMessage({ type: 'PANEL_REHYDRATE_VIEW', auditId });
+  if (!parseRehydrateResponse(response, auditId)) {
+    transition({ type: 'AUDIT_UNAVAILABLE', auditId, reason: 'Não foi possível concluir a operação local.' });
+  } else announce('Recuperando o resultado local.');
+}
+
+function receiveBootstrap(value) {
+  if (value?.state === 'initial') {
+    resultBundle = null;
+    transition({ type: 'BOOTSTRAP_INITIAL' });
+    return;
+  }
+  if (value?.state === 'running' && AUDIT_ID.test(value.auditId ?? '') && value.result === null) {
+    resultBundle = null;
+    transition({ type: 'AUDIT_RUNNING', auditId: value.auditId });
+    return;
+  }
+  if (['result', 'view-only'].includes(value?.state) && AUDIT_ID.test(value.auditId ?? '') && value.result) {
+    resultBundle = value.result;
+    transition({ type: 'AUDIT_RESULT', auditId: value.auditId, result: value.result });
+    return;
+  }
+  resultBundle = null;
+  transition({ type: 'AUDIT_UNAVAILABLE', auditId: state.auditId, reason: 'O resultado local não pôde ser exibido com segurança.' });
+}
+
+function receivePortStatus(value) {
+  if (value === 'Painel indisponível; tentando reconectar.') {
+    transition({ type: 'PORT_INTERRUPTED' });
+    return;
+  }
+  if (typeof value === 'string') announce(value);
+}
+
+function currentInteraction(fallbackFocusId) {
+  const activeFocusId = document.activeElement?.dataset?.focusId;
+  return {
+    focusId: typeof activeFocusId === 'string' ? activeFocusId : fallbackFocusId,
+    scrollTop: Number.isSafeInteger(root?.scrollTop) && root.scrollTop >= 0 ? root.scrollTop : state.scrollTop,
   };
-  const label = labels[limitation.code] || 'conteúdo fora da cobertura automática';
-  const suffix = limitation.truncated === true
-    ? ' A fila é parcial e não representa cobertura integral da página.'
-    : '';
-  return `${limitation.count} ocorrência(s): ${label}.${suffix}`;
 }
 
-function panelPlatformPrototype(name) {
-  try {
-    const constructorDescriptor = Object.getOwnPropertyDescriptor(globalThis, name);
-    if (!constructorDescriptor || !Object.hasOwn(constructorDescriptor, 'value') ||
-      typeof constructorDescriptor.value !== 'function') return null;
-    const prototypeDescriptor = Object.getOwnPropertyDescriptor(constructorDescriptor.value, 'prototype');
-    if (!prototypeDescriptor || !Object.hasOwn(prototypeDescriptor, 'value') ||
-      !prototypeDescriptor.value || typeof prototypeDescriptor.value !== 'object') return null;
-    return prototypeDescriptor.value;
-  } catch { return null; }
-}
-
-function panelPlatformMethod(prototype, key) {
-  if (!prototype) return null;
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(prototype, key);
-    return descriptor && Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'function'
-      ? descriptor.value
-      : null;
-  } catch { return null; }
-}
-
-function panelPlatformGetter(prototype, key) {
-  if (!prototype) return null;
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(prototype, key);
-    return descriptor && typeof descriptor.get === 'function' && descriptor.set === undefined
-      ? descriptor.get
-      : null;
-  } catch { return null; }
-}
-
-// These methods/getters are captured from the extension page's platform prototypes once.
-// Calling them directly preserves the Web IDL brand check: ordinary objects and Proxy
-// wrappers fail before any attacker-controlled property or reflection trap is consulted.
-const PANEL_SPEECH_PROTOTYPE = panelPlatformPrototype('SpeechSynthesis');
-const PANEL_VOICE_PROTOTYPE = panelPlatformPrototype('SpeechSynthesisVoice');
-const PANEL_EVENT_TARGET_PROTOTYPE = panelPlatformPrototype('EventTarget');
-const PANEL_GET_VOICES = panelPlatformMethod(PANEL_SPEECH_PROTOTYPE, 'getVoices');
-const PANEL_ADD_EVENT_LISTENER = panelPlatformMethod(PANEL_EVENT_TARGET_PROTOTYPE, 'addEventListener');
-const PANEL_VOICE_GETTERS = Object.freeze({
-  localService: panelPlatformGetter(PANEL_VOICE_PROTOTYPE, 'localService'),
-  voiceURI: panelPlatformGetter(PANEL_VOICE_PROTOTYPE, 'voiceURI'),
-  name: panelPlatformGetter(PANEL_VOICE_PROTOTYPE, 'name'),
-  lang: panelPlatformGetter(PANEL_VOICE_PROTOTYPE, 'lang'),
-});
-
-function readPanelSpeechSynthesis() {
-  try {
-    const own = Object.getOwnPropertyDescriptor(globalThis, 'speechSynthesis');
-    if (own) {
-      return Object.hasOwn(own, 'value')
-        ? { status: own.value ? 'available' : 'unavailable', synthesis: own.value || null }
-        : { status: 'error', synthesis: null };
+function restoreFocus(focusId) {
+  if (!focusId || typeof root?.querySelectorAll !== 'function') return;
+  const nodes = root.querySelectorAll('[data-focus-id]');
+  for (const node of nodes) {
+    if (node.dataset.focusId === focusId) {
+      try { node.focus(); } catch { /* focus remains on the panel root */ }
+      return;
     }
-    let current = Object.getPrototypeOf(globalThis);
-    for (let depth = 0; current && depth < 3; depth += 1) {
-      const descriptor = Object.getOwnPropertyDescriptor(current, 'speechSynthesis');
-      if (descriptor) {
-        if (typeof descriptor.get !== 'function' || descriptor.set !== undefined) {
-          return { status: 'error', synthesis: null };
-        }
-        const synthesis = descriptor.get.call(globalThis);
-        return { status: synthesis ? 'available' : 'unavailable', synthesis: synthesis || null };
-      }
-      current = Object.getPrototypeOf(current);
-    }
-  } catch { return { status: 'error', synthesis: null }; }
-  return { status: 'unavailable', synthesis: null };
-}
-
-function densePanelVoiceEntries(value) {
-  try {
-    if (!Array.isArray(value)) return null;
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    const length = descriptors.length;
-    if (!length || !Object.hasOwn(length, 'value') || !Number.isSafeInteger(length.value) ||
-      length.value < 0 || length.value > 128 || Reflect.ownKeys(descriptors).length !== length.value + 1) return null;
-    const entries = new Array(length.value);
-    for (let index = 0; index < length.value; index += 1) {
-      const descriptor = descriptors[String(index)];
-      if (!descriptor || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) return null;
-      entries[index] = descriptor.value;
-    }
-    return entries;
-  } catch { return null; }
-}
-
-function projectPanelVoice(voice) {
-  if (!voice || typeof voice !== 'object') return null;
-  if (!PANEL_VOICE_GETTERS.localService || !PANEL_VOICE_GETTERS.voiceURI ||
-    !PANEL_VOICE_GETTERS.name || !PANEL_VOICE_GETTERS.lang) return null;
-  const read = getter => {
-    try { return { ok: true, value: Reflect.apply(getter, voice, []) }; }
-    catch { return { ok: false, value: undefined }; }
-  };
-  const local = read(PANEL_VOICE_GETTERS.localService);
-  if (!local.ok) return null;
-  if (local.value !== true) return { local: false };
-  const uri = read(PANEL_VOICE_GETTERS.voiceURI);
-  if (!uri.ok || typeof uri.value !== 'string' || uri.value !== uri.value.trim() ||
-    Array.from(uri.value).length < 1 || Array.from(uri.value).length > 200 ||
-    /[\u0000-\u001f\u007f]/u.test(uri.value)) return null;
-  const name = read(PANEL_VOICE_GETTERS.name);
-  const language = read(PANEL_VOICE_GETTERS.lang);
-  if (!name.ok || !language.ok || typeof name.value !== 'string' || typeof language.value !== 'string') return null;
-  const safeName = Array.from(name.value.replace(/\s+/gu, ' ').trim()).slice(0, 120).join('');
-  const safeLanguage = language.value.replace(/[^A-Za-z0-9-]/gu, '').slice(0, 35);
-  return { local: true, voiceId: uri.value, name: safeName || 'Voz local', language: safeLanguage };
-}
-
-function readPanelLocalVoices() {
-  const speech = readPanelSpeechSynthesis();
-  if (!speech.synthesis) return { status: speech.status, voices: [] };
-  const synthesis = speech.synthesis;
-  if (!PANEL_GET_VOICES) return { status: 'error', voices: [] };
-  try {
-    const entries = densePanelVoiceEntries(Reflect.apply(PANEL_GET_VOICES, synthesis, []));
-    if (!entries) return { status: 'error', voices: [] };
-    const voices = [];
-    const ids = new Set();
-    for (const entry of entries) {
-      const projected = projectPanelVoice(entry);
-      if (!projected) return { status: 'error', voices: [] };
-      if (!projected.local) continue;
-      if (ids.has(projected.voiceId)) return { status: 'error', voices: [] };
-      ids.add(projected.voiceId);
-      voices.push(projected);
-    }
-    return { status: 'available', voices };
-  } catch { return { status: 'error', voices: [] }; }
-}
-
-function loadPersonaVoices() {
-  if (!personaVoice) return;
-  const inventory = readPanelLocalVoices();
-  personaVoiceInventoryStatus = inventory.status;
-  personaLocalVoiceIds = new Set(inventory.voices.map(voice => voice.voiceId));
-  const defaultOption = document.createElement('option');
-  defaultOption.value = '';
-  defaultOption.textContent = inventory.status === 'error'
-    ? 'Não foi possível validar vozes locais'
-    : (inventory.voices.length ? 'Selecione uma voz local' : 'Nenhuma voz local disponível');
-  personaVoice.replaceChildren(defaultOption);
-  for (const voice of inventory.voices) {
-    const option = document.createElement('option');
-    option.value = voice.voiceId;
-    option.textContent = voice.language ? `${voice.name} (${voice.language})` : voice.name;
-    personaVoice.appendChild(option);
   }
-  syncPersonaPreferences();
-  renderPersonas();
 }
 
-for (const button of personaModeButtons) {
-  button.addEventListener('click', () => {
-    const mode = button.dataset.personaMode;
-    if (personaState.activeMode === mode) sendPersonaCommand('stop');
-    else sendPersonaCommand('activate', { mode });
+function announce(message) {
+  if (typeof root?.querySelector !== 'function') return;
+  const region = root.querySelector('[role="status"][aria-live="polite"]');
+  if (region && typeof message === 'string') region.textContent = message;
+}
+
+function exactDetail(occurrenceId) {
+  if (typeof occurrenceId !== 'string' || !resultBundle || state.auditId !== resultBundle.auditId) return null;
+  const matches = resultBundle.details.filter(row => row.occurrenceId === occurrenceId);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function nextRequestId() {
+  requestSequence += 1;
+  return `panel-${Date.now()}-${requestSequence}`;
+}
+
+function sendWorkerMessage(message) {
+  if (typeof chromeApi?.runtime?.sendMessage !== 'function') return Promise.resolve(null);
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      resolve(value && typeof value === 'object' ? value : null);
+    };
+    try {
+      const returned = chromeApi.runtime.sendMessage(message, finish);
+      if (returned && typeof returned.then === 'function') returned.then(finish, () => finish(null));
+    } catch { finish(null); }
   });
 }
-personaGoTarget?.addEventListener('click', () => sendPersonaCommand('go-target'));
-personaStopAll?.addEventListener('click', () => sendPersonaCommand('stop'));
-personaReconnect?.addEventListener('click', reconnectPersonas);
-personaReaderToggle?.addEventListener('click', () => {
-  if (personaState.activeMode !== 'reader') sendPersonaCommand('activate', { mode: 'reader' });
-  else sendPersonaCommand('reader-action', {
-    action: personaState.reader.playback === 'idle'
-      ? 'start'
-      : (personaState.reader.playback === 'paused' ? 'resume' : 'pause'),
-  });
-});
-personaReaderStop?.addEventListener('click', () => sendPersonaCommand('reader-action', { action: 'stop' }));
-personaReaderRepeat?.addEventListener('click', () => sendPersonaCommand('reader-action', { action: 'repeat' }));
-personaReaderPrevious?.addEventListener('click', () => sendPersonaCommand('reader-action', { action: 'previous' }));
-personaReaderNext?.addEventListener('click', () => sendPersonaCommand('reader-action', { action: 'next' }));
-personaVoice?.addEventListener('change', () => sendPersonaCommand('preferences', {
-  voiceId: personaLocalVoiceIds.has(personaVoice.value) ? personaVoice.value : '',
-  rate: Number(personaRate.value),
-}));
-personaRate?.addEventListener('input', () => {
-  const value = Number(personaRate.value);
-  personaRateOutput.value = `${value.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}×`;
-});
-personaRate?.addEventListener('change', () => sendPersonaCommand('preferences', {
-  voiceId: personaLocalVoiceIds.has(personaVoice.value) ? personaVoice.value : '',
-  rate: Number(personaRate.value),
-}));
-try {
-  const synthesis = readPanelSpeechSynthesis().synthesis;
-  if (synthesis && PANEL_ADD_EVENT_LISTENER) {
-    Reflect.apply(PANEL_ADD_EVENT_LISTENER, synthesis, ['voiceschanged', loadPersonaVoices]);
-  }
-} catch { /* absence of a safe listener keeps the inventory fail-closed */ }
 
-loadPersonaVoices();
-connectPersonas();
+function parsePreparedCapability(value, requestId) {
+  const response = exactRecord(value, ['ok', 'requestId', 'capabilityId', 'expiresAt']);
+  return response && response.ok === true && response.requestId === requestId &&
+    OPAQUE_CAPABILITY.test(response.capabilityId ?? '') && Number.isSafeInteger(response.expiresAt)
+    ? { capabilityId: response.capabilityId }
+    : null;
+}
+
+function parseStartedAudit(value) {
+  const response = exactRecord(value, ['ok', 'auditId', 'state']);
+  return Boolean(response) && response.ok === true && response.state === 'running' && AUDIT_ID.test(response.auditId ?? '');
+}
+
+function parseRehydrateResponse(value, auditId) {
+  const response = exactRecord(value, ['ok', 'auditId', 'state']);
+  return Boolean(response) && response.ok === true && response.auditId === auditId && response.state === 'view-only';
+}
+
+function exactRecord(value, keys) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
+    const own = Reflect.ownKeys(value);
+    if (own.length !== keys.length || own.some(key => typeof key !== 'string' || !keys.includes(key))) return null;
+    const copy = {};
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      copy[key] = descriptor.value;
+    }
+    return copy;
+  } catch { return null; }
+}
+
+render();
+
+let sessionPortClient = null;
+if (typeof chromeApi?.runtime?.connect === 'function' && typeof chromeApi.runtime.sendMessage === 'function') {
+  sessionPortClient = createPanelSessionPortClient({
+    chromeApi,
+    onBootstrapResult: receiveBootstrap,
+    onStatus: receivePortStatus,
+    setTimer: globalThis.setTimeout.bind(globalThis),
+    clearTimer: globalThis.clearTimeout.bind(globalThis),
+  });
+  sessionPortClient.start();
+}
