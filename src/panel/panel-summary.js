@@ -1,3 +1,4 @@
+import { validateExecutionCheckpoint } from '../background/execution-checkpoint.js';
 import { createAuditModel } from '../core/report/audit-model.js';
 import { verifyCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
 import {
@@ -6,7 +7,6 @@ import {
   deriveResultContextV1,
 } from './panel-result-contract.js';
 
-const CHECKPOINT_OUTCOMES = new Set(['passed', 'failed', 'cantTell', 'inapplicable', 'untested']);
 const COVERED_OUTCOMES = new Set(['passed', 'failed', 'inapplicable']);
 const GROUP_NAMES = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
 const IMPACT_ORDER = Object.freeze({ critical: 4, serious: 3, moderate: 2, minor: 1 });
@@ -18,96 +18,13 @@ function checkpointDenied() {
   throw new TypeError('CHECKPOINT_GRAPH_DENIED');
 }
 
-function plainRecord(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) checkpointDenied();
-  let prototype;
-  try { prototype = Object.getPrototypeOf(value); } catch { checkpointDenied(); }
-  if (prototype !== Object.prototype && prototype !== null) checkpointDenied();
-  return value;
-}
-
-function captureRecord(value, expectedKeys) {
-  const record = plainRecord(value);
-  let keys;
-  try { keys = Reflect.ownKeys(record); } catch { checkpointDenied(); }
-  if (keys.length !== expectedKeys.length || expectedKeys.some(key => !keys.includes(key)) ||
-    keys.some(key => typeof key !== 'string')) checkpointDenied();
-  const output = Object.create(null);
-  for (const key of expectedKeys) {
-    let descriptor;
-    try { descriptor = Object.getOwnPropertyDescriptor(record, key); } catch { checkpointDenied(); }
-    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) checkpointDenied();
-    output[key] = descriptor.value;
-  }
-  return output;
-}
-
-function captureArray(value, maximum = 10_000) {
-  if (!Array.isArray(value)) checkpointDenied();
-  let prototype;
-  let keys;
-  try {
-    prototype = Object.getPrototypeOf(value);
-    keys = Reflect.ownKeys(value);
-  } catch { checkpointDenied(); }
-  if (prototype !== Array.prototype) checkpointDenied();
-  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
-  const length = lengthDescriptor?.value;
-  if (!Number.isSafeInteger(length) || length < 0 || length > maximum) checkpointDenied();
-  const expected = ['length', ...Array.from({ length }, (_value, index) => String(index))];
-  if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) checkpointDenied();
-  return Array.from({ length }, (_value, index) => {
-    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) checkpointDenied();
-    return descriptor.value;
-  });
-}
-
-function validId(value) {
-  return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,200}$/u.test(value);
-}
-
-function validInstant(value) {
-  if (typeof value !== 'string') return false;
-  const date = new Date(value);
-  return Number.isFinite(date.getTime()) && date.toISOString() === value;
-}
-
-function captureCheckpoint(input, model) {
-  const root = captureRecord(input, ['version', 'auditId', 'pages']);
-  if (root.version !== 1 || root.auditId !== model.auditId) checkpointDenied();
-  const pages = captureArray(root.pages, 20);
-  if (pages.length !== model.pages.length) checkpointDenied();
-  const copiedPages = pages.map((inputPage, index) => {
-    const page = captureRecord(inputPage, [
-      'pageId', 'attempted', 'startedAt', 'rulesVersion', 'inventoryVersion', 'inventoryHash', 'outcomes',
-    ]);
+function correlateCheckpointModel(checkpoint, model) {
+  for (let index = 0; index < checkpoint.pages.length; index += 1) {
+    const page = checkpoint.pages[index];
     const modelPage = model.pages[index];
-    if (!validId(page.pageId) || page.pageId !== modelPage.pageId || page.attempted !== modelPage.attempted ||
-      typeof page.rulesVersion !== 'string' || typeof page.inventoryVersion !== 'string' ||
-      typeof page.inventoryHash !== 'string' || !/^[a-f0-9]{64}$/u.test(page.inventoryHash)) checkpointDenied();
-    const outcomes = captureArray(page.outcomes, 130).map(inputOutcome => {
-      const outcome = captureRecord(inputOutcome, ['ruleId', 'outcome']);
-      if (!validId(outcome.ruleId) || !CHECKPOINT_OUTCOMES.has(outcome.outcome)) checkpointDenied();
-      return { ruleId: outcome.ruleId, outcome: outcome.outcome };
-    });
-    if (new Set(outcomes.map(row => row.ruleId)).size !== outcomes.length ||
-      outcomes.some((row, outcomeIndex) => outcomeIndex > 0 &&
-        outcomes[outcomeIndex - 1].ruleId.localeCompare(row.ruleId) >= 0)) checkpointDenied();
-    if (page.attempted) {
-      if (!validInstant(page.startedAt) || page.startedAt !== modelPage.timestamps.startedAt) checkpointDenied();
-    } else if (page.startedAt !== null || outcomes.length !== 0) checkpointDenied();
-    return {
-      pageId: page.pageId,
-      attempted: page.attempted,
-      startedAt: page.startedAt,
-      rulesVersion: page.rulesVersion,
-      inventoryVersion: page.inventoryVersion,
-      inventoryHash: page.inventoryHash,
-      outcomes,
-    };
-  });
-  return { version: 1, auditId: root.auditId, pages: copiedPages };
+    if (page.pageId !== modelPage.pageId || page.attempted !== modelPage.attempted ||
+      (page.attempted && page.startedAt !== modelPage.timestamps.startedAt)) checkpointDenied();
+  }
 }
 
 function validateCheckpointInventory(checkpoint, inventory, model) {
@@ -193,8 +110,12 @@ function firstAccessibility(occurrences, evidenceById) {
 }
 
 function impactFor(occurrences) {
-  return occurrences.reduce((best, occurrence) =>
-    IMPACT_ORDER[occurrence.impact] > IMPACT_ORDER[best] ? occurrence.impact : best, null);
+  if (occurrences.length === 0) return null;
+  let best = occurrences[0].impact;
+  for (let index = 1; index < occurrences.length; index += 1) {
+    if (IMPACT_ORDER[occurrences[index].impact] > IMPACT_ORDER[best]) best = occurrences[index].impact;
+  }
+  return best;
 }
 
 function cardMetadata(occurrences, rule, itemById) {
@@ -335,7 +256,17 @@ function freeze(value, seen = new WeakSet()) {
 
 export async function buildPanelSummary({ model: inputModel, executionCheckpoint, inventory: inputInventory }) {
   const model = createAuditModel(inputModel);
-  const checkpoint = captureCheckpoint(executionCheckpoint, model);
+  let checkpoint;
+  try {
+    checkpoint = validateExecutionCheckpoint({
+      auditId: model.auditId,
+      checkpoint: executionCheckpoint,
+      pageOrder: model.pages.map(page => page.pageId),
+    });
+  } catch {
+    checkpointDenied();
+  }
+  correlateCheckpointModel(checkpoint, model);
   let inventory = null;
   try {
     inventory = await verifyCoreRuleInventory(inputInventory);

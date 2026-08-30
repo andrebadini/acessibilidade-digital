@@ -6,6 +6,7 @@ import {
   createPageCheckpointRecorder,
   mergeExecutionCheckpoint,
 } from '../../src/background/execution-checkpoint.js';
+import * as executionCheckpointModule from '../../src/background/execution-checkpoint.js';
 
 async function makeRecorder(overrides = {}) {
   const inventory = await createInstalledCoreRuleInventory();
@@ -88,4 +89,56 @@ test('rejects hostile checkpoint accessors without invoking them', async () => {
   }), /CHECKPOINT_MERGE_DENIED/u);
   assert.equal(getterCalls, 0);
   assert.ok(inventory.ruleIds.length > 0);
+});
+
+test('validates one complete checkpoint graph as a detached deeply frozen authority copy', async () => {
+  const inventory = await createInstalledCoreRuleInventory();
+  const checkpoint = {
+    version: 1, auditId: 'audit-a', pages: [{
+      pageId: 'page-1', attempted: true, startedAt: '2026-08-29T10:00:00.000Z',
+      rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion,
+      inventoryHash: inventory.sha256, outcomes: [{ ruleId: inventory.ruleIds[0], outcome: 'passed' }],
+    }],
+  };
+
+  const validated = executionCheckpointModule.validateExecutionCheckpoint({
+    auditId: 'audit-a', checkpoint, pageOrder: ['page-1'],
+  });
+  checkpoint.pages[0].outcomes.length = 0;
+
+  assert.deepEqual(validated.pages[0].outcomes, [{ ruleId: inventory.ruleIds[0], outcome: 'passed' }]);
+  assert.notEqual(validated, checkpoint);
+  assert.equal(Object.isFrozen(validated), true);
+  assert.equal(Object.isFrozen(validated.pages), true);
+  assert.equal(Object.isFrozen(validated.pages[0]), true);
+  assert.equal(Object.isFrozen(validated.pages[0].outcomes[0]), true);
+});
+
+test('checkpoint authority rejects 161-character IDs, order drift and hostile graphs without echo', async () => {
+  const inventory = await createInstalledCoreRuleInventory();
+  const page = pageId => ({
+    pageId, attempted: true, startedAt: '2026-08-29T10:00:00.000Z',
+    rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion,
+    inventoryHash: inventory.sha256, outcomes: [],
+  });
+  const longId = `a${'b'.repeat(160)}`;
+  assert.throws(() => executionCheckpointModule.validateExecutionCheckpoint({
+    auditId: 'audit-a', checkpoint: { version: 1, auditId: 'audit-a', pages: [page(longId)] },
+    pageOrder: [longId],
+  }), /CHECKPOINT_MERGE_DENIED/u);
+  assert.throws(() => executionCheckpointModule.validateExecutionCheckpoint({
+    auditId: 'audit-a', checkpoint: {
+      version: 1, auditId: 'audit-a', pages: [page('page-1'), page('page-2')],
+    }, pageOrder: ['page-2', 'page-1'],
+  }), /CHECKPOINT_MERGE_DENIED/u);
+
+  const marker = 'PRIVATE_CHECKPOINT_AUTHORITY';
+  const hostile = new Proxy({}, { ownKeys() { throw new Error(marker); } });
+  assert.throws(() => executionCheckpointModule.validateExecutionCheckpoint({
+    auditId: 'audit-a', checkpoint: hostile, pageOrder: ['page-1'],
+  }), error => {
+    assert.equal(error.message, 'CHECKPOINT_MERGE_DENIED');
+    assert.doesNotMatch(error.message, new RegExp(marker, 'u'));
+    return true;
+  });
 });

@@ -127,6 +127,36 @@ function allCards(summary) {
   return Object.values(summary.groups).flat();
 }
 
+function modelWithEveryImpact() {
+  const model = structuredClone(SAMPLE_AUDIT);
+  model.occurrences.find(value => value.occurrenceId === 'occ-focus-failed').impact = 'critical';
+  model.occurrences.find(value => value.occurrenceId === 'occ-focus-review').impact = 'serious';
+  model.occurrences.find(value => value.occurrenceId === 'occ-cross-page').impact = 'moderate';
+  model.methodology.supplementalRuleCount += 1;
+  model.methodology.ruleCount += 1;
+  model.ruleResults.push({
+    ruleId: 'editorial.placeholder-text', outcome: 'failed', mode: 'automated',
+    classification: 'editorial', impact: 'minor', confidence: 'high',
+    source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
+    nbrItems: [], wcag: [], targets: [{
+      nodeId: 'n-1', selectorHint: '', message: 'Substitua o conteúdo provisório antes da publicação.',
+      data: { reason: 'placeholder-text' },
+    }],
+    summary: 'Há conteúdo provisório inequívoco na página.', limitations: [],
+  });
+  model.occurrences.push({
+    occurrenceId: 'occ-editorial-impact', pageId: 'page-1', outcome: 'failed',
+    classification: 'editorial', impact: 'minor', confidence: 'high',
+    source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
+    nbrItemRef: null, itemWcagRefs: [], sourceWcagRefs: [], testedWcagRefs: [], wcagRefs: [], foreignBenchmarkRefs: [],
+    target: { nodeId: 'n-1', selector: null, framePath: [] }, accessiblePreview: null,
+    evidenceRefs: [], legalAnalysis: null, itemId: null, ruleId: 'editorial.placeholder-text',
+    mode: 'automated', nodeId: 'n-1', evidenceIds: [],
+    justification: 'Há conteúdo provisório inequívoco na página.',
+  });
+  return model;
+}
+
 test('separates attempted core coverage pairs from all-engine checkKeys and occurrence counts', async () => {
   const inventory = await createInstalledCoreRuleInventory();
   const checkpoint = checkpointFor(SAMPLE_AUDIT, inventory, new Map([[
@@ -155,6 +185,27 @@ test('uses integer half-up coverage arithmetic at exact boundaries', () => {
   assert.equal(coveragePercent(2, 130), '1,5%');
   assert.equal(coveragePercent(129, 130), '99,2%');
   assert.throws(() => coveragePercent(0, 0), /COVERAGE_PERCENT_DENIED/u);
+});
+
+test('preserves every canonical occurrence impact and counts checkKeys in the ordered impact distribution', async () => {
+  const model = modelWithEveryImpact();
+  const inventory = await createInstalledCoreRuleInventory();
+  const summary = await buildPanelSummary({
+    model, executionCheckpoint: checkpointFor(model, inventory), inventory,
+  });
+  const byOccurrence = new Map(allCards(summary).flatMap(card =>
+    card.occurrenceIds.map(occurrenceId => [occurrenceId, card.impact])));
+
+  assert.equal(byOccurrence.get('occ-focus-failed'), 'critical');
+  assert.equal(byOccurrence.get('occ-focus-review'), 'serious');
+  assert.equal(byOccurrence.get('occ-cross-page'), 'moderate');
+  assert.equal(byOccurrence.get('occ-editorial-impact'), 'minor');
+  assert.deepEqual(summary.distributions.impact, [
+    { id: 'critical', count: 1 },
+    { id: 'minor', count: 1 },
+    { id: 'moderate', count: 1 },
+    { id: 'serious', count: 1 },
+  ]);
 });
 
 test('distinguishes zero denominator, started without outcomes, not-started pages and a partial batch', async () => {
@@ -217,6 +268,16 @@ test('rejects foreign, duplicate, out-of-order, unknown and version-incompatible
       /CHECKPOINT_GRAPH_DENIED/u,
     );
   }
+});
+
+test('normalizes the checkpoint authority rejection for a 161-character audit identifier', async () => {
+  const inventory = await createInstalledCoreRuleInventory();
+  const model = structuredClone(SAMPLE_AUDIT);
+  model.auditId = `a${'b'.repeat(160)}`;
+  await assert.rejects(
+    () => buildPanelSummary({ model, executionCheckpoint: checkpointFor(model, inventory), inventory }),
+    /CHECKPOINT_GRAPH_DENIED/u,
+  );
 });
 
 test('reports an unverified inventory without inventing checkpoint passes', async () => {

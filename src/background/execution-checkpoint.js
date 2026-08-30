@@ -125,6 +125,21 @@ function copyCheckpoint(value, auditId) {
   return pages;
 }
 
+export function validateExecutionCheckpoint({ auditId, checkpoint, pageOrder }) {
+  try {
+    if (!validId(auditId)) denyMerge();
+    const orderedPageIds = captureArray(pageOrder);
+    if (orderedPageIds.length === 0 || orderedPageIds.some(pageId => !validId(pageId)) ||
+      new Set(orderedPageIds).size !== orderedPageIds.length) denyMerge();
+    const pages = copyCheckpoint(checkpoint, auditId);
+    if (pages.length !== orderedPageIds.length ||
+      pages.some((page, index) => page.pageId !== orderedPageIds[index])) denyMerge();
+    return freezeCheckpoint({ version: 1, auditId, pages });
+  } catch {
+    denyMerge();
+  }
+}
+
 export function mergeExecutionCheckpoint({ auditId, prior, pageSnapshot, pageOrder }) {
   if (!validId(auditId) || !Array.isArray(pageOrder) || pageOrder.length === 0 ||
     pageOrder.some(pageId => !validId(pageId)) || new Set(pageOrder).size !== pageOrder.length) denyMerge();

@@ -1,4 +1,5 @@
 import { decodePngDataUrl } from '../core/evidence/png.js';
+import { sanitizeHtmlSnippetSource } from '../core/evidence/snippet.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../core/legal/consumer-basis.js';
 import { projectAuditResourceOrigin, sanitizeEvidenceUrl } from '../core/privacy.js';
 import { createAuditModel } from '../core/report/audit-model.js';
@@ -118,7 +119,7 @@ function accessibilityBlock(occurrence, evidence) {
   return {
     name: artifact?.accessibility?.name ?? null,
     nameSource: artifact?.accessibility?.nameSource ?? null,
-    announcementPreview: artifact?.accessibility?.announcementPreview ?? occurrence.accessiblePreview ?? null,
+    announcementPreview: artifact?.accessibility?.announcementPreview ?? null,
   };
 }
 
@@ -155,6 +156,12 @@ function previewBlock(evidence) {
       origin: /^https?:\/\//u.test(mediaUrl) ? projectAuditResourceOrigin(mediaUrl) : '',
     };
   });
+}
+
+function technicalSnippet(evidence) {
+  const rawSnippet = evidence.find(artifact => typeof artifact.snippet === 'string')?.snippet;
+  if (typeof rawSnippet !== 'string') return null;
+  return sanitizeHtmlSnippetSource(rawSnippet) || null;
 }
 
 function legalReferenceFor({ occurrence, card, item, decision }) {
@@ -226,6 +233,17 @@ export function buildPanelDetail({ model: inputModel, summary: inputSummary, occ
     JSON.stringify([...card.occurrenceIds].sort((left, right) => left.localeCompare(right))) !== JSON.stringify(authoritativeOccurrenceIds)) {
     detailDenied();
   }
+  const itemById = new Map(model.itemResults.map(candidate => [candidate.id, candidate]));
+  const expectedAbntItemIds = [...new Set(cardOccurrences
+    .map(candidate => candidate.nbrItemRef)
+    .filter(candidate => itemById.has(candidate)))]
+    .sort((left, right) => left.localeCompare(right));
+  const expectedWcag = [...new Set(expectedAbntItemIds
+    .flatMap(itemId => itemById.get(itemId).wcag.map(reference => reference.id))
+    .concat(rule?.wcag ?? []))]
+    .sort((left, right) => left.localeCompare(right));
+  if (JSON.stringify(card.abntItemIds) !== JSON.stringify(expectedAbntItemIds) ||
+    JSON.stringify(card.wcag) !== JSON.stringify(expectedWcag)) detailDenied();
   const decisionByOccurrence = new Map(model.reviewDecisions.map(candidate => [candidate.occurrenceId, candidate]));
   if (expectedDisplayOutcome(cardOccurrences, decisionByOccurrence) !== card.displayOutcome ||
     deriveResultContextV1({ occurrences: cardOccurrences, evidenceById }) !== card.context) detailDenied();
@@ -265,7 +283,7 @@ export function buildPanelDetail({ model: inputModel, summary: inputSummary, occ
     technical: {
       selector: locator.selector,
       framePath: locator.framePath,
-      snippet: evidence.find(artifact => typeof artifact.snippet === 'string')?.snippet ?? null,
+      snippet: technicalSnippet(evidence),
       styles: [],
       engine: occurrence.source.engine,
       ruleId: occurrence.source.ruleId,

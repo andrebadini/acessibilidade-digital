@@ -7,13 +7,13 @@ import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule
 import { buildPanelDetail } from '../../src/panel/panel-detail.js';
 import { buildPanelSummary } from '../../src/panel/panel-summary.js';
 
-function checkpointFor(inventory) {
+function checkpointFor(inventory, model = SAMPLE_AUDIT) {
   return {
     version: 1,
-    auditId: SAMPLE_AUDIT.auditId,
+    auditId: model.auditId,
     pages: [{
       pageId: 'page-1', attempted: true,
-      startedAt: SAMPLE_AUDIT.pages[0].timestamps.startedAt,
+      startedAt: model.pages[0].timestamps.startedAt,
       rulesVersion: inventory.rulesVersion,
       inventoryVersion: inventory.inventoryVersion,
       inventoryHash: inventory.sha256,
@@ -22,9 +22,36 @@ function checkpointFor(inventory) {
   };
 }
 
-async function summaryFixture() {
+async function summaryFixture(model = SAMPLE_AUDIT) {
   const inventory = await createInstalledCoreRuleInventory();
-  return buildPanelSummary({ model: SAMPLE_AUDIT, executionCheckpoint: checkpointFor(inventory), inventory });
+  return buildPanelSummary({ model, executionCheckpoint: checkpointFor(inventory, model), inventory });
+}
+
+function editorialModel() {
+  const model = structuredClone(SAMPLE_AUDIT);
+  model.methodology.supplementalRuleCount += 1;
+  model.methodology.ruleCount += 1;
+  model.ruleResults.push({
+    ruleId: 'editorial.placeholder-text', outcome: 'failed', mode: 'automated',
+    classification: 'editorial', impact: 'minor', confidence: 'high',
+    source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
+    nbrItems: [], wcag: [], targets: [{
+      nodeId: 'n-1', selectorHint: '', message: 'Substitua o conteúdo provisório antes da publicação.',
+      data: { reason: 'placeholder-text' },
+    }],
+    summary: 'Há conteúdo provisório inequívoco na página.', limitations: [],
+  });
+  model.occurrences.push({
+    occurrenceId: 'occ-editorial-detail', pageId: 'page-1', outcome: 'failed',
+    classification: 'editorial', impact: 'minor', confidence: 'high',
+    source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
+    nbrItemRef: null, itemWcagRefs: [], sourceWcagRefs: [], testedWcagRefs: [], wcagRefs: [], foreignBenchmarkRefs: [],
+    target: { nodeId: 'n-1', selector: null, framePath: [] }, accessiblePreview: null,
+    evidenceRefs: [], legalAnalysis: null, itemId: null, ruleId: 'editorial.placeholder-text',
+    mode: 'automated', nodeId: 'n-1', evidenceIds: [],
+    justification: 'Há conteúdo provisório inequívoco na página.',
+  });
+  return model;
 }
 
 test('projects the ten ordered detail blocks from canonical precedence without a live highlight claim', async () => {
@@ -116,6 +143,63 @@ test('uses the singular selected item in detail and the sorted unique official i
   assert.equal(detail.heading.title, 'Ordem de foco previsível');
   assert.equal(detail.affected.audience, 'A verificação exige interação e julgamento humano sobre o comportamento observado.');
   assert.equal(detail.observed, 'Requisito “Ordem de foco previsível”: conclusão dependente de revisão humana.');
+});
+
+test('uses only correlated evidence accessibility and never falls back to occurrence accessiblePreview', async () => {
+  const marker = 'PRIVATE_ACCESSIBLE_PREVIEW';
+  const model = structuredClone(SAMPLE_AUDIT);
+  delete model.evidence.find(value => value.evidenceId === 'ev-control').accessibility;
+  model.occurrences.find(value => value.occurrenceId === 'occ-focus-failed').accessiblePreview = marker;
+  const summary = await summaryFixture(model);
+  const detail = buildPanelDetail({
+    model, summary, occurrenceId: 'occ-focus-failed', highlightAvailability: new Map(),
+  });
+
+  assert.deepEqual(detail.accessibility, { name: null, nameSource: null, announcementPreview: null });
+  assert.doesNotMatch(JSON.stringify(detail), new RegExp(marker, 'u'));
+});
+
+test('keeps the normative trio null only without an ABNT item and rejects partial card adulteration', async () => {
+  const model = editorialModel();
+  const summary = await summaryFixture(model);
+  const detail = buildPanelDetail({
+    model, summary, occurrenceId: 'occ-editorial-detail', highlightAvailability: new Map(),
+  });
+  assert.equal(detail.normative.abntItem, null);
+  assert.equal(detail.normative.classification, null);
+  assert.equal(detail.legalReference, null);
+
+  const forgedEditorial = structuredClone(summary);
+  forgedEditorial.groups.alerts[0].abntItemIds = ['5.1.1'];
+  assert.throws(() => buildPanelDetail({
+    model, summary: forgedEditorial, occurrenceId: 'occ-editorial-detail', highlightAvailability: new Map(),
+  }), /PANEL_DETAIL_OCCURRENCE_DENIED/u);
+
+  const officialSummary = structuredClone(await summaryFixture());
+  officialSummary.groups.failed[0].abntItemIds = [];
+  assert.throws(() => buildPanelDetail({
+    model: SAMPLE_AUDIT, summary: officialSummary,
+    occurrenceId: 'occ-focus-failed', highlightAvailability: new Map(),
+  }), /PANEL_DETAIL_OCCURRENCE_DENIED/u);
+});
+
+test('re-sanitizes the technical snippet at the detail boundary without losing public source', async () => {
+  const model = structuredClone(SAMPLE_AUDIT);
+  model.evidence.find(value => value.evidenceId === 'ev-control').snippet = [
+    '<a href="javascript:PRIVATE_SCHEME" onclick="PRIVATE_HANDLER">Abrir</a>',
+    '<a href="https://user:pass@example.test/path?token=PRIVATE_TOKEN&lang=pt#authorization=Bearer_PRIVATE_AUTHORITY">Público</a>',
+    '<p>authorization=Bearer_PRIVATE_AUTHORITY token=PRIVATE_TEXT conteúdo público</p>',
+  ].join('');
+  const summary = await summaryFixture(model);
+  const detail = buildPanelDetail({
+    model, summary, occurrenceId: 'occ-focus-failed', highlightAvailability: new Map(),
+  });
+
+  assert.match(detail.technical.snippet, /<a>Abrir<\/a>/u);
+  assert.match(detail.technical.snippet, /href="https:\/\/example\.test\/path\?lang=pt"/u);
+  assert.match(detail.technical.snippet, /authorization=\[redacted\] token=\[redacted\]/u);
+  assert.match(detail.technical.snippet, /conteúdo público/u);
+  assert.doesNotMatch(detail.technical.snippet, /PRIVATE_|javascript:|onclick|user:pass|Bearer_/iu);
 });
 
 test('denies detail for a checkpoint-only pass and for an occurrence not represented by exactly one card', async () => {
