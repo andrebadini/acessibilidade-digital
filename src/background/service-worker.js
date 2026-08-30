@@ -1,10 +1,6 @@
 import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
 import { createSessionUrlDigestManager } from '../core/privacy/session-url-digest.js';
 import { createAuditDeletedEvent } from '../core/audit-deleted-event.js';
-import {
-  createExportFailureRequest,
-  persistExportFailure,
-} from '../export/export-controller.js';
 import { createPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
 import {
   AuditDeleteBusyError,
@@ -32,6 +28,8 @@ import {
 import { getPersonaController } from './persona-runtime.js';
 import { runAttachedAuditExecution } from './run-audit.js';
 import { createSidePanelIntentRouter } from './side-panel-intent-router.js';
+import { createReportLaunchAuthority } from './report-launch.js';
+import { createExportLaunchAuthority, deriveExportLeaseOwner } from './export-launch.js';
 import {
   createTargetCapabilityAuthority,
   readAuditSessionForWorker,
@@ -244,12 +242,13 @@ export function createCheckpointAdapters(sessionArea) {
 }
 
 function copyReadyRuntime(value) {
-  const runtime = exact(value, ['authority', 'auditStarter', 'chromeAdapter'], true);
+  const runtime = exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch'], true) ??
+    exact(value, ['authority', 'auditStarter', 'chromeAdapter'], true);
   if (!runtime || !runtime.authority || !runtime.auditStarter || !runtime.chromeAdapter) throw new Error('WORKER_UNAVAILABLE');
   return freeze(runtime);
 }
 
-function createCompatibilityAdapters({ chromeApi, auditStore, sessionArea, modelNow, createExportOwnerId }) {
+function createCompatibilityAdapters({ chromeApi, auditStore, sessionArea, modelNow }) {
   const checkpoints = createCheckpointAdapters(sessionArea);
   const now = () => canonicalModelTime(modelNow);
 
@@ -274,53 +273,6 @@ function createCompatibilityAdapters({ chromeApi, auditStore, sessionArea, model
       await sendRuntimeMessage(chromeApi, { type: 'AUDIT_REVIEW_UPDATED', auditId, exportRevision });
       return Object.freeze({ ok: true });
     } catch { return Object.freeze({ ok: false, code: 'COMPATIBILITY_FAILED' }); }
-  }
-
-  async function queueLegacyExport({ auditId }) {
-    try {
-      const [snapshot, latest] = await Promise.all([auditStore.getAuditSnapshot(auditId), auditStore.getLatest()]);
-      if (snapshot?.model?.auditId !== auditId || !snapshot.capability || !Number.isSafeInteger(snapshot.revision)) {
-        return freeze({ ok: false, auditId, state: 'failed', code: 'EXPORT_PREPARE_FAILED', retryable: true, retryAt: null });
-      }
-      const leaseOwnerId = createExportOwnerId();
-      if (!AUDIT_ID.test(leaseOwnerId ?? '')) throw new Error('denied');
-      const latestState = {
-        ...(latest?.auditId === auditId ? latest : {}), auditId,
-        exportStatus: 'queued', exportRevision: snapshot.revision, exportQueuedAt: now(),
-        leaseOwnerId, message: 'Relatório na fila de geração.',
-      };
-      delete latestState.exportAttempt;
-      const lease = await auditStore.acquireExportLease(auditId, snapshot.capability, {
-        ownerId: leaseOwnerId, now: latestState.exportQueuedAt, latestState,
-      });
-      if (!lease?.acquired) {
-        return freeze({ ok: false, auditId, state: 'busy', code: 'EXPORT_BUSY', retryable: true, retryAt: typeof lease?.retryAt === 'string' ? lease.retryAt : null });
-      }
-      if (!Number.isSafeInteger(lease.exportAttempt) || lease.exportAttempt < 1) throw new Error('denied');
-      const query = `auditId=${encodeURIComponent(auditId)}&leaseOwnerId=${encodeURIComponent(leaseOwnerId)}&exportAttempt=${lease.exportAttempt}`;
-      try {
-        await invokeChrome(chromeApi, chromeApi.tabs, 'create', {
-          url: chromeApi.runtime.getURL(`src/export/index.html?${query}`), active: false,
-        });
-      } catch {
-        try {
-          await persistExportFailure(createExportFailureRequest({
-            snapshotCapability: snapshot.capability,
-            leaseOwnerId,
-            exportAttempt: lease.exportAttempt,
-            latest: latestState,
-            at: latestState.exportQueuedAt,
-          }), auditStore);
-        } catch { /* stale revision or replacement lease remains untouched */ }
-        return freeze({ ok: false, auditId, state: 'failed', code: 'EXPORT_PREPARE_FAILED', retryable: true, retryAt: null });
-      }
-      return freeze({
-        ok: true, auditId, state: 'queued', exportRevision: snapshot.revision,
-        exportAttempt: lease.exportAttempt, leaseOwnerId,
-      });
-    } catch {
-      return freeze({ ok: false, auditId, state: 'failed', code: 'EXPORT_PREPARE_FAILED', retryable: true, retryAt: null });
-    }
   }
 
   async function deleteLegacyAudit({ auditId }) {
@@ -355,24 +307,9 @@ function createCompatibilityAdapters({ chromeApi, auditStore, sessionArea, model
     }
   }
 
-  async function acknowledgeLegacyExportEvent({ event }) {
-    try {
-      if (event.type === 'EXPORT_COMPLETE' && event.localAuditDeleted === true) {
-        const [snapshot, retention, latest] = await Promise.all([
-          auditStore.getAuditSnapshot(event.auditId), auditStore.getAuditRetention(event.auditId), auditStore.getLatest(),
-        ]);
-        if (snapshot?.model === undefined && retention === undefined && latest?.auditId !== event.auditId) {
-          await checkpoints.removeCheckpoint({ auditId: event.auditId, sessionCapabilityId: null, windowId: null });
-          await sendRuntimeMessage(chromeApi, createAuditDeletedEvent({ auditId: event.auditId, reason: 'complete-export' })).catch(() => {});
-        }
-      }
-      return Object.freeze({ ok: true });
-    } catch { return Object.freeze({ ok: true }); }
-  }
-
   return freeze({
-    readLegacyLastAudit, notifyLegacyReviewCommitted, queueLegacyExport,
-    deleteLegacyAudit, deleteAllLegacyAudits, acknowledgeLegacyExportEvent,
+    readLegacyLastAudit, notifyLegacyReviewCommitted,
+    deleteLegacyAudit, deleteAllLegacyAudits,
   });
 }
 
@@ -443,30 +380,52 @@ async function buildDefaultRuntime(chromeApi, options) {
     readLatest: () => auditStore.getLatest(), buildPanelResultBundle,
     epochNow, modelNow, createAbortController: () => new AbortController(),
   });
+  const launchApisAvailable = typeof chromeApi.tabs?.create === 'function' && typeof chromeApi.tabs?.update === 'function' &&
+    typeof chromeApi.tabs?.get === 'function' && typeof chromeApi.tabs?.remove === 'function';
+  const unavailableLaunch = freeze({
+    async openRegisteredReport() { return { ok: false, code: 'REPORT_OPEN_DENIED' }; },
+    async connect() { return { ok: false, code: 'CONTEXT_DENIED' }; },
+    async authorizeExport() { return { ok: false, code: 'REPORT_EXPORT_DENIED' }; },
+    async validateConsumer() { return false; },
+    async requestExport() { return { ok: false, code: 'REPORT_EXPORT_DENIED' }; },
+    async complete() { return { ok: false, code: 'EXPORT_COMPLETE_DENIED' }; },
+    async handleTabUpdated() { return false; }, async handleTabRemoved() { return false; }, async handleWindowRemoved() { return false; },
+  });
+  const reportLaunch = launchApisAvailable ? createReportLaunchAuthority({ chromeApi, sessionArea, epochNow, randomBytes: bytes }) : unavailableLaunch;
+  const exportCompletionStore = Object.freeze({
+    ...auditStore,
+    async completeExport(auditId, { attemptId, receipt }) {
+      const durable = await auditStore.getExportReceipt(auditId);
+      if (!same(durable, receipt)) throw new Error('EXPORT_RECEIPT_DENIED');
+      const released = await auditStore.releaseExportLease(auditId, {
+        ownerId: deriveExportLeaseOwner(auditId, attemptId), now: canonicalModelTime(modelNow),
+      });
+      if (released !== true) throw new Error('EXPORT_COMPLETE_DENIED');
+      return Object.freeze({ completed: true, deleted: false });
+    },
+  });
+  const exportLaunch = launchApisAvailable ? createExportLaunchAuthority({
+    chromeApi, sessionArea, auditStore: exportCompletionStore, reportLaunch, epochNow, modelNow, randomBytes: bytes,
+  }) : unavailableLaunch;
   const router = createSidePanelIntentRouter({
     chromeApi, authority, auditStarter, panelCoordinator, chromeAdapter,
     readReportRevision: ({ auditId }) => auditStore.getReportRevision(auditId),
     buildPanelResultBundle, revokeViewOnly, epochNow, modelNow,
-    createAuditId: options.createAuditId ?? defaultAuditId,
+    createAuditId: options.createAuditId ?? defaultAuditId, reportLaunch, exportLaunch,
   });
-  const compatibilityAdapters = createCompatibilityAdapters({
-    chromeApi, auditStore, sessionArea, modelNow,
-    createExportOwnerId: options.createExportOwnerId ?? defaultAuditId,
-  });
+  const compatibilityAdapters = createCompatibilityAdapters({ chromeApi, auditStore, sessionArea, modelNow });
   const compatibilityHandler = createLegacyCompatibilityHandler({
     chromeApi,
     readLegacyLastAudit: compatibilityAdapters.readLegacyLastAudit,
     notifyLegacyReviewCommitted: compatibilityAdapters.notifyLegacyReviewCommitted,
-    queueLegacyExport: compatibilityAdapters.queueLegacyExport,
     deleteLegacyAudit: compatibilityAdapters.deleteLegacyAudit,
     deleteAllLegacyAudits: compatibilityAdapters.deleteAllLegacyAudits,
-    acknowledgeLegacyExportEvent: compatibilityAdapters.acknowledgeLegacyExportEvent,
   });
   const personaController = options.personaController ?? getPersonaController(chromeApi, { logger: options.logger });
   const recovery = await auditStarter.recoverAuthorizedAuditLifecycle();
   if (recovery?.ok !== true) throw new Error('WORKER_UNAVAILABLE');
   return {
-    readyRuntime: copyReadyRuntime({ authority, auditStarter, chromeAdapter }),
+    readyRuntime: copyReadyRuntime({ authority, auditStarter, chromeAdapter, reportLaunch, exportLaunch }),
     router, compatibilityHandler, panelCoordinator, personaController,
   };
 }

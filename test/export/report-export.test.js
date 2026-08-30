@@ -13,6 +13,10 @@ import { renderOccurrenceCsv } from '../../src/core/report/csv.js';
 import { verifyAuditIntegritySnapshot } from '../../src/core/report/integrity.js';
 import { commitReviewDecision, recordReviewDecision } from '../../src/review/review-state.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
+import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
+import { buildPanelSummary } from '../../src/panel/panel-summary.js';
+import { buildReportView } from '../../src/review/report-view.js';
+import { EXPORT_FORMATS_V1 } from '../../src/export/export-formats.js';
 
 const PDF = new TextEncoder().encode('%PDF-1.7\nlocal');
 const FALLBACK_PDF = new TextEncoder().encode('%PDF-1.7\nfinal-fallback');
@@ -85,6 +89,66 @@ test('keeps technical single and batch status complete when an export artifact i
     assert.doesNotThrow(() => renderTechnicalJson(finalized));
     assert.doesNotThrow(() => renderOccurrenceCsv(finalized));
   }
+});
+
+test('authorized ReportView export keeps one stored revision across all four exact byte receipts', async () => {
+  const model = await finalizeGeneratedModel(
+    completeSingleAudit(), '2026-08-26T15:00:00.000Z', [], true, false, true, true,
+  );
+  const inventory = await createInstalledCoreRuleInventory();
+  const checkpoint = {
+    version: 1, auditId: model.auditId,
+    pages: model.pages.map(page => ({
+      pageId: page.pageId, attempted: page.attempted,
+      startedAt: page.attempted ? page.timestamps.startedAt : null,
+      rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion,
+      inventoryHash: inventory.sha256, outcomes: [],
+    })),
+  };
+  const summary = await buildPanelSummary({ model, executionCheckpoint: checkpoint, inventory });
+  const store = createInMemoryAuditStore();
+  await store.setAudit(model.auditId, model);
+  const snapshot = await store.getAuditSnapshot(model.auditId);
+  const reportView = buildReportView({
+    model, summary, modelRevision: snapshot.revision, modelHash: model.integrity.canonicalModelHash,
+  });
+  const ownerId = 'export-authorized-test';
+  const acquired = await store.acquireExportLease(model.auditId, snapshot.capability, {
+    ownerId, now: '2026-08-26T15:00:01.000Z',
+  });
+  await store.claimExportLease(model.auditId, snapshot.capability, {
+    ownerId, exportAttempt: acquired.exportAttempt, now: '2026-08-26T15:00:02.000Z',
+  });
+  await store.beginExportDelivery(model.auditId, snapshot.capability, {
+    ownerId, exportAttempt: acquired.exportAttempt, now: '2026-08-26T15:00:03.000Z',
+  });
+  const result = await runReportExport({
+    auditSnapshotCapability: snapshot.capability, exportLeaseOwnerId: ownerId,
+    exportAttempt: acquired.exportAttempt,
+  }, {
+    reportView,
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+    downloadsAdapter: fakeDownloads([]),
+    assertDelivery({ snapshotCapability, exportLeaseOwnerId }) {
+      return store.assertExportLease(model.auditId, snapshotCapability, {
+        ownerId: exportLeaseOwnerId, exportAttempt: acquired.exportAttempt,
+        now: '2026-08-26T15:00:04.000Z', phase: 'delivering',
+      });
+    },
+    recordDelivery({ snapshotCapability, exportLeaseOwnerId, ...entry }) {
+      return store.recordExportDelivery(model.auditId, snapshotCapability, {
+        ownerId: exportLeaseOwnerId, exportAttempt: acquired.exportAttempt,
+        now: '2026-08-26T15:00:04.000Z', ...entry,
+      });
+    },
+  });
+  assert.equal((await store.getAuditSnapshot(model.auditId)).revision, snapshot.revision);
+  assert.deepEqual(result.deliveryReceipt.formats.map(entry => entry.format), EXPORT_FORMATS_V1);
+  assert.equal(result.deliveryReceipt.formats.every(entry => entry.byteSize > 0 && /^[a-f0-9]{64}$/u.test(entry.sha256)), true);
+  assert.equal((result.html.match(/<h2\b/gu) ?? []).length, 7);
+  assert.equal((result.html.match(/Câmara dos Deputados/gu) ?? []).length, 2);
 });
 
 test('rejects noncanonical export issues and never invokes issue or request accessors', async () => {
@@ -205,7 +269,7 @@ test('prints one inactive blob tab, cleans exact resources, and exports one shar
   const technical = JSON.parse(result.json);
   assert.equal(technical.assertions.length, 146);
   assert.equal(technical.audit.auditId, result.model.auditId);
-  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv', 'pdf']);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'pdf', 'csv', 'json']);
   assert.ok(result.csv.startsWith('\uFEFF'));
   for (const occurrence of result.model.occurrences) {
     assert.match(result.csv, new RegExp(`"${occurrence.occurrenceId}"`, 'u'));
@@ -450,7 +514,7 @@ test('keeps HTML and JSON when PDF fails, records a partial limitation, and stil
   });
   assert.equal(result.model.session.status, 'partial');
   assert.match(result.model.limitations.join(' '), /PDF|impressão/iu);
-  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'csv', 'json']);
   assert.deepEqual(result.deliveryReceipt, {
     status: 'partial',
     formats: result.formats,
@@ -476,7 +540,7 @@ test('contains a hostile print failure name accessor without invoking or seriali
   });
 
   assert.equal(accessed, false);
-  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'csv', 'json']);
   assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'REPORT_PDF_UNAVAILABLE'));
   assert.doesNotMatch(`${result.html}\n${result.json}\n${JSON.stringify(result)}`, /PRIVATE_SENTINEL/u);
 });
@@ -499,7 +563,7 @@ test('contains readiness failures and cleanup errors without leaking a print URL
     downloadsAdapter: fakeDownloads(events),
   });
   assert.equal(result.model.session.status, 'partial');
-  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'csv', 'json']);
   assert.deepEqual(events.filter(entry => entry[0] === 'revoke'), [['revoke', 'blob:chrome-extension://test/print']]);
 });
 
@@ -528,7 +592,7 @@ test('descriptor-validates the temporary print tab without invoking ID accessors
     });
 
     assert.equal(accessed, false);
-    assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
+    assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'csv', 'json']);
     assert.deepEqual(events.filter(entry => entry[0].startsWith('unexpected')), []);
     assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'REPORT_PRINT_TAB_FAILED'));
   }
@@ -548,7 +612,7 @@ test('contains print Blob URL preparation failure as a PDF omission and still ex
     downloadsAdapter: fakeDownloads(events),
   });
 
-  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'csv', 'json']);
   assert.equal(result.model.session.status, 'partial');
   assert.equal(result.model.report.artifact.pdfFallback, false);
   assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'REPORT_PDF_UNAVAILABLE'));
@@ -585,7 +649,7 @@ test('descriptor-validates and snapshots PDF renderer output before reading fall
       downloadsAdapter: fakeDownloads(events),
     });
 
-    assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
+    assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'csv', 'json']);
     assert.equal(result.model.report.artifact.pdfFallback, false);
     assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'REPORT_PDF_UNAVAILABLE'));
     assert.ok(events.every(entry => entry[0] !== 'download' || !entry[1].endsWith('.pdf')));
@@ -625,7 +689,7 @@ test('keeps delivery receipt separate so downloaded JSON and final model cannot 
   assert.deepEqual(JSON.parse(result.json).audit, result.model);
   assert.equal(result.deliveryReceipt.status, 'partial');
   assert.deepEqual(result.deliveryReceipt.formats.map(format => format.status), ['complete', 'complete', 'timeout', 'complete']);
-  assert.deepEqual(result.model.report.artifact.formats.map(format => format.format), ['html', 'json', 'csv', 'pdf']);
+  assert.deepEqual(result.model.report.artifact.formats.map(format => format.format), ['html', 'pdf', 'csv', 'json']);
   assert.ok(result.model.report.artifact.formats.every(format => format.status === 'prepared'));
   assert.equal(Object.hasOwn(result.model.report.artifact, 'deliveryReceipt'), false);
   assert.doesNotMatch(JSON.stringify(result), /TOPSECRET|blob:|chrome-extension:/iu);
@@ -641,8 +705,8 @@ test('contains CSV preparation failure, records it in the final correlated model
   });
   assert.equal(result.model.session.status, 'partial');
   assert.match(result.model.limitations.join(' '), /CSV/iu);
-  assert.deepEqual(result.formats.map(format => format.format), ['html', 'json', 'pdf']);
-  assert.deepEqual(result.model.report.artifact.formats.map(format => format.format), ['html', 'json', 'pdf']);
+  assert.deepEqual(result.formats.map(format => format.format), ['html', 'pdf', 'json']);
+  assert.deepEqual(result.model.report.artifact.formats.map(format => format.format), ['html', 'pdf', 'json']);
   assert.deepEqual(JSON.parse(result.json).audit, result.model);
   assert.equal(result.csv, null);
   assert.deepEqual(result.deliveryReceipt, {
@@ -679,8 +743,8 @@ test('marks CSV unavailable when an occurrence has more than 256 evidence refere
 
   assert.equal(result.csv, null);
   assert.equal(result.model.session.status, 'partial');
-  assert.deepEqual(result.model.report.artifact.formats.map(entry => entry.format), ['html', 'json', 'pdf']);
-  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'pdf']);
+  assert.deepEqual(result.model.report.artifact.formats.map(entry => entry.format), ['html', 'pdf', 'json']);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'pdf', 'json']);
   assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'REPORT_CSV_UNAVAILABLE'));
   assert.deepEqual(result.deliveryReceipt.limitations, ['O CSV não foi gerado devido a uma limitação técnica local.']);
   assert.equal(events.some(entry => entry[0] === 'download' && entry[1].endsWith('.csv')), false);
@@ -767,8 +831,8 @@ test('fails closed and omits PDF when a final fallback rerender diverges from it
   assert.equal(renders, 2);
   assert.equal(result.pdf, null);
   assert.equal(result.pdfFallback, false);
-  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'csv']);
-  assert.deepEqual(result.model.report.artifact.formats.map(entry => entry.format), ['html', 'json', 'csv']);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'csv', 'json']);
+  assert.deepEqual(result.model.report.artifact.formats.map(entry => entry.format), ['html', 'csv', 'json']);
   assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'REPORT_PDF_UNAVAILABLE'));
   assert.deepEqual(JSON.parse(result.json).audit, result.model);
   assert.equal(result.csv, (await import('../../src/core/report/csv.js')).renderOccurrenceCsv(result.model));
@@ -819,8 +883,8 @@ test('treats non-string, non-BOM or noncanonical CSV renderer output as a genera
 
     assert.equal(result.csv, null);
     assert.equal(result.model.session.status, 'partial');
-    assert.deepEqual(result.model.report.artifact.formats.map(entry => entry.format), ['html', 'json', 'pdf']);
-    assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json', 'pdf']);
+    assert.deepEqual(result.model.report.artifact.formats.map(entry => entry.format), ['html', 'pdf', 'json']);
+    assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'pdf', 'json']);
     assert.deepEqual(result.deliveryReceipt.limitations, ['O CSV não foi gerado devido a uma limitação técnica local.']);
     assert.equal(result.deliveryReceipt.status, 'partial');
     assert.ok(events.some(entry => entry[0] === 'download' && entry[1].endsWith('.pdf')));

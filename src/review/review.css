@@ -2,6 +2,23 @@
 * { box-sizing: border-box; }
 body { margin: 0; }
 main { max-width: 72rem; margin: auto; padding: 1.5rem; }
+.report-view { display: grid; gap: 1rem; }
+.report-identity, .report-view > section { background: #fff; border: 1px solid #c8d0d6; border-radius: .5rem; padding: clamp(1rem, 3vw, 1.5rem); }
+.report-identity { border-top: .35rem solid #155a8a; }
+.report-identity p { margin-block: .25rem; overflow-wrap: anywhere; }
+.report-view h2 { margin-block: 0 .75rem; font-size: clamp(1.2rem, 3vw, 1.55rem); line-height: 1.25; }
+.report-view h3 { font-size: 1rem; }
+.report-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: .75rem; margin-block: 1rem; }
+.report-filters [role="group"] { display: flex; flex-wrap: wrap; align-content: flex-start; gap: .4rem; padding: .5rem; border: 1px solid #d7dde2; }
+.report-filters button { min-height: 2.75rem; padding: .4rem .65rem; }
+.report-filters button[aria-pressed="true"] { background: #155a8a; color: #fff; }
+[data-report-group] { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr)); gap: .75rem; }
+[data-report-issue] { min-width: 0; padding: 1rem; border: 1px solid #c8d0d6; border-inline-start: .35rem solid #155a8a; border-radius: .35rem; overflow-wrap: anywhere; }
+[data-result="failed"] { border-inline-start-color: #9d2b18; }
+[data-result="humanReview"] { border-inline-start-color: #8a6200; }
+.report-view table { width: 100%; border-collapse: collapse; font-size: .925rem; }
+.report-view th, .report-view td { padding: .6rem; border: 1px solid #c8d0d6; text-align: start; vertical-align: top; }
+.report-view section:nth-of-type(6) { overflow-x: auto; }
 .review-controls, .review-card { background: white; border: 1px solid #c8d0d6; border-radius: .5rem; padding: 1rem; margin-block: 1rem; }
 label { display: block; font-weight: 700; }
 input, textarea, button { font: inherit; }
@@ -20,6 +37,6 @@ dialog:not([open]) { display: none; }
 .dialog-status:empty { display: none; }
 .dialog-actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1.25rem; }
 .dialog-actions button { flex: 1 1 10rem; min-height: 2.75rem; }
-@media (max-width: 22rem) { main { padding: 1rem; } .dialog-actions { flex-direction: column; } }
-@media (forced-colors: active) { button, input, textarea, .review-controls, .review-card, dialog { border-color: CanvasText; } }
+@media (max-width: 32rem) { main { padding: 1rem; } .dialog-actions { flex-direction: column; } .report-filters { grid-template-columns: 1fr; } .report-identity, .report-view > section { padding: 1rem; } }
+@media (forced-colors: active) { button, input, textarea, .review-controls, .review-card, dialog, .report-identity, .report-view > section, [data-report-issue], .report-filters [role="group"], .report-view th, .report-view td { border-color: CanvasText; } .report-filters button[aria-pressed="true"] { background: Highlight; color: HighlightText; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }

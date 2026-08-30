@@ -11,9 +11,9 @@ import {
 
 const FAST_SHA256 = () => '0'.repeat(64);
 
-test('builds sanitized host and canonical timestamp artifact names', () => {
-  assert.equal(buildArtifactBaseName('https://Serviço.Exemplo.test:8443/path', '2026-08-26T14:00:00.000Z'), 'xn-servio-0ua-exemplo-test-20260826T140000000Z');
-  assert.equal(buildArtifactBaseName('https://example.test/', '2026-08-26T14:00:00.000Z'), 'example-test-20260826T140000000Z');
+test('builds audit-owned canonical timestamp artifact names without a hostname', () => {
+  assert.equal(buildArtifactBaseName('audit:cliente-1', '2026-08-26T14:00:00.000Z'), 'audit-cliente-1-20260826T140000000Z');
+  assert.throws(() => buildArtifactBaseName('https://example.test/', '2026-08-26T14:00:00.000Z'), /Auditoria inválida/u);
 });
 
 test('downloads large payloads only through Blob URLs and revokes them after terminal states', async () => {
@@ -36,11 +36,11 @@ test('downloads large payloads only through Blob URLs and revokes them after ter
   assert.deepEqual(result.formats.map(item => item.status), ['complete', 'complete', 'complete', 'complete']);
   assert.deepEqual(result.formats.map(item => item.downloadId), [10, 11, 12, 13]);
   assert.deepEqual(result.formats.map(item => item.filename), [
-    'example-test-20260826T140000000Z.html', 'example-test-20260826T140000000Z.json',
-    'example-test-20260826T140000000Z.csv', 'example-test-20260826T140000000Z.pdf',
+    'example-test-20260826T140000000Z.html', 'example-test-20260826T140000000Z.pdf',
+    'example-test-20260826T140000000Z.csv', 'example-test-20260826T140000000Z.json',
   ]);
   assert.deepEqual(result.formats.map(item => item.mimeType), [
-    'text/html;charset=utf-8', 'application/json;charset=utf-8', 'text/csv;charset=utf-8', 'application/pdf',
+    'text/html;charset=utf-8', 'application/pdf', 'text/csv;charset=utf-8', 'application/json;charset=utf-8',
   ]);
   assert.ok(result.formats.every(item => /^[a-f0-9]{64}$/u.test(item.sha256)));
   for (const event of events.filter(item => item[0] === 'download')) {
@@ -85,8 +85,8 @@ test('revalidates delivery immediately before each physical download and aborts 
     },
   }), error => error?.code === 'AUDIT_EXPORT_LEASE_CONFLICT');
 
-  assert.deepEqual(checked, ['html', 'html', 'html', 'html', 'json', 'json', 'json', 'json', 'csv']);
-  assert.deepEqual(started, ['audit.html', 'audit.json']);
+  assert.deepEqual(checked, ['html', 'html', 'html', 'html', 'pdf', 'pdf', 'pdf', 'pdf', 'csv']);
+  assert.deepEqual(started, ['audit.html', 'audit.pdf']);
   assert.equal(revoked.length, 3);
 });
 
@@ -194,7 +194,8 @@ test('journals a physical download before start and exposes a durable cleanup fa
   assert.deepEqual(journal, [
     { state: 'starting', format: 'html', filename: 'audit.html' },
     { state: 'in-flight', format: 'html', filename: 'audit.html', downloadId: 77 },
-    { state: 'terminal', format: 'html', filename: 'audit.html', downloadId: 77 },
+    { state: 'terminal', format: 'html', filename: 'audit.html', downloadId: 77,
+      mimeType: 'text/html;charset=utf-8', byteSize: 15, sha256: '0'.repeat(64) },
     { state: 'cleanup-failed', format: 'html', filename: 'audit.html', downloadId: 77 },
   ]);
 });
@@ -759,7 +760,7 @@ test('does not pass an invalid late start result to the cancellation adapter', a
 
   assert.deepEqual(cancelled, []);
   assert.equal(result.formats[0].failureCode, 'DOWNLOAD_START_TIMEOUT');
-  assert.equal(result.formats.at(-1).format, 'pdf');
+  assert.equal(result.formats.at(-1).format, 'json');
   assert.equal(result.formats.at(-1).status, 'complete');
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_SENTINEL/u);
 });
@@ -791,15 +792,15 @@ test('independently times out a hanging terminal wait, cancels it, revokes once,
   assert.notEqual(outcome, 'still-pending');
   assert.deepEqual(outcome.formats.map(entry => [entry.format, entry.status, entry.failureCode ?? null]), [
     ['html', 'timeout', 'DOWNLOAD_WAIT_TIMEOUT'],
-    ['json', 'complete', null],
-    ['csv', 'complete', null],
     ['pdf', 'complete', null],
+    ['csv', 'complete', null],
+    ['json', 'complete', null],
   ]);
   assert.deepEqual(events.filter(entry => entry[0] === 'cancel'), [['cancel', 1]]);
   assert.equal(events.filter(entry => entry[0] === 'revoke').length, 4);
   assert.equal(new Set(events.filter(entry => entry[0] === 'revoke').map(entry => entry[1])).size, 4);
   assert.deepEqual(events.filter(entry => entry[0] === 'download').map(entry => entry[1]), [
-    'audit.html', 'audit.json', 'audit.csv', 'audit.pdf',
+    'audit.html', 'audit.pdf', 'audit.csv', 'audit.json',
   ]);
   assert.ok(events.findIndex(entry => entry[0] === 'cancel') < events.findIndex(entry => entry[0] === 'revoke'));
 
@@ -875,7 +876,7 @@ test('attempts one contained cancellation after every terminal observer failure 
     assert.equal(new Set(events.filter(entry => entry[0] === 'revoke').map(entry => entry[1])).size, 4);
     assert.ok(events.findIndex(entry => entry[0] === 'cancel') < events.findIndex(entry => entry[0] === 'revoke'));
     assert.deepEqual(events.filter(entry => entry[0] === 'download').map(entry => entry[1]), [
-      'audit.html', 'audit.json', 'audit.csv', 'audit.pdf',
+      'audit.html', 'audit.pdf', 'audit.csv', 'audit.json',
     ]);
     assert.doesNotMatch(JSON.stringify(result), /PRIVATE_TERMINAL_SENTINEL/u);
   }
@@ -933,7 +934,7 @@ test('uses a descriptor-safe inherited cancellation method accepted by a class a
   assert.deepEqual(result.formats.slice(1).map(entry => entry.status), ['complete', 'complete', 'complete']);
 });
 
-test('contains invalid artifact bytes and hash failures without skipping the later PDF', async () => {
+test('contains invalid artifact bytes and hash failures without skipping the later JSON', async () => {
   for (const scenario of ['bytes', 'hash']) {
     let id = 0;
     let hashCalls = 0;
@@ -959,12 +960,12 @@ test('contains invalid artifact bytes and hash failures without skipping the lat
     });
 
     assert.deepEqual(result.formats.map(entry => [entry.format, entry.status]), [
-      ['html', 'complete'], ['json', 'complete'], ['csv', 'interrupted'], ['pdf', 'complete'],
+      ['html', 'complete'], ['pdf', 'complete'], ['csv', 'interrupted'], ['json', 'complete'],
     ]);
     assert.equal(result.formats[2].failureCode, scenario === 'bytes' ? 'ARTIFACT_BYTES_INVALID' : 'ARTIFACT_HASH_FAILED');
     assert.equal(result.formats[2].sha256, null);
-    assert.deepEqual(downloaded, ['audit.html', 'audit.json', 'audit.pdf']);
-    assert.deepEqual(created, ['text/html;charset=utf-8', 'application/json;charset=utf-8', 'application/pdf']);
+    assert.deepEqual(downloaded, ['audit.html', 'audit.pdf', 'audit.json']);
+    assert.deepEqual(created, ['text/html;charset=utf-8', 'application/pdf', 'application/json;charset=utf-8']);
     assert.doesNotMatch(JSON.stringify(result), /PRIVATE_SENTINEL|blob:/u);
   }
 });
@@ -998,11 +999,11 @@ test('independently times out a hanging hash calculation and continues through t
   assert.notEqual(outcome, 'still-pending');
   assert.deepEqual(outcome.formats.map(entry => [entry.format, entry.status, entry.failureCode ?? null]), [
     ['html', 'interrupted', 'ARTIFACT_HASH_FAILED'],
-    ['json', 'complete', null],
-    ['csv', 'complete', null],
     ['pdf', 'complete', null],
+    ['csv', 'complete', null],
+    ['json', 'complete', null],
   ]);
-  assert.deepEqual(downloaded, ['audit.json', 'audit.csv', 'audit.pdf']);
+  assert.deepEqual(downloaded, ['audit.pdf', 'audit.csv', 'audit.json']);
 });
 
 test('hashes and blobs the same owned byte snapshot when the caller mutates its original buffer', async () => {
@@ -1038,7 +1039,7 @@ test('hashes and blobs the same owned byte snapshot when the caller mutates its 
   assert.notDeepEqual(pdf, original);
 });
 
-test('contains CSV Blob preparation failure and still downloads the later PDF', async () => {
+test('contains CSV Blob preparation failure and still downloads the later JSON', async () => {
   let id = 0;
   const downloaded = [];
   const adapter = {
@@ -1055,11 +1056,11 @@ test('contains CSV Blob preparation failure and still downloads the later PDF', 
     pdf: new TextEncoder().encode('%PDF-1.7'),
   }, adapter);
   assert.deepEqual(result.formats.map(format => [format.format, format.status]), [
-    ['html', 'complete'], ['json', 'complete'], ['csv', 'interrupted'], ['pdf', 'complete'],
+    ['html', 'complete'], ['pdf', 'complete'], ['csv', 'interrupted'], ['json', 'complete'],
   ]);
   assert.equal(result.formats[2].failureCode, 'ARTIFACT_BLOB_FAILED');
   assert.deepEqual(result.limitations, ['O artefato CSV não pôde ser preparado para download.']);
-  assert.deepEqual(downloaded, ['audit.html', 'audit.json', 'audit.pdf']);
+  assert.deepEqual(downloaded, ['audit.html', 'audit.pdf', 'audit.json']);
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_SENTINEL|blob:/u);
 });
 

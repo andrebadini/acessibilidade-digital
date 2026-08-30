@@ -41,11 +41,18 @@ export function createAuditLifecycle(raw) {
 
   let registered = false;
 
-  async function invalidateTab(tabId, reasonCode) {
+  async function invalidateTab(tabId, reasonCode, changeInfo = null) {
     try {
       const runtime = await input.getReadyRuntime();
       await runtime.auditStarter.abortAttachedAuditForTarget({ tabId, windowId: null, reasonCode });
       await runtime.authority.invalidateForTab(tabId, reasonCode);
+      if (changeInfo !== null) {
+        await runtime.reportLaunch?.handleTabUpdated?.(tabId, changeInfo);
+        await runtime.exportLaunch?.handleTabUpdated?.(tabId, changeInfo);
+      } else {
+        await runtime.reportLaunch?.handleTabRemoved?.(tabId);
+        await runtime.exportLaunch?.handleTabRemoved?.(tabId);
+      }
     } catch { /* readiness and invalidation failures are closed no-ops */ }
   }
 
@@ -54,6 +61,8 @@ export function createAuditLifecycle(raw) {
       const runtime = await input.getReadyRuntime();
       await runtime.auditStarter.abortAttachedAuditForTarget({ tabId: null, windowId, reasonCode: 'WINDOW_REMOVED' });
       await runtime.authority.invalidateForWindow(windowId, 'WINDOW_REMOVED');
+      await runtime.reportLaunch?.handleWindowRemoved?.(windowId);
+      await runtime.exportLaunch?.handleWindowRemoved?.(windowId);
     } catch { /* readiness and invalidation failures are closed no-ops */ }
   }
 
@@ -69,7 +78,7 @@ export function createAuditLifecycle(raw) {
         : pendingUrl.found && typeof pendingUrl.value === 'string'
           ? 'TAB_PENDING_URL'
           : null;
-    if (reason) void invalidateTab(tabId, reason);
+    if (reason) void invalidateTab(tabId, reason, changeInfo);
   };
   const onTabRemoved = tabId => { if (safeChromeId(tabId)) void invalidateTab(tabId, 'TAB_REMOVED'); };
   const onWindowRemoved = windowId => { if (safeChromeId(windowId)) void invalidateWindow(windowId); };

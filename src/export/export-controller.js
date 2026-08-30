@@ -26,7 +26,7 @@ import {
   buildArtifactBaseName,
 } from '../browser/download-artifacts.js';
 
-const FORMAT_ORDER = Object.freeze(['html', 'json', 'csv', 'pdf']);
+import { EXPORT_FORMATS_V1 } from './export-formats.js';
 const REQUIRED_FORMATS = new Set(['html', 'json']);
 const PRINT_CLEANUP_LIMITATION = createExportIssue('REPORT_PRINT_CLEANUP_LIMITED').message;
 const RESULT_KEYS = new Set([
@@ -273,6 +273,7 @@ function normalizeDeliveryReceipt(value, preparedFormats) {
     const hasDownloadId = Object.hasOwn(entry, 'downloadId');
     const expectedKeys = [
       'filename', 'format', 'mimeType', 'sha256', 'status',
+      ...(complete ? ['byteSize'] : []),
       ...(complete ? [] : ['failureCode']),
       ...((complete || failure?.hasDownloadId) ? ['downloadId'] : []),
     ].sort();
@@ -282,6 +283,7 @@ function normalizeDeliveryReceipt(value, preparedFormats) {
     if (!failure && !complete || canonicalStringify(keys) !== canonicalStringify(expectedKeys) ||
       typeof entry.filename !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9.-]{0,240}$/u.test(entry.filename) ||
       !entry.filename.endsWith(`.${entry.format}`) || entry.mimeType !== expectedMime[entry.format] || !hashValid ||
+      (complete && (!Number.isSafeInteger(entry.byteSize) || entry.byteSize < 0)) ||
       (hasDownloadId && (!Number.isSafeInteger(entry.downloadId) || entry.downloadId < 0)) ||
       (complete && !hasDownloadId) || (!complete && entry.status !== failure.status)) {
       throw new TypeError('Formato no recibo de entrega possui arquivo, MIME, hash ou status inválido.');
@@ -340,17 +342,17 @@ function preparedArtifactFormats(model) {
   const formats = values.map(entry => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry) ||
       canonicalStringify(Object.keys(entry).sort()) !== canonicalStringify(['format', 'status']) ||
-      entry.status !== 'prepared' || !FORMAT_ORDER.includes(entry.format)) {
+      entry.status !== 'prepared' || !EXPORT_FORMATS_V1.includes(entry.format)) {
       throw new TypeError('Formatos preparados do relatório inválidos ou fora de ordem.');
     }
     return entry.format;
   });
-  const expected = FORMAT_ORDER.filter(format => formats.includes(format));
+  const expected = EXPORT_FORMATS_V1.filter(format => formats.includes(format));
   if ([...REQUIRED_FORMATS].some(format => !formats.includes(format)) ||
     canonicalStringify(formats) !== canonicalStringify(expected)) {
     throw new TypeError('Formatos preparados do relatório duplicados, incompletos ou fora de ordem.');
   }
-  const missing = FORMAT_ORDER.filter(format => !formats.includes(format));
+  const missing = EXPORT_FORMATS_V1.filter(format => !formats.includes(format));
   const missingLimitations = [];
   const generatedAt = model.timestamps?.generatedAt;
   if (typeof generatedAt !== 'string' || new Date(generatedAt).toISOString() !== generatedAt) {
@@ -414,7 +416,7 @@ function preparedArtifactFormats(model) {
   if (formats.includes('csv') && currentCsvUnavailable || formats.includes('pdf') && currentPdfUnavailable) {
     throw new TypeError('Diagnóstico de geração não corresponde aos formatos preparados.');
   }
-  return { formats, missing, missingLimitations, baseName: buildArtifactBaseName(model.finalUrl, generatedAt) };
+  return { formats, missing, missingLimitations, baseName: buildArtifactBaseName(model.auditId, generatedAt) };
 }
 
 function snapshotLatest(value, auditId) {
@@ -462,7 +464,11 @@ async function validateArtifactHashes(artifacts, formats) {
   for (const entry of formats) {
     if (entry.sha256 === null) continue;
     const artifact = artifacts[entry.format];
-    if (artifact === null || artifact === undefined || await sha256Hex(artifact) !== entry.sha256) {
+    const byteSize = typeof artifact === 'string'
+      ? new TextEncoder().encode(artifact).byteLength
+      : artifact?.byteLength;
+    if (artifact === null || artifact === undefined || await sha256Hex(artifact) !== entry.sha256 ||
+      (entry.status === 'complete' && byteSize !== entry.byteSize)) {
       throw new TypeError(`Hash do artefato ${entry.format.toUpperCase()} não corresponde ao resultado.`);
     }
   }

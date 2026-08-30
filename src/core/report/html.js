@@ -47,8 +47,9 @@ const ANNOTATION_MAP_LIMITATION_LABELS = Object.freeze({
 const OUTCOME_PRIORITY = Object.freeze({ failed: 0, cantTell: 1, passed: 2, untested: 3, inapplicable: 4 });
 const IMPACT_PRIORITY = Object.freeze({ critical: 0, serious: 1, moderate: 2, minor: 3 });
 
-export function renderHtmlReport(input) {
+export function renderHtmlReport(input, options = {}) {
   const model = createAuditModel(input);
+  if (options?.reportView !== undefined) return renderReportViewDocument(model, options.reportView);
   const itemById = new Map(model.itemResults.map(item => [item.id, item]));
   const pageById = new Map(model.pages.map(page => [page.pageId, page]));
   const ruleById = new Map(model.ruleResults.map(rule => [rule.ruleId, rule]));
@@ -95,6 +96,42 @@ ${methodologySection(model)}
 <script>${REPORT_SCRIPT}</script>
 </body>
 </html>`;
+}
+
+function renderReportViewDocument(model, view) {
+  if (!view || view.version !== 1 || view.auditId !== model.auditId ||
+    view.modelHash !== model.integrity.canonicalModelHash || !Object.isFrozen(view) ||
+    !Array.isArray(view.matrix) || view.matrix.length !== 146) {
+    throw new TypeError('ReportViewV1 inválida para exportação.');
+  }
+  const csp = [
+    "default-src 'none'", "img-src data:", `style-src '${REPORT_CSS_CSP_HASH}'`,
+    "connect-src 'none'", "object-src 'none'", "frame-src 'none'", "font-src 'none'", "media-src 'none'",
+    "worker-src 'none'", "base-uri 'none'", "form-action 'none'",
+  ].join('; ');
+  const issueCards = group => view.issues[group].map(issue => `<article class="occurrence-card"><h3>${escapeHtml(issue.title)}</h3><p>Resultado consolidado: ${escapeHtml(issue.displayOutcome)}. Resultado original: ${escapeHtml(issue.originalOutcome)}.</p>${issue.occurrences.map(occurrence => `<section class="legal-analysis"><h4>Ocorrência ${escapeHtml(occurrence.occurrenceId)}</h4><p>${escapeHtml(occurrence.justification)}</p>${occurrence.legalReference ? `<p>${escapeHtml(occurrence.legalReference.text)} ${escapeHtml(occurrence.legalReference.qualification)}</p>` : ''}</section>`).join('')}</article>`).join('');
+  const section = (index, body) => `<section id="report-section-${index + 1}" aria-labelledby="report-heading-${index + 1}"><h2 id="report-heading-${index + 1}">${escapeHtml(viewSectionTitle(index))}</h2>${body}</section>`;
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${csp}"><title>Relatório de auditoria — Audita Acessibilidade</title><style>${REPORT_CSS}</style></head><body>${header()}<main id="conteudo"><h1>Relatório de auditoria de acessibilidade</h1><p>Escopo avaliado: ${escapeHtml(view.executive.identity.finalUrl)}. Revisão ${view.modelRevision}.</p>
+${section(0, `<p>Status: ${escapeHtml(view.executive.status)}.</p><ul>${view.executive.limitations.map(value => `<li>${escapeHtml(value)}</li>`).join('')}</ul>`)}
+${section(1, `<p>Cobertura automática: ${escapeHtml(view.executive.coverage.status === 'available' ? view.executive.coverage.percent : 'indisponível')}.</p><p>A cobertura é execução automática; não é nota, certificação ou declaração de conformidade.</p>${['failed','alerts','humanReview','passed'].map(group => `<h3>${escapeHtml(group)}</h3>${issueCards(group)}`).join('')}`)}
+${section(2, issueCards('failed'))}
+${section(3, issueCards('humanReview'))}
+${section(4, `<p>As prévias de anúncio são uma estimativa; não são transcrições literais de tecnologia assistiva.</p>${view.readerMaps.map(map => `<p>Mapa ${escapeHtml(map.evidenceId)}: ${escapeHtml(map.pageId)}.</p>`).join('')}`)}
+${section(5, `<div class="matrix-scroll" role="region" aria-label="Matriz completa dos 146 itens ABNT" tabindex="0"><table><caption>Matriz completa da ABNT NBR 17225</caption><thead><tr><th scope="col">Item</th><th scope="col">Título</th><th scope="col">Classificação</th><th scope="col">Resultado</th><th scope="col">WCAG</th></tr></thead><tbody>${view.matrix.map(row => `<tr><th scope="row">${escapeHtml(row.id)}</th><td>${escapeHtml(row.title)}</td><td>${escapeHtml(row.classification)}</td><td>${escapeHtml(row.outcome)}</td><td>${escapeHtml(row.wcag.map(ref => `${ref.id} ${ref.level}`).join(', '))}</td></tr>`).join('')}</tbody></table></div>`)}
+${section(6, `${view.methodology.caveats.map(value => `<p>${escapeHtml(value)}</p>`).join('')}<p>Integridade: ${escapeHtml(view.modelHash)}.</p><h3>Fontes oficiais</h3><ul>${CONSUMER_ACCESSIBILITY_FIXED_BASIS.sources.map(source => `<li><a href="${escapeHtml(source.url)}">${escapeHtml(source.publisher)} — ${escapeHtml(source.title)}</a></li>`).join('')}</ul><h3>Evidências técnicas e anexos</h3>${view.technicalEvidence.map(evidence => `<p>${escapeHtml(evidence.evidenceId)}: ${escapeHtml(evidence.kind)}.</p>`).join('')}`)}
+</main><footer class="report-footer"><p>Audita Acessibilidade — relatório local da auditoria ${escapeHtml(view.auditId)}.</p></footer></body></html>`;
+}
+
+function viewSectionTitle(index) {
+  return [
+    'Sumário executivo e limitações críticas',
+    'Cobertura e quatro grupos de resultado',
+    'Não conformidades priorizadas',
+    'Revisões humanas pendentes',
+    'Mapas de anúncios',
+    'Matriz completa dos 146 itens',
+    'Metodologia, fontes, integridade, evidências técnicas e anexos',
+  ][index];
 }
 
 function header() {
@@ -262,7 +299,7 @@ function legalAnalysis(occurrence, item, anchor, displayOutcome, decision) {
   const reviewedFailure = occurrence.outcome === 'cantTell' && decision?.answer === 'não conforme';
   if ((!automaticBasis && !reviewedFailure) || (automaticBasis && occurrence.legalAnalysis?.basisRef !== automaticBasis.id)) return '';
   const basis = automaticBasis || CONSUMER_ACCESSIBILITY_FIXED_BASIS;
-  return `<section class="legal-analysis" aria-labelledby="${anchor}-juridico"><h4 id="${anchor}-juridico">${escapeHtml(basis.label)}</h4><p><strong>Referência técnica variável:</strong> ABNT NBR 17225:2025, item ${escapeHtml(item.id)} — ${escapeHtml(item.title)} (${escapeHtml(CLASSIFICATION[item.classification])}).</p><p>${escapeHtml(basis.display)}</p><p>${escapeHtml(basis.qualification)}</p><p><strong>Ressalva ao texto vigente:</strong> consulte a referência ${escapeHtml(basis.currentTextCaveatRef)} antes da qualificação jurídica do caso concreto.</p></section>`;
+  return `<section class="legal-analysis" aria-labelledby="${anchor}-juridico"><h4 id="${anchor}-juridico">${escapeHtml(basis.label)}</h4><p><strong>Referência técnica variável:</strong> ABNT NBR 17225:2025, item ${escapeHtml(item.id)} — ${escapeHtml(item.title)} (${escapeHtml(CLASSIFICATION[item.classification])}).</p><p>${escapeHtml(basis.sentencePrefix)}. ${escapeHtml(basis.qualification)}</p></section>`;
 }
 
 function occurrenceEvidence(occurrence, artifactById, imageByEvidenceId, outcome, occurrenceIndex) {
@@ -384,7 +421,7 @@ function methodologySection(model) {
 <article class="method-card"><h3>Método e ambiente</h3><p>${escapeHtml(model.methodology.name)}. Aprovação automática exige aplicabilidade e expectativas integralmente observadas; itens contextuais permanecem inconclusivos.</p><dl class="meta"><dt>Extensão</dt><dd>${escapeHtml(model.versions.extension)}</dd><dt>Regras</dt><dd>${escapeHtml(model.versions.rules)}</dd><dt>Navegador</dt><dd>${escapeHtml(model.versions.browser)}</dd><dt>Viewport</dt><dd>${escapeHtml(viewportText)}</dd><dt>Regras próprias</dt><dd>${escapeHtml(model.methodology.coreRuleCount)}</dd><dt>Regras suplementares</dt><dd>${escapeHtml(model.methodology.supplementalRuleCount)}</dd><dt>Itens normativos</dt><dd>${escapeHtml(model.methodology.itemCount)}</dd></dl></article>
 <article class="method-card"><h3>Proveniência dos motores</h3><ul class="compact-list">${sources.map(source => `<li>${escapeHtml(source)}</li>`).join('') || '<li>Nenhuma ocorrência de motor registrada.</li>'}</ul><p>axe-core, quando habilitado por gate técnico, é suplementar e não aprova item ABNT por si só.</p></article>
 <article class="method-card"><h3>Limitações e diagnósticos</h3><ul class="compact-list">${materialEntries.map(value => `<li>${escapeHtml(value)}</li>`).join('') || '<li>Nenhuma limitação adicional registrada.</li>'}</ul><p>A ausência de falha automática não comprova conformidade integral.</p></article>
-<article class="method-card"><h3>Fundamentação e fontes</h3><p>Ledger normativo congelado e reproduzível:</p><ul class="compact-list">${sourceLedger}</ul><p><strong>${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.label)}:</strong> ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.display)} ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification)} Ressalva ao texto vigente: ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.currentTextCaveatRef)}.</p></article>
+<article class="method-card"><h3>Fundamentação e fontes</h3><p>Ledger normativo congelado e reproduzível:</p><ul class="compact-list">${sourceLedger}</ul><p><strong>${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.label)}:</strong> ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.sentencePrefix)}. ${escapeHtml(CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification)}</p></article>
 <article class="method-card"><h3>Notas de integridade normativa</h3><p>Informação impressa e normalização adotada permanecem separadas; o relatório não atribui à ABNT errata não localizada.</p><ul class="compact-list">${notes.map(note => `<li><strong>${escapeHtml(note.itemId)}:</strong> impresso “${escapeHtml(note.printed)}”; normalização “${escapeHtml(note.normalized)}”. ${escapeHtml(note.rationale)}</li>`).join('') || '<li>Nenhuma nota editorial registrada.</li>'}</ul></article>
 <article class="method-card"><h3>Manifesto de integridade</h3>${integrityList(model)}<p>SHA-256 permite verificar igualdade dos artefatos, mas não substitui assinatura digital, carimbo certificado ou ata notarial.</p></article>
 </div></section>`;

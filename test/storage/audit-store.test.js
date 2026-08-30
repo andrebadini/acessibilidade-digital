@@ -78,6 +78,54 @@ test('atomically creates a terminal model, checkpoint companion, revision and la
   });
 });
 
+test('advances delivery without changing the report revision and re-reads exact four-format identity', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+  const store = factory();
+  const auditId = `receipt-identity-${backend.toLowerCase()}`;
+  const { model, checkpoint, latest } = await terminalFixture(auditId);
+  await store.commitAuditWithCheckpointIfAbsent(auditId, model, checkpoint, latest,
+    { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false });
+  let snapshot = await store.getAuditSnapshot(auditId);
+  const lease = await store.acquireExportLease(auditId, snapshot.capability,
+    { ownerId: `export:${auditId}:pending`, now: '2026-08-29T12:00:01.000Z' });
+  assert.equal(lease.exportAttempt, 1);
+  const ownerId = `export:${auditId}:1`;
+  await store.claimExportLease(auditId, snapshot.capability,
+    { ownerId, exportAttempt: 1, now: '2026-08-29T12:00:02.000Z' });
+  await store.beginExportDelivery(auditId, snapshot.capability,
+    { ownerId, exportAttempt: 1, now: '2026-08-29T12:00:03.000Z' });
+  const delivering = await store.getAuditSnapshot(auditId);
+  assert.equal(delivering.revision, snapshot.revision);
+  const unchangedRevision = await store.getReportRevision(auditId);
+  assert.equal(unchangedRevision.modelRevision, snapshot.revision);
+  assert.equal(unchangedRevision.modelHash, model.integrity.canonicalModelHash);
+  const identity = {
+    html: ['text/html;charset=utf-8', 11, '1'.repeat(64)],
+    pdf: ['application/pdf', 12, '2'.repeat(64)],
+    csv: ['text/csv;charset=utf-8', 13, '3'.repeat(64)],
+    json: ['application/json;charset=utf-8', 14, '4'.repeat(64)],
+  };
+  for (const [index, format] of ['html', 'pdf', 'csv', 'json'].entries()) {
+    const [mimeType, byteSize, sha256] = identity[format];
+    await store.recordExportDelivery(auditId, delivering.capability, {
+      ownerId, exportAttempt: 1, now: `2026-08-29T12:00:04.${String(index).padStart(3, '0')}Z`,
+      format, filename: `${auditId}-20260829T120000000Z.${format}`, state: 'terminal', downloadId: index + 10,
+      mimeType, byteSize, sha256,
+    });
+  }
+  const receipt = await store.getExportReceipt(auditId);
+  assert.deepEqual(Object.keys(receipt), ['version', 'auditId', 'modelRevision', 'modelHash', 'attemptId', 'status', 'formats']);
+  assert.equal(receipt.attemptId, '1');
+  assert.equal(receipt.modelRevision, delivering.revision);
+  assert.deepEqual(receipt.formats.map(row => row.format), ['html', 'pdf', 'csv', 'json']);
+  assert.deepEqual(receipt.formats.map(row => [row.mimeType, row.byteSize, row.sha256, row.downloadId, row.state]), [
+    [...identity.html, 10, 'complete'], [...identity.pdf, 11, 'complete'],
+    [...identity.csv, 12, 'complete'], [...identity.json, 13, 'complete'],
+  ]);
+  assert.equal(Object.isFrozen(receipt.formats), true);
+  });
+});
+
 test('terminal commit rejects hostile options and cryptographic or checkpoint corruption without mutation', async t => {
   for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
     const store = factory();

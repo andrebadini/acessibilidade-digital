@@ -1,0 +1,284 @@
+import { REVIEW_SURFACE, deriveTrustedExtensionContext } from './target-capabilities.js';
+
+const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
+const CAPABILITY = /^[A-Za-z0-9_-]{22}$/u;
+const PATH = '/src/review/index.html';
+const TTL_MS = 30 * 60 * 1000;
+const CONNECT_TIMEOUT_MS = 2_000;
+const SHARED_QUEUES = new WeakMap();
+
+const launchKey = auditId => `audita:report-launch:v1:${auditId}`;
+const indexKey = tabId => `audita:report-launch-tab:v1:${tabId}`;
+const consumerKey = id => `audita:report-consumer:v1:${id}`;
+
+function fail(code) { return Object.freeze({ ok: false, code }); }
+function safeId(value) { return Number.isSafeInteger(value) && value >= 0; }
+function freeze(value, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object' || seen.has(value)) return value;
+  seen.add(value); for (const child of Object.values(value)) freeze(child, seen); return Object.freeze(value);
+}
+function exact(value, keys) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
+    const own = Reflect.ownKeys(value);
+    if (own.length !== keys.length || own.some(key => typeof key !== 'string' || !keys.includes(key))) return null;
+    const copy = {};
+    for (const key of keys) { const descriptor = Object.getOwnPropertyDescriptor(value, key); if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null; copy[key] = descriptor.value; }
+    return copy;
+  } catch { return null; }
+}
+function launchRecord(value) {
+  const row = exact(value, ['version', 'auditId', 'tabId', 'windowId', 'path', 'documentId', 'state', 'issuedAt', 'expiresAt']);
+  if (!row || row.version !== 1 || !AUDIT_ID.test(row.auditId ?? '') || !safeId(row.tabId) || !safeId(row.windowId) ||
+    row.path !== PATH || !['allocated', 'awaiting-connection', 'connected', 'revoked'].includes(row.state) ||
+    !Number.isSafeInteger(row.issuedAt) || !Number.isSafeInteger(row.expiresAt) || row.issuedAt < 0 || row.expiresAt <= row.issuedAt ||
+    (['allocated', 'awaiting-connection'].includes(row.state) && row.documentId !== null) ||
+    (row.state === 'connected' && (typeof row.documentId !== 'string' || !row.documentId))) return null;
+  if (row.state === 'revoked' && row.documentId !== null && (typeof row.documentId !== 'string' || !row.documentId)) return null;
+  return freeze(row);
+}
+function consumerRecord(value) {
+  const row = exact(value, ['version', 'sessionCapabilityId', 'auditId', 'tabId', 'windowId', 'documentId', 'intents', 'state', 'issuedAt', 'expiresAt']);
+  if (!row || row.version !== 1 || !CAPABILITY.test(row.sessionCapabilityId ?? '') || !AUDIT_ID.test(row.auditId ?? '') ||
+    !safeId(row.tabId) || !safeId(row.windowId) || typeof row.documentId !== 'string' || !row.documentId ||
+    !Array.isArray(row.intents) || row.intents.length !== 1 || row.intents[0] !== 'export' ||
+    !['active', 'revoked'].includes(row.state) || !Number.isSafeInteger(row.issuedAt) || !Number.isSafeInteger(row.expiresAt)) return null;
+  return freeze(row);
+}
+function readEpoch(fn) { const value = fn(); if (!Number.isSafeInteger(value) || value < 0) throw new Error('REPORT_CLOCK_DENIED'); return value; }
+function canonicalUrl(chromeApi, auditId) {
+  const url = new URL(chromeApi.runtime.getURL('src/review/index.html'));
+  url.searchParams.set('auditId', auditId);
+  if (url.pathname !== PATH || url.hash || [...url.searchParams.keys()].length !== 1 || url.searchParams.getAll('auditId').length !== 1) throw new Error();
+  return url.href;
+}
+function opaqueId(randomBytes) {
+  const bytes = randomBytes(16);
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== 16) throw new Error();
+  let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
+  const id = btoa(binary).replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=+$/gu, '');
+  if (!CAPABILITY.test(id)) throw new Error(); return id;
+}
+async function stored(area, key, parse) {
+  const envelope = await area.get(key);
+  const root = exact(envelope, Object.hasOwn(envelope ?? {}, key) ? [key] : []);
+  return root && Object.hasOwn(root, key) ? parse(root[key]) : null;
+}
+async function writeConfirmed(area, key, value, parse) {
+  await area.set({ [key]: value });
+  const confirmed = await stored(area, key, parse);
+  return confirmed && JSON.stringify(confirmed) === JSON.stringify(value) ? confirmed : null;
+}
+function queuesFor(area) { let map = SHARED_QUEUES.get(area); if (!map) { map = new Map(); SHARED_QUEUES.set(area, map); } return map; }
+function serialize(area, key, task) {
+  const queues = queuesFor(area); const prior = queues.get(key) ?? Promise.resolve();
+  const operation = prior.then(task, task); const tail = operation.then(() => undefined, () => undefined); queues.set(key, tail);
+  return operation.finally(() => { if (queues.get(key) === tail) queues.delete(key); });
+}
+async function tabCall(receiver, method, ...args) {
+  try { return await receiver[method](...args); } catch { throw new Error('REPORT_OPEN_FAILED'); }
+}
+
+export function createReportLaunchAuthority(raw) {
+  const input = exact(raw, ['chromeApi', 'sessionArea', 'epochNow', 'randomBytes']);
+  if (!input || typeof input.chromeApi?.runtime?.id !== 'string' || typeof input.chromeApi.runtime.getURL !== 'function' ||
+    typeof input.chromeApi.runtime.getContexts !== 'function' || typeof input.chromeApi?.tabs?.create !== 'function' ||
+    typeof input.chromeApi.tabs.update !== 'function' || typeof input.chromeApi.tabs.get !== 'function' ||
+    typeof input.chromeApi.tabs.remove !== 'function' || typeof input.sessionArea?.get !== 'function' ||
+    typeof input.sessionArea.set !== 'function' || typeof input.epochNow !== 'function' || typeof input.randomBytes !== 'function') {
+    throw new TypeError('REPORT_LAUNCH_INVALID');
+  }
+
+  const getLaunch = auditId => AUDIT_ID.test(auditId ?? '') ? stored(input.sessionArea, launchKey(auditId), launchRecord) : Promise.resolve(null);
+  const getConsumer = id => CAPABILITY.test(id ?? '') ? stored(input.sessionArea, consumerKey(id), consumerRecord) : Promise.resolve(null);
+
+  async function focusConnected(record) {
+    const now = readEpoch(input.epochNow);
+    if (record.expiresAt <= now || record.state !== 'connected') return false;
+    let tab; let contexts;
+    try {
+      tab = await input.chromeApi.tabs.get(record.tabId);
+      contexts = await input.chromeApi.runtime.getContexts({ documentIds: [record.documentId] });
+    } catch { return false; }
+    const expected = canonicalUrl(input.chromeApi, record.auditId);
+    const exactContext = Array.isArray(contexts) && contexts.filter(context => context?.contextType === 'TAB' &&
+      context.documentId === record.documentId && context.documentUrl === expected && context.tabId === record.tabId && context.windowId === record.windowId).length === 1;
+    if (tab?.id !== record.tabId || tab.windowId !== record.windowId || tab.url !== expected || !exactContext) return false;
+    try {
+      await input.chromeApi.tabs.update(record.tabId, { active: true });
+      if (typeof input.chromeApi.windows?.update === 'function') await input.chromeApi.windows.update(record.windowId, { focused: true });
+      return true;
+    } catch { return false; }
+  }
+
+  async function setupOpen(auditId, windowId) {
+    const existing = await getLaunch(auditId);
+    if (existing && existing.state === 'connected' && await focusConnected(existing)) return { existing, created: false };
+    if (existing && ['allocated', 'awaiting-connection'].includes(existing.state) && existing.expiresAt > readEpoch(input.epochNow)) {
+      return { existing, created: false };
+    }
+    const tab = await tabCall(input.chromeApi.tabs, 'create', { url: 'about:blank', active: true, windowId });
+    if (!safeId(tab?.id) || tab.windowId !== windowId) throw new Error('REPORT_OPEN_FAILED');
+    const now = readEpoch(input.epochNow);
+    const allocated = freeze({ version: 1, auditId, tabId: tab.id, windowId, path: PATH, documentId: null, state: 'allocated', issuedAt: now, expiresAt: now + TTL_MS });
+    const persisted = await writeConfirmed(input.sessionArea, launchKey(auditId), allocated, launchRecord);
+    if (!persisted) { try { await input.chromeApi.tabs.remove(tab.id); } catch {} throw new Error('REPORT_OPEN_FAILED'); }
+    await input.sessionArea.set({ [indexKey(tab.id)]: auditId });
+    try { await tabCall(input.chromeApi.tabs, 'update', tab.id, { url: canonicalUrl(input.chromeApi, auditId), active: true }); }
+    catch (error) {
+      const current = await getLaunch(auditId);
+      if (current?.tabId === tab.id && current.state === 'allocated') {
+        await writeConfirmed(input.sessionArea, launchKey(auditId), freeze({ ...current, state: 'revoked' }), launchRecord);
+        try { await input.chromeApi.tabs.remove(tab.id); } catch {}
+      }
+      throw error;
+    }
+    const current = await getLaunch(auditId);
+    if (!current || current.tabId !== tab.id || current.state !== 'allocated') throw new Error('REPORT_OPEN_FAILED');
+    const awaiting = await writeConfirmed(input.sessionArea, launchKey(auditId), freeze({ ...current, state: 'awaiting-connection' }), launchRecord);
+    if (!awaiting) throw new Error('REPORT_OPEN_FAILED');
+    return { existing: awaiting, created: true };
+  }
+
+  async function waitForConnection(auditId) {
+    const deadline = readEpoch(input.epochNow) + CONNECT_TIMEOUT_MS;
+    // A real monotonic clock may be fixed in deterministic tests, so also bound attempts.
+    for (let attempt = 0; attempt < 210; attempt += 1) {
+      const current = await getLaunch(auditId);
+      if (current?.state === 'connected') return current;
+      if (!current || current.state === 'revoked' || current.expiresAt <= readEpoch(input.epochNow)) throw new Error('REPORT_CONNECT_DENIED');
+      if (readEpoch(input.epochNow) > deadline) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error('REPORT_CONNECT_TIMEOUT');
+  }
+
+  async function openRegisteredReport({ auditId, windowId } = {}) {
+    if (!AUDIT_ID.test(auditId ?? '') || !safeId(windowId)) throw new Error('REPORT_OPEN_FAILED');
+    const setup = await serialize(input.sessionArea, auditId, () => setupOpen(auditId, windowId));
+    if (setup.existing.state === 'connected') return freeze({ ok: true, auditId, state: 'connected', tabId: setup.existing.tabId });
+    const connected = await waitForConnection(auditId);
+    return freeze({ ok: true, auditId, state: 'connected', tabId: connected.tabId });
+  }
+
+  async function connect({ auditId, sender } = {}) {
+    if (!AUDIT_ID.test(auditId ?? '')) return fail('REPORT_CONNECT_DENIED');
+    let context;
+    try { context = await deriveTrustedExtensionContext({ sender, chromeApi: input.chromeApi, surface: REVIEW_SURFACE }); }
+    catch { return fail('CONTEXT_DENIED'); }
+    return serialize(input.sessionArea, auditId, async () => {
+      const launch = await getLaunch(auditId);
+      const now = readEpoch(input.epochNow);
+      if (!launch || !['allocated', 'awaiting-connection'].includes(launch.state) || launch.expiresAt <= now ||
+        context.tabId !== launch.tabId || context.windowId !== launch.windowId || context.documentUrl !== canonicalUrl(input.chromeApi, auditId)) {
+        return fail('REPORT_CONNECT_DENIED');
+      }
+      const sessionCapabilityId = opaqueId(input.randomBytes);
+      const consumer = freeze({
+        version: 1, sessionCapabilityId, auditId, tabId: launch.tabId, windowId: launch.windowId,
+        documentId: sender.documentId, intents: ['export'], state: 'active', issuedAt: now, expiresAt: launch.expiresAt,
+      });
+      if (!await writeConfirmed(input.sessionArea, consumerKey(sessionCapabilityId), consumer, consumerRecord)) return fail('REPORT_CONNECT_DENIED');
+      const current = await getLaunch(auditId);
+      if (!current || current.state !== launch.state || current.tabId !== launch.tabId) {
+        await writeConfirmed(input.sessionArea, consumerKey(sessionCapabilityId), freeze({ ...consumer, state: 'revoked' }), consumerRecord);
+        return fail('REPORT_CONNECT_DENIED');
+      }
+      const connected = await writeConfirmed(input.sessionArea, launchKey(auditId), freeze({ ...launch, documentId: sender.documentId, state: 'connected' }), launchRecord);
+      if (!connected) return fail('REPORT_CONNECT_DENIED');
+      return freeze({ ok: true, auditId, sessionCapabilityId, state: 'view-only' });
+    });
+  }
+
+  async function authorizeExport({ sessionCapabilityId, auditId, sender } = {}) {
+    if (!CAPABILITY.test(sessionCapabilityId ?? '') || !AUDIT_ID.test(auditId ?? '')) return fail('REPORT_EXPORT_DENIED');
+    let context;
+    try { context = await deriveTrustedExtensionContext({ sender, chromeApi: input.chromeApi, surface: REVIEW_SURFACE }); }
+    catch { return fail('CONTEXT_DENIED'); }
+    const [consumer, launch] = await Promise.all([getConsumer(sessionCapabilityId), getLaunch(auditId)]);
+    const now = readEpoch(input.epochNow);
+    if (!consumer || consumer.auditId !== auditId || consumer.state !== 'active' || consumer.expiresAt <= now ||
+      consumer.documentId !== sender.documentId || consumer.tabId !== context.tabId || consumer.windowId !== context.windowId ||
+      !consumer.intents.includes('export') || !launch || launch.state !== 'connected' || launch.documentId !== consumer.documentId) {
+      return fail('REPORT_EXPORT_DENIED');
+    }
+    return freeze({ ok: true, auditId, windowId: consumer.windowId, sessionCapabilityId });
+  }
+
+  async function validateConsumer(sessionCapabilityId, auditId) {
+    if (!CAPABILITY.test(sessionCapabilityId ?? '') || !AUDIT_ID.test(auditId ?? '')) return false;
+    const [consumer, launch] = await Promise.all([getConsumer(sessionCapabilityId), getLaunch(auditId)]);
+    const now = readEpoch(input.epochNow);
+    return Boolean(consumer && consumer.auditId === auditId && consumer.state === 'active' &&
+      consumer.expiresAt > now && consumer.intents.includes('export') && launch?.state === 'connected' &&
+      launch.documentId === consumer.documentId && launch.tabId === consumer.tabId && launch.windowId === consumer.windowId);
+  }
+
+  async function revokeLaunch(launch) {
+    if (!launch || launch.state === 'revoked') return;
+    if (launch.documentId) {
+      const envelope = await input.sessionArea.get(null);
+      for (const [key, value] of Object.entries(envelope ?? {})) {
+        if (!key.startsWith('audita:report-consumer:v1:')) continue;
+        const consumer = consumerRecord(value);
+        if (consumer?.auditId === launch.auditId && consumer.state === 'active') {
+          await writeConfirmed(input.sessionArea, key, freeze({ ...consumer, state: 'revoked' }), consumerRecord);
+        }
+      }
+    }
+    await writeConfirmed(input.sessionArea, launchKey(launch.auditId), freeze({ ...launch, state: 'revoked' }), launchRecord);
+  }
+
+  async function auditIdForTab(tabId) {
+    const envelope = await input.sessionArea.get(indexKey(tabId));
+    const value = envelope?.[indexKey(tabId)];
+    return AUDIT_ID.test(value ?? '') ? value : null;
+  }
+
+  async function handleTabUpdated(tabId, changeInfo) {
+    if (!safeId(tabId)) return false;
+    const auditId = await auditIdForTab(tabId); if (!auditId) return false;
+    return serialize(input.sessionArea, auditId, async () => {
+      const launch = await getLaunch(auditId); if (!launch || launch.tabId !== tabId || launch.state === 'revoked') return false;
+      let url = typeof changeInfo?.url === 'string' ? changeInfo.url : null;
+      if (!url && changeInfo?.status === 'loading') { try { url = (await input.chromeApi.tabs.get(tabId))?.url ?? null; } catch { url = null; } }
+      if (url === canonicalUrl(input.chromeApi, auditId) && launch.state === 'connected') {
+        await revokeLaunchConsumers(launch.auditId);
+        const current = await getLaunch(auditId);
+        await writeConfirmed(input.sessionArea, launchKey(auditId), freeze({ ...current, documentId: null, state: 'awaiting-connection' }), launchRecord);
+        return true;
+      }
+      if (url && url !== canonicalUrl(input.chromeApi, auditId)) { await revokeLaunch(launch); return true; }
+      return false;
+    });
+  }
+
+  async function revokeLaunchConsumers(auditId) {
+    const envelope = await input.sessionArea.get(null);
+    for (const [key, value] of Object.entries(envelope ?? {})) {
+      const consumer = key.startsWith('audita:report-consumer:v1:') ? consumerRecord(value) : null;
+      if (consumer?.auditId === auditId && consumer.state === 'active') {
+        await writeConfirmed(input.sessionArea, key, freeze({ ...consumer, state: 'revoked' }), consumerRecord);
+      }
+    }
+  }
+
+  async function handleTabRemoved(tabId) {
+    const auditId = safeId(tabId) ? await auditIdForTab(tabId) : null; if (!auditId) return false;
+    return serialize(input.sessionArea, auditId, async () => { const launch = await getLaunch(auditId); await revokeLaunch(launch); return true; });
+  }
+  async function handleWindowRemoved(windowId) {
+    if (!safeId(windowId)) return false;
+    const envelope = await input.sessionArea.get(null); let changed = false;
+    for (const [key, value] of Object.entries(envelope ?? {})) {
+      const launch = key.startsWith('audita:report-launch:v1:') ? launchRecord(value) : null;
+      if (launch?.windowId === windowId && launch.state !== 'revoked') { await serialize(input.sessionArea, launch.auditId, () => revokeLaunch(launch)); changed = true; }
+    }
+    return changed;
+  }
+
+  return freeze({
+    openRegisteredReport, connect, authorizeExport, validateConsumer, getLaunch, getConsumer,
+    handleTabUpdated, handleTabRemoved, handleWindowRemoved,
+  });
+}

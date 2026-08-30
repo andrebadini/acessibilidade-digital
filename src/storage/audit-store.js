@@ -13,6 +13,7 @@ import { canonicalStringify } from '../core/report/canonical-json.js';
 import { verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
 import { applyReviewDecisions } from '../core/review/decisions.js';
 import { validateExecutionCheckpoint } from '../background/execution-checkpoint.js';
+import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 
 const DB_NAME = 'audita-mt';
 const STORE_NAME = 'audits';
@@ -27,7 +28,7 @@ const RETENTION_CLEANUP_CURSOR_KEY = '__audit_retention_cleanup__';
 const DEFAULT_EXPORT_LEASE_TTL_MS = 2 * 60 * 1000;
 const MAX_EXPORT_LEASE_TTL_MS = 10 * 60 * 1000;
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
-const EXPORT_FORMATS = new Set(['html', 'json', 'csv', 'pdf']);
+const EXPORT_FORMATS = new Set(EXPORT_FORMATS_V1);
 const TERMINAL_AUDIT_STATUSES = new Set(['complete', 'partial', 'failed', 'cancelled']);
 const INTERRUPTIBLE_AUDIT_STATUSES = new Set(['idle', 'validating', 'queued', 'running', 'cancelling']);
 const AUDIT_SNAPSHOT_CAPABILITIES = new WeakMap();
@@ -447,12 +448,21 @@ function canonicalDeliveryOptions(options, outcome = false) {
     }
     return { ownerId, exportAttempt, ...instant, format, filename, downloadId, outcome: options.outcome };
   }
+  const identityProvided = options?.mimeType !== undefined || options?.byteSize !== undefined || options?.sha256 !== undefined;
+  let identity = {};
+  if (identityProvided) {
+    if (typeof options.mimeType !== 'string' || options.mimeType.length < 3 || options.mimeType.length > 120 ||
+      !Number.isSafeInteger(options.byteSize) || options.byteSize < 0 || !/^[a-f0-9]{64}$/u.test(options.sha256 ?? '')) {
+      throw new TypeError('Identidade persistente do artefato inválida.');
+    }
+    identity = { mimeType: options.mimeType, byteSize: options.byteSize, sha256: options.sha256 };
+  }
   const state = options?.state;
   if (!['starting', 'in-flight', 'terminal'].includes(state) ||
     (state !== 'starting' && downloadId === undefined)) {
     throw new TypeError('Estado do journal de entrega inválido.');
   }
-  return { ownerId, exportAttempt, ...instant, format, filename, downloadId, state };
+  return { ownerId, exportAttempt, ...instant, format, filename, downloadId, state, ...identity };
 }
 
 function canonicalDeliveryJournal(value, auditId) {
@@ -466,7 +476,9 @@ function canonicalDeliveryJournal(value, auditId) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new TypeError('Journal persistente de entrega inválido.');
     const keys = Object.keys(raw).sort();
     const hasId = Object.hasOwn(raw, 'downloadId');
-    const expected = ['exportAttempt', 'filename', 'format', 'ownerId', 'recordedAt', 'state', 'updatedAt', ...(hasId ? ['downloadId'] : [])].sort();
+    const hasIdentity = ['mimeType', 'byteSize', 'sha256'].every(key => Object.hasOwn(raw, key));
+    const expected = ['exportAttempt', 'filename', 'format', 'ownerId', 'recordedAt', 'state', 'updatedAt', ...(hasId ? ['downloadId'] : []),
+      ...(hasIdentity ? ['mimeType', 'byteSize', 'sha256'] : [])].sort();
     if (JSON.stringify(keys) !== JSON.stringify(expected) ||
       !['starting', 'in-flight', 'terminal', 'cleanup-failed'].includes(raw.state)) {
       throw new TypeError('Journal persistente de entrega inválido.');
@@ -490,6 +502,7 @@ function canonicalDeliveryJournal(value, auditId) {
       format: canonical.format,
       filename: canonical.filename,
       ...(hasId ? { downloadId: canonical.downloadId } : {}),
+      ...(hasIdentity ? { mimeType: canonical.mimeType, byteSize: canonical.byteSize, sha256: canonical.sha256 } : {}),
       recordedAt: raw.recordedAt,
       updatedAt: raw.updatedAt,
     };
@@ -498,6 +511,22 @@ function canonicalDeliveryJournal(value, auditId) {
 
 function deliveryJournalRecord(auditId, entries) {
   return { schemaVersion: 1, auditId, entries: storageClone(entries) };
+}
+
+function exportReceiptFromRevision(reportRevision, entries) {
+  if (!reportRevision || !Array.isArray(entries) || entries.length !== EXPORT_FORMATS_V1.length) return null;
+  const formats = EXPORT_FORMATS_V1.map(format => entries.find(entry => entry.format === format));
+  if (formats.some(entry => !entry || entry.state !== 'terminal' || !Number.isSafeInteger(entry.downloadId) || entry.downloadId < 0 ||
+    typeof entry.mimeType !== 'string' || !Number.isSafeInteger(entry.byteSize) || entry.byteSize < 0 || !/^[a-f0-9]{64}$/u.test(entry.sha256 ?? ''))) return null;
+  const ownerId = formats[0].ownerId;
+  const exportAttempt = formats[0].exportAttempt;
+  if (formats.some(entry => entry.ownerId !== ownerId || entry.exportAttempt !== exportAttempt)) return null;
+  return freezeStored({
+    version: 1, auditId: reportRevision.auditId, modelRevision: reportRevision.modelRevision,
+    modelHash: reportRevision.modelHash, attemptId: String(exportAttempt), status: 'complete',
+    formats: formats.map(entry => ({ format: entry.format, mimeType: entry.mimeType, byteSize: entry.byteSize,
+      sha256: entry.sha256, downloadId: entry.downloadId, state: 'complete' })),
+  });
 }
 
 function pendingCleanupLatest(latest, entries) {
@@ -533,6 +562,8 @@ function updateDeliveryEntries(entries, options) {
     format: options.format,
     filename: options.filename,
     ...(options.downloadId === undefined ? (previous?.downloadId === undefined ? {} : { downloadId: previous.downloadId }) : { downloadId: options.downloadId }),
+    ...(options.mimeType === undefined ? (previous?.mimeType === undefined ? {} : { mimeType: previous.mimeType, byteSize: previous.byteSize, sha256: previous.sha256 }) :
+      { mimeType: options.mimeType, byteSize: options.byteSize, sha256: options.sha256 }),
     recordedAt: previous?.recordedAt ?? options.now,
     updatedAt,
   };
@@ -844,7 +875,10 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       initial.get(exportAttemptKey(key)), initial.get(LATEST_KEY), key,
     );
     const deliveryEntries = canonicalDeliveryJournal(initial.get(exportDeliveryKey(key)), key);
-    const lease = exportLeaseRecord(key, { ...normalized, exportAttempt });
+    const ownerId = normalized.ownerId === `export:${key}:pending`
+      ? `export:${key}:${exportAttempt}`
+      : normalized.ownerId;
+    const lease = exportLeaseRecord(key, { ...normalized, ownerId, exportAttempt });
     initial.set(exportLeaseKey(key), lease);
     initial.set(exportAttemptKey(key), exportAttempt);
     if (normalized.latestState !== undefined) {
@@ -876,6 +910,28 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       ));
     }
     return { claimed: true, revision, exportAttempt: existing.exportAttempt, expiresAt: lease.expiresAt };
+  };
+  const beginExportDelivery = (id, snapshotCapability, options) => {
+    const key = validId(id);
+    const revision = capabilityRevision(snapshotCapability, owner, key);
+    const currentModel = currentAudit(key);
+    const currentRevision = storedRevision(initial.get(revisionKey(key)));
+    if (currentModel === undefined || currentRevision !== revision) throw new AuditRevisionConflictError();
+    const normalized = canonicalLeaseOptions({ ...options, phase: 'delivering' }, revision, 'delivering');
+    const existing = activeExportLease(initial.get(exportLeaseKey(key)), key, revision, normalized.nowMs);
+    if (!existing || existing.ownerId !== normalized.ownerId || existing.phase !== 'running' ||
+      (normalized.exportAttempt !== undefined && normalized.exportAttempt !== existing.exportAttempt)) {
+      throw new AuditExportLeaseConflictError();
+    }
+    const deliveryEntries = canonicalDeliveryJournal(initial.get(exportDeliveryKey(key)), key);
+    const lease = exportLeaseRecord(key, {
+      ...monotonicLeaseTransition(normalized, existing), exportAttempt: existing.exportAttempt,
+    }, existing.acquiredAt);
+    initial.set(exportLeaseKey(key), lease);
+    if (normalized.latestState !== undefined) initial.set(LATEST_KEY, pendingCleanupLatest(
+      { ...normalized.latestState, exportAttempt: existing.exportAttempt }, deliveryEntries,
+    ));
+    return { delivering: true, revision, exportAttempt: existing.exportAttempt, expiresAt: lease.expiresAt };
   };
   const commitAuditIfRevisionWithExportLease = (id, model, latestState, snapshotCapability, options) => {
     const key = validId(id);
@@ -1142,6 +1198,9 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     async claimExportLease(id, snapshotCapability, options) {
       return claimExportLease(id, snapshotCapability, options);
     },
+    async beginExportDelivery(id, snapshotCapability, options) {
+      return beginExportDelivery(id, snapshotCapability, options);
+    },
     async commitAuditIfRevisionWithExportLease(id, model, latestState, snapshotCapability, options) {
       return commitAuditIfRevisionWithExportLease(id, model, latestState, snapshotCapability, options);
     },
@@ -1155,6 +1214,10 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     },
     async resolveExportDelivery(id, options) { return resolveExportDelivery(id, options); },
     async getExportDeliveryJournal(id) { return storageClone(getExportDeliveryJournal(id)); },
+    async getExportReceipt(id) {
+      const [revision, entries] = await Promise.all([getReportRevision(id), Promise.resolve(getExportDeliveryJournal(id))]);
+      return exportReceiptFromRevision(revision, entries);
+    },
     async getAuditRetention(id) {
       const key = validId(id);
       const value = retention.get(key);
@@ -1268,6 +1331,7 @@ function createUnavailableAuditStore() {
     commitAuditReviewIfRevision: unavailable,
     acquireExportLease: unavailable,
     claimExportLease: unavailable,
+    beginExportDelivery: unavailable,
     commitAuditIfRevisionWithExportLease: unavailable,
     releaseExportLease: unavailable,
     getExportLeaseState: unavailable,
@@ -1275,6 +1339,7 @@ function createUnavailableAuditStore() {
     recordExportDelivery: unavailable,
     resolveExportDelivery: unavailable,
     getExportDeliveryJournal: unavailable,
+    getExportReceipt: unavailable,
     getAuditRetention: unavailable,
     setRetentionIntent: unavailable,
     cleanupExpiredAudits: unavailable,
@@ -1658,7 +1723,10 @@ export function createAuditStore(options = {}) {
           finish(reject, error);
           return;
         }
-        const lease = exportLeaseRecord(key, { ...normalized, exportAttempt });
+        const ownerId = normalized.ownerId === `export:${key}:pending`
+          ? `export:${key}:${exportAttempt}`
+          : normalized.ownerId;
+        const lease = exportLeaseRecord(key, { ...normalized, ownerId, exportAttempt });
         store.put(lease, exportLeaseKey(key));
         store.put(exportAttempt, exportAttemptKey(key));
         if (normalized.latestState !== undefined) {
@@ -1686,15 +1754,17 @@ export function createAuditStore(options = {}) {
     });
   };
 
-  const mutateWithExportLease = async (id, model, latestState, snapshotCapability, options, claimOnly = false) => {
+  const mutateWithExportLease = async (id, model, latestState, snapshotCapability, options, mode = 'commit') => {
+    const claimOnly = mode === 'claim';
+    const transitionOnly = mode === 'delivery';
     const key = validId(id);
     const expected = capabilityRevision(snapshotCapability, owner, key);
     const normalized = canonicalLeaseOptions(
-      claimOnly ? { ...options, phase: 'running' } : options,
+      claimOnly ? { ...options, phase: 'running' } : transitionOnly ? { ...options, phase: 'delivering' } : options,
       expected,
       claimOnly ? 'running' : 'delivering',
     );
-    const modelClone = claimOnly ? null : storageClone(materializeCanonicalAuditModel(key, model));
+    const modelClone = claimOnly || transitionOnly ? null : storageClone(materializeCanonicalAuditModel(key, model));
     const latestClone = latestState === undefined ? undefined : storageClone(latestState);
     const db = await open();
     return new Promise((resolve, reject) => {
@@ -1740,6 +1810,8 @@ export function createAuditStore(options = {}) {
         const attemptMatches = normalized.exportAttempt === undefined || normalized.exportAttempt === existing?.exportAttempt;
         const allowed = claimOnly
           ? attemptMatches && existing?.ownerId === normalized.ownerId && existing.phase === 'queued'
+          : transitionOnly
+            ? attemptMatches && existing?.ownerId === normalized.ownerId && existing.phase === 'running'
           : attemptMatches && existing?.ownerId === normalized.ownerId && (normalized.release
               ? ['queued', 'running', 'delivering'].includes(existing.phase)
               : existing.phase === 'running' && normalized.phase === 'delivering');
@@ -1774,6 +1846,21 @@ export function createAuditStore(options = {}) {
           }
           result = {
             claimed: true, revision, exportAttempt: existing.exportAttempt,
+            expiresAt: lease.expiresAt,
+          };
+          return;
+        }
+        if (transitionOnly) {
+          const lease = exportLeaseRecord(key, {
+            ...monotonicLeaseTransition(normalized, existing),
+            exportAttempt: existing.exportAttempt,
+          }, existing.acquiredAt);
+          store.put(lease, exportLeaseKey(key));
+          if (latestClone !== undefined) store.put(pendingCleanupLatest(
+            { ...latestClone, exportAttempt: existing.exportAttempt }, deliveryEntries,
+          ), LATEST_KEY);
+          result = {
+            delivering: true, revision, exportAttempt: existing.exportAttempt,
             expiresAt: lease.expiresAt,
           };
           return;
@@ -2615,7 +2702,10 @@ export function createAuditStore(options = {}) {
     },
     acquireExportLease,
     claimExportLease(id, snapshotCapability, options) {
-      return mutateWithExportLease(id, null, options?.latestState, snapshotCapability, options, true);
+      return mutateWithExportLease(id, null, options?.latestState, snapshotCapability, options, 'claim');
+    },
+    beginExportDelivery(id, snapshotCapability, options) {
+      return mutateWithExportLease(id, null, options?.latestState, snapshotCapability, options, 'delivery');
     },
     commitAuditIfRevisionWithExportLease(id, model, latestState, snapshotCapability, options) {
       return mutateWithExportLease(id, model, latestState, snapshotCapability, options, false);
@@ -2626,6 +2716,10 @@ export function createAuditStore(options = {}) {
     recordExportDelivery,
     resolveExportDelivery,
     getExportDeliveryJournal,
+    async getExportReceipt(id) {
+      const [revision, entries] = await Promise.all([getReportRevision(id), getExportDeliveryJournal(id)]);
+      return exportReceiptFromRevision(revision, entries);
+    },
     getAuditRetention,
     setRetentionIntent,
     cleanupExpiredAudits,

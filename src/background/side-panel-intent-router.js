@@ -9,8 +9,9 @@ import { parseWorkerMessage } from './worker-protocol.js';
 const FACTORY_KEYS = Object.freeze([
   'chromeApi', 'authority', 'auditStarter', 'panelCoordinator', 'chromeAdapter',
   'readReportRevision', 'buildPanelResultBundle', 'revokeViewOnly',
-  'epochNow', 'modelNow', 'createAuditId',
+  'epochNow', 'modelNow', 'createAuditId', 'reportLaunch', 'exportLaunch',
 ]);
+const LEGACY_FACTORY_KEYS = Object.freeze(FACTORY_KEYS.filter(key => !['reportLaunch', 'exportLaunch'].includes(key)));
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const CAPABILITY = /^[A-Za-z0-9_-]{20,240}$/u;
 const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
@@ -105,7 +106,7 @@ function proofRecord(value, tabId, windowId) {
 function fail(code) { return Object.freeze({ ok: false, code }); }
 
 export function createSidePanelIntentRouter(raw) {
-  const input = exact(raw, FACTORY_KEYS);
+  const input = exact(raw, FACTORY_KEYS) ?? exact(raw, LEGACY_FACTORY_KEYS);
   const coordinator = exact(input?.panelCoordinator, ['attachPanelPort', 'withWindowLock']);
   if (!input || typeof input.chromeApi?.runtime?.id !== 'string' || typeof input.chromeApi?.runtime?.getContexts !== 'function' ||
     typeof input.chromeApi?.tabs?.query !== 'function' || !input.authority || !input.auditStarter || !coordinator ||
@@ -271,19 +272,44 @@ export function createSidePanelIntentRouter(raw) {
     }
   }
 
+  async function openReport(envelope, sender) {
+    if (typeof input.reportLaunch?.openRegisteredReport !== 'function') return fail('FEATURE_UNAVAILABLE');
+    try {
+      const authorized = await input.authority.authorizeSession({
+        sessionCapabilityId: envelope.sessionCapabilityId, auditId: envelope.auditId,
+        consumer: 'panel', intent: 'open-report', sender,
+      });
+      if (authorized?.ok !== true || authorized.session?.auditId !== envelope.auditId || !safeChromeId(authorized.context?.windowId)) {
+        return fail('REPORT_OPEN_DENIED');
+      }
+      const opened = await input.reportLaunch.openRegisteredReport({ auditId: envelope.auditId, windowId: authorized.context.windowId });
+      return opened?.ok === true ? freeze({ ok: true, auditId: envelope.auditId, state: 'connected' }) : fail('REPORT_OPEN_DENIED');
+    } catch { return fail('REPORT_OPEN_DENIED'); }
+  }
+
   async function dispatch(rawRequest) {
     const request = exact(rawRequest, ['envelope', 'sender']);
     if (!request || !Object.isFrozen(request.envelope)) return fail('INVALID_MESSAGE');
     const parsed = parseWorkerMessage(request.envelope);
     if (!parsed.ok) return parsed.code === 'MESSAGE_TOO_LARGE' ? fail('MESSAGE_TOO_LARGE') : fail('INVALID_MESSAGE');
     const envelope = parsed.value;
-    if (['POPUP_START_PERSONA', 'PANEL_OPEN_REPORT', 'REPORT_REQUEST_EXPORT', 'REPORT_CONNECT', 'EXPORT_CONNECT'].includes(envelope.type)) {
+    if (envelope.type === 'POPUP_START_PERSONA') {
       return fail('FEATURE_UNAVAILABLE');
     }
     if (envelope.type === 'PREPARE_POPUP_CAPABILITIES') return preparePopup(envelope, request.sender);
     if (envelope.type === 'PREPARE_PANEL_CAPABILITY') return preparePanel(envelope, request.sender);
     if (['POPUP_START_AUDIT', 'PANEL_START_ATTACHED_AUDIT'].includes(envelope.type)) return startAttached(envelope, request.sender);
     if (envelope.type === 'PANEL_CANCEL_AUDIT') return cancel(envelope, request.sender);
+    if (envelope.type === 'PANEL_OPEN_REPORT') return openReport(envelope, request.sender);
+    if (envelope.type === 'REPORT_CONNECT') return input.reportLaunch?.connect?.({ auditId: envelope.auditId, sender: request.sender }) ?? fail('FEATURE_UNAVAILABLE');
+    if (envelope.type === 'REPORT_REQUEST_EXPORT') return input.exportLaunch?.requestExport?.({
+      auditId: envelope.auditId, sessionCapabilityId: envelope.sessionCapabilityId, sender: request.sender,
+    }) ?? fail('FEATURE_UNAVAILABLE');
+    if (envelope.type === 'EXPORT_CONNECT') return input.exportLaunch?.connect?.({ auditId: envelope.auditId, sender: request.sender }) ?? fail('FEATURE_UNAVAILABLE');
+    if (envelope.type === 'EXPORT_COMPLETE') return input.exportLaunch?.complete?.({
+      sessionCapabilityId: envelope.sessionCapabilityId, auditId: envelope.auditId,
+      attemptId: envelope.attemptId, sender: request.sender,
+    }) ?? fail('FEATURE_UNAVAILABLE');
     if (envelope.type === 'PANEL_REHYDRATE_VIEW') return rehydrate(envelope, request.sender);
     return fail('FEATURE_UNAVAILABLE');
   }

@@ -24,14 +24,18 @@ test('review script renders snippets inertly, offers exactly three answers and n
   assert.doesNotMatch(source, /innerHTML/);
   for (const answer of ['conforme', 'não conforme', 'não foi possível determinar']) assert.match(source, new RegExp(answer, 'u'));
   assert.match(source, /Pular revisão/);
-  assert.match(source, /REQUEST_EXPORT/);
+  assert.match(source, /REPORT_CONNECT/u);
+  assert.match(source, /REPORT_REQUEST_EXPORT/u);
   assert.match(source, /REVIEW_COMMITTED/u);
   assert.match(source, /exportRevision:\s*committed\.exportRevision/u);
-  assert.match(source, /restoreExportEventState\(latest\)/u);
+  assert.match(source, /getReportRevision\(id\)/u);
+  assert.match(source, /buildReportView/u);
+  assert.match(source, /renderReportView/u);
   assert.match(source, /latest\?\.exportCleanupPending\s*===\s*true/u);
   assert.match(source, /arquivo obsoleto.*removido/iu);
   assert.match(source, /Solicitando a geração do relatório/u);
   assert.doesNotMatch(source, /\.checked\s*=\s*true|\.click\(\)/);
+  assert.doesNotMatch(source, /\bREQUEST_EXPORT\b|EXPORT_PROGRESS|searchParams\.get\(['"]leaseOwnerId/u);
 });
 
 test('review uses the canonical ABNT item id and isolates a divergent printed id in an editorial note', async () => {

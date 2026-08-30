@@ -3,8 +3,8 @@ import {
   REPORT_GENERATION_ISSUE_CODES,
 } from './diagnostic-policy.js';
 import { canonicalStringify } from './canonical-json.js';
+import { EXPORT_FORMATS_V1 } from '../../export/export-formats.js';
 
-const FORMAT_ORDER = Object.freeze(['html', 'json', 'csv', 'pdf']);
 const GENERATION_CODES = new Set([...REPORT_GENERATION_ISSUE_CODES, 'REPORT_EXPORT_PREPARATION_FAILED']);
 const PDF_FAILURE_CODES = new Set(PDF_GENERATION_FAILURE_CODES);
 
@@ -96,7 +96,7 @@ export function canonicalInternalReviewUrl(value, auditId, expectedExtensionId) 
 }
 
 export function preparedReportFormats({ hasCsv, hasPdf }) {
-  return ['html', 'json', ...(hasCsv ? ['csv'] : []), ...(hasPdf ? ['pdf'] : [])]
+  return EXPORT_FORMATS_V1.filter(format => (format !== 'csv' || hasCsv) && (format !== 'pdf' || hasPdf))
     .map(format => ({ format, status: 'prepared' }));
 }
 
@@ -115,12 +115,12 @@ function validatePreparedFormats(entries) {
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry) ||
       canonicalStringify(Object.keys(entry).sort()) !== canonicalStringify(['format', 'status']) ||
-      entry.status !== 'prepared' || !FORMAT_ORDER.includes(entry.format) || formats.includes(entry.format)) {
+      entry.status !== 'prepared' || !EXPORT_FORMATS_V1.includes(entry.format) || formats.includes(entry.format)) {
       throw new TypeError('Formato preparado inválido ou duplicado.');
     }
     formats.push(entry.format);
   }
-  const expected = FORMAT_ORDER.filter(format => formats.includes(format));
+  const expected = EXPORT_FORMATS_V1.filter(format => formats.includes(format));
   if (canonicalStringify(formats) !== canonicalStringify(expected)) {
     throw new TypeError('Formatos preparados estão fora da ordem canônica.');
   }

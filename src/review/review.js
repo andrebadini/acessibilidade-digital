@@ -1,12 +1,16 @@
 import { createReviewDecision } from '../core/review/decisions.js';
-import { applyExportEvent, restoreExportEventState } from '../panel/panel-state.js';
+import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
+import { createPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
 import { createAuditStore } from '../storage/audit-store.js';
 import { createDestructiveDialog } from '../ui/destructive-dialog.js';
 import { parseAuditDeletedEvent } from '../core/audit-deleted-event.js';
 import { createReviewDecisionCommitter, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId } from './review-state.js';
+import { buildReportView, renderReportView } from './report-view.js';
 
 const ANSWERS = ['conforme', 'não conforme', 'não foi possível determinar'];
 const list = document.querySelector('#review-list');
+const reportRoot = document.querySelector('#report-root');
+const reviewControls = document.querySelector('.review-controls');
 const status = document.querySelector('#review-status');
 const evaluator = document.querySelector('#review-evaluator');
 const regenerate = document.querySelector('#regenerate-report');
@@ -19,7 +23,7 @@ const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde s
 const store = createAuditStore();
 const commitDecision = createReviewDecisionCommitter();
 let auditModel;
-let exportEventState = {};
+let reportSessionCapabilityId = null;
 
 function sendWorkerRequest(message) {
   return new Promise(resolve => {
@@ -41,7 +45,7 @@ function sendWorkerRequest(message) {
 
 function renderDeletedAudit() {
   auditModel = null;
-  exportEventState = {};
+  reportSessionCapabilityId = null;
   list.replaceChildren();
   evaluator.disabled = true;
   regenerate.disabled = true;
@@ -69,21 +73,18 @@ const deleteAuditController = createDestructiveDialog({
 
 deleteAudit.addEventListener('click', () => deleteAuditController.open(deleteAudit));
 
-regenerate.addEventListener('click', () => {
+async function requestExport() {
   if (!auditModel?.auditId) return;
   regenerate.disabled = true;
   status.textContent = 'Solicitando a geração do relatório.';
-  chrome.runtime.sendMessage({ type: 'REQUEST_EXPORT', auditId: auditModel.auditId }, response => {
-    regenerate.disabled = false;
-    if (chrome.runtime.lastError || !response?.ok) status.textContent = response?.error || 'Não foi possível gerar o relatório atualizado.';
-    else {
-      const next = applyExportEvent(exportEventState, response, 'queued');
-      if (next === exportEventState) return;
-      exportEventState = next;
-      status.textContent = 'Relatório atualizado na fila de geração.';
-    }
+  const response = await sendWorkerRequest({
+    type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: reportSessionCapabilityId, auditId: auditModel.auditId,
   });
-});
+  regenerate.disabled = false;
+  status.textContent = response?.ok ? 'Relatório atualizado na fila de geração.' : 'Não foi possível gerar o relatório atualizado.';
+}
+
+regenerate.addEventListener('click', () => { void requestExport(); });
 
 chrome.runtime.onMessage.addListener((message, sender) => {
   const deletion = parseAuditDeletedEvent(message, sender, {
@@ -96,30 +97,6 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     return;
   }
   if (message?.type === 'AUDIT_DELETED') return;
-  if (!auditModel || message?.auditId !== auditModel.auditId) return;
-  let nextStatus = null;
-  let text = null;
-  if (message.type === 'EXPORT_PROGRESS') {
-    nextStatus = 'running';
-    text = message.message || 'Gerando os arquivos do relatório.';
-  }
-  if (message.type === 'EXPORT_COMPLETE') {
-    nextStatus = message.status === 'partial' ? 'partial' : 'complete';
-    text = nextStatus === 'partial' ? 'Relatório gerado com limitações.' : 'Arquivos do relatório gerados.';
-  }
-  if (message.type === 'EXPORT_FAILED') {
-    nextStatus = 'failed';
-    text = message.error || 'Não foi possível gerar os arquivos do relatório.';
-  }
-  if (message.type === 'EXPORT_INVALIDATED') {
-    nextStatus = 'preparing';
-    text = message.error || 'A auditoria foi atualizada; gere o relatório novamente.';
-  }
-  if (!nextStatus) return;
-  const next = applyExportEvent(exportEventState, message, nextStatus);
-  if (next === exportEventState) return;
-  exportEventState = next;
-  status.textContent = text;
 });
 
 function safeAuditId() {
@@ -191,7 +168,7 @@ function renderCard(entry) {
   const card = document.createElement('article');
   card.className = 'review-card';
   card.id = `review-${occurrence.occurrenceId.replace(/[^A-Za-z0-9_-]/gu, '-')}`;
-  appendText(card, 'h2', entry.question || `O item “${item.title}” está conforme no contexto apresentado?`);
+  appendText(card, 'h3', entry.question || `O item “${item.title}” está conforme no contexto apresentado?`);
   appendText(card, 'p', `ABNT NBR 17225 — item ${item.id} (${item.classification || 'classificação não informada'}).`);
   if (typeof item.printedId === 'string' && item.printedId !== item.id) {
     appendText(card, 'p', `Nota editorial: a impressão consultada mostra “${item.printedId}”; esta ferramenta usa a referência normalizada “${item.id}” da Seção 5, sem atribuir errata à ABNT.`);
@@ -235,16 +212,24 @@ function renderCard(entry) {
 }
 
 async function start() {
-  const latest = await store.getLatest();
-  const id = safeAuditId() || normalizeReviewAuditId(latest?.auditId);
+  const id = safeAuditId();
   if (!id) { status.textContent = 'Auditoria não identificada.'; return; }
-  auditModel = await store.getAudit(id);
-  if (!auditModel || auditModel.auditId !== id) { status.textContent = 'Auditoria não encontrada.'; return; }
+  const connected = await sendWorkerRequest({ type: 'REPORT_CONNECT', auditId: id });
+  if (!connected?.ok || connected.auditId !== id || connected.state !== 'view-only') { status.textContent = 'Relatório não autorizado.'; return; }
+  reportSessionCapabilityId = connected.sessionCapabilityId;
+  const [revision, inventory] = await Promise.all([store.getReportRevision(id), createInstalledCoreRuleInventory()]);
+  if (!revision || revision.auditId !== id) { status.textContent = 'Auditoria não encontrada.'; return; }
+  const bundle = await createPanelResultBundleV1({ reportRevision: revision, inventory });
+  const view = buildReportView({ model: revision.model, summary: bundle.summary, modelRevision: revision.modelRevision, modelHash: revision.modelHash });
+  auditModel = revision.model;
+  const report = renderReportView({ view, document, onExport: () => { void requestExport(); } });
+  reportRoot.replaceChildren(report);
+  const reviewTarget = report.querySelector('[data-review-controls-target]');
+  reviewTarget.append(reviewControls, list);
   deleteAudit.disabled = false;
-  if (latest?.auditId === id) exportEventState = restoreExportEventState(latest);
   for (const entry of getPendingReviewEntries(auditModel)) renderCard(entry);
-  status.textContent = latest?.auditId === id && latest?.exportCleanupPending === true
-    ? EXPORT_CLEANUP_MESSAGE
+  const latest = await store.getLatest();
+  status.textContent = latest?.auditId === id && latest?.exportCleanupPending === true ? EXPORT_CLEANUP_MESSAGE
     : list.childElementCount ? `${list.childElementCount} ocorrências aguardam revisão.` : 'Não há ocorrências para revisar.';
 }
 

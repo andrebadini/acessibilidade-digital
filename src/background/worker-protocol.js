@@ -15,6 +15,7 @@ const MESSAGE_SCHEMAS = deepFreeze({
   PANEL_REHYDRATE_VIEW: ['type', 'auditId'],
   REPORT_CONNECT: ['type', 'auditId'],
   EXPORT_CONNECT: ['type', 'auditId'],
+  EXPORT_COMPLETE: ['type', 'sessionCapabilityId', 'auditId', 'attemptId'],
 });
 
 export function parseWorkerMessage(message) {
@@ -47,6 +48,10 @@ function validWorkerEnvelope(value) {
   }
   if (['PANEL_CANCEL_AUDIT', 'PANEL_OPEN_REPORT', 'REPORT_REQUEST_EXPORT'].includes(value.type)) {
     return OPAQUE_ID.test(value.sessionCapabilityId ?? '') && AUDIT_ID.test(value.auditId ?? '');
+  }
+  if (value.type === 'EXPORT_COMPLETE') {
+    return OPAQUE_ID.test(value.sessionCapabilityId ?? '') && AUDIT_ID.test(value.auditId ?? '') &&
+      /^(?:[1-9][0-9]*)$/u.test(value.attemptId ?? '') && Number.isSafeInteger(Number(value.attemptId));
   }
   return AUDIT_ID.test(value.auditId ?? '');
 }

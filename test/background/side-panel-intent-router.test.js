@@ -190,6 +190,41 @@ test('personas and reserved intents fail before capability, storage or Chrome ef
   assert.deepEqual(calls, []);
 });
 
+test('routes report and export envelopes through the single launch authorities without UI payloads', async () => {
+  const calls = [];
+  const reportLaunch = {
+    async openRegisteredReport(value) { calls.push(['open', value]); return { ok: true }; },
+    async connect(value) { calls.push(['report-connect', value]); return { ok: true, auditId: value.auditId, sessionCapabilityId: 'R'.repeat(22), state: 'view-only' }; },
+  };
+  const exportLaunch = {
+    async requestExport(value) { calls.push(['request-export', value]); return { ok: true, auditId: value.auditId, attemptId: '1', state: 'awaiting-connection' }; },
+    async connect(value) { calls.push(['export-connect', value]); return { ok: true, auditId: value.auditId, sessionCapabilityId: 'E'.repeat(22), expectedRevision: 3, attemptId: '1' }; },
+    async complete(value) { calls.push(['export-complete', value]); return { ok: true, auditId: value.auditId, state: 'terminal' }; },
+  };
+  const { router } = fixture({ reportLaunch, exportLaunch });
+  const sender = panelSender();
+  const rows = [
+    [{ type: 'PANEL_OPEN_REPORT', sessionCapabilityId: SESSION, auditId: 'audit-1' }, 'open'],
+    [{ type: 'REPORT_CONNECT', auditId: 'audit-1' }, 'report-connect'],
+    [{ type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: SESSION, auditId: 'audit-1' }, 'request-export'],
+    [{ type: 'EXPORT_CONNECT', auditId: 'audit-1' }, 'export-connect'],
+    [{ type: 'EXPORT_COMPLETE', sessionCapabilityId: SESSION, auditId: 'audit-1', attemptId: '1' }, 'export-complete'],
+  ];
+  for (const [message, expectedCall] of rows) {
+    const response = await router.dispatch({ envelope: parsed(message), sender });
+    assert.equal(response.ok, true);
+    assert.equal(calls.at(-1)[0], expectedCall);
+    assert.deepEqual(Object.keys(calls.at(-1)[1]).sort(), expectedCall === 'export-complete'
+      ? ['attemptId', 'auditId', 'sender', 'sessionCapabilityId']
+      : expectedCall === 'request-export'
+        ? ['auditId', 'sender', 'sessionCapabilityId']
+        : expectedCall === 'open'
+          ? ['auditId', 'windowId']
+          : ['auditId', 'sender']);
+  }
+  assert.doesNotMatch(JSON.stringify(calls), /model|summary|projection|bytes|formats/iu);
+});
+
 test('authorizes cancellation and passes only the correlated session and window', async () => {
   const { router, calls } = fixture();
   const response = await router.dispatch({

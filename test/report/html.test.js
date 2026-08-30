@@ -302,9 +302,8 @@ test('changes occurrence evidence from review to red after a nonconformity decis
   assert.match(card, /class="legal-analysis"/u);
   for (const fixedText of [
     CONSUMER_ACCESSIBILITY_FIXED_BASIS.label,
-    CONSUMER_ACCESSIBILITY_FIXED_BASIS.display,
+    CONSUMER_ACCESSIBILITY_FIXED_BASIS.sentencePrefix,
     CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification,
-    CONSUMER_ACCESSIBILITY_FIXED_BASIS.currentTextCaveatRef,
   ]) assert.match(card, new RegExp(fixedText.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
   assert.doesNotMatch(card, /evidence-highlight--review/u);
   assert.ok(html.indexOf('data-occurrence-id="occ-focus-review"') < html.indexOf('data-occurrence-id="occ-cross-page"'));
@@ -459,9 +458,9 @@ test('resolves the immutable consumer basis for every failed ABNT occurrence inc
   const humanReview = occurrenceCard(html, 'occ-focus-review');
   for (const card of [failedRequirement, failedRecommendation]) {
     assert.match(card, new RegExp(CONSUMER_ACCESSIBILITY_FIXED_BASIS.label, 'u'));
-    assert.match(card, new RegExp(CONSUMER_ACCESSIBILITY_FIXED_BASIS.display.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+    assert.match(card, new RegExp(CONSUMER_ACCESSIBILITY_FIXED_BASIS.sentencePrefix.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
     assert.match(card, new RegExp(CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
-    assert.match(card, /Ressalva ao texto vigente/iu);
+    assert.doesNotMatch(card, /conclusão jurídica final|certificação jurídica automática/iu);
   }
   assert.match(failedRecommendation, /Recomendação ABNT/u);
   assert.doesNotMatch(humanReview, /Base consumerista padronizada para análise/u);

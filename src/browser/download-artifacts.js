@@ -1,4 +1,5 @@
 import { sha256Hex } from '../core/report/hash.js';
+import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 
 const MIME = Object.freeze({
   html: 'text/html;charset=utf-8',
@@ -27,12 +28,11 @@ const FAILURE_MESSAGES = Object.freeze({
   DOWNLOAD_INTERRUPTED: format => `O artefato ${format} não concluiu o download (interrompido).`,
 });
 
-export function buildArtifactBaseName(pageUrl, timestamp) {
-  const url = new URL(pageUrl);
-  if (!/^https?:$/u.test(url.protocol)) throw new TypeError('URL do relatório inválida.');
+export function buildArtifactBaseName(auditId, timestamp) {
+  if (typeof auditId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/u.test(auditId)) throw new TypeError('Auditoria inválida.');
   if (typeof timestamp !== 'string' || new Date(timestamp).toISOString() !== timestamp) throw new TypeError('Timestamp do relatório inválido.');
-  const host = url.hostname.toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-|-$/gu, '').slice(0, 100) || 'auditoria';
-  return `${host}-${timestamp.replace(/[-:.]/gu, '')}`;
+  const safeAuditId = auditId.replace(/[^A-Za-z0-9._-]+/gu, '-').slice(0, 160);
+  return `${safeAuditId}-${timestamp.replace(/[-:.]/gu, '')}`;
 }
 
 export async function bindDeliveryArtifactBaseName(baseName, ownerId, exportAttempt) {
@@ -61,12 +61,8 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
   if (recordDeliveryState !== undefined && typeof recordDeliveryState !== 'function') {
     throw new TypeError('Journal persistente de entrega inválido.');
   }
-  const artifacts = [
-    ['html', payload.html],
-    ['json', payload.json],
-    ['csv', payload.csv],
-    ['pdf', payload.pdf],
-  ].filter(([, value]) => value !== undefined && value !== null);
+  const artifacts = EXPORT_FORMATS_V1.map(format => [format, payload[format]])
+    .filter(([, value]) => value !== undefined && value !== null);
   const formats = [];
   const limitations = [];
   for (const [format, value] of artifacts) {
@@ -118,7 +114,9 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
         if (!recordDeliveryState) return;
         try {
           await boundedOperation(
-            Promise.resolve().then(() => recordDeliveryState(entry)),
+            Promise.resolve().then(() => recordDeliveryState(entry.state === 'terminal'
+              ? { ...entry, mimeType: MIME[format], byteSize: bytes.byteLength, sha256 }
+              : entry)),
             timeoutMs,
             'A atualização do journal de entrega excedeu o tempo limite.',
           );
@@ -213,7 +211,7 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
         if (!isCompleteTerminal(terminal, downloadId)) throw Object.assign(new Error('Download interrompido.'), { name: 'DownloadInterruptedError' });
         await recordDelivery({ state: 'terminal', format, filename, downloadId });
         await assertDelivery('terminal');
-        formats.push({ format, filename, mimeType: MIME[format], status: 'complete', downloadId, sha256 });
+        formats.push({ format, filename, mimeType: MIME[format], byteSize: bytes.byteLength, status: 'complete', downloadId, sha256 });
       } catch (error) {
         monitor?.stop();
         monitor = null;

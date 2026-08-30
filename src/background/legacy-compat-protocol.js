@@ -11,30 +11,16 @@ const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const LEASE_OWNER_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const REVIEW_PATH = '/src/review/index.html';
 const PANEL_PATH = '/src/panel/index.html';
-const EXPORT_PATH = '/src/export/index.html';
-const COMPLETE_FORMATS = Object.freeze(['html', 'json', 'csv', 'pdf']);
-const ALLOWED_FORMATS = Object.freeze([
-  Object.freeze(['html', 'json']),
-  Object.freeze(['html', 'json', 'csv']),
-  Object.freeze(['html', 'json', 'pdf']),
-  COMPLETE_FORMATS,
-]);
 const SCHEMAS = deepFreeze({
   GET_LAST_AUDIT: ['type'],
   REVIEW_COMMITTED: ['type', 'auditId', 'exportRevision'],
-  REQUEST_EXPORT: ['type', 'auditId'],
   REQUEST_DELETE_AUDIT: ['type', 'auditId'],
   REQUEST_DELETE_ALL_AUDITS: ['type'],
-  EXPORT_PROGRESS: ['type', 'auditId', 'status', 'message', 'exportRevision', 'exportAttempt', 'leaseOwnerId'],
-  EXPORT_FAILED: ['type', 'auditId', 'status', 'error', 'exportRevision', 'exportAttempt', 'leaseOwnerId'],
-  EXPORT_BUSY: ['type', 'auditId', 'status', 'error', 'exportRevision', 'exportAttempt', 'leaseOwnerId'],
-  EXPORT_INVALIDATED: ['type', 'auditId', 'status', 'error', 'exportRevision', 'exportAttempt', 'leaseOwnerId'],
-  EXPORT_COMPLETE: ['type', 'auditId', 'status', 'formats', 'exportRevision', 'exportAttempt', 'leaseOwnerId', 'localAuditDeleted'],
 });
 
 const FACTORY_KEYS = [
-  'chromeApi', 'readLegacyLastAudit', 'notifyLegacyReviewCommitted', 'queueLegacyExport',
-  'deleteLegacyAudit', 'deleteAllLegacyAudits', 'acknowledgeLegacyExportEvent',
+  'chromeApi', 'readLegacyLastAudit', 'notifyLegacyReviewCommitted',
+  'deleteLegacyAudit', 'deleteAllLegacyAudits',
 ];
 
 export function parseLegacyCompatMessage(message) {
@@ -42,11 +28,6 @@ export function parseLegacyCompatMessage(message) {
   if (!type.found || !Object.hasOwn(SCHEMAS, type.value)) return denied('UNKNOWN_MESSAGE');
   const copy = copyExactDataRecord(message, SCHEMAS[type.value]);
   if (!copy) return denied('COMPATIBILITY_DENIED');
-  if (copy.type === 'EXPORT_COMPLETE') {
-    const formats = copyDenseDataArray(copy.formats);
-    if (!formats) return denied('COMPATIBILITY_DENIED');
-    copy.formats = formats;
-  }
   if (!hasPrimitiveCompatibilityShape(copy)) return denied('COMPATIBILITY_DENIED');
   const byteLength = capturedUtf8Length(copy);
   if (byteLength === null || byteLength > MAX_ENVELOPE_BYTES || !validCompatibilityEnvelope(copy)) {
@@ -74,10 +55,8 @@ export function createLegacyCompatibilityHandler(options) {
       let output;
       if (envelope.type === 'GET_LAST_AUDIT') output = await input.readLegacyLastAudit();
       else if (envelope.type === 'REVIEW_COMMITTED') output = await input.notifyLegacyReviewCommitted({ auditId: envelope.auditId, exportRevision: envelope.exportRevision });
-      else if (envelope.type === 'REQUEST_EXPORT') output = await input.queueLegacyExport({ auditId: envelope.auditId });
       else if (envelope.type === 'REQUEST_DELETE_AUDIT') output = await input.deleteLegacyAudit({ auditId: envelope.auditId });
       else if (envelope.type === 'REQUEST_DELETE_ALL_AUDITS') output = await input.deleteAllLegacyAudits();
-      else output = await input.acknowledgeLegacyExportEvent({ event: envelope });
       return copyAdapterOutput(envelope, output, input.chromeApi.runtime.id) ?? compatibilityFailed();
     } catch {
       return compatibilityFailed();
@@ -89,9 +68,7 @@ export function createLegacyCompatibilityHandler(options) {
 
 function hasPrimitiveCompatibilityShape(value) {
   for (const [key, entry] of Object.entries(value)) {
-    if (key === 'formats') {
-      if (!Array.isArray(entry) || entry.some(format => typeof format !== 'string')) return false;
-    } else if (!['string', 'number', 'boolean'].includes(typeof entry)) return false;
+    if (!['string', 'number', 'boolean'].includes(typeof entry)) return false;
   }
   return true;
 }
@@ -100,17 +77,7 @@ function validCompatibilityEnvelope(value) {
   if (['GET_LAST_AUDIT', 'REQUEST_DELETE_ALL_AUDITS'].includes(value.type)) return true;
   if (!AUDIT_ID.test(value.auditId ?? '')) return false;
   if (value.type === 'REVIEW_COMMITTED') return validRevision(value.exportRevision);
-  if (['REQUEST_EXPORT', 'REQUEST_DELETE_AUDIT'].includes(value.type)) return true;
-  if (!validRevision(value.exportRevision) || !validAttempt(value.exportAttempt) ||
-    !LEASE_OWNER_ID.test(value.leaseOwnerId ?? '')) return false;
-  if (value.type === 'EXPORT_PROGRESS') return value.status === 'running' && validNonemptyProse(value.message);
-  if (value.type === 'EXPORT_FAILED') return value.status === 'failed' && validNonemptyProse(value.error);
-  if (value.type === 'EXPORT_BUSY') return value.status === 'busy' && validNonemptyProse(value.error);
-  if (value.type === 'EXPORT_INVALIDATED') return value.status === 'preparing' && validNonemptyProse(value.error);
-  const formats = ALLOWED_FORMATS.some(expected => sameArray(value.formats, expected));
-  return ['complete', 'partial'].includes(value.status) && formats && typeof value.localAuditDeleted === 'boolean' &&
-    (value.status !== 'complete' || sameArray(value.formats, COMPLETE_FORMATS)) &&
-    (value.localAuditDeleted !== true || sameArray(value.formats, COMPLETE_FORMATS));
+  return value.type === 'REQUEST_DELETE_AUDIT';
 }
 
 async function proveCompatibilitySurface(chromeApi, sender, envelope) {
@@ -137,8 +104,7 @@ async function proveCompatibilitySurface(chromeApi, sender, envelope) {
 
 function expectedSurface(envelope) {
   if (['GET_LAST_AUDIT', 'REQUEST_DELETE_ALL_AUDITS'].includes(envelope.type)) return { path: PANEL_PATH, contextType: 'SIDE_PANEL', query: 'none' };
-  if (['REVIEW_COMMITTED', 'REQUEST_EXPORT', 'REQUEST_DELETE_AUDIT'].includes(envelope.type)) return { path: REVIEW_PATH, contextType: 'TAB', query: 'audit' };
-  return { path: EXPORT_PATH, contextType: 'TAB', query: 'legacy-export' };
+  return { path: REVIEW_PATH, contextType: 'TAB', query: 'audit' };
 }
 
 function validSurfaceQuery(url, expected, envelope) {
@@ -148,10 +114,7 @@ function validSurfaceQuery(url, expected, envelope) {
     return keys.length === 1 && keys[0] === 'auditId' && url.searchParams.getAll('auditId').length === 1 &&
       url.searchParams.get('auditId') === envelope.auditId;
   }
-  return keys.length === 3 && new Set(keys).size === 3 && keys.every(key => ['auditId', 'leaseOwnerId', 'exportAttempt'].includes(key)) &&
-    url.searchParams.getAll('auditId').length === 1 && url.searchParams.get('auditId') === envelope.auditId &&
-    url.searchParams.getAll('leaseOwnerId').length === 1 && url.searchParams.get('leaseOwnerId') === envelope.leaseOwnerId &&
-    url.searchParams.getAll('exportAttempt').length === 1 && url.searchParams.get('exportAttempt') === String(envelope.exportAttempt);
+  return false;
 }
 
 function contextMatches(context, documentId, documentUrl, contextType) {
@@ -177,10 +140,9 @@ function contextMatches(context, documentId, documentUrl, contextType) {
 function copyAdapterOutput(envelope, output, runtimeId) {
   if (envelope.type === 'GET_LAST_AUDIT') return copyLastAuditResponse(output, runtimeId);
   if (envelope.type === 'REVIEW_COMMITTED') return copyAckResponse(output, true);
-  if (envelope.type === 'REQUEST_EXPORT') return copyQueueResponse(output, envelope.auditId);
   if (envelope.type === 'REQUEST_DELETE_AUDIT') return copyDeleteOneResponse(output, envelope.auditId);
   if (envelope.type === 'REQUEST_DELETE_ALL_AUDITS') return copyDeleteAllResponse(output);
-  return copyAckResponse(output, false);
+  return null;
 }
 
 function copyLastAuditResponse(output, runtimeId) {
@@ -199,23 +161,6 @@ function copyAckResponse(output, allowDenied) {
   const failure = copyExactDataRecord(output, ['ok', 'code']);
   const codes = allowDenied ? ['COMPATIBILITY_DENIED', 'COMPATIBILITY_FAILED'] : ['COMPATIBILITY_FAILED'];
   return failure?.ok === false && codes.includes(failure.code) ? deepFreeze(failure) : null;
-}
-
-function copyQueueResponse(output, auditId) {
-  const success = copyExactDataRecord(output, ['ok', 'auditId', 'state', 'exportRevision', 'exportAttempt', 'leaseOwnerId']);
-  if (success && success.ok === true && success.auditId === auditId && success.state === 'queued' &&
-    validRevision(success.exportRevision) && validAttempt(success.exportAttempt) && LEASE_OWNER_ID.test(success.leaseOwnerId ?? '')) {
-    return deepFreeze(success);
-  }
-  const failure = copyExactDataRecord(output, ['ok', 'auditId', 'state', 'code', 'retryable', 'retryAt']);
-  if (!failure || failure.ok !== false || failure.auditId !== auditId || failure.retryable !== true ||
-    (failure.retryAt !== null && typeof failure.retryAt !== 'string')) return null;
-  const expected = {
-    busy: 'EXPORT_BUSY',
-    stale: 'AUDIT_REVISION_CONFLICT',
-    failed: 'EXPORT_PREPARE_FAILED',
-  };
-  return expected[failure.state] === failure.code ? deepFreeze(failure) : null;
 }
 
 function copyDeleteOneResponse(output, auditId) {

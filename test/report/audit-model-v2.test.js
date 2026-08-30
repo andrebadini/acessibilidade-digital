@@ -825,8 +825,8 @@ test('requires every root fatal diagnostic to correspond to the terminal page fa
       status: 'partial', pdfFallback: false,
       formats: [
         { format: 'html', status: 'prepared' },
-        { format: 'json', status: 'prepared' },
         { format: 'csv', status: 'prepared' },
+        { format: 'json', status: 'prepared' },
       ],
       limitations: [sessionOnlyRecoverable.message],
     },
@@ -1062,8 +1062,8 @@ test('keeps page and diagnostic observation times inside their pertinent root wi
       status: 'partial', pdfFallback: false,
       formats: [
         { format: 'html', status: 'prepared' },
-        { format: 'json', status: 'prepared' },
         { format: 'csv', status: 'prepared' },
+        { format: 'json', status: 'prepared' },
       ],
       limitations: [generationDiagnostic.message],
     },

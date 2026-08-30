@@ -18,6 +18,7 @@ import {
 import { runReportExport } from '../../src/export/report-export.js';
 import { commitReviewDecision } from '../../src/review/review-state.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
+import { EXPORT_FORMATS_V1 } from '../../src/export/export-formats.js';
 
 const PDF = new TextEncoder().encode('%PDF-1.7\ncontroller-test');
 const TEST_LEASE_OWNER = 'owner-test-export';
@@ -234,7 +235,7 @@ test('atomically persists the exact serialized model and a separate delivery rec
 });
 
 test('rejects forged evidence bytes even when manifest and canonical claims were recomputed', async () => {
-  const model = generatedModel(['html', 'json', 'csv', 'pdf']);
+  const model = generatedModel(['html', 'pdf', 'csv', 'json']);
   model.evidence[0].dataUrl = `data:image/png;base64,${Buffer.from([
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x63,
   ]).toString('base64')}`;
@@ -242,7 +243,7 @@ test('rejects forged evidence bytes even when manifest and canonical claims were
   refreshDeclaredIntegrity(model);
   const receipt = {
     status: 'complete',
-    formats: ['html', 'json', 'csv', 'pdf'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
+    formats: ['html', 'pdf', 'csv', 'json'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
     limitations: [],
   };
   let committed = false;
@@ -260,11 +261,11 @@ test('rejects forged evidence bytes even when manifest and canonical claims were
 });
 
 test('rejects unavailable integrity in a final V2 export', async () => {
-  const model = generatedModel(['html', 'json', 'csv', 'pdf']);
+  const model = generatedModel(['html', 'pdf', 'csv', 'json']);
   model.integrity = { algorithm: 'unavailable', status: 'not-recorded-v1' };
   const receipt = {
     status: 'complete',
-    formats: ['html', 'json', 'csv', 'pdf'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
+    formats: ['html', 'pdf', 'csv', 'json'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
     limitations: [],
   };
   let committed = false;
@@ -587,13 +588,10 @@ test('rejects a Proxy around an opaque persistence request before every meta-tra
 });
 
 test('requires correlated ordered unique receipt formats with exact MIME, filename, hash and status semantics', async () => {
-  const model = generatedModel(['html', 'json', 'csv', 'pdf']);
+  const model = generatedModel(['html', 'pdf', 'csv', 'json']);
   const baseReceipt = {
     status: 'complete',
-    formats: [
-      receiptFormat('html', 'complete', 1), receiptFormat('json', 'complete', 2),
-      receiptFormat('csv', 'complete', 3), receiptFormat('pdf', 'complete', 4),
-    ],
+    formats: EXPORT_FORMATS_V1.map((format, index) => receiptFormat(format, 'complete', index + 1)),
     limitations: [],
   };
   const attempts = [
@@ -624,11 +622,11 @@ test('requires the four-format model contract and exact generation evidence for 
     generatedModel(['json', 'csv', 'pdf']),
     generatedModel(['html', 'csv', 'pdf']),
     generatedModel(['html', 'json'], ['REPORT_CSV_UNAVAILABLE']),
-    generatedModel(['html', 'json', 'pdf'], ['REPORT_PDF_UNAVAILABLE']),
-    generatedModel(['html', 'json', 'csv'], ['REPORT_PRINT_CLEANUP_LIMITED']),
-    generatedModel(['html', 'json', 'csv'], ['REPORT_PDF_TAGGING_UNSUPPORTED']),
+    generatedModel(['html', 'pdf', 'json'], ['REPORT_PDF_UNAVAILABLE']),
+    generatedModel(['html', 'csv', 'json'], ['REPORT_PRINT_CLEANUP_LIMITED']),
+    generatedModel(['html', 'csv', 'json'], ['REPORT_PDF_TAGGING_UNSUPPORTED']),
   ];
-  invalidModels.push(generatedModel(['html', 'json', 'pdf'], ['REPORT_CSV_UNAVAILABLE'], {
+  invalidModels.push(generatedModel(['html', 'pdf', 'json'], ['REPORT_CSV_UNAVAILABLE'], {
     artifactLimitations: ['Mensagem não canônica para o CSV.'],
   }));
 
@@ -701,9 +699,9 @@ test('accepts one exact late print-cleanup limitation only in a partial delivery
 test('accepts a controlled fourth-artifact start failure as a partial export', async () => {
   const result = await genuineReportExport({ pdfDownloadStartFailure: true });
   assert.deepEqual(result.deliveryReceipt.formats.at(-1), {
-    format: 'pdf',
+    format: 'json',
     filename: result.deliveryReceipt.formats.at(-1).filename,
-    mimeType: 'application/pdf',
+    mimeType: 'application/json;charset=utf-8',
     status: 'interrupted',
     sha256: result.deliveryReceipt.formats.at(-1).sha256,
     failureCode: 'DOWNLOAD_START_FAILED',
@@ -717,8 +715,8 @@ test('accepts a controlled fourth-artifact start failure as a partial export', a
 });
 
 test('rejects artifact payloads that are present despite controlled CSV or PDF omission', async () => {
-  const missingCsv = generatedModel(['html', 'json', 'pdf'], ['REPORT_CSV_UNAVAILABLE']);
-  const missingPdf = generatedModel(['html', 'json', 'csv'], ['REPORT_PDF_UNAVAILABLE']);
+  const missingCsv = generatedModel(['html', 'pdf', 'json'], ['REPORT_CSV_UNAVAILABLE']);
+  const missingPdf = generatedModel(['html', 'csv', 'json'], ['REPORT_PDF_UNAVAILABLE']);
   for (const [model, format] of [[missingCsv, 'csv'], [missingPdf, 'pdf']]) {
     const formats = model.report.artifact.formats.map((entry, index) => receiptFormat(entry.format, 'complete', index + 1));
     const valid = await exportResult(model, {
@@ -738,14 +736,14 @@ test('rejects artifact payloads that are present despite controlled CSV or PDF o
 });
 
 test('rejects stale or bidirectionally inconsistent generation evidence and PDF fallback omissions', async () => {
-  const staleCsv = generatedModel(['html', 'json', 'pdf'], ['REPORT_CSV_UNAVAILABLE']);
+  const staleCsv = generatedModel(['html', 'pdf', 'json'], ['REPORT_CSV_UNAVAILABLE']);
   staleCsv.session.diagnostics[0].at = '2026-08-26T15:59:59.999Z';
-  const csvIssueWithCsv = generatedModel(['html', 'json', 'csv', 'pdf'], ['REPORT_CSV_UNAVAILABLE']);
-  const missingFallbackPdf = generatedModel(['html', 'json', 'csv'], ['REPORT_PDF_UNAVAILABLE']);
+  const csvIssueWithCsv = generatedModel(['html', 'pdf', 'csv', 'json'], ['REPORT_CSV_UNAVAILABLE']);
+  const missingFallbackPdf = generatedModel(['html', 'csv', 'json'], ['REPORT_PDF_UNAVAILABLE']);
   missingFallbackPdf.report.artifact.pdfFallback = true;
-  const extraDiagnostic = generatedModel(['html', 'json', 'pdf'], ['REPORT_CSV_UNAVAILABLE']);
+  const extraDiagnostic = generatedModel(['html', 'pdf', 'json'], ['REPORT_CSV_UNAVAILABLE']);
   extraDiagnostic.session.diagnostics[0].details = { note: 'PRIVATE_DIAGNOSTIC_SENTINEL' };
-  const duplicateDiagnostic = generatedModel(['html', 'json', 'pdf'], ['REPORT_CSV_UNAVAILABLE']);
+  const duplicateDiagnostic = generatedModel(['html', 'pdf', 'json'], ['REPORT_CSV_UNAVAILABLE']);
   duplicateDiagnostic.session.diagnostics.push(structuredClone(duplicateDiagnostic.session.diagnostics[0]));
 
   for (const model of [staleCsv, csvIssueWithCsv, missingFallbackPdf, extraDiagnostic, duplicateDiagnostic]) {
@@ -773,13 +771,13 @@ test('rejects stale or bidirectionally inconsistent generation evidence and PDF 
 });
 
 test('rejects unbacked artifact limitations and forged PDF fallback status in otherwise complete exports', async () => {
-  const rawLimitation = generatedModel(['html', 'json', 'csv', 'pdf']);
+  const rawLimitation = generatedModel(['html', 'pdf', 'csv', 'json']);
   rawLimitation.report.artifact.limitations = ['token=PRIVATE_ARTIFACT_SENTINEL'];
   rawLimitation.limitations = ['token=PRIVATE_ARTIFACT_SENTINEL'];
-  const forgedFallback = generatedModel(['html', 'json', 'csv', 'pdf']);
+  const forgedFallback = generatedModel(['html', 'pdf', 'csv', 'json']);
   forgedFallback.report.artifact.pdfFallback = true;
   const unsupportedWithoutFallback = generatedModel(
-    ['html', 'json', 'csv', 'pdf'],
+    ['html', 'pdf', 'csv', 'json'],
     ['REPORT_PDF_TAGGING_UNSUPPORTED'],
   );
 
@@ -806,10 +804,10 @@ test('accepts PDF fallback only with one exact current tagging diagnostic and pa
 });
 
 test('rejects forged top-level artifact correlation and well-formed but wrong hashes', async () => {
-  const model = generatedModel(['html', 'json', 'csv', 'pdf']);
+  const model = generatedModel(['html', 'pdf', 'csv', 'json']);
   const receipt = {
     status: 'complete',
-    formats: ['html', 'json', 'csv', 'pdf'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
+    formats: ['html', 'pdf', 'csv', 'json'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
     limitations: [],
   };
   const valid = await exportResult(model, receipt);
@@ -833,14 +831,14 @@ test('rejects forged top-level artifact correlation and well-formed but wrong ha
 });
 
 test('preserves fixed artifact failure stage and rejects incompatible failure schemas or raw limitations', async () => {
-  const model = generatedModel(['html', 'json', 'csv', 'pdf']);
+  const model = generatedModel(['html', 'pdf', 'csv', 'json']);
   const blobFailure = {
     status: 'partial',
     formats: [
       receiptFormat('html', 'complete', 1),
-      receiptFormat('json', 'complete', 2),
+      receiptFormat('pdf', 'complete', 2),
       { ...receiptFormat('csv', 'interrupted'), failureCode: 'ARTIFACT_BLOB_FAILED' },
-      receiptFormat('pdf', 'complete', 4),
+      receiptFormat('json', 'complete', 4),
     ],
     limitations: ['O artefato CSV não pôde ser preparado para download.'],
   };
@@ -878,10 +876,10 @@ test('preserves fixed artifact failure stage and rejects incompatible failure sc
 });
 
 test('rejects an accessor or revoked delivery receipt without invoking private data', async () => {
-  const model = generatedModel(['html', 'json', 'csv', 'pdf']);
+  const model = generatedModel(['html', 'pdf', 'csv', 'json']);
   const valid = await exportResult(model, {
     status: 'complete',
-    formats: ['html', 'json', 'csv', 'pdf'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
+    formats: ['html', 'pdf', 'csv', 'json'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
     limitations: [],
   });
   let accessed = false;
@@ -909,10 +907,10 @@ test('rejects an accessor or revoked delivery receipt without invoking private d
 });
 
 test('rejects hostile outer request and result accessors before invoking them', async () => {
-  const model = generatedModel(['html', 'json', 'csv', 'pdf']);
+  const model = generatedModel(['html', 'pdf', 'csv', 'json']);
   const deliveryReceipt = {
     status: 'complete',
-    formats: ['html', 'json', 'csv', 'pdf'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
+    formats: ['html', 'pdf', 'csv', 'json'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
     limitations: [],
   };
   const valid = await exportResult(model, deliveryReceipt);
@@ -948,10 +946,10 @@ test('rejects hostile outer request and result accessors before invoking them', 
 });
 
 test('rejects a technical JSON incompatible with the final model before persistence', async () => {
-  const model = generatedModel(['html', 'json', 'csv', 'pdf']);
+  const model = generatedModel(['html', 'pdf', 'csv', 'json']);
   const receipt = {
     status: 'complete',
-    formats: ['html', 'json', 'csv', 'pdf'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
+    formats: ['html', 'pdf', 'csv', 'json'].map((format, index) => receiptFormat(format, 'complete', index + 1)),
     limitations: [],
   };
   const technical = JSON.parse(renderTechnicalJson(model));
@@ -977,6 +975,7 @@ function receiptFormat(format, status, downloadId) {
     filename: `audit.${format}`,
     mimeType,
     status,
+    ...(status === 'complete' ? { byteSize: 1 } : {}),
     ...(downloadId === undefined ? {} : { downloadId }),
     sha256: 'a'.repeat(64),
   };
@@ -995,12 +994,17 @@ async function exportResult(model, deliveryReceipt, overrides = {}) {
   }
   const pdf = prepared.includes('pdf') ? Uint8Array.from(PDF) : null;
   const artifacts = { html, json, csv, pdf };
-  const baseName = buildArtifactBaseName(renderModel.finalUrl, renderModel.timestamps.generatedAt);
+  const baseName = buildArtifactBaseName(renderModel.auditId, renderModel.timestamps.generatedAt);
   const normalizedFormats = deliveryReceipt.formats.map(entry => ({
     ...entry,
     ...(entry.filename === `audit.${entry.format}` ? { filename: `${baseName}.${entry.format}` } : {}),
     ...(entry.sha256 === 'a'.repeat(64) && artifacts[entry.format] !== null && artifacts[entry.format] !== undefined
       ? { sha256: artifactHash(artifacts[entry.format]) }
+      : {}),
+    ...(entry.status === 'complete' && artifacts[entry.format] !== null && artifacts[entry.format] !== undefined
+      ? { byteSize: typeof artifacts[entry.format] === 'string'
+        ? new TextEncoder().encode(artifacts[entry.format]).byteLength
+        : artifacts[entry.format].byteLength }
       : {}),
   }));
   const receipt = { ...deliveryReceipt, formats: normalizedFormats };

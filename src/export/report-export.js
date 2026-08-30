@@ -13,6 +13,8 @@ import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { renderHtmlReport } from '../core/report/html.js';
 import { REPORT_HASH_BASE, verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
 import { preparedReportFormats } from '../core/report/report-policy.js';
+import { EXPORT_FORMATS_V1 } from './export-formats.js';
+export { EXPORT_FORMATS_V1 };
 import { deriveSystemLimitations } from '../core/report/text-policy.js';
 import { inspectAuditSnapshotCapability } from '../storage/audit-store.js';
 import {
@@ -62,6 +64,17 @@ export async function runReportExport(request, dependencies) {
     sourceModel = createAuditModel(capturedRequest.auditModel);
   }
   validateDependencies(dependencies);
+  if (snapshotCapability !== null && dependencies.reportView !== undefined) {
+    return runImmutableRevisionExport({
+      sourceModel,
+      reportView: dependencies.reportView,
+      snapshotCapability,
+      exportLeaseOwnerId,
+      exportAttempt,
+      timeoutMs: capturedRequest.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      dependencies,
+    });
+  }
   const at = safeCanonicalNow(capturedRequest.now);
   if (snapshotCapability !== null) {
     sourceModel = await enrichAuditForReport(sourceModel, {
@@ -175,7 +188,7 @@ export async function runReportExport(request, dependencies) {
     snapshotCapability = reservedCapability;
   }
 
-  let baseName = buildArtifactBaseName(model.finalUrl, at);
+  let baseName = buildArtifactBaseName(model.auditId, at);
   if (snapshotCapability !== null) {
     baseName = await bindDeliveryArtifactBaseName(baseName, exportLeaseOwnerId, exportAttempt);
   }
@@ -231,6 +244,58 @@ export async function runReportExport(request, dependencies) {
     pdfFallback,
   };
   return attestReportExportResult(result, snapshotCapability, exportLeaseOwnerId, exportAttempt);
+}
+
+async function runImmutableRevisionExport({
+  sourceModel, reportView, snapshotCapability, exportLeaseOwnerId, exportAttempt, timeoutMs, dependencies,
+}) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !reportView || reportView.version !== 1 ||
+    reportView.auditId !== sourceModel.auditId || reportView.modelHash !== sourceModel.integrity.canonicalModelHash ||
+    !Object.isFrozen(reportView)) throw reportExportInputError();
+  const model = await verifyAuditIntegritySnapshot(sourceModel);
+  const generatedAt = safeCanonicalNow(() => model.timestamps.generatedAt);
+  const html = renderHtmlReport(model, { reportView });
+  const json = renderTechnicalJson(model);
+  let csv = null;
+  let pdf = null;
+  let pdfFallback = false;
+  const limitations = [];
+  try { csv = renderCanonicalCsv(model, dependencies.csvRenderer); }
+  catch { limitations.push(createExportIssue('REPORT_CSV_UNAVAILABLE').message); }
+  if (csv !== null) {
+    const printed = await printFinalHtml(html, dependencies, timeoutMs, false);
+    if (printed.cleanupLimited) limitations.push(createExportIssue('REPORT_PRINT_CLEANUP_LIMITED').message);
+    if (printed.issue) limitations.push(printed.issue.message);
+    else {
+      pdf = printed.bytes;
+      pdfFallback = printed.usedFallback;
+      if (pdfFallback) limitations.push(createExportIssue('REPORT_PDF_TAGGING_UNSUPPORTED').message);
+    }
+  }
+  if (!pdf && !limitations.some(value => value === createExportIssue('REPORT_PDF_UNAVAILABLE').message)) {
+    limitations.push(createExportIssue('REPORT_PDF_UNAVAILABLE').message);
+  }
+  let baseName = buildArtifactBaseName(model.auditId, generatedAt);
+  baseName = await bindDeliveryArtifactBaseName(baseName, exportLeaseOwnerId, exportAttempt);
+  const downloads = await downloadArtifacts({
+    baseName, html, json, ...(csv === null ? {} : { csv }), ...(pdf ? { pdf } : {}),
+  }, dependencies.downloadsAdapter, {
+    timeoutMs,
+    assertCanDownload: ({ format }) => dependencies.assertDelivery({ snapshotCapability, exportLeaseOwnerId, format }),
+    recordDeliveryState: entry => dependencies.recordDelivery({ snapshotCapability, exportLeaseOwnerId, ...entry }),
+  });
+  const receiptLimitations = [...new Set([...limitations, ...downloads.limitations])];
+  const deliveryReceipt = {
+    status: downloads.formats.length === EXPORT_FORMATS_V1.length &&
+      downloads.formats.every((entry, index) => entry.status === 'complete' && entry.format === EXPORT_FORMATS_V1[index]) &&
+      receiptLimitations.length === 0 ? 'complete' : 'partial',
+    formats: downloads.formats,
+    limitations: receiptLimitations,
+  };
+  return attestReportExportResult({
+    model, html, json, csv, pdf, formats: downloads.formats, deliveryReceipt,
+    limitations: receiptLimitations, pdfFallback,
+  }, snapshotCapability, exportLeaseOwnerId, exportAttempt);
 }
 
 /** Safe identity probe used before any reflection on a caller-provided result. */

@@ -470,13 +470,9 @@ test('retries context-menu installation on service-worker startup only after sha
   assert.equal(calls[1][1].id, 'audita.accessibility.audit-page');
 });
 
-test('routes all ten compatibility schemas and no removed legacy start type', async () => {
+test('routes only the four retained compatibility schemas and rejects the removed export lane', async () => {
   const { chromeApi, events } = chromeFixture();
-  const types = [
-    'GET_LAST_AUDIT', 'REVIEW_COMMITTED', 'REQUEST_EXPORT', 'REQUEST_DELETE_AUDIT',
-    'REQUEST_DELETE_ALL_AUDITS', 'EXPORT_PROGRESS', 'EXPORT_FAILED', 'EXPORT_BUSY',
-    'EXPORT_INVALIDATED', 'EXPORT_COMPLETE',
-  ];
+  const types = ['GET_LAST_AUDIT', 'REVIEW_COMMITTED', 'REQUEST_DELETE_AUDIT', 'REQUEST_DELETE_ALL_AUDITS'];
   const compatibilityCalls = [];
   registerServiceWorker(chromeApi, {
     startupReady: Promise.resolve(runtimeValue()),
@@ -489,20 +485,16 @@ test('routes all ten compatibility schemas and no removed legacy start type', as
   const messages = {
     GET_LAST_AUDIT: { type: 'GET_LAST_AUDIT' },
     REVIEW_COMMITTED: { type: 'REVIEW_COMMITTED', auditId: 'audit-1', exportRevision: 1 },
-    REQUEST_EXPORT: { type: 'REQUEST_EXPORT', auditId: 'audit-1' },
     REQUEST_DELETE_AUDIT: { type: 'REQUEST_DELETE_AUDIT', auditId: 'audit-1' },
     REQUEST_DELETE_ALL_AUDITS: { type: 'REQUEST_DELETE_ALL_AUDITS' },
-    EXPORT_PROGRESS: { type: 'EXPORT_PROGRESS', auditId: 'audit-1', status: 'running', message: 'Executando.', exportRevision: 1, exportAttempt: 1, leaseOwnerId: 'owner-1' },
-    EXPORT_FAILED: { type: 'EXPORT_FAILED', auditId: 'audit-1', status: 'failed', error: 'Falha.', exportRevision: 1, exportAttempt: 1, leaseOwnerId: 'owner-1' },
-    EXPORT_BUSY: { type: 'EXPORT_BUSY', auditId: 'audit-1', status: 'busy', error: 'Ocupado.', exportRevision: 1, exportAttempt: 1, leaseOwnerId: 'owner-1' },
-    EXPORT_INVALIDATED: { type: 'EXPORT_INVALIDATED', auditId: 'audit-1', status: 'preparing', error: 'Invalidado.', exportRevision: 1, exportAttempt: 1, leaseOwnerId: 'owner-1' },
-    EXPORT_COMPLETE: { type: 'EXPORT_COMPLETE', auditId: 'audit-1', status: 'complete', formats: ['html', 'json', 'csv', 'pdf'], exportRevision: 1, exportAttempt: 1, leaseOwnerId: 'owner-1', localAuditDeleted: false },
   };
   const listener = [...events.message.listeners][0];
   for (const type of types) assert.equal(listener(messages[type], {}, () => {}), true);
-  for (const type of ['START_AUDIT', 'START_BATCH', 'CANCEL_AUDIT']) {
+  for (const type of ['START_AUDIT', 'START_BATCH', 'CANCEL_AUDIT', 'REQUEST_EXPORT', 'EXPORT_PROGRESS', 'EXPORT_FAILED', 'EXPORT_BUSY', 'EXPORT_INVALIDATED']) {
     assert.equal(listener({ type }, {}, () => { throw new Error('must not respond'); }), false);
   }
+  assert.equal(listener({ type: 'EXPORT_COMPLETE', auditId: 'audit-1' }, {}, () => {}), true,
+    'EXPORT_COMPLETE now belongs only to the authenticated primary protocol');
   await tick();
   assert.deepEqual(compatibilityCalls, types);
 });
@@ -558,176 +550,6 @@ test('real default graph validates review revision before a bearer-free update b
   assert.equal(JSON.stringify(env.sent).includes('capability'), false);
 });
 
-test('real default graph queues export with persistent lease correlation and reports a live busy retry', async () => {
-  const env = defaultGraphFixture();
-  env.snapshots.set('audit-export', { model: { auditId: 'audit-export' }, revision: 2, capability: Object.freeze({ token: 'private' }) });
-  env.setLatest({ auditId: 'audit-export', status: 'complete' });
-  assert.deepEqual(await env.dispatch(
-    { type: 'REQUEST_EXPORT', auditId: 'audit-export' },
-    env.sender('review', 'audit-export'),
-  ), {
-    ok: true, auditId: 'audit-export', state: 'queued', exportRevision: 2,
-    exportAttempt: 1, leaseOwnerId: 'export-owner-1',
-  });
-  assert.deepEqual(env.createdTabs, [{
-    url: env.chromeApi.runtime.getURL('src/export/index.html?auditId=audit-export&leaseOwnerId=export-owner-1&exportAttempt=1'),
-    active: false,
-  }]);
-  assert.equal(JSON.stringify(env.createdTabs).includes('private'), false);
-
-  env.setLeaseResult({ acquired: false, retryAt: '2026-08-29T12:01:00.000Z' });
-  assert.deepEqual(await env.dispatch(
-    { type: 'REQUEST_EXPORT', auditId: 'audit-export' },
-    env.sender('review', 'audit-export'),
-  ), {
-    ok: false, auditId: 'audit-export', state: 'busy', code: 'EXPORT_BUSY', retryable: true,
-    retryAt: '2026-08-29T12:01:00.000Z',
-  });
-  assert.equal(env.createdTabs.length, 1);
-});
-
-test('worker restart ignores an uncorrelated queued marker and trusts the durable lease state', async () => {
-  const modelNow = new Date().toISOString();
-  const backing = new Map();
-  const beforeRestart = createInMemoryAuditStore(backing);
-  await beforeRestart.setAudit(SAMPLE_AUDIT.auditId, structuredClone(SAMPLE_AUDIT));
-  await beforeRestart.setLatest({
-    auditId: SAMPLE_AUDIT.auditId, status: SAMPLE_AUDIT.session.status,
-    exportStatus: 'queued', exportRevision: 1, exportAttempt: 7,
-    leaseOwnerId: 'stale-owner', exportQueuedAt: modelNow,
-  });
-
-  const restartedStore = createInMemoryAuditStore(backing);
-  const restarted = defaultGraphFixture(null, {
-    auditStore: restartedStore,
-    modelNow: () => modelNow,
-  });
-  assert.deepEqual(await restarted.dispatch(
-    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
-    restarted.sender('review', SAMPLE_AUDIT.auditId),
-  ), {
-    ok: true, auditId: SAMPLE_AUDIT.auditId, state: 'queued', exportRevision: 1,
-    exportAttempt: 8, leaseOwnerId: 'export-owner-1',
-  });
-  assert.equal(restarted.createdTabs.length, 1);
-});
-
-test('real memory store compensates export tab creation failure and permits an immediate retry', async () => {
-  const modelNow = new Date().toISOString();
-  const store = createInMemoryAuditStore();
-  await store.setAudit(SAMPLE_AUDIT.auditId, structuredClone(SAMPLE_AUDIT));
-  const env = defaultGraphFixture(null, { auditStore: store, modelNow: () => modelNow });
-  env.setTabCreator((_options, callback) => {
-    env.chromeApi.runtime.lastError = { message: 'native tab creation secret' };
-    callback?.();
-    delete env.chromeApi.runtime.lastError;
-  });
-
-  const failed = await env.dispatch(
-    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
-    env.sender('review', SAMPLE_AUDIT.auditId),
-  );
-  assert.deepEqual(failed, {
-    ok: false, auditId: SAMPLE_AUDIT.auditId, state: 'failed',
-    code: 'EXPORT_PREPARE_FAILED', retryable: true, retryAt: null,
-  });
-  assert.doesNotMatch(JSON.stringify(failed), /native|tab|secret/u);
-  const compensated = await store.getAuditSnapshot(SAMPLE_AUDIT.auditId);
-  assert.equal(compensated.revision, 2);
-  assert.equal((await store.getLatest()).exportStatus, 'failed');
-  assert.equal((await store.getLatest()).exportAttempt, 1);
-  assert.deepEqual(await store.getExportLeaseState(SAMPLE_AUDIT.auditId, { now: new Date().toISOString() }), {
-    active: false, revision: 2,
-  });
-
-  env.setTabCreator((_options, callback) => callback?.({ id: 88 }));
-  assert.deepEqual(await env.dispatch(
-    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
-    env.sender('review', SAMPLE_AUDIT.auditId),
-  ), {
-    ok: true, auditId: SAMPLE_AUDIT.auditId, state: 'queued', exportRevision: 2,
-    exportAttempt: 2, leaseOwnerId: 'export-owner-1',
-  });
-});
-
-test('export tab failure compensation cannot overwrite a concurrently advanced revision', async () => {
-  const modelNow = new Date().toISOString();
-  const store = createInMemoryAuditStore();
-  await store.setAudit(SAMPLE_AUDIT.auditId, structuredClone(SAMPLE_AUDIT));
-  const env = defaultGraphFixture(null, { auditStore: store, modelNow: () => modelNow });
-  const newerLatest = {
-    auditId: SAMPLE_AUDIT.auditId, status: SAMPLE_AUDIT.session.status,
-    exportStatus: 'unavailable', exportRevision: 2, marker: 'newer-worker',
-  };
-  env.setTabCreator(async () => {
-    const snapshot = await store.getAuditSnapshot(SAMPLE_AUDIT.auditId);
-    await store.commitAudit(
-      SAMPLE_AUDIT.auditId, snapshot.model, newerLatest, { now: new Date().toISOString() },
-    );
-    throw new Error('native create rejection');
-  });
-
-  assert.deepEqual(await env.dispatch(
-    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
-    env.sender('review', SAMPLE_AUDIT.auditId),
-  ), {
-    ok: false, auditId: SAMPLE_AUDIT.auditId, state: 'failed',
-    code: 'EXPORT_PREPARE_FAILED', retryable: true, retryAt: null,
-  });
-  assert.equal((await store.getAuditSnapshot(SAMPLE_AUDIT.auditId)).revision, 2);
-  assert.deepEqual(await store.getLatest(), newerLatest);
-
-  env.setTabCreator((_options, callback) => callback?.({ id: 89 }));
-  const retry = await env.dispatch(
-    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
-    env.sender('review', SAMPLE_AUDIT.auditId),
-  );
-  assert.equal(retry.ok, true);
-  assert.equal(retry.exportRevision, 2);
-  assert.equal(retry.exportAttempt, 2);
-});
-
-test('concurrent workers preserve one export lease owner and allow retry after compensated failure', async () => {
-  const modelNow = new Date().toISOString();
-  const backing = new Map();
-  const firstStore = createInMemoryAuditStore(backing);
-  const secondStore = createInMemoryAuditStore(backing);
-  await firstStore.setAudit(SAMPLE_AUDIT.auditId, structuredClone(SAMPLE_AUDIT));
-  const first = defaultGraphFixture(null, { auditStore: firstStore, modelNow: () => modelNow });
-  const second = defaultGraphFixture(null, { auditStore: secondStore, modelNow: () => modelNow });
-  const createGate = deferred();
-  first.setTabCreator(async () => {
-    await createGate.promise;
-    throw new Error('native first worker failure');
-  });
-
-  const firstRequest = first.dispatch(
-    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
-    first.sender('review', SAMPLE_AUDIT.auditId),
-  );
-  while (first.createdTabs.length === 0) await tick();
-  assert.deepEqual(await second.dispatch(
-    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
-    second.sender('review', SAMPLE_AUDIT.auditId),
-  ), {
-    ok: false, auditId: SAMPLE_AUDIT.auditId, state: 'busy', code: 'EXPORT_BUSY',
-    retryable: true, retryAt: (await secondStore.getExportLeaseState(
-      SAMPLE_AUDIT.auditId, { now: modelNow },
-    )).retryAt,
-  });
-
-  createGate.resolve();
-  assert.equal((await firstRequest).code, 'EXPORT_PREPARE_FAILED');
-  second.setTabCreator((_options, callback) => callback?.({ id: 90 }));
-  const retry = await second.dispatch(
-    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
-    second.sender('review', SAMPLE_AUDIT.auditId),
-  );
-  assert.equal(retry.ok, true);
-  assert.equal(retry.exportRevision, 2);
-  assert.equal(retry.exportAttempt, 2);
-});
-
 test('real default graph deletes one/all through correlated surfaces and maps storage busy errors', async () => {
   const env = defaultGraphFixture();
   env.snapshots.set('audit-delete', { model: { auditId: 'audit-delete' }, revision: 1, capability: Object.freeze({}) });
@@ -762,26 +584,6 @@ test('real default graph deletes one/all through correlated surfaces and maps st
     { type: 'REQUEST_DELETE_AUDIT', auditId: 'audit-busy' },
     env.sender('review', 'audit-busy'),
   ), { ok: false, code: 'AUDIT_DELETE_BUSY' });
-});
-
-test('real default graph acknowledges completed export deletion only after durable absence', async () => {
-  const env = defaultGraphFixture();
-  const message = {
-    type: 'EXPORT_COMPLETE', auditId: 'audit-gone', status: 'complete',
-    formats: ['html', 'json', 'csv', 'pdf'], exportRevision: 1, exportAttempt: 2,
-    leaseOwnerId: 'export-owner-2', localAuditDeleted: true,
-  };
-  assert.deepEqual(await env.dispatch(
-    message, env.sender('export', 'audit-gone', 'export-owner-2', 2),
-  ), { ok: true });
-  assert.deepEqual(env.sent, [{ type: 'AUDIT_DELETED', auditId: 'audit-gone', reason: 'complete-export' }]);
-
-  env.snapshots.set('audit-present', { model: { auditId: 'audit-present' }, revision: 1, capability: Object.freeze({}) });
-  const present = { ...message, auditId: 'audit-present' };
-  assert.deepEqual(await env.dispatch(
-    present, env.sender('export', 'audit-present', 'export-owner-2', 2),
-  ), { ok: true });
-  assert.equal(env.sent.length, 1);
 });
 
 test('unknown URL and batch envelopes do not read, serialize, log or respond with secret fields', () => {
