@@ -370,6 +370,42 @@ test('start-first hello cannot publish running until the start journal is confir
   assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].state, 'pending');
 });
 
+test('an accessor start-journal envelope cannot authorize running publication or bootstrap consumption', async () => {
+  const env = fixture();
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  env.setActive(runningActive());
+  const bootstrapKey = panelBootstrapStorageKey(9);
+  const journalKey = 'audita:start-journal:v1';
+  env.sessionArea.values[bootstrapKey] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  let getterCalls = 0;
+  const accessorEnvelope = {};
+  Object.defineProperty(accessorEnvelope, journalKey, {
+    enumerable: true,
+    get() { getterCalls += 1; return { private: 'unsettled-start' }; },
+  });
+  const originalGet = env.sessionArea.get.bind(env.sessionArea);
+  const originalSet = env.sessionArea.set.bind(env.sessionArea);
+  let writes = 0;
+  env.sessionArea.get = async key => key === journalKey ? accessorEnvelope : originalGet(key);
+  env.sessionArea.set = async entries => { writes += 1; await originalSet(entries); };
+
+  const published = await env.coordinator.withWindowLock(9, scope => scope.publishRegisteredBootstrap({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+  }));
+
+  assert.equal(published, false);
+  assert.equal(getterCalls, 0);
+  assert.equal(writes, 0);
+  assert.equal(env.sessionArea.values[bootstrapKey].state, 'pending');
+  assert.equal(connected.messages.some(message => message.state === 'running'), false);
+});
+
 test('an idle live panel receives running only after ACTIVE exists and the start journal is absent', async () => {
   const env = fixture();
   const connected = port();
@@ -441,6 +477,180 @@ test('registerAndPublishViewOnly durably registers without a port and preserves 
   }));
   assert.deepEqual(denied, { registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' });
   assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].auditId, 'foreign-audit');
+});
+
+test('an accessor bootstrap envelope cannot be mistaken for absence and overwritten', async () => {
+  const resultBundle = await bundle();
+  const env = fixture();
+  const key = panelBootstrapStorageKey(9);
+  let getterCalls = 0;
+  const accessorEnvelope = {};
+  Object.defineProperty(accessorEnvelope, key, {
+    enumerable: true,
+    get() { getterCalls += 1; return { private: 'hostile-bootstrap' }; },
+  });
+  const originalGet = env.sessionArea.get.bind(env.sessionArea);
+  const originalSet = env.sessionArea.set.bind(env.sessionArea);
+  const originalRemove = env.sessionArea.remove.bind(env.sessionArea);
+  let writes = 0;
+  let removals = 0;
+  env.sessionArea.get = async requestedKey => requestedKey === key ? accessorEnvelope : originalGet(requestedKey);
+  env.sessionArea.set = async entries => { writes += 1; await originalSet(entries); };
+  env.sessionArea.remove = async removedKey => { removals += 1; await originalRemove(removedKey); };
+
+  const registration = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
+    auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
+    createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
+  }));
+
+  assert.deepEqual(registration, { registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' });
+  assert.equal(getterCalls, 0);
+  assert.equal(writes, 0);
+  assert.equal(removals, 0);
+  assert.equal(Object.hasOwn(env.sessionArea.values, key), false);
+});
+
+test('bootstrap storage envelopes admit only exact absent or one-key defined data shapes', async t => {
+  const resultBundle = await bundle();
+  const key = panelBootstrapStorageKey(9);
+  const oldSessionCapabilityId = 'O'.repeat(22);
+  const prior = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: oldSessionCapabilityId,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'consumed',
+  };
+
+  for (const variant of [
+    { name: 'plain empty', nullPrototype: false, present: false },
+    { name: 'null-prototype empty', nullPrototype: true, present: false },
+    { name: 'plain one-key data', nullPrototype: false, present: true },
+    { name: 'null-prototype one-key data', nullPrototype: true, present: true },
+  ]) {
+    await t.test(variant.name, async () => {
+      const env = fixture();
+      if (variant.present) {
+        env.sessions.set(oldSessionCapabilityId, session('result', oldSessionCapabilityId));
+        env.sessionArea.values[key] = structuredClone(prior);
+      }
+      if (variant.nullPrototype) {
+        const originalGet = env.sessionArea.get.bind(env.sessionArea);
+        env.sessionArea.get = async requestedKey => {
+          const source = await originalGet(requestedKey);
+          const envelope = Object.create(null);
+          if (Object.hasOwn(source, requestedKey)) {
+            Object.defineProperty(envelope, requestedKey, { enumerable: true, value: source[requestedKey] });
+          }
+          return envelope;
+        };
+      }
+
+      const registration = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
+        auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
+        createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
+      }));
+
+      assert.deepEqual(registration, { registered: true, delivered: false });
+      assert.equal(env.sessionArea.values[key].sessionCapabilityId, VIEW_SESSION);
+      assert.equal(env.sessionArea.values[key].state, 'pending');
+    });
+  }
+});
+
+test('bootstrap storage envelopes reject malformed shapes or invalid present values without effects', async t => {
+  const resultBundle = await bundle();
+  const key = panelBootstrapStorageKey(9);
+  const oldSessionCapabilityId = 'O'.repeat(22);
+  const prior = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: oldSessionCapabilityId,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'consumed',
+  };
+  const cases = [
+    ['accessor', getterState => {
+      const value = {};
+      Object.defineProperty(value, key, {
+        enumerable: true,
+        get() { getterState.calls += 1; return prior; },
+      });
+      return value;
+    }],
+    ['non-enumerable', () => {
+      const value = {};
+      Object.defineProperty(value, key, { enumerable: false, value: prior });
+      return value;
+    }],
+    ['symbol', () => ({ [key]: prior, [Symbol('private')]: true })],
+    ['extra key', () => ({ [key]: prior, extra: true })],
+    ['wrong key', () => ({ other: prior })],
+    ['custom prototype', () => Object.assign(Object.create({ inherited: true }), { [key]: prior })],
+    ['explicit undefined', () => ({ [key]: undefined })],
+    ['defined null row', () => ({ [key]: null })],
+    ['array', () => []],
+    ['primitive', () => 7],
+    ['ownKeys failure', () => new Proxy({ [key]: prior }, {
+      ownKeys() { throw new Error('PRIVATE_OWN_KEYS_FAILURE'); },
+    })],
+    ['descriptor failure', () => new Proxy({ [key]: prior }, {
+      getOwnPropertyDescriptor() { throw new Error('PRIVATE_DESCRIPTOR_FAILURE'); },
+    })],
+  ];
+
+  for (const [name, createEnvelope] of cases) {
+    await t.test(name, async () => {
+      const env = fixture();
+      env.sessions.set(oldSessionCapabilityId, session('result', oldSessionCapabilityId));
+      const getterState = { calls: 0 };
+      const envelope = createEnvelope(getterState);
+      const originalGet = env.sessionArea.get.bind(env.sessionArea);
+      const originalSet = env.sessionArea.set.bind(env.sessionArea);
+      const originalRemove = env.sessionArea.remove.bind(env.sessionArea);
+      let writes = 0;
+      let removals = 0;
+      env.sessionArea.get = async requestedKey => requestedKey === key ? envelope : originalGet(requestedKey);
+      env.sessionArea.set = async entries => { writes += 1; await originalSet(entries); };
+      env.sessionArea.remove = async removedKey => { removals += 1; await originalRemove(removedKey); };
+
+      const registration = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
+        auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
+        createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
+      }));
+
+      assert.deepEqual(registration, { registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' });
+      assert.equal(getterState.calls, 0);
+      assert.equal(writes, 0);
+      assert.equal(removals, 0);
+    });
+  }
+});
+
+test('view-only registration preserves observable bootstrap drift immediately before replacement set', async () => {
+  const resultBundle = await bundle();
+  const key = panelBootstrapStorageKey(9);
+  const foreign = {
+    version: 1, kind: 'audit-session', auditId: 'foreign-audit', sessionCapabilityId: 'F'.repeat(22),
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  let sessionArea;
+  let activeReads = 0;
+  const env = fixture({
+    readActiveJob: async () => {
+      activeReads += 1;
+      if (activeReads === 2) sessionArea.values[key] = structuredClone(foreign);
+      return null;
+    },
+  });
+  sessionArea = env.sessionArea;
+  const originalSet = env.sessionArea.set.bind(env.sessionArea);
+  let writes = 0;
+  env.sessionArea.set = async entries => { writes += 1; await originalSet(entries); };
+
+  const registration = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
+    auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
+    createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
+  }));
+
+  assert.equal(activeReads, 2);
+  assert.deepEqual(registration, { registered: false, delivered: false, code: 'AUDIT_RECOVERY_REQUIRED' });
+  assert.equal(writes, 0);
+  assert.deepEqual(env.sessionArea.values[key], foreign);
 });
 
 test('view-only pending registration reconciles a landed write when its first confirmation read throws', async () => {

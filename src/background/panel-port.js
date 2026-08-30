@@ -56,6 +56,20 @@ function own(value, key) {
   } catch { return undefined; }
 }
 
+function parseStorageEnvelope(value, key) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length === 0) return Object.freeze({ present: false, value: null });
+    if (keys.length !== 1 || keys[0] !== key) return null;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value') || descriptor.value === undefined) return null;
+    return Object.freeze({ present: true, value: descriptor.value });
+  } catch { return null; }
+}
+
 function safeChromeId(value) { return Number.isSafeInteger(value) && value >= 0; }
 function safeEpoch(value) { return Number.isSafeInteger(value) && value >= 0; }
 
@@ -204,9 +218,10 @@ export function createPanelPortCoordinator(raw) {
     const read = async () => {
       const envelope = await input.sessionArea.get(key);
       reassert(assertOwned);
-      const rawValue = own(envelope, key);
-      if (rawValue === undefined) return null;
-      const value = parseBootstrap(rawValue);
+      const parsed = parseStorageEnvelope(envelope, key);
+      if (!parsed) throw new Error('PANEL_BOOTSTRAP_DENIED');
+      if (!parsed.present) return null;
+      const value = parseBootstrap(parsed.value);
       if (!value) throw new Error('PANEL_BOOTSTRAP_DENIED');
       return value;
     };
@@ -271,6 +286,14 @@ export function createPanelPortCoordinator(raw) {
     const operation = Object.freeze({ previous, candidate });
     const rollback = () => reconcileBootstrapReplacement(operation, assertOwned);
     try {
+      const current = await readBootstrap(candidate.windowId, assertOwned);
+      reassert(assertOwned);
+      if (!same(current, previous)) return replacementOutcome('recovery-required', null);
+    } catch (error) {
+      if (error === scopeDeniedSentinel) throw error;
+      return replacementOutcome('recovery-required', null);
+    }
+    try {
       reassert(assertOwned);
       await input.sessionArea.set({ [panelBootstrapStorageKey(candidate.windowId)]: candidate });
       reassert(assertOwned);
@@ -312,14 +335,16 @@ export function createPanelPortCoordinator(raw) {
     const read = async () => {
       const envelope = await input.sessionArea.get(START_JOURNAL_KEY);
       reassert(assertOwned);
-      return own(envelope, START_JOURNAL_KEY);
+      const parsed = parseStorageEnvelope(envelope, START_JOURNAL_KEY);
+      if (!parsed) throw new Error('PANEL_START_JOURNAL_DENIED');
+      return parsed.present;
     };
     const first = await read();
     reassert(assertOwned);
-    if (first !== undefined) return false;
+    if (first) return false;
     const second = await read();
     reassert(assertOwned);
-    return second === undefined;
+    return !second;
   }
 
   function snapshotSender(port) {
