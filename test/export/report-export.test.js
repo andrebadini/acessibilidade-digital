@@ -156,6 +156,7 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   const persisted = await persistExportSuccess(createExportSuccessRequest({ auditId:model.auditId,result,latest:{auditId:model.auditId} }),store);
   assert.equal(persisted.latest.exportStatus,'complete'); assert.equal(persisted.latest.exportRevision,snapshot.revision+1);
   assert.deepEqual(persisted.latest.deliveryReceipt.formats.map(row=>row.format),EXPORT_FORMATS_V1);
+  const durableAfterControl = [await store.getAuditSnapshot(model.auditId), await store.getLatest(), persisted.latest.deliveryReceipt];
   // The control above consumed an unmodified, privately attested result.  This
   // mutation keeps that same object identity, so failure proves attestation
   // revalidation rather than structuredClone losing its private capability.
@@ -163,11 +164,13 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   result.html += 'tampered';
   const tampered = createExportSuccessRequest({ auditId: model.auditId, result, latest: {} });
   await assert.rejects(persistExportSuccess(tampered, store), /hash|proveniência|artefatos/i);
+  assert.deepEqual([await store.getAuditSnapshot(model.auditId), await store.getLatest(), persisted.latest.deliveryReceipt], durableAfterControl);
   result.html = originalHtml;
   const originalIdentity = result.exportDeliveryIdentity;
   result.exportDeliveryIdentity = { ...originalIdentity, modelRevision: originalIdentity.modelRevision + 1 };
   const wrongRevision = createExportSuccessRequest({ auditId: model.auditId, result, latest: {} });
   await assert.rejects(persistExportSuccess(wrongRevision, store), /identidade|revisão|proveniência/i);
+  assert.deepEqual([await store.getAuditSnapshot(model.auditId), await store.getLatest(), persisted.latest.deliveryReceipt], durableAfterControl);
   result.exportDeliveryIdentity = originalIdentity;
   assert.equal((result.html.match(/<h2\b/gu) ?? []).length, 7);
   assert.equal((result.html.match(/Câmara dos Deputados/gu) ?? []).length, 2);
