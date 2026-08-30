@@ -39,6 +39,7 @@ const FAILURE_CODES = new Set(['PRIVACY_PAUSED', 'TARGET_CHANGED', 'AUDIT_FAILED
 const TARGET_REASONS = new Set(['TAB_LOADING', 'TAB_URL_CHANGED', 'TAB_PENDING_URL', 'TAB_REMOVED', 'WINDOW_REMOVED']);
 const TARGET_UNAVAILABLE_SENTINEL = Object.freeze(Object.create(null));
 const AUDIT_REVOKED_SENTINEL = Object.freeze(Object.create(null));
+const AUDIT_CANCELLATION_PENDING_SENTINEL = Object.freeze(Object.create(null));
 
 function freeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value)) return value;
@@ -400,6 +401,9 @@ export function createAuthorizedAuditStarter(input) {
       const current = await readActiveAuditJobForWorker({ sessionArea });
       if (!current || current.auditId !== liveRecord.active.auditId || current.state !== 'running' || liveRecord.externallyInvalidated) {
         throw AUDIT_REVOKED_SENTINEL;
+      }
+      if (liveRecord.controller.signal.aborted && candidate.model.session.status !== 'cancelled') {
+        throw AUDIT_CANCELLATION_PENDING_SENTINEL;
       }
       const updatedAt = safeEpoch(epochNow);
       const pending = freeze({

@@ -121,6 +121,10 @@ function deniedRegistration() {
   return Object.freeze({ registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' });
 }
 
+function recoveryRequiredRegistration() {
+  return Object.freeze({ registered: false, delivered: false, code: 'AUDIT_RECOVERY_REQUIRED' });
+}
+
 export function createPanelPortCoordinator(raw) {
   const input = exact(raw, FACTORY_KEYS);
   if (!input || typeof input.chromeApi?.runtime?.id !== 'string' || typeof input.chromeApi.runtime.getContexts !== 'function' ||
@@ -386,24 +390,35 @@ export function createPanelPortCoordinator(raw) {
 
   async function recoverTerminal(binding, bootstrap, session) {
     let minted = null;
+    let replacement = null;
     try {
       if (await readActive() !== null || !['result', 'view-only', 'revoked'].includes(session.state)) throw new Error('PANEL_TERMINAL_DENIED');
       const resultBundle = copyPanelResultBundleV1(await input.loadPanelResultBundle({ auditId: bootstrap.auditId }));
+      if (await readActive() !== null) throw new Error('PANEL_TERMINAL_DENIED');
       minted = await input.rehydrateViewOnly({ auditId: bootstrap.auditId, windowId: bootstrap.windowId, mode: 'attached' });
+      if (await readActive() !== null) throw new Error('PANEL_TERMINAL_DENIED');
       if (minted?.ok !== true || minted.auditId !== bootstrap.auditId || !CAPABILITY.test(minted.sessionCapabilityId ?? '') ||
         !safeEpoch(minted.expiresAt)) throw new Error('PANEL_TERMINAL_DENIED');
       const createdAt = input.epochNow();
       if (!safeEpoch(createdAt) || createdAt >= minted.expiresAt) throw new Error('PANEL_TERMINAL_DENIED');
-      const replacement = await writeBootstrap({
+      if (await readActive() !== null) throw new Error('PANEL_TERMINAL_DENIED');
+      replacement = Object.freeze({
         version: 1, kind: 'audit-session', auditId: bootstrap.auditId,
         sessionCapabilityId: minted.sessionCapabilityId, windowId: bootstrap.windowId,
         createdAt, expiresAt: minted.expiresAt, state: 'consumed',
       });
-      if (!await reprove(binding) || await readActive() !== null) throw new Error('PANEL_TERMINAL_DENIED');
+      replacement = await writeBootstrap(replacement);
+      if (await readActive() !== null) throw new Error('PANEL_TERMINAL_DENIED');
+      if (!await reprove(binding)) throw new Error('PANEL_TERMINAL_DENIED');
+      if (await readActive() !== null) throw new Error('PANEL_TERMINAL_DENIED');
       send(binding, packet('view-only', replacement.auditId, replacement.sessionCapabilityId, resultBundle));
       bind(binding, replacement.windowId, 'bound-session', replacement.auditId, replacement.sessionCapabilityId);
       return true;
     } catch {
+      if (replacement !== null) {
+        try { await restoreBootstrap(bootstrap, replacement, null); }
+        catch { /* publication remains denied */ }
+      }
       if (minted?.ok === true && CAPABILITY.test(minted.sessionCapabilityId ?? '')) {
         let revoked = false;
         try { revoked = await input.revokeViewOnly({ sessionCapabilityId: minted.sessionCapabilityId, auditId: bootstrap.auditId }); }
@@ -637,10 +652,14 @@ export function createPanelPortCoordinator(raw) {
         if (error === activeConflictSentinel) {
           if (replacement) {
             try {
-              await restoreBootstrap(previous, replacement, assertOwned);
+              const restored = await restoreBootstrap(previous, replacement, assertOwned);
               assertOwned();
+              if (!restored) return recoveryRequiredRegistration();
             }
-            catch (restoreError) { if (restoreError === scopeDeniedSentinel) throw restoreError; }
+            catch (restoreError) {
+              if (restoreError === scopeDeniedSentinel) throw restoreError;
+              return recoveryRequiredRegistration();
+            }
           }
           return deniedRegistration();
         }

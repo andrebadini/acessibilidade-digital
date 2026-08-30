@@ -279,3 +279,21 @@ test('registration exception revokes durable session while registered success re
     assert.equal(calls.some(([name]) => name === 'revoke'), false);
   });
 });
+
+test('unconfirmed coordinator rollback remains recovery-required after minted-session revocation succeeds', async () => {
+  const { router, durableSessions } = fixture({
+    panelScopeOverrides: {
+      async registerAndPublishViewOnly() {
+        return { registered: false, delivered: false, code: 'AUDIT_RECOVERY_REQUIRED' };
+      },
+    },
+  });
+
+  const response = await router.dispatch({
+    envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-bootstrap-recovery' }),
+    sender: panelSender(),
+  });
+
+  assert.deepEqual(response, { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' });
+  assert.deepEqual(durableSessions.get(SESSION), { auditId: 'audit-bootstrap-recovery', state: 'revoked' });
+});

@@ -228,6 +228,7 @@ export function createSidePanelIntentRouter(raw) {
 
   async function rehydrate(envelope, sender) {
     let minted = null;
+    let recoveryRequired = false;
     try {
       const reportRevision = await input.readReportRevision({ auditId: envelope.auditId });
       if (!reportRevision) return fail('AUDIT_REHYDRATE_DENIED');
@@ -246,7 +247,13 @@ export function createSidePanelIntentRouter(raw) {
             windowId: context.windowId, createdAt, expiresAt: minted.expiresAt, resultBundle,
           }));
       } catch { registration = null; }
-      if (registration?.registered !== true || typeof registration.delivered !== 'boolean') throw new Error('register-denied');
+      const registered = exact(registration, ['registered', 'delivered']);
+      if (!registered || registered.registered !== true || typeof registered.delivered !== 'boolean') {
+        const denied = exact(registration, ['registered', 'delivered', 'code']);
+        recoveryRequired = denied?.registered === false && denied.delivered === false &&
+          denied.code === 'AUDIT_RECOVERY_REQUIRED';
+        throw new Error('register-denied');
+      }
       return freeze({ ok: true, auditId: envelope.auditId, state: 'view-only' });
     } catch {
       if (minted?.ok === true && CAPABILITY.test(minted.sessionCapabilityId ?? '')) {
@@ -259,6 +266,7 @@ export function createSidePanelIntentRouter(raw) {
         } catch { /* cleanup remains unconfirmed */ }
         if (revoked !== true) return fail('AUDIT_RECOVERY_REQUIRED');
       }
+      if (recoveryRequired) return fail('AUDIT_RECOVERY_REQUIRED');
       return fail('AUDIT_REHYDRATE_DENIED');
     }
   }

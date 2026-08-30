@@ -523,6 +523,57 @@ test('view-only registration rechecks ACTIVE after reproof and before publicatio
   assert.deepEqual(env.getActive(), foreignRunningActive());
 });
 
+test('view-only registration reports recovery-required when removing its replacement cannot be confirmed', async () => {
+  const resultBundle = await bundle();
+  const env = fixture();
+  const originalSet = env.sessionArea.set.bind(env.sessionArea);
+  env.sessionArea.set = async entries => {
+    await originalSet(entries);
+    env.setActive(foreignRunningActive());
+  };
+  env.sessionArea.remove = async removedKey => {
+    assert.equal(removedKey, panelBootstrapStorageKey(9));
+  };
+
+  const registration = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
+    auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
+    createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
+  }));
+
+  assert.deepEqual(registration, { registered: false, delivered: false, code: 'AUDIT_RECOVERY_REQUIRED' });
+  assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].sessionCapabilityId, VIEW_SESSION);
+  assert.deepEqual(env.getActive(), foreignRunningActive());
+});
+
+test('view-only registration reports recovery-required when restoring its exact prior bootstrap throws', async () => {
+  const resultBundle = await bundle();
+  const env = fixture();
+  const oldSessionCapabilityId = 'O'.repeat(22);
+  env.sessions.set(oldSessionCapabilityId, session('result', oldSessionCapabilityId));
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: oldSessionCapabilityId,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'consumed',
+  };
+  const originalSet = env.sessionArea.set.bind(env.sessionArea);
+  let writes = 0;
+  env.sessionArea.set = async entries => {
+    writes += 1;
+    if (writes === 2) throw new Error('PRIVATE_RESTORE_FAILURE');
+    await originalSet(entries);
+    env.setActive(foreignRunningActive());
+  };
+
+  const registration = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
+    auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
+    createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
+  }));
+
+  assert.deepEqual(registration, { registered: false, delivered: false, code: 'AUDIT_RECOVERY_REQUIRED' });
+  assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].sessionCapabilityId, VIEW_SESSION);
+  assert.deepEqual(env.getActive(), foreignRunningActive());
+  assert.doesNotMatch(JSON.stringify(registration), /PRIVATE_RESTORE_FAILURE/u);
+});
+
 test('a live view-only send failure remains durably registered for reconnect', async () => {
   const resultBundle = await bundle();
   const env = fixture();
@@ -609,4 +660,95 @@ test('terminal hello rotates to a fresh view-only session and sends a bearer-fre
   assert.equal(connected.messages[0].result.auditId, 'audit-port');
   assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].sessionCapabilityId, VIEW_SESSION);
   assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].state, 'consumed');
+});
+
+test('terminal hello restores its exact prior bootstrap when foreign ACTIVE appears during replacement write', async () => {
+  const resultBundle = await bundle();
+  const env = fixture({ loadPanelResultBundle: async () => resultBundle });
+  env.sessions.set(SESSION, session('result'));
+  const prior = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'consumed',
+  };
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = structuredClone(prior);
+  const originalSet = env.sessionArea.set.bind(env.sessionArea);
+  env.sessionArea.set = async entries => {
+    await originalSet(entries);
+    env.setActive(foreignRunningActive());
+  };
+  const connected = port();
+
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+
+  assert.equal(connected.messages.length, 0);
+  assert.equal(connected.disconnects, 1);
+  assert.deepEqual(env.revoked, [{ sessionCapabilityId: VIEW_SESSION, auditId: 'audit-port' }]);
+  assert.deepEqual(env.getActive(), foreignRunningActive());
+  assert.deepEqual(env.sessionArea.values[panelBootstrapStorageKey(9)], prior);
+});
+
+test('terminal hello restores its exact prior bootstrap when foreign ACTIVE appears during final reproof', async () => {
+  const resultBundle = await bundle();
+  const env = fixture({ loadPanelResultBundle: async () => resultBundle });
+  env.sessions.set(SESSION, session('result'));
+  const prior = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = structuredClone(prior);
+  let contextReads = 0;
+  env.chromeApi.runtime.getContexts = async ({ documentIds }) => {
+    contextReads += 1;
+    if (contextReads === 3) env.setActive(foreignRunningActive());
+    return [{
+      documentId: documentIds[0], documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`,
+      contextType: 'SIDE_PANEL', windowId: 9,
+    }];
+  };
+  const connected = port();
+
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+
+  assert.equal(contextReads, 3);
+  assert.equal(connected.messages.length, 0);
+  assert.equal(connected.disconnects, 1);
+  assert.deepEqual(env.revoked, [{ sessionCapabilityId: VIEW_SESSION, auditId: 'audit-port' }]);
+  assert.deepEqual(env.getActive(), foreignRunningActive());
+  assert.deepEqual(env.sessionArea.values[panelBootstrapStorageKey(9)], prior);
+});
+
+test('terminal hello denies publication and preserves its replacement when rollback cannot be confirmed', async () => {
+  const resultBundle = await bundle();
+  const env = fixture({ loadPanelResultBundle: async () => resultBundle });
+  env.sessions.set(SESSION, session('result'));
+  const prior = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'consumed',
+  };
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = structuredClone(prior);
+  const originalSet = env.sessionArea.set.bind(env.sessionArea);
+  let writes = 0;
+  env.sessionArea.set = async entries => {
+    writes += 1;
+    if (writes === 1) {
+      await originalSet(entries);
+      env.setActive(foreignRunningActive());
+    }
+  };
+  const connected = port();
+
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+
+  assert.equal(writes, 2);
+  assert.equal(connected.messages.length, 0);
+  assert.equal(connected.disconnects, 1);
+  assert.deepEqual(env.revoked, [{ sessionCapabilityId: VIEW_SESSION, auditId: 'audit-port' }]);
+  assert.deepEqual(env.getActive(), foreignRunningActive());
+  assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].sessionCapabilityId, VIEW_SESSION);
 });

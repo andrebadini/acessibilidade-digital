@@ -610,6 +610,69 @@ test('commits a canonical cancelled model exactly once when the runner bypasses 
   assert.equal(commits, 1);
 });
 
+test('an accepted user cancellation wins before ACTIVE enters finalizing and commits only the cancelled model', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const auditId = 'audit-cancel-before-finalizing';
+  const terminal = await reportFixture(auditId);
+  const cancelled = await reportFixture(auditId, 'cancelled');
+  const reportByAudit = new Map();
+  const committedStatuses = [];
+  let releaseBundle;
+  let reachedBundle;
+  const bundleReached = new Promise(resolve => { reachedBundle = resolve; });
+  const bundleGate = new Promise(resolve => { releaseBundle = resolve; });
+  const execution = async ({ onCheckpoint, persistAuditModel }) => {
+    await onCheckpoint(terminal.checkpoint);
+    try {
+      await persistAuditModel(terminal.model);
+      assert.fail('the pre-cancel terminal candidate must not commit');
+    } catch {
+      await onCheckpoint(cancelled.checkpoint);
+      return Object.freeze({
+        version: 1, auditId, state: 'model', failureCode: null,
+        model: cancelled.model, checkpoint: cancelled.checkpoint,
+      });
+    }
+  };
+  const dependencies = dependencyFixture({ area, authority: prepared.authority, execution, reportByAudit });
+  const commit = dependencies.commitTerminalAudit;
+  dependencies.commitTerminalAudit = async value => {
+    committedStatuses.push(value.model.session.status);
+    return commit(value);
+  };
+  dependencies.buildPanelResultBundle = async ({ reportRevision }) => {
+    if (reportRevision.model.session.status !== 'cancelled') {
+      reachedBundle();
+      await bundleGate;
+    }
+    return createPanelResultBundleV1({ reportRevision, inventory: terminal.inventory });
+  };
+  const starter = createAuthorizedAuditStarter(dependencies);
+  const started = await starter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+  await bundleReached;
+
+  const cancellation = await starter.abortAuthorizedAudit({
+    auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9, reasonCode: 'USER_CANCELLED',
+  });
+  releaseBundle();
+  const completion = await started.completion;
+
+  assert.deepEqual(cancellation, { ok: true, auditId, state: 'cancelling' });
+  assert.deepEqual(completion, { ok: true, auditId, state: 'result', revision: 1 });
+  assert.deepEqual(committedStatuses, ['cancelled']);
+  assert.equal(reportByAudit.get(auditId).model.session.status, 'cancelled');
+  const session = await readAuditSessionForWorker({
+    sessionArea: area, sessionCapabilityId: started.sessionCapabilityId, auditId,
+  });
+  assert.equal(session.state, 'result');
+  assert.equal(Object.hasOwn(area.values, ACTIVE_AUDIT_JOB_KEY), false);
+});
+
 test('finalizing fallback reconciles a witnessed commit after the commit adapter return is denied', async () => {
   const area = sessionArea();
   const prepared = await authorityFixture(area);
