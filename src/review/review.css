@@ -85,6 +85,15 @@ dialog:not([open]) { display: none; }
 .dialog-actions button { flex: 1 1 10rem; min-height: 2.75rem; }
 @media (min-width: 48rem) { .report-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); } [data-report-evidence-preview] { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 32rem) { main { padding: .75rem; } .dialog-actions { flex-direction: column; } .report-filters { grid-template-columns: 1fr; } .report-identity, .report-view > section { padding: .85rem; } .section-nav { align-items: flex-start; flex-direction: column; } .section-nav ul { width: 100%; } }
-@media print { .executive-actions, .section-nav, .report-filters, .review-controls { display: none !important; } [data-report-technical]:not([open]) > *:not(summary), [data-report-limitations]:not([open]) > *:not(summary) { display: block !important; } [data-report-evidence-preview] figure, [data-report-issue], [data-report-evidence] { break-inside: avoid; } }
+@media print {
+  .executive-actions, .section-nav, .report-filters, .review-controls { display: none !important; }
+  [data-report-technical]:not([open]) > *:not(summary), [data-report-limitations]:not([open]) > *:not(summary) { display: block !important; }
+  [data-report-evidence-preview] figure[data-evidence-kind="element"] { break-inside: avoid; }
+  [data-report-evidence-preview] figure[data-evidence-kind="full-page"] { break-inside: auto; }
+  [data-report-evidence-preview] figcaption { break-inside: avoid; break-before: avoid; }
+  [data-evidence-kind="full-page"] > .evidence-media { display: block; width: 100%; max-height: 210mm; object-fit: contain; object-position: top center; }
+  [data-report-issue], [data-report-technical], [data-report-limitations], [data-report-evidence] { break-inside: auto; }
+  [data-report-issue-heading], [data-report-evidence] > h4, summary { break-after: avoid; }
+}
 @media (forced-colors: active) { button, input, textarea, .review-controls, .review-card, dialog, .report-identity, .report-view > section, [data-report-metric], [data-report-issue], [data-report-evidence-preview] figure, [data-report-evidence], .section-nav a, .report-filters [role="group"], .report-view th, .report-view td { border-color: CanvasText; } .report-filters button[aria-pressed="true"], [data-report-executive-actions] button { background: Highlight; color: HighlightText; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }

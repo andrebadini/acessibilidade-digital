@@ -46,9 +46,10 @@ function matches(node, selector) {
   return true;
 }
 
-async function fixture() {
+async function fixture({ mutateDraft } = {}) {
   const inventory = await createInstalledCoreRuleInventory();
   const draft = structuredClone(SAMPLE_AUDIT);
+  mutateDraft?.(draft);
   draft.integrity.canonicalModelHash = 'pending';
   draft.integrity.evidenceManifestHash = 'pending';
   const model = await enrichAuditForReport(draft, {
@@ -97,9 +98,56 @@ test('ReportViewV1 owns exact frozen copies and the canonical four-format order'
   });
   assert.equal(Object.isFrozen(failed.plainLanguage), true);
   assert.equal(Object.isFrozen(failed.plainLanguage.observed), true);
-  assert.match(view.issues.humanReview[0].plainLanguage.impact, /ainda não há conclusão/iu);
+  const humanReview = view.issues.humanReview[0];
+  const passed = view.issues.passed[0];
+  assert.match(humanReview.plainLanguage.impact, /ainda não há conclusão/iu);
+  assert.equal(humanReview.plainLanguage.correction,
+    'Realize a verificação humana indicada, registre as condições observadas e conclua se o requisito foi atendido, não atendido ou permaneceu inconclusivo.');
+  assert.equal(passed.plainLanguage.correction,
+    'Nenhuma correção é indicada para este resultado positivo no escopo observado.');
+  assert.doesNotMatch(passed.plainLanguage.correction, /corrija|revise|aplique/iu);
   const observed = Object.values(view.issues).flatMap(cards => cards.map(card => card.plainLanguage.observed));
   assert.doesNotMatch(JSON.stringify(observed), /top-document|mixed|page-or-process/u);
+});
+
+test('ReportViewV1 keeps qualified remediation and uses a prudent alert fallback', async () => {
+  const canonicalRemediation = 'Forneça um indicador de foco visível.';
+  const { model, summary } = await fixture({
+    mutateDraft(draft) {
+      const coreRule = draft.ruleResults.find(rule => rule.ruleId === 'focus-visible');
+      coreRule.targets = [{
+        nodeId: 'n-1', message: canonicalRemediation,
+        data: { reason: 'focus-indicator-not-visible' },
+      }];
+      draft.methodology.supplementalRuleCount += 1;
+      draft.methodology.ruleCount += 1;
+      draft.ruleResults.push({
+        ruleId: 'editorial.placeholder-text', outcome: 'failed', mode: 'automated',
+        classification: 'editorial', impact: 'minor', confidence: 'high',
+        source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
+        nbrItems: [], wcag: [], targets: [{
+          nodeId: 'n-editorial', selectorHint: '', message: 'Substitua o conteúdo provisório antes da publicação.',
+          data: { reason: 'placeholder-text' },
+        }],
+        summary: 'Há conteúdo provisório inequívoco na página.', limitations: [],
+      });
+      draft.occurrences.push({
+        occurrenceId: 'occ-editorial', pageId: 'page-1', outcome: 'failed',
+        classification: 'editorial', impact: 'minor', confidence: 'high',
+        source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
+        nbrItemRef: null, itemWcagRefs: [], sourceWcagRefs: [], testedWcagRefs: [], wcagRefs: [], foreignBenchmarkRefs: [],
+        target: { nodeId: 'n-editorial', selector: null, framePath: [] }, accessiblePreview: null,
+        evidenceRefs: [], legalAnalysis: null, itemId: null, ruleId: 'editorial.placeholder-text',
+        mode: 'automated', nodeId: 'n-editorial', evidenceIds: [],
+        justification: 'Há conteúdo provisório inequívoco na página.',
+      });
+    },
+  });
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  assert.equal(view.issues.failed[0].remediation, canonicalRemediation);
+  assert.equal(view.issues.failed[0].plainLanguage.correction, canonicalRemediation);
+  assert.equal(view.issues.alerts[0].plainLanguage.correction,
+    'Revise o alerta no contexto da página e, se a barreira for confirmada, aplique a orientação técnica antes de repetir a auditoria.');
 });
 
 test('ReportViewV1 rejects foreign summary, revision/hash drift and hostile inputs without side effects', async () => {
@@ -251,9 +299,13 @@ test('live report renders decision-first cards, evidence previews and honest evi
   assert.equal(firstIssue.querySelector('[data-report-consult-evidence]').getAttribute('href'), '#report-evidence-1');
   assert.equal(root.querySelectorAll('button[data-report-highlight]').length, 0);
   assert.doesNotMatch(root.textContent, /Destacar (?:ao vivo|na página)/iu);
+  const positiveIssue = root.querySelector('[data-report-issue][data-result="passed"]');
+  assert.match(positiveIssue.querySelector('[data-report-plain-block="correction"]').textContent, /Nenhuma correção é indicada/iu);
+  assert.doesNotMatch(positiveIssue.querySelector('[data-report-plain-block="correction"]').textContent, /após a correção/iu);
   assert.equal(root.querySelectorAll('[data-report-evidence]').length, view.technicalEvidence.length);
   assert.deepEqual(root.querySelectorAll('[data-report-evidence]').map(node => node.getAttribute('id')),
     view.technicalEvidence.map((_evidence, index) => `report-evidence-${index + 1}`));
+  assert.equal(root.querySelector('[data-report-evidence="ev-full"]').getAttribute('data-evidence-kind'), 'full-page');
   assert.equal(root.querySelectorAll('[id]').some(node => /capability|lease|tab|window|document|chrome/iu.test(node.getAttribute('id'))), false);
   const sources = root.querySelectorAll('[data-official-source]');
   assert.equal(sources.length, 2);
@@ -285,4 +337,7 @@ test('review CSS keeps the summary and evidence usable from 320px through deskto
   assert.match(css, /\[data-report-metric\] \.metric-value[^{]*\{[^}]*font-size:\s*clamp/isu);
   assert.match(css, /@media\s*\(forced-colors:\s*active\)/iu);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/iu);
+  assert.match(css, /@media\s+print[^]*?\[data-report-evidence-preview\] figure\[data-evidence-kind="full-page"\][^{]*\{[^}]*break-inside:\s*auto/isu);
+  assert.match(css, /@media\s+print[^]*?\[data-evidence-kind="full-page"\]\s*>\s*\.evidence-media[^{]*\{[^}]*max-height:\s*210mm[^}]*object-fit:\s*contain/isu);
+  assert.match(css, /@media\s+print[^]*?\[data-report-issue\][^}]*\[data-report-technical\][^}]*\[data-report-evidence\][^{]*\{[^}]*break-inside:\s*auto/isu);
 });

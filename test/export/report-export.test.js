@@ -201,6 +201,7 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   assert.match(result.html, /Resultado consolidado: Não atendido neste teste/u);
   assert.doesNotMatch(result.html, /Resultado consolidado: failed|Impacto:<\/strong> moderate|Classificação:<\/strong> failed/u);
   assert.equal((result.html.match(/<img class="evidence-media" src="data:image\/png;base64,/gu) ?? []).length >= 2, true);
+  assert.match(result.html, /data-report-evidence="ev-full" data-evidence-kind="full-page"/u);
   assert.match(result.html, /ev-control[\s\S]*ev-full|ev-full[\s\S]*ev-control/u);
   assert.match(result.html, /<nav class="section-nav" aria-label="Seções do relatório">/u);
   for (let index = 1; index <= 7; index += 1) {
@@ -209,6 +210,12 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   }
   assert.doesNotMatch(result.html, /<script\b|script-src/iu);
   assert.match(result.html, /<body class="report-view-document">/u);
+  const printableBody = result.html.slice(result.html.indexOf('<body class="report-view-document">'));
+  const printableHeading = printableBody.indexOf('<h1>Relatório de auditoria de acessibilidade</h1>');
+  const printableIdentity = printableBody.indexOf(`<p class="report-static-identity">Escopo avaliado: ${model.finalUrl}.</p>`);
+  const printableSummary = printableBody.indexOf('id="report-section-1"');
+  assert.equal(printableHeading >= 0 && printableHeading < printableIdentity && printableIdentity < printableSummary, true,
+    'o documento imprimível deve começar semanticamente pelo h1 e preservar a URL final antes do sumário');
   assert.doesNotMatch(result.html, /<button\b|data-report-export|data-report-highlight/iu);
   assert.match(result.html, /Formatos desta entrega: HTML, PDF, CSV e JSON/u);
   const summaryStart = result.html.indexOf('id="report-section-1"');
@@ -229,6 +236,9 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   assert.equal((result.html.match(/<article class="occurrence-card"/gu) ?? []).length, expectedCards);
   const failedCard = result.html.match(/<article class="occurrence-card"[^>]*data-result="failed"[^]*?<\/article>/u)?.[0] ?? '';
   assert.ok(failedCard);
+  const passedCard = result.html.match(/<article class="occurrence-card"[^>]*data-result="passed"[^]*?<\/article>/u)?.[0] ?? '';
+  assert.match(passedCard, /Nenhuma correção é indicada/iu);
+  assert.doesNotMatch(passedCard, /após a correção/iu);
   const orderedMarkers = [
     'data-report-issue-heading', 'data-report-plain-block="impact"', 'data-report-plain-block="observed"',
     'data-report-plain-block="correction"', 'data-report-plain-block="announcement"',

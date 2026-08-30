@@ -33,7 +33,12 @@ const SECTION_NAV_LABELS = Object.freeze([
   'Matriz ABNT', 'Metodologia e evidências',
 ]);
 const MAX_GRAPH_NODES = 200_000;
-const FALLBACK_CORRECTION = 'Revise o elemento e aplique a orientação técnica antes de executar uma nova auditoria.';
+const FALLBACK_CORRECTIONS = Object.freeze({
+  failed: 'Revise o elemento e aplique a orientação técnica antes de executar uma nova auditoria.',
+  alerts: 'Revise o alerta no contexto da página e, se a barreira for confirmada, aplique a orientação técnica antes de repetir a auditoria.',
+  humanReview: 'Realize a verificação humana indicada, registre as condições observadas e conclua se o requisito foi atendido, não atendido ou permaneceu inconclusivo.',
+  passed: 'Nenhuma correção é indicada para este resultado positivo no escopo observado.',
+});
 
 function denied() { throw new TypeError('REPORT_VIEW_DENIED'); }
 
@@ -172,6 +177,32 @@ function plainImpact(group) {
   return 'Este resultado positivo se limita ao escopo automático que foi efetivamente observado.';
 }
 
+function plainCorrection(group, remediation) {
+  return typeof remediation === 'string' && remediation ? remediation : FALLBACK_CORRECTIONS[group];
+}
+
+function correctionPresentation(group) {
+  if (group === 'passed') {
+    return {
+      title: 'Orientação e manutenção',
+      confirmation: 'Confirmação: mantenha este registro como evidência positiva do escopo observado e reavalie se a página mudar.',
+    };
+  }
+  if (group === 'humanReview') {
+    return {
+      title: 'Como revisar e concluir',
+      confirmation: 'Confirmação: registre a decisão humana, a justificativa e as evidências consideradas.',
+    };
+  }
+  if (group === 'alerts') {
+    return {
+      title: 'Como analisar e tratar',
+      confirmation: 'Confirmação: registre se a análise confirmou uma barreira e repita a auditoria somente após eventual correção.',
+    };
+  }
+  return { title: 'Como corrigir e confirmar', confirmation: 'Confirmação: repita a verificação após a correção.' };
+}
+
 export function collectFilterOptions(model, summary) {
   const cards = GROUPS.flatMap(group => summary.groups[group].map(card => ({ ...card, result: group })));
   return freeze({
@@ -237,7 +268,7 @@ function projectCard(card, group, model, decisionByOccurrence) {
     plainLanguage: {
       impact: plainImpact(group),
       observed: [...new Set(occurrences.map(occurrence => occurrence.justification).filter(value => typeof value === 'string' && value))],
-      correction: remediation ?? FALLBACK_CORRECTION,
+      correction: plainCorrection(group, remediation),
     },
     occurrences,
   });
@@ -466,10 +497,11 @@ function issueArticle(document, issue, group, evidenceById, evidenceAnchorById) 
   const observed = plainBlock(document, 'observed', 'O que foi observado');
   appendTextList(document, observed, issue.plainLanguage.observed, 'Nenhuma justificativa adicional foi registrada.');
   article.append(observed);
-  const correction = plainBlock(document, 'correction', 'Como corrigir e confirmar');
+  const correctionCopy = correctionPresentation(group);
+  const correction = plainBlock(document, 'correction', correctionCopy.title);
   correction.append(
     element(document, 'p', `Correção: ${issue.plainLanguage.correction}`),
-    element(document, 'p', 'Confirmação: repita a verificação após a correção.'),
+    element(document, 'p', correctionCopy.confirmation),
   );
   article.append(correction);
   const announcement = plainBlock(document, 'announcement', 'Nome acessível e anúncio estimado');
@@ -683,6 +715,7 @@ export function renderReportView({ view, document, onExport } = {}) {
   sources.append(element(document, 'h3', 'Evidências técnicas e anexos'));
   for (const evidence of view.technicalEvidence) {
     const card = document.createElement('article'); card.setAttribute('data-report-evidence', evidence.evidenceId);
+    card.setAttribute('data-evidence-kind', evidence.kind);
     card.setAttribute('id', evidenceAnchorById.get(evidence.evidenceId));
     card.append(
       element(document, 'h4', `${evidence.evidenceId} — ${evidenceKindLabel(evidence.kind)}`),

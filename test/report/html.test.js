@@ -510,13 +510,29 @@ test('renders a complete no-JS source, one live region and independent print saf
   assert.match(html, /@media \(forced-colors:active\)/u);
   assert.match(html, /@media \(prefers-reduced-motion:reduce\)/u);
   assert.match(html, /select,button\{[^}]*min-height:44px/u);
-  assert.match(html, /\[data-report-metrics\]\{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/u);
-  assert.match(html, /@media \(min-width:48rem\)\{[^]*?\[data-report-metrics\]\{[^}]*grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/u);
+  assert.match(html, /\[data-report-metrics\]\.summary-grid\{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/u);
+  assert.match(html, /@media \(min-width:48rem\)\{[^]*?\[data-report-metrics\]\.summary-grid\{[^}]*grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/u);
+  const metricsSelector = html.match(/(\[data-report-metrics\]\.summary-grid)\{[^}]*grid-template-columns:repeat\(2/u)?.[1] ?? '';
+  const inheritedSummarySelector = html.match(/(\.summary-grid)\{grid-template-columns:repeat\(5/u)?.[1] ?? '';
+  const selectorSpecificity = selector => (selector.match(/\[[^\]]+\]|\.[A-Za-z0-9_-]+/gu) ?? []).length;
+  const metricsSpecificity = selectorSpecificity(metricsSelector);
+  const inheritedSummarySpecificity = selectorSpecificity(inheritedSummarySelector);
+  assert.equal(metricsSpecificity > inheritedSummarySpecificity, true,
+    'a grade de métricas deve vencer as regras responsivas genéricas de .summary-grid no cascade real');
   assert.match(html, /\[data-report-evidence-preview\]\{[^}]*grid-template-columns:minmax\(0,1fr\)/u);
   assert.match(html, /@media \(min-width:48rem\)[^]*?\[data-report-evidence-preview\]\{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/u);
   assert.match(html, /@media print\{[^]*?\[data-report-technical\]:not\(\[open\]\)>\*:not\(summary\),\[data-report-limitations\]:not\(\[open\]\)>\*:not\(summary\)\{display:block!important\}/u);
   assert.match(html, /@media print\{[^]*?\.report-view-document \.report-header[^}]*display:none!important/u);
-  assert.match(html, /@media print\{[^]*?\[data-report-evidence-preview\] figure[^}]*break-inside:avoid/u);
+  const printCss = html.match(/@media print\{([^]*?)\}\s*@media \(max-width:/u)?.[1] ?? '';
+  assert.doesNotMatch(printCss, /\.report-view-document main>h1[^}]*display:none!important/u);
+  assert.doesNotMatch(printCss, /\.report-view-document \.report-static-identity[^}]*display:none!important/u);
+  assert.match(printCss, /\.report-view-document main>h1\{[^}]*display:block!important/u);
+  assert.match(printCss, /\.report-view-document \.report-static-identity\{[^}]*display:block!important/u);
+  assert.match(printCss, /\.report-view-document \[data-report-evidence-preview\] figure\[data-evidence-kind="full-page"\]\{[^}]*break-inside:auto/u);
+  assert.match(printCss, /\.report-view-document \[data-evidence-kind="full-page"\]>.evidence-media\{[^}]*max-height:210mm[^}]*object-fit:contain/u);
+  assert.match(printCss, /\.report-view-document \[data-report-evidence-preview\] figcaption\{[^}]*break-inside:avoid[^}]*break-before:avoid/u);
+  assert.match(printCss, /\.report-view-document \[data-report-issue\],\.report-view-document \[data-report-technical\],\.report-view-document \[data-report-limitations\],\.report-view-document \[data-report-evidence\]\{break-inside:auto\}/u);
+  assert.doesNotMatch(printCss, /\[data-report-evidence-preview\] figure,\[data-report-issue\],\[data-report-evidence\]\{break-inside:avoid\}/u);
 });
 
 test('renders present, absent, unknown, partial and not-recorded widget inventory states without changing findings', () => {
