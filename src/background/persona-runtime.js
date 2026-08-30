@@ -11,6 +11,7 @@ const MODES = new Set(['reader', 'achromatopsia', 'motor']);
 const TARGET_KEYS = ['tabId', 'windowId', 'documentId', 'urlSessionDigest'];
 const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
 const READER_ACTIONS = new Set(['previous', 'repeat', 'pause', 'resume', 'next', 'stop']);
+const LEASE_ID = /^lease-[A-Za-z0-9_-]{22}$/u;
 const READER_STATE_KEYS = [
   'version', 'playback', 'index', 'total', 'caption', 'canPrevious', 'canNext',
   'speechAvailability', 'voiceId', 'rate',
@@ -57,10 +58,11 @@ function parseApplyInput(value) {
     const target = parseTarget(inspect.target);
     return target ? { target, op: inspect.op, mode: null } : null;
   }
-  const install = exactDataRecord(value, ['target', 'op', 'mode']);
-  if (!install || install.op !== 'install' || !MODES.has(install.mode)) return null;
+  const install = exactDataRecord(value, ['target', 'op', 'mode', 'leaseId']);
+  if (!install || install.op !== 'install' || !MODES.has(install.mode) ||
+    !LEASE_ID.test(install.leaseId ?? '')) return null;
   const target = parseTarget(install.target);
-  return target ? { target, op: 'install', mode: install.mode } : null;
+  return target ? { target, op: 'install', mode: install.mode, leaseId: install.leaseId } : null;
 }
 
 function canonicalText(value, limit, allowEmpty) {
@@ -360,7 +362,7 @@ export function createPersonaInjectionRuntime({ chromeApi } = {}) {
       if (!css.ok) return failure(css.reason);
       const installed = await command(
         input.target,
-        { version: 1, op: 'install', mode: input.mode },
+        { version: 1, op: 'install', mode: input.mode, leaseId: input.leaseId },
         'command',
       );
       if (!installed.ok) return publicCommandFailure(installed.reason);

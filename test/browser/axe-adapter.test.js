@@ -187,7 +187,7 @@ test('records the exact browser proof before enabling the coupled production gat
     enabled: true,
     targetSizeEnabled: true,
     code: 'AXE_MV3_CSP_E2E_PASSED',
-    testedBrowser: 'Google Chrome 151.0.7922.174',
+    testedBrowser: 'Google Chrome for Testing 152.0.7977.64',
   });
   assert.equal(Object.isFrozen(adapter.AXE_MV3_CSP_GATE), true);
 });

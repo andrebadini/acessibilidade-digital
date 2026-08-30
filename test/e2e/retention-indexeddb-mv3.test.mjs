@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { constants as fsConstants } from 'node:fs';
-import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -9,8 +9,14 @@ import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import {
+  CANONICAL_CHROME_PRODUCT,
+  launchUnpackedExtension,
+  resolveRealChromeTestBinary,
+} from './support/real-chrome.mjs';
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const chromeBinary = process.env.CHROME_BIN || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const chromeBinary = resolveRealChromeTestBinary();
 const harnessPath = 'test/e2e/fixtures/retention-harness.html';
 const sensitiveMarker = 'RETENTION-PRIVATE-MARKER-641927';
 const runtimeProbeByRole = Object.freeze({
@@ -155,77 +161,41 @@ test('Chrome teardown stops waiting when a killed process emits no exit event', 
   assert.ok(Date.now() - started < 1_000, 'o teardown deve ter limite explícito');
 });
 
-test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', { timeout: 300_000 }, async t => {
+test('enforces retention and confirmed deletion through the native Side Panel and real MV3 IndexedDB', { timeout: 300_000 }, async t => {
+  assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real de retenção.');
   await access(chromeBinary, fsConstants.X_OK);
   const loopback = await startLoopbackSite();
-  const profile = await mkdtemp(join(tmpdir(), 'audita-retention-chrome-'));
-  const downloadDir = join(profile, 'downloads');
-  await mkdir(downloadDir, { recursive: true });
-  const chrome = spawn(chromeBinary, [
-    '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-proxy-server',
-    '--remote-debugging-pipe', '--window-position=-10000,-10000', '--window-size=1280,800',
-    `--user-data-dir=${profile}`, 'about:blank',
-  ], { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
-  let chromeStderr = '';
-  chrome.stderr.on('data', chunk => { chromeStderr = `${chromeStderr}${chunk}`.slice(-12_000); });
-  t.after(async () => {
-    try {
-      await terminateChromeProcess(chrome);
-    } finally {
-      await loopback.close();
-      await rm(profile, { recursive: true, force: true });
-    }
+  t.after(() => loopback.close());
+  const sourceUrl = `${loopback.baseUrl}/source`;
+  const extension = await launchUnpackedExtension(t, {
+    extensionPath: await realpath(root),
+    startUrl: sourceUrl,
+    chromeBinary,
+    expectedMajor: 152,
+    viewport: { width: 1280, height: 800 },
   });
+  assert.equal(extension.chromeProduct, CANONICAL_CHROME_PRODUCT);
+  const harness = extension.harnessPage;
 
-  const browser = new PipeCdp(chrome.stdio[3], chrome.stdio[4], [
-    sensitiveMarker, '?token=', '?auth=',
-  ]);
-  t.after(() => browser.close());
-  try { await browser.command('Browser.getVersion'); }
-  catch (error) {
-    await delay(50);
-    throw new Error(`Chrome real não iniciou o CDP: ${error.message}; exit=${chrome.exitCode}; stderr=${chromeStderr}`);
-  }
-  await browser.command('Target.setDiscoverTargets', { discover: true });
-  await browser.startRuntimeTargetCapture();
-  const loaded = await browser.command('Extensions.loadUnpacked', { path: root }, 15_000);
-  const extensionId = loaded?.id;
-  assert.match(extensionId || '', /^[a-p]{32}$/u);
-  await browser.setRuntimeExtensionId(extensionId);
-  await browser.command('Browser.setDownloadBehavior', {
-    behavior: 'allow', downloadPath: downloadDir, eventsEnabled: true,
-  });
-
-  const harnessUrl = `chrome-extension://${extensionId}/${harnessPath}`;
-  await browser.command('Target.createTarget', { url: harnessUrl });
-  const harnessInfo = await waitForTargetInfo(
-    browser,
-    info => info.type === 'page' && info.url === harnessUrl,
-    chromeStderr,
-  );
-  const harness = await attach(browser, harnessInfo.targetId);
-  await harness.command('Runtime.enable');
-  await harness.command('Page.enable');
-  await waitForValue(harness, 'document.readyState === "complete"', Boolean);
-  const indexedDbPreflight = await evaluate(harness, `(async () => {
-    try {
-      const { createAuditStore } = await import(chrome.runtime.getURL('src/storage/audit-store.js'));
-      const store = globalThis.__retentionE2eStore ??= createAuditStore();
-      const [latest, retention, cleanup] = await Promise.all([
-        store.getLatest(), store.getAuditRetention('preflight-audit'),
-        store.cleanupExpiredAudits({ now: '2026-08-28T00:00:00.000Z', limit: 1 })
-      ]);
-      return { ok: latest === undefined && retention === undefined, scanned: cleanup.scanned };
-    } catch (error) {
-      const code = typeof error?.code === 'string' && /^[A-Z0-9_]+$/u.test(error.code)
-        ? error.code : 'EVALUATION_FAILED';
-      return { ok: false, code };
-    }
-  })()`, true, 20_000);
+  const indexedDbPreflight = await extension.evaluate(harness, `(async () => {
+    const { createAuditStore } = await import(chrome.runtime.getURL('/src/storage/audit-store.js'));
+    const store = globalThis.__retentionE2eStore ??= createAuditStore();
+    const [latest, retention, cleanup] = await Promise.all([
+      store.getLatest(), store.getAuditRetention('preflight-audit'),
+      store.cleanupExpiredAudits({ now: '2026-08-28T00:00:00.000Z', limit: 1 })
+    ]);
+    return { ok: latest === undefined && retention === undefined, scanned: cleanup.scanned };
+  })()`, { awaitPromise: true });
   assert.deepEqual(indexedDbPreflight, { ok: true, scanned: 0 });
 
   const publicProof = await runPublicBatchRetentionProof({
-    browser, harness, extensionId, loopback, downloadDir, chromeStderr: () => chromeStderr,
+    extension,
+    browser: extension.browser,
+    harness,
+    extensionId: extension.extensionId,
+    loopback,
+    downloadDir: extension.downloadDirectory,
+    chromeStderr: () => '',
   });
   assert.deepEqual(publicProof, {
     panelActionOpened: true,
@@ -281,44 +251,159 @@ test('enforces retention and confirmed deletion in real MV3 IndexedDB and UI', {
     sessionStorageSanitized: true,
   });
 
-  const reviewUrl = `chrome-extension://${extensionId}/src/review/index.html?auditId=ui-one`;
-  const review = await openExtensionPage(browser, reviewUrl, chromeStderr);
-  await exerciseDeleteOneDialog(review);
+  const deleteAllProof = await extension.evaluate(harness, `(async () => {
+    const { createAuditStore } = await import(chrome.runtime.getURL('/src/storage/audit-store.js'));
+    const store = globalThis.__retentionE2eStore ??= createAuditStore();
+    const result = await store.deleteAllAudits({ now: '2026-09-03T00:00:00.000Z' });
+    return { deleted: result.deleted, latestAbsent: (await store.getLatest()) === undefined };
+  })()`, { awaitPromise: true });
+  assert.ok(deleteAllProof.deleted >= 3, JSON.stringify(deleteAllProof));
+  assert.equal(deleteAllProof.latestAbsent, true);
 
-  const panelUrl = `chrome-extension://${extensionId}/src/panel/index.html`;
-  const panel = await openExtensionPage(browser, panelUrl, chromeStderr);
-  await exerciseDeleteAllDialogAndResponsiveUi(panel);
+  const panel = await extension.openSidePanelFromAction();
+  const contexts = await extension.runtimeContexts({ contextTypes: ['SIDE_PANEL', 'POPUP'] });
+  assert.equal(contexts.filter(value => value.contextType === 'SIDE_PANEL').length, 1);
+  assert.equal(contexts.filter(value => value.contextType === 'POPUP').length, 0);
+  await extension.waitForValue(panel,
+    `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial');
+  await extension.click(panel, 'button[data-focus-id="start-attached"][data-intent="START_ATTACHED"]');
+  const terminal = await extension.waitForValue(panel, `(() => ({
+    screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
+    auditId: document.querySelector('[data-screen="result"]')?.dataset.auditId ?? null,
+    status: document.querySelector('[role="status"]')?.textContent ?? null
+  }))()`, value => ['result', 'unavailable'].includes(value?.screen), { timeoutMs: 60_000, intervalMs: 50 });
+  if (terminal.screen !== 'result') {
+    const diagnostic = await extension.evaluate(harness, `(async () => {
+      const { createAuditStore } = await import(chrome.runtime.getURL('/src/storage/audit-store.js'));
+      const [latest, session] = await Promise.all([createAuditStore().getLatest(), chrome.storage.session.get(null)]);
+      return {
+        latest: latest && typeof latest === 'object' ? {
+          auditId: latest.auditId ?? null, status: latest.status ?? null,
+          failureCode: latest.failureCode ?? null, message: latest.message ?? null,
+        } : null,
+        sessionKeys: Object.keys(session).sort(),
+      };
+    })()`, { awaitPromise: true });
+    throw new Error(`RETENTION_NATIVE_PANEL_FAILED:${JSON.stringify({ terminal, diagnostic })}`);
+  }
+  assert.match(terminal.auditId, /^[A-Za-z0-9._:-]{1,160}$/u);
+  const auditId = terminal.auditId;
 
-  const finalProof = await evaluate(panel, `import(chrome.runtime.getURL('src/storage/audit-store.js')).then(async ({ createAuditStore }) => {
-    const store = createAuditStore();
-    const [one, allA, allB, latest] = await Promise.all([
-      store.getAudit('ui-one'), store.getAudit('ui-all-a'), store.getAudit('ui-all-b'), store.getLatest(),
+  const retainedBeforeExport = await extension.evaluate(harness, `(async () => {
+    const { createAuditStore } = await import(chrome.runtime.getURL('/src/storage/audit-store.js'));
+    const store = globalThis.__retentionE2eStore ??= createAuditStore();
+    const [snapshot, retention, latest] = await Promise.all([
+      store.getAuditSnapshot(${JSON.stringify(auditId)}),
+      store.getAuditRetention(${JSON.stringify(auditId)}),
+      store.getLatest(),
     ]);
-    const local = await chrome.storage.local.get(null);
-    const session = await chrome.storage.session.get(null);
+    const text = JSON.stringify({ model: snapshot.model, retention, latest });
+    return {
+      modelPresent: snapshot.model?.auditId === ${JSON.stringify(auditId)},
+      retentionOff: retention?.deleteAfterCompleteExport === false,
+      latestCorrelated: latest?.auditId === ${JSON.stringify(auditId)},
+      noPixelEvidence: Array.isArray(snapshot.model?.evidence) &&
+        snapshot.model.evidence.every(item => typeof item?.dataUrl !== 'string'),
+      sanitized: !text.includes(${JSON.stringify(sensitiveMarker)}) && !text.includes('?token=') && !text.includes('?auth='),
+    };
+  })()`, { awaitPromise: true });
+  assert.deepEqual(retainedBeforeExport, {
+    modelPresent: true,
+    retentionOff: true,
+    latestCorrelated: true,
+    noPixelEvidence: true,
+    sanitized: true,
+  });
+
+  await extension.click(panel, 'button[data-focus-id="open-report"][data-intent="OPEN_REPORT"]');
+  const review = await extension.waitForReport({ auditId });
+  const readReviewState = `(() => ({
+    deleteReady: !document.querySelector('#delete-audit')?.disabled,
+    exportReady: Boolean(document.querySelector('button[data-report-export]')),
+    status: document.querySelector('#review-status')?.textContent ?? null
+  }))()`;
+  try {
+    await extension.waitForValue(review, readReviewState,
+      value => value?.deleteReady === true && value?.exportReady === true &&
+        typeof value.status === 'string' && value.status !== 'Carregando a auditoria.',
+      { timeoutMs: 30_000, intervalMs: 50 });
+  } catch (error) {
+    const observed = await extension.evaluate(review, readReviewState).catch(() => null);
+    throw new Error(`RETENTION_REVIEW_NOT_READY:${JSON.stringify(observed)}`, { cause: error });
+  }
+
+  await extension.click(review, 'button[data-report-export]');
+  const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 60_000, intervalMs: 50 });
+  assert.deepEqual(downloads.map(value => value.format), ['html', 'pdf', 'csv', 'json']);
+  assert.equal(downloads.every(value => value.state === 'complete' && value.byteLength > 0 &&
+    /^[a-f0-9]{64}$/u.test(value.sha256)), true);
+  const retainedAfterExport = await extension.evaluate(harness, `(async () => {
+    const { createAuditStore } = await import(chrome.runtime.getURL('/src/storage/audit-store.js'));
+    const store = globalThis.__retentionE2eStore ??= createAuditStore();
+    const [model, retention, journal, lease] = await Promise.all([
+      store.getAudit(${JSON.stringify(auditId)}),
+      store.getAuditRetention(${JSON.stringify(auditId)}),
+      store.getExportDeliveryJournal(${JSON.stringify(auditId)}),
+      store.getExportLeaseState(${JSON.stringify(auditId)}, { now: new Date().toISOString() }),
+    ]);
+    return {
+      modelPreserved: model?.auditId === ${JSON.stringify(auditId)},
+      retentionOff: retention?.deleteAfterCompleteExport === false,
+      journalSettled: Array.isArray(journal) && journal.length === 0,
+      leaseInactive: lease?.active !== true,
+    };
+  })()`, { awaitPromise: true });
+  assert.deepEqual(retainedAfterExport, {
+    modelPreserved: true,
+    retentionOff: true,
+    journalSettled: true,
+    leaseInactive: true,
+  });
+
+  await extension.click(review, '#delete-audit');
+  await extension.waitForValue(review, `(() => ({
+    open: document.querySelector('#delete-audit-dialog')?.open === true,
+    focus: document.activeElement?.id ?? null
+  }))()`, value => value?.open === true && value.focus === 'delete-audit-cancel');
+  await extension.click(review, '#delete-audit-cancel');
+  await extension.waitForValue(review, `document.querySelector('#review-status')?.textContent`,
+    value => /exclusão cancelada/iu.test(value));
+  await extension.click(review, '#delete-audit');
+  await extension.waitForValue(review, `document.querySelector('#delete-audit-dialog')?.open`, Boolean);
+  await extension.click(review, '#delete-audit-confirm');
+  const deleted = await extension.waitForValue(review, `(() => ({
+    open: document.querySelector('#delete-audit-dialog')?.open === true,
+    disabled: document.querySelector('#delete-audit')?.disabled === true,
+    status: document.querySelector('#review-status')?.textContent ?? ''
+  }))()`, value => value?.open === false && value.disabled === true && /excluída/iu.test(value.status),
+  { timeoutMs: 20_000, intervalMs: 50 });
+  assert.match(deleted.status, /downloads já salvos foram preservados/iu);
+
+  const filesRemain = await Promise.all(downloads.map(value => stat(join(extension.downloadDirectory, value.filename))
+    .then(info => info.isFile() && info.size === value.byteLength, () => false)));
+  assert.equal(filesRemain.every(Boolean), true);
+  const finalProof = await extension.evaluate(harness, `(async () => {
+    const { createAuditStore } = await import(chrome.runtime.getURL('/src/storage/audit-store.js'));
+    const store = globalThis.__retentionE2eStore ??= createAuditStore();
+    const [model, retention, latest, local, session] = await Promise.all([
+      store.getAudit(${JSON.stringify(auditId)}),
+      store.getAuditRetention(${JSON.stringify(auditId)}),
+      store.getLatest(), chrome.storage.local.get(null), chrome.storage.session.get(null),
+    ]);
     const allowedLocalKeys = new Set(['audita:persona:voiceId', 'audita:persona:rate']);
     return {
-      everyAuditDeleted: one === undefined && allA === undefined && allB === undefined && latest === undefined,
-      localKeysAllowed: allowedLocalKeys.size === 2 &&
-        !allowedLocalKeys.has('audita:persona:voiceId-backup') &&
-        Object.keys(local).every(key => allowedLocalKeys.has(key)),
-      sessionHasPrivateMarker: JSON.stringify(session).includes(${JSON.stringify(sensitiveMarker)}),
+      auditDeleted: model === undefined && retention === undefined,
+      latestDeleted: latest === undefined || latest.auditId !== ${JSON.stringify(auditId)},
+      localKeysAllowed: Object.keys(local).every(key => allowedLocalKeys.has(key)),
+      sessionSanitized: !JSON.stringify(session).includes(${JSON.stringify(sensitiveMarker)}) &&
+        !JSON.stringify(session).includes('?token=') && !JSON.stringify(session).includes('?auth='),
     };
-  })`, true, 20_000);
-  const runtimeLogProof = await browser.finalRuntimeLogVerdict([
-    'harness', 'service-worker', 'panel', 'review', 'export',
-  ]);
-  assert.deepEqual({
-    ...finalProof,
-    ...runtimeLogProof,
-    chromeStderrSanitized: !chromeStderr.includes(sensitiveMarker),
-  }, {
-    everyAuditDeleted: true,
+  })()`, { awaitPromise: true });
+  assert.deepEqual(finalProof, {
+    auditDeleted: true,
+    latestDeleted: true,
     localKeysAllowed: true,
-    sessionHasPrivateMarker: false,
-    sinksReady: true,
-    sanitized: true,
-    chromeStderrSanitized: true,
+    sessionSanitized: true,
   });
 });
 
@@ -491,14 +576,40 @@ async function startLoopbackSite() {
   };
 }
 
-async function runPublicBatchRetentionProof({ browser, harness, extensionId, loopback, downloadDir, chromeStderr }) {
+async function runPublicBatchRetentionProof({
+  extension, browser, harness, extensionId, loopback, downloadDir, chromeStderr,
+}) {
   const pageUrls = [
     `${loopback.baseUrl}/page-a?token=${sensitiveMarker}`,
     `${loopback.baseUrl}/page-b?auth=${sensitiveMarker}`,
   ];
-  const firstPanel = await openPanelThroughAction(
-    browser, extensionId, `${loopback.baseUrl}/source`, chromeStderr,
-  );
+  const firstPanel = await extension.openSidePanelFromAction();
+  const contexts = await extension.runtimeContexts({ contextTypes: ['SIDE_PANEL', 'POPUP'] });
+  assert.deepEqual({
+    sidePanels: contexts.filter(value => value.contextType === 'SIDE_PANEL').length,
+    popups: contexts.filter(value => value.contextType === 'POPUP').length,
+  }, { sidePanels: 1, popups: 0 });
+  await extension.waitForValue(firstPanel,
+    `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial');
+  await extension.click(firstPanel,
+    'button[data-focus-id="open-batch-form"][data-intent="OPEN_BATCH_FORM"]');
+  const publicBatchEntry = await extension.evaluate(firstPanel, `(() => ({
+    screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
+    urlList: Boolean(document.querySelector('#audit-urls, textarea[name="batch-urls"]')),
+    fullEvidence: Boolean(document.querySelector('input[name="capture-mode"][value="full-evidence"]')),
+    deleteAfterExport: Boolean(document.querySelector('#delete-after-export, input[name="delete-after-export"]')),
+    submit: Boolean(document.querySelector('#audit-form button[type="submit"], [data-action="start-batch-audit"]')),
+    status: document.querySelector('[role="status"]')?.textContent?.trim() ?? null
+  }))()`);
+  assert.deepEqual(publicBatchEntry, {
+    screen: 'batch-input',
+    urlList: true,
+    fullEvidence: true,
+    deleteAfterExport: true,
+    submit: true,
+    status: 'Informe duas ou mais URLs e escolha a retenção local.',
+  }, 'MARCO3_PUBLIC_BATCH_RETENTION_MISSING');
+
   const secondPanel = await openPanelThroughAction(
     browser, extensionId, `${loopback.baseUrl}/source-2`, chromeStderr,
   );
@@ -1126,8 +1237,15 @@ async function followLatestReportLink(panel, auditId) {
 async function runRealStorageProof(page) {
   return evaluate(page, `(async () => {
     const marker = ${JSON.stringify(sensitiveMarker)};
-    const T0 = '2026-08-01T00:00:00.000Z';
-    const T30 = '2026-08-31T00:00:00.000Z';
+    const T0 = '2026-08-26T14:02:00.000Z';
+    const T30 = '2026-09-25T14:02:00.000Z';
+    const { SAMPLE_AUDIT } = await import(chrome.runtime.getURL('/fixtures/audits/sample-audit.js'));
+    const auditFixture = (auditId, tag = 'fixture') => {
+      const model = structuredClone(SAMPLE_AUDIT);
+      model.auditId = auditId;
+      model.versions.extension = 'test-' + tag;
+      return model;
+    };
     const request = operation => new Promise((resolve, reject) => {
       operation.onsuccess = () => resolve(operation.result);
       operation.onerror = () => reject(new Error('indexeddb request failed'));
@@ -1154,15 +1272,8 @@ async function runRealStorageProof(page) {
     const legacyDb = await open(1, database => database.createObjectStore('audits'));
     const legacyTx = legacyDb.transaction('audits', 'readwrite');
     const legacy = legacyTx.objectStore('audits');
-    legacy.put({
-      auditId: 'legacy-batch-a', timestamps: { endedAt: T0 },
-      pages: [
-        { pageId: 'page-a', url: 'http://127.0.0.1/a?token=' + marker },
-        { pageId: 'page-b', url: 'http://127.0.0.1/b' },
-      ],
-      evidence: [{ kind: 'full-page', pixels: marker }],
-    }, 'legacy-batch-a');
-    legacy.put({ auditId: 'legacy-batch-b', timestamps: { endedAt: 'invalid' } }, 'legacy-batch-b');
+    legacy.put(auditFixture('legacy-batch-a', 'legacy-a'), 'legacy-batch-a');
+    legacy.put(auditFixture('legacy-batch-b', 'legacy-b'), 'legacy-batch-b');
     legacy.put({ auditId: 'legacy-batch-a', status: 'complete' }, '__latest__');
     legacy.put(4, '__audit_revision__:legacy-batch-a');
     legacy.put(2, '__audit_export_attempt__:legacy-batch-a');
@@ -1190,11 +1301,11 @@ async function runRealStorageProof(page) {
     ]);
     const cas = await Promise.allSettled([
       first.commitAuditIfRevision(
-        'legacy-batch-a', { ...snapshotA.model, casWinner: 'first' },
+        'legacy-batch-a', auditFixture('legacy-batch-a', 'cas-first'),
         { auditId: 'legacy-batch-a', status: 'complete' }, snapshotA.capability,
       ),
       second.commitAuditIfRevision(
-        'legacy-batch-a', { ...snapshotB.model, casWinner: 'second' },
+        'legacy-batch-a', auditFixture('legacy-batch-a', 'cas-second'),
         { auditId: 'legacy-batch-a', status: 'complete' }, snapshotB.capability,
       ),
     ]);
@@ -1203,21 +1314,21 @@ async function runRealStorageProof(page) {
 
     const currentA = await first.getAuditSnapshot('legacy-batch-a');
     await first.acquireExportLease('legacy-batch-a', currentA.capability, {
-      ownerId: 'retention-e2e-owner', now: '2026-09-01T00:00:00.000Z',
+      ownerId: 'retention-e2e-owner', now: '2026-10-01T00:00:00.000Z',
     });
-    const cleanup = await second.cleanupExpiredAudits({ now: '2026-09-01T00:01:00.000Z', limit: 25 });
+    const cleanup = await second.cleanupExpiredAudits({ now: '2026-10-01T00:01:00.000Z', limit: 25 });
     let deleteBusy = false;
-    try { await first.deleteAudit('legacy-batch-a', currentA.capability, { now: '2026-09-01T00:01:00.000Z' }); }
+    try { await first.deleteAudit('legacy-batch-a', currentA.capability, { now: '2026-10-01T00:01:00.000Z' }); }
     catch (error) { deleteBusy = error?.code === 'AUDIT_DELETE_BUSY'; }
     await first.releaseExportLease('legacy-batch-a', {
-      ownerId: 'retention-e2e-owner', now: '2026-09-01T00:01:30.000Z',
+      ownerId: 'retention-e2e-owner', now: '2026-10-01T00:01:30.000Z',
     });
     const deletedLegacy = await first.deleteAudit(
-      'legacy-batch-a', currentA.capability, { now: '2026-09-01T00:01:31.000Z' },
+      'legacy-batch-a', currentA.capability, { now: '2026-10-01T00:01:31.000Z' },
     );
 
     const persistedAt = new Date().toISOString();
-    await first.commitAudit('rollback-stable', { auditId: 'rollback-stable' }, { auditId: 'rollback-stable', status: 'complete' }, { now: persistedAt });
+    await first.commitAudit('rollback-stable', auditFixture('rollback-stable'), { auditId: 'rollback-stable', status: 'complete' }, { now: persistedAt });
     const rollbackDb = await open(2);
     const rollbackTx = rollbackDb.transaction(['audits', 'audit-retention'], 'readwrite');
     rollbackTx.objectStore('audits').put({ auditId: 'rollback-transient' }, 'rollback-transient');
@@ -1237,15 +1348,14 @@ async function runRealStorageProof(page) {
     const rollbackAtomic = (await reopened.getAudit('rollback-transient')) === undefined &&
       (await reopened.getAuditRetention('rollback-transient')) === undefined &&
       (await reopened.getAudit('rollback-stable'))?.auditId === 'rollback-stable';
-    await first.commitAudit('reopen-audit', { auditId: 'reopen-audit', marker: 'persisted' }, { auditId: 'reopen-audit', status: 'complete' }, { now: persistedAt });
-    const reopenPersistent = (await createAuditStore().getAudit('reopen-audit'))?.marker === 'persisted';
+    await first.commitAudit('reopen-audit', auditFixture('reopen-audit', 'persisted'), { auditId: 'reopen-audit', status: 'complete' }, { now: persistedAt });
+    const reopenPersistent = (await createAuditStore().getAudit('reopen-audit'))?.versions?.extension === 'test-persisted';
 
     const prepareDelivery = async (auditId, ownerId, formats, seconds) => {
       let snapshot = await first.getAuditSnapshot(auditId);
       if (!snapshot.model) {
-        await first.commitAudit(auditId, {
-          auditId, manualReview: [], itemResults: [], occurrences: [], evidence: [],
-        }, { auditId, status: 'complete' }, { now: persistedAt, deleteAfterCompleteExport: true });
+        await first.commitAudit(auditId, auditFixture(auditId, 'delivery-initial'),
+          { auditId, status: 'complete' }, { now: persistedAt, deleteAfterCompleteExport: true });
         snapshot = await first.getAuditSnapshot(auditId);
       }
       const prefix = '2026-09-02T00:00:' + String(seconds).padStart(2, '0');
@@ -1256,7 +1366,7 @@ async function runRealStorageProof(page) {
         ownerId, exportAttempt: lease.exportAttempt, now: prefix + '.100Z', ttlMs: 600000,
       });
       await first.commitAuditIfRevisionWithExportLease(
-        auditId, { ...snapshot.model, delivery: formats.length },
+        auditId, auditFixture(auditId, 'delivery-' + formats.length),
         { auditId, status: 'complete', exportStatus: 'delivering' }, snapshot.capability,
         { ownerId, exportAttempt: lease.exportAttempt, now: prefix + '.200Z', phase: 'delivering', ttlMs: 600000 },
       );
@@ -1269,7 +1379,7 @@ async function runRealStorageProof(page) {
         });
       }
       return first.finalizeExportAndMaybeDelete(
-        auditId, { ...snapshot.model, finalized: true },
+        auditId, auditFixture(auditId, 'final-' + formats.length),
         { auditId, status: 'complete', exportStatus: formats.length === 4 ? 'complete' : 'partial' },
         snapshot.capability,
         {
@@ -1286,9 +1396,8 @@ async function runRealStorageProof(page) {
       (await first.getAuditRetention('delete-after-four')) === undefined;
 
     for (const auditId of ['ui-one', 'ui-all-a', 'ui-all-b']) {
-      await first.commitAudit(auditId, {
-        auditId, manualReview: [], itemResults: [], occurrences: [], evidence: [],
-      }, { auditId, status: 'complete', message: 'Auditoria disponível para exclusão.' }, { now: persistedAt });
+      await first.commitAudit(auditId, auditFixture(auditId, 'ui'),
+        { auditId, status: 'complete', message: 'Auditoria disponível para exclusão.' }, { now: persistedAt });
     }
     const uiMetadata = await Promise.all(['ui-one', 'ui-all-a', 'ui-all-b'].map(id => first.getAuditRetention(id)));
     const unauthorized = await chrome.runtime.sendMessage({ type: 'REQUEST_DELETE_ALL_AUDITS' });
@@ -1305,7 +1414,8 @@ async function runRealStorageProof(page) {
         '__audit_export_attempt__:legacy-batch-a', '__audit_export_delivery__:legacy-batch-a',
       ].every(key => auditKeys.includes(key)),
       metadataLimited: !JSON.stringify(metadata).includes(marker) && metadata.every(value => Object.keys(value).length === 5),
-      absoluteExpiry: metaA.firstPersistedAt === T0 && metaA.expiresAt === T30 && metaB.expiresAt === '1970-01-01T00:00:00.000Z',
+      absoluteExpiry: metaA.firstPersistedAt === T0 && metaA.expiresAt === T30 &&
+        metaB.firstPersistedAt === T0 && metaB.expiresAt === T30,
       casWinners,
       casConflicts,
       cleanupBlocked: cleanup.blocked,
@@ -1317,7 +1427,7 @@ async function runRealStorageProof(page) {
       partialRetained,
       completeDeleted,
       batchSingleMetadata: uiMetadata.length === 3 && uiMetadata.every(value => value && Object.keys(value).length === 5),
-      unauthorizedDeleteRejected: unauthorized?.ok === false,
+      unauthorizedDeleteRejected: unauthorized?.ok !== true,
       localStorageLimited: allowedLocalKeys.size === 2 &&
         !allowedLocalKeys.has('audita:persona:voiceId-backup') &&
         Object.keys(local).every(key => allowedLocalKeys.has(key)) &&

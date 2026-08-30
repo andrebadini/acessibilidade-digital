@@ -4,7 +4,7 @@ import test from 'node:test';
 import { createPersonaController } from '../../src/background/persona-controller.js';
 
 const EXPECTED_METHODS = [
-  'start', 'rehydrate', 'setMode', 'stop',
+  'start', 'rehydrate', 'setMode', 'readerCommand', 'stop',
   'invalidateTab', 'invalidateWindow', 'recover', 'expireDue',
 ];
 
@@ -16,6 +16,7 @@ function dependencies(overrides = {}) {
   };
   const personaCoordinator = {
     async setMode(value) { calls.push(['setMode', value]); return { ok: true, source: 'setMode' }; },
+    async readerCommand(value) { calls.push(['readerCommand', value]); return { ok: true, source: 'readerCommand' }; },
     async stop(value) { calls.push(['stop', value]); return { ok: true, source: 'stop' }; },
     async invalidateTab(...value) { calls.push(['invalidateTab', ...value]); return { ok: true, source: 'invalidateTab' }; },
     async invalidateWindow(...value) { calls.push(['invalidateWindow', ...value]); return { ok: true, source: 'invalidateWindow' }; },
@@ -53,7 +54,7 @@ test('delegates every public operation exactly once to the single persona owner'
   const controller = createPersonaController(fixture.value);
   const marker = Object.freeze({ marker: true });
 
-  for (const method of ['start', 'rehydrate', 'setMode', 'stop']) {
+  for (const method of ['start', 'rehydrate', 'setMode', 'readerCommand', 'stop']) {
     assert.deepEqual(await controller[method](marker), { ok: true, source: method });
   }
   assert.deepEqual(await controller.invalidateTab(17, 'navigation'), { ok: true, source: 'invalidateTab' });
@@ -64,6 +65,7 @@ test('delegates every public operation exactly once to the single persona owner'
     ['start', marker],
     ['rehydrate', marker],
     ['setMode', marker],
+    ['readerCommand', marker],
     ['stop', marker],
     ['invalidateTab', 17, 'navigation'],
     ['invalidateWindow', 9, 'window-removed'],
@@ -75,7 +77,7 @@ test('delegates every public operation exactly once to the single persona owner'
 test('fails closed when either delegated boundary is incomplete and rejects the legacy constructor', () => {
   const required = {
     personaStart: ['start', 'rehydrate'],
-    personaCoordinator: ['setMode', 'stop', 'invalidateTab', 'invalidateWindow', 'recover', 'expireDue'],
+    personaCoordinator: ['setMode', 'readerCommand', 'stop', 'invalidateTab', 'invalidateWindow', 'recover', 'expireDue'],
   };
   for (const [dependency, methods] of Object.entries(required)) {
     for (const method of methods) {

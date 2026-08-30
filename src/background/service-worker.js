@@ -18,6 +18,13 @@ import { createAuditLifecycle } from './audit-lifecycle.js';
 import { composeChromeAdapter, createChromeAdapter } from './chrome-adapter.js';
 import { registerAuditContextMenus } from './context-menu.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
+import { recordHighlightBindingV1 } from './highlight-binding.js';
+import { createHighlightBindingRecorder } from './highlight-binding-recorder.js';
+import { createHighlightBindingStore } from './highlight-binding-store.js';
+import { createHighlightController } from './highlight-controller.js';
+import { createHighlightLiveVerifier } from './highlight-live-verifier.js';
+import { createHighlightModelAuthority } from './highlight-model-authority.js';
+import { createHighlightSessionAuthorityBridge } from './highlight-session-authority.js';
 import {
   PANEL_PORT_NAME,
   createPanelPortCoordinator,
@@ -31,10 +38,13 @@ import { createPersonaStartOrchestrator } from './persona-start-orchestrator.js'
 import { runAttachedAuditExecution } from './run-audit.js';
 import { createSidePanelIntentRouter } from './side-panel-intent-router.js';
 import { createReportLaunchAuthority } from './report-launch.js';
+import {
+  REPORT_PORT_NAME,
+  createReportPortCoordinator,
+} from './report-port.js';
 import { createExportLaunchAuthority } from './export-launch.js';
 import { createTargetOperationQueue } from './target-operation-queue.js';
 import {
-  createAbsentHighlightCleaner,
   createLiveAidCleanup,
 } from './live-aid-cleanup.js';
 import {
@@ -44,8 +54,10 @@ import {
 import { isPanelPortIntent, parseWorkerMessage } from './worker-protocol.js';
 
 export const SESSION_ACCESS_LEVEL_DENIED = 'SESSION_ACCESS_LEVEL_DENIED';
+export const SIDE_PANEL_DEFAULT_DENIED = 'SIDE_PANEL_DEFAULT_DENIED';
 export const SIDE_PANEL_BEHAVIOR_DENIED = 'SIDE_PANEL_BEHAVIOR_DENIED';
 export const PERSONA_EXPIRY_ALARM_NAME = 'audita-persona-expiry-v1';
+export const HIGHLIGHT_EXPIRY_ALARM_NAME = 'audita-highlight-expiry-v1';
 
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const CAPABILITY = /^[A-Za-z0-9_-]{22}$/u;
@@ -250,19 +262,93 @@ export function createCheckpointAdapters(sessionArea) {
 }
 
 function copyReadyRuntime(value) {
-  const runtime = exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch', 'personaCoordinator'], true) ??
+  const runtime = exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch', 'personaCoordinator', 'highlightController'], true) ??
+    exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch', 'personaCoordinator'], true) ??
     exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch'], true) ??
     exact(value, ['authority', 'auditStarter', 'chromeAdapter'], true);
   if (!runtime || !runtime.authority || !runtime.auditStarter || !runtime.chromeAdapter) throw new Error('WORKER_UNAVAILABLE');
   if (Object.hasOwn(runtime, 'personaCoordinator') && typeof runtime.personaCoordinator?.expireDue !== 'function') {
     throw new Error('WORKER_UNAVAILABLE');
   }
+  if (Object.hasOwn(runtime, 'highlightController') &&
+    (typeof runtime.highlightController?.expireDue !== 'function' ||
+      typeof runtime.highlightController?.invalidateTab !== 'function')) {
+    throw new Error('WORKER_UNAVAILABLE');
+  }
   return freeze(runtime);
 }
 
-function createReportOperations({ chromeApi, auditStore, sessionArea, modelNow }) {
+export function createPublishingHighlightController(raw) {
+  const input = exact(raw, ['controller', 'publishHighlightState', 'scheduleExpiry']);
+  const methodNames = [
+    'availability', 'highlight', 'clear', 'clearForTargetLocked', 'clearAudit',
+    'invalidateContent', 'invalidateTab', 'recover', 'expireDue',
+  ];
+  if (!input || typeof input.publishHighlightState !== 'function' || typeof input.scheduleExpiry !== 'function' ||
+    methodNames.some(name => typeof input.controller?.[name] !== 'function')) {
+    throw new TypeError('HIGHLIGHT_RUNTIME_CONTROLLER_INVALID');
+  }
+
+  function clearedAuditIds(result) {
+    if (result?.ok !== true || !Array.isArray(result.clearedAuditIds) || result.clearedAuditIds.length > 5_000) return null;
+    const ids = [...new Set(result.clearedAuditIds)];
+    return ids.length === result.clearedAuditIds.length && ids.every(value => AUDIT_ID.test(value)) ? ids : null;
+  }
+
+  async function lifecycle(method, args) {
+    let result;
+    try { result = await input.controller[method](...args); }
+    catch { return Object.freeze({ ok: false, code: 'HIGHLIGHT_STATE_FAILED' }); }
+    if (result?.ok !== true) return result;
+    const auditIds = clearedAuditIds(result);
+    if (!auditIds) return Object.freeze({ ok: false, code: 'HIGHLIGHT_STATE_FAILED' });
+    try {
+      await input.scheduleExpiry();
+      for (const auditId of auditIds) {
+        await input.publishHighlightState({
+          version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId,
+          occurrenceId: null, state: 'clear',
+        });
+      }
+    } catch {
+      return Object.freeze({ ok: false, code: 'HIGHLIGHT_STATE_FAILED' });
+    }
+    return result;
+  }
+
+  return Object.freeze({
+    ...input.controller,
+    invalidateTab: (...args) => lifecycle('invalidateTab', args),
+    recover: (...args) => lifecycle('recover', args),
+    expireDue: (...args) => lifecycle('expireDue', args),
+  });
+}
+
+export function createReportOperations({
+  chromeApi, auditStore, sessionArea, modelNow, highlightController, highlightBindingStore,
+  publishHighlightState,
+}) {
   const checkpoints = createCheckpointAdapters(sessionArea);
   const now = () => canonicalModelTime(modelNow);
+
+  async function clearHighlightAudit(auditId, reason) {
+    const cleared = await highlightController.clearAudit(auditId, reason);
+    if (cleared?.ok !== true || cleared.state !== 'clear') return false;
+    await highlightBindingStore.deleteAudit(auditId);
+    const snapshot = await highlightBindingStore.snapshot();
+    const confirmed = !Object.values(snapshot.bindingsByAuditPage ?? {}).some(value => value?.auditId === auditId) &&
+      !Object.values(snapshot.activeOverlayByTab ?? {}).some(value => value?.auditId === auditId);
+    if (!confirmed) return false;
+    try {
+      const published = await publishHighlightState({
+        version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId,
+        occurrenceId: null, state: 'clear',
+      });
+      return Number.isSafeInteger(published?.delivered) && published.delivered >= 0;
+    } catch {
+      return false;
+    }
+  }
 
   async function commitReviewDecision(input) {
     let decision;
@@ -273,6 +359,9 @@ function createReportOperations({ chromeApi, auditStore, sessionArea, modelNow }
         const snapshot = await auditStore.getAuditSnapshot(decision.auditId);
         if (snapshot?.model?.auditId !== decision.auditId || !snapshot.capability) {
           return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' });
+        }
+        if (!await clearHighlightAudit(decision.auditId, 'review-commit')) {
+          return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
         }
         const nextModel = createAuditModel(applyReviewDecisions(snapshot.model, [decision]));
         const committed = await auditStore.commitAuditReviewIfRevision(
@@ -308,6 +397,7 @@ function createReportOperations({ chromeApi, auditStore, sessionArea, modelNow }
       if (active?.auditId === auditId) return Object.freeze({ ok: false, code: 'AUDIT_DELETE_BUSY' });
       const snapshot = await auditStore.getAuditSnapshot(auditId);
       if (snapshot?.model?.auditId !== auditId || !snapshot.capability) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
+      if (!await clearHighlightAudit(auditId, 'delete-audit')) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
       const result = await auditStore.deleteAudit(auditId, snapshot.capability, { now: now() });
       if (result?.deleted !== true) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
       await checkpoints.removeCheckpoint({ auditId, sessionCapabilityId: null, windowId: null });
@@ -323,6 +413,19 @@ function createReportOperations({ chromeApi, auditStore, sessionArea, modelNow }
   async function deleteAllAudits() {
     try {
       if (await readActiveAuditJobForWorker({ sessionArea }) !== null) return Object.freeze({ ok: false, code: 'AUDIT_DELETE_BUSY' });
+      const highlightSnapshot = await highlightBindingStore.snapshot();
+      const highlightAuditIds = new Set([
+        ...Object.values(highlightSnapshot.bindingsByAuditPage ?? {}).map(value => value?.auditId),
+        ...Object.values(highlightSnapshot.activeOverlayByTab ?? {}).map(value => value?.auditId),
+      ].filter(value => typeof value === 'string'));
+      for (const auditId of highlightAuditIds) {
+        if (!await clearHighlightAudit(auditId, 'delete-all')) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
+      }
+      const confirmedHighlights = await highlightBindingStore.snapshot();
+      if (Object.keys(confirmedHighlights.bindingsByAuditPage ?? {}).length > 0 ||
+        Object.keys(confirmedHighlights.activeOverlayByTab ?? {}).length > 0) {
+        return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
+      }
       const result = await auditStore.deleteAllAudits({ now: now() });
       if (!Number.isSafeInteger(result?.deleted) || result.deleted < 0) throw new Error('denied');
       await sendRuntimeMessage(chromeApi, createAuditDeletedEvent({ scope: 'all', reason: 'delete-all' })).catch(() => {});
@@ -367,7 +470,7 @@ async function buildDefaultRuntime(chromeApi, options) {
     randomBytes: bytes,
   });
   const personaRuntime = createPersonaInjectionRuntime({ chromeApi });
-  const scheduleExpiry = async when => {
+  const schedulePersonaExpiry = async when => {
     if (when === null) {
       await chromeApi.alarms.clear(PERSONA_EXPIRY_ALARM_NAME);
       return;
@@ -380,20 +483,100 @@ async function buildDefaultRuntime(chromeApi, options) {
     targetQueue,
     personaRuntime,
     probeDocument: tabId => chromeAdapter.probeDocumentIdentity(tabId),
-    scheduleExpiry,
+    scheduleExpiry: schedulePersonaExpiry,
   });
   const personaStart = createPersonaStartOrchestrator({
     authority,
     targetQueue,
     personaCoordinator,
   });
-  const highlightCleaner = createAbsentHighlightCleaner({ sessionArea, targetQueue });
+  const auditStore = options.auditStore ?? createAuditStore(options.auditStoreOptions);
+  const launchApisAvailable = typeof chromeApi.tabs?.create === 'function' && typeof chromeApi.tabs?.update === 'function' &&
+    typeof chromeApi.tabs?.get === 'function' && typeof chromeApi.tabs?.remove === 'function';
+  const unavailableLaunch = freeze({
+    async openRegisteredReport() { return { ok: false, code: 'REPORT_OPEN_DENIED' }; },
+    async connect() { return { ok: false, code: 'CONTEXT_DENIED' }; },
+    async authorizeIntent() { return { ok: false, code: 'REPORT_INTENT_DENIED' }; },
+    async authorizeExport() { return { ok: false, code: 'REPORT_EXPORT_DENIED' }; },
+    async returnToSource() { return { ok: false, code: 'REPORT_RETURN_DENIED' }; },
+    async validateConsumer() { return false; },
+    async requestExport() { return { ok: false, code: 'REPORT_EXPORT_DENIED' }; },
+    async complete() { return { ok: false, code: 'EXPORT_COMPLETE_DENIED' }; },
+    async handleTabUpdated() { return false; }, async handleTabRemoved() { return false; }, async handleWindowRemoved() { return false; },
+  });
+  const sourceSessionAuthority = Object.freeze({
+    async reauthorizeReportSource({ sessionCapabilityId, auditId, state } = {}) {
+      try {
+        const session = await readAuditSessionForWorker({ sessionArea, sessionCapabilityId, auditId });
+        const current = epochNow();
+        if (!Number.isSafeInteger(current) || current < 0 || session.issuedAt > current || current >= session.expiresAt ||
+          session.state !== state || !['result', 'view-only'].includes(state)) {
+          return Object.freeze({ ok: false, code: 'REPORT_SOURCE_DENIED' });
+        }
+        if (state === 'result') {
+          const binding = exact(session.targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest'], true);
+          const proof = binding?.kind === 'attached'
+            ? exact(await chromeAdapter.probeDocumentIdentity(binding.tabId),
+              ['tabId', 'windowId', 'documentId', 'urlSessionDigest'], true)
+            : null;
+          if (!proof || proof.tabId !== binding.tabId || proof.windowId !== session.windowId ||
+            proof.documentId !== binding.documentId || proof.urlSessionDigest !== binding.urlSessionDigest) {
+            return Object.freeze({ ok: false, code: 'REPORT_SOURCE_DENIED' });
+          }
+          return Object.freeze({ ok: true, state, binding: session.targetBinding, windowId: session.windowId, live: true });
+        }
+        return Object.freeze({ ok: true, state, binding: session.targetBinding, windowId: session.windowId, live: false });
+      } catch {
+        return Object.freeze({ ok: false, code: 'REPORT_SOURCE_DENIED' });
+      }
+    },
+  });
+  const reportLaunch = launchApisAvailable ? createReportLaunchAuthority({
+    chromeApi, sessionArea, epochNow, randomBytes: bytes, sourceSessionAuthority,
+    sourcePanelAuthority: panelLaunchAuthority,
+  }) : unavailableLaunch;
+  const highlightBindingStore = createHighlightBindingStore({ sessionArea, now: epochNow });
+  const highlightModelAuthority = createHighlightModelAuthority({ auditStore });
+  const highlightLiveVerifier = createHighlightLiveVerifier({
+    chromeApi, digestManager, chromeAdapter, now: epochNow,
+  });
+  const highlightSessionBridge = createHighlightSessionAuthorityBridge({ authority, reportLaunch });
+  const highlightController = createHighlightController({
+    chromeApi,
+    chromeAdapter,
+    sessionAuthority: highlightSessionBridge.sessionAuthority,
+    modelAuthority: highlightModelAuthority,
+    bindingStore: highlightBindingStore,
+    liveVerifier: highlightLiveVerifier,
+    targetQueue,
+    now: epochNow,
+    randomBytes: bytes,
+  });
+  async function scheduleHighlightExpiry() {
+    const snapshot = await highlightBindingStore.snapshot();
+    const deadlines = [
+      ...Object.values(snapshot.bindingsByAuditPage),
+      ...Object.values(snapshot.activeOverlayByTab),
+    ].map(value => value.expiresAt).filter(value => Number.isSafeInteger(value) && value >= 0);
+    if (deadlines.length === 0) {
+      await chromeApi.alarms.clear(HIGHLIGHT_EXPIRY_ALARM_NAME);
+      return;
+    }
+    await chromeApi.alarms.create(HIGHLIGHT_EXPIRY_ALARM_NAME, { when: Math.min(...deadlines) });
+  }
+  const highlightBindingRecorder = createHighlightBindingRecorder({
+    bindingStore: highlightBindingStore,
+    chromeAdapter,
+    digestManager,
+    now: epochNow,
+    recordBinding: recordHighlightBindingV1,
+    scheduleExpiry: scheduleHighlightExpiry,
+  });
   const cleanupBarrier = createLiveAidCleanup({
-    highlightCleaner,
+    highlightCleaner: highlightController,
     personaCoordinator,
     targetQueue,
   });
-  const auditStore = options.auditStore ?? createAuditStore(options.auditStoreOptions);
   const inventory = await createInstalledCoreRuleInventory();
   const buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({ reportRevision, inventory });
   const checkpoints = createCheckpointAdapters(sessionArea);
@@ -423,6 +606,9 @@ async function buildDefaultRuntime(chromeApi, options) {
     setTimer: (callback, delay) => setTimeout(callback, delay),
     clearTimer: timer => clearTimeout(timer),
     launchAuthority: panelLaunchAuthority,
+    authorizeHighlightSession: value => authority.authorizeSession({
+      ...value, consumer: 'panel', intent: 'highlight',
+    }),
     dispatchPanelIntent: request => panelIntentDispatcher
       ? panelIntentDispatcher(request)
       : Object.freeze({ ok: false, code: 'CONTEXT_DENIED' }),
@@ -437,8 +623,12 @@ async function buildDefaultRuntime(chromeApi, options) {
     if (result?.revision !== 1 || typeof result.modelHash !== 'string') throw new Error('TERMINAL_COMMIT_DENIED');
     return Object.freeze({ revision: 1, modelHash: result.modelHash });
   };
+  const panelAuditCoordinator = Object.freeze({
+    attachPanelPort: panelCoordinator.attachPanelPort,
+    withWindowLock: panelCoordinator.withWindowLock,
+  });
   const auditStarter = createAuthorizedAuditStarter({
-    authority, sessionArea, panelCoordinator, targetQueue, cleanupBarrier,
+    authority, sessionArea, panelCoordinator: panelAuditCoordinator, targetQueue, cleanupBarrier,
     runAttachedAuditExecution: args => runAttachedAuditExecution({
       ...args, chromeAdapter, expectedExtensionId: chromeApi.runtime.id,
     }),
@@ -447,21 +637,36 @@ async function buildDefaultRuntime(chromeApi, options) {
     readAuditSnapshot: ({ auditId }) => auditStore.getAuditSnapshot(auditId),
     readReportRevision: ({ auditId }) => auditStore.getReportRevision(auditId),
     readLatest: () => auditStore.getLatest(), buildPanelResultBundle,
+    recordHighlightBinding: value => highlightBindingRecorder.record(value),
     epochNow, modelNow, createAbortController: () => new AbortController(),
   });
-  const launchApisAvailable = typeof chromeApi.tabs?.create === 'function' && typeof chromeApi.tabs?.update === 'function' &&
-    typeof chromeApi.tabs?.get === 'function' && typeof chromeApi.tabs?.remove === 'function';
-  const unavailableLaunch = freeze({
-    async openRegisteredReport() { return { ok: false, code: 'REPORT_OPEN_DENIED' }; },
-    async connect() { return { ok: false, code: 'CONTEXT_DENIED' }; },
-    async authorizeIntent() { return { ok: false, code: 'REPORT_INTENT_DENIED' }; },
-    async authorizeExport() { return { ok: false, code: 'REPORT_EXPORT_DENIED' }; },
-    async validateConsumer() { return false; },
-    async requestExport() { return { ok: false, code: 'REPORT_EXPORT_DENIED' }; },
-    async complete() { return { ok: false, code: 'EXPORT_COMPLETE_DENIED' }; },
-    async handleTabUpdated() { return false; }, async handleTabRemoved() { return false; }, async handleWindowRemoved() { return false; },
+  const reportPortCoordinator = createReportPortCoordinator({
+    reportLaunch,
+    async readHighlightState({ sessionCapabilityId, auditId, sender }) {
+      let token;
+      try { token = highlightSessionBridge.createReviewSender({ sender }); }
+      catch { return Object.freeze({ ok: false, code: 'HIGHLIGHT_NOT_AUTHORIZED' }); }
+      return highlightController.currentState({ sessionCapabilityId, auditId, sender: token });
+    },
+    setTimer: (callback, delay) => setTimeout(callback, delay),
+    clearTimer: timer => clearTimeout(timer),
   });
-  const reportLaunch = launchApisAvailable ? createReportLaunchAuthority({ chromeApi, sessionArea, epochNow, randomBytes: bytes }) : unavailableLaunch;
+  const publishHighlightState = async event => {
+    const [panelResult, reportResult] = await Promise.all([
+      panelCoordinator.publishHighlightState(event),
+      reportPortCoordinator.publishHighlightState(event),
+    ]);
+    const panelDelivered = Number.isSafeInteger(panelResult?.delivered) && panelResult.delivered >= 0
+      ? panelResult.delivered : 0;
+    const reportDelivered = Number.isSafeInteger(reportResult?.delivered) && reportResult.delivered >= 0
+      ? reportResult.delivered : 0;
+    return Object.freeze({ delivered: panelDelivered + reportDelivered });
+  };
+  const highlightRuntimeController = createPublishingHighlightController({
+    controller: highlightController,
+    publishHighlightState,
+    scheduleExpiry: scheduleHighlightExpiry,
+  });
   const exportCompletionStore = Object.freeze({
     ...auditStore,
     async emitTerminal(event) { await chromeAdapter.emitProgress(event); },
@@ -475,17 +680,23 @@ async function buildDefaultRuntime(chromeApi, options) {
   const exportLaunch = launchApisAvailable ? createExportLaunchAuthority({
     chromeApi, sessionArea, auditStore: exportCompletionStore, reportLaunch, epochNow, modelNow, randomBytes: bytes,
   }) : unavailableLaunch;
-  const reportOperations = createReportOperations({ chromeApi, auditStore, sessionArea, modelNow });
+  const reportOperations = createReportOperations({
+    chromeApi, auditStore, sessionArea, modelNow, highlightController, highlightBindingStore,
+    publishHighlightState,
+  });
   const router = createSidePanelIntentRouter({
     chromeApi, authority, auditStarter, panelCoordinator, chromeAdapter,
     personaStart, personaCoordinator,
     readReportRevision: ({ auditId }) => auditStore.getReportRevision(auditId),
     buildPanelResultBundle, revokeViewOnly, epochNow, modelNow,
     createAuditId: options.createAuditId ?? defaultAuditId, reportLaunch, exportLaunch, reportOperations,
+    highlightController, highlightSessionBridge, publishHighlightState,
   });
   panelIntentDispatcher = request => router.dispatch(request);
   const panelLauncher = options.panelLauncher ??
     createPanelLauncher({ chromeApi, launchAuthority: panelLaunchAuthority, logger: options.logger });
+  const highlightRecovery = await highlightRuntimeController.recover();
+  if (highlightRecovery?.ok !== true) throw new Error('WORKER_UNAVAILABLE');
   const personaRecovery = await personaCoordinator.recover();
   if (personaRecovery?.ok !== true) throw new Error('WORKER_UNAVAILABLE');
   const recovery = await auditStarter.recoverAuthorizedAuditLifecycle();
@@ -498,16 +709,20 @@ async function buildDefaultRuntime(chromeApi, options) {
       reportLaunch,
       exportLaunch,
       personaCoordinator,
+      highlightController: highlightRuntimeController,
     }),
-    router, panelCoordinator, panelLauncher,
+    router, panelCoordinator, panelLauncher, reportPortCoordinator,
   };
 }
 
 function parseBuiltRuntime(value) {
-  const built = exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher'], true);
+  const built = exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator'], true) ??
+    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher'], true);
   if (!built || typeof built.router?.dispatch !== 'function' ||
     typeof built.panelCoordinator?.attachPanelPort !== 'function' ||
-    typeof built.panelLauncher?.launch !== 'function') throw new Error('WORKER_UNAVAILABLE');
+    typeof built.panelLauncher?.launch !== 'function' ||
+    (Object.hasOwn(built, 'reportPortCoordinator') &&
+      typeof built.reportPortCoordinator?.attachReportPort !== 'function')) throw new Error('WORKER_UNAVAILABLE');
   return { ...built, readyRuntime: copyReadyRuntime(built.readyRuntime) };
 }
 
@@ -523,12 +738,16 @@ export function registerServiceWorker(chromeApi, options = {}) {
   const createEventNonce = options.createEventNonce ?? defaultNonce;
   const createAuditId = options.createAuditId ?? defaultAuditId;
 
+  void invokeChrome(chromeApi, chromeApi.sidePanel, 'setOptions', {
+    enabled: false,
+  }).catch(() => logger.error(SIDE_PANEL_DEFAULT_DENIED));
   void invokeChrome(chromeApi, chromeApi.sidePanel, 'setPanelBehavior', {
     openPanelOnActionClick: false,
   }).catch(() => logger.error(SIDE_PANEL_BEHAVIOR_DENIED));
 
   let router = options.router ?? null;
   let panelCoordinator = options.panelCoordinator ?? null;
+  let reportPortCoordinator = options.reportPortCoordinator ?? null;
   let panelLauncher = options.panelLauncher ?? null;
   let earlyPanelLaunchAuthority = null;
   let settlePanelStorageGate = null;
@@ -581,6 +800,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
     const name = own(port, 'name');
     void startupReady.then(() => {
       if (name === PANEL_PORT_NAME) panelCoordinator.attachPanelPort(port);
+      else if (name === REPORT_PORT_NAME && reportPortCoordinator) reportPortCoordinator.attachReportPort(port);
       else {
         try { port?.disconnect?.(); } catch { /* fixed denial */ }
       }
@@ -590,8 +810,14 @@ export function registerServiceWorker(chromeApi, options = {}) {
   };
 
   const alarmListener = alarm => {
-    if (own(alarm, 'name') !== PERSONA_EXPIRY_ALARM_NAME) return;
-    void startupReady.then(runtime => runtime.personaCoordinator?.expireDue?.(), () => false).catch(() => false);
+    const name = own(alarm, 'name');
+    if (name === PERSONA_EXPIRY_ALARM_NAME) {
+      void startupReady.then(runtime => runtime.personaCoordinator?.expireDue?.(), () => false).catch(() => false);
+      return;
+    }
+    if (name === HIGHLIGHT_EXPIRY_ALARM_NAME) {
+      void startupReady.then(runtime => runtime.highlightController?.expireDue?.(), () => false).catch(() => false);
+    }
   };
 
   const actionListener = tab => {
@@ -607,7 +833,13 @@ export function registerServiceWorker(chromeApi, options = {}) {
   chromeApi.alarms.onAlarm.addListener(alarmListener);
   chromeApi.action.onClicked.addListener(actionListener);
 
-  const lifecycle = createAuditLifecycle({ chromeApi, getReadyRuntime });
+  const lifecycle = createAuditLifecycle({
+    chromeApi,
+    getReadyRuntime,
+    rebindPanelForNavigation: value => typeof panelLauncher?.rebindForNavigation === 'function'
+      ? panelLauncher.rebindForNavigation(value)
+      : false,
+  });
   lifecycle.register();
   const contextMenus = registerAuditContextMenus(chromeApi, {
     getReadyRuntime, createEventNonce, createAuditId, epochNow, logger,
@@ -638,6 +870,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
           }));
         router = built.router;
         panelCoordinator = built.panelCoordinator;
+        reportPortCoordinator = built.reportPortCoordinator ?? null;
         panelLauncher = built.panelLauncher;
         resolveStartup(built.readyRuntime);
       } catch {

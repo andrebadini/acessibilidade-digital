@@ -605,10 +605,13 @@
         return voice.voiceId === requestedVoiceId;
       }) || null;
       if (!requestedVoiceId || !selected) return publish(queue[index]);
+      var shouldAnnounce = !voiceId || ['error', 'unavailable'].includes(speechAvailability);
       voiceId = requestedVoiceId;
       rate = requestedRate;
       speechAvailability = 'available';
-      return publish(queue[index]);
+      return shouldAnnounce && playback === 'playing' && index >= 0
+        ? speakCurrent()
+        : publish(queue[index]);
     }
 
     function listLocalVoices() {

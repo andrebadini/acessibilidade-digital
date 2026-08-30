@@ -156,6 +156,60 @@ test('admits one exact tokenized Side Panel context and returns a document-bound
   assert.equal(Object.values(persisted).every(record => record.state === 'admitted'), true);
 });
 
+test('confirms only the exact connected admitted Side Panel for its audited source tab', async () => {
+  let contexts = [contextFor(TOKEN_A)];
+  const chromeApi = {
+    runtime: {
+      id: RUNTIME_ID,
+      async getContexts() { return contexts; },
+    },
+  };
+  const { authority } = await initialize(fixture({ chromeApi }));
+  const issued = authority.issue({ tabId: 41, windowId: 9 });
+  await flushPersistence();
+  assert.equal((await authority.admitPort({ sender: senderFor(issued.token) })).ok, true);
+
+  assert.equal(await authority.hasOpenPanelForSource({ tabId: 41, windowId: 9 }), true);
+  assert.equal(await authority.hasOpenPanelForSource({ tabId: 42, windowId: 9 }), false);
+  assert.equal(await authority.hasOpenPanelForSource({ tabId: 41, windowId: 10 }), false);
+  contexts = [contextFor(TOKEN_A, { documentId: 'foreign-panel-document' })];
+  assert.equal(await authority.hasOpenPanelForSource({ tabId: 41, windowId: 9 }), false);
+});
+
+test('atomically rotates an admitted panel to a fresh navigation launch for the same source tab', async () => {
+  const entropy = [0xab, 0xbc];
+  const chromeApi = {
+    runtime: {
+      id: RUNTIME_ID,
+      async getContexts() { return [contextFor(TOKEN_A)]; },
+    },
+  };
+  const env = await initialize(fixture({
+    chromeApi,
+    randomBytes(length) { return new Uint8Array(length).fill(entropy.shift()); },
+  }));
+  const first = env.authority.issue({ tabId: 41, windowId: 9 });
+  await flushPersistence();
+  const admission = await env.authority.admitPort({ sender: senderFor(first.token) });
+  assert.equal(admission.ok, true);
+
+  const rotated = await env.authority.rotateForNavigation({ tabId: 41 });
+  assert.deepEqual(rotated, {
+    ok: true,
+    token: TOKEN_B,
+    path: `src/panel/index.html?launch=${TOKEN_B}`,
+    generation: 2,
+  });
+  assert.equal(await env.authority.whenReady(rotated), true);
+  assert.deepEqual(await env.authority.reprove(admission), {
+    ok: false, code: 'PANEL_LAUNCH_DENIED',
+  });
+  const persisted = await env.sessionArea.get(null);
+  assert.equal(Object.keys(persisted).length, 2);
+  assert.equal(JSON.stringify(persisted).includes(TOKEN_A), false);
+  assert.equal(JSON.stringify(persisted).includes(TOKEN_B), true);
+});
+
 test('rejects a second live or pending launch for the same source tab synchronously', async () => {
   const { authority, randomCalls } = await initialize(fixture());
 

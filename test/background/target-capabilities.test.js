@@ -419,8 +419,8 @@ test('prepares an exact one-use target and atomically persists its running sessi
     { name: 'review', path: '/src/review/index.html', contextType: 'TAB' },
   ]);
   assert.deepEqual(session.intents, {
-    panel: { running: ['cancel'], result: ['open-report'], 'view-only': ['open-report'] },
-    review: { running: [], result: ['export'], 'view-only': ['export'] },
+    panel: { running: ['cancel'], result: ['open-report', 'highlight'], 'view-only': ['open-report'] },
+    review: { running: [], result: ['export', 'highlight'], 'view-only': ['export'] },
   });
   assert.equal(sessionArea.writes.at(-1).keys.length, 2);
   assert.deepEqual(await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId)), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
@@ -902,6 +902,7 @@ test('authorizes only state consumer intent audit window path and context matche
   }
   assert.equal((await authority.transitionAuditSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', nextState: 'result' })).ok, true);
   assert.equal((await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'open-report', sender, claimedWindowId: 9 })).ok, true);
+  assert.equal((await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'highlight', sender, claimedWindowId: 9 })).ok, true);
   assert.deepEqual(await authority.transitionAuditSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', nextState: 'running' }), { ok: false, code: 'SESSION_TRANSITION_DENIED' });
 });
 
@@ -971,20 +972,53 @@ test('validates reordered closed intents structurally and rejects changed grants
   const reordered = {
     ...session,
     intents: {
-      review: { 'view-only': ['export'], result: ['export'], running: [] },
-      panel: { 'view-only': ['open-report'], result: ['open-report'], running: ['cancel'] },
+      review: { 'view-only': ['export'], result: ['export', 'highlight'], running: [] },
+      panel: { 'view-only': ['open-report'], result: ['open-report', 'highlight'], running: ['cancel'] },
     },
   };
   await sessionArea.set({ [key]: reordered });
   assert.equal((await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender, claimedWindowId: 9 })).ok, true);
   for (const intents of [
     { ...reordered.intents, extra: {} },
-    { panel: { result: ['open-report'], 'view-only': ['open-report'] }, review: reordered.intents.review },
+    { panel: { result: ['open-report', 'highlight'], 'view-only': ['open-report'] }, review: reordered.intents.review },
     { panel: { ...reordered.intents.panel, running: ['open-report', 'cancel'] }, review: reordered.intents.review },
   ]) {
     await sessionArea.set({ [key]: { ...session, intents } });
     assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender, claimedWindowId: 9 }), { ok: false, code: 'SESSION_DENIED' });
   }
+});
+
+test('keeps a legacy V1 session readable without silently granting highlight', async () => {
+  const sender = { id: 'test', documentId: 'panel-document-1', url: PANEL_URL };
+  const { chromeApi } = panelChromeApi(sender);
+  const { authority, sessionArea } = authorityFixture({ chromeApi });
+  const prepared = await prepareAttached(authority);
+  const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+  const key = sessionCapabilityStorageKey(claimed.sessionCapabilityId);
+  const session = (await sessionArea.get(key))[key];
+  const legacyIntents = {
+    panel: { running: ['cancel'], result: ['open-report'], 'view-only': ['open-report'] },
+    review: { running: [], result: ['export'], 'view-only': ['export'] },
+  };
+  await sessionArea.set({ [key]: { ...session, intents: legacyIntents } });
+
+  assert.equal((await authority.authorizeSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel',
+    intent: 'cancel', sender, claimedWindowId: 9,
+  })).ok, true);
+  assert.equal((await authority.transitionAuditSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', nextState: 'result',
+  })).ok, true);
+  assert.equal((await authority.authorizeSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel',
+    intent: 'open-report', sender, claimedWindowId: 9,
+  })).ok, true);
+  assert.deepEqual(await authority.authorizeSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel',
+    intent: 'highlight', sender, claimedWindowId: 9,
+  }), { ok: false, code: 'SESSION_DENIED' });
+  const persisted = (await sessionArea.get(key))[key];
+  assert.deepEqual(persisted.intents, legacyIntents);
 });
 
 test('rejects hostile exact-shape accessors symbols and non-enumerable additions without invoking getters', async () => {
@@ -1046,6 +1080,7 @@ test('rehydrates a closed view-only session without resurrecting running intent'
   assert.equal(session.state, 'view-only');
   assert.deepEqual(session.targetBinding, { kind: 'view-only' });
   assert.equal((await authority.authorizeSession({ sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-view-1', consumer: 'panel', intent: 'open-report', sender, claimedWindowId: 9 })).ok, true);
+  assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-view-1', consumer: 'panel', intent: 'highlight', sender, claimedWindowId: 9 }), { ok: false, code: 'SESSION_DENIED' });
   assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-view-1', consumer: 'panel', intent: 'cancel', sender, claimedWindowId: 9 }), { ok: false, code: 'SESSION_DENIED' });
 });
 

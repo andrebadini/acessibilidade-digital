@@ -4,6 +4,7 @@ import vm from 'node:vm';
 
 let commandModule = {};
 try { commandModule = await import('../../src/personas/persona-command.js'); } catch { /* RED */ }
+const LEASE = `lease-${'L'.repeat(22)}`;
 
 function apply(command, environment) {
   assert.equal(
@@ -18,8 +19,8 @@ function runtimeFixture({ activeMode = null, stopLeavesMode = false } = {}) {
   const calls = [];
   let mode = activeMode;
   const runtime = Object.freeze({
-    activate(nextMode) {
-      calls.push(['activate', nextMode]);
+    activate(nextMode, preferences, correlation) {
+      calls.push(['activate', nextMode, preferences, correlation]);
       mode = nextMode;
       return { activeMode: mode };
     },
@@ -108,14 +109,27 @@ function environmentFixture(options = {}) {
     },
   });
   Object.freeze(namespace);
-  const environment = { document: Object.freeze({ nodeType: 9 }) };
+  const sent = [];
+  const environment = {
+    document: Object.freeze({ nodeType: 9 }),
+    ...(options.withMessaging ? {
+      chrome: {
+        runtime: {
+          sendMessage(message) {
+            sent.push(structuredClone(message));
+            return Promise.resolve({ ok: true });
+          },
+        },
+      },
+    } : {}),
+  };
   Object.defineProperty(environment, Symbol.for('audita.accessible-preview.runtime.v1'), {
     value: options.namespace ?? namespace,
     enumerable: false,
     configurable: false,
     writable: false,
   });
-  return { environment, namespace, created, getSingleton: () => singleton };
+  return { environment, namespace, created, sent, getSingleton: () => singleton };
 }
 
 test('self-contained probe distinguishes an absent namespace without installing anything', () => {
@@ -138,7 +152,9 @@ test('rejects non-exact commands and never evaluates accessor properties', () =>
     {},
     { version: 1, op: 'probe', mode: 'reader' },
     { version: 1, op: 'install' },
+    { version: 1, op: 'install', mode: 'reader' },
     { version: 1, op: 'install', mode: 'unknown' },
+    { version: 1, op: 'install', mode: 'reader', leaseId: 'short' },
     { version: 1, op: 'inspect', extra: true },
     { version: 2, op: 'clear' },
   ];
@@ -167,21 +183,41 @@ test('probe reports a conflicting namespace but only commands diagnose its brand
   });
 });
 
-test('install creates the registered singleton, activates exactly one mode and installs no messaging', () => {
+test('install binds one opaque lease and exposes only the closed autonomous shutdown emitter', () => {
   const createdRuntime = runtimeFixture();
-  const { environment, created, getSingleton } = environmentFixture({
+  const { environment, created, sent, getSingleton } = environmentFixture({
     createdRuntime: createdRuntime.runtime,
+    withMessaging: true,
   });
-  assert.deepEqual(apply({ version: 1, op: 'install', mode: 'reader' }, environment), {
+  assert.deepEqual(apply({ version: 1, op: 'install', mode: 'reader', leaseId: LEASE }, environment), {
     ok: true, mode: 'reader',
   });
   assert.strictEqual(getSingleton(), createdRuntime.runtime);
-  assert.deepEqual(createdRuntime.calls, [['inspect'], ['activate', 'reader'], ['inspect']]);
+  assert.deepEqual(createdRuntime.calls, [
+    ['inspect'],
+    ['activate', 'reader', undefined, { leaseId: LEASE }],
+    ['inspect'],
+  ]);
   assert.equal(created.length, 1);
-  assert.deepEqual(Object.keys(created[0]).sort(), ['document', 'window']);
+  assert.deepEqual(Object.keys(created[0]).sort(), ['document', 'emitEvent', 'window']);
   assert.strictEqual(created[0].document, environment.document);
   assert.strictEqual(created[0].window, environment);
   assert.equal(Object.hasOwn(createdRuntime.runtime, 'installMessaging'), false);
+
+  for (const reason of ['emergency-stop', 'lifecycle-stop', 'reader-terminal']) {
+    created[0].emitEvent({ event: reason, leaseId: LEASE });
+  }
+  for (const rejected of [
+    { event: 'state', leaseId: LEASE },
+    { event: 'emergency-stop', leaseId: 'short' },
+    { event: 'lifecycle-stop', leaseId: LEASE, url: 'https://private.test/' },
+  ]) created[0].emitEvent(rejected);
+  assert.deepEqual(sent, [
+    { type: 'AUDITA_PERSONA_AUTONOMOUS_STOP', leaseId: LEASE, reason: 'emergency-stop' },
+    { type: 'AUDITA_PERSONA_AUTONOMOUS_STOP', leaseId: LEASE, reason: 'lifecycle-stop' },
+    { type: 'AUDITA_PERSONA_AUTONOMOUS_STOP', leaseId: LEASE, reason: 'reader-terminal' },
+  ]);
+  assert.doesNotMatch(JSON.stringify(sent), /private|https?:|selector/iu);
 
   const bridge = Object.getOwnPropertyDescriptor(environment, '__auditaPersonaV1');
   assert.equal(bridge?.enumerable, false);
@@ -209,7 +245,7 @@ test('install never invokes arbitrary own or prototype document accessors', () =
     writable: false,
   });
 
-  assert.deepEqual(apply({ version: 1, op: 'install', mode: 'reader' }, environment), {
+  assert.deepEqual(apply({ version: 1, op: 'install', mode: 'reader', leaseId: LEASE }, environment), {
     ok: true, mode: 'reader',
   });
   assert.equal(prototypeReads, 0);
@@ -222,7 +258,7 @@ test('install never invokes arbitrary own or prototype document accessors', () =
     configurable: true,
     get() { hostileReads += 1; return document; },
   });
-  assert.deepEqual(apply({ version: 1, op: 'install', mode: 'reader' }, hostile.environment), {
+  assert.deepEqual(apply({ version: 1, op: 'install', mode: 'reader', leaseId: LEASE }, hostile.environment), {
     ok: true, mode: 'reader',
   });
   assert.equal(hostileReads, 0);
@@ -234,7 +270,7 @@ test('inspect reads only the existing singleton and clear removes its bridge aft
   const { environment, created } = environmentFixture({ singleton: current.runtime });
   assert.deepEqual(apply({ version: 1, op: 'inspect' }, environment), { ok: true, mode: 'motor' });
   assert.equal(created.length, 0);
-  assert.deepEqual(apply({ version: 1, op: 'install', mode: 'motor' }, environment), { ok: true, mode: 'motor' });
+  assert.deepEqual(apply({ version: 1, op: 'install', mode: 'motor', leaseId: LEASE }, environment), { ok: true, mode: 'motor' });
   assert.equal(Object.hasOwn(environment, '__auditaPersonaV1'), true);
 
   assert.deepEqual(apply({ version: 1, op: 'clear' }, environment), { ok: true, mode: null });
@@ -268,7 +304,7 @@ test('runtime exceptions and malformed singleton state never escape the local br
     getState() { return { activeMode: 'forged' }; },
   });
   const { environment } = environmentFixture({ singleton: broken });
-  assert.deepEqual(apply({ version: 1, op: 'install', mode: 'reader' }, environment), {
+  assert.deepEqual(apply({ version: 1, op: 'install', mode: 'reader', leaseId: LEASE }, environment), {
     ok: false, reason: 'runtime-error',
   });
   assert.deepEqual(apply({ version: 1, op: 'inspect' }, environment), {

@@ -4,6 +4,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const namespaceExpression = 'globalThis[Symbol.for("audita.accessible-preview.runtime.v1")]';
+const LEASE = `lease-${'L'.repeat(22)}`;
 
 class FakeClassList {
   constructor(values = []) { this.values = new Set(values); }
@@ -351,12 +352,12 @@ test('keeps modes exclusive/reversible and blocks pointer while preserving keybo
     now: () => now,
   });
 
-  assert.equal(content.activate('reader', { voiceId: '', rate: 1 }).activeMode, 'reader');
+  assert.equal(content.activate('reader', { voiceId: '', rate: 1 }, { leaseId: LEASE }).activeMode, 'reader');
   messages.length = 0;
-  assert.equal(content.activate('achromatopsia').activeMode, 'achromatopsia');
+  assert.equal(content.activate('achromatopsia', undefined, { leaseId: LEASE }).activeMode, 'achromatopsia');
   assert.deepEqual(messages, [], 'troca de modo não pode publicar estado inativo transitório na geração do ACK final');
   assert.equal(fixture.document.documentElement.classList.contains('audita-persona-achromatopsia'), true);
-  assert.equal(content.activate('motor').activeMode, 'motor');
+  assert.equal(content.activate('motor', undefined, { leaseId: LEASE }).activeMode, 'motor');
   assert.equal(fixture.document.documentElement.classList.contains('audita-persona-achromatopsia'), false);
   assert.equal(fixture.document.documentElement.classList.contains('audita-persona-motor'), true);
 
@@ -404,7 +405,34 @@ test('keeps modes exclusive/reversible and blocks pointer while preserving keybo
   assert.equal(content.getState().activeMode, null);
   assert.equal(fixture.document.documentElement.classList.contains('audita-persona-motor'), false);
   assert.equal(fixture.document.documentElement.classList.contains('audita-persona-preexisting'), true);
-  assert.equal(messages.at(-1).event, 'emergency-stop');
+  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), { event: 'emergency-stop', leaseId: LEASE });
+});
+
+test('rebinds an already active mode to a replacement lease before autonomous shutdown', async () => {
+  const namespace = await loadContentFactory();
+  const fixture = fixturePage();
+  const messages = [];
+  let now = 0;
+  const replacementLease = `lease-${'N'.repeat(22)}`;
+  const content = namespace.createContentRuntime({
+    document: fixture.document,
+    window: fixture.document.defaultView,
+    emitEvent: message => messages.push(message),
+    speechSynthesis: null,
+    now: () => now,
+  });
+
+  assert.equal(content.activate('motor', undefined, { leaseId: LEASE }).activeMode, 'motor');
+  assert.equal(content.activate('motor', undefined, { leaseId: replacementLease }).activeMode, 'motor');
+  for (let press = 0; press < 3; press += 1) {
+    now += 200;
+    fixture.document.dispatch('keydown', event({ isTrusted: true, key: 'Escape', repeat: false }));
+  }
+
+  assert.equal(content.getState().activeMode, null);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
+    { event: 'emergency-stop', leaseId: replacementLease },
+  ]);
 });
 
 test('cleanup removes only classes it owns and a material SPA mutation stops the active mode', async () => {
@@ -417,10 +445,11 @@ test('cleanup removes only classes it owns and a material SPA mutation stops the
     observe(target, init) { this.target = target; this.init = init; }
     disconnect() { this.disconnected = true; }
   }
+  const messages = [];
   const content = namespace.createContentRuntime({
     document: fixture.document,
     window: fixture.document.defaultView,
-    emitEvent() {},
+    emitEvent: message => messages.push(message),
     speechSynthesis: null,
     MutationObserver: FakeMutationObserver,
   });
@@ -428,11 +457,12 @@ test('cleanup removes only classes it owns and a material SPA mutation stops the
   content.stop('requested');
   assert.equal(fixture.document.documentElement.classList.contains('audita-persona-preexisting'), true);
 
-  content.activate('reader', { voiceId: '', rate: 1 });
+  content.activate('reader', { voiceId: '', rate: 1 }, { leaseId: LEASE });
   assert.ok(observer, 'mutação material deve ser observada durante a persona');
   observer.callback([{ type: 'childList', target: fixture.document.body, addedNodes: [], removedNodes: [fixture.nodes.natural] }]);
   assert.equal(content.getState().activeMode, null);
   assert.equal(observer.disconnected, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), { event: 'lifecycle-stop', leaseId: LEASE });
 });
 
 test('root ownership makes residual CSS inert and rejects preexisting persona collisions', async () => {
@@ -691,10 +721,10 @@ test('lifecycle boundary stops on relevant attributes, open-shadow mutations, SP
   observer.callback([{ type: 'childList', target: fixture.shadowRoot, addedNodes: [addedInShadow], removedNodes: [] }]);
   assert.equal(content.getState().activeMode, null);
 
-  content.activate('achromatopsia');
+  content.activate('achromatopsia', undefined, { leaseId: LEASE });
   fixture.document.dispatchWindow('popstate');
   assert.equal(content.getState().activeMode, null);
-  assert.equal(messages.at(-1).event, 'lifecycle-stop');
+  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), { event: 'lifecycle-stop', leaseId: LEASE });
 
   content.activate('motor');
   fixture.document.dispatchWindow('pagehide');
@@ -888,7 +918,7 @@ test('focus-driven reader overflow becomes terminal and removes the local person
     Utterance: ContentSpeechSynthesisUtterance,
   });
 
-  assert.equal(content.activate('reader', { voiceId: 'content-local', rate: 1 }).activeMode, 'reader');
+  assert.equal(content.activate('reader', { voiceId: 'content-local', rate: 1 }, { leaseId: LEASE }).activeMode, 'reader');
   for (let count = 0; count < 33; count += 1) {
     fixture.document.dispatch('focusin', { target: fixture.nodes.natural });
   }
@@ -900,7 +930,9 @@ test('focus-driven reader overflow becomes terminal and removes the local person
   assert.equal(content.getState().reader.playback, 'idle');
   assert.equal(fixture.document.documentElement.classList.contains('audita-persona-reader'), false);
   assert.equal(content.readerAction('resume').actionStatus, 'rejected');
-  assert.equal(events.filter(event => event?.event === 'reader-terminal').length, 1);
+  assert.deepEqual(events.filter(event => event?.event === 'reader-terminal'), [
+    { event: 'reader-terminal', leaseId: LEASE },
+  ]);
 });
 
 test('hostile speech bootstrap is never evaluated and visual reader fallback remains usable', async () => {

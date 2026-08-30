@@ -3,7 +3,9 @@ import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { PANEL_PORT_NAME } from '../../src/background/panel-port.js';
+import { REPORT_PORT_NAME } from '../../src/background/report-port.js';
 import {
+  HIGHLIGHT_EXPIRY_ALARM_NAME,
   PERSONA_EXPIRY_ALARM_NAME,
   registerServiceWorker,
 } from '../../src/background/service-worker.js';
@@ -39,7 +41,12 @@ function chromeFixture() {
       contextMenus: { onClicked: events.context, async removeAll() {}, create() {} },
       sidePanel: { async open() {}, async setOptions() {}, async setPanelBehavior() {} },
       action: { onClicked: events.action },
-      tabs: { onUpdated: events.updated, onRemoved: events.tabRemoved, onDetached: events.tabDetached },
+      tabs: {
+        onUpdated: events.updated, onRemoved: events.tabRemoved, onDetached: events.tabDetached,
+        async get(tabId) {
+          return { id: tabId, windowId: 9, status: 'complete', discarded: false, url: 'https://example.test/' };
+        },
+      },
       windows: { onRemoved: events.windowRemoved, async get(windowId) { return { id: windowId, focused: false, type: 'normal' }; } },
       alarms: { onAlarm: events.alarm, async create() {}, async clear() { return true; } },
       scripting: { async executeScript() { return []; }, async insertCSS() {}, async removeCSS() {} },
@@ -61,7 +68,7 @@ function runtimeValue() {
   return Object.freeze({ authority: Object.freeze({}), auditStarter: Object.freeze({}), chromeAdapter: Object.freeze({}) });
 }
 
-function runtimeWithPersona(personaCoordinator) {
+function runtimeWithPersona(personaCoordinator, highlightController = null) {
   return Object.freeze({
     authority: Object.freeze({}),
     auditStarter: Object.freeze({}),
@@ -69,6 +76,10 @@ function runtimeWithPersona(personaCoordinator) {
     reportLaunch: Object.freeze({}),
     exportLaunch: Object.freeze({}),
     personaCoordinator,
+    ...(highlightController ? { highlightController: {
+      async invalidateTab() { return { ok: true }; },
+      ...highlightController,
+    } } : {}),
   });
 }
 
@@ -109,6 +120,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
   let denySessionScan = false;
   let panelPath = null;
   let panelOpens = 0;
+  const panelOptions = [];
   const deleted = [];
   const storeCalls = [];
   const sessionGetCalls = [];
@@ -153,7 +165,8 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
   };
   chromeApi.tabs.query = fixtureOptions.tabsQuery ?? (async () => []);
   chromeApi.sidePanel.setOptions = (value, callback) => {
-    panelPath = value.path;
+    panelOptions.push(structuredClone(value));
+    if (typeof value.path === 'string') panelPath = value.path;
     if (callback) setImmediate(callback);
   };
   chromeApi.sidePanel.open = (_value, callback) => { panelOpens += 1; callback?.(); };
@@ -228,9 +241,15 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
   const registration = registerServiceWorker(chromeApi, {
     auditStore,
     chromeAdapterFactory() {
-      return fixtureOptions.chromeAdapter ?? Object.freeze({
+      return Object.freeze({
         async probeDocumentIdentity() { throw new Error('not used'); },
         async getEvidenceUrl() { throw new Error('not used'); },
+        async getFinalUrl() { return 'https://example.test/'; },
+        async proveHighlightTargets() { return []; },
+        async verifyHighlightTarget() { return { ok: false, reason: 'live-proof-failed' }; },
+        async injectHighlight() { return { ok: false, reason: 'execution-failed' }; },
+        async emitProgress() {},
+        ...(fixtureOptions.chromeAdapter ?? {}),
       });
     },
     personaLockManager,
@@ -278,6 +297,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
   async function connectPanel() {
     await registration.startupReady;
     events.action.emit({ id: 17, windowId: 9 });
+    await tick();
     if (typeof panelPath !== 'string') throw new Error('panel launch failed');
     const url = chromeApi.runtime.getURL(panelPath);
     const panelContext = {
@@ -339,6 +359,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
     denySessionScan() { denySessionScan = true; },
     getPanelPath() { return panelPath; },
     getPanelOpens() { return panelOpens; },
+    getPanelOptions() { return structuredClone(panelOptions); },
   };
 }
 
@@ -364,7 +385,7 @@ test('registers every MV3 wrapper synchronously before the shared readiness prom
   assert.equal(events.action.listeners.size, 1);
 });
 
-test('routes only the durable persona expiry alarm through the recovered runtime', async () => {
+test('routes the two durable live-aid expiry alarms through the recovered runtime', async () => {
   const { chromeApi, events } = chromeFixture();
   const ready = deferred();
   const calls = [];
@@ -377,24 +398,70 @@ test('routes only the durable persona expiry alarm through the recovered runtime
   });
   events.alarm.emit({ name: 'foreign-alarm', scheduledTime: 3 });
   events.alarm.emit({ name: PERSONA_EXPIRY_ALARM_NAME, scheduledTime: 4 });
-  ready.resolve(runtimeWithPersona({ async expireDue() { calls.push('expire'); return { ok: true }; } }));
+  events.alarm.emit({ name: HIGHLIGHT_EXPIRY_ALARM_NAME, scheduledTime: 5 });
+  ready.resolve(runtimeWithPersona(
+    { async expireDue() { calls.push('persona-expire'); return { ok: true }; } },
+    { async expireDue() { calls.push('highlight-expire'); return { ok: true }; } },
+  ));
   await tick();
-  assert.deepEqual(calls, ['expire']);
+  assert.deepEqual(calls, ['persona-expire', 'highlight-expire']);
   registration.dispose();
   assert.equal(events.alarm.listeners.size, 0);
 });
 
+test('publishes correlated clear after lifecycle recovery invalidation and expiry retire an overlay', async () => {
+  assert.equal(typeof serviceWorkerModule.createPublishingHighlightController, 'function');
+  const calls = [];
+  const controller = {
+    async invalidateTab(tabId, reason) {
+      calls.push(['invalidate', tabId, reason]);
+      return { ok: true, state: 'invalidated', clearedAuditIds: ['audit-navigation'] };
+    },
+    async recover() {
+      calls.push(['recover']);
+      return { ok: true, recovered: 1, clearedAuditIds: ['audit-recovery'] };
+    },
+    async expireDue() {
+      calls.push(['expire']);
+      return { ok: true, purged: 1, clearedAuditIds: ['audit-expiry'] };
+    },
+    availability() {}, highlight() {}, clear() {}, clearForTargetLocked() {}, clearAudit() {}, invalidateContent() {},
+  };
+  const wrapped = serviceWorkerModule.createPublishingHighlightController({
+    controller,
+    async publishHighlightState(value) { calls.push(['publish', value]); return { delivered: 0 }; },
+    async scheduleExpiry() { calls.push(['schedule']); },
+  });
+
+  assert.equal((await wrapped.invalidateTab(17, 'navigation')).ok, true);
+  assert.equal((await wrapped.recover()).ok, true);
+  assert.equal((await wrapped.expireDue()).ok, true);
+  assert.deepEqual(calls.filter(([name]) => name === 'publish').map(([, value]) => value), [
+    { version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: 'audit-navigation', occurrenceId: null, state: 'clear' },
+    { version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: 'audit-recovery', occurrenceId: null, state: 'clear' },
+    { version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: 'audit-expiry', occurrenceId: null, state: 'clear' },
+  ]);
+  assert.equal(calls.filter(([name]) => name === 'schedule').length, 3);
+});
+
 test('disables Chrome auto-open and synchronously delegates toolbar clicks to the token launcher', async t => {
-  for (const [name, implementation, expectedLogs] of [
-    ['success', async () => undefined, []],
-    ['denial', async () => { throw new Error('native secret'); }, ['SIDE_PANEL_BEHAVIOR_DENIED']],
+  for (const [name, disableDefault, setBehavior, expectedLogs] of [
+    ['success', async () => undefined, async () => undefined, []],
+    ['default denial', async () => { throw new Error('native secret'); }, async () => undefined,
+      ['SIDE_PANEL_DEFAULT_DENIED']],
+    ['behavior denial', async () => undefined, async () => { throw new Error('native secret'); },
+      ['SIDE_PANEL_BEHAVIOR_DENIED']],
   ]) await t.test(name, async () => {
     const { chromeApi, events } = chromeFixture();
     const calls = [];
     const logs = [];
+    chromeApi.sidePanel.setOptions = async value => {
+      calls.push(['default', structuredClone(value)]);
+      return disableDefault();
+    };
     chromeApi.sidePanel.setPanelBehavior = async value => {
       calls.push(['behavior', structuredClone(value)]);
-      return implementation();
+      return setBehavior();
     };
     registerServiceWorker(chromeApi, {
       startupReady: Promise.resolve(runtimeValue()),
@@ -407,6 +474,7 @@ test('disables Chrome auto-open and synchronously delegates toolbar clicks to th
     events.action.emit({ id: 17, windowId: 9 });
     await tick();
     assert.deepEqual(calls, [
+      ['default', { enabled: false }],
       ['behavior', { openPanelOnActionClick: false }],
       ['launch', { id: 17, windowId: 9 }],
     ]);
@@ -420,8 +488,11 @@ test('a cold default worker launches the tokenized Side Panel before long runtim
 
   env.events.action.emit({ id: 17, windowId: 9 });
 
+  assert.deepEqual(env.getPanelOptions()[0], { enabled: false },
+    'the synchronous action listener first disables the global fallback panel');
+  await tick();
   assert.match(env.getPanelPath() ?? '', /^src\/panel\/index\.html\?launch=[A-Za-z0-9_-]{43}$/u,
-    'the synchronous action listener owns launch even while startupReady is pending');
+    'the callback chain owns the exact tab panel even while startupReady is pending');
   await env.registration.startupReady;
   await tick();
   assert.equal(env.getPanelOpens(), 1);
@@ -510,27 +581,30 @@ test('readiness rejection closes recognized primary while removed one-shot types
   assert.equal(oldResponses, 0);
 });
 
-test('attaches only the Side Panel port after readiness and rejects the removed persona popup port', async () => {
+test('attaches only the Side Panel and authenticated report ports after readiness', async () => {
   const { chromeApi, events } = chromeFixture();
   const attached = [];
   registerServiceWorker(chromeApi, {
     startupReady: Promise.resolve(runtimeValue()),
     router: { async dispatch() { return { ok: true }; } },
     panelCoordinator: { attachPanelPort(port) { attached.push(['panel', port.name]); return true; } },
+    reportPortCoordinator: { attachReportPort(port) { attached.push(['report', port.name]); return true; } },
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
     logger: { error() {} },
   });
   const listener = [...events.connect.listeners][0];
   const ports = [
     { name: PANEL_PORT_NAME, disconnects: 0, disconnect() { this.disconnects += 1; } },
+    { name: REPORT_PORT_NAME, disconnects: 0, disconnect() { this.disconnects += 1; } },
     { name: 'audita-persona-v1', disconnects: 0, disconnect() { this.disconnects += 1; } },
     { name: 'unknown', disconnects: 0, disconnect() { this.disconnects += 1; } },
   ];
   for (const port of ports) listener(port);
   await tick();
-  assert.deepEqual(attached, [['panel', PANEL_PORT_NAME]]);
-  assert.equal(ports[1].disconnects, 1);
+  assert.deepEqual(attached, [['panel', PANEL_PORT_NAME], ['report', REPORT_PORT_NAME]]);
+  assert.equal(ports[1].disconnects, 0);
   assert.equal(ports[2].disconnects, 1);
+  assert.equal(ports[3].disconnects, 1);
 });
 
 test('opens trusted session storage before building one shared runtime graph', async () => {
@@ -585,6 +659,7 @@ test('default runtime serializes persona recovery with the supplied Web Locks ma
   const env = defaultGraphFixture();
   const runtime = await env.registration.startupReady;
   assert.equal(typeof runtime.personaCoordinator?.expireDue, 'function');
+  assert.equal(typeof runtime.highlightController?.expireDue, 'function');
   assert.equal(env.personaLockManager.calls.length > 0, true);
   assert.equal(env.personaLockManager.calls.every(call =>
     call.name === 'audita:persona-lease-store:v1' && call.options.mode === 'exclusive'), true);
@@ -608,7 +683,13 @@ test('default runtime clears the persona expiry alarm with the exact Promise API
   });
 
   await env.registration.startupReady;
-  assert.deepEqual(calls, [['clear', 1, PERSONA_EXPIRY_ALARM_NAME]]);
+  env.events.alarm.emit({ name: HIGHLIGHT_EXPIRY_ALARM_NAME, scheduledTime: 1_788_000_000_001 });
+  await tick();
+  assert.deepEqual(calls, [
+    ['clear', 1, HIGHLIGHT_EXPIRY_ALARM_NAME],
+    ['clear', 1, PERSONA_EXPIRY_ALARM_NAME],
+    ['clear', 1, HIGHLIGHT_EXPIRY_ALARM_NAME],
+  ]);
 });
 
 test('a restarted worker recovers an active persona and rehydrates it through a fresh Side Panel capability', async () => {
@@ -685,9 +766,10 @@ test('a restarted worker recovers an active persona and rehydrates it through a 
     }),
   });
   await env.registration.startupReady;
-  assert.deepEqual(alarmCalls, [[
-    'create', 2, PERSONA_EXPIRY_ALARM_NAME, { when: 1_788_001_800_000 },
-  ]]);
+  assert.deepEqual(alarmCalls, [
+    ['clear', 1, HIGHLIGHT_EXPIRY_ALARM_NAME],
+    ['create', 2, PERSONA_EXPIRY_ALARM_NAME, { when: 1_788_001_800_000 }],
+  ]);
   const panel = await env.connectPanel();
   const prepared = await panel.request({
     type: 'PREPARE_PANEL_PERSONA_CAPABILITY',

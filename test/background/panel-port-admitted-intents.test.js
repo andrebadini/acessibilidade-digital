@@ -48,6 +48,7 @@ function fixture() {
     setTimer(callback, delay) { return { callback, delay }; },
     clearTimer() {},
     launchAuthority,
+    async authorizeHighlightSession() { return { ok: false }; },
     async dispatchPanelIntent(value) {
       calls.push(['dispatch', value]);
       return Object.freeze({ ok: true, requestId: value.envelope.requestId });

@@ -562,6 +562,96 @@ export function createPanelLaunchAuthority({
     });
   }
 
+  async function hasOpenPanelForSource(raw) {
+    const source = exact(raw, ['tabId', 'windowId']);
+    if (!source || !safeChromeId(source.tabId) || !safeChromeId(source.windowId) || !state.initialized) return false;
+    return serialize(state, async () => {
+      try {
+        const pair = await readIndexedPair(source.tabId);
+        if (!pair || pair.absent === true || pair.record.state !== 'admitted' ||
+          pair.record.tabId !== source.tabId || pair.record.windowId !== source.windowId) return false;
+        const reservation = state.byTab.get(source.tabId);
+        if (!reservation || state.byToken.get(pair.record.token) !== reservation ||
+          reservation.token !== pair.record.token || reservation.generation !== pair.record.generation ||
+          reservation.contextId !== pair.record.contextId || reservation.documentId !== pair.record.documentId) return false;
+        const url = urlFor(chromeApi.runtime.id, pair.record.token);
+        const contexts = await chromeApi.runtime.getContexts({
+          contextTypes: ['SIDE_PANEL'], documentUrls: [url],
+        });
+        if (!Array.isArray(contexts) || contexts.length !== 1) return false;
+        const context = parseContext(contexts[0], url);
+        return Boolean(context && context.contextId === pair.record.contextId &&
+          context.documentId === pair.record.documentId);
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  async function rotateForNavigation(raw) {
+    const source = exact(raw, ['tabId']);
+    if (!source || !safeChromeId(source.tabId) || !state.initialized) return fail();
+    return serialize(state, async () => {
+      let replacement = null;
+      try {
+        const pair = await readIndexedPair(source.tabId);
+        if (!pair || pair.absent === true || pair.record.state !== 'admitted') return fail();
+        const current = state.byTab.get(source.tabId);
+        if (!current || state.byToken.get(pair.record.token) !== current ||
+          current.token !== pair.record.token || current.generation !== pair.record.generation ||
+          current.contextId !== pair.record.contextId || current.documentId !== pair.record.documentId) return fail();
+        const currentUrl = urlFor(chromeApi.runtime.id, pair.record.token);
+        const contexts = await chromeApi.runtime.getContexts({
+          contextTypes: ['SIDE_PANEL'], documentUrls: [currentUrl],
+        });
+        const context = Array.isArray(contexts) && contexts.length === 1
+          ? parseContext(contexts[0], currentUrl)
+          : null;
+        if (!context || context.contextId !== pair.record.contextId ||
+          context.documentId !== pair.record.documentId) return fail();
+        if (!await removePair(pair.record)) return fail();
+        forget(pair.record);
+
+        const issuedAt = readNow();
+        if (issuedAt > Number.MAX_SAFE_INTEGER - ttlMs ||
+          !Number.isSafeInteger(pair.record.generation + 1)) return fail();
+        const token = encodeToken(randomBytes(32));
+        if (token === pair.record.token || state.byToken.has(token)) return fail('PANEL_LAUNCH_CONFLICT');
+        const generation = pair.record.generation + 1;
+        const expiresAt = issuedAt + ttlMs;
+        const record = {
+          version: 1, token, tabId: pair.record.tabId, windowId: pair.record.windowId, generation,
+          state: 'issued', contextId: null, documentId: null, issuedAt, expiresAt,
+        };
+        const index = {
+          version: 1, tabId: pair.record.tabId, token, generation,
+          state: 'issued', issuedAt, expiresAt,
+        };
+        replacement = {
+          ...record, persistence: Promise.resolve(false), persistenceState: 'pending', connected: false,
+        };
+        state.generations.set(record.tabId, Math.max(state.generations.get(record.tabId) ?? 0, generation));
+        state.byTab.set(record.tabId, replacement);
+        state.byToken.set(token, replacement);
+        const persisted = await writePair(record, index);
+        if (!persisted) throw new Error('denied');
+        replacement.persistenceState = 'ready';
+        replacement.persistence = Promise.resolve(true);
+        return Object.freeze({ ok: true, token, path: pathFor(token), generation });
+      } catch {
+        if (replacement) {
+          if (state.byTab.get(replacement.tabId) === replacement) state.byTab.delete(replacement.tabId);
+          if (state.byToken.get(replacement.token) === replacement) state.byToken.delete(replacement.token);
+          try {
+            const persisted = await readPair(replacement.token);
+            if (persisted) await removePair(persisted.record);
+          } catch { /* the replacement remains denied */ }
+        }
+        return fail();
+      }
+    });
+  }
+
   async function revoke(raw) {
     const admission = parseAdmission(raw, chromeApi.runtime.id);
     const issued = admission ? null : parseIssued(raw);
@@ -583,5 +673,8 @@ export function createPanelLaunchAuthority({
     });
   }
 
-  return Object.freeze({ initialize, issue, isReady, whenReady, admitPort, reprove, revoke });
+  return Object.freeze({
+    initialize, issue, isReady, whenReady, admitPort, reprove,
+    hasOpenPanelForSource, rotateForNavigation, revoke,
+  });
 }

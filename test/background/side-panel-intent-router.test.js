@@ -13,9 +13,12 @@ const PANEL_URL = `chrome-extension://${RUNTIME_ID}/src/panel/index.html?launch=
 const PANEL_TYPES = new Set([
   'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
   'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
-  'PANEL_SET_PERSONA_MODE', 'PANEL_STOP_PERSONA', 'PANEL_CANCEL_AUDIT',
+  'PANEL_SET_PERSONA_MODE', 'PANEL_READER_STATE', 'PANEL_READER_ACTION',
+  'PANEL_READER_ENABLE_VOICE',
+  'PANEL_STOP_PERSONA', 'PANEL_CANCEL_AUDIT',
   'PANEL_OPEN_REPORT', 'PANEL_REHYDRATE_VIEW',
 ]);
+const HIGHLIGHT_TYPES = new Set(['GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT']);
 const REVIEW_DECISION_MESSAGE = Object.freeze({
   type: 'REPORT_COMMIT_REVIEW_DECISION', sessionCapabilityId: SESSION, auditId: 'audit-1',
   itemId: '5.2.1', occurrenceId: 'occurrence-1', answer: 'não conforme', evaluator: 'Pessoa avaliadora',
@@ -47,6 +50,7 @@ function panelCoordinatorFor(calls, overrides = {}) {
   return Object.freeze({
     attachPanelPort() { return true; },
     async withWindowLock(windowId, fn) { calls.push(['lock', windowId]); return fn(scope); },
+    async publishHighlightState(value) { calls.push(['publish-panel-highlight', value]); return { delivered: 1 }; },
   });
 }
 
@@ -80,7 +84,10 @@ function fixture(overrides = {}) {
     async invalidateCapability(capabilityId, reason) { calls.push(['invalidate', capabilityId, reason]); return { ok: true }; },
     async authorizeSession(value) {
       calls.push(['authorize', value]);
-      return { ok: true, session: { auditId: value.auditId, sessionCapabilityId: value.sessionCapabilityId, windowId: 9 }, context: { windowId: 9 } };
+      return { ok: true, session: {
+        auditId: value.auditId, sessionCapabilityId: value.sessionCapabilityId,
+        windowId: 9, state: 'result',
+      }, context: { windowId: 9 } };
     },
     async rehydrateViewOnly(value) {
       calls.push(['rehydrate', value]);
@@ -103,6 +110,10 @@ function fixture(overrides = {}) {
     },
   };
   const personaCoordinator = {
+    async autonomousStop(value) {
+      calls.push(['persona-autonomous-stop', value]);
+      return { ok: true, state: 'revoked' };
+    },
     async setMode(value) {
       calls.push(['persona-set-mode', value]);
       return { ok: true, lease: { leaseId: value.leaseId, activeMode: value.mode, expiresAt: 400 } };
@@ -111,8 +122,49 @@ function fixture(overrides = {}) {
       calls.push(['persona-stop', value]);
       return { ok: true, lease: { leaseId: value.leaseId, activeMode: null, expiresAt: 400 } };
     },
+    async readerCommand(value) {
+      calls.push(['persona-reader', value]);
+      if (value.command.op === 'voices') {
+        return {
+          ok: true, kind: 'voices', status: 'available',
+          voices: [{ id: 'local-a', label: 'Voz local A', lang: 'pt-BR' }],
+        };
+      }
+      return {
+        ok: true,
+        kind: 'state',
+        state: {
+          version: 1, playback: value.command.op === 'action' && value.command.action === 'pause' ? 'paused' : 'playing',
+          index: 0, total: 2, caption: 'Título principal, título nível 1',
+          canPrevious: false, canNext: true, speechAvailability: 'available', voiceId: 'local-a', rate: 1,
+        },
+      };
+    },
   };
   const panelCoordinator = panelCoordinatorFor(calls, panelScopeOverrides);
+  const panelToken = Object.freeze(Object.create(null));
+  const reviewToken = Object.freeze(Object.create(null));
+  const highlightSessionBridge = {
+    createPanelSender(value) { calls.push(['highlight-panel-sender', value]); return panelToken; },
+    createReviewSender(value) { calls.push(['highlight-review-sender', value]); return reviewToken; },
+  };
+  const highlightController = {
+    async currentState(value) { calls.push(['highlight-state', value]); return { ok: true, highlight: { state: 'clear' } }; },
+    async availability(value) { calls.push(['highlight-availability', value]); return { ok: true, bindingStatus: { state: 'available' } }; },
+    async highlight(value) { calls.push(['highlight-install', value]); return { ok: true, highlight: { state: 'active', occurrenceId: value.occurrenceId } }; },
+    async clear(value) { calls.push(['highlight-clear', value]); return { ok: true, highlight: { state: 'clear' } }; },
+    async invalidateContent(value) {
+      calls.push(['highlight-invalidate-content', value]);
+      if (value.sender?.documentId !== 'page-document') {
+        return { ok: false, code: 'HIGHLIGHT_INVALIDATION_IGNORED' };
+      }
+      return {
+        ok: true,
+        auditId: 'audit-1',
+        highlight: { state: 'clear' },
+      };
+    },
+  };
   const chromeAdapter = {
     async probeDocumentIdentity(tabId) { calls.push(['probe', tabId]); return { tabId, windowId: 9, documentId: 'page-document', urlSessionDigest: DIGEST }; },
     async getEvidenceUrl(tabId, includeQuery) { calls.push(['evidence', tabId, includeQuery]); return 'https://example.test/'; },
@@ -132,18 +184,186 @@ function fixture(overrides = {}) {
     epochNow: () => 250,
     modelNow: () => '2026-08-29T12:00:00.000Z',
     createAuditId: (() => { let id = 0; return () => `audit-router-${++id}`; })(),
+    highlightController,
+    highlightSessionBridge,
+    async publishHighlightState(value) { calls.push(['publish-highlight', value]); return { delivered: 2 }; },
     ...dependencyOverrides,
   };
   const rawRouter = createSidePanelIntentRouter(dependencies);
   const router = Object.freeze({
     dispatch(request) {
-      return rawRouter.dispatch(PANEL_TYPES.has(request.envelope?.type)
-        ? { ...request, launchTabId: 17 }
-        : request);
+      if (PANEL_TYPES.has(request.envelope?.type)) return rawRouter.dispatch({ ...request, launchTabId: 17 });
+      if (HIGHLIGHT_TYPES.has(request.envelope?.type)) {
+        return rawRouter.dispatch({ ...request, launchTabId: 17, panelWindowId: 9 });
+      }
+      return rawRouter.dispatch(request);
     },
   });
   return { calls, durableSessions, router, rawRouter, dependencies };
 }
+
+test('routes panel highlight intents with only occurrence correlation and a worker-owned window token', async () => {
+  const { router, calls } = fixture();
+  const current = await router.dispatch({
+    envelope: parsed({
+      type: 'GET_HIGHLIGHT_STATE', sessionCapabilityId: SESSION, auditId: 'audit-1',
+    }),
+    sender: panelSender(),
+  });
+  assert.deepEqual(current, { ok: true, highlight: { state: 'clear' } });
+  const availability = await router.dispatch({
+    envelope: parsed({
+      type: 'GET_HIGHLIGHT_AVAILABILITY', sessionCapabilityId: SESSION,
+      auditId: 'audit-1', occurrenceId: 'occurrence-1',
+    }),
+    sender: panelSender(),
+  });
+  assert.deepEqual(availability, { ok: true, bindingStatus: { state: 'available' } });
+
+  const highlighted = await router.dispatch({
+    envelope: parsed({
+      type: 'HIGHLIGHT_OCCURRENCE', sessionCapabilityId: SESSION,
+      auditId: 'audit-1', occurrenceId: 'occurrence-1',
+    }),
+    sender: panelSender(),
+  });
+  assert.deepEqual(highlighted, { ok: true, highlight: { state: 'active', occurrenceId: 'occurrence-1' } });
+
+  const cleared = await router.dispatch({
+    envelope: parsed({ type: 'CLEAR_HIGHLIGHT', sessionCapabilityId: SESSION, auditId: 'audit-1' }),
+    sender: panelSender(),
+  });
+  assert.deepEqual(cleared, { ok: true, highlight: { state: 'clear' } });
+
+  assert.deepEqual(calls.find(([name]) => name === 'highlight-panel-sender')[1], {
+    sender: panelSender(), windowId: 9,
+  });
+  const install = calls.find(([name]) => name === 'highlight-install')[1];
+  assert.deepEqual(Object.keys(install).sort(), ['auditId', 'occurrenceId', 'sender', 'sessionCapabilityId']);
+  assert.equal(Object.keys(install.sender).length, 0);
+  assert.equal(JSON.stringify(calls).includes('selector'), false);
+  assert.equal(calls.filter(([name]) => name === 'highlight-state').length, 1);
+  assert.deepEqual(calls.filter(([name]) => name === 'publish-highlight').map(([, value]) => value), [
+    { version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: 'audit-1', occurrenceId: 'occurrence-1', state: 'active' },
+    { version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: 'audit-1', occurrenceId: null, state: 'clear' },
+  ]);
+});
+
+test('routes report highlight through a review token and rejects mixed panel transport claims', async () => {
+  const reportLaunch = {
+    async returnToSource(value) {
+      calls.push(['return-source-for-highlight', value]);
+      return { ok: true, state: 'source-focused' };
+    },
+  };
+  const exportLaunch = {};
+  const { rawRouter, calls } = fixture({ reportLaunch, exportLaunch });
+  const sender = { id: RUNTIME_ID, documentId: 'review-document', url: `chrome-extension://${RUNTIME_ID}/src/review/index.html?auditId=audit-1` };
+  const envelope = parsed({
+    type: 'HIGHLIGHT_OCCURRENCE', sessionCapabilityId: SESSION,
+    auditId: 'audit-1', occurrenceId: 'occurrence-1',
+  });
+  assert.equal((await rawRouter.dispatch({ envelope, sender })).ok, true);
+  assert.deepEqual(calls.find(([name]) => name === 'highlight-review-sender')[1], { sender });
+  assert.deepEqual(calls.find(([name]) => name === 'return-source-for-highlight')[1], {
+    sessionCapabilityId: SESSION, auditId: 'audit-1', sender,
+  });
+  assert.deepEqual(calls.filter(([name]) => [
+    'highlight-review-sender', 'return-source-for-highlight', 'highlight-install', 'publish-highlight',
+  ].includes(name)).map(([name]) => name), [
+    'highlight-review-sender', 'return-source-for-highlight', 'highlight-install', 'publish-highlight',
+  ]);
+  assert.deepEqual(await rawRouter.dispatch({ envelope, sender, panelWindowId: 9 }), {
+    ok: false, code: 'CONTEXT_DENIED',
+  });
+  assert.deepEqual(await rawRouter.dispatch({ envelope, sender, launchTabId: 17 }), {
+    ok: false, code: 'CONTEXT_DENIED',
+  });
+});
+
+test('fails closed before a report highlight mutation when the source page cannot be focused', async () => {
+  const reportLaunch = {
+    async returnToSource(value) {
+      calls.push(['return-source-for-highlight', value]);
+      return { ok: false, code: 'REPORT_RETURN_DENIED' };
+    },
+  };
+  const exportLaunch = {};
+  const { rawRouter, calls } = fixture({ reportLaunch, exportLaunch });
+  const sender = {
+    id: RUNTIME_ID, documentId: 'review-document',
+    url: `chrome-extension://${RUNTIME_ID}/src/review/index.html?auditId=audit-1`,
+  };
+  const envelope = parsed({
+    type: 'HIGHLIGHT_OCCURRENCE', sessionCapabilityId: SESSION,
+    auditId: 'audit-1', occurrenceId: 'occurrence-1',
+  });
+
+  assert.deepEqual(await rawRouter.dispatch({ envelope, sender }), {
+    ok: false, code: 'HIGHLIGHT_RETURN_FAILED',
+  });
+  assert.equal(calls.some(([name]) => ['highlight-install', 'highlight-clear', 'publish-highlight'].includes(name)), false);
+});
+
+test('routes an exact content invalidation through sender correlation and publishes only safe clear state', async () => {
+  const { rawRouter, calls } = fixture();
+  const sender = {
+    id: RUNTIME_ID, documentId: 'page-document', frameId: 0,
+    tab: { id: 17, windowId: 9 }, url: 'https://example.test/',
+  };
+  const envelope = parsed({ type: 'AUDITA_HIGHLIGHT_INVALIDATED', nonce: 'N'.repeat(22) });
+
+  assert.deepEqual(await rawRouter.dispatch({ envelope, sender }), {
+    ok: true, highlight: { state: 'clear' },
+  });
+  assert.deepEqual(calls.find(([name]) => name === 'highlight-invalidate-content')[1], {
+    message: envelope, sender,
+  });
+  assert.deepEqual(calls.find(([name]) => name === 'publish-highlight')[1], {
+    version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: 'audit-1', occurrenceId: null, state: 'clear',
+  });
+  assert.doesNotMatch(JSON.stringify(await rawRouter.dispatch({
+    envelope, sender: { ...sender, documentId: 'forged-document' },
+  })), /audit-1/u);
+});
+
+test('correlates a minimal autonomous persona shutdown to the exact native content sender only', async () => {
+  const { rawRouter, calls } = fixture();
+  const sender = {
+    id: RUNTIME_ID, documentId: 'page-document', frameId: 0,
+    tab: { id: 17, windowId: 9 }, url: 'https://example.test/private?token=hidden',
+  };
+  const envelope = parsed({
+    type: 'AUDITA_PERSONA_AUTONOMOUS_STOP',
+    leaseId: `lease-${'L'.repeat(22)}`,
+    reason: 'reader-terminal',
+  });
+
+  assert.deepEqual(await rawRouter.dispatch({ envelope, sender }), {
+    ok: true, state: 'acknowledged',
+  });
+  assert.deepEqual(calls.find(([name]) => name === 'persona-autonomous-stop')[1], {
+    leaseId: `lease-${'L'.repeat(22)}`,
+    tabId: 17,
+    windowId: 9,
+    documentId: 'page-document',
+    reason: 'reader-terminal',
+  });
+  assert.doesNotMatch(JSON.stringify(calls.find(([name]) => name === 'persona-autonomous-stop')), /private|token|https?:/iu);
+
+  const before = calls.filter(([name]) => name === 'persona-autonomous-stop').length;
+  for (const forged of [
+    { ...sender, id: 'foreign-extension' },
+    { ...sender, documentId: '' },
+    { ...sender, frameId: 1 },
+    { ...sender, tab: { id: 18, windowId: -1 } },
+  ]) {
+    assert.deepEqual(await rawRouter.dispatch({ envelope, sender: forged }), {
+      ok: false, code: 'CONTEXT_DENIED',
+    });
+  }
+  assert.equal(calls.filter(([name]) => name === 'persona-autonomous-stop').length, before);
+});
 
 test('rejects privileged panel messages on runtime dispatch before any effect', async () => {
   const { rawRouter, calls } = fixture();
@@ -273,6 +493,40 @@ test('rehydrates switches and stops a persona through the correlated Side Panel 
   assert.deepEqual(calls.filter(([name]) => name.startsWith('persona-')).map(([name]) => name), [
     'persona-rehydrate', 'persona-set-mode', 'persona-stop',
   ]);
+});
+
+test('projects authenticated reader state and actions without exposing target data', async () => {
+  const { router, calls } = fixture();
+  const leaseId = `lease-${'L'.repeat(22)}`;
+  const expected = {
+    ok: true,
+    readerState: {
+      version: 1, playback: 'playing', index: 0, total: 2,
+      caption: 'Título principal, título nível 1', canPrevious: false, canNext: true,
+      speechAvailability: 'available', voiceId: 'local-a', rate: 1,
+    },
+  };
+  assert.deepEqual(await router.dispatch({
+    envelope: parsed({ type: 'PANEL_READER_STATE', leaseId, windowId: 9 }),
+    sender: panelSender(),
+  }), expected);
+  assert.deepEqual(await router.dispatch({
+    envelope: parsed({ type: 'PANEL_READER_ACTION', leaseId, action: 'next', windowId: 9 }),
+    sender: panelSender(),
+  }), expected);
+  assert.deepEqual(await router.dispatch({
+    envelope: parsed({ type: 'PANEL_READER_ENABLE_VOICE', leaseId, windowId: 9 }),
+    sender: panelSender(),
+  }), expected);
+  const readerCalls = calls.filter(([name]) => name === 'persona-reader').map(([, value]) => value);
+  assert.deepEqual(readerCalls.map(value => value.command), [
+    { version: 1, op: 'state' },
+    { version: 1, op: 'action', action: 'next' },
+    { version: 1, op: 'voices', explicitUserGesture: true },
+    { version: 1, op: 'preferences', voiceId: 'local-a', rate: 1 },
+  ]);
+  assert.equal(JSON.stringify(expected).includes('document'), false);
+  assert.equal(JSON.stringify(expected).includes('tabId'), false);
 });
 
 test('persona commands deny a forged non-panel sender before persona effects', async () => {
@@ -444,6 +698,7 @@ test('routes report and export envelopes through the single launch authorities w
     async openRegisteredReport(value) { calls.push(['open', value]); return { ok: true }; },
     async connect(value) { calls.push(['report-connect', value]); return { ok: true, auditId: value.auditId, sessionCapabilityId: 'R'.repeat(22), state: 'view-only' }; },
     async authorizeIntent(value) { calls.push(['authorize-report', value]); return { ok: true, auditId: value.auditId, intent: value.intent }; },
+    async returnToSource(value) { calls.push(['return-source', value]); return { ok: true, state: 'source-focused' }; },
   };
   const reportOperations = {
     async commitReviewDecision(value) {
@@ -464,6 +719,7 @@ test('routes report and export envelopes through the single launch authorities w
     [{ type: 'PANEL_OPEN_REPORT', sessionCapabilityId: SESSION, auditId: 'audit-1', windowId: 9 }, 'open'],
     [{ type: 'REPORT_CONNECT', auditId: 'audit-1' }, 'report-connect'],
     [{ type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: SESSION, auditId: 'audit-1' }, 'request-export'],
+    [{ type: 'REPORT_RETURN_TO_SOURCE', sessionCapabilityId: SESSION, auditId: 'audit-1' }, 'return-source'],
     [REVIEW_DECISION_MESSAGE, 'review-commit'],
     [{ type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: SESSION, auditId: 'audit-1' }, 'delete-audit'],
     [{ type: 'REPORT_DELETE_ALL_AUDITS', sessionCapabilityId: SESSION, auditId: 'audit-1' }, 'delete-all'],
@@ -487,11 +743,40 @@ test('routes report and export envelopes through the single launch authorities w
           ? ['auditId']
       : expectedCall === 'request-export'
         ? ['auditId', 'sender', 'sessionCapabilityId']
+        : expectedCall === 'return-source'
+          ? ['auditId', 'sender', 'sessionCapabilityId']
         : expectedCall === 'open'
-          ? ['auditId', 'windowId']
+          ? ['auditId', 'sourceSessionCapabilityId', 'sourceSessionState', 'windowId']
           : ['auditId', 'sender']);
   }
+  const openCall = calls.find(([name]) => name === 'open');
+  assert.deepEqual(openCall[1], {
+    auditId: 'audit-1', windowId: 9,
+    sourceSessionCapabilityId: SESSION, sourceSessionState: 'result',
+  });
   assert.doesNotMatch(JSON.stringify(calls), /model|summary|projection|bytes|formats/iu);
+});
+
+test('denies report launch when the authorized source session is not exact or no longer report-capable', async t => {
+  for (const [name, session] of [
+    ['capability', { auditId: 'audit-1', sessionCapabilityId: 'X'.repeat(22), windowId: 9, state: 'result' }],
+    ['state', { auditId: 'audit-1', sessionCapabilityId: SESSION, windowId: 9, state: 'running' }],
+  ]) await t.test(name, async () => {
+    const calls = [];
+    const reportLaunch = {
+      async openRegisteredReport(value) { calls.push(value); return { ok: true }; },
+    };
+    const { router, dependencies } = fixture({ reportLaunch, exportLaunch: {} });
+    dependencies.authority.authorizeSession = async () => ({
+      ok: true, session, context: { windowId: 9 },
+    });
+    const response = await router.dispatch({
+      envelope: parsed({ type: 'PANEL_OPEN_REPORT', sessionCapabilityId: SESSION, auditId: 'audit-1', windowId: 9 }),
+      sender: panelSender(),
+    });
+    assert.deepEqual(response, { ok: false, code: 'REPORT_OPEN_DENIED' });
+    assert.deepEqual(calls, []);
+  });
 });
 
 test('denies report mutations before storage effects when report session authority rejects', async () => {

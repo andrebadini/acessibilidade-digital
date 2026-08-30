@@ -673,6 +673,47 @@ test('selects preferences atomically only when the requested voice is still trus
   assert.equal(selected.rate, 1.75);
 });
 
+test('activating the first trusted local voice announces the current caption without disturbing foreign speech', async () => {
+  const namespace = await loadReaderFactory();
+  const local = trustedVoice({ voiceURI: 'local-a', name: 'Voz local', lang: 'pt-BR', localService: true });
+  const fixture = fixtureEnvironment({ voices: [local] });
+  const reader = namespace.createScreenReaderModule(fixture.environment);
+  reader.start({ voiceId: '', rate: 1 });
+  assert.equal(fixture.events.some(value => value === 'speak:Primeiro, botão'), false);
+
+  const activated = reader.setPreferences({ voiceId: 'local-a', rate: 1.25 });
+  assert.equal(activated.voiceId, 'local-a');
+  assert.equal(activated.rate, 1.25);
+  assert.equal(fixture.events.filter(value => value === 'speak:Primeiro, botão').length, 1);
+
+  const busyFixture = fixtureEnvironment({ voices: [local] });
+  const busyReader = namespace.createScreenReaderModule(busyFixture.environment);
+  busyReader.start({ voiceId: '', rate: 1 });
+  const foreign = busyFixture.enqueueForeignSpeech('Fala da página preservada');
+  const busy = busyReader.setPreferences({ voiceId: 'local-a', rate: 1 });
+  assert.equal(busy.speechAvailability, 'busy');
+  assert.equal(busyFixture.events.some(value => value === 'speak:Primeiro, botão'), false);
+  assert.equal(busyFixture.speech.cancelCalls, 0);
+  assert.equal(foreign.cancelled, false);
+});
+
+test('retrying explicit local voice activation after a speech error attempts the current caption again', async () => {
+  const namespace = await loadReaderFactory();
+  const local = trustedVoice({ voiceURI: 'local-a', name: 'Voz local', lang: 'pt-BR', localService: true });
+  const fixture = fixtureEnvironment({ voices: [local], speakThrows: true });
+  const reader = namespace.createScreenReaderModule(fixture.environment);
+  reader.start({ voiceId: '', rate: 1 });
+
+  const failed = reader.setPreferences({ voiceId: 'local-a', rate: 1 });
+  assert.equal(failed.voiceId, 'local-a');
+  assert.equal(failed.speechAvailability, 'error');
+  fixture.setSpeechState({ speakThrows: false });
+
+  const retried = reader.setPreferences({ voiceId: 'local-a', rate: 1 });
+  assert.equal(retried.speechAvailability, 'available');
+  assert.equal(fixture.events.filter(value => value === 'speak:Primeiro, botão').length, 2);
+});
+
 test('reader stop clears only playback and caption while resume safely recollects without global speech controls', async () => {
   const namespace = await loadReaderFactory();
   const fixture = fixtureEnvironment();

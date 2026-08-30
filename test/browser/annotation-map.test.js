@@ -425,14 +425,16 @@ test('fails explicitly without worker canvas APIs and never mutates the pristine
   assert.equal(JSON.stringify(source), before);
 });
 
-test('records the exact browser proof before enabling the production compositor gate', () => {
+test('keeps the production compositor disabled until URL input and pixel consent pass a public black-box flow', async () => {
   assert.deepEqual(ANNOTATION_MAP_MV3_GATE, {
-    enabled: true,
-    code: 'ANNOTATION_MAP_MV3_E2E_PASSED',
-    reason: 'O compositor foi comprovado pelo fluxo público black-box desta versão.',
-    testedBrowser: 'Google Chrome 151.0.7922.174',
+    enabled: false,
+    code: 'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE',
+    reason: 'A entrada por URL e o consentimento público de pixels ainda não estão disponíveis no Painel Lateral.',
+    testedBrowser: null,
   });
   assert.equal(Object.isFrozen(ANNOTATION_MAP_MV3_GATE), true);
+  await assert.rejects(composeAnnouncementMapForProduction(), error =>
+    error instanceof AnnotationMapError && error.code === 'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE');
 });
 
 test('composes and revalidates a strict PNG segment, records recalculable geometry and releases the bitmap', async () => {

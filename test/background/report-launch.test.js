@@ -15,7 +15,7 @@ function area() {
   };
 }
 
-function fixture() {
+function fixture({ sourceSessionAuthority = null, sourcePanelAuthority = null } = {}) {
   const sessionArea = area(); const calls = []; let nextTab = 40; let contextDocument = 'report-doc-1';
   let contextTabId = 40;
   let contextDocumentUrl = 'chrome-extension://ext-test/src/review/index.html?auditId=audit-1';
@@ -30,7 +30,11 @@ function fixture() {
     },
     tabs: {
       async create(options) { calls.push(['create', options]); return { id: nextTab++, windowId: options.windowId, url: 'about:blank' }; },
-      async update(tabId, options) { calls.push(['update', tabId, options]); currentTabUrl = options.url; return { id: tabId, windowId: 7, url: options.url }; },
+      async update(tabId, options) {
+        calls.push(['update', tabId, options]);
+        if (typeof options.url === 'string') currentTabUrl = options.url;
+        return { id: tabId, windowId: 7, url: currentTabUrl };
+      },
       async get(tabId) {
         calls.push(['get', tabId]);
         if (failTabRead) throw new Error('private');
@@ -39,12 +43,16 @@ function fixture() {
       },
       async remove(tabId) { calls.push(['remove', tabId]); },
     },
+    sidePanel: { async open(options) { calls.push(['open-panel', options]); } },
     windows: { async update(windowId, options) { calls.push(['focus-window', windowId, options]); } },
   };
   let byte = 0;
-  const authority = createReportLaunchAuthority({
+  const factory = {
     chromeApi, sessionArea, epochNow: () => currentEpoch, randomBytes: size => new Uint8Array(size).fill(++byte),
-  });
+  };
+  if (sourceSessionAuthority) factory.sourceSessionAuthority = sourceSessionAuthority;
+  if (sourcePanelAuthority) factory.sourcePanelAuthority = sourcePanelAuthority;
+  const authority = createReportLaunchAuthority(factory);
   const sender = {
     id: 'ext-test', documentId: contextDocument,
     url: 'chrome-extension://ext-test/src/review/index.html?auditId=audit-1',
@@ -61,6 +69,110 @@ function fixture() {
     setTabReadSequence(values) { tabReadSequence = [...values]; },
   };
 }
+
+test('V2 reauthorizes its exact result source before minting a highlight-capable report consumer', async () => {
+  const calls = [];
+  const sourceSessionAuthority = {
+    async reauthorizeReportSource(value) {
+      calls.push(value);
+      return { ok: true, state: 'result', binding: {
+        kind: 'attached', tabId: 17, documentId: 'target-document',
+        urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+      }, windowId: 7, live: true };
+    },
+  };
+  const input = fixture({ sourceSessionAuthority });
+  const opening = input.authority.openRegisteredReport({
+    auditId: 'audit-1', windowId: 7,
+    sourceSessionCapabilityId: 'S'.repeat(22), sourceSessionState: 'result',
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const allocated = await input.authority.getLaunch('audit-1');
+  assert.deepEqual({
+    version: allocated.version,
+    sourceSessionCapabilityId: allocated.sourceSessionCapabilityId,
+    sourceSessionState: allocated.sourceSessionState,
+  }, { version: 2, sourceSessionCapabilityId: 'S'.repeat(22), sourceSessionState: 'result' });
+
+  const connected = await input.authority.connect({ auditId: 'audit-1', sender: input.sender });
+  assert.deepEqual({ ok: connected.ok, auditId: connected.auditId, state: connected.state },
+    { ok: true, auditId: 'audit-1', state: 'result' });
+  assert.deepEqual((await input.authority.getConsumer(connected.sessionCapabilityId)).intents,
+    ['export', 'review-commit', 'delete-audit', 'delete-all', 'highlight', 'return-source']);
+  assert.deepEqual(calls, [{
+    sessionCapabilityId: 'S'.repeat(22), auditId: 'audit-1', state: 'result',
+  }]);
+  await opening;
+});
+
+test('an exact live V2 report consumer returns to its audited tab and reopens the native Side Panel', async () => {
+  const sourceSessionAuthority = {
+    async reauthorizeReportSource() {
+      return {
+        ok: true, state: 'result', windowId: 7, live: true,
+        binding: {
+          kind: 'attached', tabId: 17, documentId: 'target-document',
+          urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+        },
+      };
+    },
+  };
+  const input = fixture({ sourceSessionAuthority });
+  const opening = input.authority.openRegisteredReport({
+    auditId: 'audit-1', windowId: 7,
+    sourceSessionCapabilityId: 'S'.repeat(22), sourceSessionState: 'result',
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const connected = await input.authority.connect({ auditId: 'audit-1', sender: input.sender });
+  await opening;
+
+  assert.deepEqual(await input.authority.returnToSource({
+    sessionCapabilityId: connected.sessionCapabilityId,
+    auditId: 'audit-1', sender: input.sender,
+  }), { ok: true, state: 'source-focused' });
+  assert.deepEqual(input.calls.slice(-3), [
+    ['focus-window', 7, { focused: true }],
+    ['update', 17, { active: true }],
+    ['open-panel', { tabId: 17 }],
+  ]);
+});
+
+test('reuses the exact already-open Side Panel after focusing the audited source tab', async () => {
+  const sourceSessionAuthority = {
+    async reauthorizeReportSource() {
+      return {
+        ok: true, state: 'result', windowId: 7, live: true,
+        binding: {
+          kind: 'attached', tabId: 17, documentId: 'target-document',
+          urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+        },
+      };
+    },
+  };
+  const panelChecks = [];
+  const sourcePanelAuthority = {
+    async hasOpenPanelForSource(value) { panelChecks.push(value); return true; },
+  };
+  const input = fixture({ sourceSessionAuthority, sourcePanelAuthority });
+  const opening = input.authority.openRegisteredReport({
+    auditId: 'audit-1', windowId: 7,
+    sourceSessionCapabilityId: 'S'.repeat(22), sourceSessionState: 'result',
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const connected = await input.authority.connect({ auditId: 'audit-1', sender: input.sender });
+  await opening;
+
+  assert.deepEqual(await input.authority.returnToSource({
+    sessionCapabilityId: connected.sessionCapabilityId,
+    auditId: 'audit-1', sender: input.sender,
+  }), { ok: true, state: 'source-focused' });
+  assert.deepEqual(panelChecks, [{ tabId: 17, windowId: 7 }]);
+  assert.deepEqual(input.calls.slice(-2), [
+    ['focus-window', 7, { focused: true }],
+    ['update', 17, { active: true }],
+  ]);
+  assert.equal(input.calls.some(([name]) => name === 'open-panel'), false);
+});
 
 const launchStorageKey = auditId => `audita:report-launch:v1:${auditId}`;
 const consumerStorageKey = capabilityId => `audita:report-consumer:v1:${capabilityId}`;
@@ -106,36 +218,37 @@ test('persists report ownership before navigation and binds only the first exact
   const connected = await input.authority.connect({ auditId: 'audit-1', sender: input.sender });
   assert.deepEqual(Object.keys(connected).sort(), ['auditId', 'ok', 'sessionCapabilityId', 'state']);
   assert.deepEqual({ ok: connected.ok, auditId: connected.auditId, state: connected.state }, { ok: true, auditId: 'audit-1', state: 'view-only' });
-  assert.deepEqual((await input.authority.getConsumer(connected.sessionCapabilityId)).intents, [
-    'export', 'review-commit', 'delete-audit', 'delete-all',
-  ]);
+  assert.deepEqual((await input.authority.getConsumer(connected.sessionCapabilityId)).intents,
+    ['export', 'review-commit', 'delete-audit', 'delete-all']);
   assert.equal((await opening).state, 'connected');
   assert.deepEqual(await input.authority.connect({ auditId: 'audit-1', sender: input.sender }), { ok: false, code: 'REPORT_CONNECT_DENIED' });
 });
 
-test('authorizes every report mutation only for the exact connected report document', async () => {
+test('keeps V1 report consumers view-only without granting live highlight', async () => {
   const input = fixture();
   const opening = input.authority.openRegisteredReport({ auditId: 'audit-1', windowId: 7 });
   await new Promise(resolve => setImmediate(resolve));
   const connected = await input.authority.connect({ auditId: 'audit-1', sender: input.sender });
   await opening;
 
+  assert.deepEqual(await input.authority.authorizeExport({
+    sessionCapabilityId: connected.sessionCapabilityId, auditId: 'audit-1', sender: input.sender,
+  }), { ok: true, auditId: 'audit-1', windowId: 7, sessionCapabilityId: connected.sessionCapabilityId });
   for (const intent of ['review-commit', 'delete-audit', 'delete-all']) {
     assert.deepEqual(await input.authority.authorizeIntent({
-      sessionCapabilityId: connected.sessionCapabilityId,
-      auditId: 'audit-1', intent, sender: input.sender,
-    }), {
-      ok: true,
-      auditId: 'audit-1',
-      windowId: 7,
-      sessionCapabilityId: connected.sessionCapabilityId,
-      intent,
-    });
+      sessionCapabilityId: connected.sessionCapabilityId, auditId: 'audit-1', intent, sender: input.sender,
+    }), { ok: true, auditId: 'audit-1', windowId: 7,
+      sessionCapabilityId: connected.sessionCapabilityId, intent });
+  }
+  for (const intent of ['highlight']) {
+    assert.deepEqual(await input.authority.authorizeIntent({
+      sessionCapabilityId: connected.sessionCapabilityId, auditId: 'audit-1', intent, sender: input.sender,
+    }), { ok: false, code: 'REPORT_INTENT_DENIED' });
   }
 
   assert.deepEqual(await input.authority.authorizeIntent({
     sessionCapabilityId: connected.sessionCapabilityId,
-    auditId: 'audit-1', intent: 'delete-audit',
+    auditId: 'audit-1', intent: 'export',
     sender: { ...input.sender, documentId: 'foreign-document' },
   }), { ok: false, code: 'CONTEXT_DENIED' });
   assert.deepEqual(await input.authority.authorizeIntent({

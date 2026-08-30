@@ -475,7 +475,7 @@ function appendTechnicalDetails(document, article, issue, evidence) {
   article.append(details);
 }
 
-function appendEvidencePreview(document, article, evidence, evidenceAnchorById) {
+function appendEvidencePreview(document, article, evidence, evidenceAnchorById, highlightOptions = null) {
   const preview = document.createElement('section');
   preview.setAttribute('data-report-evidence-preview', '');
   preview.append(element(document, 'h4', 'Capturas registradas'));
@@ -498,9 +498,34 @@ function appendEvidencePreview(document, article, evidence, evidenceAnchorById) 
     }
   }
   article.append(preview);
-  const fallback = element(document, 'p', 'O destaque ao vivo não está disponível neste relatório. Consulte as capturas registradas no momento da auditoria.');
-  fallback.setAttribute('data-report-live-action', 'evidence-only');
-  article.append(fallback);
+  if (highlightOptions?.enabled === true && typeof highlightOptions.onIntent === 'function' &&
+    Array.isArray(highlightOptions.occurrenceIds) && highlightOptions.occurrenceIds.length > 0) {
+    const total = highlightOptions.occurrenceIds.length;
+    for (const [index, occurrenceId] of highlightOptions.occurrenceIds.entries()) {
+      const context = `${highlightOptions.issueTitle}, página ${highlightOptions.pageId}, ocorrência ${index + 1} de ${total}`;
+      const control = document.createElement('div');
+      control.setAttribute('data-report-live-action', 'worker-approved');
+      control.setAttribute('data-report-highlight-control', occurrenceId);
+      control.setAttribute('data-report-highlight-context', context);
+      const button = element(document, 'button', 'Verificar possibilidade de destaque');
+      button.setAttribute('type', 'button');
+      button.setAttribute('data-highlight-action', 'check');
+      button.setAttribute('aria-label', `Verificar possibilidade de destaque — ${context}`);
+      button.addEventListener('click', () => {
+        if (button.disabled === true || button.getAttribute('aria-disabled') === 'true') return;
+        const action = button.getAttribute('data-highlight-action');
+        if (action === 'highlight') highlightOptions.onIntent(freeze({ type: 'HIGHLIGHT_OCCURRENCE', occurrenceId }));
+        else if (action === 'clear') highlightOptions.onIntent(freeze({ type: 'CLEAR_HIGHLIGHT' }));
+        else if (action === 'check') highlightOptions.onIntent(freeze({ type: 'GET_HIGHLIGHT_AVAILABILITY', occurrenceId }));
+      });
+      control.append(button);
+      article.append(control);
+    }
+  } else {
+    const fallback = element(document, 'p', 'O destaque ao vivo não está disponível neste relatório. Consulte as capturas registradas no momento da auditoria.');
+    fallback.setAttribute('data-report-live-action', 'evidence-only');
+    article.append(fallback);
+  }
   const firstAnchor = evidence.map(item => evidenceAnchorById.get(item.evidenceId)).find(Boolean);
   if (firstAnchor) {
     const link = element(document, 'a', 'Consultar evidências registradas');
@@ -512,7 +537,7 @@ function appendEvidencePreview(document, article, evidence, evidenceAnchorById) 
   }
 }
 
-function issueArticle(document, issue, group, evidenceById, evidenceAnchorById) {
+function issueArticle(document, issue, group, evidenceById, evidenceAnchorById, highlightOptions = null) {
   const article = document.createElement('article');
   article.setAttribute('data-report-issue', '');
   article.setAttribute('data-result', group);
@@ -561,7 +586,13 @@ function issueArticle(document, issue, group, evidenceById, evidenceAnchorById) 
     article.append(legal);
   }
   const evidence = correlatedEvidence(issue, evidenceById);
-  appendEvidencePreview(document, article, evidence, evidenceAnchorById);
+  appendEvidencePreview(document, article, evidence, evidenceAnchorById,
+    highlightOptions && ['failed', 'humanReview'].includes(group)
+      ? {
+        ...highlightOptions, occurrenceIds: issue.occurrences.map(value => value.occurrenceId),
+        issueTitle: issue.title, pageId: issue.pageId,
+      }
+      : null);
   appendTechnicalDetails(document, article, issue, evidence);
   return article;
 }
@@ -622,8 +653,9 @@ function renderFilters(document, view, root, status) {
   return wrapper;
 }
 
-export function renderReportView({ view, document, onExport } = {}) {
-  if (!view || view.version !== 1 || !document || typeof document.createElement !== 'function' || typeof onExport !== 'function') denied();
+export function renderReportView({ view, document, onExport, onHighlightIntent = null } = {}) {
+  if (!view || view.version !== 1 || !document || typeof document.createElement !== 'function' ||
+    typeof onExport !== 'function' || ![null, 'function'].includes(onHighlightIntent === null ? null : typeof onHighlightIntent)) denied();
   const root = document.createElement('div');
   root.setAttribute('class', 'report-view');
   const identity = document.createElement('header');
@@ -705,12 +737,14 @@ export function renderReportView({ view, document, onExport } = {}) {
   root.append(coverage);
 
   const failed = section(document, 2);
-  for (const issue of view.issues.failed) failed.append(issueArticle(document, issue, 'failed', evidenceById, evidenceAnchorById));
+  for (const issue of view.issues.failed) failed.append(issueArticle(document, issue, 'failed', evidenceById, evidenceAnchorById,
+    onHighlightIntent ? { enabled: true, onIntent: onHighlightIntent } : null));
   root.append(failed);
 
   const review = section(document, 3);
   review.setAttribute('data-review-controls-target', '');
-  for (const issue of view.issues.humanReview) review.append(issueArticle(document, issue, 'humanReview', evidenceById, evidenceAnchorById));
+  for (const issue of view.issues.humanReview) review.append(issueArticle(document, issue, 'humanReview', evidenceById, evidenceAnchorById,
+    onHighlightIntent ? { enabled: true, onIntent: onHighlightIntent } : null));
   root.append(review);
 
   const maps = section(document, 4);
@@ -778,6 +812,49 @@ export function renderReportView({ view, document, onExport } = {}) {
   methodology.append(sources);
   root.append(methodology);
   return root;
+}
+
+export function updateReportHighlightAction({ root, occurrenceId, bindingStatus, activeOccurrenceId } = {}) {
+  if (!root || typeof root.querySelectorAll !== 'function' || typeof occurrenceId !== 'string' ||
+    !/^[A-Za-z0-9._:-]{1,200}$/u.test(occurrenceId)) return false;
+  const controls = root.querySelectorAll('[data-report-highlight-control]');
+  const control = [...controls].find(value => value.getAttribute('data-report-highlight-control') === occurrenceId);
+  const button = control?.querySelector?.('button');
+  if (!button) return false;
+  const context = control.getAttribute('data-report-highlight-context') ?? 'ocorrência selecionada';
+  try { button.removeAttribute('data-report-highlight'); } catch { /* absent attribute is already safe */ }
+  if (activeOccurrenceId === occurrenceId) {
+    button.disabled = false;
+    button.removeAttribute('aria-disabled');
+    button.textContent = 'Limpar destaque';
+    button.setAttribute('data-highlight-action', 'clear');
+    button.setAttribute('data-report-highlight', 'clear');
+    button.setAttribute('aria-label', `Limpar destaque — ${context}`);
+    return true;
+  }
+  if (bindingStatus?.state === 'available') {
+    button.disabled = false;
+    button.removeAttribute('aria-disabled');
+    button.textContent = 'Ver e destacar na página';
+    button.setAttribute('data-highlight-action', 'highlight');
+    button.setAttribute('data-report-highlight', 'highlight');
+    button.setAttribute('aria-label', `Ver e destacar na página — ${context}`);
+    return true;
+  }
+  if (bindingStatus?.state === 'checking') {
+    button.disabled = false;
+    button.setAttribute('aria-disabled', 'true');
+    button.textContent = 'Verificando possibilidade de destaque';
+    button.setAttribute('data-highlight-action', 'check');
+    button.setAttribute('aria-label', `Verificando possibilidade de destaque — ${context}`);
+    return true;
+  }
+  button.disabled = false;
+  button.setAttribute('aria-disabled', 'true');
+  button.textContent = 'Destaque ao vivo indisponível; consulte as evidências';
+  button.setAttribute('data-highlight-action', 'unavailable');
+  button.setAttribute('aria-label', `Destaque ao vivo indisponível; consulte as evidências — ${context}`);
+  return true;
 }
 
 export { SECTION_TITLES as REPORT_SECTION_TITLES_V1 };

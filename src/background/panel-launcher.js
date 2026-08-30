@@ -38,6 +38,7 @@ export function createPanelLauncher(raw) {
   if (!input || typeof input.chromeApi?.sidePanel?.setOptions !== 'function' ||
     typeof input.chromeApi.sidePanel.open !== 'function' ||
     typeof input.launchAuthority?.issue !== 'function' || typeof input.launchAuthority.whenReady !== 'function' ||
+    typeof input.launchAuthority.rotateForNavigation !== 'function' ||
     typeof input.launchAuthority.revoke !== 'function' ||
     typeof input.logger?.error !== 'function') throw new TypeError('PANEL_LAUNCHER_INVALID');
 
@@ -116,5 +117,58 @@ export function createPanelLauncher(raw) {
     }
   }
 
-  return Object.freeze({ launch });
+  async function rebindForNavigation(raw) {
+    const request = exact(raw, ['tabId']);
+    if (!request || !safeChromeId(request.tabId)) return false;
+    let issued;
+    try { issued = validIssued(await input.launchAuthority.rotateForNavigation({ tabId: request.tabId })); }
+    catch { issued = null; }
+    if (!issued) return false;
+    return new Promise(resolve => {
+      let finished = false;
+      const settle = value => {
+        if (finished) return;
+        finished = true;
+        resolve(value);
+      };
+      const onSetOptions = () => {
+        if (finished) return;
+        if (hasLastError()) {
+          revoke(issued);
+          log('PANEL_REBIND_UNAVAILABLE');
+          settle(false);
+          return;
+        }
+        let readiness;
+        try { readiness = input.launchAuthority.whenReady(issued); }
+        catch { readiness = false; }
+        void Promise.resolve(readiness).then(ready => {
+          if (ready !== true) {
+            revoke(issued);
+            log('PANEL_REBIND_UNAVAILABLE');
+            settle(false);
+            return;
+          }
+          settle(true);
+        }, () => {
+          revoke(issued);
+          log('PANEL_REBIND_UNAVAILABLE');
+          settle(false);
+        });
+      };
+      try {
+        input.chromeApi.sidePanel.setOptions({
+          tabId: request.tabId,
+          enabled: true,
+          path: issued.path,
+        }, onSetOptions);
+      } catch {
+        revoke(issued);
+        log('PANEL_REBIND_UNAVAILABLE');
+        settle(false);
+      }
+    });
+  }
+
+  return Object.freeze({ launch, rebindForNavigation });
 }

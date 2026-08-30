@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import { buildPanelView, renderPanelView } from '../../src/panel/panel-view.js';
 
+const SAFE_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
 function kebab(value) { return value.replace(/[A-Z]/gu, letter => `-${letter.toLowerCase()}`); }
 
 class TestElement {
@@ -302,22 +304,187 @@ test('all four screens emit only the exhaustive UI intent union', () => {
     for (const button of root.querySelectorAll('button[data-intent]')) button.click();
   }
   const resultInput = fixture();
+  resultInput.state.highlight = {
+    state: 'idle', occurrenceId: null,
+    bindingStatus: { state: 'unavailable', reason: 'no-binding' }, message: null,
+  };
   const resultRoot = renderPanelView({ view: buildPanelView(resultInput), document, onIntent: value => emitted.push(value), onEvent() {} });
   for (const button of resultRoot.querySelectorAll('button[data-intent]')) button.click();
   assert.deepEqual(new Set(emitted.map(value => value.type)), new Set([
     'START_ATTACHED', 'OPEN_URL_FORM', 'OPEN_BATCH_FORM', 'CANCEL_AUDIT',
     'OPEN_REPORT', 'SELECT_OCCURRENCE', 'CONSULT_EVIDENCE', 'RETRY',
+    'PERSONA_SELECT',
   ]));
 });
 
-test('consult evidence is a details action and never renders a highlight control', () => {
+test('details expose exactly the worker-approved action and emit no target internals', () => {
   const input = fixture();
   input.state.evidenceExpanded = true;
-  const root = renderPanelView({
-    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
+  input.state.highlight = {
+    state: 'idle', occurrenceId: null, bindingStatus: { state: 'available' },
+    message: 'Este item pode ser destacado na página.',
+  };
+  const intents = [];
+  let root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent: value => intents.push(value), onEvent() {},
   });
   assert.equal(root.querySelector('[data-detail-block="previews"]').open, true);
   assert.equal(root.querySelector('[data-detail-block="technical"]').open, true);
-  assert.doesNotMatch(root.textContent, /destacar na página|highlight/iu);
-  assert.match(root.textContent, /Consultar evidências/iu);
+  assert.match(root.textContent, /Ver e destacar na página/iu);
+  assert.equal(root.querySelector('[data-action="clear-highlight"]'), null);
+  assert.equal(root.querySelector('[data-action="consult-evidence"]'), null);
+  root.querySelector('[data-action="highlight-occurrence"]').click();
+  assert.deepEqual(intents, [{ type: 'HIGHLIGHT_OCCURRENCE', occurrenceId: 'occ-1' }]);
+  assert.equal(JSON.stringify(intents).includes('selector'), false);
+
+  input.state.highlight = {
+    state: 'active', occurrenceId: 'occ-1', bindingStatus: { state: 'available' },
+    message: 'Destaque visível na página atual.',
+  };
+  root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent: value => intents.push(value), onEvent() {},
+  });
+  assert.equal(root.querySelector('[data-action="highlight-occurrence"]'), null);
+  root.querySelector('[data-action="clear-highlight"]').click();
+  assert.deepEqual(intents.at(-1), { type: 'CLEAR_HIGHLIGHT' });
+});
+
+test('live highlight action keeps one stable focus identity while its label and intent change', () => {
+  const input = fixture();
+  input.state.highlight = {
+    state: 'idle', occurrenceId: null, bindingStatus: { state: 'available' }, message: null,
+  };
+  let root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  const highlight = root.querySelector('[data-action="highlight-occurrence"]');
+  assert.equal(highlight.dataset.focusId, 'live-highlight-action');
+
+  input.state.highlight = {
+    state: 'active', occurrenceId: 'occ-1', bindingStatus: { state: 'available' }, message: null,
+  };
+  root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  const clear = root.querySelector('[data-action="clear-highlight"]');
+  assert.equal(clear.dataset.focusId, highlight.dataset.focusId);
+
+  input.state.highlight = {
+    state: 'idle', occurrenceId: null, bindingStatus: { state: 'checking' }, message: null,
+  };
+  root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  const checking = root.querySelector('[data-action="highlight-checking"]');
+  assert.equal(checking.dataset.focusId, highlight.dataset.focusId);
+  assert.equal(checking.disabled, false);
+  assert.equal(checking.getAttribute('aria-disabled'), 'true');
+
+  input.state.highlight = {
+    state: 'busy', operation: 'highlight', occurrenceId: 'occ-1', bindingStatus: { state: 'available' }, message: null,
+  };
+  root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  const busy = root.querySelector('[data-action="highlight-occurrence"]');
+  assert.equal(busy.dataset.focusId, highlight.dataset.focusId);
+  assert.equal(busy.disabled, false);
+  assert.equal(busy.getAttribute('aria-disabled'), 'true');
+  assert.match(busy.textContent, /Destacando na página/iu);
+  assert.equal(root.querySelector('[data-action="clear-highlight"]'), null);
+
+  input.state.highlight = {
+    state: 'busy', operation: 'clear', occurrenceId: 'occ-1', bindingStatus: { state: 'available' }, message: null,
+  };
+  root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  const clearing = root.querySelector('[data-action="clear-highlight"]');
+  assert.ok(clearing);
+  assert.match(clearing.textContent, /Removendo destaque/iu);
+});
+
+test('an overlay keeps an accessible global clear action when another occurrence is selected or filters hide its detail', () => {
+  const input = fixture();
+  input.state.selectedOccurrenceId = 'occ-2';
+  input.state.highlight = {
+    state: 'active', occurrenceId: 'occ-1', bindingStatus: { state: 'unchecked' }, message: null,
+  };
+  const intents = [];
+  let root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent: value => intents.push(value), onEvent() {},
+  });
+  let clear = root.querySelector('[data-global-highlight-clear]');
+  assert.ok(clear);
+  assert.match(clear.textContent, /Limpar destaque/iu);
+  clear.click();
+  assert.deepEqual(intents, [{ type: 'CLEAR_HIGHLIGHT' }]);
+
+  input.state.selectedOccurrenceId = 'occ-1';
+  input.state.filters = { impact: ['serious'], wcag: [], abnt: [] };
+  root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent: value => intents.push(value), onEvent() {},
+  });
+  clear = root.querySelector('[data-global-highlight-clear]');
+  assert.ok(clear, 'filtering the active detail cannot orphan the overlay');
+});
+
+test('evidence fallback renders only a validated local PNG with contextual alternative text and intrinsic dimensions', () => {
+  const input = fixture();
+  input.state.evidenceExpanded = true;
+  input.detail.previews = [
+    { evidenceId: 'ev-safe', kind: 'element', dataUrl: SAFE_PNG, mediaUrl: '', origin: 'captura local' },
+    { evidenceId: 'ev-remote', kind: 'full-page', dataUrl: 'https://remote.invalid/secret.png', mediaUrl: 'https://remote.invalid/secret.png', origin: 'remota' },
+  ];
+  const root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  const images = root.querySelectorAll('[data-evidence-preview-image]');
+  assert.equal(images.length, 1);
+  assert.equal(images[0].getAttribute('src'), SAFE_PNG);
+  assert.match(images[0].getAttribute('alt'), /captura do elemento.*ev-safe/iu);
+  assert.equal(images[0].getAttribute('width'), '1');
+  assert.equal(images[0].getAttribute('height'), '1');
+  assert.equal(root.querySelectorAll('[src="https://remote.invalid/secret.png"]').length, 0);
+});
+
+test('persistent simulation controls expose pressed state and reader transport labels', () => {
+  const input = fixture();
+  input.state.persona = {
+    mode: 'reader', readerPaused: false, speechAvailability: 'unavailable', voiceId: '', rate: 1,
+    message: 'Leitura simulada ativa. Use os controles para navegar pela legenda.',
+  };
+  const root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  const reader = root.querySelector('button[data-persona-mode="reader"]');
+  assert.equal(reader.getAttribute('aria-pressed'), 'true');
+  for (const label of ['Anterior', 'Repetir', 'Pausar', 'Próximo', 'Encerrar']) assert.match(root.textContent, new RegExp(label, 'u'));
+  const enableVoice = root.querySelector('button[data-intent="PERSONA_READER_ENABLE_VOICE"]');
+  assert.ok(enableVoice);
+  assert.match(enableVoice.textContent, /Ativar voz local/u);
+  assert.match(root.textContent, /Leitura simulada ativa/u);
+});
+
+test('reader voice activation is an explicit panel intent and disappears after a local voice is active', () => {
+  const input = fixture();
+  input.state.persona = {
+    mode: 'reader', readerPaused: false, speechAvailability: 'unavailable', voiceId: '', rate: 1,
+    message: 'A legenda está ativa; ative uma voz local para ouvir.',
+  };
+  const intents = [];
+  let root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent: value => intents.push(value), onEvent() {},
+  });
+  root.querySelector('button[data-intent="PERSONA_READER_ENABLE_VOICE"]').click();
+  assert.deepEqual(intents, [{ type: 'PERSONA_READER_ENABLE_VOICE' }]);
+
+  input.state.persona = {
+    ...input.state.persona, speechAvailability: 'available', voiceId: 'local-a', rate: 1.25,
+    message: 'Voz local ativa.',
+  };
+  root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent: value => intents.push(value), onEvent() {},
+  });
+  assert.equal(root.querySelector('button[data-intent="PERSONA_READER_ENABLE_VOICE"]'), null);
 });

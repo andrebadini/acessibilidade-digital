@@ -18,7 +18,7 @@ export const executionCheckpointStorageKey = auditId => `audita:execution-checkp
 const FACTORY_KEYS = Object.freeze([
   'authority', 'sessionArea', 'panelCoordinator', 'targetQueue', 'cleanupBarrier', 'runAttachedAuditExecution',
   'persistLatest', 'persistCheckpoint', 'removeCheckpoint', 'commitTerminalAudit',
-  'readAuditSnapshot', 'readReportRevision', 'readLatest', 'buildPanelResultBundle',
+  'readAuditSnapshot', 'readReportRevision', 'readLatest', 'buildPanelResultBundle', 'recordHighlightBinding',
   'epochNow', 'modelNow', 'createAbortController',
 ]);
 const BEGIN_KEYS = Object.freeze([
@@ -338,7 +338,7 @@ export function createAuthorizedAuditStarter(input) {
   const {
     authority, sessionArea, panelCoordinator, targetQueue, cleanupBarrier, runAttachedAuditExecution,
     persistLatest, persistCheckpoint, removeCheckpoint, commitTerminalAudit,
-    readAuditSnapshot, readReportRevision, readLatest, buildPanelResultBundle,
+    readAuditSnapshot, readReportRevision, readLatest, buildPanelResultBundle, recordHighlightBinding,
     epochNow, modelNow, createAbortController,
   } = dependencies;
   let globalTail = Promise.resolve();
@@ -431,6 +431,24 @@ export function createAuthorizedAuditStarter(input) {
       });
       const result = exact(committed, ['revision', 'modelHash']);
       if (!result || result.revision !== 1 || result.modelHash !== candidate.modelHash) throw new Error('TERMINAL_COMMIT_DENIED');
+      try {
+        await recordHighlightBinding(freeze({
+          snapshot: {
+            model: candidate.model,
+            modelRevision: candidate.modelRevision,
+            modelHash: candidate.modelHash,
+          },
+          observedTarget: {
+            version: 1,
+            kind: 'attached',
+            tabId: liveRecord.grant.target.tabId,
+            windowId: liveRecord.grant.target.windowId,
+            documentId: liveRecord.grant.target.documentId,
+            urlSessionDigest: liveRecord.grant.target.initialUrlSessionDigest,
+            urlEvidence: liveRecord.grant.target.initialUrlEvidence,
+          },
+        }));
+      } catch { /* a ausência de prova ao vivo mantém o relatório em evidências coletadas */ }
       const confirmed = freeze({ ...pending, commitState: 'confirmed', updatedAt: safeEpoch(epochNow) });
       await writeConfirmed(sessionArea, ACTIVE_AUDIT_JOB_KEY, confirmed, activeRecord, 'ACTIVE_AUDIT_JOB_DENIED');
       const removed = exact(await removeCheckpoint({

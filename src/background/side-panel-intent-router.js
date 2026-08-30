@@ -13,20 +13,51 @@ const LAUNCH_FACTORY_KEYS = Object.freeze([
 ]);
 const FACTORY_KEYS = Object.freeze([...LAUNCH_FACTORY_KEYS, 'reportOperations']);
 const LEGACY_FACTORY_KEYS = Object.freeze(LAUNCH_FACTORY_KEYS.filter(key => !['reportLaunch', 'exportLaunch'].includes(key)));
+const HIGHLIGHT_DEPENDENCY_KEYS = Object.freeze([
+  'highlightController', 'highlightSessionBridge', 'publishHighlightState',
+]);
+const HIGHLIGHT_FACTORY_KEYS = Object.freeze([...FACTORY_KEYS, ...HIGHLIGHT_DEPENDENCY_KEYS]);
+const HIGHLIGHT_LAUNCH_FACTORY_KEYS = Object.freeze([...LAUNCH_FACTORY_KEYS, ...HIGHLIGHT_DEPENDENCY_KEYS]);
+const HIGHLIGHT_LEGACY_FACTORY_KEYS = Object.freeze([...LEGACY_FACTORY_KEYS, ...HIGHLIGHT_DEPENDENCY_KEYS]);
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
+const OCCURRENCE_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const CAPABILITY = /^[A-Za-z0-9_-]{20,240}$/u;
 const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
 const LEASE_ID = /^lease-[A-Za-z0-9_-]{22}$/u;
 const PERSONA_MODES = new Set(['reader', 'achromatopsia', 'motor']);
+const READER_ACTIONS = new Set(['previous', 'repeat', 'pause', 'resume', 'next', 'stop']);
+const AUTONOMOUS_PERSONA_REASONS = new Set(['emergency-stop', 'lifecycle-stop', 'reader-terminal']);
+const READER_STATE_KEYS = Object.freeze([
+  'version', 'playback', 'index', 'total', 'caption', 'canPrevious', 'canNext',
+  'speechAvailability', 'voiceId', 'rate',
+]);
 const PANEL_PORT_TYPES = new Set([
   'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
   'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
-  'PANEL_SET_PERSONA_MODE', 'PANEL_STOP_PERSONA', 'PANEL_CANCEL_AUDIT',
+  'PANEL_SET_PERSONA_MODE', 'PANEL_READER_STATE', 'PANEL_READER_ACTION',
+  'PANEL_READER_ENABLE_VOICE',
+  'PANEL_STOP_PERSONA', 'PANEL_CANCEL_AUDIT',
   'PANEL_OPEN_REPORT', 'PANEL_REHYDRATE_VIEW',
 ]);
+const HIGHLIGHT_TYPES = new Set([
+  'GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT',
+]);
+const HIGHLIGHT_FAILURE_CODES = new Set([
+  'HIGHLIGHT_AMBIGUOUS', 'HIGHLIGHT_CLEANUP_UNCONFIRMED', 'HIGHLIGHT_DOCUMENT_CHANGED',
+  'HIGHLIGHT_EXPIRED', 'HIGHLIGHT_INACCESSIBLE', 'HIGHLIGHT_INJECTION_FAILED',
+  'HIGHLIGHT_INPUT_INVALID', 'HIGHLIGHT_LIVE_PROOF_FAILED', 'HIGHLIGHT_NOT_APPLICABLE',
+  'HIGHLIGHT_NOT_AUTHORIZED', 'HIGHLIGHT_NO_BINDING', 'HIGHLIGHT_PAGE_OR_PROCESS',
+  'HIGHLIGHT_SHADOW_ROOT', 'HIGHLIGHT_STATE_FAILED', 'HIGHLIGHT_URL_CHANGED',
+  'HIGHLIGHT_WINDOW_CHANGED',
+]);
+const HIGHLIGHT_UNAVAILABLE_REASONS = new Set(['no-binding', 'expired', 'live-proof-failed']);
 const PERSONA_CODES = new Set([
   'CAPABILITY_UNAVAILABLE', 'PERSONA_NOT_FOUND', 'PERSONA_EXPIRED', 'PERSONA_CONFLICT',
-  'PERSONA_RUNTIME_FAILED', 'PERSONA_CLEANUP_UNCONFIRMED',
+  'PERSONA_RUNTIME_FAILED', 'PERSONA_CLEANUP_UNCONFIRMED', 'PERSONA_CONSUMER_MISMATCH',
+  'PERSONA_STATE_FAILED', 'PERSONA_TARGET_CHANGED', 'PERSONA_READER_INACTIVE',
+  'PERSONA_READER_ACTION_REJECTED', 'PERSONA_READER_ACTION_TERMINAL',
+  'PERSONA_READER_GESTURE_REQUIRED', 'PERSONA_READER_VOICE_UNAVAILABLE',
+  'PERSONA_READER_RUNTIME_FAILED',
   'PERSONA_REVOKED_AFTER_RUNTIME_FAILURE',
 ]);
 const START_CODES = new Set([
@@ -121,8 +152,9 @@ function proofRecord(value, tabId, windowId) {
 function fail(code) { return Object.freeze({ ok: false, code }); }
 
 export function createSidePanelIntentRouter(raw) {
-  const input = exact(raw, FACTORY_KEYS) ?? exact(raw, LAUNCH_FACTORY_KEYS) ?? exact(raw, LEGACY_FACTORY_KEYS);
-  const coordinator = exact(input?.panelCoordinator, ['attachPanelPort', 'withWindowLock']);
+  const input = exact(raw, HIGHLIGHT_FACTORY_KEYS) ?? exact(raw, HIGHLIGHT_LAUNCH_FACTORY_KEYS) ??
+    exact(raw, HIGHLIGHT_LEGACY_FACTORY_KEYS);
+  const coordinator = exact(input?.panelCoordinator, ['attachPanelPort', 'withWindowLock', 'publishHighlightState']);
   const reportOperations = input?.reportOperations
     ? exact(input.reportOperations, ['commitReviewDecision', 'deleteAudit', 'deleteAllAudits'])
     : null;
@@ -130,12 +162,23 @@ export function createSidePanelIntentRouter(raw) {
     typeof input.chromeApi?.windows?.get !== 'function' || typeof input.chromeApi?.tabs?.query !== 'function' ||
     !input.authority || !input.auditStarter || !coordinator ||
     typeof input.personaStart?.start !== 'function' || typeof input.personaStart?.rehydrate !== 'function' ||
-    typeof input.personaCoordinator?.setMode !== 'function' || typeof input.personaCoordinator?.stop !== 'function' ||
+    typeof input.personaCoordinator?.setMode !== 'function' ||
+    typeof input.personaCoordinator?.readerCommand !== 'function' ||
+    typeof input.personaCoordinator?.stop !== 'function' ||
+    typeof input.personaCoordinator?.autonomousStop !== 'function' ||
     typeof coordinator.attachPanelPort !== 'function' || typeof coordinator.withWindowLock !== 'function' ||
     typeof input.chromeAdapter?.probeDocumentIdentity !== 'function' || typeof input.chromeAdapter?.getEvidenceUrl !== 'function' ||
     typeof input.readReportRevision !== 'function' || typeof input.buildPanelResultBundle !== 'function' ||
     typeof input.revokeViewOnly !== 'function' || typeof input.epochNow !== 'function' ||
     typeof input.modelNow !== 'function' || typeof input.createAuditId !== 'function' ||
+    typeof input.highlightController?.currentState !== 'function' ||
+    typeof input.highlightController?.availability !== 'function' ||
+    typeof input.highlightController?.highlight !== 'function' ||
+    typeof input.highlightController?.clear !== 'function' ||
+    typeof input.highlightController?.invalidateContent !== 'function' ||
+    typeof input.highlightSessionBridge?.createPanelSender !== 'function' ||
+    typeof input.highlightSessionBridge?.createReviewSender !== 'function' ||
+    typeof input.publishHighlightState !== 'function' ||
     (Object.hasOwn(input, 'reportOperations') && (!reportOperations ||
       Object.values(reportOperations).some(operation => typeof operation !== 'function')))) {
     throw new TypeError('SIDE_PANEL_ROUTER_INVALID');
@@ -218,6 +261,82 @@ export function createSidePanelIntentRouter(raw) {
     return freeze({ ok: true, lease: { leaseId, activeMode, expiresAt } });
   }
 
+  function canonicalReaderText(value, maximum, allowEmpty) {
+    if (typeof value !== 'string' || /[\u0000-\u001F\u007F]/u.test(value)) return null;
+    const normalized = Array.from(value.replace(/\s+/gu, ' ').trim()).slice(0, maximum).join('');
+    return (allowEmpty || normalized) && normalized === value ? normalized : null;
+  }
+
+  function projectReaderState(value) {
+    const readerState = exact(value, READER_STATE_KEYS);
+    if (!readerState || readerState.version !== 1 ||
+      !['idle', 'playing', 'paused'].includes(readerState.playback) ||
+      !Number.isSafeInteger(readerState.index) || !Number.isSafeInteger(readerState.total) ||
+      readerState.total < 0 || readerState.total > 2000 ||
+      typeof readerState.canPrevious !== 'boolean' || typeof readerState.canNext !== 'boolean' ||
+      !['available', 'unavailable', 'busy', 'error'].includes(readerState.speechAvailability) ||
+      typeof readerState.rate !== 'number' || !Number.isFinite(readerState.rate) ||
+      readerState.rate < 0.5 || readerState.rate > 2) return null;
+    const caption = canonicalReaderText(readerState.caption, 2048, true);
+    const voiceId = canonicalReaderText(readerState.voiceId, 200, true);
+    if (caption === null || voiceId === null) return null;
+    if (readerState.playback === 'idle') {
+      if (readerState.index !== -1 || readerState.total !== 0 || caption !== '' ||
+        readerState.canPrevious || readerState.canNext) return null;
+    } else if (readerState.total < 1 || readerState.index < 0 || readerState.index >= readerState.total ||
+      caption === '' || readerState.canPrevious !== (readerState.index > 0) ||
+      readerState.canNext !== (readerState.index < readerState.total - 1)) return null;
+    return freeze({ ...readerState, caption, voiceId });
+  }
+
+  function projectReaderResult(result) {
+    const failed = exact(result, ['ok', 'code']);
+    if (failed?.ok === false) {
+      return fail(PERSONA_CODES.has(failed.code) ? failed.code : 'PERSONA_READER_RUNTIME_FAILED');
+    }
+    const success = exact(result, ['ok', 'kind', 'state']);
+    const readerState = success?.ok === true && success.kind === 'state'
+      ? projectReaderState(success.state)
+      : null;
+    return readerState
+      ? freeze({ ok: true, readerState })
+      : fail('PERSONA_READER_RUNTIME_FAILED');
+  }
+
+  function preferredLocalVoice(result) {
+    const success = exact(result, ['ok', 'kind', 'status', 'voices']);
+    if (!success || success.ok !== true || success.kind !== 'voices' ||
+      !['available', 'unavailable'].includes(success.status) || !Array.isArray(success.voices)) return null;
+    let length;
+    let keys;
+    try {
+      length = Object.getOwnPropertyDescriptor(success.voices, 'length')?.value;
+      keys = Reflect.ownKeys(success.voices);
+    } catch { return null; }
+    if (!Number.isSafeInteger(length) || length < 0 || length > 128 || keys.length !== length + 1 ||
+      (success.status === 'unavailable' && length !== 0)) return null;
+    const voices = [];
+    const ids = new Set();
+    for (let index = 0; index < length; index += 1) {
+      let voice;
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(success.voices, String(index));
+        voice = descriptor?.enumerable && Object.hasOwn(descriptor, 'value')
+          ? exact(descriptor.value, ['id', 'label', 'lang'])
+          : null;
+      } catch { return null; }
+      const id = voice && canonicalReaderText(voice.id, 200, false);
+      const label = voice && canonicalReaderText(voice.label, 200, false);
+      const lang = voice && canonicalReaderText(voice.lang, 64, true);
+      if (!voice || id === null || label === null || lang === null || ids.has(id)) return null;
+      ids.add(id);
+      voices.push({ id, lang });
+    }
+    if (success.status !== 'available' || voices.length === 0) return false;
+    return voices.find(voice => voice.lang.toLowerCase() === 'pt-br') ??
+      voices.find(voice => voice.lang.toLowerCase().startsWith('pt-')) ?? voices[0];
+  }
+
   async function withPersonaContext(envelope, sender, operation) {
     let context;
     try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
@@ -251,6 +370,54 @@ export function createSidePanelIntentRouter(raw) {
     }));
   }
 
+  async function readerPersona(envelope, sender) {
+    let context;
+    try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
+    catch { return fail('CONTEXT_DENIED'); }
+    const command = envelope.type === 'PANEL_READER_STATE'
+      ? freeze({ version: 1, op: 'state' })
+      : READER_ACTIONS.has(envelope.action)
+        ? freeze({ version: 1, op: 'action', action: envelope.action })
+        : null;
+    if (!command) return fail('INVALID_MESSAGE');
+    try {
+      return projectReaderResult(await input.personaCoordinator.readerCommand({
+        leaseId: envelope.leaseId,
+        consumer: personaConsumer(context),
+        command,
+      }));
+    } catch { return fail('PERSONA_READER_RUNTIME_FAILED'); }
+  }
+
+  async function enableReaderVoice(envelope, sender) {
+    let context;
+    try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
+    catch { return fail('CONTEXT_DENIED'); }
+    const consumer = personaConsumer(context);
+    let inventory;
+    try {
+      inventory = await input.personaCoordinator.readerCommand({
+        leaseId: envelope.leaseId,
+        consumer,
+        command: freeze({ version: 1, op: 'voices', explicitUserGesture: true }),
+      });
+    } catch { return fail('PERSONA_READER_RUNTIME_FAILED'); }
+    const failed = exact(inventory, ['ok', 'code']);
+    if (failed?.ok === false) {
+      return fail(PERSONA_CODES.has(failed.code) ? failed.code : 'PERSONA_READER_RUNTIME_FAILED');
+    }
+    const selected = preferredLocalVoice(inventory);
+    if (selected === false) return fail('PERSONA_READER_VOICE_UNAVAILABLE');
+    if (!selected) return fail('PERSONA_READER_RUNTIME_FAILED');
+    try {
+      return projectReaderResult(await input.personaCoordinator.readerCommand({
+        leaseId: envelope.leaseId,
+        consumer,
+        command: freeze({ version: 1, op: 'preferences', voiceId: selected.id, rate: 1 }),
+      }));
+    } catch { return fail('PERSONA_READER_RUNTIME_FAILED'); }
+  }
+
   async function stopPersona(envelope, sender) {
     let context;
     try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
@@ -262,6 +429,34 @@ export function createSidePanelIntentRouter(raw) {
         explicit: true,
       }), true);
     } catch { return fail('PERSONA_RUNTIME_FAILED'); }
+  }
+
+  async function autonomousPersonaStop(envelope, sender) {
+    const extensionId = own(sender, 'id');
+    const documentId = own(sender, 'documentId');
+    const frameId = own(sender, 'frameId');
+    const senderTab = own(sender, 'tab');
+    const tabId = own(senderTab, 'id');
+    const windowId = own(senderTab, 'windowId');
+    if (extensionId !== input.chromeApi.runtime.id || frameId !== 0 ||
+      !Number.isSafeInteger(tabId) || tabId <= 0 || !safeChromeId(windowId) ||
+      typeof documentId !== 'string' || documentId.length < 1 || documentId.length > 512 ||
+      /[\u0000-\u001F\u007F]/u.test(documentId) ||
+      !LEASE_ID.test(envelope.leaseId ?? '') || !AUTONOMOUS_PERSONA_REASONS.has(envelope.reason)) {
+      return fail('CONTEXT_DENIED');
+    }
+    try {
+      await input.personaCoordinator.autonomousStop({
+        leaseId: envelope.leaseId,
+        tabId,
+        windowId,
+        documentId,
+        reason: envelope.reason,
+      });
+      return freeze({ ok: true, state: 'acknowledged' });
+    } catch {
+      return fail('PERSONA_AUTONOMOUS_STOP_UNAVAILABLE');
+    }
   }
 
   async function startAttached(envelope, sender) {
@@ -363,10 +558,17 @@ export function createSidePanelIntentRouter(raw) {
         consumer: 'panel', intent: 'open-report', sender,
         claimedWindowId: envelope.windowId,
       });
-      if (authorized?.ok !== true || authorized.session?.auditId !== envelope.auditId || !safeChromeId(authorized.context?.windowId)) {
+      if (authorized?.ok !== true || authorized.session?.auditId !== envelope.auditId ||
+        authorized.session?.sessionCapabilityId !== envelope.sessionCapabilityId ||
+        !['result', 'view-only'].includes(authorized.session?.state) || !safeChromeId(authorized.context?.windowId)) {
         return fail('REPORT_OPEN_DENIED');
       }
-      const opened = await input.reportLaunch.openRegisteredReport({ auditId: envelope.auditId, windowId: authorized.context.windowId });
+      const opened = await input.reportLaunch.openRegisteredReport({
+        auditId: envelope.auditId,
+        windowId: authorized.context.windowId,
+        sourceSessionCapabilityId: envelope.sessionCapabilityId,
+        sourceSessionState: authorized.session.state,
+      });
       return opened?.ok === true ? freeze({ ok: true, auditId: envelope.auditId, state: 'connected' }) : fail('REPORT_OPEN_DENIED');
     } catch { return fail('REPORT_OPEN_DENIED'); }
   }
@@ -393,27 +595,175 @@ export function createSidePanelIntentRouter(raw) {
     } catch { return fail('REPORT_OPERATION_FAILED'); }
   }
 
+  function projectHighlightFailure(result) {
+    const failed = exact(result, ['ok', 'code']);
+    return failed?.ok === false
+      ? fail(HIGHLIGHT_FAILURE_CODES.has(failed.code) ? failed.code : 'HIGHLIGHT_OPERATION_FAILED')
+      : null;
+  }
+
+  async function highlightIntent(envelope, sender, panelWindowId = null) {
+    let token;
+    try {
+      token = panelWindowId === null
+        ? input.highlightSessionBridge.createReviewSender({ sender })
+        : input.highlightSessionBridge.createPanelSender({ sender, windowId: panelWindowId });
+    } catch { return fail('CONTEXT_DENIED'); }
+    if (!token || typeof token !== 'object') return fail('CONTEXT_DENIED');
+    if (panelWindowId === null && ['HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT'].includes(envelope.type)) {
+      if (typeof input.reportLaunch?.returnToSource !== 'function') return fail('HIGHLIGHT_RETURN_FAILED');
+      let returned;
+      try {
+        returned = await input.reportLaunch.returnToSource({
+          sessionCapabilityId: envelope.sessionCapabilityId,
+          auditId: envelope.auditId,
+          sender,
+        });
+      } catch {
+        return fail('HIGHLIGHT_RETURN_FAILED');
+      }
+      const focused = exact(returned, ['ok', 'state']);
+      if (focused?.ok !== true || focused.state !== 'source-focused') return fail('HIGHLIGHT_RETURN_FAILED');
+    }
+    const request = {
+      sessionCapabilityId: envelope.sessionCapabilityId,
+      auditId: envelope.auditId,
+      ...(['GET_HIGHLIGHT_STATE', 'CLEAR_HIGHLIGHT'].includes(envelope.type)
+        ? {} : { occurrenceId: envelope.occurrenceId }),
+      sender: token,
+    };
+    let result;
+    try {
+      if (envelope.type === 'GET_HIGHLIGHT_STATE') {
+        result = await input.highlightController.currentState(request);
+        const failed = projectHighlightFailure(result);
+        if (failed) return failed;
+        const success = exact(result, ['ok', 'highlight']);
+        const clearState = exact(success?.highlight, ['state']);
+        const activeState = exact(success?.highlight, ['state', 'occurrenceId']);
+        if (success?.ok === true && clearState?.state === 'clear') {
+          return freeze({ ok: true, highlight: { state: 'clear' } });
+        }
+        if (success?.ok === true && activeState?.state === 'active' &&
+          OCCURRENCE_ID.test(activeState.occurrenceId ?? '')) {
+          return freeze({ ok: true, highlight: { state: 'active', occurrenceId: activeState.occurrenceId } });
+        }
+        return fail('HIGHLIGHT_OPERATION_FAILED');
+      }
+      if (envelope.type === 'GET_HIGHLIGHT_AVAILABILITY') {
+        result = await input.highlightController.availability(request);
+        const failed = projectHighlightFailure(result);
+        if (failed) return failed;
+        const available = exact(result, ['ok', 'bindingStatus']);
+        const status = exact(available?.bindingStatus, ['state']) ??
+          exact(available?.bindingStatus, ['state', 'reason']);
+        if (available?.ok !== true || !status) return fail('HIGHLIGHT_OPERATION_FAILED');
+        if (status.state === 'available' && Reflect.ownKeys(status).length === 1) {
+          return freeze({ ok: true, bindingStatus: { state: 'available' } });
+        }
+        if (status.state === 'unavailable' && HIGHLIGHT_UNAVAILABLE_REASONS.has(status.reason)) {
+          return freeze({ ok: true, bindingStatus: { state: 'unavailable', reason: status.reason } });
+        }
+        return fail('HIGHLIGHT_OPERATION_FAILED');
+      }
+      if (envelope.type === 'HIGHLIGHT_OCCURRENCE') {
+        result = await input.highlightController.highlight(request);
+        const failed = projectHighlightFailure(result);
+        if (failed) return failed;
+        const success = exact(result, ['ok', 'highlight']);
+        const state = exact(success?.highlight, ['state', 'occurrenceId']);
+        if (success?.ok !== true || state?.state !== 'active' || state.occurrenceId !== envelope.occurrenceId) {
+          return fail('HIGHLIGHT_OPERATION_FAILED');
+        }
+        const event = freeze({
+          version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: envelope.auditId,
+          occurrenceId: envelope.occurrenceId, state: 'active',
+        });
+        try { await input.publishHighlightState(event); } catch { /* the correlated response still carries authoritative state */ }
+        return freeze({ ok: true, highlight: { state: 'active', occurrenceId: envelope.occurrenceId } });
+      }
+      result = await input.highlightController.clear(request);
+      const failed = projectHighlightFailure(result);
+      if (failed) return failed;
+      const success = exact(result, ['ok', 'highlight']);
+      const state = exact(success?.highlight, ['state']);
+      if (success?.ok !== true || state?.state !== 'clear') return fail('HIGHLIGHT_OPERATION_FAILED');
+      const event = freeze({
+        version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: envelope.auditId,
+        occurrenceId: null, state: 'clear',
+      });
+      try { await input.publishHighlightState(event); } catch { /* the correlated response still carries authoritative state */ }
+      return freeze({ ok: true, highlight: { state: 'clear' } });
+    } catch { return fail('HIGHLIGHT_OPERATION_FAILED'); }
+  }
+
+  async function invalidateContentHighlight(envelope, sender) {
+    let result;
+    try {
+      result = await input.highlightController.invalidateContent({ message: envelope, sender });
+    } catch {
+      return fail('HIGHLIGHT_INVALIDATION_IGNORED');
+    }
+    const success = exact(result, ['ok', 'auditId', 'highlight']);
+    const state = exact(success?.highlight, ['state']);
+    if (success?.ok !== true || !AUDIT_ID.test(success.auditId ?? '') || state?.state !== 'clear') {
+      return fail('HIGHLIGHT_INVALIDATION_IGNORED');
+    }
+    const event = freeze({
+      version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: success.auditId,
+      occurrenceId: null, state: 'clear',
+    });
+    try { await input.publishHighlightState(event); }
+    catch { /* durable state is already clear; consumers reprove before their next action */ }
+    return freeze({ ok: true, highlight: { state: 'clear' } });
+  }
+
   async function dispatch(rawRequest) {
     const request = exact(rawRequest, ['envelope', 'sender']) ??
-      exact(rawRequest, ['envelope', 'sender', 'launchTabId']);
+      exact(rawRequest, ['envelope', 'sender', 'launchTabId']) ??
+      exact(rawRequest, ['envelope', 'sender', 'launchTabId', 'panelWindowId']) ??
+      exact(rawRequest, ['envelope', 'sender', 'panelWindowId']);
     if (!request || !Object.isFrozen(request.envelope)) return fail('INVALID_MESSAGE');
     const parsed = parseWorkerMessage(request.envelope);
     if (!parsed.ok) return parsed.code === 'MESSAGE_TOO_LARGE' ? fail('MESSAGE_TOO_LARGE') : fail('INVALID_MESSAGE');
     const envelope = parsed.value;
     const panelIntent = PANEL_PORT_TYPES.has(envelope.type);
+    const highlight = HIGHLIGHT_TYPES.has(envelope.type);
     const hasLaunchTab = Object.hasOwn(request, 'launchTabId');
-    if (panelIntent && (!hasLaunchTab || !safeChromeId(request.launchTabId))) return fail('CONTEXT_DENIED');
-    if (!panelIntent && hasLaunchTab) return fail('CONTEXT_DENIED');
+    const hasPanelWindow = Object.hasOwn(request, 'panelWindowId');
+    if (panelIntent && (!hasLaunchTab || hasPanelWindow || !safeChromeId(request.launchTabId))) return fail('CONTEXT_DENIED');
+    if (highlight) {
+      const panelLane = hasLaunchTab && hasPanelWindow && safeChromeId(request.launchTabId) &&
+        safeChromeId(request.panelWindowId);
+      const reportLane = !hasLaunchTab && !hasPanelWindow;
+      if (!panelLane && !reportLane) return fail('CONTEXT_DENIED');
+    } else if (!panelIntent && (hasLaunchTab || hasPanelWindow)) return fail('CONTEXT_DENIED');
     if (envelope.type === 'PREPARE_PANEL_CAPABILITY') return preparePanel(envelope, request.sender, request.launchTabId);
     if (envelope.type === 'PREPARE_PANEL_PERSONA_CAPABILITY') return preparePanelPersona(envelope, request.sender, request.launchTabId);
     if (envelope.type === 'PANEL_START_ATTACHED_AUDIT') return startAttached(envelope, request.sender);
     if (envelope.type === 'PANEL_START_PERSONA') return startPersona(envelope, request.sender);
     if (envelope.type === 'PANEL_REHYDRATE_PERSONA') return rehydratePersona(envelope, request.sender);
     if (envelope.type === 'PANEL_SET_PERSONA_MODE') return setPersonaMode(envelope, request.sender);
+    if (['PANEL_READER_STATE', 'PANEL_READER_ACTION'].includes(envelope.type)) {
+      return readerPersona(envelope, request.sender);
+    }
+    if (envelope.type === 'PANEL_READER_ENABLE_VOICE') {
+      return enableReaderVoice(envelope, request.sender);
+    }
     if (envelope.type === 'PANEL_STOP_PERSONA') return stopPersona(envelope, request.sender);
     if (envelope.type === 'PANEL_CANCEL_AUDIT') return cancel(envelope, request.sender);
     if (envelope.type === 'PANEL_OPEN_REPORT') return openReport(envelope, request.sender);
+    if (highlight) return highlightIntent(envelope, request.sender, hasPanelWindow ? request.panelWindowId : null);
+    if (envelope.type === 'AUDITA_HIGHLIGHT_INVALIDATED') {
+      return invalidateContentHighlight(envelope, request.sender);
+    }
+    if (envelope.type === 'AUDITA_PERSONA_AUTONOMOUS_STOP') {
+      return autonomousPersonaStop(envelope, request.sender);
+    }
     if (envelope.type === 'REPORT_CONNECT') return input.reportLaunch?.connect?.({ auditId: envelope.auditId, sender: request.sender }) ?? fail('FEATURE_UNAVAILABLE');
+    if (envelope.type === 'REPORT_RETURN_TO_SOURCE') return input.reportLaunch?.returnToSource?.({
+      sessionCapabilityId: envelope.sessionCapabilityId, auditId: envelope.auditId, sender: request.sender,
+    }) ?? fail('FEATURE_UNAVAILABLE');
     if (envelope.type === 'REPORT_REQUEST_EXPORT') return input.exportLaunch?.requestExport?.({
       auditId: envelope.auditId, sessionCapabilityId: envelope.sessionCapabilityId, sender: request.sender,
     }) ?? fail('FEATURE_UNAVAILABLE');

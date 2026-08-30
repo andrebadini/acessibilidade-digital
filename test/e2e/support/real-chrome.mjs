@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
 export const MAX_CDP_FRAME_BYTES = 16 * 1024 * 1024;
+export const CANONICAL_CHROME_PRODUCT = 'Chrome/152.0.7977.64';
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const HARNESS_PATH = '/test/e2e/fixtures/real-tab-harness.html';
 const BLANK_PATH = '/test/e2e/fixtures/real-tab-blank.html';
@@ -45,6 +46,15 @@ function plain(value) {
 
 function positiveInteger(value) {
   return Number.isSafeInteger(value) && value > 0;
+}
+
+export function resolveRealChromeTestBinary(env = process.env) {
+  if (!env || typeof env !== 'object') throw fixed('CHROME_BINARY_INVALID');
+  const primary = env.AUDITA_E2E_CHROME;
+  const fallback = env.CHROME_BIN;
+  if (primary !== undefined && typeof primary !== 'string') throw fixed('CHROME_BINARY_INVALID');
+  if (fallback !== undefined && typeof fallback !== 'string') throw fixed('CHROME_BINARY_INVALID');
+  return primary || fallback || null;
 }
 
 function canonicalAbsolute(value) {
@@ -735,6 +745,50 @@ export async function terminateChromeProcess(chrome, options = {}) {
   return true;
 }
 
+export function createBoundedBrowserCleanup(raw = {}) {
+  const keys = ['closeClients', 'terminateChrome', 'closeServer', 'removeProfile', 'stageTimeoutMs'];
+  if (!plain(raw) || Reflect.ownKeys(raw).length !== keys.length ||
+    Reflect.ownKeys(raw).some(key => typeof key !== 'string' || !keys.includes(key)) ||
+    keys.slice(0, 4).some(key => typeof raw[key] !== 'function') || !positiveInteger(raw.stageTimeoutMs)) {
+    throw fixed('BROWSER_CLEANUP_INVALID');
+  }
+  const stages = Object.freeze([
+    Object.freeze(['clients', raw.closeClients]),
+    Object.freeze(['chrome', raw.terminateChrome]),
+    Object.freeze(['server', raw.closeServer]),
+    Object.freeze(['profile', raw.removeProfile]),
+  ]);
+  let cleanupPromise = null;
+
+  const runStage = (stage, operation) => {
+    let timer;
+    const operationResult = Promise.resolve().then(operation).then(
+      () => Object.freeze({ ok: true }),
+      () => Object.freeze({ ok: false, stage, code: 'failed' }),
+    );
+    const timeout = new Promise(resolvePromise => {
+      timer = setTimeout(() => resolvePromise(Object.freeze({ ok: false, stage, code: 'timeout' })), raw.stageTimeoutMs);
+    });
+    return Promise.race([operationResult, timeout]).finally(() => clearTimeout(timer));
+  };
+
+  return () => {
+    if (cleanupPromise !== null) return cleanupPromise;
+    cleanupPromise = (async () => {
+      const failures = [];
+      let chromeExitConfirmed = false;
+      for (const [stage, operation] of stages) {
+        if (stage === 'profile' && !chromeExitConfirmed) continue;
+        const result = await runStage(stage, operation);
+        if (stage === 'chrome') chromeExitConfirmed = result.ok;
+        if (!result.ok) failures.push(Object.freeze({ stage: result.stage, code: result.code }));
+      }
+      return Object.freeze({ ok: failures.length === 0, failures: Object.freeze(failures) });
+    })();
+    return cleanupPromise;
+  };
+}
+
 export async function launchUnpackedExtension(t, options = {}) {
   const optionKeys = ['extensionPath', 'startUrl', 'downloadDirectory', 'viewport', 'chromeBinary', 'expectedMajor', 'qaDirectory'];
   if (!plain(options) || Reflect.ownKeys(options).some(key => typeof key !== 'string' || !optionKeys.includes(key)) ||
@@ -825,6 +879,9 @@ export async function openSidePanelFromAction(launch, options = {}) {
   await waitForValue(await openTabHarness(launch),
     'chrome.sidePanel.getPanelBehavior().then(value=>value?.openPanelOnActionClick===false)', Boolean,
     { timeoutMs: 10_000, intervalMs: 50 });
+  await waitForValue(await openTabHarness(launch), `new Promise(resolve =>
+    chrome.contextMenus.update('audita.accessibility.audit-page', { visible: true }, () =>
+      resolve(!chrome.runtime.lastError)))`, Boolean, { timeoutMs: 10_000, intervalMs: 50 });
   await activateRealTab(launch, launch.startPage, { operationId: safeOperationId() });
   DECLARED_SHORTCUTS.set(launch.startPage.page, new Set([shortcut]));
   await pressShortcut(launch.startPage.page, shortcut);
@@ -864,6 +921,36 @@ export async function waitForSidePanel(launch) {
   const [context] = await waitForExactContext(launch, 'SIDE_PANEL', '/src/panel/index.html');
   const info = await waitForPageTarget(launch, value => value.url === context.documentUrl);
   return attachPage(launch, info.targetId);
+}
+
+export async function waitForReboundSidePanel(launch, options = {}) {
+  if (!plain(options) || Reflect.ownKeys(options).some(key => !['priorDocumentId', 'timeoutMs'].includes(key)) ||
+    typeof options.priorDocumentId !== 'string' || !options.priorDocumentId ||
+    !positiveInteger(options.timeoutMs ?? 10_000)) throw fixed('CONTEXT_PROOF_DENIED');
+  const deadline = Date.now() + (options.timeoutMs ?? 10_000);
+  do {
+    const contexts = await runtimeContexts(launch, { contextTypes: ['SIDE_PANEL'] });
+    const candidates = contexts.filter(context => {
+      if (context.documentId === options.priorDocumentId) return false;
+      try {
+        const url = new URL(context.documentUrl);
+        return url.protocol === 'chrome-extension:' && url.hostname === launch.extensionId &&
+          url.pathname === '/src/panel/index.html' && !url.hash && url.searchParams.size === 1 &&
+          url.searchParams.getAll('launch').length === 1 &&
+          PANEL_LAUNCH_TOKEN.test(url.searchParams.get('launch') ?? '');
+      } catch { return false; }
+    });
+    if (candidates.length > 1) throw fixed('CONTEXT_PROOF_DENIED');
+    if (candidates.length === 1) {
+      const [context] = candidates;
+      const info = await waitForPageTarget(launch, value => value.url === context.documentUrl);
+      const page = await attachPage(launch, info.targetId);
+      await waitForCdpPageLoad(page, context.documentUrl);
+      return Object.freeze({ context: Object.freeze({ ...context }), page });
+    }
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 50));
+  } while (Date.now() < deadline);
+  throw fixed('CONTEXT_PROOF_DENIED');
 }
 
 export async function waitForReport(launch, args) {

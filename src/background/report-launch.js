@@ -2,10 +2,14 @@ import { REVIEW_SURFACE, deriveTrustedExtensionContext } from './target-capabili
 
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const CAPABILITY = /^[A-Za-z0-9_-]{22}$/u;
+const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
 const PATH = '/src/review/index.html';
 const TTL_MS = 30 * 60 * 1000;
 const CONNECT_TIMEOUT_MS = 2_000;
-const REPORT_INTENTS = Object.freeze(['export', 'review-commit', 'delete-audit', 'delete-all']);
+const REPORT_INTENTS = Object.freeze([
+  'export', 'review-commit', 'delete-audit', 'delete-all', 'highlight', 'return-source',
+]);
+const BASE_REPORT_INTENTS = Object.freeze(['export', 'review-commit', 'delete-audit', 'delete-all']);
 const REPORT_INTENT_SET = new Set(REPORT_INTENTS);
 const SHARED_QUEUES = new WeakMap();
 
@@ -59,23 +63,32 @@ function exact(value, keys) {
   } catch { return null; }
 }
 function launchRecord(value) {
-  const row = exact(value, ['version', 'auditId', 'tabId', 'windowId', 'path', 'documentId', 'state', 'issuedAt', 'expiresAt']);
-  if (!row || row.version !== 1 || !AUDIT_ID.test(row.auditId ?? '') || !safeId(row.tabId) || !safeId(row.windowId) ||
+  const v1 = exact(value, ['version', 'auditId', 'tabId', 'windowId', 'path', 'documentId', 'state', 'issuedAt', 'expiresAt']);
+  const v2 = exact(value, ['version', 'auditId', 'tabId', 'windowId', 'path', 'documentId', 'state', 'issuedAt', 'expiresAt', 'sourceSessionCapabilityId', 'sourceSessionState']);
+  const row = v2 ?? v1;
+  if (!row || ![1, 2].includes(row.version) || !AUDIT_ID.test(row.auditId ?? '') || !safeId(row.tabId) || !safeId(row.windowId) ||
     row.path !== PATH || !['allocated', 'awaiting-connection', 'connected', 'revoked'].includes(row.state) ||
     !Number.isSafeInteger(row.issuedAt) || !Number.isSafeInteger(row.expiresAt) || row.issuedAt < 0 || row.expiresAt <= row.issuedAt ||
     (['allocated', 'awaiting-connection'].includes(row.state) && row.documentId !== null) ||
     (row.state === 'connected' && (typeof row.documentId !== 'string' || !row.documentId))) return null;
   if (row.state === 'revoked' && row.documentId !== null && (typeof row.documentId !== 'string' || !row.documentId)) return null;
+  if (row.version === 2 && (!CAPABILITY.test(row.sourceSessionCapabilityId ?? '') ||
+    !['result', 'view-only'].includes(row.sourceSessionState))) return null;
   return freeze(row);
 }
 function consumerRecord(value) {
   const row = exact(value, ['version', 'sessionCapabilityId', 'auditId', 'tabId', 'windowId', 'documentId', 'intents', 'state', 'issuedAt', 'expiresAt']);
   if (!row || row.version !== 1 || !CAPABILITY.test(row.sessionCapabilityId ?? '') || !AUDIT_ID.test(row.auditId ?? '') ||
     !safeId(row.tabId) || !safeId(row.windowId) || typeof row.documentId !== 'string' || !row.documentId ||
-    !Array.isArray(row.intents) || row.intents.length !== REPORT_INTENTS.length ||
-    row.intents.some((intent, index) => intent !== REPORT_INTENTS[index]) ||
+    !Array.isArray(row.intents) || ![BASE_REPORT_INTENTS, REPORT_INTENTS].some(expected => row.intents.length === expected.length &&
+      row.intents.every((intent, index) => intent === expected[index])) ||
     !['active', 'revoked'].includes(row.state) || !Number.isSafeInteger(row.issuedAt) || !Number.isSafeInteger(row.expiresAt)) return null;
   return freeze(row);
+}
+function currentAttachedBinding(value) {
+  const binding = exact(value, ['kind', 'tabId', 'documentId', 'urlSessionDigest']);
+  return binding?.kind === 'attached' && safeId(binding.tabId) && typeof binding.documentId === 'string' && binding.documentId &&
+    DIGEST.test(binding.urlSessionDigest ?? '') ? binding : null;
 }
 function readEpoch(fn) { const value = fn(); if (!Number.isSafeInteger(value) || value < 0) throw new Error('REPORT_CLOCK_DENIED'); return value; }
 function liveLaunchAt(launch, auditId, now) {
@@ -124,12 +137,20 @@ async function tabCall(receiver, method, ...args) {
 }
 
 export function createReportLaunchAuthority(raw) {
-  const input = exact(raw, ['chromeApi', 'sessionArea', 'epochNow', 'randomBytes']);
+  const input = exact(raw, ['chromeApi', 'sessionArea', 'epochNow', 'randomBytes']) ??
+    exact(raw, ['chromeApi', 'sessionArea', 'epochNow', 'randomBytes', 'sourceSessionAuthority']) ??
+    exact(raw, [
+      'chromeApi', 'sessionArea', 'epochNow', 'randomBytes',
+      'sourceSessionAuthority', 'sourcePanelAuthority',
+    ]);
   if (!input || typeof input.chromeApi?.runtime?.id !== 'string' || typeof input.chromeApi.runtime.getURL !== 'function' ||
     typeof input.chromeApi.runtime.getContexts !== 'function' || typeof input.chromeApi?.tabs?.create !== 'function' ||
     typeof input.chromeApi.tabs.update !== 'function' || typeof input.chromeApi.tabs.get !== 'function' ||
     typeof input.chromeApi.tabs.remove !== 'function' || typeof input.sessionArea?.get !== 'function' ||
-    typeof input.sessionArea.set !== 'function' || typeof input.epochNow !== 'function' || typeof input.randomBytes !== 'function') {
+    typeof input.sessionArea.set !== 'function' || typeof input.epochNow !== 'function' || typeof input.randomBytes !== 'function' ||
+    (Object.hasOwn(input, 'sourceSessionAuthority') && typeof input.sourceSessionAuthority?.reauthorizeReportSource !== 'function') ||
+    (Object.hasOwn(input, 'sourcePanelAuthority') &&
+      typeof input.sourcePanelAuthority?.hasOpenPanelForSource !== 'function')) {
     throw new TypeError('REPORT_LAUNCH_INVALID');
   }
   const getLaunch = async auditId => {
@@ -158,7 +179,7 @@ export function createReportLaunchAuthority(raw) {
     } catch { return false; }
   }
 
-  async function setupOpen(auditId, windowId) {
+  async function setupOpen(auditId, windowId, source = null) {
     const existing = await getLaunch(auditId);
     if (existing && existing.state === 'connected' && await focusConnected(existing, auditId)) return { existing, created: false };
     if (existing && ['allocated', 'awaiting-connection'].includes(existing.state) &&
@@ -168,7 +189,10 @@ export function createReportLaunchAuthority(raw) {
     const tab = await tabCall(input.chromeApi.tabs, 'create', { url: 'about:blank', active: true, windowId });
     if (!safeId(tab?.id) || tab.windowId !== windowId) throw new Error('REPORT_OPEN_FAILED');
     const now = readEpoch(input.epochNow);
-    const allocated = freeze({ version: 1, auditId, tabId: tab.id, windowId, path: PATH, documentId: null, state: 'allocated', issuedAt: now, expiresAt: now + TTL_MS });
+    const allocated = freeze(source === null
+      ? { version: 1, auditId, tabId: tab.id, windowId, path: PATH, documentId: null, state: 'allocated', issuedAt: now, expiresAt: now + TTL_MS }
+      : { version: 2, auditId, tabId: tab.id, windowId, path: PATH, documentId: null, state: 'allocated', issuedAt: now, expiresAt: now + TTL_MS,
+        sourceSessionCapabilityId: source.sourceSessionCapabilityId, sourceSessionState: source.sourceSessionState });
     const persisted = await writeConfirmed(input.sessionArea, launchKey(auditId), allocated, launchRecord);
     if (!persisted) { try { await input.chromeApi.tabs.remove(tab.id); } catch {} throw new Error('REPORT_OPEN_FAILED'); }
     await input.sessionArea.set({ [indexKey(tab.id)]: auditId });
@@ -202,12 +226,17 @@ export function createReportLaunchAuthority(raw) {
     throw new Error('REPORT_CONNECT_TIMEOUT');
   }
 
-  async function openRegisteredReport({ auditId, windowId } = {}) {
-    if (!AUDIT_ID.test(auditId ?? '') || !safeId(windowId)) throw new Error('REPORT_OPEN_FAILED');
-    const setup = await serialize(input.sessionArea, auditId, () => setupOpen(auditId, windowId));
-    if (setup.existing.state === 'connected') return freeze({ ok: true, auditId, state: 'connected', tabId: setup.existing.tabId });
-    const connected = await waitForConnection(auditId);
-    return freeze({ ok: true, auditId, state: 'connected', tabId: connected.tabId });
+  async function openRegisteredReport(raw = {}) {
+    const legacy = exact(raw, ['auditId', 'windowId']);
+    const v2 = exact(raw, ['auditId', 'windowId', 'sourceSessionCapabilityId', 'sourceSessionState']);
+    const request = v2 ?? legacy;
+    if (!request || !AUDIT_ID.test(request.auditId ?? '') || !safeId(request.windowId) ||
+      (v2 && (!CAPABILITY.test(v2.sourceSessionCapabilityId ?? '') || !['result', 'view-only'].includes(v2.sourceSessionState) ||
+        typeof input.sourceSessionAuthority?.reauthorizeReportSource !== 'function'))) throw new Error('REPORT_OPEN_FAILED');
+    const setup = await serialize(input.sessionArea, request.auditId, () => setupOpen(request.auditId, request.windowId, v2));
+    if (setup.existing.state === 'connected') return freeze({ ok: true, auditId: request.auditId, state: 'connected', tabId: setup.existing.tabId });
+    const connected = await waitForConnection(request.auditId);
+    return freeze({ ok: true, auditId: request.auditId, state: 'connected', tabId: connected.tabId });
   }
 
   async function connect({ auditId, sender } = {}) {
@@ -222,10 +251,25 @@ export function createReportLaunchAuthority(raw) {
         context.tabId !== launch.tabId || context.windowId !== launch.windowId || context.documentUrl !== canonicalUrl(input.chromeApi, auditId)) {
         return fail('REPORT_CONNECT_DENIED');
       }
+      let state = 'view-only';
+      let intents = BASE_REPORT_INTENTS;
+      if (launch.version === 2) {
+        let source;
+        try {
+          source = await input.sourceSessionAuthority.reauthorizeReportSource({
+            sessionCapabilityId: launch.sourceSessionCapabilityId, auditId, state: launch.sourceSessionState,
+          });
+        } catch { return fail('REPORT_CONNECT_DENIED'); }
+        if (source?.ok !== true || source.state !== launch.sourceSessionState) return fail('REPORT_CONNECT_DENIED');
+        if (source.state === 'result' && currentAttachedBinding(source.binding)) {
+          state = 'result';
+          intents = REPORT_INTENTS;
+        }
+      }
       const sessionCapabilityId = opaqueId(input.randomBytes);
       const consumer = freeze({
         version: 1, sessionCapabilityId, auditId, tabId: launch.tabId, windowId: launch.windowId,
-        documentId: sender.documentId, intents: [...REPORT_INTENTS], state: 'active', issuedAt: now, expiresAt: launch.expiresAt,
+        documentId: sender.documentId, intents: [...intents], state: 'active', issuedAt: now, expiresAt: launch.expiresAt,
       });
       if (!await writeConfirmed(input.sessionArea, consumerKey(sessionCapabilityId), consumer, consumerRecord)) return fail('REPORT_CONNECT_DENIED');
       const current = await getLaunch(auditId);
@@ -235,7 +279,7 @@ export function createReportLaunchAuthority(raw) {
       }
       const connected = await writeConfirmed(input.sessionArea, launchKey(auditId), freeze({ ...launch, documentId: sender.documentId, state: 'connected' }), launchRecord);
       if (!connected) return fail('REPORT_CONNECT_DENIED');
-      return freeze({ ok: true, auditId, sessionCapabilityId, state: 'view-only' });
+      return freeze({ ok: true, auditId, sessionCapabilityId, state });
     });
   }
 
@@ -265,6 +309,51 @@ export function createReportLaunchAuthority(raw) {
       ok: true, auditId: authorized.auditId, windowId: authorized.windowId,
       sessionCapabilityId: authorized.sessionCapabilityId,
     });
+  }
+
+  async function returnToSource({ sessionCapabilityId, auditId, sender } = {}) {
+    const authorized = await authorizeIntent({
+      sessionCapabilityId, auditId, intent: 'return-source', sender,
+    });
+    if (authorized.ok !== true) {
+      return authorized.code === 'CONTEXT_DENIED' ? authorized : fail('REPORT_RETURN_DENIED');
+    }
+    if (typeof input.sourceSessionAuthority?.reauthorizeReportSource !== 'function' ||
+      typeof input.chromeApi.windows?.update !== 'function' ||
+      typeof input.chromeApi.sidePanel?.open !== 'function') return fail('REPORT_RETURN_DENIED');
+    const launch = await getLaunch(auditId);
+    if (launch?.version !== 2 || launch.sourceSessionState !== 'result' ||
+      !CAPABILITY.test(launch.sourceSessionCapabilityId ?? '')) return fail('REPORT_RETURN_DENIED');
+    let source;
+    try {
+      source = await input.sourceSessionAuthority.reauthorizeReportSource({
+        sessionCapabilityId: launch.sourceSessionCapabilityId,
+        auditId,
+        state: launch.sourceSessionState,
+      });
+    } catch { return fail('REPORT_RETURN_DENIED'); }
+    const proof = exact(source, ['ok', 'state', 'binding', 'windowId', 'live']);
+    const binding = currentAttachedBinding(proof?.binding);
+    if (proof?.ok !== true || proof.state !== 'result' || proof.live !== true ||
+      !safeId(proof.windowId) || !binding) return fail('REPORT_RETURN_DENIED');
+    try {
+      await input.chromeApi.windows.update(proof.windowId, { focused: true });
+      await input.chromeApi.tabs.update(binding.tabId, { active: true });
+      if (typeof input.sourcePanelAuthority?.hasOpenPanelForSource === 'function') {
+        let alreadyOpen = false;
+        try {
+          alreadyOpen = await input.sourcePanelAuthority.hasOpenPanelForSource({
+            tabId: binding.tabId,
+            windowId: proof.windowId,
+          });
+        } catch {
+          alreadyOpen = false;
+        }
+        if (alreadyOpen === true) return freeze({ ok: true, state: 'source-focused' });
+      }
+      await input.chromeApi.sidePanel.open({ tabId: binding.tabId });
+      return freeze({ ok: true, state: 'source-focused' });
+    } catch { return fail('REPORT_RETURN_DENIED'); }
   }
 
   async function validateConsumer(sessionCapabilityId, auditId) {
@@ -372,7 +461,8 @@ export function createReportLaunchAuthority(raw) {
   }
 
   return freeze({
-    openRegisteredReport, connect, authorizeIntent, authorizeExport, validateConsumer, getLaunch, getConsumer,
+    openRegisteredReport, connect, authorizeIntent, authorizeExport, returnToSource,
+    validateConsumer, getLaunch, getConsumer,
     handleTabUpdated, handleTabRemoved, handleWindowRemoved,
   });
 }

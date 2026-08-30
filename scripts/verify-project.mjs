@@ -46,15 +46,15 @@ assert.deepEqual(AXE_MV3_CSP_GATE, {
   enabled: true,
   targetSizeEnabled: true,
   code: 'AXE_MV3_CSP_E2E_PASSED',
-  testedBrowser: 'Google Chrome 151.0.7922.174',
+  testedBrowser: 'Google Chrome for Testing 152.0.7977.64',
 }, 'axe e target-size exigem a prova black-box pública desta versão');
 assert.deepEqual(AXE_RUN_CONFIG.rules['target-size'], { enabled: true }, 'target-size deve acompanhar o gate axe aprovado');
 assert.deepEqual(ANNOTATION_MAP_MV3_GATE, {
-  enabled: true,
-  code: 'ANNOTATION_MAP_MV3_E2E_PASSED',
-  reason: 'O compositor foi comprovado pelo fluxo público black-box desta versão.',
-  testedBrowser: 'Google Chrome 151.0.7922.174',
-}, 'mapa anotado exige a mesma prova black-box pública desta versão');
+  enabled: false,
+  code: 'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE',
+  reason: 'A entrada por URL e o consentimento público de pixels ainda não estão disponíveis no Painel Lateral.',
+  testedBrowser: null,
+}, 'mapa anotado permanece desabilitado até existir prova black-box pública de URL e consentimento');
 assert.doesNotMatch(JSON.stringify(AXE_RUN_CONFIG), /experimental|section508/iu);
 
 assert.equal(CORE_RULES.length, 130);
@@ -91,7 +91,7 @@ if (process.env.AUDITA_VERIFY_SKIP_TESTS !== '1') {
   assert.equal(suite.status, 0, 'npm test precisa passar');
 }
 
-console.log('verify-project: manifest/CSP, axe 4.13.0 e mapa aprovados no Chrome 151.0.7922.174, 130/146 (96/50), identidade neutra, HTML/JSON/PDF, fixtures, privacidade e suíte GREEN');
+console.log('verify-project: manifest/CSP e axe 4.13.0 aprovados no Chrome for Testing 152.0.7977.64; mapa aguarda fluxo público de URL/consentimento; 130/146 (96/50), identidade neutra, HTML/JSON/PDF, fixtures e privacidade GREEN');
 
 async function sourceFiles(directoryUrl) {
   const directory = directoryUrl.pathname;

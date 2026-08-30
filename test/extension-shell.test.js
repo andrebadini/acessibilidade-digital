@@ -59,12 +59,12 @@ test('shipped extension has no popup surface or popup-only protocol', async () =
   }
 });
 
-test('panel is an accessible local four-state mount with no legacy URL or persona surface', async () => {
+test('panel is an accessible local four-state mount with no popup or legacy URL surface', async () => {
   const html = await readWorkspaceFile('src/panel/index.html');
   assert.equal((html.match(/<h1\b/gi) ?? []).length, 1);
   assert.match(html, /<main[^>]+id="panel-root"[^>]+tabindex="-1"/iu);
   assert.doesNotMatch(html, /<form\b|<input\b|<textarea\b|audit-url|audit-urls|prefill/iu);
-  assert.doesNotMatch(html, /persona|speechSynthesis|audita-persona-v1/iu);
+  assert.doesNotMatch(html, /speechSynthesis|audita-persona-v1/iu);
   assert.doesNotMatch(html, /<script(?![^>]+src=)/i);
   assert.doesNotMatch(html, /<style\b|\sstyle=/i);
   assert.doesNotMatch(html, /<(?:script|link)[^>]+(?:src|href)="https?:\/\//i);
@@ -86,7 +86,7 @@ test('panel module renders the local lifecycle without a bearer or legacy side-p
   assert.match(view, /Disponível no Marco 3/u);
   assert.doesNotMatch(`${source}\n${view}`, /innerHTML/);
   assert.doesNotMatch(source, /START_AUDIT|START_BATCH|AUDIT_CONTEXT_PREFILL|GET_LAST_AUDIT/u);
-  assert.doesNotMatch(source, /speechSynthesis|audita-persona-v1|data-persona-mode/u);
+  assert.doesNotMatch(source, /speechSynthesis|audita-persona-v1|window\.open|default_popup/u);
   assert.doesNotMatch(`${source}\n${view}`, /sessionCapabilityId/u);
 });
 

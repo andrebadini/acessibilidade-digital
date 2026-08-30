@@ -8,7 +8,7 @@ export const panelBootstrapStorageKey = windowId => `audita:panel-bootstrap:v1:$
 const FACTORY_KEYS = Object.freeze([
   'chromeApi', 'sessionArea', 'readActiveJob', 'readAuditSession', 'loadPanelResultBundle',
   'rehydrateViewOnly', 'revokeViewOnly', 'epochNow', 'setTimer', 'clearTimer',
-  'launchAuthority', 'dispatchPanelIntent',
+  'launchAuthority', 'dispatchPanelIntent', 'authorizeHighlightSession',
 ]);
 const BOOTSTRAP_KEYS = Object.freeze([
   'version', 'kind', 'auditId', 'sessionCapabilityId', 'windowId', 'createdAt', 'expiresAt', 'state',
@@ -21,9 +21,17 @@ const ACTIVE_KEYS = Object.freeze([
   'state', 'commitState', 'expectedTerminalRevision', 'createdAt', 'updatedAt',
 ]);
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
+const OCCURRENCE_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const CAPABILITY = /^[A-Za-z0-9_-]{22}$/u;
 const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
 const START_JOURNAL_KEY = 'audita:start-journal:v1';
+const HIGHLIGHT_INTENT_TYPES = new Set([
+  'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT',
+]);
+const AUTHORIZED_SESSION_KEYS = Object.freeze([
+  'version', 'sessionCapabilityId', 'auditId', 'windowId', 'mode', 'targetBinding',
+  'consumers', 'intents', 'state', 'issuedAt', 'expiresAt',
+]);
 
 function freeze(value) {
   if (value && typeof value === 'object') {
@@ -130,6 +138,51 @@ function intentPacket(value) {
   return freeze({ requestId: record.requestId, envelope: record.envelope });
 }
 
+function highlightStatePacket(value) {
+  const record = exact(value, ['version', 'type', 'auditId', 'occurrenceId', 'state']);
+  const byteLength = record ? capturedUtf8Length(record) : null;
+  if (!record || record.version !== 1 || record.type !== 'HIGHLIGHT_STATE_CHANGED' ||
+    !AUDIT_ID.test(record.auditId ?? '') || byteLength === null || byteLength > 4096) return null;
+  if (record.state === 'active' && OCCURRENCE_ID.test(record.occurrenceId ?? '')) return freeze(record);
+  if (record.state === 'clear' && record.occurrenceId === null) return freeze(record);
+  return null;
+}
+
+function safeStringArray(value, maximum = 16) {
+  try {
+    if (!Array.isArray(value) || value.length > maximum) return null;
+    const copy = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string') return null;
+      copy.push(descriptor.value);
+    }
+    return Reflect.ownKeys(value).length === value.length + 1 ? copy : null;
+  } catch { return null; }
+}
+
+function authorizedHighlightPublication(value, binding, actionAt) {
+  const authorization = exact(value, ['ok', 'session', 'context'], true);
+  const session = authorization && exact(authorization.session, AUTHORIZED_SESSION_KEYS, true);
+  const target = session && exact(session.targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest'], true);
+  const intents = session && exact(session.intents, ['panel', 'review'], true);
+  const panelIntents = intents && exact(intents.panel, ['running', 'result', 'view-only'], true);
+  const resultIntents = panelIntents && safeStringArray(panelIntents.result);
+  const context = authorization && exact(authorization.context, ['issuer', 'windowId', 'tabId', 'contextType', 'documentUrl'], true);
+  const issuer = context && exact(context.issuer, ['type', 'documentId', 'path'], true);
+  return Boolean(authorization?.ok === true && session && target && resultIntents &&
+    session.version === 1 && session.sessionCapabilityId === binding.sessionCapabilityId &&
+    session.auditId === binding.auditId && session.windowId === binding.windowId && session.mode === 'attached' &&
+    session.state === 'result' && safeEpoch(session.issuedAt) && safeEpoch(session.expiresAt) &&
+    session.issuedAt <= actionAt && actionAt < session.expiresAt &&
+    target.kind === 'attached' && target.tabId === binding.admission?.tabId &&
+    typeof target.documentId === 'string' && target.documentId.length >= 1 && target.documentId.length <= 512 &&
+    DIGEST.test(target.urlSessionDigest ?? '') && resultIntents.includes('highlight') &&
+    context.windowId === binding.windowId && context.tabId === null && context.contextType === 'SIDE_PANEL' &&
+    context.documentUrl === binding.sender.url && issuer?.type === 'extension-document' &&
+    issuer.documentId === binding.issuerDocumentId && issuer.path === '/src/panel/index.html');
+}
+
 function packet(state, auditId, sessionCapabilityId, result) {
   return freeze({
     protocol: 'audita-panel', version: 1, type: 'bootstrap-result',
@@ -154,7 +207,8 @@ export function createPanelPortCoordinator(raw) {
     typeof input.revokeViewOnly !== 'function' || typeof input.epochNow !== 'function' ||
     typeof input.setTimer !== 'function' || typeof input.clearTimer !== 'function' ||
     typeof input.launchAuthority?.admitPort !== 'function' || typeof input.launchAuthority.reprove !== 'function' ||
-    typeof input.launchAuthority.revoke !== 'function' || typeof input.dispatchPanelIntent !== 'function') {
+    typeof input.launchAuthority.revoke !== 'function' || typeof input.dispatchPanelIntent !== 'function' ||
+    typeof input.authorizeHighlightSession !== 'function') {
     throw new TypeError('PANEL_PORT_COORDINATOR_INVALID');
   }
 
@@ -547,11 +601,13 @@ export function createPanelPortCoordinator(raw) {
       if (!connected(binding) || !await reprove(binding)) throw new Error('PANEL_CONTEXT_DENIED');
       const parsed = parsePanelPortIntent(request.envelope, binding.windowId);
       if (!parsed.ok) throw new Error('PANEL_INTENT_DENIED');
-      const response = await input.dispatchPanelIntent({
+      const dispatchRequest = {
         envelope: parsed.value,
         sender: binding.admission.syntheticSender,
         launchTabId: binding.admission.tabId,
-      });
+      };
+      if (HIGHLIGHT_INTENT_TYPES.has(parsed.value.type)) dispatchRequest.panelWindowId = binding.windowId;
+      const response = await input.dispatchPanelIntent(dispatchRequest);
       if (!connected(binding) || !await reprove(binding)) throw new Error('PANEL_CONTEXT_DENIED');
       const responseBytes = capturedUtf8Length(response);
       if (responseBytes === null || responseBytes > 4096) throw new Error('PANEL_RESPONSE_DENIED');
@@ -838,8 +894,43 @@ export function createPanelPortCoordinator(raw) {
     })();
   }
 
+  async function publishHighlightState(rawEvent) {
+    const event = highlightStatePacket(rawEvent);
+    if (!event) return Object.freeze({ delivered: 0 });
+    let delivered = 0;
+    const candidates = [...liveByWindow.values()].filter(binding => connected(binding) &&
+      binding.state === 'bound-session' && binding.auditId === event.auditId);
+    for (const binding of candidates) {
+      try {
+        if (!await reprove(binding)) {
+          disconnect(binding);
+          continue;
+        }
+        const actionAt = input.epochNow();
+        if (!safeEpoch(actionAt)) {
+          disconnect(binding);
+          continue;
+        }
+        const authorization = await input.authorizeHighlightSession({
+          sessionCapabilityId: binding.sessionCapabilityId,
+          auditId: binding.auditId,
+          claimedWindowId: binding.windowId,
+          sender: binding.admission.syntheticSender,
+        });
+        if (!authorizedHighlightPublication(authorization, binding, actionAt)) {
+          disconnect(binding);
+          continue;
+        }
+        send(binding, event);
+        delivered += 1;
+      } catch { disconnect(binding); }
+    }
+    return Object.freeze({ delivered });
+  }
+
   return Object.freeze({
     attachPanelPort,
     withWindowLock,
+    publishHighlightState,
   });
 }

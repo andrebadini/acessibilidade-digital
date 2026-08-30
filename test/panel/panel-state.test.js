@@ -68,6 +68,11 @@ test('creates an immutable initial screen with only stable interaction state', (
     filters: { impact: [], wcag: [], abnt: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,
+    persona: {
+      mode: null, readerPaused: false, speechAvailability: 'unavailable', voiceId: '', rate: 1,
+      message: 'Escolha uma simulação para esta página.',
+    },
+    highlight: { state: 'idle', operation: null, occurrenceId: null, bindingStatus: { state: 'unchecked' }, message: null },
     focusId: 'start-attached',
     scrollTop: 0,
     reason: null,
@@ -75,6 +80,75 @@ test('creates an immutable initial screen with only stable interaction state', (
   assert.equal(Object.isFrozen(state), true);
   assert.equal(Object.isFrozen(state.filters.impact), true);
   assert.equal(Object.hasOwn(state, 'sessionCapabilityId'), false);
+});
+
+test('keeps persona simulation and page highlight UI state closed and independent from audit data', () => {
+  const initial = createInitialPanelState();
+  const reader = reducePanelState(initial, { type: 'PERSONA_SELECTED', mode: 'reader' });
+  assert.deepEqual(reader.persona, {
+    mode: 'reader', readerPaused: false, speechAvailability: 'unavailable', voiceId: '', rate: 1,
+    message: 'Leitura simulada ativa. Use os controles para navegar pela legenda.',
+  });
+  const paused = reducePanelState(reader, { type: 'PERSONA_READER_PAUSED' });
+  assert.equal(paused.persona.readerPaused, true);
+  const announced = reducePanelState(paused, {
+    type: 'PERSONA_READER_STATE', playback: 'playing', index: 1, total: 3,
+    caption: 'Enviar formulário, botão', speechAvailability: 'unavailable', voiceId: '', rate: 1,
+  });
+  assert.deepEqual(announced.persona, {
+    mode: 'reader', readerPaused: false, speechAvailability: 'unavailable', voiceId: '', rate: 1,
+    message: 'Leitura 2 de 3: Enviar formulário, botão. A legenda está ativa; ative uma voz local para ouvir.',
+  });
+  const voiced = reducePanelState(announced, {
+    type: 'PERSONA_READER_STATE', playback: 'playing', index: 1, total: 3,
+    caption: 'Enviar formulário, botão', speechAvailability: 'available', voiceId: 'local-a', rate: 1.25,
+  });
+  assert.deepEqual(voiced.persona, {
+    mode: 'reader', readerPaused: false, speechAvailability: 'available', voiceId: 'local-a', rate: 1.25,
+    message: 'Leitura 2 de 3: Enviar formulário, botão. Voz local ativa.',
+  });
+  const failed = reducePanelState(voiced, { type: 'PERSONA_FAILED' });
+  assert.deepEqual(failed.persona, {
+    mode: 'reader', readerPaused: false, speechAvailability: 'available', voiceId: 'local-a', rate: 1.25,
+    message: 'Não foi possível aplicar a simulação nesta página.',
+  });
+  const busy = reducePanelState(paused, { type: 'HIGHLIGHT_BUSY', occurrenceId: 'occ-1' });
+  assert.deepEqual(busy.highlight, {
+    state: 'busy', operation: 'highlight', occurrenceId: 'occ-1', bindingStatus: { state: 'unchecked' },
+    message: 'Destacando na página atual.',
+  });
+  const active = reducePanelState(busy, { type: 'HIGHLIGHT_ACTIVE', occurrenceId: 'occ-1' });
+  assert.equal(active.highlight.state, 'active');
+  assert.equal(active.highlight.occurrenceId, 'occ-1');
+  assert.equal(Object.hasOwn(active, 'sessionCapabilityId'), false);
+  const cleared = reducePanelState({
+    ...active,
+    highlight: { ...active.highlight, bindingStatus: { state: 'available' } },
+  }, { type: 'HIGHLIGHT_CLEARED', focusId: 'live-highlight-action' });
+  assert.deepEqual(cleared.highlight, {
+    state: 'idle', operation: null, occurrenceId: null, bindingStatus: { state: 'unchecked' }, message: 'Destaque removido.',
+  });
+  assert.equal(cleared.focusId, 'live-highlight-action');
+});
+
+test('distinguishes highlight installation from clear while preserving the same stable action focus', () => {
+  const initial = reducePanelState(createInitialPanelState(), {
+    type: 'AUDIT_RESULT', auditId: 'audit-1', result: resultBundle(),
+  });
+  const installing = reducePanelState(initial, {
+    type: 'HIGHLIGHT_BUSY', occurrenceId: 'occ-1', focusId: 'live-highlight-action',
+  });
+  assert.equal(installing.highlight.operation, 'highlight');
+  const active = reducePanelState(installing, {
+    type: 'HIGHLIGHT_ACTIVE', occurrenceId: 'occ-1', focusId: 'live-highlight-action',
+  });
+  assert.equal(active.highlight.operation, null);
+  const clearing = reducePanelState(active, {
+    type: 'HIGHLIGHT_CLEAR_BUSY', focusId: 'live-highlight-action',
+  });
+  assert.equal(clearing.highlight.operation, 'clear');
+  assert.equal(clearing.highlight.occurrenceId, 'occ-1');
+  assert.equal(clearing.focusId, 'live-highlight-action');
 });
 
 test('implements the exact four-screen lifecycle and ignores unknown events', () => {
@@ -100,6 +174,11 @@ test('unknown and invalid events return a detached recursively frozen valid stat
     version: 1, screen: 'result', auditId: 'audit-1',
     filters: { impact: ['critical'], wcag: [], abnt: [] },
     selectedOccurrenceId: 'occ-1', evidenceExpanded: false,
+    persona: {
+      mode: null, readerPaused: false, speechAvailability: 'unavailable', voiceId: '', rate: 1,
+      message: 'Escolha uma simulação para esta página.',
+    },
+    highlight: { state: 'idle', operation: null, occurrenceId: null, bindingStatus: { state: 'unchecked' }, message: null },
     focusId: 'result-summary', scrollTop: 24, reason: null,
   };
   for (const event of [{ type: 'NOT_A_PANEL_EVENT' }, null]) {
@@ -191,6 +270,11 @@ test('port interruption and retry preserve only the last safe audit ID', () => {
     filters: { impact: [], wcag: [], abnt: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,
+    persona: {
+      mode: null, readerPaused: false, speechAvailability: 'unavailable', voiceId: '', rate: 1,
+      message: 'Escolha uma simulação para esta página.',
+    },
+    highlight: { state: 'idle', operation: null, occurrenceId: null, bindingStatus: { state: 'unchecked' }, message: null },
     focusId: 'retry',
     scrollTop: 0,
     reason: 'Painel não preparado. Abra novamente pelo botão da extensão.',

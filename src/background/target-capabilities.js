@@ -26,6 +26,10 @@ const CONSUMERS = deepFreeze([
   { name: 'review', path: REVIEW_SURFACE.path, contextType: REVIEW_SURFACE.contextType },
 ]);
 const INTENTS = deepFreeze({
+  panel: { running: ['cancel'], result: ['open-report', 'highlight'], 'view-only': ['open-report'] },
+  review: { running: [], result: ['export', 'highlight'], 'view-only': ['export'] },
+});
+const LEGACY_INTENTS = deepFreeze({
   panel: { running: ['cancel'], result: ['open-report'], 'view-only': ['open-report'] },
   review: { running: [], result: ['export'], 'view-only': ['export'] },
 });
@@ -698,14 +702,18 @@ function parseIntents(value) {
   if (!intents) return null;
   const panel = readDataRecord(intents.panel, ['running', 'result', 'view-only']);
   const review = readDataRecord(intents.review, ['running', 'result', 'view-only']);
-  if (!panel || !review || !sameDataArray(panel.running, ['cancel']) ||
-    !sameDataArray(panel.result, ['open-report']) || !sameDataArray(panel['view-only'], ['open-report']) ||
-    !sameDataArray(review.running, []) || !sameDataArray(review.result, ['export']) ||
-    !sameDataArray(review['view-only'], ['export'])) return null;
-  return {
-    panel: { running: ['cancel'], result: ['open-report'], 'view-only': ['open-report'] },
-    review: { running: [], result: ['export'], 'view-only': ['export'] },
-  };
+  if (!panel || !review) return null;
+  for (const allowed of [INTENTS, LEGACY_INTENTS]) {
+    if (sameDataArray(panel.running, allowed.panel.running) &&
+      sameDataArray(panel.result, allowed.panel.result) &&
+      sameDataArray(panel['view-only'], allowed.panel['view-only']) &&
+      sameDataArray(review.running, allowed.review.running) &&
+      sameDataArray(review.result, allowed.review.result) &&
+      sameDataArray(review['view-only'], allowed.review['view-only'])) {
+      return structuredClone(allowed);
+    }
+  }
+  return null;
 }
 function validClaimedCorrelation(target, session, input) {
   return target.capabilityId === input.capabilityId && target.kind === 'attached' && target.allowedIntent === 'start-audit' &&

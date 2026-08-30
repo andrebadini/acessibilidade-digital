@@ -4,13 +4,21 @@ const OPAQUE_ID = /^[A-Za-z0-9_-]{20,240}$/u;
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const REVIEW_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const PERSONA_MODES = new Set(['reader', 'achromatopsia', 'motor']);
+const READER_ACTIONS = new Set(['previous', 'repeat', 'pause', 'resume', 'next', 'stop']);
+const AUTONOMOUS_PERSONA_REASONS = new Set(['emergency-stop', 'lifecycle-stop', 'reader-terminal']);
 const REVIEW_ANSWERS = new Set(['conforme', 'não conforme', 'não foi possível determinar']);
 const REVIEW_MODES = new Set(['assisted', 'manual']);
+const HIGHLIGHT_NONCE = /^[A-Za-z0-9_-]{22}$/u;
 const PANEL_PORT_TYPES = new Set([
   'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
   'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
-  'PANEL_SET_PERSONA_MODE', 'PANEL_STOP_PERSONA', 'PANEL_CANCEL_AUDIT',
+  'PANEL_SET_PERSONA_MODE', 'PANEL_READER_STATE', 'PANEL_READER_ACTION',
+  'PANEL_READER_ENABLE_VOICE',
+  'PANEL_STOP_PERSONA', 'PANEL_CANCEL_AUDIT',
   'PANEL_OPEN_REPORT', 'PANEL_REHYDRATE_VIEW',
+]);
+const SHARED_HIGHLIGHT_TYPES = new Set([
+  'GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT',
 ]);
 
 const MESSAGE_SCHEMAS = deepFreeze({
@@ -20,16 +28,26 @@ const MESSAGE_SCHEMAS = deepFreeze({
   PANEL_START_PERSONA: ['type', 'capabilityId', 'mode', 'windowId'],
   PANEL_REHYDRATE_PERSONA: ['type', 'capabilityId', 'windowId'],
   PANEL_SET_PERSONA_MODE: ['type', 'leaseId', 'mode', 'windowId'],
+  PANEL_READER_STATE: ['type', 'leaseId', 'windowId'],
+  PANEL_READER_ACTION: ['type', 'leaseId', 'action', 'windowId'],
+  PANEL_READER_ENABLE_VOICE: ['type', 'leaseId', 'windowId'],
   PANEL_STOP_PERSONA: ['type', 'leaseId', 'windowId'],
   PANEL_CANCEL_AUDIT: ['type', 'sessionCapabilityId', 'auditId', 'windowId'],
   PANEL_OPEN_REPORT: ['type', 'sessionCapabilityId', 'auditId', 'windowId'],
   REPORT_REQUEST_EXPORT: ['type', 'sessionCapabilityId', 'auditId'],
+  REPORT_RETURN_TO_SOURCE: ['type', 'sessionCapabilityId', 'auditId'],
   REPORT_COMMIT_REVIEW_DECISION: [
     'type', 'sessionCapabilityId', 'auditId', 'itemId', 'occurrenceId',
     'answer', 'evaluator', 'decidedAt', 'mode', 'note',
   ],
   REPORT_DELETE_AUDIT: ['type', 'sessionCapabilityId', 'auditId'],
   REPORT_DELETE_ALL_AUDITS: ['type', 'sessionCapabilityId', 'auditId'],
+  GET_HIGHLIGHT_STATE: ['type', 'sessionCapabilityId', 'auditId'],
+  GET_HIGHLIGHT_AVAILABILITY: ['type', 'sessionCapabilityId', 'auditId', 'occurrenceId'],
+  HIGHLIGHT_OCCURRENCE: ['type', 'sessionCapabilityId', 'auditId', 'occurrenceId'],
+  CLEAR_HIGHLIGHT: ['type', 'sessionCapabilityId', 'auditId'],
+  AUDITA_HIGHLIGHT_INVALIDATED: ['type', 'nonce'],
+  AUDITA_PERSONA_AUTONOMOUS_STOP: ['type', 'leaseId', 'reason'],
   PANEL_REHYDRATE_VIEW: ['type', 'auditId', 'windowId'],
   REPORT_CONNECT: ['type', 'auditId'],
   EXPORT_CONNECT: ['type', 'auditId'],
@@ -54,13 +72,16 @@ export function parseWorkerMessage(message) {
 
 export function parsePanelPortIntent(message, windowId) {
   const type = readSafeOwnEnumerableDataType(message);
-  if (!type.found || !PANEL_PORT_TYPES.has(type.value) || !safeChromeId(windowId)) {
+  if (!type.found || (!PANEL_PORT_TYPES.has(type.value) && !SHARED_HIGHLIGHT_TYPES.has(type.value)) || !safeChromeId(windowId)) {
     return failure('INVALID_MESSAGE');
   }
-  const expected = MESSAGE_SCHEMAS[type.value].filter(key => key !== 'windowId');
+  const panelOnly = PANEL_PORT_TYPES.has(type.value);
+  const expected = panelOnly
+    ? MESSAGE_SCHEMAS[type.value].filter(key => key !== 'windowId')
+    : MESSAGE_SCHEMAS[type.value];
   const copy = copyExactDataRecord(message, expected);
   if (!copy) return failure('INVALID_MESSAGE');
-  const parsed = parseWorkerMessage({ ...copy, windowId });
+  const parsed = parseWorkerMessage(panelOnly ? { ...copy, windowId } : copy);
   return parsed.ok ? parsed : failure(parsed.code === 'MESSAGE_TOO_LARGE' ? 'MESSAGE_TOO_LARGE' : 'INVALID_MESSAGE');
 }
 
@@ -90,6 +111,12 @@ function validWorkerEnvelope(value) {
   if (value.type === 'PANEL_SET_PERSONA_MODE') {
     return validOpaqueId(value.leaseId) && PERSONA_MODES.has(value.mode) && safeChromeId(value.windowId);
   }
+  if (['PANEL_READER_STATE', 'PANEL_READER_ENABLE_VOICE'].includes(value.type)) {
+    return validOpaqueId(value.leaseId) && safeChromeId(value.windowId);
+  }
+  if (value.type === 'PANEL_READER_ACTION') {
+    return validOpaqueId(value.leaseId) && READER_ACTIONS.has(value.action) && safeChromeId(value.windowId);
+  }
   if (value.type === 'PANEL_STOP_PERSONA') {
     return validOpaqueId(value.leaseId) && safeChromeId(value.windowId);
   }
@@ -97,8 +124,19 @@ function validWorkerEnvelope(value) {
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) &&
       safeChromeId(value.windowId);
   }
-  if (['REPORT_REQUEST_EXPORT', 'REPORT_DELETE_AUDIT', 'REPORT_DELETE_ALL_AUDITS'].includes(value.type)) {
+  if (['REPORT_REQUEST_EXPORT', 'REPORT_RETURN_TO_SOURCE', 'REPORT_DELETE_AUDIT', 'REPORT_DELETE_ALL_AUDITS'].includes(value.type)) {
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId);
+  }
+  if (['GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE'].includes(value.type)) {
+    return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) && validReviewId(value.occurrenceId);
+  }
+  if (['GET_HIGHLIGHT_STATE', 'CLEAR_HIGHLIGHT'].includes(value.type)) {
+    return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId);
+  }
+  if (value.type === 'AUDITA_HIGHLIGHT_INVALIDATED') return HIGHLIGHT_NONCE.test(value.nonce ?? '');
+  if (value.type === 'AUDITA_PERSONA_AUTONOMOUS_STOP') {
+    return validOpaqueId(value.leaseId) && /^lease-[A-Za-z0-9_-]{22}$/u.test(value.leaseId) &&
+      AUTONOMOUS_PERSONA_REASONS.has(value.reason);
   }
   if (value.type === 'REPORT_COMMIT_REVIEW_DECISION') {
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) &&

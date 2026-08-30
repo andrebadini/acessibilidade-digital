@@ -4,6 +4,9 @@ import { composeAnnouncementMapForProduction as composeAnnouncementMap } from '.
 import { createCdpClient, createChromeDebuggerTransport } from '../browser/cdp-client.js';
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
 import { projectAuditResourceOrigin } from '../core/privacy.js';
+import { canonicalStringify } from '../core/report/canonical-json.js';
+import { parseCssSelectorV1 } from './highlight-locator.js';
+import { runAuditaHighlightCommand } from '../browser/highlight-overlay.js';
 
 export const AUDIT_EXECUTION_INTERNAL = Symbol('audita.audit-execution-internal');
 
@@ -17,6 +20,447 @@ const ObjectGetPrototypeOf = Object.getPrototypeOf;
 const ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const ObjectHasOwn = Object.hasOwn;
 const ReflectOwnKeys = Reflect.ownKeys;
+
+const HIGHLIGHT_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
+const HIGHLIGHT_DOCUMENT_ID = /^[A-Za-z0-9._:-]{1,240}$/u;
+const HIGHLIGHT_NONCE = /^[A-Za-z0-9_-]{22}$/u;
+const HIGHLIGHT_SHA256 = /^[a-f0-9]{64}$/u;
+const MAX_HIGHLIGHT_TARGETS = 5_000;
+const MAX_HIGHLIGHT_SELECTOR_BYTES = 1_000_000;
+
+function exactHighlightRecord(value, expectedKeys) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const prototype = Reflect.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== expectedKeys.length || keys.some(key => typeof key !== 'string') ||
+      expectedKeys.some(key => !keys.includes(key))) return null;
+    const output = Object.create(null);
+    for (const key of expectedKeys) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      output[key] = descriptor.value;
+    }
+    return output;
+  } catch {
+    return null;
+  }
+}
+
+function denseHighlightArray(value, maximum) {
+  try {
+    if (!Array.isArray(value) || Reflect.getPrototypeOf(value) !== Array.prototype) return null;
+    const length = Reflect.getOwnPropertyDescriptor(value, 'length')?.value;
+    if (!Number.isSafeInteger(length) || length < 0 || length > maximum) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== length + 1 || !keys.includes('length')) return null;
+    const output = new Array(length);
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      output[index] = descriptor.value;
+    }
+    return output;
+  } catch {
+    return null;
+  }
+}
+
+function validHighlightChromeId(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function validHighlightId(value) {
+  return typeof value === 'string' && HIGHLIGHT_ID.test(value) &&
+    !['__proto__', 'prototype', 'constructor'].includes(value);
+}
+
+function highlightSelectorRecord(value) {
+  const record = exactHighlightRecord(value, ['syntax', 'value', 'byteLength', 'complexity']);
+  if (!record || record.syntax !== 'CSSSelectorV1') return null;
+  try {
+    const parsed = parseCssSelectorV1(record.value);
+    if (parsed.byteLength !== record.byteLength || parsed.complexity !== record.complexity) return null;
+    return Object.freeze({
+      syntax: 'CSSSelectorV1',
+      value: parsed.value,
+      byteLength: parsed.byteLength,
+      complexity: parsed.complexity,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function highlightSignatureRecord(value) {
+  const record = exactHighlightRecord(value, ['version', 'sha256']);
+  return record?.version === 'StructuralSignatureV1' && typeof record.sha256 === 'string' &&
+    HIGHLIGHT_SHA256.test(record.sha256)
+    ? Object.freeze({ version: 'StructuralSignatureV1', sha256: record.sha256 })
+    : null;
+}
+
+function highlightRectRecord(value) {
+  if (value === null) return null;
+  const record = exactHighlightRecord(value, ['x', 'y', 'width', 'height']);
+  if (!record) return undefined;
+  for (const key of ['x', 'y', 'width', 'height']) {
+    if (!Number.isSafeInteger(record[key]) || Math.abs(record[key]) > 1_000_000 || record[key] % 16 !== 0) {
+      return undefined;
+    }
+  }
+  return record.width >= 0 && record.height >= 0
+    ? Object.freeze({ x: record.x, y: record.y, width: record.width, height: record.height })
+    : undefined;
+}
+
+function highlightCandidateRecord(value) {
+  const record = exactHighlightRecord(value, ['occurrenceId', 'evidenceId', 'backendNodeId', 'selector']);
+  const selector = record && highlightSelectorRecord(record.selector);
+  return record && validHighlightId(record.occurrenceId) && validHighlightId(record.evidenceId) &&
+    Number.isSafeInteger(record.backendNodeId) && record.backendNodeId > 0 && selector
+    ? Object.freeze({
+      occurrenceId: record.occurrenceId,
+      evidenceId: record.evidenceId,
+      backendNodeId: record.backendNodeId,
+      selector,
+    })
+    : null;
+}
+
+function highlightTargetRecord(value) {
+  const record = exactHighlightRecord(value, [
+    'documentId', 'frameId', 'backendNodeId', 'evidenceId', 'selector',
+    'structuralSignature', 'rectBucket',
+  ]);
+  const selector = record && highlightSelectorRecord(record.selector);
+  const structuralSignature = record && highlightSignatureRecord(record.structuralSignature);
+  const rectBucket = record && highlightRectRecord(record.rectBucket);
+  if (!record || typeof record.documentId !== 'string' || !HIGHLIGHT_DOCUMENT_ID.test(record.documentId) ||
+    !validHighlightChromeId(record.frameId) || !Number.isSafeInteger(record.backendNodeId) ||
+    record.backendNodeId <= 0 || !validHighlightId(record.evidenceId) || !selector ||
+    !structuralSignature || rectBucket === undefined) return null;
+  return Object.freeze({
+    documentId: record.documentId,
+    frameId: record.frameId,
+    backendNodeId: record.backendNodeId,
+    evidenceId: record.evidenceId,
+    selector,
+    structuralSignature,
+    rectBucket,
+  });
+}
+
+function highlightProofInput(value) {
+  const record = exactHighlightRecord(value, ['tabId', 'windowId', 'topDocumentId', 'candidates']);
+  const candidates = record && denseHighlightArray(record.candidates, MAX_HIGHLIGHT_TARGETS);
+  if (!record || !validHighlightChromeId(record.tabId) || !validHighlightChromeId(record.windowId) ||
+    typeof record.topDocumentId !== 'string' || !HIGHLIGHT_DOCUMENT_ID.test(record.topDocumentId) ||
+    !candidates || candidates.length < 1) return null;
+  const output = [];
+  const occurrenceIds = new Set();
+  let selectorBytes = 0;
+  for (const candidateValue of candidates) {
+    const candidate = highlightCandidateRecord(candidateValue);
+    if (!candidate || occurrenceIds.has(candidate.occurrenceId)) return null;
+    occurrenceIds.add(candidate.occurrenceId);
+    selectorBytes += candidate.selector.byteLength;
+    if (!Number.isSafeInteger(selectorBytes) || selectorBytes > MAX_HIGHLIGHT_SELECTOR_BYTES) return null;
+    output.push(candidate);
+  }
+  return Object.freeze({
+    tabId: record.tabId,
+    windowId: record.windowId,
+    topDocumentId: record.topDocumentId,
+    candidates: Object.freeze(output),
+  });
+}
+
+function highlightVerifyInput(value) {
+  const record = exactHighlightRecord(value, ['tabId', 'windowId', 'topDocumentId', 'target']);
+  const target = record && highlightTargetRecord(record.target);
+  return record && validHighlightChromeId(record.tabId) && validHighlightChromeId(record.windowId) &&
+    typeof record.topDocumentId === 'string' && HIGHLIGHT_DOCUMENT_ID.test(record.topDocumentId) && target
+    ? Object.freeze({
+      tabId: record.tabId,
+      windowId: record.windowId,
+      topDocumentId: record.topDocumentId,
+      target,
+    })
+    : null;
+}
+
+function highlightCommandInput(value) {
+  const record = exactHighlightRecord(value, ['tabId', 'documentId', 'command']);
+  if (!record || !validHighlightChromeId(record.tabId) || typeof record.documentId !== 'string' ||
+    !HIGHLIGHT_DOCUMENT_ID.test(record.documentId)) return null;
+  let command;
+  const operation = exactHighlightRecord(record.command, ['version', 'op', 'nonce']);
+  if (operation && operation.version === 1 && operation.op === 'clear' &&
+    typeof operation.nonce === 'string' && HIGHLIGHT_NONCE.test(operation.nonce)) {
+    command = Object.freeze({ version: 1, op: 'clear', nonce: operation.nonce });
+  } else {
+    const install = exactHighlightRecord(record.command, [
+      'version', 'op', 'nonce', 'documentId', 'frameId', 'selector',
+      'structuralSignature', 'kind', 'markerNumber',
+    ]);
+    const selector = install && highlightSelectorRecord(install.selector);
+    const structuralSignature = install && highlightSignatureRecord(install.structuralSignature);
+    if (!install || install.version !== 1 || install.op !== 'install' ||
+      typeof install.nonce !== 'string' || !HIGHLIGHT_NONCE.test(install.nonce) ||
+      install.documentId !== record.documentId || !validHighlightChromeId(install.frameId) ||
+      !selector || !structuralSignature || !['failed', 'manual'].includes(install.kind) ||
+      !Number.isSafeInteger(install.markerNumber) || install.markerNumber < 1 || install.markerNumber > 5_000) {
+      return null;
+    }
+    command = Object.freeze({
+      version: 1,
+      op: 'install',
+      nonce: install.nonce,
+      documentId: install.documentId,
+      frameId: install.frameId,
+      selector,
+      structuralSignature,
+      kind: install.kind,
+      markerNumber: install.markerNumber,
+    });
+  }
+  return Object.freeze({ tabId: record.tabId, documentId: record.documentId, command });
+}
+
+async function collectHighlightStructuralProofs(rawCandidates, expectedElement = null) {
+  function safeRecord(value, keys) {
+    try {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+      const prototype = Reflect.getPrototypeOf(value);
+      if (prototype !== Object.prototype && prototype !== null) return null;
+      const ownKeys = Reflect.ownKeys(value);
+      if (ownKeys.length !== keys.length || ownKeys.some(key => typeof key !== 'string') ||
+        keys.some(key => !ownKeys.includes(key))) return null;
+      const output = Object.create(null);
+      for (const key of keys) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+        if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+        output[key] = descriptor.value;
+      }
+      return output;
+    } catch {
+      return null;
+    }
+  }
+
+  const failure = reason => ({ version: 1, entries: [], reason });
+  const tagOf = element => {
+    const raw = element?.tagName;
+    if (typeof raw !== 'string' || raw.length > 63) throw new TypeError();
+    const tag = raw.toLowerCase();
+    if (!/^[a-z][a-z0-9-]{0,62}$/u.test(tag)) throw new TypeError();
+    return tag;
+  };
+  const attribute = (element, name, maximum) => {
+    if (!element || typeof element.getAttribute !== 'function') throw new TypeError();
+    const value = element.getAttribute(name);
+    if (value !== null && (typeof value !== 'string' || value.length > maximum)) throw new TypeError();
+    return value;
+  };
+  const sensitive = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_]?time|api[-_]?key)/iu;
+  const safeToken = value => typeof value === 'string' && value.length >= 1 && value.length <= 23 &&
+    /^-?[_A-Za-z][_A-Za-z0-9-]*$/u.test(value) && !sensitive.test(value) &&
+    !/@|:\/\/|www\./iu.test(value) && !/[0-9]{4}/u.test(value) &&
+    !/[0-9a-f]{8}/iu.test(value) && !/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/iu.test(value);
+  const hexDigest = async value => {
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+    const bytes = new Uint8Array(digest);
+    if (bytes.byteLength !== 32) throw new TypeError();
+    return [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  };
+  const children = parent => {
+    const values = parent?.children;
+    if (!values || typeof values.length !== 'number' || !Number.isSafeInteger(values.length) ||
+      values.length < 1 || values.length > 10_000) throw new TypeError();
+    return Array.from(values);
+  };
+  const ordinal = element => {
+    const tag = tagOf(element);
+    let value = 0;
+    let found = null;
+    for (const sibling of children(element.parentElement ?? element.parentNode)) {
+      if (tagOf(sibling) !== tag) continue;
+      value += 1;
+      if (sibling === element) found = value;
+    }
+    if (!Number.isSafeInteger(found) || found < 1) throw new TypeError();
+    return found;
+  };
+  const computedRole = element => {
+    const tag = tagOf(element);
+    const allowed = new Set([
+      'alert', 'button', 'checkbox', 'dialog', 'heading', 'img', 'link', 'list', 'listitem',
+      'main', 'menu', 'menuitem', 'navigation', 'option', 'radio', 'region', 'search', 'slider',
+      'spinbutton', 'status', 'switch', 'tab', 'tabpanel', 'textbox',
+    ]);
+    const explicit = attribute(element, 'role', 512);
+    if (explicit !== null) {
+      for (const token of explicit.split(/[\t\n\f\r ]+/u)) if (allowed.has(token)) return token;
+    }
+    if ((tag === 'a' || tag === 'area') && attribute(element, 'href', 8_192) !== null) return 'link';
+    if (tag === 'button') return 'button';
+    if (tag === 'input') {
+      const type = (attribute(element, 'type', 128) ?? 'text').toLowerCase();
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (type === 'range') return 'slider';
+      if (type === 'number') return 'spinbutton';
+      if (['button', 'file', 'image', 'reset', 'submit'].includes(type)) return 'button';
+      if (['email', 'password', 'search', 'tel', 'text', 'url'].includes(type)) return 'textbox';
+      if (['color', 'date', 'datetime-local', 'hidden', 'month', 'time', 'week'].includes(type)) return null;
+      return 'textbox';
+    }
+    if (tag === 'textarea') return 'textbox';
+    if (tag === 'img') return 'img';
+    if (tag === 'nav') return 'navigation';
+    if (tag === 'main') return 'main';
+    if (tag === 'ul' || tag === 'ol') return 'list';
+    if (tag === 'li') return 'listitem';
+    if (/^h[1-6]$/u.test(tag)) return 'heading';
+    if (tag === 'dialog') return 'dialog';
+    return null;
+  };
+  const structuralInput = async element => {
+    const ancestry = [];
+    const seen = new Set();
+    let current = element;
+    while (true) {
+      if (!current || seen.has(current) || ancestry.length >= 16) throw new TypeError();
+      seen.add(current);
+      const attributes = [];
+      for (const [name, maximum] of [['role', 512], ['type', 128]]) {
+        const value = attribute(current, name, maximum);
+        if (value !== null && safeToken(value)) attributes.push({ name, valueSha256: await hexDigest(value) });
+      }
+      ancestry.push({ tag: tagOf(current), nthOfType: ordinal(current), attributes });
+      if (current.parentNode === current.ownerDocument) break;
+      current = current.parentElement;
+    }
+    return {
+      version: 'StructuralSignatureInputV1',
+      tag: tagOf(element),
+      computedRole: computedRole(element),
+      ancestry,
+    };
+  };
+
+  try {
+    if (!Array.isArray(rawCandidates) || rawCandidates.length < 1 || rawCandidates.length > 5_000) {
+      return failure('inaccessible');
+    }
+    const entries = [];
+    for (const rawCandidate of rawCandidates) {
+      const candidate = safeRecord(rawCandidate, ['occurrenceId', 'selector']);
+      if (!candidate || typeof candidate.occurrenceId !== 'string' ||
+        typeof candidate.selector !== 'string' || candidate.selector.length < 1 || candidate.selector.length > 2_048) {
+        return failure('inaccessible');
+      }
+      let selected = expectedElement;
+      if (selected !== null) {
+        if (typeof selected.getRootNode !== 'function' || selected.getRootNode() !== selected.ownerDocument) {
+          return failure('shadow-root');
+        }
+      }
+      const scope = selected?.ownerDocument ?? globalThis.document;
+      const matches = scope.querySelectorAll(candidate.selector);
+      if (!matches || matches.length !== 1 || (selected !== null && matches[0] !== selected)) {
+        if (selected !== null) return failure('ambiguous');
+        continue;
+      }
+      selected = matches[0];
+      if (typeof selected.getRootNode !== 'function' || selected.getRootNode() !== scope) {
+        if (expectedElement !== null) return failure('shadow-root');
+        continue;
+      }
+      entries.push({ occurrenceId: candidate.occurrenceId, structuralInput: await structuralInput(selected) });
+    }
+    return { version: 1, entries, reason: null };
+  } catch {
+    return failure('inaccessible');
+  }
+}
+
+function structuralInputRecord(value) {
+  const record = exactHighlightRecord(value, ['version', 'tag', 'computedRole', 'ancestry']);
+  const ancestry = record && denseHighlightArray(record.ancestry, 16);
+  if (!record || record.version !== 'StructuralSignatureInputV1' ||
+    typeof record.tag !== 'string' || !/^[a-z][a-z0-9-]{0,62}$/u.test(record.tag) ||
+    (record.computedRole !== null && (typeof record.computedRole !== 'string' || record.computedRole.length > 32)) ||
+    !ancestry || ancestry.length < 1) return null;
+  const canonicalAncestry = [];
+  for (const rawEntry of ancestry) {
+    const entry = exactHighlightRecord(rawEntry, ['tag', 'nthOfType', 'attributes']);
+    const attributes = entry && denseHighlightArray(entry.attributes, 2);
+    if (!entry || typeof entry.tag !== 'string' || !/^[a-z][a-z0-9-]{0,62}$/u.test(entry.tag) ||
+      !Number.isSafeInteger(entry.nthOfType) || entry.nthOfType < 1 || entry.nthOfType > 10_000 || !attributes) return null;
+    const canonicalAttributes = [];
+    const names = new Set();
+    for (const rawAttribute of attributes) {
+      const attribute = exactHighlightRecord(rawAttribute, ['name', 'valueSha256']);
+      if (!attribute || !['role', 'type'].includes(attribute.name) || names.has(attribute.name) ||
+        typeof attribute.valueSha256 !== 'string' || !HIGHLIGHT_SHA256.test(attribute.valueSha256)) return null;
+      names.add(attribute.name);
+      canonicalAttributes.push(Object.freeze({ name: attribute.name, valueSha256: attribute.valueSha256 }));
+    }
+    canonicalAncestry.push(Object.freeze({
+      tag: entry.tag,
+      nthOfType: entry.nthOfType,
+      attributes: Object.freeze(canonicalAttributes),
+    }));
+  }
+  return Object.freeze({
+    version: 'StructuralSignatureInputV1',
+    tag: record.tag,
+    computedRole: record.computedRole,
+    ancestry: Object.freeze(canonicalAncestry),
+  });
+}
+
+function structuralProofResult(value) {
+  const record = exactHighlightRecord(value, ['version', 'entries', 'reason']);
+  const entries = record && denseHighlightArray(record.entries, MAX_HIGHLIGHT_TARGETS);
+  if (!record || record.version !== 1 || !entries ||
+    (record.reason !== null && !['ambiguous', 'inaccessible', 'shadow-root'].includes(record.reason))) return null;
+  const canonicalEntries = [];
+  const occurrenceIds = new Set();
+  for (const rawEntry of entries) {
+    const entry = exactHighlightRecord(rawEntry, ['occurrenceId', 'structuralInput']);
+    const structuralInput = entry && structuralInputRecord(entry.structuralInput);
+    if (!entry || !validHighlightId(entry.occurrenceId) || occurrenceIds.has(entry.occurrenceId) || !structuralInput) return null;
+    occurrenceIds.add(entry.occurrenceId);
+    canonicalEntries.push(Object.freeze({ occurrenceId: entry.occurrenceId, structuralInput }));
+  }
+  return Object.freeze({ version: 1, entries: Object.freeze(canonicalEntries), reason: record.reason });
+}
+
+async function structuralSignatureForProof(documentId, frameId, input) {
+  const value = {
+    version: 'StructuralSignatureInputV1',
+    documentId,
+    frameId,
+    tag: input.tag,
+    computedRole: input.computedRole,
+    ancestry: input.ancestry,
+  };
+  const digest = await globalThis.crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(canonicalStringify(value)),
+  );
+  const bytes = new Uint8Array(digest);
+  if (bytes.byteLength !== 32) throw new TypeError('HIGHLIGHT_PROOF_FAILED');
+  return [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function frozenHighlightFailure(reason) {
+  return Object.freeze({ ok: false, reason });
+}
 
 function compositionDenied() {
   return new PrimordialTypeError('AUDIT_ADAPTER_COMPOSITION_DENIED');
@@ -335,6 +779,180 @@ export function createChromeAdapter(chromeApi, options = {}) {
     };
   };
 
+  const probeHighlightTopDocument = async ({ tabId, windowId, topDocumentId }) => {
+    try {
+      const before = await invoke(chromeApi, chromeApi.tabs, 'get', tabId);
+      const rawUrl = before?.url;
+      if (before?.id !== tabId || before.windowId !== windowId || before.status !== 'complete' ||
+        before.discarded !== false || typeof rawUrl !== 'string') return false;
+      const parsed = new URL(rawUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.href !== rawUrl) return false;
+      const results = denseHighlightArray(await executeScript({
+        target: { tabId, frameIds: [0] },
+        world: 'ISOLATED',
+        func: () => globalThis.location?.href,
+      }), 1);
+      if (!results || results.length !== 1) return false;
+      const result = exactHighlightRecord(results[0], ['frameId', 'documentId', 'result']);
+      if (!result || result.frameId !== 0 || result.documentId !== topDocumentId || result.result !== rawUrl) return false;
+      const after = await invoke(chromeApi, chromeApi.tabs, 'get', tabId);
+      return after?.id === tabId && after.windowId === windowId && after.status === 'complete' &&
+        after.discarded === false && after.url === rawUrl;
+    } catch {
+      return false;
+    }
+  };
+
+  const collectFrameHighlightProofs = async input => {
+    const scriptCandidates = input.candidates.map(candidate => Object.freeze({
+      occurrenceId: candidate.occurrenceId,
+      selector: candidate.selector.value,
+    }));
+    let rawResults;
+    try {
+      rawResults = await executeScript({
+        target: { tabId: input.tabId, allFrames: true },
+        world: 'ISOLATED',
+        func: collectHighlightStructuralProofs,
+        args: [scriptCandidates],
+      });
+    } catch {
+      return { ok: false, reason: 'inaccessible' };
+    }
+    const results = denseHighlightArray(rawResults, 1_000);
+    if (!results) return { ok: false, reason: 'live-proof-failed' };
+    const byOccurrence = new Map();
+    const documents = new Set();
+    for (const rawResult of results) {
+      const result = exactHighlightRecord(rawResult, ['frameId', 'documentId', 'result']);
+      if (!result || !validHighlightChromeId(result.frameId) || typeof result.documentId !== 'string' ||
+        !HIGHLIGHT_DOCUMENT_ID.test(result.documentId)) return { ok: false, reason: 'live-proof-failed' };
+      const documentKey = `${result.frameId}\u0000${result.documentId}`;
+      if (documents.has(documentKey)) return { ok: false, reason: 'live-proof-failed' };
+      documents.add(documentKey);
+      const proof = structuralProofResult(result.result);
+      if (!proof) return { ok: false, reason: 'live-proof-failed' };
+      for (const entry of proof.entries) {
+        const matches = byOccurrence.get(entry.occurrenceId) ?? [];
+        matches.push(Object.freeze({
+          documentId: result.documentId,
+          frameId: result.frameId,
+          structuralInput: entry.structuralInput,
+        }));
+        byOccurrence.set(entry.occurrenceId, matches);
+      }
+    }
+    return { ok: true, byOccurrence };
+  };
+
+  const proveResolvedHighlightCandidate = async (cdp, candidate) => {
+    let objectId = null;
+    try {
+      const resolved = await cdp.command('DOM.resolveNode', {
+        backendNodeId: candidate.backendNodeId,
+        objectGroup: 'audita-mt-highlight-proof',
+      });
+      objectId = resolved?.object?.objectId;
+      if (typeof objectId !== 'string' || !objectId) return { ok: false, reason: 'inaccessible' };
+      const functionDeclaration = `function(candidate){return (${collectHighlightStructuralProofs.toString()})([candidate],this);}`;
+      const called = await cdp.command('Runtime.callFunctionOn', {
+        objectId,
+        functionDeclaration,
+        arguments: [{ value: { occurrenceId: candidate.occurrenceId, selector: candidate.selector.value } }],
+        awaitPromise: true,
+        returnByValue: true,
+        objectGroup: 'audita-mt-highlight-proof',
+      });
+      if (called?.exceptionDetails !== undefined) return { ok: false, reason: 'inaccessible' };
+      const proof = structuralProofResult(called?.result?.value);
+      if (!proof) return { ok: false, reason: 'live-proof-failed' };
+      if (proof.reason !== null) return { ok: false, reason: proof.reason };
+      if (proof.entries.length !== 1 || proof.entries[0].occurrenceId !== candidate.occurrenceId) {
+        return { ok: false, reason: 'ambiguous' };
+      }
+      return { ok: true, structuralInput: proof.entries[0].structuralInput };
+    } catch {
+      return { ok: false, reason: 'inaccessible' };
+    } finally {
+      if (objectId !== null) {
+        try { await cdp.command('Runtime.releaseObject', { objectId }); } catch { /* detached below */ }
+      }
+    }
+  };
+
+  const proveHighlightTargetsCore = async input => {
+    if (!await probeHighlightTopDocument(input)) {
+      return { ok: false, reason: 'document-changed', proofs: [], failures: new Map() };
+    }
+    const cdp = createCdpClient(transport);
+    let connected = false;
+    let frameProofs;
+    const resolvedByOccurrence = new Map();
+    let globalReason = null;
+    try {
+      await cdp.connect(input.tabId);
+      connected = true;
+      frameProofs = await collectFrameHighlightProofs(input);
+      if (!frameProofs.ok) globalReason = frameProofs.reason;
+      if (globalReason === null) {
+        for (const candidate of input.candidates) {
+          resolvedByOccurrence.set(
+            candidate.occurrenceId,
+            await proveResolvedHighlightCandidate(cdp, candidate),
+          );
+        }
+      }
+    } catch {
+      globalReason = 'inaccessible';
+    } finally {
+      if (connected) {
+        try { await cdp.disconnect(); } catch { globalReason = 'inaccessible'; }
+      }
+    }
+    if (!await probeHighlightTopDocument(input)) globalReason = 'document-changed';
+    if (globalReason !== null) {
+      return { ok: false, reason: globalReason, proofs: [], failures: new Map() };
+    }
+
+    const proofs = [];
+    const failures = new Map();
+    for (const candidate of input.candidates) {
+      const resolved = resolvedByOccurrence.get(candidate.occurrenceId);
+      if (!resolved?.ok) {
+        failures.set(candidate.occurrenceId, resolved?.reason ?? 'live-proof-failed');
+        continue;
+      }
+      const frames = frameProofs.byOccurrence.get(candidate.occurrenceId) ?? [];
+      if (frames.length !== 1) {
+        failures.set(candidate.occurrenceId, 'ambiguous');
+        continue;
+      }
+      const frame = frames[0];
+      if (canonicalStringify(frame.structuralInput) !== canonicalStringify(resolved.structuralInput)) {
+        failures.set(candidate.occurrenceId, 'live-proof-failed');
+        continue;
+      }
+      let sha256;
+      try {
+        sha256 = await structuralSignatureForProof(frame.documentId, frame.frameId, frame.structuralInput);
+      } catch {
+        failures.set(candidate.occurrenceId, 'live-proof-failed');
+        continue;
+      }
+      proofs.push(Object.freeze({
+        occurrenceId: candidate.occurrenceId,
+        evidenceId: candidate.evidenceId,
+        documentId: frame.documentId,
+        frameId: frame.frameId,
+        backendNodeId: candidate.backendNodeId,
+        selector: candidate.selector,
+        structuralSignature: Object.freeze({ version: 'StructuralSignatureV1', sha256 }),
+        rectBucket: null,
+      }));
+    }
+    return { ok: true, proofs: Object.freeze(proofs), failures };
+  };
+
   const adapter = {
     createTab(options) { return invoke(chromeApi, chromeApi.tabs, 'create', options); },
     navigateTab(tabId, url) { return invoke(chromeApi, chromeApi.tabs, 'update', tabId, { url }); },
@@ -482,6 +1100,81 @@ export function createChromeAdapter(chromeApi, options = {}) {
       return { chromeVersion: String(version?.product || ''), viewport: { width: value.width, height: value.height, deviceScaleFactor: value.deviceScaleFactor } };
     },
     async getFinalUrl(tabId) { return (await invoke(chromeApi, chromeApi.tabs, 'get', tabId))?.url || ''; },
+    async proveHighlightTargets(rawInput) {
+      const input = highlightProofInput(rawInput);
+      if (!input) return Object.freeze([]);
+      const result = await proveHighlightTargetsCore(input);
+      return result.ok ? result.proofs : Object.freeze([]);
+    },
+    async verifyHighlightTarget(rawInput) {
+      const input = highlightVerifyInput(rawInput);
+      if (!input) return frozenHighlightFailure('live-proof-failed');
+      const candidate = Object.freeze({
+        occurrenceId: 'verify-target',
+        evidenceId: input.target.evidenceId,
+        backendNodeId: input.target.backendNodeId,
+        selector: input.target.selector,
+      });
+      const proofInput = Object.freeze({
+        tabId: input.tabId,
+        windowId: input.windowId,
+        topDocumentId: input.topDocumentId,
+        candidates: Object.freeze([candidate]),
+      });
+      const result = await proveHighlightTargetsCore(proofInput);
+      if (!result.ok) return frozenHighlightFailure(result.reason);
+      if (result.proofs.length !== 1) {
+        return frozenHighlightFailure(result.failures.get(candidate.occurrenceId) ?? 'live-proof-failed');
+      }
+      const [proof] = result.proofs;
+      if (proof.documentId !== input.target.documentId) return frozenHighlightFailure('document-changed');
+      if (proof.frameId !== input.target.frameId || proof.backendNodeId !== input.target.backendNodeId ||
+        proof.structuralSignature.sha256 !== input.target.structuralSignature.sha256) {
+        return frozenHighlightFailure('live-proof-failed');
+      }
+      return Object.freeze({
+        ok: true,
+        topDocumentId: input.topDocumentId,
+        documentId: proof.documentId,
+        frameId: proof.frameId,
+      });
+    },
+    async injectHighlight(rawInput) {
+      const input = highlightCommandInput(rawInput);
+      if (!input) return frozenHighlightFailure('invalid-input');
+      let results;
+      try {
+        results = denseHighlightArray(await executeScript({
+          target: { tabId: input.tabId, documentIds: [input.documentId] },
+          world: 'ISOLATED',
+          func: runAuditaHighlightCommand,
+          args: [input.command],
+        }), 1);
+      } catch {
+        return frozenHighlightFailure('execution-failed');
+      }
+      if (!results || results.length !== 1) return frozenHighlightFailure('result-mismatch');
+      const wrapper = exactHighlightRecord(results[0], ['documentId', 'frameId', 'result']);
+      if (!wrapper || wrapper.documentId !== input.documentId || !validHighlightChromeId(wrapper.frameId) ||
+        (input.command.op === 'install' && wrapper.frameId !== input.command.frameId)) {
+        return frozenHighlightFailure('result-mismatch');
+      }
+      const success = exactHighlightRecord(wrapper.result, ['ok', 'nonce']);
+      if (success?.ok === true && success.nonce === input.command.nonce) {
+        return Object.freeze({
+          ok: true,
+          nonce: success.nonce,
+          documentId: wrapper.documentId,
+          frameId: wrapper.frameId,
+        });
+      }
+      const failure = exactHighlightRecord(wrapper.result, ['ok', 'reason']);
+      if (failure?.ok === false && [
+        'invalid-command', 'target-not-unique', 'signature-mismatch', 'target-not-rendered',
+        'nonce-mismatch', 'runtime-error',
+      ].includes(failure.reason)) return frozenHighlightFailure(failure.reason);
+      return frozenHighlightFailure('result-mismatch');
+    },
     async emitProgress(message) { await invoke(chromeApi, chromeApi.runtime, 'sendMessage', message); },
     async handoffReport(model) {
       return {

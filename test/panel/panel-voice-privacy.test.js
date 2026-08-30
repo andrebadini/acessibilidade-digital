@@ -106,10 +106,12 @@ async function resultBundle(auditId) {
 test('panel runtime sends every privileged intent through its admitted Port without claiming a window', async t => {
   const originalDocument = globalThis.document;
   const originalChrome = globalThis.chrome;
+  const originalLocation = globalThis.location;
   const originalSpeech = Object.getOwnPropertyDescriptor(globalThis, 'speechSynthesis');
   t.after(() => {
     if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
     if (originalChrome === undefined) delete globalThis.chrome; else globalThis.chrome = originalChrome;
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation;
     if (originalSpeech === undefined) delete globalThis.speechSynthesis;
     else Object.defineProperty(globalThis, 'speechSynthesis', originalSpeech);
   });
@@ -135,6 +137,7 @@ test('panel runtime sends every privileged intent through its admitted Port with
   const capabilityId = 'C'.repeat(24);
   const chrome = {
     runtime: {
+      id: 'abcdefghijklmnopabcdefghijklmnop',
       connect({ name }) {
         const port = {
           name, posted: [], onMessage: event(), onDisconnect: event(),
@@ -159,6 +162,9 @@ test('panel runtime sends every privileged intent through its admitted Port with
   };
   globalThis.document = document;
   globalThis.chrome = chrome;
+  globalThis.location = {
+    href: `chrome-extension://${chrome.runtime.id}/src/panel/index.html?launch=${'A'.repeat(43)}`,
+  };
 
   await import(`../../src/panel/panel.js?privacy=${Date.now()}`);
   await new Promise(resolve => setImmediate(resolve));
@@ -167,19 +173,42 @@ test('panel runtime sends every privileged intent through its admitted Port with
   assert.equal(chromeTargetReads, 0);
   assert.deepEqual(ports.map(port => port.name), ['audita-panel-v1']);
   assert.deepEqual(ports[0].posted, [{ protocol: 'audita-panel', version: 1, type: 'bootstrap' }]);
-  assert.doesNotMatch(document.root.textContent, /persona|voz|simulação/iu);
-  assert.equal(document.root.querySelector('[data-persona-mode]'), null);
+  assert.match(document.root.textContent, /Simular experiência/iu);
+  assert.equal(document.root.querySelectorAll('[data-persona-mode]').length, 3);
+  assert.doesNotMatch(document.root.textContent, /voz|speechSynthesis/iu);
 
   ports[0].onMessage.emit({
     protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
     auditId: null, sessionCapabilityId: null, result: null,
   });
+  await new Promise(resolve => setImmediate(resolve));
+  const startupPersonaPrepare = ports[0].posted.find(packet =>
+    packet?.envelope?.type === 'PREPARE_PANEL_PERSONA_CAPABILITY');
+  assert.ok(startupPersonaPrepare, 'a reabertura verifica de modo seguro se existe uma persona ativa');
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: startupPersonaPrepare.requestId,
+    response: {
+      ok: true, requestId: startupPersonaPrepare.envelope.requestId,
+      capabilityId: 'R'.repeat(22),
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const startupRehydrate = ports[0].posted.find(packet =>
+    packet?.envelope?.type === 'PANEL_REHYDRATE_PERSONA');
+  assert.deepEqual(startupRehydrate?.envelope, {
+    type: 'PANEL_REHYDRATE_PERSONA', capabilityId: 'R'.repeat(22),
+  });
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: startupRehydrate.requestId,
+    response: { ok: false, code: 'PERSONA_NOT_FOUND' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
   const start = document.root.querySelector('button[data-intent="START_ATTACHED"]');
   assert.ok(start);
   await start.click();
   await new Promise(resolve => setImmediate(resolve));
 
-  const preparePacket = ports[0].posted[1];
+  const preparePacket = ports[0].posted.find(packet => packet?.envelope?.type === 'PREPARE_PANEL_CAPABILITY');
   assert.match(preparePacket.requestId, /^[A-Za-z0-9._:-]{1,160}$/u);
   assert.deepEqual(preparePacket, {
     protocol: 'audita-panel', version: 1, type: 'intent', requestId: preparePacket.requestId,
@@ -192,7 +221,7 @@ test('panel runtime sends every privileged intent through its admitted Port with
   });
   await new Promise(resolve => setImmediate(resolve));
 
-  const startPacket = ports[0].posted[2];
+  const startPacket = ports[0].posted.find(packet => packet?.envelope?.type === 'PANEL_START_ATTACHED_AUDIT');
   assert.match(startPacket.requestId, /^[A-Za-z0-9._:-]{1,160}$/u);
   assert.deepEqual(startPacket, {
     protocol: 'audita-panel', version: 1, type: 'intent', requestId: startPacket.requestId,
@@ -224,7 +253,7 @@ test('panel runtime sends every privileged intent through its admitted Port with
   assert.ok(cancel);
   await cancel.click();
   await new Promise(resolve => setImmediate(resolve));
-  const cancelPacket = ports[0].posted[3];
+  const cancelPacket = ports[0].posted.find(packet => packet?.envelope?.type === 'PANEL_CANCEL_AUDIT');
   assert.deepEqual(cancelPacket, {
     protocol: 'audita-panel', version: 1, type: 'intent', requestId: cancelPacket.requestId,
     envelope: {
@@ -241,6 +270,12 @@ test('panel runtime sends every privileged intent through its admitted Port with
   ports[0].onMessage.emit({
     protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'result',
     auditId: 'audit-panel-1', sessionCapabilityId, result: bundle,
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const highlightStatePacket = ports[0].posted.find(packet => packet?.envelope?.type === 'GET_HIGHLIGHT_STATE');
+  assert.ok(highlightStatePacket, 'a result bootstrap requests the durable highlight state through the admitted Port');
+  assert.deepEqual(highlightStatePacket.envelope, {
+    type: 'GET_HIGHLIGHT_STATE', sessionCapabilityId, auditId: 'audit-panel-1',
   });
   const resultSummary = document.root.querySelector('[data-focus-id="result-summary"]');
   assert.ok(resultSummary);
@@ -259,7 +294,8 @@ test('panel runtime sends every privileged intent through its admitted Port with
   assert.ok(openReport);
   await openReport.click();
   await new Promise(resolve => setImmediate(resolve));
-  const reportPacket = ports[0].posted[4];
+  const reportPacket = ports[0].posted.find(packet => packet?.envelope?.type === 'PANEL_OPEN_REPORT');
+  assert.ok(reportPacket, 'opening the report is sent through the admitted panel Port');
   assert.deepEqual(reportPacket, {
     protocol: 'audita-panel', version: 1, type: 'intent', requestId: reportPacket.requestId,
     envelope: {
@@ -276,7 +312,8 @@ test('panel runtime sends every privileged intent through its admitted Port with
   assert.ok(retry);
   await retry.click();
   await new Promise(resolve => setImmediate(resolve));
-  const retryPacket = ports[0].posted[5];
+  const retryPacket = ports[0].posted.find(packet => packet?.envelope?.type === 'PANEL_REHYDRATE_VIEW');
+  assert.ok(retryPacket, 'retrying the view is sent through the admitted panel Port');
   assert.deepEqual(retryPacket, {
     protocol: 'audita-panel', version: 1, type: 'intent', requestId: retryPacket.requestId,
     envelope: { type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-panel-1' },
@@ -286,6 +323,129 @@ test('panel runtime sends every privileged intent through its admitted Port with
     response: { ok: true, auditId: 'audit-panel-1', state: 'view-only' },
   });
   await new Promise(resolve => setImmediate(resolve));
+
+  const readerButton = document.root.querySelector('button[data-persona-mode="reader"]');
+  assert.ok(readerButton);
+  await readerButton.click();
+  await new Promise(resolve => setImmediate(resolve));
+  const preparePersonaPacket = ports[0].posted.filter(packet =>
+    packet?.envelope?.type === 'PREPARE_PANEL_PERSONA_CAPABILITY').at(-1);
+  assert.ok(preparePersonaPacket, 'persona selection first requests a target-bound capability through the admitted Port');
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: preparePersonaPacket.requestId,
+    response: {
+      ok: true, requestId: preparePersonaPacket.envelope.requestId,
+      capabilityId: 'P'.repeat(22),
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const startPersonaPacket = ports[0].posted.find(packet => packet?.envelope?.type === 'PANEL_START_PERSONA');
+  assert.deepEqual(startPersonaPacket?.envelope, {
+    type: 'PANEL_START_PERSONA', capabilityId: 'P'.repeat(22), mode: 'reader',
+  });
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: startPersonaPacket.requestId,
+    response: {
+      ok: true,
+      lease: { leaseId: `lease-${'L'.repeat(22)}`, activeMode: 'reader', expiresAt: 1_788_001_800_000 },
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const readerStatePacket = ports[0].posted.find(packet => packet?.envelope?.type === 'PANEL_READER_STATE');
+  assert.deepEqual(readerStatePacket?.envelope, {
+    type: 'PANEL_READER_STATE', leaseId: `lease-${'L'.repeat(22)}`,
+  });
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: readerStatePacket.requestId,
+    response: {
+      ok: true,
+      readerState: {
+        version: 1, playback: 'playing', index: 0, total: 2,
+        caption: 'Positivo um, botão', canPrevious: false, canNext: true,
+        speechAvailability: 'unavailable', voiceId: '', rate: 1,
+      },
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(document.root.querySelector('button[data-persona-mode="reader"]')?.getAttribute('aria-pressed'), 'true');
+  assert.match(document.root.textContent, /Leitura 1 de 2: Positivo um, botão/u);
+  const enableVoice = document.root.querySelector('button[data-intent="PERSONA_READER_ENABLE_VOICE"]');
+  assert.ok(enableVoice);
+  await enableVoice.click();
+  await new Promise(resolve => setImmediate(resolve));
+  const enableVoicePacket = ports[0].posted.find(packet =>
+    packet?.envelope?.type === 'PANEL_READER_ENABLE_VOICE');
+  assert.deepEqual(enableVoicePacket?.envelope, {
+    type: 'PANEL_READER_ENABLE_VOICE', leaseId: `lease-${'L'.repeat(22)}`,
+  });
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: enableVoicePacket.requestId,
+    response: {
+      ok: true,
+      readerState: {
+        version: 1, playback: 'playing', index: 0, total: 2,
+        caption: 'Positivo um, botão', canPrevious: false, canNext: true,
+        speechAvailability: 'available', voiceId: 'local-a', rate: 1,
+      },
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(document.root.textContent, /Voz local ativa/u);
+  assert.equal(document.root.querySelector('button[data-intent="PERSONA_READER_ENABLE_VOICE"]'), null);
+
+  const nextReader = document.root.querySelector('button[data-intent="PERSONA_READER_NEXT"]');
+  await nextReader.click();
+  await new Promise(resolve => setImmediate(resolve));
+  const nextPacket = ports[0].posted.find(packet =>
+    packet?.envelope?.type === 'PANEL_READER_ACTION' && packet.envelope.action === 'next');
+  assert.deepEqual(nextPacket?.envelope, {
+    type: 'PANEL_READER_ACTION', leaseId: `lease-${'L'.repeat(22)}`, action: 'next',
+  });
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: nextPacket.requestId,
+    response: {
+      ok: true,
+      readerState: {
+        version: 1, playback: 'playing', index: 1, total: 2,
+        caption: 'Positivo dois, botão', canPrevious: true, canNext: false,
+        speechAvailability: 'available', voiceId: 'local-a', rate: 1,
+      },
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(document.root.textContent, /Leitura 2 de 2: Positivo dois, botão/u);
+
+  const keyboard = document.root.querySelector('button[data-persona-mode="keyboard"]');
+  await keyboard.click();
+  await new Promise(resolve => setImmediate(resolve));
+  const modePacket = ports[0].posted.find(packet =>
+    packet?.envelope?.type === 'PANEL_SET_PERSONA_MODE' && packet.envelope.mode === 'motor');
+  assert.deepEqual(modePacket?.envelope, {
+    type: 'PANEL_SET_PERSONA_MODE', leaseId: `lease-${'L'.repeat(22)}`, mode: 'motor',
+  });
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: modePacket.requestId,
+    response: {
+      ok: true,
+      lease: { leaseId: `lease-${'L'.repeat(22)}`, activeMode: 'motor', expiresAt: 1_788_001_800_001 },
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(document.root.querySelector('button[data-persona-mode="keyboard"]')?.getAttribute('aria-pressed'), 'true');
+
+  const endPersona = document.root.querySelector('button[data-intent="PERSONA_END"]');
+  await endPersona.click();
+  await new Promise(resolve => setImmediate(resolve));
+  const stopPacket = ports[0].posted.find(packet => packet?.envelope?.type === 'PANEL_STOP_PERSONA');
+  assert.deepEqual(stopPacket?.envelope, {
+    type: 'PANEL_STOP_PERSONA', leaseId: `lease-${'L'.repeat(22)}`,
+  });
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: stopPacket.requestId,
+    response: { ok: true, lease: null },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(document.root.querySelectorAll('button[data-persona-mode][aria-pressed="true"]').length, 0);
 
   assert.equal(runtimeMessageCalls, 0);
   assert.equal(currentWindowReads, 0);

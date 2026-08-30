@@ -86,9 +86,10 @@ export function applyAuditaPersonaCommand(command, environment = globalThis) {
       if (basic.version !== 1 || !['probe', 'inspect', 'clear', 'reader-state'].includes(basic.op)) return null;
       return basic;
     }
-    var three = ownDataRecord(value, ['version', 'op', 'mode']);
-    if (three && three.version === 1 && three.op === 'install' &&
-      ['reader', 'achromatopsia', 'motor'].includes(three.mode)) return three;
+    var install = ownDataRecord(value, ['version', 'op', 'mode', 'leaseId']);
+    if (install && install.version === 1 && install.op === 'install' &&
+      ['reader', 'achromatopsia', 'motor'].includes(install.mode) &&
+      /^lease-[A-Za-z0-9_-]{22}$/u.test(install.leaseId || '')) return install;
     var action = ownDataRecord(value, ['version', 'op', 'action']);
     if (action && action.version === 1 && action.op === 'reader-action' &&
       ['previous', 'repeat', 'pause', 'resume', 'next', 'stop'].includes(action.action)) return action;
@@ -236,10 +237,33 @@ export function applyAuditaPersonaCommand(command, environment = globalThis) {
     return ownDataValue(namespace, 'getContentSingleton').call(namespace);
   }
 
+  function createAutonomousEmitter(holder) {
+    var chromeApi = ownDataValue(holder, 'chrome');
+    var runtimeApi = ownDataValue(chromeApi, 'runtime');
+    var sendMessage = ownDataValue(runtimeApi, 'sendMessage');
+    if (typeof sendMessage !== 'function') return function noop() {};
+    return function emitAutonomousShutdown(value) {
+      var event = ownDataRecord(value, ['event', 'leaseId']);
+      if (!event || !['emergency-stop', 'lifecycle-stop', 'reader-terminal'].includes(event.event) ||
+        !/^lease-[A-Za-z0-9_-]{22}$/u.test(event.leaseId || '')) return;
+      try {
+        var pending = sendMessage.call(runtimeApi, {
+          type: 'AUDITA_PERSONA_AUTONOMOUS_STOP',
+          leaseId: event.leaseId,
+          reason: event.event,
+        });
+        if (pending && typeof Promise === 'function') {
+          Promise.resolve(pending).catch(function ignoreDeliveryFailure() {});
+        }
+      } catch (_error) { /* worker restart/revocation is recovered from persisted state */ }
+    };
+  }
+
   function createSingleton(namespace, holder) {
     var candidate = ownDataValue(namespace, 'createContentRuntime').call(namespace, {
       document: safePlatformValue(holder, 'document'),
       window: holder,
+      emitEvent: createAutonomousEmitter(holder),
     });
     return ownDataValue(namespace, 'setContentSingleton').call(namespace, candidate);
   }
@@ -312,7 +336,7 @@ export function applyAuditaPersonaCommand(command, environment = globalThis) {
     if (!initial.ok) return { ok: false, reason: 'runtime-error' };
 
     if (parsed.op === 'install') {
-      ownDataValue(runtime, 'activate').call(runtime, parsed.mode);
+      ownDataValue(runtime, 'activate').call(runtime, parsed.mode, undefined, { leaseId: parsed.leaseId });
       var installed = modeFromRuntime(runtime);
       if (!installed.ok || installed.mode !== parsed.mode ||
         !installBridge(environment, observation.namespace, runtime)) {

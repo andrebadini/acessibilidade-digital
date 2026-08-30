@@ -153,6 +153,30 @@ function fixture(overrides = {}) {
       },
       async revoke() { return { ok: true, revoked: true }; },
     },
+    async authorizeHighlightSession({ sessionCapabilityId, auditId, claimedWindowId, sender }) {
+      const value = sessions.get(sessionCapabilityId);
+      if (!value || value.auditId !== auditId || value.state !== 'result' || value.windowId !== claimedWindowId) {
+        return { ok: false };
+      }
+      return {
+        ok: true,
+        session: {
+          ...value,
+          consumers: [
+            { name: 'panel', path: '/src/panel/index.html', contextType: 'SIDE_PANEL' },
+            { name: 'review', path: '/src/review/index.html', contextType: 'TAB' },
+          ],
+          intents: {
+            panel: { running: ['cancel'], result: ['open-report', 'highlight'], 'view-only': ['open-report'] },
+            review: { running: [], result: ['export', 'highlight'], 'view-only': ['export'] },
+          },
+        },
+        context: {
+          issuer: { type: 'extension-document', documentId: sender.documentId, path: '/src/panel/index.html' },
+          windowId: claimedWindowId, tabId: null, contextType: 'SIDE_PANEL', documentUrl: sender.url,
+        },
+      };
+    },
     async dispatchPanelIntent() { return { ok: false, code: 'FEATURE_UNAVAILABLE' }; },
     ...overrides,
   };
@@ -185,7 +209,7 @@ function tick() { return new Promise(resolve => setImmediate(resolve)); }
 
 test('exports only lock entry and attaches fresh owner-bound mutation scopes', async () => {
   const { coordinator } = fixture();
-  assert.deepEqual(Object.keys(coordinator), ['attachPanelPort', 'withWindowLock']);
+  assert.deepEqual(Object.keys(coordinator), ['attachPanelPort', 'withWindowLock', 'publishHighlightState']);
   assert.equal(Object.isFrozen(coordinator), true);
 
   let retained;
@@ -218,6 +242,110 @@ test('exports only lock entry and attaches fresh owner-bound mutation scopes', a
   await assert.rejects(() => rejectedScope.disconnectSession({
     auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, reasonCode: 'AUDIT_FAILED',
   }), /PANEL_SCOPE_DENIED/u);
+});
+
+test('injects the admitted Port window only into worker dispatch and publishes safe highlight state without disconnecting', async () => {
+  const dispatched = [];
+  const env = fixture({
+    async dispatchPanelIntent(request) {
+      dispatched.push(request);
+      return { ok: true, highlight: { state: 'active', occurrenceId: 'occ-1' } };
+    },
+  });
+  env.setActive(runningActive());
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  connected.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: 'highlight-request-1',
+    envelope: {
+      type: 'HIGHLIGHT_OCCURRENCE', sessionCapabilityId: SESSION,
+      auditId: 'audit-port', occurrenceId: 'occ-1',
+    },
+  });
+  await tick();
+  assert.equal(connected.disconnects, 0);
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0].panelWindowId, 9);
+  assert.equal(dispatched[0].launchTabId, 17);
+  assert.equal(Object.hasOwn(dispatched[0].envelope, 'windowId'), false);
+  assert.equal(dispatched[0].envelope.occurrenceId, 'occ-1');
+
+  env.sessions.set(SESSION, session('result'));
+  env.setActive(null);
+
+  assert.deepEqual(await env.coordinator.publishHighlightState({
+    version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: 'audit-port',
+    occurrenceId: 'occ-1', state: 'active',
+  }), { delivered: 1 });
+  assert.deepEqual(connected.messages.at(-1), {
+    version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: 'audit-port',
+    occurrenceId: 'occ-1', state: 'active',
+  });
+});
+
+test('reauthorizes every highlight publication against an unexpired attached result grant', async () => {
+  const authorizations = [];
+  let grant = 'current';
+  const env = fixture({
+    async authorizeHighlightSession(value) {
+      authorizations.push(value);
+      const intents = grant === 'legacy'
+        ? { panel: { running: ['cancel'], result: ['open-report'], 'view-only': ['open-report'] }, review: { running: [], result: ['export'], 'view-only': ['export'] } }
+        : { panel: { running: ['cancel'], result: ['open-report', 'highlight'], 'view-only': ['open-report'] }, review: { running: [], result: ['export', 'highlight'], 'view-only': ['export'] } };
+      return {
+        ok: true,
+        session: {
+          version: 1, sessionCapabilityId: SESSION, auditId: 'audit-port', windowId: 9, mode: 'attached',
+          targetBinding: grant === 'view-only'
+            ? { kind: 'view-only' }
+            : { kind: 'attached', tabId: 17, documentId: 'page-document', urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}` },
+          consumers: [
+            { name: 'panel', path: '/src/panel/index.html', contextType: 'SIDE_PANEL' },
+            { name: 'review', path: '/src/review/index.html', contextType: 'TAB' },
+          ],
+          intents, state: grant === 'view-only' ? 'view-only' : 'result',
+          issuedAt: EPOCH, expiresAt: grant === 'expired' ? EPOCH + 1 : EPOCH + 10_000,
+        },
+        context: {
+          issuer: { type: 'extension-document', documentId: 'panel-document', path: '/src/panel/index.html' },
+          windowId: 9, tabId: null, contextType: 'SIDE_PANEL', documentUrl: PANEL_URL,
+        },
+      };
+    },
+  });
+  env.setActive(runningActive());
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  env.sessions.set(SESSION, session('result'));
+  env.setActive(null);
+
+  const event = {
+    version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: 'audit-port', occurrenceId: null, state: 'clear',
+  };
+  assert.deepEqual(await env.coordinator.publishHighlightState(event), { delivered: 1 });
+  assert.deepEqual(authorizations, [{
+    sessionCapabilityId: SESSION, auditId: 'audit-port', claimedWindowId: 9,
+    sender: {
+      id: RUNTIME_ID, url: PANEL_URL, origin: `chrome-extension://${RUNTIME_ID}`,
+      documentId: 'panel-document',
+    },
+  }]);
+
+  grant = 'legacy';
+  assert.deepEqual(await env.coordinator.publishHighlightState(event), { delivered: 0 });
+  assert.equal(connected.disconnects, 1);
 });
 
 test('keeps scoped mutation authority across awaits and serializes independent lock requests', async () => {

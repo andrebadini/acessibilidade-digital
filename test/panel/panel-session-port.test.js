@@ -52,6 +52,7 @@ function createClient(env, overrides = {}) {
     chromeApi: env.chromeApi,
     onBootstrapResult() {},
     onStatus() {},
+    onHighlightState() {},
     createRequestId: env.createRequestId,
     setTimer: env.setTimer,
     clearTimer: env.clearTimer,
@@ -99,6 +100,26 @@ test('uses one admitted Port for bootstrap and every privileged panel intent', a
   assert.ok(statuses.includes('Painel conectado.'));
 });
 
+test('accepts correlated highlight state events without treating them as hostile Port traffic', () => {
+  const env = fixture();
+  const events = [];
+  const client = createClient(env, { onHighlightState: value => events.push(value) });
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-port', SESSION_ID);
+  port.onMessage.emit({
+    version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: 'audit-port', occurrenceId: 'occ-1', state: 'active',
+  });
+  port.onMessage.emit({
+    version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: 'audit-port', occurrenceId: null, state: 'clear',
+  });
+  assert.deepEqual(events, [
+    { auditId: 'audit-port', occurrenceId: 'occ-1', state: 'active' },
+    { auditId: 'audit-port', occurrenceId: null, state: 'clear' },
+  ]);
+  assert.equal(port.disconnects, 0);
+});
+
 test('keeps a pending start request correlated when running bootstrap arrives before its result', async () => {
   const env = fixture();
   const observed = [];
@@ -142,6 +163,64 @@ test('adds only the current session correlation to cancel and report intents wit
     requestId: 'port-request-1', response: { ok: true },
   });
   assert.deepEqual(await pending, { ok: true });
+});
+
+test('adds current correlation to occurrence-only highlight intents and never accepts UI target or window data', async () => {
+  const env = fixture();
+  const client = createClient(env);
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-panel-1', SESSION_ID);
+
+  const current = client.requestIntent({ type: 'GET_HIGHLIGHT_STATE' });
+  assert.deepEqual(port.messages.at(-1).envelope, {
+    type: 'GET_HIGHLIGHT_STATE', sessionCapabilityId: SESSION_ID, auditId: 'audit-panel-1',
+  });
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: 'port-request-1',
+    response: { ok: true, highlight: { state: 'clear' } },
+  });
+  assert.deepEqual(await current, { ok: true, highlight: { state: 'clear' } });
+
+  const availability = client.requestIntent({ type: 'GET_HIGHLIGHT_AVAILABILITY', occurrenceId: 'occ-1' });
+  assert.deepEqual(port.messages.at(-1).envelope, {
+    type: 'GET_HIGHLIGHT_AVAILABILITY', sessionCapabilityId: SESSION_ID,
+    auditId: 'audit-panel-1', occurrenceId: 'occ-1',
+  });
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: 'port-request-2',
+    response: { ok: true, bindingStatus: { state: 'available' } },
+  });
+  assert.deepEqual(await availability, { ok: true, bindingStatus: { state: 'available' } });
+
+  const highlight = client.requestIntent({ type: 'HIGHLIGHT_OCCURRENCE', occurrenceId: 'occ-1' });
+  assert.deepEqual(port.messages.at(-1).envelope, {
+    type: 'HIGHLIGHT_OCCURRENCE', sessionCapabilityId: SESSION_ID,
+    auditId: 'audit-panel-1', occurrenceId: 'occ-1',
+  });
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: 'port-request-3',
+    response: { ok: true, highlight: { state: 'active', occurrenceId: 'occ-1' } },
+  });
+  assert.equal((await highlight).ok, true);
+
+  const clear = client.requestIntent({ type: 'CLEAR_HIGHLIGHT' });
+  assert.deepEqual(port.messages.at(-1).envelope, {
+    type: 'CLEAR_HIGHLIGHT', sessionCapabilityId: SESSION_ID, auditId: 'audit-panel-1',
+  });
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: 'port-request-4',
+    response: { ok: true, highlight: { state: 'clear' } },
+  });
+  assert.equal((await clear).ok, true);
+
+  for (const hostile of [
+    { type: 'HIGHLIGHT_OCCURRENCE', occurrenceId: 'occ-1', selector: '#forged' },
+    { type: 'HIGHLIGHT_OCCURRENCE', occurrenceId: 'occ-1', windowId: 9 },
+    { type: 'GET_HIGHLIGHT_STATE', auditId: 'forged' },
+    { type: 'CLEAR_HIGHLIGHT', auditId: 'forged' },
+  ]) assert.deepEqual(await client.requestIntent(hostile), { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  assert.equal(port.disconnects, 0);
 });
 
 test('disconnect and correlation rotation close every pending request and never fall back to messages', async () => {

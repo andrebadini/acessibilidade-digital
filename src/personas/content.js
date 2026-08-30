@@ -104,9 +104,16 @@
     var discoveryMetrics = null;
     var pendingInactiveReason = null;
     var pendingInactiveEvent = null;
+    var activeLeaseId = null;
 
     function dispatchPersonaEvent(event) {
       try { emitEvent(event); } catch (_error) { /* injected observer is optional */ }
+    }
+
+    function correlationLeaseId(value) {
+      var lease = ownDataProperty(value, 'leaseId');
+      return lease.present && typeof lease.value === 'string' &&
+        /^lease-[A-Za-z0-9_-]{22}$/u.test(lease.value) ? lease.value : null;
     }
 
     var ALLOWED_ATTRIBUTES = [
@@ -957,12 +964,19 @@
       lastEscapeAt = 0;
     }
 
-    function activate(mode, preferences) {
+    function activate(mode, preferences, correlation) {
       if (destroyed || !['reader', 'achromatopsia', 'motor'].includes(mode)) return getState();
-      if (activeMode === mode) return getState();
+      var requestedLeaseId = correlationLeaseId(correlation);
+      var replacingLease = activeMode === mode && activeLeaseId && requestedLeaseId &&
+        activeLeaseId !== requestedLeaseId;
+      if (activeMode === mode && !replacingLease) {
+        if (requestedLeaseId) activeLeaseId = requestedLeaseId;
+        return getState();
+      }
       var inactive = transitionToInactive('switch-mode');
       if (!inactive.confirmed) return getState();
       if (!acquireRootOwnership()) return getState();
+      activeLeaseId = requestedLeaseId;
       try {
         var className = `audita-persona-${mode}`;
         if (!addOwnedClass(className)) throw new Error('Colisão de classe da persona.');
@@ -986,8 +1000,10 @@
 
     function finalizeInactiveCleanup() {
       var eventName = pendingInactiveEvent;
+      var leaseId = activeLeaseId;
       reader = null;
       activeMode = null;
+      activeLeaseId = null;
       pendingInactiveReason = null;
       pendingInactiveEvent = null;
       currentReaderElement = null;
@@ -997,7 +1013,9 @@
       removeOwnedClasses();
       releaseRootOwnership();
       readerState = idleReaderState();
-      if (eventName) dispatchPersonaEvent({ event: eventName });
+      if (eventName) dispatchPersonaEvent(leaseId
+        ? { event: eventName, leaseId: leaseId }
+        : { event: eventName });
     }
 
     function transitionToInactive(reason, eventName) {

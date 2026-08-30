@@ -7,7 +7,7 @@ import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { buildPanelSummary } from '../../src/panel/panel-summary.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
-import { buildReportView, renderReportView } from '../../src/review/report-view.js';
+import { buildReportView, renderReportView, updateReportHighlightAction } from '../../src/review/report-view.js';
 import { EXPORT_FORMATS_V1 } from '../../src/export/report-export.js';
 
 class Element {
@@ -25,6 +25,7 @@ class Element {
     if (name.startsWith('data-')) this.dataset[name.slice(5).replace(/-([a-z])/gu, (_all, letter) => letter.toUpperCase())] = String(value);
   }
   getAttribute(name) { return this.attributes.get(name) ?? null; }
+  removeAttribute(name) { this.attributes.delete(name); }
   addEventListener(type, listener) { const values = this.listeners.get(type) ?? []; values.push(listener); this.listeners.set(type, values); }
   click() { for (const listener of this.listeners.get('click') ?? []) listener({ currentTarget: this }); }
   querySelectorAll(selector) {
@@ -398,6 +399,83 @@ test('live report renders decision-first cards, evidence previews and honest evi
   const headings = root.querySelectorAll('h3').map(node => node.textContent);
   for (const label of ['Não conformidades', 'Alertas', 'Revisões humanas pendentes', 'Resultados positivos']) {
     assert.equal(headings.includes(label) || headings.some(value => value.startsWith(`${label}:`)), true);
+  }
+});
+
+test('result report reveals live highlight only after worker approval and emits occurrence correlation only', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const intents = [];
+  const root = renderReportView({
+    view, document: new Document(), onExport() {},
+    onHighlightIntent(value) { intents.push(value); },
+  });
+  const occurrenceId = view.issues.failed[0].occurrences[0].occurrenceId;
+  const control = root.querySelector(`[data-report-highlight-control="${occurrenceId}"]`);
+  const button = control.querySelector('button');
+  assert.equal(button.getAttribute('data-report-highlight'), null);
+  button.click();
+  assert.deepEqual(intents, [{ type: 'GET_HIGHLIGHT_AVAILABILITY', occurrenceId }]);
+
+  assert.equal(updateReportHighlightAction({
+    root, occurrenceId, bindingStatus: { state: 'checking' }, activeOccurrenceId: null,
+  }), true);
+  assert.equal(button.disabled, false, 'checking must keep the focused report action in the tab order');
+  assert.equal(button.getAttribute('aria-disabled'), 'true');
+  button.click();
+  assert.equal(intents.length, 1, 'aria-disabled checking cannot issue a duplicate request');
+
+  assert.equal(updateReportHighlightAction({
+    root, occurrenceId, bindingStatus: { state: 'available' }, activeOccurrenceId: null,
+  }), true);
+  assert.equal(button.getAttribute('aria-disabled'), null);
+  assert.equal(button.getAttribute('data-report-highlight'), 'highlight');
+  button.click();
+  assert.deepEqual(intents.at(-1), { type: 'HIGHLIGHT_OCCURRENCE', occurrenceId });
+
+  assert.equal(updateReportHighlightAction({
+    root, occurrenceId, bindingStatus: { state: 'available' }, activeOccurrenceId: occurrenceId,
+  }), true);
+  assert.equal(button.getAttribute('data-report-highlight'), 'clear');
+  button.click();
+  assert.deepEqual(intents.at(-1), { type: 'CLEAR_HIGHLIGHT' });
+  assert.equal(updateReportHighlightAction({
+    root, occurrenceId,
+    bindingStatus: { state: 'unavailable', reason: 'live-proof-failed' },
+    activeOccurrenceId: occurrenceId,
+  }), true);
+  assert.equal(button.disabled, false, 'an interrupted availability channel cannot hide the active overlay clear action');
+  assert.equal(button.getAttribute('data-report-highlight'), 'clear');
+  assert.equal(JSON.stringify(intents).includes('selector'), false);
+  assert.equal(JSON.stringify(intents).includes('windowId'), false);
+});
+
+test('multiple live occurrences have unique contextual accessible names without exposing live target internals', async () => {
+  const { model, summary } = await fixture({
+    mutateDraft(draft) {
+      const original = draft.occurrences.find(value => value.occurrenceId === 'occ-focus-failed');
+      const duplicate = structuredClone(original);
+      duplicate.occurrenceId = 'occ-focus-failed-2';
+      duplicate.nodeId = 'n-2';
+      duplicate.target.nodeId = 'n-2';
+      duplicate.evidenceIds = ['ev-full'];
+      duplicate.evidenceRefs = ['ev-full'];
+      draft.occurrences.push(duplicate);
+      draft.ruleResults.find(value => value.ruleId === 'focus-visible').targets.push('n-2');
+    },
+  });
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {}, onHighlightIntent() {} });
+  const issue = root.querySelectorAll('[data-report-issue][data-result="failed"]')
+    .find(node => node.querySelectorAll('[data-report-highlight-control]').length === 2);
+  assert.ok(issue, 'the two correlated occurrences remain in one issue card');
+  const controls = issue.querySelectorAll('[data-report-highlight-control]');
+  assert.equal(controls.length, 2);
+  const names = controls.map(control => control.querySelector('button').getAttribute('aria-label'));
+  assert.equal(new Set(names).size, names.length);
+  for (const name of names) {
+    assert.match(name, /Imagem|foco|ocorrência|Página/iu);
+    assert.doesNotMatch(name, /selector|windowId|tabId|documentId/iu);
   }
 });
 

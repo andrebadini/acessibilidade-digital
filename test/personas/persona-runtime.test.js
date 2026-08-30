@@ -10,6 +10,7 @@ const target = Object.freeze({
   documentId: 'document-main',
   urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
 });
+const LEASE = `lease-${'L'.repeat(22)}`;
 
 function createRuntime(options = {}) {
   assert.equal(
@@ -54,7 +55,7 @@ test('install probes the exact document, injects classic files in order, adds lo
     injection(undefined),
     injection({ ok: true, mode: 'reader' }),
   ] });
-  assert.deepEqual(await fixture.runtime.apply({ target, op: 'install', mode: 'reader' }), {
+  assert.deepEqual(await fixture.runtime.apply({ target, op: 'install', mode: 'reader', leaseId: LEASE }), {
     ok: true, documentId: target.documentId, frameId: 0, mode: 'reader',
   });
   assert.equal(fixture.calls.length, 4);
@@ -70,7 +71,7 @@ test('install probes the exact document, injects classic files in order, adds lo
   ]);
   assert.deepEqual(css[1].files, ['src/personas/personas.css']);
   assert.equal(css[1].origin, 'AUTHOR');
-  assert.deepEqual(command[1].args, [{ version: 1, op: 'install', mode: 'reader' }]);
+  assert.deepEqual(command[1].args, [{ version: 1, op: 'install', mode: 'reader', leaseId: LEASE }]);
 });
 
 test('an already-present runtime is reused without reinjecting files', async () => {
@@ -78,7 +79,7 @@ test('an already-present runtime is reused without reinjecting files', async () 
     injection({ ok: true, present: true, mode: 'reader' }),
     injection({ ok: true, mode: 'motor' }),
   ] });
-  assert.equal((await fixture.runtime.apply({ target, op: 'install', mode: 'motor' })).mode, 'motor');
+  assert.equal((await fixture.runtime.apply({ target, op: 'install', mode: 'motor', leaseId: LEASE })).mode, 'motor');
   assert.deepEqual(fixture.calls.map(call => call[0]), ['execute', 'insertCSS', 'execute']);
 });
 
@@ -168,7 +169,7 @@ test('maps bridge-only diagnostics to the closed public runtime reasons', async 
       injection({ ok: true, present: true, mode: null }),
       injection({ ok: false, reason: 'runtime-brand-mismatch' }),
     ] });
-    const input = op === 'install' ? { target, op, mode: 'reader' } : { target, op };
+    const input = op === 'install' ? { target, op, mode: 'reader', leaseId: LEASE } : { target, op };
     assert.deepEqual(await fixture.runtime.apply(input), { ok: false, reason: 'runtime-error' });
   }
 });
@@ -191,7 +192,9 @@ test('validates the closed apply schema without reading target accessors', async
     null,
     { target, op: 'inspect', mode: null },
     { target, op: 'install' },
+    { target, op: 'install', mode: 'reader' },
     { target, op: 'install', mode: 'unknown' },
+    { target, op: 'install', mode: 'reader', leaseId: 'short' },
     { target: { ...target, extra: true }, op: 'inspect' },
     { target: { ...target, tabId: 0 }, op: 'inspect' },
   ];

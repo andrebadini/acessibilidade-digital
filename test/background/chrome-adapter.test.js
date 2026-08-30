@@ -629,3 +629,310 @@ test('keeps selector and frame fallback when duplicate IDs prevent target backen
   assert.deepEqual(result.targetSizes, [{ selector: '#duplicate', frameId: 'main-frame', width: 20, height: 20, exception: 'unknown' }]);
   assert.equal(cdpCalls.some(([method]) => method === 'DOM.describeNode'), false);
 });
+
+const HIGHLIGHT_SIGNATURE = 'd9d995574b8ab6b35d4450e54365fe187f36b1c6561ae4a207522b5634dea7a2';
+
+function highlightSelector() {
+  return {
+    syntax: 'CSSSelectorV1',
+    value: 'button#continue',
+    byteLength: 15,
+    complexity: 2,
+  };
+}
+
+function highlightStructuralInput() {
+  return {
+    version: 'StructuralSignatureInputV1',
+    tag: 'button',
+    computedRole: 'button',
+    ancestry: [
+      { tag: 'button', nthOfType: 1, attributes: [] },
+      { tag: 'body', nthOfType: 1, attributes: [] },
+      { tag: 'html', nthOfType: 1, attributes: [] },
+    ],
+  };
+}
+
+function highlightCandidate() {
+  return {
+    occurrenceId: 'occ-1',
+    evidenceId: 'ev-1',
+    backendNodeId: 91,
+    selector: highlightSelector(),
+  };
+}
+
+function highlightTarget(overrides = {}) {
+  return {
+    documentId: 'doc-child',
+    frameId: 4,
+    backendNodeId: 91,
+    evidenceId: 'ev-1',
+    selector: highlightSelector(),
+    structuralSignature: {
+      version: 'StructuralSignatureV1',
+      sha256: HIGHLIGHT_SIGNATURE,
+    },
+    rectBucket: null,
+    ...overrides,
+  };
+}
+
+function highlightCommand(overrides = {}) {
+  return {
+    version: 1,
+    op: 'install',
+    nonce: 'N'.repeat(22),
+    documentId: 'doc-child',
+    frameId: 4,
+    selector: highlightSelector(),
+    structuralSignature: {
+      version: 'StructuralSignatureV1',
+      sha256: HIGHLIGHT_SIGNATURE,
+    },
+    kind: 'failed',
+    markerNumber: 1,
+    ...overrides,
+  };
+}
+
+function highlightProofChromeFake() {
+  const fake = chromeFake();
+  const url = 'https://example.test/private?token=never-return-this';
+  const state = {
+    topDocuments: ['doc-top', 'doc-top'],
+    proofResult: {
+      version: 1,
+      entries: [{ occurrenceId: 'occ-1', structuralInput: highlightStructuralInput() }],
+      reason: null,
+    },
+  };
+  fake.chromeApi.tabs.get = async id => ({
+    id,
+    windowId: 3,
+    status: 'complete',
+    discarded: false,
+    url,
+  });
+  fake.chromeApi.scripting.executeScript = async options => {
+    fake.calls.push(['script-options', options]);
+    if (options.target.allFrames === true) {
+      const result = structuredClone(state.proofResult);
+      if (result.entries.length === 1) result.entries[0].occurrenceId = options.args[0][0].occurrenceId;
+      return [{ frameId: 4, documentId: 'doc-child', result }];
+    }
+    const documentId = state.topDocuments.shift() ?? 'doc-top';
+    return [{ frameId: 0, documentId, result: url }];
+  };
+  fake.chromeApi.debugger.sendCommand = async (_target, method, params) => {
+    fake.calls.push(['cdp-params', method, params]);
+    if (method === 'DOM.resolveNode') return { object: { objectId: 'remote-node-91' } };
+    if (method === 'Runtime.callFunctionOn') {
+      const value = structuredClone(state.proofResult);
+      if (value.entries.length === 1) value.entries[0].occurrenceId = params.arguments[0].value.occurrenceId;
+      return { result: { value } };
+    }
+    return {};
+  };
+  return { ...fake, state };
+}
+
+test('correlates backend identity with one exact isolated document and returns no private page data', async () => {
+  const fake = highlightProofChromeFake();
+  const adapter = createChromeAdapter(fake.chromeApi);
+
+  const proofs = await adapter.proveHighlightTargets({
+    tabId: 7,
+    windowId: 3,
+    topDocumentId: 'doc-top',
+    candidates: [highlightCandidate()],
+  });
+
+  assert.deepEqual(proofs, [{
+    occurrenceId: 'occ-1',
+    evidenceId: 'ev-1',
+    documentId: 'doc-child',
+    frameId: 4,
+    backendNodeId: 91,
+    selector: highlightSelector(),
+    structuralSignature: {
+      version: 'StructuralSignatureV1',
+      sha256: HIGHLIGHT_SIGNATURE,
+    },
+    rectBucket: null,
+  }]);
+  assert.equal(Object.isFrozen(proofs), true);
+  assert.doesNotMatch(JSON.stringify(proofs), /never-return-this|example\.test/u);
+  assert.deepEqual(fake.calls.filter(call => call[0] === 'attach').length, 1);
+  assert.deepEqual(fake.calls.filter(call => call[0] === 'detach').length, 1);
+  assert.deepEqual(
+    fake.calls.find(call => call[0] === 'cdp-params' && call[1] === 'DOM.resolveNode')?.[2],
+    { backendNodeId: 91, objectGroup: 'audita-mt-highlight-proof' },
+  );
+});
+
+test('fails document-bound verification after same-URL document replacement and still detaches CDP', async () => {
+  const fake = highlightProofChromeFake();
+  fake.state.topDocuments = ['doc-top', 'doc-after-reload'];
+  const adapter = createChromeAdapter(fake.chromeApi);
+
+  const result = await adapter.verifyHighlightTarget({
+    tabId: 7,
+    windowId: 3,
+    topDocumentId: 'doc-top',
+    target: highlightTarget(),
+  });
+
+  assert.deepEqual(result, { ok: false, reason: 'document-changed' });
+  assert.equal(fake.calls.filter(call => call[0] === 'detach').length, 1);
+});
+
+test('accepts a canonical rectangle bucket without treating coordinates as live authority', async () => {
+  const fake = highlightProofChromeFake();
+  const result = await createChromeAdapter(fake.chromeApi).verifyHighlightTarget({
+    tabId: 7,
+    windowId: 3,
+    topDocumentId: 'doc-top',
+    target: highlightTarget({ rectBucket: { x: -16, y: 32, width: 96, height: 32 } }),
+  });
+
+  assert.deepEqual(result, {
+    ok: true,
+    topDocumentId: 'doc-top',
+    documentId: 'doc-child',
+    frameId: 4,
+  });
+  assert.equal(JSON.stringify(result).includes('width'), false);
+});
+
+test('serialized structural proof preserves the locator role map for unknown input types', async () => {
+  const fake = chromeFake();
+  const url = 'https://example.test/form';
+  let browserProof;
+  const document = {
+    children: [],
+    querySelectorAll(selector) { return selector === 'input#field' ? [input] : []; },
+  };
+  const element = (tag, attributes = {}) => ({
+    tagName: tag.toUpperCase(),
+    children: [],
+    parentElement: null,
+    parentNode: null,
+    ownerDocument: document,
+    getAttribute(name) { return Object.hasOwn(attributes, name) ? attributes[name] : null; },
+    getRootNode() { return document; },
+  });
+  const html = element('html');
+  const body = element('body');
+  const input = element('input', { id: 'field', type: 'madeup' });
+  document.children = [html];
+  html.parentNode = document;
+  html.children = [body];
+  body.parentElement = html;
+  body.parentNode = html;
+  body.children = [input];
+  input.parentElement = body;
+  input.parentNode = body;
+  fake.chromeApi.tabs.get = async id => ({ id, windowId: 3, status: 'complete', discarded: false, url });
+  fake.chromeApi.scripting.executeScript = async options => {
+    if (options.target.allFrames === true) {
+      const original = globalThis.document;
+      try {
+        globalThis.document = document;
+        browserProof = await options.func(...options.args);
+      } finally {
+        if (original === undefined) delete globalThis.document;
+        else globalThis.document = original;
+      }
+      return [{ frameId: 0, documentId: 'doc-top', result: browserProof }];
+    }
+    return [{ frameId: 0, documentId: 'doc-top', result: url }];
+  };
+  fake.chromeApi.debugger.sendCommand = async (_target, method) => {
+    if (method === 'DOM.resolveNode') return { object: { objectId: 'remote-input' } };
+    if (method === 'Runtime.callFunctionOn') return { result: { value: structuredClone(browserProof) } };
+    return {};
+  };
+  const selector = { syntax: 'CSSSelectorV1', value: 'input#field', byteLength: 11, complexity: 2 };
+
+  await createChromeAdapter(fake.chromeApi).proveHighlightTargets({
+    tabId: 7,
+    windowId: 3,
+    topDocumentId: 'doc-top',
+    candidates: [{ occurrenceId: 'occ-input', evidenceId: 'ev-input', backendNodeId: 92, selector }],
+  });
+
+  assert.equal(browserProof.entries[0].structuralInput.computedRole, 'textbox');
+});
+
+test('rejects ambiguous or backend-divergent live targets instead of falling back to a selector', async () => {
+  for (const mutation of [
+    fake => { fake.state.proofResult.entries = []; fake.state.proofResult.reason = 'ambiguous'; },
+    fake => { fake.state.proofResult.entries[0].structuralInput.tag = 'a'; },
+  ]) {
+    const fake = highlightProofChromeFake();
+    mutation(fake);
+    const result = await createChromeAdapter(fake.chromeApi).verifyHighlightTarget({
+      tabId: 7,
+      windowId: 3,
+      topDocumentId: 'doc-top',
+      target: highlightTarget(),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(['ambiguous', 'live-proof-failed'].includes(result.reason), true);
+    assert.equal(fake.calls.filter(call => call[0] === 'detach').length, 1);
+  }
+});
+
+test('injects an exact overlay command by documentIds only and correlates document plus frame', async () => {
+  const fake = chromeFake();
+  const scriptCalls = [];
+  fake.chromeApi.scripting.executeScript = async options => {
+    scriptCalls.push(options);
+    return [{
+      documentId: 'doc-child',
+      frameId: 4,
+      result: { ok: true, nonce: 'N'.repeat(22) },
+    }];
+  };
+  const adapter = createChromeAdapter(fake.chromeApi);
+  const command = highlightCommand();
+
+  assert.deepEqual(await adapter.injectHighlight({ tabId: 7, documentId: 'doc-child', command }), {
+    ok: true,
+    nonce: 'N'.repeat(22),
+    documentId: 'doc-child',
+    frameId: 4,
+  });
+  assert.deepEqual(scriptCalls[0].target, { tabId: 7, documentIds: ['doc-child'] });
+  assert.equal(Object.hasOwn(scriptCalls[0].target, 'frameIds'), false);
+  assert.equal(scriptCalls[0].world, 'ISOLATED');
+  assert.deepEqual(scriptCalls[0].args, [command]);
+
+  fake.chromeApi.scripting.executeScript = async () => [{
+    documentId: 'forged-document',
+    frameId: 4,
+    result: { ok: true, nonce: 'N'.repeat(22) },
+  }];
+  assert.deepEqual(await adapter.injectHighlight({ tabId: 7, documentId: 'doc-child', command }), {
+    ok: false,
+    reason: 'result-mismatch',
+  });
+});
+
+test('rejects hostile highlight adapter inputs before invoking Chrome APIs', async () => {
+  const fake = highlightProofChromeFake();
+  const adapter = createChromeAdapter(fake.chromeApi);
+  let getterCalls = 0;
+  const hostile = { tabId: 7, documentId: 'doc-child', command: highlightCommand() };
+  Object.defineProperty(hostile, 'command', {
+    enumerable: true,
+    get() { getterCalls += 1; return highlightCommand(); },
+  });
+  const scriptCallsBefore = fake.calls.filter(call => call[0] === 'script-options').length;
+
+  assert.deepEqual(await adapter.injectHighlight(hostile), { ok: false, reason: 'invalid-input' });
+  assert.equal(getterCalls, 0);
+  assert.equal(fake.calls.filter(call => call[0] === 'script-options').length, scriptCallsBefore);
+});

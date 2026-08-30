@@ -254,6 +254,54 @@ test('a command-observed autonomous stop revokes the stale owner before a fresh 
   ]);
 });
 
+test('an exact autonomous content shutdown revokes its persisted lease and a stale event cannot stop the replacement', async () => {
+  const fixture = coordinatorFixture();
+  const first = await claimActive(fixture, target, 'motor', consumer);
+  assert.equal(first.ok, true);
+  assert.equal(fixture.runtimeCalls[0].leaseId, first.lease.leaseId,
+    'the isolated runtime must receive the same opaque lease persisted by the worker');
+  fixture.runtimeCalls.length = 0;
+  fixture.runtimeModes.set(target.documentId, null);
+
+  assert.deepEqual(await fixture.coordinator.autonomousStop({
+    leaseId: first.lease.leaseId,
+    tabId: target.tabId,
+    windowId: target.windowId,
+    documentId: 'forged-document',
+    reason: 'emergency-stop',
+  }), { ok: false, code: 'PERSONA_NOT_FOUND' });
+  assert.deepEqual(fixture.runtimeCalls, []);
+  assert.equal((await fixture.leaseStore.findOwner(target)).leaseId, first.lease.leaseId);
+
+  assert.deepEqual(await fixture.coordinator.autonomousStop({
+    leaseId: first.lease.leaseId,
+    tabId: target.tabId,
+    windowId: target.windowId,
+    documentId: target.documentId,
+    reason: 'emergency-stop',
+  }), { ok: true, state: 'revoked' });
+  assert.equal(await fixture.leaseStore.findOwner(target), null);
+  assert.deepEqual(fixture.runtimeCalls.map(call => call.op), ['clear']);
+
+  const revoked = (await fixture.leaseStore.snapshot()).leases[first.lease.leaseId];
+  assert.equal(revoked.state, 'revoked');
+  assert.equal(revoked.revokeReason, 'runtime-failure');
+
+  const replacement = await claimActive(fixture, target, 'reader', reopenedConsumer);
+  assert.equal(replacement.ok, true);
+  fixture.runtimeCalls.length = 0;
+  assert.deepEqual(await fixture.coordinator.autonomousStop({
+    leaseId: first.lease.leaseId,
+    tabId: target.tabId,
+    windowId: target.windowId,
+    documentId: target.documentId,
+    reason: 'lifecycle-stop',
+  }), { ok: false, code: 'PERSONA_NOT_FOUND' });
+  assert.deepEqual(fixture.runtimeCalls, []);
+  assert.equal((await fixture.leaseStore.findOwner(target)).leaseId, replacement.lease.leaseId);
+  assert.equal(fixture.runtimeModes.get(target.documentId), 'reader');
+});
+
 test('claim clears and revokes after installation failure', async () => {
   const fixture = coordinatorFixture();
   fixture.runtimeQueue.push({ ok: false, reason: 'runtime-error' });

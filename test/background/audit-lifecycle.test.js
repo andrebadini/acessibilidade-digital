@@ -15,6 +15,12 @@ function event() {
 
 function tick() { return new Promise(resolve => setImmediate(resolve)); }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
 test('registers one stable lifecycle graph and aborts before authority invalidation', async () => {
   const updated = event();
   const removed = event();
@@ -32,6 +38,9 @@ test('registers one stable lifecycle graph and aborts before authority invalidat
     personaCoordinator: {
       async invalidateTab(tabId, reason) { order.push(['persona-tab', tabId, reason]); },
       async invalidateWindow(windowId, reason) { order.push(['persona-window', windowId, reason]); },
+    },
+    highlightController: {
+      async invalidateTab(tabId, reason) { order.push(['highlight-tab', tabId, reason]); },
     },
     chromeAdapter: Object.freeze({}),
   });
@@ -51,14 +60,25 @@ test('registers one stable lifecycle graph and aborts before authority invalidat
   await tick();
   assert.deepEqual(order, [
     ['abort', { tabId: 17, windowId: null, reasonCode: 'TAB_LOADING' }],
+    ['highlight-tab', 17, 'navigation'],
     ['invalidate-tab', 17, 'TAB_LOADING'],
     ['persona-tab', 17, 'navigation'],
+  ]);
+  order.length = 0;
+  updated.emit(17, { discarded: true }, {});
+  await tick();
+  assert.deepEqual(order, [
+    ['abort', { tabId: 17, windowId: null, reasonCode: 'TAB_DISCARDED' }],
+    ['highlight-tab', 17, 'discarded'],
+    ['invalidate-tab', 17, 'TAB_DISCARDED'],
+    ['persona-tab', 17, 'discarded'],
   ]);
   order.length = 0;
   removed.emit(17);
   await tick();
   assert.deepEqual(order, [
     ['abort', { tabId: 17, windowId: null, reasonCode: 'TAB_REMOVED' }],
+    ['highlight-tab', 17, 'tab-removed'],
     ['invalidate-tab', 17, 'TAB_REMOVED'],
     ['persona-tab', 17, 'tab-removed'],
   ]);
@@ -67,6 +87,7 @@ test('registers one stable lifecycle graph and aborts before authority invalidat
   await tick();
   assert.deepEqual(order, [
     ['abort', { tabId: 17, windowId: null, reasonCode: 'TAB_REMOVED' }],
+    ['highlight-tab', 17, 'window-changed'],
     ['invalidate-tab', 17, 'TAB_REMOVED'],
     ['persona-tab', 17, 'window-changed'],
   ]);
@@ -138,10 +159,92 @@ test('isolates every invalidation adapter so all cleanup stages run best-effort'
     authority: { async invalidateForTab() { calls.push('authority'); throw new Error('private authority'); }, async invalidateForWindow() {} },
     reportLaunch: { async handleTabRemoved() { calls.push('report'); throw new Error('private report'); } },
     exportLaunch: { async handleTabRemoved() { calls.push('export'); throw new Error('private export'); } },
+    highlightController: { async invalidateTab() { calls.push('highlight'); throw new Error('private highlight'); } },
   };
   createAuditLifecycle({ chromeApi: { tabs: { onUpdated: updated, onRemoved: removed }, windows: { onRemoved: windows } },
     getReadyRuntime: async () => runtime }).register();
   removed.emit(17);
   await tick();
-  assert.deepEqual(calls, ['abort', 'authority', 'report', 'export']);
+  assert.deepEqual(calls, ['abort', 'highlight', 'authority', 'report', 'export']);
+});
+
+test('serializes overlapping navigation invalidations for the same tab through publication and revocation', async () => {
+  const updated = event(); const removed = event(); const windows = event();
+  const firstHighlight = deferred();
+  const calls = [];
+  let highlightCalls = 0;
+  const runtime = {
+    auditStarter: {
+      async abortAttachedAuditForTarget(value) { calls.push(`abort:${value.reasonCode}`); },
+    },
+    highlightController: {
+      async invalidateTab(_tabId, reason) {
+        highlightCalls += 1;
+        calls.push(`highlight:${reason}:start`);
+        if (highlightCalls === 1) await firstHighlight.promise;
+        calls.push(`highlight:${reason}:published`);
+      },
+    },
+    authority: {
+      async invalidateForTab(_tabId, reason) { calls.push(`authority:${reason}`); },
+      async invalidateForWindow() {},
+    },
+    personaCoordinator: {
+      async invalidateTab(_tabId, reason) { calls.push(`persona:${reason}`); },
+    },
+    reportLaunch: {
+      async handleTabUpdated(_tabId, changeInfo) { calls.push(`report:${changeInfo.status ?? 'url'}`); },
+    },
+    exportLaunch: {
+      async handleTabUpdated(_tabId, changeInfo) { calls.push(`export:${changeInfo.status ?? 'url'}`); },
+    },
+  };
+  createAuditLifecycle({
+    chromeApi: { tabs: { onUpdated: updated, onRemoved: removed }, windows: { onRemoved: windows } },
+    getReadyRuntime: async () => runtime,
+  }).register();
+
+  updated.emit(17, { status: 'loading' }, {});
+  await tick();
+  updated.emit(17, { url: 'https://example.test/after' }, {});
+  await tick();
+  assert.deepEqual(calls, ['abort:TAB_LOADING', 'highlight:navigation:start']);
+
+  firstHighlight.resolve();
+  for (let index = 0; index < 4; index += 1) await tick();
+  assert.deepEqual(calls, [
+    'abort:TAB_LOADING', 'highlight:navigation:start', 'highlight:navigation:published',
+    'authority:TAB_LOADING', 'persona:navigation', 'report:loading', 'export:loading',
+    'abort:TAB_URL_CHANGED', 'highlight:navigation:start', 'highlight:navigation:published',
+    'authority:TAB_URL_CHANGED', 'persona:navigation', 'report:url', 'export:url',
+  ]);
+});
+
+test('rebinds the existing Side Panel once after loading invalidation completes', async () => {
+  const updated = event(); const removed = event(); const windows = event();
+  const calls = [];
+  const runtime = {
+    auditStarter: { async abortAttachedAuditForTarget() { calls.push('abort'); } },
+    highlightController: { async invalidateTab() { calls.push('highlight'); } },
+    authority: {
+      async invalidateForTab() { calls.push('authority'); },
+      async invalidateForWindow() {},
+    },
+  };
+  createAuditLifecycle({
+    chromeApi: { tabs: { onUpdated: updated, onRemoved: removed }, windows: { onRemoved: windows } },
+    getReadyRuntime: async () => runtime,
+    async rebindPanelForNavigation(value) { calls.push(['rebind', value]); return true; },
+  }).register();
+
+  updated.emit(17, { status: 'loading' }, {});
+  for (let index = 0; index < 3; index += 1) await tick();
+  assert.deepEqual(calls, [
+    'abort', 'highlight', 'authority', ['rebind', { tabId: 17 }],
+  ]);
+
+  calls.length = 0;
+  updated.emit(17, { url: 'https://example.test/after' }, {});
+  for (let index = 0; index < 3; index += 1) await tick();
+  assert.deepEqual(calls, ['abort', 'highlight', 'authority']);
 });

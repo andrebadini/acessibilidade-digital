@@ -1,6 +1,6 @@
 const START_METHODS = Object.freeze(['start', 'rehydrate']);
 const COORDINATOR_METHODS = Object.freeze([
-  'setMode', 'stop', 'invalidateTab', 'invalidateWindow', 'recover', 'expireDue',
+  'setMode', 'readerCommand', 'stop', 'invalidateTab', 'invalidateWindow', 'recover', 'expireDue',
 ]);
 
 export function createPersonaController(value = {}) {
@@ -16,6 +16,7 @@ export function createPersonaController(value = {}) {
     start: value => personaStart.start(value),
     rehydrate: value => personaStart.rehydrate(value),
     setMode: value => personaCoordinator.setMode(value),
+    readerCommand: value => personaCoordinator.readerCommand(value),
     stop: value => personaCoordinator.stop(value),
     invalidateTab: (tabId, reason) => personaCoordinator.invalidateTab(tabId, reason),
     invalidateWindow: (windowId, reason) => personaCoordinator.invalidateWindow(windowId, reason),

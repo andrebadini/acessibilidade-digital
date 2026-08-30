@@ -7,11 +7,11 @@ const TOKEN = 'L'.repeat(43);
 
 function fixture() {
   const calls = [];
-  const callbacks = {};
+  const callbacks = { setOptions: [] };
   const chromeApi = {
     runtime: { lastError: null },
     sidePanel: {
-      setOptions(...args) { calls.push(['setOptions', args]); callbacks.setOptions = args[1]; },
+      setOptions(...args) { calls.push(['setOptions', args]); callbacks.setOptions.push(args[1]); },
       open(...args) { calls.push(['open', args]); callbacks.open = args[1]; },
     },
   };
@@ -20,6 +20,7 @@ function fixture() {
   });
   const launchAuthority = {
     issue(value) { calls.push(['issue', value]); return issued; },
+    async rotateForNavigation(value) { calls.push(['rotate', value]); return issued; },
     async whenReady(value) { calls.push(['whenReady', value]); return true; },
     async revoke(value) { calls.push(['revoke', value]); return { ok: true, revoked: true }; },
   };
@@ -31,7 +32,7 @@ function launcher(env) {
   return createPanelLauncher({ chromeApi: env.chromeApi, launchAuthority: env.launchAuthority, logger: env.logger });
 }
 
-test('preserves the gesture with an exact callback-only setOptions then open chain', async () => {
+test('preserves the gesture with one exact tab setOptions callback before open', async () => {
   const env = fixture();
   const panelLauncher = launcher(env);
   let opened = 0;
@@ -39,12 +40,12 @@ test('preserves the gesture with an exact callback-only setOptions then open cha
   assert.equal(panelLauncher.launch({ id: 17, windowId: 9, url: 'https://example.test/' }, () => { opened += 1; }), true);
   assert.deepEqual(env.calls.slice(0, 2), [
     ['issue', { tabId: 17, windowId: 9 }],
-    ['setOptions', [{ tabId: 17, enabled: true, path: env.issued.path }, env.callbacks.setOptions]],
+    ['setOptions', [{ tabId: 17, enabled: true, path: env.issued.path }, env.callbacks.setOptions[0]]],
   ]);
   assert.equal(env.calls[1][1].length, 2);
   assert.equal(env.calls.some(([name]) => name === 'open'), false);
 
-  env.callbacks.setOptions();
+  env.callbacks.setOptions[0]();
   assert.equal(opened, 0);
   assert.deepEqual(env.calls.at(-1), ['open', [{ tabId: 17 }, env.callbacks.open]]);
   assert.equal(env.calls.at(-1)[1].length, 2);
@@ -60,7 +61,7 @@ test('revokes the token on synchronous, setOptions, or open failure without logg
     const panelLauncher = launcher(env);
     panelLauncher.launch({ id: 17, windowId: 9 });
     env.chromeApi.runtime.lastError = { message: `secret ${TOKEN}` };
-    env.callbacks.setOptions();
+    env.callbacks.setOptions[0]();
     await Promise.resolve();
     assert.deepEqual(env.calls.find(([name]) => name === 'revoke')[1], env.issued);
     assert.doesNotMatch(JSON.stringify(env.calls.filter(([name]) => name === 'log')), new RegExp(TOKEN, 'u'));
@@ -71,7 +72,7 @@ test('revokes the token on synchronous, setOptions, or open failure without logg
     const env = fixture();
     const panelLauncher = launcher(env);
     panelLauncher.launch({ id: 17, windowId: 9 });
-    env.callbacks.setOptions();
+    env.callbacks.setOptions[0]();
     env.chromeApi.runtime.lastError = { message: 'denied' };
     env.callbacks.open();
     await Promise.resolve();
@@ -114,7 +115,7 @@ test('opens inside the gesture but never runs the caller callback when durable i
   let opened = 0;
 
   assert.equal(panelLauncher.launch({ id: 17, windowId: 9 }, () => { opened += 1; }), true);
-  env.callbacks.setOptions();
+  env.callbacks.setOptions[0]();
   assert.deepEqual(env.calls.at(-1), ['open', [{ tabId: 17 }, env.callbacks.open]],
     'Chrome open remains directly inside the setOptions callback');
   env.callbacks.open();
@@ -129,4 +130,21 @@ test('opens inside the gesture but never runs the caller callback when durable i
   assert.equal(opened, 0, 'a failed durable reservation cannot start a context-menu audit');
   assert.deepEqual(env.calls.find(([name]) => name === 'revoke')?.[1], env.issued);
   assert.ok(env.calls.some(([name, value]) => name === 'log' && value === 'PANEL_LAUNCH_UNAVAILABLE'));
+});
+
+test('rebinds an already-open panel after navigation without attempting another gesture-gated open', async () => {
+  const env = fixture();
+  const panelLauncher = launcher(env);
+
+  const rebound = panelLauncher.rebindForNavigation({ tabId: 17 });
+  await Promise.resolve();
+  assert.deepEqual(env.calls.slice(0, 2), [
+    ['rotate', { tabId: 17 }],
+    ['setOptions', [{ tabId: 17, enabled: true, path: env.issued.path }, env.callbacks.setOptions[0]]],
+  ]);
+  assert.equal(env.calls.some(([name]) => name === 'open'), false);
+  env.callbacks.setOptions[0]();
+  assert.equal(await rebound, true);
+  assert.equal(env.calls.some(([name]) => name === 'open'), false);
+  assert.deepEqual(env.calls.find(([name]) => name === 'whenReady')[1], env.issued);
 });

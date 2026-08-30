@@ -4,6 +4,7 @@ import { PANEL_UNPREPARED_MESSAGE } from './panel-status.js';
 const PORT_NAME = 'audita-panel-v1';
 const SESSION_ID = /^[A-Za-z0-9_-]{20,240}$/u;
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
+const OCCURRENCE_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const RECONNECT_DELAYS = Object.freeze([250, 500, 1000, 2000, 5000]);
 const REQUEST_TIMEOUT_MS = 5000;
@@ -11,6 +12,7 @@ const BOOTSTRAP_KEYS = Object.freeze([
   'protocol', 'version', 'type', 'state', 'auditId', 'sessionCapabilityId', 'result',
 ]);
 const INTENT_RESULT_KEYS = Object.freeze(['protocol', 'version', 'type', 'requestId', 'response']);
+const HIGHLIGHT_STATE_KEYS = Object.freeze(['version', 'type', 'auditId', 'occurrenceId', 'state']);
 
 function freeze(value, seen = new WeakSet()) {
   if (value && typeof value === 'object' && !seen.has(value)) {
@@ -87,6 +89,15 @@ function parseIntentResult(value) {
   catch { return null; }
 }
 
+function parseHighlightState(value) {
+  const packet = exact(value, HIGHLIGHT_STATE_KEYS);
+  if (!packet || packet.version !== 1 || packet.type !== 'HIGHLIGHT_STATE_CHANGED' ||
+    !AUDIT_ID.test(packet.auditId ?? '')) return null;
+  if (packet.state === 'active' && OCCURRENCE_ID.test(packet.occurrenceId ?? '')) return freeze(packet);
+  if (packet.state === 'clear' && packet.occurrenceId === null) return freeze(packet);
+  return null;
+}
+
 function copyIntent(value) {
   try {
     const copy = copyData(value);
@@ -100,10 +111,12 @@ function localUnavailable() {
 
 export function createPanelSessionPortClient(raw) {
   const input = exact(raw, [
-    'chromeApi', 'onBootstrapResult', 'onStatus', 'createRequestId', 'setTimer', 'clearTimer',
+    'chromeApi', 'onBootstrapResult', 'onStatus', 'onHighlightState',
+    'createRequestId', 'setTimer', 'clearTimer',
   ]);
   if (!input || typeof input.chromeApi?.runtime?.connect !== 'function' ||
     typeof input.onBootstrapResult !== 'function' || typeof input.onStatus !== 'function' ||
+    typeof input.onHighlightState !== 'function' ||
     typeof input.createRequestId !== 'function' || typeof input.setTimer !== 'function' ||
     typeof input.clearTimer !== 'function') throw new TypeError('PANEL_SESSION_CLIENT_INVALID');
 
@@ -122,6 +135,9 @@ export function createPanelSessionPortClient(raw) {
   };
   const notifyBootstrap = value => {
     try { input.onBootstrapResult(value); } catch { /* UI callbacks do not own transport state. */ }
+  };
+  const notifyHighlightState = value => {
+    try { input.onHighlightState(value); } catch { /* UI callbacks do not own transport state. */ }
   };
   const clearCorrelation = () => { ready = false; auditId = null; sessionId = null; };
   const settle = (entry, value) => {
@@ -181,6 +197,19 @@ export function createPanelSessionPortClient(raw) {
       notifyBootstrap(freeze({ state: bootstrap.state, auditId: bootstrap.auditId, result: bootstrap.result }));
       return;
     }
+    const highlightState = parseHighlightState(rawPacket);
+    if (highlightState) {
+      if (!ready || auditId === null || highlightState.auditId !== auditId) {
+        unavailable(port, true);
+        return;
+      }
+      notifyHighlightState(freeze({
+        auditId: highlightState.auditId,
+        occurrenceId: highlightState.occurrenceId,
+        state: highlightState.state,
+      }));
+      return;
+    }
     const result = parseIntentResult(rawPacket);
     if (!result || !pending.has(result.requestId)) {
       unavailable(port, true);
@@ -237,6 +266,20 @@ export function createPanelSessionPortClient(raw) {
     let intent = copyIntent(rawIntent);
     if (!intent) return Promise.resolve(localUnavailable());
     if (['PANEL_CANCEL_AUDIT', 'PANEL_OPEN_REPORT'].includes(intent.type)) {
+      if (Reflect.ownKeys(intent).length !== 1 || auditId === null || sessionId === null) return Promise.resolve(localUnavailable());
+      intent = freeze({ type: intent.type, sessionCapabilityId: sessionId, auditId });
+    }
+    if (['GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE'].includes(intent.type)) {
+      if (Reflect.ownKeys(intent).length !== 2 || typeof intent.occurrenceId !== 'string' ||
+        !OCCURRENCE_ID.test(intent.occurrenceId) || auditId === null || sessionId === null) {
+        return Promise.resolve(localUnavailable());
+      }
+      intent = freeze({
+        type: intent.type, sessionCapabilityId: sessionId, auditId,
+        occurrenceId: intent.occurrenceId,
+      });
+    }
+    if (['GET_HIGHLIGHT_STATE', 'CLEAR_HIGHLIGHT'].includes(intent.type)) {
       if (Reflect.ownKeys(intent).length !== 1 || auditId === null || sessionId === null) return Promise.resolve(localUnavailable());
       intent = freeze({ type: intent.type, sessionCapabilityId: sessionId, auditId });
     }

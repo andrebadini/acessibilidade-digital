@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build:release": "node scripts/build-release.mjs",
-    "test": "node --test",
+    "test": "node scripts/run-tests.mjs",
     "verify": "node scripts/verify-project.mjs"
   },
   "devDependencies": {

@@ -8,14 +8,23 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { AXE_MV3_CSP_GATE, AXE_RUN_CONFIG } from '../../src/browser/axe-adapter.js';
 import { decideAxeE2eExecution } from '../../scripts/axe-e2e-decision.mjs';
+import {
+  CANONICAL_CHROME_PRODUCT,
+  createBoundedBrowserCleanup,
+  resolveRealChromeTestBinary,
+  terminateChromeProcess,
+} from './support/real-chrome.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const fixtures = join(root, 'test', 'e2e', 'fixtures');
-const chromeBinary = process.env.CHROME_BIN;
+const chromeBinary = resolveRealChromeTestBinary();
 const strictCsp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'";
 const debug = message => { if (process.env.AUDITA_E2E_DEBUG === '1') process.stderr.write(`[axe-e2e] ${message}\n`); };
 
 test('runs pinned local axe in every isolated frame under real MV3 and strict page CSP', { timeout: 45_000 }, async t => {
+  let chrome = null;
+  let profile = null;
+  const cdpClients = [];
   const server = createServer(async (request, response) => {
     debug(`fixture request: ${request.url}`);
     const name = request.url === '/axe-csp-frame.html' ? 'axe-csp-frame.html' : 'axe-csp.html';
@@ -24,7 +33,26 @@ test('runs pinned local axe in every isolated frame under real MV3 and strict pa
   });
   await new Promise((resolveListen, rejectListen) => server.listen(0, '127.0.0.1', error => error ? rejectListen(error) : resolveListen()));
   debug('fixture server listening');
-  t.after(() => new Promise(resolveClose => server.close(resolveClose)));
+  const cleanup = createBoundedBrowserCleanup({
+    closeClients() {
+      for (const client of cdpClients.toReversed()) client.close();
+    },
+    terminateChrome() {
+      return chrome === null ? true : terminateChromeProcess(chrome, { timeoutMs: 1_500 });
+    },
+    closeServer() {
+      server.closeAllConnections?.();
+      return new Promise((resolveClose, rejectClose) => server.close(error => error ? rejectClose(error) : resolveClose(true)));
+    },
+    removeProfile() {
+      return profile === null ? true : rm(profile, { recursive: true, force: true });
+    },
+    stageTimeoutMs: 2_000,
+  });
+  t.after(async () => {
+    const result = await cleanup();
+    assert.deepEqual(result, { ok: true, failures: [] }, `cleanup axe limitado falhou: ${JSON.stringify(result.failures)}`);
+  });
   const fixtureUrl = `http://127.0.0.1:${server.address().port}/axe-csp.html`;
   const response = await fetch(fixtureUrl);
   assert.equal(response.headers.get('content-security-policy'), strictCsp);
@@ -37,29 +65,38 @@ test('runs pinned local axe in every isolated frame under real MV3 and strict pa
   }
   assert.equal(decision.action, 'run', decision.code);
 
-  const profile = await mkdtemp(join(tmpdir(), 'audita-axe-chrome-'));
-  const chrome = spawn(chromeBinary, [
-    '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
+  profile = await mkdtemp(join(tmpdir(), 'audita-axe-chrome-'));
+  chrome = spawn(chromeBinary, [
+    '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-proxy-server', '--use-mock-keychain',
+    '--window-position=-10000,-10000', '--window-size=1280,800',
     `--user-data-dir=${profile}`, '--remote-debugging-port=0',
     'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
   let chromeStderr = '';
   chrome.stderr.on('data', chunk => { chromeStderr = `${chromeStderr}${chunk}`.slice(-8_000); });
-  t.after(async () => {
-    if (chrome.exitCode === null) {
-      const exited = new Promise(resolveExit => chrome.once('exit', resolveExit));
-      chrome.kill('SIGKILL');
-      await exited;
-    }
-    await rm(profile, { recursive: true, force: true });
-  });
 
   const port = await waitForDevToolsPort(profile, chrome);
   debug(`DevTools active on ${port}`);
   const version = await fetch(`http://127.0.0.1:${port}/json/version`).then(value => value.json());
+  assert.equal(version.Browser, CANONICAL_CHROME_PRODUCT);
   const cdp = await Cdp.connect(version.webSocketDebuggerUrl);
+  cdpClients.push(cdp);
   debug('browser CDP connected');
-  t.after(() => cdp.close());
+
+  const fixtureCreated = await cdp.command('Target.createTarget', { url: fixtureUrl });
+  let listedFixture;
+  for (let attempt = 0; attempt < 200 && !listedFixture; attempt += 1) {
+    const listedTargets = await fetch(`http://127.0.0.1:${port}/json/list`).then(value => value.json());
+    listedFixture = listedTargets.find(info => info.id === fixtureCreated.targetId && info.url === fixtureUrl && info.webSocketDebuggerUrl);
+    if (!listedFixture) await delay(50);
+  }
+  assert.ok(listedFixture, `fixture real não carregou: ${chromeStderr}`);
+  const fixtureCdp = await Cdp.connect(listedFixture.webSocketDebuggerUrl);
+  cdpClients.push(fixtureCdp);
+  await fixtureCdp.command('Runtime.enable');
+  await fixtureCdp.command('Page.enable');
+  await waitForPageContext(fixtureCdp, { expectedUrl: fixtureUrl, timeoutMs: 10_000 });
+  debug('fixture tab criada pelo CDP e estabilizada');
 
   const loaded = await cdp.command('Extensions.loadUnpacked', { path: root });
   const id = loaded?.id;
@@ -75,7 +112,7 @@ test('runs pinned local axe in every isolated frame under real MV3 and strict pa
   }
   assert.ok(listedExtension, `página real da extensão não carregou: ${chromeStderr}`);
   const extensionCdp = await Cdp.connect(listedExtension.webSocketDebuggerUrl);
-  t.after(() => extensionCdp.close());
+  cdpClients.push(extensionCdp);
   await extensionCdp.command('Runtime.enable');
   await extensionCdp.command('Page.enable');
   const readyContext = await waitForExtensionContext(extensionCdp, {
@@ -89,20 +126,23 @@ test('runs pinned local axe in every isolated frame under real MV3 and strict pa
     extensionId: id,
   });
   debug('real extension panel CDP connected');
+
   const expression = `(() => {
     globalThis.__axeE2eResult = null;
     globalThis.__axeE2eError = null;
     globalThis.__axeE2eTrace = [];
-    globalThis.__axeE2eStage = 'create-fixture-tab';
-    chrome.tabs.create({ url: ${JSON.stringify(fixtureUrl)}, active: false }).then(tab => new Promise((resolveTab, rejectTab) => {
+    globalThis.__axeE2eStage = 'find-fixture-tab';
+    new Promise((resolveTab, rejectTab) => {
       const startedAt = Date.now();
-      const check = () => chrome.tabs.get(tab.id).then(current => {
-        if (current.status === 'complete' && current.url === ${JSON.stringify(fixtureUrl)}) resolveTab(current);
-        else if (Date.now() - startedAt >= 10000) rejectTab(new Error('fixture tab did not complete'));
+      const check = () => chrome.tabs.query({}).then(tabs => {
+        const matches = tabs.filter(tab => tab.status === 'complete' && tab.url === ${JSON.stringify(fixtureUrl)});
+        if (matches.length === 1) resolveTab(matches[0]);
+        else if (matches.length > 1) rejectTab(new Error('fixture tab ambiguous'));
+        else if (Date.now() - startedAt >= 10000) rejectTab(new Error('fixture tab did not correlate'));
         else setTimeout(check, 50);
       }, rejectTab);
       check();
-    })).then(tab => {
+    }).then(tab => {
       globalThis.__axeE2eStage = 'import-adapter';
       return Promise.all([tab, import(chrome.runtime.getURL('src/browser/axe-adapter.js'))]);
     }).then(([tab, adapter]) => {
@@ -173,6 +213,23 @@ async function waitForDevToolsPort(profile, chrome) {
     await delay(50);
   }
   throw new Error('Chrome não publicou DevToolsActivePort.');
+}
+
+async function waitForPageContext(cdp, { expectedUrl, timeoutMs }) {
+  const startedAt = Date.now();
+  let latest = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const observed = await cdp.command('Runtime.evaluate', {
+        expression: `({ href: globalThis.location?.href || '', readyState: globalThis.document?.readyState || '' })`,
+        returnByValue: true,
+      });
+      if (!observed.exceptionDetails) latest = observed.result?.value ?? null;
+    } catch { latest = null; }
+    if (latest?.href === expectedUrl && latest.readyState === 'complete') return latest;
+    await delay(50);
+  }
+  throw new Error(`fixture não estabilizou: ${JSON.stringify(latest)}`);
 }
 
 async function waitForExtensionContext(cdp, { extensionUrl, extensionId, timeoutMs }) {

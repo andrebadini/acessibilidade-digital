@@ -1,3 +1,6 @@
+import { highlightActionForOccurrence } from './highlight-action.js';
+import { decodePngDataUrl } from '../core/evidence/png.js';
+
 const SCREEN_NAMES = Object.freeze(['initial', 'running', 'result', 'unavailable']);
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
 const FILTERS = Object.freeze(['impact', 'wcag', 'abnt']);
@@ -19,6 +22,8 @@ export function buildPanelView({ state, summary = null, detail = null } = {}) {
     filters: copyFilters(state.filters),
     selectedOccurrenceId: typeof state.selectedOccurrenceId === 'string' ? state.selectedOccurrenceId : null,
     evidenceExpanded: state.evidenceExpanded === true,
+    persona: copyPersona(state.persona),
+    highlight: copyHighlight(state.highlight),
     focusId: typeof state.focusId === 'string' ? state.focusId : null,
     scrollTop: Number.isSafeInteger(state.scrollTop) && state.scrollTop >= 0 ? state.scrollTop : 0,
     reason: typeof state.reason === 'string' ? state.reason : null,
@@ -55,6 +60,15 @@ export function renderPanelView({ view, document, onIntent, onEvent = () => {} }
       case 'OPEN_REPORT':
       case 'SELECT_OCCURRENCE':
       case 'CONSULT_EVIDENCE':
+      case 'HIGHLIGHT_OCCURRENCE':
+      case 'CLEAR_HIGHLIGHT':
+      case 'PERSONA_SELECT':
+      case 'PERSONA_READER_PREVIOUS':
+      case 'PERSONA_READER_REPEAT':
+      case 'PERSONA_READER_TOGGLE':
+      case 'PERSONA_READER_NEXT':
+      case 'PERSONA_READER_ENABLE_VOICE':
+      case 'PERSONA_END':
       case 'RETRY':
         onIntent(freezeRenderModel({ ...intent }));
         return;
@@ -64,12 +78,25 @@ export function renderPanelView({ view, document, onIntent, onEvent = () => {} }
   };
 
   switch (view.screen) {
-    case 'initial': return renderInitial(document, emitIntent);
-    case 'running': return renderRunning(document, emitIntent);
-    case 'result': return renderResult(document, view, emitIntent, onEvent);
-    case 'unavailable': return renderUnavailable(document, view, emitIntent);
+    case 'initial': return appendPersonaControls(renderInitial(document, emitIntent), document, view.persona, emitIntent);
+    case 'running': return appendPersonaControls(renderRunning(document, emitIntent), document, view.persona, emitIntent);
+    case 'result': return appendPersonaControls(renderResult(document, view, emitIntent, onEvent), document, view.persona, emitIntent);
+    case 'unavailable': return appendPersonaControls(renderUnavailable(document, view, emitIntent), document, view.persona, emitIntent);
     default: throw new TypeError('PANEL_SCREEN_INVALID');
   }
+}
+
+export function renderPanelReconnectView({ document } = {}) {
+  if (typeof document?.createElement !== 'function') throw new TypeError('PANEL_RECONNECT_INPUT_INVALID');
+  const root = section(document, 'panel-screen panel-reconnecting');
+  root.dataset.screen = 'reconnecting';
+  root.append(
+    paragraph(document, 'Página alterada', 'status-label status-running'),
+    heading(document, 2, 'Reconectando o painel'),
+    paragraph(document, 'A página mudou. O resultado local está sendo recuperado com segurança.', 'supporting-copy'),
+    liveRegion(document, 'Reconectando o painel à página atual.'),
+  );
+  return root;
 }
 
 function renderInitial(document, emit) {
@@ -172,9 +199,19 @@ function renderResult(document, view, emit, onEvent) {
   }
   root.append(groups);
 
+  const activeOccurrenceId = view.highlight.state === 'active' ||
+    (view.highlight.state === 'busy' && view.highlight.operation === 'clear')
+    ? view.highlight.occurrenceId : null;
+  const selectedDetailIsVisible = activeOccurrenceId !== null && result.detail?.occurrenceId === activeOccurrenceId &&
+    GROUPS.some(name => result.groups[name].some(card => card.occurrenceIds.includes(activeOccurrenceId)));
+  if (activeOccurrenceId !== null && !selectedDetailIsVisible) {
+    root.append(renderGlobalHighlightClear(document, view.highlight, emit));
+  }
+
   const footer = section(document, 'result-footer');
   footer.append(actionButton(document, 'Abrir relatório completo', 'OPEN_REPORT', 'open-report', emit, 'secondary-action report-action'));
-  root.append(footer, liveRegion(document, view.evidenceExpanded && result.detail ? result.detail.action.reason : 'Resultado da auditoria carregado.'));
+  root.append(footer, liveRegion(document, view.highlight.message ??
+    (view.evidenceExpanded && result.detail ? result.detail.action.reason : 'Resultado da auditoria carregado.')));
   return root;
 }
 
@@ -255,7 +292,7 @@ function renderGroup(document, name, cards, view, emit, onEvent, detail) {
   for (const card of cards) {
     wrapper.append(renderCard(document, card, view, emit));
     if (detail && card.occurrenceIds.includes(detail.occurrenceId)) {
-      wrapper.append(renderDetail(document, detail, view.evidenceExpanded, emit, onEvent));
+      wrapper.append(renderDetail(document, detail, view.evidenceExpanded, view.highlight, emit, onEvent));
     }
   }
   return wrapper;
@@ -302,7 +339,7 @@ function renderCard(document, card, view, emit) {
   return root;
 }
 
-function renderDetail(document, detail, expanded, emit, onEvent) {
+function renderDetail(document, detail, expanded, highlight, emit, onEvent) {
   const root = section(document, 'result-detail');
   root.dataset.resultDetail = '';
   root.dataset.classification = detail.heading.classification;
@@ -332,11 +369,64 @@ function renderDetail(document, detail, expanded, emit, onEvent) {
     previewBlock(document, detail.previews, expanded, onEvent),
     technicalBlock(document, detail.technical, expanded, onEvent),
   );
-  root.append(actionButton(document, 'Consultar evidências', 'CONSULT_EVIDENCE', 'consult-evidence', emit, 'primary-action', {
-    occurrenceId: detail.occurrenceId,
-    reason: detail.action.reason,
-  }));
+  const actions = section(document, 'detail-actions');
+  const action = highlightActionForOccurrence({
+    occurrence: detail,
+    bindingStatus: highlight.bindingStatus,
+    activeOccurrenceId: highlight.state === 'active' ||
+      (highlight.state === 'busy' && highlight.operation === 'clear') ? highlight.occurrenceId : null,
+  });
+  if (action.kind === 'highlight') {
+    const busy = highlight.state === 'busy' && highlight.operation === 'highlight' &&
+      highlight.occurrenceId === detail.occurrenceId;
+    const button = actionButton(document, busy ? 'Destacando na página' : action.label,
+      'HIGHLIGHT_OCCURRENCE', 'live-highlight-action', emit, 'primary-action', {
+        occurrenceId: detail.occurrenceId,
+      }, busy);
+    button.dataset.action = 'highlight-occurrence';
+    actions.append(button);
+  } else if (action.kind === 'clear') {
+    const busy = highlight.state === 'busy' && highlight.operation === 'clear';
+    const button = actionButton(document, busy ? 'Removendo destaque' : action.label,
+      'CLEAR_HIGHLIGHT', 'live-highlight-action', emit, 'secondary-action', {}, busy);
+    button.dataset.action = 'clear-highlight';
+    actions.append(button);
+  } else if (action.kind === 'checking') {
+    const button = document.createElement('button');
+    button.setAttribute('type', 'button');
+    button.className = 'secondary-action';
+    button.dataset.focusId = 'live-highlight-action';
+    button.dataset.action = 'highlight-checking';
+    button.disabled = false;
+    button.setAttribute('aria-disabled', 'true');
+    button.textContent = action.label;
+    actions.append(button);
+  } else {
+    const button = actionButton(document, action.label, 'CONSULT_EVIDENCE', 'consult-evidence', emit, 'secondary-action', {
+      occurrenceId: detail.occurrenceId,
+      reason: action.reason,
+    });
+    button.dataset.action = 'consult-evidence';
+    actions.append(button);
+  }
+  root.append(actions);
   return root;
+}
+
+function renderGlobalHighlightClear(document, highlight, emit) {
+  const block = section(document, 'global-highlight-action');
+  block.setAttribute('role', 'region');
+  block.setAttribute('aria-label', 'Destaque ativo na página');
+  block.append(paragraph(document,
+    'Há um destaque ativo em outra ocorrência ou em um resultado oculto pelos filtros.',
+    'global-highlight-message'));
+  const busy = highlight.state === 'busy' && highlight.operation === 'clear';
+  const button = actionButton(document, busy ? 'Removendo destaque' : 'Limpar destaque ativo',
+    'CLEAR_HIGHLIGHT', 'live-highlight-action', emit, 'secondary-action', {}, busy);
+  button.dataset.action = 'clear-highlight';
+  button.dataset.globalHighlightClear = '';
+  block.append(button);
+  return block;
 }
 
 function detailBlock(document, name, title, values) {
@@ -360,6 +450,19 @@ function previewBlock(document, previews, expanded, onEvent) {
   if (previews.length === 0) block.append(paragraph(document, 'Nenhuma prévia visual foi armazenada.'));
   for (const preview of previews) {
     const item = section(document, 'evidence-preview');
+    const imageMetadata = safePngPreview(preview.dataUrl);
+    if (imageMetadata) {
+      const image = document.createElement('img');
+      image.className = 'evidence-preview-image';
+      image.dataset.evidencePreviewImage = '';
+      image.setAttribute('src', preview.dataUrl);
+      image.setAttribute('alt', `${previewKindLabel(preview.kind)} local da evidência ${preview.evidenceId}`);
+      image.setAttribute('width', String(imageMetadata.width));
+      image.setAttribute('height', String(imageMetadata.height));
+      image.setAttribute('loading', 'lazy');
+      image.setAttribute('decoding', 'async');
+      item.append(image);
+    }
     item.append(
       paragraph(document, preview.kind ? `Tipo: ${preview.kind}` : 'Evidência local'),
       paragraph(document, preview.origin ? `Origem: ${preview.origin}` : 'Origem não informada'),
@@ -367,6 +470,19 @@ function previewBlock(document, previews, expanded, onEvent) {
     block.append(item);
   }
   return block;
+}
+
+function safePngPreview(value) {
+  try {
+    const metadata = decodePngDataUrl(value, { maxBytes: 16 * 1024 * 1024, maxDimension: 50_000, maxPixels: 100_000_000 });
+    return { width: metadata.width, height: metadata.height };
+  } catch { return null; }
+}
+
+function previewKindLabel(kind) {
+  if (kind === 'element') return 'Captura do elemento';
+  if (kind === 'full-page') return 'Captura da página inteira';
+  return 'Captura de evidência';
 }
 
 function technicalBlock(document, technical, expanded, onEvent) {
@@ -420,15 +536,58 @@ function renderUnavailable(document, view, emit) {
   return root;
 }
 
-function actionButton(document, label, intent, focusId, emit, className, fields = {}) {
+function actionButton(document, label, intent, focusId, emit, className, fields = {}, disabled = false) {
   const button = document.createElement('button');
   button.setAttribute('type', 'button');
   button.className = className;
   button.dataset.intent = intent;
   button.dataset.focusId = focusId;
+  button.disabled = false;
+  if (disabled) button.setAttribute('aria-disabled', 'true');
   button.textContent = label;
-  button.addEventListener('click', () => emit({ type: intent, ...fields }));
+  button.addEventListener('click', () => {
+    if (button.getAttribute('aria-disabled') === 'true') return;
+    emit({ type: intent, ...fields });
+  });
   return button;
+}
+
+function appendPersonaControls(root, document, persona, emit) {
+  const section = document.createElement('section');
+  section.className = 'persona-controls';
+  section.setAttribute('aria-label', 'Simular experiência');
+  section.append(heading(document, 2, 'Simular experiência'));
+  const modes = document.createElement('div');
+  modes.className = 'persona-mode-buttons';
+  for (const [mode, label] of [['reader', 'Leitura simulada'], ['achromatopsia', 'Acromatopsia'], ['keyboard', 'Somente teclado']]) {
+    const button = actionButton(document, label, 'PERSONA_SELECT', `persona-${mode}`, emit, 'persona-mode', { mode });
+    button.dataset.personaMode = mode;
+    button.setAttribute('aria-pressed', String(persona.mode === mode));
+    modes.append(button);
+  }
+  section.append(modes, paragraph(document, persona.message, 'persona-message'));
+  if (persona.mode === 'reader') {
+    if (!persona.voiceId || ['unavailable', 'error'].includes(persona.speechAvailability)) {
+      section.append(actionButton(
+        document, 'Ativar voz local', 'PERSONA_READER_ENABLE_VOICE',
+        'persona-reader-enable-voice', emit, 'secondary-action',
+      ));
+    }
+    const transport = document.createElement('div');
+    transport.className = 'persona-transport';
+    for (const [intent, label] of [
+      ['PERSONA_READER_PREVIOUS', 'Anterior'], ['PERSONA_READER_REPEAT', 'Repetir'],
+      ['PERSONA_READER_TOGGLE', persona.readerPaused ? 'Continuar' : 'Pausar'],
+      ['PERSONA_READER_NEXT', 'Próximo'], ['PERSONA_END', 'Encerrar'],
+    ]) transport.append(actionButton(document, label, intent, `persona-${intent.toLowerCase()}`, emit, 'secondary-action'));
+    section.append(transport);
+  } else if (persona.mode !== null) {
+    section.append(actionButton(
+      document, 'Encerrar simulação', 'PERSONA_END', 'persona-end', emit, 'secondary-action',
+    ));
+  }
+  root.append(section);
+  return root;
 }
 
 function section(document, className) {
@@ -462,6 +621,37 @@ function copyFilters(filters) {
   const copy = {};
   for (const name of FILTERS) copy[name] = Array.isArray(filters?.[name]) ? [...filters[name]] : [];
   return copy;
+}
+
+function copyPersona(value) {
+  const mode = ['reader', 'achromatopsia', 'keyboard'].includes(value?.mode) ? value.mode : null;
+  const speechAvailability = ['available', 'unavailable', 'busy', 'error'].includes(value?.speechAvailability)
+    ? value.speechAvailability : 'unavailable';
+  const voiceId = typeof value?.voiceId === 'string' && !/[\u0000-\u001F\u007F]/u.test(value.voiceId) &&
+    Array.from(value.voiceId).length <= 200 ? value.voiceId : '';
+  const rate = typeof value?.rate === 'number' && Number.isFinite(value.rate) && value.rate >= 0.5 && value.rate <= 2
+    ? value.rate : 1;
+  return {
+    mode, readerPaused: value?.readerPaused === true, speechAvailability, voiceId, rate,
+    message: typeof value?.message === 'string' ? value.message : 'Escolha uma simulação para esta página.',
+  };
+}
+
+function copyHighlight(value) {
+  let bindingStatus = { state: 'unchecked' };
+  if (['available', 'checking', 'unchecked'].includes(value?.bindingStatus?.state)) {
+    bindingStatus = { state: value.bindingStatus.state };
+  } else if (value?.bindingStatus?.state === 'unavailable' && typeof value.bindingStatus.reason === 'string') {
+    bindingStatus = { state: 'unavailable', reason: value.bindingStatus.reason };
+  }
+  return ['idle', 'busy', 'active'].includes(value?.state)
+    ? {
+      state: value.state,
+      operation: value.state === 'busy' && ['highlight', 'clear'].includes(value.operation) ? value.operation : null,
+      occurrenceId: typeof value.occurrenceId === 'string' ? value.occurrenceId : null,
+      bindingStatus, message: typeof value.message === 'string' ? value.message : null,
+    }
+    : { state: 'idle', operation: null, occurrenceId: null, bindingStatus, message: null };
 }
 
 function copySummary(summary) {

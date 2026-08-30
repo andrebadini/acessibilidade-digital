@@ -7,7 +7,9 @@ import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 
+import { createNodeTestArgs, createTestPlan } from '../../../scripts/run-tests.mjs';
 import {
+  CANONICAL_CHROME_PRODUCT,
   MAX_CDP_FRAME_BYTES,
   activateRealTab,
   buildChromeLaunchArgv,
@@ -16,6 +18,7 @@ import {
   captureVisualComparison,
   click,
   command,
+  createBoundedBrowserCleanup,
   createCdpPipeTransport,
   createRealPage,
   discoverProcessLoadedExtension,
@@ -33,6 +36,7 @@ import {
   removeRealTab,
   resolveChromeBinary,
   resolveExpectedChromeMajor,
+  resolveRealChromeTestBinary,
   resolveLaunchDirectories,
   resolveUnpackedExtensionPath,
   startFixtureServer,
@@ -44,6 +48,47 @@ import {
   waitForServiceWorker,
   waitForValue,
 } from './real-chrome.mjs';
+
+test('real Chrome E2Es share one explicit binary resolution and one exact Chrome 152 product', () => {
+  assert.equal(CANONICAL_CHROME_PRODUCT, 'Chrome/152.0.7977.64');
+  assert.equal(resolveRealChromeTestBinary({ AUDITA_E2E_CHROME: '/cft-152', CHROME_BIN: '/fallback' }), '/cft-152');
+  assert.equal(resolveRealChromeTestBinary({ CHROME_BIN: '/fallback' }), '/fallback');
+  assert.equal(resolveRealChromeTestBinary({}), null);
+  assert.equal(resolveRealChromeTestBinary({ AUDITA_E2E_CHROME: '', CHROME_BIN: '/fallback' }), '/fallback');
+  assert.throws(() => resolveRealChromeTestBinary({ AUDITA_E2E_CHROME: 152 }),
+    error => error.code === 'CHROME_BINARY_INVALID');
+});
+
+test('default suite keeps fast tests parallel and classifies every real-Chrome E2E for serial execution', () => {
+  const files = [
+    'test/background/service-worker.test.js',
+    'test/e2e/axe-mv3-csp-decision.test.mjs',
+    'test/e2e/axe-mv3-csp.test.mjs',
+    'test/e2e/personas-mv3-csp.test.mjs',
+    'test/e2e/public-axe-map-mv3.test.mjs',
+    'test/e2e/retention-indexeddb-mv3.test.mjs',
+    'test/e2e/sidepanel-flow-mv3.test.mjs',
+    'test/e2e/support/real-chrome.test.mjs',
+  ];
+  const plan = createTestPlan(files);
+  assert.deepEqual(plan.parallel, [
+    'test/background/service-worker.test.js',
+    'test/e2e/axe-mv3-csp-decision.test.mjs',
+    'test/e2e/support/real-chrome.test.mjs',
+  ]);
+  assert.deepEqual(plan.serial, [
+    'test/e2e/axe-mv3-csp.test.mjs',
+    'test/e2e/personas-mv3-csp.test.mjs',
+    'test/e2e/public-axe-map-mv3.test.mjs',
+    'test/e2e/retention-indexeddb-mv3.test.mjs',
+    'test/e2e/sidepanel-flow-mv3.test.mjs',
+  ]);
+  assert.deepEqual(createNodeTestArgs(plan.parallel), ['--test', ...plan.parallel]);
+  assert.deepEqual(createNodeTestArgs(plan.serial, { serial: true }),
+    ['--test', '--test-concurrency=1', ...plan.serial]);
+  assert.throws(() => createTestPlan([...files, 'test/e2e/new-real-browser.test.mjs']),
+    error => error.code === 'TEST_PLAN_UNCLASSIFIED_E2E');
+});
 
 function decodeFrames(buffer) {
   return buffer.toString('utf8').split('\0').filter(Boolean).map(value => JSON.parse(value));
@@ -143,6 +188,49 @@ test('Chrome teardown proves process exit before cleanup may continue', async t 
     await assert.rejects(terminateChromeProcess(chrome, { timeoutMs: 10 }),
       error => error.code === 'CHROME_PROCESS_REMAINED');
   });
+});
+
+test('bounded browser cleanup is idempotent and preserves clients → Chrome → server → profile order', async () => {
+  const trace = [];
+  const cleanup = createBoundedBrowserCleanup({
+    closeClients() { trace.push('clients'); },
+    terminateChrome() { trace.push('chrome'); },
+    closeServer() { trace.push('server'); },
+    removeProfile() { trace.push('profile'); },
+    stageTimeoutMs: 25,
+  });
+
+  const first = cleanup();
+  assert.strictEqual(cleanup(), first, 'concurrent and repeated callers share exactly one cleanup');
+  assert.deepEqual(await first, { ok: true, failures: [] });
+  assert.strictEqual(cleanup(), first);
+  assert.deepEqual(trace, ['clients', 'chrome', 'server', 'profile']);
+});
+
+test('bounded browser cleanup closes the server but preserves the profile when Chrome exit is unconfirmed', async () => {
+  const trace = [];
+  const cleanup = createBoundedBrowserCleanup({
+    closeClients() { trace.push('clients'); return new Promise(() => {}); },
+    terminateChrome() { trace.push('chrome'); throw new Error('private process detail'); },
+    closeServer() { trace.push('server'); return new Promise(() => {}); },
+    removeProfile() { trace.push('profile'); },
+    stageTimeoutMs: 5,
+  });
+  const startedAt = Date.now();
+  const result = await cleanup();
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.deepEqual(trace, ['clients', 'chrome', 'server'],
+    'profile removal is forbidden after an unconfirmed Chrome exit');
+  assert.deepEqual(result, {
+    ok: false,
+    failures: [
+      { stage: 'clients', code: 'timeout' },
+      { stage: 'chrome', code: 'failed' },
+      { stage: 'server', code: 'timeout' },
+    ],
+  });
+  assert.ok(elapsedMs < 250, `cleanup excedeu o limite observável: ${elapsedMs}ms`);
 });
 
 test('Pipe CDP writes NUL frames and correlates one response', async t => {
@@ -268,6 +356,7 @@ test('launch preflight rejects unknown options and removes its owned temporary p
   try {
     await assert.rejects(launchUnpackedExtension(null, {
       extensionPath: workspaceRoot, startUrl: 'http://127.0.0.1/', chromeBinary: fakeBinary,
+      expectedMajor: 0,
     }), error => error.code === 'CHROME_MAJOR_INVALID');
   } finally {
     await rm(fakeBinaryRoot, { recursive: true, force: true });
@@ -438,6 +527,7 @@ test('the declared _execute_action shortcut opens one tokenized Side Panel while
   const shortcut = process.platform === 'darwin' ? 'MacCtrl+Shift+A' : 'Alt+Shift+A';
   let opened = false;
   let behaviorReads = 0;
+  let runtimeReadinessReads = 0;
   const launchToken = 'A'.repeat(43);
   const panelUrl = `chrome-extension://${extensionId}/src/panel/index.html?launch=${launchToken}`;
   const harnessPage = {
@@ -457,6 +547,10 @@ test('the declared _execute_action shortcut opens one tokenized Side Panel while
       if (params.expression.includes('chrome.sidePanel.getPanelBehavior')) {
         behaviorReads += 1;
         return { result: { value: params.expression.includes('openPanelOnActionClick===false') } };
+      }
+      if (params.expression.includes('chrome.contextMenus.update')) {
+        runtimeReadinessReads += 1;
+        return { result: { value: runtimeReadinessReads >= 2 } };
       }
       return { result: { value: true } };
     },
@@ -491,6 +585,8 @@ test('the declared _execute_action shortcut opens one tokenized Side Panel while
   assert.equal((await runtimeContexts(launch, { contextTypes: ['SIDE_PANEL'] })).length, 1);
   assert.equal((await runtimeContexts(launch, { contextTypes: ['POPUP'] })).length, 0);
   assert.equal(behaviorReads, 1);
+  assert.equal(runtimeReadinessReads, 2,
+    'o atalho só pode ser enviado depois que o comando público instalado comprova o runtime pronto');
   const panelLaunch = new URL(panelUrl);
   assert.equal(panelLaunch.pathname, '/src/panel/index.html');
   assert.deepEqual([...panelLaunch.searchParams.keys()], ['launch']);

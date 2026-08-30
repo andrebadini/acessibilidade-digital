@@ -5,13 +5,18 @@ import { basename, dirname, join, sep } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { launchUnpackedExtension, redactDiagnostic, startFixtureServer } from './support/real-chrome.mjs';
+import {
+  CANONICAL_CHROME_PRODUCT,
+  launchUnpackedExtension,
+  navigateRealPage,
+  redactDiagnostic,
+  resolveRealChromeTestBinary,
+  startFixtureServer,
+  waitForReboundSidePanel,
+} from './support/real-chrome.mjs';
 
 const workspaceRoot = fileURLToPath(new URL('../../', import.meta.url));
-const chromeBinary = process.env.AUDITA_E2E_CHROME;
-const chromeMajorText = process.env.AUDITA_EXPECT_CHROME_MAJOR;
-const e2eReady = typeof chromeBinary === 'string' && chromeBinary.startsWith('/') &&
-  /^[1-9][0-9]{0,2}$/u.test(chromeMajorText ?? '');
+const chromeBinary = resolveRealChromeTestBinary();
 
 async function createSafeRunDirectories(t) {
   const canonicalTmp = await realpath(tmpdir());
@@ -32,16 +37,17 @@ async function createSafeRunDirectories(t) {
   return { downloadDirectory, qaDirectory };
 }
 
-test('real toolbar shortcut opens the Side Panel and completes the attached audit journey', {
-  skip: e2eReady ? false : 'Chrome E2E executa somente no gate explícito com binário e versão canônica.',
-}, async t => {
-  assert.equal(chromeMajorText, '152');
-  assert.match(process.env.AUDITA_QA_PRESERVE ?? '', /^[01]$/u);
+test('real toolbar shortcut opens the Side Panel and completes the attached audit journey', async t => {
+  assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real do painel lateral.');
   const { downloadDirectory, qaDirectory } = await createSafeRunDirectories(t);
   const fixture = await startFixtureServer(t, new Map([['/', {
     status: 200,
     headers: { 'content-type': 'text/html; charset=utf-8' },
     body: '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Fixture Audita</title></head><body><main><h1>Teste local</h1><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="><a href="/">clique aqui</a><button>Continuar</button></main></body></html>',
+  }], ['/after-navigation', {
+    status: 200,
+    headers: { 'content-type': 'text/html; charset=utf-8' },
+    body: '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Fixture após navegação</title></head><body><main><h1>Página navegada</h1><button>Continuar</button></main></body></html>',
   }]]));
 
   let extension;
@@ -53,9 +59,9 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
       qaDirectory,
       viewport: { width: 1280, height: 900 },
       chromeBinary,
-      expectedMajor: Number(chromeMajorText),
+      expectedMajor: 152,
     });
-    assert.equal(extension.chromeProduct, 'Chrome/152.0.7977.64');
+    assert.equal(extension.chromeProduct, CANONICAL_CHROME_PRODUCT);
     const panelBehavior = await extension.evaluate(extension.harnessPage,
       'chrome.sidePanel.getPanelBehavior()', { awaitPromise: true });
     assert.equal(panelBehavior?.openPanelOnActionClick, false);
@@ -173,10 +179,33 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
     assert.equal(summary.occurrenceButton, true);
     await extension.captureJourney('panel-summary', panel);
 
-    await extension.click(panel, 'button.card-select,button.occurrence-select');
+    const occurrenceCount = await extension.evaluate(panel,
+      "document.querySelectorAll('button.card-select,button.occurrence-select').length");
+    assert.ok(Number.isInteger(occurrenceCount) && occurrenceCount > 0);
+    let selectedOccurrenceId = null;
+    for (let index = 0; index < Math.min(occurrenceCount, 40); index += 1) {
+      const selected = await extension.evaluate(panel, `(() => {
+        const button=[...document.querySelectorAll('button.card-select,button.occurrence-select')][${index}];
+        if(!button)return false;
+        button.click();
+        return true;
+      })()`, { userGesture: true });
+      assert.equal(selected, true);
+      const availability = await extension.waitForValue(panel, `(() => ({
+        highlight:Boolean(document.querySelector('[data-action="highlight-occurrence"]')),
+        unavailable:/Não foi possível destacar este item/iu.test(document.querySelector('[role="status"]')?.textContent??''),
+        focusId:document.querySelector('[aria-pressed="true"][data-focus-id^="occurrence-"]')?.dataset.focusId??null
+      }))()`, value => value?.highlight === true || value?.unavailable === true,
+      { timeoutMs: 5_000, intervalMs: 50 }).catch(() => null);
+      if (availability?.highlight === true && typeof availability.focusId === 'string') {
+        selectedOccurrenceId = availability.focusId.slice('occurrence-'.length);
+        break;
+      }
+    }
+    assert.match(selectedOccurrenceId, /^[A-Za-z0-9._:-]{1,200}$/u);
     await extension.waitForValue(panel, "Boolean(document.querySelector('[data-result-detail]'))", Boolean);
     await extension.captureJourney('panel-detail', panel);
-    await extension.click(panel, 'button[data-focus-id="consult-evidence"]');
+    await extension.click(panel, 'details[data-detail-block="previews"] > summary');
     await extension.waitForValue(panel, "document.querySelector('details[data-detail-block=" + '"previews"' + "]')?.open", Boolean);
     await proveStablePanel('detail-and-evidence');
     assert.equal(new Set(stablePanelWidths).size, 1, 'the native panel width remains fixed across the journey');
@@ -203,6 +232,160 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
     await assertTokenNotExposed(report, 'report must not expose panel launch authority');
     await extension.captureJourney('report', report, { captureBeyondViewport: false });
 
+    const reportHighlightSelector = `[data-report-highlight-control="${selectedOccurrenceId}"] button`;
+    await extension.click(report, `${reportHighlightSelector}[data-highlight-action="check"]`);
+    await extension.waitForValue(report,
+      `document.querySelector(${JSON.stringify(reportHighlightSelector)})?.getAttribute('data-report-highlight')`,
+      value => value === 'highlight', { timeoutMs: 10_000, intervalMs: 50 });
+    await extension.click(report, `${reportHighlightSelector}[data-report-highlight="highlight"]`);
+    try {
+      await Promise.all([
+        extension.waitForValue(report,
+          `document.querySelector(${JSON.stringify(reportHighlightSelector)})?.getAttribute('data-report-highlight')`,
+          value => value === 'clear', { timeoutMs: 10_000, intervalMs: 50 }),
+        extension.waitForValue(panel, "Boolean(document.querySelector('[data-action=\"clear-highlight\"]'))", Boolean,
+          { timeoutMs: 10_000, intervalMs: 50 }),
+        extension.waitForValue(extension.startPage.page,
+          "document.querySelectorAll('[data-audita-highlight-root=\"v1\"]').length", value => value === 1,
+          { timeoutMs: 10_000, intervalMs: 50 }),
+      ]);
+    } catch (error) {
+      const highlightDiagnostic = await extension.evaluate(extension.harnessPage, `(async()=>({
+        frames:await chrome.scripting.executeScript({
+          target:{tabId:${extension.startPage.tabId},allFrames:true},
+          world:'ISOLATED',
+          func:()=>({
+            href:location.href,
+            roots:document.querySelectorAll('[data-audita-highlight-root="v1"]').length,
+            runtime:Boolean(globalThis.__auditaHighlightOverlayV1),
+            disposed:globalThis.__auditaHighlightOverlayV1?.disposed??null,
+            notified:globalThis.__auditaHighlightOverlayV1?.notified??null
+          })
+        }),
+        report:document.title
+      }))()`, { awaitPromise: true }).catch(value => ({ diagnosticFailure: String(value?.code || value) }));
+      const surfaces = {
+        report: await extension.evaluate(report,
+          `document.querySelector(${JSON.stringify(reportHighlightSelector)})?.getAttribute('data-report-highlight')`),
+        reportAction: await extension.evaluate(report, `(() => {
+          const button=document.querySelector(${JSON.stringify(reportHighlightSelector)});
+          return button?{
+            action:button.getAttribute('data-highlight-action'),
+            disabled:button.disabled,
+            ariaDisabled:button.getAttribute('aria-disabled'),
+            text:button.textContent,
+            status:document.querySelector('#review-status')?.textContent??null
+          }:null;
+        })()`),
+        panel: await extension.evaluate(panel, "Boolean(document.querySelector('[data-action=\"clear-highlight\"]'))"),
+        panelState: await extension.evaluate(panel, `(() => ({
+          screen:document.querySelector('[data-screen]')?.dataset.screen??null,
+          status:document.querySelector('[role="status"]')?.textContent??null,
+          action:document.querySelector('[data-action]')?.dataset.action??null
+        }))()`),
+        page: await extension.evaluate(extension.startPage.page,
+          "document.querySelectorAll('[data-audita-highlight-root=\"v1\"]').length"),
+        activeTabs: await extension.evaluate(extension.harnessPage,
+          `chrome.tabs.query({active:true,currentWindow:true}).then(tabs=>tabs.map(tab=>({id:tab.id,url:new URL(tab.url).pathname})))`,
+          { awaitPromise: true }),
+      };
+      t.diagnostic(`highlight-install=${JSON.stringify({ surfaces, highlightDiagnostic })}`);
+      throw error;
+    }
+    assert.equal(await extension.evaluate(panel, `(() => {
+      const button=document.querySelector('button[data-action="clear-highlight"]');
+      if(!button||button.disabled)return false;
+      button.focus();
+      button.click();
+      return true;
+    })()`, { userGesture: true }), true);
+    await Promise.all([
+      extension.waitForValue(extension.startPage.page,
+        "document.querySelectorAll('[data-audita-highlight-root=\"v1\"]').length", value => value === 0,
+        { timeoutMs: 10_000, intervalMs: 50 }),
+      extension.waitForValue(panel, `(() => ({
+        action:document.querySelector('[data-action="highlight-occurrence"]')?.dataset.action??null,
+        focusId:document.activeElement?.dataset?.focusId??null
+      }))()`, value => value?.action === 'highlight-occurrence' && value?.focusId === 'live-highlight-action',
+      { timeoutMs: 10_000, intervalMs: 50 }),
+      extension.waitForValue(report,
+        `document.querySelector(${JSON.stringify(reportHighlightSelector)})?.getAttribute('data-report-highlight')`,
+        value => value === 'highlight', { timeoutMs: 10_000, intervalMs: 50 }),
+    ]);
+
+    await extension.click(report, `${reportHighlightSelector}[data-report-highlight="highlight"]`);
+    await extension.waitForValue(extension.startPage.page,
+      "document.querySelectorAll('[data-audita-highlight-root=\"v1\"]').length", value => value === 1,
+      { timeoutMs: 10_000, intervalMs: 50 });
+    assert.deepEqual(await extension.identityOf(extension.startPage), before,
+      'the audit and live highlight did not navigate the audited page');
+    await navigateRealPage(extension, extension.startPage, {
+      url: `${fixture.origin}/after-navigation`, operationId: 'highlight-navigation-cleanup',
+    });
+    try {
+      await Promise.all([
+        extension.waitForValue(extension.startPage.page,
+          "document.querySelectorAll('[data-audita-highlight-root=\"v1\"]').length", value => value === 0,
+          { timeoutMs: 10_000, intervalMs: 50 }),
+        extension.waitForValue(report,
+          `document.querySelector(${JSON.stringify(reportHighlightSelector)})?.getAttribute('data-highlight-action')`,
+          value => value === 'unavailable', { timeoutMs: 10_000, intervalMs: 50 }),
+      ]);
+      const rebound = await waitForReboundSidePanel(extension, {
+        priorDocumentId: panelDocumentId,
+        timeoutMs: 10_000,
+      });
+      const reboundState = await extension.waitForValue(rebound.page, `(() => ({
+        screen:document.querySelector('[data-screen]')?.dataset.screen??null,
+        clear:Boolean(document.querySelector('[data-action="clear-highlight"]')),
+        status:document.querySelector('[role="status"]')?.textContent??null
+      }))()`, value => value?.screen === 'result' && value?.clear === false, {
+        timeoutMs: 10_000, intervalMs: 50,
+      });
+      const reboundContexts = await extension.waitForValue(extension.harnessPage,
+        `chrome.runtime.getContexts({contextTypes:['SIDE_PANEL']}).then(values=>values.map(value=>({
+          documentId:value.documentId,
+          documentUrl:value.documentUrl
+        })))`, values => Array.isArray(values) && values.length === 1 && (() => {
+          try {
+            const url=new URL(values[0].documentUrl);
+            return url.pathname==='/src/panel/index.html' && url.searchParams.getAll('launch').length===1;
+          } catch { return false; }
+        })(), { timeoutMs: 10_000, intervalMs: 50 });
+      t.diagnostic(`panel-rebound=${JSON.stringify({
+        screen: reboundState.screen,
+        clear: reboundState.clear,
+        sidePanels: reboundContexts.length,
+      })}`);
+    } catch (error) {
+      const navigationDiagnostic = {
+        page: await extension.evaluate(extension.startPage.page, `({
+          href:location.href,
+          roots:document.querySelectorAll('[data-audita-highlight-root="v1"]').length
+        })`),
+        panel: await extension.evaluate(panel, `(() => ({
+          screen:document.querySelector('[data-screen]')?.dataset.screen??null,
+          status:document.querySelector('[role="status"]')?.textContent??null,
+          clear:Boolean(document.querySelector('[data-action="clear-highlight"]')),
+          highlight:Boolean(document.querySelector('[data-action="highlight-occurrence"]')),
+          unavailable:Boolean(document.querySelector('[data-action="consult-evidence"]'))
+        }))()`),
+        report: await extension.evaluate(report, `(() => {
+          const button=document.querySelector(${JSON.stringify(reportHighlightSelector)});
+          return button?{
+            action:button.getAttribute('data-highlight-action'),
+            state:button.getAttribute('data-report-highlight'),
+            ariaDisabled:button.getAttribute('aria-disabled'),
+            text:button.textContent
+          }:null;
+        })()`),
+        contexts: await extension.runtimeContexts({ contextTypes: ['SIDE_PANEL'] }),
+      };
+      t.diagnostic(`highlight-navigation=${JSON.stringify(navigationDiagnostic)}`);
+      throw error;
+    }
+    t.diagnostic(`highlight-sync=active-panel-report; clear-focus=preserved; navigation-cleanup=confirmed; occurrence=${selectedOccurrenceId}`);
+
     await extension.click(report, 'button[data-report-export]');
     const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 60_000, intervalMs: 50 });
     assert.deepEqual(downloads.map(row => row.format), ['html', 'pdf', 'csv', 'json']);
@@ -212,7 +395,6 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
       containsToken: (await readFile(join(downloadDirectory, row.filename))).includes(Buffer.from(launchToken)),
     })))).filter(row => row.containsToken).map(row => row.format);
     assert.deepEqual(exportsContainingLaunchAuthority, []);
-    assert.deepEqual(await extension.identityOf(extension.startPage), before);
     const downloadProofs = downloads.map(row => ({
       format: row.format,
       path: join(downloadDirectory, row.filename),

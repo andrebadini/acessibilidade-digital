@@ -127,6 +127,37 @@ button:active { transform: translateY(1px); }
 
 .source-choices { display: grid; gap: 12px; }
 
+.persona-controls {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid #c4ced7;
+}
+
+.persona-controls h2 { font-size: 16px; }
+
+.persona-mode-buttons,
+.persona-transport,
+.detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.persona-mode {
+  flex: 1 1 8rem;
+  background: var(--surface);
+  color: var(--brand);
+}
+
+.persona-mode[aria-pressed="true"] {
+  background: var(--brand);
+  color: #ffffff;
+}
+
+.persona-message { color: #42586a; font-size: 14px; line-height: 1.35; }
+.detail-actions { grid-column: 1 / -1; }
+
 .source-choice {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -424,6 +455,34 @@ details.detail-block[open] > :not(summary) { margin-block: 8px; }
   gap: 4px;
   padding: 8px 12px;
   background: var(--muted-surface);
+}
+
+.evidence-preview-image {
+  display: block;
+  inline-size: auto;
+  max-inline-size: 100%;
+  block-size: auto;
+  max-block-size: 24rem;
+  object-fit: contain;
+  border: 1px solid #a8b5c1;
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+.global-highlight-action {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 2px solid var(--brand);
+  border-radius: 6px;
+  background: var(--muted-surface);
+}
+
+.global-highlight-message { margin: 0; }
+
+button[aria-disabled="true"] {
+  cursor: wait;
+  opacity: 0.72;
 }
 
 .technical-label {

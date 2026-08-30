@@ -179,6 +179,7 @@ function dependencyFixture({
       const inventory = fixture?.inventory ?? await createInstalledCoreRuleInventory();
       return createPanelResultBundleV1({ reportRevision, inventory });
     },
+    async recordHighlightBinding() { return null; },
     epochNow: () => EPOCH + 1,
     modelNow: () => '2026-08-29T12:00:00.000Z',
     createAbortController: () => new AbortController(),
@@ -634,6 +635,145 @@ test('journals, claims, checkpoints and atomically settles a result before publi
   assert.ok(order.indexOf('bootstrap-register') < order.indexOf('latest:running'));
   assert.ok(order.indexOf('latest:running') < order.indexOf('bootstrap'));
   assert.ok(order.indexOf('bootstrap') < order.indexOf('run'));
+});
+
+test('records the validated terminal snapshot against the observed target before exposing the result', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const report = await reportFixture('audit-highlight-binding-seam');
+  const order = [];
+  const reportByAudit = new Map();
+  let recorded = null;
+  let recordCalls = 0;
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority, order, reportByAudit,
+    execution: async ({ onCheckpoint, persistAuditModel }) => {
+      order.push('run');
+      await onCheckpoint(report.checkpoint);
+      await persistAuditModel(report.model);
+      return Object.freeze({
+        version: 1, auditId: report.model.auditId, state: 'model', failureCode: null,
+        model: report.model, checkpoint: report.checkpoint,
+      });
+    },
+  });
+  dependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({
+    reportRevision, inventory: report.inventory,
+  });
+  dependencies.recordHighlightBinding = async input => {
+    recordCalls += 1;
+    order.push('highlight-binding');
+    recorded = input;
+    return Object.freeze({ state: 'available' });
+  };
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: report.model.auditId,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(await started.completion, {
+    ok: true, auditId: report.model.auditId, state: 'result', revision: 1,
+  });
+  assert.equal(recordCalls, 1);
+  assert.deepEqual(Reflect.ownKeys(recorded), ['snapshot', 'observedTarget']);
+  assert.deepEqual(Reflect.ownKeys(recorded.snapshot), ['model', 'modelRevision', 'modelHash']);
+  assert.equal(Object.isFrozen(recorded.snapshot), true);
+  assert.equal(recorded.snapshot.model, reportByAudit.get(report.model.auditId).model);
+  assert.equal(recorded.snapshot.modelRevision, 1);
+  assert.equal(recorded.snapshot.modelHash, report.model.integrity.canonicalModelHash);
+  assert.deepEqual(recorded.observedTarget, {
+    version: 1,
+    kind: 'attached',
+    tabId: 17,
+    windowId: 9,
+    documentId: 'document-a',
+    urlSessionDigest: DIGEST,
+    urlEvidence: 'https://example.test/',
+  });
+  assert.equal(Object.isFrozen(recorded.observedTarget), true);
+  assert.ok(order.indexOf('commit') < order.indexOf('highlight-binding'));
+  assert.ok(order.indexOf('highlight-binding') < order.indexOf('publish:result'));
+});
+
+for (const [label, recordHighlightBinding] of [
+  ['returns no live binding', async () => null],
+  ['cannot persist the live binding', async () => { throw new Error('HIGHLIGHT_REGISTRY_WRITE_DENIED'); }],
+]) {
+  test(`keeps the canonical audit result evidence-only when binding recording ${label}`, async () => {
+    const area = sessionArea();
+    const prepared = await authorityFixture(area);
+    const report = await reportFixture(`audit-highlight-evidence-only-${label.replaceAll(' ', '-')}`);
+    const reportByAudit = new Map();
+    let recordCalls = 0;
+    const dependencies = dependencyFixture({
+      area, authority: prepared.authority, reportByAudit,
+      execution: async () => Object.freeze({
+        version: 1, auditId: report.model.auditId, state: 'model', failureCode: null,
+        model: report.model, checkpoint: report.checkpoint,
+      }),
+    });
+    dependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({
+      reportRevision, inventory: report.inventory,
+    });
+    dependencies.recordHighlightBinding = async input => {
+      recordCalls += 1;
+      try { input.snapshot.model.session.status = 'failed'; } catch { /* the verified snapshot is immutable */ }
+      return recordHighlightBinding();
+    };
+
+    const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+      capabilityId: prepared.capabilityId, eventNonce: null, auditId: report.model.auditId,
+      capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+      retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+    });
+
+    assert.deepEqual(await started.completion, {
+      ok: true, auditId: report.model.auditId, state: 'result', revision: 1,
+    });
+    assert.equal(recordCalls, 1);
+    const stored = reportByAudit.get(report.model.auditId).model;
+    assert.equal(stored.session.status, report.model.session.status);
+    assert.deepEqual(
+      stored.occurrences.map(occurrence => [occurrence.occurrenceId, occurrence.outcome, occurrence.classification]),
+      report.model.occurrences.map(occurrence => [occurrence.occurrenceId, occurrence.outcome, occurrence.classification]),
+    );
+    assert.equal(stored.integrity.canonicalModelHash, report.model.integrity.canonicalModelHash);
+  });
+}
+
+test('does not record a live binding when terminal persistence fails and compensates the finalizing job', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const report = await reportFixture('audit-highlight-terminal-compensation');
+  let recordCalls = 0;
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority,
+    execution: async ({ onCheckpoint, persistAuditModel }) => {
+      await onCheckpoint(report.checkpoint);
+      await persistAuditModel(report.model);
+      throw new Error('must stop after terminal persistence denial');
+    },
+  });
+  dependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({
+    reportRevision, inventory: report.inventory,
+  });
+  dependencies.commitTerminalAudit = async () => { throw new Error('TERMINAL_COMMIT_DENIED'); };
+  dependencies.recordHighlightBinding = async () => { recordCalls += 1; return null; };
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: report.model.auditId,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(await started.completion, {
+    ok: true, auditId: report.model.auditId, state: 'revoked', code: 'AUDIT_INTERRUPTED',
+  });
+  assert.equal(recordCalls, 0);
+  assert.equal(Object.hasOwn(area.values, ACTIVE_AUDIT_JOB_KEY), false);
+  assert.equal(Object.hasOwn(area.values, retentionPreferenceStorageKey(report.model.auditId)), false);
 });
 
 test('compensates a false bootstrap publication instead of reporting a running audit', async () => {

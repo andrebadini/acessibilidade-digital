@@ -15,9 +15,10 @@
       <div class="review-controls">
         <label for="review-evaluator">Nome da pessoa avaliadora</label>
         <input id="review-evaluator" autocomplete="name" required>
+        <button id="return-to-page" type="button" disabled>Voltar à página auditada e ao painel</button>
         <button id="regenerate-report" type="button">Gerar relatório atualizado</button>
         <button id="delete-audit" type="button" class="danger-action" disabled>Excluir auditoria local</button>
-        <a href="../panel/index.html">Voltar ao painel</a>
+        <a href="#report-root">Voltar ao início do relatório</a>
       </div>
       <div id="review-list" aria-label="Ocorrências para revisão"></div>
       <dialog id="delete-audit-dialog" aria-labelledby="delete-audit-title" aria-describedby="delete-audit-description" aria-hidden="true">

@@ -3,6 +3,7 @@ const CONSUMER_KEYS = ['extensionId', 'documentId', 'path', 'windowId'];
 const MODES = new Set(['reader', 'achromatopsia', 'motor']);
 const LEASE_ID = /^lease-[A-Za-z0-9_-]{22}$/u;
 const READER_ACTIONS = new Set(['previous', 'repeat', 'pause', 'resume', 'next', 'stop']);
+const AUTONOMOUS_REASONS = new Set(['emergency-stop', 'lifecycle-stop', 'reader-terminal']);
 const READER_STATE_KEYS = [
   'version', 'playback', 'index', 'total', 'caption', 'canPrevious', 'canNext',
   'speechAvailability', 'voiceId', 'rate',
@@ -123,6 +124,23 @@ function parseReaderRequest(value) {
   const command = parseReaderCommand(request.command);
   return consumer && command
     ? Object.freeze({ leaseId: request.leaseId, consumer, command })
+    : null;
+}
+
+function parseAutonomousStopRequest(value) {
+  const request = ownRecord(value, ['leaseId', 'tabId', 'windowId', 'documentId', 'reason']);
+  const documentId = request && canonicalText(request.documentId, 512, false);
+  return request && LEASE_ID.test(request.leaseId ?? '') &&
+    Number.isSafeInteger(request.tabId) && request.tabId > 0 &&
+    Number.isSafeInteger(request.windowId) && request.windowId >= 0 &&
+    documentId !== null && AUTONOMOUS_REASONS.has(request.reason)
+    ? Object.freeze({
+        leaseId: request.leaseId,
+        tabId: request.tabId,
+        windowId: request.windowId,
+        documentId,
+        reason: request.reason,
+      })
     : null;
 }
 
@@ -459,7 +477,9 @@ export function createPersonaCoordinator({
     if (!prepared.ok) return storeFailure(prepared);
     let installed;
     try {
-      installed = await personaRuntime.apply({ target, op: 'install', mode });
+      installed = await personaRuntime.apply({
+        target, op: 'install', mode, leaseId: prepared.lease.leaseId,
+      });
     } catch {
       installed = null;
     }
@@ -523,7 +543,7 @@ export function createPersonaCoordinator({
       }
       if (!begun.ok) return expireRejectedLiveLease({ rejected: begun, target, lock });
       let installed;
-      try { installed = await personaRuntime.apply({ target, op: 'install', mode }); }
+      try { installed = await personaRuntime.apply({ target, op: 'install', mode, leaseId }); }
       catch { installed = null; }
       let stateFailure = false;
       if (confirmedRuntimeSuccess(installed, target, mode)) {
@@ -548,7 +568,7 @@ export function createPersonaCoordinator({
       try {
         restored = priorMode === null
           ? await personaRuntime.apply({ target, op: 'clear' })
-          : await personaRuntime.apply({ target, op: 'install', mode: priorMode });
+          : await personaRuntime.apply({ target, op: 'install', mode: priorMode, leaseId });
       } catch {
         restored = null;
       }
@@ -799,6 +819,30 @@ export function createPersonaCoordinator({
     return finish(() => stopCore(args));
   }
 
+  async function autonomousStopCore({ leaseId, tabId, windowId, documentId, reason }) {
+    const initial = await leaseById(leaseId);
+    if (!initial || initial.target.tabId !== tabId || initial.target.windowId !== windowId ||
+      initial.target.documentId !== documentId) return failure('PERSONA_NOT_FOUND');
+    const target = initial.target;
+    return targetQueue.withTarget(target, async lock => {
+      targetQueue.assertHeld(lock, target);
+      const owner = await currentOwner(target, leaseId);
+      if (!owner || owner.target.tabId !== tabId || owner.target.windowId !== windowId ||
+        owner.target.documentId !== documentId) return failure('PERSONA_NOT_FOUND');
+      return revokeTargetCore({
+        target,
+        reason: reason === 'lifecycle-stop' ? 'navigation' : 'runtime-failure',
+        lock,
+      });
+    });
+  }
+
+  function autonomousStop(value) {
+    const input = parseAutonomousStopRequest(value);
+    if (!input) throw new TypeError('PERSONA_INPUT_INVALID');
+    return finish(() => autonomousStopCore(input));
+  }
+
   async function rehydrateLockedCore({ target, consumer, lock }) {
     targetQueue.assertHeld(lock, target);
     const owner = await currentOwner(target);
@@ -984,6 +1028,7 @@ export function createPersonaCoordinator({
     setMode,
     readerCommand,
     stop,
+    autonomousStop,
     rehydrateLocked,
     revokeTargetLocked,
     recover,

@@ -14,10 +14,14 @@ const validMessages = [
   { type: 'PANEL_START_PERSONA', capabilityId: CAPABILITY, mode: 'reader', windowId: 9 },
   { type: 'PANEL_REHYDRATE_PERSONA', capabilityId: CAPABILITY, windowId: 9 },
   { type: 'PANEL_SET_PERSONA_MODE', leaseId: LEASE, mode: 'motor', windowId: 9 },
+  { type: 'PANEL_READER_STATE', leaseId: LEASE, windowId: 9 },
+  { type: 'PANEL_READER_ACTION', leaseId: LEASE, action: 'next', windowId: 9 },
+  { type: 'PANEL_READER_ENABLE_VOICE', leaseId: LEASE, windowId: 9 },
   { type: 'PANEL_STOP_PERSONA', leaseId: LEASE, windowId: 9 },
   { type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION, auditId: '-audit.1', windowId: 9 },
   { type: 'PANEL_OPEN_REPORT', sessionCapabilityId: SESSION, auditId: '_audit:1', windowId: 9 },
   { type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: SESSION, auditId: '1-audit' },
+  { type: 'REPORT_RETURN_TO_SOURCE', sessionCapabilityId: SESSION, auditId: '1-audit' },
   {
     type: 'REPORT_COMMIT_REVIEW_DECISION', sessionCapabilityId: SESSION, auditId: '1-audit',
     itemId: '5.2.1', occurrenceId: 'occurrence-1', answer: 'não conforme', evaluator: 'Pessoa avaliadora',
@@ -25,6 +29,12 @@ const validMessages = [
   },
   { type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: SESSION, auditId: '1-audit' },
   { type: 'REPORT_DELETE_ALL_AUDITS', sessionCapabilityId: SESSION, auditId: '1-audit' },
+  { type: 'GET_HIGHLIGHT_STATE', sessionCapabilityId: SESSION, auditId: '1-audit' },
+  { type: 'GET_HIGHLIGHT_AVAILABILITY', sessionCapabilityId: SESSION, auditId: '1-audit', occurrenceId: 'occurrence-1' },
+  { type: 'HIGHLIGHT_OCCURRENCE', sessionCapabilityId: SESSION, auditId: '1-audit', occurrenceId: 'occurrence-1' },
+  { type: 'CLEAR_HIGHLIGHT', sessionCapabilityId: SESSION, auditId: '1-audit' },
+  { type: 'AUDITA_HIGHLIGHT_INVALIDATED', nonce: 'N'.repeat(22) },
+  { type: 'AUDITA_PERSONA_AUTONOMOUS_STOP', leaseId: LEASE, reason: 'emergency-stop' },
   { type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit.1', windowId: 9 },
   { type: 'REPORT_CONNECT', auditId: 'audit_1' },
   { type: 'EXPORT_CONNECT', auditId: 'audit:1' },
@@ -171,6 +181,49 @@ test('adds the admitted window only at the panel Port boundary and rejects every
   assert.equal(reads, 0);
 });
 
+test('admits shared highlight intents through the panel Port without adding or accepting a UI window claim', () => {
+  for (const message of validMessages.filter(value => [
+    'GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT',
+  ].includes(value.type))) {
+    const parsed = parsePanelPortIntent(message, 9);
+    assert.equal(parsed.ok, true, message.type);
+    assert.deepEqual(parsed.value, message);
+    assert.equal(Object.hasOwn(parsed.value, 'windowId'), false);
+    assert.deepEqual(parsePanelPortIntent({ ...message, windowId: 9 }, 9), {
+      ok: false, code: 'INVALID_MESSAGE',
+    });
+  }
+  assert.deepEqual(parseWorkerMessage({
+    type: 'HIGHLIGHT_OCCURRENCE', sessionCapabilityId: SESSION, auditId: 'audit-1',
+    occurrenceId: 'occ-1', selector: '#forged',
+  }), { ok: false, code: 'INVALID_MESSAGE' });
+});
+
+test('admits only the exact opaque content invalidation notice outside the panel Port lane', () => {
+  const message = { type: 'AUDITA_HIGHLIGHT_INVALIDATED', nonce: 'N'.repeat(22) };
+  assert.deepEqual(parseWorkerMessage(message), { ok: true, value: message });
+  for (const invalid of [
+    { ...message, nonce: 'short' },
+    { ...message, nonce: 'N'.repeat(22), auditId: 'forged-audit' },
+    { ...message, nonce: 'N'.repeat(22), tabId: 7 },
+  ]) assert.deepEqual(parseWorkerMessage(invalid), { ok: false, code: 'INVALID_MESSAGE' });
+  assert.deepEqual(parsePanelPortIntent(message, 9), { ok: false, code: 'INVALID_MESSAGE' });
+});
+
+test('admits only a minimal exact persona shutdown correlation outside the panel Port lane', () => {
+  for (const reason of ['emergency-stop', 'lifecycle-stop', 'reader-terminal']) {
+    const message = { type: 'AUDITA_PERSONA_AUTONOMOUS_STOP', leaseId: LEASE, reason };
+    assert.deepEqual(parseWorkerMessage(message), { ok: true, value: message });
+    assert.deepEqual(parsePanelPortIntent(message, 9), { ok: false, code: 'INVALID_MESSAGE' });
+  }
+  for (const invalid of [
+    { type: 'AUDITA_PERSONA_AUTONOMOUS_STOP', leaseId: 'short', reason: 'emergency-stop' },
+    { type: 'AUDITA_PERSONA_AUTONOMOUS_STOP', leaseId: LEASE, reason: 'page-text' },
+    { type: 'AUDITA_PERSONA_AUTONOMOUS_STOP', leaseId: LEASE, reason: 'lifecycle-stop', url: 'https://private.test/' },
+    { type: 'AUDITA_PERSONA_AUTONOMOUS_STOP', leaseId: LEASE, reason: 'reader-terminal', selector: '#private' },
+  ]) assert.deepEqual(parseWorkerMessage(invalid), { ok: false, code: 'INVALID_MESSAGE' });
+});
+
 test('persona envelopes reject target coordinates modes outside the closed union and extra fields', () => {
   for (const message of [
     { type: 'PANEL_START_PERSONA', capabilityId: CAPABILITY, mode: 'reader', windowId: 9, tabId: 17 },
@@ -178,6 +231,10 @@ test('persona envelopes reject target coordinates modes outside the closed union
     { type: 'PANEL_REHYDRATE_PERSONA', capabilityId: CAPABILITY, windowId: 9, documentId: 'forged' },
     { type: 'PANEL_SET_PERSONA_MODE', leaseId: LEASE, mode: 'motor', windowId: 9, selector: '#forged' },
     { type: 'PANEL_SET_PERSONA_MODE', leaseId: LEASE, mode: 'reader', windowId: -1 },
+    { type: 'PANEL_READER_STATE', leaseId: LEASE, windowId: 9, caption: 'forjada' },
+    { type: 'PANEL_READER_ACTION', leaseId: LEASE, action: 'clear', windowId: 9 },
+    { type: 'PANEL_READER_ACTION', leaseId: LEASE, action: 'next', windowId: 9, documentId: 'forged' },
+    { type: 'PANEL_READER_ENABLE_VOICE', leaseId: LEASE, windowId: 9, explicitUserGesture: true },
     { type: 'PANEL_STOP_PERSONA', leaseId: LEASE, windowId: 9, explicitActionAt: 1 },
   ]) assert.deepEqual(parseWorkerMessage(message), { ok: false, code: 'INVALID_MESSAGE' });
 });

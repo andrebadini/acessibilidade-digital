@@ -28,7 +28,8 @@ function safeChromeId(value) {
 }
 
 export function createAuditLifecycle(raw) {
-  const input = exact(raw, ['chromeApi', 'getReadyRuntime']);
+  const input = exact(raw, ['chromeApi', 'getReadyRuntime']) ??
+    exact(raw, ['chromeApi', 'getReadyRuntime', 'rebindPanelForNavigation']);
   const updated = input?.chromeApi?.tabs?.onUpdated;
   const removed = input?.chromeApi?.tabs?.onRemoved;
   const detached = input?.chromeApi?.tabs?.onDetached;
@@ -39,11 +40,23 @@ export function createAuditLifecycle(raw) {
     typeof updated?.addListener !== 'function' || typeof updated.removeListener !== 'function' ||
     typeof removed?.addListener !== 'function' || typeof removed.removeListener !== 'function' ||
     detachedMalformed ||
+    (Object.hasOwn(input, 'rebindPanelForNavigation') && typeof input.rebindPanelForNavigation !== 'function') ||
     typeof windowRemoved?.addListener !== 'function' || typeof windowRemoved.removeListener !== 'function') {
     throw new TypeError('AUDIT_LIFECYCLE_INVALID');
   }
 
   let registered = false;
+  const tabTails = new Map();
+
+  function scheduleTab(tabId, operation) {
+    const prior = tabTails.get(tabId) ?? Promise.resolve();
+    const current = prior.then(operation, operation);
+    const tail = current.then(() => undefined, () => undefined);
+    tabTails.set(tabId, tail);
+    void tail.then(() => {
+      if (tabTails.get(tabId) === tail) tabTails.delete(tabId);
+    });
+  }
 
   async function bestEffort(operation) {
     try { await operation(); } catch { /* each lifecycle stage is independently fail-closed */ }
@@ -53,6 +66,9 @@ export function createAuditLifecycle(raw) {
     try {
       const runtime = await input.getReadyRuntime();
       await bestEffort(() => runtime.auditStarter.abortAttachedAuditForTarget({ tabId, windowId: null, reasonCode }));
+      if (personaReason !== null) {
+        await bestEffort(() => runtime.highlightController?.invalidateTab?.(tabId, personaReason));
+      }
       await bestEffort(() => runtime.authority.invalidateForTab(tabId, reasonCode));
       if (personaReason !== null) {
         await bestEffort(() => runtime.personaCoordinator?.invalidateTab?.(tabId, personaReason));
@@ -60,6 +76,9 @@ export function createAuditLifecycle(raw) {
       if (changeInfo !== null) {
         await bestEffort(() => runtime.reportLaunch?.handleTabUpdated?.(tabId, changeInfo));
         await bestEffort(() => runtime.exportLaunch?.handleTabUpdated?.(tabId, changeInfo));
+        if (reasonCode === 'TAB_LOADING' && typeof input.rebindPanelForNavigation === 'function') {
+          await bestEffort(() => input.rebindPanelForNavigation({ tabId }));
+        }
       } else {
         await bestEffort(() => runtime.reportLaunch?.handleTabRemoved?.(tabId));
         await bestEffort(() => runtime.exportLaunch?.handleTabRemoved?.(tabId));
@@ -83,20 +102,24 @@ export function createAuditLifecycle(raw) {
     const status = ownData(changeInfo, 'status');
     const url = ownData(changeInfo, 'url');
     const pendingUrl = ownData(changeInfo, 'pendingUrl');
+    const discarded = ownData(changeInfo, 'discarded');
     const reason = status.found && status.value === 'loading'
       ? 'TAB_LOADING'
       : url.found && typeof url.value === 'string'
         ? 'TAB_URL_CHANGED'
         : pendingUrl.found && typeof pendingUrl.value === 'string'
           ? 'TAB_PENDING_URL'
+          : discarded.found && discarded.value === true
+            ? 'TAB_DISCARDED'
           : null;
-    if (reason) void invalidateTab(tabId, reason, changeInfo, 'navigation');
+    if (reason) scheduleTab(tabId, () => invalidateTab(tabId, reason, changeInfo,
+      reason === 'TAB_DISCARDED' ? 'discarded' : 'navigation'));
   };
   const onTabRemoved = tabId => {
-    if (safeChromeId(tabId)) void invalidateTab(tabId, 'TAB_REMOVED', null, 'tab-removed');
+    if (safeChromeId(tabId)) scheduleTab(tabId, () => invalidateTab(tabId, 'TAB_REMOVED', null, 'tab-removed'));
   };
   const onTabDetached = tabId => {
-    if (safeChromeId(tabId)) void invalidateTab(tabId, 'TAB_REMOVED', null, 'window-changed');
+    if (safeChromeId(tabId)) scheduleTab(tabId, () => invalidateTab(tabId, 'TAB_REMOVED', null, 'window-changed'));
   };
   const onWindowRemoved = windowId => { if (safeChromeId(windowId)) void invalidateWindow(windowId); };
 
