@@ -443,6 +443,91 @@ test('registerAndPublishViewOnly durably registers without a port and preserves 
   assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].auditId, 'foreign-audit');
 });
 
+test('view-only pending registration reconciles a landed write when its first confirmation read throws', async () => {
+  const resultBundle = await bundle();
+  const env = fixture();
+  const key = panelBootstrapStorageKey(9);
+  const originalGet = env.sessionArea.get.bind(env.sessionArea);
+  const originalSet = env.sessionArea.set.bind(env.sessionArea);
+  let pendingWritten = false;
+  let confirmationFailed = false;
+  env.sessionArea.set = async entries => {
+    await originalSet(entries);
+    pendingWritten = true;
+  };
+  env.sessionArea.get = async requestedKey => {
+    if (requestedKey === key && pendingWritten && !confirmationFailed) {
+      confirmationFailed = true;
+      throw new Error('PRIVATE_CONFIRMATION_FAILURE');
+    }
+    return originalGet(requestedKey);
+  };
+
+  const registration = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
+    auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
+    createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
+  }));
+
+  assert.deepEqual(registration, { registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' });
+  assert.equal(confirmationFailed, true);
+  assert.equal(Object.hasOwn(env.sessionArea.values, key), false);
+  assert.doesNotMatch(JSON.stringify(registration), /PRIVATE_CONFIRMATION_FAILURE/u);
+});
+
+test('view-only pending confirmation preserves stable foreign drift and requires recovery', async () => {
+  const resultBundle = await bundle();
+  const env = fixture();
+  const key = panelBootstrapStorageKey(9);
+  const foreign = {
+    version: 1, kind: 'audit-session', auditId: 'foreign-audit', sessionCapabilityId: 'F'.repeat(22),
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  const originalSet = env.sessionArea.set.bind(env.sessionArea);
+  env.sessionArea.set = async entries => {
+    await originalSet(entries);
+    env.sessionArea.values[key] = structuredClone(foreign);
+  };
+
+  const registration = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
+    auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
+    createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
+  }));
+
+  assert.deepEqual(registration, { registered: false, delivered: false, code: 'AUDIT_RECOVERY_REQUIRED' });
+  assert.deepEqual(env.sessionArea.values[key], foreign);
+});
+
+test('view-only consumed confirmation preserves stable foreign drift and cannot claim registration', async () => {
+  const resultBundle = await bundle();
+  const env = fixture();
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  const key = panelBootstrapStorageKey(9);
+  const foreign = {
+    version: 1, kind: 'audit-session', auditId: 'foreign-audit', sessionCapabilityId: 'F'.repeat(22),
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'consumed',
+  };
+  const originalSet = env.sessionArea.set.bind(env.sessionArea);
+  let writes = 0;
+  env.sessionArea.set = async entries => {
+    await originalSet(entries);
+    writes += 1;
+    if (writes === 2) env.sessionArea.values[key] = structuredClone(foreign);
+  };
+
+  const registration = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
+    auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
+    createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
+  }));
+
+  assert.equal(writes, 2);
+  assert.deepEqual(registration, { registered: false, delivered: false, code: 'AUDIT_RECOVERY_REQUIRED' });
+  assert.deepEqual(env.sessionArea.values[key], foreign);
+  assert.equal(connected.messages.some(message => message.state === 'view-only'), false);
+});
+
 test('view-only registration restores the exact prior bootstrap when ACTIVE appears during the pending write', async () => {
   const resultBundle = await bundle();
   const env = fixture();
@@ -471,7 +556,7 @@ test('view-only registration restores the exact prior bootstrap when ACTIVE appe
   assert.deepEqual(env.getActive(), foreignRunningActive());
 });
 
-test('view-only registration removes only its own bootstrap when ACTIVE appears during the consumed write', async () => {
+test('view-only registration rolls consumed back to confirmed pending when ACTIVE appears during the consumed write', async () => {
   const resultBundle = await bundle();
   const env = fixture();
   const connected = port();
@@ -491,13 +576,14 @@ test('view-only registration removes only its own bootstrap when ACTIVE appears 
     createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
   }));
 
-  assert.deepEqual(registration, { registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' });
-  assert.equal(Object.hasOwn(env.sessionArea.values, panelBootstrapStorageKey(9)), false);
+  assert.deepEqual(registration, { registered: true, delivered: false });
+  assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].state, 'pending');
+  assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].sessionCapabilityId, VIEW_SESSION);
   assert.equal(connected.messages.some(message => message.state === 'view-only'), false);
   assert.deepEqual(env.getActive(), foreignRunningActive());
 });
 
-test('view-only registration rechecks ACTIVE after reproof and before publication', async () => {
+test('view-only registration rechecks ACTIVE after reproof and retains only confirmed pending registration', async () => {
   const resultBundle = await bundle();
   const env = fixture();
   const connected = port();
@@ -517,8 +603,9 @@ test('view-only registration rechecks ACTIVE after reproof and before publicatio
     createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
   }));
 
-  assert.deepEqual(registration, { registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' });
-  assert.equal(Object.hasOwn(env.sessionArea.values, panelBootstrapStorageKey(9)), false);
+  assert.deepEqual(registration, { registered: true, delivered: false });
+  assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].state, 'pending');
+  assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].sessionCapabilityId, VIEW_SESSION);
   assert.equal(connected.messages.some(message => message.state === 'view-only'), false);
   assert.deepEqual(env.getActive(), foreignRunningActive());
 });

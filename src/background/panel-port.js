@@ -218,34 +218,69 @@ export function createPanelPortCoordinator(raw) {
     return first;
   }
 
-  async function writeBootstrap(record, assertOwned = null) {
-    const canonical = parseBootstrap(record);
-    if (!canonical) throw new Error('PANEL_BOOTSTRAP_DENIED');
-    const key = panelBootstrapStorageKey(canonical.windowId);
-    reassert(assertOwned);
-    await input.sessionArea.set({ [key]: canonical });
-    reassert(assertOwned);
-    const confirmed = await readBootstrap(canonical.windowId, assertOwned);
-    reassert(assertOwned);
-    if (!same(confirmed, canonical)) throw new Error('PANEL_BOOTSTRAP_DENIED');
-    return confirmed;
+  function replacementOutcome(state, record, rollback = null) {
+    return Object.freeze({ state, record, rollback });
   }
 
-  async function restoreBootstrap(previous, replacement, assertOwned) {
-    const current = await readBootstrap(replacement.windowId, assertOwned);
-    reassert(assertOwned);
-    if (!same(current, replacement)) return false;
-    if (previous !== null) {
-      const restored = await writeBootstrap(previous, assertOwned);
+  async function reconcileBootstrapReplacement(operation, assertOwned) {
+    let current;
+    try {
+      current = await readBootstrap(operation.candidate.windowId, assertOwned);
       reassert(assertOwned);
-      return same(restored, previous);
+    } catch (error) {
+      if (error === scopeDeniedSentinel) throw error;
+      return replacementOutcome('recovery-required', null);
     }
-    reassert(assertOwned);
-    await input.sessionArea.remove(panelBootstrapStorageKey(replacement.windowId));
-    reassert(assertOwned);
-    const removed = await readBootstrap(replacement.windowId, assertOwned);
-    reassert(assertOwned);
-    return removed === null;
+    if (same(current, operation.previous)) return replacementOutcome('rolled-back', operation.previous);
+    if (!same(current, operation.candidate)) return replacementOutcome('recovery-required', null);
+
+    try {
+      reassert(assertOwned);
+      if (operation.previous === null) {
+        await input.sessionArea.remove(panelBootstrapStorageKey(operation.candidate.windowId));
+      } else {
+        await input.sessionArea.set({
+          [panelBootstrapStorageKey(operation.candidate.windowId)]: operation.previous,
+        });
+      }
+      reassert(assertOwned);
+    } catch (error) {
+      if (error === scopeDeniedSentinel) throw error;
+      // The storage effect may have landed before rejecting; the confirming read below is authoritative.
+    }
+
+    try {
+      const restored = await readBootstrap(operation.candidate.windowId, assertOwned);
+      reassert(assertOwned);
+      return same(restored, operation.previous)
+        ? replacementOutcome('rolled-back', operation.previous)
+        : replacementOutcome('recovery-required', null);
+    } catch (error) {
+      if (error === scopeDeniedSentinel) throw error;
+      return replacementOutcome('recovery-required', null);
+    }
+  }
+
+  async function replaceBootstrap(previousValue, candidateValue, assertOwned = null) {
+    const previous = previousValue === null ? null : parseBootstrap(previousValue);
+    const candidate = parseBootstrap(candidateValue);
+    if (!candidate || (previousValue !== null && !previous) ||
+      (previous !== null && previous.windowId !== candidate.windowId)) {
+      throw new Error('PANEL_BOOTSTRAP_DENIED');
+    }
+    const operation = Object.freeze({ previous, candidate });
+    const rollback = () => reconcileBootstrapReplacement(operation, assertOwned);
+    try {
+      reassert(assertOwned);
+      await input.sessionArea.set({ [panelBootstrapStorageKey(candidate.windowId)]: candidate });
+      reassert(assertOwned);
+      const confirmed = await readBootstrap(candidate.windowId, assertOwned);
+      reassert(assertOwned);
+      if (same(confirmed, candidate)) return replacementOutcome('committed', confirmed, rollback);
+    } catch (error) {
+      if (error === scopeDeniedSentinel) throw error;
+    }
+    return reconcileBootstrapReplacement(operation, assertOwned);
   }
 
   async function readSession(sessionCapabilityId, auditId, assertOwned = null) {
@@ -374,12 +409,16 @@ export function createPanelPortCoordinator(raw) {
     }
     let current = bootstrap;
     if (rotate) {
-      current = await writeBootstrap({ ...bootstrap, state: 'pending' }, assertOwned);
+      const rotation = await replaceBootstrap(bootstrap, { ...bootstrap, state: 'pending' }, assertOwned);
       reassert(assertOwned);
+      if (rotation.state !== 'committed') throw new Error('PANEL_BOOTSTRAP_DENIED');
+      current = rotation.record;
     }
     if (current.state !== 'pending') throw new Error('PANEL_BOOTSTRAP_DENIED');
-    current = await writeBootstrap({ ...current, state: 'consumed' }, assertOwned);
+    const consumption = await replaceBootstrap(current, { ...current, state: 'consumed' }, assertOwned);
     reassert(assertOwned);
+    if (consumption.state !== 'committed') throw new Error('PANEL_BOOTSTRAP_DENIED');
+    current = consumption.record;
     const context = await reprove(binding, assertOwned);
     reassert(assertOwned);
     if (!context) throw new Error('PANEL_CONTEXT_DENIED');
@@ -407,16 +446,18 @@ export function createPanelPortCoordinator(raw) {
         sessionCapabilityId: minted.sessionCapabilityId, windowId: bootstrap.windowId,
         createdAt, expiresAt: minted.expiresAt, state: 'consumed',
       });
-      replacement = await writeBootstrap(replacement);
+      const operation = await replaceBootstrap(bootstrap, replacement);
+      if (operation.state !== 'committed') throw new Error('PANEL_TERMINAL_DENIED');
+      replacement = operation;
       if (await readActive() !== null) throw new Error('PANEL_TERMINAL_DENIED');
       if (!await reprove(binding)) throw new Error('PANEL_TERMINAL_DENIED');
       if (await readActive() !== null) throw new Error('PANEL_TERMINAL_DENIED');
-      send(binding, packet('view-only', replacement.auditId, replacement.sessionCapabilityId, resultBundle));
-      bind(binding, replacement.windowId, 'bound-session', replacement.auditId, replacement.sessionCapabilityId);
+      send(binding, packet('view-only', replacement.record.auditId, replacement.record.sessionCapabilityId, resultBundle));
+      bind(binding, replacement.record.windowId, 'bound-session', replacement.record.auditId, replacement.record.sessionCapabilityId);
       return true;
     } catch {
-      if (replacement !== null) {
-        try { await restoreBootstrap(bootstrap, replacement, null); }
+      if (replacement?.state === 'committed') {
+        try { await replacement.rollback(); }
         catch { /* publication remains denied */ }
       }
       if (minted?.ok === true && CAPABILITY.test(minted.sessionCapabilityId ?? '')) {
@@ -515,12 +556,12 @@ export function createPanelPortCoordinator(raw) {
         if (existing && (existing.auditId !== args.auditId || existing.sessionCapabilityId !== args.sessionCapabilityId ||
           existing.windowId !== args.windowId)) return false;
         assertOwned();
-        const bootstrap = await writeBootstrap({
+        const replacement = await replaceBootstrap(existing, {
           version: 1, kind: 'audit-session', auditId: args.auditId, sessionCapabilityId: args.sessionCapabilityId,
           windowId: args.windowId, createdAt: args.createdAt, expiresAt: args.expiresAt, state: 'pending',
         }, assertOwned);
         assertOwned();
-        return Boolean(bootstrap);
+        return replacement.state === 'committed';
       } catch (error) {
         if (error === scopeDeniedSentinel) throw error;
         return false;
@@ -598,6 +639,7 @@ export function createPanelPortCoordinator(raw) {
       let registered = false;
       let previous = null;
       let replacement = null;
+      let replacementStage = null;
       try {
         assertOwned();
         const resultBundle = copyPanelResultBundleV1(args.resultBundle);
@@ -620,12 +662,16 @@ export function createPanelPortCoordinator(raw) {
         }
         await requireActiveAbsent(assertOwned);
         assertOwned();
-        const pending = await writeBootstrap({
+        const pendingOperation = await replaceBootstrap(previous, {
           version: 1, kind: 'audit-session', auditId: args.auditId, sessionCapabilityId: args.sessionCapabilityId,
           windowId: args.windowId, createdAt: args.createdAt, expiresAt: args.expiresAt, state: 'pending',
         }, assertOwned);
         assertOwned();
-        replacement = pending;
+        if (pendingOperation.state === 'recovery-required') return recoveryRequiredRegistration();
+        if (pendingOperation.state !== 'committed') return deniedRegistration();
+        const pending = pendingOperation.record;
+        replacement = pendingOperation;
+        replacementStage = 'pending';
         await requireActiveAbsent(assertOwned);
         assertOwned();
         registered = true;
@@ -634,9 +680,13 @@ export function createPanelPortCoordinator(raw) {
         if (binding.auditId && binding.auditId !== args.auditId) return Object.freeze({ registered: true, delivered: false });
         await requireActiveAbsent(assertOwned);
         assertOwned();
-        const consumed = await writeBootstrap({ ...pending, state: 'consumed' }, assertOwned);
+        const consumedOperation = await replaceBootstrap(pending, { ...pending, state: 'consumed' }, assertOwned);
         assertOwned();
-        replacement = consumed;
+        if (consumedOperation.state === 'recovery-required') return recoveryRequiredRegistration();
+        if (consumedOperation.state !== 'committed') return Object.freeze({ registered: true, delivered: false });
+        const consumed = consumedOperation.record;
+        replacement = consumedOperation;
+        replacementStage = 'consumed';
         await requireActiveAbsent(assertOwned);
         assertOwned();
         const context = await reprove(binding, assertOwned);
@@ -652,9 +702,11 @@ export function createPanelPortCoordinator(raw) {
         if (error === activeConflictSentinel) {
           if (replacement) {
             try {
-              const restored = await restoreBootstrap(previous, replacement, assertOwned);
+              const restored = await replacement.rollback();
               assertOwned();
-              if (!restored) return recoveryRequiredRegistration();
+              if (restored.state === 'recovery-required') return recoveryRequiredRegistration();
+              if (restored.state !== 'rolled-back') return recoveryRequiredRegistration();
+              if (replacementStage === 'consumed') return Object.freeze({ registered: true, delivered: false });
             }
             catch (restoreError) {
               if (restoreError === scopeDeniedSentinel) throw restoreError;
