@@ -510,6 +510,13 @@ test('renders a complete no-JS source, one live region and independent print saf
   assert.match(html, /@media \(forced-colors:active\)/u);
   assert.match(html, /@media \(prefers-reduced-motion:reduce\)/u);
   assert.match(html, /select,button\{[^}]*min-height:44px/u);
+  assert.match(html, /\[data-report-metrics\]\{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/u);
+  assert.match(html, /@media \(min-width:48rem\)\{[^]*?\[data-report-metrics\]\{[^}]*grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/u);
+  assert.match(html, /\[data-report-evidence-preview\]\{[^}]*grid-template-columns:minmax\(0,1fr\)/u);
+  assert.match(html, /@media \(min-width:48rem\)[^]*?\[data-report-evidence-preview\]\{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/u);
+  assert.match(html, /@media print\{[^]*?\[data-report-technical\]:not\(\[open\]\)>\*:not\(summary\),\[data-report-limitations\]:not\(\[open\]\)>\*:not\(summary\)\{display:block!important\}/u);
+  assert.match(html, /@media print\{[^]*?\.report-view-document \.report-header[^}]*display:none!important/u);
+  assert.match(html, /@media print\{[^]*?\[data-report-evidence-preview\] figure[^}]*break-inside:avoid/u);
 });
 
 test('renders present, absent, unknown, partial and not-recorded widget inventory states without changing findings', () => {

@@ -28,7 +28,12 @@ const SECTION_TITLES = Object.freeze([
   'Matriz completa dos 146 itens',
   'Metodologia, fontes, integridade, evidências técnicas e anexos',
 ]);
+const SECTION_NAV_LABELS = Object.freeze([
+  'Sumário', 'Resultados', 'Não conformidades', 'Revisões humanas', 'Anúncios',
+  'Matriz ABNT', 'Metodologia e evidências',
+]);
 const MAX_GRAPH_NODES = 200_000;
+const FALLBACK_CORRECTION = 'Revise o elemento e aplique a orientação técnica antes de executar uma nova auditoria.';
 
 function denied() { throw new TypeError('REPORT_VIEW_DENIED'); }
 
@@ -144,11 +149,6 @@ function untestedLimitationLabel(model, value) {
   return `Verificação não testada: ${item?.title ?? rule?.summary ?? 'verificação do escopo'} — ${pageLabel(model, pageId)}.`;
 }
 
-function groupMetric(view, group) {
-  const cards = view.issues[group];
-  return { checkKeys: cards.length, occurrences: cards.reduce((total, card) => total + card.occurrences.length, 0) };
-}
-
 function countLabel(count, singular, plural) { return `${count} ${count === 1 ? singular : plural}`; }
 
 function remediationForOccurrence(model, occurrence) {
@@ -157,6 +157,19 @@ function remediationForOccurrence(model, occurrence) {
   const target = rule?.targets?.find(candidate => candidate && typeof candidate === 'object' && !Array.isArray(candidate) &&
     typeof candidate.message === 'string' && (candidate.nodeId === 'document' ? null : String(candidate.nodeId)) === occurrenceNode);
   return target?.message ?? null;
+}
+
+function plainImpact(group) {
+  if (group === 'failed') {
+    return 'Esta barreira pode dificultar ou impedir a tarefa para pessoas que dependem deste requisito de acessibilidade.';
+  }
+  if (group === 'humanReview') {
+    return 'Esta verificação depende de análise humana; ainda não há conclusão sobre o atendimento do requisito.';
+  }
+  if (group === 'alerts') {
+    return 'Este alerta merece análise porque pode indicar uma barreira ou uma prática que precisa de correção.';
+  }
+  return 'Este resultado positivo se limita ao escopo automático que foi efetivamente observado.';
 }
 
 export function collectFilterOptions(model, summary) {
@@ -192,7 +205,7 @@ export function projectExecutive(model, summary) {
   });
 }
 
-function projectCard(card, model, decisionByOccurrence) {
+function projectCard(card, group, model, decisionByOccurrence) {
   const officialItemById = new Map(NBR17225_ITEMS.map(item => [item.id, item]));
   const occurrences = card.occurrenceIds.map(id => model.occurrences.find(row => row.occurrenceId === id)).filter(Boolean)
     .map(occurrence => {
@@ -213,13 +226,20 @@ function projectCard(card, model, decisionByOccurrence) {
         remediation: remediationForOccurrence(model, occurrence),
       };
     });
+  const remediation = occurrences.find(occurrence => occurrence.remediation !== null)?.remediation ?? null;
   return freeze({
     checkKey: card.checkKey, pageId: card.pageId, engine: card.engine, ruleId: card.ruleId,
     title: card.title, originalOutcome: card.originalOutcome, displayOutcome: card.displayOutcome,
     classification: card.classification, impact: card.impact, wcag: [...card.wcag],
     abntItemIds: [...card.abntItemIds], context: card.context, occurrenceIds: [...card.occurrenceIds],
     accessibleName: card.accessibleName, announcement: card.announcement,
-    remediation: occurrences.find(occurrence => occurrence.remediation !== null)?.remediation ?? null, occurrences,
+    remediation,
+    plainLanguage: {
+      impact: plainImpact(group),
+      observed: [...new Set(occurrences.map(occurrence => occurrence.justification).filter(value => typeof value === 'string' && value))],
+      correction: remediation ?? FALLBACK_CORRECTION,
+    },
+    occurrences,
   });
 }
 
@@ -227,7 +247,7 @@ export function projectIssues(model, summary) {
   const decisions = new Map(model.reviewDecisions.map(decision => [decision.occurrenceId, decision]));
   return freeze(Object.fromEntries(GROUPS.map(group => [
     group,
-    summary.groups[group].map(card => projectCard(card, model, decisions))
+    summary.groups[group].map(card => projectCard(card, group, model, decisions))
       .sort((left, right) => left.checkKey.localeCompare(right.checkKey)),
   ])));
 }
@@ -324,9 +344,9 @@ function sectionNavigation(document) {
   navigation.setAttribute('class', 'section-nav');
   navigation.setAttribute('aria-label', 'Seções do relatório');
   navigation.setAttribute('data-report-navigation', '');
-  navigation.append(element(document, 'strong', 'Navegue pelo relatório'));
+  navigation.append(element(document, 'strong', 'Ir para'));
   const list = document.createElement('ul');
-  for (const [index, title] of SECTION_TITLES.entries()) {
+  for (const [index, title] of SECTION_NAV_LABELS.entries()) {
     const item = document.createElement('li');
     const link = element(document, 'a', title);
     link.setAttribute('href', `#report-section-${index + 1}`);
@@ -338,32 +358,92 @@ function sectionNavigation(document) {
 
 function isSafePngDataUrl(value) { return typeof value === 'string' && /^data:image\/png;base64,[A-Za-z0-9+/]+=*$/u.test(value); }
 
-function appendEvidenceDetails(document, article, issue, evidenceById) {
-  const evidenceIds = [...new Set(issue.occurrences.flatMap(occurrence => occurrence.evidenceRefs))];
+function plainBlock(document, name, title) {
+  const block = document.createElement('section');
+  block.setAttribute('class', 'issue-plain-block');
+  block.setAttribute('data-report-plain-block', name);
+  block.append(element(document, 'h4', title));
+  return block;
+}
+
+function correlatedEvidence(issue, evidenceById) {
+  const evidenceIds = new Set(issue.occurrences.flatMap(occurrence => occurrence.evidenceRefs));
+  return [...evidenceById.values()].filter(evidence => evidenceIds.has(evidence.evidenceId));
+}
+
+function appendTechnicalDetails(document, article, issue, evidence) {
   const details = document.createElement('details');
-  details.append(element(document, 'summary', 'Evidências técnicas'));
-  for (const evidenceId of evidenceIds) {
-    const evidence = evidenceById.get(evidenceId);
-    if (!evidence) continue;
-    const block = document.createElement('section'); block.setAttribute('data-report-occurrence-evidence', evidenceId);
+  details.setAttribute('data-report-technical', '');
+  details.append(
+    element(document, 'summary', 'Ver detalhes técnicos'),
+    element(document, 'p', `Resultado original: ${outcomeLabel(issue.originalOutcome)}. Resultado consolidado: ${outcomeLabel(issue.displayOutcome)}.`),
+    element(document, 'p', `Contexto técnico: ${issue.context ?? 'não registrado'}. Página: ${issue.pageId}.`),
+  );
+  for (const occurrence of issue.occurrences) {
+    const block = document.createElement('section');
+    block.setAttribute('data-report-occurrence-technical', occurrence.occurrenceId);
     block.append(
-      element(document, 'h4', `${evidenceId} — ${evidenceKindLabel(evidence.kind)}`),
-      element(document, 'p', `URL: ${evidence.mediaUrl ?? 'não registrada.'}`),
-      element(document, 'p', `Horário: ${evidence.observedAt ?? 'não registrado.'}`),
-      element(document, 'p', `Seletor: ${evidence.selector?.css ?? 'não registrado.'}`),
-      element(document, 'p', `Snippet: ${evidence.snippet ?? 'não disponível.'}`),
+      element(document, 'h4', `ID da ocorrência: ${occurrence.occurrenceId}`),
+      element(document, 'p', `Proveniência: Página ${issue.pageId}; Motor ${occurrence.source.engine}; Regra ${occurrence.source.ruleId}; Versão ${occurrence.source.version}.`),
+      element(document, 'p', `Item ABNT: ${occurrence.itemId}. Classificação: ${classificationLabel(occurrence.classification)}.`),
     );
-    if (isSafePngDataUrl(evidence.dataUrl)) {
-      const image = document.createElement('img'); image.setAttribute('src', evidence.dataUrl);
-      image.setAttribute('alt', `${evidenceKindLabel(evidence.kind)} local da evidência ${evidenceId}`);
-      image.setAttribute('class', 'evidence-media'); block.append(image);
-    } else block.append(element(document, 'p', 'Imagem segura: PNG local não disponível.'));
+    details.append(block);
+  }
+  for (const item of evidence) {
+    const block = document.createElement('section');
+    block.setAttribute('data-report-occurrence-evidence', item.evidenceId);
+    block.append(
+      element(document, 'h4', `ID da evidência: ${item.evidenceId} — ${evidenceKindLabel(item.kind)}`),
+      element(document, 'p', `Proveniência: página ${item.pageId}; tipo ${item.kind}; estado ${item.state ?? 'não registrado'}.`),
+      element(document, 'p', `URL: ${item.mediaUrl ?? 'não registrada.'}`),
+      element(document, 'p', `Horário: ${item.observedAt ?? 'não registrado.'}`),
+      element(document, 'p', `Seletor: ${item.selector?.css ?? 'não registrado.'}`),
+      element(document, 'p', `Snippet: ${item.snippet ?? 'não disponível.'}`),
+      element(document, 'p', `Hash: ${item.hash ?? 'não disponível.'}`),
+    );
     details.append(block);
   }
   article.append(details);
 }
 
-function issueArticle(document, issue, group, evidenceById) {
+function appendEvidencePreview(document, article, evidence, evidenceAnchorById) {
+  const preview = document.createElement('section');
+  preview.setAttribute('data-report-evidence-preview', '');
+  preview.append(element(document, 'h4', 'Capturas registradas'));
+  const selected = [
+    evidence.find(item => item.kind === 'element' && isSafePngDataUrl(item.dataUrl)),
+    evidence.find(item => item.kind === 'full-page' && isSafePngDataUrl(item.dataUrl)),
+  ].filter(Boolean);
+  if (selected.length === 0) {
+    preview.append(element(document, 'p', 'Nenhuma captura PNG local está disponível para esta verificação.'));
+  } else {
+    for (const item of selected) {
+      const figure = document.createElement('figure');
+      figure.setAttribute('data-evidence-kind', item.kind);
+      const image = document.createElement('img');
+      image.setAttribute('src', item.dataUrl);
+      image.setAttribute('alt', `${evidenceKindLabel(item.kind)} local da evidência ${item.evidenceId}`);
+      image.setAttribute('class', 'evidence-media');
+      figure.append(image, element(document, 'figcaption', `${evidenceKindLabel(item.kind)} — evidência ${item.evidenceId}.`));
+      preview.append(figure);
+    }
+  }
+  article.append(preview);
+  const fallback = element(document, 'p', 'O destaque ao vivo não está disponível neste relatório. Consulte as capturas registradas no momento da auditoria.');
+  fallback.setAttribute('data-report-live-action', 'evidence-only');
+  article.append(fallback);
+  const firstAnchor = evidence.map(item => evidenceAnchorById.get(item.evidenceId)).find(Boolean);
+  if (firstAnchor) {
+    const link = element(document, 'a', 'Consultar evidências registradas');
+    link.setAttribute('data-report-consult-evidence', '');
+    link.setAttribute('href', `#${firstAnchor}`);
+    article.append(link);
+  } else {
+    article.append(element(document, 'p', 'Nenhuma evidência correlata foi registrada para esta verificação.'));
+  }
+}
+
+function issueArticle(document, issue, group, evidenceById, evidenceAnchorById) {
   const article = document.createElement('article');
   article.setAttribute('data-report-issue', '');
   article.setAttribute('data-result', group);
@@ -373,23 +453,46 @@ function issueArticle(document, issue, group, evidenceById) {
   article.setAttribute('data-impact', issue.impact ?? 'none');
   article.setAttribute('data-wcag', issue.wcag.join(' '));
   article.setAttribute('data-abnt', issue.abntItemIds.join(' '));
-  article.append(
+  const heading = document.createElement('header');
+  heading.setAttribute('data-report-issue-heading', '');
+  heading.append(
     element(document, 'h3', issue.title),
-    element(document, 'p', `Resultado consolidado: ${outcomeLabel(issue.displayOutcome)}. Resultado original: ${outcomeLabel(issue.originalOutcome)}.`),
-    element(document, 'p', `Impacto: ${impactLabel(issue.impact)}. Classificação: ${classificationLabel(issue.classification)}.`),
-    element(document, 'p', `Observação: ${issue.context ?? 'Sem observação adicional registrada.'}`),
-    element(document, 'p', `Correção: ${issue.remediation ?? 'revise o elemento e aplique a orientação técnica antes de nova auditoria.'}`),
-    element(document, 'p', 'Confirmar: repita a verificação após a correção.'),
-    element(document, 'p', `WCAG: ${issue.wcag.join(', ') || 'sem referência'}. ABNT: ${issue.abntItemIds.join(', ') || 'sem item'}.`),
-    element(document, 'p', `Nome acessível: ${issue.accessibleName ?? 'não disponível'}.`),
-    element(document, 'p', `Prévia estimada de anúncio: ${issue.announcement ?? 'indisponível'}.`),
+    element(document, 'p', `Estado consolidado: ${outcomeLabel(issue.displayOutcome)}.`),
+    element(document, 'p', `Classificação: ${classificationLabel(issue.classification)}. Impacto: ${impactLabel(issue.impact)}.`),
   );
-  for (const occurrence of issue.occurrences) {
-    article.append(element(document, 'p', occurrence.legalReference
-      ? `${occurrence.legalReference.label}: ${occurrence.legalReference.text} ${occurrence.legalReference.qualification}`
-      : 'Referência técnica e jurídica qualificada: não aplicável a este resultado.'));
+  article.append(heading);
+  const impact = plainBlock(document, 'impact', 'Impacto para a pessoa usuária');
+  impact.append(element(document, 'p', issue.plainLanguage.impact)); article.append(impact);
+  const observed = plainBlock(document, 'observed', 'O que foi observado');
+  appendTextList(document, observed, issue.plainLanguage.observed, 'Nenhuma justificativa adicional foi registrada.');
+  article.append(observed);
+  const correction = plainBlock(document, 'correction', 'Como corrigir e confirmar');
+  correction.append(
+    element(document, 'p', `Correção: ${issue.plainLanguage.correction}`),
+    element(document, 'p', 'Confirmação: repita a verificação após a correção.'),
+  );
+  article.append(correction);
+  const announcement = plainBlock(document, 'announcement', 'Nome acessível e anúncio estimado');
+  announcement.append(
+    element(document, 'p', `Nome acessível: ${issue.accessibleName ?? 'não disponível'}.`),
+    element(document, 'p', `Anúncio estimado: ${issue.announcement ?? 'indisponível'}.`),
+    element(document, 'p', 'Esta prévia não é transcrição literal de tecnologia assistiva e pode variar conforme o leitor e as preferências.'),
+  );
+  article.append(announcement);
+  const normative = plainBlock(document, 'normative', 'Fundamentação normativa');
+  normative.append(element(document, 'p', `WCAG 2.2: ${issue.wcag.join(', ') || 'sem referência'}. ABNT NBR 17225: ${issue.abntItemIds.join(', ') || 'sem item'}.`));
+  article.append(normative);
+  const legalReferences = issue.occurrences.map(occurrence => occurrence.legalReference).filter(Boolean);
+  if (legalReferences.length > 0) {
+    const legal = plainBlock(document, 'legal', 'Fundamentação legal qualificada');
+    for (const reference of legalReferences) {
+      legal.append(element(document, 'p', `${reference.label}: ${reference.text} ${reference.qualification}`));
+    }
+    article.append(legal);
   }
-  appendEvidenceDetails(document, article, issue, evidenceById);
+  const evidence = correlatedEvidence(issue, evidenceById);
+  appendEvidencePreview(document, article, evidence, evidenceAnchorById);
+  appendTechnicalDetails(document, article, issue, evidence);
   return article;
 }
 
@@ -452,35 +555,62 @@ export function renderReportView({ view, document, onExport } = {}) {
   identity.append(
     element(document, 'p', 'Audita Acessibilidade — relatório técnico independente'),
     element(document, 'p', `Escopo avaliado: ${view.executive.identity.finalUrl}`),
-    element(document, 'p', `Estado: ${statusLabel(view.executive.status)}. Revisão do modelo: ${view.modelRevision}.`),
   );
   root.append(identity);
-  root.append(sectionNavigation(document));
   const live = element(document, 'p');
   live.setAttribute('class', 'report-filter-status');
   live.setAttribute('role', 'status'); live.setAttribute('aria-live', 'polite'); live.setAttribute('aria-atomic', 'true');
 
   const executive = section(document, 0);
-  const metrics = document.createElement('div'); metrics.setAttribute('class', 'report-metrics');
-  for (const [group, label] of [
-    ['failed', 'Não conformidades'], ['alerts', 'Alertas'],
-    ['humanReview', 'Revisões humanas'], ['passed', 'Resultados positivos'],
+  const outcome = element(document, 'p', `Estado da auditoria: ${statusLabel(view.executive.status)}.`, 'executive-outcome');
+  outcome.setAttribute('data-report-outcome', '');
+  executive.append(outcome);
+  const coverageSummary = document.createElement('div');
+  coverageSummary.setAttribute('class', 'executive-coverage');
+  coverageSummary.setAttribute('data-report-coverage', '');
+  coverageSummary.append(
+    element(document, 'strong', view.executive.coverage.status === 'available'
+      ? `Cobertura automática: ${view.executive.coverage.percent}.`
+      : 'Cobertura automática: indisponível.'),
+    element(document, 'span', ' Mede a execução automática; não é nota, certificação ou declaração de conformidade.'),
+  );
+  executive.append(coverageSummary);
+  const metrics = document.createElement('div');
+  metrics.setAttribute('class', 'report-metrics');
+  metrics.setAttribute('data-report-metrics', '');
+  for (const [group, label, count] of [
+    ['failed', 'Não conformidades', view.executive.counts.errors],
+    ['alerts', 'Alertas', view.executive.counts.alerts],
+    ['humanReview', 'Revisões humanas', view.executive.counts.humanReview],
+    ['passed', 'Resultados positivos', view.executive.counts.positive],
   ]) {
-    const metric = groupMetric(view, group);
     const card = document.createElement('article'); card.setAttribute('data-report-metric', group);
     card.append(
-      element(document, 'strong', String(metric.checkKeys), 'metric-value'),
+      element(document, 'strong', String(count.checkKeys), 'metric-value'),
       element(document, 'span', label, 'metric-label'),
-      element(document, 'small', `${countLabel(metric.checkKeys, 'verificação', 'verificações')} · ${countLabel(metric.occurrences, 'ocorrência', 'ocorrências')}`, 'metric-detail'),
+      element(document, 'small', `${countLabel(count.checkKeys, 'verificação', 'verificações')} · ${countLabel(count.occurrences, 'ocorrência', 'ocorrências')}`, 'metric-detail'),
     );
     metrics.append(card);
   }
   executive.append(metrics);
-  appendTextList(document, executive, view.executive.limitations, 'Nenhuma limitação crítica registrada.');
+  const limitations = document.createElement('details');
+  limitations.setAttribute('data-report-limitations', '');
+  limitations.append(element(document, 'summary', `Limitações registradas (${view.executive.limitations.length})`));
+  appendTextList(document, limitations, view.executive.limitations, 'Nenhuma limitação crítica registrada.');
+  const actions = document.createElement('div');
+  actions.setAttribute('class', 'executive-actions');
+  actions.setAttribute('data-report-executive-actions', '');
+  const exportButton = element(document, 'button', 'Exportar HTML, PDF, CSV e JSON');
+  exportButton.setAttribute('type', 'button'); exportButton.setAttribute('data-report-export', '');
+  exportButton.addEventListener('click', () => onExport());
+  actions.append(exportButton);
+  executive.append(actions, limitations);
   root.append(executive);
+  root.append(sectionNavigation(document));
 
   const coverage = section(document, 1);
   const evidenceById = new Map(view.technicalEvidence.map(evidence => [evidence.evidenceId, evidence]));
+  const evidenceAnchorById = new Map(view.technicalEvidence.map((evidence, index) => [evidence.evidenceId, `report-evidence-${index + 1}`]));
   coverage.append(element(document, 'p', view.executive.coverage.status === 'available'
     ? `Cobertura automática: ${view.executive.coverage.percent}.`
     : 'Cobertura automática indisponível.'));
@@ -492,19 +622,19 @@ export function renderReportView({ view, document, onExport } = {}) {
     groupNode.append(element(document, 'h3', `${GROUP_LABELS[group]}: ${view.issues[group].length}`));
     groupNode.append(element(document, 'p', 'As fichas detalhadas aparecem uma única vez nas seções seguintes.'));
     if (['alerts', 'passed'].includes(group)) {
-      for (const issue of view.issues[group]) groupNode.append(issueArticle(document, issue, group, evidenceById));
+      for (const issue of view.issues[group]) groupNode.append(issueArticle(document, issue, group, evidenceById, evidenceAnchorById));
     }
     coverage.append(groupNode);
   }
   root.append(coverage);
 
   const failed = section(document, 2);
-  for (const issue of view.issues.failed) failed.append(issueArticle(document, issue, 'failed', evidenceById));
+  for (const issue of view.issues.failed) failed.append(issueArticle(document, issue, 'failed', evidenceById, evidenceAnchorById));
   root.append(failed);
 
   const review = section(document, 3);
   review.setAttribute('data-review-controls-target', '');
-  for (const issue of view.issues.humanReview) review.append(issueArticle(document, issue, 'humanReview', evidenceById));
+  for (const issue of view.issues.humanReview) review.append(issueArticle(document, issue, 'humanReview', evidenceById, evidenceAnchorById));
   root.append(review);
 
   const maps = section(document, 4);
@@ -553,6 +683,7 @@ export function renderReportView({ view, document, onExport } = {}) {
   sources.append(element(document, 'h3', 'Evidências técnicas e anexos'));
   for (const evidence of view.technicalEvidence) {
     const card = document.createElement('article'); card.setAttribute('data-report-evidence', evidence.evidenceId);
+    card.setAttribute('id', evidenceAnchorById.get(evidence.evidenceId));
     card.append(
       element(document, 'h4', `${evidence.evidenceId} — ${evidenceKindLabel(evidence.kind)}`),
       element(document, 'p', `URL: ${evidence.mediaUrl ?? 'não registrada.'}`),
@@ -568,9 +699,6 @@ export function renderReportView({ view, document, onExport } = {}) {
     sources.append(card);
   }
   methodology.append(sources);
-  const exportButton = element(document, 'button', 'Exportar HTML, PDF, CSV e JSON');
-  exportButton.setAttribute('type', 'button'); exportButton.setAttribute('data-report-export', '');
-  exportButton.addEventListener('click', () => onExport()); methodology.append(exportButton);
   root.append(methodology);
   return root;
 }

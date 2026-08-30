@@ -101,17 +101,47 @@ th{background:#eef4f8;color:#14212b}
 .evidence-relation{font-size:.92rem;color:#14212b}
 .method-grid{grid-template-columns:1fr}
 .compact-list{margin:.5rem 0;padding-left:1.3rem}
+.report-view-document main{padding-top:1rem}
+.report-view-document main>h1{font-size:clamp(1.65rem,3vw,2.25rem);margin-bottom:.2rem}
+.report-static-identity{margin:.2rem 0 .75rem;overflow-wrap:anywhere}
+.report-view-document #report-section-1 h2{margin-top:.75rem}
+[data-report-outcome],[data-report-coverage]{margin:.5rem 0;padding:.65rem .75rem;border-left:.35rem solid #003b71;background:#eef4f8;overflow-wrap:anywhere}
+[data-report-coverage]{border-left-style:double}
+[data-report-metrics]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.65rem;margin:.75rem 0}
+[data-report-metrics] .summary-card{min-width:0;padding:.7rem;border-left:.4rem solid #003b71;overflow-wrap:anywhere}
+[data-report-metric="failed"]{border-left-color:#8b1e1e!important}[data-report-metric="alerts"]{border-left-color:#6b4e00!important;border-left-style:dashed!important}[data-report-metric="humanReview"]{border-left-color:#6b4e00!important;border-left-style:double!important}[data-report-metric="passed"]{border-left-color:#236b3b!important}
+[data-report-metrics] .summary-card strong{font-size:2.15rem;line-height:1}
+.report-view-document .section-nav{display:flex;align-items:center;gap:.6rem;min-width:0;margin:.75rem 0;padding:.25rem .55rem}
+.report-view-document .section-nav ul{flex:1 1 auto;margin:0;gap:.15rem .35rem}
+.report-view-document .section-nav a{display:inline-flex;align-items:center;min-height:44px;padding:.2rem .4rem;overflow-wrap:anywhere}
+[data-report-issue]{min-width:0;margin:1rem 0;padding:1rem;border:1px solid #738596;border-left:.45rem solid #005a9c;border-radius:.45rem;overflow-wrap:anywhere;break-inside:avoid}
+[data-report-issue][data-result="failed"]{border-left-color:#8b1e1e}[data-report-issue][data-result="humanReview"]{border-left-color:#6b4e00;border-left-style:dashed}
+[data-report-issue-heading]{padding-bottom:.65rem;border-bottom:1px solid #738596}
+[data-report-issue-heading] p{display:inline-block;margin:.25rem .5rem 0 0;padding:.2rem .45rem;border:1px solid #738596;border-radius:999px;background:#eef4f8;font-size:.9rem}
+.issue-plain-block{margin-top:.75rem;padding:.7rem .8rem;border-left:.3rem solid #738596;background:#f7fafc;overflow-wrap:anywhere}
+.issue-plain-block h4{margin-top:0}
+[data-report-plain-block="correction"]{border-left-color:#236b3b}[data-report-plain-block="announcement"]{border-left-color:#005a9c}[data-report-plain-block="normative"]{border-left-style:double}[data-report-plain-block="legal"]{border:2px solid #8b2f00;border-left-width:.4rem;background:#fff}
+[data-report-evidence-preview]{display:grid;grid-template-columns:minmax(0,1fr);gap:.75rem;min-width:0;margin-top:1rem}
+[data-report-evidence-preview]>h4{grid-column:1/-1;margin:0}
+[data-report-evidence-preview] figure{min-width:0;margin:0;padding:.65rem;border:1px solid #738596;border-radius:.4rem;background:#eef4f8;break-inside:avoid}
+[data-report-evidence-preview] figcaption{margin-top:.45rem;font-size:.9rem}
+[data-report-live-action="evidence-only"]{margin:.85rem 0 .35rem;padding:.65rem .75rem;border-left:.3rem solid #6b4e00;background:#eef4f8}
+[data-report-consult-evidence]{display:inline-flex;align-items:center;min-height:44px;font-weight:750}
+[data-report-technical]{margin-top:.65rem}
+[data-report-technical] section{min-width:0;margin-top:.65rem;padding:.65rem;border:1px solid #738596;background:#eef4f8;overflow-wrap:anywhere}
+.report-view-document [data-report-evidence]{min-width:0;overflow-wrap:anywhere}
 .sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
 .report-footer{margin-top:3rem;font-size:.9rem}
 .report-footer p{max-width:72rem;margin:.25rem auto}
+@media (min-width:48rem){[data-report-metrics]{grid-template-columns:repeat(4,minmax(0,1fr))}[data-report-evidence-preview]{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (min-width:42rem){.filters-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.scope-grid,.page-grid,.widget-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media (min-width:64rem){.filters-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.scope-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.summary-grid{grid-template-columns:repeat(5,minmax(0,1fr))}.page-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.method-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @page{size:A4 portrait;margin:18mm 15mm 20mm}
-@media print{html{scroll-behavior:auto}.skip-link,.section-nav,.filters-shell,.filter-actions,.empty-state{display:none!important}.report-header,.report-footer{background:#fff;color:#14212b;border-bottom:2px solid #003b71;padding:.5rem 0}.report-footer{border-top:2px solid #003b71;border-bottom:0}.major-section{break-before:page}.scope-card,.summary-card,.page-card,.occurrence-card,.review-card,.widget-card,.evidence-card,.method-card,.announcement-map-segment,.announcement-map-legend li,details{break-inside:avoid}.occurrence-card[hidden]{display:block!important}details:not([open])>*:not(summary){display:block!important}thead{display:table-header-group}a{color:#14212b;text-decoration:none}main{max-width:none;padding:0}.status,.chip{color:#14212b!important;background:#fff!important;border-color:#14212b!important}.matrix-scroll{overflow:visible}.matrix-scroll table{min-width:0;font-size:8.5pt}.report-enhanced .filters-noscript{display:block}.filters-noscript::after{content:" Todos os registros foram incluídos na impressão."}}
+@media print{html{scroll-behavior:auto}.skip-link,.section-nav,.filters-shell,.filter-actions,.empty-state{display:none!important}.report-header,.report-footer{background:#fff;color:#14212b;border-bottom:2px solid #003b71;padding:.5rem 0}.report-footer{border-top:2px solid #003b71;border-bottom:0}.major-section{break-before:page}.scope-card,.summary-card,.page-card,.occurrence-card,.review-card,.widget-card,.evidence-card,.method-card,.announcement-map-segment,.announcement-map-legend li,details{break-inside:avoid}.occurrence-card[hidden]{display:block!important}details:not([open])>*:not(summary){display:block!important}[data-report-technical]:not([open])>*:not(summary),[data-report-limitations]:not([open])>*:not(summary){display:block!important}.report-view-document .report-header,.report-view-document main>h1,.report-view-document .report-static-identity,.report-view-document [data-report-navigation],.report-view-document .filters-noscript{display:none!important}[data-report-evidence-preview] figure,[data-report-issue],[data-report-evidence]{break-inside:avoid}thead{display:table-header-group}a{color:#14212b;text-decoration:none}main{max-width:none;padding:0}.status,.chip{color:#14212b!important;background:#fff!important;border-color:#14212b!important}.matrix-scroll{overflow:visible}.matrix-scroll table{min-width:0;font-size:8.5pt}.report-enhanced .filters-noscript{display:block}.filters-noscript::after{content:" Todos os registros foram incluídos na impressão."}}
 @media (max-width:42rem){main{padding:1rem}.meta{grid-template-columns:1fr}.meta dd{margin-bottom:.5rem}.report-header__inner{align-items:flex-start;flex-direction:column}.filter-actions{display:grid}.filter-actions button{width:100%}.occurrence-heading{display:block}}
 @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
-@media (forced-colors:active){*{forced-color-adjust:auto}.status,.chip,.scope-card,.summary-card,.page-card,.occurrence-card,.review-card,.widget-card,.evidence-card,.map-card,.method-card,.filters-shell,.legal-analysis,.page-level-evidence{border-color:CanvasText}.occurrence-card[data-display-outcome="failed"]{border-left-style:double}.occurrence-card[data-display-outcome="cantTell"]{border-left-style:dashed}.evidence-highlight{stroke:CanvasText}.evidence-highlight--review{stroke-dasharray:14 9}a:focus-visible,button:focus-visible,select:focus-visible,summary:focus-visible,[tabindex]:focus-visible{outline-color:Highlight;box-shadow:none}}
+@media (forced-colors:active){*{forced-color-adjust:auto}.status,.chip,.scope-card,.summary-card,.page-card,.occurrence-card,.review-card,.widget-card,.evidence-card,.map-card,.method-card,.filters-shell,.legal-analysis,.page-level-evidence,[data-report-issue],[data-report-evidence-preview] figure,[data-report-technical] section{border-color:CanvasText}.occurrence-card[data-display-outcome="failed"]{border-left-style:double}.occurrence-card[data-display-outcome="cantTell"],[data-report-issue][data-result="humanReview"]{border-left-style:dashed}.evidence-highlight{stroke:CanvasText}.evidence-highlight--review{stroke-dasharray:14 9}a:focus-visible,button:focus-visible,select:focus-visible,summary:focus-visible,[tabindex]:focus-visible{outline-color:Highlight;box-shadow:none}}
 `;
 
 // Updated by the CSP integrity test whenever the static stylesheet changes.
-export const REPORT_CSS_CSP_HASH = 'sha256-VrYeXfgzigfqTduxBXCLFryR9dhRZoIZZPTvRON4WC0=';
+export const REPORT_CSS_CSP_HASH = 'sha256-eqKrcn3DgucGmFbCPxg3JjKiph09s5OUI+cBflbFZnI=';

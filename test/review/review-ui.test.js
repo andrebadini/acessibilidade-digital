@@ -7,6 +7,7 @@ const read = path => readFile(new URL(`../../${path}`, import.meta.url), 'utf8')
 test('review page leaves its one polite live announcement to the rendered report and has one h1', async () => {
   const html = await read('src/review/index.html');
   assert.equal((html.match(/<h1\b/gi) ?? []).length, 1);
+  assert.match(html, /<h1 class="review-page-title">Relatório de auditoria de acessibilidade<\/h1>/iu);
   assert.match(html, /lang="pt-BR"/i);
   assert.doesNotMatch(html, /aria-live="polite"/i);
   assert.match(html, /id="review-list"/i);

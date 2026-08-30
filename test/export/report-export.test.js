@@ -208,12 +208,46 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
     assert.match(result.html, new RegExp(`id="report-section-${index}"`, 'u'));
   }
   assert.doesNotMatch(result.html, /<script\b|script-src/iu);
+  assert.match(result.html, /<body class="report-view-document">/u);
+  assert.doesNotMatch(result.html, /<button\b|data-report-export|data-report-highlight/iu);
+  assert.match(result.html, /Formatos desta entrega: HTML, PDF, CSV e JSON/u);
+  const summaryStart = result.html.indexOf('id="report-section-1"');
+  const navigationStart = result.html.indexOf('<div data-report-navigation>');
+  const resultsStart = result.html.indexOf('id="report-section-2"');
+  assert.equal(summaryStart >= 0 && summaryStart < navigationStart && navigationStart < resultsStart, true);
+  assert.match(result.html, /data-report-outcome/u);
+  assert.match(result.html, /data-report-coverage[^>]*>[\s\S]*não é nota, certificação/iu);
+  assert.equal((result.html.match(/<article class="summary-card" data-report-metric="(?:failed|alerts|humanReview|passed)"/gu) ?? []).length, 4);
+  for (const label of ['Sumário', 'Resultados', 'Não conformidades', 'Revisões humanas', 'Anúncios', 'Matriz ABNT', 'Metodologia e evidências']) {
+    assert.match(result.html, new RegExp(`>${label}<`, 'u'));
+  }
   assert.match(result.html, /Este arquivo contém todos os registros; filtros interativos estão disponíveis somente no relatório vivo\./u);
   assert.match(result.html, /data-report-metric="passed"[\s\S]*<strong>1<\/strong>[\s\S]*0 ocorrências/u);
   assert.doesNotMatch(result.html, /\[&quot;page-1&quot;,&quot;audita-core&quot;,&quot;keyboard-focus-trap&quot;\]/u);
   assert.match(result.html, /Verificação não testada: Armadilha de foco — Página 1\./u);
   const expectedCards = Object.values(reportView.issues).reduce((total, group) => total + group.length, 0);
-  assert.equal((result.html.match(/<article class="occurrence-card">/gu) ?? []).length, expectedCards);
+  assert.equal((result.html.match(/<article class="occurrence-card"/gu) ?? []).length, expectedCards);
+  const failedCard = result.html.match(/<article class="occurrence-card"[^>]*data-result="failed"[^]*?<\/article>/u)?.[0] ?? '';
+  assert.ok(failedCard);
+  const orderedMarkers = [
+    'data-report-issue-heading', 'data-report-plain-block="impact"', 'data-report-plain-block="observed"',
+    'data-report-plain-block="correction"', 'data-report-plain-block="announcement"',
+    'data-report-plain-block="normative"', 'data-report-plain-block="legal"',
+    'data-report-evidence-preview', 'data-report-live-action="evidence-only"',
+    'data-report-consult-evidence', 'data-report-technical',
+  ];
+  let markerPosition = -1;
+  for (const marker of orderedMarkers) {
+    const next = failedCard.indexOf(marker);
+    assert.equal(next > markerPosition, true, `${marker} deve preservar a ordem progressiva`);
+    markerPosition = next;
+  }
+  const technicalStart = failedCard.indexOf('data-report-technical');
+  assert.equal((failedCard.slice(0, technicalStart).match(/<img\b/gu) ?? []).length, 2);
+  assert.equal((failedCard.slice(technicalStart).match(/<img\b/gu) ?? []).length, 0);
+  assert.match(failedCard, /O destaque ao vivo não está disponível neste relatório/u);
+  assert.match(failedCard, /href="#report-evidence-1"/u);
+  assert.doesNotMatch(failedCard, /<details[^>]*data-report-technical[^>]*\sopen\b/iu);
   assert.match(result.html, /@media print\{[\s\S]*details:not\(\[open\]\)>\*:not\(summary\)\{display:block!important\}/u);
 });
 
