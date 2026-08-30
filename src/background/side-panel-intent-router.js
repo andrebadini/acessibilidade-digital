@@ -106,8 +106,10 @@ function fail(code) { return Object.freeze({ ok: false, code }); }
 
 export function createSidePanelIntentRouter(raw) {
   const input = exact(raw, FACTORY_KEYS);
+  const coordinator = exact(input?.panelCoordinator, ['attachPanelPort', 'withWindowLock']);
   if (!input || typeof input.chromeApi?.runtime?.id !== 'string' || typeof input.chromeApi?.runtime?.getContexts !== 'function' ||
-    typeof input.chromeApi?.tabs?.query !== 'function' || !input.authority || !input.auditStarter || !input.panelCoordinator ||
+    typeof input.chromeApi?.tabs?.query !== 'function' || !input.authority || !input.auditStarter || !coordinator ||
+    typeof coordinator.attachPanelPort !== 'function' || typeof coordinator.withWindowLock !== 'function' ||
     typeof input.chromeAdapter?.probeDocumentIdentity !== 'function' || typeof input.chromeAdapter?.getEvidenceUrl !== 'function' ||
     typeof input.readReportRevision !== 'function' || typeof input.buildPanelResultBundle !== 'function' ||
     typeof input.revokeViewOnly !== 'function' || typeof input.epochNow !== 'function' ||
@@ -238,8 +240,8 @@ export function createSidePanelIntentRouter(raw) {
       if (!Number.isSafeInteger(createdAt) || createdAt < 0 || createdAt >= minted.expiresAt) throw new Error('clock-denied');
       let registration;
       try {
-        registration = await input.panelCoordinator.withWindowLock(context.windowId, () =>
-          input.panelCoordinator.registerAndPublishViewOnly({
+        registration = await input.panelCoordinator.withWindowLock(context.windowId, scope =>
+          scope.registerAndPublishViewOnly({
             auditId: envelope.auditId, sessionCapabilityId: minted.sessionCapabilityId,
             windowId: context.windowId, createdAt, expiresAt: minted.expiresAt, resultBundle,
           }));

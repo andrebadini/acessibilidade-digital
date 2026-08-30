@@ -22,6 +22,7 @@ const ACTIVE_KEYS = Object.freeze([
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const CAPABILITY = /^[A-Za-z0-9_-]{22}$/u;
 const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
+const START_JOURNAL_KEY = 'audita:start-journal:v1';
 
 function freeze(value) {
   if (value && typeof value === 'object') {
@@ -134,41 +135,62 @@ export function createPanelPortCoordinator(raw) {
   const windowTails = new Map();
   const bindings = new WeakMap();
   const liveByWindow = new Map();
-  const activePublicationScopes = new Set();
+  const scopeStates = new WeakMap();
+  const scopeDeniedSentinel = Object.freeze(Object.create(null));
   let scopeMarker = null;
+
+  function assertScope(scope, windowId) {
+    const state = scopeStates.get(scope);
+    if (!state?.active || state.windowId !== windowId) throw scopeDeniedSentinel;
+  }
+
+  function exposeScopeFailure(error) {
+    if (error === scopeDeniedSentinel) throw new Error('PANEL_SCOPE_DENIED');
+    throw error;
+  }
+
+  function createScope(windowId) {
+    let scope;
+    const invoke = operation => rawArgs => {
+      try {
+        assertScope(scope, windowId);
+        if (own(rawArgs, 'windowId') !== windowId) return Promise.resolve(false);
+        return Promise.resolve(operation(rawArgs, () => assertScope(scope, windowId))).catch(exposeScopeFailure);
+      } catch (error) {
+        return Promise.reject(error === scopeDeniedSentinel ? new Error('PANEL_SCOPE_DENIED') : error);
+      }
+    };
+    scope = Object.freeze({
+      registerPendingBootstrap: invoke(registerPendingBootstrap),
+      publishRegisteredBootstrap: invoke(publishRegisteredBootstrap),
+      publishResult: invoke(publishResult),
+      registerAndPublishViewOnly: invoke(registerAndPublishViewOnly),
+      disconnectSession: invoke(disconnectSession),
+    });
+    scopeStates.set(scope, { windowId, active: true });
+    return scope;
+  }
 
   function withWindowLock(windowId, fn) {
     if (!safeChromeId(windowId) || typeof fn !== 'function') return Promise.reject(new TypeError('PANEL_WINDOW_LOCK_DENIED'));
     if (scopeMarker?.windowId === windowId) return Promise.reject(new Error('PANEL_WINDOW_LOCK_REENTRANT'));
     const previous = windowTails.get(windowId) ?? Promise.resolve();
-    const operation = previous.then(async () => {
+    const run = async () => {
       const marker = { windowId };
+      const scope = createScope(windowId);
       scopeMarker = marker;
-      activePublicationScopes.add(windowId);
       let returned;
-      try { returned = fn(); }
-      finally { if (scopeMarker === marker) scopeMarker = null; }
-      try { return await returned; }
-      finally {
-        activePublicationScopes.delete(windowId);
+      try {
+        try { returned = fn(scope); }
+        finally { if (scopeMarker === marker) scopeMarker = null; }
+        return await returned;
       }
-    }, async () => {
-      const marker = { windowId };
-      scopeMarker = marker;
-      activePublicationScopes.add(windowId);
-      let returned;
-      try { returned = fn(); }
-      finally { if (scopeMarker === marker) scopeMarker = null; }
-      try { return await returned; }
-      finally {
-        activePublicationScopes.delete(windowId);
-      }
-    });
+      finally { scopeStates.get(scope).active = false; }
+    };
+    const operation = previous.then(run, run);
     windowTails.set(windowId, operation.catch(() => {}));
     return operation;
   }
-
-  function scoped(windowId) { return activePublicationScopes.has(windowId); }
 
   async function readBootstrap(windowId) {
     const key = panelBootstrapStorageKey(windowId);
@@ -206,6 +228,11 @@ export function createPanelPortCoordinator(raw) {
     const value = parseActive(await input.readActiveJob());
     if (value === undefined) throw new Error('PANEL_ACTIVE_DENIED');
     return value;
+  }
+
+  async function confirmStartJournalAbsent() {
+    const read = async () => own(await input.sessionArea.get(START_JOURNAL_KEY), START_JOURNAL_KEY);
+    return await read() === undefined && await read() === undefined;
   }
 
   function snapshotSender(port) {
@@ -383,43 +410,78 @@ export function createPanelPortCoordinator(raw) {
     return true;
   }
 
-  function publishRegisteredBootstrap(rawArgs) {
+  function registerPendingBootstrap(rawArgs, assertOwned) {
     const args = exact(rawArgs, ['auditId', 'sessionCapabilityId', 'windowId', 'createdAt', 'expiresAt']);
-    if (!args || !scoped(args.windowId)) return Promise.resolve(false);
+    if (!args) return Promise.resolve(false);
     return (async () => {
       try {
+        assertOwned();
         const session = await readSession(args.sessionCapabilityId, args.auditId);
+        assertOwned();
         const currentTime = input.epochNow();
         if (session.state !== 'running' || session.windowId !== args.windowId || session.expiresAt !== args.expiresAt ||
           !safeEpoch(args.createdAt) || args.createdAt < session.issuedAt || args.createdAt >= args.expiresAt ||
           !safeEpoch(currentTime) || currentTime >= args.expiresAt) return false;
+        const existing = await readBootstrap(args.windowId);
+        assertOwned();
+        if (existing && (existing.auditId !== args.auditId || existing.sessionCapabilityId !== args.sessionCapabilityId ||
+          existing.windowId !== args.windowId)) return false;
         const bootstrap = await writeBootstrap({
           version: 1, kind: 'audit-session', auditId: args.auditId, sessionCapabilityId: args.sessionCapabilityId,
           windowId: args.windowId, createdAt: args.createdAt, expiresAt: args.expiresAt, state: 'pending',
         });
-        const binding = liveByWindow.get(args.windowId);
-        if (connected(binding) && binding.state === 'bound-idle') {
-          input.setTimer(() => {
-            void withWindowLock(args.windowId, async () => {
-              try { await deliverRunning(binding, await readBootstrap(args.windowId), false); } catch { /* reconnect owns recovery */ }
-            });
-          }, 0);
-        }
+        assertOwned();
         return Boolean(bootstrap);
-      } catch { return false; }
+      } catch (error) {
+        if (error === scopeDeniedSentinel) throw error;
+        return false;
+      }
     })();
   }
 
-  function publishResult(rawArgs) {
-    const args = exact(rawArgs, ['auditId', 'sessionCapabilityId', 'windowId', 'state', 'resultBundle']);
-    if (!args || !scoped(args.windowId)) return Promise.resolve(false);
+  function publishRegisteredBootstrap(rawArgs, assertOwned) {
+    const args = exact(rawArgs, ['auditId', 'sessionCapabilityId', 'windowId']);
+    if (!args) return Promise.resolve(false);
     return (async () => {
       try {
+        assertOwned();
+        const bootstrap = await readBootstrap(args.windowId);
+        assertOwned();
+        if (!bootstrap || bootstrap.state !== 'pending' || bootstrap.auditId !== args.auditId ||
+          bootstrap.sessionCapabilityId !== args.sessionCapabilityId || bootstrap.windowId !== args.windowId) return false;
+        const session = await readSession(args.sessionCapabilityId, args.auditId);
+        assertOwned();
+        const active = await readActive();
+        assertOwned();
+        if (session.state !== 'running' || session.windowId !== args.windowId || active?.state !== 'running' ||
+          active.auditId !== args.auditId || active.sessionCapabilityId !== args.sessionCapabilityId ||
+          active.windowId !== args.windowId || !await confirmStartJournalAbsent()) return false;
+        assertOwned();
+        const binding = liveByWindow.get(args.windowId);
+        if (connected(binding) && binding.state === 'bound-idle') {
+          return await deliverRunning(binding, bootstrap, false);
+        }
+        return true;
+      } catch (error) {
+        if (error === scopeDeniedSentinel) throw error;
+        return false;
+      }
+    })();
+  }
+
+  function publishResult(rawArgs, assertOwned) {
+    const args = exact(rawArgs, ['auditId', 'sessionCapabilityId', 'windowId', 'state', 'resultBundle']);
+    if (!args) return Promise.resolve(false);
+    return (async () => {
+      try {
+        assertOwned();
         if (!['result', 'view-only'].includes(args.state)) return false;
         const resultBundle = copyPanelResultBundleV1(args.resultBundle);
         if (resultBundle.auditId !== args.auditId) return false;
         const session = await readSession(args.sessionCapabilityId, args.auditId);
+        assertOwned();
         const bootstrap = await readBootstrap(args.windowId);
+        assertOwned();
         const binding = liveByWindow.get(args.windowId);
         if (session.state !== args.state || session.windowId !== args.windowId || !bootstrap ||
           bootstrap.auditId !== args.auditId || bootstrap.sessionCapabilityId !== args.sessionCapabilityId ||
@@ -427,24 +489,30 @@ export function createPanelPortCoordinator(raw) {
           !await reprove(binding)) return false;
         send(binding, packet(args.state, args.auditId, args.sessionCapabilityId, resultBundle));
         return true;
-      } catch { return false; }
+      } catch (error) {
+        if (error === scopeDeniedSentinel) throw error;
+        return false;
+      }
     })();
   }
 
-  function registerAndPublishViewOnly(rawArgs) {
+  function registerAndPublishViewOnly(rawArgs, assertOwned) {
     const args = exact(rawArgs, ['auditId', 'sessionCapabilityId', 'windowId', 'createdAt', 'expiresAt', 'resultBundle']);
-    if (!args || !scoped(args.windowId)) return Promise.resolve(deniedRegistration());
+    if (!args) return Promise.resolve(deniedRegistration());
     return (async () => {
       let registered = false;
       try {
+        assertOwned();
         const resultBundle = copyPanelResultBundleV1(args.resultBundle);
         if (resultBundle.auditId !== args.auditId) return deniedRegistration();
         const session = await readSession(args.sessionCapabilityId, args.auditId);
+        assertOwned();
         const currentTime = input.epochNow();
         if (session.state !== 'view-only' || session.windowId !== args.windowId || session.expiresAt !== args.expiresAt ||
           !safeEpoch(args.createdAt) || args.createdAt < session.issuedAt || args.createdAt >= args.expiresAt ||
           !safeEpoch(currentTime) || currentTime >= args.expiresAt || await readActive() !== null) return deniedRegistration();
         const existing = await readBootstrap(args.windowId);
+        assertOwned();
         if (existing) {
           if (existing.auditId !== args.auditId || existing.windowId !== args.windowId) return deniedRegistration();
           const oldSession = await readSession(existing.sessionCapabilityId, existing.auditId);
@@ -454,6 +522,7 @@ export function createPanelPortCoordinator(raw) {
           version: 1, kind: 'audit-session', auditId: args.auditId, sessionCapabilityId: args.sessionCapabilityId,
           windowId: args.windowId, createdAt: args.createdAt, expiresAt: args.expiresAt, state: 'pending',
         });
+        assertOwned();
         registered = true;
         const binding = liveByWindow.get(args.windowId);
         if (!connected(binding)) return Object.freeze({ registered: true, delivered: false });
@@ -463,36 +532,39 @@ export function createPanelPortCoordinator(raw) {
         send(binding, packet('view-only', consumed.auditId, consumed.sessionCapabilityId, resultBundle));
         bind(binding, args.windowId, 'bound-session', args.auditId, args.sessionCapabilityId);
         return Object.freeze({ registered: true, delivered: true });
-      } catch {
+      } catch (error) {
+        if (error === scopeDeniedSentinel) throw error;
         return registered ? Object.freeze({ registered: true, delivered: false }) : deniedRegistration();
       }
     })();
   }
 
-  function disconnectSession(rawArgs) {
+  function disconnectSession(rawArgs, assertOwned) {
     const args = exact(rawArgs, ['auditId', 'sessionCapabilityId', 'windowId', 'reasonCode']);
-    if (!args || !scoped(args.windowId) || typeof args.reasonCode !== 'string' || !args.reasonCode) return Promise.resolve(false);
+    if (!args || typeof args.reasonCode !== 'string' || !args.reasonCode) return Promise.resolve(false);
     return (async () => {
       try {
+        assertOwned();
         const binding = liveByWindow.get(args.windowId);
         if (connected(binding) && binding.auditId === args.auditId &&
           binding.sessionCapabilityId === args.sessionCapabilityId) disconnect(binding);
         const bootstrap = await readBootstrap(args.windowId);
+        assertOwned();
         if (bootstrap === null) return true;
         if (bootstrap.auditId !== args.auditId || bootstrap.sessionCapabilityId !== args.sessionCapabilityId ||
           bootstrap.windowId !== args.windowId) return false;
         await input.sessionArea.remove(panelBootstrapStorageKey(args.windowId));
+        assertOwned();
         return await readBootstrap(args.windowId) === null;
-      } catch { return false; }
+      } catch (error) {
+        if (error === scopeDeniedSentinel) throw error;
+        return false;
+      }
     })();
   }
 
   return Object.freeze({
     attachPanelPort,
     withWindowLock,
-    publishRegisteredBootstrap,
-    publishResult,
-    registerAndPublishViewOnly,
-    disconnectSession,
   });
 }

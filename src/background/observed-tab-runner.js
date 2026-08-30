@@ -73,6 +73,17 @@ function diagnosticStatus(signal, code) {
   return signal?.aborted || code === 'AUDIT_ABORTED' ? 'cancelled' : 'failed';
 }
 
+function capturedModelStatus(value) {
+  try {
+    const model = Object.getOwnPropertyDescriptor(value, 'model');
+    const session = model?.enumerable && Object.hasOwn(model, 'value')
+      ? Object.getOwnPropertyDescriptor(model.value, 'session') : null;
+    const status = session?.enumerable && Object.hasOwn(session, 'value')
+      ? Object.getOwnPropertyDescriptor(session.value, 'status') : null;
+    return status?.enumerable && Object.hasOwn(status, 'value') ? status.value : null;
+  } catch { return null; }
+}
+
 async function safeModel(factory, auditId, code, status) {
   if (typeof factory !== 'function') {
     return Object.freeze({
@@ -168,6 +179,7 @@ export async function runObservedTabAudit({
   now = () => new Date().toISOString(),
 }) {
   const targetChangedSentinel = Object.freeze(Object.create(null));
+  const abortedSentinel = Object.freeze(Object.create(null));
   const failTargetChanged = () => { throw targetChangedSentinel; };
   const safeTarget = captureTarget(target);
   const safeDecision = captureDecision(privacyDecision);
@@ -344,7 +356,7 @@ export async function runObservedTabAudit({
       throw new Error(code);
     } else if (privacyDecision.status === 'aborted') {
       code = 'AUDIT_ABORTED';
-      throw new DOMException('Operação cancelada.', 'AbortError');
+      throw abortedSentinel;
     } else {
       throw new TypeError('PRIVACY_DECISION_DENIED');
     }
@@ -355,6 +367,7 @@ export async function runObservedTabAudit({
       throw new Error(code);
     }
     const piped = await pipeline({ auditId, observedTarget, capturePolicy, checkpointRecorder, signal, failTargetChanged });
+    if (!signal?.aborted && capturedModelStatus(piped) === 'cancelled') throw new Error('AUDIT_FAILED');
     await cleanupDisposable();
     return Object.freeze({
       status: 'completed', model: piped.model, observedTarget,
@@ -362,7 +375,7 @@ export async function runObservedTabAudit({
     });
   } catch (error) {
     if (error === targetChangedSentinel) code = 'TARGET_CHANGED';
-    else if (error?.name === 'AbortError' || signal?.aborted) code = 'AUDIT_ABORTED';
+    else if (error === abortedSentinel || signal?.aborted) code = 'AUDIT_ABORTED';
     else if (!['TARGET_CHANGED', 'PRIVACY_TARGET_CHANGED'].includes(code)) code = 'AUDIT_FAILED';
     try { await cleanupDisposable(); } catch {
       if (ownershipState !== 'cleanup-unconfirmed') ownershipState = 'cleanup-pending';

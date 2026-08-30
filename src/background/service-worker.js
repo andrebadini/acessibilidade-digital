@@ -19,6 +19,7 @@ import {
 import { createAuditLifecycle } from './audit-lifecycle.js';
 import { composeChromeAdapter, createChromeAdapter } from './chrome-adapter.js';
 import { registerAuditContextMenus } from './context-menu.js';
+import { validateExecutionCheckpoint } from './execution-checkpoint.js';
 import {
   createLegacyCompatibilityHandler,
   parseLegacyCompatMessage,
@@ -125,13 +126,15 @@ async function sendRuntimeMessage(chromeApi, message) {
   await invokeChrome(chromeApi, chromeApi.runtime, 'sendMessage', message);
 }
 
-async function readStored(sessionArea, key) {
+async function readStored(sessionArea, key, parser) {
   const read = async () => {
     const envelope = await sessionArea.get(key);
     if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) throw new Error('STORAGE_DENIED');
     const value = own(envelope, key);
     if (value === undefined) return null;
-    return value;
+    const parsed = parser(value);
+    if (!parsed) throw new Error('STORAGE_DENIED');
+    return parsed;
   };
   const first = await read();
   const second = await read();
@@ -139,33 +142,79 @@ async function readStored(sessionArea, key) {
   return first;
 }
 
+function denseArray(value) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
+    const keys = Reflect.ownKeys(value);
+    const expected = ['length', ...Array.from({ length: value.length }, (_unused, index) => String(index))];
+    if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) return null;
+    const copy = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      copy.push(descriptor.value);
+    }
+    return copy;
+  } catch { return null; }
+}
+
+function canonicalCheckpoint(auditId, value) {
+  const root = exact(value, ['version', 'auditId', 'pages'], true);
+  const pages = root ? denseArray(root.pages) : null;
+  if (!root || root.version !== 1 || root.auditId !== auditId || !pages || pages.length === 0) return null;
+  const pageOrder = [];
+  for (const page of pages) {
+    const pageId = own(page, 'pageId');
+    if (typeof pageId !== 'string') return null;
+    pageOrder.push(pageId);
+  }
+  try { return validateExecutionCheckpoint({ auditId, checkpoint: value, pageOrder }); }
+  catch { return null; }
+}
+
 function checkpointRecord(value) {
   const record = exact(value, ['version', 'auditId', 'sessionCapabilityId', 'windowId', 'checkpoint'], true);
   if (!record || record.version !== 1 || !AUDIT_ID.test(record.auditId ?? '') ||
     !CAPABILITY.test(record.sessionCapabilityId ?? '') || !Number.isSafeInteger(record.windowId) || record.windowId < 0 ||
     !record.checkpoint || typeof record.checkpoint !== 'object') return null;
-  return freeze(structuredClone(record));
+  const checkpoint = canonicalCheckpoint(record.auditId, record.checkpoint);
+  return checkpoint ? freeze({ ...record, checkpoint }) : null;
 }
 
-function createCheckpointAdapters(sessionArea) {
+function checkpointProgresses(existing, incoming) {
+  const oldPages = existing.checkpoint.pages;
+  const newPages = incoming.checkpoint.pages;
+  if (newPages.length < oldPages.length) return false;
+  for (let index = 0; index < oldPages.length; index += 1) {
+    const prior = oldPages[index];
+    const next = newPages[index];
+    if (!next || prior.pageId !== next.pageId || prior.attempted !== next.attempted ||
+      prior.startedAt !== next.startedAt || prior.rulesVersion !== next.rulesVersion ||
+      prior.inventoryVersion !== next.inventoryVersion || prior.inventoryHash !== next.inventoryHash) return false;
+    const nextOutcomes = new Map(next.outcomes.map(row => [row.ruleId, row.outcome]));
+    if (prior.outcomes.some(row => nextOutcomes.get(row.ruleId) !== row.outcome)) return false;
+  }
+  return true;
+}
+
+export function createCheckpointAdapters(sessionArea) {
   async function persistCheckpoint(raw) {
-    const args = exact(raw, ['auditId', 'sessionCapabilityId', 'windowId', 'checkpoint']);
-    const record = checkpointRecord(args && { version: 1, ...args });
-    if (!record) throw new Error('CHECKPOINT_PERSIST_DENIED');
-    const key = executionCheckpointStorageKey(record.auditId);
-    const existingRaw = await readStored(sessionArea, key);
-    if (existingRaw !== null) {
-      const existing = checkpointRecord(existingRaw);
-      if (!existing || existing.auditId !== record.auditId || existing.sessionCapabilityId !== record.sessionCapabilityId ||
-        existing.windowId !== record.windowId) throw new Error('CHECKPOINT_PERSIST_DENIED');
-      const oldPages = Array.isArray(existing.checkpoint.pages) ? existing.checkpoint.pages : [];
-      const newPages = Array.isArray(record.checkpoint.pages) ? record.checkpoint.pages : [];
-      if (newPages.length < oldPages.length) throw new Error('CHECKPOINT_PERSIST_DENIED');
+    try {
+      const args = exact(raw, ['auditId', 'sessionCapabilityId', 'windowId', 'checkpoint']);
+      const record = checkpointRecord(args && { version: 1, ...args });
+      if (!record) throw new Error('CHECKPOINT_PERSIST_DENIED');
+      const key = executionCheckpointStorageKey(record.auditId);
+      const existing = await readStored(sessionArea, key, checkpointRecord);
+      if (existing !== null && (existing.auditId !== record.auditId ||
+        existing.sessionCapabilityId !== record.sessionCapabilityId || existing.windowId !== record.windowId ||
+        !checkpointProgresses(existing, record))) throw new Error('CHECKPOINT_PERSIST_DENIED');
+      await sessionArea.set({ [key]: record });
+      const confirmed = await readStored(sessionArea, key, checkpointRecord);
+      if (!confirmed || !same(confirmed, record)) throw new Error('CHECKPOINT_PERSIST_DENIED');
+      return confirmed;
+    } catch {
+      throw new Error('CHECKPOINT_PERSIST_DENIED');
     }
-    await sessionArea.set({ [key]: record });
-    const confirmed = checkpointRecord(await readStored(sessionArea, key));
-    if (!confirmed || !same(confirmed, record)) throw new Error('CHECKPOINT_PERSIST_DENIED');
-    return confirmed;
   }
 
   async function removeCheckpoint(raw) {
@@ -175,17 +224,20 @@ function createCheckpointAdapters(sessionArea) {
         (CAPABILITY.test(args.sessionCapabilityId ?? '') && Number.isSafeInteger(args.windowId) && args.windowId >= 0))) {
       return Object.freeze({ removed: false });
     }
-    const key = executionCheckpointStorageKey(args.auditId);
-    const currentRaw = await readStored(sessionArea, key);
-    if (currentRaw === null) return Object.freeze({ removed: false });
-    const current = checkpointRecord(currentRaw);
-    const correlated = current && current.auditId === args.auditId &&
-      (args.sessionCapabilityId === null ||
-        (current.sessionCapabilityId === args.sessionCapabilityId && current.windowId === args.windowId));
-    if (!correlated) return Object.freeze({ removed: false });
-    await sessionArea.remove(key);
-    if (await readStored(sessionArea, key) !== null) throw new Error('CHECKPOINT_REMOVE_DENIED');
-    return Object.freeze({ removed: true });
+    try {
+      const key = executionCheckpointStorageKey(args.auditId);
+      const current = await readStored(sessionArea, key, checkpointRecord);
+      if (current === null) return Object.freeze({ removed: false });
+      const correlated = current.auditId === args.auditId &&
+        (args.sessionCapabilityId === null ||
+          (current.sessionCapabilityId === args.sessionCapabilityId && current.windowId === args.windowId));
+      if (!correlated) throw new Error('CHECKPOINT_REMOVE_DENIED');
+      await sessionArea.remove(key);
+      if (await readStored(sessionArea, key, checkpointRecord) !== null) throw new Error('CHECKPOINT_REMOVE_DENIED');
+      return Object.freeze({ removed: true });
+    } catch {
+      throw new Error('CHECKPOINT_REMOVE_DENIED');
+    }
   }
 
   return Object.freeze({ persistCheckpoint, removeCheckpoint });

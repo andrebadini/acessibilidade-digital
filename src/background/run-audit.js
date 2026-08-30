@@ -928,6 +928,7 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
       async persistAuditModel(model) {
         const finalProof = await chromeAdapter.probeDocumentIdentity(target.tabId);
         if (!proofMatchesAttached(finalProof, target)) args.failTargetChanged();
+        if (!signal?.aborted && model?.session?.status === 'cancelled') throw new Error('AUDIT_FAILED');
         await persistAuditModel(model);
       },
     },
@@ -1111,7 +1112,9 @@ export async function runAuditExecution({
     consentAuthority: internals.consentAuthority, failureModelFactory,
     resumePauseId: internals.resumePauseId, now,
   });
-  let compatibleModel = legacyDraft ?? observed.model;
+  const spoofedLegacyCancellation = !signal?.aborted && observed.status === 'failed' &&
+    legacyDraft?.session?.status === 'cancelled';
+  let compatibleModel = spoofedLegacyCancellation ? observed.model : (legacyDraft ?? observed.model);
   if (observed.ownershipState === 'cleanup-pending' && legacyModel) compatibleModel = legacyModel;
   if (navigationAttempted && compatibleModel?.schemaVersion === 1 && compatibleModel.attempted !== true) {
     const mutable = structuredClone(compatibleModel);

@@ -4,6 +4,7 @@ import test from 'node:test';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { PANEL_PORT_NAME } from '../../src/background/panel-port.js';
 import { registerServiceWorker } from '../../src/background/service-worker.js';
+import * as serviceWorkerModule from '../../src/background/service-worker.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 
 const CAPABILITY = 'C'.repeat(22);
@@ -50,6 +51,24 @@ function tick() { return new Promise(resolve => setImmediate(resolve)); }
 
 function runtimeValue() {
   return Object.freeze({ authority: Object.freeze({}), auditStarter: Object.freeze({}), chromeAdapter: Object.freeze({}) });
+}
+
+function checkpoint(auditId, pages = [{
+  pageId: 'page-1', attempted: true, startedAt: '2026-08-29T12:00:00.000Z',
+  rulesVersion: '1.0.0', inventoryVersion: 'inventory-v1', inventoryHash: 'a'.repeat(64),
+  outcomes: [{ ruleId: 'rule-a', outcome: 'passed' }],
+}]) {
+  return { version: 1, auditId, pages: structuredClone(pages) };
+}
+
+function sessionAreaForCheckpointTest() {
+  const values = Object.create(null);
+  return {
+    values,
+    async get(key) { return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {}; },
+    async set(entries) { Object.assign(values, structuredClone(entries)); },
+    async remove(key) { delete values[key]; },
+  };
 }
 
 function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
@@ -349,6 +368,69 @@ test('default runtime rejects readiness when lifecycle recovery reports blocked 
   });
 
   await assert.rejects(env.registration.startupReady, /WORKER_UNAVAILABLE/u);
+});
+
+test('checkpoint adapter permits only canonical semantic progression and preserves corrupt evidence', async () => {
+  assert.equal(typeof serviceWorkerModule.createCheckpointAdapters, 'function');
+  const storage = sessionAreaForCheckpointTest();
+  const adapter = serviceWorkerModule.createCheckpointAdapters(storage);
+  const auditId = 'audit-checkpoint';
+  const sessionCapabilityId = 'S'.repeat(22);
+  const key = `audita:execution-checkpoint:v1:${auditId}`;
+  const persist = value => adapter.persistCheckpoint({
+    auditId, sessionCapabilityId, windowId: 9, checkpoint: value,
+  });
+
+  const initial = checkpoint(auditId);
+  await persist(initial);
+  const progressed = checkpoint(auditId);
+  progressed.pages[0].outcomes.push({ ruleId: 'rule-b', outcome: 'failed' });
+  assert.equal((await persist(progressed)).checkpoint.pages[0].outcomes.length, 2);
+
+  for (const regression of [
+    (() => { const value = checkpoint(auditId); value.pages[0].outcomes[0].outcome = 'failed'; return value; })(),
+    (() => { const value = structuredClone(progressed); value.pages[0].outcomes.shift(); return value; })(),
+    (() => { const value = structuredClone(progressed); value.pages[0].inventoryHash = 'b'.repeat(64); return value; })(),
+  ]) {
+    await assert.rejects(() => persist(regression), /CHECKPOINT_PERSIST_DENIED/u);
+    assert.deepEqual(storage.values[key].checkpoint, progressed);
+  }
+
+  const appended = structuredClone(progressed);
+  appended.pages.push({
+    pageId: 'page-2', attempted: false, startedAt: null, rulesVersion: '1.0.0',
+    inventoryVersion: 'inventory-v1', inventoryHash: 'a'.repeat(64), outcomes: [],
+  });
+  assert.deepEqual((await persist(appended)).checkpoint.pages.map(page => page.pageId), ['page-1', 'page-2']);
+  const reordered = structuredClone(appended);
+  reordered.pages.reverse();
+  await assert.rejects(() => persist(reordered), /CHECKPOINT_PERSIST_DENIED/u);
+
+  const malformed = { version: 1, auditId, sessionCapabilityId, windowId: 9, checkpoint: { private: true } };
+  storage.values[key] = structuredClone(malformed);
+  await assert.rejects(() => persist(initial), /CHECKPOINT_PERSIST_DENIED/u);
+  assert.deepEqual(storage.values[key], malformed);
+
+  let getterCalls = 0;
+  const hostile = checkpoint(auditId);
+  Object.defineProperty(hostile.pages[0], 'pageId', {
+    enumerable: true,
+    get() { getterCalls += 1; return 'page-1'; },
+  });
+  delete storage.values[key];
+  await assert.rejects(() => persist(hostile), /CHECKPOINT_PERSIST_DENIED/u);
+  assert.equal(getterCalls, 0);
+  assert.equal(Object.hasOwn(storage.values, key), false);
+
+  const foreignAuditId = 'foreign-checkpoint';
+  storage.values[key] = {
+    version: 1, auditId: foreignAuditId, sessionCapabilityId: 'F'.repeat(22), windowId: 11,
+    checkpoint: checkpoint(foreignAuditId),
+  };
+  await assert.rejects(() => adapter.removeCheckpoint({
+    auditId, sessionCapabilityId, windowId: 9,
+  }), /CHECKPOINT_REMOVE_DENIED/u);
+  assert.equal(storage.values[key].auditId, foreignAuditId);
 });
 
 test('fails a denied trusted-session gate with one fixed diagnostic and no graph construction', async () => {

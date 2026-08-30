@@ -503,6 +503,51 @@ test('attached execution re-proves inside persistence and commits nothing after 
   assert.equal(persisted, 0);
 });
 
+test('attached execution maps a dependency AbortError to AUDIT_FAILED when its signal is not aborted', async () => {
+  const adapter = fakeAdapter({
+    noPixels: true,
+    collectError: new DOMException('PRIVATE_ABORT_DETAIL', 'AbortError'),
+  });
+  let persisted = 0;
+  const result = await runAttachedAuditExecution({
+    auditId: 'audit-attached-abort-spoof', sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: 'https://example.test/', initialUrlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+    },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { persisted += 1; },
+  });
+  assert.deepEqual({ state: result.state, failureCode: result.failureCode, model: result.model }, {
+    state: 'revoked', failureCode: 'AUDIT_FAILED', model: null,
+  });
+  assert.equal(persisted, 0);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_ABORT_DETAIL/u);
+});
+
+test('attached execution preserves a canonical cancelled model for a genuinely aborted signal', async () => {
+  const controller = new AbortController();
+  const adapter = fakeAdapter({
+    noPixels: true,
+    afterCollect() { controller.abort(new DOMException('PRIVATE_USER_CANCEL_DETAIL', 'AbortError')); },
+  });
+  const result = await runAttachedAuditExecution({
+    auditId: 'audit-attached-real-abort', sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: 'https://example.test/', initialUrlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+    },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    chromeAdapter: adapter, modelNow: clock, signal: controller.signal,
+    expectedExtensionId: TEST_EXTENSION_ID, onCheckpoint: async () => {}, persistAuditModel: async () => {},
+  });
+  assert.equal(result.state, 'model');
+  assert.equal(result.failureCode, null);
+  assert.equal(result.model.session.status, 'cancelled');
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_USER_CANCEL_DETAIL/u);
+});
+
 test('attached execution rejects hostile or extra façade fields before probing', async () => {
   const adapter = fakeAdapter({ noPixels: true });
   let reads = 0;
@@ -1516,19 +1561,15 @@ test('records a missing environment as a factual partial cause', async () => {
   assert.equal(draft.session.diagnostics.some(entry => entry.code === 'ENVIRONMENT_UNAVAILABLE'), true);
 });
 
-test('maps an AbortError raised by collection to cancellation instead of collection failure', async () => {
+test('does not let a collection AbortError spoof cancellation without an aborted signal', async () => {
   const draft = await runAudit({
     url: 'https://example.test/',
     chromeAdapter: fakeAdapter({ collectError: new DOMException('cancelada', 'AbortError') }),
     now: clock,
     idFactory: () => 'audit-abort-during-collection',
   });
-  assert.equal(draft.session.status, 'cancelled');
-  assert.equal(draft.session.diagnostics.some(entry => entry.code === 'COLLECTION_FAILED'), false);
-  assert.deepEqual(
-    draft.session.diagnostics.filter(entry => entry.recoverable === false).map(entry => entry.code),
-    ['NAVIGATION_FAILED'],
-  );
+  assert.equal(draft.session.status, 'failed');
+  assert.doesNotMatch(JSON.stringify(draft), /cancelada/u);
 });
 
 test('keeps cleanup failures explicit but recoverable in a valid partial audit model', async t => {
@@ -1555,11 +1596,11 @@ test('keeps cleanup failures explicit but recoverable in a valid partial audit m
   });
 });
 
-test('cancels conservatively during navigation and never reports complete', async () => {
+test('does not treat an uncorrelated navigation AbortError as user cancellation', async () => {
   const aborted = new DOMException('Operação cancelada', 'AbortError');
   const adapter = fakeAdapter({ waitFailure: aborted });
   const model = await runAudit({ url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'audit-cancelled' });
-  assert.equal(model.session.status, 'cancelled');
+  assert.equal(model.session.status, 'failed');
   assert.equal(model.progress.some(entry => entry.percent === 100), false);
   assert.equal(adapter.counts.disconnects, 0);
   assert.equal(adapter.counts.removals, 1);

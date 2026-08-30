@@ -31,7 +31,23 @@ function popupSender(windowId = 9) {
   };
 }
 
+function panelCoordinatorFor(calls, overrides = {}) {
+  const scope = Object.freeze({
+    async registerPendingBootstrap() { return true; },
+    async publishRegisteredBootstrap() { return true; },
+    async publishResult() { return true; },
+    async registerAndPublishViewOnly(value) { calls.push(['register-view', value]); return { registered: true, delivered: false }; },
+    async disconnectSession() { return true; },
+    ...overrides,
+  });
+  return Object.freeze({
+    attachPanelPort() { return true; },
+    async withWindowLock(windowId, fn) { calls.push(['lock', windowId]); return fn(scope); },
+  });
+}
+
 function fixture(overrides = {}) {
+  const { panelScopeOverrides, ...dependencyOverrides } = overrides;
   const calls = [];
   const durableSessions = new Map();
   const chromeApi = {
@@ -70,10 +86,7 @@ function fixture(overrides = {}) {
     async beginAuthorizedAudit(value) { calls.push(['begin', value]); return { response: { ok: true, auditId: value.auditId, state: 'running' } }; },
     async abortAuthorizedAudit(value) { calls.push(['abort', value]); return { ok: true, auditId: value.auditId, state: 'cancelling' }; },
   };
-  const panelCoordinator = {
-    async withWindowLock(windowId, fn) { calls.push(['lock', windowId]); return fn(); },
-    async registerAndPublishViewOnly(value) { calls.push(['register-view', value]); return { registered: true, delivered: false }; },
-  };
+  const panelCoordinator = panelCoordinatorFor(calls, panelScopeOverrides);
   const chromeAdapter = {
     async probeDocumentIdentity(tabId) { calls.push(['probe', tabId]); return { tabId, windowId: 9, documentId: 'page-document', urlSessionDigest: DIGEST }; },
     async getEvidenceUrl(tabId, includeQuery) { calls.push(['evidence', tabId, includeQuery]); return 'https://example.test/'; },
@@ -92,7 +105,7 @@ function fixture(overrides = {}) {
     epochNow: () => 250,
     modelNow: () => '2026-08-29T12:00:00.000Z',
     createAuditId: (() => { let id = 0; return () => `audit-router-${++id}`; })(),
-    ...overrides,
+    ...dependencyOverrides,
   };
   return { calls, durableSessions, router: createSidePanelIntentRouter(dependencies), dependencies };
 }
@@ -191,8 +204,7 @@ test('authorizes cancellation and passes only the correlated session and window'
 
 test('rehydrates under the shared window lock and confirms durable revocation after registration denial', async () => {
   const { router, calls, durableSessions } = fixture({
-    panelCoordinator: {
-      async withWindowLock(windowId, fn) { calls.push(['lock', windowId]); return fn(); },
+    panelScopeOverrides: {
       async registerAndPublishViewOnly(value) { calls.push(['register-view', value]); return { registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' }; },
     },
   });
@@ -226,8 +238,7 @@ test('post-mint cleanup false or rejection returns recovery-required and never r
     ['rejection', async () => { throw new Error('native revoke secret'); }],
   ]) await t.test(name, async () => {
     const { router, durableSessions } = fixture({
-      panelCoordinator: {
-        async withWindowLock(_windowId, fn) { return fn(); },
+      panelScopeOverrides: {
         async registerAndPublishViewOnly() {
           return { registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' };
         },
@@ -247,8 +258,7 @@ test('post-mint cleanup false or rejection returns recovery-required and never r
 test('registration exception revokes durable session while registered success retains it', async t => {
   await t.test('registration exception', async () => {
     const { router, durableSessions } = fixture({
-      panelCoordinator: {
-        async withWindowLock(_windowId, fn) { return fn(); },
+      panelScopeOverrides: {
         async registerAndPublishViewOnly() { throw new Error('native registration secret'); },
       },
     });

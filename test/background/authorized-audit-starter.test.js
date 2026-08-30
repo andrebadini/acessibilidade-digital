@@ -99,13 +99,24 @@ async function authorityFixture(area, windowId = 9) {
   return { authority, capabilityId: prepared.capabilityId, senderContext };
 }
 
-function panelCoordinator(order = []) {
-  return {
-    async withWindowLock(windowId, fn) { order.push(`window:${windowId}:enter`); const value = await fn(); order.push(`window:${windowId}:leave`); return value; },
+function panelCoordinator(order = [], overrides = {}) {
+  const scope = Object.freeze({
+    async registerPendingBootstrap(value) { order.push('bootstrap-register'); assert.equal(value.windowId >= 0, true); return true; },
     async publishRegisteredBootstrap(value) { order.push('bootstrap'); assert.equal(value.windowId >= 0, true); return true; },
     async publishResult(value) { order.push(`publish:${value.state}`); return true; },
+    async registerAndPublishViewOnly() { return { registered: true, delivered: false }; },
     async disconnectSession() { order.push('disconnect'); return true; },
-  };
+    ...overrides,
+  });
+  return Object.freeze({
+    attachPanelPort() { return true; },
+    async withWindowLock(windowId, fn) {
+      order.push(`window:${windowId}:enter`);
+      const value = await fn(scope);
+      order.push(`window:${windowId}:leave`);
+      return value;
+    },
+  });
 }
 
 function dependencyFixture({ area, authority, execution, order = [], reportByAudit = new Map(), latest = { value: null } }) {
@@ -204,6 +215,20 @@ test('journals, claims, checkpoints and atomically settles a result before publi
     });
   };
   const dependencies = dependencyFixture({ area, authority: prepared.authority, execution, order, reportByAudit });
+  dependencies.panelCoordinator = panelCoordinator(order, {
+    async registerPendingBootstrap(value) {
+      assert.equal(Object.hasOwn(area.values, 'audita:start-journal:v1'), true);
+      assert.equal(Object.hasOwn(area.values, ACTIVE_AUDIT_JOB_KEY), false);
+      order.push('bootstrap-register');
+      return true;
+    },
+    async publishRegisteredBootstrap() {
+      assert.equal(Object.hasOwn(area.values, 'audita:start-journal:v1'), false);
+      assert.equal(Object.hasOwn(area.values, ACTIVE_AUDIT_JOB_KEY), true);
+      order.push('bootstrap');
+      return true;
+    },
+  });
   dependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({ reportRevision, inventory: report.inventory });
   const starter = createAuthorizedAuditStarter(dependencies);
   const started = await starter.beginAuthorizedAudit({
@@ -225,6 +250,9 @@ test('journals, claims, checkpoints and atomically settles a result before publi
   });
   assert.ok(order.indexOf('commit') < order.indexOf('publish:result'));
   assert.ok(order.indexOf('checkpoint-remove') < order.indexOf('publish:result'));
+  assert.ok(order.indexOf('bootstrap-register') < order.indexOf('latest:running'));
+  assert.ok(order.indexOf('latest:running') < order.indexOf('bootstrap'));
+  assert.ok(order.indexOf('bootstrap') < order.indexOf('run'));
 });
 
 test('compensates a false bootstrap publication instead of reporting a running audit', async () => {
@@ -235,7 +263,7 @@ test('compensates a false bootstrap publication instead of reporting a running a
     area, authority: prepared.authority,
     execution: async () => { executions += 1; },
   });
-  dependencies.panelCoordinator.publishRegisteredBootstrap = async () => false;
+  dependencies.panelCoordinator = panelCoordinator([], { publishRegisteredBootstrap: async () => false });
   const starter = createAuthorizedAuditStarter(dependencies);
 
   const started = await starter.beginAuthorizedAudit({
@@ -267,12 +295,14 @@ test('journal removal failure after ACTIVE triggers complete verified start comp
     area, authority: prepared.authority, latest,
     execution: async () => { executions += 1; },
   });
-  dependencies.panelCoordinator = {
-    async withWindowLock(_windowId, fn) { return fn(); },
-    async publishRegisteredBootstrap(value) {
+  dependencies.panelCoordinator = panelCoordinator([], {
+    async registerPendingBootstrap(value) {
       area.values[panelBootstrapStorageKey(value.windowId)] = {
         version: 1, kind: 'audit-session', ...structuredClone(value), state: 'pending',
       };
+      return true;
+    },
+    async publishRegisteredBootstrap(value) {
       return true;
     },
     async publishResult() { return true; },
@@ -282,7 +312,7 @@ test('journal removal failure after ACTIVE triggers complete verified start comp
       if (bootstrap && bootstrap.auditId === auditId && bootstrap.sessionCapabilityId === sessionCapabilityId) delete area.values[key];
       return !Object.hasOwn(area.values, key);
     },
-  };
+  });
   const starter = createAuthorizedAuditStarter(dependencies);
 
   const started = await starter.beginAuthorizedAudit({
@@ -323,7 +353,7 @@ test('incomplete post-ACTIVE compensation returns recovery-required and keeps AC
     area, authority: prepared.authority,
     execution: async () => { throw new Error('must not run'); },
   });
-  dependencies.panelCoordinator.disconnectSession = async () => false;
+  dependencies.panelCoordinator = panelCoordinator([], { disconnectSession: async () => false });
 
   const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
     capabilityId: prepared.capabilityId, eventNonce: null, auditId: 'audit-compensation-blocked',
@@ -413,7 +443,7 @@ test('running recovery blocks and retains ACTIVE when durable panel cleanup cann
     area, authority: prepared.authority, latest,
     execution: async () => { throw new Error('must not resume'); },
   });
-  dependencies.panelCoordinator.disconnectSession = async () => false;
+  dependencies.panelCoordinator = panelCoordinator([], { disconnectSession: async () => false });
 
   assert.deepEqual(await createAuthorizedAuditStarter(dependencies).recoverAuthorizedAuditLifecycle(), {
     ok: false, state: 'blocked', auditId: null, revision: null, code: 'AUDIT_RECOVERY_REQUIRED',
@@ -462,7 +492,7 @@ test('revoked settlement blocks and retains recoverable ACTIVE when durable pane
       failureCode: 'AUDIT_FAILED', model: null, checkpoint: null,
     }),
   });
-  dependencies.panelCoordinator.disconnectSession = async () => false;
+  dependencies.panelCoordinator = panelCoordinator([], { disconnectSession: async () => false });
   const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
     capabilityId: prepared.capabilityId, eventNonce: null, auditId: 'audit-settlement-blocked',
     capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
@@ -487,14 +517,14 @@ test('revoked settlement succeeds without a live port after correlated durable b
       failureCode: 'AUDIT_FAILED', model: null, checkpoint: null,
     }),
   });
-  dependencies.panelCoordinator = {
-    async withWindowLock(_windowId, fn) { return fn(); },
-    async publishRegisteredBootstrap(value) {
+  dependencies.panelCoordinator = panelCoordinator([], {
+    async registerPendingBootstrap(value) {
       area.values[panelBootstrapStorageKey(value.windowId)] = {
         version: 1, kind: 'audit-session', ...structuredClone(value), state: 'pending',
       };
       return true;
     },
+    async publishRegisteredBootstrap() { return true; },
     async publishResult() { return false; },
     async disconnectSession({ auditId, sessionCapabilityId, windowId }) {
       const key = panelBootstrapStorageKey(windowId);
@@ -503,7 +533,7 @@ test('revoked settlement succeeds without a live port after correlated durable b
       delete area.values[key];
       return true;
     },
-  };
+  });
   const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
     capabilityId: prepared.capabilityId, eventNonce: null, auditId: 'audit-no-live-settlement',
     capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
@@ -632,7 +662,7 @@ test('settlement blocks with finalizing ACTIVE when result publication returns a
   dependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({
     reportRevision, inventory: report.inventory,
   });
-  dependencies.panelCoordinator.publishResult = async () => undefined;
+  dependencies.panelCoordinator = panelCoordinator([], { publishResult: async () => undefined });
   const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
     capabilityId: prepared.capabilityId, eventNonce: null, auditId: report.model.auditId,
     capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),

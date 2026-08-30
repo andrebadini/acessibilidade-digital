@@ -131,29 +131,68 @@ function runningActive() {
 
 function tick() { return new Promise(resolve => setImmediate(resolve)); }
 
-test('exports the exact six-method non-reentrant coordinator and rejects out-of-scope publication', async () => {
+test('exports only lock entry and attaches fresh owner-bound mutation scopes', async () => {
   const { coordinator } = fixture();
-  assert.deepEqual(Object.keys(coordinator), [
-    'attachPanelPort', 'withWindowLock', 'publishRegisteredBootstrap', 'publishResult',
-    'registerAndPublishViewOnly', 'disconnectSession',
-  ]);
+  assert.deepEqual(Object.keys(coordinator), ['attachPanelPort', 'withWindowLock']);
   assert.equal(Object.isFrozen(coordinator), true);
-  assert.equal(await coordinator.publishRegisteredBootstrap({
-    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000,
-  }), false);
-  await assert.rejects(() => coordinator.withWindowLock(9, () => coordinator.withWindowLock(9, async () => true)), /PANEL_WINDOW_LOCK_REENTRANT/u);
+
+  let retained;
+  await coordinator.withWindowLock(9, async scope => {
+    retained = scope;
+    assert.deepEqual(Object.keys(scope), [
+      'registerPendingBootstrap', 'publishRegisteredBootstrap', 'publishResult',
+      'registerAndPublishViewOnly', 'disconnectSession',
+    ]);
+    assert.equal(Object.isFrozen(scope), true);
+  });
+  await assert.rejects(() => retained.disconnectSession({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, reasonCode: 'AUDIT_FAILED',
+  }), /PANEL_SCOPE_DENIED/u);
+
+  let release;
+  const held = coordinator.withWindowLock(9, async () => new Promise(resolve => { release = resolve; }));
+  await Promise.resolve();
+  await assert.rejects(() => retained.disconnectSession({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, reasonCode: 'AUDIT_FAILED',
+  }), /PANEL_SCOPE_DENIED/u);
+  release();
+  await held;
+
+  let rejectedScope;
+  await assert.rejects(() => coordinator.withWindowLock(9, scope => {
+    rejectedScope = scope;
+    throw new Error('callback failed');
+  }), /callback failed/u);
+  await assert.rejects(() => rejectedScope.disconnectSession({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, reasonCode: 'AUDIT_FAILED',
+  }), /PANEL_SCOPE_DENIED/u);
 });
 
-test('keeps publication authority across awaits inside the held window callback', async () => {
+test('keeps scoped mutation authority across awaits and serializes independent lock requests', async () => {
   const { coordinator } = fixture();
-  const published = await coordinator.withWindowLock(9, async () => {
+  const order = [];
+  let release;
+  let entered;
+  const enteredPromise = new Promise(resolve => { entered = resolve; });
+  const first = coordinator.withWindowLock(9, async scope => {
+    order.push('first-enter');
     await Promise.resolve();
-    return coordinator.publishRegisteredBootstrap({
+    const registered = await scope.registerPendingBootstrap({
       auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
       createdAt: EPOCH, expiresAt: EPOCH + 10_000,
     });
+    assert.equal(registered, true);
+    entered();
+    await new Promise(resolve => { release = resolve; });
+    order.push('first-leave');
   });
-  assert.equal(published, true);
+  await enteredPromise;
+  const second = coordinator.withWindowLock(9, async () => { order.push('second'); });
+  await Promise.resolve();
+  assert.deepEqual(order, ['first-enter']);
+  release();
+  await Promise.all([first, second]);
+  assert.deepEqual(order, ['first-enter', 'first-leave', 'second']);
 });
 
 test('panel-first receives initial, rejects a second hello and preserves the incumbent port', async () => {
@@ -216,6 +255,35 @@ test('start-first consumes a pending bootstrap only after proving ACTIVE running
   });
 });
 
+test('an idle live panel receives running only after ACTIVE exists and the start journal is absent', async () => {
+  const env = fixture();
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.equal(connected.messages.at(-1).state, 'initial');
+
+  await env.coordinator.withWindowLock(9, async scope => {
+    assert.equal(await scope.registerPendingBootstrap({
+      auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+      createdAt: EPOCH, expiresAt: EPOCH + 10_000,
+    }), true);
+    env.setActive(runningActive());
+    env.sessionArea.values['audita:start-journal:v1'] = { private: 'unconfirmed-removal' };
+    assert.equal(await scope.publishRegisteredBootstrap({
+      auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+    }), false);
+    assert.equal(connected.messages.some(message => message.state === 'running'), false);
+
+    delete env.sessionArea.values['audita:start-journal:v1'];
+    assert.equal(await scope.publishRegisteredBootstrap({
+      auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+    }), true);
+    assert.equal(connected.messages.at(-1).state, 'running');
+  });
+  assert.equal(env.timers.some(timer => timer.delay === 0), false);
+});
+
 test('rotates a consumed running bootstrap only for the exact durable ACTIVE job', async () => {
   const env = fixture();
   env.setActive(runningActive());
@@ -241,7 +309,7 @@ test('rotates a consumed running bootstrap only for the exact durable ACTIVE job
 test('registerAndPublishViewOnly durably registers without a port and preserves foreign state', async () => {
   const resultBundle = await bundle();
   const env = fixture();
-  const registered = await env.coordinator.withWindowLock(9, () => env.coordinator.registerAndPublishViewOnly({
+  const registered = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
     auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
     createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
   }));
@@ -252,7 +320,7 @@ test('registerAndPublishViewOnly durably registers without a port and preserves 
     version: 1, kind: 'audit-session', auditId: 'foreign-audit', sessionCapabilityId: 'F'.repeat(22),
     windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
   };
-  const denied = await env.coordinator.withWindowLock(9, () => env.coordinator.registerAndPublishViewOnly({
+  const denied = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
     auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
     createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
   }));
@@ -267,7 +335,7 @@ test('a live view-only send failure remains durably registered for reconnect', a
   env.coordinator.attachPanelPort(connected);
   connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
   await tick();
-  const result = await env.coordinator.withWindowLock(9, () => env.coordinator.registerAndPublishViewOnly({
+  const result = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
     auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
     createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
   }));
@@ -282,7 +350,7 @@ test('disconnectSession removes a correlated durable bootstrap even when no live
     windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
   };
 
-  const disconnected = await env.coordinator.withWindowLock(9, () => env.coordinator.disconnectSession({
+  const disconnected = await env.coordinator.withWindowLock(9, scope => scope.disconnectSession({
     auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, reasonCode: 'AUDIT_INTERRUPTED',
   }));
 
@@ -297,7 +365,7 @@ test('disconnectSession preserves a foreign durable bootstrap and reports cleanu
     windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
   };
 
-  const disconnected = await env.coordinator.withWindowLock(9, () => env.coordinator.disconnectSession({
+  const disconnected = await env.coordinator.withWindowLock(9, scope => scope.disconnectSession({
     auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, reasonCode: 'AUDIT_INTERRUPTED',
   }));
 
@@ -321,7 +389,7 @@ test('disconnectSession detects and preserves a concurrent bootstrap replacement
     env.sessionArea.values[key] = structuredClone(replacement);
   };
 
-  const disconnected = await env.coordinator.withWindowLock(9, () => env.coordinator.disconnectSession({
+  const disconnected = await env.coordinator.withWindowLock(9, scope => scope.disconnectSession({
     auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, reasonCode: 'AUDIT_INTERRUPTED',
   }));
 

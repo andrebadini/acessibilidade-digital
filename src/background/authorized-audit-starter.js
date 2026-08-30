@@ -307,6 +307,7 @@ function completionRevoked(auditId, code) {
 
 export function createAuthorizedAuditStarter(input) {
   const dependencies = exact(input, FACTORY_KEYS);
+  const coordinator = exact(dependencies?.panelCoordinator, ['attachPanelPort', 'withWindowLock']);
   if (!dependencies || !dependencies.authority || !dependencies.sessionArea || !dependencies.panelCoordinator ||
     FACTORY_KEYS.filter(key => !['authority', 'sessionArea', 'panelCoordinator'].includes(key))
       .some(key => typeof dependencies[key] !== 'function') ||
@@ -315,11 +316,9 @@ export function createAuthorizedAuditStarter(input) {
     typeof dependencies.authority.claimAndIssueAuditSession !== 'function' ||
     typeof dependencies.authority.claimWorkerEventAndIssueAuditSession !== 'function' ||
     typeof dependencies.authority.transitionAuditSession !== 'function' ||
-    typeof dependencies.authority.invalidateCapability !== 'function' ||
-    typeof dependencies.panelCoordinator.withWindowLock !== 'function' ||
-    typeof dependencies.panelCoordinator.publishRegisteredBootstrap !== 'function' ||
-    typeof dependencies.panelCoordinator.publishResult !== 'function' ||
-    typeof dependencies.panelCoordinator.disconnectSession !== 'function') throw new TypeError('AUTHORIZED_AUDIT_STARTER_INVALID');
+    typeof dependencies.authority.invalidateCapability !== 'function' || !coordinator ||
+    typeof coordinator.attachPanelPort !== 'function' ||
+    typeof coordinator.withWindowLock !== 'function') throw new TypeError('AUTHORIZED_AUDIT_STARTER_INVALID');
 
   const {
     authority, sessionArea, panelCoordinator, runAttachedAuditExecution,
@@ -489,7 +488,7 @@ export function createAuthorizedAuditStarter(input) {
 
   async function settle(liveRecord, rawOutcome, forcedCode = null) {
     const active = liveRecord.active;
-    return withGlobalLock(() => panelCoordinator.withWindowLock(active.windowId, async () => {
+    return withGlobalLock(() => panelCoordinator.withWindowLock(active.windowId, async scope => {
       try {
         let current = await readActiveAuditJobForWorker({ sessionArea });
         if (!current || current.auditId !== active.auditId || current.sessionCapabilityId !== active.sessionCapabilityId) {
@@ -499,7 +498,7 @@ export function createAuthorizedAuditStarter(input) {
           await persistExactLatest(latestState(current.auditId, 'AUDIT_REVOKED', modelNow));
           await transitionConfirmed(current, 'revoked');
           if (await invalidateConfirmed(current) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
-          if (await panelCoordinator.disconnectSession({
+          if (await scope.disconnectSession({
             auditId: current.auditId, sessionCapabilityId: current.sessionCapabilityId,
             windowId: current.windowId, reasonCode: 'AUDIT_REVOKED',
           }) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
@@ -519,7 +518,7 @@ export function createAuthorizedAuditStarter(input) {
           }
           if (!committed || current.state !== 'finalizing' || current.commitState !== 'confirmed') throw new Error('TERMINAL_COMMIT_DENIED');
           await transitionConfirmed(current, 'result');
-          const published = await panelCoordinator.publishResult({
+          const published = await scope.publishResult({
             auditId: current.auditId, sessionCapabilityId: current.sessionCapabilityId,
             windowId: current.windowId, state: 'result', resultBundle: committed.bundle,
           });
@@ -531,7 +530,7 @@ export function createAuthorizedAuditStarter(input) {
         await persistExactLatest(latestState(current.auditId, code, modelNow));
         await transitionConfirmed(current, 'revoked');
         if (await invalidateConfirmed(current) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
-        if (await panelCoordinator.disconnectSession({
+        if (await scope.disconnectSession({
           auditId: current.auditId, sessionCapabilityId: current.sessionCapabilityId,
           windowId: current.windowId, reasonCode: code,
         }) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
@@ -545,7 +544,7 @@ export function createAuthorizedAuditStarter(input) {
 
   async function compensateStart(fact, journal, claimed) {
     try {
-      return await panelCoordinator.withWindowLock(fact.windowId, async () => {
+      return await panelCoordinator.withWindowLock(fact.windowId, async scope => {
         const sessionCapabilityId = claimed?.sessionCapabilityId;
         const currentActive = await readActiveAuditJobForWorker({ sessionArea });
         if (currentActive && (currentActive.auditId !== journal.auditId ||
@@ -568,7 +567,7 @@ export function createAuthorizedAuditStarter(input) {
           }
           await transitionConfirmed(active, 'revoked');
           if (await invalidateConfirmed(active) !== true) return false;
-          if (await panelCoordinator.disconnectSession({
+          if (await scope.disconnectSession({
             auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId,
             windowId: active.windowId, reasonCode: 'AUDIT_START_COMPENSATED',
           }) !== true) return false;
@@ -634,7 +633,7 @@ export function createAuthorizedAuditStarter(input) {
         try {
           fact = await readPreparedAttachedAuditFact({ sessionArea, capabilityId: args.capabilityId, epochNow });
         } catch { throw TARGET_UNAVAILABLE_SENTINEL; }
-        return await panelCoordinator.withWindowLock(fact.windowId, async () => {
+        return await panelCoordinator.withWindowLock(fact.windowId, async scope => {
           let confirmedFact;
           try {
             confirmedFact = await readPreparedAttachedAuditFact({ sessionArea, capabilityId: args.capabilityId, epochNow });
@@ -679,11 +678,11 @@ export function createAuthorizedAuditStarter(input) {
             return record && same(record, storedPreference) ? freeze(record) : null;
           };
           await writeConfirmed(sessionArea, retentionPreferenceStorageKey(args.auditId), storedPreference, preferenceParser, 'RETENTION_PREFERENCE_DENIED');
-          const bootstrapPublished = await panelCoordinator.publishRegisteredBootstrap({
+          const bootstrapRegistered = await scope.registerPendingBootstrap({
             auditId: args.auditId, sessionCapabilityId: claimed.sessionCapabilityId,
             windowId: fact.windowId, createdAt: postGrant, expiresAt: grant.expiresAt,
           });
-          if (bootstrapPublished !== true) throw new Error('AUDIT_START_FAILED');
+          if (bootstrapRegistered !== true) throw new Error('AUDIT_START_FAILED');
           await persistExactLatest(latestState(args.auditId, 'running', modelNow));
           const controller = createAbortController();
           if (!controller || typeof controller.abort !== 'function' || !controller.signal) throw new Error('AUDIT_START_FAILED');
@@ -700,6 +699,10 @@ export function createAuthorizedAuditStarter(input) {
             current => current.auditId === active.auditId && current.capabilityId === active.capabilityId &&
               current.sessionCapabilityId === active.sessionCapabilityId && current.windowId === active.windowId);
           if (!removedJournal) throw new Error('AUDIT_START_FAILED');
+          const bootstrapPublished = await scope.publishRegisteredBootstrap({
+            auditId: args.auditId, sessionCapabilityId: claimed.sessionCapabilityId, windowId: fact.windowId,
+          });
+          if (bootstrapPublished !== true) throw new Error('AUDIT_START_FAILED');
           let resolveCompletion;
           const completion = new Promise(resolve => { resolveCompletion = resolve; });
           liveRecord.completion = completion;
@@ -788,7 +791,7 @@ export function createAuthorizedAuditStarter(input) {
     if (session.state === 'running') await transitionConfirmed(active, 'revoked');
     else if (session.state !== 'revoked') throw new Error('AUDIT_RECOVERY_REQUIRED');
     if (await invalidateConfirmed(active) !== true) throw new Error('AUDIT_RECOVERY_REQUIRED');
-    const disconnected = await panelCoordinator.withWindowLock(active.windowId, () => panelCoordinator.disconnectSession({
+    const disconnected = await panelCoordinator.withWindowLock(active.windowId, scope => scope.disconnectSession({
       auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId,
       windowId: active.windowId, reasonCode: 'AUDIT_INTERRUPTED',
     }));
@@ -815,7 +818,7 @@ export function createAuthorizedAuditStarter(input) {
     });
     if (session.state === 'running') await transitionConfirmed(active, 'result');
     else if (session.state !== 'result') throw new Error('AUDIT_RECOVERY_REQUIRED');
-    const published = await panelCoordinator.withWindowLock(active.windowId, () => panelCoordinator.publishResult({
+    const published = await panelCoordinator.withWindowLock(active.windowId, scope => scope.publishResult({
       auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId,
       windowId: active.windowId, state: 'result', resultBundle: bundle,
     }));

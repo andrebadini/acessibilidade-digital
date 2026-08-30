@@ -382,3 +382,32 @@ test('maps only the runner-private post-collection fence capability to TARGET_CH
     assert.equal(result.model.session.diagnostics.at(-1).code, 'AUDIT_FAILED');
   }
 });
+
+test('treats AbortError-shaped dependency failures as audit failures unless cancellation is real', async () => {
+  for (const spoof of [
+    Object.assign(new Error('PRIVATE_ABORT_DETAIL'), { name: 'AbortError' }),
+    new DOMException('PRIVATE_ABORT_DETAIL', 'AbortError'),
+  ]) {
+    const unrelated = attachedFixture({ pipelineError: spoof });
+    const result = await runObservedTabAudit(unrelated.args);
+    assert.equal(result.model.session.status, 'failed');
+    assert.equal(result.model.session.diagnostics.at(-1).code, 'AUDIT_FAILED');
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_ABORT_DETAIL/u);
+  }
+
+  const controller = new AbortController();
+  const cancelled = attachedFixture({ signal: controller.signal });
+  cancelled.args.pipeline = async () => {
+    controller.abort(new Error('PRIVATE_USER_CANCEL_DETAIL'));
+    throw controller.signal.reason;
+  };
+  const result = await runObservedTabAudit(cancelled.args);
+  assert.equal(result.model.session.status, 'cancelled');
+  assert.equal(result.model.session.diagnostics.at(-1).code, 'AUDIT_ABORTED');
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_USER_CANCEL_DETAIL/u);
+
+  const internal = attachedFixture({ decision: { status: 'aborted' } });
+  const internallyCancelled = await runObservedTabAudit(internal.args);
+  assert.equal(internallyCancelled.model.session.status, 'cancelled');
+  assert.equal(internallyCancelled.model.session.diagnostics.at(-1).code, 'AUDIT_ABORTED');
+});
