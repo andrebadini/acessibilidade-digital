@@ -161,6 +161,69 @@ test('accepts Node WHATWG chrome-extension URL without origin comparison or send
   ]);
 });
 
+test('accepts the native SIDE_PANEL sender without documentId only after exact origin context and window proofs', async () => {
+  const url = 'chrome-extension://test/src/panel/index.html';
+  const sender = { id: 'test', url, origin: 'chrome-extension://test' };
+  const calls = [];
+  const chromeApi = {
+    runtime: {
+      id: 'test',
+      async getContexts(filter) {
+        calls.push(['contexts', filter]);
+        return [{
+          documentId: 'native-panel-document', documentUrl: url,
+          contextType: 'SIDE_PANEL', tabId: -1, windowId: -1,
+        }];
+      },
+    },
+    windows: {
+      async get(windowId, options) {
+        calls.push(['window', windowId, options]);
+        return { id: windowId, focused: false, type: 'normal' };
+      },
+    },
+    tabs: {
+      async query(queryInfo) {
+        calls.push(['tabs', queryInfo]);
+        return [{ id: 41, windowId: 9, active: true, status: 'complete', url: 'https://example.test/', pendingUrl: '' }];
+      },
+    },
+  };
+
+  const context = await deriveTrustedExtensionContext({ sender, chromeApi, surface: PANEL_SURFACE, claimedWindowId: 9 });
+
+  assert.deepEqual(context, {
+    issuer: { type: 'extension-document', documentId: 'side-panel-window:9', path: PANEL_SURFACE.path },
+    windowId: 9, tabId: null, contextType: 'SIDE_PANEL', documentUrl: url,
+  });
+  assert.deepEqual(calls, [
+    ['contexts', { contextTypes: ['SIDE_PANEL'], documentUrls: [url] }],
+    ['window', 9, { populate: false }],
+    ['tabs', { active: true, windowId: 9 }],
+  ]);
+});
+
+test('fails closed for a document-less sender without the exact native panel origin or live SIDE_PANEL context', async () => {
+  const url = 'chrome-extension://test/src/panel/index.html';
+  for (const [name, sender, contexts] of [
+    ['missing-origin', { id: 'test', url }, [{ documentId: 'native-panel', documentUrl: url, contextType: 'SIDE_PANEL', windowId: -1 }]],
+    ['wrong-origin', { id: 'test', url, origin: 'chrome-extension://other' }, [{ documentId: 'native-panel', documentUrl: url, contextType: 'SIDE_PANEL', windowId: -1 }]],
+    ['missing-context', { id: 'test', url, origin: 'chrome-extension://test' }, []],
+    ['wrong-context', { id: 'test', url, origin: 'chrome-extension://test' }, [{ documentId: 'native-panel', documentUrl: url, contextType: 'TAB', windowId: -1 }]],
+  ]) {
+    const chromeApi = {
+      runtime: { id: 'test', async getContexts() { return contexts; } },
+      windows: { async get(windowId) { return { id: windowId, type: 'normal' }; } },
+      tabs: { async query({ windowId }) { return [{ id: 41, windowId, active: true, status: 'complete', url: 'https://example.test/', pendingUrl: '' }]; } },
+    };
+    await assert.rejects(
+      () => deriveTrustedExtensionContext({ sender, chromeApi, surface: PANEL_SURFACE, claimedWindowId: 9 }),
+      /CONTEXT_DENIED/u,
+      name,
+    );
+  }
+});
+
 test('rejects a SIDE_PANEL sentinel without one independently verified window claim', async () => {
   const sender = {
     id: 'test', documentId: 'panel-document-1',

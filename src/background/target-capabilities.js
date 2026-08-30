@@ -31,9 +31,18 @@ const INTENTS = deepFreeze({
 export async function deriveTrustedExtensionContext({ sender, chromeApi, surface, claimedWindowId } = {}) {
   try {
     if (!TRUSTED_SURFACES.has(surface)) throw new Error('CONTEXT_DENIED');
-    if (sender?.id !== chromeApi?.runtime?.id || typeof sender.documentId !== 'string' || !sender.documentId ||
-      typeof sender.url !== 'string') throw new Error('CONTEXT_DENIED');
-    const url = new URL(sender.url);
+    const isPanel = surface === PANEL_SURFACE;
+    const senderId = readDataProperty(sender, 'id');
+    const senderUrl = readDataProperty(sender, 'url');
+    const senderDocumentId = readOptionalDataProperty(sender, 'documentId');
+    const senderOrigin = readOptionalDataProperty(sender, 'origin');
+    const nativePanelSender = isPanel && !senderDocumentId.found && !senderDocumentId.invalid;
+    if (!senderId.found || senderId.value !== chromeApi?.runtime?.id || !senderUrl.found ||
+      typeof senderUrl.value !== 'string' ||
+      (!nativePanelSender && (!senderDocumentId.found || typeof senderDocumentId.value !== 'string' || !senderDocumentId.value)) ||
+      (nativePanelSender && (senderOrigin.invalid || !senderOrigin.found ||
+        senderOrigin.value !== `chrome-extension://${chromeApi.runtime.id}`))) throw new Error('CONTEXT_DENIED');
+    const url = new URL(senderUrl.value);
     const credentialsEmpty = url.username === '' && url.password === '' && url.port === '';
     const auditIds = url.searchParams.getAll('auditId');
     const queryAllowed = surface.allowQuery === true || (surface.allowQuery === 'auditId-only' &&
@@ -43,44 +52,75 @@ export async function deriveTrustedExtensionContext({ sender, chromeApi, surface
       url.pathname !== surface.path || url.hash !== '' || (!queryAllowed && url.search !== '')) {
       throw new Error('CONTEXT_DENIED');
     }
-    const isPanel = surface === PANEL_SURFACE;
     if ((isPanel && !safeChromeId(claimedWindowId)) || (!isPanel && claimedWindowId !== undefined)) {
       throw new Error('CONTEXT_DENIED');
     }
-    const contexts = readDataArray(await chromeApi.runtime.getContexts({ documentIds: [sender.documentId] }));
-    if (!contexts || contexts.length !== 1) throw new Error('CONTEXT_DENIED');
-    const candidate = contexts[0];
-    const documentId = readDataProperty(candidate, 'documentId');
-    const documentUrl = readDataProperty(candidate, 'documentUrl');
-    const contextType = readDataProperty(candidate, 'contextType');
-    const nativeWindowId = readDataProperty(candidate, 'windowId');
-    if (!documentId.found || documentId.value !== sender.documentId || !documentUrl.found ||
-      documentUrl.value !== sender.url || !contextType.found || contextType.value !== surface.contextType ||
-      !nativeWindowId.found) throw new Error('CONTEXT_DENIED');
+    const contexts = readDataArray(await chromeApi.runtime.getContexts(nativePanelSender
+      ? { contextTypes: [surface.contextType], documentUrls: [senderUrl.value] }
+      : { documentIds: [senderDocumentId.value] }));
+    if (!contexts || contexts.length === 0) throw new Error('CONTEXT_DENIED');
+    let contextType = surface.contextType;
+    let documentUrl = senderUrl.value;
+    let nativeWindowId = -1;
+    let candidate = null;
+    if (nativePanelSender) {
+      if (!contexts.every(candidate => validNativePanelContext(candidate, senderUrl.value, claimedWindowId))) {
+        throw new Error('CONTEXT_DENIED');
+      }
+    } else {
+      if (contexts.length !== 1) throw new Error('CONTEXT_DENIED');
+      candidate = contexts[0];
+      const documentId = readDataProperty(candidate, 'documentId');
+      const candidateUrl = readDataProperty(candidate, 'documentUrl');
+      const candidateType = readDataProperty(candidate, 'contextType');
+      const candidateWindowId = readDataProperty(candidate, 'windowId');
+      if (!documentId.found || documentId.value !== senderDocumentId.value || !candidateUrl.found ||
+        candidateUrl.value !== senderUrl.value || !candidateType.found || candidateType.value !== surface.contextType ||
+        !candidateWindowId.found) throw new Error('CONTEXT_DENIED');
+      documentUrl = candidateUrl.value;
+      contextType = candidateType.value;
+      nativeWindowId = candidateWindowId.value;
+    }
     let windowId;
     let tabId = null;
     if (isPanel) {
-      if (nativeWindowId.value !== -1 && nativeWindowId.value !== claimedWindowId) throw new Error('CONTEXT_DENIED');
+      if (nativeWindowId !== -1 && nativeWindowId !== claimedWindowId) throw new Error('CONTEXT_DENIED');
       await provePanelWindowClaim(chromeApi, claimedWindowId);
       windowId = claimedWindowId;
     } else {
       const nativeTabId = readDataProperty(candidate, 'tabId');
-      if (!safeChromeId(nativeWindowId.value) || !nativeTabId.found || !safeChromeId(nativeTabId.value)) {
+      if (!safeChromeId(nativeWindowId) || !nativeTabId.found || !safeChromeId(nativeTabId.value)) {
         throw new Error('CONTEXT_DENIED');
       }
-      windowId = nativeWindowId.value;
+      windowId = nativeWindowId;
       tabId = nativeTabId.value;
     }
     return deepFreeze({
-      issuer: { type: 'extension-document', documentId: sender.documentId, path: surface.path },
+      issuer: {
+        type: 'extension-document',
+        documentId: nativePanelSender ? panelIssuerDocumentId(claimedWindowId) : senderDocumentId.value,
+        path: surface.path,
+      },
       windowId,
       tabId,
-      contextType: contextType.value,
-      documentUrl: documentUrl.value,
+      contextType,
+      documentUrl,
     });
   } catch {
     throw new Error('CONTEXT_DENIED');
   }
+}
+
+function panelIssuerDocumentId(windowId) { return `side-panel-window:${windowId}`; }
+
+function validNativePanelContext(candidate, senderUrl, claimedWindowId) {
+  const documentId = readDataProperty(candidate, 'documentId');
+  const documentUrl = readDataProperty(candidate, 'documentUrl');
+  const contextType = readDataProperty(candidate, 'contextType');
+  const nativeWindowId = readDataProperty(candidate, 'windowId');
+  return documentId.found && validDocumentId(documentId.value) && documentUrl.found &&
+    documentUrl.value === senderUrl && contextType.found && contextType.value === PANEL_SURFACE.contextType &&
+    nativeWindowId.found && (nativeWindowId.value === -1 || nativeWindowId.value === claimedWindowId);
 }
 
 export const targetCapabilityStorageKey = capabilityId => `${TARGET_PREFIX}${capabilityId}`;

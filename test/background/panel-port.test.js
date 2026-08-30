@@ -36,12 +36,15 @@ function area() {
   };
 }
 
-function port({ documentId = 'panel-document', postError = false, failState = null } = {}) {
+function port({ documentId = 'panel-document', nativeSender = false, postError = false, failState = null } = {}) {
   const onMessage = event();
   const onDisconnect = event();
+  const url = `chrome-extension://${RUNTIME_ID}/src/panel/index.html`;
   return {
     name: PANEL_PORT_NAME,
-    sender: { id: RUNTIME_ID, documentId, url: `chrome-extension://${RUNTIME_ID}/src/panel/index.html` },
+    sender: nativeSender
+      ? { id: RUNTIME_ID, url, origin: `chrome-extension://${RUNTIME_ID}` }
+      : { id: RUNTIME_ID, documentId, url },
     onMessage, onDisconnect, messages: [], disconnects: 0,
     postMessage(message) { if (postError || message.state === failState) throw new Error('native secret'); this.messages.push(structuredClone(message)); },
     disconnect() { this.disconnects += 1; onDisconnect.emit(); },
@@ -90,10 +93,12 @@ function fixture(overrides = {}) {
   const chromeApi = {
     runtime: {
       id: RUNTIME_ID,
-      async getContexts({ documentIds }) {
+      async getContexts({ documentIds, contextTypes, documentUrls }) {
+        const documentId = documentIds?.[0] ?? 'native-panel-document';
+        const documentUrl = documentUrls?.[0] ?? `chrome-extension://${RUNTIME_ID}/src/panel/index.html`;
         return [{
-          documentId: documentIds[0], documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`,
-          contextType: 'SIDE_PANEL', tabId: -1, windowId: -1,
+          documentId, documentUrl,
+          contextType: contextTypes?.[0] ?? 'SIDE_PANEL', tabId: -1, windowId: -1,
         }];
       },
     },
@@ -317,6 +322,53 @@ test('panel-first receives initial, rejects a second hello and preserves the inc
   assert.equal(competitor.disconnects, 1);
   first.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   assert.equal(first.disconnects, 1);
+});
+
+test('native SIDE_PANEL port without sender documentId reaches a proved idle bootstrap', async () => {
+  const env = fixture();
+  const connected = port({ nativeSender: true });
+
+  assert.equal(env.coordinator.attachPanelPort(connected), true);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
+  await tick();
+
+  assert.deepEqual(connected.messages, [{
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null,
+  }]);
+  assert.equal(connected.disconnects, 0);
+});
+
+test('document-less panel port is denied before hello unless Chrome supplies the exact extension origin', () => {
+  const env = fixture();
+  let documentIdReads = 0;
+  const accessorDocumentId = {
+    id: RUNTIME_ID,
+    url: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`,
+    origin: `chrome-extension://${RUNTIME_ID}`,
+  };
+  Object.defineProperty(accessorDocumentId, 'documentId', {
+    enumerable: true,
+    get() { documentIdReads += 1; return 'forged-document'; },
+  });
+  const nativeShape = {
+    id: RUNTIME_ID,
+    url: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`,
+    origin: `chrome-extension://${RUNTIME_ID}`,
+  };
+  for (const sender of [
+    { id: RUNTIME_ID, url: `chrome-extension://${RUNTIME_ID}/src/panel/index.html` },
+    { id: RUNTIME_ID, url: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`, origin: 'chrome-extension://other' },
+    accessorDocumentId,
+    Object.assign([], nativeShape),
+    Object.assign(Object.create({ inherited: true }), nativeShape),
+  ]) {
+    const connected = port();
+    connected.sender = sender;
+    assert.equal(env.coordinator.attachPanelPort(connected), false);
+    assert.equal(connected.disconnects, 1);
+  }
+  assert.equal(documentIdReads, 0);
 });
 
 test('port bootstrap denies missing extra negative and accessor window claims without reading accessors', async () => {

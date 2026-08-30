@@ -57,6 +57,17 @@ function own(value, key) {
   } catch { return undefined; }
 }
 
+function optionalOwn(value, key) {
+  try {
+    if (!value || typeof value !== 'object') return { found: false, invalid: true };
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor) return { found: false, invalid: false };
+    return descriptor.enumerable && Object.hasOwn(descriptor, 'value')
+      ? { found: true, invalid: false, value: descriptor.value }
+      : { found: true, invalid: true };
+  } catch { return { found: true, invalid: true }; }
+}
+
 function safeChromeId(value) { return Number.isSafeInteger(value) && value >= 0; }
 function safeEpoch(value) { return Number.isSafeInteger(value) && value >= 0; }
 
@@ -338,11 +349,21 @@ export function createPanelPortCoordinator(raw) {
 
   function snapshotSender(port) {
     const sender = own(port, 'sender');
+    let senderPrototype;
+    try { senderPrototype = sender && typeof sender === 'object' ? Object.getPrototypeOf(sender) : undefined; }
+    catch { return null; }
+    if (!sender || typeof sender !== 'object' || Array.isArray(sender) ||
+      (senderPrototype !== Object.prototype && senderPrototype !== null)) return null;
     const id = own(sender, 'id');
-    const documentId = own(sender, 'documentId');
+    const documentId = optionalOwn(sender, 'documentId');
     const url = own(sender, 'url');
-    return id === input.chromeApi.runtime.id && typeof documentId === 'string' && documentId && typeof url === 'string'
-      ? freeze({ id, documentId, url }) : null;
+    const origin = own(sender, 'origin');
+    if (id !== input.chromeApi.runtime.id || typeof url !== 'string' || documentId.invalid) return null;
+    if (documentId.found && typeof documentId.value === 'string' && documentId.value) {
+      return freeze({ id, documentId: documentId.value, url });
+    }
+    return !documentId.found && origin === `chrome-extension://${input.chromeApi.runtime.id}`
+      ? freeze({ id, url, origin }) : null;
   }
 
   async function proveSender(sender, claimedWindowId) {
@@ -386,7 +407,8 @@ export function createPanelPortCoordinator(raw) {
   async function reprove(binding, assertOwned = null) {
     const context = await proveSender(binding.sender, binding.windowId);
     reassert(assertOwned);
-    return connected(binding) && context.windowId === binding.windowId && context.issuer.documentId === binding.sender.documentId
+    return connected(binding) && context.windowId === binding.windowId &&
+      context.issuer.documentId === binding.issuerDocumentId && context.documentUrl === binding.sender.url
       ? context : null;
   }
 
@@ -490,6 +512,7 @@ export function createPanelPortCoordinator(raw) {
     try {
       const admission = await binding.admission;
       if (!admission || !connected(binding)) throw new Error('PANEL_CONTEXT_DENIED');
+      binding.issuerDocumentId = admission.issuer.documentId;
       await withWindowLock(admission.windowId, async () => {
         binding.windowId = admission.windowId;
         if (!await reprove(binding)) throw new Error('PANEL_CONTEXT_DENIED');
@@ -529,7 +552,7 @@ export function createPanelPortCoordinator(raw) {
     }
     const binding = {
       port, sender, state: 'awaiting-hello', windowId: null, auditId: null, sessionCapabilityId: null,
-      admission: null, deadline: null, onHello: null, onBoundMessage: null, onDisconnect: null,
+      issuerDocumentId: null, admission: null, deadline: null, onHello: null, onBoundMessage: null, onDisconnect: null,
     };
     binding.onBoundMessage = () => disconnect(binding);
     binding.onDisconnect = () => {
