@@ -121,16 +121,21 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   const reportView = buildReportView({
     model, summary, modelRevision: snapshot.revision, modelHash: model.integrity.canonicalModelHash,
   });
+  // Keep the synthetic delivery timeline close to the controller's trusted
+  // wall clock. A fixed calendar instant eventually makes the two-minute
+  // lease expire before persistExportSuccess() can finalize it.
+  const leaseBaseMs = Date.now() - 10_000;
+  const leaseNow = offsetMs => new Date(leaseBaseMs + offsetMs).toISOString();
   const ownerId = `export:${model.auditId}:pending`;
   const acquired = await store.acquireExportLease(model.auditId, snapshot.capability, {
-    ownerId, now: '2026-08-30T15:00:01.000Z',
+    ownerId, now: leaseNow(1_000),
   });
   const deliveryOwnerId = `export:${model.auditId}:${acquired.exportAttempt}`;
   await store.claimExportLease(model.auditId, snapshot.capability, {
-    ownerId: deliveryOwnerId, exportAttempt: acquired.exportAttempt, now: '2026-08-30T15:00:02.000Z',
+    ownerId: deliveryOwnerId, exportAttempt: acquired.exportAttempt, now: leaseNow(2_000),
   });
   await store.beginExportDelivery(model.auditId, snapshot.capability, {
-    ownerId: deliveryOwnerId, exportAttempt: acquired.exportAttempt, now: '2026-08-30T15:00:03.000Z',
+    ownerId: deliveryOwnerId, exportAttempt: acquired.exportAttempt, now: leaseNow(3_000),
   });
   const result = await runReportExport({
     auditSnapshotCapability: snapshot.capability, exportLeaseOwnerId: deliveryOwnerId,
@@ -144,13 +149,13 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
     assertDelivery({ snapshotCapability, exportLeaseOwnerId }) {
       return store.assertExportLease(model.auditId, snapshotCapability, {
         ownerId: exportLeaseOwnerId, exportAttempt: acquired.exportAttempt,
-        now: '2026-08-30T15:00:04.000Z', phase: 'delivering',
+        now: leaseNow(4_000), phase: 'delivering',
       });
     },
     recordDelivery({ snapshotCapability, exportLeaseOwnerId, ...entry }) {
       return store.recordExportDelivery(model.auditId, snapshotCapability, {
         ownerId: exportLeaseOwnerId, exportAttempt: acquired.exportAttempt,
-        now: '2026-08-30T15:00:04.000Z', ...entry,
+        now: leaseNow(4_000), ...entry,
       });
     },
   });
