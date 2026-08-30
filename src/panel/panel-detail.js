@@ -1,0 +1,278 @@
+import { decodePngDataUrl } from '../core/evidence/png.js';
+import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../core/legal/consumer-basis.js';
+import { projectAuditResourceOrigin, sanitizeEvidenceUrl } from '../core/privacy.js';
+import { createAuditModel } from '../core/report/audit-model.js';
+import { assertPanelClassificationV1, deriveResultContextV1 } from './panel-result-contract.js';
+
+const GROUP_NAMES = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
+const CONSULT_ACTION = Object.freeze({
+  kind: 'consult-evidence',
+  reason: 'Esta verificação não possui um elemento único destacável no estado atual.',
+});
+
+function detailDenied() {
+  throw new TypeError('PANEL_DETAIL_OCCURRENCE_DENIED');
+}
+
+function copyData(value, seen = new WeakMap()) {
+  if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) return value;
+  if (!value || typeof value !== 'object' || seen.has(value)) detailDenied();
+  let prototype;
+  let keys;
+  try {
+    prototype = Object.getPrototypeOf(value);
+    keys = Reflect.ownKeys(value);
+  } catch { detailDenied(); }
+  if (Array.isArray(value)) {
+    if (prototype !== Array.prototype) detailDenied();
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+    const length = lengthDescriptor?.value;
+    const expected = ['length', ...Array.from({ length }, (_item, index) => String(index))];
+    if (!Number.isSafeInteger(length) || length < 0 || length > 100_000 ||
+      keys.length !== expected.length || expected.some(key => !keys.includes(key))) detailDenied();
+    const output = [];
+    seen.set(value, output);
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) detailDenied();
+      output.push(copyData(descriptor.value, seen));
+    }
+    return output;
+  }
+  if (prototype !== Object.prototype && prototype !== null) detailDenied();
+  const output = {};
+  seen.set(value, output);
+  for (const key of keys) {
+    if (typeof key !== 'string') detailDenied();
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) detailDenied();
+    output[key] = copyData(descriptor.value, seen);
+  }
+  return output;
+}
+
+function snapshotSummary(input, auditId) {
+  let summary;
+  try { summary = copyData(input); } catch { detailDenied(); }
+  if (!summary || summary.version !== 1 || summary.auditId !== auditId || !summary.groups ||
+    Object.keys(summary.groups).length !== GROUP_NAMES.length ||
+    GROUP_NAMES.some(groupName => !Array.isArray(summary.groups[groupName]))) detailDenied();
+  return summary;
+}
+
+function matchingCard(summary, occurrenceId) {
+  const matches = [];
+  for (const groupName of GROUP_NAMES) {
+    for (const card of summary.groups[groupName]) {
+      if (!card || !Array.isArray(card.occurrenceIds)) detailDenied();
+      if (card.occurrenceIds.includes(occurrenceId)) matches.push({ groupName, card });
+    }
+  }
+  if (matches.length !== 1) detailDenied();
+  const match = matches[0];
+  try {
+    assertPanelClassificationV1(match.groupName, match.card.classification, match.card.displayOutcome);
+  } catch { detailDenied(); }
+  return match.card;
+}
+
+function ruleIndex(model) {
+  const index = new Map();
+  for (const rule of model.ruleResults) {
+    const key = JSON.stringify([rule.source.engine, rule.source.ruleId]);
+    if (index.has(key)) detailDenied();
+    index.set(key, rule);
+  }
+  return index;
+}
+
+function evidenceForOccurrence(occurrence, evidenceById) {
+  const evidence = [];
+  for (const evidenceId of occurrence.evidenceRefs) {
+    const artifact = evidenceById.get(evidenceId);
+    if (!artifact || artifact.pageId !== occurrence.pageId) detailDenied();
+    if (artifact.nodeId !== undefined && artifact.nodeId !== null && artifact.nodeId !== occurrence.nodeId) detailDenied();
+    evidence.push(artifact);
+  }
+  return evidence;
+}
+
+function correlatedLocator(occurrence, evidence) {
+  let selector = occurrence.target.selector;
+  let framePath = [...occurrence.target.framePath];
+  for (const artifact of evidence) {
+    if (!artifact.selector || (artifact.nodeId !== undefined && artifact.nodeId !== null && artifact.nodeId !== occurrence.nodeId)) continue;
+    const css = artifact.selector.css;
+    const frames = artifact.selector.framePath ?? [];
+    if (selector && css && selector !== css) detailDenied();
+    if (framePath.length > 0 && frames.length > 0 && JSON.stringify(framePath) !== JSON.stringify(frames)) detailDenied();
+    if (!selector && css) selector = css;
+    if (framePath.length === 0 && frames.length > 0) framePath = [...frames];
+  }
+  return { selector, framePath };
+}
+
+function accessibilityBlock(occurrence, evidence) {
+  const artifact = evidence.find(value => value.accessibility &&
+    (value.nodeId === undefined || value.nodeId === null || value.nodeId === occurrence.nodeId));
+  return {
+    name: artifact?.accessibility?.name ?? null,
+    nameSource: artifact?.accessibility?.nameSource ?? null,
+    announcementPreview: artifact?.accessibility?.announcementPreview ?? occurrence.accessiblePreview ?? null,
+  };
+}
+
+function correctionFor(occurrence, rule, item) {
+  const matchingTarget = rule?.targets?.find(target => {
+    if (typeof target === 'string' || Number.isSafeInteger(target)) return String(target) === occurrence.nodeId;
+    return target && String(target.nodeId ?? '') === String(occurrence.nodeId ?? '');
+  });
+  if (matchingTarget && typeof matchingTarget === 'object' && typeof matchingTarget.message === 'string' && matchingTarget.message) {
+    return matchingTarget.message;
+  }
+  if (typeof item?.humanReason === 'string' && item.humanReason) return item.humanReason;
+  return rule?.summary ?? occurrence.justification;
+}
+
+function safeDataUrl(value) {
+  if (typeof value !== 'string') return '';
+  try {
+    decodePngDataUrl(value);
+    return value;
+  } catch {
+    return '';
+  }
+}
+
+function previewBlock(evidence) {
+  return evidence.map(artifact => {
+    const mediaUrl = typeof artifact.mediaUrl === 'string' ? sanitizeEvidenceUrl(artifact.mediaUrl) : '';
+    return {
+      evidenceId: artifact.evidenceId,
+      kind: artifact.kind,
+      dataUrl: safeDataUrl(artifact.dataUrl),
+      mediaUrl: /^https?:\/\//u.test(mediaUrl) ? mediaUrl : '',
+      origin: /^https?:\/\//u.test(mediaUrl) ? projectAuditResourceOrigin(mediaUrl) : '',
+    };
+  });
+}
+
+function legalReferenceFor({ occurrence, card, item, decision }) {
+  const official = item && occurrence.nbrItemRef === item.id;
+  const originalEligible = occurrence.legalAnalysis?.basisRef === CONSUMER_ACCESSIBILITY_FIXED_BASIS.id;
+  const reviewedEligible = occurrence.outcome === 'cantTell' && decision?.answer === 'não conforme' &&
+    typeof decision.evaluator === 'string' && decision.evaluator.length > 0 &&
+    typeof decision.decidedAt === 'string' && decision.decidedAt.length > 0 &&
+    typeof decision.note === 'string' && decision.note.length > 0;
+  if (card.displayOutcome !== 'failed' || !official || (!originalEligible && !reviewedEligible)) return null;
+  return {
+    basisRef: CONSUMER_ACCESSIBILITY_FIXED_BASIS.id,
+    abntItem: item.id,
+    statement: `A referida desconformidade infringe o disposto nos arts. 7º, caput, 20, § 2º, e 39, VIII, da Lei nº 8.078/1990, c/c o art. 12, IX, “a”, do Decreto nº 2.181/1997, e no item ${item.id} da ABNT NBR 17225:2025.`,
+    qualification: CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification,
+  };
+}
+
+function targetBlock(card, occurrenceById) {
+  const occurrences = card.occurrenceIds.map(id => occurrenceById.get(id));
+  if (occurrences.some(value => !value)) detailDenied();
+  return occurrences.map((occurrence, index) => ({
+    nodeId: occurrence.nodeId,
+    position: index + 1,
+    total: occurrences.length,
+  }));
+}
+
+function expectedDisplayOutcome(occurrences, decisionByOccurrence) {
+  const priority = { failed: 5, cantTell: 4, untested: 3, passed: 2, inapplicable: 1 };
+  const outcomes = occurrences.map(occurrence => {
+    if (['failed', 'passed'].includes(occurrence.outcome)) return occurrence.outcome;
+    const answer = decisionByOccurrence.get(occurrence.occurrenceId)?.answer;
+    if (answer === 'não conforme') return 'failed';
+    if (answer === 'conforme') return 'passed';
+    return 'cantTell';
+  });
+  return outcomes.reduce((best, outcome) => priority[outcome] > priority[best] ? outcome : best, 'inapplicable');
+}
+
+function freeze(value, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object' || seen.has(value) || Object.isFrozen(value)) return value;
+  seen.add(value);
+  for (const child of Object.values(value)) freeze(child, seen);
+  return Object.freeze(value);
+}
+
+export function buildPanelDetail({ model: inputModel, summary: inputSummary, occurrenceId, highlightAvailability: _availability }) {
+  let model;
+  try { model = createAuditModel(inputModel); } catch { throw new TypeError('PANEL_DETAIL_MODEL_DENIED'); }
+  if (typeof occurrenceId !== 'string') detailDenied();
+  const summary = snapshotSummary(inputSummary, model.auditId);
+  const card = matchingCard(summary, occurrenceId);
+  const occurrenceById = new Map(model.occurrences.map(occurrence => [occurrence.occurrenceId, occurrence]));
+  const occurrence = occurrenceById.get(occurrenceId);
+  if (!occurrence || card.checkKey !== JSON.stringify([occurrence.pageId, occurrence.source.engine, occurrence.source.ruleId])) detailDenied();
+  const rules = ruleIndex(model);
+  const rule = rules.get(JSON.stringify([occurrence.source.engine, occurrence.source.ruleId]));
+  const item = occurrence.nbrItemRef === null
+    ? null
+    : model.itemResults.find(candidate => candidate.id === occurrence.nbrItemRef) ?? null;
+  const evidenceById = new Map(model.evidence.map(artifact => [artifact.evidenceId, artifact]));
+  const cardOccurrences = card.occurrenceIds.map(id => occurrenceById.get(id));
+  const authoritativeOccurrenceIds = model.occurrences
+    .filter(candidate => JSON.stringify([candidate.pageId, candidate.source.engine, candidate.source.ruleId]) === card.checkKey)
+    .map(candidate => candidate.occurrenceId)
+    .sort((left, right) => left.localeCompare(right));
+  if (cardOccurrences.some(value => !value) ||
+    JSON.stringify([...card.occurrenceIds].sort((left, right) => left.localeCompare(right))) !== JSON.stringify(authoritativeOccurrenceIds)) {
+    detailDenied();
+  }
+  const decisionByOccurrence = new Map(model.reviewDecisions.map(candidate => [candidate.occurrenceId, candidate]));
+  if (expectedDisplayOutcome(cardOccurrences, decisionByOccurrence) !== card.displayOutcome ||
+    deriveResultContextV1({ occurrences: cardOccurrences, evidenceById }) !== card.context) detailDenied();
+  const evidence = evidenceForOccurrence(occurrence, evidenceById);
+  const locator = correlatedLocator(occurrence, evidence);
+  const decision = model.reviewDecisions.find(candidate => candidate.occurrenceId === occurrenceId) ?? null;
+  const title = item?.title ?? rule?.summary ?? occurrence.justification;
+  const reason = occurrence.justification || rule?.summary || title;
+  const normativeWcag = item?.wcag ?? [];
+  const detail = {
+    version: 1,
+    auditId: model.auditId,
+    occurrenceId,
+    checkKey: card.checkKey,
+    heading: {
+      title,
+      classification: card.classification,
+      impact: occurrence.impact,
+      context: card.context,
+    },
+    affected: {
+      audience: item?.humanReason || reason,
+      reason,
+    },
+    observed: reason,
+    correction: correctionFor(occurrence, rule, item),
+    targets: targetBlock(card, occurrenceById),
+    accessibility: accessibilityBlock(occurrence, evidence),
+    normative: {
+      wcag: normativeWcag.map(reference => reference.id),
+      level: normativeWcag.map(reference => reference.level),
+      abntItem: item?.id ?? null,
+      classification: item?.classification ?? null,
+    },
+    legalReference: legalReferenceFor({ occurrence, card, item, decision }),
+    previews: previewBlock(evidence),
+    technical: {
+      selector: locator.selector,
+      framePath: locator.framePath,
+      snippet: evidence.find(artifact => typeof artifact.snippet === 'string')?.snippet ?? null,
+      styles: [],
+      engine: occurrence.source.engine,
+      ruleId: occurrence.source.ruleId,
+      version: occurrence.source.version,
+      hashes: evidence.map(artifact => artifact.hash).filter(hash => typeof hash === 'string'),
+    },
+    action: { ...CONSULT_ACTION },
+  };
+  return freeze(detail);
+}

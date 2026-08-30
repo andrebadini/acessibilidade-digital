@@ -59,3 +59,25 @@ test('rejects a hostile own iterator without invoking it', async () => {
   await assert.rejects(() => verifyCoreRuleInventory(inventory), /CORE_INVENTORY_UNVERIFIED/u);
   assert.equal(iteratorCalls, 0);
 });
+
+test('rejects hostile inventory accessors and proxies without invoking or echoing them', async () => {
+  const valid = await handBuiltInventory();
+  let getterCalls = 0;
+  Object.defineProperty(valid, 'sha256', {
+    enumerable: true,
+    get() { getterCalls += 1; throw new Error('PRIVATE_INVENTORY_GETTER'); },
+  });
+  await assert.rejects(() => verifyCoreRuleInventory(valid), error => {
+    assert.equal(error.message, 'CORE_INVENTORY_UNVERIFIED');
+    return true;
+  });
+  assert.equal(getterCalls, 0);
+
+  const proxied = new Proxy({}, {
+    ownKeys() { throw new Error('PRIVATE_INVENTORY_PROXY'); },
+  });
+  await assert.rejects(() => verifyCoreRuleInventory(proxied), error => {
+    assert.equal(error.message, 'CORE_INVENTORY_UNVERIFIED');
+    return true;
+  });
+});
