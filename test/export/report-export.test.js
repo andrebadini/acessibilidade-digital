@@ -156,10 +156,12 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   const persisted = await persistExportSuccess(createExportSuccessRequest({ auditId:model.auditId,result,latest:{auditId:model.auditId} }),store);
   assert.equal(persisted.latest.exportStatus,'complete'); assert.equal(persisted.latest.exportRevision,snapshot.revision+1);
   assert.deepEqual(persisted.latest.deliveryReceipt.formats.map(row=>row.format),EXPORT_FORMATS_V1);
-  const corrupt = structuredClone(result); corrupt.html += 'x';
-  assert.throws(() => createExportSuccessRequest({auditId:model.auditId,result:corrupt,latest:{}}));
-  const wrongIdentity = structuredClone(result); wrongIdentity.exportDeliveryIdentity.modelRevision += 1;
-  assert.throws(() => createExportSuccessRequest({auditId:model.auditId,result:wrongIdentity,latest:{}}));
+  // The control above consumed an unmodified, privately attested result.  This
+  // mutation keeps that same object identity, so failure proves attestation
+  // revalidation rather than structuredClone losing its private capability.
+  result.html += 'tampered';
+  const tampered = createExportSuccessRequest({ auditId: model.auditId, result, latest: {} });
+  await assert.rejects(persistExportSuccess(tampered, store), /hash|proveniência|artefatos/i);
   assert.equal((result.html.match(/<h2\b/gu) ?? []).length, 7);
   assert.equal((result.html.match(/Câmara dos Deputados/gu) ?? []).length, 2);
   const identity = {

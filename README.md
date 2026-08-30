@@ -13,19 +13,19 @@ Para gerar o pacote distribuível, execute `npm run build:release`. O ZIP criado
 
 ## Uso básico
 
-Clique no ícone da extensão para abrir o painel lateral e escolha **Auditar a página atual**. Abrir o painel não inicia a coleta: o botão é a confirmação explícita. O Chrome controla e permite redimensionar a largura do painel. Ao final, revise os casos indeterminados e use **Gerar relatório atualizado** quando registrar novas decisões. A exportação baixa HTML autocontido, JSON-LD técnico no vocabulário EARL e, quando o navegador permite, PDF.
+Clique no ícone da extensão para abrir o painel lateral e escolha **Auditar a página atual**. Abrir o painel não inicia a coleta: o botão é a confirmação explícita. O Chrome controla e permite redimensionar a largura do painel. Ao final, revise os casos indeterminados e use **Gerar relatório atualizado** quando registrar novas decisões. A exportação baixa HTML autocontido, PDF, CSV e JSON-LD técnico no vocabulário EARL.
 
-A auditoria captura a página inteira e elementos, incluindo pixels e dados sensíveis que estejam visíveis. Essas evidências permanecem no dispositivo e são incorporadas aos relatórios; oculte ou remova dados sensíveis antes de iniciar.
+A auditoria anexada atual inspeciona localmente a estrutura da página ativa e não captura pixels. A URL e o conteúdo estrutural necessário à análise podem conter dados sensíveis; oculte ou remova esses dados antes de iniciar. Modos de captura visual condicionados a uma etapa própria de privacidade não fazem parte deste fluxo atual.
 
-Nos relatórios, cada ocorrência com alvo recebe automaticamente uma moldura: vermelha para não conformidade e âmbar enquanto depende de revisão humana. Depois da revisão, uma resposta “conforme” muda a moldura para verde e uma resposta “não conforme” para vermelha; uma resposta inconclusiva permanece âmbar. A miniatura inclui margem ao redor do alvo; a anotação é aplicada na apresentação HTML/PDF, enquanto o PNG original e o hash permanecem preservados na seção de evidências.
+Os relatórios apresentam as ocorrências, os alvos estruturais disponíveis e as decisões de revisão. Como o fluxo anexado atual usa o modo sem pixels, ele não produz miniaturas nem capturas anotadas da página.
 
-As permissões `tabs` e `scripting` abrem e observam somente a aba descartável criada pela auditoria. `debugger` dá acesso local ao protocolo do Chrome para estrutura, evidência e impressão. `downloads` salva os artefatos e `storage` mantém auditoria e andamento no dispositivo. Os sites auditados são cobertos por `host_permissions` HTTP(S).
+As permissões `tabs` e `scripting` permitem identificar e inspecionar localmente a página ativa escolhida no painel; a auditoria anexada não navega, fecha nem substitui essa aba. `debugger` dá acesso local ao protocolo do Chrome para coletar a estrutura e preparar a impressão. `downloads` salva os artefatos e `storage` mantém auditoria e andamento no dispositivo. Os sites auditados são cobertos por `host_permissions` HTTP(S).
 
 ## Limites atuais
 
-A auditoria cobre uma página e o estado observado, não todo o serviço. Itens contextuais exigem revisão humana. Frames ou capturas bloqueados podem produzir resultado parcial. Audita Acessibilidade é uma ferramenta independente, sem vínculo institucional; seus resultados não equivalem a certificação nem a laudo oficial.
+A auditoria cobre uma página e o estado observado, não todo o serviço. Itens contextuais exigem revisão humana. Frames de terceiros ou coleta estrutural bloqueada podem produzir resultado parcial. Audita Acessibilidade é uma ferramenta independente, sem vínculo institucional; seus resultados não equivalem a certificação nem a laudo oficial.
 
-Nesta entrega, o E2E em Chrome/Chromium real e a QA visual foram executados. A validação cobriu a instalação sem compactação, o fluxo de auditoria e revisão, os downloads HTML, JSON-LD e PDF e a apresentação em desktop, móvel e impressão. Esses ensaios devem ser repetidos no ambiente-alvo antes do uso em fiscalização. Consulte [Uso fiscal](docs/USO-FISCAL.md) para a leitura correta dos resultados.
+Nesta etapa, os testes unitários, de integração não gráfica e as verificações estáticas passaram. O gate E2E em Chrome 116 e na versão atual, incluindo QA visual em desktop, móvel e impressão, instalação sem compactação e o percurso completo até os quatro downloads, ainda está pendente e não deve ser tratado como comportamento verificado. Consulte [Uso fiscal](docs/USO-FISCAL.md) para a leitura correta dos resultados.
 
 ## Desenvolvimento
 
