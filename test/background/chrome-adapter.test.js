@@ -154,6 +154,289 @@ test('normalizes every hostile overrides introspection trap without disclosing i
   }
 });
 
+test('does not let mutable Set primordials authorize a trusted-capability override', () => {
+  const OriginalSet = globalThis.Set;
+  const originalSetHas = OriginalSet.prototype.has;
+  const originalPrototype = Object.prototype;
+  const base = createChromeAdapter(chromeFake().chromeApi);
+  const trustedRemoveTab = base.removeTab;
+  let caught;
+  let composed;
+  const overrides = new Proxy({ removeTab() {} }, {
+    getPrototypeOf() {
+      globalThis.Set = class HostileSet { has() { return true; } };
+      OriginalSet.prototype.has = () => true;
+      return originalPrototype;
+    },
+  });
+
+  try {
+    try { composed = chromeAdapterModule.composeChromeAdapter(base, overrides); }
+    catch (error) { caught = error; }
+  } finally {
+    globalThis.Set = OriginalSet;
+    OriginalSet.prototype.has = originalSetHas;
+  }
+
+  assert.equal(composed, undefined);
+  assert.equal(caught?.constructor, TypeError);
+  assert.equal(caught?.message, 'AUDIT_ADAPTER_COMPOSITION_DENIED');
+  assert.equal(base.removeTab, trustedRemoveTab);
+});
+
+const primordialMutationCases = [
+  {
+    name: 'Object.defineProperty',
+    mutate() { Object.defineProperty = () => { throw new Error('PRIVATE_OBJECT_DEFINE_PROPERTY'); }; },
+    restore: (() => { const value = Object.defineProperty; return () => { Object.defineProperty = value; }; })(),
+  },
+  {
+    name: 'Object.getOwnPropertyDescriptor',
+    mutate() { Object.getOwnPropertyDescriptor = () => { throw new Error('PRIVATE_OBJECT_GET_DESCRIPTOR'); }; },
+    restore: (() => { const value = Object.getOwnPropertyDescriptor; return () => { Object.getOwnPropertyDescriptor = value; }; })(),
+  },
+  {
+    name: 'Object.getPrototypeOf',
+    mutate() { Object.getPrototypeOf = () => { throw new Error('PRIVATE_OBJECT_GET_PROTOTYPE'); }; },
+    restore: (() => { const value = Object.getPrototypeOf; return () => { Object.getPrototypeOf = value; }; })(),
+  },
+  {
+    name: 'Object.hasOwn',
+    mutate() { Object.hasOwn = () => { throw new Error('PRIVATE_OBJECT_HAS_OWN'); }; },
+    restore: (() => { const value = Object.hasOwn; return () => { Object.hasOwn = value; }; })(),
+  },
+  {
+    name: 'Object.create',
+    mutate() { Object.create = () => { throw new Error('PRIVATE_OBJECT_CREATE'); }; },
+    restore: (() => { const value = Object.create; return () => { Object.create = value; }; })(),
+  },
+  {
+    name: 'Object.freeze',
+    mutate() { Object.freeze = () => { throw new Error('PRIVATE_OBJECT_FREEZE'); }; },
+    restore: (() => { const value = Object.freeze; return () => { Object.freeze = value; }; })(),
+  },
+  {
+    name: 'Reflect.ownKeys',
+    mutate() { Reflect.ownKeys = () => { throw new Error('PRIVATE_REFLECT_OWN_KEYS'); }; },
+    restore: (() => { const value = Reflect.ownKeys; return () => { Reflect.ownKeys = value; }; })(),
+  },
+  {
+    name: 'Array iterator',
+    mutate() { Array.prototype[Symbol.iterator] = () => { throw new Error('PRIVATE_ARRAY_ITERATOR'); }; },
+    restore: (() => { const value = Array.prototype[Symbol.iterator]; return () => { Array.prototype[Symbol.iterator] = value; }; })(),
+  },
+  {
+    name: 'Array numeric prototype accessors',
+    mutate() {
+      Object.defineProperty(Array.prototype, '0', {
+        configurable: true,
+        get() { throw new Error('PRIVATE_ARRAY_NUMERIC_GETTER'); },
+        set() { throw new Error('PRIVATE_ARRAY_NUMERIC_SETTER'); },
+      });
+    },
+    restore: (() => {
+      const descriptor = Object.getOwnPropertyDescriptor(Array.prototype, '0');
+      return () => {
+        delete Array.prototype[0];
+        if (descriptor) Object.defineProperty(Array.prototype, '0', descriptor);
+      };
+    })(),
+  },
+  {
+    name: 'Array.some',
+    mutate() { Array.prototype.some = () => { throw new Error('PRIVATE_ARRAY_SOME'); }; },
+    restore: (() => { const value = Array.prototype.some; return () => { Array.prototype.some = value; }; })(),
+  },
+  {
+    name: 'Array.map',
+    mutate() { Array.prototype.map = () => { throw new Error('PRIVATE_ARRAY_MAP'); }; },
+    restore: (() => { const value = Array.prototype.map; return () => { Array.prototype.map = value; }; })(),
+  },
+  {
+    name: 'Array.push',
+    mutate() { Array.prototype.push = () => { throw new Error('PRIVATE_ARRAY_PUSH'); }; },
+    restore: (() => { const value = Array.prototype.push; return () => { Array.prototype.push = value; }; })(),
+  },
+];
+
+for (const primordialCase of primordialMutationCases) {
+  test(`captures ${primordialCase.name} before observing hostile overrides`, () => {
+    const target = { async emitProgress() {} };
+    const targetPrototype = Object.getPrototypeOf(target);
+    const base = createChromeAdapter(chromeFake().chromeApi);
+    const trustedRemoveTab = base.removeTab;
+    let caught;
+    let composed;
+    const overrides = new Proxy(target, {
+      getPrototypeOf() {
+        primordialCase.mutate();
+        return targetPrototype;
+      },
+    });
+
+    try {
+      try { composed = chromeAdapterModule.composeChromeAdapter(base, overrides); }
+      catch (error) { caught = error; }
+    } finally {
+      primordialCase.restore();
+    }
+
+    assert.ifError(caught);
+    assert.equal(composed.emitProgress, target.emitProgress);
+    assert.equal(composed.removeTab, trustedRemoveTab);
+    assert.equal(Object.getPrototypeOf(composed), null);
+    assert.equal(Object.isFrozen(composed), true);
+    assert.equal(Object.isExtensible(composed), false);
+  });
+}
+
+test('uses the captured TypeError when hostile introspection replaces the global constructor', () => {
+  const OriginalTypeError = globalThis.TypeError;
+  class PrivateTypeError extends Error {}
+  const targetPrototype = Object.prototype;
+  const overrides = new Proxy({ removeTab() {} }, {
+    getPrototypeOf() {
+      globalThis.TypeError = PrivateTypeError;
+      return targetPrototype;
+    },
+  });
+  let caught;
+
+  try {
+    try { chromeAdapterModule.composeChromeAdapter(createChromeAdapter(chromeFake().chromeApi), overrides); }
+    catch (error) { caught = error; }
+  } finally {
+    globalThis.TypeError = OriginalTypeError;
+  }
+
+  assert.equal(caught?.constructor, OriginalTypeError);
+  assert.equal(caught?.message, 'AUDIT_ADAPTER_COMPOSITION_DENIED');
+});
+
+test('returns a null-prototype adapter despite Object.prototype pollution during introspection', () => {
+  const pollutionKey = '__auditaHostileCapability__';
+  const originalDescriptor = Object.getOwnPropertyDescriptor(Object.prototype, pollutionKey);
+  const target = { async emitProgress() {} };
+  const targetPrototype = Object.prototype;
+  const base = createChromeAdapter(chromeFake().chromeApi);
+  const trustedRemoveTab = base.removeTab;
+  const hostileCapability = () => 'hostile';
+  let inheritedDuringComposition;
+  let composed;
+
+  try {
+    const overrides = new Proxy(target, {
+      getPrototypeOf() {
+        Object.defineProperty(Object.prototype, pollutionKey, {
+          configurable: true, enumerable: true, writable: true, value: hostileCapability,
+        });
+        return targetPrototype;
+      },
+    });
+    composed = chromeAdapterModule.composeChromeAdapter(base, overrides);
+    inheritedDuringComposition = composed[pollutionKey];
+  } finally {
+    if (originalDescriptor) Object.defineProperty(Object.prototype, pollutionKey, originalDescriptor);
+    else delete Object.prototype[pollutionKey];
+  }
+
+  assert.equal(inheritedDuringComposition, undefined);
+  assert.equal(Object.getPrototypeOf(composed), null);
+  assert.equal(composed.removeTab, trustedRemoveTab);
+  assert.equal(Object.hasOwn(composed, pollutionKey), false);
+});
+
+test('recaptures property descriptors without inherited get/set fields', () => {
+  const originalGet = Object.getOwnPropertyDescriptor(Object.prototype, 'get');
+  const originalSet = Object.getOwnPropertyDescriptor(Object.prototype, 'set');
+  const defineProperty = Object.defineProperty;
+  const getPollution = Object.create(null);
+  getPollution.configurable = true;
+  getPollution.value = () => { throw new Error('PRIVATE_INHERITED_GET'); };
+  const setPollution = Object.create(null);
+  setPollution.configurable = true;
+  setPollution.value = () => { throw new Error('PRIVATE_INHERITED_SET'); };
+  const target = { async emitProgress() {} };
+  const targetPrototype = Object.prototype;
+  let caught;
+  let composed;
+
+  try {
+    const overrides = new Proxy(target, {
+      getPrototypeOf() {
+        defineProperty(Object.prototype, 'get', getPollution);
+        defineProperty(Object.prototype, 'set', setPollution);
+        return targetPrototype;
+      },
+    });
+    try { composed = chromeAdapterModule.composeChromeAdapter(createChromeAdapter(chromeFake().chromeApi), overrides); }
+    catch (error) { caught = error; }
+  } finally {
+    delete Object.prototype.get;
+    delete Object.prototype.set;
+    if (originalGet) defineProperty(Object.prototype, 'get', originalGet);
+    if (originalSet) defineProperty(Object.prototype, 'set', originalSet);
+  }
+
+  assert.ifError(caught);
+  assert.equal(composed.emitProgress, target.emitProgress);
+  assert.equal(Object.getPrototypeOf(composed), null);
+  assert.equal(Object.isFrozen(composed), true);
+});
+
+test('keeps scratch state isolated when an overrides trap reenters composition', () => {
+  const base = createChromeAdapter(chromeFake().chromeApi);
+  const trustedInternal = base[AUDIT_EXECUTION_INTERNAL];
+  const innerEmitProgress = () => {};
+  const outerEmitProgress = () => {};
+  const target = { emitProgress: outerEmitProgress };
+  const targetPrototype = Object.getPrototypeOf(target);
+  let inner;
+  const outer = chromeAdapterModule.composeChromeAdapter(base, new Proxy(target, {
+    getPrototypeOf() {
+      inner = chromeAdapterModule.composeChromeAdapter(base, { emitProgress: innerEmitProgress });
+      return targetPrototype;
+    },
+  }));
+
+  assert.equal(inner.emitProgress, innerEmitProgress);
+  assert.equal(outer.emitProgress, outerEmitProgress);
+  assert.notEqual(inner, outer);
+  assert.equal(inner[AUDIT_EXECUTION_INTERNAL], trustedInternal);
+  assert.equal(outer[AUDIT_EXECUTION_INTERNAL], trustedInternal);
+  assert.equal(Object.getPrototypeOf(inner), null);
+  assert.equal(Object.getPrototypeOf(outer), null);
+  assert.equal(Object.isFrozen(inner), true);
+  assert.equal(Object.isFrozen(outer), true);
+});
+
+test('returns an immutable exact-hook adapter that remains safely recomposable', () => {
+  const base = createChromeAdapter(chromeFake().chromeApi);
+  const trustedInternal = base[AUDIT_EXECUTION_INTERNAL];
+  const firstHooks = {
+    enterFinalization() {}, tryEnterFinalization() { return true; },
+    handoffReport() {}, emitProgress() {},
+  };
+  const first = chromeAdapterModule.composeChromeAdapter(base, firstHooks);
+  const secondEmitProgress = () => {};
+  const second = chromeAdapterModule.composeChromeAdapter(first, { emitProgress: secondEmitProgress });
+
+  for (const adapter of [first, second]) {
+    assert.equal(Object.getPrototypeOf(adapter), null);
+    assert.equal(Object.isFrozen(adapter), true);
+    assert.equal(Object.isExtensible(adapter), false);
+    assert.equal(adapter[AUDIT_EXECUTION_INTERNAL], trustedInternal);
+    assert.equal(Object.getOwnPropertyDescriptor(adapter, AUDIT_EXECUTION_INTERNAL).enumerable, false);
+    assert.throws(() => { adapter.untrustedCapability = () => {}; }, TypeError);
+  }
+  assert.equal(first.enterFinalization, firstHooks.enterFinalization);
+  assert.equal(first.tryEnterFinalization, firstHooks.tryEnterFinalization);
+  assert.equal(first.handoffReport, firstHooks.handoffReport);
+  assert.equal(first.emitProgress, firstHooks.emitProgress);
+  assert.equal(second.emitProgress, secondEmitProgress);
+  assert.equal(second.enterFinalization, firstHooks.enterFinalization);
+});
+
 test('projects the real observed URL to its durable origin regardless of query authority', async () => {
   const fake = chromeFake();
   fake.chromeApi.tabs.get = async id => ({

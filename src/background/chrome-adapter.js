@@ -7,59 +7,97 @@ import { projectAuditResourceOrigin } from '../core/privacy.js';
 
 export const AUDIT_EXECUTION_INTERNAL = Symbol('audita.audit-execution-internal');
 
-const WORKER_OVERRIDE_NAMES = Object.freeze([
-  'enterFinalization', 'tryEnterFinalization', 'handoffReport', 'emitProgress',
-]);
+const PrimordialTypeError = TypeError;
+const ObjectPrototype = Object.prototype;
+const ObjectCreate = Object.create;
+const ObjectDefineProperty = Object.defineProperty;
+const ObjectFreeze = Object.freeze;
+const ObjectPreventExtensions = Object.preventExtensions;
+const ObjectGetPrototypeOf = Object.getPrototypeOf;
+const ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const ObjectHasOwn = Object.hasOwn;
+const ReflectOwnKeys = Reflect.ownKeys;
 
 function compositionDenied() {
-  return new TypeError('AUDIT_ADAPTER_COMPOSITION_DENIED');
+  return new PrimordialTypeError('AUDIT_ADAPTER_COMPOSITION_DENIED');
+}
+
+function isWorkerOverrideName(name) {
+  return name === 'enterFinalization'
+    || name === 'tryEnterFinalization'
+    || name === 'handoffReport'
+    || name === 'emitProgress';
+}
+
+function defineDataProperty(target, key, value, enumerable, configurable, writable) {
+  const descriptor = ObjectCreate(null);
+  descriptor.value = value;
+  descriptor.enumerable = enumerable;
+  descriptor.configurable = configurable;
+  descriptor.writable = writable;
+  ObjectDefineProperty(target, key, descriptor);
 }
 
 /** Copies a trusted adapter while preserving its single opaque execution contract. */
 export function composeChromeAdapter(base, overrides) {
   if (arguments.length !== 2) throw compositionDenied();
   if (!base || typeof base !== 'object' || !overrides || typeof overrides !== 'object') throw compositionDenied();
-  let baseDescriptors;
+  let baseNames;
+  let baseValues;
+  let baseCount = 0;
   let internalValue;
   try {
-    const baseKeys = Reflect.ownKeys(base);
-    const internal = Object.getOwnPropertyDescriptor(base, AUDIT_EXECUTION_INTERNAL);
-    if (!internal || internal.enumerable || !Object.hasOwn(internal, 'value') || internal.get || internal.set) {
+    const baseKeys = ReflectOwnKeys(base);
+    const internal = ObjectGetOwnPropertyDescriptor(base, AUDIT_EXECUTION_INTERNAL);
+    if (!internal || internal.enumerable || !ObjectHasOwn(internal, 'value')) {
       throw compositionDenied();
     }
     internalValue = internal.value;
-    baseDescriptors = [];
-    for (const key of baseKeys) {
+    baseNames = ObjectCreate(null);
+    baseValues = ObjectCreate(null);
+    for (let index = 0; index < baseKeys.length; index += 1) {
+      const key = baseKeys[index];
       if (key === AUDIT_EXECUTION_INTERNAL) continue;
       if (typeof key !== 'string') throw compositionDenied();
-      const descriptor = Object.getOwnPropertyDescriptor(base, key);
-      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw compositionDenied();
-      baseDescriptors.push([key, descriptor]);
+      const descriptor = ObjectGetOwnPropertyDescriptor(base, key);
+      if (!descriptor?.enumerable || !ObjectHasOwn(descriptor, 'value')) throw compositionDenied();
+      baseNames[baseCount] = key;
+      baseValues[baseCount] = descriptor.value;
+      baseCount += 1;
     }
   } catch { throw compositionDenied(); }
-  let overrideDescriptors;
+  let overrideNames;
+  let overrideValues;
+  let overrideCount = 0;
   try {
-    const prototype = Object.getPrototypeOf(overrides);
-    if (prototype !== Object.prototype && prototype !== null) throw compositionDenied();
-    const allowed = new Set(WORKER_OVERRIDE_NAMES);
-    const overrideKeys = Reflect.ownKeys(overrides);
-    if (overrideKeys.some(key => typeof key !== 'string' || !allowed.has(key))) throw compositionDenied();
-    overrideDescriptors = overrideKeys.map(key => {
-      const descriptor = Object.getOwnPropertyDescriptor(overrides, key);
-      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'function') {
+    const prototype = ObjectGetPrototypeOf(overrides);
+    if (prototype !== ObjectPrototype && prototype !== null) throw compositionDenied();
+    const overrideKeys = ReflectOwnKeys(overrides);
+    overrideNames = ObjectCreate(null);
+    overrideValues = ObjectCreate(null);
+    for (let index = 0; index < overrideKeys.length; index += 1) {
+      const key = overrideKeys[index];
+      if (typeof key !== 'string' || !isWorkerOverrideName(key)) throw compositionDenied();
+      const descriptor = ObjectGetOwnPropertyDescriptor(overrides, key);
+      if (!descriptor?.enumerable || !ObjectHasOwn(descriptor, 'value') || typeof descriptor.value !== 'function') {
         throw compositionDenied();
       }
-      return [key, descriptor];
-    });
+      overrideNames[overrideCount] = key;
+      overrideValues[overrideCount] = descriptor.value;
+      overrideCount += 1;
+    }
   } catch { throw compositionDenied(); }
   try {
-    const composed = {};
-    for (const [key, descriptor] of baseDescriptors) Object.defineProperty(composed, key, descriptor);
-    for (const [key, descriptor] of overrideDescriptors) Object.defineProperty(composed, key, descriptor);
-    Object.defineProperty(composed, AUDIT_EXECUTION_INTERNAL, {
-      enumerable: false, configurable: false, writable: false, value: internalValue,
-    });
-    return composed;
+    const composed = ObjectCreate(null);
+    for (let index = 0; index < baseCount; index += 1) {
+      defineDataProperty(composed, baseNames[index], baseValues[index], true, true, true);
+    }
+    for (let index = 0; index < overrideCount; index += 1) {
+      defineDataProperty(composed, overrideNames[index], overrideValues[index], true, true, true);
+    }
+    defineDataProperty(composed, AUDIT_EXECUTION_INTERNAL, internalValue, false, false, false);
+    ObjectPreventExtensions(composed);
+    return ObjectFreeze(composed);
   } catch {
     throw compositionDenied();
   }
