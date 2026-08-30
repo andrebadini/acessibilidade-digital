@@ -224,6 +224,20 @@ test('remaps identical local graphs with deterministic page-qualified sequential
   }
 });
 
+test('remaps single-page resource identities to requested and observed origins without changing observation facts', async () => {
+  const remapped = await remapAuditPage(reportInput({
+    auditId: 'child-safe-resource',
+    requestedUrl: 'https://example.test/pessoa/CPF-123456789?case=7&secret=x#fragmento',
+    finalUrl: 'https://redirect.example.test/conta/private?session=REMOVE&view=public#fim',
+  }), { batchAuditId: 'batch-safe-resource', pageId: 'page-1' });
+
+  assert.equal(remapped.page.requestedUrl, 'https://example.test/');
+  assert.equal(remapped.page.finalUrl, 'https://redirect.example.test/');
+  assert.equal(remapped.page.finalUrlObserved, true);
+  assert.equal(remapped.page.status, 'partial');
+  assert.equal(remapped.page.pageId, 'page-1');
+});
+
 test('remaps an occurrence-scoped diagnostic to the same page-qualified occurrence identity', async () => {
   const child = await childModel(
     'child-occurrence-diagnostic',
@@ -418,7 +432,7 @@ test('aggregates pages in requested order with unique rules, 146 items and conse
   });
 
   assert.deepEqual(raw.requestedScope.urls, [
-    'https://one.example.test/?view=public',
+    'https://one.example.test/',
     'https://two.example.test/',
     'https://three.example.test/',
   ]);

@@ -4,6 +4,7 @@ import { createAuditModel } from '../report/audit-model.js';
 import { canonicalStringify } from '../report/canonical-json.js';
 import { sha256Hex } from '../report/hash.js';
 import { derivePageLimitations } from '../report/text-policy.js';
+import { projectAuditResourceOrigin } from '../privacy.js';
 
 const ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 
@@ -125,6 +126,8 @@ export async function remapAuditPage(input, { batchAuditId, pageId }) {
   const page = {
     ...structuredClone(sourcePage),
     pageId,
+    requestedUrl: projectAuditResourceOrigin(sourcePage.requestedUrl),
+    finalUrl: projectAuditResourceOrigin(sourcePage.finalUrl),
     diagnostics,
     limitations: [],
     coverage: structuredClone(sourcePage.coverage ?? model.snapshot?.coverage ?? {}),

@@ -120,6 +120,40 @@ test('composed adapters reject symbols, accessors, extra overrides, and internal
   assert.equal(thirdArgumentReads, 0);
 });
 
+test('snapshots every trusted base capability before an overrides Proxy can mutate the base', async () => {
+  const base = createChromeAdapter(chromeFake().chromeApi);
+  const trustedRemoveTab = base.removeTab;
+  const trustedInternal = base[AUDIT_EXECUTION_INTERNAL];
+  let hostileRemoveCalls = 0;
+  const overrides = new Proxy({ async emitProgress() {} }, {
+    getPrototypeOf(target) {
+      base.removeTab = async () => { hostileRemoveCalls += 1; };
+      return Reflect.getPrototypeOf(target);
+    },
+  });
+
+  const composed = chromeAdapterModule.composeChromeAdapter(base, overrides);
+  assert.equal(composed.removeTab, trustedRemoveTab);
+  assert.equal(composed[AUDIT_EXECUTION_INTERNAL], trustedInternal);
+  await composed.removeTab(17);
+  assert.equal(hostileRemoveCalls, 0);
+});
+
+test('normalizes every hostile overrides introspection trap without disclosing its error', () => {
+  const traps = ['getPrototypeOf', 'ownKeys', 'getOwnPropertyDescriptor'];
+  for (const trap of traps) {
+    const secret = `PRIVATE_${trap.toUpperCase()}`;
+    const overrides = new Proxy({ async emitProgress() {} }, {
+      [trap]() { throw new Error(secret); },
+    });
+    let caught;
+    try { chromeAdapterModule.composeChromeAdapter(createChromeAdapter(chromeFake().chromeApi), overrides); }
+    catch (error) { caught = error; }
+    assert.equal(caught?.message, 'AUDIT_ADAPTER_COMPOSITION_DENIED');
+    assert.doesNotMatch(String(caught), new RegExp(secret, 'u'));
+  }
+});
+
 test('projects the real observed URL to its durable origin regardless of query authority', async () => {
   const fake = chromeFake();
   fake.chromeApi.tabs.get = async id => ({

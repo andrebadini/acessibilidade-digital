@@ -517,6 +517,53 @@ test('custom batch failure persists only the requested origin', async () => {
   assert.doesNotMatch(JSON.stringify(model), /CPF-123456789|case=7|secret=x|fragmento|PRIVATE_NATIVE_FAILURE/u);
 });
 
+test('compatible batch success persists only requested and observed redirect origins', async () => {
+  const requested = 'https://example.test/pessoa/CPF-123456789?case=7&secret=x#fragmento';
+  const observed = 'https://redirect.example.test/conta/private?session=REMOVE&view=public#fim';
+  const model = await runBatch({
+    entries: normalizeUrlList(requested).entries,
+    batchAuditId: 'batch-safe-compatible-success',
+    runner: options => ({
+      ...rawChild({ auditId: options.idFactory(), url: options.url, now: options.now }),
+      finalUrl: observed,
+    }),
+    chromeAdapter: { async emitProgress() {}, async handoffReport() { return { reviewUrl: null }; } },
+    now: clock(), reportOptions: REPORT_OPTIONS,
+  });
+
+  assert.deepEqual(model.requestedScope.urls, ['https://example.test/']);
+  assert.equal(model.requestedUrl, 'https://example.test/');
+  assert.equal(model.finalUrl, 'https://redirect.example.test/');
+  assert.deepEqual(model.pages.map(page => ({
+    pageId: page.pageId,
+    requestedUrl: page.requestedUrl,
+    finalUrl: page.finalUrl,
+    finalUrlObserved: page.finalUrlObserved,
+  })), [{
+    pageId: 'page-1', requestedUrl: 'https://example.test/',
+    finalUrl: 'https://redirect.example.test/', finalUrlObserved: true,
+  }]);
+});
+
+test('compatible batch keeps two same-origin navigation targets as distinct ordered pages', async () => {
+  const entries = normalizeUrlList([
+    'https://example.test/first/private?case=7#one',
+    'https://example.test/second/private?case=8#two',
+  ].join('\n')).entries;
+  const model = await runBatch({
+    entries, batchAuditId: 'batch-compatible-shared-origin',
+    runner: options => rawChild({ auditId: options.idFactory(), url: options.url, now: options.now }),
+    chromeAdapter: { async emitProgress() {}, async handoffReport() { return { reviewUrl: null }; } },
+    now: clock(), reportOptions: REPORT_OPTIONS,
+  });
+
+  assert.deepEqual(model.requestedScope.urls, ['https://example.test/', 'https://example.test/']);
+  assert.deepEqual(model.pages.map(page => [page.pageId, page.requestedUrl, page.finalUrl]), [
+    ['page-1', 'https://example.test/', 'https://example.test/'],
+    ['page-2', 'https://example.test/', 'https://example.test/'],
+  ]);
+});
+
 test('clears the losing cleanup timer after a timed-out runner settles', async () => {
   const nativeSetTimeout = globalThis.setTimeout;
   const nativeClearTimeout = globalThis.clearTimeout;

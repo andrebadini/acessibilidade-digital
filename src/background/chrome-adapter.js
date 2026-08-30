@@ -18,37 +18,51 @@ function compositionDenied() {
 /** Copies a trusted adapter while preserving its single opaque execution contract. */
 export function composeChromeAdapter(base, overrides) {
   if (arguments.length !== 2) throw compositionDenied();
-  if (!base || typeof base !== 'object' || !overrides || typeof overrides !== 'object' ||
-    (Object.getPrototypeOf(overrides) !== Object.prototype && Object.getPrototypeOf(overrides) !== null)) {
+  if (!base || typeof base !== 'object' || !overrides || typeof overrides !== 'object') throw compositionDenied();
+  let baseDescriptors;
+  let internalValue;
+  try {
+    const baseKeys = Reflect.ownKeys(base);
+    const internal = Object.getOwnPropertyDescriptor(base, AUDIT_EXECUTION_INTERNAL);
+    if (!internal || internal.enumerable || !Object.hasOwn(internal, 'value') || internal.get || internal.set) {
+      throw compositionDenied();
+    }
+    internalValue = internal.value;
+    baseDescriptors = [];
+    for (const key of baseKeys) {
+      if (key === AUDIT_EXECUTION_INTERNAL) continue;
+      if (typeof key !== 'string') throw compositionDenied();
+      const descriptor = Object.getOwnPropertyDescriptor(base, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw compositionDenied();
+      baseDescriptors.push([key, descriptor]);
+    }
+  } catch { throw compositionDenied(); }
+  let overrideDescriptors;
+  try {
+    const prototype = Object.getPrototypeOf(overrides);
+    if (prototype !== Object.prototype && prototype !== null) throw compositionDenied();
+    const allowed = new Set(WORKER_OVERRIDE_NAMES);
+    const overrideKeys = Reflect.ownKeys(overrides);
+    if (overrideKeys.some(key => typeof key !== 'string' || !allowed.has(key))) throw compositionDenied();
+    overrideDescriptors = overrideKeys.map(key => {
+      const descriptor = Object.getOwnPropertyDescriptor(overrides, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'function') {
+        throw compositionDenied();
+      }
+      return [key, descriptor];
+    });
+  } catch { throw compositionDenied(); }
+  try {
+    const composed = {};
+    for (const [key, descriptor] of baseDescriptors) Object.defineProperty(composed, key, descriptor);
+    for (const [key, descriptor] of overrideDescriptors) Object.defineProperty(composed, key, descriptor);
+    Object.defineProperty(composed, AUDIT_EXECUTION_INTERNAL, {
+      enumerable: false, configurable: false, writable: false, value: internalValue,
+    });
+    return composed;
+  } catch {
     throw compositionDenied();
   }
-  let baseKeys;
-  let overrideKeys;
-  try {
-    baseKeys = Reflect.ownKeys(base);
-    overrideKeys = Reflect.ownKeys(overrides);
-  } catch { throw compositionDenied(); }
-  const internal = Object.getOwnPropertyDescriptor(base, AUDIT_EXECUTION_INTERNAL);
-  if (!internal || internal.enumerable || !Object.hasOwn(internal, 'value') || internal.get || internal.set) throw compositionDenied();
-  const allowed = new Set(WORKER_OVERRIDE_NAMES);
-  if (overrideKeys.some(key => typeof key !== 'string' || !allowed.has(key))) throw compositionDenied();
-  const composed = {};
-  for (const key of baseKeys) {
-    if (key === AUDIT_EXECUTION_INTERNAL) continue;
-    if (typeof key !== 'string') throw compositionDenied();
-    const descriptor = Object.getOwnPropertyDescriptor(base, key);
-    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw compositionDenied();
-    Object.defineProperty(composed, key, descriptor);
-  }
-  for (const key of overrideKeys) {
-    const descriptor = Object.getOwnPropertyDescriptor(overrides, key);
-    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'function') throw compositionDenied();
-    Object.defineProperty(composed, key, descriptor);
-  }
-  Object.defineProperty(composed, AUDIT_EXECUTION_INTERNAL, {
-    enumerable: false, configurable: false, writable: false, value: internal.value,
-  });
-  return composed;
 }
 
 function timeoutError() {
