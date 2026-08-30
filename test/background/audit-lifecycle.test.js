@@ -109,3 +109,18 @@ test('readiness rejection makes lifecycle events no-ops without native diagnosti
   await tick();
   assert.equal(updated.listeners.size, 1);
 });
+
+test('isolates every invalidation adapter so all cleanup stages run best-effort', async () => {
+  const updated = event(); const removed = event(); const windows = event(); const calls = [];
+  const runtime = {
+    auditStarter: { async abortAttachedAuditForTarget() { calls.push('abort'); throw new Error('private abort'); } },
+    authority: { async invalidateForTab() { calls.push('authority'); throw new Error('private authority'); }, async invalidateForWindow() {} },
+    reportLaunch: { async handleTabRemoved() { calls.push('report'); throw new Error('private report'); } },
+    exportLaunch: { async handleTabRemoved() { calls.push('export'); throw new Error('private export'); } },
+  };
+  createAuditLifecycle({ chromeApi: { tabs: { onUpdated: updated, onRemoved: removed }, windows: { onRemoved: windows } },
+    getReadyRuntime: async () => runtime }).register();
+  removed.emit(17);
+  await tick();
+  assert.deepEqual(calls, ['abort', 'authority', 'report', 'export']);
+});

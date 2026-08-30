@@ -8,7 +8,12 @@ import { normalizeReviewAuditId } from '../review/review-state.js';
 import { createAuditStore, isAuditExportLeaseConflict, isAuditRevisionConflict } from '../storage/audit-store.js';
 import { deriveExportLeaseOwner } from '../background/export-launch.js';
 import { createExportTabAdapter } from './chrome-export-adapter.js';
-import { createExportFailureRequest, persistExportFailure } from './export-controller.js';
+import {
+  createExportFailureRequest,
+  createExportSuccessRequest,
+  persistExportFailure,
+  persistExportSuccess,
+} from './export-controller.js';
 import { runReportExport } from './report-export.js';
 
 const status = document.querySelector('#export-status');
@@ -22,6 +27,7 @@ let exportAttempt = null;
 let leaseOwnerId = null;
 let latestState = null;
 let leaseClaimed = false;
+let completionPending = false;
 
 function sendWorkerRequest(message) {
   return new Promise(resolve => {
@@ -90,14 +96,29 @@ async function generate(connected) {
           ...(downloadId === undefined ? {} : { downloadId }), mimeType, byteSize, sha256, state });
     },
   });
-  const completed = await sendWorkerRequest({ type: 'EXPORT_COMPLETE', sessionCapabilityId: connected.sessionCapabilityId,
-    auditId, attemptId: connected.attemptId });
-  if (!completed?.ok) throw new Error('O recibo dos downloads não pôde ser confirmado.');
+  await persistExportSuccess(createExportSuccessRequest({ auditId, result, latest: latestState }), store);
+  leaseClaimed = false;
+  completionPending = true;
+  await confirmExportCompletion(connected);
+  completionPending = false;
   status.textContent = 'Os quatro arquivos foram baixados e o recibo local foi confirmado.';
   await closeOwnTab();
 }
 
+async function confirmExportCompletion(connected) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const completed = await sendWorkerRequest({ type: 'EXPORT_COMPLETE', sessionCapabilityId: connected.sessionCapabilityId,
+      auditId, attemptId: connected.attemptId });
+    if (completed?.ok) return completed;
+  }
+  throw new Error('O recibo dos downloads não pôde ser confirmado.');
+}
+
 async function fail(error) {
+  if (completionPending) {
+    status.textContent = 'Os quatro arquivos foram baixados; a confirmação local continua pendente nesta aba.';
+    return;
+  }
   let message = 'Não foi possível preparar os artefatos do relatório.';
   const busy = isAuditExportLeaseConflict(error);
   const invalidated = isAuditRevisionConflict(error);

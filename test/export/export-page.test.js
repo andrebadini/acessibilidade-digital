@@ -14,6 +14,8 @@ test('internal export page authenticates first, rebuilds one stored revision and
   assert.doesNotMatch(html, /(?:src|href)="https?:\/\//u);
   assert.doesNotMatch(script, /data:text|URL\.createObjectURL/u);
   assert.match(script, /runReportExport|createAuditStore/u);
+  assert.match(script, /createExportSuccessRequest/u);
+  assert.match(script, /persistExportSuccess/u);
   assert.match(script, /type:\s*'EXPORT_CONNECT'/u);
   assert.match(script, /deriveExportLeaseOwner/u);
   assert.match(script, /getReportRevision/u);
@@ -25,8 +27,12 @@ test('internal export page authenticates first, rebuilds one stored revision and
   assert.match(script, /resolveExportDelivery/u);
   assert.ok(script.indexOf('await store.claimExportLease') < script.indexOf('await store.beginExportDelivery'));
   assert.ok(script.indexOf('await store.beginExportDelivery') < script.indexOf('const result = await runReportExport'));
-  assert.doesNotMatch(script, /commitAuditIfRevisionWithExportLease/u,
-    'a exportação autorizada não pode criar uma revisão diferente da revisão reconstruída');
+  assert.ok(script.indexOf('const result = await runReportExport') < script.indexOf('await persistExportSuccess'));
+  assert.ok(script.indexOf('await persistExportSuccess') < script.indexOf("type: 'EXPORT_COMPLETE'"));
+  assert.match(script, /completionPending\s*=\s*true[\s\S]*confirmExportCompletion/u);
+  assert.match(script, /for \(let attempt = 0; attempt < 3; attempt \+= 1\)/u);
+  assert.match(script, /if \(completionPending\)[\s\S]*return;/u,
+    'a transient acknowledgement failure must preserve the durable receipt and active export tab for retry');
   assert.doesNotMatch(script, /navigator\.locks|request\(['"]audita-export/u);
   assert.match(script, /if \(!busy\) await closeOwnTab\(\)/u);
   assert.match(script, /type:\s*'EXPORT_COMPLETE'[\s\S]*sessionCapabilityId[\s\S]*attemptId/u);

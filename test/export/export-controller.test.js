@@ -363,6 +363,12 @@ test('successful persistence delegates deletion only to the atomic four-format f
   assert.equal(calls[0][4].deleteAfterCompleteExport, true);
   assert.equal(persisted.deleted, true);
   assert.equal(persisted.latest.exportStatus, 'complete');
+  assert.deepEqual(calls[0][2].exportDeliveryIdentity, {
+    auditId: result.model.auditId,
+    modelRevision: 2,
+    modelHash: result.model.integrity.canonicalModelHash,
+    attemptId: '1',
+  });
 });
 
 test('passes the attested export attempt into atomic four-terminal finalization', async () => {

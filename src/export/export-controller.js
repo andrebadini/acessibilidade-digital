@@ -26,11 +26,11 @@ import {
   buildArtifactBaseName,
 } from '../browser/download-artifacts.js';
 
-import { EXPORT_FORMATS_V1 } from './export-formats.js';
+import { createExportDeliveryIdentityV1, EXPORT_FORMATS_V1 } from './export-formats.js';
 const REQUIRED_FORMATS = new Set(['html', 'json']);
 const PRINT_CLEANUP_LIMITATION = createExportIssue('REPORT_PRINT_CLEANUP_LIMITED').message;
 const RESULT_KEYS = new Set([
-  'model', 'html', 'json', 'csv', 'pdf', 'formats', 'deliveryReceipt', 'limitations', 'pdfFallback',
+  'model', 'html', 'json', 'csv', 'pdf', 'formats', 'deliveryReceipt', 'exportDeliveryIdentity', 'limitations', 'pdfFallback',
 ]);
 const SUCCESS_REQUESTS = new WeakMap();
 const FAILURE_REQUESTS = new WeakMap();
@@ -156,6 +156,7 @@ export async function persistExportSuccess(request, store) {
       formats: outerResult.formats,
       json: outerResult.json,
       deliveryReceipt: outerResult.deliveryReceipt,
+      exportDeliveryIdentity: outerResult.exportDeliveryIdentity,
       limitations: outerResult.limitations,
     }));
   } catch {
@@ -183,6 +184,12 @@ export async function persistExportSuccess(request, store) {
     envelope.exportAttempt,
   );
   const receipt = normalizeDeliveryReceipt(result.deliveryReceipt, prepared);
+  const exportDeliveryIdentity = normalizeExportDeliveryIdentity(
+    result.exportDeliveryIdentity,
+    verifiedModel,
+    expectedRevision,
+    envelope.exportAttempt,
+  );
   validateArtifactCorrelation({
     model: verifiedModel,
     html,
@@ -204,6 +211,7 @@ export async function persistExportSuccess(request, store) {
     pdf,
     formats: result.formats,
     deliveryReceipt: result.deliveryReceipt,
+    exportDeliveryIdentity: result.exportDeliveryIdentity,
     limitations: result.limitations,
     pdfFallback,
   });
@@ -222,6 +230,7 @@ export async function persistExportSuccess(request, store) {
     exportRevision: expectedRevision + 1,
     message: exportStatus === 'complete' ? 'Arquivos do relatório gerados.' : 'Relatório gerado com limitações.',
     deliveryReceipt: receipt,
+    exportDeliveryIdentity,
   };
   const finalized = await store.finalizeExportAndMaybeDelete(
     auditId,
@@ -238,6 +247,19 @@ export async function persistExportSuccess(request, store) {
     },
   );
   return { model: verifiedModel, latest, deleted: finalized?.deleted === true };
+}
+
+function normalizeExportDeliveryIdentity(value, model, expectedRevision, exportAttempt) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+    canonicalStringify(Object.keys(value).sort()) !== canonicalStringify(['attemptId', 'auditId', 'modelHash', 'modelRevision'])) {
+    throw new TypeError('ExportDeliveryIdentityV1 inválida no resultado de exportação.');
+  }
+  const identity = createExportDeliveryIdentityV1(value);
+  if (identity.auditId !== model.auditId || identity.modelRevision !== expectedRevision ||
+    identity.modelHash !== model.integrity?.canonicalModelHash || identity.attemptId !== String(exportAttempt)) {
+    throw new TypeError('ExportDeliveryIdentityV1 não corresponde à revisão exportada.');
+  }
+  return identity;
 }
 
 function normalizeDeliveryReceipt(value, preparedFormats) {
@@ -281,7 +303,7 @@ function normalizeDeliveryReceipt(value, preparedFormats) {
       ? typeof entry.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(entry.sha256)
       : entry.sha256 === null;
     if (!failure && !complete || canonicalStringify(keys) !== canonicalStringify(expectedKeys) ||
-      typeof entry.filename !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9.-]{0,240}$/u.test(entry.filename) ||
+      typeof entry.filename !== 'string' || !/^[A-Za-z0-9._-]{1,240}$/u.test(entry.filename) ||
       !entry.filename.endsWith(`.${entry.format}`) || entry.mimeType !== expectedMime[entry.format] || !hashValid ||
       (complete && (!Number.isSafeInteger(entry.byteSize) || entry.byteSize < 0)) ||
       (hasDownloadId && (!Number.isSafeInteger(entry.downloadId) || entry.downloadId < 0)) ||
@@ -427,6 +449,7 @@ function snapshotLatest(value, auditId) {
   if (!clone || typeof clone !== 'object' || Array.isArray(clone) || (clone.auditId !== undefined && clone.auditId !== auditId)) return {};
   delete clone.message;
   delete clone.deliveryReceipt;
+  delete clone.exportDeliveryIdentity;
   return clone;
 }
 

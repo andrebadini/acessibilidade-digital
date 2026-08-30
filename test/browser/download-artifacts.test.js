@@ -16,6 +16,18 @@ test('builds audit-owned canonical timestamp artifact names without a hostname',
   assert.throws(() => buildArtifactBaseName('https://example.test/', '2026-08-26T14:00:00.000Z'), /Auditoria inválida/u);
 });
 
+test('accepts every canonical audit id character and keeps the bound delivery name within its limit', async () => {
+  const auditId = `._${'a'.repeat(157)}:`;
+  const base = buildArtifactBaseName(auditId, '2026-08-26T14:00:00.000Z');
+  assert.equal(base.length <= 160, true);
+  assert.match(base, /^\._/u);
+  const bound = await bindDeliveryArtifactBaseName(base, `export:${auditId}:1`, 1);
+  assert.equal(bound.length <= 240, true);
+  await assert.doesNotReject(() => downloadArtifacts({ baseName: bound }, {
+    createObjectURL() {}, revokeObjectURL() {}, download() {}, waitForDownload() {},
+  }));
+});
+
 test('downloads large payloads only through Blob URLs and revokes them after terminal states', async () => {
   const events = [];
   let nextId = 10;
@@ -438,32 +450,18 @@ test('never deletes an ambiguous or absent pre-ID download by filename alone', a
   }
 });
 
-test('bounds hanging cleanup while reconciling a stale persisted download', { timeout: 500 }, async () => {
-  const cancelGate = deferred();
-  const removeGate = deferred();
+test('preserves a completed prior-attempt download while clearing only its finalized journal row', async () => {
   const outcomes = [];
   const base = await bindDeliveryArtifactBaseName('audit', 'owner-old', 1);
-  const operation = reconcileStaleDownloads([{
+  await reconcileStaleDownloads([{
     ownerId: 'owner-old', exportAttempt: 1, state: 'terminal',
     format: 'html', filename: `${base}.html`, downloadId: 99,
   }], {
-    cancelDownload() { return cancelGate.promise; },
-    removeDownloadFile() { return removeGate.promise; },
-  }, async (_entry, outcome) => { outcomes.push(outcome); }, { timeoutMs: 10 }).then(
-    value => ({ status: 'resolved', value }),
-    error => ({ status: 'rejected', error }),
-  );
-  const outcome = await Promise.race([
-    operation,
-    new Promise(resolve => setTimeout(() => resolve({ status: 'still-pending' }), 70)),
-  ]);
-  cancelGate.resolve();
-  removeGate.resolve();
-  await operation;
+    async cancelDownload() { throw new Error('completed download must remain available'); },
+    async removeDownloadFile() { throw new Error('completed download must remain available'); },
+  }, async (_entry, outcome) => { outcomes.push(outcome); }, { timeoutMs: 10 });
 
-  assert.equal(outcome.status, 'rejected');
-  assert.equal(outcome.error?.code, 'AUDIT_DOWNLOAD_CLEANUP_PENDING');
-  assert.deepEqual(outcomes, ['cleanup-failed']);
+  assert.deepEqual(outcomes, ['cleaned']);
 });
 
 test('bounds a hanging pre-ID filename lookup and records cleanup-failed', { timeout: 500 }, async () => {
@@ -517,7 +515,7 @@ test('bounds a hanging journal resolution after physical stale cleanup', { timeo
 
   assert.equal(outcome.status, 'rejected');
   assert.equal(outcome.error?.code, 'AUDIT_DOWNLOAD_CLEANUP_PENDING');
-  assert.deepEqual(outcomes, ['cleaned', 'cleanup-failed']);
+  assert.deepEqual(outcomes, ['cleaned'], 'a completed row must remain terminal when its journal cleanup cannot be confirmed');
 });
 
 test('polls delivery ownership and cancels while the terminal observer is still pending', async () => {

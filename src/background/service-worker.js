@@ -29,7 +29,7 @@ import { getPersonaController } from './persona-runtime.js';
 import { runAttachedAuditExecution } from './run-audit.js';
 import { createSidePanelIntentRouter } from './side-panel-intent-router.js';
 import { createReportLaunchAuthority } from './report-launch.js';
-import { createExportLaunchAuthority, deriveExportLeaseOwner } from './export-launch.js';
+import { createExportLaunchAuthority } from './export-launch.js';
 import {
   createTargetCapabilityAuthority,
   readAuditSessionForWorker,
@@ -397,10 +397,7 @@ async function buildDefaultRuntime(chromeApi, options) {
     async completeExport(auditId, { attemptId, receipt }) {
       const durable = await auditStore.getExportReceipt(auditId);
       if (!same(durable, receipt)) throw new Error('EXPORT_RECEIPT_DENIED');
-      const released = await auditStore.releaseExportLease(auditId, {
-        ownerId: deriveExportLeaseOwner(auditId, attemptId), now: canonicalModelTime(modelNow),
-      });
-      if (released !== true) throw new Error('EXPORT_COMPLETE_DENIED');
+      if (durable.attemptId !== attemptId) throw new Error('EXPORT_COMPLETE_DENIED');
       return Object.freeze({ completed: true, deleted: false });
     },
   });

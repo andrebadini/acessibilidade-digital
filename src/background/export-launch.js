@@ -85,6 +85,7 @@ export function createExportLaunchAuthority(raw) {
   if (!input || typeof input.chromeApi?.runtime?.getURL !== 'function' || typeof input.chromeApi.runtime.getContexts !== 'function' ||
     typeof input.chromeApi?.tabs?.create !== 'function' || typeof input.chromeApi.tabs.update !== 'function' || typeof input.sessionArea?.get !== 'function' ||
     typeof input.sessionArea.set !== 'function' || typeof input.auditStore?.getAuditSnapshot !== 'function' || typeof input.auditStore.acquireExportLease !== 'function' ||
+    typeof input.auditStore.releaseExportLease !== 'function' ||
     typeof input.reportLaunch?.authorizeExport !== 'function' || typeof input.epochNow !== 'function' || typeof input.modelNow !== 'function' || typeof input.randomBytes !== 'function') {
     throw new TypeError('EXPORT_LAUNCH_INVALID');
   }
@@ -100,21 +101,41 @@ export function createExportLaunchAuthority(raw) {
       const snapshot = await input.auditStore.getAuditSnapshot(auditId);
       if (!snapshot || !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 1) return fail('EXPORT_REVISION_DENIED');
       const ownerSeed = `export:${auditId}:pending`;
-      const lease = await input.auditStore.acquireExportLease(auditId, snapshot.capability, { ownerId: ownerSeed, now: input.modelNow() });
-      if (!lease?.acquired || !Number.isSafeInteger(lease.exportAttempt) || lease.exportAttempt < 1 || lease.revision !== snapshot.revision) return fail('EXPORT_LEASE_DENIED');
+      const leaseNow = input.modelNow();
+      const lease = await input.auditStore.acquireExportLease(auditId, snapshot.capability, { ownerId: ownerSeed, now: leaseNow });
+      if (!lease?.acquired) return fail('EXPORT_LEASE_DENIED');
+      if (!Number.isSafeInteger(lease.exportAttempt) || lease.exportAttempt < 1 || lease.revision !== snapshot.revision) {
+        await input.auditStore.releaseExportLease(auditId, { ownerId: ownerSeed, now: leaseNow }).catch(() => false);
+        return fail('EXPORT_LEASE_DENIED');
+      }
       const attemptId = String(lease.exportAttempt);
-      const tab = await input.chromeApi.tabs.create({ url: 'about:blank', active: false, windowId: authorization.windowId });
-      if (!safeId(tab?.id) || tab.windowId !== authorization.windowId) return fail('EXPORT_OPEN_FAILED');
-      const now = readEpoch(input.epochNow);
-      const launch = deepFreeze({ version:1,auditId,sourceReviewSessionCapabilityId:sessionCapabilityId,expectedRevision:snapshot.revision,
-        attemptId,tabId:tab.id,windowId:authorization.windowId,path:PATH,documentId:null,state:'allocated',issuedAt:now,expiresAt:now+TTL_MS });
-      if (!await confirmed(input.sessionArea, launchKey(auditId), launch, launchRecord)) return fail('EXPORT_OPEN_FAILED');
-      await input.sessionArea.set({ [indexKey(tab.id)]: auditId });
-      try { await input.chromeApi.tabs.update(tab.id, { url: canonicalUrl(input.chromeApi,auditId), active:false }); }
-      catch { await confirmed(input.sessionArea,launchKey(auditId),deepFreeze({...launch,state:'revoked'}),launchRecord); try { await input.chromeApi.tabs.remove?.(tab.id); } catch {} return fail('EXPORT_OPEN_FAILED'); }
-      const awaiting = deepFreeze({...launch,state:'awaiting-connection'});
-      if (!await confirmed(input.sessionArea,launchKey(auditId),awaiting,launchRecord)) return fail('EXPORT_OPEN_FAILED');
-      return deepFreeze({ok:true,auditId,attemptId,state:'awaiting-connection'});
+      let ownedTabId = null;
+      try {
+        const tab = await input.chromeApi.tabs.create({ url: 'about:blank', active: false, windowId: authorization.windowId });
+        if (!safeId(tab?.id) || tab.windowId !== authorization.windowId) throw new Error('EXPORT_OPEN_FAILED');
+        ownedTabId = tab.id;
+        const now = readEpoch(input.epochNow);
+        const launch = deepFreeze({ version:1,auditId,sourceReviewSessionCapabilityId:sessionCapabilityId,expectedRevision:snapshot.revision,
+          attemptId,tabId:tab.id,windowId:authorization.windowId,path:PATH,documentId:null,state:'allocated',issuedAt:now,expiresAt:now+TTL_MS });
+        if (!await confirmed(input.sessionArea, launchKey(auditId), launch, launchRecord)) throw new Error('EXPORT_OPEN_FAILED');
+        await input.sessionArea.set({ [indexKey(tab.id)]: auditId });
+        await input.chromeApi.tabs.update(tab.id, { url: canonicalUrl(input.chromeApi,auditId), active:false });
+        const current = await getLaunch(auditId);
+        if (!current || current.tabId !== tab.id || current.state !== 'allocated') throw new Error('EXPORT_OPEN_FAILED');
+        const awaiting = deepFreeze({...current,state:'awaiting-connection'});
+        if (!await confirmed(input.sessionArea,launchKey(auditId),awaiting,launchRecord)) throw new Error('EXPORT_OPEN_FAILED');
+        return deepFreeze({ok:true,auditId,attemptId,state:'awaiting-connection'});
+      } catch {
+        const current = await getLaunch(auditId).catch(() => null);
+        if (current && current.attemptId === attemptId && !['terminal','revoked'].includes(current.state)) {
+          await confirmed(input.sessionArea,launchKey(auditId),deepFreeze({...current,state:'revoked'}),launchRecord).catch(() => null);
+        }
+        await input.auditStore.releaseExportLease(auditId, {
+          ownerId: ownerSeed, now: leaseNow,
+        }).catch(() => false);
+        if (ownedTabId !== null) { try { await input.chromeApi.tabs.remove?.(ownedTabId); } catch {} }
+        return fail('EXPORT_OPEN_FAILED');
+      }
     });
   }
 
@@ -147,43 +168,74 @@ export function createExportLaunchAuthority(raw) {
     let context; try { context=await deriveTrustedExtensionContext({sender,chromeApi:input.chromeApi,surface:EXPORT_SURFACE}); } catch { return fail('CONTEXT_DENIED'); }
     return serialize(input.sessionArea,auditId,async()=>{
       const [launch,session]=await Promise.all([getLaunch(auditId),getSession(sessionCapabilityId)]); const now=readEpoch(input.epochNow);
-      if (!launch || launch.state!=='connected' || launch.attemptId!==attemptId || launch.documentId!==sender.documentId ||
-        launch.tabId!==context.tabId || launch.windowId!==context.windowId || !session || session.state!=='active' || session.expiresAt<=now ||
-        session.auditId!==auditId || session.attemptId!==attemptId || session.expectedRevision!==launch.expectedRevision || session.launchDocumentId!==sender.documentId) return fail('EXPORT_COMPLETE_DENIED');
+      const correlated = launch && launch.attemptId===attemptId && launch.documentId===sender.documentId &&
+        launch.tabId===context.tabId && launch.windowId===context.windowId && session && session.auditId===auditId &&
+        session.attemptId===attemptId && session.expectedRevision===launch.expectedRevision && session.launchDocumentId===sender.documentId;
+      if (!correlated || launch.state!=='connected' || session.state!=='active' || session.expiresAt<=now) return fail('EXPORT_COMPLETE_DENIED');
       const receipt=await input.auditStore.getExportReceipt?.(auditId);
       if (!receipt || receipt.status!=='complete' || receipt.auditId!==auditId || receipt.attemptId!==attemptId || receipt.modelRevision!==launch.expectedRevision ||
         !Array.isArray(receipt.formats) || receipt.formats.length!==EXPORT_FORMATS_V1.length || receipt.formats.some((row,index)=>
           row?.format!==EXPORT_FORMATS_V1[index] || row.mimeType!==EXPORT_MIME_V1[row.format] || row.state!=='complete' ||
           !Number.isSafeInteger(row.byteSize) || row.byteSize<0 || !/^[a-f0-9]{64}$/u.test(row.sha256??'') ||
           !Number.isSafeInteger(row.downloadId) || row.downloadId<0)) return fail('EXPORT_RECEIPT_DENIED');
-      const terminalSession=await confirmed(input.sessionArea,sessionKey(sessionCapabilityId),deepFreeze({...session,state:'terminal'}),sessionRecord);
-      if (!terminalSession) return fail('EXPORT_COMPLETE_DENIED');
-      const latest=await getLaunch(auditId);
-      if (!latest || latest.state!=='connected') return fail('EXPORT_COMPLETE_DENIED');
-      if (!await confirmed(input.sessionArea,launchKey(auditId),deepFreeze({...latest,state:'terminal'}),launchRecord)) return fail('EXPORT_COMPLETE_DENIED');
       await input.auditStore.completeExport?.(auditId,{attemptId,receipt});
+      const terminalSession=deepFreeze({...session,state:'terminal'});
+      const terminalLaunch=deepFreeze({...launch,state:'terminal'});
+      await input.sessionArea.set({ [sessionKey(sessionCapabilityId)]:terminalSession, [launchKey(auditId)]:terminalLaunch });
+      const [confirmedSession,confirmedLaunch]=await Promise.all([getSession(sessionCapabilityId),getLaunch(auditId)]);
+      if (!confirmedSession || confirmedSession.state!=='terminal' || !confirmedLaunch || confirmedLaunch.state!=='terminal') return fail('EXPORT_COMPLETE_DENIED');
       return deepFreeze({ok:true,auditId,state:'terminal'});
     });
   }
 
   async function revoke(launch) {
     if (!launch || ['terminal','revoked'].includes(launch.state)) return false;
-    const envelope=await input.sessionArea.get(null);
+    let envelope;
+    try { envelope=await input.sessionArea.get(null); } catch { return false; }
     for (const [key,value] of Object.entries(envelope ?? {})) {
       const session=key.startsWith('audita:export-session:v1:')?sessionRecord(value):null;
-      if (session?.auditId===launch.auditId && session.state==='active') await confirmed(input.sessionArea,key,deepFreeze({...session,state:'revoked'}),sessionRecord);
+      if (session?.auditId===launch.auditId && session.state==='active') {
+        try {
+          if (!await confirmed(input.sessionArea,key,deepFreeze({...session,state:'revoked'}),sessionRecord)) return false;
+        } catch { return false; }
+      }
     }
-    await confirmed(input.sessionArea,launchKey(launch.auditId),deepFreeze({...launch,state:'revoked'}),launchRecord); return true;
+    try {
+      if (!await confirmed(input.sessionArea,launchKey(launch.auditId),deepFreeze({...launch,state:'revoked'}),launchRecord)) return false;
+    } catch { return false; }
+    const owners = launch.state === 'connected'
+      ? [deriveExportLeaseOwner(launch.auditId, launch.attemptId), `export:${launch.auditId}:pending`]
+      : [`export:${launch.auditId}:pending`, deriveExportLeaseOwner(launch.auditId, launch.attemptId)];
+    for (const ownerId of owners) {
+      try {
+        if (await input.auditStore.releaseExportLease(launch.auditId, { ownerId, now: input.modelNow() })) break;
+      } catch { /* the alternate owner can still be attempted */ }
+    }
+    try { await input.chromeApi.tabs.remove?.(launch.tabId); } catch {}
+    return true;
   }
   async function auditForTab(tabId) { const result=await input.sessionArea.get(indexKey(tabId)); const value=result?.[indexKey(tabId)]; return AUDIT_ID.test(value??'')?value:null; }
   async function handleTabUpdated(tabId,changeInfo) {
-    const auditId=safeId(tabId)?await auditForTab(tabId):null; if(!auditId)return false;
+    const auditId=safeId(tabId)?await auditForTab(tabId):null;
+    if(!auditId)return revokeInvalidSourceExports();
     return serialize(input.sessionArea,auditId,async()=>{const launch=await getLaunch(auditId);if(!launch||launch.tabId!==tabId)return false;
       let url=typeof changeInfo?.url==='string'?changeInfo.url:null;if(!url&&changeInfo?.status==='loading')url=canonicalUrl(input.chromeApi,auditId);
       if(launch.state==='connected' || (url&&url!==canonicalUrl(input.chromeApi,auditId)))return revoke(launch);return false;});
   }
-  async function handleTabRemoved(tabId){const auditId=safeId(tabId)?await auditForTab(tabId):null;if(!auditId)return false;return serialize(input.sessionArea,auditId,async()=>revoke(await getLaunch(auditId)));}
-  async function handleWindowRemoved(windowId){if(!safeId(windowId))return false;const envelope=await input.sessionArea.get(null);let changed=false;for(const [key,value] of Object.entries(envelope??{})){const launch=key.startsWith('audita:export-launch:v1:')?launchRecord(value):null;if(launch?.windowId===windowId){changed=await serialize(input.sessionArea,launch.auditId,()=>revoke(launch))||changed;}}return changed;}
+  async function revokeInvalidSourceExports(){
+    const envelope=await input.sessionArea.get(null);let changed=false;
+    for(const [key,value] of Object.entries(envelope??{})){
+      const launch=key.startsWith('audita:export-launch:v1:')?launchRecord(value):null;
+      if(launch&&!['terminal','revoked'].includes(launch.state)){
+        try {
+          if(!await sourceActive(launch)) changed=await serialize(input.sessionArea,launch.auditId,()=>revoke(launch))||changed;
+        } catch { /* one unavailable source cannot block later independent revocations */ }
+      }
+    }
+    return changed;
+  }
+  async function handleTabRemoved(tabId){const auditId=safeId(tabId)?await auditForTab(tabId):null;if(!auditId)return revokeInvalidSourceExports();return serialize(input.sessionArea,auditId,async()=>revoke(await getLaunch(auditId)));}
+  async function handleWindowRemoved(windowId){if(!safeId(windowId))return false;const envelope=await input.sessionArea.get(null);let changed=false;for(const [key,value] of Object.entries(envelope??{})){const launch=key.startsWith('audita:export-launch:v1:')?launchRecord(value):null;if(launch?.windowId===windowId){changed=await serialize(input.sessionArea,launch.auditId,()=>revoke(launch))||changed;}}return await revokeInvalidSourceExports()||changed;}
 
   return deepFreeze({requestExport,connect,complete,getLaunch,getSession,handleTabUpdated,handleTabRemoved,handleWindowRemoved});
 }

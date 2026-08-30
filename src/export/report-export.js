@@ -13,7 +13,7 @@ import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { renderHtmlReport } from '../core/report/html.js';
 import { REPORT_HASH_BASE, verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
 import { preparedReportFormats } from '../core/report/report-policy.js';
-import { EXPORT_FORMATS_V1 } from './export-formats.js';
+import { createExportDeliveryIdentityV1, EXPORT_FORMATS_V1 } from './export-formats.js';
 export { EXPORT_FORMATS_V1 };
 import { deriveSystemLimitations } from '../core/report/text-policy.js';
 import { inspectAuditSnapshotCapability } from '../storage/audit-store.js';
@@ -228,6 +228,11 @@ export async function runReportExport(request, dependencies) {
     formats: downloads.formats,
     limitations: deliveryLimitations,
   };
+  const deliverySnapshot = snapshotCapability === null ? null : inspectAuditSnapshotCapability(snapshotCapability);
+  if (snapshotCapability !== null && (!deliverySnapshot || deliverySnapshot.auditId !== model.auditId ||
+    canonicalStringify(deliverySnapshot.model) !== canonicalStringify(model))) {
+    throw new TypeError('Snapshot reservado não corresponde ao relatório entregue.');
+  }
   const result = {
     model,
     html,
@@ -242,6 +247,14 @@ export async function runReportExport(request, dependencies) {
       ...downloads.limitations,
     ])],
     pdfFallback,
+    ...(deliverySnapshot === null ? {} : {
+      exportDeliveryIdentity: createExportDeliveryIdentityV1({
+        auditId: model.auditId,
+        modelRevision: deliverySnapshot.revision,
+        modelHash: model.integrity.canonicalModelHash,
+        attemptId: String(exportAttempt),
+      }),
+    }),
   };
   return attestReportExportResult(result, snapshotCapability, exportLeaseOwnerId, exportAttempt);
 }
@@ -254,13 +267,17 @@ async function runImmutableRevisionExport({
     !Object.isFrozen(reportView)) throw reportExportInputError();
   const model = await verifyAuditIntegritySnapshot(sourceModel);
   const generatedAt = safeCanonicalNow(() => model.timestamps.generatedAt);
-  const html = renderHtmlReport(model, { reportView });
-  const json = renderTechnicalJson(model);
+  const deliveryIdentity = createExportDeliveryIdentityV1({
+    auditId: model.auditId, modelRevision: reportView.modelRevision, modelHash: reportView.modelHash,
+    attemptId: String(exportAttempt),
+  });
+  const html = renderHtmlReport(model, { reportView, deliveryIdentity });
+  const json = renderTechnicalJson(model, { deliveryIdentity });
   let csv = null;
   let pdf = null;
   let pdfFallback = false;
   const limitations = [];
-  try { csv = renderCanonicalCsv(model, dependencies.csvRenderer); }
+  try { csv = renderCanonicalCsv(model, dependencies.csvRenderer, deliveryIdentity); }
   catch { limitations.push(createExportIssue('REPORT_CSV_UNAVAILABLE').message); }
   if (csv !== null) {
     const printed = await printFinalHtml(html, dependencies, timeoutMs, false);
@@ -293,7 +310,7 @@ async function runImmutableRevisionExport({
     limitations: receiptLimitations,
   };
   return attestReportExportResult({
-    model, html, json, csv, pdf, formats: downloads.formats, deliveryReceipt,
+    model, html, json, csv, pdf, formats: downloads.formats, deliveryReceipt, exportDeliveryIdentity: deliveryIdentity,
     limitations: receiptLimitations, pdfFallback,
   }, snapshotCapability, exportLeaseOwnerId, exportAttempt);
 }
@@ -365,6 +382,7 @@ async function projectGeneratedResult(value) {
     pdf: await generatedBinaryHash(value.pdf, true),
     formats: await sha256Hex(canonicalStringify(value.formats)),
     deliveryReceipt: await sha256Hex(canonicalStringify(value.deliveryReceipt)),
+    exportDeliveryIdentity: value.exportDeliveryIdentity === undefined ? null : await sha256Hex(canonicalStringify(createExportDeliveryIdentityV1(value.exportDeliveryIdentity))),
     limitations: await sha256Hex(canonicalStringify(value.limitations)),
     pdfFallback: value.pdfFallback === true ? true : value.pdfFallback === false ? false : invalidGeneratedValue(),
   };
@@ -460,9 +478,9 @@ async function printFinalHtml(html, dependencies, timeoutMs, forceCompatible) {
   return { bytes, usedFallback, issue, cleanupLimited };
 }
 
-function renderCanonicalCsv(model, csvRenderer) {
-  const canonicalCsv = renderOccurrenceCsv(model);
-  const renderedCsv = csvRenderer ? csvRenderer(model) : canonicalCsv;
+function renderCanonicalCsv(model, csvRenderer, deliveryIdentity = undefined) {
+  const canonicalCsv = renderOccurrenceCsv(model, deliveryIdentity === undefined ? undefined : { deliveryIdentity });
+  const renderedCsv = csvRenderer ? csvRenderer(model, deliveryIdentity) : canonicalCsv;
   if (typeof renderedCsv !== 'string' || renderedCsv !== canonicalCsv) {
     throw new TypeError('O renderizador CSV não retornou a projeção canônica esperada.');
   }

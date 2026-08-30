@@ -41,17 +41,21 @@ export function createAuditLifecycle(raw) {
 
   let registered = false;
 
+  async function bestEffort(operation) {
+    try { await operation(); } catch { /* each lifecycle stage is independently fail-closed */ }
+  }
+
   async function invalidateTab(tabId, reasonCode, changeInfo = null) {
     try {
       const runtime = await input.getReadyRuntime();
-      await runtime.auditStarter.abortAttachedAuditForTarget({ tabId, windowId: null, reasonCode });
-      await runtime.authority.invalidateForTab(tabId, reasonCode);
+      await bestEffort(() => runtime.auditStarter.abortAttachedAuditForTarget({ tabId, windowId: null, reasonCode }));
+      await bestEffort(() => runtime.authority.invalidateForTab(tabId, reasonCode));
       if (changeInfo !== null) {
-        await runtime.reportLaunch?.handleTabUpdated?.(tabId, changeInfo);
-        await runtime.exportLaunch?.handleTabUpdated?.(tabId, changeInfo);
+        await bestEffort(() => runtime.reportLaunch?.handleTabUpdated?.(tabId, changeInfo));
+        await bestEffort(() => runtime.exportLaunch?.handleTabUpdated?.(tabId, changeInfo));
       } else {
-        await runtime.reportLaunch?.handleTabRemoved?.(tabId);
-        await runtime.exportLaunch?.handleTabRemoved?.(tabId);
+        await bestEffort(() => runtime.reportLaunch?.handleTabRemoved?.(tabId));
+        await bestEffort(() => runtime.exportLaunch?.handleTabRemoved?.(tabId));
       }
     } catch { /* readiness and invalidation failures are closed no-ops */ }
   }
@@ -59,10 +63,10 @@ export function createAuditLifecycle(raw) {
   async function invalidateWindow(windowId) {
     try {
       const runtime = await input.getReadyRuntime();
-      await runtime.auditStarter.abortAttachedAuditForTarget({ tabId: null, windowId, reasonCode: 'WINDOW_REMOVED' });
-      await runtime.authority.invalidateForWindow(windowId, 'WINDOW_REMOVED');
-      await runtime.reportLaunch?.handleWindowRemoved?.(windowId);
-      await runtime.exportLaunch?.handleWindowRemoved?.(windowId);
+      await bestEffort(() => runtime.auditStarter.abortAttachedAuditForTarget({ tabId: null, windowId, reasonCode: 'WINDOW_REMOVED' }));
+      await bestEffort(() => runtime.authority.invalidateForWindow(windowId, 'WINDOW_REMOVED'));
+      await bestEffort(() => runtime.reportLaunch?.handleWindowRemoved?.(windowId));
+      await bestEffort(() => runtime.exportLaunch?.handleWindowRemoved?.(windowId));
     } catch { /* readiness and invalidation failures are closed no-ops */ }
   }
 

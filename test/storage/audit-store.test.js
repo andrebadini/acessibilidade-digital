@@ -123,6 +123,45 @@ test('advances delivery without changing the report revision and re-reads exact 
     [...identity.csv, 12, 'complete'], [...identity.json, 13, 'complete'],
   ]);
   assert.equal(Object.isFrozen(receipt.formats), true);
+  const exportDeliveryIdentity = {
+    auditId,
+    modelRevision: delivering.revision,
+    modelHash: unchangedRevision.modelHash,
+    attemptId: '1',
+  };
+  await store.finalizeExportAndMaybeDelete(
+    auditId,
+    model,
+    {
+      auditId,
+      exportStatus: 'complete',
+      exportDeliveryIdentity,
+      deliveryReceipt: {
+        status: 'complete',
+        limitations: [],
+        formats: receipt.formats.map(row => ({
+          format: row.format,
+          filename: `${auditId}-20260829T120000000Z.${row.format}`,
+          mimeType: row.mimeType,
+          byteSize: row.byteSize,
+          sha256: row.sha256,
+          downloadId: row.downloadId,
+          status: 'complete',
+        })),
+      },
+    },
+    delivering.capability,
+    {
+      ownerId,
+      exportAttempt: 1,
+      now: '2026-08-29T12:00:05.000Z',
+      clearDeliveryJournal: true,
+      deleteAfterCompleteExport: false,
+    },
+  );
+  assert.deepEqual(await store.getExportDeliveryJournal(auditId), []);
+  assert.deepEqual(await store.getExportReceipt(auditId), receipt,
+    'the terminal receipt must survive atomic journal cleanup for worker acknowledgement');
   });
 });
 

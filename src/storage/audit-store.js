@@ -13,7 +13,7 @@ import { canonicalStringify } from '../core/report/canonical-json.js';
 import { verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
 import { applyReviewDecisions } from '../core/review/decisions.js';
 import { validateExecutionCheckpoint } from '../background/execution-checkpoint.js';
-import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
+import { createExportDeliveryIdentityV1, EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 
 const DB_NAME = 'audita-mt';
 const STORE_NAME = 'audits';
@@ -29,6 +29,10 @@ const DEFAULT_EXPORT_LEASE_TTL_MS = 2 * 60 * 1000;
 const MAX_EXPORT_LEASE_TTL_MS = 10 * 60 * 1000;
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
 const EXPORT_FORMATS = new Set(EXPORT_FORMATS_V1);
+const EXPORT_MIME_V1 = Object.freeze({
+  html: 'text/html;charset=utf-8', pdf: 'application/pdf',
+  csv: 'text/csv;charset=utf-8', json: 'application/json;charset=utf-8',
+});
 const TERMINAL_AUDIT_STATUSES = new Set(['complete', 'partial', 'failed', 'cancelled']);
 const INTERRUPTIBLE_AUDIT_STATUSES = new Set(['idle', 'validating', 'queued', 'running', 'cancelling']);
 const AUDIT_SNAPSHOT_CAPABILITIES = new WeakMap();
@@ -529,6 +533,37 @@ function exportReceiptFromRevision(reportRevision, entries) {
   });
 }
 
+function exportReceiptFromLatest(latest, auditId) {
+  try {
+    if (!latest || typeof latest !== 'object' || Array.isArray(latest) || latest.auditId !== auditId ||
+      latest.exportStatus !== 'complete') return null;
+    const rawIdentity = latest.exportDeliveryIdentity;
+    if (!rawIdentity || typeof rawIdentity !== 'object' || Array.isArray(rawIdentity) ||
+      canonicalStringify(Object.keys(rawIdentity).sort()) !== canonicalStringify(['attemptId', 'auditId', 'modelHash', 'modelRevision'])) return null;
+    const identity = createExportDeliveryIdentityV1(rawIdentity);
+    if (identity.auditId !== auditId) return null;
+    const receipt = latest.deliveryReceipt;
+    if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt) || receipt.status !== 'complete' ||
+      !Array.isArray(receipt.formats) || receipt.formats.length !== EXPORT_FORMATS_V1.length ||
+      !Array.isArray(receipt.limitations) || receipt.limitations.length !== 0 ||
+      canonicalStringify(Object.keys(receipt).sort()) !== canonicalStringify(['formats', 'limitations', 'status'])) return null;
+    const seenDownloadIds = new Set();
+    const formats = receipt.formats.map((entry, index) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || entry.format !== EXPORT_FORMATS_V1[index] ||
+        canonicalStringify(Object.keys(entry).sort()) !== canonicalStringify(['byteSize', 'downloadId', 'filename', 'format', 'mimeType', 'sha256', 'status']) ||
+        entry.status !== 'complete' || entry.mimeType !== EXPORT_MIME_V1[entry.format] || typeof entry.filename !== 'string' ||
+        !Number.isSafeInteger(entry.byteSize) || entry.byteSize < 0 || !/^[a-f0-9]{64}$/u.test(entry.sha256 ?? '') ||
+        !Number.isSafeInteger(entry.downloadId) || entry.downloadId < 0 || seenDownloadIds.has(entry.downloadId)) throw new TypeError();
+      seenDownloadIds.add(entry.downloadId);
+      return { format: entry.format, mimeType: entry.mimeType, byteSize: entry.byteSize,
+        sha256: entry.sha256, downloadId: entry.downloadId, state: 'complete' };
+    });
+    return freezeStored({ version: 1, ...identity, status: 'complete', formats });
+  } catch {
+    return null;
+  }
+}
+
 function pendingCleanupLatest(latest, entries) {
   if (latest === undefined || !latest || typeof latest !== 'object' || Array.isArray(latest)) return latest;
   const next = storageClone(latest);
@@ -657,6 +692,7 @@ function reviewLatestState(value, auditId, model, revision) {
   delete latest.exportAttempt;
   delete latest.leaseOwnerId;
   delete latest.deliveryReceipt;
+  delete latest.exportDeliveryIdentity;
   return latest;
 }
 
@@ -1215,8 +1251,10 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     async resolveExportDelivery(id, options) { return resolveExportDelivery(id, options); },
     async getExportDeliveryJournal(id) { return storageClone(getExportDeliveryJournal(id)); },
     async getExportReceipt(id) {
-      const [revision, entries] = await Promise.all([getReportRevision(id), Promise.resolve(getExportDeliveryJournal(id))]);
-      return exportReceiptFromRevision(revision, entries);
+      const [revision, entries, latest] = await Promise.all([
+        getReportRevision(id), Promise.resolve(getExportDeliveryJournal(id)), Promise.resolve(initial.get(LATEST_KEY)),
+      ]);
+      return exportReceiptFromRevision(revision, entries) ?? exportReceiptFromLatest(latest, validId(id));
     },
     async getAuditRetention(id) {
       const key = validId(id);
@@ -2717,8 +2755,8 @@ export function createAuditStore(options = {}) {
     resolveExportDelivery,
     getExportDeliveryJournal,
     async getExportReceipt(id) {
-      const [revision, entries] = await Promise.all([getReportRevision(id), getExportDeliveryJournal(id)]);
-      return exportReceiptFromRevision(revision, entries);
+      const [revision, entries, latest] = await Promise.all([getReportRevision(id), getExportDeliveryJournal(id), get(LATEST_KEY)]);
+      return exportReceiptFromRevision(revision, entries) ?? exportReceiptFromLatest(latest, validId(id));
     },
     getAuditRetention,
     setRetentionIntent,

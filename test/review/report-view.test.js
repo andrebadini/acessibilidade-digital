@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
@@ -60,7 +61,10 @@ async function fixture() {
       pageId: page.pageId, attempted: page.attempted,
       startedAt: page.attempted ? page.timestamps.startedAt : null,
       rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion,
-      inventoryHash: inventory.sha256, outcomes: [],
+      inventoryHash: inventory.sha256, outcomes: [
+        { ruleId: 'focus-fully-visible', outcome: 'passed' },
+        { ruleId: 'keyboard-focus-trap', outcome: 'untested' },
+      ],
     })),
   };
   const summary = await buildPanelSummary({ model, executionCheckpoint: checkpoint, inventory });
@@ -114,6 +118,18 @@ test('renderer creates neutral identity plus exactly seven h2 sections and filte
     'Metodologia, fontes, integridade, evidências técnicas e anexos',
   ]);
   assert.equal(root.querySelectorAll('[role="status"][aria-live="polite"]').length, 1);
+  const liveStatus = root.querySelector('[role="status"]');
+  assert.equal(liveStatus.parentNode.getAttribute('class'), 'report-filters');
+  assert.match(liveStatus.textContent, /verificações visíveis/iu);
+  const positiveMetric = root.querySelector('[data-report-metric="passed"]');
+  assert.ok(positiveMetric);
+  assert.match(positiveMetric.textContent, /1 verificação.*0 ocorrências/iu);
+  const navigation = root.querySelector('[data-report-navigation]');
+  assert.ok(navigation);
+  assert.deepEqual(navigation.querySelectorAll('a').map(link => link.getAttribute('href')), [
+    '#report-section-1', '#report-section-2', '#report-section-3', '#report-section-4',
+    '#report-section-5', '#report-section-6', '#report-section-7',
+  ]);
   const before = structuredClone(view);
   const filter = root.querySelector('button[data-report-filter="result"][data-filter-value="failed"]');
   assert.ok(filter);
@@ -123,9 +139,51 @@ test('renderer creates neutral identity plus exactly seven h2 sections and filte
   const renderedIssues = root.querySelectorAll('[data-report-issue]');
   assert.equal(renderedIssues.some(issue => issue.hidden), true);
   assert.equal(renderedIssues.some(issue => !issue.hidden), true);
+  assert.equal(renderedIssues.filter(issue => !issue.hidden).every(issue => issue.getAttribute('data-result') === 'failed'), true);
+  assert.match(root.querySelector('[role="status"]').textContent, /filtros não alteram os arquivos exportados/iu);
   filter.click();
   assert.equal(filter.getAttribute('aria-pressed'), 'false');
   assert.equal(renderedIssues.every(issue => !issue.hidden), true);
   assert.equal(root.textContent.includes('estimativa'), true);
+  assert.doesNotMatch(root.textContent, /\["page-1","audita-core","keyboard-focus-trap"\]/u);
+  assert.match(root.textContent, /Verificação não testada: Armadilha de foco — Página 1\./u);
   assert.doesNotMatch(JSON.stringify(root.dataset), /capability|attempt|revision|lease|tab|window|document/iu);
+});
+
+test('live report exposes complete progressive cards, inert official sources and one combined polite announcement', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const firstIssue = root.querySelector('[data-report-issue][data-result="failed"]');
+  assert.ok(firstIssue);
+  assert.match(firstIssue.textContent, /Impacto|Observação|Correção|Confirmar|WCAG|ABNT|Nome acessível|estimada|Referência técnica e jurídica qualificada/iu);
+  assert.equal(firstIssue.querySelectorAll('details').length, 1);
+  assert.match(firstIssue.querySelector('details').textContent, /URL|Horário|Seletor|Snippet|Imagem segura/iu);
+  assert.equal(firstIssue.querySelectorAll('img').length >= 2, true);
+  assert.match(firstIssue.querySelector('details').textContent, /ev-control|ev-full/iu);
+  assert.match(firstIssue.textContent, /Resultado consolidado: Não atendido neste teste|Impacto: Moderado|Classificação: Não conformidade identificada/iu);
+  assert.equal(root.querySelectorAll('[data-report-evidence]').length, view.technicalEvidence.length);
+  assert.equal(root.querySelectorAll('[data-report-evidence]').flatMap(node => node.querySelectorAll('img')).length >= 2, true);
+  const sources = root.querySelectorAll('[data-official-source]');
+  assert.equal(sources.length, 2);
+  assert.equal(sources.every(source => source.getAttribute('href') === null && source.getAttribute('src') === null), true);
+  assert.equal(root.querySelectorAll('[role="status"][aria-live="polite"]').length, 1);
+  const headings = root.querySelectorAll('h3').map(node => node.textContent);
+  for (const label of ['Não conformidades', 'Alertas', 'Revisões humanas pendentes', 'Resultados positivos']) {
+    assert.equal(headings.includes(label) || headings.some(value => value.startsWith(`${label}:`)), true);
+  }
+});
+
+test('review document retains exactly one polite live region and its CSS protects the 320px matrix reflow', async () => {
+  const read = path => readFile(new URL(`../../${path}`, import.meta.url), 'utf8');
+  const [html, css] = await Promise.all([read('src/review/index.html'), read('src/review/review.css')]);
+  assert.equal((html.match(/aria-live="polite"/giu) ?? []).length, 0);
+  assert.match(css, /\[data-report-group\][^{]*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/isu);
+  assert.match(css, /\.matrix-scroll[^{]*\{[^}]*overflow-x:\s*auto/isu);
+  assert.match(css, /\.matrix-scroll[^{]*\{[^}]*min-width:\s*0/isu);
+  assert.match(css, /\.report-view[^{]*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/isu);
+  assert.match(css, /\.report-metrics[^{]*\{[^}]*minmax\(min\(100%,\s*14rem\),\s*1fr\)/isu);
+  assert.match(css, /\.section-nav ul[^{]*\{[^}]*list-style:\s*none/isu);
+  assert.match(css, /\[data-report-metric\][^{]*\{[^}]*border-inline-start/isu);
+  assert.match(css, /\[data-report-metric\] \.metric-value[^{]*\{[^}]*font-size:\s*clamp/isu);
 });

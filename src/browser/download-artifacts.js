@@ -31,12 +31,13 @@ const FAILURE_MESSAGES = Object.freeze({
 export function buildArtifactBaseName(auditId, timestamp) {
   if (typeof auditId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/u.test(auditId)) throw new TypeError('Auditoria inválida.');
   if (typeof timestamp !== 'string' || new Date(timestamp).toISOString() !== timestamp) throw new TypeError('Timestamp do relatório inválido.');
-  const safeAuditId = auditId.replace(/[^A-Za-z0-9._-]+/gu, '-').slice(0, 160);
-  return `${safeAuditId}-${timestamp.replace(/[-:.]/gu, '')}`;
+  const instant = timestamp.replace(/[-:.]/gu, '');
+  const safeAuditId = auditId.replace(/[^A-Za-z0-9._-]+/gu, '-').slice(0, 160 - instant.length - 1);
+  return `${safeAuditId}-${instant}`;
 }
 
 export async function bindDeliveryArtifactBaseName(baseName, ownerId, exportAttempt) {
-  if (typeof baseName !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9-]{0,159}$/u.test(baseName) ||
+  if (typeof baseName !== 'string' || !/^[A-Za-z0-9._-]{1,160}$/u.test(baseName) ||
     typeof ownerId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/u.test(ownerId) ||
     !Number.isSafeInteger(exportAttempt) || exportAttempt < 1) {
     throw new TypeError('Identidade do nome de entrega inválida.');
@@ -46,7 +47,7 @@ export async function bindDeliveryArtifactBaseName(baseName, ownerId, exportAtte
 
 export async function downloadArtifacts(payload, adapter, options = {}) {
   validateAdapter(adapter);
-  if (!payload || typeof payload.baseName !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9-]*$/u.test(payload.baseName)) {
+  if (!payload || typeof payload.baseName !== 'string' || !/^[A-Za-z0-9._-]{1,240}$/u.test(payload.baseName)) {
     throw new TypeError('Nome-base dos artefatos inválido.');
   }
   const timeoutMs = options.timeoutMs ?? 30_000;
@@ -322,6 +323,11 @@ export async function reconcileStaleDownloads(entries, adapter, resolveEntry, op
     const canonical = canonicalStaleEntry(entry);
     const expectedSuffix = `-delivery-${await deliveryToken(canonical.ownerId, canonical.exportAttempt)}.${canonical.format}`;
     if (!canonical.filename.endsWith(expectedSuffix)) throw downloadCleanupPendingError();
+    if (canonical.state === 'terminal') {
+      try { await resolvePersistedEntry(canonical, 'cleaned'); }
+      catch (error) { throw downloadCleanupPendingError(error); }
+      continue;
+    }
     let ids = canonical.downloadId === undefined ? [] : [canonical.downloadId];
     if (ids.length === 0) {
       const find = ownOrPrototypeMethod(adapter, 'findDownloadsByFilename');

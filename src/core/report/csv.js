@@ -2,6 +2,7 @@ import { NBR17225_ITEMS } from '../normative/nbr17225.js';
 import { registeredOccurrenceSource } from '../provenance.js';
 import { auditModelInputError } from './audit-input.js';
 import { isAuditIntegrityVerified } from './integrity.js';
+import { createExportDeliveryIdentityV1 } from '../../export/export-formats.js';
 
 export const OCCURRENCE_CSV_VERSION = 'audita-occurrences-v1';
 export const OCCURRENCE_CSV_COLUMNS = Object.freeze([
@@ -40,14 +41,20 @@ const OUTCOME_LABEL = Object.freeze({
 });
 
 /** Pure, fixed-column projection of an integrity-verified canonical V2 snapshot. */
-export function renderOccurrenceCsv(input) {
+export function renderOccurrenceCsv(input, options = {}) {
   if (!isAuditIntegrityVerified(input)) {
     throw auditModelInputError();
   }
   const model = input;
   const pageById = new Map(model.pages.map(page => [page.pageId, page]));
   const evidenceById = new Map(model.evidence.map(evidence => [evidence.evidenceId, evidence]));
-  const records = [serializeRecord(OCCURRENCE_CSV_COLUMNS)];
+  const deliveryIdentity = options?.deliveryIdentity === undefined ? null : createExportDeliveryIdentityV1(options.deliveryIdentity);
+  const columns = deliveryIdentity === null ? OCCURRENCE_CSV_COLUMNS : [
+    ...OCCURRENCE_CSV_COLUMNS,
+    'export_delivery_identity_type', 'export_delivery_audit_id', 'export_delivery_model_revision',
+    'export_delivery_model_hash', 'export_delivery_attempt_id',
+  ];
+  const records = [serializeRecord(columns)];
   let byteLength = ENCODER.encode(`\uFEFF${records[0]}\r\n`).byteLength;
 
   for (const occurrence of model.occurrences) {
@@ -95,7 +102,10 @@ export function renderOccurrenceCsv(input) {
       strictSha256(model.integrity?.canonicalModelHash),
       strictSha256(model.integrity?.evidenceManifestHash),
     ];
-    const record = serializeRecord(values);
+    const record = serializeRecord(deliveryIdentity === null ? values : [...values,
+      'ExportDeliveryIdentityV1', deliveryIdentity.auditId, String(deliveryIdentity.modelRevision),
+      deliveryIdentity.modelHash, deliveryIdentity.attemptId,
+    ]);
     byteLength += ENCODER.encode(`${record}\r\n`).byteLength;
     if (byteLength > MAX_CSV_BYTES) throw new RangeError('O CSV excede o limite seguro de tamanho.');
     records.push(record);

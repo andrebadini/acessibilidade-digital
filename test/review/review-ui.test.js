@@ -4,11 +4,11 @@ import test from 'node:test';
 
 const read = path => readFile(new URL(`../../${path}`, import.meta.url), 'utf8');
 
-test('review page is local, keyboard-friendly and has one live status and one h1', async () => {
+test('review page leaves its one polite live announcement to the rendered report and has one h1', async () => {
   const html = await read('src/review/index.html');
   assert.equal((html.match(/<h1\b/gi) ?? []).length, 1);
   assert.match(html, /lang="pt-BR"/i);
-  assert.match(html, /aria-live="polite"/i);
+  assert.doesNotMatch(html, /aria-live="polite"/i);
   assert.match(html, /id="review-list"/i);
   assert.match(html, /id="review-evaluator"/i);
   assert.match(html, /id="regenerate-report"/i);
@@ -52,7 +52,8 @@ test('review offers a correlated accessible delete-one dialog without exposing t
   assert.match(html, /id="delete-audit"/u);
   assert.match(html, /<dialog[^>]+id="delete-audit-dialog"[^>]+aria-labelledby="delete-audit-title"[^>]+aria-describedby="delete-audit-description"/iu);
   assert.match(html, /<dialog[^>]+id="delete-audit-dialog"[^>]+aria-hidden="true"/iu);
-  assert.match(html, /id="delete-audit-dialog-status"[^>]+role="status"[^>]+aria-live="polite"/iu);
+  assert.match(html, /id="delete-audit-dialog-status"/iu);
+  assert.doesNotMatch(html, /aria-live="polite"/iu);
   assert.match(html, /id="review-status"[^>]+tabindex="-1"/iu);
   assert.match(html, /evidências[\s\S]*pixels[\s\S]*revisões[\s\S]*downloads/iu);
   assert.match(script, /createDestructiveDialog/u);

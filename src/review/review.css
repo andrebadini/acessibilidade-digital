@@ -1,30 +1,42 @@
-:root { color-scheme: light; font: 100%/1.5 system-ui, sans-serif; color: #17202a; background: #f5f7f8; }
+:root { color-scheme: light; font: 100%/1.5 system-ui, sans-serif; color: #14212b; background: #eef4f8; --ink: #14212b; --surface: #fff; --pale: #eef4f8; --brand: #003b71; --action: #005a9c; --border: #738596; }
 * { box-sizing: border-box; }
-body { margin: 0; }
-main { max-width: 72rem; margin: auto; padding: 1.5rem; }
-.report-view { display: grid; gap: 1rem; }
-.report-identity, .report-view > section { background: #fff; border: 1px solid #c8d0d6; border-radius: .5rem; padding: clamp(1rem, 3vw, 1.5rem); }
-.report-identity { border-top: .35rem solid #155a8a; }
+body { margin: 0; min-width: 0; }
+main { width: 100%; min-width: 0; max-width: 72rem; margin: auto; padding: 1.5rem; }
+.report-view { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+.report-identity, .report-view > section { min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: .5rem; padding: clamp(1rem, 3vw, 1.5rem); }
+.report-identity { border-top: .35rem solid var(--brand); }
 .report-identity p { margin-block: .25rem; overflow-wrap: anywhere; }
 .report-view h2 { margin-block: 0 .75rem; font-size: clamp(1.2rem, 3vw, 1.55rem); line-height: 1.25; }
 .report-view h3 { font-size: 1rem; }
+.section-nav { min-width: 0; padding: .75rem 1rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--pale); }
+.section-nav ul { display: flex; flex-wrap: wrap; gap: .5rem; list-style: none; margin: .5rem 0 0; padding: 0; }
+.section-nav a { display: inline-flex; align-items: center; min-height: 2.75rem; padding: .35rem .6rem; border: 1px solid var(--action); border-radius: .25rem; color: var(--action); }
 .report-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: .75rem; margin-block: 1rem; }
 .report-filters [role="group"] { display: flex; flex-wrap: wrap; align-content: flex-start; gap: .4rem; padding: .5rem; border: 1px solid #d7dde2; }
 .report-filters button { min-height: 2.75rem; padding: .4rem .65rem; }
-.report-filters button[aria-pressed="true"] { background: #155a8a; color: #fff; }
-[data-report-group] { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr)); gap: .75rem; }
+.report-filters button[aria-pressed="true"] { background: var(--action); color: #fff; }
+[data-report-group] { display: grid; grid-template-columns: minmax(0, 1fr); gap: .75rem; }
+.report-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: .75rem; }
+.report-metrics [data-report-metric], [data-report-evidence], [data-report-occurrence-evidence] { min-width: 0; margin: 0; padding: 1rem; border: 1px solid var(--border); border-inline-start: .45rem solid var(--brand); border-radius: .35rem; background: var(--pale); overflow-wrap: anywhere; }
+[data-report-metric="alerts"] { border-inline-start-style: dashed; }
+[data-report-metric="humanReview"] { border-inline-start-style: double; }
+[data-report-metric="passed"] { border-inline-start-style: dotted; }
+[data-report-metric] .metric-value { display: block; font-size: clamp(2rem, 7vw, 3rem); line-height: 1; color: var(--brand); }
+[data-report-metric] .metric-label { display: block; margin-top: .4rem; font-weight: 750; }
+[data-report-metric] .metric-detail { display: block; margin-top: .2rem; }
+.report-filter-status { margin: .25rem 0 0; font-weight: 750; }
 [data-report-issue] { min-width: 0; padding: 1rem; border: 1px solid #c8d0d6; border-inline-start: .35rem solid #155a8a; border-radius: .35rem; overflow-wrap: anywhere; }
 [data-result="failed"] { border-inline-start-color: #9d2b18; }
 [data-result="humanReview"] { border-inline-start-color: #8a6200; }
 .report-view table { width: 100%; border-collapse: collapse; font-size: .925rem; }
 .report-view th, .report-view td { padding: .6rem; border: 1px solid #c8d0d6; text-align: start; vertical-align: top; }
-.report-view section:nth-of-type(6) { overflow-x: auto; }
+.matrix-scroll { min-width: 0; overflow-x: auto; }
 .review-controls, .review-card { background: white; border: 1px solid #c8d0d6; border-radius: .5rem; padding: 1rem; margin-block: 1rem; }
 label { display: block; font-weight: 700; }
 input, textarea, button { font: inherit; }
 input, textarea { box-sizing: border-box; width: 100%; max-width: 40rem; padding: .55rem; }
 .answers { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: 1rem; }
-button { min-height: 2.75rem; padding: .6rem .8rem; border: 2px solid #155a8a; border-radius: .25rem; background: #fff; color: #123; cursor: pointer; }
+button { min-height: 2.75rem; padding: .6rem .8rem; border: 2px solid var(--brand); border-radius: .25rem; background: var(--surface); color: var(--ink); cursor: pointer; }
 button:hover, button:focus-visible { background: #e6f3ff; outline: 3px solid #ffbf47; outline-offset: 2px; }
 code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: .75rem; background: #eef1f3; }
 .evidence-media { max-width: 100%; height: auto; border: 1px solid #65737e; }
@@ -38,5 +50,5 @@ dialog:not([open]) { display: none; }
 .dialog-actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1.25rem; }
 .dialog-actions button { flex: 1 1 10rem; min-height: 2.75rem; }
 @media (max-width: 32rem) { main { padding: 1rem; } .dialog-actions { flex-direction: column; } .report-filters { grid-template-columns: 1fr; } .report-identity, .report-view > section { padding: 1rem; } }
-@media (forced-colors: active) { button, input, textarea, .review-controls, .review-card, dialog, .report-identity, .report-view > section, [data-report-issue], .report-filters [role="group"], .report-view th, .report-view td { border-color: CanvasText; } .report-filters button[aria-pressed="true"] { background: Highlight; color: HighlightText; } }
+@media (forced-colors: active) { button, input, textarea, .review-controls, .review-card, dialog, .report-identity, .report-view > section, [data-report-metric], [data-report-issue], .section-nav a, .report-filters [role="group"], .report-view th, .report-view td { border-color: CanvasText; } .report-filters button[aria-pressed="true"] { background: Highlight; color: HighlightText; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }

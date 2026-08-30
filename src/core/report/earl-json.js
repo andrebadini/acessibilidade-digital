@@ -1,5 +1,6 @@
 import { createAuditModel } from './audit-model.js';
 import { canonicalStringify } from './canonical-json.js';
+import { createExportDeliveryIdentityV1 } from '../../export/export-formats.js';
 
 const EARL = 'http://www.w3.org/ns/earl#';
 const MODE = Object.freeze({ automated: `${EARL}automatic`, assisted: `${EARL}semiAuto`, manual: `${EARL}manual` });
@@ -8,8 +9,9 @@ const OUTCOME = Object.freeze({
   inapplicable: `${EARL}inapplicable`, untested: `${EARL}untested`,
 });
 
-export function renderTechnicalJson(input) {
+export function renderTechnicalJson(input, options = {}) {
   const model = createAuditModel(input);
+  const deliveryIdentity = options?.deliveryIdentity === undefined ? null : createExportDeliveryIdentityV1(options.deliveryIdentity);
   const artifacts = new Map(model.evidence.map(artifact => [artifact.evidenceId, artifact]));
   const occurrencesByItem = new Map();
   for (const occurrence of model.occurrences) {
@@ -60,6 +62,7 @@ export function renderTechnicalJson(input) {
     },
     audit: model,
     assertions,
+    ...(deliveryIdentity === null ? {} : { exportDeliveryIdentityType: 'ExportDeliveryIdentityV1', exportDeliveryIdentity: deliveryIdentity }),
   });
 }
 

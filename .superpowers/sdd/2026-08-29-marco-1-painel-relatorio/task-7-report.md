@@ -84,3 +84,20 @@ Não foi feita captura real do Chrome nesta execução. A comparação visual em
 - Arquivos de produção passam por `node --check` no fechamento.
 - Staging é explícito apenas para arquivos Task 7 e este relatório.
 - `node_modules/` permanece não rastreado e não será staged.
+
+## Fechamento de revisão — 2026-08-30
+
+Revisão independente do diff rastreado contra `1c0a648`, confrontada com o brief da Task 7: foi encontrado e corrigido um desvio real no limite de autoridade de conclusão. Após uma primeira `EXPORT_COMPLETE` autenticada, o estado terminal estava respondendo sucesso idempotente à mesma capability; o contrato exige uma única conclusão e negação explícita da repetição. O teste foi primeiro alterado para exigir `{ok:false,code:'EXPORT_COMPLETE_DENIED'}` na segunda chamada: RED genuíno (a implementação devolvia `{ok:true,auditId,state:'terminal'}`); a guarda de `connected`/`active` foi então mantida como condição exclusiva e o teste ficou GREEN.
+
+Evidência final focada (sem Chrome real e sem suíte completa):
+
+```text
+node --test [16 arquivos focados da Task 7]
+229/229 passaram — 15,138 s
+git diff --check
+limpo
+node --check [13 módulos de produção alterados]
+limpo
+```
+
+Autocrítica: a revisão cobriu o contrato de bytes/receipt, formato canônico, lease e transições de autoridade pelos testes determinísticos, mas não substitui a QA visual em Chrome real nem reexecuta o gate não legado completo; ambos foram deliberadamente excluídos deste fechamento. O staging posterior é explícito apenas dos 24 arquivos rastreados da Task 7 e deste relatório; `node_modules/` e os cinco itens não rastreados da Task 8 ficam intocados.

@@ -102,7 +102,10 @@ test('authorized ReportView export keeps one stored revision across all four exa
       pageId: page.pageId, attempted: page.attempted,
       startedAt: page.attempted ? page.timestamps.startedAt : null,
       rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion,
-      inventoryHash: inventory.sha256, outcomes: [],
+      inventoryHash: inventory.sha256, outcomes: [
+        { ruleId: 'focus-fully-visible', outcome: 'passed' },
+        { ruleId: 'keyboard-focus-trap', outcome: 'untested' },
+      ],
     })),
   };
   const summary = await buildPanelSummary({ model, executionCheckpoint: checkpoint, inventory });
@@ -149,6 +152,35 @@ test('authorized ReportView export keeps one stored revision across all four exa
   assert.equal(result.deliveryReceipt.formats.every(entry => entry.byteSize > 0 && /^[a-f0-9]{64}$/u.test(entry.sha256)), true);
   assert.equal((result.html.match(/<h2\b/gu) ?? []).length, 7);
   assert.equal((result.html.match(/Câmara dos Deputados/gu) ?? []).length, 2);
+  const identity = {
+    auditId: model.auditId,
+    modelRevision: snapshot.revision,
+    modelHash: model.integrity.canonicalModelHash,
+    attemptId: String(acquired.exportAttempt),
+  };
+  assert.deepEqual(result.exportDeliveryIdentity, identity);
+  for (const artifact of [result.html, result.json, result.csv]) {
+    assert.match(artifact, /ExportDeliveryIdentityV1/u);
+    for (const value of Object.values(identity)) assert.match(artifact, new RegExp(String(value), 'u'));
+    assert.doesNotMatch(artifact, new RegExp(ownerId, 'u'));
+  }
+  assert.match(result.html, /Resultado consolidado: Não atendido neste teste/u);
+  assert.doesNotMatch(result.html, /Resultado consolidado: failed|Impacto:<\/strong> moderate|Classificação:<\/strong> failed/u);
+  assert.equal((result.html.match(/<img class="evidence-media" src="data:image\/png;base64,/gu) ?? []).length >= 2, true);
+  assert.match(result.html, /ev-control[\s\S]*ev-full|ev-full[\s\S]*ev-control/u);
+  assert.match(result.html, /<nav class="section-nav" aria-label="Seções do relatório">/u);
+  for (let index = 1; index <= 7; index += 1) {
+    assert.match(result.html, new RegExp(`href="#report-section-${index}"`, 'u'));
+    assert.match(result.html, new RegExp(`id="report-section-${index}"`, 'u'));
+  }
+  assert.doesNotMatch(result.html, /<script\b|script-src/iu);
+  assert.match(result.html, /Este arquivo contém todos os registros; filtros interativos estão disponíveis somente no relatório vivo\./u);
+  assert.match(result.html, /data-report-metric="passed"[\s\S]*<strong>1<\/strong>[\s\S]*0 ocorrências/u);
+  assert.doesNotMatch(result.html, /\[&quot;page-1&quot;,&quot;audita-core&quot;,&quot;keyboard-focus-trap&quot;\]/u);
+  assert.match(result.html, /Verificação não testada: Armadilha de foco — Página 1\./u);
+  const expectedCards = Object.values(reportView.issues).reduce((total, group) => total + group.length, 0);
+  assert.equal((result.html.match(/<article class="occurrence-card">/gu) ?? []).length, expectedCards);
+  assert.match(result.html, /@media print\{[\s\S]*details:not\(\[open\]\)>\*:not\(summary\)\{display:block!important\}/u);
 });
 
 test('rejects noncanonical export issues and never invokes issue or request accessors', async () => {
