@@ -293,6 +293,7 @@ function resolvePresentationTargets(occurrences, artifacts) {
       occurrence.presentationTargetKey = `node:${occurrence.nodeId}`;
       continue;
     }
+    if (occurrence.source?.engine === 'axe-core') continue;
     const selector = occurrence.target?.selector ?? occurrence.selector;
     const candidates = typeof selector === 'string' ? selectorToNodeIds.get(selector) : null;
     if (candidates?.length === 1) occurrence.presentationTargetKey = `node:${candidates[0]}`;
@@ -369,7 +370,10 @@ async function draftModel(state) {
 }
 
 /** Runs one local audit in one disposable tab using only injected Chrome effects. */
-async function runLegacyAudit({ url, chromeAdapter, now = () => new Date().toISOString(), idFactory = () => crypto.randomUUID(), signal, closeAuditTab = true, expectedExtensionId }) {
+async function runLegacyAudit({
+  url, chromeAdapter, now = () => new Date().toISOString(), idFactory = () => crypto.randomUUID(), signal,
+  closeAuditTab = true, expectedExtensionId, startedAt: suppliedStartedAt,
+}) {
   if (!chromeAdapter || typeof chromeAdapter !== 'object') throw new TypeError('O adapter Chrome é obrigatório.');
   const navigationUrl = normalizeAuditUrl(url);
   const generatedId = idFactory('audit');
@@ -381,7 +385,7 @@ async function runLegacyAudit({ url, chromeAdapter, now = () => new Date().toISO
     finalUrl: '',
     attempted: false,
     finalUrlObserved: false,
-    startedAt: canonicalTime(now()),
+    startedAt: suppliedStartedAt === undefined ? canonicalTime(now()) : canonicalTime(suppliedStartedAt),
     endedAt: '',
     environment: { chromeVersion: '', viewport: { width: null, height: null, deviceScaleFactor: null } },
     status: 'running', diagnostics: [], progress: [], snapshot: null,
@@ -912,7 +916,7 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
         };
         legacyDraft = await runLegacyAudit({
           url: target.initialUrlEvidence, chromeAdapter: observedAdapter, now: modelNow,
-          idFactory: () => auditId, signal, closeAuditTab: false, expectedExtensionId,
+          idFactory: () => auditId, signal, closeAuditTab: false, expectedExtensionId, startedAt,
         });
         terminalModel = await enrichAuditForReport(legacyDraft, {
           now: modelNow, expectedExtensionId,
@@ -943,7 +947,7 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
     const draft = legacyDraft ?? await runLegacyAudit({
       url: target.initialUrlEvidence,
       chromeAdapter: { async createTab() { throw new Error('AUDIT_ABORTED'); } },
-      now: modelNow, idFactory: () => auditId, signal: undefined, closeAuditTab: false, expectedExtensionId,
+      now: modelNow, idFactory: () => auditId, signal: undefined, closeAuditTab: false, expectedExtensionId, startedAt,
     });
     const cancelled = structuredClone(draft);
     cancelled.session.status = 'cancelled';

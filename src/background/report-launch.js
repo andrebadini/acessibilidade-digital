@@ -13,6 +13,35 @@ const consumerKey = id => `audita:report-consumer:v1:${id}`;
 
 function fail(code) { return Object.freeze({ ok: false, code }); }
 function safeId(value) { return Number.isSafeInteger(value) && value >= 0; }
+function ownDataDescriptor(value, key, optional = false) {
+  try {
+    if (!value || typeof value !== 'object') return null;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor) return optional ? Object.freeze({ present: false, value: undefined }) : null;
+    if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+    return Object.freeze({ present: true, value: descriptor.value });
+  } catch { return null; }
+}
+function tabSnapshot(value) {
+  const id = ownDataDescriptor(value, 'id');
+  const windowId = ownDataDescriptor(value, 'windowId');
+  const url = ownDataDescriptor(value, 'url');
+  const pendingUrl = ownDataDescriptor(value, 'pendingUrl', true);
+  if (!id || !windowId || !url || !pendingUrl) return null;
+  return Object.freeze({
+    id: id.value, windowId: windowId.value, url: url.value,
+    pendingUrlPresent: pendingUrl.present, pendingUrl: pendingUrl.value,
+  });
+}
+function exactStagingTab(tab, launch, expectedUrl) {
+  if (!tab || tab.id !== launch.tabId || tab.windowId !== launch.windowId) return false;
+  if (tab.url === expectedUrl) return !tab.pendingUrlPresent || tab.pendingUrl === expectedUrl;
+  return tab.url === 'about:blank' && tab.pendingUrlPresent && tab.pendingUrl === expectedUrl;
+}
+function exactConnectedTab(tab, launch, expectedUrl) {
+  return Boolean(tab && tab.id === launch.tabId && tab.windowId === launch.windowId &&
+    tab.url === expectedUrl && !tab.pendingUrlPresent);
+}
 function freeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value)) return value;
   seen.add(value); for (const child of Object.values(value)) freeze(child, seen); return Object.freeze(value);
@@ -88,7 +117,6 @@ export function createReportLaunchAuthority(raw) {
     typeof input.sessionArea.set !== 'function' || typeof input.epochNow !== 'function' || typeof input.randomBytes !== 'function') {
     throw new TypeError('REPORT_LAUNCH_INVALID');
   }
-
   const getLaunch = auditId => AUDIT_ID.test(auditId ?? '') ? stored(input.sessionArea, launchKey(auditId), launchRecord) : Promise.resolve(null);
   const getConsumer = id => CAPABILITY.test(id ?? '') ? stored(input.sessionArea, consumerKey(id), consumerRecord) : Promise.resolve(null);
 
@@ -103,7 +131,7 @@ export function createReportLaunchAuthority(raw) {
     const expected = canonicalUrl(input.chromeApi, record.auditId);
     const exactContext = Array.isArray(contexts) && contexts.filter(context => context?.contextType === 'TAB' &&
       context.documentId === record.documentId && context.documentUrl === expected && context.tabId === record.tabId && context.windowId === record.windowId).length === 1;
-    if (tab?.id !== record.tabId || tab.windowId !== record.windowId || tab.url !== expected || !exactContext) return false;
+    if (!exactConnectedTab(tabSnapshot(tab), record, expected) || !exactContext) return false;
     try {
       await input.chromeApi.tabs.update(record.tabId, { active: true });
       if (typeof input.chromeApi.windows?.update === 'function') await input.chromeApi.windows.update(record.windowId, { focused: true });
@@ -235,21 +263,55 @@ export function createReportLaunchAuthority(raw) {
     return AUDIT_ID.test(value ?? '') ? value : null;
   }
 
+  async function readOwnedTab(launch) {
+    try { return tabSnapshot(await input.chromeApi.tabs.get(launch.tabId)); } catch { return null; }
+  }
+
+  async function connectedDocumentProof(launch, expectedUrl) {
+    const tab = await readOwnedTab(launch);
+    if (!exactConnectedTab(tab, launch, expectedUrl)) return Object.freeze({ exact: false, tab });
+    let contexts;
+    try { contexts = await input.chromeApi.runtime.getContexts({ documentIds: [launch.documentId] }); }
+    catch { return Object.freeze({ exact: false, tab }); }
+    const exactContext = Array.isArray(contexts) && contexts.filter(context => context?.contextType === 'TAB' &&
+      context.documentId === launch.documentId && context.documentUrl === expectedUrl &&
+      context.tabId === launch.tabId && context.windowId === launch.windowId).length === 1;
+    return Object.freeze({ exact: exactContext, tab });
+  }
+
+  async function transitionReload(launch) {
+    await revokeLaunchConsumers(launch.auditId);
+    const current = await getLaunch(launch.auditId);
+    if (!current || current.state !== 'connected' || current.documentId !== launch.documentId) {
+      await revokeLaunch(current);
+      return;
+    }
+    await writeConfirmed(input.sessionArea, launchKey(launch.auditId),
+      freeze({ ...current, documentId: null, state: 'awaiting-connection' }), launchRecord);
+  }
+
   async function handleTabUpdated(tabId, changeInfo) {
     if (!safeId(tabId)) return false;
     const auditId = await auditIdForTab(tabId); if (!auditId) return false;
     return serialize(input.sessionArea, auditId, async () => {
       const launch = await getLaunch(auditId); if (!launch || launch.tabId !== tabId || launch.state === 'revoked') return false;
-      let url = typeof changeInfo?.url === 'string' ? changeInfo.url : null;
-      if (!url && changeInfo?.status === 'loading') { try { url = (await input.chromeApi.tabs.get(tabId))?.url ?? null; } catch { url = null; } }
-      if (url === canonicalUrl(input.chromeApi, auditId) && launch.state === 'connected') {
-        await revokeLaunchConsumers(launch.auditId);
-        const current = await getLaunch(auditId);
-        await writeConfirmed(input.sessionArea, launchKey(auditId), freeze({ ...current, documentId: null, state: 'awaiting-connection' }), launchRecord);
+      const url = typeof changeInfo?.url === 'string' ? changeInfo.url : null;
+      const navigationStarted = url !== null || changeInfo?.status === 'loading';
+      if (!navigationStarted) return false;
+      const expectedUrl = canonicalUrl(input.chromeApi, auditId);
+      if (launch.state === 'connected') {
+        const proof = await connectedDocumentProof(launch, expectedUrl);
+        if (proof.exact) return false;
+        if (exactStagingTab(proof.tab, launch, expectedUrl)) await transitionReload(launch);
+        else await revokeLaunch(launch);
         return true;
       }
-      if (url && url !== canonicalUrl(input.chromeApi, auditId)) { await revokeLaunch(launch); return true; }
-      return false;
+      if (url !== null && url !== 'about:blank' && url !== expectedUrl) {
+        await revokeLaunch(launch); return true;
+      }
+      const current = await readOwnedTab(launch);
+      if (exactStagingTab(current, launch, expectedUrl)) return false;
+      await revokeLaunch(launch); return true;
     });
   }
 

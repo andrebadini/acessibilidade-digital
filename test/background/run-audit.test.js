@@ -466,6 +466,7 @@ test('attached execution uses no owned-tab or URL-vault effects and returns the 
   assert.equal(result.failureCode, null);
   assert.ok(['complete', 'partial'].includes(result.model.session.status));
   assert.equal(result.checkpoint.auditId, 'audit-attached-1');
+  assert.equal(result.checkpoint.pages[0].startedAt, result.model.pages[0].timestamps.startedAt);
   assert.equal(persisted.length, 1);
   assert.ok(checkpoints.length > 0);
   assert.equal(adapter.events.includes('create-tab'), false);
@@ -1010,6 +1011,44 @@ test('integrates a confirmed top-frame axe violation with provenance, ABNT outco
       manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
     }), /axe|suplement|autoritativ|diverge|inválid/i);
   }
+});
+
+test('preserves the canonical axe selector target when evidence independently resolves the same element', async () => {
+  const page = rawPage();
+  page.nodes.push({
+    backendNodeId: 4,
+    tagName: 'img',
+    attributes: { src: '/missing-alt.png' },
+    text: '',
+    parentBackendNodeId: null,
+    rect: { x: 10, y: 300, width: 80, height: 80 },
+  });
+  const axeRun = {
+    status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],
+    frames: [{ frameId: 0, status: 'success', result: {
+      violations: [{
+        id: 'image-alt', impact: 'critical',
+        nodes: [{ impact: 'critical', target: ['img'] }],
+      }],
+      incomplete: [], passes: [], inapplicable: [],
+    } }],
+  };
+
+  const model = await runAudit({
+    url: 'https://example.test/', chromeAdapter: fakeAdapter({ page, axeRun }),
+    now: clock, idFactory: () => 'audit-axe-selector-evidence',
+  });
+  const projected = model.occurrences.find(occurrence => occurrence.source?.engine === 'axe-core');
+  const normalized = model.axe.occurrences.find(occurrence => occurrence.occurrenceId === projected?.occurrenceId);
+
+  assert.equal(projected.nodeId, null);
+  assert.equal(normalized.nodeId, null);
+  assert.equal(projected.presentationTargetKey, normalized.presentationTargetKey);
+  assert.equal(projected.presentationTargetKey, 'selector:0:img');
+  await assert.doesNotReject(enrichAuditForReport(model, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  }));
 });
 
 test('keeps a conclusive axe occurrence auditable when pristine capture absence has the fixed bounded diagnostic', async () => {

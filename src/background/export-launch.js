@@ -17,6 +17,35 @@ const sessionKey = id => `audita:export-session:v1:${id}`;
 
 function fail(code) { return Object.freeze({ ok: false, code }); }
 function safeId(value) { return Number.isSafeInteger(value) && value >= 0; }
+function ownDataDescriptor(value, key, optional = false) {
+  try {
+    if (!value || typeof value !== 'object') return null;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor) return optional ? Object.freeze({ present: false, value: undefined }) : null;
+    if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+    return Object.freeze({ present: true, value: descriptor.value });
+  } catch { return null; }
+}
+function tabSnapshot(value) {
+  const id = ownDataDescriptor(value, 'id');
+  const windowId = ownDataDescriptor(value, 'windowId');
+  const url = ownDataDescriptor(value, 'url');
+  const pendingUrl = ownDataDescriptor(value, 'pendingUrl', true);
+  if (!id || !windowId || !url || !pendingUrl) return null;
+  return Object.freeze({
+    id: id.value, windowId: windowId.value, url: url.value,
+    pendingUrlPresent: pendingUrl.present, pendingUrl: pendingUrl.value,
+  });
+}
+function exactStagingTab(tab, launch, expectedUrl) {
+  if (!tab || tab.id !== launch.tabId || tab.windowId !== launch.windowId) return false;
+  if (tab.url === expectedUrl) return !tab.pendingUrlPresent || tab.pendingUrl === expectedUrl;
+  return tab.url === 'about:blank' && tab.pendingUrlPresent && tab.pendingUrl === expectedUrl;
+}
+function exactConnectedTab(tab, launch, expectedUrl) {
+  return Boolean(tab && tab.id === launch.tabId && tab.windowId === launch.windowId &&
+    tab.url === expectedUrl && !tab.pendingUrlPresent);
+}
 function deepFreeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value)) return value;
   seen.add(value); for (const child of Object.values(value)) deepFreeze(child, seen); return Object.freeze(value);
@@ -45,7 +74,9 @@ function launchRecord(value) {
     !Number.isSafeInteger(row.expectedRevision) || row.expectedRevision < 1 || !validAttempt(row.attemptId) || !safeId(row.tabId) || !safeId(row.windowId) ||
     row.path !== PATH || !['allocated','awaiting-connection','connected','terminal','revoked'].includes(row.state) ||
     !Number.isSafeInteger(row.issuedAt) || !Number.isSafeInteger(row.expiresAt) || row.expiresAt <= row.issuedAt ||
-    (['allocated','awaiting-connection'].includes(row.state) ? row.documentId !== null : typeof row.documentId !== 'string' || !row.documentId)) return null;
+    (['allocated','awaiting-connection'].includes(row.state) && row.documentId !== null) ||
+    (['connected','terminal'].includes(row.state) && (typeof row.documentId !== 'string' || !row.documentId)) ||
+    (row.state === 'revoked' && row.documentId !== null && (typeof row.documentId !== 'string' || !row.documentId))) return null;
   return deepFreeze(row);
 }
 function sessionRecord(value) {
@@ -83,7 +114,8 @@ function opaqueId(randomBytes) {
 export function createExportLaunchAuthority(raw) {
   const input = exact(raw, ['chromeApi','sessionArea','auditStore','reportLaunch','epochNow','modelNow','randomBytes']);
   if (!input || typeof input.chromeApi?.runtime?.getURL !== 'function' || typeof input.chromeApi.runtime.getContexts !== 'function' ||
-    typeof input.chromeApi?.tabs?.create !== 'function' || typeof input.chromeApi.tabs.update !== 'function' || typeof input.sessionArea?.get !== 'function' ||
+    typeof input.chromeApi?.tabs?.create !== 'function' || typeof input.chromeApi.tabs.update !== 'function' || typeof input.chromeApi.tabs.get !== 'function' ||
+    typeof input.sessionArea?.get !== 'function' ||
     typeof input.sessionArea.set !== 'function' || typeof input.auditStore?.getAuditSnapshot !== 'function' || typeof input.auditStore.acquireExportLease !== 'function' ||
     typeof input.auditStore.releaseExportLease !== 'function' ||
     typeof input.reportLaunch?.authorizeExport !== 'function' || typeof input.epochNow !== 'function' || typeof input.modelNow !== 'function' || typeof input.randomBytes !== 'function') {
@@ -218,12 +250,37 @@ export function createExportLaunchAuthority(raw) {
     return true;
   }
   async function auditForTab(tabId) { const result=await input.sessionArea.get(indexKey(tabId)); const value=result?.[indexKey(tabId)]; return AUDIT_ID.test(value??'')?value:null; }
+  async function readOwnedTab(launch) {
+    try { return tabSnapshot(await input.chromeApi.tabs.get(launch.tabId)); } catch { return null; }
+  }
+  async function connectedDocumentIsCurrent(launch, expectedUrl) {
+    const tab = await readOwnedTab(launch);
+    if (!exactConnectedTab(tab, launch, expectedUrl)) return false;
+    let contexts;
+    try { contexts = await input.chromeApi.runtime.getContexts({ documentIds: [launch.documentId] }); } catch { return false; }
+    return Array.isArray(contexts) && contexts.filter(context => context?.contextType === 'TAB' &&
+      context.documentId === launch.documentId && context.documentUrl === expectedUrl &&
+      context.tabId === launch.tabId && context.windowId === launch.windowId).length === 1;
+  }
   async function handleTabUpdated(tabId,changeInfo) {
     const auditId=safeId(tabId)?await auditForTab(tabId):null;
     if(!auditId)return revokeInvalidSourceExports();
-    return serialize(input.sessionArea,auditId,async()=>{const launch=await getLaunch(auditId);if(!launch||launch.tabId!==tabId)return false;
-      let url=typeof changeInfo?.url==='string'?changeInfo.url:null;if(!url&&changeInfo?.status==='loading')url=canonicalUrl(input.chromeApi,auditId);
-      if(launch.state==='connected' || (url&&url!==canonicalUrl(input.chromeApi,auditId)))return revoke(launch);return false;});
+    return serialize(input.sessionArea,auditId,async()=>{
+      const launch=await getLaunch(auditId);
+      if(!launch||launch.tabId!==tabId||['terminal','revoked'].includes(launch.state))return false;
+      const url=typeof changeInfo?.url==='string'?changeInfo.url:null;
+      const navigationStarted=url!==null||changeInfo?.status==='loading';
+      if(!navigationStarted)return false;
+      const expectedUrl=canonicalUrl(input.chromeApi,auditId);
+      if(launch.state==='connected'){
+        if(await connectedDocumentIsCurrent(launch,expectedUrl))return false;
+        return revoke(launch);
+      }
+      if(url!==null&&url!=='about:blank'&&url!==expectedUrl)return revoke(launch);
+      const current=await readOwnedTab(launch);
+      if(exactStagingTab(current,launch,expectedUrl))return false;
+      return revoke(launch);
+    });
   }
   async function revokeInvalidSourceExports(){
     const envelope=await input.sessionArea.get(null);let changed=false;

@@ -3,11 +3,207 @@ import test from 'node:test';
 
 import { createExportLaunchAuthority, deriveExportLeaseOwner } from '../../src/background/export-launch.js';
 
+function navigationFixture() {
+  const auditId = 'audit-navigation';
+  const windowId = 7;
+  const tabId = 51;
+  const canonical = `chrome-extension://ext-test/src/export/index.html?auditId=${auditId}`;
+  const records = new Map();
+  const calls = [];
+  let currentTab = { id: tabId, windowId, url: canonical };
+  let tabReadSequence = [];
+  let failTabRead = false;
+  let contextDocument = 'export-doc';
+  const sessionArea = {
+    async get(keys) {
+      const list = keys === null ? [...records.keys()] : (Array.isArray(keys) ? keys : [keys]);
+      return Object.fromEntries(list.filter(key => records.has(key)).map(key => [key, structuredClone(records.get(key))]));
+    },
+    async set(rows) { for (const [key, value] of Object.entries(rows)) records.set(key, structuredClone(value)); },
+  };
+  const capability = Object.freeze({});
+  const auditStore = {
+    async getAuditSnapshot() { return { model: { auditId }, revision: 1, capability }; },
+    async acquireExportLease(_auditId, receivedCapability) {
+      assert.equal(receivedCapability, capability);
+      return { acquired: true, exportAttempt: 1, revision: 1 };
+    },
+    async releaseExportLease(_auditId, options) { calls.push(['release', options.ownerId]); return true; },
+  };
+  const chromeApi = {
+    runtime: {
+      id: 'ext-test',
+      getURL: path => `chrome-extension://ext-test/${path}`,
+      async getContexts() {
+        return contextDocument === null ? []
+          : [{ contextType: 'TAB', documentId: contextDocument, documentUrl: canonical, tabId, windowId }];
+      },
+    },
+    tabs: {
+      async create(options) { calls.push(['create', options]); return { id: tabId, windowId, url: 'about:blank' }; },
+      async update(receivedTabId, options) {
+        calls.push(['navigate', receivedTabId, options.url]);
+        currentTab = { id: receivedTabId, windowId, url: options.url };
+        return structuredClone(currentTab);
+      },
+      async get(receivedTabId) {
+        calls.push(['get', receivedTabId]);
+        if (failTabRead) throw new Error('private');
+        const next = tabReadSequence.length > 0 ? tabReadSequence.shift() : currentTab;
+        return typeof next === 'string' ? { id: receivedTabId, windowId, url: next } : next;
+      },
+      async remove(receivedTabId) { calls.push(['remove', receivedTabId]); },
+    },
+  };
+  const authority = createExportLaunchAuthority({
+    chromeApi, sessionArea, auditStore,
+    reportLaunch: {
+      async authorizeExport() { return { ok: true, auditId, windowId, sessionCapabilityId: 'R'.repeat(22) }; },
+      async validateConsumer() { return true; },
+    },
+    epochNow: () => 1000,
+    modelNow: () => '2026-08-30T12:00:00.000Z',
+    randomBytes: size => new Uint8Array(size).fill(3),
+  });
+  const request = {
+    auditId, sessionCapabilityId: 'R'.repeat(22),
+    sender: { id: 'ext-test', documentId: 'review-doc', url: `chrome-extension://ext-test/src/review/index.html?auditId=${auditId}` },
+  };
+  const sender = { id: 'ext-test', documentId: 'export-doc', url: canonical };
+  return {
+    auditId, authority, calls, canonical, request, sender, tabId, windowId,
+    setCurrentTab(value) { currentTab = value; },
+    setDocument(value) { contextDocument = value; },
+    setTabReadFailure(value) { failTabRead = value; },
+    setTabReadSequence(values) { tabReadSequence = [...values]; },
+  };
+}
+
 test('attempt identity is a canonical decimal string and its private owner is deterministic', () => {
   assert.equal(deriveExportLeaseOwner('audit-1', '7'), 'export:audit-1:7');
   for (const value of ['0', '01', '-1', '1.0', '9007199254740992']) {
     assert.throws(() => deriveExportLeaseOwner('audit-1', value), /EXPORT_ATTEMPT_DENIED/u);
   }
+});
+
+test('accepts every exact pre-connection staging snapshot immediately without a timer', async () => {
+  const snapshots = input => [
+    { id: input.tabId, windowId: input.windowId, url: input.canonical },
+    { id: input.tabId, windowId: input.windowId, url: input.canonical, pendingUrl: input.canonical },
+    { id: input.tabId, windowId: input.windowId, url: 'about:blank', pendingUrl: input.canonical },
+  ];
+  for (const snapshot of snapshots(navigationFixture())) {
+    const input = navigationFixture();
+    assert.equal((await input.authority.requestExport(input.request)).ok, true);
+    input.setCurrentTab(snapshot);
+
+    assert.equal(await input.authority.handleTabUpdated(input.tabId, { status: 'loading', url: 'about:blank' }), false);
+    assert.equal(input.calls.filter(call => call[0] === 'get').length, 1);
+    assert.equal((await input.authority.getLaunch(input.auditId)).state, 'awaiting-connection');
+    assert.equal(input.calls.some(call => call[0] === 'release' || call[0] === 'remove'), false);
+  }
+});
+
+test('revokes a pre-connection export immediately for any noncanonical URL', async () => {
+  for (const url of ['https://outside.example/',
+    'chrome-extension://ext-test/src/export/index.html?auditId=audit-navigation&extra=1']) {
+    const input = navigationFixture();
+    assert.equal((await input.authority.requestExport(input.request)).ok, true);
+    input.setTabReadFailure(true);
+
+    assert.equal(await input.authority.handleTabUpdated(input.tabId, { status: 'loading', url }), true);
+    assert.equal(input.calls.filter(call => call[0] === 'get').length, 0);
+    assert.equal((await input.authority.getLaunch(input.auditId)).state, 'revoked');
+  }
+});
+
+test('re-proves a canonical pre-connection event against the current exact export tab', async () => {
+  for (const mode of ['canonical', 'stale-external', 'pending-external', 'read-failed']) {
+    const input = navigationFixture();
+    assert.equal((await input.authority.requestExport(input.request)).ok, true);
+    if (mode === 'stale-external') input.setCurrentTab({
+      id: input.tabId, windowId: input.windowId, url: 'https://outside.example/',
+    });
+    else if (mode === 'pending-external') input.setCurrentTab({
+      id: input.tabId, windowId: input.windowId, url: input.canonical, pendingUrl: 'https://outside.example/',
+    });
+    else if (mode === 'read-failed') input.setTabReadFailure(true);
+
+    const updated = await input.authority.handleTabUpdated(input.tabId, { status: 'loading', url: input.canonical });
+    assert.equal(updated, mode !== 'canonical', mode);
+    assert.equal((await input.authority.getLaunch(input.auditId)).state,
+      mode === 'canonical' ? 'awaiting-connection' : 'revoked', mode);
+  }
+});
+
+test('fails closed immediately when one fresh read cannot prove an exact export staging snapshot', async () => {
+  for (const mode of ['still-blank', 'read-failed', 'url-absent', 'wrong-tab', 'wrong-window', 'pending-external']) {
+    const input = navigationFixture();
+    assert.equal((await input.authority.requestExport(input.request)).ok, true);
+    if (mode === 'read-failed') input.setTabReadFailure(true);
+    else if (mode === 'url-absent') input.setCurrentTab({ id: input.tabId, windowId: input.windowId });
+    else if (mode === 'wrong-tab') input.setCurrentTab({ id: input.tabId + 1, windowId: input.windowId, url: input.canonical });
+    else if (mode === 'wrong-window') input.setCurrentTab({ id: input.tabId, windowId: input.windowId + 1, url: input.canonical });
+    else if (mode === 'pending-external') input.setCurrentTab({
+      id: input.tabId, windowId: input.windowId, url: input.canonical, pendingUrl: 'https://outside.example/',
+    });
+    else input.setCurrentTab({ id: input.tabId, windowId: input.windowId, url: 'about:blank' });
+
+    const event = ['url-absent', 'pending-external'].includes(mode)
+      ? { status: 'loading' }
+      : { status: 'loading', url: 'about:blank' };
+    assert.equal(await input.authority.handleTabUpdated(input.tabId, event), true, mode);
+    assert.equal(input.calls.filter(call => call[0] === 'get').length, 1, mode);
+    assert.equal((await input.authority.getLaunch(input.auditId)).state, 'revoked', mode);
+  }
+});
+
+test('ignores delayed connected export events only while the same document remains exact', async () => {
+  const input = navigationFixture();
+  assert.equal((await input.authority.requestExport(input.request)).ok, true);
+  assert.equal((await input.authority.connect({ auditId: input.auditId, sender: input.sender })).ok, true);
+
+  assert.equal(await input.authority.handleTabUpdated(input.tabId, { status: 'complete' }), false);
+  assert.equal((await input.authority.getLaunch(input.auditId)).state, 'connected');
+  assert.equal(await input.authority.handleTabUpdated(input.tabId, {
+    status: 'loading', url: 'https://stale-event.example/',
+  }), false);
+  assert.equal((await input.authority.getLaunch(input.auditId)).state, 'connected');
+});
+
+test('revokes connected export authority on every absent, divergent or navigating proof', async () => {
+  for (const mode of ['document-absent', 'document-replaced', 'pending-canonical', 'pending-external', 'tab-read-failed']) {
+    const input = navigationFixture();
+    assert.equal((await input.authority.requestExport(input.request)).ok, true);
+    assert.equal((await input.authority.connect({ auditId: input.auditId, sender: input.sender })).ok, true);
+    if (mode === 'document-absent') input.setDocument(null);
+    else if (mode === 'document-replaced') input.setDocument('replacement-doc');
+    else if (mode === 'pending-canonical') input.setCurrentTab({
+      id: input.tabId, windowId: input.windowId, url: input.canonical, pendingUrl: input.canonical,
+    });
+    else if (mode === 'pending-external') input.setCurrentTab({
+      id: input.tabId, windowId: input.windowId, url: input.canonical, pendingUrl: 'https://outside.example/',
+    });
+    else input.setTabReadFailure(true);
+
+    assert.equal(await input.authority.handleTabUpdated(input.tabId, {
+      status: 'loading', url: 'about:blank',
+    }), true, mode);
+    assert.equal((await input.authority.getLaunch(input.auditId)).state, 'revoked', mode);
+  }
+});
+
+test('reads native tab proof only through own data descriptors', async () => {
+  const input = navigationFixture();
+  assert.equal((await input.authority.requestExport(input.request)).ok, true);
+  let getterReads = 0;
+  const hostile = { id: input.tabId, windowId: input.windowId, url: input.canonical };
+  Object.defineProperty(hostile, 'pendingUrl', { enumerable: true, get() { getterReads += 1; return input.canonical; } });
+  input.setCurrentTab(hostile);
+
+  assert.equal(await input.authority.handleTabUpdated(input.tabId, { status: 'loading', url: input.canonical }), true);
+  assert.equal(getterReads, 0);
+  assert.equal((await input.authority.getLaunch(input.auditId)).state, 'revoked');
 });
 
 test('export launch creates a bearer-free URL and persists one first-document session', async () => {
@@ -46,6 +242,7 @@ test('export launch creates a bearer-free URL and persists one first-document se
     tabs: {
       async create(options) { calls.push(['create', options]); return { id: 51, windowId: 9, url: 'about:blank' }; },
       async update(tabId, options) { calls.push(['navigate', tabId, options.url]); return { id: tabId, windowId: 9, url: options.url }; },
+      async get(tabId) { return { id: tabId, windowId: 9, url: 'chrome-extension://ext-test/src/export/index.html?auditId=audit-1' }; },
       async remove(tabId) { calls.push(['remove', tabId]); },
     },
   };
@@ -110,6 +307,7 @@ test('compensates a proven owned tab and export lease after launch allocation fa
     tabs: {
       async create() { if (createFails) { createFails = false; throw new Error('create failed'); } return { id: 81, windowId: 3 }; },
       async update(_id, options) { return { id: 81, windowId: 3, url: options.url }; },
+      async get(id) { return { id, windowId: 3, url: 'chrome-extension://ext-test/src/export/index.html?auditId=audit.retry_1' }; },
       async remove(id) { calls.push(['remove', id]); },
     },
   };
@@ -145,7 +343,8 @@ test('releases a lease whose acquired response cannot be correlated to the autho
   };
   const authority = createExportLaunchAuthority({
     chromeApi: { runtime: { getURL: path => `chrome-extension://ext-test/${path}`, async getContexts() { return []; } },
-      tabs: { async create() { return { id: 31, windowId: 3 }; }, async update(_id, options) { return { id: 31, windowId: 3, url: options.url }; } } },
+      tabs: { async create() { return { id: 31, windowId: 3 }; }, async update(_id, options) { return { id: 31, windowId: 3, url: options.url }; },
+        async get(id) { return { id, windowId: 3, url: 'chrome-extension://ext-test/src/export/index.html?auditId=audit-lease-validate' }; } } },
     sessionArea, auditStore, reportLaunch: { async authorizeExport() { return { ok: true, windowId: 3 }; } },
     epochNow: () => 1000, modelNow: () => '2026-08-30T12:00:00.000Z', randomBytes: size => new Uint8Array(size),
   });
@@ -201,6 +400,7 @@ test('compensates validate, persist, navigate and confirm failures after lease a
             if (armed && failureStage === 'navigate') { armed = false; throw new Error('navigate'); }
             return { id: 201, windowId: 3, url: options.url };
           },
+          async get(id) { return { id, windowId: 3, url: `chrome-extension://ext-test/src/export/index.html?auditId=${auditId}` }; },
           async remove(id) { calls.push(['remove', id]); },
         },
       };
@@ -242,6 +442,7 @@ test('revokes an active export when its source report consumer is revoked', asyn
     tabs: {
       async create() { return { id: 51, windowId: 7 }; },
       async update(_id, options) { return { id: 51, windowId: 7, url: options.url }; },
+      async get(id) { return { id, windowId: 7, url: 'chrome-extension://ext-test/src/export/index.html?auditId=audit-1' }; },
       async remove(id) { calls.push(['remove', id]); },
     },
   };
@@ -273,7 +474,7 @@ test('keeps lease and owned tab when durable launch revocation cannot be confirm
   };
   const authority = createExportLaunchAuthority({
     chromeApi: { runtime: { getURL: path => `chrome-extension://ext-test/${path}`, async getContexts() { return []; } },
-      tabs: { async create() {}, async update() {}, async remove(id) { calls.push(['remove', id]); } } },
+      tabs: { async create() {}, async update() {}, async get() {}, async remove(id) { calls.push(['remove', id]); } } },
     sessionArea,
     auditStore: { async getAuditSnapshot() {}, async acquireExportLease() {}, async releaseExportLease() { calls.push(['release']); return true; } },
     reportLaunch: { async authorizeExport() {}, async validateConsumer() { return false; } },
@@ -300,7 +501,7 @@ test('isolates source validation failures and still revokes later independent ex
   };
   const authority = createExportLaunchAuthority({
     chromeApi: { runtime: { getURL: path => `chrome-extension://ext-test/${path}`, async getContexts() { return []; } },
-      tabs: { async create() {}, async update() {}, async remove(id) { calls.push(['remove', id]); } } },
+      tabs: { async create() {}, async update() {}, async get() {}, async remove(id) { calls.push(['remove', id]); } } },
     sessionArea,
     auditStore: { async getAuditSnapshot() {}, async acquireExportLease() {},
       async releaseExportLease(auditId) { calls.push(['release', auditId]); return true; } },

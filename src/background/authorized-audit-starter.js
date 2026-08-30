@@ -87,6 +87,11 @@ function same(left, right) {
   return leftKeys.length === rightKeys.length && leftKeys.every(key => rightKeys.includes(key) && same(left[key], right[key]));
 }
 
+function missingAuditSnapshot(value) {
+  const snapshot = exact(value, ['model', 'revision', 'capability']);
+  return snapshot !== null && snapshot.model === undefined && snapshot.revision === 0 && snapshot.capability === null;
+}
+
 function activeRecord(value) {
   const record = exact(value, ACTIVE_KEYS);
   if (!record || record.version !== 1 || !AUDIT_ID.test(record.auditId ?? '') ||
@@ -619,8 +624,8 @@ export function createAuthorizedAuditStarter(input) {
         }
         if (singletons.active) return freeze({ response: { ok: false, code: 'AUDIT_BUSY' }, sessionCapabilityId: null, completion: null });
         if (singletons.journal) return freeze({ response: { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' }, sessionCapabilityId: null, completion: null });
-        const snapshot = exact(await readAuditSnapshot({ auditId: args.auditId }), ['model', 'revision']);
-        if (!snapshot || snapshot.model !== undefined || snapshot.revision !== 0 || await readReportRevision({ auditId: args.auditId }) !== null) {
+        const snapshot = await readAuditSnapshot({ auditId: args.auditId });
+        if (!missingAuditSnapshot(snapshot) || await readReportRevision({ auditId: args.auditId }) !== null) {
           return freeze({ response: { ok: false, code: 'AUDIT_ID_COLLISION' }, sessionCapabilityId: null, completion: null });
         }
         try {

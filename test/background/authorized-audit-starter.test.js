@@ -148,7 +148,11 @@ function dependencyFixture({ area, authority, execution, order = [], reportByAud
       latest.value = structuredClone(latestState);
       return Object.freeze({ revision: 1, modelHash: model.integrity.canonicalModelHash });
     },
-    async readAuditSnapshot({ auditId }) { return reportByAudit.has(auditId) ? { model: reportByAudit.get(auditId).model, revision: 1 } : { model: undefined, revision: 0 }; },
+    async readAuditSnapshot({ auditId }) {
+      return reportByAudit.has(auditId)
+        ? { model: reportByAudit.get(auditId).model, revision: 1, capability: Object.freeze(Object.create(null)) }
+        : { model: undefined, revision: 0, capability: null };
+    },
     async readReportRevision({ auditId }) { return reportByAudit.get(auditId) ?? null; },
     async readLatest() { return structuredClone(latest.value); },
     async buildPanelResultBundle({ reportRevision }) {
@@ -369,6 +373,69 @@ test('native dependency messages cannot spoof TARGET_UNAVAILABLE selection', asy
   });
 
   assert.deepEqual(started.response, { ok: false, code: 'AUDIT_START_FAILED' });
+});
+
+test('starts from the exact missing snapshot contract returned by the real audit store', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority,
+    execution: async ({ auditId }) => Object.freeze({
+      version: 1, auditId, state: 'revoked', failureCode: 'AUDIT_FAILED', model: null, checkpoint: null,
+    }),
+  });
+  dependencies.readAuditSnapshot = async () => ({ model: undefined, revision: 0, capability: null });
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: 'audit-real-missing-snapshot',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(started.response, { ok: true, auditId: 'audit-real-missing-snapshot', state: 'running' });
+  assert.match(started.sessionCapabilityId, /^[A-Za-z0-9_-]{22}$/u);
+  await started.completion;
+});
+
+test('rejects malformed missing-snapshot lookalikes before claim or persistence', async t => {
+  let getterCalls = 0;
+  const accessor = { model: undefined, revision: 0 };
+  Object.defineProperty(accessor, 'capability', {
+    enumerable: true,
+    get() { getterCalls += 1; return null; },
+  });
+  const cases = [
+    ['legacy two-key shape', { model: undefined, revision: 0 }],
+    ['extra key', { model: undefined, revision: 0, capability: null, extra: true }],
+    ['non-null capability without a model', { model: undefined, revision: 0, capability: Object.freeze(Object.create(null)) }],
+    ['nonzero revision without a model', { model: undefined, revision: 1, capability: null }],
+    ['accessor capability', accessor],
+  ];
+  for (const [name, snapshot] of cases) {
+    await t.test(name, async () => {
+      const area = sessionArea();
+      const prepared = await authorityFixture(area);
+      const effects = { claims: 0 };
+      const order = [];
+      const dependencies = dependencyFixture({
+        area, authority: instrumentAuthority(prepared.authority, effects), order,
+        execution: async () => { throw new Error('must not run'); },
+      });
+      dependencies.readAuditSnapshot = async () => snapshot;
+
+      const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+        capabilityId: prepared.capabilityId, eventNonce: null, auditId: `audit-hostile-snapshot-${name.replaceAll(' ', '-')}`,
+        capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+        retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+      });
+
+      assert.deepEqual(started.response, { ok: false, code: 'AUDIT_ID_COLLISION' });
+      assert.equal(started.sessionCapabilityId, null);
+      assert.equal(effects.claims, 0);
+      assert.deepEqual(order, []);
+    });
+  }
+  assert.equal(getterCalls, 0);
 });
 
 test('journals, claims, checkpoints and atomically settles a result before publication', async () => {
