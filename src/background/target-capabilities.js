@@ -1,9 +1,8 @@
-export const POPUP_SURFACE = Object.freeze({ path: '/src/popup/index.html', contextType: 'POPUP', allowQuery: false });
 export const PANEL_SURFACE = Object.freeze({ path: '/src/panel/index.html', contextType: 'SIDE_PANEL', allowQuery: false });
 export const REVIEW_SURFACE = Object.freeze({ path: '/src/review/index.html', contextType: 'TAB', allowQuery: 'auditId-only' });
 export const EXPORT_SURFACE = Object.freeze({ path: '/src/export/index.html', contextType: 'TAB', allowQuery: 'auditId-only' });
 
-const TRUSTED_SURFACES = new Set([POPUP_SURFACE, PANEL_SURFACE, REVIEW_SURFACE, EXPORT_SURFACE]);
+const TRUSTED_SURFACES = new Set([PANEL_SURFACE, REVIEW_SURFACE, EXPORT_SURFACE]);
 const SURFACE_BY_PATH = new Map([...TRUSTED_SURFACES].map(surface => [surface.path, surface]));
 const TARGET_PREFIX = 'audita:target-capability:v1:';
 const SESSION_PREFIX = 'audita:audit-session-capability:v1:';

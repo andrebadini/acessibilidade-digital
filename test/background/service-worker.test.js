@@ -22,7 +22,7 @@ function event() {
 function chromeFixture() {
   const events = {
     message: event(), connect: event(), installed: event(), context: event(),
-    updated: event(), tabRemoved: event(), windowRemoved: event(),
+    updated: event(), tabRemoved: event(), windowRemoved: event(), action: event(),
   };
   return {
     events,
@@ -32,7 +32,8 @@ function chromeFixture() {
         onMessage: events.message, onConnect: events.connect, onInstalled: events.installed,
       },
       contextMenus: { onClicked: events.context, async removeAll() {}, create() {} },
-      sidePanel: { async open() {} },
+      sidePanel: { async open() {}, async setPanelBehavior() {} },
+      action: { onClicked: events.action },
       tabs: { onUpdated: events.updated, onRemoved: events.tabRemoved },
       windows: { onRemoved: events.windowRemoved },
       storage: { session: { async setAccessLevel() {} } },
@@ -241,6 +242,35 @@ test('registers every MV3 wrapper synchronously before the shared readiness prom
   assert.equal(events.updated.listeners.size, 1);
   assert.equal(events.tabRemoved.listeners.size, 1);
   assert.equal(events.windowRemoved.listeners.size, 1);
+  assert.equal(events.action.listeners.size, 0);
+});
+
+test('configures the toolbar action to open the native side panel exactly once without a click fallback', async t => {
+  for (const [name, implementation, expectedLogs] of [
+    ['success', async () => undefined, []],
+    ['denial', async () => { throw new Error('native secret'); }, ['SIDE_PANEL_BEHAVIOR_DENIED']],
+  ]) await t.test(name, async () => {
+    const { chromeApi, events } = chromeFixture();
+    const calls = [];
+    const logs = [];
+    chromeApi.sidePanel.setPanelBehavior = async value => {
+      calls.push(structuredClone(value));
+      return implementation();
+    };
+    registerServiceWorker(chromeApi, {
+      startupReady: Promise.resolve(runtimeValue()),
+      router: { async dispatch() { return { ok: true }; } },
+      compatibilityHandler: { async dispatch() { return { ok: true }; } },
+      panelCoordinator: { attachPanelPort() { return true; } },
+      personaController: { attachPanelPort() { return true; } },
+      createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
+      logger: { error(value) { logs.push(value); } },
+    });
+    await tick();
+    assert.deepEqual(calls, [{ openPanelOnActionClick: true }]);
+    assert.deepEqual(logs, expectedLogs);
+    assert.equal(events.action.listeners.size, 0);
+  });
 });
 
 test('classifies primary then compatibility, returns literal true only when handled, and responds once after readiness', async () => {

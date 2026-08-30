@@ -37,6 +37,7 @@ import {
 import { parseWorkerMessage } from './worker-protocol.js';
 
 export const SESSION_ACCESS_LEVEL_DENIED = 'SESSION_ACCESS_LEVEL_DENIED';
+export const SIDE_PANEL_BEHAVIOR_DENIED = 'SIDE_PANEL_BEHAVIOR_DENIED';
 
 const PERSONA_PORT_NAME = 'audita-persona-v1';
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
@@ -443,6 +444,10 @@ export function registerServiceWorker(chromeApi, options = {}) {
   const epochNow = options.epochNow ?? Date.now;
   const createEventNonce = options.createEventNonce ?? defaultNonce;
   const createAuditId = options.createAuditId ?? defaultAuditId;
+
+  void invokeChrome(chromeApi, chromeApi.sidePanel, 'setPanelBehavior', {
+    openPanelOnActionClick: true,
+  }).catch(() => logger.error(SIDE_PANEL_BEHAVIOR_DENIED));
 
   let router = options.router ?? null;
   let compatibilityHandler = options.compatibilityHandler ?? null;

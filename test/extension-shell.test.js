@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import test from 'node:test';
 
 const readWorkspaceFile = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
@@ -25,7 +25,8 @@ test('declares a minimal MV3 extension shell without remote executable code', as
     type: 'module',
   });
   assert.deepEqual(manifest.action.default_icon, manifest.icons);
-  assert.equal(manifest.action.default_popup, 'src/popup/index.html');
+  assert.equal(manifest.action.default_title, 'Abrir Audita Acessibilidade');
+  assert.equal(Object.hasOwn(manifest.action, 'default_popup'), false);
   assert.deepEqual(manifest.side_panel, { default_path: 'src/panel/index.html' });
   assert.deepEqual(manifest.commands, {
     _execute_action: {
@@ -39,30 +40,23 @@ test('declares a minimal MV3 extension shell without remote executable code', as
     "script-src 'self'; object-src 'none'; img-src 'self' data: blob:; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'");
 });
 
-test('popup is an accessible local launcher with no URL, retention or pixel controls', async () => {
-  const [html, css] = await Promise.all([
-    readWorkspaceFile('src/popup/index.html'),
-    readWorkspaceFile('src/popup/popup.css'),
-  ]);
-  assert.equal((html.match(/<h1\b/giu) ?? []).length, 1);
-  assert.match(html, /id="page-domain"/u);
-  assert.match(html, /id="page-title"/u);
-  assert.match(html, /<button[^>]+id="audit-page"[^>]+disabled[^>]*>\s*Avaliar esta página\s*<\/button>/iu);
-  assert.match(html, /<button[^>]+id="other-source"[^>]+disabled[^>]*>\s*Outra URL ou lote\s*<\/button>/iu);
-  assert.equal((html.match(/data-persona-mode=/gu) ?? []).length, 3);
-  assert.equal((html.match(/data-persona-mode=[^>]+disabled/gu) ?? []).length, 3);
-  assert.match(html, /Processamento local; nenhum dado é enviado\./u);
-  assert.match(html, /Capturas visuais serão habilitadas somente após a etapa de privacidade\./u);
-  assert.match(html, /role="status"[^>]+aria-live="polite"|aria-live="polite"[^>]+role="status"/iu);
-  assert.doesNotMatch(html, /<input\b|<textarea\b|type="checkbox"|reten|full-evidence|element-only|no-pixels/iu);
-  assert.doesNotMatch(html, /<script(?![^>]+src=)|<style\b|\sstyle=/iu);
-  assert.doesNotMatch(html, /<(?:script|link|img)[^>]+(?:src|href)="https?:\/\//iu);
-  assert.doesNotMatch(html, /gov(?:erno)?|bras[aã]o|secretaria|certifica|nota de acessibilidade/iu);
-  assert.match(css, /font-family:\s*system-ui/iu);
-  assert.match(css, /min-(?:block-size|height):\s*44px/iu);
-  assert.match(css, /@media\s*\(forced-colors:\s*active\)/iu);
-  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/iu);
-  assert.doesNotMatch(css, /@import|https?:|url\s*\(/iu);
+test('shipped extension has no popup surface or popup-only protocol', async () => {
+  const forbidden = /src\/popup\/index\.html|PREPARE_POPUP_CAPABILITIES|POPUP_START_AUDIT|POPUP_START_PERSONA|POPUP_SURFACE|openActionPopup/u;
+  const visit = async path => {
+    const entries = await readdir(new URL(`../${path}`, import.meta.url), { withFileTypes: true });
+    const files = [];
+    for (const entry of entries) {
+      const child = `${path}/${entry.name}`;
+      if (entry.isDirectory()) files.push(...await visit(child));
+      else files.push(child);
+    }
+    return files;
+  };
+  const shippedFiles = ['manifest.json', ...await visit('src')];
+  for (const path of shippedFiles) {
+    const source = await readWorkspaceFile(path);
+    assert.doesNotMatch(source, forbidden, path);
+  }
 });
 
 test('panel is an accessible local four-state mount with no legacy URL or persona surface', async () => {

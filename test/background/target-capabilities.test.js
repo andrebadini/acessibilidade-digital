@@ -4,7 +4,6 @@ import test from 'node:test';
 import {
   EXPORT_SURFACE,
   PANEL_SURFACE,
-  POPUP_SURFACE,
   REVIEW_SURFACE,
   createTargetCapabilityAuthority,
   deriveTrustedExtensionContext,
@@ -99,12 +98,19 @@ const validStart = capabilityId => ({
   senderContext: extensionContext(),
 });
 
-test('exports the four frozen trusted-surface constants', () => {
-  assert.deepEqual(POPUP_SURFACE, { path: '/src/popup/index.html', contextType: 'POPUP', allowQuery: false });
+test('exports only the three frozen trusted-surface constants', () => {
   assert.deepEqual(PANEL_SURFACE, { path: '/src/panel/index.html', contextType: 'SIDE_PANEL', allowQuery: false });
   assert.deepEqual(REVIEW_SURFACE, { path: '/src/review/index.html', contextType: 'TAB', allowQuery: 'auditId-only' });
   assert.deepEqual(EXPORT_SURFACE, { path: '/src/export/index.html', contextType: 'TAB', allowQuery: 'auditId-only' });
-  assert.equal([POPUP_SURFACE, PANEL_SURFACE, REVIEW_SURFACE, EXPORT_SURFACE].every(Object.isFrozen), true);
+  assert.equal([PANEL_SURFACE, REVIEW_SURFACE, EXPORT_SURFACE].every(Object.isFrozen), true);
+});
+
+test('does not trust an object shaped like the removed popup surface', async () => {
+  const sender = { id: 'test', documentId: 'popup-document', url: 'chrome-extension://test/src/popup/index.html' };
+  const chromeApi = { runtime: { id: 'test', async getContexts() { return [{ documentId: 'popup-document', documentUrl: sender.url, contextType: 'POPUP', windowId: -1 }]; } } };
+  await assert.rejects(() => deriveTrustedExtensionContext({
+    sender, chromeApi, surface: Object.freeze({ path: '/src/popup/index.html', contextType: 'POPUP', allowQuery: false }),
+  }), /CONTEXT_DENIED/u);
 });
 
 test('accepts Node WHATWG chrome-extension URL without origin comparison or sender.tab', async () => {

@@ -7,13 +7,13 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 1. Abra `chrome://extensions` em uma versão compatível do Chrome ou Chromium.
 2. Ative o **Modo do desenvolvedor**.
 3. Escolha **Carregar sem compactação** e selecione esta pasta.
-4. Fixe “Audita Acessibilidade” na barra do navegador, se desejar.
+4. Fixe “Audita Acessibilidade” na barra do navegador, se desejar. Ao clicar no ícone, o Chrome abre o painel lateral persistente ao lado da página.
 
-Para distribuição pela Chrome Web Store, execute `npm run build:release`. O ZIP gerado em `release/` contém somente o manifesto, o código executável local e os ícones necessários, com `manifest.json` na raiz.
+Para gerar o pacote distribuível, execute `npm run build:release`. O ZIP criado em `release/` contém somente o manifesto, o código executável local e os ícones necessários, com `manifest.json` na raiz.
 
 ## Uso básico
 
-Abra o painel, informe uma URL HTTP(S) e escolha **Auditar**. Ao final, revise os casos indeterminados e use **Gerar relatório atualizado** quando registrar novas decisões. A exportação baixa HTML autocontido, JSON-LD técnico no vocabulário EARL e, quando o navegador permite, PDF.
+Clique no ícone da extensão para abrir o painel lateral e escolha **Auditar a página atual**. Abrir o painel não inicia a coleta: o botão é a confirmação explícita. O Chrome controla e permite redimensionar a largura do painel. Ao final, revise os casos indeterminados e use **Gerar relatório atualizado** quando registrar novas decisões. A exportação baixa HTML autocontido, JSON-LD técnico no vocabulário EARL e, quando o navegador permite, PDF.
 
 A auditoria captura a página inteira e elementos, incluindo pixels e dados sensíveis que estejam visíveis. Essas evidências permanecem no dispositivo e são incorporadas aos relatórios; oculte ou remova dados sensíveis antes de iniciar.
 

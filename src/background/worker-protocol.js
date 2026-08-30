@@ -1,14 +1,10 @@
 const MAX_ENVELOPE_BYTES = 4096;
 const OPAQUE_ID = /^[A-Za-z0-9_-]{20,240}$/u;
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
-const PERSONA_MODES = new Set(['reader', 'achromatopsia', 'motor']);
 
 const MESSAGE_SCHEMAS = deepFreeze({
-  PREPARE_POPUP_CAPABILITIES: ['type', 'requestId'],
   PREPARE_PANEL_CAPABILITY: ['type', 'requestId'],
-  POPUP_START_AUDIT: ['type', 'capabilityId', 'captureMode', 'includeQuery', 'deleteAfterCompleteExport'],
   PANEL_START_ATTACHED_AUDIT: ['type', 'capabilityId', 'captureMode', 'includeQuery', 'deleteAfterCompleteExport'],
-  POPUP_START_PERSONA: ['type', 'capabilityId', 'mode'],
   PANEL_CANCEL_AUDIT: ['type', 'sessionCapabilityId', 'auditId'],
   PANEL_OPEN_REPORT: ['type', 'sessionCapabilityId', 'auditId'],
   REPORT_REQUEST_EXPORT: ['type', 'sessionCapabilityId', 'auditId'],
@@ -36,15 +32,12 @@ function hasFlatPrimitiveShape(value) {
 }
 
 function validWorkerEnvelope(value) {
-  if (['PREPARE_POPUP_CAPABILITIES', 'PREPARE_PANEL_CAPABILITY'].includes(value.type)) {
+  if (value.type === 'PREPARE_PANEL_CAPABILITY') {
     return AUDIT_ID.test(value.requestId ?? '');
   }
-  if (['POPUP_START_AUDIT', 'PANEL_START_ATTACHED_AUDIT'].includes(value.type)) {
+  if (value.type === 'PANEL_START_ATTACHED_AUDIT') {
     return OPAQUE_ID.test(value.capabilityId ?? '') && value.captureMode === 'no-pixels' &&
       value.includeQuery === false && value.deleteAfterCompleteExport === false;
-  }
-  if (value.type === 'POPUP_START_PERSONA') {
-    return OPAQUE_ID.test(value.capabilityId ?? '') && PERSONA_MODES.has(value.mode);
   }
   if (['PANEL_CANCEL_AUDIT', 'PANEL_OPEN_REPORT', 'REPORT_REQUEST_EXPORT'].includes(value.type)) {
     return OPAQUE_ID.test(value.sessionCapabilityId ?? '') && AUDIT_ID.test(value.auditId ?? '');

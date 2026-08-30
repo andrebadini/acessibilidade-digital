@@ -30,7 +30,7 @@ O processamento local não transmite o conteúdo coletado. URLs sensíveis são 
 
 As permissões `debugger`, `downloads`, `tabs`, `scripting` e `storage`, além do acesso às páginas HTTP e HTTPS indicadas pelo usuário, são necessárias para coleta, impressão, download e persistência local.
 
-Para uso público, instale pela Chrome Web Store e fixe o ícone do Audita Acessibilidade na barra do Chrome. A instalação sem compactação, por **Carregar sem compactação**, é reservada a desenvolvimento e testes controlados.
+Depois de instalar, fixe o ícone do Audita Acessibilidade na barra do Chrome, se desejar. Um clique no ícone abre diretamente o painel lateral persistente; a auditoria só começa quando você escolhe **Auditar a página atual** dentro dele. A instalação sem compactação, por **Carregar sem compactação**, é reservada a desenvolvimento e testes controlados.
 
 ## Limitações operacionais
 

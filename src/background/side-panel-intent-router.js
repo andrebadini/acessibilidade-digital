@@ -1,7 +1,6 @@
 import { createCapturePolicyV1 } from '../core/privacy/capture-policy.js';
 import {
   PANEL_SURFACE,
-  POPUP_SURFACE,
   deriveTrustedExtensionContext,
 } from './target-capabilities.js';
 import { parseWorkerMessage } from './worker-protocol.js';
@@ -133,37 +132,6 @@ export function createSidePanelIntentRouter(raw) {
     return freeze({ proof, initialUrlEvidence });
   }
 
-  async function preparePopup(envelope, sender) {
-    let context;
-    try { context = await proveSurface(sender, POPUP_SURFACE); }
-    catch { return fail('CONTEXT_DENIED'); }
-    const emitted = [];
-    try {
-      const target = await selectedTarget(context);
-      const common = {
-        kind: 'attached', tabId: target.proof.tabId, windowId: target.proof.windowId,
-        documentId: target.proof.documentId, initialUrlEvidence: target.initialUrlEvidence,
-        initialUrlSessionDigest: target.proof.urlSessionDigest, createdBy: 'user', issuer: context.issuer,
-      };
-      const audit = await input.authority.prepare({ ...common, allowedIntent: 'start-audit' });
-      if (audit?.ok !== true || !CAPABILITY.test(audit.capabilityId ?? '') || !Number.isSafeInteger(audit.expiresAt)) throw new Error('TARGET_UNAVAILABLE');
-      emitted.push(audit.capabilityId);
-      const persona = await input.authority.prepare({ ...common, allowedIntent: 'start-persona' });
-      if (persona?.ok !== true || !CAPABILITY.test(persona.capabilityId ?? '') || !Number.isSafeInteger(persona.expiresAt)) throw new Error('TARGET_UNAVAILABLE');
-      emitted.push(persona.capabilityId);
-      return freeze({
-        ok: true, requestId: envelope.requestId,
-        auditCapabilityId: audit.capabilityId, personaCapabilityId: persona.capabilityId,
-        windowId: context.windowId, expiresAt: Math.min(audit.expiresAt, persona.expiresAt),
-      });
-    } catch {
-      for (const capabilityId of emitted) {
-        try { await input.authority.invalidateCapability(capabilityId, 'PREPARE_POPUP_FAILED'); } catch { /* sibling cleanup */ }
-      }
-      return fail('TARGET_UNAVAILABLE');
-    }
-  }
-
   async function preparePanel(envelope, sender) {
     let context;
     try { context = await proveSurface(sender, PANEL_SURFACE); }
@@ -182,9 +150,8 @@ export function createSidePanelIntentRouter(raw) {
   }
 
   async function startAttached(envelope, sender) {
-    const surface = envelope.type === 'POPUP_START_AUDIT' ? POPUP_SURFACE : PANEL_SURFACE;
     let context;
-    try { context = await proveSurface(sender, surface); }
+    try { context = await proveSurface(sender, PANEL_SURFACE); }
     catch { return fail('CONTEXT_DENIED'); }
     for (let attempt = 0; attempt < 3; attempt += 1) {
       let auditId;
@@ -293,12 +260,8 @@ export function createSidePanelIntentRouter(raw) {
     const parsed = parseWorkerMessage(request.envelope);
     if (!parsed.ok) return parsed.code === 'MESSAGE_TOO_LARGE' ? fail('MESSAGE_TOO_LARGE') : fail('INVALID_MESSAGE');
     const envelope = parsed.value;
-    if (envelope.type === 'POPUP_START_PERSONA') {
-      return fail('FEATURE_UNAVAILABLE');
-    }
-    if (envelope.type === 'PREPARE_POPUP_CAPABILITIES') return preparePopup(envelope, request.sender);
     if (envelope.type === 'PREPARE_PANEL_CAPABILITY') return preparePanel(envelope, request.sender);
-    if (['POPUP_START_AUDIT', 'PANEL_START_ATTACHED_AUDIT'].includes(envelope.type)) return startAttached(envelope, request.sender);
+    if (envelope.type === 'PANEL_START_ATTACHED_AUDIT') return startAttached(envelope, request.sender);
     if (envelope.type === 'PANEL_CANCEL_AUDIT') return cancel(envelope, request.sender);
     if (envelope.type === 'PANEL_OPEN_REPORT') return openReport(envelope, request.sender);
     if (envelope.type === 'REPORT_CONNECT') return input.reportLaunch?.connect?.({ auditId: envelope.auditId, sender: request.sender }) ?? fail('FEATURE_UNAVAILABLE');

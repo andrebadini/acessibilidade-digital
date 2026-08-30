@@ -7,11 +7,8 @@ const CAPABILITY = '_1234567890123456789';
 const SESSION = '-1234567890123456789';
 
 const validMessages = [
-  { type: 'PREPARE_POPUP_CAPABILITIES', requestId: '1.request' },
   { type: 'PREPARE_PANEL_CAPABILITY', requestId: '_request' },
-  { type: 'POPUP_START_AUDIT', capabilityId: CAPABILITY, captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false },
   { type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false },
-  { type: 'POPUP_START_PERSONA', capabilityId: CAPABILITY, mode: 'reader' },
   { type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION, auditId: '-audit.1' },
   { type: 'PANEL_OPEN_REPORT', sessionCapabilityId: SESSION, auditId: '_audit:1' },
   { type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: SESSION, auditId: '1-audit' },
@@ -34,7 +31,7 @@ test('copies and recursively freezes every exact primary envelope', () => {
 test('accepts the full external opaque and audit identifier alphabets without a letter prefix', () => {
   for (const capabilityId of ['01234567890123456789', '_1234567890123456789', '-1234567890123456789', 'A'.repeat(240)]) {
     assert.equal(parseWorkerMessage({
-      type: 'POPUP_START_AUDIT', capabilityId, captureMode: 'no-pixels',
+      type: 'PANEL_START_ATTACHED_AUDIT', capabilityId, captureMode: 'no-pixels',
       includeQuery: false, deleteAfterCompleteExport: false,
     }).ok, true);
   }
@@ -45,13 +42,11 @@ test('accepts the full external opaque and audit identifier alphabets without a 
 
 test('rejects wrong values and exact-key violations as recognized invalid messages', () => {
   const invalid = [
-    { type: 'PREPARE_POPUP_CAPABILITIES', requestId: '' },
     { type: 'PREPARE_PANEL_CAPABILITY', requestId: 'a', extra: true },
-    { type: 'POPUP_START_AUDIT', capabilityId: 'short', captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false },
-    { type: 'POPUP_START_AUDIT', capabilityId: CAPABILITY, captureMode: 'pixels', includeQuery: false, deleteAfterCompleteExport: false },
-    { type: 'POPUP_START_AUDIT', capabilityId: CAPABILITY, captureMode: 'no-pixels', includeQuery: true, deleteAfterCompleteExport: false },
+    { type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: 'short', captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false },
+    { type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'pixels', includeQuery: false, deleteAfterCompleteExport: false },
+    { type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'no-pixels', includeQuery: true, deleteAfterCompleteExport: false },
     { type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: true },
-    { type: 'POPUP_START_PERSONA', capabilityId: CAPABILITY, mode: 'unknown' },
     { type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION, auditId: '' },
     { type: 'PANEL_REHYDRATE_VIEW', auditId: 'space denied' },
   ];
@@ -72,9 +67,12 @@ test('classifies inherited and non-enumerable types as unknown without reading o
   assert.equal(secretReads, 0);
 });
 
-test('returns unknown immediately for removed URL batch and legacy start types without touching secrets', () => {
+test('returns unknown immediately for removed popup URL batch and legacy start types without touching secrets', () => {
   let secretReads = 0;
-  for (const type of ['START_AUDIT', 'START_BATCH', 'CANCEL_AUDIT', 'PANEL_START_URL', 'SOME_UNKNOWN_TYPE']) {
+  for (const type of [
+    'PREPARE_POPUP_CAPABILITIES', 'POPUP_START_AUDIT', 'POPUP_START_PERSONA',
+    'START_AUDIT', 'START_BATCH', 'CANCEL_AUDIT', 'PANEL_START_URL', 'SOME_UNKNOWN_TYPE',
+  ]) {
     const message = { type };
     Object.defineProperty(message, 'url', { enumerable: true, get() { secretReads += 1; return 'https://secret.test/private'; } });
     Object.defineProperty(message, 'toJSON', { enumerable: true, get() { secretReads += 1; return () => 'secret'; } });

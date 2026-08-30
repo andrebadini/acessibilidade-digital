@@ -23,14 +23,6 @@ function panelSender(windowId = 9) {
   };
 }
 
-function popupSender(windowId = 9) {
-  return {
-    id: RUNTIME_ID, documentId: 'popup-document', frameId: 0,
-    url: `chrome-extension://${RUNTIME_ID}/src/popup/index.html`,
-    windowId,
-  };
-}
-
 function panelCoordinatorFor(calls, overrides = {}) {
   const scope = Object.freeze({
     async registerPendingBootstrap() { return true; },
@@ -55,10 +47,9 @@ function fixture(overrides = {}) {
       id: RUNTIME_ID,
       async getContexts({ documentIds }) {
         const documentId = documentIds[0];
-        const side = documentId === 'panel-document';
         return [{
-          documentId, documentUrl: `chrome-extension://${RUNTIME_ID}/src/${side ? 'panel' : 'popup'}/index.html`,
-          contextType: side ? 'SIDE_PANEL' : 'POPUP', windowId: 9,
+          documentId, documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`,
+          contextType: 'SIDE_PANEL', windowId: 9,
         }];
       },
     },
@@ -109,23 +100,6 @@ function fixture(overrides = {}) {
   };
   return { calls, durableSessions, router: createSidePanelIntentRouter(dependencies), dependencies };
 }
-
-test('prepares popup siblings from one proof and returns the minimum expiry with windowId', async () => {
-  const { router, calls } = fixture();
-  const response = await router.dispatch({
-    envelope: parsed({ type: 'PREPARE_POPUP_CAPABILITIES', requestId: 'request-popup-1' }),
-    sender: popupSender(),
-  });
-  assert.deepEqual(response, {
-    ok: true, requestId: 'request-popup-1', auditCapabilityId: CAPABILITY,
-    personaCapabilityId: 'P'.repeat(22), windowId: 9, expiresAt: 180,
-  });
-  const prepared = calls.filter(([name]) => name === 'prepare').map(([, value]) => value);
-  assert.equal(prepared.length, 2);
-  assert.deepEqual(prepared[0].issuer, prepared[1].issuer);
-  assert.equal(prepared[0].initialUrlSessionDigest, prepared[1].initialUrlSessionDigest);
-  assert.equal(prepared[0].initialUrlEvidence, 'https://example.test/');
-});
 
 test('rejects an accessor-backed pending URL before proof or capability effects', async () => {
   let pendingReads = 0;
@@ -179,15 +153,36 @@ test('prepares a panel capability and starts through the only attached starter w
   assert.equal(Object.isFrozen(begin.retentionPreference), true);
 });
 
-test('personas and reserved intents fail before capability, storage or Chrome effects', async () => {
+test('reserved intents fail before capability storage or Chrome effects', async () => {
   const { router, calls } = fixture();
   for (const envelope of [
-    parsed({ type: 'POPUP_START_PERSONA', capabilityId: CAPABILITY, mode: 'reader' }),
     parsed({ type: 'PANEL_OPEN_REPORT', sessionCapabilityId: SESSION, auditId: 'audit-1' }),
     parsed({ type: 'REPORT_CONNECT', auditId: 'audit-1' }),
     parsed({ type: 'EXPORT_CONNECT', auditId: 'audit-1' }),
   ]) assert.deepEqual(await router.dispatch({ envelope, sender: panelSender() }), { ok: false, code: 'FEATURE_UNAVAILABLE' });
   assert.deepEqual(calls, []);
+});
+
+test('denies wrong panel document path context and window before target or authority effects', async t => {
+  for (const [name, sender, context] of [
+    ['path', { ...panelSender(), url: `chrome-extension://${RUNTIME_ID}/src/review/index.html` }, {
+      documentId: 'panel-document', documentUrl: `chrome-extension://${RUNTIME_ID}/src/review/index.html`, contextType: 'SIDE_PANEL', windowId: 9,
+    }],
+    ['context', panelSender(), {
+      documentId: 'panel-document', documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`, contextType: 'TAB', windowId: 9,
+    }],
+    ['window', panelSender(), {
+      documentId: 'panel-document', documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`, contextType: 'SIDE_PANEL', windowId: 11,
+    }],
+  ]) await t.test(name, async () => {
+    const { router, calls, dependencies } = fixture();
+    dependencies.chromeApi.runtime.getContexts = async () => [context];
+    const response = await router.dispatch({
+      envelope: parsed({ type: 'PREPARE_PANEL_CAPABILITY', requestId: `request-${name}` }), sender,
+    });
+    assert.deepEqual(response, name === 'window' ? { ok: false, code: 'TARGET_UNAVAILABLE' } : { ok: false, code: 'CONTEXT_DENIED' });
+    assert.equal(calls.some(([operation]) => ['probe', 'evidence', 'prepare'].includes(operation)), false);
+  });
 });
 
 test('routes report and export envelopes through the single launch authorities without UI payloads', async () => {
