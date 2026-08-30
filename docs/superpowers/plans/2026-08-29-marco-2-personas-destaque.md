@@ -1,5 +1,7 @@
 # Marco 2 — Personas e destaque seguro Implementation Plan
 
+> **Emenda vinculante de 30 de agosto de 2026:** o popup foi removido do produto. Toda referência histórica abaixo a `src/popup/*`, contexto `POPUP`, `POPUP_*`, `popupA/popupB` ou percurso popup → painel deve ser executada no painel lateral nativo (`src/panel/index.html`, contexto `SIDE_PANEL`, envelopes `PANEL_*`, consumidores `panelA/panelB`). O ícone/atalho abre diretamente o Side Panel por `openPanelOnActionClick:true`; o E2E deve provar exatamente um `SIDE_PANEL` e zero `POPUP`. Personas, auditoria e destaque permanecem ações explícitas dentro do painel.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Entregar personas reversíveis e destaque visual seguro no fluxo já criado pelo Marco 1, sem permitir que a interface escolha o alvo e sem contaminar auditoria, evidência ou exportação.

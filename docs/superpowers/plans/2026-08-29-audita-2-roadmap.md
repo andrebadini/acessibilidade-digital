@@ -1,5 +1,7 @@
 # Audita Acessibilidade 2.0 Roadmap Implementation Plan
 
+> **Emenda vinculante de 30 de agosto de 2026:** o percurso público definitivo é ícone/atalho → painel lateral nativo → auditoria/personas/resultados → relatório, sem popup. Todas as referências históricas deste roadmap e dos marcos a `src/popup/*`, `action.default_popup`, `POPUP_*` ou contexto `POPUP` devem ser lidas como substituídas pela superfície `SIDE_PANEL` já definida na especificação visual.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Substituir a experiência técnica da versão 1.0.1 por um fluxo completo e local de fiscalização — popup → painel lateral → sumário → ficha → destaque/evidências → relatório → quatro exportações — e entregar a versão 2.0.0 por ZIP local.

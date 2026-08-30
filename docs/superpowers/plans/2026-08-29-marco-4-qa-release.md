@@ -1,5 +1,7 @@
 # Marco 4 — QA, documentação e release 2.0.0 Implementation Plan
 
+> **Emenda vinculante de 30 de agosto de 2026:** a release 2.0.0 não contém popup. Substituir todas as exigências históricas de `action.default_popup`, `src/popup/*`, contexto/artefato `POPUP` e percurso popup → painel por abertura direta do painel lateral nativo com `openPanelOnActionClick:true`. A matriz QA começa no `SIDE_PANEL`, inclui os estados inicial/progresso/sumário/detalhe/erro/personas e deve comprovar exatamente um painel lateral persistente e zero popups. O relatório permanece em aba própria.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Demonstrar, revisar e empacotar a versão 2.0.0 do fluxo popup → painel lateral → relatório com evidência reproduzível em Chrome 116 e Chrome atual, QA visual/acessível/PDF mensurado e distribuição exclusivamente por ZIP local.

@@ -1,5 +1,7 @@
 # Marco 3 — Privacidade, lote, retenção e entrega Implementation Plan
 
+> **Emenda vinculante de 30 de agosto de 2026:** o popup foi removido do produto. Toda escolha de privacidade, URL, lote e retenção descrita historicamente para `src/popup/*` passa a existir no painel lateral nativo (`src/panel/index.html`, contexto `SIDE_PANEL`). Não criar `action.default_popup`, contexto `POPUP` nem envelopes `POPUP_*`; adaptar os testes reais para ícone/atalho → um `SIDE_PANEL` → auditoria/pausa → resultado → relatório → quatro exportações, sempre comprovando zero `POPUP`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Tornar URL única e lote explícito privados por padrão, aplicar três modos de evidência com consentimento de pixels vinculado ao documento, executar retenção absoluta e liberar exclusão pós-exportação somente após recibo terminal dos quatro arquivos.
