@@ -57,6 +57,36 @@ function extensionContext(documentId = 'panel-document-1', windowId = 9) {
   });
 }
 
+function panelChromeApi(sender, overrides = {}) {
+  const calls = [];
+  const chromeApi = {
+    runtime: {
+      id: 'test',
+      async getContexts() {
+        calls.push(['contexts', sender.documentId]);
+        return [{
+          documentId: sender.documentId, documentUrl: sender.url,
+          contextType: 'SIDE_PANEL', tabId: -1, windowId: -1,
+        }];
+      },
+    },
+    windows: {
+      async get(windowId, options) {
+        calls.push(['window', windowId, options]);
+        return { id: windowId, focused: false, type: 'normal' };
+      },
+    },
+    tabs: {
+      async query(queryInfo) {
+        calls.push(['tabs', queryInfo]);
+        return [{ id: 41, windowId: queryInfo.windowId, active: true, status: 'complete', url: 'https://example.test/path', pendingUrl: '' }];
+      },
+    },
+    ...overrides,
+  };
+  return { chromeApi, calls };
+}
+
 function authorityFixture(options = {}) {
   const sessionArea = createStorageArea();
   const randomValues = [new Uint8Array(16).fill(1), new Uint8Array(16).fill(2), new Uint8Array(16).fill(3)];
@@ -118,46 +148,83 @@ test('accepts Node WHATWG chrome-extension URL without origin comparison or send
     id: 'test', documentId: 'panel-document-1',
     url: 'chrome-extension://test/src/panel/index.html',
   };
-  const chromeApi = {
-    runtime: {
-      id: 'test',
-      async getContexts() {
-        return [{ documentId: 'panel-document-1', documentUrl: sender.url, contextType: 'SIDE_PANEL', windowId: 9 }];
-      },
-    },
-  };
-  const context = await deriveTrustedExtensionContext({ sender, chromeApi, surface: PANEL_SURFACE });
+  const { chromeApi, calls } = panelChromeApi(sender);
+  const context = await deriveTrustedExtensionContext({ sender, chromeApi, surface: PANEL_SURFACE, claimedWindowId: 9 });
   assert.equal(context.contextType, 'SIDE_PANEL');
   assert.equal(context.tabId, null);
+  assert.equal(context.windowId, 9);
   assert.deepEqual(context.issuer, { type: 'extension-document', documentId: 'panel-document-1', path: PANEL_SURFACE.path });
+  assert.deepEqual(calls, [
+    ['contexts', 'panel-document-1'],
+    ['window', 9, { populate: false }],
+    ['tabs', { active: true, windowId: 9 }],
+  ]);
 });
 
-test('rejects the real SIDE_PANEL sentinel window before returning trusted authority', async () => {
+test('rejects a SIDE_PANEL sentinel without one independently verified window claim', async () => {
   const sender = {
     id: 'test', documentId: 'panel-document-1',
     url: 'chrome-extension://test/src/panel/index.html',
   };
-  const chromeApi = {
-    runtime: {
-      id: 'test',
-      async getContexts() {
-        return [{
-          documentId: sender.documentId, documentUrl: sender.url,
-          contextType: 'SIDE_PANEL', windowId: -1,
-        }];
-      },
-    },
-  };
+  const { chromeApi } = panelChromeApi(sender);
   await assert.rejects(
     () => deriveTrustedExtensionContext({ sender, chromeApi, surface: PANEL_SURFACE }),
     /CONTEXT_DENIED/u,
   );
 });
 
+test('denies wrong removed ambiguous loading pending and privileged window claims before returning authority', async t => {
+  const sender = {
+    id: 'test', documentId: 'panel-document-1',
+    url: 'chrome-extension://test/src/panel/index.html',
+  };
+  const rows = [
+    ['wrong-window', {
+      windows: { async get() { return { id: 11, focused: false }; } },
+    }],
+    ['removed-window', {
+      windows: { async get() { throw new Error('No window with id: 9.'); } },
+    }],
+    ['popup-window', {
+      windows: { async get() { return { id: 9, focused: false, type: 'popup' }; } },
+    }],
+    ['app-window', {
+      windows: { async get() { return { id: 9, focused: false, type: 'app' }; } },
+    }],
+    ['ambiguous-tab', {
+      tabs: { async query() { return [
+        { id: 41, windowId: 9, active: true, status: 'complete', url: 'https://example.test/', pendingUrl: '' },
+        { id: 42, windowId: 9, active: true, status: 'complete', url: 'https://example.test/other', pendingUrl: '' },
+      ]; } },
+    }],
+    ['inactive-tab', {
+      tabs: { async query() { return [{ id: 41, windowId: 9, active: false, status: 'complete', url: 'https://example.test/', pendingUrl: '' }]; } },
+    }],
+    ['loading-tab', {
+      tabs: { async query() { return [{ id: 41, windowId: 9, active: true, status: 'loading', url: 'https://example.test/', pendingUrl: '' }]; } },
+    }],
+    ['pending-tab', {
+      tabs: { async query() { return [{ id: 41, windowId: 9, active: true, status: 'complete', url: 'https://example.test/', pendingUrl: 'https://next.test/' }]; } },
+    }],
+    ['privileged-tab', {
+      tabs: { async query() { return [{ id: 41, windowId: 9, active: true, status: 'complete', url: 'chrome://settings/', pendingUrl: '' }]; } },
+    }],
+  ];
+  for (const [name, override] of rows) await t.test(name, async () => {
+    const { chromeApi } = panelChromeApi(sender, override);
+    await assert.rejects(
+      () => deriveTrustedExtensionContext({ sender, chromeApi, surface: PANEL_SURFACE, claimedWindowId: 9 }),
+      /CONTEXT_DENIED/u,
+    );
+  });
+});
+
 test('rejects scheme host query context and document mismatches', async () => {
   const validUrl = 'chrome-extension://test/src/panel/index.html';
   const contexts = [{ documentId: 'panel-document-1', documentUrl: validUrl, contextType: 'SIDE_PANEL', windowId: 9 }];
-  const chromeApi = { runtime: { id: 'test', async getContexts() { return contexts; } } };
+  const { chromeApi } = panelChromeApi({ id: 'test', documentId: 'panel-document-1', url: validUrl }, {
+    runtime: { id: 'test', async getContexts() { return contexts; } },
+  });
   const senders = [
     { id: 'test', documentId: 'panel-document-1', url: 'https://test/src/panel/index.html' },
     { id: 'test', documentId: 'panel-document-1', url: 'chrome-extension://other/src/panel/index.html' },
@@ -168,7 +235,7 @@ test('rejects scheme host query context and document mismatches', async () => {
   for (const sender of senders) {
     contexts[0].contextType = sender.contextOverride ?? 'SIDE_PANEL';
     await assert.rejects(
-      () => deriveTrustedExtensionContext({ sender, chromeApi, surface: PANEL_SURFACE }),
+      () => deriveTrustedExtensionContext({ sender, chromeApi, surface: PANEL_SURFACE, claimedWindowId: 9 }),
       /CONTEXT_DENIED/u,
     );
   }
@@ -419,20 +486,23 @@ test('serializes competing claims so only one can persist a session', async () =
 
 test('authorizes only state consumer intent audit window path and context matches', async () => {
   const sender = { id: 'test', documentId: 'panel-document-1', url: 'chrome-extension://test/src/panel/index.html' };
-  const chromeApi = { runtime: { id: 'test', async getContexts() { return [{ documentId: sender.documentId, documentUrl: sender.url, contextType: 'SIDE_PANEL', windowId: 9 }]; } } };
+  const { chromeApi } = panelChromeApi(sender);
   const { authority } = authorityFixture({ chromeApi });
   const prepared = await prepareAttached(authority);
   const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
-  assert.equal((await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender })).ok, true);
+  assert.equal((await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender, claimedWindowId: 9 })).ok, true);
   for (const value of [
     { auditId: 'other', consumer: 'panel', intent: 'cancel' },
     { auditId: 'audit-1', consumer: 'panel', intent: 'open-report' },
     { auditId: 'audit-1', consumer: 'review', intent: 'export' },
   ]) {
-    assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, sender, ...value }), { ok: false, code: 'SESSION_DENIED' });
+    assert.deepEqual(await authority.authorizeSession({
+      sessionCapabilityId: claimed.sessionCapabilityId, sender, ...value,
+      ...(value.consumer === 'panel' ? { claimedWindowId: 9 } : {}),
+    }), { ok: false, code: 'SESSION_DENIED' });
   }
   assert.equal((await authority.transitionAuditSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', nextState: 'result' })).ok, true);
-  assert.equal((await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'open-report', sender })).ok, true);
+  assert.equal((await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'open-report', sender, claimedWindowId: 9 })).ok, true);
   assert.deepEqual(await authority.transitionAuditSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', nextState: 'running' }), { ok: false, code: 'SESSION_TRANSITION_DENIED' });
 });
 
@@ -449,7 +519,7 @@ test('invalidates one exact capability without scanning unrelated records', asyn
 
 test('binds embedded target and session IDs to their storage locators at every boundary', async () => {
   const sender = { id: 'test', documentId: 'panel-document-1', url: 'chrome-extension://test/src/panel/index.html' };
-  const chromeApi = { runtime: { id: 'test', async getContexts() { return [{ documentId: sender.documentId, documentUrl: sender.url, contextType: 'SIDE_PANEL', windowId: 9 }]; } } };
+  const { chromeApi } = panelChromeApi(sender);
 
   {
     const { authority, sessionArea } = authorityFixture({ chromeApi });
@@ -484,7 +554,7 @@ test('binds embedded target and session IDs to their storage locators at every b
     const transplantedId = '______________________';
     const transplantedKey = sessionCapabilityStorageKey(transplantedId);
     await sessionArea.set({ [transplantedKey]: (await sessionArea.get(realKey))[realKey] });
-    assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: transplantedId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender }), { ok: false, code: 'SESSION_DENIED' });
+    assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: transplantedId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender, claimedWindowId: 9 }), { ok: false, code: 'SESSION_DENIED' });
     const writesBefore = sessionArea.writes.length;
     assert.deepEqual(await authority.transitionAuditSession({ sessionCapabilityId: transplantedId, auditId: 'audit-1', nextState: 'result' }), { ok: false, code: 'SESSION_TRANSITION_DENIED' });
     assert.equal(sessionArea.writes.length, writesBefore);
@@ -493,7 +563,7 @@ test('binds embedded target and session IDs to their storage locators at every b
 
 test('validates reordered closed intents structurally and rejects changed grants', async () => {
   const sender = { id: 'test', documentId: 'panel-document-1', url: 'chrome-extension://test/src/panel/index.html' };
-  const chromeApi = { runtime: { id: 'test', async getContexts() { return [{ documentId: sender.documentId, documentUrl: sender.url, contextType: 'SIDE_PANEL', windowId: 9 }]; } } };
+  const { chromeApi } = panelChromeApi(sender);
   const { authority, sessionArea } = authorityFixture({ chromeApi });
   const prepared = await prepareAttached(authority);
   const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
@@ -507,14 +577,14 @@ test('validates reordered closed intents structurally and rejects changed grants
     },
   };
   await sessionArea.set({ [key]: reordered });
-  assert.equal((await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender })).ok, true);
+  assert.equal((await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender, claimedWindowId: 9 })).ok, true);
   for (const intents of [
     { ...reordered.intents, extra: {} },
     { panel: { result: ['open-report'], 'view-only': ['open-report'] }, review: reordered.intents.review },
     { panel: { ...reordered.intents.panel, running: ['open-report', 'cancel'] }, review: reordered.intents.review },
   ]) {
     await sessionArea.set({ [key]: { ...session, intents } });
-    assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender }), { ok: false, code: 'SESSION_DENIED' });
+    assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender, claimedWindowId: 9 }), { ok: false, code: 'SESSION_DENIED' });
   }
 });
 
@@ -566,7 +636,7 @@ test('browser lifecycle scans revoke only records bound to the exact tab or wind
 
 test('rehydrates a closed view-only session without resurrecting running intent', async () => {
   const sender = { id: 'test', documentId: 'panel-view-document', url: 'chrome-extension://test/src/panel/index.html' };
-  const chromeApi = { runtime: { id: 'test', async getContexts() { return [{ documentId: sender.documentId, documentUrl: sender.url, contextType: 'SIDE_PANEL', windowId: 9 }]; } } };
+  const { chromeApi } = panelChromeApi(sender);
   const { authority, sessionArea } = authorityFixture({ chromeApi });
   const result = await authority.rehydrateViewOnly({
     auditId: 'audit-view-1', windowId: 9, mode: 'attached',
@@ -576,8 +646,8 @@ test('rehydrates a closed view-only session without resurrecting running intent'
   assert.deepEqual(Object.keys(session), SESSION_KEYS);
   assert.equal(session.state, 'view-only');
   assert.deepEqual(session.targetBinding, { kind: 'view-only' });
-  assert.equal((await authority.authorizeSession({ sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-view-1', consumer: 'panel', intent: 'open-report', sender })).ok, true);
-  assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-view-1', consumer: 'panel', intent: 'cancel', sender }), { ok: false, code: 'SESSION_DENIED' });
+  assert.equal((await authority.authorizeSession({ sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-view-1', consumer: 'panel', intent: 'open-report', sender, claimedWindowId: 9 })).ok, true);
+  assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-view-1', consumer: 'panel', intent: 'cancel', sender, claimedWindowId: 9 }), { ok: false, code: 'SESSION_DENIED' });
 });
 
 test('rehydrateViewOnly rejects caller-supplied target bindings and keeps the exact nine-method authority shape', async () => {
@@ -592,12 +662,12 @@ test('rehydrateViewOnly rejects caller-supplied target bindings and keeps the ex
 test('worker terminalization remains correlated after TTL expiry while UI authorization stays expired', async () => {
   let currentTime = 1_788_000_000_000;
   const sender = { id: 'test', documentId: 'panel-document-1', url: 'chrome-extension://test/src/panel/index.html' };
-  const chromeApi = { runtime: { id: 'test', async getContexts() { return [{ documentId: sender.documentId, documentUrl: sender.url, contextType: 'SIDE_PANEL', windowId: 9 }]; } } };
+  const { chromeApi } = panelChromeApi(sender);
   const { authority } = authorityFixture({ chromeApi, now: () => currentTime });
   const prepared = await prepareAttached(authority);
   const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
   currentTime += 30 * 60_000 + 1;
-  assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender }), { ok: false, code: 'SESSION_DENIED' });
+  assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender, claimedWindowId: 9 }), { ok: false, code: 'SESSION_DENIED' });
   assert.deepEqual(await authority.transitionAuditSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', nextState: 'result' }), {
     ok: true, sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', state: 'result',
   });

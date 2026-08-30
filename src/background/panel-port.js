@@ -106,9 +106,10 @@ function parseActive(value) {
 }
 
 function hello(value) {
-  const record = exact(value, ['protocol', 'version', 'type']);
+  const record = exact(value, ['protocol', 'version', 'type', 'windowId']);
   return record && record.protocol === 'audita-panel' && record.version === 1 && record.type === 'bootstrap' &&
-    capturedUtf8Length(record) <= 4096;
+    safeChromeId(record.windowId) && capturedUtf8Length(record) <= 4096
+    ? freeze({ windowId: record.windowId }) : null;
 }
 
 function packet(state, auditId, sessionCapabilityId, result) {
@@ -129,6 +130,7 @@ function recoveryRequiredRegistration() {
 export function createPanelPortCoordinator(raw) {
   const input = exact(raw, FACTORY_KEYS);
   if (!input || typeof input.chromeApi?.runtime?.id !== 'string' || typeof input.chromeApi.runtime.getContexts !== 'function' ||
+    typeof input.chromeApi?.windows?.get !== 'function' || typeof input.chromeApi?.tabs?.query !== 'function' ||
     typeof input.sessionArea?.get !== 'function' || typeof input.sessionArea.set !== 'function' ||
     typeof input.readActiveJob !== 'function' || typeof input.readAuditSession !== 'function' ||
     typeof input.loadPanelResultBundle !== 'function' || typeof input.rehydrateViewOnly !== 'function' ||
@@ -343,8 +345,10 @@ export function createPanelPortCoordinator(raw) {
       ? freeze({ id, documentId, url }) : null;
   }
 
-  async function proveSender(sender) {
-    return deriveTrustedExtensionContext({ sender, chromeApi: input.chromeApi, surface: PANEL_SURFACE });
+  async function proveSender(sender, claimedWindowId) {
+    return deriveTrustedExtensionContext({
+      sender, chromeApi: input.chromeApi, surface: PANEL_SURFACE, claimedWindowId,
+    });
   }
 
   function connected(binding) {
@@ -380,7 +384,7 @@ export function createPanelPortCoordinator(raw) {
   }
 
   async function reprove(binding, assertOwned = null) {
-    const context = await proveSender(binding.sender);
+    const context = await proveSender(binding.sender, binding.windowId);
     reassert(assertOwned);
     return connected(binding) && context.windowId === binding.windowId && context.issuer.documentId === binding.sender.documentId
       ? context : null;
@@ -525,7 +529,7 @@ export function createPanelPortCoordinator(raw) {
     }
     const binding = {
       port, sender, state: 'awaiting-hello', windowId: null, auditId: null, sessionCapabilityId: null,
-      admission: proveSender(sender).catch(() => null), deadline: null, onHello: null, onBoundMessage: null, onDisconnect: null,
+      admission: null, deadline: null, onHello: null, onBoundMessage: null, onDisconnect: null,
     };
     binding.onBoundMessage = () => disconnect(binding);
     binding.onDisconnect = () => {
@@ -539,8 +543,10 @@ export function createPanelPortCoordinator(raw) {
     binding.onHello = value => {
       if (binding.state !== 'awaiting-hello') { disconnect(binding); return; }
       removeTemporary(binding);
-      if (!hello(value)) { disconnect(binding); return; }
+      const claim = hello(value);
+      if (!claim) { disconnect(binding); return; }
       binding.state = 'proving-hello';
+      binding.admission = proveSender(sender, claim.windowId).catch(() => null);
       port.onMessage.addListener(binding.onBoundMessage);
       void handleHello(binding);
     };

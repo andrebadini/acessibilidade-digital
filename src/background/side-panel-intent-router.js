@@ -108,7 +108,8 @@ export function createSidePanelIntentRouter(raw) {
   const input = exact(raw, FACTORY_KEYS) ?? exact(raw, LEGACY_FACTORY_KEYS);
   const coordinator = exact(input?.panelCoordinator, ['attachPanelPort', 'withWindowLock']);
   if (!input || typeof input.chromeApi?.runtime?.id !== 'string' || typeof input.chromeApi?.runtime?.getContexts !== 'function' ||
-    typeof input.chromeApi?.tabs?.query !== 'function' || !input.authority || !input.auditStarter || !coordinator ||
+    typeof input.chromeApi?.windows?.get !== 'function' || typeof input.chromeApi?.tabs?.query !== 'function' ||
+    !input.authority || !input.auditStarter || !coordinator ||
     typeof coordinator.attachPanelPort !== 'function' || typeof coordinator.withWindowLock !== 'function' ||
     typeof input.chromeAdapter?.probeDocumentIdentity !== 'function' || typeof input.chromeAdapter?.getEvidenceUrl !== 'function' ||
     typeof input.readReportRevision !== 'function' || typeof input.buildPanelResultBundle !== 'function' ||
@@ -117,8 +118,10 @@ export function createSidePanelIntentRouter(raw) {
     throw new TypeError('SIDE_PANEL_ROUTER_INVALID');
   }
 
-  async function proveSurface(sender, surface) {
-    return deriveTrustedExtensionContext({ sender, chromeApi: input.chromeApi, surface });
+  async function proveSurface(sender, surface, claimedWindowId) {
+    return deriveTrustedExtensionContext({
+      sender, chromeApi: input.chromeApi, surface, claimedWindowId,
+    });
   }
 
   async function selectedTarget(context) {
@@ -134,7 +137,7 @@ export function createSidePanelIntentRouter(raw) {
 
   async function preparePanel(envelope, sender) {
     let context;
-    try { context = await proveSurface(sender, PANEL_SURFACE); }
+    try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
     catch { return fail('CONTEXT_DENIED'); }
     try {
       const target = await selectedTarget(context);
@@ -151,7 +154,7 @@ export function createSidePanelIntentRouter(raw) {
 
   async function startAttached(envelope, sender) {
     let context;
-    try { context = await proveSurface(sender, PANEL_SURFACE); }
+    try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
     catch { return fail('CONTEXT_DENIED'); }
     for (let attempt = 0; attempt < 3; attempt += 1) {
       let auditId;
@@ -180,6 +183,7 @@ export function createSidePanelIntentRouter(raw) {
       const authorized = await input.authority.authorizeSession({
         sessionCapabilityId: envelope.sessionCapabilityId, auditId: envelope.auditId,
         consumer: 'panel', intent: 'cancel', sender,
+        claimedWindowId: envelope.windowId,
       });
       if (authorized?.ok !== true || authorized.session?.auditId !== envelope.auditId ||
         authorized.session.sessionCapabilityId !== envelope.sessionCapabilityId ||
@@ -201,7 +205,7 @@ export function createSidePanelIntentRouter(raw) {
       const reportRevision = await input.readReportRevision({ auditId: envelope.auditId });
       if (!reportRevision) return fail('AUDIT_REHYDRATE_DENIED');
       const resultBundle = await input.buildPanelResultBundle({ reportRevision });
-      const context = await proveSurface(sender, PANEL_SURFACE);
+      const context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId);
       minted = await input.authority.rehydrateViewOnly({ auditId: envelope.auditId, windowId: context.windowId, mode: 'attached' });
       if (minted?.ok !== true || minted.auditId !== envelope.auditId || !CAPABILITY.test(minted.sessionCapabilityId ?? '') ||
         !Number.isSafeInteger(minted.expiresAt)) throw new Error('mint-denied');
@@ -245,6 +249,7 @@ export function createSidePanelIntentRouter(raw) {
       const authorized = await input.authority.authorizeSession({
         sessionCapabilityId: envelope.sessionCapabilityId, auditId: envelope.auditId,
         consumer: 'panel', intent: 'open-report', sender,
+        claimedWindowId: envelope.windowId,
       });
       if (authorized?.ok !== true || authorized.session?.auditId !== envelope.auditId || !safeChromeId(authorized.context?.windowId)) {
         return fail('REPORT_OPEN_DENIED');

@@ -16,6 +16,7 @@ const PREPARE_KEYS = ['kind', 'tabId', 'windowId', 'documentId', 'initialUrlEvid
 const EXTENSION_CLAIM_KEYS = ['capabilityId', 'auditId', 'mode', 'allowedIntent', 'senderContext'];
 const WORKER_CLAIM_KEYS = ['capabilityId', 'auditId', 'mode', 'allowedIntent', 'eventNonce', 'senderContext'];
 const AUTHORIZE_KEYS = ['sessionCapabilityId', 'auditId', 'consumer', 'intent', 'sender'];
+const PANEL_AUTHORIZE_KEYS = [...AUTHORIZE_KEYS, 'claimedWindowId'];
 const TRANSITION_KEYS = ['sessionCapabilityId', 'auditId', 'nextState'];
 const REHYDRATE_KEYS = ['auditId', 'windowId', 'mode'];
 const CONSUMERS = deepFreeze([
@@ -27,7 +28,7 @@ const INTENTS = deepFreeze({
   review: { running: [], result: ['export'], 'view-only': ['export'] },
 });
 
-export async function deriveTrustedExtensionContext({ sender, chromeApi, surface }) {
+export async function deriveTrustedExtensionContext({ sender, chromeApi, surface, claimedWindowId } = {}) {
   try {
     if (!TRUSTED_SURFACES.has(surface)) throw new Error('CONTEXT_DENIED');
     if (sender?.id !== chromeApi?.runtime?.id || typeof sender.documentId !== 'string' || !sender.documentId ||
@@ -42,17 +43,40 @@ export async function deriveTrustedExtensionContext({ sender, chromeApi, surface
       url.pathname !== surface.path || url.hash !== '' || (!queryAllowed && url.search !== '')) {
       throw new Error('CONTEXT_DENIED');
     }
-    const contexts = await chromeApi.runtime.getContexts({ documentIds: [sender.documentId] });
-    if (!Array.isArray(contexts)) throw new Error('CONTEXT_DENIED');
-    const exact = contexts.filter(value => value?.documentId === sender.documentId && value.documentUrl === sender.url &&
-      value.contextType === surface.contextType && safeChromeId(value.windowId));
-    if (exact.length !== 1) throw new Error('CONTEXT_DENIED');
+    const isPanel = surface === PANEL_SURFACE;
+    if ((isPanel && !safeChromeId(claimedWindowId)) || (!isPanel && claimedWindowId !== undefined)) {
+      throw new Error('CONTEXT_DENIED');
+    }
+    const contexts = readDataArray(await chromeApi.runtime.getContexts({ documentIds: [sender.documentId] }));
+    if (!contexts || contexts.length !== 1) throw new Error('CONTEXT_DENIED');
+    const candidate = contexts[0];
+    const documentId = readDataProperty(candidate, 'documentId');
+    const documentUrl = readDataProperty(candidate, 'documentUrl');
+    const contextType = readDataProperty(candidate, 'contextType');
+    const nativeWindowId = readDataProperty(candidate, 'windowId');
+    if (!documentId.found || documentId.value !== sender.documentId || !documentUrl.found ||
+      documentUrl.value !== sender.url || !contextType.found || contextType.value !== surface.contextType ||
+      !nativeWindowId.found) throw new Error('CONTEXT_DENIED');
+    let windowId;
+    let tabId = null;
+    if (isPanel) {
+      if (nativeWindowId.value !== -1 && nativeWindowId.value !== claimedWindowId) throw new Error('CONTEXT_DENIED');
+      await provePanelWindowClaim(chromeApi, claimedWindowId);
+      windowId = claimedWindowId;
+    } else {
+      const nativeTabId = readDataProperty(candidate, 'tabId');
+      if (!safeChromeId(nativeWindowId.value) || !nativeTabId.found || !safeChromeId(nativeTabId.value)) {
+        throw new Error('CONTEXT_DENIED');
+      }
+      windowId = nativeWindowId.value;
+      tabId = nativeTabId.value;
+    }
     return deepFreeze({
       issuer: { type: 'extension-document', documentId: sender.documentId, path: surface.path },
-      windowId: exact[0].windowId,
-      tabId: Number.isInteger(exact[0].tabId) ? exact[0].tabId : null,
-      contextType: exact[0].contextType,
-      documentUrl: exact[0].documentUrl,
+      windowId,
+      tabId,
+      contextType: contextType.value,
+      documentUrl: documentUrl.value,
     });
   } catch {
     throw new Error('CONTEXT_DENIED');
@@ -255,13 +279,22 @@ export function createTargetCapabilityAuthority({
   }
 
   const authorizeSession = args => serialize(async () => {
-    const input = readDataRecord(args, AUTHORIZE_KEYS);
+    const input = readDataRecord(args, AUTHORIZE_KEYS) ?? readDataRecord(args, PANEL_AUTHORIZE_KEYS);
     if (!input || !CAPABILITY_ID.test(input.sessionCapabilityId ?? '') || !MODEL_ID.test(input.auditId ?? '') ||
-      !['panel', 'review'].includes(input.consumer) || typeof input.intent !== 'string') return sessionDenied();
+      !['panel', 'review'].includes(input.consumer) || typeof input.intent !== 'string' ||
+      (input.consumer === 'panel' && !safeChromeId(input.claimedWindowId)) ||
+      (input.consumer === 'review' && Object.hasOwn(input, 'claimedWindowId'))) return sessionDenied();
     const descriptor = CONSUMERS.find(value => value.name === input.consumer);
     const surface = SURFACE_BY_PATH.get(descriptor.path);
     let context;
-    try { context = await deriveTrustedExtensionContext({ sender: input.sender, chromeApi, surface }); }
+    try {
+      context = await deriveTrustedExtensionContext({
+        sender: input.sender,
+        chromeApi,
+        surface,
+        ...(input.consumer === 'panel' ? { claimedWindowId: input.claimedWindowId } : {}),
+      });
+    }
     catch { return sessionDenied(); }
     const key = sessionCapabilityStorageKey(input.sessionCapabilityId);
     const session = parseSessionRecord(readStoredValue(await sessionArea.get(key), key));
@@ -569,6 +602,52 @@ function validEvidenceUrl(value) {
     return ['http:', 'https:'].includes(parsed.protocol) && parsed.href === value &&
       parsed.username === '' && parsed.password === '' && parsed.hash === '';
   } catch { return false; }
+}
+async function provePanelWindowClaim(chromeApi, windowId) {
+  if (typeof chromeApi?.windows?.get !== 'function' || typeof chromeApi?.tabs?.query !== 'function') {
+    throw new Error('CONTEXT_DENIED');
+  }
+  const browserWindow = await chromeApi.windows.get(windowId, { populate: false });
+  const verifiedWindowId = readDataProperty(browserWindow, 'id');
+  const windowType = readDataProperty(browserWindow, 'type');
+  if (!verifiedWindowId.found || verifiedWindowId.value !== windowId ||
+    !windowType.found || windowType.value !== 'normal') throw new Error('CONTEXT_DENIED');
+  const tabs = readDataArray(await chromeApi.tabs.query({ active: true, windowId }));
+  if (!tabs || tabs.length !== 1 || !validPanelActiveTab(tabs[0], windowId)) throw new Error('CONTEXT_DENIED');
+}
+function validPanelActiveTab(tab, windowId) {
+  const tabId = readDataProperty(tab, 'id');
+  const tabWindowId = readDataProperty(tab, 'windowId');
+  const active = readDataProperty(tab, 'active');
+  const status = readDataProperty(tab, 'status');
+  const url = readDataProperty(tab, 'url');
+  const pendingUrl = readOptionalDataProperty(tab, 'pendingUrl');
+  return tabId.found && safeChromeId(tabId.value) && tabWindowId.found && tabWindowId.value === windowId &&
+    active.found && active.value === true &&
+    status.found && status.value === 'complete' && url.found && canonicalHttpUrl(url.value) &&
+    !pendingUrl.invalid && (!pendingUrl.found || pendingUrl.value === null || pendingUrl.value === '');
+}
+function canonicalHttpUrl(value) {
+  if (typeof value !== 'string') return false;
+  try {
+    const parsed = new URL(value);
+    return ['http:', 'https:'].includes(parsed.protocol) && parsed.href === value &&
+      parsed.username === '' && parsed.password === '';
+  } catch { return false; }
+}
+function readOptionalDataProperty(value, key) {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return { found: false, invalid: true };
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return { found: false, invalid: true };
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor) return { found: false, invalid: false };
+    return descriptor.enumerable === true && Object.hasOwn(descriptor, 'value')
+      ? { found: true, invalid: false, value: descriptor.value }
+      : { found: true, invalid: true };
+  } catch {
+    return { found: true, invalid: true };
+  }
 }
 function safeChromeId(value) { return Number.isSafeInteger(value) && value >= 0; }
 function safeTime(value) { return Number.isSafeInteger(value) && value >= 0; }

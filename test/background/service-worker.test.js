@@ -35,7 +35,7 @@ function chromeFixture() {
       sidePanel: { async open() {}, async setPanelBehavior() {} },
       action: { onClicked: events.action },
       tabs: { onUpdated: events.updated, onRemoved: events.tabRemoved },
-      windows: { onRemoved: events.windowRemoved },
+      windows: { onRemoved: events.windowRemoved, async get(windowId) { return { id: windowId, focused: false, type: 'normal' }; } },
       storage: { session: { async setAccessLevel() {} } },
     },
   };
@@ -288,12 +288,12 @@ test('classifies primary then compatibility, returns literal true only when hand
   });
   const listener = [...events.message.listeners][0];
   const primaryResponses = [];
-  assert.equal(listener({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-1' }, {}, value => primaryResponses.push(value)), true);
+  assert.equal(listener({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-1', windowId: 9 }, {}, value => primaryResponses.push(value)), true);
   assert.deepEqual(primaryResponses, []);
   const compatResponses = [];
   assert.equal(listener({ type: 'GET_LAST_AUDIT' }, {}, value => compatResponses.push(value)), true);
   const malformedResponses = [];
-  assert.equal(listener({ type: 'PREPARE_PANEL_CAPABILITY', requestId: '' }, {}, value => malformedResponses.push(value)), true);
+  assert.equal(listener({ type: 'PREPARE_PANEL_CAPABILITY', requestId: '', windowId: 9 }, {}, value => malformedResponses.push(value)), true);
   let unknownResponses = 0;
   assert.equal(listener({ type: 'START_AUDIT', url: 'https://secret.test/?token=hidden' }, {}, () => { unknownResponses += 1; }), false);
   assert.equal(listener({ type: 'PANEL_START_URL', url: 'https://secret.test/?token=hidden' }, {}, () => { unknownResponses += 1; }), false);
@@ -304,6 +304,38 @@ test('classifies primary then compatibility, returns literal true only when hand
   assert.deepEqual(malformedResponses, [{ ok: false, code: 'INVALID_MESSAGE' }]);
   assert.equal(unknownResponses, 0);
   assert.deepEqual(calls.map(([name]) => name), ['primary', 'compat']);
+});
+
+test('rejects absent extra and accessor panel window claims before router effects', async () => {
+  const { chromeApi, events } = chromeFixture();
+  let dispatches = 0;
+  let getterCalls = 0;
+  registerServiceWorker(chromeApi, {
+    startupReady: Promise.resolve(runtimeValue()),
+    router: { async dispatch() { dispatches += 1; return { ok: true }; } },
+    compatibilityHandler: { async dispatch() { throw new Error('must not dispatch'); } },
+    panelCoordinator: { attachPanelPort() {} }, personaController: { attachPanelPort() {} },
+    createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
+    logger: { error() {} },
+  });
+  const accessor = { type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-accessor' };
+  Object.defineProperty(accessor, 'windowId', {
+    enumerable: true,
+    get() { getterCalls += 1; return 9; },
+  });
+  const responses = [];
+  const listener = [...events.message.listeners][0];
+  for (const message of [
+    { type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-missing' },
+    { type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-extra', windowId: 9, extra: true },
+    accessor,
+  ]) {
+    assert.equal(listener(message, {}, value => responses.push(value)), true);
+  }
+  await tick();
+  assert.deepEqual(responses, Array.from({ length: 3 }, () => ({ ok: false, code: 'INVALID_MESSAGE' })));
+  assert.equal(dispatches, 0);
+  assert.equal(getterCalls, 0);
 });
 
 test('readiness rejection overrides recognized primary and compatibility without native error leakage', async () => {
@@ -320,7 +352,7 @@ test('readiness rejection overrides recognized primary and compatibility without
   const listener = [...events.message.listeners][0];
   const primary = [];
   const compat = [];
-  listener({ type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false }, {}, value => primary.push(value));
+  listener({ type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9 }, {}, value => primary.push(value));
   listener({ type: 'GET_LAST_AUDIT' }, {}, value => compat.push(value));
   ready.reject(new Error('native storage secret'));
   await tick();
@@ -650,7 +682,7 @@ test('dispatch rejection becomes a fixed closed response for primary and compati
   const listener = [...events.message.listeners][0];
   const primary = [];
   const compatibility = [];
-  listener({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-fixed' }, {}, value => primary.push(value));
+  listener({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-fixed', windowId: 9 }, {}, value => primary.push(value));
   listener({ type: 'GET_LAST_AUDIT' }, {}, value => compatibility.push(value));
   await tick();
   assert.deepEqual(primary, [{ ok: false, code: 'WORKER_UNAVAILABLE' }]);

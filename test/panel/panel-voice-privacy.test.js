@@ -103,7 +103,7 @@ async function resultBundle(auditId) {
   });
 }
 
-test('panel runtime never reads speech voices or Chrome target IDs and connects only audita-panel-v1', async t => {
+test('panel runtime reads only its current window claim, never target tabs or speech voices, and connects only audita-panel-v1', async t => {
   const originalDocument = globalThis.document;
   const originalChrome = globalThis.chrome;
   const originalSpeech = Object.getOwnPropertyDescriptor(globalThis, 'speechSynthesis');
@@ -129,6 +129,7 @@ test('panel runtime never reads speech voices or Chrome target IDs and connects 
   });
 
   let chromeTargetReads = 0;
+  let currentWindowReads = 0;
   const ports = [];
   const sent = [];
   const capabilityId = 'C'.repeat(24);
@@ -153,17 +154,27 @@ test('panel runtime never reads speech voices or Chrome target IDs and connects 
         return Promise.resolve(response);
       },
     },
+    windows: {
+      getCurrent(...args) {
+        const [options, callback] = args;
+        currentWindowReads += 1;
+        assert.deepEqual(options, { populate: false });
+        const value = { id: 9, focused: false };
+        setImmediate(() => callback?.(value));
+      },
+    },
     tabs: new Proxy({}, { get() { chromeTargetReads += 1; throw new Error('PRIVATE_CHROME_TARGET'); } }),
   };
   globalThis.document = document;
   globalThis.chrome = chrome;
 
   await import(`../../src/panel/panel.js?privacy=${Date.now()}`);
+  await new Promise(resolve => setImmediate(resolve));
 
   assert.equal(speechReads, 0);
   assert.equal(chromeTargetReads, 0);
   assert.deepEqual(ports.map(port => port.name), ['audita-panel-v1']);
-  assert.deepEqual(ports[0].posted, [{ protocol: 'audita-panel', version: 1, type: 'bootstrap' }]);
+  assert.deepEqual(ports[0].posted, [{ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 }]);
   assert.doesNotMatch(document.root.textContent, /persona|voz|simulação/iu);
   assert.equal(document.root.querySelector('[data-persona-mode]'), null);
 
@@ -175,16 +186,19 @@ test('panel runtime never reads speech voices or Chrome target IDs and connects 
   assert.ok(start);
   await start.click();
   await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
 
   assert.equal(sent[0].type, 'PREPARE_PANEL_CAPABILITY');
-  assert.deepEqual(Object.keys(sent[0]).sort(), ['requestId', 'type']);
+  assert.deepEqual(Object.keys(sent[0]).sort(), ['requestId', 'type', 'windowId']);
+  assert.equal(sent[0].windowId, 9);
   assert.deepEqual(sent[1], {
     type: 'PANEL_START_ATTACHED_AUDIT', capabilityId,
-    captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
+    captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9,
   });
   assert.doesNotMatch(document.root.textContent, new RegExp(capabilityId, 'u'));
   assert.doesNotMatch(JSON.stringify(document.root.dataset), /capability|session|tab|window|document|frame/iu);
   assert.equal(chromeTargetReads, 0);
+  assert.equal(currentWindowReads, 3, 'port hello, prepare and start each obtain a fresh closed claim');
 
   const sessionCapabilityId = 'S'.repeat(22);
   ports[0].onMessage.emit({

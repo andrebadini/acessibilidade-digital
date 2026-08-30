@@ -51,14 +51,16 @@ function localUnavailable() {
 }
 
 export function createPanelSessionPortClient(raw) {
-  const input = exact(raw, ['chromeApi', 'onBootstrapResult', 'onStatus', 'setTimer', 'clearTimer']);
+  const input = exact(raw, ['chromeApi', 'getWindowId', 'onBootstrapResult', 'onStatus', 'setTimer', 'clearTimer']);
   if (!input || typeof input.chromeApi?.runtime?.connect !== 'function' ||
-    typeof input.chromeApi.runtime.sendMessage !== 'function' || typeof input.onBootstrapResult !== 'function' ||
+    typeof input.chromeApi.runtime.sendMessage !== 'function' || typeof input.getWindowId !== 'function' ||
+    typeof input.onBootstrapResult !== 'function' ||
     typeof input.onStatus !== 'function' || typeof input.setTimer !== 'function' || typeof input.clearTimer !== 'function') {
     throw new TypeError('PANEL_SESSION_CLIENT_INVALID');
   }
 
   let started = false;
+  let connecting = false;
   let currentPort = null;
   let reconnectTimer = null;
   let reconnectIndex = 0;
@@ -120,13 +122,35 @@ export function createPanelSessionPortClient(raw) {
     notifyBootstrap(freeze({ state: packet.state, auditId: packet.auditId, result: packet.result }));
   }
 
-  function connect() {
-    if (!started || currentPort !== null) return;
+  async function connect() {
+    if (!started || currentPort !== null || connecting) return;
+    connecting = true;
+    let windowId;
+    try { windowId = await input.getWindowId(); }
+    catch {
+      connecting = false;
+      unavailable(null);
+      return;
+    }
+    if (!started || currentPort !== null) {
+      connecting = false;
+      return;
+    }
+    if (!Number.isSafeInteger(windowId) || windowId < 0) {
+      connecting = false;
+      unavailable(null);
+      return;
+    }
     let port;
     try { port = input.chromeApi.runtime.connect({ name: PORT_NAME }); }
-    catch { unavailable(null); return; }
+    catch {
+      connecting = false;
+      unavailable(null);
+      return;
+    }
     if (!port || typeof port.postMessage !== 'function' ||
       typeof port.onMessage?.addListener !== 'function' || typeof port.onDisconnect?.addListener !== 'function') {
+      connecting = false;
       unavailable(port, true);
       return;
     }
@@ -140,7 +164,8 @@ export function createPanelSessionPortClient(raw) {
     port.onMessage.addListener(onMessage);
     port.onDisconnect.addListener(onDisconnect);
     notifyStatus('Conectando ao painel.');
-    try { port.postMessage({ protocol: 'audita-panel', version: 1, type: 'bootstrap' }); }
+    connecting = false;
+    try { port.postMessage({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId }); }
     catch { unavailable(port, true); }
   }
 
@@ -167,7 +192,11 @@ export function createPanelSessionPortClient(raw) {
     const intent = exact(rawIntent, ['type']);
     if (!intent || !['PANEL_CANCEL_AUDIT', 'PANEL_OPEN_REPORT'].includes(intent.type) ||
       auditId === null || sessionId === null) return localUnavailable();
-    const message = { type: intent.type, sessionCapabilityId: sessionId, auditId };
+    let windowId;
+    try { windowId = await input.getWindowId(); }
+    catch { return localUnavailable(); }
+    if (!Number.isSafeInteger(windowId) || windowId < 0) return localUnavailable();
+    const message = { type: intent.type, sessionCapabilityId: sessionId, auditId, windowId };
     try {
       return await new Promise(resolve => {
         let settled = false;

@@ -217,8 +217,13 @@ function nextRequestId() {
   return `panel-${Date.now()}-${requestSequence}`;
 }
 
-function sendWorkerMessage(message) {
+async function sendWorkerMessage(message) {
   if (typeof chromeApi?.runtime?.sendMessage !== 'function') return Promise.resolve(null);
+  if (!message || typeof message !== 'object' || Object.hasOwn(message, 'windowId')) return null;
+  let windowId;
+  try { windowId = await readCurrentPanelWindowId(); }
+  catch { return null; }
+  const claimedMessage = { ...message, windowId };
   return new Promise(resolve => {
     let settled = false;
     const finish = value => {
@@ -227,9 +232,43 @@ function sendWorkerMessage(message) {
       resolve(value && typeof value === 'object' ? value : null);
     };
     try {
-      const returned = chromeApi.runtime.sendMessage(message, finish);
+      const returned = chromeApi.runtime.sendMessage(claimedMessage, finish);
       if (returned && typeof returned.then === 'function') returned.then(finish, () => finish(null));
     } catch { finish(null); }
+  });
+}
+
+function readCurrentPanelWindowId() {
+  if (typeof chromeApi?.windows?.getCurrent !== 'function') return Promise.reject(new Error('PANEL_WINDOW_UNAVAILABLE'));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (handler, value) => {
+      if (settled) return;
+      settled = true;
+      handler(value);
+    };
+    const accept = value => {
+      try {
+        const descriptor = value && typeof value === 'object'
+          ? Object.getOwnPropertyDescriptor(value, 'id')
+          : null;
+        if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value') ||
+          !Number.isSafeInteger(descriptor.value) || descriptor.value < 0) {
+          finish(reject, new Error('PANEL_WINDOW_UNAVAILABLE'));
+          return;
+        }
+        finish(resolve, descriptor.value);
+      } catch { finish(reject, new Error('PANEL_WINDOW_UNAVAILABLE')); }
+    };
+    try {
+      const returned = chromeApi.windows.getCurrent({ populate: false }, value => {
+        if (chromeApi.runtime?.lastError) finish(reject, new Error('PANEL_WINDOW_UNAVAILABLE'));
+        else accept(value);
+      });
+      if (returned && typeof returned.then === 'function') {
+        returned.then(accept, () => finish(reject, new Error('PANEL_WINDOW_UNAVAILABLE')));
+      } else if (returned !== undefined) accept(returned);
+    } catch { finish(reject, new Error('PANEL_WINDOW_UNAVAILABLE')); }
   });
 }
 
@@ -272,6 +311,7 @@ let sessionPortClient = null;
 if (typeof chromeApi?.runtime?.connect === 'function' && typeof chromeApi.runtime.sendMessage === 'function') {
   sessionPortClient = createPanelSessionPortClient({
     chromeApi,
+    getWindowId: readCurrentPanelWindowId,
     onBootstrapResult: receiveBootstrap,
     onStatus: receivePortStatus,
     setTimer: globalThis.setTimeout.bind(globalThis),

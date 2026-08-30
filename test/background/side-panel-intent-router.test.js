@@ -15,11 +15,10 @@ function parsed(message) {
   return result.value;
 }
 
-function panelSender(windowId = 9) {
+function panelSender() {
   return {
     id: RUNTIME_ID, documentId: 'panel-document', frameId: 0,
     url: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`,
-    windowId,
   };
 }
 
@@ -49,12 +48,15 @@ function fixture(overrides = {}) {
         const documentId = documentIds[0];
         return [{
           documentId, documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`,
-          contextType: 'SIDE_PANEL', windowId: 9,
+          contextType: 'SIDE_PANEL', tabId: -1, windowId: -1,
         }];
       },
     },
+    windows: {
+      async get(windowId, options) { calls.push(['window', windowId, options]); return { id: windowId, focused: false, type: 'normal' }; },
+    },
     tabs: {
-      async query(value) { calls.push(['query', value]); return [{ id: 17, windowId: 9, status: 'complete', url: 'https://example.test/', pendingUrl: '' }]; },
+      async query(value) { calls.push(['query', value]); return [{ id: 17, windowId: 9, active: true, status: 'complete', url: 'https://example.test/', pendingUrl: '' }]; },
     },
   };
   const authority = {
@@ -115,9 +117,10 @@ test('rejects an accessor-backed pending URL before proof or capability effects'
           }];
         },
       },
+      windows: { async get(windowId) { return { id: windowId, focused: false, type: 'normal' }; } },
       tabs: {
         async query() {
-          const tab = { id: 17, windowId: 9, status: 'complete', url: 'https://example.test/' };
+          const tab = { id: 17, windowId: 9, active: true, status: 'complete', url: 'https://example.test/' };
           Object.defineProperty(tab, 'pendingUrl', { enumerable: true, get() { pendingReads += 1; return ''; } });
           return [tab];
         },
@@ -125,9 +128,9 @@ test('rejects an accessor-backed pending URL before proof or capability effects'
     },
   });
   assert.deepEqual(await router.dispatch({
-    envelope: parsed({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-panel-hostile' }),
+    envelope: parsed({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-panel-hostile', windowId: 9 }),
     sender: panelSender(),
-  }), { ok: false, code: 'TARGET_UNAVAILABLE' });
+  }), { ok: false, code: 'CONTEXT_DENIED' });
   assert.equal(pendingReads, 0);
   assert.equal(calls.some(([name]) => ['probe', 'prepare'].includes(name)), false);
 });
@@ -135,12 +138,12 @@ test('rejects an accessor-backed pending URL before proof or capability effects'
 test('prepares a panel capability and starts through the only attached starter with worker IDs', async () => {
   const { router, calls } = fixture();
   assert.deepEqual(await router.dispatch({
-    envelope: parsed({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-panel-1' }),
+    envelope: parsed({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-panel-1', windowId: 9 }),
     sender: panelSender(),
   }), { ok: true, requestId: 'request-panel-1', capabilityId: CAPABILITY, expiresAt: 200 });
 
   const started = await router.dispatch({
-    envelope: parsed({ type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false }),
+    envelope: parsed({ type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9 }),
     sender: panelSender(),
   });
   assert.deepEqual(started, { ok: true, auditId: 'audit-router-1', state: 'running' });
@@ -153,17 +156,36 @@ test('prepares a panel capability and starts through the only attached starter w
   assert.equal(Object.isFrozen(begin.retentionPreference), true);
 });
 
+test('re-proves the panel window on start and denies a changed claim before the audit starter', async () => {
+  const { router, calls } = fixture();
+  assert.equal((await router.dispatch({
+    envelope: parsed({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-window-reproof', windowId: 9 }),
+    sender: panelSender(),
+  })).ok, true);
+  const beforeStart = calls.length;
+  const response = await router.dispatch({
+    envelope: parsed({
+      type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY,
+      captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
+      windowId: 11,
+    }),
+    sender: panelSender(),
+  });
+  assert.deepEqual(response, { ok: false, code: 'CONTEXT_DENIED' });
+  assert.equal(calls.slice(beforeStart).some(([operation]) => operation === 'begin'), false);
+});
+
 test('reserved intents fail before capability storage or Chrome effects', async () => {
   const { router, calls } = fixture();
   for (const envelope of [
-    parsed({ type: 'PANEL_OPEN_REPORT', sessionCapabilityId: SESSION, auditId: 'audit-1' }),
+    parsed({ type: 'PANEL_OPEN_REPORT', sessionCapabilityId: SESSION, auditId: 'audit-1', windowId: 9 }),
     parsed({ type: 'REPORT_CONNECT', auditId: 'audit-1' }),
     parsed({ type: 'EXPORT_CONNECT', auditId: 'audit-1' }),
   ]) assert.deepEqual(await router.dispatch({ envelope, sender: panelSender() }), { ok: false, code: 'FEATURE_UNAVAILABLE' });
   assert.deepEqual(calls, []);
 });
 
-test('denies wrong panel document path context and window before target or authority effects', async t => {
+test('denies wrong panel document path context and native window before target or authority effects', async t => {
   for (const [name, sender, context] of [
     ['path', { ...panelSender(), url: `chrome-extension://${RUNTIME_ID}/src/review/index.html` }, {
       documentId: 'panel-document', documentUrl: `chrome-extension://${RUNTIME_ID}/src/review/index.html`, contextType: 'SIDE_PANEL', windowId: 9,
@@ -171,21 +193,57 @@ test('denies wrong panel document path context and window before target or autho
     ['context', panelSender(), {
       documentId: 'panel-document', documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`, contextType: 'TAB', windowId: 9,
     }],
+    ['popup', panelSender(), {
+      documentId: 'panel-document', documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`, contextType: 'POPUP', windowId: -1,
+    }],
     ['window', panelSender(), {
       documentId: 'panel-document', documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`, contextType: 'SIDE_PANEL', windowId: 11,
-    }],
-    ['sentinel', panelSender(), {
-      documentId: 'panel-document', documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`, contextType: 'SIDE_PANEL', windowId: -1,
     }],
   ]) await t.test(name, async () => {
     const { router, calls, dependencies } = fixture();
     dependencies.chromeApi.runtime.getContexts = async () => [context];
     const response = await router.dispatch({
-      envelope: parsed({ type: 'PREPARE_PANEL_CAPABILITY', requestId: `request-${name}` }), sender,
+      envelope: parsed({ type: 'PREPARE_PANEL_CAPABILITY', requestId: `request-${name}`, windowId: 9 }), sender,
     });
-    assert.deepEqual(response, name === 'window' ? { ok: false, code: 'TARGET_UNAVAILABLE' } : { ok: false, code: 'CONTEXT_DENIED' });
+    assert.deepEqual(response, { ok: false, code: 'CONTEXT_DENIED' });
     assert.equal(calls.some(([operation]) => ['probe', 'evidence', 'prepare'].includes(operation)), false);
-    if (name !== 'window') assert.deepEqual(calls, []);
+  });
+});
+
+test('denies an unverified claimed window and unsafe active tab before probe prepare or response disclosure', async t => {
+  const rows = [
+    ['wrong-window', {
+      windows: { async get() { return { id: 11, focused: false }; } },
+    }],
+    ['removed-window', {
+      windows: { async get() { throw new Error('private native window detail'); } },
+    }],
+    ['ambiguous', {
+      tabs: { async query() { return [
+        { id: 17, windowId: 9, active: true, status: 'complete', url: 'https://example.test/', pendingUrl: '' },
+        { id: 18, windowId: 9, active: true, status: 'complete', url: 'https://example.test/other', pendingUrl: '' },
+      ]; } },
+    }],
+    ['loading', {
+      tabs: { async query() { return [{ id: 17, windowId: 9, active: true, status: 'loading', url: 'https://example.test/', pendingUrl: '' }]; } },
+    }],
+    ['pending', {
+      tabs: { async query() { return [{ id: 17, windowId: 9, active: true, status: 'complete', url: 'https://example.test/', pendingUrl: 'https://private.test/token' }]; } },
+    }],
+    ['privileged', {
+      tabs: { async query() { return [{ id: 17, windowId: 9, active: true, status: 'complete', url: 'chrome://settings/', pendingUrl: '' }]; } },
+    }],
+  ];
+  for (const [name, override] of rows) await t.test(name, async () => {
+    const { router, calls, dependencies } = fixture();
+    Object.assign(dependencies.chromeApi, override);
+    const response = await router.dispatch({
+      envelope: parsed({ type: 'PREPARE_PANEL_CAPABILITY', requestId: `request-${name}`, windowId: 9 }),
+      sender: panelSender(),
+    });
+    assert.deepEqual(response, { ok: false, code: 'CONTEXT_DENIED' });
+    assert.equal(calls.some(([operation]) => ['probe', 'evidence', 'prepare'].includes(operation)), false);
+    assert.doesNotMatch(JSON.stringify(response), /private|https?:|chrome:\/\//iu);
   });
 });
 
@@ -203,7 +261,7 @@ test('routes report and export envelopes through the single launch authorities w
   const { router } = fixture({ reportLaunch, exportLaunch });
   const sender = panelSender();
   const rows = [
-    [{ type: 'PANEL_OPEN_REPORT', sessionCapabilityId: SESSION, auditId: 'audit-1' }, 'open'],
+    [{ type: 'PANEL_OPEN_REPORT', sessionCapabilityId: SESSION, auditId: 'audit-1', windowId: 9 }, 'open'],
     [{ type: 'REPORT_CONNECT', auditId: 'audit-1' }, 'report-connect'],
     [{ type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: SESSION, auditId: 'audit-1' }, 'request-export'],
     [{ type: 'EXPORT_CONNECT', auditId: 'audit-1' }, 'export-connect'],
@@ -227,7 +285,7 @@ test('routes report and export envelopes through the single launch authorities w
 test('authorizes cancellation and passes only the correlated session and window', async () => {
   const { router, calls } = fixture();
   const response = await router.dispatch({
-    envelope: parsed({ type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION, auditId: 'audit-cancel' }),
+    envelope: parsed({ type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION, auditId: 'audit-cancel', windowId: 9 }),
     sender: panelSender(),
   });
   assert.deepEqual(response, { ok: true, auditId: 'audit-cancel', state: 'cancelling' });
@@ -243,7 +301,7 @@ test('rehydrates under the shared window lock and confirms durable revocation af
     },
   });
   const response = await router.dispatch({
-    envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-history' }), sender: panelSender(),
+    envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-history', windowId: 9 }), sender: panelSender(),
   });
   assert.deepEqual(response, { ok: false, code: 'AUDIT_REHYDRATE_DENIED' });
   assert.deepEqual(calls.find(([name]) => name === 'rehydrate')[1], { auditId: 'audit-history', windowId: 9, mode: 'attached' });
@@ -258,7 +316,7 @@ test('rehydrates under the shared window lock and confirms durable revocation af
 test('hostile post-mint clock denies and revokes before any bootstrap registration', async () => {
   const { router, calls, durableSessions } = fixture({ epochNow: () => 300 });
   const response = await router.dispatch({
-    envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-clock' }), sender: panelSender(),
+    envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-clock', windowId: 9 }), sender: panelSender(),
   });
   assert.deepEqual(response, { ok: false, code: 'AUDIT_REHYDRATE_DENIED' });
   assert.equal(calls.some(([name]) => name === 'register-view'), false);
@@ -280,7 +338,7 @@ test('post-mint cleanup false or rejection returns recovery-required and never r
       revokeViewOnly,
     });
     const response = await router.dispatch({
-      envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: `audit-cleanup-${name}` }),
+      envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: `audit-cleanup-${name}`, windowId: 9 }),
       sender: panelSender(),
     });
     assert.deepEqual(response, { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' });
@@ -297,7 +355,7 @@ test('registration exception revokes durable session while registered success re
       },
     });
     assert.deepEqual(await router.dispatch({
-      envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-register-throw' }),
+      envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-register-throw', windowId: 9 }),
       sender: panelSender(),
     }), { ok: false, code: 'AUDIT_REHYDRATE_DENIED' });
     assert.deepEqual(durableSessions.get(SESSION), { auditId: 'audit-register-throw', state: 'revoked' });
@@ -306,7 +364,7 @@ test('registration exception revokes durable session while registered success re
   await t.test('registered success', async () => {
     const { router, durableSessions, calls } = fixture();
     assert.deepEqual(await router.dispatch({
-      envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-register-success' }),
+      envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-register-success', windowId: 9 }),
       sender: panelSender(),
     }), { ok: true, auditId: 'audit-register-success', state: 'view-only' });
     assert.deepEqual(durableSessions.get(SESSION), { auditId: 'audit-register-success', state: 'view-only' });
@@ -324,7 +382,7 @@ test('unconfirmed coordinator rollback remains recovery-required after minted-se
   });
 
   const response = await router.dispatch({
-    envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-bootstrap-recovery' }),
+    envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-bootstrap-recovery', windowId: 9 }),
     sender: panelSender(),
   });
 

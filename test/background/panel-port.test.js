@@ -93,8 +93,16 @@ function fixture(overrides = {}) {
       async getContexts({ documentIds }) {
         return [{
           documentId: documentIds[0], documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`,
-          contextType: 'SIDE_PANEL', windowId: 9,
+          contextType: 'SIDE_PANEL', tabId: -1, windowId: -1,
         }];
+      },
+    },
+    windows: {
+      async get(windowId) { return { id: windowId, focused: false, type: 'normal' }; },
+    },
+    tabs: {
+      async query({ windowId }) {
+        return [{ id: 17, windowId, active: true, status: 'complete', url: 'https://example.test/', pendingUrl: '' }];
       },
     },
   };
@@ -226,7 +234,7 @@ test('publishResult cannot send after its owner callback settles during final re
   };
   const connected = port();
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
   env.sessions.set(SESSION, session('result'));
 
@@ -260,7 +268,7 @@ test('view-only registration cannot send or bind after its owner callback settle
   const env = fixture();
   const connected = port();
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
   assert.equal(connected.messages.at(-1).state, 'initial');
 
@@ -294,7 +302,7 @@ test('panel-first receives initial, rejects a second hello and preserves the inc
   const first = port();
   assert.equal(coordinator.attachPanelPort(first), true);
   assert.equal(timers[0].delay, 5000);
-  first.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  first.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
   assert.deepEqual(first.messages, [{
     protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
@@ -304,11 +312,80 @@ test('panel-first receives initial, rejects a second hello and preserves the inc
 
   const competitor = port({ documentId: 'panel-document-2' });
   coordinator.attachPanelPort(competitor);
-  competitor.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  competitor.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
   assert.equal(competitor.disconnects, 1);
-  first.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  first.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   assert.equal(first.disconnects, 1);
+});
+
+test('port bootstrap denies missing extra negative and accessor window claims without reading accessors', async () => {
+  let getterCalls = 0;
+  const accessor = { protocol: 'audita-panel', version: 1, type: 'bootstrap' };
+  Object.defineProperty(accessor, 'windowId', {
+    enumerable: true,
+    get() { getterCalls += 1; return 9; },
+  });
+  for (const hello of [
+    { protocol: 'audita-panel', version: 1, type: 'bootstrap' },
+    { protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9, extra: true },
+    { protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: -1 },
+    accessor,
+  ]) {
+    const env = fixture();
+    const connected = port();
+    env.coordinator.attachPanelPort(connected);
+    connected.onMessage.emit(hello);
+    assert.equal(connected.disconnects, 1);
+    assert.deepEqual(connected.messages, []);
+  }
+  assert.equal(getterCalls, 0);
+});
+
+test('port bootstrap independently denies a wrong window claim and non-SIDE_PANEL contexts', async t => {
+  await t.test('wrong window', async () => {
+    const env = fixture();
+    env.chromeApi.windows.get = async () => ({ id: 9, focused: false });
+    const connected = port();
+    env.coordinator.attachPanelPort(connected);
+    connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 11 });
+    await tick();
+    assert.equal(connected.disconnects, 1);
+    assert.deepEqual(connected.messages, []);
+  });
+  for (const contextType of ['TAB', 'POPUP']) await t.test(contextType, async () => {
+    const env = fixture();
+    env.chromeApi.runtime.getContexts = async ({ documentIds }) => [{
+      documentId: documentIds[0], documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`,
+      contextType, windowId: -1,
+    }];
+    const connected = port();
+    env.coordinator.attachPanelPort(connected);
+    connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
+    await tick();
+    assert.equal(connected.disconnects, 1);
+    assert.deepEqual(connected.messages, []);
+  });
+});
+
+test('a bound port re-proves the claimed window and denies delivery after active-tab correlation changes', async () => {
+  const resultBundle = await bundle();
+  const env = fixture();
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
+  await tick();
+  assert.equal(connected.messages.at(-1).state, 'initial');
+
+  env.chromeApi.tabs.query = async () => [{
+    id: 27, windowId: 11, active: true, status: 'complete', url: 'https://other.test/', pendingUrl: '',
+  }];
+  const registration = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
+    auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
+    createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
+  }));
+  assert.deepEqual(registration, { registered: true, delivered: false });
+  assert.equal(connected.messages.some(message => message.state === 'view-only'), false);
 });
 
 test('a duplicate packet arriving while first-hello proof is pending disconnects immediately', async () => {
@@ -320,12 +397,14 @@ test('a duplicate packet arriving while first-hello proof is pending disconnects
         id: RUNTIME_ID,
         async getContexts() { return contexts; },
       },
+      windows: { async get(windowId) { return { id: windowId, focused: false }; } },
+      tabs: { async query({ windowId }) { return [{ id: 17, windowId, active: true, status: 'complete', url: 'https://example.test/', pendingUrl: '' }]; } },
     },
   });
   const connected = port();
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   assert.equal(connected.disconnects, 1);
   resolveContexts([{ documentId: 'panel-document', documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`, contextType: 'SIDE_PANEL', windowId: 9 }]);
   await tick();
@@ -340,7 +419,7 @@ test('start-first consumes a pending bootstrap only after proving ACTIVE running
   };
   const connected = port();
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
   assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].state, 'consumed');
   assert.deepEqual(connected.messages[0], {
@@ -362,7 +441,7 @@ test('start-first hello cannot publish running until the start journal is confir
   const connected = port();
 
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
 
   assert.equal(connected.messages.some(message => message.state === 'running'), false);
@@ -374,7 +453,7 @@ test('an accessor start-journal envelope cannot authorize running publication or
   const env = fixture();
   const connected = port();
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
   env.setActive(runningActive());
   const bootstrapKey = panelBootstrapStorageKey(9);
@@ -410,7 +489,7 @@ test('an idle live panel receives running only after ACTIVE exists and the start
   const env = fixture();
   const connected = port();
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
   assert.equal(connected.messages.at(-1).state, 'initial');
 
@@ -444,14 +523,14 @@ test('rotates a consumed running bootstrap only for the exact durable ACTIVE job
   };
   const connected = port();
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
   assert.equal(connected.messages[0].state, 'running');
   env.setActive(null);
   connected.onDisconnect.emit();
   const replay = port({ documentId: 'panel-document-3' });
   env.coordinator.attachPanelPort(replay);
-  replay.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  replay.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
   assert.equal(replay.messages.length, 0);
   assert.equal(replay.disconnects, 1);
@@ -712,7 +791,7 @@ test('view-only consumed confirmation preserves stable foreign drift and cannot 
   const env = fixture();
   const connected = port();
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
   const key = panelBootstrapStorageKey(9);
   const foreign = {
@@ -771,7 +850,7 @@ test('view-only registration rolls consumed back to confirmed pending when ACTIV
   const env = fixture();
   const connected = port();
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
   const originalSet = env.sessionArea.set.bind(env.sessionArea);
   let writes = 0;
@@ -798,7 +877,7 @@ test('view-only registration rechecks ACTIVE after reproof and retains only conf
   const env = fixture();
   const connected = port();
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
   env.chromeApi.runtime.getContexts = async ({ documentIds }) => {
     env.setActive(foreignRunningActive());
@@ -876,7 +955,7 @@ test('a live view-only send failure remains durably registered for reconnect', a
   const env = fixture();
   const connected = port({ failState: 'view-only' });
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
   const result = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
     auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
@@ -950,7 +1029,7 @@ test('terminal hello rotates to a fresh view-only session and sends a bearer-fre
   };
   const connected = port();
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
   assert.equal(connected.messages[0].state, 'view-only');
   assert.equal(connected.messages[0].sessionCapabilityId, VIEW_SESSION);
@@ -976,7 +1055,7 @@ test('terminal hello restores its exact prior bootstrap when foreign ACTIVE appe
   const connected = port();
 
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
 
   assert.equal(connected.messages.length, 0);
@@ -1007,7 +1086,7 @@ test('terminal hello restores its exact prior bootstrap when foreign ACTIVE appe
   const connected = port();
 
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
 
   assert.equal(contextReads, 3);
@@ -1039,7 +1118,7 @@ test('terminal hello denies publication and preserves its replacement when rollb
   const connected = port();
 
   env.coordinator.attachPanelPort(connected);
-  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 });
   await tick();
 
   assert.equal(writes, 2);

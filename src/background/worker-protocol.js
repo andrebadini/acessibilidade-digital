@@ -3,12 +3,12 @@ const OPAQUE_ID = /^[A-Za-z0-9_-]{20,240}$/u;
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 
 const MESSAGE_SCHEMAS = deepFreeze({
-  PREPARE_PANEL_CAPABILITY: ['type', 'requestId'],
-  PANEL_START_ATTACHED_AUDIT: ['type', 'capabilityId', 'captureMode', 'includeQuery', 'deleteAfterCompleteExport'],
-  PANEL_CANCEL_AUDIT: ['type', 'sessionCapabilityId', 'auditId'],
-  PANEL_OPEN_REPORT: ['type', 'sessionCapabilityId', 'auditId'],
+  PREPARE_PANEL_CAPABILITY: ['type', 'requestId', 'windowId'],
+  PANEL_START_ATTACHED_AUDIT: ['type', 'capabilityId', 'captureMode', 'includeQuery', 'deleteAfterCompleteExport', 'windowId'],
+  PANEL_CANCEL_AUDIT: ['type', 'sessionCapabilityId', 'auditId', 'windowId'],
+  PANEL_OPEN_REPORT: ['type', 'sessionCapabilityId', 'auditId', 'windowId'],
   REPORT_REQUEST_EXPORT: ['type', 'sessionCapabilityId', 'auditId'],
-  PANEL_REHYDRATE_VIEW: ['type', 'auditId'],
+  PANEL_REHYDRATE_VIEW: ['type', 'auditId', 'windowId'],
   REPORT_CONNECT: ['type', 'auditId'],
   EXPORT_CONNECT: ['type', 'auditId'],
   EXPORT_COMPLETE: ['type', 'sessionCapabilityId', 'auditId', 'attemptId'],
@@ -28,26 +28,35 @@ export function parseWorkerMessage(message) {
 }
 
 function hasFlatPrimitiveShape(value) {
-  return Object.values(value).every(entry => ['string', 'boolean'].includes(typeof entry));
+  return Object.values(value).every(entry => ['string', 'boolean', 'number'].includes(typeof entry));
 }
 
 function validWorkerEnvelope(value) {
   if (value.type === 'PREPARE_PANEL_CAPABILITY') {
-    return AUDIT_ID.test(value.requestId ?? '');
+    return AUDIT_ID.test(value.requestId ?? '') && safeChromeId(value.windowId);
   }
   if (value.type === 'PANEL_START_ATTACHED_AUDIT') {
     return OPAQUE_ID.test(value.capabilityId ?? '') && value.captureMode === 'no-pixels' &&
-      value.includeQuery === false && value.deleteAfterCompleteExport === false;
+      value.includeQuery === false && value.deleteAfterCompleteExport === false && safeChromeId(value.windowId);
   }
-  if (['PANEL_CANCEL_AUDIT', 'PANEL_OPEN_REPORT', 'REPORT_REQUEST_EXPORT'].includes(value.type)) {
+  if (['PANEL_CANCEL_AUDIT', 'PANEL_OPEN_REPORT'].includes(value.type)) {
+    return OPAQUE_ID.test(value.sessionCapabilityId ?? '') && AUDIT_ID.test(value.auditId ?? '') &&
+      safeChromeId(value.windowId);
+  }
+  if (value.type === 'REPORT_REQUEST_EXPORT') {
     return OPAQUE_ID.test(value.sessionCapabilityId ?? '') && AUDIT_ID.test(value.auditId ?? '');
   }
   if (value.type === 'EXPORT_COMPLETE') {
     return OPAQUE_ID.test(value.sessionCapabilityId ?? '') && AUDIT_ID.test(value.auditId ?? '') &&
       /^(?:[1-9][0-9]*)$/u.test(value.attemptId ?? '') && Number.isSafeInteger(Number(value.attemptId));
   }
+  if (value.type === 'PANEL_REHYDRATE_VIEW') {
+    return AUDIT_ID.test(value.auditId ?? '') && safeChromeId(value.windowId);
+  }
   return AUDIT_ID.test(value.auditId ?? '');
 }
+
+function safeChromeId(value) { return Number.isSafeInteger(value) && value >= 0; }
 
 export function readSafeOwnEnumerableDataType(value) {
   try {
