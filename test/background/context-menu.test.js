@@ -45,6 +45,7 @@ test('declares and installs exactly one page-only HTTP(S) item', async () => {
   };
   const controller = registerAuditContextMenus(chromeApi, {
     getReadyRuntime: () => Promise.resolve({}),
+    launchPanel: () => true,
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-context', epochNow: () => 1,
     logger: { error() {} },
   });
@@ -82,6 +83,7 @@ test('serializes concurrent installations and rolls back a partial registration'
   const logs = [];
   const controller = registerAuditContextMenus(chromeApi, {
     getReadyRuntime: () => Promise.resolve({}),
+    launchPanel: () => true,
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-context', epochNow: () => 1,
     logger: { error(code) { logs.push(code); } },
   });
@@ -126,6 +128,7 @@ test('contains callback lastError, settles callback-plus-Promise once, and perfo
   };
   const controller = registerAuditContextMenus(chromeApi, {
     getReadyRuntime: () => Promise.resolve({}),
+    launchPanel: () => true,
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-context', epochNow: () => 1,
     logger: { error(code) { logs.push(code); } },
   });
@@ -164,7 +167,7 @@ test('pure click parsing never reads URL-bearing info fields or accessors', () =
   ]) assert.equal(parseContextMenuClick(badInfo, badTab), null);
 });
 
-test('opens the side panel as the first Chrome call, then uses the shared adapter, authority and starter', async () => {
+test('uses the shared token launcher first, then the adapter, authority and starter', async () => {
   const installed = event();
   const clicked = event();
   const calls = [];
@@ -188,13 +191,14 @@ test('opens the side panel as the first Chrome call, then uses the shared adapte
   let readinessCalls = 0;
   registerAuditContextMenus(chromeApi, {
     getReadyRuntime() { readinessCalls += 1; calls.push(['ready']); return Promise.resolve(runtime); },
+    launchPanel(tab, onOpened) { calls.push(['launch', structuredClone(tab)]); onOpened(); return true; },
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-context-1', epochNow: () => 50,
     logger: { error(code) { calls.push(['log', code]); } },
   });
   clicked.emit({ menuItemId: CONTEXT_MENU_IDS.page, frameId: 0, pageUrl: 'https://secret.test/?token=hidden' }, {
     id: 17, windowId: 9, status: 'complete', url: 'https://example.test/', pendingUrl: null,
   });
-  assert.deepEqual(calls, [['open', { windowId: 9 }]]);
+  assert.deepEqual(calls, [['launch', { id: 17, windowId: 9 }]]);
   assert.equal(readinessCalls, 0);
   await tick();
   assert.equal(calls[1][0], 'ready');
@@ -221,6 +225,7 @@ test('invalid clicks and readiness failure perform no post-open audit effects or
   };
   registerAuditContextMenus(chromeApi, {
     getReadyRuntime: () => Promise.reject(new Error('native secret')),
+    launchPanel(tab, onOpened) { opens.push(structuredClone(tab)); onOpened(); return true; },
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-context-2', epochNow: () => 50,
     logger: { error(code) { logs.push(code); } },
   });
@@ -228,7 +233,7 @@ test('invalid clicks and readiness failure perform no post-open audit effects or
   assert.deepEqual(opens, []);
   clicked.emit({ menuItemId: CONTEXT_MENU_IDS.page, frameId: 0 }, { id: 17, windowId: 9, status: 'complete', url: 'https://example.test/' });
   await tick();
-  assert.deepEqual(opens, [{ windowId: 9 }]);
+  assert.deepEqual(opens, [{ id: 17, windowId: 9 }]);
   assert.deepEqual(logs, ['CONTEXT_MENU_UNAVAILABLE']);
 });
 
@@ -250,6 +255,7 @@ test('contains a closed starter denial after opening without exposing its native
       authority: { async prepare() { return { ok: true, capabilityId: 'C'.repeat(22), expiresAt: 100 }; } },
       auditStarter: { async beginAuthorizedAudit() { return { response: { ok: false, code: 'AUDIT_BUSY', native: 'secret' } }; } },
     }),
+    launchPanel(_tab, onOpened) { onOpened(); return true; },
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-context-denied', epochNow: () => 50,
     logger: { error(code) { logs.push(code); } },
   });

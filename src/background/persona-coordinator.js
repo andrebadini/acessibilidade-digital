@@ -250,6 +250,18 @@ export function createPersonaCoordinator({
     targetQueue.assertHeld(lock, target);
     if (!MODES.has(mode)) throw new TypeError('PERSONA_INPUT_INVALID');
     if (!await liveTargetMatches(target)) return failure('PERSONA_TARGET_CHANGED');
+    const priorOwner = await currentOwner(target);
+    if (priorOwner) {
+      let inspected;
+      try { inspected = await personaRuntime.apply({ target, op: 'inspect' }); }
+      catch { inspected = null; }
+      if (confirmedRuntimeSuccess(inspected, target, null)) {
+        const revoked = await revokeTargetCore({ target, reason: 'runtime-failure', lock });
+        if (!revoked.ok) return revoked.code === 'PERSONA_CLEANUP_UNCONFIRMED'
+          ? revoked
+          : failure('PERSONA_STATE_FAILED');
+      }
+    }
     const prepared = await leaseStore.claimPrepared({ target, consumer, mode });
     if (!prepared.ok) return storeFailure(prepared);
     let installed;

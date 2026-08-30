@@ -18,6 +18,7 @@ function tick() { return new Promise(resolve => setImmediate(resolve)); }
 test('registers one stable lifecycle graph and aborts before authority invalidation', async () => {
   const updated = event();
   const removed = event();
+  const detached = event();
   const windows = event();
   const order = [];
   const runtime = Object.freeze({
@@ -28,10 +29,14 @@ test('registers one stable lifecycle graph and aborts before authority invalidat
     auditStarter: {
       async abortAttachedAuditForTarget(value) { order.push(['abort', value]); return { aborted: true, auditId: 'audit-1' }; },
     },
+    personaCoordinator: {
+      async invalidateTab(tabId, reason) { order.push(['persona-tab', tabId, reason]); },
+      async invalidateWindow(windowId, reason) { order.push(['persona-window', windowId, reason]); },
+    },
     chromeAdapter: Object.freeze({}),
   });
   const lifecycle = createAuditLifecycle({
-    chromeApi: { tabs: { onUpdated: updated, onRemoved: removed }, windows: { onRemoved: windows } },
+    chromeApi: { tabs: { onUpdated: updated, onRemoved: removed, onDetached: detached }, windows: { onRemoved: windows } },
     getReadyRuntime: () => Promise.resolve(runtime),
   });
   assert.deepEqual(Object.keys(lifecycle), ['register', 'dispose']);
@@ -39,6 +44,7 @@ test('registers one stable lifecycle graph and aborts before authority invalidat
   assert.equal(lifecycle.register(), false);
   assert.equal(updated.listeners.size, 1);
   assert.equal(removed.listeners.size, 1);
+  assert.equal(detached.listeners.size, 1);
   assert.equal(windows.listeners.size, 1);
 
   updated.emit(17, { status: 'loading' }, {});
@@ -46,21 +52,36 @@ test('registers one stable lifecycle graph and aborts before authority invalidat
   assert.deepEqual(order, [
     ['abort', { tabId: 17, windowId: null, reasonCode: 'TAB_LOADING' }],
     ['invalidate-tab', 17, 'TAB_LOADING'],
+    ['persona-tab', 17, 'navigation'],
   ]);
   order.length = 0;
   removed.emit(17);
-  windows.emit(9);
   await tick();
   assert.deepEqual(order, [
     ['abort', { tabId: 17, windowId: null, reasonCode: 'TAB_REMOVED' }],
-    ['abort', { tabId: null, windowId: 9, reasonCode: 'WINDOW_REMOVED' }],
     ['invalidate-tab', 17, 'TAB_REMOVED'],
+    ['persona-tab', 17, 'tab-removed'],
+  ]);
+  order.length = 0;
+  detached.emit(17, { oldWindowId: 9, oldPosition: 0 });
+  await tick();
+  assert.deepEqual(order, [
+    ['abort', { tabId: 17, windowId: null, reasonCode: 'TAB_REMOVED' }],
+    ['invalidate-tab', 17, 'TAB_REMOVED'],
+    ['persona-tab', 17, 'window-changed'],
+  ]);
+  order.length = 0;
+  windows.emit(9);
+  await tick();
+  assert.deepEqual(order, [
+    ['abort', { tabId: null, windowId: 9, reasonCode: 'WINDOW_REMOVED' }],
     ['invalidate-window', 9, 'WINDOW_REMOVED'],
+    ['persona-window', 9, 'window-changed'],
   ]);
 
   assert.equal(lifecycle.dispose(), true);
   assert.equal(lifecycle.dispose(), false);
-  assert.equal(updated.listeners.size + removed.listeners.size + windows.listeners.size, 0);
+  assert.equal(updated.listeners.size + removed.listeners.size + detached.listeners.size + windows.listeners.size, 0);
 });
 
 test('admits every navigation field descriptor-safely and ignores malformed or accessor records', async () => {

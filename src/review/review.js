@@ -4,7 +4,7 @@ import { createPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
 import { createAuditStore } from '../storage/audit-store.js';
 import { createDestructiveDialog } from '../ui/destructive-dialog.js';
 import { parseAuditDeletedEvent } from '../core/audit-deleted-event.js';
-import { createReviewDecisionCommitter, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId } from './review-state.js';
+import { createAuthorizedReviewDecisionCommitter, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId } from './review-state.js';
 import { buildReportView, renderReportView } from './report-view.js';
 
 const ANSWERS = ['conforme', 'não conforme', 'não foi possível determinar'];
@@ -21,7 +21,7 @@ const deleteAuditConfirm = document.querySelector('#delete-audit-confirm');
 const deleteAuditDialogStatus = document.querySelector('#delete-audit-dialog-status');
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
 const store = createAuditStore();
-const commitDecision = createReviewDecisionCommitter();
+const commitDecision = createAuthorizedReviewDecisionCommitter();
 let auditModel;
 let reportSessionCapabilityId = null;
 
@@ -62,7 +62,8 @@ const deleteAuditController = createDestructiveDialog({
   async onConfirm() {
     if (!auditModel?.auditId) return { ok: false, error: 'Auditoria não encontrada ou já excluída.' };
     const response = await sendWorkerRequest({
-      type: 'REQUEST_DELETE_AUDIT', auditId: auditModel.auditId,
+      type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: reportSessionCapabilityId,
+      auditId: auditModel.auditId,
     });
     if (response.ok === true) renderDeletedAudit();
     return response;
@@ -137,7 +138,14 @@ async function saveDecision(occurrence, answer, note, card, trigger) {
   const committed = await commitDecision({
     auditModel,
     input: decision,
-    store,
+    requestCommit: authorizedDecision => sendWorkerRequest({
+      type: 'REPORT_COMMIT_REVIEW_DECISION', sessionCapabilityId: reportSessionCapabilityId,
+      auditId: authorizedDecision.auditId, itemId: authorizedDecision.itemId,
+      occurrenceId: authorizedDecision.occurrenceId, answer: authorizedDecision.answer,
+      evaluator: authorizedDecision.evaluator, decidedAt: authorizedDecision.decidedAt,
+      mode: authorizedDecision.mode, note: authorizedDecision.note ?? '',
+    }),
+    loadReportRevision: auditId => store.getReportRevision(auditId),
     controls: card.querySelectorAll('button'),
     retryFocus: trigger,
     onPendingChange(pending) {
@@ -147,14 +155,6 @@ async function saveDecision(occurrence, answer, note, card, trigger) {
   });
   if (committed.status === 'duplicate') return;
   auditModel = committed.model;
-  if (Number.isSafeInteger(committed.exportRevision) && committed.exportRevision >= 0) {
-    try {
-      chrome.runtime.sendMessage({
-        type: 'REVIEW_COMMITTED', auditId: auditModel.auditId,
-        exportRevision: committed.exportRevision,
-      }, () => { void chrome.runtime.lastError; });
-    } catch {}
-  }
   card.removeAttribute('aria-busy');
   card.classList.add('answered');
   status.textContent = `Decisão salva para o item ${occurrence.itemId}.`;

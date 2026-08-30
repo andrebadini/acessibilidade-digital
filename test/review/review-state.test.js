@@ -3,7 +3,15 @@ import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
-import { commitReviewDecision, createReviewDecisionCommitter, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId, recordReviewDecision } from '../../src/review/review-state.js';
+import {
+  commitReviewDecision,
+  createAuthorizedReviewDecisionCommitter,
+  createReviewDecisionCommitter,
+  getPendingReviewEntries,
+  isSafeEvidenceImageUrl,
+  normalizeReviewAuditId,
+  recordReviewDecision,
+} from '../../src/review/review-state.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 
 const FIRST_REVIEW = SAMPLE_AUDIT.manualReview[0];
@@ -292,4 +300,135 @@ test('unlocks and focuses a failed card so the same occurrence can retry', async
   assert.equal(retryControls.every(control => control.disabled), true);
   retryWrite.resolve();
   assert.equal((await retry).status, 'committed');
+});
+
+test('authorized review gate never reads or publishes a model when the worker denies the mutation', async () => {
+  const original = reviewModel();
+  const controls = [{ disabled: false }, { disabled: false }];
+  const retryFocus = { calls: 0, focus() { this.calls += 1; } };
+  const pendingStates = [];
+  let revisionReads = 0;
+  const commit = createAuthorizedReviewDecisionCommitter();
+
+  await assert.rejects(commit({
+    auditModel: original,
+    input: reviewInput(),
+    controls,
+    retryFocus,
+    onPendingChange: pending => pendingStates.push(pending),
+    async requestCommit() { return { ok: false, code: 'REPORT_OPERATION_DENIED' }; },
+    async loadReportRevision() { revisionReads += 1; throw new Error('must not read after denial'); },
+  }), /decisão não foi autorizada/iu);
+
+  assert.equal(revisionReads, 0);
+  assert.equal(original.reviewDecisions.length, 0);
+  assert.deepEqual(controls.map(control => control.disabled), [false, false]);
+  assert.equal(retryFocus.calls, 1);
+  assert.deepEqual(pendingStates, [true, false]);
+});
+
+test('authorized review gate publishes only a worker-committed and independently re-read exact revision', async () => {
+  const original = reviewModel();
+  const input = reviewInput();
+  const persisted = recordReviewDecision(original, input);
+  const request = deferred();
+  const controls = [{ disabled: false }, { disabled: false }];
+  const duplicateControls = [{ disabled: false }];
+  const calls = [];
+  const commit = createAuthorizedReviewDecisionCommitter();
+  const first = commit({
+    auditModel: original,
+    input,
+    controls,
+    async requestCommit(decision) {
+      calls.push(['request', decision]);
+      return request.promise;
+    },
+    async loadReportRevision(auditId) {
+      calls.push(['read', auditId]);
+      return {
+        version: 1,
+        auditId,
+        modelRevision: 2,
+        modelHash: 'a'.repeat(64),
+        model: persisted,
+        checkpoint: null,
+      };
+    },
+  });
+  assert.deepEqual(controls.map(control => control.disabled), [true, true]);
+  const duplicate = await commit({
+    auditModel: original,
+    input: { ...input, answer: 'não conforme' },
+    controls: duplicateControls,
+    async requestCommit() { throw new Error('duplicate must not reach worker'); },
+    async loadReportRevision() { throw new Error('duplicate must not read'); },
+  });
+  assert.deepEqual(duplicate, { status: 'duplicate', model: original });
+  assert.equal(duplicateControls[0].disabled, false);
+
+  request.resolve({
+    ok: true,
+    auditId: original.auditId,
+    occurrenceId: input.occurrenceId,
+    modelRevision: 2,
+    modelHash: 'a'.repeat(64),
+  });
+  const committed = await first;
+  assert.equal(committed.status, 'committed');
+  assert.deepEqual(committed.model, persisted);
+  assert.equal(committed.modelRevision, 2);
+  assert.equal(committed.modelHash, 'a'.repeat(64));
+  assert.equal(committed.model.reviewDecisions.length, 1);
+  assert.deepEqual(calls.map(call => call[0]), ['request', 'read']);
+  assert.deepEqual(controls.map(control => control.disabled), [true, true]);
+});
+
+test('authorized review gate rejects a forged success receipt or mismatched persisted revision and remains retryable', async () => {
+  const original = reviewModel();
+  const input = reviewInput();
+  const controls = [{ disabled: false }];
+  const retryFocus = { calls: 0, focus() { this.calls += 1; } };
+  const commit = createAuthorizedReviewDecisionCommitter();
+  let requests = 0;
+
+  await assert.rejects(commit({
+    auditModel: original,
+    input,
+    controls,
+    retryFocus,
+    async requestCommit() {
+      requests += 1;
+      return {
+        ok: true,
+        auditId: original.auditId,
+        occurrenceId: input.occurrenceId,
+        modelRevision: 2,
+        modelHash: 'b'.repeat(64),
+      };
+    },
+    async loadReportRevision(auditId) {
+      return {
+        version: 1,
+        auditId,
+        modelRevision: 2,
+        modelHash: 'c'.repeat(64),
+        model: recordReviewDecision(original, input),
+        checkpoint: null,
+      };
+    },
+  }), /confirmação.*não corresponde/iu);
+
+  assert.equal(requests, 1);
+  assert.equal(original.reviewDecisions.length, 0);
+  assert.equal(controls[0].disabled, false);
+  assert.equal(retryFocus.calls, 1);
+  await assert.rejects(commit({
+    auditModel: original,
+    input,
+    controls,
+    async requestCommit() { requests += 1; return { ok: false, code: 'REPORT_OPERATION_DENIED' }; },
+    async loadReportRevision() { throw new Error('must not read'); },
+  }));
+  assert.equal(requests, 2);
 });

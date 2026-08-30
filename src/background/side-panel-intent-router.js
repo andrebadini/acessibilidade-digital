@@ -5,17 +5,33 @@ import {
 } from './target-capabilities.js';
 import { parseWorkerMessage } from './worker-protocol.js';
 
-const FACTORY_KEYS = Object.freeze([
+const LAUNCH_FACTORY_KEYS = Object.freeze([
   'chromeApi', 'authority', 'auditStarter', 'panelCoordinator', 'chromeAdapter',
+  'personaStart', 'personaCoordinator',
   'readReportRevision', 'buildPanelResultBundle', 'revokeViewOnly',
   'epochNow', 'modelNow', 'createAuditId', 'reportLaunch', 'exportLaunch',
 ]);
-const LEGACY_FACTORY_KEYS = Object.freeze(FACTORY_KEYS.filter(key => !['reportLaunch', 'exportLaunch'].includes(key)));
+const FACTORY_KEYS = Object.freeze([...LAUNCH_FACTORY_KEYS, 'reportOperations']);
+const LEGACY_FACTORY_KEYS = Object.freeze(LAUNCH_FACTORY_KEYS.filter(key => !['reportLaunch', 'exportLaunch'].includes(key)));
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const CAPABILITY = /^[A-Za-z0-9_-]{20,240}$/u;
 const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
+const LEASE_ID = /^lease-[A-Za-z0-9_-]{22}$/u;
+const PERSONA_MODES = new Set(['reader', 'achromatopsia', 'motor']);
+const PANEL_PORT_TYPES = new Set([
+  'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
+  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
+  'PANEL_SET_PERSONA_MODE', 'PANEL_STOP_PERSONA', 'PANEL_CANCEL_AUDIT',
+  'PANEL_OPEN_REPORT', 'PANEL_REHYDRATE_VIEW',
+]);
+const PERSONA_CODES = new Set([
+  'CAPABILITY_UNAVAILABLE', 'PERSONA_NOT_FOUND', 'PERSONA_EXPIRED', 'PERSONA_CONFLICT',
+  'PERSONA_RUNTIME_FAILED', 'PERSONA_CLEANUP_UNCONFIRMED',
+  'PERSONA_REVOKED_AFTER_RUNTIME_FAILURE',
+]);
 const START_CODES = new Set([
   'AUDIT_BUSY', 'AUDIT_RECOVERY_REQUIRED', 'TARGET_UNAVAILABLE', 'AUDIT_ID_COLLISION', 'AUDIT_START_FAILED',
+  'HIGHLIGHT_CLEANUP_UNCONFIRMED', 'PERSONA_CLEANUP_UNCONFIRMED',
 ]);
 
 function freeze(value) {
@@ -105,16 +121,23 @@ function proofRecord(value, tabId, windowId) {
 function fail(code) { return Object.freeze({ ok: false, code }); }
 
 export function createSidePanelIntentRouter(raw) {
-  const input = exact(raw, FACTORY_KEYS) ?? exact(raw, LEGACY_FACTORY_KEYS);
+  const input = exact(raw, FACTORY_KEYS) ?? exact(raw, LAUNCH_FACTORY_KEYS) ?? exact(raw, LEGACY_FACTORY_KEYS);
   const coordinator = exact(input?.panelCoordinator, ['attachPanelPort', 'withWindowLock']);
+  const reportOperations = input?.reportOperations
+    ? exact(input.reportOperations, ['commitReviewDecision', 'deleteAudit', 'deleteAllAudits'])
+    : null;
   if (!input || typeof input.chromeApi?.runtime?.id !== 'string' || typeof input.chromeApi?.runtime?.getContexts !== 'function' ||
     typeof input.chromeApi?.windows?.get !== 'function' || typeof input.chromeApi?.tabs?.query !== 'function' ||
     !input.authority || !input.auditStarter || !coordinator ||
+    typeof input.personaStart?.start !== 'function' || typeof input.personaStart?.rehydrate !== 'function' ||
+    typeof input.personaCoordinator?.setMode !== 'function' || typeof input.personaCoordinator?.stop !== 'function' ||
     typeof coordinator.attachPanelPort !== 'function' || typeof coordinator.withWindowLock !== 'function' ||
     typeof input.chromeAdapter?.probeDocumentIdentity !== 'function' || typeof input.chromeAdapter?.getEvidenceUrl !== 'function' ||
     typeof input.readReportRevision !== 'function' || typeof input.buildPanelResultBundle !== 'function' ||
     typeof input.revokeViewOnly !== 'function' || typeof input.epochNow !== 'function' ||
-    typeof input.modelNow !== 'function' || typeof input.createAuditId !== 'function') {
+    typeof input.modelNow !== 'function' || typeof input.createAuditId !== 'function' ||
+    (Object.hasOwn(input, 'reportOperations') && (!reportOperations ||
+      Object.values(reportOperations).some(operation => typeof operation !== 'function')))) {
     throw new TypeError('SIDE_PANEL_ROUTER_INVALID');
   }
 
@@ -124,10 +147,10 @@ export function createSidePanelIntentRouter(raw) {
     });
   }
 
-  async function selectedTarget(context) {
+  async function selectedTarget(context, launchTabId) {
     const tabs = await queryTabs(input.chromeApi, { active: true, windowId: context.windowId });
     const tab = activeTab(tabs, context.windowId);
-    if (!tab) throw new Error('TARGET_UNAVAILABLE');
+    if (!tab || tab.id !== launchTabId) throw new Error('TARGET_UNAVAILABLE');
     const proof = proofRecord(await input.chromeAdapter.probeDocumentIdentity(tab.id), tab.id, context.windowId);
     if (!proof) throw new Error('TARGET_UNAVAILABLE');
     const initialUrlEvidence = await input.chromeAdapter.getEvidenceUrl(tab.id, false);
@@ -135,12 +158,12 @@ export function createSidePanelIntentRouter(raw) {
     return freeze({ proof, initialUrlEvidence });
   }
 
-  async function preparePanel(envelope, sender) {
+  async function preparePanel(envelope, sender, launchTabId) {
     let context;
     try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
     catch { return fail('CONTEXT_DENIED'); }
     try {
-      const target = await selectedTarget(context);
+      const target = await selectedTarget(context, launchTabId);
       const prepared = await input.authority.prepare({
         kind: 'attached', tabId: target.proof.tabId, windowId: target.proof.windowId,
         documentId: target.proof.documentId, initialUrlEvidence: target.initialUrlEvidence,
@@ -148,8 +171,97 @@ export function createSidePanelIntentRouter(raw) {
         allowedIntent: 'start-audit', issuer: context.issuer,
       });
       if (prepared?.ok !== true || !CAPABILITY.test(prepared.capabilityId ?? '') || !Number.isSafeInteger(prepared.expiresAt)) throw new Error();
-      return freeze({ ok: true, requestId: envelope.requestId, capabilityId: prepared.capabilityId, expiresAt: prepared.expiresAt });
+      return freeze({ ok: true, requestId: envelope.requestId, capabilityId: prepared.capabilityId });
     } catch { return fail('TARGET_UNAVAILABLE'); }
+  }
+
+  async function preparePanelPersona(envelope, sender, launchTabId) {
+    let context;
+    try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
+    catch { return fail('CONTEXT_DENIED'); }
+    try {
+      const target = await selectedTarget(context, launchTabId);
+      const prepared = await input.authority.prepare({
+        kind: 'attached', tabId: target.proof.tabId, windowId: target.proof.windowId,
+        documentId: target.proof.documentId, initialUrlEvidence: target.initialUrlEvidence,
+        initialUrlSessionDigest: target.proof.urlSessionDigest, createdBy: 'user',
+        allowedIntent: 'start-persona', issuer: context.issuer,
+      });
+      if (prepared?.ok !== true || !CAPABILITY.test(prepared.capabilityId ?? '') ||
+        !Number.isSafeInteger(prepared.expiresAt)) throw new Error();
+      return freeze({ ok: true, requestId: envelope.requestId, capabilityId: prepared.capabilityId });
+    } catch { return fail('TARGET_UNAVAILABLE'); }
+  }
+
+  function personaConsumer(context) {
+    return freeze({
+      extensionId: input.chromeApi.runtime.id,
+      documentId: context.issuer.documentId,
+      path: PANEL_SURFACE.path,
+      windowId: context.windowId,
+    });
+  }
+
+  function projectPersonaResult(result, stopped = false) {
+    const failed = exact(result, ['ok', 'code']);
+    if (failed?.ok === false) return fail(PERSONA_CODES.has(failed.code) ? failed.code : 'PERSONA_RUNTIME_FAILED');
+    const success = exact(result, ['ok', 'lease']);
+    if (!success || success.ok !== true || !success.lease || typeof success.lease !== 'object') {
+      return fail('PERSONA_RUNTIME_FAILED');
+    }
+    if (stopped) return freeze({ ok: true, lease: null });
+    const leaseId = own(success.lease, 'leaseId');
+    const activeMode = own(success.lease, 'activeMode');
+    const expiresAt = own(success.lease, 'expiresAt');
+    if (!LEASE_ID.test(leaseId ?? '') || !PERSONA_MODES.has(activeMode) ||
+      !Number.isSafeInteger(expiresAt) || expiresAt < 0) return fail('PERSONA_RUNTIME_FAILED');
+    return freeze({ ok: true, lease: { leaseId, activeMode, expiresAt } });
+  }
+
+  async function withPersonaContext(envelope, sender, operation) {
+    let context;
+    try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
+    catch { return fail('CONTEXT_DENIED'); }
+    try { return projectPersonaResult(await operation(context)); }
+    catch { return fail('PERSONA_RUNTIME_FAILED'); }
+  }
+
+  function startPersona(envelope, sender) {
+    return withPersonaContext(envelope, sender, context => input.personaStart.start({
+      capabilityId: envelope.capabilityId,
+      mode: envelope.mode,
+      senderContext: context,
+      consumer: personaConsumer(context),
+    }));
+  }
+
+  function rehydratePersona(envelope, sender) {
+    return withPersonaContext(envelope, sender, context => input.personaStart.rehydrate({
+      capabilityId: envelope.capabilityId,
+      senderContext: context,
+      consumer: personaConsumer(context),
+    }));
+  }
+
+  function setPersonaMode(envelope, sender) {
+    return withPersonaContext(envelope, sender, context => input.personaCoordinator.setMode({
+      leaseId: envelope.leaseId,
+      consumer: personaConsumer(context),
+      mode: envelope.mode,
+    }));
+  }
+
+  async function stopPersona(envelope, sender) {
+    let context;
+    try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
+    catch { return fail('CONTEXT_DENIED'); }
+    try {
+      return projectPersonaResult(await input.personaCoordinator.stop({
+        leaseId: envelope.leaseId,
+        consumer: personaConsumer(context),
+        explicit: true,
+      }), true);
+    } catch { return fail('PERSONA_RUNTIME_FAILED'); }
   }
 
   async function startAttached(envelope, sender) {
@@ -259,20 +371,55 @@ export function createSidePanelIntentRouter(raw) {
     } catch { return fail('REPORT_OPEN_DENIED'); }
   }
 
+  async function mutateReport(envelope, sender, intent) {
+    if (!reportOperations || typeof input.reportLaunch?.authorizeIntent !== 'function') return fail('FEATURE_UNAVAILABLE');
+    try {
+      const authorization = await input.reportLaunch.authorizeIntent({
+        auditId: envelope.auditId,
+        sessionCapabilityId: envelope.sessionCapabilityId,
+        intent,
+        sender,
+      });
+      if (authorization?.ok !== true || authorization.auditId !== envelope.auditId || authorization.intent !== intent) {
+        return fail('REPORT_OPERATION_DENIED');
+      }
+      if (intent === 'review-commit') return await reportOperations.commitReviewDecision({
+        auditId: envelope.auditId, itemId: envelope.itemId, occurrenceId: envelope.occurrenceId,
+        answer: envelope.answer, evaluator: envelope.evaluator, decidedAt: envelope.decidedAt,
+        mode: envelope.mode, note: envelope.note,
+      });
+      if (intent === 'delete-audit') return await reportOperations.deleteAudit({ auditId: envelope.auditId });
+      return await reportOperations.deleteAllAudits();
+    } catch { return fail('REPORT_OPERATION_FAILED'); }
+  }
+
   async function dispatch(rawRequest) {
-    const request = exact(rawRequest, ['envelope', 'sender']);
+    const request = exact(rawRequest, ['envelope', 'sender']) ??
+      exact(rawRequest, ['envelope', 'sender', 'launchTabId']);
     if (!request || !Object.isFrozen(request.envelope)) return fail('INVALID_MESSAGE');
     const parsed = parseWorkerMessage(request.envelope);
     if (!parsed.ok) return parsed.code === 'MESSAGE_TOO_LARGE' ? fail('MESSAGE_TOO_LARGE') : fail('INVALID_MESSAGE');
     const envelope = parsed.value;
-    if (envelope.type === 'PREPARE_PANEL_CAPABILITY') return preparePanel(envelope, request.sender);
+    const panelIntent = PANEL_PORT_TYPES.has(envelope.type);
+    const hasLaunchTab = Object.hasOwn(request, 'launchTabId');
+    if (panelIntent && (!hasLaunchTab || !safeChromeId(request.launchTabId))) return fail('CONTEXT_DENIED');
+    if (!panelIntent && hasLaunchTab) return fail('CONTEXT_DENIED');
+    if (envelope.type === 'PREPARE_PANEL_CAPABILITY') return preparePanel(envelope, request.sender, request.launchTabId);
+    if (envelope.type === 'PREPARE_PANEL_PERSONA_CAPABILITY') return preparePanelPersona(envelope, request.sender, request.launchTabId);
     if (envelope.type === 'PANEL_START_ATTACHED_AUDIT') return startAttached(envelope, request.sender);
+    if (envelope.type === 'PANEL_START_PERSONA') return startPersona(envelope, request.sender);
+    if (envelope.type === 'PANEL_REHYDRATE_PERSONA') return rehydratePersona(envelope, request.sender);
+    if (envelope.type === 'PANEL_SET_PERSONA_MODE') return setPersonaMode(envelope, request.sender);
+    if (envelope.type === 'PANEL_STOP_PERSONA') return stopPersona(envelope, request.sender);
     if (envelope.type === 'PANEL_CANCEL_AUDIT') return cancel(envelope, request.sender);
     if (envelope.type === 'PANEL_OPEN_REPORT') return openReport(envelope, request.sender);
     if (envelope.type === 'REPORT_CONNECT') return input.reportLaunch?.connect?.({ auditId: envelope.auditId, sender: request.sender }) ?? fail('FEATURE_UNAVAILABLE');
     if (envelope.type === 'REPORT_REQUEST_EXPORT') return input.exportLaunch?.requestExport?.({
       auditId: envelope.auditId, sessionCapabilityId: envelope.sessionCapabilityId, sender: request.sender,
     }) ?? fail('FEATURE_UNAVAILABLE');
+    if (envelope.type === 'REPORT_COMMIT_REVIEW_DECISION') return mutateReport(envelope, request.sender, 'review-commit');
+    if (envelope.type === 'REPORT_DELETE_AUDIT') return mutateReport(envelope, request.sender, 'delete-audit');
+    if (envelope.type === 'REPORT_DELETE_ALL_AUDITS') return mutateReport(envelope, request.sender, 'delete-all');
     if (envelope.type === 'EXPORT_CONNECT') return input.exportLaunch?.connect?.({ auditId: envelope.auditId, sender: request.sender }) ?? fail('FEATURE_UNAVAILABLE');
     if (envelope.type === 'EXPORT_COMPLETE') return input.exportLaunch?.complete?.({
       sessionCapabilityId: envelope.sessionCapabilityId, auditId: envelope.auditId,

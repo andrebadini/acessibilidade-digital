@@ -1,6 +1,8 @@
 import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
 import { createSessionUrlDigestManager } from '../core/privacy/session-url-digest.js';
 import { createAuditDeletedEvent } from '../core/audit-deleted-event.js';
+import { applyReviewDecisions, createReviewDecision } from '../core/review/decisions.js';
+import { createAuditModel } from '../core/report/audit-model.js';
 import { createPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
 import {
   AuditDeleteBusyError,
@@ -17,29 +19,34 @@ import { composeChromeAdapter, createChromeAdapter } from './chrome-adapter.js';
 import { registerAuditContextMenus } from './context-menu.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
 import {
-  createLegacyCompatibilityHandler,
-  parseLegacyCompatMessage,
-  projectLegacyPanelLatestV1,
-} from './legacy-compat-protocol.js';
-import {
   PANEL_PORT_NAME,
   createPanelPortCoordinator,
 } from './panel-port.js';
-import { getPersonaController } from './persona-runtime.js';
+import { createPanelLaunchAuthority } from './panel-launch-authority.js';
+import { createPanelLauncher } from './panel-launcher.js';
+import { createPersonaCoordinator } from './persona-coordinator.js';
+import { createPersonaLeaseStore } from './persona-lease-store.js';
+import { createPersonaInjectionRuntime } from './persona-runtime.js';
+import { createPersonaStartOrchestrator } from './persona-start-orchestrator.js';
 import { runAttachedAuditExecution } from './run-audit.js';
 import { createSidePanelIntentRouter } from './side-panel-intent-router.js';
 import { createReportLaunchAuthority } from './report-launch.js';
 import { createExportLaunchAuthority } from './export-launch.js';
+import { createTargetOperationQueue } from './target-operation-queue.js';
+import {
+  createAbsentHighlightCleaner,
+  createLiveAidCleanup,
+} from './live-aid-cleanup.js';
 import {
   createTargetCapabilityAuthority,
   readAuditSessionForWorker,
 } from './target-capabilities.js';
-import { parseWorkerMessage } from './worker-protocol.js';
+import { isPanelPortIntent, parseWorkerMessage } from './worker-protocol.js';
 
 export const SESSION_ACCESS_LEVEL_DENIED = 'SESSION_ACCESS_LEVEL_DENIED';
 export const SIDE_PANEL_BEHAVIOR_DENIED = 'SIDE_PANEL_BEHAVIOR_DENIED';
+export const PERSONA_EXPIRY_ALARM_NAME = 'audita-persona-expiry-v1';
 
-const PERSONA_PORT_NAME = 'audita-persona-v1';
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const CAPABILITY = /^[A-Za-z0-9_-]{22}$/u;
 
@@ -243,58 +250,77 @@ export function createCheckpointAdapters(sessionArea) {
 }
 
 function copyReadyRuntime(value) {
-  const runtime = exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch'], true) ??
+  const runtime = exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch', 'personaCoordinator'], true) ??
+    exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch'], true) ??
     exact(value, ['authority', 'auditStarter', 'chromeAdapter'], true);
   if (!runtime || !runtime.authority || !runtime.auditStarter || !runtime.chromeAdapter) throw new Error('WORKER_UNAVAILABLE');
+  if (Object.hasOwn(runtime, 'personaCoordinator') && typeof runtime.personaCoordinator?.expireDue !== 'function') {
+    throw new Error('WORKER_UNAVAILABLE');
+  }
   return freeze(runtime);
 }
 
-function createCompatibilityAdapters({ chromeApi, auditStore, sessionArea, modelNow }) {
+function createReportOperations({ chromeApi, auditStore, sessionArea, modelNow }) {
   const checkpoints = createCheckpointAdapters(sessionArea);
   const now = () => canonicalModelTime(modelNow);
 
-  async function readLegacyLastAudit() {
-    try {
-      await auditStore.cleanupExpiredAudits({ now: now(), limit: 25 });
-      const latest = (await auditStore.getLatest()) ?? null;
-      return freeze({
-        ok: true,
-        state: projectLegacyPanelLatestV1(latest, chromeApi.runtime.id),
-      });
-    }
-    catch { return Object.freeze({ ok: false, code: 'COMPATIBILITY_FAILED' }); }
-  }
-
-  async function notifyLegacyReviewCommitted({ auditId, exportRevision }) {
-    try {
-      const snapshot = await auditStore.getAuditSnapshot(auditId);
-      if (snapshot?.model?.auditId !== auditId || snapshot.revision !== exportRevision) {
-        return Object.freeze({ ok: false, code: 'COMPATIBILITY_DENIED' });
+  async function commitReviewDecision(input) {
+    let decision;
+    try { decision = createReviewDecision(input); }
+    catch { return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' }); }
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        const snapshot = await auditStore.getAuditSnapshot(decision.auditId);
+        if (snapshot?.model?.auditId !== decision.auditId || !snapshot.capability) {
+          return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' });
+        }
+        const nextModel = createAuditModel(applyReviewDecisions(snapshot.model, [decision]));
+        const committed = await auditStore.commitAuditReviewIfRevision(
+          decision.auditId, nextModel, snapshot.capability,
+        );
+        const revision = await auditStore.getReportRevision(decision.auditId);
+        const persistedDecision = revision?.model?.reviewDecisions?.find(value =>
+          value?.occurrenceId === decision.occurrenceId);
+        if (!Number.isSafeInteger(committed?.revision) || committed.revision < 1 ||
+          revision?.auditId !== decision.auditId || revision.modelRevision !== committed.revision ||
+          typeof revision.modelHash !== 'string' || !/^[a-f0-9]{64}$/u.test(revision.modelHash) ||
+          !same(persistedDecision, decision)) {
+          return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
+        }
+        await sendRuntimeMessage(chromeApi, {
+          type: 'AUDIT_REVIEW_UPDATED', auditId: decision.auditId, exportRevision: committed.revision,
+        }).catch(() => {});
+        return freeze({
+          ok: true, auditId: decision.auditId, occurrenceId: decision.occurrenceId,
+          modelRevision: committed.revision, modelHash: revision.modelHash,
+        });
+      } catch (error) {
+        if (own(error, 'code') === 'AUDIT_REVISION_CONFLICT') continue;
+        return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
       }
-      await sendRuntimeMessage(chromeApi, { type: 'AUDIT_REVIEW_UPDATED', auditId, exportRevision });
-      return Object.freeze({ ok: true });
-    } catch { return Object.freeze({ ok: false, code: 'COMPATIBILITY_FAILED' }); }
+    }
+    return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
   }
 
-  async function deleteLegacyAudit({ auditId }) {
+  async function deleteAudit({ auditId }) {
     try {
       const active = await readActiveAuditJobForWorker({ sessionArea });
       if (active?.auditId === auditId) return Object.freeze({ ok: false, code: 'AUDIT_DELETE_BUSY' });
       const snapshot = await auditStore.getAuditSnapshot(auditId);
-      if (snapshot?.model?.auditId !== auditId || !snapshot.capability) return Object.freeze({ ok: false, code: 'COMPATIBILITY_FAILED' });
+      if (snapshot?.model?.auditId !== auditId || !snapshot.capability) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
       const result = await auditStore.deleteAudit(auditId, snapshot.capability, { now: now() });
-      if (result?.deleted !== true) return Object.freeze({ ok: false, code: 'COMPATIBILITY_FAILED' });
+      if (result?.deleted !== true) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
       await checkpoints.removeCheckpoint({ auditId, sessionCapabilityId: null, windowId: null });
       await sendRuntimeMessage(chromeApi, createAuditDeletedEvent({ auditId, reason: 'delete-one' })).catch(() => {});
       return freeze({ ok: true, auditId, deleted: true });
     } catch (error) {
       return error instanceof AuditDeleteBusyError || own(error, 'code') === 'AUDIT_DELETE_BUSY'
         ? Object.freeze({ ok: false, code: 'AUDIT_DELETE_BUSY' })
-        : Object.freeze({ ok: false, code: 'COMPATIBILITY_FAILED' });
+        : Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
     }
   }
 
-  async function deleteAllLegacyAudits() {
+  async function deleteAllAudits() {
     try {
       if (await readActiveAuditJobForWorker({ sessionArea }) !== null) return Object.freeze({ ok: false, code: 'AUDIT_DELETE_BUSY' });
       const result = await auditStore.deleteAllAudits({ now: now() });
@@ -304,13 +330,12 @@ function createCompatibilityAdapters({ chromeApi, auditStore, sessionArea, model
     } catch (error) {
       return error instanceof AuditDeleteBusyError || own(error, 'code') === 'AUDIT_DELETE_BUSY'
         ? Object.freeze({ ok: false, code: 'AUDIT_DELETE_BUSY' })
-        : Object.freeze({ ok: false, code: 'COMPATIBILITY_FAILED' });
+        : Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
     }
   }
 
   return freeze({
-    readLegacyLastAudit, notifyLegacyReviewCommitted,
-    deleteLegacyAudit, deleteAllLegacyAudits,
+    commitReviewDecision, deleteAudit, deleteAllAudits,
   });
 }
 
@@ -330,6 +355,44 @@ async function buildDefaultRuntime(chromeApi, options) {
     chromeApi, sessionArea, now: epochNow, randomBytes: bytes,
     probeDocument: tabId => chromeAdapter.probeDocumentIdentity(tabId),
   });
+  const panelLaunchAuthority = options.panelLaunchAuthority ?? createPanelLaunchAuthority({
+    chromeApi, sessionArea, now: epochNow, randomBytes: bytes,
+  });
+  if (await panelLaunchAuthority.initialize() !== true) throw new Error('WORKER_UNAVAILABLE');
+  const targetQueue = createTargetOperationQueue();
+  const personaLeaseStore = createPersonaLeaseStore({
+    sessionArea,
+    lockManager: options.personaLockManager ?? globalThis.navigator?.locks,
+    now: epochNow,
+    randomBytes: bytes,
+  });
+  const personaRuntime = createPersonaInjectionRuntime({ chromeApi });
+  const scheduleExpiry = async when => {
+    if (when === null) {
+      await chromeApi.alarms.clear(PERSONA_EXPIRY_ALARM_NAME);
+      return;
+    }
+    if (!Number.isSafeInteger(when) || when < 0) throw new Error('PERSONA_EXPIRY_SCHEDULE_FAILED');
+    await chromeApi.alarms.create(PERSONA_EXPIRY_ALARM_NAME, { when });
+  };
+  const personaCoordinator = createPersonaCoordinator({
+    leaseStore: personaLeaseStore,
+    targetQueue,
+    personaRuntime,
+    probeDocument: tabId => chromeAdapter.probeDocumentIdentity(tabId),
+    scheduleExpiry,
+  });
+  const personaStart = createPersonaStartOrchestrator({
+    authority,
+    targetQueue,
+    personaCoordinator,
+  });
+  const highlightCleaner = createAbsentHighlightCleaner({ sessionArea, targetQueue });
+  const cleanupBarrier = createLiveAidCleanup({
+    highlightCleaner,
+    personaCoordinator,
+    targetQueue,
+  });
   const auditStore = options.auditStore ?? createAuditStore(options.auditStoreOptions);
   const inventory = await createInstalledCoreRuleInventory();
   const buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({ reportRevision, inventory });
@@ -348,6 +411,7 @@ async function buildDefaultRuntime(chromeApi, options) {
     const reportRevision = await auditStore.getReportRevision(auditId);
     return reportRevision ? buildPanelResultBundle({ reportRevision }) : null;
   };
+  let panelIntentDispatcher = null;
   const panelCoordinator = createPanelPortCoordinator({
     chromeApi, sessionArea,
     readActiveJob: () => readActiveAuditJobForWorker({ sessionArea }),
@@ -358,6 +422,10 @@ async function buildDefaultRuntime(chromeApi, options) {
     epochNow,
     setTimer: (callback, delay) => setTimeout(callback, delay),
     clearTimer: timer => clearTimeout(timer),
+    launchAuthority: panelLaunchAuthority,
+    dispatchPanelIntent: request => panelIntentDispatcher
+      ? panelIntentDispatcher(request)
+      : Object.freeze({ ok: false, code: 'CONTEXT_DENIED' }),
   });
   const persistLatest = async ({ state }) => { await auditStore.setLatest(state); return freeze(structuredClone(state)); };
   const commitTerminalAudit = async ({ auditId, model, checkpoint, latestState, expectedRevision }) => {
@@ -370,7 +438,7 @@ async function buildDefaultRuntime(chromeApi, options) {
     return Object.freeze({ revision: 1, modelHash: result.modelHash });
   };
   const auditStarter = createAuthorizedAuditStarter({
-    authority, sessionArea, panelCoordinator,
+    authority, sessionArea, panelCoordinator, targetQueue, cleanupBarrier,
     runAttachedAuditExecution: args => runAttachedAuditExecution({
       ...args, chromeAdapter, expectedExtensionId: chromeApi.runtime.id,
     }),
@@ -386,6 +454,7 @@ async function buildDefaultRuntime(chromeApi, options) {
   const unavailableLaunch = freeze({
     async openRegisteredReport() { return { ok: false, code: 'REPORT_OPEN_DENIED' }; },
     async connect() { return { ok: false, code: 'CONTEXT_DENIED' }; },
+    async authorizeIntent() { return { ok: false, code: 'REPORT_INTENT_DENIED' }; },
     async authorizeExport() { return { ok: false, code: 'REPORT_EXPORT_DENIED' }; },
     async validateConsumer() { return false; },
     async requestExport() { return { ok: false, code: 'REPORT_EXPORT_DENIED' }; },
@@ -406,39 +475,48 @@ async function buildDefaultRuntime(chromeApi, options) {
   const exportLaunch = launchApisAvailable ? createExportLaunchAuthority({
     chromeApi, sessionArea, auditStore: exportCompletionStore, reportLaunch, epochNow, modelNow, randomBytes: bytes,
   }) : unavailableLaunch;
+  const reportOperations = createReportOperations({ chromeApi, auditStore, sessionArea, modelNow });
   const router = createSidePanelIntentRouter({
     chromeApi, authority, auditStarter, panelCoordinator, chromeAdapter,
+    personaStart, personaCoordinator,
     readReportRevision: ({ auditId }) => auditStore.getReportRevision(auditId),
     buildPanelResultBundle, revokeViewOnly, epochNow, modelNow,
-    createAuditId: options.createAuditId ?? defaultAuditId, reportLaunch, exportLaunch,
+    createAuditId: options.createAuditId ?? defaultAuditId, reportLaunch, exportLaunch, reportOperations,
   });
-  const compatibilityAdapters = createCompatibilityAdapters({ chromeApi, auditStore, sessionArea, modelNow });
-  const compatibilityHandler = createLegacyCompatibilityHandler({
-    chromeApi,
-    readLegacyLastAudit: compatibilityAdapters.readLegacyLastAudit,
-    notifyLegacyReviewCommitted: compatibilityAdapters.notifyLegacyReviewCommitted,
-    deleteLegacyAudit: compatibilityAdapters.deleteLegacyAudit,
-    deleteAllLegacyAudits: compatibilityAdapters.deleteAllLegacyAudits,
-  });
-  const personaController = options.personaController ?? getPersonaController(chromeApi, { logger: options.logger });
+  panelIntentDispatcher = request => router.dispatch(request);
+  const panelLauncher = options.panelLauncher ??
+    createPanelLauncher({ chromeApi, launchAuthority: panelLaunchAuthority, logger: options.logger });
+  const personaRecovery = await personaCoordinator.recover();
+  if (personaRecovery?.ok !== true) throw new Error('WORKER_UNAVAILABLE');
   const recovery = await auditStarter.recoverAuthorizedAuditLifecycle();
   if (recovery?.ok !== true) throw new Error('WORKER_UNAVAILABLE');
   return {
-    readyRuntime: copyReadyRuntime({ authority, auditStarter, chromeAdapter, reportLaunch, exportLaunch }),
-    router, compatibilityHandler, panelCoordinator, personaController,
+    readyRuntime: copyReadyRuntime({
+      authority,
+      auditStarter,
+      chromeAdapter,
+      reportLaunch,
+      exportLaunch,
+      personaCoordinator,
+    }),
+    router, panelCoordinator, panelLauncher,
   };
 }
 
 function parseBuiltRuntime(value) {
-  const built = exact(value, ['readyRuntime', 'router', 'compatibilityHandler', 'panelCoordinator', 'personaController'], true);
-  if (!built || typeof built.router?.dispatch !== 'function' || typeof built.compatibilityHandler?.dispatch !== 'function' ||
-    typeof built.panelCoordinator?.attachPanelPort !== 'function') throw new Error('WORKER_UNAVAILABLE');
+  const built = exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher'], true);
+  if (!built || typeof built.router?.dispatch !== 'function' ||
+    typeof built.panelCoordinator?.attachPanelPort !== 'function' ||
+    typeof built.panelLauncher?.launch !== 'function') throw new Error('WORKER_UNAVAILABLE');
   return { ...built, readyRuntime: copyReadyRuntime(built.readyRuntime) };
 }
 
 export function registerServiceWorker(chromeApi, options = {}) {
   if (!chromeApi?.runtime?.onMessage?.addListener || !chromeApi.runtime.onMessage.removeListener ||
     !chromeApi?.runtime?.onConnect?.addListener || !chromeApi.runtime.onConnect.removeListener ||
+    !chromeApi?.alarms?.onAlarm?.addListener || !chromeApi.alarms.onAlarm.removeListener ||
+    !chromeApi?.action?.onClicked?.addListener || !chromeApi.action.onClicked.removeListener ||
+    typeof chromeApi.alarms.create !== 'function' || typeof chromeApi.alarms.clear !== 'function' ||
     !chromeApi?.storage?.session) throw new TypeError('SERVICE_WORKER_INVALID');
   const logger = options.logger ?? { error() {} };
   const epochNow = options.epochNow ?? Date.now;
@@ -446,13 +524,31 @@ export function registerServiceWorker(chromeApi, options = {}) {
   const createAuditId = options.createAuditId ?? defaultAuditId;
 
   void invokeChrome(chromeApi, chromeApi.sidePanel, 'setPanelBehavior', {
-    openPanelOnActionClick: true,
+    openPanelOnActionClick: false,
   }).catch(() => logger.error(SIDE_PANEL_BEHAVIOR_DENIED));
 
   let router = options.router ?? null;
-  let compatibilityHandler = options.compatibilityHandler ?? null;
   let panelCoordinator = options.panelCoordinator ?? null;
-  let personaController = options.personaController ?? null;
+  let panelLauncher = options.panelLauncher ?? null;
+  let earlyPanelLaunchAuthority = null;
+  let settlePanelStorageGate = null;
+  if (!options.startupReady && !options.buildRuntime && !panelLauncher) {
+    const panelStorageGate = new Promise(resolve => { settlePanelStorageGate = resolve; });
+    try {
+      earlyPanelLaunchAuthority = createPanelLaunchAuthority({
+        chromeApi,
+        sessionArea: chromeApi.storage.session,
+        now: epochNow,
+        randomBytes: options.randomBytes ?? randomBytes,
+      });
+      void earlyPanelLaunchAuthority.initialize(panelStorageGate);
+      panelLauncher = createPanelLauncher({ chromeApi, launchAuthority: earlyPanelLaunchAuthority, logger });
+    } catch {
+      earlyPanelLaunchAuthority = null;
+      settlePanelStorageGate(false);
+      settlePanelStorageGate = null;
+    }
+  }
   let resolveStartup;
   let rejectStartup;
   let startupReady;
@@ -466,27 +562,15 @@ export function registerServiceWorker(chromeApi, options = {}) {
 
   const messageListener = (message, sender, sendResponse) => {
     const primary = parseWorkerMessage(message);
-    let compatibility = null;
-    let kind = 'primary';
-    if (!primary.ok && primary.code === 'UNKNOWN_MESSAGE') {
-      compatibility = parseLegacyCompatMessage(message);
-      if (!compatibility.ok && compatibility.code === 'UNKNOWN_MESSAGE') return false;
-      kind = 'compatibility';
-    }
+    if (!primary.ok && primary.code === 'UNKNOWN_MESSAGE') return false;
     void startupReady.then(async () => {
-      if (kind === 'primary') {
-        if (!primary.ok) return primary.code === 'MESSAGE_TOO_LARGE'
-          ? Object.freeze({ ok: false, code: 'MESSAGE_TOO_LARGE' })
-          : Object.freeze({ ok: false, code: 'INVALID_MESSAGE' });
-        try { return await router.dispatch({ envelope: primary.value, sender }); }
-        catch { return Object.freeze({ ok: false, code: 'WORKER_UNAVAILABLE' }); }
-      }
-      if (!compatibility.ok) return Object.freeze({ ok: false, code: 'COMPATIBILITY_DENIED' });
-      try { return await compatibilityHandler.dispatch({ envelope: compatibility.value, sender }); }
-      catch { return Object.freeze({ ok: false, code: 'COMPATIBILITY_FAILED' }); }
-    }, () => kind === 'primary'
-      ? Object.freeze({ ok: false, code: 'WORKER_UNAVAILABLE' })
-      : Object.freeze({ ok: false, code: 'COMPATIBILITY_FAILED' }))
+      if (!primary.ok) return primary.code === 'MESSAGE_TOO_LARGE'
+        ? Object.freeze({ ok: false, code: 'MESSAGE_TOO_LARGE' })
+        : Object.freeze({ ok: false, code: 'INVALID_MESSAGE' });
+      if (isPanelPortIntent(primary.value)) return Object.freeze({ ok: false, code: 'CONTEXT_DENIED' });
+      try { return await router.dispatch({ envelope: primary.value, sender }); }
+      catch { return Object.freeze({ ok: false, code: 'WORKER_UNAVAILABLE' }); }
+    }, () => Object.freeze({ ok: false, code: 'WORKER_UNAVAILABLE' }))
       .then(response => {
         try { sendResponse(response); } catch { /* one closed response attempt */ }
       });
@@ -497,7 +581,6 @@ export function registerServiceWorker(chromeApi, options = {}) {
     const name = own(port, 'name');
     void startupReady.then(() => {
       if (name === PANEL_PORT_NAME) panelCoordinator.attachPanelPort(port);
-      else if (name === PERSONA_PORT_NAME && personaController?.attachPanelPort) personaController.attachPanelPort(port);
       else {
         try { port?.disconnect?.(); } catch { /* fixed denial */ }
       }
@@ -506,13 +589,30 @@ export function registerServiceWorker(chromeApi, options = {}) {
     });
   };
 
+  const alarmListener = alarm => {
+    if (own(alarm, 'name') !== PERSONA_EXPIRY_ALARM_NAME) return;
+    void startupReady.then(runtime => runtime.personaCoordinator?.expireDue?.(), () => false).catch(() => false);
+  };
+
+  const actionListener = tab => {
+    try {
+      if (typeof panelLauncher?.launch !== 'function' || panelLauncher.launch(tab) !== true) {
+        logger.error('PANEL_LAUNCH_UNAVAILABLE');
+      }
+    } catch { logger.error('PANEL_LAUNCH_UNAVAILABLE'); }
+  };
+
   chromeApi.runtime.onMessage.addListener(messageListener);
   chromeApi.runtime.onConnect.addListener(connectListener);
+  chromeApi.alarms.onAlarm.addListener(alarmListener);
+  chromeApi.action.onClicked.addListener(actionListener);
 
   const lifecycle = createAuditLifecycle({ chromeApi, getReadyRuntime });
   lifecycle.register();
   const contextMenus = registerAuditContextMenus(chromeApi, {
     getReadyRuntime, createEventNonce, createAuditId, epochNow, logger,
+    launchPanel: (tab, onOpened) => typeof panelLauncher?.launch === 'function' &&
+      panelLauncher.launch(tab, onOpened) === true,
   });
   void startupReady.then(() => contextMenus.installMenus(), () => false);
 
@@ -522,18 +622,23 @@ export function registerServiceWorker(chromeApi, options = {}) {
         if (typeof chromeApi.storage.session.setAccessLevel !== 'function') throw new Error(SESSION_ACCESS_LEVEL_DENIED);
         await invokeChrome(chromeApi, chromeApi.storage.session, 'setAccessLevel', { accessLevel: 'TRUSTED_CONTEXTS' });
       } catch {
+        settlePanelStorageGate?.(false);
         logger.error(SESSION_ACCESS_LEVEL_DENIED);
         rejectStartup(new Error('WORKER_UNAVAILABLE'));
         return;
       }
+      settlePanelStorageGate?.(true);
       try {
         const built = parseBuiltRuntime(options.buildRuntime
           ? await options.buildRuntime({ chromeApi, sessionArea: chromeApi.storage.session })
-          : await buildDefaultRuntime(chromeApi, { ...options, logger, epochNow, createAuditId }));
+          : await buildDefaultRuntime(chromeApi, {
+            ...options, logger, epochNow, createAuditId,
+            panelLaunchAuthority: earlyPanelLaunchAuthority ?? undefined,
+            panelLauncher: panelLauncher ?? undefined,
+          }));
         router = built.router;
-        compatibilityHandler = built.compatibilityHandler;
         panelCoordinator = built.panelCoordinator;
-        personaController = built.personaController;
+        panelLauncher = built.panelLauncher;
         resolveStartup(built.readyRuntime);
       } catch {
         rejectStartup(new Error('WORKER_UNAVAILABLE'));
@@ -544,6 +649,8 @@ export function registerServiceWorker(chromeApi, options = {}) {
   function dispose() {
     chromeApi.runtime.onMessage.removeListener(messageListener);
     chromeApi.runtime.onConnect.removeListener(connectListener);
+    chromeApi.alarms.onAlarm.removeListener(alarmListener);
+    chromeApi.action.onClicked.removeListener(actionListener);
     lifecycle.dispose();
     contextMenus.dispose();
   }

@@ -31,10 +31,14 @@ export function createAuditLifecycle(raw) {
   const input = exact(raw, ['chromeApi', 'getReadyRuntime']);
   const updated = input?.chromeApi?.tabs?.onUpdated;
   const removed = input?.chromeApi?.tabs?.onRemoved;
+  const detached = input?.chromeApi?.tabs?.onDetached;
   const windowRemoved = input?.chromeApi?.windows?.onRemoved;
+  const detachedAvailable = typeof detached?.addListener === 'function' && typeof detached.removeListener === 'function';
+  const detachedMalformed = detached !== undefined && !detachedAvailable;
   if (!input || typeof input.getReadyRuntime !== 'function' ||
     typeof updated?.addListener !== 'function' || typeof updated.removeListener !== 'function' ||
     typeof removed?.addListener !== 'function' || typeof removed.removeListener !== 'function' ||
+    detachedMalformed ||
     typeof windowRemoved?.addListener !== 'function' || typeof windowRemoved.removeListener !== 'function') {
     throw new TypeError('AUDIT_LIFECYCLE_INVALID');
   }
@@ -45,11 +49,14 @@ export function createAuditLifecycle(raw) {
     try { await operation(); } catch { /* each lifecycle stage is independently fail-closed */ }
   }
 
-  async function invalidateTab(tabId, reasonCode, changeInfo = null) {
+  async function invalidateTab(tabId, reasonCode, changeInfo = null, personaReason = null) {
     try {
       const runtime = await input.getReadyRuntime();
       await bestEffort(() => runtime.auditStarter.abortAttachedAuditForTarget({ tabId, windowId: null, reasonCode }));
       await bestEffort(() => runtime.authority.invalidateForTab(tabId, reasonCode));
+      if (personaReason !== null) {
+        await bestEffort(() => runtime.personaCoordinator?.invalidateTab?.(tabId, personaReason));
+      }
       if (changeInfo !== null) {
         await bestEffort(() => runtime.reportLaunch?.handleTabUpdated?.(tabId, changeInfo));
         await bestEffort(() => runtime.exportLaunch?.handleTabUpdated?.(tabId, changeInfo));
@@ -65,6 +72,7 @@ export function createAuditLifecycle(raw) {
       const runtime = await input.getReadyRuntime();
       await bestEffort(() => runtime.auditStarter.abortAttachedAuditForTarget({ tabId: null, windowId, reasonCode: 'WINDOW_REMOVED' }));
       await bestEffort(() => runtime.authority.invalidateForWindow(windowId, 'WINDOW_REMOVED'));
+      await bestEffort(() => runtime.personaCoordinator?.invalidateWindow?.(windowId, 'window-changed'));
       await bestEffort(() => runtime.reportLaunch?.handleWindowRemoved?.(windowId));
       await bestEffort(() => runtime.exportLaunch?.handleWindowRemoved?.(windowId));
     } catch { /* readiness and invalidation failures are closed no-ops */ }
@@ -82,9 +90,14 @@ export function createAuditLifecycle(raw) {
         : pendingUrl.found && typeof pendingUrl.value === 'string'
           ? 'TAB_PENDING_URL'
           : null;
-    if (reason) void invalidateTab(tabId, reason, changeInfo);
+    if (reason) void invalidateTab(tabId, reason, changeInfo, 'navigation');
   };
-  const onTabRemoved = tabId => { if (safeChromeId(tabId)) void invalidateTab(tabId, 'TAB_REMOVED'); };
+  const onTabRemoved = tabId => {
+    if (safeChromeId(tabId)) void invalidateTab(tabId, 'TAB_REMOVED', null, 'tab-removed');
+  };
+  const onTabDetached = tabId => {
+    if (safeChromeId(tabId)) void invalidateTab(tabId, 'TAB_REMOVED', null, 'window-changed');
+  };
   const onWindowRemoved = windowId => { if (safeChromeId(windowId)) void invalidateWindow(windowId); };
 
   function register() {
@@ -92,6 +105,7 @@ export function createAuditLifecycle(raw) {
     registered = true;
     updated.addListener(onUpdated);
     removed.addListener(onTabRemoved);
+    if (detachedAvailable) detached.addListener(onTabDetached);
     windowRemoved.addListener(onWindowRemoved);
     return true;
   }
@@ -101,6 +115,7 @@ export function createAuditLifecycle(raw) {
     registered = false;
     updated.removeListener(onUpdated);
     removed.removeListener(onTabRemoved);
+    if (detachedAvailable) detached.removeListener(onTabDetached);
     windowRemoved.removeListener(onWindowRemoved);
     return true;
   }

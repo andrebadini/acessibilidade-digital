@@ -18,13 +18,17 @@ import {
 const TARGET_KEYS = ['version', 'capabilityId', 'kind', 'tabId', 'windowId', 'documentId', 'initialUrlEvidence', 'initialUrlSessionDigest', 'createdBy', 'allowedIntent', 'issuer', 'sessionCapabilityId', 'issuedAt', 'expiresAt', 'state'];
 const SESSION_KEYS = ['version', 'sessionCapabilityId', 'auditId', 'windowId', 'mode', 'targetBinding', 'consumers', 'intents', 'state', 'issuedAt', 'expiresAt'];
 const DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
+const LAUNCH_TOKEN = 'L'.repeat(43);
+const PANEL_URL = `chrome-extension://test/src/panel/index.html?launch=${LAUNCH_TOKEN}`;
 
 function createStorageArea() {
   const values = {};
   const unsafeValues = new Map();
   const writes = [];
+  const removals = [];
   return {
     writes,
+    removals,
     unsafeSet(key, value) { unsafeValues.set(key, value); },
     async get(key) {
       if (key === null) return { ...structuredClone(values), ...Object.fromEntries(unsafeValues) };
@@ -44,6 +48,14 @@ function createStorageArea() {
       writes.push({ keys: Object.keys(entries), value: structuredClone(entries) });
       Object.assign(values, structuredClone(entries));
     },
+    async remove(key) {
+      const keys = Array.isArray(key) ? key : [key];
+      removals.push([...keys]);
+      for (const entry of keys) {
+        delete values[entry];
+        unsafeValues.delete(entry);
+      }
+    },
   };
 }
 
@@ -53,7 +65,17 @@ function extensionContext(documentId = 'panel-document-1', windowId = 9) {
     windowId,
     tabId: null,
     contextType: PANEL_SURFACE.contextType,
-    documentUrl: 'chrome-extension://test/src/panel/index.html',
+    documentUrl: PANEL_URL,
+  });
+}
+
+function surfaceContext(surface, documentId = 'surface-document-1', windowId = 9) {
+  return Object.freeze({
+    issuer: Object.freeze({ type: 'extension-document', documentId, path: surface.path }),
+    windowId,
+    tabId: surface === PANEL_SURFACE ? null : 71,
+    contextType: surface.contextType,
+    documentUrl: `chrome-extension://test${surface.path}${surface.allowQuery === 'auditId-only' ? '?auditId=audit-1' : ''}`,
   });
 }
 
@@ -120,6 +142,20 @@ async function prepareAttached(authority, issuer = extensionContext().issuer) {
   });
 }
 
+async function preparePersona(authority, issuer = extensionContext().issuer) {
+  return authority.prepare({
+    kind: 'attached',
+    tabId: 41,
+    windowId: 9,
+    documentId: 'target-document-1',
+    initialUrlEvidence: 'https://example.test/path',
+    initialUrlSessionDigest: DIGEST,
+    createdBy: 'user',
+    allowedIntent: 'start-persona',
+    issuer,
+  });
+}
+
 const validStart = capabilityId => ({
   capabilityId,
   auditId: 'audit-1',
@@ -129,7 +165,7 @@ const validStart = capabilityId => ({
 });
 
 test('exports only the three frozen trusted-surface constants', () => {
-  assert.deepEqual(PANEL_SURFACE, { path: '/src/panel/index.html', contextType: 'SIDE_PANEL', allowQuery: false });
+  assert.deepEqual(PANEL_SURFACE, { path: '/src/panel/index.html', contextType: 'SIDE_PANEL', allowQuery: 'launch-only' });
   assert.deepEqual(REVIEW_SURFACE, { path: '/src/review/index.html', contextType: 'TAB', allowQuery: 'auditId-only' });
   assert.deepEqual(EXPORT_SURFACE, { path: '/src/export/index.html', contextType: 'TAB', allowQuery: 'auditId-only' });
   assert.equal([PANEL_SURFACE, REVIEW_SURFACE, EXPORT_SURFACE].every(Object.isFrozen), true);
@@ -143,10 +179,10 @@ test('does not trust an object shaped like the removed popup surface', async () 
   }), /CONTEXT_DENIED/u);
 });
 
-test('accepts Node WHATWG chrome-extension URL without origin comparison or sender.tab', async () => {
+test('accepts only an exact tokenized Side Panel URL with one native document identity', async () => {
   const sender = {
     id: 'test', documentId: 'panel-document-1',
-    url: 'chrome-extension://test/src/panel/index.html',
+    url: PANEL_URL,
   };
   const { chromeApi, calls } = panelChromeApi(sender);
   const context = await deriveTrustedExtensionContext({ sender, chromeApi, surface: PANEL_SURFACE, claimedWindowId: 9 });
@@ -161,7 +197,25 @@ test('accepts Node WHATWG chrome-extension URL without origin comparison or send
   ]);
 });
 
-test('accepts the native SIDE_PANEL sender without documentId only after exact origin context and window proofs', async () => {
+test('keeps the default panel and malformed launch URLs unprivileged', async () => {
+  for (const url of [
+    'chrome-extension://test/src/panel/index.html',
+    'chrome-extension://test/src/panel/index.html?launch=short',
+    `${PANEL_URL}&launch=${'M'.repeat(43)}`,
+    `${PANEL_URL}&extra=1`,
+    `${PANEL_URL}#fragment`,
+  ]) {
+    const sender = { id: 'test', documentId: 'panel-document-1', url };
+    const { chromeApi } = panelChromeApi(sender);
+    await assert.rejects(
+      () => deriveTrustedExtensionContext({ sender, chromeApi, surface: PANEL_SURFACE, claimedWindowId: 9 }),
+      /CONTEXT_DENIED/u,
+      url,
+    );
+  }
+});
+
+test('rejects a native Side Panel message sender without documentId even when URL origin and window look valid', async () => {
   const url = 'chrome-extension://test/src/panel/index.html';
   const sender = { id: 'test', url, origin: 'chrome-extension://test' };
   const calls = [];
@@ -190,20 +244,14 @@ test('accepts the native SIDE_PANEL sender without documentId only after exact o
     },
   };
 
-  const context = await deriveTrustedExtensionContext({ sender, chromeApi, surface: PANEL_SURFACE, claimedWindowId: 9 });
-
-  assert.deepEqual(context, {
-    issuer: { type: 'extension-document', documentId: 'side-panel-window:9', path: PANEL_SURFACE.path },
-    windowId: 9, tabId: null, contextType: 'SIDE_PANEL', documentUrl: url,
-  });
-  assert.deepEqual(calls, [
-    ['contexts', { contextTypes: ['SIDE_PANEL'], documentUrls: [url] }],
-    ['window', 9, { populate: false }],
-    ['tabs', { active: true, windowId: 9 }],
-  ]);
+  await assert.rejects(
+    () => deriveTrustedExtensionContext({ sender, chromeApi, surface: PANEL_SURFACE, claimedWindowId: 9 }),
+    /CONTEXT_DENIED/u,
+  );
+  assert.deepEqual(calls, []);
 });
 
-test('admits the native SIDE_PANEL sender for its claimed window when the same global panel is open in another window', async () => {
+test('never aliases a document-less Side Panel sender by its claimed window', async () => {
   const url = 'chrome-extension://test/src/panel/index.html';
   const sender = { id: 'test', url, origin: 'chrome-extension://test' };
   const chromeApi = {
@@ -232,18 +280,14 @@ test('admits the native SIDE_PANEL sender for its claimed window when the same g
     },
   };
 
-  const context = await deriveTrustedExtensionContext({
-    sender, chromeApi, surface: PANEL_SURFACE, claimedWindowId: 9,
-  });
-
-  assert.deepEqual(context, {
-    issuer: { type: 'extension-document', documentId: 'side-panel-window:9', path: PANEL_SURFACE.path },
-    windowId: 9, tabId: null, contextType: 'SIDE_PANEL', documentUrl: url,
-  });
+  await assert.rejects(
+    () => deriveTrustedExtensionContext({ sender, chromeApi, surface: PANEL_SURFACE, claimedWindowId: 9 }),
+    /CONTEXT_DENIED/u,
+  );
 });
 
-test('fails closed for a document-less sender without the exact native panel origin or live SIDE_PANEL context', async () => {
-  const url = 'chrome-extension://test/src/panel/index.html';
+test('fails closed for every document-less sender shape', async () => {
+  const url = PANEL_URL;
   for (const [name, sender, contexts] of [
     ['missing-origin', { id: 'test', url }, [{ documentId: 'native-panel', documentUrl: url, contextType: 'SIDE_PANEL', windowId: -1 }]],
     ['wrong-origin', { id: 'test', url, origin: 'chrome-extension://other' }, [{ documentId: 'native-panel', documentUrl: url, contextType: 'SIDE_PANEL', windowId: -1 }]],
@@ -266,7 +310,7 @@ test('fails closed for a document-less sender without the exact native panel ori
 test('rejects a SIDE_PANEL sentinel without one independently verified window claim', async () => {
   const sender = {
     id: 'test', documentId: 'panel-document-1',
-    url: 'chrome-extension://test/src/panel/index.html',
+    url: PANEL_URL,
   };
   const { chromeApi } = panelChromeApi(sender);
   await assert.rejects(
@@ -278,7 +322,7 @@ test('rejects a SIDE_PANEL sentinel without one independently verified window cl
 test('denies wrong removed ambiguous loading pending and privileged window claims before returning authority', async t => {
   const sender = {
     id: 'test', documentId: 'panel-document-1',
-    url: 'chrome-extension://test/src/panel/index.html',
+    url: PANEL_URL,
   };
   const rows = [
     ['wrong-window', {
@@ -322,7 +366,7 @@ test('denies wrong removed ambiguous loading pending and privileged window claim
 });
 
 test('rejects scheme host query context and document mismatches', async () => {
-  const validUrl = 'chrome-extension://test/src/panel/index.html';
+  const validUrl = PANEL_URL;
   const contexts = [{ documentId: 'panel-document-1', documentUrl: validUrl, contextType: 'SIDE_PANEL', windowId: 9 }];
   const { chromeApi } = panelChromeApi({ id: 'test', documentId: 'panel-document-1', url: validUrl }, {
     runtime: { id: 'test', async getContexts() { return contexts; } },
@@ -330,7 +374,7 @@ test('rejects scheme host query context and document mismatches', async () => {
   const senders = [
     { id: 'test', documentId: 'panel-document-1', url: 'https://test/src/panel/index.html' },
     { id: 'test', documentId: 'panel-document-1', url: 'chrome-extension://other/src/panel/index.html' },
-    { id: 'test', documentId: 'panel-document-1', url: `${validUrl}?auditId=audit-1` },
+    { id: 'test', documentId: 'panel-document-1', url: `${validUrl}&auditId=audit-1` },
     { id: 'test', documentId: 'panel-document-1', url: validUrl, contextOverride: 'TAB' },
     { id: 'test', documentId: 'unknown-document', url: validUrl },
   ];
@@ -358,7 +402,7 @@ test('review and export allow exactly one closed auditId query', async () => {
 
 test('prepares an exact one-use target and atomically persists its running session', async () => {
   const { authority, sessionArea } = authorityFixture();
-  assert.deepEqual(Object.keys(authority), ['prepare', 'claimAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'rehydrateViewOnly']);
+  assert.deepEqual(Object.keys(authority), ['prepare', 'inspectPreparedTarget', 'claimPreparedTarget', 'inspectPreparedAuditTarget', 'claimAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'rehydrateViewOnly']);
   const prepared = await prepareAttached(authority);
   const result = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
   assert.equal(result.ok, true);
@@ -404,6 +448,34 @@ test('rejects expiry reached while fresh document proof is pending without a cla
   assert.deepEqual(await pending, { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
   assert.equal(sessionArea.writes.length, writesBeforeClaim);
   assert.equal((await sessionArea.get(targetCapabilityStorageKey(prepared.capabilityId)))[targetCapabilityStorageKey(prepared.capabilityId)].state, 'prepared');
+});
+
+test('audit inspection returns the exact target without consuming either extension or worker-event authority', async () => {
+  for (const workerEvent of [false, true]) {
+    const { authority, sessionArea } = authorityFixture();
+    const eventNonce = workerEvent ? 'nonce-12345678901234567890' : null;
+    const prepared = await prepareAttached(authority, workerEvent
+      ? { type: 'worker-event', event: 'context-menu', eventNonce }
+      : extensionContext().issuer);
+    const before = sessionArea.writes.length;
+    const result = await authority.inspectPreparedAuditTarget({
+      capabilityId: prepared.capabilityId,
+      allowedIntent: 'start-audit',
+      eventNonce,
+      senderContext: workerEvent ? null : extensionContext(),
+    });
+    assert.deepEqual(result, {
+      ok: true,
+      target: {
+        tabId: 41,
+        windowId: 9,
+        documentId: 'target-document-1',
+        urlSessionDigest: DIGEST,
+      },
+    });
+    assert.equal(sessionArea.writes.length, before);
+    assert.equal((await sessionArea.get(targetCapabilityStorageKey(prepared.capabilityId)))[targetCapabilityStorageKey(prepared.capabilityId)].state, 'prepared');
+  }
 });
 
 test('fails closed when intent issuer window context or fresh document proof differs', async () => {
@@ -469,24 +541,248 @@ test('worker event claim rejects externally supplied window ownership and non-nu
   }
 });
 
-test('rejects the removed persona target intent without any session-area write', async () => {
+test('prepares, inspects and atomically claims a persona target without issuing an audit session', async () => {
   const { authority, sessionArea } = authorityFixture();
-  await assert.rejects(() => authority.prepare({
-    kind: 'attached',
-    tabId: 41,
-    windowId: 9,
-    documentId: 'target-document-1',
-    initialUrlEvidence: 'https://example.test/path',
-    initialUrlSessionDigest: DIGEST,
-    createdBy: 'user',
-    allowedIntent: 'start-persona',
-    issuer: extensionContext().issuer,
-  }), /CAPABILITY_PREPARE_DENIED/u);
-  assert.deepEqual(sessionArea.writes, []);
-  assert.deepEqual(await sessionArea.get(null), {});
+  const prepared = await preparePersona(authority);
+  const input = {
+    capabilityId: prepared.capabilityId,
+    intent: 'start-persona',
+    senderContext: extensionContext(),
+  };
+  const beforeInspect = sessionArea.writes.length;
+  const inspected = await authority.inspectPreparedTarget(input);
+  assert.deepEqual(inspected, {
+    ok: true,
+    target: {
+      tabId: 41,
+      windowId: 9,
+      documentId: 'target-document-1',
+      urlSessionDigest: DIGEST,
+    },
+  });
+  assert.equal(Object.isFrozen(inspected), true);
+  assert.equal(Object.isFrozen(inspected.target), true);
+  assert.equal(sessionArea.writes.length, beforeInspect, 'inspection is read-only');
+
+  const claimed = await authority.claimPreparedTarget(input);
+  assert.deepEqual(claimed, inspected);
+  const stored = await sessionArea.get(null);
+  assert.equal(stored[targetCapabilityStorageKey(prepared.capabilityId)], undefined);
+  assert.equal(Object.keys(stored).some(key => key.startsWith('audita:audit-session-capability:')), false);
+  assert.deepEqual(sessionArea.removals, [[targetCapabilityStorageKey(prepared.capabilityId)]]);
+  assert.deepEqual(await authority.claimPreparedTarget(input), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
 });
 
-test('rejects an injected persisted persona target at every parser-boundary consumer', async () => {
+test('persona capabilities are prepared and persisted only for the exact Side Panel surface', async () => {
+  for (const surface of [REVIEW_SURFACE, EXPORT_SURFACE]) {
+    const issuer = surfaceContext(surface).issuer;
+    const { authority } = authorityFixture();
+    await assert.rejects(() => preparePersona(authority, issuer), /CAPABILITY_PREPARE_DENIED/u);
+  }
+
+  for (const surface of [REVIEW_SURFACE, EXPORT_SURFACE]) {
+    const capabilityId = surface === REVIEW_SURFACE ? 'R'.repeat(22) : 'E'.repeat(22);
+    const { authority, sessionArea } = authorityFixture();
+    const key = targetCapabilityStorageKey(capabilityId);
+    await sessionArea.set({
+      [key]: {
+        version: 1,
+        capabilityId,
+        kind: 'attached',
+        tabId: 41,
+        windowId: 9,
+        documentId: 'target-document-1',
+        initialUrlEvidence: 'https://example.test/path',
+        initialUrlSessionDigest: DIGEST,
+        createdBy: 'user',
+        allowedIntent: 'start-persona',
+        issuer: surfaceContext(surface).issuer,
+        sessionCapabilityId: null,
+        issuedAt: 1_788_000_000_000,
+        expiresAt: 1_788_000_060_000,
+        state: 'prepared',
+      },
+    });
+    const input = {
+      capabilityId,
+      intent: 'start-persona',
+      senderContext: surfaceContext(surface),
+    };
+    assert.deepEqual(await authority.inspectPreparedTarget(input), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+    assert.deepEqual(await authority.claimPreparedTarget(input), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+    assert.equal((await sessionArea.get(key))[key].state, 'prepared', 'hostile fixture is never consumed');
+  }
+});
+
+test('persona inspection and claim require the exact correlated Side Panel context', async () => {
+  const invalidContexts = [
+    { ...extensionContext(), tabId: 41 },
+    { ...extensionContext(), contextType: 'TAB' },
+    { ...extensionContext(), documentUrl: 'chrome-extension://test/src/panel/index.html?auditId=audit-1' },
+    { ...extensionContext(), windowId: 10 },
+    { ...extensionContext(), issuer: { ...extensionContext().issuer, documentId: 'another-panel-document' } },
+  ];
+  for (const senderContext of invalidContexts) {
+    for (const operation of ['inspectPreparedTarget', 'claimPreparedTarget']) {
+      const { authority } = authorityFixture();
+      const prepared = await preparePersona(authority);
+      assert.deepEqual(await authority[operation]({
+        capabilityId: prepared.capabilityId,
+        intent: 'start-persona',
+        senderContext,
+      }), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+    }
+  }
+});
+
+test('persona inspection and claim both re-prove context expiry and the live document', async () => {
+  const mutations = [
+    input => ({ ...input, senderContext: extensionContext('forged-panel') }),
+    input => ({ ...input, intent: 'start-audit' }),
+    input => ({ ...input, tabId: 41 }),
+  ];
+  for (const mutate of mutations) {
+    const { authority, sessionArea } = authorityFixture();
+    const prepared = await preparePersona(authority);
+    const input = {
+      capabilityId: prepared.capabilityId,
+      intent: 'start-persona',
+      senderContext: extensionContext(),
+    };
+    assert.deepEqual(await authority.inspectPreparedTarget(mutate(input)), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+    assert.deepEqual(await authority.claimPreparedTarget(mutate(input)), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+    assert.equal((await sessionArea.get(targetCapabilityStorageKey(prepared.capabilityId)))[targetCapabilityStorageKey(prepared.capabilityId)].state, 'prepared');
+  }
+
+  let documentId = 'target-document-1';
+  const { authority, sessionArea } = authorityFixture({
+    probeDocument: async () => ({ tabId: 41, windowId: 9, documentId, urlSessionDigest: DIGEST }),
+  });
+  const prepared = await preparePersona(authority);
+  const input = { capabilityId: prepared.capabilityId, intent: 'start-persona', senderContext: extensionContext() };
+  assert.equal((await authority.inspectPreparedTarget(input)).ok, true);
+  documentId = 'reloaded-document';
+  assert.deepEqual(await authority.claimPreparedTarget(input), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+  assert.equal((await sessionArea.get(targetCapabilityStorageKey(prepared.capabilityId)))[targetCapabilityStorageKey(prepared.capabilityId)].state, 'prepared');
+});
+
+test('persona inspection and claim fail closed before proof when the clock regresses behind issuance', async () => {
+  for (const operation of ['inspectPreparedTarget', 'claimPreparedTarget']) {
+    let currentTime = 1_788_000_000_000;
+    let probeCalls = 0;
+    const { authority, sessionArea } = authorityFixture({
+      now: () => currentTime,
+      probeDocument: async () => {
+        probeCalls += 1;
+        return { tabId: 41, windowId: 9, documentId: 'target-document-1', urlSessionDigest: DIGEST };
+      },
+    });
+    const prepared = await preparePersona(authority);
+    currentTime -= 1;
+
+    assert.deepEqual(await authority[operation]({
+      capabilityId: prepared.capabilityId,
+      intent: 'start-persona',
+      senderContext: extensionContext(),
+    }), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+    assert.equal(probeCalls, 0, `${operation} must reject before probing`);
+    const key = targetCapabilityStorageKey(prepared.capabilityId);
+    assert.equal((await sessionArea.get(key))[key].state, 'prepared');
+  }
+});
+
+test('persona inspection and claim fail closed when the clock regresses during proof', async () => {
+  for (const operation of ['inspectPreparedTarget', 'claimPreparedTarget']) {
+    const issuedAt = 1_788_000_000_000;
+    let currentTime = issuedAt;
+    const { authority, sessionArea } = authorityFixture({
+      now: () => currentTime,
+      probeDocument: async () => {
+        currentTime = issuedAt;
+        return { tabId: 41, windowId: 9, documentId: 'target-document-1', urlSessionDigest: DIGEST };
+      },
+    });
+    const prepared = await preparePersona(authority);
+    currentTime = issuedAt + 1;
+
+    assert.deepEqual(await authority[operation]({
+      capabilityId: prepared.capabilityId,
+      intent: 'start-persona',
+      senderContext: extensionContext(),
+    }), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+    const key = targetCapabilityStorageKey(prepared.capabilityId);
+    assert.equal((await sessionArea.get(key))[key].state, 'prepared');
+  }
+});
+
+test('two competing persona claims consume the capability at most once', async () => {
+  const { authority, sessionArea } = authorityFixture();
+  const prepared = await preparePersona(authority);
+  const input = { capabilityId: prepared.capabilityId, intent: 'start-persona', senderContext: extensionContext() };
+  const results = await Promise.all([
+    authority.claimPreparedTarget(input),
+    authority.claimPreparedTarget(input),
+  ]);
+  assert.equal(results.filter(result => result.ok === true).length, 1);
+  assert.equal(results.filter(result => result.code === 'CAPABILITY_UNAVAILABLE').length, 1);
+  const stored = await sessionArea.get(null);
+  assert.equal(Object.keys(stored).length, 0);
+});
+
+test('persona invalidation and expiry remove the capability instead of retaining URL evidence', async t => {
+  for (const [name, invalidate] of [
+    ['exact', (authority, capabilityId) => authority.invalidateCapability(capabilityId, 'cancelled')],
+    ['tab lifecycle', authority => authority.invalidateForTab(41, 'navigation')],
+    ['window lifecycle', authority => authority.invalidateForWindow(9, 'window-removed')],
+  ]) await t.test(name, async () => {
+    const { authority, sessionArea } = authorityFixture();
+    const prepared = await preparePersona(authority);
+    const key = targetCapabilityStorageKey(prepared.capabilityId);
+    const result = await invalidate(authority, prepared.capabilityId);
+    assert.equal(result.ok, true);
+    assert.equal((await sessionArea.get(key))[key], undefined);
+    assert.deepEqual(sessionArea.removals, [[key]]);
+  });
+
+  for (const operation of ['inspectPreparedTarget', 'claimPreparedTarget']) await t.test(`expired ${operation}`, async () => {
+    let currentTime = 1_788_000_000_000;
+    let probeCalls = 0;
+    const { authority, sessionArea } = authorityFixture({
+      now: () => currentTime,
+      probeDocument: async () => { probeCalls += 1; throw new Error('must not probe expired capability'); },
+    });
+    const prepared = await preparePersona(authority);
+    const key = targetCapabilityStorageKey(prepared.capabilityId);
+    currentTime += 60_000;
+    assert.deepEqual(await authority[operation]({
+      capabilityId: prepared.capabilityId,
+      intent: 'start-persona',
+      senderContext: extensionContext(),
+    }), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+    assert.equal(probeCalls, 0);
+    assert.equal((await sessionArea.get(key))[key], undefined);
+    assert.deepEqual(sessionArea.removals, [[key]]);
+  });
+});
+
+test('persona inspection deterministically purges legacy claimed and invalidated tombstones', async () => {
+  for (const state of ['claimed', 'invalidated']) {
+    const { authority, sessionArea } = authorityFixture();
+    const prepared = await preparePersona(authority);
+    const key = targetCapabilityStorageKey(prepared.capabilityId);
+    const record = (await sessionArea.get(key))[key];
+    await sessionArea.set({ [key]: { ...record, state } });
+    assert.deepEqual(await authority.inspectPreparedTarget({
+      capabilityId: prepared.capabilityId,
+      intent: 'start-persona',
+      senderContext: extensionContext(),
+    }), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+    assert.equal((await sessionArea.get(key))[key], undefined);
+    assert.deepEqual(sessionArea.removals, [[key]]);
+  }
+});
+
+test('keeps a persona target rejected at every audit-only parser boundary', async () => {
   const capabilityId = 'P'.repeat(22);
   const sessionCapabilityId = 'S'.repeat(22);
   const currentTime = 1_788_000_000_000;
@@ -541,15 +837,16 @@ test('rejects an injected persisted persona target at every parser-boundary cons
     allowedIntent: 'start-audit',
     senderContext: extensionContext(),
   }), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
-  assert.deepEqual(await authority.invalidateCapability(capabilityId, 'removed-intent'), {
-    ok: false, code: 'CAPABILITY_UNAVAILABLE',
+  assert.deepEqual(await authority.invalidateCapability(capabilityId, 'persona-invalidated'), {
+    ok: true, capabilityId,
   });
-  assert.deepEqual(await authority.invalidateForTab(41, 'removed-intent'), { ok: true, invalidated: 0 });
-  assert.deepEqual(await authority.invalidateForWindow(9, 'removed-intent'), { ok: true, invalidated: 0 });
+  assert.deepEqual(await authority.invalidateForTab(41, 'persona-invalidated'), { ok: true, invalidated: 0 });
+  assert.deepEqual(await authority.invalidateForWindow(9, 'persona-invalidated'), { ok: true, invalidated: 0 });
 
   assert.equal(probeCalls, 0);
-  assert.equal(sessionArea.writes.length, 1, 'no parser consumer may rewrite or issue a session');
-  assert.deepEqual(Object.keys(await sessionArea.get(null)), [targetKey]);
+  assert.equal(sessionArea.writes.length, 1, 'persona invalidation removes rather than rewriting URL evidence');
+  assert.deepEqual(sessionArea.removals, [[targetKey]]);
+  assert.deepEqual(Object.keys(await sessionArea.get(null)), []);
 });
 
 test('rejects unsanitized evidence URLs before persistence', async () => {
@@ -587,7 +884,7 @@ test('serializes competing claims so only one can persist a session', async () =
 });
 
 test('authorizes only state consumer intent audit window path and context matches', async () => {
-  const sender = { id: 'test', documentId: 'panel-document-1', url: 'chrome-extension://test/src/panel/index.html' };
+  const sender = { id: 'test', documentId: 'panel-document-1', url: PANEL_URL };
   const { chromeApi } = panelChromeApi(sender);
   const { authority } = authorityFixture({ chromeApi });
   const prepared = await prepareAttached(authority);
@@ -620,7 +917,7 @@ test('invalidates one exact capability without scanning unrelated records', asyn
 });
 
 test('binds embedded target and session IDs to their storage locators at every boundary', async () => {
-  const sender = { id: 'test', documentId: 'panel-document-1', url: 'chrome-extension://test/src/panel/index.html' };
+  const sender = { id: 'test', documentId: 'panel-document-1', url: PANEL_URL };
   const { chromeApi } = panelChromeApi(sender);
 
   {
@@ -664,7 +961,7 @@ test('binds embedded target and session IDs to their storage locators at every b
 });
 
 test('validates reordered closed intents structurally and rejects changed grants', async () => {
-  const sender = { id: 'test', documentId: 'panel-document-1', url: 'chrome-extension://test/src/panel/index.html' };
+  const sender = { id: 'test', documentId: 'panel-document-1', url: PANEL_URL };
   const { chromeApi } = panelChromeApi(sender);
   const { authority, sessionArea } = authorityFixture({ chromeApi });
   const prepared = await prepareAttached(authority);
@@ -737,7 +1034,7 @@ test('browser lifecycle scans revoke only records bound to the exact tab or wind
 });
 
 test('rehydrates a closed view-only session without resurrecting running intent', async () => {
-  const sender = { id: 'test', documentId: 'panel-view-document', url: 'chrome-extension://test/src/panel/index.html' };
+  const sender = { id: 'test', documentId: 'panel-view-document', url: PANEL_URL };
   const { chromeApi } = panelChromeApi(sender);
   const { authority, sessionArea } = authorityFixture({ chromeApi });
   const result = await authority.rehydrateViewOnly({
@@ -754,7 +1051,7 @@ test('rehydrates a closed view-only session without resurrecting running intent'
 
 test('rehydrateViewOnly rejects caller-supplied target bindings and keeps the exact nine-method authority shape', async () => {
   const { authority, sessionArea } = authorityFixture();
-  assert.deepEqual(Object.keys(authority), ['prepare', 'claimAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'rehydrateViewOnly']);
+  assert.deepEqual(Object.keys(authority), ['prepare', 'inspectPreparedTarget', 'claimPreparedTarget', 'inspectPreparedAuditTarget', 'claimAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'rehydrateViewOnly']);
   assert.deepEqual(await authority.rehydrateViewOnly({
     auditId: 'audit-view-1', windowId: 9, mode: 'attached', targetBinding: { kind: 'view-only' },
   }), { ok: false, code: 'SESSION_DENIED' });
@@ -763,7 +1060,7 @@ test('rehydrateViewOnly rejects caller-supplied target bindings and keeps the ex
 
 test('worker terminalization remains correlated after TTL expiry while UI authorization stays expired', async () => {
   let currentTime = 1_788_000_000_000;
-  const sender = { id: 'test', documentId: 'panel-document-1', url: 'chrome-extension://test/src/panel/index.html' };
+  const sender = { id: 'test', documentId: 'panel-document-1', url: PANEL_URL };
   const { chromeApi } = panelChromeApi(sender);
   const { authority } = authorityFixture({ chromeApi, now: () => currentTime });
   const prepared = await prepareAttached(authority);

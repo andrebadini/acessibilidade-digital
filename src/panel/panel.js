@@ -1,4 +1,5 @@
 import { createPanelSessionPortClient } from './panel-session-port.js';
+import { PANEL_UNPREPARED_MESSAGE } from './panel-status.js';
 import { buildPanelView, renderPanelView } from './panel-view.js';
 import { createInitialPanelState, reducePanelState } from './panel-state.js';
 
@@ -87,12 +88,12 @@ async function handleIntent(intent) {
 async function startAttachedAudit() {
   transition({ type: 'START_REQUESTED' });
   const requestId = nextRequestId();
-  const prepared = parsePreparedCapability(await sendWorkerMessage({ type: 'PREPARE_PANEL_CAPABILITY', requestId }), requestId);
+  const prepared = parsePreparedCapability(await requestPanelIntent({ type: 'PREPARE_PANEL_CAPABILITY', requestId }), requestId);
   if (!prepared) {
     transition({ type: 'AUDIT_UNAVAILABLE', reason: 'Não foi possível concluir a operação local.' });
     return;
   }
-  const response = await sendWorkerMessage({
+  const response = await requestPanelIntent({
     type: 'PANEL_START_ATTACHED_AUDIT',
     capabilityId: prepared.capabilityId,
     captureMode: 'no-pixels',
@@ -106,7 +107,7 @@ async function startAttachedAudit() {
 
 async function requestSessionAction(type) {
   if (!sessionPortClient) return;
-  const response = await sessionPortClient.requestSessionIntent({ type });
+  const response = await sessionPortClient.requestIntent({ type });
   if (response?.ok === true) {
     announce(type === 'PANEL_CANCEL_AUDIT' ? 'Cancelamento solicitado.' : 'Relatório solicitado.');
     return;
@@ -139,7 +140,7 @@ async function retryAudit() {
     await startAttachedAudit();
     return;
   }
-  const response = await sendWorkerMessage({ type: 'PANEL_REHYDRATE_VIEW', auditId });
+  const response = await requestPanelIntent({ type: 'PANEL_REHYDRATE_VIEW', auditId });
   if (!parseRehydrateResponse(response, auditId)) {
     transition({ type: 'AUDIT_UNAVAILABLE', auditId, reason: 'Não foi possível concluir a operação local.' });
   } else announce('Recuperando o resultado local.');
@@ -166,7 +167,7 @@ function receiveBootstrap(value) {
 }
 
 function receivePortStatus(value) {
-  if (value === 'Painel indisponível; tentando reconectar.') {
+  if (value === PANEL_UNPREPARED_MESSAGE) {
     transition({ type: 'PORT_INTERRUPTED' });
     return;
   }
@@ -217,65 +218,14 @@ function nextRequestId() {
   return `panel-${Date.now()}-${requestSequence}`;
 }
 
-async function sendWorkerMessage(message) {
-  if (typeof chromeApi?.runtime?.sendMessage !== 'function') return Promise.resolve(null);
-  if (!message || typeof message !== 'object' || Object.hasOwn(message, 'windowId')) return null;
-  let windowId;
-  try { windowId = await readCurrentPanelWindowId(); }
-  catch { return null; }
-  const claimedMessage = { ...message, windowId };
-  return new Promise(resolve => {
-    let settled = false;
-    const finish = value => {
-      if (settled) return;
-      settled = true;
-      resolve(value && typeof value === 'object' ? value : null);
-    };
-    try {
-      const returned = chromeApi.runtime.sendMessage(claimedMessage, finish);
-      if (returned && typeof returned.then === 'function') returned.then(finish, () => finish(null));
-    } catch { finish(null); }
-  });
-}
-
-function readCurrentPanelWindowId() {
-  if (typeof chromeApi?.windows?.getCurrent !== 'function') return Promise.reject(new Error('PANEL_WINDOW_UNAVAILABLE'));
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (handler, value) => {
-      if (settled) return;
-      settled = true;
-      handler(value);
-    };
-    const accept = value => {
-      try {
-        const descriptor = value && typeof value === 'object'
-          ? Object.getOwnPropertyDescriptor(value, 'id')
-          : null;
-        if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value') ||
-          !Number.isSafeInteger(descriptor.value) || descriptor.value < 0) {
-          finish(reject, new Error('PANEL_WINDOW_UNAVAILABLE'));
-          return;
-        }
-        finish(resolve, descriptor.value);
-      } catch { finish(reject, new Error('PANEL_WINDOW_UNAVAILABLE')); }
-    };
-    try {
-      const returned = chromeApi.windows.getCurrent({ populate: false }, value => {
-        if (chromeApi.runtime?.lastError) finish(reject, new Error('PANEL_WINDOW_UNAVAILABLE'));
-        else accept(value);
-      });
-      if (returned && typeof returned.then === 'function') {
-        returned.then(accept, () => finish(reject, new Error('PANEL_WINDOW_UNAVAILABLE')));
-      } else if (returned !== undefined) accept(returned);
-    } catch { finish(reject, new Error('PANEL_WINDOW_UNAVAILABLE')); }
-  });
+function requestPanelIntent(message) {
+  return sessionPortClient?.requestIntent(message) ?? Promise.resolve(null);
 }
 
 function parsePreparedCapability(value, requestId) {
-  const response = exactRecord(value, ['ok', 'requestId', 'capabilityId', 'expiresAt']);
+  const response = exactRecord(value, ['ok', 'requestId', 'capabilityId']);
   return response && response.ok === true && response.requestId === requestId &&
-    OPAQUE_CAPABILITY.test(response.capabilityId ?? '') && Number.isSafeInteger(response.expiresAt)
+    OPAQUE_CAPABILITY.test(response.capabilityId ?? '')
     ? { capabilityId: response.capabilityId }
     : null;
 }
@@ -308,12 +258,12 @@ function exactRecord(value, keys) {
 render();
 
 let sessionPortClient = null;
-if (typeof chromeApi?.runtime?.connect === 'function' && typeof chromeApi.runtime.sendMessage === 'function') {
+if (typeof chromeApi?.runtime?.connect === 'function') {
   sessionPortClient = createPanelSessionPortClient({
     chromeApi,
-    getWindowId: readCurrentPanelWindowId,
     onBootstrapResult: receiveBootstrap,
     onStatus: receivePortStatus,
+    createRequestId: nextRequestId,
     setTimer: globalThis.setTimeout.bind(globalThis),
     clearTimer: globalThis.clearTimeout.bind(globalThis),
   });

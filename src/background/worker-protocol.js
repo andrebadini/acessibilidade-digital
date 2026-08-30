@@ -1,13 +1,35 @@
 const MAX_ENVELOPE_BYTES = 4096;
+const MAX_REVIEW_DECISION_ENVELOPE_BYTES = 24 * 1024;
 const OPAQUE_ID = /^[A-Za-z0-9_-]{20,240}$/u;
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
+const REVIEW_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
+const PERSONA_MODES = new Set(['reader', 'achromatopsia', 'motor']);
+const REVIEW_ANSWERS = new Set(['conforme', 'não conforme', 'não foi possível determinar']);
+const REVIEW_MODES = new Set(['assisted', 'manual']);
+const PANEL_PORT_TYPES = new Set([
+  'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
+  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
+  'PANEL_SET_PERSONA_MODE', 'PANEL_STOP_PERSONA', 'PANEL_CANCEL_AUDIT',
+  'PANEL_OPEN_REPORT', 'PANEL_REHYDRATE_VIEW',
+]);
 
 const MESSAGE_SCHEMAS = deepFreeze({
   PREPARE_PANEL_CAPABILITY: ['type', 'requestId', 'windowId'],
+  PREPARE_PANEL_PERSONA_CAPABILITY: ['type', 'requestId', 'windowId'],
   PANEL_START_ATTACHED_AUDIT: ['type', 'capabilityId', 'captureMode', 'includeQuery', 'deleteAfterCompleteExport', 'windowId'],
+  PANEL_START_PERSONA: ['type', 'capabilityId', 'mode', 'windowId'],
+  PANEL_REHYDRATE_PERSONA: ['type', 'capabilityId', 'windowId'],
+  PANEL_SET_PERSONA_MODE: ['type', 'leaseId', 'mode', 'windowId'],
+  PANEL_STOP_PERSONA: ['type', 'leaseId', 'windowId'],
   PANEL_CANCEL_AUDIT: ['type', 'sessionCapabilityId', 'auditId', 'windowId'],
   PANEL_OPEN_REPORT: ['type', 'sessionCapabilityId', 'auditId', 'windowId'],
   REPORT_REQUEST_EXPORT: ['type', 'sessionCapabilityId', 'auditId'],
+  REPORT_COMMIT_REVIEW_DECISION: [
+    'type', 'sessionCapabilityId', 'auditId', 'itemId', 'occurrenceId',
+    'answer', 'evaluator', 'decidedAt', 'mode', 'note',
+  ],
+  REPORT_DELETE_AUDIT: ['type', 'sessionCapabilityId', 'auditId'],
+  REPORT_DELETE_ALL_AUDITS: ['type', 'sessionCapabilityId', 'auditId'],
   PANEL_REHYDRATE_VIEW: ['type', 'auditId', 'windowId'],
   REPORT_CONNECT: ['type', 'auditId'],
   EXPORT_CONNECT: ['type', 'auditId'],
@@ -22,9 +44,29 @@ export function parseWorkerMessage(message) {
   if (!hasFlatPrimitiveShape(copy)) return failure('INVALID_MESSAGE');
   const byteLength = capturedUtf8Length(copy);
   if (byteLength === null) return failure('INVALID_MESSAGE');
-  if (byteLength > MAX_ENVELOPE_BYTES) return failure('MESSAGE_TOO_LARGE');
+  const maximumBytes = copy.type === 'REPORT_COMMIT_REVIEW_DECISION'
+    ? MAX_REVIEW_DECISION_ENVELOPE_BYTES
+    : MAX_ENVELOPE_BYTES;
+  if (byteLength > maximumBytes) return failure('MESSAGE_TOO_LARGE');
   if (!validWorkerEnvelope(copy)) return failure('INVALID_MESSAGE');
   return deepFreeze({ ok: true, value: copy });
+}
+
+export function parsePanelPortIntent(message, windowId) {
+  const type = readSafeOwnEnumerableDataType(message);
+  if (!type.found || !PANEL_PORT_TYPES.has(type.value) || !safeChromeId(windowId)) {
+    return failure('INVALID_MESSAGE');
+  }
+  const expected = MESSAGE_SCHEMAS[type.value].filter(key => key !== 'windowId');
+  const copy = copyExactDataRecord(message, expected);
+  if (!copy) return failure('INVALID_MESSAGE');
+  const parsed = parseWorkerMessage({ ...copy, windowId });
+  return parsed.ok ? parsed : failure(parsed.code === 'MESSAGE_TOO_LARGE' ? 'MESSAGE_TOO_LARGE' : 'INVALID_MESSAGE');
+}
+
+export function isPanelPortIntent(message) {
+  const type = readSafeOwnEnumerableDataType(message);
+  return type.found && PANEL_PORT_TYPES.has(type.value);
 }
 
 function hasFlatPrimitiveShape(value) {
@@ -32,19 +74,38 @@ function hasFlatPrimitiveShape(value) {
 }
 
 function validWorkerEnvelope(value) {
-  if (value.type === 'PREPARE_PANEL_CAPABILITY') {
+  if (['PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY'].includes(value.type)) {
     return validAuditId(value.requestId) && safeChromeId(value.windowId);
   }
   if (value.type === 'PANEL_START_ATTACHED_AUDIT') {
     return validOpaqueId(value.capabilityId) && value.captureMode === 'no-pixels' &&
       value.includeQuery === false && value.deleteAfterCompleteExport === false && safeChromeId(value.windowId);
   }
+  if (value.type === 'PANEL_START_PERSONA') {
+    return validOpaqueId(value.capabilityId) && PERSONA_MODES.has(value.mode) && safeChromeId(value.windowId);
+  }
+  if (value.type === 'PANEL_REHYDRATE_PERSONA') {
+    return validOpaqueId(value.capabilityId) && safeChromeId(value.windowId);
+  }
+  if (value.type === 'PANEL_SET_PERSONA_MODE') {
+    return validOpaqueId(value.leaseId) && PERSONA_MODES.has(value.mode) && safeChromeId(value.windowId);
+  }
+  if (value.type === 'PANEL_STOP_PERSONA') {
+    return validOpaqueId(value.leaseId) && safeChromeId(value.windowId);
+  }
   if (['PANEL_CANCEL_AUDIT', 'PANEL_OPEN_REPORT'].includes(value.type)) {
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) &&
       safeChromeId(value.windowId);
   }
-  if (value.type === 'REPORT_REQUEST_EXPORT') {
+  if (['REPORT_REQUEST_EXPORT', 'REPORT_DELETE_AUDIT', 'REPORT_DELETE_ALL_AUDITS'].includes(value.type)) {
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId);
+  }
+  if (value.type === 'REPORT_COMMIT_REVIEW_DECISION') {
+    return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) &&
+      validReviewId(value.itemId) && validReviewId(value.occurrenceId) &&
+      REVIEW_ANSWERS.has(value.answer) && REVIEW_MODES.has(value.mode) &&
+      canonicalInstant(value.decidedAt) && boundedCanonicalText(value.evaluator, 160, false) &&
+      boundedCanonicalText(value.note, 4_000, true);
   }
   if (value.type === 'EXPORT_COMPLETE') {
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) && validAttemptId(value.attemptId);
@@ -57,6 +118,21 @@ function validWorkerEnvelope(value) {
 
 function validOpaqueId(value) { return typeof value === 'string' && OPAQUE_ID.test(value); }
 function validAuditId(value) { return typeof value === 'string' && AUDIT_ID.test(value); }
+function validReviewId(value) { return typeof value === 'string' && REVIEW_ID.test(value); }
+function canonicalInstant(value) {
+  if (typeof value !== 'string' || value === '') return false;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) && date.toISOString() === value;
+}
+function boundedCanonicalText(value, maximum, optional) {
+  if (typeof value !== 'string' || value !== value.trim() || (!optional && value === '')) return false;
+  let count = 0;
+  for (const _character of value) {
+    count += 1;
+    if (count > maximum) return false;
+  }
+  return true;
+}
 function validAttemptId(value) {
   return typeof value === 'string' && /^(?:[1-9][0-9]*)$/u.test(value) && Number.isSafeInteger(Number(value));
 }

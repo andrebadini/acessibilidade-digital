@@ -1,6 +1,5 @@
 import { copyPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
-import { PANEL_SURFACE, deriveTrustedExtensionContext } from './target-capabilities.js';
-import { capturedUtf8Length } from './worker-protocol.js';
+import { capturedUtf8Length, parsePanelPortIntent } from './worker-protocol.js';
 import { parseStorageGetEnvelope } from './storage-get-envelope.js';
 
 export const PANEL_PORT_NAME = 'audita-panel-v1';
@@ -9,6 +8,7 @@ export const panelBootstrapStorageKey = windowId => `audita:panel-bootstrap:v1:$
 const FACTORY_KEYS = Object.freeze([
   'chromeApi', 'sessionArea', 'readActiveJob', 'readAuditSession', 'loadPanelResultBundle',
   'rehydrateViewOnly', 'revokeViewOnly', 'epochNow', 'setTimer', 'clearTimer',
+  'launchAuthority', 'dispatchPanelIntent',
 ]);
 const BOOTSTRAP_KEYS = Object.freeze([
   'version', 'kind', 'auditId', 'sessionCapabilityId', 'windowId', 'createdAt', 'expiresAt', 'state',
@@ -117,10 +117,17 @@ function parseActive(value) {
 }
 
 function hello(value) {
-  const record = exact(value, ['protocol', 'version', 'type', 'windowId']);
+  const record = exact(value, ['protocol', 'version', 'type']);
   return record && record.protocol === 'audita-panel' && record.version === 1 && record.type === 'bootstrap' &&
-    safeChromeId(record.windowId) && capturedUtf8Length(record) <= 4096
-    ? freeze({ windowId: record.windowId }) : null;
+    capturedUtf8Length(record) <= 4096 ? freeze(record) : null;
+}
+
+function intentPacket(value) {
+  const record = exact(value, ['protocol', 'version', 'type', 'requestId', 'envelope']);
+  const byteLength = record ? capturedUtf8Length(record) : null;
+  if (!record || record.protocol !== 'audita-panel' || record.version !== 1 || record.type !== 'intent' ||
+    !AUDIT_ID.test(record.requestId ?? '') || byteLength === null || byteLength > 4096) return null;
+  return freeze({ requestId: record.requestId, envelope: record.envelope });
 }
 
 function packet(state, auditId, sessionCapabilityId, result) {
@@ -140,13 +147,14 @@ function recoveryRequiredRegistration() {
 
 export function createPanelPortCoordinator(raw) {
   const input = exact(raw, FACTORY_KEYS);
-  if (!input || typeof input.chromeApi?.runtime?.id !== 'string' || typeof input.chromeApi.runtime.getContexts !== 'function' ||
-    typeof input.chromeApi?.windows?.get !== 'function' || typeof input.chromeApi?.tabs?.query !== 'function' ||
+  if (!input || typeof input.chromeApi?.runtime?.id !== 'string' ||
     typeof input.sessionArea?.get !== 'function' || typeof input.sessionArea.set !== 'function' ||
     typeof input.readActiveJob !== 'function' || typeof input.readAuditSession !== 'function' ||
     typeof input.loadPanelResultBundle !== 'function' || typeof input.rehydrateViewOnly !== 'function' ||
     typeof input.revokeViewOnly !== 'function' || typeof input.epochNow !== 'function' ||
-    typeof input.setTimer !== 'function' || typeof input.clearTimer !== 'function') {
+    typeof input.setTimer !== 'function' || typeof input.clearTimer !== 'function' ||
+    typeof input.launchAuthority?.admitPort !== 'function' || typeof input.launchAuthority.reprove !== 'function' ||
+    typeof input.launchAuthority.revoke !== 'function' || typeof input.dispatchPanelIntent !== 'function') {
     throw new TypeError('PANEL_PORT_COORDINATOR_INVALID');
   }
 
@@ -349,27 +357,9 @@ export function createPanelPortCoordinator(raw) {
 
   function snapshotSender(port) {
     const sender = own(port, 'sender');
-    let senderPrototype;
-    try { senderPrototype = sender && typeof sender === 'object' ? Object.getPrototypeOf(sender) : undefined; }
-    catch { return null; }
-    if (!sender || typeof sender !== 'object' || Array.isArray(sender) ||
-      (senderPrototype !== Object.prototype && senderPrototype !== null)) return null;
-    const id = own(sender, 'id');
-    const documentId = optionalOwn(sender, 'documentId');
-    const url = own(sender, 'url');
-    const origin = own(sender, 'origin');
-    if (id !== input.chromeApi.runtime.id || typeof url !== 'string' || documentId.invalid) return null;
-    if (documentId.found && typeof documentId.value === 'string' && documentId.value) {
-      return freeze({ id, documentId: documentId.value, url });
-    }
-    return !documentId.found && origin === `chrome-extension://${input.chromeApi.runtime.id}`
-      ? freeze({ id, url, origin }) : null;
-  }
-
-  async function proveSender(sender, claimedWindowId) {
-    return deriveTrustedExtensionContext({
-      sender, chromeApi: input.chromeApi, surface: PANEL_SURFACE, claimedWindowId,
-    });
+    const copy = exact(sender, ['id', 'url', 'origin'], true);
+    return copy?.id === input.chromeApi.runtime.id && typeof copy.url === 'string' &&
+      copy.origin === `chrome-extension://${input.chromeApi.runtime.id}` ? freeze(copy) : null;
   }
 
   function connected(binding) {
@@ -399,16 +389,23 @@ export function createPanelPortCoordinator(raw) {
     bindings.delete(binding.port);
     reassert(assertOwned);
     if (binding.windowId !== null && liveByWindow.get(binding.windowId) === binding) liveByWindow.delete(binding.windowId);
+    const admission = binding.admission;
+    binding.admission = null;
+    if (admission) {
+      try { void Promise.resolve(input.launchAuthority.revoke(admission)).catch(() => {}); }
+      catch { /* launch cleanup remains fail-closed */ }
+    }
     reassert(assertOwned);
     try { binding.port.disconnect(); } catch { /* fixed cleanup */ }
     return true;
   }
 
   async function reprove(binding, assertOwned = null) {
-    const context = await proveSender(binding.sender, binding.windowId);
+    const context = await input.launchAuthority.reprove(binding.admission);
     reassert(assertOwned);
-    return connected(binding) && context.windowId === binding.windowId &&
-      context.issuer.documentId === binding.issuerDocumentId && context.documentUrl === binding.sender.url
+    return connected(binding) && context?.ok === true && context.windowId === binding.windowId &&
+      context.documentId === binding.issuerDocumentId && context.url === binding.sender.url &&
+      context.token === binding.admission?.token && context.generation === binding.admission?.generation
       ? context : null;
   }
 
@@ -511,8 +508,13 @@ export function createPanelPortCoordinator(raw) {
   async function handleHello(binding) {
     try {
       const admission = await binding.admission;
-      if (!admission || !connected(binding)) throw new Error('PANEL_CONTEXT_DENIED');
-      binding.issuerDocumentId = admission.issuer.documentId;
+      if (admission?.ok !== true) throw new Error('PANEL_CONTEXT_DENIED');
+      if (!connected(binding)) {
+        try { await input.launchAuthority.revoke(admission); } catch { /* disconnected admission stays denied */ }
+        return;
+      }
+      binding.admission = admission;
+      binding.issuerDocumentId = admission.documentId;
       await withWindowLock(admission.windowId, async () => {
         binding.windowId = admission.windowId;
         if (!await reprove(binding)) throw new Error('PANEL_CONTEXT_DENIED');
@@ -540,6 +542,48 @@ export function createPanelPortCoordinator(raw) {
     } catch { disconnect(binding); }
   }
 
+  async function processIntent(binding, request) {
+    try {
+      if (!connected(binding) || !await reprove(binding)) throw new Error('PANEL_CONTEXT_DENIED');
+      const parsed = parsePanelPortIntent(request.envelope, binding.windowId);
+      if (!parsed.ok) throw new Error('PANEL_INTENT_DENIED');
+      const response = await input.dispatchPanelIntent({
+        envelope: parsed.value,
+        sender: binding.admission.syntheticSender,
+        launchTabId: binding.admission.tabId,
+      });
+      if (!connected(binding) || !await reprove(binding)) throw new Error('PANEL_CONTEXT_DENIED');
+      const responseBytes = capturedUtf8Length(response);
+      if (responseBytes === null || responseBytes > 4096) throw new Error('PANEL_RESPONSE_DENIED');
+      send(binding, freeze({
+        protocol: 'audita-panel', version: 1, type: 'intent-result',
+        requestId: request.requestId, response,
+      }));
+    } catch { disconnect(binding); }
+  }
+
+  function receiveBound(binding, value) {
+    if (!connected(binding) || !['bound-idle', 'bound-session'].includes(binding.state)) {
+      disconnect(binding);
+      return;
+    }
+    const request = intentPacket(value);
+    if (!request || binding.seenRequestIds.has(request.requestId)) {
+      disconnect(binding);
+      return;
+    }
+    binding.seenRequestIds.add(request.requestId);
+    if (binding.seenRequestIds.size > 1024) {
+      disconnect(binding);
+      return;
+    }
+    const operation = binding.intentTail.then(
+      () => processIntent(binding, request),
+      () => processIntent(binding, request),
+    );
+    binding.intentTail = operation.catch(() => {});
+  }
+
   function attachPanelPort(port) {
     const name = own(port, 'name');
     const sender = snapshotSender(port);
@@ -553,8 +597,9 @@ export function createPanelPortCoordinator(raw) {
     const binding = {
       port, sender, state: 'awaiting-hello', windowId: null, auditId: null, sessionCapabilityId: null,
       issuerDocumentId: null, admission: null, deadline: null, onHello: null, onBoundMessage: null, onDisconnect: null,
+      intentTail: Promise.resolve(), seenRequestIds: new Set(),
     };
-    binding.onBoundMessage = () => disconnect(binding);
+    binding.onBoundMessage = value => receiveBound(binding, value);
     binding.onDisconnect = () => {
       if (binding.state === 'disconnected') return;
       binding.state = 'disconnected';
@@ -562,14 +607,19 @@ export function createPanelPortCoordinator(raw) {
       try { port.onMessage.removeListener(binding.onBoundMessage); } catch { /* fixed cleanup */ }
       bindings.delete(port);
       if (binding.windowId !== null && liveByWindow.get(binding.windowId) === binding) liveByWindow.delete(binding.windowId);
+      const admission = binding.admission;
+      binding.admission = null;
+      if (admission) {
+        try { void Promise.resolve(input.launchAuthority.revoke(admission)).catch(() => {}); }
+        catch { /* launch cleanup remains fail-closed */ }
+      }
     };
     binding.onHello = value => {
       if (binding.state !== 'awaiting-hello') { disconnect(binding); return; }
       removeTemporary(binding);
-      const claim = hello(value);
-      if (!claim) { disconnect(binding); return; }
+      if (!hello(value)) { disconnect(binding); return; }
       binding.state = 'proving-hello';
-      binding.admission = proveSender(sender, claim.windowId).catch(() => null);
+      binding.admission = Promise.resolve(input.launchAuthority.admitPort({ sender })).catch(() => null);
       port.onMessage.addListener(binding.onBoundMessage);
       void handleHello(binding);
     };

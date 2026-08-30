@@ -3,9 +3,13 @@ import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { PANEL_PORT_NAME } from '../../src/background/panel-port.js';
-import { registerServiceWorker } from '../../src/background/service-worker.js';
+import {
+  PERSONA_EXPIRY_ALARM_NAME,
+  registerServiceWorker,
+} from '../../src/background/service-worker.js';
 import * as serviceWorkerModule from '../../src/background/service-worker.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
+import { createFakeLockManager } from '../personas/fake-lock-manager.js';
 
 const CAPABILITY = 'C'.repeat(22);
 
@@ -22,7 +26,8 @@ function event() {
 function chromeFixture() {
   const events = {
     message: event(), connect: event(), installed: event(), context: event(),
-    updated: event(), tabRemoved: event(), windowRemoved: event(), action: event(),
+    updated: event(), tabRemoved: event(), tabDetached: event(), windowRemoved: event(),
+    action: event(), alarm: event(),
   };
   return {
     events,
@@ -32,10 +37,12 @@ function chromeFixture() {
         onMessage: events.message, onConnect: events.connect, onInstalled: events.installed,
       },
       contextMenus: { onClicked: events.context, async removeAll() {}, create() {} },
-      sidePanel: { async open() {}, async setPanelBehavior() {} },
+      sidePanel: { async open() {}, async setOptions() {}, async setPanelBehavior() {} },
       action: { onClicked: events.action },
-      tabs: { onUpdated: events.updated, onRemoved: events.tabRemoved },
+      tabs: { onUpdated: events.updated, onRemoved: events.tabRemoved, onDetached: events.tabDetached },
       windows: { onRemoved: events.windowRemoved, async get(windowId) { return { id: windowId, focused: false, type: 'normal' }; } },
+      alarms: { onAlarm: events.alarm, async create() {}, async clear() { return true; } },
+      scripting: { async executeScript() { return []; }, async insertCSS() {}, async removeCSS() {} },
       storage: { session: { async setAccessLevel() {} } },
     },
   };
@@ -52,6 +59,17 @@ function tick() { return new Promise(resolve => setImmediate(resolve)); }
 
 function runtimeValue() {
   return Object.freeze({ authority: Object.freeze({}), auditStarter: Object.freeze({}), chromeAdapter: Object.freeze({}) });
+}
+
+function runtimeWithPersona(personaCoordinator) {
+  return Object.freeze({
+    authority: Object.freeze({}),
+    auditStarter: Object.freeze({}),
+    chromeAdapter: Object.freeze({}),
+    reportLaunch: Object.freeze({}),
+    exportLaunch: Object.freeze({}),
+    personaCoordinator,
+  });
 }
 
 function checkpoint(auditId, pages = [{
@@ -76,6 +94,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
   const { chromeApi, events } = chromeFixture();
   const sessionValues = Object.create(null);
   const contexts = new Map();
+  const contextsByUrl = new Map();
   const sent = [];
   const createdTabs = [];
   const snapshots = new Map();
@@ -85,11 +104,15 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
   let deletedAll = 0;
   let deleteError = null;
   let cleanupError = null;
+  let reviewConflicts = fixtureOptions.reviewConflicts ?? 0;
   let tabCreator = (_options, callback) => callback?.({ id: 77 });
   let denySessionScan = false;
+  let panelPath = null;
+  let panelOpens = 0;
   const deleted = [];
   const storeCalls = [];
   const sessionGetCalls = [];
+  const personaLockManager = createFakeLockManager();
 
   if (initialSessionValues) Object.assign(sessionValues, structuredClone(initialSessionValues));
 
@@ -99,6 +122,11 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
       sessionGetCalls.push(key);
       if (key === null && denySessionScan) throw new Error('session-wide scan denied');
       if (key === null) return structuredClone(sessionValues);
+      if (Array.isArray(key)) {
+        const envelope = {};
+        for (const entry of key) if (Object.hasOwn(sessionValues, entry)) envelope[entry] = structuredClone(sessionValues[entry]);
+        return envelope;
+      }
       return Object.hasOwn(sessionValues, key) ? { [key]: structuredClone(sessionValues[key]) } : {};
     },
     async set(entries) { Object.assign(sessionValues, structuredClone(entries)); },
@@ -111,8 +139,8 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
     get() { throw new Error('storage.local must remain untouched'); },
   });
   chromeApi.runtime.getURL = path => `chrome-extension://${chromeApi.runtime.id}/${path}`;
-  chromeApi.runtime.getContexts = async ({ documentIds }) => {
-    const value = contexts.get(documentIds[0]);
+  chromeApi.runtime.getContexts = async ({ documentIds, documentUrls }) => {
+    const value = documentIds ? contexts.get(documentIds[0]) : contextsByUrl.get(documentUrls?.[0]);
     return value ? [structuredClone(value)] : [];
   };
   chromeApi.runtime.sendMessage = (message, callback) => {
@@ -123,7 +151,14 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
     createdTabs.push(structuredClone(options));
     return tabCreator(options, callback);
   };
-  chromeApi.tabs.query = async () => [];
+  chromeApi.tabs.query = fixtureOptions.tabsQuery ?? (async () => []);
+  chromeApi.sidePanel.setOptions = (value, callback) => {
+    panelPath = value.path;
+    if (callback) setImmediate(callback);
+  };
+  chromeApi.sidePanel.open = (_value, callback) => { panelOpens += 1; callback?.(); };
+  if (fixtureOptions.scripting) chromeApi.scripting = fixtureOptions.scripting;
+  if (fixtureOptions.alarms) chromeApi.alarms = { onAlarm: events.alarm, ...fixtureOptions.alarms };
 
   const fixtureAuditStore = {
     async getLatest() { storeCalls.push(['getLatest']); return structuredClone(latest); },
@@ -137,13 +172,20 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
       const value = snapshots.get(auditId);
       return value ? { ...value } : { model: undefined, revision: 0, capability: null };
     },
-    async getReportRevision() { return null; },
+    async getReportRevision(auditId) {
+      const value = snapshots.get(auditId);
+      return value ? {
+        version: 1, auditId, modelRevision: value.revision, modelHash: 'a'.repeat(64),
+        model: structuredClone(value.model), checkpoint: null,
+      } : null;
+    },
     async getAuditRetention(auditId) { return retentions.get(auditId); },
     async acquireExportLease(_auditId, _capability, options) {
       return leaseResult.acquired
         ? { acquired: true, exportAttempt: leaseResult.exportAttempt, ownerId: options.ownerId }
         : { acquired: false, retryAt: leaseResult.retryAt ?? null };
     },
+    async releaseExportLease() { return { released: true }; },
     async deleteAudit(auditId) {
       if (deleteError) throw deleteError;
       snapshots.delete(auditId);
@@ -155,19 +197,43 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
       snapshots.clear();
       return { deleted: deletedAll };
     },
-    async commitAuditWithCheckpointIfAbsent() { throw new Error('must not commit during compatibility tests'); },
+    async commitAuditReviewIfRevision(auditId, model, capability) {
+      storeCalls.push(['commitAuditReviewIfRevision', auditId]);
+      if (reviewConflicts > 0) {
+        reviewConflicts -= 1;
+        throw Object.assign(new Error('revision conflict'), { code: 'AUDIT_REVISION_CONFLICT' });
+      }
+      const current = snapshots.get(auditId);
+      if (!current || current.capability !== capability) {
+        throw Object.assign(new Error('revision conflict'), { code: 'AUDIT_REVISION_CONFLICT' });
+      }
+      const next = { model: structuredClone(model), revision: current.revision + 1, capability: Object.freeze({}) };
+      snapshots.set(auditId, next);
+      return { revision: next.revision, capability: next.capability };
+    },
+    async commitAuditWithCheckpointIfAbsent() { throw new Error('must not commit during worker protocol tests'); },
   };
   const auditStore = fixtureOptions.auditStore ?? fixtureAuditStore;
+
+  if (fixtureOptions.enableReportLaunch === true) {
+    chromeApi.tabs.create = async options => {
+      createdTabs.push(structuredClone(options));
+      return { id: 77, windowId: options.windowId, url: 'about:blank' };
+    };
+    chromeApi.tabs.update = async (tabId, options) => ({ id: tabId, windowId: 9, url: options.url });
+    chromeApi.tabs.get = async tabId => ({ id: tabId, windowId: 9, url: chromeApi.runtime.getURL('src/review/index.html?auditId=audit-review') });
+    chromeApi.tabs.remove = async () => undefined;
+  }
 
   const registration = registerServiceWorker(chromeApi, {
     auditStore,
     chromeAdapterFactory() {
-      return Object.freeze({
+      return fixtureOptions.chromeAdapter ?? Object.freeze({
         async probeDocumentIdentity() { throw new Error('not used'); },
         async getEvidenceUrl() { throw new Error('not used'); },
       });
     },
-    personaController: { attachPanelPort() {} },
+    personaLockManager,
     createAuditId: () => 'audit-worker-generated',
     createExportOwnerId: () => 'export-owner-1',
     createEventNonce: () => 'N'.repeat(22),
@@ -209,10 +275,61 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
     });
   }
 
+  async function connectPanel() {
+    await registration.startupReady;
+    events.action.emit({ id: 17, windowId: 9 });
+    if (typeof panelPath !== 'string') throw new Error('panel launch failed');
+    const url = chromeApi.runtime.getURL(panelPath);
+    const panelContext = {
+      contextType: 'SIDE_PANEL', contextId: 'panel-context', documentId: 'panel-document',
+      documentUrl: url, tabId: -1, windowId: -1,
+    };
+    contextsByUrl.set(url, panelContext);
+    contexts.set('panel-document', panelContext);
+    const onMessage = event();
+    const onDisconnect = event();
+    const port = {
+      name: PANEL_PORT_NAME,
+      sender: { id: chromeApi.runtime.id, url, origin: `chrome-extension://${chromeApi.runtime.id}` },
+      onMessage, onDisconnect, messages: [], disconnects: 0,
+      postMessage(value) { this.messages.push(structuredClone(value)); },
+      disconnect() { this.disconnects += 1; onDisconnect.emit(); },
+    };
+    events.connect.emit(port);
+    await tick();
+    onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+    await tick();
+    let requestCounter = 0;
+    return {
+      port,
+      async request(envelope) {
+        requestCounter += 1;
+        const requestId = `test-panel-${requestCounter}`;
+        onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'intent', requestId, envelope });
+        await tick();
+        const packet = port.messages.find(value => value.type === 'intent-result' && value.requestId === requestId);
+        if (!packet) throw new Error(`panel intent failed: ${JSON.stringify({ messages: port.messages, disconnects: port.disconnects })}`);
+        return packet.response;
+      },
+    };
+  }
+
+  async function connectReport(auditId) {
+    await registration.startupReady;
+    const now = 1_788_000_000_000;
+    sessionValues[`audita:report-launch:v1:${auditId}`] = {
+      version: 1, auditId, tabId: 17, windowId: 9, path: '/src/review/index.html',
+      documentId: null, state: 'awaiting-connection', issuedAt: now, expiresAt: now + 1_800_000,
+    };
+    const from = sender('review', auditId);
+    const connected = await dispatch({ type: 'REPORT_CONNECT', auditId }, from);
+    return { connected, from };
+  }
+
   return {
-    chromeApi, events, registration, auditStore, sessionValues, sessionGetCalls,
+    chromeApi, events, registration, auditStore, sessionValues, sessionGetCalls, personaLockManager,
     sent, createdTabs, snapshots, retentions, deleted, storeCalls,
-    sender, dispatch,
+    sender, dispatch, connectPanel, connectReport,
     setLatest(value) { latest = value; },
     setLeaseResult(value) { leaseResult = value; },
     setDeletedAll(value) { deletedAll = value; },
@@ -220,6 +337,8 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
     setCleanupError(value) { cleanupError = value; },
     setTabCreator(value) { tabCreator = value; },
     denySessionScan() { denySessionScan = true; },
+    getPanelPath() { return panelPath; },
+    getPanelOpens() { return panelOpens; },
   };
 }
 
@@ -229,9 +348,7 @@ test('registers every MV3 wrapper synchronously before the shared readiness prom
   registerServiceWorker(chromeApi, {
     startupReady: ready.promise,
     router: { async dispatch() { return { ok: true }; } },
-    compatibilityHandler: { async dispatch() { return { ok: true }; } },
     panelCoordinator: { attachPanelPort() { return true; } },
-    personaController: { attachPanelPort() { return true; } },
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
     logger: { error() {} },
   });
@@ -241,11 +358,33 @@ test('registers every MV3 wrapper synchronously before the shared readiness prom
   assert.equal(events.context.listeners.size, 1);
   assert.equal(events.updated.listeners.size, 1);
   assert.equal(events.tabRemoved.listeners.size, 1);
+  assert.equal(events.tabDetached.listeners.size, 1);
   assert.equal(events.windowRemoved.listeners.size, 1);
-  assert.equal(events.action.listeners.size, 0);
+  assert.equal(events.alarm.listeners.size, 1);
+  assert.equal(events.action.listeners.size, 1);
 });
 
-test('configures the toolbar action to open the native side panel exactly once without a click fallback', async t => {
+test('routes only the durable persona expiry alarm through the recovered runtime', async () => {
+  const { chromeApi, events } = chromeFixture();
+  const ready = deferred();
+  const calls = [];
+  const registration = registerServiceWorker(chromeApi, {
+    startupReady: ready.promise,
+    router: { async dispatch() { return { ok: true }; } },
+    panelCoordinator: { attachPanelPort() { return true; } },
+    createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
+    logger: { error() {} },
+  });
+  events.alarm.emit({ name: 'foreign-alarm', scheduledTime: 3 });
+  events.alarm.emit({ name: PERSONA_EXPIRY_ALARM_NAME, scheduledTime: 4 });
+  ready.resolve(runtimeWithPersona({ async expireDue() { calls.push('expire'); return { ok: true }; } }));
+  await tick();
+  assert.deepEqual(calls, ['expire']);
+  registration.dispose();
+  assert.equal(events.alarm.listeners.size, 0);
+});
+
+test('disables Chrome auto-open and synchronously delegates toolbar clicks to the token launcher', async t => {
   for (const [name, implementation, expectedLogs] of [
     ['success', async () => undefined, []],
     ['denial', async () => { throw new Error('native secret'); }, ['SIDE_PANEL_BEHAVIOR_DENIED']],
@@ -254,35 +393,48 @@ test('configures the toolbar action to open the native side panel exactly once w
     const calls = [];
     const logs = [];
     chromeApi.sidePanel.setPanelBehavior = async value => {
-      calls.push(structuredClone(value));
+      calls.push(['behavior', structuredClone(value)]);
       return implementation();
     };
     registerServiceWorker(chromeApi, {
       startupReady: Promise.resolve(runtimeValue()),
       router: { async dispatch() { return { ok: true }; } },
-      compatibilityHandler: { async dispatch() { return { ok: true }; } },
       panelCoordinator: { attachPanelPort() { return true; } },
-      personaController: { attachPanelPort() { return true; } },
+      panelLauncher: { launch(tab) { calls.push(['launch', structuredClone(tab)]); return true; } },
       createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
       logger: { error(value) { logs.push(value); } },
     });
+    events.action.emit({ id: 17, windowId: 9 });
     await tick();
-    assert.deepEqual(calls, [{ openPanelOnActionClick: true }]);
+    assert.deepEqual(calls, [
+      ['behavior', { openPanelOnActionClick: false }],
+      ['launch', { id: 17, windowId: 9 }],
+    ]);
     assert.deepEqual(logs, expectedLogs);
-    assert.equal(events.action.listeners.size, 0);
+    assert.equal(events.action.listeners.size, 1);
   });
 });
 
-test('classifies primary then compatibility, returns literal true only when handled, and responds once after readiness', async () => {
+test('a cold default worker launches the tokenized Side Panel before long runtime recovery settles', async () => {
+  const env = defaultGraphFixture();
+
+  env.events.action.emit({ id: 17, windowId: 9 });
+
+  assert.match(env.getPanelPath() ?? '', /^src\/panel\/index\.html\?launch=[A-Za-z0-9_-]{43}$/u,
+    'the synchronous action listener owns launch even while startupReady is pending');
+  await env.registration.startupReady;
+  await tick();
+  assert.equal(env.getPanelOpens(), 1);
+});
+
+test('classifies primary messages, ignores removed one-shot types, and responds once after readiness', async () => {
   const { chromeApi, events } = chromeFixture();
   const ready = deferred();
   const calls = [];
   registerServiceWorker(chromeApi, {
     startupReady: ready.promise,
     router: { async dispatch(value) { calls.push(['primary', value]); return { ok: true, requestId: value.envelope.requestId }; } },
-    compatibilityHandler: { async dispatch(value) { calls.push(['compat', value]); return { ok: true, state: null }; } },
     panelCoordinator: { attachPanelPort() { return true; } },
-    personaController: { attachPanelPort() { return true; } },
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
     logger: { error() {} },
   });
@@ -290,8 +442,8 @@ test('classifies primary then compatibility, returns literal true only when hand
   const primaryResponses = [];
   assert.equal(listener({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-1', windowId: 9 }, {}, value => primaryResponses.push(value)), true);
   assert.deepEqual(primaryResponses, []);
-  const compatResponses = [];
-  assert.equal(listener({ type: 'GET_LAST_AUDIT' }, {}, value => compatResponses.push(value)), true);
+  let oldResponses = 0;
+  assert.equal(listener({ type: 'GET_LAST_AUDIT' }, {}, () => { oldResponses += 1; }), false);
   const malformedResponses = [];
   assert.equal(listener({ type: 'PREPARE_PANEL_CAPABILITY', requestId: '', windowId: 9 }, {}, value => malformedResponses.push(value)), true);
   let unknownResponses = 0;
@@ -299,11 +451,11 @@ test('classifies primary then compatibility, returns literal true only when hand
   assert.equal(listener({ type: 'PANEL_START_URL', url: 'https://secret.test/?token=hidden' }, {}, () => { unknownResponses += 1; }), false);
   ready.resolve(runtimeValue());
   await tick();
-  assert.deepEqual(primaryResponses, [{ ok: true, requestId: 'request-1' }]);
-  assert.deepEqual(compatResponses, [{ ok: true, state: null }]);
+  assert.deepEqual(primaryResponses, [{ ok: false, code: 'CONTEXT_DENIED' }]);
+  assert.equal(oldResponses, 0);
   assert.deepEqual(malformedResponses, [{ ok: false, code: 'INVALID_MESSAGE' }]);
   assert.equal(unknownResponses, 0);
-  assert.deepEqual(calls.map(([name]) => name), ['primary', 'compat']);
+  assert.deepEqual(calls, []);
 });
 
 test('rejects absent extra and accessor panel window claims before router effects', async () => {
@@ -313,8 +465,7 @@ test('rejects absent extra and accessor panel window claims before router effect
   registerServiceWorker(chromeApi, {
     startupReady: Promise.resolve(runtimeValue()),
     router: { async dispatch() { dispatches += 1; return { ok: true }; } },
-    compatibilityHandler: { async dispatch() { throw new Error('must not dispatch'); } },
-    panelCoordinator: { attachPanelPort() {} }, personaController: { attachPanelPort() {} },
+    panelCoordinator: { attachPanelPort() {} },
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
     logger: { error() {} },
   });
@@ -338,36 +489,34 @@ test('rejects absent extra and accessor panel window claims before router effect
   assert.equal(getterCalls, 0);
 });
 
-test('readiness rejection overrides recognized primary and compatibility without native error leakage', async () => {
+test('readiness rejection closes recognized primary while removed one-shot types stay unhandled', async () => {
   const { chromeApi, events } = chromeFixture();
   const ready = deferred();
   registerServiceWorker(chromeApi, {
     startupReady: ready.promise,
     router: { async dispatch() { throw new Error('must not run'); } },
-    compatibilityHandler: { async dispatch() { throw new Error('must not run'); } },
-    panelCoordinator: { attachPanelPort() {} }, personaController: { attachPanelPort() {} },
+    panelCoordinator: { attachPanelPort() {} },
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
     logger: { error() {} },
   });
   const listener = [...events.message.listeners][0];
   const primary = [];
-  const compat = [];
+  let oldResponses = 0;
   listener({ type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9 }, {}, value => primary.push(value));
-  listener({ type: 'GET_LAST_AUDIT' }, {}, value => compat.push(value));
+  assert.equal(listener({ type: 'GET_LAST_AUDIT' }, {}, () => { oldResponses += 1; }), false);
   ready.reject(new Error('native storage secret'));
   await tick();
   assert.deepEqual(primary, [{ ok: false, code: 'WORKER_UNAVAILABLE' }]);
-  assert.deepEqual(compat, [{ ok: false, code: 'COMPATIBILITY_FAILED' }]);
+  assert.equal(oldResponses, 0);
 });
 
-test('fans out panel and persona ports strictly after readiness and disconnects every other name', async () => {
+test('attaches only the Side Panel port after readiness and rejects the removed persona popup port', async () => {
   const { chromeApi, events } = chromeFixture();
   const attached = [];
   registerServiceWorker(chromeApi, {
     startupReady: Promise.resolve(runtimeValue()),
-    router: { async dispatch() { return { ok: true }; } }, compatibilityHandler: { async dispatch() { return { ok: true }; } },
+    router: { async dispatch() { return { ok: true }; } },
     panelCoordinator: { attachPanelPort(port) { attached.push(['panel', port.name]); return true; } },
-    personaController: { attachPanelPort(port) { attached.push(['persona', port.name]); return true; } },
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
     logger: { error() {} },
   });
@@ -379,7 +528,8 @@ test('fans out panel and persona ports strictly after readiness and disconnects 
   ];
   for (const port of ports) listener(port);
   await tick();
-  assert.deepEqual(attached, [['panel', PANEL_PORT_NAME], ['persona', 'audita-persona-v1']]);
+  assert.deepEqual(attached, [['panel', PANEL_PORT_NAME]]);
+  assert.equal(ports[1].disconnects, 1);
   assert.equal(ports[2].disconnects, 1);
 });
 
@@ -394,9 +544,8 @@ test('opens trusted session storage before building one shared runtime graph', a
       return {
         readyRuntime,
         router: { async dispatch() { return { ok: true }; } },
-        compatibilityHandler: { async dispatch() { return { ok: true }; } },
         panelCoordinator: { attachPanelPort() { return true; } },
-        personaController: { attachPanelPort() { return true; } },
+        panelLauncher: { launch() { return true; } },
       };
     },
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
@@ -430,6 +579,133 @@ test('default runtime rejects readiness when lifecycle recovery reports blocked 
   });
 
   await assert.rejects(env.registration.startupReady, /WORKER_UNAVAILABLE/u);
+});
+
+test('default runtime serializes persona recovery with the supplied Web Locks manager', async () => {
+  const env = defaultGraphFixture();
+  const runtime = await env.registration.startupReady;
+  assert.equal(typeof runtime.personaCoordinator?.expireDue, 'function');
+  assert.equal(env.personaLockManager.calls.length > 0, true);
+  assert.equal(env.personaLockManager.calls.every(call =>
+    call.name === 'audita:persona-lease-store:v1' && call.options.mode === 'exclusive'), true);
+});
+
+test('default runtime clears the persona expiry alarm with the exact Promise API arity', async () => {
+  const calls = [];
+  const env = defaultGraphFixture(null, {
+    alarms: {
+      clear(...args) {
+        calls.push(['clear', args.length, ...args]);
+        if (args.length !== 1) throw new Error('callback overload forbidden');
+        return Promise.resolve(true);
+      },
+      create(...args) {
+        calls.push(['create', args.length, ...args]);
+        if (args.length !== 2) throw new Error('callback overload forbidden');
+        return Promise.resolve();
+      },
+    },
+  });
+
+  await env.registration.startupReady;
+  assert.deepEqual(calls, [['clear', 1, PERSONA_EXPIRY_ALARM_NAME]]);
+});
+
+test('a restarted worker recovers an active persona and rehydrates it through a fresh Side Panel capability', async () => {
+  const leaseId = `lease-${'L'.repeat(22)}`;
+  const target = {
+    tabId: 17,
+    windowId: 9,
+    documentId: 'document-a',
+    urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+  };
+  const initialSession = {
+    'audita:persona-leases:v1': {
+      version: 1,
+      leases: {
+        [leaseId]: {
+          version: 1,
+          leaseId,
+          target,
+          consumer: {
+            extensionId: 'abcdefghijklmnopabcdefghijklmnop',
+            documentId: 'panel-document',
+            path: '/src/panel/index.html',
+            windowId: 9,
+          },
+          activeMode: 'reader',
+          pendingMode: null,
+          createdAt: 1_788_000_000_000,
+          lastExplicitActionAt: 1_788_000_000_000,
+          expiresAt: 1_788_001_800_000,
+          state: 'active',
+          revision: 2,
+          revokeReason: null,
+        },
+      },
+      ownerByTarget: { [`${target.tabId}\u0000${target.documentId}`]: leaseId },
+    },
+  };
+  const scripting = {
+    async executeScript(details) {
+      const command = details.args?.[0];
+      const result = command?.op === 'probe'
+        ? { ok: true, present: true, mode: 'reader' }
+        : { ok: true, mode: 'reader' };
+      return [{ frameId: 0, documentId: target.documentId, result }];
+    },
+    async insertCSS() {},
+    async removeCSS() {},
+  };
+  const alarmCalls = [];
+  const env = defaultGraphFixture(initialSession, {
+    alarms: {
+      clear(...args) {
+        alarmCalls.push(['clear', args.length, ...args]);
+        if (args.length !== 1) throw new Error('callback overload forbidden');
+        return Promise.resolve(true);
+      },
+      create(...args) {
+        alarmCalls.push(['create', args.length, ...args]);
+        if (args.length !== 2) throw new Error('callback overload forbidden');
+        return Promise.resolve();
+      },
+    },
+    scripting,
+    tabsQuery: async () => [{
+      id: target.tabId,
+      windowId: target.windowId,
+      active: true,
+      status: 'complete',
+      url: 'https://example.test/',
+    }],
+    chromeAdapter: Object.freeze({
+      async probeDocumentIdentity() { return structuredClone(target); },
+      async getEvidenceUrl() { return 'https://example.test/'; },
+    }),
+  });
+  await env.registration.startupReady;
+  assert.deepEqual(alarmCalls, [[
+    'create', 2, PERSONA_EXPIRY_ALARM_NAME, { when: 1_788_001_800_000 },
+  ]]);
+  const panel = await env.connectPanel();
+  const prepared = await panel.request({
+    type: 'PREPARE_PANEL_PERSONA_CAPABILITY',
+    requestId: 'persona-after-worker-restart',
+  });
+  assert.equal(prepared.ok, true, JSON.stringify(prepared));
+  const rehydrated = await panel.request({
+    type: 'PANEL_REHYDRATE_PERSONA',
+    capabilityId: prepared.capabilityId,
+  });
+  assert.deepEqual(rehydrated, {
+    ok: true,
+    lease: {
+      leaseId,
+      activeMode: 'reader',
+      expiresAt: 1_788_001_800_000,
+    },
+  });
 });
 
 test('checkpoint adapter permits only canonical semantic progression and preserves corrupt evidence', async () => {
@@ -519,8 +795,7 @@ test('retries context-menu installation on service-worker startup only after sha
   registerServiceWorker(chromeApi, {
     startupReady: ready.promise,
     router: { async dispatch() { return { ok: true }; } },
-    compatibilityHandler: { async dispatch() { return { ok: true }; } },
-    panelCoordinator: { attachPanelPort() {} }, personaController: { attachPanelPort() {} },
+    panelCoordinator: { attachPanelPort() {} },
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
     logger: { error() {} },
   });
@@ -532,15 +807,14 @@ test('retries context-menu installation on service-worker startup only after sha
   assert.equal(calls[1][1].id, 'audita.accessibility.audit-page');
 });
 
-test('routes only the four retained compatibility schemas and rejects the removed export lane', async () => {
+test('rejects old one-shot privileged messages and routes only correlated report mutations', async () => {
   const { chromeApi, events } = chromeFixture();
-  const types = ['GET_LAST_AUDIT', 'REVIEW_COMMITTED', 'REQUEST_DELETE_AUDIT', 'REQUEST_DELETE_ALL_AUDITS'];
-  const compatibilityCalls = [];
+  const oldTypes = ['GET_LAST_AUDIT', 'REVIEW_COMMITTED', 'REQUEST_DELETE_AUDIT', 'REQUEST_DELETE_ALL_AUDITS'];
+  const routed = [];
   registerServiceWorker(chromeApi, {
     startupReady: Promise.resolve(runtimeValue()),
-    router: { async dispatch() { throw new Error('wrong route'); } },
-    compatibilityHandler: { async dispatch({ envelope }) { compatibilityCalls.push(envelope.type); return { ok: true }; } },
-    panelCoordinator: { attachPanelPort() {} }, personaController: { attachPanelPort() {} },
+    router: { async dispatch({ envelope }) { routed.push(envelope); return { ok: true }; } },
+    panelCoordinator: { attachPanelPort() {} },
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
     logger: { error() {} },
   });
@@ -551,73 +825,84 @@ test('routes only the four retained compatibility schemas and rejects the remove
     REQUEST_DELETE_ALL_AUDITS: { type: 'REQUEST_DELETE_ALL_AUDITS' },
   };
   const listener = [...events.message.listeners][0];
-  for (const type of types) assert.equal(listener(messages[type], {}, () => {}), true);
+  for (const type of oldTypes) assert.equal(listener(messages[type], {}, () => { throw new Error('must not respond'); }), false);
   for (const type of ['START_AUDIT', 'START_BATCH', 'CANCEL_AUDIT', 'REQUEST_EXPORT', 'EXPORT_PROGRESS', 'EXPORT_FAILED', 'EXPORT_BUSY', 'EXPORT_INVALIDATED']) {
     assert.equal(listener({ type }, {}, () => { throw new Error('must not respond'); }), false);
   }
-  assert.equal(listener({ type: 'EXPORT_COMPLETE', auditId: 'audit-1' }, {}, () => {}), true,
-    'EXPORT_COMPLETE now belongs only to the authenticated primary protocol');
+  const correlated = {
+    type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: 'S'.repeat(22), auditId: 'audit-1',
+  };
+  assert.equal(listener(correlated, {}, () => {}), true);
   await tick();
-  assert.deepEqual(compatibilityCalls, types);
+  assert.deepEqual(routed, [correlated]);
 });
 
-test('real default graph cleans retention before projecting canonical Task 5 latest rows', async () => {
-  const env = defaultGraphFixture();
-  const rows = [
-    ['audit-running', 'running', 0, 'Preparando a auditoria.', null, null],
-    ['audit-complete', 'complete', 100, 'Avaliação concluída.', null, 1],
-    ['audit-failed', 'failed', 100, 'Não foi possível concluir a auditoria.', 'AUDIT_FAILED', null],
-  ];
-  for (const [auditId, status, percent, message, failureCode, modelRevision] of rows) {
-    env.setLatest({
-      version: 1, auditId, status, percent, message, failureCode, modelRevision,
-      updatedAt: '2026-08-29T12:00:00.000Z', secretBearer: 'S'.repeat(22),
+test('real default graph authorizes first then commits one review with snapshot CAS and a closed receipt', async () => {
+  const env = defaultGraphFixture(null, { enableReportLaunch: true, reviewConflicts: 1 });
+  env.snapshots.set(SAMPLE_AUDIT.auditId, {
+    model: structuredClone(SAMPLE_AUDIT), revision: 1, capability: Object.freeze({}),
+  });
+  const { connected, from } = await env.connectReport(SAMPLE_AUDIT.auditId);
+  assert.equal(connected.ok, true);
+  const entry = SAMPLE_AUDIT.manualReview[0];
+  const response = await env.dispatch({
+    type: 'REPORT_COMMIT_REVIEW_DECISION', sessionCapabilityId: connected.sessionCapabilityId,
+    auditId: SAMPLE_AUDIT.auditId, itemId: entry.itemId, occurrenceId: entry.occurrenceId,
+    answer: 'não conforme', evaluator: 'Pessoa avaliadora', decidedAt: '2026-08-30T12:00:00.000Z',
+    mode: entry.mode, note: 'Barreira confirmada.',
+  }, from);
+
+  assert.deepEqual(response, {
+    ok: true, auditId: SAMPLE_AUDIT.auditId, occurrenceId: entry.occurrenceId,
+    modelRevision: 2, modelHash: 'a'.repeat(64),
+  });
+  assert.equal(env.storeCalls.filter(([name]) => name === 'commitAuditReviewIfRevision').length, 2);
+  const stored = env.snapshots.get(SAMPLE_AUDIT.auditId);
+  assert.equal(stored.revision, 2);
+  assert.deepEqual(stored.model.reviewDecisions.map(value => value.occurrenceId), [entry.occurrenceId]);
+  assert.deepEqual(env.sent, [{
+    type: 'AUDIT_REVIEW_UPDATED', auditId: SAMPLE_AUDIT.auditId, exportRevision: 2,
+  }]);
+  assert.equal(JSON.stringify(response).includes('evaluator'), false);
+  assert.equal(JSON.stringify(response).includes('note'), false);
+  assert.equal(JSON.stringify(response).includes('capability'), false);
+});
+
+test('expired revoked and wrong-document report sessions cause zero review-store mutation', async t => {
+  for (const attack of ['expired', 'revoked', 'wrong-document']) await t.test(attack, async () => {
+    const env = defaultGraphFixture(null, { enableReportLaunch: true });
+    env.snapshots.set(SAMPLE_AUDIT.auditId, {
+      model: structuredClone(SAMPLE_AUDIT), revision: 1, capability: Object.freeze({}),
     });
-    assert.deepEqual(await env.dispatch({ type: 'GET_LAST_AUDIT' }, env.sender('panel')), {
-      ok: true, state: { auditId, status, percent, message },
-    });
-  }
-  assert.deepEqual(env.storeCalls, rows.flatMap(() => [
-    ['cleanupExpiredAudits', { now: '2026-08-29T12:00:00.000Z', limit: 25 }],
-    ['getLatest'],
-  ]));
-});
+    const { connected, from } = await env.connectReport(SAMPLE_AUDIT.auditId);
+    assert.equal(connected.ok, true);
+    const consumerKey = `audita:report-consumer:v1:${connected.sessionCapabilityId}`;
+    if (attack === 'expired') env.sessionValues[consumerKey].expiresAt = 1_788_000_000_000;
+    if (attack === 'revoked') env.sessionValues[consumerKey].state = 'revoked';
+    const entry = SAMPLE_AUDIT.manualReview[0];
+    const response = await env.dispatch({
+      type: 'REPORT_COMMIT_REVIEW_DECISION', sessionCapabilityId: connected.sessionCapabilityId,
+      auditId: SAMPLE_AUDIT.auditId, itemId: entry.itemId, occurrenceId: entry.occurrenceId,
+      answer: 'conforme', evaluator: 'Pessoa avaliadora', decidedAt: '2026-08-30T12:00:00.000Z',
+      mode: entry.mode, note: '',
+    }, attack === 'wrong-document' ? { ...from, documentId: 'foreign-document' } : from);
 
-test('real default graph returns fixed failure when GET_LAST cleanup fails before latest read', async () => {
-  const env = defaultGraphFixture();
-  env.setLatest({ auditId: 'audit-hidden', status: 'complete' });
-  env.setCleanupError(new Error('native cleanup secret'));
-  const response = await env.dispatch({ type: 'GET_LAST_AUDIT' }, env.sender('panel'));
-  assert.deepEqual(response, { ok: false, code: 'COMPATIBILITY_FAILED' });
-  assert.deepEqual(env.storeCalls, [[
-    'cleanupExpiredAudits', { now: '2026-08-29T12:00:00.000Z', limit: 25 },
-  ]]);
-  assert.doesNotMatch(JSON.stringify(response), /native|cleanup|secret/u);
-});
-
-test('real default graph validates review revision before a bearer-free update broadcast', async () => {
-  const env = defaultGraphFixture();
-  env.snapshots.set('audit-review', { model: { auditId: 'audit-review' }, revision: 4, capability: Object.freeze({}) });
-  assert.deepEqual(await env.dispatch(
-    { type: 'REVIEW_COMMITTED', auditId: 'audit-review', exportRevision: 3 },
-    env.sender('review', 'audit-review'),
-  ), { ok: false, code: 'COMPATIBILITY_DENIED' });
-  assert.deepEqual(env.sent, []);
-
-  assert.deepEqual(await env.dispatch(
-    { type: 'REVIEW_COMMITTED', auditId: 'audit-review', exportRevision: 4 },
-    env.sender('review', 'audit-review'),
-  ), { ok: true });
-  assert.deepEqual(env.sent, [{ type: 'AUDIT_REVIEW_UPDATED', auditId: 'audit-review', exportRevision: 4 }]);
-  assert.equal(JSON.stringify(env.sent).includes('capability'), false);
+    assert.equal(response.ok, false);
+    assert.equal(env.storeCalls.some(([name]) => name === 'commitAuditReviewIfRevision'), false);
+    assert.equal(env.snapshots.get(SAMPLE_AUDIT.auditId).revision, 1);
+    assert.equal(env.snapshots.get(SAMPLE_AUDIT.auditId).model.reviewDecisions.length, 0);
+    assert.deepEqual(env.sent, []);
+  });
 });
 
 test('real default graph deletes one/all through correlated surfaces and maps storage busy errors', async () => {
-  const env = defaultGraphFixture();
+  const env = defaultGraphFixture(null, { enableReportLaunch: true });
   env.snapshots.set('audit-delete', { model: { auditId: 'audit-delete' }, revision: 1, capability: Object.freeze({}) });
+  const { connected, from } = await env.connectReport('audit-delete');
+  assert.equal(connected.ok, true);
   assert.deepEqual(await env.dispatch(
-    { type: 'REQUEST_DELETE_AUDIT', auditId: 'audit-delete' },
-    env.sender('review', 'audit-delete'),
+    { type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: connected.sessionCapabilityId, auditId: 'audit-delete' },
+    from,
   ), { ok: true, auditId: 'audit-delete', deleted: true });
   assert.deepEqual(env.deleted, ['audit-delete']);
   assert.deepEqual(env.sent, [{ type: 'AUDIT_DELETED', auditId: 'audit-delete', reason: 'delete-one' }]);
@@ -632,19 +917,22 @@ test('real default graph deletes one/all through correlated surfaces and maps st
     checkpoint: { version: 1, auditId: 'audit-foreign', pages: [] },
   };
   env.sessionValues['user:unrelated'] = { private: true };
+  const nullScansBeforeDeleteAll = env.sessionGetCalls.filter(value => value === null).length;
   env.denySessionScan();
-  assert.deepEqual(await env.dispatch({ type: 'REQUEST_DELETE_ALL_AUDITS' }, env.sender('panel')), { ok: true, deleted: 3 });
+  assert.deepEqual(await env.dispatch({
+    type: 'REPORT_DELETE_ALL_AUDITS', sessionCapabilityId: connected.sessionCapabilityId, auditId: 'audit-delete',
+  }, from), { ok: true, deleted: 3 });
   assert.deepEqual(env.sent.at(-1), { type: 'AUDIT_DELETED', scope: 'all', reason: 'delete-all' });
   assert.equal(Object.hasOwn(env.sessionValues, 'audita:execution-checkpoint:v1:audit-stale'), true);
   assert.equal(Object.hasOwn(env.sessionValues, 'audita:execution-checkpoint:v1:audit-transplanted'), true);
   assert.deepEqual(env.sessionValues['user:unrelated'], { private: true });
-  assert.equal(env.sessionGetCalls.includes(null), false);
+  assert.equal(env.sessionGetCalls.filter(value => value === null).length, nullScansBeforeDeleteAll);
 
-  env.snapshots.set('audit-busy', { model: { auditId: 'audit-busy' }, revision: 1, capability: Object.freeze({}) });
+  env.snapshots.set('audit-delete', { model: { auditId: 'audit-delete' }, revision: 2, capability: Object.freeze({}) });
   env.setDeleteError(Object.assign(new Error('native lock detail'), { code: 'AUDIT_DELETE_BUSY' }));
   assert.deepEqual(await env.dispatch(
-    { type: 'REQUEST_DELETE_AUDIT', auditId: 'audit-busy' },
-    env.sender('review', 'audit-busy'),
+    { type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: connected.sessionCapabilityId, auditId: 'audit-delete' },
+    from,
   ), { ok: false, code: 'AUDIT_DELETE_BUSY' });
 });
 
@@ -654,8 +942,7 @@ test('unknown URL and batch envelopes do not read, serialize, log or respond wit
   registerServiceWorker(chromeApi, {
     startupReady: Promise.resolve(runtimeValue()),
     router: { async dispatch() { throw new Error('must not run'); } },
-    compatibilityHandler: { async dispatch() { throw new Error('must not run'); } },
-    panelCoordinator: { attachPanelPort() {} }, personaController: { attachPanelPort() {} },
+    panelCoordinator: { attachPanelPort() {} },
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
     logger: { error(value) { logs.push(value); } },
   });
@@ -669,22 +956,21 @@ test('unknown URL and batch envelopes do not read, serialize, log or respond wit
   assert.deepEqual(logs, []);
 });
 
-test('dispatch rejection becomes a fixed closed response for primary and compatibility paths', async () => {
+test('dispatch rejection becomes a fixed closed response only for recognized primary paths', async () => {
   const { chromeApi, events } = chromeFixture();
   registerServiceWorker(chromeApi, {
     startupReady: Promise.resolve(runtimeValue()),
     router: { async dispatch() { throw new Error('native primary secret'); } },
-    compatibilityHandler: { async dispatch() { throw new Error('native compatibility secret'); } },
-    panelCoordinator: { attachPanelPort() {} }, personaController: { attachPanelPort() {} },
+    panelCoordinator: { attachPanelPort() {} },
     createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
     logger: { error() {} },
   });
   const listener = [...events.message.listeners][0];
   const primary = [];
-  const compatibility = [];
+  let oldResponses = 0;
   listener({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-fixed', windowId: 9 }, {}, value => primary.push(value));
-  listener({ type: 'GET_LAST_AUDIT' }, {}, value => compatibility.push(value));
+  assert.equal(listener({ type: 'GET_LAST_AUDIT' }, {}, () => { oldResponses += 1; }), false);
   await tick();
-  assert.deepEqual(primary, [{ ok: false, code: 'WORKER_UNAVAILABLE' }]);
-  assert.deepEqual(compatibility, [{ ok: false, code: 'COMPATIBILITY_FAILED' }]);
+  assert.deepEqual(primary, [{ ok: false, code: 'CONTEXT_DENIED' }]);
+  assert.equal(oldResponses, 0);
 });

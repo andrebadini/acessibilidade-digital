@@ -1,16 +1,21 @@
 import { copyPanelResultBundleV1 } from './panel-result-bundle.js';
+import { PANEL_UNPREPARED_MESSAGE } from './panel-status.js';
 
 const PORT_NAME = 'audita-panel-v1';
 const SESSION_ID = /^[A-Za-z0-9_-]{20,240}$/u;
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
+const REQUEST_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const RECONNECT_DELAYS = Object.freeze([250, 500, 1000, 2000, 5000]);
-const PACKET_KEYS = Object.freeze([
+const REQUEST_TIMEOUT_MS = 5000;
+const BOOTSTRAP_KEYS = Object.freeze([
   'protocol', 'version', 'type', 'state', 'auditId', 'sessionCapabilityId', 'result',
 ]);
+const INTENT_RESULT_KEYS = Object.freeze(['protocol', 'version', 'type', 'requestId', 'response']);
 
-function freeze(value) {
-  if (value && typeof value === 'object') {
-    for (const child of Object.values(value)) freeze(child);
+function freeze(value, seen = new WeakSet()) {
+  if (value && typeof value === 'object' && !seen.has(value)) {
+    seen.add(value);
+    for (const child of Object.values(value)) freeze(child, seen);
     Object.freeze(value);
   }
   return value;
@@ -31,8 +36,36 @@ function exact(value, keys) {
   } catch { return null; }
 }
 
-function parsePacket(value) {
-  const packet = exact(value, PACKET_KEYS);
+function copyData(value, state = { nodes: 0 }, depth = 0) {
+  if (['string', 'number', 'boolean'].includes(typeof value) || value === null) return value;
+  if (depth > 8 || ++state.nodes > 2048 || !value || typeof value !== 'object') throw new TypeError('INVALID_DATA');
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype || value.length > 2048) throw new TypeError('INVALID_DATA');
+    const own = Reflect.ownKeys(value);
+    if (own.length !== value.length + 1 || !own.includes('length')) throw new TypeError('INVALID_DATA');
+    const output = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new TypeError('INVALID_DATA');
+      output.push(copyData(descriptor.value, state, depth + 1));
+    }
+    return output;
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype) throw new TypeError('INVALID_DATA');
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > 256 || keys.some(key => typeof key !== 'string')) throw new TypeError('INVALID_DATA');
+  const output = {};
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new TypeError('INVALID_DATA');
+    output[key] = copyData(descriptor.value, state, depth + 1);
+  }
+  if (new TextEncoder().encode(JSON.stringify(output)).byteLength > 65_536) throw new TypeError('INVALID_DATA');
+  return output;
+}
+
+function parseBootstrap(value) {
+  const packet = exact(value, BOOTSTRAP_KEYS);
   if (!packet || packet.protocol !== 'audita-panel' || packet.version !== 1 || packet.type !== 'bootstrap-result') return null;
   if (packet.state === 'initial') {
     return packet.auditId === null && packet.sessionCapabilityId === null && packet.result === null ? freeze(packet) : null;
@@ -46,35 +79,60 @@ function parsePacket(value) {
   } catch { return null; }
 }
 
+function parseIntentResult(value) {
+  const packet = exact(value, INTENT_RESULT_KEYS);
+  if (!packet || packet.protocol !== 'audita-panel' || packet.version !== 1 || packet.type !== 'intent-result' ||
+    !REQUEST_ID.test(packet.requestId ?? '')) return null;
+  try { return freeze({ ...packet, response: copyData(packet.response) }); }
+  catch { return null; }
+}
+
+function copyIntent(value) {
+  try {
+    const copy = copyData(value);
+    return copy && !Array.isArray(copy) && typeof copy.type === 'string' ? freeze(copy) : null;
+  } catch { return null; }
+}
+
 function localUnavailable() {
   return Object.freeze({ ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
 }
 
 export function createPanelSessionPortClient(raw) {
-  const input = exact(raw, ['chromeApi', 'getWindowId', 'onBootstrapResult', 'onStatus', 'setTimer', 'clearTimer']);
+  const input = exact(raw, [
+    'chromeApi', 'onBootstrapResult', 'onStatus', 'createRequestId', 'setTimer', 'clearTimer',
+  ]);
   if (!input || typeof input.chromeApi?.runtime?.connect !== 'function' ||
-    typeof input.chromeApi.runtime.sendMessage !== 'function' || typeof input.getWindowId !== 'function' ||
-    typeof input.onBootstrapResult !== 'function' ||
-    typeof input.onStatus !== 'function' || typeof input.setTimer !== 'function' || typeof input.clearTimer !== 'function') {
-    throw new TypeError('PANEL_SESSION_CLIENT_INVALID');
-  }
+    typeof input.onBootstrapResult !== 'function' || typeof input.onStatus !== 'function' ||
+    typeof input.createRequestId !== 'function' || typeof input.setTimer !== 'function' ||
+    typeof input.clearTimer !== 'function') throw new TypeError('PANEL_SESSION_CLIENT_INVALID');
 
   let started = false;
-  let connecting = false;
   let currentPort = null;
   let reconnectTimer = null;
   let reconnectIndex = 0;
+  let ready = false;
   let auditId = null;
   let sessionId = null;
   const bindings = new WeakMap();
+  const pending = new Map();
 
   const notifyStatus = status => {
-    try { input.onStatus(status); } catch { /* UI callbacks never own transport state. */ }
+    try { input.onStatus(status); } catch { /* UI callbacks do not own transport state. */ }
   };
   const notifyBootstrap = value => {
-    try { input.onBootstrapResult(value); } catch { /* UI callbacks never own transport state. */ }
+    try { input.onBootstrapResult(value); } catch { /* UI callbacks do not own transport state. */ }
   };
-  const clearCorrelation = () => { auditId = null; sessionId = null; };
+  const clearCorrelation = () => { ready = false; auditId = null; sessionId = null; };
+  const settle = (entry, value) => {
+    if (!entry) return;
+    try { input.clearTimer(entry.timer); } catch { /* fixed cleanup */ }
+    entry.resolve(value);
+  };
+  const settleAll = value => {
+    for (const entry of pending.values()) settle(entry, value);
+    pending.clear();
+  };
 
   function detach(port, disconnect) {
     if (!port) return;
@@ -89,9 +147,9 @@ export function createPanelSessionPortClient(raw) {
   }
 
   function scheduleReconnect() {
-    if (!started || reconnectTimer !== null) return;
-    const delay = RECONNECT_DELAYS[Math.min(reconnectIndex, RECONNECT_DELAYS.length - 1)];
-    reconnectIndex = Math.min(reconnectIndex + 1, RECONNECT_DELAYS.length);
+    if (!started || reconnectTimer !== null || reconnectIndex >= RECONNECT_DELAYS.length) return;
+    const delay = RECONNECT_DELAYS[reconnectIndex];
+    reconnectIndex += 1;
     reconnectTimer = input.setTimer(() => {
       reconnectTimer = null;
       if (started) connect();
@@ -100,72 +158,57 @@ export function createPanelSessionPortClient(raw) {
 
   function unavailable(port, disconnect = false) {
     clearCorrelation();
+    settleAll(localUnavailable());
     detach(port, disconnect);
-    notifyStatus('Painel indisponível; tentando reconectar.');
+    notifyStatus(PANEL_UNPREPARED_MESSAGE);
     scheduleReconnect();
   }
 
   function receive(port, rawPacket) {
     if (!started || currentPort !== port) return;
-    const packet = parsePacket(rawPacket);
-    if (!packet) {
+    const bootstrap = parseBootstrap(rawPacket);
+    if (bootstrap) {
+      const priorCorrelation = ready && (auditId !== null || sessionId !== null)
+        ? `${auditId ?? ''}\u0000${sessionId ?? ''}`
+        : null;
+      const nextCorrelation = `${bootstrap.auditId ?? ''}\u0000${bootstrap.sessionCapabilityId ?? ''}`;
+      if (priorCorrelation !== null && priorCorrelation !== nextCorrelation) settleAll(localUnavailable());
+      reconnectIndex = 0;
+      ready = true;
+      auditId = bootstrap.auditId;
+      sessionId = bootstrap.sessionCapabilityId;
+      notifyStatus('Painel conectado.');
+      notifyBootstrap(freeze({ state: bootstrap.state, auditId: bootstrap.auditId, result: bootstrap.result }));
+      return;
+    }
+    const result = parseIntentResult(rawPacket);
+    if (!result || !pending.has(result.requestId)) {
       unavailable(port, true);
       return;
     }
-    reconnectIndex = 0;
-    if (packet.state === 'initial') clearCorrelation();
-    else {
-      auditId = packet.auditId;
-      sessionId = packet.sessionCapabilityId;
-    }
-    notifyStatus('Painel conectado.');
-    notifyBootstrap(freeze({ state: packet.state, auditId: packet.auditId, result: packet.result }));
+    const entry = pending.get(result.requestId);
+    pending.delete(result.requestId);
+    settle(entry, result.response);
   }
 
-  async function connect() {
-    if (!started || currentPort !== null || connecting) return;
-    connecting = true;
-    let windowId;
-    try { windowId = await input.getWindowId(); }
-    catch {
-      connecting = false;
-      unavailable(null);
-      return;
-    }
-    if (!started || currentPort !== null) {
-      connecting = false;
-      return;
-    }
-    if (!Number.isSafeInteger(windowId) || windowId < 0) {
-      connecting = false;
-      unavailable(null);
-      return;
-    }
+  function connect() {
+    if (!started || currentPort !== null) return;
     let port;
     try { port = input.chromeApi.runtime.connect({ name: PORT_NAME }); }
-    catch {
-      connecting = false;
-      unavailable(null);
-      return;
-    }
+    catch { unavailable(null); return; }
     if (!port || typeof port.postMessage !== 'function' ||
       typeof port.onMessage?.addListener !== 'function' || typeof port.onDisconnect?.addListener !== 'function') {
-      connecting = false;
       unavailable(port, true);
       return;
     }
     currentPort = port;
     const onMessage = message => receive(port, message);
-    const onDisconnect = () => {
-      if (currentPort !== port) return;
-      unavailable(port, false);
-    };
+    const onDisconnect = () => { if (currentPort === port) unavailable(port, false); };
     bindings.set(port, { onMessage, onDisconnect });
     port.onMessage.addListener(onMessage);
     port.onDisconnect.addListener(onDisconnect);
     notifyStatus('Conectando ao painel.');
-    connecting = false;
-    try { port.postMessage({ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId }); }
+    try { port.postMessage({ protocol: 'audita-panel', version: 1, type: 'bootstrap' }); }
     catch { unavailable(port, true); }
   }
 
@@ -180,6 +223,7 @@ export function createPanelSessionPortClient(raw) {
     if (!started) return false;
     started = false;
     clearCorrelation();
+    settleAll(localUnavailable());
     if (reconnectTimer !== null) {
       input.clearTimer(reconnectTimer);
       reconnectTimer = null;
@@ -188,29 +232,36 @@ export function createPanelSessionPortClient(raw) {
     return true;
   }
 
-  async function requestSessionIntent(rawIntent) {
-    const intent = exact(rawIntent, ['type']);
-    if (!intent || !['PANEL_CANCEL_AUDIT', 'PANEL_OPEN_REPORT'].includes(intent.type) ||
-      auditId === null || sessionId === null) return localUnavailable();
-    const expectedAuditId = auditId;
-    const expectedSessionId = sessionId;
-    let windowId;
-    try { windowId = await input.getWindowId(); }
-    catch { return localUnavailable(); }
-    if (!Number.isSafeInteger(windowId) || windowId < 0 ||
-      auditId !== expectedAuditId || sessionId !== expectedSessionId) return localUnavailable();
-    const message = {
-      type: intent.type, sessionCapabilityId: expectedSessionId, auditId: expectedAuditId, windowId,
-    };
-    try {
-      return await new Promise(resolve => {
-        let settled = false;
-        const finish = value => { if (!settled) { settled = true; resolve(value); } };
-        const result = input.chromeApi.runtime.sendMessage(message, finish);
-        if (result && typeof result.then === 'function') result.then(finish, () => finish(localUnavailable()));
-      });
-    } catch { return localUnavailable(); }
+  function requestIntent(rawIntent) {
+    if (!started || !ready || currentPort === null) return Promise.resolve(localUnavailable());
+    let intent = copyIntent(rawIntent);
+    if (!intent) return Promise.resolve(localUnavailable());
+    if (['PANEL_CANCEL_AUDIT', 'PANEL_OPEN_REPORT'].includes(intent.type)) {
+      if (Reflect.ownKeys(intent).length !== 1 || auditId === null || sessionId === null) return Promise.resolve(localUnavailable());
+      intent = freeze({ type: intent.type, sessionCapabilityId: sessionId, auditId });
+    }
+    let requestId;
+    try { requestId = input.createRequestId(); } catch { return Promise.resolve(localUnavailable()); }
+    if (!REQUEST_ID.test(requestId ?? '') || pending.has(requestId)) return Promise.resolve(localUnavailable());
+    const port = currentPort;
+    return new Promise(resolve => {
+      const timer = input.setTimer(() => {
+        const entry = pending.get(requestId);
+        if (!entry) return;
+        pending.delete(requestId);
+        settle(entry, localUnavailable());
+      }, REQUEST_TIMEOUT_MS);
+      pending.set(requestId, { resolve, timer });
+      try {
+        port.postMessage({ protocol: 'audita-panel', version: 1, type: 'intent', requestId, envelope: intent });
+      } catch {
+        const entry = pending.get(requestId);
+        pending.delete(requestId);
+        settle(entry, localUnavailable());
+        unavailable(port, true);
+      }
+    });
   }
 
-  return Object.freeze({ start, stop, requestSessionIntent });
+  return Object.freeze({ start, stop, requestIntent });
 }

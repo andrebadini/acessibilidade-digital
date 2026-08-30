@@ -4,7 +4,6 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const namespaceExpression = 'globalThis[Symbol.for("audita.accessible-preview.runtime.v1")]';
-let structuredCloneCalls = 0;
 
 class FakeClassList {
   constructor(values = []) { this.values = new Set(values); }
@@ -136,11 +135,7 @@ async function loadContentFactory(contextGlobals = {}) {
   let content = '';
   try { content = await readFile(new URL('../../src/personas/content.js', import.meta.url), 'utf8'); } catch { /* RED */ }
   assert.notEqual(content, '', 'o runtime clássico de conteúdo precisa existir');
-  structuredCloneCalls = 0;
-  const context = vm.createContext({
-    structuredClone() { structuredCloneCalls += 1; throw new Error('structuredClone não deve tocar a mensagem'); },
-    ...contextGlobals,
-  });
+  const context = vm.createContext(contextGlobals);
   for (const source of [runtime, reader, content]) new vm.Script(source).runInContext(context);
   return vm.runInContext(namespaceExpression, context);
 }
@@ -510,100 +505,42 @@ test('bounded DOM discovery reports an explicit truncation limitation with a cou
   assert.ok(Number.isSafeInteger(limitation.count) && limitation.count >= 10);
 });
 
-test('content messaging rejects nested accessors/replayed initialize and uses only a correlated port for captions', async () => {
-  const namespace = await loadContentFactory();
+test('loading the injected content factory never opens legacy runtime messaging channels', async () => {
   const fixture = fixturePage();
   const onMessage = hook();
   const onConnect = hook();
-  const broadcasts = [];
-  const chromeApi = {
-    runtime: {
-      id: 'test-extension', onMessage, onConnect,
-      sendMessage(message) { broadcasts.push(message); },
+  const namespace = await loadContentFactory({
+    document: fixture.document,
+    chrome: {
+      runtime: {
+        id: 'test-extension',
+        onMessage,
+        onConnect,
+        sendMessage() { throw new Error('legacy broadcast must remain unused'); },
+      },
     },
-  };
+  });
+  assert.equal(onMessage.size, 0);
+  assert.equal(onConnect.size, 0);
+  assert.equal(namespace.getContentSingleton(), null);
+});
+
+test('content runtime exposes no callable or source-level legacy messaging channel', async () => {
+  const namespace = await loadContentFactory();
+  const fixture = fixturePage();
   const content = namespace.createContentRuntime({
     document: fixture.document,
     window: fixture.document.defaultView,
     speechSynthesis: null,
   });
-  content.installMessaging(chromeApi);
-  const initialize = contentCommand('initialize', 'init-1', 1, {});
-  let firstResponse;
-  assert.equal(onMessage.fireWithResult(initialize, { id: 'test-extension' }, value => { firstResponse = value; }), true);
-  assert.equal(firstResponse.ok, true);
-  const contentPort = createEventPort();
-  onConnect.fire(contentPort);
-  contentPort.onMessage.fire({
-    protocol: 'audita-persona-content', version: 1, type: 'bind-events',
-    token: 'content-token', generation: 1, documentId: 'content-document',
-  });
-  assert.equal(JSON.stringify(contentPort.posted.at(-1)), JSON.stringify({
-    protocol: 'audita-persona-content', version: 1, type: 'events-bound',
-    token: 'content-token', generation: 1, documentId: 'content-document',
-  }));
-  let replayResponse;
-  onMessage.fireWithResult(initialize, { id: 'test-extension' }, value => { replayResponse = value; });
-  assert.equal(replayResponse.code, 'PERSONA_REPLAY_REJECTED');
+  assert.equal(Object.hasOwn(content, 'installMessaging'), false);
+  assert.deepEqual(Object.keys(content), [
+    'activate', 'stop', 'readerAction', 'setPreferences',
+    'collectReaderCandidates', 'getLimitations', 'getState', 'destroy',
+  ]);
 
-  let reads = 0;
-  const hostileArgs = {};
-  Object.defineProperty(hostileArgs, 'mode', { enumerable: true, get() { reads += 1; return 'reader'; } });
-  const hostile = contentCommand('activate', 'nested-accessor', 2, hostileArgs);
-  assert.equal(onMessage.fireWithResult(hostile, { id: 'test-extension' }, () => {}), false);
-  assert.equal(reads, 0);
-
-  const activate = contentCommand('activate', 'activate-1', 2, { mode: 'reader', preferences: { voiceId: '', rate: 1 } });
-  let activeResponse;
-  onMessage.fireWithResult(activate, { id: 'test-extension' }, value => { activeResponse = value; });
-  assert.equal(activeResponse.ok, true);
-  assert.equal(structuredCloneCalls, 0, 'validação por descritores não delega a clone que possa ler getters');
-  assert.equal(broadcasts.length, 0);
-  assert.ok(contentPort.posted.some(message => message.type === 'event' && message.state?.reader?.caption === 'Positivo um, botão'));
-  assert.ok(contentPort.posted.every(message => message.token === 'content-token' && message.documentId === 'content-document'));
-  assert.doesNotMatch(JSON.stringify(contentPort.posted), /SEGREDO-(?:WIDGET|OTP)/iu);
-
-  const duplicatePort = createEventPort();
-  onConnect.fire(duplicatePort);
-  duplicatePort.onMessage.fire({
-    protocol: 'audita-persona-content', version: 1, type: 'bind-events',
-    token: 'content-token', generation: 2, documentId: 'content-document',
-  });
-  assert.equal(duplicatePort.disconnectCalls, 1, 'uma segunda porta não substitui o canal já correlacionado');
-
-  let bindGetterReads = 0;
-  const hostilePort = createEventPort();
-  onConnect.fire(hostilePort);
-  const hostileBinding = {};
-  Object.defineProperty(hostileBinding, 'token', {
-    enumerable: true, get() { bindGetterReads += 1; return 'content-token'; },
-  });
-  hostilePort.onMessage.fire(hostileBinding);
-  assert.equal(bindGetterReads, 0);
-  assert.equal(hostilePort.disconnectCalls, 1);
-
-  contentPort.disconnect();
-  assert.equal(content.getState().activeMode, null, 'morte do worker encerra a persona localmente');
-  assert.equal(fixture.document.body.children.filter(node => node.hasAttribute('data-audita-persona-owned')).length, 0);
-  const reinitialize = {
-    ...contentCommand('initialize', 'init-after-worker-restart', 1, {}),
-    token: 'content-token-restarted', documentId: 'content-document-restarted',
-  };
-  let restartResponse;
-  onMessage.fireWithResult(reinitialize, { id: 'test-extension' }, value => { restartResponse = value; });
-  assert.equal(restartResponse.ok, true);
-  const restartedPort = createEventPort();
-  onConnect.fire(restartedPort);
-  restartedPort.onMessage.fire({
-    protocol: 'audita-persona-content', version: 1, type: 'bind-events',
-    token: 'content-token-restarted', generation: 1, documentId: 'content-document-restarted',
-  });
-  const restartActivation = {
-    ...contentCommand('activate', 'activate-after-worker-restart', 2, { mode: 'motor', preferences: { voiceId: '', rate: 1 } }),
-    token: 'content-token-restarted', documentId: 'content-document-restarted',
-  };
-  onMessage.fireWithResult(restartActivation, { id: 'test-extension' }, () => {});
-  assert.equal(content.getState().activeMode, 'motor');
+  const source = await readFile(new URL('../../src/personas/content.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /installMessaging|audita-persona-content|runtime\.onMessage|runtime\.onConnect/u);
 });
 
 test('reader artifacts are owned, aria-hidden, pointer-transparent by CSS contract and cleaned idempotently', async () => {
@@ -885,27 +822,10 @@ function event(init) {
 function hook() {
   const listeners = [];
   return {
+    get size() { return listeners.length; },
     addListener(listener) { listeners.push(listener); },
     removeListener(listener) { const index = listeners.indexOf(listener); if (index >= 0) listeners.splice(index, 1); },
     fire(...args) { for (const listener of [...listeners]) listener(...args); },
     fireWithResult(...args) { return listeners[0]?.(...args); },
-  };
-}
-
-function createEventPort() {
-  const onMessage = hook();
-  const onDisconnect = hook();
-  return {
-    name: 'audita-persona-content-v1', sender: { id: 'test-extension' },
-    onMessage, onDisconnect, posted: [], disconnectCalls: 0,
-    postMessage(message) { this.posted.push(message); },
-    disconnect() { this.disconnectCalls += 1; onDisconnect.fire(); },
-  };
-}
-
-function contentCommand(command, requestId, generation, args) {
-  return {
-    protocol: 'audita-persona-content', version: 1, type: 'command', requestId,
-    token: 'content-token', generation, documentId: 'content-document', command, args,
   };
 }

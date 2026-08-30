@@ -20,6 +20,7 @@ const EXTENSION_PAGE_SCHEMAS = Object.freeze({
   '/test/e2e/fixtures/retention-harness.html': Object.freeze([]),
 });
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
+const PANEL_LAUNCH_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const METHOD = /^[A-Za-z][A-Za-z0-9]*\.[A-Za-z][A-Za-z0-9]*$/u;
 const OPERATION_ID = /^[A-Za-z0-9_-]{1,96}$/u;
 const CHROME_ID = /^[a-p]{32}$/u;
@@ -822,7 +823,7 @@ export async function openSidePanelFromAction(launch, options = {}) {
   const shortcut = options.shortcut ?? declared;
   if (typeof shortcut !== 'string' || shortcut !== declared) throw fixed('SHORTCUT_DENIED');
   await waitForValue(await openTabHarness(launch),
-    'chrome.sidePanel.getPanelBehavior().then(value=>value?.openPanelOnActionClick===true)', Boolean,
+    'chrome.sidePanel.getPanelBehavior().then(value=>value?.openPanelOnActionClick===false)', Boolean,
     { timeoutMs: 10_000, intervalMs: 50 });
   await activateRealTab(launch, launch.startPage, { operationId: safeOperationId() });
   DECLARED_SHORTCUTS.set(launch.startPage.page, new Set([shortcut]));
@@ -846,7 +847,10 @@ async function waitForExactContext(launch, contextType, path, auditId = null) {
       try {
         const url = new URL(context.documentUrl);
         return url.protocol === 'chrome-extension:' && url.hostname === launch.extensionId && url.pathname === path && !url.hash &&
-          (auditId === null ? url.search === '' : url.searchParams.size === 1 && url.searchParams.getAll('auditId').length === 1 && url.searchParams.get('auditId') === auditId);
+          (auditId === null
+            ? path === '/src/panel/index.html' && url.searchParams.size === 1 && url.searchParams.getAll('launch').length === 1 &&
+              PANEL_LAUNCH_TOKEN.test(url.searchParams.get('launch') ?? '')
+            : url.searchParams.size === 1 && url.searchParams.getAll('auditId').length === 1 && url.searchParams.get('auditId') === auditId);
       } catch { return false; }
     });
     if (matches.length === 1) return matches;

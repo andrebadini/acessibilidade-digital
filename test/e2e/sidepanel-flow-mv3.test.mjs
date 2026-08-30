@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, sep } from 'node:path';
 import test from 'node:test';
@@ -56,14 +56,39 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
       expectedMajor: Number(chromeMajorText),
     });
     assert.equal(extension.chromeProduct, 'Chrome/152.0.7977.64');
+    const panelBehavior = await extension.evaluate(extension.harnessPage,
+      'chrome.sidePanel.getPanelBehavior()', { awaitPromise: true });
+    assert.equal(panelBehavior?.openPanelOnActionClick, false);
     const before = await extension.identityOf(extension.startPage);
     const panel = await extension.openSidePanelFromAction();
     const sidePanels = await extension.runtimeContexts({ contextTypes: ['SIDE_PANEL'] });
     const popups = await extension.runtimeContexts({ contextTypes: ['POPUP'] });
     assert.equal(sidePanels.length, 1);
     assert.equal(popups.length, 0);
+    const panelLaunchUrl = new URL(sidePanels[0].documentUrl);
+    assert.equal(panelLaunchUrl.protocol, 'chrome-extension:');
+    assert.equal(panelLaunchUrl.hostname, extension.extensionId);
+    assert.equal(panelLaunchUrl.pathname, '/src/panel/index.html');
+    assert.deepEqual([...panelLaunchUrl.searchParams.keys()], ['launch']);
+    const launchToken = panelLaunchUrl.searchParams.get('launch');
+    assert.match(launchToken, /^[A-Za-z0-9_-]{43}$/u);
+    assert.notEqual(panelLaunchUrl.search, '');
     const contextProof = sidePanels.map(({ contextType, documentId, tabId, windowId }) => ({ contextType, documentId, tabId, windowId }));
     const panelDocumentId = sidePanels[0].documentId;
+    const stablePanelWidths = [];
+    const assertTokenNotExposed = async (target, surface) => {
+      const exposure = await extension.evaluate(target, `(() => {
+        const token=${JSON.stringify(launchToken)};
+        const storageHasToken=storage=>Object.keys(storage).some(key=>key.includes(token)||String(storage.getItem(key)).includes(token));
+        return {
+          dom: document.documentElement.outerHTML.includes(token),
+          rendered: (document.body?.innerText ?? '').includes(token),
+          localStorage: storageHasToken(localStorage),
+          sessionStorage: storageHasToken(sessionStorage)
+        };
+      })()`);
+      assert.deepEqual(exposure, { dom: false, rendered: false, localStorage: false, sessionStorage: false }, surface);
+    };
     const proveStablePanel = async stage => {
       const [currentPanels, currentPopups] = await Promise.all([
         extension.runtimeContexts({ contextTypes: ['SIDE_PANEL'] }),
@@ -72,7 +97,20 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
       assert.equal(currentPanels.length, 1, stage);
       assert.equal(currentPanels[0].documentId, panelDocumentId, stage);
       assert.equal(currentPopups.length, 0, stage);
-      t.diagnostic(`panel-stability=${stage}; SIDE_PANEL=${currentPanels.length}; POPUP=${currentPopups.length}`);
+      const widths = await extension.evaluate(panel, `(async()=>{
+        const values=[];
+        for(let index=0;index<4;index+=1){
+          await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+          values.push({innerWidth,clientWidth:document.documentElement.clientWidth,bodyWidth:document.body?.clientWidth??0});
+        }
+        return values;
+      })()`, { awaitPromise: true });
+      assert.equal(widths.length, 4, stage);
+      assert.equal(widths.every(value => Number.isInteger(value.innerWidth) && value.innerWidth > 0 &&
+        value.clientWidth === value.innerWidth && value.bodyWidth === value.innerWidth), true, stage);
+      assert.equal(new Set(widths.map(value => value.innerWidth)).size, 1, `${stage}: no width oscillation`);
+      stablePanelWidths.push(widths[0].innerWidth);
+      t.diagnostic(`panel-stability=${stage}; SIDE_PANEL=${currentPanels.length}; POPUP=${currentPopups.length}; width=${widths[0].innerWidth}`);
     };
     t.diagnostic(`Chrome=${extension.chromeProduct}; SIDE_PANEL=${sidePanels.length}; POPUP=${popups.length}; contexts=${JSON.stringify(contextProof)}`);
 
@@ -86,6 +124,7 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
     assert.equal(initialState.screen, 'initial');
     assert.equal(initialState.heading, 'Avaliar acessibilidade');
     await proveStablePanel('initial');
+    await assertTokenNotExposed(panel, 'panel initial must not expose launch authority');
     await extension.captureJourney('panel-initial', panel);
 
     await extension.click(panel, 'button[data-focus-id="start-attached"][data-intent="START_ATTACHED"]');
@@ -120,6 +159,7 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
     }
     assert.equal(terminalState.screen, 'result');
     await proveStablePanel('result');
+    await assertTokenNotExposed(panel, 'panel result must not expose launch authority');
 
     const auditId = await extension.readAttribute(panel, '[data-screen="result"]', 'data-audit-id');
     assert.match(auditId, /^[A-Za-z0-9._:-]{1,160}$/u);
@@ -139,6 +179,7 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
     await extension.click(panel, 'button[data-focus-id="consult-evidence"]');
     await extension.waitForValue(panel, "document.querySelector('details[data-detail-block=" + '"previews"' + "]')?.open", Boolean);
     await proveStablePanel('detail-and-evidence');
+    assert.equal(new Set(stablePanelWidths).size, 1, 'the native panel width remains fixed across the journey');
     await extension.captureJourney('panel-evidence', panel);
 
     await extension.click(panel, 'button[data-focus-id="open-report"]');
@@ -159,12 +200,18 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
     assert.equal(reportState.exportReady, true);
     assert.ok(reportState.rootChildren > 0);
     assert.notEqual(reportState.status, 'Carregando a auditoria.');
+    await assertTokenNotExposed(report, 'report must not expose panel launch authority');
     await extension.captureJourney('report', report, { captureBeyondViewport: false });
 
     await extension.click(report, 'button[data-report-export]');
     const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 60_000, intervalMs: 50 });
     assert.deepEqual(downloads.map(row => row.format), ['html', 'pdf', 'csv', 'json']);
     assert.equal(downloads.every(row => row.state === 'complete' && row.byteLength > 0 && /^[a-f0-9]{64}$/u.test(row.sha256)), true);
+    const exportsContainingLaunchAuthority = (await Promise.all(downloads.map(async row => ({
+      format: row.format,
+      containsToken: (await readFile(join(downloadDirectory, row.filename))).includes(Buffer.from(launchToken)),
+    })))).filter(row => row.containsToken).map(row => row.format);
+    assert.deepEqual(exportsContainingLaunchAuthority, []);
     assert.deepEqual(await extension.identityOf(extension.startPage), before);
     const downloadProofs = downloads.map(row => ({
       format: row.format,

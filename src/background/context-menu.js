@@ -86,15 +86,17 @@ async function invoke(chromeApi, receiver, name, ...args) {
 }
 
 export function registerAuditContextMenus(chromeApi, rawOptions) {
-  const options = exact(rawOptions, ['getReadyRuntime', 'createEventNonce', 'createAuditId', 'epochNow', 'logger']);
+  const options = exact(rawOptions, ['getReadyRuntime', 'createEventNonce', 'createAuditId', 'epochNow', 'logger', 'launchPanel']);
   if (!options || typeof options.getReadyRuntime !== 'function' || typeof options.createEventNonce !== 'function' ||
     typeof options.createAuditId !== 'function' || typeof options.epochNow !== 'function' ||
+    typeof options.launchPanel !== 'function' ||
     typeof options.logger?.error !== 'function' || typeof chromeApi?.runtime?.onInstalled?.addListener !== 'function' ||
     typeof chromeApi.runtime.onInstalled.removeListener !== 'function' ||
     typeof chromeApi?.contextMenus?.onClicked?.addListener !== 'function' ||
     typeof chromeApi.contextMenus.onClicked.removeListener !== 'function' ||
-    typeof chromeApi.contextMenus.removeAll !== 'function' || typeof chromeApi.contextMenus.create !== 'function' ||
-    typeof chromeApi?.sidePanel?.open !== 'function') throw new TypeError('CONTEXT_MENU_INVALID');
+    typeof chromeApi.contextMenus.removeAll !== 'function' || typeof chromeApi.contextMenus.create !== 'function') {
+    throw new TypeError('CONTEXT_MENU_INVALID');
+  }
 
   let disposed = false;
   let installTail = Promise.resolve();
@@ -129,47 +131,49 @@ export function registerAuditContextMenus(chromeApi, rawOptions) {
   const onClicked = (info, tab) => {
     const admitted = parseContextMenuClick(info, tab);
     if (!admitted || disposed) return;
-    let opened;
+    const startAudit = () => {
+      void Promise.resolve().then(async () => {
+        try {
+          const runtime = await options.getReadyRuntime();
+          const proof = await runtime.chromeAdapter.probeDocumentIdentity(admitted.tabId);
+          if (!proof || proof.tabId !== admitted.tabId || proof.windowId !== admitted.windowId ||
+            typeof proof.documentId !== 'string' || !proof.documentId ||
+            !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(proof.urlSessionDigest ?? '')) throw new Error('denied');
+          const initialUrlEvidence = await runtime.chromeAdapter.getEvidenceUrl(admitted.tabId, false);
+          if (!canonicalHttpUrl(initialUrlEvidence)) throw new Error('denied');
+          const eventNonce = options.createEventNonce();
+          const auditId = options.createAuditId();
+          const epoch = options.epochNow();
+          if (!NONCE.test(eventNonce ?? '') || !AUDIT_ID.test(auditId ?? '') || !Number.isSafeInteger(epoch) || epoch < 0) throw new Error('denied');
+          const prepared = await runtime.authority.prepare({
+            kind: 'attached', tabId: proof.tabId, windowId: proof.windowId, documentId: proof.documentId,
+            initialUrlEvidence, initialUrlSessionDigest: proof.urlSessionDigest,
+            createdBy: 'user', allowedIntent: 'start-audit',
+            issuer: { type: 'worker-event', event: 'context-menu', eventNonce },
+          });
+          if (prepared?.ok !== true || !NONCE.test(prepared.capabilityId ?? '')) throw new Error('denied');
+          const started = await runtime.auditStarter.beginAuthorizedAudit({
+            capabilityId: prepared.capabilityId, eventNonce, auditId,
+            capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+            retentionPreference: Object.freeze({ version: 1, deleteAfterCompleteExport: false }),
+            senderContext: null,
+          });
+          if (started?.response?.ok !== true || started.response.auditId !== auditId || started.response.state !== 'running') {
+            throw new Error('denied');
+          }
+        } catch {
+          options.logger.error('CONTEXT_MENU_UNAVAILABLE');
+        }
+      });
+    };
     try {
-      // User-gesture preservation: this is deliberately the first Chrome call.
-      opened = chromeApi.sidePanel.open({ windowId: admitted.windowId });
+      // The launcher owns the callback-only setOptions -> open gesture chain.
+      if (options.launchPanel({ id: admitted.tabId, windowId: admitted.windowId }, startAudit) !== true) {
+        throw new Error('denied');
+      }
     } catch {
       options.logger.error('CONTEXT_MENU_OPEN_FAILED');
-      return;
     }
-    void Promise.resolve(opened).then(async () => {
-      try {
-        const runtime = await options.getReadyRuntime();
-        const proof = await runtime.chromeAdapter.probeDocumentIdentity(admitted.tabId);
-        if (!proof || proof.tabId !== admitted.tabId || proof.windowId !== admitted.windowId ||
-          typeof proof.documentId !== 'string' || !proof.documentId ||
-          !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(proof.urlSessionDigest ?? '')) throw new Error('denied');
-        const initialUrlEvidence = await runtime.chromeAdapter.getEvidenceUrl(admitted.tabId, false);
-        if (!canonicalHttpUrl(initialUrlEvidence)) throw new Error('denied');
-        const eventNonce = options.createEventNonce();
-        const auditId = options.createAuditId();
-        const epoch = options.epochNow();
-        if (!NONCE.test(eventNonce ?? '') || !AUDIT_ID.test(auditId ?? '') || !Number.isSafeInteger(epoch) || epoch < 0) throw new Error('denied');
-        const prepared = await runtime.authority.prepare({
-          kind: 'attached', tabId: proof.tabId, windowId: proof.windowId, documentId: proof.documentId,
-          initialUrlEvidence, initialUrlSessionDigest: proof.urlSessionDigest,
-          createdBy: 'user', allowedIntent: 'start-audit',
-          issuer: { type: 'worker-event', event: 'context-menu', eventNonce },
-        });
-        if (prepared?.ok !== true || !NONCE.test(prepared.capabilityId ?? '')) throw new Error('denied');
-        const started = await runtime.auditStarter.beginAuthorizedAudit({
-          capabilityId: prepared.capabilityId, eventNonce, auditId,
-          capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
-          retentionPreference: Object.freeze({ version: 1, deleteAfterCompleteExport: false }),
-          senderContext: null,
-        });
-        if (started?.response?.ok !== true || started.response.auditId !== auditId || started.response.state !== 'running') {
-          throw new Error('denied');
-        }
-      } catch {
-        options.logger.error('CONTEXT_MENU_UNAVAILABLE');
-      }
-    }, () => options.logger.error('CONTEXT_MENU_OPEN_FAILED'));
   };
 
   chromeApi.runtime.onInstalled.addListener(onInstalled);

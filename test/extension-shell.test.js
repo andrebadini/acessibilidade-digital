@@ -80,7 +80,8 @@ test('panel module renders the local lifecycle without a bearer or legacy side-p
   assert.match(source, /PREPARE_PANEL_CAPABILITY/u);
   assert.match(source, /PANEL_START_ATTACHED_AUDIT/u);
   assert.match(source, /PANEL_REHYDRATE_VIEW/u);
-  assert.match(source, /requestSessionIntent/u);
+  assert.match(source, /requestIntent/u);
+  assert.doesNotMatch(source, /runtime\.sendMessage/u);
   assert.match(view, /initial|running|result|unavailable/u);
   assert.match(view, /Disponível no Marco 3/u);
   assert.doesNotMatch(`${source}\n${view}`, /innerHTML/);

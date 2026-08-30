@@ -5,6 +5,8 @@ const CAPABILITY = /^[A-Za-z0-9_-]{22}$/u;
 const PATH = '/src/review/index.html';
 const TTL_MS = 30 * 60 * 1000;
 const CONNECT_TIMEOUT_MS = 2_000;
+const REPORT_INTENTS = Object.freeze(['export', 'review-commit', 'delete-audit', 'delete-all']);
+const REPORT_INTENT_SET = new Set(REPORT_INTENTS);
 const SHARED_QUEUES = new WeakMap();
 
 const launchKey = auditId => `audita:report-launch:v1:${auditId}`;
@@ -70,11 +72,24 @@ function consumerRecord(value) {
   const row = exact(value, ['version', 'sessionCapabilityId', 'auditId', 'tabId', 'windowId', 'documentId', 'intents', 'state', 'issuedAt', 'expiresAt']);
   if (!row || row.version !== 1 || !CAPABILITY.test(row.sessionCapabilityId ?? '') || !AUDIT_ID.test(row.auditId ?? '') ||
     !safeId(row.tabId) || !safeId(row.windowId) || typeof row.documentId !== 'string' || !row.documentId ||
-    !Array.isArray(row.intents) || row.intents.length !== 1 || row.intents[0] !== 'export' ||
+    !Array.isArray(row.intents) || row.intents.length !== REPORT_INTENTS.length ||
+    row.intents.some((intent, index) => intent !== REPORT_INTENTS[index]) ||
     !['active', 'revoked'].includes(row.state) || !Number.isSafeInteger(row.issuedAt) || !Number.isSafeInteger(row.expiresAt)) return null;
   return freeze(row);
 }
 function readEpoch(fn) { const value = fn(); if (!Number.isSafeInteger(value) || value < 0) throw new Error('REPORT_CLOCK_DENIED'); return value; }
+function liveLaunchAt(launch, auditId, now) {
+  return Boolean(launch && launch.auditId === auditId && launch.issuedAt <= now && now < launch.expiresAt);
+}
+function exactLiveConsumerGraph(consumer, launch, sessionCapabilityId, auditId, intent, now) {
+  return Boolean(consumer && launch && consumer.sessionCapabilityId === sessionCapabilityId &&
+    consumer.auditId === auditId && launch.auditId === auditId &&
+    consumer.state === 'active' && launch.state === 'connected' && consumer.intents.includes(intent) &&
+    launch.issuedAt <= consumer.issuedAt && consumer.issuedAt <= now && now < consumer.expiresAt &&
+    now < launch.expiresAt && consumer.expiresAt === launch.expiresAt &&
+    consumer.tabId === launch.tabId && consumer.windowId === launch.windowId &&
+    consumer.documentId === launch.documentId);
+}
 function canonicalUrl(chromeApi, auditId) {
   const url = new URL(chromeApi.runtime.getURL('src/review/index.html'));
   url.searchParams.set('auditId', auditId);
@@ -117,12 +132,16 @@ export function createReportLaunchAuthority(raw) {
     typeof input.sessionArea.set !== 'function' || typeof input.epochNow !== 'function' || typeof input.randomBytes !== 'function') {
     throw new TypeError('REPORT_LAUNCH_INVALID');
   }
-  const getLaunch = auditId => AUDIT_ID.test(auditId ?? '') ? stored(input.sessionArea, launchKey(auditId), launchRecord) : Promise.resolve(null);
+  const getLaunch = async auditId => {
+    if (!AUDIT_ID.test(auditId ?? '')) return null;
+    const record = await stored(input.sessionArea, launchKey(auditId), launchRecord);
+    return record?.auditId === auditId ? record : null;
+  };
   const getConsumer = id => CAPABILITY.test(id ?? '') ? stored(input.sessionArea, consumerKey(id), consumerRecord) : Promise.resolve(null);
 
-  async function focusConnected(record) {
+  async function focusConnected(record, expectedAuditId) {
     const now = readEpoch(input.epochNow);
-    if (record.expiresAt <= now || record.state !== 'connected') return false;
+    if (!liveLaunchAt(record, expectedAuditId, now) || record.state !== 'connected') return false;
     let tab; let contexts;
     try {
       tab = await input.chromeApi.tabs.get(record.tabId);
@@ -141,8 +160,9 @@ export function createReportLaunchAuthority(raw) {
 
   async function setupOpen(auditId, windowId) {
     const existing = await getLaunch(auditId);
-    if (existing && existing.state === 'connected' && await focusConnected(existing)) return { existing, created: false };
-    if (existing && ['allocated', 'awaiting-connection'].includes(existing.state) && existing.expiresAt > readEpoch(input.epochNow)) {
+    if (existing && existing.state === 'connected' && await focusConnected(existing, auditId)) return { existing, created: false };
+    if (existing && ['allocated', 'awaiting-connection'].includes(existing.state) &&
+      liveLaunchAt(existing, auditId, readEpoch(input.epochNow))) {
       return { existing, created: false };
     }
     const tab = await tabCall(input.chromeApi.tabs, 'create', { url: 'about:blank', active: true, windowId });
@@ -173,9 +193,10 @@ export function createReportLaunchAuthority(raw) {
     // A real monotonic clock may be fixed in deterministic tests, so also bound attempts.
     for (let attempt = 0; attempt < 210; attempt += 1) {
       const current = await getLaunch(auditId);
+      const now = readEpoch(input.epochNow);
+      if (!liveLaunchAt(current, auditId, now) || current.state === 'revoked') throw new Error('REPORT_CONNECT_DENIED');
       if (current?.state === 'connected') return current;
-      if (!current || current.state === 'revoked' || current.expiresAt <= readEpoch(input.epochNow)) throw new Error('REPORT_CONNECT_DENIED');
-      if (readEpoch(input.epochNow) > deadline) break;
+      if (now > deadline) break;
       await new Promise(resolve => setTimeout(resolve, 10));
     }
     throw new Error('REPORT_CONNECT_TIMEOUT');
@@ -197,14 +218,14 @@ export function createReportLaunchAuthority(raw) {
     return serialize(input.sessionArea, auditId, async () => {
       const launch = await getLaunch(auditId);
       const now = readEpoch(input.epochNow);
-      if (!launch || !['allocated', 'awaiting-connection'].includes(launch.state) || launch.expiresAt <= now ||
+      if (!liveLaunchAt(launch, auditId, now) || !['allocated', 'awaiting-connection'].includes(launch.state) ||
         context.tabId !== launch.tabId || context.windowId !== launch.windowId || context.documentUrl !== canonicalUrl(input.chromeApi, auditId)) {
         return fail('REPORT_CONNECT_DENIED');
       }
       const sessionCapabilityId = opaqueId(input.randomBytes);
       const consumer = freeze({
         version: 1, sessionCapabilityId, auditId, tabId: launch.tabId, windowId: launch.windowId,
-        documentId: sender.documentId, intents: ['export'], state: 'active', issuedAt: now, expiresAt: launch.expiresAt,
+        documentId: sender.documentId, intents: [...REPORT_INTENTS], state: 'active', issuedAt: now, expiresAt: launch.expiresAt,
       });
       if (!await writeConfirmed(input.sessionArea, consumerKey(sessionCapabilityId), consumer, consumerRecord)) return fail('REPORT_CONNECT_DENIED');
       const current = await getLaunch(auditId);
@@ -218,28 +239,39 @@ export function createReportLaunchAuthority(raw) {
     });
   }
 
-  async function authorizeExport({ sessionCapabilityId, auditId, sender } = {}) {
-    if (!CAPABILITY.test(sessionCapabilityId ?? '') || !AUDIT_ID.test(auditId ?? '')) return fail('REPORT_EXPORT_DENIED');
+  async function authorizeIntent({ sessionCapabilityId, auditId, intent, sender } = {}) {
+    if (!CAPABILITY.test(sessionCapabilityId ?? '') || !AUDIT_ID.test(auditId ?? '') || !REPORT_INTENT_SET.has(intent)) {
+      return fail('REPORT_INTENT_DENIED');
+    }
     let context;
     try { context = await deriveTrustedExtensionContext({ sender, chromeApi: input.chromeApi, surface: REVIEW_SURFACE }); }
     catch { return fail('CONTEXT_DENIED'); }
     const [consumer, launch] = await Promise.all([getConsumer(sessionCapabilityId), getLaunch(auditId)]);
     const now = readEpoch(input.epochNow);
-    if (!consumer || consumer.auditId !== auditId || consumer.state !== 'active' || consumer.expiresAt <= now ||
+    if (!exactLiveConsumerGraph(consumer, launch, sessionCapabilityId, auditId, intent, now) ||
       consumer.documentId !== sender.documentId || consumer.tabId !== context.tabId || consumer.windowId !== context.windowId ||
-      !consumer.intents.includes('export') || !launch || launch.state !== 'connected' || launch.documentId !== consumer.documentId) {
-      return fail('REPORT_EXPORT_DENIED');
+      launch.documentId !== sender.documentId || launch.tabId !== context.tabId || launch.windowId !== context.windowId) {
+      return fail('REPORT_INTENT_DENIED');
     }
-    return freeze({ ok: true, auditId, windowId: consumer.windowId, sessionCapabilityId });
+    return freeze({ ok: true, auditId, windowId: consumer.windowId, sessionCapabilityId, intent });
+  }
+
+  async function authorizeExport({ sessionCapabilityId, auditId, sender } = {}) {
+    const authorized = await authorizeIntent({ sessionCapabilityId, auditId, intent: 'export', sender });
+    if (authorized.ok !== true) {
+      return authorized.code === 'CONTEXT_DENIED' ? authorized : fail('REPORT_EXPORT_DENIED');
+    }
+    return freeze({
+      ok: true, auditId: authorized.auditId, windowId: authorized.windowId,
+      sessionCapabilityId: authorized.sessionCapabilityId,
+    });
   }
 
   async function validateConsumer(sessionCapabilityId, auditId) {
     if (!CAPABILITY.test(sessionCapabilityId ?? '') || !AUDIT_ID.test(auditId ?? '')) return false;
     const [consumer, launch] = await Promise.all([getConsumer(sessionCapabilityId), getLaunch(auditId)]);
     const now = readEpoch(input.epochNow);
-    return Boolean(consumer && consumer.auditId === auditId && consumer.state === 'active' &&
-      consumer.expiresAt > now && consumer.intents.includes('export') && launch?.state === 'connected' &&
-      launch.documentId === consumer.documentId && launch.tabId === consumer.tabId && launch.windowId === consumer.windowId);
+    return exactLiveConsumerGraph(consumer, launch, sessionCapabilityId, auditId, 'export', now);
   }
 
   async function revokeLaunch(launch) {
@@ -340,7 +372,7 @@ export function createReportLaunchAuthority(raw) {
   }
 
   return freeze({
-    openRegisteredReport, connect, authorizeExport, validateConsumer, getLaunch, getConsumer,
+    openRegisteredReport, connect, authorizeIntent, authorizeExport, validateConsumer, getLaunch, getConsumer,
     handleTabUpdated, handleTabRemoved, handleWindowRemoved,
   });
 }

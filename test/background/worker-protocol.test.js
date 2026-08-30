@@ -1,17 +1,30 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { parseWorkerMessage } from '../../src/background/worker-protocol.js';
+import { parsePanelPortIntent, parseWorkerMessage } from '../../src/background/worker-protocol.js';
 
 const CAPABILITY = '_1234567890123456789';
 const SESSION = '-1234567890123456789';
+const LEASE = 'lease-1234567890123456789012';
 
 const validMessages = [
   { type: 'PREPARE_PANEL_CAPABILITY', requestId: '_request', windowId: 9 },
+  { type: 'PREPARE_PANEL_PERSONA_CAPABILITY', requestId: '_persona', windowId: 9 },
   { type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9 },
+  { type: 'PANEL_START_PERSONA', capabilityId: CAPABILITY, mode: 'reader', windowId: 9 },
+  { type: 'PANEL_REHYDRATE_PERSONA', capabilityId: CAPABILITY, windowId: 9 },
+  { type: 'PANEL_SET_PERSONA_MODE', leaseId: LEASE, mode: 'motor', windowId: 9 },
+  { type: 'PANEL_STOP_PERSONA', leaseId: LEASE, windowId: 9 },
   { type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION, auditId: '-audit.1', windowId: 9 },
   { type: 'PANEL_OPEN_REPORT', sessionCapabilityId: SESSION, auditId: '_audit:1', windowId: 9 },
   { type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: SESSION, auditId: '1-audit' },
+  {
+    type: 'REPORT_COMMIT_REVIEW_DECISION', sessionCapabilityId: SESSION, auditId: '1-audit',
+    itemId: '5.2.1', occurrenceId: 'occurrence-1', answer: 'não conforme', evaluator: 'Pessoa avaliadora',
+    decidedAt: '2026-08-30T12:00:00.000Z', mode: 'manual', note: '',
+  },
+  { type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: SESSION, auditId: '1-audit' },
+  { type: 'REPORT_DELETE_ALL_AUDITS', sessionCapabilityId: SESSION, auditId: '1-audit' },
   { type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit.1', windowId: 9 },
   { type: 'REPORT_CONNECT', auditId: 'audit_1' },
   { type: 'EXPORT_CONNECT', auditId: 'audit:1' },
@@ -54,6 +67,13 @@ test('rejects numeric coercion for every identifier while keeping windowId numer
     { type: 'PANEL_OPEN_REPORT', sessionCapabilityId: SESSION, auditId: 1, windowId: 9 },
     { type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: twentyDigitNumber, auditId: 'audit-1' },
     { type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: SESSION, auditId: 1 },
+    {
+      type: 'REPORT_COMMIT_REVIEW_DECISION', sessionCapabilityId: twentyDigitNumber, auditId: 'audit-1',
+      itemId: '5.2.1', occurrenceId: 'occurrence-1', answer: 'conforme', evaluator: 'Pessoa avaliadora',
+      decidedAt: '2026-08-30T12:00:00.000Z', mode: 'manual', note: '',
+    },
+    { type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: twentyDigitNumber, auditId: 'audit-1' },
+    { type: 'REPORT_DELETE_ALL_AUDITS', sessionCapabilityId: SESSION, auditId: 1 },
     { type: 'PANEL_REHYDRATE_VIEW', auditId: 1, windowId: 9 },
     { type: 'REPORT_CONNECT', auditId: 1 },
     { type: 'EXPORT_CONNECT', auditId: 1 },
@@ -85,6 +105,28 @@ test('rejects wrong values and exact-key violations as recognized invalid messag
   }
 });
 
+test('accepts the bounded review decision envelope and rejects legacy, malformed and oversized mutations', () => {
+  const base = {
+    type: 'REPORT_COMMIT_REVIEW_DECISION', sessionCapabilityId: SESSION, auditId: 'audit-1',
+    itemId: '5.2.1', occurrenceId: 'occurrence-1', answer: 'conforme', evaluator: 'Pessoa avaliadora',
+    decidedAt: '2026-08-30T12:00:00.000Z', mode: 'assisted', note: '',
+  };
+  assert.equal(parseWorkerMessage({ ...base, note: '📝'.repeat(4_000) }).ok, true);
+  for (const message of [
+    { type: 'REPORT_REVIEW_COMMITTED', sessionCapabilityId: SESSION, auditId: 'audit-1', exportRevision: 2 },
+    { ...base, note: '📝'.repeat(4_001) },
+    { ...base, evaluator: ' ' },
+    { ...base, evaluator: 'a'.repeat(161) },
+    { ...base, itemId: '../forged' },
+    { ...base, occurrenceId: 'x'.repeat(201) },
+    { ...base, answer: 'talvez' },
+    { ...base, decidedAt: '2026-08-30' },
+    { ...base, mode: 'automatic' },
+    { ...base, note: 1 },
+  ]) assert.equal(parseWorkerMessage(message).ok, false, JSON.stringify(message).slice(0, 160));
+  assert.deepEqual(parseWorkerMessage({ ...base, note: 'a'.repeat(30_000) }), { ok: false, code: 'MESSAGE_TOO_LARGE' });
+});
+
 test('requires one safe data-only window claim on every panel envelope', () => {
   const base = { type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-1', windowId: 9 };
   const missing = { type: base.type, requestId: base.requestId };
@@ -101,6 +143,43 @@ test('requires one safe data-only window claim on every panel envelope', () => {
     assert.deepEqual(parseWorkerMessage(message), { ok: false, code: 'INVALID_MESSAGE' });
   }
   assert.equal(getterCalls, 0);
+});
+
+test('adds the admitted window only at the panel Port boundary and rejects every non-panel lane', () => {
+  for (const message of validMessages.filter(value => value.type.startsWith('PANEL_') || value.type.startsWith('PREPARE_PANEL_'))) {
+    const { windowId: _removed, ...withoutWindow } = message;
+    const parsed = parsePanelPortIntent(withoutWindow, 9);
+    assert.equal(parsed.ok, true, message.type);
+    assert.deepEqual(parsed.value, message);
+    assert.equal(Object.isFrozen(parsed.value), true);
+    assert.deepEqual(parsePanelPortIntent(message, 9), { ok: false, code: 'INVALID_MESSAGE' });
+  }
+  assert.deepEqual(parsePanelPortIntent({ type: 'REPORT_CONNECT', auditId: 'audit-1' }, 9), {
+    ok: false, code: 'INVALID_MESSAGE',
+  });
+  assert.deepEqual(parsePanelPortIntent({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-1' }, -1), {
+    ok: false, code: 'INVALID_MESSAGE',
+  });
+
+  let reads = 0;
+  const hostile = { type: 'PREPARE_PANEL_CAPABILITY' };
+  Object.defineProperty(hostile, 'requestId', {
+    enumerable: true,
+    get() { reads += 1; return 'request-1'; },
+  });
+  assert.deepEqual(parsePanelPortIntent(hostile, 9), { ok: false, code: 'INVALID_MESSAGE' });
+  assert.equal(reads, 0);
+});
+
+test('persona envelopes reject target coordinates modes outside the closed union and extra fields', () => {
+  for (const message of [
+    { type: 'PANEL_START_PERSONA', capabilityId: CAPABILITY, mode: 'reader', windowId: 9, tabId: 17 },
+    { type: 'PANEL_START_PERSONA', capabilityId: CAPABILITY, mode: 'visual', windowId: 9 },
+    { type: 'PANEL_REHYDRATE_PERSONA', capabilityId: CAPABILITY, windowId: 9, documentId: 'forged' },
+    { type: 'PANEL_SET_PERSONA_MODE', leaseId: LEASE, mode: 'motor', windowId: 9, selector: '#forged' },
+    { type: 'PANEL_SET_PERSONA_MODE', leaseId: LEASE, mode: 'reader', windowId: -1 },
+    { type: 'PANEL_STOP_PERSONA', leaseId: LEASE, windowId: 9, explicitActionAt: 1 },
+  ]) assert.deepEqual(parseWorkerMessage(message), { ok: false, code: 'INVALID_MESSAGE' });
 });
 
 test('classifies inherited and non-enumerable types as unknown without reading other fields', () => {

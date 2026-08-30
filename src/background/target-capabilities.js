@@ -1,4 +1,4 @@
-export const PANEL_SURFACE = Object.freeze({ path: '/src/panel/index.html', contextType: 'SIDE_PANEL', allowQuery: false });
+export const PANEL_SURFACE = Object.freeze({ path: '/src/panel/index.html', contextType: 'SIDE_PANEL', allowQuery: 'launch-only' });
 export const REVIEW_SURFACE = Object.freeze({ path: '/src/review/index.html', contextType: 'TAB', allowQuery: 'auditId-only' });
 export const EXPORT_SURFACE = Object.freeze({ path: '/src/export/index.html', contextType: 'TAB', allowQuery: 'auditId-only' });
 
@@ -13,6 +13,8 @@ const TARGET_KEYS = ['version', 'capabilityId', 'kind', 'tabId', 'windowId', 'do
 const SESSION_KEYS = ['version', 'sessionCapabilityId', 'auditId', 'windowId', 'mode', 'targetBinding', 'consumers', 'intents', 'state', 'issuedAt', 'expiresAt'];
 const PROOF_KEYS = ['tabId', 'windowId', 'documentId', 'urlSessionDigest'];
 const PREPARE_KEYS = ['kind', 'tabId', 'windowId', 'documentId', 'initialUrlEvidence', 'initialUrlSessionDigest', 'createdBy', 'allowedIntent', 'issuer'];
+const PERSONA_CLAIM_KEYS = ['capabilityId', 'intent', 'senderContext'];
+const AUDIT_INSPECT_KEYS = ['capabilityId', 'allowedIntent', 'eventNonce', 'senderContext'];
 const EXTENSION_CLAIM_KEYS = ['capabilityId', 'auditId', 'mode', 'allowedIntent', 'senderContext'];
 const WORKER_CLAIM_KEYS = ['capabilityId', 'auditId', 'mode', 'allowedIntent', 'eventNonce', 'senderContext'];
 const AUTHORIZE_KEYS = ['sessionCapabilityId', 'auditId', 'consumer', 'intent', 'sender'];
@@ -35,52 +37,41 @@ export async function deriveTrustedExtensionContext({ sender, chromeApi, surface
     const senderId = readDataProperty(sender, 'id');
     const senderUrl = readDataProperty(sender, 'url');
     const senderDocumentId = readOptionalDataProperty(sender, 'documentId');
-    const senderOrigin = readOptionalDataProperty(sender, 'origin');
-    const nativePanelSender = isPanel && !senderDocumentId.found && !senderDocumentId.invalid;
     if (!senderId.found || senderId.value !== chromeApi?.runtime?.id || !senderUrl.found ||
       typeof senderUrl.value !== 'string' ||
-      (!nativePanelSender && (!senderDocumentId.found || typeof senderDocumentId.value !== 'string' || !senderDocumentId.value)) ||
-      (nativePanelSender && (senderOrigin.invalid || !senderOrigin.found ||
-        senderOrigin.value !== `chrome-extension://${chromeApi.runtime.id}`))) throw new Error('CONTEXT_DENIED');
+      senderDocumentId.invalid || !senderDocumentId.found ||
+      typeof senderDocumentId.value !== 'string' || !senderDocumentId.value) throw new Error('CONTEXT_DENIED');
     const url = new URL(senderUrl.value);
     const credentialsEmpty = url.username === '' && url.password === '' && url.port === '';
     const auditIds = url.searchParams.getAll('auditId');
+    const launchTokens = url.searchParams.getAll('launch');
     const queryAllowed = surface.allowQuery === true || (surface.allowQuery === 'auditId-only' &&
       [...url.searchParams.keys()].every(key => key === 'auditId') && auditIds.length === 1 &&
-      /^[A-Za-z0-9_-]{1,160}$/u.test(auditIds[0]));
+      /^[A-Za-z0-9_-]{1,160}$/u.test(auditIds[0])) ||
+      (surface.allowQuery === 'launch-only' &&
+        [...url.searchParams.keys()].every(key => key === 'launch') && launchTokens.length === 1 &&
+        /^[A-Za-z0-9_-]{43}$/u.test(launchTokens[0]));
     if (url.protocol !== 'chrome-extension:' || url.hostname !== chromeApi.runtime.id || !credentialsEmpty ||
-      url.pathname !== surface.path || url.hash !== '' || (!queryAllowed && url.search !== '')) {
+      url.pathname !== surface.path || url.hash !== '' ||
+      (!queryAllowed && (url.search !== '' || surface.allowQuery === 'launch-only'))) {
       throw new Error('CONTEXT_DENIED');
     }
     if ((isPanel && !safeChromeId(claimedWindowId)) || (!isPanel && claimedWindowId !== undefined)) {
       throw new Error('CONTEXT_DENIED');
     }
-    const contexts = readDataArray(await chromeApi.runtime.getContexts(nativePanelSender
-      ? { contextTypes: [surface.contextType], documentUrls: [senderUrl.value] }
-      : { documentIds: [senderDocumentId.value] }));
-    if (!contexts || contexts.length === 0) throw new Error('CONTEXT_DENIED');
-    let contextType = surface.contextType;
-    let documentUrl = senderUrl.value;
-    let nativeWindowId = -1;
-    let candidate = null;
-    if (nativePanelSender) {
-      if (!contexts.some(candidate => validNativePanelContext(candidate, senderUrl.value, claimedWindowId))) {
-        throw new Error('CONTEXT_DENIED');
-      }
-    } else {
-      if (contexts.length !== 1) throw new Error('CONTEXT_DENIED');
-      candidate = contexts[0];
-      const documentId = readDataProperty(candidate, 'documentId');
-      const candidateUrl = readDataProperty(candidate, 'documentUrl');
-      const candidateType = readDataProperty(candidate, 'contextType');
-      const candidateWindowId = readDataProperty(candidate, 'windowId');
-      if (!documentId.found || documentId.value !== senderDocumentId.value || !candidateUrl.found ||
-        candidateUrl.value !== senderUrl.value || !candidateType.found || candidateType.value !== surface.contextType ||
-        !candidateWindowId.found) throw new Error('CONTEXT_DENIED');
-      documentUrl = candidateUrl.value;
-      contextType = candidateType.value;
-      nativeWindowId = candidateWindowId.value;
-    }
+    const contexts = readDataArray(await chromeApi.runtime.getContexts({ documentIds: [senderDocumentId.value] }));
+    if (!contexts || contexts.length !== 1) throw new Error('CONTEXT_DENIED');
+    const candidate = contexts[0];
+    const documentId = readDataProperty(candidate, 'documentId');
+    const candidateUrl = readDataProperty(candidate, 'documentUrl');
+    const candidateType = readDataProperty(candidate, 'contextType');
+    const candidateWindowId = readDataProperty(candidate, 'windowId');
+    if (!documentId.found || documentId.value !== senderDocumentId.value || !candidateUrl.found ||
+      candidateUrl.value !== senderUrl.value || !candidateType.found || candidateType.value !== surface.contextType ||
+      !candidateWindowId.found) throw new Error('CONTEXT_DENIED');
+    const documentUrl = candidateUrl.value;
+    const contextType = candidateType.value;
+    const nativeWindowId = candidateWindowId.value;
     let windowId;
     let tabId = null;
     if (isPanel) {
@@ -98,7 +89,7 @@ export async function deriveTrustedExtensionContext({ sender, chromeApi, surface
     return deepFreeze({
       issuer: {
         type: 'extension-document',
-        documentId: nativePanelSender ? panelIssuerDocumentId(claimedWindowId) : senderDocumentId.value,
+        documentId: senderDocumentId.value,
         path: surface.path,
       },
       windowId,
@@ -109,18 +100,6 @@ export async function deriveTrustedExtensionContext({ sender, chromeApi, surface
   } catch {
     throw new Error('CONTEXT_DENIED');
   }
-}
-
-function panelIssuerDocumentId(windowId) { return `side-panel-window:${windowId}`; }
-
-function validNativePanelContext(candidate, senderUrl, claimedWindowId) {
-  const documentId = readDataProperty(candidate, 'documentId');
-  const documentUrl = readDataProperty(candidate, 'documentUrl');
-  const contextType = readDataProperty(candidate, 'contextType');
-  const nativeWindowId = readDataProperty(candidate, 'windowId');
-  return documentId.found && validDocumentId(documentId.value) && documentUrl.found &&
-    documentUrl.value === senderUrl && contextType.found && contextType.value === PANEL_SURFACE.contextType &&
-    nativeWindowId.found && (nativeWindowId.value === -1 || nativeWindowId.value === claimedWindowId);
 }
 
 export const targetCapabilityStorageKey = capabilityId => `${TARGET_PREFIX}${capabilityId}`;
@@ -247,7 +226,8 @@ export function createTargetCapabilityAuthority({
   sessionTtlMs = 30 * 60_000,
 } = {}) {
   if (!chromeApi?.runtime?.id || !sessionArea || typeof sessionArea.get !== 'function' ||
-    typeof sessionArea.set !== 'function' || typeof now !== 'function' || typeof randomBytes !== 'function' ||
+    typeof sessionArea.set !== 'function' || typeof sessionArea.remove !== 'function' ||
+    typeof now !== 'function' || typeof randomBytes !== 'function' ||
     typeof probeDocument !== 'function' || !Number.isSafeInteger(capabilityTtlMs) || capabilityTtlMs < 1 ||
     !Number.isSafeInteger(sessionTtlMs) || sessionTtlMs < 1) throw new TypeError('CAPABILITY_AUTHORITY_INVALID');
   let tail = Promise.resolve();
@@ -266,6 +246,86 @@ export function createTargetCapabilityAuthority({
     await sessionArea.set({ [targetCapabilityStorageKey(capabilityId)]: record });
     return deepFreeze({ ok: true, capabilityId, expiresAt: record.expiresAt });
   });
+
+  const inspectPreparedTarget = args => serialize(() => provePersonaTarget(args, false));
+  const claimPreparedTarget = args => serialize(() => provePersonaTarget(args, true));
+  const inspectPreparedAuditTarget = args => serialize(async () => {
+    const input = readDataRecord(args, AUDIT_INSPECT_KEYS);
+    if (!input || !CAPABILITY_ID.test(input.capabilityId ?? '') || input.allowedIntent !== 'start-audit') {
+      return unavailable();
+    }
+    const key = targetCapabilityStorageKey(input.capabilityId);
+    const target = parseTargetRecord(readStoredValue(await sessionArea.get(key), key));
+    const proofStartedAt = readNow(now);
+    if (!target || target.capabilityId !== input.capabilityId || target.kind !== 'attached' ||
+      target.state !== 'prepared' || target.sessionCapabilityId !== null ||
+      target.allowedIntent !== 'start-audit' || target.expiresAt <= proofStartedAt) return unavailable();
+    const workerEvent = typeof input.eventNonce === 'string' && input.senderContext === null;
+    const extension = input.eventNonce === null && validExtensionClaimContext(
+      target,
+      input.senderContext,
+      chromeApi.runtime.id,
+    );
+    if (workerEvent) {
+      const issuer = parseWorkerIssuer(target.issuer);
+      if (!issuer || issuer.eventNonce !== input.eventNonce) return unavailable();
+    } else if (!extension) return unavailable();
+    let proof;
+    try { proof = parseProof(await probeDocument(target.tabId)); }
+    catch { return unavailable(); }
+    const proofFinishedAt = readNow(now);
+    if (proofFinishedAt < proofStartedAt || target.expiresAt <= proofFinishedAt || !proof ||
+      proof.tabId !== target.tabId || proof.windowId !== target.windowId ||
+      proof.documentId !== target.documentId ||
+      proof.urlSessionDigest !== target.initialUrlSessionDigest) return unavailable();
+    return deepFreeze({
+      ok: true,
+      target: {
+        tabId: target.tabId,
+        windowId: target.windowId,
+        documentId: target.documentId,
+        urlSessionDigest: target.initialUrlSessionDigest,
+      },
+    });
+  });
+
+  async function provePersonaTarget(args, consume) {
+    const input = readDataRecord(args, PERSONA_CLAIM_KEYS);
+    if (!input || !CAPABILITY_ID.test(input.capabilityId ?? '') || input.intent !== 'start-persona') {
+      return unavailable();
+    }
+    const key = targetCapabilityStorageKey(input.capabilityId);
+    const target = parseTargetRecord(readStoredValue(await sessionArea.get(key), key));
+    const proofStartedAt = readNow(now);
+    if (isPersonaTarget(target) && target.capabilityId === input.capabilityId &&
+      (target.state !== 'prepared' || target.expiresAt <= proofStartedAt)) {
+      await sessionArea.remove(key);
+      return unavailable();
+    }
+    if (!target || target.capabilityId !== input.capabilityId || target.kind !== 'attached' ||
+      target.state !== 'prepared' || target.sessionCapabilityId !== null ||
+      target.allowedIntent !== 'start-persona' || target.issuedAt > proofStartedAt ||
+      target.expiresAt <= proofStartedAt ||
+      !validPersonaClaimContext(target, input.senderContext, chromeApi.runtime.id)) return unavailable();
+    let proof;
+    try { proof = parseProof(await probeDocument(target.tabId)); }
+    catch { return unavailable(); }
+    const proofFinishedAt = readNow(now);
+    if (proofFinishedAt < proofStartedAt || target.expiresAt <= proofFinishedAt || !proof ||
+      proof.tabId !== target.tabId || proof.windowId !== target.windowId ||
+      proof.documentId !== target.documentId ||
+      proof.urlSessionDigest !== target.initialUrlSessionDigest) return unavailable();
+    if (consume) await sessionArea.remove(key);
+    return deepFreeze({
+      ok: true,
+      target: {
+        tabId: target.tabId,
+        windowId: target.windowId,
+        documentId: target.documentId,
+        urlSessionDigest: target.initialUrlSessionDigest,
+      },
+    });
+  }
 
   const claimAndIssueAuditSession = args => serialize(() => claimCommon(args, false));
   const claimWorkerEventAndIssueAuditSession = args => serialize(() => claimCommon(args, true));
@@ -373,6 +433,10 @@ export function createTargetCapabilityAuthority({
     const key = targetCapabilityStorageKey(capabilityId);
     const target = parseTargetRecord(readStoredValue(await sessionArea.get(key), key));
     if (!target || target.capabilityId !== capabilityId) return unavailable();
+    if (isPersonaTarget(target)) {
+      await sessionArea.remove(key);
+      return deepFreeze({ ok: true, capabilityId });
+    }
     if (target.state !== 'invalidated') await sessionArea.set({ [key]: { ...target, state: 'invalidated' } });
     return deepFreeze({ ok: true, capabilityId });
   });
@@ -392,6 +456,7 @@ export function createTargetCapabilityAuthority({
       if (typeof reason !== 'string' || !reason) return unavailable();
       const all = await sessionArea.get(null);
       const changes = {};
+      const removals = [];
       for (const [key, rawRecord] of readStorageEntries(all)) {
         const target = parseTargetRecord(rawRecord);
         const session = parseSessionRecord(rawRecord);
@@ -401,11 +466,13 @@ export function createTargetCapabilityAuthority({
             ? { type: 'session', value: session }
             : null;
         if (!record || !predicate(record)) continue;
-        if (record.type === 'target' && record.value.state !== 'invalidated') changes[key] = { ...record.value, state: 'invalidated' };
+        if (record.type === 'target' && isPersonaTarget(record.value)) removals.push(key);
+        else if (record.type === 'target' && record.value.state !== 'invalidated') changes[key] = { ...record.value, state: 'invalidated' };
         if (record.type === 'session' && record.value.state !== 'revoked') changes[key] = { ...record.value, state: 'revoked' };
       }
       if (Object.keys(changes).length > 0) await sessionArea.set(changes);
-      return deepFreeze({ ok: true, invalidated: Object.keys(changes).length });
+      if (removals.length > 0) await sessionArea.remove(removals);
+      return deepFreeze({ ok: true, invalidated: Object.keys(changes).length + removals.length });
     });
   }
 
@@ -431,6 +498,9 @@ export function createTargetCapabilityAuthority({
 
   return Object.freeze({
     prepare,
+    inspectPreparedTarget,
+    claimPreparedTarget,
+    inspectPreparedAuditTarget,
     claimAndIssueAuditSession,
     claimWorkerEventAndIssueAuditSession,
     authorizeSession,
@@ -444,10 +514,13 @@ export function createTargetCapabilityAuthority({
 
 function createTargetRecord(value) {
   const issuer = parseIssuer(value.issuer);
+  const personaTarget = value.kind === 'attached' && value.createdBy === 'user' &&
+    value.allowedIntent === 'start-persona' && Boolean(parsePanelIssuer(value.issuer));
+  const auditTarget = ['user', 'audit'].includes(value.createdBy) && value.allowedIntent === 'start-audit';
   if (!['attached', 'disposable'].includes(value.kind) || !CAPABILITY_ID.test(value.capabilityId ?? '') ||
     !safeChromeId(value.tabId) || !safeChromeId(value.windowId) || !validDocumentId(value.documentId) ||
     !validEvidenceUrl(value.initialUrlEvidence) || !DIGEST.test(value.initialUrlSessionDigest ?? '') ||
-    !['user', 'audit'].includes(value.createdBy) || value.allowedIntent !== 'start-audit' ||
+    (!auditTarget && !personaTarget) ||
     !issuer || !safeTime(value.issuedAt) || !safeTime(value.expiresAt) ||
     value.expiresAt <= value.issuedAt || value.state !== 'prepared') {
     throw new TypeError('CAPABILITY_PREPARE_DENIED');
@@ -471,6 +544,11 @@ function createTargetRecord(value) {
   };
 }
 
+function isPersonaTarget(value) {
+  return Boolean(value && value.kind === 'attached' && value.createdBy === 'user' &&
+    value.allowedIntent === 'start-persona' && parsePanelIssuer(value.issuer));
+}
+
 function createSessionRecord(value) {
   return {
     version: 1,
@@ -491,15 +569,20 @@ function parseTargetRecord(value) {
   const record = readDataRecord(value, TARGET_KEYS);
   if (!record) return null;
   const issuer = parseIssuer(record.issuer);
+  const personaTarget = record.kind === 'attached' && record.createdBy === 'user' &&
+    record.allowedIntent === 'start-persona' && Boolean(parsePanelIssuer(record.issuer));
+  const auditTarget = ['user', 'audit'].includes(record.createdBy) && record.allowedIntent === 'start-audit';
   if (record.version !== 1 || !CAPABILITY_ID.test(record.capabilityId ?? '') ||
     !['attached', 'disposable'].includes(record.kind) || !safeChromeId(record.tabId) ||
     !safeChromeId(record.windowId) || !validDocumentId(record.documentId) ||
     !validEvidenceUrl(record.initialUrlEvidence) || !DIGEST.test(record.initialUrlSessionDigest ?? '') ||
-    !['user', 'audit'].includes(record.createdBy) || record.allowedIntent !== 'start-audit' ||
+    (!auditTarget && !personaTarget) ||
     !issuer || !safeTime(record.issuedAt) || !safeTime(record.expiresAt) || record.expiresAt <= record.issuedAt ||
     !['prepared', 'claimed', 'invalidated'].includes(record.state) ||
     (record.state === 'prepared' && record.sessionCapabilityId !== null) ||
-    (record.state === 'claimed' && !CAPABILITY_ID.test(record.sessionCapabilityId ?? '')) ||
+    (record.state === 'claimed' && (personaTarget
+      ? record.sessionCapabilityId !== null
+      : !CAPABILITY_ID.test(record.sessionCapabilityId ?? ''))) ||
     (record.state === 'invalidated' && record.sessionCapabilityId !== null && !CAPABILITY_ID.test(record.sessionCapabilityId ?? ''))) return null;
   return { ...record, issuer };
 }
@@ -544,10 +627,48 @@ function validExtensionClaimContext(target, context, runtimeId) {
   return Boolean(surface && contextIssuer.documentId === targetIssuer.documentId &&
     contextIssuer.path === targetIssuer.path && parsedContext.windowId === target.windowId &&
     parsedContext.contextType === surface.contextType &&
-    parsedContext.documentUrl === `chrome-extension://${runtimeId}${surface.path}`);
+    validExtensionSurfaceUrl(parsedContext.documentUrl, runtimeId, surface));
+}
+
+function validPersonaClaimContext(target, context, runtimeId) {
+  const targetIssuer = parsePanelIssuer(target.issuer);
+  const parsedContext = readDataRecord(context, ['issuer', 'windowId', 'tabId', 'contextType', 'documentUrl']);
+  const contextIssuer = parsedContext && parsePanelIssuer(parsedContext.issuer);
+  return Boolean(targetIssuer && parsedContext && contextIssuer &&
+    contextIssuer.documentId === targetIssuer.documentId &&
+    parsedContext.windowId === target.windowId && parsedContext.tabId === null &&
+    parsedContext.contextType === PANEL_SURFACE.contextType &&
+    validExtensionSurfaceUrl(parsedContext.documentUrl, runtimeId, PANEL_SURFACE));
+}
+
+function validExtensionSurfaceUrl(value, runtimeId, surface) {
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'chrome-extension:' || url.hostname !== runtimeId || url.pathname !== surface.path ||
+      url.username !== '' || url.password !== '' || url.port !== '' || url.hash !== '') return false;
+    if (surface.allowQuery === false) return url.search === '';
+    if (surface.allowQuery === 'launch-only') {
+      const tokens = url.searchParams.getAll('launch');
+      return [...url.searchParams.keys()].every(key => key === 'launch') && tokens.length === 1 &&
+        /^[A-Za-z0-9_-]{43}$/u.test(tokens[0]);
+    }
+    if (surface.allowQuery === 'auditId-only') {
+      const auditIds = url.searchParams.getAll('auditId');
+      return [...url.searchParams.keys()].every(key => key === 'auditId') && auditIds.length === 1 &&
+        /^[A-Za-z0-9_-]{1,160}$/u.test(auditIds[0]);
+    }
+    return surface.allowQuery === true;
+  } catch {
+    return false;
+  }
 }
 
 function parseIssuer(value) { return parseExtensionIssuer(value) ?? parseWorkerIssuer(value); }
+function parsePanelIssuer(value) {
+  const issuer = parseExtensionIssuer(value);
+  return issuer?.path === PANEL_SURFACE.path ? issuer : null;
+}
 function parseExtensionIssuer(value) {
   const issuer = readDataRecord(value, ['type', 'documentId', 'path']);
   return issuer && issuer.type === 'extension-document' && validDocumentId(issuer.documentId) &&

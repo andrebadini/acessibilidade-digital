@@ -488,7 +488,7 @@ test('does not rehydrate an in-flight mode transition and internal cleanup clear
   assert.equal(stopping.lease.pendingMode, null);
 });
 
-test('explicit stop requires the consumer and renews only after confirmed completion', async () => {
+test('explicit stop requires the consumer and releases ownership only after confirmed completion', async () => {
   const { store, clock } = createFixture();
   const lease = await prepareAndActivate(store);
   clock.value = 20_000;
@@ -509,14 +509,16 @@ test('explicit stop requires the consumer and renews only after confirmed comple
     explicit: true,
   });
   assert.equal(stopped.ok, true);
-  assert.equal(stopped.lease.state, 'active');
+  assert.equal(stopped.lease.state, 'revoked');
   assert.equal(stopped.lease.activeMode, null);
   assert.equal(stopped.lease.pendingMode, null);
+  assert.equal(stopped.lease.revokeReason, 'explicit-stop');
   assert.equal(stopped.lease.lastExplicitActionAt, 30_000);
   assert.equal(stopped.lease.expiresAt, 30_000 + TTL_MS);
+  assert.equal(await store.findOwner(target), null);
 });
 
-test('an explicitly stopped lease can safely start and commit a new mode', async () => {
+test('an explicitly stopped lease rejects stale transitions while a fresh lease can activate', async () => {
   const { store, clock } = createFixture();
   const lease = await prepareAndActivate(store);
   const stopping = await store.beginStop({
@@ -530,28 +532,23 @@ test('an explicitly stopped lease can safely start and commit a new mode', async
     explicit: true,
   });
   assert.equal(stopped.lease.activeMode, null);
-
-  const previousExpiry = stopped.lease.expiresAt;
-  const restarting = await store.beginSetMode({
+  assert.equal(stopped.lease.state, 'revoked');
+  assert.deepEqual(await store.beginSetMode({
     leaseId: lease.leaseId,
     consumer: panelA,
     mode: 'motor',
-  });
-  assert.equal(restarting.ok, true);
-  assert.equal(restarting.lease.activeMode, null);
-  assert.equal(restarting.lease.pendingMode, 'motor');
-  assert.equal(restarting.lease.expiresAt, previousExpiry);
+  }), { ok: false, code: 'PERSONA_TRANSITION_INVALID' });
 
   clock.value = stopped.lease.lastExplicitActionAt + 50_000;
-  const restarted = await store.commitSetMode({
-    leaseId: lease.leaseId,
-    expectedRevision: restarting.lease.revision,
+  const fresh = await store.claimPrepared({ target, consumer: panelA, mode: 'motor' });
+  assert.equal(fresh.ok, true);
+  assert.notEqual(fresh.lease.leaseId, lease.leaseId);
+  const active = await store.activate({
+    leaseId: fresh.lease.leaseId,
+    expectedRevision: fresh.lease.revision,
   });
-  assert.equal(restarted.ok, true);
-  assert.equal(restarted.lease.activeMode, 'motor');
-  assert.equal(restarted.lease.pendingMode, null);
-  assert.equal(restarted.lease.lastExplicitActionAt, clock.value);
-  assert.equal(restarted.lease.expiresAt, clock.value + TTL_MS);
+  assert.equal(active.ok, true);
+  assert.equal(active.lease.activeMode, 'motor');
 });
 
 test('worker-internal stop accepts recoverable states, requires null consumer and never renews', async () => {

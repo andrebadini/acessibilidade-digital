@@ -10,6 +10,7 @@ const REVOKE_REASONS = new Set([
   'audit-start',
   'runtime-failure',
   'recovery',
+  'explicit-stop',
 ]);
 const TTL_MS = 30 * 60_000;
 const MAX_DOCUMENT_ID_LENGTH = 512;
@@ -672,8 +673,9 @@ export function createPersonaLeaseStore({ sessionArea, lockManager, now, randomB
       pendingMode: null,
       lastExplicitActionAt: actionAt,
       expiresAt,
-      state: 'active',
+      state: 'revoked',
       revision: nextRevision(lease.revision),
+      revokeReason: 'explicit-stop',
     };
     await persist(withLease(registry, updated));
     return success(updated);

@@ -16,7 +16,7 @@ export const retentionPreferenceStorageKey = auditId => `audita:retention-prefer
 export const executionCheckpointStorageKey = auditId => `audita:execution-checkpoint:v1:${auditId}`;
 
 const FACTORY_KEYS = Object.freeze([
-  'authority', 'sessionArea', 'panelCoordinator', 'runAttachedAuditExecution',
+  'authority', 'sessionArea', 'panelCoordinator', 'targetQueue', 'cleanupBarrier', 'runAttachedAuditExecution',
   'persistLatest', 'persistCheckpoint', 'removeCheckpoint', 'commitTerminalAudit',
   'readAuditSnapshot', 'readReportRevision', 'readLatest', 'buildPanelResultBundle',
   'epochNow', 'modelNow', 'createAbortController',
@@ -36,6 +36,7 @@ const LATEST_KEYS = Object.freeze([
 ]);
 const CAPABILITY = /^[A-Za-z0-9_-]{22}$/u;
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
+const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
 const FAILURE_CODES = new Set(['PRIVACY_PAUSED', 'TARGET_CHANGED', 'AUDIT_FAILED']);
 const TARGET_REASONS = new Set(['TAB_LOADING', 'TAB_URL_CHANGED', 'TAB_PENDING_URL', 'TAB_REMOVED', 'WINDOW_REMOVED']);
 const TARGET_UNAVAILABLE_SENTINEL = Object.freeze(Object.create(null));
@@ -300,23 +301,42 @@ function completionRevoked(auditId, code) {
   return freeze({ ok: true, auditId, state: 'revoked', code });
 }
 
+function inspectedTarget(value) {
+  const result = exact(value, ['ok', 'target']);
+  const target = result?.ok === true
+    ? exact(result.target, ['tabId', 'windowId', 'documentId', 'urlSessionDigest'])
+    : null;
+  return target && Number.isSafeInteger(target.tabId) && target.tabId > 0 &&
+    Number.isSafeInteger(target.windowId) && target.windowId >= 0 &&
+    typeof target.documentId === 'string' && target.documentId.length >= 1 && target.documentId.length <= 512 &&
+    !/[\u0000-\u001F\u007F]/u.test(target.documentId) && DIGEST.test(target.urlSessionDigest ?? '')
+    ? freeze(target)
+    : null;
+}
+
 export function createAuthorizedAuditStarter(input) {
   const dependencies = exact(input, FACTORY_KEYS);
   const coordinator = exact(dependencies?.panelCoordinator, ['attachPanelPort', 'withWindowLock']);
   if (!dependencies || !dependencies.authority || !dependencies.sessionArea || !dependencies.panelCoordinator ||
-    FACTORY_KEYS.filter(key => !['authority', 'sessionArea', 'panelCoordinator'].includes(key))
+    FACTORY_KEYS.filter(key => !['authority', 'sessionArea', 'panelCoordinator', 'targetQueue', 'cleanupBarrier'].includes(key))
       .some(key => typeof dependencies[key] !== 'function') ||
     typeof dependencies.sessionArea.get !== 'function' || typeof dependencies.sessionArea.set !== 'function' ||
     typeof dependencies.sessionArea.remove !== 'function' ||
     typeof dependencies.authority.claimAndIssueAuditSession !== 'function' ||
     typeof dependencies.authority.claimWorkerEventAndIssueAuditSession !== 'function' ||
+    typeof dependencies.authority.inspectPreparedAuditTarget !== 'function' ||
     typeof dependencies.authority.transitionAuditSession !== 'function' ||
     typeof dependencies.authority.invalidateCapability !== 'function' || !coordinator ||
     typeof coordinator.attachPanelPort !== 'function' ||
-    typeof coordinator.withWindowLock !== 'function') throw new TypeError('AUTHORIZED_AUDIT_STARTER_INVALID');
+    typeof coordinator.withWindowLock !== 'function' ||
+    typeof dependencies.targetQueue?.withTarget !== 'function' ||
+    typeof dependencies.targetQueue?.assertHeld !== 'function' ||
+    typeof dependencies.cleanupBarrier?.clearForAuditLocked !== 'function') {
+    throw new TypeError('AUTHORIZED_AUDIT_STARTER_INVALID');
+  }
 
   const {
-    authority, sessionArea, panelCoordinator, runAttachedAuditExecution,
+    authority, sessionArea, panelCoordinator, targetQueue, cleanupBarrier, runAttachedAuditExecution,
     persistLatest, persistCheckpoint, removeCheckpoint, commitTerminalAudit,
     readAuditSnapshot, readReportRevision, readLatest, buildPanelResultBundle,
     epochNow, modelNow, createAbortController,
@@ -612,114 +632,164 @@ export function createAuthorizedAuditStarter(input) {
       !capturePolicy || !preference || !inversePair) {
       return freeze({ response: { ok: false, code: 'AUDIT_START_FAILED' }, sessionCapabilityId: null, completion: null });
     }
-    let launch = null;
-    const started = await withGlobalLock(async () => {
-      let fact = null;
-      let journal = null;
-      let claimed = null;
-      try {
-        let singletons;
-        try { singletons = await currentSingletons(); } catch {
-          return freeze({ response: { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' }, sessionCapabilityId: null, completion: null });
+    let target;
+    try {
+      target = inspectedTarget(await authority.inspectPreparedAuditTarget({
+        capabilityId: args.capabilityId,
+        allowedIntent: 'start-audit',
+        eventNonce: args.eventNonce,
+        senderContext: args.senderContext,
+      }));
+    } catch { target = null; }
+    if (!target) {
+      return freeze({ response: { ok: false, code: 'TARGET_UNAVAILABLE' }, sessionCapabilityId: null, completion: null });
+    }
+
+    let resolveStarted;
+    let startedResolved = false;
+    const started = new Promise(resolve => {
+      resolveStarted = value => {
+        if (!startedResolved) {
+          startedResolved = true;
+          resolve(value);
         }
-        if (singletons.active) return freeze({ response: { ok: false, code: 'AUDIT_BUSY' }, sessionCapabilityId: null, completion: null });
-        if (singletons.journal) return freeze({ response: { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' }, sessionCapabilityId: null, completion: null });
-        const snapshot = await readAuditSnapshot({ auditId: args.auditId });
-        if (!missingAuditSnapshot(snapshot) || await readReportRevision({ auditId: args.auditId }) !== null) {
-          return freeze({ response: { ok: false, code: 'AUDIT_ID_COLLISION' }, sessionCapabilityId: null, completion: null });
-        }
-        try {
-          fact = await readPreparedAttachedAuditFact({ sessionArea, capabilityId: args.capabilityId, epochNow });
-        } catch { throw TARGET_UNAVAILABLE_SENTINEL; }
-        return await panelCoordinator.withWindowLock(fact.windowId, async scope => {
-          let confirmedFact;
-          try {
-            confirmedFact = await readPreparedAttachedAuditFact({ sessionArea, capabilityId: args.capabilityId, epochNow });
-          } catch { throw TARGET_UNAVAILABLE_SENTINEL; }
-          if (confirmedFact.windowId !== fact.windowId) throw TARGET_UNAVAILABLE_SENTINEL;
-          const createdAt = safeEpoch(epochNow);
-          journal = freeze({
-            version: 1, capabilityId: args.capabilityId, auditId: args.auditId, windowId: fact.windowId,
-            state: 'prepared', sessionCapabilityId: null, createdAt, updatedAt: createdAt,
-          });
-          await writeConfirmed(sessionArea, START_JOURNAL_KEY, journal, journalRecord, 'START_JOURNAL_DENIED');
-          try {
-            claimed = args.eventNonce === null
-              ? await authority.claimAndIssueAuditSession({
-                  capabilityId: args.capabilityId, auditId: args.auditId, mode: 'attached',
-                  allowedIntent: 'start-audit', senderContext: args.senderContext,
-                })
-              : await authority.claimWorkerEventAndIssueAuditSession({
-                  capabilityId: args.capabilityId, auditId: args.auditId, mode: 'attached',
-                  allowedIntent: 'start-audit', eventNonce: args.eventNonce, senderContext: null,
-                });
-          } catch { throw TARGET_UNAVAILABLE_SENTINEL; }
-          if (claimed?.ok !== true || !CAPABILITY.test(claimed.sessionCapabilityId ?? '')) throw TARGET_UNAVAILABLE_SENTINEL;
-          let grant;
-          try {
-            grant = await readClaimedAttachedAuditGrant({
-              sessionArea, capabilityId: args.capabilityId, sessionCapabilityId: claimed.sessionCapabilityId,
-              auditId: args.auditId, epochNow,
-            });
-          } catch { throw TARGET_UNAVAILABLE_SENTINEL; }
-          if (grant.windowId !== fact.windowId) throw TARGET_UNAVAILABLE_SENTINEL;
-          journal = freeze({ ...journal, state: 'claimed', sessionCapabilityId: claimed.sessionCapabilityId, updatedAt: safeEpoch(epochNow) });
-          await writeConfirmed(sessionArea, START_JOURNAL_KEY, journal, journalRecord, 'START_JOURNAL_DENIED');
-          const postGrant = safeEpoch(epochNow);
-          if (postGrant < grant.issuedAt || postGrant >= grant.expiresAt) throw new Error('AUDIT_START_FAILED');
-          const storedPreference = freeze({
-            version: 1, auditId: args.auditId, deleteAfterCompleteExport: false,
-            createdAt: postGrant, expiresAt: grant.expiresAt,
-          });
-          const preferenceParser = value => {
-            const record = exact(value, ['version', 'auditId', 'deleteAfterCompleteExport', 'createdAt', 'expiresAt']);
-            return record && same(record, storedPreference) ? freeze(record) : null;
-          };
-          await writeConfirmed(sessionArea, retentionPreferenceStorageKey(args.auditId), storedPreference, preferenceParser, 'RETENTION_PREFERENCE_DENIED');
-          const bootstrapRegistered = await scope.registerPendingBootstrap({
-            auditId: args.auditId, sessionCapabilityId: claimed.sessionCapabilityId,
-            windowId: fact.windowId, createdAt: postGrant, expiresAt: grant.expiresAt,
-          });
-          if (bootstrapRegistered !== true) throw new Error('AUDIT_START_FAILED');
-          await persistExactLatest(latestState(args.auditId, 'running', modelNow));
-          const controller = createAbortController();
-          if (!controller || typeof controller.abort !== 'function' || !controller.signal) throw new Error('AUDIT_START_FAILED');
-          const active = freeze({
-            version: 1, auditId: args.auditId, capabilityId: args.capabilityId,
-            sessionCapabilityId: claimed.sessionCapabilityId, windowId: fact.windowId, mode: 'attached',
-            state: 'running', commitState: 'none', expectedTerminalRevision: null,
-            createdAt: postGrant, updatedAt: postGrant,
-          });
-          await writeConfirmed(sessionArea, ACTIVE_AUDIT_JOB_KEY, active, activeRecord, 'ACTIVE_AUDIT_JOB_DENIED');
-          const liveRecord = { active, controller, grant, capturePolicy, externallyInvalidated: false, committed: null, completion: null };
-          live.set(active.auditId, liveRecord);
-          const removedJournal = await removeCorrelated(sessionArea, START_JOURNAL_KEY, journalRecord,
-            current => current.auditId === active.auditId && current.capabilityId === active.capabilityId &&
-              current.sessionCapabilityId === active.sessionCapabilityId && current.windowId === active.windowId);
-          if (!removedJournal) throw new Error('AUDIT_START_FAILED');
-          const bootstrapPublished = await scope.publishRegisteredBootstrap({
-            auditId: args.auditId, sessionCapabilityId: claimed.sessionCapabilityId, windowId: fact.windowId,
-          });
-          if (bootstrapPublished !== true) throw new Error('AUDIT_START_FAILED');
-          let resolveCompletion;
-          const completion = new Promise(resolve => { resolveCompletion = resolve; });
-          liveRecord.completion = completion;
-          launch = () => { execute(liveRecord).then(resolveCompletion, () => resolveCompletion(completionRevoked(active.auditId, 'AUDIT_FAILED'))); };
-          return freeze({
-            response: { ok: true, auditId: args.auditId, state: 'running' },
-            sessionCapabilityId: claimed.sessionCapabilityId, completion,
-          });
-        });
-      } catch (error) {
-        if (fact && journal) {
-          const compensated = await compensateStart(fact, journal, claimed);
-          if (!compensated) return freeze({ response: { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' }, sessionCapabilityId: null, completion: null });
-        }
-        const code = error === TARGET_UNAVAILABLE_SENTINEL ? 'TARGET_UNAVAILABLE' : 'AUDIT_START_FAILED';
-        return freeze({ response: { ok: false, code }, sessionCapabilityId: null, completion: null });
-      }
+      };
     });
-    launch?.();
+    let resolveCompletion;
+    const completion = new Promise(resolve => { resolveCompletion = resolve; });
+    const targetOperation = targetQueue.withTarget(target, async lock => {
+      const setup = await withGlobalLock(async () => {
+        let fact = null;
+        let journal = null;
+        let claimed = null;
+        try {
+          let singletons;
+          try { singletons = await currentSingletons(); } catch {
+            return freeze({ response: { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' }, sessionCapabilityId: null, completion: null });
+          }
+          if (singletons.active) return freeze({ response: { ok: false, code: 'AUDIT_BUSY' }, sessionCapabilityId: null, completion: null });
+          if (singletons.journal) return freeze({ response: { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' }, sessionCapabilityId: null, completion: null });
+          const snapshot = await readAuditSnapshot({ auditId: args.auditId });
+          if (!missingAuditSnapshot(snapshot) || await readReportRevision({ auditId: args.auditId }) !== null) {
+            return freeze({ response: { ok: false, code: 'AUDIT_ID_COLLISION' }, sessionCapabilityId: null, completion: null });
+          }
+          try {
+            fact = await readPreparedAttachedAuditFact({ sessionArea, capabilityId: args.capabilityId, epochNow });
+          } catch { throw TARGET_UNAVAILABLE_SENTINEL; }
+          if (fact.windowId !== target.windowId) throw TARGET_UNAVAILABLE_SENTINEL;
+          return await panelCoordinator.withWindowLock(fact.windowId, async scope => {
+            let confirmedFact;
+            try {
+              confirmedFact = await readPreparedAttachedAuditFact({ sessionArea, capabilityId: args.capabilityId, epochNow });
+            } catch { throw TARGET_UNAVAILABLE_SENTINEL; }
+            if (confirmedFact.windowId !== fact.windowId) throw TARGET_UNAVAILABLE_SENTINEL;
+            let cleanup;
+            try { cleanup = await cleanupBarrier.clearForAuditLocked({ target, lock }); }
+            catch { cleanup = null; }
+            if (cleanup?.ok !== true || cleanup.state !== 'clear') {
+              const code = cleanup?.ok === false &&
+                ['HIGHLIGHT_CLEANUP_UNCONFIRMED', 'PERSONA_CLEANUP_UNCONFIRMED'].includes(cleanup.code)
+                ? cleanup.code : 'AUDIT_START_FAILED';
+              return freeze({ response: { ok: false, code }, sessionCapabilityId: null, completion: null });
+            }
+            const createdAt = safeEpoch(epochNow);
+            journal = freeze({
+              version: 1, capabilityId: args.capabilityId, auditId: args.auditId, windowId: fact.windowId,
+              state: 'prepared', sessionCapabilityId: null, createdAt, updatedAt: createdAt,
+            });
+            await writeConfirmed(sessionArea, START_JOURNAL_KEY, journal, journalRecord, 'START_JOURNAL_DENIED');
+            try {
+              claimed = args.eventNonce === null
+                ? await authority.claimAndIssueAuditSession({
+                    capabilityId: args.capabilityId, auditId: args.auditId, mode: 'attached',
+                    allowedIntent: 'start-audit', senderContext: args.senderContext,
+                  })
+                : await authority.claimWorkerEventAndIssueAuditSession({
+                    capabilityId: args.capabilityId, auditId: args.auditId, mode: 'attached',
+                    allowedIntent: 'start-audit', eventNonce: args.eventNonce, senderContext: null,
+                  });
+            } catch { throw TARGET_UNAVAILABLE_SENTINEL; }
+            if (claimed?.ok !== true || !CAPABILITY.test(claimed.sessionCapabilityId ?? '')) throw TARGET_UNAVAILABLE_SENTINEL;
+            let grant;
+            try {
+              grant = await readClaimedAttachedAuditGrant({
+                sessionArea, capabilityId: args.capabilityId, sessionCapabilityId: claimed.sessionCapabilityId,
+                auditId: args.auditId, epochNow,
+              });
+            } catch { throw TARGET_UNAVAILABLE_SENTINEL; }
+            if (grant.windowId !== fact.windowId || grant.target.tabId !== target.tabId ||
+              grant.target.documentId !== target.documentId ||
+              grant.target.initialUrlSessionDigest !== target.urlSessionDigest) throw TARGET_UNAVAILABLE_SENTINEL;
+            journal = freeze({ ...journal, state: 'claimed', sessionCapabilityId: claimed.sessionCapabilityId, updatedAt: safeEpoch(epochNow) });
+            await writeConfirmed(sessionArea, START_JOURNAL_KEY, journal, journalRecord, 'START_JOURNAL_DENIED');
+            const postGrant = safeEpoch(epochNow);
+            if (postGrant < grant.issuedAt || postGrant >= grant.expiresAt) throw new Error('AUDIT_START_FAILED');
+            const storedPreference = freeze({
+              version: 1, auditId: args.auditId, deleteAfterCompleteExport: false,
+              createdAt: postGrant, expiresAt: grant.expiresAt,
+            });
+            const preferenceParser = value => {
+              const record = exact(value, ['version', 'auditId', 'deleteAfterCompleteExport', 'createdAt', 'expiresAt']);
+              return record && same(record, storedPreference) ? freeze(record) : null;
+            };
+            await writeConfirmed(sessionArea, retentionPreferenceStorageKey(args.auditId), storedPreference, preferenceParser, 'RETENTION_PREFERENCE_DENIED');
+            const bootstrapRegistered = await scope.registerPendingBootstrap({
+              auditId: args.auditId, sessionCapabilityId: claimed.sessionCapabilityId,
+              windowId: fact.windowId, createdAt: postGrant, expiresAt: grant.expiresAt,
+            });
+            if (bootstrapRegistered !== true) throw new Error('AUDIT_START_FAILED');
+            await persistExactLatest(latestState(args.auditId, 'running', modelNow));
+            const controller = createAbortController();
+            if (!controller || typeof controller.abort !== 'function' || !controller.signal) throw new Error('AUDIT_START_FAILED');
+            const active = freeze({
+              version: 1, auditId: args.auditId, capabilityId: args.capabilityId,
+              sessionCapabilityId: claimed.sessionCapabilityId, windowId: fact.windowId, mode: 'attached',
+              state: 'running', commitState: 'none', expectedTerminalRevision: null,
+              createdAt: postGrant, updatedAt: postGrant,
+            });
+            await writeConfirmed(sessionArea, ACTIVE_AUDIT_JOB_KEY, active, activeRecord, 'ACTIVE_AUDIT_JOB_DENIED');
+            const liveRecord = { active, controller, grant, capturePolicy, externallyInvalidated: false, committed: null, completion: null };
+            live.set(active.auditId, liveRecord);
+            const removedJournal = await removeCorrelated(sessionArea, START_JOURNAL_KEY, journalRecord,
+              current => current.auditId === active.auditId && current.capabilityId === active.capabilityId &&
+                current.sessionCapabilityId === active.sessionCapabilityId && current.windowId === active.windowId);
+            if (!removedJournal) throw new Error('AUDIT_START_FAILED');
+            const bootstrapPublished = await scope.publishRegisteredBootstrap({
+              auditId: args.auditId, sessionCapabilityId: claimed.sessionCapabilityId, windowId: fact.windowId,
+            });
+            if (bootstrapPublished !== true) throw new Error('AUDIT_START_FAILED');
+            return {
+              response: { ok: true, auditId: args.auditId, state: 'running' },
+              sessionCapabilityId: claimed.sessionCapabilityId, liveRecord,
+            };
+          });
+        } catch (error) {
+          if (fact && journal) {
+            const compensated = await compensateStart(fact, journal, claimed);
+            if (!compensated) return freeze({ response: { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' }, sessionCapabilityId: null, completion: null });
+          }
+          const code = error === TARGET_UNAVAILABLE_SENTINEL ? 'TARGET_UNAVAILABLE' : 'AUDIT_START_FAILED';
+          return freeze({ response: { ok: false, code }, sessionCapabilityId: null, completion: null });
+        }
+      });
+      if (setup.response.ok !== true) {
+        resolveStarted(setup);
+        return null;
+      }
+      const { liveRecord } = setup;
+      liveRecord.completion = completion;
+      resolveStarted(freeze({
+        response: setup.response,
+        sessionCapabilityId: setup.sessionCapabilityId,
+        completion,
+      }));
+      try { return await execute(liveRecord); }
+      catch { return completionRevoked(liveRecord.active.auditId, 'AUDIT_FAILED'); }
+    });
+    void targetOperation.then(resolveCompletion, () => {
+      resolveStarted(freeze({ response: { ok: false, code: 'AUDIT_START_FAILED' }, sessionCapabilityId: null, completion: null }));
+      resolveCompletion(completionRevoked(args.auditId, 'AUDIT_FAILED'));
+    });
     return started;
   }
 

@@ -190,6 +190,29 @@ test('claim verifies the held target, reprobes, installs and activates one lease
   assert.equal(fixture.scheduleCalls.at(-1), result.lease.expiresAt);
 });
 
+test('a command-observed autonomous stop revokes the stale owner before a fresh start', async () => {
+  const fixture = coordinatorFixture();
+  const first = await claimActive(fixture, target, 'motor', consumer);
+  assert.equal(first.ok, true);
+  fixture.runtimeModes.set(target.documentId, null);
+
+  const second = await claimActive(fixture, target, 'reader', reopenedConsumer);
+
+  assert.equal(second.ok, true);
+  assert.equal(second.lease.activeMode, 'reader');
+  assert.equal(second.lease.leaseId === first.lease.leaseId, false);
+  assert.equal((await fixture.leaseStore.findOwner(target)).leaseId, second.lease.leaseId);
+  const stale = (await fixture.leaseStore.snapshot()).leases[first.lease.leaseId];
+  assert.equal(stale.state, 'revoked');
+  assert.equal(stale.revokeReason, 'runtime-failure');
+  assert.deepEqual(fixture.runtimeCalls.map(call => [call.op, call.mode ?? null]), [
+    ['install', 'motor'],
+    ['inspect', null],
+    ['clear', null],
+    ['install', 'reader'],
+  ]);
+});
+
 test('claim clears and revokes after installation failure', async () => {
   const fixture = coordinatorFixture();
   fixture.runtimeQueue.push({ ok: false, reason: 'runtime-error' });
@@ -617,7 +640,7 @@ test('a rejected explicit beginStop still clears and revokes an expired live mod
   assert.deepEqual(fixture.runtimeCalls.map(call => call.op), ['clear']);
 });
 
-test('confirmed explicit stop keeps an inactive lease and renews its user-action deadline', async () => {
+test('confirmed explicit stop creates a terminal tombstone and releases target ownership', async () => {
   const fixture = coordinatorFixture();
   const claimed = await claimActive(fixture, target, 'reader', consumer);
   fixture.advance(1_000);
@@ -627,9 +650,65 @@ test('confirmed explicit stop keeps an inactive lease and renews its user-action
     explicit: true,
   });
   assert.equal(result.ok, true);
-  assert.equal(result.lease.state, 'active');
+  assert.equal(result.lease.state, 'revoked');
   assert.equal(result.lease.activeMode, null);
+  assert.equal(result.lease.revokeReason, 'explicit-stop');
   assert.equal(result.lease.expiresAt, claimed.lease.expiresAt + 1_000);
+  assert.equal(await fixture.leaseStore.findOwner(target), null);
+});
+
+test('explicit stop revokes the old owner so a fresh capability can start and activate the target', async () => {
+  const fixture = coordinatorFixture();
+  const first = await claimActive(fixture, target, 'reader', consumer);
+  const stopped = await fixture.coordinator.stop({
+    leaseId: first.lease.leaseId,
+    consumer,
+    explicit: true,
+  });
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.lease.state, 'revoked');
+  assert.equal(stopped.lease.revokeReason, 'explicit-stop');
+  assert.equal(await fixture.leaseStore.findOwner(target), null);
+
+  assert.deepEqual(await fixture.coordinator.setMode({
+    leaseId: first.lease.leaseId,
+    consumer,
+    mode: 'motor',
+  }), { ok: false, code: 'PERSONA_NOT_FOUND' });
+  assert.deepEqual(await fixture.coordinator.stop({
+    leaseId: first.lease.leaseId,
+    consumer,
+    explicit: true,
+  }), { ok: false, code: 'PERSONA_NOT_FOUND' });
+
+  const second = await claimActive(fixture, target, 'motor', consumer);
+  assert.equal(second.ok, true);
+  assert.notEqual(second.lease.leaseId, first.lease.leaseId);
+  assert.equal(second.lease.state, 'active');
+  assert.equal(second.lease.activeMode, 'motor');
+});
+
+test('restart recovery does not resurrect or rehydrate an explicitly stopped lease', async () => {
+  const fixture = coordinatorFixture();
+  const claimed = await claimActive(fixture, target, 'reader', consumer);
+  const stopped = await fixture.coordinator.stop({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    explicit: true,
+  });
+  assert.equal(stopped.ok, true);
+  fixture.runtimeCalls.length = 0;
+
+  assert.deepEqual(await fixture.coordinator.recover(), {
+    ok: true,
+    processed: 0,
+    revoked: 0,
+    retained: 0,
+  });
+  const rehydrated = await fixture.targetQueue.withTarget(target, lock =>
+    fixture.coordinator.rehydrateLocked({ target, consumer: reopenedConsumer, lock }));
+  assert.deepEqual(rehydrated, { ok: false, code: 'PERSONA_NOT_FOUND' });
+  assert.deepEqual(fixture.runtimeCalls, []);
 });
 
 test('a thrown final stop persistence leaves a recoverable stopping owner and returns a closed code', async () => {

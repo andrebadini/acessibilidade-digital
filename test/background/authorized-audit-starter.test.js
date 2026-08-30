@@ -9,10 +9,12 @@ import {
   retentionPreferenceStorageKey,
 } from '../../src/background/authorized-audit-starter.js';
 import { panelBootstrapStorageKey } from '../../src/background/panel-port.js';
+import { createTargetOperationQueue } from '../../src/background/target-operation-queue.js';
 import {
   createTargetCapabilityAuthority,
   readAttachedAuditCorrelationForRecovery,
   readAuditSessionForWorker,
+  targetCapabilityStorageKey,
 } from '../../src/background/target-capabilities.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
@@ -25,6 +27,7 @@ import { reportInput } from '../report/helpers.js';
 const DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
 const EPOCH = 1_788_000_000_000;
 const START_JOURNAL_KEY = 'audita:start-journal:v1';
+const PANEL_URL = `chrome-extension://abcdefghijklmnopabcdefghijklmnop/src/panel/index.html?launch=${'L'.repeat(43)}`;
 
 function sessionArea() {
   const values = Object.create(null);
@@ -95,7 +98,7 @@ async function authorityFixture(area, windowId = 9) {
   const senderContext = {
     issuer: { type: 'extension-document', documentId: 'panel-doc', path: '/src/panel/index.html' },
     windowId, tabId: null, contextType: 'SIDE_PANEL',
-    documentUrl: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/src/panel/index.html',
+    documentUrl: PANEL_URL,
   };
   return { authority, capabilityId: prepared.capabilityId, senderContext };
 }
@@ -120,9 +123,25 @@ function panelCoordinator(order = [], overrides = {}) {
   });
 }
 
-function dependencyFixture({ area, authority, execution, order = [], reportByAudit = new Map(), latest = { value: null } }) {
+function dependencyFixture({
+  area,
+  authority,
+  execution,
+  order = [],
+  reportByAudit = new Map(),
+  latest = { value: null },
+  targetQueue = createTargetOperationQueue(),
+  cleanupBarrier = null,
+}) {
+  const barrier = cleanupBarrier ?? Object.freeze({
+    async clearForAuditLocked({ target, lock }) {
+      targetQueue.assertHeld(lock, target);
+      return Object.freeze({ ok: true, state: 'clear' });
+    },
+  });
   return {
     authority, sessionArea: area, panelCoordinator: panelCoordinator(order),
+    targetQueue, cleanupBarrier: barrier,
     runAttachedAuditExecution: execution,
     async persistLatest({ state }) { order.push(`latest:${state.status}`); latest.value = structuredClone(state); return structuredClone(state); },
     async persistCheckpoint(value) {
@@ -234,6 +253,97 @@ function malformedJournalEnvelopeCases(getterState) {
     })],
   ];
 }
+
+test('cleans live aids under the target lock before any capability claim or audit side effect', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const targetQueue = createTargetOperationQueue();
+  const effects = { claims: 0, executions: 0 };
+  const trace = [];
+  const starter = createAuthorizedAuditStarter(dependencyFixture({
+    area,
+    authority: instrumentAuthority(prepared.authority, effects),
+    targetQueue,
+    cleanupBarrier: {
+      async clearForAuditLocked({ target, lock }) {
+        trace.push('cleanup');
+        targetQueue.assertHeld(lock, target);
+        return { ok: false, code: 'PERSONA_CLEANUP_UNCONFIRMED' };
+      },
+    },
+    execution: async () => { effects.executions += 1; throw new Error('must not execute'); },
+  }));
+
+  const started = await starter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId,
+    eventNonce: null,
+    auditId: 'audit-cleanup-denied',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(started, {
+    response: { ok: false, code: 'PERSONA_CLEANUP_UNCONFIRMED' },
+    sessionCapabilityId: null,
+    completion: null,
+  });
+  assert.deepEqual(trace, ['cleanup']);
+  assert.equal(effects.claims, 0);
+  assert.equal(effects.executions, 0);
+  assert.equal((await area.get(targetCapabilityStorageKey(prepared.capabilityId)))[targetCapabilityStorageKey(prepared.capabilityId)].state, 'prepared');
+});
+
+test('holds the shared target queue until the attached audit execution and settlement finish', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const targetQueue = createTargetOperationQueue();
+  let releaseExecution;
+  let executionEntered = false;
+  const executionGate = new Promise(resolve => { releaseExecution = resolve; });
+  const starter = createAuthorizedAuditStarter(dependencyFixture({
+    area,
+    authority: prepared.authority,
+    targetQueue,
+    execution: async () => {
+      executionEntered = true;
+      await executionGate;
+      return Object.freeze({
+        version: 1,
+        auditId: 'audit-target-lock',
+        state: 'revoked',
+        failureCode: 'AUDIT_FAILED',
+        model: null,
+        checkpoint: null,
+      });
+    },
+  }));
+  const started = await starter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId,
+    eventNonce: null,
+    auditId: 'audit-target-lock',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    senderContext: prepared.senderContext,
+  });
+  assert.equal(started.response.ok, true);
+  while (!executionEntered) await new Promise(resolve => setImmediate(resolve));
+
+  let contenderEntered = false;
+  const contender = targetQueue.withTarget({
+    tabId: 17,
+    windowId: 9,
+    documentId: 'document-a',
+    urlSessionDigest: DIGEST,
+  }, async () => { contenderEntered = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(contenderEntered, false);
+  releaseExecution();
+  await started.completion;
+  assert.equal(contenderEntered, true,
+    'completion pública só pode resolver depois que o lock do alvo liberar o sucessor');
+  await contender;
+});
 
 test('explicit undefined start-journal storage blocks begin before overwrite, claim, bootstrap or publication', async () => {
   const area = sessionArea();
@@ -373,6 +483,38 @@ test('native dependency messages cannot spoof TARGET_UNAVAILABLE selection', asy
   });
 
   assert.deepEqual(started.response, { ok: false, code: 'AUDIT_START_FAILED' });
+});
+
+test('a failed target inspection returns one recoverable closed response before queue or cleanup effects', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  let cleanupCalls = 0;
+  const authority = {
+    ...prepared.authority,
+    async inspectPreparedAuditTarget() { throw new Error('private inspection detail'); },
+  };
+  const dependencies = dependencyFixture({
+    area,
+    authority,
+    cleanupBarrier: {
+      async clearForAuditLocked() { cleanupCalls += 1; return { ok: true, state: 'clear' }; },
+    },
+    execution: async () => { throw new Error('must not execute'); },
+  });
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId,
+    eventNonce: null,
+    auditId: 'audit-inspection-failed',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    senderContext: prepared.senderContext,
+  });
+  assert.deepEqual(started, {
+    response: { ok: false, code: 'TARGET_UNAVAILABLE' },
+    sessionCapabilityId: null,
+    completion: null,
+  });
+  assert.equal(cleanupCalls, 0);
 });
 
 test('starts from the exact missing snapshot contract returned by the real audit store', async () => {

@@ -17,13 +17,16 @@ function area() {
 
 function fixture() {
   const sessionArea = area(); const calls = []; let nextTab = 40; let contextDocument = 'report-doc-1';
+  let contextTabId = 40;
+  let contextDocumentUrl = 'chrome-extension://ext-test/src/review/index.html?auditId=audit-1';
   let currentTabUrl = 'chrome-extension://ext-test/src/review/index.html?auditId=audit-1';
+  let currentEpoch = 1000;
   let failTabRead = false;
   let tabReadSequence = [];
   const chromeApi = {
     runtime: {
       id: 'ext-test', getURL: path => `chrome-extension://ext-test/${path}`,
-      async getContexts() { return [{ contextType: 'TAB', documentId: contextDocument, documentUrl: 'chrome-extension://ext-test/src/review/index.html?auditId=audit-1', tabId: 40, windowId: 7 }]; },
+      async getContexts() { return [{ contextType: 'TAB', documentId: contextDocument, documentUrl: contextDocumentUrl, tabId: contextTabId, windowId: 7 }]; },
     },
     tabs: {
       async create(options) { calls.push(['create', options]); return { id: nextTab++, windowId: options.windowId, url: 'about:blank' }; },
@@ -40,7 +43,7 @@ function fixture() {
   };
   let byte = 0;
   const authority = createReportLaunchAuthority({
-    chromeApi, sessionArea, epochNow: () => 1000, randomBytes: size => new Uint8Array(size).fill(++byte),
+    chromeApi, sessionArea, epochNow: () => currentEpoch, randomBytes: size => new Uint8Array(size).fill(++byte),
   });
   const sender = {
     id: 'ext-test', documentId: contextDocument,
@@ -48,12 +51,49 @@ function fixture() {
   };
   return {
     authority, chromeApi, sessionArea, calls, sender,
+    setNow(value) { currentEpoch = value; },
+    setContextTab(value) { contextTabId = value; },
+    setContextDocumentUrl(value) { contextDocumentUrl = value; },
     setDocument(value) { contextDocument = value; },
     setTabUrl(value) { currentTabUrl = value; },
     setCurrentTab(value) { currentTabUrl = value; },
     setTabReadFailure(value) { failTabRead = value; },
     setTabReadSequence(values) { tabReadSequence = [...values]; },
   };
+}
+
+const launchStorageKey = auditId => `audita:report-launch:v1:${auditId}`;
+const consumerStorageKey = capabilityId => `audita:report-consumer:v1:${capabilityId}`;
+
+async function openAwaitingReport(input) {
+  const opening = input.authority.openRegisteredReport({ auditId: 'audit-1', windowId: 7 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal((await input.authority.getLaunch('audit-1')).state, 'awaiting-connection');
+  return { opening };
+}
+
+async function openConnectedReport() {
+  const input = fixture();
+  const { opening } = await openAwaitingReport(input);
+  const connected = await input.authority.connect({ auditId: 'audit-1', sender: input.sender });
+  assert.equal(connected.ok, true);
+  await opening;
+  return { input, connected };
+}
+
+async function denyReportIntent(input, connected, intent, message) {
+  const args = {
+    sessionCapabilityId: connected.sessionCapabilityId,
+    auditId: 'audit-1',
+    sender: input.sender,
+  };
+  const actual = intent === 'export'
+    ? await input.authority.authorizeExport(args)
+    : await input.authority.authorizeIntent({ ...args, intent });
+  assert.deepEqual(actual, {
+    ok: false,
+    code: intent === 'export' ? 'REPORT_EXPORT_DENIED' : 'REPORT_INTENT_DENIED',
+  }, message);
 }
 
 test('persists report ownership before navigation and binds only the first exact document', async () => {
@@ -66,9 +106,270 @@ test('persists report ownership before navigation and binds only the first exact
   const connected = await input.authority.connect({ auditId: 'audit-1', sender: input.sender });
   assert.deepEqual(Object.keys(connected).sort(), ['auditId', 'ok', 'sessionCapabilityId', 'state']);
   assert.deepEqual({ ok: connected.ok, auditId: connected.auditId, state: connected.state }, { ok: true, auditId: 'audit-1', state: 'view-only' });
-  assert.deepEqual((await input.authority.getConsumer(connected.sessionCapabilityId)).intents, ['export']);
+  assert.deepEqual((await input.authority.getConsumer(connected.sessionCapabilityId)).intents, [
+    'export', 'review-commit', 'delete-audit', 'delete-all',
+  ]);
   assert.equal((await opening).state, 'connected');
   assert.deepEqual(await input.authority.connect({ auditId: 'audit-1', sender: input.sender }), { ok: false, code: 'REPORT_CONNECT_DENIED' });
+});
+
+test('authorizes every report mutation only for the exact connected report document', async () => {
+  const input = fixture();
+  const opening = input.authority.openRegisteredReport({ auditId: 'audit-1', windowId: 7 });
+  await new Promise(resolve => setImmediate(resolve));
+  const connected = await input.authority.connect({ auditId: 'audit-1', sender: input.sender });
+  await opening;
+
+  for (const intent of ['review-commit', 'delete-audit', 'delete-all']) {
+    assert.deepEqual(await input.authority.authorizeIntent({
+      sessionCapabilityId: connected.sessionCapabilityId,
+      auditId: 'audit-1', intent, sender: input.sender,
+    }), {
+      ok: true,
+      auditId: 'audit-1',
+      windowId: 7,
+      sessionCapabilityId: connected.sessionCapabilityId,
+      intent,
+    });
+  }
+
+  assert.deepEqual(await input.authority.authorizeIntent({
+    sessionCapabilityId: connected.sessionCapabilityId,
+    auditId: 'audit-1', intent: 'delete-audit',
+    sender: { ...input.sender, documentId: 'foreign-document' },
+  }), { ok: false, code: 'CONTEXT_DENIED' });
+  assert.deepEqual(await input.authority.authorizeIntent({
+    sessionCapabilityId: connected.sessionCapabilityId,
+    auditId: 'audit-1', intent: 'unknown', sender: input.sender,
+  }), { ok: false, code: 'REPORT_INTENT_DENIED' });
+});
+
+test('connect rejects stale or mismatched launch records', async t => {
+  const attacks = [
+    {
+      name: 'clock rollback before launch issuance',
+      async apply(input) { input.setNow(999); },
+    },
+    {
+      name: 'future-dated launch issuance',
+      async apply(input, launch) {
+        await input.sessionArea.set({ [launchStorageKey('audit-1')]: { ...launch, issuedAt: 1001 } });
+      },
+    },
+    {
+      name: 'exact expiry boundary',
+      async apply(input, launch) { input.setNow(launch.expiresAt); },
+    },
+    {
+      name: 'launch record belongs to another audit',
+      async apply(input, launch) {
+        await input.sessionArea.set({ [launchStorageKey('audit-1')]: { ...launch, auditId: 'audit-2' } });
+      },
+    },
+  ];
+
+  for (const attack of attacks) {
+    await t.test(attack.name, async () => {
+      const input = fixture();
+      const { opening } = await openAwaitingReport(input);
+      const launch = await input.authority.getLaunch('audit-1');
+      await attack.apply(input, launch);
+
+      assert.deepEqual(await input.authority.connect({ auditId: 'audit-1', sender: input.sender }), {
+        ok: false,
+        code: 'REPORT_CONNECT_DENIED',
+      });
+      const persisted = await input.sessionArea.get(null);
+      assert.equal(Object.keys(persisted).some(key => key.startsWith('audita:report-consumer:v1:')), false);
+
+      input.setNow(launch.expiresAt);
+      await assert.rejects(opening, /REPORT_CONNECT_DENIED/u);
+    });
+  }
+});
+
+test('clock rollback never focuses reuses or completes a report launch issued in the future', async t => {
+  await t.test('connected focus creates a fresh launch instead of reusing future authority', async () => {
+    const { input } = await openConnectedReport();
+    input.setNow(999);
+    const reopened = input.authority.openRegisteredReport({ auditId: 'audit-1', windowId: 7 });
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(input.calls.filter(([name]) => name === 'create').length, 2);
+      input.setContextTab(41);
+      assert.equal((await input.authority.connect({ auditId: 'audit-1', sender: input.sender })).ok, true);
+      assert.equal((await reopened).tabId, 41);
+    } finally {
+      input.setNow(1_801_001);
+      await Promise.allSettled([reopened]);
+    }
+  });
+
+  await t.test('awaiting launch is replaced instead of reused before its issuance', async () => {
+    const input = fixture();
+    const first = input.authority.openRegisteredReport({ auditId: 'audit-1', windowId: 7 });
+    await new Promise(resolve => setImmediate(resolve));
+    input.setNow(999);
+    const second = input.authority.openRegisteredReport({ auditId: 'audit-1', windowId: 7 });
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(input.calls.filter(([name]) => name === 'create').length, 2);
+      input.setContextTab(41);
+      assert.equal((await input.authority.connect({ auditId: 'audit-1', sender: input.sender })).ok, true);
+      assert.deepEqual((await Promise.all([first, second])).map(value => value.tabId), [41, 41]);
+    } finally {
+      input.setNow(1_801_001);
+      await Promise.allSettled([first, second]);
+    }
+  });
+
+  await t.test('waiter rejects a connected transition that became future-dated', async () => {
+    const input = fixture();
+    const opening = input.authority.openRegisteredReport({ auditId: 'audit-1', windowId: 7 });
+    await new Promise(resolve => setImmediate(resolve));
+    const launch = await input.authority.getLaunch('audit-1');
+    await input.sessionArea.set({
+      [launchStorageKey('audit-1')]: { ...launch, state: 'connected', documentId: 'report-doc-1' },
+    });
+    input.setNow(999);
+    await assert.rejects(opening, /REPORT_CONNECT_DENIED/u);
+  });
+});
+
+test('a connected launch transplanted under another audit key is never focused or reused', async () => {
+  const { input } = await openConnectedReport();
+  const launch = await input.authority.getLaunch('audit-1');
+  await input.sessionArea.set({
+    [launchStorageKey('audit-1')]: { ...launch, auditId: 'audit-2' },
+  });
+  input.setTabUrl('chrome-extension://ext-test/src/review/index.html?auditId=audit-2');
+  input.setContextDocumentUrl('chrome-extension://ext-test/src/review/index.html?auditId=audit-2');
+  const reopened = input.authority.openRegisteredReport({ auditId: 'audit-1', windowId: 7 });
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(input.calls.filter(([name]) => name === 'create').length, 2);
+    input.setContextTab(41);
+    input.setContextDocumentUrl('chrome-extension://ext-test/src/review/index.html?auditId=audit-1');
+    assert.equal((await input.authority.connect({ auditId: 'audit-1', sender: input.sender })).ok, true);
+    assert.equal((await reopened).tabId, 41);
+  } finally {
+    input.setNow(1_801_001);
+    await Promise.allSettled([reopened]);
+  }
+});
+
+test('every report intent rechecks current time and the exact launch-consumer correlation', async t => {
+  const attacks = [
+    {
+      name: 'clock rollback before both issuance times',
+      async apply({ input }) { input.setNow(999); },
+    },
+    {
+      name: 'future-dated launch issuance',
+      async apply({ input, launch }) {
+        await input.sessionArea.set({ [launchStorageKey('audit-1')]: { ...launch, issuedAt: 1001 } });
+      },
+    },
+    {
+      name: 'future-dated consumer issuance',
+      async apply({ input, consumer, connected }) {
+        await input.sessionArea.set({
+          [consumerStorageKey(connected.sessionCapabilityId)]: { ...consumer, issuedAt: 1001 },
+        });
+      },
+    },
+    {
+      name: 'consumer issuance predates its launch',
+      async apply({ input, consumer, connected }) {
+        await input.sessionArea.set({
+          [consumerStorageKey(connected.sessionCapabilityId)]: { ...consumer, issuedAt: 999 },
+        });
+      },
+    },
+    {
+      name: 'consumer expiry does not follow its issuance',
+      async apply({ input, consumer, connected }) {
+        await input.sessionArea.set({
+          [consumerStorageKey(connected.sessionCapabilityId)]: {
+            ...consumer,
+            issuedAt: 1001,
+            expiresAt: 1001,
+          },
+        });
+      },
+    },
+    {
+      name: 'exact shared expiry boundary',
+      async apply({ input, consumer }) { input.setNow(consumer.expiresAt); },
+    },
+    {
+      name: 'launch expired while consumer remains active',
+      async apply({ input, launch }) {
+        await input.sessionArea.set({
+          [launchStorageKey('audit-1')]: { ...launch, issuedAt: 999, expiresAt: 1000 },
+        });
+      },
+    },
+    {
+      name: 'launch and consumer expiries differ',
+      async apply({ input, launch }) {
+        await input.sessionArea.set({
+          [launchStorageKey('audit-1')]: { ...launch, expiresAt: launch.expiresAt + 1 },
+        });
+      },
+    },
+    {
+      name: 'launch audit differs from consumer audit',
+      async apply({ input, launch }) {
+        await input.sessionArea.set({ [launchStorageKey('audit-1')]: { ...launch, auditId: 'audit-2' } });
+      },
+    },
+    {
+      name: 'consumer record capability differs from its storage key',
+      async apply({ input, consumer, connected }) {
+        await input.sessionArea.set({
+          [consumerStorageKey(connected.sessionCapabilityId)]: {
+            ...consumer,
+            sessionCapabilityId: 'Z'.repeat(22),
+          },
+        });
+      },
+    },
+    {
+      name: 'launch tab differs from consumer tab',
+      async apply({ input, launch }) {
+        await input.sessionArea.set({ [launchStorageKey('audit-1')]: { ...launch, tabId: 41 } });
+      },
+    },
+    {
+      name: 'launch window differs from consumer window',
+      async apply({ input, launch }) {
+        await input.sessionArea.set({ [launchStorageKey('audit-1')]: { ...launch, windowId: 8 } });
+      },
+    },
+    {
+      name: 'launch document differs from consumer document',
+      async apply({ input, launch }) {
+        await input.sessionArea.set({ [launchStorageKey('audit-1')]: { ...launch, documentId: 'other-report-doc' } });
+      },
+    },
+  ];
+
+  for (const intent of ['export', 'review-commit', 'delete-audit', 'delete-all']) {
+    await t.test(intent, async intentTest => {
+      for (const attack of attacks) {
+        await intentTest.test(attack.name, async () => {
+          const { input, connected } = await openConnectedReport();
+          const launch = await input.authority.getLaunch('audit-1');
+          const consumer = await input.authority.getConsumer(connected.sessionCapabilityId);
+          await attack.apply({ input, connected, launch, consumer });
+
+          await denyReportIntent(input, connected, intent, attack.name);
+          assert.equal(await input.authority.validateConsumer(connected.sessionCapabilityId, 'audit-1'), false);
+        });
+      }
+    });
+  }
 });
 
 test('ignores only the delayed about:blank staging update before the exact report document connects', async () => {

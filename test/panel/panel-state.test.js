@@ -5,6 +5,7 @@ import {
   createInitialPanelState,
   reducePanelState,
 } from '../../src/panel/panel-state.js';
+import * as panelStateModule from '../../src/panel/panel-state.js';
 
 function frozen(value) {
   for (const child of Object.values(value ?? {})) {
@@ -53,6 +54,10 @@ function resultBundle(overrides = {}) {
   };
   return frozen(bundle);
 }
+
+test('exports only the live four-screen panel state contract', () => {
+  assert.deepEqual(Object.keys(panelStateModule).sort(), ['createInitialPanelState', 'reducePanelState']);
+});
 
 test('creates an immutable initial screen with only stable interaction state', () => {
   const state = createInitialPanelState();
@@ -188,7 +193,7 @@ test('port interruption and retry preserve only the last safe audit ID', () => {
     evidenceExpanded: false,
     focusId: 'retry',
     scrollTop: 0,
-    reason: 'Auditoria interrompida; ela não foi retomada automaticamente',
+    reason: 'Painel não preparado. Abra novamente pelo botão da extensão.',
   });
   const retrying = reducePanelState(interrupted, { type: 'RETRY_REQUESTED' });
   assert.equal(retrying.screen, 'unavailable');

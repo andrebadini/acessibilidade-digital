@@ -27,8 +27,13 @@ test('review script renders snippets inertly, offers exactly three answers and n
   assert.match(source, /Pular revisão/);
   assert.match(source, /REPORT_CONNECT/u);
   assert.match(source, /REPORT_REQUEST_EXPORT/u);
-  assert.match(source, /REVIEW_COMMITTED/u);
-  assert.match(source, /exportRevision:\s*committed\.exportRevision/u);
+  assert.match(source, /REPORT_COMMIT_REVIEW_DECISION/u);
+  assert.match(source, /sessionCapabilityId:\s*reportSessionCapabilityId/u);
+  assert.match(source, /createAuthorizedReviewDecisionCommitter/u);
+  assert.match(source, /loadReportRevision:\s*auditId\s*=>\s*store\.getReportRevision\(auditId\)/u);
+  assert.doesNotMatch(source, /REPORT_REVIEW_COMMITTED/u);
+  assert.doesNotMatch(source, /createReviewDecisionCommitter/u);
+  assert.doesNotMatch(source, /\bstore\s*,\s*controls:/u);
   assert.match(source, /getReportRevision\(id\)/u);
   assert.match(source, /buildReportView/u);
   assert.match(source, /renderReportView/u);
@@ -58,7 +63,9 @@ test('review offers a correlated accessible delete-one dialog without exposing t
   assert.match(html, /id="review-status"[^>]+tabindex="-1"/iu);
   assert.match(html, /evidências[\s\S]*pixels[\s\S]*revisões[\s\S]*downloads/iu);
   assert.match(script, /createDestructiveDialog/u);
-  assert.match(script, /REQUEST_DELETE_AUDIT/u);
+  assert.match(script, /REPORT_DELETE_AUDIT/u);
+  assert.match(script, /sessionCapabilityId:\s*reportSessionCapabilityId/u);
+  assert.doesNotMatch(script, /type:\s*['"](?:REVIEW_COMMITTED|REQUEST_DELETE_AUDIT|REQUEST_DELETE_ALL_AUDITS)['"]/u);
   assert.match(script, /auditId:\s*auditModel\.auditId/u);
   assert.match(script, /parseAuditDeletedEvent/u);
   assert.match(script, /stableFocus:\s*status/u);

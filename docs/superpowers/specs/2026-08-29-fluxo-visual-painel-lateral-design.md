@@ -9,21 +9,19 @@
 
 Esta emenda substitui todo contrato posterior que trate o popup como lançador obrigatório. O ícone da Audita passa a abrir diretamente o painel lateral nativo do Chrome, ao lado da página, sem `action.default_popup`. O painel reúne página atual, **“Avaliar esta página”**, URL/lote, progresso, resultados e personas; o relatório completo continua em aba própria.
 
-O service worker configura `chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:true})`. O atalho `_execute_action`, o ícone fixado ou não fixado e o menu de contexto convergem no mesmo painel e no mesmo starter autorizado. O painel é persistente e responsivo; sua largura exata é controlada e redimensionável pelo Chrome, portanto a extensão otimiza o conteúdo para aproximadamente um quarto da tela em desktop sem alegar impor 25%.
+O clique no ícone ou o atalho `_execute_action` chega ao `chrome.action.onClicked` com a aba e a janela observadas pelo próprio Chrome. No mesmo gesto, o service worker cria um token aleatório de lançamento, configura uma URL exclusiva do painel com `chrome.sidePanel.setOptions()` e chama `chrome.sidePanel.open()` no callback dessa API. Isso preserva o gesto exigido pelo Chrome e vincula o documento lateral ao alvo sem aceitar `tabId`, `windowId`, URL ou seletor fornecido pela interface. O menu de contexto converge no mesmo starter autorizado. O painel é persistente e responsivo; sua largura exata é controlada e redimensionável pelo Chrome, portanto a extensão otimiza o conteúdo para aproximadamente um quarto da tela em desktop sem alegar impor 25%.
 
-Não existe contexto `POPUP` no percurso público nem capacidade preparada por popup. A superfície `SIDE_PANEL` prova sua janela real, prepara a capacidade somente depois de nova prova da aba HTTP/HTTPS ativa e inicia a auditoria por ação explícita dentro do painel. Os arquivos e envelopes legados exclusivos do popup devem ser removidos da superfície empacotada, dos protocolos e dos testes. O E2E obrigatório passa a ser **ícone/atalho → SIDE_PANEL → Avaliar página → resultado → relatório → quatro exportações**, e deve provar que zero contextos `POPUP` foram criados.
+Não existe contexto `POPUP` no percurso público nem capacidade preparada por popup. A superfície `SIDE_PANEL` só recebe autoridade depois de apresentar, em uma Port viva, a URL exata com token de uso único e corresponder a exatamente um contexto lateral ativo. O worker consome o token, liga a geração à aba/janela originalmente observadas no clique e revoga a autoridade ao desconectar; uma reabertura é sempre um documento novo. Os arquivos e envelopes legados exclusivos do popup devem ser removidos da superfície empacotada, dos protocolos e dos testes. O E2E obrigatório passa a ser **ícone/atalho → SIDE_PANEL → Avaliar página → resultado → relatório → quatro exportações**, e deve provar que zero contextos `POPUP` foram criados.
 
 A razão técnica também é documentada: o Chromium representa um action popup com `tabId:-1` e `windowId:-1`; usar esse sentinela como propriedade da janela real causou a falha observada na versão em desenvolvimento. A abertura direta elimina a superfície efêmera e reduz a autoridade exposta, sem relaxar a prova da aba/documento.
 
 ## 1. Decisão e objetivo
 
-A versão 1.0.1 não é uma base visual aceitável. Ela expõe demasiada estrutura técnica antes de responder às perguntas práticas da pessoa avaliadora. O produto passa a usar um fluxo em três superfícies:
+A versão 1.0.1 não é uma base visual aceitável. Ela expõe demasiada estrutura técnica antes de responder às perguntas práticas da pessoa avaliadora. O produto passa a usar duas superfícies de interface e uma superfície operacional:
 
-1. popup mínimo para iniciar a auditoria e acionar personas;
-2. painel lateral persistente para acompanhar, compreender e navegar pelos resultados;
-3. relatório completo em aba própria para revisão, fundamentação e exportação.
-
-A página auditada é uma quarta superfície operacional: nela a extensão destaca, sob comando explícito, o elemento associado à ocorrência selecionada.
+1. painel lateral persistente para iniciar, acompanhar, compreender e navegar pelos resultados e personas;
+2. relatório completo em aba própria para revisão, fundamentação e exportação;
+3. a própria página auditada, onde a extensão destaca o elemento associado à ocorrência selecionada.
 
 O percurso obrigatório é:
 
@@ -72,34 +70,27 @@ Fontes públicas consultadas:
 
 ## 4. Arquitetura de superfícies
 
-### 4.1 Popup mínimo
+### 4.1 Abertura direta e vinculada
 
-O popup é o lançador, não o local de análise. Ele contém:
+Não há popup. O ícone e o atalho abrem o Side Panel nativo em um clique. O handler de `chrome.action.onClicked` valida os identificadores da aba e da janela entregues pelo Chrome, cria uma geração com token aleatório de pelo menos 256 bits e mantém o vínculo somente em `chrome.storage.session`, restrito a contextos confiáveis.
 
-- domínio e título da aba ativa;
-- botão principal **“Avaliar esta página”**;
-- ação secundária **“Outra URL ou lote”**, que abre o painel lateral no formulário apropriado;
-- três controles compactos: Leitura simulada, Acromatopsia e Somente teclado;
-- nota curta: **“Processamento local; nenhum dado é enviado.”**;
-- link para privacidade e limites, sem mural técnico obrigatório.
+Como o clique pode despertar um service worker MV3 frio, o listener e o launcher mínimo são registrados e construídos de forma síncrona no escopo superior, conforme a [orientação oficial do Chrome para listeners de service workers](https://developer.chrome.com/docs/extensions/develop/migrate/to-service-workers#register_listeners_synchronously). A cadeia `sidePanel.setOptions(..., callback)` → `sidePanel.open(..., callback)` permanece diretamente no gesto do usuário, como exige a [API oficial de Side Panel](https://developer.chrome.com/docs/extensions/reference/api/sidePanel#open-programmatically). A reserva do token é síncrona, mas sua persistência ocorre em paralelo e fica bloqueada até `storage.session.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'})` ser confirmado. A Port privilegiada e qualquer callback que possa iniciar auditoria aguardam a gravação verificada; se ela falhar, o painel apresenta o estado leigo de indisponibilidade e nenhuma auditoria começa parcialmente.
 
-O popup não mostra relatório, matriz normativa, retenção detalhada, código ou lista de ocorrências. Os controles têm alvo mínimo de 44 × 44 CSS px, foco visível e nome acessível.
+O handler chama `chrome.sidePanel.setOptions({tabId,enabled:true,path})` e, no callback de sucesso, `chrome.sidePanel.open({tabId})`. Não usa `await` ou encadeamento de Promise entre essas duas APIs, pois isso perde o gesto em versões reais do Chrome. Falha em qualquer etapa revoga a geração e o painel apresenta apenas uma mensagem leiga de indisponibilidade; não prepara capacidade nem inicia auditoria parcial.
 
-`action.default_popup` é o único lançador do ícone da extensão; ao declará-lo, o listener histórico `chrome.action.onClicked` deixa de fazer parte do contrato. Ao carregar, o popup consulta a aba ativa e pede ao worker capacidades opacas, curtas e de uso delimitado: uma para `start-audit` e outra para `start-persona`. O worker só as emite depois de validar uma aba HTTP/HTTPS ativa e provar a identidade do documento por uma sondagem local que retorna `documentId` sem ler conteúdo. Cada capacidade autoriza somente a intenção declarada.
+O documento lateral conecta uma Port com URL exata `src/panel/index.html?launch=<token>`. O worker exige origem e caminho da extensão, um único parâmetro `launch`, ausência de fragmento, token não expirado e exatamente um `SIDE_PANEL` vivo com a mesma URL. A transição `issued → admitted` é atômica e liga a Port, geração, `contextId`, `documentId`, `tabId` e `windowId` observados pelo worker. Todo comando privilegiado trafega por essa Port; `runtime.sendMessage` sem identidade documental é recusado. Desconexão revoga a geração. Reabrir cria token, Port e identidade novos, sem herdar autoridade do documento anterior.
 
-O popup prepara `windowId` e as capacidades antes de habilitar os botões e as renova preventivamente, após nova prova do documento, enquanto o popup estiver aberto. No handler síncrono do clique de auditoria, chama imediatamente `chrome.sidePanel.open({windowId})`; somente depois envia a intenção tipada e a capacidade `start-audit` já preparada ao worker. Nenhuma consulta assíncrona antecede `sidePanel.open()` na cadeia do gesto. Se a abertura falhar, nenhuma auditoria é iniciada e o popup mostra erro leigo. Capacidade expirada não é substituída silenciosamente durante o claim: a ação não começa até o popup obter nova prova. A API requer `sidePanel` e Chrome 116 ou superior.
+Depois da admissão, o painel pede capacidades opacas, curtas e de uso delimitado para `start-audit` e `start-persona`. O worker só as emite após validar a aba HTTP/HTTPS vinculada e provar a identidade do documento por sondagem local que não lê conteúdo. “Avaliar esta página” e os controles de persona enviam somente IDs opacos e intenções fechadas; URL, `tabId`, `windowId`, `documentId`, seletor ou instante fornecidos pela interface nunca autorizam o alvo.
 
-“Avaliar esta página” e os controles de persona enviam somente a capacidade opaca; URL, `tabId`, `windowId` e `documentId` fornecidos pela interface nunca autorizam o alvo. “Outra URL ou lote” abre o estado inicial do painel sem iniciar coleta.
+O menu de contexto permanece como atalho para página ou link HTTP/HTTPS e usa um emissor `worker-event` próprio, sem fingir um documento lateral. Falha de preparo deixa o painel em estado explicativo, sem auditoria parcial. Ele não é a única forma de iniciar funções.
 
-O menu de contexto permanece como atalho para página ou link HTTP/HTTPS e abre o mesmo painel no próprio `onClicked`, antes de operações assíncronas. Depois o worker prepara a capacidade ou valida a URL do link e enfileira a intenção; falha de preparo deixa o painel aberto com explicação, sem auditoria parcial. Ele não será a única forma de iniciar funções.
-
-O primeiro controle de persona reclama a capacidade `start-persona` e cria um `PersonaLeaseV1` do mesmo `tabId` + `documentId`. Alternar ou desativar Leitura simulada, Acromatopsia e Somente teclado usa somente esse lease, com transições fechadas, sem reutilizar a capacidade inicial. O lease não depende de o popup permanecer aberto nem de uma aba artificial do painel; ao reabrir, um contexto autorizado pode reidratá-lo depois de validar novamente o documento. Ele termina no menor valor entre fim da sessão, fim do documento e 30 minutos desde a última ação explícita de persona; cada extensão de prazo exige nova interação em controle de persona. Navegação, fechamento, expiração ou início de auditoria revogam o lease e limpam a simulação. Auditoria e persona disputando o mesmo alvo são serializadas: iniciar auditoria primeiro encerra e confirma a limpeza da persona e só então reclama uma capacidade `start-audit` ainda válida.
+O primeiro controle de persona reclama a capacidade `start-persona` e cria um `PersonaLeaseV1` do mesmo `tabId` + `documentId`. Alternar modo usa somente esse lease. Desligar explicitamente limpa a simulação, revoga o lease e permite uma nova ativação por capacidade fresca. Navegação, fechamento do alvo, expiração ou início de auditoria também revogam e limpam. Auditoria e persona disputando o mesmo alvo são serializadas: iniciar auditoria encerra e confirma a limpeza da persona antes de reclamar a capacidade `start-audit` ainda válida.
 
 ### 4.2 Painel lateral persistente
 
 O painel é a superfície operacional. Há quatro estados de tela: **inicial**, **em execução**, **resultado** e **erro/indisponível**. Resultado cobre auditorias completas, parciais, canceladas com modelo válido e conjuntos sem ocorrências. O detalhe é uma expansão/rota dentro de Resultado e preserva filtros, posição de rolagem e foco; não é um quinto estado exclusivo.
 
-O popup abre o painel para a janela corrente, de modo que ele permaneça visível durante a troca entre a página e o relatório. O documento do painel nunca presume possuir `sender.tab`. Cada mensagem e porta tem remetente, URL/caminho de extensão, campos, tamanho e transições permitidos por uma lista fechada; o worker valida `port.sender` antes de anexar a porta.
+O clique no ícone abre o painel ligado à aba corrente, de modo que ele permaneça visível ao lado da página. O documento do painel nunca presume possuir `sender.tab`. Cada mensagem e Port tem remetente, URL/caminho de extensão, campos, tamanho e transições permitidos por uma lista fechada; o worker valida `port.sender` antes de anexar a Port.
 
 Uma capacidade interna `AuditTargetCapabilityV1` vincula o gesto a um alvo:
 
@@ -291,7 +282,7 @@ A captura integral original permanece sem marcações e com hash próprio. A cap
 
 ### Página aberta
 
-`POPUP_START_AUDIT` e `PANEL_START_ATTACHED_AUDIT` aceitam somente uma `AuditTargetCapabilityV1` válida. O worker revalida aba, janela, URL HTTP/HTTPS e `documentId`, reclama a capacidade atomicamente e chama o runner com um target `attached`. Esse runner nunca usa `tabs.update()` ou `tabs.remove()` na aba anexada, inclusive em cancelamento, falha de CDP, timeout ou suspensão. Debugger já anexado por outra ferramenta produz erro controlado antes de efeitos.
+`PANEL_START_ATTACHED_AUDIT` aceita somente uma `AuditTargetCapabilityV1` válida pela Port admitida do Side Panel. O worker revalida aba, janela, URL HTTP/HTTPS e `documentId`, reclama a capacidade atomicamente e chama o runner com um target `attached`. Esse runner nunca usa `tabs.update()` ou `tabs.remove()` na aba anexada, inclusive em cancelamento, falha de CDP, timeout ou suspensão. Debugger já anexado por outra ferramenta produz erro controlado antes de efeitos.
 
 A auditoria observa a aba sem navegar ou fechá-la. Isso preserva o estado visível e permite destaque confiável após o resultado. A coleta não aciona controles nem envia formulários. Aba fechada ou documento alterado entre preparo e claim invalida a capacidade e não inicia auditoria.
 
@@ -359,7 +350,7 @@ Mensagens leigas são estáveis e não repetem entrada privada. O mesmo catálog
 - “O elemento não pôde ser localizado no estado atual da página.”
 - “O relatório foi gerado parcialmente; veja quais arquivos não puderam ser criados.”
 
-Falhas são correlacionadas por auditoria, página e etapa. Uma falha de destaque não altera o modelo, o relatório ou a classificação da ocorrência. Fechar popup/painel não cancela auditoria; cancelar exige ação explícita.
+Falhas são correlacionadas por auditoria, página e etapa. Uma falha de destaque não altera o modelo, o relatório ou a classificação da ocorrência. Fechar ou desconectar o painel não cancela auditoria; cancelar exige ação explícita.
 
 ## 9. Manifesto, permissões e privacidade
 
@@ -379,7 +370,7 @@ O manifesto passa a conter, entre os demais campos existentes:
     "tabs"
   ],
   "side_panel": { "default_path": "src/panel/index.html" },
-  "action": { "default_popup": "src/popup/index.html" }
+  "action": {}
 }
 ```
 
@@ -409,7 +400,7 @@ Tokens preservam o sistema existente: `#003b71` marca, `#005a9c` ação, `#14212
 
 O alvo visual orienta hierarquia, densidade e tratamento, não cria controles fora do alcance da extensão. QA compara apenas a região controlada pela extensão contra `assets/2026-08-29-sidepanel-option-2.png`.
 
-- WCAG 2.2 AA como requisito de painel, popup e relatório;
+- WCAG 2.2 AA como requisito de painel e relatório;
 - hierarquia de headings sem saltos;
 - regiões e nomes acessíveis para sumário, filtros, lista e ficha;
 - foco preservado ao filtrar, expandir, destacar e retornar da página;
@@ -434,7 +425,7 @@ Permissões, autorização de mensagens, seleção de aba, evidência, modelo no
 
 ### Risco médio
 
-Popup, painel, view-model, filtros, destaque, personas e relatório:
+Painel lateral, view-model, filtros, destaque, personas e relatório:
 
 - testes focados durante implementação;
 - uma revisão independente por marco;
@@ -453,8 +444,8 @@ Textos, documentação e pequenos ajustes visuais:
 
 ### Contrato e unidade
 
-- `default_popup` substitui `action.onClicked`; ícone fixado e não fixado abrem o mesmo popup e as intenções cobrem aba atual, URL, lote e personas;
-- `sidePanel.open()` é a primeira operação no handler elegível e falha não inicia auditoria;
+- não há `default_popup`; `action.onClicked` cria uma geração vinculada à aba e usa somente a cadeia de callbacks `sidePanel.setOptions(...)` → `sidePanel.open(...)`, sem perder o gesto;
+- falha de `setOptions` ou `open` revoga a geração e não prepara capacidade nem inicia auditoria;
 - acesso de `chrome.storage.session` fica em `TRUSTED_CONTEXTS`; capabilities têm pelo menos 128 bits CSPRNG, não vazam em diagnóstico e rejeitam remetente, contexto, janela ou intenção divergentes;
 - emissão, claim atômico único, expiração e invalidação de `AuditTargetCapabilityV1`, incluindo reload na mesma URL;
 - `PersonaLeaseV1` cobre Leitura simulada → Acromatopsia → Somente teclado → auditoria, sem reutilizar capability, sem dois owners e sem overlay residual;
@@ -483,7 +474,7 @@ Textos, documentação e pequenos ajustes visuais:
 
 ### Integração e E2E Chrome
 
-- Chrome 116 mínimo, extensão carregada unpacked e action fixada/não fixada → popup → painel lateral em gesto real;
+- Chrome 116 mínimo, extensão carregada unpacked e action fixada/não fixada → painel lateral tokenizado em gesto real;
 - página aberta → auditoria → sumário → ocorrência → destaque;
 - URL informada e lote, incluindo falha intermediária e cancelamento;
 - relatório em aba dedicada e retorno ao painel;
@@ -498,7 +489,7 @@ Textos, documentação e pequenos ajustes visuais:
 ### QA visual e acessibilidade
 
 - comparação lado a lado do alvo selecionado e implementação na mesma dimensão/estado;
-- popup, painel inicial, progresso, sumário, detalhe e erro;
+- painel inicial, progresso, sumário, detalhe e erro;
 - largura estreita, 200% de zoom, impressão A4 e PDF;
 - contraste, foco, teclado, leitor de tela e `forced-colors`;
 - relatório com conjunto vazio, uma ocorrência e volume grande;
@@ -506,7 +497,7 @@ Textos, documentação e pequenos ajustes visuais:
 
 ## 13. Critérios de aceitação
 
-1. O popup permite auditar a página aberta em um clique quando não houver pausa de privacidade obrigatória e acessar URL/lote/personas.
+1. O painel lateral permite auditar a página aberta em um clique quando não houver pausa de privacidade obrigatória e acessar URL/lote/personas.
 2. A análise aparece no painel lateral persistente; o relatório completo abre em aba própria.
 3. Progresso e falhas são compreensíveis sem códigos técnicos.
 4. O sumário separa cobertura da execução, falhas, alertas, revisão e aprovações; não há nota de conformidade.

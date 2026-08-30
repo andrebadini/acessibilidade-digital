@@ -17,182 +17,185 @@ function event() {
 
 function fixture() {
   const ports = [];
-  const sent = [];
   const timers = [];
+  let requestId = 0;
   const chromeApi = {
     runtime: {
       connect({ name }) {
         const port = {
           name,
-          onMessage: event(), onDisconnect: event(), messages: [], disconnects: 0,
+          onMessage: event(),
+          onDisconnect: event(),
+          messages: [],
+          disconnects: 0,
           postMessage(message) { this.messages.push(structuredClone(message)); },
           disconnect() { this.disconnects += 1; },
         };
         ports.push(port);
         return port;
       },
-      async sendMessage(message) { sent.push(structuredClone(message)); return { ok: true }; },
+      sendMessage() { throw new Error('privileged panel traffic must never use runtime.sendMessage'); },
     },
   };
-  let currentWindowId = 9;
-  const windowReads = [];
   return {
-    chromeApi, ports, sent, timers,
-    windowReads,
-    getWindowId() { windowReads.push(currentWindowId); return currentWindowId; },
-    setCurrentWindowId(value) { currentWindowId = value; },
+    chromeApi,
+    ports,
+    timers,
+    createRequestId() { requestId += 1; return `port-request-${requestId}`; },
     setTimer(callback, delay) { const timer = { callback, delay, cleared: false }; timers.push(timer); return timer; },
     clearTimer(timer) { timer.cleared = true; },
   };
 }
 
-test('connects once, sends one exact hello and never exposes the bearer to callbacks', async () => {
-  const env = fixture();
-  const bootstrap = [];
-  const statuses = [];
-  const client = createPanelSessionPortClient({
+function createClient(env, overrides = {}) {
+  return createPanelSessionPortClient({
     chromeApi: env.chromeApi,
-    getWindowId: env.getWindowId,
-    onBootstrapResult: value => bootstrap.push(value),
-    onStatus: value => statuses.push(value),
+    onBootstrapResult() {},
+    onStatus() {},
+    createRequestId: env.createRequestId,
     setTimer: env.setTimer,
     clearTimer: env.clearTimer,
+    ...overrides,
+  });
+}
+
+function bootstrap(port, state = 'initial', auditId = null, sessionCapabilityId = null) {
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state,
+    auditId, sessionCapabilityId, result: null,
+  });
+}
+
+test('uses one admitted Port for bootstrap and every privileged panel intent', async () => {
+  const env = fixture();
+  const observed = [];
+  const statuses = [];
+  const client = createClient(env, {
+    onBootstrapResult: value => observed.push(value),
+    onStatus: value => statuses.push(value),
   });
 
-  assert.deepEqual(Object.keys(client), ['start', 'stop', 'requestSessionIntent']);
+  assert.deepEqual(Object.keys(client), ['start', 'stop', 'requestIntent']);
   assert.equal(Object.isFrozen(client), true);
   assert.equal(client.start(), true);
   assert.equal(client.start(), false);
-  await new Promise(resolve => setImmediate(resolve));
   assert.equal(env.ports.length, 1);
-  assert.deepEqual(env.ports[0].messages, [{ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 }]);
-
-  env.ports[0].onMessage.emit({
-    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'running',
-    auditId: 'audit-panel-1', sessionCapabilityId: SESSION_ID, result: null,
-  });
-  assert.deepEqual(bootstrap, [{ state: 'running', auditId: 'audit-panel-1', result: null }]);
-  assert.equal(JSON.stringify({ bootstrap, statuses }).includes(SESSION_ID), false);
-
-  assert.deepEqual(await client.requestSessionIntent({ type: 'PANEL_CANCEL_AUDIT' }), { ok: true });
-  assert.deepEqual(env.sent, [{ type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION_ID, auditId: 'audit-panel-1', windowId: 9 }]);
-  assert.deepEqual(env.windowReads, [9, 9]);
-});
-
-test('denies an in-flight session intent when bootstrap rotates its correlation', async () => {
-  const env = fixture();
-  let windowReads = 0;
-  let releaseWindow;
-  const client = createPanelSessionPortClient({
-    chromeApi: env.chromeApi,
-    getWindowId() {
-      windowReads += 1;
-      if (windowReads === 1) return 9;
-      return new Promise(resolve => { releaseWindow = resolve; });
-    },
-    onBootstrapResult() {}, onStatus() {}, setTimer: env.setTimer, clearTimer: env.clearTimer,
-  });
-  client.start();
-  await new Promise(resolve => setImmediate(resolve));
   const port = env.ports[0];
-  port.onMessage.emit({
-    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'running',
-    auditId: 'audit-before-rotation', sessionCapabilityId: SESSION_ID, result: null,
-  });
+  assert.deepEqual(port.messages, [{ protocol: 'audita-panel', version: 1, type: 'bootstrap' }]);
+  bootstrap(port);
+  assert.deepEqual(observed, [{ state: 'initial', auditId: null, result: null }]);
 
-  const pending = client.requestSessionIntent({ type: 'PANEL_CANCEL_AUDIT' });
-  await new Promise(resolve => setImmediate(resolve));
-  port.onMessage.emit({
-    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'running',
-    auditId: 'audit-after-rotation', sessionCapabilityId: 'B'.repeat(22), result: null,
+  const pending = client.requestIntent({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'prepare-1' });
+  assert.deepEqual(port.messages.at(-1), {
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: 'port-request-1',
+    envelope: { type: 'PREPARE_PANEL_CAPABILITY', requestId: 'prepare-1' },
   });
-  releaseWindow(9);
-
-  assert.deepEqual(await pending, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
-  assert.deepEqual(env.sent, []);
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'port-request-1', response: { ok: true, requestId: 'prepare-1' },
+  });
+  assert.deepEqual(await pending, { ok: true, requestId: 'prepare-1' });
+  assert.equal(env.timers.at(-1).cleared, true);
+  assert.ok(statuses.includes('Painel conectado.'));
 });
 
-test('clears correlation before unavailable notification and follows the fixed reconnect schedule', async () => {
+test('keeps a pending start request correlated when running bootstrap arrives before its result', async () => {
   const env = fixture();
-  const observations = [];
-  let client;
-  client = createPanelSessionPortClient({
-    chromeApi: env.chromeApi,
-    getWindowId: env.getWindowId,
-    onBootstrapResult: value => observations.push(['bootstrap', value]),
-    onStatus: value => observations.push(['status', value]),
-    setTimer: env.setTimer,
-    clearTimer: env.clearTimer,
-  });
+  const observed = [];
+  const client = createClient(env, { onBootstrapResult: value => observed.push(value) });
   client.start();
-  await new Promise(resolve => setImmediate(resolve));
-  const first = env.ports[0];
-  first.onMessage.emit({
-    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'running',
-    auditId: 'audit-panel-2', sessionCapabilityId: SESSION_ID, result: null,
+  const port = env.ports[0];
+  bootstrap(port);
+  const pending = client.requestIntent({
+    type: 'PANEL_START_ATTACHED_AUDIT',
+    capabilityId: 'C'.repeat(22),
+    captureMode: 'no-pixels',
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    auditId: 'audit-start-1',
   });
-  first.onDisconnect.emit();
-  assert.deepEqual(await client.requestSessionIntent({ type: 'PANEL_OPEN_REPORT' }), {
+
+  bootstrap(port, 'running', 'audit-start-1', SESSION_ID);
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'port-request-1',
+    response: { ok: true, auditId: 'audit-start-1', state: 'running' },
+  });
+
+  assert.deepEqual(await pending, { ok: true, auditId: 'audit-start-1', state: 'running' });
+  assert.equal(port.disconnects, 0);
+  assert.deepEqual(observed.at(-1), { state: 'running', auditId: 'audit-start-1', result: null });
+});
+
+test('adds only the current session correlation to cancel and report intents without a window claim', async () => {
+  const env = fixture();
+  const client = createClient(env);
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-panel-1', SESSION_ID);
+
+  const pending = client.requestIntent({ type: 'PANEL_CANCEL_AUDIT' });
+  assert.deepEqual(port.messages.at(-1).envelope, {
+    type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION_ID, auditId: 'audit-panel-1',
+  });
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'port-request-1', response: { ok: true },
+  });
+  assert.deepEqual(await pending, { ok: true });
+});
+
+test('disconnect and correlation rotation close every pending request and never fall back to messages', async () => {
+  const env = fixture();
+  const statuses = [];
+  const client = createClient(env, { onStatus: value => statuses.push(value) });
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-before', SESSION_ID);
+  const first = client.requestIntent({ type: 'PANEL_OPEN_REPORT' });
+  bootstrap(port, 'running', 'audit-after', 'B'.repeat(22));
+  assert.deepEqual(await first, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+
+  const second = client.requestIntent({ type: 'PANEL_OPEN_REPORT' });
+  port.onDisconnect.emit();
+  assert.deepEqual(await second, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  assert.equal(env.timers.at(-1).delay, 250);
+  assert.ok(statuses.includes('Painel não preparado. Abra novamente pelo botão da extensão.'));
+});
+
+test('rejects malformed or replayed intent responses and stops without leaked listeners or timers', async () => {
+  const env = fixture();
+  const client = createClient(env);
+  assert.deepEqual(await client.requestIntent({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'before-start' }), {
     ok: false, code: 'PANEL_SESSION_UNAVAILABLE',
   });
-  assert.equal(env.sent.length, 0);
-  assert.deepEqual(env.timers.map(timer => timer.delay), [250]);
-
-  for (const expected of [500, 1000, 2000, 5000, 5000]) {
-    env.timers.at(-1).callback();
-    await new Promise(resolve => setImmediate(resolve));
-    env.ports.at(-1).onDisconnect.emit();
-    assert.equal(env.timers.at(-1).delay, expected);
-  }
-  assert.equal(observations.some(([, value]) => JSON.stringify(value).includes(SESSION_ID)), false);
-});
-
-test('invalid packets clear IDs, disconnect, and stop removes listeners and timers idempotently', async () => {
-  const env = fixture();
-  const client = createPanelSessionPortClient({
-    chromeApi: env.chromeApi,
-    getWindowId: env.getWindowId,
-    onBootstrapResult() {}, onStatus() {}, setTimer: env.setTimer, clearTimer: env.clearTimer,
-  });
   client.start();
-  await new Promise(resolve => setImmediate(resolve));
   const port = env.ports[0];
-  port.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial', auditId: null, sessionCapabilityId: null, result: null, extra: true });
+  bootstrap(port);
+  const pending = client.requestIntent({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'prepare-1' });
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'unknown-request', response: { ok: true },
+  });
+  assert.deepEqual(await pending, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
   assert.equal(port.disconnects, 1);
-  assert.equal(env.timers[0].delay, 250);
-  assert.deepEqual(await client.requestSessionIntent({ type: 'PANEL_CANCEL_AUDIT' }), { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
-  assert.deepEqual(await client.requestSessionIntent({ type: 'PANEL_START_ATTACHED_AUDIT' }), { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
   assert.equal(client.stop(), true);
   assert.equal(client.stop(), false);
   assert.equal(port.onMessage.listeners.size, 0);
   assert.equal(port.onDisconnect.listeners.size, 0);
-  assert.equal(env.timers[0].cleared, true);
 });
 
-test('re-reads and propagates one closed panel window claim for reconnects and session actions', async () => {
+test('bounds reconnect attempts so an unprepared default panel remains stable', () => {
   const env = fixture();
-  const client = createPanelSessionPortClient({
-    chromeApi: env.chromeApi,
-    getWindowId: env.getWindowId,
-    onBootstrapResult() {}, onStatus() {}, setTimer: env.setTimer, clearTimer: env.clearTimer,
-  });
+  const client = createClient(env);
   client.start();
-  await new Promise(resolve => setImmediate(resolve));
-  const first = env.ports[0];
-  first.onMessage.emit({
-    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'running',
-    auditId: 'audit-panel-window', sessionCapabilityId: SESSION_ID, result: null,
-  });
-  env.setCurrentWindowId(11);
-  assert.deepEqual(await client.requestSessionIntent({ type: 'PANEL_CANCEL_AUDIT' }), { ok: true });
-  assert.deepEqual(env.sent.at(-1), {
-    type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION_ID,
-    auditId: 'audit-panel-window', windowId: 11,
-  });
-  first.onDisconnect.emit();
-  env.timers.at(-1).callback();
-  await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(env.ports.at(-1).messages, [
-    { protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 11 },
-  ]);
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    env.ports.at(-1).onDisconnect.emit();
+    assert.equal(env.timers.length, attempt + 1);
+    env.timers.at(-1).callback();
+  }
+  env.ports.at(-1).onDisconnect.emit();
+
+  assert.equal(env.ports.length, 6);
+  assert.equal(env.timers.length, 5);
 });

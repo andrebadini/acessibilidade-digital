@@ -103,7 +103,7 @@ async function resultBundle(auditId) {
   });
 }
 
-test('panel runtime reads only its current window claim, never target tabs or speech voices, and connects only audita-panel-v1', async t => {
+test('panel runtime sends every privileged intent through its admitted Port without claiming a window', async t => {
   const originalDocument = globalThis.document;
   const originalChrome = globalThis.chrome;
   const originalSpeech = Object.getOwnPropertyDescriptor(globalThis, 'speechSynthesis');
@@ -130,8 +130,8 @@ test('panel runtime reads only its current window claim, never target tabs or sp
 
   let chromeTargetReads = 0;
   let currentWindowReads = 0;
+  let runtimeMessageCalls = 0;
   const ports = [];
-  const sent = [];
   const capabilityId = 'C'.repeat(24);
   const chrome = {
     runtime: {
@@ -144,25 +144,17 @@ test('panel runtime reads only its current window claim, never target tabs or sp
         ports.push(port);
         return port;
       },
-      sendMessage(message, callback) {
-        const copy = structuredClone(message);
-        sent.push(copy);
-        const response = message.type === 'PREPARE_PANEL_CAPABILITY'
-          ? { ok: true, requestId: message.requestId, capabilityId, expiresAt: 999999 }
-          : { ok: true, auditId: 'audit-panel-1', state: 'running' };
-        callback?.(response);
-        return Promise.resolve(response);
+      sendMessage() {
+        runtimeMessageCalls += 1;
+        throw new Error('PRIVILEGED_PANEL_MESSAGE_BYPASSED_PORT');
       },
     },
-    windows: {
-      getCurrent(...args) {
-        const [options, callback] = args;
+    windows: new Proxy({}, {
+      get() {
         currentWindowReads += 1;
-        assert.deepEqual(options, { populate: false });
-        const value = { id: 9, focused: false };
-        setImmediate(() => callback?.(value));
+        throw new Error('PANEL_WINDOW_CLAIM_ATTEMPTED');
       },
-    },
+    }),
     tabs: new Proxy({}, { get() { chromeTargetReads += 1; throw new Error('PRIVATE_CHROME_TARGET'); } }),
   };
   globalThis.document = document;
@@ -174,7 +166,7 @@ test('panel runtime reads only its current window claim, never target tabs or sp
   assert.equal(speechReads, 0);
   assert.equal(chromeTargetReads, 0);
   assert.deepEqual(ports.map(port => port.name), ['audita-panel-v1']);
-  assert.deepEqual(ports[0].posted, [{ protocol: 'audita-panel', version: 1, type: 'bootstrap', windowId: 9 }]);
+  assert.deepEqual(ports[0].posted, [{ protocol: 'audita-panel', version: 1, type: 'bootstrap' }]);
   assert.doesNotMatch(document.root.textContent, /persona|voz|simulação/iu);
   assert.equal(document.root.querySelector('[data-persona-mode]'), null);
 
@@ -186,19 +178,40 @@ test('panel runtime reads only its current window claim, never target tabs or sp
   assert.ok(start);
   await start.click();
   await new Promise(resolve => setImmediate(resolve));
+
+  const preparePacket = ports[0].posted[1];
+  assert.match(preparePacket.requestId, /^[A-Za-z0-9._:-]{1,160}$/u);
+  assert.deepEqual(preparePacket, {
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: preparePacket.requestId,
+    envelope: { type: 'PREPARE_PANEL_CAPABILITY', requestId: preparePacket.envelope.requestId },
+  });
+  assert.match(preparePacket.envelope.requestId, /^panel-[0-9]+-[0-9]+$/u);
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: preparePacket.requestId,
+    response: { ok: true, requestId: preparePacket.envelope.requestId, capabilityId },
+  });
   await new Promise(resolve => setImmediate(resolve));
 
-  assert.equal(sent[0].type, 'PREPARE_PANEL_CAPABILITY');
-  assert.deepEqual(Object.keys(sent[0]).sort(), ['requestId', 'type', 'windowId']);
-  assert.equal(sent[0].windowId, 9);
-  assert.deepEqual(sent[1], {
-    type: 'PANEL_START_ATTACHED_AUDIT', capabilityId,
-    captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9,
+  const startPacket = ports[0].posted[2];
+  assert.match(startPacket.requestId, /^[A-Za-z0-9._:-]{1,160}$/u);
+  assert.deepEqual(startPacket, {
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: startPacket.requestId,
+    envelope: {
+      type: 'PANEL_START_ATTACHED_AUDIT', capabilityId,
+      captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
+    },
   });
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: startPacket.requestId,
+    response: { ok: true, auditId: 'audit-panel-1', state: 'running' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
   assert.doesNotMatch(document.root.textContent, new RegExp(capabilityId, 'u'));
   assert.doesNotMatch(JSON.stringify(document.root.dataset), /capability|session|tab|window|document|frame/iu);
   assert.equal(chromeTargetReads, 0);
-  assert.equal(currentWindowReads, 3, 'port hello, prepare and start each obtain a fresh closed claim');
+  assert.equal(currentWindowReads, 0);
+  assert.equal(runtimeMessageCalls, 0);
 
   const sessionCapabilityId = 'S'.repeat(22);
   ports[0].onMessage.emit({
@@ -206,6 +219,23 @@ test('panel runtime reads only its current window claim, never target tabs or sp
     auditId: 'audit-panel-1', sessionCapabilityId, result: null,
   });
   assert.equal(document.activeElement, document.root.querySelector('[data-focus-id="cancel-audit"]'));
+
+  const cancel = document.root.querySelector('button[data-intent="CANCEL_AUDIT"]');
+  assert.ok(cancel);
+  await cancel.click();
+  await new Promise(resolve => setImmediate(resolve));
+  const cancelPacket = ports[0].posted[3];
+  assert.deepEqual(cancelPacket, {
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: cancelPacket.requestId,
+    envelope: {
+      type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId, auditId: 'audit-panel-1',
+    },
+  });
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: cancelPacket.requestId,
+    response: { ok: true, auditId: 'audit-panel-1', state: 'cancelling' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
 
   const bundle = await resultBundle('audit-panel-1');
   ports[0].onMessage.emit({
@@ -224,4 +254,44 @@ test('panel runtime reads only its current window claim, never target tabs or sp
   await filter.click();
   assert.equal(document.root.scrollTop, 211, 'the effective panel scroll position survives the re-render');
   assert.equal(document.activeElement?.dataset?.focusId, filterFocusId, 'focus returns to the exact chip, not its dimension peer');
+
+  const openReport = document.root.querySelector('button[data-intent="OPEN_REPORT"]');
+  assert.ok(openReport);
+  await openReport.click();
+  await new Promise(resolve => setImmediate(resolve));
+  const reportPacket = ports[0].posted[4];
+  assert.deepEqual(reportPacket, {
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: reportPacket.requestId,
+    envelope: {
+      type: 'PANEL_OPEN_REPORT', sessionCapabilityId, auditId: 'audit-panel-1',
+    },
+  });
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: reportPacket.requestId,
+    response: { ok: false, code: 'REPORT_OPEN_DENIED' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  const retry = document.root.querySelector('button[data-intent="RETRY"]');
+  assert.ok(retry);
+  await retry.click();
+  await new Promise(resolve => setImmediate(resolve));
+  const retryPacket = ports[0].posted[5];
+  assert.deepEqual(retryPacket, {
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: retryPacket.requestId,
+    envelope: { type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-panel-1' },
+  });
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: retryPacket.requestId,
+    response: { ok: true, auditId: 'audit-panel-1', state: 'view-only' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(runtimeMessageCalls, 0);
+  assert.equal(currentWindowReads, 0);
+
+  ports[0].onDisconnect.emit();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(document.root.querySelector('[data-screen="unavailable"]'));
+  assert.match(document.root.textContent, /Painel não preparado\. Abra novamente pelo botão da extensão\./u);
 });

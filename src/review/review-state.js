@@ -114,6 +114,98 @@ export function createReviewDecisionCommitter() {
   };
 }
 
+function ownData(value, key) {
+  try {
+    const descriptor = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key) : null;
+    return descriptor?.enumerable === true && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch { return undefined; }
+}
+
+function exactCommitReceipt(value, decision) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
+    const keys = Reflect.ownKeys(value);
+    const expected = ['ok', 'auditId', 'occurrenceId', 'modelRevision', 'modelHash'];
+    if (keys.length !== expected.length || keys.some(key => typeof key !== 'string' || !expected.includes(key))) return null;
+    const receipt = Object.fromEntries(expected.map(key => [key, ownData(value, key)]));
+    return receipt.ok === true && receipt.auditId === decision.auditId &&
+      receipt.occurrenceId === decision.occurrenceId &&
+      Number.isSafeInteger(receipt.modelRevision) && receipt.modelRevision >= 1 &&
+      typeof receipt.modelHash === 'string' && /^[a-f0-9]{64}$/u.test(receipt.modelHash)
+      ? receipt : null;
+  } catch { return null; }
+}
+
+function sameReviewDecision(current, expected) {
+  if (!current || typeof current !== 'object') return false;
+  return current.decisionId === expected.decisionId && current.auditId === expected.auditId &&
+    current.itemId === expected.itemId && current.occurrenceId === expected.occurrenceId &&
+    current.answer === expected.answer && current.evaluator === expected.evaluator &&
+    current.decidedAt === expected.decidedAt && current.mode === expected.mode &&
+    (current.note ?? '') === (expected.note ?? '');
+}
+
+function verifiedCommittedRevision(value, receipt, decision) {
+  try {
+    const auditId = ownData(value, 'auditId');
+    const modelRevision = ownData(value, 'modelRevision');
+    const modelHash = ownData(value, 'modelHash');
+    const model = createAuditModel(ownData(value, 'model'));
+    if (auditId !== decision.auditId || model.auditId !== decision.auditId ||
+      modelRevision !== receipt.modelRevision || modelHash !== receipt.modelHash ||
+      !Array.isArray(model.reviewDecisions) ||
+      !model.reviewDecisions.some(current => sameReviewDecision(current, decision))) return null;
+    return { model, modelRevision, modelHash };
+  } catch { return null; }
+}
+
+/** Serializes UI requests while keeping the only review write behind worker authorization. */
+export function createAuthorizedReviewDecisionCommitter() {
+  const pendingOccurrences = new Set();
+  const auditQueues = new Map();
+  return async function commitOnce({
+    auditModel, input, requestCommit, loadReportRevision,
+    controls = [], retryFocus, onPendingChange,
+  } = {}) {
+    const decision = createReviewDecision(input);
+    const pendingKey = `${decision.auditId}\u0000${decision.occurrenceId}`;
+    if (pendingOccurrences.has(pendingKey)) return { status: 'duplicate', model: auditModel };
+    pendingOccurrences.add(pendingKey);
+    const cardControls = Array.from(controls).filter(control => control && typeof control === 'object');
+    for (const control of cardControls) control.disabled = true;
+    const queue = auditQueues.get(decision.auditId) || { tail: null };
+    auditQueues.set(decision.auditId, queue);
+    const persist = async () => {
+      if (typeof requestCommit !== 'function' || typeof loadReportRevision !== 'function') {
+        throw new TypeError('Canal autorizado de revisão indisponível.');
+      }
+      const receipt = exactCommitReceipt(await requestCommit(decision), decision);
+      if (!receipt) throw new Error('A decisão não foi autorizada pelo relatório.');
+      const revision = verifiedCommittedRevision(
+        await loadReportRevision(decision.auditId), receipt, decision,
+      );
+      if (!revision) throw new Error('A confirmação da decisão não corresponde ao relatório persistido.');
+      return revision;
+    };
+    const operation = queue.tail ? queue.tail.then(persist) : persist();
+    const tail = operation.then(() => undefined, () => undefined);
+    queue.tail = tail;
+    try {
+      try { onPendingChange?.(true); } catch { /* UI notification must not affect authorization. */ }
+      const committed = await operation;
+      return { status: 'committed', ...committed };
+    } catch (error) {
+      for (const control of cardControls) control.disabled = false;
+      try { onPendingChange?.(false); } catch { /* UI notification must not mask the authorization error. */ }
+      try { retryFocus?.focus?.(); } catch { /* Focus recovery is best effort. */ }
+      throw error;
+    } finally {
+      pendingOccurrences.delete(pendingKey);
+      if (queue.tail === tail) queue.tail = null;
+    }
+  };
+}
+
 function rememberReviewRevision(model, committed) {
   if (model && typeof model === 'object' && Number.isSafeInteger(committed?.revision) && committed.revision >= 0) {
     REVIEW_COMMIT_REVISIONS.set(model, committed.revision);

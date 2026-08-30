@@ -8,6 +8,19 @@ const CAPABILITY = 'C'.repeat(22);
 const SESSION = 'S'.repeat(22);
 const DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
 const RUNTIME_ID = 'abcdefghijklmnopabcdefghijklmnop';
+const LAUNCH_TOKEN = 'L'.repeat(43);
+const PANEL_URL = `chrome-extension://${RUNTIME_ID}/src/panel/index.html?launch=${LAUNCH_TOKEN}`;
+const PANEL_TYPES = new Set([
+  'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
+  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
+  'PANEL_SET_PERSONA_MODE', 'PANEL_STOP_PERSONA', 'PANEL_CANCEL_AUDIT',
+  'PANEL_OPEN_REPORT', 'PANEL_REHYDRATE_VIEW',
+]);
+const REVIEW_DECISION_MESSAGE = Object.freeze({
+  type: 'REPORT_COMMIT_REVIEW_DECISION', sessionCapabilityId: SESSION, auditId: 'audit-1',
+  itemId: '5.2.1', occurrenceId: 'occurrence-1', answer: 'não conforme', evaluator: 'Pessoa avaliadora',
+  decidedAt: '2026-08-30T12:00:00.000Z', mode: 'manual', note: 'Barreira confirmada.',
+});
 
 function parsed(message) {
   const result = parseWorkerMessage(message);
@@ -18,7 +31,7 @@ function parsed(message) {
 function panelSender() {
   return {
     id: RUNTIME_ID, documentId: 'panel-document', frameId: 0,
-    url: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`,
+    url: PANEL_URL,
   };
 }
 
@@ -47,7 +60,7 @@ function fixture(overrides = {}) {
       async getContexts({ documentIds }) {
         const documentId = documentIds[0];
         return [{
-          documentId, documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`,
+          documentId, documentUrl: PANEL_URL,
           contextType: 'SIDE_PANEL', tabId: -1, windowId: -1,
         }];
       },
@@ -79,6 +92,26 @@ function fixture(overrides = {}) {
     async beginAuthorizedAudit(value) { calls.push(['begin', value]); return { response: { ok: true, auditId: value.auditId, state: 'running' } }; },
     async abortAuthorizedAudit(value) { calls.push(['abort', value]); return { ok: true, auditId: value.auditId, state: 'cancelling' }; },
   };
+  const personaStart = {
+    async start(value) {
+      calls.push(['persona-start', value]);
+      return { ok: true, lease: { leaseId: `lease-${'L'.repeat(22)}`, activeMode: value.mode, expiresAt: 400 } };
+    },
+    async rehydrate(value) {
+      calls.push(['persona-rehydrate', value]);
+      return { ok: true, lease: { leaseId: `lease-${'L'.repeat(22)}`, activeMode: 'reader', expiresAt: 400 } };
+    },
+  };
+  const personaCoordinator = {
+    async setMode(value) {
+      calls.push(['persona-set-mode', value]);
+      return { ok: true, lease: { leaseId: value.leaseId, activeMode: value.mode, expiresAt: 400 } };
+    },
+    async stop(value) {
+      calls.push(['persona-stop', value]);
+      return { ok: true, lease: { leaseId: value.leaseId, activeMode: null, expiresAt: 400 } };
+    },
+  };
   const panelCoordinator = panelCoordinatorFor(calls, panelScopeOverrides);
   const chromeAdapter = {
     async probeDocumentIdentity(tabId) { calls.push(['probe', tabId]); return { tabId, windowId: 9, documentId: 'page-document', urlSessionDigest: DIGEST }; },
@@ -86,6 +119,7 @@ function fixture(overrides = {}) {
   };
   const dependencies = {
     chromeApi, authority, auditStarter, panelCoordinator, chromeAdapter,
+    personaStart, personaCoordinator,
     async readReportRevision({ auditId }) { calls.push(['read-report', auditId]); return { version: 1, auditId }; },
     async buildPanelResultBundle({ reportRevision }) { calls.push(['bundle', reportRevision.auditId]); return Object.freeze({ version: 1, auditId: reportRevision.auditId }); },
     async revokeViewOnly(value) {
@@ -100,8 +134,39 @@ function fixture(overrides = {}) {
     createAuditId: (() => { let id = 0; return () => `audit-router-${++id}`; })(),
     ...dependencyOverrides,
   };
-  return { calls, durableSessions, router: createSidePanelIntentRouter(dependencies), dependencies };
+  const rawRouter = createSidePanelIntentRouter(dependencies);
+  const router = Object.freeze({
+    dispatch(request) {
+      return rawRouter.dispatch(PANEL_TYPES.has(request.envelope?.type)
+        ? { ...request, launchTabId: 17 }
+        : request);
+    },
+  });
+  return { calls, durableSessions, router, rawRouter, dependencies };
 }
+
+test('rejects privileged panel messages on runtime dispatch before any effect', async () => {
+  const { rawRouter, calls } = fixture();
+  const response = await rawRouter.dispatch({
+    envelope: parsed({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'runtime-panel-denied', windowId: 9 }),
+    sender: panelSender(),
+  });
+
+  assert.deepEqual(response, { ok: false, code: 'CONTEXT_DENIED' });
+  assert.equal(calls.some(([name]) => ['query', 'probe', 'prepare'].includes(name)), false);
+});
+
+test('admitted panel selection is bound to the launch tab and denies a changed active tab', async () => {
+  const { rawRouter, calls } = fixture();
+  const response = await rawRouter.dispatch({
+    envelope: parsed({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'launch-tab-denied', windowId: 9 }),
+    sender: panelSender(),
+    launchTabId: 18,
+  });
+
+  assert.deepEqual(response, { ok: false, code: 'TARGET_UNAVAILABLE' });
+  assert.equal(calls.some(([name]) => ['probe', 'prepare'].includes(name)), false);
+});
 
 test('rejects an accessor-backed pending URL before proof or capability effects', async () => {
   let pendingReads = 0;
@@ -140,7 +205,7 @@ test('prepares a panel capability and starts through the only attached starter w
   assert.deepEqual(await router.dispatch({
     envelope: parsed({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'request-panel-1', windowId: 9 }),
     sender: panelSender(),
-  }), { ok: true, requestId: 'request-panel-1', capabilityId: CAPABILITY, expiresAt: 200 });
+  }), { ok: true, requestId: 'request-panel-1', capabilityId: CAPABILITY });
 
   const started = await router.dispatch({
     envelope: parsed({ type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9 }),
@@ -156,9 +221,73 @@ test('prepares a panel capability and starts through the only attached starter w
   assert.equal(Object.isFrozen(begin.retentionPreference), true);
 });
 
-test('prepares from the native SIDE_PANEL sender after context and window proofs', async () => {
+test('prepares and consumes persona capabilities only from the Side Panel and projects no target data', async () => {
+  const { router, calls } = fixture();
+  const prepared = await router.dispatch({
+    envelope: parsed({ type: 'PREPARE_PANEL_PERSONA_CAPABILITY', requestId: 'request-persona-1', windowId: 9 }),
+    sender: panelSender(),
+  });
+  assert.deepEqual(prepared, {
+    ok: true,
+    requestId: 'request-persona-1',
+    capabilityId: 'P'.repeat(22),
+  });
+
+  const started = await router.dispatch({
+    envelope: parsed({ type: 'PANEL_START_PERSONA', capabilityId: prepared.capabilityId, mode: 'reader', windowId: 9 }),
+    sender: panelSender(),
+  });
+  assert.deepEqual(started, {
+    ok: true,
+    lease: { leaseId: `lease-${'L'.repeat(22)}`, activeMode: 'reader', expiresAt: 400 },
+  });
+  const preparedCall = calls.find(([name, value]) => name === 'prepare' && value.allowedIntent === 'start-persona');
+  assert.equal(preparedCall[1].issuer.path, '/src/panel/index.html');
+  const start = calls.find(([name]) => name === 'persona-start')[1];
+  assert.deepEqual(start.consumer, {
+    extensionId: RUNTIME_ID,
+    documentId: 'panel-document',
+    path: '/src/panel/index.html',
+    windowId: 9,
+  });
+  assert.equal(Object.hasOwn(start, 'tabId'), false);
+  assert.equal(JSON.stringify(started).includes('document'), false);
+});
+
+test('rehydrates switches and stops a persona through the correlated Side Panel consumer', async () => {
+  const { router, calls } = fixture();
+  const leaseId = `lease-${'L'.repeat(22)}`;
+  const rehydrated = await router.dispatch({
+    envelope: parsed({ type: 'PANEL_REHYDRATE_PERSONA', capabilityId: 'P'.repeat(22), windowId: 9 }),
+    sender: panelSender(),
+  });
+  assert.equal(rehydrated.ok, true);
+  assert.deepEqual(await router.dispatch({
+    envelope: parsed({ type: 'PANEL_SET_PERSONA_MODE', leaseId, mode: 'motor', windowId: 9 }),
+    sender: panelSender(),
+  }), { ok: true, lease: { leaseId, activeMode: 'motor', expiresAt: 400 } });
+  assert.deepEqual(await router.dispatch({
+    envelope: parsed({ type: 'PANEL_STOP_PERSONA', leaseId, windowId: 9 }),
+    sender: panelSender(),
+  }), { ok: true, lease: null });
+  assert.deepEqual(calls.filter(([name]) => name.startsWith('persona-')).map(([name]) => name), [
+    'persona-rehydrate', 'persona-set-mode', 'persona-stop',
+  ]);
+});
+
+test('persona commands deny a forged non-panel sender before persona effects', async () => {
+  const { router, calls } = fixture();
+  const response = await router.dispatch({
+    envelope: parsed({ type: 'PANEL_START_PERSONA', capabilityId: 'P'.repeat(22), mode: 'reader', windowId: 9 }),
+    sender: { ...panelSender(), url: `chrome-extension://${RUNTIME_ID}/src/review/index.html` },
+  });
+  assert.deepEqual(response, { ok: false, code: 'CONTEXT_DENIED' });
+  assert.equal(calls.some(([name]) => name.startsWith('persona-')), false);
+});
+
+test('denies a document-less SIDE_PANEL sender because only the admitted Port may synthesize identity', async () => {
   const { router, dependencies } = fixture();
-  const url = `chrome-extension://${RUNTIME_ID}/src/panel/index.html`;
+  const url = PANEL_URL;
   dependencies.chromeApi.runtime.getContexts = async filter => [{
     documentId: 'native-panel-document', documentUrl: filter.documentUrls?.[0] ?? url,
     contextType: filter.contextTypes?.[0] ?? 'SIDE_PANEL', tabId: -1, windowId: -1,
@@ -169,9 +298,7 @@ test('prepares from the native SIDE_PANEL sender after context and window proofs
     sender: { id: RUNTIME_ID, url, origin: `chrome-extension://${RUNTIME_ID}` },
   });
 
-  assert.deepEqual(response, {
-    ok: true, requestId: 'request-native-panel', capabilityId: CAPABILITY, expiresAt: 200,
-  });
+  assert.deepEqual(response, { ok: false, code: 'CONTEXT_DENIED' });
 });
 
 test('awaits a callback result when tabs.query returns undefined regardless of declared arity', async () => {
@@ -194,7 +321,7 @@ test('awaits a callback result when tabs.query returns undefined regardless of d
   });
 
   assert.deepEqual(response, {
-    ok: true, requestId: 'request-callback-query', capabilityId: CAPABILITY, expiresAt: 200,
+    ok: true, requestId: 'request-callback-query', capabilityId: CAPABILITY,
   });
 });
 
@@ -216,7 +343,7 @@ test('accepts a defined synchronous tabs.query result regardless of declared ari
   });
 
   assert.deepEqual(response, {
-    ok: true, requestId: 'request-defined-query', capabilityId: CAPABILITY, expiresAt: 200,
+    ok: true, requestId: 'request-defined-query', capabilityId: CAPABILITY,
   });
 });
 
@@ -316,18 +443,30 @@ test('routes report and export envelopes through the single launch authorities w
   const reportLaunch = {
     async openRegisteredReport(value) { calls.push(['open', value]); return { ok: true }; },
     async connect(value) { calls.push(['report-connect', value]); return { ok: true, auditId: value.auditId, sessionCapabilityId: 'R'.repeat(22), state: 'view-only' }; },
+    async authorizeIntent(value) { calls.push(['authorize-report', value]); return { ok: true, auditId: value.auditId, intent: value.intent }; },
+  };
+  const reportOperations = {
+    async commitReviewDecision(value) {
+      calls.push(['review-commit', value]);
+      return { ok: true, auditId: value.auditId, occurrenceId: value.occurrenceId, modelRevision: 4, modelHash: 'a'.repeat(64) };
+    },
+    async deleteAudit(value) { calls.push(['delete-audit', value]); return { ok: true, auditId: value.auditId, deleted: true }; },
+    async deleteAllAudits() { calls.push(['delete-all']); return { ok: true, deleted: 2 }; },
   };
   const exportLaunch = {
     async requestExport(value) { calls.push(['request-export', value]); return { ok: true, auditId: value.auditId, attemptId: '1', state: 'awaiting-connection' }; },
     async connect(value) { calls.push(['export-connect', value]); return { ok: true, auditId: value.auditId, sessionCapabilityId: 'E'.repeat(22), expectedRevision: 3, attemptId: '1' }; },
     async complete(value) { calls.push(['export-complete', value]); return { ok: true, auditId: value.auditId, state: 'terminal' }; },
   };
-  const { router } = fixture({ reportLaunch, exportLaunch });
+  const { router } = fixture({ reportLaunch, exportLaunch, reportOperations });
   const sender = panelSender();
   const rows = [
     [{ type: 'PANEL_OPEN_REPORT', sessionCapabilityId: SESSION, auditId: 'audit-1', windowId: 9 }, 'open'],
     [{ type: 'REPORT_CONNECT', auditId: 'audit-1' }, 'report-connect'],
     [{ type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: SESSION, auditId: 'audit-1' }, 'request-export'],
+    [REVIEW_DECISION_MESSAGE, 'review-commit'],
+    [{ type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: SESSION, auditId: 'audit-1' }, 'delete-audit'],
+    [{ type: 'REPORT_DELETE_ALL_AUDITS', sessionCapabilityId: SESSION, auditId: 'audit-1' }, 'delete-all'],
     [{ type: 'EXPORT_CONNECT', auditId: 'audit-1' }, 'export-connect'],
     [{ type: 'EXPORT_COMPLETE', sessionCapabilityId: SESSION, auditId: 'audit-1', attemptId: '1' }, 'export-complete'],
   ];
@@ -335,8 +474,17 @@ test('routes report and export envelopes through the single launch authorities w
     const response = await router.dispatch({ envelope: parsed(message), sender });
     assert.equal(response.ok, true);
     assert.equal(calls.at(-1)[0], expectedCall);
+    if (expectedCall === 'delete-all') {
+      assert.equal(calls.at(-2)[0], 'authorize-report');
+      assert.equal(calls.at(-1).length, 1);
+      continue;
+    }
     assert.deepEqual(Object.keys(calls.at(-1)[1]).sort(), expectedCall === 'export-complete'
       ? ['attemptId', 'auditId', 'sender', 'sessionCapabilityId']
+      : expectedCall === 'review-commit'
+        ? ['answer', 'auditId', 'decidedAt', 'evaluator', 'itemId', 'mode', 'note', 'occurrenceId']
+        : expectedCall === 'delete-audit'
+          ? ['auditId']
       : expectedCall === 'request-export'
         ? ['auditId', 'sender', 'sessionCapabilityId']
         : expectedCall === 'open'
@@ -344,6 +492,29 @@ test('routes report and export envelopes through the single launch authorities w
           : ['auditId', 'sender']);
   }
   assert.doesNotMatch(JSON.stringify(calls), /model|summary|projection|bytes|formats/iu);
+});
+
+test('denies report mutations before storage effects when report session authority rejects', async () => {
+  const calls = [];
+  const reportLaunch = {
+    async authorizeIntent(value) { calls.push(['authorize-report', value]); return { ok: false, code: 'REPORT_INTENT_DENIED' }; },
+  };
+  const reportOperations = {
+    async commitReviewDecision(value) { calls.push(['review-commit', value]); return { ok: true }; },
+    async deleteAudit(value) { calls.push(['delete-audit', value]); return { ok: true }; },
+    async deleteAllAudits() { calls.push(['delete-all']); return { ok: true }; },
+  };
+  const { router } = fixture({ reportLaunch, reportOperations, exportLaunch: {} });
+  for (const message of [
+    REVIEW_DECISION_MESSAGE,
+    { type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: SESSION, auditId: 'audit-1' },
+    { type: 'REPORT_DELETE_ALL_AUDITS', sessionCapabilityId: SESSION, auditId: 'audit-1' },
+  ]) {
+    calls.length = 0;
+    const response = await router.dispatch({ envelope: parsed(message), sender: panelSender() });
+    assert.deepEqual(response, { ok: false, code: 'REPORT_OPERATION_DENIED' });
+    assert.deepEqual(calls.map(call => call[0]), ['authorize-report']);
+  }
 });
 
 test('authorizes cancellation and passes only the correlated session and window', async () => {

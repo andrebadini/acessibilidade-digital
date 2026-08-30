@@ -433,12 +433,13 @@ test('process-loaded extension discovery derives one exact service worker withou
   assert.equal(calls.includes('Extensions.loadUnpacked'), false);
 });
 
-test('action shortcut opens exactly one Side Panel and proves that no popup exists', async () => {
+test('the declared _execute_action shortcut opens one tokenized Side Panel while action-click auto-open stays disabled', async () => {
   const extensionId = 'a'.repeat(32);
   const shortcut = process.platform === 'darwin' ? 'MacCtrl+Shift+A' : 'Alt+Shift+A';
   let opened = false;
   let behaviorReads = 0;
-  const panelUrl = `chrome-extension://${extensionId}/src/panel/index.html`;
+  const launchToken = 'A'.repeat(43);
+  const panelUrl = `chrome-extension://${extensionId}/src/panel/index.html?launch=${launchToken}`;
   const harnessPage = {
     targetId: 'harness',
     async command(method, params) {
@@ -455,7 +456,7 @@ test('action shortcut opens exactly one Side Panel and proves that no popup exis
       }
       if (params.expression.includes('chrome.sidePanel.getPanelBehavior')) {
         behaviorReads += 1;
-        return { result: { value: behaviorReads > 1 } };
+        return { result: { value: params.expression.includes('openPanelOnActionClick===false') } };
       }
       return { result: { value: true } };
     },
@@ -489,7 +490,11 @@ test('action shortcut opens exactly one Side Panel and proves that no popup exis
   assert.equal(panel.targetId, 'panel-target');
   assert.equal((await runtimeContexts(launch, { contextTypes: ['SIDE_PANEL'] })).length, 1);
   assert.equal((await runtimeContexts(launch, { contextTypes: ['POPUP'] })).length, 0);
-  assert.equal(behaviorReads, 2);
+  assert.equal(behaviorReads, 1);
+  const panelLaunch = new URL(panelUrl);
+  assert.equal(panelLaunch.pathname, '/src/panel/index.html');
+  assert.deepEqual([...panelLaunch.searchParams.keys()], ['launch']);
+  assert.match(panelLaunch.searchParams.get('launch'), /^[A-Za-z0-9_-]{43}$/u);
 });
 
 test('foundation constants and fixture files remain bounded', async () => {

@@ -101,31 +101,10 @@
     var escapeCount = 0;
     var lastEscapeAt = 0;
     var destroyed = false;
-    var messagingCleanup = null;
-    var eventPort = null;
-    var eventCounter = 0;
-    var session = null;
-    var seenRequests = new Set();
     var discoveryMetrics = null;
 
     function dispatchPersonaEvent(event) {
       try { emitEvent(event); } catch (_error) { /* injected observer is optional */ }
-      if (!eventPort || !session) return;
-      var state = event?.event === 'state' ? {
-        activeMode: event.activeMode,
-        reader: sanitizeReaderState(event.reader),
-        limitations: getLimitations(),
-        coverage: 'dom-fallback-top-document-open-shadow'
-      } : undefined;
-      try {
-        eventPort.postMessage({
-          protocol: 'audita-persona-content', version: 1, type: 'event',
-          event: event?.event === 'state' ? 'state' : String(event?.event || 'lifecycle-stop').slice(0, 64),
-          eventId: `event-${++eventCounter}`, token: session.token,
-          generation: session.generation, documentId: session.documentId,
-          ...(state ? { state: state } : {})
-        });
-      } catch (_error) { /* local emergency cleanup never depends on the worker */ }
     }
 
     var ALLOWED_ATTRIBUTES = [
@@ -1059,8 +1038,6 @@
 
     function destroy() {
       stop('destroy');
-      messagingCleanup?.();
-      messagingCleanup = null;
       destroyed = true;
     }
 
@@ -1072,195 +1049,9 @@
       collectReaderCandidates: collectReaderCandidates,
       getLimitations: getLimitations,
       getState: getState,
-      destroy: destroy,
-      installMessaging: installMessaging
+      destroy: destroy
     });
 
-    function installMessaging(chromeApi) {
-      if (messagingCleanup || !chromeApi?.runtime?.onMessage?.addListener) return messagingCleanup || function noop() {};
-      var listener = function onMessage(message, sender, sendResponse) {
-        return handleMessage(message, sender, sendResponse, chromeApi);
-      };
-      var connectListener = function onConnect(port) {
-        if (!port || port.name !== 'audita-persona-content-v1' || port.sender?.id !== chromeApi.runtime.id ||
-          typeof port.postMessage !== 'function' || !port.onMessage?.addListener) return;
-        var bound = false;
-        var bindListener = function bindEventPort(message) {
-          if (bound) return;
-          var binding = parseEventPortBinding(message);
-          if (!binding || !session || binding.token !== session.token ||
-            binding.documentId !== session.documentId || binding.generation !== session.generation ||
-            (eventPort && eventPort !== port)) {
-            try { port.disconnect?.(); } catch (_error) { /* rejeição local fail-closed */ }
-            return;
-          }
-          bound = true;
-          eventPort = port;
-          port.onMessage.removeListener?.(bindListener);
-          try {
-            port.postMessage({
-              protocol: 'audita-persona-content', version: 1, type: 'events-bound',
-              token: session.token, generation: session.generation, documentId: session.documentId
-            });
-          } catch (_error) {
-            eventPort = null;
-            transitionToInactive('event-bind-failure');
-            try { port.disconnect?.(); } catch (_ignored) { /* falha de handshake permanece local */ }
-          }
-        };
-        var disconnect = function onPortDisconnect() {
-          if (eventPort === port) {
-            eventPort = null;
-            transitionToInactive('worker-disconnect');
-          }
-          port.onMessage.removeListener?.(bindListener);
-        };
-        port.onMessage.addListener(bindListener);
-        port.onDisconnect?.addListener?.(disconnect);
-      };
-      chromeApi.runtime.onMessage.addListener(listener);
-      chromeApi.runtime.onConnect?.addListener?.(connectListener);
-      messagingCleanup = function removeMessaging() {
-        chromeApi.runtime.onMessage.removeListener?.(listener);
-        chromeApi.runtime.onConnect?.removeListener?.(connectListener);
-        eventPort = null;
-      };
-      return messagingCleanup;
-    }
-
-    function handleMessage(message, sender, sendResponse, chromeApi) {
-      var parsed = parseContentCommand(message);
-      if (!parsed || sender?.id !== chromeApi.runtime.id) return false;
-      if (parsed.command === 'initialize') {
-        if (seenRequests.has(parsed.requestId)) {
-          sendResponse?.({ ok: false, code: 'PERSONA_REPLAY_REJECTED' });
-          return true;
-        }
-        if (session && parsed.token === session.token && parsed.generation <= session.generation) {
-          sendResponse?.({ ok: false, code: 'PERSONA_CORRELATION_REJECTED' });
-          return true;
-        }
-        if (session) stop('reinitialize');
-        session = {
-          token: parsed.token,
-          generation: parsed.generation,
-          documentId: parsed.documentId
-        };
-        seenRequests.clear();
-      } else if (seenRequests.has(parsed.requestId)) {
-        sendResponse?.({ ok: false, code: 'PERSONA_REPLAY_REJECTED' });
-        return true;
-      } else if (!session || parsed.token !== session.token || parsed.generation !== session.generation + 1 ||
-        parsed.documentId !== session.documentId) {
-        sendResponse?.({ ok: false, code: 'PERSONA_CORRELATION_REJECTED' });
-        return true;
-      }
-      seenRequests.add(parsed.requestId);
-      if (seenRequests.size > 128) seenRequests.delete(seenRequests.values().next().value);
-      session.generation = parsed.generation;
-      var result;
-      if (parsed.command === 'initialize') result = getState();
-      else if (parsed.command === 'activate') result = activate(parsed.args.mode, parsed.args.preferences);
-      else if (parsed.command === 'stop') result = stop('worker-command');
-      else if (parsed.command === 'reader-action') result = readerAction(parsed.args.action);
-      else if (parsed.command === 'preferences') result = setPreferences(parsed.args.preferences);
-      else return false;
-      sendResponse?.({
-        protocol: 'audita-persona-content', version: 1, type: 'ack',
-        requestId: parsed.requestId, token: parsed.token, generation: parsed.generation,
-        documentId: parsed.documentId, ok: true, state: result
-      });
-      return true;
-    }
   });
 
-  function parseContentCommand(message) {
-    var cloned = clonePlain(message);
-    if (!cloned) return null;
-    var keys = Object.keys(cloned).sort();
-    var expected = ['args', 'command', 'documentId', 'generation', 'protocol', 'requestId', 'token', 'type', 'version'].sort();
-    if (keys.length !== expected.length || keys.some(function mismatch(key, index) { return key !== expected[index]; })) return null;
-    if (cloned.protocol !== 'audita-persona-content' || cloned.version !== 1 || cloned.type !== 'command' ||
-      !boundedIdentifier(cloned.requestId) || !boundedIdentifier(cloned.token) ||
-      !boundedIdentifier(cloned.documentId) || !Number.isSafeInteger(cloned.generation) || cloned.generation < 1) return null;
-    if (!['initialize', 'activate', 'stop', 'reader-action', 'preferences'].includes(cloned.command) || !validContentArgs(cloned.command, cloned.args)) return null;
-    return cloned;
-  }
-
-  function parseEventPortBinding(message) {
-    var cloned = clonePlain(message);
-    if (!cloned || !exactKeys(cloned, ['protocol', 'version', 'type', 'token', 'generation', 'documentId']) ||
-      cloned.protocol !== 'audita-persona-content' || cloned.version !== 1 || cloned.type !== 'bind-events' ||
-      !boundedIdentifier(cloned.token) || !boundedIdentifier(cloned.documentId) ||
-      !Number.isSafeInteger(cloned.generation) || cloned.generation < 1) return null;
-    return cloned;
-  }
-
-  function clonePlain(value) {
-    var result = copyDataRecord(value, 0, { count: 0 });
-    return result?.ok === true && result.value && typeof result.value === 'object' && !Array.isArray(result.value)
-      ? result.value
-      : null;
-  }
-
-  function copyDataRecord(value, depth, budget) {
-    if (depth > 6 || budget.count > 128) return { ok: false };
-    if (value === null || typeof value === 'boolean' || typeof value === 'string') return { ok: true, value: value };
-    if (typeof value === 'number' && Number.isFinite(value)) return { ok: true, value: value };
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false };
-    var descriptors;
-    try { descriptors = Object.getOwnPropertyDescriptors(value); } catch (_error) { return { ok: false }; }
-    var output = Object.create(null);
-    for (var key of Object.keys(descriptors)) {
-      budget.count += 1;
-      var descriptor = descriptors[key];
-      if (!descriptor || !Object.hasOwn(descriptor, 'value') || descriptor.enumerable !== true) return { ok: false };
-      var copied = copyDataRecord(descriptor.value, depth + 1, budget);
-      if (!copied.ok) return copied;
-      output[key] = copied.value;
-    }
-    return { ok: true, value: output };
-  }
-
-  function exactKeys(value, expected) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-    var keys = Object.keys(value).sort();
-    var wanted = expected.slice().sort();
-    return keys.length === wanted.length && keys.every(function same(key, index) { return key === wanted[index]; });
-  }
-
-  function validPreferences(value) {
-    return exactKeys(value, ['voiceId', 'rate']) && typeof value.voiceId === 'string' &&
-      Array.from(value.voiceId).length <= 200 && !/[\u0000-\u001f\u007f]/u.test(value.voiceId) &&
-      typeof value.rate === 'number' && Number.isFinite(value.rate) && value.rate >= 0.5 && value.rate <= 2;
-  }
-
-  function validContentArgs(command, args) {
-    if (command === 'initialize' || command === 'stop') return exactKeys(args, []);
-    if (command === 'activate') {
-      return exactKeys(args, ['mode', 'preferences']) && ['reader', 'achromatopsia', 'motor'].includes(args.mode) && validPreferences(args.preferences);
-    }
-    if (command === 'reader-action') {
-      return exactKeys(args, ['action']) && ['start', 'pause', 'resume', 'stop', 'repeat', 'previous', 'next'].includes(args.action);
-    }
-    return command === 'preferences' && exactKeys(args, ['preferences']) && validPreferences(args.preferences);
-  }
-
-  function boundedIdentifier(value) {
-    return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,200}$/u.test(value);
-  }
-
-  if (root.document && root.chrome?.runtime?.onMessage) {
-    var existing = namespace.getContentSingleton();
-    if (!existing) {
-      var singleton = namespace.createContentRuntime({
-        document: root.document,
-        window: root,
-        speechSynthesis: safePlatformProperty(root, 'speechSynthesis') || null,
-        Utterance: safePlatformProperty(root, 'SpeechSynthesisUtterance')
-      });
-      namespace.setContentSingleton(singleton);
-      singleton.installMessaging(root.chrome);
-    }
-  }
 })(globalThis);
