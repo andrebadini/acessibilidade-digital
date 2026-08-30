@@ -97,9 +97,7 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   const reviewed = await enrichAuditForReport(structuredClone(SAMPLE_AUDIT), { now:()=> '2026-08-26T15:00:00.000Z', timezone:SAMPLE_AUDIT.timezone, manifestVersion:SAMPLE_AUDIT.versions.manifest, rulesVersion:SAMPLE_AUDIT.versions.rules, browserVersion:SAMPLE_AUDIT.environment.chromeVersion });
   const inventory = await createInstalledCoreRuleInventory();
   const store = createInMemoryAuditStore();
-  await store.setAudit(reviewed.auditId, reviewed);
-  const snapshot = await store.getAuditSnapshot(reviewed.auditId);
-  const model = snapshot.model;
+  const model = reviewed;
   assert.equal(model.report.status, 'review-ready'); assert.equal(model.report.artifact.status, 'pending');
   const checkpoint = {
     version: 1, auditId: model.auditId,
@@ -113,6 +111,12 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
       ],
     })),
   };
+  await store.commitAuditWithCheckpointIfAbsent(model.auditId, model, checkpoint, {
+    version:1, auditId:model.auditId, status:model.session.status, percent:100,
+    message:'Avaliação concluída com limitações.', failureCode:null, modelRevision:1,
+    updatedAt:'2026-08-26T15:00:00.000Z',
+  }, { now:'2026-08-26T15:00:00.000Z', deleteAfterCompleteExport:false });
+  const snapshot = await store.getAuditSnapshot(model.auditId);
   const summary = await buildPanelSummary({ model, executionCheckpoint: checkpoint, inventory });
   const reportView = buildReportView({
     model, summary, modelRevision: snapshot.revision, modelHash: model.integrity.canonicalModelHash,
@@ -156,7 +160,15 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   const persisted = await persistExportSuccess(createExportSuccessRequest({ auditId:model.auditId,result,latest:{auditId:model.auditId} }),store);
   assert.equal(persisted.latest.exportStatus,'complete'); assert.equal(persisted.latest.exportRevision,snapshot.revision+1);
   assert.deepEqual(persisted.latest.deliveryReceipt.formats.map(row=>row.format),EXPORT_FORMATS_V1);
-  const durableAfterControl = [await store.getAuditSnapshot(model.auditId), await store.getLatest(), persisted.latest.deliveryReceipt];
+  const durableReceipt = await store.getExportReceipt(model.auditId);
+  const durableSnapshot = await store.getAuditSnapshot(model.auditId);
+  const durableLatest = await store.getLatest();
+  assert.equal(durableSnapshot.revision, snapshot.revision + 1);
+  assert.equal(durableLatest.exportStatus, 'complete');
+  assert.equal(durableLatest.exportRevision, snapshot.revision + 1);
+  assert.deepEqual(durableReceipt.formats.map(row => row.format), EXPORT_FORMATS_V1);
+  assert.deepEqual(durableReceipt.formats.map(row => row.sha256), result.deliveryReceipt.formats.map(row => row.sha256));
+  const durableAfterControl = [durableSnapshot, durableLatest, durableReceipt];
   // The control above consumed an unmodified, privately attested result.  This
   // mutation keeps that same object identity, so failure proves attestation
   // revalidation rather than structuredClone losing its private capability.
@@ -164,13 +176,13 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   result.html += 'tampered';
   const tampered = createExportSuccessRequest({ auditId: model.auditId, result, latest: {} });
   await assert.rejects(persistExportSuccess(tampered, store), /hash|proveniência|artefatos/i);
-  assert.deepEqual([await store.getAuditSnapshot(model.auditId), await store.getLatest(), persisted.latest.deliveryReceipt], durableAfterControl);
+  assert.deepEqual([await store.getAuditSnapshot(model.auditId), await store.getLatest(), await store.getExportReceipt(model.auditId)], durableAfterControl);
   result.html = originalHtml;
   const originalIdentity = result.exportDeliveryIdentity;
   result.exportDeliveryIdentity = { ...originalIdentity, modelRevision: originalIdentity.modelRevision + 1 };
   const wrongRevision = createExportSuccessRequest({ auditId: model.auditId, result, latest: {} });
   await assert.rejects(persistExportSuccess(wrongRevision, store), /identidade|revisão|proveniência/i);
-  assert.deepEqual([await store.getAuditSnapshot(model.auditId), await store.getLatest(), persisted.latest.deliveryReceipt], durableAfterControl);
+  assert.deepEqual([await store.getAuditSnapshot(model.auditId), await store.getLatest(), await store.getExportReceipt(model.auditId)], durableAfterControl);
   result.exportDeliveryIdentity = originalIdentity;
   assert.equal((result.html.match(/<h2\b/gu) ?? []).length, 7);
   assert.equal((result.html.match(/Câmara dos Deputados/gu) ?? []).length, 2);
