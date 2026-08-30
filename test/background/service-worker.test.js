@@ -260,19 +260,14 @@ function withAuditRevisions(store) {
   };
 }
 
-test('opens the local panel through the centralized persona binding with the explicit source tab', async () => {
+test('does not register an action click listener and preserves the panel persona port', () => {
   const chromeApi = createChrome();
-  const opens = [];
   const attached = [];
   const personaController = {
-    async openPanel(value) { opens.push(value); return { id: 50 }; },
     attachPanelPort(port) { attached.push(port); return true; },
   };
   registerServiceWorker(chromeApi, { createId: () => 'audit-1', personaController });
-  const sourceTab = { id: 7, url: 'https://alvo.test/pagina', title: 'não persistir' };
-  chromeApi.listeners.action.listener(sourceTab);
-  await waitUntil(() => opens.length === 1);
-  assert.deepEqual(opens, [{ sourceTab }]);
+  assert.equal(chromeApi.listeners.action.listener, undefined);
   assert.deepEqual(chromeApi.createdTabs, []);
   const port = { name: 'audita-persona-v1' };
   chromeApi.listeners.connect.listener(port);
@@ -2072,14 +2067,11 @@ test('GET_LAST retries a torn latest/snapshot read instead of reporting a live d
   assert.equal(response.state.exportRevision, queuedSnapshot.revision + 1);
 });
 
-test('handles rejected panel-tab creation without an unhandled rejection', async () => {
+test('registers without the action API because the manifest popup owns the gesture', () => {
   const chromeApi = createChrome();
-  chromeApi.tabs.create = async () => { throw new Error('tabs indisponível'); };
-  const errors = [];
-  registerServiceWorker(chromeApi, { createId: () => 'audit-1', logger: { error: (message) => errors.push(message) } });
-  chromeApi.listeners.action.listener();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(errors, ['Não foi possível abrir o painel de auditoria.']);
+  delete chromeApi.action;
+  registerServiceWorker(chromeApi, { createId: () => 'audit-1' });
+  assert.equal(typeof chromeApi.listeners.message.listener, 'function');
 });
 
 test('START_AUDIT persists the per-audit delete-after-export intent only on the first model commit', async () => {

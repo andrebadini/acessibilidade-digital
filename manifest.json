@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "minimum_chrome_version": "106",
+  "minimum_chrome_version": "116",
   "name": "Audita Acessibilidade",
   "version": "1.0.1",
   "description": "Auditoria independente de acessibilidade de páginas web.",
@@ -11,10 +11,12 @@
     "128": "assets/icons/icon-128.png"
   },
   "permissions": [
+    "alarms",
     "contextMenus",
     "debugger",
     "downloads",
     "scripting",
+    "sidePanel",
     "storage",
     "tabs"
   ],
@@ -29,13 +31,26 @@
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'none'; img-src 'self' data: blob:; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'"
   },
+  "side_panel": {
+    "default_path": "src/panel/index.html"
+  },
   "action": {
     "default_title": "Abrir Audita Acessibilidade",
+    "default_popup": "src/popup/index.html",
     "default_icon": {
       "16": "assets/icons/icon-16.png",
       "32": "assets/icons/icon-32.png",
       "48": "assets/icons/icon-48.png",
       "128": "assets/icons/icon-128.png"
+    }
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+A",
+        "mac": "MacCtrl+Shift+A"
+      },
+      "description": "Abrir Audita Acessibilidade"
     }
   }
 }

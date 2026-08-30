@@ -7,6 +7,9 @@
   --focus: #8b2f00;
   --border: #738596;
   --muted-surface: #eef4f8;
+  --failure: #8b1e1e;
+  --review: #6b4e00;
+  --success: #1b6e3c;
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   line-height: 1.5;
 }
@@ -44,7 +47,7 @@ body {
 }
 
 main {
-  max-width: 46rem;
+  max-width: 37.5rem;
   margin: 0 auto;
   padding: 1.5rem;
 }
@@ -57,7 +60,7 @@ h2 {
 
 h1 {
   margin: 0 0 0.5rem;
-  font-size: clamp(2rem, 8vw, 3rem);
+  font-size: 1.25rem;
 }
 
 h2 {
@@ -68,6 +71,15 @@ h2 {
 .intro {
   max-width: 65ch;
   margin-bottom: 1.5rem;
+}
+
+.surface-kicker {
+  margin: 0 0 0.25rem;
+  color: var(--brand);
+  font-size: 0.875rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .privacy-notice {

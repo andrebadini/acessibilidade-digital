@@ -206,7 +206,7 @@ export function createSessionStore(chromeApi, fallback = new Map()) {
 }
 
 export function registerServiceWorker(chromeApi, options = {}) {
-  if (!chromeApi?.action?.onClicked || !chromeApi?.runtime?.onMessage || !chromeApi?.tabs?.create) {
+  if (!chromeApi?.runtime?.onMessage || !chromeApi?.tabs?.create) {
     throw new TypeError('As APIs Chrome necessárias não estão disponíveis.');
   }
   const sessions = options.sessionStore ?? createSessionStore(chromeApi, options.sessions);
@@ -240,15 +240,6 @@ export function registerServiceWorker(chromeApi, options = {}) {
     beginSingleAudit,
   });
   const startupReady = restoreInterruptedBatchCheckpoint();
-
-  chromeApi.action.onClicked.addListener((sourceTab) => {
-    void Promise.resolve()
-      .then(() => {
-        if (!personaController) throw new Error('Controlador de personas indisponível.');
-        return personaController.openPanel({ sourceTab });
-      })
-      .catch(() => logger.error('Não foi possível abrir o painel de auditoria.'));
-  });
 
   chromeApi.runtime.onConnect?.addListener?.((port) => {
     personaController?.attachPanelPort(port);

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Audita Acessibilidade</title>
+    <link rel="stylesheet" href="popup.css">
+    <script type="module" src="popup.js"></script>
+  </head>
+  <body>
+    <header class="popup-header">
+      <p class="product-name">Audita Acessibilidade</p>
+      <p>Avaliação local e independente</p>
+    </header>
+    <main>
+      <p class="eyebrow">Página atual</p>
+      <h1 id="page-domain">Preparando página</h1>
+      <p id="page-title" class="page-title">Aguarde enquanto a página é identificada.</p>
+
+      <div class="primary-actions">
+        <button id="audit-page" type="button" disabled>Avaliar esta página</button>
+        <button id="other-source" type="button" class="secondary-action" disabled>Outra URL ou lote</button>
+      </div>
+
+      <section aria-labelledby="personas-heading">
+        <h2 id="personas-heading">Simulações</h2>
+        <div class="persona-grid" role="group" aria-label="Simulações disponíveis em uma próxima etapa">
+          <button type="button" data-persona-mode="reader" disabled aria-label="Leitura simulada, indisponível nesta etapa">Leitura</button>
+          <button type="button" data-persona-mode="achromatopsia" disabled aria-label="Acromatopsia, indisponível nesta etapa">Sem cor</button>
+          <button type="button" data-persona-mode="keyboard" disabled aria-label="Somente teclado, indisponível nesta etapa">Teclado</button>
+        </div>
+      </section>
+
+      <div class="notices">
+        <p>Processamento local; nenhum dado é enviado.</p>
+        <p>Capturas visuais serão habilitadas somente após a etapa de privacidade.</p>
+      </div>
+      <p id="popup-status" class="status" role="status" aria-live="polite" aria-atomic="true"></p>
+    </main>
+  </body>
+</html>

@@ -7,7 +7,7 @@ const readWorkspaceFile = (path) => readFile(new URL(`../${path}`, import.meta.u
 test('declares a minimal MV3 extension shell without remote executable code', async () => {
   const manifest = JSON.parse(await readWorkspaceFile('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.minimum_chrome_version, '106', 'documentIds da scripting API exige Chrome 106+');
+  assert.equal(manifest.minimum_chrome_version, '116', 'sidePanel.open e runtime.getContexts exigem Chrome 116+');
   assert.equal(manifest.version, '1.0.1');
   assert.equal(manifest.description, 'Auditoria independente de acessibilidade de páginas web.');
   assert.deepEqual(manifest.icons, {
@@ -17,7 +17,7 @@ test('declares a minimal MV3 extension shell without remote executable code', as
     128: 'assets/icons/icon-128.png',
   });
   assert.deepEqual(manifest.permissions, [
-    'contextMenus', 'debugger', 'downloads', 'scripting', 'storage', 'tabs',
+    'alarms', 'contextMenus', 'debugger', 'downloads', 'scripting', 'sidePanel', 'storage', 'tabs',
   ]);
   assert.deepEqual(manifest.host_permissions, ['http://*/*', 'https://*/*']);
   assert.deepEqual(manifest.background, {
@@ -25,9 +25,44 @@ test('declares a minimal MV3 extension shell without remote executable code', as
     type: 'module',
   });
   assert.deepEqual(manifest.action.default_icon, manifest.icons);
-  assert.equal(manifest.action.default_popup, undefined);
+  assert.equal(manifest.action.default_popup, 'src/popup/index.html');
+  assert.deepEqual(manifest.side_panel, { default_path: 'src/panel/index.html' });
+  assert.deepEqual(manifest.commands, {
+    _execute_action: {
+      suggested_key: { default: 'Alt+Shift+A', mac: 'MacCtrl+Shift+A' },
+      description: 'Abrir Audita Acessibilidade',
+    },
+  });
+  assert.equal(manifest.content_scripts, undefined);
+  assert.equal(manifest.web_accessible_resources, undefined);
   assert.equal(manifest.content_security_policy.extension_pages,
     "script-src 'self'; object-src 'none'; img-src 'self' data: blob:; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'");
+});
+
+test('popup is an accessible local launcher with no URL, retention or pixel controls', async () => {
+  const [html, css] = await Promise.all([
+    readWorkspaceFile('src/popup/index.html'),
+    readWorkspaceFile('src/popup/popup.css'),
+  ]);
+  assert.equal((html.match(/<h1\b/giu) ?? []).length, 1);
+  assert.match(html, /id="page-domain"/u);
+  assert.match(html, /id="page-title"/u);
+  assert.match(html, /<button[^>]+id="audit-page"[^>]+disabled[^>]*>\s*Avaliar esta página\s*<\/button>/iu);
+  assert.match(html, /<button[^>]+id="other-source"[^>]+disabled[^>]*>\s*Outra URL ou lote\s*<\/button>/iu);
+  assert.equal((html.match(/data-persona-mode=/gu) ?? []).length, 3);
+  assert.equal((html.match(/data-persona-mode=[^>]+disabled/gu) ?? []).length, 3);
+  assert.match(html, /Processamento local; nenhum dado é enviado\./u);
+  assert.match(html, /Capturas visuais serão habilitadas somente após a etapa de privacidade\./u);
+  assert.match(html, /role="status"[^>]+aria-live="polite"|aria-live="polite"[^>]+role="status"/iu);
+  assert.doesNotMatch(html, /<input\b|<textarea\b|type="checkbox"|reten|full-evidence|element-only|no-pixels/iu);
+  assert.doesNotMatch(html, /<script(?![^>]+src=)|<style\b|\sstyle=/iu);
+  assert.doesNotMatch(html, /<(?:script|link|img)[^>]+(?:src|href)="https?:\/\//iu);
+  assert.doesNotMatch(html, /gov(?:erno)?|bras[aã]o|secretaria|certifica|nota de acessibilidade/iu);
+  assert.match(css, /font-family:\s*system-ui/iu);
+  assert.match(css, /min-(?:block-size|height):\s*44px/iu);
+  assert.match(css, /@media\s*\(forced-colors:\s*active\)/iu);
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/iu);
+  assert.doesNotMatch(css, /@import|https?:|url\s*\(/iu);
 });
 
 test('panel is an accessible local document with no inline code', async () => {
@@ -76,7 +111,7 @@ test('packages persona runtimes as local classic files without broadening the MV
   const manifest = JSON.parse(manifestSource);
   assert.equal(manifest.content_scripts, undefined);
   assert.equal(manifest.web_accessible_resources, undefined);
-  assert.deepEqual(manifest.permissions, ['contextMenus', 'debugger', 'downloads', 'scripting', 'storage', 'tabs']);
+  assert.deepEqual(manifest.permissions, ['alarms', 'contextMenus', 'debugger', 'downloads', 'scripting', 'sidePanel', 'storage', 'tabs']);
   assert.equal(manifest.content_security_policy.extension_pages.includes("'unsafe-eval'"), false);
   assert.match(buildSource, /cp\(join\(root, 'src'\), join\(staging, 'src'\), \{ recursive: true \}\)/u);
   for (const [path, source] of [
