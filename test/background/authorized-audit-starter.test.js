@@ -8,7 +8,12 @@ import {
   readActiveAuditJobForWorker,
   retentionPreferenceStorageKey,
 } from '../../src/background/authorized-audit-starter.js';
-import { createTargetCapabilityAuthority } from '../../src/background/target-capabilities.js';
+import { panelBootstrapStorageKey } from '../../src/background/panel-port.js';
+import {
+  createTargetCapabilityAuthority,
+  readAttachedAuditCorrelationForRecovery,
+  readAuditSessionForWorker,
+} from '../../src/background/target-capabilities.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
@@ -165,6 +170,24 @@ test('rejects a hostile retention intent before claim, journal or other effect',
   assert.equal(Object.hasOwn(area.values, ACTIVE_AUDIT_JOB_KEY), false);
 });
 
+test('native dependency messages cannot spoof TARGET_UNAVAILABLE selection', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority,
+    execution: async () => { throw new Error('must not run'); },
+  });
+  dependencies.readAuditSnapshot = async () => { throw new Error('TARGET_UNAVAILABLE'); };
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: 'audit-native-target-spoof',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(started.response, { ok: false, code: 'AUDIT_START_FAILED' });
+});
+
 test('journals, claims, checkpoints and atomically settles a result before publication', async () => {
   const area = sessionArea();
   const prepared = await authorityFixture(area);
@@ -204,6 +227,115 @@ test('journals, claims, checkpoints and atomically settles a result before publi
   assert.ok(order.indexOf('checkpoint-remove') < order.indexOf('publish:result'));
 });
 
+test('compensates a false bootstrap publication instead of reporting a running audit', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  let executions = 0;
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority,
+    execution: async () => { executions += 1; },
+  });
+  dependencies.panelCoordinator.publishRegisteredBootstrap = async () => false;
+  const starter = createAuthorizedAuditStarter(dependencies);
+
+  const started = await starter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: 'audit-bootstrap-false',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(started.response, { ok: false, code: 'AUDIT_START_FAILED' });
+  assert.equal(started.sessionCapabilityId, null);
+  assert.equal(executions, 0);
+  assert.equal(Object.hasOwn(area.values, ACTIVE_AUDIT_JOB_KEY), false);
+  assert.equal(Object.hasOwn(area.values, retentionPreferenceStorageKey('audit-bootstrap-false')), false);
+  assert.equal(Object.hasOwn(area.values, 'audita:start-journal:v1'), false);
+});
+
+test('journal removal failure after ACTIVE triggers complete verified start compensation', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const latest = { value: null };
+  let executions = 0;
+  const originalRemove = area.remove.bind(area);
+  let journalRemovals = 0;
+  area.remove = async key => {
+    if (key === 'audita:start-journal:v1' && journalRemovals++ === 0) return;
+    return originalRemove(key);
+  };
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority, latest,
+    execution: async () => { executions += 1; },
+  });
+  dependencies.panelCoordinator = {
+    async withWindowLock(_windowId, fn) { return fn(); },
+    async publishRegisteredBootstrap(value) {
+      area.values[panelBootstrapStorageKey(value.windowId)] = {
+        version: 1, kind: 'audit-session', ...structuredClone(value), state: 'pending',
+      };
+      return true;
+    },
+    async publishResult() { return true; },
+    async disconnectSession({ auditId, sessionCapabilityId, windowId }) {
+      const key = panelBootstrapStorageKey(windowId);
+      const bootstrap = area.values[key];
+      if (bootstrap && bootstrap.auditId === auditId && bootstrap.sessionCapabilityId === sessionCapabilityId) delete area.values[key];
+      return !Object.hasOwn(area.values, key);
+    },
+  };
+  const starter = createAuthorizedAuditStarter(dependencies);
+
+  const started = await starter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: 'audit-active-compensation',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(started.response, { ok: false, code: 'AUDIT_START_FAILED' });
+  assert.equal(executions, 0);
+  assert.equal(Object.hasOwn(area.values, ACTIVE_AUDIT_JOB_KEY), false);
+  assert.equal(Object.hasOwn(area.values, executionCheckpointStorageKey('audit-active-compensation')), false);
+  assert.equal(Object.hasOwn(area.values, panelBootstrapStorageKey(9)), false);
+  assert.equal(Object.hasOwn(area.values, retentionPreferenceStorageKey('audit-active-compensation')), false);
+  assert.equal(Object.hasOwn(area.values, 'audita:start-journal:v1'), false);
+  assert.equal(latest.value.auditId, 'audit-active-compensation');
+  assert.equal(latest.value.failureCode, 'AUDIT_FAILED');
+  const correlation = await readAttachedAuditCorrelationForRecovery({
+    sessionArea: area, capabilityId: prepared.capabilityId, auditId: 'audit-active-compensation',
+  });
+  assert.equal(correlation.targetState, 'invalidated');
+  const revoked = await readAuditSessionForWorker({
+    sessionArea: area, sessionCapabilityId: correlation.sessionCapabilityId, auditId: 'audit-active-compensation',
+  });
+  assert.equal(revoked.state, 'revoked');
+});
+
+test('incomplete post-ACTIVE compensation returns recovery-required and keeps ACTIVE recoverable', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const originalRemove = area.remove.bind(area);
+  let journalRemovals = 0;
+  area.remove = async key => {
+    if (key === 'audita:start-journal:v1' && journalRemovals++ === 0) return;
+    return originalRemove(key);
+  };
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority,
+    execution: async () => { throw new Error('must not run'); },
+  });
+  dependencies.panelCoordinator.disconnectSession = async () => false;
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: 'audit-compensation-blocked',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(started.response, { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' });
+  const active = await readActiveAuditJobForWorker({ sessionArea: area });
+  assert.equal(active.auditId, 'audit-compensation-blocked');
+});
+
 test('recovers a durable running job as interrupted without resuming collection', async () => {
   const area = sessionArea();
   const prepared = await authorityFixture(area);
@@ -231,6 +363,175 @@ test('recovers a durable running job as interrupted without resuming collection'
   assert.equal(executionCalls, 1);
   assert.equal(latest.value.failureCode, 'AUDIT_INTERRUPTED');
   assert.equal(Object.hasOwn(area.values, ACTIVE_AUDIT_JOB_KEY), false);
+});
+
+test('running recovery preserves a supported foreign legacy export latest record', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const latest = { value: null };
+  const starter = createAuthorizedAuditStarter(dependencyFixture({
+    area, authority: prepared.authority, latest,
+    execution: async () => new Promise(() => {}),
+  }));
+  const started = await starter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: 'audit-recover-foreign-latest',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+  assert.equal(started.response.ok, true);
+  latest.value = {
+    auditId: 'foreign-export-audit', status: 'complete', exportStatus: 'queued', exportRevision: 3,
+  };
+
+  const recovered = createAuthorizedAuditStarter(dependencyFixture({
+    area, authority: prepared.authority, latest,
+    execution: async () => { throw new Error('must not resume'); },
+  }));
+  assert.deepEqual(await recovered.recoverAuthorizedAuditLifecycle(), {
+    ok: true, state: 'interrupted', auditId: 'audit-recover-foreign-latest', revision: null,
+  });
+  assert.deepEqual(latest.value, {
+    auditId: 'foreign-export-audit', status: 'complete', exportStatus: 'queued', exportRevision: 3,
+  });
+});
+
+test('running recovery blocks and retains ACTIVE when durable panel cleanup cannot be confirmed', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const latest = { value: null };
+  const starter = createAuthorizedAuditStarter(dependencyFixture({
+    area, authority: prepared.authority, latest,
+    execution: async () => new Promise(() => {}),
+  }));
+  const started = await starter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: 'audit-recovery-cleanup-blocked',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+  assert.equal(started.response.ok, true);
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority, latest,
+    execution: async () => { throw new Error('must not resume'); },
+  });
+  dependencies.panelCoordinator.disconnectSession = async () => false;
+
+  assert.deepEqual(await createAuthorizedAuditStarter(dependencies).recoverAuthorizedAuditLifecycle(), {
+    ok: false, state: 'blocked', auditId: null, revision: null, code: 'AUDIT_RECOVERY_REQUIRED',
+  });
+  const active = await readActiveAuditJobForWorker({ sessionArea: area });
+  assert.equal(active.auditId, 'audit-recovery-cleanup-blocked');
+});
+
+test('prepared-journal recovery blocks and preserves a concurrent replacement during cleanup', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  area.values['audita:start-journal:v1'] = {
+    version: 1, capabilityId: prepared.capabilityId, auditId: 'audit-prepared-replacement', windowId: 9,
+    state: 'prepared', sessionCapabilityId: null, createdAt: EPOCH, updatedAt: EPOCH,
+  };
+  const replacement = {
+    version: 1, capabilityId: 'R'.repeat(22), auditId: 'foreign-replacement', windowId: 11,
+    state: 'prepared', sessionCapabilityId: null, createdAt: EPOCH + 1, updatedAt: EPOCH + 1,
+  };
+  const originalRemove = area.remove.bind(area);
+  area.remove = async key => {
+    if (key === 'audita:start-journal:v1') {
+      area.values[key] = structuredClone(replacement);
+      return;
+    }
+    return originalRemove(key);
+  };
+  const recovery = await createAuthorizedAuditStarter(dependencyFixture({
+    area, authority: prepared.authority,
+    execution: async () => { throw new Error('must not resume'); },
+  })).recoverAuthorizedAuditLifecycle();
+
+  assert.deepEqual(recovery, {
+    ok: false, state: 'blocked', auditId: null, revision: null, code: 'AUDIT_RECOVERY_REQUIRED',
+  });
+  assert.deepEqual(area.values['audita:start-journal:v1'], replacement);
+});
+
+test('revoked settlement blocks and retains recoverable ACTIVE when durable panel cleanup fails', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority,
+    execution: async () => Object.freeze({
+      version: 1, auditId: 'audit-settlement-blocked', state: 'revoked',
+      failureCode: 'AUDIT_FAILED', model: null, checkpoint: null,
+    }),
+  });
+  dependencies.panelCoordinator.disconnectSession = async () => false;
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: 'audit-settlement-blocked',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(await started.completion, {
+    ok: false, auditId: 'audit-settlement-blocked', state: 'blocked', code: 'AUDIT_RECOVERY_REQUIRED',
+  });
+  const active = await readActiveAuditJobForWorker({ sessionArea: area });
+  assert.equal(active.auditId, 'audit-settlement-blocked');
+  assert.equal(active.state, 'running');
+});
+
+test('revoked settlement succeeds without a live port after correlated durable bootstrap cleanup', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority,
+    execution: async () => Object.freeze({
+      version: 1, auditId: 'audit-no-live-settlement', state: 'revoked',
+      failureCode: 'AUDIT_FAILED', model: null, checkpoint: null,
+    }),
+  });
+  dependencies.panelCoordinator = {
+    async withWindowLock(_windowId, fn) { return fn(); },
+    async publishRegisteredBootstrap(value) {
+      area.values[panelBootstrapStorageKey(value.windowId)] = {
+        version: 1, kind: 'audit-session', ...structuredClone(value), state: 'pending',
+      };
+      return true;
+    },
+    async publishResult() { return false; },
+    async disconnectSession({ auditId, sessionCapabilityId, windowId }) {
+      const key = panelBootstrapStorageKey(windowId);
+      const bootstrap = area.values[key];
+      if (!bootstrap || bootstrap.auditId !== auditId || bootstrap.sessionCapabilityId !== sessionCapabilityId) return false;
+      delete area.values[key];
+      return true;
+    },
+  };
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: 'audit-no-live-settlement',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(await started.completion, {
+    ok: true, auditId: 'audit-no-live-settlement', state: 'revoked', code: 'AUDIT_FAILED',
+  });
+  assert.equal(Object.hasOwn(area.values, panelBootstrapStorageKey(9)), false);
+  assert.equal(Object.hasOwn(area.values, ACTIVE_AUDIT_JOB_KEY), false);
+});
+
+test('native runner messages cannot spoof AUDIT_REVOKED selection', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const started = await createAuthorizedAuditStarter(dependencyFixture({
+    area, authority: prepared.authority,
+    execution: async () => { throw new Error('AUDIT_REVOKED'); },
+  })).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: 'audit-native-revoked-spoof',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(await started.completion, {
+    ok: true, auditId: 'audit-native-revoked-spoof', state: 'revoked', code: 'AUDIT_FAILED',
+  });
 });
 
 test('blocks starts and recovery on malformed singleton state instead of overwriting it', async () => {
@@ -277,6 +578,73 @@ test('commits a canonical cancelled model exactly once when the runner bypasses 
     ok: true, auditId: report.model.auditId, state: 'result', revision: 1,
   });
   assert.equal(commits, 1);
+});
+
+test('finalizing fallback reconciles a witnessed commit after the commit adapter return is denied', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const report = await reportFixture('audit-finalizing-fallback');
+  const reportByAudit = new Map();
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority, reportByAudit,
+    execution: async ({ onCheckpoint, persistAuditModel }) => {
+      await onCheckpoint(report.checkpoint);
+      await persistAuditModel(report.model);
+      throw new Error('must not continue after denied adapter return');
+    },
+  });
+  const commit = dependencies.commitTerminalAudit;
+  dependencies.commitTerminalAudit = async value => {
+    await commit(value);
+    return Object.freeze({ revision: 1, modelHash: '0'.repeat(64) });
+  };
+  dependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({
+    reportRevision, inventory: report.inventory,
+  });
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: report.model.auditId,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(await started.completion, {
+    ok: true, auditId: report.model.auditId, state: 'result', revision: 1,
+  });
+  assert.equal(Object.hasOwn(area.values, ACTIVE_AUDIT_JOB_KEY), false);
+});
+
+test('settlement blocks with finalizing ACTIVE when result publication returns a non-boolean confirmation', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const report = await reportFixture('audit-publication-confirmation');
+  const reportByAudit = new Map();
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority, reportByAudit,
+    execution: async ({ onCheckpoint, persistAuditModel }) => {
+      await onCheckpoint(report.checkpoint);
+      await persistAuditModel(report.model);
+      return Object.freeze({
+        version: 1, auditId: report.model.auditId, state: 'model', failureCode: null,
+        model: report.model, checkpoint: report.checkpoint,
+      });
+    },
+  });
+  dependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({
+    reportRevision, inventory: report.inventory,
+  });
+  dependencies.panelCoordinator.publishResult = async () => undefined;
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: report.model.auditId,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(await started.completion, {
+    ok: false, auditId: report.model.auditId, state: 'blocked', code: 'AUDIT_RECOVERY_REQUIRED',
+  });
+  const active = await readActiveAuditJobForWorker({ sessionArea: area });
+  assert.equal(active.state, 'finalizing');
+  assert.equal(active.commitState, 'confirmed');
 });
 
 test('reconciles a confirmed finalizing revision and preserves a different latest audit', async () => {

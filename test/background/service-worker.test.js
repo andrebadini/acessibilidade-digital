@@ -50,7 +50,7 @@ function runtimeValue() {
   return Object.freeze({ authority: Object.freeze({}), auditStarter: Object.freeze({}), chromeAdapter: Object.freeze({}) });
 }
 
-function defaultGraphFixture() {
+function defaultGraphFixture(initialSessionValues = null) {
   const { chromeApi, events } = chromeFixture();
   const sessionValues = Object.create(null);
   const contexts = new Map();
@@ -63,6 +63,8 @@ function defaultGraphFixture() {
   let deletedAll = 0;
   let deleteError = null;
   const deleted = [];
+
+  if (initialSessionValues) Object.assign(sessionValues, structuredClone(initialSessionValues));
 
   chromeApi.storage.session = {
     async setAccessLevel() {},
@@ -320,6 +322,14 @@ test('does not misreport a post-gate runtime construction failure as access deni
   await assert.rejects(registration.startupReady, /WORKER_UNAVAILABLE/u);
   assert.equal(accessCalls, 1);
   assert.deepEqual(logs, []);
+});
+
+test('default runtime rejects readiness when lifecycle recovery reports blocked state', async () => {
+  const env = defaultGraphFixture({
+    'audita:active-audit-job:v1': { version: 1, auditId: 'malformed-active', state: 'running' },
+  });
+
+  await assert.rejects(env.registration.startupReady, /WORKER_UNAVAILABLE/u);
 });
 
 test('fails a denied trusted-session gate with one fixed diagnostic and no graph construction', async () => {

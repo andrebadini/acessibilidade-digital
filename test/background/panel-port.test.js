@@ -275,6 +275,60 @@ test('a live view-only send failure remains durably registered for reconnect', a
   assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].state, 'consumed');
 });
 
+test('disconnectSession removes a correlated durable bootstrap even when no live port exists', async () => {
+  const env = fixture();
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+
+  const disconnected = await env.coordinator.withWindowLock(9, () => env.coordinator.disconnectSession({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, reasonCode: 'AUDIT_INTERRUPTED',
+  }));
+
+  assert.equal(disconnected, true);
+  assert.equal(Object.hasOwn(env.sessionArea.values, panelBootstrapStorageKey(9)), false);
+});
+
+test('disconnectSession preserves a foreign durable bootstrap and reports cleanup failure', async () => {
+  const env = fixture();
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'foreign-audit', sessionCapabilityId: 'F'.repeat(22),
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+
+  const disconnected = await env.coordinator.withWindowLock(9, () => env.coordinator.disconnectSession({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, reasonCode: 'AUDIT_INTERRUPTED',
+  }));
+
+  assert.equal(disconnected, false);
+  assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].auditId, 'foreign-audit');
+});
+
+test('disconnectSession detects and preserves a concurrent bootstrap replacement', async () => {
+  const env = fixture();
+  const key = panelBootstrapStorageKey(9);
+  env.sessionArea.values[key] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  const replacement = {
+    version: 1, kind: 'audit-session', auditId: 'foreign-replacement', sessionCapabilityId: 'R'.repeat(22),
+    windowId: 9, createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  env.sessionArea.remove = async removedKey => {
+    assert.equal(removedKey, key);
+    env.sessionArea.values[key] = structuredClone(replacement);
+  };
+
+  const disconnected = await env.coordinator.withWindowLock(9, () => env.coordinator.disconnectSession({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, reasonCode: 'AUDIT_INTERRUPTED',
+  }));
+
+  assert.equal(disconnected, false);
+  assert.deepEqual(env.sessionArea.values[key], replacement);
+});
+
 test('terminal hello rotates to a fresh view-only session and sends a bearer-free result to UI callbacks only', async () => {
   const resultBundle = await bundle();
   const env = fixture({ loadPanelResultBundle: async () => resultBundle });

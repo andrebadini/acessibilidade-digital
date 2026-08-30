@@ -37,6 +37,8 @@ const CAPABILITY = /^[A-Za-z0-9_-]{22}$/u;
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const FAILURE_CODES = new Set(['PRIVACY_PAUSED', 'TARGET_CHANGED', 'AUDIT_FAILED']);
 const TARGET_REASONS = new Set(['TAB_LOADING', 'TAB_URL_CHANGED', 'TAB_PENDING_URL', 'TAB_REMOVED', 'WINDOW_REMOVED']);
+const TARGET_UNAVAILABLE_SENTINEL = Object.freeze(Object.create(null));
+const AUDIT_REVOKED_SENTINEL = Object.freeze(Object.create(null));
 
 function freeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value)) return value;
@@ -214,7 +216,76 @@ function latestState(auditId, kind, modelNow, status = null) {
 
 function parseLatest(value) {
   const record = exact(value, LATEST_KEYS);
-  return record && record.version === 1 && AUDIT_ID.test(record.auditId ?? '') ? freeze(record) : null;
+  if (!record || record.version !== 1 || !AUDIT_ID.test(record.auditId ?? '') || typeof record.updatedAt !== 'string') return null;
+  const date = new Date(record.updatedAt);
+  if (!Number.isFinite(date.getTime()) || date.toISOString() !== record.updatedAt) return null;
+  const key = record.failureCode ?? record.status;
+  const expected = {
+    running: ['running', 0, 'Preparando a auditoria.', null, null],
+    complete: ['complete', 100, 'Avaliação concluída.', null, 1],
+    partial: ['partial', 100, 'Avaliação concluída com limitações.', null, 1],
+    cancelled: ['cancelled', 100, 'Avaliação cancelada.', null, 1],
+    AUDIT_INTERRUPTED: ['failed', 100, 'A auditoria foi interrompida antes da conclusão.', 'AUDIT_INTERRUPTED', null],
+    AUDIT_FAILED: ['failed', 100, 'Não foi possível concluir a auditoria.', 'AUDIT_FAILED', null],
+    TARGET_CHANGED: ['failed', 100, 'A página mudou durante a auditoria; tente novamente.', 'TARGET_CHANGED', null],
+    PRIVACY_PAUSED: ['paused', 0, 'A auditoria foi pausada por proteção de privacidade.', 'PRIVACY_PAUSED', null],
+  }[key];
+  return expected && same(
+    [record.status, record.percent, record.message, record.failureCode, record.modelRevision], expected,
+  ) ? freeze(record) : null;
+}
+
+function supportedLatestAuditId(value) {
+  const current = parseLatest(value);
+  if (current) return current.auditId;
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return null;
+    const allowed = new Set([
+      'auditId', 'mode', 'status', 'percent', 'message', 'reviewUrl', 'exportStatus', 'exportRevision',
+      'exportAttempt', 'leaseOwnerId', 'total', 'pageNumber', 'statusCounts', 'exportQueuedAt',
+    ]);
+    const keys = Reflect.ownKeys(value);
+    if (keys.length < 2 || keys.some(key => typeof key !== 'string' || !allowed.has(key))) return null;
+    const copy = {};
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      copy[key] = descriptor.value;
+    }
+    if (!AUDIT_ID.test(copy.auditId ?? '') ||
+      (!Object.hasOwn(copy, 'status') && !Object.hasOwn(copy, 'exportStatus'))) return null;
+    if (Object.hasOwn(copy, 'mode') && !['single', 'batch'].includes(copy.mode)) return null;
+    if (Object.hasOwn(copy, 'status') && ![
+      'idle', 'validating', 'queued', 'running', 'cancelling', 'complete', 'partial', 'failed', 'cancelled', 'paused',
+    ].includes(copy.status)) return null;
+    if (Object.hasOwn(copy, 'exportStatus') && ![
+      'unavailable', 'preparing', 'queued', 'running', 'delivering', 'complete', 'partial', 'failed', 'busy',
+    ].includes(copy.exportStatus)) return null;
+    if (Object.hasOwn(copy, 'percent') && (typeof copy.percent !== 'number' || !Number.isFinite(copy.percent) ||
+      copy.percent < 0 || copy.percent > 100)) return null;
+    if (Object.hasOwn(copy, 'message') && (typeof copy.message !== 'string' || [...copy.message].length > 512)) return null;
+    if (Object.hasOwn(copy, 'reviewUrl')) {
+      if (typeof copy.reviewUrl !== 'string') return null;
+      const review = new URL(copy.reviewUrl);
+      if (review.protocol !== 'chrome-extension:' || review.pathname !== '/src/review/index.html' || review.hash ||
+        [...review.searchParams.keys()].length !== 1 || review.searchParams.get('auditId') !== copy.auditId) return null;
+    }
+    if (Object.hasOwn(copy, 'exportRevision') && (!Number.isSafeInteger(copy.exportRevision) || copy.exportRevision < 0)) return null;
+    if (Object.hasOwn(copy, 'exportAttempt') && (!Number.isSafeInteger(copy.exportAttempt) || copy.exportAttempt < 1)) return null;
+    if (Object.hasOwn(copy, 'leaseOwnerId') && !/^[A-Za-z0-9._:-]{1,200}$/u.test(copy.leaseOwnerId ?? '')) return null;
+    if (Object.hasOwn(copy, 'exportQueuedAt') && typeof copy.exportQueuedAt !== 'string') return null;
+    if (Object.hasOwn(copy, 'total') && (!Number.isSafeInteger(copy.total) || copy.total < 1 || copy.total > 20)) return null;
+    if (Object.hasOwn(copy, 'pageNumber') && (!Number.isSafeInteger(copy.pageNumber) || copy.pageNumber < 0 ||
+      !Number.isSafeInteger(copy.total) || copy.pageNumber > copy.total)) return null;
+    if (Object.hasOwn(copy, 'statusCounts')) {
+      const counts = exact(copy.statusCounts, ['cancelled', 'complete', 'failed', 'partial']);
+      if (!counts || !Number.isSafeInteger(copy.total) || Object.values(counts).some(count =>
+        !Number.isSafeInteger(count) || count < 0 || count > 20) ||
+        Object.values(counts).reduce((sum, count) => sum + count, 0) > copy.total) return null;
+    }
+    return copy.auditId;
+  } catch { return null; }
 }
 
 async function terminalCandidate({ auditId, model, checkpoint }) {
@@ -311,24 +382,25 @@ export function createAuthorizedAuditStarter(input) {
       auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId, windowId: active.windowId,
     }), ['removed']);
     if (!checkpoint || typeof checkpoint.removed !== 'boolean') throw new Error('CORRELATED_CLEANUP_DENIED');
-    const removedActive = await removeCorrelated(
-      sessionArea, ACTIVE_AUDIT_JOB_KEY, activeRecord,
-      current => current.auditId === active.auditId && current.capabilityId === active.capabilityId &&
-        current.sessionCapabilityId === active.sessionCapabilityId && current.windowId === active.windowId,
-    );
     const removedJournal = await removeCorrelated(
       sessionArea, START_JOURNAL_KEY, journalRecord,
       current => current.auditId === active.auditId && current.capabilityId === active.capabilityId && current.windowId === active.windowId,
     );
     const retention = removeRetention ? await removePreference(active) : true;
+    if (!removedJournal || !retention) throw new Error('CORRELATED_CLEANUP_DENIED');
+    const removedActive = await removeCorrelated(
+      sessionArea, ACTIVE_AUDIT_JOB_KEY, activeRecord,
+      current => current.auditId === active.auditId && current.capabilityId === active.capabilityId &&
+        current.sessionCapabilityId === active.sessionCapabilityId && current.windowId === active.windowId,
+    );
+    if (!removedActive) throw new Error('CORRELATED_CLEANUP_DENIED');
     live.delete(active.auditId);
-    if (!removedActive || !removedJournal || !retention) throw new Error('CORRELATED_CLEANUP_DENIED');
   }
 
   async function markFinalizingLocked(liveRecord, candidate, bundle) {
       const current = await readActiveAuditJobForWorker({ sessionArea });
       if (!current || current.auditId !== liveRecord.active.auditId || current.state !== 'running' || liveRecord.externallyInvalidated) {
-        throw new Error('AUDIT_REVOKED');
+        throw AUDIT_REVOKED_SENTINEL;
       }
       const updatedAt = safeEpoch(epochNow);
       const pending = freeze({
@@ -407,7 +479,7 @@ export function createAuthorizedAuditStarter(input) {
         if (recovery.ok && recovery.state === 'interrupted') return completionRevoked(active.auditId, 'AUDIT_INTERRUPTED');
         return freeze({ ok: false, auditId: active.auditId, state: 'blocked', code: 'AUDIT_RECOVERY_REQUIRED' });
       }
-      const code = error?.message === 'AUDIT_REVOKED' || liveRecord.externallyInvalidated ? 'AUDIT_REVOKED' : 'AUDIT_FAILED';
+      const code = error === AUDIT_REVOKED_SENTINEL || liveRecord.externallyInvalidated ? 'AUDIT_REVOKED' : 'AUDIT_FAILED';
       return settle(liveRecord, freeze({
         version: 1, auditId: active.auditId, state: 'revoked', failureCode: code === 'AUDIT_REVOKED' ? 'AUDIT_FAILED' : code,
         model: null, checkpoint: null,
@@ -426,11 +498,11 @@ export function createAuthorizedAuditStarter(input) {
         if (liveRecord.externallyInvalidated || forcedCode === 'AUDIT_REVOKED') {
           await persistExactLatest(latestState(current.auditId, 'AUDIT_REVOKED', modelNow));
           await transitionConfirmed(current, 'revoked');
-          await invalidateConfirmed(current);
-          await panelCoordinator.disconnectSession({
+          if (await invalidateConfirmed(current) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
+          if (await panelCoordinator.disconnectSession({
             auditId: current.auditId, sessionCapabilityId: current.sessionCapabilityId,
             windowId: current.windowId, reasonCode: 'AUDIT_REVOKED',
-          });
+          }) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
           await cleanupActive(current, { removeRetention: true });
           return completionRevoked(current.auditId, 'AUDIT_REVOKED');
         }
@@ -447,68 +519,89 @@ export function createAuthorizedAuditStarter(input) {
           }
           if (!committed || current.state !== 'finalizing' || current.commitState !== 'confirmed') throw new Error('TERMINAL_COMMIT_DENIED');
           await transitionConfirmed(current, 'result');
-          await panelCoordinator.publishResult({
+          const published = await panelCoordinator.publishResult({
             auditId: current.auditId, sessionCapabilityId: current.sessionCapabilityId,
             windowId: current.windowId, state: 'result', resultBundle: committed.bundle,
           });
+          if (typeof published !== 'boolean') throw new Error('PANEL_PUBLICATION_DENIED');
           await cleanupActive(current);
           return freeze({ ok: true, auditId: current.auditId, state: 'result', revision: 1 });
         }
         const code = FAILURE_CODES.has(outcome.failureCode) ? outcome.failureCode : 'AUDIT_FAILED';
         await persistExactLatest(latestState(current.auditId, code, modelNow));
         await transitionConfirmed(current, 'revoked');
-        await invalidateConfirmed(current);
-        await panelCoordinator.disconnectSession({
+        if (await invalidateConfirmed(current) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
+        if (await panelCoordinator.disconnectSession({
           auditId: current.auditId, sessionCapabilityId: current.sessionCapabilityId,
           windowId: current.windowId, reasonCode: code,
-        });
+        }) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
         await cleanupActive(current, { removeRetention: true });
         return completionRevoked(current.auditId, code);
       } catch {
-        try {
-          const current = await readActiveAuditJobForWorker({ sessionArea });
-          if (current?.auditId === active.auditId && current.state === 'running') {
-            await transitionConfirmed(current, 'revoked');
-            await invalidateConfirmed(current);
-            await cleanupActive(current, { removeRetention: true });
-          }
-          return completionRevoked(active.auditId, 'AUDIT_FAILED');
-        } catch {
-          return freeze({ ok: false, auditId: active.auditId, state: 'blocked', code: 'AUDIT_RECOVERY_REQUIRED' });
-        }
+        return freeze({ ok: false, auditId: active.auditId, state: 'blocked', code: 'AUDIT_RECOVERY_REQUIRED' });
       }
     }));
   }
 
   async function compensateStart(fact, journal, claimed) {
     try {
-      if (claimed?.sessionCapabilityId) {
-        const active = {
+      return await panelCoordinator.withWindowLock(fact.windowId, async () => {
+        const sessionCapabilityId = claimed?.sessionCapabilityId;
+        const currentActive = await readActiveAuditJobForWorker({ sessionArea });
+        if (currentActive && (currentActive.auditId !== journal.auditId ||
+          currentActive.capabilityId !== journal.capabilityId || currentActive.sessionCapabilityId !== sessionCapabilityId ||
+          currentActive.windowId !== fact.windowId)) return false;
+        const active = sessionCapabilityId ? (currentActive ?? {
           auditId: journal.auditId, capabilityId: journal.capabilityId,
-          sessionCapabilityId: claimed.sessionCapabilityId, windowId: fact.windowId,
+          sessionCapabilityId, windowId: fact.windowId,
+        }) : null;
+        const liveRecord = live.get(journal.auditId);
+        if (liveRecord && active && liveRecord.active.sessionCapabilityId === active.sessionCapabilityId) {
+          try { liveRecord.controller.abort(); } catch { /* durable compensation remains authoritative */ }
+        }
+        if (active) {
+          const latest = await readLatest();
+          const latestAuditId = latest === null || latest === undefined ? null : supportedLatestAuditId(latest);
+          if (latest !== null && latest !== undefined && latestAuditId === null) return false;
+          if (latestAuditId === null || latestAuditId === active.auditId) {
+            await persistExactLatest(latestState(active.auditId, 'AUDIT_FAILED', modelNow));
+          }
+          await transitionConfirmed(active, 'revoked');
+          if (await invalidateConfirmed(active) !== true) return false;
+          if (await panelCoordinator.disconnectSession({
+            auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId,
+            windowId: active.windowId, reasonCode: 'AUDIT_START_COMPENSATED',
+          }) !== true) return false;
+          const checkpoint = exact(await removeCheckpoint({
+            auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId, windowId: active.windowId,
+          }), ['removed']);
+          if (!checkpoint || typeof checkpoint.removed !== 'boolean') return false;
+        } else {
+          await authority.invalidateCapability(fact.capabilityId, 'AUDIT_START_COMPENSATED');
+          const correlation = await readAttachedAuditCorrelationForRecovery({
+            sessionArea, capabilityId: fact.capabilityId, auditId: journal.auditId,
+          });
+          if (correlation.targetState !== 'invalidated') return false;
+        }
+        const preferenceKey = retentionPreferenceStorageKey(journal.auditId);
+        const preferenceParser = value => {
+          const record = exact(value, ['version', 'auditId', 'deleteAfterCompleteExport', 'createdAt', 'expiresAt']);
+          return record && record.version === 1 && record.auditId === journal.auditId &&
+            record.deleteAfterCompleteExport === false ? freeze(record) : null;
         };
-        await authority.transitionAuditSession({
-          sessionCapabilityId: active.sessionCapabilityId, auditId: active.auditId, nextState: 'revoked',
-        });
-        const session = await readAuditSessionForWorker({
-          sessionArea, sessionCapabilityId: active.sessionCapabilityId, auditId: active.auditId,
-        });
-        if (session.state !== 'revoked') throw new Error('SESSION_TRANSITION_DENIED');
-        await panelCoordinator.disconnectSession({
-          auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId,
-          windowId: active.windowId, reasonCode: 'AUDIT_START_COMPENSATED',
-        });
-      }
-      await authority.invalidateCapability(fact.capabilityId, 'AUDIT_START_COMPENSATED');
-      const preferenceKey = retentionPreferenceStorageKey(journal.auditId);
-      const preferenceParser = value => {
-        const record = exact(value, ['version', 'auditId', 'deleteAfterCompleteExport', 'createdAt', 'expiresAt']);
-        return record && record.auditId === journal.auditId && record.deleteAfterCompleteExport === false ? freeze(record) : null;
-      };
-      await removeCorrelated(sessionArea, preferenceKey, preferenceParser, record => record.auditId === journal.auditId);
-      await removeCorrelated(sessionArea, START_JOURNAL_KEY, journalRecord,
-        current => current.auditId === journal.auditId && current.capabilityId === journal.capabilityId);
-      return true;
+        if (!await removeCorrelated(sessionArea, preferenceKey, preferenceParser,
+          record => record.auditId === journal.auditId)) return false;
+        if (!await removeCorrelated(sessionArea, START_JOURNAL_KEY, journalRecord,
+          current => current.auditId === journal.auditId && current.capabilityId === journal.capabilityId &&
+            current.windowId === fact.windowId)) return false;
+        if (currentActive && !await removeCorrelated(
+          sessionArea, ACTIVE_AUDIT_JOB_KEY, activeRecord,
+          current => current.auditId === currentActive.auditId && current.capabilityId === currentActive.capabilityId &&
+            current.sessionCapabilityId === currentActive.sessionCapabilityId && current.windowId === currentActive.windowId,
+        )) return false;
+        live.delete(journal.auditId);
+        return true;
+      });
     } catch { return false; }
   }
 
@@ -538,31 +631,41 @@ export function createAuthorizedAuditStarter(input) {
         if (!snapshot || snapshot.model !== undefined || snapshot.revision !== 0 || await readReportRevision({ auditId: args.auditId }) !== null) {
           return freeze({ response: { ok: false, code: 'AUDIT_ID_COLLISION' }, sessionCapabilityId: null, completion: null });
         }
-        fact = await readPreparedAttachedAuditFact({ sessionArea, capabilityId: args.capabilityId, epochNow });
+        try {
+          fact = await readPreparedAttachedAuditFact({ sessionArea, capabilityId: args.capabilityId, epochNow });
+        } catch { throw TARGET_UNAVAILABLE_SENTINEL; }
         return await panelCoordinator.withWindowLock(fact.windowId, async () => {
-          const confirmedFact = await readPreparedAttachedAuditFact({ sessionArea, capabilityId: args.capabilityId, epochNow });
-          if (confirmedFact.windowId !== fact.windowId) throw new Error('TARGET_UNAVAILABLE');
+          let confirmedFact;
+          try {
+            confirmedFact = await readPreparedAttachedAuditFact({ sessionArea, capabilityId: args.capabilityId, epochNow });
+          } catch { throw TARGET_UNAVAILABLE_SENTINEL; }
+          if (confirmedFact.windowId !== fact.windowId) throw TARGET_UNAVAILABLE_SENTINEL;
           const createdAt = safeEpoch(epochNow);
           journal = freeze({
             version: 1, capabilityId: args.capabilityId, auditId: args.auditId, windowId: fact.windowId,
             state: 'prepared', sessionCapabilityId: null, createdAt, updatedAt: createdAt,
           });
           await writeConfirmed(sessionArea, START_JOURNAL_KEY, journal, journalRecord, 'START_JOURNAL_DENIED');
-          claimed = args.eventNonce === null
-            ? await authority.claimAndIssueAuditSession({
-                capabilityId: args.capabilityId, auditId: args.auditId, mode: 'attached',
-                allowedIntent: 'start-audit', senderContext: args.senderContext,
-              })
-            : await authority.claimWorkerEventAndIssueAuditSession({
-                capabilityId: args.capabilityId, auditId: args.auditId, mode: 'attached',
-                allowedIntent: 'start-audit', eventNonce: args.eventNonce, senderContext: null,
-              });
-          if (claimed?.ok !== true || !CAPABILITY.test(claimed.sessionCapabilityId ?? '')) throw new Error('TARGET_UNAVAILABLE');
-          const grant = await readClaimedAttachedAuditGrant({
-            sessionArea, capabilityId: args.capabilityId, sessionCapabilityId: claimed.sessionCapabilityId,
-            auditId: args.auditId, epochNow,
-          });
-          if (grant.windowId !== fact.windowId) throw new Error('TARGET_UNAVAILABLE');
+          try {
+            claimed = args.eventNonce === null
+              ? await authority.claimAndIssueAuditSession({
+                  capabilityId: args.capabilityId, auditId: args.auditId, mode: 'attached',
+                  allowedIntent: 'start-audit', senderContext: args.senderContext,
+                })
+              : await authority.claimWorkerEventAndIssueAuditSession({
+                  capabilityId: args.capabilityId, auditId: args.auditId, mode: 'attached',
+                  allowedIntent: 'start-audit', eventNonce: args.eventNonce, senderContext: null,
+                });
+          } catch { throw TARGET_UNAVAILABLE_SENTINEL; }
+          if (claimed?.ok !== true || !CAPABILITY.test(claimed.sessionCapabilityId ?? '')) throw TARGET_UNAVAILABLE_SENTINEL;
+          let grant;
+          try {
+            grant = await readClaimedAttachedAuditGrant({
+              sessionArea, capabilityId: args.capabilityId, sessionCapabilityId: claimed.sessionCapabilityId,
+              auditId: args.auditId, epochNow,
+            });
+          } catch { throw TARGET_UNAVAILABLE_SENTINEL; }
+          if (grant.windowId !== fact.windowId) throw TARGET_UNAVAILABLE_SENTINEL;
           journal = freeze({ ...journal, state: 'claimed', sessionCapabilityId: claimed.sessionCapabilityId, updatedAt: safeEpoch(epochNow) });
           await writeConfirmed(sessionArea, START_JOURNAL_KEY, journal, journalRecord, 'START_JOURNAL_DENIED');
           const postGrant = safeEpoch(epochNow);
@@ -576,10 +679,11 @@ export function createAuthorizedAuditStarter(input) {
             return record && same(record, storedPreference) ? freeze(record) : null;
           };
           await writeConfirmed(sessionArea, retentionPreferenceStorageKey(args.auditId), storedPreference, preferenceParser, 'RETENTION_PREFERENCE_DENIED');
-          await panelCoordinator.publishRegisteredBootstrap({
+          const bootstrapPublished = await panelCoordinator.publishRegisteredBootstrap({
             auditId: args.auditId, sessionCapabilityId: claimed.sessionCapabilityId,
             windowId: fact.windowId, createdAt: postGrant, expiresAt: grant.expiresAt,
           });
+          if (bootstrapPublished !== true) throw new Error('AUDIT_START_FAILED');
           await persistExactLatest(latestState(args.auditId, 'running', modelNow));
           const controller = createAbortController();
           if (!controller || typeof controller.abort !== 'function' || !controller.signal) throw new Error('AUDIT_START_FAILED');
@@ -610,8 +714,7 @@ export function createAuthorizedAuditStarter(input) {
           const compensated = await compensateStart(fact, journal, claimed);
           if (!compensated) return freeze({ response: { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' }, sessionCapabilityId: null, completion: null });
         }
-        const code = error?.message === 'TARGET_UNAVAILABLE' || error?.message === 'PREPARED_AUDIT_FACT_DENIED'
-          ? 'TARGET_UNAVAILABLE' : 'AUDIT_START_FAILED';
+        const code = error === TARGET_UNAVAILABLE_SENTINEL ? 'TARGET_UNAVAILABLE' : 'AUDIT_START_FAILED';
         return freeze({ response: { ok: false, code }, sessionCapabilityId: null, completion: null });
       }
     });
@@ -674,9 +777,9 @@ export function createAuthorizedAuditStarter(input) {
 
   async function recoverInterrupted(active) {
     const latest = await readLatest();
-    const parsedLatest = latest === null || latest === undefined ? null : parseLatest(latest);
-    if (latest !== null && latest !== undefined && !parsedLatest) throw new Error('AUDIT_RECOVERY_REQUIRED');
-    if (!parsedLatest || parsedLatest.auditId === active.auditId) {
+    const latestAuditId = latest === null || latest === undefined ? null : supportedLatestAuditId(latest);
+    if (latest !== null && latest !== undefined && latestAuditId === null) throw new Error('AUDIT_RECOVERY_REQUIRED');
+    if (latestAuditId === null || latestAuditId === active.auditId) {
       await persistExactLatest(latestState(active.auditId, 'AUDIT_INTERRUPTED', modelNow));
     }
     const session = await readAuditSessionForWorker({
@@ -684,11 +787,12 @@ export function createAuthorizedAuditStarter(input) {
     });
     if (session.state === 'running') await transitionConfirmed(active, 'revoked');
     else if (session.state !== 'revoked') throw new Error('AUDIT_RECOVERY_REQUIRED');
-    await invalidateConfirmed(active);
-    await panelCoordinator.withWindowLock(active.windowId, () => panelCoordinator.disconnectSession({
+    if (await invalidateConfirmed(active) !== true) throw new Error('AUDIT_RECOVERY_REQUIRED');
+    const disconnected = await panelCoordinator.withWindowLock(active.windowId, () => panelCoordinator.disconnectSession({
       auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId,
       windowId: active.windowId, reasonCode: 'AUDIT_INTERRUPTED',
     }));
+    if (disconnected !== true) throw new Error('AUDIT_RECOVERY_REQUIRED');
     await cleanupActive(active, { removeRetention: true });
     return freeze({ ok: true, state: 'interrupted', auditId: active.auditId, revision: null });
   }
@@ -701,9 +805,9 @@ export function createAuthorizedAuditStarter(input) {
       report.modelRevision !== active.expectedTerminalRevision) return recoverInterrupted(active);
     const bundle = copyPanelResultBundleV1(await buildPanelResultBundle({ reportRevision: report }));
     const latest = await readLatest();
-    const parsedLatest = latest === null || latest === undefined ? null : parseLatest(latest);
-    if (latest !== null && latest !== undefined && !parsedLatest) throw new Error('AUDIT_RECOVERY_REQUIRED');
-    if (!parsedLatest || parsedLatest.auditId === active.auditId) {
+    const latestAuditId = latest === null || latest === undefined ? null : supportedLatestAuditId(latest);
+    if (latest !== null && latest !== undefined && latestAuditId === null) throw new Error('AUDIT_RECOVERY_REQUIRED');
+    if (latestAuditId === null || latestAuditId === active.auditId) {
       await persistExactLatest(latestState(active.auditId, candidate.model.session.status, modelNow));
     }
     const session = await readAuditSessionForWorker({
@@ -711,10 +815,11 @@ export function createAuthorizedAuditStarter(input) {
     });
     if (session.state === 'running') await transitionConfirmed(active, 'result');
     else if (session.state !== 'result') throw new Error('AUDIT_RECOVERY_REQUIRED');
-    await panelCoordinator.withWindowLock(active.windowId, () => panelCoordinator.publishResult({
+    const published = await panelCoordinator.withWindowLock(active.windowId, () => panelCoordinator.publishResult({
       auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId,
       windowId: active.windowId, state: 'result', resultBundle: bundle,
     }));
+    if (typeof published !== 'boolean') throw new Error('AUDIT_RECOVERY_REQUIRED');
     await cleanupActive(active);
     return freeze({ ok: true, state: 'reconciled', auditId: active.auditId, revision: 1 });
   }
@@ -729,8 +834,10 @@ export function createAuthorizedAuditStarter(input) {
           });
           const result = active.state === 'finalizing' ? await recoverFinalizing(active) : await recoverInterrupted(active);
           if (journal && journal.auditId === active.auditId && journal.capabilityId === active.capabilityId) {
-            await removeCorrelated(sessionArea, START_JOURNAL_KEY, journalRecord,
-              current => current.auditId === active.auditId && current.capabilityId === active.capabilityId);
+            if (!await removeCorrelated(sessionArea, START_JOURNAL_KEY, journalRecord,
+              current => current.auditId === active.auditId && current.capabilityId === active.capabilityId)) {
+              throw new Error('AUDIT_RECOVERY_REQUIRED');
+            }
           }
           return result;
         }
@@ -741,8 +848,14 @@ export function createAuthorizedAuditStarter(input) {
         if (correlation.windowId !== journal.windowId) throw new Error('AUDIT_RECOVERY_REQUIRED');
         if (correlation.targetState === 'prepared') {
           await authority.invalidateCapability(journal.capabilityId, 'AUDIT_START_INTERRUPTED');
-          await removeCorrelated(sessionArea, START_JOURNAL_KEY, journalRecord,
-            current => current.auditId === journal.auditId && current.capabilityId === journal.capabilityId);
+          const invalidated = await readAttachedAuditCorrelationForRecovery({
+            sessionArea, capabilityId: journal.capabilityId, auditId: journal.auditId,
+          });
+          if (invalidated.targetState !== 'invalidated' || !await removeCorrelated(
+            sessionArea, START_JOURNAL_KEY, journalRecord,
+            current => current.auditId === journal.auditId && current.capabilityId === journal.capabilityId &&
+              current.windowId === journal.windowId,
+          )) throw new Error('AUDIT_RECOVERY_REQUIRED');
           return freeze({ ok: true, state: 'interrupted', auditId: journal.auditId, revision: null });
         }
         if (!correlation.sessionCapabilityId) throw new Error('AUDIT_RECOVERY_REQUIRED');

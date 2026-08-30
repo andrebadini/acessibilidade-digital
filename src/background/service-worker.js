@@ -413,7 +413,8 @@ async function buildDefaultRuntime(chromeApi, options) {
     acknowledgeLegacyExportEvent: compatibilityAdapters.acknowledgeLegacyExportEvent,
   });
   const personaController = options.personaController ?? getPersonaController(chromeApi, { logger: options.logger });
-  await auditStarter.recoverAuthorizedAuditLifecycle();
+  const recovery = await auditStarter.recoverAuthorizedAuditLifecycle();
+  if (recovery?.ok !== true) throw new Error('WORKER_UNAVAILABLE');
   return {
     readyRuntime: copyReadyRuntime({ authority, auditStarter, chromeAdapter }),
     router, compatibilityHandler, panelCoordinator, personaController,

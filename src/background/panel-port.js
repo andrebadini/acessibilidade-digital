@@ -472,11 +472,19 @@ export function createPanelPortCoordinator(raw) {
   function disconnectSession(rawArgs) {
     const args = exact(rawArgs, ['auditId', 'sessionCapabilityId', 'windowId', 'reasonCode']);
     if (!args || !scoped(args.windowId) || typeof args.reasonCode !== 'string' || !args.reasonCode) return Promise.resolve(false);
-    const binding = liveByWindow.get(args.windowId);
-    if (!connected(binding) || binding.auditId !== args.auditId || binding.sessionCapabilityId !== args.sessionCapabilityId) {
-      return Promise.resolve(false);
-    }
-    return Promise.resolve(disconnect(binding));
+    return (async () => {
+      try {
+        const binding = liveByWindow.get(args.windowId);
+        if (connected(binding) && binding.auditId === args.auditId &&
+          binding.sessionCapabilityId === args.sessionCapabilityId) disconnect(binding);
+        const bootstrap = await readBootstrap(args.windowId);
+        if (bootstrap === null) return true;
+        if (bootstrap.auditId !== args.auditId || bootstrap.sessionCapabilityId !== args.sessionCapabilityId ||
+          bootstrap.windowId !== args.windowId) return false;
+        await input.sessionArea.remove(panelBootstrapStorageKey(args.windowId));
+        return await readBootstrap(args.windowId) === null;
+      } catch { return false; }
+    })();
   }
 
   return Object.freeze({
