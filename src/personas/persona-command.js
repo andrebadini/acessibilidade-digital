@@ -83,13 +83,116 @@ export function applyAuditaPersonaCommand(command, environment = globalThis) {
   function parseCommand(value) {
     var basic = ownDataRecord(value, ['version', 'op']);
     if (basic) {
-      if (basic.version !== 1 || !['probe', 'inspect', 'clear'].includes(basic.op)) return null;
+      if (basic.version !== 1 || !['probe', 'inspect', 'clear', 'reader-state'].includes(basic.op)) return null;
       return basic;
     }
-    var install = ownDataRecord(value, ['version', 'op', 'mode']);
-    if (!install || install.version !== 1 || install.op !== 'install' ||
-      !['reader', 'achromatopsia', 'motor'].includes(install.mode)) return null;
-    return install;
+    var three = ownDataRecord(value, ['version', 'op', 'mode']);
+    if (three && three.version === 1 && three.op === 'install' &&
+      ['reader', 'achromatopsia', 'motor'].includes(three.mode)) return three;
+    var action = ownDataRecord(value, ['version', 'op', 'action']);
+    if (action && action.version === 1 && action.op === 'reader-action' &&
+      ['previous', 'repeat', 'pause', 'resume', 'next', 'stop'].includes(action.action)) return action;
+    var voices = ownDataRecord(value, ['version', 'op', 'explicitUserGesture']);
+    if (voices && voices.version === 1 && voices.op === 'reader-voices' &&
+      typeof voices.explicitUserGesture === 'boolean') return voices;
+    var preferences = ownDataRecord(value, ['version', 'op', 'voiceId', 'rate']);
+    if (preferences && preferences.version === 1 && preferences.op === 'reader-preferences' &&
+      typeof preferences.voiceId === 'string' && preferences.voiceId.length >= 1 &&
+      preferences.voiceId.length <= 200 && preferences.voiceId === preferences.voiceId.trim() &&
+      !/[\u0000-\u001f\u007f]/u.test(preferences.voiceId) &&
+      typeof preferences.rate === 'number' && Number.isFinite(preferences.rate) &&
+      preferences.rate >= 0.5 && preferences.rate <= 2) return preferences;
+    return null;
+  }
+
+  function canonicalText(value, limit, allowEmpty) {
+    if (typeof value !== 'string' || /[\u0000-\u001f\u007f]/u.test(value)) return null;
+    var normalized = Array.from(value.replace(/\s+/gu, ' ').trim()).slice(0, limit).join('');
+    if ((!allowEmpty && !normalized) || normalized !== value) return null;
+    return normalized;
+  }
+
+  function projectReaderState(value) {
+    var rootState = ownDataRecord(value, ['activeMode', 'reader', 'limitations', 'coverage']);
+    var readerState = rootState && ownDataRecord(rootState.reader, [
+      'playback', 'index', 'total', 'caption', 'canPrevious', 'canNext',
+      'speechAvailability', 'voiceId', 'rate',
+    ]);
+    if (!rootState || rootState.activeMode !== 'reader' || !readerState ||
+      !['idle', 'playing', 'paused'].includes(readerState.playback) ||
+      !Number.isSafeInteger(readerState.index) || !Number.isSafeInteger(readerState.total) ||
+      readerState.total < 0 || readerState.total > 2000 ||
+      typeof readerState.canPrevious !== 'boolean' || typeof readerState.canNext !== 'boolean' ||
+      !['available', 'unavailable', 'busy', 'error'].includes(readerState.speechAvailability) ||
+      typeof readerState.rate !== 'number' || !Number.isFinite(readerState.rate) ||
+      readerState.rate < 0.5 || readerState.rate > 2) return null;
+    var caption = canonicalText(readerState.caption, 2048, true);
+    var voiceId = canonicalText(readerState.voiceId, 200, true);
+    if (caption === null || voiceId === null) return null;
+    if (readerState.playback === 'idle') {
+      if (readerState.index !== -1 || readerState.total !== 0 || caption !== '' ||
+        readerState.canPrevious || readerState.canNext) return null;
+    } else if (readerState.total < 1 || readerState.index < 0 || readerState.index >= readerState.total || !caption ||
+      readerState.canPrevious !== (readerState.index > 0) ||
+      readerState.canNext !== (readerState.index < readerState.total - 1)) return null;
+    return {
+      version: 1,
+      playback: readerState.playback,
+      index: readerState.index,
+      total: readerState.total,
+      caption: caption,
+      canPrevious: readerState.canPrevious,
+      canNext: readerState.canNext,
+      speechAvailability: readerState.speechAvailability,
+      voiceId: voiceId,
+      rate: readerState.rate,
+    };
+  }
+
+  function projectVoiceInventory(value) {
+    var inventory = ownDataRecord(value, ['status', 'voices']);
+    if (!inventory || !['available', 'unavailable', 'error'].includes(inventory.status) ||
+      !Array.isArray(inventory.voices)) return null;
+    if (inventory.status === 'error') return { status: 'error', voices: [] };
+    var length;
+    var keys;
+    try {
+      length = Object.getOwnPropertyDescriptor(inventory.voices, 'length')?.value;
+      keys = Reflect.ownKeys(inventory.voices);
+    } catch (_error) { return null; }
+    if (!Number.isSafeInteger(length) || length < 0 || length > 128 || keys.length !== length + 1) return null;
+    var voices = [];
+    var ids = new Set();
+    for (var position = 0; position < length; position += 1) {
+      var row = Object.getOwnPropertyDescriptor(inventory.voices, String(position));
+      var voice = row?.enumerable && Object.hasOwn(row, 'value')
+        ? ownDataRecord(row.value, ['id', 'label', 'lang'])
+        : null;
+      var id = voice && canonicalText(voice.id, 200, false);
+      var label = voice && canonicalText(voice.label, 200, false);
+      var lang = voice && canonicalText(voice.lang, 64, true);
+      if (!voice || id === null || label === null || lang === null || ids.has(id)) return null;
+      ids.add(id);
+      voices.push({ id: id, label: label, lang: lang });
+    }
+    if (inventory.status === 'unavailable' && voices.length !== 0) return null;
+    return { status: inventory.status, voices: voices };
+  }
+
+  function projectReaderActionOutcome(value) {
+    var outcome = ownDataRecord(value, ['actionStatus', 'state']);
+    if (!outcome || !['accepted', 'rejected', 'terminal'].includes(outcome.actionStatus)) return null;
+    var projectedState = projectReaderState(outcome.state);
+    return projectedState
+      ? { actionStatus: outcome.actionStatus, state: projectedState }
+      : null;
+  }
+
+  function sameReaderState(left, right) {
+    return Boolean(left && right && [
+      'version', 'playback', 'index', 'total', 'caption', 'canPrevious', 'canNext',
+      'speechAvailability', 'voiceId', 'rate',
+    ].every(function sameValue(key) { return left[key] === right[key]; }));
   }
 
   function namespaceObservation(holder) {
@@ -219,6 +322,53 @@ export function applyAuditaPersonaCommand(command, environment = globalThis) {
     }
 
     if (parsed.op === 'inspect') return { ok: true, mode: initial.mode };
+
+    if (parsed.op.startsWith('reader-')) {
+      if (initial.mode !== 'reader') return { ok: false, reason: 'reader-inactive' };
+      if (parsed.op === 'reader-voices') {
+        if (parsed.explicitUserGesture !== true) return { ok: false, reason: 'gesture-required' };
+        var listVoices = ownDataValue(runtime, 'listReaderVoices');
+        if (typeof listVoices !== 'function') return { ok: false, reason: 'runtime-error' };
+        var projectedInventory = projectVoiceInventory(listVoices.call(runtime));
+        if (!projectedInventory || projectedInventory.status === 'error') {
+          return { ok: false, reason: 'runtime-error' };
+        }
+        return {
+          ok: true,
+          kind: 'voices',
+          status: projectedInventory.status,
+          voices: projectedInventory.voices,
+        };
+      }
+      var projectedAction = null;
+      if (parsed.op === 'reader-action') {
+        var readerAction = ownDataValue(runtime, 'readerAction');
+        if (typeof readerAction !== 'function') return { ok: false, reason: 'runtime-error' };
+        projectedAction = projectReaderActionOutcome(readerAction.call(runtime, parsed.action));
+        if (!projectedAction) return { ok: false, reason: 'runtime-error' };
+      } else if (parsed.op === 'reader-preferences') {
+        var setPreferences = ownDataValue(runtime, 'setPreferences');
+        if (typeof setPreferences !== 'function') return { ok: false, reason: 'runtime-error' };
+        setPreferences.call(runtime, { voiceId: parsed.voiceId, rate: parsed.rate });
+      }
+      var projectedState = projectReaderState(ownDataValue(runtime, 'getState').call(runtime));
+      if (!projectedState) return { ok: false, reason: 'runtime-error' };
+      if (projectedAction && !sameReaderState(projectedAction.state, projectedState)) {
+        return { ok: false, reason: 'runtime-error' };
+      }
+      if (parsed.op === 'reader-preferences' &&
+        (projectedState.voiceId !== parsed.voiceId || projectedState.rate !== parsed.rate)) {
+        return { ok: false, reason: 'voice-unavailable' };
+      }
+      return projectedAction
+        ? {
+            ok: true,
+            kind: 'state',
+            actionStatus: projectedAction.actionStatus,
+            state: projectedState,
+          }
+        : { ok: true, kind: 'state', state: projectedState };
+    }
 
     ownDataValue(runtime, 'stop').call(runtime);
     var cleared = modeFromRuntime(runtime);

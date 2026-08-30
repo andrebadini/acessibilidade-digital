@@ -36,6 +36,56 @@ function runtimeFixture({ activeMode = null, stopLeavesMode = false } = {}) {
   return { runtime, calls, readMode: () => mode };
 }
 
+function readerRuntimeFixture({
+  voices = [{ id: 'local-a', label: 'Voz local', lang: 'pt-BR' }],
+  voiceStatus = 'available',
+  actionStatuses = [],
+} = {}) {
+  const calls = [];
+  let mode = 'reader';
+  let reader = {
+    playback: 'playing', index: 0, total: 2, caption: 'Primeiro, botão',
+    canPrevious: false, canNext: true, speechAvailability: 'available',
+    voiceId: 'local-a', rate: 1,
+  };
+  const snapshot = () => ({
+    activeMode: mode,
+    reader: structuredClone(reader),
+    limitations: [{ code: 'PRIVATE_INTERNAL_LIMITATION', count: 1 }],
+    coverage: 'PRIVATE_INTERNAL_COVERAGE',
+  });
+  const runtime = Object.freeze({
+    activate(nextMode) { calls.push(['activate', nextMode]); mode = nextMode; return snapshot(); },
+    stop() { calls.push(['persona-stop']); mode = null; return snapshot(); },
+    getState() { calls.push(['inspect']); return snapshot(); },
+    readerAction(action) {
+      calls.push(['reader-action', action]);
+      const actionStatus = actionStatuses.length ? actionStatuses.shift() : 'accepted';
+      if (actionStatus === 'accepted' && action === 'stop') reader = { ...reader, playback: 'idle', index: -1, total: 0, caption: '', canPrevious: false, canNext: false };
+      if (actionStatus === 'accepted' && action === 'resume' && reader.playback === 'idle') reader = { ...reader, playback: 'playing', index: 0, total: 2, caption: 'Primeiro, botão', canNext: true };
+      if (actionStatus === 'accepted' && action === 'pause' && reader.playback === 'playing') reader = { ...reader, playback: 'paused' };
+      if (actionStatus === 'accepted' && action === 'next' && reader.index === 0) reader = { ...reader, index: 1, caption: 'Segundo, link', canPrevious: true, canNext: false };
+      if (actionStatus === 'terminal') reader = { ...reader, speechAvailability: 'error' };
+      return {
+        actionStatus,
+        state: snapshot(),
+      };
+    },
+    setPreferences(preferences) {
+      calls.push(['reader-preferences', structuredClone(preferences)]);
+      if (voices.some(voice => voice.id === preferences.voiceId)) {
+        reader = { ...reader, voiceId: preferences.voiceId, rate: preferences.rate };
+      }
+      return snapshot();
+    },
+    listReaderVoices() {
+      calls.push(['reader-voices']);
+      return { status: voiceStatus, voices: structuredClone(voices) };
+    },
+  });
+  return { runtime, calls, state: () => snapshot() };
+}
+
 function environmentFixture(options = {}) {
   let singleton = options.singleton ?? null;
   const created = [];
@@ -224,4 +274,126 @@ test('runtime exceptions and malformed singleton state never escape the local br
   assert.deepEqual(apply({ version: 1, op: 'inspect' }, environment), {
     ok: false, reason: 'runtime-error',
   });
+});
+
+test('reader state returns only a bounded closed projection and never internal runtime details', () => {
+  const current = readerRuntimeFixture();
+  const { environment } = environmentFixture({ singleton: current.runtime });
+
+  const result = apply({ version: 1, op: 'reader-state' }, environment);
+
+  assert.deepEqual(result, {
+    ok: true,
+    kind: 'state',
+    state: {
+      version: 1,
+      playback: 'playing', index: 0, total: 2, caption: 'Primeiro, botão',
+      canPrevious: false, canNext: true, speechAvailability: 'available',
+      voiceId: 'local-a', rate: 1,
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_INTERNAL/u);
+});
+
+test('reader stop and resume affect playback without invoking the persona stop operation', () => {
+  const current = readerRuntimeFixture();
+  const { environment } = environmentFixture({ singleton: current.runtime });
+
+  const stopped = apply({ version: 1, op: 'reader-action', action: 'stop' }, environment);
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.actionStatus, 'accepted');
+  assert.equal(stopped.state.playback, 'idle');
+  assert.equal(stopped.state.caption, '');
+  assert.equal(current.state().activeMode, 'reader');
+  assert.equal(current.calls.some(call => call[0] === 'persona-stop'), false);
+
+  const resumed = apply({ version: 1, op: 'reader-action', action: 'resume' }, environment);
+  assert.equal(resumed.ok, true);
+  assert.equal(resumed.actionStatus, 'accepted');
+  assert.equal(resumed.state.playback, 'playing');
+  assert.equal(resumed.state.caption, 'Primeiro, botão');
+  assert.equal(current.state().activeMode, 'reader');
+});
+
+test('reader action bridge preserves and validates the closed internal disposition', () => {
+  const current = readerRuntimeFixture({
+    actionStatuses: ['rejected', 'terminal', 'unknown'],
+  });
+  const { environment } = environmentFixture({ singleton: current.runtime });
+
+  assert.equal(apply({
+    version: 1, op: 'reader-action', action: 'next',
+  }, environment).actionStatus, 'rejected');
+  assert.equal(apply({
+    version: 1, op: 'reader-action', action: 'next',
+  }, environment).actionStatus, 'terminal');
+  assert.deepEqual(apply({
+    version: 1, op: 'reader-action', action: 'next',
+  }, environment), { ok: false, reason: 'runtime-error' });
+});
+
+test('reader voice inventory requires an explicit gesture and exposes only id label and language', () => {
+  const current = readerRuntimeFixture({ voices: [
+    { id: 'local-a', label: 'Voz local', lang: 'pt-BR' },
+    { id: 'local-en', label: 'Local English', lang: 'en-US' },
+  ] });
+  const { environment } = environmentFixture({ singleton: current.runtime });
+
+  assert.deepEqual(apply({
+    version: 1, op: 'reader-voices', explicitUserGesture: false,
+  }, environment), { ok: false, reason: 'gesture-required' });
+  assert.equal(current.calls.some(call => call[0] === 'reader-voices'), false);
+
+  assert.deepEqual(apply({
+    version: 1, op: 'reader-voices', explicitUserGesture: true,
+  }, environment), {
+    ok: true,
+    kind: 'voices',
+    status: 'available',
+    voices: [
+      { id: 'local-a', label: 'Voz local', lang: 'pt-BR' },
+      { id: 'local-en', label: 'Local English', lang: 'en-US' },
+    ],
+  });
+});
+
+test('reader voice inventory preserves unavailable and fails closed on enumeration error', () => {
+  const unavailable = readerRuntimeFixture({ voices: [], voiceStatus: 'unavailable' });
+  assert.deepEqual(apply({
+    version: 1, op: 'reader-voices', explicitUserGesture: true,
+  }, environmentFixture({ singleton: unavailable.runtime }).environment), {
+    ok: true,
+    kind: 'voices',
+    status: 'unavailable',
+    voices: [],
+  });
+
+  const failed = readerRuntimeFixture({ voices: [], voiceStatus: 'error' });
+  assert.deepEqual(apply({
+    version: 1, op: 'reader-voices', explicitUserGesture: true,
+  }, environmentFixture({ singleton: failed.runtime }).environment), {
+    ok: false,
+    reason: 'runtime-error',
+  });
+});
+
+test('reader preferences accept only an exact local voice and a numeric rate from 0.5 through 2', () => {
+  const current = readerRuntimeFixture();
+  const { environment } = environmentFixture({ singleton: current.runtime });
+  assert.deepEqual(apply({
+    version: 1, op: 'reader-preferences', voiceId: 'local-a', rate: 1.75,
+  }, environment).state.voiceId, 'local-a');
+  assert.equal(current.state().reader.rate, 1.75);
+
+  assert.deepEqual(apply({
+    version: 1, op: 'reader-preferences', voiceId: 'remote-cloud', rate: 1.5,
+  }, environment), { ok: false, reason: 'voice-unavailable' });
+  assert.equal(current.state().reader.voiceId, 'local-a');
+  assert.equal(current.state().reader.rate, 1.75);
+
+  for (const rate of [0.49, 2.01, NaN, '1']) {
+    assert.deepEqual(apply({
+      version: 1, op: 'reader-preferences', voiceId: 'local-a', rate,
+    }, environment), { ok: false, reason: 'invalid-command' });
+  }
 });

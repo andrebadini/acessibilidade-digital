@@ -2,6 +2,11 @@ const TARGET_KEYS = ['tabId', 'windowId', 'documentId', 'urlSessionDigest'];
 const CONSUMER_KEYS = ['extensionId', 'documentId', 'path', 'windowId'];
 const MODES = new Set(['reader', 'achromatopsia', 'motor']);
 const LEASE_ID = /^lease-[A-Za-z0-9_-]{22}$/u;
+const READER_ACTIONS = new Set(['previous', 'repeat', 'pause', 'resume', 'next', 'stop']);
+const READER_STATE_KEYS = [
+  'version', 'playback', 'index', 'total', 'caption', 'canPrevious', 'canNext',
+  'speechAvailability', 'voiceId', 'rate',
+];
 
 function ownRecord(value, keys) {
   try {
@@ -54,6 +59,186 @@ function activeLeases(snapshot) {
   return Object.values(snapshot.leases).filter(lease => lease?.state !== 'revoked');
 }
 
+function canonicalText(value, limit, allowEmpty) {
+  if (typeof value !== 'string' || /[\u0000-\u001F\u007F]/u.test(value)) return null;
+  const normalized = Array.from(value.replace(/\s+/gu, ' ').trim()).slice(0, limit).join('');
+  return (allowEmpty || normalized) && normalized === value ? normalized : null;
+}
+
+function validConsumer(value) {
+  const parsed = ownRecord(value, CONSUMER_KEYS);
+  return parsed && typeof parsed.extensionId === 'string' && parsed.extensionId.length >= 1 &&
+    parsed.extensionId.length <= 128 && /^[A-Za-z0-9_-]+$/u.test(parsed.extensionId) &&
+    canonicalText(parsed.documentId, 512, false) !== null &&
+    typeof parsed.path === 'string' && parsed.path.length >= 1 && parsed.path.length <= 512 &&
+    parsed.path.startsWith('/') && !parsed.path.includes('?') && !parsed.path.includes('#') &&
+    !/[\u0000-\u001F\u007F]/u.test(parsed.path) &&
+    Number.isSafeInteger(parsed.windowId) && parsed.windowId >= 0
+    ? Object.freeze({
+        extensionId: parsed.extensionId,
+        documentId: parsed.documentId,
+        path: parsed.path,
+        windowId: parsed.windowId,
+      })
+    : null;
+}
+
+function parseReaderCommand(value) {
+  const basic = ownRecord(value, ['version', 'op']);
+  if (basic && basic.version === 1 && basic.op === 'state') {
+    return Object.freeze({ version: 1, op: 'state' });
+  }
+  const action = ownRecord(value, ['version', 'op', 'action']);
+  if (action && action.version === 1 && action.op === 'action' && READER_ACTIONS.has(action.action)) {
+    return Object.freeze({ version: 1, op: 'action', action: action.action });
+  }
+  const voices = ownRecord(value, ['version', 'op', 'explicitUserGesture']);
+  if (voices && voices.version === 1 && voices.op === 'voices' &&
+    typeof voices.explicitUserGesture === 'boolean') {
+    return Object.freeze({
+      version: 1,
+      op: 'voices',
+      explicitUserGesture: voices.explicitUserGesture,
+    });
+  }
+  const preferences = ownRecord(value, ['version', 'op', 'voiceId', 'rate']);
+  const voiceId = preferences && canonicalText(preferences.voiceId, 200, false);
+  if (preferences && preferences.version === 1 && preferences.op === 'preferences' &&
+    voiceId !== null && typeof preferences.rate === 'number' && Number.isFinite(preferences.rate) &&
+    preferences.rate >= 0.5 && preferences.rate <= 2) {
+    return Object.freeze({
+      version: 1,
+      op: 'preferences',
+      voiceId,
+      rate: preferences.rate,
+    });
+  }
+  return null;
+}
+
+function parseReaderRequest(value) {
+  const request = ownRecord(value, ['leaseId', 'consumer', 'command']);
+  if (!request || !LEASE_ID.test(request.leaseId ?? '')) return null;
+  const consumer = validConsumer(request.consumer);
+  const command = parseReaderCommand(request.command);
+  return consumer && command
+    ? Object.freeze({ leaseId: request.leaseId, consumer, command })
+    : null;
+}
+
+function projectReaderState(value) {
+  const state = ownRecord(value, READER_STATE_KEYS);
+  if (!state || state.version !== 1 || !['idle', 'playing', 'paused'].includes(state.playback) ||
+    !Number.isSafeInteger(state.index) || !Number.isSafeInteger(state.total) ||
+    state.total < 0 || state.total > 2000 || typeof state.canPrevious !== 'boolean' ||
+    typeof state.canNext !== 'boolean' ||
+    !['available', 'unavailable', 'busy', 'error'].includes(state.speechAvailability) ||
+    typeof state.rate !== 'number' || !Number.isFinite(state.rate) ||
+    state.rate < 0.5 || state.rate > 2) return null;
+  const caption = canonicalText(state.caption, 2048, true);
+  const voiceId = canonicalText(state.voiceId, 200, true);
+  if (caption === null || voiceId === null) return null;
+  if (state.playback === 'idle') {
+    if (state.index !== -1 || state.total !== 0 || caption !== '' ||
+      state.canPrevious || state.canNext) return null;
+  } else if (state.total < 1 || state.index < 0 || state.index >= state.total || !caption ||
+    state.canPrevious !== (state.index > 0) ||
+    state.canNext !== (state.index < state.total - 1)) return null;
+  return Object.freeze({
+    version: 1,
+    playback: state.playback,
+    index: state.index,
+    total: state.total,
+    caption,
+    canPrevious: state.canPrevious,
+    canNext: state.canNext,
+    speechAvailability: state.speechAvailability,
+    voiceId,
+    rate: state.rate,
+  });
+}
+
+function projectReaderVoices(value) {
+  if (!Array.isArray(value)) return null;
+  let length;
+  let keys;
+  try {
+    length = Object.getOwnPropertyDescriptor(value, 'length')?.value;
+    keys = Reflect.ownKeys(value);
+  } catch { return null; }
+  if (!Number.isSafeInteger(length) || length < 0 || length > 128 || keys.length !== length + 1) {
+    return null;
+  }
+  const ids = new Set();
+  const voices = [];
+  for (let index = 0; index < length; index += 1) {
+    let voice;
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      voice = descriptor?.enumerable && Object.hasOwn(descriptor, 'value')
+        ? ownRecord(descriptor.value, ['id', 'label', 'lang'])
+        : null;
+    } catch { return null; }
+    const id = voice && canonicalText(voice.id, 200, false);
+    const label = voice && canonicalText(voice.label, 200, false);
+    const lang = voice && canonicalText(voice.lang, 64, true);
+    if (!voice || id === null || label === null || lang === null || ids.has(id)) return null;
+    ids.add(id);
+    voices.push(Object.freeze({ id, label, lang }));
+  }
+  return Object.freeze(voices);
+}
+
+function parseReaderRuntimeResult(value, target, command) {
+  const failed = ownRecord(value, ['ok', 'reason']);
+  if (failed && failed.ok === false && [
+    'document-missing', 'result-mismatch', 'runtime-error', 'reader-inactive',
+    'gesture-required', 'voice-unavailable',
+  ].includes(failed.reason)) return Object.freeze({ ok: false, reason: failed.reason });
+
+  const actionResult = ownRecord(value, [
+    'ok', 'documentId', 'frameId', 'kind', 'actionStatus', 'state',
+  ]);
+  if (actionResult && actionResult.ok === true && actionResult.documentId === target.documentId &&
+    actionResult.frameId === 0 && actionResult.kind === 'state' && command.op === 'action' &&
+    ['accepted', 'rejected', 'terminal'].includes(actionResult.actionStatus)) {
+    const state = projectReaderState(actionResult.state);
+    return state ? Object.freeze({
+      ok: true,
+      kind: 'state',
+      actionStatus: actionResult.actionStatus,
+      state,
+    }) : null;
+  }
+
+  const stateResult = ownRecord(value, ['ok', 'documentId', 'frameId', 'kind', 'state']);
+  if (stateResult && stateResult.ok === true && stateResult.documentId === target.documentId &&
+    stateResult.frameId === 0 && stateResult.kind === 'state' &&
+    ['state', 'preferences'].includes(command.op)) {
+    const state = projectReaderState(stateResult.state);
+    if (!state || (command.op === 'preferences' &&
+      (state.voiceId !== command.voiceId || state.rate !== command.rate))) return null;
+    return Object.freeze({ ok: true, kind: 'state', state });
+  }
+
+  const voicesResult = ownRecord(value, [
+    'ok', 'documentId', 'frameId', 'kind', 'status', 'voices',
+  ]);
+  if (voicesResult && voicesResult.ok === true && voicesResult.documentId === target.documentId &&
+    voicesResult.frameId === 0 && voicesResult.kind === 'voices' && command.op === 'voices' &&
+    ['available', 'unavailable'].includes(voicesResult.status)) {
+    const voices = projectReaderVoices(voicesResult.voices);
+    if (!voices || (voicesResult.status === 'unavailable' && voices.length !== 0)) return null;
+    return Object.freeze({
+      ok: true,
+      kind: 'voices',
+      status: voicesResult.status,
+      voices,
+    });
+  }
+  return null;
+}
+
 export function createPersonaCoordinator({
   leaseStore,
   targetQueue,
@@ -62,14 +247,14 @@ export function createPersonaCoordinator({
   scheduleExpiry,
 } = {}) {
   const storeMethods = [
-    'claimPrepared', 'activate', 'beginSetMode', 'commitSetMode', 'rollbackSetMode',
+    'claimPrepared', 'activate', 'beginSetMode', 'commitSetMode', 'renewExplicitAction', 'rollbackSetMode',
     'beginStop', 'completeStop', 'rehydrate', 'revoke', 'findOwner', 'snapshot',
     'listRecoverable', 'listExpired', 'prepareInvalidRegistryRecovery',
     'finalizeInvalidRegistryRecovery',
   ];
   if (!leaseStore || storeMethods.some(name => typeof leaseStore[name] !== 'function') ||
     !targetQueue || typeof targetQueue.withTarget !== 'function' || typeof targetQueue.assertHeld !== 'function' ||
-    !personaRuntime || typeof personaRuntime.apply !== 'function' ||
+    !personaRuntime || typeof personaRuntime.apply !== 'function' || typeof personaRuntime.reader !== 'function' ||
     typeof probeDocument !== 'function' || typeof scheduleExpiry !== 'function') {
     throw new TypeError('PERSONA_COORDINATOR_INVALID');
   }
@@ -237,6 +422,14 @@ export function createPersonaCoordinator({
     }
   }
 
+  async function compensateReaderFailure({ target, reason, code, lock }) {
+    const revoked = await revokeAfterLiveFailure({ target, reason, lock });
+    if (revoked.ok) return failure(code);
+    return revoked.code === 'PERSONA_CLEANUP_UNCONFIRMED'
+      ? failure('PERSONA_CLEANUP_UNCONFIRMED')
+      : failure('PERSONA_STATE_FAILED');
+  }
+
   async function expireRejectedLiveLease({ rejected, target, lock }) {
     if (rejected?.code !== 'PERSONA_EXPIRED') return storeFailure(rejected);
     const revoked = await revokeAfterLiveFailure({ target, reason: 'expired', lock });
@@ -384,6 +577,176 @@ export function createPersonaCoordinator({
     return finish(() => setModeCore(args));
   }
 
+  async function readerCommandCore({ leaseId, consumer, command }) {
+    const initial = await leaseById(leaseId);
+    if (!initial) return failure('PERSONA_NOT_FOUND');
+    if (!sameConsumer(initial.consumer, consumer)) return failure('PERSONA_CONSUMER_MISMATCH');
+    const target = initial.target;
+    return targetQueue.withTarget(target, async lock => {
+      targetQueue.assertHeld(lock, target);
+      let owner;
+      try { owner = await currentOwner(target, leaseId); }
+      catch {
+        return compensateReaderFailure({
+          target, reason: 'runtime-failure', code: 'PERSONA_STATE_FAILED', lock,
+        });
+      }
+      if (!owner) return failure('PERSONA_NOT_FOUND');
+      if (!sameConsumer(owner.consumer, consumer)) return failure('PERSONA_CONSUMER_MISMATCH');
+      if (owner.state !== 'active' || owner.pendingMode !== null) {
+        return compensateReaderFailure({
+          target, reason: 'runtime-failure', code: 'PERSONA_STATE_FAILED', lock,
+        });
+      }
+      if (owner.activeMode !== 'reader') return failure('PERSONA_READER_INACTIVE');
+
+      let expired;
+      try { expired = (await expiredLeaseIds()).has(leaseId); }
+      catch {
+        return compensateReaderFailure({
+          target, reason: 'runtime-failure', code: 'PERSONA_STATE_FAILED', lock,
+        });
+      }
+      if (expired) {
+        return compensateReaderFailure({
+          target, reason: 'expired', code: 'PERSONA_EXPIRED', lock,
+        });
+      }
+      if (!await liveTargetMatches(target)) {
+        return compensateReaderFailure({
+          target, reason: 'navigation', code: 'PERSONA_TARGET_CHANGED', lock,
+        });
+      }
+      if (command.op === 'voices' && command.explicitUserGesture !== true) {
+        return failure('PERSONA_READER_GESTURE_REQUIRED');
+      }
+
+      let rawResult;
+      try { rawResult = await personaRuntime.reader({ target, command }); }
+      catch { rawResult = null; }
+
+      if (command.op === 'state') {
+        try { expired = (await expiredLeaseIds()).has(leaseId); }
+        catch {
+          return compensateReaderFailure({
+            target, reason: 'runtime-failure', code: 'PERSONA_STATE_FAILED', lock,
+          });
+        }
+        if (expired) {
+          return compensateReaderFailure({
+            target, reason: 'expired', code: 'PERSONA_EXPIRED', lock,
+          });
+        }
+      }
+      if (!await liveTargetMatches(target)) {
+        return compensateReaderFailure({
+          target, reason: 'navigation', code: 'PERSONA_TARGET_CHANGED', lock,
+        });
+      }
+
+      let current;
+      try { current = await currentOwner(target, leaseId); }
+      catch {
+        return compensateReaderFailure({
+          target, reason: 'runtime-failure', code: 'PERSONA_STATE_FAILED', lock,
+        });
+      }
+      if (!current || !sameConsumer(current.consumer, consumer) || current.state !== 'active' ||
+        current.activeMode !== 'reader' || current.pendingMode !== null || current.revision !== owner.revision) {
+        return compensateReaderFailure({
+          target, reason: 'runtime-failure', code: 'PERSONA_STATE_FAILED', lock,
+        });
+      }
+
+      const result = parseReaderRuntimeResult(rawResult, target, command);
+      if (result?.ok && result.kind === 'state' && command.op === 'action') {
+        if (result.actionStatus === 'rejected') {
+          return failure('PERSONA_READER_ACTION_REJECTED');
+        }
+        if (result.actionStatus === 'terminal') {
+          return compensateReaderFailure({
+            target,
+            reason: 'runtime-failure',
+            code: 'PERSONA_READER_ACTION_TERMINAL',
+            lock,
+          });
+        }
+      }
+      let publicResult = null;
+      if (result?.ok) {
+        publicResult = result.kind === 'state'
+          ? Object.freeze({ ok: true, kind: 'state', state: result.state })
+          : Object.freeze({
+              ok: true,
+              kind: 'voices',
+              status: result.status,
+              voices: result.voices,
+            });
+      } else if (result?.reason === 'gesture-required') {
+        publicResult = failure('PERSONA_READER_GESTURE_REQUIRED');
+      } else if (result?.reason === 'voice-unavailable') {
+        publicResult = failure('PERSONA_READER_VOICE_UNAVAILABLE');
+      }
+      if (publicResult?.ok === false) return publicResult;
+      if (publicResult && command.op === 'state') return publicResult;
+      if (publicResult) {
+        let renewed;
+        try {
+          renewed = await leaseStore.renewExplicitAction({
+            leaseId,
+            consumer,
+            expectedRevision: owner.revision,
+          });
+        } catch { renewed = null; }
+        if (!renewed?.ok || !renewed.lease || renewed.lease.leaseId !== leaseId ||
+          renewed.lease.state !== 'active' || renewed.lease.activeMode !== 'reader' ||
+          renewed.lease.pendingMode !== null || renewed.lease.revision !== owner.revision + 1 ||
+          !sameTarget(renewed.lease.target, target) || !sameConsumer(renewed.lease.consumer, consumer)) {
+          return compensateReaderFailure({
+            target, reason: 'runtime-failure', code: 'PERSONA_STATE_FAILED', lock,
+          });
+        }
+        if (!await liveTargetMatches(target)) {
+          return compensateReaderFailure({
+            target, reason: 'navigation', code: 'PERSONA_TARGET_CHANGED', lock,
+          });
+        }
+        let renewedOwner;
+        try { renewedOwner = await currentOwner(target, leaseId); }
+        catch { renewedOwner = null; }
+        if (!renewedOwner || renewedOwner.revision !== renewed.lease.revision ||
+          renewedOwner.state !== 'active' || renewedOwner.activeMode !== 'reader' ||
+          renewedOwner.pendingMode !== null || !sameConsumer(renewedOwner.consumer, consumer)) {
+          return compensateReaderFailure({
+            target, reason: 'runtime-failure', code: 'PERSONA_STATE_FAILED', lock,
+          });
+        }
+        return publicResult;
+      }
+      if (result?.reason === 'reader-inactive') {
+        return compensateReaderFailure({
+          target, reason: 'runtime-failure', code: 'PERSONA_READER_INACTIVE', lock,
+        });
+      }
+      if (result?.reason === 'document-missing') {
+        return compensateReaderFailure({
+          target, reason: 'navigation', code: 'PERSONA_TARGET_CHANGED', lock,
+        });
+      }
+      return compensateReaderFailure({
+        target, reason: 'runtime-failure', code: 'PERSONA_READER_RUNTIME_FAILED', lock,
+      });
+    });
+  }
+
+  function readerCommand(value) {
+    return finish(() => {
+      const input = parseReaderRequest(value);
+      if (!input) throw new TypeError('PERSONA_INPUT_INVALID');
+      return readerCommandCore(input);
+    });
+  }
+
   async function stopCore({ leaseId, consumer, explicit }) {
     if (explicit !== true) throw new TypeError('PERSONA_INPUT_INVALID');
     const initial = await leaseById(leaseId);
@@ -399,13 +762,17 @@ export function createPersonaCoordinator({
         return revoked.ok ? failure('PERSONA_TARGET_CHANGED') : failure('PERSONA_CLEANUP_UNCONFIRMED');
       }
       let stopping;
-      try {
-        stopping = await leaseStore.beginStop({ leaseId, consumer, explicit: true });
-      } catch {
-        const revoked = await revokeAfterLiveFailure({ target, reason: 'runtime-failure', lock });
-        return revoked.ok || revoked.code === 'PERSONA_STATE_FAILED'
-          ? failure('PERSONA_STATE_FAILED')
-          : failure('PERSONA_CLEANUP_UNCONFIRMED');
+      if (owner.state === 'stopping' && owner.pendingMode === null) {
+        stopping = { ok: true, lease: owner };
+      } else {
+        try {
+          stopping = await leaseStore.beginStop({ leaseId, consumer, explicit: true });
+        } catch {
+          const revoked = await revokeAfterLiveFailure({ target, reason: 'runtime-failure', lock });
+          return revoked.ok || revoked.code === 'PERSONA_STATE_FAILED'
+            ? failure('PERSONA_STATE_FAILED')
+            : failure('PERSONA_CLEANUP_UNCONFIRMED');
+        }
       }
       if (!stopping.ok) return expireRejectedLiveLease({ rejected: stopping, target, lock });
       let cleared = await clearTarget(target);
@@ -615,6 +982,7 @@ export function createPersonaCoordinator({
   return Object.freeze({
     claimLocked,
     setMode,
+    readerCommand,
     stop,
     rehydrateLocked,
     revokeTargetLocked,

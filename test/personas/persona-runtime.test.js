@@ -211,3 +211,236 @@ test('validates the closed apply schema without reading target accessors', async
   );
   assert.equal(reads, 0);
 });
+
+test('reader state probes and commands only the exact leased document with a closed result', async () => {
+  const state = {
+    version: 1,
+    playback: 'playing',
+    index: 0,
+    total: 2,
+    caption: 'Início, título nível 1',
+    canPrevious: false,
+    canNext: true,
+    speechAvailability: 'available',
+    voiceId: 'local-a',
+    rate: 1.25,
+  };
+  const fixture = createRuntime({ results: [
+    injection({ ok: true, present: true, mode: 'reader' }),
+    injection({ ok: true, kind: 'state', state }),
+  ] });
+
+  assert.deepEqual(await fixture.runtime.reader({
+    target,
+    command: { version: 1, op: 'state' },
+  }), {
+    ok: true,
+    documentId: target.documentId,
+    frameId: 0,
+    kind: 'state',
+    state,
+  });
+  assert.equal(fixture.calls.length, 2);
+  for (const [, details] of fixture.calls) {
+    assert.deepEqual(details.target, { tabId: 7, documentIds: ['document-main'] });
+    assert.equal(Object.hasOwn(details.target, 'frameIds'), false);
+    assert.equal(details.world, 'ISOLATED');
+  }
+  assert.deepEqual(fixture.calls[1][1].args, [{ version: 1, op: 'reader-state' }]);
+});
+
+test('reader actions and preferences use the dedicated bridge without invoking persona clear', async () => {
+  const idle = {
+    version: 1,
+    playback: 'idle',
+    index: -1,
+    total: 0,
+    caption: '',
+    canPrevious: false,
+    canNext: false,
+    speechAvailability: 'available',
+    voiceId: 'local-a',
+    rate: 1.5,
+  };
+  for (const [command, expectedBridge, actionStatus] of [
+    [
+      { version: 1, op: 'action', action: 'stop' },
+      { version: 1, op: 'reader-action', action: 'stop' },
+      'accepted',
+    ],
+    [
+      { version: 1, op: 'preferences', voiceId: 'local-a', rate: 1.5 },
+      { version: 1, op: 'reader-preferences', voiceId: 'local-a', rate: 1.5 },
+    ],
+  ]) {
+    const fixture = createRuntime({ results: [
+      injection({ ok: true, present: true, mode: 'reader' }),
+      injection({
+        ok: true,
+        kind: 'state',
+        ...(actionStatus ? { actionStatus } : {}),
+        state: idle,
+      }),
+    ] });
+    const result = await fixture.runtime.reader({ target, command });
+    assert.equal(result.ok, true);
+    assert.equal(result.kind, 'state');
+    assert.equal(result.actionStatus, actionStatus);
+    assert.deepEqual(fixture.calls[1][1].args, [expectedBridge]);
+    assert.equal(fixture.calls.some(call => call[0] === 'removeCSS'), false);
+  }
+});
+
+test('reader runtime preserves only exact closed action dispositions', async () => {
+  for (const actionStatus of ['rejected', 'terminal']) {
+    const fixture = createRuntime({ results: [
+      injection({ ok: true, present: true, mode: 'reader' }),
+      injection({ ok: true, kind: 'state', actionStatus, state: {
+        version: 1,
+        playback: 'playing', index: 0, total: 1, caption: 'Único, botão',
+        canPrevious: false, canNext: false, speechAvailability: 'error',
+        voiceId: 'local-a', rate: 1,
+      } }),
+    ] });
+    assert.equal((await fixture.runtime.reader({
+      target,
+      command: { version: 1, op: 'action', action: 'next' },
+    })).actionStatus, actionStatus);
+  }
+
+  for (const malformed of [
+    { ok: true, kind: 'state', state: {
+      version: 1, playback: 'playing', index: 0, total: 1, caption: 'Único, botão',
+      canPrevious: false, canNext: false, speechAvailability: 'available',
+      voiceId: 'local-a', rate: 1,
+    } },
+    { ok: true, kind: 'state', actionStatus: 'unknown', state: {
+      version: 1, playback: 'playing', index: 0, total: 1, caption: 'Único, botão',
+      canPrevious: false, canNext: false, speechAvailability: 'available',
+      voiceId: 'local-a', rate: 1,
+    } },
+  ]) {
+    const fixture = createRuntime({ results: [
+      injection({ ok: true, present: true, mode: 'reader' }),
+      injection(malformed),
+    ] });
+    assert.deepEqual(await fixture.runtime.reader({
+      target,
+      command: { version: 1, op: 'action', action: 'next' },
+    }), { ok: false, reason: 'result-mismatch' });
+  }
+});
+
+test('reader voice inventory requires an explicit gesture and returns only minimal local metadata', async () => {
+  const noGesture = createRuntime();
+  assert.deepEqual(await noGesture.runtime.reader({
+    target,
+    command: { version: 1, op: 'voices', explicitUserGesture: false },
+  }), { ok: false, reason: 'gesture-required' });
+  assert.deepEqual(noGesture.calls, []);
+
+  const voices = [
+    { id: 'local-a', label: 'Voz local A', lang: 'pt-BR' },
+    { id: 'local-b', label: 'Voz local B', lang: '' },
+  ];
+  const fixture = createRuntime({ results: [
+    injection({ ok: true, present: true, mode: 'reader' }),
+    injection({ ok: true, kind: 'voices', status: 'available', voices }),
+  ] });
+  assert.deepEqual(await fixture.runtime.reader({
+    target,
+    command: { version: 1, op: 'voices', explicitUserGesture: true },
+  }), {
+    ok: true,
+    documentId: target.documentId,
+    frameId: 0,
+    kind: 'voices',
+    status: 'available',
+    voices,
+  });
+  assert.deepEqual(fixture.calls[1][1].args, [
+    { version: 1, op: 'reader-voices', explicitUserGesture: true },
+  ]);
+
+  const unavailable = createRuntime({ results: [
+    injection({ ok: true, present: true, mode: 'reader' }),
+    injection({ ok: true, kind: 'voices', status: 'unavailable', voices: [] }),
+  ] });
+  assert.deepEqual(await unavailable.runtime.reader({
+    target,
+    command: { version: 1, op: 'voices', explicitUserGesture: true },
+  }), {
+    ok: true,
+    documentId: target.documentId,
+    frameId: 0,
+    kind: 'voices',
+    status: 'unavailable',
+    voices: [],
+  });
+
+  const failed = createRuntime({ results: [
+    injection({ ok: true, present: true, mode: 'reader' }),
+    injection({ ok: false, reason: 'runtime-error' }),
+  ] });
+  assert.deepEqual(await failed.runtime.reader({
+    target,
+    command: { version: 1, op: 'voices', explicitUserGesture: true },
+  }), { ok: false, reason: 'runtime-error' });
+});
+
+test('reader commands fail closed for inactive, malformed, cross-document and accessor inputs', async () => {
+  for (const probe of [
+    { ok: true, present: false, mode: null },
+    { ok: true, present: true, mode: 'motor' },
+  ]) {
+    const fixture = createRuntime({ results: [injection(probe)] });
+    assert.deepEqual(await fixture.runtime.reader({
+      target,
+      command: { version: 1, op: 'state' },
+    }), { ok: false, reason: 'reader-inactive' });
+    assert.equal(fixture.calls.length, 1);
+  }
+
+  const malformed = createRuntime({ results: [
+    injection({ ok: true, present: true, mode: 'reader' }),
+    injection({ ok: true, kind: 'state', state: { playback: 'playing' }, extra: true }),
+  ] });
+  assert.deepEqual(await malformed.runtime.reader({
+    target,
+    command: { version: 1, op: 'state' },
+  }), { ok: false, reason: 'result-mismatch' });
+
+  const crossDocument = createRuntime({ results: [
+    injection({ ok: true, present: true, mode: 'reader' }),
+    injection({ ok: true, kind: 'state', state: {} }, { documentId: 'other-document' }),
+  ] });
+  assert.deepEqual(await crossDocument.runtime.reader({
+    target,
+    command: { version: 1, op: 'state' },
+  }), { ok: false, reason: 'result-mismatch' });
+
+  const invalid = createRuntime();
+  for (const command of [
+    { version: 1, op: 'voices' },
+    { version: 1, op: 'action', action: 'clear' },
+    { version: 1, op: 'preferences', voiceId: 'local-a', rate: 2.1 },
+    { version: 1, op: 'state', extra: true },
+  ]) {
+    await assert.rejects(
+      () => invalid.runtime.reader({ target, command }),
+      /PERSONA_RUNTIME_INPUT_INVALID/u,
+    );
+  }
+
+  let reads = 0;
+  const hostileCommand = { version: 1, op: 'state' };
+  Object.defineProperty(hostileCommand, 'op', {
+    enumerable: true,
+    get() { reads += 1; return 'state'; },
+  });
+  await assert.rejects(
+    () => invalid.runtime.reader({ target, command: hostileCommand }),
+    /PERSONA_RUNTIME_INPUT_INVALID/u,
+  );
+  assert.equal(reads, 0);
+});

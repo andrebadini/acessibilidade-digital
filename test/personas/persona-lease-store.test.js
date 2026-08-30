@@ -383,6 +383,66 @@ test('a revision-matched successful commit renews even when runtime work crossed
   assert.equal(committed.lease.expiresAt, clock.value + TTL_MS);
 });
 
+test('renews an explicit reader action by exact consumer and revision CAS', async () => {
+  const { store, clock } = createFixture();
+  const lease = await prepareAndActivate(store);
+  clock.value = 25_000;
+
+  const renewed = await store.renewExplicitAction({
+    leaseId: lease.leaseId,
+    consumer: panelA,
+    expectedRevision: lease.revision,
+  });
+
+  assert.equal(renewed.ok, true);
+  assert.equal(renewed.lease.state, 'active');
+  assert.equal(renewed.lease.activeMode, 'reader');
+  assert.equal(renewed.lease.pendingMode, null);
+  assert.equal(renewed.lease.lastExplicitActionAt, 25_000);
+  assert.equal(renewed.lease.expiresAt, 25_000 + TTL_MS);
+  assert.equal(renewed.lease.revision, lease.revision + 1);
+});
+
+test('explicit renewal rejects stale revision or consumer without writing', async () => {
+  const { store, sessionArea } = createFixture();
+  const lease = await prepareAndActivate(store);
+  const writesBefore = sessionArea.writes.length;
+
+  assert.deepEqual(await store.renewExplicitAction({
+    leaseId: lease.leaseId,
+    consumer: panelA,
+    expectedRevision: lease.revision + 1,
+  }), { ok: false, code: 'PERSONA_REVISION_MISMATCH' });
+  assert.deepEqual(await store.renewExplicitAction({
+    leaseId: lease.leaseId,
+    consumer: panelB,
+    expectedRevision: lease.revision,
+  }), { ok: false, code: 'PERSONA_CONSUMER_MISMATCH' });
+  assert.equal(sessionArea.writes.length, writesBefore);
+});
+
+test('exact renewal may cross the prior deadline but rejects a regressed clock', async () => {
+  const { store, clock, sessionArea } = createFixture();
+  const lease = await prepareAndActivate(store);
+  clock.value = lease.expiresAt + 1;
+  const renewed = await store.renewExplicitAction({
+    leaseId: lease.leaseId,
+    consumer: panelA,
+    expectedRevision: lease.revision,
+  });
+  assert.equal(renewed.ok, true);
+  assert.equal(renewed.lease.lastExplicitActionAt, lease.expiresAt + 1);
+
+  clock.value = renewed.lease.lastExplicitActionAt - 1;
+  const writesBefore = sessionArea.writes.length;
+  await assert.rejects(() => store.renewExplicitAction({
+    leaseId: lease.leaseId,
+    consumer: panelA,
+    expectedRevision: renewed.lease.revision,
+  }), /PERSONA_CLOCK_INVALID/u);
+  assert.equal(sessionArea.writes.length, writesBefore);
+});
+
 test('a regressed clock cannot create non-monotonic commit or stop timestamps', async () => {
   const { store, clock, sessionArea } = createFixture();
   const lease = await prepareAndActivate(store);

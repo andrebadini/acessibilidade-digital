@@ -32,6 +32,22 @@ const reopenedConsumer = Object.freeze({
   documentId: 'side-panel-window:3-reopened',
 });
 
+function readerState(overrides = {}) {
+  return Object.freeze({
+    version: 1,
+    playback: 'playing',
+    index: 0,
+    total: 2,
+    caption: 'Início, título nível 1',
+    canPrevious: false,
+    canNext: true,
+    speechAvailability: 'available',
+    voiceId: 'local-a',
+    rate: 1,
+    ...overrides,
+  });
+}
+
 function consumerFor(targetValue, suffix = '') {
   return Object.freeze({
     extensionId: 'test-extension',
@@ -90,8 +106,11 @@ function coordinatorFixture(options = {}) {
   const targetQueue = options.targetQueueFactory?.(baseTargetQueue) ?? baseTargetQueue;
   const runtimeCalls = [];
   const runtimeQueue = [];
+  const readerCalls = [];
+  const readerQueue = [];
   const runtimeModes = new Map();
   let beforeRuntimeApply = null;
+  let beforeRuntimeReader = null;
   const personaRuntime = {
     async apply(input) {
       runtimeCalls.push(structuredClone(input));
@@ -111,6 +130,20 @@ function coordinatorFixture(options = {}) {
       }
       return structuredClone(result);
     },
+    async reader(input) {
+      readerCalls.push(structuredClone(input));
+      await beforeRuntimeReader?.(input);
+      const queued = readerQueue.length ? readerQueue.shift() : null;
+      const result = queued ?? {
+        ok: true,
+        documentId: input.target.documentId,
+        frameId: 0,
+        kind: 'state',
+        ...(input.command.op === 'action' ? { actionStatus: 'accepted' } : {}),
+        state: readerState(),
+      };
+      return structuredClone(result);
+    },
   };
   const proofQueue = [];
   const probeCalls = [];
@@ -126,12 +159,18 @@ function coordinatorFixture(options = {}) {
     return structuredClone(found);
   };
   const scheduleCalls = [];
+  let renewalCalls = 0;
   const coordinatorLeaseStore = Object.fromEntries([
     'claimPrepared', 'activate', 'beginSetMode', 'commitSetMode', 'rollbackSetMode',
+    'renewExplicitAction',
     'beginStop', 'completeStop', 'rehydrate', 'revoke', 'findOwner', 'snapshot',
     'listRecoverable', 'listExpired', 'prepareInvalidRegistryRecovery',
     'finalizeInvalidRegistryRecovery',
   ].map(name => [name, (...args) => leaseStore[name](...args)]));
+  coordinatorLeaseStore.renewExplicitAction = (...args) => {
+    renewalCalls += 1;
+    return leaseStore.renewExplicitAction(...args);
+  };
   Object.assign(coordinatorLeaseStore, options.leaseStoreOverrides || {});
   const coordinator = coordinatorModule.createPersonaCoordinator({
     leaseStore: coordinatorLeaseStore,
@@ -145,11 +184,13 @@ function coordinatorFixture(options = {}) {
   });
   return {
     coordinator, leaseStore, targetQueue, runtimeCalls, runtimeQueue, runtimeModes,
-    proofQueue, probeCalls, scheduleCalls, sessionArea,
+    readerCalls, readerQueue, proofQueue, probeCalls, scheduleCalls, sessionArea,
     advance(milliseconds) { nowValue += milliseconds; },
     setNow(value) { nowValue = value; },
     readNow() { return nowValue; },
+    readRenewalCalls() { return renewalCalls; },
     beforeRuntimeApply(hook) { beforeRuntimeApply = hook; },
+    beforeRuntimeReader(hook) { beforeRuntimeReader = hook; },
   };
 }
 
@@ -383,6 +424,433 @@ test('setMode commits the new mode under the same target queue', async () => {
   assert.deepEqual(fixture.runtimeCalls.map(call => [call.op, call.mode ?? null]), [['install', 'motor']]);
 });
 
+test('authenticated reader state and reader stop preserve the active reader lease', async () => {
+  const fixture = coordinatorFixture();
+  const claimed = await claimActive(fixture, target, 'reader', consumer);
+  fixture.runtimeCalls.length = 0;
+  fixture.probeCalls.length = 0;
+
+  const stateResult = await fixture.coordinator.readerCommand({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'state' },
+  });
+  assert.deepEqual(stateResult, { ok: true, kind: 'state', state: readerState() });
+  assert.deepEqual(fixture.readerCalls, [{
+    target,
+    command: { version: 1, op: 'state' },
+  }]);
+  assert.deepEqual(fixture.probeCalls, [target.tabId, target.tabId]);
+
+  fixture.readerQueue.push({
+    ok: true,
+    documentId: target.documentId,
+    frameId: 0,
+    kind: 'state',
+    actionStatus: 'accepted',
+    state: readerState({
+      playback: 'idle', index: -1, total: 0, caption: '', canNext: false,
+    }),
+  });
+  const stopped = await fixture.coordinator.readerCommand({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'action', action: 'stop' },
+  });
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.state.playback, 'idle');
+  const owner = await fixture.leaseStore.findOwner(target);
+  assert.equal(owner.leaseId, claimed.lease.leaseId);
+  assert.equal(owner.state, 'active');
+  assert.equal(owner.activeMode, 'reader');
+  assert.equal(owner.pendingMode, null);
+  assert.deepEqual(fixture.runtimeCalls, []);
+});
+
+test('reader stop keeps a truthful playing state while its owned utterance settles', async () => {
+  const fixture = coordinatorFixture();
+  const claimed = await claimActive(fixture, target, 'reader', consumer);
+  fixture.readerQueue.push({
+    ok: true,
+    documentId: target.documentId,
+    frameId: 0,
+    kind: 'state',
+    actionStatus: 'accepted',
+    state: readerState({ playback: 'playing' }),
+  });
+
+  assert.deepEqual(await fixture.coordinator.readerCommand({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'action', action: 'stop' },
+  }), {
+    ok: true,
+    kind: 'state',
+    state: readerState({ playback: 'playing' }),
+  });
+  const owner = await fixture.leaseStore.findOwner(target);
+  assert.equal(owner.leaseId, claimed.lease.leaseId);
+  assert.equal(owner.activeMode, 'reader');
+  assert.equal(owner.revision, claimed.lease.revision + 1);
+});
+
+test('reader state is observational while explicit actions renew the lease by CAS', async () => {
+  const fixture = coordinatorFixture();
+  const claimed = await claimActive(fixture, target, 'reader', consumer);
+  fixture.advance(10_000);
+
+  assert.equal((await fixture.coordinator.readerCommand({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'state' },
+  })).ok, true);
+  const observed = await fixture.leaseStore.findOwner(target);
+  assert.equal(observed.revision, claimed.lease.revision);
+  assert.equal(observed.lastExplicitActionAt, claimed.lease.lastExplicitActionAt);
+  assert.equal(observed.expiresAt, claimed.lease.expiresAt);
+
+  assert.equal((await fixture.coordinator.readerCommand({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'action', action: 'next' },
+  })).ok, true);
+  const renewed = await fixture.leaseStore.findOwner(target);
+  assert.equal(renewed.revision, claimed.lease.revision + 1);
+  assert.equal(renewed.lastExplicitActionAt, fixture.readNow());
+  assert.equal(renewed.expiresAt, fixture.readNow() + 30 * 60_000);
+});
+
+test('a rejected reader action returns closed and never renews the lease', async () => {
+  const fixture = coordinatorFixture();
+  const claimed = await claimActive(fixture, target, 'reader', consumer);
+  fixture.advance(5_000);
+  fixture.runtimeCalls.length = 0;
+  fixture.readerQueue.push({
+    ok: true,
+    documentId: target.documentId,
+    frameId: 0,
+    kind: 'state',
+    actionStatus: 'rejected',
+    state: readerState(),
+  });
+
+  assert.deepEqual(await fixture.coordinator.readerCommand({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'action', action: 'next' },
+  }), { ok: false, code: 'PERSONA_READER_ACTION_REJECTED' });
+  const owner = await fixture.leaseStore.findOwner(target);
+  assert.equal(owner.revision, claimed.lease.revision);
+  assert.equal(owner.lastExplicitActionAt, claimed.lease.lastExplicitActionAt);
+  assert.equal(owner.expiresAt, claimed.lease.expiresAt);
+  assert.equal(fixture.readRenewalCalls(), 0);
+  assert.deepEqual(fixture.runtimeCalls, []);
+});
+
+test('rejected reader preferences and voice requests never renew the lease', async () => {
+  for (const { command, reason, code } of [
+    {
+      command: { version: 1, op: 'preferences', voiceId: 'missing-local-voice', rate: 1 },
+      reason: 'voice-unavailable',
+      code: 'PERSONA_READER_VOICE_UNAVAILABLE',
+    },
+    {
+      command: { version: 1, op: 'voices', explicitUserGesture: true },
+      reason: 'gesture-required',
+      code: 'PERSONA_READER_GESTURE_REQUIRED',
+    },
+  ]) {
+    const fixture = coordinatorFixture();
+    const claimed = await claimActive(fixture, target, 'reader', consumer);
+    fixture.advance(5_000);
+    fixture.readerQueue.push({ ok: false, reason });
+
+    assert.deepEqual(await fixture.coordinator.readerCommand({
+      leaseId: claimed.lease.leaseId,
+      consumer,
+      command,
+    }), { ok: false, code });
+    const owner = await fixture.leaseStore.findOwner(target);
+    assert.equal(owner.revision, claimed.lease.revision);
+    assert.equal(owner.lastExplicitActionAt, claimed.lease.lastExplicitActionAt);
+    assert.equal(owner.expiresAt, claimed.lease.expiresAt);
+    assert.equal(fixture.readRenewalCalls(), 0);
+  }
+});
+
+test('a terminal reader action compensates its mutation instead of renewing', async () => {
+  const fixture = coordinatorFixture();
+  const claimed = await claimActive(fixture, target, 'reader', consumer);
+  fixture.runtimeCalls.length = 0;
+  fixture.readerQueue.push({
+    ok: true,
+    documentId: target.documentId,
+    frameId: 0,
+    kind: 'state',
+    actionStatus: 'terminal',
+    state: readerState({ speechAvailability: 'error' }),
+  });
+
+  assert.deepEqual(await fixture.coordinator.readerCommand({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'action', action: 'next' },
+  }), { ok: false, code: 'PERSONA_READER_ACTION_TERMINAL' });
+  assert.equal(fixture.readRenewalCalls(), 0);
+  assert.deepEqual(fixture.runtimeCalls.map(call => call.op), ['clear']);
+  assert.equal(await fixture.leaseStore.findOwner(target), null);
+});
+
+test('preferences and gesture-authorized voice inventory also renew the reader lease', async () => {
+  const fixture = coordinatorFixture();
+  const claimed = await claimActive(fixture, target, 'reader', consumer);
+  fixture.advance(1_000);
+  assert.equal((await fixture.coordinator.readerCommand({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'preferences', voiceId: 'local-a', rate: 1 },
+  })).ok, true);
+  const afterPreference = await fixture.leaseStore.findOwner(target);
+  assert.equal(afterPreference.revision, claimed.lease.revision + 1);
+
+  fixture.advance(1_000);
+  fixture.readerQueue.push({
+    ok: true,
+    documentId: target.documentId,
+    frameId: 0,
+    kind: 'voices',
+    status: 'available',
+    voices: [{ id: 'local-a', label: 'Voz local A', lang: 'pt-BR' }],
+  });
+  assert.equal((await fixture.coordinator.readerCommand({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'voices', explicitUserGesture: true },
+  })).ok, true);
+  const afterInventory = await fixture.leaseStore.findOwner(target);
+  assert.equal(afterInventory.revision, afterPreference.revision + 1);
+  assert.equal(afterInventory.lastExplicitActionAt, fixture.readNow());
+});
+
+test('an explicit reader action may cross the old deadline and renew after runtime completion', async () => {
+  const fixture = coordinatorFixture();
+  const claimed = await claimActive(fixture, target, 'reader', consumer);
+  fixture.advance(30 * 60_000 - 1);
+  fixture.beforeRuntimeReader(() => fixture.advance(1));
+
+  const result = await fixture.coordinator.readerCommand({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'action', action: 'next' },
+  });
+
+  assert.equal(result.ok, true);
+  const renewed = await fixture.leaseStore.findOwner(target);
+  assert.equal(renewed.lastExplicitActionAt, fixture.readNow());
+  assert.equal(renewed.expiresAt, fixture.readNow() + 30 * 60_000);
+});
+
+test('a failed renewal after reader mutation compensates by clearing and revoking', async () => {
+  let failRenewal = false;
+  const fixture = coordinatorFixture({
+    leaseStoreOverrides: {
+      async renewExplicitAction(...args) {
+        if (failRenewal) return { ok: false, code: 'PERSONA_REVISION_MISMATCH' };
+        return fixture.leaseStore.renewExplicitAction(...args);
+      },
+    },
+  });
+  const claimed = await claimActive(fixture, target, 'reader', consumer);
+  failRenewal = true;
+  fixture.runtimeCalls.length = 0;
+
+  assert.deepEqual(await fixture.coordinator.readerCommand({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'action', action: 'next' },
+  }), { ok: false, code: 'PERSONA_STATE_FAILED' });
+  assert.equal(fixture.readerCalls.length, 1);
+  assert.deepEqual(fixture.runtimeCalls.map(call => call.op), ['clear']);
+  assert.equal(await fixture.leaseStore.findOwner(target), null);
+});
+
+test('a renewal that persists then throws is also cleared and revoked', async () => {
+  let failAfterPersist = false;
+  const fixture = coordinatorFixture({
+    leaseStoreOverrides: {
+      async renewExplicitAction(...args) {
+        const result = await fixture.leaseStore.renewExplicitAction(...args);
+        if (failAfterPersist) throw new Error('uncertain renewal persistence');
+        return result;
+      },
+    },
+  });
+  const claimed = await claimActive(fixture, target, 'reader', consumer);
+  failAfterPersist = true;
+  fixture.runtimeCalls.length = 0;
+
+  assert.deepEqual(await fixture.coordinator.readerCommand({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'action', action: 'next' },
+  }), { ok: false, code: 'PERSONA_STATE_FAILED' });
+  assert.deepEqual(fixture.runtimeCalls.map(call => call.op), ['clear']);
+  assert.equal(await fixture.leaseStore.findOwner(target), null);
+});
+
+test('reader commands authenticate the exact consumer and require an active stable reader lease', async () => {
+  const fixture = coordinatorFixture();
+  const reader = await claimActive(fixture, target, 'reader', consumer);
+  const impostor = { ...consumer, documentId: 'side-panel-window:impostor' };
+  assert.deepEqual(await fixture.coordinator.readerCommand({
+    leaseId: reader.lease.leaseId,
+    consumer: impostor,
+    command: { version: 1, op: 'state' },
+  }), { ok: false, code: 'PERSONA_CONSUMER_MISMATCH' });
+  assert.deepEqual(fixture.readerCalls, []);
+
+  const motor = await claimActive(fixture, secondTarget, 'motor', consumerFor(secondTarget));
+  assert.deepEqual(await fixture.coordinator.readerCommand({
+    leaseId: motor.lease.leaseId,
+    consumer: consumerFor(secondTarget),
+    command: { version: 1, op: 'state' },
+  }), { ok: false, code: 'PERSONA_READER_INACTIVE' });
+  assert.deepEqual(fixture.readerCalls, []);
+});
+
+test('reader voice inventory requires a trusted explicit gesture and stays minimal', async () => {
+  const fixture = coordinatorFixture();
+  const claimed = await claimActive(fixture, target, 'reader', consumer);
+  assert.deepEqual(await fixture.coordinator.readerCommand({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'voices', explicitUserGesture: false },
+  }), { ok: false, code: 'PERSONA_READER_GESTURE_REQUIRED' });
+  assert.deepEqual(fixture.readerCalls, []);
+
+  fixture.readerQueue.push({
+    ok: true,
+    documentId: target.documentId,
+    frameId: 0,
+    kind: 'voices',
+    status: 'available',
+    voices: [{ id: 'local-a', label: 'Voz local A', lang: 'pt-BR' }],
+  });
+  assert.deepEqual(await fixture.coordinator.readerCommand({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'voices', explicitUserGesture: true },
+  }), {
+    ok: true,
+    kind: 'voices',
+    status: 'available',
+    voices: [{ id: 'local-a', label: 'Voz local A', lang: 'pt-BR' }],
+  });
+
+  fixture.readerQueue.push({
+    ok: true,
+    documentId: target.documentId,
+    frameId: 0,
+    kind: 'voices',
+    status: 'unavailable',
+    voices: [],
+  });
+  assert.deepEqual(await fixture.coordinator.readerCommand({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'voices', explicitUserGesture: true },
+  }), {
+    ok: true,
+    kind: 'voices',
+    status: 'unavailable',
+    voices: [],
+  });
+});
+
+test('reader command validation is exact and never evaluates accessor properties', async () => {
+  const fixture = coordinatorFixture();
+  const claimed = await claimActive(fixture, target, 'reader', consumer);
+  for (const args of [
+    { leaseId: claimed.lease.leaseId, consumer, command: { version: 1, op: 'state' }, extra: true },
+    { leaseId: claimed.lease.leaseId, consumer, command: { version: 1, op: 'action', action: 'clear' } },
+    { leaseId: claimed.lease.leaseId, consumer, command: { version: 1, op: 'preferences', voiceId: 'local-a', rate: 0.49 } },
+    { leaseId: 'lease-invalid', consumer, command: { version: 1, op: 'state' } },
+  ]) {
+    await assert.rejects(
+      () => fixture.coordinator.readerCommand(args),
+      /PERSONA_INPUT_INVALID/u,
+    );
+  }
+
+  let reads = 0;
+  const hostile = {
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'state' },
+  };
+  Object.defineProperty(hostile.command, 'op', {
+    enumerable: true,
+    get() { reads += 1; return 'state'; },
+  });
+  await assert.rejects(
+    () => fixture.coordinator.readerCommand(hostile),
+    /PERSONA_INPUT_INVALID/u,
+  );
+  assert.equal(reads, 0);
+});
+
+test('reader commands recheck navigation and expiry after the runtime and revoke safely', async () => {
+  const navigated = coordinatorFixture();
+  const navigationLease = await claimActive(navigated, target, 'reader', consumer);
+  navigated.runtimeCalls.length = 0;
+  navigated.proofQueue.push(target, { ...target, documentId: 'reloaded-document' });
+  assert.deepEqual(await navigated.coordinator.readerCommand({
+    leaseId: navigationLease.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'state' },
+  }), { ok: false, code: 'PERSONA_TARGET_CHANGED' });
+  assert.equal(await navigated.leaseStore.findOwner(target), null);
+  assert.deepEqual(navigated.runtimeCalls.map(call => call.op), ['clear']);
+
+  const expired = coordinatorFixture();
+  const expiryLease = await claimActive(expired, target, 'reader', consumer);
+  expired.runtimeCalls.length = 0;
+  expired.advance(30 * 60_000 - 1);
+  expired.beforeRuntimeReader(() => expired.advance(1));
+  assert.deepEqual(await expired.coordinator.readerCommand({
+    leaseId: expiryLease.lease.leaseId,
+    consumer,
+    command: { version: 1, op: 'state' },
+  }), { ok: false, code: 'PERSONA_EXPIRED' });
+  assert.equal(await expired.leaseStore.findOwner(target), null);
+  assert.deepEqual(expired.runtimeCalls.map(call => call.op), ['clear']);
+});
+
+test('terminal reader result failures are compensated under the target lock', async () => {
+  for (const result of [
+    { ok: false, reason: 'runtime-error' },
+    {
+      ok: true,
+      documentId: target.documentId,
+      frameId: 0,
+      kind: 'state',
+      state: { ...readerState(), caption: 'altered\ncaption' },
+    },
+  ]) {
+    const fixture = coordinatorFixture();
+    const claimed = await claimActive(fixture, target, 'reader', consumer);
+    fixture.runtimeCalls.length = 0;
+    fixture.readerQueue.push(result);
+    assert.deepEqual(await fixture.coordinator.readerCommand({
+      leaseId: claimed.lease.leaseId,
+      consumer,
+      command: { version: 1, op: 'state' },
+    }), { ok: false, code: 'PERSONA_READER_RUNTIME_FAILED' });
+    assert.equal(await fixture.leaseStore.findOwner(target), null);
+    assert.deepEqual(fixture.runtimeCalls.map(call => call.op), ['clear']);
+  }
+});
+
 test('setMode restores the prior mode and rolls back after a runtime failure', async () => {
   const fixture = coordinatorFixture();
   const claimed = await claimActive(fixture, target, 'reader', consumer);
@@ -587,6 +1055,32 @@ test('explicit stop retries clear once and preserves a stopping owner if absence
   assert.deepEqual(result, { ok: false, code: 'PERSONA_CLEANUP_UNCONFIRMED' });
   assert.equal((await fixture.leaseStore.findOwner(target)).state, 'stopping');
   assert.deepEqual(fixture.runtimeCalls.map(call => call.op), ['clear', 'clear']);
+});
+
+test('explicit stop can finish its authenticated stopping lease after owned speech ends', async () => {
+  const fixture = coordinatorFixture();
+  const claimed = await claimActive(fixture, target, 'reader', consumer);
+  fixture.runtimeQueue.push(
+    { ok: false, reason: 'cleanup-unconfirmed' },
+    { ok: false, reason: 'cleanup-unconfirmed' },
+  );
+
+  assert.deepEqual(await fixture.coordinator.stop({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    explicit: true,
+  }), { ok: false, code: 'PERSONA_CLEANUP_UNCONFIRMED' });
+  const stopping = await fixture.leaseStore.findOwner(target);
+  assert.equal(stopping.state, 'stopping');
+
+  const completed = await fixture.coordinator.stop({
+    leaseId: claimed.lease.leaseId,
+    consumer,
+    explicit: true,
+  });
+  assert.equal(completed.ok, true);
+  assert.equal(completed.lease.state, 'revoked');
+  assert.equal(await fixture.leaseStore.findOwner(target), null);
 });
 
 test('a thrown beginStop still attempts conservative clear and revocation under the held lock', async () => {

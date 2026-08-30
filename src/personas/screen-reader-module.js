@@ -25,6 +25,12 @@
     var rate = 1;
     var originalFocus = null;
     var ownUtterance = null;
+    var pendingSpeechActions = [];
+    var pendingSpeechTerminal = false;
+    var pendingSpeechOverflow = false;
+    // Overflow discards the queue and schedules one terminal stop after the
+    // currently audible Audita utterance. It never touches the shared queue.
+    var MAX_PENDING_SPEECH_ACTIONS = 32;
     var speechGeneration = 0;
     var unsubscribeFocus = null;
     var unsubscribeVoices = null;
@@ -36,6 +42,8 @@
     var nativeUtterancePrototype = trustedNativePrototype('SpeechSynthesisUtterance');
     var speechSynthesis = ownDataValue(environment, 'speechSynthesis');
     var Utterance = ownDataValue(environment, 'Utterance');
+    var onTerminal = ownDataValue(environment, 'onTerminal');
+    if (typeof onTerminal !== 'function') onTerminal = null;
 
     function ownDataValue(holder, key) {
       try {
@@ -74,6 +82,17 @@
     function boundedVoiceId(value) {
       if (typeof value !== 'string' || /[\u0000-\u001f\u007f]/u.test(value)) return '';
       return Array.from(value.trim()).slice(0, 200).join('');
+    }
+
+    function boundedVoiceLabel(value, fallback) {
+      if (typeof value !== 'string' || /[\u0000-\u001f\u007f]/u.test(value)) return fallback;
+      var label = Array.from(value.replace(/\s+/gu, ' ').trim()).slice(0, 200).join('');
+      return label || fallback;
+    }
+
+    function boundedVoiceLanguage(value) {
+      if (typeof value !== 'string' || /[\u0000-\u001f\u007f]/u.test(value)) return '';
+      return Array.from(value.trim()).slice(0, 64).join('');
     }
 
     function boundedRate(value) {
@@ -116,6 +135,15 @@
       try { environment.render(current || null, snapshot); } catch (_error) { /* visual fallback is optional */ }
       try { environment.publish(snapshot); } catch (_error) { /* worker channel can be absent */ }
       return snapshot;
+    }
+
+    function actionResult(actionStatus, snapshot) {
+      return Object.freeze(Object.assign({ actionStatus: actionStatus }, snapshot || state()));
+    }
+
+    function signalTerminal(reason) {
+      if (!onTerminal) return;
+      try { onTerminal(reason); } catch (_error) { /* the local owner still observes the terminal state */ }
     }
 
     function nativeMethod(value, prototype, key) {
@@ -195,11 +223,18 @@
       if (!uri || !uri.present) return null;
       var canonicalId = boundedVoiceId(uri.value);
       if (!canonicalId || canonicalId !== uri.value) return null;
-      for (var optionalKey of ['name', 'lang']) {
-        var optional = read(optionalKey);
-        if (!optional || (optional.present && typeof optional.value !== 'string')) return null;
-      }
-      return { local: true, voiceId: canonicalId, voice: voice };
+      var name = read('name');
+      var language = read('lang');
+      if (!name || !language || typeof name.value !== 'string' || typeof language.value !== 'string') return null;
+      var canonicalLanguage = boundedVoiceLanguage(language.value);
+      if (canonicalLanguage !== language.value.trim()) return null;
+      return {
+        local: true,
+        voiceId: canonicalId,
+        label: boundedVoiceLabel(name.value, canonicalId),
+        lang: canonicalLanguage,
+        voice: voice
+      };
     }
 
     function localVoiceInventory() {
@@ -245,6 +280,93 @@
     function invalidateOwnedSpeech() {
       speechGeneration += 1;
       ownUtterance = null;
+      pendingSpeechActions = [];
+      pendingSpeechTerminal = false;
+      pendingSpeechOverflow = false;
+    }
+
+    function deferUntilSpeechEnds(action) {
+      if (pendingSpeechTerminal) return actionResult('rejected', publish(queue[index]));
+      var actionStatus = 'accepted';
+      if (action.type === 'stop') {
+        pendingSpeechActions = [{ type: 'stop' }];
+        pendingSpeechTerminal = true;
+      } else if (pendingSpeechActions.length >= MAX_PENDING_SPEECH_ACTIONS) {
+        pendingSpeechActions = [{ type: 'stop' }];
+        pendingSpeechTerminal = true;
+        pendingSpeechOverflow = true;
+        speechAvailability = 'error';
+        actionStatus = 'terminal';
+      } else {
+        pendingSpeechActions.push(action);
+      }
+      if (!pendingSpeechOverflow) {
+        var busy = synthesisBusy(speechSynthesis);
+        speechAvailability = busy === null ? 'error' : (busy ? 'busy' : speechAvailability);
+      }
+      var snapshot = publish(queue[index]);
+      if (actionStatus === 'terminal') signalTerminal('queue-overflow');
+      return actionResult(actionStatus, snapshot);
+    }
+
+    function drainPendingSpeechActions() {
+      while (!ownUtterance && pendingSpeechActions.length) {
+        var action = pendingSpeechActions.shift();
+        if (action.type === 'stop') {
+          clearSession(true);
+          return;
+        }
+        if (action.type === 'pause') {
+          if (playback === 'playing') playback = 'paused';
+          publish(queue[index]);
+          continue;
+        }
+        if (action.type === 'resume') {
+          if (playback === 'paused') playback = 'playing';
+          if (playback === 'playing') {
+            publish(queue[index]);
+            speakCurrent();
+          }
+          continue;
+        }
+        if (action.type === 'repeat') {
+          if (playback !== 'idle' && index >= 0) {
+            publish(queue[index]);
+            if (playback === 'playing') speakCurrent();
+          }
+          continue;
+        }
+        if (action.type === 'next' || action.type === 'previous') {
+          var offset = action.type === 'next' ? 1 : -1;
+          show(index + offset, { focus: true, speak: true });
+          continue;
+        }
+        if (action.type === 'focus') {
+          var position = queue.findIndex(function findPendingCandidate(candidate) {
+            return candidate.element === action.element;
+          });
+          if (position >= 0) show(position, { focus: false, speak: true });
+        }
+      }
+      if (sessionActive && !ownUtterance) publish(queue[index]);
+    }
+
+    function settleOwnedSpeech(utterance, generation, failed) {
+      if (generation !== speechGeneration || ownUtterance !== utterance) return;
+      ownUtterance = null;
+      if (failed || pendingSpeechOverflow) speechAvailability = 'error';
+      else {
+        var availableVoice = selectedVoice();
+        if (availableVoice) {
+          var busy = synthesisBusy(speechSynthesis);
+          speechAvailability = busy === null ? 'error' : (busy ? 'busy' : 'available');
+        }
+      }
+      if (!pendingSpeechActions.length) {
+        publish(queue[index]);
+        return;
+      }
+      drainPendingSpeechActions();
     }
 
     function speakCurrent() {
@@ -257,7 +379,6 @@
       }
       var voice = selectedVoice();
       if (!voice) {
-        if (ownUtterance) invalidateOwnedSpeech();
         return publish(current);
       }
       var speak = nativeMethod(synthesis, nativeSynthesisPrototype, 'speak');
@@ -267,7 +388,10 @@
       }
       // Web Speech exposes one global queue and no per-utterance stop. A reference
       // to our utterance is therefore not proof that cancel/pause/resume is safe.
-      if (ownUtterance) invalidateOwnedSpeech();
+      if (ownUtterance) {
+        deferUntilSpeechEnds({ type: 'repeat' });
+        return state();
+      }
       var busy = synthesisBusy(synthesis);
       if (busy === null) {
         speechAvailability = 'error';
@@ -287,16 +411,10 @@
         if (!voice) return publish(current);
         utterance.voice = voice;
         utterance.onend = function onSpeechEnd() {
-          if (generation !== speechGeneration || ownUtterance !== utterance) return;
-          ownUtterance = null;
-          speechAvailability = 'available';
-          publish(queue[index]);
+          settleOwnedSpeech(utterance, generation, false);
         };
         utterance.onerror = function onSpeechError() {
-          if (generation !== speechGeneration || ownUtterance !== utterance) return;
-          ownUtterance = null;
-          speechAvailability = 'error';
-          publish(queue[index]);
+          settleOwnedSpeech(utterance, generation, true);
         };
         var confirmedVoice = selectedVoice();
         if (!confirmedVoice || confirmedVoice !== voice || assignedUtteranceVoice(utterance) !== confirmedVoice) {
@@ -349,14 +467,17 @@
       }
       var position = queue.findIndex(function findCandidate(candidate) { return candidate.element === element; });
       if (position < 0) return;
+      if (ownUtterance && playback === 'playing') {
+        deferUntilSpeechEnds({ type: 'focus', element: element });
+        return;
+      }
       show(position, { focus: false, speak: playback === 'playing' });
     }
 
     function handleVoicesChanged() {
       if (!sessionActive) return state();
       var selected = selectedVoice();
-      if (!selected && ownUtterance) invalidateOwnedSpeech();
-      if (selected && !ownUtterance) {
+      if (selected) {
         var busy = synthesisBusy(speechSynthesis);
         speechAvailability = busy === null ? 'error' : (busy ? 'busy' : 'available');
       }
@@ -402,6 +523,9 @@
       index = queue.length ? 0 : -1;
       caption = queue.length ? queue[0].caption : '';
       speechAvailability = 'unavailable';
+      pendingSpeechActions = [];
+      pendingSpeechTerminal = false;
+      pendingSpeechOverflow = false;
       subscribe();
       selectedVoice();
       var snapshot = publish(queue[index]);
@@ -413,26 +537,29 @@
     }
 
     function pause() {
-      if (playback !== 'playing') return state();
+      if (playback !== 'playing') return actionResult('rejected');
+      if (ownUtterance) return deferUntilSpeechEnds({ type: 'pause' });
       playback = 'paused';
-      if (ownUtterance) {
-        invalidateOwnedSpeech();
-        var busy = synthesisBusy(speechSynthesis);
-        speechAvailability = busy === null ? 'error' : (busy ? 'busy' : speechAvailability);
-      }
-      return publish(queue[index]);
+      return actionResult('accepted', publish(queue[index]));
     }
 
     function resume() {
-      if (playback !== 'paused') return state();
+      if (ownUtterance) return deferUntilSpeechEnds({ type: 'resume' });
+      if (playback === 'idle') {
+        return actionResult('accepted', start({ voiceId: voiceId, rate: rate }));
+      }
+      if (playback !== 'paused') return actionResult('rejected');
       playback = 'playing';
       publish(queue[index]);
-      return speakCurrent();
+      return actionResult('accepted', speakCurrent());
     }
 
     function stop() {
-      if (!sessionActive && !unsubscribeFocus && !unsubscribeVoices && !ownUtterance) return state();
-      return clearSession(true);
+      if (!sessionActive && !unsubscribeFocus && !unsubscribeVoices && !ownUtterance) {
+        return actionResult('rejected');
+      }
+      if (ownUtterance) return deferUntilSpeechEnds({ type: 'stop' });
+      return actionResult('accepted', clearSession(true));
     }
 
     function clearSession(restoreOriginalFocus) {
@@ -456,16 +583,42 @@
     }
 
     function repeat() {
-      if (playback === 'idle' || index < 0) return state();
+      if (playback === 'idle' || index < 0) return actionResult('rejected');
+      if (ownUtterance && playback === 'playing') return deferUntilSpeechEnds({ type: 'repeat' });
       publish(queue[index]);
-      return playback === 'playing' ? speakCurrent() : state();
+      return actionResult('accepted', playback === 'playing' ? speakCurrent() : state());
+    }
+
+    function navigate(direction) {
+      if (playback === 'idle' || !queue.length) return actionResult('rejected');
+      if (ownUtterance && playback === 'playing') {
+        return deferUntilSpeechEnds({ type: direction });
+      }
+      return actionResult('accepted', show(index + (direction === 'next' ? 1 : -1), { focus: true }));
     }
 
     function setPreferences(preferences) {
-      voiceId = boundedVoiceId(preferences?.voiceId);
-      rate = boundedRate(preferences?.rate);
-      selectedVoice();
+      var requestedVoiceId = boundedVoiceId(preferences?.voiceId);
+      var requestedRate = boundedRate(preferences?.rate);
+      var inventory = localVoiceInventory();
+      var selected = inventory.voices.find(function matchesRequestedVoice(voice) {
+        return voice.voiceId === requestedVoiceId;
+      }) || null;
+      if (!requestedVoiceId || !selected) return publish(queue[index]);
+      voiceId = requestedVoiceId;
+      rate = requestedRate;
+      speechAvailability = 'available';
       return publish(queue[index]);
+    }
+
+    function listLocalVoices() {
+      var inventory = localVoiceInventory();
+      return {
+        status: inventory.status,
+        voices: inventory.voices.map(function publicVoice(voice) {
+          return { id: voice.voiceId, label: voice.label, lang: voice.lang };
+        })
+      };
     }
 
     return Object.freeze({
@@ -474,9 +627,10 @@
       resume: resume,
       stop: stop,
       repeat: repeat,
-      previous: function previous() { return show(index - 1, { focus: true }); },
-      next: function next() { return show(index + 1, { focus: true }); },
+      previous: function previous() { return navigate('previous'); },
+      next: function next() { return navigate('next'); },
       setPreferences: setPreferences,
+      listLocalVoices: listLocalVoices,
       handleVoicesChanged: handleVoicesChanged,
       getState: state
     });

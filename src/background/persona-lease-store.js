@@ -600,6 +600,34 @@ export function createPersonaLeaseStore({ sessionArea, lockManager, now, randomB
     return success(updated);
   });
 
+  const renewExplicitAction = args => serialize(async () => {
+    const input = readInput(args, ['leaseId', 'consumer', 'expectedRevision']);
+    const leaseId = readLeaseId(input.leaseId);
+    const consumer = assertConsumer(input.consumer);
+    const expectedRevision = readRevision(input.expectedRevision);
+    const registry = await loadRegistry();
+    const lease = registry.leases[leaseId];
+    const actionAt = readNow();
+    const problem = assertTransition(lease, {
+      states: ['active'], expectedRevision, consumer, allowExpired: true,
+    });
+    if (problem) return failure(problem);
+    if (lease.activeMode === null || lease.pendingMode !== null) {
+      return failure('PERSONA_TRANSITION_INVALID');
+    }
+    if (actionAt < lease.lastExplicitActionAt) throw new TypeError('PERSONA_CLOCK_INVALID');
+    const expiresAt = actionAt + TTL_MS;
+    if (!Number.isSafeInteger(expiresAt)) throw new TypeError('PERSONA_CLOCK_INVALID');
+    const updated = {
+      ...lease,
+      lastExplicitActionAt: actionAt,
+      expiresAt,
+      revision: nextRevision(lease.revision),
+    };
+    await persist(withLease(registry, updated));
+    return success(updated);
+  });
+
   const rollbackSetMode = args => serialize(async () => {
     const input = readInput(args, ['leaseId', 'expectedRevision']);
     const leaseId = readLeaseId(input.leaseId);
@@ -786,6 +814,7 @@ export function createPersonaLeaseStore({ sessionArea, lockManager, now, randomB
     activate,
     beginSetMode,
     commitSetMode,
+    renewExplicitAction,
     rollbackSetMode,
     beginStop,
     completeStop,

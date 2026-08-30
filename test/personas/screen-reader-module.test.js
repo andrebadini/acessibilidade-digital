@@ -118,6 +118,7 @@ async function loadReaderFactory(contextGlobals = {}) {
 
 function fixtureEnvironment(options = {}) {
   const events = [];
+  const terminalEvents = [];
   const utterances = [];
   let focusListener = null;
   let voicesListener = null;
@@ -156,13 +157,14 @@ function fixtureEnvironment(options = {}) {
       events.push(`render:${state.caption}:${current?.element?.id ?? 'none'}`);
     },
     publish(state) { events.push(`publish:${state.playback}:${state.index}:${state.caption}`); },
+    onTerminal(reason) { terminalEvents.push(reason); },
     onFocus(listener) { focusListener = listener; return () => { focusListener = null; focusUnsubscribes += 1; }; },
     onVoicesChanged(listener) { voicesListener = listener; return () => { voicesListener = null; voicesUnsubscribes += 1; }; },
     speechSynthesis: speech,
     Utterance,
   };
   return {
-    environment, speech, events, utterances, get candidates() { return candidates; },
+    environment, speech, events, terminalEvents, utterances, get candidates() { return candidates; },
     setSpeechState(patch) { Object.assign(requireBrand(trustedSynthesisState, speech, 'síntese'), patch); },
     enqueueForeignSpeech(text = 'Fala da página') {
       const state = requireBrand(trustedSynthesisState, speech, 'síntese');
@@ -171,6 +173,15 @@ function fixtureEnvironment(options = {}) {
       state.pending = true;
       events.push(`foreign:${text}`);
       return utterance;
+    },
+    finishOwnedSpeech(kind = 'end') {
+      const state = requireBrand(trustedSynthesisState, speech, 'síntese');
+      const utterance = state.current;
+      state.current = null;
+      state.speaking = false;
+      if (!state.foreignQueue.length) state.pending = false;
+      if (kind === 'error') utterance?.onerror?.();
+      else utterance?.onend?.();
     },
     setCandidates(value) { candidates = value; },
     listenerState() { return { focus: Boolean(focusListener), voices: Boolean(voicesListener), focusUnsubscribes, voicesUnsubscribes }; },
@@ -196,10 +207,16 @@ test('starts caption-first, navigates exact bounds and focuses only selected ite
   assert.equal(fixture.speech.cancelCalls, 0, 'start nunca cancela a fila global preventivamente');
 
   assert.equal(reader.previous().index, 0);
-  assert.equal(reader.next().index, 1);
+  fixture.finishOwnedSpeech();
+  assert.equal(reader.next().index, 0);
+  fixture.finishOwnedSpeech();
+  assert.equal(reader.getState().index, 1);
   assert.ok(fixture.events.includes('focus:second:true'));
-  assert.equal(reader.next().index, 2);
+  assert.equal(reader.next().index, 1);
+  fixture.finishOwnedSpeech();
+  assert.equal(reader.getState().index, 2);
   assert.equal(reader.next().index, 2, 'não há wrap no fim');
+  fixture.finishOwnedSpeech();
   assert.equal(reader.getState().canNext, false);
 });
 
@@ -209,8 +226,10 @@ test('pause/resume change only Audita state and never pause or resume the shared
   const reader = namespace.createScreenReaderModule(fixture.environment);
   reader.start({ voiceId: 'voice-a', rate: 1 });
   const foreign = fixture.enqueueForeignSpeech('Fala da página após Audita');
-  assert.equal(reader.pause().playback, 'paused');
+  assert.equal(reader.pause().playback, 'playing');
   assert.equal(fixture.speech.pauseCalls, 0, 'pause é global e não pode afetar a página');
+  fixture.finishOwnedSpeech();
+  assert.equal(reader.getState().playback, 'paused');
   const utteranceCount = fixture.utterances.length;
 
   fixture.focus(fixture.candidates[2].element);
@@ -222,10 +241,13 @@ test('pause/resume change only Audita state and never pause or resume the shared
   assert.equal(foreign.cancelled, false);
 
   const stopped = reader.stop('requested');
+  assert.equal(stopped.actionStatus, 'accepted');
   assert.equal(stopped.playback, 'idle');
   assert.equal(fixture.speech.cancelCalls, 0);
   assert.ok(fixture.events.includes('restore:original:true'));
-  assert.deepEqual(reader.stop('again'), stopped, 'parar duas vezes é idempotente');
+  const duplicateStop = reader.stop('again');
+  assert.equal(duplicateStop.actionStatus, 'rejected');
+  assert.equal(duplicateStop.playback, 'idle');
 });
 
 test('never cancels foreign speech and ignores stale synchronous callbacks from owned speech', async () => {
@@ -243,6 +265,8 @@ test('never cancels foreign speech and ignores stale synchronous callbacks from 
   assert.equal(fixture.utterances.length, 1);
   const stale = fixture.utterances[0];
   reader.next();
+  assert.equal(reader.getState().index, 0);
+  fixture.finishOwnedSpeech();
   const afterNext = reader.getState();
   assert.equal(afterNext.index, 1);
   stale.onerror?.();
@@ -269,13 +293,13 @@ test('next, repeat, stop and voiceschanged never cancel speech queued by the pag
     assert.equal(fixture.speech.cancelCalls, 0, `${action}: cancel é global e não pode ser usado`);
     assert.equal(foreign.cancelled, false, `${action}: a fala alheia precisa permanecer na fila`);
     assert.equal(fixture.utterances.length, 1, `${action}: nenhuma fala Audita obsoleta pode entrar depois da fala alheia`);
-    if (action === 'next') assert.equal(reader.getState().caption, 'Segundo, link');
-    if (action === 'stop') assert.equal(reader.getState().playback, 'idle');
+    if (action === 'next') assert.equal(reader.getState().caption, 'Primeiro, botão');
+    if (action === 'stop') assert.equal(reader.getState().playback, 'playing');
     else assert.notEqual(reader.getState().playback, 'idle');
   }
 });
 
-test('voiceschanged cannot hide that the shared queue remains busy after Audita abandons its utterance', async () => {
+test('voiceschanged cannot hide that the shared queue remains busy while Audita owns its utterance', async () => {
   const namespace = await loadReaderFactory();
   const fixture = fixtureEnvironment();
   const reader = namespace.createScreenReaderModule(fixture.environment);
@@ -351,6 +375,7 @@ test('late focus and voices callbacks after stop cannot publish or recreate read
   const lateFocus = fixture.captureFocusListener();
   const lateVoices = fixture.captureVoicesListener();
   reader.stop('done');
+  fixture.finishOwnedSpeech();
   const afterStop = fixture.events.slice();
   lateFocus?.(fixture.candidates[1].element);
   lateVoices?.();
@@ -569,7 +594,7 @@ test('revalidates a selected local voice immediately before speak and on voicesc
   repeatReader.start({ voiceId: 'local-a', rate: 1 });
   assert.equal(repeatFixture.events.filter(value => value.startsWith('speak:')).length, 1);
   repeatFixture.speech.voices = [];
-  repeatFixture.setSpeechState({ speaking: false });
+  repeatFixture.finishOwnedSpeech();
   repeatReader.repeat();
   assert.equal(repeatFixture.events.filter(value => value.startsWith('speak:')).length, 1);
   assert.equal(repeatReader.getState().voiceId, '');
@@ -608,4 +633,263 @@ test('never falls back to a default when assignment removes or does not retain t
   assert.equal(ignoredReader.getState().caption, 'Primeiro, botão');
   assert.equal(ignoredReader.next().index, 1);
   assert.match(ignoredReader.getState().speechAvailability, /unavailable|error/iu);
+});
+
+test('projects only a bounded minimal inventory of trusted local voices on explicit request', async () => {
+  const namespace = await loadReaderFactory();
+  const local = trustedVoice({
+    voiceURI: 'local-pt-br', name: 'Voz local brasileira', lang: 'pt-BR', localService: true,
+  });
+  const remote = trustedVoice({
+    voiceURI: 'remote-cloud', name: 'Voz remota', lang: 'pt-BR', localService: false,
+  });
+  const fixture = fixtureEnvironment({ voices: [local, remote] });
+  const reader = namespace.createScreenReaderModule(fixture.environment);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(reader.listLocalVoices())), {
+    status: 'available',
+    voices: [{ id: 'local-pt-br', label: 'Voz local brasileira', lang: 'pt-BR' }],
+  });
+  assert.equal(JSON.stringify(reader.listLocalVoices()).includes('remote-cloud'), false);
+  assert.equal(JSON.stringify(reader.listLocalVoices()).includes('Voz remota'), false);
+});
+
+test('selects preferences atomically only when the requested voice is still trusted and local', async () => {
+  const namespace = await loadReaderFactory();
+  const first = trustedVoice({ voiceURI: 'local-a', name: 'Voz A', lang: 'pt-BR', localService: true });
+  const second = trustedVoice({ voiceURI: 'local-b', name: 'Voz B', lang: 'pt-BR', localService: true });
+  const remote = trustedVoice({ voiceURI: 'remote-a', name: 'Remota', lang: 'pt-BR', localService: false });
+  const fixture = fixtureEnvironment({ voices: [first, second, remote] });
+  const reader = namespace.createScreenReaderModule(fixture.environment);
+  reader.start({ voiceId: 'local-a', rate: 1 });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(reader.setPreferences({ voiceId: 'remote-a', rate: 1.75 }))), {
+    playback: 'playing', index: 0, total: 3, caption: 'Primeiro, botão',
+    canPrevious: false, canNext: true, speechAvailability: 'available',
+    voiceId: 'local-a', rate: 1,
+  });
+  const selected = reader.setPreferences({ voiceId: 'local-b', rate: 1.75 });
+  assert.equal(selected.voiceId, 'local-b');
+  assert.equal(selected.rate, 1.75);
+});
+
+test('reader stop clears only playback and caption while resume safely recollects without global speech controls', async () => {
+  const namespace = await loadReaderFactory();
+  const fixture = fixtureEnvironment();
+  const reader = namespace.createScreenReaderModule(fixture.environment);
+  reader.start({ voiceId: 'voice-a', rate: 1 });
+  const foreign = fixture.enqueueForeignSpeech('Fala da página preservada');
+
+  const stopped = reader.stop();
+  assert.equal(stopped.playback, 'playing');
+  assert.equal(stopped.caption, 'Primeiro, botão');
+  assert.equal(fixture.speech.cancelCalls, 0);
+  assert.equal(fixture.speech.pauseCalls, 0);
+  assert.equal(fixture.speech.resumeCalls, 0);
+  assert.equal(foreign.cancelled, false);
+
+  fixture.finishOwnedSpeech();
+  assert.equal(reader.getState().playback, 'idle');
+  assert.equal(reader.getState().caption, '');
+  fixture.setSpeechState({ pending: false, paused: false });
+  const resumed = reader.resume();
+  assert.equal(resumed.playback, 'playing');
+  assert.equal(resumed.caption, 'Primeiro, botão');
+  assert.equal(fixture.speech.cancelCalls, 0);
+  assert.equal(fixture.speech.pauseCalls, 0);
+  assert.equal(fixture.speech.resumeCalls, 0);
+});
+
+test('pause and stop remain truthful until the owned utterance actually ends', async () => {
+  const namespace = await loadReaderFactory();
+
+  const pausedFixture = fixtureEnvironment();
+  const pausedReader = namespace.createScreenReaderModule(pausedFixture.environment);
+  pausedReader.start({ voiceId: 'voice-a', rate: 1 });
+  const pausePending = pausedReader.pause();
+  assert.equal(pausePending.playback, 'playing', 'a fala ainda audível não pode ser declarada pausada');
+  assert.equal(pausePending.caption, 'Primeiro, botão');
+  assert.equal(pausedFixture.speech.pauseCalls, 0);
+  pausedFixture.finishOwnedSpeech();
+  assert.equal(pausedReader.getState().playback, 'paused');
+  assert.equal(pausedFixture.utterances.length, 1);
+
+  const stoppedFixture = fixtureEnvironment();
+  const stoppedReader = namespace.createScreenReaderModule(stoppedFixture.environment);
+  stoppedReader.start({ voiceId: 'voice-a', rate: 1 });
+  const stopPending = stoppedReader.stop();
+  assert.equal(stopPending.playback, 'playing', 'a fala ainda audível não pode ser declarada encerrada');
+  assert.equal(stopPending.caption, 'Primeiro, botão');
+  assert.equal(stoppedFixture.speech.cancelCalls, 0);
+  stoppedFixture.finishOwnedSpeech();
+  assert.equal(stoppedReader.getState().playback, 'idle');
+  assert.equal(stoppedReader.getState().caption, '');
+});
+
+test('next repeat and resume requested during owned speech announce after the current utterance', async () => {
+  const namespace = await loadReaderFactory();
+
+  const nextFixture = fixtureEnvironment();
+  const nextReader = namespace.createScreenReaderModule(nextFixture.environment);
+  nextReader.start({ voiceId: 'voice-a', rate: 1 });
+  const nextPending = nextReader.next();
+  assert.equal(nextPending.index, 0, 'a legenda deve continuar correspondendo à fala audível');
+  assert.equal(nextFixture.utterances.length, 1);
+  nextFixture.finishOwnedSpeech();
+  assert.equal(nextReader.getState().index, 1);
+  assert.equal(nextReader.getState().caption, 'Segundo, link');
+  assert.equal(nextFixture.utterances.length, 2);
+  assert.equal(nextFixture.utterances[1].text, 'Segundo, link');
+
+  const repeatFixture = fixtureEnvironment();
+  const repeatReader = namespace.createScreenReaderModule(repeatFixture.environment);
+  repeatReader.start({ voiceId: 'voice-a', rate: 1 });
+  repeatReader.repeat();
+  assert.equal(repeatFixture.utterances.length, 1);
+  repeatFixture.finishOwnedSpeech();
+  assert.equal(repeatFixture.utterances.length, 2);
+  assert.equal(repeatFixture.utterances[1].text, 'Primeiro, botão');
+
+  const resumeFixture = fixtureEnvironment();
+  const resumeReader = namespace.createScreenReaderModule(resumeFixture.environment);
+  resumeReader.start({ voiceId: 'voice-a', rate: 1 });
+  resumeReader.pause();
+  const resumePending = resumeReader.resume();
+  assert.equal(resumePending.playback, 'playing');
+  assert.equal(resumeFixture.utterances.length, 1);
+  resumeFixture.finishOwnedSpeech();
+  assert.equal(resumeFixture.utterances.length, 2);
+  assert.equal(resumeFixture.utterances[1].text, 'Primeiro, botão');
+
+  for (const fixture of [nextFixture, repeatFixture, resumeFixture]) {
+    assert.equal(fixture.speech.cancelCalls, 0);
+    assert.equal(fixture.speech.pauseCalls, 0);
+    assert.equal(fixture.speech.resumeCalls, 0);
+  }
+});
+
+test('queued semantic actions run FIFO with navigation calculated only when consumed', async () => {
+  const namespace = await loadReaderFactory();
+
+  const nextRepeatFixture = fixtureEnvironment();
+  const nextRepeatReader = namespace.createScreenReaderModule(nextRepeatFixture.environment);
+  nextRepeatReader.start({ voiceId: 'voice-a', rate: 1 });
+  nextRepeatReader.next();
+  nextRepeatReader.repeat();
+  nextRepeatFixture.finishOwnedSpeech();
+  assert.deepEqual(nextRepeatFixture.utterances.map(item => item.text), [
+    'Primeiro, botão', 'Segundo, link',
+  ]);
+  nextRepeatFixture.finishOwnedSpeech();
+  assert.deepEqual(nextRepeatFixture.utterances.map(item => item.text), [
+    'Primeiro, botão', 'Segundo, link', 'Segundo, link',
+  ]);
+
+  const nextNextFixture = fixtureEnvironment();
+  const nextNextReader = namespace.createScreenReaderModule(nextNextFixture.environment);
+  nextNextReader.start({ voiceId: 'voice-a', rate: 1 });
+  nextNextReader.next();
+  nextNextReader.next();
+  nextNextFixture.finishOwnedSpeech();
+  assert.equal(nextNextReader.getState().index, 1);
+  nextNextFixture.finishOwnedSpeech();
+  assert.equal(nextNextReader.getState().index, 2);
+  assert.deepEqual(nextNextFixture.utterances.map(item => item.text), [
+    'Primeiro, botão', 'Segundo, link', 'Terceiro, caixa de seleção',
+  ]);
+
+  const nextPreviousFixture = fixtureEnvironment();
+  const nextPreviousReader = namespace.createScreenReaderModule(nextPreviousFixture.environment);
+  nextPreviousReader.start({ voiceId: 'voice-a', rate: 1 });
+  nextPreviousReader.next();
+  nextPreviousReader.previous();
+  nextPreviousFixture.finishOwnedSpeech();
+  assert.equal(nextPreviousReader.getState().index, 1);
+  nextPreviousFixture.finishOwnedSpeech();
+  assert.equal(nextPreviousReader.getState().index, 0);
+  assert.deepEqual(nextPreviousFixture.utterances.map(item => item.text), [
+    'Primeiro, botão', 'Segundo, link', 'Primeiro, botão',
+  ]);
+
+  for (const fixture of [nextRepeatFixture, nextNextFixture, nextPreviousFixture]) {
+    assert.equal(fixture.speech.cancelCalls, 0);
+    assert.equal(fixture.speech.pauseCalls, 0);
+    assert.equal(fixture.speech.resumeCalls, 0);
+  }
+});
+
+test('pending action queue has an exact bound and overflow fails closed after owned speech', async () => {
+  const namespace = await loadReaderFactory();
+  const acceptedFixture = fixtureEnvironment();
+  const acceptedReader = namespace.createScreenReaderModule(acceptedFixture.environment);
+  acceptedReader.start({ voiceId: 'voice-a', rate: 1 });
+  for (let count = 0; count < 32; count += 1) acceptedReader.repeat();
+  for (let count = 0; count < 32; count += 1) acceptedFixture.finishOwnedSpeech();
+  assert.equal(acceptedFixture.utterances.length, 33, '32 ações devem caber na fila fechada');
+  assert.equal(acceptedReader.getState().playback, 'playing');
+
+  const overflowFixture = fixtureEnvironment();
+  const overflowReader = namespace.createScreenReaderModule(overflowFixture.environment);
+  overflowReader.start({ voiceId: 'voice-a', rate: 1 });
+  for (let count = 0; count < 32; count += 1) overflowReader.repeat();
+  const overflow = overflowReader.next();
+  assert.equal(overflow.actionStatus, 'terminal');
+  assert.equal(overflow.playback, 'playing', 'overflow não pode declarar idle antes do término real');
+  assert.equal(overflow.speechAvailability, 'error');
+  assert.equal(overflowReader.repeat().actionStatus, 'rejected');
+  overflowFixture.finishOwnedSpeech();
+  assert.equal(overflowReader.getState().playback, 'idle');
+  assert.equal(overflowFixture.utterances.length, 1, 'overflow descarta ações e encerra sem nova fala');
+  assert.equal(overflowFixture.speech.cancelCalls, 0);
+  assert.equal(overflowFixture.speech.pauseCalls, 0);
+  assert.equal(overflowFixture.speech.resumeCalls, 0);
+
+  const errorFixture = fixtureEnvironment();
+  const errorReader = namespace.createScreenReaderModule(errorFixture.environment);
+  errorReader.start({ voiceId: 'voice-a', rate: 1 });
+  for (let count = 0; count < 32; count += 1) errorReader.repeat();
+  assert.equal(errorReader.next().actionStatus, 'terminal');
+  errorFixture.finishOwnedSpeech('error');
+  assert.equal(errorReader.getState().playback, 'idle');
+  assert.equal(errorReader.getState().speechAvailability, 'error');
+  assert.equal(errorFixture.utterances.length, 1);
+  assert.equal(errorFixture.speech.cancelCalls, 0);
+});
+
+test('focus-driven queue overflow emits one terminal signal and cannot silently restart', async () => {
+  const namespace = await loadReaderFactory();
+  const fixture = fixtureEnvironment();
+  const reader = namespace.createScreenReaderModule(fixture.environment);
+  reader.start({ voiceId: 'voice-a', rate: 1 });
+
+  for (let count = 0; count < 33; count += 1) fixture.focus(fixture.candidates[1].element);
+
+  assert.deepEqual(fixture.terminalEvents, ['queue-overflow']);
+  assert.equal(reader.getState().playback, 'playing');
+  assert.equal(reader.getState().speechAvailability, 'error');
+  fixture.finishOwnedSpeech();
+  assert.equal(reader.getState().playback, 'idle');
+  assert.equal(reader.resume().actionStatus, 'accepted', 'the module remains reusable only when its owner accepts the terminal signal');
+  assert.deepEqual(fixture.terminalEvents, ['queue-overflow']);
+});
+
+test('stop is terminal for queued actions but remains truthful until onend', async () => {
+  const namespace = await loadReaderFactory();
+  const fixture = fixtureEnvironment();
+  const reader = namespace.createScreenReaderModule(fixture.environment);
+  reader.start({ voiceId: 'voice-a', rate: 1 });
+  assert.equal(reader.next().actionStatus, 'accepted');
+  const stopping = reader.stop();
+  assert.equal(stopping.actionStatus, 'accepted');
+  assert.equal(reader.next().actionStatus, 'rejected');
+  assert.equal(reader.repeat().actionStatus, 'rejected');
+
+  assert.equal(stopping.playback, 'playing');
+  assert.equal(reader.getState().index, 0);
+  fixture.finishOwnedSpeech();
+  assert.equal(reader.getState().playback, 'idle');
+  assert.equal(fixture.utterances.length, 1);
+  assert.equal(fixture.speech.cancelCalls, 0);
+  assert.equal(fixture.speech.pauseCalls, 0);
+  assert.equal(fixture.speech.resumeCalls, 0);
 });

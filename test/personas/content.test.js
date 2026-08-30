@@ -129,6 +129,80 @@ class FakeDocument {
   dispatchWindow(type, event = {}) { for (const listener of [...(this.windowListeners.get(type) ?? [])]) listener(event); }
 }
 
+const contentVoiceState = new WeakMap();
+const contentSpeechState = new WeakMap();
+const contentUtteranceState = new WeakMap();
+
+class ContentSpeechSynthesisVoice {
+  constructor(values) { contentVoiceState.set(this, values); }
+  get voiceURI() { return contentVoiceState.get(this).voiceURI; }
+  get name() { return contentVoiceState.get(this).name; }
+  get lang() { return contentVoiceState.get(this).lang; }
+  get localService() { return contentVoiceState.get(this).localService; }
+}
+
+class ContentSpeechSynthesis {
+  constructor(voices) {
+    contentSpeechState.set(this, {
+      voices, speaking: false, pending: false, paused: false, current: null, listeners: new Map(),
+    });
+  }
+  get speaking() { return contentSpeechState.get(this).speaking; }
+  get pending() { return contentSpeechState.get(this).pending; }
+  get paused() { return contentSpeechState.get(this).paused; }
+  getVoices() { return contentSpeechState.get(this).voices; }
+  speak(utterance) {
+    const state = contentSpeechState.get(this);
+    state.speaking = true;
+    state.current = utterance;
+  }
+  addEventListener(type, listener) { contentSpeechState.get(this).listeners.set(type, listener); }
+  removeEventListener(type, listener) {
+    const state = contentSpeechState.get(this);
+    if (state.listeners.get(type) === listener) state.listeners.delete(type);
+  }
+}
+
+class ContentSpeechSynthesisUtterance {
+  constructor(textValue) {
+    contentUtteranceState.set(this, {
+      text: textValue, voice: null, lang: '', rate: 1, onend: null, onerror: null,
+    });
+  }
+  get voice() { return contentUtteranceState.get(this).voice; }
+  set voice(value) { contentUtteranceState.get(this).voice = value; }
+  get lang() { return contentUtteranceState.get(this).lang; }
+  set lang(value) { contentUtteranceState.get(this).lang = value; }
+  get rate() { return contentUtteranceState.get(this).rate; }
+  set rate(value) { contentUtteranceState.get(this).rate = value; }
+  get onend() { return contentUtteranceState.get(this).onend; }
+  set onend(value) { contentUtteranceState.get(this).onend = value; }
+  get onerror() { return contentUtteranceState.get(this).onerror; }
+  set onerror(value) { contentUtteranceState.get(this).onerror = value; }
+}
+
+function contentSpeechFixture() {
+  const voice = new ContentSpeechSynthesisVoice({
+    voiceURI: 'content-local', name: 'Voz local', lang: 'pt-BR', localService: true,
+  });
+  const synthesis = new ContentSpeechSynthesis([voice]);
+  return {
+    context: {
+      SpeechSynthesisVoice: ContentSpeechSynthesisVoice,
+      SpeechSynthesis: ContentSpeechSynthesis,
+      SpeechSynthesisUtterance: ContentSpeechSynthesisUtterance,
+    },
+    synthesis,
+    finish() {
+      const state = contentSpeechState.get(synthesis);
+      const current = state.current;
+      state.current = null;
+      state.speaking = false;
+      current?.onend?.();
+    },
+  };
+}
+
 async function loadContentFactory(contextGlobals = {}) {
   const runtime = await readFile(new URL('../../src/core/accessibility/accessible-preview-runtime.classic.js', import.meta.url), 'utf8');
   const reader = await readFile(new URL('../../src/personas/screen-reader-module.js', import.meta.url), 'utf8');
@@ -535,7 +609,7 @@ test('content runtime exposes no callable or source-level legacy messaging chann
   });
   assert.equal(Object.hasOwn(content, 'installMessaging'), false);
   assert.deepEqual(Object.keys(content), [
-    'activate', 'stop', 'readerAction', 'setPreferences',
+    'activate', 'stop', 'readerAction', 'setPreferences', 'listReaderVoices',
     'collectReaderCandidates', 'getLimitations', 'getState', 'destroy',
   ]);
 
@@ -737,11 +811,96 @@ test('reader with an empty queue can explicitly recollect and start after safe D
   assert.equal(empty.reader.total, 0);
   body.append(element('button', 'late-button', 'Botão adicionado'));
   const restarted = content.readerAction('start');
-  assert.equal(restarted.reader.playback, 'playing');
-  assert.equal(restarted.reader.total, 1);
-  assert.equal(restarted.reader.caption, 'Botão adicionado, botão');
+  assert.equal(restarted.actionStatus, 'accepted');
+  assert.equal(restarted.state.reader.playback, 'playing');
+  assert.equal(restarted.state.reader.total, 1);
+  assert.equal(restarted.state.reader.caption, 'Botão adicionado, botão');
   content.stop('done');
   assert.equal(document.body.children.filter(node => node.hasAttribute('data-audita-persona-owned')).length, 0);
+});
+
+test('reader stop clears only reader playback while preserving the persona lease mode for a safe resume', async () => {
+  const namespace = await loadContentFactory();
+  const fixture = fixturePage();
+  const content = namespace.createContentRuntime({
+    document: fixture.document,
+    window: fixture.document.defaultView,
+    emitEvent() {},
+    speechSynthesis: null,
+  });
+  assert.equal(content.activate('reader', { voiceId: '', rate: 1 }).activeMode, 'reader');
+
+  const readerStopped = content.readerAction('stop');
+  assert.equal(readerStopped.actionStatus, 'accepted');
+  assert.equal(readerStopped.state.activeMode, 'reader');
+  assert.equal(readerStopped.state.reader.playback, 'idle');
+  assert.equal(readerStopped.state.reader.caption, '');
+  assert.equal(fixture.document.documentElement.classList.contains('audita-persona-reader'), true);
+
+  const resumed = content.readerAction('resume');
+  assert.equal(resumed.actionStatus, 'accepted');
+  assert.equal(resumed.state.activeMode, 'reader');
+  assert.equal(resumed.state.reader.playback, 'playing');
+  assert.equal(resumed.state.reader.caption, 'Positivo um, botão');
+
+  const personaStopped = content.stop('explicit-persona-stop');
+  assert.equal(personaStopped.activeMode, null);
+  assert.equal(fixture.document.documentElement.classList.contains('audita-persona-reader'), false);
+});
+
+test('persona cleanup stays unconfirmed until its owned reader utterance has really ended', async () => {
+  const speech = contentSpeechFixture();
+  const namespace = await loadContentFactory(speech.context);
+  const fixture = fixturePage();
+  const content = namespace.createContentRuntime({
+    document: fixture.document,
+    window: fixture.document.defaultView,
+    emitEvent() {},
+    speechSynthesis: speech.synthesis,
+    Utterance: ContentSpeechSynthesisUtterance,
+  });
+
+  const active = content.activate('reader', { voiceId: 'content-local', rate: 1 });
+  assert.equal(active.activeMode, 'reader');
+  assert.equal(contentSpeechState.get(speech.synthesis).speaking, true);
+
+  const pending = content.stop();
+  assert.equal(pending.activeMode, 'reader', 'não pode confirmar cleanup com fala própria ainda audível');
+  assert.equal(pending.reader.playback, 'playing');
+  assert.equal(fixture.document.documentElement.classList.contains('audita-persona-reader'), true);
+
+  speech.finish();
+  assert.equal(content.getState().activeMode, null);
+  assert.equal(content.getState().reader.playback, 'idle');
+  assert.equal(fixture.document.documentElement.classList.contains('audita-persona-reader'), false);
+});
+
+test('focus-driven reader overflow becomes terminal and removes the local persona after owned speech', async () => {
+  const speech = contentSpeechFixture();
+  const namespace = await loadContentFactory(speech.context);
+  const fixture = fixturePage();
+  const events = [];
+  const content = namespace.createContentRuntime({
+    document: fixture.document,
+    window: fixture.document.defaultView,
+    emitEvent: event => events.push(structuredClone(event)),
+    speechSynthesis: speech.synthesis,
+    Utterance: ContentSpeechSynthesisUtterance,
+  });
+
+  assert.equal(content.activate('reader', { voiceId: 'content-local', rate: 1 }).activeMode, 'reader');
+  for (let count = 0; count < 33; count += 1) {
+    fixture.document.dispatch('focusin', { target: fixture.nodes.natural });
+  }
+
+  assert.equal(content.getState().activeMode, 'reader', 'cleanup remains pending while Audita still speaks');
+  assert.equal(content.getState().reader.speechAvailability, 'error');
+  speech.finish();
+  assert.equal(content.getState().activeMode, null);
+  assert.equal(content.getState().reader.playback, 'idle');
+  assert.equal(fixture.document.documentElement.classList.contains('audita-persona-reader'), false);
+  assert.equal(content.readerAction('resume').actionStatus, 'rejected');
+  assert.equal(events.filter(event => event?.event === 'reader-terminal').length, 1);
 });
 
 test('hostile speech bootstrap is never evaluated and visual reader fallback remains usable', async () => {
@@ -774,7 +933,9 @@ test('hostile speech bootstrap is never evaluated and visual reader fallback rem
   assert.equal(active.reader.caption, 'Positivo um, botão');
   assert.equal(active.reader.speechAvailability, 'unavailable');
   assert.equal(fixture.document.body.children.filter(node => node.hasAttribute('data-audita-persona-owned')).length, 2);
-  assert.equal(content.readerAction('next').reader.index, 1);
+  const next = content.readerAction('next');
+  assert.equal(next.actionStatus, 'accepted');
+  assert.equal(next.state.reader.index, 1);
 });
 
 test('voice inventory changes use the trusted inherited EventTarget listener', async () => {

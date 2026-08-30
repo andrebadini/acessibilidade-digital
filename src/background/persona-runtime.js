@@ -10,6 +10,11 @@ export const PERSONA_INJECTION_CSS = Object.freeze(['src/personas/personas.css']
 const MODES = new Set(['reader', 'achromatopsia', 'motor']);
 const TARGET_KEYS = ['tabId', 'windowId', 'documentId', 'urlSessionDigest'];
 const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
+const READER_ACTIONS = new Set(['previous', 'repeat', 'pause', 'resume', 'next', 'stop']);
+const READER_STATE_KEYS = [
+  'version', 'playback', 'index', 'total', 'caption', 'canPrevious', 'canNext',
+  'speechAvailability', 'voiceId', 'rate',
+];
 
 function exactDataRecord(value, keys) {
   try {
@@ -58,6 +63,62 @@ function parseApplyInput(value) {
   return target ? { target, op: 'install', mode: install.mode } : null;
 }
 
+function canonicalText(value, limit, allowEmpty) {
+  if (typeof value !== 'string' || /[\u0000-\u001F\u007F]/u.test(value)) return null;
+  const normalized = Array.from(value.replace(/\s+/gu, ' ').trim()).slice(0, limit).join('');
+  return (allowEmpty || normalized) && normalized === value ? normalized : null;
+}
+
+function parseReaderInput(value) {
+  const input = exactDataRecord(value, ['target', 'command']);
+  if (!input) return null;
+  const target = parseTarget(input.target);
+  if (!target) return null;
+
+  const basic = exactDataRecord(input.command, ['version', 'op']);
+  if (basic && basic.version === 1 && basic.op === 'state') {
+    return { target, bridgeCommand: { version: 1, op: 'reader-state' }, gestureRequired: false };
+  }
+  const action = exactDataRecord(input.command, ['version', 'op', 'action']);
+  if (action && action.version === 1 && action.op === 'action' && READER_ACTIONS.has(action.action)) {
+    return {
+      target,
+      bridgeCommand: { version: 1, op: 'reader-action', action: action.action },
+      gestureRequired: false,
+    };
+  }
+  const voices = exactDataRecord(input.command, ['version', 'op', 'explicitUserGesture']);
+  if (voices && voices.version === 1 && voices.op === 'voices' &&
+    typeof voices.explicitUserGesture === 'boolean') {
+    return {
+      target,
+      bridgeCommand: {
+        version: 1,
+        op: 'reader-voices',
+        explicitUserGesture: voices.explicitUserGesture,
+      },
+      gestureRequired: !voices.explicitUserGesture,
+    };
+  }
+  const preferences = exactDataRecord(input.command, ['version', 'op', 'voiceId', 'rate']);
+  const voiceId = preferences && canonicalText(preferences.voiceId, 200, false);
+  if (preferences && preferences.version === 1 && preferences.op === 'preferences' &&
+    voiceId !== null && typeof preferences.rate === 'number' && Number.isFinite(preferences.rate) &&
+    preferences.rate >= 0.5 && preferences.rate <= 2) {
+    return {
+      target,
+      bridgeCommand: {
+        version: 1,
+        op: 'reader-preferences',
+        voiceId,
+        rate: preferences.rate,
+      },
+      gestureRequired: false,
+    };
+  }
+  return null;
+}
+
 function parseInjectionMeta(results, expectedDocumentId) {
   try {
     if (!Array.isArray(results) || results.length !== 1) return null;
@@ -92,6 +153,98 @@ function parseCommandResult(value) {
   if (failure && failure.ok === false && [
     'invalid-command', 'runtime-missing', 'runtime-brand-mismatch', 'runtime-error', 'cleanup-unconfirmed',
   ].includes(failure.reason)) return { ok: false, reason: failure.reason };
+  return null;
+}
+
+function parseReaderState(value) {
+  const state = exactDataRecord(value, READER_STATE_KEYS);
+  if (!state || state.version !== 1 || !['idle', 'playing', 'paused'].includes(state.playback) ||
+    !Number.isSafeInteger(state.index) || !Number.isSafeInteger(state.total) ||
+    state.total < 0 || state.total > 2000 || typeof state.canPrevious !== 'boolean' ||
+    typeof state.canNext !== 'boolean' ||
+    !['available', 'unavailable', 'busy', 'error'].includes(state.speechAvailability) ||
+    typeof state.rate !== 'number' || !Number.isFinite(state.rate) ||
+    state.rate < 0.5 || state.rate > 2) return null;
+  const caption = canonicalText(state.caption, 2048, true);
+  const voiceId = canonicalText(state.voiceId, 200, true);
+  if (caption === null || voiceId === null) return null;
+  if (state.playback === 'idle') {
+    if (state.index !== -1 || state.total !== 0 || caption !== '' ||
+      state.canPrevious || state.canNext) return null;
+  } else if (state.total < 1 || state.index < 0 || state.index >= state.total || !caption ||
+    state.canPrevious !== (state.index > 0) ||
+    state.canNext !== (state.index < state.total - 1)) return null;
+  return Object.freeze({
+    version: 1,
+    playback: state.playback,
+    index: state.index,
+    total: state.total,
+    caption,
+    canPrevious: state.canPrevious,
+    canNext: state.canNext,
+    speechAvailability: state.speechAvailability,
+    voiceId,
+    rate: state.rate,
+  });
+}
+
+function parseReaderVoices(value) {
+  if (!Array.isArray(value)) return null;
+  let length;
+  let keys;
+  try {
+    length = Object.getOwnPropertyDescriptor(value, 'length')?.value;
+    keys = Reflect.ownKeys(value);
+  } catch { return null; }
+  if (!Number.isSafeInteger(length) || length < 0 || length > 128 || keys.length !== length + 1) {
+    return null;
+  }
+  const ids = new Set();
+  const voices = [];
+  for (let index = 0; index < length; index += 1) {
+    let item;
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      item = descriptor?.enumerable && Object.hasOwn(descriptor, 'value')
+        ? exactDataRecord(descriptor.value, ['id', 'label', 'lang'])
+        : null;
+    } catch { return null; }
+    const id = item && canonicalText(item.id, 200, false);
+    const label = item && canonicalText(item.label, 200, false);
+    const lang = item && canonicalText(item.lang, 64, true);
+    if (!item || id === null || label === null || lang === null || ids.has(id)) return null;
+    ids.add(id);
+    voices.push(Object.freeze({ id, label, lang }));
+  }
+  return Object.freeze(voices);
+}
+
+function parseReaderCommandResult(value) {
+  const actionResult = exactDataRecord(value, ['ok', 'kind', 'actionStatus', 'state']);
+  if (actionResult && actionResult.ok === true && actionResult.kind === 'state' &&
+    ['accepted', 'rejected', 'terminal'].includes(actionResult.actionStatus)) {
+    const state = parseReaderState(actionResult.state);
+    return state
+      ? { ok: true, kind: 'state', actionStatus: actionResult.actionStatus, state }
+      : null;
+  }
+  const stateResult = exactDataRecord(value, ['ok', 'kind', 'state']);
+  if (stateResult && stateResult.ok === true && stateResult.kind === 'state') {
+    const state = parseReaderState(stateResult.state);
+    return state ? { ok: true, kind: 'state', state } : null;
+  }
+  const voicesResult = exactDataRecord(value, ['ok', 'kind', 'status', 'voices']);
+  if (voicesResult && voicesResult.ok === true && voicesResult.kind === 'voices' &&
+    ['available', 'unavailable'].includes(voicesResult.status)) {
+    const voices = parseReaderVoices(voicesResult.voices);
+    if (!voices || (voicesResult.status === 'unavailable' && voices.length !== 0)) return null;
+    return { ok: true, kind: 'voices', status: voicesResult.status, voices };
+  }
+  const failureResult = exactDataRecord(value, ['ok', 'reason']);
+  if (failureResult && failureResult.ok === false && [
+    'invalid-command', 'runtime-missing', 'runtime-brand-mismatch', 'runtime-error',
+    'reader-inactive', 'gesture-required', 'voice-unavailable',
+  ].includes(failureResult.reason)) return { ok: false, reason: failureResult.reason };
   return null;
 }
 
@@ -147,7 +300,11 @@ export function createPersonaInjectionRuntime({ chromeApi } = {}) {
     } catch {
       return { ok: false, reason: 'result-mismatch' };
     }
-    const parsed = type === 'probe' ? parseProbeResult(raw) : parseCommandResult(raw);
+    const parsed = type === 'probe'
+      ? parseProbeResult(raw)
+      : type === 'reader'
+        ? parseReaderCommandResult(raw)
+        : parseCommandResult(raw);
     return parsed ?? { ok: false, reason: 'result-mismatch' };
   }
 
@@ -245,5 +402,45 @@ export function createPersonaInjectionRuntime({ chromeApi } = {}) {
     return success(input.target.documentId, null);
   }
 
-  return Object.freeze({ apply });
+  async function reader(value) {
+    const input = parseReaderInput(value);
+    if (!input) throw new TypeError('PERSONA_RUNTIME_INPUT_INVALID');
+    if (input.gestureRequired) return failure('gesture-required');
+
+    const probe = await command(input.target, { version: 1, op: 'probe' }, 'probe');
+    if (!probe.ok) return failure(probe.reason);
+    if (!probe.present || probe.mode !== 'reader') return failure('reader-inactive');
+
+    const commanded = await command(input.target, input.bridgeCommand, 'reader');
+    if (!commanded.ok) {
+      if (['reader-inactive', 'gesture-required', 'voice-unavailable'].includes(commanded.reason)) {
+        return failure(commanded.reason);
+      }
+      return publicCommandFailure(commanded.reason);
+    }
+    if (commanded.kind === 'state') {
+      const expectsActionStatus = input.bridgeCommand.op === 'reader-action';
+      if (expectsActionStatus !== Object.hasOwn(commanded, 'actionStatus')) {
+        return failure('result-mismatch');
+      }
+      return Object.freeze({
+        ok: true,
+        documentId: input.target.documentId,
+        frameId: 0,
+        kind: 'state',
+        ...(expectsActionStatus ? { actionStatus: commanded.actionStatus } : {}),
+        state: commanded.state,
+      });
+    }
+    return Object.freeze({
+      ok: true,
+      documentId: input.target.documentId,
+      frameId: 0,
+      kind: 'voices',
+      status: commanded.status,
+      voices: commanded.voices,
+    });
+  }
+
+  return Object.freeze({ apply, reader });
 }

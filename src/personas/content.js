@@ -102,6 +102,8 @@
     var lastEscapeAt = 0;
     var destroyed = false;
     var discoveryMetrics = null;
+    var pendingInactiveReason = null;
+    var pendingInactiveEvent = null;
 
     function dispatchPersonaEvent(event) {
       try { emitEvent(event); } catch (_error) { /* injected observer is optional */ }
@@ -632,6 +634,7 @@
 
     function publishReader(value) {
       readerState = sanitizeReaderState(value);
+      if (pendingInactiveReason && readerState.playback === 'idle') finalizeInactiveCleanup();
       if (!suppressReaderEvents) {
         dispatchPersonaEvent({ event: 'state', activeMode: activeMode, reader: readerState, limitations: getLimitations() });
       }
@@ -679,6 +682,9 @@
           return function removeVoices() {
             try { remove.call(speechSynthesis, 'voiceschanged', listener); } catch (_error) { /* detached platform */ }
           };
+        },
+        onTerminal: function onTerminal(reason) {
+          if (reason === 'queue-overflow') transitionToInactive('reader-terminal', 'reader-terminal');
         },
         speechSynthesis: speechSynthesis,
         Utterance: Utterance
@@ -740,8 +746,7 @@
         lastEscapeAt = instant;
         escapeCount += 1;
         if (escapeCount < 3) return;
-        stop('emergency');
-        dispatchPersonaEvent({ event: 'emergency-stop' });
+        transitionToInactive('emergency', 'emergency-stop');
       };
       document.addEventListener('keydown', keydown, true);
       cleanupListeners.push(function removeEmergency() { document.removeEventListener('keydown', keydown, true); });
@@ -753,8 +758,7 @@
       windowObject.addEventListener?.('unload', leave, { once: true });
       var spa = function leaveSpa() {
         if (!activeMode) return;
-        var transition = transitionToInactive('spa-navigation');
-        if (transition.wasActive) dispatchPersonaEvent({ event: 'lifecycle-stop' });
+        transitionToInactive('spa-navigation', 'lifecycle-stop');
       };
       windowObject.addEventListener?.('popstate', spa);
       windowObject.addEventListener?.('hashchange', spa);
@@ -814,8 +818,7 @@
             }
           }
           if (!material) return;
-          var transition = transitionToInactive('material-dom-change');
-          if (transition.wasActive) dispatchPersonaEvent({ event: 'lifecycle-stop' });
+          transitionToInactive('material-dom-change', 'lifecycle-stop');
         });
         try {
           var observerInit = {
@@ -957,7 +960,8 @@
     function activate(mode, preferences) {
       if (destroyed || !['reader', 'achromatopsia', 'motor'].includes(mode)) return getState();
       if (activeMode === mode) return getState();
-      transitionToInactive('switch-mode');
+      var inactive = transitionToInactive('switch-mode');
+      if (!inactive.confirmed) return getState();
       if (!acquireRootOwnership()) return getState();
       try {
         var className = `audita-persona-${mode}`;
@@ -980,17 +984,12 @@
       return transitionToInactive('stop').state;
     }
 
-    function transitionToInactive(_reason) {
-      var wasActive = Boolean(activeMode || reader || cleanupListeners.length || artifacts.length || ownedClasses.size);
-      var activeReader = reader;
+    function finalizeInactiveCleanup() {
+      var eventName = pendingInactiveEvent;
       reader = null;
       activeMode = null;
-      if (activeReader) {
-        suppressReaderEvents = true;
-        try { readerState = sanitizeReaderState(activeReader.stop()); }
-        catch (_error) { readerState = idleReaderState(); }
-        finally { suppressReaderEvents = false; }
-      }
+      pendingInactiveReason = null;
+      pendingInactiveEvent = null;
       currentReaderElement = null;
       readerCandidateElements.clear();
       clearListeners();
@@ -998,25 +997,102 @@
       removeOwnedClasses();
       releaseRootOwnership();
       readerState = idleReaderState();
-      return { wasActive: wasActive, state: getState() };
+      if (eventName) dispatchPersonaEvent({ event: eventName });
+    }
+
+    function transitionToInactive(reason, eventName) {
+      var wasActive = Boolean(activeMode || reader || cleanupListeners.length || artifacts.length || ownedClasses.size);
+      if (!pendingInactiveReason) {
+        pendingInactiveReason = reason;
+        pendingInactiveEvent = eventName || null;
+      }
+      var activeReader = reader;
+      if (activeReader) {
+        suppressReaderEvents = true;
+        try { readerState = sanitizeReaderState(activeReader.stop()); }
+        catch (_error) {
+          return { wasActive: wasActive, confirmed: false, state: getState() };
+        }
+        finally { suppressReaderEvents = false; }
+        if (readerState.playback !== 'idle') {
+          return { wasActive: wasActive, confirmed: false, state: getState() };
+        }
+      }
+      finalizeInactiveCleanup();
+      return { wasActive: wasActive, confirmed: true, state: getState() };
     }
 
     function readerAction(action) {
-      if (activeMode !== 'reader' || !reader) return getState();
-      if (action === 'start') reader.start();
-      else if (action === 'pause') reader.pause();
-      else if (action === 'resume') reader.resume();
-      else if (action === 'stop') return stop('reader-stop');
-      else if (action === 'repeat') reader.repeat();
-      else if (action === 'previous') reader.previous();
-      else if (action === 'next') reader.next();
+      if (activeMode !== 'reader' || !reader) {
+        return { actionStatus: 'rejected', state: getState() };
+      }
+      var result = null;
+      var actionStatus = 'rejected';
+      try {
+        if (action === 'start') {
+          reader.start();
+          actionStatus = 'accepted';
+        } else if (action === 'pause') result = reader.pause();
+        else if (action === 'resume') result = reader.resume();
+        else if (action === 'stop') result = reader.stop();
+        else if (action === 'repeat') result = reader.repeat();
+        else if (action === 'previous') result = reader.previous();
+        else if (action === 'next') result = reader.next();
+        if (result) {
+          var status = ownDataProperty(result, 'actionStatus');
+          actionStatus = status.present && ['accepted', 'rejected', 'terminal'].includes(status.value)
+            ? status.value
+            : 'terminal';
+        }
+      } catch (_error) {
+        actionStatus = 'terminal';
+      }
       readerState = sanitizeReaderState(reader.getState());
-      return getState();
+      return { actionStatus: actionStatus, state: getState() };
     }
 
     function setPreferences(preferences) {
       if (reader) readerState = sanitizeReaderState(reader.setPreferences(preferences || {}));
       return getState();
+    }
+
+    function listReaderVoices() {
+      if (activeMode !== 'reader' || !reader || typeof reader.listLocalVoices !== 'function') {
+        return { status: 'unavailable', voices: [] };
+      }
+      var raw;
+      try { raw = reader.listLocalVoices(); } catch (_error) { raw = null; }
+      var status = ownDataProperty(raw, 'status');
+      var voiceList = ownDataProperty(raw, 'voices');
+      if (!status.present || !['available', 'unavailable', 'error'].includes(status.value) ||
+        !voiceList.present || !Array.isArray(voiceList.value) || voiceList.value.length > 128) {
+        return { status: 'error', voices: [] };
+      }
+      var voices = [];
+      var ids = new Set();
+      for (var candidate of voiceList.value) {
+        try {
+          if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate) ||
+            ![Object.prototype, null].includes(Object.getPrototypeOf(candidate))) throw new Error();
+          var keys = Reflect.ownKeys(candidate);
+          if (keys.length !== 3 || !['id', 'label', 'lang'].every(function expected(key) { return keys.includes(key); })) {
+            throw new Error();
+          }
+          var id = ownDataProperty(candidate, 'id');
+          var label = ownDataProperty(candidate, 'label');
+          var lang = ownDataProperty(candidate, 'lang');
+          var safeId = textValue(id.value, 200);
+          var safeLabel = textValue(label.value, 200);
+          var safeLang = textValue(lang.value, 64);
+          if (!id.present || !label.present || !lang.present || !safeId || !safeLabel ||
+            safeId !== id.value || safeLabel !== label.value || safeLang !== lang.value || ids.has(safeId)) throw new Error();
+          ids.add(safeId);
+          voices.push({ id: safeId, label: safeLabel, lang: safeLang });
+        } catch (_error) {
+          return { status: 'error', voices: [] };
+        }
+      }
+      return { status: status.value, voices: voices };
     }
 
     function getLimitations() {
@@ -1046,6 +1122,7 @@
       stop: stop,
       readerAction: readerAction,
       setPreferences: setPreferences,
+      listReaderVoices: listReaderVoices,
       collectReaderCandidates: collectReaderCandidates,
       getLimitations: getLimitations,
       getState: getState,
