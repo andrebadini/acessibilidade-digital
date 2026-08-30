@@ -64,7 +64,7 @@ export async function deriveTrustedExtensionContext({ sender, chromeApi, surface
     let nativeWindowId = -1;
     let candidate = null;
     if (nativePanelSender) {
-      if (!contexts.every(candidate => validNativePanelContext(candidate, senderUrl.value, claimedWindowId))) {
+      if (!contexts.some(candidate => validNativePanelContext(candidate, senderUrl.value, claimedWindowId))) {
         throw new Error('CONTEXT_DENIED');
       }
     } else {

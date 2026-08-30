@@ -203,6 +203,45 @@ test('accepts the native SIDE_PANEL sender without documentId only after exact o
   ]);
 });
 
+test('admits the native SIDE_PANEL sender for its claimed window when the same global panel is open in another window', async () => {
+  const url = 'chrome-extension://test/src/panel/index.html';
+  const sender = { id: 'test', url, origin: 'chrome-extension://test' };
+  const chromeApi = {
+    runtime: {
+      id: 'test',
+      async getContexts() {
+        return [
+          {
+            documentId: 'native-panel-window-8', documentUrl: url,
+            contextType: 'SIDE_PANEL', tabId: -1, windowId: 8,
+          },
+          {
+            documentId: 'native-panel-window-9', documentUrl: url,
+            contextType: 'SIDE_PANEL', tabId: -1, windowId: 9,
+          },
+        ];
+      },
+    },
+    windows: {
+      async get(windowId) { return { id: windowId, focused: true, type: 'normal' }; },
+    },
+    tabs: {
+      async query({ windowId }) {
+        return [{ id: 41, windowId, active: true, status: 'complete', url: 'https://example.test/', pendingUrl: '' }];
+      },
+    },
+  };
+
+  const context = await deriveTrustedExtensionContext({
+    sender, chromeApi, surface: PANEL_SURFACE, claimedWindowId: 9,
+  });
+
+  assert.deepEqual(context, {
+    issuer: { type: 'extension-document', documentId: 'side-panel-window:9', path: PANEL_SURFACE.path },
+    windowId: 9, tabId: null, contextType: 'SIDE_PANEL', documentUrl: url,
+  });
+});
+
 test('fails closed for a document-less sender without the exact native panel origin or live SIDE_PANEL context', async () => {
   const url = 'chrome-extension://test/src/panel/index.html';
   for (const [name, sender, contexts] of [
