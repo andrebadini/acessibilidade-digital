@@ -160,6 +160,7 @@ test('panel lists only descriptor-safe local voices and clears a persisted remot
     addEventListener() {},
     removeEventListener() {},
   };
+  element('audit-submit');
   for (const id of ['delete-all-dialog']) element(id).ownerDocument = document;
 
   const posted = [];
