@@ -928,6 +928,7 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
       async persistAuditModel(model) {
         const finalProof = await chromeAdapter.probeDocumentIdentity(target.tabId);
         if (!proofMatchesAttached(finalProof, target)) args.failTargetChanged();
+        if (signal?.aborted) throw new Error('AUDIT_ABORTED');
         if (!signal?.aborted && model?.session?.status === 'cancelled') throw new Error('AUDIT_FAILED');
         await persistAuditModel(model);
       },
@@ -947,7 +948,14 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
     const cancelled = structuredClone(draft);
     cancelled.session.status = 'cancelled';
     cancelled.session.partial = false;
-    cancelled.session.diagnostics.push(diagnostic('AUDIT_ABORTED', 'A auditoria foi cancelada.', canonicalTime(modelNow()), false));
+    const cancellationAt = canonicalTime(cancelled.timestamps?.endedAt ?? modelNow());
+    if (!cancelled.session.diagnostics.some(entry => entry?.code === 'NAVIGATION_FAILED' &&
+      entry?.message === 'A auditoria foi cancelada.' && entry?.recoverable === false)) {
+      cancelled.session.diagnostics.push(diagnostic(
+        'NAVIGATION_FAILED', 'A auditoria foi cancelada.', cancellationAt, false,
+      ));
+    }
+    cancelled.session.diagnostics.push(diagnostic('AUDIT_ABORTED', 'A auditoria foi cancelada.', cancellationAt, false));
     return enrichAuditForReport(cancelled, {
       now: modelNow, expectedExtensionId,
       browserVersion: cancelled.environment?.chromeVersion || 'não disponível',

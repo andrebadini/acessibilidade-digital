@@ -137,6 +137,7 @@ export function createPanelPortCoordinator(raw) {
   const liveByWindow = new Map();
   const scopeStates = new WeakMap();
   const scopeDeniedSentinel = Object.freeze(Object.create(null));
+  const activeConflictSentinel = Object.freeze(Object.create(null));
   let scopeMarker = null;
 
   function assertScope(scope, windowId) {
@@ -192,10 +193,13 @@ export function createPanelPortCoordinator(raw) {
     return operation;
   }
 
-  async function readBootstrap(windowId) {
+  function reassert(assertOwned) { assertOwned?.(); }
+
+  async function readBootstrap(windowId, assertOwned = null) {
     const key = panelBootstrapStorageKey(windowId);
     const read = async () => {
       const envelope = await input.sessionArea.get(key);
+      reassert(assertOwned);
       const rawValue = own(envelope, key);
       if (rawValue === undefined) return null;
       const value = parseBootstrap(rawValue);
@@ -203,36 +207,80 @@ export function createPanelPortCoordinator(raw) {
       return value;
     };
     const first = await read();
+    reassert(assertOwned);
     const second = await read();
+    reassert(assertOwned);
     if (!same(first, second)) throw new Error('PANEL_BOOTSTRAP_DENIED');
     return first;
   }
 
-  async function writeBootstrap(record) {
+  async function writeBootstrap(record, assertOwned = null) {
     const canonical = parseBootstrap(record);
     if (!canonical) throw new Error('PANEL_BOOTSTRAP_DENIED');
     const key = panelBootstrapStorageKey(canonical.windowId);
+    reassert(assertOwned);
     await input.sessionArea.set({ [key]: canonical });
-    const confirmed = await readBootstrap(canonical.windowId);
+    reassert(assertOwned);
+    const confirmed = await readBootstrap(canonical.windowId, assertOwned);
+    reassert(assertOwned);
     if (!same(confirmed, canonical)) throw new Error('PANEL_BOOTSTRAP_DENIED');
     return confirmed;
   }
 
-  async function readSession(sessionCapabilityId, auditId) {
+  async function restoreBootstrap(previous, replacement, assertOwned) {
+    const current = await readBootstrap(replacement.windowId, assertOwned);
+    reassert(assertOwned);
+    if (!same(current, replacement)) return false;
+    if (previous !== null) {
+      const restored = await writeBootstrap(previous, assertOwned);
+      reassert(assertOwned);
+      return same(restored, previous);
+    }
+    reassert(assertOwned);
+    await input.sessionArea.remove(panelBootstrapStorageKey(replacement.windowId));
+    reassert(assertOwned);
+    const removed = await readBootstrap(replacement.windowId, assertOwned);
+    reassert(assertOwned);
+    return removed === null;
+  }
+
+  async function readSession(sessionCapabilityId, auditId, assertOwned = null) {
     const value = parseSession(await input.readAuditSession({ sessionCapabilityId, auditId }));
+    reassert(assertOwned);
     if (!value || value.sessionCapabilityId !== sessionCapabilityId || value.auditId !== auditId) throw new Error('PANEL_SESSION_DENIED');
     return value;
   }
 
-  async function readActive() {
+  async function readActive(assertOwned = null) {
     const value = parseActive(await input.readActiveJob());
+    reassert(assertOwned);
     if (value === undefined) throw new Error('PANEL_ACTIVE_DENIED');
     return value;
   }
 
-  async function confirmStartJournalAbsent() {
-    const read = async () => own(await input.sessionArea.get(START_JOURNAL_KEY), START_JOURNAL_KEY);
-    return await read() === undefined && await read() === undefined;
+  async function requireActiveAbsent(assertOwned) {
+    try {
+      const active = await readActive(assertOwned);
+      reassert(assertOwned);
+      if (active !== null) throw activeConflictSentinel;
+    } catch (error) {
+      if (error === scopeDeniedSentinel) throw error;
+      throw activeConflictSentinel;
+    }
+  }
+
+  async function confirmStartJournalAbsent(assertOwned = null) {
+    const read = async () => {
+      const envelope = await input.sessionArea.get(START_JOURNAL_KEY);
+      reassert(assertOwned);
+      return own(envelope, START_JOURNAL_KEY);
+    };
+    const first = await read();
+    reassert(assertOwned);
+    if (first !== undefined) return false;
+    const second = await read();
+    reassert(assertOwned);
+    return second === undefined;
   }
 
   function snapshotSender(port) {
@@ -252,38 +300,49 @@ export function createPanelPortCoordinator(raw) {
     return binding && binding.state !== 'disconnected' && bindings.get(binding.port) === binding;
   }
 
-  function removeTemporary(binding) {
+  function removeTemporary(binding, assertOwned = null) {
     if (binding.deadline !== null) {
+      reassert(assertOwned);
       input.clearTimer(binding.deadline);
       binding.deadline = null;
     }
+    reassert(assertOwned);
     try { binding.port.onMessage.removeListener(binding.onHello); } catch { /* fixed cleanup */ }
   }
 
-  function disconnect(binding) {
+  function disconnect(binding, assertOwned = null) {
     if (!binding || binding.state === 'disconnected') return false;
+    reassert(assertOwned);
     binding.state = 'disconnected';
-    removeTemporary(binding);
+    removeTemporary(binding, assertOwned);
+    reassert(assertOwned);
     try { binding.port.onMessage.removeListener(binding.onBoundMessage); } catch { /* fixed cleanup */ }
+    reassert(assertOwned);
     try { binding.port.onDisconnect.removeListener(binding.onDisconnect); } catch { /* fixed cleanup */ }
+    reassert(assertOwned);
     bindings.delete(binding.port);
+    reassert(assertOwned);
     if (binding.windowId !== null && liveByWindow.get(binding.windowId) === binding) liveByWindow.delete(binding.windowId);
+    reassert(assertOwned);
     try { binding.port.disconnect(); } catch { /* fixed cleanup */ }
     return true;
   }
 
-  async function reprove(binding) {
+  async function reprove(binding, assertOwned = null) {
     const context = await proveSender(binding.sender);
+    reassert(assertOwned);
     return connected(binding) && context.windowId === binding.windowId && context.issuer.documentId === binding.sender.documentId
       ? context : null;
   }
 
-  function send(binding, value) {
+  function send(binding, value, assertOwned = null) {
+    reassert(assertOwned);
     if (!connected(binding)) throw new Error('PANEL_PORT_DISCONNECTED');
     binding.port.postMessage(value);
   }
 
-  function bind(binding, windowId, state, auditId = null, sessionCapabilityId = null) {
+  function bind(binding, windowId, state, auditId = null, sessionCapabilityId = null, assertOwned = null) {
+    reassert(assertOwned);
     binding.windowId = windowId;
     binding.state = state;
     binding.auditId = auditId;
@@ -291,23 +350,37 @@ export function createPanelPortCoordinator(raw) {
     liveByWindow.set(windowId, binding);
   }
 
-  async function runningCorrelation(bootstrap) {
-    const session = await readSession(bootstrap.sessionCapabilityId, bootstrap.auditId);
-    const active = await readActive();
+  async function runningCorrelation(bootstrap, assertOwned = null) {
+    const session = await readSession(bootstrap.sessionCapabilityId, bootstrap.auditId, assertOwned);
+    reassert(assertOwned);
+    const active = await readActive(assertOwned);
+    reassert(assertOwned);
     return session.state === 'running' && session.windowId === bootstrap.windowId && active?.state === 'running' &&
       active.auditId === bootstrap.auditId && active.sessionCapabilityId === bootstrap.sessionCapabilityId &&
       active.windowId === bootstrap.windowId ? { session, active } : null;
   }
 
-  async function deliverRunning(binding, bootstrap, rotate) {
-    if (!await runningCorrelation(bootstrap)) throw new Error('PANEL_RUNNING_DENIED');
+  async function deliverRunning(binding, bootstrap, rotate, assertOwned = null) {
+    const correlation = await runningCorrelation(bootstrap, assertOwned);
+    reassert(assertOwned);
+    const journalAbsent = correlation ? await confirmStartJournalAbsent(assertOwned) : false;
+    reassert(assertOwned);
+    if (!correlation || !journalAbsent) {
+      throw new Error('PANEL_RUNNING_DENIED');
+    }
     let current = bootstrap;
-    if (rotate) current = await writeBootstrap({ ...bootstrap, state: 'pending' });
+    if (rotate) {
+      current = await writeBootstrap({ ...bootstrap, state: 'pending' }, assertOwned);
+      reassert(assertOwned);
+    }
     if (current.state !== 'pending') throw new Error('PANEL_BOOTSTRAP_DENIED');
-    current = await writeBootstrap({ ...current, state: 'consumed' });
-    if (!await reprove(binding)) throw new Error('PANEL_CONTEXT_DENIED');
-    send(binding, packet('running', current.auditId, current.sessionCapabilityId, null));
-    bind(binding, current.windowId, 'bound-session', current.auditId, current.sessionCapabilityId);
+    current = await writeBootstrap({ ...current, state: 'consumed' }, assertOwned);
+    reassert(assertOwned);
+    const context = await reprove(binding, assertOwned);
+    reassert(assertOwned);
+    if (!context) throw new Error('PANEL_CONTEXT_DENIED');
+    send(binding, packet('running', current.auditId, current.sessionCapabilityId, null), assertOwned);
+    bind(binding, current.windowId, 'bound-session', current.auditId, current.sessionCapabilityId, assertOwned);
     return true;
   }
 
@@ -416,20 +489,21 @@ export function createPanelPortCoordinator(raw) {
     return (async () => {
       try {
         assertOwned();
-        const session = await readSession(args.sessionCapabilityId, args.auditId);
+        const session = await readSession(args.sessionCapabilityId, args.auditId, assertOwned);
         assertOwned();
         const currentTime = input.epochNow();
         if (session.state !== 'running' || session.windowId !== args.windowId || session.expiresAt !== args.expiresAt ||
           !safeEpoch(args.createdAt) || args.createdAt < session.issuedAt || args.createdAt >= args.expiresAt ||
           !safeEpoch(currentTime) || currentTime >= args.expiresAt) return false;
-        const existing = await readBootstrap(args.windowId);
+        const existing = await readBootstrap(args.windowId, assertOwned);
         assertOwned();
         if (existing && (existing.auditId !== args.auditId || existing.sessionCapabilityId !== args.sessionCapabilityId ||
           existing.windowId !== args.windowId)) return false;
+        assertOwned();
         const bootstrap = await writeBootstrap({
           version: 1, kind: 'audit-session', auditId: args.auditId, sessionCapabilityId: args.sessionCapabilityId,
           windowId: args.windowId, createdAt: args.createdAt, expiresAt: args.expiresAt, state: 'pending',
-        });
+        }, assertOwned);
         assertOwned();
         return Boolean(bootstrap);
       } catch (error) {
@@ -445,21 +519,25 @@ export function createPanelPortCoordinator(raw) {
     return (async () => {
       try {
         assertOwned();
-        const bootstrap = await readBootstrap(args.windowId);
+        const bootstrap = await readBootstrap(args.windowId, assertOwned);
         assertOwned();
         if (!bootstrap || bootstrap.state !== 'pending' || bootstrap.auditId !== args.auditId ||
           bootstrap.sessionCapabilityId !== args.sessionCapabilityId || bootstrap.windowId !== args.windowId) return false;
-        const session = await readSession(args.sessionCapabilityId, args.auditId);
+        const session = await readSession(args.sessionCapabilityId, args.auditId, assertOwned);
         assertOwned();
-        const active = await readActive();
+        const active = await readActive(assertOwned);
         assertOwned();
         if (session.state !== 'running' || session.windowId !== args.windowId || active?.state !== 'running' ||
           active.auditId !== args.auditId || active.sessionCapabilityId !== args.sessionCapabilityId ||
-          active.windowId !== args.windowId || !await confirmStartJournalAbsent()) return false;
+          active.windowId !== args.windowId) return false;
+        const journalAbsent = await confirmStartJournalAbsent(assertOwned);
         assertOwned();
+        if (!journalAbsent) return false;
         const binding = liveByWindow.get(args.windowId);
         if (connected(binding) && binding.state === 'bound-idle') {
-          return await deliverRunning(binding, bootstrap, false);
+          const delivered = await deliverRunning(binding, bootstrap, false, assertOwned);
+          assertOwned();
+          return delivered;
         }
         return true;
       } catch (error) {
@@ -478,16 +556,18 @@ export function createPanelPortCoordinator(raw) {
         if (!['result', 'view-only'].includes(args.state)) return false;
         const resultBundle = copyPanelResultBundleV1(args.resultBundle);
         if (resultBundle.auditId !== args.auditId) return false;
-        const session = await readSession(args.sessionCapabilityId, args.auditId);
+        const session = await readSession(args.sessionCapabilityId, args.auditId, assertOwned);
         assertOwned();
-        const bootstrap = await readBootstrap(args.windowId);
+        const bootstrap = await readBootstrap(args.windowId, assertOwned);
         assertOwned();
         const binding = liveByWindow.get(args.windowId);
         if (session.state !== args.state || session.windowId !== args.windowId || !bootstrap ||
           bootstrap.auditId !== args.auditId || bootstrap.sessionCapabilityId !== args.sessionCapabilityId ||
-          !connected(binding) || binding.auditId !== args.auditId || binding.sessionCapabilityId !== args.sessionCapabilityId ||
-          !await reprove(binding)) return false;
-        send(binding, packet(args.state, args.auditId, args.sessionCapabilityId, resultBundle));
+          !connected(binding) || binding.auditId !== args.auditId || binding.sessionCapabilityId !== args.sessionCapabilityId) return false;
+        const context = await reprove(binding, assertOwned);
+        assertOwned();
+        if (!context) return false;
+        send(binding, packet(args.state, args.auditId, args.sessionCapabilityId, resultBundle), assertOwned);
         return true;
       } catch (error) {
         if (error === scopeDeniedSentinel) throw error;
@@ -501,39 +581,69 @@ export function createPanelPortCoordinator(raw) {
     if (!args) return Promise.resolve(deniedRegistration());
     return (async () => {
       let registered = false;
+      let previous = null;
+      let replacement = null;
       try {
         assertOwned();
         const resultBundle = copyPanelResultBundleV1(args.resultBundle);
         if (resultBundle.auditId !== args.auditId) return deniedRegistration();
-        const session = await readSession(args.sessionCapabilityId, args.auditId);
+        const session = await readSession(args.sessionCapabilityId, args.auditId, assertOwned);
         assertOwned();
         const currentTime = input.epochNow();
         if (session.state !== 'view-only' || session.windowId !== args.windowId || session.expiresAt !== args.expiresAt ||
           !safeEpoch(args.createdAt) || args.createdAt < session.issuedAt || args.createdAt >= args.expiresAt ||
-          !safeEpoch(currentTime) || currentTime >= args.expiresAt || await readActive() !== null) return deniedRegistration();
-        const existing = await readBootstrap(args.windowId);
+          !safeEpoch(currentTime) || currentTime >= args.expiresAt) return deniedRegistration();
+        await requireActiveAbsent(assertOwned);
         assertOwned();
-        if (existing) {
-          if (existing.auditId !== args.auditId || existing.windowId !== args.windowId) return deniedRegistration();
-          const oldSession = await readSession(existing.sessionCapabilityId, existing.auditId);
+        previous = await readBootstrap(args.windowId, assertOwned);
+        assertOwned();
+        if (previous) {
+          if (previous.auditId !== args.auditId || previous.windowId !== args.windowId) return deniedRegistration();
+          const oldSession = await readSession(previous.sessionCapabilityId, previous.auditId, assertOwned);
+          assertOwned();
           if (!['result', 'view-only', 'revoked'].includes(oldSession.state) || oldSession.windowId !== args.windowId) return deniedRegistration();
         }
+        await requireActiveAbsent(assertOwned);
+        assertOwned();
         const pending = await writeBootstrap({
           version: 1, kind: 'audit-session', auditId: args.auditId, sessionCapabilityId: args.sessionCapabilityId,
           windowId: args.windowId, createdAt: args.createdAt, expiresAt: args.expiresAt, state: 'pending',
-        });
+        }, assertOwned);
+        assertOwned();
+        replacement = pending;
+        await requireActiveAbsent(assertOwned);
         assertOwned();
         registered = true;
         const binding = liveByWindow.get(args.windowId);
         if (!connected(binding)) return Object.freeze({ registered: true, delivered: false });
         if (binding.auditId && binding.auditId !== args.auditId) return Object.freeze({ registered: true, delivered: false });
-        const consumed = await writeBootstrap({ ...pending, state: 'consumed' });
-        if (!await reprove(binding)) return Object.freeze({ registered: true, delivered: false });
-        send(binding, packet('view-only', consumed.auditId, consumed.sessionCapabilityId, resultBundle));
-        bind(binding, args.windowId, 'bound-session', args.auditId, args.sessionCapabilityId);
+        await requireActiveAbsent(assertOwned);
+        assertOwned();
+        const consumed = await writeBootstrap({ ...pending, state: 'consumed' }, assertOwned);
+        assertOwned();
+        replacement = consumed;
+        await requireActiveAbsent(assertOwned);
+        assertOwned();
+        const context = await reprove(binding, assertOwned);
+        assertOwned();
+        if (!context) return Object.freeze({ registered: true, delivered: false });
+        await requireActiveAbsent(assertOwned);
+        assertOwned();
+        send(binding, packet('view-only', consumed.auditId, consumed.sessionCapabilityId, resultBundle), assertOwned);
+        bind(binding, args.windowId, 'bound-session', args.auditId, args.sessionCapabilityId, assertOwned);
         return Object.freeze({ registered: true, delivered: true });
       } catch (error) {
         if (error === scopeDeniedSentinel) throw error;
+        if (error === activeConflictSentinel) {
+          if (replacement) {
+            try {
+              await restoreBootstrap(previous, replacement, assertOwned);
+              assertOwned();
+            }
+            catch (restoreError) { if (restoreError === scopeDeniedSentinel) throw restoreError; }
+          }
+          return deniedRegistration();
+        }
         return registered ? Object.freeze({ registered: true, delivered: false }) : deniedRegistration();
       }
     })();
@@ -547,15 +657,18 @@ export function createPanelPortCoordinator(raw) {
         assertOwned();
         const binding = liveByWindow.get(args.windowId);
         if (connected(binding) && binding.auditId === args.auditId &&
-          binding.sessionCapabilityId === args.sessionCapabilityId) disconnect(binding);
-        const bootstrap = await readBootstrap(args.windowId);
+          binding.sessionCapabilityId === args.sessionCapabilityId) disconnect(binding, assertOwned);
+        const bootstrap = await readBootstrap(args.windowId, assertOwned);
         assertOwned();
         if (bootstrap === null) return true;
         if (bootstrap.auditId !== args.auditId || bootstrap.sessionCapabilityId !== args.sessionCapabilityId ||
           bootstrap.windowId !== args.windowId) return false;
+        assertOwned();
         await input.sessionArea.remove(panelBootstrapStorageKey(args.windowId));
         assertOwned();
-        return await readBootstrap(args.windowId) === null;
+        const removed = await readBootstrap(args.windowId, assertOwned);
+        assertOwned();
+        return removed === null;
       } catch (error) {
         if (error === scopeDeniedSentinel) throw error;
         return false;

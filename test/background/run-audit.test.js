@@ -548,6 +548,41 @@ test('attached execution preserves a canonical cancelled model for a genuinely a
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_USER_CANCEL_DETAIL/u);
 });
 
+test('attached execution never persists complete when cancellation wins the final document proof', async () => {
+  const controller = new AbortController();
+  const adapter = fakeAdapter({ noPixels: true });
+  let proofCount = 0;
+  adapter.probeDocumentIdentity = async tabId => {
+    proofCount += 1;
+    if (proofCount === 3) controller.abort(new Error('PRIVATE_FINAL_PROOF_CANCEL_DETAIL'));
+    return {
+      tabId,
+      windowId: 9,
+      documentId: 'document-a',
+      urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+    };
+  };
+  const persisted = [];
+
+  const result = await runAttachedAuditExecution({
+    auditId: 'audit-attached-final-proof-abort', sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: 'https://example.test/', initialUrlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+    },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    chromeAdapter: adapter, modelNow: clock, signal: controller.signal,
+    expectedExtensionId: TEST_EXTENSION_ID, onCheckpoint: async () => {},
+    persistAuditModel: async model => { persisted.push(model); },
+  });
+
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(result.state, 'model');
+  assert.equal(result.model.session.status, 'cancelled');
+  assert.equal(persisted.length, 0);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_FINAL_PROOF_CANCEL_DETAIL/u);
+});
+
 test('attached execution rejects hostile or extra façade fields before probing', async () => {
   const adapter = fakeAdapter({ noPixels: true });
   let reads = 0;

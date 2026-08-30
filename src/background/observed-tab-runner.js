@@ -367,6 +367,7 @@ export async function runObservedTabAudit({
       throw new Error(code);
     }
     const piped = await pipeline({ auditId, observedTarget, capturePolicy, checkpointRecorder, signal, failTargetChanged });
+    if (signal?.aborted) throw abortedSentinel;
     if (!signal?.aborted && capturedModelStatus(piped) === 'cancelled') throw new Error('AUDIT_FAILED');
     await cleanupDisposable();
     return Object.freeze({

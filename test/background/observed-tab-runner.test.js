@@ -411,3 +411,28 @@ test('treats AbortError-shaped dependency failures as audit failures unless canc
   assert.equal(internallyCancelled.model.session.status, 'cancelled');
   assert.equal(internallyCancelled.model.session.diagnostics.at(-1).code, 'AUDIT_ABORTED');
 });
+
+test('a genuine abort raised as the pipeline returns cannot be reported as completed', async () => {
+  const controller = new AbortController();
+  const fixture = attachedFixture({ signal: controller.signal });
+  fixture.args.pipeline = async () => {
+    controller.abort(new Error('PRIVATE_LATE_CANCEL_DETAIL'));
+    return {
+      model: Object.freeze({
+        schemaVersion: 2,
+        auditId: 'audit-a',
+        session: Object.freeze({ status: 'complete', diagnostics: Object.freeze([]) }),
+      }),
+      checkpoint: checkpointRecorder().snapshot(),
+      observationState: 'observed',
+    };
+  };
+
+  const result = await runObservedTabAudit(fixture.args);
+
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.model.session.status, 'cancelled');
+  assert.equal(result.model.session.diagnostics.at(-1).code, 'AUDIT_ABORTED');
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_LATE_CANCEL_DETAIL/u);
+});

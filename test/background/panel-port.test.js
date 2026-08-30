@@ -115,8 +115,9 @@ function fixture(overrides = {}) {
     ...overrides,
   };
   return {
-    sessionArea, sessions, timers, revoked,
+    chromeApi, sessionArea, sessions, timers, revoked,
     setActive(value) { active = value; },
+    getActive() { return active; },
     coordinator: createPanelPortCoordinator(dependencies),
   };
 }
@@ -126,6 +127,15 @@ function runningActive() {
     version: 1, auditId: 'audit-port', capabilityId: 'C'.repeat(22), sessionCapabilityId: SESSION,
     windowId: 9, mode: 'attached', state: 'running', commitState: 'none', expectedTerminalRevision: null,
     createdAt: EPOCH, updatedAt: EPOCH,
+  });
+}
+
+function foreignRunningActive() {
+  return Object.freeze({
+    version: 1, auditId: 'foreign-active-audit', capabilityId: 'F'.repeat(22),
+    sessionCapabilityId: 'G'.repeat(22), windowId: 12, mode: 'attached',
+    state: 'running', commitState: 'none', expectedTerminalRevision: null,
+    createdAt: EPOCH, updatedAt: EPOCH + 1,
   });
 }
 
@@ -195,6 +205,90 @@ test('keeps scoped mutation authority across awaits and serializes independent l
   assert.deepEqual(order, ['first-enter', 'first-leave', 'second']);
 });
 
+test('rejects synchronous same-window root reentry without weakening independent serialization', async () => {
+  const { coordinator } = fixture();
+
+  await coordinator.withWindowLock(9, () => assert.rejects(
+    () => coordinator.withWindowLock(9, async () => {}),
+    /PANEL_WINDOW_LOCK_REENTRANT/u,
+  ));
+
+  assert.equal(await coordinator.withWindowLock(9, async () => 'independent'), 'independent');
+});
+
+test('publishResult cannot send after its owner callback settles during final reproof', async () => {
+  const resultBundle = await bundle();
+  const env = fixture();
+  env.setActive(runningActive());
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  env.sessions.set(SESSION, session('result'));
+
+  let releaseReproof;
+  let reachedReproof;
+  const reproofReached = new Promise(resolve => { reachedReproof = resolve; });
+  env.chromeApi.runtime.getContexts = async ({ documentIds }) => {
+    reachedReproof();
+    await new Promise(resolve => { releaseReproof = resolve; });
+    return [{
+      documentId: documentIds[0], documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`,
+      contextType: 'SIDE_PANEL', windowId: 9,
+    }];
+  };
+  let publication;
+  await env.coordinator.withWindowLock(9, async scope => {
+    publication = scope.publishResult({
+      auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+      state: 'result', resultBundle,
+    });
+    await reproofReached;
+  });
+  releaseReproof();
+
+  await assert.rejects(publication, /PANEL_SCOPE_DENIED/u);
+  assert.equal(connected.messages.some(message => message.state === 'result'), false);
+});
+
+test('view-only registration cannot send or bind after its owner callback settles during reproof', async () => {
+  const resultBundle = await bundle();
+  const env = fixture();
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.equal(connected.messages.at(-1).state, 'initial');
+
+  let releaseReproof;
+  let reachedReproof;
+  const reproofReached = new Promise(resolve => { reachedReproof = resolve; });
+  env.chromeApi.runtime.getContexts = async ({ documentIds }) => {
+    reachedReproof();
+    await new Promise(resolve => { releaseReproof = resolve; });
+    return [{
+      documentId: documentIds[0], documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`,
+      contextType: 'SIDE_PANEL', windowId: 9,
+    }];
+  };
+  let registration;
+  await env.coordinator.withWindowLock(9, async scope => {
+    registration = scope.registerAndPublishViewOnly({
+      auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
+      createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
+    });
+    await reproofReached;
+  });
+  releaseReproof();
+
+  await assert.rejects(registration, /PANEL_SCOPE_DENIED/u);
+  assert.equal(connected.messages.some(message => message.state === 'view-only'), false);
+});
+
 test('panel-first receives initial, rejects a second hello and preserves the incumbent port', async () => {
   const { coordinator, timers } = fixture();
   const first = port();
@@ -253,6 +347,27 @@ test('start-first consumes a pending bootstrap only after proving ACTIVE running
     protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'running',
     auditId: 'audit-port', sessionCapabilityId: SESSION, result: null,
   });
+});
+
+test('start-first hello cannot publish running until the start journal is confirmed absent', async () => {
+  const env = fixture();
+  env.setActive(runningActive());
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  env.sessionArea.values['audita:start-journal:v1'] = {
+    version: 1, auditId: 'audit-port', private: 'start-not-settled',
+  };
+  const connected = port();
+
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+
+  assert.equal(connected.messages.some(message => message.state === 'running'), false);
+  assert.equal(connected.disconnects, 1);
+  assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].state, 'pending');
 });
 
 test('an idle live panel receives running only after ACTIVE exists and the start journal is absent', async () => {
@@ -326,6 +441,86 @@ test('registerAndPublishViewOnly durably registers without a port and preserves 
   }));
   assert.deepEqual(denied, { registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' });
   assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].auditId, 'foreign-audit');
+});
+
+test('view-only registration restores the exact prior bootstrap when ACTIVE appears during the pending write', async () => {
+  const resultBundle = await bundle();
+  const env = fixture();
+  const oldSessionCapabilityId = 'O'.repeat(22);
+  env.sessions.set(oldSessionCapabilityId, session('result', oldSessionCapabilityId));
+  const prior = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: oldSessionCapabilityId,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'consumed',
+  };
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = structuredClone(prior);
+  const originalSet = env.sessionArea.set.bind(env.sessionArea);
+  let writes = 0;
+  env.sessionArea.set = async entries => {
+    await originalSet(entries);
+    writes += 1;
+    if (writes === 1) env.setActive(foreignRunningActive());
+  };
+
+  const registration = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
+    auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
+    createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
+  }));
+
+  assert.deepEqual(registration, { registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' });
+  assert.deepEqual(env.sessionArea.values[panelBootstrapStorageKey(9)], prior);
+  assert.deepEqual(env.getActive(), foreignRunningActive());
+});
+
+test('view-only registration removes only its own bootstrap when ACTIVE appears during the consumed write', async () => {
+  const resultBundle = await bundle();
+  const env = fixture();
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  const originalSet = env.sessionArea.set.bind(env.sessionArea);
+  let writes = 0;
+  env.sessionArea.set = async entries => {
+    await originalSet(entries);
+    writes += 1;
+    if (writes === 2) env.setActive(foreignRunningActive());
+  };
+
+  const registration = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
+    auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
+    createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
+  }));
+
+  assert.deepEqual(registration, { registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' });
+  assert.equal(Object.hasOwn(env.sessionArea.values, panelBootstrapStorageKey(9)), false);
+  assert.equal(connected.messages.some(message => message.state === 'view-only'), false);
+  assert.deepEqual(env.getActive(), foreignRunningActive());
+});
+
+test('view-only registration rechecks ACTIVE after reproof and before publication', async () => {
+  const resultBundle = await bundle();
+  const env = fixture();
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  env.chromeApi.runtime.getContexts = async ({ documentIds }) => {
+    env.setActive(foreignRunningActive());
+    return [{
+      documentId: documentIds[0], documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`,
+      contextType: 'SIDE_PANEL', windowId: 9,
+    }];
+  };
+
+  const registration = await env.coordinator.withWindowLock(9, scope => scope.registerAndPublishViewOnly({
+    auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
+    createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle,
+  }));
+
+  assert.deepEqual(registration, { registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' });
+  assert.equal(Object.hasOwn(env.sessionArea.values, panelBootstrapStorageKey(9)), false);
+  assert.equal(connected.messages.some(message => message.state === 'view-only'), false);
+  assert.deepEqual(env.getActive(), foreignRunningActive());
 });
 
 test('a live view-only send failure remains durably registered for reconnect', async () => {
