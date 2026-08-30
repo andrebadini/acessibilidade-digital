@@ -45,7 +45,7 @@ export async function deriveTrustedExtensionContext({ sender, chromeApi, surface
     const contexts = await chromeApi.runtime.getContexts({ documentIds: [sender.documentId] });
     if (!Array.isArray(contexts)) throw new Error('CONTEXT_DENIED');
     const exact = contexts.filter(value => value?.documentId === sender.documentId && value.documentUrl === sender.url &&
-      value.contextType === surface.contextType && Number.isInteger(value.windowId));
+      value.contextType === surface.contextType && safeChromeId(value.windowId));
     if (exact.length !== 1) throw new Error('CONTEXT_DENIED');
     return deepFreeze({
       issuer: { type: 'extension-document', documentId: sender.documentId, path: surface.path },
@@ -374,7 +374,7 @@ function createTargetRecord(value) {
   if (!['attached', 'disposable'].includes(value.kind) || !CAPABILITY_ID.test(value.capabilityId ?? '') ||
     !safeChromeId(value.tabId) || !safeChromeId(value.windowId) || !validDocumentId(value.documentId) ||
     !validEvidenceUrl(value.initialUrlEvidence) || !DIGEST.test(value.initialUrlSessionDigest ?? '') ||
-    !['user', 'audit'].includes(value.createdBy) || !['start-audit', 'start-persona'].includes(value.allowedIntent) ||
+    !['user', 'audit'].includes(value.createdBy) || value.allowedIntent !== 'start-audit' ||
     !issuer || !safeTime(value.issuedAt) || !safeTime(value.expiresAt) ||
     value.expiresAt <= value.issuedAt || value.state !== 'prepared') {
     throw new TypeError('CAPABILITY_PREPARE_DENIED');
@@ -422,7 +422,7 @@ function parseTargetRecord(value) {
     !['attached', 'disposable'].includes(record.kind) || !safeChromeId(record.tabId) ||
     !safeChromeId(record.windowId) || !validDocumentId(record.documentId) ||
     !validEvidenceUrl(record.initialUrlEvidence) || !DIGEST.test(record.initialUrlSessionDigest ?? '') ||
-    !['user', 'audit'].includes(record.createdBy) || !['start-audit', 'start-persona'].includes(record.allowedIntent) ||
+    !['user', 'audit'].includes(record.createdBy) || record.allowedIntent !== 'start-audit' ||
     !issuer || !safeTime(record.issuedAt) || !safeTime(record.expiresAt) || record.expiresAt <= record.issuedAt ||
     !['prepared', 'claimed', 'invalidated'].includes(record.state) ||
     (record.state === 'prepared' && record.sessionCapabilityId !== null) ||

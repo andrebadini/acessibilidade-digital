@@ -174,6 +174,9 @@ test('denies wrong panel document path context and window before target or autho
     ['window', panelSender(), {
       documentId: 'panel-document', documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`, contextType: 'SIDE_PANEL', windowId: 11,
     }],
+    ['sentinel', panelSender(), {
+      documentId: 'panel-document', documentUrl: `chrome-extension://${RUNTIME_ID}/src/panel/index.html`, contextType: 'SIDE_PANEL', windowId: -1,
+    }],
   ]) await t.test(name, async () => {
     const { router, calls, dependencies } = fixture();
     dependencies.chromeApi.runtime.getContexts = async () => [context];
@@ -182,6 +185,7 @@ test('denies wrong panel document path context and window before target or autho
     });
     assert.deepEqual(response, name === 'window' ? { ok: false, code: 'TARGET_UNAVAILABLE' } : { ok: false, code: 'CONTEXT_DENIED' });
     assert.equal(calls.some(([operation]) => ['probe', 'evidence', 'prepare'].includes(operation)), false);
+    if (name !== 'window') assert.deepEqual(calls, []);
   });
 });
 

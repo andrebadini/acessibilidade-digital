@@ -132,6 +132,28 @@ test('accepts Node WHATWG chrome-extension URL without origin comparison or send
   assert.deepEqual(context.issuer, { type: 'extension-document', documentId: 'panel-document-1', path: PANEL_SURFACE.path });
 });
 
+test('rejects the real SIDE_PANEL sentinel window before returning trusted authority', async () => {
+  const sender = {
+    id: 'test', documentId: 'panel-document-1',
+    url: 'chrome-extension://test/src/panel/index.html',
+  };
+  const chromeApi = {
+    runtime: {
+      id: 'test',
+      async getContexts() {
+        return [{
+          documentId: sender.documentId, documentUrl: sender.url,
+          contextType: 'SIDE_PANEL', windowId: -1,
+        }];
+      },
+    },
+  };
+  await assert.rejects(
+    () => deriveTrustedExtensionContext({ sender, chromeApi, surface: PANEL_SURFACE }),
+    /CONTEXT_DENIED/u,
+  );
+});
+
 test('rejects scheme host query context and document mismatches', async () => {
   const validUrl = 'chrome-extension://test/src/panel/index.html';
   const contexts = [{ documentId: 'panel-document-1', documentUrl: validUrl, contextType: 'SIDE_PANEL', windowId: 9 }];
@@ -217,7 +239,6 @@ test('rejects expiry reached while fresh document proof is pending without a cla
 
 test('fails closed when intent issuer window context or fresh document proof differs', async () => {
   const variants = [
-    start => ({ ...start, allowedIntent: 'start-persona' }),
     start => ({ ...start, senderContext: extensionContext('another-panel') }),
     start => ({ ...start, senderContext: { ...extensionContext(), windowId: 10 } }),
     start => ({ ...start, senderContext: { ...extensionContext(), contextType: 'TAB' } }),
@@ -279,9 +300,9 @@ test('worker event claim rejects externally supplied window ownership and non-nu
   }
 });
 
-test('never upgrades a persona-only target capability into an audit session', async () => {
-  const { authority } = authorityFixture();
-  const prepared = await authority.prepare({
+test('rejects the removed persona target intent without any session-area write', async () => {
+  const { authority, sessionArea } = authorityFixture();
+  await assert.rejects(() => authority.prepare({
     kind: 'attached',
     tabId: 41,
     windowId: 9,
@@ -291,11 +312,9 @@ test('never upgrades a persona-only target capability into an audit session', as
     createdBy: 'user',
     allowedIntent: 'start-persona',
     issuer: extensionContext().issuer,
-  });
-  assert.deepEqual(await authority.claimAndIssueAuditSession({
-    ...validStart(prepared.capabilityId),
-    allowedIntent: 'start-persona',
-  }), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+  }), /CAPABILITY_PREPARE_DENIED/u);
+  assert.deepEqual(sessionArea.writes, []);
+  assert.deepEqual(await sessionArea.get(null), {});
 });
 
 test('rejects unsanitized evidence URLs before persistence', async () => {
