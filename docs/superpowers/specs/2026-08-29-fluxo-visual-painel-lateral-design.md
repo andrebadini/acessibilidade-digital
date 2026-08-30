@@ -5,6 +5,16 @@
 - Complementa: `2026-08-26-auditoria-acessibilidade-design.md` e `2026-08-27-motor-hibrido-personas-multipaginas-design.md`
 - Alvo visual: `assets/2026-08-29-sidepanel-option-2.png`
 
+## Emenda aprovada em 30 de agosto de 2026 — abertura direta no painel lateral
+
+Esta emenda substitui todo contrato posterior que trate o popup como lançador obrigatório. O ícone da Audita passa a abrir diretamente o painel lateral nativo do Chrome, ao lado da página, sem `action.default_popup`. O painel reúne página atual, **“Avaliar esta página”**, URL/lote, progresso, resultados e personas; o relatório completo continua em aba própria.
+
+O service worker configura `chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:true})`. O atalho `_execute_action`, o ícone fixado ou não fixado e o menu de contexto convergem no mesmo painel e no mesmo starter autorizado. O painel é persistente e responsivo; sua largura exata é controlada e redimensionável pelo Chrome, portanto a extensão otimiza o conteúdo para aproximadamente um quarto da tela em desktop sem alegar impor 25%.
+
+Não existe contexto `POPUP` no percurso público nem capacidade preparada por popup. A superfície `SIDE_PANEL` prova sua janela real, prepara a capacidade somente depois de nova prova da aba HTTP/HTTPS ativa e inicia a auditoria por ação explícita dentro do painel. Os arquivos e envelopes legados exclusivos do popup devem ser removidos da superfície empacotada, dos protocolos e dos testes. O E2E obrigatório passa a ser **ícone/atalho → SIDE_PANEL → Avaliar página → resultado → relatório → quatro exportações**, e deve provar que zero contextos `POPUP` foram criados.
+
+A razão técnica também é documentada: o Chromium representa um action popup com `tabId:-1` e `windowId:-1`; usar esse sentinela como propriedade da janela real causou a falha observada na versão em desenvolvimento. A abertura direta elimina a superfície efêmera e reduz a autoridade exposta, sem relaxar a prova da aba/documento.
+
 ## 1. Decisão e objetivo
 
 A versão 1.0.1 não é uma base visual aceitável. Ela expõe demasiada estrutura técnica antes de responder às perguntas práticas da pessoa avaliadora. O produto passa a usar um fluxo em três superfícies:

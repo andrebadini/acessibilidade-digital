@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Entregar o percurso local e reproduzível popup → painel lateral → relatório, com autorização opaca, auditoria segura da página aberta, sumário visual completo e exportação acionável sem login ou servidor.
+**Goal:** Entregar o percurso local e reproduzível ícone/atalho → painel lateral → relatório, com autorização opaca, auditoria segura da página aberta, sumário visual completo e exportação acionável sem login ou servidor.
+
+> **Emenda vinculante de 30 de agosto de 2026:** a decisão mais recente do produto remove o popup do percurso público. Ela substitui as etapas históricas deste plano que exigem `action.default_popup`, `POPUP_SURFACE`, envelopes `PREPARE_POPUP_*`/`POPUP_START_*`, `openActionPopup()` ou contexto `POPUP`. O manifesto deve usar o ícone/atalho para abrir diretamente o Side Panel por `setPanelBehavior({openPanelOnActionClick:true})`; a auditoria começa pelo botão do painel. O E2E prova zero contextos `POPUP` e o percurso `ação → SIDE_PANEL → auditoria → relatório → exportação`. A correção está detalhada no brief SDD `task-7a-direct-sidepanel-brief.md` e deve ocorrer antes da Task 8.
 
 **Architecture:** O service worker é a única autoridade sobre alvo, aba, documento, sessão, porta, relatório e exportação. A UI nunca autoriza IDs Chrome, URL, seletor ou documento. Um coordinator atômico reclama a capability, grava a sessão e o bootstrap do painel antes de iniciar o runner. O runner separa propriedade de aba, checkpoint core e pausa de privacidade. `PanelSummaryV1`, `PanelDetailV1` e `ReportViewV1` são projeções puras de entradas canônicas validadas.
 
@@ -12,7 +14,7 @@
 
 ## Global invariants
 
-- Chrome mínimo 116; `action.default_popup` é o único lançador do ícone e `side_panel.default_path` é `src/panel/index.html`.
+- Chrome mínimo 116; o ícone/atalho abre diretamente `side_panel.default_path = src/panel/index.html` por `openPanelOnActionClick:true`, sem `action.default_popup`.
 - O produto permanece local, neutro, sem login, servidor, telemetria, identidade estatal, código remoto ou upload de HTML/arquivo.
 - `chrome.storage.session.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'})` conclui antes de qualquer listener operacional.
 - A UI fornece somente IDs opacos ou IDs canônicos do modelo; URL, `tabId`, `windowId`, `frameId`, `documentId`, seletor e bytes de relatório nunca são autoridade.
