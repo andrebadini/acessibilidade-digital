@@ -1180,11 +1180,8 @@ function validateRequestedScope(scope) {
     !['single', 'batch'].includes(scope.mode) || !Array.isArray(scope.urls) || !scope.urls.length) {
     throw new TypeError('requestedScope inválido.');
   }
-  const seen = new Set();
   scope.urls.forEach((url, index) => {
-    const normalized = reportUrl(url, `requestedScope.urls[${index}]`);
-    if (seen.has(normalized)) throw new TypeError('requestedScope contém URL duplicada.');
-    seen.add(normalized);
+    reportUrl(url, `requestedScope.urls[${index}]`);
   });
   if (scope.mode === 'single' && scope.urls.length !== 1) {
     throw new TypeError('requestedScope single deve conter exatamente uma URL.');

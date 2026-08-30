@@ -8,9 +8,9 @@ test('normalizes separators, ignores blank lines and preserves unique URL order'
 
   assert.deepEqual(result, {
     entries: [
-      { line: 1, navigationUrl: 'https://example.test/a', reportUrl: 'https://example.test/a' },
-      { line: 3, navigationUrl: 'https://xn--mnich-kva.example/b#fim', reportUrl: 'https://xn--mnich-kva.example/b#fim' },
-      { line: 4, navigationUrl: 'http://127.0.0.1:8080/private', reportUrl: 'http://127.0.0.1:8080/private' },
+      { line: 1, navigationUrl: 'https://example.test/a', reportUrl: 'https://example.test/' },
+      { line: 3, navigationUrl: 'https://xn--mnich-kva.example/b#fim', reportUrl: 'https://xn--mnich-kva.example/' },
+      { line: 4, navigationUrl: 'http://127.0.0.1:8080/private', reportUrl: 'http://127.0.0.1:8080/' },
     ],
     errors: [],
     warnings: [],
@@ -20,7 +20,7 @@ test('normalizes separators, ignores blank lines and preserves unique URL order'
   assert.equal(Object.isFrozen(result.entries[0]), true);
 });
 
-test('deduplicates canonical hrefs and redacted report identities without exposing secrets', () => {
+test('deduplicates only canonical navigation URLs and retains origin-colliding pages', () => {
   const secret = 'PRIVATE_BATCH_TOKEN';
   const result = normalizeUrlList([
     'https://example.test:443/a',
@@ -30,16 +30,20 @@ test('deduplicates canonical hrefs and redacted report identities without exposi
   ].join('\n'));
 
   assert.deepEqual(result.entries, [
-    { line: 1, navigationUrl: 'https://example.test/a', reportUrl: 'https://example.test/a' },
+    { line: 1, navigationUrl: 'https://example.test/a', reportUrl: 'https://example.test/' },
     {
       line: 3,
       navigationUrl: `https://example.test/account?token=${secret}&view=summary`,
-      reportUrl: 'https://example.test/account?view=summary',
+      reportUrl: 'https://example.test/',
+    },
+    {
+      line: 4,
+      navigationUrl: 'https://example.test/account?token=OTHER_PRIVATE_TOKEN&view=summary',
+      reportUrl: 'https://example.test/',
     },
   ]);
   assert.deepEqual(result.warnings, [
     { line: 2, code: 'DUPLICATE_URL', firstLine: 1, message: 'A URL repete uma entrada anterior e não será auditada novamente.' },
-    { line: 4, code: 'DUPLICATE_AFTER_REDACTION', firstLine: 3, message: 'A URL tem a mesma identidade segura de uma entrada anterior e não será auditada novamente.' },
   ]);
   assert.equal(result.errors.length, 0);
   assert.doesNotMatch(JSON.stringify(result.warnings), /PRIVATE_BATCH_TOKEN|OTHER_PRIVATE_TOKEN/u);
@@ -57,8 +61,8 @@ test('reports every invalid line with fixed messages and accepts user-authorized
 
   assert.deepEqual(result.entries.map(entry => entry.reportUrl), [
     'http://localhost:3000/',
-    'http://10.0.0.8/internal',
-    'http://[fe80::1]/status',
+    'http://10.0.0.8/',
+    'http://[fe80::1]/',
   ]);
   assert.deepEqual(result.errors.map(({ line, code }) => ({ line, code })), [
     { line: 1, code: 'INVALID_URL' },

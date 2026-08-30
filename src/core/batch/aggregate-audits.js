@@ -1,5 +1,5 @@
 import { unknownAccessibilityWidgetInventory } from '../detection/accessibility-widgets.js';
-import { sanitizeResourceUrl } from '../normalize-snapshot.js';
+import { projectAuditResourceOrigin } from '../privacy.js';
 import { NBR17225_EDITORIAL_NOTES, NBR17225_ITEMS } from '../normative/nbr17225.js';
 import { NORMATIVE_SOURCE_LEDGER } from '../normative/source-ledger.js';
 import { aggregateItems } from '../rules/aggregate-items.js';
@@ -47,7 +47,7 @@ export function createBatchFailurePage({
   if (!['failed', 'cancelled'].includes(status) || typeof attempted !== 'boolean') {
     throw new TypeError('Estado de página sem resultado inválido.');
   }
-  const reportUrl = sanitizeResourceUrl(requestedUrl);
+  const reportUrl = projectAuditResourceOrigin(requestedUrl);
   if (!/^https?:\/\//u.test(reportUrl)) throw new TypeError('Identidade segura da página inválida.');
   const diagnostic = { code, message, at: endedAt, recoverable: false };
   return deepFreeze({
@@ -236,13 +236,11 @@ function applyAxeItemOutcomes(items, occurrences) {
 
 function assertPageOrderAndIdentity(pages) {
   const ids = new Set();
-  const urls = new Set();
   for (const [index, page] of pages.entries()) {
-    if (page.pageId !== `page-${index + 1}` || ids.has(page.pageId) || urls.has(page.requestedUrl)) {
+    if (page.pageId !== `page-${index + 1}` || ids.has(page.pageId)) {
       throw new TypeError('Páginas do lote não preservam ordem ou identidade única.');
     }
     ids.add(page.pageId);
-    urls.add(page.requestedUrl);
   }
 }
 

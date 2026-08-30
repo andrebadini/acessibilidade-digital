@@ -420,7 +420,7 @@ test('aggregates pages in requested order with unique rules, 146 items and conse
   assert.deepEqual(raw.requestedScope.urls, [
     'https://one.example.test/?view=public',
     'https://two.example.test/',
-    'https://three.example.test/?view=public',
+    'https://three.example.test/',
   ]);
   assert.deepEqual(raw.pages.map(page => page.pageId), ['page-1', 'page-2', 'page-3']);
   assert.equal(raw.pages[2].attempted, true);
@@ -444,6 +444,31 @@ test('aggregates pages in requested order with unique rules, 146 items and conse
   assert.equal(final.itemResults.length, 146);
   assert.equal(final.session.status, 'partial');
   assert.match(final.integrity.canonicalModelHash, /^[a-f0-9]{64}$/u);
+});
+
+test('uses pageId as batch identity when two failure pages share one projected origin', async () => {
+  const first = createBatchFailurePage({
+    pageId: 'page-1', requestedUrl: 'https://example.test/first/private?case=7#one', status: 'failed',
+    attempted: true, startedAt: '2026-08-28T11:00:00.000Z', endedAt: '2026-08-28T11:00:10.000Z',
+    code: 'BATCH_PAGE_FAILED', message: 'A página não pôde ser auditada.',
+  });
+  const second = createBatchFailurePage({
+    pageId: 'page-2', requestedUrl: 'https://example.test/second/secret?case=8#two', status: 'failed',
+    attempted: true, startedAt: '2026-08-28T11:00:20.000Z', endedAt: '2026-08-28T11:00:30.000Z',
+    code: 'BATCH_PAGE_FAILED', message: 'A página não pôde ser auditada.',
+  });
+  const raw = aggregateBatchAudits({
+    batchAuditId: 'batch-shared-origin', pageResults: [first, second],
+    startedAt: '2026-08-28T11:00:00.000Z', endedAt: '2026-08-28T11:00:40.000Z',
+    status: 'failed', progress: [], diagnostics: [],
+    template: createBatchReportTemplate(OPTIONS),
+  });
+  assert.deepEqual(raw.pages.map(page => [page.pageId, page.requestedUrl]), [
+    ['page-1', 'https://example.test/'],
+    ['page-2', 'https://example.test/'],
+  ]);
+  assert.deepEqual(raw.requestedScope.urls, ['https://example.test/', 'https://example.test/']);
+  await assert.doesNotReject(() => enrichAuditForReport(raw, OPTIONS));
 });
 
 test('uses the strongest rule metadata and derives conservative status and summaries from every page', async () => {
@@ -567,7 +592,7 @@ test('represents never-started cancellation without pixels, findings or observed
   });
   assert.equal(page.page.attempted, false);
   assert.equal(page.page.finalUrlObserved, false);
-  assert.equal(page.page.finalUrl, 'https://four.example.test/?view=public');
+  assert.equal(page.page.finalUrl, 'https://four.example.test/');
   assert.deepEqual(page.occurrences, []);
   assert.deepEqual(page.evidence, []);
   assert.doesNotMatch(JSON.stringify(page), /REMOVE|session=/u);

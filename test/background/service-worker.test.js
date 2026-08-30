@@ -389,7 +389,7 @@ test('validates START_AUDIT, stores an armed session, and keeps the response cha
   assert.deepEqual(response, { ok: true, auditId: 'audit-1', state: 'idle' });
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(response, { ok: true, auditId: 'audit-1', state: 'idle' });
-  assert.equal(sessions.get('audit-1').requestedUrl, 'https://example.test/a');
+  assert.equal(sessions.get('audit-1').requestedUrl, 'https://example.test/');
   finishRunner?.({ auditId: 'audit-1', session: { status: 'failed' }, report: {} });
 });
 
@@ -1578,7 +1578,7 @@ test('clears a stale active marker without replacing a newer single-page latest 
   assert.deepEqual(writes, []);
 });
 
-test('single-audit checkpoints strip every query and hash while runner keeps the full navigation URL', async () => {
+test('single-audit checkpoints retain only the origin while runner keeps the full navigation URL', async () => {
   const chromeApi = createChrome();
   const sessions = new Map();
   const stored = [];
@@ -1605,7 +1605,7 @@ test('single-audit checkpoints strip every query and hash while runner keeps the
   );
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(runnerUrl, fullNavigationUrl);
-  assert.equal(sessions.get('audit-private').requestedUrl, 'https://example.test/path');
+  assert.equal(sessions.get('audit-private').requestedUrl, 'https://example.test/');
   assert.doesNotMatch(
     JSON.stringify([...sessions.values(), ...stored, ...logs]),
     /PRIVATE_QUERY_VALUE|ordinary_parameter|ordinary-fragment/iu,

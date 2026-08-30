@@ -1,4 +1,4 @@
-import { sanitizeResourceUrl } from '../normalize-snapshot.js';
+import { projectAuditResourceOrigin } from '../privacy.js';
 import { normalizeAuditUrl } from '../url.js';
 
 const MAX_UNIQUE_URLS = 20;
@@ -13,7 +13,6 @@ const MESSAGES = Object.freeze({
   BATCH_LINE_TOO_LONG: 'A linha excede o limite seguro de 8192 caracteres.',
   BATCH_LIMIT_EXCEEDED: 'O lote aceita no máximo 20 URLs únicas.',
   DUPLICATE_URL: 'A URL repete uma entrada anterior e não será auditada novamente.',
-  DUPLICATE_AFTER_REDACTION: 'A URL tem a mesma identidade segura de uma entrada anterior e não será auditada novamente.',
   EMBEDDED_CREDENTIALS: 'A linha contém credenciais embutidas, que não são permitidas.',
   INVALID_URL: 'A linha não contém uma URL HTTP ou HTTPS válida.',
 });
@@ -32,7 +31,6 @@ export function normalizeUrlList(input) {
   const errors = [];
   const warnings = [];
   const navigationFirstLine = new Map();
-  const reportFirstLine = new Map();
   let nonemptyCount = 0;
 
   const lines = input.split(/\r\n|\r|\n/u);
@@ -60,15 +58,10 @@ export function normalizeUrlList(input) {
       errors.push(issue(line, code));
       continue;
     }
-    const reportUrl = sanitizeResourceUrl(navigationUrl);
+    const reportUrl = projectAuditResourceOrigin(navigationUrl);
     const navigationDuplicate = navigationFirstLine.get(navigationUrl);
     if (navigationDuplicate !== undefined) {
       warnings.push(issue(line, 'DUPLICATE_URL', navigationDuplicate));
-      continue;
-    }
-    const reportDuplicate = reportFirstLine.get(reportUrl);
-    if (reportDuplicate !== undefined) {
-      warnings.push(issue(line, 'DUPLICATE_AFTER_REDACTION', reportDuplicate));
       continue;
     }
     if (entries.length >= MAX_UNIQUE_URLS) {
@@ -76,7 +69,6 @@ export function normalizeUrlList(input) {
       continue;
     }
     navigationFirstLine.set(navigationUrl, line);
-    reportFirstLine.set(reportUrl, line);
     entries.push({ line, navigationUrl, reportUrl });
   }
 

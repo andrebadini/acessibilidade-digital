@@ -382,7 +382,7 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
   assert.ok(model.limitations.some(value => /axe-core|MV3|CSP/i.test(value)));
   assert.ok(model.session.diagnostics.some(value => value.code === 'AXE_FEATURE_DISABLED'));
   assert.equal(model.requestedUrl, 'https://example.test/');
-  assert.equal(model.finalUrl, 'https://example.test/final?view=public');
+  assert.equal(model.finalUrl, 'https://example.test/');
   assert.ok(adapter.events.indexOf('full-page') < adapter.events.indexOf('collect'));
   assert.ok(adapter.events.indexOf('axe') < adapter.events.indexOf('collect'));
   assert.ok(adapter.events.indexOf('axe') < adapter.events.indexOf('probes'));
@@ -445,6 +445,20 @@ test('uses one conservative durable URL projection for successful and failed no-
     await runAudit({ url: rawUrl, chromeAdapter: fakeAdapter({ noPixels: true }), now: clock, idFactory: () => 'audit-safe-url-success' }),
     await runAudit({ url: rawUrl, chromeAdapter: fakeAdapter({ noPixels: true, waitFailure: new Error('PRIVATE_NATIVE_URL') }), now: clock, idFactory: () => 'audit-safe-url-failure' }),
   ];
+  assert.deepEqual(models.map(model => ({
+    requestedUrl: model.requestedUrl,
+    finalUrl: model.finalUrl,
+    snapshotUrl: model.snapshot?.document?.url ?? null,
+  })), [
+    {
+      requestedUrl: 'https://example.test/', finalUrl: 'https://example.test/',
+      snapshotUrl: 'https://example.test/',
+    },
+    {
+      requestedUrl: 'https://example.test/', finalUrl: 'https://example.test/',
+      snapshotUrl: null,
+    },
+  ]);
   const durable = JSON.stringify(models);
   assert.match(durable, /https:\/\/example\.test/u);
   assert.doesNotMatch(durable, /CPF-123456789|case=7|secret=x|fragmento|PRIVATE_NATIVE_URL|\?case=7|&secret=x/u);

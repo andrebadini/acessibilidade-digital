@@ -105,6 +105,30 @@ test('composed adapters reject symbols, accessors, extra overrides, and internal
     { async emitProgress() {}, removeTab() {} },
     { [AUDIT_EXECUTION_INTERNAL]: {} },
   ]) assert.throws(() => compose(base, overrides), /AUDIT_ADAPTER_COMPOSITION_DENIED/u);
+
+  let thirdArgumentReads = 0;
+  const hostileAllowlist = [];
+  Object.defineProperty(hostileAllowlist, '0', {
+    enumerable: true,
+    get() { thirdArgumentReads += 1; throw new Error('GETTER_INVOKED'); },
+  });
+  hostileAllowlist.length = 1;
+  assert.throws(
+    () => chromeAdapterModule.composeChromeAdapter(base, { removeTab() {} }, hostileAllowlist),
+    /AUDIT_ADAPTER_COMPOSITION_DENIED/u,
+  );
+  assert.equal(thirdArgumentReads, 0);
+});
+
+test('projects the real observed URL to its durable origin regardless of query authority', async () => {
+  const fake = chromeFake();
+  fake.chromeApi.tabs.get = async id => ({
+    id, windowId: 9, status: 'complete',
+    url: 'https://example.test/pessoa/CPF-123456789?case=7&secret=x#fragmento',
+  });
+  const adapter = createChromeAdapter(fake.chromeApi);
+  assert.equal(await adapter.getEvidenceUrl(17, false), 'https://example.test/');
+  assert.equal(await adapter.getEvidenceUrl(17, true), 'https://example.test/');
 });
 
 test('proves a fresh top document identity without returning its raw URL', async () => {

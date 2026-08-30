@@ -4,14 +4,13 @@ import { composeChromeAdapter, createChromeAdapter } from './chrome-adapter.js';
 import { runAudit } from './run-audit.js';
 import { runBatch } from './run-batch.js';
 import { normalizeUrlList } from '../core/batch/normalize-url-list.js';
-import { AUDIT_STORAGE_UNAVAILABLE_MESSAGE as STORAGE_UNAVAILABLE_MESSAGE } from '../core/privacy.js';
+import { AUDIT_STORAGE_UNAVAILABLE_MESSAGE as STORAGE_UNAVAILABLE_MESSAGE, projectAuditResourceOrigin } from '../core/privacy.js';
 import {
   AuditStorageUnavailableError,
   createAuditStore,
   isAuditExportLeaseConflict,
   isAuditRevisionConflict,
 } from '../storage/audit-store.js';
-import { sanitizeResourceUrl } from '../core/normalize-snapshot.js';
 import { createExportFailureRequest, persistExportFailure } from '../export/export-controller.js';
 import { getPersonaController } from './persona-runtime.js';
 import { registerAuditContextMenus } from './context-menu.js';
@@ -947,10 +946,7 @@ function retentionIntent(message) {
 }
 
 function checkpointResourceIdentity(value) {
-  const identity = new URL(sanitizeResourceUrl(value));
-  identity.search = '';
-  identity.hash = '';
-  return identity.href;
+  return projectAuditResourceOrigin(value);
 }
 
 function panelOwnerKey(sender) {

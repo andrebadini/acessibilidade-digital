@@ -4,6 +4,18 @@ export const SENSITIVE_KEY = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)
 // which may disclose URLs, database names or implementation-specific values.
 export const AUDIT_STORAGE_UNAVAILABLE_MESSAGE = 'Não foi possível salvar a auditoria no armazenamento local. Libere espaço ou verifique as permissões e tente novamente.';
 
+/** Marco 1 durable projection: resource identity is limited to its canonical origin. */
+export function projectAuditResourceOrigin(value) {
+  if (typeof value !== 'string' || value.length === 0) return '';
+  try {
+    const parsed = new URL(value);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.href !== value) return '';
+    return `${parsed.origin}/`;
+  } catch {
+    return '';
+  }
+}
+
 const URL_ATTRIBUTE_KEYS = new Set(['action', 'cite', 'formaction', 'href', 'poster', 'src', 'currentSrc']);
 
 const FIXED_WARNING_MESSAGES = Object.freeze({

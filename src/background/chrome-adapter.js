@@ -3,7 +3,7 @@ import { captureElement, captureFullPage } from '../browser/capture-evidence.js'
 import { composeAnnouncementMapForProduction as composeAnnouncementMap } from '../browser/annotation-map.js';
 import { createCdpClient, createChromeDebuggerTransport } from '../browser/cdp-client.js';
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
-import { sanitizeResourceUrl } from '../core/normalize-snapshot.js';
+import { projectAuditResourceOrigin } from '../core/privacy.js';
 
 export const AUDIT_EXECUTION_INTERNAL = Symbol('audita.audit-execution-internal');
 
@@ -16,10 +16,12 @@ function compositionDenied() {
 }
 
 /** Copies a trusted adapter while preserving its single opaque execution contract. */
-export function composeChromeAdapter(base, overrides, allowedNames = WORKER_OVERRIDE_NAMES) {
+export function composeChromeAdapter(base, overrides) {
+  if (arguments.length !== 2) throw compositionDenied();
   if (!base || typeof base !== 'object' || !overrides || typeof overrides !== 'object' ||
-    (Object.getPrototypeOf(overrides) !== Object.prototype && Object.getPrototypeOf(overrides) !== null) ||
-    !Array.isArray(allowedNames) || allowedNames.some(name => typeof name !== 'string')) throw compositionDenied();
+    (Object.getPrototypeOf(overrides) !== Object.prototype && Object.getPrototypeOf(overrides) !== null)) {
+    throw compositionDenied();
+  }
   let baseKeys;
   let overrideKeys;
   try {
@@ -28,7 +30,7 @@ export function composeChromeAdapter(base, overrides, allowedNames = WORKER_OVER
   } catch { throw compositionDenied(); }
   const internal = Object.getOwnPropertyDescriptor(base, AUDIT_EXECUTION_INTERNAL);
   if (!internal || internal.enumerable || !Object.hasOwn(internal, 'value') || internal.get || internal.set) throw compositionDenied();
-  const allowed = new Set(allowedNames);
+  const allowed = new Set(WORKER_OVERRIDE_NAMES);
   if (overrideKeys.some(key => typeof key !== 'string' || !allowed.has(key))) throw compositionDenied();
   const composed = {};
   for (const key of baseKeys) {
@@ -340,11 +342,7 @@ export function createChromeAdapter(chromeApi, options = {}) {
       if (!Number.isSafeInteger(tabId) || tabId < 0 || typeof includeQuery !== 'boolean') return '';
       try {
         const rawUrl = (await invoke(chromeApi, chromeApi.tabs, 'get', tabId))?.url;
-        if (typeof rawUrl !== 'string') return '';
-        const parsed = new URL(rawUrl);
-        if (!['http:', 'https:'].includes(parsed.protocol) || parsed.href !== rawUrl) return '';
-        if (!includeQuery) parsed.search = '';
-        return sanitizeResourceUrl(parsed.href);
+        return projectAuditResourceOrigin(rawUrl);
       } catch {
         return '';
       }

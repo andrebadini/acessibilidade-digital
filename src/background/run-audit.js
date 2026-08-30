@@ -27,6 +27,7 @@ import { axeEquivalenceForAuditaRule } from '../core/normative/axe-nbr-crosswalk
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
 import { section508ReferencesForWcag } from '../core/normative/section508.js';
 import { AUDIT_EXECUTION_INTERNAL } from './chrome-adapter.js';
+import { projectAuditResourceOrigin } from '../core/privacy.js';
 import { createOwnedTabRegistry } from './owned-tabs.js';
 import { createRawNavigationVaultV1 } from './raw-navigation-vault.js';
 import { runObservedTabAudit } from './observed-tab-runner.js';
@@ -80,14 +81,6 @@ function stableHash(value) {
 function safeUrl(value) {
   if (typeof value !== 'string') return '';
   return sanitizeResourceUrl(value);
-}
-
-function conservativeRequestedEvidence(value) {
-  try {
-    const parsed = new URL(value);
-    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
-    return `${parsed.protocol}//${parsed.host}/`;
-  } catch { return ''; }
 }
 
 function validateTransientReviewUrl(value, auditId, expectedExtensionId) {
@@ -382,7 +375,7 @@ async function runLegacyAudit({ url, chromeAdapter, now = () => new Date().toISO
   if (!/^[A-Za-z0-9._:-]{1,160}$/u.test(auditId)) throw new TypeError('O identificador da auditoria é inválido.');
   const state = {
     auditId,
-    requestedUrl: safeUrl(navigationUrl),
+    requestedUrl: projectAuditResourceOrigin(navigationUrl),
     finalUrl: '',
     attempted: false,
     finalUrlObserved: false,
@@ -478,7 +471,7 @@ async function runLegacyAudit({ url, chromeAdapter, now = () => new Date().toISO
     });
     const navigation = await awaitStep(() => chromeAdapter.waitForStable(tab.id, { signal, timeoutMs: 30_000 }));
     const observedUrl = navigation?.url || await awaitStep(() => chromeAdapter.getFinalUrl?.(tab.id)) || navigationUrl;
-    state.finalUrl = safeUrl(observedUrl);
+    state.finalUrl = projectAuditResourceOrigin(observedUrl);
     state.finalUrlObserved = true;
     cdp = await awaitStep(() => chromeAdapter.connectCdp(tab.id, { signal }));
     if (!cdp || typeof cdp.command !== 'function') throw new Error('CDP inválido');
@@ -542,7 +535,8 @@ async function runLegacyAudit({ url, chromeAdapter, now = () => new Date().toISO
       raw = chromeAdapter.collectPage
         ? await awaitStep(() => chromeAdapter.collectPage(cdp, tab.id, { signal }))
         : await awaitStep(() => collectPage(cdp, tab.id, { executeScript: chromeAdapter.executeScript, signal }));
-      state.snapshot = normalizeSnapshot(raw);
+      state.snapshot = structuredClone(normalizeSnapshot(raw));
+      state.snapshot.document.url = projectAuditResourceOrigin(state.snapshot.document.url);
       state.accessibilityWidgets = detectAccessibilityWidgets(state.snapshot.document?.accessibilityWidgetSignals);
     } catch (error) {
       rethrowAbort(error, signal);
@@ -818,7 +812,7 @@ export async function runAuditExecution({
 }) {
   const internals = internalContract(chromeAdapter);
   let navigationUrl = normalizeAuditUrl(url);
-  const requestedEvidence = conservativeRequestedEvidence(navigationUrl);
+  const requestedEvidence = projectAuditResourceOrigin(navigationUrl);
   const generatedId = idFactory('audit');
   const auditId = typeof generatedId === 'string' ? generatedId.trim() : '';
   if (!/^[A-Za-z0-9._:-]{1,160}$/u.test(auditId)) throw new TypeError('O identificador da auditoria é inválido.');

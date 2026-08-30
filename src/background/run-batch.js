@@ -10,7 +10,7 @@ import {
   createBatchReportTemplate,
 } from '../core/batch/aggregate-audits.js';
 import { remapAuditPage } from '../core/batch/remap-audit.js';
-import { sanitizeResourceUrl } from '../core/normalize-snapshot.js';
+import { projectAuditResourceOrigin } from '../core/privacy.js';
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { canonicalInternalReviewUrl } from '../core/report/report-policy.js';
 import { normalizeAuditUrl } from '../core/url.js';
@@ -320,10 +320,18 @@ async function runPageWithBoundary({ operation, externalSignal, pageTimeoutMs, c
   clearTimeout(timeoutId);
   externalSignal?.removeEventListener('abort', externalAbort);
   if (first.kind === 'fulfilled' || first.kind === 'rejected') return first;
-  const cleanup = await Promise.race([
-    settled,
-    new Promise(resolve => setTimeout(() => resolve({ kind: 'cleanup-unconfirmed' }), cleanupTimeoutMs)),
-  ]);
+  let cleanupTimerId;
+  let cleanup;
+  try {
+    cleanup = await Promise.race([
+      settled,
+      new Promise(resolve => {
+        cleanupTimerId = setTimeout(() => resolve({ kind: 'cleanup-unconfirmed' }), cleanupTimeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(cleanupTimerId);
+  }
   if (cleanup.kind === 'cleanup-unconfirmed') return cleanup;
   return { kind: first.kind === 'cancel-boundary' ? 'cancelled' : 'timeout', settled: cleanup };
 }
@@ -345,14 +353,12 @@ function validateInputs({ entries, batchAuditId, chromeAdapter, runner, pageTime
   if (!Number.isSafeInteger(evidenceBudgetBytes) || evidenceBudgetBytes < 0) {
     throw new TypeError('Orçamento de evidências do lote inválido.');
   }
-  const reportUrls = new Set();
   for (const entry of entries) {
     if (!entry || !Number.isSafeInteger(entry.line) || entry.line < 1 ||
       normalizeAuditUrl(entry.navigationUrl) !== entry.navigationUrl ||
-      sanitizeResourceUrl(entry.navigationUrl) !== entry.reportUrl || reportUrls.has(entry.reportUrl)) {
+      projectAuditResourceOrigin(entry.navigationUrl) !== entry.reportUrl) {
       throw new TypeError('Lista normalizada do lote inválida.');
     }
-    reportUrls.add(entry.reportUrl);
   }
 }
 

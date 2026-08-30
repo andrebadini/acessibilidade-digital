@@ -448,7 +448,7 @@ test('default timeout blocks the next page when the settled execution confirms c
   const model = await runBatch({
     entries: normalizeUrlList('https://slow.example.test/\nhttps://never.example.test/').entries,
     batchAuditId: 'batch-timeout-pending', chromeAdapter: adapter, now: clock(),
-    reportOptions: REPORT_OPTIONS, pageTimeoutMs: 2, cleanupTimeoutMs: 30,
+    reportOptions: REPORT_OPTIONS, pageTimeoutMs: 1_000, cleanupTimeoutMs: 1_000,
   });
   assert.equal(adapter.events.filter(event => event.startsWith('create:')).length, 1);
   assert.equal(model.pages[1].attempted, false);
@@ -461,7 +461,7 @@ test('default timeout merges the late factual checkpoint and starts the next pag
   const model = await runBatch({
     entries: normalizeUrlList('https://slow.example.test/\nhttps://next.example.test/').entries,
     batchAuditId: 'batch-timeout-removed', chromeAdapter: adapter, now: clock(),
-    reportOptions: REPORT_OPTIONS, pageTimeoutMs: 2, cleanupTimeoutMs: 30,
+    reportOptions: REPORT_OPTIONS, pageTimeoutMs: 1_000, cleanupTimeoutMs: 1_000,
     onExecutionCheckpoint: async value => checkpoints.push(value),
   });
   assert.ok(adapter.events.indexOf('settle:80') < adapter.events.indexOf('create:81'));
@@ -501,4 +501,46 @@ test('default batch blocks after persistent ownership registration and removal f
   assert.equal(model.pages[1].attempted, false);
   assert.equal(Object.keys(values).some(key => key.startsWith('audita:owned-tab:v1:')), false);
   assert.doesNotMatch(JSON.stringify(model), /PRIVATE_TOKEN|PRIVATE_SET|PRIVATE_REMOVE|owner-/u);
+});
+
+test('custom batch failure persists only the requested origin', async () => {
+  const model = await runBatch({
+    entries: normalizeUrlList('https://example.test/pessoa/CPF-123456789?case=7&secret=x#fragmento').entries,
+    batchAuditId: 'batch-safe-failure-url',
+    runner: async () => { throw new Error('PRIVATE_NATIVE_FAILURE'); },
+    chromeAdapter: { async emitProgress() {}, async handoffReport() { return { reviewUrl: null }; } },
+    now: clock(), reportOptions: REPORT_OPTIONS,
+  });
+  assert.deepEqual(model.requestedScope.urls, ['https://example.test/']);
+  assert.equal(model.pages[0].requestedUrl, 'https://example.test/');
+  assert.equal(model.pages[0].finalUrl, 'https://example.test/');
+  assert.doesNotMatch(JSON.stringify(model), /CPF-123456789|case=7|secret=x|fragmento|PRIVATE_NATIVE_FAILURE/u);
+});
+
+test('clears the losing cleanup timer after a timed-out runner settles', async () => {
+  const nativeSetTimeout = globalThis.setTimeout;
+  const nativeClearTimeout = globalThis.clearTimeout;
+  const cleared = [];
+  let nextTimer = 0;
+  try {
+    globalThis.setTimeout = (callback, delay) => {
+      const id = { id: ++nextTimer, delay };
+      queueMicrotask(callback);
+      return id;
+    };
+    globalThis.clearTimeout = id => { cleared.push(id); };
+    await runBatch({
+      entries: normalizeUrlList('https://timer.example.test/').entries,
+      batchAuditId: 'batch-cleanup-timer',
+      runner: options => new Promise(resolve => options.signal.addEventListener('abort', () => resolve(
+        rawChild({ auditId: options.idFactory(), url: options.url, status: 'cancelled', now: options.now }),
+      ), { once: true })),
+      chromeAdapter: { async emitProgress() {}, async handoffReport() { return { reviewUrl: null }; } },
+      now: clock(), reportOptions: REPORT_OPTIONS, pageTimeoutMs: 5, cleanupTimeoutMs: 50,
+    });
+    assert.ok(cleared.some(timer => timer?.delay === 50));
+  } finally {
+    globalThis.setTimeout = nativeSetTimeout;
+    globalThis.clearTimeout = nativeClearTimeout;
+  }
 });
