@@ -16,23 +16,33 @@ const fixedState = state => Object.freeze({
 });
 
 function exactDataRecord(value, expectedKeys) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
+  let keys;
+  let prototype;
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    prototype = Object.getPrototypeOf(value);
+    keys = Reflect.ownKeys(value);
+  } catch {
     return null;
   }
-  const keys = Reflect.ownKeys(value);
+  if (prototype !== Object.prototype) return null;
   if (keys.some(key => typeof key !== 'string') || keys.length !== expectedKeys.length ||
     keys.slice().sort().some((key, index) => key !== expectedKeys[index])) return null;
   const record = Object.create(null);
   for (const key of expectedKeys) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor || !Object.hasOwn(descriptor, 'value')) return null;
-    record[key] = descriptor.value;
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) return null;
+      record[key] = descriptor.value;
+    } catch {
+      return null;
+    }
   }
   return record;
 }
 
 function validOpaqueId(value) {
-  return typeof value === 'string' && /^[A-Za-z0-9_-]{20,256}$/u.test(value);
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{22}$/u.test(value);
 }
 
 function validRequestId(value) {
@@ -118,7 +128,11 @@ export function createPopupController(options = {}) {
       response = null;
     }
     if (generation !== preparationGeneration) return false;
-    prepared = parsePreparation(response, requestId, now());
+    try {
+      prepared = parsePreparation(response, requestId, now());
+    } catch {
+      prepared = null;
+    }
     preparing = false;
     message = prepared ? '' : 'Não foi possível preparar as ações locais.';
     notify();
@@ -138,7 +152,7 @@ export function createPopupController(options = {}) {
       await opening;
       panelOpened = true;
       const response = await sendMessage(createPopupAuditMessage(clickSnapshot.auditCapabilityId));
-      prepared = null;
+      if (prepared === clickSnapshot) prepared = null;
       if (!response || typeof response !== 'object' || response.ok !== true) {
         message = 'Não foi possível iniciar a auditoria local.';
         return false;
@@ -146,7 +160,7 @@ export function createPopupController(options = {}) {
       message = 'Auditoria iniciada no painel lateral.';
       return true;
     } catch {
-      prepared = null;
+      if (prepared === clickSnapshot) prepared = null;
       message = panelOpened
         ? 'Não foi possível iniciar a auditoria local.'
         : 'Não foi possível abrir o painel lateral.';
