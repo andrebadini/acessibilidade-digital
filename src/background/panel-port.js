@@ -1,6 +1,7 @@
 import { copyPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
 import { PANEL_SURFACE, deriveTrustedExtensionContext } from './target-capabilities.js';
 import { capturedUtf8Length } from './worker-protocol.js';
+import { parseStorageGetEnvelope } from './storage-get-envelope.js';
 
 export const PANEL_PORT_NAME = 'audita-panel-v1';
 export const panelBootstrapStorageKey = windowId => `audita:panel-bootstrap:v1:${windowId}`;
@@ -54,20 +55,6 @@ function own(value, key) {
     const descriptor = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key) : null;
     return descriptor?.enumerable && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
   } catch { return undefined; }
-}
-
-function parseStorageEnvelope(value, key) {
-  try {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) return null;
-    const keys = Reflect.ownKeys(value);
-    if (keys.length === 0) return Object.freeze({ present: false, value: null });
-    if (keys.length !== 1 || keys[0] !== key) return null;
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value') || descriptor.value === undefined) return null;
-    return Object.freeze({ present: true, value: descriptor.value });
-  } catch { return null; }
 }
 
 function safeChromeId(value) { return Number.isSafeInteger(value) && value >= 0; }
@@ -218,9 +205,9 @@ export function createPanelPortCoordinator(raw) {
     const read = async () => {
       const envelope = await input.sessionArea.get(key);
       reassert(assertOwned);
-      const parsed = parseStorageEnvelope(envelope, key);
+      const parsed = parseStorageGetEnvelope(envelope, key);
       if (!parsed) throw new Error('PANEL_BOOTSTRAP_DENIED');
-      if (!parsed.present) return null;
+      if (parsed.state === 'absent') return null;
       const value = parseBootstrap(parsed.value);
       if (!value) throw new Error('PANEL_BOOTSTRAP_DENIED');
       return value;
@@ -335,9 +322,9 @@ export function createPanelPortCoordinator(raw) {
     const read = async () => {
       const envelope = await input.sessionArea.get(START_JOURNAL_KEY);
       reassert(assertOwned);
-      const parsed = parseStorageEnvelope(envelope, START_JOURNAL_KEY);
+      const parsed = parseStorageGetEnvelope(envelope, START_JOURNAL_KEY);
       if (!parsed) throw new Error('PANEL_START_JOURNAL_DENIED');
-      return parsed.present;
+      return parsed.state === 'present';
     };
     const first = await read();
     reassert(assertOwned);

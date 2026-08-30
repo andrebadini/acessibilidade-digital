@@ -24,6 +24,7 @@ import { reportInput } from '../report/helpers.js';
 
 const DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
 const EPOCH = 1_788_000_000_000;
+const START_JOURNAL_KEY = 'audita:start-journal:v1';
 
 function sessionArea() {
   const values = Object.create(null);
@@ -160,6 +161,177 @@ function dependencyFixture({ area, authority, execution, order = [], reportByAud
     createAbortController: () => new AbortController(),
   };
 }
+
+function instrumentAuthority(authority, effects) {
+  return Object.freeze({
+    ...authority,
+    async claimAndIssueAuditSession(args) {
+      effects.claims += 1;
+      return authority.claimAndIssueAuditSession(args);
+    },
+    async claimWorkerEventAndIssueAuditSession(args) {
+      effects.claims += 1;
+      return authority.claimWorkerEventAndIssueAuditSession(args);
+    },
+  });
+}
+
+function instrumentJournalStorage(area, createEnvelope = null) {
+  const effects = { writes: 0, removals: 0 };
+  const originalGet = area.get.bind(area);
+  const originalSet = area.set.bind(area);
+  const originalRemove = area.remove.bind(area);
+  if (createEnvelope) {
+    area.get = async key => key === START_JOURNAL_KEY ? createEnvelope() : originalGet(key);
+  }
+  area.set = async entries => {
+    if (Object.hasOwn(entries, START_JOURNAL_KEY)) effects.writes += 1;
+    return originalSet(entries);
+  };
+  area.remove = async key => {
+    if ((Array.isArray(key) && key.includes(START_JOURNAL_KEY)) || key === START_JOURNAL_KEY) effects.removals += 1;
+    return originalRemove(key);
+  };
+  return effects;
+}
+
+function malformedJournalEnvelopeCases(getterState) {
+  const journal = {
+    version: 1, capabilityId: 'A'.repeat(22), auditId: 'hostile-audit', windowId: 9,
+    state: 'prepared', sessionCapabilityId: null, createdAt: EPOCH, updatedAt: EPOCH,
+  };
+  return [
+    ['accessor', () => {
+      const envelope = {};
+      Object.defineProperty(envelope, START_JOURNAL_KEY, {
+        enumerable: true,
+        get() { getterState.calls += 1; return journal; },
+      });
+      return envelope;
+    }],
+    ['non-enumerable', () => {
+      const envelope = {};
+      Object.defineProperty(envelope, START_JOURNAL_KEY, { enumerable: false, value: journal });
+      return envelope;
+    }],
+    ['symbol', () => ({ [START_JOURNAL_KEY]: journal, [Symbol('private')]: true })],
+    ['extra key', () => ({ [START_JOURNAL_KEY]: journal, extra: true })],
+    ['wrong key', () => ({ other: journal })],
+    ['custom prototype', () => Object.assign(Object.create({ inherited: true }), { [START_JOURNAL_KEY]: journal })],
+    ['explicit undefined', () => ({ [START_JOURNAL_KEY]: undefined })],
+    ['defined invalid row', () => ({ [START_JOURNAL_KEY]: null })],
+    ['array', () => []],
+    ['primitive', () => 7],
+    ['ownKeys failure', () => new Proxy({ [START_JOURNAL_KEY]: journal }, {
+      ownKeys() { throw new Error('PRIVATE_OWN_KEYS_FAILURE'); },
+    })],
+    ['descriptor failure', () => new Proxy({ [START_JOURNAL_KEY]: journal }, {
+      getOwnPropertyDescriptor() { throw new Error('PRIVATE_DESCRIPTOR_FAILURE'); },
+    })],
+  ];
+}
+
+test('explicit undefined start-journal storage blocks begin before overwrite, claim, bootstrap or publication', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  area.values[START_JOURNAL_KEY] = undefined;
+  const effects = { claims: 0 };
+  const order = [];
+  const storageEffects = instrumentJournalStorage(area);
+  const starter = createAuthorizedAuditStarter(dependencyFixture({
+    area,
+    authority: instrumentAuthority(prepared.authority, effects),
+    order,
+    execution: async () => Object.freeze({
+      version: 1, auditId: 'audit-undefined-journal', state: 'revoked',
+      failureCode: 'AUDIT_FAILED', model: null, checkpoint: null,
+    }),
+  }));
+
+  const started = await starter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: 'audit-undefined-journal',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+  if (started.completion) await started.completion;
+
+  assert.deepEqual(started.response, { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' });
+  assert.equal(started.sessionCapabilityId, null);
+  assert.equal(effects.claims, 0);
+  assert.equal(storageEffects.writes, 0);
+  assert.equal(storageEffects.removals, 0);
+  assert.deepEqual(order, []);
+  assert.equal(Object.hasOwn(area.values, START_JOURNAL_KEY), true);
+  assert.equal(area.values[START_JOURNAL_KEY], undefined);
+});
+
+test('explicit undefined start-journal storage blocks lifecycle recovery instead of reporting idle', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  area.values[START_JOURNAL_KEY] = undefined;
+  const order = [];
+  const storageEffects = instrumentJournalStorage(area);
+  const recovered = await createAuthorizedAuditStarter(dependencyFixture({
+    area, authority: prepared.authority, order,
+    execution: async () => { throw new Error('must not resume'); },
+  })).recoverAuthorizedAuditLifecycle();
+
+  assert.deepEqual(recovered, {
+    ok: false, state: 'blocked', auditId: null, revision: null, code: 'AUDIT_RECOVERY_REQUIRED',
+  });
+  assert.equal(storageEffects.writes, 0);
+  assert.equal(storageEffects.removals, 0);
+  assert.deepEqual(order, []);
+  assert.equal(Object.hasOwn(area.values, START_JOURNAL_KEY), true);
+  assert.equal(area.values[START_JOURNAL_KEY], undefined);
+});
+
+test('hostile start-journal storage envelopes block begin and recovery with zero effects', async t => {
+  const getterState = { calls: 0 };
+  for (const [name, createEnvelope] of malformedJournalEnvelopeCases(getterState)) {
+    await t.test(name, async () => {
+      const beginArea = sessionArea();
+      const prepared = await authorityFixture(beginArea);
+      const beginEffects = { claims: 0 };
+      const beginOrder = [];
+      const beginStorageEffects = instrumentJournalStorage(beginArea, createEnvelope);
+      const started = await createAuthorizedAuditStarter(dependencyFixture({
+        area: beginArea,
+        authority: instrumentAuthority(prepared.authority, beginEffects),
+        order: beginOrder,
+        execution: async () => { throw new Error('must not run'); },
+      })).beginAuthorizedAudit({
+        capabilityId: prepared.capabilityId, eventNonce: null, auditId: `audit-hostile-${name.replaceAll(' ', '-')}`,
+        capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+        retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+      });
+
+      assert.deepEqual(started.response, { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' });
+      assert.equal(started.sessionCapabilityId, null);
+      assert.equal(beginEffects.claims, 0);
+      assert.equal(beginStorageEffects.writes, 0);
+      assert.equal(beginStorageEffects.removals, 0);
+      assert.deepEqual(beginOrder, []);
+
+      const recoveryArea = sessionArea();
+      const recoveryPrepared = await authorityFixture(recoveryArea);
+      const recoveryOrder = [];
+      const recoveryStorageEffects = instrumentJournalStorage(recoveryArea, createEnvelope);
+      const recovered = await createAuthorizedAuditStarter(dependencyFixture({
+        area: recoveryArea, authority: recoveryPrepared.authority, order: recoveryOrder,
+        execution: async () => { throw new Error('must not resume'); },
+      })).recoverAuthorizedAuditLifecycle();
+
+      assert.deepEqual(recovered, {
+        ok: false, state: 'blocked', auditId: null, revision: null, code: 'AUDIT_RECOVERY_REQUIRED',
+      });
+      assert.equal(recoveryStorageEffects.writes, 0);
+      assert.equal(recoveryStorageEffects.removals, 0);
+      assert.deepEqual(recoveryOrder, []);
+    });
+  }
+  assert.equal(getterState.calls, 0);
+});
 
 test('rejects a hostile retention intent before claim, journal or other effect', async () => {
   const area = sessionArea();

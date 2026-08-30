@@ -8,6 +8,7 @@ import {
 import { isCapturePolicyV1 } from '../core/privacy/capture-policy.js';
 import { verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
 import { copyPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
+import { parseStorageGetEnvelope } from './storage-get-envelope.js';
 
 export const ACTIVE_AUDIT_JOB_KEY = 'audita:active-audit-job:v1';
 const START_JOURNAL_KEY = 'audita:start-journal:v1';
@@ -112,26 +113,14 @@ function journalRecord(value) {
   return freeze(record);
 }
 
-function readEnvelopeValue(envelope, key) {
-  try {
-    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) ||
-      (Object.getPrototypeOf(envelope) !== Object.prototype && Object.getPrototypeOf(envelope) !== null)) throw new Error();
-    const keys = Reflect.ownKeys(envelope);
-    if (keys.length === 0) return undefined;
-    if (keys.length !== 1 || keys[0] !== key) throw new Error();
-    const descriptor = Object.getOwnPropertyDescriptor(envelope, key);
-    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new Error();
-    return descriptor.value;
-  } catch { throw new TypeError('STORAGE_DENIED'); }
-}
-
 async function readConfirmed(sessionArea, key, parser, denial) {
   try {
-    const first = readEnvelopeValue(await sessionArea.get(key), key);
-    const second = readEnvelopeValue(await sessionArea.get(key), key);
-    if (first === undefined && second === undefined) return null;
-    const firstParsed = parser(first);
-    const secondParsed = parser(second);
+    const first = parseStorageGetEnvelope(await sessionArea.get(key), key);
+    const second = parseStorageGetEnvelope(await sessionArea.get(key), key);
+    if (!first || !second || first.state !== second.state) throw new Error();
+    if (first.state === 'absent') return null;
+    const firstParsed = parser(first.value);
+    const secondParsed = parser(second.value);
     if (!firstParsed || !secondParsed || !same(firstParsed, secondParsed)) throw new Error();
     return firstParsed;
   } catch { throw new Error(denial); }
