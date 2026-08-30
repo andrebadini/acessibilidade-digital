@@ -482,7 +482,7 @@ test('uses curated supplemental summaries and never attaches legal or normative 
   const card = occurrenceCard(html, 'occ-editorial');
   assert.match(card, /<h3[^>]*>Há conteúdo provisório inequívoco na página\.<\/h3>/u);
   assert.match(card, /chip--editorial[\s\S]*Alerta editorial/u);
-  assert.match(card, /Sem mapeamento normativo atribuído/iu);
+  assert.match(card, /ABNT NBR 17225:<\/strong> Sem item ABNT associado\./u);
   assert.doesNotMatch(card, /legal-analysis|Base consumerista padronizada|ABNT NBR 17225:2025:<\/strong> item/iu);
   assert.match(html, /<option value="best-practice">Boa prática suplementar<\/option>/u);
   assert.match(html, /\.chip--best-practice\{[^}]*border-color:#738596/u);

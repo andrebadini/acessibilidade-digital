@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
+import { renderHtmlReport } from '../../src/core/report/html.js';
 import { buildPanelSummary } from '../../src/panel/panel-summary.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { buildReportView, renderReportView } from '../../src/review/report-view.js';
@@ -72,6 +73,31 @@ async function fixture({ mutateDraft } = {}) {
   return { model, summary };
 }
 
+function addEditorialOccurrenceWithoutAbnt(draft) {
+  draft.methodology.supplementalRuleCount += 1;
+  draft.methodology.ruleCount += 1;
+  draft.ruleResults.push({
+    ruleId: 'editorial.placeholder-text', outcome: 'failed', mode: 'automated',
+    classification: 'editorial', impact: 'minor', confidence: 'high',
+    source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
+    nbrItems: [], wcag: [], targets: [{
+      nodeId: 'n-editorial', selectorHint: '', message: 'Substitua o conteúdo provisório antes da publicação.',
+      data: { reason: 'placeholder-text' },
+    }],
+    summary: 'Há conteúdo provisório inequívoco na página.', limitations: [],
+  });
+  draft.occurrences.push({
+    occurrenceId: 'occ-editorial', pageId: 'page-1', outcome: 'failed',
+    classification: 'editorial', impact: 'minor', confidence: 'high',
+    source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
+    nbrItemRef: null, itemWcagRefs: [], sourceWcagRefs: [], testedWcagRefs: [], wcagRefs: [], foreignBenchmarkRefs: [],
+    target: { nodeId: 'n-editorial', selector: null, framePath: [] }, accessiblePreview: null,
+    evidenceRefs: [], legalAnalysis: null, itemId: null, ruleId: 'editorial.placeholder-text',
+    mode: 'automated', nodeId: 'n-editorial', evidenceIds: [],
+    justification: 'Há conteúdo provisório inequívoco na página.',
+  });
+}
+
 test('ReportViewV1 owns exact frozen copies and the canonical four-format order', async () => {
   const { model, summary } = await fixture();
   const view = buildReportView({
@@ -110,6 +136,20 @@ test('ReportViewV1 owns exact frozen copies and the canonical four-format order'
   assert.doesNotMatch(JSON.stringify(observed), /top-document|mixed|page-or-process/u);
 });
 
+test('ReportViewV1 offers the three WCAG conformance levels instead of numeric criteria', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({
+    model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash,
+  });
+
+  assert.deepEqual(view.filters.wcag, [
+    { id: 'A', count: 1 },
+    { id: 'AA', count: 3 },
+    { id: 'AAA', count: 2 },
+  ]);
+  assert.equal(view.filters.wcag.every(option => !/^\d+(?:\.\d+)+$/u.test(option.id)), true);
+});
+
 test('ReportViewV1 keeps qualified remediation and uses a prudent alert fallback', async () => {
   const canonicalRemediation = 'Forneça um indicador de foco visível.';
   const { model, summary } = await fixture({
@@ -119,28 +159,7 @@ test('ReportViewV1 keeps qualified remediation and uses a prudent alert fallback
         nodeId: 'n-1', message: canonicalRemediation,
         data: { reason: 'focus-indicator-not-visible' },
       }];
-      draft.methodology.supplementalRuleCount += 1;
-      draft.methodology.ruleCount += 1;
-      draft.ruleResults.push({
-        ruleId: 'editorial.placeholder-text', outcome: 'failed', mode: 'automated',
-        classification: 'editorial', impact: 'minor', confidence: 'high',
-        source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
-        nbrItems: [], wcag: [], targets: [{
-          nodeId: 'n-editorial', selectorHint: '', message: 'Substitua o conteúdo provisório antes da publicação.',
-          data: { reason: 'placeholder-text' },
-        }],
-        summary: 'Há conteúdo provisório inequívoco na página.', limitations: [],
-      });
-      draft.occurrences.push({
-        occurrenceId: 'occ-editorial', pageId: 'page-1', outcome: 'failed',
-        classification: 'editorial', impact: 'minor', confidence: 'high',
-        source: { engine: 'audita-editorial', ruleId: 'editorial.placeholder-text', version: '1.0.0' },
-        nbrItemRef: null, itemWcagRefs: [], sourceWcagRefs: [], testedWcagRefs: [], wcagRefs: [], foreignBenchmarkRefs: [],
-        target: { nodeId: 'n-editorial', selector: null, framePath: [] }, accessiblePreview: null,
-        evidenceRefs: [], legalAnalysis: null, itemId: null, ruleId: 'editorial.placeholder-text',
-        mode: 'automated', nodeId: 'n-editorial', evidenceIds: [],
-        justification: 'Há conteúdo provisório inequívoco na página.',
-      });
+      addEditorialOccurrenceWithoutAbnt(draft);
     },
   });
   const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
@@ -255,6 +274,71 @@ test('renderer keeps filters live-only without mutating the immutable report vie
   assert.doesNotMatch(root.textContent, /\["page-1","audita-core","keyboard-focus-trap"\]/u);
   assert.match(root.textContent, /Verificação não testada: Armadilha de foco — Página 1\./u);
   assert.doesNotMatch(JSON.stringify(root.dataset), /capability|attempt|revision|lease|tab|window|document/iu);
+});
+
+test('live filters expose visible Portuguese labels and apply WCAG levels', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const groups = root.querySelectorAll('.report-filters [role="group"]');
+
+  assert.deepEqual(groups.map(group => group.getAttribute('aria-label')), [
+    'Filtrar por impacto',
+    'Filtrar por nível WCAG 2.2',
+    'Filtrar por tipo de resultado',
+    'Filtrar por classificação',
+    'Filtrar por página avaliada',
+    'Filtrar por origem da verificação',
+    'Filtrar por item da ABNT NBR 17225',
+  ]);
+  assert.deepEqual(groups.map(group => group.querySelector('[data-report-filter-label]').textContent), [
+    'Impacto',
+    'Nível WCAG 2.2',
+    'Tipo de resultado',
+    'Classificação',
+    'Página avaliada',
+    'Origem da verificação',
+    'Item ABNT NBR 17225',
+  ]);
+  const wcagGroup = groups[1];
+  assert.deepEqual(wcagGroup.querySelectorAll('button').map(button => button.getAttribute('data-filter-value')), ['A', 'AA', 'AAA']);
+  assert.deepEqual(wcagGroup.querySelectorAll('button').map(button => button.textContent), [
+    'Nível A (1)', 'Nível AA (3)', 'Nível AAA (2)',
+  ]);
+  assert.doesNotMatch(wcagGroup.textContent, /\b\d+\.\d+(?:\.\d+)?\b/u);
+
+  wcagGroup.querySelector('button[data-filter-value="AA"]').click();
+  const visible = root.querySelectorAll('[data-report-issue]').filter(issue => !issue.hidden);
+  assert.equal(visible.length, 3);
+  assert.equal(visible.every(issue => issue.getAttribute('data-wcag').split(' ').includes('AA')), true);
+});
+
+test('missing ABNT association is explicit in the live report and HTML/PDF source', async () => {
+  const { model, summary } = await fixture({ mutateDraft: addEditorialOccurrenceWithoutAbnt });
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const alert = root.querySelector('[data-report-issue][data-result="alerts"]');
+
+  assert.ok(alert);
+  assert.equal(alert.getAttribute('data-abnt'), '__none__');
+  assert.match(alert.querySelector('[data-report-plain-block="normative"]').textContent, /Sem item ABNT associado/u);
+  assert.match(alert.querySelector('[data-report-technical]').textContent, /Item ABNT: Sem item ABNT associado\./u);
+  assert.doesNotMatch(alert.textContent, /Item ABNT:\s*null|ABNT NBR 17225:\s*(?:\.|sem item\.)/iu);
+  const emptyAbntFilter = root.querySelector('button[data-report-filter="abnt"][data-filter-value="__none__"]');
+  assert.equal(emptyAbntFilter.textContent, 'Sem item ABNT associado (1)');
+  emptyAbntFilter.click();
+  assert.deepEqual(root.querySelectorAll('[data-report-issue]').filter(issue => !issue.hidden), [alert]);
+
+  const html = renderHtmlReport(model, { reportView: view });
+  assert.match(html, /data-abnt="__none__"/u);
+  assert.match(html, /ABNT NBR 17225:<\/strong> Sem item ABNT associado\./u);
+  assert.match(html, /Item ABNT:<\/strong> Sem item ABNT associado\./u);
+  assert.doesNotMatch(html, /data-abnt=""|Item ABNT:<\/strong> null|ABNT NBR 17225:<\/strong> (?:sem item\.|\.)/iu);
+
+  const standaloneHtml = renderHtmlReport(model);
+  assert.match(standaloneHtml, /<option value="__none__">Sem item ABNT associado<\/option>/u);
+  assert.match(standaloneHtml, /ABNT NBR 17225:<\/strong> Sem item ABNT associado\./u);
+  assert.doesNotMatch(standaloneHtml, /data-abnt-item=""|ABNT NBR 17225:<\/strong> (?:null|\.)/iu);
 });
 
 test('live report renders decision-first cards, evidence previews and honest evidence-only navigation', async () => {

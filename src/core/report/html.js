@@ -1,6 +1,7 @@
 import { consumerBasisForOccurrence, CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../legal/consumer-basis.js';
 import { sanitizeResourceUrl } from '../normalize-snapshot.js';
 import { SECTION508_REVISED_CROSSWALK } from '../normative/section508.js';
+import { WCAG22_LEVELS } from '../normative/wcag22.js';
 import { createAuditModel } from './audit-model.js';
 import { REPORT_CSS, REPORT_CSS_CSP_HASH } from './report.css.js';
 import { REPORT_SCRIPT, REPORT_SCRIPT_CSP_HASH } from './report.js.js';
@@ -47,6 +48,30 @@ const ANNOTATION_MAP_LIMITATION_LABELS = Object.freeze({
 
 const OUTCOME_PRIORITY = Object.freeze({ failed: 0, cantTell: 1, passed: 2, untested: 3, inapplicable: 4 });
 const IMPACT_PRIORITY = Object.freeze({ critical: 0, serious: 1, moderate: 2, minor: 3 });
+const REPORT_WCAG_LEVEL_ORDER = Object.freeze(['A', 'AA', 'AAA']);
+const REPORT_NO_ABNT_ITEM = '__none__';
+const REPORT_NO_ABNT_ITEM_LABEL = 'Sem item ABNT associado';
+
+function reportWcagLevels(criteria) {
+  const levels = new Set((Array.isArray(criteria) ? criteria : [])
+    .map(criterion => typeof criterion === 'string' ? WCAG22_LEVELS[criterion] : undefined)
+    .filter(level => REPORT_WCAG_LEVEL_ORDER.includes(level)));
+  return REPORT_WCAG_LEVEL_ORDER.filter(level => levels.has(level));
+}
+
+function reportAbntItemsLabel(values) {
+  const items = (Array.isArray(values) ? values : []).filter(value => typeof value === 'string' && value);
+  return items.length > 0 ? items.join(', ') : REPORT_NO_ABNT_ITEM_LABEL;
+}
+
+function reportAbntItemLabel(value) {
+  return typeof value === 'string' && value ? value : REPORT_NO_ABNT_ITEM_LABEL;
+}
+
+function reportAbntFilterToken(values) {
+  const items = (Array.isArray(values) ? values : []).filter(value => typeof value === 'string' && value);
+  return items.length > 0 ? items.join(' ') : REPORT_NO_ABNT_ITEM;
+}
 
 export function renderHtmlReport(input, options = {}) {
   const model = createAuditModel(input);
@@ -142,7 +167,7 @@ function renderReportViewDocument(model, view, options = {}) {
       : selected.map(item => `<figure data-evidence-kind="${escapeHtml(item.kind)}"><img class="evidence-media" src="${escapeHtml(item.dataUrl)}" alt="${escapeHtml(`${label(item.kind, evidenceKindLabels, 'Evidência registrada')} local da evidência ${item.evidenceId}`)}"><figcaption>${escapeHtml(label(item.kind, evidenceKindLabels, 'Evidência registrada'))} — evidência ${escapeHtml(item.evidenceId)}.</figcaption></figure>`).join('');
     return `<section data-report-evidence-preview><h4>Capturas registradas</h4>${previews}</section>`;
   };
-  const technicalDetails = (issue, evidence) => `<details data-report-technical><summary>Ver detalhes técnicos</summary><p>Resultado original: ${escapeHtml(label(issue.originalOutcome, outcomeLabels))}. Resultado consolidado: ${escapeHtml(label(issue.displayOutcome, outcomeLabels))}.</p><p><strong>Contexto técnico:</strong> ${escapeHtml(issue.context ?? 'não registrado')}. <strong>Página:</strong> ${escapeHtml(issue.pageId)}.</p>${issue.occurrences.map(occurrence => `<section data-report-occurrence-technical="${escapeHtml(occurrence.occurrenceId)}"><h4>ID da ocorrência: ${escapeHtml(occurrence.occurrenceId)}</h4><p><strong>Proveniência:</strong> Página ${escapeHtml(issue.pageId)}; Motor ${escapeHtml(occurrence.source.engine)}; Regra ${escapeHtml(occurrence.source.ruleId)}; Versão ${escapeHtml(occurrence.source.version)}.</p><p><strong>Item ABNT:</strong> ${escapeHtml(occurrence.itemId)}. <strong>Classificação:</strong> ${escapeHtml(label(occurrence.classification, classificationLabels))}.</p></section>`).join('')}${evidence.map(item => `<section data-report-occurrence-evidence="${escapeHtml(item.evidenceId)}"><h4>ID da evidência: ${escapeHtml(item.evidenceId)} — ${escapeHtml(label(item.kind, evidenceKindLabels, 'Evidência registrada'))}</h4><p><strong>Proveniência:</strong> página ${escapeHtml(item.pageId)}; tipo ${escapeHtml(item.kind)}; estado ${escapeHtml(item.state ?? 'não registrado')}.</p><p><strong>URL:</strong> ${escapeHtml(item.mediaUrl ?? 'não registrada')}</p><p><strong>Horário:</strong> ${escapeHtml(item.observedAt ?? 'não registrado')}</p><p><strong>Seletor:</strong> ${escapeHtml(item.selector?.css ?? 'não registrado')}</p><p><strong>Snippet:</strong> ${escapeHtml(item.snippet ?? 'não disponível')}</p><p><strong>Hash:</strong> ${escapeHtml(item.hash ?? 'não disponível')}</p></section>`).join('')}</details>`;
+  const technicalDetails = (issue, evidence) => `<details data-report-technical><summary>Ver detalhes técnicos</summary><p>Resultado original: ${escapeHtml(label(issue.originalOutcome, outcomeLabels))}. Resultado consolidado: ${escapeHtml(label(issue.displayOutcome, outcomeLabels))}.</p><p><strong>Contexto técnico:</strong> ${escapeHtml(issue.context ?? 'não registrado')}. <strong>Página:</strong> ${escapeHtml(issue.pageId)}.</p>${issue.occurrences.map(occurrence => `<section data-report-occurrence-technical="${escapeHtml(occurrence.occurrenceId)}"><h4>ID da ocorrência: ${escapeHtml(occurrence.occurrenceId)}</h4><p><strong>Proveniência:</strong> Página ${escapeHtml(issue.pageId)}; Motor ${escapeHtml(occurrence.source.engine)}; Regra ${escapeHtml(occurrence.source.ruleId)}; Versão ${escapeHtml(occurrence.source.version)}.</p><p><strong>Item ABNT:</strong> ${escapeHtml(reportAbntItemLabel(occurrence.itemId))}. <strong>Classificação:</strong> ${escapeHtml(label(occurrence.classification, classificationLabels))}.</p></section>`).join('')}${evidence.map(item => `<section data-report-occurrence-evidence="${escapeHtml(item.evidenceId)}"><h4>ID da evidência: ${escapeHtml(item.evidenceId)} — ${escapeHtml(label(item.kind, evidenceKindLabels, 'Evidência registrada'))}</h4><p><strong>Proveniência:</strong> página ${escapeHtml(item.pageId)}; tipo ${escapeHtml(item.kind)}; estado ${escapeHtml(item.state ?? 'não registrado')}.</p><p><strong>URL:</strong> ${escapeHtml(item.mediaUrl ?? 'não registrada')}</p><p><strong>Horário:</strong> ${escapeHtml(item.observedAt ?? 'não registrado')}</p><p><strong>Seletor:</strong> ${escapeHtml(item.selector?.css ?? 'não registrado')}</p><p><strong>Snippet:</strong> ${escapeHtml(item.snippet ?? 'não disponível')}</p><p><strong>Hash:</strong> ${escapeHtml(item.hash ?? 'não disponível')}</p></section>`).join('')}</details>`;
   const issueCard = (issue, group) => {
     const evidence = correlatedEvidence(issue);
     const correctionPresentation = group === 'passed'
@@ -158,7 +183,7 @@ function renderReportViewDocument(model, view, options = {}) {
     const evidenceLink = firstAnchor
       ? `<a data-report-consult-evidence href="#${firstAnchor}">Consultar evidências registradas</a>`
       : '<p>Nenhuma evidência correlata foi registrada para esta verificação.</p>';
-    return `<article class="occurrence-card" data-report-issue data-result="${escapeHtml(group)}" data-classification="${escapeHtml(issue.classification)}" data-page="${escapeHtml(issue.pageId)}" data-engine="${escapeHtml(issue.engine)}" data-impact="${escapeHtml(issue.impact ?? 'none')}" data-wcag="${escapeHtml(issue.wcag.join(' '))}" data-abnt="${escapeHtml(issue.abntItemIds.join(' '))}"><header data-report-issue-heading><h3>${escapeHtml(issue.title)}</h3><p><strong>Estado consolidado:</strong> ${escapeHtml(label(issue.displayOutcome, outcomeLabels))}.</p><p><strong>Classificação:</strong> ${escapeHtml(label(issue.classification, classificationLabels))}. <strong>Impacto:</strong> ${escapeHtml(label(issue.impact, impactLabels, 'Não aplicável'))}.</p></header>${plainBlock('impact', 'Impacto para a pessoa usuária', `<p>${escapeHtml(issue.plainLanguage.impact)}</p>`)}${plainBlock('observed', 'O que foi observado', `<ul>${issue.plainLanguage.observed.map(value => `<li>${escapeHtml(value)}</li>`).join('') || '<li>Nenhuma justificativa adicional foi registrada.</li>'}</ul>`)}${plainBlock('correction', correctionPresentation.title, `<p><strong>Correção:</strong> ${escapeHtml(issue.plainLanguage.correction)}</p><p><strong>Confirmação:</strong> ${escapeHtml(correctionPresentation.confirmation)}</p>`)}${plainBlock('announcement', 'Nome acessível e anúncio estimado', `<p><strong>Nome acessível:</strong> ${escapeHtml(issue.accessibleName ?? 'não disponível')}.</p><p><strong>Anúncio estimado:</strong> ${escapeHtml(issue.announcement ?? 'indisponível')}.</p><p>Esta prévia não é transcrição literal de tecnologia assistiva e pode variar conforme o leitor e as preferências.</p>`)}${plainBlock('normative', 'Fundamentação normativa', `<p><strong>WCAG 2.2:</strong> ${escapeHtml(issue.wcag.join(', ') || 'sem referência')}. <strong>ABNT NBR 17225:</strong> ${escapeHtml(issue.abntItemIds.join(', ') || 'sem item')}.</p>`)}${legal}${evidencePreview(evidence)}<p data-report-live-action="evidence-only">O destaque ao vivo não está disponível neste relatório. Consulte as capturas registradas no momento da auditoria.</p>${evidenceLink}${technicalDetails(issue, evidence)}</article>`;
+    return `<article class="occurrence-card" data-report-issue data-result="${escapeHtml(group)}" data-classification="${escapeHtml(issue.classification)}" data-page="${escapeHtml(issue.pageId)}" data-engine="${escapeHtml(issue.engine)}" data-impact="${escapeHtml(issue.impact ?? 'none')}" data-wcag="${escapeHtml(reportWcagLevels(issue.wcag).join(' '))}" data-abnt="${escapeHtml(reportAbntFilterToken(issue.abntItemIds))}"><header data-report-issue-heading><h3>${escapeHtml(issue.title)}</h3><p><strong>Estado consolidado:</strong> ${escapeHtml(label(issue.displayOutcome, outcomeLabels))}.</p><p><strong>Classificação:</strong> ${escapeHtml(label(issue.classification, classificationLabels))}. <strong>Impacto:</strong> ${escapeHtml(label(issue.impact, impactLabels, 'Não aplicável'))}.</p></header>${plainBlock('impact', 'Impacto para a pessoa usuária', `<p>${escapeHtml(issue.plainLanguage.impact)}</p>`)}${plainBlock('observed', 'O que foi observado', `<ul>${issue.plainLanguage.observed.map(value => `<li>${escapeHtml(value)}</li>`).join('') || '<li>Nenhuma justificativa adicional foi registrada.</li>'}</ul>`)}${plainBlock('correction', correctionPresentation.title, `<p><strong>Correção:</strong> ${escapeHtml(issue.plainLanguage.correction)}</p><p><strong>Confirmação:</strong> ${escapeHtml(correctionPresentation.confirmation)}</p>`)}${plainBlock('announcement', 'Nome acessível e anúncio estimado', `<p><strong>Nome acessível:</strong> ${escapeHtml(issue.accessibleName ?? 'não disponível')}.</p><p><strong>Anúncio estimado:</strong> ${escapeHtml(issue.announcement ?? 'indisponível')}.</p><p>Esta prévia não é transcrição literal de tecnologia assistiva e pode variar conforme o leitor e as preferências.</p>`)}${plainBlock('normative', 'Fundamentação normativa', `<p><strong>WCAG 2.2:</strong> ${escapeHtml(issue.wcag.join(', ') || 'sem referência')}. <strong>ABNT NBR 17225:</strong> ${escapeHtml(reportAbntItemsLabel(issue.abntItemIds))}.</p>`)}${legal}${evidencePreview(evidence)}<p data-report-live-action="evidence-only">O destaque ao vivo não está disponível neste relatório. Consulte as capturas registradas no momento da auditoria.</p>${evidenceLink}${technicalDetails(issue, evidence)}</article>`;
   };
   const issueCards = group => view.issues[group].map(issue => issueCard(issue, group)).join('');
   const section = (index, body) => `<section id="report-section-${index + 1}" aria-labelledby="report-heading-${index + 1}"><h2 id="report-heading-${index + 1}">${escapeHtml(viewSectionTitle(index))}</h2>${body}</section>`;
@@ -262,7 +287,7 @@ ${selectFilter('filter-outcome', 'Resultado do motor', [['', 'Todos'], ...Object
 ${selectFilter('filter-classification', 'Classificação', [['', 'Todas'], ...Object.entries(CLASSIFICATION).map(([value, label]) => [value, label])])}
 ${selectFilter('filter-page', 'Página', [['', 'Todas'], ...pages.map(page => [page.value, page.label])])}
 ${selectFilter('filter-engine', 'Motor', [['', 'Todos'], ...engines.map(value => [value, value])])}
-${selectFilter('filter-abnt', 'Item ABNT', [['', 'Todos'], ['__none__', 'Sem item ABNT'], ...items.map(item => [item.value, item.label])])}
+${selectFilter('filter-abnt', 'Item ABNT', [['', 'Todos'], ['__none__', REPORT_NO_ABNT_ITEM_LABEL], ...items.map(item => [item.value, item.label])])}
 </div>
 <div class="filter-actions"><button type="button" data-clear-filters disabled>Limpar filtros</button><button type="button" id="expand-details" disabled>Expandir detalhes</button><button type="button" id="collapse-details" disabled>Recolher detalhes</button></div>
 <p id="filters-help" class="filters-noscript">Os filtros precisam de JavaScript. Sem JavaScript, todas as ocorrências e todos os detalhes permanecem abertos e legíveis.</p>
@@ -343,7 +368,7 @@ function occurrenceTitle(occurrence, item, rule) {
 }
 
 function normativeMapping(occurrence, item) {
-  if (!item) return '<div class="normative-map"><h4>Mapeamento normativo</h4><p>Sem mapeamento normativo atribuído.</p></div>';
+  if (!item) return `<div class="normative-map"><h4>Mapeamento normativo</h4><p><strong>ABNT NBR 17225:</strong> ${REPORT_NO_ABNT_ITEM_LABEL}.</p></div>`;
   const levelById = new Map(item.wcag.map(reference => [reference.id, reference.level]));
   const format = references => references.length
     ? references.map(reference => `${reference}${levelById.has(reference) ? ` (nível ${levelById.get(reference)})` : ''}`).join(', ')

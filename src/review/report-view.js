@@ -1,6 +1,7 @@
 import { createAuditModel } from '../core/report/audit-model.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS, qualifiedConsumerReference } from '../core/legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../core/normative/nbr17225.js';
+import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
 import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
@@ -19,6 +20,18 @@ const CLASSIFICATION_LABELS = Object.freeze({
 const STATUS_LABELS = Object.freeze({ pending: 'Pendente', complete: 'Concluída', partial: 'Concluída com limitações', cancelled: 'Cancelada', failed: 'Falhou' });
 const EVIDENCE_KIND_LABELS = Object.freeze({ 'full-page': 'Página completa', element: 'Elemento', 'announcement-map': 'Mapa de anúncios' });
 const FILTERS = Object.freeze(['impact', 'wcag', 'result', 'classification', 'page', 'engine', 'abnt']);
+const FILTER_PRESENTATION = Object.freeze({
+  impact: Object.freeze({ visible: 'Impacto', aria: 'Filtrar por impacto' }),
+  wcag: Object.freeze({ visible: 'Nível WCAG 2.2', aria: 'Filtrar por nível WCAG 2.2' }),
+  result: Object.freeze({ visible: 'Tipo de resultado', aria: 'Filtrar por tipo de resultado' }),
+  classification: Object.freeze({ visible: 'Classificação', aria: 'Filtrar por classificação' }),
+  page: Object.freeze({ visible: 'Página avaliada', aria: 'Filtrar por página avaliada' }),
+  engine: Object.freeze({ visible: 'Origem da verificação', aria: 'Filtrar por origem da verificação' }),
+  abnt: Object.freeze({ visible: 'Item ABNT NBR 17225', aria: 'Filtrar por item da ABNT NBR 17225' }),
+});
+const WCAG_LEVEL_ORDER = Object.freeze(['A', 'AA', 'AAA']);
+const NO_ABNT_ITEM = '__none__';
+const NO_ABNT_ITEM_LABEL = 'Sem item ABNT associado';
 const SECTION_TITLES = Object.freeze([
   'Sumário executivo e limitações críticas',
   'Cobertura e quatro grupos de resultado',
@@ -137,6 +150,27 @@ function classificationLabel(value) { return labelFor(value, CLASSIFICATION_LABE
 function statusLabel(value) { return labelFor(value, STATUS_LABELS); }
 function evidenceKindLabel(value) { return labelFor(value, EVIDENCE_KIND_LABELS, 'Evidência registrada'); }
 
+function wcagLevelsFor(criteria) {
+  const levels = new Set((Array.isArray(criteria) ? criteria : [])
+    .map(criterion => typeof criterion === 'string' ? WCAG22_LEVELS[criterion] : undefined)
+    .filter(level => WCAG_LEVEL_ORDER.includes(level)));
+  return WCAG_LEVEL_ORDER.filter(level => levels.has(level));
+}
+
+function abntItemsLabel(values) {
+  const items = (Array.isArray(values) ? values : []).filter(value => typeof value === 'string' && value);
+  return items.length > 0 ? items.join(', ') : NO_ABNT_ITEM_LABEL;
+}
+
+function abntItemLabel(value) {
+  return typeof value === 'string' && value ? value : NO_ABNT_ITEM_LABEL;
+}
+
+function abntFilterToken(values) {
+  const items = (Array.isArray(values) ? values : []).filter(value => typeof value === 'string' && value);
+  return items.length > 0 ? items.join(' ') : NO_ABNT_ITEM;
+}
+
 function pageLabel(model, pageId) {
   const index = model.pages.findIndex(page => page.pageId === pageId);
   return index >= 0 ? `Página ${index + 1}` : 'Página do escopo avaliado';
@@ -205,14 +239,18 @@ function correctionPresentation(group) {
 
 export function collectFilterOptions(model, summary) {
   const cards = GROUPS.flatMap(group => summary.groups[group].map(card => ({ ...card, result: group })));
+  const wcagCounts = new Map(WCAG_LEVEL_ORDER.map(level => [level, 0]));
+  for (const card of cards) {
+    for (const level of wcagLevelsFor(card.wcag)) wcagCounts.set(level, wcagCounts.get(level) + 1);
+  }
   return freeze({
     impact: copyRows(summary.distributions.impact),
-    wcag: copyRows(summary.distributions.wcag),
+    wcag: WCAG_LEVEL_ORDER.map(id => ({ id, count: wcagCounts.get(id) })),
     result: GROUPS.map(id => ({ id, count: summary.groups[id].length })),
     classification: countOptions(cards, card => [card.classification]),
     page: countOptions(cards, card => [card.pageId]),
     engine: countOptions(cards, card => [card.engine]),
-    abnt: copyRows(summary.distributions.abnt),
+    abnt: countOptions(cards, card => card.abntItemIds.length > 0 ? card.abntItemIds : [NO_ABNT_ITEM]),
   });
 }
 
@@ -416,7 +454,7 @@ function appendTechnicalDetails(document, article, issue, evidence) {
     block.append(
       element(document, 'h4', `ID da ocorrência: ${occurrence.occurrenceId}`),
       element(document, 'p', `Proveniência: Página ${issue.pageId}; Motor ${occurrence.source.engine}; Regra ${occurrence.source.ruleId}; Versão ${occurrence.source.version}.`),
-      element(document, 'p', `Item ABNT: ${occurrence.itemId}. Classificação: ${classificationLabel(occurrence.classification)}.`),
+      element(document, 'p', `Item ABNT: ${abntItemLabel(occurrence.itemId)}. Classificação: ${classificationLabel(occurrence.classification)}.`),
     );
     details.append(block);
   }
@@ -482,8 +520,8 @@ function issueArticle(document, issue, group, evidenceById, evidenceAnchorById) 
   article.setAttribute('data-page', issue.pageId);
   article.setAttribute('data-engine', issue.engine);
   article.setAttribute('data-impact', issue.impact ?? 'none');
-  article.setAttribute('data-wcag', issue.wcag.join(' '));
-  article.setAttribute('data-abnt', issue.abntItemIds.join(' '));
+  article.setAttribute('data-wcag', wcagLevelsFor(issue.wcag).join(' '));
+  article.setAttribute('data-abnt', abntFilterToken(issue.abntItemIds));
   const heading = document.createElement('header');
   heading.setAttribute('data-report-issue-heading', '');
   heading.append(
@@ -512,7 +550,7 @@ function issueArticle(document, issue, group, evidenceById, evidenceAnchorById) 
   );
   article.append(announcement);
   const normative = plainBlock(document, 'normative', 'Fundamentação normativa');
-  normative.append(element(document, 'p', `WCAG 2.2: ${issue.wcag.join(', ') || 'sem referência'}. ABNT NBR 17225: ${issue.abntItemIds.join(', ') || 'sem item'}.`));
+  normative.append(element(document, 'p', `WCAG 2.2: ${issue.wcag.join(', ') || 'sem referência'}. ABNT NBR 17225: ${abntItemsLabel(issue.abntItemIds)}.`));
   article.append(normative);
   const legalReferences = issue.occurrences.map(occurrence => occurrence.legalReference).filter(Boolean);
   if (legalReferences.length > 0) {
@@ -551,13 +589,19 @@ function renderFilters(document, view, root, status) {
   for (const dimension of FILTERS) {
     const group = document.createElement('div');
     group.setAttribute('role', 'group');
-    group.setAttribute('aria-label', `Filtro ${dimension}`);
+    group.setAttribute('aria-label', FILTER_PRESENTATION[dimension].aria);
+    const visibleLabel = element(document, 'strong', FILTER_PRESENTATION[dimension].visible, 'report-filter-label');
+    visibleLabel.setAttribute('data-report-filter-label', '');
+    group.append(visibleLabel);
     for (const option of view.filters[dimension]) {
       const translated = dimension === 'impact' ? impactLabel(option.id)
         : dimension === 'result' ? labelFor(option.id, GROUP_LABELS)
           : dimension === 'classification' ? classificationLabel(option.id)
-            : dimension === 'page' ? `Página ${option.id}` : dimension === 'engine' ? `Motor ${option.id}` : option.id;
-      const button = element(document, 'button', `${translated} ${option.count}`);
+            : dimension === 'page' ? `Página ${option.id}`
+              : dimension === 'engine' ? `Origem ${option.id}`
+                : dimension === 'wcag' ? `Nível ${option.id}`
+                  : option.id === NO_ABNT_ITEM ? NO_ABNT_ITEM_LABEL : option.id;
+      const button = element(document, 'button', `${translated} (${option.count})`);
       button.setAttribute('type', 'button');
       button.setAttribute('data-report-filter', dimension);
       button.setAttribute('data-filter-value', option.id);
