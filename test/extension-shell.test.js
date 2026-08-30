@@ -85,18 +85,14 @@ test('panel is an accessible local document with no inline code', async () => {
   assert.doesNotMatch(html, /<(?:script|link)[^>]+(?:src|href)="https?:\/\//i);
 });
 
-test('panel module sends normalized START_AUDIT requests and renders only text', async () => {
+test('panel module starts the closed session client and renders a fixed unavailable start state', async () => {
   const source = await readWorkspaceFile('src/panel/panel.js');
-  assert.match(source, /normalizeAuditUrl/);
-  assert.match(source, /type:\s*'START_AUDIT'/);
+  assert.match(source, /createPanelSessionPortClient/);
+  assert.match(source, /sessionPortClient\.start\(\)/u);
   assert.match(source, /textContent/);
   assert.doesNotMatch(source, /innerHTML/);
-  assert.match(source, /AUDIT_CONTEXT_PREFILL/u);
-  assert.match(source, /createContextPrefillAck/u);
-  assert.match(source, /AUDIT_CONTEXT_PREFILL_COMMIT/u);
-  assert.match(source, /createContextPrefillCommitAck/u);
-  assert.match(source, /autoStarted/u);
-  assert.match(source, /shouldApplyRestoredAudit/u);
+  assert.doesNotMatch(source, /START_AUDIT|START_BATCH|CANCEL_AUDIT|AUDIT_CONTEXT_PREFILL/u);
+  assert.doesNotMatch(source, /sessionCapabilityId/u);
 });
 
 test('packages persona runtimes as local classic files without broadening the MV3 shell', async () => {

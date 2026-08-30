@@ -8,7 +8,7 @@ test('reopened panel hydrates the persisted export attempt correlation', async (
   assert.match(source, /GET_LAST_AUDIT/u);
 });
 
-test('panel exposes an explicit accessible single-page or URL-list audit form', async () => {
+test('panel exposes the temporary fixed unavailable audit state without legacy start or cancel sends', async () => {
   const [html, script, css] = await Promise.all([
     readFile(new URL('../../src/panel/index.html', import.meta.url), 'utf8'),
     readFile(new URL('../../src/panel/panel.js', import.meta.url), 'utf8'),
@@ -25,10 +25,11 @@ test('panel exposes an explicit accessible single-page or URL-list audit form', 
   assert.match(html, /id="cancel-audit"/u);
   assert.match(html, /sessão atual[\s\S]*URLs[\s\S]*pixels/iu);
   assert.equal((html.match(/id="audit-status"[^>]*aria-live="polite"/gu) ?? []).length, 1);
-  assert.match(script, /START_BATCH/u);
-  assert.match(script, /CANCEL_AUDIT/u);
-  assert.match(script, /normalizeUrlList/u);
-  assert.match(script, /renderBatchWarnings/u);
+  assert.match(script, /createPanelSessionPortClient/u);
+  assert.match(script, /Iniciar auditorias por este painel estará disponível na próxima etapa\./u);
+  assert.doesNotMatch(script, /START_AUDIT|START_BATCH|CANCEL_AUDIT/u);
+  assert.match(script, /auditForm\.addEventListener\('submit'/u);
+  assert.match(script, /submitButton\.disabled\s*=\s*true/u);
   assert.match(css, /#cancel-audit[^{]*\{[^}]*min-height:\s*2\.75rem/isu);
   assert.match(css, /\.audit-mode label[^{]*\{[^}]*min-height:\s*2\.75rem/isu);
   assert.match(css, /\.product-header[^{]*\{[^}]*flex-wrap:\s*wrap/isu);
@@ -50,7 +51,6 @@ test('panel exposes explicit 30-day retention controls and a confirmed delete-al
   assert.match(html, /id="audit-status"[^>]+tabindex="-1"/iu);
   assert.match(html, /todas as auditorias locais[\s\S]*downloads/iu);
   assert.match(script, /createDestructiveDialog/u);
-  assert.match(script, /deleteAfterCompleteExport:\s*deleteAfterExport\.checked/u);
   assert.match(script, /REQUEST_DELETE_ALL_AUDITS/u);
   assert.match(script, /parseAuditDeletedEvent/u);
   assert.match(script, /stableFocus:\s*status/u);

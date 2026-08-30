@@ -5,547 +5,258 @@ import {
   CONTEXT_MENU_IDS,
   CONTEXT_MENU_ITEMS,
   parseContextMenuClick,
-  registerAuditContextMenus as registerAuditContextMenusImplementation,
+  registerAuditContextMenus,
 } from '../../src/background/context-menu.js';
 
-function registerAuditContextMenus(chromeApi, options = {}) {
-  const leases = new WeakSet();
-  return registerAuditContextMenusImplementation(chromeApi, {
-    async issueBindingLease() {
-      const lease = Object.freeze(Object.create(null));
-      leases.add(lease);
-      return lease;
-    },
-    consumeBindingLease(lease) {
-      if (!leases.has(lease)) return false;
-      leases.delete(lease);
-      return true;
-    },
-    ...options,
-  });
-}
+const DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
 
-const tick = () => new Promise(resolve => setImmediate(resolve));
-
-async function waitUntil(predicate, timeoutMs = 500) {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error('Condição de teste não foi atendida no prazo.');
-    await tick();
-  }
-}
-
-function createEvent() {
-  const listeners = [];
+function event() {
+  const listeners = new Set();
   return {
     listeners,
-    addListener(listener) { listeners.push(listener); },
-    fire(...args) { for (const listener of listeners) listener(...args); },
+    addListener(listener) { listeners.add(listener); },
+    removeListener(listener) { listeners.delete(listener); },
+    emit(...args) { for (const listener of [...listeners]) listener(...args); },
   };
 }
 
-function createChrome() {
-  const onInstalled = createEvent();
-  const onClicked = createEvent();
-  const onStartup = createEvent();
-  const outbound = [];
-  const menuCalls = [];
-  const tabs = new Map([
-    [7, { id: 7, url: 'https://origem.test/pagina#secao', status: 'complete' }],
-    [50, { id: 50, url: 'chrome-extension://test/src/panel/index.html', status: 'complete' }],
-  ]);
-  const api = {
-    runtime: {
-      id: 'test',
-      lastError: null,
-      getURL(path) { return `chrome-extension://test/${String(path).replace(/^\//u, '')}`; },
-      onInstalled,
-      onStartup,
-      sendMessage(message, callback) {
-        outbound.push(structuredClone(message));
-        queueMicrotask(() => callback?.());
-      },
-    },
+function tick() { return new Promise(resolve => setImmediate(resolve)); }
+
+test('declares and installs exactly one page-only HTTP(S) item', async () => {
+  assert.deepEqual(CONTEXT_MENU_IDS, { page: 'audita.accessibility.audit-page' });
+  assert.deepEqual(CONTEXT_MENU_ITEMS, [{
+    id: 'audita.accessibility.audit-page',
+    title: 'Auditar esta página com Audita Acessibilidade',
+    contexts: ['page'],
+    documentUrlPatterns: ['http://*/*', 'https://*/*'],
+  }]);
+  const installed = event();
+  const clicked = event();
+  const created = [];
+  let removed = 0;
+  const chromeApi = {
+    runtime: { onInstalled: installed },
     contextMenus: {
-      onClicked,
-      removeAll(callback) {
-        menuCalls.push(['removeAll']);
-        queueMicrotask(() => callback?.());
-      },
-      create(item, callback) {
-        menuCalls.push(['create', structuredClone(item)]);
-        queueMicrotask(() => callback?.());
-        return item.id;
-      },
+      onClicked: clicked,
+      async removeAll() { removed += 1; },
+      create(item) { created.push(structuredClone(item)); },
     },
-    tabs: {
-      async get(tabId) {
-        const value = tabs.get(tabId);
-        if (!value) throw new Error('No tab with id');
-        return structuredClone(value);
-      },
-      query() { throw new Error('A aba ativa nunca pode ser consultada.'); },
-    },
-    events: { onInstalled, onClicked, onStartup },
-    outbound,
-    menuCalls,
-    tabState: tabs,
-  };
-  return api;
-}
-
-const pageInfo = Object.freeze({
-  menuItemId: 'audita.accessibility.audit-page',
-  frameId: 0,
-  pageUrl: 'https://origem.test/pagina',
-});
-const sourceTab = Object.freeze({ id: 7, url: 'https://origem.test/pagina#secao' });
-
-test('declares the two exact menu items and registers only installed/click listeners without boot recreation', async () => {
-  const chromeApi = createChrome();
-  const controller = registerAuditContextMenus(chromeApi, {
-    openPanel: async () => ({ id: 50 }),
-    beginSingleAudit: () => ({ response: { ok: true, auditId: 'audit-1', state: 'idle' }, completion: Promise.resolve() }),
-    createRequestId: () => 'context-1',
-  });
-
-  assert.deepEqual(CONTEXT_MENU_IDS, {
-    page: 'audita.accessibility.audit-page',
-    link: 'audita.accessibility.audit-link',
-  });
-  assert.deepEqual(CONTEXT_MENU_ITEMS, [
-    {
-      id: 'audita.accessibility.audit-page',
-      title: 'Auditar esta página com Audita Acessibilidade',
-      contexts: ['page'],
-      documentUrlPatterns: ['http://*/*', 'https://*/*'],
-    },
-    {
-      id: 'audita.accessibility.audit-link',
-      title: 'Auditar este link com Audita Acessibilidade',
-      contexts: ['link'],
-      documentUrlPatterns: ['http://*/*', 'https://*/*'],
-      targetUrlPatterns: ['http://*/*', 'https://*/*'],
-    },
-  ]);
-  assert.equal(chromeApi.events.onInstalled.listeners.length, 1);
-  assert.equal(chromeApi.events.onClicked.listeners.length, 1);
-  assert.equal(chromeApi.events.onStartup.listeners.length, 0);
-  assert.deepEqual(chromeApi.menuCalls, [], 'reiniciar o worker não recria menus persistentes');
-
-  chromeApi.events.onInstalled.fire({ reason: 'install' });
-  await waitUntil(() => chromeApi.menuCalls.length === 3);
-  assert.deepEqual(chromeApi.menuCalls, [
-    ['removeAll'],
-    ['create', CONTEXT_MENU_ITEMS[0]],
-    ['create', CONTEXT_MENU_ITEMS[1]],
-  ]);
-  assert.equal(typeof controller.installMenus, 'function');
-});
-
-test('serializes concurrent installs and cleans a partial registration using callback lastError', async () => {
-  const chromeApi = createChrome();
-  const errors = [];
-  let createCount = 0;
-  chromeApi.contextMenus.create = (item, callback) => {
-    chromeApi.menuCalls.push(['create', structuredClone(item)]);
-    createCount += 1;
-    queueMicrotask(() => {
-      chromeApi.runtime.lastError = createCount === 2 ? { message: 'secret raw browser failure' } : null;
-      callback?.();
-      chromeApi.runtime.lastError = null;
-    });
-    return item.id;
+    sidePanel: { async open() {} },
   };
   const controller = registerAuditContextMenus(chromeApi, {
-    openPanel: async () => ({ id: 50 }),
-    beginSingleAudit: () => ({ response: { ok: true, auditId: 'audit-1', state: 'idle' }, completion: Promise.resolve() }),
-    logger: { error: message => errors.push(message) },
+    getReadyRuntime: () => Promise.resolve({}),
+    createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-context', epochNow: () => 1,
+    logger: { error() {} },
   });
-
-  const [first, second] = await Promise.all([controller.installMenus(), controller.installMenus()]);
-  assert.deepEqual([first, second], [false, true]);
-  assert.deepEqual(chromeApi.menuCalls.map(([kind]) => kind), [
-    'removeAll', 'create', 'create', 'removeAll',
-    'removeAll', 'create', 'create',
-  ]);
-  assert.deepEqual(errors, ['Não foi possível registrar os atalhos do menu de contexto.']);
-  assert.doesNotMatch(JSON.stringify(errors), /secret raw browser failure/u);
+  assert.equal(installed.listeners.size, 1);
+  assert.equal(clicked.listeners.size, 1);
+  assert.equal(await controller.installMenus(), true);
+  assert.equal(removed, 1);
+  assert.deepEqual(created, CONTEXT_MENU_ITEMS);
+  assert.equal(controller.dispose(), true);
+  assert.equal(controller.dispose(), false);
 });
 
-test('settles callback-plus-Promise APIs once and gives callback lastError a contained rollback', async () => {
-  const chromeApi = createChrome();
-  const errors = [];
+test('serializes concurrent installations and rolls back a partial registration', async () => {
+  const installed = event();
+  const clicked = event();
+  const calls = [];
+  const gates = [];
+  let active = 0;
+  let maxActive = 0;
+  const chromeApi = {
+    runtime: { onInstalled: installed, lastError: null },
+    contextMenus: {
+      onClicked: clicked,
+      async removeAll() {
+        calls.push('remove');
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise(resolve => gates.push(resolve));
+        active -= 1;
+      },
+      create() { calls.push('create'); },
+    },
+    sidePanel: { async open() {} },
+  };
+  const logs = [];
+  const controller = registerAuditContextMenus(chromeApi, {
+    getReadyRuntime: () => Promise.resolve({}),
+    createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-context', epochNow: () => 1,
+    logger: { error(code) { logs.push(code); } },
+  });
+  const first = controller.installMenus();
+  const second = controller.installMenus();
+  await Promise.resolve();
+  assert.equal(gates.length, 1);
+  gates.shift()();
+  await tick();
+  assert.equal(gates.length, 1);
+  gates.shift()();
+  assert.deepEqual(await Promise.all([first, second]), [true, true]);
+  assert.equal(maxActive, 1);
+  assert.deepEqual(calls, ['remove', 'create', 'remove', 'create']);
+  assert.deepEqual(logs, []);
+});
+
+test('contains callback lastError, settles callback-plus-Promise once, and performs one rollback', async () => {
+  const installed = event();
+  const clicked = event();
+  const logs = [];
   let removes = 0;
   let creates = 0;
-  chromeApi.contextMenus.removeAll = callback => {
-    removes += 1;
-    callback?.();
-    return Promise.resolve('late-remove');
-  };
-  chromeApi.contextMenus.create = (_item, callback) => {
-    creates += 1;
-    const callNumber = creates;
-    const early = Promise.resolve('early-create');
-    setTimeout(() => {
-      if (callNumber === 2) chromeApi.runtime.lastError = { message: 'raw secret error' };
-      callback?.();
-      chromeApi.runtime.lastError = null;
-    }, 5);
-    return early;
+  const chromeApi = {
+    runtime: { onInstalled: installed, lastError: null },
+    contextMenus: {
+      onClicked: clicked,
+      removeAll(callback) {
+        removes += 1;
+        callback();
+        return Promise.resolve();
+      },
+      create(_item, callback) {
+        creates += 1;
+        chromeApi.runtime.lastError = { message: 'native secret' };
+        callback();
+        chromeApi.runtime.lastError = null;
+        return Promise.resolve();
+      },
+    },
+    sidePanel: { async open() {} },
   };
   const controller = registerAuditContextMenus(chromeApi, {
-    openPanel: async () => ({ id: 50 }),
-    beginSingleAudit: () => ({ response: { ok: true }, completion: Promise.resolve() }),
-    logger: { error: message => errors.push(message) },
+    getReadyRuntime: () => Promise.resolve({}),
+    createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-context', epochNow: () => 1,
+    logger: { error(code) { logs.push(code); } },
   });
   assert.equal(await controller.installMenus(), false);
-  assert.equal(removes, 2, 'uma remoção inicial e um rollback, sem liquidação duplicada');
-  assert.equal(creates, 2);
-  assert.deepEqual(errors, ['Não foi possível registrar os atalhos do menu de contexto.']);
-  assert.doesNotMatch(JSON.stringify(errors), /raw secret error/u);
+  assert.equal(creates, 1);
+  assert.equal(removes, 2);
+  assert.deepEqual(logs, ['CONTEXT_MENU_INSTALL_FAILED']);
+  assert.equal(JSON.stringify(logs).includes('native secret'), false);
 });
 
-test('fails registration finitely when a callback API returns a Promise but never invokes its callback', async () => {
-  const chromeApi = createChrome();
-  const errors = [];
-  chromeApi.contextMenus.removeAll = () => Promise.resolve('promise-only-must-not-authorize');
-  const controller = registerAuditContextMenus(chromeApi, {
-    apiCallbackTimeoutMs: 5,
-    openPanel: async () => ({ id: 50 }),
-    beginSingleAudit: () => ({ response: { ok: true }, completion: Promise.resolve() }),
-    logger: { error: message => errors.push(message) },
-  });
-  assert.equal(await controller.installMenus(), false);
-  assert.deepEqual(errors, ['Não foi possível registrar os atalhos do menu de contexto.']);
-});
-
-test('parses page and framed-link clicks from exact HTTP(S) fields without an active-tab fallback', () => {
-  assert.deepEqual(parseContextMenuClick(pageInfo, sourceTab), {
-    kind: 'page', sourceTabId: 7,
-    sourceUrl: 'https://origem.test/pagina#secao',
-    auditUrl: 'https://origem.test/pagina', frameId: 0,
-  });
-  assert.deepEqual(parseContextMenuClick({
-    menuItemId: 'audita.accessibility.audit-link', frameId: 4,
-    pageUrl: 'https://origem.test/pagina', frameUrl: 'https://frames.test/conteudo',
-    linkUrl: 'https://destino.test/alvo?token=nao-persistir&view=public#parte',
-  }, sourceTab), {
-    kind: 'link', sourceTabId: 7,
-    sourceUrl: 'https://origem.test/pagina#secao',
-    auditUrl: 'https://destino.test/alvo?token=nao-persistir&view=public#parte', frameId: 4,
-  });
-});
-
-test('fails closed for unknown menus, frames, divergent pages, forbidden URLs, malformed IDs and accessors', () => {
-  const invalid = [
-    [{ ...pageInfo, menuItemId: 'unknown' }, sourceTab],
-    [{ ...pageInfo, frameId: 1 }, sourceTab],
-    [{ ...pageInfo, pageUrl: 'https://other.test/' }, sourceTab],
-    [{ ...pageInfo, pageUrl: 'javascript:alert(1)' }, sourceTab],
-    [{ menuItemId: CONTEXT_MENU_IDS.page, pageUrl: pageInfo.pageUrl }, sourceTab],
-    [{ ...pageInfo, frameId: null }, sourceTab],
-    [{ ...pageInfo, frameId: Number.NaN }, sourceTab],
-    [{ ...pageInfo, frameId: Number.POSITIVE_INFINITY }, sourceTab],
-    [{ ...pageInfo, frameId: -1 }, sourceTab],
-    [{ ...pageInfo, frameId: 0.5 }, sourceTab],
-    [{ ...pageInfo }, { url: sourceTab.url }],
-    [{ menuItemId: CONTEXT_MENU_IDS.link, frameId: 2, pageUrl: pageInfo.pageUrl, linkUrl: 'https://destino.test/' }, sourceTab],
-    [{ menuItemId: CONTEXT_MENU_IDS.link, frameId: 0, pageUrl: pageInfo.pageUrl, linkUrl: 'https://user:pass@destino.test/' }, sourceTab],
-    [{ menuItemId: CONTEXT_MENU_IDS.link, frameId: 0, pageUrl: pageInfo.pageUrl, linkUrl: 'https://destino.test/\\evil' }, sourceTab],
-    [{ menuItemId: CONTEXT_MENU_IDS.link, frameId: 0, pageUrl: pageInfo.pageUrl, linkUrl: 'https://destino.test/\u202Eevil' }, sourceTab],
-  ];
-  for (const [info, tab] of invalid) assert.equal(parseContextMenuClick(info, tab), null);
-
-  let reads = 0;
-  const hostile = { menuItemId: CONTEXT_MENU_IDS.page, frameId: 0 };
-  Object.defineProperty(hostile, 'pageUrl', { enumerable: true, get() { reads += 1; return pageInfo.pageUrl; } });
-  assert.equal(parseContextMenuClick(hostile, sourceTab), null);
-  assert.equal(reads, 0);
-
-  for (const [target, key, value] of [
-    [{ ...sourceTab }, 'id', 7],
-    [{ ...sourceTab }, 'url', sourceTab.url],
-    [{ menuItemId: CONTEXT_MENU_IDS.link, frameId: 0, pageUrl: pageInfo.pageUrl }, 'linkUrl', 'https://destino.test/'],
-    [{ menuItemId: CONTEXT_MENU_IDS.link, frameId: 2, pageUrl: pageInfo.pageUrl, linkUrl: 'https://destino.test/' }, 'frameUrl', 'https://frame.test/'],
-  ]) {
-    let accessorReads = 0;
-    Object.defineProperty(target, key, { enumerable: true, get() { accessorReads += 1; return value; } });
-    const info = target === sourceTab || Object.hasOwn(target, 'id') ? pageInfo : target;
-    const tab = info === pageInfo ? target : sourceTab;
-    assert.equal(parseContextMenuClick(info, tab), null);
-    assert.equal(accessorReads, 0);
+test('pure click parsing never reads URL-bearing info fields or accessors', () => {
+  const info = { menuItemId: CONTEXT_MENU_IDS.page, frameId: 0 };
+  let secretReads = 0;
+  for (const key of ['pageUrl', 'linkUrl', 'frameUrl']) {
+    Object.defineProperty(info, key, { enumerable: true, get() { secretReads += 1; throw new Error('secret'); } });
   }
+  assert.deepEqual(parseContextMenuClick(info, {
+    id: 17, windowId: 9, status: 'complete', url: 'https://example.test/', pendingUrl: '',
+  }), { tabId: 17, windowId: 9 });
+  assert.equal(secretReads, 0);
+
+  const hostileTab = { id: 17, windowId: 9, status: 'complete', pendingUrl: '' };
+  Object.defineProperty(hostileTab, 'url', { enumerable: true, get() { secretReads += 1; return 'https://example.test/'; } });
+  assert.equal(parseContextMenuClick(info, hostileTab), null);
+  assert.equal(secretReads, 0);
+  const hostilePending = { id: 17, windowId: 9, status: 'complete', url: 'https://example.test/' };
+  Object.defineProperty(hostilePending, 'pendingUrl', { enumerable: true, get() { secretReads += 1; return ''; } });
+  assert.equal(parseContextMenuClick(info, hostilePending), null);
+  assert.equal(secretReads, 0);
+  for (const [badInfo, badTab] of [
+    [{ menuItemId: CONTEXT_MENU_IDS.page, frameId: 2 }, { id: 17, windowId: 9, status: 'complete', url: 'https://example.test/' }],
+    [{ menuItemId: 'other', frameId: 0 }, { id: 17, windowId: 9, status: 'complete', url: 'https://example.test/' }],
+    [{ menuItemId: CONTEXT_MENU_IDS.page, frameId: 0 }, { id: 17, windowId: 9, status: 'loading', url: 'https://example.test/' }],
+    [{ menuItemId: CONTEXT_MENU_IDS.page, frameId: 0 }, { id: 17, windowId: 9, status: 'complete', url: 'chrome://settings/' }],
+    [{ menuItemId: CONTEXT_MENU_IDS.page, frameId: 0 }, { id: 17, windowId: 9, status: 'complete', url: 'https://example.test/', pendingUrl: 'https://next.test/' }],
+  ]) assert.equal(parseContextMenuClick(badInfo, badTab), null);
 });
 
-test('settles wrong-sender, replay and accessor ACKs with a finite failure response', () => {
-  const chromeApi = createChrome();
-  const controller = registerAuditContextMenus(chromeApi, {
-    openPanel: async () => ({ id: 50 }),
-    beginSingleAudit: () => ({ response: { ok: true }, completion: Promise.resolve() }),
-  });
-  const ack = { type: 'CONTEXT_PREFILL_ACK', requestId: 'not-pending', panelTabId: 50, accepted: true };
-  for (const sender of [
-    { id: 'other', frameId: 0, documentId: 'doc-1', url: 'chrome-extension://test/src/panel/index.html', tab: { id: 50 } },
-    { id: 'test', frameId: 1, documentId: 'doc-1', url: 'chrome-extension://test/src/panel/index.html', tab: { id: 50 } },
-    { id: 'test', frameId: 0, documentId: 'doc-1', url: 'chrome-extension://test/src/panel/index.html', tab: { id: 51 } },
-  ]) {
-    let response;
-    assert.equal(controller.handlePanelProtocolMessage(ack, sender, value => { response = value; }), true);
-    assert.deepEqual(response, { ok: false, error: 'ACK de painel não correlacionado.' });
-  }
-  let reads = 0;
-  const hostile = { type: 'CONTEXT_PREFILL_ACK', panelTabId: 50, accepted: true };
-  Object.defineProperty(hostile, 'requestId', { enumerable: true, get() { reads += 1; return 'not-pending'; } });
-  let response;
-  assert.equal(controller.handlePanelProtocolMessage(hostile, {}, value => { response = value; }), true);
-  assert.equal(reads, 0);
-  assert.deepEqual(response, { ok: false, error: 'ACK de painel não correlacionado.' });
-});
-
-test('correlates one-shot panel ACKs to tab/document, confirms the same document, and holds the source gate until runner completion', async () => {
-  const chromeApi = createChrome();
-  const opens = [];
-  const starts = [];
-  let finishRunner;
-  const completion = new Promise(resolve => { finishRunner = resolve; });
-  const controller = registerAuditContextMenus(chromeApi, {
-    createRequestId: () => 'context-one-shot',
-    async openPanel(value) { opens.push(structuredClone(value)); return { id: 50 }; },
-    beginSingleAudit(value) {
-      starts.push(value);
-      return { response: { ok: true, auditId: 'audit-context', state: 'idle' }, completion };
+test('opens the side panel as the first Chrome call, then uses the shared adapter, authority and starter', async () => {
+  const installed = event();
+  const clicked = event();
+  const calls = [];
+  const chromeApi = {
+    runtime: { onInstalled: installed },
+    contextMenus: { onClicked: clicked, async removeAll() {}, create() {} },
+    sidePanel: { open(value) { calls.push(['open', value]); return Promise.resolve(); } },
+  };
+  const runtime = Object.freeze({
+    chromeAdapter: {
+      async probeDocumentIdentity(tabId) { calls.push(['probe', tabId]); return { tabId, windowId: 9, documentId: 'document-1', urlSessionDigest: DIGEST }; },
+      async getEvidenceUrl(tabId, includeQuery) { calls.push(['evidence', tabId, includeQuery]); return 'https://example.test/'; },
+    },
+    authority: {
+      async prepare(value) { calls.push(['prepare', value]); return { ok: true, capabilityId: 'C'.repeat(22), expiresAt: 100 }; },
+    },
+    auditStarter: {
+      async beginAuthorizedAudit(value) { calls.push(['start', value]); return { response: { ok: true, auditId: value.auditId, state: 'running' }, sessionCapabilityId: 'S'.repeat(22), completion: Promise.resolve() }; },
     },
   });
-
-  chromeApi.events.onClicked.fire({
-    menuItemId: CONTEXT_MENU_IDS.link, frameId: 0, pageUrl: pageInfo.pageUrl,
-    linkUrl: 'https://destino.test/alvo?token=TOPSECRET&view=public#auth=TOPSECRET',
-  }, sourceTab);
-  chromeApi.events.onClicked.fire(pageInfo, sourceTab);
-  await waitUntil(() => chromeApi.outbound.some(message => message.type === 'AUDIT_CONTEXT_PREFILL'));
-
-  assert.deepEqual(opens, [{ sourceTab: { id: 7, url: sourceTab.url } }]);
-  const prefill = chromeApi.outbound.find(message => message.type === 'AUDIT_CONTEXT_PREFILL');
-  assert.deepEqual(prefill, {
-    type: 'AUDIT_CONTEXT_PREFILL', requestId: 'context-one-shot', panelTabId: 50,
-    prefill: { kind: 'link', url: 'https://destino.test/alvo?view=public', autoStarted: true },
+  let readinessCalls = 0;
+  registerAuditContextMenus(chromeApi, {
+    getReadyRuntime() { readinessCalls += 1; calls.push(['ready']); return Promise.resolve(runtime); },
+    createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-context-1', epochNow: () => 50,
+    logger: { error(code) { calls.push(['log', code]); } },
   });
-  assert.doesNotMatch(JSON.stringify(chromeApi.outbound), /TOPSECRET|token=|auth=/iu);
-
-  let panelStartResponse;
-  const ackSender = {
-    id: 'test', frameId: 0, documentId: 'panel-document-1',
-    url: 'chrome-extension://test/src/panel/index.html',
-    tab: { id: 50, url: 'chrome-extension://test/src/panel/index.html' },
-  };
-  assert.equal(controller.handlePanelProtocolMessage({
-    type: 'CONTEXT_PREFILL_ACK', requestId: 'context-one-shot', panelTabId: 50, accepted: true,
-  }, ackSender, value => { panelStartResponse = value; }), true);
-  assert.equal(controller.handlePanelProtocolMessage({
-    type: 'CONTEXT_PREFILL_ACK', requestId: 'context-one-shot', panelTabId: 50, accepted: true,
-  }, ackSender, () => {}), true, 'replay é reconhecido e rejeitado sem consumir novamente');
-
-  await waitUntil(() => chromeApi.outbound.some(message => message.type === 'AUDIT_CONTEXT_PREFILL_COMMIT'));
-  const commit = chromeApi.outbound.find(message => message.type === 'AUDIT_CONTEXT_PREFILL_COMMIT');
-  assert.deepEqual(commit, {
-    type: 'AUDIT_CONTEXT_PREFILL_COMMIT', requestId: 'context-one-shot', panelTabId: 50,
+  clicked.emit({ menuItemId: CONTEXT_MENU_IDS.page, frameId: 0, pageUrl: 'https://secret.test/?token=hidden' }, {
+    id: 17, windowId: 9, status: 'complete', url: 'https://example.test/', pendingUrl: null,
   });
-  assert.equal(controller.handlePanelProtocolMessage({
-    type: 'CONTEXT_PREFILL_COMMIT_ACK', requestId: 'context-one-shot', panelTabId: 50, accepted: true,
-  }, { ...ackSender, documentId: 'other-document' }, () => {}), true);
-  assert.equal(starts.length, 0);
-  assert.equal(controller.handlePanelProtocolMessage({
-    type: 'CONTEXT_PREFILL_COMMIT_ACK', requestId: 'context-one-shot', panelTabId: 50, accepted: true,
-  }, ackSender, () => {}), true);
-  await waitUntil(() => starts.length === 1);
-
-  assert.equal(starts[0].navigationUrl, 'https://destino.test/alvo?token=TOPSECRET&view=public#auth=TOPSECRET');
-  assert.equal(starts[0].senderKey, 'panel-tab:50');
-  assert.deepEqual(panelStartResponse, { ok: true, auditId: 'audit-context', state: 'idle' });
-  chromeApi.events.onClicked.fire(pageInfo, sourceTab);
+  assert.deepEqual(calls, [['open', { windowId: 9 }]]);
+  assert.equal(readinessCalls, 0);
   await tick();
-  assert.equal(opens.length, 1, 'o gate continua retido enquanto o runner está ativo');
-
-  finishRunner();
-  await waitUntil(() => controller.isSourceActive(7) === false);
+  assert.equal(calls[1][0], 'ready');
+  assert.equal(calls[2][0], 'probe');
+  const prepare = calls.find(([name]) => name === 'prepare')[1];
+  assert.deepEqual(prepare.issuer, { type: 'worker-event', event: 'context-menu', eventNonce: 'N'.repeat(22) });
+  assert.equal(JSON.stringify(calls).includes('token=hidden'), false);
+  const started = calls.find(([name]) => name === 'start')[1];
+  assert.equal(started.eventNonce, 'N'.repeat(22));
+  assert.equal(started.senderContext, null);
+  assert.equal(started.capturePolicy.mode, 'no-pixels');
+  assert.deepEqual(started.retentionPreference, { version: 1, deleteAfterCompleteExport: false });
 });
 
-test('issues the document-bound persona lease only after commit and rejects an invalid final proof', async () => {
-  const chromeApi = createChrome();
-  const lease = Object.freeze(Object.create(null));
-  const issued = [];
-  let leaseIsLive = true;
-  let consumeCalls = 0;
-  let starts = 0;
-  const controller = registerAuditContextMenus(chromeApi, {
-    createRequestId: () => 'context-binding-lease',
-    openPanel: async () => ({ id: 50 }),
-    async issueBindingLease(value) { issued.push(structuredClone(value)); return leaseIsLive ? lease : null; },
-    consumeBindingLease(value) {
-      consumeCalls += 1;
-      assert.equal(value, lease);
-      const result = leaseIsLive;
-      leaseIsLive = false;
-      return result;
-    },
-    beginSingleAudit: () => { starts += 1; return { response: { ok: true }, completion: Promise.resolve() }; },
-  });
-  chromeApi.events.onClicked.fire(pageInfo, sourceTab);
-  await waitUntil(() => chromeApi.outbound.some(message => message.type === 'AUDIT_CONTEXT_PREFILL'));
-  const sender = {
-    id: 'test', frameId: 0, documentId: 'panel-doc-lease',
-    url: 'chrome-extension://test/src/panel/index.html', tab: { id: 50 },
+test('invalid clicks and readiness failure perform no post-open audit effects or secret logging', async () => {
+  const installed = event();
+  const clicked = event();
+  const logs = [];
+  const opens = [];
+  const chromeApi = {
+    runtime: { onInstalled: installed },
+    contextMenus: { onClicked: clicked, async removeAll() {}, create() {} },
+    sidePanel: { open(value) { opens.push(value); return Promise.resolve(); } },
   };
-  controller.handlePanelProtocolMessage({
-    type: 'CONTEXT_PREFILL_ACK', requestId: 'context-binding-lease', panelTabId: 50, accepted: true,
-  }, sender, () => {});
-  await waitUntil(() => chromeApi.outbound.some(message => message.type === 'AUDIT_CONTEXT_PREFILL_COMMIT'));
-  assert.deepEqual(issued, [], 'nenhuma prova pode envelhecer enquanto o painel confirma o commit');
-  leaseIsLive = false;
-  controller.handlePanelProtocolMessage({
-    type: 'CONTEXT_PREFILL_COMMIT_ACK', requestId: 'context-binding-lease', panelTabId: 50, accepted: true,
-  }, sender, () => {});
-  await waitUntil(() => controller.isSourceActive(7) === false);
-  assert.deepEqual(issued, [{
-    panelTabId: 50, targetTabId: 7, sourceUrl: sourceTab.url, panelDocumentId: 'panel-doc-lease',
-  }]);
-  assert.equal(consumeCalls, 0);
-  assert.equal(starts, 0, 'prova reinstalada/navegada durante o handshake impede auditoria invisível');
-});
-
-test('never starts an invisible audit when the panel, source, pending navigation, ACK or final correlation changes', async () => {
-  for (const mutate of ['source', 'pending', 'panel', 'panel-pending', 'ack']) {
-    const chromeApi = createChrome();
-    let starts = 0;
-    const controller = registerAuditContextMenus(chromeApi, {
-      createRequestId: () => `context-${mutate}`,
-      openPanel: async () => ({ id: 50 }),
-      beginSingleAudit: () => { starts += 1; return { response: { ok: true }, completion: Promise.resolve() }; },
-    });
-    chromeApi.events.onClicked.fire(pageInfo, sourceTab);
-    await waitUntil(() => chromeApi.outbound.some(message => message.type === 'AUDIT_CONTEXT_PREFILL'));
-    if (mutate === 'source') chromeApi.tabState.set(7, { id: 7, url: 'https://origem.test/outra', status: 'complete' });
-    if (mutate === 'pending') chromeApi.tabState.set(7, {
-      id: 7, url: sourceTab.url, pendingUrl: 'https://origem.test/outra', status: 'complete',
-    });
-    if (mutate === 'panel') chromeApi.tabState.delete(50);
-    if (mutate === 'panel-pending') chromeApi.tabState.set(50, {
-      id: 50, url: 'chrome-extension://test/src/panel/index.html',
-      pendingUrl: 'chrome-extension://test/src/panel/index.html', status: 'complete',
-    });
-    const requestId = `context-${mutate}`;
-    controller.handlePanelProtocolMessage({
-      type: 'CONTEXT_PREFILL_ACK', requestId, panelTabId: 50, accepted: mutate !== 'ack',
-    }, {
-      id: 'test', frameId: 0, documentId: 'panel-document-1',
-      url: 'chrome-extension://test/src/panel/index.html', tab: { id: 50 },
-    }, () => {});
-    await waitUntil(() => controller.isSourceActive(7) === false);
-    assert.equal(starts, 0, `${mutate} não pode iniciar o runner`);
-  }
-});
-
-test('releases the source gate after open, broadcast, or begin failures without retrying the runner', async () => {
-  for (const failure of ['open', 'broadcast', 'begin']) {
-    const chromeApi = createChrome();
-    const errors = [];
-    let beginCalls = 0;
-    if (failure === 'broadcast') chromeApi.runtime.sendMessage = () => { throw new Error('send failed'); };
-    const controller = registerAuditContextMenus(chromeApi, {
-      prefillTimeoutMs: 20,
-      createRequestId: () => `request-${failure}`,
-      logger: { error: message => errors.push(message) },
-      openPanel: async () => {
-        if (failure === 'open') throw new Error('open failed');
-        return { id: 50 };
-      },
-      beginSingleAudit: () => {
-        beginCalls += 1;
-        if (failure === 'begin') throw new Error('begin failed');
-        return { response: { ok: true, auditId: 'audit-1', state: 'idle' }, completion: Promise.resolve() };
-      },
-    });
-    chromeApi.events.onClicked.fire(pageInfo, sourceTab);
-    if (failure === 'begin') {
-      await waitUntil(() => chromeApi.outbound.some(message => message.type === 'AUDIT_CONTEXT_PREFILL'));
-      const sender = {
-        id: 'test', frameId: 0, documentId: 'panel-doc',
-        url: 'chrome-extension://test/src/panel/index.html', tab: { id: 50 },
-      };
-      controller.handlePanelProtocolMessage({
-        type: 'CONTEXT_PREFILL_ACK', requestId: 'request-begin', panelTabId: 50, accepted: true,
-      }, sender, () => {});
-      await waitUntil(() => chromeApi.outbound.some(message => message.type === 'AUDIT_CONTEXT_PREFILL_COMMIT'));
-      controller.handlePanelProtocolMessage({
-        type: 'CONTEXT_PREFILL_COMMIT_ACK', requestId: 'request-begin', panelTabId: 50, accepted: true,
-      }, sender, () => {});
-    }
-    await waitUntil(() => controller.isSourceActive(7) === false);
-    assert.equal(beginCalls, failure === 'begin' ? 1 : 0);
-    assert.deepEqual(errors, ['Não foi possível iniciar a auditoria pelo menu de contexto.']);
-  }
-});
-
-test('a worker-owned decision deadline prevents a slow final proof from starting after the panel can recover', async () => {
-  const chromeApi = createChrome();
-  let starts = 0;
-  let panelResponse;
-  const controller = registerAuditContextMenus(chromeApi, {
-    decisionTimeoutMs: 10,
-    prefillTimeoutMs: 20,
-    createRequestId: () => 'context-slow-proof',
-    openPanel: async () => ({ id: 50 }),
-    issueBindingLease: () => new Promise(() => {}),
-    consumeBindingLease: () => { throw new Error('uma lease não emitida não pode ser consumida'); },
-    beginSingleAudit: () => { starts += 1; return { response: { ok: true }, completion: Promise.resolve() }; },
+  registerAuditContextMenus(chromeApi, {
+    getReadyRuntime: () => Promise.reject(new Error('native secret')),
+    createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-context-2', epochNow: () => 50,
+    logger: { error(code) { logs.push(code); } },
   });
-  const sender = {
-    id: 'test', frameId: 0, documentId: 'panel-doc-slow-proof',
-    url: 'chrome-extension://test/src/panel/index.html', tab: { id: 50 },
-  };
-  chromeApi.events.onClicked.fire(pageInfo, sourceTab);
-  await waitUntil(() => chromeApi.outbound.some(message => message.type === 'AUDIT_CONTEXT_PREFILL'));
-  controller.handlePanelProtocolMessage({
-    type: 'CONTEXT_PREFILL_ACK', requestId: 'context-slow-proof', panelTabId: 50, accepted: true,
-  }, sender, value => { panelResponse = value; });
-  await waitUntil(() => chromeApi.outbound.some(message => message.type === 'AUDIT_CONTEXT_PREFILL_COMMIT'));
-  controller.handlePanelProtocolMessage({
-    type: 'CONTEXT_PREFILL_COMMIT_ACK', requestId: 'context-slow-proof', panelTabId: 50, accepted: true,
-  }, sender, () => {});
-  await waitUntil(() => controller.isSourceActive(7) === false);
-  assert.equal(starts, 0);
-  assert.deepEqual(panelResponse, { ok: false, error: 'Não foi possível iniciar a auditoria pelo menu de contexto.' });
+  clicked.emit({ menuItemId: 'unknown', frameId: 0 }, { id: 17, windowId: 9, status: 'complete', url: 'https://example.test/' });
+  assert.deepEqual(opens, []);
+  clicked.emit({ menuItemId: CONTEXT_MENU_IDS.page, frameId: 0 }, { id: 17, windowId: 9, status: 'complete', url: 'https://example.test/' });
+  await tick();
+  assert.deepEqual(opens, [{ windowId: 9 }]);
+  assert.deepEqual(logs, ['CONTEXT_MENU_UNAVAILABLE']);
 });
 
-test('rejects a panel URL or document replacement between initial ACK and commit', async () => {
-  for (const replacement of ['url', 'document']) {
-    const chromeApi = createChrome();
-    let starts = 0;
-    const controller = registerAuditContextMenus(chromeApi, {
-      prefillTimeoutMs: 20,
-      createRequestId: () => `replace-${replacement}`,
-      openPanel: async () => ({ id: 50 }),
-      beginSingleAudit: () => { starts += 1; return { response: { ok: true }, completion: Promise.resolve() }; },
-    });
-    chromeApi.events.onClicked.fire(pageInfo, sourceTab);
-    await waitUntil(() => chromeApi.outbound.some(message => message.type === 'AUDIT_CONTEXT_PREFILL'));
-    const sender = {
-      id: 'test', frameId: 0, documentId: 'panel-doc-old',
-      url: 'chrome-extension://test/src/panel/index.html', tab: { id: 50 },
-    };
-    controller.handlePanelProtocolMessage({
-      type: 'CONTEXT_PREFILL_ACK', requestId: `replace-${replacement}`, panelTabId: 50, accepted: true,
-    }, sender, () => {});
-    if (replacement === 'url') {
-      chromeApi.tabState.set(50, { id: 50, url: 'chrome-extension://test/src/review/index.html', status: 'complete' });
-    } else {
-      await waitUntil(() => chromeApi.outbound.some(message => message.type === 'AUDIT_CONTEXT_PREFILL_COMMIT'));
-      controller.handlePanelProtocolMessage({
-        type: 'CONTEXT_PREFILL_COMMIT_ACK', requestId: 'replace-document', panelTabId: 50, accepted: true,
-      }, { ...sender, documentId: 'panel-doc-new' }, () => {});
-    }
-    await waitUntil(() => controller.isSourceActive(7) === false);
-    assert.equal(starts, 0);
-  }
+test('contains a closed starter denial after opening without exposing its native detail', async () => {
+  const installed = event();
+  const clicked = event();
+  const logs = [];
+  const chromeApi = {
+    runtime: { onInstalled: installed },
+    contextMenus: { onClicked: clicked, async removeAll() {}, create() {} },
+    sidePanel: { async open() {} },
+  };
+  registerAuditContextMenus(chromeApi, {
+    getReadyRuntime: () => Promise.resolve({
+      chromeAdapter: {
+        async probeDocumentIdentity() { return { tabId: 17, windowId: 9, documentId: 'document-1', urlSessionDigest: DIGEST }; },
+        async getEvidenceUrl() { return 'https://example.test/'; },
+      },
+      authority: { async prepare() { return { ok: true, capabilityId: 'C'.repeat(22), expiresAt: 100 }; } },
+      auditStarter: { async beginAuthorizedAudit() { return { response: { ok: false, code: 'AUDIT_BUSY', native: 'secret' } }; } },
+    }),
+    createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-context-denied', epochNow: () => 50,
+    logger: { error(code) { logs.push(code); } },
+  });
+  clicked.emit({ menuItemId: CONTEXT_MENU_IDS.page, frameId: 0 }, {
+    id: 17, windowId: 9, status: 'complete', url: 'https://example.test/', pendingUrl: '',
+  });
+  await tick();
+  assert.deepEqual(logs, ['CONTEXT_MENU_UNAVAILABLE']);
+  assert.equal(JSON.stringify(logs).includes('secret'), false);
 });

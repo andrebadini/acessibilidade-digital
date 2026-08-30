@@ -1,0 +1,111 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import { createAuditLifecycle } from '../../src/background/audit-lifecycle.js';
+
+function event() {
+  const listeners = new Set();
+  return {
+    listeners,
+    addListener(listener) { listeners.add(listener); },
+    removeListener(listener) { listeners.delete(listener); },
+    emit(...args) { for (const listener of [...listeners]) listener(...args); },
+  };
+}
+
+function tick() { return new Promise(resolve => setImmediate(resolve)); }
+
+test('registers one stable lifecycle graph and aborts before authority invalidation', async () => {
+  const updated = event();
+  const removed = event();
+  const windows = event();
+  const order = [];
+  const runtime = Object.freeze({
+    authority: {
+      async invalidateForTab(tabId, reason) { order.push(['invalidate-tab', tabId, reason]); },
+      async invalidateForWindow(windowId, reason) { order.push(['invalidate-window', windowId, reason]); },
+    },
+    auditStarter: {
+      async abortAttachedAuditForTarget(value) { order.push(['abort', value]); return { aborted: true, auditId: 'audit-1' }; },
+    },
+    chromeAdapter: Object.freeze({}),
+  });
+  const lifecycle = createAuditLifecycle({
+    chromeApi: { tabs: { onUpdated: updated, onRemoved: removed }, windows: { onRemoved: windows } },
+    getReadyRuntime: () => Promise.resolve(runtime),
+  });
+  assert.deepEqual(Object.keys(lifecycle), ['register', 'dispose']);
+  assert.equal(lifecycle.register(), true);
+  assert.equal(lifecycle.register(), false);
+  assert.equal(updated.listeners.size, 1);
+  assert.equal(removed.listeners.size, 1);
+  assert.equal(windows.listeners.size, 1);
+
+  updated.emit(17, { status: 'loading' }, {});
+  await tick();
+  assert.deepEqual(order, [
+    ['abort', { tabId: 17, windowId: null, reasonCode: 'TAB_LOADING' }],
+    ['invalidate-tab', 17, 'TAB_LOADING'],
+  ]);
+  order.length = 0;
+  removed.emit(17);
+  windows.emit(9);
+  await tick();
+  assert.deepEqual(order, [
+    ['abort', { tabId: 17, windowId: null, reasonCode: 'TAB_REMOVED' }],
+    ['abort', { tabId: null, windowId: 9, reasonCode: 'WINDOW_REMOVED' }],
+    ['invalidate-tab', 17, 'TAB_REMOVED'],
+    ['invalidate-window', 9, 'WINDOW_REMOVED'],
+  ]);
+
+  assert.equal(lifecycle.dispose(), true);
+  assert.equal(lifecycle.dispose(), false);
+  assert.equal(updated.listeners.size + removed.listeners.size + windows.listeners.size, 0);
+});
+
+test('admits every navigation field descriptor-safely and ignores malformed or accessor records', async () => {
+  const updated = event();
+  const removed = event();
+  const windows = event();
+  const calls = [];
+  const runtime = Object.freeze({
+    authority: { async invalidateForTab() {}, async invalidateForWindow() {} },
+    auditStarter: { async abortAttachedAuditForTarget(value) { calls.push(value); return { aborted: false, auditId: null }; } },
+    chromeAdapter: Object.freeze({}),
+  });
+  createAuditLifecycle({
+    chromeApi: { tabs: { onUpdated: updated, onRemoved: removed }, windows: { onRemoved: windows } },
+    getReadyRuntime: () => Promise.resolve(runtime),
+  }).register();
+
+  updated.emit(1, { url: 'https://secret.test/?token=hidden' }, {});
+  updated.emit(2, { pendingUrl: 'https://secret.test/next' }, {});
+  updated.emit(3, { status: 'complete' }, {});
+  updated.emit(-1, { status: 'loading' }, {});
+  let getterReads = 0;
+  const hostile = {};
+  Object.defineProperty(hostile, 'url', { enumerable: true, get() { getterReads += 1; return 'https://secret.test/'; } });
+  updated.emit(4, hostile, {});
+  await tick();
+  assert.deepEqual(calls, [
+    { tabId: 1, windowId: null, reasonCode: 'TAB_URL_CHANGED' },
+    { tabId: 2, windowId: null, reasonCode: 'TAB_PENDING_URL' },
+  ]);
+  assert.equal(getterReads, 0);
+  assert.equal(JSON.stringify(calls).includes('secret'), false);
+});
+
+test('readiness rejection makes lifecycle events no-ops without native diagnostics', async () => {
+  const updated = event();
+  const removed = event();
+  const windows = event();
+  createAuditLifecycle({
+    chromeApi: { tabs: { onUpdated: updated, onRemoved: removed }, windows: { onRemoved: windows } },
+    getReadyRuntime: () => Promise.reject(new Error('native secret')),
+  }).register();
+  updated.emit(1, { status: 'loading' }, {});
+  removed.emit(1);
+  windows.emit(1);
+  await tick();
+  assert.equal(updated.listeners.size, 1);
+});

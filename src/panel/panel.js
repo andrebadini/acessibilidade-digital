@@ -1,33 +1,19 @@
-import { normalizeAuditUrl } from '../core/url.js';
-import { normalizeUrlList } from '../core/batch/normalize-url-list.js';
 import { createDestructiveDialog } from '../ui/destructive-dialog.js';
 import { parseAuditDeletedEvent } from '../core/audit-deleted-event.js';
+import { createPanelSessionPortClient } from './panel-session-port.js';
 import {
   createInitialPersonaState,
-  createContextPrefillAck,
-  createContextPrefillCommitAck,
   createPersonaHello,
-  contextProtocolMessageType,
   expectPersonaHello,
-  formatBatchWarning,
-  createSubmissionGate,
-  isMessageForAudit,
   isSafeReportUrl,
-  parseContextPrefillCommitMessage,
-  parseContextPrefillMessage,
   queuePersonaCommand,
-  reduceContextCommitDelivery,
   reducePersonaState,
-  reducePanelState,
   restoreExportEventState,
-  resolveCurrentPanelTabId,
-  sendContextProtocolAck,
-  shouldApplyRestoredAudit,
 } from './panel-state.js';
 
-const form = document.querySelector('#audit-form');
+const auditForm = document.querySelector('#audit-form');
 const input = document.querySelector('#audit-url');
-const submit = form.querySelector('button[type="submit"]');
+const submitButton = auditForm.querySelector('button[type="submit"]');
 const status = document.querySelector('#audit-status');
 const latestReport = document.querySelector('#latest-report');
 const batchInput = document.querySelector('#audit-urls');
@@ -44,7 +30,6 @@ const deleteAllDialog = document.querySelector('#delete-all-dialog');
 const deleteAllCancel = document.querySelector('#delete-all-cancel');
 const deleteAllConfirm = document.querySelector('#delete-all-confirm');
 const deleteAllDialogStatus = document.querySelector('#delete-all-dialog-status');
-const submissionGate = createSubmissionGate();
 let activeAuditId = null;
 let panelState = null;
 let personaState = createInitialPersonaState();
@@ -53,10 +38,6 @@ let personaRequestSequence = 0;
 let personaLocalVoiceIds = new Set();
 let personaVoiceInventoryStatus = 'unavailable';
 let personaVoiceClear = { voiceId: '', attempts: 0, requestId: null };
-let contextPrefill = null;
-let currentPanelTabIdPromise = null;
-const seenContextPrefills = new Set();
-let panelLifecycleEpoch = 0;
 
 const personaSection = document.querySelector('#persona-section');
 const personaModeButtons = Array.from(document.querySelectorAll('[data-persona-mode]'));
@@ -83,11 +64,15 @@ function setStatus(message) {
   status.textContent = message;
 }
 
-function setSubmitting(isSubmitting) {
-  submit.disabled = isSubmitting;
-  cancelAudit.hidden = !isSubmitting;
-  deleteAfterExport.disabled = isSubmitting;
-  deleteAllAudits.disabled = isSubmitting;
+function renderStartUnavailable() {
+  submitButton.disabled = true;
+  cancelAudit.hidden = true;
+  cancelAudit.disabled = true;
+  input.disabled = true;
+  batchInput.disabled = true;
+  deleteAfterExport.disabled = true;
+  for (const radio of auditForm.querySelectorAll('input[name="audit-mode"]')) radio.disabled = true;
+  setStatus('Iniciar auditorias por este painel estará disponível na próxima etapa.');
 }
 
 function sendWorkerRequest(message) {
@@ -120,10 +105,9 @@ const deleteAllController = createDestructiveDialog({
     if (response.ok === true) {
       activeAuditId = null;
       panelState = null;
-      submissionGate.release();
       clearReport();
       renderBatchState(null);
-      setSubmitting(false);
+      renderStartUnavailable();
     }
     return response;
   },
@@ -132,39 +116,6 @@ const deleteAllController = createDestructiveDialog({
 });
 
 deleteAllAudits.addEventListener('click', () => deleteAllController.open(deleteAllAudits));
-
-function selectedAuditMode() {
-  return form.elements['audit-mode']?.value === 'batch' ? 'batch' : 'single';
-}
-
-function selectAuditMode(mode) {
-  const radio = form.querySelector(`input[name="audit-mode"][value="${mode}"]`);
-  if (radio) radio.checked = true;
-  const batch = mode === 'batch';
-  batchFields.hidden = !batch;
-  singleFields.hidden = batch;
-  input.required = !batch;
-}
-
-for (const radio of form.querySelectorAll('input[name="audit-mode"]')) {
-  radio.addEventListener('change', () => selectAuditMode(selectedAuditMode()));
-}
-
-function renderBatchErrors(errors = []) {
-  batchErrors.replaceChildren(...errors.map(error => {
-    const item = document.createElement('li');
-    item.textContent = error.line > 0 ? `Linha ${error.line}: ${error.message}` : error.message;
-    return item;
-  }));
-}
-
-function renderBatchWarnings(warnings = []) {
-  batchWarnings.replaceChildren(...warnings.map(formatBatchWarning).filter(Boolean).map(text => {
-    const item = document.createElement('li');
-    item.textContent = text;
-    return item;
-  }));
-}
 
 function renderBatchState(state) {
   const batch = state?.mode === 'batch' || Number.isSafeInteger(state?.total);
@@ -188,217 +139,30 @@ function showReport(url) {
   latestReport.removeAttribute('aria-disabled');
 }
 
-function finishActiveAudit() {
-  activeAuditId = null;
-  submissionGate.release();
-  setSubmitting(false);
-}
-
-form.addEventListener('submit', (event) => {
+auditForm.addEventListener('submit', event => {
   event.preventDefault();
-  if (!submissionGate.tryAcquire()) return;
-  panelLifecycleEpoch += 1;
-  const mode = selectedAuditMode();
-  let request;
-  if (mode === 'batch') {
-    const normalized = normalizeUrlList(batchInput.value);
-    const errors = normalized.entries.length === 0 && normalized.errors.length === 0
-      ? [{ line: 0, message: 'Informe ao menos uma URL.' }]
-      : normalized.errors;
-    renderBatchErrors(errors);
-    renderBatchWarnings(normalized.warnings);
-    if (errors.length > 0) {
-      finishActiveAudit(); setStatus('Corrija a lista antes de iniciar.'); batchInput.focus(); return;
-    }
-    request = {
-      type: 'START_BATCH', urls: batchInput.value,
-      deleteAfterCompleteExport: deleteAfterExport.checked,
-    };
-  } else {
-    try {
-      request = {
-        type: 'START_AUDIT', url: normalizeAuditUrl(input.value),
-        deleteAfterCompleteExport: deleteAfterExport.checked,
-      };
-    }
-    catch (error) {
-      finishActiveAudit();
-      setStatus(error instanceof Error ? error.message : 'Não foi possível validar o endereço.');
-      input.focus();
-      return;
-    }
-  }
-
-  clearReport();
-  setSubmitting(true);
-  setStatus('Preparando a auditoria.');
-  try {
-    chrome.runtime.sendMessage(request, (response) => {
-      const runtimeError = chrome.runtime.lastError;
-      if (runtimeError) {
-        finishActiveAudit();
-        setStatus(`Não foi possível iniciar a auditoria: ${runtimeError.message}`);
-        return;
-      }
-      if (!response || response.ok !== true || typeof response.auditId !== 'string') {
-        finishActiveAudit();
-        setStatus(response?.error || 'Não foi possível iniciar a auditoria.');
-        return;
-      }
-      activeAuditId = response.auditId;
-      if (mode === 'batch') renderBatchWarnings(response.warnings ?? []);
-      panelState = {
-        auditId: activeAuditId, mode, status: 'running', percent: 0,
-        message: mode === 'batch' ? 'Lote preparado. A primeira página será iniciada em breve.' : 'Auditoria preparada. A coleta será iniciada em breve.',
-        reviewUrl: null, ...(mode === 'batch' ? { total: response.total, pageNumber: 0 } : {}),
-      };
-      setStatus(panelState.message);
-      renderBatchState(panelState);
-    });
-  } catch (error) {
-    finishActiveAudit();
-    setStatus(error instanceof Error ? `Não foi possível iniciar a auditoria: ${error.message}` : 'Não foi possível iniciar a auditoria.');
-  }
-});
-
-cancelAudit.addEventListener('click', () => {
-  if (!activeAuditId) return;
-  cancelAudit.disabled = true;
-  setStatus('Cancelamento solicitado; aguardando a limpeza da página ativa.');
-  chrome.runtime.sendMessage({ type: 'CANCEL_AUDIT', auditId: activeAuditId }, response => {
-    cancelAudit.disabled = false;
-    if (chrome.runtime.lastError || response?.ok !== true) {
-      setStatus(response?.error || 'Não foi possível solicitar o cancelamento.');
-    }
-  });
+  renderStartUnavailable();
 });
 
 chrome.runtime.onMessage.addListener((message, sender) => {
-  const messageType = contextProtocolMessageType(message);
-  if (messageType === null) return false;
-  if (messageType === 'AUDIT_CONTEXT_PREFILL') {
-    void handleContextPrefill(message, sender);
-    return false;
-  }
-  if (messageType === 'AUDIT_CONTEXT_PREFILL_COMMIT') {
-    void handleContextPrefillCommit(message, sender);
-    return false;
-  }
-  if (messageType === 'AUDIT_DELETED') {
-    const deletion = parseAuditDeletedEvent(message, sender, {
-      id: chrome.runtime.id,
-      workerUrl: chrome.runtime.getURL('src/background/service-worker.js'),
-    });
-    if (deletion && (deletion.scope === 'all' || deletion.auditId === (activeAuditId ?? panelState?.auditId))) {
-      if (deletion.scope === 'all') deleteAllController.completeSuccess();
-      activeAuditId = null;
-      panelState = null;
-      submissionGate.release();
-      clearReport();
-      renderBatchState(null);
-      setSubmitting(false);
-      if (deletion.scope !== 'all') setStatus('A auditoria local foi excluída. Downloads já salvos foram preservados.');
-    }
-    return false;
-  }
-  if (!message || typeof message !== 'object' || !isMessageForAudit(message, activeAuditId ?? panelState?.auditId)) return;
-  panelState = reducePanelState(panelState, message, chrome.runtime.getURL('/'));
-  setStatus(panelState.message);
-  renderBatchState(panelState);
-  if (messageType === 'AUDIT_PROGRESS') return;
-  if (messageType === 'AUDIT_COMPLETE') {
-    if (panelState.reviewUrl) showReport(panelState.reviewUrl);
-    else clearReport();
-    finishActiveAudit();
-    return;
-  }
-  if (messageType === 'AUDIT_FAILED') {
-    clearReport();
-    setStatus(typeof message.error === 'string' ? message.error : 'A auditoria não pôde ser concluída.');
-    finishActiveAudit();
-  }
+  const deletion = parseAuditDeletedEvent(message, sender, {
+    id: chrome.runtime.id,
+    workerUrl: chrome.runtime.getURL('src/background/service-worker.js'),
+  });
+  if (!deletion || (deletion.scope !== 'all' && deletion.auditId !== (activeAuditId ?? panelState?.auditId))) return false;
+  if (deletion.scope === 'all') deleteAllController.completeSuccess();
+  activeAuditId = null;
+  panelState = null;
+  clearReport();
+  renderBatchState(null);
+  renderStartUnavailable();
+  return false;
 });
 
-async function handleContextPrefill(message, sender) {
-  if (!isAuthorizedWorkerMessage(sender)) return;
-  const panelTabId = await currentPanelTabId();
-  const parsed = parseContextPrefillMessage(message, panelTabId);
-  if (!parsed) return;
-  if (seenContextPrefills.has(parsed.requestId) || contextPrefill || !submissionGate.tryAcquire()) {
-    sendContextAck(createContextPrefillAck(parsed.requestId, panelTabId, false));
-    return;
-  }
-  panelLifecycleEpoch += 1;
-  seenContextPrefills.add(parsed.requestId);
-  while (seenContextPrefills.size > 128) seenContextPrefills.delete(seenContextPrefills.values().next().value);
-  contextPrefill = { requestId: parsed.requestId, panelTabId, committed: false };
-  selectAuditMode('single');
-  input.value = parsed.url;
-  clearReport();
-  setSubmitting(true);
-  setStatus(parsed.kind === 'link'
-    ? 'Preparando a auditoria do link solicitado pelo menu de contexto.'
-    : 'Preparando a auditoria da página solicitada pelo menu de contexto.');
-  sendContextAck(createContextPrefillAck(parsed.requestId, panelTabId, parsed.autoStarted), (response, runtimeFailed) => {
-    if (!contextPrefill || contextPrefill.requestId !== parsed.requestId) return;
-    contextPrefill = null;
-    if (runtimeFailed || !response || response.ok !== true || typeof response.auditId !== 'string') {
-      finishActiveAudit();
-      setStatus(response?.error || 'Não foi possível iniciar a auditoria pelo menu de contexto.');
-      return;
-    }
-    activeAuditId = response.auditId;
-    panelState = {
-      auditId: activeAuditId, status: 'running', percent: 0,
-      message: 'Auditoria preparada. A coleta será iniciada em breve.', reviewUrl: null,
-    };
-    setStatus(panelState.message);
-  });
-}
-
-async function handleContextPrefillCommit(message, sender) {
-  if (!isAuthorizedWorkerMessage(sender)) return;
-  const panelTabId = await currentPanelTabId();
-  const parsed = parseContextPrefillCommitMessage(message, panelTabId);
-  const accepted = Boolean(parsed && contextPrefill && !contextPrefill.committed &&
-    contextPrefill.requestId === parsed.requestId && contextPrefill.panelTabId === parsed.panelTabId);
-  if (accepted) contextPrefill.committed = true;
-  const requestId = parsed?.requestId;
-  if (requestId) sendContextAck(createContextPrefillCommitAck(requestId, panelTabId, accepted), (response, runtimeFailed) => {
-    const outcome = reduceContextCommitDelivery(contextPrefill, requestId, { response, runtimeFailed });
-    contextPrefill = outcome.contextPrefill;
-    if (!outcome.releaseGate) return;
-    finishActiveAudit();
-    setStatus('A conexão com a auditoria do menu foi interrompida; o formulário está disponível novamente.');
-  });
-}
-
-function isAuthorizedWorkerMessage(sender) {
-  if (!sender || sender.id !== chrome.runtime.id || sender.tab) return false;
-  if (sender.url === undefined) return true;
-  return sender.url === chrome.runtime.getURL('src/background/service-worker.js');
-}
-
-function currentPanelTabId() {
-  if (currentPanelTabIdPromise) return currentPanelTabIdPromise;
-  currentPanelTabIdPromise = resolveCurrentPanelTabId(chrome);
-  return currentPanelTabIdPromise;
-}
-
-function sendContextAck(message, callback = () => {}) {
-  if (!message) return;
-  sendContextProtocolAck(chrome, message, callback);
-}
-
 function restoreLatest() {
-  const requestedEpoch = panelLifecycleEpoch;
   try {
     chrome.runtime.sendMessage({ type: 'GET_LAST_AUDIT' }, response => {
       if (chrome.runtime.lastError || !response?.ok || !response.state?.auditId) return;
-      if (!shouldApplyRestoredAudit({
-        requestedEpoch, currentEpoch: panelLifecycleEpoch,
-        contextPending: Boolean(contextPrefill), activeAuditId,
-      })) return;
       const saved = response.state;
       panelState = {
         auditId: saved.auditId,
@@ -411,13 +175,9 @@ function restoreLatest() {
         ...restoreExportEventState(saved),
         ...(Number.isSafeInteger(saved.total) ? { total: saved.total, pageNumber: saved.pageNumber ?? 0, statusCounts: saved.statusCounts } : {}),
       };
-      setStatus(panelState.message);
       renderBatchState(panelState);
-      if (['running', 'idle'].includes(panelState.status)) {
-        activeAuditId = panelState.auditId;
-        setSubmitting(true);
-        submissionGate.tryAcquire();
-      } else if (panelState.reviewUrl) showReport(panelState.reviewUrl);
+      if (panelState.reviewUrl) showReport(panelState.reviewUrl);
+      renderStartUnavailable();
     });
   } catch {
     // A restauração é opcional; o formulário permanece utilizável.
@@ -425,6 +185,16 @@ function restoreLatest() {
 }
 
 restoreLatest();
+
+const sessionPortClient = createPanelSessionPortClient({
+  chromeApi: chrome,
+  onBootstrapResult() { renderStartUnavailable(); },
+  onStatus() { /* Task 6 installs the production session renderer. */ },
+  setTimer: globalThis.setTimeout.bind(globalThis),
+  clearTimer: globalThis.clearTimeout.bind(globalThis),
+});
+renderStartUnavailable();
+sessionPortClient.start();
 
 function nextPersonaRequestId(prefix = 'panel') {
   personaRequestSequence += 1;
