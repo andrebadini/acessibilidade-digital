@@ -7,6 +7,7 @@ const PRIVATE_PREFIXES = Object.freeze([
   '__audit_export_lease__:',
   '__audit_export_attempt__:',
   '__audit_export_delivery__:',
+  '__audit_checkpoint__:',
 ]);
 const RETENTION_KEYS = Object.freeze([
   'auditId',

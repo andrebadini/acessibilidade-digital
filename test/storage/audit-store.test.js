@@ -5,6 +5,7 @@ import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
+import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 import { reportInput } from '../report/helpers.js';
 import {
   AuditDeleteBusyError,
@@ -20,6 +21,99 @@ const HOSTILE_REVIEW_URL =
   'chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/src/review/index.html?auditId=audit-sample-20260826&token=PRIVATE_REVIEW_QUERY';
 const TRUSTED_REVIEW_URL =
   'chrome-extension://abcdefghijklmnopabcdefghijklmnop/src/review/index.html?auditId=audit-sample-20260826';
+
+async function terminalFixture(auditId) {
+  const draft = structuredClone(SAMPLE_AUDIT);
+  draft.auditId = auditId;
+  draft.integrity.canonicalModelHash = 'pending';
+  draft.integrity.evidenceManifestHash = 'pending';
+  const model = await enrichAuditForReport(draft, {
+    now: () => '2026-08-29T12:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  });
+  const inventory = await createInstalledCoreRuleInventory();
+  const checkpoint = {
+    version: 1, auditId,
+    pages: model.pages.map(page => ({
+      pageId: page.pageId, attempted: page.attempted,
+      startedAt: page.attempted ? page.timestamps.startedAt : null,
+      rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion,
+      inventoryHash: inventory.sha256, outcomes: [],
+    })),
+  };
+  const latest = {
+    version: 1, auditId, status: model.session.status, percent: 100,
+    message: 'Avaliação concluída com limitações.', failureCode: null,
+    modelRevision: 1, updatedAt: '2026-08-29T12:00:00.000Z',
+  };
+  return { model, checkpoint, latest };
+}
+
+test('atomically creates a terminal model, checkpoint companion, revision and latest exactly once', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    const auditId = `terminal-${backend.toLowerCase()}`;
+    const { model, checkpoint, latest } = await terminalFixture(auditId);
+    const committed = await store.commitAuditWithCheckpointIfAbsent(
+      auditId, model, checkpoint, latest,
+      { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false },
+    );
+    assert.equal(committed.revision, 1);
+    assert.equal(committed.modelHash, model.integrity.canonicalModelHash);
+    assert.equal(Object.getPrototypeOf(committed.capability), null);
+    assert.deepEqual(Reflect.ownKeys(committed.capability), []);
+    const report = await store.getReportRevision(auditId);
+    assert.deepEqual(Object.keys(report), ['version', 'auditId', 'modelRevision', 'modelHash', 'model', 'checkpoint']);
+    assert.equal(report.modelRevision, 1);
+    assert.equal(report.modelHash, model.integrity.canonicalModelHash);
+    assert.deepEqual(report.checkpoint, checkpoint);
+    assert.deepEqual(await store.getLatest(), latest);
+    assert.equal(Object.isFrozen(report.checkpoint.pages), true);
+    await assert.rejects(
+      store.commitAuditWithCheckpointIfAbsent(
+        auditId, model, checkpoint, latest,
+        { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false },
+      ),
+    );
+  });
+});
+
+test('terminal commit rejects hostile options and cryptographic or checkpoint corruption without mutation', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    const auditId = `hostile-terminal-${backend.toLowerCase()}`;
+    const { model, checkpoint, latest } = await terminalFixture(auditId);
+    const hostile = { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false, extra: true };
+    await assert.rejects(store.commitAuditWithCheckpointIfAbsent(auditId, model, checkpoint, latest, hostile));
+    assert.deepEqual(await store.getAuditSnapshot(auditId), { model: undefined, revision: 0, capability: null });
+    const tampered = structuredClone(model);
+    tampered.environment.chromeVersion = 'Chrome/private-tamper';
+    await assert.rejects(store.commitAuditWithCheckpointIfAbsent(
+      auditId, tampered, checkpoint, latest,
+      { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false },
+    ));
+    assert.equal((await store.getAuditSnapshot(auditId)).revision, 0);
+  });
+});
+
+test('single and bulk deletion remove the private terminal checkpoint companion', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    for (const suffix of ['one', 'all']) {
+      const auditId = `terminal-delete-${backend.toLowerCase()}-${suffix}`;
+      const { model, checkpoint, latest } = await terminalFixture(auditId);
+      await store.commitAuditWithCheckpointIfAbsent(
+        auditId, model, checkpoint, latest,
+        { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false },
+      );
+    }
+    const one = await store.getAuditSnapshot(`terminal-delete-${backend.toLowerCase()}-one`);
+    await store.deleteAudit(`terminal-delete-${backend.toLowerCase()}-one`, one.capability, { now: T29 });
+    assert.equal(await store.getReportRevision(`terminal-delete-${backend.toLowerCase()}-one`), null);
+    await store.deleteAllAudits({ now: T29 });
+    assert.equal(await store.getReportRevision(`terminal-delete-${backend.toLowerCase()}-all`), null);
+  });
+});
 
 function storeFactories() {
   return [

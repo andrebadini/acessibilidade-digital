@@ -360,3 +360,25 @@ test('never claims cleanup-pending when neither ownership journal nor tab remova
   assert.equal(await ownedTabs.get('owner-a'), null);
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE|private\.example|owner-a|71/u);
 });
+
+test('maps only the runner-private post-collection fence capability to TARGET_CHANGED', async () => {
+  const changed = attachedFixture();
+  changed.args.pipeline = async ({ failTargetChanged }) => {
+    assert.equal(typeof failTargetChanged, 'function');
+    failTargetChanged();
+  };
+  const changedResult = await runObservedTabAudit(changed.args);
+  assert.equal(changedResult.status, 'failed');
+  assert.equal(changedResult.model.session.diagnostics.at(-1).code, 'TARGET_CHANGED');
+
+  for (const spoof of [
+    new Error('TARGET_CHANGED'),
+    Object.assign(new Error('private'), { name: 'TARGET_CHANGED', code: 'TARGET_CHANGED' }),
+    { name: 'TARGET_CHANGED', message: 'TARGET_CHANGED', code: 'TARGET_CHANGED' },
+  ]) {
+    const unrelated = attachedFixture();
+    unrelated.args.pipeline = async () => { throw spoof; };
+    const result = await runObservedTabAudit(unrelated.args);
+    assert.equal(result.model.session.diagnostics.at(-1).code, 'AUDIT_FAILED');
+  }
+});

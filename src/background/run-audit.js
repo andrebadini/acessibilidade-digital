@@ -36,6 +36,8 @@ import { createPageCheckpointRecorder } from './execution-checkpoint.js';
 import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
 import { createCapturePolicyV1, isCapturePolicyV1 } from '../core/privacy/capture-policy.js';
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
+import { createAuditModel } from '../core/report/audit-model.js';
+import { validateExecutionCheckpoint } from './execution-checkpoint.js';
 
 const SCHEMA_VERSION = 1;
 const METHODOLOGY = Object.freeze({ name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 130, itemCount: 146 });
@@ -802,6 +804,179 @@ function internalContract(chromeAdapter) {
 function ownValue(value, key) {
   const descriptor = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key) : null;
   return descriptor?.enumerable && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+}
+
+function captureExactRecord(value, keys) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) return null;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== keys.length || ownKeys.some(key => typeof key !== 'string' || !keys.includes(key))) return null;
+    const copy = {};
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      copy[key] = descriptor.value;
+    }
+    return copy;
+  } catch { return null; }
+}
+
+function attachedTarget(value) {
+  const target = captureExactRecord(value, [
+    'kind', 'tabId', 'windowId', 'documentId', 'initialUrlEvidence', 'initialUrlSessionDigest',
+  ]);
+  if (!target || target.kind !== 'attached' || !Number.isSafeInteger(target.tabId) || target.tabId < 0 ||
+    !Number.isSafeInteger(target.windowId) || target.windowId < 0 ||
+    typeof target.documentId !== 'string' || !/^[A-Za-z0-9._:-]{1,240}$/u.test(target.documentId) ||
+    typeof target.initialUrlSessionDigest !== 'string' ||
+    !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(target.initialUrlSessionDigest)) throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
+  try {
+    const url = new URL(target.initialUrlEvidence);
+    if (!['http:', 'https:'].includes(url.protocol) || url.href !== target.initialUrlEvidence ||
+      url.username || url.password || url.hash) throw new Error();
+  } catch { throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED'); }
+  return Object.freeze(target);
+}
+
+function proofMatchesAttached(value, target) {
+  const proof = captureExactRecord(value, ['tabId', 'windowId', 'documentId', 'urlSessionDigest']);
+  return Boolean(proof && proof.tabId === target.tabId && proof.windowId === target.windowId &&
+    proof.documentId === target.documentId && proof.urlSessionDigest === target.initialUrlSessionDigest);
+}
+
+function captureAttachedFacadeArgs(value) {
+  const allowed = [
+    'auditId', 'sessionCapabilityId', 'target', 'capturePolicy', 'chromeAdapter', 'modelNow', 'signal',
+    'expectedExtensionId', 'pageId', 'onCheckpoint', 'persistAuditModel',
+  ];
+  const required = [
+    'auditId', 'sessionCapabilityId', 'target', 'capturePolicy', 'chromeAdapter', 'modelNow',
+    'onCheckpoint', 'persistAuditModel',
+  ];
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.some(key => typeof key !== 'string' || !allowed.includes(key)) || required.some(key => !keys.includes(key))) return null;
+    const copy = {};
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      copy[key] = descriptor.value;
+    }
+    return copy;
+  } catch { return null; }
+}
+
+/** Production attached-page façade. It never accepts or owns a raw navigation target. */
+export async function runAttachedAuditExecution(rawArgs = {}) {
+  const args = captureAttachedFacadeArgs(rawArgs);
+  if (!args) throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
+  const {
+    auditId, sessionCapabilityId, target: inputTarget, capturePolicy, chromeAdapter, modelNow,
+    signal, expectedExtensionId, pageId = 'page-1', onCheckpoint, persistAuditModel,
+  } = args;
+  const target = attachedTarget(inputTarget);
+  if (typeof auditId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/u.test(auditId) ||
+    typeof sessionCapabilityId !== 'string' || !/^[A-Za-z0-9_-]{22}$/u.test(sessionCapabilityId) ||
+    !isCapturePolicyV1(capturePolicy) || capturePolicy.mode !== 'no-pixels' || capturePolicy.includeQuery !== false ||
+    typeof modelNow !== 'function' || typeof onCheckpoint !== 'function' || typeof persistAuditModel !== 'function' ||
+    !chromeAdapter || typeof chromeAdapter.probeDocumentIdentity !== 'function') {
+    throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
+  }
+  const inventory = await createInstalledCoreRuleInventory();
+  const startedAt = canonicalTime(modelNow());
+  const checkpointRecorder = await createPageCheckpointRecorder({
+    auditId, pageId, startedAt, rulesVersion: inventory.rulesVersion, inventory, onCheckpoint,
+  });
+  let legacyDraft = null;
+  let terminalModel = null;
+  let closedFailureCode = 'AUDIT_FAILED';
+  const pipeline = args => executeObservedAuditPipeline({
+    ...args,
+    services: {
+      async collectObservedPage({ observedTarget }) {
+        const observedAdapter = {
+          ...chromeAdapter,
+          captureFullPageEnabled: false,
+          captureElementsEnabled: false,
+          captureElementsWithoutFullPage: false,
+          async createTab() { return { id: observedTarget.tabId, windowId: observedTarget.windowId }; },
+          async navigateTab() {},
+          async waitForStable() { return { url: observedTarget.urlEvidence }; },
+          async removeTab() {},
+          async captureFullPage() { throw new Error('PIXEL_CAPTURE_OMITTED'); },
+          async captureElement() { throw new Error('PIXEL_CAPTURE_OMITTED'); },
+          composeAnnouncementMap: undefined,
+        };
+        legacyDraft = await runLegacyAudit({
+          url: target.initialUrlEvidence, chromeAdapter: observedAdapter, now: modelNow,
+          idFactory: () => auditId, signal, closeAuditTab: false, expectedExtensionId,
+        });
+        terminalModel = await enrichAuditForReport(legacyDraft, {
+          now: modelNow, expectedExtensionId,
+          browserVersion: legacyDraft.environment?.chromeVersion || 'não disponível',
+          rulesVersion: legacyDraft.methodology?.version || inventory.rulesVersion,
+        });
+        return { version: 1, kind: 'legacy-observation' };
+      },
+      async runCoreRules() {
+        return { ruleResults: terminalModel.ruleResults.filter(result => result.source?.engine === 'audita-core') };
+      },
+      async buildAuditModel() { return terminalModel; },
+      async persistAuditModel(model) {
+        const finalProof = await chromeAdapter.probeDocumentIdentity(target.tabId);
+        if (!proofMatchesAttached(finalProof, target)) args.failTargetChanged();
+        await persistAuditModel(model);
+      },
+    },
+  });
+  const failureModelFactory = async ({ code, status }) => {
+    closedFailureCode = code;
+    if (code !== 'AUDIT_ABORTED') return Object.freeze({
+      schemaVersion: 2, auditId,
+      session: Object.freeze({ status, diagnostics: Object.freeze([Object.freeze({ code })]) }),
+    });
+    const draft = legacyDraft ?? await runLegacyAudit({
+      url: target.initialUrlEvidence,
+      chromeAdapter: { async createTab() { throw new Error('AUDIT_ABORTED'); } },
+      now: modelNow, idFactory: () => auditId, signal: undefined, closeAuditTab: false, expectedExtensionId,
+    });
+    const cancelled = structuredClone(draft);
+    cancelled.session.status = 'cancelled';
+    cancelled.session.partial = false;
+    cancelled.session.diagnostics.push(diagnostic('AUDIT_ABORTED', 'A auditoria foi cancelada.', canonicalTime(modelNow()), false));
+    return enrichAuditForReport(cancelled, {
+      now: modelNow, expectedExtensionId,
+      browserVersion: cancelled.environment?.chromeVersion || 'não disponível',
+      rulesVersion: cancelled.methodology?.version || inventory.rulesVersion,
+    });
+  };
+  const observed = await runObservedTabAudit({
+    auditId, sessionCapabilityId, target, capturePolicy,
+    privacyDecision: Object.freeze({ status: 'no-pixels', limitationCode: 'PIXEL_CAPTURE_OMITTED' }),
+    checkpointRecorder, signal, chromeAdapter, pipeline, failureModelFactory, now: modelNow,
+  });
+  const lastCheckpoint = (() => {
+    try {
+      return validateExecutionCheckpoint({ auditId, checkpoint: observed.checkpoint, pageOrder: [pageId] });
+    } catch { return null; }
+  })();
+  if (observed.status === 'completed' || closedFailureCode === 'AUDIT_ABORTED') {
+    let model;
+    try { model = createAuditModel(observed.model); } catch { throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED'); }
+    if (model.auditId !== auditId || !['complete', 'partial', 'cancelled'].includes(model.session.status) || !lastCheckpoint) {
+      throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
+    }
+    return deepFreeze({ version: 1, auditId, state: 'model', failureCode: null, model, checkpoint: lastCheckpoint });
+  }
+  const failureCode = closedFailureCode === 'TARGET_CHANGED' ? 'TARGET_CHANGED'
+    : closedFailureCode === 'PRIVACY_TARGET_CHANGED' ? 'PRIVACY_PAUSED'
+      : 'AUDIT_FAILED';
+  return deepFreeze({
+    version: 1, auditId, state: 'revoked', failureCode, model: null, checkpoint: lastCheckpoint,
+  });
 }
 
 /** Internal orchestration result; its pipeline persists only a validated AuditModel V2. */

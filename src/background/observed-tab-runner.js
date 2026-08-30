@@ -167,6 +167,8 @@ export async function runObservedTabAudit({
   resumePauseId,
   now = () => new Date().toISOString(),
 }) {
+  const targetChangedSentinel = Object.freeze(Object.create(null));
+  const failTargetChanged = () => { throw targetChangedSentinel; };
   const safeTarget = captureTarget(target);
   const safeDecision = captureDecision(privacyDecision);
   if (!validId(auditId) || !validId(sessionCapabilityId) || !safeTarget ||
@@ -352,14 +354,15 @@ export async function runObservedTabAudit({
       code = 'TARGET_CHANGED';
       throw new Error(code);
     }
-    const piped = await pipeline({ auditId, observedTarget, capturePolicy, checkpointRecorder, signal });
+    const piped = await pipeline({ auditId, observedTarget, capturePolicy, checkpointRecorder, signal, failTargetChanged });
     await cleanupDisposable();
     return Object.freeze({
       status: 'completed', model: piped.model, observedTarget,
       checkpoint: piped.checkpoint, observationState: 'observed', ownershipState,
     });
   } catch (error) {
-    if (error?.name === 'AbortError' || signal?.aborted) code = 'AUDIT_ABORTED';
+    if (error === targetChangedSentinel) code = 'TARGET_CHANGED';
+    else if (error?.name === 'AbortError' || signal?.aborted) code = 'AUDIT_ABORTED';
     else if (!['TARGET_CHANGED', 'PRIVACY_TARGET_CHANGED'].includes(code)) code = 'AUDIT_FAILED';
     try { await cleanupDisposable(); } catch {
       if (ownershipState !== 'cleanup-unconfirmed') ownershipState = 'cleanup-pending';

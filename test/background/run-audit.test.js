@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
-import { canonicalTime, runAudit } from '../../src/background/run-audit.js';
+import { canonicalTime, runAttachedAuditExecution, runAudit } from '../../src/background/run-audit.js';
 import { AUDIT_EXECUTION_INTERNAL } from '../../src/background/chrome-adapter.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
@@ -437,6 +437,90 @@ test('public compatibility path defaults to an owned proof boundary and performs
   assert.ok(adapter.events.findIndex(value => value.startsWith('navigate:')) < adapter.events.findIndex(value => value.startsWith('remove-tab:')));
   assert.equal(Object.hasOwn(model, 'checkpoint'), false);
   assert.doesNotMatch(JSON.stringify(model), /owner-|navigationToken|urlSessionDigest|ERASE/u);
+});
+
+test('attached execution uses no owned-tab or URL-vault effects and returns the closed terminal union', async () => {
+  const adapter = fakeAdapter({ noPixels: true });
+  const persisted = [];
+  const checkpoints = [];
+  const result = await runAttachedAuditExecution({
+    auditId: 'audit-attached-1',
+    sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: 'https://example.test/',
+      initialUrlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+    },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    chromeAdapter: adapter,
+    modelNow: clock,
+    expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async checkpoint => { checkpoints.push(checkpoint); },
+    persistAuditModel: async model => { persisted.push(model); },
+  });
+
+  assert.deepEqual(Object.keys(result), ['version', 'auditId', 'state', 'failureCode', 'model', 'checkpoint']);
+  assert.equal(result.version, 1);
+  assert.equal(result.auditId, 'audit-attached-1');
+  assert.equal(result.state, 'model');
+  assert.equal(result.failureCode, null);
+  assert.ok(['complete', 'partial'].includes(result.model.session.status));
+  assert.equal(result.checkpoint.auditId, 'audit-attached-1');
+  assert.equal(persisted.length, 1);
+  assert.ok(checkpoints.length > 0);
+  assert.equal(adapter.events.includes('create-tab'), false);
+  assert.equal(adapter.events.some(value => value.startsWith('navigate:')), false);
+  assert.equal(adapter.events.some(value => value.startsWith('remove-tab:')), false);
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(Object.isFrozen(result.checkpoint), true);
+});
+
+test('attached execution re-proves inside persistence and commits nothing after document drift', async () => {
+  const adapter = fakeAdapter({ noPixels: true });
+  let proof = 0;
+  adapter.probeDocumentIdentity = async tabId => {
+    proof += 1;
+    return {
+      tabId, windowId: 9,
+      documentId: proof >= 3 ? 'document-b' : 'document-a',
+      urlSessionDigest: `hmac-sha256:${(proof >= 3 ? 'B' : 'A').repeat(43)}`,
+    };
+  };
+  let persisted = 0;
+  const result = await runAttachedAuditExecution({
+    auditId: 'audit-attached-drift', sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: 'https://example.test/', initialUrlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+    },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { persisted += 1; },
+  });
+  assert.deepEqual({ state: result.state, code: result.failureCode, model: result.model }, {
+    state: 'revoked', code: 'TARGET_CHANGED', model: null,
+  });
+  assert.equal(persisted, 0);
+});
+
+test('attached execution rejects hostile or extra façade fields before probing', async () => {
+  const adapter = fakeAdapter({ noPixels: true });
+  let reads = 0;
+  const args = {
+    auditId: 'audit-hostile-facade', sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: 'https://example.test/', initialUrlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+    },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    chromeAdapter: adapter, modelNow: clock, signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, onCheckpoint: async () => {}, persistAuditModel: async () => {},
+    extra: 'PRIVATE',
+  };
+  Object.defineProperty(args, 'auditId', { enumerable: true, get() { reads += 1; return 'audit-hostile-facade'; } });
+  await assert.rejects(runAttachedAuditExecution(args), /ATTACHED_AUDIT_EXECUTION_DENIED/u);
+  assert.equal(reads, 0);
+  assert.equal(adapter.events.length, 0);
 });
 
 test('uses one conservative durable URL projection for successful and failed no-pixels audits', async () => {

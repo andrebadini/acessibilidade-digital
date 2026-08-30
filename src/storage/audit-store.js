@@ -12,12 +12,14 @@ import { auditModelInputError, captureAuditInput } from '../core/report/audit-in
 import { canonicalStringify } from '../core/report/canonical-json.js';
 import { verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
 import { applyReviewDecisions } from '../core/review/decisions.js';
+import { validateExecutionCheckpoint } from '../background/execution-checkpoint.js';
 
 const DB_NAME = 'audita-mt';
 const STORE_NAME = 'audits';
 const RETENTION_STORE_NAME = 'audit-retention';
 const LATEST_KEY = '__latest__';
 const REVISION_KEY_PREFIX = '__audit_revision__:';
+const CHECKPOINT_KEY_PREFIX = '__audit_checkpoint__:';
 const EXPORT_LEASE_KEY_PREFIX = '__audit_export_lease__:';
 const EXPORT_ATTEMPT_KEY_PREFIX = '__audit_export_attempt__:';
 const EXPORT_DELIVERY_KEY_PREFIX = '__audit_export_delivery__:';
@@ -197,6 +199,13 @@ function legacyPrivateAuditKeyIsSafe(key, value) {
     }
   }
   if (key === RETENTION_CLEANUP_CURSOR_KEY) return cleanupCursorRecord(value) !== null;
+  if (key?.startsWith?.(CHECKPOINT_KEY_PREFIX)) {
+    try {
+      const auditId = canonicalAuditId(key.slice(CHECKPOINT_KEY_PREFIX.length));
+      parseCheckpointCompanion(value, auditId);
+      return true;
+    } catch { return false; }
+  }
   for (const prefix of [
     REVISION_KEY_PREFIX,
     EXPORT_LEASE_KEY_PREFIX,
@@ -265,6 +274,103 @@ function nextExportAttempt(value, latest, auditId) {
 
 function revisionKey(id) {
   return `${REVISION_KEY_PREFIX}${id}`;
+}
+
+function checkpointKey(id) {
+  return `${CHECKPOINT_KEY_PREFIX}${id}`;
+}
+
+function exactDataRecord(value, keys) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) return null;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== keys.length || ownKeys.some(key => typeof key !== 'string' || !keys.includes(key))) return null;
+    const copy = {};
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      copy[key] = descriptor.value;
+    }
+    return copy;
+  } catch { return null; }
+}
+
+function exactTerminalOptions(value) {
+  const options = exactDataRecord(value, ['now', 'deleteAfterCompleteExport']);
+  if (!options || options.deleteAfterCompleteExport !== false) throw new TypeError('Commit terminal inválido.');
+  canonicalRetentionInstant(options.now);
+  return options;
+}
+
+function checkpointPageOrder(value) {
+  const checkpoint = exactDataRecord(value, ['version', 'auditId', 'pages']);
+  if (!checkpoint || !Array.isArray(checkpoint.pages) || Object.getPrototypeOf(checkpoint.pages) !== Array.prototype) {
+    throw new TypeError('Checkpoint terminal inválido.');
+  }
+  const length = Object.getOwnPropertyDescriptor(checkpoint.pages, 'length')?.value;
+  if (!Number.isSafeInteger(length) || length < 1 || length > 20) throw new TypeError('Checkpoint terminal inválido.');
+  const keys = Reflect.ownKeys(checkpoint.pages);
+  const expected = ['length', ...Array.from({ length }, (_entry, index) => String(index))];
+  if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) throw new TypeError('Checkpoint terminal inválido.');
+  return Array.from({ length }, (_entry, index) => {
+    const row = Object.getOwnPropertyDescriptor(checkpoint.pages, String(index));
+    const page = row?.enumerable && Object.hasOwn(row, 'value') ? row.value : null;
+    const descriptor = page && typeof page === 'object' ? Object.getOwnPropertyDescriptor(page, 'pageId') : null;
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new TypeError('Checkpoint terminal inválido.');
+    return descriptor.value;
+  });
+}
+
+function canonicalTerminalCheckpoint(auditId, checkpoint, model) {
+  const pageOrder = model?.pages?.map(page => page.pageId) ?? checkpointPageOrder(checkpoint);
+  try { return validateExecutionCheckpoint({ auditId, checkpoint, pageOrder }); }
+  catch { throw new TypeError('Checkpoint terminal inválido.'); }
+}
+
+function canonicalTerminalLatest(auditId, latestState, model) {
+  const latest = exactDataRecord(latestState, [
+    'version', 'auditId', 'status', 'percent', 'message', 'failureCode', 'modelRevision', 'updatedAt',
+  ]);
+  const fixed = {
+    complete: [100, 'Avaliação concluída.'],
+    partial: [100, 'Avaliação concluída com limitações.'],
+    cancelled: [100, 'Avaliação cancelada.'],
+  }[model?.session?.status];
+  if (!latest || !fixed || latest.version !== 1 || latest.auditId !== auditId ||
+    latest.status !== model.session.status || latest.percent !== fixed[0] || latest.message !== fixed[1] ||
+    latest.failureCode !== null || latest.modelRevision !== 1) throw new TypeError('Estado terminal inválido.');
+  canonicalRetentionInstant(latest.updatedAt);
+  return storageClone(latest);
+}
+
+async function canonicalTerminalGraph(auditId, model, checkpoint, latestState) {
+  const key = validId(auditId);
+  let verified;
+  try { verified = await verifyAuditIntegritySnapshot(model); }
+  catch { throw new AuditStorageUnavailableError(); }
+  if (verified.auditId !== key || !['complete', 'partial', 'cancelled'].includes(verified.session.status) ||
+    !/^[a-f0-9]{64}$/u.test(verified.integrity.canonicalModelHash)) throw new AuditStorageUnavailableError();
+  const terminalCheckpoint = canonicalTerminalCheckpoint(key, checkpoint, verified);
+  const terminalLatest = canonicalTerminalLatest(key, latestState, verified);
+  return { key, model: verified, checkpoint: terminalCheckpoint, latest: terminalLatest };
+}
+
+function checkpointCompanion(auditId, checkpoint) {
+  return storageClone({ version: 1, auditId, checkpoint });
+}
+
+function freezeStored(value, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object' || seen.has(value)) return value;
+  seen.add(value);
+  for (const child of Object.values(value)) freezeStored(child, seen);
+  return Object.freeze(value);
+}
+
+function parseCheckpointCompanion(value, auditId, model = null) {
+  const record = exactDataRecord(value, ['version', 'auditId', 'checkpoint']);
+  if (!record || record.version !== 1 || record.auditId !== auditId) throw new AuditStorageUnavailableError();
+  return canonicalTerminalCheckpoint(auditId, record.checkpoint, model);
 }
 
 function exportLeaseKey(id) {
@@ -895,6 +1001,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   const deleteStoredAudit = key => {
     initial.delete(key);
     initial.delete(revisionKey(key));
+    initial.delete(checkpointKey(key));
     initial.delete(exportLeaseKey(key));
     initial.delete(exportAttemptKey(key));
     initial.delete(exportDeliveryKey(key));
@@ -966,10 +1073,48 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     );
     return { ...committed, deleted: false };
   };
+  const commitAuditWithCheckpointIfAbsent = async (id, model, checkpoint, latestState, options) => {
+    const normalizedOptions = exactTerminalOptions(options);
+    const terminal = await canonicalTerminalGraph(id, model, checkpoint, latestState);
+    if (currentAudit(terminal.key) !== undefined || storedRevision(initial.get(revisionKey(terminal.key))) !== 0 ||
+      initial.has(checkpointKey(terminal.key))) throw new AuditRevisionConflictError();
+    const modelClone = storageClone(terminal.model);
+    initial.set(terminal.key, modelClone);
+    initial.set(checkpointKey(terminal.key), checkpointCompanion(terminal.key, terminal.checkpoint));
+    initial.set(revisionKey(terminal.key), 1);
+    initial.set(LATEST_KEY, storageClone(terminal.latest));
+    retention.set(terminal.key, createRetentionMetadata(terminal.key, normalizedOptions.now, false));
+    const capability = mintAuditSnapshot(owner, terminal.key, modelClone, 1).capability;
+    return Object.freeze({ revision: 1, modelHash: terminal.model.integrity.canonicalModelHash, capability });
+  };
+  const getReportRevision = async id => {
+    try {
+      const key = validId(id);
+      const rawModel = initial.get(key);
+      const rawRevision = initial.get(revisionKey(key));
+      const rawCompanion = initial.get(checkpointKey(key));
+      if (rawModel === undefined && rawRevision === undefined && rawCompanion === undefined) return null;
+      const model = await verifyAuditIntegritySnapshot(rawModel);
+      const revision = storedRevision(rawRevision);
+      if (model.auditId !== key || !Number.isSafeInteger(revision) || revision < 1 ||
+        !['complete', 'partial', 'cancelled'].includes(model.session.status) ||
+        !/^[a-f0-9]{64}$/u.test(model.integrity.canonicalModelHash)) throw new Error();
+      const checkpoint = parseCheckpointCompanion(rawCompanion, key, model);
+      return freezeStored({
+        version: 1, auditId: key, modelRevision: revision,
+        modelHash: model.integrity.canonicalModelHash, model: storageClone(model), checkpoint: storageClone(checkpoint),
+      });
+    } catch (error) {
+      if (error instanceof AuditStorageUnavailableError) throw error;
+      throw new AuditStorageUnavailableError();
+    }
+  };
   return {
     async setAudit(id, model, options) { return writeAudit(id, model, undefined, undefined, options); },
     async getAudit(id) { return snapshot(id).model; },
     async getAuditSnapshot(id) { return snapshot(id); },
+    commitAuditWithCheckpointIfAbsent,
+    getReportRevision,
     async setLatest(state) { initial.set(LATEST_KEY, storageClone(state)); },
     async getLatest() { return storageClone(initial.get(LATEST_KEY)); },
     async markAuditInterrupted(id, latestState, options) {
@@ -1117,6 +1262,8 @@ function createUnavailableAuditStore() {
     getLatest: unavailable,
     markAuditInterrupted: unavailable,
     commitAudit: unavailable,
+    commitAuditWithCheckpointIfAbsent: unavailable,
+    getReportRevision: unavailable,
     commitAuditIfRevision: unavailable,
     commitAuditReviewIfRevision: unavailable,
     acquireExportLease: unavailable,
@@ -1262,6 +1409,78 @@ export function createAuditStore(options = {}) {
     const values = await readKeys([key, revisionKey(key)]);
     const model = materializeCanonicalAuditModel(key, values.get(key), { allowMissing: true });
     return mintAuditSnapshot(owner, key, model, values.get(revisionKey(key)));
+  };
+  const commitAuditWithCheckpointIfAbsent = async (id, model, checkpoint, latestState, options) => {
+    const normalizedOptions = exactTerminalOptions(options);
+    const terminal = await canonicalTerminalGraph(id, model, checkpoint, latestState);
+    const modelClone = storageClone(terminal.model);
+    const companion = checkpointCompanion(terminal.key, terminal.checkpoint);
+    const latestClone = storageClone(terminal.latest);
+    const retentionMetadata = createRetentionMetadata(terminal.key, normalizedOptions.now, false);
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let reads = 0;
+      let conflict = false;
+      let written = false;
+      const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
+      const transaction = indexedDbBoundary(() => db.transaction([STORE_NAME, RETENTION_STORE_NAME], 'readwrite'));
+      const store = indexedDbObjectStore(transaction, () => transaction.objectStore(STORE_NAME));
+      const retentionStore = indexedDbObjectStore(transaction, () => transaction.objectStore(RETENTION_STORE_NAME));
+      const requests = [
+        store.get(terminal.key), store.get(revisionKey(terminal.key)),
+        store.get(checkpointKey(terminal.key)), retentionStore.get(terminal.key),
+      ];
+      const values = new Array(requests.length);
+      const apply = () => {
+        if (reads !== requests.length || written || conflict) return;
+        if (values.some(value => value !== undefined)) { conflict = true; return; }
+        written = true;
+        store.put(modelClone, terminal.key);
+        store.put(companion, checkpointKey(terminal.key));
+        store.put(1, revisionKey(terminal.key));
+        store.put(latestClone, LATEST_KEY);
+        retentionStore.put(retentionMetadata);
+      };
+      requests.forEach((request, index) => {
+        request.onsuccess = () => { values[index] = request.result; reads += 1; apply(); };
+        request.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      });
+      transaction.oncomplete = () => {
+        if (conflict) finish(reject, new AuditRevisionConflictError());
+        else if (!written) finish(reject, new AuditStorageUnavailableError());
+        else finish(resolve, Object.freeze({
+          revision: 1,
+          modelHash: terminal.model.integrity.canonicalModelHash,
+          capability: mintAuditSnapshot(owner, terminal.key, modelClone, 1).capability,
+        }));
+      };
+      transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
+    });
+  };
+  const getReportRevision = async id => {
+    try {
+      const key = validId(id);
+      const values = await readKeys([key, revisionKey(key), checkpointKey(key)]);
+      const rawModel = values.get(key);
+      const rawRevision = values.get(revisionKey(key));
+      const rawCompanion = values.get(checkpointKey(key));
+      if (rawModel === undefined && rawRevision === undefined && rawCompanion === undefined) return null;
+      const model = await verifyAuditIntegritySnapshot(rawModel);
+      const revision = storedRevision(rawRevision);
+      if (model.auditId !== key || revision < 1 || !['complete', 'partial', 'cancelled'].includes(model.session.status) ||
+        !/^[a-f0-9]{64}$/u.test(model.integrity.canonicalModelHash)) throw new Error();
+      const terminalCheckpoint = parseCheckpointCompanion(rawCompanion, key, model);
+      return freezeStored({
+        version: 1, auditId: key, modelRevision: revision,
+        modelHash: model.integrity.canonicalModelHash,
+        model: storageClone(model), checkpoint: storageClone(terminalCheckpoint),
+      });
+    } catch (error) {
+      if (error instanceof AuditStorageUnavailableError) throw error;
+      throw new AuditStorageUnavailableError();
+    }
   };
   const mutateAudit = async (id, model, latestState, snapshotCapability, options = {}) => {
     const key = validId(id);
@@ -2017,6 +2236,7 @@ export function createAuditStore(options = {}) {
         applied = true;
         auditStore.delete(key);
         auditStore.delete(revisionKey(key));
+        auditStore.delete(checkpointKey(key));
         auditStore.delete(exportLeaseKey(key));
         auditStore.delete(exportAttemptKey(key));
         auditStore.delete(exportDeliveryKey(key));
@@ -2178,6 +2398,7 @@ export function createAuditStore(options = {}) {
         if (shouldDelete) {
           auditStore.delete(key);
           auditStore.delete(revisionKey(key));
+          auditStore.delete(checkpointKey(key));
           auditStore.delete(exportLeaseKey(key));
           auditStore.delete(exportAttemptKey(key));
           auditStore.delete(exportDeliveryKey(key));
@@ -2338,6 +2559,7 @@ export function createAuditStore(options = {}) {
           else {
             auditStore.delete(metadata.auditId);
             auditStore.delete(revisionKey(metadata.auditId));
+            auditStore.delete(checkpointKey(metadata.auditId));
             auditStore.delete(exportLeaseKey(metadata.auditId));
             auditStore.delete(exportAttemptKey(metadata.auditId));
             auditStore.delete(exportDeliveryKey(metadata.auditId));
@@ -2370,6 +2592,8 @@ export function createAuditStore(options = {}) {
       return materializeCanonicalAuditModel(key, await get(key), { allowMissing: true });
     },
     getAuditSnapshot,
+    commitAuditWithCheckpointIfAbsent,
+    getReportRevision,
     setLatest(state) { return put(LATEST_KEY, state); },
     getLatest() { return get(LATEST_KEY); },
     markAuditInterrupted,
