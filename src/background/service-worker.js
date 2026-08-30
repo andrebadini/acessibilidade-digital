@@ -394,6 +394,7 @@ async function buildDefaultRuntime(chromeApi, options) {
   const reportLaunch = launchApisAvailable ? createReportLaunchAuthority({ chromeApi, sessionArea, epochNow, randomBytes: bytes }) : unavailableLaunch;
   const exportCompletionStore = Object.freeze({
     ...auditStore,
+    async emitTerminal(event) { await chromeAdapter.emitProgress(event); },
     async completeExport(auditId, { attemptId, receipt }) {
       const durable = await auditStore.getExportReceipt(auditId);
       if (!same(durable, receipt)) throw new Error('EXPORT_RECEIPT_DENIED');

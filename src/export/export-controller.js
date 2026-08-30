@@ -177,7 +177,14 @@ export async function persistExportSuccess(request, store) {
     || canonicalStringify(serializedModel) !== canonicalStringify(verifiedModel)) {
     throw new TypeError('Resultado e auditId de exportação não estão correlacionados.');
   }
-  const prepared = preparedArtifactFormats(verifiedModel);
+  // A ReportViewV1 export deliberately preserves the stored review-ready model:
+  // it has no generated-artifact claim to retrofit.  Its private generator
+  // attestation and the durable four-byte receipt are the authority instead.
+  const immutableRevision = verifiedModel.report?.status === 'review-ready' &&
+    verifiedModel.report?.artifact?.status === 'pending';
+  const prepared = immutableRevision
+    ? immutableRevisionFormats(result.deliveryReceipt, verifiedModel)
+    : preparedArtifactFormats(verifiedModel);
   prepared.baseName = await bindDeliveryArtifactBaseName(
     prepared.baseName,
     envelope.leaseOwnerId,
@@ -190,18 +197,9 @@ export async function persistExportSuccess(request, store) {
     expectedRevision,
     envelope.exportAttempt,
   );
-  validateArtifactCorrelation({
-    model: verifiedModel,
-    html,
-    json: result.json,
-    csv,
-    pdf,
-    formats: result.formats,
-    limitations: result.limitations,
-    pdfFallback,
-    receipt,
-    prepared,
-  });
+  if (immutableRevision) validateImmutableRevisionCorrelation({ model: verifiedModel, json: result.json, csv, pdf, formats: result.formats, receipt, exportDeliveryIdentity });
+  else validateArtifactCorrelation({ model: verifiedModel, html, json: result.json, csv, pdf, formats: result.formats,
+    limitations: result.limitations, pdfFallback, receipt, prepared });
   await validateArtifactHashes({ html, json: result.json, csv, pdf }, receipt.formats);
   const verifiedCapability = await verifyGeneratedReportExportResult(envelope.result, {
     model: verifiedModel,
@@ -218,7 +216,7 @@ export async function persistExportSuccess(request, store) {
   if (verifiedCapability !== envelope.snapshotCapability) {
     throw new TypeError('Proveniência do snapshot de exportação inválida ou ausente.');
   }
-  const exportStatus = prepared.missing.length > 0 || verifiedModel.report.artifact.status === 'partial' || receipt.status !== 'complete'
+  const exportStatus = prepared.missing.length > 0 || (!immutableRevision && verifiedModel.report.artifact.status === 'partial') || receipt.status !== 'complete'
     ? 'partial'
     : 'complete';
   const latest = {
@@ -350,6 +348,21 @@ function normalizeDeliveryReceipt(value, preparedFormats) {
     : 'partial';
   if (receipt.status !== status) throw new TypeError('Status do recibo de entrega inválido.');
   return { status, formats, limitations };
+}
+
+function immutableRevisionFormats(receipt, model) {
+  if (!receipt || receipt.status !== 'complete' || !Array.isArray(receipt.formats) || receipt.formats.length !== EXPORT_FORMATS_V1.length ||
+    receipt.formats.some((entry, index) => entry?.format !== EXPORT_FORMATS_V1[index] || entry.status !== 'complete')) {
+    throw new TypeError('Recibo completo da revisão imutável inválido.');
+  }
+  return { formats: [...EXPORT_FORMATS_V1], missing: [], missingLimitations: [],
+    baseName: buildArtifactBaseName(model.auditId, model.timestamps.generatedAt) };
+}
+
+function validateImmutableRevisionCorrelation({ model, json, csv, pdf, formats, receipt, exportDeliveryIdentity }) {
+  if (canonicalStringify(formats) !== canonicalStringify(receipt.formats) || csv === null || pdf === null ||
+    json !== renderTechnicalJson(model, { deliveryIdentity: exportDeliveryIdentity }) ||
+    !csv.startsWith('\uFEFF')) throw new TypeError('Artefatos da revisão imutável não correspondem ao recibo.');
 }
 
 function preparedArtifactFormats(model) {

@@ -101,3 +101,12 @@ limpo
 ```
 
 Autocrítica: a revisão cobriu o contrato de bytes/receipt, formato canônico, lease e transições de autoridade pelos testes determinísticos, mas não substitui a QA visual em Chrome real nem reexecuta o gate não legado completo; ambos foram deliberadamente excluídos deste fechamento. O staging posterior é explícito apenas dos 24 arquivos rastreados da Task 7 e deste relatório; `node_modules/` e os cinco itens não rastreados da Task 8 ficam intocados.
+
+## Correções da revisão independente — rodada 1
+
+- `REPORT_REQUEST_EXPORT` não devolve mais `attemptId`; a tentativa continua exclusivamente no registro privado até `EXPORT_CONNECT` provar o primeiro documento. O teste de envelope registrou RED (a resposta continha `attemptId`) e GREEN após removê-lo.
+- A conclusão agora emite uma única mensagem saneada `EXPORT_COMPLETE` após a confirmação CAS terminal, com `auditId`, `deleted`, `status` e `exportRevision`; o teste de lifecycle registrou RED por ausência do evento e GREEN após a emissão através do adaptador do worker.
+- A persistência distingue a revisão imutável normal (`review-ready`/`pending`) do modelo técnico já preparado: exige recibo integral nos quatro formatos, identidade de entrega, hashes exatos, JSON técnico correlato e atestado privado do gerador, mas não tenta impor retroativamente `preparedArtifactFormats` ao modelo armazenado.
+- O arquivo-folha `src/export/export-formats.js` permanece uma expansão de escopo deliberada: evita ciclo ESM entre `report-export`, CSV/JSON/store/review e preserva uma única constante congelada; `report-export.js` a reexporta como fronteira pública. Isso é compatível com a exigência de ordem única, embora diverja da localização literal do brief.
+
+Verificação desta rodada: `node --test test/background/export-launch.test.js test/background/service-worker.test.js test/export/export-controller.test.js test/export/export-page.test.js` — `66/66` passaram em `13,372 s`; `git diff --check` limpo. Chrome real e o gate completo continuam fora do escopo desta rodada.

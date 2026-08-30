@@ -32,6 +32,7 @@ test('export launch creates a bearer-free URL and persists one first-document se
       if (completionFailures-- > 0) throw new Error('durable finalize unavailable');
       return { completed: true };
     },
+    async emitTerminal(event) { calls.push(['terminal', event]); },
   };
   const reportLaunch = {
     async authorizeExport() { return { ok: true, auditId: 'audit-1', windowId: 9, sessionCapabilityId: 'R'.repeat(22) }; },
@@ -57,7 +58,7 @@ test('export launch creates a bearer-free URL and persists one first-document se
     sender: { id: 'ext-test', documentId: 'review-doc', url: 'chrome-extension://ext-test/src/review/index.html?auditId=audit-1' },
   });
   assert.equal(requested.ok, true);
-  assert.equal(requested.attemptId, '7');
+  assert.deepEqual(Object.keys(requested).sort(), ['auditId', 'ok', 'state']);
   assert.deepEqual(calls.find(call => call[0] === 'lease'), ['lease', 'export:audit-1:pending']);
   const navigation = calls.find(call => call[0] === 'navigate')[2];
   assert.equal(navigation, 'chrome-extension://ext-test/src/export/index.html?auditId=audit-1');
@@ -76,6 +77,7 @@ test('export launch creates a bearer-free URL and persists one first-document se
   assert.equal((await authority.getSession(session.sessionCapabilityId)).state, 'active');
   assert.deepEqual(await authority.complete({ sessionCapabilityId: session.sessionCapabilityId, auditId: 'audit-1', attemptId: '7', sender }),
     { ok: true, auditId: 'audit-1', state: 'terminal' });
+  assert.deepEqual(calls.find(call => call[0] === 'terminal'), ['terminal', { type: 'EXPORT_COMPLETE', auditId: 'audit-1', deleted: false, status: 'complete', exportRevision: 5 }]);
   assert.equal(calls.filter(call => call[0] === 'receipt-reread').length, 2);
   assert.deepEqual(calls.filter(call => call[0] === 'completion'), [['completion', '7'], ['completion', '7']]);
   assert.deepEqual(await authority.complete({ sessionCapabilityId: session.sessionCapabilityId, auditId: 'audit-1', attemptId: '7', sender }),

@@ -124,7 +124,7 @@ export function createExportLaunchAuthority(raw) {
         if (!current || current.tabId !== tab.id || current.state !== 'allocated') throw new Error('EXPORT_OPEN_FAILED');
         const awaiting = deepFreeze({...current,state:'awaiting-connection'});
         if (!await confirmed(input.sessionArea,launchKey(auditId),awaiting,launchRecord)) throw new Error('EXPORT_OPEN_FAILED');
-        return deepFreeze({ok:true,auditId,attemptId,state:'awaiting-connection'});
+        return deepFreeze({ok:true,auditId,state:'awaiting-connection'});
       } catch {
         const current = await getLaunch(auditId).catch(() => null);
         if (current && current.attemptId === attemptId && !['terminal','revoked'].includes(current.state)) {
@@ -178,12 +178,15 @@ export function createExportLaunchAuthority(raw) {
           row?.format!==EXPORT_FORMATS_V1[index] || row.mimeType!==EXPORT_MIME_V1[row.format] || row.state!=='complete' ||
           !Number.isSafeInteger(row.byteSize) || row.byteSize<0 || !/^[a-f0-9]{64}$/u.test(row.sha256??'') ||
           !Number.isSafeInteger(row.downloadId) || row.downloadId<0)) return fail('EXPORT_RECEIPT_DENIED');
-      await input.auditStore.completeExport?.(auditId,{attemptId,receipt});
+      const completed = await input.auditStore.completeExport?.(auditId,{attemptId,receipt});
       const terminalSession=deepFreeze({...session,state:'terminal'});
       const terminalLaunch=deepFreeze({...launch,state:'terminal'});
       await input.sessionArea.set({ [sessionKey(sessionCapabilityId)]:terminalSession, [launchKey(auditId)]:terminalLaunch });
       const [confirmedSession,confirmedLaunch]=await Promise.all([getSession(sessionCapabilityId),getLaunch(auditId)]);
       if (!confirmedSession || confirmedSession.state!=='terminal' || !confirmedLaunch || confirmedLaunch.state!=='terminal') return fail('EXPORT_COMPLETE_DENIED');
+      await input.auditStore.emitTerminal?.(deepFreeze({ type: 'EXPORT_COMPLETE', auditId,
+        deleted: completed?.deleted === true, status: completed?.status === 'partial' ? 'partial' : 'complete',
+        exportRevision: launch.expectedRevision + 1 }));
       return deepFreeze({ok:true,auditId,state:'terminal'});
     });
   }
