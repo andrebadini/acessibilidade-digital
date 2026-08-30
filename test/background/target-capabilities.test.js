@@ -8,11 +8,15 @@ import {
   REVIEW_SURFACE,
   createTargetCapabilityAuthority,
   deriveTrustedExtensionContext,
+  readAttachedAuditCorrelationForRecovery,
+  readAuditSessionForWorker,
+  readClaimedAttachedAuditGrant,
+  readPreparedAttachedAuditFact,
   sessionCapabilityStorageKey,
   targetCapabilityStorageKey,
 } from '../../src/background/target-capabilities.js';
 
-const TARGET_KEYS = ['version', 'capabilityId', 'kind', 'tabId', 'windowId', 'documentId', 'initialUrlEvidence', 'initialUrlSessionDigest', 'createdBy', 'allowedIntent', 'issuer', 'issuedAt', 'expiresAt', 'state'];
+const TARGET_KEYS = ['version', 'capabilityId', 'kind', 'tabId', 'windowId', 'documentId', 'initialUrlEvidence', 'initialUrlSessionDigest', 'createdBy', 'allowedIntent', 'issuer', 'sessionCapabilityId', 'issuedAt', 'expiresAt', 'state'];
 const SESSION_KEYS = ['version', 'sessionCapabilityId', 'auditId', 'windowId', 'mode', 'targetBinding', 'consumers', 'intents', 'state', 'issuedAt', 'expiresAt'];
 const DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
 
@@ -25,6 +29,14 @@ function createStorageArea() {
     unsafeSet(key, value) { unsafeValues.set(key, value); },
     async get(key) {
       if (key === null) return { ...structuredClone(values), ...Object.fromEntries(unsafeValues) };
+      if (Array.isArray(key)) {
+        const result = {};
+        for (const entry of key) {
+          if (unsafeValues.has(entry)) result[entry] = unsafeValues.get(entry);
+          else if (Object.hasOwn(values, entry)) result[entry] = structuredClone(values[entry]);
+        }
+        return result;
+      }
       if (unsafeValues.has(key)) return { [key]: unsafeValues.get(key) };
       if (typeof key === 'string') return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {};
       throw new TypeError('test key');
@@ -158,6 +170,7 @@ test('prepares an exact one-use target and atomically persists its running sessi
   assert.deepEqual(Object.keys(target), TARGET_KEYS);
   assert.deepEqual(Object.keys(session), SESSION_KEYS);
   assert.equal(target.state, 'claimed');
+  assert.equal(target.sessionCapabilityId, result.sessionCapabilityId);
   assert.equal(session.state, 'running');
   assert.deepEqual(session.targetBinding, { kind: 'attached', tabId: 41, documentId: 'target-document-1', urlSessionDigest: DIGEST });
   assert.deepEqual(session.consumers, [
@@ -466,14 +479,198 @@ test('rehydrates a closed view-only session without resurrecting running intent'
   const { authority, sessionArea } = authorityFixture({ chromeApi });
   const result = await authority.rehydrateViewOnly({
     auditId: 'audit-view-1', windowId: 9, mode: 'attached',
-    targetBinding: { kind: 'attached', tabId: 41, documentId: 'historical-document', urlSessionDigest: DIGEST },
   });
   const key = sessionCapabilityStorageKey(result.sessionCapabilityId);
   const session = (await sessionArea.get(key))[key];
   assert.deepEqual(Object.keys(session), SESSION_KEYS);
   assert.equal(session.state, 'view-only');
+  assert.deepEqual(session.targetBinding, { kind: 'view-only' });
   assert.equal((await authority.authorizeSession({ sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-view-1', consumer: 'panel', intent: 'open-report', sender })).ok, true);
   assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-view-1', consumer: 'panel', intent: 'cancel', sender }), { ok: false, code: 'SESSION_DENIED' });
+});
+
+test('rehydrateViewOnly rejects caller-supplied target bindings and keeps the exact nine-method authority shape', async () => {
+  const { authority, sessionArea } = authorityFixture();
+  assert.deepEqual(Object.keys(authority), ['prepare', 'claimAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'rehydrateViewOnly']);
+  assert.deepEqual(await authority.rehydrateViewOnly({
+    auditId: 'audit-view-1', windowId: 9, mode: 'attached', targetBinding: { kind: 'view-only' },
+  }), { ok: false, code: 'SESSION_DENIED' });
+  assert.deepEqual(await sessionArea.get(null), {});
+});
+
+test('worker terminalization remains correlated after TTL expiry while UI authorization stays expired', async () => {
+  let currentTime = 1_788_000_000_000;
+  const sender = { id: 'test', documentId: 'panel-document-1', url: 'chrome-extension://test/src/panel/index.html' };
+  const chromeApi = { runtime: { id: 'test', async getContexts() { return [{ documentId: sender.documentId, documentUrl: sender.url, contextType: 'SIDE_PANEL', windowId: 9 }]; } } };
+  const { authority } = authorityFixture({ chromeApi, now: () => currentTime });
+  const prepared = await prepareAttached(authority);
+  const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+  currentTime += 30 * 60_000 + 1;
+  assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender }), { ok: false, code: 'SESSION_DENIED' });
+  assert.deepEqual(await authority.transitionAuditSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', nextState: 'result' }), {
+    ok: true, sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', state: 'result',
+  });
+  assert.equal((await authority.transitionAuditSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', nextState: 'revoked' })).ok, true);
+});
+
+test('reads an exact confirmed unexpired prepared attached fact without scanning storage', async () => {
+  let currentTime = 1_788_000_000_000;
+  const { authority, sessionArea } = authorityFixture({ now: () => currentTime });
+  const prepared = await prepareAttached(authority);
+  const requestedKeys = [];
+  const area = { ...sessionArea, async get(key) { requestedKeys.push(key); return sessionArea.get(key); } };
+  const fact = await readPreparedAttachedAuditFact({ sessionArea: area, capabilityId: prepared.capabilityId, epochNow: () => currentTime });
+  assert.deepEqual(fact, { version: 1, capabilityId: prepared.capabilityId, windowId: 9, issuedAt: currentTime, expiresAt: currentTime + 60_000 });
+  assert.equal(Object.isFrozen(fact), true);
+  assert.deepEqual(requestedKeys, [targetCapabilityStorageKey(prepared.capabilityId), targetCapabilityStorageKey(prepared.capabilityId)]);
+  currentTime += 60_000;
+  await assert.rejects(() => readPreparedAttachedAuditFact({ sessionArea, capabilityId: prepared.capabilityId, epochNow: () => currentTime }), /PREPARED_AUDIT_FACT_DENIED/u);
+});
+
+test('prepared fact rejects drift transplant and claimed state', async () => {
+  const { authority, sessionArea } = authorityFixture();
+  const first = await prepareAttached(authority);
+  const second = await prepareAttached(authority);
+  const firstKey = targetCapabilityStorageKey(first.capabilityId);
+  const secondKey = targetCapabilityStorageKey(second.capabilityId);
+  const secondRecord = (await sessionArea.get(secondKey))[secondKey];
+  sessionArea.unsafeSet(firstKey, secondRecord);
+  await assert.rejects(() => readPreparedAttachedAuditFact({ sessionArea, capabilityId: first.capabilityId, epochNow: () => 1_788_000_000_000 }), /PREPARED_AUDIT_FACT_DENIED/u);
+
+  const { authority: claimedAuthority, sessionArea: claimedArea } = authorityFixture();
+  const prepared = await prepareAttached(claimedAuthority);
+  await claimedAuthority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+  await assert.rejects(() => readPreparedAttachedAuditFact({ sessionArea: claimedArea, capabilityId: prepared.capabilityId, epochNow: () => 1_788_000_000_000 }), /PREPARED_AUDIT_FACT_DENIED/u);
+
+  let reads = 0;
+  const driftingArea = { async get(key) {
+    reads += 1;
+    return { [key]: { ...secondRecord, capabilityId: first.capabilityId, expiresAt: secondRecord.expiresAt + (reads === 1 ? 0 : 1) } };
+  } };
+  await assert.rejects(() => readPreparedAttachedAuditFact({ sessionArea: driftingArea, capabilityId: first.capabilityId, epochNow: () => 1_788_000_000_000 }), /PREPARED_AUDIT_FACT_DENIED/u);
+
+  const future = { ...secondRecord, capabilityId: first.capabilityId, issuedAt: 1_788_000_000_001, expiresAt: 1_788_000_060_001 };
+  sessionArea.unsafeSet(firstKey, future);
+  await assert.rejects(() => readPreparedAttachedAuditFact({ sessionArea, capabilityId: first.capabilityId, epochNow: () => 1_788_000_000_000 }), /PREPARED_AUDIT_FACT_DENIED/u);
+
+  const hostileEnvelopeArea = { async get(key) { return { [key]: { ...secondRecord, capabilityId: first.capabilityId }, extra: 'transplanted' }; } };
+  await assert.rejects(() => readPreparedAttachedAuditFact({ sessionArea: hostileEnvelopeArea, capabilityId: first.capabilityId, epochNow: () => 1_788_000_000_000 }), /PREPARED_AUDIT_FACT_DENIED/u);
+});
+
+test('reads a claimed attached grant from exact target and session locators with session-owned root times', async () => {
+  const currentTime = 1_788_000_000_000;
+  const { authority, sessionArea } = authorityFixture({ now: () => currentTime });
+  const prepared = await prepareAttached(authority);
+  const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+  const requestedKeys = [];
+  const area = { ...sessionArea, async get(keys) { requestedKeys.push(keys); return sessionArea.get(keys); } };
+  const grant = await readClaimedAttachedAuditGrant({ sessionArea: area, capabilityId: prepared.capabilityId, sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', epochNow: () => currentTime });
+  assert.deepEqual(grant, {
+    version: 1, capabilityId: prepared.capabilityId, auditId: 'audit-1', sessionCapabilityId: claimed.sessionCapabilityId,
+    windowId: 9, issuedAt: currentTime, expiresAt: currentTime + 30 * 60_000,
+    target: { kind: 'attached', tabId: 41, windowId: 9, documentId: 'target-document-1', initialUrlEvidence: 'https://example.test/path', initialUrlSessionDigest: DIGEST },
+  });
+  assert.equal(Object.isFrozen(grant), true);
+  assert.equal(Object.isFrozen(grant.target), true);
+  const expectedKeys = [targetCapabilityStorageKey(prepared.capabilityId), sessionCapabilityStorageKey(claimed.sessionCapabilityId)];
+  assert.deepEqual(requestedKeys, [expectedKeys, expectedKeys]);
+});
+
+test('claimed reader rejects session-ID transplant target-binding expiry and confirming-reread drift', async () => {
+  const currentTime = 1_788_000_000_000;
+  const { authority, sessionArea } = authorityFixture({ now: () => currentTime });
+  const prepared = await prepareAttached(authority);
+  const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+  const targetKey = targetCapabilityStorageKey(prepared.capabilityId);
+  const sessionKey = sessionCapabilityStorageKey(claimed.sessionCapabilityId);
+  const target = (await sessionArea.get(targetKey))[targetKey];
+  const session = (await sessionArea.get(sessionKey))[sessionKey];
+  const baseArgs = { sessionArea, capabilityId: prepared.capabilityId, sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', epochNow: () => currentTime };
+  for (const changedTarget of [{ ...target, sessionCapabilityId: '______________________' }, { ...target, expiresAt: currentTime }]) {
+    sessionArea.unsafeSet(targetKey, changedTarget);
+    await assert.rejects(() => readClaimedAttachedAuditGrant(baseArgs), /CLAIMED_AUDIT_GRANT_DENIED/u);
+  }
+  sessionArea.unsafeSet(targetKey, target);
+  sessionArea.unsafeSet(sessionKey, { ...session, targetBinding: { ...session.targetBinding, documentId: 'different-document' } });
+  await assert.rejects(() => readClaimedAttachedAuditGrant(baseArgs), /CLAIMED_AUDIT_GRANT_DENIED/u);
+  let reads = 0;
+  const driftingArea = { async get() {
+    reads += 1;
+    return { [targetKey]: { ...target, state: reads === 1 ? 'claimed' : 'invalidated' }, [sessionKey]: session };
+  } };
+  await assert.rejects(() => readClaimedAttachedAuditGrant({ ...baseArgs, sessionArea: driftingArea }), /CLAIMED_AUDIT_GRANT_DENIED/u);
+
+  sessionArea.unsafeSet(targetKey, { ...target, issuedAt: currentTime + 1, expiresAt: currentTime + 60_001 });
+  sessionArea.unsafeSet(sessionKey, session);
+  await assert.rejects(() => readClaimedAttachedAuditGrant(baseArgs), /CLAIMED_AUDIT_GRANT_DENIED/u);
+});
+
+test('reads a frozen worker session without inventing expiry validity or exposing consumers and intents', async () => {
+  const { authority, sessionArea } = authorityFixture();
+  const prepared = await prepareAttached(authority);
+  const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+  const session = await readAuditSessionForWorker({ sessionArea, sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1' });
+  assert.deepEqual(Object.keys(session), ['version', 'sessionCapabilityId', 'auditId', 'windowId', 'mode', 'targetBinding', 'state', 'issuedAt', 'expiresAt']);
+  assert.equal(Object.isFrozen(session), true);
+  assert.equal(Object.isFrozen(session.targetBinding), true);
+  await assert.rejects(() => readAuditSessionForWorker({ sessionArea, sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'other' }), /AUDIT_SESSION_READ_DENIED/u);
+});
+
+test('recovery reader accepts prepared claimed and invalidated targets without TTL authorization and keeps target times', async () => {
+  const currentTime = 1_788_000_000_000;
+  {
+    const { authority, sessionArea } = authorityFixture({ now: () => currentTime });
+    const prepared = await prepareAttached(authority);
+    const result = await readAttachedAuditCorrelationForRecovery({ sessionArea, capabilityId: prepared.capabilityId, auditId: 'audit-prepared' });
+    assert.deepEqual(result, {
+      version: 1, capabilityId: prepared.capabilityId, auditId: 'audit-prepared', windowId: 9,
+      targetState: 'prepared', sessionCapabilityId: null, sessionState: null,
+      issuedAt: currentTime, expiresAt: currentTime + 60_000,
+    });
+  }
+  {
+    const { authority, sessionArea } = authorityFixture({ now: () => currentTime });
+    const prepared = await prepareAttached(authority);
+    const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+    for (const state of ['claimed', 'invalidated']) {
+      const targetKey = targetCapabilityStorageKey(prepared.capabilityId);
+      const target = (await sessionArea.get(targetKey))[targetKey];
+      await sessionArea.set({ [targetKey]: { ...target, state } });
+      const result = await readAttachedAuditCorrelationForRecovery({ sessionArea, capabilityId: prepared.capabilityId, auditId: 'audit-1' });
+      assert.deepEqual(result, {
+        version: 1, capabilityId: prepared.capabilityId, auditId: 'audit-1', windowId: 9,
+        targetState: state, sessionCapabilityId: claimed.sessionCapabilityId, sessionState: 'running',
+        issuedAt: currentTime, expiresAt: currentTime + 60_000,
+      });
+    }
+  }
+});
+
+test('recovery reader rejects correlated session transplant and drift without scanning', async () => {
+  const { authority, sessionArea } = authorityFixture();
+  const prepared = await prepareAttached(authority);
+  const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+  const targetKey = targetCapabilityStorageKey(prepared.capabilityId);
+  const sessionKey = sessionCapabilityStorageKey(claimed.sessionCapabilityId);
+  const target = (await sessionArea.get(targetKey))[targetKey];
+  const session = (await sessionArea.get(sessionKey))[sessionKey];
+  sessionArea.unsafeSet(sessionKey, { ...session, auditId: 'other' });
+  await assert.rejects(() => readAttachedAuditCorrelationForRecovery({ sessionArea, capabilityId: prepared.capabilityId, auditId: 'audit-1' }), /AUDIT_RECOVERY_CORRELATION_DENIED/u);
+  sessionArea.unsafeSet(sessionKey, { ...session, mode: 'single', targetBinding: { kind: 'disposable', ownerId: prepared.capabilityId } });
+  await assert.rejects(() => readAttachedAuditCorrelationForRecovery({ sessionArea, capabilityId: prepared.capabilityId, auditId: 'audit-1' }), /AUDIT_RECOVERY_CORRELATION_DENIED/u);
+  let targetReads = 0;
+  const requested = [];
+  const driftingArea = { async get(key) {
+    requested.push(key);
+    if (key === targetKey) {
+      targetReads += 1;
+      return { [targetKey]: { ...target, state: targetReads === 1 ? 'claimed' : 'invalidated' } };
+    }
+    if (key === sessionKey) return { [sessionKey]: session };
+    throw new Error('scan denied');
+  } };
+  await assert.rejects(() => readAttachedAuditCorrelationForRecovery({ sessionArea: driftingArea, capabilityId: prepared.capabilityId, auditId: 'audit-1' }), /AUDIT_RECOVERY_CORRELATION_DENIED/u);
+  assert.equal(requested.includes(null), false);
 });
 
 test('rejects a stored target record with extra keys without broadening it', async () => {

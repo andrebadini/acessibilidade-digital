@@ -10,7 +10,7 @@ const SESSION_PREFIX = 'audita:audit-session-capability:v1:';
 const CAPABILITY_ID = /^[A-Za-z0-9_-]{22}$/u;
 const MODEL_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
-const TARGET_KEYS = ['version', 'capabilityId', 'kind', 'tabId', 'windowId', 'documentId', 'initialUrlEvidence', 'initialUrlSessionDigest', 'createdBy', 'allowedIntent', 'issuer', 'issuedAt', 'expiresAt', 'state'];
+const TARGET_KEYS = ['version', 'capabilityId', 'kind', 'tabId', 'windowId', 'documentId', 'initialUrlEvidence', 'initialUrlSessionDigest', 'createdBy', 'allowedIntent', 'issuer', 'sessionCapabilityId', 'issuedAt', 'expiresAt', 'state'];
 const SESSION_KEYS = ['version', 'sessionCapabilityId', 'auditId', 'windowId', 'mode', 'targetBinding', 'consumers', 'intents', 'state', 'issuedAt', 'expiresAt'];
 const PROOF_KEYS = ['tabId', 'windowId', 'documentId', 'urlSessionDigest'];
 const PREPARE_KEYS = ['kind', 'tabId', 'windowId', 'documentId', 'initialUrlEvidence', 'initialUrlSessionDigest', 'createdBy', 'allowedIntent', 'issuer'];
@@ -18,7 +18,7 @@ const EXTENSION_CLAIM_KEYS = ['capabilityId', 'auditId', 'mode', 'allowedIntent'
 const WORKER_CLAIM_KEYS = ['capabilityId', 'auditId', 'mode', 'allowedIntent', 'eventNonce', 'senderContext'];
 const AUTHORIZE_KEYS = ['sessionCapabilityId', 'auditId', 'consumer', 'intent', 'sender'];
 const TRANSITION_KEYS = ['sessionCapabilityId', 'auditId', 'nextState'];
-const REHYDRATE_KEYS = ['auditId', 'windowId', 'mode', 'targetBinding'];
+const REHYDRATE_KEYS = ['auditId', 'windowId', 'mode'];
 const CONSUMERS = deepFreeze([
   { name: 'panel', path: PANEL_SURFACE.path, contextType: PANEL_SURFACE.contextType },
   { name: 'review', path: REVIEW_SURFACE.path, contextType: REVIEW_SURFACE.contextType },
@@ -62,6 +62,117 @@ export async function deriveTrustedExtensionContext({ sender, chromeApi, surface
 
 export const targetCapabilityStorageKey = capabilityId => `${TARGET_PREFIX}${capabilityId}`;
 export const sessionCapabilityStorageKey = sessionCapabilityId => `${SESSION_PREFIX}${sessionCapabilityId}`;
+
+export async function readPreparedAttachedAuditFact(args) {
+  try {
+    const input = readDataRecord(args, ['sessionArea', 'capabilityId', 'epochNow']);
+    if (!input || typeof input.sessionArea?.get !== 'function' || !CAPABILITY_ID.test(input.capabilityId ?? '') ||
+      typeof input.epochNow !== 'function') throw new Error('denied');
+    const key = targetCapabilityStorageKey(input.capabilityId);
+    const first = parseTargetRecord(readExactStoredValue(await input.sessionArea.get(key), key));
+    const firstNow = readEpoch(input.epochNow);
+    const second = parseTargetRecord(readExactStoredValue(await input.sessionArea.get(key), key));
+    const secondNow = readEpoch(input.epochNow);
+    if (!first || !second || !sameGraph(first, second) || secondNow < firstNow ||
+      first.capabilityId !== input.capabilityId || first.kind !== 'attached' || first.allowedIntent !== 'start-audit' ||
+      first.state !== 'prepared' || first.sessionCapabilityId !== null || first.issuedAt > firstNow ||
+      first.expiresAt <= secondNow) throw new Error('denied');
+    return deepFreeze({
+      version: 1, capabilityId: first.capabilityId, windowId: first.windowId,
+      issuedAt: first.issuedAt, expiresAt: first.expiresAt,
+    });
+  } catch {
+    throw new Error('PREPARED_AUDIT_FACT_DENIED');
+  }
+}
+
+export async function readClaimedAttachedAuditGrant(args) {
+  try {
+    const input = readDataRecord(args, ['sessionArea', 'capabilityId', 'sessionCapabilityId', 'auditId', 'epochNow']);
+    if (!input || typeof input.sessionArea?.get !== 'function' || !CAPABILITY_ID.test(input.capabilityId ?? '') ||
+      !CAPABILITY_ID.test(input.sessionCapabilityId ?? '') || !MODEL_ID.test(input.auditId ?? '') ||
+      typeof input.epochNow !== 'function') throw new Error('denied');
+    const targetKey = targetCapabilityStorageKey(input.capabilityId);
+    const sessionKey = sessionCapabilityStorageKey(input.sessionCapabilityId);
+    const keys = [targetKey, sessionKey];
+    const firstEnvelope = await input.sessionArea.get(keys);
+    const firstValues = readExactStoredValues(firstEnvelope, keys);
+    const firstTarget = parseTargetRecord(firstValues?.[targetKey]);
+    const firstSession = parseSessionRecord(firstValues?.[sessionKey]);
+    const firstNow = readEpoch(input.epochNow);
+    const secondEnvelope = await input.sessionArea.get(keys);
+    const secondValues = readExactStoredValues(secondEnvelope, keys);
+    const secondTarget = parseTargetRecord(secondValues?.[targetKey]);
+    const secondSession = parseSessionRecord(secondValues?.[sessionKey]);
+    const secondNow = readEpoch(input.epochNow);
+    if (!firstTarget || !firstSession || !secondTarget || !secondSession ||
+      !sameGraph(firstTarget, secondTarget) || !sameGraph(firstSession, secondSession) || secondNow < firstNow ||
+      !validClaimedCorrelation(firstTarget, firstSession, input) || firstTarget.expiresAt <= secondNow ||
+      firstSession.expiresAt <= secondNow || firstTarget.issuedAt > firstNow || firstSession.issuedAt > firstNow) throw new Error('denied');
+    return deepFreeze({
+      version: 1,
+      capabilityId: firstTarget.capabilityId,
+      auditId: firstSession.auditId,
+      sessionCapabilityId: firstSession.sessionCapabilityId,
+      windowId: firstSession.windowId,
+      issuedAt: firstSession.issuedAt,
+      expiresAt: firstSession.expiresAt,
+      target: {
+        kind: 'attached', tabId: firstTarget.tabId, windowId: firstTarget.windowId,
+        documentId: firstTarget.documentId, initialUrlEvidence: firstTarget.initialUrlEvidence,
+        initialUrlSessionDigest: firstTarget.initialUrlSessionDigest,
+      },
+    });
+  } catch {
+    throw new Error('CLAIMED_AUDIT_GRANT_DENIED');
+  }
+}
+
+export async function readAuditSessionForWorker(args) {
+  try {
+    const input = readDataRecord(args, ['sessionArea', 'sessionCapabilityId', 'auditId']);
+    if (!input || typeof input.sessionArea?.get !== 'function' || !CAPABILITY_ID.test(input.sessionCapabilityId ?? '') ||
+      !MODEL_ID.test(input.auditId ?? '')) throw new Error('denied');
+    const key = sessionCapabilityStorageKey(input.sessionCapabilityId);
+    const session = parseSessionRecord(readExactStoredValue(await input.sessionArea.get(key), key));
+    if (!session || session.sessionCapabilityId !== input.sessionCapabilityId || session.auditId !== input.auditId) throw new Error('denied');
+    return copyWorkerSession(session);
+  } catch {
+    throw new Error('AUDIT_SESSION_READ_DENIED');
+  }
+}
+
+export async function readAttachedAuditCorrelationForRecovery(args) {
+  try {
+    const input = readDataRecord(args, ['sessionArea', 'capabilityId', 'auditId']);
+    if (!input || typeof input.sessionArea?.get !== 'function' || !CAPABILITY_ID.test(input.capabilityId ?? '') ||
+      !MODEL_ID.test(input.auditId ?? '')) throw new Error('denied');
+    const targetKey = targetCapabilityStorageKey(input.capabilityId);
+    const firstTarget = parseTargetRecord(readExactStoredValue(await input.sessionArea.get(targetKey), targetKey));
+    if (!validRecoveryTarget(firstTarget, input.capabilityId)) throw new Error('denied');
+    let firstSession = null;
+    let secondSession = null;
+    let sessionKey = null;
+    if (firstTarget.sessionCapabilityId !== null) {
+      sessionKey = sessionCapabilityStorageKey(firstTarget.sessionCapabilityId);
+      firstSession = parseSessionRecord(readExactStoredValue(await input.sessionArea.get(sessionKey), sessionKey));
+      if (!validRecoverySession(firstSession, firstTarget, input.auditId)) throw new Error('denied');
+    }
+    const secondTarget = parseTargetRecord(readExactStoredValue(await input.sessionArea.get(targetKey), targetKey));
+    if (!secondTarget || !sameGraph(firstTarget, secondTarget)) throw new Error('denied');
+    if (sessionKey !== null) {
+      secondSession = parseSessionRecord(readExactStoredValue(await input.sessionArea.get(sessionKey), sessionKey));
+      if (!secondSession || !sameGraph(firstSession, secondSession)) throw new Error('denied');
+    }
+    return deepFreeze({
+      version: 1, capabilityId: firstTarget.capabilityId, auditId: input.auditId, windowId: firstTarget.windowId,
+      targetState: firstTarget.state, sessionCapabilityId: firstTarget.sessionCapabilityId,
+      sessionState: firstSession?.state ?? null, issuedAt: firstTarget.issuedAt, expiresAt: firstTarget.expiresAt,
+    });
+  } catch {
+    throw new Error('AUDIT_RECOVERY_CORRELATION_DENIED');
+  }
+}
 
 export function createTargetCapabilityAuthority({
   chromeApi,
@@ -130,7 +241,7 @@ export function createTargetCapabilityAuthority({
       issuedAt,
       expiresAt: issuedAt + sessionTtlMs,
     });
-    const claimed = { ...target, state: 'claimed' };
+    const claimed = { ...target, sessionCapabilityId, state: 'claimed' };
     await sessionArea.set({
       [key]: claimed,
       [sessionCapabilityStorageKey(sessionCapabilityId)]: session,
@@ -176,7 +287,7 @@ export function createTargetCapabilityAuthority({
     const key = sessionCapabilityStorageKey(input.sessionCapabilityId);
     const session = parseSessionRecord(readStoredValue(await sessionArea.get(key), key));
     const allowed = session && session.sessionCapabilityId === input.sessionCapabilityId &&
-      session.auditId === input.auditId && session.expiresAt > readNow(now) &&
+      session.auditId === input.auditId &&
       ((session.state === 'running' && ['result', 'revoked'].includes(input.nextState)) ||
         (['result', 'view-only'].includes(session.state) && input.nextState === 'revoked'));
     if (!allowed) return transitionDenied();
@@ -228,9 +339,8 @@ export function createTargetCapabilityAuthority({
 
   const rehydrateViewOnly = args => serialize(async () => {
     const input = readDataRecord(args, REHYDRATE_KEYS);
-    const targetBinding = input && parseTargetBinding(input.targetBinding);
-    if (!input || !MODEL_ID.test(input.auditId ?? '') || !MODEL_ID.test(input.mode ?? '') ||
-      !Number.isSafeInteger(input.windowId) || !targetBinding) return sessionDenied();
+    if (!input || !MODEL_ID.test(input.auditId ?? '') || input.mode !== 'attached' ||
+      !safeChromeId(input.windowId)) return sessionDenied();
     const currentTime = readNow(now);
     const sessionCapabilityId = createCapabilityId(randomBytes);
     const session = createSessionRecord({
@@ -238,7 +348,7 @@ export function createTargetCapabilityAuthority({
       auditId: input.auditId,
       windowId: input.windowId,
       mode: input.mode,
-      targetBinding,
+      targetBinding: { kind: 'view-only' },
       state: 'view-only',
       issuedAt: currentTime,
       expiresAt: currentTime + sessionTtlMs,
@@ -282,6 +392,7 @@ function createTargetRecord(value) {
     createdBy: value.createdBy,
     allowedIntent: value.allowedIntent,
     issuer,
+    sessionCapabilityId: null,
     issuedAt: value.issuedAt,
     expiresAt: value.expiresAt,
     state: value.state,
@@ -314,7 +425,10 @@ function parseTargetRecord(value) {
     !validEvidenceUrl(record.initialUrlEvidence) || !DIGEST.test(record.initialUrlSessionDigest ?? '') ||
     !['user', 'audit'].includes(record.createdBy) || !['start-audit', 'start-persona'].includes(record.allowedIntent) ||
     !issuer || !safeTime(record.issuedAt) || !safeTime(record.expiresAt) || record.expiresAt <= record.issuedAt ||
-    !['prepared', 'claimed', 'invalidated'].includes(record.state)) return null;
+    !['prepared', 'claimed', 'invalidated'].includes(record.state) ||
+    (record.state === 'prepared' && record.sessionCapabilityId !== null) ||
+    (record.state === 'claimed' && !CAPABILITY_ID.test(record.sessionCapabilityId ?? '')) ||
+    (record.state === 'invalidated' && record.sessionCapabilityId !== null && !CAPABILITY_ID.test(record.sessionCapabilityId ?? ''))) return null;
   return { ...record, issuer };
 }
 
@@ -327,6 +441,8 @@ function parseSessionRecord(value) {
   if (record.version !== 1 || !CAPABILITY_ID.test(record.sessionCapabilityId ?? '') ||
     !MODEL_ID.test(record.auditId ?? '') || !safeChromeId(record.windowId) || !MODEL_ID.test(record.mode ?? '') ||
     !targetBinding || !consumers || !intents || !['running', 'result', 'view-only', 'revoked'].includes(record.state) ||
+    (targetBinding.kind === 'view-only' && !['view-only', 'revoked'].includes(record.state)) ||
+    (record.state === 'view-only' && targetBinding.kind !== 'view-only') ||
     !safeTime(record.issuedAt) || !safeTime(record.expiresAt) || record.expiresAt <= record.issuedAt) return null;
   return { ...record, targetBinding, consumers, intents };
 }
@@ -338,6 +454,10 @@ function parseTargetBinding(value) {
     const binding = readDataRecord(value, ['kind', 'tabId', 'documentId', 'urlSessionDigest']);
     return binding && safeChromeId(binding.tabId) && validDocumentId(binding.documentId) &&
       DIGEST.test(binding.urlSessionDigest ?? '') ? binding : null;
+  }
+  if (kind.value === 'view-only') {
+    const binding = readDataRecord(value, ['kind']);
+    return binding?.kind === 'view-only' ? binding : null;
   }
   const binding = readDataRecord(value, ['kind', 'ownerId']);
   return binding && binding.kind === 'disposable' && MODEL_ID.test(binding.ownerId ?? '') ? binding : null;
@@ -393,6 +513,54 @@ function parseIntents(value) {
     panel: { running: ['cancel'], result: ['open-report'], 'view-only': ['open-report'] },
     review: { running: [], result: ['export'], 'view-only': ['export'] },
   };
+}
+function validClaimedCorrelation(target, session, input) {
+  return target.capabilityId === input.capabilityId && target.kind === 'attached' && target.allowedIntent === 'start-audit' &&
+    target.state === 'claimed' && target.sessionCapabilityId === input.sessionCapabilityId &&
+    session.sessionCapabilityId === input.sessionCapabilityId && session.auditId === input.auditId &&
+    session.windowId === target.windowId && session.mode === 'attached' && session.state === 'running' &&
+    session.targetBinding.kind === 'attached' && session.targetBinding.tabId === target.tabId &&
+    session.targetBinding.documentId === target.documentId &&
+    session.targetBinding.urlSessionDigest === target.initialUrlSessionDigest;
+}
+function validRecoveryTarget(target, capabilityId) {
+  return Boolean(target && target.capabilityId === capabilityId && target.kind === 'attached' &&
+    target.allowedIntent === 'start-audit' && ['prepared', 'claimed', 'invalidated'].includes(target.state));
+}
+function validRecoverySession(session, target, auditId) {
+  if (!session || session.sessionCapabilityId !== target.sessionCapabilityId || session.auditId !== auditId ||
+    session.windowId !== target.windowId || session.mode !== 'attached' ||
+    !['running', 'result', 'view-only', 'revoked'].includes(session.state)) return false;
+  if (session.targetBinding.kind === 'view-only') return ['view-only', 'revoked'].includes(session.state);
+  return session.targetBinding.kind === 'attached' && session.targetBinding.tabId === target.tabId &&
+    session.targetBinding.documentId === target.documentId &&
+    session.targetBinding.urlSessionDigest === target.initialUrlSessionDigest;
+}
+function copyWorkerSession(session) {
+  return deepFreeze({
+    version: 1,
+    sessionCapabilityId: session.sessionCapabilityId,
+    auditId: session.auditId,
+    windowId: session.windowId,
+    mode: session.mode,
+    targetBinding: structuredClone(session.targetBinding),
+    state: session.state,
+    issuedAt: session.issuedAt,
+    expiresAt: session.expiresAt,
+  });
+}
+function readEpoch(epochNow) {
+  const value = epochNow();
+  if (!safeTime(value)) throw new TypeError('CAPABILITY_TIME_INVALID');
+  return value;
+}
+function sameGraph(first, second) {
+  if (Object.is(first, second)) return true;
+  if (first === null || second === null || typeof first !== 'object' || typeof second !== 'object' ||
+    Array.isArray(first) !== Array.isArray(second)) return false;
+  const firstKeys = Reflect.ownKeys(first);
+  const secondKeys = Reflect.ownKeys(second);
+  return firstKeys.length === secondKeys.length && firstKeys.every(key => secondKeys.includes(key) && sameGraph(first[key], second[key]));
 }
 function validDocumentId(value) { return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,240}$/u.test(value); }
 function validEvidenceUrl(value) {
@@ -488,6 +656,27 @@ function readDataArray(value) {
 function readStoredValue(envelope, key) {
   const descriptor = readDataProperty(envelope, key);
   return descriptor.found ? descriptor.value : undefined;
+}
+function readExactStoredValue(envelope, key) {
+  return readExactStoredValues(envelope, [key])?.[key];
+}
+function readExactStoredValues(envelope, keys) {
+  try {
+    if (envelope === null || typeof envelope !== 'object' || Array.isArray(envelope)) return null;
+    const prototype = Object.getPrototypeOf(envelope);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const ownKeys = Reflect.ownKeys(envelope);
+    if (ownKeys.length !== keys.length || ownKeys.some(key => typeof key !== 'string' || !keys.includes(key))) return null;
+    const values = {};
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(envelope, key);
+      if (!descriptor || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) return null;
+      values[key] = descriptor.value;
+    }
+    return values;
+  } catch {
+    return null;
+  }
 }
 function readStorageEntries(value) {
   try {
