@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createPersonaLeaseStore } from '../../src/background/persona-lease-store.js';
+import { createFakeLockManager } from './fake-lock-manager.js';
 
 const REGISTRY_KEY = 'audita:persona-leases:v1';
+const STORE_LOCK_NAME = 'audita:persona-lease-store:v1';
 const TTL_MS = 30 * 60_000;
 const target = Object.freeze({
   tabId: 7,
@@ -63,14 +65,30 @@ function createDeterministicRandom() {
   return randomBytes;
 }
 
-function createFixture({ initial = {}, clock = createClock(), randomBytes = createDeterministicRandom() } = {}) {
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+}
+
+function createFixture({
+  initial = {},
+  clock = createClock(),
+  randomBytes = createDeterministicRandom(),
+  lockManager = createFakeLockManager(),
+} = {}) {
   const sessionArea = createSessionArea(initial);
   const store = createPersonaLeaseStore({
     sessionArea,
     now: () => clock.value,
     randomBytes,
+    lockManager,
   });
-  return { store, sessionArea, clock, randomBytes };
+  return { store, sessionArea, clock, randomBytes, lockManager };
 }
 
 function capacityLeaseId(index) {
@@ -235,7 +253,12 @@ test('a full registry without revoked tombstones rejects a claim without writing
 test('fails closed on a CSPRNG identifier collision without replacing either owner', async () => {
   const sessionArea = createSessionArea();
   const randomBytes = length => new Uint8Array(length).fill(9);
-  const store = createPersonaLeaseStore({ sessionArea, now: () => 1_000, randomBytes });
+  const store = createPersonaLeaseStore({
+    sessionArea,
+    lockManager: createFakeLockManager(),
+    now: () => 1_000,
+    randomBytes,
+  });
   const first = await store.claimPrepared({ target, consumer: panelA, mode: 'reader' });
   await assert.rejects(
     () => store.claimPrepared({ target: otherTarget, consumer: panelA, mode: 'motor' }),
@@ -788,6 +811,7 @@ test('rejects malformed persisted registries without repair or accessor reads', 
   sessionArea.get = async () => ({ [REGISTRY_KEY]: hostile });
   const store = createPersonaLeaseStore({
     sessionArea,
+    lockManager: createFakeLockManager(),
     now: () => 1_000,
     randomBytes: createDeterministicRandom(),
   });
@@ -839,14 +863,17 @@ test('rejects persisted leases whose expiry is not the exact safe TTL derivation
 test('reopens from the one persisted registry and preserves exact owner identity', async () => {
   const clock = createClock();
   const sessionArea = createSessionArea();
+  const lockManager = createFakeLockManager();
   const first = createPersonaLeaseStore({
     sessionArea,
+    lockManager,
     now: () => clock.value,
     randomBytes: createDeterministicRandom(),
   });
   const claimed = await first.claimPrepared({ target, consumer: panelA, mode: 'reader' });
   const reopened = createPersonaLeaseStore({
     sessionArea,
+    lockManager,
     now: () => clock.value,
     randomBytes: createDeterministicRandom(),
   });
@@ -856,12 +883,130 @@ test('reopens from the one persisted registry and preserves exact owner identity
   assert.deepEqual(Object.keys(sessionArea.inspect()), [REGISTRY_KEY]);
 });
 
+test('a shared exclusive Web Lock prevents a stale finalize from erasing a newer owner from another store', async () => {
+  const clock = createClock();
+  const sessionArea = createSessionArea();
+  const lockManager = createFakeLockManager();
+  const first = createPersonaLeaseStore({
+    sessionArea,
+    lockManager,
+    now: () => clock.value,
+    randomBytes: createDeterministicRandom(),
+  });
+  const second = createPersonaLeaseStore({
+    sessionArea,
+    lockManager,
+    now: () => clock.value,
+    randomBytes: createDeterministicRandom(),
+  });
+  await prepareAndActivate(first);
+  const invalid = sessionArea.inspect()[REGISTRY_KEY];
+  invalid.ownerByTarget = Object.create(null);
+  sessionArea.replace({ [REGISTRY_KEY]: invalid });
+  const preparedFirst = await first.prepareInvalidRegistryRecovery();
+  const preparedSecond = await second.prepareInvalidRegistryRecovery();
+  assert.equal(preparedFirst.ok, true);
+  assert.equal(preparedSecond.ok, true);
+
+  const firstResetEntered = deferred();
+  const releaseFirstReset = deferred();
+  const originalSet = sessionArea.set;
+  let blockFirstReset = true;
+  sessionArea.set = async entries => {
+    const registry = entries[REGISTRY_KEY];
+    const isReset = registry && Object.keys(registry.leases).length === 0 &&
+      Object.keys(registry.ownerByTarget).length === 0;
+    if (blockFirstReset && isReset) {
+      blockFirstReset = false;
+      firstResetEntered.resolve();
+      await releaseFirstReset.promise;
+    }
+    return originalSet.call(sessionArea, entries);
+  };
+
+  const finalizedFirst = first.finalizeInvalidRegistryRecovery(preparedFirst.token);
+  await firstResetEntered.promise;
+  const ownerCreated = deferred();
+  const competing = (async () => {
+    const finalized = await second.finalizeInvalidRegistryRecovery(preparedSecond.token);
+    const claimed = await second.claimPrepared({ target, consumer: panelA, mode: 'reader' });
+    assert.equal(claimed.ok, true);
+    const activated = await second.activate({
+      leaseId: claimed.lease.leaseId,
+      expectedRevision: claimed.lease.revision,
+    });
+    assert.equal(activated.ok, true);
+    ownerCreated.resolve();
+    return finalized;
+  })();
+  const overtook = await Promise.race([
+    ownerCreated.promise.then(() => true),
+    new Promise(resolve => setImmediate(() => resolve(false))),
+  ]);
+  releaseFirstReset.resolve();
+
+  assert.equal((await finalizedFirst).ok, true);
+  const competingFinalize = await competing;
+  assert.equal(overtook, false);
+  assert.deepEqual(competingFinalize, { ok: false, code: 'PERSONA_STATE_FAILED' });
+  assert.equal((await second.findOwner(target)).state, 'active');
+});
+
+test('every store operation requests and validates the one exact exclusive Web Lock', async () => {
+  const { store, lockManager } = createFixture();
+  await store.snapshot();
+  assert.deepEqual(lockManager.calls, [{
+    name: STORE_LOCK_NAME,
+    options: { mode: 'exclusive' },
+  }]);
+
+  const invalidGrants = [
+    null,
+    { name: 'audita:other-lock', mode: 'exclusive' },
+    { name: STORE_LOCK_NAME, mode: 'shared' },
+  ];
+  for (const granted of invalidGrants) {
+    const invalid = createPersonaLeaseStore({
+      sessionArea: createSessionArea(),
+      lockManager: { request: (_name, _options, callback) => callback(granted) },
+      now: () => 1_000,
+      randomBytes: createDeterministicRandom(),
+    });
+    await assert.rejects(() => invalid.snapshot(), /PERSONA_STORE_LOCK_INVALID/u);
+  }
+});
+
+test('a rejected Web Lock request does not poison later serialized store operations', async () => {
+  const shared = createFakeLockManager();
+  let rejectFirst = true;
+  const lockManager = {
+    request(...args) {
+      if (rejectFirst) {
+        rejectFirst = false;
+        return Promise.reject(new Error('web lock unavailable'));
+      }
+      return shared.request(...args);
+    },
+  };
+  const store = createPersonaLeaseStore({
+    sessionArea: createSessionArea(),
+    lockManager,
+    now: () => 1_000,
+    randomBytes: createDeterministicRandom(),
+  });
+
+  await assert.rejects(() => store.snapshot(), /web lock unavailable/u);
+  assert.deepEqual(await store.snapshot(), { version: 1, leases: {}, ownerByTarget: {} });
+});
+
 test('validates constructor, exact public inputs, clock and CSPRNG boundaries', async () => {
   const sessionArea = createSessionArea();
   for (const args of [
     {},
-    { sessionArea, now: null, randomBytes: createDeterministicRandom() },
-    { sessionArea: {}, now: () => 0, randomBytes: createDeterministicRandom() },
+    { sessionArea, now: () => 0, randomBytes: createDeterministicRandom() },
+    { sessionArea, lockManager: {}, now: () => 0, randomBytes: createDeterministicRandom() },
+    { sessionArea, lockManager: createFakeLockManager(), now: null, randomBytes: createDeterministicRandom() },
+    { sessionArea: {}, lockManager: createFakeLockManager(), now: () => 0, randomBytes: createDeterministicRandom() },
   ]) assert.throws(() => createPersonaLeaseStore(args), /PERSONA_LEASE_STORE_INVALID/u);
 
   const { store } = createFixture();
@@ -875,6 +1020,7 @@ test('validates constructor, exact public inputs, clock and CSPRNG boundaries', 
 
   const badClock = createPersonaLeaseStore({
     sessionArea: createSessionArea(),
+    lockManager: createFakeLockManager(),
     now: () => Date.now() + 0.5,
     randomBytes: createDeterministicRandom(),
   });
@@ -890,6 +1036,7 @@ test('validates constructor, exact public inputs, clock and CSPRNG boundaries', 
   ]) {
     const invalidRandom = createPersonaLeaseStore({
       sessionArea: createSessionArea(),
+      lockManager: createFakeLockManager(),
       now: () => 1_000,
       randomBytes,
     });
@@ -911,6 +1058,7 @@ test('continues serial mutations after a rejected persistence attempt', async ()
   };
   const store = createPersonaLeaseStore({
     sessionArea,
+    lockManager: createFakeLockManager(),
     now: () => 1_000,
     randomBytes: createDeterministicRandom(),
   });

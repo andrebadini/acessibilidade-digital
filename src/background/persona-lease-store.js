@@ -1,4 +1,5 @@
 const REGISTRY_KEY = 'audita:persona-leases:v1';
+const STORE_LOCK_NAME = 'audita:persona-lease-store:v1';
 const MODES = new Set(['reader', 'achromatopsia', 'motor']);
 const STATES = new Set(['prepared', 'active', 'stopping', 'revoked']);
 const REVOKE_REASONS = new Set([
@@ -249,6 +250,123 @@ function assertExactRegistry(value) {
   return normalized;
 }
 
+function fingerprintData(value) {
+  const seen = new Set();
+  const visit = (current, depth) => {
+    if (depth > 32) throw new TypeError();
+    if (current === null) return 'null';
+    if (typeof current === 'string') return `string:${JSON.stringify(current)}`;
+    if (typeof current === 'boolean') return `boolean:${current}`;
+    if (typeof current === 'undefined') return 'undefined';
+    if (typeof current === 'number') {
+      if (Number.isNaN(current)) return 'number:NaN';
+      if (current === Infinity) return 'number:+Infinity';
+      if (current === -Infinity) return 'number:-Infinity';
+      if (Object.is(current, -0)) return 'number:-0';
+      return `number:${current}`;
+    }
+    if (typeof current !== 'object' || seen.has(current)) throw new TypeError();
+    const prototype = Object.getPrototypeOf(current);
+    const type = Array.isArray(current)
+      ? 'array'
+      : prototype === null
+        ? 'null-record'
+        : prototype === Object.prototype
+          ? 'record'
+          : null;
+    if (!type) throw new TypeError();
+    seen.add(current);
+    const keys = Reflect.ownKeys(current);
+    if (keys.some(key => typeof key !== 'string')) throw new TypeError();
+    keys.sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+    const entries = keys.map(key => {
+      const descriptor = Object.getOwnPropertyDescriptor(current, key);
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new TypeError();
+      return `${JSON.stringify(key)}=${visit(descriptor.value, depth + 1)}`;
+    });
+    seen.delete(current);
+    return `${type}:{${entries.join(',')}}`;
+  };
+  try { return visit(value, 0); }
+  catch { return null; }
+}
+
+function targetFromOwnerKey(key, reference) {
+  if (typeof key !== 'string') return null;
+  const separator = key.indexOf('\u0000');
+  if (separator <= 0 || key.indexOf('\u0000', separator + 1) !== -1) return null;
+  const tabText = key.slice(0, separator);
+  if (!/^[1-9][0-9]*$/u.test(tabText)) return null;
+  const tabId = Number(tabText);
+  const documentId = key.slice(separator + 1);
+  if (!safeChromeId(tabId, { positive: true }) || String(tabId) !== tabText ||
+    !boundedText(documentId, MAX_DOCUMENT_ID_LENGTH)) return null;
+  return {
+    tabId,
+    windowId: reference.windowId,
+    documentId,
+    urlSessionDigest: reference.urlSessionDigest,
+  };
+}
+
+function targetsFromInvalidRegistryEnvelope(envelope) {
+  try {
+    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) return null;
+    const prototype = Object.getPrototypeOf(envelope);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const envelopeKeys = Reflect.ownKeys(envelope);
+    if (envelopeKeys.length !== 1 || envelopeKeys[0] !== REGISTRY_KEY) return null;
+    const registryDescriptor = Object.getOwnPropertyDescriptor(envelope, REGISTRY_KEY);
+    if (!registryDescriptor?.enumerable || !Object.hasOwn(registryDescriptor, 'value')) return null;
+    const registry = exactRecord(registryDescriptor.value, REGISTRY_KEYS);
+    if (!registry || registry.version !== 1) return null;
+    try {
+      assertExactRegistry(registryDescriptor.value);
+      return null;
+    } catch { /* somente o registro estritamente inválido é recuperável aqui */ }
+
+    const leaseEntries = dataEntries(registry.leases);
+    const ownerEntries = dataEntries(registry.ownerByTarget);
+    if (!leaseEntries || !ownerEntries) return null;
+    const targetByLeaseId = new Map();
+    const targets = new Map();
+    const addTarget = target => {
+      targets.set(`${target.tabId}\u0000${target.windowId}\u0000${target.documentId}\u0000${target.urlSessionDigest}`, target);
+    };
+    let resetAllowed = true;
+    for (const [leaseId, rawLease] of leaseEntries) {
+      const lease = exactRecord(rawLease, LEASE_KEYS);
+      if (!lease) {
+        resetAllowed = false;
+        continue;
+      }
+      let target;
+      try { target = assertTarget(lease.target); }
+      catch {
+        resetAllowed = false;
+        continue;
+      }
+      targetByLeaseId.set(leaseId, target);
+      addTarget(target);
+      if (leaseId !== lease.leaseId) resetAllowed = false;
+    }
+    for (const [key, leaseId] of ownerEntries) {
+      const leaseTarget = typeof leaseId === 'string' ? targetByLeaseId.get(leaseId) : null;
+      if (!leaseTarget) {
+        resetAllowed = false;
+        continue;
+      }
+      if (key === targetKey(leaseTarget)) continue;
+      resetAllowed = false;
+      const derived = targetFromOwnerKey(key, leaseTarget);
+      if (derived) addTarget(derived);
+    }
+    return { targets: [...targets.values()], resetAllowed };
+  } catch {
+    return null;
+  }
+}
+
 function assertTransition(lease, { states, expectedRevision, consumer, allowExpired = false, now }) {
   if (!lease) return 'PERSONA_NOT_FOUND';
   if (!states.includes(lease.state)) return 'PERSONA_TRANSITION_INVALID';
@@ -323,15 +441,24 @@ function failure(code) {
   return Object.freeze({ ok: false, code });
 }
 
-export function createPersonaLeaseStore({ sessionArea, now, randomBytes } = {}) {
+export function createPersonaLeaseStore({ sessionArea, lockManager, now, randomBytes } = {}) {
   if (!sessionArea || typeof sessionArea.get !== 'function' || typeof sessionArea.set !== 'function' ||
+    !lockManager || typeof lockManager.request !== 'function' ||
     typeof now !== 'function' || typeof randomBytes !== 'function') {
     throw new TypeError('PERSONA_LEASE_STORE_INVALID');
   }
 
+  const requestLock = lockManager.request.bind(lockManager);
   let tail = Promise.resolve();
+  const invalidRecoveryTokens = new WeakMap();
   const serialize = operation => {
-    const pending = tail.then(operation, operation);
+    const locked = () => requestLock(STORE_LOCK_NAME, { mode: 'exclusive' }, lock => {
+      if (!lock || typeof lock !== 'object' || lock.name !== STORE_LOCK_NAME || lock.mode !== 'exclusive') {
+        throw new Error('PERSONA_STORE_LOCK_INVALID');
+      }
+      return operation();
+    });
+    const pending = tail.then(locked, locked);
     tail = pending.then(() => undefined, () => undefined);
     return pending;
   };
@@ -614,7 +741,42 @@ export function createPersonaLeaseStore({ sessionArea, now, randomBytes } = {}) 
     const registry = await loadRegistry();
     const actionAt = readNow();
     return cloneFrozen(Object.values(registry.leases).filter(lease =>
-      lease.state !== 'revoked' && lease.expiresAt <= actionAt));
+      lease.state !== 'revoked' && (lease.createdAt > actionAt ||
+        lease.lastExplicitActionAt > actionAt || lease.expiresAt <= actionAt)));
+  });
+
+  const prepareInvalidRegistryRecovery = () => serialize(async () => {
+    const envelope = await sessionArea.get(REGISTRY_KEY);
+    const recovery = targetsFromInvalidRegistryEnvelope(envelope);
+    if (!recovery) return failure('PERSONA_STATE_FAILED');
+    const fingerprint = fingerprintData(envelope);
+    if (fingerprint === null) return failure('PERSONA_STATE_FAILED');
+    const token = Object.freeze(Object.create(null));
+    invalidRecoveryTokens.set(token, {
+      fingerprint,
+      resetAllowed: recovery.resetAllowed,
+      processed: recovery.targets.length,
+    });
+    return Object.freeze({
+      ok: true,
+      token,
+      targets: cloneFrozen(recovery.targets),
+      resetAllowed: recovery.resetAllowed,
+    });
+  });
+
+  const finalizeInvalidRegistryRecovery = token => serialize(async () => {
+    if (!token || typeof token !== 'object') throw new TypeError('PERSONA_INPUT_INVALID');
+    const prepared = invalidRecoveryTokens.get(token);
+    if (!prepared) return failure('PERSONA_STATE_FAILED');
+    invalidRecoveryTokens.delete(token);
+    if (!prepared.resetAllowed) return failure('PERSONA_STATE_FAILED');
+    const currentFingerprint = fingerprintData(await sessionArea.get(REGISTRY_KEY));
+    if (currentFingerprint === null || currentFingerprint !== prepared.fingerprint) {
+      return failure('PERSONA_STATE_FAILED');
+    }
+    await persist(newRegistry());
+    return Object.freeze({ ok: true, state: 'reset', processed: prepared.processed });
   });
 
   return Object.freeze({
@@ -631,5 +793,7 @@ export function createPersonaLeaseStore({ sessionArea, now, randomBytes } = {}) 
     snapshot,
     listRecoverable,
     listExpired,
+    prepareInvalidRegistryRecovery,
+    finalizeInvalidRegistryRecovery,
   });
 }
