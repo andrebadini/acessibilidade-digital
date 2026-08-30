@@ -246,18 +246,93 @@ test('validates and copies only the closed legacy latest projection', async () =
   assert.equal(Object.isFrozen(response.state.statusCounts), true);
 });
 
-test('fails closed on malformed latest projections and non-parser dispatch envelopes', async () => {
+test('projects canonical Task 5, export and batch latest rows without internal store fields', async () => {
+  const rows = [
+    [{
+      version: 1, auditId: 'audit-running', status: 'running', percent: 0,
+      message: 'Preparando a auditoria.', failureCode: null, modelRevision: null,
+      updatedAt: '2026-08-29T12:00:00.000Z',
+    }, {
+      auditId: 'audit-running', status: 'running', percent: 0,
+      message: 'Preparando a auditoria.',
+    }],
+    [{
+      auditId: 'audit-export', status: 'complete', exportStatus: 'queued',
+      exportRevision: 3, exportAttempt: 2, leaseOwnerId: OWNER_ID,
+      exportQueuedAt: '2026-08-29T12:00:00.000Z',
+      deliveryReceipt: { status: 'pending', formats: [], limitations: [] },
+    }, {
+      auditId: 'audit-export', status: 'complete', exportStatus: 'queued',
+      exportRevision: 3, exportAttempt: 2, leaseOwnerId: OWNER_ID,
+    }],
+    [{
+      auditId: 'audit-batch', mode: 'batch', status: 'partial', total: 3, pageNumber: 2,
+      statusCounts: { cancelled: 0, complete: 1, failed: 1, partial: 1 },
+      pages: [{ privateUrl: 'https://secret.test/' }],
+    }, {
+      auditId: 'audit-batch', mode: 'batch', status: 'partial', total: 3, pageNumber: 2,
+      statusCounts: { cancelled: 0, complete: 1, failed: 1, partial: 1 },
+    }],
+  ];
+  for (const [state, projected] of rows) {
+    const surface = senderFixture('/src/panel/index.html', '', 'SIDE_PANEL');
+    const { handler, envelope, sender } = createHandler({ type: 'GET_LAST_AUDIT' }, surface, {
+      readLegacyLastAudit: async () => ({ ok: true, state }),
+    });
+    assert.deepEqual(await handler.dispatch({ envelope, sender }), { ok: true, state: projected });
+  }
+});
+
+test('omits invalid optional latest fields independently without invoking getters', async () => {
+  let getterCalls = 0;
+  const state = {
+    auditId: AUDIT_ID, status: 'complete', mode: 'url', percent: Number.POSITIVE_INFINITY,
+    reviewUrl: 'https://secret.test/private', exportStatus: 'unknown', exportRevision: -1,
+    exportAttempt: 0, leaseOwnerId: 'owner with spaces', total: 99, pageNumber: 100,
+    statusCounts: { cancelled: 0, complete: 99, failed: 0, partial: 0 },
+  };
+  Object.defineProperty(state, 'message', {
+    enumerable: true,
+    get() { getterCalls += 1; return 'native secret'; },
+  });
+  Object.defineProperty(state, 'privateBearer', {
+    enumerable: true,
+    get() { getterCalls += 1; return 'S'.repeat(22); },
+  });
+  const surface = senderFixture('/src/panel/index.html', '', 'SIDE_PANEL');
+  const { handler, envelope, sender } = createHandler({ type: 'GET_LAST_AUDIT' }, surface, {
+    readLegacyLastAudit: async () => ({ ok: true, state }),
+  });
+  assert.deepEqual(await handler.dispatch({ envelope, sender }), {
+    ok: true, state: { auditId: AUDIT_ID, status: 'complete' },
+  });
+  assert.equal(getterCalls, 0);
+});
+
+test('returns null for invalid required latest data and fixed failure for hostile roots', async () => {
   const surface = senderFixture('/src/panel/index.html', '', 'SIDE_PANEL');
   for (const state of [
-    { auditId: AUDIT_ID, status: 'complete', secret: 'raw store data' },
-    { auditId: AUDIT_ID, status: 'complete', reviewUrl: 'https://secret.test/private' },
-    { auditId: AUDIT_ID, status: 'complete', mode: 'batch', total: 2, pageNumber: 3 },
+    42,
+    [],
+    Object.assign(Object.create({ inherited: true }), { auditId: AUDIT_ID, status: 'complete' }),
+    { auditId: '', status: 'complete', secret: 'raw store data' },
+    { auditId: AUDIT_ID, status: 'unknown' },
   ]) {
     const { handler, envelope, sender } = createHandler({ type: 'GET_LAST_AUDIT' }, surface, {
       readLegacyLastAudit: async () => ({ ok: true, state }),
     });
-    assert.deepEqual(await handler.dispatch({ envelope, sender }), { ok: false, code: 'COMPATIBILITY_FAILED' });
+    assert.deepEqual(await handler.dispatch({ envelope, sender }), { ok: true, state: null });
   }
+  const hostile = new Proxy({}, {
+    getPrototypeOf() { throw new Error('native proxy secret'); },
+  });
+  const proxied = createHandler({ type: 'GET_LAST_AUDIT' }, surface, {
+    readLegacyLastAudit: async () => ({ ok: true, state: hostile }),
+  });
+  const fixed = await proxied.handler.dispatch({ envelope: proxied.envelope, sender: proxied.sender });
+  assert.deepEqual(fixed, { ok: false, code: 'COMPATIBILITY_FAILED' });
+  assert.doesNotMatch(JSON.stringify(fixed), /native|proxy|secret/u);
+
   const { handler, sender } = createHandler({ type: 'GET_LAST_AUDIT' }, surface);
   assert.deepEqual(await handler.dispatch({ envelope: { type: 'GET_LAST_AUDIT' }, sender }), { ok: false, code: 'COMPATIBILITY_DENIED' });
 });

@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { PANEL_PORT_NAME } from '../../src/background/panel-port.js';
 import { registerServiceWorker } from '../../src/background/service-worker.js';
+import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 
 const CAPABILITY = 'C'.repeat(22);
 
@@ -50,7 +52,7 @@ function runtimeValue() {
   return Object.freeze({ authority: Object.freeze({}), auditStarter: Object.freeze({}), chromeAdapter: Object.freeze({}) });
 }
 
-function defaultGraphFixture(initialSessionValues = null) {
+function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
   const { chromeApi, events } = chromeFixture();
   const sessionValues = Object.create(null);
   const contexts = new Map();
@@ -62,13 +64,20 @@ function defaultGraphFixture(initialSessionValues = null) {
   let leaseResult = { acquired: true, exportAttempt: 1 };
   let deletedAll = 0;
   let deleteError = null;
+  let cleanupError = null;
+  let tabCreator = (_options, callback) => callback?.({ id: 77 });
+  let denySessionScan = false;
   const deleted = [];
+  const storeCalls = [];
+  const sessionGetCalls = [];
 
   if (initialSessionValues) Object.assign(sessionValues, structuredClone(initialSessionValues));
 
   chromeApi.storage.session = {
     async setAccessLevel() {},
     async get(key) {
+      sessionGetCalls.push(key);
+      if (key === null && denySessionScan) throw new Error('session-wide scan denied');
       if (key === null) return structuredClone(sessionValues);
       return Object.hasOwn(sessionValues, key) ? { [key]: structuredClone(sessionValues[key]) } : {};
     },
@@ -92,13 +101,18 @@ function defaultGraphFixture(initialSessionValues = null) {
   };
   chromeApi.tabs.create = (options, callback) => {
     createdTabs.push(structuredClone(options));
-    callback?.({ id: 77 });
+    return tabCreator(options, callback);
   };
   chromeApi.tabs.query = async () => [];
 
-  const auditStore = {
-    async getLatest() { return structuredClone(latest); },
+  const fixtureAuditStore = {
+    async getLatest() { storeCalls.push(['getLatest']); return structuredClone(latest); },
     async setLatest(value) { latest = structuredClone(value); },
+    async cleanupExpiredAudits(options) {
+      storeCalls.push(['cleanupExpiredAudits', structuredClone(options)]);
+      if (cleanupError) throw cleanupError;
+      return { scanned: 0, deleted: 0, remaining: 0, blocked: 0 };
+    },
     async getAuditSnapshot(auditId) {
       const value = snapshots.get(auditId);
       return value ? { ...value } : { model: undefined, revision: 0, capability: null };
@@ -123,6 +137,7 @@ function defaultGraphFixture(initialSessionValues = null) {
     },
     async commitAuditWithCheckpointIfAbsent() { throw new Error('must not commit during compatibility tests'); },
   };
+  const auditStore = fixtureOptions.auditStore ?? fixtureAuditStore;
 
   const registration = registerServiceWorker(chromeApi, {
     auditStore,
@@ -137,7 +152,7 @@ function defaultGraphFixture(initialSessionValues = null) {
     createExportOwnerId: () => 'export-owner-1',
     createEventNonce: () => 'N'.repeat(22),
     epochNow: () => 1_788_000_000_000,
-    modelNow: () => '2026-08-29T12:00:00.000Z',
+    modelNow: fixtureOptions.modelNow ?? (() => '2026-08-29T12:00:00.000Z'),
     randomBytes: length => new Uint8Array(length).fill(7),
     logger: { error() {} },
   });
@@ -175,12 +190,16 @@ function defaultGraphFixture(initialSessionValues = null) {
   }
 
   return {
-    chromeApi, events, registration, sessionValues, sent, createdTabs, snapshots, retentions, deleted,
+    chromeApi, events, registration, auditStore, sessionValues, sessionGetCalls,
+    sent, createdTabs, snapshots, retentions, deleted, storeCalls,
     sender, dispatch,
     setLatest(value) { latest = value; },
     setLeaseResult(value) { leaseResult = value; },
     setDeletedAll(value) { deletedAll = value; },
     setDeleteError(value) { deleteError = value; },
+    setCleanupError(value) { cleanupError = value; },
+    setTabCreator(value) { tabCreator = value; },
+    denySessionScan() { denySessionScan = true; },
   };
 }
 
@@ -406,28 +425,38 @@ test('routes all ten compatibility schemas and no removed legacy start type', as
   assert.deepEqual(compatibilityCalls, types);
 });
 
-test('real default graph restores only a validated panel latest projection', async () => {
+test('real default graph cleans retention before projecting canonical Task 5 latest rows', async () => {
   const env = defaultGraphFixture();
-  env.setLatest({
-    auditId: 'audit-latest', mode: 'single', status: 'complete', percent: 100,
-    message: 'Auditoria concluída.',
-    reviewUrl: env.chromeApi.runtime.getURL('src/review/index.html?auditId=audit-latest'),
-    exportStatus: 'unavailable', exportRevision: 1,
-  });
-  assert.deepEqual(await env.dispatch({ type: 'GET_LAST_AUDIT' }, env.sender('panel')), {
-    ok: true,
-    state: {
-      auditId: 'audit-latest', mode: 'single', status: 'complete', percent: 100,
-      message: 'Auditoria concluída.',
-      reviewUrl: env.chromeApi.runtime.getURL('src/review/index.html?auditId=audit-latest'),
-      exportStatus: 'unavailable', exportRevision: 1,
-    },
-  });
+  const rows = [
+    ['audit-running', 'running', 0, 'Preparando a auditoria.', null, null],
+    ['audit-complete', 'complete', 100, 'Avaliação concluída.', null, 1],
+    ['audit-failed', 'failed', 100, 'Não foi possível concluir a auditoria.', 'AUDIT_FAILED', null],
+  ];
+  for (const [auditId, status, percent, message, failureCode, modelRevision] of rows) {
+    env.setLatest({
+      version: 1, auditId, status, percent, message, failureCode, modelRevision,
+      updatedAt: '2026-08-29T12:00:00.000Z', secretBearer: 'S'.repeat(22),
+    });
+    assert.deepEqual(await env.dispatch({ type: 'GET_LAST_AUDIT' }, env.sender('panel')), {
+      ok: true, state: { auditId, status, percent, message },
+    });
+  }
+  assert.deepEqual(env.storeCalls, rows.flatMap(() => [
+    ['cleanupExpiredAudits', { now: '2026-08-29T12:00:00.000Z', limit: 25 }],
+    ['getLatest'],
+  ]));
+});
 
-  env.setLatest({ auditId: 'audit-latest', status: 'complete', secretBearer: 'S'.repeat(22) });
-  assert.deepEqual(await env.dispatch({ type: 'GET_LAST_AUDIT' }, env.sender('panel')), {
-    ok: false, code: 'COMPATIBILITY_FAILED',
-  });
+test('real default graph returns fixed failure when GET_LAST cleanup fails before latest read', async () => {
+  const env = defaultGraphFixture();
+  env.setLatest({ auditId: 'audit-hidden', status: 'complete' });
+  env.setCleanupError(new Error('native cleanup secret'));
+  const response = await env.dispatch({ type: 'GET_LAST_AUDIT' }, env.sender('panel'));
+  assert.deepEqual(response, { ok: false, code: 'COMPATIBILITY_FAILED' });
+  assert.deepEqual(env.storeCalls, [[
+    'cleanupExpiredAudits', { now: '2026-08-29T12:00:00.000Z', limit: 25 },
+  ]]);
+  assert.doesNotMatch(JSON.stringify(response), /native|cleanup|secret/u);
 });
 
 test('real default graph validates review revision before a bearer-free update broadcast', async () => {
@@ -475,6 +504,148 @@ test('real default graph queues export with persistent lease correlation and rep
   assert.equal(env.createdTabs.length, 1);
 });
 
+test('worker restart ignores an uncorrelated queued marker and trusts the durable lease state', async () => {
+  const modelNow = new Date().toISOString();
+  const backing = new Map();
+  const beforeRestart = createInMemoryAuditStore(backing);
+  await beforeRestart.setAudit(SAMPLE_AUDIT.auditId, structuredClone(SAMPLE_AUDIT));
+  await beforeRestart.setLatest({
+    auditId: SAMPLE_AUDIT.auditId, status: SAMPLE_AUDIT.session.status,
+    exportStatus: 'queued', exportRevision: 1, exportAttempt: 7,
+    leaseOwnerId: 'stale-owner', exportQueuedAt: modelNow,
+  });
+
+  const restartedStore = createInMemoryAuditStore(backing);
+  const restarted = defaultGraphFixture(null, {
+    auditStore: restartedStore,
+    modelNow: () => modelNow,
+  });
+  assert.deepEqual(await restarted.dispatch(
+    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
+    restarted.sender('review', SAMPLE_AUDIT.auditId),
+  ), {
+    ok: true, auditId: SAMPLE_AUDIT.auditId, state: 'queued', exportRevision: 1,
+    exportAttempt: 8, leaseOwnerId: 'export-owner-1',
+  });
+  assert.equal(restarted.createdTabs.length, 1);
+});
+
+test('real memory store compensates export tab creation failure and permits an immediate retry', async () => {
+  const modelNow = new Date().toISOString();
+  const store = createInMemoryAuditStore();
+  await store.setAudit(SAMPLE_AUDIT.auditId, structuredClone(SAMPLE_AUDIT));
+  const env = defaultGraphFixture(null, { auditStore: store, modelNow: () => modelNow });
+  env.setTabCreator((_options, callback) => {
+    env.chromeApi.runtime.lastError = { message: 'native tab creation secret' };
+    callback?.();
+    delete env.chromeApi.runtime.lastError;
+  });
+
+  const failed = await env.dispatch(
+    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
+    env.sender('review', SAMPLE_AUDIT.auditId),
+  );
+  assert.deepEqual(failed, {
+    ok: false, auditId: SAMPLE_AUDIT.auditId, state: 'failed',
+    code: 'EXPORT_PREPARE_FAILED', retryable: true, retryAt: null,
+  });
+  assert.doesNotMatch(JSON.stringify(failed), /native|tab|secret/u);
+  const compensated = await store.getAuditSnapshot(SAMPLE_AUDIT.auditId);
+  assert.equal(compensated.revision, 2);
+  assert.equal((await store.getLatest()).exportStatus, 'failed');
+  assert.equal((await store.getLatest()).exportAttempt, 1);
+  assert.deepEqual(await store.getExportLeaseState(SAMPLE_AUDIT.auditId, { now: new Date().toISOString() }), {
+    active: false, revision: 2,
+  });
+
+  env.setTabCreator((_options, callback) => callback?.({ id: 88 }));
+  assert.deepEqual(await env.dispatch(
+    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
+    env.sender('review', SAMPLE_AUDIT.auditId),
+  ), {
+    ok: true, auditId: SAMPLE_AUDIT.auditId, state: 'queued', exportRevision: 2,
+    exportAttempt: 2, leaseOwnerId: 'export-owner-1',
+  });
+});
+
+test('export tab failure compensation cannot overwrite a concurrently advanced revision', async () => {
+  const modelNow = new Date().toISOString();
+  const store = createInMemoryAuditStore();
+  await store.setAudit(SAMPLE_AUDIT.auditId, structuredClone(SAMPLE_AUDIT));
+  const env = defaultGraphFixture(null, { auditStore: store, modelNow: () => modelNow });
+  const newerLatest = {
+    auditId: SAMPLE_AUDIT.auditId, status: SAMPLE_AUDIT.session.status,
+    exportStatus: 'unavailable', exportRevision: 2, marker: 'newer-worker',
+  };
+  env.setTabCreator(async () => {
+    const snapshot = await store.getAuditSnapshot(SAMPLE_AUDIT.auditId);
+    await store.commitAudit(
+      SAMPLE_AUDIT.auditId, snapshot.model, newerLatest, { now: new Date().toISOString() },
+    );
+    throw new Error('native create rejection');
+  });
+
+  assert.deepEqual(await env.dispatch(
+    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
+    env.sender('review', SAMPLE_AUDIT.auditId),
+  ), {
+    ok: false, auditId: SAMPLE_AUDIT.auditId, state: 'failed',
+    code: 'EXPORT_PREPARE_FAILED', retryable: true, retryAt: null,
+  });
+  assert.equal((await store.getAuditSnapshot(SAMPLE_AUDIT.auditId)).revision, 2);
+  assert.deepEqual(await store.getLatest(), newerLatest);
+
+  env.setTabCreator((_options, callback) => callback?.({ id: 89 }));
+  const retry = await env.dispatch(
+    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
+    env.sender('review', SAMPLE_AUDIT.auditId),
+  );
+  assert.equal(retry.ok, true);
+  assert.equal(retry.exportRevision, 2);
+  assert.equal(retry.exportAttempt, 2);
+});
+
+test('concurrent workers preserve one export lease owner and allow retry after compensated failure', async () => {
+  const modelNow = new Date().toISOString();
+  const backing = new Map();
+  const firstStore = createInMemoryAuditStore(backing);
+  const secondStore = createInMemoryAuditStore(backing);
+  await firstStore.setAudit(SAMPLE_AUDIT.auditId, structuredClone(SAMPLE_AUDIT));
+  const first = defaultGraphFixture(null, { auditStore: firstStore, modelNow: () => modelNow });
+  const second = defaultGraphFixture(null, { auditStore: secondStore, modelNow: () => modelNow });
+  const createGate = deferred();
+  first.setTabCreator(async () => {
+    await createGate.promise;
+    throw new Error('native first worker failure');
+  });
+
+  const firstRequest = first.dispatch(
+    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
+    first.sender('review', SAMPLE_AUDIT.auditId),
+  );
+  while (first.createdTabs.length === 0) await tick();
+  assert.deepEqual(await second.dispatch(
+    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
+    second.sender('review', SAMPLE_AUDIT.auditId),
+  ), {
+    ok: false, auditId: SAMPLE_AUDIT.auditId, state: 'busy', code: 'EXPORT_BUSY',
+    retryable: true, retryAt: (await secondStore.getExportLeaseState(
+      SAMPLE_AUDIT.auditId, { now: modelNow },
+    )).retryAt,
+  });
+
+  createGate.resolve();
+  assert.equal((await firstRequest).code, 'EXPORT_PREPARE_FAILED');
+  second.setTabCreator((_options, callback) => callback?.({ id: 90 }));
+  const retry = await second.dispatch(
+    { type: 'REQUEST_EXPORT', auditId: SAMPLE_AUDIT.auditId },
+    second.sender('review', SAMPLE_AUDIT.auditId),
+  );
+  assert.equal(retry.ok, true);
+  assert.equal(retry.exportRevision, 2);
+  assert.equal(retry.exportAttempt, 2);
+});
+
 test('real default graph deletes one/all through correlated surfaces and maps storage busy errors', async () => {
   const env = defaultGraphFixture();
   env.snapshots.set('audit-delete', { model: { auditId: 'audit-delete' }, revision: 1, capability: Object.freeze({}) });
@@ -490,11 +661,18 @@ test('real default graph deletes one/all through correlated surfaces and maps st
     version: 1, auditId: 'audit-stale', sessionCapabilityId: 'S'.repeat(22), windowId: 9,
     checkpoint: { version: 1, auditId: 'audit-stale', pages: [] },
   };
+  env.sessionValues['audita:execution-checkpoint:v1:audit-transplanted'] = {
+    version: 1, auditId: 'audit-foreign', sessionCapabilityId: 'F'.repeat(22), windowId: 11,
+    checkpoint: { version: 1, auditId: 'audit-foreign', pages: [] },
+  };
   env.sessionValues['user:unrelated'] = { private: true };
+  env.denySessionScan();
   assert.deepEqual(await env.dispatch({ type: 'REQUEST_DELETE_ALL_AUDITS' }, env.sender('panel')), { ok: true, deleted: 3 });
   assert.deepEqual(env.sent.at(-1), { type: 'AUDIT_DELETED', scope: 'all', reason: 'delete-all' });
-  assert.equal(Object.hasOwn(env.sessionValues, 'audita:execution-checkpoint:v1:audit-stale'), false);
+  assert.equal(Object.hasOwn(env.sessionValues, 'audita:execution-checkpoint:v1:audit-stale'), true);
+  assert.equal(Object.hasOwn(env.sessionValues, 'audita:execution-checkpoint:v1:audit-transplanted'), true);
   assert.deepEqual(env.sessionValues['user:unrelated'], { private: true });
+  assert.equal(env.sessionGetCalls.includes(null), false);
 
   env.snapshots.set('audit-busy', { model: { auditId: 'audit-busy' }, revision: 1, capability: Object.freeze({}) });
   env.setDeleteError(Object.assign(new Error('native lock detail'), { code: 'AUDIT_DELETE_BUSY' }));

@@ -33,6 +33,7 @@ function popupSender(windowId = 9) {
 
 function fixture(overrides = {}) {
   const calls = [];
+  const durableSessions = new Map();
   const chromeApi = {
     runtime: {
       id: RUNTIME_ID,
@@ -59,7 +60,11 @@ function fixture(overrides = {}) {
       calls.push(['authorize', value]);
       return { ok: true, session: { auditId: value.auditId, sessionCapabilityId: value.sessionCapabilityId, windowId: 9 }, context: { windowId: 9 } };
     },
-    async rehydrateViewOnly(value) { calls.push(['rehydrate', value]); return { ok: true, sessionCapabilityId: SESSION, auditId: value.auditId, expiresAt: 300 }; },
+    async rehydrateViewOnly(value) {
+      calls.push(['rehydrate', value]);
+      durableSessions.set(SESSION, { auditId: value.auditId, state: 'view-only' });
+      return { ok: true, sessionCapabilityId: SESSION, auditId: value.auditId, expiresAt: 300 };
+    },
   };
   const auditStarter = {
     async beginAuthorizedAudit(value) { calls.push(['begin', value]); return { response: { ok: true, auditId: value.auditId, state: 'running' } }; },
@@ -77,13 +82,19 @@ function fixture(overrides = {}) {
     chromeApi, authority, auditStarter, panelCoordinator, chromeAdapter,
     async readReportRevision({ auditId }) { calls.push(['read-report', auditId]); return { version: 1, auditId }; },
     async buildPanelResultBundle({ reportRevision }) { calls.push(['bundle', reportRevision.auditId]); return Object.freeze({ version: 1, auditId: reportRevision.auditId }); },
-    async revokeViewOnly(value) { calls.push(['revoke', value]); return true; },
+    async revokeViewOnly(value) {
+      calls.push(['revoke', value]);
+      const current = durableSessions.get(value.sessionCapabilityId);
+      if (!current || current.auditId !== value.auditId || current.state !== 'view-only') return false;
+      durableSessions.set(value.sessionCapabilityId, { ...current, state: 'revoked' });
+      return true;
+    },
     epochNow: () => 250,
     modelNow: () => '2026-08-29T12:00:00.000Z',
     createAuditId: (() => { let id = 0; return () => `audit-router-${++id}`; })(),
     ...overrides,
   };
-  return { calls, router: createSidePanelIntentRouter(dependencies), dependencies };
+  return { calls, durableSessions, router: createSidePanelIntentRouter(dependencies), dependencies };
 }
 
 test('prepares popup siblings from one proof and returns the minimum expiry with windowId', async () => {
@@ -178,8 +189,8 @@ test('authorizes cancellation and passes only the correlated session and window'
   });
 });
 
-test('rehydrates under the shared window lock and revokes every failed post-mint registration', async () => {
-  const { router, calls } = fixture({
+test('rehydrates under the shared window lock and confirms durable revocation after registration denial', async () => {
+  const { router, calls, durableSessions } = fixture({
     panelCoordinator: {
       async withWindowLock(windowId, fn) { calls.push(['lock', windowId]); return fn(); },
       async registerAndPublishViewOnly(value) { calls.push(['register-view', value]); return { registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' }; },
@@ -195,14 +206,66 @@ test('rehydrates under the shared window lock and revokes every failed post-mint
   assert.equal(registration.createdAt, 250);
   assert.equal(registration.expiresAt, 300);
   assert.equal(Object.hasOwn(registration, 'delivered'), false);
+  assert.deepEqual(durableSessions.get(SESSION), { auditId: 'audit-history', state: 'revoked' });
 });
 
 test('hostile post-mint clock denies and revokes before any bootstrap registration', async () => {
-  const { router, calls } = fixture({ epochNow: () => 300 });
+  const { router, calls, durableSessions } = fixture({ epochNow: () => 300 });
   const response = await router.dispatch({
     envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-clock' }), sender: panelSender(),
   });
   assert.deepEqual(response, { ok: false, code: 'AUDIT_REHYDRATE_DENIED' });
   assert.equal(calls.some(([name]) => name === 'register-view'), false);
   assert.equal(calls.some(([name]) => name === 'revoke'), true);
+  assert.deepEqual(durableSessions.get(SESSION), { auditId: 'audit-clock', state: 'revoked' });
+});
+
+test('post-mint cleanup false or rejection returns recovery-required and never reports view-only success', async t => {
+  for (const [name, revokeViewOnly] of [
+    ['false', async () => false],
+    ['rejection', async () => { throw new Error('native revoke secret'); }],
+  ]) await t.test(name, async () => {
+    const { router, durableSessions } = fixture({
+      panelCoordinator: {
+        async withWindowLock(_windowId, fn) { return fn(); },
+        async registerAndPublishViewOnly() {
+          return { registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' };
+        },
+      },
+      revokeViewOnly,
+    });
+    const response = await router.dispatch({
+      envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: `audit-cleanup-${name}` }),
+      sender: panelSender(),
+    });
+    assert.deepEqual(response, { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' });
+    assert.deepEqual(durableSessions.get(SESSION), { auditId: `audit-cleanup-${name}`, state: 'view-only' });
+    assert.doesNotMatch(JSON.stringify(response), /native|revoke|secret/u);
+  });
+});
+
+test('registration exception revokes durable session while registered success retains it', async t => {
+  await t.test('registration exception', async () => {
+    const { router, durableSessions } = fixture({
+      panelCoordinator: {
+        async withWindowLock(_windowId, fn) { return fn(); },
+        async registerAndPublishViewOnly() { throw new Error('native registration secret'); },
+      },
+    });
+    assert.deepEqual(await router.dispatch({
+      envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-register-throw' }),
+      sender: panelSender(),
+    }), { ok: false, code: 'AUDIT_REHYDRATE_DENIED' });
+    assert.deepEqual(durableSessions.get(SESSION), { auditId: 'audit-register-throw', state: 'revoked' });
+  });
+
+  await t.test('registered success', async () => {
+    const { router, durableSessions, calls } = fixture();
+    assert.deepEqual(await router.dispatch({
+      envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-register-success' }),
+      sender: panelSender(),
+    }), { ok: true, auditId: 'audit-register-success', state: 'view-only' });
+    assert.deepEqual(durableSessions.get(SESSION), { auditId: 'audit-register-success', state: 'view-only' });
+    assert.equal(calls.some(([name]) => name === 'revoke'), false);
+  });
 });

@@ -189,8 +189,8 @@ function copyLastAuditResponse(output, runtimeId) {
   const response = copyExactDataRecord(output, ['ok', 'state']);
   if (!response || response.ok !== true) return null;
   if (response.state === null) return deepFreeze(response);
-  const state = copyLegacyLatest(response.state, runtimeId);
-  return state ? deepFreeze({ ok: true, state }) : null;
+  const state = projectLegacyPanelLatestV1(response.state, runtimeId);
+  return deepFreeze({ ok: true, state });
 }
 
 function copyAckResponse(output, allowDenied) {
@@ -237,52 +237,68 @@ function copyBusyOrFailed(output) {
     : null;
 }
 
-function copyLegacyLatest(value, runtimeId) {
-  const allowed = [
-    'auditId', 'mode', 'status', 'percent', 'message', 'reviewUrl', 'exportStatus', 'exportRevision',
-    'exportAttempt', 'leaseOwnerId', 'total', 'pageNumber', 'statusCounts',
-  ];
-  const state = copyAllowedDataRecord(value, allowed);
-  if (!state || !AUDIT_ID.test(state.auditId ?? '') || ![
+export function projectLegacyPanelLatestV1(value, runtimeId) {
+  if (value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) return null;
+  let prototype;
+  try {
+    prototype = Object.getPrototypeOf(value);
+  } catch {
+    throw new TypeError('LEGACY_LATEST_DENIED');
+  }
+  if (prototype !== Object.prototype) return null;
+  const audit = latestDataField(value, 'auditId');
+  const status = latestDataField(value, 'status');
+  if (audit.unsafe || status.unsafe) throw new TypeError('LEGACY_LATEST_DENIED');
+  if (!audit.found || !AUDIT_ID.test(audit.value ?? '') || !status.found || ![
     'idle', 'validating', 'queued', 'running', 'cancelling', 'complete', 'partial', 'failed', 'cancelled', 'paused',
-  ].includes(state.status)) return null;
-  if (Object.hasOwn(state, 'mode') && !['single', 'batch'].includes(state.mode)) return null;
-  if (Object.hasOwn(state, 'percent') && (typeof state.percent !== 'number' || !Number.isFinite(state.percent) || state.percent < 0 || state.percent > 100)) return null;
-  if (Object.hasOwn(state, 'message') && (typeof state.message !== 'string' || codePoints(state.message) > 512)) return null;
-  if (Object.hasOwn(state, 'reviewUrl') && !validReviewUrl(state.reviewUrl, runtimeId, state.auditId)) return null;
-  if (Object.hasOwn(state, 'exportStatus') && ![
+  ].includes(status.value)) return null;
+
+  const state = { auditId: audit.value, status: status.value };
+  copyValidLatestField(value, state, 'mode', entry => ['single', 'batch'].includes(entry));
+  copyValidLatestField(value, state, 'percent', entry =>
+    typeof entry === 'number' && Number.isFinite(entry) && entry >= 0 && entry <= 100);
+  copyValidLatestField(value, state, 'message', entry => typeof entry === 'string' && codePoints(entry) <= 512);
+  copyValidLatestField(value, state, 'reviewUrl', entry => validReviewUrl(entry, runtimeId, state.auditId));
+  copyValidLatestField(value, state, 'exportStatus', entry => [
     'unavailable', 'preparing', 'queued', 'running', 'delivering', 'complete', 'partial', 'failed', 'busy',
-  ].includes(state.exportStatus)) return null;
-  if (Object.hasOwn(state, 'exportRevision') && !validRevision(state.exportRevision)) return null;
-  if (Object.hasOwn(state, 'exportAttempt') && !validAttempt(state.exportAttempt)) return null;
-  if (Object.hasOwn(state, 'leaseOwnerId') && !LEASE_OWNER_ID.test(state.leaseOwnerId ?? '')) return null;
-  if (Object.hasOwn(state, 'total') && (!Number.isSafeInteger(state.total) || state.total < 1 || state.total > 20 || state.mode !== 'batch')) return null;
-  if (Object.hasOwn(state, 'pageNumber') && (!Number.isSafeInteger(state.pageNumber) || !Number.isSafeInteger(state.total) || state.pageNumber < 0 || state.pageNumber > state.total)) return null;
-  if (Object.hasOwn(state, 'statusCounts')) {
-    if (!Number.isSafeInteger(state.total)) return null;
-    const counts = copyExactDataRecord(state.statusCounts, ['cancelled', 'complete', 'failed', 'partial']);
-    if (!counts || Object.values(counts).some(count => !Number.isSafeInteger(count) || count < 0 || count > 20) ||
-      Object.values(counts).reduce((sum, count) => sum + count, 0) > state.total) return null;
-    state.statusCounts = counts;
+  ].includes(entry));
+  copyValidLatestField(value, state, 'exportRevision', validRevision);
+  copyValidLatestField(value, state, 'exportAttempt', validAttempt);
+  copyValidLatestField(value, state, 'leaseOwnerId', entry => LEASE_OWNER_ID.test(entry ?? ''));
+  copyValidLatestField(value, state, 'total', entry =>
+    state.mode === 'batch' && Number.isSafeInteger(entry) && entry >= 1 && entry <= 20);
+  copyValidLatestField(value, state, 'pageNumber', entry =>
+    Number.isSafeInteger(state.total) && Number.isSafeInteger(entry) && entry >= 0 && entry <= state.total);
+
+  const statusCounts = latestDataField(value, 'statusCounts');
+  if (statusCounts.unsafe) throw new TypeError('LEGACY_LATEST_DENIED');
+  if (statusCounts.found && Number.isSafeInteger(state.total)) {
+    const counts = copyExactDataRecord(statusCounts.value, ['cancelled', 'complete', 'failed', 'partial']);
+    if (counts && Object.values(counts).every(count => Number.isSafeInteger(count) && count >= 0 && count <= 20) &&
+      Object.values(counts).reduce((sum, count) => sum + count, 0) <= state.total) {
+      state.statusCounts = counts;
+    }
   }
   return deepFreeze(state);
 }
 
-function copyAllowedDataRecord(value, allowedKeys) {
+function latestDataField(value, key) {
   try {
-    if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
-    const ownKeys = Reflect.ownKeys(value);
-    if (ownKeys.some(key => typeof key !== 'string' || !allowedKeys.includes(key))) return null;
-    const copy = {};
-    for (const key of ownKeys) {
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      if (!descriptor || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) return null;
-      copy[key] = descriptor.value;
-    }
-    return copy;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor) return { found: false, unsafe: false };
+    return descriptor.enumerable === true && Object.hasOwn(descriptor, 'value')
+      ? { found: true, unsafe: false, value: descriptor.value }
+      : { found: false, unsafe: false };
   } catch {
-    return null;
+    return { found: false, unsafe: true };
   }
+}
+
+function copyValidLatestField(source, target, key, validate) {
+  const field = latestDataField(source, key);
+  if (field.unsafe) throw new TypeError('LEGACY_LATEST_DENIED');
+  if (field.found && validate(field.value)) target[key] = field.value;
 }
 
 function validReviewUrl(value, runtimeId, auditId) {

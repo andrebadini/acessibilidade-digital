@@ -1,6 +1,10 @@
 import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
 import { createSessionUrlDigestManager } from '../core/privacy/session-url-digest.js';
 import { createAuditDeletedEvent } from '../core/audit-deleted-event.js';
+import {
+  createExportFailureRequest,
+  persistExportFailure,
+} from '../export/export-controller.js';
 import { createPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
 import {
   AuditDeleteBusyError,
@@ -18,6 +22,7 @@ import { registerAuditContextMenus } from './context-menu.js';
 import {
   createLegacyCompatibilityHandler,
   parseLegacyCompatMessage,
+  projectLegacyPanelLatestV1,
 } from './legacy-compat-protocol.js';
 import {
   PANEL_PORT_NAME,
@@ -143,7 +148,6 @@ function checkpointRecord(value) {
 }
 
 function createCheckpointAdapters(sessionArea) {
-  const prefix = executionCheckpointStorageKey('');
   async function persistCheckpoint(raw) {
     const args = exact(raw, ['auditId', 'sessionCapabilityId', 'windowId', 'checkpoint']);
     const record = checkpointRecord(args && { version: 1, ...args });
@@ -184,32 +188,7 @@ function createCheckpointAdapters(sessionArea) {
     return Object.freeze({ removed: true });
   }
 
-  async function pruneCheckpoints() {
-    const envelope = await sessionArea.get(null);
-    let keys;
-    try {
-      if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) ||
-        ![Object.prototype, null].includes(Object.getPrototypeOf(envelope))) throw new Error('CHECKPOINT_PRUNE_DENIED');
-      keys = Reflect.ownKeys(envelope);
-      if (keys.some(key => typeof key !== 'string')) throw new Error('CHECKPOINT_PRUNE_DENIED');
-      for (const key of keys) {
-        const descriptor = Object.getOwnPropertyDescriptor(envelope, key);
-        if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new Error('CHECKPOINT_PRUNE_DENIED');
-      }
-    } catch { throw new Error('CHECKPOINT_PRUNE_DENIED'); }
-    const owned = keys.filter(key => key.startsWith(prefix));
-    if (owned.length > 0) await sessionArea.remove(owned);
-    const confirmed = await sessionArea.get(null);
-    try {
-      if (!confirmed || typeof confirmed !== 'object' || Array.isArray(confirmed) ||
-        Reflect.ownKeys(confirmed).some(key => typeof key !== 'string' || key.startsWith(prefix))) {
-        throw new Error('CHECKPOINT_PRUNE_DENIED');
-      }
-    } catch { throw new Error('CHECKPOINT_PRUNE_DENIED'); }
-    return Object.freeze({ removed: owned.length });
-  }
-
-  return Object.freeze({ persistCheckpoint, removeCheckpoint, pruneCheckpoints });
+  return Object.freeze({ persistCheckpoint, removeCheckpoint });
 }
 
 function copyReadyRuntime(value) {
@@ -223,7 +202,14 @@ function createCompatibilityAdapters({ chromeApi, auditStore, sessionArea, model
   const now = () => canonicalModelTime(modelNow);
 
   async function readLegacyLastAudit() {
-    try { return freeze({ ok: true, state: (await auditStore.getLatest()) ?? null }); }
+    try {
+      await auditStore.cleanupExpiredAudits({ now: now(), limit: 25 });
+      const latest = (await auditStore.getLatest()) ?? null;
+      return freeze({
+        ok: true,
+        state: projectLegacyPanelLatestV1(latest, chromeApi.runtime.id),
+      });
+    }
     catch { return Object.freeze({ ok: false, code: 'COMPATIBILITY_FAILED' }); }
   }
 
@@ -260,9 +246,22 @@ function createCompatibilityAdapters({ chromeApi, auditStore, sessionArea, model
       }
       if (!Number.isSafeInteger(lease.exportAttempt) || lease.exportAttempt < 1) throw new Error('denied');
       const query = `auditId=${encodeURIComponent(auditId)}&leaseOwnerId=${encodeURIComponent(leaseOwnerId)}&exportAttempt=${lease.exportAttempt}`;
-      await invokeChrome(chromeApi, chromeApi.tabs, 'create', {
-        url: chromeApi.runtime.getURL(`src/export/index.html?${query}`), active: false,
-      });
+      try {
+        await invokeChrome(chromeApi, chromeApi.tabs, 'create', {
+          url: chromeApi.runtime.getURL(`src/export/index.html?${query}`), active: false,
+        });
+      } catch {
+        try {
+          await persistExportFailure(createExportFailureRequest({
+            snapshotCapability: snapshot.capability,
+            leaseOwnerId,
+            exportAttempt: lease.exportAttempt,
+            latest: latestState,
+            at: latestState.exportQueuedAt,
+          }), auditStore);
+        } catch { /* stale revision or replacement lease remains untouched */ }
+        return freeze({ ok: false, auditId, state: 'failed', code: 'EXPORT_PREPARE_FAILED', retryable: true, retryAt: null });
+      }
       return freeze({
         ok: true, auditId, state: 'queued', exportRevision: snapshot.revision,
         exportAttempt: lease.exportAttempt, leaseOwnerId,
@@ -295,7 +294,6 @@ function createCompatibilityAdapters({ chromeApi, auditStore, sessionArea, model
       if (await readActiveAuditJobForWorker({ sessionArea }) !== null) return Object.freeze({ ok: false, code: 'AUDIT_DELETE_BUSY' });
       const result = await auditStore.deleteAllAudits({ now: now() });
       if (!Number.isSafeInteger(result?.deleted) || result.deleted < 0) throw new Error('denied');
-      await checkpoints.pruneCheckpoints();
       await sendRuntimeMessage(chromeApi, createAuditDeletedEvent({ scope: 'all', reason: 'delete-all' })).catch(() => {});
       return freeze({ ok: true, deleted: result.deleted });
     } catch (error) {

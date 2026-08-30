@@ -248,8 +248,14 @@ export function createSidePanelIntentRouter(raw) {
       return freeze({ ok: true, auditId: envelope.auditId, state: 'view-only' });
     } catch {
       if (minted?.ok === true && CAPABILITY.test(minted.sessionCapabilityId ?? '')) {
-        try { await input.revokeViewOnly({ sessionCapabilityId: minted.sessionCapabilityId, auditId: envelope.auditId }); }
-        catch { /* denial remains fixed */ }
+        let revoked = false;
+        try {
+          revoked = await input.revokeViewOnly({
+            sessionCapabilityId: minted.sessionCapabilityId,
+            auditId: envelope.auditId,
+          });
+        } catch { /* cleanup remains unconfirmed */ }
+        if (revoked !== true) return fail('AUDIT_RECOVERY_REQUIRED');
       }
       return fail('AUDIT_REHYDRATE_DENIED');
     }
