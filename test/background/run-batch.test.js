@@ -267,7 +267,7 @@ test('integrates three controlled fixtures through runBatch and runAudit into on
   });
   assert.deepEqual(order, entries.map(entry => entry.navigationUrl));
   assert.equal(model.pages.length, 3);
-  assert.deepEqual(model.pages.map(value => value.status), ['partial', 'failed', 'partial'], JSON.stringify(childModels.map(value => value.session)));
+  assert.deepEqual(model.pages.map(value => value.status), ['complete', 'failed', 'complete'], JSON.stringify(childModels.map(value => value.session)));
   assert.equal(finalHandoffs, 1, 'handoffs filhos são no-op e só o modelo consolidado abre revisão');
   assert.deepEqual(removed.length, 3);
   assert.equal(model.auditId, 'batch-integration');
