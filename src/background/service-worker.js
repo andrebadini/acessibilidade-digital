@@ -264,8 +264,7 @@ export function createCheckpointAdapters(sessionArea) {
 }
 
 function copyReadyRuntime(value) {
-  const runtime = exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch', 'personaCoordinator', 'highlightController', 'digestManager', 'rawNavigationVault'], true) ??
-    exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch', 'personaCoordinator', 'highlightController'], true) ??
+  const runtime = exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch', 'personaCoordinator', 'highlightController'], true) ??
     exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch', 'personaCoordinator'], true) ??
     exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch'], true) ??
     exact(value, ['authority', 'auditStarter', 'chromeAdapter'], true);
@@ -276,13 +275,6 @@ function copyReadyRuntime(value) {
   if (Object.hasOwn(runtime, 'highlightController') &&
     (typeof runtime.highlightController?.expireDue !== 'function' ||
       typeof runtime.highlightController?.invalidateTab !== 'function')) {
-    throw new Error('WORKER_UNAVAILABLE');
-  }
-  if (Object.hasOwn(runtime, 'digestManager') && typeof runtime.digestManager?.digest !== 'function') {
-    throw new Error('WORKER_UNAVAILABLE');
-  }
-  if (Object.hasOwn(runtime, 'rawNavigationVault') &&
-    (typeof runtime.rawNavigationVault?.put !== 'function' || typeof runtime.rawNavigationVault?.take !== 'function')) {
     throw new Error('WORKER_UNAVAILABLE');
   }
   return freeze(runtime);
@@ -460,9 +452,10 @@ async function buildDefaultRuntime(chromeApi, options) {
   const digestManager = createSessionUrlDigestManager({
     sessionArea, subtle: options.subtle ?? globalThis.crypto?.subtle, randomBytes: bytes, now: epochNow,
   });
-  const rawNavigationVault = createRawNavigationVaultV1({
+  const rawNavigationVault = (options.rawNavigationVaultFactory ?? createRawNavigationVaultV1)({
     sessionArea, digestManager, now: epochNow, randomBytes: bytes,
   });
+  if (typeof rawNavigationVault?.put !== 'function' || typeof rawNavigationVault?.take !== 'function') throw new Error('WORKER_UNAVAILABLE');
   const baseAdapter = (options.chromeAdapterFactory ?? createChromeAdapter)(chromeApi, { sessionUrlDigestManager: digestManager });
   const chromeAdapter = options.chromeAdapterOverrides
     ? composeChromeAdapter(baseAdapter, options.chromeAdapterOverrides)
@@ -717,8 +710,6 @@ async function buildDefaultRuntime(chromeApi, options) {
       exportLaunch,
       personaCoordinator,
       highlightController: highlightRuntimeController,
-      digestManager,
-      rawNavigationVault,
     }),
     router, panelCoordinator, panelLauncher, reportPortCoordinator,
   };

@@ -221,3 +221,18 @@ test('a new worker manager reuses a valid session key while a new session create
   assert.notEqual(await secondWorker.digest('https://example.test/restart'), firstDigest);
   assert.equal(secondSession.writes.length, 1);
 });
+
+test('concurrent digest callers create exactly one session HMAC key record', async () => {
+  const sessionArea = createSessionArea();
+  const manager = createSessionUrlDigestManager({
+    sessionArea, subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(12), now: () => 123,
+  });
+  const digests = await Promise.all([
+    manager.digest('https://example.test/concurrent-a'),
+    manager.digest('https://example.test/concurrent-b'),
+    manager.digest('https://example.test/concurrent-c'),
+  ]);
+  assert.equal(new Set(digests).size, 3);
+  assert.equal(sessionArea.writes.filter(write => Object.hasOwn(write, SESSION_HMAC_KEY)).length, 1);
+});

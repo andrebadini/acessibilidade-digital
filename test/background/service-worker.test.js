@@ -4,6 +4,7 @@ import test from 'node:test';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { PANEL_PORT_NAME } from '../../src/background/panel-port.js';
 import { REPORT_PORT_NAME } from '../../src/background/report-port.js';
+import { createRawNavigationVaultV1 } from '../../src/background/raw-navigation-vault.js';
 import {
   HIGHLIGHT_EXPIRY_ALARM_NAME,
   PERSONA_EXPIRY_ALARM_NAME,
@@ -244,7 +245,8 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
 
   const registration = registerServiceWorker(chromeApi, {
     auditStore,
-    chromeAdapterFactory() {
+    chromeAdapterFactory(...args) {
+      if (fixtureOptions.chromeAdapterFactory) return fixtureOptions.chromeAdapterFactory(...args);
       return Object.freeze({
         async probeDocumentIdentity() { throw new Error('not used'); },
         async getEvidenceUrl() { throw new Error('not used'); },
@@ -263,6 +265,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
     epochNow: () => 1_788_000_000_000,
     modelNow: fixtureOptions.modelNow ?? (() => '2026-08-29T12:00:00.000Z'),
     randomBytes: length => new Uint8Array(length).fill(7),
+    ...(fixtureOptions.rawNavigationVaultFactory ? { rawNavigationVaultFactory: fixtureOptions.rawNavigationVaultFactory } : {}),
     logger: { error() {} },
   });
 
@@ -669,15 +672,35 @@ test('default runtime serializes persona recovery with the supplied Web Locks ma
     call.name === 'audita:persona-lease-store:v1' && call.options.mode === 'exclusive'), true);
 });
 
-test('default worker owns one digest manager shared with its volatile navigation vault', async () => {
-  const env = defaultGraphFixture();
+test('default worker keeps the volatile vault closed while injecting the one digest manager by factories', async () => {
+  const captured = {};
+  const env = defaultGraphFixture(null, {
+    chromeAdapterFactory(_chromeApi, { sessionUrlDigestManager }) {
+      captured.adapterDigestManager = sessionUrlDigestManager;
+      return Object.freeze({
+        async probeDocumentIdentity() { throw new Error('not used'); },
+        async getEvidenceUrl() { throw new Error('not used'); },
+        async getFinalUrl() { return 'https://example.test/'; },
+        async proveHighlightTargets() { return []; },
+        async verifyHighlightTarget() { return { ok: false, reason: 'live-proof-failed' }; },
+        async injectHighlight() { return { ok: false, reason: 'execution-failed' }; },
+        async emitProgress() {},
+      });
+    },
+    rawNavigationVaultFactory(input) {
+      captured.vaultInput = input;
+      captured.vault = createRawNavigationVaultV1(input);
+      return captured.vault;
+    },
+  });
   const runtime = await env.registration.startupReady;
-  assert.equal(typeof runtime.digestManager?.digest, 'function');
-  assert.equal(typeof runtime.rawNavigationVault?.put, 'function');
+  assert.equal(Object.hasOwn(runtime, 'digestManager'), false);
+  assert.equal(Object.hasOwn(runtime, 'rawNavigationVault'), false);
+  assert.equal(captured.vaultInput.digestManager, captured.adapterDigestManager);
   const sessionScansBefore = env.sessionGetCalls.filter(key => key === null).length;
   const [digest, issued] = await Promise.all([
-    runtime.digestManager.digest('https://example.test/shared?private=1'),
-    runtime.rawNavigationVault.put('https://example.test/shared?private=1', {
+    captured.adapterDigestManager.digest('https://example.test/shared?private=1'),
+    captured.vault.put('https://example.test/shared?private=1', {
       auditId: 'audit-vault', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
     }),
   ]);

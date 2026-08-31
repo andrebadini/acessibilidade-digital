@@ -12,6 +12,7 @@ const LEGACY_RECORD_KEYS = Object.freeze(['version', 'navigationToken', 'ownerId
 const RECORD_KEYS = Object.freeze(['version', 'auditId', 'purpose', 'rawUrl', 'issuedAt', 'expiresAt']);
 const QUEUE_KEYS = Object.freeze(['version', 'auditId', 'ownerOperationId', 'revision', 'issuedAt', 'expiresAt', 'nextIndex', 'entries']);
 const QUEUE_ENTRY_KEYS = Object.freeze(['line', 'navigationToken', 'evidenceUrl', 'sessionDigest', 'status']);
+const SESSION_STATES = new WeakMap();
 
 function exact(value, keys) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -77,13 +78,26 @@ function token(bytes) {
   return btoa(binary).replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=+$/u, '');
 }
 
-function currentTime(now) {
+function stateFor(sessionArea) {
+  let state = SESSION_STATES.get(sessionArea);
+  if (!state) {
+    state = { tail: Promise.resolve(), highWater: null, bindings: new Map() };
+    SESSION_STATES.set(sessionArea, state);
+  }
+  return state;
+}
+
+function currentTime(now, state) {
   let value;
   try { value = now(); } catch { return null; }
-  if (validClock(value)) return value;
-  if (typeof value !== 'string') return null;
-  const parsed = new Date(value);
-  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value ? parsed.getTime() : null;
+  if (!validClock(value)) {
+    if (typeof value !== 'string') return null;
+    const parsed = new Date(value);
+    value = Number.isFinite(parsed.getTime()) && parsed.toISOString() === value ? parsed.getTime() : null;
+  }
+  if (!validClock(value) || (state.highWater !== null && value < state.highWater)) return null;
+  state.highWater = value;
+  return value;
 }
 
 function publicRecord(value) {
@@ -108,9 +122,17 @@ function parseQueue(value) {
     !validClock(queue.expiresAt) || queue.expiresAt - queue.issuedAt !== BATCH_TTL_MS ||
     !Number.isSafeInteger(queue.nextIndex) || queue.nextIndex < 0) return null;
   const entries = dense(queue.entries);
-  if (!entries || queue.nextIndex > entries.length) return null;
+  if (!entries || entries.length < 1 || entries.length > 20 || queue.nextIndex > entries.length) return null;
   const parsed = entries.map(parseQueueEntry);
-  if (parsed.some(entry => entry === null) || new Set(parsed.map(entry => entry.line)).size !== parsed.length) return null;
+  if (parsed.some(entry => entry === null) || new Set(parsed.map(entry => entry.line)).size !== parsed.length ||
+    new Set(parsed.map(entry => entry.navigationToken)).size !== parsed.length) return null;
+  for (let index = 0; index < queue.nextIndex; index += 1) if (parsed[index].status !== 'finished') return null;
+  if (queue.nextIndex === parsed.length) {
+    if (parsed.some(entry => entry.status !== 'finished')) return null;
+  } else {
+    if (!['pending', 'running'].includes(parsed[queue.nextIndex].status) ||
+      parsed.slice(queue.nextIndex + 1).some(entry => entry.status !== 'pending')) return null;
+  }
   return freeze({ ...queue, entries: parsed });
 }
 
@@ -120,21 +142,73 @@ function parseExpectedState(value) {
   return state && Number.isSafeInteger(state.nextIndex) && state.nextIndex >= 0 && QUEUE_STATUSES.has(state.status) ? freeze(state) : null;
 }
 
+function sameQueueMetadata(left, right) {
+  return left.line === right.line && left.navigationToken === right.navigationToken &&
+    same(left.evidenceUrl, right.evidenceUrl) && left.sessionDigest === right.sessionDigest;
+}
+
+function validTransition(current, desired) {
+  if (desired.nextIndex < current.nextIndex || desired.nextIndex > current.nextIndex + 1 ||
+    desired.entries.length !== current.entries.length ||
+    desired.entries.some((entry, index) => !sameQueueMetadata(entry, current.entries[index]))) return false;
+  for (let index = 0; index < current.nextIndex; index += 1) if (desired.entries[index].status !== 'finished') return false;
+  if (desired.nextIndex === current.nextIndex) {
+    const before = current.entries[current.nextIndex];
+    const after = desired.entries[desired.nextIndex];
+    return before.status === after.status || (before.status === 'pending' && after.status === 'running');
+  }
+  return desired.entries[current.nextIndex].status === 'finished';
+}
+
+function dropBindings(state, tokens) {
+  for (const navigationToken of tokens) state.bindings.delete(navigationToken);
+}
+
 async function erase(sessionArea, key) {
   try { await sessionArea.remove(key); return !Object.hasOwn(await sessionArea.get(key), key); } catch { return false; }
 }
 
 async function all(sessionArea) {
   const value = await sessionArea.get(null);
-  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new Error();
+    const entries = [];
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') throw new Error();
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new Error();
+      entries.push([key, descriptor.value]);
+    }
+    return entries;
+  } catch { throw unavailable(); }
+}
+
+function recordAuditId(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const descriptor = Object.getOwnPropertyDescriptor(value, 'auditId');
+    return descriptor?.enumerable && Object.hasOwn(descriptor, 'value') && validId(descriptor.value) ? descriptor.value : null;
+  } catch { return null; }
+}
+
+async function removeKeys(sessionArea, keys) {
+  try {
+    await sessionArea.remove(keys);
+    const entries = await all(sessionArea);
+    return !entries.some(([key]) => keys.includes(key));
+  } catch { return false; }
 }
 
 export function createRawNavigationVaultV1({ sessionArea, digestManager = null, now, randomBytes }) {
   if (!sessionArea || typeof sessionArea.get !== 'function' || typeof sessionArea.set !== 'function' ||
     typeof sessionArea.remove !== 'function' || typeof now !== 'function' || typeof randomBytes !== 'function' ||
     (digestManager !== null && typeof digestManager?.digest !== 'function')) throw new TypeError('RAW_NAVIGATION_INVALID');
-  let tail = Promise.resolve();
-  const serial = operation => { const pending = tail.then(operation, operation); tail = pending.catch(() => {}); return pending; };
+  const state = stateFor(sessionArea);
+  const serial = operation => {
+    const pending = state.tail.then(operation, operation);
+    state.tail = pending.catch(() => {});
+    return pending;
+  };
   const readPublic = async navigationToken => {
     if (!validToken(navigationToken)) throw consumed();
     const key = `${PREFIX}${navigationToken}`;
@@ -164,19 +238,21 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
   return freeze({
     putInternal({ ownerId, rawUrl }) { return serial(async () => {
       if (!validId(ownerId) || !validRawUrl(rawUrl)) throw new TypeError('RAW_NAVIGATION_INVALID');
-      const issuedAt = currentTime(now); if (issuedAt === null || issuedAt > Number.MAX_SAFE_INTEGER - LEGACY_TTL_MS) throw new TypeError('RAW_NAVIGATION_INVALID');
+      const issuedAt = currentTime(now, state); if (issuedAt === null || issuedAt > Number.MAX_SAFE_INTEGER - LEGACY_TTL_MS) throw new TypeError('RAW_NAVIGATION_INVALID');
       const navigationToken = token(randomBytes(16)); const expiresAt = issuedAt + LEGACY_TTL_MS; const key = `${PREFIX}${navigationToken}`;
+      let writeAttempted = false;
       try {
         if (Object.hasOwn(await sessionArea.get(key), key)) throw unavailable();
+        writeAttempted = true;
         await sessionArea.set({ [key]: { version: 1, navigationToken, ownerId, rawUrl, issuedAt, expiresAt, state: 'prepared' } });
         const confirmed = exact((await sessionArea.get(key))?.[key], LEGACY_RECORD_KEYS);
         if (!confirmed || !same(confirmed, { version: 1, navigationToken, ownerId, rawUrl, issuedAt, expiresAt, state: 'prepared' })) throw unavailable();
-      } catch { throw unavailable(); }
+      } catch { if (writeAttempted) await erase(sessionArea, key); throw unavailable(); }
       return freeze({ navigationToken, expiresAt });
     }); },
     takeInternal({ ownerId, navigationToken }) { return serial(async () => {
-      const { key, record } = await readLegacy(ownerId, navigationToken); const nowValue = currentTime(now);
-      if (nowValue === null) throw unavailable();
+      const { key, record } = await readLegacy(ownerId, navigationToken); const nowValue = currentTime(now, state);
+      if (nowValue === null || nowValue < record.issuedAt) { await erase(sessionArea, key); throw unavailable(); }
       if (nowValue >= record.expiresAt) { await erase(sessionArea, key); throw unavailable(); }
       if (!await erase(sessionArea, key)) throw unavailable(); return record.rawUrl;
     }); },
@@ -190,42 +266,66 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       let canonical; let evidenceUrl;
       try { canonical = canonicalNavigationUrl(rawUrl); evidenceUrl = sanitizeEvidenceUrlV1(canonical, { includeQuery: input.includeQuery }); }
       catch { throw new TypeError('RAW_NAVIGATION_INVALID'); }
-      const issuedAt = currentTime(now); if (issuedAt === null || issuedAt > Number.MAX_SAFE_INTEGER - input.ttlMs) throw new TypeError('RAW_NAVIGATION_INVALID');
+      const issuedAt = currentTime(now, state); if (issuedAt === null || issuedAt > Number.MAX_SAFE_INTEGER - input.ttlMs) throw new TypeError('RAW_NAVIGATION_INVALID');
       let sessionDigest; try { sessionDigest = await digestManager.digest(canonical); } catch { throw consumed(); }
       if (!validDigest(sessionDigest)) throw consumed();
       const navigationToken = token(randomBytes(16)); const expiresAt = issuedAt + input.ttlMs; const key = `${PREFIX}${navigationToken}`;
       const record = freeze({ version: 'RawNavigationUrlV1', auditId: input.auditId, purpose: input.purpose, rawUrl: canonical, issuedAt, expiresAt });
+      let writeAttempted = false;
       try {
         if (Object.hasOwn(await sessionArea.get(key), key)) throw consumed();
+        writeAttempted = true;
         await sessionArea.set({ [key]: record });
         if (!same(publicRecord((await sessionArea.get(key))?.[key]), record)) throw consumed();
-      } catch (error) { if (error?.message === consumed().message) throw error; throw consumed(); }
+      } catch (error) {
+        if (writeAttempted) await erase(sessionArea, key);
+        if (error?.message === consumed().message) throw error;
+        throw consumed();
+      }
+      state.bindings.set(navigationToken, freeze({ evidenceUrl, sessionDigest }));
       return freeze({ navigationToken, evidenceUrl, sessionDigest, expiresAt });
     }); },
     take(navigationToken, options) { return serial(async () => {
       const input = exact(options, ['auditId', 'purpose']); if (!input || !validId(input.auditId) || !PURPOSES.has(input.purpose)) throw consumed();
       const { key, record } = await readPublic(navigationToken);
       if (record.auditId !== input.auditId) throw wrongAudit(); if (record.purpose !== input.purpose) throw wrongPurpose();
-      const nowValue = currentTime(now); if (nowValue === null) throw consumed();
-      if (nowValue >= record.expiresAt) { await erase(sessionArea, key); throw consumed(); }
-      if (!await erase(sessionArea, key)) throw consumed(); return record.rawUrl;
+      const nowValue = currentTime(now, state); if (nowValue === null || nowValue < record.issuedAt) { await erase(sessionArea, key); dropBindings(state, [navigationToken]); throw consumed(); }
+      if (nowValue >= record.expiresAt) { await erase(sessionArea, key); dropBindings(state, [navigationToken]); throw consumed(); }
+      if (!await erase(sessionArea, key)) throw consumed(); dropBindings(state, [navigationToken]); return record.rawUrl;
     }); },
-    putQueue({ auditId, entries }) { return serial(async () => {
+    putQueue(input) { return serial(async () => {
+      const request = exact(input, ['auditId', 'entries']);
+      if (!request) throw new TypeError('RAW_NAVIGATION_INVALID');
+      const { auditId, entries } = request;
       if (!validId(auditId)) throw new TypeError('RAW_NAVIGATION_INVALID');
       const values = dense(entries); const parsed = values?.map(parseQueueEntry);
-      if (!parsed || parsed.some(entry => entry === null) || new Set(parsed.map(entry => entry.line)).size !== parsed.length ||
-        new Set(parsed.map(entry => entry.navigationToken)).size !== parsed.length) throw new TypeError('RAW_NAVIGATION_INVALID');
-      const nowValue = currentTime(now); if (nowValue === null) throw new TypeError('RAW_NAVIGATION_INVALID');
+      if (!parsed || parsed.length < 1 || parsed.length > 20 || parsed.some(entry => entry === null || entry.status !== 'pending') ||
+        new Set(parsed.map(entry => entry.line)).size !== parsed.length || new Set(parsed.map(entry => entry.navigationToken)).size !== parsed.length) throw new TypeError('RAW_NAVIGATION_INVALID');
+      const nowValue = currentTime(now, state); if (nowValue === null) throw new TypeError('RAW_NAVIGATION_INVALID');
       const sourceRecords = [];
-      for (const entry of parsed) {
-        const { record } = await readPublic(entry.navigationToken);
-        if (record.auditId !== auditId || record.purpose !== 'batch-page' || record.expiresAt <= nowValue) throw new TypeError('RAW_NAVIGATION_INVALID');
-        sourceRecords.push({ entry, record });
+      try {
+        for (const entry of parsed) {
+          const { record } = await readPublic(entry.navigationToken);
+          if (record.auditId !== auditId || record.purpose !== 'batch-page' || record.expiresAt <= nowValue) throw new TypeError('RAW_NAVIGATION_INVALID');
+          let expectedEvidence; let expectedDigest;
+          try {
+            expectedEvidence = sanitizeEvidenceUrlV1(record.rawUrl, { includeQuery: entry.evidenceUrl.queryIncluded });
+            expectedDigest = await digestManager.digest(record.rawUrl);
+          } catch { throw new TypeError('RAW_NAVIGATION_INVALID'); }
+          const binding = state.bindings.get(entry.navigationToken);
+          if (!binding || !same(binding.evidenceUrl, entry.evidenceUrl) || binding.sessionDigest !== entry.sessionDigest ||
+            !same(expectedEvidence, entry.evidenceUrl) || expectedDigest !== entry.sessionDigest) throw new TypeError('RAW_NAVIGATION_INVALID');
+          sourceRecords.push({ entry, record });
+        }
+      } catch (error) {
+        dropBindings(state, parsed.map(entry => entry.navigationToken));
+        throw error;
       }
       const issuedAt = Math.min(...sourceRecords.map(source => source.record.issuedAt));
       const expiresAt = Math.min(...sourceRecords.map(source => source.record.expiresAt));
       const key = `${QUEUE_PREFIX}${auditId}`;
       const queue = freeze({ version: 1, auditId, ownerOperationId: token(randomBytes(16)), revision: 1, issuedAt, expiresAt, nextIndex: 0, entries: parsed });
+      let writeAttempted = false;
       try {
         if (Object.hasOwn(await sessionArea.get(key), key)) throw staleQueue();
         const writes = { [key]: queue };
@@ -234,16 +334,24 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
           record: freeze({ ...record, issuedAt, expiresAt }),
         }));
         for (const source of normalized) writes[source.key] = source.record;
+        writeAttempted = true;
         await sessionArea.set(writes);
         const confirmed = parseQueue((await sessionArea.get(key))?.[key]);
         if (!confirmed || !same(confirmed, queue) || !same(queueState(confirmed), queueState(queue))) throw staleQueue();
         for (const source of normalized) if (!same(publicRecord((await sessionArea.get(source.key))?.[source.key]), source.record)) throw staleQueue();
-      } catch (error) { if (error?.message === staleQueue().message) throw error; throw staleQueue(); }
+      } catch (error) {
+        if (writeAttempted) await removeKeys(sessionArea, [key, ...sourceRecords.map(source => `${PREFIX}${source.entry.navigationToken}`)]);
+        dropBindings(state, parsed.map(entry => entry.navigationToken));
+        if (error?.message === staleQueue().message) throw error;
+        throw staleQueue();
+      }
+      dropBindings(state, parsed.map(entry => entry.navigationToken));
     }); },
     readQueue(auditId) { return serial(async () => {
       const { key, queue } = await readQueue(auditId); if (!queue) return null;
-      const nowValue = currentTime(now); if (nowValue === null) throw staleQueue();
-      if (nowValue >= queue.expiresAt) { if (!await erase(sessionArea, key)) throw staleQueue(); return null; }
+      const keys = [key, ...queue.entries.map(entry => `${PREFIX}${entry.navigationToken}`)];
+      const nowValue = currentTime(now, state); if (nowValue === null || nowValue < queue.issuedAt) { if (!await removeKeys(sessionArea, keys)) throw staleQueue(); dropBindings(state, queue.entries.map(entry => entry.navigationToken)); throw staleQueue(); }
+      if (nowValue >= queue.expiresAt) { if (!await removeKeys(sessionArea, keys)) throw staleQueue(); dropBindings(state, queue.entries.map(entry => entry.navigationToken)); return null; }
       return freeze(structuredClone(queue));
     }); },
     replaceQueue(auditId, value, options) { return serial(async () => {
@@ -251,35 +359,51 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       if (!validId(auditId) || !expected || !expectedState || !Number.isSafeInteger(expected.expectedRevision) || expected.expectedRevision < 1 || !desired || desired.auditId !== auditId) throw staleQueue();
       const { key, queue: current } = await readQueue(auditId);
       if (!current || current.revision !== expected.expectedRevision || !same(queueState(current), expectedState) || desired.ownerOperationId !== current.ownerOperationId ||
-        desired.revision !== current.revision + 1 || desired.issuedAt !== current.issuedAt || desired.expiresAt !== current.expiresAt) throw staleQueue();
-      const nowValue = currentTime(now); if (nowValue === null || nowValue >= current.expiresAt) throw staleQueue();
+        desired.revision !== current.revision + 1 || desired.issuedAt !== current.issuedAt || desired.expiresAt !== current.expiresAt || !validTransition(current, desired)) throw staleQueue();
+      const nowValue = currentTime(now, state);
+      if (nowValue === null || nowValue < current.issuedAt || nowValue >= current.expiresAt) {
+        if (!await removeKeys(sessionArea, [key, ...current.entries.map(entry => `${PREFIX}${entry.navigationToken}`)])) throw staleQueue();
+        dropBindings(state, current.entries.map(entry => entry.navigationToken));
+        throw staleQueue();
+      }
       try {
         await sessionArea.set({ [key]: desired }); const confirmed = parseQueue((await sessionArea.get(key))?.[key]);
         if (!confirmed || confirmed.revision !== desired.revision || confirmed.ownerOperationId !== desired.ownerOperationId || !same(queueState(confirmed), queueState(desired)) || !same(confirmed, desired)) throw staleQueue();
-      } catch (error) { if (error?.message === staleQueue().message) throw error; throw staleQueue(); }
+      } catch (error) {
+        let restored = false;
+        try {
+          await sessionArea.set({ [key]: current });
+          restored = same(parseQueue((await sessionArea.get(key))?.[key]), current);
+        } catch { restored = false; }
+        if (!restored) await removeKeys(sessionArea, [key, ...current.entries.map(entry => `${PREFIX}${entry.navigationToken}`)]);
+        if (error?.message === staleQueue().message) throw error;
+        throw staleQueue();
+      }
     }); },
     clearAudit(auditId) { return serial(async () => {
       if (!validId(auditId)) throw new TypeError('RAW_NAVIGATION_INVALID'); let entries;
       try { entries = await all(sessionArea); } catch { throw unavailable(); }
-      const keys = Object.entries(entries).flatMap(([key, value]) =>
-        (key.startsWith(PREFIX) && publicRecord(value)?.auditId === auditId) || (key === `${QUEUE_PREFIX}${auditId}` && parseQueue(value)?.auditId === auditId) ? [key] : []);
+      const keys = entries.flatMap(([key, value]) =>
+        (key.startsWith(PREFIX) && recordAuditId(value) === auditId) || key === `${QUEUE_PREFIX}${auditId}` ? [key] : []);
       if (keys.length === 0) return 0;
-      try { await sessionArea.remove(keys); const confirmed = await all(sessionArea); if (keys.some(key => Object.hasOwn(confirmed, key))) throw unavailable(); }
-      catch { throw unavailable(); }
+      if (!await removeKeys(sessionArea, keys)) throw unavailable();
+      dropBindings(state, keys.filter(key => key.startsWith(PREFIX)).map(key => key.slice(PREFIX.length)));
       return keys.length;
     }); },
     clearExpired() { return serial(async () => {
-      const nowValue = currentTime(now); if (nowValue === null) throw unavailable(); let entries;
+      const nowValue = currentTime(now, state); if (nowValue === null) throw unavailable(); let entries;
       try { entries = await all(sessionArea); } catch { throw unavailable(); }
-      const keys = Object.entries(entries).flatMap(([key, value]) => {
+      const keys = entries.flatMap(([key, value]) => {
         const legacy = key.startsWith(PREFIX) ? exact(value, LEGACY_RECORD_KEYS) : null;
         const publicValue = key.startsWith(PREFIX) ? publicRecord(value) : null;
         const queue = key.startsWith(QUEUE_PREFIX) ? parseQueue(value) : null;
-        return (legacy && validClock(legacy.expiresAt) && nowValue >= legacy.expiresAt) || (publicValue && nowValue >= publicValue.expiresAt) || (queue && nowValue >= queue.expiresAt) ? [key] : [];
+        const malformed = key.startsWith(PREFIX) && !legacy && !publicValue || key.startsWith(QUEUE_PREFIX) && !queue;
+        return malformed || (legacy && validClock(legacy.expiresAt) && nowValue >= legacy.expiresAt) ||
+          (publicValue && nowValue >= publicValue.expiresAt) || (queue && nowValue >= queue.expiresAt) ? [key] : [];
       });
       if (keys.length === 0) return 0;
-      try { await sessionArea.remove(keys); const confirmed = await all(sessionArea); if (keys.some(key => Object.hasOwn(confirmed, key))) throw unavailable(); }
-      catch { throw unavailable(); }
+      if (!await removeKeys(sessionArea, keys)) throw unavailable();
+      dropBindings(state, keys.filter(key => key.startsWith(PREFIX)).map(key => key.slice(PREFIX.length)));
       return keys.length;
     }); },
   });
