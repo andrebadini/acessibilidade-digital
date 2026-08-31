@@ -450,6 +450,24 @@ git commit -m "feat: isolate volatile navigation authority"
 > convertidas para o painel lateral. Testes devem continuar comprovando zero
 > popup.
 
+> **Emenda vinculante 3B — 2026-08-31.** O contrato rastreado
+> `docs/superpowers/plans/2026-08-31-task-3b-journal-consentimento.md`
+> substitui integralmente, apenas para `pixel-capture-consent.js` e
+> `pixel-consent-expiry.js`, as interfaces e os Steps 4/scheduler históricos
+> desta Task 3. Prevalecem o journal único por auditId, prazo de pausa de 10
+> minutos dos rulings R8/R10 do controller, FSM
+> `paused|resuming|revoked|finished`, gate final de documento/prazo/sinais,
+> APIs fechadas pelo par audit+consent, scans fail-closed audit-scoped e recovery
+> com liquidator temporizado/backoff. `run('alarm'|'panel')` nunca processa
+> `resuming`; somente `recoverOnStartup()` o faz antes da readiness, sem replay
+> de pixels e preservando eventual resultado terminal durável pela correlação
+> privada não autorizante descrita naquele contrato.
+>
+> Na Task 5, substituir `revokeAudit(auditId,'audit-deleted')` por leitura da
+> suspensão e `revokeAudit({auditId,consentId,reason:'AUDIT_DELETED'})`; cleaners
+> usam somente o par/source confirmados e `finish({auditId,consentId})` ocorre
+> após liquidação. `missing|mismatch` exige releitura, nunca cleanup aproximado.
+
 #### Contratos rebaselinados
 
 - **R1 — pausa no mesmo percurso visual:** `privacy-paused` conserva
