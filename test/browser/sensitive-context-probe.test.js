@@ -181,3 +181,34 @@ test('keeps frozen target documentIds separate from the immutable expected inven
   });
   assert.deepEqual(signals.categories, ['otp']);
 });
+
+test('reads type only from INPUT elements after the injected probe is serialized', async () => {
+  const reads = { divType: 0, inputType: 0 };
+  const div = {
+    tagName: 'DIV', shadowRoot: null,
+    getAttribute(name) {
+      if (name === 'type') reads.divType += 1;
+      return name === 'type' ? 'password' : null;
+    },
+    hasAttribute() { return false; },
+  };
+  const input = {
+    tagName: 'INPUT', shadowRoot: null,
+    getAttribute(name) {
+      if (name === 'type') reads.inputType += 1;
+      return name === 'type' ? 'password' : null;
+    },
+    hasAttribute() { return false; },
+  };
+  await withDocument(fakeRoot([div, input]), async () => {
+    const signals = await probeSensitiveContextInTab(7, {
+      documentIds: ['doc-top'],
+      executeScript: async options => {
+        const serialized = Function(`return (${options.func.toString()});`)();
+        return [injection(0, 'doc-top', serialized())];
+      },
+    });
+    assert.deepEqual(signals.categories, ['password']);
+  });
+  assert.deepEqual(reads, { divType: 0, inputType: 1 });
+});

@@ -103,13 +103,14 @@ function inspectSensitiveContext() {
       if (typeof getAttribute !== 'function' || typeof hasAttribute !== 'function') throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE');
       const tagName = element.tagName;
       if (typeof tagName !== 'string') throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE');
-      const type = getAttribute.call(element, 'type');
+      const isInput = tagName.toLowerCase() === 'input';
+      const type = isInput ? getAttribute.call(element, 'type') : null;
       const autocomplete = getAttribute.call(element, 'autocomplete');
       if ((type !== null && typeof type !== 'string') || (autocomplete !== null && typeof autocomplete !== 'string')) {
         throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE');
       }
       const tokens = autocomplete === null ? [] : autocomplete.toLowerCase().split(/[\t\n\f\r ]+/u).filter(Boolean);
-      if (tagName.toLowerCase() === 'input' && type?.toLowerCase() === 'password') output.password = true;
+      if (isInput && type?.toLowerCase() === 'password') output.password = true;
       if (tokens.includes('current-password') || tokens.includes('new-password')) output.password = true;
       if (tokens.includes('one-time-code')) output.otp = true;
       if (tokens.some(token => token.startsWith('cc-'))) output.payment = true;
