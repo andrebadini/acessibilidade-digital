@@ -30,14 +30,15 @@ import { AUDIT_EXECUTION_INTERNAL } from './chrome-adapter.js';
 import { projectAuditResourceOrigin } from '../core/privacy.js';
 import { createOwnedTabRegistry } from './owned-tabs.js';
 import { createRawNavigationVaultV1 } from './raw-navigation-vault.js';
-import { runObservedTabAudit } from './observed-tab-runner.js';
-import { executeObservedAuditPipeline } from './audit-pipeline.js';
+import { readObservedAuditInterruption, runObservedTabAudit } from './observed-tab-runner.js';
+import { createObservedPipelineRunner } from './audit-pipeline.js';
 import { createPageCheckpointRecorder } from './execution-checkpoint.js';
 import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
 import { createCapturePolicyV1, isCapturePolicyV1 } from '../core/privacy/capture-policy.js';
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { createAuditModel } from '../core/report/audit-model.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
+import { isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
 
 const SCHEMA_VERSION = 1;
 const METHODOLOGY = Object.freeze({ name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 130, itemCount: 146 });
@@ -102,11 +103,8 @@ function throwIfAborted(signal) {
   throw new DOMException('Operação cancelada.', 'AbortError');
 }
 
-function rethrowAbort(error, signal) {
-  if (error?.name === 'AbortError' || signal?.aborted) {
-    if (error?.name === 'AbortError') throw error;
-    throwIfAborted(signal);
-  }
+function rethrowAbort(_error, signal) {
+  if (signal?.aborted) throwIfAborted(signal);
 }
 
 function probesTimedOut(raw, normalized) {
@@ -461,7 +459,7 @@ async function runLegacyAudit({
   };
   const fail = (code, message, error) => {
     fatal = true;
-    state.status = error?.name === 'AbortError' || signal?.aborted ? 'cancelled' : 'failed';
+    state.status = signal?.aborted ? 'cancelled' : 'failed';
     state.diagnostics.push(diagnostic(code, message, canonicalTime(now()), false));
   };
 
@@ -735,7 +733,7 @@ async function runLegacyAudit({
     throwIfAborted(signal);
     await progress('complete', 'Auditoria concluída', 100);
   } catch (error) {
-    if (!error?.auditHandled) fail('NAVIGATION_FAILED', error?.name === 'AbortError' || signal?.aborted ? 'A auditoria foi cancelada.' : 'O site não pôde ser aberto de forma estável.', error);
+    if (!error?.auditHandled) fail('NAVIGATION_FAILED', signal?.aborted ? 'A auditoria foi cancelada.' : 'O site não pôde ser aberto de forma estável.', error);
   } finally {
     if (cdp) {
       try { await cdp.disconnect(); } catch { state.diagnostics.push(diagnostic('CDP_DISCONNECT_FAILED', 'A sessão de depuração não pôde ser encerrada automaticamente.', canonicalTime(now()), true)); if (state.status === 'complete') state.status = 'partial'; }
@@ -775,24 +773,6 @@ function opaqueId(randomBytes, prefix) {
   return `${prefix}-${btoa(text).replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=+$/u, '')}`;
 }
 
-function createPauseStore(sessionArea) {
-  const prefix = 'audita:privacy-pause:v1:';
-  return Object.freeze({
-    async persistPause(record) {
-      const key = `${prefix}${record.pauseId}`;
-      try {
-        await sessionArea.set({ [key]: record });
-        const verified = (await sessionArea.get(key))?.[key];
-        if (!verified) throw new Error();
-      } catch { throw new Error('PRIVACY_STATE_UNAVAILABLE'); }
-    },
-    async getPause(pauseId) {
-      try { return (await sessionArea.get(`${prefix}${pauseId}`))?.[`${prefix}${pauseId}`] ?? null; }
-      catch { throw new Error('PRIVACY_STATE_UNAVAILABLE'); }
-    },
-  });
-}
-
 function internalContract(chromeAdapter) {
   const descriptor = chromeAdapter && typeof chromeAdapter === 'object'
     ? Object.getOwnPropertyDescriptor(chromeAdapter, AUDIT_EXECUTION_INTERNAL)
@@ -826,6 +806,83 @@ function captureExactRecord(value, keys) {
   } catch { return null; }
 }
 
+function copyEvidenceUrlV1(value) {
+  const copy = captureExactRecord(value, ['version', 'href', 'queryIncluded', 'redactedSegments']);
+  return copy && isEvidenceUrlV1(copy) ? Object.freeze(copy) : null;
+}
+
+function copyOwnedObservedTarget(value) {
+  const copy = captureExactRecord(value, [
+    'version', 'kind', 'ownershipId', 'tabId', 'windowId', 'documentId', 'urlEvidence',
+    'urlSessionDigest', 'cleanupMode', 'pageId',
+  ]);
+  const urlEvidence = copy && copyEvidenceUrlV1(copy.urlEvidence);
+  if (!copy || copy.version !== 'ObservedTargetV1' || copy.kind !== 'owned-disposable' ||
+    typeof copy.ownershipId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/u.test(copy.ownershipId) ||
+    !Number.isSafeInteger(copy.tabId) || copy.tabId < 0 ||
+    !Number.isSafeInteger(copy.windowId) || copy.windowId < 0 ||
+    typeof copy.documentId !== 'string' || copy.documentId.length < 1 || copy.documentId.length > 512 ||
+    typeof copy.urlSessionDigest !== 'string' || !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(copy.urlSessionDigest) ||
+    !['always', 'pre-observation-failure'].includes(copy.cleanupMode) ||
+    !(copy.pageId === null || typeof copy.pageId === 'string' && /^[A-Za-z0-9._:-]{1,160}$/u.test(copy.pageId)) ||
+    !urlEvidence || urlEvidence.queryIncluded) return null;
+  return Object.freeze({ ...copy, urlEvidence });
+}
+
+function copyAttachedObservedTarget(value) {
+  const copy = captureExactRecord(value, [
+    'version', 'kind', 'tabId', 'windowId', 'documentId', 'urlEvidence', 'urlSessionDigest',
+  ]);
+  const urlEvidence = copy && copyEvidenceUrlV1(copy.urlEvidence);
+  if (!copy || copy.version !== 'ObservedTargetV1' || copy.kind !== 'attached' ||
+    !Number.isSafeInteger(copy.tabId) || copy.tabId < 0 ||
+    !Number.isSafeInteger(copy.windowId) || copy.windowId < 0 ||
+    typeof copy.documentId !== 'string' || copy.documentId.length < 1 || copy.documentId.length > 512 ||
+    typeof copy.urlSessionDigest !== 'string' || !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(copy.urlSessionDigest) ||
+    !urlEvidence || urlEvidence.queryIncluded) return null;
+  return Object.freeze({ ...copy, urlEvidence });
+}
+
+function recoveredOwnedCleanupState(value, { auditId, ownershipId, observedTarget, cleanupMode }) {
+  const record = captureExactRecord(value, [
+    'version', 'ownershipId', 'auditId', 'purpose', 'tabId', 'windowId',
+    'cleanupMode', 'state', 'createdAt', 'updatedAt',
+  ]);
+  if (!record || record.version !== 2 || record.ownershipId !== ownershipId || record.auditId !== auditId ||
+    record.purpose !== 'audit' || record.tabId !== observedTarget.tabId || record.windowId !== observedTarget.windowId ||
+    record.cleanupMode !== cleanupMode || !['removed', 'cleanup-pending', 'retained-for-review'].includes(record.state) ||
+    (record.state === 'retained-for-review' && cleanupMode !== 'pre-observation-failure')) return null;
+  try {
+    if (canonicalTime(record.createdAt) !== record.createdAt || canonicalTime(record.updatedAt) !== record.updatedAt) return null;
+  } catch { return null; }
+  return record.state;
+}
+
+function copyOwnedInterruption(value, { auditId, ownershipId, cleanupMode }) {
+  const copy = captureExactRecord(value, [
+    'version', 'auditId', 'observationState', 'observedTarget', 'ownershipState', 'reason',
+  ]);
+  const observedTarget = copy && copyOwnedObservedTarget(copy.observedTarget);
+  if (!copy || copy.version !== 1 || copy.auditId !== auditId || copy.observationState !== 'observed' ||
+    !['cancelled', 'failed'].includes(copy.reason) || !observedTarget || observedTarget.ownershipId !== ownershipId ||
+    observedTarget.cleanupMode !== cleanupMode ||
+    !['removed', 'cleanup-pending', 'retained-for-review'].includes(copy.ownershipState)) return null;
+  return Object.freeze({ ...copy, observedTarget });
+}
+
+function copyAttachedInterruption(value, { auditId, target }) {
+  const copy = captureExactRecord(value, [
+    'version', 'auditId', 'observationState', 'observedTarget', 'ownershipState', 'reason',
+  ]);
+  const observedTarget = copy && copyAttachedObservedTarget(copy.observedTarget);
+  if (!copy || copy.version !== 1 || copy.auditId !== auditId || copy.observationState !== 'observed' ||
+    copy.ownershipState !== 'attached' || copy.reason !== 'cancelled' || !observedTarget ||
+    observedTarget.tabId !== target.tabId || observedTarget.windowId !== target.windowId ||
+    observedTarget.documentId !== target.documentId || observedTarget.urlSessionDigest !== target.initialUrlSessionDigest ||
+    observedTarget.urlEvidence.href !== target.initialUrlEvidence.href) return null;
+  return Object.freeze({ ...copy, observedTarget });
+}
+
 function attachedTarget(value) {
   const target = captureExactRecord(value, [
     'kind', 'tabId', 'windowId', 'documentId', 'initialUrlEvidence', 'initialUrlSessionDigest',
@@ -835,12 +892,14 @@ function attachedTarget(value) {
     typeof target.documentId !== 'string' || !/^[A-Za-z0-9._:-]{1,240}$/u.test(target.documentId) ||
     typeof target.initialUrlSessionDigest !== 'string' ||
     !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(target.initialUrlSessionDigest)) throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
+  let initialUrlEvidence;
   try {
-    const url = new URL(target.initialUrlEvidence);
-    if (!['http:', 'https:'].includes(url.protocol) || url.href !== target.initialUrlEvidence ||
-      url.username || url.password || url.hash) throw new Error();
+    initialUrlEvidence = typeof target.initialUrlEvidence === 'string'
+      ? sanitizeEvidenceUrlV1(target.initialUrlEvidence, { includeQuery: false })
+      : copyEvidenceUrlV1(target.initialUrlEvidence);
   } catch { throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED'); }
-  return Object.freeze(target);
+  if (!initialUrlEvidence || initialUrlEvidence.queryIncluded) throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
+  return Object.freeze({ ...target, initialUrlEvidence });
 }
 
 function proofMatchesAttached(value, target) {
@@ -873,6 +932,110 @@ function captureAttachedFacadeArgs(value) {
   } catch { return null; }
 }
 
+function createObservedLegacyAdapter(chromeAdapter, observedTarget) {
+  return {
+    ...chromeAdapter,
+    captureFullPageEnabled: false,
+    captureElementsEnabled: false,
+    captureElementsWithoutFullPage: false,
+    async createTab() { return { id: observedTarget.tabId, windowId: observedTarget.windowId }; },
+    async navigateTab() {},
+    async waitForStable() { return { url: observedTarget.urlEvidence.href }; },
+    async getFinalUrl() { return observedTarget.urlEvidence.href; },
+    async removeTab() {},
+    async captureFullPage() { throw new Error('PIXEL_CAPTURE_OMITTED'); },
+    async captureElement() { throw new Error('PIXEL_CAPTURE_OMITTED'); },
+    composeAnnouncementMap: undefined,
+  };
+}
+
+function alignLegacyDraftWithObservedEvidence(draft, evidenceUrl, requestedEvidenceUrl = null) {
+  const aligned = structuredClone(draft);
+  if (requestedEvidenceUrl !== null) aligned.requestedUrl = requestedEvidenceUrl;
+  aligned.finalUrl = evidenceUrl;
+  aligned.finalUrlObserved = true;
+  return deepFreeze(aligned);
+}
+
+function projectCancelledAuditDraft(draft, cancellationAt) {
+  const cancelled = structuredClone(draft);
+  cancelled.session.status = 'cancelled';
+  cancelled.session.partial = false;
+  cancelled.session.diagnostics = (Array.isArray(cancelled.session.diagnostics) ? cancelled.session.diagnostics : [])
+    .filter(entry => entry?.recoverable !== false);
+  cancelled.timestamps = { ...cancelled.timestamps, endedAt: cancellationAt };
+  cancelled.progress = (Array.isArray(cancelled.progress) ? cancelled.progress : [])
+    .filter(entry => entry?.phase !== 'complete' && !/concluída/iu.test(entry?.message ?? ''));
+  cancelled.progress.push({
+    type: 'AUDIT_PROGRESS', sessionId: cancelled.auditId, auditId: cancelled.auditId,
+    phase: 'cancelled', message: 'Auditoria cancelada', percent: 100, at: cancellationAt,
+  });
+  cancelled.report = {
+    status: 'pending', reviewUrl: null,
+    artifact: { status: 'pending', formats: [] },
+  };
+  cancelled.session.diagnostics.push(diagnostic(
+    'NAVIGATION_FAILED', 'A auditoria foi cancelada.', cancellationAt, false,
+  ));
+  return deepFreeze(cancelled);
+}
+
+async function createInterruptedObservedDraft({ auditId, requestedUrl, observedTarget, startedAt, now }) {
+  const endedAt = canonicalTime(now());
+  return draftModel({
+    auditId,
+    requestedUrl,
+    finalUrl: observedTarget.urlEvidence.href,
+    attempted: true,
+    finalUrlObserved: true,
+    startedAt,
+    endedAt,
+    environment: {
+      chromeVersion: '',
+      viewport: { width: null, height: null, deviceScaleFactor: null },
+    },
+    status: 'failed',
+    diagnostics: [diagnostic(
+      'FULL_PAGE_CAPTURE_FAILED',
+      'Não foi possível capturar a página completa no estado original.',
+      endedAt,
+      true,
+    )],
+    progress: [],
+    snapshot: null,
+    ruleResults: [],
+    coreRuleResults: [],
+    itemResults: fallbackItems(),
+    occurrences: [],
+    manualReview: [],
+    reviewDecisions: [],
+    editorialRuleResults: [],
+    axe: undefined,
+    accessibilityWidgets: detectAccessibilityWidgets(null),
+    limitations: [],
+    presentation: { groups: [], occurrenceCount: 0, hiddenOccurrenceCount: 0 },
+    artifacts: [],
+    fullPage: null,
+    report: { status: 'pending', reviewUrl: null, artifact: { status: 'pending', formats: [] } },
+  });
+}
+
+async function cancelledAuditProjection({ draft, now, expectedExtensionId, rulesVersion }) {
+  const cancellationAt = canonicalTime(now());
+  const cancelled = projectCancelledAuditDraft(draft, cancellationAt);
+  const model = await enrichAuditForReport(cancelled, {
+    now,
+    expectedExtensionId,
+    browserVersion: cancelled.environment?.chromeVersion || 'não disponível',
+    rulesVersion: cancelled.methodology?.version || rulesVersion,
+  });
+  return Object.freeze({ draft: cancelled, model });
+}
+
+async function cancelledAuditModel(args) {
+  return (await cancelledAuditProjection(args)).model;
+}
+
 /** Production attached-page façade. It never accepts or owns a raw navigation target. */
 export async function runAttachedAuditExecution(rawArgs = {}) {
   const args = captureAttachedFacadeArgs(rawArgs);
@@ -885,10 +1048,17 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
   if (typeof auditId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/u.test(auditId) ||
     typeof sessionCapabilityId !== 'string' || !/^[A-Za-z0-9_-]{22}$/u.test(sessionCapabilityId) ||
     !isCapturePolicyV1(capturePolicy) || capturePolicy.mode !== 'no-pixels' || capturePolicy.includeQuery !== false ||
+    pageId !== 'page-1' ||
     typeof modelNow !== 'function' || typeof onCheckpoint !== 'function' || typeof persistAuditModel !== 'function' ||
-    !chromeAdapter || typeof chromeAdapter.probeDocumentIdentity !== 'function') {
+    !chromeAdapter || typeof chromeAdapter !== 'object') {
     throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
   }
+  let probeDocumentIdentity;
+  let legacyEffects;
+  try {
+    probeDocumentIdentity = requiredAdapterMethod(chromeAdapter, 'probeDocumentIdentity');
+    legacyEffects = captureLegacyEffects(chromeAdapter);
+  } catch { throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED'); }
   const inventory = await createInstalledCoreRuleInventory();
   const startedAt = canonicalTime(modelNow());
   const checkpointRecorder = await createPageCheckpointRecorder({
@@ -896,258 +1066,464 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
   });
   let legacyDraft = null;
   let terminalModel = null;
+  let terminalPersistenceStarted = false;
+  let runnerTargetChanged = false;
+  let runnerProofCount = 0;
+  let runnerFinalProofAttempted = false;
+  let runnerFinalProofMatched = false;
+  let finalProofAttempted = false;
+  let finalProofMatched = false;
   let closedFailureCode = 'AUDIT_FAILED';
-  const pipeline = args => executeObservedAuditPipeline({
-    ...args,
-    services: {
-      async collectObservedPage({ observedTarget }) {
-        const observedAdapter = {
-          ...chromeAdapter,
-          captureFullPageEnabled: false,
-          captureElementsEnabled: false,
-          captureElementsWithoutFullPage: false,
-          async createTab() { return { id: observedTarget.tabId, windowId: observedTarget.windowId }; },
-          async navigateTab() {},
-          async waitForStable() { return { url: observedTarget.urlEvidence }; },
-          async removeTab() {},
-          async captureFullPage() { throw new Error('PIXEL_CAPTURE_OMITTED'); },
-          async captureElement() { throw new Error('PIXEL_CAPTURE_OMITTED'); },
-          composeAnnouncementMap: undefined,
-        };
-        legacyDraft = await runLegacyAudit({
-          url: target.initialUrlEvidence, chromeAdapter: observedAdapter, now: modelNow,
-          idFactory: () => auditId, signal, closeAuditTab: false, expectedExtensionId, startedAt,
-        });
-        terminalModel = await enrichAuditForReport(legacyDraft, {
-          now: modelNow, expectedExtensionId,
-          browserVersion: legacyDraft.environment?.chromeVersion || 'não disponível',
-          rulesVersion: legacyDraft.methodology?.version || inventory.rulesVersion,
-        });
-        return { version: 1, kind: 'legacy-observation' };
-      },
-      async runCoreRules() {
-        return { ruleResults: terminalModel.ruleResults.filter(result => result.source?.engine === 'audita-core') };
-      },
-      async buildAuditModel() { return terminalModel; },
-      async persistAuditModel(model) {
-        const finalProof = await chromeAdapter.probeDocumentIdentity(target.tabId);
-        if (!proofMatchesAttached(finalProof, target)) args.failTargetChanged();
-        if (signal?.aborted) throw new Error('AUDIT_ABORTED');
-        if (!signal?.aborted && model?.session?.status === 'cancelled') throw new Error('AUDIT_FAILED');
-        await persistAuditModel(model);
-      },
+  const services = Object.freeze({
+    async collectObservedPage({ observedTarget }) {
+      const observedAdapter = createObservedLegacyAdapter(legacyEffects, observedTarget);
+      legacyDraft = await runLegacyAudit({
+        url: target.initialUrlEvidence.href,
+        chromeAdapter: observedAdapter,
+        now: modelNow,
+        idFactory: () => auditId,
+        signal,
+        closeAuditTab: false,
+        expectedExtensionId,
+        startedAt,
+      });
+      legacyDraft = alignLegacyDraftWithObservedEvidence(
+        legacyDraft,
+        observedTarget.urlEvidence.href,
+        target.initialUrlEvidence.href,
+      );
+      terminalModel = await enrichAuditForReport(legacyDraft, {
+        now: modelNow,
+        expectedExtensionId,
+        browserVersion: legacyDraft.environment?.chromeVersion || 'não disponível',
+        rulesVersion: legacyDraft.methodology?.version || inventory.rulesVersion,
+      });
+      return Object.freeze({ version: 1, kind: 'legacy-observation' });
+    },
+    async runCoreRules() {
+      return Object.freeze({
+        ruleResults: terminalModel.ruleResults.filter(result => result.source?.engine === 'audita-core'),
+      });
+    },
+    async buildAuditModel() { return terminalModel; },
+    async persistAuditModel(model) {
+      finalProofAttempted = true;
+      let finalProof;
+      try { finalProof = await probeDocumentIdentity(target.tabId); } catch {
+        closedFailureCode = 'AUDIT_FAILED';
+        throw new Error('TARGET_PROOF_UNAVAILABLE');
+      }
+      if (!proofMatchesAttached(finalProof, target)) {
+        closedFailureCode = 'TARGET_CHANGED';
+        throw new Error('TARGET_CHANGED');
+      }
+      finalProofMatched = true;
+      if (signal?.aborted) {
+        closedFailureCode = 'AUDIT_ABORTED';
+        throw new Error('AUDIT_ABORTED');
+      }
+      if (model?.session?.status === 'cancelled') {
+        closedFailureCode = 'AUDIT_FAILED';
+        throw new Error('AUDIT_FAILED');
+      }
+      terminalPersistenceStarted = true;
+      await persistAuditModel(model);
     },
   });
-  const failureModelFactory = async ({ code, status }) => {
-    closedFailureCode = code;
-    if (code !== 'AUDIT_ABORTED') return Object.freeze({
-      schemaVersion: 2, auditId,
-      session: Object.freeze({ status, diagnostics: Object.freeze([Object.freeze({ code })]) }),
-    });
-    const draft = legacyDraft ?? await runLegacyAudit({
-      url: target.initialUrlEvidence,
-      chromeAdapter: { async createTab() { throw new Error('AUDIT_ABORTED'); } },
-      now: modelNow, idFactory: () => auditId, signal: undefined, closeAuditTab: false, expectedExtensionId, startedAt,
-    });
-    const cancelled = structuredClone(draft);
-    cancelled.session.status = 'cancelled';
-    cancelled.session.partial = false;
-    const cancellationAt = canonicalTime(cancelled.timestamps?.endedAt ?? modelNow());
-    if (!cancelled.session.diagnostics.some(entry => entry?.code === 'NAVIGATION_FAILED' &&
-      entry?.message === 'A auditoria foi cancelada.' && entry?.recoverable === false)) {
-      cancelled.session.diagnostics.push(diagnostic(
-        'NAVIGATION_FAILED', 'A auditoria foi cancelada.', cancellationAt, false,
-      ));
-    }
-    cancelled.session.diagnostics.push(diagnostic('AUDIT_ABORTED', 'A auditoria foi cancelada.', cancellationAt, false));
-    return enrichAuditForReport(cancelled, {
-      now: modelNow, expectedExtensionId,
-      browserVersion: cancelled.environment?.chromeVersion || 'não disponível',
-      rulesVersion: cancelled.methodology?.version || inventory.rulesVersion,
-    });
-  };
-  const observed = await runObservedTabAudit({
-    auditId, sessionCapabilityId, target, capturePolicy,
-    privacyDecision: Object.freeze({ status: 'no-pixels', limitationCode: 'PIXEL_CAPTURE_OMITTED' }),
-    checkpointRecorder, signal, chromeAdapter, pipeline, failureModelFactory, now: modelNow,
+  const runPipeline = createObservedPipelineRunner({ checkpointRecorder, services });
+  const runnerAdapter = Object.freeze({
+    async probeDocumentIdentity(tabId) {
+      runnerProofCount += 1;
+      const finalAttempt = runnerProofCount >= 2;
+      if (finalAttempt) runnerFinalProofAttempted = true;
+      let proof;
+      try { proof = await probeDocumentIdentity(tabId); } catch {
+        if (finalAttempt) closedFailureCode = 'AUDIT_FAILED';
+        throw new Error('TARGET_PROOF_UNAVAILABLE');
+      }
+      const matched = proofMatchesAttached(proof, target);
+      if (finalAttempt) runnerFinalProofMatched = matched;
+      if (!matched) {
+        runnerTargetChanged = true;
+        closedFailureCode = 'TARGET_CHANGED';
+      }
+      return proof;
+    },
+    runPipeline,
   });
-  const lastCheckpoint = (() => {
-    try {
-      return validateExecutionCheckpoint({ auditId, checkpoint: observed.checkpoint, pageOrder: [pageId] });
-    } catch { return null; }
-  })();
-  if (observed.status === 'completed' || closedFailureCode === 'AUDIT_ABORTED') {
+  let observed = null;
+  let observedInterruption = null;
+  try {
+    observed = await runObservedTabAudit({
+      auditId,
+      target,
+      chromeAdapter: runnerAdapter,
+      capturePolicy,
+      privacyGate: null,
+      onCheckpoint,
+      now: modelNow,
+      signal,
+      expectedExtensionId,
+    });
+  } catch (error) {
+    observedInterruption = copyAttachedInterruption(
+      readObservedAuditInterruption(error),
+      { auditId, target },
+    );
+    if (terminalPersistenceStarted && !(signal?.aborted && legacyDraft)) {
+      throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
+    }
+    if (runnerTargetChanged) closedFailureCode = 'TARGET_CHANGED';
+    const attestationAttempted = runnerFinalProofAttempted || finalProofAttempted;
+    const attestationsMatched = (!runnerFinalProofAttempted || runnerFinalProofMatched) &&
+      (!finalProofAttempted || finalProofMatched);
+    if (signal?.aborted && legacyDraft && closedFailureCode !== 'TARGET_CHANGED' &&
+      (!attestationAttempted || attestationsMatched)) closedFailureCode = 'AUDIT_ABORTED';
+  }
+  let lastCheckpoint = null;
+  try {
+    lastCheckpoint = validateExecutionCheckpoint({
+      auditId,
+      checkpoint: checkpointRecorder.snapshot(),
+      pageOrder: [pageId],
+    });
+  } catch { /* a execução não chegou ao primeiro checkpoint */ }
+  if (observedInterruption && signal?.aborted && !terminalPersistenceStarted && !legacyDraft && lastCheckpoint) {
+    const draft = await createInterruptedObservedDraft({
+      auditId,
+      requestedUrl: target.initialUrlEvidence.href,
+      observedTarget: observedInterruption.observedTarget,
+      startedAt,
+      now: modelNow,
+    });
+    const model = await cancelledAuditModel({
+      draft, now: modelNow, expectedExtensionId, rulesVersion: inventory.rulesVersion,
+    });
+    return deepFreeze({ version: 1, auditId, state: 'model', failureCode: null, model, checkpoint: lastCheckpoint });
+  }
+  if (observed?.observationState === 'pre-observation-failure') {
+    return deepFreeze({
+      version: 1,
+      auditId,
+      state: 'revoked',
+      failureCode: runnerTargetChanged ? 'TARGET_CHANGED' : 'AUDIT_FAILED',
+      model: null,
+      checkpoint: lastCheckpoint,
+    });
+  }
+  if (observed?.observationState === 'observed' && ['complete', 'partial', 'cancelled', 'failed'].includes(observed.status)) {
     let model;
     try { model = createAuditModel(observed.model); } catch { throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED'); }
-    if (model.auditId !== auditId || !['complete', 'partial', 'cancelled'].includes(model.session.status) || !lastCheckpoint) {
+    if (model.auditId !== auditId || model.session.status !== observed.status || !lastCheckpoint) {
       throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
     }
     return deepFreeze({ version: 1, auditId, state: 'model', failureCode: null, model, checkpoint: lastCheckpoint });
   }
-  const failureCode = closedFailureCode === 'TARGET_CHANGED' ? 'TARGET_CHANGED'
-    : closedFailureCode === 'PRIVACY_TARGET_CHANGED' ? 'PRIVACY_PAUSED'
-      : 'AUDIT_FAILED';
+  if (closedFailureCode === 'AUDIT_ABORTED' && legacyDraft && lastCheckpoint) {
+    const model = await cancelledAuditModel({
+      draft: legacyDraft, now: modelNow, expectedExtensionId, rulesVersion: inventory.rulesVersion,
+    });
+    if (terminalPersistenceStarted) await persistAuditModel(model);
+    return deepFreeze({ version: 1, auditId, state: 'model', failureCode: null, model, checkpoint: lastCheckpoint });
+  }
   return deepFreeze({
-    version: 1, auditId, state: 'revoked', failureCode, model: null, checkpoint: lastCheckpoint,
+    version: 1,
+    auditId,
+    state: 'revoked',
+    failureCode: closedFailureCode === 'TARGET_CHANGED' ? 'TARGET_CHANGED' : 'AUDIT_FAILED',
+    model: null,
+    checkpoint: lastCheckpoint,
   });
 }
 
+function checkpointProjection(checkpoint, { sourceAuditId, sourcePageId, auditId, pageId }) {
+  const source = validateExecutionCheckpoint({
+    auditId: sourceAuditId,
+    checkpoint,
+    pageOrder: [sourcePageId],
+  });
+  const projected = {
+    version: source.version,
+    auditId,
+    pages: [{ ...source.pages[0], pageId }],
+  };
+  return validateExecutionCheckpoint({ auditId, checkpoint: projected, pageOrder: [pageId] });
+}
+
+function requiredAdapterMethod(adapter, name) {
+  const value = ownValue(adapter, name);
+  if (typeof value !== 'function') throw new TypeError('AUDIT_EXECUTION_DENIED');
+  return value.bind(adapter);
+}
+
+function optionalAdapterMethod(adapter, name) {
+  const value = ownValue(adapter, name);
+  if (value === undefined) return undefined;
+  if (typeof value !== 'function') throw new TypeError('AUDIT_EXECUTION_DENIED');
+  return value.bind(adapter);
+}
+
+function captureLegacyEffects(adapter) {
+  const captured = {};
+  for (const name of [
+    'connectCdp', 'runAxeInTab', 'collectPage', 'runDynamicProbes', 'getEnvironment',
+    'emitProgress', 'handoffReport', 'executeScript', 'createProbeAdapter',
+  ]) {
+    const method = optionalAdapterMethod(adapter, name);
+    if (method) captured[name] = method;
+  }
+  return Object.freeze(captured);
+}
+
 /** Internal orchestration result; its pipeline persists only a validated AuditModel V2. */
-export async function runAuditExecution({
+async function runAuditExecutionInternal({
   url, chromeAdapter, now = () => new Date().toISOString(), idFactory = () => crypto.randomUUID(), signal,
   closeAuditTab = true, expectedExtensionId, pageId = 'page-1', cleanupMode,
-  checkpointAuditId = null,
+  checkpointAuditId = null, onCheckpoint,
 }) {
+  if (checkpointAuditId === null && pageId !== 'page-1') throw new TypeError('AUDIT_EXECUTION_DENIED');
   const internals = internalContract(chromeAdapter);
+  const createTab = requiredAdapterMethod(chromeAdapter, 'createTab');
+  const navigateTab = requiredAdapterMethod(chromeAdapter, 'navigateTab');
+  const waitForStable = requiredAdapterMethod(chromeAdapter, 'waitForStable');
+  const probeDocumentIdentity = requiredAdapterMethod(chromeAdapter, 'probeDocumentIdentity');
+  const removeTab = requiredAdapterMethod(chromeAdapter, 'removeTab');
+  const baseGetEvidenceUrl = optionalAdapterMethod(chromeAdapter, 'getEvidenceUrl');
+  const baseGetFinalUrl = optionalAdapterMethod(chromeAdapter, 'getFinalUrl');
+  const legacyEffects = captureLegacyEffects(chromeAdapter);
   let navigationUrl = normalizeAuditUrl(url);
-  const requestedEvidence = projectAuditResourceOrigin(navigationUrl);
+  const requestedUrlEvidence = sanitizeEvidenceUrlV1(navigationUrl, { includeQuery: false });
   const generatedId = idFactory('audit');
   const auditId = typeof generatedId === 'string' ? generatedId.trim() : '';
-  if (!/^[A-Za-z0-9._:-]{1,160}$/u.test(auditId)) throw new TypeError('O identificador da auditoria é inválido.');
-  const privacyState = internals.privacyState ?? createPauseStore(internals.sessionArea);
-  const resumeRecord = internals.resumePauseId
-    ? await privacyState.getPause(internals.resumePauseId)
-    : null;
-  const resumedOwnerId = ownValue(resumeRecord, 'ownerId');
-  const resumedSessionId = ownValue(resumeRecord, 'sessionCapabilityId');
-  const ownerId = resumeRecord ? resumedOwnerId : opaqueId(internals.randomBytes, 'owner');
-  const sessionCapabilityId = resumeRecord ? resumedSessionId : opaqueId(internals.randomBytes, 'session');
-  if (resumeRecord && (!/^[A-Za-z0-9._:-]{1,160}$/u.test(ownerId ?? '') || !/^[A-Za-z0-9._:-]{1,160}$/u.test(sessionCapabilityId ?? ''))) {
+  const externalAuditId = checkpointAuditId ?? auditId;
+  const selectedCleanupMode = cleanupMode ?? (closeAuditTab === false ? 'pre-observation-failure' : 'always');
+  if (!/^[A-Za-z0-9._:-]{1,160}$/u.test(auditId) ||
+    !/^[A-Za-z0-9._:-]{1,160}$/u.test(externalAuditId) ||
+    !/^[A-Za-z0-9._:-]{1,160}$/u.test(pageId) ||
+    !['always', 'pre-observation-failure'].includes(selectedCleanupMode) ||
+    (onCheckpoint !== undefined && typeof onCheckpoint !== 'function')) {
     throw new TypeError('AUDIT_EXECUTION_DENIED');
   }
+  const capturePolicy = createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false });
+  const ownershipId = opaqueId(internals.randomBytes, 'ownership');
   const rawNavigationVault = createRawNavigationVaultV1({
-    sessionArea: internals.sessionArea, now: internals.epochNow ?? Date.now,
+    sessionArea: internals.sessionArea,
+    now: ownValue(internals, 'epochNow') ?? Date.now,
     randomBytes: internals.randomBytes,
   });
-  const issued = resumeRecord
-    ? { navigationToken: 'A'.repeat(22) }
-    : await rawNavigationVault.putInternal({ ownerId, rawUrl: navigationUrl });
-  navigationUrl = null;
-  const ownedTabs = createOwnedTabRegistry({ sessionArea: internals.sessionArea, chromeAdapter, now });
+  const ownedTabs = createOwnedTabRegistry({
+    sessionArea: internals.sessionArea,
+    chromeAdapter: Object.freeze({ removeTab }),
+    now,
+  });
   const inventory = await createInstalledCoreRuleInventory();
-  const resumeCheckpoint = ownValue(resumeRecord, 'checkpoint');
-  const resumePages = ownValue(resumeCheckpoint, 'pages');
-  const resumePage = ownValue(resumePages, '0');
-  const checkpointStartedAt = ownValue(resumePage, 'startedAt');
+  const startedAt = canonicalTime(now());
+  const internalPageId = 'page-1';
+  const checkpointSink = onCheckpoint ?? ownValue(internals, 'onExecutionCheckpoint') ?? (async () => {});
+  if (typeof checkpointSink !== 'function') throw new TypeError('AUDIT_EXECUTION_DENIED');
   const checkpointRecorder = await createPageCheckpointRecorder({
-    auditId: checkpointAuditId ?? auditId, pageId,
-    startedAt: resumeRecord ? canonicalTime(checkpointStartedAt) : canonicalTime(now()),
-    rulesVersion: inventory.rulesVersion, inventory,
-    onCheckpoint: internals.onExecutionCheckpoint ?? (async () => {}),
+    auditId,
+    pageId: internalPageId,
+    startedAt,
+    rulesVersion: inventory.rulesVersion,
+    inventory,
+    onCheckpoint: checkpoint => checkpointSink(checkpointProjection(checkpoint, {
+      sourceAuditId: auditId,
+      sourcePageId: internalPageId,
+      auditId: externalAuditId,
+      pageId,
+    })),
   });
-  const resumedPolicy = ownValue(resumeRecord, 'capturePolicy');
-  const capturePolicy = isCapturePolicyV1(internals.capturePolicy)
-    ? internals.capturePolicy
-    : isCapturePolicyV1(resumedPolicy) ? resumedPolicy
-    : createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false });
-  const privacyDecision = internals.privacyDecision ?? (
-    capturePolicy.mode === 'no-pixels'
-      ? Object.freeze({ status: 'no-pixels', limitationCode: 'PIXEL_CAPTURE_OMITTED' })
-      : null
-  );
-  if (!privacyDecision) throw new TypeError('AUDIT_EXECUTION_DENIED');
-  let legacyDraft = null;
-  let legacyModel = null;
-  const pipeline = args => executeObservedAuditPipeline({
-    ...args,
-    services: {
-      async collectObservedPage({ observedTarget }) {
-        const observedAdapter = {
-          ...chromeAdapter,
-          captureFullPageEnabled: capturePolicy.captureFullPage,
-          captureElementsEnabled: capturePolicy.captureElements,
-          captureElementsWithoutFullPage: capturePolicy.mode === 'element-only',
-          async createTab() { return { id: observedTarget.tabId, windowId: observedTarget.windowId }; },
-          async navigateTab() {},
-          async waitForStable() { return { url: observedTarget.urlEvidence || requestedEvidence }; },
-          async removeTab(tabId) {
-            if (closeAuditTab === false) return;
-            const current = await ownedTabs.get(ownerId);
-            const removed = await ownedTabs.removeOwned({ ownerId, auditId, tabId, fromState: current?.state });
-            if (removed.state !== 'removed') throw new Error('TAB_CLOSE_FAILED');
-          },
-          ...(capturePolicy.captureFullPage ? {} : {
-            async captureFullPage() { throw new Error('PIXEL_CAPTURE_OMITTED'); },
-          }),
-          ...(capturePolicy.captureElements ? {} : {
-            async captureElement() { throw new Error('PIXEL_CAPTURE_OMITTED'); },
-          }),
-          ...(capturePolicy.composeAnnouncementMap ? {} : { composeAnnouncementMap: undefined }),
-        };
-        const draft = await runLegacyAudit({
-          url: requestedEvidence, chromeAdapter: observedAdapter, now,
-          idFactory: () => auditId, signal, closeAuditTab, expectedExtensionId,
-        });
-        legacyDraft = draft;
-        legacyModel = await enrichAuditForReport(draft, {
-          now, expectedExtensionId,
-          browserVersion: draft.environment?.chromeVersion || 'não disponível',
-          rulesVersion: draft.methodology?.version || '1.0.0',
-        });
-        return { version: 1, kind: 'legacy-observation' };
-      },
-      async runCoreRules() { return { ruleResults: legacyModel.ruleResults.filter(result => result.source?.engine === 'audita-core') }; },
-      async buildAuditModel() { return legacyModel; },
-      async persistAuditModel(model) { await internals.persistAuditModel?.(model); },
+  const persistAuditModel = ownValue(internals, 'persistAuditModel');
+  if (persistAuditModel !== undefined && typeof persistAuditModel !== 'function') {
+    throw new TypeError('AUDIT_EXECUTION_DENIED');
+  }
+  let terminalModel = null;
+  let compatibilityDraft = null;
+  let recoveryObservedTarget = null;
+  let pipelinePersistenceStarted = false;
+  const services = Object.freeze({
+    async collectObservedPage({ observedTarget }) {
+      recoveryObservedTarget = copyOwnedObservedTarget(observedTarget);
+      if (!recoveryObservedTarget || recoveryObservedTarget.ownershipId !== ownershipId ||
+        recoveryObservedTarget.cleanupMode !== selectedCleanupMode) throw new TypeError('AUDIT_EXECUTION_DENIED');
+      const collectedDraft = await runLegacyAudit({
+        url: requestedUrlEvidence.href,
+        chromeAdapter: createObservedLegacyAdapter(legacyEffects, observedTarget),
+        now,
+        idFactory: () => auditId,
+        signal,
+        closeAuditTab: false,
+        expectedExtensionId,
+        startedAt,
+      });
+      const draft = alignLegacyDraftWithObservedEvidence(
+        collectedDraft,
+        observedTarget.urlEvidence.href,
+        requestedUrlEvidence.href,
+      );
+      compatibilityDraft = draft;
+      terminalModel = await enrichAuditForReport(draft, {
+        now,
+        expectedExtensionId,
+        browserVersion: draft.environment?.chromeVersion || 'não disponível',
+        rulesVersion: draft.methodology?.version || inventory.rulesVersion,
+      });
+      return Object.freeze({ version: 1, kind: 'legacy-observation' });
+    },
+    async runCoreRules() {
+      return Object.freeze({
+        ruleResults: terminalModel.ruleResults.filter(result => result.source?.engine === 'audita-core'),
+      });
+    },
+    async buildAuditModel() { return terminalModel; },
+    async persistAuditModel(model) {
+      pipelinePersistenceStarted = true;
+      if (persistAuditModel) await Reflect.apply(persistAuditModel, internals, [model]);
     },
   });
-  const failureModelFactory = async ({ code, status }) => {
-    const draft = await runLegacyAudit({
-      url: requestedEvidence,
-      chromeAdapter: { async createTab() { throw new Error('AUDIT_FAILED'); } },
-      now, idFactory: () => auditId, signal: undefined, closeAuditTab: false, expectedExtensionId,
+  const runPipeline = createObservedPipelineRunner({ checkpointRecorder, services });
+  let tokenConsumed = false;
+  const executionAdapter = Object.freeze({
+    runPipeline,
+    probeDocumentIdentity,
+    ownedTabs,
+    createTab,
+    navigateTab,
+    waitForStable,
+    async resolveNavigationToken(navigationToken) {
+      const resolved = await rawNavigationVault.takeInternal({ ownerId: ownershipId, navigationToken });
+      tokenConsumed = true;
+      return resolved;
+    },
+    async getEvidenceUrl(tabId, includeQuery) {
+      const pending = typeof baseGetEvidenceUrl === 'function'
+        ? baseGetEvidenceUrl(tabId, includeQuery)
+        : typeof baseGetFinalUrl === 'function'
+          ? baseGetFinalUrl(tabId)
+          : (() => { throw new Error('TARGET_EVIDENCE_UNAVAILABLE'); })();
+      const synchronous = copyEvidenceUrlV1(pending);
+      if (synchronous) return synchronous;
+      if (typeof pending === 'string') return sanitizeEvidenceUrlV1(pending, { includeQuery: false });
+      const candidate = await pending;
+      const copied = copyEvidenceUrlV1(candidate);
+      if (copied) return copied;
+      if (typeof candidate === 'string') return sanitizeEvidenceUrlV1(candidate, { includeQuery: false });
+      throw new TypeError('AUDIT_EXECUTION_DENIED');
+    },
+    removeTab,
+  });
+  const issued = await rawNavigationVault.putInternal({ ownerId: ownershipId, rawUrl: navigationUrl });
+  navigationUrl = null;
+  let observed;
+  let thrown = null;
+  let interruption = null;
+  try {
+    observed = await runObservedTabAudit({
+      auditId,
+      target: Object.freeze({
+        kind: 'owned-disposable',
+        ownershipId,
+        navigationToken: issued.navigationToken,
+        cleanupMode: selectedCleanupMode,
+        pageId: checkpointAuditId === null ? pageId : null,
+      }),
+      chromeAdapter: executionAdapter,
+      capturePolicy,
+      privacyGate: null,
+      onCheckpoint: checkpointSink,
+      now,
+      signal,
+      expectedExtensionId,
     });
-    const compatible = structuredClone(draft);
-    compatible.session.status = status;
-    compatible.session.partial = false;
-    if (code === 'AUDIT_ABORTED') compatible.session.diagnostics.push(diagnostic(
-      'AUDIT_ABORTED', 'A auditoria foi cancelada.', canonicalTime(now()), false,
-    ));
-    const failedDraft = deepFreeze(compatible);
-    if (!legacyDraft) legacyDraft = failedDraft;
-    return failedDraft;
-  };
-  let navigationAttempted = false;
-  const executionAdapter = {
-    ...chromeAdapter,
-    async navigateTab(...args) {
-      navigationAttempted = true;
-      return chromeAdapter.navigateTab(...args);
-    },
-  };
-  const resumedOwnership = resumeRecord ? await ownedTabs.get(ownerId) : null;
-  const observed = await runObservedTabAudit({
-    auditId, sessionCapabilityId,
-    target: { kind: 'disposable', ownerId, navigationToken: issued.navigationToken, cleanupMode: cleanupMode ?? resumedOwnership?.cleanupMode ?? (closeAuditTab === false ? 'retain-after-observation' : 'always') },
-    capturePolicy, privacyDecision, checkpointRecorder, signal, chromeAdapter: executionAdapter, ownedTabs, rawNavigationVault,
-    pipeline, privacyState,
-    consentAuthority: internals.consentAuthority, failureModelFactory,
-    resumePauseId: internals.resumePauseId, now,
+  } catch (error) {
+    thrown = error;
+    interruption = copyOwnedInterruption(readObservedAuditInterruption(error), {
+      auditId, ownershipId, cleanupMode: selectedCleanupMode,
+    });
+  } finally {
+    if (!tokenConsumed) {
+      try {
+        await rawNavigationVault.invalidateInternal({ ownerId: ownershipId, navigationToken: issued.navigationToken });
+      } catch (error) {
+        thrown ??= error;
+      }
+    }
+  }
+  const interruptedTarget = recoveryObservedTarget ?? interruption?.observedTarget ?? null;
+  if (thrown && signal?.aborted && interruption?.reason === 'cancelled' && interruptedTarget && !pipelinePersistenceStarted) {
+    let ownershipState = null;
+    try {
+      ownershipState = recoveredOwnedCleanupState(await ownedTabs.get(ownershipId), {
+        auditId, ownershipId, observedTarget: interruptedTarget, cleanupMode: selectedCleanupMode,
+      });
+    } catch { ownershipState = null; }
+    if (interruption && ownershipState !== interruption.ownershipState) ownershipState = null;
+    if (ownershipState) {
+      const draft = compatibilityDraft ?? await createInterruptedObservedDraft({
+        auditId,
+        requestedUrl: requestedUrlEvidence.href,
+        observedTarget: interruptedTarget,
+        startedAt,
+        now,
+      });
+      const cancelled = await cancelledAuditProjection({
+        draft, now, expectedExtensionId, rulesVersion: inventory.rulesVersion,
+      });
+      const checkpoint = checkpointProjection(checkpointRecorder.snapshot(), {
+        sourceAuditId: auditId,
+        sourcePageId: internalPageId,
+        auditId: externalAuditId,
+        pageId,
+      });
+      return Object.freeze({
+        execution: deepFreeze({
+          status: 'cancelled', model: cancelled.model, observedTarget: interruptedTarget,
+          observationState: 'observed', ownershipState, checkpoint,
+        }),
+        compatibilityDraft: cancelled.draft,
+      });
+    }
+  }
+  if (thrown) throw thrown;
+  const checkpoint = checkpointProjection(checkpointRecorder.snapshot(), {
+    sourceAuditId: auditId,
+    sourcePageId: internalPageId,
+    auditId: externalAuditId,
+    pageId,
   });
-  const spoofedLegacyCancellation = !signal?.aborted && observed.status === 'failed' &&
-    legacyDraft?.session?.status === 'cancelled';
-  let compatibleModel = spoofedLegacyCancellation ? observed.model : (legacyDraft ?? observed.model);
-  if (observed.ownershipState === 'cleanup-pending' && legacyModel) compatibleModel = legacyModel;
-  if (navigationAttempted && compatibleModel?.schemaVersion === 1 && compatibleModel.attempted !== true) {
-    const mutable = structuredClone(compatibleModel);
-    mutable.attempted = true;
-    compatibleModel = deepFreeze(mutable);
-  }
-  if (observed.ownershipState === 'cleanup-pending' && compatibleModel?.schemaVersion === 1 &&
-    !compatibleModel.session.diagnostics.some(value => value.code === 'TAB_CLOSE_FAILED')) {
-    const mutable = structuredClone(compatibleModel);
-    mutable.session.diagnostics.push(diagnostic(
-      'TAB_CLOSE_FAILED', 'A aba descartável não pôde ser fechada automaticamente.', canonicalTime(now()), true,
-    ));
-    if (mutable.session.status === 'complete') mutable.session.status = 'partial';
-    mutable.session.partial = mutable.session.status === 'partial';
-    compatibleModel = deepFreeze(mutable);
-  }
-  return Object.freeze({ ...observed, model: compatibleModel });
+  if (observed) return Object.freeze({
+    execution: deepFreeze({ ...observed, checkpoint }),
+    compatibilityDraft,
+  });
+  throw new TypeError('AUDIT_EXECUTION_DENIED');
+}
+
+export async function runAuditExecution(args) {
+  return (await runAuditExecutionInternal(args)).execution;
 }
 
 /** Compatibility façade: exact legacy call shape and model-only return. */
 export async function runAudit({ url, chromeAdapter, now = () => new Date().toISOString(), idFactory = () => crypto.randomUUID(), signal, closeAuditTab = true, expectedExtensionId }) {
-  const execution = await runAuditExecution({ url, chromeAdapter, now, idFactory, signal, closeAuditTab, expectedExtensionId });
-  return execution.model;
+  const { execution, compatibilityDraft } = await runAuditExecutionInternal({
+    url, chromeAdapter, now, idFactory, signal, closeAuditTab, expectedExtensionId,
+  });
+  if (execution?.observationState !== 'observed' || !execution.model ||
+    execution.status !== execution.model.session?.status || !compatibilityDraft ||
+    !['removed', 'retained-for-review'].includes(execution.ownershipState)) {
+    throw new TypeError('AUDIT_EXECUTION_DENIED');
+  }
+  if (compatibilityDraft.session.status !== 'cancelled' || signal?.aborted) return compatibilityDraft;
+  const compatible = structuredClone(compatibilityDraft);
+  compatible.session.status = 'failed';
+  compatible.session.partial = false;
+  compatible.session.diagnostics = compatible.session.diagnostics.filter(entry =>
+    entry?.code !== 'AUDIT_ABORTED' && !/cancelad/iu.test(entry?.message ?? ''));
+  compatible.session.diagnostics.push(diagnostic(
+    'AUDIT_FAILED',
+    'A auditoria falhou antes de concluir a observação.',
+    canonicalTime(compatible.timestamps?.endedAt ?? now()),
+    false,
+  ));
+  return deepFreeze(compatible);
 }

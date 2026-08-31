@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { runObservedTabAudit } from '../../src/background/observed-tab-runner.js';
+import {
+  readObservedAuditInterruption,
+  runObservedTabAudit,
+} from '../../src/background/observed-tab-runner.js';
 import { createObservedPipelineRunner } from '../../src/background/audit-pipeline.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
@@ -124,6 +127,79 @@ test('no-pixels completes without privacy gate, consent, probe or pixel calls', 
   assert.equal(result.observationState, 'observed');
   assert.equal(result.ownershipState, 'attached');
   assert.deepEqual(calls, ['probe', 'probe']);
+});
+
+test('exposes an observed interruption only through the private reader after factual cleanup', async () => {
+  const controller = new AbortController();
+  const { input } = fixture({ signal: controller.signal });
+  input.chromeAdapter.runPipeline = createObservedPipelineRunner({
+    checkpointRecorder: {
+      async started() { controller.abort(new DOMException('PRIVATE_CHECKPOINT_ABORT', 'AbortError')); },
+      async record() {},
+      snapshot() { return checkpoint(); },
+    },
+    services: {
+      async collectObservedPage() { throw new Error('must-not-collect'); },
+      async runCoreRules() { throw new Error('must-not-run'); },
+      async buildAuditModel() { throw new Error('must-not-build'); },
+      async persistAuditModel() { throw new Error('must-not-persist'); },
+    },
+  });
+
+  let interruption = null;
+  await assert.rejects(runObservedTabAudit(input), error => {
+    assert.match(String(error), /OBSERVED_RUNNER_DENIED/u);
+    interruption = readObservedAuditInterruption(error);
+    assert.equal(readObservedAuditInterruption(error), interruption);
+    assert.equal(readObservedAuditInterruption(new TypeError('OBSERVED_RUNNER_DENIED')), null);
+    return true;
+  });
+  assert.deepEqual(Reflect.ownKeys(interruption), [
+    'version', 'auditId', 'observationState', 'observedTarget', 'ownershipState', 'reason',
+  ]);
+  assert.equal(interruption.version, 1);
+  assert.equal(interruption.auditId, 'audit-1');
+  assert.equal(interruption.observationState, 'observed');
+  assert.equal(interruption.ownershipState, 'attached');
+  assert.equal(interruption.reason, 'cancelled');
+  assert.equal(interruption.observedTarget.version, 'ObservedTargetV1');
+  assert.equal(Object.isFrozen(interruption), true);
+  assert.doesNotMatch(JSON.stringify(interruption), /PRIVATE_CHECKPOINT_ABORT/u);
+});
+
+test('final proof failure takes precedence over a simultaneous cancellation in private interruption metadata', async t => {
+  for (const scenario of [
+    { name: 'target-changed', expectedReason: 'failed' },
+    { name: 'proof-unavailable', expectedReason: 'failed' },
+    { name: 'valid-proof', expectedReason: 'cancelled' },
+  ]) await t.test(scenario.name, async () => {
+    const controller = new AbortController();
+    let proofCount = 0;
+    const { input } = fixture({ signal: controller.signal, adapter: {
+      async probeDocumentIdentity(tabId) {
+        proofCount += 1;
+        if (proofCount === 2) {
+          controller.abort(new DOMException('PRIVATE_FINAL_PROOF_ABORT', 'AbortError'));
+          if (scenario.name === 'proof-unavailable') throw new Error('PRIVATE_FINAL_PROOF_UNAVAILABLE');
+          if (scenario.name === 'target-changed') {
+            return { tabId, windowId: 3, documentId: 'doc-changed', urlSessionDigest: `hmac-sha256:${'B'.repeat(43)}` };
+          }
+        }
+        return { tabId, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST };
+      },
+    } });
+
+    let interruption = null;
+    await assert.rejects(runObservedTabAudit(input), error => {
+      interruption = readObservedAuditInterruption(error);
+      assert.match(String(error), /OBSERVED_RUNNER_DENIED/u);
+      return true;
+    });
+    assert.equal(proofCount, 2);
+    assert.equal(interruption?.reason, scenario.expectedReason);
+    assert.equal(interruption?.ownershipState, 'attached');
+    assert.doesNotMatch(JSON.stringify(interruption), /PRIVATE_FINAL_PROOF/u);
+  });
 });
 
 test('accepts a canonical observed model only when its wrapper status matches', async () => {

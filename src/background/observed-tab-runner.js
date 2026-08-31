@@ -13,8 +13,12 @@ const RUNNER_KEYS = Object.freeze([
   'auditId', 'target', 'chromeAdapter', 'capturePolicy', 'privacyGate',
   'onCheckpoint', 'now', 'signal', 'expectedExtensionId',
 ]);
+const OBSERVED_INTERRUPTION_BY_ERROR = new WeakMap();
 
 function denied() { return new TypeError('OBSERVED_RUNNER_DENIED'); }
+export function readObservedAuditInterruption(error) {
+  return error && typeof error === 'object' ? OBSERVED_INTERRUPTION_BY_ERROR.get(error) ?? null : null;
+}
 function validId(value) { return typeof value === 'string' && ID.test(value); }
 function validChromeId(value) { return Number.isSafeInteger(value) && value >= 0; }
 function validTime(value) {
@@ -436,6 +440,8 @@ export async function runObservedTabAudit(input) {
   let observed = false;
   let terminalModel = null;
   let attestation = null;
+  let finalProofAttempted = false;
+  let finalProofMatched = false;
   let journalCommitted = false;
   let createdTab = false;
   try {
@@ -502,7 +508,9 @@ export async function runObservedTabAudit(input) {
         (capturedTarget.kind === 'owned-disposable' &&
           (capturedTarget.ownershipId !== observedTarget.ownershipId || capturedTarget.cleanupMode !== observedTarget.cleanupMode ||
             capturedTarget.pageId !== observedTarget.pageId))) throw denied();
+      finalProofAttempted = true;
       const finalProof = validProof(await probeDocumentIdentity(capturedTarget.tabId), capturedTarget);
+      finalProofMatched = Boolean(finalProof);
       assertNotAborted(signal);
       if (!finalProof) throw new Error('TARGET_CHANGED');
       attestation = finalProof;
@@ -540,7 +548,18 @@ export async function runObservedTabAudit(input) {
       else throw new Error('CLEANUP_UNCONFIRMED');
     }
     if ((!createdTab || journalCommitted) && !preCreateAbsent) ownershipState = await cleanupOwned(ownedBundle, chromeAdapter, { ...target, tabId, windowId }, auditId, ownershipState, observed, signal, removeTab);
-    if (observed) throw denied();
+    if (observed) {
+      let reason = 'failed';
+      if (!finalProofAttempted || finalProofMatched) {
+        try { assertNotAborted(signal); } catch { reason = 'cancelled'; }
+      }
+      const interruptionError = denied();
+      OBSERVED_INTERRUPTION_BY_ERROR.set(interruptionError, Object.freeze({
+        version: 1, auditId, observationState: 'observed', observedTarget,
+        ownershipState, reason,
+      }));
+      throw interruptionError;
+    }
     let aborted = false;
     try { assertNotAborted(signal); } catch { aborted = true; }
     return Object.freeze({ status: observed && aborted ? 'cancelled' : 'failed', model: observed && typeof terminalModel !== 'undefined' ? terminalModel : null,

@@ -178,6 +178,7 @@ button:active { transform: translateY(1px); }
 }
 
 .status-complete { color: var(--success); }
+.status-failed { color: var(--failure); }
 .status-limited,
 .status-unavailable { color: var(--review); }
 .status-running { color: var(--action); }

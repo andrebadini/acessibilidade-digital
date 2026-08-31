@@ -194,6 +194,18 @@ test('renders native determinate coverage progress and a semantic result focus d
   assert.equal(summary.getAttribute('tabindex'), '-1');
 });
 
+test('labels a structurally failed audit explicitly instead of presenting it as completed', () => {
+  const input = fixture();
+  input.summary.identity.status = 'failed';
+  const root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  const status = root.querySelector('p');
+  assert.match(status.className, /(?:^|\s)status-failed(?:\s|$)/u, 'failed has its own visual and semantic state');
+  assert.equal(status.textContent, 'A avaliação não pôde ser concluída');
+  assert.doesNotMatch(status.textContent, /^Avaliação concluída$/u);
+});
+
 test('places the selected detail directly after its result card', () => {
   const input = fixture();
   const root = renderPanelView({

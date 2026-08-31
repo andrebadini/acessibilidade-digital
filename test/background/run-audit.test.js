@@ -2,9 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
-import { canonicalTime, runAttachedAuditExecution, runAudit } from '../../src/background/run-audit.js';
+import {
+  canonicalTime,
+  runAttachedAuditExecution,
+  runAudit,
+  runAuditExecution,
+} from '../../src/background/run-audit.js';
 import { AUDIT_EXECUTION_INTERNAL } from '../../src/background/chrome-adapter.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
+import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { remapAuditPage } from '../../src/core/batch/remap-audit.js';
@@ -15,6 +21,17 @@ import { captureElement as captureElementEvidence, captureFullPage as captureFul
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const TEST_EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
+const TEST_DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
+const TEST_EVIDENCE_URL = sanitizeEvidenceUrlV1('https://example.test/final?secret=REMOVE', { includeQuery: false });
+
+function unreadEvidenceProxy(evidence, onRead) {
+  return new Proxy({ ...evidence }, {
+    get(target, key, receiver) {
+      onRead(key);
+      return Reflect.get(target, key, receiver);
+    },
+  });
+}
 
 test('exports the single canonical audit timestamp normalizer used by observed runners', () => {
   assert.equal(canonicalTime('2026-08-29T10:00:00-04:00'), '2026-08-29T14:00:00.000Z');
@@ -216,7 +233,7 @@ function fakeAdapter(options = {}) {
       if (options.disconnectFailure) throw new Error('detalhe privado de desconexão');
     },
   };
-  const sessionValues = {};
+  const sessionValues = options.sessionValues ?? {};
   let randomValue = 0;
   const adapter = {
     events,
@@ -272,9 +289,20 @@ function fakeAdapter(options = {}) {
     adapter.captureFullPage = async (...args) => { fullPageCalls += 1; return captureFullPageEvidence(...args); };
     adapter.captureElement = async (...args) => { elementCalls += 1; return captureElementEvidence(...args); };
   }
-  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
-    enumerable: false,
-    value: Object.freeze({
+  const canonicalInternal = Object.assign(Object.create(null), {
+    sessionArea: {
+      async get(key) { return Object.hasOwn(sessionValues, key) ? { [key]: structuredClone(sessionValues[key]) } : {}; },
+      async set(entries) { Object.assign(sessionValues, structuredClone(entries)); },
+      async remove(key) { delete sessionValues[key]; },
+    },
+    randomBytes(length) { return new Uint8Array(length).fill(++randomValue); },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    ...(options.onExecutionCheckpoint ? { onExecutionCheckpoint: options.onExecutionCheckpoint } : {}),
+    ...(options.persistAuditModel ? { persistAuditModel: options.persistAuditModel } : {}),
+  });
+  const internal = options.canonicalInternals
+    ? Object.freeze(canonicalInternal)
+    : Object.freeze({
       sessionArea: {
         async get(key) { return Object.hasOwn(sessionValues, key) ? { [key]: structuredClone(sessionValues[key]) } : {}; },
         async set(entries) { Object.assign(sessionValues, structuredClone(entries)); },
@@ -290,7 +318,10 @@ function fakeAdapter(options = {}) {
           urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
         }),
       ...(options.noPixels || options.mode === 'no-pixels' ? {} : { consentAuthority: Object.freeze({ async consume() { return true; } }) }),
-    }),
+    });
+  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
+    enumerable: false,
+    value: internal,
   });
   if (options.composeMap || options.mapFailure) adapter.composeAnnouncementMap = async input => {
     events.push('map');
@@ -365,7 +396,7 @@ test('keeps diagnostics and evidence correlated when two new findings have the s
   }
 });
 
-test('runs the 130→146 pipeline with pristine capture before collection, probes and rules', async () => {
+test('runs the 130→146 pipeline through the canonical no-pixels boundary before collection, probes and rules', async () => {
   const adapter = fakeAdapter();
   const model = await runAudit({
     url: ' example.test/start?password=REMOVE&view=public ', chromeAdapter: adapter,
@@ -377,28 +408,25 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
   assert.equal(model.methodology.supplementalRuleCount, 1);
   assert.equal(model.ruleResults.find(rule => rule.ruleId === 'editorial.placeholder-text').outcome, 'inapplicable');
   assert.equal(model.itemResults.length, 146);
-  assert.equal(model.session.status, 'complete');
+  assert.equal(model.session.status, 'partial');
   assert.equal(model.axe.status, 'disabled');
   assert.ok(model.limitations.some(value => /axe-core|MV3|CSP/i.test(value)));
   assert.ok(model.session.diagnostics.some(value => value.code === 'AXE_FEATURE_DISABLED'));
-  assert.equal(model.requestedUrl, 'https://example.test/');
-  assert.equal(model.finalUrl, 'https://example.test/');
-  assert.ok(adapter.events.indexOf('full-page') < adapter.events.indexOf('collect'));
+  assert.equal(model.requestedUrl, 'https://example.test/start');
+  assert.equal(model.finalUrl, 'https://example.test/final');
+  assert.equal(adapter.events.includes('full-page'), false);
   assert.ok(adapter.events.indexOf('axe') < adapter.events.indexOf('collect'));
   assert.ok(adapter.events.indexOf('axe') < adapter.events.indexOf('probes'));
-  assert.ok(adapter.events.indexOf('full-page') < adapter.events.indexOf('probes'));
+  assert.equal(adapter.counts.screenshots, 0);
   assert.equal(adapter.counts.disconnects, 1);
   assert.equal(adapter.counts.removals, 1);
-  assert.equal(model.evidence.artifacts.filter(item => item.kind === 'full-page').length, 1);
+  assert.equal(model.evidence.artifacts.filter(item => item.kind === 'full-page').length, 0);
   assert.ok(model.evidence.artifacts.every(item => /^[a-f0-9]{64}$/u.test(item.hash)));
   for (const key of ['snapshotHash', 'ruleResultsHash', 'evidenceHash']) {
     assert.match(model.reproducibility[key], /^[a-f0-9]{64}$/u, key);
   }
   assert.equal(model.evidence.artifacts.filter(item => item.nodeId === 'n-1').length, 1);
-  assert.deepEqual(model.evidence.artifacts.find(item => item.nodeId === 'n-1').metadata.highlightBox, {
-    x: 10, y: 20, width: 80, height: 30,
-    coordinateSpace: 'capture-css-px',
-  });
+  assert.equal(Object.hasOwn(model.evidence.artifacts.find(item => item.nodeId === 'n-1'), 'dataUrl'), false);
   assert.ok(model.occurrences.length > 0);
   assert.deepEqual(model.occurrences.map(value => value.occurrenceId), model.occurrences.map((_value, index) =>
     `occurrence-page-1-${String(index + 1).padStart(6, '0')}`));
@@ -427,7 +455,8 @@ test('runs the 130→146 pipeline with pristine capture before collection, probe
 });
 
 test('public compatibility path defaults to an owned proof boundary and performs no pixel operation without consent', async () => {
-  const adapter = fakeAdapter({ noPixels: true });
+  const sessionValues = {};
+  const adapter = fakeAdapter({ noPixels: true, sessionValues });
   const model = await runAudit({
     url: 'https://example.test/?secret=ERASE', chromeAdapter: adapter,
     now: clock, idFactory: () => 'audit-owned-no-pixels',
@@ -435,8 +464,54 @@ test('public compatibility path defaults to an owned proof boundary and performs
   assert.equal(adapter.counts.screenshots, 0);
   assert.ok(adapter.events.indexOf('create-tab') < adapter.events.findIndex(value => value.startsWith('navigate:')));
   assert.ok(adapter.events.findIndex(value => value.startsWith('navigate:')) < adapter.events.findIndex(value => value.startsWith('remove-tab:')));
+  const ownedRecords = Object.values(sessionValues).filter(value => value?.version === 2 && value?.purpose === 'audit');
+  assert.equal(ownedRecords.length, 1);
+  assert.equal(ownedRecords[0].auditId, model.auditId);
+  assert.equal(ownedRecords[0].state, 'removed');
   assert.equal(Object.hasOwn(model, 'checkpoint'), false);
   assert.doesNotMatch(JSON.stringify(model), /owner-|navigationToken|urlSessionDigest|ERASE/u);
+});
+
+test('public compatibility path rejects an adapter without canonical authority before any browser effect', async () => {
+  const base = fakeAdapter({ trackCaptureCalls: true });
+  const adapter = { ...base };
+
+  await assert.rejects(runAudit({
+    url: 'https://example.test/?secret=ERASE', chromeAdapter: adapter,
+    now: clock, idFactory: () => 'audit-public-without-authority',
+  }), /AUDIT_EXECUTION_DENIED/u);
+
+  assert.deepEqual(base.events, []);
+  assert.equal(base.counts.screenshots, 0);
+  assert.equal(base.counts.removals, 0);
+});
+
+test('public compatibility path cannot activate a legacy pixel policy without the canonical no-pixels boundary', async () => {
+  const base = fakeAdapter({ trackCaptureCalls: true });
+  const sessionValues = {};
+  const adapter = { ...base };
+  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
+    value: Object.freeze({
+      sessionArea: {
+        async get(key) { return Object.hasOwn(sessionValues, key) ? { [key]: structuredClone(sessionValues[key]) } : {}; },
+        async set(entries) { Object.assign(sessionValues, structuredClone(entries)); },
+        async remove(key) { delete sessionValues[key]; },
+      },
+      randomBytes(length) { return new Uint8Array(length).fill(7); },
+      capturePolicy: createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false }),
+    }),
+  });
+
+  const model = await runAudit({
+    url: 'https://example.test/', chromeAdapter: adapter,
+    now: clock, idFactory: () => 'audit-public-pixel-policy-denied',
+  });
+
+  assert.equal(model.auditId, 'audit-public-pixel-policy-denied');
+  assert.equal(base.counts.screenshots, 0);
+  assert.equal(base.counts.fullPageCalls, 0);
+  assert.equal(base.counts.elementCalls, 0);
+  assert.equal(Object.values(sessionValues).some(value => value?.version === 2 && value?.state === 'removed'), true);
 });
 
 test('attached execution uses no owned-tab or URL-vault effects and returns the closed terminal union', async () => {
@@ -476,6 +551,666 @@ test('attached execution uses no owned-tab or URL-vault effects and returns the 
   assert.equal(Object.isFrozen(result.checkpoint), true);
 });
 
+test('attached caller projects EvidenceUrlV1 through the canonical runner without legacy runner arguments', async () => {
+  const adapter = fakeAdapter({ noPixels: true });
+  const checkpoints = [];
+  const result = await runAttachedAuditExecution({
+    auditId: 'audit-attached-canonical',
+    sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: TEST_EVIDENCE_URL,
+      initialUrlSessionDigest: TEST_DIGEST,
+    },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    chromeAdapter: adapter,
+    modelNow: clock,
+    expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async checkpoint => { checkpoints.push(checkpoint); },
+    persistAuditModel: async () => {},
+  });
+
+  assert.equal(result.state, 'model');
+  assert.equal(result.failureCode, null);
+  assert.equal(result.model.auditId, 'audit-attached-canonical');
+  assert.ok(['complete', 'partial', 'cancelled'].includes(result.model.session.status));
+  assert.ok(checkpoints.length > 0);
+  assert.equal(adapter.events.includes('create-tab'), false);
+  assert.equal(adapter.events.some(value => value.startsWith('navigate:')), false);
+  assert.equal(adapter.events.some(value => value.startsWith('remove-tab:')), false);
+  assert.equal(adapter.counts.screenshots, 0);
+});
+
+test('attached cancellation at the first checkpoint preserves the observed target as a cancelled model', async () => {
+  const controller = new AbortController();
+  const adapter = fakeAdapter({ noPixels: true });
+  const requested = sanitizeEvidenceUrlV1(
+    'https://example.test/area/page?secret=REMOVE',
+    { includeQuery: false },
+  );
+  let checkpointCalls = 0;
+  let persisted = 0;
+  const result = await runAttachedAuditExecution({
+    auditId: 'audit-attached-first-checkpoint-cancel',
+    sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: requested,
+      initialUrlSessionDigest: TEST_DIGEST,
+    },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    chromeAdapter: adapter,
+    modelNow: clock,
+    signal: controller.signal,
+    expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {
+      checkpointCalls += 1;
+      if (checkpointCalls === 1) {
+        controller.abort(new DOMException('PRIVATE_ATTACHED_CHECKPOINT_ABORT', 'AbortError'));
+      }
+    },
+    persistAuditModel: async () => { persisted += 1; },
+  });
+
+  assert.equal(result.state, 'model');
+  assert.equal(result.failureCode, null);
+  assert.equal(result.model.session.status, 'cancelled');
+  assert.equal(result.model.requestedUrl, requested.href);
+  assert.equal(result.model.finalUrl, requested.href);
+  assert.equal(result.checkpoint.auditId, 'audit-attached-first-checkpoint-cancel');
+  assert.equal(result.checkpoint.pages[0].pageId, 'page-1');
+  assert.equal(adapter.events.includes('collect'), false);
+  assert.equal(persisted, 0);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_ATTACHED_CHECKPOINT_ABORT|REMOVE|secret=/u);
+});
+
+test('attached caller copies EvidenceUrlV1 through data descriptors without property reads', async () => {
+  const adapter = fakeAdapter({ noPixels: true });
+  let directReads = 0;
+  const result = await runAttachedAuditExecution({
+    auditId: 'audit-attached-evidence-descriptors',
+    sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: unreadEvidenceProxy(TEST_EVIDENCE_URL, () => { directReads += 1; }),
+      initialUrlSessionDigest: TEST_DIGEST,
+    },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    chromeAdapter: adapter,
+    modelNow: clock,
+    expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {},
+    persistAuditModel: async () => {},
+  });
+
+  assert.equal(result.state, 'model');
+  assert.equal(directReads, 0);
+});
+
+test('attached caller captures browser effects before its first asynchronous boundary', async () => {
+  const adapter = fakeAdapter({ noPixels: true });
+  const replacements = [];
+  const running = runAttachedAuditExecution({
+    auditId: 'audit-attached-effect-snapshot',
+    sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: TEST_EVIDENCE_URL,
+      initialUrlSessionDigest: TEST_DIGEST,
+    },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => {},
+  });
+  for (const name of [
+    'probeDocumentIdentity', 'connectCdp', 'runAxeInTab', 'collectPage',
+    'runDynamicProbes', 'getEnvironment', 'emitProgress', 'handoffReport',
+  ]) {
+    adapter[name] = async () => {
+      replacements.push(name);
+      throw new Error(`PRIVATE_ATTACHED_REPLACEMENT_${name}`);
+    };
+  }
+
+  const result = await running;
+  assert.equal(result.state, 'model');
+  assert.deepEqual(replacements, []);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_ATTACHED_REPLACEMENT/u);
+});
+
+test('attached caller preserves the sanitized requested path when no redirect occurred', async () => {
+  const adapter = fakeAdapter({ noPixels: true, collectFailure: true });
+  const requested = sanitizeEvidenceUrlV1(
+    'https://example.test/area/page?secret=REMOVE',
+    { includeQuery: false },
+  );
+  const result = await runAttachedAuditExecution({
+    auditId: 'audit-attached-requested-path',
+    sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: requested,
+      initialUrlSessionDigest: TEST_DIGEST,
+    },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    chromeAdapter: adapter,
+    modelNow: clock,
+    expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {},
+    persistAuditModel: async () => {},
+  });
+
+  assert.equal(result.state, 'model');
+  assert.equal(result.model.requestedUrl, requested.href);
+  assert.equal(result.model.finalUrl, requested.href);
+  assert.equal(result.model.pages[0].requestedUrl, requested.href);
+  assert.equal(result.model.pages[0].finalUrl, requested.href);
+  assert.doesNotMatch(JSON.stringify(result), /REMOVE|secret=/u);
+});
+
+test('attached execution rejects a custom page id before time, checkpoint or browser effects', async () => {
+  const adapter = fakeAdapter({ noPixels: true });
+  let probeCalls = 0;
+  let nowCalls = 0;
+  let checkpointCalls = 0;
+  adapter.probeDocumentIdentity = async tabId => {
+    probeCalls += 1;
+    return { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: TEST_DIGEST };
+  };
+
+  await assert.rejects(runAttachedAuditExecution({
+    auditId: 'audit-attached-custom-page-denied',
+    sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: TEST_EVIDENCE_URL,
+      initialUrlSessionDigest: TEST_DIGEST,
+    },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    chromeAdapter: adapter,
+    modelNow: () => { nowCalls += 1; return '2026-08-29T12:00:00.000Z'; },
+    pageId: 'page-custom',
+    expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => { checkpointCalls += 1; },
+    persistAuditModel: async () => {},
+  }), /ATTACHED_AUDIT_EXECUTION_DENIED/u);
+
+  assert.equal(nowCalls, 0);
+  assert.equal(probeCalls, 0);
+  assert.equal(checkpointCalls, 0);
+  assert.deepEqual(adapter.events, []);
+});
+
+test('owned standalone execution rejects a custom page id before RNG, vault or browser effects', async () => {
+  const sessionValues = {};
+  const adapter = fakeAdapter({ noPixels: true, canonicalInternals: true, sessionValues });
+  let idCalls = 0;
+
+  await assert.rejects(runAuditExecution({
+    url: 'https://example.test/',
+    chromeAdapter: adapter,
+    now: clock,
+    idFactory: () => { idCalls += 1; return 'audit-owned-custom-page-denied'; },
+    pageId: 'page-custom',
+    checkpointAuditId: null,
+    expectedExtensionId: TEST_EXTENSION_ID,
+  }), /AUDIT_EXECUTION_DENIED/u);
+
+  assert.equal(idCalls, 0);
+  assert.deepEqual(adapter.events, []);
+  assert.deepEqual(sessionValues, {});
+});
+
+test('owned batch child accepts a custom parent page id with a projected checkpoint', async () => {
+  const checkpoints = [];
+  const adapter = fakeAdapter({ noPixels: true, canonicalInternals: true });
+  const execution = await runAuditExecution({
+    url: 'https://example.test/',
+    chromeAdapter: adapter,
+    now: clock,
+    idFactory: () => 'audit-owned-parent-page',
+    pageId: 'page-custom',
+    checkpointAuditId: 'batch-parent',
+    onCheckpoint: async checkpoint => { checkpoints.push(checkpoint); },
+    expectedExtensionId: TEST_EXTENSION_ID,
+  });
+
+  assert.equal(execution.observationState, 'observed');
+  assert.equal(execution.observedTarget.pageId, null);
+  assert.equal(execution.checkpoint.auditId, 'batch-parent');
+  assert.equal(execution.checkpoint.pages[0].pageId, 'page-custom');
+  assert.equal(checkpoints.at(-1).auditId, 'batch-parent');
+  assert.equal(checkpoints.at(-1).pages[0].pageId, 'page-custom');
+});
+
+test('owned caller uses V2 ownership, a fresh token and only the closed R18 status union', async () => {
+  const sessionValues = {};
+  const checkpoints = [];
+  const persisted = [];
+  const adapter = fakeAdapter({
+    noPixels: true,
+    canonicalInternals: true,
+    sessionValues,
+    onExecutionCheckpoint: async checkpoint => { checkpoints.push(checkpoint); },
+    persistAuditModel: async model => { persisted.push(model); },
+  });
+  const execution = await runAuditExecution({
+    url: 'https://example.test/final?secret=REMOVE',
+    chromeAdapter: adapter,
+    now: clock,
+    idFactory: () => 'audit-owned-canonical',
+    closeAuditTab: true,
+    expectedExtensionId: TEST_EXTENSION_ID,
+    pageId: 'page-1',
+    cleanupMode: 'always',
+  });
+
+  assert.ok(['complete', 'partial', 'cancelled'].includes(execution.status));
+  assert.equal(execution.status, execution.model.session.status);
+  assert.notEqual(execution.status, 'completed');
+  assert.equal(execution.observationState, 'observed');
+  assert.equal(execution.ownershipState, 'removed');
+  assert.deepEqual(Reflect.ownKeys(execution.observedTarget), [
+    'version', 'kind', 'ownershipId', 'tabId', 'windowId', 'documentId',
+    'urlEvidence', 'urlSessionDigest', 'cleanupMode', 'pageId',
+  ]);
+  assert.equal(execution.observedTarget.version, 'ObservedTargetV1');
+  assert.equal(execution.observedTarget.kind, 'owned-disposable');
+  assert.equal(execution.observedTarget.cleanupMode, 'always');
+  assert.equal(execution.observedTarget.pageId, 'page-1');
+  assert.deepEqual(execution.observedTarget.urlEvidence, TEST_EVIDENCE_URL);
+  assert.equal(Object.hasOwn(execution.observedTarget, 'ownerId'), false);
+  assert.equal(Object.hasOwn(execution.observedTarget, 'navigationToken'), false);
+  assert.ok(checkpoints.length > 0);
+  assert.equal(persisted.length, 1);
+  assert.equal(adapter.counts.screenshots, 0);
+
+  const v2Keys = Object.keys(sessionValues).filter(key => key.startsWith('audita:owned-tab:v2:'));
+  assert.equal(v2Keys.length, 1);
+  const owner = sessionValues[v2Keys[0]];
+  assert.deepEqual(Reflect.ownKeys(owner), [
+    'version', 'ownershipId', 'auditId', 'purpose', 'tabId', 'windowId',
+    'cleanupMode', 'state', 'createdAt', 'updatedAt',
+  ]);
+  assert.equal(owner.version, 2);
+  assert.equal(owner.auditId, 'audit-owned-canonical');
+  assert.equal(owner.ownershipId, execution.observedTarget.ownershipId);
+  assert.equal(owner.state, 'removed');
+  assert.equal(Object.hasOwn(owner, 'ownerId'), false);
+  assert.equal(Object.hasOwn(owner, 'sessionCapabilityId'), false);
+  assert.equal(Object.keys(sessionValues).some(key => key.startsWith('audita:owned-tab:v1:')), false);
+  assert.doesNotMatch(JSON.stringify({ execution, sessionValues }), /REMOVE|navigationToken|sessionCapabilityId/u);
+});
+
+test('owned caller copies returned EvidenceUrlV1 through data descriptors without property reads', async () => {
+  const adapter = fakeAdapter({ noPixels: true, canonicalInternals: true });
+  let directReads = 0;
+  adapter.getEvidenceUrl = () => unreadEvidenceProxy(TEST_EVIDENCE_URL, () => { directReads += 1; });
+
+  const execution = await runAuditExecution({
+    url: 'https://example.test/final?secret=REMOVE',
+    chromeAdapter: adapter,
+    now: clock,
+    idFactory: () => 'audit-owned-evidence-descriptors',
+    expectedExtensionId: TEST_EXTENSION_ID,
+    cleanupMode: 'always',
+  });
+
+  assert.ok(['complete', 'partial', 'failed'].includes(execution.status));
+  assert.equal(directReads, 0);
+});
+
+test('owned caller preserves distinct sanitized requested and observed URLs across a cross-origin redirect', async () => {
+  const adapter = fakeAdapter({ noPixels: true, canonicalInternals: true });
+  adapter.waitForStable = async () => ({ url: 'https://final.example.test/dest?token=REMOVE_FINAL' });
+  adapter.getEvidenceUrl = async () => 'https://final.example.test/dest?token=REMOVE_FINAL';
+
+  const execution = await runAuditExecution({
+    url: 'https://requested.example.test/start?secret=REMOVE_REQUEST',
+    chromeAdapter: adapter,
+    now: clock,
+    idFactory: () => 'audit-owned-cross-origin-redirect',
+    expectedExtensionId: TEST_EXTENSION_ID,
+    cleanupMode: 'always',
+  });
+
+  assert.equal(execution.model.requestedUrl, 'https://requested.example.test/start');
+  assert.equal(execution.model.finalUrl, 'https://final.example.test/dest');
+  assert.equal(execution.model.pages[0].requestedUrl, 'https://requested.example.test/start');
+  assert.equal(execution.model.pages[0].finalUrl, 'https://final.example.test/dest');
+  assert.equal(execution.observedTarget.urlEvidence.href, 'https://final.example.test/dest');
+  assert.doesNotMatch(JSON.stringify(execution), /REMOVE_REQUEST|REMOVE_FINAL|secret=|token=/u);
+});
+
+test('owned execution propagates a checkpoint rejection after observation instead of fabricating a terminal result', async () => {
+  const adapter = fakeAdapter({
+    noPixels: true,
+    canonicalInternals: true,
+    onExecutionCheckpoint: async () => { throw new Error('PRIVATE_CHECKPOINT_REJECTION'); },
+  });
+
+  await assert.rejects(runAuditExecution({
+    url: 'https://example.test/final?secret=REMOVE',
+    chromeAdapter: adapter,
+    now: clock,
+    idFactory: () => 'audit-owned-checkpoint-rejection',
+    expectedExtensionId: TEST_EXTENSION_ID,
+    cleanupMode: 'always',
+  }), error => {
+    assert.doesNotMatch(String(error), /PRIVATE_CHECKPOINT_REJECTION/u);
+    return true;
+  });
+});
+
+test('owned execution never persists an uncorrelated dependency AbortError as a cancelled audit', async () => {
+  const persisted = [];
+  const adapter = fakeAdapter({
+    noPixels: true,
+    canonicalInternals: true,
+    collectError: new DOMException('PRIVATE_ABORT_SPOOF', 'AbortError'),
+    persistAuditModel: async model => { persisted.push(model); },
+  });
+
+  const execution = await runAuditExecution({
+    url: 'https://example.test/',
+    chromeAdapter: adapter,
+    now: clock,
+    idFactory: () => 'audit-owned-abort-spoof',
+    expectedExtensionId: TEST_EXTENSION_ID,
+    cleanupMode: 'always',
+  });
+
+  assert.equal(execution.status, 'failed');
+  assert.equal(execution.model.session.status, 'failed');
+  assert.deepEqual(persisted.map(model => model.session.status), ['failed']);
+  assert.doesNotMatch(JSON.stringify(execution), /PRIVATE_ABORT_SPOOF/u);
+});
+
+test('owned cancellation after observation returns only with a factual V2 cleanup state', async t => {
+  for (const scenario of [
+    { name: 'removed', removeTabFailure: false },
+    { name: 'cleanup-pending', removeTabFailure: true },
+  ]) await t.test(scenario.name, async () => {
+    const controller = new AbortController();
+    const sessionValues = {};
+    const adapter = fakeAdapter({
+      noPixels: true,
+      canonicalInternals: true,
+      sessionValues,
+      removeTabFailure: scenario.removeTabFailure,
+      afterCollect: () => controller.abort(new DOMException('PRIVATE_POST_OBSERVATION_ABORT', 'AbortError')),
+    });
+
+    const execution = await runAuditExecution({
+      url: 'https://example.test/?secret=REMOVE',
+      chromeAdapter: adapter,
+      now: clock,
+      idFactory: () => `audit-owned-cancel-${scenario.name}`,
+      signal: controller.signal,
+      expectedExtensionId: TEST_EXTENSION_ID,
+      cleanupMode: 'always',
+    });
+
+    assert.equal(execution.status, 'cancelled');
+    assert.equal(execution.model.session.status, 'cancelled');
+    assert.equal(execution.observationState, 'observed');
+    assert.equal(execution.ownershipState, scenario.name);
+    assert.equal(execution.checkpoint.pages[0].pageId, 'page-1');
+    const owner = Object.values(sessionValues).find(value => value?.version === 2 && value?.purpose === 'audit');
+    assert.equal(owner?.state, scenario.name);
+    assert.doesNotMatch(JSON.stringify({ execution, sessionValues }), /PRIVATE_POST_OBSERVATION_ABORT|REMOVE/u);
+  });
+});
+
+test('owned cancellation at the first checkpoint preserves observed identity and factual cleanup', async t => {
+  for (const scenario of [
+    { name: 'removed', removeTabFailure: false },
+    { name: 'cleanup-pending', removeTabFailure: true },
+  ]) await t.test(scenario.name, async () => {
+    const controller = new AbortController();
+    const sessionValues = {};
+    let checkpointCalls = 0;
+    let persisted = 0;
+    const adapter = fakeAdapter({
+      noPixels: true,
+      canonicalInternals: true,
+      sessionValues,
+      removeTabFailure: scenario.removeTabFailure,
+      onExecutionCheckpoint: async () => {
+        checkpointCalls += 1;
+        if (checkpointCalls === 1) {
+          controller.abort(new DOMException('PRIVATE_FIRST_CHECKPOINT_ABORT', 'AbortError'));
+        }
+      },
+      persistAuditModel: async () => { persisted += 1; },
+    });
+
+    const execution = await runAuditExecution({
+      url: 'https://example.test/requested/path?secret=REMOVE',
+      chromeAdapter: adapter,
+      now: clock,
+      idFactory: () => `audit-owned-checkpoint-cancel-${scenario.name}`,
+      signal: controller.signal,
+      expectedExtensionId: TEST_EXTENSION_ID,
+      cleanupMode: 'always',
+    });
+
+    assert.equal(execution.status, 'cancelled');
+    assert.equal(execution.model.session.status, 'cancelled');
+    assert.equal(execution.observationState, 'observed');
+    assert.equal(execution.ownershipState, scenario.name);
+    assert.equal(execution.model.requestedUrl, 'https://example.test/requested/path');
+    assert.equal(execution.model.finalUrl, execution.observedTarget.urlEvidence.href);
+    assert.equal(execution.checkpoint.pages[0].pageId, 'page-1');
+    assert.equal(adapter.events.includes('collect'), false);
+    assert.equal(persisted, 0);
+    assert.equal(Object.values(sessionValues).find(value => value?.version === 2)?.state, scenario.name);
+    assert.doesNotMatch(JSON.stringify({ execution, sessionValues }), /PRIVATE_FIRST_CHECKPOINT_ABORT|REMOVE/u);
+  });
+});
+
+test('owned final proof failure takes precedence over simultaneous cancellation after factual cleanup', async t => {
+  for (const scenario of ['target-changed', 'proof-unavailable']) await t.test(scenario, async () => {
+    const controller = new AbortController();
+    const sessionValues = {};
+    let proofCount = 0;
+    let persisted = 0;
+    const adapter = fakeAdapter({
+      noPixels: true,
+      canonicalInternals: true,
+      sessionValues,
+      persistAuditModel: async () => { persisted += 1; },
+    });
+    adapter.probeDocumentIdentity = async tabId => {
+      proofCount += 1;
+      if (proofCount === 2) {
+        controller.abort(new DOMException('PRIVATE_OWNED_FINAL_PROOF_ABORT', 'AbortError'));
+        if (scenario === 'proof-unavailable') throw new Error('PRIVATE_OWNED_FINAL_PROOF_UNAVAILABLE');
+        return {
+          tabId, windowId: 9, documentId: 'document-changed',
+          urlSessionDigest: `hmac-sha256:${'B'.repeat(43)}`,
+        };
+      }
+      return { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: TEST_DIGEST };
+    };
+
+    await assert.rejects(runAuditExecution({
+      url: 'https://example.test/?secret=REMOVE',
+      chromeAdapter: adapter,
+      now: clock,
+      idFactory: () => `audit-owned-final-proof-${scenario}`,
+      signal: controller.signal,
+      expectedExtensionId: TEST_EXTENSION_ID,
+      cleanupMode: 'always',
+    }), error => {
+      assert.match(String(error), /OBSERVED_RUNNER_DENIED/u);
+      assert.doesNotMatch(String(error), /PRIVATE_OWNED_FINAL_PROOF|REMOVE/u);
+      return true;
+    });
+
+    assert.equal(proofCount, 2);
+    assert.equal(persisted, 0);
+    assert.equal(Object.values(sessionValues).find(value => value?.version === 2)?.state, 'removed');
+    assert.doesNotMatch(JSON.stringify(sessionValues), /PRIVATE_OWNED_FINAL_PROOF|REMOVE/u);
+  });
+});
+
+test('owned simultaneous cancellation remains cancelled when its final proof is valid', async () => {
+  const controller = new AbortController();
+  const sessionValues = {};
+  let proofCount = 0;
+  const adapter = fakeAdapter({ noPixels: true, canonicalInternals: true, sessionValues });
+  adapter.probeDocumentIdentity = async tabId => {
+    proofCount += 1;
+    if (proofCount === 2) controller.abort(new DOMException('PRIVATE_VALID_FINAL_PROOF_ABORT', 'AbortError'));
+    return { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: TEST_DIGEST };
+  };
+
+  const execution = await runAuditExecution({
+    url: 'https://example.test/',
+    chromeAdapter: adapter,
+    now: clock,
+    idFactory: () => 'audit-owned-valid-final-proof-cancel',
+    signal: controller.signal,
+    expectedExtensionId: TEST_EXTENSION_ID,
+    cleanupMode: 'always',
+  });
+
+  assert.equal(proofCount, 2);
+  assert.equal(execution.status, 'cancelled');
+  assert.equal(execution.ownershipState, 'removed');
+  assert.equal(execution.model.session.status, 'cancelled');
+  assert.doesNotMatch(JSON.stringify(execution), /PRIVATE_VALID_FINAL_PROOF_ABORT/u);
+});
+
+test('owned cancellation may retain the observed tab only under the explicit review cleanup mode', async () => {
+  const controller = new AbortController();
+  const sessionValues = {};
+  const adapter = fakeAdapter({
+    noPixels: true,
+    canonicalInternals: true,
+    sessionValues,
+    afterCollect: () => controller.abort(new DOMException('PRIVATE_RETAINED_ABORT', 'AbortError')),
+  });
+  const execution = await runAuditExecution({
+    url: 'https://example.test/', chromeAdapter: adapter, now: clock,
+    idFactory: () => 'audit-owned-cancel-retained', signal: controller.signal,
+    closeAuditTab: false, expectedExtensionId: TEST_EXTENSION_ID,
+  });
+
+  assert.equal(execution.status, 'cancelled');
+  assert.equal(execution.model.session.status, 'cancelled');
+  assert.equal(execution.ownershipState, 'retained-for-review');
+  assert.equal(adapter.counts.removals, 0);
+  assert.equal(Object.values(sessionValues).find(value => value?.version === 2)?.state, 'retained-for-review');
+  assert.doesNotMatch(JSON.stringify({ execution, sessionValues }), /PRIVATE_RETAINED_ABORT/u);
+
+  const compatibilityController = new AbortController();
+  const compatibilityAdapter = fakeAdapter({
+    noPixels: true,
+    canonicalInternals: true,
+    afterCollect: () => compatibilityController.abort(new DOMException('PRIVATE_COMPAT_RETAINED_ABORT', 'AbortError')),
+  });
+  const draft = await runAudit({
+    url: 'https://example.test/', chromeAdapter: compatibilityAdapter, now: clock,
+    idFactory: () => 'audit-compat-cancel-retained', signal: compatibilityController.signal,
+    closeAuditTab: false, expectedExtensionId: TEST_EXTENSION_ID,
+  });
+  assert.equal(draft.session.status, 'cancelled');
+  assert.equal(draft.progress.at(-1)?.phase, 'cancelled');
+  assert.equal(compatibilityAdapter.counts.removals, 0);
+  assert.doesNotMatch(JSON.stringify(draft), /PRIVATE_COMPAT_RETAINED_ABORT/u);
+});
+
+test('owned cleanup uses the remove effect captured before asynchronous callbacks can mutate the adapter', async () => {
+  let adapter;
+  let originalCalls = 0;
+  let replacementCalls = 0;
+  adapter = fakeAdapter({
+    noPixels: true,
+    canonicalInternals: true,
+    afterCollect() {
+      adapter.removeTab = async () => { replacementCalls += 1; };
+    },
+  });
+  const originalRemove = adapter.removeTab.bind(adapter);
+  adapter.removeTab = async tabId => {
+    originalCalls += 1;
+    return originalRemove(tabId);
+  };
+
+  const execution = await runAuditExecution({
+    url: 'https://example.test/',
+    chromeAdapter: adapter,
+    now: clock,
+    idFactory: () => 'audit-owned-remove-toctou',
+    expectedExtensionId: TEST_EXTENSION_ID,
+    cleanupMode: 'always',
+  });
+
+  assert.equal(execution.ownershipState, 'removed');
+  assert.equal(originalCalls, 1);
+  assert.equal(replacementCalls, 0);
+});
+
+test('owned execution captures every browser effect before its first asynchronous boundary', async () => {
+  const adapter = fakeAdapter({ noPixels: true, canonicalInternals: true });
+  const replacements = [];
+  const running = runAuditExecution({
+    url: 'https://example.test/', chromeAdapter: adapter, now: clock,
+    idFactory: () => 'audit-owned-effect-snapshot', expectedExtensionId: TEST_EXTENSION_ID,
+    cleanupMode: 'always',
+  });
+  for (const name of [
+    'createTab', 'navigateTab', 'waitForStable', 'probeDocumentIdentity',
+    'getEvidenceUrl', 'getFinalUrl', 'removeTab',
+  ]) {
+    adapter[name] = async () => {
+      replacements.push(name);
+      throw new Error(`PRIVATE_REPLACEMENT_${name}`);
+    };
+  }
+
+  const execution = await running;
+  assert.equal(execution.observationState, 'observed');
+  assert.equal(execution.ownershipState, 'removed');
+  assert.deepEqual(replacements, []);
+  assert.doesNotMatch(JSON.stringify(execution), /PRIVATE_REPLACEMENT/u);
+});
+
+test('pre-observation owned failure returns failed with no fabricated model or observed target', async () => {
+  const sessionValues = {};
+  const persisted = [];
+  const adapter = fakeAdapter({
+    noPixels: true,
+    canonicalInternals: true,
+    sessionValues,
+    createTabFailure: true,
+    persistAuditModel: async model => { persisted.push(model); },
+  });
+  const execution = await runAuditExecution({
+    url: 'https://example.test/private?secret=REMOVE',
+    chromeAdapter: adapter,
+    now: clock,
+    idFactory: () => 'audit-owned-pre-observation',
+    closeAuditTab: true,
+    expectedExtensionId: TEST_EXTENSION_ID,
+    pageId: 'page-1',
+    cleanupMode: 'always',
+  });
+
+  assert.equal(execution.status, 'failed');
+  assert.notEqual(execution.status, 'failed-before-observation');
+  assert.equal(execution.model, null);
+  assert.equal(execution.observedTarget, null);
+  assert.equal(execution.observationState, 'pre-observation-failure');
+  assert.ok(['removed', 'cleanup-pending'].includes(execution.ownershipState));
+  assert.deepEqual(persisted, []);
+  assert.equal(adapter.counts.screenshots, 0);
+  assert.equal(Object.keys(sessionValues).some(key => key.startsWith('audita:owned-tab:v1:')), false);
+  assert.doesNotMatch(JSON.stringify({ execution, sessionValues }), /REMOVE|sessionCapabilityId/u);
+});
+
 test('attached execution re-proves inside persistence and commits nothing after document drift', async () => {
   const adapter = fakeAdapter({ noPixels: true });
   let proof = 0;
@@ -504,7 +1239,34 @@ test('attached execution re-proves inside persistence and commits nothing after 
   assert.equal(persisted, 0);
 });
 
-test('attached execution maps a dependency AbortError to AUDIT_FAILED when its signal is not aborted', async () => {
+test('attached execution classifies a divergent first document proof as TARGET_CHANGED', async () => {
+  const adapter = fakeAdapter({ noPixels: true });
+  adapter.probeDocumentIdentity = async tabId => ({
+    tabId,
+    windowId: 9,
+    documentId: 'document-b',
+    urlSessionDigest: `hmac-sha256:${'B'.repeat(43)}`,
+  });
+  let persisted = 0;
+
+  const result = await runAttachedAuditExecution({
+    auditId: 'audit-attached-first-proof-drift', sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST,
+    },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { persisted += 1; },
+  });
+
+  assert.deepEqual({ state: result.state, failureCode: result.failureCode, model: result.model }, {
+    state: 'revoked', failureCode: 'TARGET_CHANGED', model: null,
+  });
+  assert.equal(persisted, 0);
+});
+
+test('attached execution persists a dependency AbortError as failed when its signal is not aborted', async () => {
   const adapter = fakeAdapter({
     noPixels: true,
     collectError: new DOMException('PRIVATE_ABORT_DETAIL', 'AbortError'),
@@ -520,11 +1282,33 @@ test('attached execution maps a dependency AbortError to AUDIT_FAILED when its s
     chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
     onCheckpoint: async () => {}, persistAuditModel: async () => { persisted += 1; },
   });
-  assert.deepEqual({ state: result.state, failureCode: result.failureCode, model: result.model }, {
-    state: 'revoked', failureCode: 'AUDIT_FAILED', model: null,
-  });
-  assert.equal(persisted, 0);
+  assert.equal(result.state, 'model');
+  assert.equal(result.failureCode, null);
+  assert.equal(result.model.session.status, 'failed');
+  assert.equal(result.model.pages[0].status, 'failed');
+  assert.equal(persisted, 1);
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_ABORT_DETAIL/u);
+});
+
+test('attached execution persists and returns a canonical failed terminal model', async () => {
+  const adapter = fakeAdapter({ noPixels: true, collectFailure: true });
+  const persisted = [];
+  const result = await runAttachedAuditExecution({
+    auditId: 'audit-attached-failed-model', sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST,
+    },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async model => { persisted.push(model); },
+  });
+
+  assert.equal(result.state, 'model');
+  assert.equal(result.failureCode, null);
+  assert.equal(result.model.session.status, 'failed');
+  assert.equal(persisted.length, 1);
+  assert.deepEqual(persisted[0], result.model);
 });
 
 test('attached execution preserves a canonical cancelled model for a genuinely aborted signal', async () => {
@@ -581,7 +1365,96 @@ test('attached execution never persists complete when cancellation wins the fina
   assert.equal(result.state, 'model');
   assert.equal(result.model.session.status, 'cancelled');
   assert.equal(persisted.length, 0);
+  assert.equal(result.model.progress, undefined, 'o V2 persistido não retém telemetria transitória de progresso');
+  assert.equal(result.model.session.diagnostics.find(entry =>
+    ['AUDIT_ABORTED', 'NAVIGATION_FAILED'].includes(entry.code) && entry.recoverable === false)?.at,
+  result.model.timestamps.endedAt);
+  assert.equal(result.model.report.status, 'pending');
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_FINAL_PROOF_CANCEL_DETAIL/u);
+});
+
+test('attached final proof failure takes precedence over a simultaneous cancellation', async t => {
+  for (const scenario of [
+    { name: 'target-changed', failureCode: 'TARGET_CHANGED' },
+    { name: 'proof-unavailable', failureCode: 'AUDIT_FAILED' },
+  ]) await t.test(scenario.name, async () => {
+    const controller = new AbortController();
+    const adapter = fakeAdapter({ noPixels: true });
+    let proofCount = 0;
+    adapter.probeDocumentIdentity = async tabId => {
+      proofCount += 1;
+      if (proofCount === 3) {
+        controller.abort(new DOMException('PRIVATE_FINAL_PROOF_ABORT', 'AbortError'));
+        if (scenario.name === 'proof-unavailable') throw new Error('PRIVATE_FINAL_PROOF_UNAVAILABLE');
+        return {
+          tabId, windowId: 9, documentId: 'document-b',
+          urlSessionDigest: `hmac-sha256:${'B'.repeat(43)}`,
+        };
+      }
+      return {
+        tabId, windowId: 9, documentId: 'document-a',
+        urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+      };
+    };
+    let persisted = 0;
+
+    const result = await runAttachedAuditExecution({
+      auditId: `audit-attached-final-proof-${scenario.name}`,
+      sessionCapabilityId: 'S'.repeat(22),
+      target: {
+        kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+        initialUrlEvidence: 'https://example.test/', initialUrlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+      },
+      capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+      chromeAdapter: adapter, modelNow: clock, signal: controller.signal,
+      expectedExtensionId: TEST_EXTENSION_ID, onCheckpoint: async () => {},
+      persistAuditModel: async () => { persisted += 1; },
+    });
+
+    assert.equal(result.state, 'revoked');
+    assert.equal(result.failureCode, scenario.failureCode);
+    assert.equal(result.model, null);
+    assert.equal(persisted, 0);
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_FINAL_PROOF_ABORT|PRIVATE_FINAL_PROOF_UNAVAILABLE/u);
+  });
+});
+
+test('attached runner proof unavailability cannot be reclassified as cancellation', async () => {
+  const controller = new AbortController();
+  const adapter = fakeAdapter({ noPixels: true });
+  let proofCount = 0;
+  adapter.probeDocumentIdentity = async tabId => {
+    proofCount += 1;
+    if (proofCount === 2) {
+      controller.abort(new DOMException('PRIVATE_RUNNER_PROOF_ABORT', 'AbortError'));
+      throw new Error('PRIVATE_RUNNER_PROOF_UNAVAILABLE');
+    }
+    return {
+      tabId, windowId: 9, documentId: 'document-a',
+      urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+    };
+  };
+  let persisted = 0;
+
+  const result = await runAttachedAuditExecution({
+    auditId: 'audit-attached-runner-proof-unavailable',
+    sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: 'https://example.test/', initialUrlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+    },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    chromeAdapter: adapter, modelNow: clock, signal: controller.signal,
+    expectedExtensionId: TEST_EXTENSION_ID, onCheckpoint: async () => {},
+    persistAuditModel: async () => { persisted += 1; },
+  });
+
+  assert.equal(proofCount, 2);
+  assert.equal(result.state, 'revoked');
+  assert.equal(result.failureCode, 'AUDIT_FAILED');
+  assert.equal(result.model, null);
+  assert.equal(persisted, 0);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_RUNNER_PROOF_ABORT|PRIVATE_RUNNER_PROOF_UNAVAILABLE/u);
 });
 
 test('attached execution rejects hostile or extra façade fields before probing', async () => {
@@ -604,42 +1477,44 @@ test('attached execution rejects hostile or extra façade fields before probing'
   assert.equal(adapter.events.length, 0);
 });
 
-test('uses one conservative durable URL projection for successful and failed no-pixels audits', async () => {
+test('uses one conservative durable URL projection and exposes no model before observation', async () => {
   const rawUrl = 'https://example.test/pessoa/CPF-123456789?case=7&secret=x#fragmento';
-  const models = [
-    await runAudit({ url: rawUrl, chromeAdapter: fakeAdapter({ noPixels: true }), now: clock, idFactory: () => 'audit-safe-url-success' }),
-    await runAudit({ url: rawUrl, chromeAdapter: fakeAdapter({ noPixels: true, waitFailure: new Error('PRIVATE_NATIVE_URL') }), now: clock, idFactory: () => 'audit-safe-url-failure' }),
-  ];
-  assert.deepEqual(models.map(model => ({
+  const model = await runAudit({
+    url: rawUrl, chromeAdapter: fakeAdapter({ noPixels: true }),
+    now: clock, idFactory: () => 'audit-safe-url-success',
+  });
+  const failed = await runAuditExecution({
+    url: rawUrl, chromeAdapter: fakeAdapter({ noPixels: true, canonicalInternals: true, waitFailure: new Error('PRIVATE_NATIVE_URL') }),
+    now: clock, idFactory: () => 'audit-safe-url-failure',
+  });
+  assert.deepEqual({
     requestedUrl: model.requestedUrl,
     finalUrl: model.finalUrl,
     snapshotUrl: model.snapshot?.document?.url ?? null,
-  })), [
-    {
-      requestedUrl: 'https://example.test/', finalUrl: 'https://example.test/',
-      snapshotUrl: 'https://example.test/',
-    },
-    {
-      requestedUrl: 'https://example.test/', finalUrl: 'https://example.test/',
-      snapshotUrl: null,
-    },
-  ]);
-  const durable = JSON.stringify(models);
+  }, {
+    requestedUrl: 'https://example.test/pessoa/:redacted-2', finalUrl: 'https://example.test/final',
+    snapshotUrl: 'https://example.test/',
+  });
+  assert.equal(failed.observationState, 'pre-observation-failure');
+  assert.equal(failed.model, null);
+  assert.equal(failed.observedTarget, null);
+  const durable = JSON.stringify({ model, failed });
   assert.match(durable, /https:\/\/example\.test/u);
   assert.doesNotMatch(durable, /CPF-123456789|case=7|secret=x|fragmento|PRIVATE_NATIVE_URL|\?case=7|&secret=x/u);
 });
 
-test('routes element-only, no-pixels, and full-evidence capture independently', async () => {
+test('forces legacy element-only and full-evidence hints through the canonical no-pixels boundary', async () => {
   const elementOnly = fakeAdapter({ mode: 'element-only', trackCaptureCalls: true });
   const elementModel = await runAudit({
     url: 'https://example.test/', chromeAdapter: elementOnly, now: clock, idFactory: () => 'audit-element-only',
   });
   assert.equal(elementOnly.counts.fullPageCalls, 0);
-  assert.ok(elementOnly.counts.elementCalls >= 1);
+  assert.equal(elementOnly.counts.elementCalls, 0);
   assert.equal(elementModel.evidence.artifacts.some(artifact => artifact.kind === 'full-page'), false);
   assert.equal(elementModel.evidence.artifacts.some(artifact => artifact.kind === 'announcement-map'), false);
-  const element = elementModel.evidence.artifacts.find(artifact => artifact.kind === 'element' && artifact.dataUrl);
+  const element = elementModel.evidence.artifacts.find(artifact => artifact.kind === 'element');
   assert.ok(element);
+  assert.equal(Object.hasOwn(element, 'dataUrl'), false);
   assert.equal(Object.hasOwn(element, 'fullPageEvidenceId'), false);
 
   const noPixels = fakeAdapter({ mode: 'no-pixels', trackCaptureCalls: true });
@@ -650,11 +1525,11 @@ test('routes element-only, no-pixels, and full-evidence capture independently', 
 
   const full = fakeAdapter({ mode: 'full-evidence', trackCaptureCalls: true });
   const fullModel = await runAudit({ url: 'https://example.test/', chromeAdapter: full, now: clock, idFactory: () => 'audit-full-route' });
-  assert.ok(full.counts.screenshots >= 2);
-  assert.equal(full.counts.fullPageCalls, 1);
-  assert.ok(full.counts.elementCalls >= 1);
-  assert.equal(fullModel.evidence.artifacts.some(artifact => artifact.kind === 'full-page'), true);
-  assert.equal(fullModel.evidence.artifacts.some(artifact => artifact.kind === 'element' && artifact.dataUrl), true);
+  assert.equal(full.counts.screenshots, 0);
+  assert.equal(full.counts.fullPageCalls, 0);
+  assert.equal(full.counts.elementCalls, 0);
+  assert.equal(fullModel.evidence.artifacts.some(artifact => artifact.kind === 'full-page'), false);
+  assert.equal(fullModel.evidence.artifacts.some(artifact => artifact.kind === 'element' && artifact.dataUrl), false);
 });
 
 test('orders capture→axe→collect→probes→core→normalize, correlates target-size by node and drops raw axe', async () => {
@@ -747,7 +1622,7 @@ test('orders capture→axe→collect→probes→core→normalize, correlates tar
   }
 });
 
-test('creates one page-level derived map after structural evidence without mutating or linking the pristine source', async () => {
+test('does not invoke the map compositor while the public façade is in no-pixels mode', async () => {
   let pristineBefore;
   let pristineAfter;
   let observedDeviceScaleFactor;
@@ -767,17 +1642,17 @@ test('creates one page-level derived map after structural evidence without mutat
   const map = model.evidence.artifacts.find(artifact => artifact.kind === 'announcement-map');
   const pristine = model.evidence.artifacts.find(artifact => artifact.kind === 'full-page');
 
-  assert.equal(map.status, 'complete');
-  assert.equal(map.fullPageEvidenceId, pristine.evidenceId);
-  assert.equal(pristineBefore, pristineAfter);
-  assert.equal(observedDeviceScaleFactor, 1);
-  assert.ok(adapter.events.indexOf('map') > adapter.events.findLastIndex(event => event.startsWith('thumbnail:')));
-  assert.ok(adapter.events.indexOf('map') < adapter.events.indexOf('handoff'));
-  assert.equal(model.occurrences.some(occurrence => occurrence.evidenceIds.includes(map.evidenceId)), false);
-  assert.equal(model.session.status, 'complete');
+  assert.equal(map, undefined);
+  assert.equal(pristine, undefined);
+  assert.equal(pristineBefore, undefined);
+  assert.equal(pristineAfter, undefined);
+  assert.equal(observedDeviceScaleFactor, undefined);
+  assert.equal(adapter.events.includes('map'), false);
+  assert.equal(model.session.status, 'partial');
+  assert.ok(model.session.diagnostics.some(entry => entry.code === 'FULL_PAGE_CAPTURE_FAILED'));
 });
 
-test('keeps the pristine evidence and reports a fixed recoverable diagnostic when the local map compositor fails', async () => {
+test('does not expose a dormant map compositor failure while pixels are disabled', async () => {
   const adapter = fakeAdapter({
     mapFailure: Object.assign(new Error('PRIVATE-RAW-ERROR'), { code: 'ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE' }),
   });
@@ -786,14 +1661,15 @@ test('keeps the pristine evidence and reports a fixed recoverable diagnostic whe
     now: clock, idFactory: () => 'audit-annotation-map-failure',
   });
 
-  assert.equal(model.evidence.artifacts.some(artifact => artifact.kind === 'full-page'), true);
+  assert.equal(model.evidence.artifacts.some(artifact => artifact.kind === 'full-page'), false);
   assert.equal(model.evidence.artifacts.some(artifact => artifact.kind === 'announcement-map'), false);
   assert.equal(model.session.status, 'partial');
-  assert.ok(model.session.diagnostics.some(entry => entry.code === 'ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE'));
+  assert.equal(model.session.diagnostics.some(entry => entry.code === 'ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE'), false);
+  assert.equal(adapter.events.includes('map'), false);
   assert.doesNotMatch(JSON.stringify(model), /PRIVATE-RAW-ERROR/u);
 });
 
-test('preserves the explicit printable-segment limit diagnostic from the map compositor', async () => {
+test('does not claim a printable-segment map failure when the compositor never ran', async () => {
   const adapter = fakeAdapter({
     mapFailure: Object.assign(new Error('PRIVATE-RAW-ERROR'), { code: 'ANNOTATION_MAP_PRINT_SEGMENT_LIMIT' }),
   });
@@ -803,7 +1679,8 @@ test('preserves the explicit printable-segment limit diagnostic from the map com
   });
 
   assert.equal(model.session.status, 'partial');
-  assert.ok(model.session.diagnostics.some(entry => entry.code === 'ANNOTATION_MAP_PRINT_SEGMENT_LIMIT'));
+  assert.equal(model.session.diagnostics.some(entry => entry.code === 'ANNOTATION_MAP_PRINT_SEGMENT_LIMIT'), false);
+  assert.equal(adapter.events.includes('map'), false);
   assert.doesNotMatch(JSON.stringify(model), /PRIVATE-RAW-ERROR/u);
 });
 
@@ -908,7 +1785,7 @@ test('rejects a forged disabled axe payload even when the report has no axe find
   }
 });
 
-test('integrates a confirmed top-frame axe violation with provenance, ABNT outcome and fixed legal reference', async () => {
+test('integrates a confirmed top-frame axe violation with provenance, ABNT outcome and fixed legal reference', async t => {
   const page = rawPage();
   page.document.language = '';
   const axeRun = {
@@ -935,7 +1812,9 @@ test('integrates a confirmed top-frame axe violation with provenance, ABNT outco
   assert.equal(axeOccurrence.itemId, '5.13.2');
   assert.equal(axeOccurrence.applicabilityEvidence.source.ruleId, 'page-language');
   assert.deepEqual(axeOccurrence.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v1' });
-  assert.ok(axeOccurrence.evidenceIds.includes(model.evidence.artifacts.find(item => item.kind === 'full-page').evidenceId));
+  assert.equal(axeOccurrence.nodeId, null);
+  assert.deepEqual(axeOccurrence.evidenceIds, []);
+  assert.equal(model.evidence.artifacts.some(item => item.kind === 'full-page'), false);
   assert.equal(model.axe.provenance.version, '4.13.0');
   assert.equal(model.axe.provenance.config.rules['target-size'].enabled, true);
   assert.equal(model.ruleResults.some(rule => rule.outcome === 'passed' && rule.source?.engine === 'axe-core'), false);
@@ -969,26 +1848,13 @@ test('integrates a confirmed top-frame axe violation with provenance, ABNT outco
   }), /axe|suplement|diverge|inválid/i);
 
   const mutations = [
-    value => { value.ruleResults.find(rule => rule.source?.engine === 'axe-core').summary = 'Prontuário privado Oliveira'; },
-    value => { value.occurrences.find(item => item.source?.engine === 'axe-core').justification = 'Prontuário privado Oliveira'; },
-    value => { value.ruleResults.find(rule => rule.source?.engine === 'axe-core').privateText = 'Prontuário privado Oliveira'; },
-    value => { value.occurrences.find(item => item.source?.engine === 'axe-core').privateText = 'Prontuário privado Oliveira'; },
-    value => { value.occurrences.find(item => item.source?.engine === 'axe-core').target.privateText = 'Prontuário privado Oliveira'; },
-    value => {
-      const occurrence = value.occurrences.find(item => item.source?.engine === 'axe-core');
-      const fullPage = value.evidence.artifacts.find(item => item.kind === 'full-page' && item.state === 'pristine');
-      occurrence.evidenceIds = occurrence.evidenceIds.filter(id => id !== fullPage.evidenceId);
-    },
-    value => { value.evidence.artifacts.find(item => item.kind === 'full-page').state = 'annotated'; },
-    value => {
-      value.evidence.artifacts.find(item => item.kind === 'full-page').state = 'annotated';
-      value.session.diagnostics.push({
-        code: 'FULL_PAGE_CAPTURE_FAILED', message: 'Paciente HIV positivo',
-        at: '2026-08-26T15:00:00.000Z', recoverable: true,
-      });
-    },
-    value => { value.itemResults.find(item => item.id === '5.13.2').outcome = 'cantTell'; },
-    value => {
+    ['axe summary', value => { value.ruleResults.find(rule => rule.source?.engine === 'axe-core').summary = 'Prontuário privado Oliveira'; }],
+    ['axe justification', value => { value.occurrences.find(item => item.source?.engine === 'axe-core').justification = 'Prontuário privado Oliveira'; }],
+    ['axe rule extra field', value => { value.ruleResults.find(rule => rule.source?.engine === 'axe-core').privateText = 'Prontuário privado Oliveira'; }],
+    ['axe occurrence extra field', value => { value.occurrences.find(item => item.source?.engine === 'axe-core').privateText = 'Prontuário privado Oliveira'; }],
+    ['axe target extra field', value => { value.occurrences.find(item => item.source?.engine === 'axe-core').target.privateText = 'Prontuário privado Oliveira'; }],
+    ['ABNT aggregate divergence', value => { value.itemResults.find(item => item.id === '5.13.2').outcome = 'cantTell'; }],
+    ['axe identity divergence', value => {
       const rule = value.ruleResults.find(item => item.source?.engine === 'axe-core');
       const occurrence = value.occurrences.find(item => item.source?.engine === 'axe-core');
       const normalizedRule = value.axe.ruleResults[0];
@@ -1001,16 +1867,16 @@ test('integrates a confirmed top-frame axe violation with provenance, ABNT outco
         target.ruleId = 'axe.fake-rule'; target.engineRuleId = 'fake-rule';
         target.source.ruleId = 'axe.fake-rule'; target.source.engineRuleId = 'fake-rule';
       }
-    },
+    }],
   ];
-  for (const mutate of mutations) {
-    const forged = structuredClone(model);
-    mutate(forged);
-    await assert.rejects(enrichAuditForReport(forged, {
-      now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
-      manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
-    }), /axe|suplement|autoritativ|diverge|inválid/i);
-  }
+  for (const [name, mutate] of mutations) await t.test(name, async () => {
+      const forged = structuredClone(model);
+      mutate(forged);
+      await assert.rejects(enrichAuditForReport(forged, {
+        now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+        manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+      }), /axe|suplement|autoritativ|diverge|inválid/i);
+    });
 });
 
 test('preserves the canonical axe selector target when evidence independently resolves the same element', async () => {
@@ -1462,7 +2328,7 @@ test('keeps a pristine capture timeout partial without retrying element screensh
   assert.ok(model.session.diagnostics.some(item => item.code === 'SNIPPET_CAPTURE_FAILED'));
   assert.ok(model.session.diagnostics.some(item => item.code === 'ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE'));
   assert.ok(adapter.events.includes('collect'));
-  assert.equal(adapter.counts.screenshots, 1);
+  assert.equal(adapter.counts.screenshots, 0);
   assert.equal(adapter.events.some(event => event.startsWith('thumbnail:')), false);
   const element = model.evidence.artifacts.find(item => item.nodeId === 'n-2');
   assert.ok(element);
@@ -1512,86 +2378,44 @@ test('does not claim an axe fallback when collection fails before the core audit
   assert.equal(report.session.diagnostics.some(entry => entry.code === 'AXE_FEATURE_DISABLED'), false);
 });
 
-test('labels requested URLs as not observed in HTML and EARL after a pre-execution failure', async () => {
-  const draft = await runAudit({
-    url: 'https://example.test/requested',
-    chromeAdapter: fakeAdapter({ createTabFailure: true }),
+test('returns no report model or requested URL after a pre-observation tab failure', async () => {
+  const execution = await runAuditExecution({
+    url: 'https://example.test/requested?secret=REMOVE',
+    chromeAdapter: fakeAdapter({ createTabFailure: true, canonicalInternals: true }),
     now: clock,
     idFactory: () => 'audit-url-not-observed',
   });
-  const report = await enrichAuditForReport(draft, {
-    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
-    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
-  });
-  const html = renderHtmlReport(report);
-  const technical = JSON.parse(renderTechnicalJson(report));
 
-  assert.equal(report.pages[0].attempted, false);
-  assert.equal(report.pages[0].finalUrlObserved, false);
-  assert.match(html, /URL final<\/dt><dd>Não observada/u);
-  assert.doesNotMatch(html, /URL final<\/dt><dd><code>https:\/\/example\.test\/requested/u);
-  assert.equal(technical.assertions.length, 146);
-  assert.deepEqual(technical.assertions[0].subject, {
-    id: report.pages[0].requestedUrl,
-    requestedUrl: report.pages[0].requestedUrl,
-    finalUrlObserved: false,
-  });
+  assert.equal(execution.observationState, 'pre-observation-failure');
+  assert.equal(execution.model, null);
+  assert.equal(execution.observedTarget, null);
+  assert.equal(execution.status, 'failed');
+  assert.doesNotMatch(JSON.stringify(execution), /requested|secret|REMOVE/u);
 });
 
-test('distinguishes a pre-execution tab failure from navigation that actually started', async t => {
+test('distinguishes pre-observation creation and navigation failures only through factual effects', async t => {
   const reportOptions = {
     now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
     manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
   };
   for (const scenario of [
-    { name: 'createTab', options: { createTabFailure: true }, attempted: false, historicalAttempted: false },
+    { name: 'createTab', options: { createTabFailure: true }, navigated: false },
     {
       name: 'navigation', options: { waitFailure: new Error('detalhe privado de navegação') },
-      attempted: true, historicalAttempted: false,
+      navigated: true,
     },
   ]) await t.test(scenario.name, async () => {
-    const draft = await runAudit({
-      url: 'https://example.test/', chromeAdapter: fakeAdapter(scenario.options), now: clock,
+    const adapter = fakeAdapter({ ...scenario.options, canonicalInternals: true });
+    const execution = await runAuditExecution({
+      url: 'https://example.test/', chromeAdapter: adapter, now: clock,
       idFactory: () => `audit-execution-${scenario.name.toLowerCase()}`,
     });
-    const report = await enrichAuditForReport(draft, reportOptions);
-    const page = report.pages[0];
-
-    assert.equal(page.attempted, scenario.attempted);
-    assert.equal(page.finalUrlObserved, false);
-    if (!scenario.attempted) {
-      assert.equal(page.timestamps.startedAt, page.timestamps.endedAt);
-      assert.ok(page.timestamps.generatedAt >= page.timestamps.endedAt);
-      assert.deepEqual(page.viewport, { width: null, height: null, deviceScaleFactor: null });
-      assert.equal(page.axeStatus, 'not-run');
-      assert.equal(report.occurrences.some(value => value.pageId === page.pageId), false);
-      assert.equal(report.evidence.some(value => value.pageId === page.pageId), false);
-      const remapped = await remapAuditPage(report, {
-        batchAuditId: 'batch-pre-execution', pageId: 'page-1',
-      });
-      assert.equal(remapped.page.attempted, false);
-      assert.equal(remapped.page.finalUrlObserved, false);
-      assert.equal(remapped.page.timestamps.startedAt, remapped.page.timestamps.endedAt);
-      assert.equal(remapped.page.axeStatus, 'not-run');
-
-    }
-
-    const historicalDraft = structuredClone(draft);
-    delete historicalDraft.attempted;
-    delete historicalDraft.finalUrlObserved;
-    const historical = await enrichAuditForReport(historicalDraft, reportOptions);
-    assert.equal(historical.pages[0].attempted, scenario.historicalAttempted);
-    assert.equal(historical.pages[0].finalUrlObserved, false);
-
-    if (scenario.name === 'createTab') {
-      const navigationSignalled = structuredClone(historicalDraft);
-      navigationSignalled.progress.push({
-        ...navigationSignalled.progress[0], phase: 'navigating', message: 'Iniciando navegação', percent: 10,
-      });
-      const inferred = await enrichAuditForReport(navigationSignalled, reportOptions);
-      assert.equal(inferred.pages[0].attempted, true);
-      assert.equal(inferred.pages[0].finalUrlObserved, false);
-    }
+    assert.equal(execution.observationState, 'pre-observation-failure');
+    assert.equal(execution.model, null);
+    assert.equal(execution.observedTarget, null);
+    assert.equal(execution.ownershipState, 'removed');
+    assert.equal(adapter.events.some(entry => entry.startsWith('navigate:')), scenario.navigated);
+    assert.doesNotMatch(JSON.stringify(execution), /detalhe privado/u);
   });
 
   await t.test('historical complete audit', async () => {
@@ -1609,21 +2433,23 @@ test('distinguishes a pre-execution tab failure from navigation that actually st
 });
 
 test('does not claim or clean ownership when createTab returns an invalid resource', async () => {
-  const adapter = fakeAdapter({ createTabResult: { id: 'PRIVATE_INVALID_TAB_ID' } });
-  const draft = await runAudit({
+  const sessionValues = {};
+  const adapter = fakeAdapter({
+    createTabResult: { id: 'PRIVATE_INVALID_TAB_ID' }, canonicalInternals: true, sessionValues,
+  });
+  const execution = await runAuditExecution({
     url: 'https://example.test/', chromeAdapter: adapter, now: clock,
     idFactory: () => 'audit-invalid-tab-resource',
-  });
-  const report = await enrichAuditForReport(draft, {
-    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
-    manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
   });
 
   assert.equal(adapter.counts.removals, 0);
   assert.equal(adapter.events.some(entry => entry.startsWith('remove-tab:')), false);
-  assert.equal(report.pages[0].attempted, false);
-  assert.equal(report.pages[0].finalUrlObserved, false);
-  assert.deepEqual(report.session.diagnostics.map(entry => entry.code), ['NAVIGATION_FAILED']);
+  assert.equal(Object.values(sessionValues).some(value => value?.version === 2), false);
+  assert.equal(execution.observationState, 'pre-observation-failure');
+  assert.equal(execution.model, null);
+  assert.equal(execution.observedTarget, null);
+  assert.equal(execution.ownershipState, 'removed');
+  assert.doesNotMatch(JSON.stringify(execution), /PRIVATE_INVALID_TAB_ID/u);
 });
 
 test('records a missing environment as a factual partial cause', async () => {
@@ -1651,11 +2477,21 @@ test('keeps cleanup failures explicit but recoverable in a valid partial audit m
     { name: 'CDP', option: 'disconnectFailure', code: 'CDP_DISCONNECT_FAILED' },
     { name: 'aba', option: 'removeTabFailure', code: 'TAB_CLOSE_FAILED' },
   ]) await t.test(scenario.name, async () => {
-    const adapter = fakeAdapter({ [scenario.option]: true });
-    const model = await runAudit({
+    const sessionValues = {};
+    const adapter = fakeAdapter({ [scenario.option]: true, sessionValues });
+    const pending = runAudit({
       url: 'https://example.test/', chromeAdapter: adapter, now: clock,
       idFactory: () => `audit-cleanup-${scenario.name.toLowerCase()}`,
     });
+
+    if (scenario.name === 'aba') {
+      await assert.rejects(pending, /AUDIT_EXECUTION_DENIED/u);
+      const owner = Object.values(sessionValues).find(value => value?.version === 2);
+      assert.equal(owner?.state, 'cleanup-pending');
+      assert.equal(adapter.counts.removals, 1);
+      return;
+    }
+    const model = await pending;
 
     assert.equal(model.session.status, 'partial');
     assert.equal(model.session.partial, true);
@@ -1672,12 +2508,16 @@ test('keeps cleanup failures explicit but recoverable in a valid partial audit m
 
 test('does not treat an uncorrelated navigation AbortError as user cancellation', async () => {
   const aborted = new DOMException('Operação cancelada', 'AbortError');
-  const adapter = fakeAdapter({ waitFailure: aborted });
-  const model = await runAudit({ url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'audit-cancelled' });
-  assert.equal(model.session.status, 'failed');
-  assert.equal(model.progress.some(entry => entry.percent === 100), false);
+  const adapter = fakeAdapter({ waitFailure: aborted, canonicalInternals: true });
+  const execution = await runAuditExecution({
+    url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'audit-cancelled',
+  });
+  assert.equal(execution.status, 'failed');
+  assert.equal(execution.observationState, 'pre-observation-failure');
+  assert.equal(execution.model, null);
   assert.equal(adapter.counts.disconnects, 0);
   assert.equal(adapter.counts.removals, 1);
+  assert.doesNotMatch(JSON.stringify(execution), /cancelada/u);
 });
 
 test('can preserve the disposable audit tab only when explicitly configured', async () => {
@@ -1689,7 +2529,7 @@ test('can preserve the disposable audit tab only when explicitly configured', as
 
 test('rejects unsafe generated audit IDs before opening a tab', async () => {
   const adapter = fakeAdapter();
-  await assert.rejects(runAudit({ url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'token=SECRET' }), /identificador/i);
+  await assert.rejects(runAudit({ url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'token=SECRET' }), /AUDIT_EXECUTION_DENIED/u);
   assert.equal(adapter.events.includes('create-tab'), false);
 });
 
@@ -1738,9 +2578,17 @@ test('validated handoff capability cannot be persisted by runAudit or alter repo
 test('cancels immediately when the signal aborts after collection', async () => {
   const controller = new AbortController();
   const adapter = fakeAdapter({ afterCollect: () => controller.abort(new DOMException('cancelada', 'AbortError')) });
-  const model = await runAudit({ url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'audit-abort-collect', signal: controller.signal });
+  const model = await runAudit({
+    url: 'https://example.test/', chromeAdapter: adapter,
+    now: clock, idFactory: () => 'audit-abort-collect', signal: controller.signal,
+  });
   assert.equal(model.session.status, 'cancelled');
-  assert.equal(model.progress.some(entry => entry.percent === 100), false);
+  assert.equal(model.progress.some(entry => entry.phase === 'complete' || /concluída/iu.test(entry.message)), false);
+  assert.deepEqual(
+    { phase: model.progress.at(-1)?.phase, message: model.progress.at(-1)?.message, at: model.progress.at(-1)?.at },
+    { phase: 'cancelled', message: 'Auditoria cancelada', at: model.timestamps.endedAt },
+  );
+  assert.equal(model.report.status, 'pending');
   assert.equal(adapter.events.includes('handoff'), false);
   assert.equal(adapter.counts.disconnects, 1);
   assert.equal(adapter.counts.removals, 1);
@@ -1751,13 +2599,15 @@ test('stops the occurrence loop immediately when evidence capture observes abort
   const adapter = fakeAdapter({ afterSnippet: backendNodeId => {
     if (backendNodeId === 1) controller.abort(new DOMException('cancelada', 'AbortError'));
   } });
-  const model = await runAudit({ url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'audit-abort-evidence', signal: controller.signal });
+  const model = await runAudit({
+    url: 'https://example.test/', chromeAdapter: adapter,
+    now: clock, idFactory: () => 'audit-abort-evidence', signal: controller.signal,
+  });
   assert.equal(model.session.status, 'cancelled');
-  assert.equal(model.progress.some(entry => entry.percent === 100), false);
+  assert.equal(model.progress.some(entry => entry.phase === 'complete' || /concluída/iu.test(entry.message)), false);
+  assert.equal(model.progress.at(-1)?.phase, 'cancelled');
+  assert.equal(model.timestamps.endedAt, model.progress.at(-1)?.at);
   assert.equal(adapter.events.includes('handoff'), false);
-  assert.equal(model.evidence.artifacts.some(item => item.nodeId === 'n-2'), false);
-  assert.ok(model.occurrences.every((occurrence, index) =>
-    occurrence.occurrenceId === `occurrence-page-1-${String(index + 1).padStart(6, '0')}`));
   assert.equal(adapter.counts.disconnects, 1);
   assert.equal(adapter.counts.removals, 1);
 });

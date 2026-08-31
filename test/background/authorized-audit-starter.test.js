@@ -8,6 +8,8 @@ import {
   readActiveAuditJobForWorker,
   retentionPreferenceStorageKey,
 } from '../../src/background/authorized-audit-starter.js';
+import { AUDIT_EXECUTION_INTERNAL } from '../../src/background/chrome-adapter.js';
+import { runAttachedAuditExecution, runAudit } from '../../src/background/run-audit.js';
 import { panelBootstrapStorageKey } from '../../src/background/panel-port.js';
 import { createTargetOperationQueue } from '../../src/background/target-operation-queue.js';
 import {
@@ -21,6 +23,8 @@ import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { createPanelResultBundleV1 } from '../../src/panel/panel-result-bundle.js';
+import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
+import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { reportInput } from '../report/helpers.js';
 
@@ -45,9 +49,89 @@ function sessionArea() {
   };
 }
 
+async function failedAudit(auditId) {
+  const internalValues = {};
+  const adapter = {
+    async createTab() { return { id: 42, windowId: 9 }; },
+    async navigateTab() {},
+    async waitForStable() { return { url: 'https://example.test/' }; },
+    async probeDocumentIdentity(tabId) {
+      return { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST };
+    },
+    async getEvidenceUrl() { return 'https://example.test/'; },
+    async connectCdp() {
+      return {
+        async command() {
+          return {
+            cssContentSize: { width: 800, height: 600 },
+            cssLayoutViewport: { clientWidth: 800, clientHeight: 600 },
+          };
+        },
+        async disconnect() {},
+      };
+    },
+    async runAxeInTab() {
+      return {
+        status: 'disabled', provenance: AXE_PROVENANCE, frames: [],
+        diagnostics: [{ code: 'AXE_FEATURE_DISABLED', frameId: null }],
+      };
+    },
+    async getEnvironment() {
+      return { chromeVersion: 'Chrome/147.0.0.0', viewport: { width: 800, height: 600, deviceScaleFactor: 1 } };
+    },
+    async collectPage() { throw new Error('structural collection failure'); },
+    async removeTab() {},
+  };
+  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
+    value: Object.freeze({
+      sessionArea: {
+        async get(key) { return Object.hasOwn(internalValues, key) ? { [key]: structuredClone(internalValues[key]) } : {}; },
+        async set(entries) { Object.assign(internalValues, structuredClone(entries)); },
+        async remove(key) { delete internalValues[key]; },
+      },
+      randomBytes(length) { return new Uint8Array(length).fill(11); },
+      capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    }),
+  });
+  return runAudit({
+    url: 'https://example.test/', chromeAdapter: adapter,
+    now: () => '2026-08-29T11:59:00.000Z', idFactory: () => auditId,
+  });
+}
+
+function failedAttachedChromeAdapter() {
+  return Object.freeze({
+    async probeDocumentIdentity(tabId) {
+      return { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST };
+    },
+    async connectCdp() {
+      return Object.freeze({
+        async command() {
+          return {
+            cssContentSize: { width: 800, height: 600 },
+            cssLayoutViewport: { clientWidth: 800, clientHeight: 600 },
+          };
+        },
+        async disconnect() {},
+      });
+    },
+    async runAxeInTab() {
+      return {
+        status: 'disabled', provenance: AXE_PROVENANCE, frames: [],
+        diagnostics: [{ code: 'AXE_FEATURE_DISABLED', frameId: null }],
+      };
+    },
+    async getEnvironment() {
+      return { chromeVersion: 'Chrome/147.0.0.0', viewport: { width: 800, height: 600, deviceScaleFactor: 1 } };
+    },
+    async collectPage() { throw new Error('structural collection failure'); },
+  });
+}
+
 async function reportFixture(auditId, status = 'partial') {
-  const draft = status === 'cancelled'
-    ? createAuditModel(reportInput({
+  const draft = status === 'failed'
+    ? await failedAudit(auditId)
+    : status === 'cancelled' ? createAuditModel(reportInput({
         auditId,
         session: {
           status: 'cancelled', partial: false,
@@ -56,9 +140,8 @@ async function reportFixture(auditId, status = 'partial') {
             at: '2026-08-26T14:00:30.000Z', recoverable: false,
           }],
         },
-      }))
-    : structuredClone(SAMPLE_AUDIT);
-  if (status !== 'cancelled') {
+      })) : structuredClone(SAMPLE_AUDIT);
+  if (!['cancelled', 'failed'].includes(status)) {
     draft.auditId = auditId;
     draft.session.status = status;
     draft.session.partial = status === 'partial';
@@ -720,6 +803,306 @@ test('journals, claims, checkpoints and atomically settles a result before publi
   assert.ok(order.indexOf('bootstrap-register') < order.indexOf('latest:running'));
   assert.ok(order.indexOf('latest:running') < order.indexOf('bootstrap'));
   assert.ok(order.indexOf('bootstrap') < order.indexOf('run'));
+});
+
+test('commits and publishes a canonical failed terminal model through the production result callback', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const report = await reportFixture('audit-attached-failed-result', 'failed');
+  const order = [];
+  const reportByAudit = new Map();
+  const auditStore = createInMemoryAuditStore();
+  let published = null;
+  const execution = async ({ onCheckpoint, persistAuditModel }) => {
+    order.push('run');
+    await onCheckpoint(report.checkpoint);
+    await persistAuditModel(report.model);
+    return Object.freeze({
+      version: 1, auditId: report.model.auditId, state: 'model', failureCode: null,
+      model: report.model, checkpoint: report.checkpoint,
+    });
+  };
+  const dependencies = dependencyFixture({ area, authority: prepared.authority, execution, order, reportByAudit });
+  let commitCalls = 0;
+  dependencies.commitTerminalAudit = async input => {
+    commitCalls += 1;
+    assert.equal(input.expectedRevision, 1);
+    return auditStore.commitAuditWithCheckpointIfAbsent(
+      input.auditId, input.model, input.checkpoint, input.latestState,
+      { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false },
+    );
+  };
+  dependencies.readAuditSnapshot = ({ auditId }) => auditStore.getAuditSnapshot(auditId);
+  dependencies.readReportRevision = ({ auditId }) => auditStore.getReportRevision(auditId);
+  dependencies.panelCoordinator = panelCoordinator(order, {
+    async publishResult(value) {
+      order.push(`publish:${value.state}`);
+      published = value;
+      return true;
+    },
+  });
+  dependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({
+    reportRevision, inventory: report.inventory,
+  });
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: report.model.auditId,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+  const completion = await started.completion;
+
+  assert.deepEqual(completion, { ok: true, auditId: report.model.auditId, state: 'result', revision: 1 });
+  assert.equal(commitCalls, 1);
+  assert.equal((await auditStore.getReportRevision(report.model.auditId))?.model.session.status, 'failed');
+  assert.equal(published?.state, 'result');
+  assert.equal(published?.resultBundle?.summary?.identity?.status, 'failed');
+  assert.equal(order.filter(entry => entry === 'publish:result').length, 1);
+  assert.equal(order.some(entry => entry === 'publish:revoked'), false);
+});
+
+test('recovers and publishes once when the real attached façade observes a terminal commit before its callback rejects', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const auditId = 'audit-attached-commit-then-throw';
+  const order = [];
+  const auditStore = createInMemoryAuditStore();
+  const inventory = await createInstalledCoreRuleInventory();
+  const chromeAdapter = failedAttachedChromeAdapter();
+  let commitCalls = 0;
+  let published = null;
+  const dependencies = dependencyFixture({
+    area,
+    authority: prepared.authority,
+    order,
+    execution: args => runAttachedAuditExecution({
+      ...args,
+      chromeAdapter,
+      expectedExtensionId: 'abcdefghijklmnopabcdefghijklmnop',
+    }),
+  });
+  dependencies.persistLatest = async ({ state }) => {
+    order.push(`latest:${state.status}`);
+    await auditStore.setLatest(state);
+    return Object.freeze(structuredClone(state));
+  };
+  dependencies.commitTerminalAudit = async input => {
+    commitCalls += 1;
+    await auditStore.commitAuditWithCheckpointIfAbsent(
+      input.auditId, input.model, input.checkpoint, input.latestState,
+      { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false },
+    );
+    throw new Error('simulated commit acknowledgement loss');
+  };
+  dependencies.readAuditSnapshot = ({ auditId: id }) => auditStore.getAuditSnapshot(id);
+  dependencies.readReportRevision = ({ auditId: id }) => auditStore.getReportRevision(id);
+  dependencies.readLatest = () => auditStore.getLatest();
+  dependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({
+    reportRevision, inventory,
+  });
+  dependencies.panelCoordinator = panelCoordinator(order, {
+    async publishResult(value) {
+      order.push(`publish:${value.state}`);
+      published = value;
+      return true;
+    },
+  });
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId,
+    eventNonce: null,
+    auditId,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(await started.completion, { ok: true, auditId, state: 'result', revision: 1 });
+  assert.equal(commitCalls, 1);
+  assert.equal((await auditStore.getReportRevision(auditId))?.model.session.status, 'failed');
+  assert.equal(published?.state, 'result');
+  assert.equal(published?.resultBundle?.summary?.identity?.status, 'failed');
+  assert.equal(order.filter(entry => entry === 'publish:result').length, 1);
+  assert.equal(order.some(entry => entry === 'publish:revoked'), false);
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+});
+
+test('real attached façade commits one cancelled result when cancellation wins during bundle preparation', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const auditId = 'audit-attached-cancel-during-bundle';
+  const order = [];
+  const auditStore = createInMemoryAuditStore();
+  const inventory = await createInstalledCoreRuleInventory();
+  const chromeAdapter = failedAttachedChromeAdapter();
+  let commitCalls = 0;
+  let published = null;
+  let buildCalls = 0;
+  let releaseFirstBuild;
+  let announceFirstBuild;
+  const firstBuildEntered = new Promise(resolve => { announceFirstBuild = resolve; });
+  const firstBuildGate = new Promise(resolve => { releaseFirstBuild = resolve; });
+  const dependencies = dependencyFixture({
+    area,
+    authority: prepared.authority,
+    order,
+    execution: args => runAttachedAuditExecution({
+      ...args,
+      chromeAdapter,
+      expectedExtensionId: 'abcdefghijklmnopabcdefghijklmnop',
+    }),
+  });
+  dependencies.persistLatest = async ({ state }) => {
+    order.push(`latest:${state.status}`);
+    await auditStore.setLatest(state);
+    return Object.freeze(structuredClone(state));
+  };
+  dependencies.commitTerminalAudit = async input => {
+    commitCalls += 1;
+    return auditStore.commitAuditWithCheckpointIfAbsent(
+      input.auditId, input.model, input.checkpoint, input.latestState,
+      { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false },
+    );
+  };
+  dependencies.readAuditSnapshot = ({ auditId: id }) => auditStore.getAuditSnapshot(id);
+  dependencies.readReportRevision = ({ auditId: id }) => auditStore.getReportRevision(id);
+  dependencies.readLatest = () => auditStore.getLatest();
+  dependencies.buildPanelResultBundle = async ({ reportRevision }) => {
+    buildCalls += 1;
+    if (buildCalls === 1) {
+      announceFirstBuild();
+      await firstBuildGate;
+    }
+    return createPanelResultBundleV1({ reportRevision, inventory });
+  };
+  dependencies.panelCoordinator = panelCoordinator(order, {
+    async publishResult(value) {
+      order.push(`publish:${value.state}`);
+      published = value;
+      return true;
+    },
+  });
+  const starter = createAuthorizedAuditStarter(dependencies);
+  const started = await starter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId,
+    eventNonce: null,
+    auditId,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    senderContext: prepared.senderContext,
+  });
+  await firstBuildEntered;
+  assert.deepEqual(await starter.abortAuthorizedAudit({
+    auditId,
+    sessionCapabilityId: started.sessionCapabilityId,
+    windowId: 9,
+    reasonCode: 'USER_CANCELLED',
+  }), { ok: true, auditId, state: 'cancelling' });
+  releaseFirstBuild();
+
+  assert.deepEqual(await started.completion, { ok: true, auditId, state: 'result', revision: 1 });
+  assert.equal(commitCalls, 1);
+  assert.equal((await auditStore.getReportRevision(auditId))?.model.session.status, 'cancelled');
+  assert.equal(published?.state, 'result');
+  assert.equal(published?.resultBundle?.summary?.identity?.status, 'cancelled');
+  assert.equal(order.filter(entry => entry === 'publish:result').length, 1);
+  assert.equal(order.some(entry => entry === 'publish:revoked'), false);
+});
+
+test('real attached façade commits cancellation accepted at its first observed checkpoint', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const auditId = 'audit-attached-cancel-first-checkpoint';
+  const order = [];
+  const auditStore = createInMemoryAuditStore();
+  const inventory = await createInstalledCoreRuleInventory();
+  let collectCalls = 0;
+  const chromeAdapter = Object.freeze({
+    ...failedAttachedChromeAdapter(),
+    async collectPage() {
+      collectCalls += 1;
+      throw new Error('collection must not start after checkpoint cancellation');
+    },
+  });
+  let commitCalls = 0;
+  let published = null;
+  let releaseFirstCheckpoint;
+  let announceFirstCheckpoint;
+  const firstCheckpointEntered = new Promise(resolve => { announceFirstCheckpoint = resolve; });
+  const firstCheckpointGate = new Promise(resolve => { releaseFirstCheckpoint = resolve; });
+  const dependencies = dependencyFixture({
+    area,
+    authority: prepared.authority,
+    order,
+    execution: args => runAttachedAuditExecution({
+      ...args,
+      chromeAdapter,
+      expectedExtensionId: 'abcdefghijklmnopabcdefghijklmnop',
+    }),
+  });
+  const persistCheckpoint = dependencies.persistCheckpoint;
+  let checkpointCalls = 0;
+  dependencies.persistCheckpoint = async value => {
+    checkpointCalls += 1;
+    if (checkpointCalls === 1) {
+      announceFirstCheckpoint();
+      await firstCheckpointGate;
+    }
+    return persistCheckpoint(value);
+  };
+  dependencies.persistLatest = async ({ state }) => {
+    order.push(`latest:${state.status}`);
+    await auditStore.setLatest(state);
+    return Object.freeze(structuredClone(state));
+  };
+  dependencies.commitTerminalAudit = async input => {
+    commitCalls += 1;
+    await auditStore.commitAuditWithCheckpointIfAbsent(
+      input.auditId, input.model, input.checkpoint, input.latestState,
+      { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false },
+    );
+    throw new Error('simulated first-checkpoint commit acknowledgement loss');
+  };
+  dependencies.readAuditSnapshot = ({ auditId: id }) => auditStore.getAuditSnapshot(id);
+  dependencies.readReportRevision = ({ auditId: id }) => auditStore.getReportRevision(id);
+  dependencies.readLatest = () => auditStore.getLatest();
+  dependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({
+    reportRevision, inventory,
+  });
+  dependencies.panelCoordinator = panelCoordinator(order, {
+    async publishResult(value) {
+      order.push(`publish:${value.state}`);
+      published = value;
+      return true;
+    },
+  });
+  const starter = createAuthorizedAuditStarter(dependencies);
+  const started = await starter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId,
+    eventNonce: null,
+    auditId,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    senderContext: prepared.senderContext,
+  });
+  await firstCheckpointEntered;
+  assert.deepEqual(await starter.abortAuthorizedAudit({
+    auditId,
+    sessionCapabilityId: started.sessionCapabilityId,
+    windowId: 9,
+    reasonCode: 'USER_CANCELLED',
+  }), { ok: true, auditId, state: 'cancelling' });
+  releaseFirstCheckpoint();
+
+  assert.deepEqual(await started.completion, { ok: true, auditId, state: 'result', revision: 1 });
+  assert.equal(checkpointCalls, 1);
+  assert.equal(collectCalls, 0);
+  assert.equal(commitCalls, 1);
+  assert.equal((await auditStore.getReportRevision(auditId))?.model.session.status, 'cancelled');
+  assert.equal(published?.state, 'result');
+  assert.equal(published?.resultBundle?.summary?.identity?.status, 'cancelled');
+  assert.equal(order.filter(entry => entry === 'publish:result').length, 1);
+  assert.equal(order.some(entry => entry === 'publish:revoked'), false);
 });
 
 test('records the validated terminal snapshot against the observed target before exposing the result', async () => {

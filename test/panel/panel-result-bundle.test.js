@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
+import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
+import { AUDIT_EXECUTION_INTERNAL } from '../../src/background/chrome-adapter.js';
+import { runAudit } from '../../src/background/run-audit.js';
+import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import {
@@ -9,8 +13,67 @@ import {
   createPanelResultBundleV1,
 } from '../../src/panel/panel-result-bundle.js';
 
-async function fixture() {
-  const model = await enrichAuditForReport(structuredClone(SAMPLE_AUDIT), {
+async function failedAudit(auditId) {
+  const internalValues = {};
+  const adapter = {
+    async createTab() { return { id: 42, windowId: 9 }; },
+    async navigateTab() {},
+    async waitForStable() { return { url: 'https://example.test/' }; },
+    async probeDocumentIdentity(tabId) {
+      return { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}` };
+    },
+    async getEvidenceUrl() { return 'https://example.test/'; },
+    async connectCdp() {
+      return {
+        async command() {
+          return {
+            cssContentSize: { width: 800, height: 600 },
+            cssLayoutViewport: { clientWidth: 800, clientHeight: 600 },
+          };
+        },
+        async disconnect() {},
+      };
+    },
+    async runAxeInTab() {
+      return {
+        status: 'disabled', provenance: AXE_PROVENANCE, frames: [],
+        diagnostics: [{ code: 'AXE_FEATURE_DISABLED', frameId: null }],
+      };
+    },
+    async getEnvironment() {
+      return { chromeVersion: 'Chrome/147.0.0.0', viewport: { width: 800, height: 600, deviceScaleFactor: 1 } };
+    },
+    async collectPage() { throw new Error('structural collection failure'); },
+    async removeTab() {},
+  };
+  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
+    value: Object.freeze({
+      sessionArea: {
+        async get(key) { return Object.hasOwn(internalValues, key) ? { [key]: structuredClone(internalValues[key]) } : {}; },
+        async set(entries) { Object.assign(internalValues, structuredClone(entries)); },
+        async remove(key) { delete internalValues[key]; },
+      },
+      randomBytes(length) { return new Uint8Array(length).fill(12); },
+      capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    }),
+  });
+  return runAudit({
+    url: 'https://example.test/', chromeAdapter: adapter,
+    now: () => '2026-08-29T11:59:00.000Z', idFactory: () => auditId,
+  });
+}
+
+async function fixture(status = null) {
+  const draft = status === 'failed'
+    ? await failedAudit('audit-panel-failed-result')
+    : structuredClone(SAMPLE_AUDIT);
+  if (status !== null && status !== 'failed') {
+    draft.session.status = status;
+    draft.session.partial = status === 'partial';
+    draft.integrity.canonicalModelHash = 'pending';
+    draft.integrity.evidenceManifestHash = 'pending';
+  }
+  const model = await enrichAuditForReport(draft, {
     now: () => '2026-08-29T12:00:00.000Z', timezone: 'America/Cuiaba',
     manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
   });
@@ -32,6 +95,16 @@ async function fixture() {
     },
   };
 }
+
+test('builds a result bundle for a canonical failed terminal audit', async () => {
+  const input = await fixture('failed');
+  const bundle = await createPanelResultBundleV1(input);
+
+  assert.equal(bundle.auditId, input.reportRevision.auditId);
+  assert.equal(bundle.modelHash, input.reportRevision.modelHash);
+  assert.equal(bundle.summary.identity.status, 'failed');
+  assert.equal(Object.isFrozen(bundle), true);
+});
 
 test('builds one sorted detail per unique occurrence exposed by the four summary groups', async () => {
   const input = await fixture();

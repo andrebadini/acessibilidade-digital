@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
+import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
+import { AUDIT_EXECUTION_INTERNAL } from '../../src/background/chrome-adapter.js';
+import { runAudit } from '../../src/background/run-audit.js';
+import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
@@ -22,11 +26,65 @@ const HOSTILE_REVIEW_URL =
 const TRUSTED_REVIEW_URL =
   'chrome-extension://abcdefghijklmnopabcdefghijklmnop/src/review/index.html?auditId=audit-sample-20260826';
 
-async function terminalFixture(auditId) {
-  const draft = structuredClone(SAMPLE_AUDIT);
-  draft.auditId = auditId;
-  draft.integrity.canonicalModelHash = 'pending';
-  draft.integrity.evidenceManifestHash = 'pending';
+async function structuralFailureAudit(auditId) {
+  const internalValues = {};
+  const adapter = {
+    async createTab() { return { id: 42, windowId: 9 }; },
+    async navigateTab() {},
+    async waitForStable() { return { url: 'https://example.test/' }; },
+    async probeDocumentIdentity(tabId) {
+      return { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}` };
+    },
+    async getEvidenceUrl() { return 'https://example.test/'; },
+    async connectCdp() {
+      return {
+        async command() {
+          return {
+            cssContentSize: { width: 800, height: 600 },
+            cssLayoutViewport: { clientWidth: 800, clientHeight: 600 },
+          };
+        },
+        async disconnect() {},
+      };
+    },
+    async runAxeInTab() {
+      return {
+        status: 'disabled', provenance: AXE_PROVENANCE, frames: [],
+        diagnostics: [{ code: 'AXE_FEATURE_DISABLED', frameId: null }],
+      };
+    },
+    async getEnvironment() {
+      return { chromeVersion: 'Chrome/147.0.0.0', viewport: { width: 800, height: 600, deviceScaleFactor: 1 } };
+    },
+    async collectPage() { throw new Error('structural collection failure'); },
+    async removeTab() {},
+  };
+  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
+    value: Object.freeze({
+      sessionArea: {
+        async get(key) { return Object.hasOwn(internalValues, key) ? { [key]: structuredClone(internalValues[key]) } : {}; },
+        async set(entries) { Object.assign(internalValues, structuredClone(entries)); },
+        async remove(key) { delete internalValues[key]; },
+      },
+      randomBytes(length) { return new Uint8Array(length).fill(13); },
+      capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    }),
+  });
+  return runAudit({
+    url: 'https://example.test/', chromeAdapter: adapter,
+    now: () => '2026-08-29T11:59:00.000Z', idFactory: () => auditId,
+  });
+}
+
+async function terminalFixture(auditId, status = 'partial') {
+  const draft = status === 'failed'
+    ? await structuralFailureAudit(auditId)
+    : structuredClone(SAMPLE_AUDIT);
+  if (status !== 'failed') {
+    draft.auditId = auditId;
+    draft.integrity.canonicalModelHash = 'pending';
+    draft.integrity.evidenceManifestHash = 'pending';
+  }
   const model = await enrichAuditForReport(draft, {
     now: () => '2026-08-29T12:00:00.000Z', timezone: 'America/Cuiaba',
     manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
@@ -43,11 +101,35 @@ async function terminalFixture(auditId) {
   };
   const latest = {
     version: 1, auditId, status: model.session.status, percent: 100,
-    message: 'Avaliação concluída com limitações.', failureCode: null,
+    message: model.session.status === 'failed'
+      ? 'Avaliação concluída com falha estrutural.'
+      : 'Avaliação concluída com limitações.',
+    failureCode: null,
     modelRevision: 1, updatedAt: '2026-08-29T12:00:00.000Z',
   };
   return { model, checkpoint, latest };
 }
+
+test('atomically stores and re-reads a canonical failed terminal model with revision one', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    const auditId = `terminal-failed-${backend.toLowerCase()}`;
+    const { model, checkpoint, latest } = await terminalFixture(auditId, 'failed');
+
+    const committed = await store.commitAuditWithCheckpointIfAbsent(
+      auditId, model, checkpoint, latest,
+      { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false },
+    );
+    const report = await store.getReportRevision(auditId);
+
+    assert.equal(committed.revision, 1);
+    assert.equal(committed.modelHash, model.integrity.canonicalModelHash);
+    assert.equal(report.modelRevision, 1);
+    assert.equal(report.model.session.status, 'failed');
+    assert.deepEqual(report.checkpoint, checkpoint);
+    assert.deepEqual(await store.getLatest(), latest);
+  });
+});
 
 test('atomically creates a terminal model, checkpoint companion, revision and latest exactly once', async t => {
   for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {

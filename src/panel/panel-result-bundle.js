@@ -201,7 +201,7 @@ export async function createPanelResultBundleV1({ reportRevision, inventory } = 
       !/^[a-f0-9]{64}$/u.test(candidate.modelHash ?? '')) denied();
     const model = await verifyAuditIntegritySnapshot(candidate.model);
     if (model.auditId !== candidate.auditId || model.integrity.canonicalModelHash !== candidate.modelHash ||
-      !['complete', 'partial', 'cancelled'].includes(model.session.status)) denied();
+      !['complete', 'partial', 'failed', 'cancelled'].includes(model.session.status)) denied();
     const checkpoint = validateExecutionCheckpoint({
       auditId: candidate.auditId, checkpoint: candidate.checkpoint,
       pageOrder: model.pages.map(page => page.pageId),

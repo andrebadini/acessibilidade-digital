@@ -196,6 +196,7 @@ function latestState(auditId, kind, modelNow, status = null) {
     running: ['running', 0, 'Preparando a auditoria.', null, null],
     complete: ['complete', 100, 'Avaliação concluída.', null, 1],
     partial: ['partial', 100, 'Avaliação concluída com limitações.', null, 1],
+    failed: ['failed', 100, 'Avaliação concluída com falha estrutural.', null, 1],
     cancelled: ['cancelled', 100, 'Avaliação cancelada.', null, 1],
     AUDIT_INTERRUPTED: ['failed', 100, 'A auditoria foi interrompida antes da conclusão.', 'AUDIT_INTERRUPTED', null],
     AUDIT_FAILED: ['failed', 100, 'Não foi possível concluir a auditoria.', 'AUDIT_FAILED', null],
@@ -220,6 +221,7 @@ function parseLatest(value) {
     running: ['running', 0, 'Preparando a auditoria.', null, null],
     complete: ['complete', 100, 'Avaliação concluída.', null, 1],
     partial: ['partial', 100, 'Avaliação concluída com limitações.', null, 1],
+    failed: ['failed', 100, 'Avaliação concluída com falha estrutural.', null, 1],
     cancelled: ['cancelled', 100, 'Avaliação cancelada.', null, 1],
     AUDIT_INTERRUPTED: ['failed', 100, 'A auditoria foi interrompida antes da conclusão.', 'AUDIT_INTERRUPTED', null],
     AUDIT_FAILED: ['failed', 100, 'Não foi possível concluir a auditoria.', 'AUDIT_FAILED', null],
@@ -286,7 +288,7 @@ function supportedLatestAuditId(value) {
 
 async function terminalCandidate({ auditId, model, checkpoint }) {
   const verified = await verifyAuditIntegritySnapshot(model);
-  if (verified.auditId !== auditId || !['complete', 'partial', 'cancelled'].includes(verified.session.status) ||
+  if (verified.auditId !== auditId || !['complete', 'partial', 'failed', 'cancelled'].includes(verified.session.status) ||
     !/^[a-f0-9]{64}$/u.test(verified.integrity.canonicalModelHash)) throw new TypeError('REPORT_REVISION_CANDIDATE_DENIED');
   const canonicalCheckpoint = validateExecutionCheckpoint({
     auditId, checkpoint, pageOrder: verified.pages.map(page => page.pageId),
@@ -572,7 +574,12 @@ export function createAuthorizedAuditStarter(input) {
         }) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
         await cleanupActive(current, { removeRetention: true });
         return completionRevoked(current.auditId, code);
-      } catch {
+      } catch (error) {
+        let durable = null;
+        try { durable = await readActiveAuditJobForWorker({ sessionArea }); } catch { /* fail closed below */ }
+        if (durable?.auditId === active.auditId && durable.state === 'finalizing' && durable.commitState === 'pending') {
+          throw error;
+        }
         return freeze({ ok: false, auditId: active.auditId, state: 'blocked', code: 'AUDIT_RECOVERY_REQUIRED' });
       }
     }));

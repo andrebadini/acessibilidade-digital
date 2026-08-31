@@ -384,6 +384,7 @@ function canonicalTerminalLatest(auditId, latestState, model) {
   const fixed = {
     complete: [100, 'Avaliação concluída.'],
     partial: [100, 'Avaliação concluída com limitações.'],
+    failed: [100, 'Avaliação concluída com falha estrutural.'],
     cancelled: [100, 'Avaliação cancelada.'],
   }[model?.session?.status];
   if (!latest || !fixed || latest.version !== 1 || latest.auditId !== auditId ||
@@ -398,7 +399,7 @@ async function canonicalTerminalGraph(auditId, model, checkpoint, latestState) {
   let verified;
   try { verified = await verifyAuditIntegritySnapshot(model); }
   catch { throw new AuditStorageUnavailableError(); }
-  if (verified.auditId !== key || !['complete', 'partial', 'cancelled'].includes(verified.session.status) ||
+  if (verified.auditId !== key || !['complete', 'partial', 'failed', 'cancelled'].includes(verified.session.status) ||
     !/^[a-f0-9]{64}$/u.test(verified.integrity.canonicalModelHash)) throw new AuditStorageUnavailableError();
   const terminalCheckpoint = canonicalTerminalCheckpoint(key, checkpoint, verified);
   const terminalLatest = canonicalTerminalLatest(key, latestState, verified);
@@ -1408,7 +1409,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       const model = await verifyAuditIntegritySnapshot(rawModel);
       const revision = storedRevision(rawRevision);
       if (model.auditId !== key || !Number.isSafeInteger(revision) || revision < 1 ||
-        !['complete', 'partial', 'cancelled'].includes(model.session.status) ||
+        !['complete', 'partial', 'failed', 'cancelled'].includes(model.session.status) ||
         !/^[a-f0-9]{64}$/u.test(model.integrity.canonicalModelHash)) throw new Error();
       const checkpoint = parseCheckpointCompanion(rawCompanion, key, model);
       return freezeStored({
@@ -1791,7 +1792,7 @@ export function createAuditStore(options = {}) {
       if (rawModel === undefined && rawRevision === undefined && rawCompanion === undefined) return null;
       const model = await verifyAuditIntegritySnapshot(rawModel);
       const revision = storedRevision(rawRevision);
-      if (model.auditId !== key || revision < 1 || !['complete', 'partial', 'cancelled'].includes(model.session.status) ||
+      if (model.auditId !== key || revision < 1 || !['complete', 'partial', 'failed', 'cancelled'].includes(model.session.status) ||
         !/^[a-f0-9]{64}$/u.test(model.integrity.canonicalModelHash)) throw new Error();
       const terminalCheckpoint = parseCheckpointCompanion(rawCompanion, key, model);
       return freezeStored({

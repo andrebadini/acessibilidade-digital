@@ -102,6 +102,39 @@ test('runs an explicit success → throw → success list strictly sequentially 
   assert.match(progress.find(entry => entry.pageNumber === 3)?.message ?? '', /3 de 3/iu);
 });
 
+test('passes onCheckpoint and cleanupMode always to every child execution', async () => {
+  const entries = normalizeUrlList('https://one.example.test/\nhttps://two.example.test/').entries;
+  const childContracts = [];
+  const model = await runBatch({
+    entries,
+    batchAuditId: 'batch-child-checkpoints',
+    runner: async options => {
+      childContracts.push({
+        pageId: options.pageId,
+        cleanupMode: options.cleanupMode,
+        onCheckpoint: options.onCheckpoint,
+      });
+      return rawChild({ auditId: options.idFactory(), url: options.url, now: options.now });
+    },
+    chromeAdapter: {
+      async emitProgress() {},
+      async handoffReport() { return { reviewUrl: null }; },
+    },
+    now: clock(),
+    reportOptions: REPORT_OPTIONS,
+  });
+
+  assert.deepEqual(childContracts.map(value => ({
+    pageId: value.pageId,
+    cleanupMode: value.cleanupMode,
+    checkpointCallable: typeof value.onCheckpoint === 'function',
+  })), [
+    { pageId: 'page-1', cleanupMode: 'always', checkpointCallable: true },
+    { pageId: 'page-2', cleanupMode: 'always', checkpointCallable: true },
+  ]);
+  assert.deepEqual(model.pages.map(page => page.status), ['complete', 'complete']);
+});
+
 test('runBatch discards the validated handoff capability from its review-ready aggregate', async () => {
   const entries = normalizeUrlList('https://batch-review.example.test/').entries;
   const model = await runBatch({
@@ -234,11 +267,11 @@ test('integrates three controlled fixtures through runBatch and runAudit into on
   });
   assert.deepEqual(order, entries.map(entry => entry.navigationUrl));
   assert.equal(model.pages.length, 3);
-  assert.deepEqual(model.pages.map(value => value.status), ['complete', 'failed', 'complete'], JSON.stringify(childModels.map(value => value.session)));
+  assert.deepEqual(model.pages.map(value => value.status), ['partial', 'failed', 'partial'], JSON.stringify(childModels.map(value => value.session)));
   assert.equal(finalHandoffs, 1, 'handoffs filhos são no-op e só o modelo consolidado abre revisão');
   assert.deepEqual(removed.length, 3);
   assert.equal(model.auditId, 'batch-integration');
-  assert.equal(childModels.length, 3);
+  assert.equal(childModels.length, 2, 'falha pré-observação não fabrica um modelo filho');
   const occurrenceIds = new Set(model.occurrences.map(value => value.occurrenceId));
   assert.ok(model.occurrences.every(value => /^occurrence-[A-Za-z0-9._:-]+-\d{6}$/u.test(value.occurrenceId)));
   assert.ok(model.axePages.flatMap(value => value.result.occurrences)
@@ -443,6 +476,404 @@ function timedDefaultAdapter({ removalFails = false, settleDelayMs = 3, settleIm
   }) });
   return adapter;
 }
+
+function cancelledDefaultAdapter({ removalFails = true, settlesAfterAbort = true } = {}) {
+  const values = {};
+  const events = [];
+  let randomValue = 60;
+  const adapter = {
+    events,
+    async createTab() { events.push('create'); return { id: 95, windowId: 9 }; },
+    async navigateTab() { events.push('navigate'); },
+    async waitForStable(_id, { signal }) {
+      events.push('wait');
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => {
+        events.push('abort');
+        if (settlesAfterAbort) reject(signal.reason);
+      }, { once: true }));
+    },
+    async probeDocumentIdentity() { throw new Error('must-not-probe'); },
+    async removeTab() {
+      events.push('remove');
+      if (removalFails) throw new Error('PRIVATE_REMOVE_FAILURE');
+    },
+    async emitProgress() {},
+    tryEnterFinalization() { return true; },
+    async handoffReport() { return { reviewUrl: null }; },
+  };
+  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
+    enumerable: false,
+    value: Object.freeze({
+      sessionArea: {
+        async get(key) { return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {}; },
+        async set(entries) { Object.assign(values, structuredClone(entries)); },
+        async remove(key) { delete values[key]; },
+      },
+      randomBytes(length) { return new Uint8Array(length).fill(++randomValue); },
+      epochNow: () => 1_788_000_000_000,
+    }),
+  });
+  return adapter;
+}
+
+function postObservationCancellationAdapter({ controller, removalFails = false }) {
+  const values = {};
+  const events = [];
+  let randomValue = 70;
+  let currentUrl = 'https://cancel-after-observation.example.test/';
+  const page = () => ({
+    format: 'simplified-v1',
+    document: { url: currentUrl, title: 'Página em cancelamento', language: 'pt-BR' },
+    coverage: { runtime: { outcome: 'complete' }, accessibility: { outcome: 'complete' } },
+    warnings: [],
+    layoutMetrics: {
+      cssContentSize: { width: 800, height: 600 },
+      cssLayoutViewport: { clientWidth: 800, clientHeight: 600 },
+    },
+    nodes: [], axTree: { nodes: [] },
+  });
+  const adapter = {
+    events,
+    async createTab() { events.push('create'); return { id: 96, windowId: 9 }; },
+    async navigateTab(_id, url) { currentUrl = url; events.push('navigate'); },
+    async waitForStable() { events.push('wait'); return { url: currentUrl }; },
+    async probeDocumentIdentity(tabId) {
+      events.push('probe');
+      return { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}` };
+    },
+    async getEvidenceUrl() { return currentUrl; },
+    async connectCdp() {
+      events.push('connect');
+      return {
+        async command(method) { return method === 'Page.getLayoutMetrics' ? page().layoutMetrics : {}; },
+        async disconnect() { events.push('disconnect'); },
+      };
+    },
+    async runAxeInTab() {
+      return { status: 'disabled', provenance: AXE_PROVENANCE, frames: [], diagnostics: [{ code: 'AXE_FEATURE_DISABLED', frameId: null }] };
+    },
+    async collectPage() {
+      events.push('collect');
+      controller.abort(new DOMException('PRIVATE_POST_OBSERVATION_ABORT', 'AbortError'));
+      return page();
+    },
+    async getEnvironment() {
+      return { chromeVersion: 'Chrome/151.0.0.0', viewport: { width: 800, height: 600, deviceScaleFactor: 1 } };
+    },
+    async removeTab() {
+      events.push('remove');
+      if (removalFails) throw new Error('PRIVATE_REMOVE_FAILURE');
+    },
+    async emitProgress() {},
+    tryEnterFinalization() { return true; },
+    async handoffReport() { return { reviewUrl: null }; },
+  };
+  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
+    enumerable: false,
+    value: Object.freeze({
+      sessionArea: {
+        async get(key) { return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {}; },
+        async set(entries) { Object.assign(values, structuredClone(entries)); },
+        async remove(key) { delete values[key]; },
+      },
+      randomBytes(length) { return new Uint8Array(length).fill(++randomValue); },
+      epochNow: () => 1_788_000_000_000,
+    }),
+  });
+  return adapter;
+}
+
+function canonicalCleanupBoundaryAdapter({ removalFails = false, onFinalization = null, finalizationResult = true } = {}) {
+  const values = {};
+  const events = [];
+  let nextTab = 100;
+  let randomValue = 90;
+  const adapter = {
+    events,
+    async createTab() {
+      const tab = { id: nextTab++, windowId: 9 };
+      events.push(`create:${tab.id}`);
+      return tab;
+    },
+    async navigateTab(id) { events.push(`navigate:${id}`); },
+    async waitForStable(id) {
+      events.push(`wait:${id}`);
+      throw new Error('CONTROLLED_PRE_OBSERVATION_FAILURE');
+    },
+    async probeDocumentIdentity() { throw new Error('must-not-probe'); },
+    async getEvidenceUrl() { throw new Error('must-not-read-evidence'); },
+    async removeTab(id) {
+      events.push(`remove:${id}`);
+      if (removalFails) throw new Error('CONTROLLED_REMOVE_FAILURE');
+    },
+    async emitProgress() {},
+    tryEnterFinalization() { onFinalization?.(); return finalizationResult; },
+    async handoffReport() { return { reviewUrl: null }; },
+  };
+  const internal = Object.assign(Object.create(null), {
+    sessionArea: {
+      async get(key) { return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {}; },
+      async set(entries) { Object.assign(values, structuredClone(entries)); },
+      async remove(key) { delete values[key]; },
+    },
+    randomBytes(length) { return new Uint8Array(length).fill(++randomValue); },
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+  });
+  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
+    enumerable: false,
+    value: Object.freeze(internal),
+  });
+  return adapter;
+}
+
+function rejectedPostObservationCleanupAdapter() {
+  const values = {};
+  const events = [];
+  let randomValue = 110;
+  let proofCount = 0;
+  let storageUnavailable = false;
+  const adapter = {
+    events,
+    async createTab() {
+      events.push('create');
+      return { id: 120, windowId: 9 };
+    },
+    async navigateTab() { events.push('navigate'); },
+    async waitForStable() { events.push('wait'); return { url: 'https://example.test/final' }; },
+    async probeDocumentIdentity(tabId) {
+      proofCount += 1;
+      const changed = proofCount >= 2;
+      return {
+        tabId, windowId: 9,
+        documentId: changed ? 'document-b' : 'document-a',
+        urlSessionDigest: `hmac-sha256:${(changed ? 'B' : 'A').repeat(43)}`,
+      };
+    },
+    async getEvidenceUrl() {
+      return {
+        version: 'EvidenceUrlV1', href: 'https://example.test/final',
+        queryIncluded: false, redactedSegments: 0,
+      };
+    },
+    async getFinalUrl() { return 'https://example.test/final'; },
+    async removeTab() {
+      events.push('remove');
+      storageUnavailable = true;
+      throw new Error('PRIVATE_REMOVE_FAILURE');
+    },
+    async emitProgress() {},
+    tryEnterFinalization() { return true; },
+    async handoffReport() { return { reviewUrl: null }; },
+  };
+  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
+    enumerable: false,
+    value: Object.freeze({
+      sessionArea: {
+        async get(key) {
+          if (storageUnavailable) throw new Error('PRIVATE_READBACK_FAILURE');
+          return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {};
+        },
+        async set(entries) { Object.assign(values, structuredClone(entries)); },
+        async remove(key) { delete values[key]; },
+      },
+      randomBytes(length) { return new Uint8Array(length).fill(++randomValue); },
+    }),
+  });
+  return adapter;
+}
+
+test('advances after removed ownership but stops the next page after cleanup-pending', async t => {
+  for (const scenario of [
+    { name: 'removed', removalFails: false, creates: 2, attempted: [true, true] },
+    { name: 'cleanup-pending', removalFails: true, creates: 1, attempted: [true, false] },
+  ]) await t.test(scenario.name, async () => {
+    const adapter = canonicalCleanupBoundaryAdapter({ removalFails: scenario.removalFails });
+    const model = await runBatch({
+      entries: normalizeUrlList('https://one.example.test/\nhttps://two.example.test/').entries,
+      batchAuditId: `batch-boundary-${scenario.name}`,
+      chromeAdapter: adapter,
+      now: clock(),
+      reportOptions: REPORT_OPTIONS,
+      pageTimeoutMs: 1_000,
+      cleanupTimeoutMs: 1_000,
+    });
+
+    assert.equal(adapter.events.filter(event => event.startsWith('create:')).length, scenario.creates);
+    assert.deepEqual(model.pages.map(page => page.attempted), scenario.attempted);
+    if (scenario.name === 'cleanup-pending') {
+      assert.match(model.pages[1].diagnostics[0].code, /CLEANUP_UNCONFIRMED/u);
+    }
+  });
+});
+
+test('default batch stops after a rejected observed execution whose cleanup cannot be proven', async () => {
+  const adapter = rejectedPostObservationCleanupAdapter();
+  const model = await runBatch({
+    entries: normalizeUrlList('https://one.example.test/\nhttps://must-not-start.example.test/').entries,
+    batchAuditId: 'batch-rejected-cleanup-unknown',
+    chromeAdapter: adapter,
+    now: clock(),
+    reportOptions: REPORT_OPTIONS,
+    pageTimeoutMs: 1_000,
+    cleanupTimeoutMs: 1_000,
+  });
+
+  assert.equal(adapter.events.filter(event => event === 'create').length, 1);
+  assert.deepEqual(model.pages.map(page => page.attempted), [true, false]);
+  assert.match(model.pages[0].diagnostics[0].code, /CLEANUP_UNCONFIRMED/u);
+  assert.match(model.pages[1].diagnostics[0].code, /CLEANUP_UNCONFIRMED/u);
+  assert.doesNotMatch(JSON.stringify(model), /PRIVATE_REMOVE|PRIVATE_READBACK/u);
+});
+
+test('default cancellation preserves cleanup-pending and blocks the remaining pages', async () => {
+  const controller = new AbortController();
+  const adapter = cancelledDefaultAdapter();
+  const executionCheckpoints = [];
+  const running = runBatch({
+    entries: normalizeUrlList('https://cancel.example.test/\nhttps://must-not-start.example.test/').entries,
+    batchAuditId: 'batch-cancel-cleanup-pending',
+    chromeAdapter: adapter,
+    signal: controller.signal,
+    now: clock(),
+    reportOptions: REPORT_OPTIONS,
+    pageTimeoutMs: 1_000,
+    cleanupTimeoutMs: 1_000,
+    onExecutionCheckpoint: async value => executionCheckpoints.push(value),
+  });
+  while (!adapter.events.includes('wait')) await new Promise(resolve => setImmediate(resolve));
+  controller.abort(new DOMException('PRIVATE_EXTERNAL_ABORT', 'AbortError'));
+
+  const model = await running;
+
+  assert.equal(adapter.events.filter(event => event === 'create').length, 1);
+  assert.deepEqual(model.pages.map(page => [page.status, page.attempted]), [
+    ['failed', true], ['failed', false],
+  ]);
+  assert.equal(model.pages[0].diagnostics[0].code, 'BATCH_PAGE_CLEANUP_UNCONFIRMED');
+  assert.equal(model.pages[1].diagnostics[0].code, 'BATCH_NOT_STARTED_CLEANUP_UNCONFIRMED');
+  assert.deepEqual(executionCheckpoints.at(-1)?.pages.map(page => page.pageId), ['page-1']);
+  assert.equal(model.session.status, 'failed');
+  assert.doesNotMatch(JSON.stringify(model), /BATCH_CANCELLED|PRIVATE_EXTERNAL_ABORT|PRIVATE_REMOVE_FAILURE/u);
+});
+
+test('default cancellation is clean only after the child confirms removed ownership', async () => {
+  const controller = new AbortController();
+  const adapter = cancelledDefaultAdapter({ removalFails: false });
+  const running = runBatch({
+    entries: normalizeUrlList('https://cancel-clean.example.test/\nhttps://not-started.example.test/').entries,
+    batchAuditId: 'batch-cancel-clean-removed',
+    chromeAdapter: adapter,
+    signal: controller.signal,
+    now: clock(),
+    reportOptions: REPORT_OPTIONS,
+    pageTimeoutMs: 1_000,
+    cleanupTimeoutMs: 1_000,
+  });
+  while (!adapter.events.includes('wait')) await new Promise(resolve => setImmediate(resolve));
+  controller.abort(new DOMException('PRIVATE_CLEAN_ABORT', 'AbortError'));
+
+  const model = await running;
+
+  assert.deepEqual(model.pages.map(page => [page.status, page.attempted]), [
+    ['cancelled', true], ['cancelled', false],
+  ]);
+  assert.equal(adapter.events.includes('remove'), true);
+  assert.equal(model.session.status, 'cancelled');
+  assert.doesNotMatch(JSON.stringify(model), /PRIVATE_CLEAN_ABORT/u);
+});
+
+test('default cancellation after observation preserves the factual V2 cleanup outcome', async t => {
+  for (const scenario of [
+    { name: 'removed', removalFails: false, statuses: ['cancelled', 'cancelled'], session: 'cancelled' },
+    { name: 'cleanup-pending', removalFails: true, statuses: ['failed', 'failed'], session: 'failed' },
+  ]) await t.test(scenario.name, async () => {
+    const controller = new AbortController();
+    const adapter = postObservationCancellationAdapter({ controller, removalFails: scenario.removalFails });
+    const checkpoints = [];
+    const model = await runBatch({
+      entries: normalizeUrlList([
+        'https://cancel-after-observation.example.test/?secret=REMOVE',
+        'https://must-not-start.example.test/',
+      ].join('\n')).entries,
+      batchAuditId: `batch-post-observation-${scenario.name}`,
+      chromeAdapter: adapter,
+      signal: controller.signal,
+      now: clock(),
+      reportOptions: REPORT_OPTIONS,
+      pageTimeoutMs: 1_000,
+      cleanupTimeoutMs: 1_000,
+      onExecutionCheckpoint: async value => checkpoints.push(value),
+    });
+
+    assert.equal(adapter.events.filter(event => event === 'create').length, 1);
+    assert.deepEqual(model.pages.map(page => page.status), scenario.statuses);
+    assert.equal(model.session.status, scenario.session);
+    assert.deepEqual(checkpoints.at(-1)?.pages.map(page => page.pageId), ['page-1']);
+    if (scenario.removalFails) {
+      assert.equal(model.pages[0].diagnostics[0].code, 'BATCH_PAGE_CLEANUP_UNCONFIRMED');
+      assert.equal(model.pages[1].diagnostics[0].code, 'BATCH_NOT_STARTED_CLEANUP_UNCONFIRMED');
+    }
+    assert.doesNotMatch(JSON.stringify(model), /PRIVATE_POST_OBSERVATION_ABORT|PRIVATE_REMOVE_FAILURE|REMOVE/u);
+  });
+});
+
+test('cleanup-unconfirmed wins when a cancelled default child never settles', async () => {
+  const controller = new AbortController();
+  const adapter = cancelledDefaultAdapter({ settlesAfterAbort: false });
+  const running = runBatch({
+    entries: normalizeUrlList('https://cancel-hung.example.test/\nhttps://must-not-start.example.test/').entries,
+    batchAuditId: 'batch-cancel-cleanup-unconfirmed',
+    chromeAdapter: adapter,
+    signal: controller.signal,
+    now: clock(),
+    reportOptions: REPORT_OPTIONS,
+    pageTimeoutMs: 1_000,
+    cleanupTimeoutMs: 5,
+  });
+  while (!adapter.events.includes('wait')) await new Promise(resolve => setImmediate(resolve));
+  controller.abort(new DOMException('PRIVATE_HUNG_ABORT', 'AbortError'));
+
+  const model = await running;
+
+  assert.deepEqual(model.pages.map(page => [page.status, page.attempted]), [
+    ['failed', true], ['failed', false],
+  ]);
+  assert.equal(model.pages[0].diagnostics[0].code, 'BATCH_PAGE_CLEANUP_UNCONFIRMED');
+  assert.equal(model.pages[1].diagnostics[0].code, 'BATCH_NOT_STARTED_CLEANUP_UNCONFIRMED');
+  assert.equal(adapter.events.includes('remove'), false);
+  assert.equal(model.session.status, 'failed');
+  assert.doesNotMatch(JSON.stringify(model), /BATCH_CANCELLED|PRIVATE_HUNG_ABORT/u);
+});
+
+test('cleanup-pending wins when cancellation fires during terminal-boundary acquisition', async () => {
+  const controller = new AbortController();
+  const adapter = canonicalCleanupBoundaryAdapter({
+    removalFails: true,
+    finalizationResult: false,
+    onFinalization() {
+      controller.abort(new DOMException('PRIVATE_FINALIZATION_ABORT', 'AbortError'));
+    },
+  });
+  const model = await runBatch({
+    entries: normalizeUrlList('https://pending.example.test/\nhttps://must-not-start.example.test/').entries,
+    batchAuditId: 'batch-cleanup-pending-finalization-abort',
+    chromeAdapter: adapter,
+    signal: controller.signal,
+    now: clock(),
+    reportOptions: REPORT_OPTIONS,
+    pageTimeoutMs: 1_000,
+    cleanupTimeoutMs: 1_000,
+  });
+
+  assert.equal(adapter.events.filter(event => event.startsWith('create:')).length, 1);
+  assert.deepEqual(model.pages.map(page => [page.status, page.attempted]), [
+    ['failed', true], ['failed', false],
+  ]);
+  assert.equal(model.pages[0].diagnostics[0].code, 'BATCH_PAGE_CLEANUP_UNCONFIRMED');
+  assert.equal(model.pages[1].diagnostics[0].code, 'BATCH_NOT_STARTED_CLEANUP_UNCONFIRMED');
+  assert.equal(model.session.status, 'failed');
+  assert.doesNotMatch(JSON.stringify(model), /BATCH_CANCELLED|PRIVATE_FINALIZATION_ABORT/u);
+});
 
 test('default timeout blocks the next page when the settled execution confirms cleanup-pending', async () => {
   const adapter = timedDefaultAdapter({ removalFails: true });

@@ -79,11 +79,11 @@ export async function runBatch(request) {
   const executionMode = runner === runAuditExecution;
   const pageOrder = entries.map((_entry, index) => `page-${index + 1}`);
 
-  const claimFinalization = () => {
-    if (terminal) return !signal?.aborted;
+  const claimFinalization = ({ allowAborted = false } = {}) => {
+    if (terminal) return allowAborted || !signal?.aborted;
     const claimed = chromeAdapter.tryEnterFinalization?.();
     terminal = true;
-    return claimed !== false && !signal?.aborted;
+    return allowAborted || (claimed !== false && !signal?.aborted);
   };
 
   const saveCheckpoint = async () => {
@@ -152,7 +152,8 @@ export async function runBatch(request) {
       const childAdapter = hasExecutionContract
         ? composeChromeAdapter(chromeAdapter, childOverrides)
         : { ...chromeAdapter, ...childOverrides };
-      const outcome = await runPageWithBoundary({
+      let latestChildCheckpoint = null;
+      let outcome = await runPageWithBoundary({
         operation: ({ childSignal }) => runner({
           url: entry.navigationUrl,
           chromeAdapter: childAdapter,
@@ -164,6 +165,7 @@ export async function runBatch(request) {
           pageId,
           cleanupMode: 'always',
           checkpointAuditId: batchAuditId,
+          onCheckpoint: async value => { latestChildCheckpoint = value; },
         }),
         externalSignal: signal,
         pageTimeoutMs,
@@ -172,11 +174,30 @@ export async function runBatch(request) {
       const pageEndedAt = canonicalTime(now());
 
       if (outcome.kind === 'cancelled') {
-        await cancelRemaining({ active: true, startedAt: pageStartedAt, endedAt: pageEndedAt });
-        break;
+        if (executionMode && outcome.settled) {
+          const late = outcome.settled;
+          const execution = late.kind === 'fulfilled' ? late.value : null;
+          const pageCheckpoint = execution?.checkpoint ?? latestChildCheckpoint;
+          const ownershipState = execution?.ownershipState;
+          if (pageCheckpoint && ['removed', 'cleanup-pending'].includes(ownershipState)) {
+            executionCheckpoint = mergeExecutionCheckpoint({
+              auditId: batchAuditId, prior: executionCheckpoint,
+              pageSnapshot: pageCheckpoint, pageOrder,
+            });
+            await saveExecutionCheckpoint();
+          }
+          if (pageCheckpoint && ownershipState === 'removed') {
+            await cancelRemaining({ active: true, startedAt: pageStartedAt, endedAt: pageEndedAt });
+            break;
+          }
+          outcome = { kind: 'cleanup-unconfirmed' };
+        } else {
+          await cancelRemaining({ active: true, startedAt: pageStartedAt, endedAt: pageEndedAt });
+          break;
+        }
       }
       if (outcome.kind === 'cleanup-unconfirmed') {
-        if (!claimFinalization()) {
+        if (!claimFinalization({ allowAborted: true })) {
           await cancelRemaining({ active: true, startedAt: pageStartedAt, endedAt: pageEndedAt });
           break;
         }
@@ -201,32 +222,34 @@ export async function runBatch(request) {
         if (executionMode) {
           const late = outcome.settled;
           const execution = late?.kind === 'fulfilled' ? late.value : null;
-          if (!execution?.checkpoint || !['removed', 'cleanup-pending', 'cleanup-unconfirmed'].includes(execution.ownershipState)) {
+          const pageCheckpoint = execution?.checkpoint ?? latestChildCheckpoint;
+          if (!pageCheckpoint || !['removed', 'cleanup-pending'].includes(execution?.ownershipState)) {
             executionCleanupUnconfirmed = true;
           } else {
             executionCheckpoint = mergeExecutionCheckpoint({
               auditId: batchAuditId, prior: executionCheckpoint,
-              pageSnapshot: execution.checkpoint, pageOrder,
+              pageSnapshot: pageCheckpoint, pageOrder,
             });
             await saveExecutionCheckpoint();
             executionCleanupPending = execution.ownershipState === 'cleanup-pending';
-            executionCleanupUnconfirmed = execution.ownershipState === 'cleanup-unconfirmed';
           }
         }
       } else if (outcome.kind === 'rejected') {
         pageResult = failureFor(entry, pageId, 'failed', true, pageStartedAt, pageEndedAt,
           'BATCH_PAGE_FAILED', 'A página não pôde ser auditada.');
+        if (executionMode) executionCleanupUnconfirmed = true;
       } else {
         try {
           const execution = executionMode ? outcome.value : null;
           const childValue = executionMode ? execution?.model : outcome.value;
           if (executionMode) {
-            if (!execution?.checkpoint || !['removed', 'cleanup-pending', 'cleanup-unconfirmed'].includes(execution.ownershipState)) {
+            const pageCheckpoint = execution?.checkpoint ?? latestChildCheckpoint;
+            if (!pageCheckpoint || !['removed', 'cleanup-pending'].includes(execution?.ownershipState)) {
               throw new TypeError('Execução filha sem fronteira terminal comprovada.');
             }
             executionCheckpoint = mergeExecutionCheckpoint({
               auditId: batchAuditId, prior: executionCheckpoint,
-              pageSnapshot: execution.checkpoint, pageOrder,
+              pageSnapshot: pageCheckpoint, pageOrder,
             });
             await saveExecutionCheckpoint();
             executionCleanupPending = execution.ownershipState === 'cleanup-pending';
@@ -252,13 +275,13 @@ export async function runBatch(request) {
             'BATCH_PAGE_MODEL_INVALID', 'O resultado da página não pôde ser validado para o lote.');
         }
       }
-      if (executionCleanupUnconfirmed || (outcome.kind === 'timeout' && executionCleanupPending)) {
+      if (executionCleanupUnconfirmed || executionCleanupPending) {
         pageResult = failureFor(entry, pageId, 'failed', true, pageStartedAt, pageEndedAt,
           'BATCH_PAGE_CLEANUP_UNCONFIRMED', 'A limpeza da página excedeu o prazo; o lote foi interrompido para evitar sobreposição.');
       }
       const stopsForCleanup = executionCleanupPending || executionCleanupUnconfirmed || pageResult.page.diagnostics?.some(value => CLEANUP_FAILURE_CODES.has(value.code));
       const endsScheduling = index === entries.length - 1 || stopsForCleanup;
-      if (endsScheduling && !claimFinalization()) {
+      if (endsScheduling && !claimFinalization({ allowAborted: stopsForCleanup })) {
         await cancelRemaining({ active: true, startedAt: pageStartedAt, endedAt: pageEndedAt });
         break;
       }

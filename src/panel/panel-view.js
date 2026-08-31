@@ -709,9 +709,14 @@ function viewFilterSelection(selected, value) {
 function statusText(status) {
   if (status === 'partial') return 'Avaliação concluída com limitações';
   if (status === 'cancelled') return 'Avaliação cancelada com resultado disponível';
+  if (status === 'failed') return 'A avaliação não pôde ser concluída';
   return 'Avaliação concluída';
 }
-function statusClass(status) { return status === 'complete' ? 'complete' : 'limited'; }
+function statusClass(status) {
+  if (status === 'complete') return 'complete';
+  if (status === 'failed') return 'failed';
+  return 'limited';
+}
 function formatCompletedAt(value) {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return 'Instante de conclusão indisponível';
