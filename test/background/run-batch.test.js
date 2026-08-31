@@ -503,9 +503,12 @@ test('default batch blocks after persistent ownership registration and removal f
   assert.doesNotMatch(JSON.stringify(model), /PRIVATE_TOKEN|PRIVATE_SET|PRIVATE_REMOVE|owner-/u);
 });
 
-test('custom batch failure persists only the requested origin', async () => {
+test('custom batch failure consumes EvidenceUrlV1 and retains only its origin in the legacy report model', async () => {
+  const entries = normalizeUrlList('https://example.test/pessoa/CPF-123456789?case=7&secret=x#fragmento').entries;
+  assert.equal(Object.hasOwn(entries[0], 'reportUrl'), false);
+  assert.equal(entries[0].evidenceUrl.href, 'https://example.test/pessoa/:redacted-2');
   const model = await runBatch({
-    entries: normalizeUrlList('https://example.test/pessoa/CPF-123456789?case=7&secret=x#fragmento').entries,
+    entries,
     batchAuditId: 'batch-safe-failure-url',
     runner: async () => { throw new Error('PRIVATE_NATIVE_FAILURE'); },
     chromeAdapter: { async emitProgress() {}, async handoffReport() { return { reviewUrl: null }; } },

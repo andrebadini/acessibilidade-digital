@@ -32,22 +32,13 @@ export function buildArtifactBaseName(auditId, timestamp) {
   if (typeof auditId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/u.test(auditId)) throw new TypeError('Auditoria inválida.');
   if (typeof timestamp !== 'string' || new Date(timestamp).toISOString() !== timestamp) throw new TypeError('Timestamp do relatório inválido.');
   const instant = timestamp.replace(/[-:.]/gu, '');
-  const safeAuditId = auditId.replace(/[^A-Za-z0-9._-]+/gu, '-').slice(0, 160 - instant.length - 1);
-  return `${safeAuditId}-${instant}`;
-}
-
-export async function bindDeliveryArtifactBaseName(baseName, ownerId, exportAttempt) {
-  if (typeof baseName !== 'string' || !/^[A-Za-z0-9._-]{1,160}$/u.test(baseName) ||
-    typeof ownerId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/u.test(ownerId) ||
-    !Number.isSafeInteger(exportAttempt) || exportAttempt < 1) {
-    throw new TypeError('Identidade do nome de entrega inválida.');
-  }
-  return `${baseName}-delivery-${await deliveryToken(ownerId, exportAttempt)}`;
+  const safeAuditId = projectArtifactAuditId(auditId);
+  return `audita-${safeAuditId}-${instant}`;
 }
 
 export async function downloadArtifacts(payload, adapter, options = {}) {
   validateAdapter(adapter);
-  if (!payload || typeof payload.baseName !== 'string' || !/^[A-Za-z0-9._-]{1,240}$/u.test(payload.baseName)) {
+  if (!payload || typeof payload.baseName !== 'string' || !/^[A-Za-z0-9._-]{1,250}$/u.test(payload.baseName)) {
     throw new TypeError('Nome-base dos artefatos inválido.');
   }
   const timeoutMs = options.timeoutMs ?? 30_000;
@@ -314,6 +305,10 @@ export async function reconcileStaleDownloads(entries, adapter, resolveEntry, op
   }
   const timeoutMs = options.timeoutMs ?? 30_000;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('Timeout de limpeza inválido.');
+  const auditId = options.auditId;
+  if (entries.length > 0 && (typeof auditId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/u.test(auditId))) {
+    throw new TypeError('Auditoria do journal de entrega inválida.');
+  }
   const resolvePersistedEntry = (entry, outcome) => boundedOperation(
     Promise.resolve().then(() => resolveEntry(entry, outcome)),
     timeoutMs,
@@ -322,7 +317,9 @@ export async function reconcileStaleDownloads(entries, adapter, resolveEntry, op
   for (const entry of entries) {
     const canonical = canonicalStaleEntry(entry);
     const expectedSuffix = `-delivery-${await deliveryToken(canonical.ownerId, canonical.exportAttempt)}.${canonical.format}`;
-    if (!canonical.filename.endsWith(expectedSuffix)) throw downloadCleanupPendingError();
+    const legacyFilename = canonical.filename.endsWith(expectedSuffix);
+    const publicFilename = isPublicArtifactFilename(canonical.filename, auditId, canonical.format);
+    if (!legacyFilename && !publicFilename) throw downloadCleanupPendingError();
     if (canonical.state === 'terminal') {
       try { await resolvePersistedEntry(canonical, 'cleaned'); }
       catch (error) { throw downloadCleanupPendingError(error); }
@@ -330,6 +327,10 @@ export async function reconcileStaleDownloads(entries, adapter, resolveEntry, op
     }
     let ids = canonical.downloadId === undefined ? [] : [canonical.downloadId];
     if (ids.length === 0) {
+      if (!legacyFilename) {
+        try { await resolvePersistedEntry(canonical, 'cleanup-failed'); } catch {}
+        throw downloadCleanupPendingError();
+      }
       const find = ownOrPrototypeMethod(adapter, 'findDownloadsByFilename');
       if (!find) throw downloadCleanupPendingError();
       let found;
@@ -363,6 +364,28 @@ export async function reconcileStaleDownloads(entries, adapter, resolveEntry, op
       throw downloadCleanupPendingError(error);
     }
   }
+}
+
+function isPublicArtifactFilename(filename, auditId, format) {
+  try {
+    const prefix = `${buildArtifactBaseName(auditId, '2000-01-01T00:00:00.000Z')}`
+      .replace(/20000101T000000000Z$/u, '');
+    const suffix = filename.slice(prefix.length, -(format.length + 1));
+    return filename.startsWith(prefix) && /^\d{8}T\d{9}Z$/u.test(suffix) &&
+      filename === `${prefix}${suffix}.${format}`;
+  } catch {
+    return false;
+  }
+}
+
+function projectArtifactAuditId(auditId) {
+  if (!/[_:]/u.test(auditId)) return auditId;
+  const escaped = auditId.replace(/_/gu, '_5f').replace(/:/gu, '_3a');
+  if (escaped.length <= 200) return escaped;
+  const bytes = new TextEncoder().encode(auditId);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `id64-${btoa(binary).replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=+$/gu, '')}`;
 }
 
 async function deliveryToken(ownerId, exportAttempt) {
@@ -597,7 +620,7 @@ function canonicalStaleEntry(value) {
       !Number.isSafeInteger(exportAttempt) || exportAttempt < 1 ||
       !['starting', 'in-flight', 'terminal', 'cleanup-failed'].includes(state) ||
       !Object.hasOwn(MIME, format) || typeof filename !== 'string' ||
-      filename !== filename.trim() || filename.length > 240 ||
+      filename !== filename.trim() || filename.length > 255 ||
       !filename.endsWith(`.${format}`) ||
       (downloadId !== undefined && (!Number.isSafeInteger(downloadId) || downloadId < 0))) throw new TypeError();
     return { ownerId, exportAttempt, state, format, filename, ...(downloadId === undefined ? {} : { downloadId }) };

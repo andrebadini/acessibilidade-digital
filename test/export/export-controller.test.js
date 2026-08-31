@@ -736,7 +736,7 @@ test('rejects artifact payloads that are present despite controlled CSV or PDF o
     let committed = false;
     await assert.rejects(persistExportSuccess({ auditId: model.auditId, result, latest: {} }, {
       async commitAudit() { committed = true; },
-    }), /CSV|PDF|artefato|formato|correla|proveniência/iu);
+    }), /CSV|PDF|artefato|formato|correla|proveniência|identidade|Identity/iu);
     assert.equal(committed, false);
   }
 });

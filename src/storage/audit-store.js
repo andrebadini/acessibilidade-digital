@@ -439,7 +439,7 @@ function canonicalDeliveryOptions(options, outcome = false) {
   const format = options?.format;
   const filename = options?.filename;
   if (!EXPORT_FORMATS.has(format) || typeof filename !== 'string' || filename !== filename.trim() ||
-    filename.length < 6 || filename.length > 240 || !filename.endsWith(`.${format}`)) {
+    filename.length < 6 || filename.length > 255 || !filename.endsWith(`.${format}`)) {
     throw new TypeError('Artefato do journal de entrega inválido.');
   }
   const downloadId = options?.downloadId;

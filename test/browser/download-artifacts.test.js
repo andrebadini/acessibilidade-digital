@@ -3,7 +3,6 @@ import test from 'node:test';
 
 import {
   buildArtifactBaseName,
-  bindDeliveryArtifactBaseName,
   createDownloadsAdapter,
   downloadArtifacts,
   reconcileStaleDownloads,
@@ -11,19 +10,28 @@ import {
 
 const FAST_SHA256 = () => '0'.repeat(64);
 
-test('builds audit-owned canonical timestamp artifact names without a hostname', () => {
-  assert.equal(buildArtifactBaseName('audit:cliente-1', '2026-08-26T14:00:00.000Z'), 'audit-cliente-1-20260826T140000000Z');
+test('builds public artifact names only from the audit id projection and canonical UTC', () => {
+  assert.equal(buildArtifactBaseName('audit-1', '2026-08-29T12:00:00.123Z'), 'audita-audit-1-20260829T120000123Z');
+  assert.equal(buildArtifactBaseName('audit:cliente-1', '2026-08-26T14:00:00.000Z'), 'audita-audit_3acliente-1-20260826T140000000Z');
+  assert.notEqual(
+    buildArtifactBaseName('audit:cliente-1', '2026-08-26T14:00:00.000Z'),
+    buildArtifactBaseName('audit-cliente-1', '2026-08-26T14:00:00.000Z'),
+  );
+  assert.notEqual(
+    buildArtifactBaseName('audit:_3a', '2026-08-26T14:00:00.000Z'),
+    buildArtifactBaseName('audit::', '2026-08-26T14:00:00.000Z'),
+  );
   assert.throws(() => buildArtifactBaseName('https://example.test/', '2026-08-26T14:00:00.000Z'), /Auditoria inválida/u);
+  assert.throws(() => buildArtifactBaseName('audit-1', '2026-08-26'), /Timestamp/u);
 });
 
-test('accepts every canonical audit id character and keeps the bound delivery name within its limit', async () => {
+test('accepts every canonical audit id character without exposing a delivery owner or attempt', async () => {
   const auditId = `._${'a'.repeat(157)}:`;
   const base = buildArtifactBaseName(auditId, '2026-08-26T14:00:00.000Z');
-  assert.equal(base.length <= 160, true);
-  assert.match(base, /^\._/u);
-  const bound = await bindDeliveryArtifactBaseName(base, `export:${auditId}:1`, 1);
-  assert.equal(bound.length <= 240, true);
-  await assert.doesNotReject(() => downloadArtifacts({ baseName: bound }, {
+  assert.equal(base.length <= 240, true);
+  assert.match(base, /^audita-\._/u);
+  assert.doesNotMatch(base, /delivery|export|attempt/iu);
+  await assert.doesNotReject(() => downloadArtifacts({ baseName: base }, {
     createObjectURL() {}, revokeObjectURL() {}, download() {}, waitForDownload() {},
   }));
 });
@@ -399,7 +407,7 @@ test('exposes exact download inspection and history erasure through callback Chr
   await assert.rejects(adapter.inspectDownload(91));
 });
 
-test('reconciles stale IDs and pre-ID starts before a retry can deliver new artifacts', async () => {
+test('reconciles a public-name stale ID and a verifiable legacy pre-ID start', async () => {
   const operations = [];
   const resolved = [];
   const adapter = {
@@ -410,29 +418,48 @@ test('reconciles stale IDs and pre-ID starts before a retry can deliver new arti
     async cancelDownload(downloadId) { operations.push(['cancel', downloadId]); },
     async removeDownloadFile(downloadId) { operations.push(['remove', downloadId]); },
   };
-  const deliveryBase = await bindDeliveryArtifactBaseName('audit', 'owner-old', 1);
+  const publicBase = buildArtifactBaseName('audit', '2026-08-29T12:00:00.123Z');
+  const legacyBase = 'audit-delivery-22be6be49601e2a3adb3c81e78057773f77e74d482c64997baa6c565a5fb0b7b';
   const entries = [
     {
       ownerId: 'owner-old', exportAttempt: 1, state: 'in-flight',
-      format: 'html', filename: `${deliveryBase}.html`, downloadId: 11,
+      format: 'html', filename: `${publicBase}.html`, downloadId: 11,
     },
     {
       ownerId: 'owner-old', exportAttempt: 1, state: 'starting',
-      format: 'json', filename: `${deliveryBase}.json`,
+      format: 'json', filename: `${legacyBase}.json`,
     },
   ];
 
-  await reconcileStaleDownloads(entries, adapter, async entry => { resolved.push(entry); });
+  await reconcileStaleDownloads(entries, adapter, async entry => { resolved.push(entry); }, { auditId: 'audit' });
 
   assert.deepEqual(operations, [
     ['cancel', 11], ['remove', 11],
-    ['find', `${deliveryBase}.json`], ['cancel', 12], ['remove', 12],
+    ['find', `${legacyBase}.json`], ['cancel', 12], ['remove', 12],
   ]);
   assert.deepEqual(resolved, entries);
 });
 
+test('never guesses a public-name pre-ID download that could belong to another attempt', async () => {
+  const outcomes = [];
+  const operations = [];
+  const base = buildArtifactBaseName('audit', '2026-08-29T12:00:00.123Z');
+  await assert.rejects(reconcileStaleDownloads([{
+    ownerId: 'owner-old', exportAttempt: 1, state: 'starting',
+    format: 'html', filename: `${base}.html`,
+  }], {
+    async findDownloadsByFilename() { operations.push('find'); return [{ id: 77 }]; },
+    async cancelDownload() { operations.push('cancel'); },
+    async removeDownloadFile() { operations.push('remove'); },
+  }, async (_entry, outcome) => { outcomes.push(outcome); }, { auditId: 'audit' }), error =>
+    error?.code === 'AUDIT_DOWNLOAD_CLEANUP_PENDING');
+
+  assert.deepEqual(operations, []);
+  assert.deepEqual(outcomes, ['cleanup-failed']);
+});
+
 test('never deletes an ambiguous or absent pre-ID download by filename alone', async () => {
-  const base = await bindDeliveryArtifactBaseName('audit', 'owner-old', 1);
+  const base = 'audit-delivery-22be6be49601e2a3adb3c81e78057773f77e74d482c64997baa6c565a5fb0b7b';
   for (const found of [[], [10, 11]]) {
     const removed = [];
     const outcomes = [];
@@ -443,7 +470,7 @@ test('never deletes an ambiguous or absent pre-ID download by filename alone', a
       async findDownloadsByFilename() { return found; },
       async cancelDownload() {},
       async removeDownloadFile(id) { removed.push(id); },
-    }, async (_entry, outcome) => { outcomes.push(outcome); }), error =>
+    }, async (_entry, outcome) => { outcomes.push(outcome); }, { auditId: 'audit' }), error =>
       error?.code === 'AUDIT_DOWNLOAD_CLEANUP_PENDING');
     assert.deepEqual(removed, []);
     assert.deepEqual(outcomes, ['cleanup-failed']);
@@ -452,14 +479,14 @@ test('never deletes an ambiguous or absent pre-ID download by filename alone', a
 
 test('preserves a completed prior-attempt download while clearing only its finalized journal row', async () => {
   const outcomes = [];
-  const base = await bindDeliveryArtifactBaseName('audit', 'owner-old', 1);
+  const base = buildArtifactBaseName('audit', '2026-08-29T12:00:00.123Z');
   await reconcileStaleDownloads([{
     ownerId: 'owner-old', exportAttempt: 1, state: 'terminal',
     format: 'html', filename: `${base}.html`, downloadId: 99,
   }], {
     async cancelDownload() { throw new Error('completed download must remain available'); },
     async removeDownloadFile() { throw new Error('completed download must remain available'); },
-  }, async (_entry, outcome) => { outcomes.push(outcome); }, { timeoutMs: 10 });
+  }, async (_entry, outcome) => { outcomes.push(outcome); }, { auditId: 'audit', timeoutMs: 10 });
 
   assert.deepEqual(outcomes, ['cleaned']);
 });
@@ -467,13 +494,13 @@ test('preserves a completed prior-attempt download while clearing only its final
 test('bounds a hanging pre-ID filename lookup and records cleanup-failed', { timeout: 500 }, async () => {
   const findGate = deferred();
   const outcomes = [];
-  const base = await bindDeliveryArtifactBaseName('audit', 'owner-old', 1);
+  const base = 'audit-delivery-22be6be49601e2a3adb3c81e78057773f77e74d482c64997baa6c565a5fb0b7b';
   const operation = reconcileStaleDownloads([{
     ownerId: 'owner-old', exportAttempt: 1, state: 'starting',
     format: 'html', filename: `${base}.html`,
   }], {
     findDownloadsByFilename() { return findGate.promise; },
-  }, async (_entry, outcome) => { outcomes.push(outcome); }, { timeoutMs: 10 }).then(
+  }, async (_entry, outcome) => { outcomes.push(outcome); }, { auditId: 'audit', timeoutMs: 10 }).then(
     value => ({ status: 'resolved', value }),
     error => ({ status: 'rejected', error }),
   );
@@ -492,7 +519,7 @@ test('bounds a hanging pre-ID filename lookup and records cleanup-failed', { tim
 test('bounds a hanging journal resolution after physical stale cleanup', { timeout: 500 }, async () => {
   const resolutionGate = deferred();
   const outcomes = [];
-  const base = await bindDeliveryArtifactBaseName('audit', 'owner-old', 1);
+  const base = buildArtifactBaseName('audit', '2026-08-29T12:00:00.123Z');
   const operation = reconcileStaleDownloads([{
     ownerId: 'owner-old', exportAttempt: 1, state: 'terminal',
     format: 'html', filename: `${base}.html`, downloadId: 101,
@@ -502,7 +529,7 @@ test('bounds a hanging journal resolution after physical stale cleanup', { timeo
   }, async (_entry, outcome) => {
     outcomes.push(outcome);
     return resolutionGate.promise;
-  }, { timeoutMs: 10 }).then(
+  }, { auditId: 'audit', timeoutMs: 10 }).then(
     value => ({ status: 'resolved', value }),
     error => ({ status: 'rejected', error }),
   );

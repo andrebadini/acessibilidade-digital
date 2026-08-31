@@ -1,4 +1,5 @@
 export const SENSITIVE_KEY = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
+export { canonicalNavigationUrl, isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from './privacy/evidence-url.js';
 
 // Public storage failures stay independent from browser/IndexedDB error details,
 // which may disclose URLs, database names or implementation-specific values.

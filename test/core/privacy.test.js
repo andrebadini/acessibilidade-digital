@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { sanitizeWarning, sanitizeWarnings } from '../../src/core/privacy.js';
+import { sanitizeEvidenceUrl, sanitizeWarning, sanitizeWarnings } from '../../src/core/privacy.js';
 
 const FALLBACK_WARNING = {
   code: 'PROBE_FAILED',
@@ -11,6 +11,14 @@ const UNAVAILABLE_WARNINGS = [{
   code: 'WARNINGS_UNAVAILABLE',
   message: 'Os avisos de coleta não puderam ser normalizados com segurança.',
 }];
+
+test('legacy resource URL sanitization remains total for relative, data and blob resources', () => {
+  assert.equal(sanitizeEvidenceUrl('../imagem.png', 'https://example.test/app/'), 'https://example.test/imagem.png');
+  assert.equal(sanitizeEvidenceUrl('data:image/png;base64,PRIVATE'), 'data:[redacted]');
+  assert.equal(sanitizeEvidenceUrl('blob:https://example.test/PRIVATE'), 'blob:[redacted]');
+  assert.equal(sanitizeEvidenceUrl('about:blank'), '');
+  assert.equal(sanitizeEvidenceUrl({ private: true }), '');
+});
 
 test('sanitizes warning leaves through own data descriptors without invoking accessors', () => {
   for (const field of ['code', 'frameId', 'message']) {

@@ -6,6 +6,7 @@ import {
 import { canonicalStringify } from '../core/report/canonical-json.js';
 import {
   finalizeGeneratedModel,
+  generatedReportExportArtifactBaseName,
   generatedReportExportAttempt,
   generatedReportExportLeaseOwnerId,
   generatedReportExportSnapshotCapability,
@@ -22,8 +23,6 @@ import {
   ARTIFACT_FAILURE_CONTRACT,
   artifactCleanupLimitation,
   artifactFailureLimitation,
-  bindDeliveryArtifactBaseName,
-  buildArtifactBaseName,
 } from '../browser/download-artifacts.js';
 
 import { createExportDeliveryIdentityV1, EXPORT_FORMATS_V1 } from './export-formats.js';
@@ -95,9 +94,11 @@ export function createExportSuccessRequest(request) {
   const snapshotCapability = generatedReportExportSnapshotCapability(outer.result);
   const leaseOwnerId = generatedReportExportLeaseOwnerId(outer.result);
   const exportAttempt = generatedReportExportAttempt(outer.result);
+  const artifactBaseName = generatedReportExportArtifactBaseName(outer.result);
   const snapshot = inspectAuditSnapshotCapability(snapshotCapability);
   if (!snapshot || snapshot.auditId !== auditId || !leaseOwnerId ||
-    !Number.isSafeInteger(exportAttempt) || exportAttempt < 1) {
+    !Number.isSafeInteger(exportAttempt) || exportAttempt < 1 ||
+    typeof artifactBaseName !== 'string' || !/^audita-[A-Za-z0-9._-]+-\d{8}T\d{9}Z$/u.test(artifactBaseName)) {
     throw new TypeError('Resultado e capacidade de snapshot da auditoria não estão correlacionados.');
   }
   const token = Object.freeze(Object.create(null));
@@ -109,6 +110,7 @@ export function createExportSuccessRequest(request) {
     snapshotCapability,
     leaseOwnerId,
     exportAttempt,
+    artifactBaseName,
   }));
   return token;
 }
@@ -183,13 +185,8 @@ export async function persistExportSuccess(request, store) {
   const immutableRevision = verifiedModel.report?.status === 'review-ready' &&
     verifiedModel.report?.artifact?.status === 'pending';
   const prepared = immutableRevision
-    ? immutableRevisionFormats(result.deliveryReceipt, verifiedModel)
-    : preparedArtifactFormats(verifiedModel);
-  prepared.baseName = await bindDeliveryArtifactBaseName(
-    prepared.baseName,
-    envelope.leaseOwnerId,
-    envelope.exportAttempt,
-  );
+    ? immutableRevisionFormats(result.deliveryReceipt, envelope.artifactBaseName)
+    : preparedArtifactFormats(verifiedModel, envelope.artifactBaseName);
   const receipt = normalizeDeliveryReceipt(result.deliveryReceipt, prepared);
   const exportDeliveryIdentity = normalizeExportDeliveryIdentity(
     result.exportDeliveryIdentity,
@@ -301,7 +298,7 @@ function normalizeDeliveryReceipt(value, preparedFormats) {
       ? typeof entry.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(entry.sha256)
       : entry.sha256 === null;
     if (!failure && !complete || canonicalStringify(keys) !== canonicalStringify(expectedKeys) ||
-      typeof entry.filename !== 'string' || !/^[A-Za-z0-9._-]{1,240}$/u.test(entry.filename) ||
+      typeof entry.filename !== 'string' || !/^[A-Za-z0-9._-]{1,255}$/u.test(entry.filename) ||
       !entry.filename.endsWith(`.${entry.format}`) || entry.mimeType !== expectedMime[entry.format] || !hashValid ||
       (complete && (!Number.isSafeInteger(entry.byteSize) || entry.byteSize < 0)) ||
       (hasDownloadId && (!Number.isSafeInteger(entry.downloadId) || entry.downloadId < 0)) ||
@@ -350,13 +347,12 @@ function normalizeDeliveryReceipt(value, preparedFormats) {
   return { status, formats, limitations };
 }
 
-function immutableRevisionFormats(receipt, model) {
+function immutableRevisionFormats(receipt, artifactBaseName) {
   if (!receipt || receipt.status !== 'complete' || !Array.isArray(receipt.formats) || receipt.formats.length !== EXPORT_FORMATS_V1.length ||
     receipt.formats.some((entry, index) => entry?.format !== EXPORT_FORMATS_V1[index] || entry.status !== 'complete')) {
     throw new TypeError('Recibo completo da revisão imutável inválido.');
   }
-  return { formats: [...EXPORT_FORMATS_V1], missing: [], missingLimitations: [],
-    baseName: buildArtifactBaseName(model.auditId, model.timestamps.generatedAt) };
+  return { formats: [...EXPORT_FORMATS_V1], missing: [], missingLimitations: [], baseName: artifactBaseName };
 }
 
 function validateImmutableRevisionCorrelation({ model, json, csv, pdf, formats, receipt, exportDeliveryIdentity }) {
@@ -365,7 +361,7 @@ function validateImmutableRevisionCorrelation({ model, json, csv, pdf, formats, 
     !csv.startsWith('\uFEFF')) throw new TypeError('Artefatos da revisão imutável não correspondem ao recibo.');
 }
 
-function preparedArtifactFormats(model) {
+function preparedArtifactFormats(model, artifactBaseName) {
   const report = model?.report;
   const artifact = report?.artifact;
   const values = artifact?.formats;
@@ -451,7 +447,7 @@ function preparedArtifactFormats(model) {
   if (formats.includes('csv') && currentCsvUnavailable || formats.includes('pdf') && currentPdfUnavailable) {
     throw new TypeError('Diagnóstico de geração não corresponde aos formatos preparados.');
   }
-  return { formats, missing, missingLimitations, baseName: buildArtifactBaseName(model.auditId, generatedAt) };
+  return { formats, missing, missingLimitations, baseName: artifactBaseName };
 }
 
 function snapshotLatest(value, auditId) {

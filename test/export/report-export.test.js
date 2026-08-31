@@ -140,6 +140,7 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   const result = await runReportExport({
     auditSnapshotCapability: snapshot.capability, exportLeaseOwnerId: deliveryOwnerId,
     exportAttempt: acquired.exportAttempt,
+    now: () => '2026-08-30T12:34:56.789Z',
   }, {
     reportView,
     urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
@@ -161,6 +162,13 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   });
   assert.equal((await store.getAuditSnapshot(model.auditId)).revision, snapshot.revision);
   assert.deepEqual(result.deliveryReceipt.formats.map(entry => entry.format), EXPORT_FORMATS_V1);
+  assert.deepEqual(result.deliveryReceipt.formats.map(entry => entry.filename), [
+    'audita-audit-sample-20260826-20260830T123456789Z.html',
+    'audita-audit-sample-20260826-20260830T123456789Z.pdf',
+    'audita-audit-sample-20260826-20260830T123456789Z.csv',
+    'audita-audit-sample-20260826-20260830T123456789Z.json',
+  ]);
+  assert.doesNotMatch(JSON.stringify(result.deliveryReceipt.formats), /delivery-|export:|attempt/iu);
   assert.equal(result.deliveryReceipt.formats.every(entry => entry.byteSize > 0 && /^[a-f0-9]{64}$/u.test(entry.sha256)), true);
   const persisted = await persistExportSuccess(createExportSuccessRequest({ auditId:model.auditId,result,latest:{auditId:model.auditId} }),store);
   assert.equal(persisted.latest.exportStatus,'complete'); assert.equal(persisted.latest.exportRevision,snapshot.revision+1);

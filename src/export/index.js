@@ -70,7 +70,8 @@ async function generate(connected) {
   });
   leaseClaimed = true;
   await reconcileStaleDownloads(await store.getExportDeliveryJournal(auditId), downloadsAdapter,
-    (entry, outcome) => store.resolveExportDelivery(auditId, { ...entry, now: new Date().toISOString(), outcome }));
+    (entry, outcome) => store.resolveExportDelivery(auditId, { ...entry, now: new Date().toISOString(), outcome }),
+    { auditId });
   await store.beginExportDelivery(auditId, sourceSnapshotCapability, {
     ownerId: leaseOwnerId, exportAttempt, now: new Date().toISOString(), ttlMs: 10 * 60 * 1000,
     latestState: { ...latestState, exportStatus: 'delivering', message: 'Transferindo os arquivos do relatório.' },

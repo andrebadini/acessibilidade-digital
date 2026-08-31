@@ -8,9 +8,15 @@ test('normalizes separators, ignores blank lines and preserves unique URL order'
 
   assert.deepEqual(result, {
     entries: [
-      { line: 1, navigationUrl: 'https://example.test/a', reportUrl: 'https://example.test/' },
-      { line: 3, navigationUrl: 'https://xn--mnich-kva.example/b#fim', reportUrl: 'https://xn--mnich-kva.example/' },
-      { line: 4, navigationUrl: 'http://127.0.0.1:8080/private', reportUrl: 'http://127.0.0.1:8080/' },
+      { line: 1, navigationUrl: 'https://example.test/a', evidenceUrl: {
+        version: 'EvidenceUrlV1', href: 'https://example.test/a', queryIncluded: false, redactedSegments: 0,
+      } },
+      { line: 3, navigationUrl: 'https://xn--mnich-kva.example/b#fim', evidenceUrl: {
+        version: 'EvidenceUrlV1', href: 'https://xn--mnich-kva.example/b', queryIncluded: false, redactedSegments: 0,
+      } },
+      { line: 4, navigationUrl: 'http://127.0.0.1:8080/private', evidenceUrl: {
+        version: 'EvidenceUrlV1', href: 'http://127.0.0.1:8080/private', queryIncluded: false, redactedSegments: 0,
+      } },
     ],
     errors: [],
     warnings: [],
@@ -30,16 +36,22 @@ test('deduplicates only canonical navigation URLs and retains origin-colliding p
   ].join('\n'));
 
   assert.deepEqual(result.entries, [
-    { line: 1, navigationUrl: 'https://example.test/a', reportUrl: 'https://example.test/' },
+    { line: 1, navigationUrl: 'https://example.test/a', evidenceUrl: {
+      version: 'EvidenceUrlV1', href: 'https://example.test/a', queryIncluded: false, redactedSegments: 0,
+    } },
     {
       line: 3,
       navigationUrl: `https://example.test/account?token=${secret}&view=summary`,
-      reportUrl: 'https://example.test/',
+      evidenceUrl: {
+        version: 'EvidenceUrlV1', href: 'https://example.test/account', queryIncluded: false, redactedSegments: 0,
+      },
     },
     {
       line: 4,
       navigationUrl: 'https://example.test/account?token=OTHER_PRIVATE_TOKEN&view=summary',
-      reportUrl: 'https://example.test/',
+      evidenceUrl: {
+        version: 'EvidenceUrlV1', href: 'https://example.test/account', queryIncluded: false, redactedSegments: 0,
+      },
     },
   ]);
   assert.deepEqual(result.warnings, [
@@ -59,10 +71,10 @@ test('reports every invalid line with fixed messages and accepts user-authorized
     'http://[fe80::1]/status',
   ].join('\n'));
 
-  assert.deepEqual(result.entries.map(entry => entry.reportUrl), [
+  assert.deepEqual(result.entries.map(entry => entry.evidenceUrl.href), [
     'http://localhost:3000/',
-    'http://10.0.0.8/',
-    'http://[fe80::1]/',
+    'http://10.0.0.8/internal',
+    'http://[fe80::1]/status',
   ]);
   assert.deepEqual(result.errors.map(({ line, code }) => ({ line, code })), [
     { line: 1, code: 'INVALID_URL' },
@@ -70,6 +82,27 @@ test('reports every invalid line with fixed messages and accepts user-authorized
     { line: 3, code: 'INVALID_URL' },
   ]);
   assert.ok(result.errors.every(error => !/ftp|password|example/u.test(error.message)));
+});
+
+test('keeps redacted collisions as distinct pages and deduplicates only exact canonical URLs', () => {
+  const value = normalizeUrlList([
+    'https://example.test/client/1234567',
+    'https://example.test/client/7654321',
+    'https://EXAMPLE.test/client/1234567',
+  ].join('\n'));
+
+  assert.equal(value.entries.length, 2);
+  assert.deepEqual(value.entries.map(entry => entry.line), [1, 2]);
+  assert.deepEqual(value.entries.map(entry => entry.evidenceUrl.href), [
+    'https://example.test/client/:redacted-2',
+    'https://example.test/client/:redacted-2',
+  ]);
+  assert.deepEqual(value.warnings, [{
+    line: 3,
+    code: 'DUPLICATE_URL',
+    firstLine: 1,
+    message: 'A URL repete uma entrada anterior e não será auditada novamente.',
+  }]);
 });
 
 test('keeps exactly twenty unique identities and reports the twenty-first without truncating silently', () => {

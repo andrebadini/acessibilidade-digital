@@ -10,7 +10,7 @@ import {
   createBatchReportTemplate,
 } from '../core/batch/aggregate-audits.js';
 import { remapAuditPage } from '../core/batch/remap-audit.js';
-import { projectAuditResourceOrigin } from '../core/privacy.js';
+import { isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { canonicalInternalReviewUrl } from '../core/report/report-policy.js';
 import { normalizeAuditUrl } from '../core/url.js';
@@ -338,7 +338,7 @@ async function runPageWithBoundary({ operation, externalSignal, pageTimeoutMs, c
 
 function failureFor(entry, pageId, status, attempted, startedAt, endedAt, code, message) {
   return createBatchFailurePage({
-    pageId, requestedUrl: entry.reportUrl, status, attempted, startedAt, endedAt, code, message,
+    pageId, requestedUrl: entry.evidenceUrl.href, status, attempted, startedAt, endedAt, code, message,
   });
 }
 
@@ -354,9 +354,15 @@ function validateInputs({ entries, batchAuditId, chromeAdapter, runner, pageTime
     throw new TypeError('Orçamento de evidências do lote inválido.');
   }
   for (const entry of entries) {
+    let expectedEvidenceUrl;
+    try { expectedEvidenceUrl = sanitizeEvidenceUrlV1(entry?.navigationUrl, { includeQuery: false }); }
+    catch { expectedEvidenceUrl = null; }
     if (!entry || !Number.isSafeInteger(entry.line) || entry.line < 1 ||
       normalizeAuditUrl(entry.navigationUrl) !== entry.navigationUrl ||
-      projectAuditResourceOrigin(entry.navigationUrl) !== entry.reportUrl) {
+      !isEvidenceUrlV1(entry.evidenceUrl) || !expectedEvidenceUrl ||
+      entry.evidenceUrl.href !== expectedEvidenceUrl.href ||
+      entry.evidenceUrl.queryIncluded !== expectedEvidenceUrl.queryIncluded ||
+      entry.evidenceUrl.redactedSegments !== expectedEvidenceUrl.redactedSegments) {
       throw new TypeError('Lista normalizada do lote inválida.');
     }
   }

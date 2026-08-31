@@ -1,4 +1,4 @@
-import { projectAuditResourceOrigin } from '../privacy.js';
+import { sanitizeEvidenceUrlV1 } from '../privacy/evidence-url.js';
 import { normalizeAuditUrl } from '../url.js';
 
 const MAX_UNIQUE_URLS = 20;
@@ -58,7 +58,6 @@ export function normalizeUrlList(input) {
       errors.push(issue(line, code));
       continue;
     }
-    const reportUrl = projectAuditResourceOrigin(navigationUrl);
     const navigationDuplicate = navigationFirstLine.get(navigationUrl);
     if (navigationDuplicate !== undefined) {
       warnings.push(issue(line, 'DUPLICATE_URL', navigationDuplicate));
@@ -69,7 +68,11 @@ export function normalizeUrlList(input) {
       continue;
     }
     navigationFirstLine.set(navigationUrl, line);
-    entries.push({ line, navigationUrl, reportUrl });
+    entries.push({
+      line,
+      navigationUrl,
+      evidenceUrl: sanitizeEvidenceUrlV1(navigationUrl, { includeQuery: false }),
+    });
   }
 
   if (nonemptyCount === 0) errors.push(issue(0, 'BATCH_EMPTY'));

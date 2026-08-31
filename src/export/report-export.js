@@ -1,5 +1,4 @@
 import {
-  bindDeliveryArtifactBaseName,
   buildArtifactBaseName,
   downloadArtifacts,
 } from '../browser/download-artifacts.js';
@@ -64,6 +63,7 @@ export async function runReportExport(request, dependencies) {
     sourceModel = createAuditModel(capturedRequest.auditModel);
   }
   validateDependencies(dependencies);
+  const deliveryAt = safeCanonicalNow(capturedRequest.now);
   if (snapshotCapability !== null && dependencies.reportView !== undefined) {
     return runImmutableRevisionExport({
       sourceModel,
@@ -71,11 +71,12 @@ export async function runReportExport(request, dependencies) {
       snapshotCapability,
       exportLeaseOwnerId,
       exportAttempt,
+      artifactTimestamp: deliveryAt,
       timeoutMs: capturedRequest.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       dependencies,
     });
   }
-  const at = safeCanonicalNow(capturedRequest.now);
+  const at = deliveryAt;
   if (snapshotCapability !== null) {
     sourceModel = await enrichAuditForReport(sourceModel, {
       now: () => at,
@@ -188,10 +189,7 @@ export async function runReportExport(request, dependencies) {
     snapshotCapability = reservedCapability;
   }
 
-  let baseName = buildArtifactBaseName(model.auditId, at);
-  if (snapshotCapability !== null) {
-    baseName = await bindDeliveryArtifactBaseName(baseName, exportLeaseOwnerId, exportAttempt);
-  }
+  const baseName = buildArtifactBaseName(model.auditId, at);
   const downloadOptions = {
     timeoutMs,
     ...(snapshotCapability === null ? {} : {
@@ -256,17 +254,16 @@ export async function runReportExport(request, dependencies) {
       }),
     }),
   };
-  return attestReportExportResult(result, snapshotCapability, exportLeaseOwnerId, exportAttempt);
+  return attestReportExportResult(result, snapshotCapability, exportLeaseOwnerId, exportAttempt, baseName);
 }
 
 async function runImmutableRevisionExport({
-  sourceModel, reportView, snapshotCapability, exportLeaseOwnerId, exportAttempt, timeoutMs, dependencies,
+  sourceModel, reportView, snapshotCapability, exportLeaseOwnerId, exportAttempt, artifactTimestamp, timeoutMs, dependencies,
 }) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !reportView || reportView.version !== 1 ||
     reportView.auditId !== sourceModel.auditId || reportView.modelHash !== sourceModel.integrity.canonicalModelHash ||
     !Object.isFrozen(reportView)) throw reportExportInputError();
   const model = await verifyAuditIntegritySnapshot(sourceModel);
-  const generatedAt = safeCanonicalNow(() => model.timestamps.generatedAt);
   const deliveryIdentity = createExportDeliveryIdentityV1({
     auditId: model.auditId, modelRevision: reportView.modelRevision, modelHash: reportView.modelHash,
     attemptId: String(exportAttempt),
@@ -292,8 +289,7 @@ async function runImmutableRevisionExport({
   if (!pdf && !limitations.some(value => value === createExportIssue('REPORT_PDF_UNAVAILABLE').message)) {
     limitations.push(createExportIssue('REPORT_PDF_UNAVAILABLE').message);
   }
-  let baseName = buildArtifactBaseName(model.auditId, generatedAt);
-  baseName = await bindDeliveryArtifactBaseName(baseName, exportLeaseOwnerId, exportAttempt);
+  const baseName = buildArtifactBaseName(model.auditId, artifactTimestamp);
   const downloads = await downloadArtifacts({
     baseName, html, json, ...(csv === null ? {} : { csv }), ...(pdf ? { pdf } : {}),
   }, dependencies.downloadsAdapter, {
@@ -312,7 +308,7 @@ async function runImmutableRevisionExport({
   return attestReportExportResult({
     model, html, json, csv, pdf, formats: downloads.formats, deliveryReceipt, exportDeliveryIdentity: deliveryIdentity,
     limitations: receiptLimitations, pdfFallback,
-  }, snapshotCapability, exportLeaseOwnerId, exportAttempt);
+  }, snapshotCapability, exportLeaseOwnerId, exportAttempt, baseName);
 }
 
 /** Safe identity probe used before any reflection on a caller-provided result. */
@@ -338,6 +334,12 @@ export function generatedReportExportAttempt(result) {
   return provenance?.exportAttempt ?? null;
 }
 
+/** Returns the trusted public artifact base selected once for this delivery. */
+export function generatedReportExportArtifactBaseName(result) {
+  const provenance = (typeof result === 'object' && result !== null) ? GENERATED_REPORT_RESULTS.get(result) : null;
+  return provenance?.artifactBaseName ?? null;
+}
+
 /** Verifies a persistence-owned snapshot against the private generation record. */
 export async function verifyGeneratedReportExportResult(result, snapshot) {
   try {
@@ -351,13 +353,17 @@ export async function verifyGeneratedReportExportResult(result, snapshot) {
   }
 }
 
-async function attestReportExportResult(result, snapshotCapability, exportLeaseOwnerId, exportAttempt) {
+async function attestReportExportResult(result, snapshotCapability, exportLeaseOwnerId, exportAttempt, artifactBaseName) {
   try {
+    if (typeof artifactBaseName !== 'string' || !/^audita-[A-Za-z0-9._-]+-\d{8}T\d{9}Z$/u.test(artifactBaseName)) {
+      throw new TypeError();
+    }
     const provenance = Object.freeze({
       projection: Object.freeze(await projectGeneratedResult(result)),
       snapshotCapability,
       exportLeaseOwnerId,
       exportAttempt,
+      artifactBaseName,
     });
     GENERATED_REPORT_RESULTS.set(result, provenance);
     return result;
