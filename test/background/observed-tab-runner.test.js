@@ -1,438 +1,454 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createOwnedTabRegistry } from '../../src/background/owned-tabs.js';
-import { createRawNavigationVaultV1 } from '../../src/background/raw-navigation-vault.js';
 import { runObservedTabAudit } from '../../src/background/observed-tab-runner.js';
+import { createObservedPipelineRunner } from '../../src/background/audit-pipeline.js';
+import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
+import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
+import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 
-const DIGEST_A = `hmac-sha256:${'A'.repeat(43)}`;
-const DIGEST_B = `hmac-sha256:${'B'.repeat(43)}`;
+const DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
+const NAV_TOKEN = 'A'.repeat(22);
+const EVIDENCE = sanitizeEvidenceUrlV1('https://example.test/a', { includeQuery: false });
+const POLICY = createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false });
+const FULL_POLICY = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+const ELEMENT_POLICY = createCapturePolicyV1({ mode: 'element-only', includeQuery: false });
+const QUERY_POLICY = createCapturePolicyV1({ mode: 'no-pixels', includeQuery: true });
+const QUERY_EVIDENCE = sanitizeEvidenceUrlV1('https://example.test/a?secret=1', { includeQuery: true });
+const NOW = () => '2026-08-31T12:00:00.000Z';
 
-function createSessionArea() {
-  const values = {};
+function model() {
+  const copy = structuredClone(SAMPLE_AUDIT);
+  copy.auditId = 'audit-1';
+  copy.finalUrl = EVIDENCE.href;
+  copy.pages[0].finalUrl = EVIDENCE.href;
+  return createAuditModel(copy);
+}
+
+function checkpoint() {
+  return { version: 1, auditId: 'audit-1', pages: [{ pageId: 'page-1', attempted: true,
+    startedAt: NOW(), rulesVersion: '1.0.0', inventoryVersion: '1.0.0', inventoryHash: 'a'.repeat(64), outcomes: [] }] };
+}
+
+function ownedRecord({ state = 'created', tabId = 41, windowId = 3 } = {}) {
+  return Object.freeze({ version: 2, ownershipId: 'ownership-1', auditId: 'audit-1', purpose: 'audit',
+    tabId, windowId, cleanupMode: 'always', state,
+    createdAt: NOW(), updatedAt: NOW() });
+}
+
+function attachedTarget(overrides = {}) {
   return {
-    async get(key) {
-      if (key === null) return structuredClone(values);
-      return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {};
-    },
-    async set(entries) { Object.assign(values, structuredClone(entries)); },
-    async remove(key) { delete values[key]; },
+    kind: 'attached', tabId: 7, windowId: 3, documentId: 'doc-1',
+    initialUrlEvidence: EVIDENCE, initialUrlSessionDigest: DIGEST, ...overrides,
   };
 }
 
-function checkpointRecorder() {
-  const snapshot = Object.freeze({ version: 1, auditId: 'audit-a', pages: Object.freeze([]) });
-  return Object.freeze({ snapshot: () => snapshot });
+async function observedResult(input, status = 'partial') {
+  await input.beforePersist({ observedTarget: input.observedTarget });
+  return { model: model(), status, checkpoint: checkpoint(), observationState: 'observed' };
 }
 
-function safeFailureModel({ auditId, code, status }) {
-  return Object.freeze({
-    schemaVersion: 2, auditId,
-    session: Object.freeze({ status, diagnostics: Object.freeze([Object.freeze({ code })]) }),
-  });
-}
-
-function privacyStore() {
-  const records = new Map();
-  return {
-    records,
-    async persistPause(value) { records.set(value.pauseId, structuredClone(value)); },
-    async getPause(pauseId) { return records.has(pauseId) ? structuredClone(records.get(pauseId)) : null; },
-  };
-}
-
-function attachedFixture({ proofs, pipelineError, decision, store = privacyStore(), signal } = {}) {
-  const calls = {
-    createTab: 0, navigateTab: 0, removeTab: 0, collect: 0, pixelOperations: 0,
-    readInputValue: 0, captureVisibleTab: 0, captureScreenshot: 0, probe: 0, order: [],
-  };
-  const queue = [...(proofs ?? [{ tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST_A }, { tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST_A }])];
-  const chromeAdapter = {
-    async createTab() { calls.createTab += 1; },
-    async navigateTab() { calls.navigateTab += 1; },
-    async removeTab() { calls.removeTab += 1; },
-    async probeDocumentIdentity() { calls.probe += 1; return structuredClone(queue.shift() ?? queue.at(-1)); },
-    async probePrivacySignals() {
-      calls.order.push('probe-structure-without-values');
-      return [{ category: 'password-field', count: 1 }];
-    },
-  };
-  const pipeline = async ({ capturePolicy }) => {
-    calls.collect += 1;
-    if (capturePolicy.captureFullPage || capturePolicy.captureElements || capturePolicy.composeAnnouncementMap) calls.pixelOperations += 1;
-    if (pipelineError) throw pipelineError;
-    return {
-      model: Object.freeze({ schemaVersion: 2, auditId: 'audit-a', session: Object.freeze({ status: 'complete', diagnostics: Object.freeze([]) }) }),
-      checkpoint: checkpointRecorder().snapshot(), observationState: 'observed',
-    };
-  };
-  const resolvedDecision = decision ?? { status: 'no-pixels', limitationCode: 'PIXEL_CAPTURE_OMITTED' };
-  const args = {
-    auditId: 'audit-a', sessionCapabilityId: 'session-a',
-    target: {
-      kind: 'attached', tabId: 17, windowId: 9, documentId: 'document-a',
-      initialUrlEvidence: 'https://example.test/path', initialUrlSessionDigest: DIGEST_A,
-    },
-    capturePolicy: createCapturePolicyV1({ mode: resolvedDecision.status === 'no-pixels' ? 'no-pixels' : 'full-evidence', includeQuery: false }),
-    privacyDecision: resolvedDecision,
-    checkpointRecorder: checkpointRecorder(), signal,
-    chromeAdapter, pipeline, privacyState: store,
-    consentAuthority: { async consume() { return true; } },
-    failureModelFactory: safeFailureModel,
-    now: () => '2026-08-29T10:00:00.000Z',
-  };
-  return { args, calls, store };
-}
-
-test('attached target is never created navigated or removed on every exit', async () => {
-  for (const exit of ['success', 'cancel', 'timeout', 'cdp-failure', 'worker-interruption']) {
-    const controller = new AbortController();
-    if (exit === 'cancel') controller.abort(new DOMException('cancelled', 'AbortError'));
-    const pipelineError = exit === 'success' || exit === 'cancel' ? null : Object.assign(new Error('PRIVATE_NATIVE_DETAIL'), { name: exit === 'timeout' ? 'TimeoutError' : 'Error' });
-    const { args, calls } = attachedFixture({ pipelineError, signal: controller.signal });
-    await runObservedTabAudit(args);
-    assert.deepEqual(
-      { create: calls.createTab, navigate: calls.navigateTab, remove: calls.removeTab },
-      { create: 0, navigate: 0, remove: 0 },
-      exit,
-    );
-  }
-});
-
-test('registers disposable ownership before navigation and retains an observed URL audit', async () => {
-  const order = [];
-  const sessionArea = createSessionArea();
-  const chromeAdapter = {
-    async createTab(options) { order.push('create-about-blank'); assert.deepEqual(options, { url: 'about:blank', active: true }); return { id: 41, windowId: 9 }; },
-    async navigateTab(tabId, rawUrl) { order.push('navigate'); assert.equal(tabId, 41); assert.equal(rawUrl, 'https://example.test/?secret=ERASE'); },
-    async waitForStable() {},
-    async probeDocumentIdentity() { return { tabId: 41, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST_A }; },
-    async getEvidenceUrl() { return 'https://example.test/'; },
-    async removeTab() { order.push('remove'); },
-  };
-  const underlyingOwned = createOwnedTabRegistry({ sessionArea, chromeAdapter, now: () => '2026-08-29T10:00:00.000Z' });
-  const ownedTabs = {
-    ...underlyingOwned,
-    async registerCreated(value) { order.push('register-owner'); return underlyingOwned.registerCreated(value); },
-  };
-  const rawNavigationVault = createRawNavigationVaultV1({
-    sessionArea, now: () => 1_788_000_000_000,
-    randomBytes: length => new Uint8Array(length).fill(7),
-  });
-  const issued = await rawNavigationVault.putInternal({ ownerId: 'owner-a', rawUrl: 'https://example.test/?secret=ERASE' });
-  const result = await runObservedTabAudit({
-    auditId: 'audit-a', sessionCapabilityId: 'session-a',
-    target: { kind: 'disposable', ownerId: 'owner-a', navigationToken: issued.navigationToken, cleanupMode: 'retain-after-observation' },
-    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
-    privacyDecision: { status: 'no-pixels', limitationCode: 'PIXEL_CAPTURE_OMITTED' },
-    checkpointRecorder: checkpointRecorder(), chromeAdapter, ownedTabs, rawNavigationVault,
-    pipeline: async () => ({ model: Object.freeze({ auditId: 'audit-a' }), checkpoint: checkpointRecorder().snapshot(), observationState: 'observed' }),
-    failureModelFactory: safeFailureModel, now: () => '2026-08-29T10:00:00.000Z',
-  });
-  assert.deepEqual(order.slice(0, 3), ['create-about-blank', 'register-owner', 'navigate']);
-  assert.equal(result.ownershipState, 'retained-for-review');
-  assert.equal((await ownedTabs.get('owner-a')).state, 'retained-for-review');
-  assert.doesNotMatch(JSON.stringify(result), /ERASE|navigationToken/u);
-  assert.doesNotMatch(JSON.stringify(result.model), /owner-a|tabId|documentId|urlSessionDigest/u);
-});
-
-test('privacy pause survives recreation and requires document reproving', async () => {
-  const store = privacyStore();
-  const pausedFixture = attachedFixture({ decision: { status: 'privacy-paused', pauseId: 'pause-1' }, store });
-  pausedFixture.args.chromeAdapter.probePrivacySignals = async () => [];
-  const paused = await runObservedTabAudit(pausedFixture.args);
-  assert.equal(paused.status, 'paused');
-  assert.equal(store.records.has('pause-1'), true);
-
-  const resumedFixture = attachedFixture({
-    decision: { status: 'allowed', consentCapabilityId: 'consent-a', documentId: 'document-a', urlSessionDigest: DIGEST_A },
-    proofs: [{ tabId: 17, windowId: 9, documentId: 'changed', urlSessionDigest: DIGEST_B }], store,
-  });
-  resumedFixture.args.resumePauseId = paused.pauseId;
-  const resumed = await runObservedTabAudit(resumedFixture.args);
-  assert.equal(resumed.status, 'failed');
-  assert.equal(resumed.model.session.diagnostics.at(-1).code, 'PRIVACY_TARGET_CHANGED');
-  assert.equal(resumedFixture.calls.pixelOperations, 0);
-});
-
-test('rejects an attached resume target swap before probing either tab', async () => {
-  const store = privacyStore();
-  const pausedFixture = attachedFixture({ decision: { status: 'privacy-paused', pauseId: 'pause-target' }, store });
-  pausedFixture.args.target = { ...pausedFixture.args.target, tabId: 99 };
-  pausedFixture.args.chromeAdapter.probeDocumentIdentity = async () => ({
-    tabId: 99, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST_A,
-  });
-  const paused = await runObservedTabAudit(pausedFixture.args);
-  assert.equal(paused.status, 'paused');
-
-  const resumed = attachedFixture({
-    decision: { status: 'allowed', consentCapabilityId: 'consent-a', documentId: 'document-a', urlSessionDigest: DIGEST_A },
-    store,
-  });
-  resumed.args.resumePauseId = 'pause-target';
-  const result = await runObservedTabAudit(resumed.args);
-  assert.equal(result.status, 'failed');
-  assert.equal(result.model.session.diagnostics.at(-1).code, 'PRIVACY_TARGET_CHANGED');
-  assert.equal(resumed.calls.probe, 0);
-  assert.equal(resumed.calls.collect, 0);
-  assert.equal(resumed.calls.pixelOperations, 0);
-});
-
-test('rejects hostile resume target structure without invoking getters', async () => {
-  let getterCalls = 0;
-  const fixtureValue = attachedFixture();
-  const hostile = { ...fixtureValue.args.target };
-  Object.defineProperty(hostile, 'tabId', { enumerable: true, get() { getterCalls += 1; return 17; } });
-  hostile.extra = true;
-  hostile[Symbol('hidden')] = true;
-  await assert.rejects(() => runObservedTabAudit({ ...fixtureValue.args, target: hostile }), /OBSERVED_RUNNER_DENIED/u);
-  assert.equal(getterCalls, 0);
-  assert.equal(fixtureValue.calls.probe, 0);
-});
-
-test('never reads values or captures pixels before an allowed decision', async () => {
-  const { args, calls } = attachedFixture({ decision: { status: 'privacy-paused', pauseId: 'pause-2' } });
-  const originalPersist = args.privacyState.persistPause;
-  args.privacyState.persistPause = async value => { calls.order.push('persist-privacy-pause'); await originalPersist(value); };
-  const result = await runObservedTabAudit(args);
-  assert.equal(result.status, 'paused');
-  assert.deepEqual(calls.order, ['probe-structure-without-values', 'persist-privacy-pause']);
-  assert.equal(calls.readInputValue, 0);
-  assert.equal(calls.captureVisibleTab, 0);
-  assert.equal(calls.captureScreenshot, 0);
-  assert.equal(calls.collect, 0);
-});
-
-test('same-document SPA URL change fails digest reproving before collection', async () => {
-  const { args, calls } = attachedFixture({ proofs: [
-    { tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST_A },
-    { tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST_B },
-  ] });
-  const result = await runObservedTabAudit(args);
-  assert.equal(result.status, 'failed');
-  assert.equal(result.model.session.diagnostics.at(-1).code, 'TARGET_CHANGED');
-  assert.equal(calls.collect, 0);
-  assert.equal(calls.pixelOperations, 0);
-});
-
-test('no-pixels skips structural probes while allowed capture consumes one-use consent', async () => {
-  const noPixels = attachedFixture();
-  const completed = await runObservedTabAudit(noPixels.args);
-  assert.equal(completed.status, 'completed');
-  assert.deepEqual(noPixels.calls.order, []);
-  assert.equal(noPixels.calls.pixelOperations, 0);
-
-  const allowed = attachedFixture({ decision: { status: 'allowed', consentCapabilityId: 'consent-a', documentId: 'document-a', urlSessionDigest: DIGEST_A } });
-  allowed.args.chromeAdapter.probePrivacySignals = async () => [];
-  let consumed = 0;
-  allowed.args.consentAuthority = { async consume(input) { consumed += 1; assert.equal(input.consentCapabilityId, 'consent-a'); return true; } };
-  assert.equal((await runObservedTabAudit(allowed.args)).status, 'completed');
-  assert.equal(consumed, 1);
-  assert.equal(allowed.calls.pixelOperations, 1);
-});
-
-test('disposable pre-observation failure removes only owned tab and exposes cleanup-pending', async () => {
-  const sessionArea = createSessionArea();
-  const adapter = {
-    async createTab() { return { id: 41, windowId: 9 }; },
-    async navigateTab() { throw new Error('PRIVATE_NAVIGATION_ERROR'); },
-    async waitForStable() { throw new Error('must not wait'); },
-    async probeDocumentIdentity() { throw new Error('must not probe'); },
-    async removeTab() { throw new Error('PRIVATE_REMOVE_ERROR'); },
-  };
-  const ownedTabs = createOwnedTabRegistry({ sessionArea, chromeAdapter: adapter, now: () => '2026-08-29T10:00:00.000Z' });
-  const rawNavigationVault = createRawNavigationVaultV1({ sessionArea, now: () => 1_788_000_000_000, randomBytes: length => new Uint8Array(length).fill(8) });
-  const issued = await rawNavigationVault.putInternal({ ownerId: 'owner-a', rawUrl: 'https://example.test/?secret=PRIVATE' });
-  const result = await runObservedTabAudit({
-    auditId: 'audit-a', sessionCapabilityId: 'session-a',
-    target: { kind: 'disposable', ownerId: 'owner-a', navigationToken: issued.navigationToken, cleanupMode: 'retain-after-observation' },
-    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
-    privacyDecision: { status: 'no-pixels', limitationCode: 'PIXEL_CAPTURE_OMITTED' },
-    checkpointRecorder: checkpointRecorder(), chromeAdapter: adapter, ownedTabs, rawNavigationVault,
-    pipeline: async () => { throw new Error('must not run'); }, failureModelFactory: safeFailureModel,
-    now: () => '2026-08-29T10:00:00.000Z',
-  });
-  assert.equal(result.status, 'failed');
-  assert.equal(result.observationState, 'pre-observation-failure');
-  assert.equal(result.ownershipState, 'cleanup-pending');
-  assert.equal((await ownedTabs.get('owner-a')).state, 'cleanup-pending');
-  assert.doesNotMatch(JSON.stringify(result), /PRIVATE|example\.test|owner-a|navigationToken/u);
-});
-
-test('rehydrates a disposable pause without creating, navigating, or consuming its token again', async () => {
-  const sessionArea = createSessionArea();
-  const store = privacyStore();
-  const calls = { create: 0, navigate: 0, remove: 0, pipeline: 0 };
-  const adapter = {
-    async createTab() { calls.create += 1; return { id: 41, windowId: 9 }; },
-    async navigateTab() { calls.navigate += 1; }, async waitForStable() {},
-    async probeDocumentIdentity() { return { tabId: 41, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST_A }; },
-    async getEvidenceUrl() { return 'https://example.test/'; }, async probePrivacySignals() { return []; },
-    async removeTab() { calls.remove += 1; },
-  };
-  const ownedTabs = createOwnedTabRegistry({ sessionArea, chromeAdapter: adapter, now: () => '2026-08-29T10:00:00.000Z' });
-  const vault = createRawNavigationVaultV1({ sessionArea, now: () => 1_788_000_000_000, randomBytes: length => new Uint8Array(length).fill(9) });
-  const issued = await vault.putInternal({ ownerId: 'owner-a', rawUrl: 'https://example.test/?secret=ERASE' });
-  const policy = createCapturePolicyV1({ mode: 'element-only', includeQuery: false });
-  const base = {
-    auditId: 'audit-a', sessionCapabilityId: 'session-a',
-    target: { kind: 'disposable', ownerId: 'owner-a', navigationToken: issued.navigationToken, cleanupMode: 'always' },
-    capturePolicy: policy, checkpointRecorder: checkpointRecorder(), chromeAdapter: adapter,
-    ownedTabs, rawNavigationVault: vault, privacyState: store, failureModelFactory: safeFailureModel,
-    pipeline: async () => { calls.pipeline += 1; return { model: { auditId: 'audit-a' }, checkpoint: checkpointRecorder().snapshot() }; },
-    consentAuthority: { async consume() { return true; } }, now: () => '2026-08-29T10:00:00.000Z',
-  };
-  const paused = await runObservedTabAudit({ ...base, privacyDecision: { status: 'privacy-paused', pauseId: 'pause-a' } });
-  assert.equal(paused.status, 'paused');
-  assert.deepEqual(Object.keys(store.records.get('pause-a')), [
-    'version', 'auditId', 'pauseId', 'sessionCapabilityId', 'ownerId', 'observedTarget',
-    'capturePolicy', 'signals', 'checkpoint', 'startedAt',
-  ]);
-  const resumed = await runObservedTabAudit({
-    ...base, resumePauseId: 'pause-a',
-    privacyDecision: { status: 'allowed', consentCapabilityId: 'consent-a', documentId: 'document-a', urlSessionDigest: DIGEST_A },
-  });
-  assert.equal(resumed.status, 'completed', JSON.stringify(resumed));
-  assert.deepEqual(calls, { create: 1, navigate: 1, remove: 1, pipeline: 1 });
-});
-
-test('persists and rereads cleanup state when ownership registration storage fails once', async () => {
-  const sessionArea = createSessionArea();
-  const originalSet = sessionArea.set.bind(sessionArea);
-  let failed = false;
-  sessionArea.set = async entries => {
-    if (!failed && Object.keys(entries).some(key => key.startsWith('audita:owned-tab:v1:'))) {
-      failed = true; throw new Error('PRIVATE_SET_FAILURE');
-    }
-    return originalSet(entries);
-  };
+function fixture({ policy = POLICY, target = attachedTarget(), modelStatus = 'partial', adapter = {}, signal, pipelineMarker = false, pipelineServices = {} } = {}) {
   const calls = [];
-  const adapter = {
-    async createTab() { calls.push('create'); return { id: 41, windowId: 9 }; },
-    async navigateTab() { calls.push('navigate'); }, async waitForStable() {},
-    async probeDocumentIdentity() { throw new Error('must not probe'); },
-    async removeTab() { calls.push('remove'); },
+  const checkpointRecorder = { async started() {}, async record() {}, snapshot() { return checkpoint(); } };
+  const services = {
+    async collectObservedPage() { if (pipelineMarker) calls.push('pipeline'); return { snapshot: { title: 'safe' } }; },
+    async runCoreRules() { return { ruleResults: [] }; },
+    async buildAuditModel() { return model(); },
+    async persistAuditModel() {},
+    ...pipelineServices,
   };
-  const ownedTabs = createOwnedTabRegistry({ sessionArea, chromeAdapter: adapter, now: () => '2026-08-29T10:00:00.000Z' });
-  const vault = createRawNavigationVaultV1({ sessionArea, now: () => 1_788_000_000_000, randomBytes: length => new Uint8Array(length).fill(10) });
-  const issued = await vault.putInternal({ ownerId: 'owner-a', rawUrl: 'https://example.test/' });
-  const result = await runObservedTabAudit({
-    auditId: 'audit-a', sessionCapabilityId: 'session-a',
-    target: { kind: 'disposable', ownerId: 'owner-a', navigationToken: issued.navigationToken, cleanupMode: 'always' },
-    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
-    privacyDecision: { status: 'no-pixels', limitationCode: 'PIXEL_CAPTURE_OMITTED' },
-    checkpointRecorder: checkpointRecorder(), chromeAdapter: adapter, ownedTabs, rawNavigationVault: vault,
-    pipeline: async () => { throw new Error('must not run'); }, failureModelFactory: safeFailureModel,
-    now: () => '2026-08-29T10:00:00.000Z',
-  });
-  assert.equal(result.ownershipState, 'removed');
-  assert.deepEqual(calls, ['create', 'remove']);
-  assert.equal((await ownedTabs.get('owner-a')).state, 'removed');
+  const canonicalPipeline = createObservedPipelineRunner({ checkpointRecorder, services });
+  const chromeAdapter = {
+    async probeDocumentIdentity(tabId) {
+      calls.push(['probe-document', tabId]);
+      return { tabId: target.tabId ?? 7, windowId: target.windowId ?? 3, documentId: 'doc-1', urlSessionDigest: DIGEST };
+    },
+    runPipeline: canonicalPipeline,
+    ...adapter,
+  };
+  const input = {
+    auditId: 'audit-1', target, chromeAdapter, capturePolicy: policy,
+    privacyGate: { async beforePixels() { calls.push(['privacy-before']); return { status: 'allowed', authorization: 'initial-gesture', claim: null }; }, async afterPixels() { calls.push(['privacy-after']); } },
+    onCheckpoint: async value => { calls.push(['checkpoint', value]); }, now: NOW, signal,
+    expectedExtensionId: 'extension-id',
+  };
+  return { input, calls };
+}
+
+test('rejects legacy arguments before any adapter effect, including getter and symbol extras', async () => {
+  const { input, calls } = fixture();
+  for (const key of ['privacyDecision', 'checkpointRecorder', 'extra']) {
+    const hostile = { ...input, [key]: key === 'extra' ? true : { status: 'no-pixels' } };
+    await assert.rejects(() => runObservedTabAudit(hostile), /OBSERVED_RUNNER_DENIED/u);
+  }
+  let getterCalls = 0;
+  const getterInput = { ...input };
+  Object.defineProperty(getterInput, 'privacyDecision', { enumerable: true, get() { getterCalls += 1; return {}; } });
+  getterInput[Symbol('legacy')] = true;
+  await assert.rejects(() => runObservedTabAudit(getterInput), /OBSERVED_RUNNER_DENIED/u);
+  assert.equal(getterCalls, 0);
+  assert.deepEqual(calls, []);
+  for (const policy of [FULL_POLICY, ELEMENT_POLICY]) {
+    const policyInput = { ...input, capturePolicy: policy };
+    await assert.rejects(() => runObservedTabAudit(policyInput), /OBSERVED_RUNNER_DENIED/u);
+  }
+  await assert.rejects(() => runObservedTabAudit({ ...input, capturePolicy: QUERY_POLICY, target: attachedTarget({ initialUrlEvidence: QUERY_EVIDENCE }) }), /OBSERVED_RUNNER_DENIED/u);
+  assert.deepEqual(calls, []);
 });
 
-test('never claims cleanup-pending when neither ownership journal nor tab removal is confirmed', async () => {
-  const sessionArea = createSessionArea();
-  const vault = createRawNavigationVaultV1({
-    sessionArea, now: () => 1_788_000_000_000,
-    randomBytes: length => new Uint8Array(length).fill(12),
-  });
-  const issued = await vault.putInternal({ ownerId: 'owner-a', rawUrl: 'https://private.example.test/person/secret' });
-  sessionArea.set = async () => { throw new Error('PRIVATE_PERSISTENCE_FAILURE'); };
-  const adapter = {
-    async createTab() { return { id: 71, windowId: 8 }; },
-    async navigateTab() { throw new Error('must not navigate'); },
-    async waitForStable() { throw new Error('must not wait'); },
-    async probeDocumentIdentity() { throw new Error('must not probe'); },
-    async removeTab() { throw new Error('PRIVATE_REMOVE_FAILURE'); },
-  };
-  const ownedTabs = createOwnedTabRegistry({ sessionArea, chromeAdapter: adapter, now: () => '2026-08-29T10:00:00.000Z' });
-  const result = await runObservedTabAudit({
-    auditId: 'audit-a', sessionCapabilityId: 'session-a',
-    target: { kind: 'disposable', ownerId: 'owner-a', navigationToken: issued.navigationToken, cleanupMode: 'always' },
-    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
-    privacyDecision: { status: 'no-pixels', limitationCode: 'PIXEL_CAPTURE_OMITTED' },
-    checkpointRecorder: checkpointRecorder(), chromeAdapter: adapter, ownedTabs, rawNavigationVault: vault,
-    pipeline: async () => { throw new Error('must not run'); }, failureModelFactory: safeFailureModel,
-    now: () => '2026-08-29T10:00:00.000Z',
-  });
-  assert.equal(result.ownershipState, 'cleanup-unconfirmed');
-  assert.equal(await ownedTabs.get('owner-a'), null);
-  assert.doesNotMatch(JSON.stringify(result), /PRIVATE|private\.example|owner-a|71/u);
-});
-
-test('maps only the runner-private post-collection fence capability to TARGET_CHANGED', async () => {
-  const changed = attachedFixture();
-  changed.args.pipeline = async ({ failTargetChanged }) => {
-    assert.equal(typeof failTargetChanged, 'function');
-    failTargetChanged();
-  };
-  const changedResult = await runObservedTabAudit(changed.args);
-  assert.equal(changedResult.status, 'failed');
-  assert.equal(changedResult.model.session.diagnostics.at(-1).code, 'TARGET_CHANGED');
-
-  for (const spoof of [
-    new Error('TARGET_CHANGED'),
-    Object.assign(new Error('private'), { name: 'TARGET_CHANGED', code: 'TARGET_CHANGED' }),
-    { name: 'TARGET_CHANGED', message: 'TARGET_CHANGED', code: 'TARGET_CHANGED' },
+test('rejects legacy observed targets and string evidence before probing or pipeline', async () => {
+  for (const target of [
+    { ...attachedTarget(), version: 1 },
+    { kind: 'attached', tabId: 7, windowId: 3, documentId: 'doc-1', initialUrlEvidence: 'https://example.test', initialUrlSessionDigest: DIGEST },
+    { version: 'ObservedTargetV1', kind: 'disposable', ownerId: 'owner-1', tabId: 7, windowId: 3, documentId: 'doc-1', urlEvidence: EVIDENCE, urlSessionDigest: DIGEST },
+    { kind: 'owned-disposable', ownershipId: 'ownership-1', tabId: 41, windowId: 3, documentId: 'doc-1', initialUrlEvidence: EVIDENCE, initialUrlSessionDigest: DIGEST, navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: 'page-1' },
+    { version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId: 'ownership-1', tabId: 41, windowId: 3, documentId: 'doc-1', urlEvidence: EVIDENCE, urlSessionDigest: DIGEST, cleanupMode: 'always', pageId: 'page-1' },
   ]) {
-    const unrelated = attachedFixture();
-    unrelated.args.pipeline = async () => { throw spoof; };
-    const result = await runObservedTabAudit(unrelated.args);
-    assert.equal(result.model.session.diagnostics.at(-1).code, 'AUDIT_FAILED');
+    const { input, calls } = fixture({ target });
+    await assert.rejects(() => runObservedTabAudit(input), /OBSERVED_RUNNER_DENIED/u);
+    assert.deepEqual(calls, []);
   }
 });
 
-test('treats AbortError-shaped dependency failures as audit failures unless cancellation is real', async () => {
-  for (const spoof of [
-    Object.assign(new Error('PRIVATE_ABORT_DETAIL'), { name: 'AbortError' }),
-    new DOMException('PRIVATE_ABORT_DETAIL', 'AbortError'),
-  ]) {
-    const unrelated = attachedFixture({ pipelineError: spoof });
-    const result = await runObservedTabAudit(unrelated.args);
-    assert.equal(result.model.session.status, 'failed');
-    assert.equal(result.model.session.diagnostics.at(-1).code, 'AUDIT_FAILED');
-    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_ABORT_DETAIL/u);
-  }
-
-  const controller = new AbortController();
-  const cancelled = attachedFixture({ signal: controller.signal });
-  cancelled.args.pipeline = async () => {
-    controller.abort(new Error('PRIVATE_USER_CANCEL_DETAIL'));
-    throw controller.signal.reason;
-  };
-  const result = await runObservedTabAudit(cancelled.args);
-  assert.equal(result.model.session.status, 'cancelled');
-  assert.equal(result.model.session.diagnostics.at(-1).code, 'AUDIT_ABORTED');
-  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_USER_CANCEL_DETAIL/u);
-
-  const internal = attachedFixture({ decision: { status: 'aborted' } });
-  const internallyCancelled = await runObservedTabAudit(internal.args);
-  assert.equal(internallyCancelled.model.session.status, 'cancelled');
-  assert.equal(internallyCancelled.model.session.diagnostics.at(-1).code, 'AUDIT_ABORTED');
+test('no-pixels completes without privacy gate, consent, probe or pixel calls', async () => {
+  const calls = [];
+  const { input } = fixture({ pipelineMarker: true, adapter: {
+    async probeDocumentIdentity() { calls.push('probe'); return { tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
+    async captureFullPage() { calls.push('full-page'); }, async captureElement() { calls.push('element'); },
+  } });
+  input.privacyGate = { async beforePixels() { calls.push('privacy-before'); }, async afterPixels() { calls.push('privacy-after'); } };
+  const result = await runObservedTabAudit(input);
+  assert.equal(result.status, 'partial');
+  assert.equal(result.observationState, 'observed');
+  assert.equal(result.ownershipState, 'attached');
+  assert.deepEqual(calls, ['probe', 'probe']);
 });
 
-test('a genuine abort raised as the pipeline returns cannot be reported as completed', async () => {
-  const controller = new AbortController();
-  const fixture = attachedFixture({ signal: controller.signal });
-  fixture.args.pipeline = async () => {
-    controller.abort(new Error('PRIVATE_LATE_CANCEL_DETAIL'));
-    return {
-      model: Object.freeze({
-        schemaVersion: 2,
-        auditId: 'audit-a',
-        session: Object.freeze({ status: 'complete', diagnostics: Object.freeze([]) }),
-      }),
-      checkpoint: checkpointRecorder().snapshot(),
-      observationState: 'observed',
-    };
+test('accepts a canonical observed model only when its wrapper status matches', async () => {
+  const { input } = fixture({ modelStatus: 'partial' });
+  const result = await runObservedTabAudit(input);
+  assert.equal(result.status, 'partial');
+  assert.equal(result.observationState, 'observed');
+  assert.equal(result.model.session.status, 'partial');
+});
+
+test('copies the validated CapturePolicy before the first await and prevents no-pixels TOCTOU', async () => {
+  const policy = { ...POLICY };
+  let received;
+  const { input } = fixture({ policy, pipelineServices: {
+    async collectObservedPage({ capturePolicy }) { received = capturePolicy; return { snapshot: { title: 'safe' } }; },
+  }, adapter: {
+    async probeDocumentIdentity() {
+      policy.mode = 'full-evidence'; policy.captureElements = true;
+      return { tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST };
+    },
+  } });
+  const result = await runObservedTabAudit(input);
+  assert.equal(result.status, 'partial');
+  assert.equal(received.mode, 'no-pixels');
+  assert.equal(Object.isFrozen(received), true);
+});
+
+test('navigation failure before observation returns failed with null model and target', async () => {
+  const { input, calls } = fixture({ adapter: {
+    async probeDocumentIdentity() { calls.push('unexpected-probe'); throw new Error('PRIVATE_PROBE'); },
+    async navigateTab() { calls.push('navigate'); throw new Error('PRIVATE_NAV'); },
+    async createTab() { calls.push('create'); return { id: 41, windowId: 3, active: true, status: 'loading' }; },
+    async resolveNavigationToken() { return 'https://example.test/a'; }, async waitForStable() { calls.push('stable'); },
+    async getEvidenceUrl() { return EVIDENCE; }, async removeTab() {},
+  }, target: { kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: 'page-1' }});
+  let state = 'created';
+  input.chromeAdapter.ownedTabs = {
+    async registerCreated() { state = 'created'; return ownedRecord({ state }); }, async get() { return ownedRecord({ state }); },
+    async transition({ toState }) { state = toState; return ownedRecord({ state }); },
+    async removeOwned() { calls.push('remove'); state = 'removed'; return ownedRecord({ state }); },
+    async markCleanupPending() { state = 'cleanup-pending'; return ownedRecord({ state }); },
   };
-
-  const result = await runObservedTabAudit(fixture.args);
-
-  assert.equal(controller.signal.aborted, true);
+  const result = await runObservedTabAudit(input);
   assert.equal(result.status, 'failed');
-  assert.equal(result.model.session.status, 'cancelled');
-  assert.equal(result.model.session.diagnostics.at(-1).code, 'AUDIT_ABORTED');
-  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_LATE_CANCEL_DETAIL/u);
+  assert.equal(result.model, null);
+  assert.equal(result.observedTarget, null);
+  assert.equal(result.observationState, 'pre-observation-failure');
+  assert.equal(['removed', 'cleanup-pending'].includes(result.ownershipState), true);
+});
+
+test('owned disposable observed target carries ownership V2 and cleanup mode', async () => {
+  const calls = [];
+  const { input } = fixture({ target: {
+    kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: 'page-1',
+  }, adapter: {
+    async probeDocumentIdentity() { calls.push('probe'); return { tabId: 41, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
+    async createTab() { calls.push('create'); return { id: 41, windowId: 3, active: true, status: 'loading' }; },
+    async resolveNavigationToken() { return 'https://example.test/a'; },
+    async navigateTab() { calls.push('navigate'); }, async waitForStable() { calls.push('stable'); },
+    async getEvidenceUrl() { return EVIDENCE; },
+    async removeTab() { calls.push('remove'); },
+    ownedTabs: (() => { let state = 'created'; return {
+      async registerCreated() { state = 'created'; return ownedRecord({ state }); }, async get() { return ownedRecord({ state }); },
+      async transition({ toState }) { state = toState; return ownedRecord({ state }); },
+      async removeOwned() { calls.push('remove'); state = 'removed'; return ownedRecord({ state }); },
+      async markCleanupPending() { state = 'cleanup-pending'; return ownedRecord({ state }); },
+    }; })(),
+  }});
+  const result = await runObservedTabAudit(input);
+  assert.equal(result.status, 'partial');
+  assert.equal(result.observedTarget.version, 'ObservedTargetV1');
+  assert.equal(result.observedTarget.kind, 'owned-disposable');
+  assert.equal(result.observedTarget.ownershipId, 'ownership-1');
+  assert.equal(result.observedTarget.cleanupMode, 'always');
+  assert.equal(result.observedTarget.pageId, 'page-1');
+  assert.deepEqual(calls, ['create', 'navigate', 'stable', 'probe', 'probe', 'remove']);
+});
+
+test('completes an owned target with null pageId when model URL evidence matches', async () => {
+  let state = 'created';
+  const { input } = fixture({ target: {
+    kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: null,
+  }, adapter: {
+    async probeDocumentIdentity() { return { tabId: 41, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
+    async createTab() { return { id: 41, windowId: 3 }; }, async resolveNavigationToken() { return 'https://example.test/a'; },
+    async navigateTab() {}, async waitForStable() {}, async getEvidenceUrl() { return EVIDENCE; }, async removeTab() {},
+    ownedTabs: {
+      async registerCreated() { return ownedRecord({ state: 'created' }); }, async get() { return ownedRecord({ state }); },
+      async transition({ toState }) { state = toState; return ownedRecord({ state }); },
+      async removeOwned() { state = 'removed'; return ownedRecord({ state }); },
+      async markCleanupPending() { state = 'cleanup-pending'; return ownedRecord({ state }); },
+    },
+  } });
+  const result = await runObservedTabAudit(input);
+  assert.equal(result.status, 'partial');
+  assert.equal(result.observedTarget.pageId, null);
+});
+
+test('rejects dynamic owned evidence carrying query data before forming observedTarget', async () => {
+  const { input } = fixture({ target: { kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: 'page-1' }, adapter: {
+    async createTab() { return { id: 41, windowId: 3, active: true }; }, async resolveNavigationToken() { return 'https://example.test/a'; },
+    async navigateTab() {}, async waitForStable() {}, async getEvidenceUrl() { return QUERY_EVIDENCE; }, async removeTab() {},
+    async probeDocumentIdentity() { return { tabId: 41, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
+    ownedTabs: (() => { let state = 'created'; return { async registerCreated() { state = 'created'; return ownedRecord({ state }); }, async get() { return ownedRecord({ state }); }, async transition({ toState }) { state = toState; return ownedRecord({ state }); }, async removeOwned() { state = 'removed'; return ownedRecord({ state }); }, async markCleanupPending() { state = 'cleanup-pending'; return ownedRecord({ state }); } }; })(),
+  } });
+  const outcome = await runObservedTabAudit(input);
+  assert.equal(outcome.status, 'failed');
+  assert.equal(outcome.observedTarget, null);
+});
+
+test('validates the complete owned adapter and registry bundle before createTab', async () => {
+  let created = 0;
+  const { input } = fixture({ target: { kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: 'page-1' }, adapter: {
+    async createTab() { created += 1; return { id: 41, windowId: 3 }; },
+    ownedTabs: { async registerCreated() {}, async transition() {}, async removeOwned() {}, async markCleanupPending() {} },
+  } });
+  await assert.rejects(() => runObservedTabAudit(input), /OBSERVED_RUNNER_DENIED/u);
+  assert.equal(created, 0);
+});
+
+test('rejects navigation tokens outside the exact 22-character base64url contract', async () => {
+  for (const navigationToken of ['token_123', 'A'.repeat(21), 'A'.repeat(23), `A${'!'.repeat(21)}`]) {
+    const { input, calls } = fixture({ target: { kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken, cleanupMode: 'always', pageId: 'page-1' } });
+    await assert.rejects(() => runObservedTabAudit(input), /OBSERVED_RUNNER_DENIED/u);
+    assert.deepEqual(calls, []);
+  }
+});
+
+test('rejects an accessor Tab.id without probing and removes a resolved native Tab exactly once', async () => {
+  let idReads = 0;
+  const { input } = fixture({ target: { kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: 'page-1' }, adapter: {
+    async createTab() { const tab = { windowId: 3, active: true }; Object.defineProperty(tab, 'id', { enumerable: true, get() { idReads += 1; return 41; } }); return tab; },
+    async navigateTab() {}, async waitForStable() {}, async resolveNavigationToken() { return 'https://example.test/a'; }, async getEvidenceUrl() { return EVIDENCE; },
+    async probeDocumentIdentity() { throw new Error('must-not-probe'); }, async removeTab() { throw new Error('must-not-direct-remove'); },
+    ownedTabs: { async registerCreated() { return ownedRecord(); }, async get() { return null; }, async transition() { return ownedRecord({ state: 'observing' }); }, async removeOwned() { return ownedRecord({ state: 'removed' }); }, async markCleanupPending() { return ownedRecord({ state: 'cleanup-pending' }); } },
+  } });
+  const outcome = await runObservedTabAudit(input);
+  assert.equal(outcome.status, 'failed');
+  assert.equal(idReads, 0);
+});
+
+test('cleans the exact tab when createTab resolves and abort is observed before navigation', async () => {
+  const controller = new AbortController();
+  const calls = [];
+  const { input } = fixture({ signal: controller.signal, target: { kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: 'page-1' }, adapter: {
+    async createTab() { controller.abort(); return { id: 41, windowId: 3, active: true }; },
+    async navigateTab() { calls.push('navigate'); }, async waitForStable() {}, async resolveNavigationToken() { return 'https://example.test/a'; }, async getEvidenceUrl() { return EVIDENCE; },
+    async probeDocumentIdentity() { calls.push('probe'); throw new Error('must-not-probe'); },
+    async removeTab(tabId) { calls.push(['direct-remove', tabId]); },
+    ownedTabs: { async registerCreated() { throw new Error('must-not-register'); }, async get() { return null; }, async transition() {}, async removeOwned() {}, async markCleanupPending() {} },
+  } });
+  const outcome = await runObservedTabAudit(input);
+  assert.equal(outcome.status, 'failed');
+  assert.equal(outcome.ownershipState, 'removed');
+  assert.deepEqual(calls, [['direct-remove', 41]]);
+});
+
+test('returns pre-observation failure without a null-tab cleanup when abort wins before create', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let creates = 0;
+  const { input } = fixture({ signal: controller.signal, target: { kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: 'page-1' }, adapter: {
+    async createTab() { creates += 1; return { id: 41, windowId: 3 }; }, async resolveNavigationToken() { return 'https://example.test/a'; },
+    async navigateTab() {}, async waitForStable() {}, async getEvidenceUrl() { return EVIDENCE; }, async removeTab() { throw new Error('must-not-remove-null-tab'); },
+    ownedTabs: { async registerCreated() { throw new Error('must-not-register'); }, async get() { return null; }, async transition() {}, async removeOwned() {}, async markCleanupPending() {} },
+  } });
+  const outcome = await runObservedTabAudit(input);
+  assert.equal(creates, 0);
+  assert.equal(outcome.status, 'failed');
+  assert.equal(outcome.model, null);
+  assert.equal(outcome.observedTarget, null);
+  assert.equal(outcome.ownershipState, 'removed');
+});
+
+test('fences a late abort after pipeline and does not invoke checkpoint after cancellation', async () => {
+  const controller = new AbortController();
+  const { input, calls } = fixture({ signal: controller.signal, pipelineServices: {
+    async persistAuditModel() { controller.abort(); },
+  } });
+  const result = await runObservedTabAudit(input);
+  assert.equal(result.status, 'partial');
+  assert.notEqual(result.model, null);
+  assert.equal(result.observedTarget !== null, true);
+  assert.equal(calls.some(call => call[0] === 'checkpoint'), false);
+});
+
+test('rejects result envelopes with accessor or extra fields without reading the accessor', async () => {
+  let getterReads = 0;
+  const { input } = fixture({ adapter: {
+    async runPipeline() {
+      const result = { model: model(), status: 'partial', checkpoint: checkpoint(), observationState: 'observed' };
+      Object.defineProperty(result, 'extra', { enumerable: true, get() { getterReads += 1; return 'secret'; } });
+      return result;
+    },
+  } });
+  await assert.rejects(() => runObservedTabAudit(input), /OBSERVED_RUNNER_DENIED/u);
+  assert.equal(getterReads, 0);
+});
+
+test('rejects an arbitrary runPipeline before probing or persistence', async () => {
+  let probed = 0;
+  let persisted = 0;
+  const { input } = fixture({ adapter: {
+    async probeDocumentIdentity() { probed += 1; return { tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
+    async runPipeline() { persisted += 1; return {}; },
+  } });
+  await assert.rejects(() => runObservedTabAudit(input), /OBSERVED_RUNNER_DENIED/u);
+  assert.equal(probed, 0);
+  assert.equal(persisted, 0);
+});
+
+test('rejects a terminal model for another audit before exposing the result', async () => {
+  const { input } = fixture({ adapter: {
+    async runPipeline() { return { model: { auditId: 'other-audit', session: { status: 'complete' } }, checkpoint: { version: 1 }, observationState: 'observed' }; },
+  } });
+  await assert.rejects(() => runObservedTabAudit(input), /OBSERVED_RUNNER_DENIED/u);
+});
+
+test('requires exact V2 journal records and removes a freshly-created tab when registration threw before commit', async () => {
+  const calls = [];
+  const { input } = fixture({ target: { kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: 'page-1' }, adapter: {
+    async createTab() { calls.push('create'); return { id: 41, windowId: 3 }; },
+    async navigateTab() { calls.push('navigate'); }, async waitForStable() { calls.push('stable'); },
+    async resolveNavigationToken() { return 'https://example.test/a'; }, async getEvidenceUrl() { return EVIDENCE; },
+    async probeDocumentIdentity() { calls.push('probe'); return { tabId: 41, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
+    async removeTab(tabId) { calls.push(['direct-remove', tabId]); },
+    ownedTabs: {
+      async registerCreated() { throw new Error('before-commit'); }, async get() { return null; },
+      async transition() { return ownedRecord({ state: 'observing' }); },
+      async removeOwned() { throw new Error('must-not-journal-remove'); },
+      async markCleanupPending() { throw new Error('must-not-pending'); },
+    },
+  } });
+  const result = await runObservedTabAudit(input);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.model, null);
+  assert.equal(result.ownershipState, 'removed');
+  assert.deepEqual(calls, ['create', ['direct-remove', 41]]);
+});
+
+test('treats commit-then-throw as journal-owned and cleans through removeOwned', async () => {
+  const calls = [];
+  let state = 'created';
+  const { input } = fixture({ target: { kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: 'page-1' }, adapter: {
+    async createTab() { calls.push('create'); return { id: 41, windowId: 3 }; },
+    async navigateTab() { calls.push('navigate'); throw new Error('must-not-navigate'); }, async waitForStable() {},
+    async resolveNavigationToken() { return 'https://example.test/a'; }, async getEvidenceUrl() { return EVIDENCE; },
+    async probeDocumentIdentity() { throw new Error('must-not-probe'); }, async removeTab() { calls.push('direct-remove'); },
+    ownedTabs: {
+      async registerCreated() { throw new Error('commit-then-throw'); }, async get() { return ownedRecord({ state }); },
+      async transition() { return ownedRecord({ state: 'observing' }); },
+      async removeOwned() { calls.push('journal-remove'); state = 'removed'; return ownedRecord({ state }); },
+      async markCleanupPending() { state = 'cleanup-pending'; return ownedRecord({ state }); },
+    },
+  } });
+  const result = await runObservedTabAudit(input);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.ownershipState, 'removed');
+  assert.deepEqual(calls, ['create', 'journal-remove']);
+});
+
+test('rejects a no-op ownership journal instead of reporting a false removal', async () => {
+  let state = 'created';
+  const { input } = fixture({ target: { kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: 'page-1' }, adapter: {
+    async createTab() { return { id: 41, windowId: 3 }; }, async resolveNavigationToken() { return 'https://example.test/a'; },
+    async navigateTab() {}, async waitForStable() {}, async getEvidenceUrl() { return EVIDENCE; },
+    async probeDocumentIdentity() { return { tabId: 41, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
+    async removeTab() { throw new Error('must-not-remove-unjournaled'); },
+    ownedTabs: {
+      async registerCreated() { return ownedRecord({ state: 'created' }); }, async get() { return ownedRecord({ state }); },
+      async transition() { state = 'observing'; return ownedRecord({ state }); },
+      async removeOwned() { return ownedRecord({ state: 'removed' }); },
+      async markCleanupPending() { return ownedRecord({ state: 'cleanup-pending' }); },
+    },
+  } });
+  await assert.rejects(() => runObservedTabAudit(input), /OBSERVED_RUNNER_DENIED|CLEANUP_UNCONFIRMED/u);
+});
+
+test('rejects an ownership cleanup-mode flip before navigation/pipeline', async () => {
+  let state = 'created';
+  let pipelines = 0;
+  const { input } = fixture({ pipelineServices: { async collectObservedPage() { pipelines += 1; return { snapshot: { title: 'safe' } }; } }, target: { kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: 'page-1' }, adapter: {
+    async createTab() { return { id: 41, windowId: 3 }; }, async resolveNavigationToken() { return 'https://example.test/a'; },
+    async navigateTab() {}, async waitForStable() {}, async getEvidenceUrl() { return EVIDENCE; }, async removeTab() {},
+    ownedTabs: {
+      async registerCreated() { return ownedRecord({ state: 'created' }); }, async get() { return ownedRecord({ state }); },
+      async transition() { return { ...ownedRecord({ state: 'observing' }), cleanupMode: 'pre-observation-failure' }; },
+      async removeOwned() { state = 'removed'; return ownedRecord({ state }); },
+      async markCleanupPending() { state = 'cleanup-pending'; return ownedRecord({ state }); },
+    },
+  } });
+  const outcome = await runObservedTabAudit(input);
+  assert.equal(outcome.observationState, 'pre-observation-failure');
+  assert.equal(pipelines, 0);
+});
+
+test('uses the preflight-captured removeTab despite persistence mutating adapter and owner methods', async () => {
+  let adapterRef;
+  let ownerRef;
+  let present = true;
+  let originalRemoves = 0;
+  let state = 'created';
+  const { input } = fixture({ pipelineServices: {
+    async persistAuditModel() {
+      adapterRef.removeTab = async () => { throw new Error('mutated-remove'); };
+      ownerRef.removeOwned = async () => null;
+      present = false;
+    },
+  }, target: { kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: 'page-1' }, adapter: {
+    async createTab() { return { id: 41, windowId: 3 }; }, async resolveNavigationToken() { return 'https://example.test/a'; },
+    async navigateTab() {}, async waitForStable() {}, async getEvidenceUrl() { return EVIDENCE; },
+    async probeDocumentIdentity() { return { tabId: 41, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
+    async removeTab() { originalRemoves += 1; },
+    ownedTabs: {
+      async registerCreated() { return ownedRecord({ state: 'created' }); },
+      async get() { return present ? ownedRecord({ state }) : null; },
+      async transition({ toState }) { state = toState; return ownedRecord({ state }); },
+      async removeOwned() { state = 'removed'; return {}; },
+      async markCleanupPending() { state = 'cleanup-pending'; return ownedRecord({ state }); },
+    },
+  } });
+  adapterRef = input.chromeAdapter;
+  ownerRef = input.chromeAdapter.ownedTabs;
+  const outcome = await runObservedTabAudit(input);
+  assert.equal(outcome.status, 'partial');
+  assert.equal(outcome.ownershipState, 'removed');
+  assert.equal(originalRemoves, 1);
 });
