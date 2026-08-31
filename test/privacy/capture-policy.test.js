@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
+import * as capturePolicy from '../../src/core/privacy/capture-policy.js';
+
+const { createCapturePolicyV1 } = capturePolicy;
 
 test('derives the exact frozen pixel capabilities for every privacy mode', () => {
   const cases = [
@@ -41,4 +43,8 @@ test('rejects hostile accessors and symbols without invoking them', () => {
   Object.defineProperty(symbolInput, Symbol('hidden'), { enumerable: true, value: true });
   assert.throws(() => createCapturePolicyV1(symbolInput), /CAPTURE_POLICY_INVALID/u);
   assert.equal(getterCalls, 0);
+});
+
+test('keeps createCapturePolicyV1 as the only capture-policy factory', () => {
+  assert.equal(Object.hasOwn(capturePolicy, 'normalizeCapturePolicyV1'), false);
 });
