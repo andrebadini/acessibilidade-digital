@@ -393,7 +393,7 @@ test('rolls back partial writes and rejects backwards clocks without reanimating
   sessionArea.set = async entries => {
     if (!partial || Object.hasOwn(entries, 'audita:session-hmac-key:v1')) return originalSet(entries);
     const [key] = Object.keys(entries);
-    sessionArea.values[key] = structuredClone(entries[key]);
+    if (key.startsWith('audita:raw-navigation-queue:v1:')) sessionArea.values[key] = structuredClone(entries[key]);
     throw new Error('partial set');
   };
   await assert.rejects(vault.put('https://example.test/rollback?private=1', {
@@ -403,8 +403,9 @@ test('rolls back partial writes and rejects backwards clocks without reanimating
   partial = false;
   const queueEntries = [
     await batchEntry(vault, 'audit-queue-rollback', 1, 'rollback-a'),
-    await batchEntry(vault, 'audit-queue-rollback', 2, 'rollback-b'),
   ];
+  clock.value += 1_000;
+  queueEntries.push(await batchEntry(vault, 'audit-queue-rollback', 2, 'rollback-b'));
   partial = true;
   await assert.rejects(vault.putQueue({ auditId: 'audit-queue-rollback', entries: queueEntries }), /fila de navegação desatualizada/iu);
   assert.equal(Object.keys(sessionArea.values).some(key => key === 'audita:raw-navigation-queue:v1:audit-queue-rollback' ||
@@ -428,7 +429,7 @@ test('invalidates queue tokens when a replace write and conservative restore bot
   const originalSet = sessionArea.set.bind(sessionArea);
   sessionArea.set = async writes => {
     const [key] = Object.keys(writes);
-    sessionArea.values[key] = structuredClone(writes[key]);
+    sessionArea.values[key] = { corrupt: true };
     throw new Error('partial replace');
   };
   await assert.rejects(vault.replaceQueue('audit-replace-rollback', desired, {
@@ -472,4 +473,110 @@ test('cleans malformed namespace records without invoking scan accessors', async
   sessionArea.get = async key => key === null ? hostileMap : originalGet(key);
   await assert.rejects(vault.clearExpired(), /RAW_NAVIGATION_UNAVAILABLE/u);
   assert.equal(getterCalls, 0);
+});
+
+test('accepts an exact write that storage persists before throwing for one-shot and legacy records', async () => {
+  for (const removeMode of ['noop', 'throw']) for (const kind of ['public', 'legacy']) {
+    const { sessionArea, vault } = publicFixture();
+    const originalSet = sessionArea.set.bind(sessionArea);
+    sessionArea.set = async writes => {
+      await originalSet(writes);
+      if (Object.keys(writes).some(key => key.startsWith('audita:raw-navigation:v1:'))) throw new Error('set completed then threw');
+    };
+    sessionArea.removeMode = removeMode;
+    const issued = kind === 'public'
+      ? await vault.put('https://example.test/complete-then-throw?secret=1', {
+        auditId: 'audit-complete', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+      })
+      : await vault.putInternal({ ownerId: 'owner-complete', rawUrl: 'https://example.test/complete-then-throw?secret=1' });
+    assert.match(issued.navigationToken, /^[A-Za-z0-9_-]{22}$/u);
+    sessionArea.removeMode = 'normal';
+    const raw = kind === 'public'
+      ? await vault.take(issued.navigationToken, { auditId: 'audit-complete', purpose: 'single-url' })
+      : await vault.takeInternal({ ownerId: 'owner-complete', navigationToken: issued.navigationToken });
+    assert.equal(raw, 'https://example.test/complete-then-throw?secret=1');
+  }
+});
+
+test('accepts exact queue and replace writes that storage persists before throwing', async () => {
+  for (const removeMode of ['noop', 'throw']) {
+    const { sessionArea, vault } = publicFixture();
+    const entries = [await batchEntry(vault, 'audit-complete-queue', 1, 'complete-queue')];
+    const originalSet = sessionArea.set.bind(sessionArea);
+    sessionArea.set = async writes => {
+      await originalSet(writes);
+      if (Object.keys(writes).some(key => key.startsWith('audita:raw-navigation-queue:v1:'))) throw new Error('set completed then threw');
+    };
+    sessionArea.removeMode = removeMode;
+    await vault.putQueue({ auditId: 'audit-complete-queue', entries });
+    const current = await vault.readQueue('audit-complete-queue');
+    const desired = structuredClone(current);
+    desired.revision = 2;
+    desired.entries[0].status = 'running';
+    await vault.replaceQueue('audit-complete-queue', desired, {
+      expectedRevision: 1, expectedState: { nextIndex: 0, status: 'pending' },
+    });
+    assert.equal((await vault.readQueue('audit-complete-queue')).revision, 2);
+  }
+});
+
+test('blocks authority behind confirmed cleanup and never returns a partially persisted queue', async () => {
+  const { sessionArea, clock, vault } = publicFixture();
+  const entries = [await batchEntry(vault, 'audit-pending-cleanup', 1, 'pending-cleanup')];
+  clock.value += 1_000;
+  entries.push(await batchEntry(vault, 'audit-pending-cleanup', 2, 'pending-cleanup-later'));
+  const originalSet = sessionArea.set.bind(sessionArea);
+  sessionArea.set = async writes => {
+    const queueKey = Object.keys(writes).find(key => key.startsWith('audita:raw-navigation-queue:v1:'));
+    if (!queueKey) return originalSet(writes);
+    sessionArea.values[queueKey] = structuredClone(writes[queueKey]);
+    throw new Error('partial set');
+  };
+  sessionArea.removeMode = 'noop';
+  await assert.rejects(vault.putQueue({ auditId: 'audit-pending-cleanup', entries }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  await assert.rejects(vault.readQueue('audit-pending-cleanup'), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  await assert.rejects(vault.put('https://example.test/blocked?secret=1', {
+    auditId: 'audit-blocked', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  sessionArea.removeMode = 'normal';
+  assert.equal(await vault.readQueue('audit-pending-cleanup'), null);
+  assert.equal(Object.keys(sessionArea.values).some(key => key.includes('audit-pending-cleanup')), false);
+});
+
+test('never returns a queue when one of its pending token records is incomplete', async () => {
+  const { sessionArea, vault } = publicFixture();
+  const entries = [await batchEntry(vault, 'audit-incomplete-read', 1, 'incomplete-read')];
+  await vault.putQueue({ auditId: 'audit-incomplete-read', entries });
+  delete sessionArea.values[`audita:raw-navigation:v1:${entries[0].navigationToken}`];
+  await assert.rejects(vault.readQueue('audit-incomplete-read'), /fila de navegação desatualizada/iu);
+  assert.equal(Object.hasOwn(sessionArea.values, 'audita:raw-navigation-queue:v1:audit-incomplete-read'), false);
+});
+
+test('copies evidence descriptors without invoking proxy gets and rejects queue no-op or terminal replacements', async () => {
+  const { vault } = publicFixture();
+  const entry = await batchEntry(vault, 'audit-proxy-entry', 1, 'proxy-entry');
+  let getCalls = 0;
+  const proxyEntry = { ...entry, evidenceUrl: new Proxy(entry.evidenceUrl, {
+    get() { getCalls += 1; throw new Error('HOSTILE_PROXY_GET'); },
+  }) };
+  await vault.putQueue({ auditId: 'audit-proxy-entry', entries: [proxyEntry] });
+  assert.equal(getCalls, 0);
+  const running = await vault.readQueue('audit-proxy-entry');
+  const noOp = structuredClone(running);
+  noOp.revision = 2;
+  await assert.rejects(vault.replaceQueue('audit-proxy-entry', noOp, {
+    expectedRevision: 1, expectedState: { nextIndex: 0, status: 'pending' },
+  }), /fila de navegação desatualizada/iu);
+  const terminal = structuredClone(running);
+  terminal.revision = 2;
+  terminal.nextIndex = 1;
+  terminal.entries[0].status = 'finished';
+  await vault.replaceQueue('audit-proxy-entry', terminal, {
+    expectedRevision: 1, expectedState: { nextIndex: 0, status: 'pending' },
+  });
+  const afterTerminal = structuredClone(terminal);
+  afterTerminal.revision = 3;
+  await assert.rejects(vault.replaceQueue('audit-proxy-entry', afterTerminal, {
+    expectedRevision: 2, expectedState: { nextIndex: 1, status: 'finished' },
+  }), /fila de navegação desatualizada/iu);
 });

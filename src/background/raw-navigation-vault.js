@@ -12,6 +12,7 @@ const LEGACY_RECORD_KEYS = Object.freeze(['version', 'navigationToken', 'ownerId
 const RECORD_KEYS = Object.freeze(['version', 'auditId', 'purpose', 'rawUrl', 'issuedAt', 'expiresAt']);
 const QUEUE_KEYS = Object.freeze(['version', 'auditId', 'ownerOperationId', 'revision', 'issuedAt', 'expiresAt', 'nextIndex', 'entries']);
 const QUEUE_ENTRY_KEYS = Object.freeze(['line', 'navigationToken', 'evidenceUrl', 'sessionDigest', 'status']);
+const EVIDENCE_URL_KEYS = Object.freeze(['version', 'href', 'queryIncluded', 'redactedSegments']);
 const SESSION_STATES = new WeakMap();
 
 function exact(value, keys) {
@@ -70,6 +71,7 @@ function consumed() { return new Error('Navegação expirada ou consumida.'); }
 function wrongPurpose() { return new Error('Finalidade não corresponde.'); }
 function wrongAudit() { return new Error('Auditoria não corresponde.'); }
 function staleQueue() { return new Error('Fila de navegação desatualizada.'); }
+function cleanupPending() { return new Error('RAW_NAVIGATION_CLEANUP_PENDING'); }
 
 function token(bytes) {
   if (!(bytes instanceof Uint8Array) || bytes.byteLength !== 16) throw new TypeError('RAW_NAVIGATION_INVALID');
@@ -81,7 +83,7 @@ function token(bytes) {
 function stateFor(sessionArea) {
   let state = SESSION_STATES.get(sessionArea);
   if (!state) {
-    state = { tail: Promise.resolve(), highWater: null, bindings: new Map() };
+    state = { tail: Promise.resolve(), highWater: null, bindings: new Map(), pendingCleanup: new Set() };
     SESSION_STATES.set(sessionArea, state);
   }
   return state;
@@ -110,9 +112,10 @@ function publicRecord(value) {
 
 function parseQueueEntry(value) {
   const entry = exact(value, QUEUE_ENTRY_KEYS);
+  const evidenceUrl = entry && exact(entry.evidenceUrl, EVIDENCE_URL_KEYS);
   if (!entry || !Number.isSafeInteger(entry.line) || entry.line < 1 || !validToken(entry.navigationToken) ||
-    !isEvidenceUrlV1(entry.evidenceUrl) || !validDigest(entry.sessionDigest) || !QUEUE_STATUSES.has(entry.status)) return null;
-  return freeze(entry);
+    !evidenceUrl || !isEvidenceUrlV1(evidenceUrl) || !validDigest(entry.sessionDigest) || !QUEUE_STATUSES.has(entry.status)) return null;
+  return freeze({ ...entry, evidenceUrl });
 }
 
 function parseQueue(value) {
@@ -148,6 +151,7 @@ function sameQueueMetadata(left, right) {
 }
 
 function validTransition(current, desired) {
+  if (current.nextIndex >= current.entries.length) return false;
   if (desired.nextIndex < current.nextIndex || desired.nextIndex > current.nextIndex + 1 ||
     desired.entries.length !== current.entries.length ||
     desired.entries.some((entry, index) => !sameQueueMetadata(entry, current.entries[index]))) return false;
@@ -155,13 +159,17 @@ function validTransition(current, desired) {
   if (desired.nextIndex === current.nextIndex) {
     const before = current.entries[current.nextIndex];
     const after = desired.entries[desired.nextIndex];
-    return before.status === after.status || (before.status === 'pending' && after.status === 'running');
+    return before.status === 'pending' && after.status === 'running';
   }
   return desired.entries[current.nextIndex].status === 'finished';
 }
 
 function dropBindings(state, tokens) {
   for (const navigationToken of tokens) state.bindings.delete(navigationToken);
+}
+
+function tokensForKeys(keys) {
+  return keys.filter(key => key.startsWith(PREFIX)).map(key => key.slice(PREFIX.length));
 }
 
 async function erase(sessionArea, key) {
@@ -204,8 +212,29 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
     typeof sessionArea.remove !== 'function' || typeof now !== 'function' || typeof randomBytes !== 'function' ||
     (digestManager !== null && typeof digestManager?.digest !== 'function')) throw new TypeError('RAW_NAVIGATION_INVALID');
   const state = stateFor(sessionArea);
+  const removeOrPend = async keys => {
+    const unique = [...new Set(keys)];
+    if (await removeKeys(sessionArea, unique)) {
+      dropBindings(state, tokensForKeys(unique));
+      return true;
+    }
+    for (const key of unique) state.pendingCleanup.add(key);
+    return false;
+  };
+  const drainPending = async () => {
+    if (state.pendingCleanup.size === 0) return true;
+    const keys = [...state.pendingCleanup];
+    if (!await removeKeys(sessionArea, keys)) return false;
+    state.pendingCleanup.clear();
+    dropBindings(state, tokensForKeys(keys));
+    return true;
+  };
   const serial = operation => {
-    const pending = state.tail.then(operation, operation);
+    const guarded = async () => {
+      if (!await drainPending()) throw cleanupPending();
+      return operation();
+    };
+    const pending = state.tail.then(guarded, guarded);
     state.tail = pending.catch(() => {});
     return pending;
   };
@@ -240,14 +269,21 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       if (!validId(ownerId) || !validRawUrl(rawUrl)) throw new TypeError('RAW_NAVIGATION_INVALID');
       const issuedAt = currentTime(now, state); if (issuedAt === null || issuedAt > Number.MAX_SAFE_INTEGER - LEGACY_TTL_MS) throw new TypeError('RAW_NAVIGATION_INVALID');
       const navigationToken = token(randomBytes(16)); const expiresAt = issuedAt + LEGACY_TTL_MS; const key = `${PREFIX}${navigationToken}`;
+      const record = freeze({ version: 1, navigationToken, ownerId, rawUrl, issuedAt, expiresAt, state: 'prepared' });
+      const confirmedWrite = async () => {
+        try { return same(exact((await sessionArea.get(key))?.[key], LEGACY_RECORD_KEYS), record); } catch { return false; }
+      };
       let writeAttempted = false;
       try {
         if (Object.hasOwn(await sessionArea.get(key), key)) throw unavailable();
         writeAttempted = true;
-        await sessionArea.set({ [key]: { version: 1, navigationToken, ownerId, rawUrl, issuedAt, expiresAt, state: 'prepared' } });
-        const confirmed = exact((await sessionArea.get(key))?.[key], LEGACY_RECORD_KEYS);
-        if (!confirmed || !same(confirmed, { version: 1, navigationToken, ownerId, rawUrl, issuedAt, expiresAt, state: 'prepared' })) throw unavailable();
-      } catch { if (writeAttempted) await erase(sessionArea, key); throw unavailable(); }
+        await sessionArea.set({ [key]: record });
+        if (!await confirmedWrite()) throw unavailable();
+      } catch {
+        if (writeAttempted && await confirmedWrite()) return freeze({ navigationToken, expiresAt });
+        if (writeAttempted && !await removeOrPend([key])) throw cleanupPending();
+        throw unavailable();
+      }
       return freeze({ navigationToken, expiresAt });
     }); },
     takeInternal({ ownerId, navigationToken }) { return serial(async () => {
@@ -271,14 +307,21 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       if (!validDigest(sessionDigest)) throw consumed();
       const navigationToken = token(randomBytes(16)); const expiresAt = issuedAt + input.ttlMs; const key = `${PREFIX}${navigationToken}`;
       const record = freeze({ version: 'RawNavigationUrlV1', auditId: input.auditId, purpose: input.purpose, rawUrl: canonical, issuedAt, expiresAt });
+      const confirmedWrite = async () => {
+        try { return same(publicRecord((await sessionArea.get(key))?.[key]), record); } catch { return false; }
+      };
       let writeAttempted = false;
       try {
         if (Object.hasOwn(await sessionArea.get(key), key)) throw consumed();
         writeAttempted = true;
         await sessionArea.set({ [key]: record });
-        if (!same(publicRecord((await sessionArea.get(key))?.[key]), record)) throw consumed();
+        if (!await confirmedWrite()) throw consumed();
       } catch (error) {
-        if (writeAttempted) await erase(sessionArea, key);
+        if (writeAttempted && await confirmedWrite()) {
+          state.bindings.set(navigationToken, freeze({ evidenceUrl, sessionDigest }));
+          return freeze({ navigationToken, evidenceUrl, sessionDigest, expiresAt });
+        }
+        if (writeAttempted && !await removeOrPend([key])) throw cleanupPending();
         if (error?.message === consumed().message) throw error;
         throw consumed();
       }
@@ -325,22 +368,30 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       const expiresAt = Math.min(...sourceRecords.map(source => source.record.expiresAt));
       const key = `${QUEUE_PREFIX}${auditId}`;
       const queue = freeze({ version: 1, auditId, ownerOperationId: token(randomBytes(16)), revision: 1, issuedAt, expiresAt, nextIndex: 0, entries: parsed });
+      const normalized = sourceRecords.map(({ entry, record }) => ({
+        key: `${PREFIX}${entry.navigationToken}`,
+        record: freeze({ ...record, issuedAt, expiresAt }),
+      }));
+      const cleanupKeys = [key, ...normalized.map(source => source.key)];
+      const confirmedWrite = async () => {
+        try {
+          const confirmed = parseQueue((await sessionArea.get(key))?.[key]);
+          if (!confirmed || !same(confirmed, queue) || !same(queueState(confirmed), queueState(queue))) return false;
+          for (const source of normalized) if (!same(publicRecord((await sessionArea.get(source.key))?.[source.key]), source.record)) return false;
+          return true;
+        } catch { return false; }
+      };
       let writeAttempted = false;
       try {
         if (Object.hasOwn(await sessionArea.get(key), key)) throw staleQueue();
         const writes = { [key]: queue };
-        const normalized = sourceRecords.map(({ entry, record }) => ({
-          key: `${PREFIX}${entry.navigationToken}`,
-          record: freeze({ ...record, issuedAt, expiresAt }),
-        }));
         for (const source of normalized) writes[source.key] = source.record;
         writeAttempted = true;
         await sessionArea.set(writes);
-        const confirmed = parseQueue((await sessionArea.get(key))?.[key]);
-        if (!confirmed || !same(confirmed, queue) || !same(queueState(confirmed), queueState(queue))) throw staleQueue();
-        for (const source of normalized) if (!same(publicRecord((await sessionArea.get(source.key))?.[source.key]), source.record)) throw staleQueue();
+        if (!await confirmedWrite()) throw staleQueue();
       } catch (error) {
-        if (writeAttempted) await removeKeys(sessionArea, [key, ...sourceRecords.map(source => `${PREFIX}${source.entry.navigationToken}`)]);
+        if (writeAttempted && await confirmedWrite()) { dropBindings(state, parsed.map(entry => entry.navigationToken)); return; }
+        if (writeAttempted && !await removeOrPend(cleanupKeys)) throw cleanupPending();
         dropBindings(state, parsed.map(entry => entry.navigationToken));
         if (error?.message === staleQueue().message) throw error;
         throw staleQueue();
@@ -350,8 +401,27 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
     readQueue(auditId) { return serial(async () => {
       const { key, queue } = await readQueue(auditId); if (!queue) return null;
       const keys = [key, ...queue.entries.map(entry => `${PREFIX}${entry.navigationToken}`)];
-      const nowValue = currentTime(now, state); if (nowValue === null || nowValue < queue.issuedAt) { if (!await removeKeys(sessionArea, keys)) throw staleQueue(); dropBindings(state, queue.entries.map(entry => entry.navigationToken)); throw staleQueue(); }
-      if (nowValue >= queue.expiresAt) { if (!await removeKeys(sessionArea, keys)) throw staleQueue(); dropBindings(state, queue.entries.map(entry => entry.navigationToken)); return null; }
+      const nowValue = currentTime(now, state);
+      if (nowValue === null || nowValue < queue.issuedAt) {
+        if (!await removeOrPend(keys)) throw cleanupPending();
+        throw staleQueue();
+      }
+      if (nowValue >= queue.expiresAt) {
+        if (!await removeOrPend(keys)) throw cleanupPending();
+        return null;
+      }
+      let complete = true;
+      for (const entry of queue.entries) {
+        if (entry.status === 'finished') continue;
+        let record;
+        try { record = publicRecord((await sessionArea.get(`${PREFIX}${entry.navigationToken}`))?.[`${PREFIX}${entry.navigationToken}`]); } catch { complete = false; break; }
+        if (!record || record.auditId !== queue.auditId || record.purpose !== 'batch-page' ||
+          record.issuedAt !== queue.issuedAt || record.expiresAt !== queue.expiresAt) { complete = false; break; }
+      }
+      if (!complete) {
+        if (!await removeOrPend(keys)) throw cleanupPending();
+        throw staleQueue();
+      }
       return freeze(structuredClone(queue));
     }); },
     replaceQueue(auditId, value, options) { return serial(async () => {
@@ -359,23 +429,30 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       if (!validId(auditId) || !expected || !expectedState || !Number.isSafeInteger(expected.expectedRevision) || expected.expectedRevision < 1 || !desired || desired.auditId !== auditId) throw staleQueue();
       const { key, queue: current } = await readQueue(auditId);
       if (!current || current.revision !== expected.expectedRevision || !same(queueState(current), expectedState) || desired.ownerOperationId !== current.ownerOperationId ||
-        desired.revision !== current.revision + 1 || desired.issuedAt !== current.issuedAt || desired.expiresAt !== current.expiresAt || !validTransition(current, desired)) throw staleQueue();
+        current.nextIndex >= current.entries.length || desired.revision !== current.revision + 1 || desired.issuedAt !== current.issuedAt || desired.expiresAt !== current.expiresAt || !validTransition(current, desired)) throw staleQueue();
       const nowValue = currentTime(now, state);
       if (nowValue === null || nowValue < current.issuedAt || nowValue >= current.expiresAt) {
-        if (!await removeKeys(sessionArea, [key, ...current.entries.map(entry => `${PREFIX}${entry.navigationToken}`)])) throw staleQueue();
-        dropBindings(state, current.entries.map(entry => entry.navigationToken));
+        if (!await removeOrPend([key, ...current.entries.map(entry => `${PREFIX}${entry.navigationToken}`)])) throw cleanupPending();
         throw staleQueue();
       }
+      const cleanupKeys = [key, ...current.entries.map(entry => `${PREFIX}${entry.navigationToken}`)];
+      const confirmedDesired = async () => {
+        try { return same(parseQueue((await sessionArea.get(key))?.[key]), desired); } catch { return false; }
+      };
+      const confirmedCurrent = async () => {
+        try { return same(parseQueue((await sessionArea.get(key))?.[key]), current); } catch { return false; }
+      };
       try {
-        await sessionArea.set({ [key]: desired }); const confirmed = parseQueue((await sessionArea.get(key))?.[key]);
-        if (!confirmed || confirmed.revision !== desired.revision || confirmed.ownerOperationId !== desired.ownerOperationId || !same(queueState(confirmed), queueState(desired)) || !same(confirmed, desired)) throw staleQueue();
+        await sessionArea.set({ [key]: desired });
+        if (!await confirmedDesired()) throw staleQueue();
       } catch (error) {
+        if (await confirmedDesired()) return;
         let restored = false;
         try {
           await sessionArea.set({ [key]: current });
-          restored = same(parseQueue((await sessionArea.get(key))?.[key]), current);
-        } catch { restored = false; }
-        if (!restored) await removeKeys(sessionArea, [key, ...current.entries.map(entry => `${PREFIX}${entry.navigationToken}`)]);
+          restored = await confirmedCurrent();
+        } catch { restored = await confirmedCurrent(); }
+        if (!restored && !await removeOrPend(cleanupKeys)) throw cleanupPending();
         if (error?.message === staleQueue().message) throw error;
         throw staleQueue();
       }
