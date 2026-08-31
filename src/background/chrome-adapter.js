@@ -19,9 +19,13 @@ const ObjectPreventExtensions = Object.preventExtensions;
 const ObjectGetPrototypeOf = Object.getPrototypeOf;
 const ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const ObjectHasOwn = Object.hasOwn;
+const ObjectIsExtensible = Object.isExtensible;
 const ReflectOwnKeys = Reflect.ownKeys;
 const ReflectApply = Reflect.apply;
 const FunctionPrototypeBind = Function.prototype.bind;
+const PrimordialUint8Array = Uint8Array;
+const PrimordialCrypto = globalThis.crypto;
+const PrimordialGetRandomValues = PrimordialCrypto?.getRandomValues;
 
 const HIGHLIGHT_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const HIGHLIGHT_DOCUMENT_ID = /^[A-Za-z0-9._:-]{1,240}$/u;
@@ -487,25 +491,39 @@ function captureDigestManager(value) {
   const keys = ReflectOwnKeys(value);
   if (keys.length < 1 || keys.length > 2) throw adapterOptionsDenied();
   let digest = null;
+  let destroy = null;
   for (let index = 0; index < keys.length; index += 1) {
     const key = keys[index];
     if (key !== 'digest' && key !== 'destroy') throw adapterOptionsDenied();
     const descriptor = ObjectGetOwnPropertyDescriptor(value, key);
-    if (!descriptor?.enumerable || !ObjectHasOwn(descriptor, 'value') || typeof descriptor.value !== 'function') {
+    if (!descriptor?.enumerable || descriptor.configurable || descriptor.writable ||
+      !ObjectHasOwn(descriptor, 'value') || typeof descriptor.value !== 'function') {
       throw adapterOptionsDenied();
     }
     if (key === 'digest') digest = descriptor.value;
+    else destroy = descriptor.value;
   }
+  if (ObjectIsExtensible(value)) throw adapterOptionsDenied();
   if (digest === null) throw adapterOptionsDenied();
   const captured = ObjectCreate(null);
   defineDataProperty(
     captured,
     'digest',
-    ReflectApply(FunctionPrototypeBind, digest, [value]),
+    ReflectApply(FunctionPrototypeBind, digest, [captured]),
     true,
     false,
     false,
   );
+  if (destroy !== null) {
+    defineDataProperty(
+      captured,
+      'destroy',
+      ReflectApply(FunctionPrototypeBind, destroy, [captured]),
+      true,
+      false,
+      false,
+    );
+  }
   return ObjectFreeze(captured);
 }
 
@@ -545,11 +563,13 @@ function capturePolicySnapshot(value) {
   for (let index = 0; index < keys.length; index += 1) {
     if (typeof keys[index] !== 'string' || !isCapturePolicyKey(keys[index])) throw adapterOptionsDenied();
   }
+  if (ObjectIsExtensible(value)) throw adapterOptionsDenied();
   const snapshot = ObjectCreate(null);
   for (let index = 0; index < CAPTURE_POLICY_KEYS.length; index += 1) {
     const key = CAPTURE_POLICY_KEYS[index];
     const descriptor = ObjectGetOwnPropertyDescriptor(value, key);
-    if (!descriptor?.enumerable || !ObjectHasOwn(descriptor, 'value')) throw adapterOptionsDenied();
+    if (!descriptor?.enumerable || descriptor.configurable || descriptor.writable ||
+      !ObjectHasOwn(descriptor, 'value')) throw adapterOptionsDenied();
     defineDataProperty(snapshot, key, descriptor.value, true, false, false);
   }
   ObjectFreeze(snapshot);
@@ -570,17 +590,267 @@ function captureAdapterOptions(value) {
     const prototype = ObjectGetPrototypeOf(value);
     if (prototype !== ObjectPrototype && prototype !== null) throw adapterOptionsDenied();
     const keys = ReflectOwnKeys(value);
-    const captured = ObjectCreate(null);
+    let hasCapturePolicy = false;
+    let hasSessionUrlDigestManager = false;
+    let hasOnExecutionCheckpoint = false;
+    let hasPersistAuditModel = false;
     for (let index = 0; index < keys.length; index += 1) {
       const key = keys[index];
       if (typeof key !== 'string' || !isAdapterOptionName(key)) throw adapterOptionsDenied();
-      const descriptor = ObjectGetOwnPropertyDescriptor(value, key);
+      if (key === 'capturePolicy') hasCapturePolicy = true;
+      else if (key === 'sessionUrlDigestManager') hasSessionUrlDigestManager = true;
+      else if (key === 'onExecutionCheckpoint') hasOnExecutionCheckpoint = true;
+      else hasPersistAuditModel = true;
+    }
+    const rawValues = ObjectCreate(null);
+    if (hasCapturePolicy) {
+      const descriptor = ObjectGetOwnPropertyDescriptor(value, 'capturePolicy');
       if (!descriptor?.enumerable || !ObjectHasOwn(descriptor, 'value')) throw adapterOptionsDenied();
-      captured[key] = captureAdapterOptionValue(key, descriptor.value);
+      rawValues.capturePolicy = descriptor.value;
+    }
+    if (hasSessionUrlDigestManager) {
+      const descriptor = ObjectGetOwnPropertyDescriptor(value, 'sessionUrlDigestManager');
+      if (!descriptor?.enumerable || !ObjectHasOwn(descriptor, 'value')) throw adapterOptionsDenied();
+      rawValues.sessionUrlDigestManager = descriptor.value;
+    }
+    if (hasOnExecutionCheckpoint) {
+      const descriptor = ObjectGetOwnPropertyDescriptor(value, 'onExecutionCheckpoint');
+      if (!descriptor?.enumerable || !ObjectHasOwn(descriptor, 'value')) throw adapterOptionsDenied();
+      rawValues.onExecutionCheckpoint = descriptor.value;
+    }
+    if (hasPersistAuditModel) {
+      const descriptor = ObjectGetOwnPropertyDescriptor(value, 'persistAuditModel');
+      if (!descriptor?.enumerable || !ObjectHasOwn(descriptor, 'value')) throw adapterOptionsDenied();
+      rawValues.persistAuditModel = descriptor.value;
+    }
+
+    const captured = ObjectCreate(null);
+    if (hasSessionUrlDigestManager) {
+      captured.sessionUrlDigestManager = captureAdapterOptionValue(
+        'sessionUrlDigestManager',
+        rawValues.sessionUrlDigestManager,
+      );
+    }
+    if (hasCapturePolicy) {
+      captured.capturePolicy = captureAdapterOptionValue('capturePolicy', rawValues.capturePolicy);
+    }
+    if (hasOnExecutionCheckpoint) {
+      captured.onExecutionCheckpoint = captureAdapterOptionValue(
+        'onExecutionCheckpoint',
+        rawValues.onExecutionCheckpoint,
+      );
+    }
+    if (hasPersistAuditModel) {
+      captured.persistAuditModel = captureAdapterOptionValue(
+        'persistAuditModel',
+        rawValues.persistAuditModel,
+      );
     }
     return captured;
   } catch {
     throw adapterOptionsDenied();
+  }
+}
+
+function chromeApiDenied() {
+  return new PrimordialTypeError('As APIs Chrome de auditoria não estão disponíveis.');
+}
+
+function ownChromeApiValue(value, key) {
+  if (!value || (typeof value !== 'object' && typeof value !== 'function')) throw chromeApiDenied();
+  const descriptor = ObjectGetOwnPropertyDescriptor(value, key);
+  if (!descriptor || !ObjectHasOwn(descriptor, 'value')) throw chromeApiDenied();
+  return descriptor.value;
+}
+
+function sameChromeDescriptor(left, right) {
+  if (!left || !right) return left === right;
+  const leftData = ObjectHasOwn(left, 'value');
+  if (leftData !== ObjectHasOwn(right, 'value') || left.enumerable !== right.enumerable ||
+    left.configurable !== right.configurable) return false;
+  if (leftData) return left.value === right.value && left.writable === right.writable;
+  return left.get === right.get && left.set === right.set;
+}
+
+function captureChromeSessionArea(value) {
+  const set = ownChromeApiValue(value, 'set');
+  const remove = ownChromeApiValue(value, 'remove');
+  const get = ownChromeApiValue(value, 'get');
+  const confirmedSet = ownChromeApiValue(value, 'set');
+  const confirmedRemove = ownChromeApiValue(value, 'remove');
+  const confirmedGet = ownChromeApiValue(value, 'get');
+  if (set !== confirmedSet || remove !== confirmedRemove || get !== confirmedGet) throw chromeApiDenied();
+  if (typeof get !== 'function' || typeof set !== 'function' || typeof remove !== 'function') {
+    throw chromeApiDenied();
+  }
+  const captured = ObjectCreate(null);
+  defineDataProperty(captured, 'get', ReflectApply(FunctionPrototypeBind, get, [captured]), true, false, false);
+  defineDataProperty(captured, 'set', ReflectApply(FunctionPrototypeBind, set, [captured]), true, false, false);
+  defineDataProperty(captured, 'remove', ReflectApply(FunctionPrototypeBind, remove, [captured]), true, false, false);
+  return ObjectFreeze(captured);
+}
+
+function captureChromeEvent(value) {
+  const removeListener = ownChromeApiValue(value, 'removeListener');
+  const addListener = ownChromeApiValue(value, 'addListener');
+  const confirmedRemoveListener = ownChromeApiValue(value, 'removeListener');
+  const confirmedAddListener = ownChromeApiValue(value, 'addListener');
+  if (removeListener !== confirmedRemoveListener || addListener !== confirmedAddListener) throw chromeApiDenied();
+  if (typeof addListener !== 'function' || typeof removeListener !== 'function') throw chromeApiDenied();
+  const captured = ObjectCreate(null);
+  defineDataProperty(
+    captured,
+    'addListener',
+    ReflectApply(FunctionPrototypeBind, addListener, [captured]),
+    true,
+    false,
+    false,
+  );
+  defineDataProperty(
+    captured,
+    'removeListener',
+    ReflectApply(FunctionPrototypeBind, removeListener, [captured]),
+    true,
+    false,
+    false,
+  );
+  return ObjectFreeze(captured);
+}
+
+function captureChromeTabs(value) {
+  const update = ownChromeApiValue(value, 'update');
+  const get = ownChromeApiValue(value, 'get');
+  const remove = ownChromeApiValue(value, 'remove');
+  const onUpdated = ownChromeApiValue(value, 'onUpdated');
+  const onRemoved = ownChromeApiValue(value, 'onRemoved');
+  const create = ownChromeApiValue(value, 'create');
+  const confirmedUpdate = ownChromeApiValue(value, 'update');
+  const confirmedGet = ownChromeApiValue(value, 'get');
+  const confirmedRemove = ownChromeApiValue(value, 'remove');
+  const confirmedOnUpdated = ownChromeApiValue(value, 'onUpdated');
+  const confirmedOnRemoved = ownChromeApiValue(value, 'onRemoved');
+  const confirmedCreate = ownChromeApiValue(value, 'create');
+  if (update !== confirmedUpdate || get !== confirmedGet || remove !== confirmedRemove ||
+    onUpdated !== confirmedOnUpdated || onRemoved !== confirmedOnRemoved || create !== confirmedCreate) {
+    throw chromeApiDenied();
+  }
+  if (typeof create !== 'function' || typeof update !== 'function' ||
+    typeof get !== 'function' || typeof remove !== 'function') throw chromeApiDenied();
+  const captured = ObjectCreate(null);
+  defineDataProperty(captured, 'create', ReflectApply(FunctionPrototypeBind, create, [captured]), true, false, false);
+  defineDataProperty(captured, 'update', ReflectApply(FunctionPrototypeBind, update, [captured]), true, false, false);
+  defineDataProperty(captured, 'get', ReflectApply(FunctionPrototypeBind, get, [captured]), true, false, false);
+  defineDataProperty(captured, 'remove', ReflectApply(FunctionPrototypeBind, remove, [captured]), true, false, false);
+  defineDataProperty(captured, 'onUpdated', captureChromeEvent(onUpdated), true, false, false);
+  defineDataProperty(captured, 'onRemoved', captureChromeEvent(onRemoved), true, false, false);
+  return ObjectFreeze(captured);
+}
+
+function captureChromeScripting(value) {
+  const executeScript = ownChromeApiValue(value, 'executeScript');
+  const confirmedExecuteScript = ownChromeApiValue(value, 'executeScript');
+  if (executeScript !== confirmedExecuteScript || typeof executeScript !== 'function') throw chromeApiDenied();
+  const captured = ObjectCreate(null);
+  defineDataProperty(
+    captured,
+    'executeScript',
+    ReflectApply(FunctionPrototypeBind, executeScript, [captured]),
+    true,
+    false,
+    false,
+  );
+  return ObjectFreeze(captured);
+}
+
+function captureChromeDebugger(value) {
+  const sendCommand = ownChromeApiValue(value, 'sendCommand');
+  const detach = ownChromeApiValue(value, 'detach');
+  const attach = ownChromeApiValue(value, 'attach');
+  const confirmedSendCommand = ownChromeApiValue(value, 'sendCommand');
+  const confirmedDetach = ownChromeApiValue(value, 'detach');
+  const confirmedAttach = ownChromeApiValue(value, 'attach');
+  if (sendCommand !== confirmedSendCommand || detach !== confirmedDetach || attach !== confirmedAttach) {
+    throw chromeApiDenied();
+  }
+  if (typeof attach !== 'function' || typeof sendCommand !== 'function' || typeof detach !== 'function') {
+    throw chromeApiDenied();
+  }
+  const captured = ObjectCreate(null);
+  defineDataProperty(captured, 'attach', ReflectApply(FunctionPrototypeBind, attach, [captured]), true, false, false);
+  defineDataProperty(
+    captured,
+    'sendCommand',
+    ReflectApply(FunctionPrototypeBind, sendCommand, [captured]),
+    true,
+    false,
+    false,
+  );
+  defineDataProperty(captured, 'detach', ReflectApply(FunctionPrototypeBind, detach, [captured]), true, false, false);
+  return ObjectFreeze(captured);
+}
+
+function captureChromeRuntime(value) {
+  const sendMessage = ownChromeApiValue(value, 'sendMessage');
+  const lastError = ObjectGetOwnPropertyDescriptor(value, 'lastError');
+  const getURL = ownChromeApiValue(value, 'getURL');
+  const confirmedSendMessage = ownChromeApiValue(value, 'sendMessage');
+  const confirmedLastError = ObjectGetOwnPropertyDescriptor(value, 'lastError');
+  const confirmedGetURL = ownChromeApiValue(value, 'getURL');
+  if (sendMessage !== confirmedSendMessage || getURL !== confirmedGetURL ||
+    !sameChromeDescriptor(lastError, confirmedLastError) ||
+    typeof getURL !== 'function' || typeof sendMessage !== 'function') throw chromeApiDenied();
+  const captured = ObjectCreate(null);
+  defineDataProperty(captured, 'getURL', ReflectApply(FunctionPrototypeBind, getURL, [captured]), true, false, false);
+  defineDataProperty(
+    captured,
+    'sendMessage',
+    ReflectApply(FunctionPrototypeBind, sendMessage, [captured]),
+    true,
+    false,
+    false,
+  );
+  if (lastError && ObjectHasOwn(lastError, 'value')) {
+    defineDataProperty(captured, 'lastError', lastError.value, true, false, false);
+  } else if (lastError) {
+    if (typeof lastError.get !== 'function') throw chromeApiDenied();
+    defineGetterProperty(
+      captured,
+      'lastError',
+      ReflectApply(FunctionPrototypeBind, lastError.get, [captured]),
+      true,
+      false,
+    );
+  }
+  return ObjectFreeze(captured);
+}
+
+function captureChromeApi(value) {
+  try {
+    const storageApi = ownChromeApiValue(value, 'storage');
+    const session = ownChromeApiValue(storageApi, 'session');
+    const tabsApi = ownChromeApiValue(value, 'tabs');
+    const scriptingApi = ownChromeApiValue(value, 'scripting');
+    const rawDebuggerApi = ownChromeApiValue(value, 'debugger');
+    const runtimeApi = ownChromeApiValue(value, 'runtime');
+
+    const sessionArea = captureChromeSessionArea(session);
+    const tabs = captureChromeTabs(tabsApi);
+    const scripting = captureChromeScripting(scriptingApi);
+    const debuggerApi = captureChromeDebugger(rawDebuggerApi);
+    const runtime = captureChromeRuntime(runtimeApi);
+
+    const storage = ObjectCreate(null);
+    defineDataProperty(storage, 'session', sessionArea, true, false, false);
+    ObjectFreeze(storage);
+    const captured = ObjectCreate(null);
+    defineDataProperty(captured, 'tabs', tabs, true, false, false);
+    defineDataProperty(captured, 'scripting', scripting, true, false, false);
+    defineDataProperty(captured, 'debugger', debuggerApi, true, false, false);
+    defineDataProperty(captured, 'runtime', runtime, true, false, false);
+    defineDataProperty(captured, 'storage', storage, true, false, false);
+    return ObjectFreeze(captured);
+  } catch {
+    throw chromeApiDenied();
   }
 }
 
@@ -597,6 +867,14 @@ function defineDataProperty(target, key, value, enumerable, configurable, writab
   descriptor.enumerable = enumerable;
   descriptor.configurable = configurable;
   descriptor.writable = writable;
+  ObjectDefineProperty(target, key, descriptor);
+}
+
+function defineGetterProperty(target, key, get, enumerable, configurable) {
+  const descriptor = ObjectCreate(null);
+  descriptor.get = get;
+  descriptor.enumerable = enumerable;
+  descriptor.configurable = configurable;
   ObjectDefineProperty(target, key, descriptor);
 }
 
@@ -748,10 +1026,8 @@ export async function resolveActiveNodeId(cdp) {
 }
 
 export function createChromeAdapter(chromeApi, rawOptions = {}) {
+  chromeApi = captureChromeApi(chromeApi);
   const options = captureAdapterOptions(rawOptions);
-  if (!chromeApi?.tabs || !chromeApi?.scripting || !chromeApi?.debugger || !chromeApi?.runtime) {
-    throw new TypeError('As APIs Chrome de auditoria não estão disponíveis.');
-  }
   const executeScript = options => invoke(chromeApi, chromeApi.scripting, 'executeScript', options);
   const transport = createChromeDebuggerTransport(chromeApi);
   const sessionUrlDigestManager = options.sessionUrlDigestManager;
@@ -1306,8 +1582,8 @@ export function createChromeAdapter(chromeApi, rawOptions = {}) {
   const internal = ObjectCreate(null);
   defineDataProperty(internal, 'sessionArea', chromeApi.storage?.session, true, false, false);
   defineDataProperty(internal, 'randomBytes', length => {
-    const bytes = new Uint8Array(length);
-    globalThis.crypto.getRandomValues(bytes);
+    const bytes = new PrimordialUint8Array(length);
+    ReflectApply(PrimordialGetRandomValues, PrimordialCrypto, [bytes]);
     return bytes;
   }, true, false, false);
   if (ObjectHasOwn(options, 'capturePolicy')) {
