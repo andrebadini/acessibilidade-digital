@@ -41,6 +41,7 @@ function fixture() {
     },
     readActiveJob: async () => null,
     readAuditSession: async () => { throw new Error('unused'); },
+    readPixelSuspension: async () => null,
     loadPanelResultBundle: async () => { throw new Error('unused'); },
     rehydrateViewOnly: async () => { throw new Error('unused'); },
     revokeViewOnly: async () => true,
@@ -94,6 +95,24 @@ test('admits a real-shape document-less Port then routes privileged intents with
     response: { ok: true, requestId: 'prepare-1' },
   });
   assert.equal(calls.filter(([name]) => name === 'reprove').length >= 2, true);
+
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: 'confirm-request-1',
+    envelope: {
+      type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: 'S'.repeat(22),
+      auditId: 'audit-paused', consentId: `${'P'.repeat(21)}Q`,
+      mode: 'full-evidence', accepted: true,
+    },
+  });
+  await tick();
+  const confirmation = calls.filter(([name]) => name === 'dispatch').at(-1)[1];
+  assert.deepEqual(confirmation.envelope, {
+    type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: 'S'.repeat(22),
+    auditId: 'audit-paused', consentId: `${'P'.repeat(21)}Q`,
+    mode: 'full-evidence', accepted: true, windowId: 9,
+  });
+  assert.equal(confirmation.sender, admission.syntheticSender);
+  assert.equal(confirmation.launchTabId, 17);
 
   port.onDisconnect.emit();
   await tick();

@@ -33,7 +33,8 @@ const READER_STATE_KEYS = Object.freeze([
 ]);
 const PANEL_PORT_TYPES = new Set([
   'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
-  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
+  'PANEL_START_ATTACHED_AUDIT', 'CONFIRM_PIXEL_CAPTURE',
+  'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
   'PANEL_SET_PERSONA_MODE', 'PANEL_READER_STATE', 'PANEL_READER_ACTION',
   'PANEL_READER_ENABLE_VOICE',
   'PANEL_STOP_PERSONA', 'PANEL_CANCEL_AUDIT',
@@ -63,6 +64,10 @@ const PERSONA_CODES = new Set([
 const START_CODES = new Set([
   'AUDIT_BUSY', 'AUDIT_RECOVERY_REQUIRED', 'TARGET_UNAVAILABLE', 'AUDIT_ID_COLLISION', 'AUDIT_START_FAILED',
   'HIGHLIGHT_CLEANUP_UNCONFIRMED', 'PERSONA_CLEANUP_UNCONFIRMED',
+]);
+const PIXEL_CONFIRM_CODES = new Set([
+  'PIXEL_CONSENT_EXPIRED', 'PIXEL_CONSENT_DOCUMENT_CHANGED', 'PIXEL_CONSENT_ALREADY_USED',
+  'PIXEL_CONSENT_STALE', 'AUDIT_RECOVERY_REQUIRED', 'AUDIT_CANCELLED',
 ]);
 
 function freeze(value) {
@@ -161,6 +166,7 @@ export function createSidePanelIntentRouter(raw) {
   if (!input || typeof input.chromeApi?.runtime?.id !== 'string' || typeof input.chromeApi?.runtime?.getContexts !== 'function' ||
     typeof input.chromeApi?.windows?.get !== 'function' || typeof input.chromeApi?.tabs?.query !== 'function' ||
     !input.authority || !input.auditStarter || !coordinator ||
+    typeof input.auditStarter.resumePrivacyPausedAudit !== 'function' ||
     typeof input.personaStart?.start !== 'function' || typeof input.personaStart?.rehydrate !== 'function' ||
     typeof input.personaCoordinator?.setMode !== 'function' ||
     typeof input.personaCoordinator?.readerCommand !== 'function' ||
@@ -470,7 +476,7 @@ export function createSidePanelIntentRouter(raw) {
       try {
         const started = await input.auditStarter.beginAuthorizedAudit({
           capabilityId: envelope.capabilityId, eventNonce: null, auditId,
-          capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+          capturePolicy: createCapturePolicyV1({ mode: envelope.captureMode, includeQuery: false }),
           retentionPreference: Object.freeze({ version: 1, deleteAfterCompleteExport: false }),
           senderContext: context,
         });
@@ -483,6 +489,47 @@ export function createSidePanelIntentRouter(raw) {
       } catch { return fail('AUDIT_START_FAILED'); }
     }
     return fail('AUDIT_ID_COLLISION');
+  }
+
+  async function confirmPixelCapture(envelope, sender) {
+    try {
+      const authorized = exact(await input.authority.authorizeSession({
+        sessionCapabilityId: envelope.sessionCapabilityId, auditId: envelope.auditId,
+        consumer: 'panel', intent: 'confirm-pixels', sender,
+        claimedWindowId: envelope.windowId,
+      }), ['ok', 'session', 'context']);
+      const session = authorized?.session;
+      const context = authorized?.context;
+      const targetBinding = own(session, 'targetBinding');
+      if (authorized?.ok !== true || own(session, 'auditId') !== envelope.auditId ||
+        own(session, 'sessionCapabilityId') !== envelope.sessionCapabilityId ||
+        own(session, 'windowId') !== envelope.windowId || own(context, 'windowId') !== envelope.windowId ||
+        own(session, 'mode') !== 'attached' || own(session, 'state') !== 'privacy-paused' ||
+        own(targetBinding, 'kind') !== 'attached') return fail('PIXEL_CONFIRM_DENIED');
+
+      const resumed = exact(await input.auditStarter.resumePrivacyPausedAudit({
+        auditId: envelope.auditId,
+        sessionCapabilityId: envelope.sessionCapabilityId,
+        windowId: envelope.windowId,
+        consentId: envelope.consentId,
+        mode: envelope.mode,
+      }), ['response', 'sessionCapabilityId', 'completion']);
+      if (!resumed || resumed.sessionCapabilityId !== envelope.sessionCapabilityId) {
+        return fail('PIXEL_CONFIRM_DENIED');
+      }
+      const success = exact(resumed.response, ['ok', 'auditId', 'state']);
+      if (success?.ok === true && success.auditId === envelope.auditId &&
+        ['running', 'privacy-paused'].includes(success.state) && resumed.completion instanceof Promise) {
+        return freeze({ ok: true, auditId: envelope.auditId, state: success.state });
+      }
+      const failed = exact(resumed.response, ['ok', 'code']);
+      if (failed?.ok === false && PIXEL_CONFIRM_CODES.has(failed.code) && resumed.completion === null) {
+        return fail(failed.code);
+      }
+      return fail('PIXEL_CONFIRM_DENIED');
+    } catch {
+      return fail('PIXEL_CONFIRM_DENIED');
+    }
   }
 
   async function cancel(envelope, sender) {
@@ -741,6 +788,7 @@ export function createSidePanelIntentRouter(raw) {
     if (envelope.type === 'PREPARE_PANEL_CAPABILITY') return preparePanel(envelope, request.sender, request.launchTabId);
     if (envelope.type === 'PREPARE_PANEL_PERSONA_CAPABILITY') return preparePanelPersona(envelope, request.sender, request.launchTabId);
     if (envelope.type === 'PANEL_START_ATTACHED_AUDIT') return startAttached(envelope, request.sender);
+    if (envelope.type === 'CONFIRM_PIXEL_CAPTURE') return confirmPixelCapture(envelope, request.sender);
     if (envelope.type === 'PANEL_START_PERSONA') return startPersona(envelope, request.sender);
     if (envelope.type === 'PANEL_REHYDRATE_PERSONA') return rehydratePersona(envelope, request.sender);
     if (envelope.type === 'PANEL_SET_PERSONA_MODE') return setPersonaMode(envelope, request.sender);

@@ -10,7 +10,7 @@ import {
 } from '../../src/background/authorized-audit-starter.js';
 import { AUDIT_EXECUTION_INTERNAL } from '../../src/background/chrome-adapter.js';
 import { runAttachedAuditExecution, runAudit } from '../../src/background/run-audit.js';
-import { panelBootstrapStorageKey } from '../../src/background/panel-port.js';
+import { createPanelPortCoordinator, panelBootstrapStorageKey } from '../../src/background/panel-port.js';
 import { createTargetOperationQueue } from '../../src/background/target-operation-queue.js';
 import {
   createTargetCapabilityAuthority,
@@ -24,7 +24,9 @@ import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { createPanelResultBundleV1 } from '../../src/panel/panel-result-bundle.js';
 import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
+import { createPixelCaptureStateV1 } from '../../src/background/pixel-capture-consent.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
+import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { reportInput } from '../report/helpers.js';
 
@@ -191,6 +193,8 @@ function panelCoordinator(order = [], overrides = {}) {
     async registerPendingBootstrap(value) { order.push('bootstrap-register'); assert.equal(value.windowId >= 0, true); return true; },
     async publishRegisteredBootstrap(value) { order.push('bootstrap'); assert.equal(value.windowId >= 0, true); return true; },
     async publishResult(value) { order.push(`publish:${value.state}`); return true; },
+    async publishPrivacyPaused(value) { order.push(`publish:${value.state ?? 'privacy-paused'}`); return true; },
+    async publishRunningResume() { order.push('publish:running-resume'); return true; },
     async registerAndPublishViewOnly() { return { registered: true, delivered: false }; },
     async disconnectSession() { order.push('disconnect'); return true; },
     ...overrides,
@@ -206,6 +210,35 @@ function panelCoordinator(order = [], overrides = {}) {
   });
 }
 
+function durablePanelCoordinator({ area, pixelState, epochNow = () => EPOCH + 3 }) {
+  const coordinator = createPanelPortCoordinator({
+    chromeApi: { runtime: { id: 'abcdefghijklmnopabcdefghijklmnop' } },
+    sessionArea: area,
+    readActiveJob: () => readActiveAuditJobForWorker({ sessionArea: area }),
+    readAuditSession: ({ sessionCapabilityId, auditId }) => readAuditSessionForWorker({
+      sessionArea: area, sessionCapabilityId, auditId,
+    }),
+    readPixelSuspension: auditId => pixelState.readSuspension(auditId),
+    async loadPanelResultBundle() { return null; },
+    async rehydrateViewOnly() { return null; },
+    async revokeViewOnly() { return false; },
+    epochNow,
+    setTimer() { return Object.freeze({}); },
+    clearTimer() {},
+    launchAuthority: {
+      async admitPort() { return Object.freeze({ ok: false, code: 'PANEL_LAUNCH_DENIED' }); },
+      async reprove() { return Object.freeze({ ok: false, code: 'PANEL_LAUNCH_DENIED' }); },
+      async revoke() { return Object.freeze({ ok: true, revoked: true }); },
+    },
+    async dispatchPanelIntent() { return Object.freeze({ ok: false, code: 'FEATURE_UNAVAILABLE' }); },
+    async authorizeHighlightSession() { return Object.freeze({ ok: false }); },
+  });
+  return Object.freeze({
+    attachPanelPort: coordinator.attachPanelPort,
+    withWindowLock: coordinator.withWindowLock,
+  });
+}
+
 function dependencyFixture({
   area,
   authority,
@@ -215,6 +248,9 @@ function dependencyFixture({
   latest = { value: null },
   targetQueue = createTargetOperationQueue(),
   cleanupBarrier = null,
+  pixelState = null,
+  probeDocumentIdentity = async tabId => ({ tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST }),
+  probeSensitiveCaptureSignals = async () => ({ version: 'SensitiveCaptureSignalsV1', detected: false, categories: [] }),
 }) {
   const barrier = cleanupBarrier ?? Object.freeze({
     async clearForAuditLocked({ target, lock }) {
@@ -222,7 +258,7 @@ function dependencyFixture({
       return Object.freeze({ ok: true, state: 'clear' });
     },
   });
-  return {
+  const dependencies = {
     authority, sessionArea: area, panelCoordinator: panelCoordinator(order),
     targetQueue, cleanupBarrier: barrier,
     runAttachedAuditExecution: execution,
@@ -266,7 +302,30 @@ function dependencyFixture({
     epochNow: () => EPOCH + 1,
     modelNow: () => '2026-08-29T12:00:00.000Z',
     createAbortController: () => new AbortController(),
+    pixelState: pixelState ?? Object.freeze({
+      async pause() { throw new Error('PIXEL_STATE_MUST_NOT_BE_ACCESSED'); },
+      async gateRunnerStart() { throw new Error('PIXEL_STATE_MUST_NOT_BE_ACCESSED'); },
+      async readSuspension() { return null; },
+      async claimAndBeginResume() { throw new Error('PIXEL_STATE_MUST_NOT_BE_ACCESSED'); },
+      async markSessionRunning() { throw new Error('PIXEL_STATE_MUST_NOT_BE_ACCESSED'); },
+      async finish() { throw new Error('PIXEL_STATE_MUST_NOT_BE_ACCESSED'); },
+      async revokeAudit() { throw new Error('PIXEL_STATE_MUST_NOT_BE_ACCESSED'); },
+    }),
+    probeDocumentIdentity,
+    probeSensitiveCaptureSignals,
+    async schedulePixelExpiry() {},
   };
+  dependencies.pixelAttemptLifecycle = {
+    async prepareResume() { return Object.freeze(Object.create(null)); },
+    async commitTerminal(value) {
+      const { attemptHandle: _attemptHandle, ...terminal } = value;
+      const committed = await dependencies.commitTerminalAudit(terminal);
+      return Object.freeze({ revision: committed.revision, modelHash: committed.modelHash });
+    },
+    async classify() { return Object.freeze({ state: 'absent', handle: null }); },
+    async cleanup() { return true; },
+  };
+  return dependencies;
 }
 
 function instrumentAuthority(authority, effects) {
@@ -380,11 +439,26 @@ function capturePolicyGateHarness() {
     epochNow: touched('epochNow'),
     modelNow: touched('modelNow'),
     createAbortController: touched('createAbortController'),
+    pixelState: {
+      pause: touched('pixelState.pause'), gateRunnerStart: touched('pixelState.gateRunnerStart'),
+      readSuspension: touched('pixelState.readSuspension'), claimAndBeginResume: touched('pixelState.claimAndBeginResume'),
+      markSessionRunning: touched('pixelState.markSessionRunning'), finish: touched('pixelState.finish'),
+      revokeAudit: touched('pixelState.revokeAudit'),
+    },
+    probeDocumentIdentity: touched('probeDocumentIdentity'),
+    probeSensitiveCaptureSignals: touched('probeSensitiveCaptureSignals'),
+    schedulePixelExpiry: touched('schedulePixelExpiry'),
+    pixelAttemptLifecycle: {
+      prepareResume: touched('pixelAttemptLifecycle.prepareResume'),
+      commitTerminal: touched('pixelAttemptLifecycle.commitTerminal'),
+      classify: touched('pixelAttemptLifecycle.classify'),
+      cleanup: touched('pixelAttemptLifecycle.cleanup'),
+    },
   };
   return { dependencies, effects };
 }
 
-test('admits only no-pixels before target inspection, queue, journal, RNG, storage or runner effects', async t => {
+test('admits every closed capture policy before target inspection without touching pixel state', async t => {
   const beginInput = (auditId, mode) => ({
     capabilityId: 'A'.repeat(22),
     eventNonce: null,
@@ -394,33 +468,474 @@ test('admits only no-pixels before target inspection, queue, journal, RNG, stora
     senderContext: {},
   });
 
-  for (const mode of ['full-evidence', 'element-only']) {
-    await t.test(`rejects ${mode} with zero effects`, async () => {
+  for (const mode of ['full-evidence', 'element-only', 'no-pixels']) {
+    await t.test(mode, async () => {
       const { dependencies, effects } = capturePolicyGateHarness();
       const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit(
         beginInput(`audit-policy-${mode}`, mode),
       );
       assert.deepEqual(started, {
-        response: { ok: false, code: 'AUDIT_START_FAILED' },
+        response: { ok: false, code: 'TARGET_UNAVAILABLE' },
         sessionCapabilityId: null,
         completion: null,
       });
-      assert.deepEqual(effects, []);
+      assert.deepEqual(effects, ['inspectPreparedAuditTarget']);
     });
   }
+});
 
-  await t.test('accepts no-pixels through the policy gate', async () => {
-    const { dependencies, effects } = capturePolicyGateHarness();
-    const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit(
-      beginInput('audit-policy-no-pixels', 'no-pixels'),
-    );
-    assert.deepEqual(started, {
-      response: { ok: false, code: 'TARGET_UNAVAILABLE' },
-      sessionCapabilityId: null,
-      completion: null,
-    });
-    assert.deepEqual(effects, ['inspectPreparedAuditTarget']);
+test('a sensitive pixel begin durably pauses only after journal and checkpoint are confirmed', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const pixelState = createPixelCaptureStateV1({
+    sessionArea: area, now: () => EPOCH + 2, randomBytes: length => new Uint8Array(length).fill(7),
   });
+  const order = [];
+  const fixture = await reportFixture('audit-pixel-paused');
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority, pixelState, order,
+    execution: async args => {
+      assert.equal(args.capturePolicy.mode, 'full-evidence');
+      assert.ok(args.privacyGate);
+      await args.onCheckpoint(fixture.checkpoint);
+      const observedTarget = Object.freeze({
+        version: 'ObservedTargetV1', kind: 'attached', tabId: 17, windowId: 9,
+        documentId: 'document-a', urlEvidence: sanitizeEvidenceUrlV1('https://example.test/', { includeQuery: false }),
+        urlSessionDigest: DIGEST,
+      });
+      const decision = await args.privacyGate.preflight({
+        auditId: 'audit-pixel-paused', observedTarget, capturePolicy: args.capturePolicy,
+        signals: Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: true, categories: Object.freeze(['password']) }),
+      });
+      return Object.freeze({
+        version: 1, auditId: 'audit-pixel-paused', state: decision.status,
+        failureCode: null, model: null, checkpoint: fixture.checkpoint,
+      });
+    },
+  });
+  const expirySchedules = [];
+  dependencies.schedulePixelExpiry = async () => { expirySchedules.push('scheduled'); return true; };
+  dependencies.panelCoordinator = durablePanelCoordinator({ area, pixelState });
+  const starter = createAuthorizedAuditStarter(dependencies);
+  const started = await starter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: 'audit-pixel-paused',
+    capturePolicy: createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(started.response, { ok: true, auditId: 'audit-pixel-paused', state: 'running' });
+  assert.deepEqual(await started.completion, { ok: true, auditId: 'audit-pixel-paused', state: 'privacy-paused', revision: null });
+  const active = await readActiveAuditJobForWorker({ sessionArea: area });
+  const session = await readAuditSessionForWorker({
+    sessionArea: area, sessionCapabilityId: started.sessionCapabilityId, auditId: 'audit-pixel-paused',
+  });
+  const suspension = await pixelState.readSuspension('audit-pixel-paused');
+  assert.equal(active.state, 'privacy-paused');
+  assert.equal(active.commitState, 'none');
+  assert.equal(active.expectedTerminalRevision, null);
+  assert.equal(session.state, 'privacy-paused');
+  assert.equal(Object.hasOwn(area.values, START_JOURNAL_KEY), false);
+  assert.equal(area.values[executionCheckpointStorageKey('audit-pixel-paused')].auditId, 'audit-pixel-paused');
+  assert.deepEqual(expirySchedules, ['scheduled']);
+  assert.equal(area.values[panelBootstrapStorageKey(9)].auditId, 'audit-pixel-paused');
+});
+
+test('resumes one paused pixel audit exactly once in the same target and finishes only after result publication', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const durablePixelState = createPixelCaptureStateV1({
+    sessionArea: area, now: (() => { let value = EPOCH + 2; return () => value++; })(),
+    randomBytes: length => new Uint8Array(length).fill(8),
+  });
+  const pixelState = Object.freeze({
+    ...durablePixelState,
+    async finish(args) {
+      await durablePixelState.finish(args);
+      throw new Error('PRIVATE_FINISH_ACK_LOST');
+    },
+  });
+  const auditId = 'audit-pixel-resume';
+  const fixture = await reportFixture(auditId);
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const signals = Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: true, categories: Object.freeze(['password']) });
+  const observedTarget = Object.freeze({
+    version: 'ObservedTargetV1', kind: 'attached', tabId: 17, windowId: 9, documentId: 'document-a',
+    urlEvidence: sanitizeEvidenceUrlV1('https://example.test/', { includeQuery: false }), urlSessionDigest: DIGEST,
+  });
+  const order = [];
+  let executions = 0;
+  const execution = async args => {
+    executions += 1;
+    await args.onCheckpoint(fixture.checkpoint);
+    const preflight = await args.privacyGate.preflight({
+      auditId, observedTarget, capturePolicy: policy, signals,
+    });
+    if (executions === 1) {
+      return Object.freeze({
+        version: 1, auditId, state: preflight.status, failureCode: null, model: null, checkpoint: fixture.checkpoint,
+      });
+    }
+    assert.equal(preflight.status, 'armed');
+    const authorized = await args.privacyGate.authorizeFirstPixel({
+      auditId, observedTarget, capturePolicy: policy,
+      proof: { tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST }, signals,
+    });
+    assert.equal(authorized.status, 'ready');
+    await args.persistAuditModel(fixture.model);
+    await args.privacyGate.afterPixels({ auditId, pixelStarted: true });
+    return Object.freeze({
+      version: 1, auditId, state: 'model', failureCode: null, model: fixture.model, checkpoint: fixture.checkpoint,
+    });
+  };
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority, pixelState, order, execution,
+    probeDocumentIdentity: async tabId => ({ tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST }),
+    probeSensitiveCaptureSignals: async () => signals,
+  });
+  const pixelAttemptCalls = [];
+  const attemptHandle = Object.freeze(Object.create(null));
+  dependencies.pixelAttemptLifecycle = Object.freeze({
+    async prepareResume(value) { pixelAttemptCalls.push(['prepare', value]); return attemptHandle; },
+    async commitTerminal(value) {
+      pixelAttemptCalls.push(['commit', value.attemptHandle]);
+      return dependencies.commitTerminalAudit(value);
+    },
+    async classify() { return Object.freeze({ state: 'absent', handle: null }); },
+    async cleanup(value) { pixelAttemptCalls.push(['cleanup', value]); return true; },
+  });
+  dependencies.panelCoordinator = panelCoordinator(order, {
+    async publishPrivacyPaused() { order.push('publish:privacy-paused'); return true; },
+    async publishRunningResume() { order.push('publish:running-resume'); return true; },
+    async publishResult() { order.push('publish:result'); return true; },
+  });
+  const starter = createAuthorizedAuditStarter(dependencies);
+  const started = await starter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId, capturePolicy: policy,
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+  await started.completion;
+  const paused = await durablePixelState.readSuspension(auditId);
+
+  const recoveredStarter = createAuthorizedAuditStarter(dependencies);
+  assert.deepEqual(await recoveredStarter.recoverAuthorizedAuditLifecycle(), {
+    ok: true, state: 'privacy-paused', auditId, revision: null,
+  });
+  assert.equal((await readActiveAuditJobForWorker({ sessionArea: area })).state, 'privacy-paused');
+  const resumedStarter = createAuthorizedAuditStarter(dependencies);
+  const resumed = await resumedStarter.resumePrivacyPausedAudit({
+    auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9,
+    consentId: paused.consentId, mode: 'full-evidence',
+  });
+  assert.deepEqual(resumed.response, { ok: true, auditId, state: 'running' });
+  assert.equal(resumed.sessionCapabilityId, started.sessionCapabilityId);
+  assert.deepEqual(await resumed.completion, { ok: true, auditId, state: 'result', revision: 1 });
+  assert.equal(executions, 2);
+  assert.equal(await durablePixelState.readSuspension(auditId), null);
+  assert.ok(order.indexOf('publish:running-resume') < order.indexOf('publish:result'));
+  assert.deepEqual(pixelAttemptCalls[0], ['prepare', {
+    auditId, consentId: paused.consentId, pageId: null, ownershipId: null, expiresAt: paused.expiresAt,
+  }]);
+  assert.deepEqual(pixelAttemptCalls[1], ['commit', attemptHandle]);
+  assert.deepEqual(pixelAttemptCalls[2], ['cleanup', {
+    auditId, consentId: null, expected: 'post-finish',
+  }]);
+
+  const replay = await resumedStarter.resumePrivacyPausedAudit({
+    auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9,
+    consentId: paused.consentId, mode: 'full-evidence',
+  });
+  assert.deepEqual(replay, {
+    response: { ok: false, code: 'AUDIT_RESUME_DENIED' }, sessionCapabilityId: null, completion: null,
+  });
+  assert.equal(executions, 2);
+});
+
+async function pausedAuditHarness(auditId) {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  let currentAt = EPOCH + 2;
+  let random = 8;
+  const pixelState = createPixelCaptureStateV1({
+    sessionArea: area, now: () => currentAt,
+    randomBytes: length => new Uint8Array(length).fill(++random),
+  });
+  const fixture = await reportFixture(auditId);
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const initialSignals = Object.freeze({
+    version: 'SensitiveCaptureSignalsV1', detected: true, categories: Object.freeze(['password']),
+  });
+  const observedTarget = Object.freeze({
+    version: 'ObservedTargetV1', kind: 'attached', tabId: 17, windowId: 9, documentId: 'document-a',
+    urlEvidence: sanitizeEvidenceUrlV1('https://example.test/', { includeQuery: false }), urlSessionDigest: DIGEST,
+  });
+  let proof = { tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST };
+  let signals = initialSignals;
+  let executions = 0;
+  const pausedPackets = [];
+  const reportByAudit = new Map();
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority, pixelState, reportByAudit,
+    probeDocumentIdentity: async () => structuredClone(proof),
+    probeSensitiveCaptureSignals: async () => signals,
+    execution: async args => {
+      executions += 1;
+      await args.onCheckpoint(fixture.checkpoint);
+      const preflight = await args.privacyGate.preflight({
+        auditId, observedTarget, capturePolicy: policy, signals: initialSignals,
+      });
+      return Object.freeze({
+        version: 1, auditId, state: preflight.status,
+        failureCode: null, model: null, checkpoint: fixture.checkpoint,
+      });
+    },
+  });
+  dependencies.panelCoordinator = panelCoordinator([], {
+    async publishPrivacyPaused(value) { pausedPackets.push(structuredClone(value)); return true; },
+    async publishRunningResume() { throw new Error('RUNNING_MUST_NOT_BE_PUBLISHED'); },
+  });
+  const starter = createAuthorizedAuditStarter(dependencies);
+  const started = await starter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId, capturePolicy: policy,
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+  await started.completion;
+  return {
+    area, dependencies, pixelState, policy, prepared, started, pausedPackets, fixture, reportByAudit,
+    get executions() { return executions; },
+    suspension: () => pixelState.readSuspension(auditId),
+    setProof(value) { proof = value; },
+    setSignals(value) { signals = value; },
+    expire(value) { currentAt = value; },
+  };
+}
+
+async function finalizingPixelRecoveryHarness(auditId) {
+  const harness = await pausedAuditHarness(auditId);
+  const suspension = await harness.suspension();
+  const proof = {
+    kind: 'attached', tabId: suspension.tabId, windowId: suspension.windowId,
+    documentId: suspension.documentId, urlSessionDigest: suspension.urlSessionDigest,
+  };
+  await harness.pixelState.claimAndBeginResume({
+    auditId, consentId: suspension.consentId, proof,
+    mode: suspension.mode, categories: suspension.categories,
+  });
+  await harness.prepared.authority.transitionAuditSession({
+    sessionCapabilityId: harness.started.sessionCapabilityId, auditId, nextState: 'running',
+  });
+  await harness.pixelState.markSessionRunning({ auditId, consentId: suspension.consentId });
+  await harness.pixelState.gateRunnerStart({
+    auditId, consentId: suspension.consentId, proof, categories: suspension.categories,
+  });
+  const active = await readActiveAuditJobForWorker({ sessionArea: harness.area });
+  harness.area.values[ACTIVE_AUDIT_JOB_KEY] = {
+    ...structuredClone(active), state: 'finalizing', commitState: 'confirmed',
+    expectedTerminalRevision: 1, updatedAt: active.updatedAt + 1,
+  };
+  harness.reportByAudit.set(auditId, Object.freeze({
+    version: 1, auditId, modelRevision: 1,
+    modelHash: harness.fixture.model.integrity.canonicalModelHash,
+    model: harness.fixture.model, checkpoint: harness.fixture.checkpoint,
+  }));
+  const effects = { publishes: 0, finishes: 0, cleanups: 0 };
+  const durablePixelState = harness.pixelState;
+  harness.dependencies.pixelState = Object.freeze({
+    ...durablePixelState,
+    async finish(value) { effects.finishes += 1; return durablePixelState.finish(value); },
+  });
+  harness.dependencies.panelCoordinator = panelCoordinator([], {
+    async publishResult() { effects.publishes += 1; return true; },
+  });
+  harness.dependencies.pixelAttemptLifecycle = Object.freeze({
+    ...harness.dependencies.pixelAttemptLifecycle,
+    async classify() { return Object.freeze({ state: 'terminal', handle: null }); },
+    async cleanup() { effects.cleanups += 1; return true; },
+  });
+  return { ...harness, initialSuspension: suspension, effects };
+}
+
+test('denies wrong mode, document drift, and expiry without relaunching a paused pixel audit', async t => {
+  await t.test('wrong mode', async () => {
+    const harness = await pausedAuditHarness('audit-resume-mode');
+    const suspension = await harness.suspension();
+    const result = await createAuthorizedAuditStarter(harness.dependencies).resumePrivacyPausedAudit({
+      auditId: 'audit-resume-mode', sessionCapabilityId: harness.started.sessionCapabilityId,
+      windowId: 9, consentId: suspension.consentId, mode: 'element-only',
+    });
+    assert.deepEqual(result, {
+      response: { ok: false, code: 'AUDIT_RESUME_DENIED' }, sessionCapabilityId: null, completion: null,
+    });
+    assert.equal(harness.executions, 1);
+  });
+
+  await t.test('document drift', async () => {
+    const harness = await pausedAuditHarness('audit-resume-document');
+    const suspension = await harness.suspension();
+    harness.setProof({ tabId: 17, windowId: 9, documentId: 'document-b', urlSessionDigest: DIGEST });
+    const result = await createAuthorizedAuditStarter(harness.dependencies).resumePrivacyPausedAudit({
+      auditId: 'audit-resume-document', sessionCapabilityId: harness.started.sessionCapabilityId,
+      windowId: 9, consentId: suspension.consentId, mode: 'full-evidence',
+    });
+    assert.deepEqual(result, {
+      response: { ok: false, code: 'PIXEL_CONSENT_DOCUMENT_CHANGED' }, sessionCapabilityId: null, completion: null,
+    });
+    assert.equal(harness.executions, 1);
+    assert.equal(await harness.suspension(), null);
+    assert.equal(await readActiveAuditJobForWorker({ sessionArea: harness.area }), null);
+  });
+
+  await t.test('expired consent', async () => {
+    const harness = await pausedAuditHarness('audit-resume-expired');
+    const suspension = await harness.suspension();
+    harness.expire(suspension.expiresAt);
+    const result = await createAuthorizedAuditStarter(harness.dependencies).resumePrivacyPausedAudit({
+      auditId: 'audit-resume-expired', sessionCapabilityId: harness.started.sessionCapabilityId,
+      windowId: 9, consentId: suspension.consentId, mode: 'full-evidence',
+    });
+    assert.deepEqual(result, {
+      response: { ok: false, code: 'PIXEL_CONSENT_EXPIRED' }, sessionCapabilityId: null, completion: null,
+    });
+    assert.equal(harness.executions, 1);
+    assert.equal(await harness.suspension(), null);
+    assert.equal(await readActiveAuditJobForWorker({ sessionArea: harness.area }), null);
+  });
+});
+
+test('liquidation rejects a transplanted suspension before session or ACTIVE cleanup', async () => {
+  const auditId = 'audit-pixel-transplant';
+  const harness = await pausedAuditHarness(auditId);
+  const suspension = await harness.suspension();
+  const key = `audita:pixel-capture:v1:${auditId}`;
+  harness.area.values[key] = { ...structuredClone(harness.area.values[key]), tabId: 999 };
+  await harness.pixelState.revokeAudit({
+    auditId, consentId: suspension.consentId, reason: 'SESSION_ENDED',
+  });
+  const result = await createAuthorizedAuditStarter(harness.dependencies).liquidatePixelAudit({
+    auditId, consentId: suspension.consentId, reason: 'SESSION_ENDED',
+    source: { kind: 'attached' }, signal: new AbortController().signal,
+  });
+  assert.equal(result, false);
+  assert.equal((await readActiveAuditJobForWorker({ sessionArea: harness.area })).auditId, auditId);
+  assert.equal((await harness.suspension()).tabId, 999);
+});
+
+test('TAB_DISCARDED enters the unified paused-pixel liquidator', async () => {
+  const auditId = 'audit-pixel-discarded';
+  const harness = await pausedAuditHarness(auditId);
+  const result = await createAuthorizedAuditStarter(harness.dependencies).abortAttachedAuditForTarget({
+    tabId: 17, windowId: null, reasonCode: 'TAB_DISCARDED',
+  });
+  assert.deepEqual(result, { handled: true, liquidated: true, aborted: true, auditId });
+  assert.equal(await harness.suspension(), null);
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: harness.area }), null);
+});
+
+test('rotates changed sensitive categories and republishes a new paused consent without relaunching', async () => {
+  const auditId = 'audit-resume-drift';
+  const harness = await pausedAuditHarness(auditId);
+  const first = await harness.suspension();
+  harness.setSignals(Object.freeze({
+    version: 'SensitiveCaptureSignalsV1', detected: true, categories: Object.freeze(['payment']),
+  }));
+  const result = await createAuthorizedAuditStarter(harness.dependencies).resumePrivacyPausedAudit({
+    auditId, sessionCapabilityId: harness.started.sessionCapabilityId,
+    windowId: 9, consentId: first.consentId, mode: 'full-evidence',
+  });
+  assert.deepEqual(result, {
+    response: { ok: true, auditId, state: 'privacy-paused' },
+    sessionCapabilityId: harness.started.sessionCapabilityId, completion: null,
+  });
+  const second = await harness.suspension();
+  assert.notEqual(second.consentId, first.consentId);
+  assert.deepEqual(second.categories, ['payment']);
+  assert.equal(harness.executions, 1);
+  assert.equal((await readActiveAuditJobForWorker({ sessionArea: harness.area })).state, 'privacy-paused');
+  assert.deepEqual(harness.pausedPackets.at(-1), {
+    auditId, sessionCapabilityId: harness.started.sessionCapabilityId,
+    windowId: 9,
+  });
+});
+
+test('restart during a claimed resume revokes the attempt and never relaunches pixels', async () => {
+  const auditId = 'audit-resume-restart-cut';
+  const harness = await pausedAuditHarness(auditId);
+  const suspension = await harness.suspension();
+  await harness.pixelState.claimAndBeginResume({
+    auditId, consentId: suspension.consentId, mode: suspension.mode,
+    categories: suspension.categories,
+    proof: {
+      kind: 'attached', tabId: suspension.tabId, windowId: suspension.windowId,
+      documentId: suspension.documentId, urlSessionDigest: suspension.urlSessionDigest,
+    },
+  });
+  await harness.prepared.authority.transitionAuditSession({
+    sessionCapabilityId: harness.started.sessionCapabilityId, auditId, nextState: 'running',
+  });
+  await harness.pixelState.markSessionRunning({ auditId, consentId: suspension.consentId });
+  const active = await readActiveAuditJobForWorker({ sessionArea: harness.area });
+  harness.area.values[ACTIVE_AUDIT_JOB_KEY] = {
+    ...structuredClone(active), state: 'running', updatedAt: active.updatedAt + 1,
+  };
+
+  const recovery = await createAuthorizedAuditStarter(harness.dependencies).recoverAuthorizedAuditLifecycle();
+  assert.deepEqual(recovery, { ok: true, state: 'interrupted', auditId, revision: null });
+  assert.equal(harness.executions, 1);
+  assert.equal(await harness.suspension(), null);
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: harness.area }), null);
+});
+
+test('restart after a terminal commit publishes and finishes consent without recapturing', async () => {
+  const auditId = 'audit-resume-terminal-cut';
+  const harness = await finalizingPixelRecoveryHarness(auditId);
+
+  const recovery = await createAuthorizedAuditStarter(harness.dependencies).recoverAuthorizedAuditLifecycle();
+  assert.deepEqual(recovery, { ok: true, state: 'reconciled', auditId, revision: 1 });
+  assert.equal(harness.executions, 1);
+  assert.equal(await harness.suspension(), null);
+  assert.deepEqual(harness.effects, { publishes: 1, finishes: 1, cleanups: 1 });
+});
+
+test('finalizing recovery rejects a transplanted pixel journal before every terminal effect', async t => {
+  const mutations = [
+    ['tab', record => { record.tabId = 999; }],
+    ['document', record => { record.documentId = 'foreign-document'; }],
+    ['digest', record => { record.urlSessionDigest = `hmac-sha256:${'B'.repeat(43)}`; }],
+    ['foreign evidence URL', record => { record.urlEvidence.href = 'https://foreign.example/other'; }],
+    ['evidence query', record => { record.urlEvidence.queryIncluded = true; record.urlEvidence.href = 'https://example.test/?private=1'; }],
+    ['mode-policy mismatch', record => { record.mode = 'element-only'; }],
+    ['query-enabled policy', record => { record.capturePolicy.includeQuery = true; }],
+    ['noncanonical categories', record => { record.categories = ['payment', 'password']; }],
+  ];
+  for (const [name, mutate] of mutations) await t.test(name, async () => {
+    const auditId = `audit-finalizing-transplant-${name.replaceAll(' ', '-')}`;
+    const harness = await finalizingPixelRecoveryHarness(auditId);
+    const key = `audita:pixel-capture:v1:${auditId}`;
+    mutate(harness.area.values[key]);
+
+    const recovery = await createAuthorizedAuditStarter(harness.dependencies).recoverAuthorizedAuditLifecycle();
+
+    assert.deepEqual(recovery, {
+      ok: false, state: 'blocked', auditId: null, revision: null, code: 'AUDIT_RECOVERY_REQUIRED',
+    });
+    assert.deepEqual(harness.effects, { publishes: 0, finishes: 0, cleanups: 0 });
+    assert.equal((await readActiveAuditJobForWorker({ sessionArea: harness.area })).auditId, auditId);
+    assert.equal(harness.reportByAudit.has(auditId), true);
+    assert.equal(Object.hasOwn(harness.area.values, key), true);
+  });
+});
+
+test('cancels a durable paused audit without any live-map authority or pixel relaunch', async () => {
+  const auditId = 'audit-paused-cancel';
+  const harness = await pausedAuditHarness(auditId);
+  const result = await createAuthorizedAuditStarter(harness.dependencies).abortAuthorizedAudit({
+    auditId, sessionCapabilityId: harness.started.sessionCapabilityId, windowId: 9, reasonCode: 'USER_CANCELLED',
+  });
+  assert.deepEqual(result, { ok: true, auditId, state: 'revoked' });
+  assert.equal(harness.executions, 1);
+  assert.equal(await harness.suspension(), null);
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: harness.area }), null);
+  assert.equal(Object.hasOwn(harness.area.values, START_JOURNAL_KEY), false);
+  assert.equal(Object.hasOwn(harness.area.values, executionCheckpointStorageKey(auditId)), false);
 });
 
 test('cleans live aids under the target lock before any capability claim or audit side effect', async () => {
@@ -799,7 +1314,7 @@ test('journals, claims, checkpoints and atomically settles a result before publi
     createdAt: EPOCH + 1, expiresAt: EPOCH + 30 * 60_000,
   });
   assert.ok(order.indexOf('commit') < order.indexOf('publish:result'));
-  assert.ok(order.indexOf('checkpoint-remove') < order.indexOf('publish:result'));
+  assert.ok(order.indexOf('publish:result') < order.indexOf('checkpoint-remove'));
   assert.ok(order.indexOf('bootstrap-register') < order.indexOf('latest:running'));
   assert.ok(order.indexOf('latest:running') < order.indexOf('bootstrap'));
   assert.ok(order.indexOf('bootstrap') < order.indexOf('run'));

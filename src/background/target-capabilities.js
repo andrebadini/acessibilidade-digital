@@ -4,6 +4,7 @@ export const EXPORT_SURFACE = Object.freeze({ path: '/src/export/index.html', co
 
 const TRUSTED_SURFACES = new Set([PANEL_SURFACE, REVIEW_SURFACE, EXPORT_SURFACE]);
 const SURFACE_BY_PATH = new Map([...TRUSTED_SURFACES].map(surface => [surface.path, surface]));
+const SESSION_AREA_TAILS = new WeakMap();
 const TARGET_PREFIX = 'audita:target-capability:v1:';
 const SESSION_PREFIX = 'audita:audit-session-capability:v1:';
 const CAPABILITY_ID = /^[A-Za-z0-9_-]{22}$/u;
@@ -26,10 +27,14 @@ const CONSUMERS = deepFreeze([
   { name: 'review', path: REVIEW_SURFACE.path, contextType: REVIEW_SURFACE.contextType },
 ]);
 const INTENTS = deepFreeze({
+  panel: { running: ['cancel'], 'privacy-paused': ['cancel', 'confirm-pixels'], result: ['open-report', 'highlight'], 'view-only': ['open-report'] },
+  review: { running: [], 'privacy-paused': [], result: ['export', 'highlight'], 'view-only': ['export'] },
+});
+const PRE_PRIVACY_INTENTS = deepFreeze({
   panel: { running: ['cancel'], result: ['open-report', 'highlight'], 'view-only': ['open-report'] },
   review: { running: [], result: ['export', 'highlight'], 'view-only': ['export'] },
 });
-const LEGACY_INTENTS = deepFreeze({
+const LEGACY_STORAGE_INTENTS = deepFreeze({
   panel: { running: ['cancel'], result: ['open-report'], 'view-only': ['open-report'] },
   review: { running: [], result: ['export'], 'view-only': ['export'] },
 });
@@ -188,35 +193,64 @@ export async function readAuditSessionForWorker(args) {
   }
 }
 
+async function readAttachedAuditRecoveryGraph(args) {
+  const input = readDataRecord(args, ['sessionArea', 'capabilityId', 'auditId']);
+  if (!input || typeof input.sessionArea?.get !== 'function' || !CAPABILITY_ID.test(input.capabilityId ?? '') ||
+    !MODEL_ID.test(input.auditId ?? '')) throw new Error('denied');
+  const targetKey = targetCapabilityStorageKey(input.capabilityId);
+  const firstTarget = parseTargetRecord(readExactStoredValue(await input.sessionArea.get(targetKey), targetKey));
+  if (!validRecoveryTarget(firstTarget, input.capabilityId)) throw new Error('denied');
+  let firstSession = null;
+  let sessionKey = null;
+  if (firstTarget.sessionCapabilityId !== null) {
+    sessionKey = sessionCapabilityStorageKey(firstTarget.sessionCapabilityId);
+    firstSession = parseSessionRecord(readExactStoredValue(await input.sessionArea.get(sessionKey), sessionKey));
+    if (!validRecoverySession(firstSession, firstTarget, input.auditId)) throw new Error('denied');
+  }
+  const secondTarget = parseTargetRecord(readExactStoredValue(await input.sessionArea.get(targetKey), targetKey));
+  if (!secondTarget || !sameGraph(firstTarget, secondTarget)) throw new Error('denied');
+  if (sessionKey !== null) {
+    const secondSession = parseSessionRecord(readExactStoredValue(await input.sessionArea.get(sessionKey), sessionKey));
+    if (!secondSession || !sameGraph(firstSession, secondSession)) throw new Error('denied');
+  }
+  return deepFreeze({ auditId: input.auditId, target: firstTarget, session: firstSession });
+}
+
 export async function readAttachedAuditCorrelationForRecovery(args) {
   try {
-    const input = readDataRecord(args, ['sessionArea', 'capabilityId', 'auditId']);
-    if (!input || typeof input.sessionArea?.get !== 'function' || !CAPABILITY_ID.test(input.capabilityId ?? '') ||
-      !MODEL_ID.test(input.auditId ?? '')) throw new Error('denied');
-    const targetKey = targetCapabilityStorageKey(input.capabilityId);
-    const firstTarget = parseTargetRecord(readExactStoredValue(await input.sessionArea.get(targetKey), targetKey));
-    if (!validRecoveryTarget(firstTarget, input.capabilityId)) throw new Error('denied');
-    let firstSession = null;
-    let secondSession = null;
-    let sessionKey = null;
-    if (firstTarget.sessionCapabilityId !== null) {
-      sessionKey = sessionCapabilityStorageKey(firstTarget.sessionCapabilityId);
-      firstSession = parseSessionRecord(readExactStoredValue(await input.sessionArea.get(sessionKey), sessionKey));
-      if (!validRecoverySession(firstSession, firstTarget, input.auditId)) throw new Error('denied');
-    }
-    const secondTarget = parseTargetRecord(readExactStoredValue(await input.sessionArea.get(targetKey), targetKey));
-    if (!secondTarget || !sameGraph(firstTarget, secondTarget)) throw new Error('denied');
-    if (sessionKey !== null) {
-      secondSession = parseSessionRecord(readExactStoredValue(await input.sessionArea.get(sessionKey), sessionKey));
-      if (!secondSession || !sameGraph(firstSession, secondSession)) throw new Error('denied');
-    }
+    const { auditId, target, session } = await readAttachedAuditRecoveryGraph(args);
     return deepFreeze({
-      version: 1, capabilityId: firstTarget.capabilityId, auditId: input.auditId, windowId: firstTarget.windowId,
-      targetState: firstTarget.state, sessionCapabilityId: firstTarget.sessionCapabilityId,
-      sessionState: firstSession?.state ?? null, issuedAt: firstTarget.issuedAt, expiresAt: firstTarget.expiresAt,
+      version: 1, capabilityId: target.capabilityId, auditId, windowId: target.windowId,
+      targetState: target.state, sessionCapabilityId: target.sessionCapabilityId,
+      sessionState: session?.state ?? null, issuedAt: target.issuedAt, expiresAt: target.expiresAt,
     });
   } catch {
     throw new Error('AUDIT_RECOVERY_CORRELATION_DENIED');
+  }
+}
+
+export async function readAttachedAuditRecoveryGrant(args) {
+  try {
+    const { auditId, target, session } = await readAttachedAuditRecoveryGraph(args);
+    if (target.initialUrlEvidence.includes('?')) throw new Error('denied');
+    return deepFreeze({
+      version: 1,
+      capabilityId: target.capabilityId,
+      auditId,
+      sessionCapabilityId: target.sessionCapabilityId,
+      windowId: target.windowId,
+      issuedAt: target.issuedAt,
+      expiresAt: target.expiresAt,
+      targetState: target.state,
+      sessionState: session?.state ?? null,
+      target: {
+        kind: 'attached', tabId: target.tabId, windowId: target.windowId,
+        documentId: target.documentId, initialUrlEvidence: target.initialUrlEvidence,
+        initialUrlSessionDigest: target.initialUrlSessionDigest,
+      },
+    });
+  } catch {
+    throw new Error('AUDIT_RECOVERY_GRANT_DENIED');
   }
 }
 
@@ -234,10 +268,10 @@ export function createTargetCapabilityAuthority({
     typeof now !== 'function' || typeof randomBytes !== 'function' ||
     typeof probeDocument !== 'function' || !Number.isSafeInteger(capabilityTtlMs) || capabilityTtlMs < 1 ||
     !Number.isSafeInteger(sessionTtlMs) || sessionTtlMs < 1) throw new TypeError('CAPABILITY_AUTHORITY_INVALID');
-  let tail = Promise.resolve();
   const serialize = operation => {
+    const tail = SESSION_AREA_TAILS.get(sessionArea) ?? Promise.resolve();
     const pending = tail.then(operation, operation);
-    tail = pending.catch(() => {});
+    SESSION_AREA_TAILS.set(sessionArea, pending.catch(() => {}));
     return pending;
   };
 
@@ -403,11 +437,13 @@ export function createTargetCapabilityAuthority({
     const key = sessionCapabilityStorageKey(input.sessionCapabilityId);
     const session = parseSessionRecord(readStoredValue(await sessionArea.get(key), key));
     const currentTime = readNow(now);
+    const stateIntents = session?.intents[input.consumer]?.[session.state] ??
+      (session?.state === 'privacy-paused' ? (input.consumer === 'panel' ? ['cancel'] : []) : null);
     const allowed = session && session.sessionCapabilityId === input.sessionCapabilityId &&
       session.expiresAt > currentTime && session.auditId === input.auditId &&
       session.windowId === context.windowId && context.issuer.path === descriptor.path &&
       context.contextType === descriptor.contextType && session.consumers.some(value => sameConsumer(value, descriptor)) &&
-      session.intents[input.consumer]?.[session.state]?.includes(input.intent) === true;
+      stateIntents?.includes(input.intent) === true;
     if (!allowed) return sessionDenied();
     if (surface.allowQuery === 'auditId-only' && new URL(context.documentUrl).searchParams.get('auditId') !== input.auditId) {
       return sessionDenied();
@@ -424,11 +460,18 @@ export function createTargetCapabilityAuthority({
     const session = parseSessionRecord(readStoredValue(await sessionArea.get(key), key));
     const allowed = session && session.sessionCapabilityId === input.sessionCapabilityId &&
       session.auditId === input.auditId &&
-      ((session.state === 'running' && ['result', 'revoked'].includes(input.nextState)) ||
+      ((session.state === 'running' && ['privacy-paused', 'result', 'revoked'].includes(input.nextState)) ||
+        (session.state === 'privacy-paused' && ['running', 'revoked'].includes(input.nextState)) ||
         (['result', 'view-only'].includes(session.state) && input.nextState === 'revoked'));
-    if (!allowed) return transitionDenied();
+    if (!allowed || (input.nextState === 'privacy-paused' && session.targetBinding.kind !== 'attached')) {
+      return transitionDenied();
+    }
     const changed = { ...session, state: input.nextState };
-    await sessionArea.set({ [key]: changed });
+    try { await sessionArea.set({ [key]: changed }); } catch { /* readback confirms commit-then-throw */ }
+    let confirmed;
+    try { confirmed = parseSessionRecord(readStoredValue(await sessionArea.get(key), key)); }
+    catch { return transitionDenied(); }
+    if (!confirmed || !sameGraph(confirmed, changed)) return transitionDenied();
     return deepFreeze({ ok: true, sessionCapabilityId: session.sessionCapabilityId, auditId: session.auditId, state: changed.state });
   });
 
@@ -599,9 +642,10 @@ function parseSessionRecord(value) {
   const intents = parseIntents(record.intents);
   if (record.version !== 1 || !CAPABILITY_ID.test(record.sessionCapabilityId ?? '') ||
     !MODEL_ID.test(record.auditId ?? '') || !safeChromeId(record.windowId) || !MODEL_ID.test(record.mode ?? '') ||
-    !targetBinding || !consumers || !intents || !['running', 'result', 'view-only', 'revoked'].includes(record.state) ||
+    !targetBinding || !consumers || !intents || !['running', 'privacy-paused', 'result', 'view-only', 'revoked'].includes(record.state) ||
     (targetBinding.kind === 'view-only' && !['view-only', 'revoked'].includes(record.state)) ||
     (record.state === 'view-only' && targetBinding.kind !== 'view-only') ||
+    (record.state === 'privacy-paused' && targetBinding.kind !== 'attached') ||
     !safeTime(record.issuedAt) || !safeTime(record.expiresAt) || record.expiresAt <= record.issuedAt) return null;
   return { ...record, targetBinding, consumers, intents };
 }
@@ -700,18 +744,32 @@ function parseConsumers(value) {
 function parseIntents(value) {
   const intents = readDataRecord(value, ['panel', 'review']);
   if (!intents) return null;
-  const panel = readDataRecord(intents.panel, ['running', 'result', 'view-only']);
-  const review = readDataRecord(intents.review, ['running', 'result', 'view-only']);
-  if (!panel || !review) return null;
-  for (const allowed of [INTENTS, LEGACY_INTENTS]) {
-    if (sameDataArray(panel.running, allowed.panel.running) &&
-      sameDataArray(panel.result, allowed.panel.result) &&
-      sameDataArray(panel['view-only'], allowed.panel['view-only']) &&
-      sameDataArray(review.running, allowed.review.running) &&
-      sameDataArray(review.result, allowed.review.result) &&
-      sameDataArray(review['view-only'], allowed.review['view-only'])) {
-      return structuredClone(allowed);
+  const panel = readDataRecord(intents.panel, ['running', 'privacy-paused', 'result', 'view-only']);
+  const review = readDataRecord(intents.review, ['running', 'privacy-paused', 'result', 'view-only']);
+  if (panel && review) {
+    for (const allowed of [INTENTS]) {
+      if (sameDataArray(panel.running, allowed.panel.running) &&
+        sameDataArray(panel['privacy-paused'], allowed.panel['privacy-paused']) &&
+        sameDataArray(panel.result, allowed.panel.result) &&
+        sameDataArray(panel['view-only'], allowed.panel['view-only']) &&
+        sameDataArray(review.running, allowed.review.running) &&
+        sameDataArray(review['privacy-paused'], allowed.review['privacy-paused']) &&
+        sameDataArray(review.result, allowed.review.result) &&
+        sameDataArray(review['view-only'], allowed.review['view-only'])) {
+        return structuredClone(allowed);
+      }
     }
+  }
+  const oldPanel = readDataRecord(intents.panel, ['running', 'result', 'view-only']);
+  const oldReview = readDataRecord(intents.review, ['running', 'result', 'view-only']);
+  if (!oldPanel || !oldReview) return null;
+  for (const stored of [PRE_PRIVACY_INTENTS, LEGACY_STORAGE_INTENTS]) {
+    if (sameDataArray(oldPanel.running, stored.panel.running) &&
+      sameDataArray(oldPanel.result, stored.panel.result) &&
+      sameDataArray(oldPanel['view-only'], stored.panel['view-only']) &&
+      sameDataArray(oldReview.running, stored.review.running) &&
+      sameDataArray(oldReview.result, stored.review.result) &&
+      sameDataArray(oldReview['view-only'], stored.review['view-only'])) return structuredClone(stored);
   }
   return null;
 }
@@ -731,8 +789,9 @@ function validRecoveryTarget(target, capabilityId) {
 function validRecoverySession(session, target, auditId) {
   if (!session || session.sessionCapabilityId !== target.sessionCapabilityId || session.auditId !== auditId ||
     session.windowId !== target.windowId || session.mode !== 'attached' ||
-    !['running', 'result', 'view-only', 'revoked'].includes(session.state)) return false;
+    !['running', 'privacy-paused', 'result', 'view-only', 'revoked'].includes(session.state)) return false;
   if (session.targetBinding.kind === 'view-only') return ['view-only', 'revoked'].includes(session.state);
+  if (session.state === 'privacy-paused' && session.targetBinding.kind !== 'attached') return false;
   return session.targetBinding.kind === 'attached' && session.targetBinding.tabId === target.tabId &&
     session.targetBinding.documentId === target.documentId &&
     session.targetBinding.urlSessionDigest === target.initialUrlSessionDigest;

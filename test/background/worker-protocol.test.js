@@ -1,16 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { parsePanelPortIntent, parseWorkerMessage } from '../../src/background/worker-protocol.js';
+import {
+  isPanelPortIntent,
+  parsePanelPortIntent,
+  parseWorkerMessage,
+} from '../../src/background/worker-protocol.js';
 
 const CAPABILITY = '_1234567890123456789';
 const SESSION = '-1234567890123456789';
 const LEASE = 'lease-1234567890123456789012';
+const CONSENT = `${'C'.repeat(21)}Q`;
 
 const validMessages = [
   { type: 'PREPARE_PANEL_CAPABILITY', requestId: '_request', windowId: 9 },
   { type: 'PREPARE_PANEL_PERSONA_CAPABILITY', requestId: '_persona', windowId: 9 },
   { type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9 },
+  { type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'full-evidence', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9 },
+  { type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'element-only', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9 },
+  { type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: '-audit.1', consentId: CONSENT, mode: 'full-evidence', accepted: true, windowId: 9 },
   { type: 'PANEL_START_PERSONA', capabilityId: CAPABILITY, mode: 'reader', windowId: 9 },
   { type: 'PANEL_REHYDRATE_PERSONA', capabilityId: CAPABILITY, windowId: 9 },
   { type: 'PANEL_SET_PERSONA_MODE', leaseId: LEASE, mode: 'motor', windowId: 9 },
@@ -179,6 +187,49 @@ test('adds the admitted window only at the panel Port boundary and rejects every
   });
   assert.deepEqual(parsePanelPortIntent(hostile, 9), { ok: false, code: 'INVALID_MESSAGE' });
   assert.equal(reads, 0);
+});
+
+test('admits confirmation only through the panel Port and injects its bound window', () => {
+  const clientIntent = {
+    type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: 'audit-1',
+    consentId: CONSENT, mode: 'element-only', accepted: true,
+  };
+  const internal = { ...clientIntent, windowId: 9 };
+
+  assert.equal(isPanelPortIntent(clientIntent), true);
+  assert.deepEqual(parsePanelPortIntent(clientIntent, 9), { ok: true, value: internal });
+  assert.deepEqual(parseWorkerMessage(internal), { ok: true, value: internal });
+  assert.deepEqual(parseWorkerMessage(clientIntent), { ok: false, code: 'INVALID_MESSAGE' });
+  assert.deepEqual(parsePanelPortIntent(internal, 9), { ok: false, code: 'INVALID_MESSAGE' });
+});
+
+test('rejects non-canonical or hostile pixel confirmations without invoking accessors', () => {
+  const base = {
+    type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: 'audit-1',
+    consentId: CONSENT, mode: 'full-evidence', accepted: true,
+  };
+  let getterCalls = 0;
+  const accessor = { ...base };
+  Object.defineProperty(accessor, 'consentId', {
+    enumerable: true,
+    get() { getterCalls += 1; return CONSENT; },
+  });
+  const customPrototype = Object.assign(Object.create({ inherited: true }), base);
+  for (const intent of [
+    { ...base, accepted: false },
+    { ...base, mode: 'no-pixels' },
+    { ...base, mode: 'pixels' },
+    { ...base, consentId: `${'C'.repeat(21)}B` },
+    { ...base, consentId: 'C'.repeat(21) },
+    { ...base, consentId: 'C'.repeat(23) },
+    { ...base, tabId: 17 },
+    { ...base, [Symbol('private')]: true },
+    accessor,
+    customPrototype,
+  ]) {
+    assert.deepEqual(parsePanelPortIntent(intent, 9), { ok: false, code: 'INVALID_MESSAGE' });
+  }
+  assert.equal(getterCalls, 0);
 });
 
 test('admits shared highlight intents through the panel Port without adding or accepting a UI window claim', () => {

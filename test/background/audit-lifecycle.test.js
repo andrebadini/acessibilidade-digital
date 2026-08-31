@@ -248,3 +248,29 @@ test('rebinds the existing Side Panel once after loading invalidation completes'
   for (let index = 0; index < 3; index += 1) await tick();
   assert.deepEqual(calls, ['abort', 'highlight', 'authority']);
 });
+
+test('a handled paused-pixel invalidation never falls through to an independent capability invalidation', async () => {
+  const updated = event(); const removed = event(); const windows = event();
+  const calls = [];
+  createAuditLifecycle({
+    chromeApi: { tabs: { onUpdated: updated, onRemoved: removed }, windows: { onRemoved: windows } },
+    getReadyRuntime: async () => ({
+      auditStarter: {
+        async abortAttachedAuditForTarget(value) {
+          calls.push(['liquidator', value]);
+          return Object.freeze({ handled: true, liquidated: false, aborted: false, auditId: 'audit-paused' });
+        },
+      },
+      authority: {
+        async invalidateForTab() { calls.push(['independent-invalidate']); },
+        async invalidateForWindow() { calls.push(['independent-window-invalidate']); },
+      },
+    }),
+  }).register();
+
+  updated.emit(17, { status: 'loading' }, {});
+  for (let index = 0; index < 3; index += 1) await tick();
+  assert.deepEqual(calls, [[
+    'liquidator', { tabId: 17, windowId: null, reasonCode: 'TAB_LOADING' },
+  ]]);
+});

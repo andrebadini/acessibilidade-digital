@@ -1,4 +1,6 @@
 import { copyPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
+import { isCapturePolicyV1 } from '../core/privacy/capture-policy.js';
+import { isEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
 import { capturedUtf8Length, parsePanelPortIntent } from './worker-protocol.js';
 import { parseStorageGetEnvelope } from './storage-get-envelope.js';
 
@@ -6,7 +8,7 @@ export const PANEL_PORT_NAME = 'audita-panel-v1';
 export const panelBootstrapStorageKey = windowId => `audita:panel-bootstrap:v1:${windowId}`;
 
 const FACTORY_KEYS = Object.freeze([
-  'chromeApi', 'sessionArea', 'readActiveJob', 'readAuditSession', 'loadPanelResultBundle',
+  'chromeApi', 'sessionArea', 'readActiveJob', 'readAuditSession', 'readPixelSuspension', 'loadPanelResultBundle',
   'rehydrateViewOnly', 'revokeViewOnly', 'epochNow', 'setTimer', 'clearTimer',
   'launchAuthority', 'dispatchPanelIntent', 'authorizeHighlightSession',
 ]);
@@ -20,10 +22,24 @@ const ACTIVE_KEYS = Object.freeze([
   'version', 'auditId', 'capabilityId', 'sessionCapabilityId', 'windowId', 'mode',
   'state', 'commitState', 'expectedTerminalRevision', 'createdAt', 'updatedAt',
 ]);
+const SUSPENSION_KEYS = Object.freeze([
+  'version', 'revision', 'auditId', 'consentId', 'tabId', 'windowId', 'documentId',
+  'urlEvidence', 'urlSessionDigest', 'mode', 'capturePolicy', 'categories',
+  'issuedAt', 'updatedAt', 'expiresAt', 'cleanupAttempts', 'cleanupNotBefore',
+  'state', 'resumePhase', 'revokeReason', 'source',
+]);
+const CAPTURE_POLICY_KEYS = Object.freeze([
+  'version', 'mode', 'includeQuery', 'captureFullPage', 'captureElements', 'composeAnnouncementMap',
+]);
+const EVIDENCE_URL_KEYS = Object.freeze(['version', 'href', 'queryIncluded', 'redactedSegments']);
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const OCCURRENCE_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const CAPABILITY = /^[A-Za-z0-9_-]{22}$/u;
 const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
+const CONSENT_ID = /^[A-Za-z0-9_-]{21}[AQgw]$/u;
+const PIXEL_MODES = new Set(['full-evidence', 'element-only']);
+const SENSITIVE_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private-marker']);
+const PRIVACY_PAUSE_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
 const START_JOURNAL_KEY = 'audita:start-journal:v1';
 const HIGHLIGHT_INTENT_TYPES = new Set([
   'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT',
@@ -99,7 +115,7 @@ function parseSession(value) {
   const record = exact(value, SESSION_KEYS, true);
   if (!record || record.version !== 1 || !CAPABILITY.test(record.sessionCapabilityId ?? '') ||
     !AUDIT_ID.test(record.auditId ?? '') || !safeChromeId(record.windowId) || record.mode !== 'attached' ||
-    !['running', 'result', 'view-only', 'revoked'].includes(record.state) || !safeEpoch(record.issuedAt) ||
+    !['running', 'privacy-paused', 'result', 'view-only', 'revoked'].includes(record.state) || !safeEpoch(record.issuedAt) ||
     !safeEpoch(record.expiresAt) || record.expiresAt <= record.issuedAt) return null;
   const viewOnlyBinding = exact(record.targetBinding, ['kind'], true);
   const attachedBinding = exact(record.targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest'], true);
@@ -120,8 +136,60 @@ function parseActive(value) {
     !safeChromeId(record.windowId) || record.mode !== 'attached' || !safeEpoch(record.createdAt) ||
     !safeEpoch(record.updatedAt) || record.updatedAt < record.createdAt) return undefined;
   if (record.state === 'running' && record.commitState === 'none' && record.expectedTerminalRevision === null) return freeze(record);
+  if (record.state === 'privacy-paused' && record.commitState === 'none' && record.expectedTerminalRevision === null) return freeze(record);
   if (record.state === 'finalizing' && ['pending', 'confirmed'].includes(record.commitState) && record.expectedTerminalRevision === 1) return freeze(record);
   return undefined;
+}
+
+function canonicalSensitiveCategories(value) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
+    const length = Object.getOwnPropertyDescriptor(value, 'length');
+    if (!length || !Object.hasOwn(length, 'value') || !Number.isSafeInteger(length.value) ||
+      length.value < 1 || length.value > SENSITIVE_CATEGORIES.length) return null;
+    const expected = ['length', ...Array.from({ length: length.value }, (_unused, index) => String(index))];
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) return null;
+    const copy = [];
+    for (let index = 0; index < length.value; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value') ||
+        !SENSITIVE_CATEGORIES.includes(descriptor.value)) return null;
+      copy.push(descriptor.value);
+    }
+    const canonical = SENSITIVE_CATEGORIES.filter(category => copy.includes(category));
+    return canonical.length === copy.length && canonical.every((category, index) => category === copy[index])
+      ? Object.freeze(canonical)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseSuspension(value) {
+  const record = exact(value, SUSPENSION_KEYS, true);
+  const policy = record && exact(record.capturePolicy, CAPTURE_POLICY_KEYS, true);
+  const evidence = record && exact(record.urlEvidence, EVIDENCE_URL_KEYS, true);
+  const categories = record && canonicalSensitiveCategories(record.categories);
+  const source = record && exact(record.source, ['kind'], true);
+  if (!record || record.version !== 'AuditSuspensionV1' || !Number.isSafeInteger(record.revision) ||
+    record.revision < 1 || !AUDIT_ID.test(record.auditId ?? '') || !CONSENT_ID.test(record.consentId ?? '') ||
+    !safeChromeId(record.tabId) || !safeChromeId(record.windowId) ||
+    typeof record.documentId !== 'string' || record.documentId.length < 1 || record.documentId.length > 512 ||
+    /[\u0000-\u001F\u007F]/u.test(record.documentId) || !DIGEST.test(record.urlSessionDigest ?? '') ||
+    !PIXEL_MODES.has(record.mode) || !policy || !isCapturePolicyV1(policy) || policy.mode !== record.mode ||
+    !evidence || !isEvidenceUrlV1(evidence) || !categories || source?.kind !== 'attached' ||
+    !safeEpoch(record.issuedAt) || !safeEpoch(record.updatedAt) || !safeEpoch(record.expiresAt) ||
+    record.updatedAt < record.issuedAt || record.expiresAt <= record.issuedAt ||
+    record.cleanupAttempts !== 0 || record.cleanupNotBefore !== null || record.state !== 'paused' ||
+    record.resumePhase !== null || record.revokeReason !== null) return null;
+  return freeze({
+    ...record,
+    capturePolicy: { ...policy },
+    urlEvidence: { ...evidence },
+    categories: [...categories],
+    source: { kind: 'attached' },
+  });
 }
 
 function hello(value) {
@@ -166,7 +234,10 @@ function authorizedHighlightPublication(value, binding, actionAt) {
   const session = authorization && exact(authorization.session, AUTHORIZED_SESSION_KEYS, true);
   const target = session && exact(session.targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest'], true);
   const intents = session && exact(session.intents, ['panel', 'review'], true);
-  const panelIntents = intents && exact(intents.panel, ['running', 'result', 'view-only'], true);
+  const panelIntents = intents && (
+    exact(intents.panel, ['running', 'privacy-paused', 'result', 'view-only'], true) ??
+    exact(intents.panel, ['running', 'result', 'view-only'], true)
+  );
   const resultIntents = panelIntents && safeStringArray(panelIntents.result);
   const context = authorization && exact(authorization.context, ['issuer', 'windowId', 'tabId', 'contextType', 'documentUrl'], true);
   const issuer = context && exact(context.issuer, ['type', 'documentId', 'path'], true);
@@ -190,6 +261,18 @@ function packet(state, auditId, sessionCapabilityId, result) {
   });
 }
 
+function privacyPausedPacket(suspension, sessionCapabilityId) {
+  return freeze({
+    protocol: 'audita-panel', version: 1, type: 'privacy-paused',
+    auditId: suspension.auditId,
+    sessionCapabilityId,
+    consentId: suspension.consentId,
+    mode: suspension.mode,
+    categories: [...suspension.categories],
+    message: PRIVACY_PAUSE_MESSAGE,
+  });
+}
+
 function deniedRegistration() {
   return Object.freeze({ registered: false, delivered: false, code: 'AUDIT_REHYDRATE_DENIED' });
 }
@@ -203,6 +286,7 @@ export function createPanelPortCoordinator(raw) {
   if (!input || typeof input.chromeApi?.runtime?.id !== 'string' ||
     typeof input.sessionArea?.get !== 'function' || typeof input.sessionArea.set !== 'function' ||
     typeof input.readActiveJob !== 'function' || typeof input.readAuditSession !== 'function' ||
+    typeof input.readPixelSuspension !== 'function' ||
     typeof input.loadPanelResultBundle !== 'function' || typeof input.rehydrateViewOnly !== 'function' ||
     typeof input.revokeViewOnly !== 'function' || typeof input.epochNow !== 'function' ||
     typeof input.setTimer !== 'function' || typeof input.clearTimer !== 'function' ||
@@ -246,6 +330,8 @@ export function createPanelPortCoordinator(raw) {
       publishRegisteredBootstrap: invoke(publishRegisteredBootstrap),
       publishResult: invoke(publishResult),
       registerAndPublishViewOnly: invoke(registerAndPublishViewOnly),
+      publishPrivacyPaused: invoke(publishPrivacyPaused),
+      publishRunningResume: invoke(publishRunningResume),
       disconnectSession: invoke(disconnectSession),
     });
     scopeStates.set(scope, { windowId, active: true });
@@ -382,6 +468,13 @@ export function createPanelPortCoordinator(raw) {
     return value;
   }
 
+  async function readSuspension(auditId, assertOwned = null) {
+    const value = parseSuspension(await input.readPixelSuspension(auditId));
+    reassert(assertOwned);
+    if (!value || value.auditId !== auditId) throw new Error('PANEL_PRIVACY_PAUSE_DENIED');
+    return value;
+  }
+
   async function requireActiveAbsent(assertOwned) {
     try {
       const active = await readActive(assertOwned);
@@ -488,6 +581,64 @@ export function createPanelPortCoordinator(raw) {
       active.windowId === bootstrap.windowId ? { session, active } : null;
   }
 
+  function privacyPauseCorrelation(bootstrap, session, active, suspension, currentTime) {
+    const target = exact(session.targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest'], true);
+    return session.state === 'privacy-paused' && session.windowId === bootstrap.windowId && target?.kind === 'attached' &&
+      active?.state === 'privacy-paused' && active.auditId === bootstrap.auditId &&
+      active.sessionCapabilityId === bootstrap.sessionCapabilityId && active.windowId === bootstrap.windowId &&
+      suspension.auditId === bootstrap.auditId && suspension.windowId === bootstrap.windowId &&
+      suspension.tabId === target.tabId && suspension.documentId === target.documentId &&
+      suspension.urlSessionDigest === target.urlSessionDigest && suspension.source.kind === 'attached' &&
+      suspension.mode === suspension.capturePolicy.mode && suspension.issuedAt <= currentTime &&
+      bootstrap.createdAt <= currentTime && currentTime < bootstrap.expiresAt &&
+      currentTime < suspension.expiresAt && currentTime < session.expiresAt;
+  }
+
+  async function stablePrivacyPauseCorrelation(bootstrap, assertOwned = null) {
+    const read = async () => {
+      const session = await readSession(bootstrap.sessionCapabilityId, bootstrap.auditId, assertOwned);
+      reassert(assertOwned);
+      const active = await readActive(assertOwned);
+      reassert(assertOwned);
+      const suspension = await readSuspension(bootstrap.auditId, assertOwned);
+      reassert(assertOwned);
+      const currentTime = input.epochNow();
+      if (!safeEpoch(currentTime) || !privacyPauseCorrelation(bootstrap, session, active, suspension, currentTime)) {
+        throw new Error('PANEL_PRIVACY_PAUSE_DENIED');
+      }
+      return freeze({ session, active, suspension });
+    };
+    const first = await read();
+    reassert(assertOwned);
+    const second = await read();
+    reassert(assertOwned);
+    return same(first, second) ? second : null;
+  }
+
+  async function stableRunningResumeCorrelation(bootstrap, assertOwned = null) {
+    const first = await runningCorrelation(bootstrap, assertOwned);
+    reassert(assertOwned);
+    const second = await runningCorrelation(bootstrap, assertOwned);
+    reassert(assertOwned);
+    const currentTime = input.epochNow();
+    return first && second && same(first, second) && safeEpoch(currentTime) &&
+      bootstrap.createdAt <= currentTime && currentTime < bootstrap.expiresAt &&
+      currentTime < second.session.expiresAt ? second : null;
+  }
+
+  async function deliverPrivacyPaused(binding, bootstrap, assertOwned = null) {
+    if (!['pending', 'consumed'].includes(bootstrap.state)) throw new Error('PANEL_BOOTSTRAP_DENIED');
+    const correlation = await stablePrivacyPauseCorrelation(bootstrap, assertOwned);
+    reassert(assertOwned);
+    if (!correlation) throw new Error('PANEL_PRIVACY_PAUSE_DENIED');
+    const context = await reprove(binding, assertOwned);
+    reassert(assertOwned);
+    if (!context) throw new Error('PANEL_CONTEXT_DENIED');
+    send(binding, privacyPausedPacket(correlation.suspension, bootstrap.sessionCapabilityId), assertOwned);
+    bind(binding, bootstrap.windowId, 'bound-privacy-paused', bootstrap.auditId, bootstrap.sessionCapabilityId, assertOwned);
+    return true;
+  }
+
   async function deliverRunning(binding, bootstrap, rotate, assertOwned = null) {
     const correlation = await runningCorrelation(bootstrap, assertOwned);
     reassert(assertOwned);
@@ -591,6 +742,10 @@ export function createPanelPortCoordinator(raw) {
           await deliverRunning(binding, bootstrap, bootstrap.state === 'consumed');
           return;
         }
+        if (session.state === 'privacy-paused') {
+          await deliverPrivacyPaused(binding, bootstrap);
+          return;
+        }
         if (!await recoverTerminal(binding, bootstrap, session)) throw new Error('PANEL_TERMINAL_DENIED');
       });
     } catch { disconnect(binding); }
@@ -619,7 +774,7 @@ export function createPanelPortCoordinator(raw) {
   }
 
   function receiveBound(binding, value) {
-    if (!connected(binding) || !['bound-idle', 'bound-session'].includes(binding.state)) {
+    if (!connected(binding) || !['bound-idle', 'bound-session', 'bound-privacy-paused'].includes(binding.state)) {
       disconnect(binding);
       return;
     }
@@ -745,6 +900,80 @@ export function createPanelPortCoordinator(raw) {
         return true;
       } catch (error) {
         if (error === scopeDeniedSentinel) throw error;
+        return false;
+      }
+    })();
+  }
+
+  function publishPrivacyPaused(rawArgs, assertOwned) {
+    const args = exact(rawArgs, ['auditId', 'sessionCapabilityId', 'windowId']);
+    if (!args) return Promise.resolve(false);
+    return (async () => {
+      let binding = null;
+      try {
+        assertOwned();
+        const bootstrap = await readBootstrap(args.windowId, assertOwned);
+        assertOwned();
+        if (!bootstrap || bootstrap.auditId !== args.auditId ||
+          bootstrap.sessionCapabilityId !== args.sessionCapabilityId || bootstrap.windowId !== args.windowId) return false;
+        binding = liveByWindow.get(args.windowId);
+        if (!connected(binding)) {
+          const correlation = await stablePrivacyPauseCorrelation(bootstrap, assertOwned);
+          assertOwned();
+          return Boolean(correlation);
+        }
+        if (binding.auditId !== args.auditId || binding.sessionCapabilityId !== args.sessionCapabilityId ||
+          !['bound-session', 'bound-privacy-paused'].includes(binding.state)) return false;
+        return await deliverPrivacyPaused(binding, bootstrap, assertOwned);
+      } catch (error) {
+        if (error === scopeDeniedSentinel) throw error;
+        if (connected(binding)) {
+          try { disconnect(binding, assertOwned); } catch { /* fixed fail-closed disconnect */ }
+        }
+        return false;
+      }
+    })();
+  }
+
+  function publishRunningResume(rawArgs, assertOwned) {
+    const args = exact(rawArgs, ['auditId', 'sessionCapabilityId', 'windowId']);
+    if (!args) return Promise.resolve(false);
+    return (async () => {
+      let binding = null;
+      try {
+        assertOwned();
+        const bootstrap = await readBootstrap(args.windowId, assertOwned);
+        assertOwned();
+        if (!bootstrap || bootstrap.auditId !== args.auditId ||
+          bootstrap.sessionCapabilityId !== args.sessionCapabilityId || bootstrap.windowId !== args.windowId ||
+          !['pending', 'consumed'].includes(bootstrap.state)) return false;
+        const correlation = await stableRunningResumeCorrelation(bootstrap, assertOwned);
+        assertOwned();
+        if (!correlation) return false;
+        binding = liveByWindow.get(args.windowId);
+        if (!connected(binding)) return true;
+        if (binding.auditId !== args.auditId || binding.sessionCapabilityId !== args.sessionCapabilityId ||
+          !['bound-session', 'bound-privacy-paused'].includes(binding.state)) return false;
+        let current = bootstrap;
+        if (current.state === 'pending') {
+          const consumption = await replaceBootstrap(current, { ...current, state: 'consumed' }, assertOwned);
+          assertOwned();
+          if (consumption.state !== 'committed') return false;
+          current = consumption.record;
+          if (!await stableRunningResumeCorrelation(current, assertOwned)) return false;
+          assertOwned();
+        }
+        const context = await reprove(binding, assertOwned);
+        assertOwned();
+        if (!context) return false;
+        send(binding, packet('running', args.auditId, args.sessionCapabilityId, null), assertOwned);
+        bind(binding, args.windowId, 'bound-session', args.auditId, args.sessionCapabilityId, assertOwned);
+        return true;
+      } catch (error) {
+        if (error === scopeDeniedSentinel) throw error;
+        if (connected(binding)) {
+          try { disconnect(binding, assertOwned); } catch { /* fixed fail-closed disconnect */ }
+        }
         return false;
       }
     })();

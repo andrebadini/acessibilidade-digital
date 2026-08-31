@@ -6,10 +6,18 @@ const SESSION_ID = /^[A-Za-z0-9_-]{20,240}$/u;
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const OCCURRENCE_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
+const CONSENT_ID = /^[A-Za-z0-9_-]{21}[AQgw]$/u;
 const RECONNECT_DELAYS = Object.freeze([250, 500, 1000, 2000, 5000]);
 const REQUEST_TIMEOUT_MS = 5000;
+const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
+const PRIVACY_MODES = new Set(['full-evidence', 'element-only']);
+const PRIVACY_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private-marker']);
 const BOOTSTRAP_KEYS = Object.freeze([
   'protocol', 'version', 'type', 'state', 'auditId', 'sessionCapabilityId', 'result',
+]);
+const PRIVACY_PAUSED_KEYS = Object.freeze([
+  'protocol', 'version', 'type', 'auditId', 'sessionCapabilityId',
+  'consentId', 'mode', 'categories', 'message',
 ]);
 const INTENT_RESULT_KEYS = Object.freeze(['protocol', 'version', 'type', 'requestId', 'response']);
 const HIGHLIGHT_STATE_KEYS = Object.freeze(['version', 'type', 'auditId', 'occurrenceId', 'state']);
@@ -81,6 +89,36 @@ function parseBootstrap(value) {
   } catch { return null; }
 }
 
+function copyPrivacyCategories(value) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype ||
+      value.length < 1 || value.length > PRIVACY_CATEGORIES.length) return null;
+    const own = Reflect.ownKeys(value);
+    if (own.length !== value.length + 1 || !own.includes('length')) return null;
+    const categories = [];
+    let priorRank = -1;
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      const rank = PRIVACY_CATEGORIES.indexOf(descriptor.value);
+      if (rank <= priorRank) return null;
+      priorRank = rank;
+      categories.push(descriptor.value);
+    }
+    return freeze(categories);
+  } catch { return null; }
+}
+
+function parsePrivacyPaused(value) {
+  const packet = exact(value, PRIVACY_PAUSED_KEYS);
+  if (!packet || packet.protocol !== 'audita-panel' || packet.version !== 1 ||
+    packet.type !== 'privacy-paused' || !AUDIT_ID.test(packet.auditId ?? '') ||
+    !SESSION_ID.test(packet.sessionCapabilityId ?? '') || !CONSENT_ID.test(packet.consentId ?? '') ||
+    !PRIVACY_MODES.has(packet.mode) || packet.message !== PRIVACY_MESSAGE) return null;
+  const categories = copyPrivacyCategories(packet.categories);
+  return categories ? { packet, categories } : null;
+}
+
 function parseIntentResult(value) {
   const packet = exact(value, INTENT_RESULT_KEYS);
   if (!packet || packet.protocol !== 'audita-panel' || packet.version !== 1 || packet.type !== 'intent-result' ||
@@ -127,6 +165,7 @@ export function createPanelSessionPortClient(raw) {
   let ready = false;
   let auditId = null;
   let sessionId = null;
+  let pendingConsent = null;
   const bindings = new WeakMap();
   const pending = new Map();
 
@@ -139,7 +178,12 @@ export function createPanelSessionPortClient(raw) {
   const notifyHighlightState = value => {
     try { input.onHighlightState(value); } catch { /* UI callbacks do not own transport state. */ }
   };
-  const clearCorrelation = () => { ready = false; auditId = null; sessionId = null; };
+  const clearCorrelation = () => {
+    ready = false;
+    auditId = null;
+    sessionId = null;
+    pendingConsent = null;
+  };
   const settle = (entry, value) => {
     if (!entry) return;
     try { input.clearTimer(entry.timer); } catch { /* fixed cleanup */ }
@@ -190,11 +234,27 @@ export function createPanelSessionPortClient(raw) {
       const nextCorrelation = `${bootstrap.auditId ?? ''}\u0000${bootstrap.sessionCapabilityId ?? ''}`;
       if (priorCorrelation !== null && priorCorrelation !== nextCorrelation) settleAll(localUnavailable());
       reconnectIndex = 0;
+      pendingConsent = null;
       ready = true;
       auditId = bootstrap.auditId;
       sessionId = bootstrap.sessionCapabilityId;
       notifyStatus('Painel conectado.');
       notifyBootstrap(freeze({ state: bootstrap.state, auditId: bootstrap.auditId, result: bootstrap.result }));
+      return;
+    }
+    const privacyPaused = parsePrivacyPaused(rawPacket);
+    if (privacyPaused) {
+      const packet = privacyPaused.packet;
+      if (!ready || auditId === null || sessionId === null ||
+        packet.auditId !== auditId || packet.sessionCapabilityId !== sessionId) {
+        unavailable(port, true);
+        return;
+      }
+      pendingConsent = freeze({ consentId: packet.consentId, mode: packet.mode });
+      notifyBootstrap(freeze({
+        state: 'privacy-paused', auditId: packet.auditId, result: null,
+        mode: packet.mode, categories: privacyPaused.categories, message: PRIVACY_MESSAGE,
+      }));
       return;
     }
     const highlightState = parseHighlightState(rawPacket);
@@ -265,6 +325,19 @@ export function createPanelSessionPortClient(raw) {
     if (!started || !ready || currentPort === null) return Promise.resolve(localUnavailable());
     let intent = copyIntent(rawIntent);
     if (!intent) return Promise.resolve(localUnavailable());
+    if (intent.type === 'CONFIRM_PIXEL_CAPTURE') {
+      const confirmation = exact(intent, ['type', 'mode', 'accepted']);
+      if (!confirmation || confirmation.accepted !== true || !PRIVACY_MODES.has(confirmation.mode) ||
+        !pendingConsent || confirmation.mode !== pendingConsent.mode || auditId === null || sessionId === null) {
+        return Promise.resolve(localUnavailable());
+      }
+      const consent = pendingConsent;
+      pendingConsent = null;
+      intent = freeze({
+        type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: sessionId, auditId,
+        consentId: consent.consentId, mode: consent.mode, accepted: true,
+      });
+    }
     if (['PANEL_CANCEL_AUDIT', 'PANEL_OPEN_REPORT'].includes(intent.type)) {
       if (Reflect.ownKeys(intent).length !== 1 || auditId === null || sessionId === null) return Promise.resolve(localUnavailable());
       intent = freeze({ type: intent.type, sessionCapabilityId: sessionId, auditId });

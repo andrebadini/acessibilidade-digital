@@ -1,5 +1,9 @@
 import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
-import { createSessionUrlDigestManager } from '../core/privacy/session-url-digest.js';
+import {
+  createSessionPixelAttemptDigestAuthority,
+  createSessionUrlDigestManager,
+} from '../core/privacy/session-url-digest.js';
+import { probeSensitiveContextInTab } from '../browser/sensitive-context-probe.js';
 import { createRawNavigationVaultV1 } from './raw-navigation-vault.js';
 import { createAuditDeletedEvent } from '../core/audit-deleted-event.js';
 import { applyReviewDecisions, createReviewDecision } from '../core/review/decisions.js';
@@ -8,6 +12,8 @@ import { createPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
 import {
   AuditDeleteBusyError,
   createAuditStore,
+  readPrivatePixelAttemptCommitV1,
+  removePrivatePixelAttemptCommitV1,
 } from '../storage/audit-store.js';
 import {
   ACTIVE_AUDIT_JOB_KEY,
@@ -16,6 +22,15 @@ import {
   readActiveAuditJobForWorker,
 } from './authorized-audit-starter.js';
 import { createAuditLifecycle } from './audit-lifecycle.js';
+import { createPixelCaptureStateV1 } from './pixel-capture-consent.js';
+import {
+  PIXEL_CONSENT_ALARM_NAME,
+  createPixelConsentExpirySchedulerV1,
+} from './pixel-consent-expiry.js';
+import {
+  createPixelAttemptCorrelationV1,
+  createPixelAttemptStoreBindingV1,
+} from './pixel-attempt-correlation.js';
 import {
   composeChromeAdapter,
   createChromeAdapter,
@@ -129,6 +144,261 @@ function base64Url(bytes) {
 
 function defaultNonce() { return base64Url(randomBytes(16)); }
 function defaultAuditId() { return globalThis.crypto.randomUUID(); }
+
+const PIXEL_ATTEMPT_MARKER_PREFIX = 'audita:pixel-attempt:v1:';
+const CONSENT_ID = /^[A-Za-z0-9_-]{21}[AQgw]$/u;
+const ATTEMPT_DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
+const PRIVATE_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
+
+function pixelAttemptMarker(value) {
+  const row = exact(value, [
+    'version', 'auditId', 'attemptDigest', 'pageId', 'ownershipId', 'preparedAt', 'expiresAt',
+  ], true);
+  if (!row || row.version !== 1 || !AUDIT_ID.test(row.auditId ?? '') ||
+    !ATTEMPT_DIGEST.test(row.attemptDigest ?? '') ||
+    (row.pageId !== null && !PRIVATE_ID.test(row.pageId ?? '')) ||
+    (row.ownershipId !== null && !PRIVATE_ID.test(row.ownershipId ?? '')) ||
+    !Number.isSafeInteger(row.preparedAt) || row.preparedAt < 0 ||
+    !Number.isSafeInteger(row.expiresAt) || row.expiresAt <= row.preparedAt) return null;
+  return Object.freeze(row);
+}
+
+function samePixelAttempt(left, right) {
+  return Boolean(left && right) && left.auditId === right.auditId &&
+    left.attemptDigest === right.attemptDigest && left.pageId === right.pageId &&
+    left.ownershipId === right.ownershipId;
+}
+
+export function createLateBoundPixelLiquidatorFacadeV1() {
+  let liquidate = null;
+  const facade = Object.freeze({
+    async liquidate(value) {
+      if (liquidate === null) return false;
+      try { return await liquidate(value) === true; }
+      catch { return false; }
+    },
+  });
+  return Object.freeze({
+    facade,
+    bind(value) {
+      if (liquidate !== null || typeof value !== 'function') return false;
+      liquidate = value;
+      return true;
+    },
+  });
+}
+
+export function createPixelAttemptLifecycleV1(raw) {
+  const input = exact(raw, [
+    'sessionArea', 'auditStore', 'attemptAuthority', 'attemptCorrelation', 'modelNow',
+  ]);
+  if (!input || typeof input.sessionArea?.get !== 'function' ||
+    typeof input.auditStore?.commitAuditWithCheckpointIfAbsent !== 'function' ||
+    typeof input.auditStore?.getReportRevision !== 'function' ||
+    typeof input.attemptAuthority?.digestAttempt !== 'function' ||
+    typeof input.attemptCorrelation?.prepare !== 'function' ||
+    typeof input.attemptCorrelation?.markerMatches !== 'function' ||
+    typeof input.attemptCorrelation?.remove !== 'function' || typeof input.modelNow !== 'function') {
+    throw new TypeError('PIXEL_ATTEMPT_LIFECYCLE_INVALID');
+  }
+
+  const handles = new WeakMap();
+  const createHandle = (capability, correlation, consentId) => {
+    const handle = Object.freeze(Object.create(null));
+    handles.set(handle, Object.freeze({ capability, correlation, consentId }));
+    return handle;
+  };
+  const markerStorageKey = marker =>
+    `${PIXEL_ATTEMPT_MARKER_PREFIX}${marker.auditId}:${marker.attemptDigest.slice('hmac-sha256:'.length)}`;
+
+  async function scanMarker(auditId) {
+    let envelope;
+    try { envelope = await input.sessionArea.get(null); }
+    catch { return { state: 'blocked', marker: null }; }
+    let keys;
+    try {
+      if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) ||
+        ![Object.prototype, null].includes(Object.getPrototypeOf(envelope))) {
+        return { state: 'blocked', marker: null };
+      }
+      keys = Reflect.ownKeys(envelope);
+    } catch { return { state: 'blocked', marker: null }; }
+    const prefix = `${PIXEL_ATTEMPT_MARKER_PREFIX}${auditId}:`;
+    const matches = [];
+    for (const key of keys) {
+      if (typeof key !== 'string' || !key.startsWith(prefix)) continue;
+      let descriptor;
+      try { descriptor = Object.getOwnPropertyDescriptor(envelope, key); }
+      catch { return { state: 'blocked', marker: null }; }
+      const marker = descriptor?.enumerable && Object.hasOwn(descriptor, 'value')
+        ? pixelAttemptMarker(descriptor.value) : null;
+      if (!marker || marker.auditId !== auditId || markerStorageKey(marker) !== key) {
+        return { state: 'blocked', marker: null };
+      }
+      matches.push(marker);
+    }
+    if (matches.length > 1) return { state: 'blocked', marker: null };
+    return { state: 'ok', marker: matches[0] ?? null };
+  }
+
+  async function prepareResume(rawRequest) {
+    const request = exact(rawRequest, ['auditId', 'consentId', 'pageId', 'ownershipId', 'expiresAt']);
+    if (!request || !AUDIT_ID.test(request.auditId ?? '') || !CONSENT_ID.test(request.consentId ?? '') ||
+      request.pageId !== null || request.ownershipId !== null ||
+      !Number.isSafeInteger(request.expiresAt) || request.expiresAt < 0) {
+      throw new TypeError('PIXEL_ATTEMPT_LIFECYCLE_INVALID');
+    }
+    const capability = await input.attemptCorrelation.prepare(request);
+    const attemptDigest = await input.attemptAuthority.digestAttempt({
+      auditId: request.auditId, consentId: request.consentId,
+    });
+    const correlation = Object.freeze({
+      auditId: request.auditId, attemptDigest, pageId: null, ownershipId: null,
+    });
+    if (await input.attemptCorrelation.markerMatches(correlation) !== true) {
+      throw new TypeError('PIXEL_ATTEMPT_LIFECYCLE_INVALID');
+    }
+    return createHandle(capability, correlation, request.consentId);
+  }
+
+  async function classifyCore(rawRequest) {
+    const request = exact(rawRequest, ['auditId', 'consentId']);
+    if (!request || !AUDIT_ID.test(request.auditId ?? '') ||
+      !(request.consentId === null || CONSENT_ID.test(request.consentId ?? ''))) {
+      return { state: 'blocked', handle: null, correlation: null };
+    }
+    const scan = await scanMarker(request.auditId);
+    if (scan.state !== 'ok') return { state: 'blocked', handle: null, correlation: null };
+    let correlation = scan.marker && Object.freeze({
+      auditId: scan.marker.auditId, attemptDigest: scan.marker.attemptDigest,
+      pageId: scan.marker.pageId, ownershipId: scan.marker.ownershipId,
+    });
+    if (request.consentId !== null) {
+      let attemptDigest;
+      try {
+        attemptDigest = await input.attemptAuthority.digestAttempt({
+          auditId: request.auditId, consentId: request.consentId,
+        });
+      } catch { return { state: 'blocked', handle: null, correlation: null }; }
+      const expected = Object.freeze({
+        auditId: request.auditId, attemptDigest, pageId: null, ownershipId: null,
+      });
+      if (correlation && !samePixelAttempt(correlation, expected)) {
+        return { state: 'blocked', handle: null, correlation: null };
+      }
+      correlation = expected;
+    }
+    if (!correlation) {
+      try {
+        return request.consentId !== null && await input.auditStore.getReportRevision(request.auditId)
+          ? { state: 'blocked', handle: null, correlation: null }
+          : { state: 'absent', handle: null, correlation: null };
+      } catch { return { state: 'blocked', handle: null, correlation: null }; }
+    }
+    const markerPresent = await input.attemptCorrelation.markerMatches(correlation);
+    let companionPresent;
+    let report;
+    try {
+      [companionPresent, report] = await Promise.all([
+        readPrivatePixelAttemptCommitV1(input.auditStore, correlation),
+        input.auditStore.getReportRevision(request.auditId),
+      ]);
+    } catch { return { state: 'blocked', handle: null, correlation: null }; }
+    if (markerPresent !== true) {
+      return companionPresent === true || request.consentId !== null && Boolean(report)
+        ? { state: 'blocked', handle: null, correlation: null }
+        : { state: 'absent', handle: null, correlation: null };
+    }
+    const terminal = companionPresent === true;
+    if (terminal !== Boolean(report)) return { state: 'blocked', handle: null, correlation: null };
+    return { state: terminal ? 'terminal' : 'prepared', handle: null, correlation };
+  }
+
+  async function classify(request) {
+    const result = await classifyCore(request);
+    return Object.freeze({ state: result.state, handle: result.handle });
+  }
+
+  async function commitTerminal(rawRequest) {
+    const request = exact(rawRequest, [
+      'auditId', 'model', 'checkpoint', 'latestState', 'expectedRevision', 'attemptHandle',
+    ]);
+    const metadata = request?.attemptHandle === null ? null : handles.get(request?.attemptHandle);
+    if (!request || !AUDIT_ID.test(request.auditId ?? '') || request.expectedRevision !== 1 ||
+      (request.attemptHandle !== null && (!metadata || metadata.correlation.auditId !== request.auditId))) {
+      throw new Error('TERMINAL_COMMIT_DENIED');
+    }
+    let committed;
+    try {
+      committed = await input.auditStore.commitAuditWithCheckpointIfAbsent(
+        request.auditId, request.model, request.checkpoint, request.latestState,
+        {
+          now: canonicalModelTime(input.modelNow), deleteAfterCompleteExport: false,
+          ...(metadata ? { pixelAttemptCommit: metadata.capability } : {}),
+        },
+      );
+    } catch { /* a readback below is the commit authority */ }
+    let report;
+    try { report = await input.auditStore.getReportRevision(request.auditId); }
+    catch { throw new Error('TERMINAL_COMMIT_DENIED'); }
+    const revision = committed?.revision ?? report?.modelRevision;
+    const modelHash = committed?.modelHash ?? report?.modelHash;
+    if (revision !== 1 || report?.modelRevision !== 1 || typeof modelHash !== 'string' ||
+      report.modelHash !== modelHash) throw new Error('TERMINAL_COMMIT_DENIED');
+    if (metadata) {
+      const classified = await classifyCore({ auditId: request.auditId, consentId: metadata.consentId });
+      if (classified.state !== 'terminal') throw new Error('TERMINAL_COMMIT_DENIED');
+    }
+    return Object.freeze({ revision: 1, modelHash });
+  }
+
+  async function cleanup(rawRequest) {
+    const request = exact(rawRequest, ['auditId', 'consentId', 'expected']);
+    if (!request || !AUDIT_ID.test(request.auditId ?? '') ||
+      !(request.consentId === null || CONSENT_ID.test(request.consentId ?? '')) ||
+      !['prepared', 'terminal', 'post-finish'].includes(request.expected)) return false;
+    if (request.expected === 'post-finish') {
+      const scan = await scanMarker(request.auditId);
+      if (scan.state !== 'ok') return false;
+      if (scan.marker === null) return true;
+      const correlation = Object.freeze({
+        auditId: scan.marker.auditId, attemptDigest: scan.marker.attemptDigest,
+        pageId: scan.marker.pageId, ownershipId: scan.marker.ownershipId,
+      });
+      let companion; let report;
+      try {
+        [companion, report] = await Promise.all([
+          readPrivatePixelAttemptCommitV1(input.auditStore, correlation),
+          input.auditStore.getReportRevision(request.auditId),
+        ]);
+      } catch { return false; }
+      if (companion === false && report) {
+        try {
+          return await input.attemptCorrelation.remove(correlation) === true &&
+            await input.attemptCorrelation.markerMatches(correlation) === false;
+        } catch { return false; }
+      }
+    }
+    const current = await classifyCore({ auditId: request.auditId, consentId: request.consentId });
+    if (current.state === 'blocked') return false;
+    if (current.state === 'absent') return request.expected === 'post-finish';
+    if (request.expected === 'prepared' && current.state !== 'prepared' ||
+      request.expected !== 'prepared' && current.state !== 'terminal') return false;
+    if (current.state === 'terminal') {
+      try {
+        if (await removePrivatePixelAttemptCommitV1(input.auditStore, current.correlation) !== true ||
+          await readPrivatePixelAttemptCommitV1(input.auditStore, current.correlation) !== false) return false;
+      } catch { return false; }
+    }
+    try {
+      if (await input.attemptCorrelation.remove(current.correlation) !== true ||
+        await input.attemptCorrelation.markerMatches(current.correlation) !== false) return false;
+    } catch { return false; }
+    return true;
+  }
+
+  return Object.freeze({ prepareResume, commitTerminal, classify, cleanup });
+}
 
 async function invokeChrome(chromeApi, receiver, name, ...args) {
   return new Promise((resolve, reject) => {
@@ -456,6 +726,9 @@ async function buildDefaultRuntime(chromeApi, options) {
   const epochNow = options.epochNow ?? Date.now;
   const modelNow = options.modelNow ?? (() => new Date().toISOString());
   const bytes = options.randomBytes ?? randomBytes;
+  const pixelState = (options.pixelCaptureStateFactory ?? createPixelCaptureStateV1)({
+    sessionArea, now: epochNow, randomBytes: bytes,
+  });
   const digestManager = createSessionUrlDigestManager({
     sessionArea, subtle: options.subtle ?? globalThis.crypto?.subtle, randomBytes: bytes, now: epochNow,
   });
@@ -506,6 +779,20 @@ async function buildDefaultRuntime(chromeApi, options) {
     personaCoordinator,
   });
   const auditStore = options.auditStore ?? createAuditStore(options.auditStoreOptions);
+  const attemptAuthority = createSessionPixelAttemptDigestAuthority({
+    sessionArea, subtle: options.subtle ?? globalThis.crypto?.subtle, randomBytes: bytes, now: epochNow,
+  });
+  const attemptCorrelation = createPixelAttemptCorrelationV1({
+    sessionArea, attemptAuthority, now: epochNow,
+    storeBinding: createPixelAttemptStoreBindingV1(auditStore, sessionArea),
+  });
+  const pixelAttemptLifecycle = createPixelAttemptLifecycleV1({
+    sessionArea, auditStore, attemptAuthority, attemptCorrelation, modelNow,
+  });
+  const liquidatorBridge = createLateBoundPixelLiquidatorFacadeV1();
+  const pixelScheduler = (options.pixelConsentSchedulerFactory ?? createPixelConsentExpirySchedulerV1)(chromeApi, {
+    pixelState, liquidator: liquidatorBridge.facade, now: epochNow,
+  });
   const launchApisAvailable = typeof chromeApi.tabs?.create === 'function' && typeof chromeApi.tabs?.update === 'function' &&
     typeof chromeApi.tabs?.get === 'function' && typeof chromeApi.tabs?.remove === 'function';
   const unavailableLaunch = freeze({
@@ -614,6 +901,7 @@ async function buildDefaultRuntime(chromeApi, options) {
     chromeApi, sessionArea,
     readActiveJob: () => readActiveAuditJobForWorker({ sessionArea }),
     readAuditSession: ({ sessionCapabilityId, auditId }) => readAuditSessionForWorker({ sessionArea, sessionCapabilityId, auditId }),
+    readPixelSuspension: auditId => pixelState.readSuspension(auditId),
     loadPanelResultBundle,
     rehydrateViewOnly: value => authority.rehydrateViewOnly(value),
     revokeViewOnly,
@@ -654,7 +942,17 @@ async function buildDefaultRuntime(chromeApi, options) {
     readLatest: () => auditStore.getLatest(), buildPanelResultBundle,
     recordHighlightBinding: value => highlightBindingRecorder.record(value),
     epochNow, modelNow, createAbortController: () => new AbortController(),
+    pixelState,
+    probeDocumentIdentity: tabId => chromeAdapter.probeDocumentIdentity(tabId),
+    probeSensitiveCaptureSignals: (tabId, documentId) => probeSensitiveContextInTab(tabId, {
+      executeScript: details => chromeApi.scripting.executeScript(details), documentIds: [documentId],
+    }),
+    pixelAttemptLifecycle,
+    schedulePixelExpiry: () => pixelScheduler.scheduleNext(),
   });
+  if (liquidatorBridge.bind(value => auditStarter.liquidatePixelAudit(value)) !== true) {
+    throw new Error('WORKER_UNAVAILABLE');
+  }
   const reportPortCoordinator = createReportPortCoordinator({
     reportLaunch,
     async readHighlightState({ sessionCapabilityId, auditId, sender }) {
@@ -704,6 +1002,7 @@ async function buildDefaultRuntime(chromeApi, options) {
   panelIntentDispatcher = request => router.dispatch(request);
   const panelLauncher = options.panelLauncher ??
     createPanelLauncher({ chromeApi, launchAuthority: panelLaunchAuthority, logger: options.logger });
+  await pixelScheduler.recoverOnStartup();
   const highlightRecovery = await highlightRuntimeController.recover();
   if (highlightRecovery?.ok !== true) throw new Error('WORKER_UNAVAILABLE');
   const personaRecovery = await personaCoordinator.recover();
@@ -720,16 +1019,26 @@ async function buildDefaultRuntime(chromeApi, options) {
       personaCoordinator,
       highlightController: highlightRuntimeController,
     }),
-    router, panelCoordinator, panelLauncher, reportPortCoordinator,
+    router, panelCoordinator, panelLauncher, reportPortCoordinator, pixelScheduler,
+    pixelRecoveryComplete: true,
   };
 }
 
 function parseBuiltRuntime(value) {
-  const built = exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator'], true) ??
+  const built = exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator', 'pixelScheduler', 'pixelRecoveryComplete'], true) ??
+    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'pixelScheduler', 'pixelRecoveryComplete'], true) ??
+    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator', 'pixelScheduler'], true) ??
+    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'pixelScheduler'], true) ??
+    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator'], true) ??
     exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher'], true);
   if (!built || typeof built.router?.dispatch !== 'function' ||
     typeof built.panelCoordinator?.attachPanelPort !== 'function' ||
     typeof built.panelLauncher?.launch !== 'function' ||
+    (Object.hasOwn(built, 'pixelScheduler') &&
+      (typeof built.pixelScheduler?.recoverOnStartup !== 'function' ||
+        typeof built.pixelScheduler?.run !== 'function' || typeof built.pixelScheduler?.scheduleNext !== 'function' ||
+        typeof built.pixelScheduler?.dispose !== 'function')) ||
+    (Object.hasOwn(built, 'pixelRecoveryComplete') && built.pixelRecoveryComplete !== true) ||
     (Object.hasOwn(built, 'reportPortCoordinator') &&
       typeof built.reportPortCoordinator?.attachReportPort !== 'function')) throw new Error('WORKER_UNAVAILABLE');
   return { ...built, readyRuntime: copyReadyRuntime(built.readyRuntime) };
@@ -758,6 +1067,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
   let panelCoordinator = options.panelCoordinator ?? null;
   let reportPortCoordinator = options.reportPortCoordinator ?? null;
   let panelLauncher = options.panelLauncher ?? null;
+  let pixelScheduler = options.pixelScheduler ?? null;
   let earlyPanelLaunchAuthority = null;
   let settlePanelStorageGate = null;
   if (!options.startupReady && !options.buildRuntime && !panelLauncher) {
@@ -782,7 +1092,10 @@ export function registerServiceWorker(chromeApi, options = {}) {
   let startupReady;
 
   if (options.startupReady) {
-    startupReady = Promise.resolve(options.startupReady).then(copyReadyRuntime);
+    startupReady = Promise.resolve(options.startupReady).then(async value => {
+      if (pixelScheduler) await pixelScheduler.recoverOnStartup();
+      return copyReadyRuntime(value);
+    });
   } else {
     startupReady = new Promise((resolve, reject) => { resolveStartup = resolve; rejectStartup = reject; });
   }
@@ -826,6 +1139,10 @@ export function registerServiceWorker(chromeApi, options = {}) {
     }
     if (name === HIGHLIGHT_EXPIRY_ALARM_NAME) {
       void startupReady.then(runtime => runtime.highlightController?.expireDue?.(), () => false).catch(() => false);
+      return;
+    }
+    if (name === PIXEL_CONSENT_ALARM_NAME) {
+      void startupReady.then(() => pixelScheduler?.run?.('alarm'), () => false).catch(() => false);
     }
   };
 
@@ -833,6 +1150,8 @@ export function registerServiceWorker(chromeApi, options = {}) {
     try {
       if (typeof panelLauncher?.launch !== 'function' || panelLauncher.launch(tab) !== true) {
         logger.error('PANEL_LAUNCH_UNAVAILABLE');
+      } else {
+        void startupReady.then(() => pixelScheduler?.run?.('panel'), () => false).catch(() => false);
       }
     } catch { logger.error('PANEL_LAUNCH_UNAVAILABLE'); }
   };
@@ -881,6 +1200,8 @@ export function registerServiceWorker(chromeApi, options = {}) {
         panelCoordinator = built.panelCoordinator;
         reportPortCoordinator = built.reportPortCoordinator ?? null;
         panelLauncher = built.panelLauncher;
+        pixelScheduler = built.pixelScheduler ?? null;
+        if (pixelScheduler && built.pixelRecoveryComplete !== true) await pixelScheduler.recoverOnStartup();
         resolveStartup(built.readyRuntime);
       } catch {
         rejectStartup(new Error('WORKER_UNAVAILABLE'));
@@ -895,6 +1216,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
     chromeApi.action.onClicked.removeListener(actionListener);
     lifecycle.dispose();
     contextMenus.dispose();
+    try { pixelScheduler?.dispose?.(); } catch { /* disposal is best-effort and local */ }
   }
 
   return Object.freeze({ startupReady, dispose });

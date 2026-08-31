@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
+import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
+import { createPanelResultBundleV1 } from '../../src/panel/panel-result-bundle.js';
 import { createPanelSessionPortClient } from '../../src/panel/panel-session-port.js';
+import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 
 const SESSION_ID = 'A'.repeat(22);
+const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
+const CONSENT_A = `${'a'.repeat(21)}A`;
+const CONSENT_B = `${'b'.repeat(21)}Q`;
 
 function event() {
   const listeners = new Set();
@@ -60,10 +67,48 @@ function createClient(env, overrides = {}) {
   });
 }
 
-function bootstrap(port, state = 'initial', auditId = null, sessionCapabilityId = null) {
+function bootstrap(port, state = 'initial', auditId = null, sessionCapabilityId = null, result = null) {
   port.onMessage.emit({
     protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state,
-    auditId, sessionCapabilityId, result: null,
+    auditId, sessionCapabilityId, result,
+  });
+}
+
+async function resultBundle(auditId) {
+  const inventory = await createInstalledCoreRuleInventory();
+  const draft = structuredClone(SAMPLE_AUDIT);
+  draft.auditId = auditId;
+  draft.integrity.canonicalModelHash = 'pending';
+  draft.integrity.evidenceManifestHash = 'pending';
+  const model = await enrichAuditForReport(draft, {
+    now: () => '2026-08-31T12:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '1.0.1', rulesVersion: inventory.rulesVersion, browserVersion: 'Chrome/152.0.0.0',
+  });
+  const checkpoint = {
+    version: 1, auditId,
+    pages: model.pages.map(page => ({
+      pageId: page.pageId, attempted: page.attempted,
+      startedAt: page.attempted ? page.timestamps.startedAt : null,
+      rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion,
+      inventoryHash: inventory.sha256, outcomes: [],
+    })),
+  };
+  return createPanelResultBundleV1({
+    reportRevision: {
+      version: 1, auditId, modelRevision: 1,
+      modelHash: model.integrity.canonicalModelHash, model, checkpoint,
+    },
+    inventory,
+  });
+}
+
+function privacyPaused(port, overrides = {}) {
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'privacy-paused',
+    auditId: 'audit-private', sessionCapabilityId: SESSION_ID,
+    consentId: CONSENT_A, mode: 'full-evidence',
+    categories: ['password', 'payment'], message: PRIVACY_MESSAGE,
+    ...overrides,
   });
 }
 
@@ -221,6 +266,288 @@ test('adds current correlation to occurrence-only highlight intents and never ac
     { type: 'CLEAR_HIGHLIGHT', auditId: 'forged' },
   ]) assert.deepEqual(await client.requestIntent(hostile), { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
   assert.equal(port.disconnects, 0);
+});
+
+test('projects a correlated privacy pause without disclosing its one-use consent nonce to any callback', () => {
+  const env = fixture();
+  const bootstraps = [];
+  const statuses = [];
+  const highlights = [];
+  const client = createClient(env, {
+    onBootstrapResult: value => bootstraps.push(value),
+    onStatus: value => statuses.push(value),
+    onHighlightState: value => highlights.push(value),
+  });
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-private', SESSION_ID);
+
+  privacyPaused(port);
+
+  assert.deepEqual(bootstraps.at(-1), {
+    state: 'privacy-paused', auditId: 'audit-private', result: null,
+    mode: 'full-evidence', categories: ['password', 'payment'], message: PRIVACY_MESSAGE,
+  });
+  assert.equal(Object.isFrozen(bootstraps.at(-1)), true);
+  assert.equal(Object.isFrozen(bootstraps.at(-1).categories), true);
+  assert.equal(JSON.stringify({ bootstraps, statuses, highlights }).includes(CONSENT_A), false);
+  assert.equal(JSON.stringify(client).includes(CONSENT_A), false);
+  assert.equal(port.disconnects, 0);
+});
+
+test('consumes the private nonce before posting one exact confirmation and rejects a replay locally', async () => {
+  const env = fixture();
+  const client = createClient(env);
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-private', SESSION_ID);
+  privacyPaused(port);
+
+  const pending = client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+  });
+  assert.deepEqual(port.messages.at(-1), {
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: 'port-request-1',
+    envelope: {
+      type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION_ID,
+      auditId: 'audit-private', consentId: CONSENT_A,
+      mode: 'full-evidence', accepted: true,
+    },
+  });
+  const messagesAfterFirstPost = port.messages.length;
+  const replay = client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+  });
+  assert.equal(port.messages.length, messagesAfterFirstPost);
+  assert.deepEqual(await replay, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'port-request-1', response: { ok: true, state: 'running' },
+  });
+  assert.deepEqual(await pending, { ok: true, state: 'running' });
+});
+
+test('the consent nonce is already unavailable during the confirmation post side effect', async () => {
+  const env = fixture();
+  const client = createClient(env);
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-private', SESSION_ID);
+  privacyPaused(port);
+  const originalPost = port.postMessage;
+  let nested = null;
+  let intercept = true;
+  port.postMessage = function postMessage(message) {
+    if (message?.type === 'intent' && intercept) {
+      intercept = false;
+      nested = client.requestIntent({
+        type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+      });
+    }
+    originalPost.call(this, message);
+  };
+
+  const pending = client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+  });
+
+  assert.equal(port.messages.filter(message => message.type === 'intent').length, 1);
+  assert.deepEqual(await nested, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'port-request-1', response: { ok: true, state: 'running' },
+  });
+  assert.equal((await pending).ok, true);
+});
+
+test('rotates A to B and reconnects only after the server rehydrates B', async () => {
+  const env = fixture();
+  const client = createClient(env);
+  client.start();
+  const firstPort = env.ports[0];
+  bootstrap(firstPort, 'running', 'audit-private', SESSION_ID);
+  privacyPaused(firstPort);
+  privacyPaused(firstPort, { consentId: CONSENT_B, mode: 'element-only', categories: ['private-marker'] });
+
+  const rotated = client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'element-only', accepted: true,
+  });
+  assert.equal(firstPort.messages.at(-1).envelope.consentId, CONSENT_B);
+  firstPort.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'port-request-1', response: { ok: true, state: 'running' },
+  });
+  await rotated;
+
+  firstPort.onDisconnect.emit();
+  env.timers.at(-1).callback();
+  const secondPort = env.ports[1];
+  bootstrap(secondPort, 'running', 'audit-private', SESSION_ID);
+  const beforeRehydrate = secondPort.messages.length;
+  const absent = client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'element-only', accepted: true,
+  });
+  assert.equal(secondPort.messages.length, beforeRehydrate);
+  assert.deepEqual(await absent, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+
+  privacyPaused(secondPort, { consentId: CONSENT_B, mode: 'element-only', categories: ['private-marker'] });
+  const rehydrated = client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'element-only', accepted: true,
+  });
+  assert.equal(secondPort.messages.at(-1).envelope.consentId, CONSENT_B);
+  secondPort.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'port-request-2', response: { ok: true, state: 'running' },
+  });
+  assert.equal((await rehydrated).ok, true);
+});
+
+test('clears private consent on every ordinary bootstrap, session swap, disconnect and stop', async t => {
+  const completedResult = await resultBundle('audit-private');
+  const terminalStates = [
+    ['initial', null, null, null],
+    ['running', 'audit-private', SESSION_ID, null],
+    ['result', 'audit-private', SESSION_ID, completedResult],
+    ['view-only', 'audit-private', SESSION_ID, completedResult],
+    ['running', 'audit-other', 'B'.repeat(22), null],
+  ];
+  for (const [state, auditId, sessionId, result] of terminalStates) {
+    await t.test(state === 'running' && auditId === 'audit-other' ? 'session-swap' : state, async () => {
+      const env = fixture();
+      const client = createClient(env);
+      client.start();
+      const port = env.ports[0];
+      bootstrap(port, 'running', 'audit-private', SESSION_ID);
+      privacyPaused(port);
+      bootstrap(port, state, auditId, sessionId, result);
+      const before = port.messages.length;
+      assert.deepEqual(await client.requestIntent({
+        type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+      }), { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+      assert.equal(port.messages.length, before);
+    });
+  }
+
+  for (const ending of ['disconnect', 'stop']) {
+    await t.test(ending, async () => {
+      const env = fixture();
+      const client = createClient(env);
+      client.start();
+      const port = env.ports[0];
+      bootstrap(port, 'running', 'audit-private', SESSION_ID);
+      privacyPaused(port);
+      if (ending === 'disconnect') port.onDisconnect.emit();
+      else client.stop();
+      const before = port.messages.length;
+      const denied = client.requestIntent({
+        type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+      });
+      assert.equal(port.messages.length, before);
+      assert.deepEqual(await denied, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+    });
+  }
+});
+
+test('rejects hostile pause packets and hostile confirmation shapes without posting or exposing a nonce', async t => {
+  const accessorCategories = [];
+  Object.defineProperty(accessorCategories, '0', {
+    enumerable: true, configurable: true, get() { throw new Error('hostile category accessor'); },
+  });
+  const symbolCategories = ['password'];
+  symbolCategories[Symbol('category')] = 'otp';
+  const hostilePackets = [
+    { consentId: 'short' },
+    { consentId: `${'a'.repeat(21)}Z` },
+    { mode: 'no-pixels' },
+    { categories: [] },
+    { categories: ['payment', 'password'] },
+    { categories: ['password', 'password'] },
+    { categories: ['password', 'unknown'] },
+    { categories: Object.assign(['password'], { extra: true }) },
+    { categories: accessorCategories },
+    { categories: symbolCategories },
+    { message: `${PRIVACY_MESSAGE}!` },
+    { auditId: 'audit-other' },
+    { sessionCapabilityId: 'B'.repeat(22) },
+    { extra: true },
+  ];
+  for (let index = 0; index < hostilePackets.length; index += 1) {
+    await t.test(`wire-shape-${index + 1}`, () => {
+      const overrides = hostilePackets[index];
+      const env = fixture();
+      const observed = [];
+      const client = createClient(env, { onBootstrapResult: value => observed.push(value) });
+      client.start();
+      const port = env.ports[0];
+      bootstrap(port, 'running', 'audit-private', SESSION_ID);
+      privacyPaused(port, overrides);
+      assert.equal(observed.some(value => value.state === 'privacy-paused'), false);
+      assert.equal(JSON.stringify(observed).includes(CONSENT_A), false);
+      assert.equal(port.disconnects, 1);
+    });
+  }
+
+  for (const kind of ['accessor', 'symbol']) {
+    await t.test(`wire-${kind}`, () => {
+      const env = fixture();
+      const observed = [];
+      const client = createClient(env, { onBootstrapResult: value => observed.push(value) });
+      client.start();
+      const port = env.ports[0];
+      bootstrap(port, 'running', 'audit-private', SESSION_ID);
+      const packet = {
+        protocol: 'audita-panel', version: 1, type: 'privacy-paused',
+        auditId: 'audit-private', sessionCapabilityId: SESSION_ID,
+        consentId: CONSENT_A, mode: 'full-evidence', categories: ['password'], message: PRIVACY_MESSAGE,
+      };
+      if (kind === 'accessor') {
+        Object.defineProperty(packet, 'consentId', {
+          enumerable: true, get() { throw new Error('hostile consent accessor'); },
+        });
+      } else packet[Symbol('consent')] = CONSENT_A;
+      port.onMessage.emit(packet);
+      assert.equal(observed.some(value => value.state === 'privacy-paused'), false);
+      assert.equal(port.disconnects, 1);
+    });
+  }
+
+  for (const makeIntent of [
+    () => ({ type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: false }),
+    () => ({ type: 'CONFIRM_PIXEL_CAPTURE', mode: 'element-only', accepted: true }),
+    () => ({ type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true, extra: true }),
+    () => Object.defineProperty({ type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence' }, 'accepted', {
+      enumerable: true, get() { throw new Error('hostile accessor'); },
+    }),
+    () => Object.assign({ type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true }, { [Symbol('x')]: true }),
+  ]) {
+    await t.test(String(makeIntent), async () => {
+      const env = fixture();
+      const client = createClient(env);
+      client.start();
+      const port = env.ports[0];
+      bootstrap(port, 'running', 'audit-private', SESSION_ID);
+      privacyPaused(port);
+      const before = port.messages.length;
+      const denied = client.requestIntent(makeIntent());
+      assert.equal(port.messages.length, before);
+      assert.deepEqual(await denied, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+    });
+  }
+
+  await t.test('nonce-absent', async () => {
+    const env = fixture();
+    const client = createClient(env);
+    client.start();
+    const port = env.ports[0];
+    bootstrap(port, 'running', 'audit-private', SESSION_ID);
+    const before = port.messages.length;
+    const denied = client.requestIntent({
+      type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+    });
+    assert.equal(port.messages.length, before);
+    assert.deepEqual(await denied, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  });
 });
 
 test('disconnect and correlation rotation close every pending request and never fall back to messages', async () => {

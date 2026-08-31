@@ -5,13 +5,17 @@ import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { PANEL_PORT_NAME } from '../../src/background/panel-port.js';
 import { REPORT_PORT_NAME } from '../../src/background/report-port.js';
 import { createRawNavigationVaultV1 } from '../../src/background/raw-navigation-vault.js';
+import { ACTIVE_AUDIT_JOB_KEY } from '../../src/background/authorized-audit-starter.js';
 import {
   HIGHLIGHT_EXPIRY_ALARM_NAME,
   PERSONA_EXPIRY_ALARM_NAME,
   registerServiceWorker,
 } from '../../src/background/service-worker.js';
+import { PIXEL_CONSENT_ALARM_NAME } from '../../src/background/pixel-consent-expiry.js';
 import * as serviceWorkerModule from '../../src/background/service-worker.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
+import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
+import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
 import { createFakeLockManager } from '../personas/fake-lock-manager.js';
 
 const CAPABILITY = 'C'.repeat(22);
@@ -32,6 +36,7 @@ function chromeFixture() {
     updated: event(), tabRemoved: event(), tabDetached: event(), windowRemoved: event(),
     action: event(), alarm: event(),
   };
+  const alarmValues = new Map();
   return {
     events,
     chromeApi: {
@@ -49,7 +54,12 @@ function chromeFixture() {
         },
       },
       windows: { onRemoved: events.windowRemoved, async get(windowId) { return { id: windowId, focused: false, type: 'normal' }; } },
-      alarms: { onAlarm: events.alarm, async create() {}, async clear() { return true; } },
+      alarms: {
+        onAlarm: events.alarm,
+        async create(name, details) { alarmValues.set(name, { name, scheduledTime: details.when }); },
+        async get(name) { return alarmValues.get(name); },
+        async clear(name) { return alarmValues.delete(name); },
+      },
       scripting: { async executeScript() { return []; }, async insertCSS() {}, async removeCSS() {} },
       storage: { session: { async setAccessLevel() {} } },
     },
@@ -181,7 +191,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
   };
   chromeApi.sidePanel.open = (_value, callback) => { panelOpens += 1; callback?.(); };
   if (fixtureOptions.scripting) chromeApi.scripting = fixtureOptions.scripting;
-  if (fixtureOptions.alarms) chromeApi.alarms = { onAlarm: events.alarm, ...fixtureOptions.alarms };
+  if (fixtureOptions.alarms) chromeApi.alarms = { ...chromeApi.alarms, ...fixtureOptions.alarms, onAlarm: events.alarm };
 
   const fixtureAuditStore = {
     async getLatest() { storeCalls.push(['getLatest']); return structuredClone(latest); },
@@ -277,6 +287,9 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
     modelNow: fixtureOptions.modelNow ?? (() => '2026-08-29T12:00:00.000Z'),
     randomBytes: length => new Uint8Array(length).fill(7),
     ...(fixtureOptions.rawNavigationVaultFactory ? { rawNavigationVaultFactory: fixtureOptions.rawNavigationVaultFactory } : {}),
+    ...(fixtureOptions.pixelConsentSchedulerFactory
+      ? { pixelConsentSchedulerFactory: fixtureOptions.pixelConsentSchedulerFactory }
+      : {}),
     logger: { error() {} },
   });
 
@@ -425,6 +438,116 @@ test('routes the two durable live-aid expiry alarms through the recovered runtim
   assert.deepEqual(calls, ['persona-expire', 'highlight-expire']);
   registration.dispose();
   assert.equal(events.alarm.listeners.size, 0);
+});
+
+test('holds messages and Ports behind pixel recovery and routes its alarm through the one worker listener', async () => {
+  const { chromeApi, events } = chromeFixture();
+  const recovery = deferred();
+  const calls = [];
+  const readyRuntime = runtimeValue();
+  const registration = registerServiceWorker(chromeApi, {
+    async buildRuntime() {
+      return {
+        readyRuntime,
+        router: { async dispatch() { calls.push('dispatch'); return { ok: true }; } },
+        panelCoordinator: { attachPanelPort() { calls.push('port'); return true; } },
+        panelLauncher: { launch() { return true; } },
+        pixelScheduler: {
+          async recoverOnStartup() { calls.push('recover:start'); await recovery.promise; calls.push('recover:end'); },
+          async run(trigger) { calls.push(`run:${trigger}`); },
+          async scheduleNext() { calls.push('schedule'); },
+          dispose() { calls.push('dispose'); },
+        },
+      };
+    },
+    createEventNonce: () => 'N'.repeat(22), createAuditId: () => 'audit-1', epochNow: () => 1,
+    logger: { error() {} },
+  });
+  const responses = [];
+  [...events.message.listeners][0](
+    { type: 'REPORT_DELETE_ALL_AUDITS', sessionCapabilityId: 'S'.repeat(22), auditId: 'audit-1' },
+    {}, value => responses.push(value),
+  );
+  events.connect.emit({ name: PANEL_PORT_NAME, disconnect() {} });
+  events.alarm.emit({ name: PIXEL_CONSENT_ALARM_NAME, scheduledTime: 5 });
+  await tick();
+  assert.deepEqual(calls, ['recover:start']);
+  assert.deepEqual(responses, []);
+
+  recovery.resolve();
+  await registration.startupReady;
+  await tick();
+  assert.deepEqual(calls, ['recover:start', 'recover:end', 'dispatch', 'port', 'run:alarm']);
+  assert.equal(events.alarm.listeners.size, 1);
+  registration.dispose();
+  assert.deepEqual(calls.at(-1), 'dispose');
+});
+
+test('late-bound pixel liquidator is closed and denies work before its single binding', async () => {
+  assert.equal(typeof serviceWorkerModule.createLateBoundPixelLiquidatorFacadeV1, 'function');
+  const bridge = serviceWorkerModule.createLateBoundPixelLiquidatorFacadeV1();
+  assert.deepEqual(Reflect.ownKeys(bridge), ['facade', 'bind']);
+  assert.equal(Object.isFrozen(bridge), true);
+  assert.equal(await bridge.facade.liquidate({ auditId: 'audit-a' }), false);
+  const calls = [];
+  assert.equal(bridge.bind(async value => { calls.push(value); return true; }), true);
+  assert.equal(bridge.bind(async () => true), false);
+  assert.equal(await bridge.facade.liquidate({ auditId: 'audit-a' }), true);
+  assert.deepEqual(calls, [{ auditId: 'audit-a' }]);
+});
+
+test('pixel-attempt recovery classifies an expired prepared marker without reminting a commit capability', async () => {
+  assert.equal(typeof serviceWorkerModule.createPixelAttemptLifecycleV1, 'function');
+  const auditId = 'audit-expired-attempt';
+  const consentId = `${'A'.repeat(21)}Q`;
+  const attemptDigest = `hmac-sha256:${'D'.repeat(43)}`;
+  const key = `audita:pixel-attempt:v1:${auditId}:${'D'.repeat(43)}`;
+  const values = {
+    [key]: { version: 1, auditId, attemptDigest, pageId: null, ownershipId: null, preparedAt: 1, expiresAt: 2 },
+  };
+  let prepareCalls = 0;
+  const lifecycle = serviceWorkerModule.createPixelAttemptLifecycleV1({
+    sessionArea: { async get() { return structuredClone(values); } },
+    auditStore: {
+      async commitAuditWithCheckpointIfAbsent() { throw new Error('not used'); },
+      async getReportRevision() { return null; },
+    },
+    attemptAuthority: { async digestAttempt() { return attemptDigest; } },
+    attemptCorrelation: {
+      async prepare() { prepareCalls += 1; throw new Error('expired marker cannot mint'); },
+      async markerMatches() { return true; }, async remove() { return true; },
+    },
+    modelNow: () => '2026-08-29T12:00:00.000Z',
+  });
+  assert.deepEqual(await lifecycle.classify({ auditId, consentId }), { state: 'prepared', handle: null });
+  assert.equal(prepareCalls, 0);
+});
+
+test('post-finish cleanup accepts only the companion-first crash cut and removes the remaining marker', async () => {
+  const auditId = 'audit-post-finish';
+  const attemptDigest = `hmac-sha256:${'E'.repeat(43)}`;
+  const key = `audita:pixel-attempt:v1:${auditId}:${'E'.repeat(43)}`;
+  const values = {
+    [key]: { version: 1, auditId, attemptDigest, pageId: null, ownershipId: null, preparedAt: 1, expiresAt: 2 },
+  };
+  let present = true;
+  const lifecycle = serviceWorkerModule.createPixelAttemptLifecycleV1({
+    sessionArea: { async get() { return present ? structuredClone(values) : {}; } },
+    auditStore: {
+      async commitAuditWithCheckpointIfAbsent() { throw new Error('not used'); },
+      async getReportRevision() { return { auditId, modelRevision: 1 }; },
+    },
+    attemptAuthority: { async digestAttempt() { throw new Error('post-finish has no raw consent'); } },
+    attemptCorrelation: {
+      async prepare() { throw new Error('not used'); },
+      async markerMatches() { return present; },
+      async remove() { present = false; return true; },
+    },
+    modelNow: () => '2026-08-29T12:00:00.000Z',
+  });
+  assert.deepEqual(await lifecycle.classify({ auditId, consentId: null }), { state: 'blocked', handle: null });
+  assert.equal(await lifecycle.cleanup({ auditId, consentId: null, expected: 'post-finish' }), true);
+  assert.equal(present, false);
 });
 
 test('publishes correlated clear after lifecycle recovery invalidation and expiry retire an overlay', async () => {
@@ -734,6 +857,80 @@ test('default worker keeps the volatile vault closed while injecting the one dig
     'the vault has no session-wide scan during put');
 });
 
+test('default graph rearms its singleton pixel scheduler after unified paused cleanup', async () => {
+  const schedules = [];
+  let durablePixelState = null;
+  const env = defaultGraphFixture(null, {
+    chromeAdapter: {
+      async probeDocumentIdentity(tabId) {
+        return {
+          tabId, windowId: 9, documentId: 'document-a',
+          urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+        };
+      },
+    },
+    pixelConsentSchedulerFactory(_chromeApi, dependencies) {
+      durablePixelState = dependencies.pixelState;
+      return Object.freeze({
+        async recoverOnStartup() { return true; },
+        async run() { return true; },
+        async scheduleNext() { schedules.push('schedule'); return true; },
+        dispose() {},
+      });
+    },
+  });
+  const runtime = await env.registration.startupReady;
+  const digest = `hmac-sha256:${'A'.repeat(43)}`;
+  const issuer = {
+    type: 'extension-document', documentId: 'panel-document', path: '/src/panel/index.html',
+  };
+  const prepared = await runtime.authority.prepare({
+    kind: 'attached', tabId: 17, windowId: 9, documentId: 'document-a',
+    initialUrlEvidence: 'https://example.test/', initialUrlSessionDigest: digest,
+    createdBy: 'user', allowedIntent: 'start-audit', issuer,
+  });
+  const claimed = await runtime.authority.claimAndIssueAuditSession({
+    capabilityId: prepared.capabilityId, auditId: 'audit-scheduler-rearm', mode: 'attached',
+    allowedIntent: 'start-audit',
+    senderContext: {
+      issuer, windowId: 9, tabId: null, contextType: 'SIDE_PANEL',
+      documentUrl: `chrome-extension://${env.chromeApi.runtime.id}/src/panel/index.html?launch=${'L'.repeat(43)}`,
+    },
+  });
+  assert.equal(claimed.ok, true);
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const paused = await durablePixelState.pause({
+    auditId: 'audit-scheduler-rearm',
+    observedTarget: {
+      version: 'ObservedTargetV1', kind: 'attached', tabId: 17, windowId: 9,
+      documentId: 'document-a',
+      urlEvidence: sanitizeEvidenceUrlV1('https://example.test/', { includeQuery: false }),
+      urlSessionDigest: digest,
+    },
+    mode: 'full-evidence', capturePolicy: policy, categories: ['password'],
+    authorityExpiresAt: 1_788_000_600_000,
+  });
+  assert.equal((await runtime.authority.transitionAuditSession({
+    sessionCapabilityId: claimed.sessionCapabilityId,
+    auditId: 'audit-scheduler-rearm', nextState: 'privacy-paused',
+  })).ok, true);
+  env.sessionValues[ACTIVE_AUDIT_JOB_KEY] = {
+    version: 1, auditId: 'audit-scheduler-rearm', capabilityId: prepared.capabilityId,
+    sessionCapabilityId: claimed.sessionCapabilityId, windowId: 9, mode: 'attached',
+    state: 'privacy-paused', commitState: 'none', expectedTerminalRevision: null,
+    createdAt: 1_788_000_000_000, updatedAt: 1_788_000_000_000,
+  };
+
+  const result = await runtime.auditStarter.abortAttachedAuditForTarget({
+    tabId: 17, windowId: null, reasonCode: 'TAB_DISCARDED',
+  });
+  assert.deepEqual(result, {
+    handled: true, liquidated: true, aborted: true, auditId: 'audit-scheduler-rearm',
+  });
+  assert.equal(await durablePixelState.readSuspension('audit-scheduler-rearm'), null);
+  assert.equal(schedules.length >= 1, true);
+});
+
 test('default runtime clears the persona expiry alarm with the exact Promise API arity', async () => {
   const calls = [];
   const env = defaultGraphFixture(null, {
@@ -755,6 +952,7 @@ test('default runtime clears the persona expiry alarm with the exact Promise API
   env.events.alarm.emit({ name: HIGHLIGHT_EXPIRY_ALARM_NAME, scheduledTime: 1_788_000_000_001 });
   await tick();
   assert.deepEqual(calls, [
+    ['clear', 1, PIXEL_CONSENT_ALARM_NAME],
     ['clear', 1, HIGHLIGHT_EXPIRY_ALARM_NAME],
     ['clear', 1, PERSONA_EXPIRY_ALARM_NAME],
     ['clear', 1, HIGHLIGHT_EXPIRY_ALARM_NAME],
@@ -836,6 +1034,7 @@ test('a restarted worker recovers an active persona and rehydrates it through a 
   });
   await env.registration.startupReady;
   assert.deepEqual(alarmCalls, [
+    ['clear', 1, PIXEL_CONSENT_ALARM_NAME],
     ['clear', 1, HIGHLIGHT_EXPIRY_ALARM_NAME],
     ['create', 2, PERSONA_EXPIRY_ALARM_NAME, { when: 1_788_001_800_000 }],
   ]);

@@ -6,13 +6,15 @@ import { parseWorkerMessage } from '../../src/background/worker-protocol.js';
 
 const CAPABILITY = 'C'.repeat(22);
 const SESSION = 'S'.repeat(22);
+const CONSENT = `${'C'.repeat(21)}Q`;
 const DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
 const RUNTIME_ID = 'abcdefghijklmnopabcdefghijklmnop';
 const LAUNCH_TOKEN = 'L'.repeat(43);
 const PANEL_URL = `chrome-extension://${RUNTIME_ID}/src/panel/index.html?launch=${LAUNCH_TOKEN}`;
 const PANEL_TYPES = new Set([
   'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
-  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
+  'PANEL_START_ATTACHED_AUDIT', 'CONFIRM_PIXEL_CAPTURE',
+  'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
   'PANEL_SET_PERSONA_MODE', 'PANEL_READER_STATE', 'PANEL_READER_ACTION',
   'PANEL_READER_ENABLE_VOICE',
   'PANEL_STOP_PERSONA', 'PANEL_CANCEL_AUDIT',
@@ -86,7 +88,9 @@ function fixture(overrides = {}) {
       calls.push(['authorize', value]);
       return { ok: true, session: {
         auditId: value.auditId, sessionCapabilityId: value.sessionCapabilityId,
-        windowId: 9, state: 'result',
+        windowId: 9, mode: 'attached',
+        targetBinding: { kind: 'attached' },
+        state: value.intent === 'confirm-pixels' ? 'privacy-paused' : 'result',
       }, context: { windowId: 9 } };
     },
     async rehydrateViewOnly(value) {
@@ -98,6 +102,14 @@ function fixture(overrides = {}) {
   const auditStarter = {
     async beginAuthorizedAudit(value) { calls.push(['begin', value]); return { response: { ok: true, auditId: value.auditId, state: 'running' } }; },
     async abortAuthorizedAudit(value) { calls.push(['abort', value]); return { ok: true, auditId: value.auditId, state: 'cancelling' }; },
+    async resumePrivacyPausedAudit(value) {
+      calls.push(['resume', value]);
+      return {
+        response: { ok: true, auditId: value.auditId, state: 'running' },
+        sessionCapabilityId: value.sessionCapabilityId,
+        completion: Promise.resolve({ ok: true }),
+      };
+    },
   };
   const personaStart = {
     async start(value) {
@@ -439,6 +451,208 @@ test('prepares a panel capability and starts through the only attached starter w
   assert.equal(begin.senderContext.documentUrl.includes('panel'), true);
   assert.deepEqual(begin.retentionPreference, { version: 1, deleteAfterCompleteExport: false });
   assert.equal(Object.isFrozen(begin.retentionPreference), true);
+});
+
+test('starts each closed capture mode with its exact canonical policy', async () => {
+  const { router, calls } = fixture();
+  for (const captureMode of ['full-evidence', 'element-only', 'no-pixels']) {
+    const started = await router.dispatch({
+      envelope: parsed({
+        type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode,
+        includeQuery: false, deleteAfterCompleteExport: false, windowId: 9,
+      }),
+      sender: panelSender(),
+    });
+    assert.equal(started.ok, true);
+  }
+  assert.deepEqual(calls.filter(([name]) => name === 'begin').map(([, value]) => value.capturePolicy), [
+    {
+      version: 'CapturePolicyV1', mode: 'full-evidence', includeQuery: false,
+      captureFullPage: true, captureElements: true, composeAnnouncementMap: true,
+    },
+    {
+      version: 'CapturePolicyV1', mode: 'element-only', includeQuery: false,
+      captureFullPage: false, captureElements: true, composeAnnouncementMap: false,
+    },
+    {
+      version: 'CapturePolicyV1', mode: 'no-pixels', includeQuery: false,
+      captureFullPage: false, captureElements: false, composeAnnouncementMap: false,
+    },
+  ]);
+});
+
+test('authorizes and resumes one correlated privacy pause without exposing the completion', async () => {
+  const { router, calls } = fixture();
+  const response = await router.dispatch({
+    envelope: parsed({
+      type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: 'audit-paused',
+      consentId: CONSENT, mode: 'full-evidence', accepted: true, windowId: 9,
+    }),
+    sender: panelSender(),
+  });
+
+  assert.deepEqual(response, { ok: true, auditId: 'audit-paused', state: 'running' });
+  assert.deepEqual(calls.find(([name]) => name === 'authorize')[1], {
+    sessionCapabilityId: SESSION, auditId: 'audit-paused', consumer: 'panel',
+    intent: 'confirm-pixels', sender: panelSender(), claimedWindowId: 9,
+  });
+  assert.deepEqual(calls.find(([name]) => name === 'resume')[1], {
+    auditId: 'audit-paused', sessionCapabilityId: SESSION, windowId: 9,
+    consentId: CONSENT, mode: 'full-evidence',
+  });
+  assert.deepEqual(Reflect.ownKeys(response), ['ok', 'auditId', 'state']);
+  assert.equal(calls.some(([name]) => ['begin', 'abort'].includes(name)), false);
+});
+
+test('projects only closed resume successes and allowlisted failures', async t => {
+  for (const state of ['running', 'privacy-paused']) await t.test(state, async () => {
+    const { router } = fixture({
+      auditStarter: {
+        async beginAuthorizedAudit() { throw new Error('unused'); },
+        async abortAuthorizedAudit() { throw new Error('unused'); },
+        async resumePrivacyPausedAudit(value) {
+          return {
+            response: { ok: true, auditId: value.auditId, state },
+            sessionCapabilityId: value.sessionCapabilityId,
+            completion: new Promise(() => {}),
+          };
+        },
+      },
+    });
+    assert.deepEqual(await router.dispatch({
+      envelope: parsed({
+        type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: `audit-${state}`,
+        consentId: CONSENT, mode: 'element-only', accepted: true, windowId: 9,
+      }),
+      sender: panelSender(),
+    }), { ok: true, auditId: `audit-${state}`, state });
+  });
+
+  for (const code of [
+    'PIXEL_CONSENT_EXPIRED', 'PIXEL_CONSENT_DOCUMENT_CHANGED', 'PIXEL_CONSENT_ALREADY_USED',
+    'PIXEL_CONSENT_STALE', 'AUDIT_RECOVERY_REQUIRED', 'AUDIT_CANCELLED',
+  ]) await t.test(code, async () => {
+    const { router } = fixture({
+      auditStarter: {
+        async beginAuthorizedAudit() { throw new Error('unused'); },
+        async abortAuthorizedAudit() { throw new Error('unused'); },
+        async resumePrivacyPausedAudit(value) {
+          return {
+            response: { ok: false, code }, sessionCapabilityId: value.sessionCapabilityId,
+            completion: null,
+          };
+        },
+      },
+    });
+    assert.deepEqual(await router.dispatch({
+      envelope: parsed({
+        type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: 'audit-denied',
+        consentId: CONSENT, mode: 'full-evidence', accepted: true, windowId: 9,
+      }),
+      sender: panelSender(),
+    }), { ok: false, code });
+  });
+});
+
+test('denies uncorrelated paused sessions and malformed starter wrappers', async t => {
+  const sessionMutations = [
+    session => ({ ...session, state: 'running' }),
+    session => ({ ...session, auditId: 'other-audit' }),
+    session => ({ ...session, sessionCapabilityId: 'X'.repeat(22) }),
+    session => ({ ...session, windowId: 11 }),
+    session => ({ ...session, mode: 'disposable' }),
+  ];
+  for (const [index, mutate] of sessionMutations.entries()) await t.test(`session-${index}`, async () => {
+    const { router, calls, dependencies } = fixture();
+    dependencies.authority.authorizeSession = async value => ({
+      ok: true,
+      session: mutate({
+        auditId: value.auditId, sessionCapabilityId: value.sessionCapabilityId,
+        windowId: 9, mode: 'attached', targetBinding: { kind: 'attached' }, state: 'privacy-paused',
+      }),
+      context: { windowId: 9 },
+    });
+    assert.deepEqual(await router.dispatch({
+      envelope: parsed({
+        type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: 'audit-paused',
+        consentId: CONSENT, mode: 'full-evidence', accepted: true, windowId: 9,
+      }),
+      sender: panelSender(),
+    }), { ok: false, code: 'PIXEL_CONFIRM_DENIED' });
+    assert.equal(calls.some(([name]) => name === 'resume'), false);
+  });
+
+  const malformed = [
+    value => ({ ...value, sessionCapabilityId: 'X'.repeat(22) }),
+    value => ({ ...value, extra: true }),
+    value => ({ ...value, response: { ok: true, auditId: 'other-audit', state: 'running' } }),
+    value => ({ ...value, response: { ok: true, auditId: 'audit-paused', state: 'result' } }),
+    value => ({ ...value, response: { ok: false, code: 'PRIVATE_NATIVE_ERROR' } }),
+  ];
+  for (const [index, mutate] of malformed.entries()) await t.test(`wrapper-${index}`, async () => {
+    const { router } = fixture({
+      auditStarter: {
+        async beginAuthorizedAudit() { throw new Error('unused'); },
+        async abortAuthorizedAudit() { throw new Error('unused'); },
+        async resumePrivacyPausedAudit() {
+          return mutate({
+            response: { ok: true, auditId: 'audit-paused', state: 'running' },
+            sessionCapabilityId: SESSION,
+            completion: null,
+          });
+        },
+      },
+    });
+    assert.deepEqual(await router.dispatch({
+      envelope: parsed({
+        type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: 'audit-paused',
+        consentId: CONSENT, mode: 'full-evidence', accepted: true, windowId: 9,
+      }),
+      sender: panelSender(),
+    }), { ok: false, code: 'PIXEL_CONFIRM_DENIED' });
+  });
+});
+
+test('mode mismatch and replay reach only the consent claim and never downstream pixels', async () => {
+  let claims = 0;
+  let pixels = 0;
+  let consumed = false;
+  const { router } = fixture({
+    auditStarter: {
+      async beginAuthorizedAudit() { throw new Error('unused'); },
+      async abortAuthorizedAudit() { throw new Error('unused'); },
+      async resumePrivacyPausedAudit(value) {
+        claims += 1;
+        if (value.mode !== 'full-evidence' || consumed) {
+          return {
+            response: { ok: false, code: 'PIXEL_CONSENT_STALE' },
+            sessionCapabilityId: value.sessionCapabilityId,
+            completion: null,
+          };
+        }
+        consumed = true;
+        pixels += 1;
+        return {
+          response: { ok: true, auditId: value.auditId, state: 'running' },
+          sessionCapabilityId: value.sessionCapabilityId,
+          completion: Promise.resolve({ ok: true }),
+        };
+      },
+    },
+  });
+  const dispatch = mode => router.dispatch({
+    envelope: parsed({
+      type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: 'audit-paused',
+      consentId: CONSENT, mode, accepted: true, windowId: 9,
+    }),
+    sender: panelSender(),
+  });
+
+  assert.deepEqual(await dispatch('element-only'), { ok: false, code: 'PIXEL_CONSENT_STALE' });
+  assert.deepEqual(await dispatch('full-evidence'), { ok: true, auditId: 'audit-paused', state: 'running' });
+  assert.deepEqual(await dispatch('full-evidence'), { ok: false, code: 'PIXEL_CONSENT_STALE' });
+  assert.equal(claims, 3);
+  assert.equal(pixels, 1);
 });
 
 test('prepares and consumes persona capabilities only from the Side Panel and projects no target data', async () => {

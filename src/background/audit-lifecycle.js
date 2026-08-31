@@ -65,11 +65,15 @@ export function createAuditLifecycle(raw) {
   async function invalidateTab(tabId, reasonCode, changeInfo = null, personaReason = null) {
     try {
       const runtime = await input.getReadyRuntime();
-      await bestEffort(() => runtime.auditStarter.abortAttachedAuditForTarget({ tabId, windowId: null, reasonCode }));
+      let settlement = null;
+      try { settlement = await runtime.auditStarter.abortAttachedAuditForTarget({ tabId, windowId: null, reasonCode }); }
+      catch { /* a failed unified liquidation remains fail-closed */ }
       if (personaReason !== null) {
         await bestEffort(() => runtime.highlightController?.invalidateTab?.(tabId, personaReason));
       }
-      await bestEffort(() => runtime.authority.invalidateForTab(tabId, reasonCode));
+      if (settlement?.handled !== true) {
+        await bestEffort(() => runtime.authority.invalidateForTab(tabId, reasonCode));
+      }
       if (personaReason !== null) {
         await bestEffort(() => runtime.personaCoordinator?.invalidateTab?.(tabId, personaReason));
       }
@@ -89,8 +93,15 @@ export function createAuditLifecycle(raw) {
   async function invalidateWindow(windowId) {
     try {
       const runtime = await input.getReadyRuntime();
-      await bestEffort(() => runtime.auditStarter.abortAttachedAuditForTarget({ tabId: null, windowId, reasonCode: 'WINDOW_REMOVED' }));
-      await bestEffort(() => runtime.authority.invalidateForWindow(windowId, 'WINDOW_REMOVED'));
+      let settlement = null;
+      try {
+        settlement = await runtime.auditStarter.abortAttachedAuditForTarget({
+          tabId: null, windowId, reasonCode: 'WINDOW_REMOVED',
+        });
+      } catch { /* a failed unified liquidation remains fail-closed */ }
+      if (settlement?.handled !== true) {
+        await bestEffort(() => runtime.authority.invalidateForWindow(windowId, 'WINDOW_REMOVED'));
+      }
       await bestEffort(() => runtime.personaCoordinator?.invalidateWindow?.(windowId, 'window-changed'));
       await bestEffort(() => runtime.reportLaunch?.handleWindowRemoved?.(windowId));
       await bestEffort(() => runtime.exportLaunch?.handleWindowRemoved?.(windowId));
