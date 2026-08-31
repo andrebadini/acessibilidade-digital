@@ -338,7 +338,10 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       let value;
       try { value = (await sessionArea.get(tokenKey))?.[tokenKey]; } catch { return { keys, stale, unavailable: true }; }
       if (value === undefined) {
-        if (entry.status !== 'finished') stale = true;
+        // A running page may already have consumed its one-shot token. Pending
+        // pages still require a correlating authority; finished pages require
+        // its absence (checked below when a record is present).
+        if (entry.status === 'pending') stale = true;
         continue;
       }
       const record = publicRecord(value);

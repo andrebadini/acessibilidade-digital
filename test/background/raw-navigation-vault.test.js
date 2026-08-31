@@ -1139,3 +1139,38 @@ test('clearAudit treats only its exact queue key and proven raw records as audit
     assert.equal(Object.hasOwn(sessionArea.values, hostileQueue), true);
   }
 });
+
+test('keeps a queue valid after consuming its running entry while preserving the next pending token', async () => {
+  const { sessionArea, clock, vault } = publicFixture();
+  const auditId = 'audit-running-consumed';
+  const entries = [
+    await batchEntry(vault, auditId, 1, 'running-consumed-one'),
+    await batchEntry(vault, auditId, 2, 'running-consumed-two'),
+  ];
+  await vault.putQueue({ auditId, entries });
+  const pending = await vault.readQueue(auditId);
+  const running = structuredClone(pending);
+  running.revision = 2;
+  running.entries[0].status = 'running';
+  await vault.replaceQueue(auditId, running, {
+    expectedRevision: 1, expectedState: { nextIndex: 0, status: 'pending' },
+  });
+  assert.equal(await vault.take(entries[0].navigationToken, { auditId, purpose: 'batch-page' }),
+    'https://example.test/running-consumed-one?private=1');
+  const restarted = await restartedPublicVault(sessionArea, clock);
+  const afterConsumption = await restarted.readQueue(auditId);
+  assert.equal(afterConsumption.entries[0].status, 'running');
+  assert.equal(Object.hasOwn(sessionArea.values, `audita:raw-navigation:v1:${entries[1].navigationToken}`), true);
+  const finished = structuredClone(afterConsumption);
+  finished.revision = 3;
+  finished.nextIndex = 1;
+  finished.entries[0].status = 'finished';
+  await restarted.replaceQueue(auditId, finished, {
+    expectedRevision: 2, expectedState: { nextIndex: 0, status: 'running' },
+  });
+  const afterFinished = await restarted.readQueue(auditId);
+  assert.equal(afterFinished.nextIndex, 1);
+  assert.equal(afterFinished.entries[1].status, 'pending');
+  assert.equal(await restarted.take(entries[1].navigationToken, { auditId, purpose: 'batch-page' }),
+    'https://example.test/running-consumed-two?private=2');
+});
