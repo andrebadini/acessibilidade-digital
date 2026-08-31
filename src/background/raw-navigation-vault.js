@@ -263,7 +263,7 @@ function recordAuditId(value) {
 function auditCleanupTargets(entries, auditId) {
   return entries.flatMap(([key, value]) =>
     key === `${QUEUE_PREFIX}${auditId}` ||
-    (namespaceCleanupKey(key) && recordAuditId(value) === auditId) ? [key] : []);
+    (key.startsWith(PREFIX) && recordAuditId(value) === auditId) ? [key] : []);
 }
 
 function expiredCleanupTargets(entries, cutoff) {

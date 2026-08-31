@@ -899,9 +899,9 @@ test('clearAudit selects malformed raw and queue records by own auditId without 
   sessionArea.values[queueTarget] = { auditId: 'audit-clear-target', malformed: true };
   sessionArea.values[canonicalQueueTarget] = { auditId: 'audit-clear-foreign', malformed: true };
   sessionArea.values[foreign] = { auditId: 'audit-clear-foreign', malformed: true };
-  assert.equal(await vault.clearAudit('audit-clear-target'), 3);
+  assert.equal(await vault.clearAudit('audit-clear-target'), 2);
   assert.equal(Object.hasOwn(sessionArea.values, rawTarget), false);
-  assert.equal(Object.hasOwn(sessionArea.values, queueTarget), false);
+  assert.equal(Object.hasOwn(sessionArea.values, queueTarget), true);
   assert.equal(Object.hasOwn(sessionArea.values, canonicalQueueTarget), false);
   assert.equal(Object.hasOwn(sessionArea.values, foreign), true);
 });
@@ -1099,5 +1099,43 @@ test('recovers a valid queue marker when its queue is absent or malformed withou
     });
     assert.equal(Object.hasOwn(sessionArea.values, queueKey), false);
     assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
+  }
+});
+
+test('clearAudit treats only its exact queue key and proven raw records as audit authority', async () => {
+  const markerKey = 'audita:raw-navigation-cleanup:v1';
+  for (const removeMode of ['normal', 'noop', 'throw']) {
+    const { sessionArea, clock, vault } = publicFixture();
+    const queueA = 'audita:raw-navigation-queue:v1:audit-authority-a';
+    const rawA = 'audita:raw-navigation:v1:https://example.test/a?secret=NEVER';
+    const queueB = 'audita:raw-navigation-queue:v1:audit-authority-b';
+    const rawB = 'audita:raw-navigation:v1:not-a-token-b';
+    const hostileQueue = 'audita:raw-navigation-queue:v1:https://example.test/a?secret=NEVER';
+    sessionArea.values[queueA] = { auditId: 'audit-authority-b', malformed: true };
+    sessionArea.values[rawA] = { auditId: 'audit-authority-a', malformed: true };
+    sessionArea.values[queueB] = { auditId: 'audit-authority-a', malformed: true };
+    sessionArea.values[rawB] = { auditId: 'audit-authority-b', malformed: true };
+    sessionArea.values[hostileQueue] = { auditId: 'audit-authority-a', malformed: true };
+    sessionArea.removeMode = removeMode;
+    if (removeMode === 'normal') {
+      assert.equal(await vault.clearAudit('audit-authority-a'), 2);
+    } else {
+      await assert.rejects(vault.clearAudit('audit-authority-a'), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+      assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'audit', auditId: 'audit-authority-a' });
+      assert.doesNotMatch(JSON.stringify(sessionArea.values[markerKey]), /NEVER|https:\/\//u);
+      const restarted = await restartedPublicVault(sessionArea, clock);
+      await assert.rejects(restarted.put('https://example.test/audit-authority-blocked', {
+        auditId: 'audit-authority-blocked', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+      }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+      sessionArea.removeMode = 'normal';
+      await restarted.put('https://example.test/audit-authority-recovered', {
+        auditId: 'audit-authority-recovered', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+      });
+    }
+    assert.equal(Object.hasOwn(sessionArea.values, queueA), false);
+    assert.equal(Object.hasOwn(sessionArea.values, rawA), false);
+    assert.equal(Object.hasOwn(sessionArea.values, queueB), true);
+    assert.equal(Object.hasOwn(sessionArea.values, rawB), true);
+    assert.equal(Object.hasOwn(sessionArea.values, hostileQueue), true);
   }
 });
