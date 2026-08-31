@@ -120,11 +120,18 @@ test('rotates consent on every sensitive signal drift without extending its abso
   }
 });
 
-test('treats the same sensitive category set in a different order as unchanged', async () => {
-  const { state } = stateFixture();
+test('canonicalizes category input but rejects stored categories outside canonical order', async () => {
+  const { sessionArea, state } = stateFixture();
   const paused = await state.pause(pauseInput());
   const claim = await state.claimAndBeginResume({ auditId: 'audit-1', consentId: paused.consentId, proof: proof(), mode: 'full-evidence', categories: ['otp', 'password'] });
   assert.equal(claim.consentId, paused.consentId);
+  assert.deepEqual(claim.categories, ['password', 'otp']);
+
+  sessionArea.values[`${JOURNAL_PREFIX}audit-1`].categories = ['otp', 'password'];
+  await assert.rejects(
+    state.readSuspension('audit-1'),
+    error => error?.message === 'PIXEL_STATE_UNAVAILABLE',
+  );
 });
 
 test('rejects an approval delayed behind a rotated consent without consuming the replacement', async () => {
@@ -409,7 +416,7 @@ test('accepts remove commit-then-throw but blocks noop and foreign replacement',
   }
 });
 
-test('revalidates expiry binding and categories at the final runner gate', async () => {
+test('revalidates a fresh clock at every resume transition and binding categories at the final gate', async () => {
   for (const scenario of ['expired', 'document-changed', 'signals-changed']) {
     const clock = { value: NOW };
     const { state } = stateFixture({ now: () => clock.value });
@@ -432,6 +439,85 @@ test('revalidates expiry binding and categories at the final runner gate', async
     }
     assert.notEqual((await state.readSuspension('audit-1')).resumePhase, 'runner-started');
   }
+
+  const outcomes = [];
+  for (const boundary of ['get', 'set']) {
+    for (const transition of ['claim', 'mark', 'gate']) {
+      const deadline = NOW + 100;
+      const clock = { value: NOW };
+      const sessionArea = memorySessionArea();
+      const state = createPixelCaptureStateV1({
+        sessionArea,
+        now: () => clock.value,
+        randomBytes: bytesFactory(),
+      });
+      const paused = await state.pause(pauseInput({
+        categories: ['payment'],
+        authorityExpiresAt: deadline,
+      }));
+      if (transition !== 'claim') {
+        await state.claimAndBeginResume({
+          auditId: paused.auditId,
+          consentId: paused.consentId,
+          proof: proof(),
+          mode: 'full-evidence',
+          categories: ['payment'],
+        });
+      }
+      if (transition === 'gate') {
+        await state.markSessionRunning({
+          auditId: paused.auditId,
+          consentId: paused.consentId,
+        });
+      }
+
+      const original = sessionArea[boundary].bind(sessionArea);
+      let armed = true;
+      sessionArea[boundary] = async (...args) => {
+        const result = await original(...args);
+        if (armed) {
+          armed = false;
+          clock.value = deadline;
+        }
+        return result;
+      };
+
+      try {
+        if (transition === 'claim') {
+          await state.claimAndBeginResume({
+            auditId: paused.auditId,
+            consentId: paused.consentId,
+            proof: proof(),
+            mode: 'full-evidence',
+            categories: ['payment'],
+          });
+        } else if (transition === 'mark') {
+          await state.markSessionRunning({
+            auditId: paused.auditId,
+            consentId: paused.consentId,
+          });
+        } else {
+          await state.gateRunnerStart({
+            auditId: paused.auditId,
+            consentId: paused.consentId,
+            proof: proof(),
+            categories: ['payment'],
+          });
+        }
+        outcomes.push(`${transition}:${boundary}:fulfilled`);
+      } catch (caught) {
+        outcomes.push(`${transition}:${boundary}:${caught?.message}`);
+      }
+    }
+  }
+  assert.deepEqual(outcomes, [
+    'claim:get:PIXEL_CONSENT_EXPIRED',
+    'mark:get:PIXEL_CONSENT_EXPIRED',
+    'gate:get:PIXEL_CONSENT_EXPIRED',
+    'claim:set:PIXEL_CONSENT_EXPIRED',
+    'mark:set:PIXEL_CONSENT_EXPIRED',
+    'gate:set:PIXEL_CONSENT_EXPIRED',
+  ]);
 });
 
 test('makes a stale recovery projection harmless after consent rotation', async () => {

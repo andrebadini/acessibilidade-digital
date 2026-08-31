@@ -166,6 +166,56 @@ test('does not liquidate again when a finished journal only needs its own remova
   assert.equal(await fixtureValue.pixelState.readSuspension('audit-finished'), null);
 });
 
+test('only defers the exact or immediate terminal revision after finish throws', async () => {
+  const scenarios = [
+    { kind: 'immediate-finish', revisionDelta: 1, state: 'finished', cleanupAttempts: 0, expected: [3] },
+    { kind: 'concurrent-defer', revisionDelta: 1, state: 'revoked', cleanupAttempts: 1, expected: [] },
+    { kind: 'distant-replacement', revisionDelta: 2, state: 'finished', cleanupAttempts: 0, expected: [] },
+  ];
+  for (const scenario of scenarios) {
+    const fixtureValue = fixture();
+    const candidate = recoveryCandidate({ auditId: `audit-${scenario.kind}` });
+    const latest = Object.freeze({
+      ...recoveryCandidate({
+        auditId: candidate.auditId,
+        consentId: candidate.consentId,
+        revision: candidate.revision + scenario.revisionDelta,
+        state: scenario.state,
+        revokeReason: scenario.state === 'revoked' ? candidate.revokeReason : null,
+        cleanupNotBefore: scenario.cleanupAttempts === 0 ? NOW : NOW + 60_000,
+      }),
+      cleanupAttempts: scenario.cleanupAttempts,
+    });
+    const deferredRevisions = [];
+    const state = {
+      async listRecoveryCandidates() {
+        return Object.freeze({
+          version: 'PixelRecoveryScanV1', candidates: Object.freeze([candidate]),
+          unavailableAuditIds: Object.freeze([]), hasUnattributedUnavailable: false, blockingCount: 0,
+        });
+      },
+      async revokeAudit() {
+        return Object.freeze({ version: 'PixelRevokeResultV1', status: 'already-revoked', suspension: candidate });
+      },
+      async finish() { throw new Error('finish outcome requires read-back'); },
+      async readSuspension() { return latest; },
+      async deferCleanup({ expectedRevision }) {
+        deferredRevisions.push(expectedRevision);
+        return latest;
+      },
+      async nextExpiresAt() { return null; },
+    };
+    const scheduler = createPixelConsentExpirySchedulerV1(fixtureValue.chromeApi, {
+      pixelState: state,
+      liquidator: { async liquidate() { return true; } },
+      now: () => NOW,
+    });
+
+    await scheduler.run('panel');
+    assert.deepEqual(deferredRevisions, scenario.expected);
+  }
+});
+
 test('schedules the nearest expiry with one alarm and retries revoked cleanup no sooner than sixty seconds', async () => {
   let now = NOW;
   const fixtureValue = fixture({ now: () => now });
@@ -183,7 +233,7 @@ test('schedules the nearest expiry with one alarm and retries revoked cleanup no
   scheduler.dispose();
 });
 
-test('times out a hung liquidator after five seconds and ignores its late success', async () => {
+test('times out a hung liquidator without adopting a newer cleanup revision or its late success', async () => {
   let now = NOW;
   const fixtureValue = fixture({ now: () => now });
   const paused = await fixtureValue.pixelState.pause(pauseInput('audit-timeout', NOW + 1));
@@ -214,6 +264,15 @@ test('times out a hung liquidator after five seconds and ignores its late succes
   assert.equal(delayMs, 5_000);
   assert.ok(observedSignal instanceof AbortSignal);
   assert.equal(observedSignal.aborted, false);
+
+  const confirmedRevocation = await fixtureValue.pixelState.readSuspension(paused.auditId);
+  assert.equal(confirmedRevocation.state, 'revoked');
+  const concurrentlyDeferred = await fixtureValue.pixelState.deferCleanup({
+    auditId: paused.auditId,
+    consentId: paused.consentId,
+    expectedRevision: confirmedRevocation.revision,
+  });
+  assert.equal(concurrentlyDeferred.cleanupAttempts, 1);
 
   localTimer.fire();
   await running;
@@ -385,7 +444,7 @@ test('clears a failed shared startup promise so a later call can retry', async (
   await retried;
 });
 
-test('a disposed factory cannot run a queued schedule and clobber another factory alarm', async () => {
+test('a disposed factory denies queued work and repairs an in-flight alarm mutation', async () => {
   const fixtureValue = fixture();
   const blocked = deferred();
   let firstRead = true;
@@ -426,6 +485,59 @@ test('a disposed factory cannot run a queued schedule and clobber another factor
   await assert.rejects(staleSchedule, /PIXEL_STATE_UNAVAILABLE/u);
   assert.equal(staleReads, 0);
   assert.deepEqual(fixtureValue.alarms.get(PIXEL_CONSENT_ALARM_NAME), { when: NOW + 5_000 });
+
+  for (const mutation of ['create', 'clear']) {
+    const alarms = new Map([[PIXEL_CONSENT_ALARM_NAME, { when: NOW + 5_000 }]]);
+    const enteredMutation = deferred();
+    const releaseMutation = deferred();
+    let targetCalls = 0;
+    const chromeApi = { alarms: {
+      async create(name, options) {
+        if (mutation === 'create') {
+          targetCalls += 1;
+          if (targetCalls === 1) {
+            enteredMutation.resolve();
+            await releaseMutation.promise;
+          }
+        }
+        alarms.set(name, structuredClone(options));
+      },
+      async get(name) {
+        return alarms.has(name)
+          ? { name, scheduledTime: alarms.get(name).when }
+          : undefined;
+      },
+      async clear(name) {
+        if (mutation === 'clear') {
+          targetCalls += 1;
+          if (targetCalls === 1) {
+            enteredMutation.resolve();
+            await releaseMutation.promise;
+          }
+        }
+        return alarms.delete(name);
+      },
+    } };
+    const state = {
+      async listRecoveryCandidates() { throw new Error('disposed work must stay closed'); },
+      async nextExpiresAt() { return mutation === 'create' ? NOW + 50_000 : null; },
+    };
+    const scheduler = createPixelConsentExpirySchedulerV1(chromeApi, {
+      pixelState: state,
+      liquidator: fixtureValue.liquidator,
+      now: () => NOW,
+    });
+
+    const pendingMutation = scheduler.scheduleNext();
+    await enteredMutation.promise;
+    scheduler.dispose();
+    await assert.rejects(scheduler.scheduleNext(), /PIXEL_STATE_UNAVAILABLE/u);
+    await assert.rejects(scheduler.run('alarm'), /PIXEL_STATE_UNAVAILABLE/u);
+    await assert.rejects(scheduler.recoverOnStartup(), /PIXEL_STATE_UNAVAILABLE/u);
+    releaseMutation.resolve();
+    await assert.rejects(pendingMutation, /PIXEL_STATE_UNAVAILABLE/u);
+    assert.deepEqual(alarms.get(PIXEL_CONSENT_ALARM_NAME), { when: NOW + 5_000 });
+  }
 });
 
 test('recalculates after create or clear when the journal deadline changes during the alarm await', async () => {

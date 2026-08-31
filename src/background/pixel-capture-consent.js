@@ -213,7 +213,8 @@ function parseJournal(value) {
     !validAuditId(journal.auditId) || !validConsentId(journal.consentId) ||
     !validEpoch(journal.tabId) || !validEpoch(journal.windowId) ||
     !validOpaque(journal.documentId) || !MODES.has(journal.mode) || !parsedPolicy ||
-    parsedPolicy.mode !== journal.mode || !parsedCategories || !validEpoch(journal.issuedAt) ||
+    parsedPolicy.mode !== journal.mode || !parsedCategories ||
+    !same(journal.categories, parsedCategories) || !validEpoch(journal.issuedAt) ||
     !validEpoch(journal.updatedAt) || !validEpoch(journal.expiresAt) ||
     journal.updatedAt < journal.issuedAt || journal.expiresAt <= journal.issuedAt ||
     journal.expiresAt - journal.issuedAt > TTL_MS || !parsedEvidence ||
@@ -488,9 +489,9 @@ export function createPixelCaptureStateV1(options) {
       if (!input || !validAuditId(input.auditId) || !validConsentId(input.consentId) ||
         !currentProof || !MODES.has(input.mode) || !currentCategories) throw unavailable();
       ensureUnblocked(input.auditId, input.consentId);
-      const claimedAt = at();
       const current = await read(input.auditId);
       if (!current) throw error('PIXEL_CONSENT_MISSING');
+      const claimedAt = at();
       assertFresh(current, claimedAt);
       if (current.consentId !== input.consentId) throw error('PIXEL_CONSENT_STALE');
       if (current.state !== 'paused') throw error('PIXEL_CONSENT_ALREADY_USED');
@@ -514,7 +515,11 @@ export function createPixelCaptureStateV1(options) {
       const resumed = updatedJournal(current, claimedAt, {
         state: 'resuming', resumePhase: 'consent-claimed',
       });
-      return claim(await write(resumed, current), claimedAt);
+      const confirmed = await write(resumed, current);
+      const confirmedAt = at();
+      assertFresh(confirmed, confirmedAt);
+      if (confirmedAt >= confirmed.expiresAt) throw error('PIXEL_CONSENT_EXPIRED');
+      return claim(confirmed, claimedAt);
     }),
 
     markSessionRunning: request => serial(async () => {
@@ -523,15 +528,19 @@ export function createPixelCaptureStateV1(options) {
         throw error('PIXEL_RESUME_TRANSITION_INVALID');
       }
       ensureUnblocked(input.auditId, input.consentId);
-      const updatedAt = at();
       const current = await read(input.auditId);
       if (!current) throw error('PIXEL_RESUME_TRANSITION_INVALID');
+      const updatedAt = at();
       assertFresh(current, updatedAt);
       if (current.consentId !== input.consentId || current.state !== 'resuming' ||
         current.resumePhase !== 'consent-claimed') throw error('PIXEL_RESUME_TRANSITION_INVALID');
       if (updatedAt >= current.expiresAt) throw error('PIXEL_CONSENT_EXPIRED');
       const running = updatedJournal(current, updatedAt, { resumePhase: 'session-running' });
-      return suspension(await write(running, current));
+      const confirmed = await write(running, current);
+      const confirmedAt = at();
+      assertFresh(confirmed, confirmedAt);
+      if (confirmedAt >= confirmed.expiresAt) throw error('PIXEL_CONSENT_EXPIRED');
+      return suspension(confirmed);
     }),
 
     gateRunnerStart: request => serial(async () => {
@@ -541,9 +550,9 @@ export function createPixelCaptureStateV1(options) {
       if (!input || !validAuditId(input.auditId) || !validConsentId(input.consentId) ||
         !currentProof || !currentCategories) throw error('PIXEL_RESUME_TRANSITION_INVALID');
       ensureUnblocked(input.auditId, input.consentId);
-      const updatedAt = at();
       const current = await read(input.auditId);
       if (!current) throw error('PIXEL_RESUME_TRANSITION_INVALID');
+      const updatedAt = at();
       assertFresh(current, updatedAt);
       if (current.consentId !== input.consentId || current.state !== 'resuming' ||
         current.resumePhase !== 'session-running') throw error('PIXEL_RESUME_TRANSITION_INVALID');
@@ -551,9 +560,13 @@ export function createPixelCaptureStateV1(options) {
       if (!bindingMatches(current, currentProof)) return revokeBindingMismatch(current, updatedAt);
       if (same(current.categories, currentCategories)) {
         const ready = updatedJournal(current, updatedAt, { resumePhase: 'runner-started' });
+        const confirmed = await write(ready, current);
+        const confirmedAt = at();
+        assertFresh(confirmed, confirmedAt);
+        if (confirmedAt >= confirmed.expiresAt) throw error('PIXEL_CONSENT_EXPIRED');
         return deepFrozenCopy({
           version: 'PixelRunnerGateResultV1', status: 'ready',
-          suspension: suspension(await write(ready, current)),
+          suspension: suspension(confirmed),
         });
       }
       let replacementConsentId;

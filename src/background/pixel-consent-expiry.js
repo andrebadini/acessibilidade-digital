@@ -91,11 +91,35 @@ function suspensionProjection(value) {
     revision: suspension.revision,
     updatedAt: suspension.updatedAt,
     expiresAt: suspension.expiresAt,
+    cleanupAttempts: suspension.cleanupAttempts,
     cleanupNotBefore: suspension.cleanupNotBefore,
     state: suspension.state,
     revokeReason: suspension.revokeReason,
     source,
   });
+}
+
+function sameSource(left, right) {
+  if (left.kind !== right.kind) return false;
+  return left.kind === 'attached' ||
+    left.ownershipId === right.ownershipId && left.cleanupMode === right.cleanupMode &&
+    left.pageId === right.pageId;
+}
+
+function finishRetryCandidate(fallback, latest) {
+  if (!fallback || !latest || latest.auditId !== fallback.auditId ||
+    latest.consentId !== fallback.consentId || latest.expiresAt !== fallback.expiresAt ||
+    !sameSource(latest.source, fallback.source)) return null;
+  if (latest.revision === fallback.revision && latest.state === fallback.state &&
+    latest.updatedAt === fallback.updatedAt &&
+    latest.cleanupAttempts === fallback.cleanupAttempts &&
+    latest.cleanupNotBefore === fallback.cleanupNotBefore &&
+    latest.revokeReason === fallback.revokeReason) return latest;
+  if (fallback.state !== 'revoked' || fallback.revision >= Number.MAX_SAFE_INTEGER ||
+    latest.revision !== fallback.revision + 1 || latest.state !== 'finished' ||
+    latest.updatedAt < fallback.updatedAt || latest.cleanupAttempts !== 0 ||
+    latest.cleanupNotBefore !== latest.updatedAt || latest.revokeReason !== null) return null;
+  return latest;
 }
 
 function recoveryScanProjection(value, at) {
@@ -204,6 +228,22 @@ export function createPixelConsentExpirySchedulerV1(chromeApi, options) {
       else await alarms.create(PIXEL_CONSENT_ALARM_NAME, { when });
     } catch { /* The read-back below is the commit authority. */ }
   };
+  const projectAlarm = value => {
+    if (value === undefined) return null;
+    const projected = alarmProjection(value);
+    if (!projected) throw failure('PIXEL_STATE_UNAVAILABLE');
+    return projected;
+  };
+  const preserveEarlierAlarm = async previous => {
+    if (!previous) return;
+    const observed = projectAlarm(await readAlarm());
+    if (observed && observed.scheduledTime <= previous.scheduledTime) return;
+    await applyAlarm(previous.scheduledTime);
+    const confirmed = projectAlarm(await readAlarm());
+    if (!confirmed || confirmed.scheduledTime > previous.scheduledTime) {
+      throw failure('PIXEL_STATE_UNAVAILABLE');
+    }
+  };
   const schedule = async () => {
     for (let attempt = 0; attempt < MAX_SCHEDULE_RECALCULATIONS; attempt += 1) {
       assertActive();
@@ -211,7 +251,13 @@ export function createPixelConsentExpirySchedulerV1(chromeApi, options) {
       const intendedDeadline = await pixelState.nextExpiresAt();
       assertActive();
       const intended = alarmWhen(intendedDeadline, current());
+      const previous = projectAlarm(await readAlarm());
+      assertActive();
       await applyAlarm(intended);
+      if (disposed) {
+        await preserveEarlierAlarm(previous);
+        throw failure('PIXEL_STATE_UNAVAILABLE');
+      }
       assertActive();
 
       const afterMutationDeadline = await pixelState.nextExpiresAt();
@@ -273,6 +319,17 @@ export function createPixelConsentExpirySchedulerV1(chromeApi, options) {
     })).then(value => finish(value === true), () => finish(false));
   });
 
+  const deferConfirmed = async candidate => {
+    if (!candidate || !['revoked', 'finished'].includes(candidate.state) || typeof pixelState.deferCleanup !== 'function') return false;
+    try {
+      return await pixelState.deferCleanup({
+        auditId: candidate.auditId,
+        consentId: candidate.consentId,
+        expectedRevision: candidate.revision,
+      }) !== null;
+    } catch { return false; }
+  };
+
   const readAndDefer = async (auditId, consentId, fallback) => {
     let latest = fallback;
     if (typeof pixelState.readSuspension === 'function') {
@@ -281,10 +338,8 @@ export function createPixelConsentExpirySchedulerV1(chromeApi, options) {
         latest = readValue === null ? null : suspensionProjection(readValue);
       } catch { return false; }
     }
-    if (!latest || latest.auditId !== auditId || latest.consentId !== consentId || !['revoked', 'finished'].includes(latest.state) || typeof pixelState.deferCleanup !== 'function') return false;
-    try {
-      return await pixelState.deferCleanup({ auditId, consentId, expectedRevision: latest.revision }) !== null;
-    } catch { return false; }
+    if (!latest || latest.auditId !== auditId || latest.consentId !== consentId) return false;
+    return deferConfirmed(finishRetryCandidate(fallback, latest));
   };
 
   const finishOnly = async candidate => {
@@ -323,7 +378,7 @@ export function createPixelConsentExpirySchedulerV1(chromeApi, options) {
     const confirmed = revoked.suspension;
     const liquidated = await liquidateWithBudget(confirmed);
     if (!liquidated) {
-      const cleanupProgressed = await readAndDefer(confirmed.auditId, confirmed.consentId, confirmed);
+      const cleanupProgressed = await deferConfirmed(confirmed);
       return cleanupProgressed || resumeAuthorityCleared;
     }
     try {
