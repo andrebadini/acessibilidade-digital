@@ -3,6 +3,12 @@ export const SESSION_HMAC_KEY = 'audita:session-hmac-key:v1';
 const KEY_BYTES = 32;
 const KEY_RECORD_KEYS = ['version', 'keyBase64Url', 'createdAt'];
 const BASE64URL_32_BYTES = /^[A-Za-z0-9_-]{43}$/u;
+const PIXEL_ATTEMPT_KEYS = ['auditId', 'consentId'];
+const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
+const CONSENT_ID = /^[A-Za-z0-9_-]{21}[AQgw]$/u;
+const PIXEL_ATTEMPT_DOMAIN = 'audita:pixel-attempt:v1';
+const SESSION_KEY_COORDINATORS = new WeakMap();
+const PIXEL_ATTEMPT_AUTHORITIES = new WeakMap();
 
 export function createSessionHmacKeyBytes(randomBytes) {
   if (typeof randomBytes !== 'function') throw new TypeError('HMAC_KEY_GENERATION_FAILED');
@@ -15,6 +21,19 @@ export function createSessionHmacKeyBytes(randomBytes) {
 
 export async function createSessionUrlDigest(rawUrl, sessionKey, subtle) {
   requireCanonicalHttpUrl(rawUrl);
+  return signHmac(new TextEncoder().encode(rawUrl), sessionKey, subtle);
+}
+
+export async function createPixelAttemptDigest(value, sessionKey, subtle) {
+  const pair = readDataRecord(value, PIXEL_ATTEMPT_KEYS);
+  if (!pair || !AUDIT_ID.test(pair.auditId ?? '') || !CONSENT_ID.test(pair.consentId ?? '')) {
+    throw new TypeError('PIXEL_ATTEMPT_DIGEST_INVALID');
+  }
+  const material = `${PIXEL_ATTEMPT_DOMAIN}\u0000${pair.auditId.length}:${pair.auditId}\u0000${pair.consentId}`;
+  return signHmac(new TextEncoder().encode(material), sessionKey, subtle);
+}
+
+async function signHmac(material, sessionKey, subtle) {
   if (!(sessionKey instanceof Uint8Array) || sessionKey.byteLength !== KEY_BYTES) {
     throw new TypeError('HMAC_KEY_INVALID');
   }
@@ -28,11 +47,36 @@ export async function createSessionUrlDigest(rawUrl, sessionKey, subtle) {
     false,
     ['sign'],
   );
-  const signature = await subtle.sign('HMAC', key, new TextEncoder().encode(rawUrl));
+  const signature = await subtle.sign('HMAC', key, material);
   if (!(signature instanceof ArrayBuffer) || signature.byteLength !== KEY_BYTES) {
     throw new TypeError('HMAC_SIGNATURE_INVALID');
   }
   return `hmac-sha256:${encodeBase64Url(new Uint8Array(signature))}`;
+}
+
+export function createSessionPixelAttemptDigestAuthority({ sessionArea, subtle, randomBytes, now = Date.now } = {}) {
+  if (!sessionArea || typeof sessionArea.get !== 'function' || typeof sessionArea.set !== 'function' ||
+    typeof randomBytes !== 'function' || typeof now !== 'function') throw new TypeError('HMAC_MANAGER_INVALID');
+  const coordinator = sessionKeyCoordinator(sessionArea);
+  const digestAttempt = pair => {
+    if (coordinator.destroyed) return Promise.reject(new Error('HMAC_MANAGER_DESTROYED'));
+    const validated = readDataRecord(pair, PIXEL_ATTEMPT_KEYS);
+    if (!validated || !AUDIT_ID.test(validated.auditId ?? '') || !CONSENT_ID.test(validated.consentId ?? '')) {
+      return Promise.reject(new TypeError('PIXEL_ATTEMPT_DIGEST_INVALID'));
+    }
+    return enqueueSessionKeyOperation(coordinator, async () => {
+      const keyBytes = await loadOrCreateSessionKey({ sessionArea, randomBytes, now });
+      return createPixelAttemptDigest(validated, keyBytes, subtle);
+    });
+  };
+  const authority = Object.freeze({ digestAttempt });
+  PIXEL_ATTEMPT_AUTHORITIES.set(authority, Object.freeze({ sessionArea, digestAttempt }));
+  return authority;
+}
+
+export function resolveSessionPixelAttemptDigestAuthorityV1(authority, sessionArea) {
+  const metadata = authority && typeof authority === 'object' ? PIXEL_ATTEMPT_AUTHORITIES.get(authority) : null;
+  return metadata?.sessionArea === sessionArea ? metadata.digestAttempt : null;
 }
 
 export function createSessionUrlDigestManager({ sessionArea, subtle, randomBytes, now = Date.now } = {}) {
@@ -40,55 +84,88 @@ export function createSessionUrlDigestManager({ sessionArea, subtle, randomBytes
     typeof sessionArea.remove !== 'function' || typeof randomBytes !== 'function' || typeof now !== 'function') {
     throw new TypeError('HMAC_MANAGER_INVALID');
   }
-  let tail = Promise.resolve();
-  let destroyed = false;
-  let destroyPromise = null;
-
-  const operate = operation => {
-    const pending = tail.then(operation, operation);
-    tail = pending.catch(() => {});
-    return pending;
-  };
+  const coordinator = sessionKeyCoordinator(sessionArea);
 
   const digest = canonicalUrl => {
-    if (destroyed) return Promise.reject(new Error('HMAC_MANAGER_DESTROYED'));
+    if (coordinator.destroyed) return Promise.reject(new Error('HMAC_MANAGER_DESTROYED'));
     try { requireCanonicalHttpUrl(canonicalUrl); }
     catch (error) { return Promise.reject(error); }
-    return operate(async () => {
-      if (destroyed) throw new Error('HMAC_MANAGER_DESTROYED');
+    return enqueueSessionKeyOperation(coordinator, async () => {
       const keyBytes = await loadOrCreateKey();
-      if (destroyed) throw new Error('HMAC_MANAGER_DESTROYED');
       return createSessionUrlDigest(canonicalUrl, keyBytes, subtle);
     });
   };
 
   const destroy = () => {
-    if (destroyPromise) return destroyPromise;
-    destroyed = true;
-    destroyPromise = operate(async () => {
-      await sessionArea.remove(SESSION_HMAC_KEY);
+    if (coordinator.destroyPromise) return coordinator.destroyPromise;
+    coordinator.destroyed = true;
+    coordinator.destroyPromise = enqueueSessionKeyOperation(coordinator, async () => {
+      try { await sessionArea.remove(SESSION_HMAC_KEY); } catch { /* confirmed below */ }
+      const envelope = await sessionArea.get(SESSION_HMAC_KEY);
+      if (ownPropertyState(envelope, SESSION_HMAC_KEY) !== 'absent') {
+        throw new TypeError('HMAC_KEY_DESTRUCTION_FAILED');
+      }
     });
-    return destroyPromise;
+    return coordinator.destroyPromise;
   };
 
   async function loadOrCreateKey() {
-    const stored = (await sessionArea.get(SESSION_HMAC_KEY))?.[SESSION_HMAC_KEY];
-    const decoded = decodeKeyRecord(stored);
-    if (decoded) return decoded;
-    const keyBytes = createSessionHmacKeyBytes(randomBytes);
-    const createdAt = now();
-    if (!Number.isSafeInteger(createdAt) || createdAt < 0) throw new TypeError('HMAC_TIME_INVALID');
-    await sessionArea.set({
-      [SESSION_HMAC_KEY]: {
-        version: 1,
-        keyBase64Url: encodeBase64Url(keyBytes),
-        createdAt,
-      },
-    });
-    return keyBytes;
+    return loadOrCreateSessionKey({ sessionArea, randomBytes, now });
   }
 
   return Object.freeze({ digest, destroy });
+}
+
+async function loadOrCreateSessionKey({ sessionArea, randomBytes, now }) {
+  const storedEnvelope = await sessionArea.get(SESSION_HMAC_KEY);
+  const stored = ownDataDescriptor(storedEnvelope, SESSION_HMAC_KEY)?.value;
+  const decoded = decodeKeyRecord(stored);
+  if (decoded) return decoded;
+  const keyBytes = createSessionHmacKeyBytes(randomBytes);
+  const createdAt = now();
+  if (!Number.isSafeInteger(createdAt) || createdAt < 0) throw new TypeError('HMAC_TIME_INVALID');
+  const keyRecord = { version: 1, keyBase64Url: encodeBase64Url(keyBytes), createdAt };
+  try { await sessionArea.set({ [SESSION_HMAC_KEY]: keyRecord }); } catch { /* confirmed below */ }
+  const confirmedEnvelope = await sessionArea.get(SESSION_HMAC_KEY);
+  const confirmed = ownDataDescriptor(confirmedEnvelope, SESSION_HMAC_KEY)?.value;
+  const confirmedRecord = readDataRecord(confirmed, KEY_RECORD_KEYS);
+  if (!confirmedRecord || confirmedRecord.version !== keyRecord.version ||
+    confirmedRecord.keyBase64Url !== keyRecord.keyBase64Url || confirmedRecord.createdAt !== keyRecord.createdAt) {
+    throw new TypeError('HMAC_KEY_GENERATION_FAILED');
+  }
+  const confirmedBytes = decodeKeyRecord(confirmed);
+  if (!confirmedBytes) throw new TypeError('HMAC_KEY_GENERATION_FAILED');
+  return confirmedBytes;
+}
+
+function sessionKeyCoordinator(sessionArea) {
+  let coordinator = SESSION_KEY_COORDINATORS.get(sessionArea);
+  if (!coordinator) {
+    coordinator = { tail: Promise.resolve(), destroyed: false, destroyPromise: null };
+    SESSION_KEY_COORDINATORS.set(sessionArea, coordinator);
+  }
+  return coordinator;
+}
+
+function enqueueSessionKeyOperation(coordinator, operation) {
+  const pending = coordinator.tail.then(operation, operation);
+  coordinator.tail = pending.catch(() => {});
+  return pending;
+}
+
+function ownDataDescriptor(value, key) {
+  try {
+    if (!value || typeof value !== 'object') return null;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor?.enumerable && Object.hasOwn(descriptor, 'value') ? descriptor : null;
+  } catch { return null; }
+}
+
+function ownPropertyState(value, key) {
+  try {
+    if (!value || typeof value !== 'object') return 'absent';
+    return Object.getOwnPropertyDescriptor(value, key) ? 'present' : 'absent';
+  } catch { return 'blocked'; }
 }
 
 function requireCanonicalHttpUrl(value) {

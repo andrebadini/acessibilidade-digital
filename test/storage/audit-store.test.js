@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { webcrypto } from 'node:crypto';
 import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
@@ -6,6 +7,10 @@ import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
 import { AUDIT_EXECUTION_INTERNAL } from '../../src/background/chrome-adapter.js';
 import { runAudit } from '../../src/background/run-audit.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
+import {
+  createPixelAttemptDigest,
+  createSessionPixelAttemptDigestAuthority,
+} from '../../src/core/privacy/session-url-digest.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
@@ -16,7 +21,13 @@ import {
   AuditStorageUnavailableError,
   createAuditStore,
   createInMemoryAuditStore,
+  readPrivatePixelAttemptCommitV1,
+  removePrivatePixelAttemptCommitV1,
 } from '../../src/storage/audit-store.js';
+import {
+  createPixelAttemptCorrelationV1,
+  createPixelAttemptStoreBindingV1,
+} from '../../src/background/pixel-attempt-correlation.js';
 
 const T0 = '2026-08-01T00:00:00.000Z';
 const T29 = '2026-08-30T00:00:00.000Z';
@@ -110,6 +121,43 @@ async function terminalFixture(auditId, status = 'partial') {
   return { model, checkpoint, latest };
 }
 
+function pixelAttemptSessionArea() {
+  const values = {};
+  return {
+    async get(key) { return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {}; },
+    async set(entries) { Object.assign(values, structuredClone(entries)); },
+    async remove(key) { delete values[key]; },
+  };
+}
+
+async function preparePixelAttempt(store, auditId, digestCharacter = 'P', existingSession = null) {
+  const area = existingSession?.area ?? pixelAttemptSessionArea();
+  const consentId = 'A'.repeat(21) + 'Q';
+  const fill = existingSession?.fill ?? digestCharacter.charCodeAt(0);
+  const correlation = {
+    auditId,
+    attemptDigest: await createPixelAttemptDigest(
+      { auditId, consentId }, new Uint8Array(32).fill(fill), webcrypto.subtle,
+    ),
+    pageId: null, ownershipId: null,
+  };
+  const attemptAuthority = existingSession?.attemptAuthority ?? createSessionPixelAttemptDigestAuthority({
+      sessionArea: area, subtle: webcrypto.subtle,
+      randomBytes: length => new Uint8Array(length).fill(fill), now: () => 10,
+    });
+  const coordinator = createPixelAttemptCorrelationV1({
+    sessionArea: area, attemptAuthority, now: () => 100,
+    storeBinding: createPixelAttemptStoreBindingV1(store, area),
+  });
+  const capability = await coordinator.prepare({
+    auditId, consentId, pageId: null, ownershipId: null, expiresAt: 200,
+  });
+  return {
+    correlation, capability, coordinator, area,
+    session: Object.freeze({ area, fill, attemptAuthority }),
+  };
+}
+
 test('atomically stores and re-reads a canonical failed terminal model with revision one', async t => {
   for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
     const store = factory();
@@ -157,6 +205,111 @@ test('atomically creates a terminal model, checkpoint companion, revision and la
         { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false },
       ),
     );
+  });
+});
+
+test('atomically commits a private pixel attempt companion without exposing it through report revision', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    const auditId = `pixel-attempt-${backend.toLowerCase()}`;
+    const { model, checkpoint, latest } = await terminalFixture(auditId);
+    const pixelAttempt = await preparePixelAttempt(store, auditId);
+    await store.commitAuditWithCheckpointIfAbsent(
+      auditId, model, checkpoint, latest,
+      {
+        now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false,
+        pixelAttemptCommit: pixelAttempt.capability,
+      },
+    );
+    assert.equal(await readPrivatePixelAttemptCommitV1(store, pixelAttempt.correlation), true);
+    assert.equal(await readPrivatePixelAttemptCommitV1(store, { ...pixelAttempt.correlation, pageId: 'foreign' }), false);
+    const report = await store.getReportRevision(auditId);
+    assert.deepEqual(Object.keys(report), ['version', 'auditId', 'modelRevision', 'modelHash', 'model', 'checkpoint']);
+    assert.doesNotMatch(JSON.stringify(report), /hmac-sha256:/u);
+    assert.equal(await removePrivatePixelAttemptCommitV1(store, pixelAttempt.correlation), true);
+    assert.equal(await removePrivatePixelAttemptCommitV1(store, pixelAttempt.correlation), true);
+    assert.equal(await readPrivatePixelAttemptCommitV1(store, pixelAttempt.correlation), false);
+  });
+});
+
+test('pixel attempt capability cannot be transplanted between stores', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const storeA = factory();
+    const storeB = factory();
+    const auditId = `pixel-transplant-${backend.toLowerCase()}`;
+    const { model, checkpoint, latest } = await terminalFixture(auditId);
+    const pixelAttempt = await preparePixelAttempt(storeA, auditId, 'T');
+    await assert.rejects(storeB.commitAuditWithCheckpointIfAbsent(
+      auditId, model, checkpoint, latest,
+      {
+        now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false,
+        pixelAttemptCommit: pixelAttempt.capability,
+      },
+    ));
+    assert.equal((await storeB.getAuditSnapshot(auditId)).revision, 0);
+  });
+});
+
+test('terminal pixel commit revalidates its current marker before every atomic mutation', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    const auditId = `pixel-stale-${backend.toLowerCase()}`;
+    const terminal = await terminalFixture(auditId);
+    const pixelAttempt = await preparePixelAttempt(store, auditId, 'S');
+    assert.equal(await pixelAttempt.coordinator.remove(pixelAttempt.correlation), true);
+
+    await assert.rejects(store.commitAuditWithCheckpointIfAbsent(
+      auditId, terminal.model, terminal.checkpoint, terminal.latest,
+      {
+        now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false,
+        pixelAttemptCommit: pixelAttempt.capability,
+      },
+    ), /PIXEL_ATTEMPT_CORRELATION_INVALID/u);
+
+    assert.deepEqual(await store.getAuditSnapshot(auditId), { model: undefined, revision: 0, capability: null });
+    assert.equal(await store.getReportRevision(auditId), null);
+    assert.equal(await store.getLatest(), undefined);
+    assert.equal(await store.getAuditRetention(auditId), undefined);
+    assert.equal(await readPrivatePixelAttemptCommitV1(store, pixelAttempt.correlation), false);
+  });
+});
+
+test('pixel attempt companion namespace cannot collide with a valid checkpoint audit id', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    const baseId = `namespace-${backend.toLowerCase()}`;
+    const pixelAttempt = await preparePixelAttempt(store, baseId, 'N');
+    const base = await terminalFixture(baseId);
+    await store.commitAuditWithCheckpointIfAbsent(
+      baseId, base.model, base.checkpoint, base.latest,
+      {
+        now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false,
+        pixelAttemptCommit: pixelAttempt.capability,
+      },
+    );
+
+    const collidingUnderOldNamespace = `pixel-attempt:${baseId}`;
+    const second = await terminalFixture(collidingUnderOldNamespace);
+    await store.commitAuditWithCheckpointIfAbsent(
+      collidingUnderOldNamespace, second.model, second.checkpoint, second.latest,
+      { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false },
+    );
+
+    assert.equal(await readPrivatePixelAttemptCommitV1(store, pixelAttempt.correlation), true);
+    assert.equal((await store.getReportRevision(baseId)).auditId, baseId);
+    assert.equal((await store.getReportRevision(collidingUnderOldNamespace)).auditId, collidingUnderOldNamespace);
+  });
+});
+
+test('a marker-equivalent correlation cannot prove terminal without the atomic companion', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    const correlation = {
+      auditId: `marker-only-${backend.toLowerCase()}`,
+      attemptDigest: `hmac-sha256:${'M'.repeat(43)}`,
+      pageId: null, ownershipId: null,
+    };
+    assert.equal(await readPrivatePixelAttemptCommitV1(store, correlation), false);
   });
 });
 
@@ -324,26 +477,44 @@ test('terminal commit rejects hostile options and cryptographic or checkpoint co
 test('single and bulk deletion remove the private terminal checkpoint companion', async t => {
   for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
     const store = factory();
+    const correlations = new Map();
+    let pixelSession = null;
     for (const suffix of ['one', 'all']) {
       const auditId = `terminal-delete-${backend.toLowerCase()}-${suffix}`;
       const { model, checkpoint, latest } = await terminalFixture(auditId);
+      const pixelAttempt = await preparePixelAttempt(
+        store, auditId, suffix === 'one' ? 'D' : 'E', pixelSession,
+      );
+      pixelSession = pixelAttempt.session;
+      correlations.set(auditId, pixelAttempt.correlation);
       await store.commitAuditWithCheckpointIfAbsent(
         auditId, model, checkpoint, latest,
-        { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false },
+        {
+          now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false,
+          pixelAttemptCommit: pixelAttempt.capability,
+        },
       );
+      assert.equal(await readPrivatePixelAttemptCommitV1(store, pixelAttempt.correlation), true);
     }
-    const one = await store.getAuditSnapshot(`terminal-delete-${backend.toLowerCase()}-one`);
-    await store.deleteAudit(`terminal-delete-${backend.toLowerCase()}-one`, one.capability, { now: T29 });
-    assert.equal(await store.getReportRevision(`terminal-delete-${backend.toLowerCase()}-one`), null);
+    const oneId = `terminal-delete-${backend.toLowerCase()}-one`;
+    const allId = `terminal-delete-${backend.toLowerCase()}-all`;
+    const one = await store.getAuditSnapshot(oneId);
+    await store.deleteAudit(oneId, one.capability, { now: T29 });
+    assert.equal(await store.getReportRevision(oneId), null);
+    assert.equal(await readPrivatePixelAttemptCommitV1(store, correlations.get(oneId)), false);
     await store.deleteAllAudits({ now: T29 });
-    assert.equal(await store.getReportRevision(`terminal-delete-${backend.toLowerCase()}-all`), null);
+    assert.equal(await store.getReportRevision(allId), null);
+    assert.equal(await readPrivatePixelAttemptCommitV1(store, correlations.get(allId)), false);
   });
 });
 
 function storeFactories() {
   return [
     ['memory', () => createInMemoryAuditStore()],
-    ['IndexedDB', () => createAuditStore({ indexedDB: createFakeIndexedDb() })],
+    ['IndexedDB', () => {
+      const fake = createFakeIndexedDb();
+      return createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+    }],
   ];
 }
 
@@ -858,6 +1029,24 @@ test('incremental cleanup deletes at most 25 expired records and continues witho
   assert.ok(await store.getAudit('future-audit'));
 });
 
+test('retention expiration removes the private pixel attempt companion in both backends', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    const auditId = `pixel-expired-${backend.toLowerCase()}`;
+    const terminal = await terminalFixture(auditId);
+    const pixelAttempt = await preparePixelAttempt(store, auditId, 'X');
+    await store.commitAuditWithCheckpointIfAbsent(
+      auditId, terminal.model, terminal.checkpoint, terminal.latest,
+      { now: T0, deleteAfterCompleteExport: false, pixelAttemptCommit: pixelAttempt.capability },
+    );
+    assert.equal(await readPrivatePixelAttemptCommitV1(store, pixelAttempt.correlation), true);
+    assert.deepEqual(await store.cleanupExpiredAudits({ now: T30, limit: 25 }), {
+      scanned: 1, deleted: 1, remaining: 0, blocked: 0,
+    });
+    assert.equal(await readPrivatePixelAttemptCommitV1(store, pixelAttempt.correlation), false);
+  });
+});
+
 test('cleanup resumes after 25 blocked audits across store recreation and then restarts its cycle', async () => {
   for (const scenario of [
     {
@@ -1013,11 +1202,18 @@ test('finalization deletes only after the exact four terminal formats for the cu
   ]) {
     const store = createStore();
     const auditId = 'final-delete';
-    await store.commitAudit(auditId, auditFixture(auditId, 'prepared'), { auditId }, {
-      now: T0,
-      deleteAfterCompleteExport: true,
-    });
+    const terminal = await terminalFixture(auditId);
+    const pixelAttempt = await preparePixelAttempt(store, auditId, 'F');
+    await store.commitAuditWithCheckpointIfAbsent(
+      auditId, terminal.model, terminal.checkpoint, terminal.latest,
+      { now: T0, deleteAfterCompleteExport: false, pixelAttemptCommit: pixelAttempt.capability },
+    );
     let snapshot = await store.getAuditSnapshot(auditId);
+    await store.setRetentionIntent(auditId, snapshot.capability, {
+      deleteAfterCompleteExport: true, now: T0,
+    });
+    snapshot = await store.getAuditSnapshot(auditId);
+    assert.equal(await readPrivatePixelAttemptCommitV1(store, pixelAttempt.correlation), true);
     const lease = await store.acquireExportLease(auditId, snapshot.capability, {
       ownerId: 'final-owner', now: '2026-08-30T10:00:00.000Z',
     });
@@ -1072,6 +1268,7 @@ test('finalization deletes only after the exact four terminal formats for the cu
     assert.equal(await store.getAudit(auditId), undefined);
     assert.equal(await store.getAuditRetention(auditId), undefined);
     assert.deepEqual(await store.getExportDeliveryJournal(auditId), []);
+    assert.equal(await readPrivatePixelAttemptCommitV1(store, pixelAttempt.correlation), false);
   }
 });
 
@@ -1273,6 +1470,26 @@ test('IndexedDB v2 persists limited retention metadata beside each model in one 
     deleteAfterCompleteExport: true,
   });
   assert.doesNotMatch(JSON.stringify(fake.inspectStore('audit-retention')), /sensitive|token|pixel/iu);
+});
+
+test('IndexedDB v2 keeps a historical audit id using the former pixel-attempt-looking prefix manageable', async () => {
+  const auditId = '__audit_pixel_attempt__:historical-audit';
+  const fake = createFakeIndexedDb({
+    version: 2,
+    initialStores: {
+      audits: [[auditId, auditFixture(auditId)]],
+      'audit-retention': [[auditId, {
+        auditId, schemaVersion: 1, firstPersistedAt: T0, expiresAt: T30,
+        deleteAfterCompleteExport: false,
+      }]],
+    },
+  });
+  const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+
+  assert.equal((await store.getAudit(auditId)).auditId, auditId);
+  await store.setAudit(auditId, auditFixture(auditId, 'still-managed'));
+  assert.equal((await store.getAudit(auditId)).versions.extension, 'test-still-managed');
+  assert.equal(fake.versions[0], 2);
 });
 
 test('IndexedDB v1 migration creates metadata only for normal audit records and preserves private keys', async () => {

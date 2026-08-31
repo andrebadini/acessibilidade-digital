@@ -6,6 +6,7 @@ import {
   migrateRetentionMetadata,
   validateRetentionMetadata,
 } from './audit-retention.js';
+import { runPixelAttemptCommitAuthorizationV1 } from '../background/pixel-attempt-correlation.js';
 import { AUDIT_STORAGE_UNAVAILABLE_MESSAGE as STORAGE_UNAVAILABLE_MESSAGE } from '../core/privacy.js';
 import { createAuditModel } from '../core/report/audit-model.js';
 import { auditModelInputError, captureAuditInput } from '../core/report/audit-input.js';
@@ -21,6 +22,7 @@ const RETENTION_STORE_NAME = 'audit-retention';
 const LATEST_KEY = '__latest__';
 const REVISION_KEY_PREFIX = '__audit_revision__:';
 const CHECKPOINT_KEY_PREFIX = '__audit_checkpoint__:';
+const PIXEL_ATTEMPT_KEY_PREFIX = '__audit_checkpoint__:/pixel-attempt/:';
 const EXPORT_LEASE_KEY_PREFIX = '__audit_export_lease__:';
 const EXPORT_ATTEMPT_KEY_PREFIX = '__audit_export_attempt__:';
 const EXPORT_DELIVERY_KEY_PREFIX = '__audit_export_delivery__:';
@@ -37,6 +39,7 @@ const TERMINAL_AUDIT_STATUSES = new Set(['complete', 'partial', 'failed', 'cance
 const INTERRUPTIBLE_AUDIT_STATUSES = new Set(['idle', 'validating', 'queued', 'running', 'cancelling']);
 const AUDIT_SNAPSHOT_CAPABILITIES = new WeakMap();
 const IN_MEMORY_RETENTION = new WeakMap();
+const PRIVATE_PIXEL_ATTEMPT_STORES = new WeakMap();
 
 function materializeCanonicalAuditModel(auditId, model, options = {}) {
   if (model === undefined && options.allowMissing === true) return undefined;
@@ -204,6 +207,12 @@ function legacyPrivateAuditKeyIsSafe(key, value) {
     }
   }
   if (key === RETENTION_CLEANUP_CURSOR_KEY) return cleanupCursorRecord(value) !== null;
+  if (key?.startsWith?.(PIXEL_ATTEMPT_KEY_PREFIX)) {
+    try {
+      const auditId = canonicalAuditId(key.slice(PIXEL_ATTEMPT_KEY_PREFIX.length));
+      return parsePixelAttemptCompanion(value, auditId) !== null;
+    } catch { return false; }
+  }
   if (key?.startsWith?.(CHECKPOINT_KEY_PREFIX)) {
     try {
       const auditId = canonicalAuditId(key.slice(CHECKPOINT_KEY_PREFIX.length));
@@ -329,6 +338,8 @@ function checkpointKey(id) {
   return `${CHECKPOINT_KEY_PREFIX}${id}`;
 }
 
+function pixelAttemptKey(id) { return `${PIXEL_ATTEMPT_KEY_PREFIX}${id}`; }
+
 function exactDataRecord(value, keys) {
   try {
     if (!value || typeof value !== 'object' || Array.isArray(value) ||
@@ -346,10 +357,14 @@ function exactDataRecord(value, keys) {
 }
 
 function exactTerminalOptions(value) {
-  const options = exactDataRecord(value, ['now', 'deleteAfterCompleteExport']);
+  const options = exactDataRecord(value, ['now', 'deleteAfterCompleteExport']) ??
+    exactDataRecord(value, ['now', 'deleteAfterCompleteExport', 'pixelAttemptCommit']);
   if (!options || options.deleteAfterCompleteExport !== false) throw new TypeError('Commit terminal inválido.');
   canonicalRetentionInstant(options.now);
-  return options;
+  return {
+    ...options,
+    pixelAttemptCommit: Object.hasOwn(options, 'pixelAttemptCommit') ? options.pixelAttemptCommit : null,
+  };
 }
 
 function checkpointPageOrder(value) {
@@ -408,6 +423,47 @@ async function canonicalTerminalGraph(auditId, model, checkpoint, latestState) {
 
 function checkpointCompanion(auditId, checkpoint) {
   return storageClone({ version: 1, auditId, checkpoint });
+}
+
+function pixelAttemptCompanion(correlation, committedAt) {
+  return storageClone({ version: 1, ...correlation, committedAt, terminalRevision: 1 });
+}
+
+function parsePixelAttemptCompanion(value, auditId) {
+  const record = exactDataRecord(value, [
+    'version', 'auditId', 'attemptDigest', 'pageId', 'ownershipId', 'committedAt', 'terminalRevision',
+  ]);
+  if (!record || record.version !== 1 || record.auditId !== auditId || record.terminalRevision !== 1 ||
+    typeof record.attemptDigest !== 'string' || !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(record.attemptDigest) ||
+    (record.pageId !== null && !/^[A-Za-z0-9._:-]{1,160}$/u.test(record.pageId ?? '')) ||
+    (record.ownershipId !== null && !/^[A-Za-z0-9._:-]{1,160}$/u.test(record.ownershipId ?? ''))) return null;
+  try { canonicalRetentionInstant(record.committedAt); } catch { return null; }
+  return record;
+}
+
+function samePixelAttempt(record, correlation) {
+  return Boolean(record) && record.auditId === correlation.auditId &&
+    record.attemptDigest === correlation.attemptDigest && record.pageId === correlation.pageId &&
+    record.ownershipId === correlation.ownershipId;
+}
+
+function pixelAttemptCorrelation(value) {
+  const record = exactDataRecord(value, ['auditId', 'attemptDigest', 'pageId', 'ownershipId']);
+  if (!record || !/^[A-Za-z0-9._:-]{1,160}$/u.test(record.auditId ?? '') ||
+    !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(record.attemptDigest ?? '') ||
+    (record.pageId !== null && !/^[A-Za-z0-9._:-]{1,160}$/u.test(record.pageId ?? '')) ||
+    (record.ownershipId !== null && !/^[A-Za-z0-9._:-]{1,160}$/u.test(record.ownershipId ?? ''))) return null;
+  return record;
+}
+
+export async function readPrivatePixelAttemptCommitV1(store, correlation) {
+  const operations = store && typeof store === 'object' ? PRIVATE_PIXEL_ATTEMPT_STORES.get(store) : null;
+  return operations ? operations.read(correlation) : false;
+}
+
+export async function removePrivatePixelAttemptCommitV1(store, correlation) {
+  const operations = store && typeof store === 'object' ? PRIVATE_PIXEL_ATTEMPT_STORES.get(store) : null;
+  return operations ? operations.remove(correlation) : false;
 }
 
 function freezeStored(value, seen = new WeakSet()) {
@@ -1312,6 +1368,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     initial.delete(key);
     initial.delete(revisionKey(key));
     initial.delete(checkpointKey(key));
+    initial.delete(pixelAttemptKey(key));
     initial.delete(exportLeaseKey(key));
     initial.delete(exportAttemptKey(key));
     initial.delete(exportDeliveryKey(key));
@@ -1388,16 +1445,25 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   const commitAuditWithCheckpointIfAbsent = async (id, model, checkpoint, latestState, options) => {
     const normalizedOptions = exactTerminalOptions(options);
     const terminal = await canonicalTerminalGraph(id, model, checkpoint, latestState);
-    if (currentAudit(terminal.key) !== undefined || storedRevision(initial.get(revisionKey(terminal.key))) !== 0 ||
-      initial.has(checkpointKey(terminal.key))) throw new AuditRevisionConflictError();
-    const modelClone = storageClone(terminal.model);
-    initial.set(terminal.key, modelClone);
-    initial.set(checkpointKey(terminal.key), checkpointCompanion(terminal.key, terminal.checkpoint));
-    initial.set(revisionKey(terminal.key), 1);
-    initial.set(LATEST_KEY, storageClone(terminal.latest));
-    retention.set(terminal.key, createRetentionMetadata(terminal.key, normalizedOptions.now, false));
-    const capability = mintAuditSnapshot(owner, terminal.key, modelClone, 1).capability;
-    return Object.freeze({ revision: 1, modelHash: terminal.model.integrity.canonicalModelHash, capability });
+    const commit = async pixelAttempt => {
+      if (pixelAttempt && pixelAttempt.auditId !== terminal.key) throw new TypeError('Commit terminal inválido.');
+      if (currentAudit(terminal.key) !== undefined || storedRevision(initial.get(revisionKey(terminal.key))) !== 0 ||
+        initial.has(checkpointKey(terminal.key)) || initial.has(pixelAttemptKey(terminal.key))) throw new AuditRevisionConflictError();
+      const modelClone = storageClone(terminal.model);
+      initial.set(terminal.key, modelClone);
+      initial.set(checkpointKey(terminal.key), checkpointCompanion(terminal.key, terminal.checkpoint));
+      if (pixelAttempt) {
+        initial.set(pixelAttemptKey(terminal.key), pixelAttemptCompanion(pixelAttempt, normalizedOptions.now));
+      }
+      initial.set(revisionKey(terminal.key), 1);
+      initial.set(LATEST_KEY, storageClone(terminal.latest));
+      retention.set(terminal.key, createRetentionMetadata(terminal.key, normalizedOptions.now, false));
+      const capability = mintAuditSnapshot(owner, terminal.key, modelClone, 1).capability;
+      return Object.freeze({ revision: 1, modelHash: terminal.model.integrity.canonicalModelHash, capability });
+    };
+    return normalizedOptions.pixelAttemptCommit
+      ? runPixelAttemptCommitAuthorizationV1(normalizedOptions.pixelAttemptCommit, api, commit)
+      : commit(null);
   };
   const getReportRevision = async id => {
     try {
@@ -1421,7 +1487,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       throw new AuditStorageUnavailableError();
     }
   };
-  return {
+  const api = {
     async setAudit(id, model, options) { return writeAudit(id, model, undefined, undefined, options); },
     async getAudit(id) { return snapshot(id).model; },
     async getAuditSnapshot(id) { return snapshot(id); },
@@ -1571,6 +1637,30 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       return finalizeExportAndMaybeDelete(id, model, latestState, snapshotCapability, options);
     },
   };
+  PRIVATE_PIXEL_ATTEMPT_STORES.set(api, Object.freeze({
+    async read(value) {
+      const expected = pixelAttemptCorrelation(value);
+      if (!expected) return false;
+      const rawModel = initial.get(expected.auditId);
+      const revision = storedRevision(initial.get(revisionKey(expected.auditId)));
+      const companion = parsePixelAttemptCompanion(initial.get(pixelAttemptKey(expected.auditId)), expected.auditId);
+      if (!rawModel || revision !== 1 || !companion || !samePixelAttempt(companion, expected)) return false;
+      try {
+        const model = await verifyAuditIntegritySnapshot(rawModel);
+        return model.auditId === expected.auditId && ['complete', 'partial', 'failed', 'cancelled'].includes(model.session.status);
+      } catch { return false; }
+    },
+    async remove(value) {
+      const expected = pixelAttemptCorrelation(value);
+      if (!expected) return false;
+      if (!initial.has(pixelAttemptKey(expected.auditId))) return true;
+      const current = parsePixelAttemptCompanion(initial.get(pixelAttemptKey(expected.auditId)), expected.auditId);
+      if (!samePixelAttempt(current, expected)) return false;
+      initial.delete(pixelAttemptKey(expected.auditId));
+      return !initial.has(pixelAttemptKey(expected.auditId));
+    },
+  }));
+  return api;
 }
 
 function createUnavailableAuditStore() {
@@ -1736,12 +1826,15 @@ export function createAuditStore(options = {}) {
   const commitAuditWithCheckpointIfAbsent = async (id, model, checkpoint, latestState, options) => {
     const normalizedOptions = exactTerminalOptions(options);
     const terminal = await canonicalTerminalGraph(id, model, checkpoint, latestState);
-    const modelClone = storageClone(terminal.model);
-    const companion = checkpointCompanion(terminal.key, terminal.checkpoint);
-    const latestClone = storageClone(terminal.latest);
-    const retentionMetadata = createRetentionMetadata(terminal.key, normalizedOptions.now, false);
-    const db = await open();
-    return new Promise((resolve, reject) => {
+    const commit = async pixelAttempt => {
+      if (pixelAttempt && pixelAttempt.auditId !== terminal.key) throw new TypeError('Commit terminal inválido.');
+      const modelClone = storageClone(terminal.model);
+      const companion = checkpointCompanion(terminal.key, terminal.checkpoint);
+      const pixelCompanion = pixelAttempt ? pixelAttemptCompanion(pixelAttempt, normalizedOptions.now) : null;
+      const latestClone = storageClone(terminal.latest);
+      const retentionMetadata = createRetentionMetadata(terminal.key, normalizedOptions.now, false);
+      const db = await open();
+      return new Promise((resolve, reject) => {
       let settled = false;
       let reads = 0;
       let conflict = false;
@@ -1752,7 +1845,8 @@ export function createAuditStore(options = {}) {
       const retentionStore = indexedDbObjectStore(transaction, () => transaction.objectStore(RETENTION_STORE_NAME));
       const requests = [
         store.get(terminal.key), store.get(revisionKey(terminal.key)),
-        store.get(checkpointKey(terminal.key)), retentionStore.get(terminal.key),
+        store.get(checkpointKey(terminal.key)), store.get(pixelAttemptKey(terminal.key)),
+        retentionStore.get(terminal.key),
       ];
       const values = new Array(requests.length);
       const apply = () => {
@@ -1761,6 +1855,7 @@ export function createAuditStore(options = {}) {
         written = true;
         store.put(modelClone, terminal.key);
         store.put(companion, checkpointKey(terminal.key));
+        if (pixelCompanion) store.put(pixelCompanion, pixelAttemptKey(terminal.key));
         store.put(1, revisionKey(terminal.key));
         store.put(latestClone, LATEST_KEY);
         retentionStore.put(retentionMetadata);
@@ -1780,7 +1875,11 @@ export function createAuditStore(options = {}) {
       };
       transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
       transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
-    });
+      });
+    };
+    return normalizedOptions.pixelAttemptCommit
+      ? runPixelAttemptCommitAuthorizationV1(normalizedOptions.pixelAttemptCommit, api, commit)
+      : commit(null);
   };
   const getReportRevision = async id => {
     try {
@@ -2659,6 +2758,7 @@ export function createAuditStore(options = {}) {
         auditStore.delete(key);
         auditStore.delete(revisionKey(key));
         auditStore.delete(checkpointKey(key));
+        auditStore.delete(pixelAttemptKey(key));
         auditStore.delete(exportLeaseKey(key));
         auditStore.delete(exportAttemptKey(key));
         auditStore.delete(exportDeliveryKey(key));
@@ -2830,6 +2930,7 @@ export function createAuditStore(options = {}) {
           auditStore.delete(key);
           auditStore.delete(revisionKey(key));
           auditStore.delete(checkpointKey(key));
+          auditStore.delete(pixelAttemptKey(key));
           auditStore.delete(exportLeaseKey(key));
           auditStore.delete(exportAttemptKey(key));
           auditStore.delete(exportDeliveryKey(key));
@@ -2993,6 +3094,7 @@ export function createAuditStore(options = {}) {
             auditStore.delete(metadata.auditId);
             auditStore.delete(revisionKey(metadata.auditId));
             auditStore.delete(checkpointKey(metadata.auditId));
+            auditStore.delete(pixelAttemptKey(metadata.auditId));
             auditStore.delete(exportLeaseKey(metadata.auditId));
             auditStore.delete(exportAttemptKey(metadata.auditId));
             auditStore.delete(exportDeliveryKey(metadata.auditId));
@@ -3018,7 +3120,7 @@ export function createAuditStore(options = {}) {
       transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
     });
   };
-  return {
+  const api = {
     setAudit(id, model, options) { return mutateAudit(id, model, undefined, undefined, options); },
     async getAudit(id) {
       const key = validId(id);
@@ -3073,4 +3175,62 @@ export function createAuditStore(options = {}) {
     deleteAllAudits,
     finalizeExportAndMaybeDelete,
   };
+  PRIVATE_PIXEL_ATTEMPT_STORES.set(api, Object.freeze({
+    async read(value) {
+      const expected = pixelAttemptCorrelation(value);
+      if (!expected) return false;
+      try {
+        const values = await readKeys([
+          expected.auditId, revisionKey(expected.auditId), pixelAttemptKey(expected.auditId),
+        ]);
+        const model = await verifyAuditIntegritySnapshot(values.get(expected.auditId));
+        const revision = storedRevision(values.get(revisionKey(expected.auditId)));
+        const companion = parsePixelAttemptCompanion(values.get(pixelAttemptKey(expected.auditId)), expected.auditId);
+        return revision === 1 && model.auditId === expected.auditId &&
+          ['complete', 'partial', 'failed', 'cancelled'].includes(model.session.status) &&
+          samePixelAttempt(companion, expected);
+      } catch { return false; }
+    },
+    async remove(value) {
+      const expected = pixelAttemptCorrelation(value);
+      if (!expected) return false;
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        let matched = false;
+        let confirmed = false;
+        const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
+        const transaction = indexedDbBoundary(() => db.transaction(STORE_NAME, 'readwrite'));
+        const store = indexedDbObjectStore(transaction, () => transaction.objectStore(STORE_NAME));
+        const request = store.get(pixelAttemptKey(expected.auditId));
+        request.onsuccess = () => {
+          if (request.result === undefined) {
+            matched = true;
+            confirmed = true;
+            return;
+          }
+          const companion = parsePixelAttemptCompanion(request.result, expected.auditId);
+          matched = samePixelAttempt(companion, expected);
+          if (!matched) return;
+          const confirmAbsent = () => {
+            let confirmation;
+            try { confirmation = store.get(pixelAttemptKey(expected.auditId)); }
+            catch { return; }
+            confirmation.onsuccess = () => { confirmed = confirmation.result === undefined; };
+            confirmation.onerror = () => finish(reject, new AuditStorageUnavailableError());
+          };
+          try {
+            const deletion = store.delete(pixelAttemptKey(expected.auditId));
+            deletion.onsuccess = confirmAbsent;
+            deletion.onerror = () => finish(reject, new AuditStorageUnavailableError());
+          } catch { confirmAbsent(); }
+        };
+        request.onerror = () => finish(reject, new AuditStorageUnavailableError());
+        transaction.oncomplete = () => finish(resolve, matched && confirmed);
+        transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
+        transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
+      });
+    },
+  }));
+  return api;
 }

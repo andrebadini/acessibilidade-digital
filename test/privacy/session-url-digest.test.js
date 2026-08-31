@@ -5,6 +5,8 @@ import test from 'node:test';
 import {
   SESSION_HMAC_KEY,
   createSessionHmacKeyBytes,
+  createPixelAttemptDigest,
+  createSessionPixelAttemptDigestAuthority,
   createSessionUrlDigest,
   createSessionUrlDigestManager,
 } from '../../src/core/privacy/session-url-digest.js';
@@ -36,6 +38,47 @@ test('exports the stateless HMAC primitives consumed by later milestones', async
     await createSessionUrlDigest('https://example.test/?secret=1', key, webcrypto.subtle),
     /^hmac-sha256:[A-Za-z0-9_-]{43}$/u,
   );
+});
+
+test('derives a domain-separated pixel attempt digest without widening the URL manager', async () => {
+  const key = createSessionHmacKeyBytes(length => new Uint8Array(length).fill(7));
+  const attempt = await createPixelAttemptDigest({
+    auditId: 'audit-1', consentId: 'A'.repeat(22),
+  }, key, webcrypto.subtle);
+  const urlLike = await createSessionUrlDigest(
+    `https://example.test/audit-1/${'A'.repeat(22)}`,
+    key,
+    webcrypto.subtle,
+  );
+  assert.match(attempt, /^hmac-sha256:[A-Za-z0-9_-]{43}$/u);
+  assert.notEqual(attempt, urlLike);
+
+  const sessionArea = createSessionArea();
+  const authority = createSessionPixelAttemptDigestAuthority({
+    sessionArea,
+    subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(9),
+    now: () => 123,
+  });
+  assert.deepEqual(Object.keys(authority), ['digestAttempt']);
+  assert.equal(
+    await authority.digestAttempt({ auditId: 'audit-1', consentId: 'A'.repeat(22) }),
+    await authority.digestAttempt({ auditId: 'audit-1', consentId: 'A'.repeat(22) }),
+  );
+});
+
+test('pixel attempt digest rejects malformed or accessor-bearing audit-consent pairs before HMAC', async () => {
+  const key = new Uint8Array(32).fill(7);
+  for (const value of [
+    { auditId: 'audit-1', consentId: 'short' },
+    { auditId: 'audit-1', consentId: 'A'.repeat(22), extra: true },
+    Object.assign(Object.create({ inherited: true }), { auditId: 'audit-1', consentId: 'A'.repeat(22) }),
+  ]) await assert.rejects(() => createPixelAttemptDigest(value, key, webcrypto.subtle), /PIXEL_ATTEMPT_DIGEST_INVALID/u);
+  let getterCalls = 0;
+  const hostile = { auditId: 'audit-1' };
+  Object.defineProperty(hostile, 'consentId', { enumerable: true, get() { getterCalls += 1; return 'A'.repeat(22); } });
+  await assert.rejects(() => createPixelAttemptDigest(hostile, key, webcrypto.subtle), /PIXEL_ATTEMPT_DIGEST_INVALID/u);
+  assert.equal(getterCalls, 0);
 });
 
 test('rejects a non-byte or wrong-length CSPRNG result and invalid digest keys', async () => {
@@ -72,7 +115,10 @@ test('replaces a hostile key record without invoking accessors', async () => {
     get() { getterCalls += 1; return 'A'.repeat(43); },
   });
   const sessionArea = createSessionArea();
-  sessionArea.get = async key => key === SESSION_HMAC_KEY ? { [key]: hostile } : {};
+  const originalGet = sessionArea.get;
+  sessionArea.get = async key => sessionArea.writes.length === 0 && key === SESSION_HMAC_KEY
+    ? { [key]: hostile }
+    : originalGet.call(sessionArea, key);
   const manager = createSessionUrlDigestManager({
     sessionArea,
     subtle: webcrypto.subtle,
@@ -82,6 +128,34 @@ test('replaces a hostile key record without invoking accessors', async () => {
   await manager.digest('https://example.test/');
   assert.equal(getterCalls, 0);
   assert.equal(sessionArea.writes.length, 1);
+});
+
+test('rejects a no-op HMAC key write and accepts commit-then-throw only after exact reread', async () => {
+  const noOp = createSessionArea();
+  noOp.set = async () => {};
+  const denied = createSessionPixelAttemptDigestAuthority({
+    sessionArea: noOp, subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(5), now: () => 10,
+  });
+  await assert.rejects(
+    () => denied.digestAttempt({ auditId: 'audit-1', consentId: 'A'.repeat(21) + 'Q' }),
+    /HMAC_KEY_GENERATION_FAILED/u,
+  );
+
+  const committed = createSessionArea();
+  const baseSet = committed.set;
+  committed.set = async entries => {
+    await baseSet.call(committed, entries);
+    throw new Error('native-private-error');
+  };
+  const accepted = createSessionPixelAttemptDigestAuthority({
+    sessionArea: committed, subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(6), now: () => 10,
+  });
+  assert.match(
+    await accepted.digestAttempt({ auditId: 'audit-1', consentId: 'A'.repeat(21) + 'Q' }),
+    /^hmac-sha256:/u,
+  );
 });
 
 test('digests the complete canonical URL and never stores its plaintext', async () => {
@@ -235,4 +309,79 @@ test('concurrent digest callers create exactly one session HMAC key record', asy
   ]);
   assert.equal(new Set(digests).size, 3);
   assert.equal(sessionArea.writes.filter(write => Object.hasOwn(write, SESSION_HMAC_KEY)).length, 1);
+});
+
+test('URL manager and pixel attempt authority converge on one confirmed session key under first-use concurrency', async () => {
+  const sessionArea = createSessionArea();
+  const urlManager = createSessionUrlDigestManager({
+    sessionArea, subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(3), now: () => 100,
+  });
+  const attemptAuthority = createSessionPixelAttemptDigestAuthority({
+    sessionArea, subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(4), now: () => 100,
+  });
+  const pair = { auditId: 'audit-concurrent', consentId: 'Z'.repeat(21) + 'g' };
+  const [_urlDigest, firstAttempt] = await Promise.all([
+    urlManager.digest('https://example.test/concurrent-authorities'),
+    attemptAuthority.digestAttempt(pair),
+  ]);
+  const restarted = createSessionPixelAttemptDigestAuthority({
+    sessionArea, subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(9), now: () => 101,
+  });
+  assert.equal(await restarted.digestAttempt(pair), firstAttempt);
+  assert.equal(sessionArea.writes.filter(write => Object.hasOwn(write, SESSION_HMAC_KEY)).length, 1);
+});
+
+test('destroy linearizes after an in-flight attempt digest and prevents every later authority from recreating the key', async () => {
+  const sessionArea = createSessionArea();
+  let releaseSign;
+  const signGate = new Promise(resolve => { releaseSign = resolve; });
+  const subtle = {
+    importKey: (...args) => webcrypto.subtle.importKey(...args),
+    async sign(...args) { await signGate; return webcrypto.subtle.sign(...args); },
+  };
+  const attempt = createSessionPixelAttemptDigestAuthority({
+    sessionArea, subtle, randomBytes: length => new Uint8Array(length).fill(7), now: () => 10,
+  });
+  const url = createSessionUrlDigestManager({
+    sessionArea, subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(8), now: () => 10,
+  });
+  const pending = attempt.digestAttempt({ auditId: 'audit-1', consentId: 'A'.repeat(21) + 'Q' });
+  const destroying = url.destroy();
+  releaseSign();
+  await pending;
+  await destroying;
+  assert.deepEqual(await sessionArea.get(SESSION_HMAC_KEY), {});
+  const restarted = createSessionPixelAttemptDigestAuthority({
+    sessionArea, subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(9), now: () => 11,
+  });
+  await assert.rejects(
+    () => restarted.digestAttempt({ auditId: 'audit-1', consentId: 'A'.repeat(21) + 'Q' }),
+    /HMAC_MANAGER_DESTROYED/u,
+  );
+  assert.deepEqual(await sessionArea.get(SESSION_HMAC_KEY), {});
+});
+
+test('destroy treats a surviving own accessor key as present without invoking it', async () => {
+  let getterCalls = 0;
+  const envelope = {};
+  Object.defineProperty(envelope, SESSION_HMAC_KEY, {
+    enumerable: true,
+    get() { getterCalls += 1; return { version: 1 }; },
+  });
+  const sessionArea = {
+    async get() { return envelope; },
+    async set() {},
+    async remove() {},
+  };
+  const manager = createSessionUrlDigestManager({
+    sessionArea, subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(9), now: () => 11,
+  });
+  await assert.rejects(() => manager.destroy(), /HMAC_KEY_DESTRUCTION_FAILED/u);
+  assert.equal(getterCalls, 0);
 });
