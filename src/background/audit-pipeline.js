@@ -173,9 +173,13 @@ function modelMatchesObservedTarget(model, target) {
     if (model.requestedScope?.mode !== 'single' || !Array.isArray(model.pages) || model.pages.length !== 1) return false;
     const page = model.pages[0];
     if (page.attempted !== true || page.finalUrlObserved !== true || typeof page.finalUrl !== 'string') return false;
+    const durableUrls = [model.requestedUrl, model.finalUrl, page.requestedUrl, page.finalUrl];
+    const durableEvidence = durableUrls.map(url => typeof url === 'string'
+      ? sanitizeEvidenceUrlV1(url, { includeQuery: false }) : null);
+    if (durableEvidence.some((evidence, index) => !evidence || durableUrls[index] !== evidence.href)) return false;
     if (target.kind === 'owned-disposable' && target.pageId !== null &&
       (!validId(target.pageId) || page.pageId !== target.pageId)) return false;
-    const evidence = sanitizeEvidenceUrlV1(page.finalUrl, { includeQuery: false });
+    const evidence = durableEvidence[3];
     return evidence.href === target.urlEvidence.href && evidence.queryIncluded === target.urlEvidence.queryIncluded &&
       evidence.redactedSegments === target.urlEvidence.redactedSegments;
   } catch { return false; }

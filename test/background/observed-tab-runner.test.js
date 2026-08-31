@@ -335,6 +335,23 @@ test('rejects an arbitrary runPipeline before probing or persistence', async () 
   assert.equal(persisted, 0);
 });
 
+test('rejects query-bearing durable model URLs without exposing secrets', async () => {
+  let persisted = 0;
+  const secretUrl = 'https://example.test/a?q=Bearer-super-secret-value';
+  const secretModel = structuredClone(SAMPLE_AUDIT);
+  secretModel.auditId = 'audit-1';
+  secretModel.requestedUrl = secretUrl;
+  secretModel.pages[0].requestedUrl = secretUrl;
+  secretModel.finalUrl = EVIDENCE.href;
+  secretModel.pages[0].finalUrl = EVIDENCE.href;
+  const { input } = fixture({ pipelineServices: {
+    async buildAuditModel() { return secretModel; },
+    async persistAuditModel() { persisted += 1; },
+  } });
+  await assert.rejects(() => runObservedTabAudit(input), error => !String(error).includes('Bearer-super-secret-value'));
+  assert.equal(persisted, 0);
+});
+
 test('rejects a terminal model for another audit before exposing the result', async () => {
   const { input } = fixture({ adapter: {
     async runPipeline() { return { model: { auditId: 'other-audit', session: { status: 'complete' } }, checkpoint: { version: 1 }, observationState: 'observed' }; },

@@ -269,3 +269,21 @@ test('rejects a canonical model whose final URL evidence diverges before persist
   }), /OBSERVED_PIPELINE_DENIED/u);
   assert.equal(persisted, 0);
 });
+
+test('rejects query-bearing durable model URLs without exposing the secret or persisting', async () => {
+  let persisted = 0;
+  let effects = '';
+  const secretUrl = 'https://servico.exemplo.test/consulta?q=Bearer-super-secret-value';
+  const secretModel = structuredClone(SAMPLE_AUDIT);
+  secretModel.requestedUrl = secretUrl;
+  secretModel.finalUrl = secretUrl;
+  secretModel.pages[0].requestedUrl = secretUrl;
+  secretModel.pages[0].finalUrl = secretUrl;
+  await assert.rejects(() => executeObservedAuditPipeline({
+    auditId: AUDIT_ID, observedTarget: TARGET, capturePolicy: POLICY, checkpointRecorder: recorder(), signal: undefined,
+    beforePersist: BEFORE_PERSIST,
+    services: { ...services(), async buildAuditModel() { return secretModel; }, async persistAuditModel() { persisted += 1; effects += secretUrl; } },
+  }), error => !String(error).includes('Bearer-super-secret-value'));
+  assert.equal(persisted, 0);
+  assert.equal(effects, '');
+});
