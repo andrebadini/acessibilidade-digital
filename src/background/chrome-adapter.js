@@ -23,9 +23,12 @@ const ObjectIsExtensible = Object.isExtensible;
 const ReflectOwnKeys = Reflect.ownKeys;
 const ReflectApply = Reflect.apply;
 const FunctionPrototypeBind = Function.prototype.bind;
+const WeakSetPrototypeAdd = WeakSet.prototype.add;
+const WeakSetPrototypeHas = WeakSet.prototype.has;
 const PrimordialUint8Array = Uint8Array;
 const PrimordialCrypto = globalThis.crypto;
 const PrimordialGetRandomValues = PrimordialCrypto?.getRandomValues;
+const ChromeAuditAuthorities = new WeakSet();
 
 const HIGHLIGHT_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const HIGHLIGHT_DOCUMENT_ID = /^[A-Za-z0-9._:-]{1,240}$/u;
@@ -854,6 +857,29 @@ function captureChromeApi(value) {
   }
 }
 
+/**
+ * Closes the browser-supplied Chrome graph at trusted extension bootstrap.
+ * The input is an environmental root of trust, not an untrusted value to validate.
+ */
+export function createChromeAuditAuthority(chromeApi) {
+  if (arguments.length !== 1) throw chromeApiDenied();
+  const authority = captureChromeApi(chromeApi);
+  ReflectApply(WeakSetPrototypeAdd, ChromeAuditAuthorities, [authority]);
+  return authority;
+}
+
+function requireChromeAuditAuthority(value) {
+  try {
+    if ((!value || (typeof value !== 'object' && typeof value !== 'function')) ||
+      ReflectApply(WeakSetPrototypeHas, ChromeAuditAuthorities, [value]) !== true) {
+      throw chromeApiDenied();
+    }
+    return value;
+  } catch {
+    throw chromeApiDenied();
+  }
+}
+
 function isWorkerOverrideName(name) {
   return name === 'enterFinalization'
     || name === 'tryEnterFinalization'
@@ -1025,8 +1051,8 @@ export async function resolveActiveNodeId(cdp) {
   }
 }
 
-export function createChromeAdapter(chromeApi, rawOptions = {}) {
-  chromeApi = captureChromeApi(chromeApi);
+export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
+  const chromeApi = requireChromeAuditAuthority(chromeAuthority);
   const options = captureAdapterOptions(rawOptions);
   const executeScript = options => invoke(chromeApi, chromeApi.scripting, 'executeScript', options);
   const transport = createChromeDebuggerTransport(chromeApi);

@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { AUDIT_EXECUTION_INTERNAL, captureFocusLocator, createChromeAdapter, resolveActiveNodeId, restoreFocusLocator } from '../../src/background/chrome-adapter.js';
+import {
+  AUDIT_EXECUTION_INTERNAL,
+  captureFocusLocator,
+  createChromeAdapter as createChromeAdapterFromAuthority,
+  createChromeAuditAuthority,
+  resolveActiveNodeId,
+  restoreFocusLocator,
+} from '../../src/background/chrome-adapter.js';
 import * as chromeAdapterModule from '../../src/background/chrome-adapter.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 
@@ -63,6 +70,13 @@ function chromeFake() {
     storage: { session: { async get() { return {}; }, async set() {}, async remove() {} } },
   };
   return { chromeApi, calls, updated, removed };
+}
+
+function createChromeAdapter(chromeApi, rawOptions) {
+  const authority = createChromeAuditAuthority(chromeApi);
+  return arguments.length === 1
+    ? createChromeAdapterFromAuthority(authority)
+    : createChromeAdapterFromAuthority(authority, rawOptions);
 }
 
 test('keeps a closed session facade and CSPRNG behind a non-enumerable execution contract', () => {
@@ -392,119 +406,113 @@ test('rejects accessor and Proxy Chrome envelopes by descriptor before observing
   }
 });
 
-test('anchors the session reference before a tabs descriptor trap can replace it', async t => {
-  for (const attack of ['session reference']) {
-    await t.test(attack, async () => {
-      const fake = chromeFake();
-      const safeCalls = [];
-      const evilCalls = [];
-      const trustedSession = {
-        async get(key) { safeCalls.push(['get', key]); return { safe: true }; },
-        async set(value) { safeCalls.push(['set', value]); },
-        async remove(key) { safeCalls.push(['remove', key]); },
-      };
-      const evilSession = {
-        async get(key) { evilCalls.push(['get', key]); return { evil: true }; },
-        async set(value) { evilCalls.push(['set', value]); },
-        async remove(key) { evilCalls.push(['remove', key]); },
-      };
-      fake.chromeApi.storage.session = trustedSession;
-      let tabsDescriptors = 0;
-      const chromeApi = new Proxy(fake.chromeApi, {
-        getOwnPropertyDescriptor(target, key) {
-          if (key === 'tabs') {
-            tabsDescriptors += 1;
-            if (attack === 'session reference') target.storage.session = evilSession;
-            else {
-              trustedSession.get = evilSession.get;
-              trustedSession.set = evilSession.set;
-              trustedSession.remove = evilSession.remove;
-            }
-          }
-          return Reflect.getOwnPropertyDescriptor(target, key);
-        },
-      });
+test('rejects an unbranded Chrome graph before a tabs trap can replace session methods', () => {
+  const fake = chromeFake();
+  const trustedSession = fake.chromeApi.storage.session;
+  const safeGet = trustedSession.get;
+  const safeSet = trustedSession.set;
+  const safeRemove = trustedSession.remove;
+  const evilSession = {
+    async get() { return { private: true }; },
+    async set() {},
+    async remove() {},
+  };
+  let tabsDescriptors = 0;
+  let optionOwnKeys = 0;
+  const chromeApi = new Proxy(fake.chromeApi, {
+    getOwnPropertyDescriptor(target, key) {
+      if (key === 'tabs') {
+        tabsDescriptors += 1;
+        trustedSession.get = evilSession.get;
+        trustedSession.set = evilSession.set;
+        trustedSession.remove = evilSession.remove;
+      }
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+  });
+  const options = new Proxy({}, {
+    ownKeys(target) {
+      optionOwnKeys += 1;
+      return Reflect.ownKeys(target);
+    },
+  });
 
-      const sessionArea = createChromeAdapter(chromeApi)[AUDIT_EXECUTION_INTERNAL].sessionArea;
-      const getResult = await sessionArea.get('alpha');
-      await sessionArea.set({ beta: true });
-      await sessionArea.remove('gamma');
-
-      assert.equal(tabsDescriptors, 1);
-      assert.notEqual(sessionArea, trustedSession);
-      assert.notEqual(sessionArea, evilSession);
-      assert.equal(Object.getPrototypeOf(sessionArea), null);
-      assert.equal(Object.isFrozen(sessionArea), true);
-      assert.deepEqual(Reflect.ownKeys(sessionArea).sort(), ['get', 'remove', 'set']);
-      assert.deepEqual(getResult, { safe: true });
-      assert.deepEqual(safeCalls, [
-        ['get', 'alpha'],
-        ['set', { beta: true }],
-        ['remove', 'gamma'],
-      ]);
-      assert.deepEqual(evilCalls, []);
-    });
-  }
+  assert.throws(
+    () => createChromeAdapterFromAuthority(chromeApi, options),
+    error => error?.constructor === TypeError &&
+      error.message === 'As APIs Chrome de auditoria não estão disponíveis.',
+  );
+  assert.equal(tabsDescriptors, 0);
+  assert.equal(optionOwnKeys, 0);
+  assert.equal(trustedSession.get, safeGet);
+  assert.equal(trustedSession.set, safeSet);
+  assert.equal(trustedSession.remove, safeRemove);
+  assert.deepEqual(fake.calls, []);
 });
 
-test('closes tabs methods before raw options can replace them', async t => {
-  for (const attack of ['raw options']) {
-    await t.test(attack, async () => {
-      const fake = chromeFake();
-      const safeCalls = [];
-      const evilCalls = [];
-      fake.chromeApi.tabs.create = async options => {
-        safeCalls.push(['create', options]);
-        return { id: 17, ...options };
-      };
-      fake.chromeApi.tabs.get = async id => {
-        safeCalls.push(['get', id]);
-        return { id, status: 'complete', url: 'https://safe.example/final' };
-      };
-      fake.chromeApi.tabs.remove = async id => { safeCalls.push(['remove', id]); };
-      const evil = {
-        async create(options) { evilCalls.push(['create', options]); return { id: 99, ...options }; },
-        async get(id) { evilCalls.push(['get', id]); return { id, url: 'https://evil.example/' }; },
-        async remove(id) { evilCalls.push(['remove', id]); },
-      };
-      const mutateTabs = () => {
-        fake.chromeApi.tabs.create = evil.create;
-        fake.chromeApi.tabs.get = evil.get;
-        fake.chromeApi.tabs.remove = evil.remove;
-      };
-      let chromeApi = fake.chromeApi;
-      let options = {};
-      if (attack === 'scripting descriptor') {
-        chromeApi = new Proxy(fake.chromeApi, {
-          getOwnPropertyDescriptor(target, key) {
-            if (key === 'scripting') mutateTabs();
-            return Reflect.getOwnPropertyDescriptor(target, key);
-          },
-        });
-      } else {
-        options = new Proxy({}, {
-          ownKeys(target) {
-            mutateTabs();
-            return Reflect.ownKeys(target);
-          },
-        });
+test('rejects an unbranded Chrome graph before a scripting trap can replace tabs methods', () => {
+  const fake = chromeFake();
+  const safeCreate = fake.chromeApi.tabs.create;
+  const safeGet = fake.chromeApi.tabs.get;
+  const safeRemove = fake.chromeApi.tabs.remove;
+  const evilTabs = {
+    async create() { return { id: 99 }; },
+    async get(id) { return { id, url: 'https://evil.example/' }; },
+    async remove() {},
+  };
+  let scriptingDescriptors = 0;
+  let optionOwnKeys = 0;
+  const chromeApi = new Proxy(fake.chromeApi, {
+    getOwnPropertyDescriptor(target, key) {
+      if (key === 'scripting') {
+        scriptingDescriptors += 1;
+        target.tabs.create = evilTabs.create;
+        target.tabs.get = evilTabs.get;
+        target.tabs.remove = evilTabs.remove;
       }
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+  });
+  const options = new Proxy({}, {
+    ownKeys(target) {
+      optionOwnKeys += 1;
+      return Reflect.ownKeys(target);
+    },
+  });
 
-      const adapter = createChromeAdapter(chromeApi, options);
-      const created = await adapter.createTab({ active: false });
-      const finalUrl = await adapter.getFinalUrl(17);
-      await adapter.removeTab(17);
+  assert.throws(
+    () => createChromeAdapterFromAuthority(chromeApi, options),
+    error => error?.constructor === TypeError &&
+      error.message === 'As APIs Chrome de auditoria não estão disponíveis.',
+  );
+  assert.equal(scriptingDescriptors, 0);
+  assert.equal(optionOwnKeys, 0);
+  assert.equal(fake.chromeApi.tabs.create, safeCreate);
+  assert.equal(fake.chromeApi.tabs.get, safeGet);
+  assert.equal(fake.chromeApi.tabs.remove, safeRemove);
+  assert.deepEqual(fake.calls, []);
+});
 
-      assert.equal(created.id, 17);
-      assert.equal(finalUrl, 'https://safe.example/final');
-      assert.deepEqual(safeCalls, [
-        ['create', { active: false }],
-        ['get', 17],
-        ['remove', 17],
-      ]);
-      assert.deepEqual(evilCalls, []);
-    });
-  }
+test('trusted bootstrap mints a closed Chrome authority for normal adapter use', async () => {
+  const fake = chromeFake();
+  const authorityFactory = chromeAdapterModule.createChromeAuditAuthority;
+
+  assert.equal(typeof authorityFactory, 'function');
+  const authority = authorityFactory(fake.chromeApi);
+  const adapter = createChromeAdapterFromAuthority(authority);
+  const created = await adapter.createTab({ active: false });
+  const finalUrl = await adapter.getFinalUrl(17);
+  await adapter.removeTab(17);
+
+  assert.equal(Object.getPrototypeOf(authority), null);
+  assert.equal(Object.isFrozen(authority), true);
+  assert.deepEqual(Reflect.ownKeys(authority).sort(), ['debugger', 'runtime', 'scripting', 'storage', 'tabs']);
+  assert.equal(created.id, 17);
+  assert.equal(finalUrl, 'https://example.test/final');
+  assert.deepEqual(fake.calls.filter(call => ['create', 'remove'].includes(call[0])), [
+    ['create', { active: false }],
+    ['remove', 17],
+  ]);
 });
 
 test('captures every root namespace before a session method descriptor can replace tabs', async () => {

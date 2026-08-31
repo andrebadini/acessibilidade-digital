@@ -16,7 +16,11 @@ import {
   readActiveAuditJobForWorker,
 } from './authorized-audit-starter.js';
 import { createAuditLifecycle } from './audit-lifecycle.js';
-import { composeChromeAdapter, createChromeAdapter } from './chrome-adapter.js';
+import {
+  composeChromeAdapter,
+  createChromeAdapter,
+  createChromeAuditAuthority,
+} from './chrome-adapter.js';
 import { registerAuditContextMenus } from './context-menu.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
 import { recordHighlightBindingV1 } from './highlight-binding.js';
@@ -445,6 +449,9 @@ export function createReportOperations({
 }
 
 async function buildDefaultRuntime(chromeApi, options) {
+  const chromeAuditAuthority = typeof options.chromeAdapterFactory === 'function'
+    ? null
+    : createChromeAuditAuthority(chromeApi);
   const sessionArea = chromeApi.storage.session;
   const epochNow = options.epochNow ?? Date.now;
   const modelNow = options.modelNow ?? (() => new Date().toISOString());
@@ -456,7 +463,9 @@ async function buildDefaultRuntime(chromeApi, options) {
     sessionArea, digestManager, now: epochNow, randomBytes: bytes,
   });
   if (typeof rawNavigationVault?.put !== 'function' || typeof rawNavigationVault?.take !== 'function') throw new Error('WORKER_UNAVAILABLE');
-  const baseAdapter = (options.chromeAdapterFactory ?? createChromeAdapter)(chromeApi, { sessionUrlDigestManager: digestManager });
+  const baseAdapter = typeof options.chromeAdapterFactory === 'function'
+    ? options.chromeAdapterFactory(chromeApi, { sessionUrlDigestManager: digestManager })
+    : createChromeAdapter(chromeAuditAuthority, { sessionUrlDigestManager: digestManager });
   const chromeAdapter = options.chromeAdapterOverrides
     ? composeChromeAdapter(baseAdapter, options.chromeAdapterOverrides)
     : Object.freeze(baseAdapter);

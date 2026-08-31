@@ -164,6 +164,15 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
     createdTabs.push(structuredClone(options));
     return tabCreator(options, callback);
   };
+  if (fixtureOptions.useDefaultChromeAdapter === true) {
+    chromeApi.tabs.update = async (tabId, options) => ({ id: tabId, windowId: 9, ...options });
+    chromeApi.tabs.remove = async () => undefined;
+    chromeApi.debugger = {
+      async attach() {},
+      async sendCommand() { return {}; },
+      async detach() {},
+    };
+  }
   chromeApi.tabs.query = fixtureOptions.tabsQuery ?? (async () => []);
   chromeApi.sidePanel.setOptions = (value, callback) => {
     panelOptions.push(structuredClone(value));
@@ -245,19 +254,21 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
 
   const registration = registerServiceWorker(chromeApi, {
     auditStore,
-    chromeAdapterFactory(...args) {
-      if (fixtureOptions.chromeAdapterFactory) return fixtureOptions.chromeAdapterFactory(...args);
-      return Object.freeze({
-        async probeDocumentIdentity() { throw new Error('not used'); },
-        async getEvidenceUrl() { throw new Error('not used'); },
-        async getFinalUrl() { return 'https://example.test/'; },
-        async proveHighlightTargets() { return []; },
-        async verifyHighlightTarget() { return { ok: false, reason: 'live-proof-failed' }; },
-        async injectHighlight() { return { ok: false, reason: 'execution-failed' }; },
-        async emitProgress() {},
-        ...(fixtureOptions.chromeAdapter ?? {}),
-      });
-    },
+    ...(fixtureOptions.useDefaultChromeAdapter === true ? {} : {
+      chromeAdapterFactory(...args) {
+        if (fixtureOptions.chromeAdapterFactory) return fixtureOptions.chromeAdapterFactory(...args);
+        return Object.freeze({
+          async probeDocumentIdentity() { throw new Error('not used'); },
+          async getEvidenceUrl() { throw new Error('not used'); },
+          async getFinalUrl() { return 'https://example.test/'; },
+          async proveHighlightTargets() { return []; },
+          async verifyHighlightTarget() { return { ok: false, reason: 'live-proof-failed' }; },
+          async injectHighlight() { return { ok: false, reason: 'execution-failed' }; },
+          async emitProgress() {},
+          ...(fixtureOptions.chromeAdapter ?? {}),
+        });
+      },
+    }),
     personaLockManager,
     createAuditId: () => 'audit-worker-generated',
     createExportOwnerId: () => 'export-owner-1',
@@ -670,6 +681,17 @@ test('default runtime serializes persona recovery with the supplied Web Locks ma
   assert.equal(env.personaLockManager.calls.length > 0, true);
   assert.equal(env.personaLockManager.calls.every(call =>
     call.name === 'audita:persona-lease-store:v1' && call.options.mode === 'exclusive'), true);
+});
+
+test('default runtime bootstraps the operational adapter through a trusted Chrome authority', async () => {
+  const env = defaultGraphFixture(null, { useDefaultChromeAdapter: true });
+
+  const runtime = await env.registration.startupReady;
+  const created = await runtime.chromeAdapter.createTab({ active: false });
+  await runtime.chromeAdapter.removeTab(created.id);
+
+  assert.equal(created.id, 77);
+  assert.deepEqual(env.createdTabs, [{ active: false }]);
 });
 
 test('default worker keeps the volatile vault closed while injecting the one digest manager by factories', async () => {
