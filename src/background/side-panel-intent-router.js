@@ -546,9 +546,12 @@ export function createSidePanelIntentRouter(raw) {
         auditId: envelope.auditId, sessionCapabilityId: envelope.sessionCapabilityId,
         windowId: authorized.context.windowId, reasonCode: 'USER_CANCELLED',
       });
-      if (result?.ok === true && result.auditId === envelope.auditId && result.state === 'cancelling') return freeze(result);
-      return result?.ok === false && ['AUDIT_CANCEL_DENIED', 'AUDIT_CANCEL_TOO_LATE'].includes(result.code)
-        ? fail(result.code) : fail('AUDIT_CANCEL_DENIED');
+      const success = exact(result, ['ok', 'auditId', 'state']);
+      if (success?.ok === true && success.auditId === envelope.auditId &&
+        ['cancelling', 'revoked'].includes(success.state)) return freeze(success);
+      const failed = exact(result, ['ok', 'code']);
+      return failed?.ok === false && ['AUDIT_CANCEL_DENIED', 'AUDIT_CANCEL_TOO_LATE'].includes(failed.code)
+        ? fail(failed.code) : fail('AUDIT_CANCEL_DENIED');
     } catch { return fail('AUDIT_CANCEL_DENIED'); }
   }
 

@@ -1028,6 +1028,68 @@ test('authorizes cancellation and passes only the correlated session and window'
   });
 });
 
+test('projects one confirmed privacy-paused cleanup as a closed revoked success', async () => {
+  let confirmedCleanups = 0;
+  const { router } = fixture({
+    auditStarter: {
+      async beginAuthorizedAudit() { throw new Error('unused'); },
+      async resumePrivacyPausedAudit() { throw new Error('unused'); },
+      async abortAuthorizedAudit(value) {
+        confirmedCleanups += 1;
+        return { ok: true, auditId: value.auditId, state: 'revoked' };
+      },
+    },
+  });
+
+  const response = await router.dispatch({
+    envelope: parsed({
+      type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION,
+      auditId: 'audit-paused-cancel', windowId: 9,
+    }),
+    sender: panelSender(),
+  });
+
+  assert.deepEqual(response, {
+    ok: true, auditId: 'audit-paused-cancel', state: 'revoked',
+  });
+  assert.deepEqual(Reflect.ownKeys(response), ['ok', 'auditId', 'state']);
+  assert.equal(confirmedCleanups, 1);
+});
+
+test('denies foreign, malformed and unknown revoked cancellation outputs', async t => {
+  const cases = [
+    ['foreign audit', { ok: true, auditId: 'audit-foreign', state: 'revoked' }],
+    ['revoked without success', { ok: false, auditId: 'audit-cancel', state: 'revoked' }],
+    ['unknown state', { ok: true, auditId: 'audit-cancel', state: 'finished' }],
+    ['extra consent detail', {
+      ok: true, auditId: 'audit-cancel', state: 'revoked', consentId: CONSENT,
+    }],
+    ['accessor state', Object.defineProperty({ ok: true, auditId: 'audit-cancel' }, 'state', {
+      enumerable: true, get() { return 'revoked'; },
+    })],
+  ];
+
+  for (const [name, outcome] of cases) await t.test(name, async () => {
+    let abortCalls = 0;
+    const { router } = fixture({
+      auditStarter: {
+        async beginAuthorizedAudit() { throw new Error('unused'); },
+        async resumePrivacyPausedAudit() { throw new Error('unused'); },
+        async abortAuthorizedAudit() { abortCalls += 1; return outcome; },
+      },
+    });
+    const response = await router.dispatch({
+      envelope: parsed({
+        type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION,
+        auditId: 'audit-cancel', windowId: 9,
+      }),
+      sender: panelSender(),
+    });
+    assert.deepEqual(response, { ok: false, code: 'AUDIT_CANCEL_DENIED' });
+    assert.equal(abortCalls, 1);
+  });
+});
+
 test('rehydrates under the shared window lock and confirms durable revocation after registration denial', async () => {
   const { router, calls, durableSessions } = fixture({
     panelScopeOverrides: {
