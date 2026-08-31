@@ -391,3 +391,23 @@ test('clearAudit rejects an operational V1 remove failure and preserves the lega
   await assert.rejects(() => owned.clearAudit('audit-operational-v1'), /OWNERSHIP_DENIED/u);
   assert.equal(Object.hasOwn(sessionArea.values, key), true);
 });
+
+test('rejects the V2-only cleanup mode on V1 without touching it or blocking later valid V1 cleanup', async () => {
+  const { sessionArea, calls, owned } = fixture();
+  const invalidKey = 'audita:owned-tab:v1:legacy-v2-mode';
+  sessionArea.values[invalidKey] = {
+    version: 1, ownerId: 'legacy-v2-mode', auditId: 'audit-legacy-mode', sessionCapabilityId: 'session',
+    tabId: 110, windowId: 8, cleanupMode: 'pre-observation-failure', state: 'cleanup-pending',
+    createdAt: '2026-08-29T10:00:00.000Z', updatedAt: '2026-08-29T10:00:00.000Z',
+  };
+  const validKey = 'audita:owned-tab:v1:legacy-valid-mode';
+  sessionArea.values[validKey] = {
+    version: 1, ownerId: 'legacy-valid-mode', auditId: 'audit-legacy-mode', sessionCapabilityId: 'session',
+    tabId: 111, windowId: 8, cleanupMode: 'retain-after-observation', state: 'cleanup-pending',
+    createdAt: '2026-08-29T10:00:00.000Z', updatedAt: '2026-08-29T10:00:00.000Z',
+  };
+  assert.equal(await owned.clearAudit('audit-legacy-mode'), 1);
+  assert.deepEqual(calls, [111]);
+  assert.equal(Object.hasOwn(sessionArea.values, invalidKey), true);
+  assert.equal(Object.hasOwn(sessionArea.values, validKey), false);
+});

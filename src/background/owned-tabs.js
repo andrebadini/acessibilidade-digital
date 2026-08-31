@@ -12,7 +12,7 @@ const V1_RECORD_KEYS = Object.freeze([
 const IDENTITY_KEYS = Object.freeze(['ownershipId', 'auditId', 'purpose', 'tabId', 'windowId', 'cleanupMode']);
 const PURPOSES = new Set(['audit', 'current-state-assist']);
 const CLEANUP_MODES = new Set(['always', 'pre-observation-failure']);
-const LEGACY_CLEANUP_MODES = new Set(['always', 'retain-after-observation', 'pre-observation-failure']);
+const LEGACY_CLEANUP_MODES = new Set(['always', 'retain-after-observation']);
 const STATES = new Set([
   'created', 'observing', 'retained-for-review', 'retained-for-consent',
   'cleanup-pending', 'removed',
