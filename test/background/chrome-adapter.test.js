@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { AUDIT_EXECUTION_INTERNAL, captureFocusLocator, createChromeAdapter, resolveActiveNodeId, restoreFocusLocator } from '../../src/background/chrome-adapter.js';
 import * as chromeAdapterModule from '../../src/background/chrome-adapter.js';
+import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 
 test('captures and restores focus for elements without DOM IDs', () => {
   const first = { localName: 'button', id: '', parentElement: null };
@@ -71,6 +72,308 @@ test('keeps the real session area and CSPRNG behind a non-enumerable execution c
   assert.equal(Object.getOwnPropertyDescriptor(adapter, AUDIT_EXECUTION_INTERNAL).enumerable, false);
   assert.equal(adapter[AUDIT_EXECUTION_INTERNAL].sessionArea, fake.chromeApi.storage.session);
   assert.equal(adapter[AUDIT_EXECUTION_INTERNAL].randomBytes(16).byteLength, 16);
+});
+
+test('publishes only the explicit Task 3C execution dependencies', () => {
+  const fake = chromeFake();
+  const capturePolicy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const sessionUrlDigestManager = Object.freeze({ async digest() { return `hmac-sha256:${'A'.repeat(43)}`; } });
+  const onExecutionCheckpoint = async () => {};
+  const persistAuditModel = async () => {};
+  const adapter = createChromeAdapter(fake.chromeApi, {
+    sessionUrlDigestManager,
+    capturePolicy,
+    onExecutionCheckpoint,
+    persistAuditModel,
+  });
+  const internal = adapter[AUDIT_EXECUTION_INTERNAL];
+
+  assert.deepEqual(
+    [...Reflect.ownKeys(internal)].sort(),
+    ['capturePolicy', 'onExecutionCheckpoint', 'persistAuditModel', 'randomBytes', 'sessionArea'].sort(),
+  );
+  assert.notEqual(internal.capturePolicy, capturePolicy);
+  assert.deepEqual({ ...internal.capturePolicy }, capturePolicy);
+  assert.equal(Object.getPrototypeOf(internal.capturePolicy), null);
+  assert.equal(Object.isFrozen(internal.capturePolicy), true);
+  assert.equal(internal.onExecutionCheckpoint, onExecutionCheckpoint);
+  assert.equal(internal.persistAuditModel, persistAuditModel);
+  assert.equal(Object.hasOwn(internal, 'sessionUrlDigestManager'), false);
+  assert.deepEqual(fake.calls, []);
+});
+
+test('snapshots a mutable capture policy before later mode and flag mutation', () => {
+  const mutablePolicy = {
+    ...createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+  };
+  const adapter = createChromeAdapter(chromeFake().chromeApi, { capturePolicy: mutablePolicy });
+  const snapshot = adapter[AUDIT_EXECUTION_INTERNAL].capturePolicy;
+
+  mutablePolicy.mode = 'full-evidence';
+  mutablePolicy.includeQuery = true;
+  mutablePolicy.captureFullPage = true;
+  mutablePolicy.captureElements = true;
+  mutablePolicy.composeAnnouncementMap = true;
+
+  assert.notEqual(snapshot, mutablePolicy);
+  assert.equal(Object.getPrototypeOf(snapshot), null);
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.deepEqual(Reflect.ownKeys(snapshot), [
+    'version', 'mode', 'includeQuery', 'captureFullPage', 'captureElements', 'composeAnnouncementMap',
+  ]);
+  assert.deepEqual({ ...snapshot }, {
+    version: 'CapturePolicyV1',
+    mode: 'no-pixels',
+    includeQuery: false,
+    captureFullPage: false,
+    captureElements: false,
+    composeAnnouncementMap: false,
+  });
+});
+
+test('rejects an evil policy when its Proxy replaces the downstream descriptor validator', () => {
+  const originalGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const safePolicy = createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false });
+  const target = {
+    version: 'CapturePolicyV1',
+    mode: 'evil-mode',
+    includeQuery: false,
+    captureFullPage: false,
+    captureElements: false,
+    composeAnnouncementMap: false,
+  };
+  let ownKeysCalls = 0;
+  const policy = new Proxy(target, {
+    ownKeys(value) {
+      ownKeysCalls += 1;
+      Object.getOwnPropertyDescriptor = (object, key) => {
+        if (object !== policy && Object.hasOwn(safePolicy, key)) {
+          return {
+            configurable: false,
+            enumerable: true,
+            writable: false,
+            value: safePolicy[key],
+          };
+        }
+        return originalGetOwnPropertyDescriptor(object, key);
+      };
+      return Reflect.ownKeys(value);
+    },
+  });
+  let adapter;
+  let caught;
+
+  try {
+    try { adapter = createChromeAdapter(chromeFake().chromeApi, { capturePolicy: policy }); }
+    catch (error) { caught = error; }
+  } finally {
+    Object.getOwnPropertyDescriptor = originalGetOwnPropertyDescriptor;
+  }
+
+  assert.equal(adapter, undefined);
+  assert.equal(caught?.constructor, TypeError);
+  assert.equal(caught?.message, 'AUDIT_ADAPTER_OPTIONS_DENIED');
+  assert.equal(ownKeysCalls, 1);
+});
+
+test('accepts canonical snapshots for every CapturePolicyV1 mode', () => {
+  for (const mode of ['full-evidence', 'element-only', 'no-pixels']) {
+    const policy = createCapturePolicyV1({ mode, includeQuery: true });
+    const snapshot = createChromeAdapter(chromeFake().chromeApi, {
+      capturePolicy: policy,
+    })[AUDIT_EXECUTION_INTERNAL].capturePolicy;
+    assert.notEqual(snapshot, policy);
+    assert.deepEqual({ ...snapshot }, policy);
+    assert.equal(Object.getPrototypeOf(snapshot), null);
+    assert.equal(Object.isFrozen(snapshot), true);
+  }
+});
+
+test('publishes an exact frozen null-prototype execution contract immune to inherited policies', () => {
+  const pollution = {
+    capturePolicy: createCapturePolicyV1({ mode: 'full-evidence', includeQuery: true }),
+    privacyDecision: Object.freeze({ status: 'authorized' }),
+    privacyState: Object.freeze({ state: 'paused' }),
+    consentAuthority: Object.freeze({ consume() { return true; } }),
+    resumePauseId: 'private-pause-id',
+  };
+  const descriptors = new Map();
+  let internal;
+  let inherited;
+  try {
+    for (const [key, value] of Object.entries(pollution)) {
+      descriptors.set(key, Object.getOwnPropertyDescriptor(Object.prototype, key));
+      Object.defineProperty(Object.prototype, key, {
+        configurable: true, enumerable: true, writable: true, value,
+      });
+    }
+    internal = createChromeAdapter(chromeFake().chromeApi)[AUDIT_EXECUTION_INTERNAL];
+    inherited = Object.fromEntries(Object.keys(pollution).map(key => [key, internal[key]]));
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(Object.prototype, key, descriptor);
+      else delete Object.prototype[key];
+    }
+  }
+
+  assert.equal(Object.getPrototypeOf(internal), null);
+  assert.equal(Object.isFrozen(internal), true);
+  assert.deepEqual(Reflect.ownKeys(internal).sort(), ['randomBytes', 'sessionArea']);
+  assert.deepEqual(inherited, {
+    capturePolicy: undefined,
+    privacyDecision: undefined,
+    privacyState: undefined,
+    consentAuthority: undefined,
+    resumePauseId: undefined,
+  });
+});
+
+test('publishes with captured primordials after hostile option reentrancy mutates globals', () => {
+  const originalCreate = Object.create;
+  const originalDefineProperty = Object.defineProperty;
+  const originalFreeze = Object.freeze;
+  const originalOwnKeys = Reflect.ownKeys;
+  const innerFake = chromeFake();
+  const outerFake = chromeFake();
+  let inner;
+  let outer;
+  let caught;
+  let ownKeysCalls = 0;
+  const options = new Proxy({}, {
+    ownKeys(target) {
+      ownKeysCalls += 1;
+      Object.create = () => { throw new Error('PRIVATE_OBJECT_CREATE'); };
+      Object.defineProperty = () => { throw new Error('PRIVATE_OBJECT_DEFINE_PROPERTY'); };
+      Object.freeze = () => { throw new Error('PRIVATE_OBJECT_FREEZE'); };
+      Reflect.ownKeys = () => { throw new Error('PRIVATE_REFLECT_OWN_KEYS'); };
+      inner = createChromeAdapter(innerFake.chromeApi);
+      return originalOwnKeys(target);
+    },
+  });
+
+  try {
+    try { outer = createChromeAdapter(outerFake.chromeApi, options); }
+    catch (error) { caught = error; }
+  } finally {
+    Object.create = originalCreate;
+    Object.defineProperty = originalDefineProperty;
+    Object.freeze = originalFreeze;
+    Reflect.ownKeys = originalOwnKeys;
+  }
+
+  assert.ifError(caught);
+  assert.equal(ownKeysCalls, 1);
+  for (const adapter of [inner, outer]) {
+    const internal = adapter[AUDIT_EXECUTION_INTERNAL];
+    assert.equal(Object.getPrototypeOf(internal), null);
+    assert.equal(Object.isFrozen(internal), true);
+    assert.deepEqual(Reflect.ownKeys(internal).sort(), ['randomBytes', 'sessionArea']);
+  }
+  assert.deepEqual(innerFake.calls, []);
+  assert.deepEqual(outerFake.calls, []);
+});
+
+test('rejects every present invalid Task 3C dependency before publication', async t => {
+  let digestGetterReads = 0;
+  const digestAccessor = {};
+  Object.defineProperty(digestAccessor, 'digest', {
+    enumerable: true,
+    get() {
+      digestGetterReads += 1;
+      throw new Error('PRIVATE_DIGEST_GETTER');
+    },
+  });
+  const invalid = [
+    ['sessionUrlDigestManager undefined', { sessionUrlDigestManager: undefined }],
+    ['sessionUrlDigestManager null', { sessionUrlDigestManager: null }],
+    ['sessionUrlDigestManager without digest', { sessionUrlDigestManager: {} }],
+    ['sessionUrlDigestManager accessor digest', { sessionUrlDigestManager: digestAccessor }],
+    ['sessionUrlDigestManager extra key', { sessionUrlDigestManager: { digest() {}, extra: true } }],
+    ['capturePolicy undefined', { capturePolicy: undefined }],
+    ['capturePolicy null', { capturePolicy: null }],
+    ['capturePolicy malformed', { capturePolicy: {} }],
+    ['onExecutionCheckpoint undefined', { onExecutionCheckpoint: undefined }],
+    ['onExecutionCheckpoint null', { onExecutionCheckpoint: null }],
+    ['onExecutionCheckpoint non-function', { onExecutionCheckpoint: {} }],
+    ['persistAuditModel undefined', { persistAuditModel: undefined }],
+    ['persistAuditModel null', { persistAuditModel: null }],
+    ['persistAuditModel non-function', { persistAuditModel: {} }],
+  ];
+
+  for (const [name, options] of invalid) {
+    await t.test(name, () => {
+      const fake = chromeFake();
+      let adapter;
+      let caught;
+      try { adapter = createChromeAdapter(fake.chromeApi, options); }
+      catch (error) { caught = error; }
+      assert.equal(adapter, undefined);
+      assert.equal(caught?.constructor, TypeError);
+      assert.equal(caught?.message, 'AUDIT_ADAPTER_OPTIONS_DENIED');
+      assert.deepEqual(fake.calls, []);
+    });
+  }
+  assert.equal(digestGetterReads, 0);
+});
+
+test('rejects retired execution options before publication without reading hostile accessors', async t => {
+  const retired = ['privacyDecision', 'privacyState', 'consentAuthority', 'resumePauseId'];
+  for (const key of retired) {
+    await t.test(`${key} data property`, () => {
+      const fake = chromeFake();
+      let adapter;
+      assert.throws(() => {
+        adapter = createChromeAdapter(fake.chromeApi, { [key]: Object.freeze({ legacy: true }) });
+      }, TypeError);
+      assert.equal(adapter, undefined);
+      assert.deepEqual(fake.calls, []);
+    });
+
+    await t.test(`${key} accessor`, () => {
+      const fake = chromeFake();
+      const options = {};
+      let reads = 0;
+      Object.defineProperty(options, key, {
+        enumerable: true,
+        get() {
+          reads += 1;
+          throw new Error(`PRIVATE_${key.toUpperCase()}`);
+        },
+      });
+      let adapter;
+      let caught;
+      try { adapter = createChromeAdapter(fake.chromeApi, options); }
+      catch (error) { caught = error; }
+      assert.equal(adapter, undefined);
+      assert.equal(caught instanceof TypeError, true);
+      assert.doesNotMatch(String(caught), /PRIVATE_/u);
+      assert.equal(reads, 0);
+      assert.deepEqual(fake.calls, []);
+    });
+  }
+});
+
+test('rejects symbolic adapter options without evaluating them or publishing an adapter', () => {
+  const fake = chromeFake();
+  const options = {};
+  let reads = 0;
+  Object.defineProperty(options, Symbol('hostile-option'), {
+    enumerable: true,
+    get() {
+      reads += 1;
+      throw new Error('PRIVATE_SYMBOL_VALUE');
+    },
+  });
+  let adapter;
+  let caught;
+  try { adapter = createChromeAdapter(fake.chromeApi, options); }
+  catch (error) { caught = error; }
+
+  assert.equal(adapter, undefined);
+  assert.equal(caught instanceof TypeError, true);
+  assert.doesNotMatch(String(caught), /PRIVATE_SYMBOL_VALUE/u);
+  assert.equal(reads, 0);
+  assert.deepEqual(fake.calls, []);
 });
 
 test('composes the real adapter with exact single and batch worker overrides without exposing internals', () => {
@@ -471,6 +774,34 @@ test('proves a fresh top document identity without returning its raw URL', async
   });
   assert.deepEqual(digested, ['https://example.test/path?token=private#fragment']);
   assert.doesNotMatch(JSON.stringify(proof), /private|example\.test/u);
+});
+
+test('captures and binds a closed null-prototype digest manager before later mutation', async () => {
+  const fake = chromeFake();
+  fake.chromeApi.tabs.get = async id => ({ id, windowId: 9, status: 'complete', url: 'https://example.test/path' });
+  fake.chromeApi.scripting.executeScript = async () => [{
+    frameId: 0,
+    documentId: 'target-document-bound',
+    result: 'https://example.test/path',
+  }];
+  const manager = Object.create(null);
+  let receiver;
+  let calls = 0;
+  manager.digest = async function digest(value) {
+    receiver = this;
+    calls += 1;
+    assert.equal(value, 'https://example.test/path');
+    return `hmac-sha256:${'A'.repeat(43)}`;
+  };
+  manager.destroy = async () => {};
+  const adapter = createChromeAdapter(fake.chromeApi, { sessionUrlDigestManager: manager });
+  manager.digest = async () => { throw new Error('MUTATED_DIGEST'); };
+
+  const proof = await adapter.probeDocumentIdentity(17);
+
+  assert.equal(calls, 1);
+  assert.equal(receiver, manager);
+  assert.equal(proof.urlSessionDigest, `hmac-sha256:${'A'.repeat(43)}`);
 });
 
 test('rejects navigation or document replacement while HMAC digest is pending', async () => {

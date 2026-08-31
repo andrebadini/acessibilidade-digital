@@ -20,6 +20,8 @@ const ObjectGetPrototypeOf = Object.getPrototypeOf;
 const ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const ObjectHasOwn = Object.hasOwn;
 const ReflectOwnKeys = Reflect.ownKeys;
+const ReflectApply = Reflect.apply;
+const FunctionPrototypeBind = Function.prototype.bind;
 
 const HIGHLIGHT_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const HIGHLIGHT_DOCUMENT_ID = /^[A-Za-z0-9._:-]{1,240}$/u;
@@ -27,6 +29,9 @@ const HIGHLIGHT_NONCE = /^[A-Za-z0-9_-]{22}$/u;
 const HIGHLIGHT_SHA256 = /^[a-f0-9]{64}$/u;
 const MAX_HIGHLIGHT_TARGETS = 5_000;
 const MAX_HIGHLIGHT_SELECTOR_BYTES = 1_000_000;
+const CAPTURE_POLICY_KEYS = ObjectFreeze([
+  'version', 'mode', 'includeQuery', 'captureFullPage', 'captureElements', 'composeAnnouncementMap',
+]);
 
 function exactHighlightRecord(value, expectedKeys) {
   try {
@@ -466,6 +471,119 @@ function compositionDenied() {
   return new PrimordialTypeError('AUDIT_ADAPTER_COMPOSITION_DENIED');
 }
 
+function adapterOptionsDenied() {
+  return new PrimordialTypeError('AUDIT_ADAPTER_OPTIONS_DENIED');
+}
+
+function isAdapterOptionName(key) {
+  return key === 'sessionUrlDigestManager' || key === 'capturePolicy' ||
+    key === 'onExecutionCheckpoint' || key === 'persistAuditModel';
+}
+
+function captureDigestManager(value) {
+  if (!value || typeof value !== 'object') throw adapterOptionsDenied();
+  const prototype = ObjectGetPrototypeOf(value);
+  if (prototype !== ObjectPrototype && prototype !== null) throw adapterOptionsDenied();
+  const keys = ReflectOwnKeys(value);
+  if (keys.length < 1 || keys.length > 2) throw adapterOptionsDenied();
+  let digest = null;
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+    if (key !== 'digest' && key !== 'destroy') throw adapterOptionsDenied();
+    const descriptor = ObjectGetOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !ObjectHasOwn(descriptor, 'value') || typeof descriptor.value !== 'function') {
+      throw adapterOptionsDenied();
+    }
+    if (key === 'digest') digest = descriptor.value;
+  }
+  if (digest === null) throw adapterOptionsDenied();
+  const captured = ObjectCreate(null);
+  defineDataProperty(
+    captured,
+    'digest',
+    ReflectApply(FunctionPrototypeBind, digest, [value]),
+    true,
+    false,
+    false,
+  );
+  return ObjectFreeze(captured);
+}
+
+function isCapturePolicyKey(key) {
+  return key === 'version' || key === 'mode' || key === 'includeQuery' ||
+    key === 'captureFullPage' || key === 'captureElements' || key === 'composeAnnouncementMap';
+}
+
+function isCanonicalCapturePolicy(value) {
+  if (value.version !== 'CapturePolicyV1' || typeof value.includeQuery !== 'boolean') return false;
+  let captureFullPage;
+  let captureElements;
+  let composeAnnouncementMap;
+  if (value.mode === 'full-evidence') {
+    captureFullPage = true;
+    captureElements = true;
+    composeAnnouncementMap = true;
+  } else if (value.mode === 'element-only') {
+    captureFullPage = false;
+    captureElements = true;
+    composeAnnouncementMap = false;
+  } else if (value.mode === 'no-pixels') {
+    captureFullPage = false;
+    captureElements = false;
+    composeAnnouncementMap = false;
+  } else return false;
+  return value.captureFullPage === captureFullPage && value.captureElements === captureElements &&
+    value.composeAnnouncementMap === composeAnnouncementMap;
+}
+
+function capturePolicySnapshot(value) {
+  if (!value || typeof value !== 'object') throw adapterOptionsDenied();
+  const prototype = ObjectGetPrototypeOf(value);
+  if (prototype !== ObjectPrototype && prototype !== null) throw adapterOptionsDenied();
+  const keys = ReflectOwnKeys(value);
+  if (keys.length !== CAPTURE_POLICY_KEYS.length) throw adapterOptionsDenied();
+  for (let index = 0; index < keys.length; index += 1) {
+    if (typeof keys[index] !== 'string' || !isCapturePolicyKey(keys[index])) throw adapterOptionsDenied();
+  }
+  const snapshot = ObjectCreate(null);
+  for (let index = 0; index < CAPTURE_POLICY_KEYS.length; index += 1) {
+    const key = CAPTURE_POLICY_KEYS[index];
+    const descriptor = ObjectGetOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !ObjectHasOwn(descriptor, 'value')) throw adapterOptionsDenied();
+    defineDataProperty(snapshot, key, descriptor.value, true, false, false);
+  }
+  ObjectFreeze(snapshot);
+  if (!isCanonicalCapturePolicy(snapshot)) throw adapterOptionsDenied();
+  return snapshot;
+}
+
+function captureAdapterOptionValue(key, value) {
+  if (key === 'sessionUrlDigestManager') return captureDigestManager(value);
+  if (key === 'capturePolicy') return capturePolicySnapshot(value);
+  if (typeof value !== 'function') throw adapterOptionsDenied();
+  return value;
+}
+
+function captureAdapterOptions(value) {
+  try {
+    if (!value || typeof value !== 'object') throw adapterOptionsDenied();
+    const prototype = ObjectGetPrototypeOf(value);
+    if (prototype !== ObjectPrototype && prototype !== null) throw adapterOptionsDenied();
+    const keys = ReflectOwnKeys(value);
+    const captured = ObjectCreate(null);
+    for (let index = 0; index < keys.length; index += 1) {
+      const key = keys[index];
+      if (typeof key !== 'string' || !isAdapterOptionName(key)) throw adapterOptionsDenied();
+      const descriptor = ObjectGetOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !ObjectHasOwn(descriptor, 'value')) throw adapterOptionsDenied();
+      captured[key] = captureAdapterOptionValue(key, descriptor.value);
+    }
+    return captured;
+  } catch {
+    throw adapterOptionsDenied();
+  }
+}
+
 function isWorkerOverrideName(name) {
   return name === 'enterFinalization'
     || name === 'tryEnterFinalization'
@@ -629,7 +747,8 @@ export async function resolveActiveNodeId(cdp) {
   }
 }
 
-export function createChromeAdapter(chromeApi, options = {}) {
+export function createChromeAdapter(chromeApi, rawOptions = {}) {
+  const options = captureAdapterOptions(rawOptions);
   if (!chromeApi?.tabs || !chromeApi?.scripting || !chromeApi?.debugger || !chromeApi?.runtime) {
     throw new TypeError('As APIs Chrome de auditoria não estão disponíveis.');
   }
@@ -1184,23 +1303,23 @@ export function createChromeAdapter(chromeApi, options = {}) {
     },
     removeTab(tabId) { return invoke(chromeApi, chromeApi.tabs, 'remove', tabId); },
   };
-  Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
-    enumerable: false,
-    value: Object.freeze({
-      sessionArea: chromeApi.storage?.session,
-      randomBytes(length) {
-        const bytes = new Uint8Array(length);
-        globalThis.crypto.getRandomValues(bytes);
-        return bytes;
-      },
-      ...(options.capturePolicy ? { capturePolicy: options.capturePolicy } : {}),
-      ...(options.privacyDecision ? { privacyDecision: options.privacyDecision } : {}),
-      ...(options.privacyState ? { privacyState: options.privacyState } : {}),
-      ...(options.consentAuthority ? { consentAuthority: options.consentAuthority } : {}),
-      ...(options.resumePauseId ? { resumePauseId: options.resumePauseId } : {}),
-      ...(options.onExecutionCheckpoint ? { onExecutionCheckpoint: options.onExecutionCheckpoint } : {}),
-      ...(options.persistAuditModel ? { persistAuditModel: options.persistAuditModel } : {}),
-    }),
-  });
+  const internal = ObjectCreate(null);
+  defineDataProperty(internal, 'sessionArea', chromeApi.storage?.session, true, false, false);
+  defineDataProperty(internal, 'randomBytes', length => {
+    const bytes = new Uint8Array(length);
+    globalThis.crypto.getRandomValues(bytes);
+    return bytes;
+  }, true, false, false);
+  if (ObjectHasOwn(options, 'capturePolicy')) {
+    defineDataProperty(internal, 'capturePolicy', options.capturePolicy, true, false, false);
+  }
+  if (ObjectHasOwn(options, 'onExecutionCheckpoint')) {
+    defineDataProperty(internal, 'onExecutionCheckpoint', options.onExecutionCheckpoint, true, false, false);
+  }
+  if (ObjectHasOwn(options, 'persistAuditModel')) {
+    defineDataProperty(internal, 'persistAuditModel', options.persistAuditModel, true, false, false);
+  }
+  ObjectFreeze(internal);
+  defineDataProperty(adapter, AUDIT_EXECUTION_INTERNAL, internal, false, false, false);
   return adapter;
 }

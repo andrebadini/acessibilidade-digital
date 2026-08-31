@@ -255,6 +255,91 @@ function malformedJournalEnvelopeCases(getterState) {
   ];
 }
 
+function capturePolicyGateHarness() {
+  const effects = [];
+  const touched = name => (..._args) => { effects.push(name); };
+  const inspected = async () => {
+    effects.push('inspectPreparedAuditTarget');
+    return { ok: false, target: null };
+  };
+  const dependencies = {
+    authority: {
+      claimAndIssueAuditSession: touched('claimAndIssueAuditSession/rng'),
+      claimWorkerEventAndIssueAuditSession: touched('claimWorkerEventAndIssueAuditSession/rng'),
+      inspectPreparedAuditTarget: inspected,
+      transitionAuditSession: touched('transitionAuditSession'),
+      invalidateCapability: touched('invalidateCapability'),
+    },
+    sessionArea: {
+      get: touched('storage.get'),
+      set: touched('storage.set'),
+      remove: touched('storage.remove'),
+    },
+    panelCoordinator: {
+      attachPanelPort: touched('attachPanelPort'),
+      withWindowLock: touched('withWindowLock'),
+    },
+    targetQueue: {
+      withTarget: touched('targetQueue.withTarget'),
+      assertHeld: touched('targetQueue.assertHeld'),
+    },
+    cleanupBarrier: { clearForAuditLocked: touched('cleanupBarrier.clearForAuditLocked') },
+    runAttachedAuditExecution: touched('runAttachedAuditExecution'),
+    persistLatest: touched('persistLatest'),
+    persistCheckpoint: touched('persistCheckpoint'),
+    removeCheckpoint: touched('removeCheckpoint'),
+    commitTerminalAudit: touched('commitTerminalAudit'),
+    readAuditSnapshot: touched('readAuditSnapshot'),
+    readReportRevision: touched('readReportRevision'),
+    readLatest: touched('readLatest'),
+    buildPanelResultBundle: touched('buildPanelResultBundle'),
+    recordHighlightBinding: touched('recordHighlightBinding'),
+    epochNow: touched('epochNow'),
+    modelNow: touched('modelNow'),
+    createAbortController: touched('createAbortController'),
+  };
+  return { dependencies, effects };
+}
+
+test('admits only no-pixels before target inspection, queue, journal, RNG, storage or runner effects', async t => {
+  const beginInput = (auditId, mode) => ({
+    capabilityId: 'A'.repeat(22),
+    eventNonce: null,
+    auditId,
+    capturePolicy: createCapturePolicyV1({ mode, includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    senderContext: {},
+  });
+
+  for (const mode of ['full-evidence', 'element-only']) {
+    await t.test(`rejects ${mode} with zero effects`, async () => {
+      const { dependencies, effects } = capturePolicyGateHarness();
+      const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit(
+        beginInput(`audit-policy-${mode}`, mode),
+      );
+      assert.deepEqual(started, {
+        response: { ok: false, code: 'AUDIT_START_FAILED' },
+        sessionCapabilityId: null,
+        completion: null,
+      });
+      assert.deepEqual(effects, []);
+    });
+  }
+
+  await t.test('accepts no-pixels through the policy gate', async () => {
+    const { dependencies, effects } = capturePolicyGateHarness();
+    const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit(
+      beginInput('audit-policy-no-pixels', 'no-pixels'),
+    );
+    assert.deepEqual(started, {
+      response: { ok: false, code: 'TARGET_UNAVAILABLE' },
+      sessionCapabilityId: null,
+      completion: null,
+    });
+    assert.deepEqual(effects, ['inspectPreparedAuditTarget']);
+  });
+});
+
 test('cleans live aids under the target lock before any capability claim or audit side effect', async () => {
   const area = sessionArea();
   const prepared = await authorityFixture(area);
