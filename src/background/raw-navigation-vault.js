@@ -14,7 +14,9 @@ const QUEUE_KEYS = Object.freeze(['version', 'auditId', 'ownerOperationId', 'rev
 const QUEUE_ENTRY_KEYS = Object.freeze(['line', 'navigationToken', 'evidenceUrl', 'sessionDigest', 'status']);
 const EVIDENCE_URL_KEYS = Object.freeze(['version', 'href', 'queryIncluded', 'redactedSegments']);
 const CLEANUP_MARKER_KEY = 'audita:raw-navigation-cleanup:v1';
-const CLEANUP_MARKER_KEYS = Object.freeze(['version', 'keys']);
+const CLEANUP_MARKER_KEYS = Object.freeze(['version', 'scope', 'keys']);
+const CLEANUP_NAMESPACE_MARKER_KEYS = Object.freeze(['version', 'scope']);
+const MAX_CLEANUP_KEYS = 256;
 const MARKER_UNAVAILABLE = Symbol('marker-unavailable');
 const MARKER_MALFORMED = Symbol('marker-malformed');
 const SESSION_STATES = new WeakMap();
@@ -87,7 +89,7 @@ function token(bytes) {
 function stateFor(sessionArea) {
   let state = SESSION_STATES.get(sessionArea);
   if (!state) {
-    state = { tail: Promise.resolve(), highWater: null, bindings: new Map(), pendingCleanup: new Set(), markerSeen: false };
+    state = { tail: Promise.resolve(), highWater: null, bindings: new Map(), pendingCleanup: new Set(), markerSeen: false, cleanupScope: null };
     SESSION_STATES.set(sessionArea, state);
   }
   return state;
@@ -182,12 +184,18 @@ function validCleanupKey(key) {
       key.startsWith(QUEUE_PREFIX) && validId(key.slice(QUEUE_PREFIX.length)));
 }
 
+function namespaceCleanupKey(key) {
+  return typeof key === 'string' && (key.startsWith(PREFIX) || key.startsWith(QUEUE_PREFIX));
+}
+
 function cleanupMarker(value) {
+  const namespace = exact(value, CLEANUP_NAMESPACE_MARKER_KEYS);
+  if (namespace?.version === 1 && namespace.scope === 'namespace') return freeze(namespace);
   const marker = exact(value, CLEANUP_MARKER_KEYS);
   const keys = marker && dense(marker.keys);
-  if (!marker || marker.version !== 1 || !keys || keys.length > 256 ||
+  if (!marker || marker.version !== 1 || marker.scope !== 'keys' || !keys || keys.length < 1 || keys.length > MAX_CLEANUP_KEYS ||
     keys.some(key => !validCleanupKey(key)) || new Set(keys).size !== keys.length) return null;
-  return freeze({ version: 1, keys: [...keys].sort() });
+  return freeze({ version: 1, scope: 'keys', keys: [...keys].sort() });
 }
 
 function ownValue(value, key) {
@@ -221,7 +229,7 @@ async function cleanupNamespaceKeys(sessionArea) {
   const value = await sessionArea.get(null);
   try {
     if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new Error();
-    return Reflect.ownKeys(value).filter(key => typeof key === 'string' && validCleanupKey(key));
+    return Reflect.ownKeys(value).filter(namespaceCleanupKey);
   } catch { throw unavailable(); }
 }
 
@@ -254,7 +262,9 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
     } catch { return MARKER_UNAVAILABLE; }
   };
   const persistMarker = async () => {
-    const marker = freeze({ version: 1, keys: [...state.pendingCleanup].sort() });
+    const marker = state.cleanupScope === 'namespace'
+      ? freeze({ version: 1, scope: 'namespace' })
+      : freeze({ version: 1, scope: 'keys', keys: [...state.pendingCleanup].sort() });
     state.markerSeen = true;
     try { await sessionArea.set({ [CLEANUP_MARKER_KEY]: marker }); } catch { /* confirm below */ }
     return same(await markerValue(), marker);
@@ -262,9 +272,10 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
   const clearMarker = async () => {
     const marker = await markerValue();
     if (marker === MARKER_UNAVAILABLE) return false;
-    if (marker === undefined) { state.markerSeen = false; return true; }
+    if (marker === undefined) { state.markerSeen = false; state.cleanupScope = null; return true; }
     if (!await erase(sessionArea, CLEANUP_MARKER_KEY)) return false;
     state.markerSeen = false;
+    state.cleanupScope = null;
     return true;
   };
   const loadPersistedMarker = async () => {
@@ -273,33 +284,45 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
     if (value === undefined) return true;
     state.markerSeen = true;
     if (value) {
-      for (const key of value.keys) state.pendingCleanup.add(key);
+      state.cleanupScope = value.scope;
+      if (value.scope === 'keys') for (const key of value.keys) state.pendingCleanup.add(key);
       return true;
     }
-    let keys;
-    try { keys = await cleanupNamespaceKeys(sessionArea); } catch { return false; }
-    for (const key of keys) state.pendingCleanup.add(key);
-    await persistMarker();
+    state.cleanupScope = 'namespace';
+    if (!await persistMarker()) return false;
     return true;
   };
-  const removeOrPend = async keys => {
-    const unique = [...new Set(keys)];
-    for (const key of unique) state.pendingCleanup.add(key);
-    await persistMarker();
-    if (!await removeKeys(sessionArea, unique)) return false;
-    for (const key of unique) state.pendingCleanup.delete(key);
-    dropBindings(state, tokensForKeys(unique));
-    return state.pendingCleanup.size === 0 ? clearMarker() : persistMarker();
+  const cleanupTargets = async () => {
+    if (state.cleanupScope === 'namespace') {
+      try { return await cleanupNamespaceKeys(sessionArea); } catch { return null; }
+    }
+    return [...state.pendingCleanup];
   };
-  const drainPending = async () => {
-    if (!await loadPersistedMarker()) return false;
-    if (state.pendingCleanup.size === 0) return state.markerSeen ? clearMarker() : true;
-    const keys = [...state.pendingCleanup];
-    await persistMarker();
-    if (!await removeKeys(sessionArea, keys)) return false;
+  const completeCleanup = async () => {
+    const keys = await cleanupTargets();
+    if (keys === null || keys.length > 0 && !await removeKeys(sessionArea, keys)) return false;
     state.pendingCleanup.clear();
     dropBindings(state, tokensForKeys(keys));
     return clearMarker();
+  };
+  const removeOrPend = async keys => {
+    const unique = [...new Set(keys)];
+    if (state.cleanupScope === 'namespace' || unique.some(key => !validCleanupKey(key)) ||
+      new Set([...state.pendingCleanup, ...unique]).size > MAX_CLEANUP_KEYS) {
+      state.cleanupScope = 'namespace';
+      state.pendingCleanup.clear();
+    } else {
+      state.cleanupScope = 'keys';
+      for (const key of unique) state.pendingCleanup.add(key);
+    }
+    if (!await persistMarker()) return await completeCleanup() && !state.markerSeen;
+    return completeCleanup();
+  };
+  const drainPending = async () => {
+    if (!await loadPersistedMarker()) return false;
+    if (!state.markerSeen) return true;
+    if (!await persistMarker()) return await completeCleanup() && !state.markerSeen;
+    return completeCleanup();
   };
   const serial = operation => {
     const guarded = async () => {

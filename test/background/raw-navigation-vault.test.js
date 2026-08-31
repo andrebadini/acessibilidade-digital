@@ -611,7 +611,8 @@ test('persists failed public and legacy take cleanup across a restarted worker',
     await assert.rejects(consume(), /RAW_NAVIGATION_CLEANUP_PENDING/u);
     const marker = sessionArea.values[markerKey];
     assert.equal(marker.version, 1);
-    assert.deepEqual(Object.keys(marker), ['version', 'keys']);
+    assert.deepEqual(Object.keys(marker), ['version', 'scope', 'keys']);
+    assert.equal(marker.scope, 'keys');
     assert.equal(marker.keys.every(key => /^audita:raw-navigation(?::|-)\w/u.test(key)), true);
     assert.doesNotMatch(JSON.stringify(marker), /NEVER|https:\/\//u);
     const restarted = await restartedPublicVault(sessionArea, clock);
@@ -707,4 +708,81 @@ test('routes invalidate and audit cleanup removal failures through the persisten
   await assert.rejects(publicVault.clearAudit('audit-clear-pending'), /RAW_NAVIGATION_CLEANUP_PENDING/u);
   publicArea.removeMode = 'normal';
   assert.equal(await publicVault.clearAudit('audit-clear-pending'), 0);
+});
+
+test('persists namespace cleanup for malformed raw and queue keys selected by audit cleanup', async () => {
+  const markerKey = 'audita:raw-navigation-cleanup:v1';
+  const rawKey = 'audita:raw-navigation:v1:not-a-token';
+  const queueKey = 'audita:raw-navigation-queue:v1:not-an-audit!';
+  const { sessionArea, clock, vault } = publicFixture();
+  sessionArea.values[rawKey] = { auditId: 'audit-malformed-cleanup' };
+  sessionArea.values[queueKey] = { malformed: true };
+  sessionArea.removeMode = 'throw';
+  await assert.rejects(vault.clearAudit('audit-malformed-cleanup'), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'namespace' });
+  const restarted = await restartedPublicVault(sessionArea, clock);
+  await assert.rejects(restarted.put('https://example.test/blocked-after-audit', {
+    auditId: 'audit-blocked-after-audit', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  sessionArea.removeMode = 'normal';
+  await restarted.put('https://example.test/recovered-after-audit', {
+    auditId: 'audit-recovered-after-audit', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  });
+  assert.equal(Object.hasOwn(sessionArea.values, rawKey), false);
+  assert.equal(Object.hasOwn(sessionArea.values, queueKey), false);
+  assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
+});
+
+test('persists namespace cleanup for malformed keys selected by expiry and malformed markers', async () => {
+  const markerKey = 'audita:raw-navigation-cleanup:v1';
+  const rawKey = 'audita:raw-navigation:v1:bad';
+  const queueKey = 'audita:raw-navigation-queue:v1:bad!';
+  const { sessionArea, clock, vault } = publicFixture();
+  sessionArea.values[rawKey] = { malformed: true };
+  sessionArea.values[queueKey] = { malformed: true };
+  sessionArea.removeMode = 'noop';
+  await assert.rejects(vault.clearExpired(), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'namespace' });
+  sessionArea.values[markerKey] = { version: 99, secret: 'forbidden' };
+  const restarted = await restartedPublicVault(sessionArea, clock);
+  await assert.rejects(restarted.readQueue('audit-any'), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'namespace' });
+  sessionArea.removeMode = 'normal';
+  await restarted.put('https://example.test/recovered-after-expiry', {
+    auditId: 'audit-recovered-after-expiry', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  });
+  assert.equal(Object.hasOwn(sessionArea.values, rawKey), false);
+  assert.equal(Object.hasOwn(sessionArea.values, queueKey), false);
+  assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
+});
+
+test('escalates an oversized precise cleanup marker to descriptor-safe namespace cleanup', async () => {
+  const markerKey = 'audita:raw-navigation-cleanup:v1';
+  const { sessionArea, clock } = publicFixture();
+  const keys = Array.from({ length: 257 }, (_unused, index) =>
+    `audita:raw-navigation:v1:${String(index).padStart(22, 'A')}`);
+  sessionArea.values[markerKey] = { version: 1, scope: 'keys', keys };
+  let getterCalls = 0;
+  let returnHostileMap = true;
+  const hostileMap = {};
+  Object.defineProperty(hostileMap, 'audita:raw-navigation:v1:hostile!', {
+    enumerable: true,
+    get() { getterCalls += 1; throw new Error('HOSTILE_NAMESPACE_GET'); },
+  });
+  const originalGet = sessionArea.get.bind(sessionArea);
+  sessionArea.get = async key => key === null && returnHostileMap ? hostileMap : originalGet(key);
+  sessionArea.removeMode = 'noop';
+  const restarted = await restartedPublicVault(sessionArea, clock);
+  await assert.rejects(restarted.put('https://example.test/oversized-blocked', {
+    auditId: 'audit-oversized-blocked', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'namespace' });
+  assert.equal(getterCalls, 0);
+  sessionArea.removeMode = 'normal';
+  returnHostileMap = false;
+  await restarted.put('https://example.test/oversized-recovered', {
+    auditId: 'audit-oversized-recovered', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  });
+  assert.equal(getterCalls, 0);
+  assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
 });
