@@ -2,6 +2,15 @@ import { PANEL_UNPREPARED_MESSAGE } from './panel-status.js';
 
 const PANEL_AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const PANEL_FILTERS = Object.freeze(['impact', 'wcag', 'abnt']);
+const CAPTURE_MODES = Object.freeze(['full-evidence', 'element-only', 'no-pixels']);
+const PIXEL_CAPTURE_MODES = Object.freeze(['full-evidence', 'element-only']);
+const PRIVACY_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private-marker']);
+const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
+const PANEL_STATE_KEYS = Object.freeze([
+  'version', 'screen', 'auditId', 'captureMode', 'sessionStatus', 'privacy',
+  'filters', 'selectedOccurrenceId', 'evidenceExpanded', 'persona', 'highlight',
+  'focusId', 'scrollTop', 'reason',
+]);
 const PERSONA_MODES = new Set(['reader', 'achromatopsia', 'keyboard']);
 const PANEL_UNAVAILABLE_REASONS = new Set([
   PANEL_UNPREPARED_MESSAGE,
@@ -19,11 +28,18 @@ function uncheckedHighlight() {
   return { state: 'idle', operation: null, occurrenceId: null, bindingStatus: { state: 'unchecked' }, message: null };
 }
 
+function neutralPrivacy() {
+  return { mode: null, categories: [], message: null, confirmationPending: false };
+}
+
 export function createInitialPanelState() {
   return deepFreezePanelState({
     version: 1,
     screen: 'initial',
     auditId: null,
+    captureMode: 'full-evidence',
+    sessionStatus: null,
+    privacy: neutralPrivacy(),
     filters: { impact: [], wcag: [], abnt: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,
@@ -39,19 +55,52 @@ export function reducePanelState(current, event) {
   if (!panelState(current)) return current;
   current = immutablePanelState(current);
   if (!event || typeof event !== 'object' || Array.isArray(event)) return current;
-  switch (event.type) {
+  const eventType = dataProperty(event, 'type');
+  if (typeof eventType !== 'string') return current;
+  switch (eventType) {
     case 'BOOTSTRAP_INITIAL':
       return createInitialPanelState();
+    case 'CAPTURE_MODE_SELECTED': {
+      const selected = exactDataRecord(event, ['type', 'mode', 'focusId']);
+      if (!selected || current.screen !== 'initial' || !CAPTURE_MODES.includes(selected.mode)) return current;
+      return nextPanelState(current, {
+        captureMode: selected.mode,
+        focusId: panelFocusId(selected.focusId, `capture-mode-${selected.mode}`),
+      });
+    }
     case 'START_REQUESTED':
       return nextPanelState(current, {
         screen: 'running', auditId: null, selectedOccurrenceId: null,
+        sessionStatus: null, privacy: neutralPrivacy(),
         evidenceExpanded: false, focusId: 'cancel-audit', scrollTop: 0, reason: null,
       });
     case 'AUDIT_RUNNING':
       if (!validPanelAuditId(event.auditId)) return current;
       return nextPanelState(current, {
         screen: 'running', auditId: event.auditId, selectedOccurrenceId: null,
+        sessionStatus: null, privacy: neutralPrivacy(),
         evidenceExpanded: false, focusId: 'cancel-audit', reason: null,
+      });
+    case 'PRIVACY_PAUSED': {
+      const paused = exactDataRecord(event, ['type', 'auditId', 'mode', 'categories', 'message']);
+      const categories = paused ? copyPrivacyCategories(paused.categories) : null;
+      if (!paused || current.screen !== 'running' || !validPanelAuditId(paused.auditId) ||
+        (current.auditId !== null && current.auditId !== paused.auditId) ||
+        !PIXEL_CAPTURE_MODES.includes(paused.mode) || paused.message !== PRIVACY_MESSAGE || !categories) return current;
+      return nextPanelState(current, {
+        auditId: paused.auditId,
+        captureMode: paused.mode,
+        sessionStatus: 'privacy-paused',
+        privacy: { mode: paused.mode, categories, message: PRIVACY_MESSAGE, confirmationPending: false },
+        focusId: 'confirm-pixel-capture',
+      });
+    }
+    case 'PRIVACY_CONFIRM_REQUESTED':
+      if (!exactDataRecord(event, ['type']) || current.screen !== 'running' ||
+        current.sessionStatus !== 'privacy-paused' || current.privacy.confirmationPending) return current;
+      return nextPanelState(current, {
+        privacy: { ...current.privacy, confirmationPending: true },
+        focusId: 'confirm-pixel-capture',
       });
     case 'AUDIT_RESULT': {
       if (!validPanelAuditId(event.auditId) || event.result?.auditId !== event.auditId) {
@@ -68,6 +117,7 @@ export function reducePanelState(current, event) {
         : (occurrenceIds[0] ?? null);
       return nextPanelState(current, {
         screen: 'result', auditId: event.auditId, selectedOccurrenceId: selected,
+        sessionStatus: null, privacy: neutralPrivacy(),
         evidenceExpanded: false, focusId: 'result-summary',
         highlight: uncheckedHighlight(),
         reason: null,
@@ -256,18 +306,30 @@ export function reducePanelState(current, event) {
 }
 
 function panelState(value) {
-  return Boolean(value) && value.version === 1 &&
-    ['initial', 'running', 'result', 'unavailable'].includes(value.screen) &&
-    value.filters && PANEL_FILTERS.every(filter => Array.isArray(value.filters[filter]));
+  const state = exactDataRecord(value, PANEL_STATE_KEYS);
+  if (!state || state.version !== 1 || !['initial', 'running', 'result', 'unavailable'].includes(state.screen) ||
+    !CAPTURE_MODES.includes(state.captureMode) || ![null, 'privacy-paused'].includes(state.sessionStatus) ||
+    !state.filters || !PANEL_FILTERS.every(filter => Array.isArray(state.filters[filter]))) return false;
+  const privacy = exactPrivacy(state.privacy);
+  if (!privacy) return false;
+  return state.sessionStatus === 'privacy-paused'
+    ? state.screen === 'running' && PIXEL_CAPTURE_MODES.includes(state.captureMode) && privacy.mode === state.captureMode
+    : privacy.mode === null;
 }
 
 function immutablePanelState(value) {
   if (Object.isFrozen(value) && Object.isFrozen(value.filters) &&
-    PANEL_FILTERS.every(filter => Object.isFrozen(value.filters[filter]))) return value;
+    PANEL_FILTERS.every(filter => Object.isFrozen(value.filters[filter])) &&
+    Object.isFrozen(value.privacy) && Object.isFrozen(value.privacy.categories) &&
+    Object.isFrozen(value.persona) && Object.isFrozen(value.highlight) &&
+    Object.isFrozen(value.highlight.bindingStatus)) return value;
   return deepFreezePanelState({
     version: value.version,
     screen: value.screen,
     auditId: value.auditId,
+    captureMode: value.captureMode,
+    sessionStatus: value.sessionStatus,
+    privacy: copyPrivacy(value.privacy),
     filters: Object.fromEntries(PANEL_FILTERS.map(filter => [filter, [...value.filters[filter]]])),
     selectedOccurrenceId: value.selectedOccurrenceId,
     evidenceExpanded: value.evidenceExpanded,
@@ -329,6 +391,8 @@ function unavailablePanelState(current, auditId, reason) {
   return nextPanelState(current, {
     screen: 'unavailable',
     auditId: validPanelAuditId(auditId) ? auditId : null,
+    sessionStatus: null,
+    privacy: neutralPrivacy(),
     filters: { impact: [], wcag: [], abnt: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,
@@ -370,6 +434,66 @@ function panelFilterValues(values) {
     copy.push(value);
   }
   return copy;
+}
+
+function copyPrivacyCategories(value) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype ||
+      value.length < 1 || value.length > PRIVACY_CATEGORIES.length) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== value.length + 1 || !keys.includes('length')) return null;
+    const categories = [];
+    let previous = -1;
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      const rank = PRIVACY_CATEGORIES.indexOf(descriptor.value);
+      if (rank <= previous) return null;
+      previous = rank;
+      categories.push(descriptor.value);
+    }
+    return categories;
+  } catch { return null; }
+}
+
+function exactPrivacy(value) {
+  const privacy = exactDataRecord(value, ['mode', 'categories', 'message', 'confirmationPending']);
+  if (!privacy || typeof privacy.confirmationPending !== 'boolean') return null;
+  if (privacy.mode === null) {
+    return Array.isArray(privacy.categories) && privacy.categories.length === 0 &&
+      privacy.message === null && privacy.confirmationPending === false ? privacy : null;
+  }
+  return PIXEL_CAPTURE_MODES.includes(privacy.mode) && copyPrivacyCategories(privacy.categories) &&
+    privacy.message === PRIVACY_MESSAGE ? privacy : null;
+}
+
+function copyPrivacy(value) {
+  const privacy = exactPrivacy(value);
+  return privacy
+    ? { mode: privacy.mode, categories: [...privacy.categories], message: privacy.message, confirmationPending: privacy.confirmationPending }
+    : neutralPrivacy();
+}
+
+function dataProperty(value, key) {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor?.enumerable && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch { return undefined; }
+}
+
+function exactDataRecord(value, keys) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== keys.length || ownKeys.some(key => typeof key !== 'string' || !keys.includes(key))) return null;
+    const copy = {};
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      copy[key] = descriptor.value;
+    }
+    return copy;
+  } catch { return null; }
 }
 
 function validPanelAuditId(value) { return typeof value === 'string' && PANEL_AUDIT_ID.test(value); }

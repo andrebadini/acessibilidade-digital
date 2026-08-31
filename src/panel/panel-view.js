@@ -4,6 +4,11 @@ import { decodePngDataUrl } from '../core/evidence/png.js';
 const SCREEN_NAMES = Object.freeze(['initial', 'running', 'result', 'unavailable']);
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
 const FILTERS = Object.freeze(['impact', 'wcag', 'abnt']);
+const CAPTURE_MODES = Object.freeze(['full-evidence', 'element-only', 'no-pixels']);
+const PIXEL_CAPTURE_MODES = Object.freeze(['full-evidence', 'element-only']);
+const PRIVACY_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private-marker']);
+const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
+const LOCAL_PIXEL_NOTICE = 'A auditoria pode capturar pixels e conteúdo visível, inclusive dados pessoais. Tudo permanece neste dispositivo.';
 const RUNNING_PHASES = Object.freeze([
   'Abrindo e estabilizando a página.',
   'Lendo estrutura e acessibilidade.',
@@ -14,11 +19,24 @@ const RUNNING_PHASES = Object.freeze([
 const COVERAGE_DISCLAIMER = 'Percentual da execução automática concluída. Não é nota, certificação ou declaração de conformidade.';
 
 export function buildPanelView({ state, summary = null, detail = null } = {}) {
-  if (!state || !SCREEN_NAMES.includes(state.screen)) throw new TypeError('PANEL_VIEW_STATE_INVALID');
+  const screen = dataProperty(state, 'screen');
+  if (!state || !SCREEN_NAMES.includes(screen)) throw new TypeError('PANEL_VIEW_STATE_INVALID');
+  const captureModeValue = dataProperty(state, 'captureMode');
+  const captureMode = CAPTURE_MODES.includes(captureModeValue) ? captureModeValue : 'full-evidence';
+  const sessionStatusValue = dataProperty(state, 'sessionStatus');
+  const sessionStatus = sessionStatusValue === 'privacy-paused' ? 'privacy-paused' : null;
+  const privacy = copyPrivacyProjection(dataProperty(state, 'privacy'));
+  if (sessionStatus === 'privacy-paused' &&
+    (screen !== 'running' || !PIXEL_CAPTURE_MODES.includes(captureMode) || !privacy || privacy.mode !== captureMode)) {
+    throw new TypeError('PANEL_VIEW_PRIVACY_INVALID');
+  }
   const base = {
     version: 1,
-    screen: state.screen,
+    screen,
     auditId: typeof state.auditId === 'string' ? state.auditId : null,
+    captureMode,
+    sessionStatus,
+    privacy: sessionStatus === 'privacy-paused' ? privacy : neutralPrivacyProjection(),
     filters: copyFilters(state.filters),
     selectedOccurrenceId: typeof state.selectedOccurrenceId === 'string' ? state.selectedOccurrenceId : null,
     evidenceExpanded: state.evidenceExpanded === true,
@@ -28,7 +46,7 @@ export function buildPanelView({ state, summary = null, detail = null } = {}) {
     scrollTop: Number.isSafeInteger(state.scrollTop) && state.scrollTop >= 0 ? state.scrollTop : 0,
     reason: typeof state.reason === 'string' ? state.reason : null,
   };
-  if (state.screen !== 'result') return freezeRenderModel(base);
+  if (screen !== 'result') return freezeRenderModel(base);
   if (!summary || summary.auditId !== base.auditId) throw new TypeError('PANEL_VIEW_RESULT_INVALID');
   const summaryCopy = copySummary(summary);
   const detailCopy = detail && detail.auditId === base.auditId && detail.occurrenceId === base.selectedOccurrenceId
@@ -54,6 +72,7 @@ export function renderPanelView({ view, document, onIntent, onEvent = () => {} }
   const emitIntent = intent => {
     switch (intent.type) {
       case 'START_ATTACHED':
+      case 'CONFIRM_PIXEL_CAPTURE':
       case 'OPEN_URL_FORM':
       case 'OPEN_BATCH_FORM':
       case 'CANCEL_AUDIT':
@@ -78,8 +97,13 @@ export function renderPanelView({ view, document, onIntent, onEvent = () => {} }
   };
 
   switch (view.screen) {
-    case 'initial': return appendPersonaControls(renderInitial(document, emitIntent), document, view.persona, emitIntent);
-    case 'running': return appendPersonaControls(renderRunning(document, emitIntent), document, view.persona, emitIntent);
+    case 'initial': return appendPersonaControls(renderInitial(document, view, emitIntent, onEvent), document, view.persona, emitIntent);
+    case 'running': {
+      const running = renderRunning(document, view, emitIntent);
+      return view.sessionStatus === 'privacy-paused'
+        ? running
+        : appendPersonaControls(running, document, view.persona, emitIntent);
+    }
     case 'result': return appendPersonaControls(renderResult(document, view, emitIntent, onEvent), document, view.persona, emitIntent);
     case 'unavailable': return appendPersonaControls(renderUnavailable(document, view, emitIntent), document, view.persona, emitIntent);
     default: throw new TypeError('PANEL_SCREEN_INVALID');
@@ -99,13 +123,15 @@ export function renderPanelReconnectView({ document } = {}) {
   return root;
 }
 
-function renderInitial(document, emit) {
+function renderInitial(document, view, emit, onEvent) {
   const root = section(document, 'panel-screen panel-initial');
   root.dataset.screen = 'initial';
   root.append(
     heading(document, 2, 'Avaliar acessibilidade'),
     paragraph(document, 'A auditoria acontece localmente nesta página e não envia o conteúdo para serviços externos.', 'lead'),
+    paragraph(document, LOCAL_PIXEL_NOTICE, 'privacy-local-copy'),
   );
+  root.append(renderCaptureModeChoices(document, view.captureMode, onEvent));
   const choices = section(document, 'source-choices');
   choices.setAttribute('aria-label', 'Escolher origem da auditoria');
   choices.append(
@@ -117,6 +143,59 @@ function renderInitial(document, emit) {
   return root;
 }
 
+function renderCaptureModeChoices(document, selectedMode, onEvent) {
+  const fieldset = document.createElement('fieldset');
+  fieldset.className = 'capture-mode-fieldset';
+  const legend = document.createElement('legend');
+  legend.textContent = 'Modo de evidência';
+  const explanation = paragraph(
+    document,
+    'Escolha quanta evidência visual pode ser coletada. Você poderá confirmar antes de qualquer captura sensível.',
+    'capture-mode-intro',
+  );
+  const options = document.createElement('div');
+  options.className = 'capture-mode-options';
+  const definitions = [
+    ['full-evidence', 'Evidência completa', 'Captura a página e os elementos quando isso for necessário para documentar a auditoria.'],
+    ['element-only', 'Somente elementos', 'Captura apenas os elementos relacionados às ocorrências encontradas.'],
+    ['no-pixels', 'Sem imagens', 'Executa a auditoria sem capturar pixels. É a opção mais reservada.'],
+  ];
+  for (const [mode, labelText, description] of definitions) {
+    const option = document.createElement('label');
+    option.className = 'capture-mode-option';
+    option.dataset.captureOption = mode;
+    const input = document.createElement('input');
+    const inputId = `capture-mode-${mode}`;
+    const descriptionId = `${inputId}-description`;
+    input.setAttribute('type', 'radio');
+    input.setAttribute('name', 'capture-mode');
+    input.setAttribute('id', inputId);
+    input.setAttribute('value', mode);
+    input.setAttribute('aria-describedby', descriptionId);
+    input.dataset.captureMode = mode;
+    input.dataset.focusId = inputId;
+    input.checked = selectedMode === mode;
+    input.addEventListener('change', event => {
+      onEvent({ type: 'CAPTURE_MODE_SELECTED', mode, focusId: event.currentTarget.dataset.focusId });
+    });
+    const copy = document.createElement('div');
+    copy.className = 'capture-mode-copy';
+    const label = document.createElement('span');
+    label.className = 'capture-mode-label';
+    label.textContent = labelText;
+    const detail = document.createElement('span');
+    detail.className = 'capture-mode-description';
+    detail.textContent = description;
+    detail.setAttribute('id', descriptionId);
+    copy.append(label, detail);
+    option.setAttribute('for', inputId);
+    option.append(input, copy);
+    options.append(option);
+  }
+  fieldset.append(legend, explanation, options);
+  return fieldset;
+}
+
 function unavailableChoice(document, label, intent, focusId, emit) {
   const wrapper = section(document, 'source-choice secondary-choice');
   wrapper.append(
@@ -126,9 +205,10 @@ function unavailableChoice(document, label, intent, focusId, emit) {
   return wrapper;
 }
 
-function renderRunning(document, emit) {
+function renderRunning(document, view, emit) {
   const root = section(document, 'panel-screen panel-running');
   root.dataset.screen = 'running';
+  if (view.sessionStatus === 'privacy-paused') return renderPrivacyPause(root, document, view, emit);
   root.append(
     paragraph(document, 'Auditoria em andamento', 'status-label status-running'),
     heading(document, 2, 'Avaliando a página atual'),
@@ -136,6 +216,7 @@ function renderRunning(document, emit) {
   );
   const phases = document.createElement('ol');
   phases.className = 'phase-list';
+  phases.dataset.runningPhases = '';
   for (const phase of RUNNING_PHASES) {
     const item = document.createElement('li');
     item.textContent = phase;
@@ -145,6 +226,50 @@ function renderRunning(document, emit) {
     phases,
     actionButton(document, 'Cancelar auditoria', 'CANCEL_AUDIT', 'cancel-audit', emit, 'danger-action'),
     liveRegion(document, 'Auditoria em andamento.'),
+  );
+  return root;
+}
+
+function renderPrivacyPause(root, document, view, emit) {
+  root.className += ' privacy-pause';
+  root.dataset.sessionStatus = 'privacy-paused';
+  root.append(
+    paragraph(document, 'Auditoria pausada para sua proteção', 'status-label status-limited'),
+    heading(document, 2, 'Confirme antes de capturar imagens'),
+    paragraph(document, view.privacy.message, 'supporting-copy'),
+    paragraph(document, LOCAL_PIXEL_NOTICE, 'privacy-local-copy'),
+  );
+  const signals = section(document, 'privacy-signals');
+  signals.append(heading(document, 3, 'Conteúdo sensível identificado'));
+  const list = document.createElement('ul');
+  for (const category of view.privacy.categories) {
+    const item = document.createElement('li');
+    item.textContent = privacyCategoryLabel(category);
+    list.append(item);
+  }
+  signals.append(list);
+  const actions = section(document, 'privacy-actions');
+  const confirm = actionButton(
+    document,
+    view.privacy.confirmationPending ? 'Confirmação enviada' : 'Continuar e capturar',
+    'CONFIRM_PIXEL_CAPTURE',
+    'confirm-pixel-capture',
+    emit,
+    'primary-action',
+    { mode: view.privacy.mode, accepted: true },
+    view.privacy.confirmationPending,
+  );
+  confirm.dataset.action = 'confirm-pixel-capture';
+  actions.append(
+    confirm,
+    actionButton(document, 'Cancelar auditoria', 'CANCEL_AUDIT', 'cancel-audit', emit, 'danger-action'),
+  );
+  root.append(
+    signals,
+    actions,
+    liveRegion(document, view.privacy.confirmationPending
+      ? 'Confirmação enviada. Aguardando retomada segura da auditoria.'
+      : 'Auditoria pausada. Confirme a captura de imagens ou cancele a auditoria.'),
   );
   return root;
 }
@@ -555,6 +680,7 @@ function actionButton(document, label, intent, focusId, emit, className, fields 
 function appendPersonaControls(root, document, persona, emit) {
   const section = document.createElement('section');
   section.className = 'persona-controls';
+  section.dataset.personaControls = '';
   section.setAttribute('aria-label', 'Simular experiência');
   section.append(heading(document, 2, 'Simular experiência'));
   const modes = document.createElement('div');
@@ -621,6 +747,62 @@ function copyFilters(filters) {
   const copy = {};
   for (const name of FILTERS) copy[name] = Array.isArray(filters?.[name]) ? [...filters[name]] : [];
   return copy;
+}
+
+function neutralPrivacyProjection() {
+  return { mode: null, categories: [], message: null, confirmationPending: false };
+}
+
+function copyPrivacyProjection(value) {
+  const privacy = exactDataRecord(value, ['mode', 'categories', 'message', 'confirmationPending']);
+  if (!privacy || !PIXEL_CAPTURE_MODES.includes(privacy.mode) || privacy.message !== PRIVACY_MESSAGE ||
+    typeof privacy.confirmationPending !== 'boolean') return null;
+  const categories = copyPrivacyCategories(privacy.categories);
+  return categories
+    ? { mode: privacy.mode, categories, message: PRIVACY_MESSAGE, confirmationPending: privacy.confirmationPending }
+    : null;
+}
+
+function copyPrivacyCategories(value) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype ||
+      value.length < 1 || value.length > PRIVACY_CATEGORIES.length) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== value.length + 1 || !keys.includes('length')) return null;
+    const output = [];
+    let previous = -1;
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      const rank = PRIVACY_CATEGORIES.indexOf(descriptor.value);
+      if (rank <= previous) return null;
+      previous = rank;
+      output.push(descriptor.value);
+    }
+    return output;
+  } catch { return null; }
+}
+
+function exactDataRecord(value, keys) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== keys.length || ownKeys.some(key => typeof key !== 'string' || !keys.includes(key))) return null;
+    const output = {};
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      output[key] = descriptor.value;
+    }
+    return output;
+  } catch { return null; }
+}
+
+function dataProperty(value, key) {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor?.enumerable && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch { return undefined; }
 }
 
 function copyPersona(value) {
@@ -737,6 +919,15 @@ function groupHeading(name) {
 }
 function classificationLabel(value) {
   return ({ failed: 'Falha confirmada', alert: 'Alerta', 'manual-review': 'Revisão humana', passed: 'Resultado positivo' })[value] ?? value;
+}
+
+function privacyCategoryLabel(value) {
+  return ({
+    password: 'Campo de senha',
+    otp: 'Código de uso único',
+    payment: 'Dados de pagamento',
+    'private-marker': 'Conteúdo marcado como privado',
+  })[value];
 }
 
 function freezeRenderModel(value, seen = new WeakSet()) {

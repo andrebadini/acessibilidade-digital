@@ -14,6 +14,10 @@ const root = document.querySelector('#panel-root');
 const chromeApi = globalThis.chrome ?? null;
 const OPAQUE_CAPABILITY = /^[A-Za-z0-9_-]{20,240}$/u;
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
+const CAPTURE_MODES = Object.freeze(['full-evidence', 'element-only', 'no-pixels']);
+const PIXEL_CAPTURE_MODES = Object.freeze(['full-evidence', 'element-only']);
+const PRIVACY_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private-marker']);
+const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
 let state = createInitialPanelState();
 let resultBundle = null;
 let requestSequence = 0;
@@ -27,6 +31,76 @@ const highlightStateSynchronizer = createHighlightStateSynchronizer({
   requestCurrent: () => requestPanelIntent({ type: 'GET_HIGHLIGHT_STATE' }),
   applyState: applyHighlightState,
 });
+const privacyConfirmation = createPanelPrivacyConfirmationController({
+  readState: () => state,
+  transition,
+  requestIntent: requestPanelIntent,
+  announce,
+});
+
+export function createPanelAttachedAuditIntent(raw) {
+  const input = exactRecord(raw, ['capabilityId', 'captureMode']);
+  if (!input || !OPAQUE_CAPABILITY.test(input.capabilityId ?? '') || !CAPTURE_MODES.includes(input.captureMode)) return null;
+  return Object.freeze({
+    type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: input.capabilityId,
+    captureMode: input.captureMode, includeQuery: false, deleteAfterCompleteExport: false,
+  });
+}
+
+export function projectPanelBootstrapEvent(value) {
+  const paused = exactRecord(value, ['state', 'auditId', 'result', 'mode', 'categories', 'message']);
+  if (!paused || paused.state !== 'privacy-paused' || !AUDIT_ID.test(paused.auditId ?? '') || paused.result !== null ||
+    !PIXEL_CAPTURE_MODES.includes(paused.mode) || paused.message !== PRIVACY_MESSAGE) return null;
+  const categories = copyPrivacyCategories(paused.categories);
+  return categories ? Object.freeze({
+    type: 'PRIVACY_PAUSED', auditId: paused.auditId, mode: paused.mode,
+    categories: Object.freeze(categories), message: PRIVACY_MESSAGE,
+  }) : null;
+}
+
+export function createPanelPrivacyConfirmationController(raw) {
+  const input = exactRecord(raw, ['readState', 'transition', 'requestIntent', 'announce']);
+  if (!input || typeof input.readState !== 'function' || typeof input.transition !== 'function' ||
+    typeof input.requestIntent !== 'function' || typeof input.announce !== 'function') {
+    throw new TypeError('PANEL_PRIVACY_CONFIRMATION_INVALID');
+  }
+  async function confirm(rawIntent) {
+    const intent = exactRecord(rawIntent, ['type', 'mode', 'accepted']);
+    if (!intent || intent.type !== 'CONFIRM_PIXEL_CAPTURE' || intent.accepted !== true ||
+      !PIXEL_CAPTURE_MODES.includes(intent.mode)) return false;
+    let current;
+    try { current = input.readState(); } catch { return false; }
+    const privacy = exactRecord(current?.privacy, ['mode', 'categories', 'message', 'confirmationPending']);
+    if (current?.screen !== 'running' || current?.sessionStatus !== 'privacy-paused' ||
+      !privacy || privacy.mode !== intent.mode || privacy.message !== PRIVACY_MESSAGE ||
+      privacy.confirmationPending !== false) return false;
+    try { input.transition({ type: 'PRIVACY_CONFIRM_REQUESTED' }); } catch { return false; }
+    let pendingState;
+    try { pendingState = input.readState(); } catch { return false; }
+    const pendingPrivacy = pendingState?.privacy;
+    if (pendingState?.sessionStatus !== 'privacy-paused' || pendingPrivacy?.mode !== intent.mode ||
+      pendingPrivacy?.confirmationPending !== true) return false;
+    let response = null;
+    try {
+      response = await input.requestIntent(Object.freeze({
+        type: 'CONFIRM_PIXEL_CAPTURE', mode: intent.mode, accepted: true,
+      }));
+    } catch { /* the one-use confirmation remains consumed */ }
+    let latest;
+    try { latest = input.readState(); } catch { return false; }
+    if (latest?.sessionStatus !== 'privacy-paused' || latest.privacy !== pendingPrivacy) return false;
+    const success = exactRecord(response, ['ok', 'state']);
+    if (success?.ok === true && success.state === 'running') return true;
+    const documentChanged = exactRecord(response, ['ok', 'code']);
+    const announcement = documentChanged?.ok === false && documentChanged.code === 'PIXEL_CONSENT_DOCUMENT_CHANGED'
+      ? 'A página mudou; inicie uma nova avaliação.'
+      : 'Não foi possível confirmar a captura. Cancele a auditoria ou aguarde uma nova confirmação.';
+    try { input.announce(announcement); }
+    catch { /* announcements never change authorization state */ }
+    return false;
+  }
+  return Object.freeze({ confirm });
+}
 
 function render() {
   if (!root) return;
@@ -66,6 +140,10 @@ function transition(event) {
 }
 
 function handleEvent(event) {
+  if (event?.type === 'CAPTURE_MODE_SELECTED') {
+    transition(event);
+    return;
+  }
   if (!['FILTER_SET', 'EVIDENCE_TOGGLED'].includes(event?.type)) return;
   const fallback = typeof event.focusId === 'string'
     ? event.focusId
@@ -77,6 +155,9 @@ async function handleIntent(intent) {
   switch (intent.type) {
     case 'START_ATTACHED':
       await startAttachedAudit();
+      return;
+    case 'CONFIRM_PIXEL_CAPTURE':
+      await privacyConfirmation.confirm(intent);
       return;
     case 'OPEN_URL_FORM':
     case 'OPEN_BATCH_FORM':
@@ -177,6 +258,7 @@ async function clearHighlight() {
 }
 
 async function startAttachedAudit() {
+  const captureMode = state.captureMode;
   transition({ type: 'START_REQUESTED' });
   const requestId = nextRequestId();
   const prepared = parsePreparedCapability(await requestPanelIntent({ type: 'PREPARE_PANEL_CAPABILITY', requestId }), requestId);
@@ -184,13 +266,12 @@ async function startAttachedAudit() {
     transition({ type: 'AUDIT_UNAVAILABLE', reason: 'Não foi possível concluir a operação local.' });
     return;
   }
-  const response = await requestPanelIntent({
-    type: 'PANEL_START_ATTACHED_AUDIT',
-    capabilityId: prepared.capabilityId,
-    captureMode: 'no-pixels',
-    includeQuery: false,
-    deleteAfterCompleteExport: false,
-  });
+  const startIntent = createPanelAttachedAuditIntent({ capabilityId: prepared.capabilityId, captureMode });
+  if (!startIntent) {
+    transition({ type: 'AUDIT_UNAVAILABLE', reason: 'Não foi possível concluir a operação local.' });
+    return;
+  }
+  const response = await requestPanelIntent(startIntent);
   const started = parseStartedAudit(response);
   await personaSession.afterAuditAttempt({ started });
   if (!started) {
@@ -262,6 +343,13 @@ async function retryAudit() {
 }
 
 function receiveBootstrap(value) {
+  const privacyEvent = projectPanelBootstrapEvent(value);
+  if (privacyEvent) {
+    highlightStateSynchronizer.invalidate();
+    resultBundle = null;
+    transition(privacyEvent);
+    return;
+  }
   if (value?.state === 'initial') {
     highlightStateSynchronizer.invalidate();
     resultBundle = null;
@@ -400,6 +488,26 @@ function exactRecord(value, keys) {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
       copy[key] = descriptor.value;
+    }
+    return copy;
+  } catch { return null; }
+}
+
+function copyPrivacyCategories(value) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype ||
+      value.length < 1 || value.length > PRIVACY_CATEGORIES.length) return null;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== value.length + 1 || !ownKeys.includes('length')) return null;
+    const copy = [];
+    let previous = -1;
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      const rank = PRIVACY_CATEGORIES.indexOf(descriptor.value);
+      if (rank <= previous) return null;
+      previous = rank;
+      copy.push(descriptor.value);
     }
     return copy;
   } catch { return null; }

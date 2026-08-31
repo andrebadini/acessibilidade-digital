@@ -227,7 +227,7 @@ test('panel runtime sends every privileged intent through its admitted Port with
     protocol: 'audita-panel', version: 1, type: 'intent', requestId: startPacket.requestId,
     envelope: {
       type: 'PANEL_START_ATTACHED_AUDIT', capabilityId,
-      captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
+      captureMode: 'full-evidence', includeQuery: false, deleteAfterCompleteExport: false,
     },
   });
   ports[0].onMessage.emit({

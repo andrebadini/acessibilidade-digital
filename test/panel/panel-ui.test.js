@@ -27,7 +27,7 @@ test('renderer uses only DOM construction and the fixed exhaustive screen and in
   }
   for (const intent of [
     'START_ATTACHED', 'OPEN_URL_FORM', 'OPEN_BATCH_FORM', 'CANCEL_AUDIT',
-    'OPEN_REPORT', 'SELECT_OCCURRENCE', 'CONSULT_EVIDENCE', 'RETRY',
+    'CONFIRM_PIXEL_CAPTURE', 'OPEN_REPORT', 'SELECT_OCCURRENCE', 'CONSULT_EVIDENCE', 'RETRY',
   ]) assert.match(runtime, new RegExp(`case ['"]${intent}['"]`, 'u'));
   assert.doesNotMatch(runtime, /START_AUDIT|START_BATCH|AUDIT_CONTEXT_PREFILL|GET_LAST_AUDIT/u);
 });
@@ -35,6 +35,9 @@ test('renderer uses only DOM construction and the fixed exhaustive screen and in
 test('initial URL and batch choices remain visible but local to Marco 3', async () => {
   const view = await panelFile('panel-view.js');
   assert.match(view, /Auditar a página atual/u);
+  for (const label of ['Evidência completa', 'Somente elementos', 'Sem imagens']) {
+    assert.match(view, new RegExp(label, 'u'));
+  }
   assert.match(view, /Outra URL/u);
   assert.match(view, /Lote de páginas/u);
   assert.match(view, /Disponível no Marco 3/u);
@@ -52,6 +55,9 @@ test('running screen presents the fixed explanatory phases without synthetic cur
   ]) assert.match(view, new RegExp(phase.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
   assert.match(view, /aria-live['"], ['"]polite/u);
   assert.doesNotMatch(view, /fase atual|concluída \d|\d+% conclu/iu);
+  assert.match(view, /Confirme antes de capturar imagens/u);
+  assert.match(view, /Tudo permanece neste dispositivo/u);
+  assert.match(view, /Continuar e capturar/u);
 });
 
 test('result copy preserves the coverage limitation and four separate checkKey metrics', async () => {
@@ -77,6 +83,9 @@ test('visual system matches the approved option-2 hierarchy and accessibility br
   assert.match(css, /@media\s*\(forced-colors:\s*active\)/iu);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/iu);
   assert.match(css, /:focus-visible/iu);
+  assert.match(css, /\.capture-mode-options/iu);
+  assert.match(css, /\.privacy-pause/iu);
+  assert.match(css, /\.capture-mode-option:has\(input:focus-visible\)/iu);
   assert.doesNotMatch(css, /@import|https?:|url\s*\(/iu);
 });
 

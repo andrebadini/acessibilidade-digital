@@ -53,7 +53,16 @@ class TestElement {
   dispatch(type) {
     for (const listener of this.listeners.get(type) ?? []) listener({ currentTarget: this, preventDefault() {} });
   }
-  click() { for (const listener of this.listeners.get('click') ?? []) listener({ currentTarget: this, preventDefault() {} }); }
+  click() {
+    for (const listener of this.listeners.get('click') ?? []) listener({ currentTarget: this, preventDefault() {} });
+    if (this.tagName === 'LABEL') {
+      const input = this.querySelector('input');
+      if (input) {
+        input.checked = true;
+        input.dispatch('change');
+      }
+    }
+  }
   focus() { this.ownerDocument.activeElement = this; }
   scrollIntoView() { this.scrolledIntoView = true; }
   querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; }
@@ -132,6 +141,8 @@ function fixture() {
   };
   const state = {
     version: 1, screen: 'result', auditId: 'audit-1',
+    captureMode: 'no-pixels', sessionStatus: null,
+    privacy: { mode: null, categories: [], message: null, confirmationPending: false },
     filters: { impact: [], wcag: [], abnt: [] }, selectedOccurrenceId: 'occ-1',
     evidenceExpanded: false, focusId: 'occurrence-occ-1', scrollTop: 160, reason: null,
   };
@@ -322,11 +333,159 @@ test('all four screens emit only the exhaustive UI intent union', () => {
   };
   const resultRoot = renderPanelView({ view: buildPanelView(resultInput), document, onIntent: value => emitted.push(value), onEvent() {} });
   for (const button of resultRoot.querySelectorAll('button[data-intent]')) button.click();
+  const pausedInput = fixture();
+  pausedInput.state = {
+    ...pausedInput.state, screen: 'running', captureMode: 'full-evidence', sessionStatus: 'privacy-paused',
+    privacy: {
+      mode: 'full-evidence', categories: ['password'],
+      message: 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.',
+      confirmationPending: false,
+    },
+  };
+  const pausedRoot = renderPanelView({
+    view: buildPanelView({ state: pausedInput.state }), document,
+    onIntent: value => emitted.push(value), onEvent() {},
+  });
+  for (const button of pausedRoot.querySelectorAll('button[data-intent]')) button.click();
   assert.deepEqual(new Set(emitted.map(value => value.type)), new Set([
     'START_ATTACHED', 'OPEN_URL_FORM', 'OPEN_BATCH_FORM', 'CANCEL_AUDIT',
     'OPEN_REPORT', 'SELECT_OCCURRENCE', 'CONSULT_EVIDENCE', 'RETRY',
-    'PERSONA_SELECT',
+    'PERSONA_SELECT', 'CONFIRM_PIXEL_CAPTURE',
   ]));
+});
+
+test('initial screen exposes three described radio modes and emits only a safe local selection event', () => {
+  const input = fixture();
+  input.state = {
+    ...input.state, screen: 'initial', auditId: null, captureMode: 'full-evidence', sessionStatus: null,
+    privacy: { mode: null, categories: [], message: null, confirmationPending: false },
+  };
+  const events = [];
+  const root = renderPanelView({
+    view: buildPanelView({ state: input.state }), document: new TestDocument(),
+    onIntent() {}, onEvent: event => events.push(event),
+  });
+
+  const fieldset = root.querySelector('fieldset');
+  assert.ok(fieldset);
+  assert.match(fieldset.textContent, /Modo de evidência/u);
+  for (const [mode, label] of [
+    ['full-evidence', 'Evidência completa'],
+    ['element-only', 'Somente elementos'],
+    ['no-pixels', 'Sem imagens'],
+  ]) {
+    const radio = root.querySelector(`input[data-capture-mode="${mode}"]`);
+    assert.ok(radio, mode);
+    assert.equal(radio.getAttribute('type'), 'radio');
+    assert.equal(radio.getAttribute('name'), 'capture-mode');
+    assert.ok(radio.getAttribute('aria-describedby'));
+    assert.match(root.textContent, new RegExp(label, 'u'));
+  }
+  assert.equal(root.querySelector('input[data-capture-mode="full-evidence"]').checked, true);
+  assert.match(
+    root.textContent,
+    /A auditoria pode capturar pixels e conteúdo visível, inclusive dados pessoais\. Tudo permanece neste dispositivo\./u,
+  );
+
+  root.querySelector('input[data-capture-mode="element-only"]').dispatch('change');
+  assert.deepEqual(events, [{
+    type: 'CAPTURE_MODE_SELECTED', mode: 'element-only', focusId: 'capture-mode-element-only',
+  }]);
+  assert.match(root.textContent, /Auditar a página atual/u);
+  assert.match(root.textContent, /Outra URL/u);
+  assert.match(root.textContent, /Lote de páginas/u);
+});
+
+test('the complete radio card, including its description, is one associated clickable target', () => {
+  const input = fixture();
+  input.state = {
+    ...input.state, screen: 'initial', auditId: null, captureMode: 'full-evidence', sessionStatus: null,
+    privacy: { mode: null, categories: [], message: null, confirmationPending: false },
+  };
+  const events = [];
+  const root = renderPanelView({
+    view: buildPanelView({ state: input.state }), document: new TestDocument(),
+    onIntent() {}, onEvent: event => events.push(event),
+  });
+  const card = root.querySelector('label[data-capture-option="element-only"]');
+  assert.ok(card);
+  assert.match(card.textContent, /Somente elementos/u);
+  assert.match(card.textContent, /Captura apenas os elementos relacionados/u);
+  card.click();
+  assert.equal(card.querySelector('input').checked, true);
+  assert.deepEqual(events, [{
+    type: 'CAPTURE_MODE_SELECTED', mode: 'element-only', focusId: 'capture-mode-element-only',
+  }]);
+});
+
+test('privacy pause stays on running screen, hides phases and personas, and emits no private identifier', () => {
+  const input = fixture();
+  input.state = {
+    ...input.state, screen: 'running', captureMode: 'full-evidence', sessionStatus: 'privacy-paused',
+    privacy: {
+      mode: 'full-evidence', categories: ['password', 'payment'],
+      message: 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.',
+      confirmationPending: false,
+    },
+  };
+  const intents = [];
+  const root = renderPanelView({
+    view: buildPanelView({ state: input.state }), document: new TestDocument(),
+    onIntent: intent => intents.push(intent), onEvent() {},
+  });
+
+  assert.equal(root.dataset.screen, 'running');
+  assert.equal(root.dataset.sessionStatus, 'privacy-paused');
+  assert.match(root.textContent, /Confirme antes de capturar imagens/u);
+  assert.match(root.textContent, /Tudo permanece neste dispositivo/u);
+  assert.match(root.textContent, /Campo de senha/u);
+  assert.match(root.textContent, /Dados de pagamento/u);
+  assert.equal(root.querySelector('[data-running-phases]'), null);
+  assert.equal(root.querySelector('[data-persona-controls]'), null);
+  assert.match(root.textContent, /Continuar e capturar/u);
+  assert.match(root.textContent, /Cancelar auditoria/u);
+  const live = root.querySelector('[role="status"][aria-live="polite"]');
+  assert.equal(live.getAttribute('aria-atomic'), 'true');
+
+  root.querySelector('button[data-intent="CONFIRM_PIXEL_CAPTURE"]').click();
+  assert.deepEqual(intents[0], { type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true });
+  assert.doesNotMatch(JSON.stringify(intents), /consent|capability|documentId|tabId|digest|PRIVATE/u);
+});
+
+test('pending privacy confirmation is visibly one-shot while cancel remains available', () => {
+  const input = fixture();
+  input.state = {
+    ...input.state, screen: 'running', captureMode: 'element-only', sessionStatus: 'privacy-paused',
+    privacy: {
+      mode: 'element-only', categories: ['private-marker'],
+      message: 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.',
+      confirmationPending: true,
+    },
+  };
+  const intents = [];
+  const root = renderPanelView({
+    view: buildPanelView({ state: input.state }), document: new TestDocument(),
+    onIntent: intent => intents.push(intent), onEvent() {},
+  });
+  const confirm = root.querySelector('button[data-intent="CONFIRM_PIXEL_CAPTURE"]');
+  assert.equal(confirm.getAttribute('aria-disabled'), 'true');
+  assert.match(confirm.textContent, /Confirmação enviada/u);
+  confirm.click();
+  root.querySelector('button[data-intent="CANCEL_AUDIT"]').click();
+  assert.deepEqual(intents, [{ type: 'CANCEL_AUDIT' }]);
+});
+
+test('rejects an impossible no-pixels privacy projection before rendering', () => {
+  const input = fixture();
+  input.state = {
+    ...input.state, screen: 'running', captureMode: 'no-pixels', sessionStatus: 'privacy-paused',
+    privacy: {
+      mode: 'no-pixels', categories: ['password'],
+      message: 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.',
+      confirmationPending: false,
+    },
+  };
+  assert.throws(() => buildPanelView({ state: input.state }), /PANEL_VIEW_PRIVACY_INVALID/u);
 });
 
 test('details expose exactly the worker-approved action and emit no target internals', () => {

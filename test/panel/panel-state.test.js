@@ -65,6 +65,9 @@ test('creates an immutable initial screen with only stable interaction state', (
     version: 1,
     screen: 'initial',
     auditId: null,
+    captureMode: 'full-evidence',
+    sessionStatus: null,
+    privacy: { mode: null, categories: [], message: null, confirmationPending: false },
     filters: { impact: [], wcag: [], abnt: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,
@@ -165,6 +168,7 @@ test('implements the exact four-screen lifecycle and ignores unknown events', ()
   assert.equal(result.focusId, 'result-summary', 'the removed cancel control needs a semantic result destination');
   const restarted = reducePanelState(result, { type: 'BOOTSTRAP_INITIAL' });
   assert.equal(restarted.screen, 'initial');
+  assert.equal(restarted.captureMode, 'full-evidence');
   assert.strictEqual(reducePanelState(restarted, { type: 'NOT_A_PANEL_EVENT' }), restarted);
   assert.strictEqual(reducePanelState(restarted, null), restarted);
 });
@@ -172,6 +176,8 @@ test('implements the exact four-screen lifecycle and ignores unknown events', ()
 test('unknown and invalid events return a detached recursively frozen valid state', () => {
   const mutable = {
     version: 1, screen: 'result', auditId: 'audit-1',
+    captureMode: 'no-pixels', sessionStatus: null,
+    privacy: { mode: null, categories: [], message: null, confirmationPending: false },
     filters: { impact: ['critical'], wcag: [], abnt: [] },
     selectedOccurrenceId: 'occ-1', evidenceExpanded: false,
     persona: {
@@ -192,6 +198,18 @@ test('unknown and invalid events return a detached recursively frozen valid stat
   assert.equal(Object.isFrozen(mutable), false, 'the reducer does not freeze caller-owned input');
   const invalid = { ...mutable, screen: 'private-invalid-screen' };
   assert.strictEqual(reducePanelState(invalid, { type: 'NOT_A_PANEL_EVENT' }), invalid);
+});
+
+test('does not trust an outer-frozen state whose privacy projection is still mutable', () => {
+  const initial = createInitialPanelState();
+  const callerPrivacy = { mode: null, categories: [], message: null, confirmationPending: false };
+  const shallowFrozen = Object.freeze({ ...initial, privacy: callerPrivacy });
+  const detached = reducePanelState(shallowFrozen, { type: 'NOT_A_PANEL_EVENT' });
+  assert.notStrictEqual(detached, shallowFrozen);
+  assert.equal(Object.isFrozen(detached.privacy), true);
+  assert.equal(Object.isFrozen(detached.privacy.categories), true);
+  callerPrivacy.categories.push('PRIVATE');
+  assert.deepEqual(detached.privacy.categories, []);
 });
 
 test('every transition is recursively frozen and filters preserve selection focus and scroll', () => {
@@ -267,6 +285,9 @@ test('port interruption and retry preserve only the last safe audit ID', () => {
     version: 1,
     screen: 'unavailable',
     auditId: 'audit-safe',
+    captureMode: 'full-evidence',
+    sessionStatus: null,
+    privacy: { mode: null, categories: [], message: null, confirmationPending: false },
     filters: { impact: [], wcag: [], abnt: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,
@@ -291,4 +312,112 @@ test('AUDIT_UNAVAILABLE maps only closed reasons and never echoes native errors'
   });
   assert.equal(state.reason, 'Não foi possível concluir a operação local.');
   assert.doesNotMatch(JSON.stringify(state), /native|SECRET/u);
+});
+
+test('selects one closed capture mode only on the initial screen and preserves it when starting', () => {
+  const initial = createInitialPanelState();
+  assert.equal(initial.captureMode, 'full-evidence');
+  const selected = reducePanelState(initial, {
+    type: 'CAPTURE_MODE_SELECTED', mode: 'no-pixels', focusId: 'capture-mode-no-pixels',
+  });
+  assert.equal(selected.captureMode, 'no-pixels');
+  assert.equal(selected.focusId, 'capture-mode-no-pixels');
+
+  const started = reducePanelState(selected, { type: 'START_REQUESTED' });
+  assert.equal(started.screen, 'running');
+  assert.equal(started.captureMode, 'no-pixels');
+  assert.strictEqual(reducePanelState(started, {
+    type: 'CAPTURE_MODE_SELECTED', mode: 'no-pixels', focusId: 'capture-mode-no-pixels',
+  }), started, 'the running audit keeps the mode that was selected before start');
+
+  const reset = reducePanelState(selected, { type: 'BOOTSTRAP_INITIAL' });
+  assert.equal(reset.captureMode, 'full-evidence');
+
+  for (const mode of ['', 'pixels', 'FULL-EVIDENCE', null]) {
+    assert.strictEqual(reducePanelState(initial, { type: 'CAPTURE_MODE_SELECTED', mode }), initial);
+  }
+});
+
+test('projects a privacy pause into the running screen without storing private correlation', () => {
+  const message = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
+  let state = reducePanelState(createInitialPanelState(), {
+    type: 'CAPTURE_MODE_SELECTED', mode: 'full-evidence', focusId: 'capture-mode-full-evidence',
+  });
+  state = reducePanelState(state, { type: 'START_REQUESTED' });
+  state = reducePanelState(state, { type: 'AUDIT_RUNNING', auditId: 'audit-private' });
+  state = reducePanelState(state, {
+    type: 'PRIVACY_PAUSED', auditId: 'audit-private', mode: 'full-evidence',
+    categories: ['password', 'payment'], message,
+  });
+
+  assert.equal(state.screen, 'running');
+  assert.equal(state.sessionStatus, 'privacy-paused');
+  assert.equal(state.captureMode, 'full-evidence');
+  assert.deepEqual(state.privacy, {
+    mode: 'full-evidence', categories: ['password', 'payment'], message, confirmationPending: false,
+  });
+  assert.equal(state.focusId, 'confirm-pixel-capture');
+  assert.equal(Object.isFrozen(state.privacy), true);
+  assert.equal(Object.isFrozen(state.privacy.categories), true);
+  assert.doesNotMatch(JSON.stringify(state), /consent|capability|documentId|tabId|digest|PRIVATE/u);
+
+  const pending = reducePanelState(state, { type: 'PRIVACY_CONFIRM_REQUESTED' });
+  assert.equal(pending.privacy.confirmationPending, true);
+  assert.equal(pending.focusId, 'confirm-pixel-capture');
+
+  const resumed = reducePanelState(pending, { type: 'AUDIT_RUNNING', auditId: 'audit-private' });
+  assert.equal(resumed.sessionStatus, null);
+  assert.deepEqual(resumed.privacy, {
+    mode: null, categories: [], message: null, confirmationPending: false,
+  });
+  assert.equal(resumed.captureMode, 'full-evidence');
+});
+
+test('a rotated privacy pause replaces the prior projection and rearms confirmation', () => {
+  const message = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
+  const running = reducePanelState(
+    reducePanelState(createInitialPanelState(), { type: 'START_REQUESTED' }),
+    { type: 'AUDIT_RUNNING', auditId: 'audit-private' },
+  );
+  const first = reducePanelState(running, {
+    type: 'PRIVACY_PAUSED', auditId: 'audit-private', mode: 'full-evidence',
+    categories: ['password'], message,
+  });
+  const pending = reducePanelState(first, { type: 'PRIVACY_CONFIRM_REQUESTED' });
+  const rotated = reducePanelState(pending, {
+    type: 'PRIVACY_PAUSED', auditId: 'audit-private', mode: 'element-only',
+    categories: ['private-marker'], message,
+  });
+
+  assert.notStrictEqual(rotated.privacy, pending.privacy);
+  assert.deepEqual(rotated.privacy, {
+    mode: 'element-only', categories: ['private-marker'], message, confirmationPending: false,
+  });
+  assert.equal(rotated.captureMode, 'element-only');
+});
+
+test('privacy reducer events fail closed for no-pixels, extra fields, accessors, symbols and proxies', () => {
+  const message = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
+  const running = reducePanelState(
+    reducePanelState(createInitialPanelState(), { type: 'START_REQUESTED' }),
+    { type: 'AUDIT_RUNNING', auditId: 'audit-private' },
+  );
+  const valid = {
+    type: 'PRIVACY_PAUSED', auditId: 'audit-private', mode: 'full-evidence', categories: ['password'], message,
+  };
+  const hostile = [
+    { ...valid, mode: 'no-pixels' },
+    { ...valid, consentId: 'PRIVATE' },
+    Object.assign({ ...valid }, { [Symbol('private')]: true }),
+    Object.defineProperty({ ...valid }, 'mode', { enumerable: true, get() { throw new Error('PRIVATE'); } }),
+    new Proxy(valid, { ownKeys() { throw new Error('PRIVATE'); } }),
+  ];
+  for (const event of hostile) assert.strictEqual(reducePanelState(running, event), running);
+
+  const selected = reducePanelState(createInitialPanelState(), {
+    type: 'CAPTURE_MODE_SELECTED', mode: 'element-only', focusId: 'capture-mode-element-only',
+  });
+  assert.strictEqual(reducePanelState(selected, {
+    type: 'CAPTURE_MODE_SELECTED', mode: 'full-evidence', focusId: 'capture-mode-full-evidence', extra: true,
+  }), selected);
 });

@@ -127,6 +127,61 @@ button:active { transform: translateY(1px); }
 
 .source-choices { display: grid; gap: 12px; }
 
+.capture-mode-fieldset {
+  display: grid;
+  gap: 8px;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.capture-mode-fieldset legend {
+  padding: 0;
+  color: var(--brand);
+  font-weight: 750;
+}
+
+.capture-mode-intro,
+.capture-mode-description {
+  color: #42586a;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.capture-mode-options {
+  display: grid;
+  gap: 8px;
+}
+
+.capture-mode-option {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  min-block-size: 44px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--muted-surface);
+  cursor: pointer;
+}
+
+.capture-mode-option:has(input:focus-visible) {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 6px var(--surface);
+}
+
+.capture-mode-option input {
+  inline-size: 20px;
+  block-size: 20px;
+  margin: 0;
+  accent-color: var(--action);
+}
+
+.capture-mode-copy { display: grid; gap: 2px; }
+.capture-mode-label { color: var(--brand); font-weight: 750; }
+
 .persona-controls {
   display: grid;
   gap: 8px;
@@ -191,6 +246,38 @@ button:active { transform: translateY(1px); }
 }
 
 .phase-list li { padding: 8px; }
+
+.privacy-pause {
+  padding: 12px;
+  border: 2px solid var(--review);
+  border-radius: 6px;
+  background: var(--muted-surface);
+}
+
+.privacy-local-copy { font-weight: 650; }
+
+.privacy-signals {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+.privacy-signals ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-inline-start: 24px;
+}
+
+.privacy-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.privacy-actions button { inline-size: 100%; }
 
 .result-identity {
   display: grid;
@@ -549,6 +636,9 @@ code {
 
 @media (forced-colors: active) {
   button,
+  .capture-mode-option,
+  .privacy-pause,
+  .privacy-signals,
   .result-card,
   .result-detail,
   code,
