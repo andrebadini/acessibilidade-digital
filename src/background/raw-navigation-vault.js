@@ -13,6 +13,10 @@ const RECORD_KEYS = Object.freeze(['version', 'auditId', 'purpose', 'rawUrl', 'i
 const QUEUE_KEYS = Object.freeze(['version', 'auditId', 'ownerOperationId', 'revision', 'issuedAt', 'expiresAt', 'nextIndex', 'entries']);
 const QUEUE_ENTRY_KEYS = Object.freeze(['line', 'navigationToken', 'evidenceUrl', 'sessionDigest', 'status']);
 const EVIDENCE_URL_KEYS = Object.freeze(['version', 'href', 'queryIncluded', 'redactedSegments']);
+const CLEANUP_MARKER_KEY = 'audita:raw-navigation-cleanup:v1';
+const CLEANUP_MARKER_KEYS = Object.freeze(['version', 'keys']);
+const MARKER_UNAVAILABLE = Symbol('marker-unavailable');
+const MARKER_MALFORMED = Symbol('marker-malformed');
 const SESSION_STATES = new WeakMap();
 
 function exact(value, keys) {
@@ -83,7 +87,7 @@ function token(bytes) {
 function stateFor(sessionArea) {
   let state = SESSION_STATES.get(sessionArea);
   if (!state) {
-    state = { tail: Promise.resolve(), highWater: null, bindings: new Map(), pendingCleanup: new Set() };
+    state = { tail: Promise.resolve(), highWater: null, bindings: new Map(), pendingCleanup: new Set(), markerSeen: false };
     SESSION_STATES.set(sessionArea, state);
   }
   return state;
@@ -172,6 +176,28 @@ function tokensForKeys(keys) {
   return keys.filter(key => key.startsWith(PREFIX)).map(key => key.slice(PREFIX.length));
 }
 
+function validCleanupKey(key) {
+  return typeof key === 'string' &&
+    (key.startsWith(PREFIX) ? validToken(key.slice(PREFIX.length)) :
+      key.startsWith(QUEUE_PREFIX) && validId(key.slice(QUEUE_PREFIX.length)));
+}
+
+function cleanupMarker(value) {
+  const marker = exact(value, CLEANUP_MARKER_KEYS);
+  const keys = marker && dense(marker.keys);
+  if (!marker || marker.version !== 1 || !keys || keys.length > 256 ||
+    keys.some(key => !validCleanupKey(key)) || new Set(keys).size !== keys.length) return null;
+  return freeze({ version: 1, keys: [...keys].sort() });
+}
+
+function ownValue(value, key) {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor) return undefined;
+    return Object.hasOwn(descriptor, 'value') ? descriptor.value : MARKER_MALFORMED;
+  } catch { return MARKER_MALFORMED; }
+}
+
 async function erase(sessionArea, key) {
   try { await sessionArea.remove(key); return !Object.hasOwn(await sessionArea.get(key), key); } catch { return false; }
 }
@@ -188,6 +214,14 @@ async function all(sessionArea) {
       entries.push([key, descriptor.value]);
     }
     return entries;
+  } catch { throw unavailable(); }
+}
+
+async function cleanupNamespaceKeys(sessionArea) {
+  const value = await sessionArea.get(null);
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new Error();
+    return Reflect.ownKeys(value).filter(key => typeof key === 'string' && validCleanupKey(key));
   } catch { throw unavailable(); }
 }
 
@@ -212,22 +246,60 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
     typeof sessionArea.remove !== 'function' || typeof now !== 'function' || typeof randomBytes !== 'function' ||
     (digestManager !== null && typeof digestManager?.digest !== 'function')) throw new TypeError('RAW_NAVIGATION_INVALID');
   const state = stateFor(sessionArea);
-  const removeOrPend = async keys => {
-    const unique = [...new Set(keys)];
-    if (await removeKeys(sessionArea, unique)) {
-      dropBindings(state, tokensForKeys(unique));
+  const markerValue = async () => {
+    try {
+      const value = ownValue(await sessionArea.get(CLEANUP_MARKER_KEY), CLEANUP_MARKER_KEY);
+      if (value === MARKER_MALFORMED) return null;
+      return value === undefined ? undefined : cleanupMarker(value);
+    } catch { return MARKER_UNAVAILABLE; }
+  };
+  const persistMarker = async () => {
+    const marker = freeze({ version: 1, keys: [...state.pendingCleanup].sort() });
+    state.markerSeen = true;
+    try { await sessionArea.set({ [CLEANUP_MARKER_KEY]: marker }); } catch { /* confirm below */ }
+    return same(await markerValue(), marker);
+  };
+  const clearMarker = async () => {
+    const marker = await markerValue();
+    if (marker === MARKER_UNAVAILABLE) return false;
+    if (marker === undefined) { state.markerSeen = false; return true; }
+    if (!await erase(sessionArea, CLEANUP_MARKER_KEY)) return false;
+    state.markerSeen = false;
+    return true;
+  };
+  const loadPersistedMarker = async () => {
+    const value = await markerValue();
+    if (value === MARKER_UNAVAILABLE) return false;
+    if (value === undefined) return true;
+    state.markerSeen = true;
+    if (value) {
+      for (const key of value.keys) state.pendingCleanup.add(key);
       return true;
     }
+    let keys;
+    try { keys = await cleanupNamespaceKeys(sessionArea); } catch { return false; }
+    for (const key of keys) state.pendingCleanup.add(key);
+    await persistMarker();
+    return true;
+  };
+  const removeOrPend = async keys => {
+    const unique = [...new Set(keys)];
     for (const key of unique) state.pendingCleanup.add(key);
-    return false;
+    await persistMarker();
+    if (!await removeKeys(sessionArea, unique)) return false;
+    for (const key of unique) state.pendingCleanup.delete(key);
+    dropBindings(state, tokensForKeys(unique));
+    return state.pendingCleanup.size === 0 ? clearMarker() : persistMarker();
   };
   const drainPending = async () => {
-    if (state.pendingCleanup.size === 0) return true;
+    if (!await loadPersistedMarker()) return false;
+    if (state.pendingCleanup.size === 0) return state.markerSeen ? clearMarker() : true;
     const keys = [...state.pendingCleanup];
+    await persistMarker();
     if (!await removeKeys(sessionArea, keys)) return false;
     state.pendingCleanup.clear();
     dropBindings(state, tokensForKeys(keys));
-    return true;
+    return clearMarker();
   };
   const serial = operation => {
     const guarded = async () => {
@@ -288,12 +360,12 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
     }); },
     takeInternal({ ownerId, navigationToken }) { return serial(async () => {
       const { key, record } = await readLegacy(ownerId, navigationToken); const nowValue = currentTime(now, state);
-      if (nowValue === null || nowValue < record.issuedAt) { await erase(sessionArea, key); throw unavailable(); }
-      if (nowValue >= record.expiresAt) { await erase(sessionArea, key); throw unavailable(); }
-      if (!await erase(sessionArea, key)) throw unavailable(); return record.rawUrl;
+      if (nowValue === null || nowValue < record.issuedAt) { if (!await removeOrPend([key])) throw cleanupPending(); throw unavailable(); }
+      if (nowValue >= record.expiresAt) { if (!await removeOrPend([key])) throw cleanupPending(); throw unavailable(); }
+      if (!await removeOrPend([key])) throw cleanupPending(); return record.rawUrl;
     }); },
     invalidateInternal({ ownerId, navigationToken }) { return serial(async () => {
-      const { key } = await readLegacy(ownerId, navigationToken); if (!await erase(sessionArea, key)) throw unavailable(); return freeze({ invalidated: true });
+      const { key } = await readLegacy(ownerId, navigationToken); if (!await removeOrPend([key])) throw cleanupPending(); return freeze({ invalidated: true });
     }); },
     put(rawUrl, options) { return serial(async () => {
       const input = exact(options, ['auditId', 'purpose', 'ttlMs', 'includeQuery']);
@@ -332,9 +404,9 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       const input = exact(options, ['auditId', 'purpose']); if (!input || !validId(input.auditId) || !PURPOSES.has(input.purpose)) throw consumed();
       const { key, record } = await readPublic(navigationToken);
       if (record.auditId !== input.auditId) throw wrongAudit(); if (record.purpose !== input.purpose) throw wrongPurpose();
-      const nowValue = currentTime(now, state); if (nowValue === null || nowValue < record.issuedAt) { await erase(sessionArea, key); dropBindings(state, [navigationToken]); throw consumed(); }
-      if (nowValue >= record.expiresAt) { await erase(sessionArea, key); dropBindings(state, [navigationToken]); throw consumed(); }
-      if (!await erase(sessionArea, key)) throw consumed(); dropBindings(state, [navigationToken]); return record.rawUrl;
+      const nowValue = currentTime(now, state); if (nowValue === null || nowValue < record.issuedAt) { if (!await removeOrPend([key])) throw cleanupPending(); throw consumed(); }
+      if (nowValue >= record.expiresAt) { if (!await removeOrPend([key])) throw cleanupPending(); throw consumed(); }
+      if (!await removeOrPend([key])) throw cleanupPending(); return record.rawUrl;
     }); },
     putQueue(input) { return serial(async () => {
       const request = exact(input, ['auditId', 'entries']);
@@ -463,8 +535,7 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       const keys = entries.flatMap(([key, value]) =>
         (key.startsWith(PREFIX) && recordAuditId(value) === auditId) || key === `${QUEUE_PREFIX}${auditId}` ? [key] : []);
       if (keys.length === 0) return 0;
-      if (!await removeKeys(sessionArea, keys)) throw unavailable();
-      dropBindings(state, keys.filter(key => key.startsWith(PREFIX)).map(key => key.slice(PREFIX.length)));
+      if (!await removeOrPend(keys)) throw cleanupPending();
       return keys.length;
     }); },
     clearExpired() { return serial(async () => {
@@ -479,8 +550,7 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
           (publicValue && nowValue >= publicValue.expiresAt) || (queue && nowValue >= queue.expiresAt) ? [key] : [];
       });
       if (keys.length === 0) return 0;
-      if (!await removeKeys(sessionArea, keys)) throw unavailable();
-      dropBindings(state, keys.filter(key => key.startsWith(PREFIX)).map(key => key.slice(PREFIX.length)));
+      if (!await removeOrPend(keys)) throw cleanupPending();
       return keys.length;
     }); },
   });

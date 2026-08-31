@@ -71,6 +71,20 @@ async function batchEntry(vault, auditId, line, path) {
     sessionDigest: issued.sessionDigest, status: 'pending' };
 }
 
+async function restartedPublicVault(sessionArea, clock) {
+  const moduleUrl = new URL('../../src/background/raw-navigation-vault.js', import.meta.url);
+  moduleUrl.searchParams.set('workerRestart', `${Date.now()}-${Math.random()}`);
+  const { createRawNavigationVaultV1: createRestartedVault } = await import(moduleUrl.href);
+  const digestManager = createSessionUrlDigestManager({
+    sessionArea, subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(12), now: () => clock.value,
+  });
+  return createRestartedVault({
+    sessionArea, digestManager, now: () => clock.value,
+    randomBytes: length => new Uint8Array(length).fill(13),
+  });
+}
+
 test('takes a raw URL once, erases it before return and never leaks it', async () => {
   const { sessionArea, vault } = fixture();
   assert.deepEqual(Object.keys(vault), [
@@ -219,7 +233,7 @@ test('fails closed without returning raw URL when removal cannot be verified', a
     sessionArea.removeMode = removeMode;
     await assert.rejects(
       () => vault.takeInternal({ ownerId: 'owner-a', navigationToken: issued.navigationToken }),
-      error => error?.message === 'RAW_NAVIGATION_UNAVAILABLE',
+      error => error?.message === 'RAW_NAVIGATION_CLEANUP_PENDING',
     );
   }
 });
@@ -296,7 +310,7 @@ test('never returns a raw URL when the consumption clock or storage read fails',
   sessionArea.getMode = 'throw';
   await assert.rejects(
     () => vault.takeInternal({ ownerId: 'owner-a', navigationToken: issued.navigationToken }),
-    error => error?.message === 'RAW_NAVIGATION_UNAVAILABLE',
+    error => error?.message === 'RAW_NAVIGATION_CLEANUP_PENDING',
   );
 });
 
@@ -579,4 +593,118 @@ test('copies evidence descriptors without invoking proxy gets and rejects queue 
   await assert.rejects(vault.replaceQueue('audit-proxy-entry', afterTerminal, {
     expectedRevision: 2, expectedState: { nextIndex: 1, status: 'finished' },
   }), /fila de navegação desatualizada/iu);
+});
+
+test('persists failed public and legacy take cleanup across a restarted worker', async () => {
+  const markerKey = 'audita:raw-navigation-cleanup:v1';
+  for (const removeMode of ['noop', 'throw']) for (const kind of ['public', 'legacy']) {
+    const { sessionArea, clock, vault } = publicFixture();
+    const issued = kind === 'public'
+      ? await vault.put('https://example.test/take-pending?secret=NEVER', {
+        auditId: 'audit-take-pending', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+      })
+      : await vault.putInternal({ ownerId: 'owner-take-pending', rawUrl: 'https://example.test/take-pending?secret=NEVER' });
+    sessionArea.removeMode = removeMode;
+    const consume = kind === 'public'
+      ? () => vault.take(issued.navigationToken, { auditId: 'audit-take-pending', purpose: 'single-url' })
+      : () => vault.takeInternal({ ownerId: 'owner-take-pending', navigationToken: issued.navigationToken });
+    await assert.rejects(consume(), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+    const marker = sessionArea.values[markerKey];
+    assert.equal(marker.version, 1);
+    assert.deepEqual(Object.keys(marker), ['version', 'keys']);
+    assert.equal(marker.keys.every(key => /^audita:raw-navigation(?::|-)\w/u.test(key)), true);
+    assert.doesNotMatch(JSON.stringify(marker), /NEVER|https:\/\//u);
+    const restarted = await restartedPublicVault(sessionArea, clock);
+    await assert.rejects(restarted.put('https://example.test/blocked?secret=NEVER', {
+      auditId: 'audit-restart-blocked', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+    }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+    sessionArea.removeMode = 'normal';
+    const recovered = await restarted.put('https://example.test/recovered', {
+      auditId: 'audit-restart-recovered', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+    });
+    assert.match(recovered.navigationToken, /^[A-Za-z0-9_-]{22}$/u);
+    assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
+  }
+});
+
+test('persists a partial queue cleanup barrier across restart until removal recovers', async () => {
+  const markerKey = 'audita:raw-navigation-cleanup:v1';
+  const { sessionArea, clock, vault } = publicFixture();
+  const entries = [await batchEntry(vault, 'audit-restart-queue', 1, 'restart-queue')];
+  clock.value += 1_000;
+  entries.push(await batchEntry(vault, 'audit-restart-queue', 2, 'restart-queue-later'));
+  const originalSet = sessionArea.set.bind(sessionArea);
+  sessionArea.set = async writes => {
+    const queueKey = Object.keys(writes).find(key => key.startsWith('audita:raw-navigation-queue:v1:'));
+    if (!queueKey) return originalSet(writes);
+    sessionArea.values[queueKey] = structuredClone(writes[queueKey]);
+    throw new Error('partial queue');
+  };
+  sessionArea.removeMode = 'noop';
+  await assert.rejects(vault.putQueue({ auditId: 'audit-restart-queue', entries }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  assert.equal(Object.hasOwn(sessionArea.values, markerKey), true);
+  const restarted = await restartedPublicVault(sessionArea, clock);
+  await assert.rejects(restarted.readQueue('audit-restart-queue'), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  sessionArea.removeMode = 'normal';
+  assert.equal(await restarted.readQueue('audit-restart-queue'), null);
+  assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
+});
+
+test('confirms a completed cleanup marker write without executing hostile marker getters', async () => {
+  const markerKey = 'audita:raw-navigation-cleanup:v1';
+  const { sessionArea, vault } = publicFixture();
+  const issued = await vault.put('https://example.test/marker-write?secret=NEVER', {
+    auditId: 'audit-marker-write', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  });
+  const originalSet = sessionArea.set.bind(sessionArea);
+  let markerWrites = 0;
+  sessionArea.set = async writes => {
+    await originalSet(writes);
+    if (Object.hasOwn(writes, markerKey)) { markerWrites += 1; throw new Error('marker persisted then threw'); }
+  };
+  assert.equal(await vault.take(issued.navigationToken, {
+    auditId: 'audit-marker-write', purpose: 'single-url',
+  }), 'https://example.test/marker-write?secret=NEVER');
+  assert.equal(markerWrites, 1);
+  assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
+
+  let getCalls = 0;
+  const originalGet = sessionArea.get.bind(sessionArea);
+  sessionArea.get = async key => key === markerKey ? { [markerKey]: new Proxy({ version: 1, keys: [] }, {
+    get() { getCalls += 1; throw new Error('HOSTILE_MARKER_GET'); },
+  }) } : originalGet(key);
+  await assert.rejects(vault.put('https://example.test/marker-hostile', {
+    auditId: 'audit-marker-hostile', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  assert.equal(getCalls, 0);
+
+  const accessorMap = {};
+  Object.defineProperty(accessorMap, markerKey, {
+    enumerable: true,
+    get() { getCalls += 1; throw new Error('HOSTILE_MARKER_ACCESSOR'); },
+  });
+  sessionArea.get = async key => key === markerKey ? accessorMap : originalGet(key);
+  await assert.rejects(vault.put('https://example.test/marker-accessor', {
+    auditId: 'audit-marker-accessor', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  assert.equal(getCalls, 0);
+});
+
+test('routes invalidate and audit cleanup removal failures through the persistent barrier', async () => {
+  const { sessionArea, vault } = fixture();
+  const legacy = await vault.putInternal({ ownerId: 'owner-cleanup', rawUrl: 'https://example.test/invalidate?secret=NEVER' });
+  sessionArea.removeMode = 'noop';
+  await assert.rejects(vault.invalidateInternal({ ownerId: 'owner-cleanup', navigationToken: legacy.navigationToken }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  await assert.rejects(vault.putInternal({ ownerId: 'owner-next', rawUrl: 'https://example.test/blocked' }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  sessionArea.removeMode = 'normal';
+  await vault.putInternal({ ownerId: 'owner-after', rawUrl: 'https://example.test/after' });
+
+  const { sessionArea: publicArea, vault: publicVault } = publicFixture();
+  await publicVault.put('https://example.test/clear-audit?secret=NEVER', {
+    auditId: 'audit-clear-pending', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  });
+  publicArea.removeMode = 'throw';
+  await assert.rejects(publicVault.clearAudit('audit-clear-pending'), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  publicArea.removeMode = 'normal';
+  assert.equal(await publicVault.clearAudit('audit-clear-pending'), 0);
 });
