@@ -198,3 +198,26 @@ test('destroy wins against an interleaved digest and rejects later use', async (
   assert.deepEqual(await sessionArea.get(SESSION_HMAC_KEY), {});
   await assert.rejects(() => manager.digest('https://example.test/'), /HMAC_MANAGER_DESTROYED/u);
 });
+
+test('a new worker manager reuses a valid session key while a new session creates a new key', async () => {
+  const firstSession = createSessionArea();
+  const firstWorker = createSessionUrlDigestManager({
+    sessionArea: firstSession, subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(3), now: () => 10,
+  });
+  const firstDigest = await firstWorker.digest('https://example.test/restart');
+  const restartedWorker = createSessionUrlDigestManager({
+    sessionArea: firstSession, subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(4), now: () => 11,
+  });
+  assert.equal(await restartedWorker.digest('https://example.test/restart'), firstDigest);
+  assert.equal(firstSession.writes.length, 1);
+
+  const secondSession = createSessionArea();
+  const secondWorker = createSessionUrlDigestManager({
+    sessionArea: secondSession, subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(4), now: () => 11,
+  });
+  assert.notEqual(await secondWorker.digest('https://example.test/restart'), firstDigest);
+  assert.equal(secondSession.writes.length, 1);
+});

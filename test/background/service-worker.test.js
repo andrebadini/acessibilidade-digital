@@ -669,6 +669,26 @@ test('default runtime serializes persona recovery with the supplied Web Locks ma
     call.name === 'audita:persona-lease-store:v1' && call.options.mode === 'exclusive'), true);
 });
 
+test('default worker owns one digest manager shared with its volatile navigation vault', async () => {
+  const env = defaultGraphFixture();
+  const runtime = await env.registration.startupReady;
+  assert.equal(typeof runtime.digestManager?.digest, 'function');
+  assert.equal(typeof runtime.rawNavigationVault?.put, 'function');
+  const sessionScansBefore = env.sessionGetCalls.filter(key => key === null).length;
+  const [digest, issued] = await Promise.all([
+    runtime.digestManager.digest('https://example.test/shared?private=1'),
+    runtime.rawNavigationVault.put('https://example.test/shared?private=1', {
+      auditId: 'audit-vault', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+    }),
+  ]);
+  assert.equal(issued.sessionDigest, digest);
+  assert.deepEqual(Object.keys(env.sessionValues).filter(key => key === 'audita:session-hmac-key:v1'), [
+    'audita:session-hmac-key:v1',
+  ]);
+  assert.equal(env.sessionGetCalls.filter(key => key === null).length, sessionScansBefore,
+    'the vault has no session-wide scan during put');
+});
+
 test('default runtime clears the persona expiry alarm with the exact Promise API arity', async () => {
   const calls = [];
   const env = defaultGraphFixture(null, {

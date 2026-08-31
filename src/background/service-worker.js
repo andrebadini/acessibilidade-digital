@@ -1,5 +1,6 @@
 import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
 import { createSessionUrlDigestManager } from '../core/privacy/session-url-digest.js';
+import { createRawNavigationVaultV1 } from './raw-navigation-vault.js';
 import { createAuditDeletedEvent } from '../core/audit-deleted-event.js';
 import { applyReviewDecisions, createReviewDecision } from '../core/review/decisions.js';
 import { createAuditModel } from '../core/report/audit-model.js';
@@ -263,7 +264,8 @@ export function createCheckpointAdapters(sessionArea) {
 }
 
 function copyReadyRuntime(value) {
-  const runtime = exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch', 'personaCoordinator', 'highlightController'], true) ??
+  const runtime = exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch', 'personaCoordinator', 'highlightController', 'digestManager', 'rawNavigationVault'], true) ??
+    exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch', 'personaCoordinator', 'highlightController'], true) ??
     exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch', 'personaCoordinator'], true) ??
     exact(value, ['authority', 'auditStarter', 'chromeAdapter', 'reportLaunch', 'exportLaunch'], true) ??
     exact(value, ['authority', 'auditStarter', 'chromeAdapter'], true);
@@ -274,6 +276,13 @@ function copyReadyRuntime(value) {
   if (Object.hasOwn(runtime, 'highlightController') &&
     (typeof runtime.highlightController?.expireDue !== 'function' ||
       typeof runtime.highlightController?.invalidateTab !== 'function')) {
+    throw new Error('WORKER_UNAVAILABLE');
+  }
+  if (Object.hasOwn(runtime, 'digestManager') && typeof runtime.digestManager?.digest !== 'function') {
+    throw new Error('WORKER_UNAVAILABLE');
+  }
+  if (Object.hasOwn(runtime, 'rawNavigationVault') &&
+    (typeof runtime.rawNavigationVault?.put !== 'function' || typeof runtime.rawNavigationVault?.take !== 'function')) {
     throw new Error('WORKER_UNAVAILABLE');
   }
   return freeze(runtime);
@@ -450,6 +459,9 @@ async function buildDefaultRuntime(chromeApi, options) {
   const bytes = options.randomBytes ?? randomBytes;
   const digestManager = createSessionUrlDigestManager({
     sessionArea, subtle: options.subtle ?? globalThis.crypto?.subtle, randomBytes: bytes, now: epochNow,
+  });
+  const rawNavigationVault = createRawNavigationVaultV1({
+    sessionArea, digestManager, now: epochNow, randomBytes: bytes,
   });
   const baseAdapter = (options.chromeAdapterFactory ?? createChromeAdapter)(chromeApi, { sessionUrlDigestManager: digestManager });
   const chromeAdapter = options.chromeAdapterOverrides
@@ -705,6 +717,8 @@ async function buildDefaultRuntime(chromeApi, options) {
       exportLaunch,
       personaCoordinator,
       highlightController: highlightRuntimeController,
+      digestManager,
+      rawNavigationVault,
     }),
     router, panelCoordinator, panelLauncher, reportPortCoordinator,
   };

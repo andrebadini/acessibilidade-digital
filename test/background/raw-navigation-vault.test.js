@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { webcrypto } from 'node:crypto';
 import test from 'node:test';
 
 import { createRawNavigationVaultV1 } from '../../src/background/raw-navigation-vault.js';
+import { createSessionUrlDigestManager } from '../../src/core/privacy/session-url-digest.js';
 
 function createSessionArea() {
   const values = {};
@@ -26,7 +28,7 @@ function createSessionArea() {
     async remove(key) {
       if (removeMode === 'throw') throw new Error('PRIVATE_REMOVE_FAILURE');
       if (removeMode === 'noop') return;
-      delete values[key];
+      for (const entry of Array.isArray(key) ? key : [key]) delete values[entry];
     },
   };
 }
@@ -34,17 +36,27 @@ function createSessionArea() {
 function fixture() {
   const sessionArea = createSessionArea();
   let value = 0;
+  const digestManager = createSessionUrlDigestManager({
+    sessionArea,
+    subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(7),
+    now: () => 1_788_000_000_000,
+  });
   const vault = createRawNavigationVaultV1({
     sessionArea,
     now: () => 1_788_000_000_000,
     randomBytes: length => new Uint8Array(length).fill(++value),
+    digestManager,
   });
-  return { sessionArea, vault };
+  return { sessionArea, vault, digestManager };
 }
 
 test('takes a raw URL once, erases it before return and never leaks it', async () => {
   const { sessionArea, vault } = fixture();
-  assert.deepEqual(Object.keys(vault), ['putInternal', 'takeInternal', 'invalidateInternal']);
+  assert.deepEqual(Object.keys(vault), [
+    'putInternal', 'takeInternal', 'invalidateInternal',
+    'put', 'take', 'putQueue', 'readQueue', 'replaceQueue', 'clearAudit', 'clearExpired',
+  ]);
   const secretUrl = 'https://example.test/?token=SEGREDO-NAO-LOGAR#private';
   const issued = await vault.putInternal({ ownerId: 'owner-a', rawUrl: secretUrl });
   const key = `audita:raw-navigation:v1:${issued.navigationToken}`;
@@ -58,6 +70,126 @@ test('takes a raw URL once, erases it before return and never leaks it', async (
     /RAW_NAVIGATION_UNAVAILABLE/u,
   );
   assert.doesNotMatch(JSON.stringify(await sessionArea.get(null)), /SEGREDO-NAO-LOGAR/u);
+});
+
+test('public vault stores only a scoped one-shot URL and uses the shared HMAC manager', async () => {
+  const sessionArea = createSessionArea();
+  const digestManager = createSessionUrlDigestManager({
+    sessionArea,
+    subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(7),
+    now: () => 1_788_004_800_000,
+  });
+  const vault = createRawNavigationVaultV1({
+    sessionArea,
+    digestManager,
+    now: () => '2026-08-29T12:00:00.000Z',
+    randomBytes: length => new Uint8Array(length).fill(5),
+  });
+
+  const issued = await vault.put('https://example.test/a?secret=1', {
+    auditId: 'audit-1', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  });
+  assert.match(issued.sessionDigest, /^hmac-sha256:[A-Za-z0-9_-]{43}$/u);
+  assert.equal(Object.hasOwn(issued, 'rawUrl'), false);
+  assert.deepEqual((await sessionArea.get('audita:session-hmac-key:v1'))['audita:session-hmac-key:v1'], {
+    version: 1,
+    keyBase64Url: 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc',
+    createdAt: 1_788_004_800_000,
+  });
+  assert.deepEqual(issued.evidenceUrl, {
+    version: 'EvidenceUrlV1', href: 'https://example.test/a', queryIncluded: false, redactedSegments: 0,
+  });
+  assert.equal(await vault.take(issued.navigationToken, {
+    auditId: 'audit-1', purpose: 'single-url',
+  }), 'https://example.test/a?secret=1');
+  await assert.rejects(vault.take(issued.navigationToken, {
+    auditId: 'audit-1', purpose: 'single-url',
+  }), /expirada ou consumida/iu);
+});
+
+test('public vault rejects cross-purpose and cross-audit claims without consuming the record', async () => {
+  const { vault } = fixture();
+  for (const purpose of ['single-url', 'batch-page', 'context-menu-link', 'current-state-assist']) {
+    const issued = await vault.put(`https://example.test/${purpose}`, {
+      auditId: 'audit-1', purpose,
+      ttlMs: purpose === 'batch-page' ? 7_200_000 : 600_000,
+      includeQuery: false,
+    });
+    const otherPurpose = purpose === 'single-url' ? 'batch-page' : 'single-url';
+    await assert.rejects(vault.take(issued.navigationToken, {
+      auditId: 'audit-1', purpose: otherPurpose,
+    }), /finalidade não corresponde/iu);
+    await assert.rejects(vault.take(issued.navigationToken, {
+      auditId: 'audit-2', purpose,
+    }), /auditoria não corresponde/iu);
+    assert.equal(await vault.take(issued.navigationToken, {
+      auditId: 'audit-1', purpose,
+    }), `https://example.test/${purpose}`);
+  }
+});
+
+test('queue keeps an absolute two-hour deadline and rejects stale revision or state replacement', async () => {
+  let now = 1_788_000_000_000;
+  const operationStartedAt = now;
+  const sessionArea = createSessionArea();
+  const digestManager = createSessionUrlDigestManager({
+    sessionArea, subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(9), now: () => now,
+  });
+  let entropy = 0;
+  const vault = createRawNavigationVaultV1({
+    sessionArea, digestManager, now: () => now,
+    randomBytes: length => new Uint8Array(length).fill(8 + ++entropy),
+  });
+  const issued = await vault.put('https://example.test/batch?private=1', {
+    auditId: 'audit-queue', purpose: 'batch-page', ttlMs: 7_200_000, includeQuery: false,
+  });
+  const expiring = await vault.put('https://example.test/expired-batch?private=1', {
+    auditId: 'audit-expired', purpose: 'batch-page', ttlMs: 7_200_000, includeQuery: false,
+  });
+  now += 1_000;
+  const laterIssued = await vault.put('https://example.test/batch-later?private=1', {
+    auditId: 'audit-queue', purpose: 'batch-page', ttlMs: 7_200_000, includeQuery: false,
+  });
+  await vault.putQueue({
+    auditId: 'audit-queue',
+    entries: [{ line: 1, navigationToken: issued.navigationToken, evidenceUrl: issued.evidenceUrl,
+      sessionDigest: issued.sessionDigest, status: 'pending' },
+    { line: 2, navigationToken: laterIssued.navigationToken, evidenceUrl: laterIssued.evidenceUrl,
+      sessionDigest: laterIssued.sessionDigest, status: 'pending' }],
+  });
+  const first = await vault.readQueue('audit-queue');
+  assert.equal(first.revision, 1);
+  assert.equal(first.issuedAt, operationStartedAt);
+  assert.equal(first.expiresAt, operationStartedAt + 7_200_000);
+  assert.equal((await sessionArea.get(`audita:raw-navigation:v1:${laterIssued.navigationToken}`))[
+    `audita:raw-navigation:v1:${laterIssued.navigationToken}`
+  ].expiresAt, operationStartedAt + 7_200_000);
+  assert.match(first.ownerOperationId, /^[A-Za-z0-9_-]{22}$/u);
+  const next = structuredClone(first);
+  next.revision = 2;
+  next.entries[0].status = 'running';
+  const foreignOwner = structuredClone(next);
+  foreignOwner.ownerOperationId = 'F'.repeat(22);
+  await assert.rejects(vault.replaceQueue('audit-queue', foreignOwner, {
+    expectedRevision: 1, expectedState: { nextIndex: 0, status: 'pending' },
+  }), /fila de navegação desatualizada/iu);
+  assert.equal((await vault.readQueue('audit-queue')).revision, 1);
+  await vault.replaceQueue('audit-queue', next, {
+    expectedRevision: 1, expectedState: { nextIndex: 0, status: 'pending' },
+  });
+  await assert.rejects(vault.replaceQueue('audit-queue', next, {
+    expectedRevision: 1, expectedState: { nextIndex: 0, status: 'pending' },
+  }), /fila de navegação desatualizada/iu);
+  now = operationStartedAt + 7_200_000;
+  await assert.rejects(vault.putQueue({
+    auditId: 'audit-expired',
+    entries: [{ line: 1, navigationToken: expiring.navigationToken, evidenceUrl: expiring.evidenceUrl,
+      sessionDigest: expiring.sessionDigest, status: 'pending' }],
+  }), /RAW_NAVIGATION_INVALID/u);
+  assert.equal(await vault.readQueue('audit-queue'), null);
+  assert.equal(await vault.clearExpired(), 3);
 });
 
 test('fails closed without returning raw URL when removal cannot be verified', async () => {
