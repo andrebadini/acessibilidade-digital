@@ -442,6 +442,89 @@ git commit -m "feat: isolate volatile navigation authority"
 
 ### Task 3: Implementar sonda, consentimento one-shot e retomada segura
 
+> **Emenda executiva obrigatória — 2026-08-30.** Esta emenda prevalece sobre
+> qualquer trecho conflitante desta Task 3 e das Tasks 4 e 7. A extensão é
+> **Side Panel only**: não restaurar `default_popup`, `src/popup/*`, mensagens
+> `POPUP_*`, `openActionPopup` ou qualquer fluxo público de popup. Referências
+> históricas a popup nos arquivos, passos e E2Es abaixo devem ser ignoradas ou
+> convertidas para o painel lateral. Testes devem continuar comprovando zero
+> popup.
+
+#### Contratos rebaselinados
+
+- **R1 — pausa no mesmo percurso visual:** `privacy-paused` conserva
+  `document.body.dataset.screen = 'running'` e publica
+  `document.body.dataset.sessionStatus = 'privacy-paused'`. Não existe uma
+  quinta tela pública `privacy-paused`.
+- **R2 — ownership V2:** novos registros são exclusivamente
+  `OwnedDisposableTabV2`. V1 é leitura de migração somente para limpeza da aba
+  exata e remoção do registro; nunca é retomado, promovido ou convertido.
+- **R5 — uma política:** `createCapturePolicyV1` permanece a única factory
+  pública. Não criar `normalizeCapturePolicyV1` nem uma autoridade paralela.
+- **R6 — mudança sensível exige novo aceite:** o claim compara, dentro da mesma
+  CAS, as categorias atuais com a lista ordenada da pausa. Adição, remoção ou
+  troca de categoria, inclusive entre a sonda da confirmação e a sonda do
+  runner, repausa e exige novo consentimento antes de qualquer pixel.
+- **R7 — revogação e limpeza separadas:** `revokeAudit` apenas persiste a
+  transição `revoked`. Um único coordenador liquida sessão, página/lote, owner e
+  checkpoint; somente depois chama `finish({auditId,consentId})`, que valida o
+  par antes de remover o journal.
+- **R18 — status único:** o status canônico do runner é
+  `complete|partial|failed|cancelled|privacy-paused`. `observationState` apenas
+  explica se a observação ocorreu. Página, lote, latest e UI projetam esse
+  status; não derivam máquinas concorrentes.
+
+#### Ordem de implementação TDD
+
+1. **3A — política e sonda, sem integração pública.** Sonda fechada e
+   descriptor-safe, sem valores, texto, HTML ou seletores; cobrir frames,
+   atributos case-insensitive, Shadow DOM aberto e falha/incerteza como negação
+   de pixels.
+2. **3B — journal e coordenador de liquidação.** Escrita confirmada, recovery de
+   `throw-before`, `commit-then-throw`, commit parcial, promessa tardia e
+   restart; scheduler ainda não exposto ao fluxo público.
+3. **3C — ownership V2 e runner canônico.** Rejeitar parâmetros legados antes
+   de efeitos, emitir `failed` canônico e manter o percurso público em
+   `no-pixels` até o gate ficar verde.
+4. **3D — pausa/retomada anexada no Side Panel.** Separar o segmento que detém
+   `targetQueue` da promessa durável de conclusão; retomada readquire a fila,
+   limpa persona/destaque e reprova o documento. Integrar Port, lifecycle,
+   bootstrap, reducer e view do painel, sem popup.
+5. **4A antecipada — fundação tokenizada de URL/lote.** Antes de implementar
+   pausa na página ativa de lote, concluir capability de navegação, tokens do
+   `rawNavigationVault`, `sessionTargetCoordinator`, binding
+   parent/page/ownership e checkpoint sanitizado previstos na Task 4.
+6. **3E — pausa/retomada de lote.** Só após 4A: persistir a página retomada,
+   confirmar cleanup, limpar o par ativo e continuar exatamente uma vez, sem
+   publicar modelo de página no slot do pai.
+
+#### Correções técnicas vinculantes
+
+- O journal deve ser uma autoridade durável única ou usar journal de mutação;
+  uma chamada `storage.session.set` com duas chaves não é tratada como atômica
+  sem releitura e recovery.
+- `PixelCaptureClaimV1` e `claimAndBeginResume` devem carregar/validar a lista
+  ordenada de categorias para cumprir R6.
+- `AuditSuspensionV1` inclui variante durável `revoked`; `finish` recebe o par
+  `{auditId,consentId}`.
+- Tempos internos e `nextExpiresAt()` usam epoch em milissegundos; ISO é apenas
+  projeção de UI/modelo. Rollback de relógio falha fechado.
+- Parsers preservam `Reflect.ownKeys` e own data descriptors; não substituir por
+  `Object.keys`, que pode reintroduzir getters.
+- A sonda nunca interpreta cobertura incompleta como `detected:false`. Erro em
+  qualquer frame, acesso negado ou resultado incerto bloqueia pixels.
+- O runner não esconde pipeline, ownership ou navegação dentro de
+  `chromeAdapter`; dependências permanecem explícitas ou numa factory fechada.
+- `runtime.onStartup` não cria uma segunda autoridade. Recovery ocorre no único
+  bootstrap já usado pelo runtime, e o único listener de alarmes apenas delega
+  ao scheduler.
+- Além dos arquivos listados abaixo, a integração do painel inclui
+  `panel-view.js`, `panel.css`, `panel-session-port.js`, `panel-port.js`,
+  `side-panel-intent-router.js`, `audit-lifecycle.js` e seus testes. O
+  `index.html` continua sendo shell mínimo.
+- Limites de URL/lote e payload do Port só mudam em 4A, de forma seletiva e
+  depois da tokenização; a Task 3 não envia URL bruta pelo Port.
+
 **Files:**
 
 - Modify: `src/core/privacy/capture-policy.js`
