@@ -1531,6 +1531,73 @@ test('rejects revoke results outside the allowed status-specific correlation', a
   }
 });
 
+for (const scenario of [
+  { state: 'paused', resumePhase: null, startup: false },
+  { state: 'resuming', resumePhase: 'consent-claimed', startup: true },
+  { state: 'resuming', resumePhase: 'session-running', startup: true },
+]) {
+  const label = scenario.resumePhase ?? scenario.state;
+  test(`preserves cleanup for an impossible ${label} to finished r+1 result`, async () => {
+    const fixtureValue = fixture();
+    const candidate = Object.freeze({
+      ...recoveryCandidate({
+        auditId: `audit-impossible-finished-${label}`,
+        state: scenario.state,
+        revokeReason: null,
+        expiresAt: scenario.state === 'paused' ? NOW - 1 : NOW + 1_000,
+      }),
+      resumePhase: scenario.resumePhase,
+    });
+    const impossibleFinished = Object.freeze({
+      ...candidate,
+      revision: candidate.revision + 1,
+      cleanupAttempts: 0,
+      cleanupNotBefore: NOW,
+      state: 'finished',
+      resumePhase: null,
+      revokeReason: null,
+    });
+    let cleanupPending = true;
+    let liquidatorCalls = 0;
+    let deferCalls = 0;
+    let finishCalls = 0;
+    const state = {
+      async listRecoveryCandidates() {
+        return Object.freeze({
+          version: 'PixelRecoveryScanV1',
+          candidates: Object.freeze(cleanupPending ? [candidate] : []),
+          unavailableAuditIds: Object.freeze([]), hasUnattributedUnavailable: false,
+          blockingCount: cleanupPending && scenario.state === 'resuming' ? 1 : 0,
+        });
+      },
+      async revokeAudit() {
+        return Object.freeze({
+          version: 'PixelRevokeResultV1', status: 'finished',
+          suspension: impossibleFinished,
+        });
+      },
+      async deferCleanup() { deferCalls += 1; return null; },
+      async finish() { finishCalls += 1; cleanupPending = false; return true; },
+      async nextExpiresAt() { return null; },
+    };
+    const scheduler = createPixelConsentExpirySchedulerV1(fixtureValue.chromeApi, {
+      pixelState: state,
+      liquidator: { async liquidate() { liquidatorCalls += 1; return true; } },
+      now: () => NOW,
+    });
+
+    if (scenario.startup) {
+      await assert.rejects(scheduler.recoverOnStartup(), /PIXEL_RECOVERY_PENDING/u);
+    } else {
+      await scheduler.run('panel');
+    }
+    assert.deepEqual(
+      { liquidatorCalls, deferCalls, finishCalls, cleanupPending },
+      { liquidatorCalls: 0, deferCalls: 0, finishCalls: 0, cleanupPending: true },
+    );
+  });
+}
+
 for (const race of [
   { state: 'paused', firstReason: 'AUDIT_CANCELLED', startup: false },
   { state: 'resuming', firstReason: 'SESSION_ENDED', startup: true },

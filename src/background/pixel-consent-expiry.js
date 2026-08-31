@@ -176,8 +176,15 @@ function correlatedAlreadyRevoked(candidate, suspension) {
 }
 
 function terminalFinishAfter(candidate, suspension) {
-  return ['paused', 'resuming', 'revoked'].includes(candidate.state) &&
-    suspension.revision > candidate.revision &&
+  const revisionSteps = candidate.state === 'revoked' ||
+    candidate.state === 'resuming' && candidate.resumePhase === 'runner-started'
+    ? 1
+    : ['paused', 'resuming'].includes(candidate.state)
+      ? 2
+      : null;
+  return revisionSteps !== null &&
+    candidate.revision <= Number.MAX_SAFE_INTEGER - revisionSteps &&
+    suspension.revision >= candidate.revision + revisionSteps &&
     suspension.updatedAt >= candidate.updatedAt &&
     suspension.state === 'finished' && suspension.resumePhase === null &&
     suspension.revokeReason === null && suspension.cleanupAttempts === 0 &&
