@@ -256,16 +256,26 @@ function storedRevision(value) {
   return value;
 }
 
-function storedExportAttempt(value) {
-  if (value === undefined) return 0;
-  if (!Number.isSafeInteger(value) || value < 0 || value >= Number.MAX_SAFE_INTEGER) {
+function storedExportAttempt(value, auditId) {
+  if (value === undefined) return { exportAttempt: 0, deliveryAt: null };
+  if (Number.isSafeInteger(value) && value >= 0 && value < Number.MAX_SAFE_INTEGER) {
+    return { exportAttempt: value, deliveryAt: null };
+  }
+  const record = exactDataRecord(value, ['schemaVersion', 'auditId', 'exportAttempt', 'deliveryAt']);
+  if (!record || record.schemaVersion !== 1 || record.auditId !== auditId ||
+    !Number.isSafeInteger(record.exportAttempt) || record.exportAttempt < 1 ||
+    record.exportAttempt >= Number.MAX_SAFE_INTEGER) {
     throw new TypeError('Tentativa armazenada da exportação inválida.');
   }
-  return value;
+  let deliveryAt;
+  try { deliveryAt = canonicalLeaseNow(record.deliveryAt).now; }
+  catch { throw new TypeError('Tentativa armazenada da exportação inválida.'); }
+  return { exportAttempt: record.exportAttempt, deliveryAt };
 }
 
-function nextExportAttempt(value, latest, auditId) {
-  let previous = storedExportAttempt(value);
+function nextExportAttempt(value, latest, auditId, now) {
+  const stored = storedExportAttempt(value, auditId);
+  let previous = stored.exportAttempt;
   if (latest && typeof latest === 'object' && !Array.isArray(latest) && latest.auditId === auditId &&
     latest.exportAttempt !== undefined) {
     if (!Number.isSafeInteger(latest.exportAttempt) || latest.exportAttempt < 1 ||
@@ -274,7 +284,41 @@ function nextExportAttempt(value, latest, auditId) {
     }
     previous = Math.max(previous, latest.exportAttempt);
   }
-  return previous + 1;
+  const instant = canonicalLeaseNow(now);
+  const previousDeliveryMs = stored.deliveryAt === null ? null : new Date(stored.deliveryAt).getTime();
+  const deliveryMs = previousDeliveryMs === null ? instant.nowMs : Math.max(instant.nowMs, previousDeliveryMs + 1);
+  let deliveryAt;
+  try { deliveryAt = new Date(deliveryMs).toISOString(); }
+  catch { throw new TypeError('Tentativa armazenada da exportação inválida.'); }
+  return { exportAttempt: previous + 1, deliveryAt };
+}
+
+function exportAttemptRecord(auditId, exportAttempt, deliveryAt) {
+  canonicalLeaseNow(deliveryAt);
+  return Object.freeze({ schemaVersion: 1, auditId, exportAttempt, deliveryAt });
+}
+
+function correlatedExportAttemptRecord(value, auditId, lease) {
+  const stored = storedExportAttempt(value, auditId);
+  if (stored.exportAttempt !== lease.exportAttempt ||
+    (stored.deliveryAt !== null && stored.deliveryAt !== lease.deliveryAt)) {
+    throw new TypeError('Tentativa armazenada da exportação inválida.');
+  }
+  return exportAttemptRecord(auditId, lease.exportAttempt, lease.deliveryAt);
+}
+
+function migrateExportAttemptBeforeLeaseRemoval(attemptValue, leaseValue, auditId) {
+  if (leaseValue === undefined) return null;
+  const currentKeys = [
+    'schemaVersion', 'auditId', 'ownerId', 'revision', 'exportAttempt', 'phase',
+    'acquiredAt', 'deliveryAt', 'expiresAt',
+  ];
+  const legacyKeys = currentKeys.filter(key => key !== 'deliveryAt');
+  const record = exactDataRecord(leaseValue, currentKeys) ?? exactDataRecord(leaseValue, legacyKeys);
+  if (!record || !Number.isSafeInteger(record.revision) || record.revision < 0) return null;
+  const lease = activeExportLease(record, auditId, record.revision, Number.NEGATIVE_INFINITY);
+  if (!lease) return null;
+  return correlatedExportAttemptRecord(attemptValue, auditId, lease);
 }
 
 function revisionKey(id) {
@@ -462,11 +506,43 @@ function canonicalDeliveryOptions(options, outcome = false) {
     identity = { mimeType: options.mimeType, byteSize: options.byteSize, sha256: options.sha256 };
   }
   const state = options?.state;
+  if (state === 'identified') {
+    const requestedFilename = options?.requestedFilename;
+    if (identityProvided || downloadId === undefined || typeof requestedFilename !== 'string' ||
+      requestedFilename !== requestedFilename.trim() || requestedFilename.length < 6 ||
+      requestedFilename.length > 255 || !requestedFilename.endsWith(`.${format}`) ||
+      !isRequestedOrUniquifiedFilename(filename, requestedFilename, format)) {
+      throw new TypeError('Estado do journal de entrega inválido.');
+    }
+    return {
+      ownerId, exportAttempt, ...instant, format, requestedFilename, filename, downloadId, state,
+    };
+  }
+  if (options?.requestedFilename !== undefined) {
+    throw new TypeError('Estado do journal de entrega inválido.');
+  }
   if (!['starting', 'in-flight', 'terminal'].includes(state) ||
     (state !== 'starting' && downloadId === undefined)) {
     throw new TypeError('Estado do journal de entrega inválido.');
   }
   return { ownerId, exportAttempt, ...instant, format, filename, downloadId, state, ...identity };
+}
+
+function isRequestedOrUniquifiedFilename(filename, requestedFilename, format) {
+  if (typeof filename !== 'string' || filename.length < 6 || filename.length > 255 ||
+    filename !== filename.trim() || /[\\/\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/u.test(filename) ||
+    /[\\/\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/u.test(requestedFilename)) return false;
+  if (filename === requestedFilename) return true;
+  const requestedSuffix = `.${format}`;
+  const stem = requestedFilename.slice(0, -requestedSuffix.length);
+  const prefix = `${stem} (`;
+  const suffix = `)${requestedSuffix}`;
+  if (!filename.startsWith(prefix) || !filename.endsWith(suffix)) return false;
+  const index = filename.slice(prefix.length, -suffix.length);
+  if (!/^[1-9]\d*$/u.test(index)) return false;
+  const numericIndex = Number(index);
+  return Number.isSafeInteger(numericIndex) && numericIndex >= 1 && String(numericIndex) === index &&
+    filename === `${prefix}${index}${suffix}`;
 }
 
 function canonicalDeliveryJournal(value, auditId) {
@@ -535,30 +611,46 @@ function exportReceiptFromRevision(reportRevision, entries) {
 
 function exportReceiptFromLatest(latest, auditId) {
   try {
+    latest = storageClone(latest);
     if (!latest || typeof latest !== 'object' || Array.isArray(latest) || latest.auditId !== auditId ||
-      latest.exportStatus !== 'complete') return null;
+      !['complete', 'partial'].includes(latest.exportStatus)) return null;
+    const status = latest.exportStatus;
     const rawIdentity = latest.exportDeliveryIdentity;
     if (!rawIdentity || typeof rawIdentity !== 'object' || Array.isArray(rawIdentity) ||
       canonicalStringify(Object.keys(rawIdentity).sort()) !== canonicalStringify(['attemptId', 'auditId', 'modelHash', 'modelRevision'])) return null;
     const identity = createExportDeliveryIdentityV1(rawIdentity);
     if (identity.auditId !== auditId) return null;
     const receipt = latest.deliveryReceipt;
-    if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt) || receipt.status !== 'complete' ||
-      !Array.isArray(receipt.formats) || receipt.formats.length !== EXPORT_FORMATS_V1.length ||
-      !Array.isArray(receipt.limitations) || receipt.limitations.length !== 0 ||
+    if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt) || receipt.status !== status ||
+      !Array.isArray(receipt.formats) || receipt.formats.length > EXPORT_FORMATS_V1.length ||
+      !Array.isArray(receipt.limitations) ||
       canonicalStringify(Object.keys(receipt).sort()) !== canonicalStringify(['formats', 'limitations', 'status'])) return null;
+    if (receipt.limitations.some(value => typeof value !== 'string' || !value.trim()) ||
+      new Set(receipt.limitations).size !== receipt.limitations.length ||
+      (status === 'complete' ? receipt.limitations.length !== 0 : receipt.limitations.length === 0)) return null;
     const seenDownloadIds = new Set();
-    const formats = receipt.formats.map((entry, index) => {
-      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || entry.format !== EXPORT_FORMATS_V1[index] ||
-        canonicalStringify(Object.keys(entry).sort()) !== canonicalStringify(['byteSize', 'downloadId', 'filename', 'format', 'mimeType', 'sha256', 'status']) ||
-        entry.status !== 'complete' || entry.mimeType !== EXPORT_MIME_V1[entry.format] || typeof entry.filename !== 'string' ||
+    const seenFormats = new Set();
+    let previousFormatIndex = -1;
+    const formats = [];
+    for (const entry of receipt.formats) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !EXPORT_FORMATS.has(entry.format) ||
+        seenFormats.has(entry.format) || !['complete', 'timeout', 'interrupted'].includes(entry.status)) throw new TypeError();
+      const formatIndex = EXPORT_FORMATS_V1.indexOf(entry.format);
+      if (formatIndex <= previousFormatIndex) throw new TypeError();
+      previousFormatIndex = formatIndex;
+      seenFormats.add(entry.format);
+      if (entry.status !== 'complete') continue;
+      if (canonicalStringify(Object.keys(entry).sort()) !== canonicalStringify(['byteSize', 'downloadId', 'filename', 'format', 'mimeType', 'sha256', 'status']) ||
+        entry.mimeType !== EXPORT_MIME_V1[entry.format] || typeof entry.filename !== 'string' ||
         !Number.isSafeInteger(entry.byteSize) || entry.byteSize < 0 || !/^[a-f0-9]{64}$/u.test(entry.sha256 ?? '') ||
         !Number.isSafeInteger(entry.downloadId) || entry.downloadId < 0 || seenDownloadIds.has(entry.downloadId)) throw new TypeError();
       seenDownloadIds.add(entry.downloadId);
-      return { format: entry.format, mimeType: entry.mimeType, byteSize: entry.byteSize,
-        sha256: entry.sha256, downloadId: entry.downloadId, state: 'complete' };
-    });
-    return freezeStored({ version: 1, ...identity, status: 'complete', formats });
+      formats.push({ format: entry.format, mimeType: entry.mimeType, byteSize: entry.byteSize,
+        sha256: entry.sha256, downloadId: entry.downloadId, state: 'complete' });
+    }
+    if (status === 'complete' &&
+      (receipt.formats.length !== EXPORT_FORMATS_V1.length || formats.length !== EXPORT_FORMATS_V1.length)) return null;
+    return freezeStored({ version: 1, ...identity, status, formats });
   } catch {
     return null;
   }
@@ -578,11 +670,44 @@ function pendingCleanupLatest(latest, entries) {
 }
 
 function updateDeliveryEntries(entries, options) {
+  if (options.state === 'identified') {
+    const matches = entries
+      .map((entry, index) => ({ entry, index }))
+      .filter(({ entry }) => entry.ownerId === options.ownerId &&
+        entry.exportAttempt === options.exportAttempt && entry.format === options.format &&
+        entry.filename === options.requestedFilename && entry.state === 'in-flight' &&
+        entry.downloadId === options.downloadId);
+    if (matches.length !== 1 || entries.some((entry, index) => index !== matches[0]?.index &&
+      entry.ownerId === options.ownerId && entry.exportAttempt === options.exportAttempt &&
+      entry.format === options.format && entry.filename === options.filename)) {
+      throw new TypeError('Identificação do download não corresponde ao journal persistente.');
+    }
+    const { entry: previous, index } = matches[0];
+    const updatedAt = new Date(options.now).getTime() < new Date(previous.updatedAt).getTime()
+      ? previous.updatedAt
+      : options.now;
+    const next = [...entries];
+    next[index] = {
+      ...previous,
+      filename: options.filename,
+      updatedAt,
+    };
+    return next;
+  }
   const index = entries.findIndex(entry => entry.ownerId === options.ownerId &&
     entry.exportAttempt === options.exportAttempt && entry.format === options.format && entry.filename === options.filename);
   const previous = index >= 0 ? entries[index] : null;
   if (previous && previous.downloadId !== undefined && options.downloadId !== undefined &&
     previous.downloadId !== options.downloadId) throw new TypeError('Download divergente no journal de entrega.');
+  if (previous?.state === 'terminal') {
+    const exactRetry = options.state === 'terminal' &&
+      previous.downloadId === options.downloadId &&
+      previous.mimeType === options.mimeType &&
+      previous.byteSize === options.byteSize &&
+      previous.sha256 === options.sha256;
+    if (exactRetry) return entries;
+    throw new TypeError('Identidade terminal do journal de entrega é imutável.');
+  }
   const order = { starting: 0, 'in-flight': 1, terminal: 2, 'cleanup-failed': 3 };
   if (previous && order[options.state] < order[previous.state]) {
     throw new TypeError('Regressão no journal de entrega.');
@@ -612,10 +737,24 @@ function updateDeliveryEntries(entries, options) {
 }
 
 function resolveDeliveryEntries(entries, options) {
-  const index = entries.findIndex(entry => entry.ownerId === options.ownerId &&
-    entry.exportAttempt === options.exportAttempt && entry.format === options.format && entry.filename === options.filename &&
-    (options.downloadId === undefined || entry.downloadId === undefined || entry.downloadId === options.downloadId));
-  if (index < 0) return { entries, matched: false };
+  let index = entries.findIndex(entry => entry.ownerId === options.ownerId &&
+    entry.exportAttempt === options.exportAttempt && entry.format === options.format &&
+    (options.downloadId === undefined
+      ? entry.filename === options.filename
+      : entry.downloadId === options.downloadId));
+  if (index < 0 && options.downloadId !== undefined) {
+    const preIdMatches = entries
+      .map((entry, candidate) => ({ entry, candidate }))
+      .filter(({ entry }) => entry.ownerId === options.ownerId &&
+        entry.exportAttempt === options.exportAttempt && entry.format === options.format &&
+        entry.filename === options.filename && entry.state === 'starting' && entry.downloadId === undefined);
+    if (preIdMatches.length === 1) index = preIdMatches[0].candidate;
+  }
+  if (index < 0) {
+    const conflictingSlot = entries.some(entry => entry.ownerId === options.ownerId &&
+      entry.exportAttempt === options.exportAttempt && entry.format === options.format);
+    return { entries, matched: options.outcome === 'cleaned' && !conflictingSlot };
+  }
   if (options.outcome === 'cleaned') {
     return { entries: entries.filter((_, candidate) => candidate !== index), matched: true };
   }
@@ -643,6 +782,44 @@ function isCompleteTerminalDelivery(entries, ownerId, exportAttempt) {
   return formats.size === EXPORT_FORMATS.size;
 }
 
+function terminalDeliveriesMatchReceipt(entries, latestState, auditId, ownerId, exportAttempt) {
+  let latest;
+  try { latest = storageClone(latestState); } catch { return false; }
+  if (!latest || typeof latest !== 'object' || Array.isArray(latest) || latest.auditId !== auditId ||
+    !['complete', 'partial'].includes(latest.exportStatus)) return false;
+  const receipt = latest.deliveryReceipt;
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt) ||
+    receipt.status !== latest.exportStatus || !Array.isArray(receipt.formats) ||
+    receipt.formats.length > EXPORT_FORMATS_V1.length || !Array.isArray(receipt.limitations)) return false;
+  const expected = [];
+  const seenFormats = new Set();
+  const seenDownloadIds = new Set();
+  for (const raw of receipt.formats) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !EXPORT_FORMATS.has(raw.format) ||
+      seenFormats.has(raw.format) || !['complete', 'timeout', 'interrupted'].includes(raw.status)) return false;
+    seenFormats.add(raw.format);
+    if (raw.status !== 'complete') continue;
+    if (typeof raw.filename !== 'string' || raw.filename !== raw.filename.trim() ||
+      raw.filename.length < 6 || raw.filename.length > 255 || !raw.filename.endsWith(`.${raw.format}`) ||
+      raw.mimeType !== EXPORT_MIME_V1[raw.format] || !Number.isSafeInteger(raw.byteSize) || raw.byteSize < 0 ||
+      !/^[a-f0-9]{64}$/u.test(raw.sha256 ?? '') || !Number.isSafeInteger(raw.downloadId) || raw.downloadId < 0 ||
+      seenDownloadIds.has(raw.downloadId)) return false;
+    seenDownloadIds.add(raw.downloadId);
+    expected.push({
+      format: raw.format, filename: raw.filename, mimeType: raw.mimeType, byteSize: raw.byteSize,
+      sha256: raw.sha256, downloadId: raw.downloadId,
+    });
+  }
+  if (receipt.status === 'complete' &&
+    (receipt.formats.length !== EXPORT_FORMATS_V1.length || expected.length !== EXPORT_FORMATS_V1.length)) return false;
+  if (entries.length !== expected.length) return false;
+  return expected.every(identity => entries.some(entry =>
+    entry.ownerId === ownerId && entry.exportAttempt === exportAttempt && entry.state === 'terminal' &&
+    entry.format === identity.format && entry.filename === identity.filename &&
+    entry.mimeType === identity.mimeType && entry.byteSize === identity.byteSize &&
+    entry.sha256 === identity.sha256 && entry.downloadId === identity.downloadId));
+}
+
 function activeExportLease(value, auditId, revision, nowMs) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.schemaVersion !== 1 ||
     value.auditId !== auditId || typeof value.ownerId !== 'string' ||
@@ -652,10 +829,14 @@ function activeExportLease(value, auditId, revision, nowMs) {
     typeof value.acquiredAt !== 'string' || typeof value.expiresAt !== 'string') return null;
   const acquiredAt = new Date(value.acquiredAt);
   const expiresAt = new Date(value.expiresAt);
+  const deliveryAtValue = Object.hasOwn(value, 'deliveryAt') ? value.deliveryAt : value.acquiredAt;
+  const deliveryAt = new Date(deliveryAtValue);
   if (!Number.isFinite(acquiredAt.getTime()) || acquiredAt.toISOString() !== value.acquiredAt ||
+    !Number.isFinite(deliveryAt.getTime()) || deliveryAt.toISOString() !== deliveryAtValue ||
+    deliveryAt.getTime() < acquiredAt.getTime() ||
     !Number.isFinite(expiresAt.getTime()) || expiresAt.toISOString() !== value.expiresAt ||
     expiresAt.getTime() <= acquiredAt.getTime() || expiresAt.getTime() <= nowMs) return null;
-  return value;
+  return Object.hasOwn(value, 'deliveryAt') ? value : { ...value, deliveryAt: deliveryAtValue };
 }
 
 function exportLeaseRecord(auditId, options, acquiredAt = options.now) {
@@ -667,6 +848,7 @@ function exportLeaseRecord(auditId, options, acquiredAt = options.now) {
     exportAttempt: options.exportAttempt,
     phase: options.phase,
     acquiredAt,
+    deliveryAt: options.deliveryAt,
     expiresAt: options.expiresAt,
   });
 }
@@ -676,6 +858,7 @@ function monotonicLeaseTransition(options, existing) {
   const requestedExpiryMs = options.nowMs + options.ttlMs;
   return {
     ...options,
+    deliveryAt: existing.deliveryAt,
     expiresAt: new Date(Math.max(priorExpiryMs, requestedExpiryMs)).toISOString(),
   };
 }
@@ -884,10 +1067,18 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
           options.deleteAfterCompleteExport === true,
         )
       : validateRetentionMetadata(currentRetention, key);
+    const migratedAttempt = options.keepExportLease === true
+      ? null
+      : migrateExportAttemptBeforeLeaseRemoval(
+          initial.get(exportAttemptKey(key)), initial.get(exportLeaseKey(key)), key,
+        );
     initial.set(key, modelClone);
     initial.set(revisionKey(key), revision);
     if (currentRetention === undefined) retention.set(key, firstRetention);
-    if (options.keepExportLease !== true) initial.delete(exportLeaseKey(key));
+    if (options.keepExportLease !== true) {
+      if (migratedAttempt !== null) initial.set(exportAttemptKey(key), migratedAttempt);
+      initial.delete(exportLeaseKey(key));
+    }
     if (options.review === true) {
       if (reviewLatest !== undefined) initial.set(LATEST_KEY, reviewLatest);
     } else if (latestState !== undefined) initial.set(LATEST_KEY, latestClone);
@@ -900,27 +1091,35 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     const currentRevision = storedRevision(initial.get(revisionKey(key)));
     if (currentModel === undefined || currentRevision !== revision) throw new AuditRevisionConflictError();
     const normalized = canonicalLeaseOptions(options, revision, 'queued');
-    const existing = activeExportLease(initial.get(exportLeaseKey(key)), key, revision, normalized.nowMs);
+    const leaseValue = initial.get(exportLeaseKey(key));
+    let attemptValue = initial.get(exportAttemptKey(key));
+    if (leaseValue !== undefined) {
+      const persistedLease = activeExportLease(leaseValue, key, revision, Number.NEGATIVE_INFINITY);
+      if (!persistedLease) throw new TypeError('Concessão armazenada da exportação inválida.');
+      attemptValue = correlatedExportAttemptRecord(attemptValue, key, persistedLease);
+    }
+    const existing = activeExportLease(leaseValue, key, revision, normalized.nowMs);
     if (existing) {
       return {
         acquired: false, busy: true, retryAt: existing.expiresAt,
         revision, exportAttempt: existing.exportAttempt,
       };
     }
-    const exportAttempt = nextExportAttempt(
-      initial.get(exportAttemptKey(key)), initial.get(LATEST_KEY), key,
+    const allocation = nextExportAttempt(
+      attemptValue, initial.get(LATEST_KEY), key, normalized.now,
     );
+    const { exportAttempt, deliveryAt } = allocation;
     const deliveryEntries = canonicalDeliveryJournal(initial.get(exportDeliveryKey(key)), key);
     const ownerId = normalized.ownerId === `export:${key}:pending`
       ? `export:${key}:${exportAttempt}`
       : normalized.ownerId;
-    const lease = exportLeaseRecord(key, { ...normalized, ownerId, exportAttempt });
+    const lease = exportLeaseRecord(key, { ...normalized, ownerId, exportAttempt, deliveryAt });
     initial.set(exportLeaseKey(key), lease);
-    initial.set(exportAttemptKey(key), exportAttempt);
+    initial.set(exportAttemptKey(key), exportAttemptRecord(key, exportAttempt, deliveryAt));
     if (normalized.latestState !== undefined) {
       initial.set(LATEST_KEY, pendingCleanupLatest({ ...normalized.latestState, exportAttempt }, deliveryEntries));
     }
-    return { acquired: true, busy: false, revision, exportAttempt, expiresAt: lease.expiresAt };
+    return { acquired: true, busy: false, revision, exportAttempt, deliveryAt, expiresAt: lease.expiresAt };
   };
   const claimExportLease = (id, snapshotCapability, options) => {
     const key = validId(id);
@@ -934,18 +1133,23 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       (normalized.exportAttempt !== undefined && normalized.exportAttempt !== existing.exportAttempt)) {
       throw new AuditExportLeaseConflictError();
     }
+    const attemptRecord = correlatedExportAttemptRecord(initial.get(exportAttemptKey(key)), key, existing);
     const deliveryEntries = canonicalDeliveryJournal(initial.get(exportDeliveryKey(key)), key);
     const lease = exportLeaseRecord(key, {
       ...monotonicLeaseTransition(normalized, existing),
       exportAttempt: existing.exportAttempt,
     }, existing.acquiredAt);
     initial.set(exportLeaseKey(key), lease);
+    initial.set(exportAttemptKey(key), attemptRecord);
     if (normalized.latestState !== undefined) {
       initial.set(LATEST_KEY, pendingCleanupLatest(
         { ...normalized.latestState, exportAttempt: existing.exportAttempt }, deliveryEntries,
       ));
     }
-    return { claimed: true, revision, exportAttempt: existing.exportAttempt, expiresAt: lease.expiresAt };
+    return {
+      claimed: true, revision, exportAttempt: existing.exportAttempt,
+      deliveryAt: existing.deliveryAt, expiresAt: lease.expiresAt,
+    };
   };
   const beginExportDelivery = (id, snapshotCapability, options) => {
     const key = validId(id);
@@ -959,15 +1163,20 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       (normalized.exportAttempt !== undefined && normalized.exportAttempt !== existing.exportAttempt)) {
       throw new AuditExportLeaseConflictError();
     }
+    const attemptRecord = correlatedExportAttemptRecord(initial.get(exportAttemptKey(key)), key, existing);
     const deliveryEntries = canonicalDeliveryJournal(initial.get(exportDeliveryKey(key)), key);
     const lease = exportLeaseRecord(key, {
       ...monotonicLeaseTransition(normalized, existing), exportAttempt: existing.exportAttempt,
     }, existing.acquiredAt);
     initial.set(exportLeaseKey(key), lease);
+    initial.set(exportAttemptKey(key), attemptRecord);
     if (normalized.latestState !== undefined) initial.set(LATEST_KEY, pendingCleanupLatest(
       { ...normalized.latestState, exportAttempt: existing.exportAttempt }, deliveryEntries,
     ));
-    return { delivering: true, revision, exportAttempt: existing.exportAttempt, expiresAt: lease.expiresAt };
+    return {
+      delivering: true, revision, exportAttempt: existing.exportAttempt,
+      deliveryAt: existing.deliveryAt, expiresAt: lease.expiresAt,
+    };
   };
   const commitAuditIfRevisionWithExportLease = (id, model, latestState, snapshotCapability, options) => {
     const key = validId(id);
@@ -983,6 +1192,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       (normalized.release && !['queued', 'running', 'delivering'].includes(existing.phase))) {
       throw new AuditExportLeaseConflictError();
     }
+    const attemptRecord = correlatedExportAttemptRecord(initial.get(exportAttemptKey(key)), key, existing);
     const deliveryEntries = canonicalDeliveryJournal(initial.get(exportDeliveryKey(key)), key);
     const latestWithAttempt = latestState === undefined
       ? undefined
@@ -995,6 +1205,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       throw new AuditExportLeaseConflictError('Existem arquivos obsoletos pendentes de reconciliação.');
     }
     const result = writeAudit(key, model, latestWithAttempt, snapshotCapability, { keepExportLease: true });
+    initial.set(exportAttemptKey(key), attemptRecord);
     if (normalized.release) {
       initial.delete(exportLeaseKey(key));
       if (normalized.clearDeliveryJournal) initial.delete(exportDeliveryKey(key));
@@ -1014,6 +1225,9 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     const normalized = canonicalLeaseOptions(options, revision);
     const existing = activeExportLease(initial.get(exportLeaseKey(key)), key, revision, normalized.nowMs);
     if (!existing || existing.ownerId !== normalized.ownerId) return false;
+    initial.set(exportAttemptKey(key), correlatedExportAttemptRecord(
+      initial.get(exportAttemptKey(key)), key, existing,
+    ));
     initial.delete(exportLeaseKey(key));
     return true;
   };
@@ -1044,9 +1258,10 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       (normalized.exportAttempt !== undefined && normalized.exportAttempt !== existing.exportAttempt)) {
       throw new AuditExportLeaseConflictError();
     }
+    correlatedExportAttemptRecord(initial.get(exportAttemptKey(key)), key, existing);
     return {
       active: true, phase: existing.phase, retryAt: existing.expiresAt,
-      revision, exportAttempt: existing.exportAttempt,
+      revision, exportAttempt: existing.exportAttempt, deliveryAt: existing.deliveryAt,
     };
   };
   const recordExportDelivery = (id, snapshotCapability, options) => {
@@ -1059,11 +1274,13 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     const existing = activeExportLease(initial.get(exportLeaseKey(key)), key, revision, normalized.nowMs);
     if (!existing || existing.ownerId !== normalized.ownerId || existing.exportAttempt !== normalized.exportAttempt ||
       existing.phase !== 'delivering') throw new AuditExportLeaseConflictError();
+    const attemptRecord = correlatedExportAttemptRecord(initial.get(exportAttemptKey(key)), key, existing);
     const entries = updateDeliveryEntries(
       canonicalDeliveryJournal(initial.get(exportDeliveryKey(key)), key), normalized,
     );
     const latest = initial.get(LATEST_KEY);
     const nextLatest = latest?.auditId === key ? pendingCleanupLatest(latest, entries) : undefined;
+    initial.set(exportAttemptKey(key), attemptRecord);
     initial.set(exportDeliveryKey(key), deliveryJournalRecord(key, entries));
     if (nextLatest !== undefined) initial.set(LATEST_KEY, nextLatest);
     return storageClone(entries.find(entry => entry.ownerId === normalized.ownerId &&
@@ -1141,9 +1358,11 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       !['queued', 'running', 'delivering'].includes(existing.phase)) {
       throw new AuditExportLeaseConflictError();
     }
+    correlatedExportAttemptRecord(initial.get(exportAttemptKey(key)), key, existing);
     const entries = canonicalDeliveryJournal(initial.get(exportDeliveryKey(key)), key);
     if (entries.some(entry => entry.ownerId !== existing.ownerId ||
-      entry.exportAttempt !== existing.exportAttempt || entry.state !== 'terminal')) {
+      entry.exportAttempt !== existing.exportAttempt || entry.state !== 'terminal') ||
+      !terminalDeliveriesMatchReceipt(entries, latestState, key, existing.ownerId, existing.exportAttempt)) {
       throw new AuditExportLeaseConflictError('Existem arquivos obsoletos pendentes de reconciliação.');
     }
     const metadata = validateRetentionMetadata(retention.get(key), key);
@@ -1598,9 +1817,13 @@ export function createAuditStore(options = {}) {
       let currentModelRead = false;
       let revisionRead = false;
       let retentionRead = false;
+      let leaseRead = false;
+      let attemptRead = false;
       let currentModel;
       let currentRevisionValue;
       let currentRetention;
+      let currentLease;
+      let currentAttempt;
       let latestRead = options.review !== true;
       let currentLatest;
       let nextRevision = null;
@@ -1612,9 +1835,12 @@ export function createAuditStore(options = {}) {
       const currentRequest = store.get(key);
       const revisionRequest = store.get(revisionKey(key));
       const retentionRequest = retentionStore.get(key);
+      const leaseRequest = store.get(exportLeaseKey(key));
+      const attemptRequest = store.get(exportAttemptKey(key));
       const latestRequest = options.review === true ? store.get(LATEST_KEY) : null;
       const apply = () => {
-        if (!currentModelRead || !revisionRead || !retentionRead || !latestRead || nextRevision !== null || conflict) return;
+        if (!currentModelRead || !revisionRead || !retentionRead || !leaseRead || !attemptRead ||
+          !latestRead || nextRevision !== null || conflict) return;
         let currentRevision;
         let canonicalCurrentModel;
         try {
@@ -1634,6 +1860,7 @@ export function createAuditStore(options = {}) {
         const candidateRevision = currentRevision + 1;
         let reviewLatest;
         let nextRetention;
+        let migratedAttempt;
         try {
           reviewLatest = options.review === true
             ? reviewLatestState(currentLatest, key, modelClone, candidateRevision)
@@ -1645,6 +1872,7 @@ export function createAuditStore(options = {}) {
                 options.deleteAfterCompleteExport === true,
               )
             : validateRetentionMetadata(currentRetention, key);
+          migratedAttempt = migrateExportAttemptBeforeLeaseRemoval(currentAttempt, currentLease, key);
         } catch (error) {
           finish(reject, error);
           try { transaction.abort(); } catch {}
@@ -1654,6 +1882,7 @@ export function createAuditStore(options = {}) {
         store.put(modelClone, key);
         store.put(nextRevision, revisionKey(key));
         if (currentRetention === undefined) retentionStore.put(nextRetention);
+        if (migratedAttempt !== null) store.put(migratedAttempt, exportAttemptKey(key));
         store.delete(exportLeaseKey(key));
         if (options.review === true) {
           if (reviewLatest !== undefined) store.put(reviewLatest, LATEST_KEY);
@@ -1674,6 +1903,16 @@ export function createAuditStore(options = {}) {
         currentRetention = retentionRequest.result;
         apply();
       };
+      leaseRequest.onsuccess = () => {
+        leaseRead = true;
+        currentLease = leaseRequest.result;
+        apply();
+      };
+      attemptRequest.onsuccess = () => {
+        attemptRead = true;
+        currentAttempt = attemptRequest.result;
+        apply();
+      };
       if (latestRequest) {
         latestRequest.onsuccess = () => {
           latestRead = true;
@@ -1685,6 +1924,8 @@ export function createAuditStore(options = {}) {
       currentRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       revisionRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       retentionRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      leaseRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      attemptRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       transaction.oncomplete = () => {
         if (conflict) finish(reject, new AuditRevisionConflictError());
         else if (nextRevision === null) finish(reject, new AuditStorageUnavailableError());
@@ -1743,6 +1984,21 @@ export function createAuditStore(options = {}) {
           return;
         }
         if (canonicalCurrentModel === undefined || revision !== expected) { revisionConflict = true; return; }
+        let attemptValue = currentAttempt;
+        if (currentLease !== undefined) {
+          const persistedLease = activeExportLease(currentLease, key, revision, Number.NEGATIVE_INFINITY);
+          if (!persistedLease) {
+            finish(reject, new TypeError('Concessão armazenada da exportação inválida.'));
+            try { transaction.abort(); } catch {}
+            return;
+          }
+          try { attemptValue = correlatedExportAttemptRecord(currentAttempt, key, persistedLease); }
+          catch (error) {
+            finish(reject, error);
+            try { transaction.abort(); } catch {}
+            return;
+          }
+        }
         const existing = activeExportLease(currentLease, key, revision, normalized.nowMs);
         if (existing) {
           result = {
@@ -1751,11 +2007,12 @@ export function createAuditStore(options = {}) {
           };
           return;
         }
-        let exportAttempt;
-        try { exportAttempt = nextExportAttempt(currentAttempt, currentLatest, key); } catch (error) {
+        let allocation;
+        try { allocation = nextExportAttempt(attemptValue, currentLatest, key, normalized.now); } catch (error) {
           finish(reject, error);
           return;
         }
+        const { exportAttempt, deliveryAt } = allocation;
         let deliveryEntries;
         try { deliveryEntries = canonicalDeliveryJournal(currentDelivery, key); } catch (error) {
           finish(reject, error);
@@ -1764,13 +2021,15 @@ export function createAuditStore(options = {}) {
         const ownerId = normalized.ownerId === `export:${key}:pending`
           ? `export:${key}:${exportAttempt}`
           : normalized.ownerId;
-        const lease = exportLeaseRecord(key, { ...normalized, ownerId, exportAttempt });
+        const lease = exportLeaseRecord(key, { ...normalized, ownerId, exportAttempt, deliveryAt });
         store.put(lease, exportLeaseKey(key));
-        store.put(exportAttempt, exportAttemptKey(key));
+        store.put(exportAttemptRecord(key, exportAttempt, deliveryAt), exportAttemptKey(key));
         if (normalized.latestState !== undefined) {
           store.put(pendingCleanupLatest({ ...normalized.latestState, exportAttempt }, deliveryEntries), LATEST_KEY);
         }
-        result = { acquired: true, busy: false, revision, exportAttempt, expiresAt: lease.expiresAt };
+        result = {
+          acquired: true, busy: false, revision, exportAttempt, deliveryAt, expiresAt: lease.expiresAt,
+        };
       };
       modelRequest.onsuccess = () => { modelRead = true; currentModel = modelRequest.result; apply(); };
       revisionRequest.onsuccess = () => { revisionRead = true; currentRevisionValue = revisionRequest.result; apply(); };
@@ -1810,11 +2069,13 @@ export function createAuditStore(options = {}) {
       let modelRead = false;
       let revisionRead = false;
       let leaseRead = false;
+      let attemptRead = false;
       let deliveryRead = false;
       let retentionRead = false;
       let currentModel;
       let currentRevisionValue;
       let currentLease;
+      let currentAttempt;
       let currentDelivery;
       let currentRetention;
       let result = null;
@@ -1827,10 +2088,12 @@ export function createAuditStore(options = {}) {
       const modelRequest = store.get(key);
       const revisionRequest = store.get(revisionKey(key));
       const leaseRequest = store.get(exportLeaseKey(key));
+      const attemptRequest = store.get(exportAttemptKey(key));
       const deliveryRequest = store.get(exportDeliveryKey(key));
       const retentionRequest = retentionStore.get(key);
       const apply = () => {
-        if (!modelRead || !revisionRead || !leaseRead || !deliveryRead || !retentionRead || result || revisionConflict || leaseConflict) return;
+        if (!modelRead || !revisionRead || !leaseRead || !attemptRead || !deliveryRead || !retentionRead ||
+          result || revisionConflict || leaseConflict) return;
         let revision;
         let canonicalCurrentModel;
         try {
@@ -1854,6 +2117,9 @@ export function createAuditStore(options = {}) {
               ? ['queued', 'running', 'delivering'].includes(existing.phase)
               : existing.phase === 'running' && normalized.phase === 'delivering');
         if (!allowed) { leaseConflict = true; return; }
+        let attemptRecord;
+        try { attemptRecord = correlatedExportAttemptRecord(currentAttempt, key, existing); }
+        catch (error) { finish(reject, error); return; }
         let deliveryEntries;
         try { deliveryEntries = canonicalDeliveryJournal(currentDelivery, key); } catch (error) {
           finish(reject, error);
@@ -1877,6 +2143,7 @@ export function createAuditStore(options = {}) {
             exportAttempt: existing.exportAttempt,
           }, existing.acquiredAt);
           store.put(lease, exportLeaseKey(key));
+          store.put(attemptRecord, exportAttemptKey(key));
           if (latestClone !== undefined) {
             store.put(pendingCleanupLatest(
               { ...latestClone, exportAttempt: existing.exportAttempt }, deliveryEntries,
@@ -1884,7 +2151,7 @@ export function createAuditStore(options = {}) {
           }
           result = {
             claimed: true, revision, exportAttempt: existing.exportAttempt,
-            expiresAt: lease.expiresAt,
+            deliveryAt: existing.deliveryAt, expiresAt: lease.expiresAt,
           };
           return;
         }
@@ -1894,18 +2161,20 @@ export function createAuditStore(options = {}) {
             exportAttempt: existing.exportAttempt,
           }, existing.acquiredAt);
           store.put(lease, exportLeaseKey(key));
+          store.put(attemptRecord, exportAttemptKey(key));
           if (latestClone !== undefined) store.put(pendingCleanupLatest(
             { ...latestClone, exportAttempt: existing.exportAttempt }, deliveryEntries,
           ), LATEST_KEY);
           result = {
             delivering: true, revision, exportAttempt: existing.exportAttempt,
-            expiresAt: lease.expiresAt,
+            deliveryAt: existing.deliveryAt, expiresAt: lease.expiresAt,
           };
           return;
         }
         const nextRevision = revision + 1;
         store.put(modelClone, key);
         store.put(nextRevision, revisionKey(key));
+        store.put(attemptRecord, exportAttemptKey(key));
         if (latestClone !== undefined) {
           store.put(pendingCleanupLatest(
             { ...latestClone, exportAttempt: existing.exportAttempt },
@@ -1929,11 +2198,13 @@ export function createAuditStore(options = {}) {
       modelRequest.onsuccess = () => { modelRead = true; currentModel = modelRequest.result; apply(); };
       revisionRequest.onsuccess = () => { revisionRead = true; currentRevisionValue = revisionRequest.result; apply(); };
       leaseRequest.onsuccess = () => { leaseRead = true; currentLease = leaseRequest.result; apply(); };
+      attemptRequest.onsuccess = () => { attemptRead = true; currentAttempt = attemptRequest.result; apply(); };
       deliveryRequest.onsuccess = () => { deliveryRead = true; currentDelivery = deliveryRequest.result; apply(); };
       retentionRequest.onsuccess = () => { retentionRead = true; currentRetention = retentionRequest.result; apply(); };
       modelRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       revisionRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       leaseRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      attemptRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       deliveryRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       retentionRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       transaction.oncomplete = () => {
@@ -1955,9 +2226,11 @@ export function createAuditStore(options = {}) {
       let settled = false;
       let revisionValue;
       let leaseValue;
+      let attemptValue;
       let modelValue;
       let revisionRead = false;
       let leaseRead = false;
+      let attemptRead = false;
       let modelRead = false;
       let released = false;
       const finish = (handler, value) => { if (!settled) { settled = true; handler(value); } };
@@ -1966,8 +2239,9 @@ export function createAuditStore(options = {}) {
       const modelRequest = store.get(key);
       const revisionRequest = store.get(revisionKey(key));
       const leaseRequest = store.get(exportLeaseKey(key));
+      const attemptRequest = store.get(exportAttemptKey(key));
       const apply = () => {
-        if (!modelRead || !revisionRead || !leaseRead) return;
+        if (!modelRead || !revisionRead || !leaseRead || !attemptRead) return;
         let revision;
         try {
           materializeCanonicalAuditModel(key, modelValue, { allowMissing: true });
@@ -1978,14 +2252,27 @@ export function createAuditStore(options = {}) {
           return;
         }
         const existing = activeExportLease(leaseValue, key, revision, normalized.nowMs);
-        if (existing?.ownerId === normalized.ownerId) { store.delete(exportLeaseKey(key)); released = true; }
+        if (existing?.ownerId === normalized.ownerId) {
+          let attemptRecord;
+          try { attemptRecord = correlatedExportAttemptRecord(attemptValue, key, existing); }
+          catch (error) {
+            finish(reject, error);
+            try { transaction.abort(); } catch {}
+            return;
+          }
+          store.put(attemptRecord, exportAttemptKey(key));
+          store.delete(exportLeaseKey(key));
+          released = true;
+        }
       };
       modelRequest.onsuccess = () => { modelRead = true; modelValue = modelRequest.result; apply(); };
       revisionRequest.onsuccess = () => { revisionRead = true; revisionValue = revisionRequest.result; apply(); };
       leaseRequest.onsuccess = () => { leaseRead = true; leaseValue = leaseRequest.result; apply(); };
+      attemptRequest.onsuccess = () => { attemptRead = true; attemptValue = attemptRequest.result; apply(); };
       modelRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       revisionRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       leaseRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      attemptRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       transaction.oncomplete = () => finish(resolve, released);
       transaction.onerror = () => finish(reject, new AuditStorageUnavailableError());
       transaction.onabort = () => finish(reject, new AuditStorageUnavailableError());
@@ -2011,7 +2298,7 @@ export function createAuditStore(options = {}) {
     const key = validId(id);
     const expected = capabilityRevision(snapshotCapability, owner, key);
     const normalized = canonicalLeaseOptions(options, expected, options?.phase ?? 'delivering');
-    const values = await readKeys([key, revisionKey(key), exportLeaseKey(key)]);
+    const values = await readKeys([key, revisionKey(key), exportLeaseKey(key), exportAttemptKey(key)]);
     const model = materializeCanonicalAuditModel(key, values.get(key), { allowMissing: true });
     const revision = storedRevision(values.get(revisionKey(key)));
     if (model === undefined || revision !== expected) throw new AuditRevisionConflictError();
@@ -2020,9 +2307,10 @@ export function createAuditStore(options = {}) {
       (normalized.exportAttempt !== undefined && normalized.exportAttempt !== existing.exportAttempt)) {
       throw new AuditExportLeaseConflictError();
     }
+    correlatedExportAttemptRecord(values.get(exportAttemptKey(key)), key, existing);
     return {
       active: true, phase: existing.phase, retryAt: existing.expiresAt,
-      revision, exportAttempt: existing.exportAttempt,
+      revision, exportAttempt: existing.exportAttempt, deliveryAt: existing.deliveryAt,
     };
   };
   const recordExportDelivery = async (id, snapshotCapability, options) => {
@@ -2035,11 +2323,13 @@ export function createAuditStore(options = {}) {
       let modelRead = false;
       let revisionRead = false;
       let leaseRead = false;
+      let attemptRead = false;
       let deliveryRead = false;
       let latestRead = false;
       let currentModel;
       let currentRevisionValue;
       let currentLease;
+      let currentAttempt;
       let currentDelivery;
       let currentLatest;
       let result = null;
@@ -2051,10 +2341,11 @@ export function createAuditStore(options = {}) {
       const modelRequest = store.get(key);
       const revisionRequest = store.get(revisionKey(key));
       const leaseRequest = store.get(exportLeaseKey(key));
+      const attemptRequest = store.get(exportAttemptKey(key));
       const deliveryRequest = store.get(exportDeliveryKey(key));
       const latestRequest = store.get(LATEST_KEY);
       const apply = () => {
-        if (!modelRead || !revisionRead || !leaseRead || !deliveryRead || !latestRead || result || revisionConflict || leaseConflict) return;
+        if (!modelRead || !revisionRead || !leaseRead || !attemptRead || !deliveryRead || !latestRead || result || revisionConflict || leaseConflict) return;
         let revision;
         let canonicalCurrentModel;
         try {
@@ -2071,10 +2362,13 @@ export function createAuditStore(options = {}) {
         const lease = activeExportLease(currentLease, key, revision, normalized.nowMs);
         if (!lease || lease.ownerId !== normalized.ownerId || lease.exportAttempt !== normalized.exportAttempt ||
           lease.phase !== 'delivering') { leaseConflict = true; return; }
+        let attemptRecord;
         let entries;
         try {
+          attemptRecord = correlatedExportAttemptRecord(currentAttempt, key, lease);
           entries = updateDeliveryEntries(canonicalDeliveryJournal(currentDelivery, key), normalized);
         } catch (error) { finish(reject, error); return; }
+        store.put(attemptRecord, exportAttemptKey(key));
         store.put(deliveryJournalRecord(key, entries), exportDeliveryKey(key));
         if (currentLatest?.auditId === key) store.put(pendingCleanupLatest(currentLatest, entries), LATEST_KEY);
         result = storageClone(entries.find(entry => entry.ownerId === normalized.ownerId &&
@@ -2083,11 +2377,13 @@ export function createAuditStore(options = {}) {
       modelRequest.onsuccess = () => { modelRead = true; currentModel = modelRequest.result; apply(); };
       revisionRequest.onsuccess = () => { revisionRead = true; currentRevisionValue = revisionRequest.result; apply(); };
       leaseRequest.onsuccess = () => { leaseRead = true; currentLease = leaseRequest.result; apply(); };
+      attemptRequest.onsuccess = () => { attemptRead = true; currentAttempt = attemptRequest.result; apply(); };
       deliveryRequest.onsuccess = () => { deliveryRead = true; currentDelivery = deliveryRequest.result; apply(); };
       latestRequest.onsuccess = () => { latestRead = true; currentLatest = latestRequest.result; apply(); };
       modelRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       revisionRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       leaseRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
+      attemptRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       deliveryRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       latestRequest.onerror = () => finish(reject, new AuditStorageUnavailableError());
       transaction.oncomplete = () => {
@@ -2482,10 +2778,11 @@ export function createAuditStore(options = {}) {
     const latestClone = latestState === undefined ? undefined : storageClone(latestState);
     const db = await open();
     return new Promise((resolve, reject) => {
-      let pending = 6;
+      let pending = 7;
       let modelValue;
       let revisionValue;
       let leaseValue;
+      let attemptValue;
       let deliveryValue;
       let latestValue;
       let retentionValue;
@@ -2503,6 +2800,7 @@ export function createAuditStore(options = {}) {
         let revision;
         let metadata;
         let entries;
+        let attemptRecord;
         try {
           revision = storedRevision(revisionValue);
           modelValue = materializeCanonicalAuditModel(key, modelValue, { allowMissing: true });
@@ -2512,8 +2810,15 @@ export function createAuditStore(options = {}) {
         if (modelValue === undefined || revision !== expected) { conflict = true; return; }
         const lease = activeExportLease(leaseValue, key, revision, normalized.nowMs);
         if (!lease || lease.ownerId !== normalized.ownerId || lease.exportAttempt !== normalized.exportAttempt ||
-          !['queued', 'running', 'delivering'].includes(lease.phase) || entries.some(entry =>
-            entry.ownerId !== lease.ownerId || entry.exportAttempt !== lease.exportAttempt || entry.state !== 'terminal')) {
+          !['queued', 'running', 'delivering'].includes(lease.phase)) {
+          leaseConflict = true;
+          return;
+        }
+        try { attemptRecord = correlatedExportAttemptRecord(attemptValue, key, lease); }
+        catch (error) { finish(reject, error); return; }
+        if (entries.some(entry => entry.ownerId !== lease.ownerId ||
+          entry.exportAttempt !== lease.exportAttempt || entry.state !== 'terminal') ||
+          !terminalDeliveriesMatchReceipt(entries, latestClone, key, lease.ownerId, lease.exportAttempt)) {
           leaseConflict = true;
           return;
         }
@@ -2535,6 +2840,7 @@ export function createAuditStore(options = {}) {
         const nextRevision = revision + 1;
         auditStore.put(modelClone, key);
         auditStore.put(nextRevision, revisionKey(key));
+        auditStore.put(attemptRecord, exportAttemptKey(key));
         auditStore.delete(exportLeaseKey(key));
         auditStore.delete(exportDeliveryKey(key));
         if (latestClone !== undefined) {
@@ -2546,6 +2852,7 @@ export function createAuditStore(options = {}) {
         [auditStore.get(key), value => { modelValue = value; }],
         [auditStore.get(revisionKey(key)), value => { revisionValue = value; }],
         [auditStore.get(exportLeaseKey(key)), value => { leaseValue = value; }],
+        [auditStore.get(exportAttemptKey(key)), value => { attemptValue = value; }],
         [auditStore.get(exportDeliveryKey(key)), value => { deliveryValue = value; }],
         [auditStore.get(LATEST_KEY), value => { latestValue = value; }],
         [retentionStore.get(key), value => { retentionValue = value; }],

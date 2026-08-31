@@ -238,7 +238,7 @@ export async function persistExportSuccess(request, store) {
       now: new Date().toISOString(),
       release: true,
       clearDeliveryJournal: true,
-      deleteAfterCompleteExport: true,
+      deleteAfterCompleteExport: false,
     },
   );
   return { model: verifiedModel, latest, deleted: finalized?.deleted === true };
@@ -276,7 +276,6 @@ function normalizeDeliveryReceipt(value, preparedFormats) {
   };
   const seen = new Set();
   const seenDownloadIds = new Set();
-  let commonBaseName = null;
   const formats = receipt.formats.map((entry, index) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry) ||
       !['complete', 'timeout', 'interrupted'].includes(entry.status) ||
@@ -298,8 +297,8 @@ function normalizeDeliveryReceipt(value, preparedFormats) {
       ? typeof entry.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(entry.sha256)
       : entry.sha256 === null;
     if (!failure && !complete || canonicalStringify(keys) !== canonicalStringify(expectedKeys) ||
-      typeof entry.filename !== 'string' || !/^[A-Za-z0-9._-]{1,255}$/u.test(entry.filename) ||
-      !entry.filename.endsWith(`.${entry.format}`) || entry.mimeType !== expectedMime[entry.format] || !hashValid ||
+      !isAttestedArtifactFilename(entry.filename, preparedFormats.baseName, entry.format) ||
+      entry.mimeType !== expectedMime[entry.format] || !hashValid ||
       (complete && (!Number.isSafeInteger(entry.byteSize) || entry.byteSize < 0)) ||
       (hasDownloadId && (!Number.isSafeInteger(entry.downloadId) || entry.downloadId < 0)) ||
       (complete && !hasDownloadId) || (!complete && entry.status !== failure.status)) {
@@ -309,10 +308,6 @@ function normalizeDeliveryReceipt(value, preparedFormats) {
       throw new TypeError('ID de download duplicado no recibo de entrega.');
     }
     if (hasDownloadId) seenDownloadIds.add(entry.downloadId);
-    const baseName = entry.filename.slice(0, -(entry.format.length + 1));
-    if (commonBaseName === null) commonBaseName = baseName;
-    else if (baseName !== commonBaseName) throw new TypeError('Arquivos do recibo de entrega não compartilham o mesmo nome-base.');
-    if (baseName !== preparedFormats.baseName) throw new TypeError('Nome-base do artefato no recibo de entrega não corresponde ao relatório.');
     seen.add(entry.format);
     return { ...entry };
   });
@@ -345,6 +340,22 @@ function normalizeDeliveryReceipt(value, preparedFormats) {
     : 'partial';
   if (receipt.status !== status) throw new TypeError('Status do recibo de entrega inválido.');
   return { status, formats, limitations };
+}
+
+function isAttestedArtifactFilename(value, requestedBaseName, format) {
+  if (typeof value !== 'string' || value.length < 6 || value.length > 255 ||
+    typeof requestedBaseName !== 'string' || !/^audita-[A-Za-z0-9._-]+-\d{8}T\d{9}Z$/u.test(requestedBaseName) ||
+    !EXPORT_FORMATS_V1.includes(format)) return false;
+  const requested = `${requestedBaseName}.${format}`;
+  if (value === requested) return true;
+  const prefix = `${requestedBaseName} (`;
+  const suffix = `).${format}`;
+  if (!value.startsWith(prefix) || !value.endsWith(suffix)) return false;
+  const index = value.slice(prefix.length, -suffix.length);
+  if (!/^[1-9]\d*$/u.test(index)) return false;
+  const numericIndex = Number(index);
+  return Number.isSafeInteger(numericIndex) && numericIndex >= 1 && String(numericIndex) === index &&
+    value === `${prefix}${index}${suffix}`;
 }
 
 function immutableRevisionFormats(receipt, artifactBaseName) {

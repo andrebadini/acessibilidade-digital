@@ -492,6 +492,54 @@ export async function resolveLaunchDirectories({ runRoot, downloadDirectory, qaD
   });
 }
 
+function resolveDownloadMode(value) {
+  const mode = value ?? 'cdp';
+  if (mode !== 'cdp' && mode !== 'profile') throw fixed('CHROME_LAUNCH_INVALID');
+  return mode;
+}
+
+export async function writeProfileDownloadPreferences(raw = {}) {
+  const keys = ['runRoot', 'downloadDirectory'];
+  if (!plain(raw) || Reflect.ownKeys(raw).length !== keys.length ||
+    Reflect.ownKeys(raw).some(key => typeof key !== 'string' || !keys.includes(key))) {
+    throw fixed('CHROME_LAUNCH_INVALID');
+  }
+  const runRoot = await canonicalDirectory(raw.runRoot, 'UNSAFE_LAUNCH_DIRECTORY');
+  const canonicalTmp = await realpath(tmpdir());
+  if (dirname(runRoot) !== canonicalTmp || !/^audita-real-chrome-[A-Za-z0-9]{6}$/u.test(basename(runRoot))) {
+    throw fixed('UNSAFE_LAUNCH_DIRECTORY');
+  }
+  const downloadDirectory = await canonicalDirectory(raw.downloadDirectory, 'UNSAFE_LAUNCH_DIRECTORY');
+  const defaultDirectory = join(runRoot, 'Default');
+  try {
+    await mkdir(defaultDirectory, { mode: 0o700 });
+    if (await realpath(defaultDirectory) !== defaultDirectory) throw fixed('UNSAFE_LAUNCH_DIRECTORY');
+    const preferencesPath = join(defaultDirectory, 'Preferences');
+    await writeFile(preferencesPath, `${JSON.stringify({
+      download: {
+        default_directory: downloadDirectory,
+        prompt_for_download: false,
+        directory_upgrade: true,
+      },
+    })}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    return preferencesPath;
+  } catch (error) {
+    throw error?.code === 'UNSAFE_LAUNCH_DIRECTORY' ? error : fixed('CHROME_LAUNCH_INVALID');
+  }
+}
+
+export async function configureDownloadBehavior(browser, downloadDirectory, downloadMode = 'cdp') {
+  const mode = resolveDownloadMode(downloadMode);
+  if (typeof browser?.command !== 'function' || !safeChromeFlagPath(downloadDirectory)) {
+    throw fixed('CHROME_LAUNCH_INVALID');
+  }
+  if (mode === 'profile') return false;
+  await browser.command('Browser.setDownloadBehavior', {
+    behavior: 'allow', downloadPath: downloadDirectory, eventsEnabled: true,
+  });
+  return true;
+}
+
 function sessionFor(browser, sessionId) {
   return Object.freeze({
     sessionId,
@@ -790,9 +838,12 @@ export function createBoundedBrowserCleanup(raw = {}) {
 }
 
 export async function launchUnpackedExtension(t, options = {}) {
-  const optionKeys = ['extensionPath', 'startUrl', 'downloadDirectory', 'viewport', 'chromeBinary', 'expectedMajor', 'qaDirectory'];
+  const optionKeys = [
+    'extensionPath', 'startUrl', 'downloadDirectory', 'viewport', 'chromeBinary', 'expectedMajor', 'qaDirectory', 'downloadMode',
+  ];
   if (!plain(options) || Reflect.ownKeys(options).some(key => typeof key !== 'string' || !optionKeys.includes(key)) ||
     !canonicalAbsolute(options.extensionPath) || !safeUrl(options.startUrl)) throw fixed('CHROME_LAUNCH_INVALID');
+  const downloadMode = resolveDownloadMode(options.downloadMode);
   const extensionPath = await resolveUnpackedExtensionPath(options.extensionPath);
   const chromeBinary = await resolveChromeBinary({ explicit: options.chromeBinary });
   const expectedMajor = resolveExpectedChromeMajor({ explicit: options.expectedMajor });
@@ -805,6 +856,11 @@ export async function launchUnpackedExtension(t, options = {}) {
     directories = await resolveLaunchDirectories({
       runRoot, downloadDirectory: options.downloadDirectory, qaDirectory: options.qaDirectory,
     });
+    if (downloadMode === 'profile') {
+      await writeProfileDownloadPreferences({
+        runRoot: directories.runRoot, downloadDirectory: directories.downloadDirectory,
+      });
+    }
   } catch (error) {
     await removeOwnedRunRoot(runRoot).catch(() => {});
     throw error;
@@ -849,9 +905,7 @@ export async function launchUnpackedExtension(t, options = {}) {
     const loaded = await discoverProcessLoadedExtension(launch);
     launch.extensionId = loaded.extensionId;
     launch.worker = loaded.worker;
-    await browser.command('Browser.setDownloadBehavior', {
-      behavior: 'allow', downloadPath: directories.downloadDirectory, eventsEnabled: true,
-    });
+    await configureDownloadBehavior(browser, directories.downloadDirectory, downloadMode);
     const harness = await openTabHarness(launch);
     await command(harness, 'ServiceWorker.enable');
     launch.startPage = await createRealPage(launch, { url: options.startUrl, active: true });

@@ -192,6 +192,10 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
         model: structuredClone(value.model), checkpoint: null,
       } : null;
     },
+    async getExportReceipt(auditId) {
+      storeCalls.push(['getExportReceipt', auditId]);
+      return fixtureOptions.exportReceipts?.get?.(auditId);
+    },
     async getAuditRetention(auditId) { return retentions.get(auditId); },
     async acquireExportLease(_auditId, _capability, options) {
       return leaseResult.acquired

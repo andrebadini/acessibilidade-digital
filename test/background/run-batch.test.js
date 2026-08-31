@@ -411,7 +411,7 @@ test('production default merges execution checkpoints and waits for owned cleanu
   assert.doesNotMatch(JSON.stringify(model), /checkpoint|owner-|CONTROLLED_NAVIGATION_FAILURE/u);
 });
 
-function timedDefaultAdapter({ removalFails = false, settleDelayMs = 3 } = {}) {
+function timedDefaultAdapter({ removalFails = false, settleDelayMs = 3, settleImmediately = false } = {}) {
   const values = {};
   const events = [];
   let nextTab = 80;
@@ -421,6 +421,7 @@ function timedDefaultAdapter({ removalFails = false, settleDelayMs = 3 } = {}) {
     async createTab() { const tab = { id: nextTab++, windowId: 9 }; events.push(`create:${tab.id}`); return tab; },
     async navigateTab(id) { events.push(`navigate:${id}`); },
     async waitForStable(id, { signal }) {
+      if (settleImmediately) throw new Error('CONTROLLED_IMMEDIATE_PAGE_FAILURE');
       if (id !== 80) throw new Error('CONTROLLED_SECOND_PAGE_FAILURE');
       return new Promise((_resolve, reject) => signal.addEventListener('abort', () => {
         events.push('abort:80');
@@ -593,4 +594,535 @@ test('clears the losing cleanup timer after a timed-out runner settles', async (
     globalThis.setTimeout = nativeSetTimeout;
     globalThis.clearTimeout = nativeClearTimeout;
   }
+});
+
+test('captures batch entries through own data descriptors without invoking accessors', async t => {
+  const baseline = structuredClone(normalizeUrlList('https://descriptors.example.test/public').entries[0]);
+  const cases = ['line', 'navigationUrl', 'evidenceUrl'];
+
+  for (const field of cases) {
+    await t.test(`rejects an accessor in ${field} without reading it`, async () => {
+      const marker = `PRIVATE_BATCH_${field.toUpperCase()}_GETTER`;
+      let reads = 0;
+      const entry = { ...baseline };
+      Object.defineProperty(entry, field, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          reads += 1;
+          throw new Error(marker);
+        },
+      });
+
+      await assert.rejects(runBatch({
+        entries: [entry], batchAuditId: `batch-accessor-${field}`,
+        runner() { throw new Error('RUNNER_MUST_NOT_START'); },
+        chromeAdapter: {}, now: clock(), reportOptions: REPORT_OPTIONS,
+      }), error => {
+        assert.equal(error instanceof TypeError, true);
+        assert.equal(error.message, 'Lista normalizada do lote inválida.');
+        assert.doesNotMatch(error.message, new RegExp(marker));
+        return true;
+      });
+      assert.equal(reads, 0);
+    });
+  }
+
+  await t.test('rejects an accessor array slot without reading it', async () => {
+    const marker = 'PRIVATE_BATCH_ARRAY_SLOT_GETTER';
+    let reads = 0;
+    const entries = new Array(1);
+    Object.defineProperty(entries, '0', {
+      enumerable: true,
+      configurable: true,
+      get() {
+        reads += 1;
+        throw new Error(marker);
+      },
+    });
+
+    await assert.rejects(runBatch({
+      entries, batchAuditId: 'batch-accessor-slot',
+      runner() { throw new Error('RUNNER_MUST_NOT_START'); },
+      chromeAdapter: {}, now: clock(), reportOptions: REPORT_OPTIONS,
+    }), error => {
+      assert.equal(error instanceof TypeError, true);
+      assert.equal(error.message, 'Lista normalizada do lote inválida.');
+      assert.doesNotMatch(error.message, new RegExp(marker));
+      return true;
+    });
+    assert.equal(reads, 0);
+  });
+});
+
+test('captures the outer batch request without invoking caller-controlled accessors', async t => {
+  const normalized = normalizeUrlList('https://outer-request.example.test/public').entries;
+  const baseRequest = {
+    entries: normalized,
+    batchAuditId: 'batch-outer-request',
+    runner: async options => rawChild({ auditId: options.idFactory(), url: options.url, now: options.now }),
+    chromeAdapter: { async handoffReport() { return { reviewUrl: null }; } },
+    now: clock(),
+    reportOptions: REPORT_OPTIONS,
+  };
+
+  for (const field of Object.keys(baseRequest)) {
+    await t.test(`rejects an outer accessor in ${field} without reading it`, async () => {
+      const marker = `PRIVATE_OUTER_${field.toUpperCase()}_GETTER`;
+      let reads = 0;
+      const request = { ...baseRequest };
+      Object.defineProperty(request, field, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          reads += 1;
+          throw new Error(marker);
+        },
+      });
+
+      await assert.rejects(runBatch(request), error => {
+        assert.equal(error instanceof TypeError, true);
+        assert.equal(error.message, 'Configuração do lote inválida.');
+        assert.doesNotMatch(error.message, new RegExp(marker));
+        return true;
+      });
+      assert.equal(reads, 0);
+    });
+  }
+
+  await t.test('accepts a transparent outer proxy without property reads', async () => {
+    let reads = 0;
+    const request = new Proxy(baseRequest, {
+      get() {
+        reads += 1;
+        throw new Error('PRIVATE_OUTER_PROXY_GET');
+      },
+    });
+    const model = await runBatch(request);
+    assert.equal(reads, 0);
+    assert.equal(model.pages.length, 1);
+  });
+
+  for (const [label, request] of [
+    ['descriptor proxy', new Proxy(baseRequest, {
+      ownKeys() { throw new Error('PRIVATE_OUTER_PROXY_OWN_KEYS'); },
+    })],
+    ['revoked proxy', (() => {
+      const value = Proxy.revocable(baseRequest, {});
+      value.revoke();
+      return value.proxy;
+    })()],
+  ]) {
+    await t.test(`rejects an outer ${label} with the fixed public error`, async () => {
+      await assert.rejects(runBatch(request), error => {
+        assert.equal(error instanceof TypeError, true);
+        assert.equal(error.message, 'Configuração do lote inválida.');
+        assert.doesNotMatch(error.message, /PRIVATE|proxy|revoked/iu);
+        return true;
+      });
+    });
+  }
+});
+
+test('captures report options once through exact own data descriptors', async t => {
+  const entries = normalizeUrlList('https://report-options.example.test/public').entries;
+
+  for (const field of Object.keys(REPORT_OPTIONS)) {
+    await t.test(`rejects a report-options accessor in ${field} without reading it`, async () => {
+      const marker = `PRIVATE_REPORT_OPTIONS_${field.toUpperCase()}_GETTER`;
+      let reads = 0;
+      const reportOptions = { ...REPORT_OPTIONS };
+      Object.defineProperty(reportOptions, field, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          reads += 1;
+          throw new Error(marker);
+        },
+      });
+      let runnerCalls = 0;
+      await assert.rejects(runBatch({
+        entries, batchAuditId: `batch-report-options-${field}`,
+        runner() { runnerCalls += 1; throw new Error('RUNNER_MUST_NOT_START'); },
+        chromeAdapter: {}, now: clock(), reportOptions,
+      }), error => {
+        assert.equal(error instanceof TypeError, true);
+        assert.equal(error.message, 'Configuração do lote inválida.');
+        assert.doesNotMatch(error.message, new RegExp(marker));
+        return true;
+      });
+      assert.equal(reads, 0);
+      assert.equal(runnerCalls, 0);
+    });
+  }
+
+  for (const [label, reportOptions] of [
+    ['extra property', { ...REPORT_OPTIONS, privateOption: 'PRIVATE_REPORT_OPTIONS_EXTRA' }],
+    ['revoked proxy', (() => {
+      const value = Proxy.revocable({ ...REPORT_OPTIONS }, {});
+      value.revoke();
+      return value.proxy;
+    })()],
+  ]) {
+    await t.test(`rejects report options with ${label} using the fixed public error`, async () => {
+      await assert.rejects(runBatch({
+        entries, batchAuditId: 'batch-report-options-invalid',
+        runner() { throw new Error('RUNNER_MUST_NOT_START'); },
+        chromeAdapter: {}, now: clock(), reportOptions,
+      }), error => {
+        assert.equal(error instanceof TypeError, true);
+        assert.equal(error.message, 'Configuração do lote inválida.');
+        assert.doesNotMatch(error.message, /PRIVATE|proxy|revoked/iu);
+        return true;
+      });
+    });
+  }
+
+  await t.test('uses the frozen report-options snapshot after the runner mutates its source', async () => {
+    const reportOptions = { ...REPORT_OPTIONS };
+    const expected = { ...reportOptions };
+    const expectedExtensionIds = [];
+    const model = await runBatch({
+      entries, batchAuditId: 'batch-report-options-snapshot',
+      runner: async options => {
+        expectedExtensionIds.push(options.expectedExtensionId);
+        reportOptions.timezone = 'PRIVATE/Mutated';
+        reportOptions.manifestVersion = 'PRIVATE_MUTATED_VERSION';
+        reportOptions.rulesVersion = 'PRIVATE_MUTATED_RULES';
+        reportOptions.browserVersion = 'PRIVATE_MUTATED_BROWSER';
+        reportOptions.expectedExtensionId = 'pppppppppppppppppppppppppppppppp';
+        return rawChild({ auditId: options.idFactory(), url: options.url, now: options.now });
+      },
+      chromeAdapter: { async handoffReport() { return { reviewUrl: null }; } },
+      now: clock(), reportOptions,
+    });
+
+    assert.deepEqual(expectedExtensionIds, [expected.expectedExtensionId]);
+    assert.equal(model.timezone, expected.timezone);
+    assert.equal(model.versions.extension, expected.manifestVersion);
+    assert.equal(model.versions.rules, expected.rulesVersion);
+    assert.equal(model.versions.browser, expected.browserVersion);
+    assert.doesNotMatch(JSON.stringify(model), /PRIVATE_MUTATED/u);
+  });
+});
+
+test('captures transparent proxies without property reads and masks hostile proxy failures', async t => {
+  const baseline = structuredClone(normalizeUrlList('https://proxy.example.test/public').entries[0]);
+  let reads = 0;
+  const entry = new Proxy(baseline, {
+    get() {
+      reads += 1;
+      throw new Error('PRIVATE_BATCH_PROXY_GET');
+    },
+  });
+  const entries = new Proxy([entry], {
+    get() {
+      reads += 1;
+      throw new Error('PRIVATE_BATCH_ARRAY_PROXY_GET');
+    },
+  });
+  const starts = [];
+  const model = await runBatch({
+    entries, batchAuditId: 'batch-transparent-proxy',
+    runner: async options => {
+      starts.push(options.url);
+      return rawChild({ auditId: options.idFactory(), url: options.url, now: options.now });
+    },
+    chromeAdapter: { async handoffReport() { return { reviewUrl: null }; } },
+    now: clock(), reportOptions: REPORT_OPTIONS,
+  });
+
+  assert.equal(reads, 0);
+  assert.deepEqual(starts, ['https://proxy.example.test/public']);
+  assert.equal(model.pages.length, 1);
+
+  for (const [label, hostile] of [
+    ['descriptor proxy', new Proxy(baseline, {
+      ownKeys() { throw new Error('PRIVATE_BATCH_PROXY_OWN_KEYS'); },
+    })],
+    ['revoked proxy', (() => {
+      const value = Proxy.revocable(baseline, {});
+      value.revoke();
+      return value.proxy;
+    })()],
+  ]) {
+    await t.test(`rejects ${label} with the fixed public error`, async () => {
+      await assert.rejects(runBatch({
+        entries: [hostile], batchAuditId: 'batch-hostile-proxy',
+        runner() { throw new Error('RUNNER_MUST_NOT_START'); },
+        chromeAdapter: {}, now: clock(), reportOptions: REPORT_OPTIONS,
+      }), error => {
+        assert.equal(error instanceof TypeError, true);
+        assert.equal(error.message, 'Lista normalizada do lote inválida.');
+        assert.doesNotMatch(error.message, /PRIVATE|proxy|revoked/iu);
+        return true;
+      });
+    });
+  }
+});
+
+test('requires a dense exact and unambiguous normalized batch entry list', async t => {
+  const first = structuredClone(normalizeUrlList('https://one.example.test/public').entries[0]);
+  const second = structuredClone(normalizeUrlList('https://two.example.test/public').entries[0]);
+  second.line = 2;
+  const cases = [
+    ['extra entry key', [{ ...first, extra: 'PRIVATE_EXTRA' }]],
+    ['sparse array', new Array(1)],
+    ['duplicate line', [first, { ...second, line: first.line }]],
+    ['duplicate navigation URL', [first, {
+      ...second,
+      navigationUrl: first.navigationUrl,
+      evidenceUrl: structuredClone(first.evidenceUrl),
+    }]],
+  ];
+
+  for (const [label, entries] of cases) {
+    await t.test(`rejects ${label}`, async () => {
+      let runnerCalls = 0;
+      await assert.rejects(runBatch({
+        entries, batchAuditId: 'batch-ambiguous-input',
+        runner() { runnerCalls += 1; throw new Error('RUNNER_MUST_NOT_START'); },
+        chromeAdapter: {}, now: clock(), reportOptions: REPORT_OPTIONS,
+      }), error => {
+        assert.equal(error instanceof TypeError, true);
+        assert.equal(error.message, 'Lista normalizada do lote inválida.');
+        assert.doesNotMatch(error.message, /PRIVATE|RUNNER_MUST_NOT_START/iu);
+        return true;
+      });
+      assert.equal(runnerCalls, 0);
+    });
+  }
+});
+
+test('uses only the captured batch copy after validation even if the caller mutates future entries', async () => {
+  const entries = structuredClone(normalizeUrlList([
+    'https://stable-one.example.test/public',
+    'https://stable-two.example.test/public',
+  ].join('\n')).entries);
+  const starts = [];
+
+  const model = await runBatch({
+    entries, batchAuditId: 'batch-captured-copy',
+    runner: async options => {
+      starts.push(options.url);
+      if (starts.length === 1) {
+        entries[0].navigationUrl = 'https://mutated-first.example.test/private';
+        entries[0].evidenceUrl.href = 'https://mutated-first.example.test/private';
+        entries[1] = structuredClone(
+          normalizeUrlList('https://mutated-future.example.test/private').entries[0],
+        );
+        entries.push(structuredClone(
+          normalizeUrlList('https://injected.example.test/private').entries[0],
+        ));
+      }
+      return rawChild({ auditId: options.idFactory(), url: options.url, now: options.now });
+    },
+    chromeAdapter: { async handoffReport() { return { reviewUrl: null }; } },
+    now: clock(), reportOptions: REPORT_OPTIONS,
+  });
+
+  assert.deepEqual(starts, [
+    'https://stable-one.example.test/public',
+    'https://stable-two.example.test/public',
+  ]);
+  assert.equal(model.pages.length, 2);
+  assert.doesNotMatch(JSON.stringify(model), /mutated-first|mutated-future|injected/iu);
+});
+
+async function observeWithin(promise, timeoutMs = 1_000) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve(promise).then(
+        value => ({ kind: 'fulfilled', value }),
+        error => ({ kind: 'rejected', error }),
+      ),
+      new Promise(resolve => {
+        timer = setTimeout(() => resolve({ kind: 'boundary-timeout' }), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+test('never starts a page when cancellation wins before boundary setup or the operation microtask', async t => {
+  await t.test('already aborted at the page boundary', async () => {
+    const controller = new AbortController();
+    const target = {};
+    const chromeAdapter = new Proxy(target, {
+      getOwnPropertyDescriptor(object, key) {
+        if (key === AUDIT_EXECUTION_INTERNAL && !controller.signal.aborted) {
+          controller.abort(new DOMException('PRIVATE_FAST_ABORT', 'AbortError'));
+        }
+        return Reflect.getOwnPropertyDescriptor(object, key);
+      },
+    });
+    let runnerCalls = 0;
+
+    const model = await runBatch({
+      entries: normalizeUrlList('https://fast-abort.example.test/').entries,
+      batchAuditId: 'batch-fast-abort', signal: controller.signal,
+      runner() { runnerCalls += 1; throw new Error('RUNNER_MUST_NOT_START'); },
+      chromeAdapter, now: clock(), reportOptions: REPORT_OPTIONS,
+      pageTimeoutMs: 100, cleanupTimeoutMs: 5,
+    });
+
+    assert.equal(runnerCalls, 0);
+    assert.equal(model.session.status, 'cancelled');
+    assert.doesNotMatch(JSON.stringify(model), /PRIVATE_FAST_ABORT|RUNNER_MUST_NOT_START/u);
+  });
+
+  await t.test('aborted after the loop check but before the queued operation', async () => {
+    const controller = new AbortController();
+    let abortedReads = 0;
+    const signal = new Proxy(controller.signal, {
+      get(target, key) {
+        if (key === 'aborted') {
+          abortedReads += 1;
+          const aborted = Reflect.get(target, key, target);
+          if (abortedReads === 2 && !aborted) {
+            queueMicrotask(() => controller.abort(new DOMException('PRIVATE_MICROTASK_ABORT', 'AbortError')));
+          }
+          return aborted;
+        }
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    let runnerCalls = 0;
+
+    const model = await runBatch({
+      entries: normalizeUrlList('https://microtask-abort.example.test/').entries,
+      batchAuditId: 'batch-microtask-abort', signal,
+      runner() { runnerCalls += 1; throw new Error('RUNNER_MUST_NOT_START'); },
+      chromeAdapter: {}, now: clock(), reportOptions: REPORT_OPTIONS,
+      pageTimeoutMs: 100, cleanupTimeoutMs: 5,
+    });
+
+    assert.equal(runnerCalls, 0);
+    assert.equal(model.session.status, 'cancelled');
+    assert.doesNotMatch(JSON.stringify(model), /PRIVATE_MICROTASK_ABORT|RUNNER_MUST_NOT_START/u);
+  });
+});
+
+test('bounds controlling checkpoint callbacks with one fixed public failure', async t => {
+  const assertPublicCheckpointFailure = outcome => {
+    assert.equal(outcome.kind, 'rejected');
+    assert.equal(outcome.error instanceof Error, true);
+    assert.equal(outcome.error.message, 'O checkpoint do lote não pôde ser persistido.');
+    assert.doesNotMatch(outcome.error.message, /PRIVATE|timeout|proxy|revoked/iu);
+  };
+
+  await t.test('onCheckpoint timeout', async () => {
+    const outcome = await observeWithin(runBatch({
+      entries: normalizeUrlList('https://checkpoint-timeout.example.test/').entries,
+      batchAuditId: 'batch-checkpoint-timeout',
+      runner() { throw new Error('RUNNER_MUST_NOT_START'); },
+      chromeAdapter: {}, now: clock(), reportOptions: REPORT_OPTIONS, cleanupTimeoutMs: 5,
+      onCheckpoint() { return new Promise(() => {}); },
+    }));
+    assertPublicCheckpointFailure(outcome);
+  });
+
+  await t.test('onCheckpoint private rejection', async () => {
+    const outcome = await observeWithin(runBatch({
+      entries: normalizeUrlList('https://checkpoint-rejection.example.test/').entries,
+      batchAuditId: 'batch-checkpoint-rejection',
+      runner() { throw new Error('RUNNER_MUST_NOT_START'); },
+      chromeAdapter: {}, now: clock(), reportOptions: REPORT_OPTIONS, cleanupTimeoutMs: 5,
+      onCheckpoint() { throw new Error('PRIVATE_CHECKPOINT_REJECTION'); },
+    }));
+    assertPublicCheckpointFailure(outcome);
+  });
+
+  await t.test('onExecutionCheckpoint timeout', async () => {
+    const outcome = await observeWithin(runBatch({
+      entries: normalizeUrlList('https://execution-checkpoint-timeout.example.test/').entries,
+      batchAuditId: 'batch-execution-checkpoint-timeout',
+      chromeAdapter: timedDefaultAdapter({ settleDelayMs: 1 }),
+      now: clock(), reportOptions: REPORT_OPTIONS,
+      pageTimeoutMs: 5, cleanupTimeoutMs: 5,
+      onExecutionCheckpoint() { return new Promise(() => {}); },
+    }));
+    assertPublicCheckpointFailure(outcome);
+  });
+
+  await t.test('onExecutionCheckpoint timeout after a fulfilled page boundary', async () => {
+    const outcome = await observeWithin(runBatch({
+      entries: normalizeUrlList('https://fulfilled-execution-checkpoint-timeout.example.test/').entries,
+      batchAuditId: 'batch-fulfilled-execution-checkpoint-timeout',
+      chromeAdapter: timedDefaultAdapter({ settleImmediately: true }),
+      now: clock(), reportOptions: REPORT_OPTIONS,
+      pageTimeoutMs: 1_000, cleanupTimeoutMs: 5,
+      onExecutionCheckpoint() { return new Promise(() => {}); },
+    }));
+    assertPublicCheckpointFailure(outcome);
+  });
+});
+
+test('progress and handoff timeouts remain non-controlling and the batch still finishes', async () => {
+  const outcome = await observeWithin(runBatch({
+    entries: normalizeUrlList('https://non-controlling-timeouts.example.test/').entries,
+    batchAuditId: 'batch-non-controlling-timeouts',
+    runner: async options => {
+      await options.chromeAdapter.emitProgress({ type: 'AUDIT_PROGRESS', percent: 25 });
+      return rawChild({ auditId: options.idFactory(), url: options.url, now: options.now });
+    },
+    chromeAdapter: {
+      emitProgress() { return new Promise(() => {}); },
+      handoffReport() { return new Promise(() => {}); },
+    },
+    now: clock(), reportOptions: REPORT_OPTIONS,
+    pageTimeoutMs: 100, cleanupTimeoutMs: 5,
+  }));
+
+  assert.equal(outcome.kind, 'fulfilled');
+  assert.equal(outcome.value.pages.length, 1);
+  assert.equal(outcome.value.pages[0].status, 'complete');
+});
+
+test('handoff method and result reflection never invoke hostile getters or leak proxy details', async t => {
+  const run = chromeAdapter => observeWithin(runBatch({
+    entries: normalizeUrlList('https://handoff-reflection.example.test/').entries,
+    batchAuditId: 'batch-handoff-reflection',
+    runner: async options => rawChild({ auditId: options.idFactory(), url: options.url, now: options.now }),
+    chromeAdapter, now: clock(), reportOptions: REPORT_OPTIONS, cleanupTimeoutMs: 5,
+  }));
+
+  await t.test('handoffReport accessor', async () => {
+    let reads = 0;
+    const prototype = Object.defineProperty({}, 'handoffReport', {
+      get() { reads += 1; throw new Error('PRIVATE_HANDOFF_METHOD_GETTER'); },
+    });
+    const outcome = await run(Object.create(prototype));
+    assert.equal(outcome.kind, 'fulfilled');
+    assert.equal(reads, 0);
+    assert.doesNotMatch(JSON.stringify(outcome.value), /PRIVATE_HANDOFF_METHOD_GETTER/u);
+  });
+
+  await t.test('reviewUrl accessor', async () => {
+    let reads = 0;
+    const chromeAdapter = { handoffReport() {
+      return Object.defineProperty({}, 'reviewUrl', {
+        enumerable: true,
+        get() { reads += 1; throw new Error('PRIVATE_HANDOFF_RESULT_GETTER'); },
+      });
+    } };
+    const outcome = await run(chromeAdapter);
+    assert.equal(outcome.kind, 'fulfilled');
+    assert.equal(reads, 0);
+    assert.doesNotMatch(JSON.stringify(outcome.value), /PRIVATE_HANDOFF_RESULT_GETTER/u);
+  });
+
+  await t.test('transparent result proxy with a hostile property-read trap', async () => {
+    let reads = 0;
+    const result = new Proxy({ reviewUrl: null }, {
+      get() { reads += 1; throw new Error('PRIVATE_HANDOFF_PROXY_GET'); },
+    });
+    const outcome = await run({ handoffReport() { return result; } });
+    assert.equal(outcome.kind, 'fulfilled');
+    assert.equal(reads, 0);
+    assert.doesNotMatch(JSON.stringify(outcome.value), /PRIVATE_HANDOFF_PROXY_GET/u);
+  });
 });

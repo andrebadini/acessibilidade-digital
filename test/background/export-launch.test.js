@@ -3,7 +3,13 @@ import test from 'node:test';
 
 import { createExportLaunchAuthority, deriveExportLeaseOwner } from '../../src/background/export-launch.js';
 
-function navigationFixture() {
+function navigationFixture({
+  completionFailures = 0,
+  terminalFailures = 0,
+  deleted = true,
+  receiptStatus = 'complete',
+  receiptFormats = ['html', 'pdf', 'csv', 'json'],
+} = {}) {
   const auditId = 'audit-navigation';
   const windowId = 7;
   const tabId = 51;
@@ -14,6 +20,7 @@ function navigationFixture() {
   let tabReadSequence = [];
   let failTabRead = false;
   let contextDocument = 'export-doc';
+  let epoch = 1000;
   const sessionArea = {
     async get(keys) {
       const list = keys === null ? [...records.keys()] : (Array.isArray(keys) ? keys : [keys]);
@@ -29,6 +36,29 @@ function navigationFixture() {
       return { acquired: true, exportAttempt: 1, revision: 1 };
     },
     async releaseExportLease(_auditId, options) { calls.push(['release', options.ownerId]); return true; },
+    async getExportReceipt() {
+      calls.push(['receipt']);
+      return {
+        version: 1, auditId, modelRevision: 1, modelHash: 'a'.repeat(64), attemptId: '1', status: receiptStatus,
+        formats: receiptFormats.map((format, index) => ({
+          format,
+          mimeType: {
+            html: 'text/html;charset=utf-8', pdf: 'application/pdf',
+            csv: 'text/csv;charset=utf-8', json: 'application/json;charset=utf-8',
+          }[format],
+          byteSize: index + 1, sha256: String(index).repeat(64), downloadId: index + 1, state: 'complete',
+        })),
+      };
+    },
+    async completeExport(_auditId, options) {
+      calls.push(['complete', options]);
+      if (completionFailures-- > 0) throw new Error('controlled completion failure');
+      return { completed: true, deleted, status: receiptStatus };
+    },
+    async emitTerminal(event) {
+      calls.push(['terminal', event]);
+      if (terminalFailures-- > 0) throw new Error('controlled terminal failure');
+    },
   };
   const chromeApi = {
     runtime: {
@@ -61,7 +91,7 @@ function navigationFixture() {
       async authorizeExport() { return { ok: true, auditId, windowId, sessionCapabilityId: 'R'.repeat(22) }; },
       async validateConsumer() { return true; },
     },
-    epochNow: () => 1000,
+    epochNow: () => epoch,
     modelNow: () => '2026-08-30T12:00:00.000Z',
     randomBytes: size => new Uint8Array(size).fill(3),
   });
@@ -74,6 +104,7 @@ function navigationFixture() {
     auditId, authority, calls, canonical, request, sender, tabId, windowId,
     setCurrentTab(value) { currentTab = value; },
     setDocument(value) { contextDocument = value; },
+    setEpoch(value) { epoch = value; },
     setTabReadFailure(value) { failTabRead = value; },
     setTabReadSequence(values) { tabReadSequence = [...values]; },
   };
@@ -206,8 +237,201 @@ test('reads native tab proof only through own data descriptors', async () => {
   assert.equal((await input.authority.getLaunch(input.auditId)).state, 'revoked');
 });
 
+test('replays a lost terminal acknowledgement without repeating completion effects', async () => {
+  const input = navigationFixture();
+  assert.equal((await input.authority.requestExport(input.request)).ok, true);
+  const session = await input.authority.connect({ auditId: input.auditId, sender: input.sender });
+  assert.equal(session.ok, true);
+  const completion = {
+    sessionCapabilityId: session.sessionCapabilityId,
+    auditId: input.auditId,
+    attemptId: '1',
+    sender: input.sender,
+  };
+
+  await input.authority.complete(completion); // the caller loses this successful response
+  const terminalProof = {
+    version: 1,
+    auditId: input.auditId,
+    sessionCapabilityId: session.sessionCapabilityId,
+    attemptId: '1',
+    modelRevision: 1,
+    receiptStatus: 'complete',
+    applied: true,
+    deleted: true,
+    status: 'complete',
+    notified: true,
+  };
+  const terminalLaunch = await input.authority.getLaunch(input.auditId);
+  const terminalSession = await input.authority.getSession(session.sessionCapabilityId);
+  assert.equal(terminalLaunch.state, 'terminal');
+  assert.deepEqual(terminalLaunch.terminalProof, terminalProof);
+  assert.equal(terminalSession.state, 'terminal');
+  assert.deepEqual(terminalSession.terminalProof, terminalProof);
+  assert.deepEqual(await input.authority.complete(completion), {
+    ok: true, auditId: input.auditId, state: 'terminal',
+  });
+  assert.equal(input.calls.filter(([type]) => type === 'receipt').length, 1);
+  assert.equal(input.calls.filter(([type]) => type === 'complete').length, 1);
+  assert.equal(input.calls.filter(([type]) => type === 'terminal').length, 1);
+
+  const divergent = [
+    ['capability', { ...completion, sessionCapabilityId: 'S'.repeat(22) }],
+    ['audit', { ...completion, auditId: 'audit-navigation-other' }],
+    ['attempt', { ...completion, attemptId: '2' }],
+    ['sender', { ...completion, sender: { ...input.sender, documentId: 'replacement-doc' } }],
+  ];
+  for (const [label, request] of divergent) {
+    assert.equal((await input.authority.complete(request)).ok, false, label);
+  }
+  assert.equal(input.calls.filter(([type]) => type === 'receipt').length, 1);
+  assert.equal(input.calls.filter(([type]) => type === 'complete').length, 1);
+  assert.equal(input.calls.filter(([type]) => type === 'terminal').length, 1);
+
+});
+
+test('replays an exactly correlated terminal acknowledgement after its active TTL expires', async () => {
+  const input = navigationFixture();
+  assert.equal((await input.authority.requestExport(input.request)).ok, true);
+  const session = await input.authority.connect({ auditId: input.auditId, sender: input.sender });
+  const completion = {
+    sessionCapabilityId: session.sessionCapabilityId,
+    auditId: input.auditId,
+    attemptId: '1',
+    sender: input.sender,
+  };
+  await input.authority.complete(completion); // successful response is lost before the caller observes it
+  input.setEpoch(901001);
+
+  assert.deepEqual(await input.authority.complete(completion), {
+    ok: true, auditId: input.auditId, state: 'terminal',
+  });
+  assert.equal(input.calls.filter(([type]) => type === 'receipt').length, 1);
+  assert.equal(input.calls.filter(([type]) => type === 'complete').length, 1);
+  assert.equal(input.calls.filter(([type]) => type === 'terminal').length, 1);
+
+  const active = navigationFixture();
+  assert.equal((await active.authority.requestExport(active.request)).ok, true);
+  const activeSession = await active.authority.connect({ auditId: active.auditId, sender: active.sender });
+  active.setEpoch(901001);
+  assert.deepEqual(await active.authority.complete({
+    sessionCapabilityId: activeSession.sessionCapabilityId,
+    auditId: active.auditId,
+    attemptId: '1',
+    sender: active.sender,
+  }), { ok: false, code: 'EXPORT_COMPLETE_DENIED' });
+  assert.equal(active.calls.filter(([type]) => type === 'receipt').length, 0);
+});
+
+test('resumes an unapplied terminal proof without requiring the deleted receipt', async () => {
+  const input = navigationFixture({ completionFailures: 1 });
+  assert.equal((await input.authority.requestExport(input.request)).ok, true);
+  const session = await input.authority.connect({ auditId: input.auditId, sender: input.sender });
+  const completion = {
+    sessionCapabilityId: session.sessionCapabilityId,
+    auditId: input.auditId,
+    attemptId: '1',
+    sender: input.sender,
+  };
+
+  await assert.rejects(input.authority.complete(completion), /controlled completion failure/u);
+  const pendingProof = {
+    version: 1,
+    auditId: input.auditId,
+    sessionCapabilityId: session.sessionCapabilityId,
+    attemptId: '1',
+    modelRevision: 1,
+    receiptStatus: 'complete',
+    applied: false,
+    deleted: false,
+    status: null,
+    notified: false,
+  };
+  assert.deepEqual((await input.authority.getLaunch(input.auditId)).terminalProof, pendingProof);
+  assert.deepEqual((await input.authority.getSession(session.sessionCapabilityId)).terminalProof, pendingProof);
+  assert.equal(input.calls.filter(([type]) => type === 'receipt').length, 1);
+
+  assert.deepEqual(await input.authority.complete(completion), {
+    ok: true, auditId: input.auditId, state: 'terminal',
+  });
+  const completionCalls = input.calls.filter(([type]) => type === 'complete');
+  assert.equal(completionCalls.length, 2);
+  assert.equal(Object.hasOwn(completionCalls[0][1], 'receipt'), true);
+  assert.equal(Object.hasOwn(completionCalls[1][1], 'receipt'), false);
+  assert.deepEqual(completionCalls[1][1].terminalProof, pendingProof);
+  assert.equal(input.calls.filter(([type]) => type === 'receipt').length, 1);
+  assert.equal(input.calls.filter(([type]) => type === 'terminal').length, 1);
+  assert.equal((await input.authority.getLaunch(input.auditId)).terminalProof.applied, true);
+  assert.equal((await input.authority.getLaunch(input.auditId)).terminalProof.notified, true);
+});
+
+test('retries a missing terminal notification without reapplying completion', async () => {
+  const input = navigationFixture({ terminalFailures: 1 });
+  assert.equal((await input.authority.requestExport(input.request)).ok, true);
+  const session = await input.authority.connect({ auditId: input.auditId, sender: input.sender });
+  const completion = {
+    sessionCapabilityId: session.sessionCapabilityId,
+    auditId: input.auditId,
+    attemptId: '1',
+    sender: input.sender,
+  };
+
+  await assert.rejects(input.authority.complete(completion), /controlled terminal failure/u);
+  const interruptedProof = (await input.authority.getLaunch(input.auditId)).terminalProof;
+  assert.deepEqual(interruptedProof, {
+    version: 1,
+    auditId: input.auditId,
+    sessionCapabilityId: session.sessionCapabilityId,
+    attemptId: '1',
+    modelRevision: 1,
+    receiptStatus: 'complete',
+    applied: true,
+    deleted: true,
+    status: 'complete',
+    notified: false,
+  });
+
+  assert.deepEqual(await input.authority.complete(completion), {
+    ok: true, auditId: input.auditId, state: 'terminal',
+  });
+  assert.equal(input.calls.filter(([type]) => type === 'receipt').length, 1);
+  assert.equal(input.calls.filter(([type]) => type === 'complete').length, 1);
+  assert.equal(input.calls.filter(([type]) => type === 'terminal').length, 2);
+  assert.equal((await input.authority.getLaunch(input.auditId)).terminalProof.notified, true);
+
+  assert.equal((await input.authority.complete(completion)).ok, true);
+  assert.equal(input.calls.filter(([type]) => type === 'terminal').length, 2);
+});
+
+test('accepts an exact partial receipt without authorizing deletion', async () => {
+  const input = navigationFixture({
+    receiptStatus: 'partial',
+    receiptFormats: ['html', 'json'],
+    deleted: false,
+  });
+  assert.equal((await input.authority.requestExport(input.request)).ok, true);
+  const session = await input.authority.connect({ auditId: input.auditId, sender: input.sender });
+  const result = await input.authority.complete({
+    sessionCapabilityId: session.sessionCapabilityId,
+    auditId: input.auditId,
+    attemptId: '1',
+    sender: input.sender,
+  });
+
+  assert.deepEqual(result, { ok: true, auditId: input.auditId, state: 'terminal' });
+  const proof = (await input.authority.getLaunch(input.auditId)).terminalProof;
+  assert.equal(proof.receiptStatus, 'partial');
+  assert.equal(proof.applied, true);
+  assert.equal(proof.deleted, false);
+  assert.equal(proof.status, 'partial');
+  assert.equal(proof.notified, true);
+  const applied = input.calls.find(([type]) => type === 'complete')[1];
+  assert.equal(applied.terminalProof.receiptStatus, 'partial');
+  assert.equal(applied.terminalProof.deleted, false);
+});
+
 test('export launch creates a bearer-free URL and persists one first-document session', async () => {
-  const records = new Map(); const calls = []; let nextByte = 1; let completionFailures = 1;
+  const records = new Map(); const calls = []; let nextByte = 1;
   const area = {
     async get(keys) { const list = keys === null ? [...records.keys()] : (Array.isArray(keys) ? keys : [keys]); return Object.fromEntries(list.filter(key => records.has(key)).map(key => [key, structuredClone(records.get(key))])); },
     async set(rows) { for (const [key, value] of Object.entries(rows)) records.set(key, structuredClone(value)); },
@@ -225,7 +449,6 @@ test('export launch creates a bearer-free URL and persists one first-document se
       }[format], byteSize: index + 1, sha256: String(index).repeat(64), downloadId: index + 1, state: 'complete' })) }; },
     async completeExport(_auditId, value) {
       calls.push(['completion', value.attemptId]);
-      if (completionFailures-- > 0) throw new Error('durable finalize unavailable');
       return { completed: true };
     },
     async emitTerminal(event) { calls.push(['terminal', event]); },
@@ -268,17 +491,11 @@ test('export launch creates a bearer-free URL and persists one first-document se
   assert.equal(connected.filter(result => result.ok === true).length, 1);
   const session = connected.find(result => result.ok);
   assert.deepEqual(Object.keys(session).sort(), ['attemptId', 'auditId', 'expectedRevision', 'ok', 'sessionCapabilityId']);
-  await assert.rejects(authority.complete({ sessionCapabilityId: session.sessionCapabilityId, auditId: 'audit-1', attemptId: '7', sender }),
-    /durable finalize unavailable/u);
-  assert.equal((await authority.getLaunch('audit-1')).state, 'connected');
-  assert.equal((await authority.getSession(session.sessionCapabilityId)).state, 'active');
   assert.deepEqual(await authority.complete({ sessionCapabilityId: session.sessionCapabilityId, auditId: 'audit-1', attemptId: '7', sender }),
     { ok: true, auditId: 'audit-1', state: 'terminal' });
   assert.deepEqual(calls.find(call => call[0] === 'terminal'), ['terminal', { type: 'EXPORT_COMPLETE', auditId: 'audit-1', deleted: false, status: 'complete', exportRevision: 5 }]);
-  assert.equal(calls.filter(call => call[0] === 'receipt-reread').length, 2);
-  assert.deepEqual(calls.filter(call => call[0] === 'completion'), [['completion', '7'], ['completion', '7']]);
-  assert.deepEqual(await authority.complete({ sessionCapabilityId: session.sessionCapabilityId, auditId: 'audit-1', attemptId: '7', sender }),
-    { ok: false, code: 'EXPORT_COMPLETE_DENIED' });
+  assert.equal(calls.filter(call => call[0] === 'receipt-reread').length, 1);
+  assert.deepEqual(calls.filter(call => call[0] === 'completion'), [['completion', '7']]);
 });
 
 test('compensates a proven owned tab and export lease after launch allocation failure', async () => {

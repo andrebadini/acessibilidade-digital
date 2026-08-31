@@ -33,6 +33,10 @@ const REPORT_REQUEST_KEYS = new Set([
   'auditModel', 'auditSnapshotCapability', 'exportLeaseOwnerId', 'exportAttempt',
   'manifestVersion', 'browserVersion', 'timezone', 'now', 'timeoutMs', 'brand',
 ]);
+const DELIVERY_LEASE_ATTESTATION_KEYS = Object.freeze([
+  'active', 'phase', 'retryAt', 'revision', 'exportAttempt', 'deliveryAt',
+]);
+const PENDING_REPORT_RESERVATIONS = new WeakMap();
 
 class OwnershipTransferTimeoutError extends DOMException {
   constructor() {
@@ -45,6 +49,7 @@ export async function runReportExport(request, dependencies) {
   let snapshotCapability = null;
   let exportLeaseOwnerId = null;
   let exportAttempt = null;
+  let snapshotRevision = null;
   let sourceModel;
   if (capturedRequest.auditSnapshotCapability !== undefined) {
     const snapshot = inspectAuditSnapshotCapability(capturedRequest.auditSnapshotCapability);
@@ -52,6 +57,7 @@ export async function runReportExport(request, dependencies) {
     snapshotCapability = capturedRequest.auditSnapshotCapability;
     exportLeaseOwnerId = validLeaseOwnerId(capturedRequest.exportLeaseOwnerId);
     exportAttempt = validExportAttempt(capturedRequest.exportAttempt);
+    snapshotRevision = snapshot.revision;
     sourceModel = createAuditModel(snapshot.model);
     if (typeof dependencies.assertDelivery !== 'function') {
       throw new TypeError('Revalidação da exclusividade de entrega indisponível para o snapshot persistido.');
@@ -63,7 +69,20 @@ export async function runReportExport(request, dependencies) {
     sourceModel = createAuditModel(capturedRequest.auditModel);
   }
   validateDependencies(dependencies);
-  const deliveryAt = safeCanonicalNow(capturedRequest.now);
+  const timeoutMs = capturedRequest.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('Timeout de exportação inválido.');
+  const deliveryAt = snapshotCapability === null
+    ? safeCanonicalNow(capturedRequest.now)
+    : captureDeliveryLeaseTimestamp(await boundary(
+        Promise.resolve().then(() => dependencies.assertDelivery({
+          snapshotCapability,
+          exportLeaseOwnerId,
+          exportAttempt,
+          stage: 'identity',
+        })),
+        timeoutMs,
+        'A atestação persistente da identidade da entrega excedeu o tempo limite.',
+      ), snapshotRevision, exportAttempt);
   if (snapshotCapability !== null && dependencies.reportView !== undefined) {
     return runImmutableRevisionExport({
       sourceModel,
@@ -87,8 +106,6 @@ export async function runReportExport(request, dependencies) {
     });
   }
   const original = sanitizeReportMessages(sourceModel);
-  const timeoutMs = capturedRequest.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('Timeout de exportação inválido.');
   const generationIssues = [];
   const printCleanupLimitations = [];
   let hasCsv = true;
@@ -176,17 +193,16 @@ export async function runReportExport(request, dependencies) {
       throw new TypeError('Reserva atômica de entrega indisponível para o snapshot persistido.');
     }
     const previousSnapshot = inspectAuditSnapshotCapability(snapshotCapability);
-    const reservation = await dependencies.reserveDelivery({
+    const reservation = Promise.resolve().then(() => dependencies.reserveDelivery({
       model: JSON.parse(canonicalStringify(model)),
-    });
-    const reservedCapability = safeReservationCapability(reservation);
-    const reservedSnapshot = inspectAuditSnapshotCapability(reservedCapability);
-    if (!previousSnapshot || !reservedSnapshot || reservedSnapshot.auditId !== previousSnapshot.auditId ||
-      reservedSnapshot.revision !== previousSnapshot.revision + 1 ||
-      canonicalStringify(reservedSnapshot.model) !== canonicalStringify(model)) {
-      throw new TypeError('Reserva atômica de entrega não corresponde ao relatório preparado.');
-    }
-    snapshotCapability = reservedCapability;
+    })).then(value => validatedReservationCapability(value, previousSnapshot, model));
+    PENDING_RESERVATION_RECORDS.set(reservation, Object.freeze({
+      auditId: previousSnapshot.auditId,
+      previousRevision: previousSnapshot.revision,
+      previousModel: canonicalStringify(previousSnapshot.model),
+      expectedModel: canonicalStringify(model),
+    }));
+    snapshotCapability = await adoptPersistentReservation(reservation, timeoutMs);
   }
 
   const baseName = buildArtifactBaseName(model.auditId, at);
@@ -427,6 +443,141 @@ function safeReservationCapability(value) {
   }
 }
 
+function validatedReservationCapability(reservation, previousSnapshot, model) {
+  const reservedCapability = safeReservationCapability(reservation);
+  const reservedSnapshot = inspectAuditSnapshotCapability(reservedCapability);
+  if (!previousSnapshot || !reservedSnapshot || reservedSnapshot.auditId !== previousSnapshot.auditId ||
+    reservedSnapshot.revision !== previousSnapshot.revision + 1 ||
+    canonicalStringify(reservedSnapshot.model) !== canonicalStringify(model)) {
+    throw new TypeError('Reserva atômica de entrega não corresponde ao relatório preparado.');
+  }
+  return reservedCapability;
+}
+
+async function adoptPersistentReservation(reservation, timeoutMs) {
+  const primary = await settleWithin(reservation, timeoutMs);
+  if (primary.status === 'fulfilled') return primary.value;
+  if (primary.status === 'rejected') throw primary.reason;
+
+  const grace = await settleWithin(reservation, timeoutMs);
+  if (grace.status === 'fulfilled') return grace.value;
+  if (grace.status === 'rejected') throw persistentReservationPendingError(reservation);
+  throw persistentReservationPendingError(reservation);
+}
+
+function settleWithin(promise, timeoutMs) {
+  return new Promise(resolve => {
+    let settled = false;
+    let timer;
+    const finish = result => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    Promise.resolve(promise).then(
+      value => finish({ status: 'fulfilled', value }),
+      reason => finish({ status: 'rejected', reason }),
+    );
+    timer = setTimeout(() => finish({ status: 'timeout' }), timeoutMs);
+  });
+}
+
+function persistentReservationPendingError(reservation) {
+  const error = new Error('A confirmação da reserva persistente continua pendente; mantenha esta aba aberta.');
+  Object.defineProperties(error, {
+    name: { value: 'AuditExportReservationPendingError', enumerable: false },
+    code: { value: 'AUDIT_EXPORT_RESERVATION_PENDING', enumerable: true },
+  });
+  const tracked = Promise.resolve(reservation);
+  void tracked.catch(() => {});
+  PENDING_REPORT_RESERVATIONS.set(error, tracked);
+  return error;
+}
+
+export function isPendingReportReservationError(error) {
+  try {
+    return Boolean(error && (typeof error === 'object' || typeof error === 'function') &&
+      PENDING_REPORT_RESERVATIONS.has(error));
+  } catch {
+    return false;
+  }
+}
+
+export async function advancePendingReportReservation(error, readSnapshot, options = undefined) {
+  let reservation;
+  try {
+    reservation = error && (typeof error === 'object' || typeof error === 'function')
+      ? PENDING_REPORT_RESERVATIONS.get(error)
+      : undefined;
+  } catch {
+    return { status: 'waiting' };
+  }
+  if (!reservation || typeof readSnapshot !== 'function') return { status: 'waiting' };
+  const timeoutMs = pendingReservationTimeout(options);
+  const settlement = await settleWithin(reservation, timeoutMs);
+  if (settlement.status === 'fulfilled') {
+    const snapshot = inspectAuditSnapshotCapability(settlement.value);
+    if (!snapshot) return { status: 'waiting' };
+    PENDING_REPORT_RESERVATIONS.delete(error);
+    return { status: 'reserved', revision: snapshot.revision, snapshotCapability: settlement.value };
+  }
+
+  const currentResult = await settleWithin(
+    Promise.resolve().then(() => Reflect.apply(readSnapshot, undefined, [])),
+    timeoutMs,
+  );
+  if (currentResult.status !== 'fulfilled') return { status: 'waiting' };
+  const current = safeStoredSnapshot(currentResult.value);
+  const pending = pendingReservationRecord(reservation);
+  if (!current || !pending || current.auditId !== pending.auditId) return { status: 'waiting' };
+  if (current.revision === pending.previousRevision + 1 &&
+    canonicalStringify(current.model) === pending.expectedModel) {
+    PENDING_REPORT_RESERVATIONS.delete(error);
+    return { status: 'reserved', revision: current.revision, snapshotCapability: current.capability };
+  }
+  if (current.revision > pending.previousRevision) {
+    PENDING_REPORT_RESERVATIONS.delete(error);
+    return { status: 'superseded' };
+  }
+  if (settlement.status === 'rejected' && current.revision === pending.previousRevision &&
+    canonicalStringify(current.model) === pending.previousModel) {
+    PENDING_REPORT_RESERVATIONS.delete(error);
+    return { status: 'not-reserved', revision: current.revision, snapshotCapability: current.capability };
+  }
+  return { status: 'waiting' };
+}
+
+function pendingReservationTimeout(options) {
+  try {
+    if (options === undefined) return 5_000;
+    if (!options || typeof options !== 'object' || Array.isArray(options)) return 5_000;
+    const descriptor = Reflect.getOwnPropertyDescriptor(options, 'timeoutMs');
+    const value = descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+    return Number.isFinite(value) && value > 0 ? value : 5_000;
+  } catch {
+    return 5_000;
+  }
+}
+
+function safeStoredSnapshot(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const descriptor = Reflect.getOwnPropertyDescriptor(value, 'capability');
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+    const snapshot = inspectAuditSnapshotCapability(descriptor.value);
+    return snapshot ? { ...snapshot, capability: descriptor.value } : null;
+  } catch {
+    return null;
+  }
+}
+
+const PENDING_RESERVATION_RECORDS = new WeakMap();
+
+function pendingReservationRecord(reservation) {
+  try { return PENDING_RESERVATION_RECORDS.get(reservation) ?? null; } catch { return null; }
+}
+
 async function printFinalHtml(html, dependencies, timeoutMs, forceCompatible) {
   let bytes = null;
   let usedFallback = false;
@@ -567,6 +718,28 @@ function canonicalGeneratedAt(value) {
   }
 }
 
+function captureDeliveryLeaseTimestamp(value, expectedRevision, expectedAttempt) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new TypeError();
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    if (keys.length !== DELIVERY_LEASE_ATTESTATION_KEYS.length ||
+      keys.some(key => typeof key !== 'string' || !DELIVERY_LEASE_ATTESTATION_KEYS.includes(key)) ||
+      DELIVERY_LEASE_ATTESTATION_KEYS.some(key => {
+        const descriptor = descriptors[key];
+        return descriptor?.enumerable !== true || !Object.hasOwn(descriptor, 'value');
+      })) throw new TypeError();
+    if (descriptors.active.value !== true ||
+      !['running', 'delivering'].includes(descriptors.phase.value) ||
+      descriptors.revision.value !== expectedRevision ||
+      descriptors.exportAttempt.value !== expectedAttempt) throw new TypeError();
+    return canonicalGeneratedAt(descriptors.deliveryAt.value);
+  } catch {
+    throw reportExportInputError();
+  }
+}
+
 function validExportAttempt(value) {
   if (!Number.isSafeInteger(value) || value < 1) throw new TypeError('Tentativa da exportação inválida.');
   return value;
@@ -591,6 +764,7 @@ function captureReportExportRequest(value) {
     if (hasCapability && (!Object.hasOwn(output, 'exportLeaseOwnerId') || !Object.hasOwn(output, 'exportAttempt'))) {
       throw new TypeError();
     }
+    if (hasCapability && Object.hasOwn(output, 'now')) throw new TypeError();
     return Object.freeze(output);
   } catch {
     throw reportExportInputError();

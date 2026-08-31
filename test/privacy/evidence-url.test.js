@@ -113,3 +113,42 @@ test('EvidenceUrlV1 is idempotent for its href projection', () => {
   assert.equal(second.href, first.href);
   assert.equal(second.redactedSegments, first.redactedSegments);
 });
+
+test('EvidenceUrlV1 removes a bare empty query marker and remains valid and idempotent', () => {
+  for (const raw of [
+    'https://example.test/public?',
+    'https://example.test/public?#private-fragment',
+  ]) {
+    const first = sanitizeEvidenceUrlV1(raw, { includeQuery: true });
+    assert.deepEqual(first, {
+      version: 'EvidenceUrlV1',
+      href: 'https://example.test/public',
+      queryIncluded: false,
+      redactedSegments: 0,
+    });
+    assert.equal(isEvidenceUrlV1(first), true);
+    assert.deepEqual(
+      sanitizeEvidenceUrlV1(first.href, { includeQuery: first.queryIncluded }),
+      first,
+    );
+  }
+});
+
+test('EvidenceUrlV1 preserves only redaction markers whose ordinal matches the path segment', () => {
+  const value = sanitizeEvidenceUrlV1(
+    'https://example.test/:redacted-7/ok/:redacted-2/:redacted-4',
+  );
+
+  assert.deepEqual(value, {
+    version: 'EvidenceUrlV1',
+    href: 'https://example.test/:redacted-1/ok/:redacted-3/:redacted-4',
+    queryIncluded: false,
+    redactedSegments: 3,
+  });
+  assert.equal(isEvidenceUrlV1(value), true);
+  assert.deepEqual(sanitizeEvidenceUrlV1(value.href), value);
+  assert.equal(isEvidenceUrlV1({
+    ...value,
+    href: 'https://example.test/:redacted-7/ok/:redacted-2/:redacted-4',
+  }), false);
+});

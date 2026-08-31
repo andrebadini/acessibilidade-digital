@@ -43,6 +43,7 @@ import {
   createReportPortCoordinator,
 } from './report-port.js';
 import { createExportLaunchAuthority } from './export-launch.js';
+import { createExportCompletionStore } from './export-completion-store.js';
 import { createTargetOperationQueue } from './target-operation-queue.js';
 import {
   createLiveAidCleanup,
@@ -667,15 +668,9 @@ async function buildDefaultRuntime(chromeApi, options) {
     publishHighlightState,
     scheduleExpiry: scheduleHighlightExpiry,
   });
-  const exportCompletionStore = Object.freeze({
-    ...auditStore,
-    async emitTerminal(event) { await chromeAdapter.emitProgress(event); },
-    async completeExport(auditId, { attemptId, receipt }) {
-      const durable = await auditStore.getExportReceipt(auditId);
-      if (!same(durable, receipt)) throw new Error('EXPORT_RECEIPT_DENIED');
-      if (durable.attemptId !== attemptId) throw new Error('EXPORT_COMPLETE_DENIED');
-      return Object.freeze({ completed: true, deleted: false });
-    },
+  const exportCompletionStore = createExportCompletionStore({
+    auditStore,
+    emitTerminal: event => chromeAdapter.emitProgress(event),
   });
   const exportLaunch = launchApisAvailable ? createExportLaunchAuthority({
     chromeApi, sessionArea, auditStore: exportCompletionStore, reportLaunch, epochNow, modelNow, randomBytes: bytes,

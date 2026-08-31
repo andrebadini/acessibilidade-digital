@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, sep } from 'node:path';
 import test from 'node:test';
@@ -56,6 +56,7 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
       extensionPath: await realpath(workspaceRoot),
       startUrl: fixture.origin,
       downloadDirectory,
+      downloadMode: 'profile',
       qaDirectory,
       viewport: { width: 1280, height: 900 },
       chromeBinary,
@@ -387,7 +388,32 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
     t.diagnostic(`highlight-sync=active-panel-report; clear-focus=preserved; navigation-cleanup=confirmed; occurrence=${selectedOccurrenceId}`);
 
     await extension.click(report, 'button[data-report-export]');
-    const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 60_000, intervalMs: 50 });
+    let downloads;
+    try {
+      downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 60_000, intervalMs: 50 });
+    } catch (error) {
+      const exportDiagnostic = await extension.evaluate(extension.harnessPage, `(async()=>{
+        const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+        const [receipt,latest,contexts,history,session]=await Promise.all([
+          store.getExportReceipt(${JSON.stringify(auditId)}),
+          store.getLatest(),
+          chrome.runtime.getContexts({contextTypes:['TAB']}),
+          chrome.downloads.search({}),
+          chrome.storage.session.get(null)
+        ]);
+        return {
+          receiptStatus:receipt?.status??null,
+          receiptFormats:receipt?.formats?.map(row=>({format:row.format,state:row.state,downloadId:row.downloadId}))??[],
+          latest:{auditId:latest?.auditId??null,exportStatus:latest?.exportStatus??null,message:latest?.message??null},
+          exportTabs:contexts.filter(value=>String(value.documentUrl||'').includes('/src/export/index.html')).map(value=>String(value.documentUrl).split('?')[0]),
+          history:history.map(row=>({id:row.id,state:row.state,exists:row.exists,filename:String(row.filename||'').split(/[\\/]/u).at(-1)})),
+          exportState:Object.entries(session).filter(([key])=>key.startsWith('audita:export-')).map(([key,value])=>({key:key.split(':').slice(0,4).join(':'),state:value?.state??null,proof:value?.terminalProof?{applied:value.terminalProof.applied,notified:value.terminalProof.notified,status:value.terminalProof.status}:null}))
+        };
+      })()`, { awaitPromise: true }).catch(() => ({ unavailable: true }));
+      const files = await readdir(downloadDirectory).catch(() => []);
+      t.diagnostic(`export-timeout=${JSON.stringify({ exportDiagnostic, files })}`);
+      throw error;
+    }
     assert.deepEqual(downloads.map(row => row.format), ['html', 'pdf', 'csv', 'json']);
     assert.equal(downloads.every(row => row.state === 'complete' && row.byteLength > 0 && /^[a-f0-9]{64}$/u.test(row.sha256)), true);
     const exportsContainingLaunchAuthority = (await Promise.all(downloads.map(async row => ({

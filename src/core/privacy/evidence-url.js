@@ -3,7 +3,6 @@ import { normalizeAuditUrl } from '../url.js';
 const INVALID_URL_MESSAGE = 'URL de evidência HTTP(S) inválida.';
 const INVALID_OPTIONS_MESSAGE = 'Opções de URL de evidência inválidas.';
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,63}$/u;
-const REDACTED_SEGMENT = /^:redacted-[1-9][0-9]*$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const EMAIL = /^[^@/\s]+@[^@/\s]+\.[^@/\s]+$/u;
 const LONG_NUMBER = /\d{7,}/u;
@@ -40,7 +39,7 @@ export function sanitizeEvidenceUrlV1(rawUrl, options = undefined) {
     if (encoded === '') return '';
     ordinal += 1;
     const decoded = decodeSegmentOnce(encoded);
-    if (decoded.ok && REDACTED_SEGMENT.test(decoded.value)) {
+    if (decoded.ok && decoded.value === `:redacted-${ordinal}`) {
       redactedSegments += 1;
       return decoded.value;
     }
@@ -52,11 +51,12 @@ export function sanitizeEvidenceUrlV1(rawUrl, options = undefined) {
       .replace(/%2E/giu, '.')
       .replace(/%7E/giu, '~');
   }).join('/');
-  if (!includeQuery) parsed.search = '';
+  const queryIncluded = includeQuery && parsed.search.length > 0;
+  if (!queryIncluded) parsed.search = '';
   return Object.freeze({
     version: 'EvidenceUrlV1',
     href: parsed.href,
-    queryIncluded: includeQuery && parsed.search.length > 0,
+    queryIncluded,
     redactedSegments,
   });
 }

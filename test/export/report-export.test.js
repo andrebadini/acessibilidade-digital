@@ -2,8 +2,17 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
-import { finalizeGeneratedModel, runReportExport } from '../../src/export/report-export.js';
-import { createExportIssue } from '../../src/export/export-issues.js';
+import {
+  advancePendingReportReservation,
+  finalizeGeneratedModel,
+  isPendingReportReservationError,
+  runReportExport,
+} from '../../src/export/report-export.js';
+import {
+  createExportIssue,
+  REPORT_EXPORT_INPUT_ERROR_CODE,
+  REPORT_EXPORT_INPUT_ERROR_MESSAGE,
+} from '../../src/export/export-issues.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { AUDIT_MODEL_INPUT_ERROR_CODE, AUDIT_MODEL_INPUT_ERROR_MESSAGE } from '../../src/core/report/audit-input.js';
 import { canonicalBatchRuleSummary, canonicalScope } from '../../src/core/report/text-policy.js';
@@ -19,6 +28,7 @@ import { buildPanelSummary } from '../../src/panel/panel-summary.js';
 import { buildReportView } from '../../src/review/report-view.js';
 import { createExportSuccessRequest, persistExportSuccess } from '../../src/export/export-controller.js';
 import { EXPORT_FORMATS_V1 } from '../../src/export/export-formats.js';
+import { buildArtifactBaseName } from '../../src/browser/download-artifacts.js';
 
 const PDF = new TextEncoder().encode('%PDF-1.7\nlocal');
 const FALLBACK_PDF = new TextEncoder().encode('%PDF-1.7\nfinal-fallback');
@@ -137,10 +147,50 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   await store.beginExportDelivery(model.auditId, snapshot.capability, {
     ownerId: deliveryOwnerId, exportAttempt: acquired.exportAttempt, now: leaseNow(3_000),
   });
+  let forgedDependencyReads = 0;
+  await assert.rejects(runReportExport({
+    auditSnapshotCapability: snapshot.capability, exportLeaseOwnerId: deliveryOwnerId,
+    exportAttempt: acquired.exportAttempt,
+    deliveryAt: '2026-08-30T12:34:56.789Z',
+  }, new Proxy({}, {
+    get() {
+      forgedDependencyReads += 1;
+      throw new Error('PRIVATE_FORGED_DELIVERY_DEPENDENCY');
+    },
+  })), error => {
+    assert.equal(error?.code, REPORT_EXPORT_INPUT_ERROR_CODE);
+    assert.equal(error?.message, REPORT_EXPORT_INPUT_ERROR_MESSAGE);
+    return true;
+  });
+  assert.equal(forgedDependencyReads, 0,
+    'caller-supplied delivery instants must be rejected before dependencies are observed');
+  const deliveryAttestation = await store.assertExportLease(model.auditId, snapshot.capability, {
+    ownerId: deliveryOwnerId, exportAttempt: acquired.exportAttempt,
+    now: leaseNow(3_500), phase: 'delivering',
+  });
+  await assert.rejects(runReportExport({
+    auditSnapshotCapability: snapshot.capability, exportLeaseOwnerId: deliveryOwnerId,
+    exportAttempt: acquired.exportAttempt, timeoutMs: 5,
+  }, {
+    reportView,
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+    downloadsAdapter: fakeDownloads([]),
+    assertDelivery({ stage }) {
+      if (stage !== 'identity') return deliveryAttestation;
+      return new Promise(resolve => setTimeout(() => resolve(deliveryAttestation), 25));
+    },
+    async recordDelivery() {},
+  }), error => {
+    assert.equal(error?.name, 'TimeoutError');
+    assert.equal(error?.message, 'A atestação persistente da identidade da entrega excedeu o tempo limite.');
+    assert.doesNotMatch(error?.message ?? '', /PRIVATE|IndexedDB|dependency/iu);
+    return true;
+  });
   const result = await runReportExport({
     auditSnapshotCapability: snapshot.capability, exportLeaseOwnerId: deliveryOwnerId,
     exportAttempt: acquired.exportAttempt,
-    now: () => '2026-08-30T12:34:56.789Z',
   }, {
     reportView,
     urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
@@ -162,12 +212,9 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   });
   assert.equal((await store.getAuditSnapshot(model.auditId)).revision, snapshot.revision);
   assert.deepEqual(result.deliveryReceipt.formats.map(entry => entry.format), EXPORT_FORMATS_V1);
-  assert.deepEqual(result.deliveryReceipt.formats.map(entry => entry.filename), [
-    'audita-audit-sample-20260826-20260830T123456789Z.html',
-    'audita-audit-sample-20260826-20260830T123456789Z.pdf',
-    'audita-audit-sample-20260826-20260830T123456789Z.csv',
-    'audita-audit-sample-20260826-20260830T123456789Z.json',
-  ]);
+  const artifactBaseName = buildArtifactBaseName(model.auditId, acquired.deliveryAt);
+  assert.deepEqual(result.deliveryReceipt.formats.map(entry => entry.filename),
+    EXPORT_FORMATS_V1.map(format => `${artifactBaseName}.${format}`));
   assert.doesNotMatch(JSON.stringify(result.deliveryReceipt.formats), /delivery-|export:|attempt/iu);
   assert.equal(result.deliveryReceipt.formats.every(entry => entry.byteSize > 0 && /^[a-f0-9]{64}$/u.test(entry.sha256)), true);
   const persisted = await persistExportSuccess(createExportSuccessRequest({ auditId:model.auditId,result,latest:{auditId:model.auditId} }),store);
@@ -451,13 +498,17 @@ test('a newer human review that wins the pre-delivery CAS prevents every stale d
     auditSnapshotCapability: snapshot.capability,
     exportLeaseOwnerId: leaseOwnerId,
     exportAttempt: acquired.exportAttempt,
-    now: () => '2026-08-26T15:00:00.000Z',
   }, {
     urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
     tabAdapter: successfulTabAdapter(),
     async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
     downloadsAdapter: fakeDownloads(events),
-    async assertDelivery() {},
+    assertDelivery({ snapshotCapability, exportLeaseOwnerId, stage }) {
+      return store.assertExportLease(SAMPLE_AUDIT.auditId, snapshotCapability, {
+        ownerId: exportLeaseOwnerId, exportAttempt: acquired.exportAttempt,
+        now: '2026-08-26T15:00:00.000Z', phase: stage === 'identity' ? 'running' : 'delivering',
+      });
+    },
     async recordDelivery() {},
     async reserveDelivery({ model }) {
       await commitReviewDecision(snapshot.model, {
@@ -504,7 +555,6 @@ test('a review immediately after reservation revokes delivery before the first p
     auditSnapshotCapability: snapshot.capability,
     exportLeaseOwnerId: leaseOwnerId,
     exportAttempt: acquired.exportAttempt,
-    now: () => '2026-08-26T15:00:00.000Z',
   }, {
     urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
     tabAdapter: successfulTabAdapter(),
@@ -530,7 +580,13 @@ test('a review immediately after reservation revokes delivery before the first p
       }, store);
       return reservation;
     },
-    async assertDelivery() {
+    async assertDelivery({ snapshotCapability, exportLeaseOwnerId, stage }) {
+      if (stage === 'identity') {
+        return store.assertExportLease(SAMPLE_AUDIT.auditId, snapshotCapability, {
+          ownerId: exportLeaseOwnerId, exportAttempt: acquired.exportAttempt,
+          now: '2026-08-26T15:00:00.000Z', phase: 'running',
+        });
+      }
       const lease = await store.getExportLeaseState(SAMPLE_AUDIT.auditId, {
         now: '2026-08-26T15:00:01.200Z',
       });
@@ -546,6 +602,141 @@ test('a review immediately after reservation revokes delivery before the first p
   assert.equal(stored.report?.artifact?.status, 'pending');
   assert.equal(stored.integrity.canonicalModelHash, 'pending');
   assert.equal((await store.getLatest()).exportStatus, 'preparing');
+});
+
+test('bounds a persistent delivery reservation that never settles and starts no download', async () => {
+  const harness = await mutablePersistentExportHarness();
+  const reservationStarted = deferred();
+  const run = runReportExport({
+    auditSnapshotCapability: harness.snapshot.capability,
+    exportLeaseOwnerId: harness.leaseOwnerId,
+    exportAttempt: harness.exportAttempt,
+    timeoutMs: 5,
+  }, {
+    ...harness.dependencies,
+    reserveDelivery() {
+      reservationStarted.resolve();
+      return new Promise(() => {});
+    },
+  });
+
+  await reservationStarted.promise;
+  const outcome = await settleTestPromise(run, 100);
+  assert.equal(outcome.status, 'rejected');
+  const code = Object.getOwnPropertyDescriptor(outcome.reason, 'code');
+  assert.equal(code && Object.hasOwn(code, 'value'), true);
+  assert.equal(code?.value, 'AUDIT_EXPORT_RESERVATION_PENDING');
+  assert.equal(isPendingReportReservationError(outcome.reason), true);
+  assert.deepEqual(await advancePendingReportReservation(
+    outcome.reason,
+    () => harness.store.getAuditSnapshot(SAMPLE_AUDIT.auditId),
+    { timeoutMs: 5 },
+  ), { status: 'waiting' });
+  assert.deepEqual(harness.downloadEvents, []);
+});
+
+test('adopts a reservation committed only after both export boundaries without losing its live owner', async () => {
+  const harness = await mutablePersistentExportHarness();
+  const reservationStarted = deferred();
+  const releaseReservation = deferred();
+  const run = runReportExport({
+    auditSnapshotCapability: harness.snapshot.capability,
+    exportLeaseOwnerId: harness.leaseOwnerId,
+    exportAttempt: harness.exportAttempt,
+    timeoutMs: 5,
+  }, {
+    ...harness.dependencies,
+    async reserveDelivery({ model }) {
+      reservationStarted.resolve();
+      await releaseReservation.promise;
+      return harness.store.commitAuditIfRevisionWithExportLease(
+        SAMPLE_AUDIT.auditId,
+        model,
+        {
+          auditId: SAMPLE_AUDIT.auditId,
+          exportStatus: 'delivering',
+          exportRevision: harness.snapshot.revision + 1,
+        },
+        harness.snapshot.capability,
+        {
+          ownerId: harness.leaseOwnerId,
+          exportAttempt: harness.exportAttempt,
+          now: '2026-08-26T15:00:01.000Z',
+          phase: 'delivering',
+        },
+      );
+    },
+  });
+
+  await reservationStarted.promise;
+  const outcome = await settleTestPromise(run, 100);
+  assert.equal(outcome.status, 'rejected');
+  assert.equal(isPendingReportReservationError(outcome.reason), true);
+  assert.deepEqual(harness.downloadEvents, []);
+  assert.deepEqual(await advancePendingReportReservation(
+    outcome.reason,
+    () => harness.store.getAuditSnapshot(SAMPLE_AUDIT.auditId),
+    { timeoutMs: 5 },
+  ), { status: 'waiting' });
+
+  releaseReservation.resolve();
+  const recovered = await advancePendingReportReservation(
+    outcome.reason,
+    () => harness.store.getAuditSnapshot(SAMPLE_AUDIT.auditId),
+    { timeoutMs: 100 },
+  );
+  assert.equal(recovered.status, 'reserved');
+  assert.equal(recovered.revision, harness.snapshot.revision + 1);
+  assert.ok(recovered.snapshotCapability);
+  assert.deepEqual(harness.downloadEvents, [], 'no artifact may start after the timed-out caller returned');
+});
+
+test('adopts a valid reservation committed after the primary timeout before starting downloads', async () => {
+  const harness = await mutablePersistentExportHarness();
+  const reservationStarted = deferred();
+  const releaseReservation = deferred();
+  const timeoutMs = 50;
+  const run = runReportExport({
+    auditSnapshotCapability: harness.snapshot.capability,
+    exportLeaseOwnerId: harness.leaseOwnerId,
+    exportAttempt: harness.exportAttempt,
+    timeoutMs,
+  }, {
+    ...harness.dependencies,
+    async reserveDelivery({ model }) {
+      reservationStarted.resolve();
+      await releaseReservation.promise;
+      return harness.store.commitAuditIfRevisionWithExportLease(
+        SAMPLE_AUDIT.auditId,
+        model,
+        {
+          auditId: SAMPLE_AUDIT.auditId,
+          exportStatus: 'delivering',
+          exportRevision: harness.snapshot.revision + 1,
+        },
+        harness.snapshot.capability,
+        {
+          ownerId: harness.leaseOwnerId,
+          exportAttempt: harness.exportAttempt,
+          now: '2026-08-26T15:00:01.000Z',
+          phase: 'delivering',
+        },
+      );
+    },
+  });
+  const outcome = run.then(
+    value => ({ status: 'fulfilled', value }),
+    reason => ({ status: 'rejected', reason }),
+  );
+
+  await reservationStarted.promise;
+  await waitMs(timeoutMs + 10);
+  assert.deepEqual(harness.downloadEvents, []);
+  releaseReservation.resolve();
+  const settled = await settleTestPromise(outcome, 2_000);
+  assert.equal(settled.status, 'fulfilled');
+  assert.equal(settled.value.status, 'fulfilled');
+  assert.ok(harness.downloadEvents.some(entry => entry[0] === 'download'));
 });
 
 test('ignores image branding input and exports only the neutral independent identity', async () => {
@@ -1129,6 +1320,7 @@ function fakeDownloads(events) {
     createObjectURL(blob) { const url = `blob:chrome-extension://test/download-${id}`; events.push(['create-download-url', blob.type]); return url; },
     revokeObjectURL() { events.push(['revoke-download-url']); },
     async download(options) { id += 1; events.push(['download', options.filename]); return id; },
+    async resolveDownloadFilename(_downloadId, { requestedFilename }) { return requestedFilename; },
     async waitForDownload(downloadId) { events.push(['download-complete', downloadId]); return { id: downloadId, state: 'complete' }; },
   };
 }
@@ -1138,6 +1330,79 @@ function successfulTabAdapter() {
     async createPrintTab() { return { id: 70 }; }, async waitForReady() {},
     async connectCdp() { return { async disconnect() {} }; }, async waitForAssets() {}, async removeTab() {},
   };
+}
+
+async function mutablePersistentExportHarness() {
+  const store = createInMemoryAuditStore();
+  await store.setAudit(SAMPLE_AUDIT.auditId, clone(SAMPLE_AUDIT));
+  const snapshot = await store.getAuditSnapshot(SAMPLE_AUDIT.auditId);
+  const leaseOwnerId = 'owner-reservation-boundary';
+  const acquired = await store.acquireExportLease(SAMPLE_AUDIT.auditId, snapshot.capability, {
+    ownerId: leaseOwnerId,
+    now: '2026-08-26T14:59:58.000Z',
+    latestState: {
+      auditId: SAMPLE_AUDIT.auditId,
+      exportStatus: 'queued',
+      exportRevision: snapshot.revision,
+    },
+  });
+  await store.claimExportLease(SAMPLE_AUDIT.auditId, snapshot.capability, {
+    ownerId: leaseOwnerId,
+    exportAttempt: acquired.exportAttempt,
+    now: '2026-08-26T14:59:59.000Z',
+    latestState: {
+      auditId: SAMPLE_AUDIT.auditId,
+      exportStatus: 'running',
+      exportRevision: snapshot.revision,
+    },
+  });
+  const downloadEvents = [];
+  return {
+    store,
+    snapshot,
+    leaseOwnerId,
+    exportAttempt: acquired.exportAttempt,
+    downloadEvents,
+    dependencies: {
+      urlApi: {
+        createObjectURL() { return 'blob:chrome-extension://test/print'; },
+        revokeObjectURL() {},
+      },
+      tabAdapter: successfulTabAdapter(),
+      async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+      downloadsAdapter: fakeDownloads(downloadEvents),
+      assertDelivery({ snapshotCapability, exportLeaseOwnerId, stage }) {
+        return store.assertExportLease(SAMPLE_AUDIT.auditId, snapshotCapability, {
+          ownerId: exportLeaseOwnerId,
+          exportAttempt: acquired.exportAttempt,
+          now: stage === 'identity' ? '2026-08-26T15:00:00.000Z' : '2026-08-26T15:00:02.000Z',
+          phase: stage === 'identity' ? 'running' : 'delivering',
+        });
+      },
+      async recordDelivery() { return true; },
+    },
+  };
+}
+
+function waitMs(milliseconds) {
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+async function settleTestPromise(promise, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve(promise).then(
+        value => ({ status: 'fulfilled', value }),
+        reason => ({ status: 'rejected', reason }),
+      ),
+      new Promise(resolve => {
+        timer = setTimeout(() => resolve({ status: 'test-timeout' }), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function deferred() {

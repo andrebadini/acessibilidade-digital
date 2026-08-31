@@ -165,6 +165,62 @@ test('advances delivery without changing the report revision and re-reads exact 
   });
 });
 
+test('a controlled partial delivery keeps an authenticated completion receipt after journal cleanup', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    const auditId = `partial-receipt-${backend.toLowerCase()}`;
+    const { model, checkpoint, latest } = await terminalFixture(auditId);
+    await store.commitAuditWithCheckpointIfAbsent(auditId, model, checkpoint, latest,
+      { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false });
+    const snapshot = await store.getAuditSnapshot(auditId);
+    const acquired = await store.acquireExportLease(auditId, snapshot.capability,
+      { ownerId: `export:${auditId}:pending`, now: '2026-08-29T12:00:01.000Z' });
+    const ownerId = `export:${auditId}:${acquired.exportAttempt}`;
+    await store.claimExportLease(auditId, snapshot.capability,
+      { ownerId, exportAttempt: acquired.exportAttempt, now: '2026-08-29T12:00:02.000Z' });
+    await store.beginExportDelivery(auditId, snapshot.capability,
+      { ownerId, exportAttempt: acquired.exportAttempt, now: '2026-08-29T12:00:03.000Z' });
+    const formats = [];
+    const identities = [
+      ['html', 'text/html;charset=utf-8'],
+      ['pdf', 'application/pdf'],
+      ['json', 'application/json;charset=utf-8'],
+    ];
+    for (const [index, [format, mimeType]] of identities.entries()) {
+      const identity = {
+        format, filename: `${auditId}.${format}`, mimeType, byteSize: 10 + index,
+        sha256: String(index + 1).repeat(64), downloadId: 80 + index,
+      };
+      formats.push({ ...identity, status: 'complete' });
+      await store.recordExportDelivery(auditId, snapshot.capability, {
+        ownerId, exportAttempt: acquired.exportAttempt,
+        now: `2026-08-29T12:00:04.${String(index).padStart(3, '0')}Z`, state: 'terminal', ...identity,
+      });
+    }
+    await store.finalizeExportAndMaybeDelete(auditId, model, {
+      auditId, exportStatus: 'partial',
+      exportDeliveryIdentity: {
+        auditId, modelRevision: snapshot.revision, modelHash: model.integrity.canonicalModelHash,
+        attemptId: String(acquired.exportAttempt),
+      },
+      deliveryReceipt: {
+        status: 'partial', formats,
+        limitations: ['O arquivo CSV não pôde ser preparado.'],
+      },
+    }, snapshot.capability, {
+      ownerId, exportAttempt: acquired.exportAttempt, now: '2026-08-29T12:00:05.000Z',
+      clearDeliveryJournal: true, deleteAfterCompleteExport: false,
+    });
+
+    assert.deepEqual(await store.getExportReceipt(auditId), {
+      version: 1, auditId, modelRevision: snapshot.revision,
+      modelHash: model.integrity.canonicalModelHash,
+      attemptId: String(acquired.exportAttempt), status: 'partial',
+      formats: formats.map(({ filename: _filename, status: _status, ...entry }) => ({ ...entry, state: 'complete' })),
+    });
+  });
+});
+
 test('terminal commit rejects hostile options and cryptographic or checkpoint corruption without mutation', async t => {
   for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
     const store = factory();
@@ -238,11 +294,13 @@ function operationGateContexts() {
     ['memory', {
       store: createInMemoryAuditStore(memoryBacking),
       replaceModel(auditId, model) { memoryBacking.set(auditId, structuredClone(model)); },
+      replacePrivate(key, value) { memoryBacking.set(key, structuredClone(value)); },
       inspectBacking() { return structuredClone([...memoryBacking]); },
     }],
     ['IndexedDB', {
       store: createAuditStore({ indexedDB: fakeIndexedDb, IDBKeyRange: fakeIndexedDb.IDBKeyRange }),
       replaceModel(auditId, model) { fakeIndexedDb.replaceRecord('audits', auditId, model); },
+      replacePrivate(key, value) { fakeIndexedDb.replaceRecord('audits', key, value); },
       inspectBacking() {
         return structuredClone({
           audits: [...(fakeIndexedDb.inspectStore('audits') ?? [])],
@@ -897,20 +955,30 @@ test('finalization deletes only after the exact four terminal formats for the cu
     );
     snapshot = await store.getAuditSnapshot(auditId);
     assert.equal(snapshot.revision, reserved.revision);
+    const receiptFormats = [];
+    const mime = {
+      html: 'text/html;charset=utf-8', pdf: 'application/pdf',
+      csv: 'text/csv;charset=utf-8', json: 'application/json;charset=utf-8',
+    };
     for (const [index, format] of ['html', 'json', 'csv', 'pdf'].entries()) {
+      const identity = {
+        format, filename: `auditoria.${format}`, downloadId: index + 1,
+        mimeType: mime[format], byteSize: index + 10, sha256: String(index + 1).repeat(64),
+      };
+      receiptFormats.push({ ...identity, status: 'complete' });
       await store.recordExportDelivery(auditId, snapshot.capability, {
         ownerId: 'final-owner', exportAttempt: lease.exportAttempt,
         now: `2026-08-30T10:00:01.${String(index).padStart(3, '0')}Z`,
-        format,
-        filename: `auditoria.${format}`,
-        state: 'terminal',
-        downloadId: index + 1,
+        state: 'terminal', ...identity,
       });
     }
     const result = await store.finalizeExportAndMaybeDelete(
       auditId,
       auditFixture(auditId, 'complete'),
-      { auditId, exportStatus: 'complete' },
+      {
+        auditId, exportStatus: 'complete',
+        deliveryReceipt: { status: 'complete', limitations: [], formats: receiptFormats },
+      },
       snapshot.capability,
       {
         ownerId: 'final-owner', exportAttempt: lease.exportAttempt,
@@ -941,17 +1009,29 @@ test('incomplete delivery receipt preserves the audit even when delete-after-exp
     { ownerId: 'partial-owner', exportAttempt: lease.exportAttempt, now: '2026-08-30T10:00:00.200Z', phase: 'delivering' },
   );
   snapshot = await store.getAuditSnapshot(auditId);
+  const receiptFormats = [];
+  const mime = {
+    html: 'text/html;charset=utf-8', pdf: 'application/pdf', json: 'application/json;charset=utf-8',
+  };
   for (const [index, format] of ['html', 'json', 'pdf'].entries()) {
+    const identity = {
+      format, filename: `auditoria.${format}`, downloadId: index + 1,
+      mimeType: mime[format], byteSize: index + 10, sha256: String(index + 1).repeat(64),
+    };
+    receiptFormats.push({ ...identity, status: 'complete' });
     await store.recordExportDelivery(auditId, snapshot.capability, {
       ownerId: 'partial-owner', exportAttempt: lease.exportAttempt,
       now: `2026-08-30T10:00:01.${String(index).padStart(3, '0')}Z`,
-      format, filename: `auditoria.${format}`, state: 'terminal', downloadId: index + 1,
+      state: 'terminal', ...identity,
     });
   }
   const result = await store.finalizeExportAndMaybeDelete(
     auditId,
     auditFixture(auditId, 'partial'),
-    { auditId, exportStatus: 'partial' },
+    {
+      auditId, exportStatus: 'partial',
+      deliveryReceipt: { status: 'partial', limitations: [], formats: receiptFormats },
+    },
     snapshot.capability,
     {
       ownerId: 'partial-owner', exportAttempt: lease.exportAttempt,
@@ -1321,11 +1401,21 @@ test('persistent storage clone failures are fixed, accessor-safe and retryable a
       },
     );
     let downloadId = 70;
+    const receiptFormats = [];
+    const mime = {
+      html: 'text/html;charset=utf-8', pdf: 'application/pdf',
+      csv: 'text/csv;charset=utf-8', json: 'application/json;charset=utf-8',
+    };
     for (const format of ['html', 'json', 'csv', 'pdf']) {
+      const identity = {
+        format, filename: `clone-finalization.${format}`, downloadId,
+        mimeType: mime[format], byteSize: downloadId, sha256: String((downloadId % 9) + 1).repeat(64),
+      };
+      receiptFormats.push({ ...identity, status: 'complete' });
       await store.recordExportDelivery(auditId, reserved.capability, {
         ownerId: 'clone-owner', exportAttempt: acquired.exportAttempt,
         now: `2026-08-01T00:00:02.${String(downloadId).padStart(3, '0')}Z`,
-        format, filename: `clone-finalization.${format}`, state: 'terminal', downloadId,
+        state: 'terminal', ...identity,
       });
       downloadId += 1;
     }
@@ -1345,7 +1435,10 @@ test('persistent storage clone failures are fixed, accessor-safe and retryable a
     const finalized = await store.finalizeExportAndMaybeDelete(
       auditId,
       auditFixture(auditId, 'partial'),
-      { auditId, exportStatus: 'partial' },
+      {
+        auditId, exportStatus: 'partial',
+        deliveryReceipt: { status: 'partial', limitations: [], formats: receiptFormats },
+      },
       reserved.capability,
       options,
     );
@@ -1693,6 +1786,374 @@ test('export attempts remain monotonic per audit when another audit becomes late
   }
 });
 
+test('delivery instants are persisted and advance one millisecond for same-clock export attempts', async t => {
+  const memoryBacking = new Map();
+  const fakeIndexedDb = createFakeIndexedDb();
+  const contexts = [
+    ['memory', createInMemoryAuditStore(memoryBacking), {
+      inspect: key => memoryBacking.get(key),
+    }],
+    ['IndexedDB', createAuditStore({ indexedDB: fakeIndexedDb }), {
+      inspect: key => fakeIndexedDb.inspectStore('audits')?.get(key),
+    }],
+  ];
+  for (const [backend, store, backing] of contexts) await t.test(backend, async () => {
+    const auditId = `delivery-clock-${backend.toLowerCase()}`;
+    const attemptKey = `__audit_export_attempt__:${auditId}`;
+    const sameNow = '2026-08-27T10:00:00.123Z';
+    await store.setAudit(auditId, auditFixture(auditId));
+    const snapshot = await store.getAuditSnapshot(auditId);
+
+    const first = await store.acquireExportLease(auditId, snapshot.capability, {
+      ownerId: 'delivery-clock-owner-1', now: sameNow,
+    });
+    assert.equal(first.exportAttempt, 1);
+    assert.equal(first.deliveryAt, sameNow);
+    const claimed = await store.claimExportLease(auditId, snapshot.capability, {
+      ownerId: 'delivery-clock-owner-1', exportAttempt: 1, now: sameNow,
+    });
+    assert.equal(claimed.deliveryAt, sameNow);
+    const attested = await store.assertExportLease(auditId, snapshot.capability, {
+      ownerId: 'delivery-clock-owner-1', exportAttempt: 1, now: sameNow, phase: 'running',
+    });
+    assert.equal(attested.deliveryAt, sameNow,
+      'the store-backed assertion is the sole authority for the public artifact timestamp');
+    assert.equal(await store.releaseExportLease(auditId, {
+      ownerId: 'delivery-clock-owner-1', now: sameNow,
+    }), true);
+
+    const second = await store.acquireExportLease(auditId, snapshot.capability, {
+      ownerId: 'delivery-clock-owner-2', now: sameNow,
+    });
+    assert.equal(second.exportAttempt, 2);
+    assert.equal(second.deliveryAt, '2026-08-27T10:00:00.124Z');
+    const secondClaim = await store.claimExportLease(auditId, snapshot.capability, {
+      ownerId: 'delivery-clock-owner-2', exportAttempt: 2, now: sameNow,
+    });
+    assert.equal(secondClaim.deliveryAt, second.deliveryAt);
+    assert.deepEqual(backing.inspect(attemptKey), {
+      schemaVersion: 1,
+      auditId,
+      exportAttempt: 2,
+      deliveryAt: '2026-08-27T10:00:00.124Z',
+    });
+
+    assert.equal(await store.releaseExportLease(auditId, {
+      ownerId: 'delivery-clock-owner-2', now: sameNow,
+    }), true);
+    await store.deleteAudit(auditId, snapshot.capability, { now: sameNow });
+    assert.equal(backing.inspect(attemptKey), undefined,
+      'the private delivery clock must be deleted with its audit');
+  });
+});
+
+test('legacy numeric attempts and leases acquire a stable delivery instant without losing monotonicity', async t => {
+  const memoryBacking = new Map();
+  const fakeIndexedDb = createFakeIndexedDb();
+  const contexts = [
+    ['memory', createInMemoryAuditStore(memoryBacking), {
+      replace(key, value) { memoryBacking.set(key, structuredClone(value)); },
+      inspect: key => memoryBacking.get(key),
+    }],
+    ['IndexedDB', createAuditStore({ indexedDB: fakeIndexedDb }), {
+      replace(key, value) { fakeIndexedDb.replaceRecord('audits', key, value); },
+      inspect: key => fakeIndexedDb.inspectStore('audits')?.get(key),
+    }],
+  ];
+  for (const [backend, store, backing] of contexts) await t.test(backend, async () => {
+    const auditId = `legacy-delivery-clock-${backend.toLowerCase()}`;
+    const attemptKey = `__audit_export_attempt__:${auditId}`;
+    const leaseKey = `__audit_export_lease__:${auditId}`;
+    await store.setAudit(auditId, auditFixture(auditId));
+    const snapshot = await store.getAuditSnapshot(auditId);
+    backing.replace(attemptKey, 7);
+    backing.replace(leaseKey, {
+      schemaVersion: 1,
+      auditId,
+      ownerId: 'legacy-delivery-owner',
+      revision: snapshot.revision,
+      exportAttempt: 7,
+      phase: 'queued',
+      acquiredAt: '2026-08-27T10:00:00.000Z',
+      expiresAt: '2026-08-27T10:01:00.000Z',
+    });
+
+    const claimed = await store.claimExportLease(auditId, snapshot.capability, {
+      ownerId: 'legacy-delivery-owner', exportAttempt: 7,
+      now: '2026-08-27T10:00:00.500Z',
+    });
+    assert.equal(claimed.deliveryAt, '2026-08-27T10:00:00.000Z');
+    assert.deepEqual(backing.inspect(attemptKey), {
+      schemaVersion: 1,
+      auditId,
+      exportAttempt: 7,
+      deliveryAt: '2026-08-27T10:00:00.000Z',
+    });
+    assert.equal(await store.releaseExportLease(auditId, {
+      ownerId: 'legacy-delivery-owner', now: '2026-08-27T10:00:00.500Z',
+    }), true);
+
+    const retry = await store.acquireExportLease(auditId, snapshot.capability, {
+      ownerId: 'legacy-delivery-retry', now: '2026-08-27T10:00:00.000Z',
+    });
+    assert.equal(retry.exportAttempt, 8);
+    assert.equal(retry.deliveryAt, '2026-08-27T10:00:00.001Z');
+  });
+});
+
+test('audit mutation preserves the delivery clock from a legacy lease before deleting it', async t => {
+  const memoryBacking = new Map();
+  const fakeIndexedDb = createFakeIndexedDb();
+  const contexts = [
+    ['memory', createInMemoryAuditStore(memoryBacking), {
+      replace(key, value) { memoryBacking.set(key, structuredClone(value)); },
+      inspect(key) { return memoryBacking.get(key); },
+    }],
+    ['IndexedDB', createAuditStore({ indexedDB: fakeIndexedDb }), {
+      replace(key, value) { fakeIndexedDb.replaceRecord('audits', key, value); },
+      inspect(key) { return fakeIndexedDb.inspectStore('audits')?.get(key); },
+    }],
+  ];
+  for (const [backend, store, backing] of contexts) await t.test(backend, async () => {
+    const auditId = `legacy-mutation-clock-${backend.toLowerCase()}`;
+    const attemptKey = `__audit_export_attempt__:${auditId}`;
+    const leaseKey = `__audit_export_lease__:${auditId}`;
+    await store.setAudit(auditId, auditFixture(auditId));
+    const firstSnapshot = await store.getAuditSnapshot(auditId);
+    backing.replace(attemptKey, 7);
+    backing.replace(leaseKey, {
+      schemaVersion: 1,
+      auditId,
+      ownerId: 'legacy-mutation-owner',
+      revision: firstSnapshot.revision,
+      exportAttempt: 7,
+      phase: 'queued',
+      acquiredAt: '2026-08-27T12:00:00.000Z',
+      expiresAt: '2026-08-27T13:00:00.000Z',
+    });
+
+    await store.setAudit(auditId, auditFixture(auditId, 'revised'));
+    assert.equal(backing.inspect(leaseKey), undefined);
+    assert.deepEqual(backing.inspect(attemptKey), {
+      schemaVersion: 1,
+      auditId,
+      exportAttempt: 7,
+      deliveryAt: '2026-08-27T12:00:00.000Z',
+    });
+    const revised = await store.getAuditSnapshot(auditId);
+    const retry = await store.acquireExportLease(auditId, revised.capability, {
+      ownerId: 'legacy-mutation-retry', now: '2026-08-27T11:00:00.000Z',
+    });
+    assert.equal(retry.exportAttempt, 8);
+    assert.equal(retry.deliveryAt, '2026-08-27T12:00:00.001Z');
+  });
+});
+
+test('audit mutation rejects a legacy lease whose attempt differs from the persisted counter', async t => {
+  for (const storedAttempt of [6, 8]) {
+    for (const [backend, context] of operationGateContexts()) await t.test(`${backend}-stored-${storedAttempt}`, async () => {
+      const auditId = `legacy-mismatch-${backend.toLowerCase()}-${storedAttempt}`;
+      const attemptKey = `__audit_export_attempt__:${auditId}`;
+      const leaseKey = `__audit_export_lease__:${auditId}`;
+      await context.store.setAudit(auditId, auditFixture(auditId));
+      const snapshot = await context.store.getAuditSnapshot(auditId);
+      context.replacePrivate(attemptKey, storedAttempt);
+      context.replacePrivate(leaseKey, {
+        schemaVersion: 1,
+        auditId,
+        ownerId: 'legacy-mismatch-owner',
+        revision: snapshot.revision,
+        exportAttempt: 7,
+        phase: 'queued',
+        acquiredAt: '2026-08-27T12:00:00.000Z',
+        expiresAt: '2026-08-27T13:00:00.000Z',
+      });
+      const before = context.inspectBacking();
+
+      await assert.rejects(
+        context.store.setAudit(auditId, auditFixture(auditId, 'must-not-commit')),
+        error => error?.message === 'Tentativa armazenada da exportação inválida.',
+      );
+      assert.deepEqual(context.inspectBacking(), before);
+    });
+  }
+});
+
+test('lease claim fails closed when its persisted attempt has a different delivery instant', async t => {
+  const memoryBacking = new Map();
+  const fakeIndexedDb = createFakeIndexedDb();
+  const contexts = [
+    ['memory', createInMemoryAuditStore(memoryBacking), {
+      replace(key, value) { memoryBacking.set(key, structuredClone(value)); },
+      inspect: key => memoryBacking.get(key),
+    }],
+    ['IndexedDB', createAuditStore({ indexedDB: fakeIndexedDb }), {
+      replace(key, value) { fakeIndexedDb.replaceRecord('audits', key, value); },
+      inspect: key => fakeIndexedDb.inspectStore('audits')?.get(key),
+    }],
+  ];
+  for (const [backend, store, backing] of contexts) await t.test(backend, async () => {
+    const auditId = `delivery-correlation-${backend.toLowerCase()}`;
+    const attemptKey = `__audit_export_attempt__:${auditId}`;
+    await store.setAudit(auditId, auditFixture(auditId));
+    const snapshot = await store.getAuditSnapshot(auditId);
+    const acquired = await store.acquireExportLease(auditId, snapshot.capability, {
+      ownerId: 'delivery-correlation-owner', now: '2026-08-27T10:00:00.000Z',
+    });
+    const forged = {
+      schemaVersion: 1,
+      auditId,
+      exportAttempt: acquired.exportAttempt,
+      deliveryAt: '2026-08-27T10:00:00.001Z',
+    };
+    backing.replace(attemptKey, forged);
+
+    await assert.rejects(store.claimExportLease(auditId, snapshot.capability, {
+      ownerId: 'delivery-correlation-owner', exportAttempt: acquired.exportAttempt,
+      now: '2026-08-27T10:00:00.100Z',
+    }), error => {
+      assert.equal(error?.message, 'Tentativa armazenada da exportação inválida.');
+      return true;
+    });
+    assert.deepEqual(backing.inspect(attemptKey), forged,
+      'a divergent private clock must not be silently overwritten');
+    await assert.rejects(store.releaseExportLease(auditId, {
+      ownerId: 'delivery-correlation-owner', now: '2026-08-27T10:00:00.150Z',
+    }), error => {
+      assert.equal(error?.message, 'Tentativa armazenada da exportação inválida.');
+      return true;
+    });
+    assert.deepEqual(backing.inspect(attemptKey), forged,
+      'release must not erase a divergent private correlation');
+    assert.equal((await store.getExportLeaseState(auditId, {
+      now: '2026-08-27T10:00:00.200Z',
+    })).phase, 'queued');
+  });
+});
+
+test('every lease-backed export gate rejects a divergent private delivery clock atomically', async t => {
+  const assertClockRejection = error => error?.message === 'Tentativa armazenada da exportação inválida.';
+  for (const operation of ['busy-acquire', 'assert', 'journal', 'finalize-retained']) {
+    for (const [backend, context] of operationGateContexts()) await t.test(`${backend}-${operation}`, async () => {
+      const state = operation === 'busy-acquire'
+        ? await createLeaseState(context)
+        : await createReservedDeliveryState(context);
+      if (operation === 'finalize-retained') {
+        await context.store.recordExportDelivery(state.auditId, state.reserved.capability, {
+          ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+          now: '2026-08-01T00:00:02.000Z', format: 'html', filename: 'report.html',
+          state: 'terminal', downloadId: 92,
+        });
+      }
+      const attemptKey = `__audit_export_attempt__:${state.auditId}`;
+      context.replacePrivate(attemptKey, {
+        schemaVersion: 1,
+        auditId: state.auditId,
+        exportAttempt: state.acquired.exportAttempt,
+        deliveryAt: '2026-08-01T00:00:01.999Z',
+      });
+      const before = context.inspectBacking();
+
+      if (operation === 'busy-acquire') {
+        await assert.rejects(context.store.acquireExportLease(state.auditId, state.snapshot.capability, {
+          ownerId: 'different-owner', now: '2026-08-01T00:00:01.050Z',
+        }), assertClockRejection);
+      } else if (operation === 'assert') {
+        await assert.rejects(context.store.assertExportLease(state.auditId, state.reserved.capability, {
+          ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+          now: '2026-08-01T00:00:02.100Z', phase: 'delivering',
+        }), assertClockRejection);
+      } else if (operation === 'journal') {
+        await assert.rejects(context.store.recordExportDelivery(state.auditId, state.reserved.capability, {
+          ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+          now: '2026-08-01T00:00:02.100Z', format: 'html', filename: 'report.html',
+          state: 'starting',
+        }), assertClockRejection);
+      } else {
+        await assert.rejects(context.store.finalizeExportAndMaybeDelete(
+          state.auditId,
+          auditFixture(state.auditId, 'complete'),
+          { ...state.latest, exportStatus: 'partial' },
+          state.reserved.capability,
+          {
+            ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+            now: '2026-08-01T00:00:03.000Z', clearDeliveryJournal: true,
+            deleteAfterCompleteExport: false,
+          },
+        ), assertClockRejection);
+      }
+      assert.deepEqual(context.inspectBacking(), before);
+    });
+  }
+});
+
+test('an expired lease cannot launder a divergent private delivery clock into the next attempt', async t => {
+  for (const [backend, context] of operationGateContexts()) await t.test(backend, async () => {
+    const auditId = `expired-clock-${backend.toLowerCase()}`;
+    await context.store.setAudit(auditId, auditFixture(auditId));
+    const snapshot = await context.store.getAuditSnapshot(auditId);
+    const first = await context.store.acquireExportLease(auditId, snapshot.capability, {
+      ownerId: 'expired-clock-owner-1', now: '2026-08-01T00:00:00.000Z', ttlMs: 1_000,
+    });
+    context.replacePrivate(`__audit_export_attempt__:${auditId}`, {
+      schemaVersion: 1,
+      auditId,
+      exportAttempt: first.exportAttempt,
+      deliveryAt: '2099-01-01T00:00:00.000Z',
+    });
+    const before = context.inspectBacking();
+
+    await assert.rejects(context.store.acquireExportLease(auditId, snapshot.capability, {
+      ownerId: 'expired-clock-owner-2', now: '2026-08-01T00:00:02.000Z', ttlMs: 1_000,
+    }), error => error?.message === 'Tentativa armazenada da exportação inválida.');
+    assert.deepEqual(context.inspectBacking(), before);
+  });
+});
+
+test('delete-after-export finalization cannot erase a divergent private delivery clock', async t => {
+  for (const [backend, context] of operationGateContexts()) await t.test(backend, async () => {
+    const state = await createReservedDeliveryState(context);
+    await context.store.setRetentionIntent(state.auditId, state.reserved.capability, {
+      now: '2026-08-01T00:00:01.500Z', deleteAfterCompleteExport: true,
+    });
+    const identities = {
+      html: ['text/html;charset=utf-8', 10],
+      pdf: ['application/pdf', 11],
+      csv: ['text/csv;charset=utf-8', 12],
+      json: ['application/json;charset=utf-8', 13],
+    };
+    for (const [index, [format, [mimeType, byteSize]]] of Object.entries(identities).entries()) {
+      await context.store.recordExportDelivery(state.auditId, state.reserved.capability, {
+        ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+        now: `2026-08-01T00:00:02.${String(index).padStart(3, '0')}Z`,
+        format, filename: `report.${format}`, state: 'terminal', downloadId: index + 1,
+        mimeType, byteSize, sha256: 'a'.repeat(64),
+      });
+    }
+    const attemptKey = `__audit_export_attempt__:${state.auditId}`;
+    context.replacePrivate(attemptKey, {
+      schemaVersion: 1,
+      auditId: state.auditId,
+      exportAttempt: state.acquired.exportAttempt,
+      deliveryAt: '2026-08-01T00:00:01.999Z',
+    });
+    const before = context.inspectBacking();
+
+    await assert.rejects(context.store.finalizeExportAndMaybeDelete(
+      state.auditId,
+      auditFixture(state.auditId, 'complete'),
+      { ...state.latest, exportStatus: 'complete' },
+      state.reserved.capability,
+      {
+        ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+        now: '2026-08-01T00:00:03.000Z', clearDeliveryJournal: true,
+        deleteAfterCompleteExport: true,
+      },
+    ), error => error?.message === 'Tentativa armazenada da exportação inválida.');
+    assert.deepEqual(context.inspectBacking(), before);
+  });
+});
+
 test('a persistent export lease lets only one in-memory store instance own physical delivery', async () => {
   const backing = new Map();
   const first = createInMemoryAuditStore(backing);
@@ -1922,6 +2383,273 @@ test('clock rollback cannot invalidate an owned lease during claim or delivery r
       ownerId: 'owner-clock-rollback',
     });
   }
+});
+
+test('an identified Chrome download atomically rekeys its starting journal row to the real filename', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    const auditId = `identified-download-${backend.toLowerCase()}`;
+    const ownerId = 'identified-download-owner';
+    const requestedFilename = 'audita-identified-download-20260827T100000000Z.html';
+    const filename = 'audita-identified-download-20260827T100000000Z (1).html';
+    await store.setAudit(auditId, auditFixture(auditId));
+    const snapshot = await store.getAuditSnapshot(auditId);
+    const lease = await store.acquireExportLease(auditId, snapshot.capability, {
+      ownerId, now: '2026-08-27T10:00:00.000Z',
+    });
+    await store.claimExportLease(auditId, snapshot.capability, {
+      ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.100Z',
+    });
+    await store.beginExportDelivery(auditId, snapshot.capability, {
+      ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.200Z',
+    });
+    await store.recordExportDelivery(auditId, snapshot.capability, {
+      ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.300Z',
+      format: 'html', filename: requestedFilename, state: 'starting',
+    });
+    await store.recordExportDelivery(auditId, snapshot.capability, {
+      ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.325Z',
+      format: 'html', filename: requestedFilename, state: 'in-flight', downloadId: 77,
+    });
+
+    const beforeForeignName = await store.getExportDeliveryJournal(auditId);
+    await assert.rejects(store.recordExportDelivery(auditId, snapshot.capability, {
+      ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.350Z',
+      format: 'html', requestedFilename, filename: 'foreign-report.html',
+      state: 'identified', downloadId: 77,
+    }), /journal|download|identifica/iu);
+    assert.deepEqual(await store.getExportDeliveryJournal(auditId), beforeForeignName,
+      'the durable boundary must reject a filename outside the attested requested family');
+
+    const identified = await store.recordExportDelivery(auditId, snapshot.capability, {
+      ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.400Z',
+      format: 'html', requestedFilename, filename, state: 'identified', downloadId: 77,
+    });
+    assert.deepEqual(identified, {
+      ownerId,
+      exportAttempt: lease.exportAttempt,
+      state: 'in-flight',
+      format: 'html',
+      filename,
+      downloadId: 77,
+      recordedAt: '2026-08-27T10:00:00.300Z',
+      updatedAt: '2026-08-27T10:00:00.400Z',
+    });
+    assert.deepEqual(await store.getExportDeliveryJournal(auditId), [identified],
+      'the requested name must not remain as a second recovery row');
+
+    const beforeMismatch = await store.getExportDeliveryJournal(auditId);
+    await assert.rejects(store.recordExportDelivery(auditId, snapshot.capability, {
+      ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.500Z',
+      format: 'html', requestedFilename: 'unknown-request.html',
+      filename: 'unknown-request (1).html', state: 'identified', downloadId: 78,
+    }));
+    assert.deepEqual(await store.getExportDeliveryJournal(auditId), beforeMismatch,
+      'a mismatched identification cannot partially mutate the journal');
+
+    const terminal = await store.recordExportDelivery(auditId, snapshot.capability, {
+      ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.600Z',
+      format: 'html', filename, state: 'terminal', downloadId: 77,
+      mimeType: 'text/html;charset=utf-8', byteSize: 123, sha256: 'a'.repeat(64),
+    });
+    assert.equal(terminal.filename, filename);
+    assert.equal(terminal.state, 'terminal');
+    assert.equal((await store.getExportDeliveryJournal(auditId)).length, 1);
+  });
+});
+
+test('a terminal delivery identity is immutable and only exact terminal retries are idempotent', async t => {
+  for (const [backend, context] of operationGateContexts()) await t.test(backend, async () => {
+    const state = await createReservedDeliveryState(context);
+    const terminal = {
+      ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+      now: '2026-08-01T00:00:02.000Z', format: 'html', filename: 'report.html',
+      state: 'terminal', downloadId: 91, mimeType: 'text/html;charset=utf-8',
+      byteSize: 123, sha256: 'a'.repeat(64),
+    };
+    await context.store.recordExportDelivery(state.auditId, state.reserved.capability, terminal);
+    const before = context.inspectBacking();
+
+    await context.store.recordExportDelivery(state.auditId, state.reserved.capability, {
+      ...terminal, now: '2026-08-01T00:00:02.100Z',
+    });
+    assert.deepEqual(context.inspectBacking(), before, 'an exact retry must not rewrite terminal evidence');
+    await assert.rejects(context.store.recordExportDelivery(state.auditId, state.reserved.capability, {
+      ...terminal, now: '2026-08-01T00:00:02.200Z', sha256: 'b'.repeat(64),
+    }), /terminal|identidade|journal|regress/iu);
+    assert.deepEqual(context.inspectBacking(), before);
+  });
+});
+
+test('atomic finalization rejects a journal changed after the delivery receipt was captured', async t => {
+  for (const [backend, context] of operationGateContexts()) await t.test(backend, async () => {
+    const state = await createReservedDeliveryState(context);
+    const formats = ['html', 'pdf', 'csv', 'json'];
+    const mime = {
+      html: 'text/html;charset=utf-8', pdf: 'application/pdf',
+      csv: 'text/csv;charset=utf-8', json: 'application/json;charset=utf-8',
+    };
+    const receiptFormats = [];
+    for (const [index, format] of formats.entries()) {
+      const identity = {
+        format, filename: `report.${format}`, mimeType: mime[format], byteSize: index + 10,
+        sha256: String(index + 1).repeat(64), downloadId: index + 1,
+      };
+      receiptFormats.push({ ...identity, status: 'complete' });
+      await context.store.recordExportDelivery(state.auditId, state.reserved.capability, {
+        ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+        now: `2026-08-01T00:00:02.${String(index).padStart(3, '0')}Z`, state: 'terminal', ...identity,
+      });
+    }
+    const journalKey = `__audit_export_delivery__:${state.auditId}`;
+    const backingBeforeForgery = context.inspectBacking();
+    const journalContainer = backend === 'memory'
+      ? new Map(backingBeforeForgery).get(journalKey)
+      : new Map(backingBeforeForgery.audits).get(journalKey);
+    const forged = structuredClone(journalContainer);
+    forged.entries[0].filename = 'foreign.html';
+    forged.entries[0].downloadId = 999;
+    forged.entries[0].sha256 = 'f'.repeat(64);
+    context.replacePrivate(journalKey, forged);
+    const beforeFinalization = context.inspectBacking();
+
+    await assert.rejects(context.store.finalizeExportAndMaybeDelete(
+      state.auditId,
+      auditFixture(state.auditId, 'complete'),
+      {
+        ...state.latest,
+        auditId: state.auditId,
+        exportStatus: 'complete',
+        deliveryReceipt: { status: 'complete', limitations: [], formats: receiptFormats },
+      },
+      state.reserved.capability,
+      {
+        ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+        now: '2026-08-01T00:00:03.000Z', clearDeliveryJournal: true,
+        deleteAfterCompleteExport: false,
+      },
+    ), error => error?.code === 'AUDIT_EXPORT_LEASE_CONFLICT');
+    assert.deepEqual(context.inspectBacking(), beforeFinalization,
+      'a receipt mismatch must preserve model, lease and forensic journal atomically');
+  });
+});
+
+test('cleanup follows the exact download id across a late identified filename rekey', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    const auditId = `late-identified-cleanup-${backend.toLowerCase()}`;
+    const ownerId = 'late-identified-owner';
+    const requestedFilename = 'audita-late-identified-20260827T100000000Z.html';
+    const filename = 'audita-late-identified-20260827T100000000Z (1).html';
+    await store.setAudit(auditId, auditFixture(auditId));
+    const snapshot = await store.getAuditSnapshot(auditId);
+    const lease = await store.acquireExportLease(auditId, snapshot.capability, {
+      ownerId, now: '2026-08-27T10:00:00.000Z',
+    });
+    await store.claimExportLease(auditId, snapshot.capability, {
+      ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.100Z',
+    });
+    await store.beginExportDelivery(auditId, snapshot.capability, {
+      ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.200Z',
+    });
+    await store.recordExportDelivery(auditId, snapshot.capability, {
+      ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.300Z',
+      format: 'html', filename: requestedFilename, state: 'starting',
+    });
+    await store.recordExportDelivery(auditId, snapshot.capability, {
+      ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.325Z',
+      format: 'html', filename: requestedFilename, state: 'in-flight', downloadId: 77,
+    });
+    await store.recordExportDelivery(auditId, snapshot.capability, {
+      ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.350Z',
+      format: 'html', requestedFilename, filename, state: 'identified', downloadId: 77,
+    });
+
+    assert.equal(await store.resolveExportDelivery(auditId, {
+      ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.400Z',
+      format: 'html', filename: requestedFilename, downloadId: 78, outcome: 'cleaned',
+    }), false, 'a foreign download id cannot clear the rekeyed row');
+    assert.equal((await store.getExportDeliveryJournal(auditId))[0].filename, filename);
+    assert.equal(await store.resolveExportDelivery(auditId, {
+      ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.500Z',
+      format: 'html', filename: requestedFilename, downloadId: 77, outcome: 'cleaned',
+    }), true, 'the stable download id must clear the row even after its basename was rekeyed');
+    assert.deepEqual(await store.getExportDeliveryJournal(auditId), []);
+  });
+});
+
+test('a late physical cleanup failure upgrades the exact pre-ID row to ID-backed recovery', async t => {
+  for (const [backend, context] of operationGateContexts()) await t.test(backend, async () => {
+    const state = await createReservedDeliveryState(context);
+    await context.store.recordExportDelivery(state.auditId, state.reserved.capability, {
+      ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+      now: '2026-08-01T00:00:02.000Z', format: 'html', filename: 'report.html', state: 'starting',
+    });
+
+    assert.equal(await context.store.resolveExportDelivery(state.auditId, {
+      ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+      now: '2026-08-01T00:00:02.100Z', format: 'html', filename: 'report.html',
+      downloadId: 95, outcome: 'cleanup-failed',
+    }), true);
+    assert.deepEqual(await context.store.getExportDeliveryJournal(state.auditId), [{
+      ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+      state: 'cleanup-failed', format: 'html', filename: 'report.html', downloadId: 95,
+      recordedAt: '2026-08-01T00:00:02.000Z', updatedAt: '2026-08-01T00:00:02.100Z',
+    }]);
+    assert.equal(await context.store.resolveExportDelivery(state.auditId, {
+      ownerId: 'operation-gate-owner', exportAttempt: state.acquired.exportAttempt,
+      now: '2026-08-01T00:00:02.200Z', format: 'html', filename: 'report.html',
+      downloadId: 95, outcome: 'cleaned',
+    }), true);
+    assert.deepEqual(await context.store.getExportDeliveryJournal(state.auditId), []);
+  });
+});
+
+test('cleaned journal resolution is idempotent only when no conflicting delivery slot remains', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    const auditId = `cleanup-idempotent-${backend.toLowerCase()}`;
+    const cleanup = {
+      ownerId: 'cleanup-idempotent-owner', exportAttempt: 1,
+      now: '2026-08-27T10:00:00.000Z', format: 'html', filename: 'audit.html',
+      outcome: 'cleaned',
+    };
+    await store.setAudit(auditId, auditFixture(auditId));
+
+    assert.equal(await store.resolveExportDelivery(auditId, cleanup), true,
+      'a row already absent is an acknowledged idempotent cleanup');
+
+    let snapshot = await store.getAuditSnapshot(auditId);
+    const lease = await store.acquireExportLease(auditId, snapshot.capability, {
+      ownerId: cleanup.ownerId, now: '2026-08-27T10:00:00.100Z',
+    });
+    await store.claimExportLease(auditId, snapshot.capability, {
+      ownerId: cleanup.ownerId, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.200Z',
+    });
+    await store.commitAuditIfRevisionWithExportLease(
+      auditId, auditFixture(auditId, 'delivering'), { auditId, exportStatus: 'delivering' }, snapshot.capability,
+      {
+        ownerId: cleanup.ownerId, exportAttempt: lease.exportAttempt,
+        now: '2026-08-27T10:00:00.300Z', phase: 'delivering',
+      },
+    );
+    snapshot = await store.getAuditSnapshot(auditId);
+    await store.recordExportDelivery(auditId, snapshot.capability, {
+      ownerId: cleanup.ownerId, exportAttempt: lease.exportAttempt,
+      now: '2026-08-27T10:00:00.400Z', format: 'html', filename: 'audit.html', state: 'starting',
+    });
+
+    assert.equal(await store.resolveExportDelivery(auditId, {
+      ...cleanup, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.500Z', filename: 'other.html',
+    }), false, 'a different filename in the same owner/attempt/format slot must not be acknowledged');
+    assert.equal((await store.getExportDeliveryJournal(auditId))[0].filename, 'audit.html');
+    assert.equal(await store.resolveExportDelivery(auditId, {
+      ...cleanup, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.600Z',
+    }), true);
+    assert.equal(await store.resolveExportDelivery(auditId, {
+      ...cleanup, exportAttempt: lease.exportAttempt, now: '2026-08-27T10:00:00.700Z',
+    }), true, 'a retry after the exact row was removed must remain acknowledged');
+  });
 });
 
 test('a persistent delivery journal survives crash and review until the next owner reconciles it', async () => {

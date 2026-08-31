@@ -338,7 +338,29 @@ test('accepts the untouched artifact set attested by genuine final report genera
   assert.equal(persisted.latest.exportStatus, 'complete');
 });
 
-test('successful persistence delegates deletion only to the atomic four-format finalizer', async () => {
+test('accepts only Chrome-attested uniquified filenames while preserving the requested artifact family', async () => {
+  const result = await genuineReportExport({ uniquifiedDownloads: true });
+  assert.deepEqual(result.deliveryReceipt.formats.map(entry => entry.format), EXPORT_FORMATS_V1);
+  result.deliveryReceipt.formats.forEach((entry, index) => {
+    assert.match(entry.filename, new RegExp(`^audita-.+ \\(${index + 1}\\)\\.${entry.format}$`, 'u'));
+  });
+
+  const commits = [];
+  const persisted = await persistExportSuccess({
+    auditId: result.model.auditId,
+    result,
+    latest: {},
+  }, { async commitAudit(...values) { commits.push(values); } });
+
+  assert.equal(commits.length, 1);
+  assert.equal(persisted.latest.exportStatus, 'complete');
+  assert.deepEqual(
+    persisted.latest.deliveryReceipt.formats.map(entry => entry.filename),
+    result.deliveryReceipt.formats.map(entry => entry.filename),
+  );
+});
+
+test('successful persistence keeps the durable receipt until authenticated completion can apply retention', async () => {
   const result = await genuineReportExport();
   const calls = [];
   const store = {
@@ -347,7 +369,7 @@ test('successful persistence delegates deletion only to the atomic four-format f
     },
     async finalizeExportAndMaybeDelete(...args) {
       calls.push(args);
-      return { deleted: true };
+      return { deleted: false };
     },
   };
 
@@ -360,8 +382,8 @@ test('successful persistence delegates deletion only to the atomic four-format f
   assert.equal(calls.length, 1);
   assert.equal(calls[0][0], result.model.auditId);
   assert.equal(calls[0][4].clearDeliveryJournal, true);
-  assert.equal(calls[0][4].deleteAfterCompleteExport, true);
-  assert.equal(persisted.deleted, true);
+  assert.equal(calls[0][4].deleteAfterCompleteExport, false);
+  assert.equal(persisted.deleted, false);
   assert.equal(persisted.latest.exportStatus, 'complete');
   assert.deepEqual(calls[0][2].exportDeliveryIdentity, {
     auditId: result.model.auditId,
@@ -397,7 +419,7 @@ test('keeps the attestation issuer private and rejects a substituted rehashed PD
   assert.equal(typeof controller.createExportSuccessRequest, 'function');
   assert.equal(provenance.attestReportExportResult, undefined);
   const store = createInMemoryAuditStore();
-  const result = await genuineReportExport({ store });
+  const result = await genuineReportExport({ store, persistentJournal: true });
   const forgedPdf = new TextEncoder().encode('%PDF-1.7\nPRIVATE_REATTEST_FORGED_PDF');
   const forgedHash = artifactHash(forgedPdf);
   result.pdf = forgedPdf;
@@ -499,7 +521,7 @@ test('a caller cannot preselect a future revision to roll a later human decision
 test('only one concurrent success or failure export can commit one expected revision', async () => {
   const controller = await import('../../src/export/export-controller.js');
   const store = createInMemoryAuditStore();
-  const result = await genuineReportExport({ store });
+  const result = await genuineReportExport({ store, persistentJournal: true });
   const { revision, capability } = await store.getAuditSnapshot(result.model.auditId);
   const success = controller.createExportSuccessRequest({
     auditId: result.model.auditId, result, latest: {},
@@ -677,7 +699,7 @@ test('keeps a complete technical session complete while persisting a controlled 
     'O relatório cobre somente uma página e o estado observado; não constitui declaração de conformidade do site inteiro.',
   ];
   await store.setAudit(technical.auditId, technical);
-  const result = await genuineReportExport({ store, csvFailure: true });
+  const result = await genuineReportExport({ store, csvFailure: true, persistentJournal: true });
   const persisted = await persistExportSuccess({
     auditId: technical.auditId, result, latest: {},
   }, store);
@@ -1114,7 +1136,6 @@ async function genuineReportExport(options = {}) {
     auditSnapshotCapability: snapshot.capability,
     exportLeaseOwnerId: leaseOwnerId,
     exportAttempt: acquired.exportAttempt,
-    now: () => '2026-08-26T16:00:00.000Z',
   }, {
     urlApi: {
       createObjectURL() { return 'blob:chrome-extension://test/print'; },
@@ -1148,6 +1169,10 @@ async function genuineReportExport(options = {}) {
         if (options.pdfDownloadStartFailure && downloadId === 4) throw new Error('controlled start failure');
         return downloadId;
       },
+      async resolveDownloadFilename(resolvedDownloadId, { requestedFilename, format }) {
+        if (options.uniquifiedDownloads !== true) return requestedFilename;
+        return `${requestedFilename.slice(0, -(format.length + 1))} (${resolvedDownloadId}).${format}`;
+      },
       async cancelDownload() {},
       async removeDownloadFile() {},
       async waitForDownload(id) {
@@ -1169,15 +1194,23 @@ async function genuineReportExport(options = {}) {
         },
       );
     },
-    assertDelivery({ snapshotCapability, exportLeaseOwnerId }) {
+    assertDelivery({ snapshotCapability, exportLeaseOwnerId, stage }) {
       return issuer.assertExportLease(SAMPLE_AUDIT.auditId, snapshotCapability, {
         ownerId: exportLeaseOwnerId,
         now: new Date().toISOString(),
-        phase: 'delivering',
+        phase: stage === 'identity' ? 'running' : 'delivering',
       });
     },
-    recordDelivery({ snapshotCapability, exportLeaseOwnerId, state, format, filename, downloadId }) {
-      if (options.persistentJournal !== true) return undefined;
+    recordDelivery({ snapshotCapability, exportLeaseOwnerId, state, format, requestedFilename, filename, downloadId,
+      mimeType, byteSize, sha256 }) {
+      if (options.persistentJournal !== true) return true;
+      if (state === 'cleaned' || state === 'cleanup-failed') {
+        return issuer.resolveExportDelivery(SAMPLE_AUDIT.auditId, {
+          ownerId: exportLeaseOwnerId, exportAttempt: acquired.exportAttempt,
+          now: new Date().toISOString(), format, filename,
+          ...(downloadId === undefined ? {} : { downloadId }), outcome: state,
+        });
+      }
       return issuer.recordExportDelivery(SAMPLE_AUDIT.auditId, snapshotCapability, {
         ownerId: exportLeaseOwnerId,
         exportAttempt: acquired.exportAttempt,
@@ -1185,7 +1218,9 @@ async function genuineReportExport(options = {}) {
         state,
         format,
         filename,
+        ...(requestedFilename === undefined ? {} : { requestedFilename }),
         ...(downloadId === undefined ? {} : { downloadId }),
+        ...(mimeType === undefined ? {} : { mimeType, byteSize, sha256 }),
       });
     },
   });

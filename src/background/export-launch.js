@@ -8,6 +8,11 @@ const EXPORT_MIME_V1 = Object.freeze({
   html: 'text/html;charset=utf-8', pdf: 'application/pdf',
   csv: 'text/csv;charset=utf-8', json: 'application/json;charset=utf-8',
 });
+const LAUNCH_RECORD_KEYS = Object.freeze(['version','auditId','sourceReviewSessionCapabilityId','expectedRevision','attemptId','tabId','windowId','path','documentId','state','issuedAt','expiresAt']);
+const SESSION_RECORD_KEYS = Object.freeze(['version','sessionCapabilityId','auditId','launchTabId','launchDocumentId','expectedRevision','attemptId','intents','state','issuedAt','expiresAt']);
+const TERMINAL_PROOF_KEYS = Object.freeze(['version','auditId','sessionCapabilityId','attemptId','modelRevision','receiptStatus','applied','deleted','status','notified']);
+const RECEIPT_KEYS = Object.freeze(['version','auditId','modelRevision','modelHash','attemptId','status','formats']);
+const RECEIPT_FORMAT_KEYS = Object.freeze(['format','mimeType','byteSize','sha256','downloadId','state']);
 const PATH = '/src/export/index.html';
 const TTL_MS = 15 * 60 * 1000;
 const SHARED_QUEUES = new WeakMap();
@@ -68,25 +73,77 @@ export function deriveExportLeaseOwner(auditId, attemptId) {
   if (!AUDIT_ID.test(auditId ?? '') || !validAttempt(attemptId)) throw new Error('EXPORT_ATTEMPT_DENIED');
   return `export:${auditId}:${attemptId}`;
 }
+function terminalProofRecord(value) {
+  const proof = exact(value, TERMINAL_PROOF_KEYS);
+  if (!proof || proof.version !== 1 || !AUDIT_ID.test(proof.auditId ?? '') ||
+    !CAPABILITY.test(proof.sessionCapabilityId ?? '') || !validAttempt(proof.attemptId) ||
+    !Number.isSafeInteger(proof.modelRevision) || proof.modelRevision < 1 ||
+    !['complete','partial'].includes(proof.receiptStatus) || typeof proof.applied !== 'boolean' ||
+    typeof proof.deleted !== 'boolean' || typeof proof.notified !== 'boolean' ||
+    (proof.applied ? !['complete','partial'].includes(proof.status) : proof.status !== null) ||
+    (!proof.applied && (proof.deleted || proof.notified)) || (proof.notified && !proof.applied) ||
+    (proof.receiptStatus === 'partial' && (proof.deleted || (proof.applied && proof.status !== 'partial')))) return null;
+  return deepFreeze(proof);
+}
+function proofMatchesLaunch(proof, launch) {
+  return Boolean(proof && proof.auditId === launch.auditId && proof.attemptId === launch.attemptId &&
+    proof.modelRevision === launch.expectedRevision);
+}
+function proofMatchesSession(proof, session) {
+  return Boolean(proof && proof.auditId === session.auditId && proof.sessionCapabilityId === session.sessionCapabilityId &&
+    proof.attemptId === session.attemptId && proof.modelRevision === session.expectedRevision);
+}
+function sameTerminalProof(left, right) {
+  return Boolean(left && right && TERMINAL_PROOF_KEYS.every(key => left[key] === right[key]));
+}
 function launchRecord(value) {
-  const row = exact(value, ['version','auditId','sourceReviewSessionCapabilityId','expectedRevision','attemptId','tabId','windowId','path','documentId','state','issuedAt','expiresAt']);
+  const row = exact(value, [...LAUNCH_RECORD_KEYS, 'terminalProof']) ?? exact(value, LAUNCH_RECORD_KEYS);
+  const hasTerminalProof = Boolean(row && Object.hasOwn(row, 'terminalProof'));
+  const terminalProof = hasTerminalProof ? terminalProofRecord(row.terminalProof) : null;
   if (!row || row.version !== 1 || !AUDIT_ID.test(row.auditId ?? '') || !CAPABILITY.test(row.sourceReviewSessionCapabilityId ?? '') ||
     !Number.isSafeInteger(row.expectedRevision) || row.expectedRevision < 1 || !validAttempt(row.attemptId) || !safeId(row.tabId) || !safeId(row.windowId) ||
     row.path !== PATH || !['allocated','awaiting-connection','connected','terminal','revoked'].includes(row.state) ||
     !Number.isSafeInteger(row.issuedAt) || !Number.isSafeInteger(row.expiresAt) || row.expiresAt <= row.issuedAt ||
     (['allocated','awaiting-connection'].includes(row.state) && row.documentId !== null) ||
     (['connected','terminal'].includes(row.state) && (typeof row.documentId !== 'string' || !row.documentId)) ||
-    (row.state === 'revoked' && row.documentId !== null && (typeof row.documentId !== 'string' || !row.documentId))) return null;
-  return deepFreeze(row);
+    (row.state === 'revoked' && row.documentId !== null && (typeof row.documentId !== 'string' || !row.documentId)) ||
+    (row.state === 'terminal' ? !hasTerminalProof || !proofMatchesLaunch(terminalProof, row) : hasTerminalProof)) return null;
+  return deepFreeze(hasTerminalProof ? {...row,terminalProof} : row);
 }
 function sessionRecord(value) {
-  const row = exact(value, ['version','sessionCapabilityId','auditId','launchTabId','launchDocumentId','expectedRevision','attemptId','intents','state','issuedAt','expiresAt']);
+  const row = exact(value, [...SESSION_RECORD_KEYS, 'terminalProof']) ?? exact(value, SESSION_RECORD_KEYS);
+  const hasTerminalProof = Boolean(row && Object.hasOwn(row, 'terminalProof'));
+  const terminalProof = hasTerminalProof ? terminalProofRecord(row.terminalProof) : null;
   if (!row || row.version !== 1 || !CAPABILITY.test(row.sessionCapabilityId ?? '') || !AUDIT_ID.test(row.auditId ?? '') ||
     !safeId(row.launchTabId) || typeof row.launchDocumentId !== 'string' || !row.launchDocumentId ||
     !Number.isSafeInteger(row.expectedRevision) || row.expectedRevision < 1 || !validAttempt(row.attemptId) ||
     !Array.isArray(row.intents) || row.intents.length !== 2 || row.intents[0] !== 'execute-export' || row.intents[1] !== 'complete-export' ||
-    !['active','terminal','revoked'].includes(row.state) || !Number.isSafeInteger(row.issuedAt) || !Number.isSafeInteger(row.expiresAt)) return null;
-  return deepFreeze(row);
+    !['active','terminal','revoked'].includes(row.state) || !Number.isSafeInteger(row.issuedAt) || !Number.isSafeInteger(row.expiresAt) ||
+    (row.state === 'terminal' ? !hasTerminalProof || !proofMatchesSession(terminalProof, row) : hasTerminalProof)) return null;
+  return deepFreeze(hasTerminalProof ? {...row,terminalProof} : row);
+}
+function exportReceiptRecord(value, { auditId, attemptId, modelRevision }) {
+  const receipt = exact(value, RECEIPT_KEYS);
+  if (!receipt || receipt.version !== 1 || receipt.auditId !== auditId || receipt.attemptId !== attemptId ||
+    receipt.modelRevision !== modelRevision || !/^[a-f0-9]{64}$/u.test(receipt.modelHash ?? '') ||
+    !['complete','partial'].includes(receipt.status) || !Array.isArray(receipt.formats) ||
+    receipt.formats.length > EXPORT_FORMATS_V1.length ||
+    (receipt.status === 'complete' && receipt.formats.length !== EXPORT_FORMATS_V1.length)) return null;
+  const formats = [];
+  const downloadIds = new Set();
+  let priorFormatIndex = -1;
+  for (const value of receipt.formats) {
+    const row = exact(value, RECEIPT_FORMAT_KEYS);
+    const formatIndex = row ? EXPORT_FORMATS_V1.indexOf(row.format) : -1;
+    if (!row || formatIndex <= priorFormatIndex || row.mimeType !== EXPORT_MIME_V1[row.format] || row.state !== 'complete' ||
+      !Number.isSafeInteger(row.byteSize) || row.byteSize < 0 || !/^[a-f0-9]{64}$/u.test(row.sha256 ?? '') ||
+      !Number.isSafeInteger(row.downloadId) || row.downloadId < 0 || downloadIds.has(row.downloadId)) return null;
+    priorFormatIndex = formatIndex;
+    downloadIds.add(row.downloadId);
+    formats.push(Object.freeze(row));
+  }
+  if (receipt.status === 'complete' && formats.some((row, index) => row.format !== EXPORT_FORMATS_V1[index])) return null;
+  return deepFreeze({ ...receipt, formats });
 }
 async function stored(area, key, parse) { const envelope = await area.get(key); return parse(envelope?.[key]); }
 async function confirmed(area, key, value, parse) {
@@ -199,27 +256,76 @@ export function createExportLaunchAuthority(raw) {
     if (!CAPABILITY.test(sessionCapabilityId ?? '') || !AUDIT_ID.test(auditId ?? '') || !validAttempt(attemptId)) return fail('EXPORT_COMPLETE_DENIED');
     let context; try { context=await deriveTrustedExtensionContext({sender,chromeApi:input.chromeApi,surface:EXPORT_SURFACE}); } catch { return fail('CONTEXT_DENIED'); }
     return serialize(input.sessionArea,auditId,async()=>{
-      const [launch,session]=await Promise.all([getLaunch(auditId),getSession(sessionCapabilityId)]); const now=readEpoch(input.epochNow);
-      const correlated = launch && launch.attemptId===attemptId && launch.documentId===sender.documentId &&
-        launch.tabId===context.tabId && launch.windowId===context.windowId && session && session.auditId===auditId &&
-        session.attemptId===attemptId && session.expectedRevision===launch.expectedRevision && session.launchDocumentId===sender.documentId;
-      if (!correlated || launch.state!=='connected' || session.state!=='active' || session.expiresAt<=now) return fail('EXPORT_COMPLETE_DENIED');
-      const receipt=await input.auditStore.getExportReceipt?.(auditId);
-      if (!receipt || receipt.status!=='complete' || receipt.auditId!==auditId || receipt.attemptId!==attemptId || receipt.modelRevision!==launch.expectedRevision ||
-        !Array.isArray(receipt.formats) || receipt.formats.length!==EXPORT_FORMATS_V1.length || receipt.formats.some((row,index)=>
-          row?.format!==EXPORT_FORMATS_V1[index] || row.mimeType!==EXPORT_MIME_V1[row.format] || row.state!=='complete' ||
-          !Number.isSafeInteger(row.byteSize) || row.byteSize<0 || !/^[a-f0-9]{64}$/u.test(row.sha256??'') ||
-          !Number.isSafeInteger(row.downloadId) || row.downloadId<0)) return fail('EXPORT_RECEIPT_DENIED');
-      const completed = await input.auditStore.completeExport?.(auditId,{attemptId,receipt});
-      const terminalSession=deepFreeze({...session,state:'terminal'});
-      const terminalLaunch=deepFreeze({...launch,state:'terminal'});
-      await input.sessionArea.set({ [sessionKey(sessionCapabilityId)]:terminalSession, [launchKey(auditId)]:terminalLaunch });
-      const [confirmedSession,confirmedLaunch]=await Promise.all([getSession(sessionCapabilityId),getLaunch(auditId)]);
-      if (!confirmedSession || confirmedSession.state!=='terminal' || !confirmedLaunch || confirmedLaunch.state!=='terminal') return fail('EXPORT_COMPLETE_DENIED');
-      await input.auditStore.emitTerminal?.(deepFreeze({ type: 'EXPORT_COMPLETE', auditId,
-        deleted: completed?.deleted === true, status: completed?.status === 'partial' ? 'partial' : 'complete',
-        exportRevision: launch.expectedRevision + 1 }));
+      const [launch,session]=await Promise.all([getLaunch(auditId),getSession(sessionCapabilityId)]);
+      const documentId=context.issuer.documentId;
+      const correlated = launch && launch.auditId===auditId && launch.attemptId===attemptId && launch.documentId===documentId &&
+        launch.tabId===context.tabId && launch.windowId===context.windowId && context.documentUrl===canonicalUrl(input.chromeApi,auditId) &&
+        session && session.sessionCapabilityId===sessionCapabilityId && session.auditId===auditId && session.attemptId===attemptId &&
+        session.expectedRevision===launch.expectedRevision && session.launchTabId===launch.tabId && session.launchDocumentId===documentId &&
+        session.expiresAt===launch.expiresAt;
+      const active = launch?.state==='connected' && session?.state==='active';
+      const terminal = launch?.state==='terminal' && session?.state==='terminal';
+      if (!correlated || (!active && !terminal)) return fail('EXPORT_COMPLETE_DENIED');
+      if (active) {
+        const now=readEpoch(input.epochNow);
+        if (session.expiresAt<=now || launch.expiresAt<=now) return fail('EXPORT_COMPLETE_DENIED');
+      }
+
+      let terminalLaunch=launch;
+      let terminalSession=session;
+      let proof;
+      let receipt=null;
+      if (active) {
+        receipt=exportReceiptRecord(await input.auditStore.getExportReceipt?.(auditId), {
+          auditId,attemptId,modelRevision:launch.expectedRevision,
+        });
+        if (!receipt) return fail('EXPORT_RECEIPT_DENIED');
+        proof=deepFreeze({version:1,auditId,sessionCapabilityId,attemptId,modelRevision:launch.expectedRevision,
+          receiptStatus:receipt.status,applied:false,deleted:false,status:null,notified:false});
+        const persisted=await persistTerminal(launch,session,proof);
+        if (!persisted) return fail('EXPORT_COMPLETE_DENIED');
+        ({ launch: terminalLaunch, session: terminalSession }=persisted);
+      } else {
+        const launchProof=terminalProofRecord(launch.terminalProof);
+        const sessionProof=terminalProofRecord(session.terminalProof);
+        if (!proofMatchesLaunch(launchProof,launch) || !proofMatchesSession(sessionProof,session) ||
+          !sameTerminalProof(launchProof,sessionProof) || launchProof.sessionCapabilityId!==sessionCapabilityId) {
+          return fail('EXPORT_COMPLETE_DENIED');
+        }
+        proof=launchProof;
+      }
+
+      if (!proof.applied) {
+        const completionOptions=receipt
+          ? deepFreeze({attemptId,receipt,terminalProof:proof})
+          : deepFreeze({attemptId,terminalProof:proof});
+        const completed=await input.auditStore.completeExport?.(auditId,completionOptions);
+        proof=deepFreeze({...proof,applied:true,
+          deleted:proof.receiptStatus==='complete' && completed?.deleted===true,
+          status:proof.receiptStatus==='partial' || completed?.status==='partial' ? 'partial' : 'complete'});
+        const persisted=await persistTerminal(terminalLaunch,terminalSession,proof);
+        if (!persisted) return fail('EXPORT_COMPLETE_DENIED');
+        ({ launch: terminalLaunch, session: terminalSession }=persisted);
+      }
+      if (!proof.notified) {
+        await input.auditStore.emitTerminal?.(deepFreeze({ type:'EXPORT_COMPLETE',auditId,
+          deleted:proof.deleted,status:proof.status,exportRevision:proof.modelRevision+1 }));
+        proof=deepFreeze({...proof,notified:true});
+        const persisted=await persistTerminal(terminalLaunch,terminalSession,proof);
+        if (!persisted) return fail('EXPORT_COMPLETE_DENIED');
+      }
       return deepFreeze({ok:true,auditId,state:'terminal'});
+
+      async function persistTerminal(currentLaunch,currentSession,terminalProof) {
+        const nextSession=deepFreeze({...currentSession,state:'terminal',terminalProof});
+        const nextLaunch=deepFreeze({...currentLaunch,state:'terminal',terminalProof});
+        await input.sessionArea.set({[sessionKey(sessionCapabilityId)]:nextSession,[launchKey(auditId)]:nextLaunch});
+        const [confirmedSession,confirmedLaunch]=await Promise.all([getSession(sessionCapabilityId),getLaunch(auditId)]);
+        if (!confirmedSession || confirmedSession.state!=='terminal' || !confirmedLaunch || confirmedLaunch.state!=='terminal' ||
+          JSON.stringify(confirmedSession)!==JSON.stringify(nextSession) || JSON.stringify(confirmedLaunch)!==JSON.stringify(nextLaunch) ||
+          !sameTerminalProof(confirmedSession.terminalProof,terminalProof) || !sameTerminalProof(confirmedLaunch.terminalProof,terminalProof)) return null;
+        return Object.freeze({launch:confirmedLaunch,session:confirmedSession});
+      }
     });
   }
 

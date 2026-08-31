@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -18,6 +18,7 @@ import {
   captureVisualComparison,
   click,
   command,
+  configureDownloadBehavior,
   createBoundedBrowserCleanup,
   createCdpPipeTransport,
   createRealPage,
@@ -47,6 +48,7 @@ import {
   waitForFourDownloads,
   waitForServiceWorker,
   waitForValue,
+  writeProfileDownloadPreferences,
 } from './real-chrome.mjs';
 
 test('real Chrome E2Es share one explicit binary resolution and one exact Chrome 152 product', () => {
@@ -64,6 +66,7 @@ test('default suite keeps fast tests parallel and classifies every real-Chrome E
     'test/background/service-worker.test.js',
     'test/e2e/axe-mv3-csp-decision.test.mjs',
     'test/e2e/axe-mv3-csp.test.mjs',
+    'test/e2e/download-uniquify-mv3.test.mjs',
     'test/e2e/personas-mv3-csp.test.mjs',
     'test/e2e/public-axe-map-mv3.test.mjs',
     'test/e2e/retention-indexeddb-mv3.test.mjs',
@@ -78,6 +81,7 @@ test('default suite keeps fast tests parallel and classifies every real-Chrome E
   ]);
   assert.deepEqual(plan.serial, [
     'test/e2e/axe-mv3-csp.test.mjs',
+    'test/e2e/download-uniquify-mv3.test.mjs',
     'test/e2e/personas-mv3-csp.test.mjs',
     'test/e2e/public-axe-map-mv3.test.mjs',
     'test/e2e/retention-indexeddb-mv3.test.mjs',
@@ -334,6 +338,38 @@ test('launch option resolvers reject unsafe binaries, versions and directories',
   assert.deepEqual(await resolveLaunchDirectories({ runRoot: root, downloadDirectory: callerDownloads, qaDirectory: callerQa }), {
     runRoot: root, downloadDirectory: callerDownloads, qaDirectory: callerQa,
   });
+});
+
+test('profile download mode writes only the exact Chrome Preferences under its owned run root', async t => {
+  const runRoot = await realpath(await mkdtemp(join(tmpdir(), 'audita-real-chrome-')));
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+  const downloadDirectory = join(runRoot, 'downloads');
+  await mkdir(downloadDirectory);
+
+  const preferencesPath = await writeProfileDownloadPreferences({ runRoot, downloadDirectory });
+
+  assert.equal(preferencesPath, join(runRoot, 'Default', 'Preferences'));
+  assert.deepEqual(JSON.parse(await readFile(preferencesPath, 'utf8')), {
+    download: {
+      default_directory: downloadDirectory,
+      prompt_for_download: false,
+      directory_upgrade: true,
+    },
+  });
+});
+
+test('profile download mode alone skips the default CDP download override', async () => {
+  const calls = [];
+  const browser = { async command(method, params) { calls.push([method, params]); return {}; } };
+  const downloadDirectory = resolve(tmpdir(), 'audita-real-chrome-test', 'downloads');
+
+  assert.equal(await configureDownloadBehavior(browser, downloadDirectory, 'profile'), false);
+  assert.deepEqual(calls, []);
+  assert.equal(await configureDownloadBehavior(browser, downloadDirectory, 'cdp'), true);
+  assert.deepEqual(calls, [[
+    'Browser.setDownloadBehavior',
+    { behavior: 'allow', downloadPath: downloadDirectory, eventsEnabled: true },
+  ]]);
 });
 
 test('launch preflight rejects unknown options and removes its owned temporary profile on failure', async () => {

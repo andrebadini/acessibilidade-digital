@@ -1,4 +1,8 @@
-import { createDownloadsAdapter, reconcileStaleDownloads } from '../browser/download-artifacts.js';
+import {
+  advancePendingDownloadOwnership,
+  createDownloadsAdapter,
+  reconcileStaleDownloads,
+} from '../browser/download-artifacts.js';
 import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
 import { createAuditModel } from '../core/report/audit-model.js';
 import { verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
@@ -14,7 +18,16 @@ import {
   persistExportFailure,
   persistExportSuccess,
 } from './export-controller.js';
-import { runReportExport } from './report-export.js';
+import {
+  advancePendingExportCleanup,
+  shouldPreserveExportTabAndLease,
+} from './export-page-failure-policy.js';
+import { awaitExportCompletionAcknowledgement } from './export-completion.js';
+import {
+  advancePendingReportReservation,
+  isPendingReportReservationError,
+  runReportExport,
+} from './report-export.js';
 
 const status = document.querySelector('#export-status');
 const store = createAuditStore();
@@ -31,8 +44,16 @@ let completionPending = false;
 
 function sendWorkerRequest(message) {
   return new Promise(resolve => {
-    try { chrome.runtime.sendMessage(message, response => resolve(chrome.runtime.lastError ? { ok: false } : response)); }
-    catch { resolve({ ok: false }); }
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish({ ok: false }), 5_000);
+    try { chrome.runtime.sendMessage(message, response => finish(chrome.runtime.lastError ? { ok: false } : response)); }
+    catch { finish({ ok: false }); }
   });
 }
 
@@ -87,19 +108,21 @@ async function generate(connected) {
       return store.assertExportLease(auditId, snapshotCapability,
         { ownerId: leaseOwnerId, exportAttempt, now: new Date().toISOString(), phase: 'delivering' });
     },
-    recordDelivery({ snapshotCapability, exportLeaseOwnerId, state, format, filename, downloadId, mimeType, byteSize, sha256 }) {
+    recordDelivery({ snapshotCapability, exportLeaseOwnerId, state, format, requestedFilename, filename, downloadId, mimeType, byteSize, sha256 }) {
       if (exportLeaseOwnerId !== leaseOwnerId) throw new TypeError('Journal divergente.');
       if (state === 'cleaned' || state === 'cleanup-failed') return store.resolveExportDelivery(auditId,
         { ownerId: leaseOwnerId, exportAttempt, now: new Date().toISOString(), format, filename,
           ...(downloadId === undefined ? {} : { downloadId }), outcome: state });
       return store.recordExportDelivery(auditId, snapshotCapability,
         { ownerId: leaseOwnerId, exportAttempt, now: new Date().toISOString(), format, filename,
+          ...(requestedFilename === undefined ? {} : { requestedFilename }),
           ...(downloadId === undefined ? {} : { downloadId }), mimeType, byteSize, sha256, state });
     },
   });
   await persistExportSuccess(createExportSuccessRequest({ auditId, result, latest: latestState }), store);
   leaseClaimed = false;
   completionPending = true;
+  status.textContent = 'Os arquivos foram baixados; confirmando o recibo local.';
   await confirmExportCompletion(connected);
   completionPending = false;
   status.textContent = 'Os quatro arquivos foram baixados e o recibo local foi confirmado.';
@@ -107,12 +130,14 @@ async function generate(connected) {
 }
 
 async function confirmExportCompletion(connected) {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const completed = await sendWorkerRequest({ type: 'EXPORT_COMPLETE', sessionCapabilityId: connected.sessionCapabilityId,
-      auditId, attemptId: connected.attemptId });
-    if (completed?.ok) return completed;
-  }
-  throw new Error('O recibo dos downloads não pôde ser confirmado.');
+  return awaitExportCompletionAcknowledgement({
+    sessionCapabilityId: connected.sessionCapabilityId,
+    auditId,
+    attemptId: connected.attemptId,
+  }, {
+    send: sendWorkerRequest,
+    wait: delay => new Promise(resolve => setTimeout(resolve, delay)),
+  });
 }
 
 async function fail(error) {
@@ -120,6 +145,18 @@ async function fail(error) {
     status.textContent = 'Os quatro arquivos foram baixados; a confirmação local continua pendente nesta aba.';
     return;
   }
+  if (isPendingReportReservationError(error)) {
+    status.textContent = 'A reserva local do relatório continua pendente; esta aba e sua exclusividade foram preservadas.';
+    const reservation = await recoverPendingReportReservation(error);
+    if (reservation === 'superseded') leaseClaimed = false;
+  } else if (shouldPreserveExportTabAndLease(error)) {
+    status.textContent = 'A limpeza de um download anterior continua pendente; esta aba e sua exclusividade foram preservadas.';
+    await recoverPendingDownloadCleanup(error);
+  }
+  await persistAndCloseFailure(error);
+}
+
+async function persistAndCloseFailure(error) {
   let message = 'Não foi possível preparar os artefatos do relatório.';
   const busy = isAuditExportLeaseConflict(error);
   const invalidated = isAuditRevisionConflict(error);
@@ -135,6 +172,42 @@ async function fail(error) {
   if (invalidated) message = 'A auditoria foi atualizada durante a exportação; a versão mais nova foi preservada.';
   status.textContent = message;
   if (!busy) await closeOwnTab();
+}
+
+async function recoverPendingReportReservation(error) {
+  for (;;) {
+    const outcome = await advancePendingReportReservation(
+      error,
+      () => store.getAuditSnapshot(auditId),
+      { timeoutMs: 5_000 },
+    );
+    if (outcome.status === 'reserved' || outcome.status === 'not-reserved') {
+      sourceSnapshotCapability = outcome.snapshotCapability;
+      sourceRevision = outcome.revision;
+      return 'owned';
+    }
+    if (outcome.status === 'superseded') return 'superseded';
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+}
+
+async function recoverPendingDownloadCleanup(error) {
+  for (;;) {
+    const pendingOwnership = await advancePendingDownloadOwnership(error, { timeoutMs: 5_000 });
+    if (pendingOwnership === 'waiting') {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      continue;
+    }
+    const outcome = await advancePendingExportCleanup({
+      readJournal: () => store.getExportDeliveryJournal(auditId),
+      reconcile: entries => reconcileStaleDownloads(entries, downloadsAdapter,
+        (entry, resolution) => store.resolveExportDelivery(auditId, {
+          ...entry, now: new Date().toISOString(), outcome: resolution,
+        }), { auditId }),
+    });
+    if (outcome === 'resolved') return;
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
 }
 
 async function closeOwnTab() {
