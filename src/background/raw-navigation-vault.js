@@ -14,8 +14,11 @@ const QUEUE_KEYS = Object.freeze(['version', 'auditId', 'ownerOperationId', 'rev
 const QUEUE_ENTRY_KEYS = Object.freeze(['line', 'navigationToken', 'evidenceUrl', 'sessionDigest', 'status']);
 const EVIDENCE_URL_KEYS = Object.freeze(['version', 'href', 'queryIncluded', 'redactedSegments']);
 const CLEANUP_MARKER_KEY = 'audita:raw-navigation-cleanup:v1';
-const CLEANUP_MARKER_KEYS = Object.freeze(['version', 'scope', 'keys']);
+const CLEANUP_KEYS_MARKER_KEYS = Object.freeze(['version', 'scope', 'keys']);
 const CLEANUP_NAMESPACE_MARKER_KEYS = Object.freeze(['version', 'scope']);
+const CLEANUP_AUDIT_MARKER_KEYS = Object.freeze(['version', 'scope', 'auditId']);
+const CLEANUP_EXPIRED_MARKER_KEYS = Object.freeze(['version', 'scope', 'cutoff']);
+const CLEANUP_QUEUE_MARKER_KEYS = Object.freeze(['version', 'scope', 'auditId']);
 const MAX_CLEANUP_KEYS = 256;
 const MARKER_UNAVAILABLE = Symbol('marker-unavailable');
 const MARKER_MALFORMED = Symbol('marker-malformed');
@@ -89,7 +92,7 @@ function token(bytes) {
 function stateFor(sessionArea) {
   let state = SESSION_STATES.get(sessionArea);
   if (!state) {
-    state = { tail: Promise.resolve(), highWater: null, bindings: new Map(), pendingCleanup: new Set(), markerSeen: false, cleanupScope: null };
+    state = { tail: Promise.resolve(), highWater: null, bindings: new Map(), cleanupMarker: null, markerSeen: false };
     SESSION_STATES.set(sessionArea, state);
   }
   return state;
@@ -184,13 +187,13 @@ function dropBindings(state, tokens) {
 }
 
 function tokensForKeys(keys) {
-  return keys.filter(key => key.startsWith(PREFIX)).map(key => key.slice(PREFIX.length));
+  return keys.filter(key => key.startsWith(PREFIX)).map(key => key.slice(PREFIX.length)).filter(validToken);
 }
 
-function validCleanupKey(key) {
-  // A persisted barrier must be able to name the exact malformed storage key
-  // that selected it.  Authority is still limited to our two private prefixes.
-  return namespaceCleanupKey(key);
+function canonicalCleanupKey(key) {
+  return typeof key === 'string' &&
+    (key.startsWith(PREFIX) ? validToken(key.slice(PREFIX.length)) :
+      key.startsWith(QUEUE_PREFIX) && validId(key.slice(QUEUE_PREFIX.length)));
 }
 
 function namespaceCleanupKey(key) {
@@ -200,10 +203,16 @@ function namespaceCleanupKey(key) {
 function cleanupMarker(value) {
   const namespace = exact(value, CLEANUP_NAMESPACE_MARKER_KEYS);
   if (namespace?.version === 1 && namespace.scope === 'namespace') return freeze(namespace);
-  const marker = exact(value, CLEANUP_MARKER_KEYS);
+  const audit = exact(value, CLEANUP_AUDIT_MARKER_KEYS);
+  if (audit?.version === 1 && audit.scope === 'audit' && validId(audit.auditId)) return freeze(audit);
+  const expired = exact(value, CLEANUP_EXPIRED_MARKER_KEYS);
+  if (expired?.version === 1 && expired.scope === 'expired' && validClock(expired.cutoff)) return freeze(expired);
+  const queue = exact(value, CLEANUP_QUEUE_MARKER_KEYS);
+  if (queue?.version === 1 && queue.scope === 'queue' && validId(queue.auditId)) return freeze(queue);
+  const marker = exact(value, CLEANUP_KEYS_MARKER_KEYS);
   const keys = marker && dense(marker.keys);
   if (!marker || marker.version !== 1 || marker.scope !== 'keys' || !keys || keys.length < 1 || keys.length > MAX_CLEANUP_KEYS ||
-    keys.some(key => !validCleanupKey(key)) || new Set(keys).size !== keys.length) return null;
+    keys.some(key => !canonicalCleanupKey(key)) || new Set(keys).size !== keys.length) return null;
   return freeze({ version: 1, scope: 'keys', keys: [...keys].sort() });
 }
 
@@ -251,6 +260,27 @@ function recordAuditId(value) {
   } catch { return null; }
 }
 
+function auditCleanupTargets(entries, auditId) {
+  return entries.flatMap(([key, value]) =>
+    key === `${QUEUE_PREFIX}${auditId}` ||
+    (namespaceCleanupKey(key) && recordAuditId(value) === auditId) ? [key] : []);
+}
+
+function expiredCleanupTargets(entries, cutoff) {
+  return entries.flatMap(([key, value]) => {
+    const rawToken = key.startsWith(PREFIX) ? key.slice(PREFIX.length) : null;
+    const queueAuditId = key.startsWith(QUEUE_PREFIX) ? key.slice(QUEUE_PREFIX.length) : null;
+    const legacy = rawToken && validToken(rawToken) ? parseLegacyRecord(value, rawToken) : null;
+    const publicValue = rawToken && validToken(rawToken) ? publicRecord(value) : null;
+    const queue = queueAuditId && validId(queueAuditId) ? parseQueue(value) : null;
+    const malformed = key.startsWith(PREFIX) && !legacy && !publicValue ||
+      key.startsWith(QUEUE_PREFIX) && (!queue || queue.auditId !== queueAuditId);
+    return malformed || (legacy && (cutoff < legacy.issuedAt || cutoff >= legacy.expiresAt)) ||
+      (publicValue && (cutoff < publicValue.issuedAt || cutoff >= publicValue.expiresAt)) ||
+      (queue && (cutoff < queue.issuedAt || cutoff >= queue.expiresAt)) ? [key] : [];
+  });
+}
+
 async function removeKeys(sessionArea, keys) {
   try { await sessionArea.remove(keys); } catch { /* confirm below */ }
   try {
@@ -272,9 +302,8 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
     } catch { return MARKER_UNAVAILABLE; }
   };
   const persistMarker = async () => {
-    const marker = state.cleanupScope === 'namespace'
-      ? freeze({ version: 1, scope: 'namespace' })
-      : freeze({ version: 1, scope: 'keys', keys: [...state.pendingCleanup].sort() });
+    const marker = state.cleanupMarker;
+    if (!marker) return true;
     state.markerSeen = true;
     try { await sessionArea.set({ [CLEANUP_MARKER_KEY]: marker }); } catch { /* confirm below */ }
     return same(await markerValue(), marker);
@@ -282,10 +311,10 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
   const clearMarker = async () => {
     const marker = await markerValue();
     if (marker === MARKER_UNAVAILABLE) return false;
-    if (marker === undefined) { state.markerSeen = false; state.cleanupScope = null; return true; }
+    if (marker === undefined) { state.markerSeen = false; state.cleanupMarker = null; return true; }
     if (!await erase(sessionArea, CLEANUP_MARKER_KEY)) return false;
     state.markerSeen = false;
-    state.cleanupScope = null;
+    state.cleanupMarker = null;
     return true;
   };
   const loadPersistedMarker = async () => {
@@ -294,44 +323,82 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
     if (value === undefined) return true;
     state.markerSeen = true;
     if (value) {
-      state.cleanupScope = value.scope;
-      if (value.scope === 'keys') for (const key of value.keys) state.pendingCleanup.add(key);
+      state.cleanupMarker = value;
       return true;
     }
-    state.cleanupScope = 'namespace';
+    state.cleanupMarker = freeze({ version: 1, scope: 'namespace' });
     if (!await persistMarker()) return false;
     return true;
   };
-  const cleanupTargets = async () => {
-    if (state.cleanupScope === 'namespace') {
+  const queueCleanup = async (key, queue) => {
+    const keys = [key];
+    let stale = false;
+    for (const entry of queue.entries) {
+      const tokenKey = `${PREFIX}${entry.navigationToken}`;
+      let value;
+      try { value = (await sessionArea.get(tokenKey))?.[tokenKey]; } catch { return { keys, stale, unavailable: true }; }
+      if (value === undefined) {
+        if (entry.status !== 'finished') stale = true;
+        continue;
+      }
+      const record = publicRecord(value);
+      // A raw record, never a queue reference, is the authority for ownership.
+      if (!record || record.auditId !== queue.auditId || record.purpose !== 'batch-page' ||
+        record.issuedAt !== queue.issuedAt || record.expiresAt !== queue.expiresAt) {
+        stale = true;
+        continue;
+      }
+      keys.push(tokenKey);
+      if (entry.status === 'finished') stale = true;
+    }
+    return { keys, stale, unavailable: false };
+  };
+  const queueCleanupTargets = async auditId => {
+    const key = `${QUEUE_PREFIX}${auditId}`;
+    let value;
+    try { value = (await sessionArea.get(key))?.[key]; } catch { return null; }
+    if (value === undefined) return [];
+    const queue = parseQueue(value);
+    if (!queue || queue.auditId !== auditId) return [key];
+    const ownership = await queueCleanup(key, queue);
+    return ownership.unavailable ? null : ownership.keys;
+  };
+  const cleanupTargets = async marker => {
+    if (marker.scope === 'keys') return marker.keys;
+    if (marker.scope === 'queue') return queueCleanupTargets(marker.auditId);
+    if (marker.scope === 'namespace') {
       try { return await cleanupNamespaceKeys(sessionArea); } catch { return null; }
     }
-    return [...state.pendingCleanup];
+    try {
+      const entries = await all(sessionArea);
+      return marker.scope === 'audit'
+        ? auditCleanupTargets(entries, marker.auditId)
+        : expiredCleanupTargets(entries, marker.cutoff);
+    } catch { return null; }
   };
   const completeCleanup = async () => {
-    const keys = await cleanupTargets();
+    const marker = state.cleanupMarker;
+    if (!marker) return true;
+    const keys = await cleanupTargets(marker);
     if (keys === null || keys.length > 0 && !await removeKeys(sessionArea, keys)) return false;
-    state.pendingCleanup.clear();
     dropBindings(state, tokensForKeys(keys));
     return clearMarker();
   };
+  const beginCleanup = async marker => {
+    state.cleanupMarker = marker;
+    state.markerSeen = true;
+    if (!await persistMarker()) return completeCleanup();
+    return completeCleanup();
+  };
   const removeOrPend = async keys => {
     const unique = [...new Set(keys)];
-    if (state.cleanupScope === 'namespace' || unique.some(key => !validCleanupKey(key)) ||
-      new Set([...state.pendingCleanup, ...unique]).size > MAX_CLEANUP_KEYS) {
-      state.cleanupScope = 'namespace';
-      state.pendingCleanup.clear();
-    } else {
-      state.cleanupScope = 'keys';
-      for (const key of unique) state.pendingCleanup.add(key);
-    }
-    if (!await persistMarker()) return await completeCleanup() && !state.markerSeen;
-    return completeCleanup();
+    if (unique.length === 0 || unique.length > MAX_CLEANUP_KEYS || unique.some(key => !canonicalCleanupKey(key))) return false;
+    return beginCleanup(freeze({ version: 1, scope: 'keys', keys: unique.sort() }));
   };
   const drainPending = async () => {
     if (!await loadPersistedMarker()) return false;
-    if (!state.markerSeen) return true;
-    if (!await persistMarker()) return await completeCleanup() && !state.markerSeen;
+    if (!state.cleanupMarker) return true;
+    if (!await persistMarker()) return completeCleanup();
     return completeCleanup();
   };
   const serial = operation => {
@@ -353,34 +420,10 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
   const readQueue = async auditId => {
     if (!validId(auditId)) throw staleQueue();
     const key = `${QUEUE_PREFIX}${auditId}`;
-    let value; try { value = (await sessionArea.get(key))?.[key]; } catch { throw staleQueue(); }
+    let value; try { value = (await sessionArea.get(key))?.[key]; } catch { return { key, queue: null, unavailable: true }; }
     if (value === undefined) return { key, queue: null };
     const queue = parseQueue(value); if (!queue || queue.auditId !== auditId) throw staleQueue();
     return { key, queue };
-  };
-  const queueCleanup = async (key, queue) => {
-    const keys = [key];
-    let stale = false;
-    for (const entry of queue.entries) {
-      const tokenKey = `${PREFIX}${entry.navigationToken}`;
-      let value;
-      try { value = (await sessionArea.get(tokenKey))?.[tokenKey]; } catch { stale = true; continue; }
-      if (value === undefined) {
-        if (entry.status !== 'finished') stale = true;
-        continue;
-      }
-      const record = publicRecord(value);
-      // The raw record is the ownership authority. A forged queue can only
-      // cause removal of records that prove this exact queue correlation.
-      if (!record || record.auditId !== queue.auditId || record.purpose !== 'batch-page' ||
-        record.issuedAt !== queue.issuedAt || record.expiresAt !== queue.expiresAt) {
-        stale = true;
-        continue;
-      }
-      keys.push(tokenKey);
-      if (entry.status === 'finished') stale = true;
-    }
-    return { keys, stale };
   };
   const readLegacy = async (ownerId, navigationToken) => {
     if (!validId(ownerId) || !validToken(navigationToken)) throw unavailable();
@@ -526,8 +569,17 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       dropBindings(state, parsed.map(entry => entry.navigationToken));
     }); },
     readQueue(auditId) { return serial(async () => {
-      const { key, queue } = await readQueue(auditId); if (!queue) return null;
+      const { key, queue, unavailable: queueUnavailable = false } = await readQueue(auditId);
+      if (queueUnavailable) {
+        if (!validId(auditId) || !await beginCleanup(freeze({ version: 1, scope: 'queue', auditId }))) throw cleanupPending();
+        throw staleQueue();
+      }
+      if (!queue) return null;
       const ownership = await queueCleanup(key, queue);
+      if (ownership.unavailable) {
+        if (!await beginCleanup(freeze({ version: 1, scope: 'queue', auditId: queue.auditId }))) throw cleanupPending();
+        throw staleQueue();
+      }
       const nowValue = currentTime(now, state);
       if (nowValue === null || nowValue < queue.issuedAt) {
         if (!await removeOrPend(ownership.keys)) throw cleanupPending();
@@ -546,10 +598,18 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
     replaceQueue(auditId, value, options) { return serial(async () => {
       const expected = exact(options, ['expectedRevision', 'expectedState']); const expectedState = expected && parseExpectedState(expected.expectedState); const desired = parseQueue(value);
       if (!validId(auditId) || !expected || !expectedState || !Number.isSafeInteger(expected.expectedRevision) || expected.expectedRevision < 1 || !desired || desired.auditId !== auditId) throw staleQueue();
-      const { key, queue: current } = await readQueue(auditId);
+      const { key, queue: current, unavailable: queueUnavailable = false } = await readQueue(auditId);
+      if (queueUnavailable) {
+        if (!await beginCleanup(freeze({ version: 1, scope: 'queue', auditId }))) throw cleanupPending();
+        throw staleQueue();
+      }
       if (!current || current.revision !== expected.expectedRevision || !same(queueState(current), expectedState) || desired.ownerOperationId !== current.ownerOperationId ||
         desired.revision !== current.revision + 1 || desired.issuedAt !== current.issuedAt || desired.expiresAt !== current.expiresAt) throw staleQueue();
       const ownership = await queueCleanup(key, current);
+      if (ownership.unavailable) {
+        if (!await beginCleanup(freeze({ version: 1, scope: 'queue', auditId: current.auditId }))) throw cleanupPending();
+        throw staleQueue();
+      }
       const nowValue = currentTime(now, state);
       if (nowValue === null || nowValue < current.issuedAt || nowValue >= current.expiresAt) {
         if (!await removeOrPend(ownership.keys)) throw cleanupPending();
@@ -585,30 +645,17 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
     clearAudit(auditId) { return serial(async () => {
       if (!validId(auditId)) throw new TypeError('RAW_NAVIGATION_INVALID'); let entries;
       try { entries = await all(sessionArea); } catch { throw unavailable(); }
-      const keys = entries.flatMap(([key, value]) =>
-        key === `${QUEUE_PREFIX}${auditId}` ||
-        ((key.startsWith(PREFIX) || key.startsWith(QUEUE_PREFIX)) && recordAuditId(value) === auditId) ? [key] : []);
+      const keys = auditCleanupTargets(entries, auditId);
       if (keys.length === 0) return 0;
-      if (!await removeOrPend(keys)) throw cleanupPending();
+      if (!await beginCleanup(freeze({ version: 1, scope: 'audit', auditId }))) throw cleanupPending();
       return keys.length;
     }); },
     clearExpired() { return serial(async () => {
       const nowValue = currentTime(now, state); if (nowValue === null) throw unavailable(); let entries;
       try { entries = await all(sessionArea); } catch { throw unavailable(); }
-      const keys = entries.flatMap(([key, value]) => {
-        const rawToken = key.startsWith(PREFIX) ? key.slice(PREFIX.length) : null;
-        const queueAuditId = key.startsWith(QUEUE_PREFIX) ? key.slice(QUEUE_PREFIX.length) : null;
-        const legacy = rawToken && validToken(rawToken) ? parseLegacyRecord(value, rawToken) : null;
-        const publicValue = rawToken && validToken(rawToken) ? publicRecord(value) : null;
-        const queue = queueAuditId && validId(queueAuditId) ? parseQueue(value) : null;
-        const malformed = key.startsWith(PREFIX) && !legacy && !publicValue ||
-          key.startsWith(QUEUE_PREFIX) && (!queue || queue.auditId !== queueAuditId);
-        return malformed || (legacy && (nowValue < legacy.issuedAt || nowValue >= legacy.expiresAt)) ||
-          (publicValue && (nowValue < publicValue.issuedAt || nowValue >= publicValue.expiresAt)) ||
-          (queue && (nowValue < queue.issuedAt || nowValue >= queue.expiresAt)) ? [key] : [];
-      });
+      const keys = expiredCleanupTargets(entries, nowValue);
       if (keys.length === 0) return 0;
-      if (!await removeOrPend(keys)) throw cleanupPending();
+      if (!await beginCleanup(freeze({ version: 1, scope: 'expired', cutoff: nowValue }))) throw cleanupPending();
       return keys.length;
     }); },
   });

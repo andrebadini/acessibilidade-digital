@@ -719,7 +719,7 @@ test('persists precise cleanup for malformed raw keys selected by audit cleanup'
   sessionArea.values[queueKey] = { malformed: true };
   sessionArea.removeMode = 'throw';
   await assert.rejects(vault.clearAudit('audit-malformed-cleanup'), /RAW_NAVIGATION_CLEANUP_PENDING/u);
-  assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'keys', keys: [rawKey] });
+  assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'audit', auditId: 'audit-malformed-cleanup' });
   const restarted = await restartedPublicVault(sessionArea, clock);
   await assert.rejects(restarted.put('https://example.test/blocked-after-audit', {
     auditId: 'audit-blocked-after-audit', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
@@ -742,9 +742,7 @@ test('persists precise cleanup for malformed expiry keys and escalates malformed
   sessionArea.values[queueKey] = { malformed: true };
   sessionArea.removeMode = 'noop';
   await assert.rejects(vault.clearExpired(), /RAW_NAVIGATION_CLEANUP_PENDING/u);
-  assert.deepEqual(sessionArea.values[markerKey], {
-    version: 1, scope: 'keys', keys: [queueKey, rawKey],
-  });
+  assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'expired', cutoff: clock.value });
   sessionArea.values[markerKey] = { version: 99, secret: 'forbidden' };
   const restarted = await restartedPublicVault(sessionArea, clock);
   await assert.rejects(restarted.readQueue('audit-any'), /RAW_NAVIGATION_CLEANUP_PENDING/u);
@@ -800,7 +798,7 @@ test('quarantines an exact-shape invalid legacy record through restart without r
   };
   sessionArea.removeMode = 'noop';
   await assert.rejects(vault.clearExpired(), /RAW_NAVIGATION_CLEANUP_PENDING/u);
-  assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'keys', keys: [key] });
+  assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'expired', cutoff: clock.value });
   assert.doesNotMatch(JSON.stringify(sessionArea.values[markerKey]), /NEVER|https:\/\//u);
   const restarted = await restartedPublicVault(sessionArea, clock);
   await assert.rejects(restarted.put('https://example.test/blocked-invalid-legacy', {
@@ -920,7 +918,7 @@ test('persists malformed clearAudit keys precisely across restart without touchi
     sessionArea.values[target] = { auditId: 'audit-clear-a', malformed: true };
     sessionArea.removeMode = removeMode;
     await assert.rejects(vault.clearAudit('audit-clear-a'), /RAW_NAVIGATION_CLEANUP_PENDING/u);
-    assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'keys', keys: [target] });
+    assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'audit', auditId: 'audit-clear-a' });
     assert.doesNotMatch(JSON.stringify(sessionArea.values[markerKey]), /NEVER|https:\/\//u);
     const restarted = await restartedPublicVault(sessionArea, clock);
     await assert.rejects(restarted.put('https://example.test/clear-audit-blocked', {
@@ -980,5 +978,126 @@ test('forged queues never remove a foreign batch token during read or replace cl
     }), /fila de navegação desatualizada/iu);
     assert.equal(Object.hasOwn(sessionArea.values, queueKey), false);
     assert.equal(Object.hasOwn(sessionArea.values, foreignKey), true);
+  }
+});
+
+test('journals audit cleanup by auditId without leaking malformed key names or deleting a foreign audit', async () => {
+  const markerKey = 'audita:raw-navigation-cleanup:v1';
+  for (const removeMode of ['noop', 'throw']) {
+    const { sessionArea, clock, vault } = publicFixture();
+    const foreign = await vault.put('https://example.test/audit-b?secret=NEVER', {
+      auditId: 'audit-journal-b', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+    });
+    const foreignKey = `audita:raw-navigation:v1:${foreign.navigationToken}`;
+    const targetKeys = Array.from({ length: 257 }, (_unused, index) =>
+      `audita:raw-navigation:v1:https://example.test/audit-a/${index}?secret=NEVER`);
+    for (const key of targetKeys) sessionArea.values[key] = { auditId: 'audit-journal-a', malformed: true };
+    sessionArea.removeMode = removeMode;
+    await assert.rejects(vault.clearAudit('audit-journal-a'), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+    assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'audit', auditId: 'audit-journal-a' });
+    assert.doesNotMatch(JSON.stringify(sessionArea.values[markerKey]), /NEVER|https:\/\//u);
+    const restarted = await restartedPublicVault(sessionArea, clock);
+    await assert.rejects(restarted.put('https://example.test/audit-journal-blocked', {
+      auditId: 'audit-journal-blocked', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+    }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+    sessionArea.removeMode = 'normal';
+    await restarted.put('https://example.test/audit-journal-recovered', {
+      auditId: 'audit-journal-recovered', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+    });
+    assert.equal(targetKeys.every(key => !Object.hasOwn(sessionArea.values, key)), true);
+    assert.equal(Object.hasOwn(sessionArea.values, foreignKey), true);
+    assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
+  }
+});
+
+test('journals expiry cleanup by cutoff without deleting nonexpired foreign authority', async () => {
+  const markerKey = 'audita:raw-navigation-cleanup:v1';
+  for (const removeMode of ['noop', 'throw']) {
+    const { sessionArea, clock, vault } = publicFixture();
+    const foreign = await vault.put('https://example.test/expiry-b?secret=NEVER', {
+      auditId: 'audit-expiry-b', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+    });
+    const foreignKey = `audita:raw-navigation:v1:${foreign.navigationToken}`;
+    const targetKeys = Array.from({ length: 257 }, (_unused, index) =>
+      `audita:raw-navigation:v1:https://example.test/expiry-a/${index}?secret=NEVER`);
+    for (const key of targetKeys) sessionArea.values[key] = { malformed: true };
+    sessionArea.removeMode = removeMode;
+    await assert.rejects(vault.clearExpired(), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+    assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'expired', cutoff: clock.value });
+    assert.doesNotMatch(JSON.stringify(sessionArea.values[markerKey]), /NEVER|https:\/\//u);
+    const restarted = await restartedPublicVault(sessionArea, clock);
+    await assert.rejects(restarted.put('https://example.test/expiry-journal-blocked', {
+      auditId: 'audit-expiry-blocked', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+    }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+    sessionArea.removeMode = 'normal';
+    await restarted.put('https://example.test/expiry-journal-recovered', {
+      auditId: 'audit-expiry-recovered', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+    });
+    assert.equal(targetKeys.every(key => !Object.hasOwn(sessionArea.values, key)), true);
+    assert.equal(Object.hasOwn(sessionArea.values, foreignKey), true);
+    assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
+  }
+});
+
+test('queues a persistent cleanup barrier when queue token reads are unavailable', async () => {
+  const markerKey = 'audita:raw-navigation-cleanup:v1';
+  for (const method of ['read', 'replace']) for (const status of ['pending', 'running', 'finished']) {
+    const { sessionArea, clock, vault } = publicFixture();
+    const auditId = `audit-queue-read-${method}-${status}`;
+    const entry = await batchEntry(vault, auditId, 1, `${method}-${status}`);
+    await vault.putQueue({ auditId, entries: [entry] });
+    const queueKey = `audita:raw-navigation-queue:v1:${auditId}`;
+    const tokenKey = `audita:raw-navigation:v1:${entry.navigationToken}`;
+    const current = structuredClone(sessionArea.values[queueKey]);
+    current.nextIndex = status === 'finished' ? 1 : 0;
+    current.entries[0].status = status;
+    sessionArea.values[queueKey] = current;
+    const foreign = await batchEntry(vault, `audit-queue-foreign-${method}-${status}`, 1, `foreign-${method}-${status}`);
+    const foreignKey = `audita:raw-navigation:v1:${foreign.navigationToken}`;
+    const originalGet = sessionArea.get.bind(sessionArea);
+    sessionArea.get = async key => key === tokenKey ? Promise.reject(new Error('TOKEN_READ_UNAVAILABLE')) : originalGet(key);
+    const run = method === 'read'
+      ? () => vault.readQueue(auditId)
+      : () => {
+        const desired = structuredClone(current);
+        desired.revision = 2;
+        if (status === 'pending') desired.entries[0].status = 'running';
+        return vault.replaceQueue(auditId, desired, {
+          expectedRevision: 1, expectedState: { nextIndex: current.nextIndex, status },
+        });
+      };
+    await assert.rejects(run(), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+    assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'queue', auditId });
+    assert.equal(Object.hasOwn(sessionArea.values, queueKey), true);
+    assert.equal(Object.hasOwn(sessionArea.values, tokenKey), true);
+    const restarted = await restartedPublicVault(sessionArea, clock);
+    await assert.rejects(restarted.put('https://example.test/queue-read-blocked', {
+      auditId: 'audit-queue-read-blocked', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+    }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+    sessionArea.get = originalGet;
+    await restarted.put('https://example.test/queue-read-recovered', {
+      auditId: 'audit-queue-read-recovered', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+    });
+    assert.equal(Object.hasOwn(sessionArea.values, queueKey), false);
+    assert.equal(Object.hasOwn(sessionArea.values, tokenKey), false);
+    assert.equal(Object.hasOwn(sessionArea.values, foreignKey), true);
+    assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
+  }
+});
+
+test('recovers a valid queue marker when its queue is absent or malformed without guessing token ownership', async () => {
+  const markerKey = 'audita:raw-navigation-cleanup:v1';
+  for (const state of ['absent', 'malformed']) {
+    const auditId = `audit-queue-${state}`;
+    const queueKey = `audita:raw-navigation-queue:v1:${auditId}`;
+    const { sessionArea, clock } = publicFixture();
+    sessionArea.values[markerKey] = { version: 1, scope: 'queue', auditId };
+    if (state === 'malformed') sessionArea.values[queueKey] = { malformed: true };
+    const restarted = await restartedPublicVault(sessionArea, clock);
+    await restarted.put('https://example.test/queue-marker-recovered', {
+      auditId: `audit-queue-marker-${state}`, purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+    });
+    assert.equal(Object.hasOwn(sessionArea.values, queueKey), false);
+    assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
   }
 });
