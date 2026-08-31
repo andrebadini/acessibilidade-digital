@@ -786,3 +786,105 @@ test('escalates an oversized precise cleanup marker to descriptor-safe namespace
   assert.equal(getterCalls, 0);
   assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
 });
+
+test('quarantines an exact-shape invalid legacy record through restart without retaining its URL', async () => {
+  const markerKey = 'audita:raw-navigation-cleanup:v1';
+  const navigationToken = 'L'.repeat(22);
+  const key = `audita:raw-navigation:v1:${navigationToken}`;
+  const { sessionArea, clock, vault } = publicFixture();
+  sessionArea.values[key] = {
+    version: 999, navigationToken, ownerId: 'owner-invalid', rawUrl: 'https://example.test/legacy?secret=NEVER',
+    issuedAt: 0, expiresAt: 'never', state: 'prepared',
+  };
+  sessionArea.removeMode = 'noop';
+  await assert.rejects(vault.clearExpired(), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'keys', keys: [key] });
+  assert.doesNotMatch(JSON.stringify(sessionArea.values[markerKey]), /NEVER|https:\/\//u);
+  const restarted = await restartedPublicVault(sessionArea, clock);
+  await assert.rejects(restarted.put('https://example.test/blocked-invalid-legacy', {
+    auditId: 'audit-invalid-legacy', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  sessionArea.removeMode = 'normal';
+  await restarted.put('https://example.test/recovered-invalid-legacy', {
+    auditId: 'audit-recovered-invalid-legacy', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  });
+  assert.equal(Object.hasOwn(sessionArea.values, key), false);
+  assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
+});
+
+test('expires only semantically valid legacy records and purges exact invalid public and queue shapes', async () => {
+  const { sessionArea, clock, vault } = publicFixture();
+  const legacy = await vault.putInternal({ ownerId: 'owner-valid-expiry', rawUrl: 'https://example.test/legacy-valid' });
+  const publicToken = 'P'.repeat(22);
+  const queueAuditId = 'audit-invalid-queue';
+  sessionArea.values[`audita:raw-navigation:v1:${publicToken}`] = {
+    version: 'RawNavigationUrlV1', auditId: 'audit-invalid-public', purpose: 'single-url', rawUrl: 'https://example.test/public?secret=NEVER',
+    issuedAt: NaN, expiresAt: 600_000,
+  };
+  sessionArea.values[`audita:raw-navigation-queue:v1:${queueAuditId}`] = {
+    version: 999, auditId: queueAuditId, ownerOperationId: 'Q'.repeat(22), revision: 1,
+    issuedAt: 0, expiresAt: 7_200_000, nextIndex: 0, entries: [],
+  };
+  clock.value += 60_000;
+  assert.equal(await vault.clearExpired(), 3);
+  assert.equal(Object.hasOwn(sessionArea.values, `audita:raw-navigation:v1:${legacy.navigationToken}`), false);
+  assert.equal(Object.keys(sessionArea.values).some(key => key.includes('invalid-public') || key.includes(queueAuditId)), false);
+});
+
+test('purges canonical legacy public and queue records issued after the cleanup clock', async () => {
+  const { sessionArea, clock, vault } = publicFixture();
+  const futureIssuedAt = clock.value + 1_000;
+  const legacyToken = 'F'.repeat(22);
+  const publicToken = 'G'.repeat(22);
+  sessionArea.values[`audita:raw-navigation:v1:${legacyToken}`] = {
+    version: 1, navigationToken: legacyToken, ownerId: 'owner-future', rawUrl: 'https://example.test/legacy-future',
+    issuedAt: futureIssuedAt, expiresAt: futureIssuedAt + 60_000, state: 'prepared',
+  };
+  sessionArea.values[`audita:raw-navigation:v1:${publicToken}`] = {
+    version: 'RawNavigationUrlV1', auditId: 'audit-future-public', purpose: 'single-url', rawUrl: 'https://example.test/public-future',
+    issuedAt: futureIssuedAt, expiresAt: futureIssuedAt + 600_000,
+  };
+  const entry = await batchEntry(vault, 'audit-future-queue', 1, 'future-queue');
+  await vault.putQueue({ auditId: 'audit-future-queue', entries: [entry] });
+  const queueKey = 'audita:raw-navigation-queue:v1:audit-future-queue';
+  const queueTokenKey = `audita:raw-navigation:v1:${entry.navigationToken}`;
+  sessionArea.values[queueKey].issuedAt += 1_000;
+  sessionArea.values[queueKey].expiresAt += 1_000;
+  sessionArea.values[queueTokenKey].issuedAt += 1_000;
+  sessionArea.values[queueTokenKey].expiresAt += 1_000;
+  assert.equal(await vault.clearExpired(), 4);
+  assert.equal(Object.hasOwn(sessionArea.values, queueKey), false);
+});
+
+test('accepts destructive remove commit-then-throw for public legacy and pending marker cleanup', async () => {
+  for (const kind of ['public', 'legacy']) {
+    const { sessionArea, vault } = publicFixture();
+    const issued = kind === 'public'
+      ? await vault.put('https://example.test/remove-throw?secret=NEVER', {
+        auditId: 'audit-remove-throw', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+      })
+      : await vault.putInternal({ ownerId: 'owner-remove-throw', rawUrl: 'https://example.test/remove-throw?secret=NEVER' });
+    const originalRemove = sessionArea.remove.bind(sessionArea);
+    sessionArea.remove = async keys => { await originalRemove(keys); throw new Error('remove completed then threw'); };
+    const raw = kind === 'public'
+      ? await vault.take(issued.navigationToken, { auditId: 'audit-remove-throw', purpose: 'single-url' })
+      : await vault.takeInternal({ ownerId: 'owner-remove-throw', navigationToken: issued.navigationToken });
+    assert.equal(raw, 'https://example.test/remove-throw?secret=NEVER');
+  }
+
+  const { sessionArea, vault } = publicFixture();
+  const issued = await vault.put('https://example.test/marker-remove-throw?secret=NEVER', {
+    auditId: 'audit-marker-remove-throw', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  });
+  sessionArea.removeMode = 'noop';
+  await assert.rejects(vault.take(issued.navigationToken, {
+    auditId: 'audit-marker-remove-throw', purpose: 'single-url',
+  }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  sessionArea.removeMode = 'normal';
+  const originalRemove = sessionArea.remove.bind(sessionArea);
+  sessionArea.remove = async keys => { await originalRemove(keys); throw new Error('remove completed then threw'); };
+  const recovered = await vault.put('https://example.test/marker-recovered', {
+    auditId: 'audit-marker-recovered', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  });
+  assert.match(recovered.navigationToken, /^[A-Za-z0-9_-]{22}$/u);
+});

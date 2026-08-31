@@ -116,6 +116,15 @@ function publicRecord(value) {
   return freeze(record);
 }
 
+function parseLegacyRecord(value, navigationToken = null, ownerId = null) {
+  const record = exact(value, LEGACY_RECORD_KEYS);
+  if (!record || record.version !== 1 || !validToken(record.navigationToken) || !validId(record.ownerId) ||
+    !validRawUrl(record.rawUrl) || !validClock(record.issuedAt) || !validClock(record.expiresAt) ||
+    record.expiresAt - record.issuedAt !== LEGACY_TTL_MS || record.state !== 'prepared' ||
+    navigationToken !== null && record.navigationToken !== navigationToken || ownerId !== null && record.ownerId !== ownerId) return null;
+  return freeze(record);
+}
+
 function parseQueueEntry(value) {
   const entry = exact(value, QUEUE_ENTRY_KEYS);
   const evidenceUrl = entry && exact(entry.evidenceUrl, EVIDENCE_URL_KEYS);
@@ -207,7 +216,8 @@ function ownValue(value, key) {
 }
 
 async function erase(sessionArea, key) {
-  try { await sessionArea.remove(key); return !Object.hasOwn(await sessionArea.get(key), key); } catch { return false; }
+  try { await sessionArea.remove(key); } catch { /* confirm below */ }
+  try { return !Object.hasOwn(await sessionArea.get(key), key); } catch { return false; }
 }
 
 async function all(sessionArea) {
@@ -242,8 +252,8 @@ function recordAuditId(value) {
 }
 
 async function removeKeys(sessionArea, keys) {
+  try { await sessionArea.remove(keys); } catch { /* confirm below */ }
   try {
-    await sessionArea.remove(keys);
     const entries = await all(sessionArea);
     return !entries.some(([key]) => keys.includes(key));
   } catch { return false; }
@@ -352,10 +362,8 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
     if (!validId(ownerId) || !validToken(navigationToken)) throw unavailable();
     const key = `${PREFIX}${navigationToken}`;
     let value; try { value = (await sessionArea.get(key))?.[key]; } catch { throw unavailable(); }
-    const record = exact(value, LEGACY_RECORD_KEYS);
-    if (!record || record.version !== 1 || record.navigationToken !== navigationToken || record.ownerId !== ownerId ||
-      !validRawUrl(record.rawUrl) || !validClock(record.issuedAt) || !validClock(record.expiresAt) ||
-      record.expiresAt <= record.issuedAt || record.state !== 'prepared') throw unavailable();
+    const record = parseLegacyRecord(value, navigationToken, ownerId);
+    if (!record) throw unavailable();
     return { key, record };
   };
 
@@ -565,12 +573,16 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       const nowValue = currentTime(now, state); if (nowValue === null) throw unavailable(); let entries;
       try { entries = await all(sessionArea); } catch { throw unavailable(); }
       const keys = entries.flatMap(([key, value]) => {
-        const legacy = key.startsWith(PREFIX) ? exact(value, LEGACY_RECORD_KEYS) : null;
-        const publicValue = key.startsWith(PREFIX) ? publicRecord(value) : null;
-        const queue = key.startsWith(QUEUE_PREFIX) ? parseQueue(value) : null;
-        const malformed = key.startsWith(PREFIX) && !legacy && !publicValue || key.startsWith(QUEUE_PREFIX) && !queue;
-        return malformed || (legacy && validClock(legacy.expiresAt) && nowValue >= legacy.expiresAt) ||
-          (publicValue && nowValue >= publicValue.expiresAt) || (queue && nowValue >= queue.expiresAt) ? [key] : [];
+        const rawToken = key.startsWith(PREFIX) ? key.slice(PREFIX.length) : null;
+        const queueAuditId = key.startsWith(QUEUE_PREFIX) ? key.slice(QUEUE_PREFIX.length) : null;
+        const legacy = rawToken && validToken(rawToken) ? parseLegacyRecord(value, rawToken) : null;
+        const publicValue = rawToken && validToken(rawToken) ? publicRecord(value) : null;
+        const queue = queueAuditId && validId(queueAuditId) ? parseQueue(value) : null;
+        const malformed = key.startsWith(PREFIX) && !legacy && !publicValue ||
+          key.startsWith(QUEUE_PREFIX) && (!queue || queue.auditId !== queueAuditId);
+        return malformed || (legacy && (nowValue < legacy.issuedAt || nowValue >= legacy.expiresAt)) ||
+          (publicValue && (nowValue < publicValue.issuedAt || nowValue >= publicValue.expiresAt)) ||
+          (queue && (nowValue < queue.issuedAt || nowValue >= queue.expiresAt)) ? [key] : [];
       });
       if (keys.length === 0) return 0;
       if (!await removeOrPend(keys)) throw cleanupPending();
