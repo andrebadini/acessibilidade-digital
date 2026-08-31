@@ -59,12 +59,16 @@ function inputOptions(value) {
       ownKeys.some(key => !['executeScript', 'documentIds'].includes(key))) return null;
     const executeScript = Reflect.getOwnPropertyDescriptor(value, 'executeScript');
     if (!executeScript?.enumerable || !Object.hasOwn(executeScript, 'value') || typeof executeScript.value !== 'function') return null;
-    if (!ownKeys.includes('documentIds')) return { executeScript: executeScript.value, documentIds: null };
+    if (!ownKeys.includes('documentIds')) return null;
     const documentIds = Reflect.getOwnPropertyDescriptor(value, 'documentIds');
     if (!documentIds?.enumerable || !Object.hasOwn(documentIds, 'value')) return null;
     const ids = dense(documentIds.value, MAX_DOCUMENT_IDS);
     if (!ids || ids.length === 0 || ids.some(id => !validDocumentId(id)) || new Set(ids).size !== ids.length) return null;
-    return { executeScript: executeScript.value, documentIds: ids };
+    return {
+      executeScript: executeScript.value,
+      expectedDocumentIds: Object.freeze([...ids]),
+      targetDocumentIds: Object.freeze([...ids]),
+    };
   } catch { return null; }
 }
 
@@ -120,8 +124,9 @@ function inspectSensitiveContext() {
 
 function injectionResult(value) {
   const result = exact(value, INJECTION_RESULT_KEYS);
-  return result && validTabId(result.frameId) && validDocumentId(result.documentId) && rawProbeResult(result.result)
-    ? result
+  const probeResult = result && rawProbeResult(result.result);
+  return result && validTabId(result.frameId) && validDocumentId(result.documentId) && probeResult
+    ? Object.freeze({ frameId: result.frameId, documentId: result.documentId, result: Object.freeze(probeResult) })
     : null;
 }
 
@@ -139,16 +144,16 @@ function aggregate(results, documentIds) {
     for (const key of PROBE_RESULT_KEYS) flags[key] ||= result.result[key];
   }
   if (!mainFrame) return null;
-  if (documentIds && (documents.size !== documentIds.length || documentIds.some(documentId => !documents.has(documentId)))) return null;
+  if (documents.size !== documentIds.length || documentIds.some(documentId => !documents.has(documentId))) return null;
   return flags;
 }
 
 export async function probeSensitiveContextInTab(tabId, options) {
   const input = inputOptions(options);
   if (!validTabId(tabId) || !input) throw unavailable();
-  const target = input.documentIds ? { tabId, documentIds: input.documentIds } : { tabId, allFrames: true };
+  const target = Object.freeze({ tabId, documentIds: input.targetDocumentIds });
   try {
-    const flags = aggregate(await input.executeScript({ target, world: 'ISOLATED', func: inspectSensitiveContext }), input.documentIds);
+    const flags = aggregate(await input.executeScript({ target, world: 'ISOLATED', func: inspectSensitiveContext }), input.expectedDocumentIds);
     if (!flags) throw unavailable();
     return detectSensitiveCaptureSignalsV1(flags);
   } catch { throw unavailable(); }

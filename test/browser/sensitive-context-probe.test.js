@@ -67,13 +67,14 @@ test('scans only structural attributes including nested open shadow roots', asyn
   await withDocument(fakeRoot([fakeElement({ shadowRoot: shadow, reads })]), async () => {
     const signals = await probeSensitiveContextInTab(7, {
       executeScript: async options => [injection(0, 'doc-root', options.func())],
+      documentIds: ['doc-root'],
     });
     assert.deepEqual(signals.categories, ['password', 'otp', 'payment', 'private-marker']);
   });
   assert.deepEqual(reads, { value: 0, text: 0, html: 0 });
 });
 
-test('unions sensitive frame results and uses an exact allFrames isolated target', async () => {
+test('unions sensitive frame results and uses an exact isolated document target', async () => {
   const calls = [];
   const signals = await probeSensitiveContextInTab(7, {
     executeScript: async options => {
@@ -82,12 +83,20 @@ test('unions sensitive frame results and uses an exact allFrames isolated target
         injection(0, 'doc-top', probeResult({ otp: true })),
         injection(9, 'doc-child', probeResult({ password: true, privateMarker: true })),
       ];
-    },
+    }, documentIds: ['doc-top', 'doc-child'],
   });
-  assert.deepEqual(calls[0].target, { tabId: 7, allFrames: true });
+  assert.deepEqual(calls[0].target, { tabId: 7, documentIds: ['doc-top', 'doc-child'] });
   assert.equal(calls[0].world, 'ISOLATED');
   assert.equal(typeof calls[0].func, 'function');
   assert.deepEqual(signals.categories, ['password', 'otp', 'private-marker']);
+});
+
+test('requires an explicit complete document inventory instead of allFrames', async () => {
+  let calls = 0;
+  await assert.rejects(probeSensitiveContextInTab(7, {
+    executeScript: async () => { calls += 1; return [injection(0, 'doc-top', probeResult())]; },
+  }), /SENSITIVE_CONTEXT_PROBE_UNAVAILABLE/u);
+  assert.equal(calls, 0);
 });
 
 test('uses exactly requested documentIds and requires a bijective result including frame zero', async () => {
@@ -129,15 +138,46 @@ test('fails closed for execute errors and hostile input or injection records wit
   });
   await assert.rejects(probeSensitiveContextInTab(7, {
     executeScript: async () => [hostileResult],
+    documentIds: ['doc-top'],
   }), /SENSITIVE_CONTEXT_PROBE_UNAVAILABLE/u);
   await assert.rejects(probeSensitiveContextInTab(7, {
     executeScript: async () => { throw new Error('frame access denied secret=never'); },
+    documentIds: ['doc-top'],
   }), /SENSITIVE_CONTEXT_PROBE_UNAVAILABLE/u);
   await assert.rejects(probeSensitiveContextInTab(7, {
     executeScript: async () => { const sparse = []; sparse[1] = injection(0, 'doc-top', probeResult()); return sparse; },
+    documentIds: ['doc-top'],
   }), /SENSITIVE_CONTEXT_PROBE_UNAVAILABLE/u);
   const { proxy, revoke } = Proxy.revocable({ executeScript: async () => [] }, {});
   revoke();
   await assert.rejects(probeSensitiveContextInTab(7, proxy), /SENSITIVE_CONTEXT_PROBE_UNAVAILABLE/u);
   assert.equal(getterCalls, 0);
+});
+
+test('aggregates the descriptor-captured probe result without reading a hostile proxy again', async () => {
+  let getCalls = 0;
+  const result = new Proxy(probeResult({ password: true }), {
+    get() { getCalls += 1; throw new Error('RAW_RESULT_GET'); },
+  });
+  const signals = await probeSensitiveContextInTab(7, {
+    executeScript: async () => [injection(0, 'doc-top', result)],
+    documentIds: ['doc-top'],
+  });
+  assert.deepEqual(signals.categories, ['password']);
+  assert.equal(getCalls, 0);
+});
+
+test('keeps frozen target documentIds separate from the immutable expected inventory', async () => {
+  const documentIds = ['doc-top'];
+  const signals = await probeSensitiveContextInTab(7, {
+    documentIds,
+    executeScript: async options => {
+      assert.equal(Object.isFrozen(options.target.documentIds), true);
+      assert.notEqual(options.target.documentIds, documentIds);
+      try { options.target.documentIds[0] = 'doc-forged'; } catch { /* frozen by contract */ }
+      documentIds[0] = 'doc-mutated-after-call';
+      return [injection(0, 'doc-top', probeResult({ otp: true }))];
+    },
+  });
+  assert.deepEqual(signals.categories, ['otp']);
 });

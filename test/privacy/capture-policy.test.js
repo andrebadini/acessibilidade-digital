@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import * as capturePolicy from '../../src/core/privacy/capture-policy.js';
 
-const { createCapturePolicyV1 } = capturePolicy;
+const { createCapturePolicyV1, isCapturePolicyV1 } = capturePolicy;
 
 test('derives the exact frozen pixel capabilities for every privacy mode', () => {
   const cases = [
@@ -47,4 +47,14 @@ test('rejects hostile accessors and symbols without invoking them', () => {
 
 test('keeps createCapturePolicyV1 as the only capture-policy factory', () => {
   assert.equal(Object.hasOwn(capturePolicy, 'normalizeCapturePolicyV1'), false);
+});
+
+test('rejects inherited mode names in both policy creation and recognition', () => {
+  for (const mode of ['__proto__', 'constructor', 'toString']) {
+    assert.throws(() => createCapturePolicyV1({ mode, includeQuery: false }), /CAPTURE_POLICY_INVALID/u);
+    assert.equal(isCapturePolicyV1({
+      version: 'CapturePolicyV1', mode, includeQuery: false,
+      captureFullPage: undefined, captureElements: undefined, composeAnnouncementMap: undefined,
+    }), false);
+  }
 });

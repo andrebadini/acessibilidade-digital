@@ -1,9 +1,9 @@
 const POLICY_KEYS = Object.freeze(['mode', 'includeQuery']);
-const MODES = Object.freeze({
+const MODES = Object.freeze(Object.assign(Object.create(null), {
   'full-evidence': Object.freeze([true, true, true]),
   'element-only': Object.freeze([false, true, false]),
   'no-pixels': Object.freeze([false, false, false]),
-});
+}));
 
 function captureExact(value, keys) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -24,7 +24,7 @@ export function createCapturePolicyV1(input) {
   const captured = captureExact(input, POLICY_KEYS);
   if (!captured) throw new TypeError('CAPTURE_POLICY_INVALID');
   const { mode, includeQuery } = captured;
-  const flags = MODES[mode];
+  const flags = typeof mode === 'string' && Object.hasOwn(MODES, mode) ? MODES[mode] : null;
   if (!flags || typeof includeQuery !== 'boolean') throw new TypeError('CAPTURE_POLICY_INVALID');
   return Object.freeze({
     version: 'CapturePolicyV1', mode, includeQuery,
