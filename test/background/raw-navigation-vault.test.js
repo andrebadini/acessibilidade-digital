@@ -710,7 +710,7 @@ test('routes invalidate and audit cleanup removal failures through the persisten
   assert.equal(await publicVault.clearAudit('audit-clear-pending'), 0);
 });
 
-test('persists namespace cleanup for malformed raw and queue keys selected by audit cleanup', async () => {
+test('persists precise cleanup for malformed raw keys selected by audit cleanup', async () => {
   const markerKey = 'audita:raw-navigation-cleanup:v1';
   const rawKey = 'audita:raw-navigation:v1:not-a-token';
   const queueKey = 'audita:raw-navigation-queue:v1:not-an-audit!';
@@ -719,7 +719,7 @@ test('persists namespace cleanup for malformed raw and queue keys selected by au
   sessionArea.values[queueKey] = { malformed: true };
   sessionArea.removeMode = 'throw';
   await assert.rejects(vault.clearAudit('audit-malformed-cleanup'), /RAW_NAVIGATION_CLEANUP_PENDING/u);
-  assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'namespace' });
+  assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'keys', keys: [rawKey] });
   const restarted = await restartedPublicVault(sessionArea, clock);
   await assert.rejects(restarted.put('https://example.test/blocked-after-audit', {
     auditId: 'audit-blocked-after-audit', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
@@ -729,11 +729,11 @@ test('persists namespace cleanup for malformed raw and queue keys selected by au
     auditId: 'audit-recovered-after-audit', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
   });
   assert.equal(Object.hasOwn(sessionArea.values, rawKey), false);
-  assert.equal(Object.hasOwn(sessionArea.values, queueKey), false);
+  assert.equal(Object.hasOwn(sessionArea.values, queueKey), true);
   assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
 });
 
-test('persists namespace cleanup for malformed keys selected by expiry and malformed markers', async () => {
+test('persists precise cleanup for malformed expiry keys and escalates malformed markers', async () => {
   const markerKey = 'audita:raw-navigation-cleanup:v1';
   const rawKey = 'audita:raw-navigation:v1:bad';
   const queueKey = 'audita:raw-navigation-queue:v1:bad!';
@@ -742,7 +742,9 @@ test('persists namespace cleanup for malformed keys selected by expiry and malfo
   sessionArea.values[queueKey] = { malformed: true };
   sessionArea.removeMode = 'noop';
   await assert.rejects(vault.clearExpired(), /RAW_NAVIGATION_CLEANUP_PENDING/u);
-  assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'namespace' });
+  assert.deepEqual(sessionArea.values[markerKey], {
+    version: 1, scope: 'keys', keys: [queueKey, rawKey],
+  });
   sessionArea.values[markerKey] = { version: 99, secret: 'forbidden' };
   const restarted = await restartedPublicVault(sessionArea, clock);
   await assert.rejects(restarted.readQueue('audit-any'), /RAW_NAVIGATION_CLEANUP_PENDING/u);
@@ -887,4 +889,96 @@ test('accepts destructive remove commit-then-throw for public legacy and pending
     auditId: 'audit-marker-recovered', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
   });
   assert.match(recovered.navigationToken, /^[A-Za-z0-9_-]{22}$/u);
+});
+
+test('clearAudit selects malformed raw and queue records by own auditId without selecting a foreign audit', async () => {
+  const { sessionArea, vault } = publicFixture();
+  const rawTarget = 'audita:raw-navigation:v1:not-a-token';
+  const queueTarget = 'audita:raw-navigation-queue:v1:not-an-audit!';
+  const canonicalQueueTarget = 'audita:raw-navigation-queue:v1:audit-clear-target';
+  const foreign = `audita:raw-navigation:v1:${'Z'.repeat(22)}`;
+  sessionArea.values[rawTarget] = { auditId: 'audit-clear-target', malformed: true };
+  sessionArea.values[queueTarget] = { auditId: 'audit-clear-target', malformed: true };
+  sessionArea.values[canonicalQueueTarget] = { auditId: 'audit-clear-foreign', malformed: true };
+  sessionArea.values[foreign] = { auditId: 'audit-clear-foreign', malformed: true };
+  assert.equal(await vault.clearAudit('audit-clear-target'), 3);
+  assert.equal(Object.hasOwn(sessionArea.values, rawTarget), false);
+  assert.equal(Object.hasOwn(sessionArea.values, queueTarget), false);
+  assert.equal(Object.hasOwn(sessionArea.values, canonicalQueueTarget), false);
+  assert.equal(Object.hasOwn(sessionArea.values, foreign), true);
+});
+
+test('persists malformed clearAudit keys precisely across restart without touching another audit', async () => {
+  const markerKey = 'audita:raw-navigation-cleanup:v1';
+  for (const removeMode of ['noop', 'throw']) {
+    const target = `audita:raw-navigation:v1:${removeMode === 'noop' ? 'malformed-audit-a!' : 'x'.repeat(600)}`;
+    const { sessionArea, clock, vault } = publicFixture();
+    const foreign = await vault.put('https://example.test/audit-b?secret=NEVER', {
+      auditId: 'audit-clear-b', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+    });
+    const foreignKey = `audita:raw-navigation:v1:${foreign.navigationToken}`;
+    sessionArea.values[target] = { auditId: 'audit-clear-a', malformed: true };
+    sessionArea.removeMode = removeMode;
+    await assert.rejects(vault.clearAudit('audit-clear-a'), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+    assert.deepEqual(sessionArea.values[markerKey], { version: 1, scope: 'keys', keys: [target] });
+    assert.doesNotMatch(JSON.stringify(sessionArea.values[markerKey]), /NEVER|https:\/\//u);
+    const restarted = await restartedPublicVault(sessionArea, clock);
+    await assert.rejects(restarted.put('https://example.test/clear-audit-blocked', {
+      auditId: 'audit-clear-blocked', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+    }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+    sessionArea.removeMode = 'normal';
+    await restarted.put('https://example.test/clear-audit-recovered', {
+      auditId: 'audit-clear-recovered', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+    });
+    assert.equal(Object.hasOwn(sessionArea.values, target), false);
+    assert.equal(Object.hasOwn(sessionArea.values, foreignKey), true);
+    assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
+  }
+});
+
+test('forged queues never remove a foreign batch token during read or replace cleanup', async () => {
+  for (const status of ['pending', 'running', 'finished']) {
+    const { sessionArea, clock, vault } = publicFixture();
+    const foreignEntry = await batchEntry(vault, `audit-foreign-${status}`, 1, `foreign-${status}`);
+    const foreignKey = `audita:raw-navigation:v1:${foreignEntry.navigationToken}`;
+    const foreignRecord = sessionArea.values[foreignKey];
+    const auditId = `audit-forged-${status}`;
+    const queueKey = `audita:raw-navigation-queue:v1:${auditId}`;
+    sessionArea.values[queueKey] = {
+      version: 1, auditId, ownerOperationId: 'O'.repeat(22), revision: 1,
+      issuedAt: foreignRecord.issuedAt, expiresAt: foreignRecord.expiresAt,
+      nextIndex: status === 'finished' ? 1 : 0,
+      entries: [{ ...foreignEntry, status }],
+    };
+    await assert.rejects(vault.readQueue(auditId), /fila de navegação desatualizada/iu);
+    assert.equal(Object.hasOwn(sessionArea.values, queueKey), false);
+    assert.equal(Object.hasOwn(sessionArea.values, foreignKey), true);
+
+    sessionArea.values[queueKey] = {
+      version: 1, auditId, ownerOperationId: 'O'.repeat(22), revision: 1,
+      issuedAt: foreignRecord.issuedAt, expiresAt: foreignRecord.expiresAt,
+      nextIndex: status === 'finished' ? 1 : 0,
+      entries: [{ ...foreignEntry, status }],
+    };
+    const desired = structuredClone(sessionArea.values[queueKey]);
+    desired.revision = 2;
+    if (status === 'pending') desired.entries[0].status = 'running';
+    await assert.rejects(vault.replaceQueue(auditId, desired, {
+      expectedRevision: 1, expectedState: { nextIndex: status === 'finished' ? 1 : 0, status },
+    }), /fila de navegação desatualizada/iu);
+    assert.equal(Object.hasOwn(sessionArea.values, queueKey), false);
+    assert.equal(Object.hasOwn(sessionArea.values, foreignKey), true);
+    clock.value = foreignRecord.expiresAt;
+    sessionArea.values[queueKey] = {
+      version: 1, auditId, ownerOperationId: 'O'.repeat(22), revision: 1,
+      issuedAt: foreignRecord.issuedAt, expiresAt: foreignRecord.expiresAt,
+      nextIndex: status === 'finished' ? 1 : 0,
+      entries: [{ ...foreignEntry, status }],
+    };
+    await assert.rejects(vault.replaceQueue(auditId, desired, {
+      expectedRevision: 1, expectedState: { nextIndex: status === 'finished' ? 1 : 0, status },
+    }), /fila de navegação desatualizada/iu);
+    assert.equal(Object.hasOwn(sessionArea.values, queueKey), false);
+    assert.equal(Object.hasOwn(sessionArea.values, foreignKey), true);
+  }
 });

@@ -188,9 +188,9 @@ function tokensForKeys(keys) {
 }
 
 function validCleanupKey(key) {
-  return typeof key === 'string' &&
-    (key.startsWith(PREFIX) ? validToken(key.slice(PREFIX.length)) :
-      key.startsWith(QUEUE_PREFIX) && validId(key.slice(QUEUE_PREFIX.length)));
+  // A persisted barrier must be able to name the exact malformed storage key
+  // that selected it.  Authority is still limited to our two private prefixes.
+  return namespaceCleanupKey(key);
 }
 
 function namespaceCleanupKey(key) {
@@ -358,6 +358,30 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
     const queue = parseQueue(value); if (!queue || queue.auditId !== auditId) throw staleQueue();
     return { key, queue };
   };
+  const queueCleanup = async (key, queue) => {
+    const keys = [key];
+    let stale = false;
+    for (const entry of queue.entries) {
+      const tokenKey = `${PREFIX}${entry.navigationToken}`;
+      let value;
+      try { value = (await sessionArea.get(tokenKey))?.[tokenKey]; } catch { stale = true; continue; }
+      if (value === undefined) {
+        if (entry.status !== 'finished') stale = true;
+        continue;
+      }
+      const record = publicRecord(value);
+      // The raw record is the ownership authority. A forged queue can only
+      // cause removal of records that prove this exact queue correlation.
+      if (!record || record.auditId !== queue.auditId || record.purpose !== 'batch-page' ||
+        record.issuedAt !== queue.issuedAt || record.expiresAt !== queue.expiresAt) {
+        stale = true;
+        continue;
+      }
+      keys.push(tokenKey);
+      if (entry.status === 'finished') stale = true;
+    }
+    return { keys, stale };
+  };
   const readLegacy = async (ownerId, navigationToken) => {
     if (!validId(ownerId) || !validToken(navigationToken)) throw unavailable();
     const key = `${PREFIX}${navigationToken}`;
@@ -503,26 +527,18 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
     }); },
     readQueue(auditId) { return serial(async () => {
       const { key, queue } = await readQueue(auditId); if (!queue) return null;
-      const keys = [key, ...queue.entries.map(entry => `${PREFIX}${entry.navigationToken}`)];
+      const ownership = await queueCleanup(key, queue);
       const nowValue = currentTime(now, state);
       if (nowValue === null || nowValue < queue.issuedAt) {
-        if (!await removeOrPend(keys)) throw cleanupPending();
+        if (!await removeOrPend(ownership.keys)) throw cleanupPending();
         throw staleQueue();
       }
       if (nowValue >= queue.expiresAt) {
-        if (!await removeOrPend(keys)) throw cleanupPending();
+        if (!await removeOrPend(ownership.keys)) throw cleanupPending();
         return null;
       }
-      let complete = true;
-      for (const entry of queue.entries) {
-        if (entry.status === 'finished') continue;
-        let record;
-        try { record = publicRecord((await sessionArea.get(`${PREFIX}${entry.navigationToken}`))?.[`${PREFIX}${entry.navigationToken}`]); } catch { complete = false; break; }
-        if (!record || record.auditId !== queue.auditId || record.purpose !== 'batch-page' ||
-          record.issuedAt !== queue.issuedAt || record.expiresAt !== queue.expiresAt) { complete = false; break; }
-      }
-      if (!complete) {
-        if (!await removeOrPend(keys)) throw cleanupPending();
+      if (ownership.stale) {
+        if (!await removeOrPend(ownership.keys)) throw cleanupPending();
         throw staleQueue();
       }
       return freeze(structuredClone(queue));
@@ -532,13 +548,19 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       if (!validId(auditId) || !expected || !expectedState || !Number.isSafeInteger(expected.expectedRevision) || expected.expectedRevision < 1 || !desired || desired.auditId !== auditId) throw staleQueue();
       const { key, queue: current } = await readQueue(auditId);
       if (!current || current.revision !== expected.expectedRevision || !same(queueState(current), expectedState) || desired.ownerOperationId !== current.ownerOperationId ||
-        current.nextIndex >= current.entries.length || desired.revision !== current.revision + 1 || desired.issuedAt !== current.issuedAt || desired.expiresAt !== current.expiresAt || !validTransition(current, desired)) throw staleQueue();
+        desired.revision !== current.revision + 1 || desired.issuedAt !== current.issuedAt || desired.expiresAt !== current.expiresAt) throw staleQueue();
+      const ownership = await queueCleanup(key, current);
       const nowValue = currentTime(now, state);
       if (nowValue === null || nowValue < current.issuedAt || nowValue >= current.expiresAt) {
-        if (!await removeOrPend([key, ...current.entries.map(entry => `${PREFIX}${entry.navigationToken}`)])) throw cleanupPending();
+        if (!await removeOrPend(ownership.keys)) throw cleanupPending();
         throw staleQueue();
       }
-      const cleanupKeys = [key, ...current.entries.map(entry => `${PREFIX}${entry.navigationToken}`)];
+      if (ownership.stale) {
+        if (!await removeOrPend(ownership.keys)) throw cleanupPending();
+        throw staleQueue();
+      }
+      if (current.nextIndex >= current.entries.length || !validTransition(current, desired)) throw staleQueue();
+      const cleanupKeys = ownership.keys;
       const confirmedDesired = async () => {
         try { return same(parseQueue((await sessionArea.get(key))?.[key]), desired); } catch { return false; }
       };
@@ -564,7 +586,8 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       if (!validId(auditId)) throw new TypeError('RAW_NAVIGATION_INVALID'); let entries;
       try { entries = await all(sessionArea); } catch { throw unavailable(); }
       const keys = entries.flatMap(([key, value]) =>
-        (key.startsWith(PREFIX) && recordAuditId(value) === auditId) || key === `${QUEUE_PREFIX}${auditId}` ? [key] : []);
+        key === `${QUEUE_PREFIX}${auditId}` ||
+        ((key.startsWith(PREFIX) || key.startsWith(QUEUE_PREFIX)) && recordAuditId(value) === auditId) ? [key] : []);
       if (keys.length === 0) return 0;
       if (!await removeOrPend(keys)) throw cleanupPending();
       return keys.length;
