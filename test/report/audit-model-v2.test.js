@@ -347,6 +347,76 @@ function setSingleStatus(model, status, { diagnostics = model.session.diagnostic
   return syncDerivedClaims(model);
 }
 
+function captureOmissionModel(code) {
+  const model = authorityConsistentSample();
+  const message = code === 'PIXEL_CAPTURE_OMITTED'
+    ? 'Nenhuma captura raster foi coletada no modo sem imagens.'
+    : 'A captura integral e o mapa anotado foram omitidos pela política; miniaturas de elementos permaneceram permitidas.';
+  const retained = code === 'PIXEL_CAPTURE_OMITTED'
+    ? []
+    : model.evidence.filter(artifact => artifact.kind === 'element').map(artifact => {
+      const copy = { ...artifact };
+      delete copy.fullPageEvidenceId;
+      return copy;
+    });
+  const ids = new Set(retained.map(artifact => artifact.evidenceId));
+  model.evidence = retained;
+  for (const occurrence of model.occurrences) {
+    occurrence.evidenceRefs = occurrence.evidenceRefs.filter(id => ids.has(id));
+    occurrence.evidenceIds = occurrence.evidenceIds.filter(id => ids.has(id));
+  }
+  model.evidenceStateCount = 0;
+  model.reproducibility.capturedStateCount = 0;
+  return setSingleStatus(model, 'complete', { diagnostics: [{
+    code, message, at: '2026-08-26T14:00:30.000Z', recoverable: true,
+  }] });
+}
+
+test('models full-page capture as pristine, failure, or an exclusive canonical policy omission', () => {
+  for (const code of ['PIXEL_CAPTURE_OMITTED', 'FULL_PAGE_CAPTURE_OMITTED']) {
+    const model = captureOmissionModel(code);
+    const canonical = createAuditModel(model);
+    assert.equal(canonical.session.status, 'complete');
+    assert.equal(canonical.limitations.includes(model.session.diagnostics[0].message), true);
+  }
+
+  const contradictoryPixels = captureOmissionModel('PIXEL_CAPTURE_OMITTED');
+  contradictoryPixels.evidence.push(structuredClone(SAMPLE_AUDIT.evidence[1]));
+  assert.throws(() => createAuditModel(contradictoryPixels), /pixel|raster|omiss|modelo/iu);
+
+  const contradictoryFull = captureOmissionModel('FULL_PAGE_CAPTURE_OMITTED');
+  contradictoryFull.evidence.push(structuredClone(SAMPLE_AUDIT.evidence[0]));
+  assert.throws(() => createAuditModel(contradictoryFull), /captura|pristine|omiss|modelo/iu);
+
+  const missingAuthority = captureOmissionModel('PIXEL_CAPTURE_OMITTED');
+  setSingleStatus(missingAuthority, 'complete', { diagnostics: [] });
+  assert.throws(() => createAuditModel(missingAuthority), /captura|estado|modelo/iu);
+});
+
+test('models an interrupted full-evidence audit as not attempted rather than failed capture', () => {
+  const model = captureOmissionModel('PIXEL_CAPTURE_OMITTED');
+  const diagnosticAt = '2026-08-26T14:00:30.000Z';
+  setSingleStatus(model, 'cancelled', { diagnostics: [
+    {
+      code: 'FULL_PAGE_CAPTURE_NOT_ATTEMPTED',
+      message: 'A captura integral não foi tentada porque a execução terminou antes da etapa de pixels.',
+      at: diagnosticAt,
+      recoverable: true,
+    },
+    {
+      code: 'NAVIGATION_FAILED', message: 'A auditoria foi cancelada.',
+      at: diagnosticAt, recoverable: false,
+    },
+  ] });
+
+  const canonical = createAuditModel(model);
+  assert.equal(canonical.session.status, 'cancelled');
+  assert.equal(canonical.session.diagnostics.some(entry => entry.code === 'FULL_PAGE_CAPTURE_FAILED'), false);
+  assert.equal(canonical.limitations.includes(
+    'A captura integral não foi tentada porque a execução terminou antes da etapa de pixels.'
+  ), true);
+});
+
 function batchWithUnattemptedPage() {
   const model = structuredClone(migrateAuditV1ToV2(reportInput()));
   const requestedUrl = 'https://not-started.example.test/';

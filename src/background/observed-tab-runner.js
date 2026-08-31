@@ -1,7 +1,8 @@
 import { isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
 import { createAuditModel } from '../core/report/audit-model.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
-import { isObservedPipelineRunner } from './audit-pipeline.js';
+import { isObservedPipelineRunner, isObservedPipelineRunnerForPrivacyGate } from './audit-pipeline.js';
+import { isPixelPrivacyGateV1, readPixelPrivacyPauseInterruptionV1 } from './pixel-privacy-gate.js';
 
 const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
 const ID = /^[A-Za-z0-9._:-]{1,160}$/u;
@@ -425,8 +426,13 @@ export async function runObservedTabAudit(input) {
   const waitForStable = target?.kind === 'owned-disposable' ? captureCallable(chromeAdapter, 'waitForStable') : null;
   const resolveNavigationToken = target?.kind === 'owned-disposable' ? captureCallable(chromeAdapter, 'resolveNavigationToken') : null;
   const getEvidenceUrl = target?.kind === 'owned-disposable' ? captureCallable(chromeAdapter, 'getEvidenceUrl') : null;
+  const noPixels = policy?.mode === 'no-pixels';
+  const validPrivacy = noPixels
+    ? privacyGate === null && isObservedPipelineRunnerForPrivacyGate(pipeline, null)
+    : target?.kind === 'attached' && isPixelPrivacyGateV1(privacyGate) &&
+      isObservedPipelineRunnerForPrivacyGate(pipeline, privacyGate);
   if (!validId(auditId) || !target || !chromeAdapter || typeof chromeAdapter !== 'object' ||
-    !policy || policy.mode !== 'no-pixels' || policy.includeQuery !== false ||
+    !policy || policy.includeQuery !== false || !validPrivacy ||
     (target.initialUrlEvidence?.queryIncluded && !policy.includeQuery) ||
     typeof onCheckpoint !== 'function' || typeof now !== 'function' ||
     (expectedExtensionId !== undefined && typeof expectedExtensionId !== 'string') ||
@@ -525,6 +531,15 @@ export async function runObservedTabAudit(input) {
     ownershipState = await cleanupOwned(ownedBundle, chromeAdapter, { ...target, tabId, windowId }, auditId, ownershipState, true, signal, removeTab);
     return Object.freeze({ status, model: result.model, observedTarget, observationState: 'observed', ownershipState });
   } catch (error) {
+    const pausedSignals = target.kind === 'attached'
+      ? readPixelPrivacyPauseInterruptionV1(error, privacyGate)
+      : null;
+    if (observed && pausedSignals) {
+      return Object.freeze({
+        status: 'privacy-paused', model: null, observedTarget,
+        observationState: 'observed', ownershipState: 'attached', signals: pausedSignals,
+      });
+    }
     let preCreateAbsent = false;
     if (target.kind === 'owned-disposable' && !createdTab && !journalCommitted && !validChromeId(tabId)) {
       const absence = await ownedBundle.methods.get(target.ownershipId);

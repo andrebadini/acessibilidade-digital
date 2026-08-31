@@ -7,6 +7,7 @@ import { projectAuditResourceOrigin } from '../core/privacy.js';
 import { canonicalStringify } from '../core/report/canonical-json.js';
 import { parseCssSelectorV1 } from './highlight-locator.js';
 import { runAuditaHighlightCommand } from '../browser/highlight-overlay.js';
+import { probeSensitiveContextInTab } from '../browser/sensitive-context-probe.js';
 
 export const AUDIT_EXECUTION_INTERNAL = Symbol('audita.audit-execution-internal');
 
@@ -1437,6 +1438,36 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
       } catch {
         return '';
       }
+    },
+    async probeSensitiveCaptureSignals(tabId, expectedMainDocumentId) {
+      if (!Number.isSafeInteger(tabId) || tabId < 0 || typeof expectedMainDocumentId !== 'string' ||
+        expectedMainDocumentId.length === 0 || expectedMainDocumentId.length > 240) {
+        throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE');
+      }
+      try {
+        const frames = denseHighlightArray(await executeScript({
+          target: { tabId, allFrames: true },
+          world: 'ISOLATED',
+          func: () => null,
+        }), 256);
+        if (!frames || frames.length === 0) {
+          throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE');
+        }
+        const documentIds = [];
+        let mainFrameDocumentId = null;
+        for (const rawFrame of frames) {
+          const frame = exactHighlightRecord(rawFrame, ['frameId', 'documentId', 'result']);
+          if (!frame || !Number.isSafeInteger(frame.frameId) || frame.frameId < 0 ||
+            typeof frame.documentId !== 'string' || frame.documentId.length === 0 || frame.documentId.length > 240 ||
+            frame.result !== null || documentIds.includes(frame.documentId)) {
+            throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE');
+          }
+          if (frame.frameId === 0) mainFrameDocumentId = frame.documentId;
+          documentIds.push(frame.documentId);
+        }
+        if (mainFrameDocumentId !== expectedMainDocumentId) throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE');
+        return await probeSensitiveContextInTab(tabId, { executeScript, documentIds });
+      } catch { throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE'); }
     },
     async probePrivacySignals(tabId) {
       if (!Number.isSafeInteger(tabId) || tabId < 0) throw new Error('PRIVACY_PROBE_UNAVAILABLE');

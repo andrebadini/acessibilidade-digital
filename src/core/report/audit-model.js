@@ -931,8 +931,10 @@ function validateAxeEvidenceBinding(model, checked) {
       }
       continue;
     }
-    const explicitAbsence = model.session?.diagnostics?.some(entry => entry.code === 'FULL_PAGE_CAPTURE_FAILED' &&
-      entry.message === 'Não foi possível capturar a página completa no estado original.' && entry.recoverable === true &&
+    const explicitAbsence = model.session?.diagnostics?.some(entry =>
+      ['FULL_PAGE_CAPTURE_FAILED', 'FULL_PAGE_CAPTURE_OMITTED', 'PIXEL_CAPTURE_OMITTED',
+        'FULL_PAGE_CAPTURE_NOT_ATTEMPTED'].includes(entry.code) &&
+      entry.recoverable === true &&
       canonicalStringify(Object.keys(entry).sort()) === canonicalStringify(['at', 'code', 'message', 'recoverable'])) ||
       model.limitations?.some(value => value === 'A captura integral original da página não estava disponível para vinculação ao achado axe conclusivo.');
     if (!explicitAbsence) throw new TypeError(`Ocorrência axe conclusiva #${occurrenceIndex + 1} não possui captura integral original nem limitação explícita.`);
@@ -1692,13 +1694,29 @@ function validatePageDiagnosticFacts(model, page, policies) {
   const annotationFailures = policies.filter(policy => policy.fact === 'annotation-failed');
   const partialMaps = maps.filter(artifact => artifact.status === 'partial');
   const hasFullPageFailure = codes.has('FULL_PAGE_CAPTURE_FAILED');
+  const hasPixelOmission = codes.has('PIXEL_CAPTURE_OMITTED');
+  const hasFullPageOmission = codes.has('FULL_PAGE_CAPTURE_OMITTED');
+  const hasFullPageNotAttempted = codes.has('FULL_PAGE_CAPTURE_NOT_ATTEMPTED');
+  const fullPageStates = Number(pristine.length === 1) + Number(hasFullPageFailure) +
+    Number(hasPixelOmission) + Number(hasFullPageOmission) + Number(hasFullPageNotAttempted);
 
-  if (page.finalUrlObserved && ((pristine.length === 0) !== hasFullPageFailure || pristine.length > 1)) {
-    throw new TypeError('Captura integral pristine e diagnóstico de ausência devem formar uma equivalência exata.');
+  if (page.finalUrlObserved && (fullPageStates !== 1 || pristine.length > 1)) {
+    throw new TypeError('Captura integral pristine, falha ou omissão por política devem formar um estado factual exclusivo.');
   }
   if (hasFullPageFailure && (maps.length > 0 ||
     policies.some(policy => ['annotation-failed', 'annotation-partial'].includes(policy.fact)))) {
     throw new TypeError('Falha de captura integral contradiz tentativa ou resultado de mapa.');
+  }
+  const rasterArtifacts = pageArtifacts.filter(artifact => Object.hasOwn(artifact, 'dataUrl') ||
+    artifact.kind === 'announcement-map');
+  if (hasPixelOmission && rasterArtifacts.length > 0) {
+    throw new TypeError('Omissão total de pixels contradiz evidência raster retida.');
+  }
+  if (hasFullPageOmission && (pristine.length > 0 || maps.length > 0)) {
+    throw new TypeError('Omissão deliberada da captura integral contradiz pristine ou mapa retido.');
+  }
+  if (hasFullPageNotAttempted && rasterArtifacts.length > 0) {
+    throw new TypeError('Captura integral não tentada contradiz evidência raster retida.');
   }
   if (codes.has('ENVIRONMENT_UNAVAILABLE') && Object.values(page.viewport).some(value => value !== null)) {
     throw new TypeError('Diagnóstico de ambiente indisponível contradiz o viewport observado.');

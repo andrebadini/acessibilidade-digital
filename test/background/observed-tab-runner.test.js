@@ -6,6 +6,7 @@ import {
   runObservedTabAudit,
 } from '../../src/background/observed-tab-runner.js';
 import { createObservedPipelineRunner } from '../../src/background/audit-pipeline.js';
+import { createPixelPipelinePreflightV1, createPixelPrivacyGateV1 } from '../../src/background/pixel-privacy-gate.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
@@ -20,6 +21,8 @@ const ELEMENT_POLICY = createCapturePolicyV1({ mode: 'element-only', includeQuer
 const QUERY_POLICY = createCapturePolicyV1({ mode: 'no-pixels', includeQuery: true });
 const QUERY_EVIDENCE = sanitizeEvidenceUrlV1('https://example.test/a?secret=1', { includeQuery: true });
 const NOW = () => '2026-08-31T12:00:00.000Z';
+const EMPTY_SIGNALS = Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: false, categories: Object.freeze([]) });
+const SENSITIVE_SIGNALS = Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: true, categories: Object.freeze(['password']) });
 
 function model() {
   const copy = structuredClone(SAMPLE_AUDIT);
@@ -52,9 +55,31 @@ async function observedResult(input, status = 'partial') {
   return { model: model(), status, checkpoint: checkpoint(), observationState: 'observed' };
 }
 
-function fixture({ policy = POLICY, target = attachedTarget(), modelStatus = 'partial', adapter = {}, signal, pipelineMarker = false, pipelineServices = {} } = {}) {
+function makePrivacyGate({ policy = FULL_POLICY, calls = [], consentId = null, sensitive = SENSITIVE_SIGNALS } = {}) {
+  const suspension = {
+    version: 'AuditSuspensionV1', revision: 1, auditId: 'audit-1', consentId: 'B'.repeat(21) + 'Q',
+    tabId: 7, windowId: 3, documentId: 'doc-1', urlEvidence: EVIDENCE, urlSessionDigest: DIGEST,
+    mode: policy.mode, capturePolicy: policy, categories: sensitive.categories,
+    issuedAt: 1_800_000_000_000, updatedAt: 1_800_000_000_001, expiresAt: 1_800_000_600_000,
+    cleanupAttempts: 0, cleanupNotBefore: null, state: 'paused', resumePhase: null,
+    revokeReason: null, source: { kind: 'attached' },
+  };
+  return createPixelPrivacyGateV1({
+    pixelState: {
+      async pause(value) { calls.push(['pause', value]); return suspension; },
+      async gateRunnerStart() { throw new Error('unexpected resume'); },
+    },
+    consentId, authorityExpiresAt: 1_900_000_000_000,
+    async afterPixels() { calls.push('after-pixels'); },
+  });
+}
+
+function fixture({ policy = POLICY, target = attachedTarget(), modelStatus = 'partial', adapter = {}, signal, pipelineMarker = false, startedMarker = false, pipelineServices = {}, privacyGate = undefined } = {}) {
   const calls = [];
-  const checkpointRecorder = { async started() {}, async record() {}, snapshot() { return checkpoint(); } };
+  const gate = privacyGate === undefined
+    ? policy.mode === 'no-pixels' ? null : makePrivacyGate({ policy, calls })
+    : privacyGate;
+  const checkpointRecorder = { async started() { if (startedMarker) calls.push('started'); }, async record() {}, snapshot() { return checkpoint(); } };
   const services = {
     async collectObservedPage() { if (pipelineMarker) calls.push('pipeline'); return { snapshot: { title: 'safe' } }; },
     async runCoreRules() { return { ruleResults: [] }; },
@@ -62,18 +87,26 @@ function fixture({ policy = POLICY, target = attachedTarget(), modelStatus = 'pa
     async persistAuditModel() {},
     ...pipelineServices,
   };
-  const canonicalPipeline = createObservedPipelineRunner({ checkpointRecorder, services });
+  const probeSensitiveCaptureSignals = typeof adapter.probeSensitiveCaptureSignals === 'function'
+    ? adapter.probeSensitiveCaptureSignals
+    : async () => { calls.push('probe-sensitive'); return EMPTY_SIGNALS; };
+  const pixelPreflight = gate === null ? null : createPixelPipelinePreflightV1(gate, { probeSensitiveCaptureSignals });
+  const canonicalPipeline = createObservedPipelineRunner({
+    checkpointRecorder, services,
+    ...(gate === null ? {} : { privacyGate: gate, pixelPreflight }),
+  });
   const chromeAdapter = {
     async probeDocumentIdentity(tabId) {
       calls.push(['probe-document', tabId]);
       return { tabId: target.tabId ?? 7, windowId: target.windowId ?? 3, documentId: 'doc-1', urlSessionDigest: DIGEST };
     },
+    probeSensitiveCaptureSignals,
     runPipeline: canonicalPipeline,
     ...adapter,
   };
   const input = {
     auditId: 'audit-1', target, chromeAdapter, capturePolicy: policy,
-    privacyGate: { async beforePixels() { calls.push(['privacy-before']); return { status: 'allowed', authorization: 'initial-gesture', claim: null }; }, async afterPixels() { calls.push(['privacy-after']); } },
+    privacyGate: gate,
     onCheckpoint: async value => { calls.push(['checkpoint', value]); }, now: NOW, signal,
     expectedExtensionId: 'extension-id',
   };
@@ -93,12 +126,35 @@ test('rejects legacy arguments before any adapter effect, including getter and s
   await assert.rejects(() => runObservedTabAudit(getterInput), /OBSERVED_RUNNER_DENIED/u);
   assert.equal(getterCalls, 0);
   assert.deepEqual(calls, []);
-  for (const policy of [FULL_POLICY, ELEMENT_POLICY]) {
-    const policyInput = { ...input, capturePolicy: policy };
-    await assert.rejects(() => runObservedTabAudit(policyInput), /OBSERVED_RUNNER_DENIED/u);
-  }
   await assert.rejects(() => runObservedTabAudit({ ...input, capturePolicy: QUERY_POLICY, target: attachedTarget({ initialUrlEvidence: QUERY_EVIDENCE }) }), /OBSERVED_RUNNER_DENIED/u);
   assert.deepEqual(calls, []);
+});
+
+test('rejects every unbranded or mismatched pixel gate and owned pixel policy before effects', async () => {
+  const { input, calls } = fixture({ policy: FULL_POLICY });
+  const realGate = input.privacyGate;
+  let getterCalls = 0;
+  const getterGate = {};
+  Object.defineProperty(getterGate, 'preflight', { enumerable: true, get() { getterCalls += 1; return realGate.preflight; } });
+  getterGate.authorizeFirstPixel = realGate.authorizeFirstPixel;
+  getterGate.afterPixels = realGate.afterPixels;
+  getterGate[Symbol('extra')] = true;
+  for (const privacyGate of [
+    {}, { ...realGate }, { ...realGate, extra: true },
+    { preflight: realGate.preflight.bind(realGate), authorizeFirstPixel: realGate.authorizeFirstPixel, afterPixels: realGate.afterPixels },
+    getterGate,
+  ]) await assert.rejects(() => runObservedTabAudit({ ...input, privacyGate }), /OBSERVED_RUNNER_DENIED/u);
+  assert.equal(getterCalls, 0);
+  assert.deepEqual(calls, []);
+
+  let ownedEffects = 0;
+  const owned = fixture({
+    policy: ELEMENT_POLICY,
+    target: { kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: 'page-1' },
+    adapter: { async createTab() { ownedEffects += 1; return { id: 41, windowId: 3 }; } },
+  });
+  await assert.rejects(() => runObservedTabAudit(owned.input), /OBSERVED_RUNNER_DENIED/u);
+  assert.equal(ownedEffects, 0);
 });
 
 test('rejects legacy observed targets and string evidence before probing or pipeline', async () => {
@@ -121,12 +177,40 @@ test('no-pixels completes without privacy gate, consent, probe or pixel calls', 
     async probeDocumentIdentity() { calls.push('probe'); return { tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
     async captureFullPage() { calls.push('full-page'); }, async captureElement() { calls.push('element'); },
   } });
-  input.privacyGate = { async beforePixels() { calls.push('privacy-before'); }, async afterPixels() { calls.push('privacy-after'); } };
+  assert.equal(input.privacyGate, null);
   const result = await runObservedTabAudit(input);
   assert.equal(result.status, 'partial');
   assert.equal(result.observationState, 'observed');
   assert.equal(result.ownershipState, 'attached');
   assert.deepEqual(calls, ['probe', 'probe']);
+
+  const withGate = fixture().input;
+  withGate.privacyGate = makePrivacyGate({ calls });
+  await assert.rejects(() => runObservedTabAudit(withGate), /OBSERVED_RUNNER_DENIED/u);
+  assert.deepEqual(calls, ['probe', 'probe']);
+});
+
+test('sensitive attached preflight pauses after started and returns the exact canonical variant', async () => {
+  const calls = [];
+  const gate = makePrivacyGate({ policy: FULL_POLICY, calls });
+  const { input, calls: runnerCalls } = fixture({
+    policy: FULL_POLICY, privacyGate: gate,
+    pipelineMarker: true, startedMarker: true,
+    adapter: { async probeSensitiveCaptureSignals() { calls.push('sensitive-probe'); return SENSITIVE_SIGNALS; } },
+  });
+  const result = await runObservedTabAudit(input);
+  assert.deepEqual(result, {
+    status: 'privacy-paused', model: null,
+    observedTarget: {
+      version: 'ObservedTargetV1', kind: 'attached', tabId: 7, windowId: 3,
+      documentId: 'doc-1', urlEvidence: EVIDENCE, urlSessionDigest: DIGEST,
+    },
+    observationState: 'observed', ownershipState: 'attached', signals: SENSITIVE_SIGNALS,
+  });
+  assert.equal(calls.filter(call => Array.isArray(call) && call[0] === 'pause').length, 1);
+  assert.equal(runnerCalls.filter(call => call === 'started').length, 1);
+  assert.equal(runnerCalls.includes('pipeline'), false);
+  assert.equal(calls.includes('after-pixels'), false);
 });
 
 test('exposes an observed interruption only through the private reader after factual cleanup', async () => {

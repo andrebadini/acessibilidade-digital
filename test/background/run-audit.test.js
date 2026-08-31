@@ -18,11 +18,40 @@ import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { createAnnotationMapFixture } from '../report/annotation-map-fixture.js';
 import { captureElement as captureElementEvidence, captureFullPage as captureFullPageEvidence } from '../../src/browser/capture-evidence.js';
+import { createPixelPrivacyGateV1 } from '../../src/background/pixel-privacy-gate.js';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const TEST_EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
 const TEST_DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
 const TEST_EVIDENCE_URL = sanitizeEvidenceUrlV1('https://example.test/final?secret=REMOVE', { includeQuery: false });
+const EMPTY_SIGNALS = Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: false, categories: Object.freeze([]) });
+const PASSWORD_SIGNALS = Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: true, categories: Object.freeze(['password']) });
+
+function attachedPixelGate(policy, calls, {
+  auditId = 'audit-attached-pixels', consentId = null, runnerStatus = 'ready', beforeGateResult = null,
+} = {}) {
+  const suspension = ({ state, resumePhase, token, categories }) => ({
+    version: 'AuditSuspensionV1', revision: 1, auditId, consentId: token,
+    tabId: 42, windowId: 9, documentId: 'document-a', urlEvidence: TEST_EVIDENCE_URL,
+    urlSessionDigest: TEST_DIGEST, mode: policy.mode, capturePolicy: policy, categories,
+    issuedAt: 1_788_000_000_000, updatedAt: 1_788_000_000_001, expiresAt: 1_788_000_600_000,
+    cleanupAttempts: 0, cleanupNotBefore: null, state, resumePhase, revokeReason: null, source: { kind: 'attached' },
+  });
+  return createPixelPrivacyGateV1({
+    pixelState: {
+      async pause(value) { calls.push('pause'); return suspension({ state: 'paused', resumePhase: null, token: 'B'.repeat(21) + 'Q', categories: value.categories }); },
+      async gateRunnerStart(value) {
+        calls.push('gate');
+        await beforeGateResult?.();
+        return runnerStatus === 'ready'
+          ? { version: 'PixelRunnerGateResultV1', status: 'ready', suspension: suspension({ state: 'resuming', resumePhase: 'runner-started', token: consentId, categories: value.categories }) }
+          : { version: 'PixelRunnerGateResultV1', status: 'repaused', suspension: suspension({ state: 'paused', resumePhase: null, token: 'C'.repeat(21) + 'Q', categories: value.categories }) };
+      },
+    },
+    consentId, authorityExpiresAt: 1_900_000_000_000,
+    async afterPixels() { calls.push('after'); },
+  });
+}
 
 function unreadEvidenceProxy(evidence, onRead) {
   return new Proxy({ ...evidence }, {
@@ -253,6 +282,11 @@ function fakeAdapter(options = {}) {
     async probeDocumentIdentity(tabId) { return { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}` }; },
     async getEvidenceUrl() { return 'https://example.test/final?view=public'; },
     async probePrivacySignals() { return []; },
+    async probeSensitiveCaptureSignals() {
+      events.push('sensitive-probe');
+      await options.duringSensitiveProbe?.();
+      return options.sensitiveSignals ?? EMPTY_SIGNALS;
+    },
     async connectCdp() { events.push('connect-cdp'); return cdp; },
     async runAxeInTab() {
       events.push('axe');
@@ -408,10 +442,11 @@ test('runs the 130→146 pipeline through the canonical no-pixels boundary befor
   assert.equal(model.methodology.supplementalRuleCount, 1);
   assert.equal(model.ruleResults.find(rule => rule.ruleId === 'editorial.placeholder-text').outcome, 'inapplicable');
   assert.equal(model.itemResults.length, 146);
-  assert.equal(model.session.status, 'partial');
+  assert.equal(model.session.status, 'complete');
   assert.equal(model.axe.status, 'disabled');
   assert.ok(model.limitations.some(value => /axe-core|MV3|CSP/i.test(value)));
   assert.ok(model.session.diagnostics.some(value => value.code === 'AXE_FEATURE_DISABLED'));
+  assert.ok(model.session.diagnostics.some(value => value.code === 'PIXEL_CAPTURE_OMITTED'));
   assert.equal(model.requestedUrl, 'https://example.test/start');
   assert.equal(model.finalUrl, 'https://example.test/final');
   assert.equal(adapter.events.includes('full-page'), false);
@@ -551,6 +586,234 @@ test('attached execution uses no owned-tab or URL-vault effects and returns the 
   assert.equal(Object.isFrozen(result.checkpoint), true);
 });
 
+test('attached full-evidence crosses proof, fresh probe and gate before raster, then maps and cleans once', async () => {
+  const auditId = 'audit-attached-pixels';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const gateCalls = [];
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  let proof = 0;
+  adapter.probeDocumentIdentity = async tabId => {
+    proof += 1; adapter.events.push(`proof-${proof}`);
+    return { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: TEST_DIGEST };
+  };
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy, privacyGate: attachedPixelGate(policy, gateCalls, { auditId }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => {},
+  });
+  assert.equal(result.state, 'model');
+  assert.equal(adapter.counts.fullPageCalls, 1);
+  assert.equal(adapter.events.includes('map'), true);
+  const raster = adapter.events.indexOf('full-page');
+  assert.deepEqual(adapter.events.slice(raster - 3, raster), ['proof-2', 'sensitive-probe', 'proof-3']);
+  assert.deepEqual(gateCalls, ['after']);
+});
+
+test('attached element-only omits full page and map without a false operational failure', async () => {
+  const auditId = 'audit-attached-elements';
+  const policy = createCapturePolicyV1({ mode: 'element-only', includeQuery: false });
+  const gateCalls = [];
+  let persisted = 0;
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy, privacyGate: attachedPixelGate(policy, gateCalls, { auditId }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { persisted += 1; },
+  });
+  assert.equal(result.state, 'model');
+  assert.equal(persisted, 1);
+  assert.equal(adapter.counts.fullPageCalls, 0);
+  assert.equal(adapter.events.includes('map'), false);
+  assert.equal(result.model.session.diagnostics.some(entry => entry.code === 'FULL_PAGE_CAPTURE_FAILED'), false);
+  assert.deepEqual(gateCalls, ['after']);
+});
+
+test('attached sensitive preflight pauses with a durable checkpoint and zero raster or cleanup', async () => {
+  const auditId = 'audit-attached-sensitive';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const gateCalls = [];
+  const adapter = fakeAdapter({ trackCaptureCalls: true, sensitiveSignals: PASSWORD_SIGNALS });
+  adapter.composeAnnouncementMap = async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId });
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy, privacyGate: attachedPixelGate(policy, gateCalls, { auditId }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { throw new Error('must-not-persist'); },
+  });
+  assert.deepEqual(Object.keys(result), ['version', 'auditId', 'state', 'failureCode', 'model', 'checkpoint']);
+  assert.equal(result.state, 'privacy-paused');
+  assert.equal(result.checkpoint.auditId, auditId);
+  assert.equal(adapter.counts.screenshots, 0);
+  assert.deepEqual(gateCalls, ['pause']);
+});
+
+test('attached element collection failure before raster still performs cleanup once without persistence', async () => {
+  const auditId = 'audit-attached-element-failure';
+  const policy = createCapturePolicyV1({ mode: 'element-only', includeQuery: false });
+  const gateCalls = [];
+  let persisted = 0;
+  const adapter = fakeAdapter({ trackCaptureCalls: true, collectFailure: true });
+  await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy, privacyGate: attachedPixelGate(policy, gateCalls, { auditId }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { persisted += 1; },
+  });
+  assert.equal(adapter.counts.screenshots, 0);
+  assert.equal(persisted, 0);
+  assert.deepEqual(gateCalls, ['after']);
+});
+
+test('attached document drift at the final pixel boundary produces zero raster', async () => {
+  const auditId = 'audit-attached-drift';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const gateCalls = [];
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  let proofs = 0;
+  adapter.probeDocumentIdentity = async tabId => {
+    proofs += 1;
+    return { tabId, windowId: 9, documentId: proofs === 1 ? 'document-a' : 'document-b', urlSessionDigest: TEST_DIGEST };
+  };
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy, privacyGate: attachedPixelGate(policy, gateCalls, { auditId }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { throw new Error('must-not-persist'); },
+  });
+  assert.equal(result.state, 'revoked');
+  assert.equal(result.failureCode, 'TARGET_CHANGED');
+  assert.equal(adapter.counts.screenshots, 0);
+});
+
+test('attached navigation during the fresh sensitive probe produces zero raster', async () => {
+  const auditId = 'audit-attached-probe-navigation';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const gateCalls = [];
+  let documentId = 'document-a';
+  let sensitiveProbes = 0;
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    async duringSensitiveProbe() {
+      sensitiveProbes += 1;
+      if (sensitiveProbes === 2) documentId = 'document-b';
+    },
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  adapter.probeDocumentIdentity = async tabId => ({
+    tabId, windowId: 9, documentId, urlSessionDigest: TEST_DIGEST,
+  });
+
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy, privacyGate: attachedPixelGate(policy, gateCalls, { auditId }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { throw new Error('must-not-persist'); },
+  });
+
+  assert.equal(result.state, 'revoked');
+  assert.equal(result.failureCode, 'TARGET_CHANGED');
+  assert.equal(adapter.counts.screenshots, 0);
+});
+
+test('attached abort during the fresh sensitive probe produces zero raster', async () => {
+  const auditId = 'audit-attached-probe-abort';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const controller = new AbortController();
+  const gateCalls = [];
+  let sensitiveProbes = 0;
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    async duringSensitiveProbe() {
+      sensitiveProbes += 1;
+      if (sensitiveProbes === 2) controller.abort(new DOMException('PRIVATE_PIXEL_ABORT', 'AbortError'));
+    },
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy, privacyGate: attachedPixelGate(policy, gateCalls, { auditId }),
+    chromeAdapter: adapter, modelNow: clock, signal: controller.signal, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { throw new Error('must-not-persist'); },
+  });
+
+  assert.equal(adapter.counts.screenshots, 0);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_PIXEL_ABORT/u);
+});
+
+test('attached navigation while the runner gate is pending produces zero raster', async () => {
+  const auditId = 'audit-attached-gate-navigation';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const consentId = 'A'.repeat(21) + 'Q';
+  const gateCalls = [];
+  let documentId = 'document-a';
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  adapter.probeDocumentIdentity = async tabId => ({
+    tabId, windowId: 9, documentId, urlSessionDigest: TEST_DIGEST,
+  });
+  const gate = attachedPixelGate(policy, gateCalls, {
+    auditId, consentId, async beforeGateResult() { documentId = 'document-b'; },
+  });
+
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy, privacyGate: gate,
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { throw new Error('must-not-persist'); },
+  });
+
+  assert.equal(result.state, 'revoked');
+  assert.equal(result.failureCode, 'TARGET_CHANGED');
+  assert.equal(adapter.counts.screenshots, 0);
+  assert.deepEqual(gateCalls, ['gate', 'after']);
+});
+
+test('attached resumed category change repauses before raster and gate replay cannot recapture', async () => {
+  const auditId = 'audit-attached-repause';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const consentId = 'A'.repeat(21) + 'Q';
+  const gateCalls = [];
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true, sensitiveSignals: PASSWORD_SIGNALS,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  const gate = attachedPixelGate(policy, gateCalls, { auditId, consentId, runnerStatus: 'repaused' });
+  const input = {
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy, privacyGate: gate, chromeAdapter: adapter, modelNow: clock,
+    expectedExtensionId: TEST_EXTENSION_ID, onCheckpoint: async () => {}, persistAuditModel: async () => {},
+  };
+  const result = await runAttachedAuditExecution(input);
+  assert.equal(result.state, 'privacy-paused');
+  assert.equal(adapter.counts.screenshots, 0);
+  assert.deepEqual(gateCalls, ['gate']);
+  await assert.rejects(() => runAttachedAuditExecution(input), /PIXEL_PRIVACY_GATE_DENIED|ATTACHED_AUDIT_EXECUTION_DENIED/u);
+  assert.equal(adapter.counts.screenshots, 0);
+});
+
 test('attached caller projects EvidenceUrlV1 through the canonical runner without legacy runner arguments', async () => {
   const adapter = fakeAdapter({ noPixels: true });
   const checkpoints = [];
@@ -617,11 +880,55 @@ test('attached cancellation at the first checkpoint preserves the observed targe
   assert.equal(result.model.session.status, 'cancelled');
   assert.equal(result.model.requestedUrl, requested.href);
   assert.equal(result.model.finalUrl, requested.href);
+  assert.deepEqual(
+    result.model.session.diagnostics.filter(entry =>
+      ['PIXEL_CAPTURE_OMITTED', 'FULL_PAGE_CAPTURE_OMITTED', 'FULL_PAGE_CAPTURE_NOT_ATTEMPTED'].includes(entry.code),
+    ).map(entry => entry.code),
+    ['PIXEL_CAPTURE_OMITTED'],
+  );
+  assert.equal(result.model.session.diagnostics.some(entry => entry.code === 'FULL_PAGE_CAPTURE_FAILED'), false);
   assert.equal(result.checkpoint.auditId, 'audit-attached-first-checkpoint-cancel');
   assert.equal(result.checkpoint.pages[0].pageId, 'page-1');
   assert.equal(adapter.events.includes('collect'), false);
   assert.equal(persisted, 0);
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_ATTACHED_CHECKPOINT_ABORT|REMOVE|secret=/u);
+});
+
+test('attached pre-capture cancellation projects one factual capture diagnostic for each pixel mode', async t => {
+  for (const [mode, expectedCode] of [
+    ['no-pixels', 'PIXEL_CAPTURE_OMITTED'],
+    ['element-only', 'FULL_PAGE_CAPTURE_OMITTED'],
+    ['full-evidence', 'FULL_PAGE_CAPTURE_NOT_ATTEMPTED'],
+  ]) await t.test(mode, async () => {
+    const auditId = `audit-attached-pre-capture-${mode}`;
+    const policy = createCapturePolicyV1({ mode, includeQuery: false });
+    const controller = new AbortController();
+    const gateCalls = [];
+    const adapter = fakeAdapter({
+      trackCaptureCalls: true,
+      composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+    });
+    let checkpoints = 0;
+    const result = await runAttachedAuditExecution({
+      auditId, sessionCapabilityId: 'S'.repeat(22),
+      target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+      capturePolicy: policy,
+      privacyGate: mode === 'no-pixels' ? undefined : attachedPixelGate(policy, gateCalls, { auditId }),
+      chromeAdapter: adapter, modelNow: clock, signal: controller.signal, expectedExtensionId: TEST_EXTENSION_ID,
+      onCheckpoint: async () => {
+        checkpoints += 1;
+        if (checkpoints === 1) controller.abort(new DOMException('PRIVATE_PRE_CAPTURE_ABORT', 'AbortError'));
+      },
+      persistAuditModel: async () => { throw new Error('must-not-persist'); },
+    });
+    const captureCodes = result.model.session.diagnostics.filter(entry =>
+      ['FULL_PAGE_CAPTURE_FAILED', 'PIXEL_CAPTURE_OMITTED', 'FULL_PAGE_CAPTURE_OMITTED', 'FULL_PAGE_CAPTURE_NOT_ATTEMPTED'].includes(entry.code),
+    ).map(entry => entry.code);
+    assert.equal(result.model.session.status, 'cancelled');
+    assert.deepEqual(captureCodes, [expectedCode]);
+    assert.equal(adapter.counts.screenshots, 0);
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_PRE_CAPTURE_ABORT/u);
+  });
 });
 
 test('attached caller copies EvidenceUrlV1 through data descriptors without property reads', async () => {
@@ -1648,8 +1955,8 @@ test('does not invoke the map compositor while the public façade is in no-pixel
   assert.equal(pristineAfter, undefined);
   assert.equal(observedDeviceScaleFactor, undefined);
   assert.equal(adapter.events.includes('map'), false);
-  assert.equal(model.session.status, 'partial');
-  assert.ok(model.session.diagnostics.some(entry => entry.code === 'FULL_PAGE_CAPTURE_FAILED'));
+  assert.equal(model.session.status, 'complete');
+  assert.ok(model.session.diagnostics.some(entry => entry.code === 'PIXEL_CAPTURE_OMITTED'));
 });
 
 test('does not expose a dormant map compositor failure while pixels are disabled', async () => {
@@ -1663,7 +1970,7 @@ test('does not expose a dormant map compositor failure while pixels are disabled
 
   assert.equal(model.evidence.artifacts.some(artifact => artifact.kind === 'full-page'), false);
   assert.equal(model.evidence.artifacts.some(artifact => artifact.kind === 'announcement-map'), false);
-  assert.equal(model.session.status, 'partial');
+  assert.equal(model.session.status, 'complete');
   assert.equal(model.session.diagnostics.some(entry => entry.code === 'ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE'), false);
   assert.equal(adapter.events.includes('map'), false);
   assert.doesNotMatch(JSON.stringify(model), /PRIVATE-RAW-ERROR/u);
@@ -1678,7 +1985,7 @@ test('does not claim a printable-segment map failure when the compositor never r
     now: clock, idFactory: () => 'audit-annotation-map-print-limit',
   });
 
-  assert.equal(model.session.status, 'partial');
+  assert.equal(model.session.status, 'complete');
   assert.equal(model.session.diagnostics.some(entry => entry.code === 'ANNOTATION_MAP_PRINT_SEGMENT_LIMIT'), false);
   assert.equal(adapter.events.includes('map'), false);
   assert.doesNotMatch(JSON.stringify(model), /PRIVATE-RAW-ERROR/u);
@@ -1917,7 +2224,7 @@ test('preserves the canonical axe selector target when evidence independently re
   }));
 });
 
-test('keeps a conclusive axe occurrence auditable when pristine capture absence has the fixed bounded diagnostic', async () => {
+test('keeps a conclusive axe occurrence auditable when pixels are deliberately omitted', async () => {
   const page = rawPage();
   page.document.language = '';
   const axeRun = {
@@ -1932,8 +2239,8 @@ test('keeps a conclusive axe occurrence auditable when pristine capture absence 
     now: clock, idFactory: () => 'audit-axe-no-pristine',
   });
   assert.equal(model.evidence.artifacts.some(item => item.kind === 'full-page' && item.state === 'pristine'), false);
-  assert.ok(model.session.diagnostics.some(item => item.code === 'FULL_PAGE_CAPTURE_FAILED' &&
-    item.message === 'Não foi possível capturar a página completa no estado original.'));
+  assert.ok(model.session.diagnostics.some(item => item.code === 'PIXEL_CAPTURE_OMITTED' &&
+    item.message === 'Nenhuma captura raster foi coletada no modo sem imagens.'));
   await assert.doesNotReject(enrichAuditForReport(model, {
     now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
     manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
@@ -2320,13 +2627,13 @@ function decodeHtmlText(value) {
     .replaceAll('&amp;', '&');
 }
 
-test('keeps a pristine capture timeout partial without retrying element screenshots', async () => {
+test('keeps a structural snippet failure partial while no-pixels never retries screenshots', async () => {
   const adapter = fakeAdapter({ fullPageFailure: new DOMException('capture timeout', 'TimeoutError'), snippetFailureNode: 1 });
   const model = await runAudit({ url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'audit-partial' });
   assert.equal(model.session.status, 'partial');
-  assert.ok(model.session.diagnostics.some(item => item.code === 'FULL_PAGE_CAPTURE_FAILED'));
+  assert.ok(model.session.diagnostics.some(item => item.code === 'PIXEL_CAPTURE_OMITTED'));
   assert.ok(model.session.diagnostics.some(item => item.code === 'SNIPPET_CAPTURE_FAILED'));
-  assert.ok(model.session.diagnostics.some(item => item.code === 'ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE'));
+  assert.equal(model.session.diagnostics.some(item => item.code === 'ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE'), false);
   assert.ok(adapter.events.includes('collect'));
   assert.equal(adapter.counts.screenshots, 0);
   assert.equal(adapter.events.some(event => event.startsWith('thumbnail:')), false);

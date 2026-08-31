@@ -1223,6 +1223,81 @@ test('proves a fresh top document identity without returning its raw URL', async
   assert.doesNotMatch(JSON.stringify(proof), /private|example\.test/u);
 });
 
+test('probes sensitive capture signals only in the exact enumerated documents', async () => {
+  const fake = chromeFake();
+  const scriptTargets = [];
+  fake.chromeApi.scripting.executeScript = async options => {
+    scriptTargets.push(options.target);
+    if (options.target.allFrames === true) {
+      return [
+        { frameId: 0, documentId: 'document-main', result: null },
+        { frameId: 3, documentId: 'document-child', result: null },
+      ];
+    }
+    return [
+      {
+        frameId: 0,
+        documentId: 'document-main',
+        result: { password: false, otp: false, payment: false, privateMarker: false },
+      },
+      {
+        frameId: 3,
+        documentId: 'document-child',
+        result: { password: true, otp: false, payment: true, privateMarker: false },
+      },
+    ];
+  };
+
+  const signals = await createChromeAdapter(fake.chromeApi).probeSensitiveCaptureSignals(17, 'document-main');
+
+  assert.deepEqual(signals, {
+    version: 'SensitiveCaptureSignalsV1',
+    detected: true,
+    categories: ['password', 'payment'],
+  });
+  assert.deepEqual(scriptTargets, [
+    { tabId: 17, allFrames: true },
+    { tabId: 17, documentIds: ['document-main', 'document-child'] },
+  ]);
+});
+
+test('rejects a hostile document enumeration without reading its array values', async () => {
+  const fake = chromeFake();
+  let reads = 0;
+  const hostileFrames = [];
+  Object.defineProperty(hostileFrames, '0', {
+    enumerable: true,
+    configurable: true,
+    get() {
+      reads += 1;
+      return { frameId: 0, documentId: 'document-main', result: null };
+    },
+  });
+  hostileFrames.length = 1;
+  fake.chromeApi.scripting.executeScript = async () => hostileFrames;
+
+  await assert.rejects(
+    () => createChromeAdapter(fake.chromeApi).probeSensitiveCaptureSignals(17, 'document-main'),
+    /SENSITIVE_CONTEXT_PROBE_UNAVAILABLE/u,
+  );
+  assert.equal(reads, 0);
+});
+
+test('rejects a sensitive probe when the enumerated main document is not the expected document', async () => {
+  const fake = chromeFake();
+  let scripts = 0;
+  fake.chromeApi.scripting.executeScript = async () => {
+    scripts += 1;
+    return [{ frameId: 0, documentId: 'replacement-document', result: null }];
+  };
+
+  await assert.rejects(
+    () => createChromeAdapter(fake.chromeApi).probeSensitiveCaptureSignals(17, 'expected-document'),
+    /SENSITIVE_CONTEXT_PROBE_UNAVAILABLE/u,
+  );
+  assert.equal(scripts, 1);
+});
+
 test('rejects a mutable digest manager whose digest descriptor injects a URL-receiving destroy', async () => {
   const fake = chromeFake();
   const rawUrl = 'https://example.test/private-digest-descriptor';

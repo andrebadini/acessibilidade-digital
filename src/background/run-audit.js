@@ -39,6 +39,12 @@ import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { createAuditModel } from '../core/report/audit-model.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
 import { isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
+import {
+  createPixelPipelinePreflightV1,
+  createPixelPrivacyPauseInterruptionV1,
+  isPixelPrivacyGateV1,
+  isPixelPrivacyPauseInterruptionV1,
+} from './pixel-privacy-gate.js';
 
 const SCHEMA_VERSION = 1;
 const METHODOLOGY = Object.freeze({ name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 130, itemCount: 146 });
@@ -57,6 +63,7 @@ const ANNOTATION_MAP_DIAGNOSTIC_CODES = new Set([
   'ANNOTATION_MAP_OUTPUT_INVALID',
   'ANNOTATION_MAP_TIMEOUT',
 ]);
+const PIXEL_BOUNDARY_INTERRUPTION = new WeakSet();
 
 function deepFreeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value) || Object.isFrozen(value)) return value;
@@ -481,22 +488,35 @@ async function runLegacyAudit({
     if (!cdp || typeof cdp.command !== 'function') throw new Error('CDP inválido');
 
     let pristineMetrics = {};
+    if (chromeAdapter.captureFullPageEnabled === false) {
+      appendDiagnosticOnce(
+        chromeAdapter.captureElementsEnabled === false ? 'PIXEL_CAPTURE_OMITTED' : 'FULL_PAGE_CAPTURE_OMITTED',
+          chromeAdapter.captureElementsEnabled === false
+          ? 'Nenhuma captura raster foi coletada no modo sem imagens.'
+          : 'A captura integral e o mapa anotado foram omitidos pela política; miniaturas de elementos permaneceram permitidas.',
+        true,
+      );
+    }
     try {
       pristineMetrics = await awaitStep(() => cdp.command('Page.getLayoutMetrics', {}));
-      if (chromeAdapter.captureFullPageEnabled === false) throw new Error('PIXEL_CAPTURE_OMITTED');
-      state.fullPage = await awaitStep(() => (chromeAdapter.captureFullPage || captureFullPage)(cdp, pristineMetrics));
-      const artifact = {
-        evidenceId: state.fullPage.evidenceId,
-        kind: 'full-page',
-        state: 'pristine',
-        dataUrl: state.fullPage.dataUrl,
-        metadata: state.fullPage.metadata,
-        hash: state.fullPage.hash,
-      };
-      state.artifacts.push(artifact);
+      if (chromeAdapter.captureFullPageEnabled !== false) {
+        state.fullPage = await awaitStep(() => (chromeAdapter.captureFullPage || captureFullPage)(cdp, pristineMetrics));
+        const artifact = {
+          evidenceId: state.fullPage.evidenceId,
+          kind: 'full-page',
+          state: 'pristine',
+          dataUrl: state.fullPage.dataUrl,
+          metadata: state.fullPage.metadata,
+          hash: state.fullPage.hash,
+        };
+        state.artifacts.push(artifact);
+      }
     } catch (error) {
+      if (isPixelBoundaryInterruption(error, chromeAdapter)) throw error;
       rethrowAbort(error, signal);
-      recoverable('FULL_PAGE_CAPTURE_FAILED', 'Não foi possível capturar a página completa no estado original.');
+      if (chromeAdapter.captureFullPageEnabled !== false) {
+        recoverable('FULL_PAGE_CAPTURE_FAILED', 'Não foi possível capturar a página completa no estado original.');
+      }
     }
 
     try {
@@ -601,8 +621,10 @@ async function runLegacyAudit({
     allocateOccurrenceIds(state);
     const indexes = buildSnapshotIndexes(state.snapshot);
     const artifactByNode = new Map();
-    const canCaptureElements = Boolean(state.fullPage) || chromeAdapter.captureElementsWithoutFullPage === true;
-    if (!canCaptureElements && state.occurrences.some(occurrence => occurrence.nodeId)) {
+    const canCaptureElements = chromeAdapter.captureElementsEnabled !== false &&
+      (Boolean(state.fullPage) || chromeAdapter.captureElementsWithoutFullPage === true);
+    if (chromeAdapter.captureElementsEnabled !== false && !canCaptureElements &&
+      state.occurrences.some(occurrence => occurrence.nodeId)) {
       recoverable('ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE', 'As miniaturas de elementos não foram tentadas porque a captura original da página falhou.');
     }
     for (const occurrence of state.occurrences) {
@@ -640,6 +662,7 @@ async function runLegacyAudit({
               recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: occurrence.occurrenceId });
             }
           } catch (error) {
+            if (isPixelBoundaryInterruption(error, chromeAdapter)) throw error;
             rethrowAbort(error, signal);
             recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: occurrence.occurrenceId });
           }
@@ -662,6 +685,7 @@ async function runLegacyAudit({
         state.artifacts.push(artifact);
         occurrence.evidenceIds.push(artifact.evidenceId);
       } catch (error) {
+        if (isPixelBoundaryInterruption(error, chromeAdapter)) throw error;
         rethrowAbort(error, signal);
         recoverable('EVIDENCE_CAPTURE_FAILED', 'As evidências de uma ocorrência não puderam ser preparadas.', { occurrenceId: occurrence.occurrenceId });
       }
@@ -733,6 +757,7 @@ async function runLegacyAudit({
     throwIfAborted(signal);
     await progress('complete', 'Auditoria concluída', 100);
   } catch (error) {
+    if (isPixelBoundaryInterruption(error, chromeAdapter)) throw error;
     if (!error?.auditHandled) fail('NAVIGATION_FAILED', signal?.aborted ? 'A auditoria foi cancelada.' : 'O site não pôde ser aberto de forma estável.', error);
   } finally {
     if (cdp) {
@@ -747,7 +772,7 @@ async function runLegacyAudit({
   async function finalize() {
     if (state.status === 'running') state.status = recoverableFailure ? 'partial' : fatal ? 'failed' : 'complete';
     if (['failed', 'cancelled'].includes(state.status)) settleFatalAxeObservation();
-    if (state.finalUrlObserved && !state.fullPage &&
+    if (state.finalUrlObserved && chromeAdapter.captureFullPageEnabled !== false && !state.fullPage &&
       !state.diagnostics.some(entry => entry.code === 'FULL_PAGE_CAPTURE_FAILED')) {
       appendDiagnosticOnce(
         'FULL_PAGE_CAPTURE_FAILED',
@@ -911,7 +936,7 @@ function proofMatchesAttached(value, target) {
 function captureAttachedFacadeArgs(value) {
   const allowed = [
     'auditId', 'sessionCapabilityId', 'target', 'capturePolicy', 'chromeAdapter', 'modelNow', 'signal',
-    'expectedExtensionId', 'pageId', 'onCheckpoint', 'persistAuditModel',
+    'expectedExtensionId', 'pageId', 'onCheckpoint', 'persistAuditModel', 'privacyGate',
   ];
   const required = [
     'auditId', 'sessionCapabilityId', 'target', 'capturePolicy', 'chromeAdapter', 'modelNow',
@@ -932,20 +957,92 @@ function captureAttachedFacadeArgs(value) {
   } catch { return null; }
 }
 
-function createObservedLegacyAdapter(chromeAdapter, observedTarget) {
+function pixelBoundaryError() {
+  const error = new TypeError('PIXEL_CAPTURE_BOUNDARY_DENIED');
+  PIXEL_BOUNDARY_INTERRUPTION.add(error);
+  return error;
+}
+
+function isPixelBoundaryInterruption(error, adapter) {
+  return Boolean(error && typeof error === 'object' &&
+    (PIXEL_BOUNDARY_INTERRUPTION.has(error) ||
+      (adapter?.privacyGate && isPixelPrivacyPauseInterruptionV1(error, adapter.privacyGate))));
+}
+
+function createObservedLegacyAdapter(chromeAdapter, observedTarget, capturePolicy, privacyGate, boundary) {
+  const pixelMode = capturePolicy.mode !== 'no-pixels';
+  const fullPageEffect = chromeAdapter.captureFullPage;
+  const elementEffect = chromeAdapter.captureElement;
+  let firstPixelAuthorized = false;
+  let pixelStarted = false;
+  const authorize = async (effect, args, invokeRaster) => {
+    if (firstPixelAuthorized) return invokeRaster ? effect(...args) : Object.freeze({ status: 'ready' });
+    let proof;
+    let signals;
+    try {
+      proof = await boundary.probeDocumentIdentity(observedTarget.tabId);
+      if (!proofMatchesAttached(proof, {
+        tabId: observedTarget.tabId, windowId: observedTarget.windowId,
+        documentId: observedTarget.documentId, initialUrlSessionDigest: observedTarget.urlSessionDigest,
+      })) {
+        boundary.onTargetChanged();
+        throw pixelBoundaryError();
+      }
+      signals = await boundary.probeSensitiveCaptureSignals(observedTarget.tabId, observedTarget.documentId);
+      const decision = await privacyGate.authorizeFirstPixel({
+        auditId: boundary.auditId, observedTarget, capturePolicy, proof, signals,
+      });
+      if (decision.status === 'privacy-paused') {
+        throw createPixelPrivacyPauseInterruptionV1(privacyGate, decision.signals);
+      }
+      if (decision.status !== 'ready') throw pixelBoundaryError();
+      const finalProof = await boundary.probeDocumentIdentity(observedTarget.tabId);
+      if (!proofMatchesAttached(finalProof, {
+        tabId: observedTarget.tabId, windowId: observedTarget.windowId,
+        documentId: observedTarget.documentId, initialUrlSessionDigest: observedTarget.urlSessionDigest,
+      })) {
+        boundary.onTargetChanged();
+        throw pixelBoundaryError();
+      }
+      if (boundary.signal?.aborted) throw pixelBoundaryError();
+      firstPixelAuthorized = true;
+      if (!invokeRaster) return decision;
+      let raster;
+      try { raster = effect(...args); } finally {
+        pixelStarted = true;
+        boundary.onPixelStarted();
+      }
+      return raster;
+    } catch (error) {
+      if (isPixelPrivacyPauseInterruptionV1(error, privacyGate) || PIXEL_BOUNDARY_INTERRUPTION.has(error)) throw error;
+      throw pixelBoundaryError();
+    }
+  };
   return {
     ...chromeAdapter,
-    captureFullPageEnabled: false,
-    captureElementsEnabled: false,
-    captureElementsWithoutFullPage: false,
+    privacyGate,
+    captureFullPageEnabled: capturePolicy.captureFullPage,
+    captureElementsEnabled: capturePolicy.captureElements,
+    captureElementsWithoutFullPage: capturePolicy.captureElements && !capturePolicy.captureFullPage,
     async createTab() { return { id: observedTarget.tabId, windowId: observedTarget.windowId }; },
     async navigateTab() {},
     async waitForStable() { return { url: observedTarget.urlEvidence.href }; },
     async getFinalUrl() { return observedTarget.urlEvidence.href; },
     async removeTab() {},
-    async captureFullPage() { throw new Error('PIXEL_CAPTURE_OMITTED'); },
-    async captureElement() { throw new Error('PIXEL_CAPTURE_OMITTED'); },
-    composeAnnouncementMap: undefined,
+    async captureFullPage(...args) {
+      if (!pixelMode || typeof fullPageEffect !== 'function') throw pixelBoundaryError();
+      return authorize(fullPageEffect, args, true);
+    },
+    async captureElement(...args) {
+      if (!pixelMode || typeof elementEffect !== 'function') throw pixelBoundaryError();
+      return authorize(elementEffect, args, true);
+    },
+    composeAnnouncementMap: capturePolicy.composeAnnouncementMap ? chromeAdapter.composeAnnouncementMap : undefined,
+    async settlePixelBoundary() {
+      if (!pixelMode || firstPixelAuthorized) return;
+      await authorize(null, [], false);
+    },
+    pixelStarted() { return pixelStarted; },
   };
 }
 
@@ -980,8 +1077,13 @@ function projectCancelledAuditDraft(draft, cancellationAt) {
   return deepFreeze(cancelled);
 }
 
-async function createInterruptedObservedDraft({ auditId, requestedUrl, observedTarget, startedAt, now }) {
+async function createInterruptedObservedDraft({ auditId, requestedUrl, observedTarget, capturePolicy, startedAt, now }) {
   const endedAt = canonicalTime(now());
+  const captureDiagnostic = capturePolicy.mode === 'no-pixels'
+    ? ['PIXEL_CAPTURE_OMITTED', 'Nenhuma captura raster foi coletada no modo sem imagens.']
+    : capturePolicy.mode === 'element-only'
+      ? ['FULL_PAGE_CAPTURE_OMITTED', 'A captura integral e o mapa anotado foram omitidos pela política; miniaturas de elementos permaneceram permitidas.']
+      : ['FULL_PAGE_CAPTURE_NOT_ATTEMPTED', 'A captura integral não foi tentada porque a execução terminou antes da etapa de pixels.'];
   return draftModel({
     auditId,
     requestedUrl,
@@ -996,8 +1098,8 @@ async function createInterruptedObservedDraft({ auditId, requestedUrl, observedT
     },
     status: 'failed',
     diagnostics: [diagnostic(
-      'FULL_PAGE_CAPTURE_FAILED',
-      'Não foi possível capturar a página completa no estado original.',
+      captureDiagnostic[0],
+      captureDiagnostic[1],
       endedAt,
       true,
     )],
@@ -1042,22 +1144,36 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
   if (!args) throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
   const {
     auditId, sessionCapabilityId, target: inputTarget, capturePolicy, chromeAdapter, modelNow,
-    signal, expectedExtensionId, pageId = 'page-1', onCheckpoint, persistAuditModel,
+    signal, expectedExtensionId, pageId = 'page-1', onCheckpoint, persistAuditModel, privacyGate = null,
   } = args;
   const target = attachedTarget(inputTarget);
+  const policyRecord = captureExactRecord(capturePolicy, [
+    'version', 'mode', 'includeQuery', 'captureFullPage', 'captureElements', 'composeAnnouncementMap',
+  ]);
+  const safeCapturePolicy = policyRecord && isCapturePolicyV1(policyRecord) ? Object.freeze(policyRecord) : null;
   if (typeof auditId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/u.test(auditId) ||
     typeof sessionCapabilityId !== 'string' || !/^[A-Za-z0-9_-]{22}$/u.test(sessionCapabilityId) ||
-    !isCapturePolicyV1(capturePolicy) || capturePolicy.mode !== 'no-pixels' || capturePolicy.includeQuery !== false ||
+    !safeCapturePolicy || safeCapturePolicy.includeQuery !== false ||
+    (safeCapturePolicy.mode === 'no-pixels' ? privacyGate !== null : !isPixelPrivacyGateV1(privacyGate)) ||
     pageId !== 'page-1' ||
     typeof modelNow !== 'function' || typeof onCheckpoint !== 'function' || typeof persistAuditModel !== 'function' ||
     !chromeAdapter || typeof chromeAdapter !== 'object') {
     throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
   }
   let probeDocumentIdentity;
+  let probeSensitiveCaptureSignals;
   let legacyEffects;
   try {
     probeDocumentIdentity = requiredAdapterMethod(chromeAdapter, 'probeDocumentIdentity');
     legacyEffects = captureLegacyEffects(chromeAdapter);
+    if (safeCapturePolicy.mode !== 'no-pixels') {
+      probeSensitiveCaptureSignals = requiredAdapterMethod(chromeAdapter, 'probeSensitiveCaptureSignals');
+      if (safeCapturePolicy.captureFullPage && typeof legacyEffects.captureFullPage !== 'function' ||
+        safeCapturePolicy.captureElements && typeof legacyEffects.captureElement !== 'function' ||
+        safeCapturePolicy.composeAnnouncementMap && typeof legacyEffects.composeAnnouncementMap !== 'function') {
+        throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
+      }
+    }
   } catch { throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED'); }
   const inventory = await createInstalledCoreRuleInventory();
   const startedAt = canonicalTime(modelNow());
@@ -1074,9 +1190,26 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
   let finalProofAttempted = false;
   let finalProofMatched = false;
   let closedFailureCode = 'AUDIT_FAILED';
+  let pixelCollectionStarted = false;
+  let pixelStarted = false;
+  let pixelTargetChanged = false;
   const services = Object.freeze({
     async collectObservedPage({ observedTarget }) {
-      const observedAdapter = createObservedLegacyAdapter(legacyEffects, observedTarget);
+      if (safeCapturePolicy.mode !== 'no-pixels') pixelCollectionStarted = true;
+      const observedAdapter = createObservedLegacyAdapter(
+        legacyEffects,
+        observedTarget,
+        safeCapturePolicy,
+        privacyGate,
+        safeCapturePolicy.mode === 'no-pixels' ? null : {
+          auditId,
+          probeDocumentIdentity,
+          probeSensitiveCaptureSignals,
+          signal,
+          onPixelStarted() { pixelStarted = true; },
+          onTargetChanged() { pixelTargetChanged = true; closedFailureCode = 'TARGET_CHANGED'; },
+        },
+      );
       legacyDraft = await runLegacyAudit({
         url: target.initialUrlEvidence.href,
         chromeAdapter: observedAdapter,
@@ -1087,6 +1220,10 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
         expectedExtensionId,
         startedAt,
       });
+      if (safeCapturePolicy.mode === 'element-only' &&
+        !['failed', 'cancelled'].includes(legacyDraft.session.status)) {
+        await observedAdapter.settlePixelBoundary();
+      }
       legacyDraft = alignLegacyDraftWithObservedEvidence(
         legacyDraft,
         observedTarget.urlEvidence.href,
@@ -1130,7 +1267,14 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
       await persistAuditModel(model);
     },
   });
-  const runPipeline = createObservedPipelineRunner({ checkpointRecorder, services });
+  const pixelPreflight = safeCapturePolicy.mode === 'no-pixels' ? null : createPixelPipelinePreflightV1(privacyGate, {
+    probeSensitiveCaptureSignals: observedTarget =>
+      probeSensitiveCaptureSignals(observedTarget.tabId, observedTarget.documentId),
+  });
+  const runPipeline = createObservedPipelineRunner({
+    checkpointRecorder, services,
+    ...(safeCapturePolicy.mode === 'no-pixels' ? {} : { privacyGate, pixelPreflight }),
+  });
   const runnerAdapter = Object.freeze({
     async probeDocumentIdentity(tabId) {
       runnerProofCount += 1;
@@ -1158,8 +1302,8 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
       auditId,
       target,
       chromeAdapter: runnerAdapter,
-      capturePolicy,
-      privacyGate: null,
+      capturePolicy: safeCapturePolicy,
+      privacyGate,
       onCheckpoint,
       now: modelNow,
       signal,
@@ -1173,12 +1317,16 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
     if (terminalPersistenceStarted && !(signal?.aborted && legacyDraft)) {
       throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
     }
-    if (runnerTargetChanged) closedFailureCode = 'TARGET_CHANGED';
+    if (runnerTargetChanged || pixelTargetChanged) closedFailureCode = 'TARGET_CHANGED';
     const attestationAttempted = runnerFinalProofAttempted || finalProofAttempted;
     const attestationsMatched = (!runnerFinalProofAttempted || runnerFinalProofMatched) &&
       (!finalProofAttempted || finalProofMatched);
     if (signal?.aborted && legacyDraft && closedFailureCode !== 'TARGET_CHANGED' &&
       (!attestationAttempted || attestationsMatched)) closedFailureCode = 'AUDIT_ABORTED';
+  } finally {
+    if (pixelCollectionStarted && observed?.status !== 'privacy-paused') {
+      await privacyGate.afterPixels({ auditId, pixelStarted });
+    }
   }
   let lastCheckpoint = null;
   try {
@@ -1193,6 +1341,7 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
       auditId,
       requestedUrl: target.initialUrlEvidence.href,
       observedTarget: observedInterruption.observedTarget,
+      capturePolicy: safeCapturePolicy,
       startedAt,
       now: modelNow,
     });
@@ -1210,6 +1359,9 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
       model: null,
       checkpoint: lastCheckpoint,
     });
+  }
+  if (observed?.status === 'privacy-paused' && observed.observationState === 'observed' && lastCheckpoint) {
+    return deepFreeze({ version: 1, auditId, state: 'privacy-paused', failureCode: null, model: null, checkpoint: lastCheckpoint });
   }
   if (observed?.observationState === 'observed' && ['complete', 'partial', 'cancelled', 'failed'].includes(observed.status)) {
     let model;
@@ -1268,6 +1420,7 @@ function captureLegacyEffects(adapter) {
   for (const name of [
     'connectCdp', 'runAxeInTab', 'collectPage', 'runDynamicProbes', 'getEnvironment',
     'emitProgress', 'handoffReport', 'executeScript', 'createProbeAdapter',
+    'captureFullPage', 'captureElement', 'composeAnnouncementMap',
   ]) {
     const method = optionalAdapterMethod(adapter, name);
     if (method) captured[name] = method;
@@ -1349,7 +1502,7 @@ async function runAuditExecutionInternal({
         recoveryObservedTarget.cleanupMode !== selectedCleanupMode) throw new TypeError('AUDIT_EXECUTION_DENIED');
       const collectedDraft = await runLegacyAudit({
         url: requestedUrlEvidence.href,
-        chromeAdapter: createObservedLegacyAdapter(legacyEffects, observedTarget),
+        chromeAdapter: createObservedLegacyAdapter(legacyEffects, observedTarget, capturePolicy, null, null),
         now,
         idFactory: () => auditId,
         signal,
@@ -1464,6 +1617,7 @@ async function runAuditExecutionInternal({
         auditId,
         requestedUrl: requestedUrlEvidence.href,
         observedTarget: interruptedTarget,
+        capturePolicy,
         startedAt,
         now,
       });

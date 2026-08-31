@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createObservedPipelineRunner, executeObservedAuditPipeline, isObservedTargetV1 } from '../../src/background/audit-pipeline.js';
+import { createPixelPipelinePreflightV1, createPixelPrivacyGateV1 } from '../../src/background/pixel-privacy-gate.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
@@ -10,7 +11,9 @@ const AUDIT_ID = SAMPLE_AUDIT.auditId;
 const DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
 const EVIDENCE = sanitizeEvidenceUrlV1(SAMPLE_AUDIT.finalUrl, { includeQuery: false });
 const POLICY = createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false });
+const PIXEL_POLICY = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
 const TARGET = Object.freeze({ version: 'ObservedTargetV1', kind: 'attached', tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST, urlEvidence: EVIDENCE });
+const EMPTY_SIGNALS = Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: false, categories: Object.freeze([]) });
 
 function recorder() {
   const checkpoints = [];
@@ -28,6 +31,17 @@ function services({ collection = { snapshot: { title: 'safe' } }, status = 'comp
 
 const BEFORE_PERSIST = async () => ({ tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST });
 
+function pixelGate({ signals = EMPTY_SIGNALS, afterPixels = async () => {} } = {}) {
+  const gate = createPixelPrivacyGateV1({
+    pixelState: { async pause() { throw new Error('unexpected pause'); }, async gateRunnerStart() { throw new Error('unexpected resume'); } },
+    consentId: null, authorityExpiresAt: 1_900_000_000_000, afterPixels,
+  });
+  const pixelPreflight = createPixelPipelinePreflightV1(gate, {
+    async probeSensitiveCaptureSignals() { return signals; },
+  });
+  return { gate, pixelPreflight };
+}
+
 test('accepts only final attached ObservedTargetV1 with EvidenceUrlV1', () => {
   assert.equal(isObservedTargetV1(TARGET), true);
   assert.equal(isObservedTargetV1({ ...TARGET, version: 1 }), false);
@@ -40,6 +54,88 @@ test('factory creates the only accepted canonical pipeline runner', async () => 
   const runner = createObservedPipelineRunner({ checkpointRecorder: recorder(), services: services() });
   const result = await runner({ auditId: AUDIT_ID, observedTarget: TARGET, capturePolicy: POLICY, signal: undefined, beforePersist: BEFORE_PERSIST });
   assert.equal(result.model.auditId, AUDIT_ID);
+});
+
+test('pixel pipeline persists only after consuming the exact settled branded gate attestation', async () => {
+  let persisted = 0;
+  let after = 0;
+  const { gate, pixelPreflight } = pixelGate({ afterPixels: async () => { after += 1; } });
+  const runner = createObservedPipelineRunner({
+    checkpointRecorder: recorder(), privacyGate: gate, pixelPreflight,
+    services: {
+      ...services(),
+      async collectObservedPage() {
+        await gate.authorizeFirstPixel({
+          auditId: AUDIT_ID, observedTarget: TARGET, capturePolicy: PIXEL_POLICY,
+          proof: { tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }, signals: EMPTY_SIGNALS,
+        });
+        return { snapshot: { title: 'safe' } };
+      },
+      async persistAuditModel() { persisted += 1; },
+    },
+  });
+  const result = await runner({
+    auditId: AUDIT_ID, observedTarget: TARGET, capturePolicy: PIXEL_POLICY,
+    signal: undefined, beforePersist: BEFORE_PERSIST,
+  });
+  assert.equal(result.model.auditId, AUDIT_ID);
+  assert.equal(persisted, 1);
+  assert.equal(after, 0);
+  await gate.afterPixels({ auditId: AUDIT_ID, pixelStarted: true });
+  assert.equal(after, 1);
+  await assert.rejects(() => runner({
+    auditId: AUDIT_ID, observedTarget: TARGET, capturePolicy: PIXEL_POLICY,
+    signal: undefined, beforePersist: BEFORE_PERSIST,
+  }), /PIXEL_PRIVACY_GATE_DENIED/u);
+  assert.equal(persisted, 1);
+});
+
+test('pixel service that ignores the unsettled barrier cannot persist a terminal model', async () => {
+  let persisted = 0;
+  const { gate, pixelPreflight } = pixelGate();
+  const runner = createObservedPipelineRunner({
+    checkpointRecorder: recorder(), privacyGate: gate, pixelPreflight,
+    services: { ...services(), async persistAuditModel() { persisted += 1; } },
+  });
+  await assert.rejects(() => runner({
+    auditId: AUDIT_ID, observedTarget: TARGET, capturePolicy: PIXEL_POLICY,
+    signal: undefined, beforePersist: BEFORE_PERSIST,
+  }), /PIXEL_PRIVACY_GATE_DENIED/u);
+  assert.equal(persisted, 0);
+});
+
+test('sensitive preflight confirms started once and stops collection, rules and persistence', async () => {
+  const counts = { started: 0, collect: 0, rules: 0, persist: 0 };
+  const signals = Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: true, categories: Object.freeze(['password']) });
+  const gate = createPixelPrivacyGateV1({
+    pixelState: {
+      async pause(value) {
+        return {
+          version: 'AuditSuspensionV1', revision: 1, auditId: value.auditId, consentId: 'B'.repeat(21) + 'Q',
+          tabId: 7, windowId: 3, documentId: 'doc-1', urlEvidence: EVIDENCE, urlSessionDigest: DIGEST,
+          mode: PIXEL_POLICY.mode, capturePolicy: PIXEL_POLICY, categories: signals.categories,
+          issuedAt: 1_800_000_000_000, updatedAt: 1_800_000_000_001, expiresAt: 1_800_000_600_000,
+          cleanupAttempts: 0, cleanupNotBefore: null, state: 'paused', resumePhase: null,
+          revokeReason: null, source: { kind: 'attached' },
+        };
+      },
+      async gateRunnerStart() { throw new Error('unexpected'); },
+    },
+    consentId: null, authorityExpiresAt: 1_900_000_000_000, async afterPixels() {},
+  });
+  const pixelPreflight = createPixelPipelinePreflightV1(gate, { async probeSensitiveCaptureSignals() { return signals; } });
+  const runner = createObservedPipelineRunner({
+    checkpointRecorder: { ...recorder(), async started() { counts.started += 1; } }, privacyGate: gate, pixelPreflight,
+    services: {
+      ...services(), async collectObservedPage() { counts.collect += 1; },
+      async runCoreRules() { counts.rules += 1; }, async persistAuditModel() { counts.persist += 1; },
+    },
+  });
+  await assert.rejects(() => runner({
+    auditId: AUDIT_ID, observedTarget: TARGET, capturePolicy: PIXEL_POLICY,
+    signal: undefined, beforePersist: BEFORE_PERSIST,
+  }), /PIXEL_PRIVACY_GATE_DENIED/u);
+  assert.deepEqual(counts, { started: 1, collect: 0, rules: 0, persist: 0 });
 });
 
 test('accepts owned-disposable V2 target and preserves its closed ownership fields', () => {

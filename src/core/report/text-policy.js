@@ -157,7 +157,8 @@ export function deriveSystemLimitations(model) {
   output.push(...axeLimitations);
   for (const diagnostic of model.session?.diagnostics ?? []) {
     const policy = SYSTEM_DIAGNOSTIC_MESSAGES.includes(diagnostic.message) &&
-      diagnostic.code.startsWith('REPORT_');
+      (diagnostic.code.startsWith('REPORT_') ||
+        ['PIXEL_CAPTURE_OMITTED', 'FULL_PAGE_CAPTURE_OMITTED', 'FULL_PAGE_CAPTURE_NOT_ATTEMPTED'].includes(diagnostic.code));
     if (policy) output.push(diagnostic.message);
   }
   return [...new Set(output)];

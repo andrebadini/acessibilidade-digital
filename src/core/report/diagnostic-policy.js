@@ -58,6 +58,20 @@ const session = ({ code, message, modes = BOTH_MODES, statuses = ALL_TERMINAL_ST
 
 const technicalPageDiagnostics = [
   page({ code: 'FULL_PAGE_CAPTURE_FAILED', message: 'Não foi possível capturar a página completa no estado original.', fact: 'full-page-absent' }),
+  page({
+    code: 'FULL_PAGE_CAPTURE_NOT_ATTEMPTED',
+    message: 'A captura integral não foi tentada porque a execução terminou antes da etapa de pixels.',
+    statuses: ['failed', 'cancelled'], fact: 'full-page-not-attempted', causePartial: false,
+  }),
+  page({
+    code: 'PIXEL_CAPTURE_OMITTED', message: 'Nenhuma captura raster foi coletada no modo sem imagens.',
+    statuses: ALL_TERMINAL_STATUSES, fact: 'pixels-omitted-policy', causePartial: false,
+  }),
+  page({
+    code: 'FULL_PAGE_CAPTURE_OMITTED',
+    message: 'A captura integral e o mapa anotado foram omitidos pela política; miniaturas de elementos permaneceram permitidas.',
+    statuses: ALL_TERMINAL_STATUSES, fact: 'full-page-omitted-policy', causePartial: false,
+  }),
   page({ code: 'ENVIRONMENT_UNAVAILABLE', message: 'Os metadados públicos do ambiente não puderam ser lidos.', fact: 'environment-unavailable' }),
   page({ code: 'DYNAMIC_PROBES_INCOMPLETE', message: 'As verificações dinâmicas atingiram o tempo limite.', fact: 'dynamic-probes-incomplete', group: 'dynamic-probes' }),
   page({ code: 'DYNAMIC_PROBES_FAILED', message: 'As verificações dinâmicas não puderam ser concluídas.', fact: 'dynamic-probes-failed', group: 'dynamic-probes' }),

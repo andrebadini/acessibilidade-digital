@@ -1,6 +1,11 @@
 import { isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
 import { createAuditModel } from '../core/report/audit-model.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
+import {
+  assertPixelPipelineAuthorizedV1,
+  isPixelPipelinePreflightForV1,
+  isPixelPrivacyGateV1,
+} from './pixel-privacy-gate.js';
 
 const OBSERVED_KEYS = Object.freeze({
   attached: Object.freeze(['version', 'kind', 'tabId', 'windowId', 'documentId', 'urlEvidence', 'urlSessionDigest']),
@@ -15,6 +20,7 @@ const PIPELINE_KEYS = Object.freeze(['auditId', 'observedTarget', 'capturePolicy
 const SERVICE_KEYS = Object.freeze(['collectObservedPage', 'runCoreRules', 'buildAuditModel', 'persistAuditModel']);
 const CHECKPOINT_KEYS = Object.freeze(['started', 'record', 'snapshot']);
 const OBSERVED_PIPELINE_RUNNERS = new WeakSet();
+const OBSERVED_PIPELINE_GATES = new WeakMap();
 
 function captureExact(value, expected) {
   try {
@@ -143,22 +149,34 @@ function validateServices(services) {
 }
 
 export function createObservedPipelineRunner(input) {
-  const args = captureExact(input, ['checkpointRecorder', 'services']);
+  const args = captureExact(input, ['checkpointRecorder', 'services']) ??
+    captureExact(input, ['checkpointRecorder', 'services', 'privacyGate', 'pixelPreflight']);
   const checkpointRecorder = captureCallableBundle(args?.checkpointRecorder, CHECKPOINT_KEYS);
   const services = validateServices(args?.services);
-  if (!checkpointRecorder || !services) throw new TypeError('OBSERVED_PIPELINE_DENIED');
+  const privacyGate = Object.hasOwn(args ?? {}, 'privacyGate') ? args.privacyGate : null;
+  const pixelPreflight = Object.hasOwn(args ?? {}, 'pixelPreflight') ? args.pixelPreflight : null;
+  if (!checkpointRecorder || !services ||
+    (privacyGate === null ? pixelPreflight !== null
+      : !isPixelPrivacyGateV1(privacyGate) || !isPixelPipelinePreflightForV1(pixelPreflight, privacyGate))) {
+    throw new TypeError('OBSERVED_PIPELINE_DENIED');
+  }
   const runner = async pipelineInput => {
     const captured = captureExact(pipelineInput, ['auditId', 'observedTarget', 'capturePolicy', 'signal', 'beforePersist']);
     if (!captured || typeof captured.beforePersist !== 'function') throw new TypeError('OBSERVED_PIPELINE_DENIED');
-    return executeObservedAuditPipeline({ ...captured, checkpointRecorder, services });
+    return executeObservedAuditPipelineInternal({ ...captured, checkpointRecorder, services }, privacyGate, pixelPreflight);
   };
   Object.freeze(runner);
   OBSERVED_PIPELINE_RUNNERS.add(runner);
+  OBSERVED_PIPELINE_GATES.set(runner, privacyGate);
   return runner;
 }
 
 export function isObservedPipelineRunner(value) {
   return typeof value === 'function' && OBSERVED_PIPELINE_RUNNERS.has(value);
+}
+
+export function isObservedPipelineRunnerForPrivacyGate(value, privacyGate) {
+  return isObservedPipelineRunner(value) && OBSERVED_PIPELINE_GATES.get(value) === privacyGate;
 }
 
 function canonicalCheckpoint(value, auditId, pageOrder) {
@@ -186,6 +204,10 @@ function modelMatchesObservedTarget(model, target) {
 }
 
 export async function executeObservedAuditPipeline(input) {
+  return executeObservedAuditPipelineInternal(input, null, null);
+}
+
+async function executeObservedAuditPipelineInternal(input, privacyGate, pixelPreflight) {
   const args = captureExact(input, PIPELINE_KEYS);
   if (!args) throw new TypeError('OBSERVED_PIPELINE_DENIED');
   const { auditId, observedTarget, capturePolicy, checkpointRecorder: rawCheckpoint, signal, services: rawServices, beforePersist: rawBeforePersist } = args;
@@ -194,9 +216,14 @@ export async function executeObservedAuditPipeline(input) {
   const services = validateServices(rawServices);
   const safePolicy = copyPolicy(capturePolicy);
   const beforePersist = typeof rawBeforePersist === 'function' ? rawBeforePersist : null;
-  if (!validId(auditId) || !safeObservedTarget || !safePolicy || safePolicy.mode !== 'no-pixels' || safePolicy.includeQuery !== false ||
+  if (!validId(auditId) || !safeObservedTarget || !safePolicy || safePolicy.includeQuery !== false ||
     (safeObservedTarget.urlEvidence.queryIncluded && !safePolicy.includeQuery) ||
-    !checkpointRecorder || !services || !beforePersist) throw new TypeError('OBSERVED_PIPELINE_DENIED');
+    !checkpointRecorder || !services || !beforePersist ||
+    (safePolicy.mode === 'no-pixels' ? privacyGate !== null || pixelPreflight !== null
+      : safeObservedTarget.kind !== 'attached' || !isPixelPrivacyGateV1(privacyGate) ||
+        !isPixelPipelinePreflightForV1(pixelPreflight, privacyGate))) {
+    throw new TypeError('OBSERVED_PIPELINE_DENIED');
+  }
   const fence = () => {
     if (!signal || typeof signal !== 'object') return;
     try {
@@ -218,6 +245,10 @@ export async function executeObservedAuditPipeline(input) {
   fence();
   await checkpointRecorder.started();
   fence();
+  if (safePolicy.mode !== 'no-pixels') {
+    await pixelPreflight({ auditId, observedTarget: safeObservedTarget, capturePolicy: safePolicy });
+    fence();
+  }
   const collection = sanitizeBoundary(await services.collectObservedPage({ observedTarget: safeObservedTarget, capturePolicy: safePolicy, signal }));
   fence();
   const core = sanitizeBoundary(await services.runCoreRules({ collection, signal }));
@@ -242,6 +273,9 @@ export async function executeObservedAuditPipeline(input) {
   if (!proof || proof.tabId !== safeObservedTarget.tabId || proof.windowId !== safeObservedTarget.windowId ||
     proof.documentId !== safeObservedTarget.documentId || proof.urlSessionDigest !== safeObservedTarget.urlSessionDigest) {
     throw new TypeError('OBSERVED_PIPELINE_DENIED');
+  }
+  if (safePolicy.mode !== 'no-pixels') {
+    assertPixelPipelineAuthorizedV1(privacyGate, { auditId, capturePolicy: safePolicy });
   }
   await services.persistAuditModel(model, Object.freeze({ observedTarget: safeObservedTarget, signal }));
   return Object.freeze({
