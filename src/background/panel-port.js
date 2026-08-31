@@ -206,6 +206,13 @@ function intentPacket(value) {
   return freeze({ requestId: record.requestId, envelope: record.envelope });
 }
 
+function revokedCancelResponse(value, auditId) {
+  const response = exact(value, ['ok', 'auditId', 'state']);
+  return response?.ok === true && response.auditId === auditId && response.state === 'revoked'
+    ? freeze(response)
+    : null;
+}
+
 function highlightStatePacket(value) {
   const record = exact(value, ['version', 'type', 'auditId', 'occurrenceId', 'state']);
   const byteLength = record ? capturedUtf8Length(record) : null;
@@ -538,6 +545,8 @@ export function createPanelPortCoordinator(raw) {
     if (binding.windowId !== null && liveByWindow.get(binding.windowId) === binding) liveByWindow.delete(binding.windowId);
     const admission = binding.admission;
     binding.admission = null;
+    binding.inFlightIntent = null;
+    binding.retiringCancel = null;
     if (admission) {
       try { void Promise.resolve(input.launchAuthority.revoke(admission)).catch(() => {}); }
       catch { /* launch cleanup remains fail-closed */ }
@@ -752,10 +761,26 @@ export function createPanelPortCoordinator(raw) {
   }
 
   async function processIntent(binding, request) {
+    let inFlight = null;
     try {
+      if (request.generation !== binding.intentGeneration) return;
       if (!connected(binding) || !await reprove(binding)) throw new Error('PANEL_CONTEXT_DENIED');
       const parsed = parsePanelPortIntent(request.envelope, binding.windowId);
       if (!parsed.ok) throw new Error('PANEL_INTENT_DENIED');
+      if (request.generation !== binding.intentGeneration || binding.inFlightIntent !== null) {
+        throw new Error('PANEL_INTENT_DENIED');
+      }
+      inFlight = Object.freeze({
+        requestId: request.requestId,
+        type: parsed.value.type,
+        auditId: own(parsed.value, 'auditId') ?? null,
+        sessionCapabilityId: own(parsed.value, 'sessionCapabilityId') ?? null,
+        windowId: binding.windowId,
+        generation: binding.admission.generation,
+        queueGeneration: request.generation,
+        originState: binding.state,
+      });
+      binding.inFlightIntent = inFlight;
       const dispatchRequest = {
         envelope: parsed.value,
         sender: binding.admission.syntheticSender,
@@ -763,6 +788,42 @@ export function createPanelPortCoordinator(raw) {
       };
       if (HIGHLIGHT_INTENT_TYPES.has(parsed.value.type)) dispatchRequest.panelWindowId = binding.windowId;
       const response = await input.dispatchPanelIntent(dispatchRequest);
+      if (binding.retiringCancel === inFlight || binding.state === 'retiring-cancel') {
+        const retired = revokedCancelResponse(response, inFlight.auditId);
+        if (!retired || binding.retiringCancel !== inFlight ||
+          inFlight.type !== 'PANEL_CANCEL_AUDIT' || inFlight.originState !== 'bound-privacy-paused') {
+          throw new Error('PANEL_CANCEL_RETIREMENT_DENIED');
+        }
+        await withWindowLock(inFlight.windowId, async () => {
+          if (!connected(binding) || binding.state !== 'retiring-cancel' ||
+            binding.retiringCancel !== inFlight || binding.inFlightIntent !== inFlight ||
+            binding.admission?.generation !== inFlight.generation ||
+            binding.intentGeneration !== inFlight.queueGeneration) throw new Error('PANEL_CANCEL_RETIREMENT_DENIED');
+          if (await readBootstrap(inFlight.windowId) !== null) throw new Error('PANEL_CANCEL_RETIREMENT_DENIED');
+          await requireActiveAbsent();
+          if (!await reprove(binding)) throw new Error('PANEL_CONTEXT_DENIED');
+          if (await readBootstrap(inFlight.windowId) !== null) throw new Error('PANEL_CANCEL_RETIREMENT_DENIED');
+          await requireActiveAbsent();
+          if (!connected(binding) || binding.state !== 'retiring-cancel' ||
+            binding.retiringCancel !== inFlight || binding.inFlightIntent !== inFlight ||
+            binding.admission?.generation !== inFlight.generation ||
+            binding.intentGeneration !== inFlight.queueGeneration) throw new Error('PANEL_CANCEL_RETIREMENT_DENIED');
+          if (!Number.isSafeInteger(binding.intentGeneration) ||
+            binding.intentGeneration >= Number.MAX_SAFE_INTEGER) throw new Error('PANEL_CANCEL_RETIREMENT_DENIED');
+          binding.intentGeneration += 1;
+          binding.inFlightIntent = null;
+          binding.retiringCancel = null;
+          bind(binding, inFlight.windowId, 'bound-idle');
+          send(binding, freeze({
+            protocol: 'audita-panel', version: 1, type: 'intent-result',
+            requestId: inFlight.requestId, response: retired,
+          }));
+        });
+        return;
+      }
+      if (inFlight.type === 'PANEL_CANCEL_AUDIT' && inFlight.originState === 'bound-privacy-paused') {
+        throw new Error('PANEL_CANCEL_RETIREMENT_DENIED');
+      }
       if (!connected(binding) || !await reprove(binding)) throw new Error('PANEL_CONTEXT_DENIED');
       const responseBytes = capturedUtf8Length(response);
       if (responseBytes === null || responseBytes > 4096) throw new Error('PANEL_RESPONSE_DENIED');
@@ -771,10 +832,14 @@ export function createPanelPortCoordinator(raw) {
         requestId: request.requestId, response,
       }));
     } catch { disconnect(binding); }
+    finally {
+      if (binding.inFlightIntent === inFlight) binding.inFlightIntent = null;
+      if (binding.retiringCancel === inFlight && binding.state !== 'retiring-cancel') binding.retiringCancel = null;
+    }
   }
 
   function receiveBound(binding, value) {
-    if (!connected(binding) || !['bound-idle', 'bound-session', 'bound-privacy-paused'].includes(binding.state)) {
+    if (!connected(binding)) {
       disconnect(binding);
       return;
     }
@@ -788,9 +853,19 @@ export function createPanelPortCoordinator(raw) {
       disconnect(binding);
       return;
     }
+    if (binding.state === 'retiring-cancel') return;
+    if (!['bound-idle', 'bound-session', 'bound-privacy-paused'].includes(binding.state)) {
+      disconnect(binding);
+      return;
+    }
+    const queued = Object.freeze({
+      requestId: request.requestId,
+      envelope: request.envelope,
+      generation: binding.intentGeneration,
+    });
     const operation = binding.intentTail.then(
-      () => processIntent(binding, request),
-      () => processIntent(binding, request),
+      () => processIntent(binding, queued),
+      () => processIntent(binding, queued),
     );
     binding.intentTail = operation.catch(() => {});
   }
@@ -808,7 +883,8 @@ export function createPanelPortCoordinator(raw) {
     const binding = {
       port, sender, state: 'awaiting-hello', windowId: null, auditId: null, sessionCapabilityId: null,
       issuerDocumentId: null, admission: null, deadline: null, onHello: null, onBoundMessage: null, onDisconnect: null,
-      intentTail: Promise.resolve(), seenRequestIds: new Set(),
+      intentTail: Promise.resolve(), seenRequestIds: new Set(), intentGeneration: 0,
+      inFlightIntent: null, retiringCancel: null,
     };
     binding.onBoundMessage = value => receiveBound(binding, value);
     binding.onDisconnect = () => {
@@ -820,6 +896,8 @@ export function createPanelPortCoordinator(raw) {
       if (binding.windowId !== null && liveByWindow.get(binding.windowId) === binding) liveByWindow.delete(binding.windowId);
       const admission = binding.admission;
       binding.admission = null;
+      binding.inFlightIntent = null;
+      binding.retiringCancel = null;
       if (admission) {
         try { void Promise.resolve(input.launchAuthority.revoke(admission)).catch(() => {}); }
         catch { /* launch cleanup remains fail-closed */ }
@@ -1103,21 +1181,47 @@ export function createPanelPortCoordinator(raw) {
       try {
         assertOwned();
         const binding = liveByWindow.get(args.windowId);
-        if (connected(binding) && binding.auditId === args.auditId &&
+        const inFlight = connected(binding) ? binding.inFlightIntent : null;
+        const retiring = args.reasonCode === 'AUDIT_CANCELLED' &&
+          binding?.state === 'bound-privacy-paused' && binding.auditId === args.auditId &&
+          binding.sessionCapabilityId === args.sessionCapabilityId && inFlight?.type === 'PANEL_CANCEL_AUDIT' &&
+          inFlight.auditId === args.auditId && inFlight.sessionCapabilityId === args.sessionCapabilityId &&
+          inFlight.windowId === args.windowId && inFlight.generation === binding.admission?.generation &&
+          inFlight.queueGeneration === binding.intentGeneration &&
+          inFlight.originState === 'bound-privacy-paused';
+        if (retiring) {
+          binding.state = 'retiring-cancel';
+          binding.retiringCancel = inFlight;
+        } else if (connected(binding) && binding.auditId === args.auditId &&
           binding.sessionCapabilityId === args.sessionCapabilityId) disconnect(binding, assertOwned);
         const bootstrap = await readBootstrap(args.windowId, assertOwned);
         assertOwned();
-        if (bootstrap === null) return true;
+        if (bootstrap === null) {
+          if (retiring) throw new Error('PANEL_CANCEL_RETIREMENT_DENIED');
+          return true;
+        }
         if (bootstrap.auditId !== args.auditId || bootstrap.sessionCapabilityId !== args.sessionCapabilityId ||
-          bootstrap.windowId !== args.windowId) return false;
+          bootstrap.windowId !== args.windowId) {
+          if (retiring) throw new Error('PANEL_CANCEL_RETIREMENT_DENIED');
+          return false;
+        }
         assertOwned();
-        await input.sessionArea.remove(panelBootstrapStorageKey(args.windowId));
+        try { await input.sessionArea.remove(panelBootstrapStorageKey(args.windowId)); }
+        catch { /* a storage rejection may follow a committed removal; confirm below */ }
         assertOwned();
         const removed = await readBootstrap(args.windowId, assertOwned);
         assertOwned();
-        return removed === null;
+        if (removed !== null) {
+          if (retiring) throw new Error('PANEL_CANCEL_RETIREMENT_DENIED');
+          return false;
+        }
+        return true;
       } catch (error) {
         if (error === scopeDeniedSentinel) throw error;
+        const binding = liveByWindow.get(args.windowId);
+        if (connected(binding) && binding.state === 'retiring-cancel') {
+          try { disconnect(binding, assertOwned); } catch { /* fixed fail-closed disconnect */ }
+        }
         return false;
       }
     })();

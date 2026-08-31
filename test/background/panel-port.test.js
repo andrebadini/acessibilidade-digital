@@ -120,6 +120,7 @@ function fixture(overrides = {}) {
   const suspensions = new Map();
   const timers = [];
   const revoked = [];
+  const launchRevoked = [];
   const chromeApi = {
     runtime: {
       id: RUNTIME_ID,
@@ -182,7 +183,7 @@ function fixture(overrides = {}) {
           context.documentId === admission.documentId && [-1, undefined].includes(context.tabId) &&
           [-1, undefined].includes(context.windowId) ? admission : { ok: false, code: 'PANEL_LAUNCH_DENIED' };
       },
-      async revoke() { return { ok: true, revoked: true }; },
+      async revoke(admission) { launchRevoked.push(admission); return { ok: true, revoked: true }; },
     },
     async authorizeHighlightSession({ sessionCapabilityId, auditId, claimedWindowId, sender }) {
       const value = sessions.get(sessionCapabilityId);
@@ -212,7 +213,7 @@ function fixture(overrides = {}) {
     ...overrides,
   };
   return {
-    chromeApi, sessionArea, sessions, suspensions, timers, revoked,
+    chromeApi, sessionArea, sessions, suspensions, timers, revoked, launchRevoked,
     setActive(value) { active = value; },
     getActive() { return active; },
     coordinator: createPanelPortCoordinator(dependencies),
@@ -316,6 +317,133 @@ test('publishes one exact private pause packet only after durable correlation', 
   });
   assert.doesNotMatch(JSON.stringify(connected.messages.at(-1)), /page-document|hmac-sha256|tabId|url/u);
   assert.doesNotMatch(JSON.stringify(env.sessionArea.values), new RegExp(CONSENT, 'u'));
+});
+
+test('retires an in-flight privacy-paused cancellation to idle without dropping the admitted Port', async () => {
+  let env;
+  env = fixture({
+    async dispatchPanelIntent(request) {
+      assert.deepEqual(request.envelope, {
+        type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION,
+        auditId: 'audit-port', windowId: 9,
+      });
+      env.sessions.set(SESSION, session('revoked'));
+      env.setActive(null);
+      assert.equal(await env.coordinator.withWindowLock(9, scope => scope.disconnectSession({
+        auditId: 'audit-port', sessionCapabilityId: SESSION,
+        windowId: 9, reasonCode: 'AUDIT_CANCELLED',
+      })), true);
+      return { ok: true, auditId: 'audit-port', state: 'revoked' };
+    },
+  });
+  env.sessions.set(SESSION, session('privacy-paused'));
+  env.setActive(privacyPausedActive());
+  env.suspensions.set('audit-port', suspension());
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.equal(connected.messages.at(-1).type, 'privacy-paused');
+
+  connected.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: 'cancel-request-1',
+    envelope: { type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION, auditId: 'audit-port' },
+  });
+  connected.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: 'queued-request-2',
+    envelope: { type: 'PREPARE_PANEL_CAPABILITY', requestId: 'prepare-queued' },
+  });
+  await tick();
+  await tick();
+
+  assert.deepEqual(connected.messages.at(-1), {
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: 'cancel-request-1',
+    response: { ok: true, auditId: 'audit-port', state: 'revoked' },
+  });
+  assert.equal(connected.disconnects, 0);
+  assert.deepEqual(env.launchRevoked, []);
+  assert.equal(Object.hasOwn(env.sessionArea.values, panelBootstrapStorageKey(9)), false);
+  assert.equal(env.getActive(), null);
+  assert.equal(connected.messages.some(message => message.requestId === 'queued-request-2'), false);
+});
+
+test('disconnects rigidly when privacy-paused cancellation cleanup cannot remove its bootstrap', async () => {
+  let env;
+  env = fixture({
+    async dispatchPanelIntent() {
+      env.sessions.set(SESSION, session('revoked'));
+      env.setActive(null);
+      assert.equal(await env.coordinator.withWindowLock(9, scope => scope.disconnectSession({
+        auditId: 'audit-port', sessionCapabilityId: SESSION,
+        windowId: 9, reasonCode: 'AUDIT_CANCELLED',
+      })), false);
+      return { ok: true, auditId: 'audit-port', state: 'revoked' };
+    },
+  });
+  env.sessions.set(SESSION, session('privacy-paused'));
+  env.setActive(privacyPausedActive());
+  env.suspensions.set('audit-port', suspension());
+  const key = panelBootstrapStorageKey(9);
+  env.sessionArea.values[key] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  env.sessionArea.remove = async () => {};
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  connected.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: 'cancel-cleanup-failure',
+    envelope: { type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION, auditId: 'audit-port' },
+  });
+  await tick();
+  await tick();
+
+  assert.equal(connected.disconnects, 1);
+  assert.equal(env.launchRevoked.length, 1);
+  assert.equal(connected.messages.some(message => message.type === 'intent-result'), false);
+  assert.equal(Object.hasOwn(env.sessionArea.values, key), true);
+});
+
+test('disconnects rigidly when a retired privacy-paused cancellation returns a non-exact response', async () => {
+  let env;
+  env = fixture({
+    async dispatchPanelIntent() {
+      env.sessions.set(SESSION, session('revoked'));
+      env.setActive(null);
+      assert.equal(await env.coordinator.withWindowLock(9, scope => scope.disconnectSession({
+        auditId: 'audit-port', sessionCapabilityId: SESSION,
+        windowId: 9, reasonCode: 'AUDIT_CANCELLED',
+      })), true);
+      return { ok: true, auditId: 'audit-port', state: 'revoked', extra: true };
+    },
+  });
+  env.sessions.set(SESSION, session('privacy-paused'));
+  env.setActive(privacyPausedActive());
+  env.suspensions.set('audit-port', suspension());
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  connected.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: 'cancel-malformed-result',
+    envelope: { type: 'PANEL_CANCEL_AUDIT', sessionCapabilityId: SESSION, auditId: 'audit-port' },
+  });
+  await tick();
+  await tick();
+
+  assert.equal(connected.disconnects, 1);
+  assert.equal(env.launchRevoked.length, 1);
+  assert.equal(connected.messages.some(message => message.type === 'intent-result'), false);
 });
 
 test('confirms a durable pause without a Port and reconnects with the same consent token', async () => {

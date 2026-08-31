@@ -46,6 +46,13 @@ function exact(value, keys) {
   } catch { return null; }
 }
 
+function ownDataOrNull(value, key) {
+  try {
+    const descriptor = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key) : null;
+    return descriptor?.enumerable && Object.hasOwn(descriptor, 'value') ? descriptor.value : null;
+  } catch { return null; }
+}
+
 function copyData(value, state = { nodes: 0 }, depth = 0) {
   if (['string', 'number', 'boolean'].includes(typeof value) || value === null) return value;
   if (depth > 8 || ++state.nodes > 2048 || !value || typeof value !== 'object') throw new TypeError('INVALID_DATA');
@@ -127,6 +134,13 @@ function parseIntentResult(value) {
   catch { return null; }
 }
 
+function parseRevokedCancelResponse(value, auditId) {
+  const response = exact(value, ['ok', 'auditId', 'state']);
+  return response?.ok === true && response.auditId === auditId && response.state === 'revoked'
+    ? freeze(response)
+    : null;
+}
+
 function parseHighlightState(value) {
   const packet = exact(value, HIGHLIGHT_STATE_KEYS);
   if (!packet || packet.version !== 1 || packet.type !== 'HIGHLIGHT_STATE_CHANGED' ||
@@ -165,6 +179,7 @@ export function createPanelSessionPortClient(raw) {
   let ready = false;
   let auditId = null;
   let sessionId = null;
+  let sessionState = null;
   let pendingConsent = null;
   const bindings = new WeakMap();
   const pending = new Map();
@@ -182,6 +197,7 @@ export function createPanelSessionPortClient(raw) {
     ready = false;
     auditId = null;
     sessionId = null;
+    sessionState = null;
     pendingConsent = null;
   };
   const settle = (entry, value) => {
@@ -238,6 +254,7 @@ export function createPanelSessionPortClient(raw) {
       ready = true;
       auditId = bootstrap.auditId;
       sessionId = bootstrap.sessionCapabilityId;
+      sessionState = bootstrap.state;
       notifyStatus('Painel conectado.');
       notifyBootstrap(freeze({ state: bootstrap.state, auditId: bootstrap.auditId, result: bootstrap.result }));
       return;
@@ -251,6 +268,7 @@ export function createPanelSessionPortClient(raw) {
         return;
       }
       pendingConsent = freeze({ consentId: packet.consentId, mode: packet.mode });
+      sessionState = 'privacy-paused';
       notifyBootstrap(freeze({
         state: 'privacy-paused', auditId: packet.auditId, result: null,
         mode: packet.mode, categories: privacyPaused.categories, message: PRIVACY_MESSAGE,
@@ -276,6 +294,25 @@ export function createPanelSessionPortClient(raw) {
       return;
     }
     const entry = pending.get(result.requestId);
+    const revoked = entry.type === 'PANEL_CANCEL_AUDIT'
+      ? parseRevokedCancelResponse(result.response, entry.auditId)
+      : null;
+    if (entry.type === 'PANEL_CANCEL_AUDIT' && (entry.sessionState === 'privacy-paused' || revoked)) {
+      if (!revoked || entry.sessionCapabilityId !== sessionId || entry.auditId !== auditId) {
+        unavailable(port, true);
+        return;
+      }
+      pending.delete(result.requestId);
+      settleAll(localUnavailable());
+      ready = true;
+      auditId = null;
+      sessionId = null;
+      sessionState = 'initial';
+      pendingConsent = null;
+      notifyBootstrap(freeze({ state: 'initial', auditId: null, result: null }));
+      settle(entry, revoked);
+      return;
+    }
     pending.delete(result.requestId);
     settle(entry, result.response);
   }
@@ -367,7 +404,13 @@ export function createPanelSessionPortClient(raw) {
         pending.delete(requestId);
         settle(entry, localUnavailable());
       }, REQUEST_TIMEOUT_MS);
-      pending.set(requestId, { resolve, timer });
+      pending.set(requestId, {
+        resolve, timer,
+        type: intent.type,
+        auditId: ownDataOrNull(intent, 'auditId'),
+        sessionCapabilityId: ownDataOrNull(intent, 'sessionCapabilityId'),
+        sessionState,
+      });
       try {
         port.postMessage({ protocol: 'audita-panel', version: 1, type: 'intent', requestId, envelope: intent });
       } catch {

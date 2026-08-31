@@ -328,6 +328,65 @@ test('consumes the private nonce before posting one exact confirmation and rejec
   assert.deepEqual(await pending, { ok: true, state: 'running' });
 });
 
+test('one correlated revoked cancellation packet returns the same Port to initial', async () => {
+  const env = fixture();
+  const observed = [];
+  const order = [];
+  const client = createClient(env, {
+    onBootstrapResult: value => { observed.push(value); order.push(`bootstrap:${value.state}`); },
+  });
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-private', SESSION_ID);
+  privacyPaused(port);
+
+  const cancelled = client.requestIntent({ type: 'PANEL_CANCEL_AUDIT' });
+  const superseded = client.requestIntent({ type: 'PANEL_OPEN_REPORT' });
+  cancelled.then(() => order.push('cancel:resolved'));
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: 'port-request-1',
+    response: { ok: true, auditId: 'audit-private', state: 'revoked' },
+  });
+
+  assert.deepEqual(await cancelled, { ok: true, auditId: 'audit-private', state: 'revoked' });
+  assert.deepEqual(await superseded, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  assert.deepEqual(observed.at(-1), { state: 'initial', auditId: null, result: null });
+  assert.ok(order.indexOf('bootstrap:initial') < order.indexOf('cancel:resolved'));
+  assert.equal(port.disconnects, 0);
+  assert.equal(env.ports.length, 1);
+
+  const next = client.requestIntent({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'prepare-after-cancel' });
+  assert.deepEqual(port.messages.at(-1), {
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: 'port-request-3',
+    envelope: { type: 'PREPARE_PANEL_CAPABILITY', requestId: 'prepare-after-cancel' },
+  });
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: 'port-request-3',
+    response: { ok: true, requestId: 'prepare-after-cancel' },
+  });
+  assert.deepEqual(await next, { ok: true, requestId: 'prepare-after-cancel' });
+});
+
+test('disconnects and denies a privacy-paused cancellation when its revoked response is not exact', async () => {
+  const env = fixture();
+  const observed = [];
+  const client = createClient(env, { onBootstrapResult: value => observed.push(value) });
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-private', SESSION_ID);
+  privacyPaused(port);
+  const cancelled = client.requestIntent({ type: 'PANEL_CANCEL_AUDIT' });
+
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: 'port-request-1',
+    response: { ok: true, auditId: 'audit-private', state: 'revoked', extra: true },
+  });
+
+  assert.deepEqual(await cancelled, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  assert.equal(port.disconnects, 1);
+  assert.notDeepEqual(observed.at(-1), { state: 'initial', auditId: null, result: null });
+});
+
 test('the consent nonce is already unavailable during the confirmation post side effect', async () => {
   const env = fixture();
   const client = createClient(env);
