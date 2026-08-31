@@ -269,6 +269,11 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
         if (fixtureOptions.chromeAdapterFactory) return fixtureOptions.chromeAdapterFactory(...args);
         return Object.freeze({
           async probeDocumentIdentity() { throw new Error('not used'); },
+          async probeSensitiveCaptureSignals() {
+            return Object.freeze({
+              version: 'SensitiveCaptureSignalsV1', detected: false, categories: Object.freeze([]),
+            });
+          },
           async getEvidenceUrl() { throw new Error('not used'); },
           async getFinalUrl() { return 'https://example.test/'; },
           async proveHighlightTargets() { return []; },
@@ -817,6 +822,84 @@ test('default runtime bootstraps the operational adapter through a trusted Chrom
   assert.deepEqual(env.createdTabs, [{ active: false }]);
 });
 
+test('one canonical all-frame sensitive probe lets iframe password consent resume without alternating re-pause', async () => {
+  const documentTargets = [];
+  const rawUrl = 'https://example.test/';
+  const scripting = {
+    async executeScript(details) {
+      const target = structuredClone(details.target);
+      if (target.frameIds) {
+        return [{ frameId: 0, documentId: 'document-a', result: rawUrl }];
+      }
+      if (target.allFrames === true) {
+        return [
+          { frameId: 0, documentId: 'document-a', result: null },
+          { frameId: 7, documentId: 'document-child', result: null },
+        ];
+      }
+      if (target.documentIds) {
+        if (['probe', 'inspect', 'clear'].includes(details.args?.[0]?.op)) {
+          return [{
+            frameId: 0, documentId: 'document-a',
+            result: { ok: true, present: false, mode: null },
+          }];
+        }
+        documentTargets.push(target.documentIds);
+        return target.documentIds.map((documentId, index) => ({
+          frameId: documentId === 'document-a' ? 0 : 7,
+          documentId,
+          result: {
+            password: documentId === 'document-child',
+            otp: false,
+            payment: false,
+            privateMarker: false,
+          },
+        }));
+      }
+      throw new Error('unexpected script target');
+    },
+    async insertCSS() {},
+    async removeCSS() {},
+  };
+  const env = defaultGraphFixture(null, { useDefaultChromeAdapter: true, scripting });
+  const runtime = await env.registration.startupReady;
+  const proof = await runtime.chromeAdapter.probeDocumentIdentity(17);
+  const issuer = {
+    type: 'extension-document', documentId: 'panel-document', path: '/src/panel/index.html',
+  };
+  const prepared = await runtime.authority.prepare({
+    kind: 'attached', tabId: 17, windowId: 9, documentId: proof.documentId,
+    initialUrlEvidence: rawUrl, initialUrlSessionDigest: proof.urlSessionDigest,
+    createdBy: 'user', allowedIntent: 'start-audit', issuer,
+  });
+  const senderContext = {
+    issuer, windowId: 9, tabId: null, contextType: 'SIDE_PANEL',
+    documentUrl: `chrome-extension://${env.chromeApi.runtime.id}/src/panel/index.html?launch=${'L'.repeat(43)}`,
+  };
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const auditId = 'audit-iframe-password-consent';
+  const started = await runtime.auditStarter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId, capturePolicy: policy,
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext,
+  });
+  assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
+  assert.deepEqual(await started.completion, { ok: true, auditId, state: 'privacy-paused', revision: null });
+  const paused = env.sessionValues[`audita:pixel-capture:v1:${auditId}`];
+  assert.deepEqual(paused.categories, ['password']);
+
+  documentTargets.length = 0;
+  const resumed = await runtime.auditStarter.resumePrivacyPausedAudit({
+    auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9,
+    consentId: paused.consentId, mode: 'full-evidence',
+  });
+
+  assert.deepEqual(resumed.response, { ok: true, auditId, state: 'running' });
+  assert.equal(documentTargets.length > 0, true);
+  assert.equal(documentTargets.every(value =>
+    value.length === 2 && value[0] === 'document-a' && value[1] === 'document-child'), true);
+  assert.notEqual((await resumed.completion).state, 'privacy-paused');
+});
+
 test('default worker keeps the volatile vault closed while injecting the one digest manager by factories', async () => {
   const captured = {};
   const env = defaultGraphFixture(null, {
@@ -824,6 +907,11 @@ test('default worker keeps the volatile vault closed while injecting the one dig
       captured.adapterDigestManager = sessionUrlDigestManager;
       return Object.freeze({
         async probeDocumentIdentity() { throw new Error('not used'); },
+        async probeSensitiveCaptureSignals() {
+          return Object.freeze({
+            version: 'SensitiveCaptureSignalsV1', detected: false, categories: Object.freeze([]),
+          });
+        },
         async getEvidenceUrl() { throw new Error('not used'); },
         async getFinalUrl() { return 'https://example.test/'; },
         async proveHighlightTargets() { return []; },

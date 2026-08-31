@@ -1,5 +1,6 @@
 import { highlightActionForOccurrence } from './highlight-action.js';
 import { decodePngDataUrl } from '../core/evidence/png.js';
+import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
 
 const SCREEN_NAMES = Object.freeze(['initial', 'running', 'result', 'unavailable']);
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
@@ -17,6 +18,7 @@ const RUNNING_PHASES = Object.freeze([
   'Preparando o resultado.',
 ]);
 const COVERAGE_DISCLAIMER = 'Percentual da execução automática concluída. Não é nota, certificação ou declaração de conformidade.';
+const WCAG_LEVEL_ORDER = Object.freeze(['A', 'AA', 'AAA']);
 
 export function buildPanelView({ state, summary = null, detail = null } = {}) {
   const screen = dataProperty(state, 'screen');
@@ -587,6 +589,8 @@ function previewBlock(document, previews, expanded, onEvent) {
       image.setAttribute('loading', 'lazy');
       image.setAttribute('decoding', 'async');
       item.append(image);
+    } else if (preview.dataUrl === null) {
+      item.append(paragraph(document, 'Prévia omitida no painel para manter o resultado leve. A captura integral permanece disponível no relatório.'));
     }
     item.append(
       paragraph(document, preview.kind ? `Tipo: ${preview.kind}` : 'Evidência local'),
@@ -879,9 +883,15 @@ function copyDetail(detail) {
 
 function cardMatchesFilters(card, filters) {
   const impact = filters.impact.length === 0 || (card.impact !== null && filters.impact.includes(card.impact));
-  const wcag = filters.wcag.length === 0 || card.wcag.some(value => filters.wcag.includes(value));
+  const wcag = filters.wcag.length === 0 || wcagLevels(card.wcag).some(value => filters.wcag.includes(value));
   const abnt = filters.abnt.length === 0 || card.abntItemIds.some(value => filters.abnt.includes(value));
   return impact && wcag && abnt;
+}
+
+function wcagLevels(criteria) {
+  const levels = new Set(criteria.map(criterion => WCAG22_LEVELS[criterion])
+    .filter(level => WCAG_LEVEL_ORDER.includes(level)));
+  return WCAG_LEVEL_ORDER.filter(level => levels.has(level));
 }
 
 function viewFilterSelection(selected, value) {

@@ -180,6 +180,26 @@ test('separates attempted core coverage pairs from all-engine checkKeys and occu
   assert.deepEqual(summary.limitations.untestedCheckKeys, [JSON.stringify(['page-1', 'audita-core', 'keyboard-focus-trap'])]);
 });
 
+test('distributes SAMPLE_AUDIT by canonical WCAG conformance level while cards preserve criterion IDs', async () => {
+  const inventory = await createInstalledCoreRuleInventory();
+  const checkpoint = checkpointFor(SAMPLE_AUDIT, inventory, new Map([[
+    'page-1', [['focus-fully-visible', 'passed']],
+  ]]));
+
+  const summary = await buildPanelSummary({ model: SAMPLE_AUDIT, executionCheckpoint: checkpoint, inventory });
+  const criteria = new Map(allCards(summary).map(card => [card.ruleId, card.wcag]));
+
+  assert.deepEqual(summary.distributions.wcag, [
+    { id: 'A', count: 1 },
+    { id: 'AA', count: 3 },
+    { id: 'AAA', count: 2 },
+  ]);
+  assert.deepEqual(criteria.get('focus-visible'), ['2.4.7']);
+  assert.deepEqual(criteria.get('focus-order'), ['2.4.3']);
+  assert.deepEqual(criteria.get('manual:5.7.5'), ['2.4.9', '3.2.4']);
+  assert.deepEqual(criteria.get('focus-fully-visible'), ['2.4.11', '2.4.12']);
+});
+
 test('uses integer half-up coverage arithmetic at exact boundaries', () => {
   assert.equal(coveragePercent(1, 16), '6,3%');
   assert.equal(coveragePercent(2, 130), '1,5%');

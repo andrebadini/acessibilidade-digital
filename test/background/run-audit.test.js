@@ -320,8 +320,18 @@ function fakeAdapter(options = {}) {
     },
   };
   if (options.trackCaptureCalls) {
-    adapter.captureFullPage = async (...args) => { fullPageCalls += 1; return captureFullPageEvidence(...args); };
-    adapter.captureElement = async (...args) => { elementCalls += 1; return captureElementEvidence(...args); };
+    adapter.captureFullPage = async (...args) => {
+      fullPageCalls += 1;
+      const result = await captureFullPageEvidence(...args);
+      await options.afterFullPage?.();
+      return result;
+    };
+    adapter.captureElement = async (...args) => {
+      elementCalls += 1;
+      const result = await captureElementEvidence(...args);
+      await options.afterElement?.();
+      return result;
+    };
   }
   const canonicalInternal = Object.assign(Object.create(null), {
     sessionArea: {
@@ -612,6 +622,107 @@ test('attached full-evidence crosses proof, fresh probe and gate before raster, 
   const raster = adapter.events.indexOf('full-page');
   assert.deepEqual(adapter.events.slice(raster - 3, raster), ['proof-2', 'sensitive-probe', 'proof-3']);
   assert.deepEqual(gateCalls, ['after']);
+});
+
+test('attached full-evidence denies every thumbnail after the observed document changes following the full-page raster', async () => {
+  const auditId = 'audit-attached-raster-drift';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const gateCalls = [];
+  let documentId = 'document-a';
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    async afterFullPage() { documentId = 'document-b'; },
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  adapter.probeDocumentIdentity = async tabId => ({
+    tabId, windowId: 9, documentId, urlSessionDigest: TEST_DIGEST,
+  });
+
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy, privacyGate: attachedPixelGate(policy, gateCalls, { auditId }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { throw new Error('must-not-persist'); },
+  });
+
+  assert.equal(result.state, 'revoked');
+  assert.equal(result.failureCode, 'TARGET_CHANGED');
+  assert.equal(adapter.counts.fullPageCalls, 1);
+  assert.equal(adapter.counts.elementCalls, 0);
+  assert.equal(adapter.counts.screenshots, 1, 'no raster from document B may start');
+});
+
+test('attached full-evidence re-proves the same document before every raster without consuming consent again', async () => {
+  const auditId = 'audit-attached-each-raster-proof';
+  const consentId = 'A'.repeat(21) + 'Q';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const gateCalls = [];
+  let proofCount = 0;
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    sensitiveSignals: PASSWORD_SIGNALS,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  adapter.probeDocumentIdentity = async tabId => {
+    proofCount += 1;
+    adapter.events.push(`proof-${proofCount}`);
+    return { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: TEST_DIGEST };
+  };
+
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy,
+    privacyGate: attachedPixelGate(policy, gateCalls, { auditId, consentId }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => {},
+  });
+
+  assert.equal(result.state, 'model');
+  assert.equal(adapter.counts.fullPageCalls, 1);
+  assert.equal(adapter.counts.elementCalls > 0, true);
+  const rasterIndexes = adapter.events
+    .map((value, index) => /^(?:full-page|thumbnail:)/u.test(value) ? index : -1)
+    .filter(index => index >= 0);
+  assert.equal(rasterIndexes.length, adapter.counts.screenshots);
+  for (const index of rasterIndexes) assert.match(adapter.events[index - 1], /^proof-\d+$/u);
+  assert.deepEqual(gateCalls, ['gate', 'after'], 'one-shot consent is gated once even across multiple rasters');
+});
+
+test('attached full-evidence abort immediately before a later raster starts no later raster effect', async () => {
+  const auditId = 'audit-attached-later-raster-abort';
+  const consentId = 'A'.repeat(21) + 'Q';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const controller = new AbortController();
+  const gateCalls = [];
+  let proofCount = 0;
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    sensitiveSignals: PASSWORD_SIGNALS,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  adapter.probeDocumentIdentity = async tabId => {
+    proofCount += 1;
+    if (proofCount === 4) controller.abort(new DOMException('PRIVATE_LATER_RASTER_ABORT', 'AbortError'));
+    return { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: TEST_DIGEST };
+  };
+
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy,
+    privacyGate: attachedPixelGate(policy, gateCalls, { auditId, consentId }),
+    chromeAdapter: adapter, modelNow: clock, signal: controller.signal, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => {},
+  });
+
+  assert.equal(adapter.counts.fullPageCalls, 1);
+  assert.equal(adapter.counts.elementCalls, 0);
+  assert.equal(adapter.counts.screenshots, 1);
+  assert.equal(result.state, 'revoked');
+  assert.equal(result.failureCode, 'AUDIT_FAILED');
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_LATER_RASTER_ABORT/u);
 });
 
 test('attached element-only omits full page and map without a false operational failure', async () => {

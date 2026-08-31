@@ -8,7 +8,12 @@ const MAX_NODES = 100_000;
 const MAX_ARRAY = 10_000;
 const MAX_STRING_CODE_POINTS = 1_048_576;
 const MAX_STRING_BYTES = 8_388_608;
+const MAX_PREVIEW_DATA_URL_BYTES = 1_000_000;
+const MAX_PREVIEW_TOTAL_BYTES = 2_000_000;
 const GROUP_NAMES = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
+const REPORT_REVISION_KEYS = Object.freeze([
+  'version', 'auditId', 'modelRevision', 'modelHash', 'model', 'checkpoint',
+]);
 
 function denied() { throw new TypeError('PANEL_RESULT_BUNDLE_DENIED'); }
 
@@ -67,6 +72,25 @@ function exact(value, keys) {
   const own = Object.keys(value);
   if (own.length !== keys.length || keys.some(key => !own.includes(key))) denied();
   return value;
+}
+
+function captureReportRevisionEnvelope(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) denied();
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) denied();
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    if (keys.length !== REPORT_REVISION_KEYS.length ||
+      keys.some(key => typeof key !== 'string' || !REPORT_REVISION_KEYS.includes(key))) denied();
+    const envelope = {};
+    for (const key of REPORT_REVISION_KEYS) {
+      const descriptor = descriptors[key];
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) denied();
+      envelope[key] = key === 'checkpoint' ? copyGraph(descriptor.value) : descriptor.value;
+    }
+    return envelope;
+  } catch { denied(); }
 }
 
 function string(value, nullable = false) {
@@ -133,7 +157,7 @@ function nullableStrings(value, keys) {
   for (const key of keys) string(value[key], true);
 }
 
-function validateDetail(detail, auditId) {
+function validateDetail(detail, auditId, previewBudget) {
   exact(detail, [
     'version', 'auditId', 'occurrenceId', 'checkKey', 'heading', 'affected', 'observed', 'correction',
     'targets', 'accessibility', 'normative', 'legalReference', 'previews', 'technical', 'action',
@@ -153,7 +177,14 @@ function validateDetail(detail, auditId) {
   string(detail.normative.abntItem, true); string(detail.normative.classification, true);
   if (detail.legalReference !== null) nullableStrings(detail.legalReference, ['basisRef', 'abntItem', 'statement', 'qualification']);
   if (!Array.isArray(detail.previews)) denied();
-  for (const preview of detail.previews) nullableStrings(preview, ['evidenceId', 'kind', 'dataUrl', 'mediaUrl', 'origin']);
+  for (const preview of detail.previews) {
+    nullableStrings(preview, ['evidenceId', 'kind', 'dataUrl', 'mediaUrl', 'origin']);
+    if (typeof preview.dataUrl === 'string' && preview.dataUrl.length > 0) {
+      const bytes = new TextEncoder().encode(preview.dataUrl).byteLength;
+      if (bytes > MAX_PREVIEW_DATA_URL_BYTES || previewBudget.bytes + bytes > MAX_PREVIEW_TOTAL_BYTES) denied();
+      previewBudget.bytes += bytes;
+    }
+  }
   exact(detail.technical, ['selector', 'framePath', 'snippet', 'styles', 'engine', 'ruleId', 'version', 'hashes']);
   string(detail.technical.selector, true); stringArray(detail.technical.framePath); string(detail.technical.snippet, true);
   if (!Array.isArray(detail.technical.styles)) denied();
@@ -166,6 +197,22 @@ function freeze(value, seen = new WeakSet()) {
   seen.add(value);
   for (const child of Object.values(value)) freeze(child, seen);
   return Object.freeze(value);
+}
+
+function applyPreviewBudget(details) {
+  let retainedBytes = 0;
+  return details.map(detail => ({
+    ...detail,
+    previews: detail.previews.map(preview => {
+      if (typeof preview.dataUrl !== 'string' || preview.dataUrl.length === 0) return { ...preview };
+      const bytes = new TextEncoder().encode(preview.dataUrl).byteLength;
+      if (bytes > MAX_PREVIEW_DATA_URL_BYTES || retainedBytes + bytes > MAX_PREVIEW_TOTAL_BYTES) {
+        return { ...preview, dataUrl: null };
+      }
+      retainedBytes += bytes;
+      return { ...preview };
+    }),
+  }));
 }
 
 export function copyPanelResultBundleV1(value) {
@@ -181,8 +228,9 @@ export function copyPanelResultBundleV1(value) {
     if (new Set(expectedIds).size !== expectedIds.length) denied();
     const sorted = [...expectedIds].sort((left, right) => left.localeCompare(right));
     if (bundle.details.length !== sorted.length) denied();
+    const previewBudget = { bytes: 0 };
     bundle.details.forEach((detail, index) => {
-      validateDetail(detail, bundle.auditId);
+      validateDetail(detail, bundle.auditId, previewBudget);
       if (detail.occurrenceId !== sorted[index]) denied();
       const cards = GROUP_NAMES.flatMap(name => bundle.summary.groups[name])
         .filter(card => card.occurrenceIds.includes(detail.occurrenceId));
@@ -194,7 +242,7 @@ export function copyPanelResultBundleV1(value) {
 
 export async function createPanelResultBundleV1({ reportRevision, inventory } = {}) {
   try {
-    const candidate = copyGraph(reportRevision);
+    const candidate = captureReportRevisionEnvelope(reportRevision);
     exact(candidate, ['version', 'auditId', 'modelRevision', 'modelHash', 'model', 'checkpoint']);
     if (candidate.version !== 1 || typeof candidate.auditId !== 'string' ||
       !Number.isSafeInteger(candidate.modelRevision) || candidate.modelRevision < 1 ||
@@ -210,8 +258,8 @@ export async function createPanelResultBundleV1({ reportRevision, inventory } = 
     const occurrenceIds = GROUP_NAMES.flatMap(name => summary.groups[name])
       .flatMap(card => card.occurrenceIds).filter(Boolean);
     if (new Set(occurrenceIds).size !== occurrenceIds.length) denied();
-    const details = [...occurrenceIds].sort((left, right) => left.localeCompare(right))
-      .map(occurrenceId => buildPanelDetail({ model, summary, occurrenceId, highlightAvailability: new Map() }));
+    const details = applyPreviewBudget([...occurrenceIds].sort((left, right) => left.localeCompare(right))
+      .map(occurrenceId => buildPanelDetail({ model, summary, occurrenceId, highlightAvailability: new Map() })));
     return copyPanelResultBundleV1({
       version: 1, auditId: candidate.auditId, modelRevision: candidate.modelRevision,
       modelHash: candidate.modelHash, summary, details,

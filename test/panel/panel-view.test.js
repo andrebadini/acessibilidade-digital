@@ -107,9 +107,9 @@ function card({ checkKey, occurrenceId, occurrenceIds, impact, wcag, abnt, class
 }
 
 function fixture() {
-  const first = card({ checkKey: 'check-1', occurrenceId: 'occ-1', impact: 'critical', wcag: 'AA', abnt: '5.1.1' });
-  const second = card({ checkKey: 'check-2', occurrenceId: 'occ-2', impact: 'serious', wcag: 'A', abnt: '5.1.4', classification: 'manual-review', context: 'mixed' });
-  const passed = card({ checkKey: 'check-3', occurrenceId: null, impact: null, wcag: 'AAA', abnt: '5.1.2', classification: 'passed', context: 'page-or-process' });
+  const first = card({ checkKey: 'check-1', occurrenceId: 'occ-1', impact: 'critical', wcag: '2.4.7', abnt: '5.1.1' });
+  const second = card({ checkKey: 'check-2', occurrenceId: 'occ-2', impact: 'serious', wcag: '2.4.3', abnt: '5.1.4', classification: 'manual-review', context: 'mixed' });
+  const passed = card({ checkKey: 'check-3', occurrenceId: null, impact: null, wcag: '2.4.12', abnt: '5.1.2', classification: 'passed', context: 'page-or-process' });
   const summary = {
     version: 1, auditId: 'audit-1',
     identity: { finalUrl: 'https://exemplo.com/', completedAt: '2026-08-26T14:02:00.000Z', status: 'complete' },
@@ -174,6 +174,13 @@ test('filters OR within a dimension, AND across dimensions, and preserve the sel
   assert.deepEqual(view.result.groups.failed, []);
   assert.deepEqual(view.result.groups.humanReview, []);
   assert.equal(view.result.detail.occurrenceId, 'occ-1', 'filtro não destrói a seleção oculta');
+
+  input.state.filters = { impact: [], wcag: ['AAA'], abnt: [] };
+  view = buildPanelView(input);
+  assert.deepEqual(view.result.groups.failed, []);
+  assert.deepEqual(view.result.groups.humanReview, []);
+  assert.deepEqual(view.result.groups.passed.map(row => row.checkKey), ['check-3']);
+  assert.deepEqual(view.result.detail.normative.wcag, ['1.1.1'], 'detail keeps criterion IDs instead of filter levels');
 });
 
 test('renders the exact ten detail blocks from PanelDetailV1', () => {
@@ -617,6 +624,20 @@ test('evidence fallback renders only a validated local PNG with contextual alter
   assert.equal(images[0].getAttribute('width'), '1');
   assert.equal(images[0].getAttribute('height'), '1');
   assert.equal(root.querySelectorAll('[src="https://remote.invalid/secret.png"]').length, 0);
+});
+
+test('explains a preview omitted by the panel budget without inventing or exposing an image source', () => {
+  const input = fixture();
+  input.state.evidenceExpanded = true;
+  input.detail.previews = [
+    { evidenceId: 'ev-large', kind: 'full-page', dataUrl: null, mediaUrl: '', origin: '' },
+  ];
+  const root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+
+  assert.equal(root.querySelectorAll('[data-evidence-preview-image]').length, 0);
+  assert.match(root.textContent, /prévia.*omitida.*painel.*relatório/iu);
 });
 
 test('persistent simulation controls expose pressed state and reader transport labels', () => {

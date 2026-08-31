@@ -3,7 +3,6 @@ import {
   createSessionPixelAttemptDigestAuthority,
   createSessionUrlDigestManager,
 } from '../core/privacy/session-url-digest.js';
-import { probeSensitiveContextInTab } from '../browser/sensitive-context-probe.js';
 import { createRawNavigationVaultV1 } from './raw-navigation-vault.js';
 import { createAuditDeletedEvent } from '../core/audit-deleted-event.js';
 import { applyReviewDecisions, createReviewDecision } from '../core/review/decisions.js';
@@ -112,6 +111,13 @@ function own(value, key) {
     const descriptor = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key) : null;
     return descriptor?.enumerable && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
   } catch { return undefined; }
+}
+
+function captureSensitiveCaptureProbeAuthority(adapter) {
+  const first = own(adapter, 'probeSensitiveCaptureSignals');
+  const second = own(adapter, 'probeSensitiveCaptureSignals');
+  if (typeof first !== 'function' || first !== second) throw new Error('WORKER_UNAVAILABLE');
+  return Object.freeze((tabId, documentId) => Reflect.apply(first, adapter, [tabId, documentId]));
 }
 
 function same(left, right) {
@@ -742,6 +748,7 @@ async function buildDefaultRuntime(chromeApi, options) {
   const chromeAdapter = options.chromeAdapterOverrides
     ? composeChromeAdapter(baseAdapter, options.chromeAdapterOverrides)
     : Object.freeze(baseAdapter);
+  const probeSensitiveCaptureSignals = captureSensitiveCaptureProbeAuthority(chromeAdapter);
   const authority = createTargetCapabilityAuthority({
     chromeApi, sessionArea, now: epochNow, randomBytes: bytes,
     probeDocument: tabId => chromeAdapter.probeDocumentIdentity(tabId),
@@ -944,9 +951,7 @@ async function buildDefaultRuntime(chromeApi, options) {
     epochNow, modelNow, createAbortController: () => new AbortController(),
     pixelState,
     probeDocumentIdentity: tabId => chromeAdapter.probeDocumentIdentity(tabId),
-    probeSensitiveCaptureSignals: (tabId, documentId) => probeSensitiveContextInTab(tabId, {
-      executeScript: details => chromeApi.scripting.executeScript(details), documentIds: [documentId],
-    }),
+    probeSensitiveCaptureSignals,
     pixelAttemptLifecycle,
     schedulePixelExpiry: () => pixelScheduler.scheduleNext(),
   });

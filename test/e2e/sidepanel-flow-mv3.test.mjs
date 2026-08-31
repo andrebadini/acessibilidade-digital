@@ -43,7 +43,7 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
   const fixture = await startFixtureServer(t, new Map([['/', {
     status: 200,
     headers: { 'content-type': 'text/html; charset=utf-8' },
-    body: '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Fixture Audita</title></head><body><main><h1>Teste local</h1><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="><a href="/">clique aqui</a><button>Continuar</button></main></body></html>',
+    body: '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Fixture Audita</title></head><body><main><h1>Teste local</h1><label for="fixture-password">Senha</label><input id="fixture-password" type="password" autocomplete="current-password" value=""><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="><a href="/">clique aqui</a><button>Continuar</button></main></body></html>',
   }], ['/after-navigation', {
     status: 200,
     headers: { 'content-type': 'text/html; charset=utf-8' },
@@ -63,6 +63,11 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
       expectedMajor: 152,
     });
     assert.equal(extension.chromeProduct, CANONICAL_CHROME_PRODUCT);
+    const sensitivityFixture = await extension.evaluate(extension.startPage.page, `(() => {
+      const fields=[...document.querySelectorAll('input[type="password"]')];
+      return { count: fields.length, empty: fields.every(field=>field.value==='') };
+    })()`);
+    assert.deepEqual(sensitivityFixture, { count: 1, empty: true });
     const panelBehavior = await extension.evaluate(extension.harnessPage,
       'chrome.sidePanel.getPanelBehavior()', { awaitPromise: true });
     assert.equal(panelBehavior?.openPanelOnActionClick, false);
@@ -125,23 +130,112 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
     const initialState = await extension.evaluate(panel, `(() => ({
       screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
       heading: document.querySelector('[data-screen] h2')?.textContent ?? null,
-      status: document.querySelector('[role="status"]')?.textContent ?? null
+      status: document.querySelector('[role="status"]')?.textContent ?? null,
+      notice: document.querySelector('.privacy-local-copy')?.textContent ?? null,
+      modes: [...document.querySelectorAll('input[data-capture-mode]')].map(input => ({
+        mode: input.dataset.captureMode ?? null,
+        type: input.type,
+        checked: input.checked,
+        disabled: input.disabled,
+        described: Boolean(input.getAttribute('aria-describedby'))
+      })),
+      startButtons: document.querySelectorAll('button[data-intent="START_ATTACHED"]').length
     }))()`);
     t.diagnostic(`panel-initial=${JSON.stringify(initialState)}`);
     assert.equal(initialState.screen, 'initial');
     assert.equal(initialState.heading, 'Avaliar acessibilidade');
+    assert.match(initialState.notice, /A auditoria pode capturar pixels e conteúdo visível, inclusive dados pessoais\. Tudo permanece neste dispositivo\./u);
+    assert.deepEqual(initialState.modes, [
+      { mode: 'full-evidence', type: 'radio', checked: true, disabled: false, described: true },
+      { mode: 'element-only', type: 'radio', checked: false, disabled: false, described: true },
+      { mode: 'no-pixels', type: 'radio', checked: false, disabled: false, described: true },
+    ]);
+    assert.equal(initialState.startButtons, 1);
     await proveStablePanel('initial');
     await assertTokenNotExposed(panel, 'panel initial must not expose launch authority');
     await extension.captureJourney('panel-initial', panel);
 
-    await extension.click(panel, 'button[data-focus-id="start-attached"][data-intent="START_ATTACHED"]');
-    const startState = await extension.waitForValue(panel, `(() => ({
+    for (const mode of ['element-only', 'no-pixels', 'full-evidence']) {
+      await extension.click(panel, `input[data-capture-mode="${mode}"]`);
+      const selectedMode = await extension.waitForValue(panel, `(() => ({
+        screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
+        checked: document.querySelector('input[name="capture-mode"]:checked')?.dataset.captureMode ?? null,
+        startButtons: document.querySelectorAll('button[data-intent="START_ATTACHED"]').length
+      }))()`, value => value?.screen === 'initial' && value?.checked === mode && value?.startButtons === 1,
+      { timeoutMs: 5_000, intervalMs: 50 });
+      assert.deepEqual(selectedMode, { screen: 'initial', checked: mode, startButtons: 1 });
+    }
+
+    const waitForPrivacyPause = () => extension.waitForValue(panel, `(() => {
+      const root=document.querySelector('[data-screen="running"][data-session-status="privacy-paused"]');
+      return {
+        screen: root?.dataset.screen ?? null,
+        sessionStatus: root?.dataset.sessionStatus ?? null,
+        categories: [...(root?.querySelectorAll('.privacy-signals li') ?? [])].map(item=>item.textContent),
+        confirm: root?.querySelector('button[data-intent="CONFIRM_PIXEL_CAPTURE"]')?.textContent ?? null,
+        cancel: root?.querySelector('button[data-intent="CANCEL_AUDIT"]')?.textContent ?? null
+      };
+    })()`, value => value?.screen === 'running' && value?.sessionStatus === 'privacy-paused' &&
+      value?.categories?.includes('Campo de senha') && typeof value?.confirm === 'string' && typeof value?.cancel === 'string', {
+      timeoutMs: 30_000, intervalMs: 50,
+    });
+
+    await extension.click(panel, 'button[data-intent="START_ATTACHED"]');
+    const firstPause = await waitForPrivacyPause();
+    t.diagnostic(`panel-first-privacy-pause=${JSON.stringify(firstPause)}`);
+    assert.ok(firstPause.categories.includes('Campo de senha'));
+    assert.match(firstPause.confirm, /Continuar e capturar/u);
+    assert.match(firstPause.cancel, /Cancelar auditoria/u);
+    await proveStablePanel('first-privacy-pause');
+    await extension.captureJourney('panel-privacy-pause-cancel', panel);
+
+    await extension.click(panel, 'button[data-intent="CANCEL_AUDIT"]');
+    const cancelledState = await extension.waitForValue(panel, `(() => ({
       screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
       heading: document.querySelector('[data-screen] h2')?.textContent ?? null,
+      selectedMode: document.querySelector('input[name="capture-mode"]:checked')?.dataset.captureMode ?? null
+    }))()`, value => value?.screen === 'initial' && value?.heading === 'Avaliar acessibilidade' &&
+      value?.selectedMode === 'full-evidence', { timeoutMs: 30_000, intervalMs: 50 });
+    assert.deepEqual(cancelledState, {
+      screen: 'initial', heading: 'Avaliar acessibilidade', selectedMode: 'full-evidence',
+    });
+    await proveStablePanel('cancelled-and-rehydrated');
+    await assertTokenNotExposed(panel, 'cancelled panel must not expose launch authority');
+    await extension.captureJourney('panel-after-cancel', panel);
+
+    await extension.click(panel, 'button[data-intent="START_ATTACHED"]');
+    const secondPause = await waitForPrivacyPause();
+    t.diagnostic(`panel-second-privacy-pause=${JSON.stringify(secondPause)}`);
+    assert.ok(secondPause.categories.includes('Campo de senha'));
+    await extension.click(panel, 'button[data-intent="CONFIRM_PIXEL_CAPTURE"]');
+    const confirmationState = await extension.waitForValue(panel, `(() => {
+      const root=document.querySelector('[data-screen="running"][data-session-status="privacy-paused"]');
+      const confirm=root?.querySelector('button[data-intent="CONFIRM_PIXEL_CAPTURE"]');
+      return {
+        screen: root?.dataset.screen ?? null,
+        sessionStatus: root?.dataset.sessionStatus ?? null,
+        ariaDisabled: confirm?.getAttribute('aria-disabled') ?? null,
+        label: confirm?.textContent ?? null,
+        confirmButtons: root?.querySelectorAll('button[data-intent="CONFIRM_PIXEL_CAPTURE"]').length ?? 0
+      };
+    })()`, value => value?.screen === 'running' && value?.sessionStatus === 'privacy-paused' &&
+      value?.ariaDisabled === 'true' && /Confirmação enviada/u.test(value?.label ?? '') && value?.confirmButtons === 1,
+    { timeoutMs: 10_000, intervalMs: 25 });
+    assert.deepEqual(confirmationState, {
+      screen: 'running', sessionStatus: 'privacy-paused', ariaDisabled: 'true',
+      label: 'Confirmação enviada', confirmButtons: 1,
+    });
+
+    const startState = await extension.waitForValue(panel, `(() => ({
+      screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
+      sessionStatus: document.querySelector('[data-screen]')?.dataset.sessionStatus ?? null,
+      heading: document.querySelector('[data-screen] h2')?.textContent ?? null,
       status: document.querySelector('[role="status"]')?.textContent ?? null
-    }))()`, value => ['running', 'result', 'unavailable'].includes(value?.screen), { timeoutMs: 10_000, intervalMs: 50 });
-    t.diagnostic(`panel-after-start=${JSON.stringify(startState)}`);
-    assert.notEqual(startState.screen, 'unavailable');
+    }))()`, value => value?.screen === 'result' ||
+      (value?.screen === 'running' && value?.sessionStatus === null), { timeoutMs: 30_000, intervalMs: 50 });
+    t.diagnostic(`panel-after-confirmation=${JSON.stringify(startState)}`);
+    assert.ok(['running', 'result'].includes(startState.screen));
+    assert.notEqual(startState.sessionStatus, 'privacy-paused');
 
     const terminalState = await extension.waitForValue(panel, `(() => ({
       screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
@@ -173,7 +267,7 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
     const summary = await extension.evaluate(panel, `(() => ({
       coverage: Number(document.querySelector('progress.coverage-progress')?.max ?? 0),
       failures: document.querySelectorAll('[data-result-card][data-classification="failed"]').length,
-      occurrenceButton: Boolean(document.querySelector('button.card-select,button.occurrence-select'))
+      occurrenceButton: Boolean(document.querySelector('button[data-intent="SELECT_OCCURRENCE"]'))
     }))()`);
     assert.ok(summary.coverage > 0);
     assert.ok(summary.failures > 0);
@@ -181,12 +275,12 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
     await extension.captureJourney('panel-summary', panel);
 
     const occurrenceCount = await extension.evaluate(panel,
-      "document.querySelectorAll('button.card-select,button.occurrence-select').length");
+      "document.querySelectorAll('button[data-intent=\"SELECT_OCCURRENCE\"]').length");
     assert.ok(Number.isInteger(occurrenceCount) && occurrenceCount > 0);
     let selectedOccurrenceId = null;
     for (let index = 0; index < Math.min(occurrenceCount, 40); index += 1) {
       const selected = await extension.evaluate(panel, `(() => {
-        const button=[...document.querySelectorAll('button.card-select,button.occurrence-select')][${index}];
+        const button=[...document.querySelectorAll('button[data-intent="SELECT_OCCURRENCE"]')][${index}];
         if(!button)return false;
         button.click();
         return true;
@@ -195,16 +289,32 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
       const availability = await extension.waitForValue(panel, `(() => ({
         highlight:Boolean(document.querySelector('[data-action="highlight-occurrence"]')),
         unavailable:/Não foi possível destacar este item/iu.test(document.querySelector('[role="status"]')?.textContent??''),
-        focusId:document.querySelector('[aria-pressed="true"][data-focus-id^="occurrence-"]')?.dataset.focusId??null
+        focusId:document.querySelector('[aria-pressed="true"][data-focus-id^="occurrence-"]')?.dataset.focusId??null,
+        normative:document.querySelector('[data-detail-block="normative"]')?.textContent??'',
+        accessibility:document.querySelector('[data-detail-block="accessibility"]')?.textContent??'',
+        evidenceImage:Boolean(document.querySelector('[data-detail-block="previews"] [data-evidence-preview-image]'))
       }))()`, value => value?.highlight === true || value?.unavailable === true,
       { timeoutMs: 5_000, intervalMs: 50 }).catch(() => null);
-      if (availability?.highlight === true && typeof availability.focusId === 'string') {
+      if (availability?.highlight === true && typeof availability.focusId === 'string' &&
+        /WCAG\s+\d/u.test(availability.normative) && /ABNT NBR 17225:\s*\S/u.test(availability.normative) &&
+        /Anúncio esperado:/u.test(availability.accessibility) && availability.evidenceImage === true) {
         selectedOccurrenceId = availability.focusId.slice('occurrence-'.length);
         break;
       }
     }
     assert.match(selectedOccurrenceId, /^[A-Za-z0-9._:-]{1,200}$/u);
     await extension.waitForValue(panel, "Boolean(document.querySelector('[data-result-detail]'))", Boolean);
+    const detailState = await extension.evaluate(panel, `(() => ({
+      normative: document.querySelector('[data-detail-block="normative"]')?.textContent ?? '',
+      accessibility: document.querySelector('[data-detail-block="accessibility"]')?.textContent ?? '',
+      evidenceImages: document.querySelectorAll('[data-detail-block="previews"] [data-evidence-preview-image]').length,
+      highlight: Boolean(document.querySelector('[data-action="highlight-occurrence"]'))
+    }))()`);
+    assert.match(detailState.normative, /WCAG\s+\d/u);
+    assert.match(detailState.normative, /ABNT NBR 17225:\s*\S/u);
+    assert.match(detailState.accessibility, /Anúncio esperado:/u);
+    assert.ok(detailState.evidenceImages > 0);
+    assert.equal(detailState.highlight, true);
     await extension.captureJourney('panel-detail', panel);
     await extension.click(panel, 'details[data-detail-block="previews"] > summary');
     await extension.waitForValue(panel, "document.querySelector('details[data-detail-block=" + '"previews"' + "]')?.open", Boolean);
@@ -212,7 +322,7 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
     assert.equal(new Set(stablePanelWidths).size, 1, 'the native panel width remains fixed across the journey');
     await extension.captureJourney('panel-evidence', panel);
 
-    await extension.click(panel, 'button[data-focus-id="open-report"]');
+    await extension.click(panel, 'button[data-intent="OPEN_REPORT"]');
     const report = await extension.waitForReport({ auditId });
     const reportState = await extension.waitForValue(report, `(() => ({
       readyState: document.readyState,

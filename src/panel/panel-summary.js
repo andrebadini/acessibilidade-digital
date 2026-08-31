@@ -1,5 +1,6 @@
 import { validateExecutionCheckpoint } from '../background/execution-checkpoint.js';
 import { createAuditModel } from '../core/report/audit-model.js';
+import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
 import { verifyCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
 import {
   assertPanelClassificationV1,
@@ -11,6 +12,7 @@ const COVERED_OUTCOMES = new Set(['passed', 'failed', 'inapplicable']);
 const GROUP_NAMES = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
 const IMPACT_ORDER = Object.freeze({ critical: 4, serious: 3, moderate: 2, minor: 1 });
 const OUTCOME_ORDER = Object.freeze({ failed: 5, cantTell: 4, untested: 3, passed: 2, inapplicable: 1 });
+const WCAG_LEVEL_ORDER = Object.freeze(['A', 'AA', 'AAA']);
 const FRAME_LIMITATION = 'Frames cross-origin ou com sandbox não observados aparecem como limitação.';
 const CLOSED_SHADOW_LIMITATION = 'Shadow DOM fechado não pode ser inspecionado automaticamente.';
 
@@ -234,12 +236,21 @@ function distribution(cards, field) {
   const counts = new Map();
   for (const card of cards) {
     const ids = field === 'impact' ? (card.impact ? [card.impact] : [])
-      : field === 'wcag' ? card.wcag
+      : field === 'wcag' ? wcagLevels(card.wcag)
         : card.abntItemIds;
     for (const id of ids) counts.set(id, (counts.get(id) ?? 0) + 1);
   }
+  if (field === 'wcag') {
+    return WCAG_LEVEL_ORDER.filter(id => counts.has(id)).map(id => ({ id, count: counts.get(id) }));
+  }
   return [...counts].sort(([left], [right]) => left.localeCompare(right))
     .map(([id, count]) => ({ id, count }));
+}
+
+function wcagLevels(criteria) {
+  const levels = new Set(criteria.map(criterion => WCAG22_LEVELS[criterion])
+    .filter(level => WCAG_LEVEL_ORDER.includes(level)));
+  return WCAG_LEVEL_ORDER.filter(level => levels.has(level));
 }
 
 function limitationCodes(model) {
