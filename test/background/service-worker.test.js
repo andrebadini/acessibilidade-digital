@@ -825,6 +825,11 @@ test('default runtime bootstraps the operational adapter through a trusted Chrom
 test('one canonical all-frame sensitive probe lets iframe password consent resume without alternating re-pause', async () => {
   const documentTargets = [];
   const rawUrl = 'https://example.test/';
+  const initialStartedAt = '2026-08-29T12:00:00.000Z';
+  const resumedAt = '2026-08-29T12:05:00.000Z';
+  let modelTime = initialStartedAt;
+  let rasterCalls = 0;
+  const auditStore = createInMemoryAuditStore();
   const scripting = {
     async executeScript(details) {
       const target = structuredClone(details.target);
@@ -861,7 +866,17 @@ test('one canonical all-frame sensitive probe lets iframe password consent resum
     async insertCSS() {},
     async removeCSS() {},
   };
-  const env = defaultGraphFixture(null, { useDefaultChromeAdapter: true, scripting });
+  const env = defaultGraphFixture(null, {
+    useDefaultChromeAdapter: true,
+    scripting,
+    auditStore,
+    modelNow: () => modelTime,
+  });
+  const sendCommand = env.chromeApi.debugger.sendCommand;
+  env.chromeApi.debugger.sendCommand = async (...args) => {
+    if (args[1] === 'Page.captureScreenshot') rasterCalls += 1;
+    return sendCommand(...args);
+  };
   const runtime = await env.registration.startupReady;
   const proof = await runtime.chromeAdapter.probeDocumentIdentity(17);
   const issuer = {
@@ -885,9 +900,15 @@ test('one canonical all-frame sensitive probe lets iframe password consent resum
   assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
   assert.deepEqual(await started.completion, { ok: true, auditId, state: 'privacy-paused', revision: null });
   const paused = env.sessionValues[`audita:pixel-capture:v1:${auditId}`];
+  const pausedCheckpoint = structuredClone(
+    env.sessionValues[`audita:execution-checkpoint:v1:${auditId}`]?.checkpoint,
+  );
   assert.deepEqual(paused.categories, ['password']);
+  assert.equal(pausedCheckpoint.pages[0].startedAt, initialStartedAt);
+  assert.equal(rasterCalls, 0);
 
   documentTargets.length = 0;
+  modelTime = resumedAt;
   const resumed = await runtime.auditStarter.resumePrivacyPausedAudit({
     auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9,
     consentId: paused.consentId, mode: 'full-evidence',
@@ -897,7 +918,9 @@ test('one canonical all-frame sensitive probe lets iframe password consent resum
   assert.equal(documentTargets.length > 0, true);
   assert.equal(documentTargets.every(value =>
     value.length === 2 && value[0] === 'document-a' && value[1] === 'document-child'), true);
-  assert.notEqual((await resumed.completion).state, 'privacy-paused');
+  assert.deepEqual(await resumed.completion, { ok: true, auditId, state: 'result', revision: 1 });
+  const revision = await auditStore.getReportRevision(auditId);
+  assert.equal(revision.checkpoint.pages[0].startedAt, initialStartedAt);
 });
 
 test('default worker keeps the volatile vault closed while injecting the one digest manager by factories', async () => {

@@ -769,6 +769,131 @@ test('attached sensitive preflight pauses with a durable checkpoint and zero ras
   assert.deepEqual(gateCalls, ['pause']);
 });
 
+test('attached privacy resume preserves the original empty checkpoint when the model clock advances', async () => {
+  const auditId = 'audit-attached-resume-checkpoint';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    sensitiveSignals: PASSWORD_SIGNALS,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  const target = {
+    kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+    initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST,
+  };
+  const paused = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22), target, capturePolicy: policy,
+    privacyGate: attachedPixelGate(policy, [], { auditId }),
+    chromeAdapter: adapter, modelNow: () => '2026-08-29T10:00:00.000Z',
+    expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { throw new Error('must-not-persist'); },
+  });
+  assert.equal(paused.state, 'privacy-paused');
+  assert.deepEqual(paused.checkpoint.pages[0].outcomes, []);
+  assert.equal(paused.checkpoint.pages[0].startedAt, '2026-08-29T10:00:00.000Z');
+  assert.equal(adapter.counts.screenshots, 0);
+
+  const resumedCheckpoints = [];
+  const resumed = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22), target, capturePolicy: policy,
+    privacyGate: attachedPixelGate(policy, [], { auditId, consentId: 'A'.repeat(21) + 'Q' }),
+    resumeCheckpoint: paused.checkpoint,
+    chromeAdapter: adapter, modelNow: () => '2026-08-29T10:05:00.000Z',
+    expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async checkpoint => { resumedCheckpoints.push(checkpoint); },
+    persistAuditModel: async () => {},
+  });
+
+  assert.equal(resumed.state, 'model');
+  assert.deepEqual(resumedCheckpoints[0], paused.checkpoint);
+  assert.equal(resumed.checkpoint.pages[0].startedAt, '2026-08-29T10:00:00.000Z');
+  assert.equal(resumed.model.pages[0].timestamps.startedAt, '2026-08-29T10:00:00.000Z');
+  assert.equal(adapter.counts.screenshots > 0, true);
+});
+
+test('attached privacy resume rejects impossible or hostile checkpoints before browser effects without echo', async () => {
+  const auditId = 'audit-attached-resume-denied';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    sensitiveSignals: PASSWORD_SIGNALS,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  const target = {
+    kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+    initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST,
+  };
+  const paused = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22), target, capturePolicy: policy,
+    privacyGate: attachedPixelGate(policy, [], { auditId }),
+    chromeAdapter: adapter, modelNow: () => '2026-08-29T10:00:00.000Z',
+    expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { throw new Error('must-not-persist'); },
+  });
+  assert.equal(paused.state, 'privacy-paused');
+
+  const changed = mutate => {
+    const value = structuredClone(paused.checkpoint);
+    mutate(value);
+    return value;
+  };
+  const marker = 'PRIVATE_RESUME_CHECKPOINT_MARKER';
+  let getterCalls = 0;
+  const accessor = { version: 1, auditId };
+  Object.defineProperty(accessor, 'pages', {
+    enumerable: true,
+    get() { getterCalls += 1; throw new Error(marker); },
+  });
+  const hostile = new Proxy({}, { ownKeys() { throw new Error(marker); } });
+  const extra = changed(() => {});
+  extra.private = marker;
+  const symbol = changed(() => {});
+  symbol[Symbol(marker)] = true;
+  const invalid = [
+    changed(value => { value.auditId = 'audit-foreign'; }),
+    changed(value => { value.pages[0].pageId = 'page-foreign'; }),
+    changed(value => { value.pages[0].inventoryHash = 'b'.repeat(64); }),
+    changed(value => { value.pages[0].outcomes.push({ ruleId: 'resume.private', outcome: 'passed' }); }),
+    extra,
+    symbol,
+    accessor,
+    hostile,
+  ];
+  let browserEffects = 0;
+  let checkpointEffects = 0;
+  let persistenceEffects = 0;
+  let modelClockReads = 0;
+  adapter.probeDocumentIdentity = async () => { browserEffects += 1; throw new Error(marker); };
+  adapter.probeSensitiveCaptureSignals = async () => { browserEffects += 1; throw new Error(marker); };
+  const eventsBefore = adapter.events.length;
+  const screenshotsBefore = adapter.counts.screenshots;
+
+  for (const resumeCheckpoint of invalid) {
+    await assert.rejects(() => runAttachedAuditExecution({
+      auditId, sessionCapabilityId: 'S'.repeat(22), target, capturePolicy: policy,
+      privacyGate: attachedPixelGate(policy, [], { auditId, consentId: 'A'.repeat(21) + 'Q' }),
+      resumeCheckpoint,
+      chromeAdapter: adapter,
+      modelNow: () => { modelClockReads += 1; return '2026-08-29T10:05:00.000Z'; },
+      expectedExtensionId: TEST_EXTENSION_ID,
+      onCheckpoint: async () => { checkpointEffects += 1; },
+      persistAuditModel: async () => { persistenceEffects += 1; },
+    }), error => {
+      assert.equal(error.message, 'ATTACHED_AUDIT_EXECUTION_DENIED');
+      assert.doesNotMatch(error.message, new RegExp(marker, 'u'));
+      return true;
+    });
+  }
+
+  assert.equal(getterCalls, 0);
+  assert.equal(browserEffects, 0);
+  assert.equal(checkpointEffects, 0);
+  assert.equal(persistenceEffects, 0);
+  assert.equal(modelClockReads, 0);
+  assert.equal(adapter.events.length, eventsBefore);
+  assert.equal(adapter.counts.screenshots, screenshotsBefore);
+});
+
 test('attached element collection failure before raster still performs cleanup once without persistence', async () => {
   const auditId = 'audit-attached-element-failure';
   const policy = createCapturePolicyV1({ mode: 'element-only', includeQuery: false });

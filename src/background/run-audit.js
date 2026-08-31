@@ -936,7 +936,7 @@ function proofMatchesAttached(value, target) {
 function captureAttachedFacadeArgs(value) {
   const allowed = [
     'auditId', 'sessionCapabilityId', 'target', 'capturePolicy', 'chromeAdapter', 'modelNow', 'signal',
-    'expectedExtensionId', 'pageId', 'onCheckpoint', 'persistAuditModel', 'privacyGate',
+    'expectedExtensionId', 'pageId', 'onCheckpoint', 'persistAuditModel', 'privacyGate', 'resumeCheckpoint',
   ];
   const required = [
     'auditId', 'sessionCapabilityId', 'target', 'capturePolicy', 'chromeAdapter', 'modelNow',
@@ -1150,6 +1150,7 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
   const {
     auditId, sessionCapabilityId, target: inputTarget, capturePolicy, chromeAdapter, modelNow,
     signal, expectedExtensionId, pageId = 'page-1', onCheckpoint, persistAuditModel, privacyGate = null,
+    resumeCheckpoint: inputResumeCheckpoint = null,
   } = args;
   const target = attachedTarget(inputTarget);
   const policyRecord = captureExactRecord(capturePolicy, [
@@ -1181,7 +1182,24 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
     }
   } catch { throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED'); }
   const inventory = await createInstalledCoreRuleInventory();
-  const startedAt = canonicalTime(modelNow());
+  let resumeCheckpoint = null;
+  if (inputResumeCheckpoint !== null) {
+    try {
+      resumeCheckpoint = validateExecutionCheckpoint({
+        auditId,
+        checkpoint: inputResumeCheckpoint,
+        pageOrder: [pageId],
+      });
+    } catch { throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED'); }
+    const resumePage = resumeCheckpoint.pages[0];
+    if (safeCapturePolicy.mode === 'no-pixels' || resumePage.attempted !== true ||
+      resumePage.rulesVersion !== inventory.rulesVersion ||
+      resumePage.inventoryVersion !== inventory.inventoryVersion ||
+      resumePage.inventoryHash !== inventory.sha256 || resumePage.outcomes.length !== 0) {
+      throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
+    }
+  }
+  const startedAt = resumeCheckpoint?.pages[0].startedAt ?? canonicalTime(modelNow());
   const checkpointRecorder = await createPageCheckpointRecorder({
     auditId, pageId, startedAt, rulesVersion: inventory.rulesVersion, inventory, onCheckpoint,
   });

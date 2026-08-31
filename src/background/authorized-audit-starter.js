@@ -714,6 +714,7 @@ export function createAuthorizedAuditStarter(input) {
         auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId,
         target: liveRecord.grant.target, capturePolicy: liveRecord.capturePolicy,
         ...(liveRecord.privacyGate ? { privacyGate: liveRecord.privacyGate } : {}),
+        ...(liveRecord.resumeCheckpoint ? { resumeCheckpoint: liveRecord.resumeCheckpoint } : {}),
         modelNow, signal: liveRecord.controller.signal,
         onCheckpoint: async checkpoint => {
           const canonicalCheckpoint = canonicalIntermediateCheckpoint(active.auditId, checkpoint);
@@ -1272,6 +1273,7 @@ export function createAuthorizedAuditStarter(input) {
             const controller = createAbortController();
             const liveRecord = {
               active: running, controller, grant, capturePolicy, privacyGate,
+              resumeCheckpoint: checkpoint.checkpoint,
               consentId: args.consentId, targetLock: lock,
               externallyInvalidated: false, liquidationReason: null,
               committed: null, completion, attemptHandle,
