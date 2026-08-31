@@ -282,10 +282,6 @@ function nextRevision(journal) {
   return journal.revision < Number.MAX_SAFE_INTEGER ? journal.revision + 1 : null;
 }
 
-function barrierKey(auditId, consentId) {
-  return `${auditId}\u0000${consentId}`;
-}
-
 function updatedJournal(current, updatedAt, changes) {
   const revision = nextRevision(current);
   if (revision === null || !validEpoch(updatedAt) || updatedAt < current.updatedAt) throw unavailable();
@@ -429,8 +425,8 @@ export function createPixelCaptureStateV1(options) {
       hasUnattributedUnavailable,
     };
   };
-  const ensureUnblocked = (auditId, consentId) => {
-    if (shared.barriers.has(barrierKey(auditId, consentId))) throw unavailable();
+  const ensureUnblocked = auditId => {
+    if (shared.barriers.has(auditId)) throw unavailable();
   };
   const revokeBindingMismatch = async (current, currentAt) => {
     try {
@@ -442,9 +438,9 @@ export function createPixelCaptureStateV1(options) {
         revokeReason: 'PIXEL_CONSENT_DOCUMENT_CHANGED',
       });
       await write(revoked, current);
-      shared.barriers.delete(barrierKey(current.auditId, current.consentId));
+      shared.barriers.delete(current.auditId);
     } catch {
-      shared.barriers.add(barrierKey(current.auditId, current.consentId));
+      shared.barriers.add(current.auditId);
       throw unavailable();
     }
     throw error('PIXEL_CONSENT_DOCUMENT_CHANGED');
@@ -488,7 +484,7 @@ export function createPixelCaptureStateV1(options) {
       const currentCategories = input && categories(input.categories, { allowEmpty: true });
       if (!input || !validAuditId(input.auditId) || !validConsentId(input.consentId) ||
         !currentProof || !MODES.has(input.mode) || !currentCategories) throw unavailable();
-      ensureUnblocked(input.auditId, input.consentId);
+      ensureUnblocked(input.auditId);
       const current = await read(input.auditId);
       if (!current) throw error('PIXEL_CONSENT_MISSING');
       const claimedAt = at();
@@ -507,7 +503,7 @@ export function createPixelCaptureStateV1(options) {
           });
           await write(rotated, current);
         } catch {
-          shared.barriers.add(barrierKey(current.auditId, current.consentId));
+          shared.barriers.add(current.auditId);
           throw unavailable();
         }
         throw error('PIXEL_CONSENT_SIGNALS_CHANGED');
@@ -527,7 +523,7 @@ export function createPixelCaptureStateV1(options) {
       if (!input || !validAuditId(input.auditId) || !validConsentId(input.consentId)) {
         throw error('PIXEL_RESUME_TRANSITION_INVALID');
       }
-      ensureUnblocked(input.auditId, input.consentId);
+      ensureUnblocked(input.auditId);
       const current = await read(input.auditId);
       if (!current) throw error('PIXEL_RESUME_TRANSITION_INVALID');
       const updatedAt = at();
@@ -549,7 +545,7 @@ export function createPixelCaptureStateV1(options) {
       const currentCategories = input && categories(input.categories, { allowEmpty: true });
       if (!input || !validAuditId(input.auditId) || !validConsentId(input.consentId) ||
         !currentProof || !currentCategories) throw error('PIXEL_RESUME_TRANSITION_INVALID');
-      ensureUnblocked(input.auditId, input.consentId);
+      ensureUnblocked(input.auditId);
       const current = await read(input.auditId);
       if (!current) throw error('PIXEL_RESUME_TRANSITION_INVALID');
       const updatedAt = at();
@@ -572,7 +568,7 @@ export function createPixelCaptureStateV1(options) {
       let replacementConsentId;
       try { replacementConsentId = consentToken(randomBytes, current.consentId); }
       catch {
-        shared.barriers.add(barrierKey(current.auditId, current.consentId));
+        shared.barriers.add(current.auditId);
         throw unavailable();
       }
       const repaused = updatedJournal(current, updatedAt, {
@@ -583,7 +579,7 @@ export function createPixelCaptureStateV1(options) {
       let confirmed;
       try { confirmed = await write(repaused, current); }
       catch {
-        shared.barriers.add(barrierKey(current.auditId, current.consentId));
+        shared.barriers.add(current.auditId);
         throw unavailable();
       }
       return deepFrozenCopy({
@@ -661,20 +657,18 @@ export function createPixelCaptureStateV1(options) {
       const updatedAt = at();
       const current = await read(input.auditId);
       if (!current) {
-        shared.barriers.delete(barrierKey(input.auditId, input.consentId));
         return revokeResult('missing');
       }
       assertFresh(current, updatedAt);
       if (current.consentId !== input.consentId) {
-        shared.barriers.delete(barrierKey(input.auditId, input.consentId));
         return revokeResult('mismatch');
       }
       if (current.state === 'finished') {
-        shared.barriers.delete(barrierKey(input.auditId, input.consentId));
+        shared.barriers.delete(input.auditId);
         return revokeResult('finished', current);
       }
       if (current.state === 'revoked') {
-        shared.barriers.delete(barrierKey(input.auditId, input.consentId));
+        shared.barriers.delete(input.auditId);
         return revokeResult('already-revoked', current);
       }
       let confirmed;
@@ -685,10 +679,10 @@ export function createPixelCaptureStateV1(options) {
         });
         confirmed = await write(revoked, current);
       } catch {
-        shared.barriers.add(barrierKey(input.auditId, input.consentId));
+        shared.barriers.add(input.auditId);
         throw unavailable();
       }
-      shared.barriers.delete(barrierKey(input.auditId, input.consentId));
+      shared.barriers.delete(input.auditId);
       return revokeResult('revoked', confirmed);
     }),
 
@@ -728,8 +722,8 @@ export function createPixelCaptureStateV1(options) {
         });
         current = await write(terminal, current);
       }
-      shared.barriers.delete(barrierKey(input.auditId, input.consentId));
       await erase(input.auditId);
+      shared.barriers.delete(input.auditId);
       return true;
     }),
   });

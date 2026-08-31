@@ -171,6 +171,7 @@ test('only defers the exact or immediate terminal revision after finish throws',
     { kind: 'immediate-finish', revisionDelta: 1, state: 'finished', cleanupAttempts: 0, expected: [3] },
     { kind: 'concurrent-defer', revisionDelta: 1, state: 'revoked', cleanupAttempts: 1, expected: [] },
     { kind: 'distant-replacement', revisionDelta: 2, state: 'finished', cleanupAttempts: 0, expected: [] },
+    { kind: 'foreign-snapshot', revisionDelta: 0, state: 'revoked', cleanupAttempts: 0, expected: [] },
   ];
   for (const scenario of scenarios) {
     const fixtureValue = fixture();
@@ -185,6 +186,17 @@ test('only defers the exact or immediate terminal revision after finish throws',
         cleanupNotBefore: scenario.cleanupAttempts === 0 ? NOW : NOW + 60_000,
       }),
       cleanupAttempts: scenario.cleanupAttempts,
+      ...(scenario.kind === 'foreign-snapshot' ? {
+        tabId: 8,
+        windowId: 4,
+        documentId: 'foreign-document',
+        urlEvidence: sanitizeEvidenceUrlV1('https://foreign.example/private'),
+        urlSessionDigest: `hmac-sha256:${'c'.repeat(43)}`,
+        mode: 'element-only',
+        capturePolicy: createCapturePolicyV1({ mode: 'element-only', includeQuery: false }),
+        categories: Object.freeze(['otp']),
+        issuedAt: NOW - 900,
+      } : {}),
     });
     const deferredRevisions = [];
     const state = {
@@ -1304,6 +1316,476 @@ test('rejects valid categories outside canonical order as a malformed scan', asy
   assert.equal(revokeCalls, 0);
   assert.equal(finishCalls, 0);
   assert.equal(fixtureValue.calls.length, 0);
+});
+
+test('does not adopt immutable fields from a foreign already-revoked snapshot', async () => {
+  const scenarios = [
+    {
+      name: 'owned source',
+      changes: {
+        source: Object.freeze({
+          kind: 'owned-disposable', ownershipId: 'owner-foreign',
+          cleanupMode: 'always', pageId: 'page-owned',
+        }),
+      },
+    },
+    { name: 'binding', changes: { tabId: 8 } },
+    { name: 'digest', changes: { urlSessionDigest: `hmac-sha256:${'c'.repeat(43)}` } },
+    {
+      name: 'policy',
+      changes: {
+        capturePolicy: createCapturePolicyV1({ mode: 'full-evidence', includeQuery: true }),
+      },
+    },
+    { name: 'categories', changes: { categories: Object.freeze(['otp']) } },
+  ];
+
+  for (const scenario of scenarios) {
+    const fixtureValue = fixture();
+    const candidate = Object.freeze({
+      ...recoveryCandidate({ auditId: `audit-foreign-${scenario.name.replace(' ', '-')}` }),
+      source: Object.freeze({
+        kind: 'owned-disposable', ownershipId: 'owner-owned',
+        cleanupMode: 'always', pageId: 'page-owned',
+      }),
+    });
+    const foreign = Object.freeze({ ...candidate, ...scenario.changes });
+    let liquidatorCalls = 0;
+    let deferCalls = 0;
+    let finishCalls = 0;
+    const state = {
+      async listRecoveryCandidates() {
+        return Object.freeze({
+          version: 'PixelRecoveryScanV1', candidates: Object.freeze([candidate]),
+          unavailableAuditIds: Object.freeze([]), hasUnattributedUnavailable: false,
+          blockingCount: 0,
+        });
+      },
+      async revokeAudit() {
+        return Object.freeze({
+          version: 'PixelRevokeResultV1', status: 'already-revoked',
+          suspension: foreign,
+        });
+      },
+      async deferCleanup() { deferCalls += 1; return foreign; },
+      async finish() { finishCalls += 1; return true; },
+      async nextExpiresAt() { return null; },
+    };
+    const scheduler = createPixelConsentExpirySchedulerV1(fixtureValue.chromeApi, {
+      pixelState: state,
+      liquidator: { async liquidate() { liquidatorCalls += 1; return true; } },
+      now: () => NOW,
+    });
+
+    await scheduler.run('panel');
+    assert.deepEqual(
+      { liquidatorCalls, deferCalls, finishCalls },
+      { liquidatorCalls: 0, deferCalls: 0, finishCalls: 0 },
+      scenario.name,
+    );
+  }
+});
+
+test('rejects revoke results outside the allowed status-specific correlation', async () => {
+  const pausedCandidate = auditId => recoveryCandidate({
+    auditId, state: 'paused', revokeReason: null, expiresAt: NOW - 1,
+  });
+  const revokedResult = (candidate, changes = {}) => Object.freeze({
+    ...candidate,
+    revision: candidate.revision + 1,
+    cleanupAttempts: 0,
+    cleanupNotBefore: NOW,
+    state: 'revoked',
+    resumePhase: null,
+    revokeReason: candidate.state === 'paused'
+      ? 'PIXEL_CONSENT_EXPIRED'
+      : 'PIXEL_RESUME_INTERRUPTED',
+    ...changes,
+  });
+  const finishedResult = (candidate, changes = {}) => Object.freeze({
+    ...candidate,
+    revision: candidate.revision + 1,
+    cleanupAttempts: 0,
+    cleanupNotBefore: NOW,
+    state: 'finished',
+    resumePhase: null,
+    revokeReason: null,
+    ...changes,
+  });
+  const scenarios = [
+    {
+      name: 'already-revoked concurrent defer', status: 'already-revoked',
+      candidate: recoveryCandidate({ auditId: 'audit-status-already-deferred' }),
+      result(candidate) {
+        return Object.freeze({
+          ...candidate, revision: candidate.revision + 1,
+          cleanupAttempts: 1, cleanupNotBefore: NOW + 60_000,
+        });
+      },
+    },
+    {
+      name: 'already-revoked after the immediate revocation was deferred',
+      status: 'already-revoked',
+      candidate: pausedCandidate('audit-status-already-paused-deferred'),
+      result(candidate) {
+        return revokedResult(candidate, {
+          revision: candidate.revision + 2,
+          revokeReason: 'AUDIT_CANCELLED',
+          cleanupAttempts: 1,
+          cleanupNotBefore: NOW + 60_000,
+        });
+      },
+    },
+    {
+      name: 'revoked without revision increment', status: 'revoked',
+      candidate: pausedCandidate('audit-status-revoked-same-revision'),
+      result: candidate => revokedResult(candidate, { revision: candidate.revision }),
+    },
+    {
+      name: 'revoked after a skipped revision', status: 'revoked',
+      candidate: pausedCandidate('audit-status-revoked-skipped-revision'),
+      result: candidate => revokedResult(candidate, { revision: candidate.revision + 2 }),
+    },
+    {
+      name: 'revoked with a foreign reason', status: 'revoked',
+      candidate: pausedCandidate('audit-status-revoked-reason'),
+      result: candidate => revokedResult(candidate, { revokeReason: 'AUDIT_CANCELLED' }),
+    },
+    {
+      name: 'revoked carrying cleanup attempts', status: 'revoked',
+      candidate: pausedCandidate('audit-status-revoked-cleanup-attempts'),
+      result: candidate => revokedResult(candidate, { cleanupAttempts: 1 }),
+    },
+    {
+      name: 'revoked with delayed cleanup', status: 'revoked',
+      candidate: pausedCandidate('audit-status-revoked-cleanup-delay'),
+      result: candidate => revokedResult(candidate, { cleanupNotBefore: NOW + 60_000 }),
+    },
+    {
+      name: 'revoked from an already-revoked candidate', status: 'revoked',
+      candidate: recoveryCandidate({ auditId: 'audit-status-revoked-origin' }),
+      result: candidate => candidate,
+    },
+    {
+      name: 'finished without a newer revision', status: 'finished',
+      candidate: pausedCandidate('audit-status-finished-same-revision'),
+      result: candidate => finishedResult(candidate, { revision: candidate.revision }),
+    },
+    {
+      name: 'finished with a regressed update time', status: 'finished',
+      candidate: recoveryCandidate({ auditId: 'audit-status-finished-regressed-time' }),
+      result: candidate => finishedResult(candidate, {
+        revision: candidate.revision + 2,
+        updatedAt: candidate.updatedAt - 1,
+        cleanupNotBefore: candidate.updatedAt - 1,
+      }),
+    },
+    {
+      name: 'finished with a concurrent cleanup mutation', status: 'finished',
+      candidate: recoveryCandidate({ auditId: 'audit-status-finished-cleanup' }),
+      result: candidate => finishedResult(candidate, {
+        cleanupAttempts: 1, cleanupNotBefore: NOW,
+      }),
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const fixtureValue = fixture();
+    let liquidatorCalls = 0;
+    let deferCalls = 0;
+    let finishCalls = 0;
+    const state = {
+      async listRecoveryCandidates() {
+        return Object.freeze({
+          version: 'PixelRecoveryScanV1', candidates: Object.freeze([scenario.candidate]),
+          unavailableAuditIds: Object.freeze([]), hasUnattributedUnavailable: false,
+          blockingCount: scenario.startup ? 1 : 0,
+        });
+      },
+      async revokeAudit() {
+        return Object.freeze({
+          version: 'PixelRevokeResultV1', status: scenario.status,
+          suspension: scenario.result(scenario.candidate),
+        });
+      },
+      async deferCleanup() { deferCalls += 1; return null; },
+      async finish() { finishCalls += 1; return true; },
+      async nextExpiresAt() { return null; },
+    };
+    const scheduler = createPixelConsentExpirySchedulerV1(fixtureValue.chromeApi, {
+      pixelState: state,
+      liquidator: { async liquidate() { liquidatorCalls += 1; return true; } },
+      now: () => NOW,
+    });
+
+    if (scenario.startup) {
+      await assert.rejects(scheduler.recoverOnStartup(), /PIXEL_RECOVERY_PENDING/u);
+    } else {
+      await scheduler.run('panel');
+    }
+    assert.deepEqual(
+      { liquidatorCalls, deferCalls, finishCalls },
+      { liquidatorCalls: 0, deferCalls: 0, finishCalls: 0 },
+      scenario.name,
+    );
+  }
+});
+
+for (const race of [
+  { state: 'paused', firstReason: 'AUDIT_CANCELLED', startup: false },
+  { state: 'resuming', firstReason: 'SESSION_ENDED', startup: true },
+]) {
+  test(`accepts a real ${race.state} first-writer revocation returned as already-revoked`, async () => {
+    let wall = NOW;
+    const fixtureValue = fixture({ now: () => wall });
+    const paused = await fixtureValue.pixelState.pause(pauseInput(
+      `audit-real-already-${race.state}`,
+      race.state === 'paused' ? NOW + 1 : NOW + 1_000,
+    ));
+    if (race.state === 'paused') {
+      wall += 2;
+    } else {
+      await fixtureValue.pixelState.claimAndBeginResume({
+        auditId: paused.auditId,
+        consentId: paused.consentId,
+        proof: {
+          kind: 'attached', tabId: 7, windowId: 3,
+          documentId: `doc-${paused.auditId}`, urlSessionDigest: DIGEST,
+        },
+        mode: 'full-evidence',
+        categories: ['password'],
+      });
+    }
+    let firstRevocation = null;
+    const racedState = {
+      ...fixtureValue.pixelState,
+      async revokeAudit(request) {
+        if (firstRevocation === null) {
+          firstRevocation = await fixtureValue.pixelState.revokeAudit({
+            ...request,
+            reason: race.firstReason,
+          });
+          assert.equal(firstRevocation.status, 'revoked');
+        }
+        return fixtureValue.pixelState.revokeAudit(request);
+      },
+    };
+    const scheduler = createPixelConsentExpirySchedulerV1(fixtureValue.chromeApi, {
+      pixelState: racedState,
+      liquidator: fixtureValue.liquidator,
+      now: () => wall,
+    });
+
+    if (race.startup) await scheduler.recoverOnStartup();
+    else await scheduler.run('panel');
+
+    assert.equal(firstRevocation.suspension.revokeReason, race.firstReason);
+    assert.equal(fixtureValue.calls.length, 1);
+    assert.equal(fixtureValue.calls[0].reason, race.firstReason);
+    assert.equal(await fixtureValue.pixelState.readSuspension(paused.auditId), null);
+  });
+}
+
+for (const race of [
+  { state: 'paused', firstReason: 'AUDIT_DELETED', startup: false },
+  { state: 'resuming', firstReason: 'SESSION_ENDED', startup: true },
+]) {
+  test(`finishes only after a real ${race.state} revocation-and-finish race`, async () => {
+    let wall = NOW;
+    const fixtureValue = fixture({ now: () => wall });
+    const paused = await fixtureValue.pixelState.pause(pauseInput(
+      `audit-real-finished-${race.state}`,
+      race.state === 'paused' ? NOW + 1 : NOW + 1_000,
+    ));
+    if (race.state === 'paused') {
+      wall += 2;
+    } else {
+      await fixtureValue.pixelState.claimAndBeginResume({
+        auditId: paused.auditId,
+        consentId: paused.consentId,
+        proof: {
+          kind: 'attached', tabId: 7, windowId: 3,
+          documentId: `doc-${paused.auditId}`, urlSessionDigest: DIGEST,
+        },
+        mode: 'full-evidence',
+        categories: ['password'],
+      });
+    }
+    const listed = await fixtureValue.pixelState.readSuspension(paused.auditId);
+    let raced = false;
+    let schedulerFinishCalls = 0;
+    const racedState = {
+      ...fixtureValue.pixelState,
+      async revokeAudit(request) {
+        if (!raced) {
+          raced = true;
+          const revoked = await fixtureValue.pixelState.revokeAudit({
+            ...request,
+            reason: race.firstReason,
+          });
+          assert.equal(revoked.status, 'revoked');
+          assert.equal(revoked.suspension.revision, listed.revision + 1);
+          const originalRemove = fixtureValue.sessionArea.remove;
+          fixtureValue.sessionArea.remove = async () => {};
+          try {
+            await assert.rejects(
+              fixtureValue.pixelState.finish({
+                auditId: paused.auditId,
+                consentId: paused.consentId,
+              }),
+              /PIXEL_STATE_UNAVAILABLE/u,
+            );
+          } finally {
+            fixtureValue.sessionArea.remove = originalRemove;
+          }
+          const terminal = await fixtureValue.pixelState.readSuspension(paused.auditId);
+          assert.equal(terminal.state, 'finished');
+          assert.equal(terminal.revision, listed.revision + 2);
+          assert.equal(terminal.cleanupAttempts, 0);
+          assert.equal(terminal.cleanupNotBefore, terminal.updatedAt);
+        }
+        return fixtureValue.pixelState.revokeAudit(request);
+      },
+      async finish(request) {
+        schedulerFinishCalls += 1;
+        return fixtureValue.pixelState.finish(request);
+      },
+    };
+    const scheduler = createPixelConsentExpirySchedulerV1(fixtureValue.chromeApi, {
+      pixelState: racedState,
+      liquidator: fixtureValue.liquidator,
+      now: () => wall,
+    });
+
+    if (race.startup) await scheduler.recoverOnStartup();
+    else await scheduler.run('panel');
+
+    assert.equal(fixtureValue.calls.length, 0);
+    assert.equal(schedulerFinishCalls, 1);
+    assert.equal(await fixtureValue.pixelState.readSuspension(paused.auditId), null);
+  });
+}
+
+test('accepts exact canonical snapshots for each revoke result status', async () => {
+  const paused = recoveryCandidate({
+    auditId: 'audit-status-valid-revoked', state: 'paused',
+    revokeReason: null, expiresAt: NOW - 1,
+  });
+  const revoked = recoveryCandidate({ auditId: 'audit-status-valid-already' });
+  const cleanupPending = Object.freeze({
+    ...recoveryCandidate({ auditId: 'audit-status-valid-finished' }),
+    issuedAt: NOW - 120_000, updatedAt: NOW - 60_000,
+    cleanupAttempts: 1, cleanupNotBefore: NOW,
+  });
+  const scenarios = [
+    {
+      name: 'revoked', candidate: paused, status: 'revoked', liquidatorCalls: 1,
+      result: Object.freeze({
+        ...paused, revision: paused.revision + 1,
+        cleanupAttempts: 0, cleanupNotBefore: NOW,
+        state: 'revoked', resumePhase: null, revokeReason: 'PIXEL_CONSENT_EXPIRED',
+      }),
+    },
+    {
+      name: 'already-revoked', candidate: revoked, status: 'already-revoked',
+      liquidatorCalls: 1, result: revoked,
+    },
+    {
+      name: 'finished', candidate: cleanupPending, status: 'finished', liquidatorCalls: 0,
+      result: Object.freeze({
+        ...cleanupPending, revision: cleanupPending.revision + 1,
+        updatedAt: NOW, cleanupAttempts: 0, cleanupNotBefore: NOW,
+        state: 'finished', resumePhase: null, revokeReason: null,
+      }),
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const fixtureValue = fixture();
+    let revokeCalls = 0;
+    let liquidatorCalls = 0;
+    let deferCalls = 0;
+    let finishCalls = 0;
+    const state = {
+      async listRecoveryCandidates() {
+        return Object.freeze({
+          version: 'PixelRecoveryScanV1', candidates: Object.freeze([scenario.candidate]),
+          unavailableAuditIds: Object.freeze([]), hasUnattributedUnavailable: false,
+          blockingCount: 0,
+        });
+      },
+      async revokeAudit() {
+        revokeCalls += 1;
+        return Object.freeze({
+          version: 'PixelRevokeResultV1', status: scenario.status,
+          suspension: scenario.result,
+        });
+      },
+      async deferCleanup() { deferCalls += 1; return null; },
+      async finish() { finishCalls += 1; return true; },
+      async nextExpiresAt() { return null; },
+    };
+    const scheduler = createPixelConsentExpirySchedulerV1(fixtureValue.chromeApi, {
+      pixelState: state,
+      liquidator: { async liquidate() { liquidatorCalls += 1; return true; } },
+      now: () => NOW,
+    });
+
+    await scheduler.run('panel');
+    assert.deepEqual(
+      { revokeCalls, liquidatorCalls, deferCalls, finishCalls },
+      {
+        revokeCalls: 1, liquidatorCalls: scenario.liquidatorCalls,
+        deferCalls: 0, finishCalls: 1,
+      },
+      scenario.name,
+    );
+  }
+});
+
+test('accepts an immediate finished transition from runner-started recovery', async () => {
+  const fixtureValue = fixture();
+  const candidate = Object.freeze({
+    ...recoveryCandidate({
+      auditId: 'audit-status-valid-runner-finished',
+      state: 'resuming', revokeReason: null,
+    }),
+    resumePhase: 'runner-started',
+  });
+  const finished = Object.freeze({
+    ...candidate, revision: candidate.revision + 1,
+    cleanupAttempts: 0, cleanupNotBefore: NOW,
+    state: 'finished', resumePhase: null, revokeReason: null,
+  });
+  let active = true;
+  let liquidatorCalls = 0;
+  let finishCalls = 0;
+  const state = {
+    async listRecoveryCandidates() {
+      return Object.freeze({
+        version: 'PixelRecoveryScanV1',
+        candidates: Object.freeze(active ? [candidate] : []),
+        unavailableAuditIds: Object.freeze([]), hasUnattributedUnavailable: false,
+        blockingCount: active ? 1 : 0,
+      });
+    },
+    async revokeAudit() {
+      return Object.freeze({
+        version: 'PixelRevokeResultV1', status: 'finished', suspension: finished,
+      });
+    },
+    async finish() { finishCalls += 1; active = false; return true; },
+    async nextExpiresAt() { return null; },
+  };
+  const scheduler = createPixelConsentExpirySchedulerV1(fixtureValue.chromeApi, {
+    pixelState: state,
+    liquidator: { async liquidate() { liquidatorCalls += 1; return true; } },
+    now: () => NOW,
+  });
+
+  await scheduler.recoverOnStartup();
+  assert.equal(liquidatorCalls, 0);
+  assert.equal(finishCalls, 1);
 });
 
 const invalidRevokeResultScenarios = [

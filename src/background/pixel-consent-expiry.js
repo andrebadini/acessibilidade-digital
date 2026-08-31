@@ -86,14 +86,25 @@ function suspensionProjection(value) {
   const terminal = suspension.state === 'revoked' || suspension.state === 'finished';
   if (terminal ? !validEpoch(suspension.cleanupNotBefore) || suspension.cleanupNotBefore < suspension.updatedAt : suspension.cleanupAttempts !== 0 || suspension.cleanupNotBefore !== null) return null;
   return Object.freeze({
+    version: suspension.version,
     auditId: suspension.auditId,
     consentId: suspension.consentId,
     revision: suspension.revision,
+    tabId: suspension.tabId,
+    windowId: suspension.windowId,
+    documentId: suspension.documentId,
+    urlEvidence: Object.freeze(urlEvidence),
+    urlSessionDigest: suspension.urlSessionDigest,
+    mode: suspension.mode,
+    capturePolicy: Object.freeze(capturePolicy),
+    categories: Object.freeze(categoryValues),
+    issuedAt: suspension.issuedAt,
     updatedAt: suspension.updatedAt,
     expiresAt: suspension.expiresAt,
     cleanupAttempts: suspension.cleanupAttempts,
     cleanupNotBefore: suspension.cleanupNotBefore,
     state: suspension.state,
+    resumePhase: suspension.resumePhase,
     revokeReason: suspension.revokeReason,
     source,
   });
@@ -106,19 +117,86 @@ function sameSource(left, right) {
     left.pageId === right.pageId;
 }
 
+function sameImmutableSuspension(left, right) {
+  return left.version === right.version && left.auditId === right.auditId &&
+    left.consentId === right.consentId && left.tabId === right.tabId &&
+    left.windowId === right.windowId && left.documentId === right.documentId &&
+    left.urlEvidence.version === right.urlEvidence.version &&
+    left.urlEvidence.href === right.urlEvidence.href &&
+    left.urlEvidence.queryIncluded === right.urlEvidence.queryIncluded &&
+    left.urlEvidence.redactedSegments === right.urlEvidence.redactedSegments &&
+    left.urlSessionDigest === right.urlSessionDigest && left.mode === right.mode &&
+    left.capturePolicy.version === right.capturePolicy.version &&
+    left.capturePolicy.mode === right.capturePolicy.mode &&
+    left.capturePolicy.includeQuery === right.capturePolicy.includeQuery &&
+    left.capturePolicy.captureFullPage === right.capturePolicy.captureFullPage &&
+    left.capturePolicy.captureElements === right.capturePolicy.captureElements &&
+    left.capturePolicy.composeAnnouncementMap === right.capturePolicy.composeAnnouncementMap &&
+    left.categories.length === right.categories.length &&
+    left.categories.every((category, index) => category === right.categories[index]) &&
+    left.issuedAt === right.issuedAt && left.expiresAt === right.expiresAt &&
+    sameSource(left.source, right.source);
+}
+
+function sameMutableSuspension(left, right) {
+  return left.revision === right.revision && left.updatedAt === right.updatedAt &&
+    left.cleanupAttempts === right.cleanupAttempts &&
+    left.cleanupNotBefore === right.cleanupNotBefore && left.state === right.state &&
+    left.resumePhase === right.resumePhase && left.revokeReason === right.revokeReason;
+}
+
+function immediateRevision(candidate, suspension) {
+  return candidate.revision < Number.MAX_SAFE_INTEGER &&
+    suspension.revision === candidate.revision + 1 &&
+    suspension.updatedAt >= candidate.updatedAt;
+}
+
+function canonicalImmediateRevocation(candidate, suspension) {
+  return ['paused', 'resuming'].includes(candidate.state) &&
+    immediateRevision(candidate, suspension) &&
+    suspension.state === 'revoked' && suspension.resumePhase === null &&
+    suspension.cleanupAttempts === 0 &&
+    suspension.cleanupNotBefore === suspension.updatedAt;
+}
+
+function immediateRevocation(candidate, suspension) {
+  const revokeReason = candidate.state === 'paused'
+    ? 'PIXEL_CONSENT_EXPIRED'
+    : candidate.state === 'resuming'
+      ? 'PIXEL_RESUME_INTERRUPTED'
+      : null;
+  return revokeReason !== null && suspension.revokeReason === revokeReason &&
+    canonicalImmediateRevocation(candidate, suspension);
+}
+
+function correlatedAlreadyRevoked(candidate, suspension) {
+  return candidate.state === 'revoked'
+    ? sameMutableSuspension(suspension, candidate)
+    : canonicalImmediateRevocation(candidate, suspension);
+}
+
+function terminalFinishAfter(candidate, suspension) {
+  return ['paused', 'resuming', 'revoked'].includes(candidate.state) &&
+    suspension.revision > candidate.revision &&
+    suspension.updatedAt >= candidate.updatedAt &&
+    suspension.state === 'finished' && suspension.resumePhase === null &&
+    suspension.revokeReason === null && suspension.cleanupAttempts === 0 &&
+    suspension.cleanupNotBefore === suspension.updatedAt;
+}
+
 function finishRetryCandidate(fallback, latest) {
-  if (!fallback || !latest || latest.auditId !== fallback.auditId ||
-    latest.consentId !== fallback.consentId || latest.expiresAt !== fallback.expiresAt ||
-    !sameSource(latest.source, fallback.source)) return null;
+  if (!fallback || !latest || !sameImmutableSuspension(latest, fallback)) return null;
   if (latest.revision === fallback.revision && latest.state === fallback.state &&
     latest.updatedAt === fallback.updatedAt &&
     latest.cleanupAttempts === fallback.cleanupAttempts &&
     latest.cleanupNotBefore === fallback.cleanupNotBefore &&
+    latest.resumePhase === fallback.resumePhase &&
     latest.revokeReason === fallback.revokeReason) return latest;
   if (fallback.state !== 'revoked' || fallback.revision >= Number.MAX_SAFE_INTEGER ||
     latest.revision !== fallback.revision + 1 || latest.state !== 'finished' ||
     latest.updatedAt < fallback.updatedAt || latest.cleanupAttempts !== 0 ||
-    latest.cleanupNotBefore !== latest.updatedAt || latest.revokeReason !== null) return null;
+    latest.cleanupNotBefore !== latest.updatedAt || latest.resumePhase !== null ||
+    latest.revokeReason !== null) return null;
   return latest;
 }
 
@@ -140,8 +218,11 @@ function revokeResultProjection(value, candidate, at) {
   if (!result || result.version !== 'PixelRevokeResultV1' || !['revoked', 'already-revoked', 'finished', 'missing', 'mismatch'].includes(result.status)) return null;
   if (['missing', 'mismatch'].includes(result.status)) return result.suspension === null ? Object.freeze({ status: result.status, suspension: null }) : null;
   const suspension = suspensionProjection(result.suspension);
-  if (!suspension || !validEpoch(at) || suspension.updatedAt > at || suspension.auditId !== candidate.auditId || suspension.consentId !== candidate.consentId) return null;
-  if (result.status === 'finished' ? suspension.state !== 'finished' : suspension.state !== 'revoked') return null;
+  if (!suspension || !validEpoch(at) || suspension.updatedAt > at ||
+    !sameImmutableSuspension(suspension, candidate)) return null;
+  if (result.status === 'revoked' && !immediateRevocation(candidate, suspension) ||
+    result.status === 'already-revoked' && !correlatedAlreadyRevoked(candidate, suspension) ||
+    result.status === 'finished' && !terminalFinishAfter(candidate, suspension)) return null;
   return Object.freeze({ status: result.status, suspension });
 }
 

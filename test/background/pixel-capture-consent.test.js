@@ -304,6 +304,56 @@ test('shares a volatile fail-closed barrier until an exact revocation is confirm
   assert.equal(repeated.suspension.revokeReason, 'AUDIT_CANCELLED');
 });
 
+test('keeps a failed binding-revocation barrier across a foreign consent replacement', async () => {
+  const sessionArea = memorySessionArea();
+  const state = createPixelCaptureStateV1({
+    sessionArea, now: () => NOW, randomBytes: bytesFactory(),
+  });
+  const paused = await state.pause(pauseInput());
+  const key = `${JOURNAL_PREFIX}audit-1`;
+  const foreign = clone(sessionArea.values[key]);
+  foreign.consentId = 'AgICAgICAgICAgICAgICAg';
+  const normalSet = sessionArea.set.bind(sessionArea);
+  sessionArea.set = async () => {
+    sessionArea.calls.set += 1;
+    sessionArea.values[key] = clone(foreign);
+  };
+
+  await assert.rejects(state.claimAndBeginResume({
+    auditId: 'audit-1', consentId: paused.consentId, proof: proof('doc-b'),
+    mode: 'full-evidence', categories: ['password', 'otp'],
+  }), error => error?.message === 'PIXEL_STATE_UNAVAILABLE');
+  sessionArea.set = normalSet;
+
+  assert.equal((await state.revokeAudit({
+    auditId: 'audit-1', consentId: paused.consentId, reason: 'AUDIT_CANCELLED',
+  })).status, 'mismatch');
+  const setCalls = sessionArea.calls.set;
+  const transitions = await Promise.allSettled([
+    state.claimAndBeginResume({
+      auditId: 'audit-1', consentId: foreign.consentId, proof: proof(),
+      mode: 'full-evidence', categories: ['password', 'otp'],
+    }),
+    state.markSessionRunning({ auditId: 'audit-1', consentId: foreign.consentId }),
+    state.gateRunnerStart({
+      auditId: 'audit-1', consentId: foreign.consentId, proof: proof(),
+      categories: ['password', 'otp'],
+    }),
+  ]);
+  assert.equal(transitions.every(result => result.status === 'rejected' &&
+    result.reason?.message === 'PIXEL_STATE_UNAVAILABLE'), true);
+  assert.equal(sessionArea.calls.set, setCalls);
+  assert.deepEqual(sessionArea.values[key], foreign);
+
+  assert.equal((await state.revokeAudit({
+    auditId: 'audit-1', consentId: foreign.consentId, reason: 'AUDIT_CANCELLED',
+  })).status, 'revoked');
+  await assert.rejects(state.claimAndBeginResume({
+    auditId: 'audit-1', consentId: foreign.consentId, proof: proof(),
+    mode: 'full-evidence', categories: ['password', 'otp'],
+  }), error => error?.message === 'PIXEL_CONSENT_ALREADY_USED');
+});
+
 test('rejects unsafe revisions before set and saturates cleanup attempts at thirty-one', async () => {
   const { sessionArea, state } = stateFixture();
   const paused = await state.pause(pauseInput());
