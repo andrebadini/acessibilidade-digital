@@ -67,6 +67,40 @@ function attachedPixelGate(policy, calls, {
   });
 }
 
+function ownedPixelGate(policy, calls, {
+  auditId, ownershipId, consentId = null, runnerStatus = 'ready',
+  urlEvidence = TEST_EVIDENCE_URL,
+  commitClock = createScriptedPixelCommitClockV1({ epochs: Array(8).fill(1_788_000_000_010) }),
+} = {}) {
+  const source = Object.freeze({
+    kind: 'owned-disposable', ownershipId,
+    cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+  });
+  const suspension = ({ state, resumePhase, token, categories }) => ({
+    version: 'AuditSuspensionV1', revision: 1, auditId, consentId: token,
+    tabId: 42, windowId: 9, documentId: 'document-a', urlEvidence,
+    urlSessionDigest: TEST_DIGEST, mode: policy.mode, capturePolicy: policy, categories,
+    issuedAt: 1_788_000_000_000, updatedAt: 1_788_000_000_010, expiresAt: 1_788_000_600_000,
+    cleanupAttempts: 0, cleanupNotBefore: null, state, resumePhase, revokeReason: null, source,
+  });
+  return createPixelPrivacyGateV1({
+    pixelState: {
+      async pause(value) {
+        calls.push('pause');
+        return suspension({ state: 'paused', resumePhase: null, token: 'B'.repeat(21) + 'Q', categories: value.categories });
+      },
+      async gateRunnerStart(value) {
+        calls.push('gate');
+        return runnerStatus === 'ready'
+          ? { version: 'PixelRunnerGateResultV1', status: 'ready', suspension: suspension({ state: 'resuming', resumePhase: 'runner-started', token: consentId, categories: value.categories }) }
+          : { version: 'PixelRunnerGateResultV1', status: 'repaused', suspension: suspension({ state: 'paused', resumePhase: null, token: 'C'.repeat(21) + 'Q', categories: value.categories }) };
+      },
+    },
+    consentId, authorityExpiresAt: 1_900_000_000_000, commitClock,
+    async afterPixels() { calls.push('after'); },
+  });
+}
+
 function unreadEvidenceProxy(evidence, onRead) {
   return new Proxy({ ...evidence }, {
     get(target, key, receiver) {
@@ -181,7 +215,7 @@ test('single URL denies a swapped private URL whose sanitized evidence still mat
   assert.doesNotMatch(String(failure), /ORIGINAL|SWAPPED|account/iu);
 });
 
-test('single URL refuses every pixel policy instead of silently downgrading it', async () => {
+test('single URL refuses every pixel policy without its exact branded privacy gate', async () => {
   let effects = 0;
   const base = {
     auditId: 'audit-url-pixels', ownershipId: `owner_${'A'.repeat(22)}`, navigationToken: 'N'.repeat(22),
@@ -198,6 +232,304 @@ test('single URL refuses every pixel policy instead of silently downgrading it',
     }), /URL_AUDIT_DENIED/u);
   }
   assert.equal(effects, 0);
+});
+
+test('single URL executes full-evidence and element-only without silently changing the selected mode', async t => {
+  for (const mode of ['full-evidence', 'element-only']) await t.test(mode, async () => {
+    const auditId = `audit-url-${mode}`;
+    const safeOwnershipId = `owner_${(mode === 'full-evidence' ? 'F' : 'E').repeat(22)}`;
+    const calls = [];
+    const sessionValues = {};
+    const adapter = fakeAdapter({ canonicalInternals: true, sessionValues, trackCaptureCalls: true });
+    const policy = createCapturePolicyV1({ mode, includeQuery: false });
+    const result = await runUrlAudit({
+      auditId, ownershipId: safeOwnershipId, windowId: 9,
+      navigationToken: 'N'.repeat(22), navigationPurpose: 'single-url',
+      evidenceUrl: TEST_EVIDENCE_URL, sessionDigest: TEST_DIGEST,
+      rawNavigationVault: Object.freeze({ async take() { return 'https://example.test/final?secret=REMOVE'; } }),
+      chromeAdapter: adapter, capturePolicy: policy,
+      privacyGate: ownedPixelGate(policy, calls, { auditId, ownershipId: safeOwnershipId }),
+      checkpointStore: Object.freeze({ async writeSanitized() {} }),
+      onProgress() {}, now: () => '2026-09-01T12:00:00.000Z', signal: undefined,
+      expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+    });
+
+    assert.equal(result.status, 'complete');
+    assert.equal(adapter.counts.fullPageCalls, mode === 'full-evidence' ? 1 : 0);
+    assert.equal(adapter.counts.elementCalls > 0, true);
+    assert.equal(calls.at(-1), 'after');
+  });
+});
+
+test('single URL sensitive preflight retains its owned tab for consent with zero raster', async () => {
+  const auditId = 'audit-url-sensitive-owned';
+  const ownershipId = `owner_${'S'.repeat(22)}`;
+  const calls = [];
+  const checkpoints = [];
+  const adapter = fakeAdapter({
+    canonicalInternals: true, sessionValues: {}, trackCaptureCalls: true,
+    sensitiveSignals: PASSWORD_SIGNALS,
+  });
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const result = await runUrlAudit({
+    auditId, ownershipId, windowId: 9, navigationToken: 'N'.repeat(22), navigationPurpose: 'single-url',
+    evidenceUrl: TEST_EVIDENCE_URL, sessionDigest: TEST_DIGEST,
+    rawNavigationVault: Object.freeze({ async take() { return 'https://example.test/final?secret=REMOVE'; } }),
+    chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: ownedPixelGate(policy, calls, { auditId, ownershipId }),
+    checkpointStore: Object.freeze({ async writeSanitized(_auditId, checkpoint) { checkpoints.push(checkpoint); } }),
+    onProgress() {}, now: () => '2026-09-01T12:00:00.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  });
+
+  assert.equal(result.status, 'privacy-paused');
+  assert.equal(result.ownershipState, 'retained-for-consent');
+  assert.equal(adapter.counts.screenshots, 0);
+  assert.equal(checkpoints.length > 0, true);
+  assert.equal(calls.includes('after'), false);
+});
+
+test('single URL resume uses the retained owner without creating navigating or consuming a URL token again', async () => {
+  const auditId = 'audit-url-resume-owned';
+  const ownershipId = `owner_${'R'.repeat(22)}`;
+  const sessionValues = {};
+  const checkpoints = [];
+  const policy = createCapturePolicyV1({ mode: 'element-only', includeQuery: false });
+  const pauseCalls = [];
+  const adapter = fakeAdapter({
+    canonicalInternals: true, sessionValues, trackCaptureCalls: true,
+    sensitiveSignals: PASSWORD_SIGNALS,
+  });
+  const paused = await runUrlAudit({
+    auditId, ownershipId, windowId: 9, navigationToken: 'N'.repeat(22), navigationPurpose: 'single-url',
+    evidenceUrl: TEST_EVIDENCE_URL, sessionDigest: TEST_DIGEST,
+    rawNavigationVault: Object.freeze({ async take() { return 'https://example.test/final?secret=REMOVE'; } }),
+    chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: ownedPixelGate(policy, pauseCalls, { auditId, ownershipId }),
+    checkpointStore: Object.freeze({ async writeSanitized(_auditId, checkpoint) { checkpoints.push(checkpoint); } }),
+    onProgress() {}, now: () => '2026-09-01T12:00:00.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  });
+  assert.equal(paused.status, 'privacy-paused');
+  const resumeCheckpoint = checkpoints.at(-1);
+  const forbidden = [];
+  adapter.createTab = async () => { forbidden.push('create'); };
+  adapter.navigateTab = async () => { forbidden.push('navigate'); };
+  adapter.waitForStable = async () => { forbidden.push('stable'); };
+  adapter.probeSensitiveCaptureSignals = async () => EMPTY_SIGNALS;
+  const resumeCalls = [];
+  const resumed = await runUrlAudit({
+    auditId,
+    requestedUrlEvidence: TEST_EVIDENCE_URL,
+    resumeTarget: Object.freeze({
+      kind: 'owned-disposable-resume', ownershipId,
+      tabId: paused.observedTarget.tabId, windowId: paused.observedTarget.windowId,
+      documentId: paused.observedTarget.documentId,
+      initialUrlEvidence: paused.observedTarget.urlEvidence,
+      initialUrlSessionDigest: paused.observedTarget.urlSessionDigest,
+      cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+    }),
+    resumeCheckpoint,
+    chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: ownedPixelGate(policy, resumeCalls, {
+      auditId, ownershipId, consentId: 'A'.repeat(21) + 'Q',
+    }),
+    checkpointStore: Object.freeze({ async writeSanitized() {} }),
+    onProgress() {}, now: () => '2026-09-01T12:00:01.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  });
+
+  assert.equal(resumed.status, 'complete');
+  assert.equal(resumed.ownershipState, 'retained-for-review');
+  assert.deepEqual(forbidden, []);
+  assert.equal(resumeCalls.includes('gate'), true);
+});
+
+test('single URL element-only resume with no element consumes consent before pixel-free persistence', async () => {
+  const auditId = 'audit-url-resume-no-elements';
+  const ownershipId = `owner_${'Z'.repeat(22)}`;
+  const sessionValues = {};
+  const checkpoints = [];
+  const policy = createCapturePolicyV1({ mode: 'element-only', includeQuery: false });
+  const emptyPage = rawPage();
+  emptyPage.nodes = [];
+  emptyPage.axTree.nodes = [];
+  const adapter = fakeAdapter({
+    canonicalInternals: true, sessionValues, page: emptyPage,
+    trackCaptureCalls: true, sensitiveSignals: PASSWORD_SIGNALS,
+  });
+  const paused = await runUrlAudit({
+    auditId, ownershipId, windowId: 9, navigationToken: 'N'.repeat(22), navigationPurpose: 'single-url',
+    evidenceUrl: TEST_EVIDENCE_URL, sessionDigest: TEST_DIGEST,
+    rawNavigationVault: Object.freeze({ async take() { return 'https://example.test/final?secret=REMOVE'; } }),
+    chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: ownedPixelGate(policy, [], { auditId, ownershipId }),
+    checkpointStore: Object.freeze({ async writeSanitized(_auditId, checkpoint) { checkpoints.push(checkpoint); } }),
+    onProgress() {}, now: () => '2026-09-01T12:00:00.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  });
+  assert.equal(paused.status, 'privacy-paused');
+
+  adapter.probeSensitiveCaptureSignals = async () => EMPTY_SIGNALS;
+  const resumeCalls = [];
+  const persisted = [];
+  const resumed = await runUrlAudit({
+    auditId,
+    requestedUrlEvidence: TEST_EVIDENCE_URL,
+    resumeTarget: Object.freeze({
+      kind: 'owned-disposable-resume', ownershipId,
+      tabId: paused.observedTarget.tabId, windowId: paused.observedTarget.windowId,
+      documentId: paused.observedTarget.documentId,
+      initialUrlEvidence: paused.observedTarget.urlEvidence,
+      initialUrlSessionDigest: paused.observedTarget.urlSessionDigest,
+      cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+    }),
+    resumeCheckpoint: checkpoints.at(-1), chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: ownedPixelGate(policy, resumeCalls, {
+      auditId, ownershipId, consentId: 'A'.repeat(21) + 'Q',
+    }),
+    checkpointStore: Object.freeze({
+      async writeSanitized() {},
+      async persistAuditModel(model, target) { persisted.push({ model, target }); },
+    }),
+    onProgress() {}, now: () => '2026-09-01T12:00:01.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  });
+
+  assert.equal(resumed.status, 'complete');
+  assert.equal(adapter.counts.screenshots, 0);
+  assert.equal(adapter.counts.fullPageCalls, 0);
+  assert.equal(adapter.counts.elementCalls, 0);
+  assert.equal(resumeCalls.filter(value => value === 'gate').length, 1);
+  assert.deepEqual(resumeCalls, ['gate', 'after']);
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0].model.auditId, auditId);
+  assert.equal(persisted[0].target.ownershipId, ownershipId);
+});
+
+test('single URL redirect resume preserves the sanitized requested URL outside the final observed target', async () => {
+  const auditId = 'audit-url-resume-redirect';
+  const ownershipId = `owner_${'Y'.repeat(22)}`;
+  const requestedUrlEvidence = sanitizeEvidenceUrlV1(
+    'https://requested.example/start?secret=REMOVE',
+    { includeQuery: false },
+  );
+  const finalUrlEvidence = sanitizeEvidenceUrlV1(
+    'https://final.example/dest?session=REMOVE',
+    { includeQuery: false },
+  );
+  const sessionValues = {};
+  const checkpoints = [];
+  const page = rawPage();
+  page.document.url = 'https://final.example/dest?session=REMOVE';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const adapter = fakeAdapter({
+    canonicalInternals: true, sessionValues, page,
+    trackCaptureCalls: true, sensitiveSignals: PASSWORD_SIGNALS,
+  });
+  adapter.waitForStable = async () => ({ url: 'https://final.example/dest?session=REMOVE' });
+  adapter.getEvidenceUrl = async () => finalUrlEvidence;
+  adapter.getFinalUrl = async () => 'https://final.example/dest?session=REMOVE';
+  const paused = await runUrlAudit({
+    auditId, ownershipId, windowId: 9, navigationToken: 'N'.repeat(22), navigationPurpose: 'single-url',
+    evidenceUrl: requestedUrlEvidence, sessionDigest: TEST_DIGEST,
+    rawNavigationVault: Object.freeze({ async take() { return 'https://requested.example/start?secret=REMOVE'; } }),
+    chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: ownedPixelGate(policy, [], { auditId, ownershipId, urlEvidence: finalUrlEvidence }),
+    checkpointStore: Object.freeze({ async writeSanitized(_auditId, checkpoint) { checkpoints.push(checkpoint); } }),
+    onProgress() {}, now: () => '2026-09-01T12:00:00.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  });
+  assert.equal(paused.status, 'privacy-paused');
+  assert.equal(paused.observedTarget.urlEvidence.href, finalUrlEvidence.href);
+
+  adapter.probeSensitiveCaptureSignals = async () => EMPTY_SIGNALS;
+  const persisted = [];
+  const resumed = await runUrlAudit({
+    auditId,
+    requestedUrlEvidence,
+    resumeTarget: Object.freeze({
+      kind: 'owned-disposable-resume', ownershipId,
+      tabId: paused.observedTarget.tabId, windowId: paused.observedTarget.windowId,
+      documentId: paused.observedTarget.documentId,
+      initialUrlEvidence: paused.observedTarget.urlEvidence,
+      initialUrlSessionDigest: paused.observedTarget.urlSessionDigest,
+      cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+    }),
+    resumeCheckpoint: checkpoints.at(-1), chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: ownedPixelGate(policy, [], {
+      auditId, ownershipId, consentId: 'A'.repeat(21) + 'Q', urlEvidence: finalUrlEvidence,
+    }),
+    checkpointStore: Object.freeze({
+      async writeSanitized() {},
+      async persistAuditModel(model) { persisted.push(model); },
+    }),
+    onProgress() {}, now: () => '2026-09-01T12:00:01.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  });
+
+  assert.equal(resumed.status, 'complete');
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0].requestedUrl, requestedUrlEvidence.href);
+  assert.equal(persisted[0].finalUrl, finalUrlEvidence.href);
+  assert.equal(persisted[0].pages[0].requestedUrl, requestedUrlEvidence.href);
+  assert.equal(persisted[0].pages[0].finalUrl, finalUrlEvidence.href);
+  assert.notEqual(persisted[0].requestedUrl, persisted[0].finalUrl);
+  assert.doesNotMatch(JSON.stringify({ resumed, persisted }), /secret=REMOVE|session=REMOVE/u);
+});
+
+test('single URL full evidence starts no thumbnail after document A changes to B', async () => {
+  const auditId = 'audit-url-owned-drift';
+  const ownershipId = `owner_${'D'.repeat(22)}`;
+  const calls = [];
+  let proofCount = 0;
+  const adapter = fakeAdapter({ canonicalInternals: true, sessionValues: {}, trackCaptureCalls: true });
+  adapter.probeDocumentIdentity = async tabId => {
+    proofCount += 1;
+    return proofCount < 4
+      ? { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: TEST_DIGEST }
+      : { tabId, windowId: 9, documentId: 'document-b', urlSessionDigest: `hmac-sha256:${'B'.repeat(43)}` };
+  };
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  await assert.rejects(() => runUrlAudit({
+    auditId, ownershipId, windowId: 9, navigationToken: 'N'.repeat(22), navigationPurpose: 'single-url',
+    evidenceUrl: TEST_EVIDENCE_URL, sessionDigest: TEST_DIGEST,
+    rawNavigationVault: Object.freeze({ async take() { return 'https://example.test/final?secret=REMOVE'; } }),
+    chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: ownedPixelGate(policy, calls, { auditId, ownershipId }),
+    checkpointStore: Object.freeze({ async writeSanitized() {} }),
+    onProgress() {}, now: () => '2026-09-01T12:00:00.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  }), /OBSERVED_RUNNER_DENIED/u);
+  assert.equal(adapter.counts.screenshots, 1);
+});
+
+test('single URL full evidence starts zero raster when document A changes before its first capture', async t => {
+  for (const changeAt of [2, 3]) await t.test(`proof-${changeAt}`, async () => {
+    const auditId = `audit-url-owned-first-drift-${changeAt}`;
+    const ownershipId = `owner_${String(changeAt).repeat(22)}`;
+    const calls = [];
+    let proofCount = 0;
+    const adapter = fakeAdapter({ canonicalInternals: true, sessionValues: {}, trackCaptureCalls: true });
+    adapter.probeDocumentIdentity = async tabId => {
+      proofCount += 1;
+      return proofCount < changeAt
+        ? { tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: TEST_DIGEST }
+        : { tabId, windowId: 9, documentId: 'document-b', urlSessionDigest: `hmac-sha256:${'B'.repeat(43)}` };
+    };
+    const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+    await assert.rejects(() => runUrlAudit({
+      auditId, ownershipId, windowId: 9, navigationToken: 'N'.repeat(22), navigationPurpose: 'single-url',
+      evidenceUrl: TEST_EVIDENCE_URL, sessionDigest: TEST_DIGEST,
+      rawNavigationVault: Object.freeze({ async take() { return 'https://example.test/final?secret=REMOVE'; } }),
+      chromeAdapter: adapter, capturePolicy: policy,
+      privacyGate: ownedPixelGate(policy, calls, { auditId, ownershipId }),
+      checkpointStore: Object.freeze({ async writeSanitized() {} }),
+      onProgress() {}, now: () => '2026-09-01T12:00:00.000Z', signal: undefined,
+      expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+    }), /OBSERVED_RUNNER_DENIED/u);
+    assert.equal(adapter.counts.screenshots, 0);
+  });
 });
 
 test('ownership IDs contain exactly 128 CSPRNG bits', () => {

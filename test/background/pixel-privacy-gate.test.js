@@ -26,6 +26,11 @@ const TARGET = Object.freeze({
   documentId: 'doc-1', urlSessionDigest: DIGEST,
   urlEvidence: sanitizeEvidenceUrlV1('https://example.test/a', { includeQuery: false }),
 });
+const OWNED_TARGET = Object.freeze({
+  version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId: 'ownership-1',
+  tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST,
+  urlEvidence: TARGET.urlEvidence, cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+});
 const PROOF = Object.freeze({ tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST });
 const EMPTY = Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: false, categories: Object.freeze([]) });
 const SENSITIVE = Object.freeze({
@@ -187,6 +192,62 @@ test('first raster probes fresh signals, proves twice, commits once and later ra
   assert.equal(didPixelRasterStartV1(boundary), true);
   assert.equal(didPixelRasterTargetChangeV1(boundary), false);
   assert.equal(assertPixelPipelineAuthorizedV1(gate, { auditId: 'audit-1', capturePolicy: POLICY }), true);
+});
+
+test('owned raster re-proves immediately before each later thumbnail and stops after document A changes to B', async () => {
+  const rasters = [];
+  let proofCount = 0;
+  const { gate } = fixture();
+  await gate.preflight({
+    auditId: 'audit-1', observedTarget: OWNED_TARGET,
+    capturePolicy: POLICY, signals: EMPTY,
+  });
+  const boundary = createPixelRasterBoundaryV1({
+    auditId: 'audit-1', observedTarget: OWNED_TARGET,
+    capturePolicy: POLICY, privacyGate: gate,
+    async probeDocumentIdentity() {
+      proofCount += 1;
+      return proofCount < 4
+        ? PROOF
+        : { ...PROOF, documentId: 'doc-2', urlSessionDigest: `hmac-sha256:${'B'.repeat(43)}` };
+    },
+    async probeSensitiveCaptureSignals() { return EMPTY; },
+    signal: new AbortController().signal,
+    async captureFullPage() { rasters.push('full'); },
+    async captureElement() { rasters.push('thumbnail'); },
+  });
+
+  await boundary.captureFullPage();
+  await boundary.captureElement();
+  await assert.rejects(() => boundary.captureElement(), /PIXEL_CAPTURE_BOUNDARY_DENIED/u);
+  assert.deepEqual(rasters, ['full', 'thumbnail']);
+  assert.equal(didPixelRasterTargetChangeV1(boundary), true);
+});
+
+test('owned sensitive pause rejects a foreign ownership source before any raster authorization', async () => {
+  let pauses = 0;
+  const gate = createPixelPrivacyGateV1({
+    pixelState: {
+      async pause() {
+        pauses += 1;
+        return {
+          ...suspension(),
+          source: {
+            kind: 'owned-disposable', ownershipId: 'ownership-foreign',
+            cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+          },
+        };
+      },
+      async gateRunnerStart() { throw new Error('must-not-resume'); },
+    },
+    consentId: null, authorityExpiresAt: 1_900_000_000_000,
+    commitClock: commitClock(), async afterPixels() {},
+  });
+  await assert.rejects(() => gate.preflight({
+    auditId: 'audit-1', observedTarget: OWNED_TARGET,
+    capturePolicy: POLICY, signals: SENSITIVE,
+  }), /PIXEL_PRIVACY_GATE_DENIED/u);
+  assert.equal(pauses, 1);
 });
 
 test('later raster refuses sensitive categories added after the first captured pixel', async () => {

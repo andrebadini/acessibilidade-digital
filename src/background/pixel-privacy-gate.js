@@ -74,13 +74,23 @@ function copyEvidence(value) {
 }
 
 function copyTarget(value) {
-  const copy = exact(value, [
+  const attached = exact(value, [
     'version', 'kind', 'tabId', 'windowId', 'documentId', 'urlEvidence', 'urlSessionDigest',
   ]);
+  const owned = exact(value, [
+    'version', 'kind', 'ownershipId', 'tabId', 'windowId', 'documentId',
+    'urlEvidence', 'urlSessionDigest', 'cleanupMode', 'pageId',
+  ]);
+  const copy = attached?.kind === 'attached'
+    ? attached
+    : owned?.kind === 'owned-disposable' ? owned : null;
   const evidence = copy && copyEvidence(copy.urlEvidence);
-  if (!copy || copy.version !== 'ObservedTargetV1' || copy.kind !== 'attached' ||
+  if (!copy || copy.version !== 'ObservedTargetV1' ||
     !validInteger(copy.tabId) || !validInteger(copy.windowId) || !validId(copy.documentId) ||
     !DIGEST.test(copy.urlSessionDigest) || !evidence || evidence.queryIncluded !== false) return null;
+  if (copy.kind === 'owned-disposable' && (!validId(copy.ownershipId) ||
+    !['always', 'pre-observation-failure'].includes(copy.cleanupMode) ||
+    (copy.pageId !== null && !validId(copy.pageId)))) return null;
   return Object.freeze({ ...copy, urlEvidence: evidence });
 }
 
@@ -123,7 +133,12 @@ function copyProof(value, target) {
   const copy = exact(value, ['tabId', 'windowId', 'documentId', 'urlSessionDigest']);
   if (!copy || copy.tabId !== target.tabId || copy.windowId !== target.windowId ||
     copy.documentId !== target.documentId || copy.urlSessionDigest !== target.urlSessionDigest) return null;
-  return Object.freeze({ kind: 'attached', ...copy });
+  return target.kind === 'owned-disposable'
+    ? Object.freeze({
+        kind: 'owned-disposable', ownershipId: target.ownershipId, ...copy,
+        cleanupMode: target.cleanupMode, pageId: target.pageId,
+      })
+    : Object.freeze({ kind: 'attached', ...copy });
 }
 
 function captureProof(value) {
@@ -144,7 +159,10 @@ function sameTarget(left, right) {
     left.documentId === right.documentId && left.urlSessionDigest === right.urlSessionDigest &&
     left.urlEvidence.href === right.urlEvidence.href &&
     left.urlEvidence.queryIncluded === right.urlEvidence.queryIncluded &&
-    left.urlEvidence.redactedSegments === right.urlEvidence.redactedSegments;
+    left.urlEvidence.redactedSegments === right.urlEvidence.redactedSegments &&
+    (left.kind !== 'owned-disposable' ||
+      (left.ownershipId === right.ownershipId && left.cleanupMode === right.cleanupMode &&
+        left.pageId === right.pageId));
 }
 
 function context(input, metadata, withProof = false) {
@@ -164,8 +182,19 @@ function context(input, metadata, withProof = false) {
 }
 
 function copySource(value) {
-  const copy = exact(value, ['kind']);
-  return copy?.kind === 'attached' ? Object.freeze(copy) : null;
+  const attached = exact(value, ['kind']);
+  if (attached?.kind === 'attached') return Object.freeze(attached);
+  const owned = exact(value, ['kind', 'ownershipId', 'cleanupMode', 'pageId']);
+  if (!owned || owned.kind !== 'owned-disposable' || !validId(owned.ownershipId) ||
+    !['always', 'pre-observation-failure'].includes(owned.cleanupMode) ||
+    (owned.pageId !== null && !validId(owned.pageId))) return null;
+  return Object.freeze(owned);
+}
+
+function sourceMatchesTarget(source, target) {
+  return source.kind === target.kind && (source.kind !== 'owned-disposable' ||
+    (source.ownershipId === target.ownershipId && source.cleanupMode === target.cleanupMode &&
+      source.pageId === target.pageId));
 }
 
 function copySuspension(value) {
@@ -194,7 +223,7 @@ function validSuspension(copy, expected, expectedState, expectedPhase, authority
     copy.updatedAt >= copy.issuedAt && copy.expiresAt > copy.updatedAt && copy.expiresAt <= authorityExpiresAt &&
     validInteger(copy.cleanupAttempts) && (copy.cleanupNotBefore === null || validInteger(copy.cleanupNotBefore)) &&
     copy.state === expectedState && copy.resumePhase === expectedPhase && copy.revokeReason === null &&
-    copy.source.kind === 'attached');
+    sourceMatchesTarget(copy.source, expected.target));
 }
 
 function validRunnerResult(value, expected, metadata) {
@@ -280,8 +309,9 @@ function settleWithoutRaster(metadata) {
     if (!elementOnly || metadata.pixelStarted || metadata.targetChanged) throw rasterDenied();
     return;
   }
-  if (metadata.state !== 'fresh' || gate.state !== 'armed' ||
-    !elementOnly) throw rasterDenied();
+  const initialAttempt = metadata.state === 'fresh' && gate.state === 'armed' && gate.consentId === null;
+  const resumedAttempt = metadata.state === 'authorizing' && gate.state === 'ready' && gate.consentId !== null;
+  if ((!initialAttempt && !resumedAttempt) || !elementOnly) throw rasterDenied();
   metadata.state = 'settled-without-raster';
   gate.state = 'no-raster-settled';
 }
@@ -533,6 +563,37 @@ export function createPixelRasterBoundaryV1(input) {
     },
     async settle() {
       if (RASTER_BOUNDARIES.get(this) !== metadata) throw rasterDenied();
+      if (metadata.state === 'fresh' && metadata.gateMetadata.consentId !== null) {
+        metadata.state = 'authorizing';
+        try {
+          const signals = copySignals(await metadata.probeSensitiveCaptureSignals(
+            metadata.target.tabId,
+            metadata.target.documentId,
+          ));
+          if (!signals) throw rasterDenied();
+          const proof = targetProof(
+            await metadata.probeDocumentIdentity(metadata.target.tabId),
+            metadata,
+          );
+          const decision = await metadata.gate.authorizeFirstPixel({
+            auditId: metadata.auditId,
+            observedTarget: metadata.target,
+            capturePolicy: metadata.policy,
+            proof,
+            signals,
+          });
+          if (decision.status === 'privacy-paused') {
+            metadata.state = 'paused';
+            throw createPixelPrivacyPauseInterruptionV1(metadata.gate, decision.signals);
+          }
+          if (decision.status !== 'ready') throw rasterDenied();
+        } catch (error) {
+          if (isPixelPrivacyPauseInterruptionV1(error, metadata.gate)) throw error;
+          if (metadata.state !== 'paused' && metadata.state !== 'failed') metadata.state = 'failed';
+          if (RASTER_INTERRUPTION.has(error)) throw error;
+          throw rasterDenied();
+        }
+      }
       settleWithoutRaster(metadata);
     },
   });

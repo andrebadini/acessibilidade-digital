@@ -100,39 +100,99 @@ const URL_AUDIT_KEYS = Object.freeze([
   'rawNavigationVault', 'chromeAdapter', 'capturePolicy', 'checkpointStore', 'onProgress', 'now',
   'signal', 'expectedExtensionId', 'auditRunner',
 ]);
+const URL_PIXEL_AUDIT_KEYS = Object.freeze([...URL_AUDIT_KEYS, 'privacyGate']);
+const URL_RESUME_AUDIT_KEYS = Object.freeze([
+  'auditId', 'requestedUrlEvidence', 'resumeTarget', 'resumeCheckpoint', 'chromeAdapter', 'capturePolicy', 'privacyGate',
+  'checkpointStore', 'onProgress', 'now', 'signal', 'expectedExtensionId', 'auditRunner',
+]);
+
+function captureUrlAuditArgs(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.some(key => typeof key !== 'string')) return null;
+    const variants = [
+      ['initial', URL_AUDIT_KEYS], ['initial-pixel', URL_PIXEL_AUDIT_KEYS],
+      ['resume', URL_RESUME_AUDIT_KEYS],
+    ];
+    const variant = variants.find(([_kind, expected]) =>
+      keys.length === expected.length && expected.every(key => keys.includes(key)));
+    if (!variant) return null;
+    const args = {};
+    for (const key of variant[1]) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      args[key] = descriptor.value;
+    }
+    return Object.freeze({ kind: variant[0], args: Object.freeze(args) });
+  } catch { return null; }
+}
+
+function copyUrlResumeTarget(value) {
+  const target = captureExactRecord(value, [
+    'kind', 'ownershipId', 'tabId', 'windowId', 'documentId',
+    'initialUrlEvidence', 'initialUrlSessionDigest', 'cleanupMode', 'pageId',
+  ]);
+  const evidence = target && copyEvidenceUrlV1(target.initialUrlEvidence);
+  if (!target || target.kind !== 'owned-disposable-resume' ||
+    !/^owner_[A-Za-z0-9_-]{22}$/u.test(target.ownershipId ?? '') ||
+    !Number.isSafeInteger(target.tabId) || target.tabId < 0 ||
+    !Number.isSafeInteger(target.windowId) || target.windowId < 0 ||
+    !/^[A-Za-z0-9._:-]{1,160}$/u.test(target.documentId ?? '') ||
+    !evidence || evidence.queryIncluded ||
+    !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(target.initialUrlSessionDigest ?? '') ||
+    target.cleanupMode !== 'pre-observation-failure' || target.pageId !== 'page-1') return null;
+  return Object.freeze({ ...target, initialUrlEvidence: evidence });
+}
 
 /** Worker-internal single-URL boundary. Raw navigation is released only to the observed runner adapter. */
 export async function runUrlAudit(rawArgs = {}) {
-  const args = captureExactRecord(rawArgs, URL_AUDIT_KEYS);
+  const capturedInput = captureUrlAuditArgs(rawArgs);
+  const resuming = capturedInput?.kind === 'resume';
+  const args = capturedInput?.args ?? null;
   const policy = args && captureExactRecord(args.capturePolicy, [
     'version', 'mode', 'includeQuery', 'captureFullPage', 'captureElements', 'composeAnnouncementMap',
   ]);
-  const evidenceUrl = args && copyEvidenceUrlV1(args.evidenceUrl);
+  const resumeTarget = resuming && copyUrlResumeTarget(args.resumeTarget);
+  const evidenceUrl = resuming ? resumeTarget?.initialUrlEvidence : args && copyEvidenceUrlV1(args.evidenceUrl);
+  const requestedUrlEvidence = resuming
+    ? args && copyEvidenceUrlV1(args.requestedUrlEvidence)
+    : evidenceUrl;
   const writeSanitized = args && optionalAdapterMethod(args.checkpointStore, 'writeSanitized');
   const persistSanitizedModel = args && optionalAdapterMethod(args.checkpointStore, 'persistAuditModel');
-  const take = args && optionalAdapterMethod(args.rawNavigationVault, 'take');
+  const take = !resuming && args && optionalAdapterMethod(args.rawNavigationVault, 'take');
+  const privacyGate = Object.hasOwn(args ?? {}, 'privacyGate') ? args.privacyGate : null;
+  const ownershipId = resuming ? resumeTarget?.ownershipId : args?.ownershipId;
+  const windowId = resuming ? resumeTarget?.windowId : args?.windowId;
+  const sessionDigest = resuming ? resumeTarget?.initialUrlSessionDigest : args?.sessionDigest;
   if (!args || !/^[A-Za-z0-9._:-]{1,160}$/u.test(args.auditId ?? '') ||
-    !/^owner_[A-Za-z0-9_-]{22}$/u.test(args.ownershipId ?? '') ||
-    !Number.isSafeInteger(args.windowId) || args.windowId < 0 ||
-    !/^[A-Za-z0-9_-]{22}$/u.test(args.navigationToken ?? '') ||
-    !['single-url', 'context-menu-link'].includes(args.navigationPurpose) || !evidenceUrl || evidenceUrl.queryIncluded ||
-    !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(args.sessionDigest ?? '') ||
-    !policy || !isCapturePolicyV1(policy) || policy.mode !== 'no-pixels' || policy.includeQuery !== false ||
-    !take || !writeSanitized || typeof args.onProgress !== 'function' || typeof args.now !== 'function' ||
+    !/^owner_[A-Za-z0-9_-]{22}$/u.test(ownershipId ?? '') ||
+    !Number.isSafeInteger(windowId) || windowId < 0 ||
+    (!resuming && (!/^[A-Za-z0-9_-]{22}$/u.test(args.navigationToken ?? '') ||
+      !['single-url', 'context-menu-link'].includes(args.navigationPurpose) || !take)) ||
+    !evidenceUrl || evidenceUrl.queryIncluded || !requestedUrlEvidence || requestedUrlEvidence.queryIncluded ||
+    !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(sessionDigest ?? '') ||
+    !policy || !isCapturePolicyV1(policy) || policy.includeQuery !== false ||
+    (policy.mode === 'no-pixels'
+      ? resuming || privacyGate !== null
+      : !isPixelPrivacyGateV1(privacyGate)) ||
+    !writeSanitized || typeof args.onProgress !== 'function' || typeof args.now !== 'function' ||
     typeof args.auditRunner !== 'function' || !args.chromeAdapter || typeof args.chromeAdapter !== 'object' ||
     (args.signal !== undefined && (!args.signal || typeof args.signal !== 'object')) ||
     typeof args.expectedExtensionId !== 'string') throw new TypeError('URL_AUDIT_DENIED');
 
   let consumed = false;
   const resolveNavigationToken = async navigationToken => {
-    if (consumed || navigationToken !== args.navigationToken) throw new TypeError('URL_AUDIT_DENIED');
+    if (resuming || consumed || navigationToken !== args.navigationToken) throw new TypeError('URL_AUDIT_DENIED');
     const url = normalizeAuditUrl(await take(args.navigationToken, {
       auditId: args.auditId, purpose: args.navigationPurpose,
-      expectedEvidenceUrl: evidenceUrl, expectedSessionDigest: args.sessionDigest,
+      expectedEvidenceUrl: requestedUrlEvidence, expectedSessionDigest: sessionDigest,
     }));
     const requestedEvidence = sanitizeEvidenceUrlV1(url, { includeQuery: false });
-    if (requestedEvidence.href !== evidenceUrl.href || requestedEvidence.queryIncluded !== evidenceUrl.queryIncluded ||
-      requestedEvidence.redactedSegments !== evidenceUrl.redactedSegments) throw new TypeError('URL_AUDIT_DENIED');
+    if (requestedEvidence.href !== requestedUrlEvidence.href ||
+      requestedEvidence.queryIncluded !== requestedUrlEvidence.queryIncluded ||
+      requestedEvidence.redactedSegments !== requestedUrlEvidence.redactedSegments) throw new TypeError('URL_AUDIT_DENIED');
     consumed = true;
     return url;
   };
@@ -141,19 +201,18 @@ export async function runUrlAudit(rawArgs = {}) {
   // The production runner receives a locally composed, branded pipeline and
   // ownership registry; neither capability crosses the public worker protocol.
   if (args.auditRunner !== runObservedTabAudit) {
-    const executionAdapter = Object.freeze({
-      ...args.chromeAdapter,
-      resolveNavigationToken,
-    });
+    const executionAdapter = Object.freeze(resuming
+      ? { ...args.chromeAdapter }
+      : { ...args.chromeAdapter, resolveNavigationToken });
     return args.auditRunner({
       auditId: args.auditId,
-      target: Object.freeze({
+      target: resuming ? resumeTarget : Object.freeze({
         kind: 'owned-disposable', ownershipId: args.ownershipId, navigationToken: args.navigationToken,
         cleanupMode: 'pre-observation-failure', pageId: 'page-1',
       }),
       chromeAdapter: executionAdapter,
       capturePolicy: Object.freeze(policy),
-      privacyGate: null,
+      privacyGate,
       onCheckpoint: checkpoint => writeSanitized(args.auditId, checkpoint),
       now: args.now,
       signal: args.signal,
@@ -166,20 +225,30 @@ export async function runUrlAudit(rawArgs = {}) {
   let navigateTab;
   let waitForStable;
   let probeDocumentIdentity;
+  let probeSensitiveCaptureSignals;
   let removeTab;
   let baseGetEvidenceUrl;
   let baseGetFinalUrl;
   let legacyEffects;
   try {
     internals = internalContract(args.chromeAdapter);
-    createTab = requiredAdapterMethod(args.chromeAdapter, 'createTab');
-    navigateTab = requiredAdapterMethod(args.chromeAdapter, 'navigateTab');
-    waitForStable = requiredAdapterMethod(args.chromeAdapter, 'waitForStable');
     probeDocumentIdentity = requiredAdapterMethod(args.chromeAdapter, 'probeDocumentIdentity');
     removeTab = requiredAdapterMethod(args.chromeAdapter, 'removeTab');
-    baseGetEvidenceUrl = optionalAdapterMethod(args.chromeAdapter, 'getEvidenceUrl');
-    baseGetFinalUrl = optionalAdapterMethod(args.chromeAdapter, 'getFinalUrl');
+    if (!resuming) {
+      createTab = requiredAdapterMethod(args.chromeAdapter, 'createTab');
+      navigateTab = requiredAdapterMethod(args.chromeAdapter, 'navigateTab');
+      waitForStable = requiredAdapterMethod(args.chromeAdapter, 'waitForStable');
+      baseGetEvidenceUrl = optionalAdapterMethod(args.chromeAdapter, 'getEvidenceUrl');
+      baseGetFinalUrl = optionalAdapterMethod(args.chromeAdapter, 'getFinalUrl');
+    }
     legacyEffects = Object.freeze({ ...captureLegacyEffects(args.chromeAdapter), emitProgress: args.onProgress });
+    if (policy.mode !== 'no-pixels') {
+      probeSensitiveCaptureSignals = requiredAdapterMethod(args.chromeAdapter, 'probeSensitiveCaptureSignals');
+      if (policy.captureFullPage && typeof legacyEffects.captureFullPage !== 'function' ||
+        policy.captureElements && typeof legacyEffects.captureElement !== 'function') {
+        throw new TypeError('URL_AUDIT_DENIED');
+      }
+    }
   } catch { throw new TypeError('URL_AUDIT_DENIED'); }
   const ownedTabs = createOwnedTabRegistry({
     sessionArea: internals.sessionArea,
@@ -187,28 +256,57 @@ export async function runUrlAudit(rawArgs = {}) {
     now: args.now,
   });
   const inventory = await createInstalledCoreRuleInventory();
-  const startedAt = canonicalTime(args.now());
+  let resumeCheckpoint = null;
+  if (resuming) {
+    try {
+      resumeCheckpoint = validateExecutionCheckpoint({
+        auditId: args.auditId, checkpoint: args.resumeCheckpoint, pageOrder: ['page-1'],
+      });
+    } catch { throw new TypeError('URL_AUDIT_DENIED'); }
+    const page = resumeCheckpoint.pages[0];
+    if (page.attempted !== true || page.rulesVersion !== inventory.rulesVersion ||
+      page.inventoryVersion !== inventory.inventoryVersion || page.inventoryHash !== inventory.sha256 ||
+      page.outcomes.length !== 0) throw new TypeError('URL_AUDIT_DENIED');
+  }
+  const startedAt = resumeCheckpoint?.pages[0].startedAt ?? canonicalTime(args.now());
   const checkpointRecorder = await createPageCheckpointRecorder({
     auditId: args.auditId, pageId: 'page-1', startedAt,
     rulesVersion: inventory.rulesVersion, inventory,
     onCheckpoint: checkpoint => writeSanitized(args.auditId, checkpoint),
   });
   let terminalModel = null;
+  let pixelRasterBoundary = null;
+  let pixelCollectionStarted = false;
+  let pixelStarted = false;
   const services = Object.freeze({
     async collectObservedPage({ observedTarget }) {
       const safeTarget = copyOwnedObservedTarget(observedTarget);
-      if (!safeTarget || safeTarget.ownershipId !== args.ownershipId ||
+      if (!safeTarget || safeTarget.ownershipId !== ownershipId ||
         safeTarget.cleanupMode !== 'pre-observation-failure' || safeTarget.pageId !== 'page-1') {
         throw new TypeError('URL_AUDIT_DENIED');
       }
+      if (policy.mode !== 'no-pixels') pixelCollectionStarted = true;
+      pixelRasterBoundary = policy.mode === 'no-pixels' ? null : createPixelRasterBoundaryV1({
+        auditId: args.auditId, observedTarget: safeTarget, capturePolicy: policy, privacyGate,
+        probeDocumentIdentity, probeSensitiveCaptureSignals, signal: args.signal,
+        captureFullPage: policy.captureFullPage ? legacyEffects.captureFullPage : null,
+        captureElement: policy.captureElements ? legacyEffects.captureElement : null,
+      });
+      const observedAdapter = createObservedLegacyAdapter(
+        legacyEffects, safeTarget, policy, privacyGate, pixelRasterBoundary,
+      );
       const collectedDraft = await runLegacyAudit({
-        url: evidenceUrl.href,
-        chromeAdapter: createObservedLegacyAdapter(legacyEffects, safeTarget, policy, null, null),
+        url: requestedUrlEvidence.href,
+        chromeAdapter: observedAdapter,
         now: args.now, idFactory: () => args.auditId, signal: args.signal,
         closeAuditTab: false, expectedExtensionId: args.expectedExtensionId, startedAt,
       });
+      if (policy.mode === 'element-only' &&
+        !['failed', 'cancelled'].includes(collectedDraft.session.status)) {
+        await observedAdapter.settlePixelBoundary();
+      }
       const draft = alignLegacyDraftWithObservedEvidence(
-        collectedDraft, safeTarget.urlEvidence.href, evidenceUrl.href,
+        collectedDraft, safeTarget.urlEvidence.href, requestedUrlEvidence.href,
       );
       terminalModel = await enrichAuditForReport(draft, {
         now: args.now,
@@ -228,16 +326,23 @@ export async function runUrlAudit(rawArgs = {}) {
       if (persistSanitizedModel) await persistSanitizedModel(model, context?.observedTarget ?? null);
     },
   });
-  const runPipeline = createObservedPipelineRunner({ checkpointRecorder, services });
+  const pixelPreflight = policy.mode === 'no-pixels' ? null : createPixelPipelinePreflightV1(privacyGate, {
+    probeSensitiveCaptureSignals: observedTarget =>
+      probeSensitiveCaptureSignals(observedTarget.tabId, observedTarget.documentId),
+  });
+  const runPipeline = createObservedPipelineRunner({
+    checkpointRecorder, services,
+    ...(policy.mode === 'no-pixels' ? {} : { privacyGate, pixelPreflight }),
+  });
   const createTabInAuthorizedWindow = async details => {
     const request = captureExactRecord(details, ['url', 'active']);
     if (!request || request.url !== 'about:blank' || request.active !== true) {
       throw new Error('TARGET_CREATION_FAILED');
     }
-    const created = await createTab({ ...request, active: false, windowId: args.windowId });
+    const created = await createTab({ ...request, active: false, windowId });
     const createdTabId = ownValue(created, 'id');
     const createdWindowId = ownValue(created, 'windowId');
-    if (Number.isSafeInteger(createdTabId) && createdTabId >= 0 && createdWindowId !== args.windowId) {
+    if (Number.isSafeInteger(createdTabId) && createdTabId >= 0 && createdWindowId !== windowId) {
       try { await removeTab(createdTabId); } catch { /* about:blank never receives the protected URL */ }
       throw new Error('TARGET_CREATION_FAILED');
     }
@@ -256,24 +361,34 @@ export async function runUrlAudit(rawArgs = {}) {
     if (!safe || safe.queryIncluded) throw new TypeError('URL_AUDIT_DENIED');
     return safe;
   };
-  const executionAdapter = Object.freeze({
-    runPipeline, probeDocumentIdentity, ownedTabs, createTab: createTabInAuthorizedWindow, navigateTab, waitForStable,
-    resolveNavigationToken, getEvidenceUrl, removeTab,
-  });
-  const runnerOutput = await args.auditRunner({
-    auditId: args.auditId,
-    target: Object.freeze({
+  const executionAdapter = Object.freeze(resuming
+    ? { runPipeline, probeDocumentIdentity, ownedTabs, removeTab }
+    : {
+        runPipeline, probeDocumentIdentity, ownedTabs, createTab: createTabInAuthorizedWindow,
+        navigateTab, waitForStable, resolveNavigationToken, getEvidenceUrl, removeTab,
+      });
+  let runnerOutput;
+  try {
+    runnerOutput = await args.auditRunner({
+      auditId: args.auditId,
+      target: resuming ? resumeTarget : Object.freeze({
       kind: 'owned-disposable', ownershipId: args.ownershipId, navigationToken: args.navigationToken,
       cleanupMode: 'pre-observation-failure', pageId: 'page-1',
-    }),
-    chromeAdapter: executionAdapter,
-    capturePolicy: Object.freeze(policy),
-    privacyGate: null,
-    onCheckpoint: checkpoint => writeSanitized(args.auditId, checkpoint),
-    now: args.now,
-    signal: args.signal,
-    expectedExtensionId: args.expectedExtensionId,
-  });
+      }),
+      chromeAdapter: executionAdapter,
+      capturePolicy: Object.freeze(policy),
+      privacyGate,
+      onCheckpoint: checkpoint => writeSanitized(args.auditId, checkpoint),
+      now: args.now,
+      signal: args.signal,
+      expectedExtensionId: args.expectedExtensionId,
+    });
+  } finally {
+    pixelStarted = pixelStarted || didPixelRasterStartV1(pixelRasterBoundary);
+    if (pixelCollectionStarted && runnerOutput?.status !== 'privacy-paused') {
+      await privacyGate.afterPixels({ auditId: args.auditId, pixelStarted });
+    }
+  }
   return runnerOutput;
 }
 

@@ -18,6 +18,11 @@ const EVIDENCE = sanitizeEvidenceUrlV1(SAMPLE_AUDIT.finalUrl, { includeQuery: fa
 const POLICY = createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false });
 const PIXEL_POLICY = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
 const TARGET = Object.freeze({ version: 'ObservedTargetV1', kind: 'attached', tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST, urlEvidence: EVIDENCE });
+const OWNED_TARGET = Object.freeze({
+  version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId: 'ownership-1',
+  tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST,
+  urlEvidence: EVIDENCE, cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+});
 const EMPTY_SIGNALS = Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: false, categories: Object.freeze([]) });
 const pixelClock = () => createScriptedPixelCommitClockV1({ epochs: Array(8).fill(1_800_000_000_010) });
 
@@ -99,6 +104,38 @@ test('pixel pipeline persists only after consuming the exact settled branded gat
     auditId: AUDIT_ID, observedTarget: TARGET, capturePolicy: PIXEL_POLICY,
     signal: undefined, beforePersist: BEFORE_PERSIST,
   }), /PIXEL_PRIVACY_GATE_DENIED/u);
+  assert.equal(persisted, 1);
+});
+
+test('owned pixel pipeline consumes the same branded gate before persistence', async () => {
+  let persisted = 0;
+  const { gate, pixelPreflight } = pixelGate();
+  const runner = createObservedPipelineRunner({
+    checkpointRecorder: recorder(), privacyGate: gate, pixelPreflight,
+    services: {
+      ...services(),
+      async collectObservedPage() {
+        const boundary = createPixelRasterBoundaryV1({
+          auditId: AUDIT_ID, observedTarget: OWNED_TARGET,
+          capturePolicy: PIXEL_POLICY, privacyGate: gate,
+          async probeDocumentIdentity() {
+            return { tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST };
+          },
+          async probeSensitiveCaptureSignals() { return EMPTY_SIGNALS; },
+          signal: undefined, async captureFullPage() {}, async captureElement() {},
+        });
+        await boundary.captureFullPage();
+        return { snapshot: { title: 'safe' } };
+      },
+      async persistAuditModel() { persisted += 1; },
+    },
+  });
+  const result = await runner({
+    auditId: AUDIT_ID, observedTarget: OWNED_TARGET,
+    capturePolicy: PIXEL_POLICY, signal: undefined,
+    beforePersist: async () => ({ tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }),
+  });
+  assert.equal(result.model.auditId, AUDIT_ID);
   assert.equal(persisted, 1);
 });
 

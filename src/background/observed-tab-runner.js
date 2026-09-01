@@ -251,13 +251,26 @@ function copyTarget(input) {
       !DIGEST.test(record.urlSessionDigest)) return null;
     return Object.freeze({ kind, tabId: record.tabId, windowId: record.windowId, documentId: record.documentId,
       initialUrlEvidence: copyEvidence(record.urlEvidence), initialUrlSessionDigest: record.urlSessionDigest,
-      navigationToken: null, cleanupMode: null, pageId: null, preRegistered: true });
+      navigationToken: null, cleanupMode: null, pageId: null, preRegistered: true, resume: false });
   }
   const attached = captureExact(input, ['kind', 'tabId', 'windowId', 'documentId', 'initialUrlEvidence', 'initialUrlSessionDigest']);
   if (attached && kind === 'attached' && validChromeId(attached.tabId) && validChromeId(attached.windowId) &&
     validId(attached.documentId) && copyEvidence(attached.initialUrlEvidence) && DIGEST.test(attached.initialUrlSessionDigest)) {
     return Object.freeze({ ...attached, initialUrlEvidence: copyEvidence(attached.initialUrlEvidence), navigationToken: null,
-      cleanupMode: null, pageId: null, preRegistered: true });
+      cleanupMode: null, pageId: null, preRegistered: true, resume: false });
+  }
+
+  const resume = captureExact(input, [
+    'kind', 'ownershipId', 'tabId', 'windowId', 'documentId',
+    'initialUrlEvidence', 'initialUrlSessionDigest', 'cleanupMode', 'pageId',
+  ]);
+  if (resume && kind === 'owned-disposable-resume' && validId(resume.ownershipId) &&
+    validChromeId(resume.tabId) && validChromeId(resume.windowId) && validId(resume.documentId) &&
+    copyEvidence(resume.initialUrlEvidence) && DIGEST.test(resume.initialUrlSessionDigest) &&
+    resume.cleanupMode === 'pre-observation-failure' && resume.pageId === 'page-1') {
+    return Object.freeze({ ...resume, kind: 'owned-disposable',
+      initialUrlEvidence: copyEvidence(resume.initialUrlEvidence), navigationToken: null,
+      preRegistered: true, resume: true });
   }
 
   // A disposable target is issued with a navigation token. A caller may know
@@ -268,7 +281,7 @@ function copyTarget(input) {
     ['always', 'pre-observation-failure'].includes(owned.cleanupMode) &&
     (owned.pageId === null || validId(owned.pageId))) {
     return Object.freeze({ ...owned, tabId: null, windowId: null, documentId: null,
-      initialUrlEvidence: null, initialUrlSessionDigest: null, preRegistered: false });
+      initialUrlEvidence: null, initialUrlSessionDigest: null, preRegistered: false, resume: false });
   }
   return null;
 }
@@ -422,14 +435,15 @@ export async function runObservedTabAudit(input) {
   const removeTab = chromeAdapter && typeof chromeAdapter === 'object' ? captureCallable(chromeAdapter, 'removeTab') : null;
   const ownedBundle = target?.kind === 'owned-disposable' && chromeAdapter && typeof chromeAdapter === 'object'
     ? captureOwnedBundle(chromeAdapter) : null;
-  const navigateTab = target?.kind === 'owned-disposable' ? captureCallable(chromeAdapter, 'navigateTab') : null;
-  const waitForStable = target?.kind === 'owned-disposable' ? captureCallable(chromeAdapter, 'waitForStable') : null;
-  const resolveNavigationToken = target?.kind === 'owned-disposable' ? captureCallable(chromeAdapter, 'resolveNavigationToken') : null;
-  const getEvidenceUrl = target?.kind === 'owned-disposable' ? captureCallable(chromeAdapter, 'getEvidenceUrl') : null;
+  const freshOwned = target?.kind === 'owned-disposable' && !target.resume;
+  const navigateTab = freshOwned ? captureCallable(chromeAdapter, 'navigateTab') : null;
+  const waitForStable = freshOwned ? captureCallable(chromeAdapter, 'waitForStable') : null;
+  const resolveNavigationToken = freshOwned ? captureCallable(chromeAdapter, 'resolveNavigationToken') : null;
+  const getEvidenceUrl = freshOwned ? captureCallable(chromeAdapter, 'getEvidenceUrl') : null;
   const noPixels = policy?.mode === 'no-pixels';
   const validPrivacy = noPixels
     ? privacyGate === null && isObservedPipelineRunnerForPrivacyGate(pipeline, null)
-    : target?.kind === 'attached' && isPixelPrivacyGateV1(privacyGate) &&
+    : ['attached', 'owned-disposable'].includes(target?.kind) && isPixelPrivacyGateV1(privacyGate) &&
       isObservedPipelineRunnerForPrivacyGate(pipeline, privacyGate);
   if (!validId(auditId) || !target || !chromeAdapter || typeof chromeAdapter !== 'object' ||
     !policy || policy.includeQuery !== false || !validPrivacy ||
@@ -437,7 +451,9 @@ export async function runObservedTabAudit(input) {
     typeof onCheckpoint !== 'function' || typeof now !== 'function' ||
     (expectedExtensionId !== undefined && typeof expectedExtensionId !== 'string') ||
     !probeDocumentIdentity || !pipeline ||
-    (target.kind === 'owned-disposable' && (!ownedBundle || !navigateTab || !waitForStable || !resolveNavigationToken || !getEvidenceUrl || !removeTab))) throw denied();
+    (target.resume && noPixels) ||
+    (target.kind === 'owned-disposable' && (!ownedBundle || !removeTab ||
+      (freshOwned && (!navigateTab || !waitForStable || !resolveNavigationToken || !getEvidenceUrl))))) throw denied();
 
   let tabId = target.tabId;
   let windowId = target.windowId;
@@ -450,8 +466,36 @@ export async function runObservedTabAudit(input) {
   let finalProofMatched = false;
   let journalCommitted = false;
   let createdTab = false;
+  let resumeOwnershipConfirmed = false;
   try {
     assertNotAborted(signal);
+    if (target.kind === 'owned-disposable' && target.resume) {
+      const expected = {
+        ownershipId: target.ownershipId, auditId, purpose: 'audit', tabId, windowId,
+        cleanupMode: target.cleanupMode,
+      };
+      const retained = copyOwnedRecord(await ownedBundle.methods.get(target.ownershipId), {
+        ...expected, state: 'retained-for-consent',
+      });
+      assertNotAborted(signal);
+      if (!retained) throw new Error('OWNERSHIP_RESUME_DENIED');
+      const transitioned = await ownedBundle.methods.transition({
+        ownershipId: target.ownershipId, auditId, tabId,
+        fromState: 'retained-for-consent', toState: 'observing',
+      });
+      assertNotAborted(signal);
+      if (!copyOwnedRecord(transitioned, { ...expected, state: 'observing' })) {
+        throw new Error('OWNERSHIP_RESUME_DENIED');
+      }
+      const confirmed = copyOwnedRecord(await ownedBundle.methods.get(target.ownershipId), {
+        ...expected, state: 'observing',
+      });
+      assertNotAborted(signal);
+      if (!confirmed) throw new Error('OWNERSHIP_RESUME_DENIED');
+      resumeOwnershipConfirmed = true;
+      journalCommitted = true;
+      ownershipState = 'observing';
+    }
     if (target.kind === 'owned-disposable' && !target.preRegistered) {
       const createTab = captureCallable(chromeAdapter, 'createTab');
       if (!createTab) throw new Error('TARGET_CREATION_FAILED');
@@ -496,7 +540,7 @@ export async function runObservedTabAudit(input) {
       assertNotAborted(signal);
       if (!copyOwnedRecord(transitionedRead, { ownershipId: target.ownershipId, auditId, purpose: 'audit', tabId, windowId,
         cleanupMode: target.cleanupMode, state: 'observing' })) throw new Error('OWNERSHIP_TRANSITION_UNCONFIRMED');
-    } else if (target.kind === 'owned-disposable') {
+    } else if (target.kind === 'owned-disposable' && ownershipState !== 'observing') {
       throw new Error('OWNERSHIP_CHANGED');
     }
     observed = true; ownershipState = target.kind === 'attached' ? 'attached' : 'observing';
@@ -531,15 +575,42 @@ export async function runObservedTabAudit(input) {
     ownershipState = await cleanupOwned(ownedBundle, chromeAdapter, { ...target, tabId, windowId }, auditId, ownershipState, true, signal, removeTab);
     return Object.freeze({ status, model: result.model, observedTarget, observationState: 'observed', ownershipState });
   } catch (error) {
-    const pausedSignals = target.kind === 'attached'
-      ? readPixelPrivacyPauseInterruptionV1(error, privacyGate)
-      : null;
+    const pausedSignals = readPixelPrivacyPauseInterruptionV1(error, privacyGate);
     if (observed && pausedSignals) {
+      if (target.kind === 'owned-disposable') {
+        const expected = {
+          ownershipId: target.ownershipId, auditId, purpose: 'audit', tabId, windowId,
+          cleanupMode: target.cleanupMode, state: 'retained-for-consent',
+        };
+        try {
+          await ownedBundle.methods.transition({
+            ownershipId: target.ownershipId, auditId, tabId,
+            fromState: 'observing', toState: 'retained-for-consent',
+          });
+        } catch { /* a releitura abaixo distingue throw-before de commit-then-throw */ }
+        const currentRaw = await ownedBundle.methods.get(target.ownershipId);
+        const retained = copyOwnedRecord(currentRaw, expected);
+        if (!retained) {
+          const observing = copyOwnedRecord(currentRaw, { ...expected, state: 'observing' });
+          if (observing) {
+            await cleanupOwned(
+              ownedBundle, chromeAdapter, { ...target, tabId, windowId },
+              auditId, 'observing', true, signal, removeTab,
+            );
+          }
+          throw denied();
+        }
+        return Object.freeze({
+          status: 'privacy-paused', model: null, observedTarget,
+          observationState: 'observed', ownershipState: 'retained-for-consent', signals: pausedSignals,
+        });
+      }
       return Object.freeze({
         status: 'privacy-paused', model: null, observedTarget,
         observationState: 'observed', ownershipState: 'attached', signals: pausedSignals,
       });
     }
+    if (target.resume && !resumeOwnershipConfirmed) throw denied();
     let preCreateAbsent = false;
     if (target.kind === 'owned-disposable' && !createdTab && !journalCommitted && !validChromeId(tabId)) {
       const absence = await ownedBundle.methods.get(target.ownershipId);

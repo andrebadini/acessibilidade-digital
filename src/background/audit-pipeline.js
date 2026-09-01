@@ -220,7 +220,7 @@ async function executeObservedAuditPipelineInternal(input, privacyGate, pixelPre
     (safeObservedTarget.urlEvidence.queryIncluded && !safePolicy.includeQuery) ||
     !checkpointRecorder || !services || !beforePersist ||
     (safePolicy.mode === 'no-pixels' ? privacyGate !== null || pixelPreflight !== null
-      : safeObservedTarget.kind !== 'attached' || !isPixelPrivacyGateV1(privacyGate) ||
+      : !isPixelPrivacyGateV1(privacyGate) ||
         !isPixelPipelinePreflightForV1(pixelPreflight, privacyGate))) {
     throw new TypeError('OBSERVED_PIPELINE_DENIED');
   }

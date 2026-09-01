@@ -6,7 +6,7 @@ import {
   runObservedTabAudit,
 } from '../../src/background/observed-tab-runner.js';
 import { createObservedPipelineRunner } from '../../src/background/audit-pipeline.js';
-import { createPixelPipelinePreflightV1, createPixelPrivacyGateV1 } from '../../src/background/pixel-privacy-gate.js';
+import { createPixelPipelinePreflightV1, createPixelPrivacyGateV1, createPixelRasterBoundaryV1 } from '../../src/background/pixel-privacy-gate.js';
 import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-commit-clock.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
@@ -25,6 +25,12 @@ const NOW = () => '2026-08-31T12:00:00.000Z';
 const EMPTY_SIGNALS = Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: false, categories: Object.freeze([]) });
 const SENSITIVE_SIGNALS = Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: true, categories: Object.freeze(['password']) });
 
+function deferred() {
+  let resolve;
+  const promise = new Promise(currentResolve => { resolve = currentResolve; });
+  return { promise, resolve };
+}
+
 function model() {
   const copy = structuredClone(SAMPLE_AUDIT);
   copy.auditId = 'audit-1';
@@ -38,10 +44,43 @@ function checkpoint() {
     startedAt: NOW(), rulesVersion: '1.0.0', inventoryVersion: '1.0.0', inventoryHash: 'a'.repeat(64), outcomes: [] }] };
 }
 
-function ownedRecord({ state = 'created', tabId = 41, windowId = 3 } = {}) {
+function ownedRecord({ state = 'created', tabId = 41, windowId = 3, cleanupMode = 'always' } = {}) {
   return Object.freeze({ version: 2, ownershipId: 'ownership-1', auditId: 'audit-1', purpose: 'audit',
-    tabId, windowId, cleanupMode: 'always', state,
+    tabId, windowId, cleanupMode, state,
     createdAt: NOW(), updatedAt: NOW() });
+}
+
+function ownedPrivacyGate({ policy, calls, consentId = null, sensitive = SENSITIVE_SIGNALS } = {}) {
+  const source = Object.freeze({
+    kind: 'owned-disposable', ownershipId: 'ownership-1',
+    cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+  });
+  const suspension = ({ state, resumePhase, token, categories }) => ({
+    version: 'AuditSuspensionV1', revision: 1, auditId: 'audit-1', consentId: token,
+    tabId: 41, windowId: 3, documentId: 'doc-1', urlEvidence: EVIDENCE,
+    urlSessionDigest: DIGEST, mode: policy.mode, capturePolicy: policy, categories,
+    issuedAt: 1_800_000_000_000, updatedAt: 1_800_000_000_010, expiresAt: 1_800_000_600_000,
+    cleanupAttempts: 0, cleanupNotBefore: null, state, resumePhase,
+    revokeReason: null, source,
+  });
+  return createPixelPrivacyGateV1({
+    pixelState: {
+      async pause(value) {
+        calls.push('pause');
+        return suspension({ state: 'paused', resumePhase: null, token: 'B'.repeat(21) + 'Q', categories: value.categories });
+      },
+      async gateRunnerStart(value) {
+        calls.push('gate');
+        return {
+          version: 'PixelRunnerGateResultV1', status: 'ready',
+          suspension: suspension({ state: 'resuming', resumePhase: 'runner-started', token: consentId, categories: value.categories }),
+        };
+      },
+    },
+    consentId, authorityExpiresAt: 1_900_000_000_000,
+    commitClock: createScriptedPixelCommitClockV1({ epochs: Array(8).fill(1_800_000_000_010) }),
+    async afterPixels() { calls.push('after'); },
+  });
 }
 
 function attachedTarget(overrides = {}) {
@@ -166,6 +205,8 @@ test('rejects legacy observed targets and string evidence before probing or pipe
     { version: 'ObservedTargetV1', kind: 'disposable', ownerId: 'owner-1', tabId: 7, windowId: 3, documentId: 'doc-1', urlEvidence: EVIDENCE, urlSessionDigest: DIGEST },
     { kind: 'owned-disposable', ownershipId: 'ownership-1', tabId: 41, windowId: 3, documentId: 'doc-1', initialUrlEvidence: EVIDENCE, initialUrlSessionDigest: DIGEST, navigationToken: NAV_TOKEN, cleanupMode: 'always', pageId: 'page-1' },
     { version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId: 'ownership-1', tabId: 41, windowId: 3, documentId: 'doc-1', urlEvidence: EVIDENCE, urlSessionDigest: DIGEST, cleanupMode: 'always', pageId: 'page-1' },
+    { kind: 'owned-disposable-resume', ownershipId: 'ownership-1', tabId: 41, windowId: 3, documentId: 'doc-1', initialUrlEvidence: EVIDENCE, initialUrlSessionDigest: DIGEST, cleanupMode: 'always', pageId: 'page-1' },
+    { kind: 'owned-disposable-resume', ownershipId: 'ownership-1', tabId: 41, windowId: 3, documentId: 'doc-1', initialUrlEvidence: EVIDENCE, initialUrlSessionDigest: DIGEST, cleanupMode: 'pre-observation-failure', pageId: null },
   ]) {
     const { input, calls } = fixture({ target });
     await assert.rejects(() => runObservedTabAudit(input), /OBSERVED_RUNNER_DENIED/u);
@@ -213,6 +254,245 @@ test('sensitive attached preflight pauses after started and returns the exact ca
   assert.equal(runnerCalls.filter(call => call === 'started').length, 1);
   assert.equal(runnerCalls.includes('pipeline'), false);
   assert.equal(calls.includes('after-pixels'), false);
+});
+
+test('fresh owned pixel audit pauses with zero raster and retains the exact owner for consent', async () => {
+  const calls = [];
+  const gate = ownedPrivacyGate({ policy: FULL_POLICY, calls });
+  let state = 'created';
+  const { input } = fixture({
+    policy: FULL_POLICY,
+    privacyGate: gate,
+    target: {
+      kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN,
+      cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+    },
+    adapter: {
+      async createTab() { calls.push('create'); return { id: 41, windowId: 3 }; },
+      async resolveNavigationToken() { calls.push('vault'); return 'https://example.test/a'; },
+      async navigateTab() { calls.push('navigate'); },
+      async waitForStable() { calls.push('stable'); },
+      async getEvidenceUrl() { return EVIDENCE; },
+      async probeDocumentIdentity() { return { tabId: 41, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
+      async probeSensitiveCaptureSignals() { return SENSITIVE_SIGNALS; },
+      async removeTab() { calls.push('raster-or-remove'); },
+      ownedTabs: {
+        async registerCreated() { state = 'created'; return ownedRecord({ state, cleanupMode: 'pre-observation-failure' }); },
+        async get() { return ownedRecord({ state, cleanupMode: 'pre-observation-failure' }); },
+        async transition({ fromState, toState }) {
+          assert.equal(state, fromState);
+          state = toState;
+          if (toState === 'retained-for-consent') throw new Error('commit-then-throw');
+          return ownedRecord({ state, cleanupMode: 'pre-observation-failure' });
+        },
+        async removeOwned() { throw new Error('must retain consent'); },
+        async markCleanupPending() { throw new Error('must retain consent'); },
+      },
+    },
+  });
+
+  const result = await runObservedTabAudit(input);
+  assert.equal(result.status, 'privacy-paused');
+  assert.equal(result.ownershipState, 'retained-for-consent');
+  assert.equal(state, 'retained-for-consent');
+  assert.equal(calls.includes('raster-or-remove'), false);
+});
+
+test('owned consent resume CASes retained owner and captures without create navigate or vault reuse', async () => {
+  const calls = [];
+  const consentId = 'A'.repeat(21) + 'Q';
+  const gate = ownedPrivacyGate({ policy: ELEMENT_POLICY, calls, consentId, sensitive: EMPTY_SIGNALS });
+  let state = 'retained-for-consent';
+  const resumeTarget = {
+    kind: 'owned-disposable-resume', ownershipId: 'ownership-1',
+    tabId: 41, windowId: 3, documentId: 'doc-1',
+    initialUrlEvidence: EVIDENCE, initialUrlSessionDigest: DIGEST,
+    cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+  };
+  const { input } = fixture({
+    policy: ELEMENT_POLICY, privacyGate: gate, target: resumeTarget,
+    pipelineServices: {
+      async collectObservedPage({ observedTarget }) {
+        const boundary = createPixelRasterBoundaryV1({
+          auditId: 'audit-1', observedTarget, capturePolicy: ELEMENT_POLICY, privacyGate: gate,
+          async probeDocumentIdentity() { return { tabId: 41, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
+          async probeSensitiveCaptureSignals() { return EMPTY_SIGNALS; }, signal: undefined,
+          captureFullPage: null,
+          async captureElement() { calls.push('thumbnail'); },
+        });
+        await boundary.captureElement();
+        return { snapshot: { title: 'safe' } };
+      },
+    },
+    adapter: {
+      async createTab() { calls.push('forbidden-create'); },
+      async navigateTab() { calls.push('forbidden-navigate'); },
+      async waitForStable() { calls.push('forbidden-stable'); },
+      async resolveNavigationToken() { calls.push('forbidden-vault'); },
+      async getEvidenceUrl() { calls.push('forbidden-evidence'); },
+      async removeTab() { calls.push('remove'); },
+      async probeDocumentIdentity() { return { tabId: 41, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
+      async probeSensitiveCaptureSignals() { return EMPTY_SIGNALS; },
+      ownedTabs: {
+        async registerCreated() { throw new Error('must-not-register'); },
+        async get() { return ownedRecord({ state, cleanupMode: 'pre-observation-failure' }); },
+        async transition({ fromState, toState }) {
+          assert.equal(state, fromState);
+          state = toState;
+          return ownedRecord({ state, cleanupMode: 'pre-observation-failure' });
+        },
+        async removeOwned() { throw new Error('must retain review'); },
+        async markCleanupPending() { throw new Error('must retain review'); },
+      },
+    },
+  });
+
+  const result = await runObservedTabAudit(input);
+  assert.equal(result.status, 'partial');
+  assert.equal(result.ownershipState, 'retained-for-review');
+  assert.equal(state, 'retained-for-review');
+  assert.deepEqual(calls.filter(value => /^forbidden/u.test(value)), []);
+  assert.equal(calls.filter(value => value === 'thumbnail').length, 1);
+});
+
+test('owned consent resume rejects a foreign owner record before pipeline or raster', async () => {
+  const calls = [];
+  const consentId = 'A'.repeat(21) + 'Q';
+  const gate = ownedPrivacyGate({ policy: ELEMENT_POLICY, calls, consentId, sensitive: EMPTY_SIGNALS });
+  const { input } = fixture({
+    policy: ELEMENT_POLICY, privacyGate: gate,
+    target: {
+      kind: 'owned-disposable-resume', ownershipId: 'ownership-1',
+      tabId: 41, windowId: 3, documentId: 'doc-1',
+      initialUrlEvidence: EVIDENCE, initialUrlSessionDigest: DIGEST,
+      cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+    },
+    pipelineServices: {
+      async collectObservedPage() { calls.push('pipeline'); throw new Error('must-not-collect'); },
+    },
+    adapter: {
+      async removeTab() { calls.push('remove'); },
+      async probeDocumentIdentity() { calls.push('probe'); throw new Error('must-not-probe'); },
+      ownedTabs: {
+        async registerCreated() { throw new Error('must-not-register'); },
+        async get() { return { ...ownedRecord({ state: 'retained-for-consent', cleanupMode: 'pre-observation-failure' }), ownershipId: 'ownership-foreign' }; },
+        async transition() { calls.push('transition'); throw new Error('must-not-transition'); },
+        async removeOwned() { calls.push('remove-owned'); throw new Error('must-not-remove'); },
+        async markCleanupPending() { calls.push('pending'); throw new Error('must-not-pending'); },
+      },
+    },
+  });
+  await assert.rejects(() => runObservedTabAudit(input));
+  assert.deepEqual(calls, []);
+});
+
+test('concurrent owned consent replay loser cannot clean or mutate the winning observing owner', async () => {
+  const target = Object.freeze({
+    kind: 'owned-disposable-resume', ownershipId: 'ownership-1',
+    tabId: 41, windowId: 3, documentId: 'doc-1',
+    initialUrlEvidence: EVIDENCE, initialUrlSessionDigest: DIGEST,
+    cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+  });
+  const bothReadRetained = deferred();
+  const winnerConfirmed = deferred();
+  const releaseWinner = deferred();
+  let retainedReads = 0;
+  let state = 'retained-for-consent';
+  const loserMutations = [];
+  const sharedGet = async () => {
+    if (state === 'retained-for-consent' && retainedReads < 2) {
+      retainedReads += 1;
+      if (retainedReads === 2) bothReadRetained.resolve();
+      await bothReadRetained.promise;
+      return ownedRecord({ state: 'retained-for-consent', cleanupMode: 'pre-observation-failure' });
+    }
+    if (state === 'observing') winnerConfirmed.resolve();
+    return ownedRecord({ state, cleanupMode: 'pre-observation-failure' });
+  };
+  const winnerCalls = [];
+  const winnerGate = ownedPrivacyGate({
+    policy: ELEMENT_POLICY, calls: winnerCalls, consentId: 'A'.repeat(21) + 'Q', sensitive: EMPTY_SIGNALS,
+  });
+  const winner = fixture({
+    policy: ELEMENT_POLICY, privacyGate: winnerGate, target,
+    pipelineServices: {
+      async collectObservedPage({ observedTarget }) {
+        await releaseWinner.promise;
+        const boundary = createPixelRasterBoundaryV1({
+          auditId: 'audit-1', observedTarget, capturePolicy: ELEMENT_POLICY, privacyGate: winnerGate,
+          async probeDocumentIdentity() { return { tabId: 41, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
+          async probeSensitiveCaptureSignals() { return EMPTY_SIGNALS; }, signal: undefined,
+          captureFullPage: null, async captureElement() { winnerCalls.push('thumbnail'); },
+        });
+        await boundary.captureElement();
+        return { snapshot: { title: 'safe' } };
+      },
+    },
+    adapter: {
+      async removeTab() {},
+      async probeDocumentIdentity() { return { tabId: 41, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
+      async probeSensitiveCaptureSignals() { return EMPTY_SIGNALS; },
+      ownedTabs: {
+        async registerCreated() { throw new Error('must-not-register'); },
+        get: sharedGet,
+        async transition({ fromState, toState }) {
+          assert.equal(state, fromState);
+          state = toState;
+          return ownedRecord({ state, cleanupMode: 'pre-observation-failure' });
+        },
+        async removeOwned() { throw new Error('must-not-remove'); },
+        async markCleanupPending() { throw new Error('must-not-pend'); },
+      },
+    },
+  });
+  const loserCalls = [];
+  const loserGate = ownedPrivacyGate({
+    policy: ELEMENT_POLICY, calls: loserCalls, consentId: 'A'.repeat(21) + 'Q', sensitive: EMPTY_SIGNALS,
+  });
+  const loser = fixture({
+    policy: ELEMENT_POLICY, privacyGate: loserGate, target,
+    pipelineServices: {
+      async collectObservedPage() { loserCalls.push('pipeline'); throw new Error('must-not-collect'); },
+    },
+    adapter: {
+      async removeTab() { loserMutations.push('remove-tab'); },
+      async probeDocumentIdentity() { loserCalls.push('probe'); throw new Error('must-not-probe'); },
+      async probeSensitiveCaptureSignals() { return EMPTY_SIGNALS; },
+      ownedTabs: {
+        async registerCreated() { throw new Error('must-not-register'); },
+        get: sharedGet,
+        async transition({ fromState }) {
+          assert.equal(fromState, 'retained-for-consent');
+          await winnerConfirmed.promise;
+          throw new Error('CAS_LOST');
+        },
+        async removeOwned() { loserMutations.push('remove-owned'); throw new Error('state-mismatch'); },
+        async markCleanupPending() {
+          loserMutations.push('cleanup-pending');
+          state = 'cleanup-pending';
+          return ownedRecord({ state, cleanupMode: 'pre-observation-failure' });
+        },
+      },
+    },
+  });
+
+  const winningRun = runObservedTabAudit(winner.input);
+  const losingRun = runObservedTabAudit(loser.input).then(
+    value => ({ value, error: null }),
+    error => ({ value: null, error }),
+  );
+  const losingOutcome = await losingRun;
+  const stateBeforeWinnerContinues = state;
+  const mutationsBeforeWinnerContinues = [...loserMutations];
+  releaseWinner.resolve();
+  const winningOutcome = await winningRun;
+
+  assert.match(String(losingOutcome.error), /OBSERVED_RUNNER_DENIED/u);
+  assert.equal(losingOutcome.value, null);
+  assert.equal(stateBeforeWinnerContinues, 'observing');
+  assert.deepEqual(mutationsBeforeWinnerContinues, []);
+  assert.equal(winningOutcome.status, 'partial');
+  assert.equal(winningOutcome.ownershipState, 'retained-for-review');
 });
 
 test('exposes an observed interruption only through the private reader after factual cleanup', async () => {
