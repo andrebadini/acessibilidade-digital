@@ -30,6 +30,7 @@ test('renderer uses only DOM construction and the fixed exhaustive screen and in
     'CONFIRM_PIXEL_CAPTURE', 'OPEN_REPORT', 'SELECT_OCCURRENCE', 'CONSULT_EVIDENCE', 'RETRY',
   ]) assert.match(runtime, new RegExp(`case ['"]${intent}['"]`, 'u'));
   assert.doesNotMatch(runtime, /START_AUDIT|START_BATCH|AUDIT_CONTEXT_PREFILL|GET_LAST_AUDIT/u);
+  assert.doesNotMatch(runtime, /relatório completo estará disponível na próxima etapa/iu);
 });
 
 test('initial URL and batch choices remain visible but local to Marco 3', async () => {

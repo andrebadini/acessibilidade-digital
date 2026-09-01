@@ -308,21 +308,38 @@ test('panel runtime sends every privileged intent through its admitted Port with
   });
   await new Promise(resolve => setImmediate(resolve));
 
-  const retry = document.root.querySelector('button[data-intent="RETRY"]');
-  assert.ok(retry);
-  await retry.click();
+  assert.ok(document.root.querySelector('[data-focus-id="result-summary"]'),
+    'a report launch failure keeps the completed result available');
+  assert.ok(document.root.querySelector('button[data-intent="OPEN_REPORT"]'),
+    'the user can retry opening the report without rehydrating the audit');
+  assert.equal(document.root.querySelector('button[data-intent="RETRY"]'), null);
+  assert.equal(
+    document.root.querySelector('[role="status"][aria-live="polite"]')?.textContent,
+    'Não foi possível abrir o relatório. Tente novamente.',
+  );
+
+  const openReportRetry = document.root.querySelector('button[data-intent="OPEN_REPORT"]');
+  await openReportRetry.click();
   await new Promise(resolve => setImmediate(resolve));
-  const retryPacket = ports[0].posted.find(packet => packet?.envelope?.type === 'PANEL_REHYDRATE_VIEW');
-  assert.ok(retryPacket, 'retrying the view is sent through the admitted panel Port');
-  assert.deepEqual(retryPacket, {
-    protocol: 'audita-panel', version: 1, type: 'intent', requestId: retryPacket.requestId,
-    envelope: { type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-panel-1' },
+  const reportRetryPacket = ports[0].posted
+    .filter(packet => packet?.envelope?.type === 'PANEL_OPEN_REPORT').at(-1);
+  assert.ok(reportRetryPacket, 'retrying the report launch uses the existing admitted panel Port');
+  assert.deepEqual(reportRetryPacket, {
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: reportRetryPacket.requestId,
+    envelope: {
+      type: 'PANEL_OPEN_REPORT', sessionCapabilityId, auditId: 'audit-panel-1',
+    },
   });
   ports[0].onMessage.emit({
-    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: retryPacket.requestId,
-    response: { ok: true, auditId: 'audit-panel-1', state: 'view-only' },
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: reportRetryPacket.requestId,
+    response: { ok: true, auditId: 'audit-panel-1', state: 'connected' },
   });
   await new Promise(resolve => setImmediate(resolve));
+  assert.ok(document.root.querySelector('[data-focus-id="result-summary"]'));
+  assert.equal(
+    document.root.querySelector('[role="status"][aria-live="polite"]')?.textContent,
+    'Relatório completo aberto em uma nova aba.',
+  );
 
   const readerButton = document.root.querySelector('button[data-persona-mode="reader"]');
   assert.ok(readerButton);
@@ -450,8 +467,20 @@ test('panel runtime sends every privileged intent through its admitted Port with
   assert.equal(runtimeMessageCalls, 0);
   assert.equal(currentWindowReads, 0);
 
-  ports[0].onDisconnect.emit();
+  const openReportBeforeDisconnect = document.root.querySelector('button[data-intent="OPEN_REPORT"]');
+  const interruptedReportRequest = openReportBeforeDisconnect.click();
   await new Promise(resolve => setImmediate(resolve));
-  assert.ok(document.root.querySelector('[data-screen="unavailable"]'));
-  assert.match(document.root.textContent, /Painel não preparado\. Abra novamente pelo botão da extensão\./u);
+  const interruptedReportPacket = ports[0].posted
+    .filter(packet => packet?.envelope?.type === 'PANEL_OPEN_REPORT').at(-1);
+  assert.notEqual(interruptedReportPacket.requestId, reportRetryPacket.requestId);
+  ports[0].onDisconnect.emit();
+  await interruptedReportRequest;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(document.root.querySelector('[data-focus-id="result-summary"]'),
+    'a Port interruption while opening the report must not discard the completed result');
+  assert.ok(document.root.querySelector('button[data-intent="OPEN_REPORT"]'));
+  assert.equal(
+    document.root.querySelector('[role="status"][aria-live="polite"]')?.textContent,
+    'Não foi possível abrir o relatório. Tente novamente.',
+  );
 });

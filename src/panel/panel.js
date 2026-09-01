@@ -280,14 +280,25 @@ async function startAttachedAudit() {
 }
 
 async function requestSessionAction(type) {
-  if (!sessionPortClient) return;
-  const response = await sessionPortClient.requestIntent({ type });
-  if (response?.ok === true) {
-    announce(type === 'PANEL_CANCEL_AUDIT' ? 'Cancelamento solicitado.' : 'Relatório solicitado.');
+  if (!sessionPortClient) {
+    if (type === 'PANEL_OPEN_REPORT') announce('Não foi possível abrir o relatório. Tente novamente.');
     return;
   }
-  if (type === 'PANEL_OPEN_REPORT' && response?.code === 'FEATURE_UNAVAILABLE') {
-    announce('Abrir relatório completo estará disponível na próxima etapa.');
+  if (type === 'PANEL_OPEN_REPORT') {
+    const auditId = state.auditId;
+    let response = null;
+    try { response = await sessionPortClient.requestIntent({ type }); }
+    catch { /* the completed result remains available for another attempt */ }
+    if (state.screen !== 'result' || state.auditId !== auditId) return;
+    const opened = exactRecord(response, ['ok', 'auditId', 'state']);
+    announce(opened?.ok === true && opened.auditId === auditId && opened.state === 'connected'
+      ? 'Relatório completo aberto em uma nova aba.'
+      : 'Não foi possível abrir o relatório. Tente novamente.');
+    return;
+  }
+  const response = await sessionPortClient.requestIntent({ type });
+  if (response?.ok === true) {
+    announce('Cancelamento solicitado.');
     return;
   }
   transition({ type: 'AUDIT_UNAVAILABLE', auditId: state.auditId, reason: 'Não foi possível concluir a operação local.' });
@@ -400,6 +411,11 @@ function applyHighlightState(value) {
 function receivePortStatus(value) {
   if (value === PANEL_UNPREPARED_MESSAGE) {
     personaBootstrapSynchronized = false;
+    if (state.screen === 'result' && resultBundle?.auditId === state.auditId) {
+      highlightStateSynchronizer.invalidate();
+      announce('A conexão local foi interrompida. O resultado permanece disponível; tente a ação novamente.');
+      return;
+    }
     transition({ type: 'PORT_INTERRUPTED' });
     return;
   }
