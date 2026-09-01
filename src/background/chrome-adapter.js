@@ -3,7 +3,7 @@ import { captureElement, captureFullPage } from '../browser/capture-evidence.js'
 import { composeAnnouncementMapForProduction as composeAnnouncementMap } from '../browser/annotation-map.js';
 import { createCdpClient, createChromeDebuggerTransport } from '../browser/cdp-client.js';
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
-import { projectAuditResourceOrigin } from '../core/privacy.js';
+import { sanitizeEvidenceUrlV1 } from '../core/privacy.js';
 import { canonicalStringify } from '../core/report/canonical-json.js';
 import { parseCssSelectorV1 } from './highlight-locator.js';
 import { runAuditaHighlightCommand } from '../browser/highlight-overlay.js';
@@ -1535,7 +1535,7 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
       if (!Number.isSafeInteger(tabId) || tabId < 0 || typeof includeQuery !== 'boolean') return '';
       try {
         const rawUrl = (await invoke(chromeApi, chromeApi.tabs, 'get', tabId))?.url;
-        return projectAuditResourceOrigin(rawUrl);
+        return sanitizeEvidenceUrlV1(rawUrl, { includeQuery: false }).href;
       } catch {
         return '';
       }

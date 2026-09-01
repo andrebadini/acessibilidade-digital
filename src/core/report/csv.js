@@ -4,12 +4,13 @@ import { auditModelInputError } from './audit-input.js';
 import { isAuditIntegrityVerified } from './integrity.js';
 import { createExportDeliveryIdentityV1 } from '../../export/export-formats.js';
 
-export const OCCURRENCE_CSV_VERSION = 'audita-occurrences-v1';
+export const OCCURRENCE_CSV_VERSION = 'audita-occurrences-v2';
 export const OCCURRENCE_CSV_COLUMNS = Object.freeze([
   'csv_schema_version', 'audit_id', 'occurrence_id', 'page_id', 'page_url',
   'observed_at', 'outcome', 'classification', 'impact', 'confidence',
   'source_engine', 'source_version', 'source_rule_id', 'nbr_item_ref',
-  'wcag_refs', 'section_508_refs', 'title', 'description', 'selector',
+  'item_wcag_refs', 'source_wcag_refs', 'tested_wcag_refs', 'wcag_refs',
+  'section_508_refs', 'title', 'description', 'selector',
   'frame_path', 'accessible_preview', 'accessible_preview_source',
   'evidence_refs', 'consumer_basis_ref', 'evidence_hashes',
   'canonical_model_hash', 'evidence_manifest_hash',
@@ -86,6 +87,9 @@ export function renderOccurrenceCsv(input, options = {}) {
       source.version,
       strictToken(source.ruleId),
       strictToken(occurrence.nbrItemRef),
+      strictTokenList(occurrence.itemWcagRefs, ';'),
+      strictTokenList(occurrence.sourceWcagRefs, ';'),
+      strictTokenList(occurrence.testedWcagRefs, ';'),
       strictTokenList(occurrence.wcagRefs, ';'),
       foreignReferenceList(occurrence.foreignBenchmarkRefs),
       localCatalogTitle(occurrence.nbrItemRef),

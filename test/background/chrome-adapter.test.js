@@ -1260,15 +1260,15 @@ test('returns an immutable exact-hook adapter that remains safely recomposable',
   assert.equal(second.enterFinalization, firstHooks.enterFinalization);
 });
 
-test('projects the real observed URL to its durable origin regardless of query authority', async () => {
+test('projects the real observed URL to its sanitized path without query authority', async () => {
   const fake = chromeFake();
   fake.chromeApi.tabs.get = async id => ({
     id, windowId: 9, status: 'complete',
     url: 'https://example.test/pessoa/CPF-123456789?case=7&secret=x#fragmento',
   });
   const adapter = createChromeAdapter(fake.chromeApi);
-  assert.equal(await adapter.getEvidenceUrl(17, false), 'https://example.test/');
-  assert.equal(await adapter.getEvidenceUrl(17, true), 'https://example.test/');
+  assert.equal(await adapter.getEvidenceUrl(17, false), 'https://example.test/pessoa/:redacted-2');
+  assert.equal(await adapter.getEvidenceUrl(17, true), 'https://example.test/pessoa/:redacted-2');
 });
 
 test('proves a fresh top document identity without returning its raw URL', async () => {

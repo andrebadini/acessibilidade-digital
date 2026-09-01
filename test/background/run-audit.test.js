@@ -16,6 +16,7 @@ import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js'
 import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
+import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 import { remapAuditPage } from '../../src/core/batch/remap-audit.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
@@ -27,6 +28,7 @@ import { runObservedTabAudit } from '../../src/background/observed-tab-runner.js
 import { createRawNavigationVaultV1 } from '../../src/background/raw-navigation-vault.js';
 import { createSessionUrlDigestManager } from '../../src/core/privacy/session-url-digest.js';
 import { ATTACHED_COPY_RELOADED_MESSAGE } from '../../src/core/report/diagnostic-policy.js';
+import { createPanelResultBundleV1 } from '../../src/panel/panel-result-bundle.js';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const TEST_EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
@@ -2978,7 +2980,7 @@ test('orders capture→axe→collect→probes→core→normalize, correlates tar
   page.nodes = [
     { backendNodeId: 10, tagName: 'html', attributes: {}, text: '', parentBackendNodeId: null, rect: { x: 0, y: 0, width: 800, height: 600 } },
     { backendNodeId: 11, tagName: 'body', attributes: {}, text: '', parentBackendNodeId: 10, rect: { x: 0, y: 0, width: 800, height: 600 } },
-    { backendNodeId: 12, tagName: 'button', attributes: {}, text: 'Continuar', parentBackendNodeId: 11, rect: { x: 10, y: 20, width: 20, height: 20 } },
+    { backendNodeId: 12, tagName: 'button', attributes: { id: 'continue-button' }, text: 'Continuar', parentBackendNodeId: 11, rect: { x: 10, y: 20, width: 20, height: 20 } },
   ];
   const options = {
     page,
@@ -3033,6 +3035,30 @@ test('orders capture→axe→collect→probes→core→normalize, correlates tar
   const report = await enrichAuditForReport(model, reportOptions);
   assert.doesNotThrow(() => createAuditModel(report));
   assert.doesNotThrow(() => renderHtmlReport(report));
+  const axeReportOccurrence = report.occurrences.find(occurrence => occurrence.ruleId === 'axe.target-size');
+  const correlatedEvidence = report.evidence.find(evidence =>
+    axeReportOccurrence.evidenceRefs.includes(evidence.evidenceId) && evidence.nodeId === axeReportOccurrence.nodeId);
+  assert.equal(axeReportOccurrence.target.selector, 'html > body > button');
+  assert.equal(correlatedEvidence.selector.css, '#continue-button');
+  const inventory = await createInstalledCoreRuleInventory();
+  const checkpoint = {
+    version: 1, auditId: report.auditId,
+    pages: [{
+      pageId: 'page-1', attempted: true, startedAt: report.pages[0].timestamps.startedAt,
+      rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion,
+      inventoryHash: inventory.sha256,
+      outcomes: [{ ruleId: 'target-size-minimum', outcome: core.outcome }],
+    }],
+  };
+  const bundle = await createPanelResultBundleV1({
+    inventory,
+    reportRevision: {
+      version: 1, auditId: report.auditId, modelRevision: 1,
+      modelHash: report.integrity.canonicalModelHash, model: report, checkpoint,
+    },
+  });
+  assert.equal(bundle.details.find(detail => detail.occurrenceId === axeReportOccurrence.occurrenceId).technical.selector,
+    'html > body > button');
   const technical = JSON.parse(renderTechnicalJson(report));
   assert.equal(technical.assertions.length, 146);
   assert.deepEqual(technical.audit, report);

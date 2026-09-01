@@ -77,7 +77,8 @@ function contextForOccurrence(occurrence, evidenceById) {
     const frames = frameDescriptor && Object.hasOwn(frameDescriptor, 'value')
       ? canonicalArray(frameDescriptor.value)
       : [];
-    if (selector && typeof css === 'string' && css && selector !== css) denyContext();
+    const exactNodeCorrelation = nodeId !== null && nodeId !== undefined && evidenceNode === nodeId;
+    if (selector && typeof css === 'string' && css && selector !== css && !exactNodeCorrelation) denyContext();
     if (framePath.length > 0 && frames.length > 0 && JSON.stringify(framePath) !== JSON.stringify(frames)) denyContext();
     if (!selector && typeof css === 'string' && css) selector = css;
     if (framePath.length === 0 && frames.length > 0) framePath = frames;

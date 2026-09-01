@@ -8,6 +8,7 @@ const ROLE_LABELS = new Map([
   ['listbox', 'caixa de listagem'],
   ['heading', 'cabeçalho'],
   ['img', 'imagem'],
+  ['image', 'imagem'],
   ['region', 'região'],
   ['table', 'tabela'],
   ['list', 'lista'],

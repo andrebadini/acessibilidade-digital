@@ -71,6 +71,10 @@ test('classic and ESM facades produce byte-identical accessible previews', async
     JSON.stringify(classic.buildAnnouncementPreview(properties)),
     JSON.stringify(buildAnnouncementPreview(properties)),
   );
+  assert.equal(
+    JSON.stringify(classic.buildAnnouncementPreview({ name: '', role: 'image' })),
+    JSON.stringify(buildAnnouncementPreview({ name: '', role: 'image' })),
+  );
 });
 
 test('normative ESM exports remain byte-identical to the 78ba813 baseline', async () => {

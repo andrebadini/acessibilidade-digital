@@ -376,6 +376,7 @@ test('derives the closed classification and every result context from correlated
     ['top', { evidenceId: 'top', nodeId: 'n-top', selector: { css: '#top', framePath: [] } }],
     ['frame', { evidenceId: 'frame', nodeId: 'n-frame', selector: { css: '#inside', framePath: ['iframe#safe'] } }],
     ['shadow', { evidenceId: 'shadow', nodeId: 'n-shadow', selector: { css: 'main >>> button', framePath: [] } }],
+    ['uncorrelated', { evidenceId: 'uncorrelated', nodeId: null, selector: { css: '#top', framePath: [] } }],
   ]);
   const occurrence = (occurrenceId, nodeId, evidenceRefs) => ({
     occurrenceId, target: { nodeId, selector: null, framePath: [] }, evidenceRefs,
@@ -384,6 +385,17 @@ test('derives the closed classification and every result context from correlated
   assert.equal(deriveResultContextV1({ occurrences: [occurrence('top', 'n-top', ['top'])], evidenceById }), 'top-document');
   assert.equal(deriveResultContextV1({ occurrences: [occurrence('frame', 'n-frame', ['frame'])], evidenceById }), 'same-origin-frame');
   assert.equal(deriveResultContextV1({ occurrences: [occurrence('shadow', 'n-shadow', ['shadow'])], evidenceById }), 'open-shadow-root');
+  const equivalentSelector = occurrence('equivalent-selector', 'n-top', ['top']);
+  equivalentSelector.target.selector = 'button#top';
+  assert.equal(deriveResultContextV1({ occurrences: [equivalentSelector], evidenceById }), 'top-document',
+    'dois seletores canônicos podem nomear o mesmo nodeId sem invalidar o relatório');
+  const uncorrelatedSelector = occurrence('uncorrelated-selector', null, ['uncorrelated']);
+  uncorrelatedSelector.target.selector = 'button#top';
+  assert.throws(
+    () => deriveResultContextV1({ occurrences: [uncorrelatedSelector], evidenceById }),
+    /RESULT_CONTEXT_DENIED/u,
+    'seletores divergentes continuam fechados sem a correlação exata do nodeId',
+  );
   assert.equal(deriveResultContextV1({
     occurrences: [occurrence('top', 'n-top', ['top']), occurrence('frame', 'n-frame', ['frame'])],
     evidenceById,

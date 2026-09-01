@@ -20,7 +20,8 @@ const HEADERS = [
   'csv_schema_version', 'audit_id', 'occurrence_id', 'page_id', 'page_url',
   'observed_at', 'outcome', 'classification', 'impact', 'confidence',
   'source_engine', 'source_version', 'source_rule_id', 'nbr_item_ref',
-  'wcag_refs', 'section_508_refs', 'title', 'description', 'selector',
+  'item_wcag_refs', 'source_wcag_refs', 'tested_wcag_refs', 'wcag_refs',
+  'section_508_refs', 'title', 'description', 'selector',
   'frame_path', 'accessible_preview', 'accessible_preview_source',
   'evidence_refs', 'consumer_basis_ref', 'evidence_hashes',
   'canonical_model_hash', 'evidence_manifest_hash',
@@ -59,7 +60,7 @@ test('serializes a deterministic RFC 4180 occurrence table with fixed versioned 
   const csv = renderOccurrenceCsv(verified);
   const records = parseQuotedCsv(csv);
 
-  assert.equal(OCCURRENCE_CSV_VERSION, 'audita-occurrences-v1');
+  assert.equal(OCCURRENCE_CSV_VERSION, 'audita-occurrences-v2');
   assert.deepEqual(OCCURRENCE_CSV_COLUMNS, HEADERS);
   assert.equal(renderOccurrenceCsv(verified), csv);
   assert.deepEqual([...new TextEncoder().encode(csv).subarray(0, 3)], [0xef, 0xbb, 0xbf]);
@@ -67,7 +68,7 @@ test('serializes a deterministic RFC 4180 occurrence table with fixed versioned 
   assert.deepEqual(records[0], HEADERS);
   assert.deepEqual(records.slice(1).map(row => row[2]), verified.occurrences.map(value => value.occurrenceId));
   assert.deepEqual(asRecord(records[1]), {
-    csv_schema_version: 'audita-occurrences-v1',
+    csv_schema_version: 'audita-occurrences-v2',
     audit_id: 'audit-sample-20260826',
     occurrence_id: 'occ-focus-failed',
     page_id: 'page-1',
@@ -81,6 +82,9 @@ test('serializes a deterministic RFC 4180 occurrence table with fixed versioned 
     source_version: '1.0.0',
     source_rule_id: 'focus-visible',
     nbr_item_ref: '5.1.1',
+    item_wcag_refs: '2.4.7',
+    source_wcag_refs: '2.4.7',
+    tested_wcag_refs: '2.4.7',
     wcag_refs: '2.4.7',
     section_508_refs: 'us.revised-508.wcag20-aa.v1:2.4.7:AA',
     title: 'Indicador de foco visível',
@@ -95,6 +99,13 @@ test('serializes a deterministic RFC 4180 occurrence table with fixed versioned 
     canonical_model_hash: verified.integrity.canonicalModelHash,
     evidence_manifest_hash: verified.integrity.evidenceManifestHash,
   });
+  const assisted = asRecord(records[2]);
+  assert.equal(assisted.outcome, 'cantTell');
+  assert.equal(assisted.nbr_item_ref, '5.1.4');
+  assert.equal(assisted.item_wcag_refs, '2.4.3');
+  assert.equal(assisted.source_wcag_refs, '2.4.3');
+  assert.equal(assisted.tested_wcag_refs, '');
+  assert.equal(assisted.wcag_refs, '', 'o alias legado não deve transformar mapeamento em teste efetivo');
   assert.ok(csv.endsWith('\r\n'));
   assert.equal(csv.replace(/\r\n/gu, '').includes('\n'), false);
 });

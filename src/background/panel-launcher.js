@@ -33,6 +33,11 @@ function validIssued(value) {
     Number.isSafeInteger(issued.generation) && issued.generation >= 1 ? Object.freeze(issued) : null;
 }
 
+function isLaunchConflict(value) {
+  const denied = exact(value, ['ok', 'code']);
+  return denied?.ok === false && denied.code === 'PANEL_LAUNCH_CONFLICT';
+}
+
 export function createPanelLauncher(raw) {
   const input = exact(raw, ['chromeApi', 'launchAuthority', 'logger']);
   if (!input || typeof input.chromeApi?.sidePanel?.setOptions !== 'function' ||
@@ -54,15 +59,49 @@ export function createPanelLauncher(raw) {
     catch { return true; }
   };
 
+  function reopenAndRotate(tabId, onOpened) {
+    let openFinished = false;
+    const onOpen = () => {
+      if (openFinished) return;
+      openFinished = true;
+      if (hasLastError()) {
+        log('PANEL_LAUNCH_UNAVAILABLE');
+        return;
+      }
+      void rebindForNavigation({ tabId }).then(ready => {
+        if (ready !== true) {
+          log('PANEL_LAUNCH_UNAVAILABLE');
+          return;
+        }
+        try { onOpened?.(); } catch { log('PANEL_LAUNCH_CALLBACK_FAILED'); }
+      }, () => log('PANEL_LAUNCH_UNAVAILABLE'));
+    };
+    try {
+      input.chromeApi.sidePanel.open({ tabId }, onOpen);
+      return true;
+    } catch {
+      openFinished = true;
+      log('PANEL_LAUNCH_UNAVAILABLE');
+      return false;
+    }
+  }
+
   function launch(tab, onOpened = undefined) {
     const tabId = ownData(tab, 'id');
     const windowId = ownData(tab, 'windowId');
     if (!safeChromeId(tabId) || !safeChromeId(windowId) ||
       (onOpened !== undefined && typeof onOpened !== 'function')) return false;
     let issued;
-    try { issued = validIssued(input.launchAuthority.issue({ tabId, windowId })); }
-    catch { issued = null; }
+    let issuance;
+    try {
+      issuance = input.launchAuthority.issue({ tabId, windowId });
+      issued = validIssued(issuance);
+    } catch {
+      issuance = null;
+      issued = null;
+    }
     if (!issued) {
+      if (isLaunchConflict(issuance)) return reopenAndRotate(tabId, onOpened);
       log('PANEL_LAUNCH_UNAVAILABLE');
       return false;
     }

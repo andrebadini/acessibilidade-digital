@@ -54,6 +54,7 @@ import { createHighlightSessionAuthorityBridge } from './highlight-session-autho
 import {
   PANEL_PORT_NAME,
   createPanelPortCoordinator,
+  panelBootstrapStorageKey,
 } from './panel-port.js';
 import { createPanelLaunchAuthority } from './panel-launch-authority.js';
 import { createPanelLauncher } from './panel-launcher.js';
@@ -90,6 +91,10 @@ export const HIGHLIGHT_EXPIRY_ALARM_NAME = 'audita-highlight-expiry-v1';
 
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const CAPABILITY = /^[A-Za-z0-9_-]{22}$/u;
+const PANEL_BOOTSTRAP_PREFIX = 'audita:panel-bootstrap:v1:';
+const PANEL_BOOTSTRAP_KEYS = Object.freeze([
+  'version', 'kind', 'auditId', 'sessionCapabilityId', 'windowId', 'createdAt', 'expiresAt', 'state',
+]);
 
 function freeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value)) return value;
@@ -120,6 +125,78 @@ function own(value, key) {
     const descriptor = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key) : null;
     return descriptor?.enumerable && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
   } catch { return undefined; }
+}
+
+function dataEntries(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length > 50_000 || keys.some(key => typeof key !== 'string')) return null;
+    const entries = [];
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      entries.push([key, descriptor.value]);
+    }
+    return entries;
+  } catch { return null; }
+}
+
+function panelBootstrapRecord(value) {
+  const record = exact(value, PANEL_BOOTSTRAP_KEYS, true);
+  return record && record.version === 1 && record.kind === 'audit-session' &&
+    AUDIT_ID.test(record.auditId ?? '') && CAPABILITY.test(record.sessionCapabilityId ?? '') &&
+    Number.isSafeInteger(record.windowId) && record.windowId >= 0 &&
+    Number.isSafeInteger(record.createdAt) && record.createdAt >= 0 &&
+    Number.isSafeInteger(record.expiresAt) && record.expiresAt > record.createdAt &&
+    ['pending', 'consumed'].includes(record.state)
+    ? Object.freeze(record)
+    : null;
+}
+
+export async function disconnectPanelAuditSessions({ auditId, sessionArea, panelCoordinator } = {}) {
+  if (!AUDIT_ID.test(auditId ?? '') || typeof sessionArea?.get !== 'function' ||
+    typeof panelCoordinator?.withWindowLock !== 'function') return false;
+  try {
+    const entries = dataEntries(await sessionArea.get(null));
+    if (!entries) return false;
+    const candidates = [];
+    const windows = new Set();
+    for (const [key, value] of entries) {
+      if (!key.startsWith(PANEL_BOOTSTRAP_PREFIX)) continue;
+      const record = panelBootstrapRecord(value);
+      if (!record) {
+        if (own(value, 'auditId') === auditId) return false;
+        continue;
+      }
+      if (key !== panelBootstrapStorageKey(record.windowId)) {
+        if (record.auditId === auditId) return false;
+        continue;
+      }
+      if (record.auditId !== auditId) continue;
+      if (windows.has(record.windowId)) return false;
+      windows.add(record.windowId);
+      candidates.push(record);
+    }
+    candidates.sort((left, right) => left.windowId - right.windowId);
+    for (const record of candidates) {
+      const disconnected = await panelCoordinator.withWindowLock(record.windowId, scope => {
+        if (typeof scope?.disconnectSession !== 'function') return false;
+        return scope.disconnectSession({
+          auditId: record.auditId,
+          sessionCapabilityId: record.sessionCapabilityId,
+          windowId: record.windowId,
+          reasonCode: 'AUDIT_DELETED',
+        });
+      });
+      if (disconnected !== true) return false;
+      const remaining = dataEntries(await sessionArea.get(panelBootstrapStorageKey(record.windowId)));
+      if (!remaining || remaining.some(([key]) => key === panelBootstrapStorageKey(record.windowId))) return false;
+    }
+    return true;
+  } catch { return false; }
 }
 
 function captureSensitiveCaptureProbeAuthority(adapter) {
@@ -716,7 +793,7 @@ export function createPublishingHighlightController(raw) {
 
 export function createReportOperations({
   chromeApi, auditStore, sessionArea, modelNow, highlightController, highlightBindingStore,
-  publishHighlightState,
+  publishHighlightState, disconnectPanelAudit,
 }) {
   const checkpoints = createCheckpointAdapters(sessionArea);
   const now = () => canonicalModelTime(modelNow);
@@ -788,9 +865,12 @@ export function createReportOperations({
       const snapshot = await auditStore.getAuditSnapshot(auditId);
       if (snapshot?.model?.auditId !== auditId || !snapshot.capability) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
       if (!await clearHighlightAudit(auditId, 'delete-audit')) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
+      if (typeof disconnectPanelAudit !== 'function' || !await disconnectPanelAudit(auditId)) {
+        return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
+      }
+      await checkpoints.removeCheckpoint({ auditId, sessionCapabilityId: null, windowId: null });
       const result = await auditStore.deleteAudit(auditId, snapshot.capability, { now: now() });
       if (result?.deleted !== true) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
-      await checkpoints.removeCheckpoint({ auditId, sessionCapabilityId: null, windowId: null });
       await sendRuntimeMessage(chromeApi, createAuditDeletedEvent({ auditId, reason: 'delete-one' })).catch(() => {});
       return freeze({ ok: true, auditId, deleted: true });
     } catch (error) {
@@ -1258,6 +1338,7 @@ async function buildDefaultRuntime(chromeApi, options) {
   const reportOperations = createReportOperations({
     chromeApi, auditStore, sessionArea, modelNow, highlightController, highlightBindingStore,
     publishHighlightState,
+    disconnectPanelAudit: auditId => disconnectPanelAuditSessions({ auditId, sessionArea, panelCoordinator }),
   });
   const router = createSidePanelIntentRouter({
     chromeApi, authority, auditStarter, panelCoordinator, chromeAdapter,

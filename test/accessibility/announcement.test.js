@@ -68,6 +68,12 @@ test('supports every minimum role and avoids unknown claims or duplicate punctua
   });
 });
 
+test('normalizes the Chrome accessibility image role into a useful unnamed-image preview', () => {
+  assert.deepEqual(buildAnnouncementPreview({ name: '', role: 'image' }), {
+    text: 'imagem', kind: 'preview', locale: 'pt-BR'
+  });
+});
+
 test('formats every checked state deterministically in Portuguese', () => {
   const expected = new Map([
     [true, 'Aceito, caixa de seleção, marcado'],

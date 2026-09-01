@@ -1,567 +1,1222 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { basename, dirname, join, sep } from 'node:path';
+import { readFile, realpath } from 'node:fs/promises';
+import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
   CANONICAL_CHROME_PRODUCT,
   launchUnpackedExtension,
-  navigateRealPage,
   redactDiagnostic,
   resolveRealChromeTestBinary,
   startFixtureServer,
-  waitForReboundSidePanel,
+  waitForServiceWorker,
 } from './support/real-chrome.mjs';
 
 const workspaceRoot = fileURLToPath(new URL('../../', import.meta.url));
 const chromeBinary = resolveRealChromeTestBinary();
+const queryMarker = 'AUDITA4D_QUERY_71F02A9C';
+const fragmentMarker = 'AUDITA4D_FRAGMENT_149B8C30';
+const memoryMarker = 'AUDITA4D_MEMORY_ONLY_4CC931E2';
+const attachedCopyLimitation =
+  'A auditoria foi executada em uma cópia temporária recarregada da URL da aba escolhida; alterações não salvas e estado mantido apenas em memória na aba original não foram observados.';
+const knownOccurrence = Object.freeze({ selector: '#missing-alt', wcag: '1.1.1', abnt: '5.2.1' });
+const canonicalReportTitle = 'Relatório de auditoria — Audita Acessibilidade';
+const exportMime = Object.freeze({
+  html: 'text/html;charset=utf-8', pdf: 'application/pdf',
+  csv: 'text/csv;charset=utf-8', json: 'application/json;charset=utf-8',
+});
+const privateFieldNames = Object.freeze([
+  'consentId', 'navigationToken', 'sessionDigest', 'urlSessionDigest', 'ownershipId', 'capabilityId',
+  'owner_', 'hmac-sha256',
+]);
 
-async function createSafeRunDirectories(t) {
-  const canonicalTmp = await realpath(tmpdir());
-  const runRoot = await realpath(await mkdtemp(join(canonicalTmp, 'audita-marco-1-')));
-  if (dirname(runRoot) !== canonicalTmp || !basename(runRoot).startsWith('audita-marco-1-')) {
-    throw new Error('UNSAFE_QA_DIRECTORY');
-  }
-  const downloadDirectory = join(runRoot, 'downloads');
-  const qaDirectory = join(runRoot, 'qa');
-  await mkdir(downloadDirectory);
-  await mkdir(qaDirectory);
-  t.after(async () => {
-    const checked = await realpath(runRoot);
-    if (dirname(checked) !== canonicalTmp || !checked.startsWith(`${canonicalTmp}${sep}`) ||
-      !basename(checked).startsWith('audita-marco-1-')) throw new Error('UNSAFE_QA_CLEANUP');
-    await rm(checked, { recursive: true, force: false });
-  });
-  return { downloadDirectory, qaDirectory };
+function currentPageDocument() {
+  const repeatedControls = Array.from({ length: 240 }, (_, index) =>
+    `<button class="unnamed-control" data-sequence="${index}"></button>`).join('');
+  return `<!doctype html>
+    <html lang="pt-BR">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width">
+        <title>Origem preservada</title>
+        <style>
+          body{font-family:system-ui;min-height:2400px;margin:0}
+          main{max-width:760px;margin:24px auto;padding:16px}
+          #runtime-style-target{color:rgb(21,44,72);border:1px solid rgb(160,170,180);padding:8px}
+          .unnamed-control{display:inline-block;width:10px;height:10px;margin:1px}
+        </style>
+      </head>
+      <body>
+        <main>
+          <h1>Origem que deve permanecer intacta</h1>
+          <label for="password-field">Senha</label>
+          <input id="password-field" type="password" autocomplete="current-password" value="">
+          <section data-audita-private><p>Área local marcada como privada.</p></section>
+          <label for="source-notes">Anotações locais</label>
+          <textarea id="source-notes">valor vindo do servidor</textarea>
+          <p id="selection-target">Texto determinístico para preservar a seleção da página.</p>
+          <p id="runtime-style-target" data-runtime-state="server">Estado visual do servidor</p>
+          <img id="missing-alt" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
+          <input id="missing-label" type="text">
+          <button id="missing-name"></button>
+          <a href="/current">clique aqui</a>
+          <div aria-label="Controles sem nome">${repeatedControls}</div>
+        </main>
+      </body>
+    </html>`;
 }
 
-test('real toolbar shortcut opens the Side Panel and completes the attached audit journey', async t => {
-  assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real do painel lateral.');
-  const { downloadDirectory, qaDirectory } = await createSafeRunDirectories(t);
-  const fixture = await startFixtureServer(t, new Map([['/', {
-    status: 200,
-    headers: { 'content-type': 'text/html; charset=utf-8' },
-    body: '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Fixture Audita</title></head><body><main><h1>Teste local</h1><label for="fixture-password">Senha</label><input id="fixture-password" type="password" autocomplete="current-password" value=""><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="><a href="/">clique aqui</a><button>Continuar</button></main></body></html>',
-  }], ['/after-navigation', {
-    status: 200,
-    headers: { 'content-type': 'text/html; charset=utf-8' },
-    body: '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Fixture após navegação</title></head><body><main><h1>Página navegada</h1><button>Continuar</button></main></body></html>',
-  }]]));
+async function armSourceInvariantProof(extension) {
+  const ready = await extension.evaluate(extension.startPage.page, `(async()=>{
+    try{globalThis.__auditaSourceInvariantV1?.dispose?.()}catch{}
+    const notes=document.querySelector('#source-notes');
+    const selected=document.querySelector('#selection-target')?.firstChild;
+    const styled=document.querySelector('#runtime-style-target');
+    const serverImage=document.querySelector('img#missing-alt');
+    const imageAlreadyRemoved=globalThis.__auditaP4dImageRemovedV1===true;
+    if(!(notes instanceof HTMLTextAreaElement)||!(selected instanceof Text)||!(styled instanceof HTMLElement)||
+      (!imageAlreadyRemoved&&!(serverImage instanceof HTMLImageElement))||(imageAlreadyRemoved&&serverImage!==null))return false;
+    if(!imageAlreadyRemoved){
+      serverImage.remove();
+      Object.defineProperty(globalThis,'__auditaP4dImageRemovedV1',{
+        value:true,configurable:true,enumerable:false,writable:false
+      });
+      notes.value=${JSON.stringify(memoryMarker)};
+      notes.focus({preventScroll:true});
+      notes.setSelectionRange(3,15,'forward');
+      const range=document.createRange();
+      range.setStart(selected,2);range.setEnd(selected,14);
+      const selection=getSelection();selection.removeAllRanges();selection.addRange(range);
+      styled.dataset.runtimeState='memory-only';
+      styled.style.cssText='color:rgb(93,31,120);border:3px dashed rgb(12,94,81);padding:11px';
+      styled.textContent='Estado mantido apenas em memória';
+      history.replaceState({fixture:'source-intact',revision:7},'',location.href);
+      history.scrollRestoration='manual';
+      scrollTo(0,640);
+      await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    }else if(notes.value!==${JSON.stringify(memoryMarker)}||styled.dataset.runtimeState!=='memory-only'||
+      styled.textContent!=='Estado mantido apenas em memória')return false;
+    const viewportStable=await new Promise(resolve=>{
+      let prior=null;let equalSamples=0;let elapsed=0;
+      const sample=()=>{
+        const visual=visualViewport;
+        const current=JSON.stringify({innerWidth,innerHeight,clientWidth:document.documentElement.clientWidth,
+          clientHeight:document.documentElement.clientHeight,visual:visual?{width:visual.width,height:visual.height}:null});
+        equalSamples=current===prior?equalSamples+1:0;prior=current;elapsed+=50;
+        if(equalSamples>=4){resolve(true);return}
+        if(elapsed>=2000){resolve(false);return}
+        setTimeout(sample,50);
+      };
+      sample();
+    });
+    if(!viewportStable)return false;
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    const eventNames=[
+      'scroll','resize','focus','blur','focusin','focusout','visibilitychange','selectionchange',
+      'beforeinput','input','change','click','pointerdown','pointerup','keydown','keyup',
+      'popstate','hashchange','pagehide'
+    ];
+    const events=Object.fromEntries(eventNames.map(name=>[name,0]));
+    const onEvent=event=>{if(Object.hasOwn(events,event.type))events[event.type]+=1};
+    for(const name of eventNames)window.addEventListener(name,onEvent,true);
+    const mutationCounts={childList:0,attributes:0,characterData:0};
+    const recordMutations=records=>{for(const record of records)mutationCounts[record.type]+=1};
+    const observer=new MutationObserver(recordMutations);
+    observer.observe(document,{subtree:true,childList:true,attributes:true,characterData:true});
+    const snapshot=()=>{
+      const currentSelection=getSelection();
+      const visual=visualViewport;
+      return {
+        href:location.href,title:document.title,html:document.documentElement.outerHTML,
+        history:{length:history.length,state:JSON.stringify(history.state),scrollRestoration:history.scrollRestoration},
+        scroll:{x:scrollX,y:scrollY},
+        viewport:{
+          innerWidth,innerHeight,devicePixelRatio,
+          clientWidth:document.documentElement.clientWidth,clientHeight:document.documentElement.clientHeight,
+          visual:visual?{width:visual.width,height:visual.height,offsetLeft:visual.offsetLeft,offsetTop:visual.offsetTop,scale:visual.scale}:null
+        },
+        focus:{hasFocus:document.hasFocus(),activeId:document.activeElement?.id??null},
+        input:{value:notes.value,start:notes.selectionStart,end:notes.selectionEnd,direction:notes.selectionDirection},
+        selection:{
+          text:currentSelection?.toString()??'',anchorId:currentSelection?.anchorNode?.parentElement?.id??null,
+          anchorOffset:currentSelection?.anchorOffset??null,focusId:currentSelection?.focusNode?.parentElement?.id??null,
+          focusOffset:currentSelection?.focusOffset??null,rangeCount:currentSelection?.rangeCount??0
+        },
+        style:{attribute:styled.getAttribute('style'),state:styled.dataset.runtimeState,text:styled.textContent,
+          color:getComputedStyle(styled).color,border:getComputedStyle(styled).border,padding:getComputedStyle(styled).padding},
+        missingAltAbsent:document.querySelector('img#missing-alt')===null,
+        overlays:document.querySelectorAll('[data-audita-highlight-root="v1"]').length
+      };
+    };
+    const baseline=snapshot();
+    const proof={
+      compare(){
+        recordMutations(observer.takeRecords());
+        const current=snapshot();
+        const eventTotal=Object.entries(events).filter(([name])=>name!=='visibilitychange')
+          .reduce((sum,[,value])=>sum+value,0);
+        const mutationTotal=Object.values(mutationCounts).reduce((sum,value)=>sum+value,0);
+        return {
+          stable:JSON.stringify(current)===JSON.stringify(baseline),
+          url:current.href===baseline.href,title:current.title===baseline.title,dom:current.html===baseline.html,
+          history:JSON.stringify(current.history)===JSON.stringify(baseline.history),
+          scroll:JSON.stringify(current.scroll)===JSON.stringify(baseline.scroll),
+          viewport:JSON.stringify(current.viewport)===JSON.stringify(baseline.viewport),
+          focus:JSON.stringify(current.focus)===JSON.stringify(baseline.focus),
+          input:JSON.stringify(current.input)===JSON.stringify(baseline.input),
+          selection:JSON.stringify(current.selection)===JSON.stringify(baseline.selection),
+          style:JSON.stringify(current.style)===JSON.stringify(baseline.style),
+          missingAltAbsent:current.missingAltAbsent===true&&baseline.missingAltAbsent===true,
+          eventTotal,mutationTotal,overlays:current.overlays,
+          eventCounts:{...events},viewportBefore:baseline.viewport,viewportAfter:current.viewport
+        };
+      },
+      dispose(){observer.disconnect();for(const name of eventNames)window.removeEventListener(name,onEvent,true)}
+    };
+    Object.defineProperty(globalThis,'__auditaSourceInvariantV1',{
+      value:proof,configurable:true,enumerable:false,writable:false
+    });
+    return true;
+  })()`, { awaitPromise: true });
+  assert.equal(ready, true);
+  return extension.identityOf(extension.startPage);
+}
 
+async function armTabIsolationProof(extension) {
+  const ready = await extension.evaluate(extension.harnessPage, `(async() => {
+    try{globalThis.__auditaCurrentCopyProofV1?.dispose?.()}catch{}
+    const sourceTabId=${JSON.stringify(extension.startPage.tabId)};
+    const sourceWindowId=${JSON.stringify(extension.startPage.windowId)};
+    const initialTargets=await chrome.debugger.getTargets();
+    const state={created:[],sourceUpdates:[],activations:[],removed:[],debugSamples:0,sourceDebugAttached:0,
+      sourceDebuggerBaseline:initialTargets.some(target=>target.tabId===sourceTabId&&target.attached===true),sampling:false};
+    const onCreated=tab=>{
+      if(tab.windowId===sourceWindowId&&tab.id!==sourceTabId){
+        state.created.push({tabId:tab.id,windowId:tab.windowId,active:tab.active===true});
+      }
+    };
+    const onUpdated=(tabId,changeInfo)=>{
+      if(tabId!==sourceTabId)return;
+      const relevant=Object.keys(changeInfo).filter(key=>['url','status','discarded'].includes(key)).sort();
+      if(relevant.length)state.sourceUpdates.push(relevant);
+    };
+    const onActivated=info=>state.activations.push({tabId:info.tabId,windowId:info.windowId});
+    const onRemoved=(tabId,info)=>state.removed.push({tabId,windowId:info.windowId});
+    chrome.tabs.onCreated.addListener(onCreated);chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onActivated.addListener(onActivated);chrome.tabs.onRemoved.addListener(onRemoved);
+    const timer=setInterval(async()=>{
+      if(state.sampling)return;state.sampling=true;
+      try{
+        const targets=await chrome.debugger.getTargets();state.debugSamples+=1;
+        if(targets.some(target=>target.tabId===sourceTabId&&target.attached===true))state.sourceDebugAttached+=1;
+      }finally{state.sampling=false}
+    },10);
+    const proof={state,dispose(){
+      clearInterval(timer);chrome.tabs.onCreated.removeListener(onCreated);chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onActivated.removeListener(onActivated);chrome.tabs.onRemoved.removeListener(onRemoved);
+    }};
+    Object.defineProperty(globalThis,'__auditaCurrentCopyProofV1',{
+      value:proof,configurable:true,enumerable:false,writable:false
+    });
+    return true;
+  })()`, { awaitPromise: true });
+  assert.equal(ready, true);
+}
+
+async function readTabIsolationProof(extension, ownerTabId) {
+  return extension.evaluate(extension.harnessPage, `(async()=>{
+    await new Promise(resolve=>setTimeout(resolve,30));
+    const proof=globalThis.__auditaCurrentCopyProofV1;
+    const active=await chrome.tabs.query({active:true,windowId:${JSON.stringify(extension.startPage.windowId)}});
+    let ownerActive=null;let ownerExists=true;let sourceDebuggerAttachedNow=false;
+    try{ownerActive=(await chrome.tabs.get(${JSON.stringify(ownerTabId)})).active===true}catch{ownerExists=false}
+    try{sourceDebuggerAttachedNow=(await chrome.debugger.getTargets()).some(target=>
+      target.tabId===${JSON.stringify(extension.startPage.tabId)}&&target.attached===true)}catch{sourceDebuggerAttachedNow=true}
+    return {
+      created:proof.state.created,sourceUpdates:proof.state.sourceUpdates,
+      ownerActivations:proof.state.activations.filter(value=>value.tabId===${JSON.stringify(ownerTabId)}).length,
+      ownerRemovals:proof.state.removed.filter(value=>value.tabId===${JSON.stringify(ownerTabId)}).length,
+      activeIds:active.map(tab=>tab.id),ownerActive,ownerExists,
+      debugSamples:proof.state.debugSamples,sourceDebugAttached:proof.state.sourceDebugAttached,
+      sourceDebuggerBaseline:proof.state.sourceDebuggerBaseline,
+      sourceDebuggerAttachedNow
+    };
+  })()`, { awaitPromise: true });
+}
+
+async function assertSourceUntouched(extension, identityBefore) {
+  const [comparison, identityAfter] = await Promise.all([
+    extension.evaluate(extension.startPage.page, 'globalThis.__auditaSourceInvariantV1.compare()'),
+    extension.identityOf(extension.startPage),
+  ]);
+  const diagnostic = {
+    eventCounts: comparison.eventCounts,
+    viewportBefore: comparison.viewportBefore,
+    viewportAfter: comparison.viewportAfter,
+  };
+  const verified = { ...comparison };
+  delete verified.eventCounts;
+  delete verified.viewportBefore;
+  delete verified.viewportAfter;
+  assert.deepEqual(verified, {
+    stable: true, url: true, title: true, dom: true, history: true, scroll: true, viewport: true,
+    focus: true, input: true, selection: true, style: true, missingAltAbsent: true,
+    eventTotal: 0, mutationTotal: 0, overlays: 0,
+  }, JSON.stringify(diagnostic));
+  assert.equal(identityAfter.targetId === identityBefore.targetId &&
+    identityAfter.frameId === identityBefore.frameId &&
+    identityAfter.loaderId === identityBefore.loaderId && identityAfter.url === identityBefore.url, true,
+  'a identidade do documento original mudou durante a auditoria');
+}
+
+async function assertCopyIsolation(extension, ownerTabId, identityBefore, { removed }) {
+  await assertSourceUntouched(extension, identityBefore);
+  const proof = await readTabIsolationProof(extension, ownerTabId);
+  assert.equal(proof.created.length, 1);
+  assert.deepEqual(proof.created.filter(value => value.tabId === ownerTabId), [{
+    tabId: ownerTabId, windowId: extension.startPage.windowId, active: false,
+  }]);
+  assert.deepEqual(proof.activeIds, [extension.startPage.tabId]);
+  assert.equal(proof.ownerActivations, 0);
+  assert.equal(proof.ownerActive, removed ? null : false);
+  assert.equal(proof.ownerExists, !removed);
+  assert.equal(proof.ownerRemovals >= (removed ? 1 : 0), true);
+  assert.deepEqual(proof.sourceUpdates, []);
+  assert.ok(proof.debugSamples >= 1);
+  assert.equal(proof.sourceDebuggerBaseline, true,
+    'o CDP do próprio E2E deve possuir a aba original antes da auditoria');
+  assert.equal(proof.sourceDebugAttached, proof.debugSamples,
+    'a posse externa do CDP sobre a origem não pode oscilar durante a auditoria');
+  assert.equal(proof.sourceDebuggerAttachedNow, true);
+}
+
+async function stopServiceWorker(extension) {
+  const worker = await waitForServiceWorker(extension);
+  assert.equal(await extension.evaluate(worker,
+    `(() => { globalThis.__auditaP4dWorkerProof='before-stop'; return globalThis.__auditaP4dWorkerProof; })()`),
+  'before-stop');
+  const expectedUrl = `chrome-extension://${extension.extensionId}/src/background/service-worker.js`;
+  await extension.command(extension.harnessPage, 'ServiceWorker.disable');
+  const runningEvent = extension.harnessPage.waitForEvent('ServiceWorker.workerVersionUpdated', value =>
+    Array.isArray(value?.versions) && value.versions.some(version =>
+      version?.scriptURL === expectedUrl && version?.runningStatus === 'running'), { timeoutMs: 10_000 });
+  await extension.command(extension.harnessPage, 'ServiceWorker.enable');
+  const running = await runningEvent;
+  const versions = running.versions.filter(version =>
+    version?.scriptURL === expectedUrl && version?.runningStatus === 'running');
+  assert.equal(versions.length, 1);
+  const stoppedEvent = extension.harnessPage.waitForEvent('ServiceWorker.workerVersionUpdated', value =>
+    Array.isArray(value?.versions) && value.versions.some(version =>
+      version?.versionId === versions[0].versionId && version?.runningStatus === 'stopped'), { timeoutMs: 10_000 });
+  await extension.command(extension.harnessPage, 'ServiceWorker.stopWorker', { versionId: versions[0].versionId });
+  await stoppedEvent;
+}
+
+async function proveReplacementServiceWorker(extension) {
+  const replacement = await waitForServiceWorker(extension, { timeoutMs: 20_000, intervalMs: 50 });
+  assert.equal(await extension.evaluate(replacement,
+    `typeof globalThis.__auditaP4dWorkerProof==='undefined'`), true);
+}
+
+function privacyPauseExpression() {
+  return `(() => {
+    const root=document.querySelector('[data-screen="running"][data-session-status="privacy-paused"]');
+    return root?{
+      screen:root.dataset.screen,status:root.dataset.sessionStatus,
+      categories:[...root.querySelectorAll('.privacy-signals li')].map(item=>item.textContent),
+      confirm:root.querySelector('[data-action="confirm-pixel-capture"]')?.textContent??null,
+      cancel:root.querySelector('button[data-intent="CANCEL_AUDIT"]')?.textContent??null
+    }:null;
+  })()`;
+}
+
+async function waitForPrivacyPause(extension, panel) {
+  return extension.waitForValue(panel, privacyPauseExpression(), value =>
+    value?.screen === 'running' && value?.status === 'privacy-paused' &&
+    value?.categories?.includes('Campo de senha') && value?.categories?.includes('Conteúdo marcado como privado') &&
+    /Continuar e capturar/u.test(value?.confirm ?? '') && /Cancelar auditoria/u.test(value?.cancel ?? ''), {
+    timeoutMs: 30_000, intervalMs: 50,
+  });
+}
+
+async function confirmOnce(extension, panel) {
+  await extension.click(panel, '[data-action="confirm-pixel-capture"]');
+  const pending = await extension.waitForValue(panel, `(() => {
+    const button=document.querySelector('[data-action="confirm-pixel-capture"]');
+    return button?{label:button.textContent,disabled:button.getAttribute('aria-disabled'),count:
+      document.querySelectorAll('[data-action="confirm-pixel-capture"]').length}:null;
+  })()`, value => value?.label === 'Confirmação enviada' && value?.disabled === 'true', {
+    timeoutMs: 10_000, intervalMs: 25,
+  });
+  assert.deepEqual(pending, { label: 'Confirmação enviada', disabled: 'true', count: 1 });
+  assert.equal(await extension.evaluate(panel, `(() => {
+    const button=document.querySelector('[data-action="confirm-pixel-capture"]');button?.click();
+    return button?.getAttribute('aria-disabled')??null;
+  })()`, { userGesture: true }), 'true');
+}
+
+async function readPrivateAttempt(extension, requestedAuditId = null) {
+  return extension.evaluate(extension.harnessPage, `(async()=>{
+    const stored=await chrome.storage.session.get(null);
+    const active=stored['audita:active-audit-job:v1']??null;
+    const auditId=${JSON.stringify(requestedAuditId)}??active?.auditId??null;
+    const owners=[];
+    for(const [key,value] of Object.entries(stored)){
+      if(!key.startsWith('audita:owned-tab:v2:')||value?.auditId!==auditId)continue;
+      let tabExists=true;let tabActive=false;
+      try{tabActive=(await chrome.tabs.get(value.tabId)).active===true}catch{tabExists=false}
+      owners.push({tabId:value.tabId,windowId:value.windowId,state:value.state,cleanupMode:value.cleanupMode,
+        tabExists,tabActive});
+    }
+    const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+    const [audit,revision,latest,exportJournal]=await Promise.all([
+      store.getAudit(auditId),store.getReportRevision(auditId),store.getLatest(),
+      store.getExportDeliveryJournal(auditId)
+    ]);
+    const model=revision?.model??null;
+    const evidence=Array.isArray(model?.evidence)?model.evidence:[];
+    const publicText=JSON.stringify({audit,revision,latest:latest?.auditId===auditId?latest:null});
+    const sessionText=JSON.stringify(stored);
+    const forbiddenPublic=${JSON.stringify([queryMarker, fragmentMarker, memoryMarker, ...privateFieldNames])};
+    const rawNavigationCount=Object.keys(stored).filter(key=>
+      key.startsWith('audita:raw-navigation:v1:')||key.startsWith('audita:raw-navigation-queue:v1:')||
+      key==='audita:raw-navigation-cleanup:v1').length;
+    const pixelStateCount=Object.keys(stored).filter(key=>
+      key.startsWith('audita:pixel-capture:v1:')||key.startsWith('audita:pixel-attempt:v1:')).length;
+    const pixelCompanionPresent=await new Promise(resolve=>{
+      const opening=indexedDB.open('audita-mt');
+      opening.onerror=()=>resolve(null);
+      opening.onsuccess=()=>{
+        const database=opening.result;let transaction;
+        try{transaction=database.transaction('audits','readonly')}catch{database.close();resolve(null);return}
+        const request=transaction.objectStore('audits').get('__audit_checkpoint__:/pixel-attempt/:'+auditId);
+        request.onerror=()=>{database.close();resolve(null)};
+        request.onsuccess=()=>{const present=request.result!==undefined;database.close();resolve(present)};
+      };
+    });
+    return {
+      auditId,
+      activeSame:active?.auditId===auditId,activeState:active?.auditId===auditId?active.state:null,
+      latestSame:latest?.auditId===auditId,
+      latestStatus:latest?.auditId===auditId?latest.status:null,
+      latestFailureCode:latest?.auditId===auditId?latest.failureCode:null,
+      latestMessage:latest?.auditId===auditId?latest.message:null,
+      owners,auditPresent:Boolean(audit),modelPresent:Boolean(model),reportPresent:Boolean(revision),
+      evidenceCount:evidence.length,exportJournalCount:Array.isArray(exportJournal)?exportJournal.length:null,
+      executionCheckpointPresent:Object.hasOwn(stored,'audita:execution-checkpoint:v1:'+auditId),
+      status:model?.session?.status??null,
+      imageAltOccurrences:(model?.occurrences??[]).filter(item=>item?.nbrItemRef===${JSON.stringify(knownOccurrence.abnt)})
+        .map(item=>({ruleId:item?.ruleId??null,source:item?.source??null,selector:item?.target?.selector??null,
+          nodeId:item?.nodeId??null,nbrItemRef:item?.nbrItemRef??null,outcome:item?.outcome??null,
+          evidenceRefs:item?.evidenceRefs??[],itemWcagRefs:item?.itemWcagRefs??[],
+          sourceWcagRefs:item?.sourceWcagRefs??[],testedWcagRefs:item?.testedWcagRefs??[],wcagRefs:item?.wcagRefs??[]})),
+      knownServerImageOccurrence:Boolean(model?.occurrences?.some(item=>
+        item?.source?.ruleId==='content-image-alternative'&&
+        item?.nbrItemRef===${JSON.stringify(knownOccurrence.abnt)}&&
+        item?.itemWcagRefs?.includes(${JSON.stringify(knownOccurrence.wcag)})&&
+        item?.evidenceRefs?.some(evidenceId=>{
+          const artifact=evidence.find(value=>value?.evidenceId===evidenceId);
+          return artifact?.nodeId===item?.nodeId&&artifact?.selector?.css===${JSON.stringify(knownOccurrence.selector)};
+        }))),
+      fullPage:evidence.filter(item=>item?.kind==='full-page'&&/^data:image\\/png;base64,/u.test(item.dataUrl??'')).length,
+      elements:evidence.filter(item=>item?.kind==='element'&&/^data:image\\/png;base64,/u.test(item.dataUrl??'')).length,
+      rasterDataUrls:(publicText.match(/data:image\\/(?:png|jpeg|webp);base64,/giu)||[]).length,
+      diagnostics:Array.isArray(model?.session?.diagnostics)?model.session.diagnostics.map(item=>item.code):[],
+      urls:[model?.requestedUrl,model?.finalUrl,model?.pages?.[0]?.requestedUrl,model?.pages?.[0]?.finalUrl],
+      forbiddenPublicCount:forbiddenPublic.filter(value=>publicText.includes(value)).length,
+      forbiddenSessionUrlCount:${JSON.stringify([queryMarker, fragmentMarker, memoryMarker])}.filter(value=>sessionText.includes(value)).length,
+      sessionRasterDataUrls:(sessionText.match(/data:image\\/(?:png|jpeg|webp);base64,/giu)||[]).length,
+      startJournalPresent:Object.hasOwn(stored,'audita:start-journal:v1'),
+      rawNavigationCount,pixelStateCount,pixelCompanionPresent
+    };
+  })()`, { awaitPromise: true });
+}
+
+async function waitForActiveAuditId(extension) {
+  return extension.waitForValue(extension.harnessPage, `(async()=>{
+    const active=(await chrome.storage.session.get('audita:active-audit-job:v1'))['audita:active-audit-job:v1'];
+    return typeof active?.auditId==='string'?active.auditId:null;
+  })()`, value => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/u.test(value), {
+    timeoutMs: 10_000, intervalMs: 25,
+  });
+}
+
+async function assertPausedCopyDocument(extension, ownerTabId, expectedUrl) {
+  const proof = await extension.evaluate(extension.harnessPage, `(async()=>{
+    const tab=await chrome.tabs.get(${JSON.stringify(ownerTabId)});
+    const frames=await chrome.scripting.executeScript({
+      target:{tabId:${JSON.stringify(ownerTabId)},frameIds:[0]},world:'ISOLATED',
+      args:[${JSON.stringify(expectedUrl)},${JSON.stringify(memoryMarker)}],
+      func:(expectedUrl,memoryMarker)=>({
+        expectedUrl:location.href===expectedUrl,
+        expectedDocument:document.title==='Origem preservada'&&
+          document.querySelector('h1')?.textContent==='Origem que deve permanecer intacta',
+        fixtureContent:Boolean(document.querySelector('#password-field')&&document.querySelector('[data-audita-private]')),
+        serverImagePresent:Boolean(document.querySelector('img#missing-alt')),
+        serverInput:document.querySelector('#source-notes')?.value==='valor vindo do servidor',
+        serverStyle:document.querySelector('#runtime-style-target')?.dataset.runtimeState==='server'&&
+          document.querySelector('#runtime-style-target')?.textContent==='Estado visual do servidor',
+        memoryStateAbsent:!(document.documentElement?.outerHTML??'').includes(memoryMarker)&&
+          typeof globalThis.__auditaSourceInvariantV1==='undefined'&&
+          typeof globalThis.__auditaP4dImageRemovedV1==='undefined'
+      })
+    });
+    const main=frames.length===1&&frames[0]?.frameId===0&&typeof frames[0]?.documentId==='string'&&
+      frames[0].documentId.length>0?frames[0].result:null;
+    return {
+      exactlyOneMainDocument:Boolean(main),inactive:tab.active===false,complete:tab.status==='complete',
+      tabUrlExpected:tab.url===${JSON.stringify(expectedUrl)},expectedUrl:main?.expectedUrl===true,
+      expectedDocument:main?.expectedDocument===true,fixtureContent:main?.fixtureContent===true,
+      serverImagePresent:main?.serverImagePresent===true,
+      serverInput:main?.serverInput===true,serverStyle:main?.serverStyle===true,
+      memoryStateAbsent:main?.memoryStateAbsent===true
+    };
+  })()`, { awaitPromise: true });
+  assert.deepEqual(proof, {
+    exactlyOneMainDocument: true, inactive: true, complete: true, tabUrlExpected: true,
+    expectedUrl: true, expectedDocument: true, fixtureContent: true, serverInput: true,
+    serverImagePresent: true, serverStyle: true, memoryStateAbsent: true,
+  });
+}
+
+async function waitForOwner(extension, auditId, predicate) {
+  return extension.waitForValue(extension.harnessPage, `(async()=>{
+    const stored=await chrome.storage.session.get(null);
+    return Object.entries(stored).filter(([key,value])=>
+      key.startsWith('audita:owned-tab:v2:')&&value?.auditId===${JSON.stringify(auditId)})
+      .map(([,value])=>({tabId:value.tabId,windowId:value.windowId,state:value.state,cleanupMode:value.cleanupMode}));
+  })()`, value => Array.isArray(value) && value.length === 1 && predicate(value[0]), {
+    timeoutMs: 30_000, intervalMs: 50,
+  });
+}
+
+async function waitForActiveAuditCleanup(extension, auditId) {
+  return extension.waitForValue(extension.harnessPage, `(async()=>{
+    const active=(await chrome.storage.session.get('audita:active-audit-job:v1'))['audita:active-audit-job:v1'];
+    return active?.auditId===${JSON.stringify(auditId)}?false:true;
+  })()`, value => value === true, {
+    timeoutMs: 30_000, intervalMs: 50,
+  });
+}
+
+async function waitForResult(extension, panel, expectedAuditId = null) {
+  const terminal = await extension.waitForValue(panel, `(() => ({
+    screen:document.querySelector('[data-screen]')?.dataset.screen??null,
+    auditId:document.querySelector('[data-screen="result"]')?.dataset.auditId??null,
+    status:document.querySelector('[role="status"]')?.textContent??null
+  }))()`, value => ['result', 'initial', 'unavailable'].includes(value?.screen), {
+    timeoutMs: 120_000, intervalMs: 50,
+  });
+  if (terminal.screen !== 'result') {
+    const attempt = expectedAuditId === null ? null : await readPrivateAttempt(extension, expectedAuditId).catch(() => null);
+    const progressProof = await extension.evaluate(panel, `(() => ({
+      samples:globalThis.__auditaP4dProgressV1?.state?.samples??[],
+      terminalResult:globalThis.__auditaP4dProgressV1?.state?.terminalResult===true
+    }))()`).catch(() => null);
+    assert.equal(terminal.screen, 'result', JSON.stringify({
+      screen: terminal.screen, status: terminal.status, attempt, progressProof,
+    }));
+  }
+  assert.match(terminal.auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);
+  return terminal.auditId;
+}
+
+async function armProgressObserver(extension, panel) {
+  const armed = await extension.evaluate(panel, `(() => {
+    globalThis.__auditaP4dProgressV1?.observer?.disconnect?.();
+    const state={samples:[],terminalResult:false};
+    const sample=()=>{
+      const root=document.querySelector('[data-screen]');
+      const progress=root?.querySelector('progress[data-audit-progress]');
+      const percent=progress?.hasAttribute('value')?Number(progress.value):null;
+      const phase=[...root?.querySelectorAll?.('[data-running-phases] li')??[]]
+        .find(item=>item.getAttribute('aria-current')==='step')?.textContent?.trim()??null;
+      const previous=state.samples.at(-1);
+      if(root?.dataset.screen==='result')state.terminalResult=true;
+      if(root?.dataset.screen==='running'&&Number.isFinite(percent)&&
+        (!previous||previous.percent!==percent||previous.phase!==phase))state.samples.push({percent,phase});
+    };
+    const observer=new MutationObserver(sample);observer.observe(document,{subtree:true,childList:true,attributes:true});
+    Object.defineProperty(globalThis,'__auditaP4dProgressV1',{
+      configurable:true,enumerable:false,writable:false,value:{state,observer}
+    });
+    sample();return true;
+  })()`);
+  assert.equal(armed, true);
+}
+
+async function assertObservedProgress(extension, panel) {
+  const proof = await extension.evaluate(panel, `(() => {
+    const proof=globalThis.__auditaP4dProgressV1;proof?.observer?.takeRecords?.();
+    const root=document.querySelector('[data-screen]');
+    if(root?.dataset.screen==='result')proof.state.terminalResult=true;
+    return {samples:proof?.state?.samples??[],terminalResult:proof?.state?.terminalResult===true};
+  })()`);
+  const percents = proof.samples.map(sample => sample.percent);
+  assert.equal(proof.terminalResult, true);
+  assert.equal(percents.length >= 2, true, JSON.stringify({ observedProgressSamples: percents.length }));
+  assert.equal(percents.every((value, index) => index === 0 || value >= percents[index - 1]), true);
+  assert.equal(new Set(percents).size >= 2, true);
+  assert.equal(Math.max(...percents) >= 92, true);
+}
+
+async function beginAttachedAttempt(extension, panel, mode) {
+  await extension.waitForValue(panel,
+    `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial', {
+      timeoutMs: 30_000, intervalMs: 50,
+    });
+  await extension.waitForValue(panel, `(() => {
+    const input=document.querySelector('input[data-capture-mode="${mode}"]');
+    const button=document.querySelector('button[data-intent="START_ATTACHED"]');
+    return Boolean(input&&!input.disabled&&button&&!button.disabled);
+  })()`, value => value === true, { timeoutMs: 10_000, intervalMs: 25 });
+  await extension.click(panel, `input[data-capture-mode="${mode}"]`);
+  await extension.waitForValue(panel,
+    `document.querySelector('input[name="capture-mode"]:checked')?.value`, value => value === mode, {
+      timeoutMs: 5_000, intervalMs: 25,
+    });
+  await armTabIsolationProof(extension);
+  await armProgressObserver(extension, panel);
+  const identityBefore = await armSourceInvariantProof(extension);
+  const ready = await extension.evaluate(panel, `(() => {
+    const root=document.querySelector('[data-screen]');
+    const button=document.querySelector('button[data-intent="START_ATTACHED"]');
+    return {
+      screen:root?.dataset.screen??null,
+      selected:document.querySelector('input[name="capture-mode"]:checked')?.value??null,
+      button:Boolean(button),disabled:button?.disabled??null,
+      ariaDisabled:button?.getAttribute('aria-disabled')??null,
+      status:document.querySelector('[role="status"]')?.textContent??null
+    };
+  })()`);
+  assert.deepEqual(ready, {
+    screen: 'initial', selected: mode, button: true, disabled: false,
+    ariaDisabled: null, status: 'Escolha como iniciar a auditoria.',
+  });
+  await assertSourceUntouched(extension, identityBefore);
+  const auditIdPromise = waitForActiveAuditId(extension);
+  await extension.click(panel, 'button[data-intent="START_ATTACHED"]');
+  return { identityBefore, auditIdPromise };
+}
+
+function assertSanitizedModelUrls(values, fixtureOrigin) {
+  assert.equal(Array.isArray(values) && values.length === 4, true);
+  for (const value of values) {
+    assert.equal(typeof value, 'string');
+    const parsed = new URL(value);
+    assert.equal(parsed.origin, fixtureOrigin);
+    assert.equal(parsed.pathname, '/current');
+    assert.equal(parsed.search, '');
+    assert.equal(parsed.hash, '');
+  }
+}
+
+async function assertPausedAttempt(extension, auditId, identityBefore, expectedUrl) {
+  const [owner] = await waitForOwner(extension, auditId,
+    value => value.state === 'retained-for-consent' && value.cleanupMode === 'always');
+  const attempt = await readPrivateAttempt(extension, auditId);
+  assert.equal(attempt.activeSame, true);
+  assert.equal(attempt.activeState, 'privacy-paused');
+  assert.equal(attempt.owners.length, 1);
+  assert.equal(attempt.auditPresent, false);
+  assert.equal(attempt.modelPresent, false);
+  assert.equal(attempt.reportPresent, false);
+  assert.equal(attempt.evidenceCount, 0);
+  assert.equal(attempt.exportJournalCount, 0);
+  assert.equal(attempt.executionCheckpointPresent, true);
+  assert.equal(attempt.sessionRasterDataUrls, 0);
+  assert.equal(attempt.forbiddenSessionUrlCount, 0);
+  assert.equal(attempt.startJournalPresent, false);
+  assert.equal(attempt.rawNavigationCount, 0);
+  assert.equal(attempt.pixelStateCount >= 1, true);
+  await assertPausedCopyDocument(extension, owner.tabId, expectedUrl);
+  await assertCopyIsolation(extension, owner.tabId, identityBefore, { removed: false });
+  return owner;
+}
+
+async function assertTerminalAttempt(extension, auditId, ownerTabId, identityBefore, expected, fixtureOrigin) {
+  await waitForOwner(extension, auditId,
+    value => value.tabId === ownerTabId && value.state === 'removed' && value.cleanupMode === 'always');
+  await waitForActiveAuditCleanup(extension, auditId);
+  const attempt = await readPrivateAttempt(extension, auditId);
+  assert.equal(attempt.activeSame, false);
+  assert.equal(attempt.auditPresent, true);
+  assert.equal(attempt.modelPresent, true);
+  assert.equal(attempt.reportPresent, true);
+  assert.equal(attempt.knownServerImageOccurrence, true,
+    `a imagem removida apenas da origem em memória deve permanecer observável na cópia recarregada: ${JSON.stringify(attempt.imageAltOccurrences)}`);
+  assert.equal(attempt.executionCheckpointPresent, false);
+  assert.equal(attempt.exportJournalCount, 0);
+  assert.ok(['complete', 'partial'].includes(attempt.status));
+  assert.equal(attempt.fullPage >= expected.minimumFullPage, true, JSON.stringify({ fullPage: attempt.fullPage }));
+  assert.equal(attempt.elements >= expected.minimumElements, true, JSON.stringify({ elements: attempt.elements }));
+  if (expected.fullPageExact !== undefined) assert.equal(attempt.fullPage, expected.fullPageExact);
+  if (expected.elementsExact !== undefined) assert.equal(attempt.elements, expected.elementsExact);
+  assert.equal(attempt.diagnostics.includes('ATTACHED_COPY_RELOADED'), true);
+  for (const diagnostic of expected.diagnostics ?? []) assert.equal(attempt.diagnostics.includes(diagnostic), true);
+  assert.equal(attempt.forbiddenPublicCount, 0);
+  assert.equal(attempt.forbiddenSessionUrlCount, 0);
+  assert.equal(attempt.startJournalPresent, false);
+  assert.equal(attempt.rawNavigationCount, 0);
+  assert.equal(attempt.pixelStateCount, 0);
+  assert.equal(attempt.pixelCompanionPresent, false);
+  assertSanitizedModelUrls(attempt.urls, fixtureOrigin);
+  await assertCopyIsolation(extension, ownerTabId, identityBefore, { removed: true });
+  return attempt;
+}
+
+async function assertPanelSummaryAndDetail(extension, panel, mode, expectedImages, identityBefore) {
+  const summary = await extension.evaluate(panel, `(() => ({
+    coverage:Number(document.querySelector('progress.coverage-progress')?.max??0),
+    failures:document.querySelectorAll('[data-result-card][data-classification="failed"]').length,
+    occurrences:document.querySelectorAll('button[data-intent="SELECT_OCCURRENCE"]').length,
+    forbiddenCount:${JSON.stringify([queryMarker, fragmentMarker, memoryMarker, ...privateFieldNames])}
+      .filter(value=>(document.documentElement?.outerHTML??'').includes(value)).length
+  }))()`);
+  assert.ok(summary.coverage > 0);
+  assert.ok(summary.failures > 0);
+  assert.ok(summary.occurrences > 0);
+  assert.equal(summary.forbiddenCount, 0);
+  const selectedIndex = await extension.evaluate(panel, `(() => {
+    const expected=${JSON.stringify(JSON.stringify(['page-1', 'audita-core', 'content-image-alternative']))};
+    const card=[...document.querySelectorAll('[data-result-card]')]
+      .find(value=>value.dataset.checkKey===expected);
+    const button=card?.querySelector('button[data-intent="SELECT_OCCURRENCE"]');
+    if(!button)return -1;
+    const index=[...document.querySelectorAll('button[data-intent="SELECT_OCCURRENCE"]')].indexOf(button);
+    button.click();return index;
+  })()`, { userGesture: true });
+  assert.equal(Number.isSafeInteger(selectedIndex) && selectedIndex >= 0, true,
+    'a ficha canônica de alternativa textual deve existir no sumário');
+  const detail = await extension.waitForValue(panel, `(() => {
+      const selected=[...document.querySelectorAll('button[data-intent="SELECT_OCCURRENCE"]')]
+        .findIndex(button=>button.getAttribute('aria-pressed')==='true');
+      const technical=document.querySelector('[data-detail-block="technical"]');
+      const selector=[...technical?.querySelectorAll('.technical-field')??[]]
+        .find(field=>field.querySelector('.technical-label')?.textContent==='Seletor sanitizado')
+        ?.querySelector('code')?.textContent??null;
+      return {
+        selected,selector,visible:Boolean(document.querySelector('[data-result-detail]')),
+        normative:[...document.querySelectorAll('[data-detail-block="normative"] p')].map(node=>node.textContent),
+        accessibility:document.querySelector('[data-detail-block="accessibility"]')?.textContent??'',
+        technical:technical?.textContent??'',
+        previewText:document.querySelector('[data-detail-block="previews"]')?.textContent??'',
+        images:document.querySelectorAll('[data-detail-block="previews"] [data-evidence-preview-image]').length,
+        consult:Boolean(document.querySelector('[data-action="consult-evidence"]')),
+        highlight:Boolean(document.querySelector('[data-action="highlight-occurrence"]'))
+      };
+    })()`, value => value?.visible === true && value?.selected === selectedIndex && value?.consult === true, {
+    timeoutMs: 10_000, intervalMs: 25,
+  });
+  assert.equal(detail.selector, knownOccurrence.selector);
+  assert.equal(detail.normative.includes(`WCAG ${knownOccurrence.wcag}`), true);
+  assert.equal(detail.normative.includes(`ABNT NBR 17225: ${knownOccurrence.abnt}`), true);
+  assert.match(detail.accessibility, /Anúncio esperado:\s*\S/u);
+  assert.match(detail.technical, /Regra:\s*content-image-alternative/u);
+  assert.match(detail.technical, /Trecho sanitizado/u);
+  assert.match(detail.previewText, /Evidências/u);
+  assert.equal(detail.highlight, false);
+  assert.equal(detail.consult, true);
+  if (mode === 'no-pixels') assert.equal(detail.images, 0);
+  else if (mode === 'full-evidence') {
+    assert.equal(detail.images >= expectedImages ||
+      /Prévia omitida no painel para manter o resultado leve/u.test(detail.previewText), true,
+    'o painel deve exibir a miniatura ou informar que a captura integral está no relatório');
+  } else assert.equal(detail.images >= expectedImages, true);
+  await assertSourceUntouched(extension, identityBefore);
+}
+
+function reportSurfaceExpression() {
+  return `(() => {
+    const text=document.body?.innerText??'';
+    const html=document.documentElement?.outerHTML??'';
+    const explanation=document.querySelector('#report-source-explanation');
+    const back=document.querySelector('#return-to-page');
+    return {
+      ready:Boolean(document.querySelector('button[data-report-export]')),
+      issues:document.querySelectorAll('[data-report-issue]').length,
+      wcag:text.includes('WCAG 2.2:'),abnt:text.includes('ABNT NBR 17225:'),
+      announcement:text.includes('Anúncio estimado:'),selector:text.includes('Seletor:'),
+      limitation:(document.body?.textContent??'').includes(${JSON.stringify(attachedCopyLimitation)}),
+      explanationVisible:Boolean(explanation&&!explanation.hidden&&/cópia temporária/iu.test(explanation.textContent??'')),
+      returnHidden:Boolean(back?.hidden),returnDisabled:Boolean(back?.disabled),
+      highlightControls:document.querySelectorAll('[data-report-highlight-control]').length,
+      evidenceOnly:document.querySelectorAll('[data-report-live-action="evidence-only"]').length,
+      images:document.querySelectorAll('[data-report-evidence-preview] img.evidence-media, [data-report-evidence-preview] svg.evidence-media image').length,
+      forbiddenCount:${JSON.stringify([queryMarker, fragmentMarker, memoryMarker, ...privateFieldNames])}
+        .filter(value=>html.includes(value)).length
+    };
+  })()`;
+}
+
+async function openViewOnlyReport(extension, panel, auditId, minimumImages, identityBefore) {
+  await assertSourceUntouched(extension, identityBefore);
+  await extension.click(panel, 'button[data-intent="OPEN_REPORT"]');
+  const report = await extension.waitForReport({ auditId });
+  const state = await extension.waitForValue(report, reportSurfaceExpression(), value =>
+    value?.ready === true && value?.issues > 0, { timeoutMs: 30_000, intervalMs: 50 });
+  assert.equal(state.wcag, true);
+  assert.equal(state.abnt, true);
+  assert.equal(state.announcement, true);
+  assert.equal(state.selector, true);
+  assert.equal(state.limitation, true);
+  assert.equal(state.explanationVisible, true);
+  assert.equal(state.returnHidden, true);
+  assert.equal(state.returnDisabled, true);
+  assert.equal(state.highlightControls, 0);
+  assert.ok(state.evidenceOnly > 0);
+  assert.equal(state.images >= minimumImages, true);
+  assert.equal(state.forbiddenCount, 0);
+  return report;
+}
+
+function durableDeletionExpression(auditId) {
+  return `(async()=>{
+    const auditId=${JSON.stringify(auditId)};
+    const stored=await chrome.storage.session.get(null);const entries=Object.entries(stored);
+    const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+    const [audit,revision,latest,retention,journal,receipt]=await Promise.all([
+      store.getAudit(auditId),store.getReportRevision(auditId),store.getLatest(),store.getAuditRetention(auditId),
+      store.getExportDeliveryJournal(auditId),store.getExportReceipt(auditId)
+    ]);
+    const owners=[];
+    for(const [key,value] of entries){
+      if(!key.startsWith('audita:owned-tab:v2:')||value?.auditId!==auditId)continue;
+      let tabExists=true;try{await chrome.tabs.get(value.tabId)}catch{tabExists=false}
+      owners.push({tabId:value.tabId,state:value.state,cleanupMode:value.cleanupMode,tabExists});
+    }
+    const readKeys=storeName=>new Promise(resolve=>{
+      const opening=indexedDB.open('audita-mt');opening.onerror=()=>resolve(null);
+      opening.onsuccess=()=>{const database=opening.result;let transaction;
+        try{transaction=database.transaction(storeName,'readonly')}catch{database.close();resolve(null);return}
+        const request=transaction.objectStore(storeName).getAllKeys();
+        request.onerror=()=>{database.close();resolve(null)};
+        request.onsuccess=()=>{const keys=request.result;database.close();resolve(keys)};
+      };
+    });
+    const [auditKeys,retentionKeys]=await Promise.all([readKeys('audits'),readKeys('audit-retention')]);
+    const related=(key,value)=>key.includes(auditId)||JSON.stringify(value).includes(auditId);
+    return {
+      auditPresent:Boolean(audit),reportPresent:Boolean(revision),latestSame:latest?.auditId===auditId,
+      retentionPresent:Boolean(retention),exportJournalCount:Array.isArray(journal)?journal.length:null,
+      exportReceiptPresent:Boolean(receipt),activeSame:stored['audita:active-audit-job:v1']?.auditId===auditId,
+      owners,
+      checkpointSessionCount:entries.filter(([key])=>key==='audita:execution-checkpoint:v1:'+auditId).length,
+      retentionSessionCount:entries.filter(([key])=>key==='audita:retention-preference:v1:'+auditId).length,
+      reportLaunchCount:entries.filter(([key,value])=>(key.startsWith('audita:report-launch:v1:')||
+        key.startsWith('audita:report-launch-tab:v1:'))&&related(key,value)).length,
+      highlightCount:JSON.stringify(stored['audita:highlight-bindings:v1']??null).includes(auditId)?1:0,
+      rawNavigationCount:entries.filter(([key,value])=>(key.startsWith('audita:raw-navigation:v1:')||
+        key.startsWith('audita:raw-navigation-queue:v1:')||key==='audita:raw-navigation-cleanup:v1')&&related(key,value)).length,
+      pixelSessionCount:entries.filter(([key,value])=>(key.startsWith('audita:pixel-capture:v1:')||
+        key.startsWith('audita:pixel-attempt:v1:'))&&related(key,value)).length,
+      auditKeyCount:Array.isArray(auditKeys)?auditKeys.filter(key=>String(key).includes(auditId)).length:null,
+      retentionKeyCount:Array.isArray(retentionKeys)?retentionKeys.filter(key=>String(key).includes(auditId)).length:null,
+      pixelCompanionPresent:Array.isArray(auditKeys)&&auditKeys.includes('__audit_checkpoint__:/pixel-attempt/:'+auditId)
+    };
+  })()`;
+}
+
+function isDurablyDeleted(value, ownerTabId) {
+  return Boolean(value && value.auditPresent === false && value.reportPresent === false &&
+    value.latestSame === false && value.retentionPresent === false && value.exportJournalCount === 0 &&
+    value.exportReceiptPresent === false && value.activeSame === false && Array.isArray(value.owners) &&
+    value.owners.some(owner => owner.tabId === ownerTabId && owner.state === 'removed' &&
+      owner.cleanupMode === 'always' && owner.tabExists === false) &&
+    value.owners.every(owner => owner.state === 'removed' && owner.tabExists === false) &&
+    value.checkpointSessionCount === 0 && value.highlightCount === 0 &&
+    value.rawNavigationCount === 0 && value.pixelSessionCount === 0 &&
+    value.auditKeyCount === 0 && value.retentionKeyCount === 0 && value.pixelCompanionPresent === false);
+}
+
+async function deleteAuditAndRestoreSource(extension, panel, report, auditId, ownerTabId) {
+  await extension.click(report, '#delete-audit');
+  await extension.waitForValue(report, `document.querySelector('#delete-audit-dialog')?.open`, Boolean, {
+    timeoutMs: 10_000, intervalMs: 25,
+  });
+  await extension.click(report, '#delete-audit-confirm');
+  let deletion;
+  try {
+    deletion = await extension.waitForValue(extension.harnessPage, durableDeletionExpression(auditId),
+      value => isDurablyDeleted(value, ownerTabId), { timeoutMs: 20_000, intervalMs: 50 });
+  } catch (error) {
+    deletion = await extension.evaluate(extension.harnessPage, durableDeletionExpression(auditId), { awaitPromise: true });
+    throw new Error(`DELETE_WAIT_TIMEOUT ${JSON.stringify(deletion)}`, { cause: error });
+  }
+  assert.equal(isDurablyDeleted(deletion, ownerTabId), true, JSON.stringify(deletion));
+  let nextPanel;
+  try {
+    nextPanel = await extension.openSidePanelFromAction();
+  } catch (openError) {
+    try {
+      nextPanel = await extension.waitForSidePanel();
+    } catch (waitError) {
+      const [contexts, targets] = await Promise.all([
+        extension.runtimeContexts({ contextTypes: ['SIDE_PANEL'] }),
+        extension.browser.command('Target.getTargets'),
+      ]);
+      const extensionTargets = (targets?.targetInfos ?? []).filter(value =>
+        typeof value?.url === 'string' && value.url.startsWith(`chrome-extension://${extension.extensionId}/`))
+        .map(value => ({ type: value.type, url: value.url }));
+      throw new Error(`PANEL_REOPEN_FAILED ${JSON.stringify({ contexts, extensionTargets })}`, {
+        cause: new AggregateError([openError, waitError]),
+      });
+    }
+  }
+  try {
+    await extension.waitForValue(nextPanel,
+      `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial', {
+        timeoutMs: 20_000, intervalMs: 50,
+      });
+  } catch (error) {
+    const observed = await extension.evaluate(nextPanel, `(() => ({
+      screen:document.querySelector('[data-screen]')?.dataset.screen??null,
+      text:(document.body?.innerText??'').slice(0,600),
+      launchLength:new URL(location.href).searchParams.get('launch')?.length??0
+    }))()`);
+    const [contexts, targets, launchState] = await Promise.all([
+      extension.runtimeContexts({ contextTypes: ['SIDE_PANEL'] }),
+      extension.browser.command('Target.getTargets'),
+      extension.evaluate(extension.harnessPage, `(async()=>{
+        const stored=await chrome.storage.session.get(null);
+        return Object.entries(stored).flatMap(([key,value])=>{
+          if(key.startsWith('audita:panel-launch:record:v1:'))return [{
+            kind:'record',state:value?.state??null,tabId:value?.tabId??null,
+            windowId:value?.windowId??null,generation:value?.generation??null
+          }];
+          if(key.startsWith('audita:panel-launch:index:v1:'))return [{
+            kind:'index',state:value?.state??null,tabId:value?.tabId??null,generation:value?.generation??null
+          }];
+          return [];
+        });
+      })()`, { awaitPromise: true }),
+    ]);
+    const topology = {
+      contextCount: contexts.length,
+      contexts: contexts.map(value => ({ documentId: value.documentId, contextId: value.contextId })),
+      panelTargetCount: (targets?.targetInfos ?? []).filter(value => value?.type === 'page' &&
+        typeof value.url === 'string' && value.url.includes('/src/panel/index.html?launch=')).length,
+      launchState,
+    };
+    throw new Error(`PANEL_DELETE_WAIT_TIMEOUT ${JSON.stringify({ observed, topology })}`, { cause: error });
+  }
+  return nextPanel;
+}
+
+function parseCsv(text) {
+  const rows = []; let row = []; let cell = ''; let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (quoted) {
+      if (character === '"' && text[index + 1] === '"') { cell += '"'; index += 1; }
+      else if (character === '"') quoted = false;
+      else cell += character;
+    } else if (character === '"') quoted = true;
+    else if (character === ',') { row.push(cell); cell = ''; }
+    else if (character === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
+    else if (character !== '\r') cell += character;
+  }
+  if (quoted) throw new Error('E2E_CSV_UNCLOSED_FIELD');
+  if (cell !== '' || row.length > 0) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+function decodePdfText(bytes) {
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    let value = '';
+    for (let index = 2; index + 1 < bytes.length; index += 2) {
+      value += String.fromCharCode((bytes[index] << 8) | bytes[index + 1]);
+    }
+    return value;
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    let value = '';
+    for (let index = 2; index + 1 < bytes.length; index += 2) {
+      value += String.fromCharCode(bytes[index] | (bytes[index + 1] << 8));
+    }
+    return value;
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
+function decodePdfString(token) {
+  if (token.startsWith('<')) {
+    const hex = token.slice(1, -1).replace(/\s/gu, '');
+    if (hex.length === 0 || hex.length % 2 !== 0 || !/^[a-f0-9]+$/iu.test(hex)) return null;
+    return decodePdfText(Buffer.from(hex, 'hex'));
+  }
+  const bytes = [];
+  const body = token.slice(1, -1);
+  for (let index = 0; index < body.length; index += 1) {
+    const character = body[index];
+    if (character !== '\\') { bytes.push(character.charCodeAt(0) & 0xff); continue; }
+    const next = body[++index];
+    if (next === undefined) return null;
+    if (next === '\n' || next === '\r') {
+      if (next === '\r' && body[index + 1] === '\n') index += 1;
+      continue;
+    }
+    const escapes = { n: 10, r: 13, t: 9, b: 8, f: 12, '(': 40, ')': 41, '\\': 92 };
+    if (Object.hasOwn(escapes, next)) { bytes.push(escapes[next]); continue; }
+    if (/[0-7]/u.test(next)) {
+      let octal = next;
+      while (octal.length < 3 && /[0-7]/u.test(body[index + 1] ?? '')) octal += body[++index];
+      bytes.push(Number.parseInt(octal, 8) & 0xff);continue;
+    }
+    bytes.push(next.charCodeAt(0) & 0xff);
+  }
+  return decodePdfText(bytes);
+}
+
+function pdfInfoTitles(bytes) {
+  const source = bytes.toString('latin1');
+  const pattern = /\/Title\s*(<\s*[a-f0-9\s]+>|\((?:\\[\s\S]|[^\\)])*\))/giu;
+  return [...source.matchAll(pattern)].map(match => decodePdfString(match[1])).filter(Boolean);
+}
+
+async function exportFourFormats(extension, report, auditId, downloadDirectory) {
+  await extension.click(report, 'button[data-report-export]');
+  const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 90_000, intervalMs: 50 });
+  assert.deepEqual(downloads.map(row => row.format), ['html', 'pdf', 'csv', 'json']);
+  assert.equal(downloads.every(row => row.state === 'complete' && row.byteLength > 0 &&
+    /^[a-f0-9]{64}$/u.test(row.sha256)), true);
+  const forbidden = [queryMarker, fragmentMarker, memoryMarker, ...privateFieldNames];
+  const artifacts = new Map(await Promise.all(downloads.map(async row => {
+    const bytes = await readFile(join(downloadDirectory, row.filename));
+    assert.equal(row.mime, exportMime[row.format]);
+    assert.equal(bytes.length, row.byteLength);
+    assert.equal([queryMarker, fragmentMarker, memoryMarker].some(value => row.filename.includes(value)), false);
+    if (row.format !== 'pdf') {
+      assert.equal(forbidden.filter(value => bytes.includes(Buffer.from(value))).length, 0);
+    }
+    return [row.format, { row, bytes }];
+  })));
+
+  const html = artifacts.get('html').bytes.toString('utf8');
+  assert.match(html, /^<!doctype html>/iu);
+  assert.match(html, /<html\b[^>]*\blang="pt-BR"/iu);
+  assert.equal(html.includes(`<title>${canonicalReportTitle}</title>`), true);
+  assert.equal(html.includes('1.1.1'), true);
+  assert.equal(html.includes('5.2.1'), true);
+  assert.equal(html.includes(attachedCopyLimitation), true);
+  assert.match(html, /<\/body>\s*<\/html>\s*$/iu);
+
+  const technical = JSON.parse(artifacts.get('json').bytes.toString('utf8'));
+  assert.equal(technical.schemaVersion, 2);
+  assert.equal(technical.audit?.auditId, auditId);
+  assert.equal(technical.exportDeliveryIdentityType, 'ExportDeliveryIdentityV1');
+  assert.equal(technical.exportDeliveryIdentity?.auditId, auditId);
+  const occurrence = technical.audit?.occurrences?.find(candidate =>
+    candidate?.source?.ruleId === 'content-image-alternative' &&
+    candidate?.nbrItemRef === knownOccurrence.abnt);
+  assert.ok(occurrence);
+  assert.equal(occurrence.itemWcagRefs.includes(knownOccurrence.wcag), true);
+  assert.equal(Array.isArray(occurrence.evidenceRefs), true);
+  const stableEvidence = technical.audit?.evidence?.find(candidate =>
+    occurrence.evidenceRefs.includes(candidate?.evidenceId) &&
+    candidate?.nodeId === occurrence.nodeId &&
+    candidate?.selector?.css === knownOccurrence.selector);
+  assert.ok(stableEvidence);
+  assert.equal(technical.assertions.some(assertion => assertion?.test?.id === `urn:abnt:nbr17225:${knownOccurrence.abnt}` &&
+    assertion.test.itemWcagRefs?.includes(knownOccurrence.wcag)), true);
+
+  const csvText = artifacts.get('csv').bytes.toString('utf8');
+  assert.equal(csvText.startsWith('\uFEFF'), true);
+  const rows = parseCsv(csvText.slice(1));
+  assert.equal(rows.length > 1, true);
+  const headers = rows[0];
+  const requiredHeaders = ['csv_schema_version', 'audit_id', 'source_rule_id', 'nbr_item_ref',
+    'item_wcag_refs', 'source_wcag_refs', 'tested_wcag_refs', 'wcag_refs',
+    'section_508_refs', 'consumer_basis_ref',
+    'export_delivery_identity_type', 'export_delivery_audit_id', 'export_delivery_model_hash'];
+  assert.equal(requiredHeaders.every(header => headers.includes(header)), true);
+  const record = rows.slice(1).map(values => Object.fromEntries(headers.map((header, index) => [header, values[index]])))
+    .find(value => value.nbr_item_ref === knownOccurrence.abnt &&
+      value.item_wcag_refs.split(';').includes(knownOccurrence.wcag) && value.source_rule_id === 'axe.image-alt');
+  assert.ok(record, JSON.stringify(rows.slice(1)
+    .map(values => Object.fromEntries(headers.map((header, index) => [header, values[index]])))
+    .filter(value => value.nbr_item_ref === knownOccurrence.abnt)
+    .map(value => ({ source_rule_id: value.source_rule_id, item_wcag_refs: value.item_wcag_refs,
+      source_wcag_refs: value.source_wcag_refs, tested_wcag_refs: value.tested_wcag_refs, wcag_refs: value.wcag_refs,
+      outcome: value.outcome, classification: value.classification }))));
+  assert.equal(record.csv_schema_version, 'audita-occurrences-v2');
+  assert.equal(record.outcome, 'cantTell');
+  assert.equal(record.source_wcag_refs.split(';').includes(knownOccurrence.wcag), true);
+  assert.equal(record.tested_wcag_refs, '');
+  assert.equal(record.wcag_refs, '');
+  assert.equal(record.section_508_refs, '');
+  assert.equal(record.consumer_basis_ref, '');
+  assert.equal(record.audit_id, auditId);
+  assert.equal(record.export_delivery_identity_type, 'ExportDeliveryIdentityV1');
+  assert.equal(record.export_delivery_audit_id, auditId);
+  assert.match(record.export_delivery_model_hash, /^[a-f0-9]{64}$/u);
+
+  const pdf = artifacts.get('pdf').bytes;
+  assert.equal(pdf.subarray(0, 5).toString('ascii'), '%PDF-');
+  assert.match(pdf.subarray(Math.max(0, pdf.length - 1024)).toString('latin1'), /%%EOF\s*$/u);
+  assert.equal(pdf.length >= 1024, true);
+  // Chrome comprime os fluxos de página; o título Info não comprimido liga os bytes finais ao HTML canônico.
+  assert.equal(pdfInfoTitles(pdf).includes(canonicalReportTitle), true,
+    'o PDF final deve preservar o título do mesmo relatório HTML canônico');
+
+  const receipt = await extension.evaluate(extension.harnessPage, `(async()=>{
+    const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+    return store.getExportReceipt(${JSON.stringify(auditId)});
+  })()`, { awaitPromise: true });
+  assert.equal(receipt?.status, 'complete');
+  assert.equal(receipt?.auditId, auditId);
+  assert.equal(receipt?.modelHash, technical.exportDeliveryIdentity.modelHash);
+  assert.equal(receipt?.modelRevision, technical.exportDeliveryIdentity.modelRevision);
+  assert.equal(receipt?.attemptId, technical.exportDeliveryIdentity.attemptId);
+  assert.equal(receipt?.formats?.length, 4);
+  assert.equal(new Set(receipt.formats.map(entry => entry.downloadId)).size, 4);
+  for (const row of downloads) {
+    const entry = receipt.formats.find(candidate => candidate.format === row.format);
+    assert.deepEqual(entry, {
+      format: row.format, mimeType: exportMime[row.format], byteSize: row.byteLength,
+      sha256: row.sha256, downloadId: row.downloadId, state: 'complete',
+    });
+  }
+}
+
+test('current-page audits run in one inactive copy and leave the original page intact', { timeout: 600_000 }, async t => {
+  assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real do painel lateral.');
+  const fixture = await startFixtureServer(t, new Map([
+    ['/current', {
+      status: 200, headers: { 'content-type': 'text/html; charset=utf-8' }, body: currentPageDocument(),
+    }],
+  ]));
+  const sourceUrl = `${fixture.origin}/current?private_marker=${queryMarker}#${fragmentMarker}`;
   let extension;
   try {
     extension = await launchUnpackedExtension(t, {
-      extensionPath: await realpath(workspaceRoot),
-      startUrl: fixture.origin,
-      downloadDirectory,
+      extensionPath: await realpath(workspaceRoot), startUrl: sourceUrl,
       downloadMode: 'profile',
-      qaDirectory,
-      viewport: { width: 1280, height: 900 },
-      chromeBinary,
-      expectedMajor: 152,
+      viewport: { width: 1280, height: 900 }, chromeBinary, expectedMajor: 152,
     });
     assert.equal(extension.chromeProduct, CANONICAL_CHROME_PRODUCT);
-    const sensitivityFixture = await extension.evaluate(extension.startPage.page, `(() => {
-      const fields=[...document.querySelectorAll('input[type="password"]')];
-      return { count: fields.length, empty: fields.every(field=>field.value==='') };
-    })()`);
-    assert.deepEqual(sensitivityFixture, { count: 1, empty: true });
-    const panelBehavior = await extension.evaluate(extension.harnessPage,
-      'chrome.sidePanel.getPanelBehavior()', { awaitPromise: true });
-    assert.equal(panelBehavior?.openPanelOnActionClick, false);
-    const before = await extension.identityOf(extension.startPage);
-    const panel = await extension.openSidePanelFromAction();
-    let currentPanel = panel;
-    const sidePanels = await extension.runtimeContexts({ contextTypes: ['SIDE_PANEL'] });
-    const popups = await extension.runtimeContexts({ contextTypes: ['POPUP'] });
-    assert.equal(sidePanels.length, 1);
-    assert.equal(popups.length, 0);
-    const panelLaunchUrl = new URL(sidePanels[0].documentUrl);
-    assert.equal(panelLaunchUrl.protocol, 'chrome-extension:');
-    assert.equal(panelLaunchUrl.hostname, extension.extensionId);
-    assert.equal(panelLaunchUrl.pathname, '/src/panel/index.html');
-    assert.deepEqual([...panelLaunchUrl.searchParams.keys()], ['launch']);
-    const launchToken = panelLaunchUrl.searchParams.get('launch');
-    assert.match(launchToken, /^[A-Za-z0-9_-]{43}$/u);
-    assert.notEqual(panelLaunchUrl.search, '');
-    const contextProof = sidePanels.map(({ contextType, documentId, tabId, windowId }) => ({ contextType, documentId, tabId, windowId }));
-    const panelDocumentId = sidePanels[0].documentId;
-    const stablePanelWidths = [];
-    const assertTokenNotExposed = async (target, surface) => {
-      const exposure = await extension.evaluate(target, `(() => {
-        const token=${JSON.stringify(launchToken)};
-        const storageHasToken=storage=>Object.keys(storage).some(key=>key.includes(token)||String(storage.getItem(key)).includes(token));
-        return {
-          dom: document.documentElement.outerHTML.includes(token),
-          rendered: (document.body?.innerText ?? '').includes(token),
-          localStorage: storageHasToken(localStorage),
-          sessionStorage: storageHasToken(sessionStorage)
-        };
-      })()`);
-      assert.deepEqual(exposure, { dom: false, rendered: false, localStorage: false, sessionStorage: false }, surface);
-    };
-    const proveStablePanel = async stage => {
-      const [currentPanels, currentPopups] = await Promise.all([
-        extension.runtimeContexts({ contextTypes: ['SIDE_PANEL'] }),
-        extension.runtimeContexts({ contextTypes: ['POPUP'] }),
-      ]);
-      assert.equal(currentPanels.length, 1, stage);
-      assert.equal(currentPanels[0].documentId, panelDocumentId, stage);
-      assert.equal(currentPopups.length, 0, stage);
-      const widths = await extension.evaluate(panel, `(async()=>{
-        const values=[];
-        for(let index=0;index<4;index+=1){
-          await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
-          values.push({innerWidth,clientWidth:document.documentElement.clientWidth,bodyWidth:document.body?.clientWidth??0});
-        }
-        return values;
-      })()`, { awaitPromise: true });
-      assert.equal(widths.length, 4, stage);
-      assert.equal(widths.every(value => Number.isInteger(value.innerWidth) && value.innerWidth > 0 &&
-        value.clientWidth === value.innerWidth && value.bodyWidth === value.innerWidth), true, stage);
-      assert.equal(new Set(widths.map(value => value.innerWidth)).size, 1, `${stage}: no width oscillation`);
-      stablePanelWidths.push(widths[0].innerWidth);
-      t.diagnostic(`panel-stability=${stage}; SIDE_PANEL=${currentPanels.length}; POPUP=${currentPopups.length}; width=${widths[0].innerWidth}`);
-    };
-    t.diagnostic(`Chrome=${extension.chromeProduct}; SIDE_PANEL=${sidePanels.length}; POPUP=${popups.length}; contexts=${JSON.stringify(contextProof)}`);
-
-    await extension.waitForValue(panel, "document.querySelector('[data-screen]')?.dataset.screen", value => typeof value === 'string');
-    const initialState = await extension.evaluate(panel, `(() => ({
-      screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
-      heading: document.querySelector('[data-screen] h2')?.textContent ?? null,
-      status: document.querySelector('[role="status"]')?.textContent ?? null,
-      notice: document.querySelector('.privacy-local-copy')?.textContent ?? null,
-      modes: [...document.querySelectorAll('input[data-capture-mode]')].map(input => ({
-        mode: input.dataset.captureMode ?? null,
-        type: input.type,
-        checked: input.checked,
-        disabled: input.disabled,
-        described: Boolean(input.getAttribute('aria-describedby'))
+    await armSourceInvariantProof(extension);
+    let panel = await extension.openSidePanelFromAction();
+    const initial = await extension.waitForValue(panel, `(() => ({
+      screen:document.querySelector('[data-screen]')?.dataset.screen??null,
+      heading:document.querySelector('[data-screen] h2')?.textContent??null,
+      modes:[...document.querySelectorAll('input[data-capture-mode]')].map(input=>({
+        mode:input.value,checked:input.checked,disabled:input.disabled
       })),
-      startButtons: document.querySelectorAll('button[data-intent="START_ATTACHED"]').length
-    }))()`);
-    t.diagnostic(`panel-initial=${JSON.stringify(initialState)}`);
-    assert.equal(initialState.screen, 'initial');
-    assert.equal(initialState.heading, 'Avaliar acessibilidade');
-    assert.match(initialState.notice, /A auditoria pode capturar pixels e conteúdo visível, inclusive dados pessoais\. Tudo permanece neste dispositivo\./u);
-    assert.deepEqual(initialState.modes, [
-      { mode: 'full-evidence', type: 'radio', checked: true, disabled: false, described: true },
-      { mode: 'element-only', type: 'radio', checked: false, disabled: false, described: true },
-      { mode: 'no-pixels', type: 'radio', checked: false, disabled: false, described: true },
+      startButtons:document.querySelectorAll('button[data-intent="START_ATTACHED"]').length
+    }))()`, value => value?.screen === 'initial', { timeoutMs: 30_000, intervalMs: 50 });
+    assert.equal(initial.heading, 'Avaliar acessibilidade');
+    assert.deepEqual(initial.modes, [
+      { mode: 'full-evidence', checked: true, disabled: false },
+      { mode: 'element-only', checked: false, disabled: false },
+      { mode: 'no-pixels', checked: false, disabled: false },
     ]);
-    assert.equal(initialState.startButtons, 1);
-    await proveStablePanel('initial');
-    await assertTokenNotExposed(panel, 'panel initial must not expose launch authority');
-    await extension.captureJourney('panel-initial', panel);
+    assert.equal(initial.startButtons, 1);
+    assert.equal((await extension.runtimeContexts({ contextTypes: ['POPUP'] })).length, 0);
+    await extension.captureJourney('panel-current-copy-initial', panel);
 
-    for (const mode of ['element-only', 'no-pixels', 'full-evidence']) {
-      await extension.click(panel, `input[data-capture-mode="${mode}"]`);
-      const selectedMode = await extension.waitForValue(panel, `(() => ({
-        screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
-        checked: document.querySelector('input[name="capture-mode"]:checked')?.dataset.captureMode ?? null,
-        startButtons: document.querySelectorAll('button[data-intent="START_ATTACHED"]').length
-      }))()`, value => value?.screen === 'initial' && value?.checked === mode && value?.startButtons === 1,
-      { timeoutMs: 5_000, intervalMs: 50 });
-      assert.deepEqual(selectedMode, { screen: 'initial', checked: mode, startButtons: 1 });
-    }
-
-    const waitForPrivacyPause = () => extension.waitForValue(panel, `(() => {
-      const root=document.querySelector('[data-screen="running"][data-session-status="privacy-paused"]');
-      return {
-        screen: root?.dataset.screen ?? null,
-        sessionStatus: root?.dataset.sessionStatus ?? null,
-        categories: [...(root?.querySelectorAll('.privacy-signals li') ?? [])].map(item=>item.textContent),
-        confirm: root?.querySelector('button[data-intent="CONFIRM_PIXEL_CAPTURE"]')?.textContent ?? null,
-        cancel: root?.querySelector('button[data-intent="CANCEL_AUDIT"]')?.textContent ?? null
-      };
-    })()`, value => value?.screen === 'running' && value?.sessionStatus === 'privacy-paused' &&
-      value?.categories?.includes('Campo de senha') && typeof value?.confirm === 'string' && typeof value?.cancel === 'string', {
-      timeoutMs: 30_000, intervalMs: 50,
+    await t.test('full-evidence can be cancelled at the privacy pause without touching the source', async () => {
+      const { identityBefore, auditIdPromise } = await beginAttachedAttempt(extension, panel, 'full-evidence');
+      await waitForPrivacyPause(extension, panel);
+      const auditId = await auditIdPromise;
+      assert.match(auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);
+      const owner = await assertPausedAttempt(extension, auditId, identityBefore, sourceUrl);
+      await extension.click(panel, 'button[data-intent="CANCEL_AUDIT"]');
+      await extension.waitForValue(panel,
+        `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial', {
+          timeoutMs: 30_000, intervalMs: 50,
+        });
+      await waitForOwner(extension, auditId,
+        value => value.tabId === owner.tabId && value.state === 'removed' && value.cleanupMode === 'always');
+      await waitForActiveAuditCleanup(extension, auditId);
+      const cancelled = await readPrivateAttempt(extension, auditId);
+      assert.equal(cancelled.auditPresent, false);
+      assert.equal(cancelled.modelPresent, false);
+      assert.equal(cancelled.reportPresent, false);
+      assert.equal(cancelled.evidenceCount, 0);
+      assert.equal(cancelled.exportJournalCount, 0);
+      assert.equal(cancelled.activeSame, false);
+      assert.equal(cancelled.executionCheckpointPresent, false);
+      assert.equal(cancelled.sessionRasterDataUrls, 0);
+      assert.equal(cancelled.rawNavigationCount, 0);
+      assert.equal(cancelled.pixelStateCount, 0);
+      assert.equal(cancelled.pixelCompanionPresent, false);
+      assert.equal(cancelled.forbiddenSessionUrlCount, 0);
+      await assertCopyIsolation(extension, owner.tabId, identityBefore, { removed: true });
+    });
+    await t.test('no-pixels shows progress, completes in the copy and exposes a view-only report', async () => {
+      const { identityBefore, auditIdPromise } = await beginAttachedAttempt(extension, panel, 'no-pixels');
+      const auditId = await auditIdPromise;
+      assert.equal(await waitForResult(extension, panel, auditId), auditId);
+      await assertObservedProgress(extension, panel);
+      const [owner] = await waitForOwner(extension, auditId,
+        value => value.state === 'removed' && value.cleanupMode === 'always');
+      const attempt = await assertTerminalAttempt(extension, auditId, owner.tabId, identityBefore, {
+        minimumFullPage: 0, minimumElements: 0, fullPageExact: 0, elementsExact: 0,
+        diagnostics: ['PIXEL_CAPTURE_OMITTED'],
+      }, fixture.origin);
+      assert.equal(attempt.rasterDataUrls, 0);
+      await assertPanelSummaryAndDetail(extension, panel, 'no-pixels', 0, identityBefore);
+      const report = await openViewOnlyReport(extension, panel, auditId, 0, identityBefore);
+      await extension.captureJourney('report-current-copy-no-pixels', report, { captureBeyondViewport: false });
+      panel = await deleteAuditAndRestoreSource(extension, panel, report, auditId, owner.tabId);
     });
 
-    await extension.click(panel, 'button[data-intent="START_ATTACHED"]');
-    const firstPause = await waitForPrivacyPause();
-    t.diagnostic(`panel-first-privacy-pause=${JSON.stringify(firstPause)}`);
-    assert.ok(firstPause.categories.includes('Campo de senha'));
-    assert.match(firstPause.confirm, /Continuar e capturar/u);
-    assert.match(firstPause.cancel, /Cancelar auditoria/u);
-    await proveStablePanel('first-privacy-pause');
-    await extension.captureJourney('panel-privacy-pause-cancel', panel);
-
-    await extension.click(panel, 'button[data-intent="CANCEL_AUDIT"]');
-    const cancelledState = await extension.waitForValue(panel, `(() => ({
-      screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
-      heading: document.querySelector('[data-screen] h2')?.textContent ?? null,
-      selectedMode: document.querySelector('input[name="capture-mode"]:checked')?.dataset.captureMode ?? null
-    }))()`, value => value?.screen === 'initial' && value?.heading === 'Avaliar acessibilidade' &&
-      value?.selectedMode === 'full-evidence', { timeoutMs: 30_000, intervalMs: 50 });
-    assert.deepEqual(cancelledState, {
-      screen: 'initial', heading: 'Avaliar acessibilidade', selectedMode: 'full-evidence',
-    });
-    await proveStablePanel('cancelled-and-rehydrated');
-    await assertTokenNotExposed(panel, 'cancelled panel must not expose launch authority');
-    await extension.captureJourney('panel-after-cancel', panel);
-
-    await extension.click(panel, 'button[data-intent="START_ATTACHED"]');
-    const secondPause = await waitForPrivacyPause();
-    t.diagnostic(`panel-second-privacy-pause=${JSON.stringify(secondPause)}`);
-    assert.ok(secondPause.categories.includes('Campo de senha'));
-    await extension.click(panel, 'button[data-intent="CONFIRM_PIXEL_CAPTURE"]');
-    const confirmationState = await extension.waitForValue(panel, `(() => {
-      const root=document.querySelector('[data-screen="running"][data-session-status="privacy-paused"]');
-      const confirm=root?.querySelector('button[data-intent="CONFIRM_PIXEL_CAPTURE"]');
-      return {
-        screen: root?.dataset.screen ?? null,
-        sessionStatus: root?.dataset.sessionStatus ?? null,
-        ariaDisabled: confirm?.getAttribute('aria-disabled') ?? null,
-        label: confirm?.textContent ?? null,
-        confirmButtons: root?.querySelectorAll('button[data-intent="CONFIRM_PIXEL_CAPTURE"]').length ?? 0
-      };
-    })()`, value => value?.screen === 'running' && value?.sessionStatus === 'privacy-paused' &&
-      value?.ariaDisabled === 'true' && /Confirmação enviada/u.test(value?.label ?? '') && value?.confirmButtons === 1,
-    { timeoutMs: 10_000, intervalMs: 25 });
-    assert.deepEqual(confirmationState, {
-      screen: 'running', sessionStatus: 'privacy-paused', ariaDisabled: 'true',
-      label: 'Confirmação enviada', confirmButtons: 1,
+    await t.test('element-only confirms once and keeps the full-page capture omitted', async () => {
+      const { identityBefore, auditIdPromise } = await beginAttachedAttempt(extension, panel, 'element-only');
+      await waitForPrivacyPause(extension, panel);
+      const auditId = await auditIdPromise;
+      assert.match(auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);
+      const owner = await assertPausedAttempt(extension, auditId, identityBefore, sourceUrl);
+      await confirmOnce(extension, panel);
+      assert.equal(await waitForResult(extension, panel, auditId), auditId);
+      await assertObservedProgress(extension, panel);
+      await assertTerminalAttempt(extension, auditId, owner.tabId, identityBefore, {
+        minimumFullPage: 0, minimumElements: 1, fullPageExact: 0,
+        diagnostics: ['FULL_PAGE_CAPTURE_OMITTED'],
+      }, fixture.origin);
+      await assertPanelSummaryAndDetail(extension, panel, 'element-only', 1, identityBefore);
+      const report = await openViewOnlyReport(extension, panel, auditId, 1, identityBefore);
+      await extension.captureJourney('report-current-copy-elements', report, { captureBeyondViewport: false });
+      panel = await deleteAuditAndRestoreSource(extension, panel, report, auditId, owner.tabId);
     });
 
-    const startState = await extension.waitForValue(panel, `(() => ({
-      screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
-      sessionStatus: document.querySelector('[data-screen]')?.dataset.sessionStatus ?? null,
-      heading: document.querySelector('[data-screen] h2')?.textContent ?? null,
-      status: document.querySelector('[role="status"]')?.textContent ?? null
-    }))()`, value => value?.screen === 'result' ||
-      (value?.screen === 'running' && value?.sessionStatus === null), { timeoutMs: 30_000, intervalMs: 50 });
-    t.diagnostic(`panel-after-confirmation=${JSON.stringify(startState)}`);
-    assert.ok(['running', 'result'].includes(startState.screen));
-    assert.notEqual(startState.sessionStatus, 'privacy-paused');
-
-    const terminalState = await extension.waitForValue(panel, `(() => ({
-      screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
-      heading: document.querySelector('[data-screen] h2')?.textContent ?? null,
-      status: document.querySelector('[role="status"]')?.textContent ?? null
-    }))()`, value => ['result', 'initial', 'unavailable'].includes(value?.screen), {
-      timeoutMs: 60_000, intervalMs: 50,
+    await t.test('full-evidence rehydrates after worker restart and exports all four formats', async () => {
+      const { identityBefore, auditIdPromise } = await beginAttachedAttempt(extension, panel, 'full-evidence');
+      await waitForPrivacyPause(extension, panel);
+      const auditId = await auditIdPromise;
+      assert.match(auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);
+      const owner = await assertPausedAttempt(extension, auditId, identityBefore, sourceUrl);
+      await stopServiceWorker(extension);
+      await proveReplacementServiceWorker(extension);
+      await waitForPrivacyPause(extension, panel);
+      const rehydrated = await readPrivateAttempt(extension, auditId);
+      assert.equal(rehydrated.activeState, 'privacy-paused');
+      assert.deepEqual(rehydrated.owners.map(value => value.tabId), [owner.tabId]);
+      assert.equal(rehydrated.sessionRasterDataUrls, 0);
+      await assertCopyIsolation(extension, owner.tabId, identityBefore, { removed: false });
+      await confirmOnce(extension, panel);
+      assert.equal(await waitForResult(extension, panel, auditId), auditId);
+      await assertObservedProgress(extension, panel);
+      await assertTerminalAttempt(extension, auditId, owner.tabId, identityBefore, {
+        minimumFullPage: 1, minimumElements: 1,
+      }, fixture.origin);
+      await assertPanelSummaryAndDetail(extension, panel, 'full-evidence', 1, identityBefore);
+      await extension.captureJourney('panel-current-copy-summary', panel);
+      const report = await openViewOnlyReport(extension, panel, auditId, 1, identityBefore);
+      await extension.captureJourney('report-current-copy-full', report, { captureBeyondViewport: false });
+      await exportFourFormats(extension, report, auditId, extension.downloadDirectory);
+      panel = await deleteAuditAndRestoreSource(extension, panel, report, auditId, owner.tabId);
     });
-    if (terminalState.screen !== 'result') {
-      const executionState = await extension.evaluate(extension.harnessPage, `(async()=>{
-        try{
-          const module=await import(chrome.runtime.getURL('/src/storage/audit-store.js'));
-          const latest=await module.createAuditStore().getLatest();
-          return latest&&typeof latest==='object'?{
-            keys:Object.keys(latest),auditIdPresent:typeof latest.auditId==='string',status:latest.status??null,
-            percent:latest.percent??null,message:latest.message??null,failureCode:latest.failureCode??null,
-            modelRevision:latest.modelRevision??null
-          }:null;
-        }catch{return {readFailed:true}}
-      })()`, { awaitPromise: true });
-      t.diagnostic(`panel-terminal=${JSON.stringify(terminalState)}; execution=${JSON.stringify(executionState)}`);
-    }
-    assert.equal(terminalState.screen, 'result');
-    await proveStablePanel('result');
-    await assertTokenNotExposed(panel, 'panel result must not expose launch authority');
 
-    const auditId = await extension.readAttribute(panel, '[data-screen="result"]', 'data-audit-id');
-    assert.match(auditId, /^[A-Za-z0-9._:-]{1,160}$/u);
-    const summary = await extension.evaluate(panel, `(() => ({
-      coverage: Number(document.querySelector('progress.coverage-progress')?.max ?? 0),
-      failures: document.querySelectorAll('[data-result-card][data-classification="failed"]').length,
-      occurrenceButton: Boolean(document.querySelector('button[data-intent="SELECT_OCCURRENCE"]'))
-    }))()`);
-    assert.ok(summary.coverage > 0);
-    assert.ok(summary.failures > 0);
-    assert.equal(summary.occurrenceButton, true);
-    await extension.captureJourney('panel-summary', panel);
-
-    const occurrenceCount = await extension.evaluate(panel,
-      "document.querySelectorAll('button[data-intent=\"SELECT_OCCURRENCE\"]').length");
-    assert.ok(Number.isInteger(occurrenceCount) && occurrenceCount > 0);
-    let selectedOccurrenceId = null;
-    for (let index = 0; index < Math.min(occurrenceCount, 40); index += 1) {
-      const selected = await extension.evaluate(panel, `(() => {
-        const button=[...document.querySelectorAll('button[data-intent="SELECT_OCCURRENCE"]')][${index}];
-        if(!button)return false;
-        button.click();
-        return true;
-      })()`, { userGesture: true });
-      assert.equal(selected, true);
-      const availability = await extension.waitForValue(panel, `(() => ({
-        highlight:Boolean(document.querySelector('[data-action="highlight-occurrence"]')),
-        unavailable:/Não foi possível destacar este item/iu.test(document.querySelector('[role="status"]')?.textContent??''),
-        focusId:document.querySelector('[aria-pressed="true"][data-focus-id^="occurrence-"]')?.dataset.focusId??null,
-        normative:document.querySelector('[data-detail-block="normative"]')?.textContent??'',
-        accessibility:document.querySelector('[data-detail-block="accessibility"]')?.textContent??'',
-        evidenceImage:Boolean(document.querySelector('[data-detail-block="previews"] [data-evidence-preview-image]'))
-      }))()`, value => value?.highlight === true || value?.unavailable === true,
-      { timeoutMs: 5_000, intervalMs: 50 }).catch(() => null);
-      if (availability?.highlight === true && typeof availability.focusId === 'string' &&
-        /WCAG\s+\d/u.test(availability.normative) && /ABNT NBR 17225:\s*\S/u.test(availability.normative) &&
-        /Anúncio esperado:/u.test(availability.accessibility) && availability.evidenceImage === true) {
-        selectedOccurrenceId = availability.focusId.slice('occurrence-'.length);
-        break;
-      }
-    }
-    assert.match(selectedOccurrenceId, /^[A-Za-z0-9._:-]{1,200}$/u);
-    await extension.waitForValue(panel, "Boolean(document.querySelector('[data-result-detail]'))", Boolean);
-    const detailState = await extension.evaluate(panel, `(() => ({
-      normative: document.querySelector('[data-detail-block="normative"]')?.textContent ?? '',
-      accessibility: document.querySelector('[data-detail-block="accessibility"]')?.textContent ?? '',
-      evidenceImages: document.querySelectorAll('[data-detail-block="previews"] [data-evidence-preview-image]').length,
-      highlight: Boolean(document.querySelector('[data-action="highlight-occurrence"]'))
-    }))()`);
-    assert.match(detailState.normative, /WCAG\s+\d/u);
-    assert.match(detailState.normative, /ABNT NBR 17225:\s*\S/u);
-    assert.match(detailState.accessibility, /Anúncio esperado:/u);
-    assert.ok(detailState.evidenceImages > 0);
-    assert.equal(detailState.highlight, true);
-    await extension.captureJourney('panel-detail', panel);
-    await extension.click(panel, 'details[data-detail-block="previews"] > summary');
-    await extension.waitForValue(panel, "document.querySelector('details[data-detail-block=" + '"previews"' + "]')?.open", Boolean);
-    await proveStablePanel('detail-and-evidence');
-    assert.equal(new Set(stablePanelWidths).size, 1, 'the native panel width remains fixed across the journey');
-    await extension.captureJourney('panel-evidence', panel);
-
-    await extension.click(panel, 'button[data-intent="OPEN_REPORT"]');
-    const report = await extension.waitForReport({ auditId });
-    const reportState = await extension.waitForValue(report, `(() => ({
-      readyState: document.readyState,
-      navigation: Boolean(document.querySelector('[data-report-navigation]')),
-      status: document.querySelector('#review-status')?.textContent ?? null,
-      rootChildren: document.querySelector('#report-root')?.childElementCount ?? null,
-      exportReady: Boolean(document.querySelector('button[data-report-export]')),
-      title: document.querySelector('h1')?.textContent ?? null
-    }))()`, value => value?.navigation === true && value?.exportReady === true && value?.rootChildren > 0 &&
-      typeof value?.status === 'string' && value.status !== 'Carregando a auditoria.', {
-      timeoutMs: 30_000, intervalMs: 50,
-    });
-    t.diagnostic(`report-state=${JSON.stringify(reportState)}`);
-    assert.equal(reportState.navigation, true);
-    assert.equal(reportState.exportReady, true);
-    assert.ok(reportState.rootChildren > 0);
-    assert.notEqual(reportState.status, 'Carregando a auditoria.');
-    await assertTokenNotExposed(report, 'report must not expose panel launch authority');
-    await extension.captureJourney('report', report, { captureBeyondViewport: false });
-
-    const reportHighlightSelector = `[data-report-highlight-control="${selectedOccurrenceId}"] button`;
-    await extension.click(report, `${reportHighlightSelector}[data-highlight-action="check"]`);
-    await extension.waitForValue(report,
-      `document.querySelector(${JSON.stringify(reportHighlightSelector)})?.getAttribute('data-report-highlight')`,
-      value => value === 'highlight', { timeoutMs: 10_000, intervalMs: 50 });
-    await extension.click(report, `${reportHighlightSelector}[data-report-highlight="highlight"]`);
-    try {
-      await Promise.all([
-        extension.waitForValue(report,
-          `document.querySelector(${JSON.stringify(reportHighlightSelector)})?.getAttribute('data-report-highlight')`,
-          value => value === 'clear', { timeoutMs: 10_000, intervalMs: 50 }),
-        extension.waitForValue(panel, "Boolean(document.querySelector('[data-action=\"clear-highlight\"]'))", Boolean,
-          { timeoutMs: 10_000, intervalMs: 50 }),
-        extension.waitForValue(extension.startPage.page,
-          "document.querySelectorAll('[data-audita-highlight-root=\"v1\"]').length", value => value === 1,
-          { timeoutMs: 10_000, intervalMs: 50 }),
-      ]);
-    } catch (error) {
-      const highlightDiagnostic = await extension.evaluate(extension.harnessPage, `(async()=>({
-        frames:await chrome.scripting.executeScript({
-          target:{tabId:${extension.startPage.tabId},allFrames:true},
-          world:'ISOLATED',
-          func:()=>({
-            href:location.href,
-            roots:document.querySelectorAll('[data-audita-highlight-root="v1"]').length,
-            runtime:Boolean(globalThis.__auditaHighlightOverlayV1),
-            disposed:globalThis.__auditaHighlightOverlayV1?.disposed??null,
-            notified:globalThis.__auditaHighlightOverlayV1?.notified??null
-          })
-        }),
-        report:document.title
-      }))()`, { awaitPromise: true }).catch(value => ({ diagnosticFailure: String(value?.code || value) }));
-      const surfaces = {
-        report: await extension.evaluate(report,
-          `document.querySelector(${JSON.stringify(reportHighlightSelector)})?.getAttribute('data-report-highlight')`),
-        reportAction: await extension.evaluate(report, `(() => {
-          const button=document.querySelector(${JSON.stringify(reportHighlightSelector)});
-          return button?{
-            action:button.getAttribute('data-highlight-action'),
-            disabled:button.disabled,
-            ariaDisabled:button.getAttribute('aria-disabled'),
-            text:button.textContent,
-            status:document.querySelector('#review-status')?.textContent??null
-          }:null;
-        })()`),
-        panel: await extension.evaluate(panel, "Boolean(document.querySelector('[data-action=\"clear-highlight\"]'))"),
-        panelState: await extension.evaluate(panel, `(() => ({
-          screen:document.querySelector('[data-screen]')?.dataset.screen??null,
-          status:document.querySelector('[role="status"]')?.textContent??null,
-          action:document.querySelector('[data-action]')?.dataset.action??null
-        }))()`),
-        page: await extension.evaluate(extension.startPage.page,
-          "document.querySelectorAll('[data-audita-highlight-root=\"v1\"]').length"),
-        activeTabs: await extension.evaluate(extension.harnessPage,
-          `chrome.tabs.query({active:true,currentWindow:true}).then(tabs=>tabs.map(tab=>({id:tab.id,url:new URL(tab.url).pathname})))`,
-          { awaitPromise: true }),
-      };
-      t.diagnostic(`highlight-install=${JSON.stringify({ surfaces, highlightDiagnostic })}`);
-      throw error;
-    }
-    assert.equal(await extension.evaluate(panel, `(() => {
-      const button=document.querySelector('button[data-action="clear-highlight"]');
-      if(!button||button.disabled)return false;
-      button.focus();
-      button.click();
-      return true;
-    })()`, { userGesture: true }), true);
-    await Promise.all([
-      extension.waitForValue(extension.startPage.page,
-        "document.querySelectorAll('[data-audita-highlight-root=\"v1\"]').length", value => value === 0,
-        { timeoutMs: 10_000, intervalMs: 50 }),
-      extension.waitForValue(panel, `(() => ({
-        action:document.querySelector('[data-action="highlight-occurrence"]')?.dataset.action??null,
-        focusId:document.activeElement?.dataset?.focusId??null
-      }))()`, value => value?.action === 'highlight-occurrence' && value?.focusId === 'live-highlight-action',
-      { timeoutMs: 10_000, intervalMs: 50 }),
-      extension.waitForValue(report,
-        `document.querySelector(${JSON.stringify(reportHighlightSelector)})?.getAttribute('data-report-highlight')`,
-        value => value === 'highlight', { timeoutMs: 10_000, intervalMs: 50 }),
-    ]);
-
-    await extension.click(report, `${reportHighlightSelector}[data-report-highlight="highlight"]`);
-    await extension.waitForValue(extension.startPage.page,
-      "document.querySelectorAll('[data-audita-highlight-root=\"v1\"]').length", value => value === 1,
-      { timeoutMs: 10_000, intervalMs: 50 });
-    assert.deepEqual(await extension.identityOf(extension.startPage), before,
-      'the audit and live highlight did not navigate the audited page');
-    await navigateRealPage(extension, extension.startPage, {
-      url: `${fixture.origin}/after-navigation`, operationId: 'highlight-navigation-cleanup',
-    });
-    try {
-      await Promise.all([
-        extension.waitForValue(extension.startPage.page,
-          "document.querySelectorAll('[data-audita-highlight-root=\"v1\"]').length", value => value === 0,
-          { timeoutMs: 10_000, intervalMs: 50 }),
-        extension.waitForValue(report,
-          `document.querySelector(${JSON.stringify(reportHighlightSelector)})?.getAttribute('data-highlight-action')`,
-          value => value === 'unavailable', { timeoutMs: 10_000, intervalMs: 50 }),
-      ]);
-      const rebound = await waitForReboundSidePanel(extension, {
-        priorDocumentId: panelDocumentId,
-        timeoutMs: 10_000,
-      });
-      currentPanel = rebound.page;
-      const reboundState = await extension.waitForValue(rebound.page, `(() => ({
-        screen:document.querySelector('[data-screen]')?.dataset.screen??null,
-        clear:Boolean(document.querySelector('[data-action="clear-highlight"]')),
-        status:document.querySelector('[role="status"]')?.textContent??null
-      }))()`, value => value?.screen === 'result' && value?.clear === false, {
-        timeoutMs: 10_000, intervalMs: 50,
-      });
-      const reboundContexts = await extension.waitForValue(extension.harnessPage,
-        `chrome.runtime.getContexts({contextTypes:['SIDE_PANEL']}).then(values=>values.map(value=>({
-          documentId:value.documentId,
-          documentUrl:value.documentUrl
-        })))`, values => Array.isArray(values) && values.length === 1 && (() => {
-          try {
-            const url=new URL(values[0].documentUrl);
-            return url.pathname==='/src/panel/index.html' && url.searchParams.getAll('launch').length===1;
-          } catch { return false; }
-        })(), { timeoutMs: 10_000, intervalMs: 50 });
-      t.diagnostic(`panel-rebound=${JSON.stringify({
-        screen: reboundState.screen,
-        clear: reboundState.clear,
-        sidePanels: reboundContexts.length,
-      })}`);
-    } catch (error) {
-      const navigationDiagnostic = {
-        page: await extension.evaluate(extension.startPage.page, `({
-          href:location.href,
-          roots:document.querySelectorAll('[data-audita-highlight-root="v1"]').length
-        })`),
-        panel: await extension.evaluate(panel, `(() => ({
-          screen:document.querySelector('[data-screen]')?.dataset.screen??null,
-          status:document.querySelector('[role="status"]')?.textContent??null,
-          clear:Boolean(document.querySelector('[data-action="clear-highlight"]')),
-          highlight:Boolean(document.querySelector('[data-action="highlight-occurrence"]')),
-          unavailable:Boolean(document.querySelector('[data-action="consult-evidence"]'))
-        }))()`),
-        report: await extension.evaluate(report, `(() => {
-          const button=document.querySelector(${JSON.stringify(reportHighlightSelector)});
-          return button?{
-            action:button.getAttribute('data-highlight-action'),
-            state:button.getAttribute('data-report-highlight'),
-            ariaDisabled:button.getAttribute('aria-disabled'),
-            text:button.textContent
-          }:null;
-        })()`),
-        contexts: await extension.runtimeContexts({ contextTypes: ['SIDE_PANEL'] }),
-      };
-      t.diagnostic(`highlight-navigation=${JSON.stringify(navigationDiagnostic)}`);
-      throw error;
-    }
-    t.diagnostic(`highlight-sync=active-panel-report; clear-focus=preserved; navigation-cleanup=confirmed; occurrence=${selectedOccurrenceId}`);
-
-    await extension.click(report, 'button[data-report-export]');
-    let downloads;
-    try {
-      downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 60_000, intervalMs: 50 });
-    } catch (error) {
-      const exportDiagnostic = await extension.evaluate(extension.harnessPage, `(async()=>{
-        const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
-        const [receipt,latest,contexts,history,session]=await Promise.all([
-          store.getExportReceipt(${JSON.stringify(auditId)}),
-          store.getLatest(),
-          chrome.runtime.getContexts({contextTypes:['TAB']}),
-          chrome.downloads.search({}),
-          chrome.storage.session.get(null)
-        ]);
-        return {
-          receiptStatus:receipt?.status??null,
-          receiptFormats:receipt?.formats?.map(row=>({format:row.format,state:row.state,downloadId:row.downloadId}))??[],
-          latest:{auditId:latest?.auditId??null,exportStatus:latest?.exportStatus??null,message:latest?.message??null},
-          exportTabs:contexts.filter(value=>String(value.documentUrl||'').includes('/src/export/index.html')).map(value=>String(value.documentUrl).split('?')[0]),
-          history:history.map(row=>({id:row.id,state:row.state,exists:row.exists,filename:String(row.filename||'').split(/[\\/]/u).at(-1)})),
-          exportState:Object.entries(session).filter(([key])=>key.startsWith('audita:export-')).map(([key,value])=>({key:key.split(':').slice(0,4).join(':'),state:value?.state??null,proof:value?.terminalProof?{applied:value.terminalProof.applied,notified:value.terminalProof.notified,status:value.terminalProof.status}:null}))
-        };
-      })()`, { awaitPromise: true }).catch(() => ({ unavailable: true }));
-      const files = await readdir(downloadDirectory).catch(() => []);
-      t.diagnostic(`export-timeout=${JSON.stringify({ exportDiagnostic, files })}`);
-      throw error;
-    }
-    assert.deepEqual(downloads.map(row => row.format), ['html', 'pdf', 'csv', 'json']);
-    assert.equal(downloads.every(row => row.state === 'complete' && row.byteLength > 0 && /^[a-f0-9]{64}$/u.test(row.sha256)), true);
-    const exportsContainingLaunchAuthority = (await Promise.all(downloads.map(async row => ({
-      format: row.format,
-      containsToken: (await readFile(join(downloadDirectory, row.filename))).includes(Buffer.from(launchToken)),
-    })))).filter(row => row.containsToken).map(row => row.format);
-    assert.deepEqual(exportsContainingLaunchAuthority, []);
-    const downloadProofs = downloads.map(row => ({
-      format: row.format,
-      path: join(downloadDirectory, row.filename),
-      byteLength: row.byteLength,
-      sha256: row.sha256,
-    }));
-    t.diagnostic(`auditId=${auditId}; coverage=${summary.coverage}; failures=${summary.failures}; receipt=complete; downloads=${JSON.stringify(downloadProofs)}`);
-
-    await extension.click(report, '#delete-audit');
-    await extension.waitForValue(report, `document.querySelector('#delete-audit-dialog')?.open`, Boolean);
-    await extension.click(report, '#delete-audit-confirm');
-    await extension.waitForValue(report, `(() => ({
-      disabled: document.querySelector('#delete-audit')?.disabled === true,
-      status: document.querySelector('#review-status')?.textContent ?? ''
-    }))()`, value => value?.disabled === true && /excluída/iu.test(value.status), {
-      timeoutMs: 20_000, intervalMs: 50,
-    });
-    const panelAfterDeletion = await extension.waitForValue(currentPanel, `(() => ({
-      screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
-      details: document.querySelectorAll('[data-result-detail]').length,
-      previews: document.querySelectorAll('[data-evidence-preview-image]').length,
-      dataImages: document.documentElement.outerHTML.includes('data:image/png;base64,')
-    }))()`, value => value?.screen === 'initial' && value.details === 0 && value.previews === 0 && value.dataImages === false, {
-      timeoutMs: 20_000, intervalMs: 50,
-    });
-    assert.deepEqual(panelAfterDeletion, {
-      screen: 'initial', details: 0, previews: 0, dataImages: false,
-    });
-    t.diagnostic('delete-sync=report-and-panel-memory-cleared; downloaded-files=preserved');
+    assert.equal(await extension.evaluate(extension.startPage.page, `(() => {
+      globalThis.__auditaSourceInvariantV1?.dispose?.();delete globalThis.__auditaP4dImageRemovedV1;return true;
+    })()`), true);
+    assert.equal(await extension.evaluate(extension.harnessPage, `(() => {
+      globalThis.__auditaCurrentCopyProofV1?.dispose?.();return true;
+    })()`), true);
+    t.diagnostic('Chrome=152; current-page=inactive-copy; source=unchanged; modes=no-pixels,element-only,full-evidence; restart=rehydrated; report=view-only; exports=4');
   } catch (error) {
     t.diagnostic(`controlled-failure=${redactDiagnostic(error?.code ?? error?.message ?? 'E2E_DENIED')}`);
     throw error;

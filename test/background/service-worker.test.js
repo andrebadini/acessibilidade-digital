@@ -409,6 +409,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
     setCleanupError(value) { cleanupError = value; },
     setTabCreator(value) { tabCreator = value; },
     denySessionScan() { denySessionScan = true; },
+    allowSessionScan() { denySessionScan = false; },
     getPanelPath() { return panelPath; },
     getPanelOpens() { return panelOpens; },
     getPanelOptions() { return structuredClone(panelOptions); },
@@ -1774,6 +1775,7 @@ test('real default graph deletes one/all through correlated surfaces and maps st
   assert.deepEqual(env.sessionValues['user:unrelated'], { private: true });
   assert.equal(env.sessionGetCalls.filter(value => value === null).length, nullScansBeforeDeleteAll);
 
+  env.allowSessionScan();
   env.snapshots.set('audit-delete', { model: { auditId: 'audit-delete' }, revision: 2, capability: Object.freeze({}) });
   env.setDeleteError(Object.assign(new Error('native lock detail'), { code: 'AUDIT_DELETE_BUSY' }));
   assert.deepEqual(await env.dispatch(

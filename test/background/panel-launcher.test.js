@@ -55,6 +55,47 @@ test('preserves the gesture with one exact tab setOptions callback before open',
   assert.equal(env.calls.some(([name]) => name === 'revoke'), false);
 });
 
+test('one action click reopens an existing panel and rotates a conflicting live launch', async () => {
+  const env = fixture();
+  env.launchAuthority.issue = value => {
+    env.calls.push(['issue', value]);
+    return Object.freeze({ ok: false, code: 'PANEL_LAUNCH_CONFLICT' });
+  };
+  const panelLauncher = launcher(env);
+  let opened = 0;
+
+  assert.equal(panelLauncher.launch({ id: 17, windowId: 9 }, () => { opened += 1; }), true);
+  assert.deepEqual(env.calls.slice(0, 2), [
+    ['issue', { tabId: 17, windowId: 9 }],
+    ['open', [{ tabId: 17 }, env.callbacks.open]],
+  ]);
+  assert.equal(env.calls.some(([name]) => name === 'setOptions'), false);
+
+  env.callbacks.open();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(env.calls.find(([name]) => name === 'rotate'), ['rotate', { tabId: 17 }]);
+  assert.deepEqual(env.calls.find(([name]) => name === 'setOptions'), [
+    'setOptions', [{ tabId: 17, enabled: true, path: env.issued.path }, env.callbacks.setOptions[0]],
+  ]);
+  assert.equal(opened, 0);
+
+  env.callbacks.setOptions[0]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(opened, 1);
+});
+
+test('does not open an existing panel for a non-conflict launch denial', () => {
+  const env = fixture();
+  env.launchAuthority.issue = value => {
+    env.calls.push(['issue', value]);
+    return Object.freeze({ ok: false, code: 'PANEL_LAUNCH_DENIED' });
+  };
+
+  assert.equal(launcher(env).launch({ id: 17, windowId: 9 }), false);
+  assert.equal(env.calls.some(([name]) => name === 'open'), false);
+});
+
 test('revokes the token on synchronous, setOptions, or open failure without logging the secret', async t => {
   await t.test('setOptions lastError', async () => {
     const env = fixture();

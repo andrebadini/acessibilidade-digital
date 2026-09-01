@@ -105,7 +105,9 @@ function correlatedLocator(occurrence, evidence) {
     if (!artifact.selector || (artifact.nodeId !== undefined && artifact.nodeId !== null && artifact.nodeId !== occurrence.nodeId)) continue;
     const css = artifact.selector.css;
     const frames = artifact.selector.framePath ?? [];
-    if (selector && css && selector !== css) detailDenied();
+    const exactNodeCorrelation = occurrence.nodeId !== null && occurrence.nodeId !== undefined &&
+      artifact.nodeId === occurrence.nodeId;
+    if (selector && css && selector !== css && !exactNodeCorrelation) detailDenied();
     if (framePath.length > 0 && frames.length > 0 && JSON.stringify(framePath) !== JSON.stringify(frames)) detailDenied();
     if (!selector && css) selector = css;
     if (framePath.length === 0 && frames.length > 0) framePath = [...frames];

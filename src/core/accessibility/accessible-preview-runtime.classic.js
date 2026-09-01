@@ -23,7 +23,7 @@
     ['button', 'botão'], ['link', 'link'], ['checkbox', 'caixa de seleção'],
     ['radio', 'botão de opção'], ['textbox', 'campo de texto'],
     ['combobox', 'caixa de combinação'], ['listbox', 'caixa de listagem'],
-    ['heading', 'cabeçalho'], ['img', 'imagem'], ['region', 'região'],
+    ['heading', 'cabeçalho'], ['img', 'imagem'], ['image', 'imagem'], ['region', 'região'],
     ['table', 'tabela'], ['list', 'lista'], ['listitem', 'item da lista'],
     ['switch', 'alternância'], ['tab', 'guia'], ['menuitem', 'item de menu'],
     ['progressbar', 'barra de progresso'], ['meter', 'medidor'],

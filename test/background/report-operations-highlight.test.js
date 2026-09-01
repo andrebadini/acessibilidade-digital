@@ -2,9 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
-import { createReportOperations } from '../../src/background/service-worker.js';
+import {
+  createReportOperations,
+  disconnectPanelAuditSessions,
+} from '../../src/background/service-worker.js';
+import { panelBootstrapStorageKey } from '../../src/background/panel-port.js';
 
-function fixture({ clearOk = true } = {}) {
+const PANEL_SESSION = 'S'.repeat(22);
+
+function fixture({ clearOk = true, disconnectOk = true } = {}) {
   const calls = [];
   const bindings = new Set(['audit-1']);
   const sessionArea = {
@@ -37,6 +43,10 @@ function fixture({ clearOk = true } = {}) {
   const operations = createReportOperations({
     chromeApi: { runtime: {} }, auditStore, sessionArea,
     modelNow: () => '2026-08-30T12:00:00.000Z', highlightController, highlightBindingStore,
+    async disconnectPanelAudit(auditId) {
+      calls.push(['disconnect-panel', auditId]);
+      return disconnectOk;
+    },
     async publishHighlightState(value) { calls.push(['publish-highlight', value]); return { delivered: 0 }; },
   });
   return { operations, calls };
@@ -82,6 +92,7 @@ function reviewFixture({ clearOk = true } = {}) {
     chromeApi: { runtime: { sendMessage(_value, callback) { callback?.(); } } }, auditStore,
     sessionArea: { async get() { return {}; }, async set() {}, async remove() {} },
     modelNow: () => '2026-08-30T12:00:00.000Z', highlightController, highlightBindingStore,
+    async disconnectPanelAudit(auditId) { calls.push(['disconnect-panel', auditId]); return true; },
     async publishHighlightState(value) { calls.push(['publish-highlight', value]); return { delivered: 0 }; },
   });
   const review = SAMPLE_AUDIT.manualReview[0];
@@ -100,11 +111,12 @@ test('delete-one clears the real overlay and binding before deleting the audit',
   assert.deepEqual(await operations.deleteAudit({ auditId: 'audit-1' }), {
     ok: true, auditId: 'audit-1', deleted: true,
   });
-  assert.deepEqual(calls.slice(0, 5).map(([name, value]) => name === 'publish-highlight'
+  assert.deepEqual(calls.slice(0, 6).map(([name, value]) => name === 'publish-highlight'
     ? [name, value.state]
     : [name, value]), [
     ['snapshot-audit', 'audit-1'], ['clear-highlight', 'audit-1'],
-    ['delete-binding', 'audit-1'], ['publish-highlight', 'clear'], ['delete-audit', 'audit-1'],
+    ['delete-binding', 'audit-1'], ['publish-highlight', 'clear'],
+    ['disconnect-panel', 'audit-1'], ['delete-audit', 'audit-1'],
   ]);
 });
 
@@ -115,6 +127,80 @@ test('delete-one fails closed before audit deletion when overlay cleanup is unco
   });
   assert.equal(calls.some(([name]) => name === 'delete-audit'), false);
   assert.equal(calls.some(([name]) => name === 'delete-binding'), false);
+});
+
+test('delete-one fails closed before audit deletion when its panel session cannot be disconnected', async () => {
+  const { operations, calls } = fixture({ disconnectOk: false });
+  assert.deepEqual(await operations.deleteAudit({ auditId: 'audit-1' }), {
+    ok: false, code: 'REPORT_OPERATION_FAILED',
+  });
+  assert.equal(calls.some(([name]) => name === 'disconnect-panel'), true);
+  assert.equal(calls.some(([name]) => name === 'delete-audit'), false);
+});
+
+test('disconnects only the exact durable panel bootstrap for the deleted audit', async () => {
+  const values = {
+    [panelBootstrapStorageKey(9)]: {
+      version: 1, kind: 'audit-session', auditId: 'audit-1', sessionCapabilityId: PANEL_SESSION,
+      windowId: 9, createdAt: 1, expiresAt: 10_000, state: 'consumed',
+    },
+    [panelBootstrapStorageKey(10)]: {
+      version: 1, kind: 'audit-session', auditId: 'foreign-audit', sessionCapabilityId: PANEL_SESSION,
+      windowId: 10, createdAt: 1, expiresAt: 10_000, state: 'consumed',
+    },
+  };
+  const sessionArea = {
+    async get(keys) {
+      if (keys === null) return structuredClone(values);
+      const requested = Array.isArray(keys) ? keys : [keys];
+      return Object.fromEntries(requested.filter(key => Object.hasOwn(values, key)).map(key => [key, structuredClone(values[key])]));
+    },
+  };
+  const calls = [];
+  const panelCoordinator = {
+    async withWindowLock(windowId, callback) {
+      return callback({
+        async disconnectSession(value) {
+          calls.push([windowId, value]);
+          delete values[panelBootstrapStorageKey(windowId)];
+          return true;
+        },
+      });
+    },
+  };
+
+  assert.equal(await disconnectPanelAuditSessions({ auditId: 'audit-1', sessionArea, panelCoordinator }), true);
+  assert.deepEqual(calls, [[9, {
+    auditId: 'audit-1', sessionCapabilityId: PANEL_SESSION, windowId: 9, reasonCode: 'AUDIT_DELETED',
+  }]]);
+  assert.equal(Object.hasOwn(values, panelBootstrapStorageKey(9)), false);
+  assert.equal(Object.hasOwn(values, panelBootstrapStorageKey(10)), true);
+});
+
+test('fails closed on a malformed or unconfirmed target panel bootstrap', async t => {
+  await t.test('malformed target', async () => {
+    const key = panelBootstrapStorageKey(9);
+    const sessionArea = { async get() { return { [key]: { auditId: 'audit-1' } }; } };
+    assert.equal(await disconnectPanelAuditSessions({
+      auditId: 'audit-1', sessionArea,
+      panelCoordinator: { async withWindowLock() { throw new Error('must not run'); } },
+    }), false);
+  });
+
+  await t.test('disconnect not confirmed', async () => {
+    const key = panelBootstrapStorageKey(9);
+    const row = {
+      version: 1, kind: 'audit-session', auditId: 'audit-1', sessionCapabilityId: PANEL_SESSION,
+      windowId: 9, createdAt: 1, expiresAt: 10_000, state: 'consumed',
+    };
+    const sessionArea = { async get() { return { [key]: structuredClone(row) }; } };
+    assert.equal(await disconnectPanelAuditSessions({
+      auditId: 'audit-1', sessionArea,
+      panelCoordinator: { async withWindowLock(_windowId, callback) {
+        return callback({ async disconnectSession() { return false; } });
+      } },
+    }), false);
+  });
 });
 
 test('delete-all clears every highlight binding first and fails closed on unconfirmed cleanup', async () => {
