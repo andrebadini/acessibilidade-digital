@@ -19,6 +19,7 @@ import {
   createAuthorizedAuditStarter,
   executionCheckpointStorageKey,
   readActiveAuditJobForWorker,
+  reserveAttachedCopyStartJournalV1,
 } from './authorized-audit-starter.js';
 import { createAuditLifecycle } from './audit-lifecycle.js';
 import { createPixelCaptureStateV1 } from './pixel-capture-consent.js';
@@ -35,10 +36,12 @@ import {
   createPixelAttemptStoreBindingV1,
 } from './pixel-attempt-correlation.js';
 import {
+  AUDIT_EXECUTION_INTERNAL,
   composeChromeAdapter,
   createChromeAdapter,
   createChromeAuditAuthority,
 } from './chrome-adapter.js';
+import { isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
 import { registerAuditContextMenus } from './context-menu.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
 import { recordHighlightBindingV1 } from './highlight-binding.js';
@@ -452,7 +455,7 @@ export function createExactUrlAuditResourceCleanerV1(raw) {
   const states = new Set([
     'created', 'observing', 'retained-for-review', 'retained-for-consent', 'cleanup-pending', 'removed',
   ]);
-  const parseOwned = (value, auditId, ownershipId) => {
+  const parseOwned = (value, auditId, ownershipId, cleanupMode) => {
     if (value === null) return null;
     const record = exact(value, [
       'version', 'ownershipId', 'auditId', 'purpose', 'tabId', 'windowId',
@@ -461,17 +464,30 @@ export function createExactUrlAuditResourceCleanerV1(raw) {
     return record?.version === 2 && record.ownershipId === ownershipId && record.auditId === auditId &&
       record.purpose === 'audit' && Number.isSafeInteger(record.tabId) && record.tabId >= 0 &&
       Number.isSafeInteger(record.windowId) && record.windowId >= 0 &&
-      record.cleanupMode === 'pre-observation-failure' && states.has(record.state)
+      record.cleanupMode === cleanupMode && states.has(record.state)
       ? record : undefined;
   };
   return Object.freeze(async rawRequest => {
-    const request = exact(rawRequest, ['auditId', 'ownershipId']);
+    const ordinary = exact(rawRequest, ['auditId', 'ownershipId']);
+    const attachedCopy = exact(rawRequest, [
+      'auditId', 'ownershipId', 'navigationPurpose', 'cleanupMode',
+    ]);
+    const request = ordinary ?? (attachedCopy?.navigationPurpose === 'attached-copy' &&
+      attachedCopy.cleanupMode === 'always' ? attachedCopy : null);
+    const cleanupMode = ordinary ? 'pre-observation-failure' : 'always';
     if (!request || !AUDIT_ID.test(request.auditId ?? '') ||
       !/^owner_[A-Za-z0-9_-]{22}$/u.test(request.ownershipId ?? '')) return false;
     let failed = false;
     try { await input.rawNavigationVault.clearAudit(request.auditId); } catch { failed = true; }
     let current;
-    try { current = parseOwned(await input.ownedTabRegistry.get(request.ownershipId), request.auditId, request.ownershipId); }
+    try {
+      current = parseOwned(
+        await input.ownedTabRegistry.get(request.ownershipId),
+        request.auditId,
+        request.ownershipId,
+        cleanupMode,
+      );
+    }
     catch { return false; }
     if (current === undefined) return false;
     if (current !== null && current.state !== 'removed') {
@@ -480,12 +496,19 @@ export function createExactUrlAuditResourceCleanerV1(raw) {
         removed = parseOwned(await input.ownedTabRegistry.removeOwned({
           ownershipId: request.ownershipId, auditId: request.auditId,
           tabId: current.tabId, fromState: current.state,
-        }), request.auditId, request.ownershipId);
+        }), request.auditId, request.ownershipId, cleanupMode);
       } catch { return false; }
       if (!removed || removed.state !== 'removed') return false;
     }
     let confirmed;
-    try { confirmed = parseOwned(await input.ownedTabRegistry.get(request.ownershipId), request.auditId, request.ownershipId); }
+    try {
+      confirmed = parseOwned(
+        await input.ownedTabRegistry.get(request.ownershipId),
+        request.auditId,
+        request.ownershipId,
+        cleanupMode,
+      );
+    }
     catch { return false; }
     return !failed && (confirmed === null || confirmed?.state === 'removed');
   });
@@ -845,6 +868,99 @@ async function buildDefaultRuntime(chromeApi, options) {
     chromeApi, sessionArea, now: epochNow, randomBytes: bytes,
     probeDocument: tabId => chromeAdapter.probeDocumentIdentity(tabId),
   });
+  const prepareAttachedCopyPlan = async raw => {
+    const input = exact(raw, [
+      'capabilityId', 'auditId', 'senderContext', 'expectedTarget',
+    ]);
+    const expectedTarget = input && exact(input.expectedTarget, [
+      'tabId', 'windowId', 'documentId', 'urlSessionDigest',
+    ]);
+    if (!input || !CAPABILITY.test(input.capabilityId ?? '') || !AUDIT_ID.test(input.auditId ?? '') ||
+      !expectedTarget || !Number.isSafeInteger(expectedTarget.tabId) || expectedTarget.tabId < 0 ||
+      !Number.isSafeInteger(expectedTarget.windowId) || expectedTarget.windowId < 0 ||
+      typeof expectedTarget.documentId !== 'string' || expectedTarget.documentId.length < 1 ||
+      !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(expectedTarget.urlSessionDigest ?? '')) {
+      throw new Error('ATTACHED_COPY_PREPARATION_DENIED');
+    }
+    let ownershipId;
+    let createdAt;
+    try {
+      ownershipId = createOwnershipId(bytes);
+      createdAt = epochNow();
+      await reserveAttachedCopyStartJournalV1({
+        sessionArea,
+        capabilityId: input.capabilityId,
+        auditId: input.auditId,
+        windowId: expectedTarget.windowId,
+        ownershipId,
+        createdAt,
+      });
+    } catch { throw new Error('AUDIT_RECOVERY_REQUIRED'); }
+    try {
+      const internalDescriptor = Object.getOwnPropertyDescriptor(chromeAdapter, AUDIT_EXECUTION_INTERNAL);
+      const internal = internalDescriptor && Object.hasOwn(internalDescriptor, 'value')
+        ? internalDescriptor.value
+        : null;
+      const snapshotAttachedCopySource = internal && own(internal, 'snapshotAttachedCopySource');
+      if (typeof snapshotAttachedCopySource !== 'function') throw new Error('ATTACHED_COPY_PREPARATION_DENIED');
+      const source = exact(await snapshotAttachedCopySource(Object.freeze({ ...expectedTarget })), [
+        'version', 'tabId', 'windowId', 'documentId', 'urlSessionDigest', 'rawUrl',
+      ]);
+      if (!source || source.version !== 'AttachedCopySourceV1' || source.tabId !== expectedTarget.tabId ||
+        source.windowId !== expectedTarget.windowId || source.documentId !== expectedTarget.documentId ||
+        source.urlSessionDigest !== expectedTarget.urlSessionDigest || typeof source.rawUrl !== 'string') {
+        throw new Error('ATTACHED_COPY_PREPARATION_DENIED');
+      }
+      const exchange = exact(await authority.exchangeAttachedForNavigationCopy({
+        capabilityId: input.capabilityId,
+        intent: 'attached-copy',
+        senderContext: input.senderContext,
+      }), ['ok', 'capabilityId', 'expiresAt']);
+      if (!exchange || exchange.ok !== true || exchange.capabilityId !== input.capabilityId ||
+        !Number.isSafeInteger(exchange.expiresAt)) throw new Error('ATTACHED_COPY_PREPARATION_DENIED');
+      const issued = exact(await rawNavigationVault.put(source.rawUrl, {
+        auditId: input.auditId,
+        purpose: 'attached-copy',
+        ttlMs: 60_000,
+        includeQuery: false,
+      }), ['navigationToken', 'evidenceUrl', 'sessionDigest', 'expiresAt']);
+      const evidenceUrl = issued && exact(issued.evidenceUrl, [
+        'version', 'href', 'queryIncluded', 'redactedSegments',
+      ]);
+      const expectedEvidence = sanitizeEvidenceUrlV1(source.rawUrl, { includeQuery: false });
+      if (!issued || !/^[A-Za-z0-9_-]{22}$/u.test(issued.navigationToken ?? '') ||
+        !evidenceUrl || !isEvidenceUrlV1(evidenceUrl) || evidenceUrl.queryIncluded !== false ||
+        JSON.stringify(evidenceUrl) !== JSON.stringify(expectedEvidence) ||
+        issued.sessionDigest !== source.urlSessionDigest ||
+        !Number.isSafeInteger(issued.expiresAt)) {
+        throw new Error('ATTACHED_COPY_PREPARATION_DENIED');
+      }
+      return freeze({
+        kind: 'attached-copy',
+        ownershipId,
+        navigationToken: issued.navigationToken,
+        navigationPurpose: 'attached-copy',
+        evidenceUrl: { ...evidenceUrl },
+        sessionDigest: issued.sessionDigest,
+      });
+    } catch {
+      let invalidated = false;
+      let cleared = false;
+      try {
+        invalidated = (await authority.invalidateCapability(
+          input.capabilityId,
+          'AUDIT_START_COMPENSATED',
+        ))?.ok === true;
+      } catch { invalidated = false; }
+      try { await rawNavigationVault.clearAudit(input.auditId); cleared = true; }
+      catch { cleared = false; }
+      void invalidated;
+      void cleared;
+      // O journal durável permanece como autoridade de retry mesmo quando a
+      // compensação imediata parece confirmada.
+      throw new Error('AUDIT_RECOVERY_REQUIRED');
+    }
+  };
   const panelLaunchAuthority = options.panelLaunchAuthority ?? createPanelLaunchAuthority({
     chromeApi, sessionArea, now: epochNow, randomBytes: bytes,
   });
@@ -1094,6 +1210,7 @@ async function buildDefaultRuntime(chromeApi, options) {
     recordHighlightBinding: value => highlightBindingRecorder.record(value),
     pixelCommitClock,
     epochNow, modelNow, createAbortController: () => new AbortController(),
+    prepareAttachedCopyPlan,
     pixelState,
     probeDocumentIdentity: tabId => chromeAdapter.probeDocumentIdentity(tabId),
     probeSensitiveCaptureSignals,

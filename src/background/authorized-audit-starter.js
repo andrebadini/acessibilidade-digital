@@ -2,6 +2,7 @@ import { validateExecutionCheckpoint } from './execution-checkpoint.js';
 import {
   readAttachedAuditCorrelationForRecovery,
   readAttachedAuditRecoveryGrant,
+  readAttachedCopyNavigationForRecovery,
   readAuditSessionForWorker,
   readClaimedAttachedAuditGrant,
   readNavigationAuditCorrelationForRecovery,
@@ -27,7 +28,7 @@ const FACTORY_KEYS = Object.freeze([
   'persistLatest', 'persistCheckpoint', 'removeCheckpoint', 'commitTerminalAudit',
   'readAuditSnapshot', 'readReportRevision', 'readLatest', 'buildPanelResultBundle', 'recordHighlightBinding',
   'pixelCommitClock', 'epochNow', 'modelNow', 'createAbortController', 'pixelState', 'probeDocumentIdentity',
-  'probeSensitiveCaptureSignals', 'pixelAttemptLifecycle', 'schedulePixelExpiry',
+  'probeSensitiveCaptureSignals', 'pixelAttemptLifecycle', 'schedulePixelExpiry', 'prepareAttachedCopyPlan',
 ]);
 const URL_FACTORY_KEYS = Object.freeze([...FACTORY_KEYS, 'runUrlAuditExecution', 'clearUrlAuditResources']);
 const BEGIN_KEYS = Object.freeze([
@@ -47,6 +48,10 @@ const ACTIVE_KEYS = Object.freeze([
 ]);
 const JOURNAL_KEYS = Object.freeze([
   'version', 'capabilityId', 'auditId', 'windowId', 'state', 'sessionCapabilityId', 'createdAt', 'updatedAt',
+]);
+const ATTACHED_COPY_JOURNAL_KEYS = Object.freeze([
+  'version', 'capabilityId', 'auditId', 'windowId', 'mode', 'navigationPurpose', 'ownershipId',
+  'state', 'sessionCapabilityId', 'createdAt', 'updatedAt',
 ]);
 const LATEST_KEYS = Object.freeze([
   'version', 'auditId', 'status', 'percent', 'message', 'failureCode', 'modelRevision', 'updatedAt',
@@ -141,13 +146,70 @@ function activeRecord(value) {
 
 function journalRecord(value) {
   const record = exact(value, JOURNAL_KEYS);
-  if (!record || record.version !== 1 || !CAPABILITY.test(record.capabilityId ?? '') ||
-    !AUDIT_ID.test(record.auditId ?? '') || !Number.isSafeInteger(record.windowId) || record.windowId < 0 ||
-    !Number.isSafeInteger(record.createdAt) || record.createdAt < 0 ||
-    !Number.isSafeInteger(record.updatedAt) || record.updatedAt < record.createdAt ||
-    (record.state === 'prepared' ? record.sessionCapabilityId !== null
-      : record.state !== 'claimed' || !CAPABILITY.test(record.sessionCapabilityId ?? ''))) return null;
-  return freeze(record);
+  if (record && record.version === 1 && CAPABILITY.test(record.capabilityId ?? '') &&
+    AUDIT_ID.test(record.auditId ?? '') && Number.isSafeInteger(record.windowId) && record.windowId >= 0 &&
+    Number.isSafeInteger(record.createdAt) && record.createdAt >= 0 &&
+    Number.isSafeInteger(record.updatedAt) && record.updatedAt >= record.createdAt &&
+    (record.state === 'prepared' ? record.sessionCapabilityId === null
+      : record.state === 'claimed' && CAPABILITY.test(record.sessionCapabilityId ?? ''))) return freeze(record);
+  const attachedCopy = exact(value, ATTACHED_COPY_JOURNAL_KEYS);
+  if (!attachedCopy || attachedCopy.version !== 1 || !CAPABILITY.test(attachedCopy.capabilityId ?? '') ||
+    attachedCopy.mode !== 'single' || attachedCopy.navigationPurpose !== 'attached-copy' ||
+    !/^owner_[A-Za-z0-9_-]{22}$/u.test(attachedCopy.ownershipId ?? '') ||
+    !AUDIT_ID.test(attachedCopy.auditId ?? '') || !Number.isSafeInteger(attachedCopy.windowId) || attachedCopy.windowId < 0 ||
+    !Number.isSafeInteger(attachedCopy.createdAt) || attachedCopy.createdAt < 0 ||
+    !Number.isSafeInteger(attachedCopy.updatedAt) || attachedCopy.updatedAt < attachedCopy.createdAt ||
+    (['copy-preparing', 'prepared'].includes(attachedCopy.state)
+      ? attachedCopy.sessionCapabilityId !== null
+      : attachedCopy.state !== 'claimed' || !CAPABILITY.test(attachedCopy.sessionCapabilityId ?? ''))) return null;
+  return freeze(attachedCopy);
+}
+
+function attachedCopyJournal(value) {
+  const record = journalRecord(value);
+  return record && Object.hasOwn(record, 'navigationPurpose') && record.navigationPurpose === 'attached-copy'
+    ? record
+    : null;
+}
+
+function sameAttachedCopyJournalIdentity(record, expected) {
+  return record?.capabilityId === expected.capabilityId && record.auditId === expected.auditId &&
+    record.windowId === expected.windowId && record.mode === 'single' &&
+    record.navigationPurpose === 'attached-copy' && record.ownershipId === expected.ownershipId;
+}
+
+/*
+ * Reserva durável criada pelo worker antes do snapshot/exchange/vault. O
+ * registro contém somente correlação técnica; URL, token e digest nunca
+ * atravessam esta fronteira.
+ */
+export async function reserveAttachedCopyStartJournalV1(raw) {
+  const input = exact(raw, [
+    'sessionArea', 'capabilityId', 'auditId', 'windowId', 'ownershipId', 'createdAt',
+  ]);
+  if (!input || typeof input.sessionArea?.get !== 'function' || typeof input.sessionArea?.set !== 'function' ||
+    !CAPABILITY.test(input.capabilityId ?? '') || !AUDIT_ID.test(input.auditId ?? '') ||
+    !Number.isSafeInteger(input.windowId) || input.windowId < 0 ||
+    !/^owner_[A-Za-z0-9_-]{22}$/u.test(input.ownershipId ?? '') ||
+    !Number.isSafeInteger(input.createdAt) || input.createdAt < 0) {
+    throw new Error('START_JOURNAL_DENIED');
+  }
+  const existing = await readConfirmed(input.sessionArea, START_JOURNAL_KEY, journalRecord, 'START_JOURNAL_DENIED');
+  if (existing !== null) throw new Error('START_JOURNAL_DENIED');
+  const journal = freeze({
+    version: 1,
+    capabilityId: input.capabilityId,
+    auditId: input.auditId,
+    windowId: input.windowId,
+    mode: 'single',
+    navigationPurpose: 'attached-copy',
+    ownershipId: input.ownershipId,
+    state: 'copy-preparing',
+    sessionCapabilityId: null,
+    createdAt: input.createdAt,
+    updatedAt: input.createdAt,
+  });
+  return writeConfirmed(input.sessionArea, START_JOURNAL_KEY, journal, journalRecord, 'START_JOURNAL_DENIED');
 }
 
 async function readConfirmed(sessionArea, key, parser, denial) {
@@ -415,11 +477,12 @@ function correlatedPixelContext(active, recoveryGrant) {
   }
   const grant = exact(recoveryGrant, [
     'version', 'capabilityId', 'auditId', 'sessionCapabilityId', 'windowId', 'capabilityState',
-    'sessionState', 'ownershipId', 'ownershipState', 'issuedAt', 'expiresAt',
+    'sessionState', 'navigationPurpose', 'ownershipId', 'ownershipState', 'issuedAt', 'expiresAt',
   ]);
   if (!grant || grant.version !== 1 || grant.auditId !== active.auditId ||
     grant.capabilityId !== active.capabilityId || grant.sessionCapabilityId !== active.sessionCapabilityId ||
     grant.windowId !== active.windowId || !['claimed', 'invalidated'].includes(grant.capabilityState) ||
+    grant.navigationPurpose !== 'single-url' ||
     !/^owner_[A-Za-z0-9_-]{22}$/u.test(grant.ownershipId ?? '') ||
     !['pending', 'observing', 'retained-for-consent', 'retained-for-review', 'cleanup-pending', 'removed']
       .includes(grant.ownershipState) ||
@@ -529,6 +592,7 @@ export function createAuthorizedAuditStarter(input) {
   if (hasUrlAudit && (typeof dependencies.runUrlAuditExecution !== 'function' ||
     typeof dependencies.clearUrlAuditResources !== 'function' ||
     typeof dependencies.authority.claimNavigationAndIssueAuditSession !== 'function' ||
+    typeof dependencies.authority.claimExchangedAttachedCopyAndIssueAuditSession !== 'function' ||
     typeof dependencies.authority.transitionDisposableAuditSession !== 'function')) {
     throw new TypeError('AUTHORIZED_AUDIT_STARTER_INVALID');
   }
@@ -539,12 +603,13 @@ export function createAuthorizedAuditStarter(input) {
     readAuditSnapshot, readReportRevision, readLatest, buildPanelResultBundle, recordHighlightBinding,
     pixelCommitClock, epochNow, modelNow, createAbortController, pixelState,
     probeDocumentIdentity, probeSensitiveCaptureSignals,
-    pixelAttemptLifecycle, schedulePixelExpiry,
+    pixelAttemptLifecycle, schedulePixelExpiry, prepareAttachedCopyPlan,
   } = dependencies;
   const runUrlAuditExecution = hasUrlAudit ? dependencies.runUrlAuditExecution : null;
   const clearUrlAuditResources = hasUrlAudit ? dependencies.clearUrlAuditResources : null;
   let globalTail = Promise.resolve();
   const live = new Map();
+  const lockedAttachedCopyStarts = new WeakSet();
   const withGlobalLock = operation => {
     const pending = globalTail.then(operation, operation);
     globalTail = pending.catch(() => {});
@@ -1115,14 +1180,17 @@ export function createAuthorizedAuditStarter(input) {
   function urlPlan(value) {
     const plan = exact(value, URL_PLAN_KEYS);
     const evidenceUrl = plan && exact(plan.evidenceUrl, ['version', 'href', 'queryIncluded', 'redactedSegments']);
-    if (!plan || plan.kind !== 'single' || !/^owner_[A-Za-z0-9_-]{22}$/u.test(plan.ownershipId ?? '') ||
-      !/^[A-Za-z0-9_-]{22}$/u.test(plan.navigationToken ?? '') || plan.navigationPurpose !== 'single-url' ||
+    const validPurpose = plan?.kind === 'single'
+      ? plan.navigationPurpose === 'single-url'
+      : plan?.kind === 'attached-copy' && plan.navigationPurpose === 'attached-copy';
+    if (!plan || !validPurpose || !/^owner_[A-Za-z0-9_-]{22}$/u.test(plan.ownershipId ?? '') ||
+      !/^[A-Za-z0-9_-]{22}$/u.test(plan.navigationToken ?? '') ||
       !evidenceUrl || !isEvidenceUrlV1(evidenceUrl) || evidenceUrl.queryIncluded !== false ||
       !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(plan.sessionDigest ?? '')) return null;
     return freeze({ ...plan, evidenceUrl: { ...evidenceUrl } });
   }
 
-  function urlObservedTarget(value, ownershipId, windowId) {
+  function urlObservedTarget(value, ownershipId, windowId, expectedCleanupMode = 'pre-observation-failure') {
     const target = exact(value, [
       'version', 'kind', 'ownershipId', 'tabId', 'windowId', 'documentId', 'urlEvidence',
       'urlSessionDigest', 'cleanupMode', 'pageId',
@@ -1134,8 +1202,14 @@ export function createAuthorizedAuditStarter(input) {
       typeof target.documentId !== 'string' || target.documentId.length < 1 || target.documentId.length > 512 ||
       /[\u0000-\u001F\u007F]/u.test(target.documentId) || !evidenceUrl || !isEvidenceUrlV1(evidenceUrl) ||
       evidenceUrl.queryIncluded !== false || !DIGEST.test(target.urlSessionDigest ?? '') ||
-      target.cleanupMode !== 'pre-observation-failure' || target.pageId !== 'page-1') return null;
+      target.cleanupMode !== expectedCleanupMode || target.pageId !== 'page-1') return null;
     return freeze({ ...target, urlEvidence: { ...evidenceUrl } });
+  }
+
+  function urlCleanupRequest(auditId, ownershipId, navigationPurpose = 'single-url') {
+    return navigationPurpose === 'attached-copy'
+      ? freeze({ auditId, ownershipId, navigationPurpose: 'attached-copy', cleanupMode: 'always' })
+      : freeze({ auditId, ownershipId });
   }
 
   async function transitionUrlOwnership(liveRecord, fromState, toState) {
@@ -1156,6 +1230,9 @@ export function createAuthorizedAuditStarter(input) {
   async function executeUrl(liveRecord) {
     const active = liveRecord.active;
     const ownershipId = liveRecord.plan?.ownershipId ?? liveRecord.resumeTarget?.ownershipId;
+    const navigationPurpose = liveRecord.plan?.navigationPurpose ?? 'single-url';
+    const attachedCopy = navigationPurpose === 'attached-copy';
+    const expectedCleanupMode = attachedCopy ? 'always' : 'pre-observation-failure';
     let lastCheckpoint = null;
     let proposedTerminal = null;
     try {
@@ -1183,7 +1260,12 @@ export function createAuthorizedAuditStarter(input) {
           if (lastCheckpoint === null || liveRecord.committed || proposedTerminal !== null) {
             throw new Error('CHECKPOINT_PERSIST_DENIED');
           }
-          const safeTarget = urlObservedTarget(observedTarget, ownershipId, active.windowId);
+          const safeTarget = urlObservedTarget(
+            observedTarget,
+            ownershipId,
+            active.windowId,
+            expectedCleanupMode,
+          );
           if (!safeTarget) throw new Error('URL_AUDIT_OUTCOME_DENIED');
           const candidate = await terminalCandidate({
             auditId: active.auditId, model, checkpoint: lastCheckpoint,
@@ -1231,7 +1313,12 @@ export function createAuthorizedAuditStarter(input) {
         throw new Error('URL_AUDIT_OUTCOME_DENIED');
       }
       if (observed.status === 'privacy-paused') {
-        const safeTarget = urlObservedTarget(observed.observedTarget, ownershipId, active.windowId);
+        const safeTarget = urlObservedTarget(
+          observed.observedTarget,
+          ownershipId,
+          active.windowId,
+          expectedCleanupMode,
+        );
         if (liveRecord.capturePolicy.mode === 'no-pixels' || observed.model !== null ||
           observed.observationState !== 'observed' || observed.ownershipState !== 'retained-for-consent' ||
           lastCheckpoint === null || !safeTarget) throw new Error('URL_AUDIT_OUTCOME_DENIED');
@@ -1259,9 +1346,15 @@ export function createAuthorizedAuditStarter(input) {
         return freeze({ ok: true, auditId: active.auditId, state: 'privacy-paused', revision: null });
       }
       if (observed.model !== null) {
-        const safeTarget = urlObservedTarget(observed.observedTarget, ownershipId, active.windowId);
+        const safeTarget = urlObservedTarget(
+          observed.observedTarget,
+          ownershipId,
+          active.windowId,
+          expectedCleanupMode,
+        );
+        const expectedOwnershipState = attachedCopy ? 'removed' : 'retained-for-review';
         if (lastCheckpoint === null || observed.observationState !== 'observed' ||
-          observed.ownershipState !== 'retained-for-review' || !safeTarget ||
+          observed.ownershipState !== expectedOwnershipState || !safeTarget ||
           (proposedTerminal && !same(proposedTerminal.safeTarget, safeTarget))) {
           throw new Error('URL_AUDIT_OUTCOME_DENIED');
         }
@@ -1275,7 +1368,27 @@ export function createAuthorizedAuditStarter(input) {
         }
         const bundle = proposedTerminal?.bundle ??
           copyPanelResultBundleV1(await buildPanelResultBundle({ reportRevision: candidate }));
-        await transitionUrlOwnership(liveRecord, liveRecord.resumeTarget ? 'observing' : 'pending', 'retained-for-review');
+        if (attachedCopy) {
+          if (await clearUrlAuditResources(urlCleanupRequest(
+            active.auditId,
+            ownershipId,
+            navigationPurpose,
+          )) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
+          await transitionUrlOwnership(liveRecord, 'pending', 'removed');
+          const correlation = await readNavigationAuditCorrelationForRecovery({
+            sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
+          });
+          if (correlation.ownershipState !== 'removed' ||
+            correlation.navigationPurpose !== 'attached-copy') {
+            throw new Error('URL_OWNERSHIP_STATE_DENIED');
+          }
+        } else {
+          await transitionUrlOwnership(
+            liveRecord,
+            liveRecord.resumeTarget ? 'observing' : 'pending',
+            'retained-for-review',
+          );
+        }
         liveRecord.observedTarget = safeTarget;
         await markFinalizing(liveRecord, candidate, bundle);
         const committed = liveRecord.committed;
@@ -1290,13 +1403,17 @@ export function createAuthorizedAuditStarter(input) {
       }
       await transitionUrlOwnership(liveRecord, 'pending', observed.ownershipState);
       if (observed.ownershipState === 'cleanup-pending') {
-        if (await clearUrlAuditResources({
-          auditId: active.auditId, ownershipId,
-        }) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
+        if (await clearUrlAuditResources(urlCleanupRequest(
+          active.auditId,
+          ownershipId,
+          navigationPurpose,
+        )) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
         await transitionUrlOwnership(liveRecord, 'cleanup-pending', 'removed');
-      } else if (await clearUrlAuditResources({
-        auditId: active.auditId, ownershipId,
-      }) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
+      } else if (await clearUrlAuditResources(urlCleanupRequest(
+        active.auditId,
+        ownershipId,
+        navigationPurpose,
+      )) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
       return settle(liveRecord, freeze({
         version: 1, auditId: active.auditId, state: 'revoked', failureCode: 'AUDIT_FAILED',
         model: null, checkpoint: null,
@@ -1324,9 +1441,11 @@ export function createAuthorizedAuditStarter(input) {
         const correlation = await readNavigationAuditCorrelationForRecovery({
           sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
         });
-        if (await clearUrlAuditResources({
-          auditId: active.auditId, ownershipId,
-        }) !== true) {
+        if (await clearUrlAuditResources(urlCleanupRequest(
+          active.auditId,
+          ownershipId,
+          navigationPurpose,
+        )) !== true) {
           throw new Error('CORRELATED_CLEANUP_DENIED');
         }
         if (correlation.ownershipState !== 'removed') {
@@ -1346,7 +1465,7 @@ export function createAuthorizedAuditStarter(input) {
     }
   }
 
-  async function beginAuthorizedUrlAudit(raw) {
+  async function beginAuthorizedUrlAudit(raw, lockToken = null) {
     const args = exact(raw, URL_BEGIN_KEYS);
     const plan = args && urlPlan(args.plan);
     const capturePolicy = args && exactCapturePolicy(args.capturePolicy);
@@ -1357,37 +1476,67 @@ export function createAuthorizedAuditStarter(input) {
       !plan || !capturePolicy || capturePolicy.includeQuery !== false ||
       !preference || !context || !Number.isSafeInteger(context.windowId) || context.windowId < 0 ||
       context.tabId !== null || context.contextType !== 'SIDE_PANEL') return denied('AUDIT_START_FAILED');
+    const lockedAttachedCopy = plan.kind === 'attached-copy' && lockToken !== null &&
+      typeof lockToken === 'object' && lockedAttachedCopyStarts.has(lockToken);
 
-    const setup = await withGlobalLock(async () => {
+    const prepareSetup = async () => {
       let journal = null;
       let claimed = null;
       try {
         const singletons = await currentSingletons();
-        if (singletons.active) return denied('AUDIT_BUSY');
-        if (singletons.journal) return denied('AUDIT_RECOVERY_REQUIRED');
+        if (lockedAttachedCopy) {
+          journal = attachedCopyJournal(singletons.journal);
+          if (singletons.active || !journal || journal.state !== 'prepared' ||
+            journal.sessionCapabilityId !== null ||
+            !sameAttachedCopyJournalIdentity(journal, {
+              capabilityId: args.capabilityId,
+              auditId: args.auditId,
+              windowId: context.windowId,
+              ownershipId: plan.ownershipId,
+            })) return denied('AUDIT_RECOVERY_REQUIRED');
+        } else {
+          if (singletons.active) return denied('AUDIT_BUSY');
+          if (singletons.journal) return denied('AUDIT_RECOVERY_REQUIRED');
+        }
         const snapshot = await readAuditSnapshot({ auditId: args.auditId });
         if (!missingAuditSnapshot(snapshot) || await readReportRevision({ auditId: args.auditId }) !== null) {
           return denied('AUDIT_ID_COLLISION');
         }
-        return panelCoordinator.withWindowLock(context.windowId, async scope => {
-          const createdAt = safeEpoch(epochNow);
-          journal = freeze({
-            version: 1, capabilityId: args.capabilityId, auditId: args.auditId,
-            windowId: context.windowId, state: 'prepared', sessionCapabilityId: null,
-            createdAt, updatedAt: createdAt,
-          });
-          await writeConfirmed(sessionArea, START_JOURNAL_KEY, journal, journalRecord, 'START_JOURNAL_DENIED');
-          claimed = await authority.claimNavigationAndIssueAuditSession({
-            capabilityId: args.capabilityId, auditId: args.auditId, ownershipId: plan.ownershipId,
-            intent: 'single', senderContext: args.senderContext,
-          });
+        return await panelCoordinator.withWindowLock(context.windowId, async scope => {
+          if (journal === null) {
+            const createdAt = safeEpoch(epochNow);
+            journal = plan.kind === 'attached-copy'
+              ? freeze({
+                  version: 1, capabilityId: args.capabilityId, auditId: args.auditId,
+                  windowId: context.windowId, mode: 'single', navigationPurpose: 'attached-copy',
+                  ownershipId: plan.ownershipId, state: 'prepared', sessionCapabilityId: null,
+                  createdAt, updatedAt: createdAt,
+                })
+              : freeze({
+                  version: 1, capabilityId: args.capabilityId, auditId: args.auditId,
+                  windowId: context.windowId, state: 'prepared', sessionCapabilityId: null,
+                  createdAt, updatedAt: createdAt,
+                });
+            await writeConfirmed(sessionArea, START_JOURNAL_KEY, journal, journalRecord, 'START_JOURNAL_DENIED');
+          }
+          claimed = plan.kind === 'attached-copy'
+            ? await authority.claimExchangedAttachedCopyAndIssueAuditSession({
+                capabilityId: args.capabilityId, auditId: args.auditId,
+                ownershipId: plan.ownershipId, senderContext: args.senderContext,
+              })
+            : await authority.claimNavigationAndIssueAuditSession({
+                capabilityId: args.capabilityId, auditId: args.auditId, ownershipId: plan.ownershipId,
+                intent: 'single', senderContext: args.senderContext,
+              });
           if (claimed?.ok !== true || !CAPABILITY.test(claimed.sessionCapabilityId ?? '')) throw TARGET_UNAVAILABLE_SENTINEL;
           const correlation = await readNavigationAuditCorrelationForRecovery({
             sessionArea, capabilityId: args.capabilityId, auditId: args.auditId,
           });
           if (correlation.sessionCapabilityId !== claimed.sessionCapabilityId ||
             correlation.windowId !== context.windowId || correlation.ownershipId !== plan.ownershipId ||
-            correlation.ownershipState !== 'pending') throw TARGET_UNAVAILABLE_SENTINEL;
+            correlation.ownershipState !== 'pending' || correlation.navigationPurpose !== plan.navigationPurpose) {
+            throw TARGET_UNAVAILABLE_SENTINEL;
+          }
           journal = freeze({
             ...journal, state: 'claimed', sessionCapabilityId: claimed.sessionCapabilityId,
             updatedAt: safeEpoch(epochNow),
@@ -1451,8 +1600,57 @@ export function createAuthorizedAuditStarter(input) {
             sessionCapabilityId: claimed.sessionCapabilityId, liveRecord };
         });
       } catch (error) {
+        if (plan.kind === 'attached-copy') {
+          try {
+            const active = await readActiveAuditJobForWorker({ sessionArea });
+            const storedJournal = attachedCopyJournal(await readConfirmed(
+              sessionArea,
+              START_JOURNAL_KEY,
+              journalRecord,
+              'START_JOURNAL_DENIED',
+            ));
+            let recovered;
+            if (active?.auditId === args.auditId && active.capabilityId === args.capabilityId &&
+              active.mode === 'single') {
+              if (storedJournal !== null) {
+                if (storedJournal.state !== 'claimed' ||
+                  storedJournal.sessionCapabilityId !== active.sessionCapabilityId ||
+                  !sameAttachedCopyJournalIdentity(storedJournal, {
+                    capabilityId: args.capabilityId,
+                    auditId: args.auditId,
+                    windowId: context.windowId,
+                    ownershipId: plan.ownershipId,
+                  }) || !await removeCorrelated(
+                    sessionArea,
+                    START_JOURNAL_KEY,
+                    journalRecord,
+                    current => same(current, storedJournal),
+                  )) throw new Error('AUDIT_RECOVERY_REQUIRED');
+              }
+              recovered = await recoverSingleInterrupted(active);
+            } else {
+              if (active !== null || !storedJournal ||
+                !sameAttachedCopyJournalIdentity(storedJournal, {
+                  capabilityId: args.capabilityId,
+                  auditId: args.auditId,
+                  windowId: context.windowId,
+                  ownershipId: plan.ownershipId,
+                })) throw new Error('AUDIT_RECOVERY_REQUIRED');
+              recovered = await recoverAttachedCopyStart(storedJournal);
+            }
+            if (recovered?.ok !== true || recovered.state !== 'interrupted' ||
+              recovered.auditId !== args.auditId) throw new Error('AUDIT_RECOVERY_REQUIRED');
+          } catch {
+            return denied('AUDIT_RECOVERY_REQUIRED');
+          }
+          return denied(error === TARGET_UNAVAILABLE_SENTINEL ? 'TARGET_UNAVAILABLE' : 'AUDIT_START_FAILED');
+        }
         try {
-          if (await clearUrlAuditResources({ auditId: args.auditId, ownershipId: plan.ownershipId }) !== true) {
+          if (await clearUrlAuditResources(urlCleanupRequest(
+            args.auditId,
+            plan.ownershipId,
+            plan.navigationPurpose,
+          )) !== true) {
             return denied('AUDIT_RECOVERY_REQUIRED');
           }
           if (claimed?.ok === true) {
@@ -1466,13 +1664,16 @@ export function createAuthorizedAuditStarter(input) {
               await removeCorrelated(sessionArea, ACTIVE_AUDIT_JOB_KEY, activeRecord,
                 current => current.auditId === active.auditId && current.sessionCapabilityId === active.sessionCapabilityId);
             } else await authority.invalidateCapability(args.capabilityId, 'AUDIT_START_COMPENSATED');
-          } else await authority.invalidateCapability(args.capabilityId, 'AUDIT_START_COMPENSATED');
+          } else if ((await authority.invalidateCapability(args.capabilityId, 'AUDIT_START_COMPENSATED'))?.ok !== true) {
+            return denied('AUDIT_RECOVERY_REQUIRED');
+          }
           if (journal) await removeCorrelated(sessionArea, START_JOURNAL_KEY, journalRecord,
             current => current.auditId === args.auditId && current.capabilityId === args.capabilityId);
         } catch { return denied('AUDIT_RECOVERY_REQUIRED'); }
         return denied(error === TARGET_UNAVAILABLE_SENTINEL ? 'TARGET_UNAVAILABLE' : 'AUDIT_START_FAILED');
       }
-    });
+    };
+    const setup = lockedAttachedCopy ? await prepareSetup() : await withGlobalLock(prepareSetup);
     if (setup.response.ok !== true) return setup;
     const completion = executeUrl(setup.liveRecord);
     setup.liveRecord.completion = completion;
@@ -1489,6 +1690,9 @@ export function createAuthorizedAuditStarter(input) {
       !capturePolicy || !preference || !inversePair) {
       return freeze({ response: { ok: false, code: 'AUDIT_START_FAILED' }, sessionCapabilityId: null, completion: null });
     }
+    if (hasUrlAudit && capturePolicy.mode !== 'no-pixels') {
+      return freeze({ response: { ok: false, code: 'AUDIT_START_FAILED' }, sessionCapabilityId: null, completion: null });
+    }
     let target;
     try {
       target = inspectedTarget(await authority.inspectPreparedAuditTarget({
@@ -1500,6 +1704,94 @@ export function createAuthorizedAuditStarter(input) {
     } catch { target = null; }
     if (!target) {
       return freeze({ response: { ok: false, code: 'TARGET_UNAVAILABLE' }, sessionCapabilityId: null, completion: null });
+    }
+    if (hasUrlAudit) {
+      if (args.eventNonce !== null || args.senderContext === null) {
+        return freeze({ response: { ok: false, code: 'TARGET_UNAVAILABLE' }, sessionCapabilityId: null, completion: null });
+      }
+      return withGlobalLock(async () => {
+        let singletons;
+        try { singletons = await currentSingletons(); }
+        catch {
+          return freeze({ response: { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' }, sessionCapabilityId: null, completion: null });
+        }
+        if (singletons.active) {
+          return freeze({ response: { ok: false, code: 'AUDIT_BUSY' }, sessionCapabilityId: null, completion: null });
+        }
+        if (singletons.journal) {
+          return freeze({ response: { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' }, sessionCapabilityId: null, completion: null });
+        }
+        const snapshot = await readAuditSnapshot({ auditId: args.auditId });
+        if (!missingAuditSnapshot(snapshot) || await readReportRevision({ auditId: args.auditId }) !== null) {
+          return freeze({ response: { ok: false, code: 'AUDIT_ID_COLLISION' }, sessionCapabilityId: null, completion: null });
+        }
+        let plan;
+        try {
+          plan = urlPlan(await prepareAttachedCopyPlan({
+            capabilityId: args.capabilityId,
+            auditId: args.auditId,
+            senderContext: args.senderContext,
+            expectedTarget: {
+              tabId: target.tabId,
+              windowId: target.windowId,
+              documentId: target.documentId,
+              urlSessionDigest: target.urlSessionDigest,
+            },
+          }));
+        } catch (error) {
+          const code = error?.message === 'AUDIT_RECOVERY_REQUIRED'
+            ? 'AUDIT_RECOVERY_REQUIRED'
+            : 'TARGET_UNAVAILABLE';
+          return freeze({ response: { ok: false, code }, sessionCapabilityId: null, completion: null });
+        }
+        if (!plan || plan.kind !== 'attached-copy') {
+          return freeze({ response: { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' }, sessionCapabilityId: null, completion: null });
+        }
+        let journal;
+        try {
+          journal = attachedCopyJournal(await readConfirmed(
+            sessionArea,
+            START_JOURNAL_KEY,
+            journalRecord,
+            'START_JOURNAL_DENIED',
+          ));
+        } catch { journal = null; }
+        if (!journal || journal.state !== 'copy-preparing' || journal.sessionCapabilityId !== null ||
+          !sameAttachedCopyJournalIdentity(journal, {
+            capabilityId: args.capabilityId,
+            auditId: args.auditId,
+            windowId: target.windowId,
+            ownershipId: plan.ownershipId,
+          })) {
+          return freeze({ response: { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' }, sessionCapabilityId: null, completion: null });
+        }
+        const preparedJournal = freeze({
+          ...journal,
+          state: 'prepared',
+          updatedAt: safeEpoch(epochNow),
+        });
+        try {
+          await writeConfirmed(
+            sessionArea,
+            START_JOURNAL_KEY,
+            preparedJournal,
+            journalRecord,
+            'START_JOURNAL_DENIED',
+          );
+        } catch {
+          return freeze({ response: { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' }, sessionCapabilityId: null, completion: null });
+        }
+        const lockToken = Object.freeze({});
+        lockedAttachedCopyStarts.add(lockToken);
+        return beginAuthorizedUrlAudit({
+          capabilityId: args.capabilityId,
+          auditId: args.auditId,
+          senderContext: args.senderContext,
+          capturePolicy,
+          retentionPreference: preference,
+          plan,
+        }, lockToken);
+      });
     }
 
     let resolveStarted;
@@ -2077,13 +2369,18 @@ export function createAuthorizedAuditStarter(input) {
     let correlation = await readNavigationAuditCorrelationForRecovery({
       sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
     });
+    const validRecoveryState =
+      (correlation.capabilityState === 'claimed' && ['running', 'revoked'].includes(correlation.sessionState)) ||
+      (correlation.capabilityState === 'invalidated' && correlation.sessionState === 'revoked');
     if (correlation.sessionCapabilityId !== active.sessionCapabilityId || correlation.windowId !== active.windowId ||
-      correlation.capabilityState !== 'claimed' || !['running', 'revoked'].includes(correlation.sessionState)) {
+      !validRecoveryState) {
       throw new Error('AUDIT_RECOVERY_REQUIRED');
     }
-    if (await clearUrlAuditResources({
-      auditId: active.auditId, ownershipId: correlation.ownershipId,
-    }) !== true) throw new Error('AUDIT_RECOVERY_REQUIRED');
+    if (await clearUrlAuditResources(urlCleanupRequest(
+      active.auditId,
+      correlation.ownershipId,
+      correlation.navigationPurpose,
+    )) !== true) throw new Error('AUDIT_RECOVERY_REQUIRED');
     if (correlation.ownershipState !== 'removed') {
       const removed = await authority.transitionDisposableAuditSession({
         sessionCapabilityId: active.sessionCapabilityId,
@@ -2123,12 +2420,18 @@ export function createAuthorizedAuditStarter(input) {
     const correlation = await readNavigationAuditCorrelationForRecovery({
       sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
     });
+    const expectedOwnershipState = correlation.navigationPurpose === 'attached-copy'
+      ? 'removed'
+      : 'retained-for-review';
+    const expectedCleanupMode = correlation.navigationPurpose === 'attached-copy'
+      ? 'always'
+      : 'pre-observation-failure';
     if (correlation.sessionCapabilityId !== active.sessionCapabilityId || correlation.windowId !== active.windowId ||
       correlation.capabilityState !== 'claimed' || !['running', 'result'].includes(correlation.sessionState) ||
-      correlation.ownershipState !== 'retained-for-review') throw new Error('AUDIT_RECOVERY_REQUIRED');
+      correlation.ownershipState !== expectedOwnershipState) throw new Error('AUDIT_RECOVERY_REQUIRED');
     const attemptSource = freeze({
       kind: 'owned-disposable', ownershipId: correlation.ownershipId,
-      cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+      cleanupMode: expectedCleanupMode, pageId: 'page-1',
     });
     let attempt = exact(await pixelAttemptLifecycle.classify(pixelAttemptRequest(
       active.auditId, null, attemptSource,
@@ -2258,14 +2561,153 @@ export function createAuthorizedAuditStarter(input) {
     return freeze({ ok: true, state: 'reconciled', auditId: active.auditId, revision: 1 });
   }
 
+  async function recoverAttachedCopyStart(journal) {
+    const cleanupRequest = urlCleanupRequest(
+      journal.auditId,
+      journal.ownershipId,
+      journal.navigationPurpose,
+    );
+    let copyGraph = null;
+    try {
+      copyGraph = await readAttachedCopyNavigationForRecovery({
+        sessionArea,
+        capabilityId: journal.capabilityId,
+      });
+    } catch { copyGraph = null; }
+
+    if (copyGraph === null) {
+      const target = await readAttachedAuditCorrelationForRecovery({
+        sessionArea,
+        capabilityId: journal.capabilityId,
+        auditId: journal.auditId,
+      });
+      if (journal.state !== 'copy-preparing' || journal.sessionCapabilityId !== null ||
+        target.windowId !== journal.windowId || target.sessionCapabilityId !== null ||
+        !['prepared', 'invalidated'].includes(target.targetState)) throw new Error('AUDIT_RECOVERY_REQUIRED');
+      if (await clearUrlAuditResources(cleanupRequest) !== true) throw new Error('AUDIT_RECOVERY_REQUIRED');
+      const invalidated = await authority.invalidateCapability(
+        journal.capabilityId,
+        'AUDIT_START_COMPENSATED',
+      );
+      if (invalidated?.ok !== true) throw new Error('AUDIT_RECOVERY_REQUIRED');
+      const confirmed = await readAttachedAuditCorrelationForRecovery({
+        sessionArea,
+        capabilityId: journal.capabilityId,
+        auditId: journal.auditId,
+      });
+      if (confirmed.windowId !== journal.windowId || confirmed.targetState !== 'invalidated' ||
+        confirmed.sessionCapabilityId !== null || confirmed.sessionState !== null) {
+        throw new Error('AUDIT_RECOVERY_REQUIRED');
+      }
+    } else {
+      if (copyGraph.windowId !== journal.windowId || copyGraph.targetState !== 'invalidated' ||
+        !['prepared', 'claimed', 'invalidated'].includes(copyGraph.navigationState)) {
+        throw new Error('AUDIT_RECOVERY_REQUIRED');
+      }
+      if (copyGraph.sessionCapabilityId === null) {
+        if (journal.sessionCapabilityId !== null || !['copy-preparing', 'prepared'].includes(journal.state)) {
+          throw new Error('AUDIT_RECOVERY_REQUIRED');
+        }
+        if (await clearUrlAuditResources(cleanupRequest) !== true) throw new Error('AUDIT_RECOVERY_REQUIRED');
+        const invalidated = await authority.invalidateCapability(
+          journal.capabilityId,
+          'AUDIT_START_COMPENSATED',
+        );
+        if (invalidated?.ok !== true) throw new Error('AUDIT_RECOVERY_REQUIRED');
+        const confirmed = await readAttachedCopyNavigationForRecovery({
+          sessionArea,
+          capabilityId: journal.capabilityId,
+        });
+        if (confirmed.windowId !== journal.windowId || confirmed.navigationState !== 'invalidated' ||
+          confirmed.sessionCapabilityId !== null) throw new Error('AUDIT_RECOVERY_REQUIRED');
+      } else {
+        if (journal.state === 'claimed' && journal.sessionCapabilityId !== copyGraph.sessionCapabilityId ||
+          !['prepared', 'claimed'].includes(journal.state)) throw new Error('AUDIT_RECOVERY_REQUIRED');
+        let correlation = await readNavigationAuditCorrelationForRecovery({
+          sessionArea,
+          capabilityId: journal.capabilityId,
+          auditId: journal.auditId,
+        });
+        if (correlation.sessionCapabilityId !== copyGraph.sessionCapabilityId ||
+          correlation.windowId !== journal.windowId || correlation.navigationPurpose !== 'attached-copy' ||
+          correlation.ownershipId !== journal.ownershipId ||
+          !['running', 'revoked'].includes(correlation.sessionState)) throw new Error('AUDIT_RECOVERY_REQUIRED');
+        if (await clearUrlAuditResources(cleanupRequest) !== true) throw new Error('AUDIT_RECOVERY_REQUIRED');
+        if (correlation.ownershipState !== 'removed') {
+          const removed = await authority.transitionDisposableAuditSession({
+            sessionCapabilityId: correlation.sessionCapabilityId,
+            auditId: journal.auditId,
+            ownershipId: journal.ownershipId,
+            fromState: correlation.ownershipState,
+            toState: 'removed',
+          });
+          if (removed?.ok !== true || removed.state !== 'removed' ||
+            removed.ownershipId !== journal.ownershipId) throw new Error('AUDIT_RECOVERY_REQUIRED');
+        }
+        const invalidated = await authority.invalidateCapability(
+          journal.capabilityId,
+          'AUDIT_START_COMPENSATED',
+        );
+        if (invalidated?.ok !== true) throw new Error('AUDIT_RECOVERY_REQUIRED');
+        correlation = await readNavigationAuditCorrelationForRecovery({
+          sessionArea,
+          capabilityId: journal.capabilityId,
+          auditId: journal.auditId,
+        });
+        if (correlation.capabilityState !== 'invalidated' || correlation.sessionState !== 'revoked' ||
+          correlation.ownershipState !== 'removed' || correlation.navigationPurpose !== 'attached-copy' ||
+          correlation.ownershipId !== journal.ownershipId) throw new Error('AUDIT_RECOVERY_REQUIRED');
+        const disconnected = await panelCoordinator.withWindowLock(journal.windowId, scope => scope.disconnectSession({
+          auditId: journal.auditId,
+          sessionCapabilityId: correlation.sessionCapabilityId,
+          windowId: journal.windowId,
+          reasonCode: 'AUDIT_INTERRUPTED',
+        }));
+        if (disconnected !== true) throw new Error('AUDIT_RECOVERY_REQUIRED');
+      }
+    }
+
+    const checkpoint = exact(await removeCheckpoint({
+      auditId: journal.auditId,
+      sessionCapabilityId: journal.sessionCapabilityId,
+      windowId: journal.sessionCapabilityId === null ? null : journal.windowId,
+    }), ['removed']);
+    if (!checkpoint || typeof checkpoint.removed !== 'boolean') throw new Error('AUDIT_RECOVERY_REQUIRED');
+    const preferenceRemoved = await removePreference({ auditId: journal.auditId });
+    if (!preferenceRemoved || !await removeCorrelated(
+      sessionArea,
+      START_JOURNAL_KEY,
+      journalRecord,
+      current => sameAttachedCopyJournalIdentity(current, journal),
+    )) throw new Error('AUDIT_RECOVERY_REQUIRED');
+    return freeze({ ok: true, state: 'interrupted', auditId: journal.auditId, revision: null });
+  }
+
   async function recoverAuthorizedAuditLifecycle() {
     return withGlobalLock(async () => {
       try {
-        const { active, journal } = await currentSingletons();
+        let { active, journal } = await currentSingletons();
         if (active) {
-          if (journal !== null) throw new Error('AUDIT_RECOVERY_REQUIRED');
+          if (journal !== null) {
+            const copyJournal = attachedCopyJournal(journal);
+            if (!copyJournal || active.mode !== 'single' || copyJournal.state !== 'claimed' ||
+              copyJournal.sessionCapabilityId !== active.sessionCapabilityId ||
+              !sameAttachedCopyJournalIdentity(copyJournal, {
+                capabilityId: active.capabilityId,
+                auditId: active.auditId,
+                windowId: active.windowId,
+                ownershipId: copyJournal.ownershipId,
+              }) || !await removeCorrelated(
+                sessionArea,
+                START_JOURNAL_KEY,
+                journalRecord,
+                current => same(current, copyJournal),
+              )) throw new Error('AUDIT_RECOVERY_REQUIRED');
+            journal = null;
+          }
+          let navigationCorrelation = null;
           if (active.mode === 'single') {
-            await readNavigationAuditCorrelationForRecovery({
+            navigationCorrelation = await readNavigationAuditCorrelationForRecovery({
               sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
             });
           } else {
@@ -2274,7 +2716,9 @@ export function createAuthorizedAuditStarter(input) {
             });
           }
           const singlePixelSuspension = active.mode === 'single'
-            ? (await readCorrelatedPixelSuspension(active)).suspension
+            ? navigationCorrelation.navigationPurpose === 'attached-copy'
+              ? null
+              : (await readCorrelatedPixelSuspension(active)).suspension
             : null;
           const result = active.mode === 'single'
             ? active.state === 'finalizing'
@@ -2295,6 +2739,8 @@ export function createAuthorizedAuditStarter(input) {
           return result;
         }
         if (!journal) return freeze({ ok: true, state: 'idle', auditId: null, revision: null });
+        const copyJournal = attachedCopyJournal(journal);
+        if (copyJournal) return recoverAttachedCopyStart(copyJournal);
         const correlation = await readAttachedAuditCorrelationForRecovery({
           sessionArea, capabilityId: journal.capabilityId, auditId: journal.auditId,
         });

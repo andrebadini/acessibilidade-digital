@@ -158,6 +158,56 @@ test('single URL resolves its one-use vault token only inside the observed runne
   }]);
 });
 
+test('attached-copy resolves only its scoped vault token and forces cleanup always', async () => {
+  const calls = [];
+  const result = await runUrlAudit({
+    auditId: 'audit-attached-copy-runner',
+    ownershipId: `owner_${'C'.repeat(22)}`,
+    navigationToken: 'C'.repeat(22),
+    windowId: 9,
+    navigationPurpose: 'attached-copy',
+    evidenceUrl: TEST_EVIDENCE_URL,
+    sessionDigest: TEST_DIGEST,
+    rawNavigationVault: Object.freeze({
+      async take(token, options) {
+        calls.push(['take', token, options]);
+        return 'https://example.test/final?private=REMOVE';
+      },
+    }),
+    chromeAdapter: Object.freeze({ marker: 'adapter' }),
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    checkpointStore: Object.freeze({ async writeSanitized() {} }),
+    onProgress() {},
+    now: () => '2026-09-01T12:00:00.000Z',
+    signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID,
+    async auditRunner(input) {
+      assert.deepEqual(input.target, {
+        kind: 'owned-disposable',
+        ownershipId: `owner_${'C'.repeat(22)}`,
+        navigationToken: 'C'.repeat(22),
+        cleanupMode: 'always',
+        pageId: 'page-1',
+      });
+      assert.equal(await input.chromeAdapter.resolveNavigationToken('C'.repeat(22)),
+        'https://example.test/final?private=REMOVE');
+      return Object.freeze({
+        status: 'complete', model: Object.freeze({ auditId: 'audit-attached-copy-runner' }),
+        observedTarget: Object.freeze({ kind: 'owned-disposable' }),
+        observationState: 'observed', ownershipState: 'removed',
+      });
+    },
+  });
+
+  assert.equal(result.ownershipState, 'removed');
+  assert.deepEqual(calls, [['take', 'C'.repeat(22), {
+    auditId: 'audit-attached-copy-runner',
+    purpose: 'attached-copy',
+    expectedEvidenceUrl: TEST_EVIDENCE_URL,
+    expectedSessionDigest: TEST_DIGEST,
+  }]]);
+});
+
 test('single URL denies a swapped private URL whose sanitized evidence still matches the authorized address', async () => {
   const values = {};
   const sessionArea = {
@@ -888,6 +938,43 @@ test('single URL production façade composes the observed pipeline and retains i
   assert.equal(checkpoints.length > 0, true);
   assert.equal(adapter.counts.screenshots, 0);
   assert.doesNotMatch(JSON.stringify({ result, checkpoints }), /secret=REMOVE|NNNNNNNNNNNNNNNNNNNNNN/u);
+});
+
+test('attached-copy production façade creates only an inactive tab and removes it after observation', async () => {
+  const sessionValues = {};
+  const adapter = fakeAdapter({ noPixels: true, canonicalInternals: true, sessionValues });
+  const createRequests = [];
+  const baseCreate = adapter.createTab;
+  adapter.createTab = async details => {
+    createRequests.push(structuredClone(details));
+    return baseCreate(details);
+  };
+  const result = await runUrlAudit({
+    auditId: 'audit-attached-copy-production', ownershipId: `owner_${'C'.repeat(22)}`,
+    windowId: 9,
+    navigationToken: 'C'.repeat(22), navigationPurpose: 'attached-copy',
+    evidenceUrl: TEST_EVIDENCE_URL, sessionDigest: TEST_DIGEST,
+    rawNavigationVault: Object.freeze({
+      async take(_token, options) {
+        assert.equal(options.purpose, 'attached-copy');
+        return 'https://example.test/final?secret=REMOVE';
+      },
+    }),
+    chromeAdapter: adapter,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    checkpointStore: Object.freeze({ async writeSanitized() {} }),
+    onProgress() {}, now: clock, signal: undefined, expectedExtensionId: TEST_EXTENSION_ID,
+    auditRunner: runObservedTabAudit,
+  });
+
+  assert.equal(result.status, 'complete');
+  assert.equal(result.ownershipState, 'removed');
+  assert.equal(result.observedTarget.cleanupMode, 'always');
+  assert.deepEqual(createRequests, [{ url: 'about:blank', active: false, windowId: 9 }]);
+  const ownerKey = Object.keys(sessionValues).find(key => key.startsWith('audita:owned-tab:v2:'));
+  assert.equal(sessionValues[ownerKey].state, 'removed');
+  assert.equal(Object.hasOwn(result.observedTarget, 'navigationToken'), false);
+  assert.doesNotMatch(JSON.stringify({ result, sessionValues }), /secret=REMOVE/u);
 });
 
 test('single URL creates its blank tab in the authorized window and never releases the raw URL on a cross-window result', async () => {

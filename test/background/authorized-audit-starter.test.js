@@ -6,6 +6,7 @@ import {
   createAuthorizedAuditStarter,
   executionCheckpointStorageKey,
   readActiveAuditJobForWorker,
+  reserveAttachedCopyStartJournalV1,
   retentionPreferenceStorageKey,
 } from '../../src/background/authorized-audit-starter.js';
 import { AUDIT_EXECUTION_INTERNAL } from '../../src/background/chrome-adapter.js';
@@ -22,6 +23,7 @@ import {
   readAttachedAuditCorrelationForRecovery,
   readAuditSessionForWorker,
   readNavigationAuditCorrelationForRecovery,
+  navigationCapabilityStorageKey,
   sessionCapabilityStorageKey,
   targetCapabilityStorageKey,
 } from '../../src/background/target-capabilities.js';
@@ -43,6 +45,24 @@ const DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
 const EPOCH = 1_788_000_000_000;
 const START_JOURNAL_KEY = 'audita:start-journal:v1';
 const PANEL_URL = `chrome-extension://abcdefghijklmnopabcdefghijklmnop/src/panel/index.html?launch=${'L'.repeat(43)}`;
+
+function attachedCopyStartJournal({
+  capabilityId, auditId, ownershipId, state = 'copy-preparing', sessionCapabilityId = null,
+}) {
+  return {
+    version: 1,
+    capabilityId,
+    auditId,
+    windowId: 9,
+    mode: 'single',
+    navigationPurpose: 'attached-copy',
+    ownershipId,
+    state,
+    sessionCapabilityId,
+    createdAt: EPOCH + 1,
+    updatedAt: EPOCH + 1,
+  };
+}
 
 function pixelCommitClock() {
   return createScriptedPixelCommitClockV1({
@@ -471,6 +491,7 @@ function dependencyFixture({
     }),
     probeDocumentIdentity,
     probeSensitiveCaptureSignals,
+    async prepareAttachedCopyPlan() { throw new Error('ATTACHED_COPY_PLAN_MUST_NOT_BE_USED'); },
     async schedulePixelExpiry() {},
   };
   dependencies.pixelAttemptLifecycle = {
@@ -606,6 +627,7 @@ function capturePolicyGateHarness() {
     },
     probeDocumentIdentity: touched('probeDocumentIdentity'),
     probeSensitiveCaptureSignals: touched('probeSensitiveCaptureSignals'),
+    prepareAttachedCopyPlan: touched('prepareAttachedCopyPlan'),
     schedulePixelExpiry: touched('schedulePixelExpiry'),
     pixelAttemptLifecycle: {
       prepareResume: touched('pixelAttemptLifecycle.prepareResume'),
@@ -659,6 +681,458 @@ test('admits every closed capture policy before target inspection without touchi
       assert.deepEqual(effects, ['inspectPreparedAuditTarget']);
     });
   }
+});
+
+test('current-page no-pixels delegates only to an attached-copy URL plan and settles both owner graphs removed', async () => {
+  const area = sessionArea();
+  const { authority, capabilityId, senderContext } = await authorityFixture(area);
+  const auditId = 'audit-current-page-copy';
+  const ownershipId = `owner_${'C'.repeat(22)}`;
+  const report = await reportFixture(auditId);
+  const reportByAudit = new Map();
+  const order = [];
+  let attachedExecutions = 0;
+  const dependencies = dependencyFixture({
+    area, authority, order, reportByAudit,
+    execution: async () => { attachedExecutions += 1; throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.prepareAttachedCopyPlan = async input => {
+    order.push('prepare-copy');
+    assert.deepEqual(input, {
+      capabilityId,
+      auditId,
+      senderContext,
+      expectedTarget: {
+        tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST,
+      },
+    });
+    await reserveAttachedCopyStartJournalV1({
+      sessionArea: area,
+      capabilityId,
+      auditId,
+      windowId: 9,
+      ownershipId,
+      createdAt: EPOCH + 1,
+    });
+    assert.equal((await authority.exchangeAttachedForNavigationCopy({
+      capabilityId,
+      intent: 'attached-copy',
+      senderContext,
+    })).ok, true);
+    return Object.freeze({
+      kind: 'attached-copy', ownershipId, navigationToken: 'C'.repeat(22),
+      navigationPurpose: 'attached-copy',
+      evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/private?never=public', { includeQuery: false }),
+      sessionDigest: DIGEST,
+    });
+  };
+  dependencies.runUrlAuditExecution = async args => {
+    order.push('run-copy');
+    await args.onCheckpoint(report.checkpoint);
+    const observedTarget = Object.freeze({
+      version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId,
+      tabId: 27, windowId: 9, documentId: 'copy-document',
+      urlEvidence: sanitizeEvidenceUrlV1('https://example.test/private', { includeQuery: false }),
+      urlSessionDigest: DIGEST, cleanupMode: 'always', pageId: 'page-1',
+    });
+    await args.persistAuditModel(report.model, observedTarget);
+    return Object.freeze({
+      status: 'complete', model: report.model, observedTarget,
+      observationState: 'observed', ownershipState: 'removed',
+    });
+  };
+  const cleanups = [];
+  dependencies.clearUrlAuditResources = async request => {
+    cleanups.push(structuredClone(request));
+    return true;
+  };
+
+  let started;
+  try {
+    started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+      capabilityId, eventNonce: null, auditId,
+      capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+      retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+      senderContext,
+    });
+  } catch (error) {
+    assert.fail(error?.stack ?? JSON.stringify(error));
+  }
+
+  assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
+  assert.deepEqual(await started.completion, { ok: true, auditId, state: 'result', revision: 1 });
+  assert.equal(attachedExecutions, 0);
+  assert.equal(order.includes('prepare-copy'), true);
+  assert.equal(order.includes('run-copy'), true);
+  assert.deepEqual(cleanups, [{
+    auditId, ownershipId, navigationPurpose: 'attached-copy', cleanupMode: 'always',
+  }]);
+  const session = await readAuditSessionForWorker({
+    sessionArea: area, sessionCapabilityId: started.sessionCapabilityId, auditId,
+  });
+  assert.equal(session.state, 'result');
+  assert.deepEqual(session.targetBinding, { kind: 'disposable', ownershipId, state: 'removed' });
+  assert.equal(reportByAudit.has(auditId), true);
+  assert.doesNotMatch(JSON.stringify({ report: reportByAudit.get(auditId), latest: area.values.latest }),
+    /never=public|CCCCCCCCCCCCCCCCCCCCCC|owner_C|hmac-sha256:A/iu);
+});
+
+test('restart completes attached-copy cleanup after crash between invalidation and ACTIVE removal', async () => {
+  const area = sessionArea();
+  const { authority, capabilityId, senderContext } = await authorityFixture(area);
+  const auditId = 'audit-copy-post-invalidation-crash';
+  const ownershipId = `owner_${'R'.repeat(22)}`;
+  const latest = { value: null };
+  const firstDependencies = dependencyFixture({
+    area,
+    authority,
+    latest,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  firstDependencies.prepareAttachedCopyPlan = async () => {
+    await reserveAttachedCopyStartJournalV1({
+      sessionArea: area,
+      capabilityId,
+      auditId,
+      windowId: 9,
+      ownershipId,
+      createdAt: EPOCH + 1,
+    });
+    assert.equal((await authority.exchangeAttachedForNavigationCopy({
+      capabilityId,
+      intent: 'attached-copy',
+      senderContext,
+    })).ok, true);
+    return Object.freeze({
+      kind: 'attached-copy',
+      ownershipId,
+      navigationToken: 'R'.repeat(22),
+      navigationPurpose: 'attached-copy',
+      evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/private', { includeQuery: false }),
+      sessionDigest: DIGEST,
+    });
+  };
+  firstDependencies.runUrlAuditExecution = async () => Object.freeze({
+    status: 'failed',
+    model: null,
+    observedTarget: null,
+    observationState: 'pre-observation-failure',
+    ownershipState: 'removed',
+  });
+  firstDependencies.clearUrlAuditResources = async () => true;
+  firstDependencies.panelCoordinator = panelCoordinator([], {
+    async disconnectSession() { return false; },
+  });
+
+  const started = await createAuthorizedAuditStarter(firstDependencies).beginAuthorizedAudit({
+    capabilityId,
+    eventNonce: null,
+    auditId,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    senderContext,
+  });
+
+  assert.deepEqual(await started.completion, {
+    ok: false, auditId, state: 'blocked', code: 'AUDIT_RECOVERY_REQUIRED',
+  });
+  const crashCut = await readNavigationAuditCorrelationForRecovery({
+    sessionArea: area,
+    capabilityId,
+    auditId,
+  });
+  assert.equal(crashCut.capabilityState, 'invalidated');
+  assert.equal(crashCut.sessionState, 'revoked');
+  assert.equal(crashCut.ownershipState, 'removed');
+  assert.equal((await readActiveAuditJobForWorker({ sessionArea: area })).auditId, auditId);
+
+  const recoveryDependencies = dependencyFixture({
+    area,
+    authority,
+    latest,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  recoveryDependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RUN'); };
+  recoveryDependencies.clearUrlAuditResources = async () => true;
+
+  const sessionKey = sessionCapabilityStorageKey(crashCut.sessionCapabilityId);
+  area.values[sessionKey].state = 'running';
+  assert.deepEqual(
+    await createAuthorizedAuditStarter(recoveryDependencies).recoverAuthorizedAuditLifecycle(),
+    { ok: false, state: 'blocked', auditId: null, revision: null, code: 'AUDIT_RECOVERY_REQUIRED' },
+  );
+  area.values[sessionKey].state = 'revoked';
+
+  assert.deepEqual(
+    await createAuthorizedAuditStarter(recoveryDependencies).recoverAuthorizedAuditLifecycle(),
+    { ok: true, state: 'interrupted', auditId, revision: null },
+  );
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+});
+
+test('current-page pixel modes fail closed before attached-copy snapshot or either execution path', async t => {
+  for (const mode of ['full-evidence', 'element-only']) await t.test(mode, async () => {
+    const area = sessionArea();
+    const { authority, capabilityId, senderContext } = await authorityFixture(area);
+    const effects = [];
+    const dependencies = dependencyFixture({
+      area, authority,
+      execution: async () => { effects.push('attached'); },
+    });
+    dependencies.prepareAttachedCopyPlan = async () => { effects.push('snapshot'); };
+    dependencies.runUrlAuditExecution = async () => { effects.push('url'); };
+    dependencies.clearUrlAuditResources = async () => true;
+    const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+      capabilityId, eventNonce: null, auditId: `audit-current-page-${mode}`,
+      capturePolicy: createCapturePolicyV1({ mode, includeQuery: false }),
+      retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+      senderContext,
+    });
+    assert.deepEqual(started, {
+      response: { ok: false, code: 'AUDIT_START_FAILED' },
+      sessionCapabilityId: null,
+      completion: null,
+    });
+    assert.deepEqual(effects, []);
+  });
+});
+
+test('current-page admission rejects busy and audit-id collision before preparing an attached copy', async t => {
+  for (const row of [
+    { name: 'busy', code: 'AUDIT_BUSY' },
+    { name: 'collision', code: 'AUDIT_ID_COLLISION' },
+  ]) await t.test(row.name, async () => {
+    const area = sessionArea();
+    const { authority, capabilityId, senderContext } = await authorityFixture(area);
+    const auditId = `audit-copy-admission-${row.name}`;
+    if (row.name === 'busy') {
+      area.values[ACTIVE_AUDIT_JOB_KEY] = {
+        version: 1,
+        auditId: 'audit-foreign-running',
+        capabilityId: 'F'.repeat(22),
+        sessionCapabilityId: 'S'.repeat(22),
+        windowId: 9,
+        mode: 'single',
+        state: 'running',
+        commitState: 'none',
+        expectedTerminalRevision: null,
+        createdAt: EPOCH,
+        updatedAt: EPOCH,
+      };
+    }
+    const dependencies = dependencyFixture({
+      area,
+      authority,
+      execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+    });
+    if (row.name === 'collision') {
+      dependencies.readAuditSnapshot = async () => ({ model: {}, revision: 1, capability: {} });
+    }
+    let preparedCopies = 0;
+    dependencies.prepareAttachedCopyPlan = async () => {
+      preparedCopies += 1;
+      return Object.freeze({
+        kind: 'attached-copy', ownershipId: `owner_${'C'.repeat(22)}`,
+        navigationToken: 'C'.repeat(22), navigationPurpose: 'attached-copy',
+        evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/private', { includeQuery: false }),
+        sessionDigest: DIGEST,
+      });
+    };
+    dependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RUN'); };
+    dependencies.clearUrlAuditResources = async () => true;
+
+    const result = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+      capabilityId,
+      eventNonce: null,
+      auditId,
+      capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+      retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+      senderContext,
+    });
+
+    assert.deepEqual(result, {
+      response: { ok: false, code: row.code },
+      sessionCapabilityId: null,
+      completion: null,
+    });
+    assert.equal(preparedCopies, 0);
+  });
+});
+
+test('restart compensates every attached-copy crash cut before ACTIVE and removes only its reserved owner', async t => {
+  for (const phase of ['journal', 'exchange-vault', 'claim']) await t.test(phase, async () => {
+    const area = sessionArea();
+    const { authority, capabilityId, senderContext } = await authorityFixture(area);
+    const auditId = `audit-copy-crash-${phase}`;
+    const ownershipId = `owner_${phase === 'journal' ? 'J' : phase === 'exchange-vault' ? 'V' : 'C'}`.padEnd(28, phase === 'journal' ? 'J' : phase === 'exchange-vault' ? 'V' : 'C');
+    let claimed = null;
+    if (phase !== 'journal') {
+      assert.equal((await authority.exchangeAttachedForNavigationCopy({
+        capabilityId,
+        intent: 'attached-copy',
+        senderContext,
+      })).ok, true);
+    }
+    if (phase === 'claim') {
+      claimed = await authority.claimExchangedAttachedCopyAndIssueAuditSession({
+        capabilityId,
+        auditId,
+        ownershipId,
+        senderContext,
+      });
+      assert.equal(claimed.ok, true);
+    }
+    area.values[START_JOURNAL_KEY] = attachedCopyStartJournal({
+      capabilityId,
+      auditId,
+      ownershipId,
+      state: phase === 'claim' ? 'prepared' : 'copy-preparing',
+    });
+    const cleanups = [];
+    const dependencies = dependencyFixture({
+      area,
+      authority,
+      execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+    });
+    dependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RUN'); };
+    dependencies.clearUrlAuditResources = async request => {
+      cleanups.push(structuredClone(request));
+      return true;
+    };
+
+    const recovery = await createAuthorizedAuditStarter(dependencies).recoverAuthorizedAuditLifecycle();
+
+    assert.deepEqual(recovery, { ok: true, state: 'interrupted', auditId, revision: null });
+    assert.deepEqual(cleanups, [{
+      auditId,
+      ownershipId,
+      navigationPurpose: 'attached-copy',
+      cleanupMode: 'always',
+    }]);
+    assert.equal(Object.hasOwn(area.values, START_JOURNAL_KEY), false);
+    assert.equal(area.values[targetCapabilityStorageKey(capabilityId)].state, 'invalidated');
+    const navigation = area.values[navigationCapabilityStorageKey(capabilityId)];
+    if (phase === 'journal') assert.equal(navigation, undefined);
+    else assert.equal(navigation.state, 'invalidated');
+    if (claimed) {
+      const session = await readAuditSessionForWorker({
+        sessionArea: area,
+        sessionCapabilityId: claimed.sessionCapabilityId,
+        auditId,
+      });
+      assert.equal(session.state, 'revoked');
+      assert.deepEqual(session.targetBinding, { kind: 'disposable', ownershipId, state: 'removed' });
+    }
+  });
+});
+
+test('restart reconciles a correlated ACTIVE plus attached-copy journal before single recovery', async () => {
+  const area = sessionArea();
+  const { authority, capabilityId, senderContext } = await authorityFixture(area);
+  const auditId = 'audit-copy-active-journal';
+  const ownershipId = `owner_${'A'.repeat(22)}`;
+  await authority.exchangeAttachedForNavigationCopy({
+    capabilityId,
+    intent: 'attached-copy',
+    senderContext,
+  });
+  const claimed = await authority.claimExchangedAttachedCopyAndIssueAuditSession({
+    capabilityId,
+    auditId,
+    ownershipId,
+    senderContext,
+  });
+  assert.equal(claimed.ok, true);
+  area.values[START_JOURNAL_KEY] = attachedCopyStartJournal({
+    capabilityId,
+    auditId,
+    ownershipId,
+    state: 'claimed',
+    sessionCapabilityId: claimed.sessionCapabilityId,
+  });
+  area.values[ACTIVE_AUDIT_JOB_KEY] = {
+    version: 1,
+    auditId,
+    capabilityId,
+    sessionCapabilityId: claimed.sessionCapabilityId,
+    windowId: 9,
+    mode: 'single',
+    state: 'running',
+    commitState: 'none',
+    expectedTerminalRevision: null,
+    createdAt: EPOCH + 1,
+    updatedAt: EPOCH + 1,
+  };
+  const cleanups = [];
+  const dependencies = dependencyFixture({
+    area,
+    authority,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RUN'); };
+  dependencies.clearUrlAuditResources = async request => { cleanups.push(structuredClone(request)); return true; };
+
+  const recovery = await createAuthorizedAuditStarter(dependencies).recoverAuthorizedAuditLifecycle();
+
+  assert.deepEqual(recovery, { ok: true, state: 'interrupted', auditId, revision: null });
+  assert.deepEqual(cleanups, [{
+    auditId,
+    ownershipId,
+    navigationPurpose: 'attached-copy',
+    cleanupMode: 'always',
+  }]);
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+  assert.equal(Object.hasOwn(area.values, START_JOURNAL_KEY), false);
+});
+
+test('unconfirmed attached-copy start compensation keeps its journal and requires recovery', async () => {
+  const area = sessionArea();
+  const fixture = await authorityFixture(area);
+  const auditId = 'audit-copy-compensation-unconfirmed';
+  const ownershipId = `owner_${'U'.repeat(22)}`;
+  await fixture.authority.exchangeAttachedForNavigationCopy({
+    capabilityId: fixture.capabilityId,
+    intent: 'attached-copy',
+    senderContext: fixture.senderContext,
+  });
+  const authority = Object.freeze({
+    ...fixture.authority,
+    async invalidateCapability() { return { ok: false, code: 'CAPABILITY_UNAVAILABLE' }; },
+  });
+  const dependencies = dependencyFixture({
+    area,
+    authority,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.panelCoordinator = panelCoordinator([], {
+    async registerPendingBootstrap() { return false; },
+  });
+  dependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RUN'); };
+  dependencies.clearUrlAuditResources = async () => true;
+
+  const result = await createAuthorizedAuditStarter(dependencies).beginAuthorizedUrlAudit({
+    capabilityId: fixture.capabilityId,
+    auditId,
+    senderContext: fixture.senderContext,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    plan: {
+      kind: 'attached-copy',
+      ownershipId,
+      navigationToken: 'U'.repeat(22),
+      navigationPurpose: 'attached-copy',
+      evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/private', { includeQuery: false }),
+      sessionDigest: DIGEST,
+    },
+  });
+
+  assert.deepEqual(result, {
+    response: { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' },
+    sessionCapabilityId: null,
+    completion: null,
+  });
+  assert.equal(area.values[START_JOURNAL_KEY]?.auditId, auditId);
+  assert.equal(area.values[navigationCapabilityStorageKey(fixture.capabilityId)].state, 'claimed');
 });
 
 test('single-URL start persists bootstrap and active job before execution, then publishes one report', async () => {

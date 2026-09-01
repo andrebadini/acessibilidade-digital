@@ -27,6 +27,7 @@ const REHYDRATE_KEYS = ['auditId', 'windowId', 'mode'];
 const NAVIGATION_PREPARE_KEYS = ['intent', 'senderContext'];
 const NAVIGATION_CLAIM_KEYS = ['capabilityId', 'auditId', 'ownershipId', 'intent', 'senderContext'];
 const ATTACHED_COPY_EXCHANGE_KEYS = ['capabilityId', 'intent', 'senderContext'];
+const ATTACHED_COPY_CLAIM_KEYS = ['capabilityId', 'auditId', 'ownershipId', 'senderContext'];
 const NAVIGATION_KEYS = ['version', 'capabilityId', 'intent', 'windowId', 'issuer', 'sessionCapabilityId', 'issuedAt', 'expiresAt', 'state'];
 const DISPOSABLE_BINDING_STATES = new Set([
   'pending', 'observing', 'retained-for-review', 'retained-for-consent', 'cleanup-pending', 'removed',
@@ -224,10 +225,45 @@ export async function readNavigationAuditCorrelationForRecovery(args) {
       version: 1, capabilityId: firstNavigation.capabilityId, auditId: firstSession.auditId,
       sessionCapabilityId: firstSession.sessionCapabilityId, windowId: firstSession.windowId,
       capabilityState: firstNavigation.state, sessionState: firstSession.state,
+      navigationPurpose: firstNavigation.intent === 'attached-copy' ? 'attached-copy' : 'single-url',
       ownershipId: firstSession.targetBinding.ownershipId, ownershipState: firstSession.targetBinding.state,
       issuedAt: firstSession.issuedAt, expiresAt: firstSession.expiresAt,
     });
   } catch { throw new Error('NAVIGATION_AUDIT_CORRELATION_DENIED'); }
+}
+
+export async function readAttachedCopyNavigationForRecovery(args) {
+  try {
+    const input = readDataRecord(args, ['sessionArea', 'capabilityId']);
+    if (!input || typeof input.sessionArea?.get !== 'function' ||
+      !CAPABILITY_ID.test(input.capabilityId ?? '')) throw new Error('denied');
+    const targetKey = targetCapabilityStorageKey(input.capabilityId);
+    const navigationKey = navigationCapabilityStorageKey(input.capabilityId);
+    const keys = [targetKey, navigationKey];
+    const firstValues = readExactStoredValues(await input.sessionArea.get(keys), keys);
+    const secondValues = readExactStoredValues(await input.sessionArea.get(keys), keys);
+    const firstTarget = parseTargetRecord(firstValues?.[targetKey]);
+    const firstNavigation = parseNavigationRecord(firstValues?.[navigationKey]);
+    const secondTarget = parseTargetRecord(secondValues?.[targetKey]);
+    const secondNavigation = parseNavigationRecord(secondValues?.[navigationKey]);
+    if (!firstTarget || !firstNavigation || !secondTarget || !secondNavigation ||
+      !sameGraph(firstTarget, secondTarget) || !sameGraph(firstNavigation, secondNavigation) ||
+      firstTarget.capabilityId !== input.capabilityId || firstTarget.kind !== 'attached' ||
+      firstTarget.allowedIntent !== 'start-audit' || firstTarget.state !== 'invalidated' ||
+      firstTarget.sessionCapabilityId !== null || firstNavigation.capabilityId !== input.capabilityId ||
+      firstNavigation.intent !== 'attached-copy' || firstNavigation.windowId !== firstTarget.windowId ||
+      !sameGraph(firstNavigation.issuer, firstTarget.issuer)) throw new Error('denied');
+    return deepFreeze({
+      version: 1,
+      capabilityId: firstNavigation.capabilityId,
+      windowId: firstNavigation.windowId,
+      targetState: firstTarget.state,
+      navigationState: firstNavigation.state,
+      sessionCapabilityId: firstNavigation.sessionCapabilityId,
+    });
+  } catch {
+    throw new Error('ATTACHED_COPY_NAVIGATION_RECOVERY_DENIED');
+  }
 }
 
 async function readAttachedAuditRecoveryGraph(args) {
@@ -520,6 +556,51 @@ export function createTargetCapabilityAuthority({
       auditId: session.auditId, expiresAt: session.expiresAt,
     });
   });
+  const claimExchangedAttachedCopyAndIssueAuditSession = args => serialize(async () => {
+    const input = readDataRecord(args, ATTACHED_COPY_CLAIM_KEYS);
+    if (!input || !CAPABILITY_ID.test(input.capabilityId ?? '') || !MODEL_ID.test(input.auditId ?? '') ||
+      !/^owner_[A-Za-z0-9_-]{22}$/u.test(input.ownershipId ?? '')) return unavailable();
+    const navigationKey = navigationCapabilityStorageKey(input.capabilityId);
+    const record = parseNavigationRecord(readStoredValue(await sessionArea.get(navigationKey), navigationKey));
+    const currentTime = readNow(now);
+    const context = parsePanelNavigationContext(input.senderContext, chromeApi.runtime.id);
+    if (!record || record.capabilityId !== input.capabilityId || record.intent !== 'attached-copy' ||
+      record.state !== 'prepared' || record.sessionCapabilityId !== null || record.issuedAt > currentTime ||
+      record.expiresAt <= currentTime || !context || context.windowId !== record.windowId ||
+      !sameGraph(context.issuer, record.issuer)) return unavailable();
+    let sessionCapabilityId;
+    try { sessionCapabilityId = createCapabilityId(randomBytes); } catch { return unavailable(); }
+    const session = createSessionRecord({
+      sessionCapabilityId,
+      auditId: input.auditId,
+      windowId: record.windowId,
+      mode: 'single',
+      targetBinding: { kind: 'disposable', ownershipId: input.ownershipId, state: 'pending' },
+      state: 'running',
+      issuedAt: currentTime,
+      expiresAt: currentTime + sessionTtlMs,
+    });
+    const claimed = { ...record, sessionCapabilityId, state: 'claimed' };
+    const sessionKey = sessionCapabilityStorageKey(sessionCapabilityId);
+    try { await sessionArea.set({ [navigationKey]: claimed, [sessionKey]: session }); }
+    catch { /* Exact readback below confirms commit-then-throw. */ }
+    let confirmedNavigation;
+    let confirmedSession;
+    try {
+      const confirmed = readExactStoredValues(
+        await sessionArea.get([navigationKey, sessionKey]),
+        [navigationKey, sessionKey],
+      );
+      confirmedNavigation = parseNavigationRecord(confirmed?.[navigationKey]);
+      confirmedSession = parseSessionRecord(confirmed?.[sessionKey]);
+    } catch { return unavailable(); }
+    if (!confirmedNavigation || !confirmedSession || !sameGraph(confirmedNavigation, claimed) ||
+      !sameGraph(confirmedSession, session)) return unavailable();
+    return deepFreeze({
+      ok: true, capabilityId: record.capabilityId, sessionCapabilityId,
+      auditId: session.auditId, expiresAt: session.expiresAt,
+    });
+  });
   const claimWorkerEventAndIssueAuditSession = args => serialize(() => claimCommon(args, true));
 
   async function claimCommon(args, workerEvent) {
@@ -664,22 +745,61 @@ export function createTargetCapabilityAuthority({
 
   const invalidateCapability = (capabilityId, reason) => serialize(async () => {
     if (!CAPABILITY_ID.test(capabilityId ?? '') || typeof reason !== 'string' || !reason) return unavailable();
-    const key = targetCapabilityStorageKey(capabilityId);
-    const target = parseTargetRecord(readStoredValue(await sessionArea.get(key), key));
-    if (!target || target.capabilityId !== capabilityId) {
-      const navigationKey = navigationCapabilityStorageKey(capabilityId);
-      const navigation = parseNavigationRecord(readStoredValue(await sessionArea.get(navigationKey), navigationKey));
-      if (!navigation || navigation.capabilityId !== capabilityId) return unavailable();
-      if (navigation.state !== 'invalidated') {
-        await sessionArea.set({ [navigationKey]: { ...navigation, state: 'invalidated' } });
-      }
-      return deepFreeze({ ok: true, capabilityId });
-    }
+    const targetKey = targetCapabilityStorageKey(capabilityId);
+    const navigationKey = navigationCapabilityStorageKey(capabilityId);
+    const targetEnvelope = await sessionArea.get(targetKey);
+    const navigationEnvelope = await sessionArea.get(navigationKey);
+    const targetProperty = readDataProperty(targetEnvelope, targetKey);
+    const navigationProperty = readDataProperty(navigationEnvelope, navigationKey);
+    const target = targetProperty.found ? parseTargetRecord(targetProperty.value) : null;
+    const navigation = navigationProperty.found ? parseNavigationRecord(navigationProperty.value) : null;
+    if (targetProperty.found && (!target || target.capabilityId !== capabilityId) ||
+      navigationProperty.found && (!navigation || navigation.capabilityId !== capabilityId) ||
+      !target && !navigation) return unavailable();
     if (isPersonaTarget(target)) {
-      await sessionArea.remove(key);
+      if (navigation) return unavailable();
+      try { await sessionArea.remove(targetKey); } catch { /* exact absence below is authoritative */ }
+      if (readDataProperty(await sessionArea.get(targetKey), targetKey).found) return unavailable();
       return deepFreeze({ ok: true, capabilityId });
     }
-    if (target.state !== 'invalidated') await sessionArea.set({ [key]: { ...target, state: 'invalidated' } });
+    const targetChanged = target && target.state !== 'invalidated' ? { ...target, state: 'invalidated' } : target;
+    const navigationChanged = navigation && navigation.state !== 'invalidated'
+      ? { ...navigation, state: 'invalidated' }
+      : navigation;
+    const targetSessionId = target?.sessionCapabilityId ?? null;
+    const navigationSessionId = navigation?.sessionCapabilityId ?? null;
+    if (targetSessionId && navigationSessionId && targetSessionId !== navigationSessionId) return unavailable();
+    const sessionCapabilityId = navigationSessionId ?? targetSessionId;
+    let session = null;
+    let changedSession = null;
+    let sessionKey = null;
+    if (sessionCapabilityId !== null) {
+      sessionKey = sessionCapabilityStorageKey(sessionCapabilityId);
+      session = parseSessionRecord(readStoredValue(await sessionArea.get(sessionKey), sessionKey));
+      if (!session || session.sessionCapabilityId !== sessionCapabilityId || session.windowId !==
+        (navigation?.windowId ?? target?.windowId)) return unavailable();
+      changedSession = reason === 'AUDIT_START_COMPENSATED' && session.state === 'running'
+        ? { ...session, state: 'revoked' }
+        : session;
+    }
+    const changes = {};
+    if (targetChanged && !sameGraph(targetChanged, target)) changes[targetKey] = targetChanged;
+    if (navigationChanged && !sameGraph(navigationChanged, navigation)) changes[navigationKey] = navigationChanged;
+    if (changedSession && !sameGraph(changedSession, session)) changes[sessionKey] = changedSession;
+    try { if (Object.keys(changes).length > 0) await sessionArea.set(changes); }
+    catch { /* Exact readback below confirms commit-then-throw. */ }
+    const confirmedTarget = targetChanged
+      ? parseTargetRecord(readStoredValue(await sessionArea.get(targetKey), targetKey))
+      : null;
+    const confirmedNavigation = navigationChanged
+      ? parseNavigationRecord(readStoredValue(await sessionArea.get(navigationKey), navigationKey))
+      : null;
+    const confirmedSession = changedSession
+      ? parseSessionRecord(readStoredValue(await sessionArea.get(sessionKey), sessionKey))
+      : null;
+    if (targetChanged && (!confirmedTarget || !sameGraph(confirmedTarget, targetChanged)) ||
+      navigationChanged && (!confirmedNavigation || !sameGraph(confirmedNavigation, navigationChanged)) ||
+      changedSession && (!confirmedSession || !sameGraph(confirmedSession, changedSession))) return unavailable();
     return deepFreeze({ ok: true, capabilityId });
   });
 
@@ -750,6 +870,7 @@ export function createTargetCapabilityAuthority({
     inspectPreparedAuditTarget,
     claimAndIssueAuditSession,
     claimNavigationAndIssueAuditSession,
+    claimExchangedAttachedCopyAndIssueAuditSession,
     claimWorkerEventAndIssueAuditSession,
     authorizeSession,
     transitionAuditSession,

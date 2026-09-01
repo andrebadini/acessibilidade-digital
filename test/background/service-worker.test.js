@@ -293,7 +293,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
     createAuditId: fixtureOptions.createAuditId ?? (() => 'audit-worker-generated'),
     createExportOwnerId: () => 'export-owner-1',
     createEventNonce: () => 'N'.repeat(22),
-    epochNow: () => 1_788_000_000_000,
+    epochNow: fixtureOptions.epochNow ?? (() => 1_788_000_000_000),
     modelNow: fixtureOptions.modelNow ?? (() => '2026-08-29T12:00:00.000Z'),
     randomBytes: length => new Uint8Array(length).fill(7),
     ...(fixtureOptions.useNativePixelCommitClock === true ? {} : {
@@ -621,6 +621,44 @@ test('single-URL cleanup removes only the exact disposable owner even when an au
   assert.equal((await registry.get(ownerTwo)).state, 'created');
 });
 
+test('URL cleanup accepts cleanup always only with an exact attached-copy correlation request', async () => {
+  const area = sessionAreaForCheckpointTest();
+  const removedTabs = [];
+  const registry = createOwnedTabRegistry({
+    sessionArea: area,
+    chromeAdapter: { async removeTab(tabId) { removedTabs.push(tabId); } },
+    now: () => '2026-09-01T12:00:00.000Z',
+  });
+  const auditId = 'audit-attached-copy-cleaner';
+  const ownershipId = `owner_${'C'.repeat(22)}`;
+  const foreignOwnershipId = `owner_${'D'.repeat(22)}`;
+  await registry.registerCreated({
+    ownershipId, auditId, purpose: 'audit', tabId: 27, windowId: 9,
+    cleanupMode: 'always',
+  });
+  await registry.registerCreated({
+    ownershipId: foreignOwnershipId, auditId, purpose: 'audit', tabId: 28, windowId: 9,
+    cleanupMode: 'always',
+  });
+  const cleaner = serviceWorkerModule.createExactUrlAuditResourceCleanerV1({
+    rawNavigationVault: { async clearAudit() { return 1; } },
+    ownedTabRegistry: registry,
+  });
+
+  assert.equal(await cleaner({ auditId, ownershipId }), false);
+  assert.equal((await registry.get(ownershipId)).state, 'created');
+  assert.equal(await cleaner({
+    auditId, ownershipId, navigationPurpose: 'single-url', cleanupMode: 'always',
+  }), false);
+  assert.equal((await registry.get(ownershipId)).state, 'created');
+  assert.equal(await cleaner({
+    auditId, ownershipId, navigationPurpose: 'attached-copy', cleanupMode: 'always',
+  }), true);
+  assert.deepEqual(removedTabs, [27]);
+  assert.equal((await registry.get(ownershipId)).state, 'removed');
+  assert.equal((await registry.get(foreignOwnershipId)).state, 'created');
+});
+
 test('post-finish cleanup accepts only the companion-first crash cut and removes the remaining marker', async () => {
   const auditId = 'audit-post-finish';
   const attemptDigest = `hmac-sha256:${'E'.repeat(43)}`;
@@ -922,14 +960,10 @@ test('default runtime bootstraps the operational adapter through a trusted Chrom
   assert.deepEqual(env.createdTabs, [{ active: false }]);
 });
 
-test('one canonical all-frame sensitive probe lets iframe password consent resume without alternating re-pause', async () => {
+test('current-page full-evidence fails closed before privacy probing or raster in the attached-copy cut', async () => {
   const documentTargets = [];
   const rawUrl = 'https://example.test/';
-  const initialStartedAt = '2026-08-29T12:00:00.000Z';
-  const resumedAt = '2026-08-29T12:05:00.000Z';
-  let modelTime = initialStartedAt;
   let rasterCalls = 0;
-  const auditStore = createInMemoryAuditStore();
   const scripting = {
     async executeScript(details) {
       const target = structuredClone(details.target);
@@ -969,8 +1003,7 @@ test('one canonical all-frame sensitive probe lets iframe password consent resum
   const env = defaultGraphFixture(null, {
     useDefaultChromeAdapter: true,
     scripting,
-    auditStore,
-    modelNow: () => modelTime,
+    modelNow: () => '2026-08-29T12:00:00.000Z',
   });
   const sendCommand = env.chromeApi.debugger.sendCommand;
   env.chromeApi.debugger.sendCommand = async (...args) => {
@@ -1013,30 +1046,94 @@ test('one canonical all-frame sensitive probe lets iframe password consent resum
     capabilityId: prepared.capabilityId, eventNonce: null, auditId, capturePolicy: policy,
     retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext,
   });
-  assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
-  assert.deepEqual(await started.completion, { ok: true, auditId, state: 'privacy-paused', revision: null });
-  const paused = env.sessionValues[`audita:pixel-capture:v1:${auditId}`];
-  const pausedCheckpoint = structuredClone(
-    env.sessionValues[`audita:execution-checkpoint:v1:${auditId}`]?.checkpoint,
-  );
-  assert.deepEqual(paused.categories, ['password']);
-  assert.equal(pausedCheckpoint.pages[0].startedAt, initialStartedAt);
-  assert.equal(rasterCalls, 0);
-
-  documentTargets.length = 0;
-  modelTime = resumedAt;
-  const resumed = await runtime.auditStarter.resumePrivacyPausedAudit({
-    auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9,
-    consentId: paused.consentId, mode: 'full-evidence',
+  assert.deepEqual(started, {
+    response: { ok: false, code: 'AUDIT_START_FAILED' },
+    sessionCapabilityId: null,
+    completion: null,
   });
+  assert.equal(rasterCalls, 0);
+  assert.deepEqual(documentTargets, []);
+});
 
-  assert.deepEqual(resumed.response, { ok: true, auditId, state: 'running' });
-  assert.equal(documentTargets.length > 0, true);
-  assert.equal(documentTargets.every(value =>
-    value.length === 2 && value[0] === 'document-a' && value[1] === 'document-child'), true);
-  assert.deepEqual(await resumed.completion, { ok: true, auditId, state: 'result', revision: 1 });
-  const revision = await auditStore.getReportRevision(auditId);
-  assert.equal(revision.checkpoint.pages[0].startedAt, initialStartedAt);
+test('default worker snapshots the current page into a private attached-copy plan before URL execution', async () => {
+  const rawUrl = 'https://example.test/current?private=NEVER_PUBLIC';
+  let epoch = 1_788_000_000_000;
+  const scriptTargets = [];
+  const execution = deferred();
+  let executionArgs = null;
+  const env = defaultGraphFixture(null, {
+    epochNow: () => epoch++,
+    useDefaultChromeAdapter: true,
+    tabsQuery: async () => [{
+      id: 17, windowId: 9, active: true, status: 'complete', url: rawUrl,
+    }],
+    scripting: {
+      async executeScript(details) {
+        scriptTargets.push(structuredClone(details.target));
+        if (details.target?.frameIds?.[0] === 0) {
+          return [{ frameId: 0, documentId: 'document-a', result: rawUrl }];
+        }
+        return [];
+      },
+      async insertCSS() {},
+      async removeCSS() {},
+    },
+    async runUrlAuditExecution(args) {
+      executionArgs = structuredClone({
+        auditId: args.auditId,
+        ownershipId: args.ownershipId,
+        windowId: args.windowId,
+        navigationToken: args.navigationToken,
+        navigationPurpose: args.navigationPurpose,
+        evidenceUrl: args.evidenceUrl,
+        sessionDigest: args.sessionDigest,
+      });
+      execution.resolve();
+      return Object.freeze({
+        status: 'failed', model: null, observedTarget: null,
+        observationState: 'pre-observation-failure', ownershipState: 'removed',
+      });
+    },
+  });
+  env.chromeApi.tabs.get = async tabId => ({
+    id: tabId, windowId: 9, active: true, status: 'complete', discarded: false, url: rawUrl,
+  });
+  const runtime = await env.registration.startupReady;
+  const proof = await runtime.chromeAdapter.probeDocumentIdentity(17);
+  const issuer = {
+    type: 'extension-document', documentId: 'panel-document', path: '/src/panel/index.html',
+  };
+  const prepared = await runtime.authority.prepare({
+    kind: 'attached', tabId: 17, windowId: 9, documentId: proof.documentId,
+    initialUrlEvidence: sanitizeEvidenceUrlV1(rawUrl, { includeQuery: false }).href,
+    initialUrlSessionDigest: proof.urlSessionDigest,
+    createdBy: 'user', allowedIntent: 'start-audit', issuer,
+  });
+  const senderContext = {
+    issuer, windowId: 9, tabId: null, contextType: 'SIDE_PANEL',
+    documentUrl: `chrome-extension://${env.chromeApi.runtime.id}/src/panel/index.html?launch=${'L'.repeat(43)}`,
+  };
+  const auditId = 'audit-default-current-copy';
+  const started = await runtime.auditStarter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    senderContext,
+  });
+  assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
+  await execution.promise;
+  assert.deepEqual(await started.completion, {
+    ok: true, auditId, state: 'revoked', code: 'AUDIT_FAILED',
+  });
+  assert.equal(executionArgs.navigationPurpose, 'attached-copy');
+  assert.equal(executionArgs.windowId, 9);
+  assert.match(executionArgs.ownershipId, /^owner_[A-Za-z0-9_-]{22}$/u);
+  assert.match(executionArgs.navigationToken, /^[A-Za-z0-9_-]{22}$/u);
+  assert.equal(executionArgs.evidenceUrl.queryIncluded, false);
+  assert.equal(executionArgs.evidenceUrl.href, 'https://example.test/current');
+  assert.doesNotMatch(JSON.stringify(executionArgs), /NEVER_PUBLIC/u);
+  assert.equal(env.createdTabs.length, 0);
+  assert.equal(scriptTargets.every(target => target.tabId === 17 && target.frameIds?.[0] === 0), true);
 });
 
 test('default worker keeps the volatile vault closed while injecting the one digest manager by factories', async () => {
@@ -1187,8 +1284,12 @@ test('default worker carries one tokenized URL from the Side Panel to a persiste
     messages: panel.port.messages,
     sessionKeys: Object.keys(env.sessionValues),
   }));
-  const resultPacket = panel.port.messages.find(value =>
-    value.type === 'bootstrap-result' && value.state === 'result' && value.auditId === auditId);
+  let resultPacket = null;
+  for (let attempt = 0; attempt < 200 && resultPacket === null; attempt += 1) {
+    await tick();
+    resultPacket = panel.port.messages.find(value =>
+      value.type === 'bootstrap-result' && value.state === 'result' && value.auditId === auditId) ?? null;
+  }
   assert.equal(Boolean(resultPacket?.result), true, JSON.stringify(panel.port.messages));
   const publicText = JSON.stringify({ packets: panel.port.messages, latest: await auditStore.getLatest() });
   assert.doesNotMatch(publicText, /private-token|owner_|hmac-sha256|navigationToken|sessionDigest|ownershipId/iu);
