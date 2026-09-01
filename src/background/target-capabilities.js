@@ -23,6 +23,9 @@ const AUTHORIZE_KEYS = ['sessionCapabilityId', 'auditId', 'consumer', 'intent', 
 const PANEL_AUTHORIZE_KEYS = [...AUTHORIZE_KEYS, 'claimedWindowId'];
 const TRANSITION_KEYS = ['sessionCapabilityId', 'auditId', 'nextState'];
 const DISPOSABLE_TRANSITION_KEYS = ['sessionCapabilityId', 'auditId', 'ownershipId', 'fromState', 'toState'];
+const BATCH_TRANSITION_KEYS = [
+  'sessionCapabilityId', 'auditId', 'fromPageId', 'fromOwnershipId', 'toPageId', 'toOwnershipId',
+];
 const REHYDRATE_KEYS = ['auditId', 'windowId', 'mode'];
 const NAVIGATION_PREPARE_KEYS = ['intent', 'senderContext'];
 const NAVIGATION_CLAIM_KEYS = ['capabilityId', 'auditId', 'ownershipId', 'intent', 'senderContext'];
@@ -232,6 +235,40 @@ export async function readNavigationAuditCorrelationForRecovery(args) {
   } catch { throw new Error('NAVIGATION_AUDIT_CORRELATION_DENIED'); }
 }
 
+export async function readBatchAuditCorrelationForRecovery(args) {
+  try {
+    const input = readDataRecord(args, ['sessionArea', 'capabilityId', 'auditId']);
+    if (!input || typeof input.sessionArea?.get !== 'function' || !CAPABILITY_ID.test(input.capabilityId ?? '') ||
+      !MODEL_ID.test(input.auditId ?? '')) throw new Error('denied');
+    const navigationKey = navigationCapabilityStorageKey(input.capabilityId);
+    const firstNavigation = parseNavigationRecord(readExactStoredValue(await input.sessionArea.get(navigationKey), navigationKey));
+    if (!firstNavigation || firstNavigation.intent !== 'batch' ||
+      !CAPABILITY_ID.test(firstNavigation.sessionCapabilityId ?? '')) throw new Error('denied');
+    const sessionKey = sessionCapabilityStorageKey(firstNavigation.sessionCapabilityId);
+    const firstSession = parseSessionRecord(readExactStoredValue(await input.sessionArea.get(sessionKey), sessionKey));
+    const secondNavigation = parseNavigationRecord(readExactStoredValue(await input.sessionArea.get(navigationKey), navigationKey));
+    const secondSession = parseSessionRecord(readExactStoredValue(await input.sessionArea.get(sessionKey), sessionKey));
+    if (!firstSession || !secondNavigation || !secondSession || !sameGraph(firstNavigation, secondNavigation) ||
+      !sameGraph(firstSession, secondSession) || firstNavigation.capabilityId !== input.capabilityId ||
+      firstSession.auditId !== input.auditId || firstSession.sessionCapabilityId !== firstNavigation.sessionCapabilityId ||
+      firstSession.windowId !== firstNavigation.windowId || firstSession.mode !== 'batch' ||
+      firstSession.targetBinding.kind !== 'batch') throw new Error('denied');
+    return deepFreeze({
+      version: 1,
+      capabilityId: firstNavigation.capabilityId,
+      auditId: firstSession.auditId,
+      sessionCapabilityId: firstSession.sessionCapabilityId,
+      windowId: firstSession.windowId,
+      capabilityState: firstNavigation.state,
+      sessionState: firstSession.state,
+      activePageId: firstSession.targetBinding.activePageId,
+      activeOwnershipId: firstSession.targetBinding.activeOwnershipId,
+      issuedAt: firstSession.issuedAt,
+      expiresAt: firstSession.expiresAt,
+    });
+  } catch { throw new Error('BATCH_AUDIT_CORRELATION_DENIED'); }
+}
+
 export async function readAttachedCopyNavigationForRecovery(args) {
   try {
     const input = readDataRecord(args, ['sessionArea', 'capabilityId']);
@@ -361,13 +398,13 @@ export function createTargetCapabilityAuthority({
   const prepareNavigationForPanel = args => serialize(async () => {
     const input = readDataRecord(args, NAVIGATION_PREPARE_KEYS);
     const context = input && parsePanelNavigationContext(input.senderContext, chromeApi.runtime.id);
-    if (!input || input.intent !== 'single' || !context) throw new TypeError('CAPABILITY_PREPARE_DENIED');
+    if (!input || !['single', 'batch'].includes(input.intent) || !context) throw new TypeError('CAPABILITY_PREPARE_DENIED');
     const issuedAt = readNow(now);
     const capabilityId = createCapabilityId(randomBytes);
     const record = {
       version: 1,
       capabilityId,
-      intent: 'single',
+      intent: input.intent,
       windowId: context.windowId,
       issuer: context.issuer,
       sessionCapabilityId: null,
@@ -524,8 +561,10 @@ export function createTargetCapabilityAuthority({
   const claimAndIssueAuditSession = args => serialize(() => claimCommon(args, false));
   const claimNavigationAndIssueAuditSession = args => serialize(async () => {
     const input = readDataRecord(args, NAVIGATION_CLAIM_KEYS);
+    const single = input?.intent === 'single' && /^owner_[A-Za-z0-9_-]{22}$/u.test(input.ownershipId ?? '');
+    const batch = input?.intent === 'batch' && input.ownershipId === null;
     if (!input || !CAPABILITY_ID.test(input.capabilityId ?? '') || !MODEL_ID.test(input.auditId ?? '') ||
-      !/^owner_[A-Za-z0-9_-]{22}$/u.test(input.ownershipId ?? '') || input.intent !== 'single') return unavailable();
+      (!single && !batch)) return unavailable();
     const key = navigationCapabilityStorageKey(input.capabilityId);
     const record = parseNavigationRecord(readStoredValue(await sessionArea.get(key), key));
     const currentTime = readNow(now);
@@ -540,8 +579,10 @@ export function createTargetCapabilityAuthority({
       sessionCapabilityId,
       auditId: input.auditId,
       windowId: record.windowId,
-      mode: 'single',
-      targetBinding: { kind: 'disposable', ownershipId: input.ownershipId, state: 'pending' },
+      mode: input.intent,
+      targetBinding: single
+        ? { kind: 'disposable', ownershipId: input.ownershipId, state: 'pending' }
+        : { kind: 'batch', activePageId: null, activeOwnershipId: null },
       state: 'running',
       issuedAt: currentTime,
       expiresAt: currentTime + sessionTtlMs,
@@ -743,6 +784,39 @@ export function createTargetCapabilityAuthority({
     });
   });
 
+  const transitionBatchAuditSession = args => serialize(async () => {
+    const input = readDataRecord(args, BATCH_TRANSITION_KEYS);
+    const fromEmpty = input?.fromPageId === null && input?.fromOwnershipId === null;
+    const toEmpty = input?.toPageId === null && input?.toOwnershipId === null;
+    const validPair = (pageId, ownershipId) => MODEL_ID.test(pageId ?? '') &&
+      /^owner_[A-Za-z0-9_-]{22}$/u.test(ownershipId ?? '');
+    if (!input || !CAPABILITY_ID.test(input.sessionCapabilityId ?? '') || !MODEL_ID.test(input.auditId ?? '') ||
+      (!fromEmpty && !validPair(input.fromPageId, input.fromOwnershipId)) ||
+      (!toEmpty && !validPair(input.toPageId, input.toOwnershipId)) || fromEmpty === toEmpty) {
+      return transitionDenied();
+    }
+    const key = sessionCapabilityStorageKey(input.sessionCapabilityId);
+    const session = parseSessionRecord(readStoredValue(await sessionArea.get(key), key));
+    const recoveryClear = session?.state === 'revoked' && !fromEmpty && toEmpty;
+    if (!session || session.sessionCapabilityId !== input.sessionCapabilityId || session.auditId !== input.auditId ||
+      session.mode !== 'batch' || !(session.state === 'running' || recoveryClear) || session.targetBinding.kind !== 'batch' ||
+      session.targetBinding.activePageId !== input.fromPageId ||
+      session.targetBinding.activeOwnershipId !== input.fromOwnershipId) return transitionDenied();
+    const changed = {
+      ...session,
+      targetBinding: { kind: 'batch', activePageId: input.toPageId, activeOwnershipId: input.toOwnershipId },
+    };
+    try { await sessionArea.set({ [key]: changed }); } catch { /* readback confirms commit-then-throw */ }
+    let confirmed;
+    try { confirmed = parseSessionRecord(readStoredValue(await sessionArea.get(key), key)); }
+    catch { return transitionDenied(); }
+    if (!confirmed || !sameGraph(confirmed, changed)) return transitionDenied();
+    return deepFreeze({
+      ok: true, sessionCapabilityId: session.sessionCapabilityId, auditId: session.auditId,
+      activePageId: input.toPageId, activeOwnershipId: input.toOwnershipId,
+    });
+  });
+
   const invalidateCapability = (capabilityId, reason) => serialize(async () => {
     if (!CAPABILITY_ID.test(capabilityId ?? '') || typeof reason !== 'string' || !reason) return unavailable();
     const targetKey = targetCapabilityStorageKey(capabilityId);
@@ -875,6 +949,7 @@ export function createTargetCapabilityAuthority({
     authorizeSession,
     transitionAuditSession,
     transitionDisposableAuditSession,
+    transitionBatchAuditSession,
     invalidateCapability,
     invalidateForTab,
     invalidateForWindow,
@@ -961,7 +1036,7 @@ function parseNavigationRecord(value) {
   const record = readDataRecord(value, NAVIGATION_KEYS);
   const issuer = record && parsePanelIssuer(record.issuer);
   if (!record || record.version !== 1 || !CAPABILITY_ID.test(record.capabilityId ?? '') ||
-    !['single', 'attached-copy'].includes(record.intent) || !safeChromeId(record.windowId) || !issuer ||
+    !['single', 'batch', 'attached-copy'].includes(record.intent) || !safeChromeId(record.windowId) || !issuer ||
     !safeTime(record.issuedAt) || !safeTime(record.expiresAt) || record.expiresAt <= record.issuedAt ||
     !['prepared', 'claimed', 'invalidated'].includes(record.state) ||
     (record.state === 'prepared' && record.sessionCapabilityId !== null) ||
@@ -1008,6 +1083,13 @@ function parseTargetBinding(value) {
   if (kind.value === 'view-only') {
     const binding = readDataRecord(value, ['kind']);
     return binding?.kind === 'view-only' ? binding : null;
+  }
+  if (kind.value === 'batch') {
+    const binding = readDataRecord(value, ['kind', 'activePageId', 'activeOwnershipId']);
+    const empty = binding?.activePageId === null && binding?.activeOwnershipId === null;
+    const active = MODEL_ID.test(binding?.activePageId ?? '') &&
+      /^owner_[A-Za-z0-9_-]{22}$/u.test(binding?.activeOwnershipId ?? '');
+    return binding && (empty || active) ? binding : null;
   }
   const binding = readDataRecord(value, ['kind', 'ownershipId', 'state']);
   return binding && binding.kind === 'disposable' && MODEL_ID.test(binding.ownershipId ?? '') &&

@@ -11,6 +11,7 @@ import {
   navigationCapabilityStorageKey,
   readAttachedAuditCorrelationForRecovery,
   readAuditSessionForWorker,
+  readBatchAuditCorrelationForRecovery,
   readClaimedAttachedAuditGrant,
   readPreparedAttachedAuditFact,
   sessionCapabilityStorageKey,
@@ -407,7 +408,7 @@ test('review and export allow exactly one closed auditId query', async () => {
 
 test('prepares an exact one-use target and atomically persists its running session', async () => {
   const { authority, sessionArea } = authorityFixture();
-  assert.deepEqual(Object.keys(authority), ['prepare', 'prepareNavigationForPanel', 'exchangeAttachedForNavigationCopy', 'inspectPreparedTarget', 'claimPreparedTarget', 'inspectPreparedAuditTarget', 'claimAndIssueAuditSession', 'claimNavigationAndIssueAuditSession', 'claimExchangedAttachedCopyAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'transitionDisposableAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'rehydrateViewOnly']);
+  assert.deepEqual(Object.keys(authority), ['prepare', 'prepareNavigationForPanel', 'exchangeAttachedForNavigationCopy', 'inspectPreparedTarget', 'claimPreparedTarget', 'inspectPreparedAuditTarget', 'claimAndIssueAuditSession', 'claimNavigationAndIssueAuditSession', 'claimExchangedAttachedCopyAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'transitionDisposableAuditSession', 'transitionBatchAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'rehydrateViewOnly']);
   const prepared = await prepareAttached(authority);
   const result = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
   assert.equal(result.ok, true);
@@ -460,6 +461,94 @@ test('single navigation capability is one-shot, panel-document bound, and issues
   assert.deepEqual(await authority.claimNavigationAndIssueAuditSession(claim), {
     ok: false, code: 'CAPABILITY_UNAVAILABLE',
   });
+});
+
+test('batch navigation capability binds and clears exactly one active owned page at a time', async () => {
+  const { authority, sessionArea } = authorityFixture();
+  const prepared = await authority.prepareNavigationForPanel({
+    intent: 'batch', senderContext: extensionContext(),
+  });
+  assert.equal(prepared.ok, true);
+  const claim = {
+    capabilityId: prepared.capabilityId, auditId: 'audit-batch-1', ownershipId: null,
+    intent: 'batch', senderContext: extensionContext(),
+  };
+  const result = await authority.claimNavigationAndIssueAuditSession(claim);
+  assert.equal(result.ok, true);
+  const sessionKey = sessionCapabilityStorageKey(result.sessionCapabilityId);
+  assert.deepEqual((await sessionArea.get(sessionKey))[sessionKey].targetBinding, {
+    kind: 'batch', activePageId: null, activeOwnershipId: null,
+  });
+  assert.deepEqual(await readBatchAuditCorrelationForRecovery({
+    sessionArea,
+    capabilityId: prepared.capabilityId,
+    auditId: 'audit-batch-1',
+  }), {
+    version: 1,
+    capabilityId: prepared.capabilityId,
+    auditId: 'audit-batch-1',
+    sessionCapabilityId: result.sessionCapabilityId,
+    windowId: 9,
+    capabilityState: 'claimed',
+    sessionState: 'running',
+    activePageId: null,
+    activeOwnershipId: null,
+    issuedAt: 1_788_000_000_000,
+    expiresAt: 1_788_001_800_000,
+  });
+  const ownershipId = `owner_${'B'.repeat(22)}`;
+  assert.deepEqual(await authority.transitionBatchAuditSession({
+    sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-batch-1',
+    fromPageId: null, fromOwnershipId: null, toPageId: 'page-1', toOwnershipId: ownershipId,
+  }), {
+    ok: true, sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-batch-1',
+    activePageId: 'page-1', activeOwnershipId: ownershipId,
+  });
+  assert.deepEqual(await authority.transitionBatchAuditSession({
+    sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-batch-1',
+    fromPageId: null, fromOwnershipId: null, toPageId: 'page-2', toOwnershipId: `owner_${'C'.repeat(22)}`,
+  }), { ok: false, code: 'SESSION_TRANSITION_DENIED' });
+  assert.deepEqual(await authority.transitionBatchAuditSession({
+    sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-batch-1',
+    fromPageId: 'page-1', fromOwnershipId: ownershipId, toPageId: null, toOwnershipId: null,
+  }), {
+    ok: true, sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-batch-1',
+    activePageId: null, activeOwnershipId: null,
+  });
+  assert.deepEqual(await authority.claimNavigationAndIssueAuditSession(claim), {
+    ok: false, code: 'CAPABILITY_UNAVAILABLE',
+  });
+});
+
+test('revoked batch session can only clear its existing owned page during recovery', async () => {
+  const { authority } = authorityFixture();
+  const prepared = await authority.prepareNavigationForPanel({
+    intent: 'batch', senderContext: extensionContext(),
+  });
+  const auditId = 'audit-batch-recovery';
+  const claimed = await authority.claimNavigationAndIssueAuditSession({
+    capabilityId: prepared.capabilityId, auditId, ownershipId: null,
+    intent: 'batch', senderContext: extensionContext(),
+  });
+  const ownershipId = `owner_${'R'.repeat(22)}`;
+  assert.equal((await authority.transitionBatchAuditSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId,
+    fromPageId: null, fromOwnershipId: null, toPageId: 'page-1', toOwnershipId: ownershipId,
+  })).ok, true);
+  assert.equal((await authority.transitionAuditSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId, nextState: 'revoked',
+  })).ok, true);
+  assert.deepEqual(await authority.transitionBatchAuditSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId,
+    fromPageId: 'page-1', fromOwnershipId: ownershipId, toPageId: null, toOwnershipId: null,
+  }), {
+    ok: true, sessionCapabilityId: claimed.sessionCapabilityId, auditId,
+    activePageId: null, activeOwnershipId: null,
+  });
+  assert.deepEqual(await authority.transitionBatchAuditSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId,
+    fromPageId: null, fromOwnershipId: null, toPageId: 'page-2', toOwnershipId: `owner_${'S'.repeat(22)}`,
+  }), { ok: false, code: 'SESSION_TRANSITION_DENIED' });
 });
 
 test('atomically exchanges a prepared attached target for an internal attached-copy navigation authority', async () => {
@@ -1618,7 +1707,7 @@ test('rehydrates a closed view-only session without resurrecting running intent'
 
 test('rehydrateViewOnly rejects caller-supplied target bindings and keeps the exact authority shape', async () => {
   const { authority, sessionArea } = authorityFixture();
-  assert.deepEqual(Object.keys(authority), ['prepare', 'prepareNavigationForPanel', 'exchangeAttachedForNavigationCopy', 'inspectPreparedTarget', 'claimPreparedTarget', 'inspectPreparedAuditTarget', 'claimAndIssueAuditSession', 'claimNavigationAndIssueAuditSession', 'claimExchangedAttachedCopyAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'transitionDisposableAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'rehydrateViewOnly']);
+  assert.deepEqual(Object.keys(authority), ['prepare', 'prepareNavigationForPanel', 'exchangeAttachedForNavigationCopy', 'inspectPreparedTarget', 'claimPreparedTarget', 'inspectPreparedAuditTarget', 'claimAndIssueAuditSession', 'claimNavigationAndIssueAuditSession', 'claimExchangedAttachedCopyAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'transitionDisposableAuditSession', 'transitionBatchAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'rehydrateViewOnly']);
   assert.deepEqual(await authority.rehydrateViewOnly({
     auditId: 'audit-view-1', windowId: 9, mode: 'attached', targetBinding: { kind: 'view-only' },
   }), { ok: false, code: 'SESSION_DENIED' });

@@ -13,7 +13,8 @@ const LAUNCH_TOKEN = 'L'.repeat(43);
 const PANEL_URL = `chrome-extension://${RUNTIME_ID}/src/panel/index.html?launch=${LAUNCH_TOKEN}`;
 const PANEL_TYPES = new Set([
   'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_NAVIGATION_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
-  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_URL_AUDIT', 'CONFIRM_PIXEL_CAPTURE', 'PANEL_CONFIRM_PIXEL_CAPTURE',
+  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_URL_AUDIT', 'PANEL_START_BATCH_AUDIT',
+  'CONFIRM_PIXEL_CAPTURE', 'PANEL_CONFIRM_PIXEL_CAPTURE',
   'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
   'PANEL_SET_PERSONA_MODE', 'PANEL_READER_STATE', 'PANEL_READER_ACTION',
   'PANEL_READER_ENABLE_VOICE',
@@ -122,17 +123,29 @@ function fixture(overrides = {}) {
       calls.push(['begin-url', value]);
       return { response: { ok: true, auditId: value.auditId, state: 'running' } };
     },
+    async beginAuthorizedBatchAudit(value) {
+      calls.push(['begin-batch', value]);
+      const plan = typeof value.preparePlan === 'function' ? await value.preparePlan() : value.plan;
+      calls.push(['prepared-batch-plan', plan]);
+      return { response: { ok: true, auditId: value.auditId, state: 'running' } };
+    },
   };
+  let vaultToken = 0;
   const rawNavigationVault = {
     async put(url, options) {
       calls.push(['vault-put', url, options]);
+      vaultToken += 1;
+      const parsedUrl = new URL(url);
+      parsedUrl.search = '';
+      parsedUrl.hash = '';
       return {
-        navigationToken: 'T'.repeat(22),
-        evidenceUrl: { version: 'EvidenceUrlV1', href: 'https://example.test/private', queryIncluded: false, redactedSegments: 0 },
-        sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+        navigationToken: vaultToken === 1 ? 'T'.repeat(22) : String(vaultToken).padStart(22, 'T'),
+        evidenceUrl: { version: 'EvidenceUrlV1', href: parsedUrl.href, queryIncluded: false, redactedSegments: 0 },
+        sessionDigest: `hmac-sha256:${vaultToken === 1 ? 'D'.repeat(43) : String(vaultToken).padStart(43, 'D')}`,
         expiresAt: 600_250,
       };
     },
+    async putQueue(value) { calls.push(['vault-put-queue', value]); },
     async clearAudit(auditId) { calls.push(['vault-clear', auditId]); return true; },
   };
   const personaStart = {
@@ -510,6 +523,61 @@ test('prepares and starts one tokenized URL without returning or retaining priva
     sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
   });
   assert.equal(Object.hasOwn(begin, 'url'), false);
+  assert.equal(begin.capturePolicy.mode, 'no-pixels');
+});
+
+test('normalizes and starts a tokenized no-pixels batch without reflecting private URLs', async () => {
+  const { router, calls } = fixture();
+  assert.deepEqual(await router.dispatch({
+    envelope: parsed({
+      type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: 'request-batch-1', intent: 'batch', windowId: 9,
+    }),
+    sender: panelSender(),
+  }), { ok: true, requestId: 'request-batch-1', capabilityId: 'N'.repeat(22) });
+
+  const response = await router.dispatch({
+    envelope: parsed({
+      type: 'PANEL_START_BATCH_AUDIT', capabilityId: 'N'.repeat(22),
+      urls: [
+        'https://one.example.test/private?token=alpha',
+        'https://two.example.test/path?token=beta',
+        'https://one.example.test/private?token=alpha',
+      ].join('\n'),
+      captureMode: 'no-pixels', includeQuery: false,
+      deleteAfterCompleteExport: false, windowId: 9,
+    }),
+    sender: panelSender(),
+  });
+  assert.deepEqual(response, {
+    ok: true, auditId: 'audit-router-1', state: 'running', total: 2,
+    warnings: [{
+      line: 3, code: 'DUPLICATE_URL', firstLine: 1,
+      message: 'A URL repete uma entrada anterior e não será auditada novamente.',
+    }],
+  });
+  assert.doesNotMatch(JSON.stringify(response), /alpha|beta|token|navigation|digest|owner|capability/iu);
+  assert.deepEqual(calls.filter(([name]) => name === 'vault-put').map(([, url, options]) => [url, options]), [
+    ['https://one.example.test/private?token=alpha', {
+      auditId: 'audit-router-1', purpose: 'batch-page', ttlMs: 7_200_000, includeQuery: false,
+    }],
+    ['https://two.example.test/path?token=beta', {
+      auditId: 'audit-router-1', purpose: 'batch-page', ttlMs: 7_200_000, includeQuery: false,
+    }],
+  ]);
+  const queue = calls.find(([name]) => name === 'vault-put-queue')[1];
+  assert.equal(queue.auditId, 'audit-router-1');
+  assert.deepEqual(queue.entries.map(entry => ({ line: entry.line, status: entry.status })), [
+    { line: 1, status: 'pending' }, { line: 2, status: 'pending' },
+  ]);
+  assert.doesNotMatch(JSON.stringify(queue), /alpha|beta|token=/iu);
+  const begin = calls.find(([name]) => name === 'begin-batch')[1];
+  assert.equal(Object.hasOwn(begin, 'plan'), false);
+  assert.equal(typeof begin.preparePlan, 'function');
+  assert.deepEqual(calls.find(([name]) => name === 'prepared-batch-plan')[1], {
+    kind: 'batch', queueId: 'audit-router-1', acceptedCount: 2,
+  });
+  assert.equal(calls.findIndex(([name]) => name === 'begin-batch') <
+    calls.findIndex(([name]) => name === 'vault-put'), true);
   assert.equal(begin.capturePolicy.mode, 'no-pixels');
 });
 

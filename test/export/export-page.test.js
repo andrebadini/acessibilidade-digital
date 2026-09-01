@@ -21,6 +21,8 @@ test('internal export page authenticates first, rebuilds one stored revision and
   assert.match(script, /deriveExportLeaseOwner/u);
   assert.match(script, /getReportRevision/u);
   assert.match(script, /verifyAuditIntegritySnapshot/u);
+  assert.match(script, /buildCompleteReportSummary/u);
+  assert.doesNotMatch(script, /createPanelResultBundleV1/u);
   assert.match(script, /buildReportView/u);
   assert.ok(script.indexOf('await store.claimExportLease') < script.indexOf('const result = await runReportExport'));
   assert.doesNotMatch(script, /runReportExport\(\{[^}]*deliveryAt\s*:/u,

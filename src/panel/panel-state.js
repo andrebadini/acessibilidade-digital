@@ -6,9 +6,14 @@ const CAPTURE_MODES = Object.freeze(['full-evidence', 'element-only', 'no-pixels
 const PIXEL_CAPTURE_MODES = Object.freeze(['full-evidence', 'element-only']);
 const PRIVACY_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private-marker']);
 const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
+const DUPLICATE_URL_MESSAGE = 'A URL repete uma entrada anterior e não será auditada novamente.';
+const SINGLE_ENTRY_ERRORS = Object.freeze(['required', 'invalid', 'too-long', 'start-failed']);
+const BATCH_ENTRY_ERRORS = Object.freeze(['required', 'too-few', 'too-many', 'invalid-lines', 'start-failed']);
+const BATCH_LINE_ERRORS = Object.freeze(['invalid', 'too-long']);
+const MAX_BATCH_LINE_NUMBER = 65_536;
 const PANEL_STATE_KEYS = Object.freeze([
   'version', 'screen', 'auditId', 'entryMode', 'entryError', 'auditSource', 'captureMode', 'sessionStatus', 'privacy',
-  'progress', 'filters', 'selectedOccurrenceId', 'evidenceExpanded', 'persona', 'highlight',
+  'progress', 'batch', 'filters', 'selectedOccurrenceId', 'evidenceExpanded', 'persona', 'highlight',
   'focusId', 'scrollTop', 'reason',
 ]);
 const PERSONA_MODES = new Set(['reader', 'achromatopsia', 'keyboard']);
@@ -36,6 +41,10 @@ function neutralProgress() {
   return { phase: null, message: null, percent: null, at: null };
 }
 
+function neutralBatch() {
+  return { total: null, pageNumber: null, warnings: [], errors: [] };
+}
+
 const AUDIT_PROGRESS = Object.freeze([
   ['opening', 'Abrindo o site', 5],
   ['collecting', 'Lendo a estrutura', 25],
@@ -56,6 +65,7 @@ export function createInitialPanelState() {
     sessionStatus: null,
     privacy: neutralPrivacy(),
     progress: neutralProgress(),
+    batch: neutralBatch(),
     filters: { impact: [], wcag: [], abnt: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,
@@ -78,7 +88,7 @@ export function reducePanelState(current, event) {
       return createInitialPanelState();
     case 'CAPTURE_MODE_SELECTED': {
       const selected = exactDataRecord(event, ['type', 'mode', 'focusId']);
-      if (!selected || current.screen !== 'initial' || !CAPTURE_MODES.includes(selected.mode)) return current;
+      if (!selected || current.screen !== 'initial' || current.entryMode === 'batch' || !CAPTURE_MODES.includes(selected.mode)) return current;
       return nextPanelState(current, {
         captureMode: selected.mode,
         focusId: panelFocusId(selected.focusId, `capture-mode-${selected.mode}`),
@@ -86,10 +96,18 @@ export function reducePanelState(current, event) {
     }
     case 'URL_FORM_OPENED':
       if (!exactDataRecord(event, ['type']) || current.screen !== 'initial') return current;
-      return nextPanelState(current, { entryMode: 'single-url', entryError: null, focusId: 'audit-url' });
+      return nextPanelState(current, { entryMode: 'single-url', entryError: null, batch: neutralBatch(), focusId: 'audit-url' });
     case 'URL_FORM_CLOSED':
       if (!exactDataRecord(event, ['type']) || current.screen !== 'initial') return current;
-      return nextPanelState(current, { entryMode: 'sources', entryError: null, focusId: 'open-url-form' });
+      return nextPanelState(current, { entryMode: 'sources', entryError: null, batch: neutralBatch(), focusId: 'open-url-form' });
+    case 'BATCH_FORM_OPENED':
+      if (!exactDataRecord(event, ['type']) || current.screen !== 'initial') return current;
+      return nextPanelState(current, {
+        entryMode: 'batch', entryError: null, captureMode: 'no-pixels', batch: neutralBatch(), focusId: 'audit-urls',
+      });
+    case 'BATCH_FORM_CLOSED':
+      if (!exactDataRecord(event, ['type']) || current.screen !== 'initial' || current.entryMode !== 'batch') return current;
+      return nextPanelState(current, { entryMode: 'sources', entryError: null, batch: neutralBatch(), focusId: 'open-batch-form' });
     case 'URL_ENTRY_REJECTED': {
       const rejected = exactDataRecord(event, ['type', 'code']);
       if (!rejected || !['required', 'invalid', 'too-long', 'start-failed'].includes(rejected.code)) return current;
@@ -103,16 +121,60 @@ export function reducePanelState(current, event) {
       if (current.screen !== 'initial' || current.entryMode !== 'single-url') return current;
       return nextPanelState(current, { entryError: rejected.code, focusId: 'audit-url' });
     }
+    case 'BATCH_ENTRY_REJECTED': {
+      const rejected = exactDataRecord(event, ['type', 'code', 'lines']);
+      const errors = rejected ? copyBatchErrors(rejected.lines) : null;
+      if (!rejected || !BATCH_ENTRY_ERRORS.includes(rejected.code) || !errors ||
+        (rejected.code === 'invalid-lines') !== (errors.length > 0)) return current;
+      if (rejected.code === 'start-failed' && current.screen === 'running' &&
+        current.auditSource === 'batch' && current.auditId === null) {
+        return nextPanelState(current, {
+          screen: 'initial', entryMode: 'batch', entryError: 'start-failed', auditSource: null,
+          sessionStatus: null, privacy: neutralPrivacy(), progress: neutralProgress(),
+          batch: { ...neutralBatch(), errors }, focusId: 'audit-urls', reason: null,
+        });
+      }
+      if (current.screen !== 'initial' || current.entryMode !== 'batch') return current;
+      return nextPanelState(current, {
+        entryError: rejected.code, batch: { ...neutralBatch(), errors }, focusId: 'audit-urls',
+      });
+    }
     case 'START_REQUESTED': {
       const requested = exactDataRecord(event, ['type', 'source']);
-      if (!requested || !['attached', 'single-url'].includes(requested.source) || current.screen !== 'initial' ||
-        requested.source === 'single-url' && current.entryMode !== 'single-url') return current;
+      if (!requested || !['attached', 'single-url', 'batch'].includes(requested.source) || current.screen !== 'initial' ||
+        requested.source === 'single-url' && current.entryMode !== 'single-url' ||
+        requested.source === 'batch' && (current.entryMode !== 'batch' || current.captureMode !== 'no-pixels')) return current;
       return nextPanelState(current, {
         screen: 'running', auditId: null, selectedOccurrenceId: null,
         auditSource: requested.source, entryError: null,
         sessionStatus: null, privacy: neutralPrivacy(),
         progress: neutralProgress(),
+        batch: neutralBatch(),
         evidenceExpanded: false, focusId: 'cancel-audit', scrollTop: 0, reason: null,
+      });
+    }
+    case 'BATCH_STARTED': {
+      const started = exactDataRecord(event, ['type', 'auditId', 'total', 'warnings']);
+      const warnings = started ? copyBatchWarnings(started.warnings) : null;
+      if (!started || current.screen !== 'running' || current.auditSource !== 'batch' ||
+        current.auditId !== null && current.auditId !== started.auditId ||
+        !validPanelAuditId(started.auditId) || !validBatchTotal(started.total) || !warnings ||
+        current.batch.total !== null && current.batch.total !== started.total) return current;
+      return nextPanelState(current, {
+        auditId: started.auditId,
+        batch: {
+          total: started.total,
+          pageNumber: current.batch.total === started.total ? current.batch.pageNumber : 0,
+          warnings, errors: [],
+        },
+      });
+    }
+    case 'BATCH_PREPARED': {
+      const prepared = exactDataRecord(event, ['type', 'total']);
+      if (!prepared || current.screen !== 'running' || current.auditSource !== 'batch' || current.auditId !== null ||
+        current.captureMode !== 'no-pixels' || !validBatchTotal(prepared.total) || current.batch.total !== null) return current;
+      return nextPanelState(current, {
+        batch: { total: prepared.total, pageNumber: 0, warnings: [], errors: [] },
       });
     }
     case 'AUDIT_RUNNING':
@@ -143,8 +205,20 @@ export function reducePanelState(current, event) {
       if (!progress || current.screen !== 'running' || current.sessionStatus !== null ||
         current.auditId !== progress.auditId || current.progress.percent !== null &&
           (progress.percent <= current.progress.percent || progress.at < current.progress.at)) return current;
+      const infersBatch = progress.pageNumber !== null && current.auditSource === 'attached' &&
+        current.batch.total === null && current.batch.pageNumber === null && current.progress.percent === null;
+      if (progress.pageNumber !== null && (!infersBatch && current.auditSource !== 'batch' ||
+        current.batch.total !== null && current.batch.total !== progress.total ||
+        current.batch.pageNumber !== null && current.batch.pageNumber > progress.pageNumber)) return current;
+      if (progress.pageNumber === null && current.auditSource === 'batch') return current;
       return nextPanelState(current, {
         progress: { phase: progress.phase, message: progress.message, percent: progress.percent, at: progress.at },
+        batch: progress.pageNumber === null ? current.batch : {
+          total: progress.total, pageNumber: progress.pageNumber,
+          warnings: current.auditSource === 'batch' ? current.batch.warnings : [], errors: [],
+        },
+        auditSource: infersBatch ? 'batch' : current.auditSource,
+        captureMode: infersBatch ? 'no-pixels' : current.captureMode,
       });
     }
     case 'PRIVACY_CONFIRM_REQUESTED':
@@ -171,6 +245,7 @@ export function reducePanelState(current, event) {
         screen: 'result', auditId: event.auditId, selectedOccurrenceId: selected,
         sessionStatus: null, privacy: neutralPrivacy(),
         progress: neutralProgress(),
+        batch: neutralBatch(),
         evidenceExpanded: false, focusId: 'result-summary',
         highlight: uncheckedHighlight(),
         reason: null,
@@ -182,6 +257,7 @@ export function reducePanelState(current, event) {
         screen: 'initial', auditId: null, sessionStatus: null, privacy: neutralPrivacy(),
         entryMode: 'sources', entryError: null, auditSource: null,
         progress: neutralProgress(),
+        batch: neutralBatch(),
         filters: { impact: [], wcag: [], abnt: [] }, selectedOccurrenceId: null,
         evidenceExpanded: false, highlight: uncheckedHighlight(), focusId: 'start-attached',
         scrollTop: 0, reason: null,
@@ -371,11 +447,20 @@ export function reducePanelState(current, event) {
 function panelState(value) {
   const state = exactDataRecord(value, PANEL_STATE_KEYS);
   if (!state || state.version !== 1 || !['initial', 'running', 'result', 'unavailable'].includes(state.screen) ||
-    !['sources', 'single-url'].includes(state.entryMode) ||
-    ![null, 'required', 'invalid', 'too-long', 'start-failed'].includes(state.entryError) ||
-    ![null, 'attached', 'single-url'].includes(state.auditSource) ||
+    !['sources', 'single-url', 'batch'].includes(state.entryMode) ||
+    !validEntryError(state.entryMode, state.entryError) ||
+    ![null, 'attached', 'single-url', 'batch'].includes(state.auditSource) ||
     !CAPTURE_MODES.includes(state.captureMode) || ![null, 'privacy-paused'].includes(state.sessionStatus) ||
-    !exactProgress(state.progress) || !state.filters || !PANEL_FILTERS.every(filter => Array.isArray(state.filters[filter]))) return false;
+    !exactProgress(state.progress) || !exactBatch(state.batch) ||
+    state.entryMode === 'batch' && state.captureMode !== 'no-pixels' ||
+    state.auditSource === 'batch' && state.captureMode !== 'no-pixels' ||
+    state.progress.phase === 'batch-page' && state.auditSource !== 'batch' ||
+    state.progress.phase !== null && state.progress.phase !== 'batch-page' && state.auditSource === 'batch' ||
+    state.progress.phase === 'batch-page' && (!validBatchProgressMessage(
+      state.progress.message, state.batch.pageNumber, state.batch.total,
+    ) || state.batch.pageNumber < 1) ||
+    state.auditSource !== 'batch' && (state.batch.total !== null || state.batch.pageNumber !== null || state.batch.warnings.length > 0) ||
+    !state.filters || !PANEL_FILTERS.every(filter => Array.isArray(state.filters[filter]))) return false;
   const privacy = exactPrivacy(state.privacy);
   if (!privacy) return false;
   return state.sessionStatus === 'privacy-paused'
@@ -387,6 +472,9 @@ function immutablePanelState(value) {
   if (Object.isFrozen(value) && Object.isFrozen(value.filters) &&
     PANEL_FILTERS.every(filter => Object.isFrozen(value.filters[filter])) &&
     Object.isFrozen(value.privacy) && Object.isFrozen(value.privacy.categories) &&
+    Object.isFrozen(value.batch) && Object.isFrozen(value.batch.warnings) &&
+    Object.isFrozen(value.batch.errors) && value.batch.warnings.every(Object.isFrozen) &&
+    value.batch.errors.every(Object.isFrozen) &&
     Object.isFrozen(value.persona) && Object.isFrozen(value.highlight) &&
     Object.isFrozen(value.highlight.bindingStatus)) return value;
   return deepFreezePanelState({
@@ -400,6 +488,7 @@ function immutablePanelState(value) {
     sessionStatus: value.sessionStatus,
     privacy: copyPrivacy(value.privacy),
     progress: copyProgress(value.progress),
+    batch: copyBatch(value.batch),
     filters: Object.fromEntries(PANEL_FILTERS.map(filter => [filter, [...value.filters[filter]]])),
     selectedOccurrenceId: value.selectedOccurrenceId,
     evidenceExpanded: value.evidenceExpanded,
@@ -464,6 +553,7 @@ function unavailablePanelState(current, auditId, reason) {
     sessionStatus: null,
     privacy: neutralPrivacy(),
     progress: neutralProgress(),
+    batch: neutralBatch(),
     filters: { impact: [], wcag: [], abnt: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,
@@ -539,19 +629,39 @@ function exactPrivacy(value) {
 }
 
 function canonicalProgress(value) {
-  const progress = exactDataRecord(value, ['type', 'auditId', 'sessionId', 'phase', 'message', 'percent', 'at']);
+  const regular = exactDataRecord(value, ['type', 'auditId', 'sessionId', 'phase', 'message', 'percent', 'at']);
+  if (regular && regular.type === 'AUDIT_PROGRESS' && validPanelAuditId(regular.auditId) &&
+    regular.sessionId === regular.auditId && canonicalIsoTime(regular.at) && AUDIT_PROGRESS.some(([phase, message, percent]) =>
+      regular.phase === phase && regular.message === message && regular.percent === percent)) {
+    return {
+      phase: regular.phase, message: regular.message, percent: regular.percent, at: regular.at,
+      auditId: regular.auditId, pageNumber: null, total: null,
+    };
+  }
+  const progress = exactDataRecord(value, [
+    'type', 'auditId', 'sessionId', 'phase', 'message', 'percent', 'pageNumber', 'total', 'at',
+  ]);
   if (!progress || progress.type !== 'AUDIT_PROGRESS' || !validPanelAuditId(progress.auditId) ||
-    progress.sessionId !== progress.auditId || !canonicalIsoTime(progress.at)) return null;
-  return AUDIT_PROGRESS.some(([phase, message, percent]) =>
-    progress.phase === phase && progress.message === message && progress.percent === percent)
-    ? { phase: progress.phase, message: progress.message, percent: progress.percent, at: progress.at, auditId: progress.auditId }
-    : null;
+    progress.sessionId !== progress.auditId || progress.phase !== 'batch-page' || !canonicalIsoTime(progress.at) ||
+    !validBatchTotal(progress.total) || !Number.isSafeInteger(progress.pageNumber) || progress.pageNumber < 1 ||
+    progress.pageNumber > progress.total || typeof progress.percent !== 'number' || !Number.isFinite(progress.percent) ||
+    progress.percent < 0 || progress.percent > 100 || !validBatchProgressMessage(progress.message, progress.pageNumber, progress.total)) return null;
+  return {
+    phase: progress.phase, message: progress.message, percent: progress.percent, at: progress.at,
+    auditId: progress.auditId, pageNumber: progress.pageNumber, total: progress.total,
+  };
 }
 
 function exactProgress(value) {
   const progress = exactDataRecord(value, ['phase', 'message', 'percent', 'at']);
   if (!progress) return null;
   if (progress.phase === null) return progress.message === null && progress.percent === null && progress.at === null ? progress : null;
+  if (progress.phase === 'batch-page') {
+    return typeof progress.message === 'string' &&
+      /^Página [1-9][0-9]* de [1-9][0-9]*: (?:auditoria em andamento|processamento encerrado)\.$/u.test(progress.message) &&
+      typeof progress.percent === 'number' && Number.isFinite(progress.percent) && progress.percent >= 0 && progress.percent <= 100 &&
+      canonicalIsoTime(progress.at) ? progress : null;
+  }
   return AUDIT_PROGRESS.some(([phase, message, percent]) =>
     progress.phase === phase && progress.message === message && progress.percent === percent) && canonicalIsoTime(progress.at)
     ? progress : null;
@@ -560,6 +670,83 @@ function exactProgress(value) {
 function copyProgress(value) {
   const progress = exactProgress(value);
   return progress ? { phase: progress.phase, message: progress.message, percent: progress.percent, at: progress.at } : neutralProgress();
+}
+
+function validEntryError(entryMode, entryError) {
+  if (entryError === null) return true;
+  if (entryMode === 'single-url') return SINGLE_ENTRY_ERRORS.includes(entryError);
+  if (entryMode === 'batch') return BATCH_ENTRY_ERRORS.includes(entryError);
+  return false;
+}
+
+function validBatchTotal(value) {
+  return Number.isSafeInteger(value) && value >= 2 && value <= 20;
+}
+
+function validBatchProgressMessage(value, pageNumber, total) {
+  return value === `Página ${pageNumber} de ${total}: auditoria em andamento.` ||
+    value === `Página ${pageNumber} de ${total}: processamento encerrado.`;
+}
+
+function copyBatchWarnings(value) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length > 20) return null;
+    const own = Reflect.ownKeys(value);
+    if (own.length !== value.length + 1 || !own.includes('length')) return null;
+    const warnings = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      const warning = exactDataRecord(descriptor.value, ['line', 'code', 'firstLine', 'message']);
+      if (!warning || !Number.isSafeInteger(warning.line) || warning.line < 1 || warning.line > MAX_BATCH_LINE_NUMBER ||
+        warning.code !== 'DUPLICATE_URL' || warning.message !== DUPLICATE_URL_MESSAGE ||
+        warning.firstLine !== null && (!Number.isSafeInteger(warning.firstLine) || warning.firstLine < 1 ||
+          warning.firstLine > MAX_BATCH_LINE_NUMBER || warning.firstLine >= warning.line)) return null;
+      warnings.push({ ...warning });
+    }
+    return warnings;
+  } catch { return null; }
+}
+
+function copyBatchErrors(value) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length > 20) return null;
+    const own = Reflect.ownKeys(value);
+    if (own.length !== value.length + 1 || !own.includes('length')) return null;
+    const errors = [];
+    let priorLine = 0;
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      const issue = exactDataRecord(descriptor.value, ['line', 'code']);
+      if (!issue || !Number.isSafeInteger(issue.line) || issue.line <= priorLine || issue.line > MAX_BATCH_LINE_NUMBER ||
+        !BATCH_LINE_ERRORS.includes(issue.code)) return null;
+      priorLine = issue.line;
+      errors.push({ ...issue });
+    }
+    return errors;
+  } catch { return null; }
+}
+
+function exactBatch(value) {
+  const batch = exactDataRecord(value, ['total', 'pageNumber', 'warnings', 'errors']);
+  if (!batch) return null;
+  const warnings = copyBatchWarnings(batch.warnings);
+  const errors = copyBatchErrors(batch.errors);
+  if (!warnings || !errors) return null;
+  if (batch.total === null || batch.pageNumber === null) {
+    return batch.total === null && batch.pageNumber === null && warnings.length === 0 ? batch : null;
+  }
+  return validBatchTotal(batch.total) && Number.isSafeInteger(batch.pageNumber) && batch.pageNumber >= 0 &&
+    batch.pageNumber <= batch.total && errors.length === 0 ? batch : null;
+}
+
+function copyBatch(value) {
+  const batch = exactBatch(value);
+  return batch ? {
+    total: batch.total, pageNumber: batch.pageNumber,
+    warnings: copyBatchWarnings(batch.warnings), errors: copyBatchErrors(batch.errors),
+  } : neutralBatch();
 }
 
 function copyPrivacy(value) {

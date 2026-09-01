@@ -53,6 +53,8 @@ test('review script renders snippets inertly, offers exactly three answers and n
   assert.doesNotMatch(source, /createReviewDecisionCommitter/u);
   assert.doesNotMatch(source, /\bstore\s*,\s*controls:/u);
   assert.match(source, /getReportRevision\(id\)/u);
+  assert.match(source, /buildCompleteReportSummary/u);
+  assert.doesNotMatch(source, /createPanelResultBundleV1/u);
   assert.match(source, /buildReportView/u);
   assert.match(source, /renderReportView/u);
   assert.match(source, /applyReportSourceControls/u);

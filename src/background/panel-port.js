@@ -136,12 +136,13 @@ function parseBootstrap(value) {
 function parseSession(value) {
   const record = exact(value, SESSION_KEYS, true);
   if (!record || record.version !== 1 || !CAPABILITY.test(record.sessionCapabilityId ?? '') ||
-    !AUDIT_ID.test(record.auditId ?? '') || !safeChromeId(record.windowId) || !['attached', 'single'].includes(record.mode) ||
+    !AUDIT_ID.test(record.auditId ?? '') || !safeChromeId(record.windowId) || !['attached', 'single', 'batch'].includes(record.mode) ||
     !['running', 'privacy-paused', 'result', 'view-only', 'revoked'].includes(record.state) || !safeEpoch(record.issuedAt) ||
     !safeEpoch(record.expiresAt) || record.expiresAt <= record.issuedAt) return null;
   const viewOnlyBinding = exact(record.targetBinding, ['kind'], true);
   const attachedBinding = exact(record.targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest'], true);
   const disposableBinding = exact(record.targetBinding, ['kind', 'ownershipId', 'state'], true);
+  const batchBinding = exact(record.targetBinding, ['kind', 'activePageId', 'activeOwnershipId'], true);
   const validViewOnly = record.mode === 'attached' && viewOnlyBinding?.kind === 'view-only' &&
     ['view-only', 'revoked'].includes(record.state);
   const validAttached = record.mode === 'attached' && attachedBinding?.kind === 'attached' && safeChromeId(attachedBinding.tabId) &&
@@ -153,7 +154,12 @@ function parseSession(value) {
     ['pending', 'observing', 'retained-for-review', 'retained-for-consent', 'cleanup-pending', 'removed']
       .includes(disposableBinding.state) && record.state !== 'view-only' &&
     (record.state !== 'privacy-paused' || disposableBinding.state === 'retained-for-consent');
-  if (!validViewOnly && !validAttached && !validDisposable) return null;
+  const emptyBatch = batchBinding?.activePageId === null && batchBinding?.activeOwnershipId === null;
+  const activeBatch = AUDIT_ID.test(batchBinding?.activePageId ?? '') &&
+    /^owner_[A-Za-z0-9_-]{22}$/u.test(batchBinding?.activeOwnershipId ?? '');
+  const validBatch = record.mode === 'batch' && batchBinding?.kind === 'batch' &&
+    (emptyBatch || activeBatch) && !['privacy-paused', 'view-only'].includes(record.state);
+  if (!validViewOnly && !validAttached && !validDisposable && !validBatch) return null;
   return freeze(record);
 }
 
@@ -162,10 +168,10 @@ function parseActive(value) {
   const record = exact(value, ACTIVE_KEYS, true);
   if (!record || record.version !== 1 || !AUDIT_ID.test(record.auditId ?? '') ||
     !CAPABILITY.test(record.capabilityId ?? '') || !CAPABILITY.test(record.sessionCapabilityId ?? '') ||
-    !safeChromeId(record.windowId) || !['attached', 'single'].includes(record.mode) || !safeEpoch(record.createdAt) ||
+    !safeChromeId(record.windowId) || !['attached', 'single', 'batch'].includes(record.mode) || !safeEpoch(record.createdAt) ||
     !safeEpoch(record.updatedAt) || record.updatedAt < record.createdAt) return undefined;
   if (record.state === 'running' && record.commitState === 'none' && record.expectedTerminalRevision === null) return freeze(record);
-  if (record.state === 'privacy-paused' && record.commitState === 'none' && record.expectedTerminalRevision === null) return freeze(record);
+  if (record.state === 'privacy-paused' && record.mode !== 'batch' && record.commitState === 'none' && record.expectedTerminalRevision === null) return freeze(record);
   if (record.state === 'finalizing' && ['pending', 'confirmed'].includes(record.commitState) && record.expectedTerminalRevision === 1) return freeze(record);
   return undefined;
 }

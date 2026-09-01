@@ -26,14 +26,14 @@ test('renderer uses only DOM construction and the fixed exhaustive screen and in
     assert.match(view, new RegExp(`case ['"]${screen}['"]`, 'u'));
   }
   for (const intent of [
-    'START_ATTACHED', 'OPEN_URL_FORM', 'OPEN_BATCH_FORM', 'CANCEL_AUDIT',
+    'START_ATTACHED', 'OPEN_URL_FORM', 'OPEN_BATCH_FORM', 'START_BATCH', 'CLOSE_BATCH_FORM', 'CANCEL_AUDIT',
     'CONFIRM_PIXEL_CAPTURE', 'OPEN_REPORT', 'SELECT_OCCURRENCE', 'CONSULT_EVIDENCE', 'RETRY',
   ]) assert.match(runtime, new RegExp(`case ['"]${intent}['"]`, 'u'));
-  assert.doesNotMatch(runtime, /START_AUDIT|START_BATCH|AUDIT_CONTEXT_PREFILL|GET_LAST_AUDIT/u);
+  assert.doesNotMatch(runtime, /START_AUDIT|AUDIT_CONTEXT_PREFILL|GET_LAST_AUDIT/u);
   assert.doesNotMatch(runtime, /relatório completo estará disponível na próxima etapa/iu);
 });
 
-test('initial URL and batch choices remain visible with an honest beta limitation', async () => {
+test('initial URL and functional bounded batch choices remain visible', async () => {
   const view = await panelFile('panel-view.js');
   assert.match(view, /Auditar a página atual/u);
   for (const label of ['Evidência completa', 'Somente elementos', 'Sem imagens']) {
@@ -41,7 +41,13 @@ test('initial URL and batch choices remain visible with an honest beta limitatio
   }
   assert.match(view, /Outra URL/u);
   assert.match(view, /Lote de páginas/u);
-  assert.match(view, /Não disponível nesta beta/u);
+  assert.match(view, /audit-urls/u);
+  assert.match(view, /batch-urls/u);
+  assert.match(view, /2 a 20 URLs HTTP\/HTTPS/u);
+  assert.match(view, /não segue links/u);
+  assert.match(view, /Avaliar páginas/u);
+  assert.match(view, /Somente sem imagens/u);
+  assert.doesNotMatch(view, /Não disponível nesta beta/u);
   assert.doesNotMatch(view, /type="url"|placeholder=.*https|prefill/iu);
 });
 
@@ -87,6 +93,8 @@ test('visual system matches the approved option-2 hierarchy and accessibility br
   assert.match(css, /:focus-visible/iu);
   assert.match(css, /\.capture-mode-options/iu);
   assert.match(css, /\.privacy-pause/iu);
+  assert.match(css, /\.batch-url-entry/iu);
+  assert.match(css, /textarea/iu);
   assert.match(css, /\.capture-mode-option:has\(input:focus-visible\)/iu);
   assert.doesNotMatch(css, /@import|https?:|url\s*\(/iu);
 });

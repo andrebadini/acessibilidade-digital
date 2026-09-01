@@ -171,17 +171,18 @@ export async function runUrlAudit(rawArgs = {}) {
   const windowId = resuming ? resumeTarget?.windowId : args?.windowId;
   const sessionDigest = resuming ? resumeTarget?.initialUrlSessionDigest : args?.sessionDigest;
   const navigationPurpose = resuming ? resumeTarget?.navigationPurpose : args?.navigationPurpose;
-  const cleanupMode = navigationPurpose === 'attached-copy'
+  const cleanupMode = ['attached-copy', 'batch-page'].includes(navigationPurpose)
     ? 'always'
     : 'pre-observation-failure';
   if (!args || !/^[A-Za-z0-9._:-]{1,160}$/u.test(args.auditId ?? '') ||
     !/^owner_[A-Za-z0-9_-]{22}$/u.test(ownershipId ?? '') ||
     !Number.isSafeInteger(windowId) || windowId < 0 ||
     (!resuming && (!/^[A-Za-z0-9_-]{22}$/u.test(args.navigationToken ?? '') ||
-      !['single-url', 'context-menu-link', 'attached-copy'].includes(args.navigationPurpose) || !take)) ||
+      !['single-url', 'context-menu-link', 'attached-copy', 'batch-page'].includes(args.navigationPurpose) || !take)) ||
     !evidenceUrl || evidenceUrl.queryIncluded || !requestedUrlEvidence || requestedUrlEvidence.queryIncluded ||
     !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(sessionDigest ?? '') ||
     !policy || !isCapturePolicyV1(policy) || policy.includeQuery !== false ||
+    (navigationPurpose === 'batch-page' && policy.mode !== 'no-pixels') ||
     (policy.mode === 'no-pixels'
       ? resuming || privacyGate !== null
       : !isPixelPrivacyGateV1(privacyGate)) ||

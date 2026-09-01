@@ -12,9 +12,11 @@ else globalThis.document = priorDocument;
 const {
   createPanelAuditDeletionController,
   createPanelAttachedAuditIntent,
+  createPanelBatchAuditIntent,
   createPanelUrlAuditIntent,
   createPanelPrivacyConfirmationController,
   normalizePanelUrlEntry,
+  normalizePanelBatchEntry,
   projectPanelAuditProgressEvent,
   projectPanelBootstrapEvent,
   shouldShowPanelStartFailure,
@@ -348,6 +350,157 @@ test('normalizes one transient URL and builds the exact start envelope for each 
     { ...input, captureMode: 'full-evidence', url: 'file:///private' },
     { ...input, captureMode: 'full-evidence', extra: 'secret' },
   ]) assert.equal(createPanelUrlAuditIntent(invalid), null);
+});
+
+test('normalizes 2–20 explicit batch URLs and builds only the exact no-pixels envelope', () => {
+  const raw = [
+    ' https://one.example/private?token=alpha ',
+    'https://two.example',
+    'https://one.example/private?token=alpha',
+  ].join('\n');
+  assert.deepEqual(normalizePanelBatchEntry(raw), {
+    ok: true,
+    urls: [
+      'https://one.example/private?token=alpha',
+      'https://two.example/',
+      'https://one.example/private?token=alpha',
+    ].join('\n'),
+    total: 2,
+  });
+  for (const [value, code] of [
+    ['', 'required'],
+    ['https://one.example', 'too-few'],
+    [Array.from({ length: 21 }, (_value, index) => `https://example${index}.test`).join('\n'), 'too-many'],
+  ]) {
+    const result = normalizePanelBatchEntry(value);
+    assert.equal(result.ok, false);
+    assert.equal(result.code, code);
+    assert.equal(Object.hasOwn(result, 'urls'), false);
+  }
+  const invalid = normalizePanelBatchEntry([
+    'https://one.example', 'file:///private', 'https://user:pass@two.example', 'x'.repeat(2_049),
+  ].join('\n'));
+  assert.deepEqual(invalid, {
+    ok: false, code: 'invalid-lines',
+    lines: [{ line: 2, code: 'invalid' }, { line: 3, code: 'invalid' }, { line: 4, code: 'too-long' }],
+  });
+  assert.doesNotMatch(JSON.stringify(invalid), /user:pass|file:\/\/\/private/u);
+
+  const urls = normalizePanelBatchEntry(raw).urls;
+  assert.deepEqual(createPanelBatchAuditIntent({ capabilityId: 'C'.repeat(22), urls }), {
+    type: 'PANEL_START_BATCH_AUDIT', capabilityId: 'C'.repeat(22), urls,
+    captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
+  });
+  for (const invalidIntent of [
+    { capabilityId: 'short', urls },
+    { capabilityId: 'C'.repeat(22), urls, captureMode: 'full-evidence' },
+    { capabilityId: 'C'.repeat(22), urls, extra: 'PRIVATE' },
+  ]) assert.equal(createPanelBatchAuditIntent(invalidIntent), null);
+});
+
+test('starts a batch through an authorized capability and announces safe total and warnings', async t => {
+  const originalDocument = globalThis.document;
+  const originalChrome = globalThis.chrome;
+  const originalLocation = globalThis.location;
+  t.after(() => {
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
+    if (originalChrome === undefined) delete globalThis.chrome; else globalThis.chrome = originalChrome;
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation;
+  });
+  const document = {
+    activeElement: null,
+    createElement(tagName) { return new RuntimeElement(tagName, document); },
+    querySelector(selector) { return selector === '#panel-root' ? document.root : null; },
+  };
+  document.root = new RuntimeElement('main', document);
+  const ports = [];
+  const chrome = {
+    runtime: {
+      id: 'abcdefghijklmnopabcdefghijklmnop',
+      connect({ name }) {
+        const port = {
+          name, posted: [], onMessage: runtimeEvent(), onDisconnect: runtimeEvent(),
+          postMessage(message) { this.posted.push(structuredClone(message)); }, disconnect() {},
+        };
+        ports.push(port);
+        return port;
+      },
+    },
+  };
+  globalThis.document = document;
+  globalThis.chrome = chrome;
+  globalThis.location = { href: `chrome-extension://${chrome.runtime.id}/src/panel/index.html?launch=${'A'.repeat(43)}` };
+
+  await import(`../../src/panel/panel.js?batch-start=${Date.now()}`);
+  const port = ports[0];
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null,
+  });
+  const personaPrepare = port.posted.find(packet => packet?.envelope?.type === 'PREPARE_PANEL_PERSONA_CAPABILITY');
+  if (personaPrepare) port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: personaPrepare.requestId,
+    response: { ok: false, code: 'PERSONA_NOT_FOUND' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  await document.root.querySelector('button[data-intent="OPEN_BATCH_FORM"]').dispatch('click');
+  let textarea = document.root.querySelector('textarea[id="audit-urls"]');
+  const rejectedUrls = 'https://one.example/private?token=alpha\nfile:///private';
+  textarea.value = rejectedUrls;
+  await textarea.dispatch('input');
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null,
+  });
+  textarea = document.root.querySelector('textarea[id="audit-urls"]');
+  assert.equal(textarea.value, rejectedUrls, 'a benign re-render keeps a draft before its first submit');
+  await document.root.querySelector('form[id="batch-audit-form"]').dispatch('submit');
+  textarea = document.root.querySelector('textarea[id="audit-urls"]');
+  assert.equal(textarea.value, rejectedUrls, 'safe validation re-render keeps the transient text only in the DOM/runtime');
+  assert.match(document.root.textContent, /Linha 2/u);
+  assert.doesNotMatch(document.root.textContent, /token=alpha|file:\/\/\/private/u);
+  textarea.value = [
+    'https://one.example/private?token=alpha',
+    'https://two.example/private?token=beta',
+    'https://one.example/private?token=alpha',
+  ].join('\n');
+  await document.root.querySelector('form[id="batch-audit-form"]').dispatch('submit');
+  const prepare = port.posted.find(packet => packet?.envelope?.type === 'PREPARE_PANEL_NAVIGATION_CAPABILITY');
+  assert.deepEqual(prepare.envelope, {
+    type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: prepare.envelope.requestId, intent: 'batch',
+  });
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: prepare.requestId,
+    response: { ok: true, requestId: prepare.envelope.requestId, capabilityId: 'C'.repeat(22) },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const start = port.posted.find(packet => packet?.envelope?.type === 'PANEL_START_BATCH_AUDIT');
+  assert.deepEqual(start.envelope, {
+    type: 'PANEL_START_BATCH_AUDIT', capabilityId: 'C'.repeat(22),
+    urls: [
+      'https://one.example/private?token=alpha',
+      'https://two.example/private?token=beta',
+      'https://one.example/private?token=alpha',
+    ].join('\n'),
+    captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
+  });
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: start.requestId,
+    response: {
+      ok: true, auditId: 'audit-batch-1', state: 'running', total: 2,
+      warnings: [{
+        line: 3, code: 'DUPLICATE_URL', firstLine: 1,
+        message: 'A URL repete uma entrada anterior e não será auditada novamente.',
+      }],
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(document.root.querySelector('[data-screen="running"]'));
+  assert.match(document.root.textContent, /Avaliando lote/u);
+  assert.match(document.root.textContent, /2 páginas/u);
+  assert.match(document.root.textContent, /Linha 3/u);
+  assert.doesNotMatch(document.root.textContent, /token=alpha|token=beta/u);
 });
 
 test('does not start residual URL navigation when the form closes before PREPARE resolves', async t => {
@@ -789,6 +942,22 @@ test('projects only canonical progress from the current worker and audit', () =>
       ...message, phase: 'complete', message: 'Auditoria concluída', percent: 100,
     }],
   ]) assert.equal(projectPanelAuditProgressEvent(event, sender, runtime, 'audit-1'), null);
+
+  const batch = {
+    type: 'AUDIT_PROGRESS', auditId: 'audit-1', sessionId: 'audit-1', phase: 'batch-page',
+    message: 'Página 2 de 3: auditoria em andamento.', percent: 50, pageNumber: 2, total: 3,
+    at: '2026-09-01T12:00:01.000Z', statusCounts: { complete: 1, partial: 0, failed: 0, cancelled: 0 },
+  };
+  assert.deepEqual(projectPanelAuditProgressEvent(
+    batch, { id: runtime.id, url: runtime.workerUrl }, runtime, 'audit-1',
+  ), {
+    type: 'AUDIT_PROGRESS', auditId: 'audit-1', sessionId: 'audit-1', phase: 'batch-page',
+    message: batch.message, percent: 50, pageNumber: 2, total: 3, at: batch.at,
+  });
+  assert.equal(projectPanelAuditProgressEvent(
+    { ...batch, message: 'PRIVATE https://secret.example/?token=raw' },
+    { id: runtime.id, url: runtime.workerUrl }, runtime, 'audit-1',
+  ), null);
 });
 
 test('clears the matching in-memory result when the worker confirms audit deletion', () => {

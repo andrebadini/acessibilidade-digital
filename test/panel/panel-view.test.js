@@ -403,6 +403,89 @@ test('initial screen exposes three described radio modes and emits only a safe l
   assert.match(root.textContent, /Lote de páginas/u);
 });
 
+test('batch form keeps URLs transient, explains the bounded list, and exposes only no-pixels', () => {
+  const input = fixture();
+  input.state = {
+    ...input.state, screen: 'initial', auditId: null, entryMode: 'batch', entryError: null,
+    auditSource: null, captureMode: 'no-pixels', sessionStatus: null,
+    batch: { total: null, pageNumber: null, warnings: [], errors: [] },
+    privacy: { mode: null, categories: [], message: null, confirmationPending: false },
+  };
+  const emitted = [];
+  const view = buildPanelView({ state: input.state });
+  assert.equal(Object.hasOwn(view, 'urls'), false);
+  const root = renderPanelView({
+    view, document: new TestDocument(), onIntent: intent => emitted.push(intent), onEvent() {},
+  });
+  const form = root.querySelector('form[id="batch-audit-form"]');
+  const urls = root.querySelector('textarea[id="audit-urls"]');
+  const submit = root.querySelector('button[data-intent="START_BATCH"]');
+  assert.ok(form);
+  assert.ok(urls);
+  assert.equal(urls.getAttribute('name'), 'batch-urls');
+  assert.equal(urls.hasAttribute('required'), true);
+  assert.equal(submit.textContent, 'Avaliar páginas');
+  assert.match(root.textContent, /2 a 20 URLs HTTP\/HTTPS/u);
+  assert.match(root.textContent, /uma por linha/u);
+  assert.match(root.textContent, /não segue links/u);
+  assert.doesNotMatch(root.textContent, /pode capturar pixels/u);
+  assert.equal(root.querySelectorAll('input[data-capture-mode]').length, 1);
+  assert.equal(root.querySelector('input[data-capture-mode="no-pixels"]').checked, true);
+  assert.equal(root.querySelector('input[data-capture-mode="full-evidence"]'), null);
+  assert.ok(root.querySelector('button[data-intent="CLOSE_BATCH_FORM"]'));
+
+  urls.value = 'https://one.example/private?token=alpha\nhttps://two.example/private?token=beta';
+  form.dispatch('submit');
+  assert.deepEqual(emitted, [{
+    type: 'START_BATCH',
+    urls: 'https://one.example/private?token=alpha\nhttps://two.example/private?token=beta',
+  }]);
+  assert.doesNotMatch(JSON.stringify(view), /token=alpha|token=beta/u);
+});
+
+test('batch errors and running progress show only safe line numbers, totals, and warnings', () => {
+  const input = fixture();
+  input.state = {
+    ...input.state, screen: 'initial', auditId: null, entryMode: 'batch', entryError: 'invalid-lines',
+    auditSource: null, captureMode: 'no-pixels', sessionStatus: null,
+    batch: {
+      total: null, pageNumber: null, warnings: [],
+      errors: [{ line: 2, code: 'invalid' }, { line: 4, code: 'too-long' }],
+    },
+  };
+  let root = renderPanelView({
+    view: buildPanelView({ state: input.state }), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  assert.match(root.textContent, /linhas indicadas/u);
+  assert.match(root.textContent, /Linha 2/u);
+  assert.match(root.textContent, /Linha 4/u);
+  assert.doesNotMatch(root.textContent, /secret\.example|token=/u);
+
+  input.state = {
+    ...input.state, screen: 'running', auditId: 'audit-batch-1', entryError: null, auditSource: 'batch',
+    progress: {
+      phase: 'batch-page', message: 'Página 1 de 2: auditoria em andamento.', percent: 25,
+      at: '2026-09-01T12:00:00.000Z',
+    },
+    batch: {
+      total: 2, pageNumber: 1, errors: [], warnings: [{
+        line: 3, code: 'DUPLICATE_URL', firstLine: 1,
+        message: 'A URL repete uma entrada anterior e não será auditada novamente.',
+      }],
+    },
+  };
+  root = renderPanelView({
+    view: buildPanelView({ state: input.state }), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  assert.match(root.textContent, /Avaliando lote/u);
+  assert.match(root.textContent, /Página 1 de 2/u);
+  assert.match(root.textContent, /Linha 3/u);
+  assert.match(root.textContent, /linha 1/u);
+  const batchProgress = root.querySelector('[data-page-number="1"][data-total="2"]');
+  assert.ok(batchProgress);
+  assert.match(root.querySelector('[role="status"]').textContent, /Página 1 de 2/u);
+});
+
 test('single-URL form keeps the typed value transient and enables all three explicit modes', () => {
   for (const mode of ['full-evidence', 'element-only', 'no-pixels']) {
     const input = fixture();

@@ -1,5 +1,6 @@
 const MAX_ENVELOPE_BYTES = 4096;
 const MAX_REVIEW_DECISION_ENVELOPE_BYTES = 24 * 1024;
+const MAX_BATCH_ENVELOPE_BYTES = 164 * 1024;
 const OPAQUE_ID = /^[A-Za-z0-9_-]{20,240}$/u;
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const REVIEW_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
@@ -14,7 +15,8 @@ const CAPTURE_MODES = new Set(['full-evidence', 'element-only', 'no-pixels']);
 const PIXEL_CAPTURE_MODES = new Set(['full-evidence', 'element-only']);
 const PANEL_PORT_TYPES = new Set([
   'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_NAVIGATION_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
-  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_URL_AUDIT', 'CONFIRM_PIXEL_CAPTURE', 'PANEL_CONFIRM_PIXEL_CAPTURE',
+  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_URL_AUDIT', 'PANEL_START_BATCH_AUDIT',
+  'CONFIRM_PIXEL_CAPTURE', 'PANEL_CONFIRM_PIXEL_CAPTURE',
   'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
   'PANEL_SET_PERSONA_MODE', 'PANEL_READER_STATE', 'PANEL_READER_ACTION',
   'PANEL_READER_ENABLE_VOICE',
@@ -31,6 +33,7 @@ const MESSAGE_SCHEMAS = deepFreeze({
   PREPARE_PANEL_PERSONA_CAPABILITY: ['type', 'requestId', 'windowId'],
   PANEL_START_ATTACHED_AUDIT: ['type', 'capabilityId', 'captureMode', 'includeQuery', 'deleteAfterCompleteExport', 'windowId'],
   PANEL_START_URL_AUDIT: ['type', 'capabilityId', 'url', 'captureMode', 'includeQuery', 'deleteAfterCompleteExport', 'windowId'],
+  PANEL_START_BATCH_AUDIT: ['type', 'capabilityId', 'urls', 'captureMode', 'includeQuery', 'deleteAfterCompleteExport', 'windowId'],
   CONFIRM_PIXEL_CAPTURE: ['type', 'sessionCapabilityId', 'auditId', 'consentId', 'mode', 'accepted', 'windowId'],
   PANEL_CONFIRM_PIXEL_CAPTURE: ['type', 'sessionCapabilityId', 'auditId', 'mode', 'accepted', 'windowId'],
   PANEL_START_PERSONA: ['type', 'capabilityId', 'mode', 'windowId'],
@@ -72,7 +75,9 @@ export function parseWorkerMessage(message) {
   if (byteLength === null) return failure('INVALID_MESSAGE');
   const maximumBytes = copy.type === 'REPORT_COMMIT_REVIEW_DECISION'
     ? MAX_REVIEW_DECISION_ENVELOPE_BYTES
-    : MAX_ENVELOPE_BYTES;
+    : copy.type === 'PANEL_START_BATCH_AUDIT'
+      ? MAX_BATCH_ENVELOPE_BYTES
+      : MAX_ENVELOPE_BYTES;
   if (byteLength > maximumBytes) return failure('MESSAGE_TOO_LARGE');
   if (!validWorkerEnvelope(copy)) return failure('INVALID_MESSAGE');
   return deepFreeze({ ok: true, value: copy });
@@ -104,7 +109,7 @@ function hasFlatPrimitiveShape(value) {
 
 function validWorkerEnvelope(value) {
   if (value.type === 'PREPARE_PANEL_NAVIGATION_CAPABILITY') {
-    return validAuditId(value.requestId) && value.intent === 'single' && safeChromeId(value.windowId);
+    return validAuditId(value.requestId) && ['single', 'batch'].includes(value.intent) && safeChromeId(value.windowId);
   }
   if (['PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY'].includes(value.type)) {
     return validAuditId(value.requestId) && safeChromeId(value.windowId);
@@ -116,6 +121,11 @@ function validWorkerEnvelope(value) {
   if (value.type === 'PANEL_START_URL_AUDIT') {
     return validOpaqueId(value.capabilityId) && boundedCanonicalText(value.url, 2_048, false) &&
       CAPTURE_MODES.has(value.captureMode) && value.includeQuery === false &&
+      value.deleteAfterCompleteExport === false && safeChromeId(value.windowId);
+  }
+  if (value.type === 'PANEL_START_BATCH_AUDIT') {
+    return validOpaqueId(value.capabilityId) && boundedCanonicalText(value.urls, 41_000, false) &&
+      value.captureMode === 'no-pixels' && value.includeQuery === false &&
       value.deleteAfterCompleteExport === false && safeChromeId(value.windowId);
   }
   if (value.type === 'CONFIRM_PIXEL_CAPTURE') {

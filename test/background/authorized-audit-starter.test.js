@@ -12,6 +12,7 @@ import {
 import { AUDIT_EXECUTION_INTERNAL } from '../../src/background/chrome-adapter.js';
 import { createPanelLaunchAuthority } from '../../src/background/panel-launch-authority.js';
 import { runAttachedAuditExecution, runAudit } from '../../src/background/run-audit.js';
+import { runBatch } from '../../src/background/run-batch.js';
 import {
   PANEL_PORT_NAME,
   createPanelPortCoordinator,
@@ -22,6 +23,7 @@ import {
   createTargetCapabilityAuthority,
   readAttachedAuditCorrelationForRecovery,
   readAuditSessionForWorker,
+  readBatchAuditCorrelationForRecovery,
   readNavigationAuditCorrelationForRecovery,
   navigationCapabilityStorageKey,
   sessionCapabilityStorageKey,
@@ -38,6 +40,7 @@ import { createPixelCaptureStateV1 } from '../../src/background/pixel-capture-co
 import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-commit-clock.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
+import { normalizeUrlList } from '../../src/core/batch/normalize-url-list.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { reportInput } from '../report/helpers.js';
 
@@ -197,6 +200,46 @@ async function reportFixture(auditId, status = 'partial') {
       startedAt: page.attempted ? page.timestamps.startedAt : null,
       rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion,
       inventoryHash: inventory.sha256, outcomes: [],
+    })),
+  };
+  return { model, checkpoint, inventory };
+}
+
+async function batchReportFixture(auditId) {
+  let tick = 0;
+  const now = () => new Date(Date.UTC(2026, 8, 1, 12, 0, tick++)).toISOString();
+  const entries = normalizeUrlList('https://one.example.test/\nhttps://two.example.test/').entries;
+  const model = await runBatch({
+    entries,
+    batchAuditId: auditId,
+    runner: async options => reportInput({
+      auditId: options.idFactory(),
+      requestedUrl: options.url,
+      finalUrl: options.url,
+      timestamps: { startedAt: now(), endedAt: now(), generatedAt: now() },
+    }),
+    chromeAdapter: {
+      async emitProgress() {},
+      async handoffReport() { return { reviewUrl: null }; },
+    },
+    now,
+    reportOptions: {
+      timezone: 'America/Cuiaba', manifestVersion: '1.0.5', rulesVersion: '1.0.0',
+      browserVersion: 'Chrome/152.0.0.0', expectedExtensionId: 'abcdefghijklmnopabcdefghijklmnop',
+    },
+  });
+  const inventory = await createInstalledCoreRuleInventory();
+  const checkpoint = {
+    version: 1,
+    auditId,
+    pages: model.pages.map(page => ({
+      pageId: page.pageId,
+      attempted: page.attempted,
+      startedAt: page.attempted ? page.timestamps.startedAt : null,
+      rulesVersion: inventory.rulesVersion,
+      inventoryVersion: inventory.inventoryVersion,
+      inventoryHash: inventory.sha256,
+      outcomes: [],
     })),
   };
   return { model, checkpoint, inventory };
@@ -1466,6 +1509,58 @@ test('single-URL start persists bootstrap and active job before execution, then 
   });
   assert.doesNotMatch(JSON.stringify({ latest: area.values['latest'], report: reportByAudit.get(auditId) }),
     /token=raw|TTTTTTTTTTTTTTTTTTTTTT|owner_O|hmac-sha256:D/iu);
+});
+
+test('batch start persists one active session, commits the consolidated report, and leaves no active owner', async () => {
+  const area = sessionArea();
+  const { authority, senderContext } = await authorityFixture(area);
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'batch', senderContext });
+  const auditId = 'audit-batch-report';
+  const report = await batchReportFixture(auditId);
+  const order = [];
+  const reportByAudit = new Map();
+  const dependencies = dependencyFixture({
+    area, authority, order, reportByAudit,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RUN'); };
+  dependencies.clearUrlAuditResources = async () => true;
+  dependencies.runBatchAuditExecution = async args => {
+    order.push('run-batch');
+    const active = await readActiveAuditJobForWorker({ sessionArea: area });
+    assert.equal(active.auditId, auditId);
+    assert.equal(active.mode, 'batch');
+    assert.equal(args.acceptedCount, 2);
+    await args.onCheckpoint(report.checkpoint);
+    return Object.freeze({ model: report.model, checkpoint: report.checkpoint });
+  };
+  dependencies.clearBatchAuditResources = async () => true;
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedBatchAudit({
+    capabilityId: prepared.capabilityId,
+    auditId,
+    senderContext,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    async preparePlan() {
+      assert.equal(area.values['audita:start-journal:v1']?.state, 'prepared');
+      order.push('prepare-batch-queue');
+      return { kind: 'batch', queueId: auditId, acceptedCount: 2 };
+    },
+  });
+
+  assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
+  assert.deepEqual(await started.completion, { ok: true, auditId, state: 'result', revision: 1 });
+  assert.equal(reportByAudit.has(auditId), true);
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+  const session = await readAuditSessionForWorker({
+    sessionArea: area, sessionCapabilityId: started.sessionCapabilityId, auditId,
+  });
+  assert.equal(session.mode, 'batch');
+  assert.equal(session.state, 'result');
+  assert.deepEqual(session.targetBinding, { kind: 'batch', activePageId: null, activeOwnershipId: null });
+  assert.equal(order.indexOf('prepare-batch-queue') < order.indexOf('run-batch'), true);
+  assert.equal(order.includes('run-batch'), true);
 });
 
 test('single-URL terminal preparation failure removes its retained owner instead of revoking without a report', async () => {
@@ -4536,4 +4631,277 @@ test('active-job reader denies storage envelope drift and never returns the firs
   };
   await assert.rejects(readActiveAuditJobForWorker({ sessionArea: area }), error => error?.message === 'ACTIVE_AUDIT_JOB_DENIED');
   assert.equal(reads, 2);
+});
+
+test('restart cleans correlated batch resources before revoking and removing a running ACTIVE', async () => {
+  const area = sessionArea();
+  const { authority, senderContext } = await authorityFixture(area);
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'batch', senderContext });
+  const auditId = 'audit-batch-restart-running';
+  const claimed = await authority.claimNavigationAndIssueAuditSession({
+    capabilityId: prepared.capabilityId,
+    auditId,
+    ownershipId: null,
+    intent: 'batch',
+    senderContext,
+  });
+  assert.equal(claimed.ok, true);
+  const ownershipId = `owner_${'R'.repeat(22)}`;
+  assert.equal((await authority.transitionBatchAuditSession({
+    sessionCapabilityId: claimed.sessionCapabilityId,
+    auditId,
+    fromPageId: null,
+    fromOwnershipId: null,
+    toPageId: 'page-1',
+    toOwnershipId: ownershipId,
+  })).ok, true);
+  area.values[ACTIVE_AUDIT_JOB_KEY] = {
+    version: 1,
+    auditId,
+    capabilityId: prepared.capabilityId,
+    sessionCapabilityId: claimed.sessionCapabilityId,
+    windowId: 9,
+    mode: 'batch',
+    state: 'running',
+    commitState: 'none',
+    expectedTerminalRevision: null,
+    createdAt: EPOCH + 1,
+    updatedAt: EPOCH + 1,
+  };
+  const cleanupCalls = [];
+  const dependencies = dependencyFixture({
+    area,
+    authority,
+    execution: async () => { throw new Error('RECOVERY_MUST_NOT_RERUN_COLLECTION'); },
+  });
+  dependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RUN'); };
+  dependencies.clearUrlAuditResources = async () => true;
+  dependencies.runBatchAuditExecution = async () => { throw new Error('BATCH_EXECUTION_MUST_NOT_RESTART'); };
+  dependencies.clearBatchAuditResources = async request => {
+    cleanupCalls.push(structuredClone(request));
+    const correlation = await readBatchAuditCorrelationForRecovery({
+      sessionArea: area,
+      capabilityId: request.capabilityId,
+      auditId: request.auditId,
+    });
+    const cleared = await authority.transitionBatchAuditSession({
+      sessionCapabilityId: request.sessionCapabilityId,
+      auditId: request.auditId,
+      fromPageId: correlation.activePageId,
+      fromOwnershipId: correlation.activeOwnershipId,
+      toPageId: null,
+      toOwnershipId: null,
+    });
+    return cleared.ok === true;
+  };
+
+  assert.deepEqual(await createAuthorizedAuditStarter(dependencies).recoverAuthorizedAuditLifecycle(), {
+    ok: true,
+    state: 'interrupted',
+    auditId,
+    revision: null,
+  });
+  assert.deepEqual(cleanupCalls, [{
+    auditId,
+    capabilityId: prepared.capabilityId,
+    sessionCapabilityId: claimed.sessionCapabilityId,
+    windowId: 9,
+  }]);
+  const session = await readAuditSessionForWorker({
+    sessionArea: area,
+    sessionCapabilityId: claimed.sessionCapabilityId,
+    auditId,
+  });
+  assert.equal(session.state, 'revoked');
+  assert.deepEqual(session.targetBinding, {
+    kind: 'batch',
+    activePageId: null,
+    activeOwnershipId: null,
+  });
+  const correlation = await readBatchAuditCorrelationForRecovery({
+    sessionArea: area,
+    capabilityId: prepared.capabilityId,
+    auditId,
+  });
+  assert.equal(correlation.capabilityState, 'invalidated');
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+});
+
+test('live batch cancellation aborts execution, cleans resources and settles the session as revoked', async () => {
+  const area = sessionArea();
+  const { authority, senderContext } = await authorityFixture(area);
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'batch', senderContext });
+  const auditId = 'audit-batch-live-cancel';
+  let announceExecution;
+  const executionEntered = new Promise(resolve => { announceExecution = resolve; });
+  const cleanupCalls = [];
+  const dependencies = dependencyFixture({
+    area,
+    authority,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RUN'); };
+  dependencies.clearUrlAuditResources = async () => true;
+  dependencies.runBatchAuditExecution = async ({ signal }) => {
+    announceExecution();
+    await new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+    throw new Error('UNREACHABLE_BATCH_EXECUTION');
+  };
+  dependencies.clearBatchAuditResources = async request => {
+    cleanupCalls.push(structuredClone(request));
+    return true;
+  };
+  const starter = createAuthorizedAuditStarter(dependencies);
+  const started = await starter.beginAuthorizedBatchAudit({
+    capabilityId: prepared.capabilityId,
+    auditId,
+    senderContext,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    async preparePlan() { return { kind: 'batch', queueId: auditId, acceptedCount: 2 }; },
+  });
+  assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
+  await executionEntered;
+
+  assert.deepEqual(await starter.abortAuthorizedAudit({
+    auditId,
+    sessionCapabilityId: started.sessionCapabilityId,
+    windowId: 9,
+    reasonCode: 'USER_CANCELLED',
+  }), { ok: true, auditId, state: 'cancelling' });
+  assert.deepEqual(await started.completion, {
+    ok: true,
+    auditId,
+    state: 'revoked',
+    code: 'AUDIT_REVOKED',
+  });
+  assert.equal(cleanupCalls.length, 1);
+  assert.deepEqual(cleanupCalls[0], {
+    auditId,
+    capabilityId: prepared.capabilityId,
+    sessionCapabilityId: started.sessionCapabilityId,
+    windowId: 9,
+  });
+  const session = await readAuditSessionForWorker({
+    sessionArea: area,
+    sessionCapabilityId: started.sessionCapabilityId,
+    auditId,
+  });
+  assert.equal(session.state, 'revoked');
+  const correlation = await readBatchAuditCorrelationForRecovery({
+    sessionArea: area,
+    capabilityId: prepared.capabilityId,
+    auditId,
+  });
+  assert.equal(correlation.capabilityState, 'invalidated');
+  assert.deepEqual({
+    activePageId: correlation.activePageId,
+    activeOwnershipId: correlation.activeOwnershipId,
+  }, {
+    activePageId: null,
+    activeOwnershipId: null,
+  });
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+});
+
+test('claimed batch start keeps its journal until interrupted recovery is fully confirmed', async () => {
+  const area = sessionArea();
+  const { authority, senderContext } = await authorityFixture(area);
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'batch', senderContext });
+  const auditId = 'audit-batch-claimed-retry';
+  const claimed = await authority.claimNavigationAndIssueAuditSession({
+    capabilityId: prepared.capabilityId,
+    auditId,
+    ownershipId: null,
+    intent: 'batch',
+    senderContext,
+  });
+  assert.equal(claimed.ok, true);
+  const journalKey = 'audita:start-journal:v1';
+  area.values[journalKey] = {
+    version: 1, capabilityId: prepared.capabilityId, auditId, windowId: 9,
+    mode: 'batch', state: 'claimed', sessionCapabilityId: claimed.sessionCapabilityId,
+    createdAt: EPOCH + 1, updatedAt: EPOCH + 1,
+  };
+  let cleanupAttempts = 0;
+  const dependencies = dependencyFixture({
+    area, authority,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RUN'); };
+  dependencies.clearUrlAuditResources = async () => true;
+  dependencies.runBatchAuditExecution = async () => { throw new Error('BATCH_EXECUTION_MUST_NOT_RUN'); };
+  dependencies.clearBatchAuditResources = async () => {
+    cleanupAttempts += 1;
+    return cleanupAttempts > 1;
+  };
+  const starter = createAuthorizedAuditStarter(dependencies);
+
+  assert.deepEqual(await starter.recoverAuthorizedAuditLifecycle(), {
+    ok: false, state: 'blocked', auditId: null, revision: null, code: 'AUDIT_RECOVERY_REQUIRED',
+  });
+  assert.equal(area.values[journalKey]?.auditId, auditId);
+  assert.equal(area.values[journalKey]?.state, 'claimed');
+
+  assert.deepEqual(await starter.recoverAuthorizedAuditLifecycle(), {
+    ok: true, state: 'interrupted', auditId, revision: null,
+  });
+  assert.equal(cleanupAttempts, 2);
+  assert.equal(Object.hasOwn(area.values, journalKey), false);
+  const session = await readAuditSessionForWorker({
+    sessionArea: area, sessionCapabilityId: claimed.sessionCapabilityId, auditId,
+  });
+  assert.equal(session.state, 'revoked');
+});
+
+test('restart blocks a durable privacy-paused ACTIVE in batch mode without touching cleanup resources', async () => {
+  const area = sessionArea();
+  const { authority } = await authorityFixture(area);
+  const hostile = {
+    version: 1,
+    auditId: 'audit-batch-illegal-pause',
+    capabilityId: 'A'.repeat(22),
+    sessionCapabilityId: 'B'.repeat(22),
+    windowId: 9,
+    mode: 'batch',
+    state: 'privacy-paused',
+    commitState: 'none',
+    expectedTerminalRevision: null,
+    createdAt: EPOCH,
+    updatedAt: EPOCH,
+  };
+  area.values[ACTIVE_AUDIT_JOB_KEY] = structuredClone(hostile);
+  let cleanupCalls = 0;
+  const dependencies = dependencyFixture({
+    area,
+    authority,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RUN'); };
+  dependencies.clearUrlAuditResources = async () => true;
+  dependencies.runBatchAuditExecution = async () => { throw new Error('BATCH_EXECUTION_MUST_NOT_RUN'); };
+  dependencies.clearBatchAuditResources = async () => {
+    cleanupCalls += 1;
+    return true;
+  };
+
+  assert.deepEqual(await createAuthorizedAuditStarter(dependencies).recoverAuthorizedAuditLifecycle(), {
+    ok: false,
+    state: 'blocked',
+    auditId: null,
+    revision: null,
+    code: 'AUDIT_RECOVERY_REQUIRED',
+  });
+  assert.equal(cleanupCalls, 0);
+  assert.deepEqual(area.values[ACTIVE_AUDIT_JOB_KEY], hostile);
+  await assert.rejects(
+    readActiveAuditJobForWorker({ sessionArea: area }),
+    error => error?.message === 'ACTIVE_AUDIT_JOB_DENIED',
+  );
 });

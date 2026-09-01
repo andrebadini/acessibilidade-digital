@@ -72,6 +72,7 @@ test('creates an immutable initial screen with only stable interaction state', (
     sessionStatus: null,
     privacy: { mode: null, categories: [], message: null, confirmationPending: false },
     progress: { phase: null, message: null, percent: null, at: null },
+    batch: { total: null, pageNumber: null, warnings: [], errors: [] },
     filters: { impact: [], wcag: [], abnt: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,
@@ -87,6 +88,101 @@ test('creates an immutable initial screen with only stable interaction state', (
   assert.equal(Object.isFrozen(state), true);
   assert.equal(Object.isFrozen(state.filters.impact), true);
   assert.equal(Object.hasOwn(state, 'sessionCapabilityId'), false);
+});
+
+test('batch entry stores only safe line diagnostics and starts only in no-pixels mode', () => {
+  const initial = createInitialPanelState();
+  const opened = reducePanelState(initial, { type: 'BATCH_FORM_OPENED' });
+  assert.equal(opened.entryMode, 'batch');
+  assert.equal(opened.captureMode, 'no-pixels');
+  assert.equal(opened.focusId, 'audit-urls');
+
+  assert.strictEqual(reducePanelState(opened, {
+    type: 'CAPTURE_MODE_SELECTED', mode: 'full-evidence', focusId: 'capture-mode-full-evidence',
+  }), opened, 'batch mode is fixed to no-pixels even for synthetic events');
+
+  const rejected = reducePanelState(opened, {
+    type: 'BATCH_ENTRY_REJECTED', code: 'invalid-lines', lines: [
+      { line: 2, code: 'invalid' }, { line: 4, code: 'too-long' },
+    ],
+  });
+  assert.equal(rejected.entryError, 'invalid-lines');
+  assert.deepEqual(rejected.batch.errors, [
+    { line: 2, code: 'invalid' }, { line: 4, code: 'too-long' },
+  ]);
+  assert.strictEqual(reducePanelState(opened, {
+    type: 'BATCH_ENTRY_REJECTED', code: 'invalid-lines',
+    lines: [{ line: 2, code: 'invalid', url: 'https://secret.example/?token=raw' }],
+  }), opened);
+
+  const requested = reducePanelState(opened, { type: 'START_REQUESTED', source: 'batch' });
+  assert.equal(requested.screen, 'running');
+  assert.equal(requested.auditSource, 'batch');
+  assert.equal(requested.captureMode, 'no-pixels');
+  assert.equal(Object.hasOwn(requested, 'urls'), false);
+  assert.strictEqual(reducePanelState(opened, {
+    type: 'START_REQUESTED', source: 'batch', urls: 'https://secret.example/?token=raw',
+  }), opened);
+
+  const warning = {
+    line: 3, code: 'DUPLICATE_URL', firstLine: 1,
+    message: 'A URL repete uma entrada anterior e não será auditada novamente.',
+  };
+  const started = reducePanelState(requested, {
+    type: 'BATCH_STARTED', auditId: 'audit-batch-1', total: 2, warnings: [warning],
+  });
+  assert.equal(started.auditId, 'audit-batch-1');
+  assert.deepEqual(started.batch, { total: 2, pageNumber: 0, warnings: [warning], errors: [] });
+  assert.doesNotMatch(JSON.stringify(started), /secret\.example|token=raw/iu);
+
+  const progress = reducePanelState(started, {
+    type: 'AUDIT_PROGRESS', auditId: 'audit-batch-1', sessionId: 'audit-batch-1',
+    phase: 'batch-page', message: 'Página 1 de 2: auditoria em andamento.', percent: 25,
+    pageNumber: 1, total: 2, at: '2026-09-01T12:00:00.000Z',
+  });
+  assert.equal(progress.batch.pageNumber, 1);
+  assert.equal(progress.batch.total, 2);
+  assert.equal(progress.progress.percent, 25);
+
+  const prepared = reducePanelState(requested, { type: 'BATCH_PREPARED', total: 2 });
+  assert.deepEqual(prepared.batch, { total: 2, pageNumber: 0, warnings: [], errors: [] });
+  const authoritative = reducePanelState(prepared, { type: 'AUDIT_RUNNING', auditId: 'audit-batch-race' });
+  const earlyProgress = reducePanelState(authoritative, {
+    type: 'AUDIT_PROGRESS', auditId: 'audit-batch-race', sessionId: 'audit-batch-race',
+    phase: 'batch-page', message: 'Página 1 de 2: auditoria em andamento.', percent: 10,
+    pageNumber: 1, total: 2, at: '2026-09-01T12:00:00.000Z',
+  });
+  assert.equal(earlyProgress.batch.pageNumber, 1);
+  const reconciled = reducePanelState(earlyProgress, {
+    type: 'BATCH_STARTED', auditId: 'audit-batch-race', total: 2, warnings: [{
+      line: 23, code: 'DUPLICATE_URL', firstLine: 1,
+      message: 'A URL repete uma entrada anterior e não será auditada novamente.',
+    }],
+  });
+  assert.equal(reconciled.auditId, 'audit-batch-race');
+  assert.equal(reconciled.batch.total, 2, 'the exact start response can enrich an earlier authoritative running bootstrap');
+  assert.equal(reconciled.batch.pageNumber, 1, 'the exact start response does not erase progress received first');
+  assert.equal(reconciled.progress.percent, 10);
+  assert.equal(reconciled.batch.warnings[0].line, 23, 'blank input lines do not make safe line numbers invalid');
+  assert.strictEqual(reducePanelState(authoritative, {
+    type: 'BATCH_STARTED', auditId: 'another-audit', total: 2, warnings: [],
+  }), authoritative);
+
+  const rehydrated = reducePanelState(createInitialPanelState(), {
+    type: 'AUDIT_RUNNING', auditId: 'audit-batch-rehydrated',
+  });
+  const inferredBatch = reducePanelState(rehydrated, {
+    type: 'AUDIT_PROGRESS', auditId: 'audit-batch-rehydrated', sessionId: 'audit-batch-rehydrated',
+    phase: 'batch-page', message: 'Página 1 de 2: auditoria em andamento.', percent: 5,
+    pageNumber: 1, total: 2, at: '2026-09-01T12:00:00.000Z',
+  });
+  assert.equal(inferredBatch.auditSource, 'batch');
+  assert.equal(inferredBatch.captureMode, 'no-pixels');
+  assert.deepEqual(inferredBatch.batch, { total: 2, pageNumber: 1, warnings: [], errors: [] });
+
+  const closed = reducePanelState(opened, { type: 'BATCH_FORM_CLOSED' });
+  assert.equal(closed.entryMode, 'sources');
+  assert.deepEqual(closed.batch, { total: null, pageNumber: null, warnings: [], errors: [] });
 });
 
 test('single-URL entry state never stores private correlation and starts each explicit capture mode', () => {
@@ -277,6 +373,7 @@ test('unknown and invalid events return a detached recursively frozen valid stat
     captureMode: 'no-pixels', sessionStatus: null,
     privacy: { mode: null, categories: [], message: null, confirmationPending: false },
     progress: { phase: null, message: null, percent: null, at: null },
+    batch: { total: null, pageNumber: null, warnings: [], errors: [] },
     filters: { impact: ['critical'], wcag: [], abnt: [] },
     selectedOccurrenceId: 'occ-1', evidenceExpanded: false,
     persona: {
@@ -391,6 +488,7 @@ test('port interruption and retry preserve only the last safe audit ID', () => {
     sessionStatus: null,
     privacy: { mode: null, categories: [], message: null, confirmationPending: false },
     progress: { phase: null, message: null, percent: null, at: null },
+    batch: { total: null, pageNumber: null, warnings: [], errors: [] },
     filters: { impact: [], wcag: [], abnt: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,

@@ -7,6 +7,11 @@ import {
   classifyPanelResultV1,
   deriveResultContextV1,
 } from './panel-result-contract.js';
+import {
+  INTERACTIVE_PANEL_LIMITATION,
+  MAX_INTERACTIVE_PANEL_CARDS,
+  MAX_INTERACTIVE_PANEL_OCCURRENCES,
+} from './panel-projection-policy.js';
 
 const COVERED_OUTCOMES = new Set(['passed', 'failed', 'inapplicable']);
 const GROUP_NAMES = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
@@ -232,6 +237,48 @@ function buildGroups(model, checkpoint, verifiedInventory) {
   return groups;
 }
 
+function projectInteractiveGroups(groups, model) {
+  const occurrenceById = new Map(model.occurrences.map(occurrence => [occurrence.occurrenceId, occurrence]));
+  const projected = { failed: [], alerts: [], humanReview: [], passed: [] };
+  let cardCount = 0;
+  let occurrenceCount = 0;
+  let limited = false;
+
+  for (const groupName of GROUP_NAMES) {
+    for (const card of groups[groupName]) {
+      if (cardCount >= MAX_INTERACTIVE_PANEL_CARDS) {
+        limited = true;
+        continue;
+      }
+      if (card.occurrenceIds.length === 0) {
+        projected[groupName].push(card);
+        cardCount += 1;
+        continue;
+      }
+      const remaining = MAX_INTERACTIVE_PANEL_OCCURRENCES - occurrenceCount;
+      if (remaining <= 0) {
+        limited = true;
+        continue;
+      }
+      const occurrenceIds = card.occurrenceIds.slice(0, remaining);
+      if (occurrenceIds.length < card.occurrenceIds.length) limited = true;
+      const evidenceIds = uniqueSorted(occurrenceIds.flatMap(occurrenceId => {
+        const occurrence = occurrenceById.get(occurrenceId);
+        if (!occurrence) checkpointDenied();
+        return occurrence.evidenceRefs;
+      }));
+      projected[groupName].push({
+        ...card,
+        occurrenceIds,
+        evidence: { ...card.evidence, evidenceIds },
+      });
+      cardCount += 1;
+      occurrenceCount += occurrenceIds.length;
+    }
+  }
+  return { groups: projected, limited };
+}
+
 function distribution(cards, field) {
   const counts = new Map();
   for (const card of cards) {
@@ -270,7 +317,7 @@ function freeze(value, seen = new WeakSet()) {
   return Object.freeze(value);
 }
 
-export async function buildPanelSummary({ model: inputModel, executionCheckpoint, inventory: inputInventory }) {
+async function buildSummary({ model: inputModel, executionCheckpoint, inventory: inputInventory }, interactive) {
   const model = createAuditModel(inputModel);
   let checkpoint;
   try {
@@ -290,8 +337,12 @@ export async function buildPanelSummary({ model: inputModel, executionCheckpoint
     if (!(error instanceof TypeError) || error.message !== 'CORE_INVENTORY_UNVERIFIED') throw error;
   }
   if (inventory) validateCheckpointInventory(checkpoint, inventory, model);
-  const groups = buildGroups(model, checkpoint, inventory);
-  const cards = GROUP_NAMES.flatMap(groupName => groups[groupName]);
+  const fullGroups = buildGroups(model, checkpoint, inventory);
+  const cards = GROUP_NAMES.flatMap(groupName => fullGroups[groupName]);
+  const projected = interactive
+    ? projectInteractiveGroups(fullGroups, model)
+    : { groups: fullGroups, limited: false };
+  const groups = projected.groups;
   const attemptedPages = checkpoint.pages.filter(page => page.attempted);
   const denominator = inventory ? attemptedPages.length * inventory.ruleIds.length : 0;
   const numerator = inventory ? attemptedPages.reduce((total, page) =>
@@ -301,7 +352,7 @@ export async function buildPanelSummary({ model: inputModel, executionCheckpoint
     : denominator === 0
       ? { status: 'unavailable', reason: 'EXECUTION_NOT_STARTED' }
       : { status: 'available', numerator, denominator, percent: coveragePercent(numerator, denominator) };
-  const occurrenceCount = groupName => uniqueSorted(groups[groupName].flatMap(card => card.occurrenceIds)).length;
+  const occurrenceCount = groupName => uniqueSorted(fullGroups[groupName].flatMap(card => card.occurrenceIds)).length;
   const keyForOutcome = (pageId, ruleId) => checkKey(pageId, 'audita-core', ruleId);
   const summary = {
     version: 1,
@@ -309,10 +360,10 @@ export async function buildPanelSummary({ model: inputModel, executionCheckpoint
     identity: { finalUrl: model.finalUrl, completedAt: model.timestamps.endedAt, status: model.session.status },
     coverage,
     counts: {
-      errors: { checkKeys: groups.failed.length, occurrences: occurrenceCount('failed') },
-      alerts: { checkKeys: groups.alerts.length, occurrences: occurrenceCount('alerts') },
-      humanReview: { checkKeys: groups.humanReview.length, occurrences: occurrenceCount('humanReview') },
-      positive: { checkKeys: groups.passed.length, occurrences: occurrenceCount('passed') },
+      errors: { checkKeys: fullGroups.failed.length, occurrences: occurrenceCount('failed') },
+      alerts: { checkKeys: fullGroups.alerts.length, occurrences: occurrenceCount('alerts') },
+      humanReview: { checkKeys: fullGroups.humanReview.length, occurrences: occurrenceCount('humanReview') },
+      positive: { checkKeys: fullGroups.passed.length, occurrences: occurrenceCount('passed') },
     },
     distributions: {
       impact: distribution(cards, 'impact'),
@@ -320,7 +371,7 @@ export async function buildPanelSummary({ model: inputModel, executionCheckpoint
       abnt: distribution(cards, 'abnt'),
     },
     limitations: {
-      codes: limitationCodes(model),
+      codes: [...limitationCodes(model), ...(projected.limited ? [INTERACTIVE_PANEL_LIMITATION] : [])],
       notStartedPageIds: checkpoint.pages.filter(page => !page.attempted).map(page => page.pageId),
       inapplicableCheckKeys: inventory ? uniqueSorted(checkpoint.pages.flatMap(page => page.outcomes
         .filter(row => row.outcome === 'inapplicable').map(row => keyForOutcome(page.pageId, row.ruleId)))) : [],
@@ -330,4 +381,12 @@ export async function buildPanelSummary({ model: inputModel, executionCheckpoint
     groups,
   };
   return freeze(summary);
+}
+
+export function buildPanelSummary(input) {
+  return buildSummary(input, true);
+}
+
+export function buildCompleteReportSummary(input) {
+  return buildSummary(input, false);
 }

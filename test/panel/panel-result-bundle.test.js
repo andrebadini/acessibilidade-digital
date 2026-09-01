@@ -9,6 +9,7 @@ import { runAudit } from '../../src/background/run-audit.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
+import { canonicalCoreRuleSummary } from '../../src/core/report/text-policy.js';
 import {
   copyPanelResultBundleV1,
   createPanelResultBundleV1,
@@ -168,6 +169,40 @@ test('builds one sorted detail per unique occurrence exposed by the four summary
   const copy = copyPanelResultBundleV1(structuredClone(bundle));
   assert.deepEqual(copy, bundle);
   assert.notEqual(copy, bundle);
+});
+
+test('bounds the interactive panel projection while preserving complete occurrence counts for the report', async () => {
+  const input = await fixture(null, draft => {
+    for (const ruleId of ['focus-visible', 'focus-order']) {
+      const rule = draft.ruleResults.find(value => value.ruleId === ruleId);
+      rule.outcome = 'inapplicable';
+      rule.targets = [];
+      rule.summary = canonicalCoreRuleSummary(ruleId, 'inapplicable');
+      rule.limitations = [];
+      for (const itemId of rule.nbrItems) {
+        draft.itemResults.find(value => value.id === itemId).outcome = 'inapplicable';
+      }
+    }
+    const source = SAMPLE_AUDIT.occurrences.find(value => value.source.engine === 'audita-manual-review');
+    const review = SAMPLE_AUDIT.manualReview.find(value => value.occurrenceId === source.occurrenceId);
+    draft.occurrences = Array.from({ length: 256 }, (_value, index) => ({
+      ...structuredClone(source), occurrenceId: `occ-panel-limit-${String(index).padStart(3, '0')}`,
+    }));
+    draft.manualReview = draft.occurrences.map(occurrence => ({
+      ...structuredClone(review), occurrenceId: occurrence.occurrenceId,
+    }));
+    draft.reviewDecisions = [];
+  });
+
+  const bundle = await createPanelResultBundleV1(input);
+  const exposedIds = Object.values(bundle.summary.groups).flatMap(cards =>
+    cards.flatMap(card => card.occurrenceIds));
+
+  assert.equal(bundle.summary.counts.humanReview.occurrences, 256);
+  assert.equal(exposedIds.length <= 64, true);
+  assert.equal(bundle.details.length, exposedIds.length);
+  assert.equal(bundle.summary.limitations.codes.some(value => /painel.+relat.rio completo/iu.test(value)), true);
+  assert.equal(input.reportRevision.model.occurrences.length, 256);
 });
 
 test('keeps a valid large canonical raster in the report while omitting only its panel preview', async () => {

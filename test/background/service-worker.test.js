@@ -17,10 +17,13 @@ import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-commit-clock.js';
 import { createOwnedTabRegistry } from '../../src/background/owned-tabs.js';
+import { runBatch } from '../../src/background/run-batch.js';
 import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
+import { normalizeUrlList } from '../../src/core/batch/normalize-url-list.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 import { createFakeLockManager } from '../personas/fake-lock-manager.js';
+import { reportInput } from '../report/helpers.js';
 
 const CAPABILITY = 'C'.repeat(22);
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
@@ -79,6 +82,40 @@ function deferred() {
 }
 
 function tick() { return new Promise(resolve => setImmediate(resolve)); }
+
+async function batchReportFixture(auditId) {
+  let tickIndex = 0;
+  const now = () => new Date(Date.UTC(2026, 8, 1, 12, 0, tickIndex++)).toISOString();
+  const entries = normalizeUrlList('https://one.example.test/\nhttps://two.example.test/').entries;
+  const model = await runBatch({
+    entries,
+    batchAuditId: auditId,
+    runner: async options => reportInput({
+      auditId: options.idFactory(), requestedUrl: options.url, finalUrl: options.url,
+      timestamps: { startedAt: now(), endedAt: now(), generatedAt: now() },
+    }),
+    chromeAdapter: { async emitProgress() {}, async handoffReport() { return { reviewUrl: null }; } },
+    now,
+    reportOptions: {
+      timezone: 'America/Cuiaba', manifestVersion: '1.0.5', rulesVersion: '1.0.0',
+      browserVersion: 'Chrome/152.0.0.0', expectedExtensionId: 'abcdefghijklmnopabcdefghijklmnop',
+    },
+  });
+  const inventory = await createInstalledCoreRuleInventory();
+  return {
+    model,
+    checkpoint: {
+      version: 1,
+      auditId,
+      pages: model.pages.map(page => ({
+        pageId: page.pageId, attempted: page.attempted,
+        startedAt: page.attempted ? page.timestamps.startedAt : null,
+        rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion,
+        inventoryHash: inventory.sha256, outcomes: [],
+      })),
+    },
+  };
+}
 
 function runtimeValue() {
   return Object.freeze({ authority: Object.freeze({}), auditStarter: Object.freeze({}), chromeAdapter: Object.freeze({}) });
@@ -295,12 +332,15 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
     createEventNonce: () => 'N'.repeat(22),
     epochNow: fixtureOptions.epochNow ?? (() => 1_788_000_000_000),
     modelNow: fixtureOptions.modelNow ?? (() => '2026-08-29T12:00:00.000Z'),
-    randomBytes: length => new Uint8Array(length).fill(7),
+    randomBytes: fixtureOptions.randomBytes ?? (length => new Uint8Array(length).fill(7)),
     ...(fixtureOptions.useNativePixelCommitClock === true ? {} : {
       pixelCommitClockFactory: () => createScriptedPixelCommitClockV1({ epochs: Array(256).fill(1_788_000_000_000) }),
     }),
     ...(fixtureOptions.rawNavigationVaultFactory ? { rawNavigationVaultFactory: fixtureOptions.rawNavigationVaultFactory } : {}),
     ...(fixtureOptions.runUrlAuditExecution ? { runUrlAuditExecution: fixtureOptions.runUrlAuditExecution } : {}),
+    ...(fixtureOptions.batchAuditExecutionFactory
+      ? { batchAuditExecutionFactory: fixtureOptions.batchAuditExecutionFactory }
+      : {}),
     ...(fixtureOptions.pixelConsentSchedulerFactory
       ? { pixelConsentSchedulerFactory: fixtureOptions.pixelConsentSchedulerFactory }
       : {}),
@@ -1245,6 +1285,85 @@ test('default worker exposes the tokenized single-URL capability only through it
   assert.equal(prepared.ok, true, JSON.stringify(prepared));
   assert.equal(prepared.requestId, 'single-url-default-worker');
   assert.match(prepared.capabilityId, /^[A-Za-z0-9_-]{22}$/u);
+});
+
+test('default worker maps an explicit no-pixels batch from the panel to one consolidated report', async () => {
+  const auditId = 'audit-worker-batch';
+  const report = await batchReportFixture(auditId);
+  const auditStore = createInMemoryAuditStore();
+  let executorDependencies = null;
+  let executorArgs = null;
+  const executionSettled = deferred();
+  let randomSeed = 0;
+  const env = defaultGraphFixture(null, {
+    auditStore,
+    enableReportLaunch: true,
+    createAuditId: () => auditId,
+    randomBytes: length => new Uint8Array(length).fill(++randomSeed),
+    tabsQuery: async () => [{
+      id: 17, windowId: 9, active: true, status: 'complete', url: 'https://example.test/',
+    }],
+    batchAuditExecutionFactory(dependencies) {
+      executorDependencies = dependencies;
+      return Object.freeze({
+        async run(args) {
+          executorArgs = args;
+          await args.onExecutionCheckpoint(report.checkpoint);
+          executionSettled.resolve();
+          return Object.freeze({ model: report.model, checkpoint: report.checkpoint });
+        },
+        async cleanup() { return true; },
+      });
+    },
+  });
+  const panel = await env.connectPanel();
+  const prepared = await panel.request({
+    type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: 'batch-result', intent: 'batch',
+  });
+  assert.equal(prepared.ok, true, JSON.stringify(prepared));
+  const started = await panel.request({
+    type: 'PANEL_START_BATCH_AUDIT', capabilityId: prepared.capabilityId,
+    urls: 'https://one.example.test/private?token=never-public\nhttps://two.example.test/',
+    captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
+  });
+  assert.deepEqual(started, { ok: true, auditId, state: 'running', total: 2, warnings: [] }, JSON.stringify({
+    started, sessionValues: env.sessionValues, panelMessages: panel.port.messages,
+  }));
+  await executionSettled.promise;
+  let revision = null;
+  for (let attempt = 0; attempt < 200 && revision === null; attempt += 1) {
+    await tick();
+    revision = await auditStore.getReportRevision(auditId);
+  }
+  assert.equal(revision?.modelRevision, 1);
+  assert.equal(revision.model.requestedScope.mode, 'batch');
+  assert.equal(revision.model.pages.length, 2);
+  assert.equal(executorArgs.acceptedCount, 2);
+  assert.equal(typeof executorArgs.now, 'function');
+  assert.equal(typeof executorArgs.onExecutionCheckpoint, 'function');
+  assert.equal(executorArgs.reportOptions.expectedExtensionId, env.chromeApi.runtime.id);
+  assert.equal(typeof executorDependencies.runUrlAuditExecution, 'function');
+  assert.equal(typeof executorDependencies.readBatchCorrelation, 'function');
+  assert.doesNotMatch(JSON.stringify({ started, revision }), /never-public|token=/iu);
+
+  let resultPacket = null;
+  for (let attempt = 0; attempt < 200 && resultPacket === null; attempt += 1) {
+    await tick();
+    resultPacket = panel.port.messages.find(value =>
+      value.type === 'bootstrap-result' && value.state === 'result' && value.auditId === auditId) ?? null;
+  }
+  assert.equal(Boolean(resultPacket?.result), true, JSON.stringify(panel.port.messages));
+  const opening = panel.request({
+    type: 'PANEL_OPEN_REPORT', auditId, sessionCapabilityId: resultPacket.sessionCapabilityId,
+  }).catch(error => error);
+  const launchKey = `audita:report-launch:v1:${auditId}`;
+  for (let attempt = 0; attempt < 20 && !env.sessionValues[launchKey]; attempt += 1) await tick();
+  assert.equal(Boolean(env.sessionValues[launchKey]), true);
+  const { connected } = await env.connectReport(auditId, { preserveLaunch: true });
+  const opened = await opening;
+  assert.match(connected.sessionCapabilityId ?? '', /^[A-Za-z0-9_-]{22}$/u);
+  assert.equal(connected.state, 'view-only');
+  assert.equal(opened.ok, true, JSON.stringify(opened));
 });
 
 test('default worker carries one tokenized URL from the Side Panel to a persisted result without public secrets', async () => {

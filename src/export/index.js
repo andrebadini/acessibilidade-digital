@@ -6,7 +6,7 @@ import {
 import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
 import { createAuditModel } from '../core/report/audit-model.js';
 import { verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
-import { createPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
+import { buildCompleteReportSummary } from '../panel/panel-summary.js';
 import { buildReportView } from '../review/report-view.js';
 import { normalizeReviewAuditId } from '../review/review-state.js';
 import { createAuditStore, isAuditExportLeaseConflict, isAuditRevisionConflict } from '../storage/audit-store.js';
@@ -78,8 +78,10 @@ async function generate(connected) {
   }
   const verified = await verifyAuditIntegritySnapshot(createAuditModel(storedRevision.model));
   if (verified.integrity.canonicalModelHash !== storedRevision.modelHash || verified.auditId !== auditId) throw new Error('Integridade da revisão negada.');
-  const bundle = await createPanelResultBundleV1({ reportRevision: storedRevision, inventory });
-  const reportView = buildReportView({ model: verified, summary: bundle.summary, modelRevision: storedRevision.modelRevision, modelHash: storedRevision.modelHash });
+  const summary = await buildCompleteReportSummary({
+    model: verified, executionCheckpoint: storedRevision.checkpoint, inventory,
+  });
+  const reportView = buildReportView({ model: verified, summary, modelRevision: storedRevision.modelRevision, modelHash: storedRevision.modelHash });
   sourceModel = verified;
   sourceRevision = snapshot.revision;
   sourceSnapshotCapability = snapshot.capability;

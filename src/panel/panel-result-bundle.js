@@ -17,49 +17,52 @@ const REPORT_REVISION_KEYS = Object.freeze([
 
 function denied() { throw new TypeError('PANEL_RESULT_BUNDLE_DENIED'); }
 
+function graphDenied() { denied(); }
+
 function copyGraph(root) {
   const seen = new WeakSet();
   const budget = { nodes: 0, bytes: 0 };
   const copy = (value, depth) => {
-    if (depth > MAX_DEPTH) denied();
+    if (depth > MAX_DEPTH) graphDenied('depth');
     if (value === null || typeof value === 'boolean') return value;
     if (typeof value === 'number') {
-      if (!Number.isFinite(value)) denied();
+      if (!Number.isFinite(value)) graphDenied('number');
       return value;
     }
     if (typeof value === 'string') {
-      if ([...value].length > MAX_STRING_CODE_POINTS) denied();
+      if ([...value].length > MAX_STRING_CODE_POINTS) graphDenied('string-length');
       budget.bytes += new TextEncoder().encode(value).byteLength;
-      if (budget.bytes > MAX_STRING_BYTES) denied();
+      if (budget.bytes > MAX_STRING_BYTES) graphDenied('string-budget');
       return value;
     }
-    if (!value || typeof value !== 'object' || seen.has(value)) denied();
+    if (!value || typeof value !== 'object') graphDenied('type');
+    if (seen.has(value)) graphDenied('shared-reference');
     seen.add(value);
     budget.nodes += 1;
-    if (budget.nodes > MAX_NODES) denied();
+    if (budget.nodes > MAX_NODES) graphDenied('node-budget');
     let prototype;
     let keys;
-    try { prototype = Object.getPrototypeOf(value); keys = Reflect.ownKeys(value); } catch { denied(); }
+    try { prototype = Object.getPrototypeOf(value); keys = Reflect.ownKeys(value); } catch { graphDenied('reflection'); }
     if (Array.isArray(value)) {
-      if (prototype !== Array.prototype) denied();
+      if (prototype !== Array.prototype) graphDenied('array-prototype');
       const length = Object.getOwnPropertyDescriptor(value, 'length')?.value;
-      if (!Number.isSafeInteger(length) || length < 0 || length > MAX_ARRAY) denied();
+      if (!Number.isSafeInteger(length) || length < 0 || length > MAX_ARRAY) graphDenied('array-length');
       const expected = ['length', ...Array.from({ length }, (_entry, index) => String(index))];
-      if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) denied();
+      if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) graphDenied('array-shape');
       const result = [];
       for (let index = 0; index < length; index += 1) {
         const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-        if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) denied();
+        if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) graphDenied('array-descriptor');
         result.push(copy(descriptor.value, depth + 1));
       }
       return result;
     }
-    if (prototype !== Object.prototype && prototype !== null) denied();
+    if (prototype !== Object.prototype && prototype !== null) graphDenied('object-prototype');
     const result = {};
     for (const key of keys) {
-      if (typeof key !== 'string') denied();
+      if (typeof key !== 'string') graphDenied('object-key');
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) denied();
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) graphDenied('object-descriptor');
       result[key] = copy(descriptor.value, depth + 1);
     }
     return result;

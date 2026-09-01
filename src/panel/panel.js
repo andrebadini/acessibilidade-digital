@@ -28,6 +28,8 @@ const CAPTURE_MODES = Object.freeze(['full-evidence', 'element-only', 'no-pixels
 const PIXEL_CAPTURE_MODES = Object.freeze(['full-evidence', 'element-only']);
 const PRIVACY_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private-marker']);
 const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
+const DUPLICATE_URL_MESSAGE = 'A URL repete uma entrada anterior e não será auditada novamente.';
+const MAX_BATCH_LINE_NUMBER = 65_536;
 const AUDIT_PROGRESS = Object.freeze([
   ['opening', 'Abrindo o site', 5],
   ['collecting', 'Lendo a estrutura', 25],
@@ -38,7 +40,8 @@ const AUDIT_PROGRESS = Object.freeze([
 let state = createInitialPanelState();
 let resultBundle = null;
 let requestSequence = 0;
-let urlEntryRevision = 0n;
+let navigationEntryRevision = 0n;
+let batchEntryDraft = '';
 let personaBootstrapSynchronized = false;
 let hasReceivedBootstrap = false;
 const personaSession = createPanelPersonaSession({
@@ -91,6 +94,45 @@ export function createPanelUrlAuditIntent(raw) {
   });
 }
 
+export function normalizePanelBatchEntry(raw) {
+  if (typeof raw !== 'string') return Object.freeze({ ok: false, code: 'invalid-lines', lines: Object.freeze([]) });
+  const nonempty = raw.split(/\r\n|\r|\n/u)
+    .map((value, index) => ({ value, line: index + 1 }))
+    .filter(entry => entry.value.trim() !== '');
+  if (nonempty.length === 0) return Object.freeze({ ok: false, code: 'required', lines: Object.freeze([]) });
+  if (nonempty.length > 20) return Object.freeze({ ok: false, code: 'too-many', lines: Object.freeze([]) });
+  const urls = [];
+  const errors = [];
+  const unique = new Set();
+  for (const entry of nonempty) {
+    const normalized = normalizePanelUrlEntry(entry.value);
+    if (!normalized.ok) {
+      errors.push(Object.freeze({
+        line: entry.line, code: normalized.code === 'too-long' ? 'too-long' : 'invalid',
+      }));
+      continue;
+    }
+    urls.push(normalized.url);
+    unique.add(normalized.url);
+  }
+  if (errors.length > 0) {
+    return Object.freeze({ ok: false, code: 'invalid-lines', lines: Object.freeze(errors) });
+  }
+  if (unique.size < 2) return Object.freeze({ ok: false, code: 'too-few', lines: Object.freeze([]) });
+  return Object.freeze({ ok: true, urls: urls.join('\n'), total: unique.size });
+}
+
+export function createPanelBatchAuditIntent(raw) {
+  const input = exactRecord(raw, ['capabilityId', 'urls']);
+  const normalized = input ? normalizePanelBatchEntry(input.urls) : null;
+  if (!input || !OPAQUE_CAPABILITY.test(input.capabilityId ?? '') || normalized?.ok !== true ||
+    normalized.urls !== input.urls) return null;
+  return Object.freeze({
+    type: 'PANEL_START_BATCH_AUDIT', capabilityId: input.capabilityId, urls: input.urls,
+    captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
+  });
+}
+
 export function shouldShowPanelStartFailure(current) {
   try {
     const screen = current && typeof current === 'object'
@@ -140,15 +182,31 @@ export function projectPanelBootstrapEvent(value) {
 export function projectPanelAuditProgressEvent(value, sender, runtime, currentAuditId) {
   if (!authorizedWorkerSender(sender, runtime) || !AUDIT_ID.test(currentAuditId ?? '')) return null;
   const event = exactRecord(value, ['type', 'auditId', 'sessionId', 'phase', 'message', 'percent', 'at']);
-  if (!event || event.type !== 'AUDIT_PROGRESS' || event.auditId !== currentAuditId ||
-    event.sessionId !== event.auditId || !canonicalIsoTime(event.at)) return null;
-  return AUDIT_PROGRESS.some(([phase, message, percent]) =>
-    event.phase === phase && event.message === message && event.percent === percent)
-    ? Object.freeze({
+  if (event && event.type === 'AUDIT_PROGRESS' && event.auditId === currentAuditId &&
+    event.sessionId === event.auditId && canonicalIsoTime(event.at) && AUDIT_PROGRESS.some(([phase, message, percent]) =>
+      event.phase === phase && event.message === message && event.percent === percent)) {
+    return Object.freeze({
         type: 'AUDIT_PROGRESS', auditId: event.auditId, sessionId: event.sessionId,
         phase: event.phase, message: event.message, percent: event.percent, at: event.at,
-      })
-    : null;
+      });
+  }
+  const batch = exactRecord(value, [
+    'type', 'auditId', 'sessionId', 'phase', 'message', 'percent', 'pageNumber', 'total', 'at', 'statusCounts',
+  ]);
+  const counts = exactRecord(batch?.statusCounts, ['complete', 'partial', 'failed', 'cancelled']);
+  if (!batch || batch.type !== 'AUDIT_PROGRESS' || batch.auditId !== currentAuditId ||
+    batch.sessionId !== batch.auditId || batch.phase !== 'batch-page' || !canonicalIsoTime(batch.at) ||
+    !Number.isSafeInteger(batch.total) || batch.total < 2 || batch.total > 20 ||
+    !Number.isSafeInteger(batch.pageNumber) || batch.pageNumber < 1 || batch.pageNumber > batch.total ||
+    typeof batch.percent !== 'number' || !Number.isFinite(batch.percent) || batch.percent < 0 || batch.percent > 100 ||
+    !validBatchProgressMessage(batch.message, batch.pageNumber, batch.total) || !counts ||
+    Object.values(counts).some(count => !Number.isSafeInteger(count) || count < 0 || count > batch.total) ||
+    Object.values(counts).reduce((total, count) => total + count, 0) > batch.total) return null;
+  return Object.freeze({
+    type: 'AUDIT_PROGRESS', auditId: batch.auditId, sessionId: batch.sessionId,
+    phase: batch.phase, message: batch.message, percent: batch.percent,
+    pageNumber: batch.pageNumber, total: batch.total, at: batch.at,
+  });
 }
 
 export function createPanelPrivacyConfirmationController(raw) {
@@ -223,6 +281,10 @@ function render() {
   const view = buildPanelView({ state, summary, detail });
   const screen = renderPanelView({ view, document, onIntent: handleIntent, onEvent: handleEvent });
   root.replaceChildren(screen);
+  if (state.screen === 'initial' && state.entryMode === 'batch' && typeof batchEntryDraft === 'string') {
+    const textarea = root.querySelector?.('textarea[id="audit-urls"]');
+    if (textarea) textarea.value = batchEntryDraft;
+  }
   root.scrollTop = state.scrollTop;
   restoreFocus(state.focusId);
 }
@@ -233,8 +295,14 @@ function transition(event) {
 }
 
 function handleEvent(event) {
+  const draft = exactRecord(event, ['type', 'urls']);
+  if (draft?.type === 'BATCH_DRAFT_CHANGED') {
+    if (state.screen === 'initial' && state.entryMode === 'batch' && typeof draft.urls === 'string' &&
+      draft.urls.length <= 40_979) batchEntryDraft = draft.urls;
+    return;
+  }
   if (event?.type === 'CAPTURE_MODE_SELECTED') {
-    reviseUrlEntry();
+    reviseNavigationEntry();
     transition(event);
     return;
   }
@@ -254,18 +322,29 @@ async function handleIntent(intent) {
       await privacyConfirmation.confirm(intent);
       return;
     case 'OPEN_URL_FORM':
-      reviseUrlEntry();
+      batchEntryDraft = '';
+      reviseNavigationEntry();
       transition({ type: 'URL_FORM_OPENED' });
       return;
     case 'CLOSE_URL_FORM':
-      reviseUrlEntry();
+      reviseNavigationEntry();
       transition({ type: 'URL_FORM_CLOSED' });
       return;
     case 'START_URL':
       await startUrlAudit(intent.url);
       return;
     case 'OPEN_BATCH_FORM':
-      announce('Não disponível nesta beta.');
+      batchEntryDraft = '';
+      reviseNavigationEntry();
+      transition({ type: 'BATCH_FORM_OPENED' });
+      return;
+    case 'CLOSE_BATCH_FORM':
+      batchEntryDraft = '';
+      reviseNavigationEntry();
+      transition({ type: 'BATCH_FORM_CLOSED' });
+      return;
+    case 'START_BATCH':
+      await startBatchAudit(intent.urls);
       return;
     case 'CANCEL_AUDIT':
       await requestSessionAction('PANEL_CANCEL_AUDIT');
@@ -384,7 +463,7 @@ async function startAttachedAudit() {
 }
 
 async function startUrlAudit(rawUrl) {
-  const submittedRevision = reviseUrlEntry();
+  const submittedRevision = reviseNavigationEntry();
   const normalized = normalizePanelUrlEntry(rawUrl);
   if (!normalized.ok) {
     transition({ type: 'URL_ENTRY_REJECTED', code: normalized.code });
@@ -400,7 +479,7 @@ async function startUrlAudit(rawUrl) {
     });
   } catch { /* a safe nontechnical error is rendered below */ }
   const prepared = parsePreparedCapability(preparedResponse, requestId);
-  if (urlEntryRevision !== submittedRevision || state.screen !== 'initial' ||
+  if (navigationEntryRevision !== submittedRevision || state.screen !== 'initial' ||
     state.entryMode !== 'single-url' || state.captureMode !== captureMode) return;
   if (!prepared) {
     transition({ type: 'URL_ENTRY_REJECTED', code: 'start-failed' });
@@ -414,7 +493,7 @@ async function startUrlAudit(rawUrl) {
     return;
   }
   transition({ type: 'START_REQUESTED', source: 'single-url' });
-  if (urlEntryRevision !== submittedRevision || state.screen !== 'running' || state.auditId !== null ||
+  if (navigationEntryRevision !== submittedRevision || state.screen !== 'running' || state.auditId !== null ||
     state.auditSource !== 'single-url' || state.captureMode !== captureMode) return;
   let response = null;
   try { response = await requestPanelIntent(startIntent); }
@@ -429,6 +508,60 @@ async function startUrlAudit(rawUrl) {
     return;
   }
   if (shouldShowPanelStartFailure(state)) transition({ type: 'URL_ENTRY_REJECTED', code: 'start-failed' });
+}
+
+async function startBatchAudit(rawUrls) {
+  const submittedRevision = reviseNavigationEntry();
+  batchEntryDraft = typeof rawUrls === 'string' ? rawUrls : '';
+  const normalized = normalizePanelBatchEntry(rawUrls);
+  if (!normalized.ok) {
+    transition({ type: 'BATCH_ENTRY_REJECTED', code: normalized.code, lines: normalized.lines });
+    return;
+  }
+  if (state.screen !== 'initial' || state.entryMode !== 'batch' || state.captureMode !== 'no-pixels') return;
+  const requestId = nextRequestId();
+  let preparedResponse = null;
+  try {
+    preparedResponse = await requestPanelIntent({
+      type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId, intent: 'batch',
+    });
+  } catch { /* a safe nontechnical error is rendered below */ }
+  const prepared = parsePreparedCapability(preparedResponse, requestId);
+  if (navigationEntryRevision !== submittedRevision || state.screen !== 'initial' ||
+    state.entryMode !== 'batch' || state.captureMode !== 'no-pixels') return;
+  if (!prepared) {
+    transition({ type: 'BATCH_ENTRY_REJECTED', code: 'start-failed', lines: [] });
+    return;
+  }
+  const startIntent = createPanelBatchAuditIntent({ capabilityId: prepared.capabilityId, urls: normalized.urls });
+  if (!startIntent) {
+    transition({ type: 'BATCH_ENTRY_REJECTED', code: 'start-failed', lines: [] });
+    return;
+  }
+  transition({ type: 'START_REQUESTED', source: 'batch' });
+  transition({ type: 'BATCH_PREPARED', total: normalized.total });
+  if (navigationEntryRevision !== submittedRevision || state.screen !== 'running' || state.auditId !== null ||
+    state.auditSource !== 'batch' || state.captureMode !== 'no-pixels') return;
+  let response = null;
+  try { response = await requestPanelIntent(startIntent); }
+  catch { /* a safe nontechnical error is rendered below */ }
+  const parsedStarted = parseBatchStartedAudit(response);
+  const started = parsedStarted?.total === normalized.total ? parsedStarted : null;
+  await personaSession.afterAuditAttempt({ started: started !== null });
+  if (started) {
+    batchEntryDraft = '';
+    if (state.screen === 'running' && (state.auditId === null || state.auditId === started.auditId) && state.auditSource === 'batch' &&
+      state.captureMode === 'no-pixels' && state.sessionStatus === null) {
+      transition({
+        type: 'BATCH_STARTED', auditId: started.auditId, total: started.total, warnings: started.warnings,
+      });
+      announce(`Lote iniciado com ${started.total} páginas. ${batchWarningCount(started.warnings.length)}`);
+    }
+    return;
+  }
+  if (shouldShowPanelStartFailure(state)) {
+    transition({ type: 'BATCH_ENTRY_REJECTED', code: 'start-failed', lines: [] });
+  }
 }
 
 async function requestSessionAction(type) {
@@ -521,13 +654,15 @@ function receiveBootstrap(value) {
     resultBundle = null;
     if (duplicateIdleBootstrap) render();
     else {
-      reviseUrlEntry();
+      batchEntryDraft = '';
+      reviseNavigationEntry();
       transition({ type: 'BOOTSTRAP_INITIAL' });
     }
     synchronizePersonaOnBootstrap();
     return;
   }
   if (value?.state === 'running' && AUDIT_ID.test(value.auditId ?? '') && value.result === null) {
+    if (state.auditSource === 'batch') batchEntryDraft = '';
     hasReceivedBootstrap = true;
     highlightStateSynchronizer.invalidate();
     resultBundle = null;
@@ -536,6 +671,7 @@ function receiveBootstrap(value) {
     return;
   }
   if (['result', 'view-only'].includes(value?.state) && AUDIT_ID.test(value.auditId ?? '') && value.result) {
+    batchEntryDraft = '';
     hasReceivedBootstrap = true;
     resultBundle = value.result;
     transition({ type: 'AUDIT_RESULT', auditId: value.auditId, result: value.result });
@@ -620,6 +756,11 @@ function canonicalIsoTime(value) {
   return Number.isFinite(date.getTime()) && date.toISOString() === value;
 }
 
+function validBatchProgressMessage(value, pageNumber, total) {
+  return value === `Página ${pageNumber} de ${total}: auditoria em andamento.` ||
+    value === `Página ${pageNumber} de ${total}: processamento encerrado.`;
+}
+
 function synchronizePersonaOnBootstrap() {
   if (personaBootstrapSynchronized) return;
   personaBootstrapSynchronized = true;
@@ -670,9 +811,9 @@ function nextRequestId() {
   return `panel-${Date.now()}-${requestSequence}`;
 }
 
-function reviseUrlEntry() {
-  urlEntryRevision += 1n;
-  return urlEntryRevision;
+function reviseNavigationEntry() {
+  navigationEntryRevision += 1n;
+  return navigationEntryRevision;
 }
 
 function requestPanelIntent(message) {
@@ -690,6 +831,15 @@ function parsePreparedCapability(value, requestId) {
 function parseStartedAudit(value) {
   const response = exactRecord(value, ['ok', 'auditId', 'state']);
   return Boolean(response) && response.ok === true && response.state === 'running' && AUDIT_ID.test(response.auditId ?? '');
+}
+
+function parseBatchStartedAudit(value) {
+  const response = exactRecord(value, ['ok', 'auditId', 'state', 'total', 'warnings']);
+  const warnings = copyBatchWarnings(response?.warnings);
+  return response?.ok === true && response.state === 'running' && AUDIT_ID.test(response.auditId ?? '') &&
+    Number.isSafeInteger(response.total) && response.total >= 2 && response.total <= 20 && warnings
+    ? Object.freeze({ auditId: response.auditId, total: response.total, warnings: Object.freeze(warnings) })
+    : null;
 }
 
 function parseRehydrateResponse(value, auditId) {
@@ -730,6 +880,31 @@ function copyPrivacyCategories(value) {
     }
     return copy;
   } catch { return null; }
+}
+
+function copyBatchWarnings(value) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length > 20) return null;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== value.length + 1 || !ownKeys.includes('length')) return null;
+    const copy = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      const warning = exactRecord(descriptor.value, ['line', 'code', 'firstLine', 'message']);
+      if (!warning || !Number.isSafeInteger(warning.line) || warning.line < 1 || warning.line > MAX_BATCH_LINE_NUMBER ||
+        warning.code !== 'DUPLICATE_URL' || warning.message !== DUPLICATE_URL_MESSAGE ||
+        warning.firstLine !== null && (!Number.isSafeInteger(warning.firstLine) || warning.firstLine < 1 ||
+          warning.firstLine > MAX_BATCH_LINE_NUMBER || warning.firstLine >= warning.line)) return null;
+      copy.push(Object.freeze({ ...warning }));
+    }
+    return copy;
+  } catch { return null; }
+}
+
+function batchWarningCount(count) {
+  if (count === 0) return 'Nenhum aviso na lista.';
+  return count === 1 ? '1 aviso na lista.' : `${count} avisos na lista.`;
 }
 
 let sessionPortClient = null;

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { runBatch } from '../../src/background/run-batch.js';
+import { createBatchExecutionRunner, runBatch } from '../../src/background/run-batch.js';
 import { runAudit } from '../../src/background/run-audit.js';
 import { normalizeUrlList } from '../../src/core/batch/normalize-url-list.js';
 import { reportInput } from '../report/helpers.js';
@@ -9,6 +9,7 @@ import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { AUDIT_EXECUTION_INTERNAL } from '../../src/background/chrome-adapter.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
+import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const TEST_EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
@@ -133,6 +134,91 @@ test('passes onCheckpoint and cleanupMode always to every child execution', asyn
     { pageId: 'page-2', cleanupMode: 'always', checkpointCallable: true },
   ]);
   assert.deepEqual(model.pages.map(page => page.status), ['complete', 'complete']);
+});
+
+test('accepts only a locally branded batch execution runner for cleanup and checkpoint evidence', async () => {
+  const entries = normalizeUrlList('https://one.example.test/\nhttps://two.example.test/').entries;
+  const inventory = await createInstalledCoreRuleInventory();
+  const executionCheckpoints = [];
+  const runner = createBatchExecutionRunner(async options => {
+    const auditId = options.idFactory();
+    const model = await enrichAuditForReport(rawChild({ auditId, url: options.url, now: options.now }), {
+      ...REPORT_OPTIONS,
+      now: options.now,
+    });
+    return Object.freeze({
+      model,
+      checkpoint: Object.freeze({
+        version: 1,
+        auditId: 'batch-branded-execution',
+        pages: [Object.freeze({
+          pageId: options.pageId,
+          attempted: true,
+          startedAt: model.pages[0].timestamps.startedAt,
+          rulesVersion: inventory.rulesVersion,
+          inventoryVersion: inventory.inventoryVersion,
+          inventoryHash: inventory.sha256,
+          outcomes: [],
+        })],
+      }),
+      ownershipState: 'removed',
+    });
+  });
+
+  const model = await runBatch({
+    entries,
+    batchAuditId: 'batch-branded-execution',
+    runner,
+    chromeAdapter: {
+      async emitProgress() {},
+      async handoffReport() { return { reviewUrl: null }; },
+    },
+    now: clock(),
+    reportOptions: REPORT_OPTIONS,
+    onExecutionCheckpoint: async checkpoint => executionCheckpoints.push(checkpoint),
+  });
+
+  assert.equal(Object.isFrozen(runner), true);
+  assert.deepEqual(model.pages.map(page => page.status), ['complete', 'complete']);
+  assert.deepEqual(executionCheckpoints.at(-1).pages.map(page => page.pageId), ['page-1', 'page-2']);
+});
+
+test('allows a branded token runner to process query-distinct pages with the same sanitized URL', async () => {
+  const first = structuredClone(normalizeUrlList('https://example.test/item').entries[0]);
+  const entries = [first, { ...structuredClone(first), line: 2 }];
+  const inventory = await createInstalledCoreRuleInventory();
+  const calls = [];
+  const runner = createBatchExecutionRunner(async options => {
+    calls.push(options.pageId);
+    const auditId = options.idFactory();
+    const model = await enrichAuditForReport(rawChild({ auditId, url: options.url, now: options.now }), {
+      ...REPORT_OPTIONS, now: options.now,
+    });
+    const checkpoint = Object.freeze({
+      version: 1,
+      auditId: 'batch-query-distinct',
+      pages: [Object.freeze({
+        pageId: options.pageId, attempted: true,
+        startedAt: model.pages[0].timestamps.startedAt,
+        rulesVersion: inventory.rulesVersion,
+        inventoryVersion: inventory.inventoryVersion,
+        inventoryHash: inventory.sha256,
+        outcomes: [],
+      })],
+    });
+    await options.onCheckpoint(checkpoint);
+    return Object.freeze({ model, checkpoint, ownershipState: 'removed' });
+  });
+
+  const model = await runBatch({
+    entries, batchAuditId: 'batch-query-distinct', runner,
+    chromeAdapter: { async emitProgress() {}, async handoffReport() { return { reviewUrl: null }; } },
+    now: clock(), reportOptions: REPORT_OPTIONS,
+    async onExecutionCheckpoint() {},
+  });
+
+  assert.deepEqual(calls, ['page-1', 'page-2']);
+  assert.deepEqual(model.pages.map(page => page.pageId), ['page-1', 'page-2']);
 });
 
 test('runBatch discards the validated handoff capability from its review-ready aggregate', async () => {

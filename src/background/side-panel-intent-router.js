@@ -1,5 +1,6 @@
 import { createCapturePolicyV1 } from '../core/privacy/capture-policy.js';
 import { isEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
+import { normalizeUrlList } from '../core/batch/normalize-url-list.js';
 import {
   PANEL_SURFACE,
   deriveTrustedExtensionContext,
@@ -38,7 +39,8 @@ const READER_STATE_KEYS = Object.freeze([
 ]);
 const PANEL_PORT_TYPES = new Set([
   'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_NAVIGATION_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
-  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_URL_AUDIT', 'CONFIRM_PIXEL_CAPTURE', 'PANEL_CONFIRM_PIXEL_CAPTURE',
+  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_URL_AUDIT', 'PANEL_START_BATCH_AUDIT',
+  'CONFIRM_PIXEL_CAPTURE', 'PANEL_CONFIRM_PIXEL_CAPTURE',
   'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
   'PANEL_SET_PERSONA_MODE', 'PANEL_READER_STATE', 'PANEL_READER_ACTION',
   'PANEL_READER_ENABLE_VOICE',
@@ -166,6 +168,9 @@ export function createSidePanelIntentRouter(raw) {
     exact(raw, URL_HIGHLIGHT_LEGACY_FACTORY_KEYS) ?? exact(raw, HIGHLIGHT_FACTORY_KEYS) ??
     exact(raw, HIGHLIGHT_LAUNCH_FACTORY_KEYS) ?? exact(raw, HIGHLIGHT_LEGACY_FACTORY_KEYS);
   const hasUrlAudit = Boolean(input && Object.hasOwn(input, 'urlAuditStarter'));
+  const hasBatchAudit = Boolean(hasUrlAudit &&
+    typeof input.urlAuditStarter?.beginAuthorizedBatchAudit === 'function' &&
+    typeof input.rawNavigationVault?.putQueue === 'function');
   const coordinator = exact(input?.panelCoordinator, ['attachPanelPort', 'withWindowLock', 'publishHighlightState']);
   const reportOperations = input?.reportOperations
     ? exact(input.reportOperations, ['commitReviewDecision', 'deleteAudit', 'deleteAllAudits'])
@@ -236,13 +241,13 @@ export function createSidePanelIntentRouter(raw) {
   }
 
   async function preparePanelNavigation(envelope, sender) {
-    if (!hasUrlAudit) return fail('FEATURE_UNAVAILABLE');
+    if (!hasUrlAudit || envelope.intent === 'batch' && !hasBatchAudit) return fail('FEATURE_UNAVAILABLE');
     let context;
     try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
     catch { return fail('CONTEXT_DENIED'); }
     try {
       const prepared = await input.authority.prepareNavigationForPanel({
-        intent: 'single', senderContext: context,
+        intent: envelope.intent, senderContext: context,
       });
       if (prepared?.ok !== true || !CAPABILITY.test(prepared.capabilityId ?? '') ||
         !Number.isSafeInteger(prepared.expiresAt)) throw new Error();
@@ -553,6 +558,66 @@ export function createSidePanelIntentRouter(raw) {
         return freeze({ ok: true, auditId, state: 'running' });
       }
       try { await input.rawNavigationVault.clearAudit(auditId); } catch { return fail('AUDIT_RECOVERY_REQUIRED'); }
+      return response?.ok === false && START_CODES.has(response.code) ? fail(response.code) : fail('AUDIT_START_FAILED');
+    } catch {
+      if (AUDIT_ID.test(auditId ?? '')) {
+        try { await input.rawNavigationVault.clearAudit(auditId); }
+        catch { return fail('AUDIT_RECOVERY_REQUIRED'); }
+      }
+      return fail('AUDIT_START_FAILED');
+    }
+  }
+
+  async function startBatch(envelope, sender) {
+    if (!hasBatchAudit || envelope.captureMode !== 'no-pixels' || envelope.includeQuery !== false ||
+      envelope.deleteAfterCompleteExport !== false) return fail('AUDIT_START_FAILED');
+    let context;
+    try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
+    catch { return fail('CONTEXT_DENIED'); }
+    let auditId = null;
+    try {
+      const normalized = normalizeUrlList(envelope.urls);
+      if (normalized.errors.length > 0 || normalized.entries.length < 2 || normalized.entries.length > 20) {
+        return fail('AUDIT_START_FAILED');
+      }
+      auditId = input.createAuditId();
+      if (!AUDIT_ID.test(auditId ?? '')) throw new Error();
+      const started = await input.urlAuditStarter.beginAuthorizedBatchAudit({
+        capabilityId: envelope.capabilityId,
+        auditId,
+        senderContext: context,
+        capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+        retentionPreference: Object.freeze({ version: 1, deleteAfterCompleteExport: false }),
+        async preparePlan() {
+          const queueEntries = [];
+          for (const entry of normalized.entries) {
+            const issued = exact(await input.rawNavigationVault.put(entry.navigationUrl, {
+              auditId, purpose: 'batch-page', ttlMs: 7_200_000, includeQuery: false,
+            }), ['navigationToken', 'evidenceUrl', 'sessionDigest', 'expiresAt']);
+            const evidenceUrl = issued && exact(issued.evidenceUrl, ['version', 'href', 'queryIncluded', 'redactedSegments']);
+            if (!issued || !/^[A-Za-z0-9_-]{22}$/u.test(issued.navigationToken ?? '') ||
+              !evidenceUrl || !isEvidenceUrlV1(evidenceUrl) || evidenceUrl.queryIncluded !== false ||
+              JSON.stringify(evidenceUrl) !== JSON.stringify(entry.evidenceUrl) ||
+              !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(issued.sessionDigest ?? '') ||
+              !Number.isSafeInteger(issued.expiresAt)) throw new Error();
+            queueEntries.push(freeze({
+              line: entry.line, navigationToken: issued.navigationToken,
+              evidenceUrl: { ...evidenceUrl }, sessionDigest: issued.sessionDigest, status: 'pending',
+            }));
+          }
+          await input.rawNavigationVault.putQueue({ auditId, entries: queueEntries });
+          return freeze({ kind: 'batch', queueId: auditId, acceptedCount: normalized.entries.length });
+        },
+      });
+      const response = started?.response;
+      if (response?.ok === true && response.auditId === auditId && response.state === 'running') {
+        return freeze({
+          ok: true, auditId, state: 'running', total: normalized.entries.length,
+          warnings: normalized.warnings.map(warning => ({ ...warning })),
+        });
+      }
+      try { await input.rawNavigationVault.clearAudit(auditId); }
+      catch { return fail('AUDIT_RECOVERY_REQUIRED'); }
       return response?.ok === false && START_CODES.has(response.code) ? fail(response.code) : fail('AUDIT_START_FAILED');
     } catch {
       if (AUDIT_ID.test(auditId ?? '')) {
@@ -885,6 +950,7 @@ export function createSidePanelIntentRouter(raw) {
     if (envelope.type === 'PREPARE_PANEL_PERSONA_CAPABILITY') return preparePanelPersona(envelope, request.sender, request.launchTabId);
     if (envelope.type === 'PANEL_START_ATTACHED_AUDIT') return startAttached(envelope, request.sender);
     if (envelope.type === 'PANEL_START_URL_AUDIT') return startUrl(envelope, request.sender);
+    if (envelope.type === 'PANEL_START_BATCH_AUDIT') return startBatch(envelope, request.sender);
     if (['CONFIRM_PIXEL_CAPTURE', 'PANEL_CONFIRM_PIXEL_CAPTURE'].includes(envelope.type)) {
       return confirmPixelCapture(envelope, request.sender);
     }

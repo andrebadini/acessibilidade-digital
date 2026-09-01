@@ -6,8 +6,9 @@ import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule
 import { projectOccurrenceEvidencePreviews } from '../../src/core/report/evidence-treatment.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
+import { canonicalCoreRuleSummary } from '../../src/core/report/text-policy.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
-import { buildPanelSummary } from '../../src/panel/panel-summary.js';
+import { buildCompleteReportSummary, buildPanelSummary } from '../../src/panel/panel-summary.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { buildReportView, renderReportView, updateReportHighlightAction } from '../../src/review/report-view.js';
 import { EXPORT_FORMATS_V1 } from '../../src/export/report-export.js';
@@ -82,7 +83,29 @@ async function fixture({ mutateDraft } = {}) {
     })),
   };
   const summary = await buildPanelSummary({ model, executionCheckpoint: checkpoint, inventory });
-  return { model, summary };
+  return { model, summary, checkpoint, inventory };
+}
+
+function expandManualReviewOccurrences(draft, count) {
+  for (const ruleId of ['focus-visible', 'focus-order']) {
+    const rule = draft.ruleResults.find(value => value.ruleId === ruleId);
+    rule.outcome = 'inapplicable';
+    rule.targets = [];
+    rule.summary = canonicalCoreRuleSummary(ruleId, 'inapplicable');
+    rule.limitations = [];
+    for (const itemId of rule.nbrItems) {
+      draft.itemResults.find(value => value.id === itemId).outcome = 'inapplicable';
+    }
+  }
+  const source = SAMPLE_AUDIT.occurrences.find(value => value.source.engine === 'audita-manual-review');
+  const review = SAMPLE_AUDIT.manualReview.find(value => value.occurrenceId === source.occurrenceId);
+  draft.occurrences = Array.from({ length: count }, (_value, index) => ({
+    ...structuredClone(source), occurrenceId: `occ-report-complete-${String(index).padStart(3, '0')}`,
+  }));
+  draft.manualReview = draft.occurrences.map(occurrence => ({
+    ...structuredClone(review), occurrenceId: occurrence.occurrenceId,
+  }));
+  draft.reviewDecisions = [];
 }
 
 function retainElementEvidenceWithoutFullPage(draft) {
@@ -175,6 +198,27 @@ test('ReportViewV1 owns exact frozen copies and the canonical four-format order'
   assert.doesNotMatch(passed.plainLanguage.correction, /corrija|revise|aplique/iu);
   const observed = Object.values(view.issues).flatMap(cards => cards.map(card => card.plainLanguage.observed));
   assert.doesNotMatch(JSON.stringify(observed), /top-document|mixed|page-or-process/u);
+});
+
+test('complete report summary preserves every occurrence beyond the bounded interactive panel projection', async () => {
+  const { model, summary: panelSummary, checkpoint, inventory } = await fixture({
+    mutateDraft(draft) { expandManualReviewOccurrences(draft, 256); },
+  });
+  const completeSummary = await buildCompleteReportSummary({
+    model, executionCheckpoint: checkpoint, inventory,
+  });
+  const view = buildReportView({
+    model, summary: completeSummary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash,
+  });
+  const panelOccurrences = Object.values(panelSummary.groups).flatMap(cards =>
+    cards.flatMap(card => card.occurrenceIds));
+  const reportOccurrences = Object.values(view.issues).flatMap(cards =>
+    cards.flatMap(card => card.occurrences));
+
+  assert.equal(panelOccurrences.length <= 64, true);
+  assert.equal(reportOccurrences.length, 256);
+  assert.equal(new Set(reportOccurrences.map(occurrence => occurrence.occurrenceId)).size, 256);
+  assert.equal(completeSummary.limitations.codes.some(value => /painel.+relat.rio completo/iu.test(value)), false);
 });
 
 test('ReportViewV1 offers the three WCAG conformance levels instead of numeric criteria', async () => {

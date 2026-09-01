@@ -4,6 +4,10 @@ import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../core/legal/consumer-basis
 import { projectAuditResourceOrigin, sanitizeEvidenceUrl } from '../core/privacy.js';
 import { createAuditModel } from '../core/report/audit-model.js';
 import { assertPanelClassificationV1, deriveResultContextV1 } from './panel-result-contract.js';
+import {
+  INTERACTIVE_PANEL_LIMITATION,
+  MAX_INTERACTIVE_PANEL_OCCURRENCES,
+} from './panel-projection-policy.js';
 
 const GROUP_NAMES = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
 const CONSULT_ACTION = Object.freeze({
@@ -186,14 +190,14 @@ function legalReferenceFor({ occurrence, card, item, decision }) {
   };
 }
 
-function targetBlock(card, occurrenceById, selectedOccurrenceId) {
-  const index = card.occurrenceIds.indexOf(selectedOccurrenceId);
-  const occurrence = index >= 0 ? occurrenceById.get(selectedOccurrenceId) : null;
+function targetBlock(occurrences, selectedOccurrenceId) {
+  const index = occurrences.findIndex(occurrence => occurrence.occurrenceId === selectedOccurrenceId);
+  const occurrence = index >= 0 ? occurrences[index] : null;
   if (!occurrence) detailDenied();
   return [{
     nodeId: occurrence.nodeId,
     position: index + 1,
-    total: card.occurrenceIds.length,
+    total: occurrences.length,
   }];
 }
 
@@ -229,16 +233,20 @@ function buildPanelDetailFromCanonical(model, summary, occurrenceId) {
     : model.itemResults.find(candidate => candidate.id === occurrence.nbrItemRef) ?? null;
   const evidenceById = new Map(model.evidence.map(artifact => [artifact.evidenceId, artifact]));
   const cardOccurrences = card.occurrenceIds.map(id => occurrenceById.get(id));
-  const authoritativeOccurrenceIds = model.occurrences
+  const authoritativeOccurrences = model.occurrences
     .filter(candidate => JSON.stringify([candidate.pageId, candidate.source.engine, candidate.source.ruleId]) === card.checkKey)
-    .map(candidate => candidate.occurrenceId)
-    .sort((left, right) => left.localeCompare(right));
-  if (cardOccurrences.some(value => !value) ||
-    JSON.stringify([...card.occurrenceIds].sort((left, right) => left.localeCompare(right))) !== JSON.stringify(authoritativeOccurrenceIds)) {
+    .sort((left, right) => left.occurrenceId.localeCompare(right.occurrenceId));
+  const authoritativeOccurrenceIds = authoritativeOccurrences.map(candidate => candidate.occurrenceId);
+  const exactOccurrenceSet = JSON.stringify(card.occurrenceIds) === JSON.stringify(authoritativeOccurrenceIds);
+  const boundedPrefix = summary.limitations.codes.includes(INTERACTIVE_PANEL_LIMITATION) &&
+    card.occurrenceIds.length > 0 && card.occurrenceIds.length <= MAX_INTERACTIVE_PANEL_OCCURRENCES &&
+    card.occurrenceIds.length < authoritativeOccurrenceIds.length &&
+    JSON.stringify(card.occurrenceIds) === JSON.stringify(authoritativeOccurrenceIds.slice(0, card.occurrenceIds.length));
+  if (cardOccurrences.some(value => !value) || (!exactOccurrenceSet && !boundedPrefix)) {
     detailDenied();
   }
   const itemById = new Map(model.itemResults.map(candidate => [candidate.id, candidate]));
-  const expectedAbntItemIds = [...new Set(cardOccurrences
+  const expectedAbntItemIds = [...new Set(authoritativeOccurrences
     .map(candidate => candidate.nbrItemRef)
     .filter(candidate => itemById.has(candidate)))]
     .sort((left, right) => left.localeCompare(right));
@@ -249,8 +257,8 @@ function buildPanelDetailFromCanonical(model, summary, occurrenceId) {
   if (JSON.stringify(card.abntItemIds) !== JSON.stringify(expectedAbntItemIds) ||
     JSON.stringify(card.wcag) !== JSON.stringify(expectedWcag)) detailDenied();
   const decisionByOccurrence = new Map(model.reviewDecisions.map(candidate => [candidate.occurrenceId, candidate]));
-  if (expectedDisplayOutcome(cardOccurrences, decisionByOccurrence) !== card.displayOutcome ||
-    deriveResultContextV1({ occurrences: cardOccurrences, evidenceById }) !== card.context) detailDenied();
+  if (expectedDisplayOutcome(authoritativeOccurrences, decisionByOccurrence) !== card.displayOutcome ||
+    deriveResultContextV1({ occurrences: authoritativeOccurrences, evidenceById }) !== card.context) detailDenied();
   const evidence = evidenceForOccurrence(occurrence, evidenceById);
   const locator = correlatedLocator(occurrence, evidence);
   const decision = model.reviewDecisions.find(candidate => candidate.occurrenceId === occurrenceId) ?? null;
@@ -274,7 +282,7 @@ function buildPanelDetailFromCanonical(model, summary, occurrenceId) {
     },
     observed: reason,
     correction: correctionFor(occurrence, rule, item),
-    targets: targetBlock(card, occurrenceById, occurrenceId),
+    targets: targetBlock(authoritativeOccurrences, occurrenceId),
     accessibility: accessibilityBlock(occurrence, evidence),
     normative: {
       wcag: normativeWcag.map(reference => reference.id),

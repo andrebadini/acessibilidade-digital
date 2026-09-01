@@ -47,6 +47,15 @@ const RUN_BATCH_REQUEST_KEYS = Object.freeze([
   'onExecutionCheckpoint',
 ]);
 const CHECKPOINT_FAILURES = new WeakSet();
+const BATCH_EXECUTION_RUNNERS = new WeakSet();
+
+/** Brands a worker-local child runner whose result includes cleanup and checkpoint evidence. */
+export function createBatchExecutionRunner(handler) {
+  if (typeof handler !== 'function') throw new TypeError(INVALID_BATCH_CONFIG_MESSAGE);
+  const runner = async options => Reflect.apply(handler, undefined, [options]);
+  BATCH_EXECUTION_RUNNERS.add(runner);
+  return Object.freeze(runner);
+}
 
 /** Audits only the normalized explicit list, exactly one disposable tab at a time. */
 export async function runBatch(request) {
@@ -64,7 +73,10 @@ export async function runBatch(request) {
     onCheckpoint = async () => {},
     onExecutionCheckpoint = async () => {},
   } = captureBatchRequest(request);
-  const entries = captureBatchEntries(requestedEntries);
+  const brandedExecutionRunner = BATCH_EXECUTION_RUNNERS.has(runner);
+  const entries = captureBatchEntries(requestedEntries, {
+    allowDuplicateNavigationUrls: brandedExecutionRunner,
+  });
   const reportOptions = captureReportOptions(requestedReportOptions);
   validateInputs({ entries, batchAuditId, chromeAdapter, runner, pageTimeoutMs, cleanupTimeoutMs, evidenceBudgetBytes, reportOptions });
   const template = createBatchReportTemplate(reportOptions);
@@ -76,7 +88,7 @@ export async function runBatch(request) {
   let evidenceBytesUsed = 0;
   let evidenceBudgetExhausted = false;
   let executionCheckpoint = null;
-  const executionMode = runner === runAuditExecution;
+  const executionMode = runner === runAuditExecution || brandedExecutionRunner;
   const pageOrder = entries.map((_entry, index) => `page-${index + 1}`);
 
   const claimFinalization = ({ allowAborted = false } = {}) => {
@@ -584,7 +596,7 @@ function captureHandoffResult(value) {
   }
 }
 
-function captureBatchEntries(value) {
+function captureBatchEntries(value, { allowDuplicateNavigationUrls = false } = {}) {
   try {
     if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) throw new TypeError();
     const descriptors = Object.getOwnPropertyDescriptors(value);
@@ -604,7 +616,9 @@ function captureBatchEntries(value) {
       const descriptor = descriptors[String(index)];
       if (!descriptor || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) throw new TypeError();
       const entry = captureBatchEntry(descriptor.value);
-      if (lines.has(entry.line) || navigationUrls.has(entry.navigationUrl)) throw new TypeError();
+      if (lines.has(entry.line) || !allowDuplicateNavigationUrls && navigationUrls.has(entry.navigationUrl)) {
+        throw new TypeError();
+      }
       lines.add(entry.line);
       navigationUrls.add(entry.navigationUrl);
       captured[index] = entry;

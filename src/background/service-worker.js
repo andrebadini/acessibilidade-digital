@@ -63,6 +63,8 @@ import { createPersonaLeaseStore } from './persona-lease-store.js';
 import { createPersonaInjectionRuntime } from './persona-runtime.js';
 import { createPersonaStartOrchestrator } from './persona-start-orchestrator.js';
 import { createOwnershipId, runAttachedAuditExecution, runUrlAudit } from './run-audit.js';
+import { runBatch } from './run-batch.js';
+import { createBatchAuditExecutionV1 } from './batch-audit-execution.js';
 import { runObservedTabAudit } from './observed-tab-runner.js';
 import { createOwnedTabRegistry } from './owned-tabs.js';
 import { createSidePanelIntentRouter } from './side-panel-intent-router.js';
@@ -79,6 +81,7 @@ import {
 } from './live-aid-cleanup.js';
 import {
   createTargetCapabilityAuthority,
+  readBatchAuditCorrelationForRecovery,
   readAuditSessionForWorker,
 } from './target-capabilities.js';
 import { isPanelPortIntent, parseWorkerMessage } from './worker-protocol.js';
@@ -936,6 +939,7 @@ async function buildDefaultRuntime(chromeApi, options) {
     sessionArea, digestManager, now: epochNow, randomBytes: bytes,
   });
   if (typeof rawNavigationVault?.put !== 'function' || typeof rawNavigationVault?.take !== 'function' ||
+    typeof rawNavigationVault?.readQueue !== 'function' || typeof rawNavigationVault?.replaceQueue !== 'function' ||
     typeof rawNavigationVault?.clearAudit !== 'function') throw new Error('WORKER_UNAVAILABLE');
   const baseAdapter = typeof options.chromeAdapterFactory === 'function'
     ? options.chromeAdapterFactory(chromeApi, { sessionUrlDigestManager: digestManager })
@@ -1121,6 +1125,14 @@ async function buildDefaultRuntime(chromeApi, options) {
             }
             return Object.freeze({ ok: true, state, binding: session.targetBinding, windowId: session.windowId, live: true });
           }
+          const batch = exact(session.targetBinding, ['kind', 'activePageId', 'activeOwnershipId'], true);
+          if (session.mode === 'batch' && batch?.kind === 'batch' &&
+            batch.activePageId === null && batch.activeOwnershipId === null) {
+            // O lote concluído não conserva uma aba de origem viva. Ele pode ser
+            // aberto para consulta, revisão e exportação, sem conceder destaque
+            // ou retorno a uma página que já foi descartada.
+            return Object.freeze({ ok: true, state, binding: session.targetBinding, windowId: session.windowId, live: false });
+          }
           const disposable = exact(session.targetBinding, ['kind', 'ownershipId', 'state'], true);
           if (disposable?.kind !== 'disposable' ||
             !['removed', 'retained-for-review'].includes(disposable.state) ||
@@ -1235,54 +1247,100 @@ async function buildDefaultRuntime(chromeApi, options) {
     attachPanelPort: panelCoordinator.attachPanelPort,
     withWindowLock: panelCoordinator.withWindowLock,
   });
+  const ownedTabRegistry = createOwnedTabRegistry({
+    sessionArea,
+    chromeAdapter: Object.freeze({ removeTab: tabId => chromeAdapter.removeTab(tabId) }),
+    now: modelNow,
+  });
   const urlAuditResourceCleaner = createExactUrlAuditResourceCleanerV1({
     rawNavigationVault,
-    ownedTabRegistry: createOwnedTabRegistry({
-      sessionArea,
-      chromeAdapter: Object.freeze({ removeTab: tabId => chromeAdapter.removeTab(tabId) }),
-      now: modelNow,
+    ownedTabRegistry,
+  });
+  const runUrlAuditExecution = options.runUrlAuditExecution ?? (args => {
+    const checkpointStore = Object.freeze({
+      writeSanitized: (auditId, checkpoint) => {
+        if (auditId !== args.auditId) throw new Error('CHECKPOINT_PERSIST_DENIED');
+        return args.onCheckpoint(checkpoint);
+      },
+      persistAuditModel: (model, observedTarget) => args.persistAuditModel(model, observedTarget),
+    });
+    const requestedVault = own(args, 'rawNavigationVault');
+    const navigationVault = requestedVault === undefined ? rawNavigationVault : requestedVault;
+    if (typeof navigationVault?.take !== 'function') throw new Error('WORKER_UNAVAILABLE');
+    const requestedProgress = own(args, 'onProgress');
+    if (requestedProgress !== undefined && typeof requestedProgress !== 'function') {
+      throw new Error('WORKER_UNAVAILABLE');
+    }
+    const common = {
+      auditId: args.auditId, chromeAdapter, capturePolicy: args.capturePolicy,
+      checkpointStore,
+      onProgress: requestedProgress ?? (event => chromeAdapter.emitProgress(event)),
+      now: args.modelNow, signal: args.signal, expectedExtensionId: chromeApi.runtime.id,
+      auditRunner: runObservedTabAudit,
+    };
+    return Object.hasOwn(args, 'resumeTarget')
+      ? runUrlAudit({
+          ...common,
+          requestedUrlEvidence: args.requestedUrlEvidence,
+          resumeTarget: args.resumeTarget,
+          resumeCheckpoint: args.resumeCheckpoint,
+          privacyGate: args.privacyGate,
+        })
+      : runUrlAudit({
+          ...common,
+          ownershipId: args.ownershipId,
+          windowId: args.windowId,
+          navigationToken: args.navigationToken,
+          navigationPurpose: args.navigationPurpose,
+          evidenceUrl: args.evidenceUrl,
+          sessionDigest: args.sessionDigest,
+          rawNavigationVault: navigationVault,
+          ...(args.privacyGate ? { privacyGate: args.privacyGate } : {}),
+        });
+  });
+  const manifestVersion = own(chromeApi.runtime.getManifest?.(), 'version');
+  const batchReportOptions = Object.freeze({
+    timezone: 'America/Cuiaba',
+    manifestVersion: typeof manifestVersion === 'string' && manifestVersion.length > 0 ? manifestVersion : '0.0.0',
+    rulesVersion: inventory.rulesVersion,
+    browserVersion: typeof globalThis.navigator?.userAgent === 'string' && globalThis.navigator.userAgent.length > 0
+      ? globalThis.navigator.userAgent.slice(0, 256)
+      : 'Chrome (versão não disponível)',
+    expectedExtensionId: chromeApi.runtime.id,
+  });
+  const batchExecution = (options.batchAuditExecutionFactory ?? createBatchAuditExecutionV1)({
+    rawNavigationVault,
+    authority,
+    ownedTabRegistry,
+    createOwnershipId: () => createOwnershipId(bytes),
+    runBatch,
+    runUrlAuditExecution,
+    readBatchCorrelation: ({ capabilityId, auditId }) => readBatchAuditCorrelationForRecovery({
+      sessionArea, capabilityId, auditId,
     }),
+    emitProgress: event => chromeAdapter.emitProgress(event),
+    tryEnterFinalization: () => true,
   });
   const auditStarter = createAuthorizedAuditStarter({
     authority, sessionArea, panelCoordinator: panelAuditCoordinator, targetQueue, cleanupBarrier,
     runAttachedAuditExecution: args => runAttachedAuditExecution({
       ...args, chromeAdapter, expectedExtensionId: chromeApi.runtime.id,
     }),
-    runUrlAuditExecution: options.runUrlAuditExecution ?? (args => {
-      const checkpointStore = Object.freeze({
-        writeSanitized: (auditId, checkpoint) => {
-          if (auditId !== args.auditId) throw new Error('CHECKPOINT_PERSIST_DENIED');
-          return args.onCheckpoint(checkpoint);
-        },
-        persistAuditModel: (model, observedTarget) => args.persistAuditModel(model, observedTarget),
-      });
-      const common = {
-        auditId: args.auditId, chromeAdapter, capturePolicy: args.capturePolicy,
-        checkpointStore, onProgress: event => chromeAdapter.emitProgress(event),
-        now: args.modelNow, signal: args.signal, expectedExtensionId: chromeApi.runtime.id,
-        auditRunner: runObservedTabAudit,
-      };
-      return Object.hasOwn(args, 'resumeTarget')
-        ? runUrlAudit({
-            ...common,
-            requestedUrlEvidence: args.requestedUrlEvidence,
-            resumeTarget: args.resumeTarget,
-            resumeCheckpoint: args.resumeCheckpoint,
-            privacyGate: args.privacyGate,
-          })
-        : runUrlAudit({
-            ...common,
-            ownershipId: args.ownershipId,
-            windowId: args.windowId,
-            navigationToken: args.navigationToken,
-            navigationPurpose: args.navigationPurpose,
-            evidenceUrl: args.evidenceUrl,
-            sessionDigest: args.sessionDigest,
-            rawNavigationVault,
-            ...(args.privacyGate ? { privacyGate: args.privacyGate } : {}),
-          });
-    }),
+    runUrlAuditExecution,
     clearUrlAuditResources: urlAuditResourceCleaner,
+    runBatchAuditExecution: args => batchExecution.run({
+      auditId: args.auditId,
+      capabilityId: args.capabilityId,
+      sessionCapabilityId: args.sessionCapabilityId,
+      windowId: args.windowId,
+      acceptedCount: args.acceptedCount,
+      capturePolicy: args.capturePolicy,
+      now: args.modelNow,
+      signal: args.signal,
+      reportOptions: batchReportOptions,
+      onExecutionCheckpoint: args.onCheckpoint,
+    }),
+    clearBatchAuditResources: args => batchExecution.cleanup(args),
     persistLatest, persistCheckpoint: checkpoints.persistCheckpoint, removeCheckpoint: checkpoints.removeCheckpoint,
     commitTerminalAudit,
     readAuditSnapshot: ({ auditId }) => auditStore.getAuditSnapshot(auditId),

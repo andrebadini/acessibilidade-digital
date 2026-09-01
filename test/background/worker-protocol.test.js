@@ -15,6 +15,7 @@ const CONSENT = `${'C'.repeat(21)}Q`;
 const validMessages = [
   { type: 'PREPARE_PANEL_CAPABILITY', requestId: '_request', windowId: 9 },
   { type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: '_navigation', intent: 'single', windowId: 9 },
+  { type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: '_batch', intent: 'batch', windowId: 9 },
   { type: 'PREPARE_PANEL_PERSONA_CAPABILITY', requestId: '_persona', windowId: 9 },
   { type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9 },
   { type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'full-evidence', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9 },
@@ -33,6 +34,12 @@ const validMessages = [
     type: 'PANEL_START_URL_AUDIT', capabilityId: CAPABILITY,
     url: 'https://example.test/private?token=raw', captureMode: 'element-only',
     includeQuery: false, deleteAfterCompleteExport: false, windowId: 9,
+  },
+  {
+    type: 'PANEL_START_BATCH_AUDIT', capabilityId: CAPABILITY,
+    urls: 'https://one.example.test/private?token=raw\nhttps://two.example.test/',
+    captureMode: 'no-pixels', includeQuery: false,
+    deleteAfterCompleteExport: false, windowId: 9,
   },
   { type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: '-audit.1', consentId: CONSENT, mode: 'full-evidence', accepted: true, windowId: 9 },
   { type: 'PANEL_CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: '-audit.1', mode: 'element-only', accepted: true, windowId: 9 },
@@ -230,7 +237,7 @@ test('admits each bounded single-URL capture mode through its exact panel Port e
   };
 
   for (const invalid of [
-    { ...prepare, intent: 'batch' },
+    { ...prepare, intent: 'crawler' },
     { ...prepare, url: 'https://forged.test/' },
     { ...start, captureMode: 'pixels' },
     { ...start, includeQuery: true },
@@ -238,6 +245,32 @@ test('admits each bounded single-URL capture mode through its exact panel Port e
     { ...start, url: '' },
     { ...start, url: 'x'.repeat(2_049) },
     { ...start, url: 'https://example.test/', ownershipId: 'forged-owner' },
+  ]) assert.deepEqual(parsePanelPortIntent(invalid, 17), { ok: false, code: 'INVALID_MESSAGE' });
+});
+
+test('admits only a bounded no-pixels batch through the panel Port', () => {
+  const prepare = { type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: 'batch-request-1', intent: 'batch' };
+  assert.deepEqual(parsePanelPortIntent(prepare, 17), {
+    ok: true, value: { ...prepare, windowId: 17 },
+  });
+  const start = {
+    type: 'PANEL_START_BATCH_AUDIT', capabilityId: CAPABILITY,
+    urls: 'https://one.example.test/private?token=raw\nhttps://two.example.test/',
+    captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
+  };
+  assert.deepEqual(parsePanelPortIntent(start, 17), {
+    ok: true, value: { ...start, windowId: 17 },
+  });
+  assert.equal(isPanelPortIntent(start), true);
+
+  for (const invalid of [
+    { ...start, captureMode: 'full-evidence' },
+    { ...start, captureMode: 'element-only' },
+    { ...start, includeQuery: true },
+    { ...start, deleteAfterCompleteExport: true },
+    { ...start, urls: '' },
+    { ...start, urls: 'x'.repeat(41_001) },
+    { ...start, queueId: 'forged' },
   ]) assert.deepEqual(parsePanelPortIntent(invalid, 17), { ok: false, code: 'INVALID_MESSAGE' });
 });
 

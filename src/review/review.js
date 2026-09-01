@@ -1,6 +1,6 @@
 import { createReviewDecision } from '../core/review/decisions.js';
 import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
-import { createPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
+import { buildCompleteReportSummary } from '../panel/panel-summary.js';
 import { createAuditStore } from '../storage/audit-store.js';
 import { createDestructiveDialog } from '../ui/destructive-dialog.js';
 import { parseAuditDeletedEvent } from '../core/audit-deleted-event.js';
@@ -430,8 +430,10 @@ async function start() {
   reportSessionState = connected.state;
   const [revision, inventory] = await Promise.all([store.getReportRevision(id), createInstalledCoreRuleInventory()]);
   if (!revision || revision.auditId !== id) { status.textContent = 'Auditoria não encontrada.'; return; }
-  const bundle = await createPanelResultBundleV1({ reportRevision: revision, inventory });
-  const view = buildReportView({ model: revision.model, summary: bundle.summary, modelRevision: revision.modelRevision, modelHash: revision.modelHash });
+  const summary = await buildCompleteReportSummary({
+    model: revision.model, executionCheckpoint: revision.checkpoint, inventory,
+  });
+  const view = buildReportView({ model: revision.model, summary, modelRevision: revision.modelRevision, modelHash: revision.modelHash });
   auditModel = revision.model;
   applyReportSourceControls({
     reportSessionState, limitations: view.executive.limitations,

@@ -25,6 +25,19 @@ const ENTRY_ERRORS = Object.freeze({
   'too-long': 'A URL é longa demais. Use um endereço com até 2.048 caracteres.',
   'start-failed': 'Não foi possível iniciar a avaliação desta URL. Tente novamente.',
 });
+const BATCH_ENTRY_ERRORS = Object.freeze({
+  required: 'Informe de 2 a 20 URLs para continuar.',
+  'too-few': 'Informe pelo menos 2 URLs válidas e diferentes.',
+  'too-many': 'Informe no máximo 20 URLs por avaliação.',
+  'invalid-lines': 'Corrija as linhas indicadas antes de avaliar.',
+  'start-failed': 'Não foi possível iniciar a avaliação do lote. Tente novamente.',
+});
+const BATCH_LINE_ERRORS = Object.freeze({
+  invalid: 'endereço HTTP/HTTPS inválido',
+  'too-long': 'endereço com mais de 2.048 caracteres',
+});
+const DUPLICATE_URL_MESSAGE = 'A URL repete uma entrada anterior e não será auditada novamente.';
+const MAX_BATCH_LINE_NUMBER = 65_536;
 
 export function buildPanelView({ state, summary = null, detail = null } = {}) {
   const screen = dataProperty(state, 'screen');
@@ -38,18 +51,23 @@ export function buildPanelView({ state, summary = null, detail = null } = {}) {
     (screen !== 'running' || !PIXEL_CAPTURE_MODES.includes(captureMode) || !privacy || privacy.mode !== captureMode)) {
     throw new TypeError('PANEL_VIEW_PRIVACY_INVALID');
   }
+  const entryModeValue = dataProperty(state, 'entryMode');
+  const entryMode = ['single-url', 'batch'].includes(entryModeValue) ? entryModeValue : 'sources';
+  const auditSourceValue = dataProperty(state, 'auditSource');
+  const auditSource = ['attached', 'single-url', 'batch'].includes(auditSourceValue) ? auditSourceValue : null;
+  const batch = copyBatchProjection(dataProperty(state, 'batch'));
   const base = {
     version: 1,
     screen,
     auditId: typeof state.auditId === 'string' ? state.auditId : null,
-    entryMode: dataProperty(state, 'entryMode') === 'single-url' ? 'single-url' : 'sources',
-    entryError: Object.hasOwn(ENTRY_ERRORS, dataProperty(state, 'entryError')) ? dataProperty(state, 'entryError') : null,
-    auditSource: ['attached', 'single-url'].includes(dataProperty(state, 'auditSource'))
-      ? dataProperty(state, 'auditSource') : null,
+    entryMode,
+    entryError: copyEntryError(entryMode, dataProperty(state, 'entryError')),
+    auditSource,
     captureMode,
     sessionStatus,
     privacy: sessionStatus === 'privacy-paused' ? privacy : neutralPrivacyProjection(),
-    progress: copyProgress(dataProperty(state, 'progress')),
+    progress: copyProgress(dataProperty(state, 'progress'), auditSource, batch),
+    batch,
     filters: copyFilters(state.filters),
     selectedOccurrenceId: typeof state.selectedOccurrenceId === 'string' ? state.selectedOccurrenceId : null,
     evidenceExpanded: state.evidenceExpanded === true,
@@ -86,9 +104,11 @@ export function renderPanelView({ view, document, onIntent, onEvent = () => {} }
     switch (intent.type) {
       case 'START_ATTACHED':
       case 'START_URL':
+      case 'START_BATCH':
       case 'CONFIRM_PIXEL_CAPTURE':
       case 'OPEN_URL_FORM':
       case 'CLOSE_URL_FORM':
+      case 'CLOSE_BATCH_FORM':
       case 'OPEN_BATCH_FORM':
       case 'CANCEL_AUDIT':
       case 'OPEN_REPORT':
@@ -170,10 +190,18 @@ function renderInitial(document, view, emit, onEvent) {
   root.append(
     heading(document, 2, 'Avaliar acessibilidade'),
     paragraph(document, 'A auditoria acontece localmente nesta página e não envia o conteúdo para serviços externos.', 'lead'),
-    paragraph(document, LOCAL_PIXEL_NOTICE, 'privacy-local-copy'),
   );
+  root.append(paragraph(
+    document,
+    view.entryMode === 'batch' ? 'O lote é avaliado sem capturar imagens. Tudo permanece neste dispositivo.' : LOCAL_PIXEL_NOTICE,
+    'privacy-local-copy',
+  ));
   if (view.entryMode === 'single-url') {
     root.append(renderSingleUrlEntry(document, view, emit, onEvent));
+    return root;
+  }
+  if (view.entryMode === 'batch') {
+    root.append(renderBatchEntry(document, view, emit, onEvent));
     return root;
   }
   root.append(renderCaptureModeChoices(document, view.captureMode, onEvent));
@@ -182,10 +210,102 @@ function renderInitial(document, view, emit, onEvent) {
   choices.append(
     actionButton(document, 'Auditar a página atual', 'START_ATTACHED', 'start-attached', emit, 'primary-action'),
     actionButton(document, 'Outra URL', 'OPEN_URL_FORM', 'open-url-form', emit, 'secondary-action'),
-    unavailableChoice(document, 'Lote de páginas', 'OPEN_BATCH_FORM', 'open-batch-form', emit),
+    actionButton(document, 'Lote de páginas', 'OPEN_BATCH_FORM', 'open-batch-form', emit, 'secondary-action'),
   );
   root.append(choices, liveRegion(document, 'Escolha como iniciar a auditoria.'));
   return root;
+}
+
+function renderBatchEntry(document, view, emit, onEvent) {
+  const wrapper = section(document, 'batch-url-entry');
+  const form = document.createElement('form');
+  form.setAttribute('id', 'batch-audit-form');
+  form.setAttribute('novalidate', '');
+  const label = document.createElement('label');
+  label.setAttribute('for', 'audit-urls');
+  label.textContent = 'Endereços das páginas';
+  const instructions = paragraph(
+    document,
+    'Informe de 2 a 20 URLs HTTP/HTTPS, uma por linha. A extensão avalia somente esta lista e não segue links.',
+    'batch-instructions',
+  );
+  instructions.setAttribute('id', 'audit-urls-instructions');
+  const textarea = document.createElement('textarea');
+  textarea.setAttribute('id', 'audit-urls');
+  textarea.setAttribute('name', 'batch-urls');
+  textarea.setAttribute('rows', '7');
+  textarea.setAttribute('required', '');
+  textarea.setAttribute('maxlength', '40979');
+  textarea.setAttribute('aria-describedby', view.entryError === null
+    ? 'audit-urls-instructions' : 'audit-urls-instructions audit-urls-error');
+  textarea.dataset.focusId = 'audit-urls';
+  textarea.addEventListener('input', () => {
+    onEvent({ type: 'BATCH_DRAFT_CHANGED', urls: typeof textarea.value === 'string' ? textarea.value : '' });
+  });
+  if (view.entryError !== null) textarea.setAttribute('aria-invalid', 'true');
+  form.append(label, instructions, textarea);
+  if (view.entryError !== null) {
+    const error = section(document, 'field-error batch-entry-error');
+    error.setAttribute('id', 'audit-urls-error');
+    error.append(paragraph(document, BATCH_ENTRY_ERRORS[view.entryError]));
+    if (view.batch.errors.length > 0) {
+      const list = document.createElement('ul');
+      for (const issue of view.batch.errors) {
+        const item = document.createElement('li');
+        item.textContent = `Linha ${issue.line}: ${BATCH_LINE_ERRORS[issue.code]}.`;
+        list.append(item);
+      }
+      error.append(list);
+    }
+    form.append(error);
+  }
+  form.append(renderBatchCaptureMode(document));
+  const actions = section(document, 'form-actions');
+  const submit = document.createElement('button');
+  submit.setAttribute('type', 'submit');
+  submit.className = 'primary-action';
+  submit.dataset.intent = 'START_BATCH';
+  submit.dataset.action = 'start-batch-audit';
+  submit.dataset.focusId = 'start-batch-audit';
+  submit.textContent = 'Avaliar páginas';
+  actions.append(submit, actionButton(document, 'Voltar', 'CLOSE_BATCH_FORM', 'close-batch-form', emit, 'secondary-action'));
+  form.append(actions);
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    emit({ type: 'START_BATCH', urls: typeof textarea.value === 'string' ? textarea.value : '' });
+  });
+  wrapper.append(form, liveRegion(document, 'Informe uma URL por linha. O lote usa somente o modo sem imagens.'));
+  return wrapper;
+}
+
+function renderBatchCaptureMode(document) {
+  const fieldset = document.createElement('fieldset');
+  fieldset.className = 'capture-mode-fieldset batch-capture-mode';
+  const legend = document.createElement('legend');
+  legend.textContent = 'Modo de evidência';
+  const option = document.createElement('label');
+  option.className = 'capture-mode-option';
+  option.setAttribute('for', 'batch-capture-mode-no-pixels');
+  const input = document.createElement('input');
+  input.setAttribute('type', 'radio');
+  input.setAttribute('name', 'capture-mode');
+  input.setAttribute('id', 'batch-capture-mode-no-pixels');
+  input.setAttribute('value', 'no-pixels');
+  input.setAttribute('disabled', '');
+  input.dataset.captureMode = 'no-pixels';
+  input.checked = true;
+  const copy = document.createElement('div');
+  copy.className = 'capture-mode-copy';
+  const label = document.createElement('span');
+  label.className = 'capture-mode-label';
+  label.textContent = 'Somente sem imagens';
+  const detail = document.createElement('span');
+  detail.className = 'capture-mode-description';
+  detail.textContent = 'O lote é avaliado localmente sem capturar pixels.';
+  copy.append(label, detail);
+  option.append(input, copy);
+  fieldset.append(legend, option);
+  return fieldset;
 }
 
 function renderSingleUrlEntry(document, view, emit, onEvent) {
@@ -290,21 +410,14 @@ function renderCaptureModeChoices(document, selectedMode, onEvent) {
   return fieldset;
 }
 
-function unavailableChoice(document, label, intent, focusId, emit) {
-  const wrapper = section(document, 'source-choice secondary-choice');
-  wrapper.append(
-    actionButton(document, label, intent, focusId, emit, 'secondary-action'),
-    paragraph(document, 'Não disponível nesta beta', 'availability-note'),
-  );
-  return wrapper;
-}
-
 function renderRunning(document, view, emit) {
   const root = section(document, 'panel-screen panel-running');
   root.dataset.screen = 'running';
   if (view.sessionStatus === 'privacy-paused') return renderPrivacyPause(root, document, view, emit);
   const started = view.auditId !== null;
+  const isBatch = view.auditSource === 'batch';
   const current = view.progress.percent === null ? null : view.progress;
+  if (isBatch) return renderBatchRunning(root, document, view, emit, started, current);
   const currentPhase = current ? RUNNING_PHASES.find(([phase]) => phase === current.phase) : null;
   const currentLabel = currentPhase?.[3] ?? current?.message;
   const status = !started
@@ -347,6 +460,58 @@ function renderRunning(document, view, emit) {
   root.append(
     progress,
     phases,
+    actionButton(document, 'Cancelar auditoria', 'CANCEL_AUDIT', 'cancel-audit', emit, 'danger-action'),
+    liveRegion(document, status),
+  );
+  return root;
+}
+
+function renderBatchRunning(root, document, view, emit, started, current) {
+  const page = view.batch.pageNumber;
+  const total = view.batch.total;
+  if (Number.isSafeInteger(page) && page > 0 && Number.isSafeInteger(total)) {
+    root.dataset.pageNumber = String(page);
+    root.dataset.total = String(total);
+  }
+  const status = !started
+    ? 'Iniciando avaliação do lote.'
+    : current && page > 0 ? `${current.message} ${current.percent}% concluído.`
+      : Number.isSafeInteger(total) ? `Lote preparado com ${total} páginas. Aguardando a primeira atualização.`
+        : 'Avaliação do lote em andamento.';
+  const statusCopy = paragraph(document, status, 'supporting-copy batch-progress-copy');
+  if (Number.isSafeInteger(page) && page > 0 && Number.isSafeInteger(total)) {
+    statusCopy.dataset.pageNumber = String(page);
+    statusCopy.dataset.total = String(total);
+  }
+  root.append(
+    paragraph(document, started ? 'Auditoria em andamento' : 'Iniciando avaliação', 'status-label status-running'),
+    heading(document, 2, 'Avaliando lote'),
+    statusCopy,
+  );
+  const progress = document.createElement('progress');
+  progress.className = 'audit-progress';
+  progress.dataset.auditProgress = '';
+  progress.setAttribute('aria-label', current
+    ? `Progresso do lote: ${current.percent}%` : 'Progresso do lote em andamento');
+  if (current) {
+    progress.setAttribute('value', String(current.percent));
+    progress.setAttribute('max', '100');
+  }
+  root.append(progress);
+  if (view.batch.warnings.length > 0) {
+    const warnings = section(document, 'batch-warnings');
+    warnings.append(heading(document, 3, 'Avisos da lista'));
+    const list = document.createElement('ul');
+    for (const warning of view.batch.warnings) {
+      const item = document.createElement('li');
+      const prior = warning.firstLine === null ? '' : ` (repete a linha ${warning.firstLine})`;
+      item.textContent = `Linha ${warning.line}${prior}: ${warning.message}`;
+      list.append(item);
+    }
+    warnings.append(list);
+    root.append(warnings);
+  }
+  root.append(
     actionButton(document, 'Cancelar auditoria', 'CANCEL_AUDIT', 'cancel-audit', emit, 'danger-action'),
     liveRegion(document, status),
   );
@@ -878,16 +1043,83 @@ function copyFilters(filters) {
   return copy;
 }
 
-function copyProgress(value) {
+function copyProgress(value, auditSource, batch) {
   const valid = value && typeof value === 'object' && !Array.isArray(value) &&
     Object.getPrototypeOf(value) === Object.prototype;
   if (!valid || value.phase === null || value.message === null || value.percent === null || value.at === null) {
     return { phase: null, message: null, percent: null, at: null };
   }
+  if (auditSource === 'batch' && value.phase === 'batch-page' && Number.isSafeInteger(batch.pageNumber) &&
+    batch.pageNumber >= 1 && Number.isSafeInteger(batch.total) && typeof value.percent === 'number' &&
+    Number.isFinite(value.percent) && value.percent >= 0 && value.percent <= 100 && canonicalIsoTime(value.at) &&
+    (value.message === `Página ${batch.pageNumber} de ${batch.total}: auditoria em andamento.` ||
+      value.message === `Página ${batch.pageNumber} de ${batch.total}: processamento encerrado.`)) {
+    return { phase: value.phase, message: value.message, percent: value.percent, at: value.at };
+  }
   return RUNNING_PHASES.some(([phase, message, percent]) =>
     value.phase === phase && value.message === message && value.percent === percent && canonicalIsoTime(value.at))
     ? { phase: value.phase, message: value.message, percent: value.percent, at: value.at }
     : { phase: null, message: null, percent: null, at: null };
+}
+
+function copyEntryError(entryMode, value) {
+  if (entryMode === 'single-url' && Object.hasOwn(ENTRY_ERRORS, value)) return value;
+  if (entryMode === 'batch' && Object.hasOwn(BATCH_ENTRY_ERRORS, value)) return value;
+  return null;
+}
+
+function copyBatchProjection(value) {
+  const batch = exactDataRecord(value, ['total', 'pageNumber', 'warnings', 'errors']);
+  if (!batch) return { total: null, pageNumber: null, warnings: [], errors: [] };
+  const warnings = copyBatchWarnings(batch.warnings);
+  const errors = copyBatchErrors(batch.errors);
+  if (!warnings || !errors) return { total: null, pageNumber: null, warnings: [], errors: [] };
+  const empty = batch.total === null && batch.pageNumber === null;
+  const running = Number.isSafeInteger(batch.total) && batch.total >= 2 && batch.total <= 20 &&
+    Number.isSafeInteger(batch.pageNumber) && batch.pageNumber >= 0 && batch.pageNumber <= batch.total;
+  return empty || running
+    ? { total: batch.total, pageNumber: batch.pageNumber, warnings, errors }
+    : { total: null, pageNumber: null, warnings: [], errors: [] };
+}
+
+function copyBatchWarnings(value) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length > 20) return null;
+    const own = Reflect.ownKeys(value);
+    if (own.length !== value.length + 1 || !own.includes('length')) return null;
+    const warnings = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      const warning = exactDataRecord(descriptor.value, ['line', 'code', 'firstLine', 'message']);
+      if (!warning || !Number.isSafeInteger(warning.line) || warning.line < 1 || warning.line > MAX_BATCH_LINE_NUMBER ||
+        warning.code !== 'DUPLICATE_URL' || warning.message !== DUPLICATE_URL_MESSAGE ||
+        warning.firstLine !== null && (!Number.isSafeInteger(warning.firstLine) || warning.firstLine < 1 ||
+          warning.firstLine > MAX_BATCH_LINE_NUMBER || warning.firstLine >= warning.line)) return null;
+      warnings.push({ ...warning });
+    }
+    return warnings;
+  } catch { return null; }
+}
+
+function copyBatchErrors(value) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length > 20) return null;
+    const own = Reflect.ownKeys(value);
+    if (own.length !== value.length + 1 || !own.includes('length')) return null;
+    const errors = [];
+    let priorLine = 0;
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      const issue = exactDataRecord(descriptor.value, ['line', 'code']);
+      if (!issue || !Number.isSafeInteger(issue.line) || issue.line <= priorLine || issue.line > MAX_BATCH_LINE_NUMBER ||
+        !Object.hasOwn(BATCH_LINE_ERRORS, issue.code)) return null;
+      priorLine = issue.line;
+      errors.push({ ...issue });
+    }
+    return errors;
+  } catch { return null; }
 }
 
 function canonicalIsoTime(value) {

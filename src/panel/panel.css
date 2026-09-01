@@ -127,6 +127,75 @@ button:active { transform: translateY(1px); }
 
 .source-choices { display: grid; gap: 12px; }
 
+.single-url-entry form,
+.batch-url-entry form {
+  display: grid;
+  gap: 10px;
+}
+
+.single-url-entry label,
+.batch-url-entry label[for="audit-urls"] {
+  color: var(--brand);
+  font-weight: 750;
+}
+
+.single-url-entry input,
+.batch-url-entry textarea {
+  inline-size: 100%;
+  min-inline-size: 0;
+  padding: 10px;
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+
+.batch-url-entry textarea {
+  min-block-size: 9rem;
+  resize: vertical;
+}
+
+.batch-instructions,
+.field-error,
+.batch-warnings {
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.batch-instructions { color: #42586a; }
+
+.field-error {
+  color: var(--failure);
+  font-weight: 650;
+}
+
+.field-error ul,
+.batch-warnings ul {
+  display: grid;
+  gap: 4px;
+  margin: 4px 0 0;
+  padding-inline-start: 24px;
+}
+
+.form-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.batch-capture-mode .capture-mode-option { cursor: default; }
+
+.batch-warnings {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--review);
+  border-radius: 6px;
+  background: #fff9e8;
+  color: var(--review);
+}
+
 .capture-mode-fieldset {
   display: grid;
   gap: 8px;
@@ -623,6 +692,8 @@ code {
   #panel-root { padding: 12px; }
   .source-choice { grid-template-columns: 1fr; }
   .source-choice button { inline-size: 100%; }
+  .form-actions { grid-template-columns: 1fr; }
+  .form-actions button { inline-size: 100%; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric:nth-child(3) { border-inline-start: 0; }
   .metric:nth-child(n + 3) { border-top: 1px solid #c4ced7; }
@@ -647,6 +718,8 @@ code {
   .capture-mode-option,
   .privacy-pause,
   .privacy-signals,
+  .batch-url-entry textarea,
+  .batch-warnings,
   .result-card,
   .result-detail,
   code,
