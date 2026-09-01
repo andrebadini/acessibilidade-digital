@@ -57,12 +57,13 @@ test('keeps the public listing concise, accurate and bounded by the Chrome summa
   assert.match(listing, /processamento local/iu);
   assert.match(listing, /não constitui certificação/iu);
   assert.match(listing, /debugger[\s\S]*DOMSnapshot[\s\S]*árvore de acessibilidade/iu);
-  assert.match(listing, /1\.0\.5 beta 4/iu);
+  assert.match(listing, /1\.0\.6 beta 5/iu);
   assert.match(listing, /Evidência completa[\s\S]*Somente elementos[\s\S]*Sem imagens/iu);
   assert.match(listing, /HTML, PDF, CSV e JSON-LD\/EARL/iu);
   assert.match(listing, /outra URL[\s\S]*três modos/iu);
   assert.match(listing, /página original[\s\S]*cópia temporária e inativa/iu);
-  assert.match(listing, /lote[\s\S]*mapa numerado[\s\S]*não estão disponíveis/iu);
+  assert.match(listing, /2 a 20 URLs[\s\S]*relatório consolidado/iu);
+  assert.match(listing, /lotes com capturas[\s\S]*mapa numerado[\s\S]*não estão disponíveis/iu);
   assert.doesNotMatch(listing, /1\.0\.1|aba descartável/iu);
 });
 
@@ -93,7 +94,7 @@ test('ships beta test instructions for the complete current-page journey and dec
   for (const phrase of [
     'Carregar sem compactação', 'painel lateral', 'Evidência completa', 'Somente elementos', 'Sem imagens',
     'Continuar e capturar', 'WCAG 2.2', 'ABNT NBR 17225', 'Abrir relatório completo',
-    'HTML', 'PDF', 'CSV', 'JSON-LD/EARL', 'Outra URL', 'Lote de páginas', 'mapa numerado',
+    'HTML', 'PDF', 'CSV', 'JSON-LD/EARL', 'Outra URL', 'Várias páginas', 'mapa numerado',
   ]) assert.match(instructions, new RegExp(phrase, 'iu'));
   assert.doesNotMatch(instructions, /campo “Endereço do site”|aba descartável|1\.0\.1/iu);
 });

@@ -1,10 +1,10 @@
-# Backlog da beta 1.0.5
+# Backlog da beta 1.0.6
 
 Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. Elas não reduzem os controles de privacidade, autorização de capturas, correlação das evidências, limpeza de estado ou confiabilidade normativa.
 
 ## Próximas entregas funcionais
 
-- permitir auditoria em lote e relatório consolidado;
+- ampliar a auditoria em lote para os modos com capturas, mantendo consentimento explícito e execução invisível;
 - habilitar o mapa numerado consolidado dos anúncios estimados do leitor de tela após E2E próprio;
 - implementar retenção automática por prazo, com limpeza recuperável e indicação visível da expiração;
 - atualizar as imagens e o texto de eventual canal público de distribuição após estabilização da beta.

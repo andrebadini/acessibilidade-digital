@@ -1,4 +1,4 @@
-# Instruções de teste — Audita Acessibilidade 1.0.5 beta 4
+# Instruções de teste — Audita Acessibilidade 1.0.6 beta 5
 
 ## Acesso
 
@@ -6,7 +6,7 @@ A extensão não exige conta, login, credencial, assinatura ou serviço externo.
 
 ## Instalação
 
-1. Descompacte `audita-acessibilidade-1.0.5.zip` em uma pasta vazia.
+1. Descompacte `audita-acessibilidade-1.0.6.zip` em uma pasta vazia.
 2. Abra `chrome://extensions` no Chrome.
 3. Ative **Modo do desenvolvedor**.
 4. Selecione **Carregar sem compactação** e escolha a pasta descompactada, que contém `manifest.json`.
@@ -32,9 +32,13 @@ A extensão não exige conta, login, credencial, assinatura ou serviço externo.
 
 Abra **Outra URL**, informe um endereço HTTP ou HTTPS e repita o percurso nos três modos. Nos modos com imagens, confirme também a pausa de privacidade, a confirmação de uso único e a geração do relatório. A página original deve continuar ativa durante a coleta.
 
+## Várias páginas
+
+Abra **Várias páginas**, informe de 2 a 20 endereços HTTP ou HTTPS, um por linha, e inicie o lote no modo **Sem imagens**. Confira o andamento página a página, o relatório consolidado e a presença de resultados de todas as páginas. Durante toda a coleta, as páginas devem ser avaliadas em abas temporárias inativas: a aba original deve permanecer visível, sem rolagem, troca de foco, destaque ou navegação perceptível.
+
 ## Limites declarados da beta
 
-**Lote de páginas** e o mapa numerado consolidado de anúncios aparecem como indisponíveis nesta beta. A página aberta e outra URL, as evidências individuais, o destaque, as personas e os quatro formatos de exportação fazem parte do percurso testável.
+O mapa numerado consolidado de anúncios e os modos com capturas para lotes ainda não estão disponíveis nesta beta. A página aberta, outra URL, o lote sem imagens, as evidências individuais, o destaque quando há fonte viva, as personas e os quatro formatos de exportação fazem parte do percurso testável.
 
 ## Privacidade
 

@@ -8,8 +8,8 @@ test('declares a minimal MV3 extension shell without remote executable code', as
   const manifest = JSON.parse(await readWorkspaceFile('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
   assert.equal(manifest.minimum_chrome_version, '116', 'sidePanel.open e runtime.getContexts exigem Chrome 116+');
-  assert.equal(manifest.version, '1.0.5');
-  assert.equal(manifest.version_name, '1.0.5 beta 4');
+  assert.equal(manifest.version, '1.0.6');
+  assert.equal(manifest.version_name, '1.0.6 beta 5');
   assert.equal(manifest.description, 'Auditoria independente de acessibilidade de páginas web.');
   assert.deepEqual(manifest.icons, {
     16: 'assets/icons/icon-16.png',
@@ -84,9 +84,10 @@ test('panel module renders the local lifecycle without a bearer or legacy side-p
   assert.match(source, /requestIntent/u);
   assert.doesNotMatch(source, /runtime\.sendMessage/u);
   assert.match(view, /initial|running|result|unavailable/u);
-  assert.match(view, /Não disponível nesta beta/u);
+  assert.match(view, /Lote de páginas/u);
+  assert.doesNotMatch(view, /Não disponível nesta beta/u);
   assert.doesNotMatch(`${source}\n${view}`, /innerHTML/);
-  assert.doesNotMatch(source, /START_AUDIT|START_BATCH|AUDIT_CONTEXT_PREFILL|GET_LAST_AUDIT/u);
+  assert.doesNotMatch(source, /START_AUDIT|AUDIT_CONTEXT_PREFILL|GET_LAST_AUDIT/u);
   assert.doesNotMatch(source, /speechSynthesis|audita-persona-v1|window\.open|default_popup/u);
   assert.doesNotMatch(`${source}\n${view}`, /sessionCapabilityId/u);
 });
