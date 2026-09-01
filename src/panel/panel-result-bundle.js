@@ -1,6 +1,6 @@
 import { validateExecutionCheckpoint } from '../background/execution-checkpoint.js';
 import { verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
-import { buildPanelDetail } from './panel-detail.js';
+import { createPanelDetailProjector } from './panel-detail.js';
 import { buildPanelSummary } from './panel-summary.js';
 
 const MAX_DEPTH = 64;
@@ -258,11 +258,13 @@ export async function createPanelResultBundleV1({ reportRevision, inventory } = 
     const occurrenceIds = GROUP_NAMES.flatMap(name => summary.groups[name])
       .flatMap(card => card.occurrenceIds).filter(Boolean);
     if (new Set(occurrenceIds).size !== occurrenceIds.length) denied();
+    const projectDetail = createPanelDetailProjector({ model, summary, highlightAvailability: new Map() });
     const details = applyPreviewBudget([...occurrenceIds].sort((left, right) => left.localeCompare(right))
-      .map(occurrenceId => buildPanelDetail({ model, summary, occurrenceId, highlightAvailability: new Map() })));
-    return copyPanelResultBundleV1({
+      .map(occurrenceId => projectDetail(occurrenceId)));
+    const output = copyPanelResultBundleV1({
       version: 1, auditId: candidate.auditId, modelRevision: candidate.modelRevision,
       modelHash: candidate.modelHash, summary, details,
     });
+    return output;
   } catch { denied(); }
 }

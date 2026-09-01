@@ -122,6 +122,9 @@ test('ReportViewV1 owns exact frozen copies and the canonical four-format order'
   assert.equal(Object.isFrozen(view), true);
   assert.equal(Object.isFrozen(view.matrix), true);
   assert.equal(Object.isFrozen(view.matrix[0]), true);
+  assert.ok(view.executive.limitations.includes(
+    'DYNAMIC_PROBES_INCOMPLETE: As verificações dinâmicas atingiram o tempo limite.',
+  ));
   const failed = view.issues.failed[0];
   assert.deepEqual(failed.plainLanguage, {
     impact: 'Esta barreira pode dificultar ou impedir a tarefa para pessoas que dependem deste requisito de acessibilidade.',
@@ -256,6 +259,18 @@ test('live report puts the decision summary before compact navigation and expose
   assert.equal(firstSection.querySelector('[data-report-executive-actions]').querySelectorAll('button[data-report-export]').length, 1);
   root.querySelector('button[data-report-export]').click();
   assert.equal(exportCalls, 1);
+});
+
+test('surfaces no-pixels collection in the visible limitations summary', async () => {
+  const { model, summary } = await fixture();
+  const view = structuredClone(buildReportView({
+    model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash,
+  }));
+  view.executive.limitations.push('PIXEL_CAPTURE_OMITTED: Nenhuma captura raster foi coletada no modo sem imagens.');
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+
+  assert.match(root.querySelector('[data-report-limitations]').querySelector('summary').textContent,
+    /modo sem imagens.*nenhuma captura raster/iu);
 });
 
 test('renderer keeps filters live-only without mutating the immutable report view', async () => {

@@ -65,6 +65,9 @@ test('creates an immutable initial screen with only stable interaction state', (
     version: 1,
     screen: 'initial',
     auditId: null,
+    entryMode: 'sources',
+    entryError: null,
+    auditSource: null,
     captureMode: 'full-evidence',
     sessionStatus: null,
     privacy: { mode: null, categories: [], message: null, confirmationPending: false },
@@ -84,6 +87,34 @@ test('creates an immutable initial screen with only stable interaction state', (
   assert.equal(Object.isFrozen(state), true);
   assert.equal(Object.isFrozen(state.filters.impact), true);
   assert.equal(Object.hasOwn(state, 'sessionCapabilityId'), false);
+});
+
+test('single-URL entry state never stores the typed URL and starts only the explicit no-pixels source', () => {
+  const initial = createInitialPanelState();
+  const opened = reducePanelState(initial, { type: 'URL_FORM_OPENED' });
+  assert.equal(opened.entryMode, 'single-url');
+  assert.equal(opened.focusId, 'audit-url');
+  assert.doesNotMatch(JSON.stringify(opened), /example\.test|token=raw/iu);
+
+  const rejected = reducePanelState(opened, { type: 'URL_ENTRY_REJECTED', code: 'invalid' });
+  assert.equal(rejected.entryError, 'invalid');
+  assert.strictEqual(reducePanelState(opened, {
+    type: 'URL_ENTRY_REJECTED', code: 'invalid', url: 'https://secret.example/path?token=raw',
+  }), opened);
+
+  assert.strictEqual(reducePanelState(opened, { type: 'START_REQUESTED', source: 'single-url' }), opened);
+  const noPixels = reducePanelState(opened, {
+    type: 'CAPTURE_MODE_SELECTED', mode: 'no-pixels', focusId: 'capture-mode-no-pixels',
+  });
+  const started = reducePanelState(noPixels, { type: 'START_REQUESTED', source: 'single-url' });
+  assert.equal(started.screen, 'running');
+  assert.equal(started.auditSource, 'single-url');
+  assert.equal(started.entryError, null);
+  assert.equal(Object.hasOwn(started, 'url'), false);
+
+  const closed = reducePanelState(opened, { type: 'URL_FORM_CLOSED' });
+  assert.equal(closed.entryMode, 'sources');
+  assert.equal(closed.entryError, null);
 });
 
 test('keeps persona simulation and page highlight UI state closed and independent from audit data', () => {
@@ -157,7 +188,7 @@ test('distinguishes highlight installation from clear while preserving the same 
 
 test('implements the exact four-screen lifecycle and ignores unknown events', () => {
   const initial = createInitialPanelState();
-  const requested = reducePanelState(initial, { type: 'START_REQUESTED' });
+  const requested = reducePanelState(initial, { type: 'START_REQUESTED', source: 'attached' });
   assert.equal(requested.screen, 'running');
   assert.equal(requested.auditId, null);
   const running = reducePanelState(requested, { type: 'AUDIT_RUNNING', auditId: 'audit-1' });
@@ -175,7 +206,7 @@ test('implements the exact four-screen lifecycle and ignores unknown events', ()
 });
 
 test('records only canonical monotonic progress for the current running audit', () => {
-  let state = reducePanelState(createInitialPanelState(), { type: 'START_REQUESTED' });
+  let state = reducePanelState(createInitialPanelState(), { type: 'START_REQUESTED', source: 'attached' });
   assert.deepEqual(state.progress, { phase: null, message: null, percent: null, at: null });
   state = reducePanelState(state, { type: 'AUDIT_RUNNING', auditId: 'audit-1' });
   const opening = {
@@ -235,6 +266,7 @@ test('drops deleted audit state while preserving an active persona and the selec
 test('unknown and invalid events return a detached recursively frozen valid state', () => {
   const mutable = {
     version: 1, screen: 'result', auditId: 'audit-1',
+    entryMode: 'sources', entryError: null, auditSource: 'attached',
     captureMode: 'no-pixels', sessionStatus: null,
     privacy: { mode: null, categories: [], message: null, confirmationPending: false },
     progress: { phase: null, message: null, percent: null, at: null },
@@ -345,6 +377,9 @@ test('port interruption and retry preserve only the last safe audit ID', () => {
     version: 1,
     screen: 'unavailable',
     auditId: 'audit-safe',
+    entryMode: 'sources',
+    entryError: null,
+    auditSource: 'attached',
     captureMode: 'full-evidence',
     sessionStatus: null,
     privacy: { mode: null, categories: [], message: null, confirmationPending: false },
@@ -384,7 +419,7 @@ test('selects one closed capture mode only on the initial screen and preserves i
   assert.equal(selected.captureMode, 'no-pixels');
   assert.equal(selected.focusId, 'capture-mode-no-pixels');
 
-  const started = reducePanelState(selected, { type: 'START_REQUESTED' });
+  const started = reducePanelState(selected, { type: 'START_REQUESTED', source: 'attached' });
   assert.equal(started.screen, 'running');
   assert.equal(started.captureMode, 'no-pixels');
   assert.strictEqual(reducePanelState(started, {
@@ -404,7 +439,7 @@ test('projects a privacy pause into the running screen without storing private c
   let state = reducePanelState(createInitialPanelState(), {
     type: 'CAPTURE_MODE_SELECTED', mode: 'full-evidence', focusId: 'capture-mode-full-evidence',
   });
-  state = reducePanelState(state, { type: 'START_REQUESTED' });
+  state = reducePanelState(state, { type: 'START_REQUESTED', source: 'attached' });
   state = reducePanelState(state, { type: 'AUDIT_RUNNING', auditId: 'audit-private' });
   state = reducePanelState(state, {
     type: 'PRIVACY_PAUSED', auditId: 'audit-private', mode: 'full-evidence',
@@ -437,7 +472,7 @@ test('projects a privacy pause into the running screen without storing private c
 test('a rotated privacy pause replaces the prior projection and rearms confirmation', () => {
   const message = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
   const running = reducePanelState(
-    reducePanelState(createInitialPanelState(), { type: 'START_REQUESTED' }),
+    reducePanelState(createInitialPanelState(), { type: 'START_REQUESTED', source: 'attached' }),
     { type: 'AUDIT_RUNNING', auditId: 'audit-private' },
   );
   const first = reducePanelState(running, {
@@ -460,7 +495,7 @@ test('a rotated privacy pause replaces the prior projection and rearms confirmat
 test('privacy reducer events fail closed for no-pixels, extra fields, accessors, symbols and proxies', () => {
   const message = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
   const running = reducePanelState(
-    reducePanelState(createInitialPanelState(), { type: 'START_REQUESTED' }),
+    reducePanelState(createInitialPanelState(), { type: 'START_REQUESTED', source: 'attached' }),
     { type: 'AUDIT_RUNNING', auditId: 'audit-private' },
   );
   const valid = {

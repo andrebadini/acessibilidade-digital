@@ -1,10 +1,10 @@
-# Backlog da beta 1.0.3
+# Backlog da beta 1.0.4
 
 Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. Elas não reduzem os controles de privacidade, autorização de capturas, correlação das evidências, limpeza de estado ou confiabilidade normativa.
 
 ## Próximas entregas funcionais
 
-- permitir auditar outra URL informada no painel;
+- habilitar Evidência completa e Somente elementos para outra URL após o percurso de consentimento e captura passar no Chrome real;
 - permitir auditoria em lote e relatório consolidado;
 - habilitar o mapa numerado consolidado dos anúncios estimados do leitor de tela após E2E próprio;
 - implementar retenção automática por prazo, com limpeza recuperável e indicação visível da expiração;
@@ -12,8 +12,13 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Refinamentos visuais não bloqueantes
 
+- trocar o título transitório “Avaliando a página atual” por uma mensagem específica ao auditar outra URL;
 - evitar o possível recorte de metade do traço quando uma moldura derivada encosta exatamente na borda superior ou esquerda da captura;
 - identificar, na legenda, as ocorrências que originaram cada tom quando a mesma evidência visual é compartilhada por falha confirmada e revisão pendente.
+
+## Infraestrutura de testes não bloqueante
+
+- aplicar limite temporal também à leitura do recibo de exportação no helper E2E, para que uma falha de armazenamento nunca deixe o teste aguardando indefinidamente.
 
 ## Aprofundamentos defensivos não bloqueantes
 

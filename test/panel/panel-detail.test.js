@@ -4,7 +4,7 @@ import test from 'node:test';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consumer-basis.js';
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
-import { buildPanelDetail } from '../../src/panel/panel-detail.js';
+import { buildPanelDetail, createPanelDetailProjector } from '../../src/panel/panel-detail.js';
 import { buildPanelSummary } from '../../src/panel/panel-summary.js';
 
 function checkpointFor(inventory, model = SAMPLE_AUDIT) {
@@ -26,6 +26,23 @@ async function summaryFixture(model = SAMPLE_AUDIT) {
   const inventory = await createInstalledCoreRuleInventory();
   return buildPanelSummary({ model, executionCheckpoint: checkpointFor(inventory, model), inventory });
 }
+
+test('reuses one validated model and summary to project every requested detail', async () => {
+  const summary = await summaryFixture();
+  const project = createPanelDetailProjector({
+    model: SAMPLE_AUDIT, summary, highlightAvailability: new Map(),
+  });
+  const occurrenceIds = Object.values(summary.groups).flatMap(group =>
+    group.flatMap(card => card.occurrenceIds));
+
+  assert.equal(Object.isFrozen(project), true);
+  for (const occurrenceId of occurrenceIds) {
+    assert.deepEqual(
+      project(occurrenceId),
+      buildPanelDetail({ model: SAMPLE_AUDIT, summary, occurrenceId, highlightAvailability: new Map() }),
+    );
+  }
+});
 
 function editorialModel() {
   const model = structuredClone(SAMPLE_AUDIT);

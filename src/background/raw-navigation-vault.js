@@ -502,11 +502,30 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       return freeze({ navigationToken, evidenceUrl, sessionDigest, expiresAt });
     }); },
     take(navigationToken, options) { return serial(async () => {
-      const input = exact(options, ['auditId', 'purpose']); if (!input || !validId(input.auditId) || !PURPOSES.has(input.purpose)) throw consumed();
+      const input = exact(options, ['auditId', 'purpose', 'expectedEvidenceUrl', 'expectedSessionDigest']);
+      const expectedEvidenceUrl = input && exact(input.expectedEvidenceUrl, EVIDENCE_URL_KEYS);
+      if (!input || !validId(input.auditId) || !PURPOSES.has(input.purpose) ||
+        !expectedEvidenceUrl || !isEvidenceUrlV1(expectedEvidenceUrl) ||
+        !validDigest(input.expectedSessionDigest) || !digestManager) throw consumed();
       const { key, record } = await readPublic(navigationToken);
       if (record.auditId !== input.auditId) throw wrongAudit(); if (record.purpose !== input.purpose) throw wrongPurpose();
       const nowValue = currentTime(now, state); if (nowValue === null || nowValue < record.issuedAt) { if (!await removeOrPend([key])) throw cleanupPending(); throw consumed(); }
       if (nowValue >= record.expiresAt) { if (!await removeOrPend([key])) throw cleanupPending(); throw consumed(); }
+      let actualEvidenceUrl;
+      let actualSessionDigest;
+      try {
+        actualEvidenceUrl = sanitizeEvidenceUrlV1(record.rawUrl, { includeQuery: expectedEvidenceUrl.queryIncluded });
+        actualSessionDigest = await digestManager.digest(record.rawUrl);
+      } catch {
+        if (!await removeOrPend([key])) throw cleanupPending();
+        throw consumed();
+      }
+      const binding = state.bindings.get(navigationToken);
+      if (!same(actualEvidenceUrl, expectedEvidenceUrl) || actualSessionDigest !== input.expectedSessionDigest ||
+        binding && (!same(binding.evidenceUrl, expectedEvidenceUrl) || binding.sessionDigest !== input.expectedSessionDigest)) {
+        if (!await removeOrPend([key])) throw cleanupPending();
+        throw consumed();
+      }
       if (!await removeOrPend([key])) throw cleanupPending(); return record.rawUrl;
     }); },
     putQueue(input) { return serial(async () => {

@@ -83,6 +83,200 @@ export function canonicalTime(value = new Date().toISOString()) {
   return date.toISOString();
 }
 
+export function createOwnershipId(randomBytes) {
+  if (typeof randomBytes !== 'function') throw new TypeError('OWNERSHIP_ID_INVALID');
+  let bytes;
+  try { bytes = randomBytes(16); } catch { throw new TypeError('OWNERSHIP_ID_INVALID'); }
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== 16) throw new TypeError('OWNERSHIP_ID_INVALID');
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const encoded = btoa(binary).replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=+$/gu, '');
+  if (!/^[A-Za-z0-9_-]{22}$/u.test(encoded)) throw new TypeError('OWNERSHIP_ID_INVALID');
+  return `owner_${encoded}`;
+}
+
+const URL_AUDIT_KEYS = Object.freeze([
+  'auditId', 'ownershipId', 'windowId', 'navigationToken', 'navigationPurpose', 'evidenceUrl', 'sessionDigest',
+  'rawNavigationVault', 'chromeAdapter', 'capturePolicy', 'checkpointStore', 'onProgress', 'now',
+  'signal', 'expectedExtensionId', 'auditRunner',
+]);
+
+/** Worker-internal single-URL boundary. Raw navigation is released only to the observed runner adapter. */
+export async function runUrlAudit(rawArgs = {}) {
+  const args = captureExactRecord(rawArgs, URL_AUDIT_KEYS);
+  const policy = args && captureExactRecord(args.capturePolicy, [
+    'version', 'mode', 'includeQuery', 'captureFullPage', 'captureElements', 'composeAnnouncementMap',
+  ]);
+  const evidenceUrl = args && copyEvidenceUrlV1(args.evidenceUrl);
+  const writeSanitized = args && optionalAdapterMethod(args.checkpointStore, 'writeSanitized');
+  const persistSanitizedModel = args && optionalAdapterMethod(args.checkpointStore, 'persistAuditModel');
+  const take = args && optionalAdapterMethod(args.rawNavigationVault, 'take');
+  if (!args || !/^[A-Za-z0-9._:-]{1,160}$/u.test(args.auditId ?? '') ||
+    !/^owner_[A-Za-z0-9_-]{22}$/u.test(args.ownershipId ?? '') ||
+    !Number.isSafeInteger(args.windowId) || args.windowId < 0 ||
+    !/^[A-Za-z0-9_-]{22}$/u.test(args.navigationToken ?? '') ||
+    !['single-url', 'context-menu-link'].includes(args.navigationPurpose) || !evidenceUrl || evidenceUrl.queryIncluded ||
+    !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(args.sessionDigest ?? '') ||
+    !policy || !isCapturePolicyV1(policy) || policy.mode !== 'no-pixels' || policy.includeQuery !== false ||
+    !take || !writeSanitized || typeof args.onProgress !== 'function' || typeof args.now !== 'function' ||
+    typeof args.auditRunner !== 'function' || !args.chromeAdapter || typeof args.chromeAdapter !== 'object' ||
+    (args.signal !== undefined && (!args.signal || typeof args.signal !== 'object')) ||
+    typeof args.expectedExtensionId !== 'string') throw new TypeError('URL_AUDIT_DENIED');
+
+  let consumed = false;
+  const resolveNavigationToken = async navigationToken => {
+    if (consumed || navigationToken !== args.navigationToken) throw new TypeError('URL_AUDIT_DENIED');
+    const url = normalizeAuditUrl(await take(args.navigationToken, {
+      auditId: args.auditId, purpose: args.navigationPurpose,
+      expectedEvidenceUrl: evidenceUrl, expectedSessionDigest: args.sessionDigest,
+    }));
+    const requestedEvidence = sanitizeEvidenceUrlV1(url, { includeQuery: false });
+    if (requestedEvidence.href !== evidenceUrl.href || requestedEvidence.queryIncluded !== evidenceUrl.queryIncluded ||
+      requestedEvidence.redactedSegments !== evidenceUrl.redactedSegments) throw new TypeError('URL_AUDIT_DENIED');
+    consumed = true;
+    return url;
+  };
+
+  // Unit callers may inject a narrow runner to prove only the vault boundary.
+  // The production runner receives a locally composed, branded pipeline and
+  // ownership registry; neither capability crosses the public worker protocol.
+  if (args.auditRunner !== runObservedTabAudit) {
+    const executionAdapter = Object.freeze({
+      ...args.chromeAdapter,
+      resolveNavigationToken,
+    });
+    return args.auditRunner({
+      auditId: args.auditId,
+      target: Object.freeze({
+        kind: 'owned-disposable', ownershipId: args.ownershipId, navigationToken: args.navigationToken,
+        cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+      }),
+      chromeAdapter: executionAdapter,
+      capturePolicy: Object.freeze(policy),
+      privacyGate: null,
+      onCheckpoint: checkpoint => writeSanitized(args.auditId, checkpoint),
+      now: args.now,
+      signal: args.signal,
+      expectedExtensionId: args.expectedExtensionId,
+    });
+  }
+
+  let internals;
+  let createTab;
+  let navigateTab;
+  let waitForStable;
+  let probeDocumentIdentity;
+  let removeTab;
+  let baseGetEvidenceUrl;
+  let baseGetFinalUrl;
+  let legacyEffects;
+  try {
+    internals = internalContract(args.chromeAdapter);
+    createTab = requiredAdapterMethod(args.chromeAdapter, 'createTab');
+    navigateTab = requiredAdapterMethod(args.chromeAdapter, 'navigateTab');
+    waitForStable = requiredAdapterMethod(args.chromeAdapter, 'waitForStable');
+    probeDocumentIdentity = requiredAdapterMethod(args.chromeAdapter, 'probeDocumentIdentity');
+    removeTab = requiredAdapterMethod(args.chromeAdapter, 'removeTab');
+    baseGetEvidenceUrl = optionalAdapterMethod(args.chromeAdapter, 'getEvidenceUrl');
+    baseGetFinalUrl = optionalAdapterMethod(args.chromeAdapter, 'getFinalUrl');
+    legacyEffects = Object.freeze({ ...captureLegacyEffects(args.chromeAdapter), emitProgress: args.onProgress });
+  } catch { throw new TypeError('URL_AUDIT_DENIED'); }
+  const ownedTabs = createOwnedTabRegistry({
+    sessionArea: internals.sessionArea,
+    chromeAdapter: Object.freeze({ removeTab }),
+    now: args.now,
+  });
+  const inventory = await createInstalledCoreRuleInventory();
+  const startedAt = canonicalTime(args.now());
+  const checkpointRecorder = await createPageCheckpointRecorder({
+    auditId: args.auditId, pageId: 'page-1', startedAt,
+    rulesVersion: inventory.rulesVersion, inventory,
+    onCheckpoint: checkpoint => writeSanitized(args.auditId, checkpoint),
+  });
+  let terminalModel = null;
+  const services = Object.freeze({
+    async collectObservedPage({ observedTarget }) {
+      const safeTarget = copyOwnedObservedTarget(observedTarget);
+      if (!safeTarget || safeTarget.ownershipId !== args.ownershipId ||
+        safeTarget.cleanupMode !== 'pre-observation-failure' || safeTarget.pageId !== 'page-1') {
+        throw new TypeError('URL_AUDIT_DENIED');
+      }
+      const collectedDraft = await runLegacyAudit({
+        url: evidenceUrl.href,
+        chromeAdapter: createObservedLegacyAdapter(legacyEffects, safeTarget, policy, null, null),
+        now: args.now, idFactory: () => args.auditId, signal: args.signal,
+        closeAuditTab: false, expectedExtensionId: args.expectedExtensionId, startedAt,
+      });
+      const draft = alignLegacyDraftWithObservedEvidence(
+        collectedDraft, safeTarget.urlEvidence.href, evidenceUrl.href,
+      );
+      terminalModel = await enrichAuditForReport(draft, {
+        now: args.now,
+        expectedExtensionId: args.expectedExtensionId,
+        browserVersion: draft.environment?.chromeVersion || 'não disponível',
+        rulesVersion: draft.methodology?.version || inventory.rulesVersion,
+      });
+      return Object.freeze({ version: 1, kind: 'legacy-observation' });
+    },
+    async runCoreRules() {
+      return Object.freeze({
+        ruleResults: terminalModel.ruleResults.filter(result => result.source?.engine === 'audita-core'),
+      });
+    },
+    async buildAuditModel() { return terminalModel; },
+    async persistAuditModel(model, context) {
+      if (persistSanitizedModel) await persistSanitizedModel(model, context?.observedTarget ?? null);
+    },
+  });
+  const runPipeline = createObservedPipelineRunner({ checkpointRecorder, services });
+  const createTabInAuthorizedWindow = async details => {
+    const request = captureExactRecord(details, ['url', 'active']);
+    if (!request || request.url !== 'about:blank' || request.active !== true) {
+      throw new Error('TARGET_CREATION_FAILED');
+    }
+    const created = await createTab({ ...request, active: false, windowId: args.windowId });
+    const createdTabId = ownValue(created, 'id');
+    const createdWindowId = ownValue(created, 'windowId');
+    if (Number.isSafeInteger(createdTabId) && createdTabId >= 0 && createdWindowId !== args.windowId) {
+      try { await removeTab(createdTabId); } catch { /* about:blank never receives the protected URL */ }
+      throw new Error('TARGET_CREATION_FAILED');
+    }
+    return created;
+  };
+  const getEvidenceUrl = async (tabId, includeQuery) => {
+    if (includeQuery !== false) throw new TypeError('URL_AUDIT_DENIED');
+    const pending = typeof baseGetEvidenceUrl === 'function'
+      ? baseGetEvidenceUrl(tabId, false)
+      : typeof baseGetFinalUrl === 'function'
+        ? baseGetFinalUrl(tabId)
+        : (() => { throw new TypeError('URL_AUDIT_DENIED'); })();
+    const value = await pending;
+    const safe = copyEvidenceUrlV1(value) ??
+      (typeof value === 'string' ? sanitizeEvidenceUrlV1(value, { includeQuery: false }) : null);
+    if (!safe || safe.queryIncluded) throw new TypeError('URL_AUDIT_DENIED');
+    return safe;
+  };
+  const executionAdapter = Object.freeze({
+    runPipeline, probeDocumentIdentity, ownedTabs, createTab: createTabInAuthorizedWindow, navigateTab, waitForStable,
+    resolveNavigationToken, getEvidenceUrl, removeTab,
+  });
+  const runnerOutput = await args.auditRunner({
+    auditId: args.auditId,
+    target: Object.freeze({
+      kind: 'owned-disposable', ownershipId: args.ownershipId, navigationToken: args.navigationToken,
+      cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+    }),
+    chromeAdapter: executionAdapter,
+    capturePolicy: Object.freeze(policy),
+    privacyGate: null,
+    onCheckpoint: checkpoint => writeSanitized(args.auditId, checkpoint),
+    now: args.now,
+    signal: args.signal,
+    expectedExtensionId: args.expectedExtensionId,
+  });
+  return runnerOutput;
+}
+
 function stableHash(value) {
   const text = typeof value === 'string' ? value : JSON.stringify(value);
   let hash = 0x811c9dc5;
@@ -376,7 +570,8 @@ async function draftModel(state) {
       capturedStateCount: state.fullPage ? 1 : 0,
     },
   };
-  return deepFreeze(structuredClone(model));
+  const output = deepFreeze(structuredClone(model));
+  return output;
 }
 
 /** Runs one local audit in one disposable tab using only injected Chrome effects. */
@@ -424,9 +619,12 @@ async function runLegacyAudit({
     throwIfAborted(signal);
     const previous = state.progress.at(-1)?.percent ?? -1;
     const entry = { type: 'AUDIT_PROGRESS', sessionId: auditId, auditId, phase, message, percent: Math.max(previous, percent), at: canonicalTime(now()) };
-    try { await chromeAdapter.emitProgress?.(entry); } catch { /* Progress transport must not abort the audit. */ }
-    throwIfAborted(signal);
     state.progress.push(entry);
+    try {
+      const pending = chromeAdapter.emitProgress?.(entry);
+      if (pending !== undefined) void Promise.resolve(pending).catch(() => {});
+    } catch { /* Progress transport must not abort or block the audit. */ }
+    throwIfAborted(signal);
   };
   const recoverable = (code, message, details = {}) => {
     recoverableFailure = true;
@@ -798,7 +996,8 @@ async function runLegacyAudit({
     }
     if (state.occurrences.length) allocateOccurrenceIds(state);
     if (!state.manualReview.length && state.occurrences.length) state.manualReview = manualQueue(state.occurrences, state.itemResults);
-    return draftModel(state);
+    const final = await draftModel(state);
+    return final;
   }
 }
 

@@ -71,6 +71,15 @@ async function batchEntry(vault, auditId, line, path) {
     sessionDigest: issued.sessionDigest, status: 'pending' };
 }
 
+function publicTakeOptions(issued, auditId, purpose) {
+  return {
+    auditId,
+    purpose,
+    expectedEvidenceUrl: issued.evidenceUrl,
+    expectedSessionDigest: issued.sessionDigest,
+  };
+}
+
 async function restartedPublicVault(sessionArea, clock) {
   const moduleUrl = new URL('../../src/background/raw-navigation-vault.js', import.meta.url);
   moduleUrl.searchParams.set('workerRestart', `${Date.now()}-${Math.random()}`);
@@ -134,12 +143,31 @@ test('public vault stores only a scoped one-shot URL and uses the shared HMAC ma
   assert.deepEqual(issued.evidenceUrl, {
     version: 'EvidenceUrlV1', href: 'https://example.test/a', queryIncluded: false, redactedSegments: 0,
   });
-  assert.equal(await vault.take(issued.navigationToken, {
-    auditId: 'audit-1', purpose: 'single-url',
-  }), 'https://example.test/a?secret=1');
-  await assert.rejects(vault.take(issued.navigationToken, {
-    auditId: 'audit-1', purpose: 'single-url',
-  }), /expirada ou consumida/iu);
+  assert.equal(await vault.take(issued.navigationToken, publicTakeOptions(issued, 'audit-1', 'single-url')),
+    'https://example.test/a?secret=1');
+  await assert.rejects(vault.take(issued.navigationToken, publicTakeOptions(issued, 'audit-1', 'single-url')),
+    /expirada ou consumida/iu);
+});
+
+test('public vault consumes and denies a swapped private URL with the same sanitized evidence', async () => {
+  const { sessionArea, vault } = publicFixture();
+  const originalUrl = 'https://example.test/path?account=ORIGINAL#one';
+  const swappedUrl = 'https://example.test/path?account=SWAPPED#two';
+  const issued = await vault.put(originalUrl, {
+    auditId: 'audit-swap', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+  });
+  const key = `audita:raw-navigation:v1:${issued.navigationToken}`;
+  sessionArea.values[key].rawUrl = swappedUrl;
+
+  await assert.rejects(
+    vault.take(issued.navigationToken, publicTakeOptions(issued, 'audit-swap', 'single-url')),
+    error => {
+      assert.match(error.message, /expirada ou consumida/iu);
+      assert.doesNotMatch(error.message, /ORIGINAL|SWAPPED|account|hmac-sha256/iu);
+      return true;
+    },
+  );
+  assert.deepEqual(await sessionArea.get(key), {});
 });
 
 test('public vault rejects cross-purpose and cross-audit claims without consuming the record', async () => {
@@ -151,15 +179,12 @@ test('public vault rejects cross-purpose and cross-audit claims without consumin
       includeQuery: false,
     });
     const otherPurpose = purpose === 'single-url' ? 'batch-page' : 'single-url';
-    await assert.rejects(vault.take(issued.navigationToken, {
-      auditId: 'audit-1', purpose: otherPurpose,
-    }), /finalidade não corresponde/iu);
-    await assert.rejects(vault.take(issued.navigationToken, {
-      auditId: 'audit-2', purpose,
-    }), /auditoria não corresponde/iu);
-    assert.equal(await vault.take(issued.navigationToken, {
-      auditId: 'audit-1', purpose,
-    }), `https://example.test/${purpose}`);
+    await assert.rejects(vault.take(issued.navigationToken, publicTakeOptions(issued, 'audit-1', otherPurpose)),
+      /finalidade não corresponde/iu);
+    await assert.rejects(vault.take(issued.navigationToken, publicTakeOptions(issued, 'audit-2', purpose)),
+      /auditoria não corresponde/iu);
+    assert.equal(await vault.take(issued.navigationToken, publicTakeOptions(issued, 'audit-1', purpose)),
+      `https://example.test/${purpose}`);
   }
 });
 
@@ -336,7 +361,7 @@ test('shares one namespace lock across vault instances for token issuance and qu
   assert.equal(issued.filter(result => result.status === 'fulfilled').length, 1);
   assert.equal(issued.filter(result => result.status === 'rejected').length, 1);
   const winner = issued.find(result => result.status === 'fulfilled').value;
-  assert.equal(await first.take(winner.navigationToken, { auditId: 'audit-lock', purpose: 'single-url' }),
+  assert.equal(await first.take(winner.navigationToken, publicTakeOptions(winner, 'audit-lock', 'single-url')),
     'https://example.test/first?private=1');
 
   const entryA = await batchEntry(first, 'audit-cas', 1, 'cas-a');
@@ -429,7 +454,8 @@ test('rolls back partial writes and rejects backwards clocks without reanimating
     auditId: 'audit-clock', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
   });
   clock.value -= 1;
-  await assert.rejects(vault.take(issued.navigationToken, { auditId: 'audit-clock', purpose: 'single-url' }), /expirada ou consumida/iu);
+  await assert.rejects(vault.take(issued.navigationToken, publicTakeOptions(issued, 'audit-clock', 'single-url')),
+    /expirada ou consumida/iu);
   assert.equal(Object.hasOwn(sessionArea.values, `audita:raw-navigation:v1:${issued.navigationToken}`), false);
 });
 
@@ -506,7 +532,7 @@ test('accepts an exact write that storage persists before throwing for one-shot 
     assert.match(issued.navigationToken, /^[A-Za-z0-9_-]{22}$/u);
     sessionArea.removeMode = 'normal';
     const raw = kind === 'public'
-      ? await vault.take(issued.navigationToken, { auditId: 'audit-complete', purpose: 'single-url' })
+      ? await vault.take(issued.navigationToken, publicTakeOptions(issued, 'audit-complete', 'single-url'))
       : await vault.takeInternal({ ownerId: 'owner-complete', navigationToken: issued.navigationToken });
     assert.equal(raw, 'https://example.test/complete-then-throw?secret=1');
   }
@@ -606,7 +632,7 @@ test('persists failed public and legacy take cleanup across a restarted worker',
       : await vault.putInternal({ ownerId: 'owner-take-pending', rawUrl: 'https://example.test/take-pending?secret=NEVER' });
     sessionArea.removeMode = removeMode;
     const consume = kind === 'public'
-      ? () => vault.take(issued.navigationToken, { auditId: 'audit-take-pending', purpose: 'single-url' })
+      ? () => vault.take(issued.navigationToken, publicTakeOptions(issued, 'audit-take-pending', 'single-url'))
       : () => vault.takeInternal({ ownerId: 'owner-take-pending', navigationToken: issued.navigationToken });
     await assert.rejects(consume(), /RAW_NAVIGATION_CLEANUP_PENDING/u);
     const marker = sessionArea.values[markerKey];
@@ -663,9 +689,9 @@ test('confirms a completed cleanup marker write without executing hostile marker
     await originalSet(writes);
     if (Object.hasOwn(writes, markerKey)) { markerWrites += 1; throw new Error('marker persisted then threw'); }
   };
-  assert.equal(await vault.take(issued.navigationToken, {
-    auditId: 'audit-marker-write', purpose: 'single-url',
-  }), 'https://example.test/marker-write?secret=NEVER');
+  assert.equal(await vault.take(issued.navigationToken,
+    publicTakeOptions(issued, 'audit-marker-write', 'single-url')),
+  'https://example.test/marker-write?secret=NEVER');
   assert.equal(markerWrites, 1);
   assert.equal(Object.hasOwn(sessionArea.values, markerKey), false);
 
@@ -867,7 +893,7 @@ test('accepts destructive remove commit-then-throw for public legacy and pending
     const originalRemove = sessionArea.remove.bind(sessionArea);
     sessionArea.remove = async keys => { await originalRemove(keys); throw new Error('remove completed then threw'); };
     const raw = kind === 'public'
-      ? await vault.take(issued.navigationToken, { auditId: 'audit-remove-throw', purpose: 'single-url' })
+      ? await vault.take(issued.navigationToken, publicTakeOptions(issued, 'audit-remove-throw', 'single-url'))
       : await vault.takeInternal({ ownerId: 'owner-remove-throw', navigationToken: issued.navigationToken });
     assert.equal(raw, 'https://example.test/remove-throw?secret=NEVER');
   }
@@ -877,9 +903,9 @@ test('accepts destructive remove commit-then-throw for public legacy and pending
     auditId: 'audit-marker-remove-throw', purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
   });
   sessionArea.removeMode = 'noop';
-  await assert.rejects(vault.take(issued.navigationToken, {
-    auditId: 'audit-marker-remove-throw', purpose: 'single-url',
-  }), /RAW_NAVIGATION_CLEANUP_PENDING/u);
+  await assert.rejects(vault.take(issued.navigationToken,
+    publicTakeOptions(issued, 'audit-marker-remove-throw', 'single-url')),
+  /RAW_NAVIGATION_CLEANUP_PENDING/u);
   sessionArea.removeMode = 'normal';
   const originalRemove = sessionArea.remove.bind(sessionArea);
   sessionArea.remove = async keys => { await originalRemove(keys); throw new Error('remove completed then threw'); };
@@ -1155,7 +1181,7 @@ test('keeps a queue valid after consuming its running entry while preserving the
   await vault.replaceQueue(auditId, running, {
     expectedRevision: 1, expectedState: { nextIndex: 0, status: 'pending' },
   });
-  assert.equal(await vault.take(entries[0].navigationToken, { auditId, purpose: 'batch-page' }),
+  assert.equal(await vault.take(entries[0].navigationToken, publicTakeOptions(entries[0], auditId, 'batch-page')),
     'https://example.test/running-consumed-one?private=1');
   const restarted = await restartedPublicVault(sessionArea, clock);
   const afterConsumption = await restarted.readQueue(auditId);
@@ -1171,6 +1197,6 @@ test('keeps a queue valid after consuming its running entry while preserving the
   const afterFinished = await restarted.readQueue(auditId);
   assert.equal(afterFinished.nextIndex, 1);
   assert.equal(afterFinished.entries[1].status, 'pending');
-  assert.equal(await restarted.take(entries[1].navigationToken, { auditId, purpose: 'batch-page' }),
+  assert.equal(await restarted.take(entries[1].navigationToken, publicTakeOptions(entries[1], auditId, 'batch-page')),
     'https://example.test/running-consumed-two?private=2');
 });

@@ -8,6 +8,7 @@ import {
   REVIEW_SURFACE,
   createTargetCapabilityAuthority,
   deriveTrustedExtensionContext,
+  navigationCapabilityStorageKey,
   readAttachedAuditCorrelationForRecovery,
   readAuditSessionForWorker,
   readClaimedAttachedAuditGrant,
@@ -406,7 +407,7 @@ test('review and export allow exactly one closed auditId query', async () => {
 
 test('prepares an exact one-use target and atomically persists its running session', async () => {
   const { authority, sessionArea } = authorityFixture();
-  assert.deepEqual(Object.keys(authority), ['prepare', 'inspectPreparedTarget', 'claimPreparedTarget', 'inspectPreparedAuditTarget', 'claimAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'rehydrateViewOnly']);
+  assert.deepEqual(Object.keys(authority), ['prepare', 'prepareNavigationForPanel', 'inspectPreparedTarget', 'claimPreparedTarget', 'inspectPreparedAuditTarget', 'claimAndIssueAuditSession', 'claimNavigationAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'transitionDisposableAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'rehydrateViewOnly']);
   const prepared = await prepareAttached(authority);
   const result = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
   assert.equal(result.ok, true);
@@ -428,6 +429,56 @@ test('prepares an exact one-use target and atomically persists its running sessi
   });
   assert.equal(sessionArea.writes.at(-1).keys.length, 2);
   assert.deepEqual(await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId)), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+});
+
+test('single navigation capability is one-shot, panel-document bound, and issues a disposable session atomically', async () => {
+  const { authority, sessionArea } = authorityFixture();
+  const prepared = await authority.prepareNavigationForPanel({
+    intent: 'single', senderContext: extensionContext(),
+  });
+  assert.equal(prepared.ok, true);
+  const navigation = (await sessionArea.get(navigationCapabilityStorageKey(prepared.capabilityId)))[navigationCapabilityStorageKey(prepared.capabilityId)];
+  assert.deepEqual(navigation, {
+    version: 1, capabilityId: prepared.capabilityId, intent: 'single', windowId: 9,
+    issuer: extensionContext().issuer, sessionCapabilityId: null,
+    issuedAt: 1_788_000_000_000, expiresAt: 1_788_000_060_000, state: 'prepared',
+  });
+  const claim = {
+    capabilityId: prepared.capabilityId, auditId: 'audit-url-1', ownershipId: `owner_${'A'.repeat(22)}`,
+    intent: 'single', senderContext: extensionContext(),
+  };
+  const result = await authority.claimNavigationAndIssueAuditSession(claim);
+  assert.equal(result.ok, true);
+  assert.equal(result.auditId, 'audit-url-1');
+  const session = (await sessionArea.get(sessionCapabilityStorageKey(result.sessionCapabilityId)))[sessionCapabilityStorageKey(result.sessionCapabilityId)];
+  assert.equal(session.mode, 'single');
+  assert.deepEqual(session.targetBinding, {
+    kind: 'disposable', ownershipId: `owner_${'A'.repeat(22)}`, state: 'pending',
+  });
+  assert.equal(Object.hasOwn(session.targetBinding, 'ownerId'), false);
+  assert.equal(session.state, 'running');
+  assert.deepEqual(await authority.claimNavigationAndIssueAuditSession(claim), {
+    ok: false, code: 'CAPABILITY_UNAVAILABLE',
+  });
+});
+
+test('single navigation capability rejects expiry and every cross-document or cross-window claim', async () => {
+  for (const senderContext of [extensionContext('another-panel'), extensionContext('panel-document-1', 10)]) {
+    const { authority } = authorityFixture();
+    const prepared = await authority.prepareNavigationForPanel({ intent: 'single', senderContext: extensionContext() });
+    assert.deepEqual(await authority.claimNavigationAndIssueAuditSession({
+      capabilityId: prepared.capabilityId, auditId: 'audit-url-1', ownershipId: `owner_${'A'.repeat(22)}`,
+      intent: 'single', senderContext,
+    }), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+  }
+  let clock = 1_788_000_000_000;
+  const { authority } = authorityFixture({ now: () => clock });
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'single', senderContext: extensionContext() });
+  clock += 60_000;
+  assert.deepEqual(await authority.claimNavigationAndIssueAuditSession({
+    capabilityId: prepared.capabilityId, auditId: 'audit-url-1', ownershipId: `owner_${'A'.repeat(22)}`,
+    intent: 'single', senderContext: extensionContext(),
+  }), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
 });
 
 test('rejects expiry reached while fresh document proof is pending without a claim/session write', async () => {
@@ -958,7 +1009,12 @@ test('enforces the closed privacy-paused transition graph and attached-only inva
 
   const key = sessionCapabilityStorageKey(claimed.sessionCapabilityId);
   const attached = (await sessionArea.get(key))[key];
-  await sessionArea.set({ [key]: { ...attached, state: 'running', targetBinding: { kind: 'disposable', ownerId: 'owner-1' } } });
+  await sessionArea.set({
+    [key]: {
+      ...attached, state: 'running',
+      targetBinding: { kind: 'disposable', ownershipId: 'owner-1', state: 'observing' },
+    },
+  });
   assert.deepEqual(await transition('privacy-paused'), { ok: false, code: 'SESSION_TRANSITION_DENIED' });
 });
 
@@ -1230,9 +1286,9 @@ test('rehydrates a closed view-only session without resurrecting running intent'
   assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-view-1', consumer: 'panel', intent: 'cancel', sender, claimedWindowId: 9 }), { ok: false, code: 'SESSION_DENIED' });
 });
 
-test('rehydrateViewOnly rejects caller-supplied target bindings and keeps the exact nine-method authority shape', async () => {
+test('rehydrateViewOnly rejects caller-supplied target bindings and keeps the exact authority shape', async () => {
   const { authority, sessionArea } = authorityFixture();
-  assert.deepEqual(Object.keys(authority), ['prepare', 'inspectPreparedTarget', 'claimPreparedTarget', 'inspectPreparedAuditTarget', 'claimAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'rehydrateViewOnly']);
+  assert.deepEqual(Object.keys(authority), ['prepare', 'prepareNavigationForPanel', 'inspectPreparedTarget', 'claimPreparedTarget', 'inspectPreparedAuditTarget', 'claimAndIssueAuditSession', 'claimNavigationAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'transitionDisposableAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'rehydrateViewOnly']);
   assert.deepEqual(await authority.rehydrateViewOnly({
     auditId: 'audit-view-1', windowId: 9, mode: 'attached', targetBinding: { kind: 'view-only' },
   }), { ok: false, code: 'SESSION_DENIED' });
@@ -1525,7 +1581,10 @@ test('recovery reader rejects correlated session transplant and drift without sc
   const session = (await sessionArea.get(sessionKey))[sessionKey];
   sessionArea.unsafeSet(sessionKey, { ...session, auditId: 'other' });
   await assert.rejects(() => readAttachedAuditCorrelationForRecovery({ sessionArea, capabilityId: prepared.capabilityId, auditId: 'audit-1' }), /AUDIT_RECOVERY_CORRELATION_DENIED/u);
-  sessionArea.unsafeSet(sessionKey, { ...session, mode: 'single', targetBinding: { kind: 'disposable', ownerId: prepared.capabilityId } });
+  sessionArea.unsafeSet(sessionKey, {
+    ...session, mode: 'single',
+    targetBinding: { kind: 'disposable', ownershipId: prepared.capabilityId, state: 'observing' },
+  });
   await assert.rejects(() => readAttachedAuditCorrelationForRecovery({ sessionArea, capabilityId: prepared.capabilityId, auditId: 'audit-1' }), /AUDIT_RECOVERY_CORRELATION_DENIED/u);
   let targetReads = 0;
   const requested = [];

@@ -687,10 +687,20 @@ function captureChromeSessionArea(value) {
   if (typeof get !== 'function' || typeof set !== 'function' || typeof remove !== 'function') {
     throw chromeApiDenied();
   }
+  const assertStable = () => {
+    const liveGet = ownChromeApiValue(value, 'get');
+    const liveSet = ownChromeApiValue(value, 'set');
+    const liveRemove = ownChromeApiValue(value, 'remove');
+    if (liveGet !== get || liveSet !== set || liveRemove !== remove) throw chromeApiDenied();
+  };
+  const invokeSession = (method, argument) => {
+    assertStable();
+    return ReflectApply(method, value, [argument]);
+  };
   const captured = ObjectCreate(null);
-  defineDataProperty(captured, 'get', ReflectApply(FunctionPrototypeBind, get, [captured]), true, false, false);
-  defineDataProperty(captured, 'set', ReflectApply(FunctionPrototypeBind, set, [captured]), true, false, false);
-  defineDataProperty(captured, 'remove', ReflectApply(FunctionPrototypeBind, remove, [captured]), true, false, false);
+  defineDataProperty(captured, 'get', argument => invokeSession(get, argument), true, false, false);
+  defineDataProperty(captured, 'set', argument => invokeSession(set, argument), true, false, false);
+  defineDataProperty(captured, 'remove', argument => invokeSession(remove, argument), true, false, false);
   return ObjectFreeze(captured);
 }
 
@@ -701,11 +711,20 @@ function captureChromeEvent(value) {
   const confirmedAddListener = ownChromeApiValue(value, 'addListener');
   if (removeListener !== confirmedRemoveListener || addListener !== confirmedAddListener) throw chromeApiDenied();
   if (typeof addListener !== 'function' || typeof removeListener !== 'function') throw chromeApiDenied();
+  const assertStable = () => {
+    const liveAddListener = ownChromeApiValue(value, 'addListener');
+    const liveRemoveListener = ownChromeApiValue(value, 'removeListener');
+    if (liveAddListener !== addListener || liveRemoveListener !== removeListener) throw chromeApiDenied();
+  };
+  const invokeEvent = (method, listener) => {
+    assertStable();
+    return ReflectApply(method, value, [listener]);
+  };
   const captured = ObjectCreate(null);
   defineDataProperty(
     captured,
     'addListener',
-    ReflectApply(FunctionPrototypeBind, addListener, [captured]),
+    listener => invokeEvent(addListener, listener),
     true,
     false,
     false,
@@ -713,7 +732,7 @@ function captureChromeEvent(value) {
   defineDataProperty(
     captured,
     'removeListener',
-    ReflectApply(FunctionPrototypeBind, removeListener, [captured]),
+    listener => invokeEvent(removeListener, listener),
     true,
     false,
     false,

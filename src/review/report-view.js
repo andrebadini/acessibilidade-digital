@@ -271,6 +271,7 @@ export function projectExecutive(model, summary) {
     })).sort((left, right) => left.pageId.localeCompare(right.pageId)),
     limitations: [...new Set([
       ...model.limitations,
+      ...model.session.diagnostics.map(diagnostic => `${diagnostic.code}: ${diagnostic.message}`),
       ...summary.limitations.codes,
       ...summary.limitations.notStartedPageIds.map(id => `Página não iniciada: ${id}.`),
       ...summary.limitations.untestedCheckKeys.map(id => untestedLimitationLabel(model, id)),
@@ -775,7 +776,11 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   executive.append(metrics);
   const limitations = document.createElement('details');
   limitations.setAttribute('data-report-limitations', '');
-  limitations.append(element(document, 'summary', `Limitações registradas (${view.executive.limitations.length})`));
+  const noPixelEvidence = view.executive.limitations.some(value =>
+    typeof value === 'string' && value.startsWith('PIXEL_CAPTURE_OMITTED:'));
+  limitations.append(element(document, 'summary', noPixelEvidence
+    ? `Limitações registradas (${view.executive.limitations.length}) · Modo sem imagens: nenhuma captura raster.`
+    : `Limitações registradas (${view.executive.limitations.length})`));
   appendTextList(document, limitations, view.executive.limitations, 'Nenhuma limitação crítica registrada.');
   const actions = document.createElement('div');
   actions.setAttribute('class', 'executive-actions');

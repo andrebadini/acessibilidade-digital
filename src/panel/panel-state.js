@@ -7,7 +7,7 @@ const PIXEL_CAPTURE_MODES = Object.freeze(['full-evidence', 'element-only']);
 const PRIVACY_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private-marker']);
 const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
 const PANEL_STATE_KEYS = Object.freeze([
-  'version', 'screen', 'auditId', 'captureMode', 'sessionStatus', 'privacy',
+  'version', 'screen', 'auditId', 'entryMode', 'entryError', 'auditSource', 'captureMode', 'sessionStatus', 'privacy',
   'progress', 'filters', 'selectedOccurrenceId', 'evidenceExpanded', 'persona', 'highlight',
   'focusId', 'scrollTop', 'reason',
 ]);
@@ -49,6 +49,9 @@ export function createInitialPanelState() {
     version: 1,
     screen: 'initial',
     auditId: null,
+    entryMode: 'sources',
+    entryError: null,
+    auditSource: null,
     captureMode: 'full-evidence',
     sessionStatus: null,
     privacy: neutralPrivacy(),
@@ -81,17 +84,42 @@ export function reducePanelState(current, event) {
         focusId: panelFocusId(selected.focusId, `capture-mode-${selected.mode}`),
       });
     }
-    case 'START_REQUESTED':
+    case 'URL_FORM_OPENED':
+      if (!exactDataRecord(event, ['type']) || current.screen !== 'initial') return current;
+      return nextPanelState(current, { entryMode: 'single-url', entryError: null, focusId: 'audit-url' });
+    case 'URL_FORM_CLOSED':
+      if (!exactDataRecord(event, ['type']) || current.screen !== 'initial') return current;
+      return nextPanelState(current, { entryMode: 'sources', entryError: null, focusId: 'open-url-form' });
+    case 'URL_ENTRY_REJECTED': {
+      const rejected = exactDataRecord(event, ['type', 'code']);
+      if (!rejected || !['required', 'invalid', 'too-long', 'start-failed'].includes(rejected.code)) return current;
+      if (rejected.code === 'start-failed' && current.screen === 'running' &&
+        current.auditSource === 'single-url' && current.auditId === null) {
+        return nextPanelState(current, {
+          screen: 'initial', entryMode: 'single-url', entryError: 'start-failed', auditSource: null,
+          sessionStatus: null, privacy: neutralPrivacy(), progress: neutralProgress(), focusId: 'audit-url', reason: null,
+        });
+      }
+      if (current.screen !== 'initial' || current.entryMode !== 'single-url') return current;
+      return nextPanelState(current, { entryError: rejected.code, focusId: 'audit-url' });
+    }
+    case 'START_REQUESTED': {
+      const requested = exactDataRecord(event, ['type', 'source']);
+      if (!requested || !['attached', 'single-url'].includes(requested.source) || current.screen !== 'initial' ||
+        requested.source === 'single-url' && (current.entryMode !== 'single-url' || current.captureMode !== 'no-pixels')) return current;
       return nextPanelState(current, {
         screen: 'running', auditId: null, selectedOccurrenceId: null,
+        auditSource: requested.source, entryError: null,
         sessionStatus: null, privacy: neutralPrivacy(),
         progress: neutralProgress(),
         evidenceExpanded: false, focusId: 'cancel-audit', scrollTop: 0, reason: null,
       });
+    }
     case 'AUDIT_RUNNING':
       if (!validPanelAuditId(event.auditId)) return current;
       return nextPanelState(current, {
         screen: 'running', auditId: event.auditId, selectedOccurrenceId: null,
+        auditSource: current.auditSource ?? 'attached',
         sessionStatus: null, privacy: neutralPrivacy(),
         progress: current.auditId === event.auditId ? current.progress : neutralProgress(),
         evidenceExpanded: false, focusId: 'cancel-audit', reason: null,
@@ -152,6 +180,7 @@ export function reducePanelState(current, event) {
       if (!exactDataRecord(event, ['type'])) return current;
       return nextPanelState(current, {
         screen: 'initial', auditId: null, sessionStatus: null, privacy: neutralPrivacy(),
+        entryMode: 'sources', entryError: null, auditSource: null,
         progress: neutralProgress(),
         filters: { impact: [], wcag: [], abnt: [] }, selectedOccurrenceId: null,
         evidenceExpanded: false, highlight: uncheckedHighlight(), focusId: 'start-attached',
@@ -342,6 +371,9 @@ export function reducePanelState(current, event) {
 function panelState(value) {
   const state = exactDataRecord(value, PANEL_STATE_KEYS);
   if (!state || state.version !== 1 || !['initial', 'running', 'result', 'unavailable'].includes(state.screen) ||
+    !['sources', 'single-url'].includes(state.entryMode) ||
+    ![null, 'required', 'invalid', 'too-long', 'start-failed'].includes(state.entryError) ||
+    ![null, 'attached', 'single-url'].includes(state.auditSource) ||
     !CAPTURE_MODES.includes(state.captureMode) || ![null, 'privacy-paused'].includes(state.sessionStatus) ||
     !exactProgress(state.progress) || !state.filters || !PANEL_FILTERS.every(filter => Array.isArray(state.filters[filter]))) return false;
   const privacy = exactPrivacy(state.privacy);
@@ -361,6 +393,9 @@ function immutablePanelState(value) {
     version: value.version,
     screen: value.screen,
     auditId: value.auditId,
+    entryMode: value.entryMode,
+    entryError: value.entryError,
+    auditSource: value.auditSource,
     captureMode: value.captureMode,
     sessionStatus: value.sessionStatus,
     privacy: copyPrivacy(value.privacy),

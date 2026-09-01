@@ -403,6 +403,65 @@ test('initial screen exposes three described radio modes and emits only a safe l
   assert.match(root.textContent, /Lote de páginas/u);
 });
 
+test('single-URL form keeps the typed value transient and blocks pixel modes without downgrading', () => {
+  const input = fixture();
+  input.state = {
+    ...input.state, screen: 'initial', auditId: null, entryMode: 'single-url', entryError: null,
+    auditSource: null, captureMode: 'no-pixels', sessionStatus: null,
+    privacy: { mode: null, categories: [], message: null, confirmationPending: false },
+  };
+  const emitted = [];
+  const view = buildPanelView({ state: input.state });
+  assert.equal(Object.hasOwn(view, 'url'), false);
+  const root = renderPanelView({
+    view, document: new TestDocument(), onIntent: intent => emitted.push(intent), onEvent() {},
+  });
+  const form = root.querySelector('form[id="audit-form"]');
+  const url = root.querySelector('input[id="audit-url"]');
+  assert.ok(form);
+  assert.ok(url);
+  assert.equal(url.getAttribute('name'), 'audit-url');
+  assert.equal(url.getAttribute('type'), 'url');
+  assert.equal(url.getAttribute('inputmode'), 'url');
+  assert.equal(url.getAttribute('autocomplete'), 'url');
+  assert.equal(url.hasAttribute('required'), true);
+  assert.equal(url.getAttribute('maxlength'), '2048');
+  assert.match(root.textContent, /Informe a URL e escolha como coletar as evidências\./u);
+  url.value = 'https://example.test/private?token=transient';
+  form.dispatch('submit');
+  assert.deepEqual(emitted, [{ type: 'START_URL', url: 'https://example.test/private?token=transient' }]);
+  assert.doesNotMatch(JSON.stringify(view), /token=transient/u);
+
+  input.state.captureMode = 'full-evidence';
+  const pixelRoot = renderPanelView({
+    view: buildPanelView({ state: input.state }), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  const submit = pixelRoot.querySelector('button[data-intent="START_URL"]');
+  assert.equal(submit.getAttribute('aria-disabled'), 'true');
+  assert.match(pixelRoot.textContent, /Outra URL está disponível nesta versão somente no modo Sem imagens/u);
+});
+
+test('single-URL errors are useful and never echo the rejected address', () => {
+  for (const [entryError, copy] of [
+    ['required', 'Informe uma URL para continuar.'],
+    ['invalid', 'Informe um endereço completo começando por http:// ou https://.'],
+    ['too-long', 'A URL é longa demais. Use um endereço com até 2.048 caracteres.'],
+    ['start-failed', 'Não foi possível iniciar a avaliação desta URL. Tente novamente.'],
+  ]) {
+    const input = fixture();
+    input.state = {
+      ...input.state, screen: 'initial', auditId: null, entryMode: 'single-url', entryError,
+      auditSource: null, captureMode: 'no-pixels', sessionStatus: null,
+      privacy: { mode: null, categories: [], message: null, confirmationPending: false },
+    };
+    const root = renderPanelView({
+      view: buildPanelView({ state: input.state }), document: new TestDocument(), onIntent() {}, onEvent() {},
+    });
+    assert.match(root.textContent, new RegExp(copy.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+    assert.doesNotMatch(root.textContent, /secret\.example|token=/u);
+  }
+});
+
 test('the complete radio card, including its description, is one associated clickable target', () => {
   const input = fixture();
   input.state = {
@@ -638,6 +697,22 @@ test('explains a preview omitted by the panel budget without inventing or exposi
 
   assert.equal(root.querySelectorAll('[data-evidence-preview-image]').length, 0);
   assert.match(root.textContent, /prévia.*omitida.*painel.*relatório/iu);
+});
+
+test('explains that structural evidence has no raster in no-pixels mode', () => {
+  const input = fixture();
+  input.state.evidenceExpanded = true;
+  input.state.captureMode = 'no-pixels';
+  input.detail.previews = [
+    { evidenceId: 'ev-structure', kind: 'element', dataUrl: '', mediaUrl: '', origin: '' },
+  ];
+  const root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+
+  assert.equal(root.querySelectorAll('[data-evidence-preview-image]').length, 0);
+  assert.match(root.querySelector('[data-detail-block="previews"]').textContent,
+    /nenhuma captura raster.*modo sem imagens.*evidências estruturais/iu);
 });
 
 test('persistent simulation controls expose pressed state and reader transport labels', () => {

@@ -1,4 +1,5 @@
 import { createCapturePolicyV1 } from '../core/privacy/capture-policy.js';
+import { isEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
 import {
   PANEL_SURFACE,
   deriveTrustedExtensionContext,
@@ -19,6 +20,10 @@ const HIGHLIGHT_DEPENDENCY_KEYS = Object.freeze([
 const HIGHLIGHT_FACTORY_KEYS = Object.freeze([...FACTORY_KEYS, ...HIGHLIGHT_DEPENDENCY_KEYS]);
 const HIGHLIGHT_LAUNCH_FACTORY_KEYS = Object.freeze([...LAUNCH_FACTORY_KEYS, ...HIGHLIGHT_DEPENDENCY_KEYS]);
 const HIGHLIGHT_LEGACY_FACTORY_KEYS = Object.freeze([...LEGACY_FACTORY_KEYS, ...HIGHLIGHT_DEPENDENCY_KEYS]);
+const URL_DEPENDENCY_KEYS = Object.freeze(['urlAuditStarter', 'rawNavigationVault', 'createOwnershipId']);
+const URL_HIGHLIGHT_FACTORY_KEYS = Object.freeze([...HIGHLIGHT_FACTORY_KEYS, ...URL_DEPENDENCY_KEYS]);
+const URL_HIGHLIGHT_LAUNCH_FACTORY_KEYS = Object.freeze([...HIGHLIGHT_LAUNCH_FACTORY_KEYS, ...URL_DEPENDENCY_KEYS]);
+const URL_HIGHLIGHT_LEGACY_FACTORY_KEYS = Object.freeze([...HIGHLIGHT_LEGACY_FACTORY_KEYS, ...URL_DEPENDENCY_KEYS]);
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const OCCURRENCE_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const CAPABILITY = /^[A-Za-z0-9_-]{20,240}$/u;
@@ -32,8 +37,8 @@ const READER_STATE_KEYS = Object.freeze([
   'speechAvailability', 'voiceId', 'rate',
 ]);
 const PANEL_PORT_TYPES = new Set([
-  'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
-  'PANEL_START_ATTACHED_AUDIT', 'CONFIRM_PIXEL_CAPTURE',
+  'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_NAVIGATION_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
+  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_URL_AUDIT', 'CONFIRM_PIXEL_CAPTURE',
   'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
   'PANEL_SET_PERSONA_MODE', 'PANEL_READER_STATE', 'PANEL_READER_ACTION',
   'PANEL_READER_ENABLE_VOICE',
@@ -157,8 +162,10 @@ function proofRecord(value, tabId, windowId) {
 function fail(code) { return Object.freeze({ ok: false, code }); }
 
 export function createSidePanelIntentRouter(raw) {
-  const input = exact(raw, HIGHLIGHT_FACTORY_KEYS) ?? exact(raw, HIGHLIGHT_LAUNCH_FACTORY_KEYS) ??
-    exact(raw, HIGHLIGHT_LEGACY_FACTORY_KEYS);
+  const input = exact(raw, URL_HIGHLIGHT_FACTORY_KEYS) ?? exact(raw, URL_HIGHLIGHT_LAUNCH_FACTORY_KEYS) ??
+    exact(raw, URL_HIGHLIGHT_LEGACY_FACTORY_KEYS) ?? exact(raw, HIGHLIGHT_FACTORY_KEYS) ??
+    exact(raw, HIGHLIGHT_LAUNCH_FACTORY_KEYS) ?? exact(raw, HIGHLIGHT_LEGACY_FACTORY_KEYS);
+  const hasUrlAudit = Boolean(input && Object.hasOwn(input, 'urlAuditStarter'));
   const coordinator = exact(input?.panelCoordinator, ['attachPanelPort', 'withWindowLock', 'publishHighlightState']);
   const reportOperations = input?.reportOperations
     ? exact(input.reportOperations, ['commitReviewDecision', 'deleteAudit', 'deleteAllAudits'])
@@ -185,6 +192,10 @@ export function createSidePanelIntentRouter(raw) {
     typeof input.highlightSessionBridge?.createPanelSender !== 'function' ||
     typeof input.highlightSessionBridge?.createReviewSender !== 'function' ||
     typeof input.publishHighlightState !== 'function' ||
+    (hasUrlAudit && (typeof input.urlAuditStarter?.beginAuthorizedUrlAudit !== 'function' ||
+      typeof input.rawNavigationVault?.put !== 'function' || typeof input.rawNavigationVault?.clearAudit !== 'function' ||
+      typeof input.createOwnershipId !== 'function' ||
+      typeof input.authority.prepareNavigationForPanel !== 'function')) ||
     (Object.hasOwn(input, 'reportOperations') && (!reportOperations ||
       Object.values(reportOperations).some(operation => typeof operation !== 'function')))) {
     throw new TypeError('SIDE_PANEL_ROUTER_INVALID');
@@ -220,6 +231,21 @@ export function createSidePanelIntentRouter(raw) {
         allowedIntent: 'start-audit', issuer: context.issuer,
       });
       if (prepared?.ok !== true || !CAPABILITY.test(prepared.capabilityId ?? '') || !Number.isSafeInteger(prepared.expiresAt)) throw new Error();
+      return freeze({ ok: true, requestId: envelope.requestId, capabilityId: prepared.capabilityId });
+    } catch { return fail('TARGET_UNAVAILABLE'); }
+  }
+
+  async function preparePanelNavigation(envelope, sender) {
+    if (!hasUrlAudit) return fail('FEATURE_UNAVAILABLE');
+    let context;
+    try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
+    catch { return fail('CONTEXT_DENIED'); }
+    try {
+      const prepared = await input.authority.prepareNavigationForPanel({
+        intent: 'single', senderContext: context,
+      });
+      if (prepared?.ok !== true || !CAPABILITY.test(prepared.capabilityId ?? '') ||
+        !Number.isSafeInteger(prepared.expiresAt)) throw new Error();
       return freeze({ ok: true, requestId: envelope.requestId, capabilityId: prepared.capabilityId });
     } catch { return fail('TARGET_UNAVAILABLE'); }
   }
@@ -489,6 +515,51 @@ export function createSidePanelIntentRouter(raw) {
       } catch { return fail('AUDIT_START_FAILED'); }
     }
     return fail('AUDIT_ID_COLLISION');
+  }
+
+  async function startUrl(envelope, sender) {
+    if (!hasUrlAudit || envelope.captureMode !== 'no-pixels' || envelope.includeQuery !== false ||
+      envelope.deleteAfterCompleteExport !== false || !canonicalHttpUrl(envelope.url)) return fail('AUDIT_START_FAILED');
+    let context;
+    try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
+    catch { return fail('CONTEXT_DENIED'); }
+    let auditId = null;
+    try {
+      auditId = input.createAuditId();
+      const ownershipId = input.createOwnershipId();
+      if (!AUDIT_ID.test(auditId ?? '') || !/^owner_[A-Za-z0-9_-]{22}$/u.test(ownershipId ?? '')) throw new Error();
+      const issued = exact(await input.rawNavigationVault.put(envelope.url, {
+        auditId, purpose: 'single-url', ttlMs: 600_000, includeQuery: false,
+      }), ['navigationToken', 'evidenceUrl', 'sessionDigest', 'expiresAt']);
+      const evidenceUrl = issued && exact(issued.evidenceUrl, ['version', 'href', 'queryIncluded', 'redactedSegments']);
+      if (!issued || !/^[A-Za-z0-9_-]{22}$/u.test(issued.navigationToken ?? '') ||
+        !evidenceUrl || !isEvidenceUrlV1(evidenceUrl) || evidenceUrl.queryIncluded !== false ||
+        !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(issued.sessionDigest ?? '') ||
+        !Number.isSafeInteger(issued.expiresAt)) throw new Error();
+      const started = await input.urlAuditStarter.beginAuthorizedUrlAudit({
+        capabilityId: envelope.capabilityId,
+        auditId,
+        senderContext: context,
+        capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+        retentionPreference: Object.freeze({ version: 1, deleteAfterCompleteExport: false }),
+        plan: freeze({
+          kind: 'single', ownershipId, navigationToken: issued.navigationToken,
+          navigationPurpose: 'single-url', evidenceUrl: { ...evidenceUrl }, sessionDigest: issued.sessionDigest,
+        }),
+      });
+      const response = started?.response;
+      if (response?.ok === true && response.auditId === auditId && response.state === 'running') {
+        return freeze({ ok: true, auditId, state: 'running' });
+      }
+      try { await input.rawNavigationVault.clearAudit(auditId); } catch { return fail('AUDIT_RECOVERY_REQUIRED'); }
+      return response?.ok === false && START_CODES.has(response.code) ? fail(response.code) : fail('AUDIT_START_FAILED');
+    } catch {
+      if (AUDIT_ID.test(auditId ?? '')) {
+        try { await input.rawNavigationVault.clearAudit(auditId); }
+        catch { return fail('AUDIT_RECOVERY_REQUIRED'); }
+      }
+      return fail('AUDIT_START_FAILED');
+    }
   }
 
   async function confirmPixelCapture(envelope, sender) {
@@ -789,8 +860,10 @@ export function createSidePanelIntentRouter(raw) {
       if (!panelLane && !reportLane) return fail('CONTEXT_DENIED');
     } else if (!panelIntent && (hasLaunchTab || hasPanelWindow)) return fail('CONTEXT_DENIED');
     if (envelope.type === 'PREPARE_PANEL_CAPABILITY') return preparePanel(envelope, request.sender, request.launchTabId);
+    if (envelope.type === 'PREPARE_PANEL_NAVIGATION_CAPABILITY') return preparePanelNavigation(envelope, request.sender);
     if (envelope.type === 'PREPARE_PANEL_PERSONA_CAPABILITY') return preparePanelPersona(envelope, request.sender, request.launchTabId);
     if (envelope.type === 'PANEL_START_ATTACHED_AUDIT') return startAttached(envelope, request.sender);
+    if (envelope.type === 'PANEL_START_URL_AUDIT') return startUrl(envelope, request.sender);
     if (envelope.type === 'CONFIRM_PIXEL_CAPTURE') return confirmPixelCapture(envelope, request.sender);
     if (envelope.type === 'PANEL_START_PERSONA') return startPersona(envelope, request.sender);
     if (envelope.type === 'PANEL_REHYDRATE_PERSONA') return rehydratePersona(envelope, request.sender);

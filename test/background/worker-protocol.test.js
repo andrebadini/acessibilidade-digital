@@ -14,10 +14,16 @@ const CONSENT = `${'C'.repeat(21)}Q`;
 
 const validMessages = [
   { type: 'PREPARE_PANEL_CAPABILITY', requestId: '_request', windowId: 9 },
+  { type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: '_navigation', intent: 'single', windowId: 9 },
   { type: 'PREPARE_PANEL_PERSONA_CAPABILITY', requestId: '_persona', windowId: 9 },
   { type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9 },
   { type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'full-evidence', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9 },
   { type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: CAPABILITY, captureMode: 'element-only', includeQuery: false, deleteAfterCompleteExport: false, windowId: 9 },
+  {
+    type: 'PANEL_START_URL_AUDIT', capabilityId: CAPABILITY,
+    url: 'https://example.test/private?token=raw', captureMode: 'no-pixels',
+    includeQuery: false, deleteAfterCompleteExport: false, windowId: 9,
+  },
   { type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: '-audit.1', consentId: CONSENT, mode: 'full-evidence', accepted: true, windowId: 9 },
   { type: 'PANEL_START_PERSONA', capabilityId: CAPABILITY, mode: 'reader', windowId: 9 },
   { type: 'PANEL_REHYDRATE_PERSONA', capabilityId: CAPABILITY, windowId: 9 },
@@ -187,6 +193,34 @@ test('adds the admitted window only at the panel Port boundary and rejects every
   });
   assert.deepEqual(parsePanelPortIntent(hostile, 9), { ok: false, code: 'INVALID_MESSAGE' });
   assert.equal(reads, 0);
+});
+
+test('admits one bounded single-URL start through its exact panel Port envelopes', () => {
+  const prepare = { type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: 'url-request-1', intent: 'single' };
+  const start = {
+    type: 'PANEL_START_URL_AUDIT', capabilityId: CAPABILITY,
+    url: 'https://example.test/private?token=raw', captureMode: 'no-pixels',
+    includeQuery: false, deleteAfterCompleteExport: false,
+  };
+  assert.deepEqual(parsePanelPortIntent(prepare, 17), {
+    ok: true, value: { ...prepare, windowId: 17 },
+  });
+  assert.deepEqual(parsePanelPortIntent(start, 17), {
+    ok: true, value: { ...start, windowId: 17 },
+  });
+  assert.equal(isPanelPortIntent(start), true);
+
+  for (const invalid of [
+    { ...prepare, intent: 'batch' },
+    { ...prepare, url: 'https://forged.test/' },
+    { ...start, captureMode: 'full-evidence' },
+    { ...start, captureMode: 'element-only' },
+    { ...start, includeQuery: true },
+    { ...start, deleteAfterCompleteExport: true },
+    { ...start, url: '' },
+    { ...start, url: 'x'.repeat(2_049) },
+    { ...start, url: 'https://example.test/', ownershipId: 'forged-owner' },
+  ]) assert.deepEqual(parsePanelPortIntent(invalid, 17), { ok: false, code: 'INVALID_MESSAGE' });
 });
 
 test('admits confirmation only through the panel Port and injects its bound window', () => {

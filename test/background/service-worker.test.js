@@ -17,6 +17,8 @@ import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-commit-clock.js';
 import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
+import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
+import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 import { createFakeLockManager } from '../personas/fake-lock-manager.js';
 
 const CAPABILITY = 'C'.repeat(22);
@@ -287,7 +289,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
       },
     }),
     personaLockManager,
-    createAuditId: () => 'audit-worker-generated',
+    createAuditId: fixtureOptions.createAuditId ?? (() => 'audit-worker-generated'),
     createExportOwnerId: () => 'export-owner-1',
     createEventNonce: () => 'N'.repeat(22),
     epochNow: () => 1_788_000_000_000,
@@ -297,13 +299,14 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
       pixelCommitClockFactory: () => createScriptedPixelCommitClockV1({ epochs: Array(256).fill(1_788_000_000_000) }),
     }),
     ...(fixtureOptions.rawNavigationVaultFactory ? { rawNavigationVaultFactory: fixtureOptions.rawNavigationVaultFactory } : {}),
+    ...(fixtureOptions.runUrlAuditExecution ? { runUrlAuditExecution: fixtureOptions.runUrlAuditExecution } : {}),
     ...(fixtureOptions.pixelConsentSchedulerFactory
       ? { pixelConsentSchedulerFactory: fixtureOptions.pixelConsentSchedulerFactory }
       : {}),
     logger: { error() {} },
   });
 
-  function sender(kind, auditId = null, leaseOwnerId = null, exportAttempt = null) {
+  function sender(kind, auditId = null, leaseOwnerId = null, exportAttempt = null, tabId = 17) {
     const documentId = `${kind}-document`;
     let path;
     let contextType;
@@ -321,7 +324,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
     const value = { id: chromeApi.runtime.id, documentId, frameId: 0, url };
     contexts.set(documentId, {
       documentId, documentUrl: url, contextType, windowId: 9,
-      ...(contextType === 'TAB' ? { tabId: 17 } : {}),
+      ...(contextType === 'TAB' ? { tabId } : {}),
     });
     return value;
   }
@@ -367,22 +370,29 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
         requestCounter += 1;
         const requestId = `test-panel-${requestCounter}`;
         onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'intent', requestId, envelope });
-        await tick();
-        const packet = port.messages.find(value => value.type === 'intent-result' && value.requestId === requestId);
+        let packet = null;
+        for (let attempt = 0; attempt < 200 && packet === null; attempt += 1) {
+          await new Promise(resolve => setTimeout(resolve, 1));
+          packet = port.messages.find(value => value.type === 'intent-result' && value.requestId === requestId) ?? null;
+        }
         if (!packet) throw new Error(`panel intent failed: ${JSON.stringify({ messages: port.messages, disconnects: port.disconnects })}`);
         return packet.response;
       },
     };
   }
 
-  async function connectReport(auditId) {
+  async function connectReport(auditId, { preserveLaunch = false } = {}) {
     await registration.startupReady;
     const now = 1_788_000_000_000;
-    sessionValues[`audita:report-launch:v1:${auditId}`] = {
-      version: 1, auditId, tabId: 17, windowId: 9, path: '/src/review/index.html',
-      documentId: null, state: 'awaiting-connection', issuedAt: now, expiresAt: now + 1_800_000,
-    };
-    const from = sender('review', auditId);
+    const launchKey = `audita:report-launch:v1:${auditId}`;
+    if (!preserveLaunch) {
+      sessionValues[launchKey] = {
+        version: 1, auditId, tabId: 17, windowId: 9, path: '/src/review/index.html',
+        documentId: null, state: 'awaiting-connection', issuedAt: now, expiresAt: now + 1_800_000,
+      };
+    }
+    const launch = sessionValues[launchKey];
+    const from = sender('review', auditId, null, null, launch?.tabId ?? 17);
     const connected = await dispatch({ type: 'REPORT_CONNECT', auditId }, from);
     return { connected, from };
   }
@@ -994,6 +1004,128 @@ test('default worker keeps the volatile vault closed while injecting the one dig
   ]);
   assert.equal(env.sessionGetCalls.filter(key => key === null).length, sessionScansBefore,
     'the vault has no session-wide scan during put');
+});
+
+test('default worker exposes the tokenized single-URL capability only through its Side Panel Port', async () => {
+  const env = defaultGraphFixture(null, {
+    tabsQuery: async () => [{
+      id: 17, windowId: 9, active: true, status: 'complete', url: 'https://example.test/',
+    }],
+  });
+  const panel = await env.connectPanel();
+
+  const prepared = await panel.request({
+    type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY',
+    requestId: 'single-url-default-worker',
+    intent: 'single',
+  });
+
+  assert.equal(prepared.ok, true, JSON.stringify(prepared));
+  assert.equal(prepared.requestId, 'single-url-default-worker');
+  assert.match(prepared.capabilityId, /^[A-Za-z0-9_-]{22}$/u);
+});
+
+test('default worker carries one tokenized URL from the Side Panel to a persisted result without public secrets', async () => {
+  const auditId = 'audit-worker-single-url';
+  const inventory = await createInstalledCoreRuleInventory();
+  const draft = structuredClone(SAMPLE_AUDIT);
+  draft.auditId = auditId;
+  draft.integrity.canonicalModelHash = 'pending';
+  draft.integrity.evidenceManifestHash = 'pending';
+  const model = await enrichAuditForReport(draft, {
+    now: () => '2026-08-29T12:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: inventory.rulesVersion,
+    browserVersion: 'Chrome/147.0.0.0',
+  });
+  const checkpoint = {
+    version: 1,
+    auditId,
+    pages: model.pages.map(page => ({
+      pageId: page.pageId,
+      attempted: page.attempted,
+      startedAt: page.attempted ? page.timestamps.startedAt : null,
+      rulesVersion: inventory.rulesVersion,
+      inventoryVersion: inventory.inventoryVersion,
+      inventoryHash: inventory.sha256,
+      outcomes: [],
+    })),
+  };
+  const auditStore = createInMemoryAuditStore();
+  let executionFailure = null;
+  const executionSettled = deferred();
+  const env = defaultGraphFixture(null, {
+    auditStore,
+    enableReportLaunch: true,
+    createAuditId: () => auditId,
+    tabsQuery: async () => [{
+      id: 17, windowId: 9, active: true, status: 'complete', url: 'https://example.test/',
+    }],
+    async runUrlAuditExecution(args) {
+      try {
+        await args.onCheckpoint(checkpoint);
+        const observedTarget = Object.freeze({
+          version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId: args.ownershipId,
+          tabId: 27, windowId: 9, documentId: 'single-url-document',
+          urlEvidence: sanitizeEvidenceUrlV1(model.finalUrl, { includeQuery: false }),
+          urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+          cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+        });
+        await args.persistAuditModel(model, observedTarget);
+        const output = Object.freeze({
+          status: 'partial', model, observedTarget,
+          observationState: 'observed', ownershipState: 'retained-for-review',
+        });
+        executionSettled.resolve();
+        return output;
+      } catch (error) {
+        executionFailure = error;
+        executionSettled.resolve();
+        throw error;
+      }
+    },
+  });
+  const panel = await env.connectPanel();
+  const prepared = await panel.request({
+    type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: 'single-url-result', intent: 'single',
+  });
+  assert.equal(prepared.ok, true, JSON.stringify(prepared));
+
+  const started = await panel.request({
+    type: 'PANEL_START_URL_AUDIT', capabilityId: prepared.capabilityId,
+    url: 'https://servico.exemplo.test/consulta?private-token=never-public',
+    captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
+  });
+  assert.deepEqual(started, { ok: true, auditId, state: 'running' });
+  await executionSettled.promise;
+
+  let revision = null;
+  for (let attempt = 0; attempt < 200 && revision === null; attempt += 1) {
+    await tick();
+    revision = await auditStore.getReportRevision(auditId);
+  }
+  assert.equal(executionFailure, null, executionFailure?.stack ?? executionFailure?.message);
+  assert.equal(revision?.modelRevision, 1, JSON.stringify({
+    revision, executionFailure: executionFailure?.message ?? null,
+    messages: panel.port.messages,
+    sessionKeys: Object.keys(env.sessionValues),
+  }));
+  const resultPacket = panel.port.messages.find(value =>
+    value.type === 'bootstrap-result' && value.state === 'result' && value.auditId === auditId);
+  assert.equal(Boolean(resultPacket?.result), true, JSON.stringify(panel.port.messages));
+  const publicText = JSON.stringify({ packets: panel.port.messages, latest: await auditStore.getLatest() });
+  assert.doesNotMatch(publicText, /private-token|owner_|hmac-sha256|navigationToken|sessionDigest|ownershipId/iu);
+
+  const opening = panel.request({
+    type: 'PANEL_OPEN_REPORT', auditId, sessionCapabilityId: resultPacket.sessionCapabilityId,
+  }).catch(error => error);
+  const launchKey = `audita:report-launch:v1:${auditId}`;
+  for (let attempt = 0; attempt < 20 && !env.sessionValues[launchKey]; attempt += 1) await tick();
+  assert.equal(Boolean(env.sessionValues[launchKey]), true);
+  const { connected } = await env.connectReport(auditId, { preserveLaunch: true });
+  const opened = await opening;
+  assert.match(connected.sessionCapabilityId ?? '', /^[A-Za-z0-9_-]{22}$/u);
+  assert.equal(connected.state, 'view-only');
+  assert.equal(opened.ok, true, JSON.stringify(opened));
 });
 
 test('default graph rearms its singleton pixel scheduler after unified paused cleanup', async () => {

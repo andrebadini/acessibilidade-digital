@@ -1243,6 +1243,172 @@ test('start-first consumes a pending bootstrap only after proving ACTIVE running
   });
 });
 
+test('single-URL bootstrap stays connected and publishes running without exposing disposable authority', async () => {
+  const env = fixture();
+  env.sessions.set(SESSION, Object.freeze({
+    ...session('running'),
+    mode: 'single',
+    targetBinding: Object.freeze({
+      kind: 'disposable', ownershipId: `owner_${'O'.repeat(22)}`, state: 'pending',
+    }),
+  }));
+  env.setActive(Object.freeze({ ...runningActive(), mode: 'single' }));
+  const connected = port();
+  assert.equal(env.coordinator.attachPanelPort(connected), true);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.equal(connected.disconnects, 0);
+  assert.deepEqual(connected.messages, [{
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null,
+  }]);
+
+  await env.coordinator.withWindowLock(9, async scope => {
+    assert.equal(await scope.registerPendingBootstrap({
+      auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+      createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000,
+    }), true);
+    assert.equal(await scope.publishRegisteredBootstrap({
+      auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+    }), true);
+  });
+  assert.equal(connected.disconnects, 0);
+  assert.deepEqual(connected.messages.at(-1), {
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'running',
+    auditId: 'audit-port', sessionCapabilityId: SESSION, result: null,
+  });
+  assert.doesNotMatch(JSON.stringify(connected.messages), /owner_|ownership|disposable/u);
+});
+
+test('single-URL result keeps the panel connected while publishing safe highlight state', async () => {
+  const targetBinding = Object.freeze({
+    kind: 'disposable', ownershipId: `owner_${'O'.repeat(22)}`, state: 'retained-for-review',
+  });
+  const env = fixture({
+    async authorizeHighlightSession() {
+      return {
+        ok: true,
+        session: {
+          version: 1, sessionCapabilityId: SESSION, auditId: 'audit-port', windowId: 9, mode: 'single',
+          targetBinding,
+          consumers: [
+            { name: 'panel', path: '/src/panel/index.html', contextType: 'SIDE_PANEL' },
+            { name: 'review', path: '/src/review/index.html', contextType: 'TAB' },
+          ],
+          intents: {
+            panel: { running: ['cancel'], 'privacy-paused': ['cancel', 'confirm-pixels'], result: ['open-report', 'highlight'], 'view-only': ['open-report'] },
+            review: { running: [], 'privacy-paused': [], result: ['export', 'highlight'], 'view-only': ['export'] },
+          },
+          state: 'result', issuedAt: EPOCH, expiresAt: EPOCH + 10_000,
+        },
+        context: {
+          issuer: { type: 'extension-document', documentId: 'panel-document', path: '/src/panel/index.html' },
+          windowId: 9, tabId: null, contextType: 'SIDE_PANEL', documentUrl: PANEL_URL,
+        },
+      };
+    },
+  });
+  env.sessions.set(SESSION, Object.freeze({
+    ...session('running'), mode: 'single',
+    targetBinding: Object.freeze({ ...targetBinding, state: 'pending' }),
+  }));
+  env.setActive(Object.freeze({ ...runningActive(), mode: 'single' }));
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  env.sessions.set(SESSION, Object.freeze({ ...session('result'), mode: 'single', targetBinding }));
+  env.setActive(null);
+
+  const event = {
+    version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: 'audit-port', occurrenceId: 'occ-1', state: 'active',
+  };
+  assert.deepEqual(await env.coordinator.publishHighlightState(event), { delivered: 1 });
+  assert.equal(connected.disconnects, 0);
+  assert.deepEqual(connected.messages.at(-1), event);
+  assert.doesNotMatch(JSON.stringify(connected.messages.at(-1)), /owner_|ownership|disposable/u);
+});
+
+test('single-URL terminal reconnect preserves its retained result session and highlight intents', async () => {
+  const resultBundle = await bundle();
+  const targetBinding = Object.freeze({
+    kind: 'disposable', ownershipId: `owner_${'O'.repeat(22)}`, state: 'retained-for-review',
+  });
+  const dispatched = [];
+  let rehydrations = 0;
+  const env = fixture({
+    loadPanelResultBundle: async () => resultBundle,
+    async rehydrateViewOnly() {
+      rehydrations += 1;
+      throw new Error('single result must stay authorized');
+    },
+    async dispatchPanelIntent(request) {
+      dispatched.push(request);
+      return request.envelope.type === 'GET_HIGHLIGHT_AVAILABILITY'
+        ? { ok: true, available: true }
+        : { ok: true, highlight: { state: 'active', occurrenceId: 'occ-1' } };
+    },
+  });
+  env.sessions.set(SESSION, Object.freeze({
+    ...session('result'), mode: 'single', targetBinding,
+  }));
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'consumed',
+  };
+  const connected = port();
+
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+
+  assert.equal(connected.disconnects, 0);
+  assert.equal(rehydrations, 0);
+  assert.deepEqual(connected.messages[0], {
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'result',
+    auditId: 'audit-port', sessionCapabilityId: SESSION, result: resultBundle,
+  });
+  assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].sessionCapabilityId, SESSION);
+  assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].state, 'consumed');
+  assert.doesNotMatch(JSON.stringify(connected.messages[0]), /owner_|ownership|disposable/u);
+
+  connected.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: 'availability-after-reconnect',
+    envelope: {
+      type: 'GET_HIGHLIGHT_AVAILABILITY', sessionCapabilityId: SESSION,
+      auditId: 'audit-port', occurrenceId: 'occ-1',
+    },
+  });
+  await tick();
+  connected.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: 'highlight-after-reconnect',
+    envelope: {
+      type: 'HIGHLIGHT_OCCURRENCE', sessionCapabilityId: SESSION,
+      auditId: 'audit-port', occurrenceId: 'occ-1',
+    },
+  });
+  await tick();
+
+  assert.equal(connected.disconnects, 0);
+  assert.deepEqual(dispatched.map(request => ({
+    type: request.envelope.type,
+    sessionCapabilityId: request.envelope.sessionCapabilityId,
+    panelWindowId: request.panelWindowId,
+  })), [
+    { type: 'GET_HIGHLIGHT_AVAILABILITY', sessionCapabilityId: SESSION, panelWindowId: 9 },
+    { type: 'HIGHLIGHT_OCCURRENCE', sessionCapabilityId: SESSION, panelWindowId: 9 },
+  ]);
+  assert.deepEqual(connected.messages.at(-1), {
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'highlight-after-reconnect',
+    response: { ok: true, highlight: { state: 'active', occurrenceId: 'occ-1' } },
+  });
+});
+
 test('start-first hello cannot publish running until the start journal is confirmed absent', async () => {
   const env = fixture();
   env.setActive(runningActive());

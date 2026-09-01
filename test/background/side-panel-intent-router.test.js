@@ -12,8 +12,8 @@ const RUNTIME_ID = 'abcdefghijklmnopabcdefghijklmnop';
 const LAUNCH_TOKEN = 'L'.repeat(43);
 const PANEL_URL = `chrome-extension://${RUNTIME_ID}/src/panel/index.html?launch=${LAUNCH_TOKEN}`;
 const PANEL_TYPES = new Set([
-  'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
-  'PANEL_START_ATTACHED_AUDIT', 'CONFIRM_PIXEL_CAPTURE',
+  'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_NAVIGATION_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
+  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_URL_AUDIT', 'CONFIRM_PIXEL_CAPTURE',
   'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
   'PANEL_SET_PERSONA_MODE', 'PANEL_READER_STATE', 'PANEL_READER_ACTION',
   'PANEL_READER_ENABLE_VOICE',
@@ -84,6 +84,10 @@ function fixture(overrides = {}) {
       return { ok: true, capabilityId: value.allowedIntent === 'start-audit' ? CAPABILITY : 'P'.repeat(22), expiresAt: value.allowedIntent === 'start-audit' ? 200 : 180 };
     },
     async invalidateCapability(capabilityId, reason) { calls.push(['invalidate', capabilityId, reason]); return { ok: true }; },
+    async prepareNavigationForPanel(value) {
+      calls.push(['prepare-navigation', value]);
+      return { ok: true, capabilityId: 'N'.repeat(22), expiresAt: 200 };
+    },
     async authorizeSession(value) {
       calls.push(['authorize', value]);
       return { ok: true, session: {
@@ -110,6 +114,24 @@ function fixture(overrides = {}) {
         completion: Promise.resolve({ ok: true }),
       };
     },
+  };
+  const urlAuditStarter = {
+    async beginAuthorizedUrlAudit(value) {
+      calls.push(['begin-url', value]);
+      return { response: { ok: true, auditId: value.auditId, state: 'running' } };
+    },
+  };
+  const rawNavigationVault = {
+    async put(url, options) {
+      calls.push(['vault-put', url, options]);
+      return {
+        navigationToken: 'T'.repeat(22),
+        evidenceUrl: { version: 'EvidenceUrlV1', href: 'https://example.test/private', queryIncluded: false, redactedSegments: 0 },
+        sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+        expiresAt: 600_250,
+      };
+    },
+    async clearAudit(auditId) { calls.push(['vault-clear', auditId]); return true; },
   };
   const personaStart = {
     async start(value) {
@@ -183,6 +205,8 @@ function fixture(overrides = {}) {
   };
   const dependencies = {
     chromeApi, authority, auditStarter, panelCoordinator, chromeAdapter,
+    urlAuditStarter, rawNavigationVault,
+    createOwnershipId() { calls.push(['ownership']); return `owner_${'O'.repeat(22)}`; },
     personaStart, personaCoordinator,
     async readReportRevision({ auditId }) { calls.push(['read-report', auditId]); return { version: 1, auditId }; },
     async buildPanelResultBundle({ reportRevision }) { calls.push(['bundle', reportRevision.auditId]); return Object.freeze({ version: 1, auditId: reportRevision.auditId }); },
@@ -451,6 +475,40 @@ test('prepares a panel capability and starts through the only attached starter w
   assert.equal(begin.senderContext.documentUrl.includes('panel'), true);
   assert.deepEqual(begin.retentionPreference, { version: 1, deleteAfterCompleteExport: false });
   assert.equal(Object.isFrozen(begin.retentionPreference), true);
+});
+
+test('prepares and starts one tokenized URL without returning or retaining private navigation fields', async () => {
+  const { router, calls } = fixture();
+  assert.deepEqual(await router.dispatch({
+    envelope: parsed({
+      type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: 'request-url-1', intent: 'single', windowId: 9,
+    }),
+    sender: panelSender(),
+  }), { ok: true, requestId: 'request-url-1', capabilityId: 'N'.repeat(22) });
+
+  const response = await router.dispatch({
+    envelope: parsed({
+      type: 'PANEL_START_URL_AUDIT', capabilityId: 'N'.repeat(22),
+      url: 'https://example.test/private?token=raw', captureMode: 'no-pixels',
+      includeQuery: false, deleteAfterCompleteExport: false, windowId: 9,
+    }),
+    sender: panelSender(),
+  });
+  assert.deepEqual(response, { ok: true, auditId: 'audit-router-1', state: 'running' });
+  assert.doesNotMatch(JSON.stringify(response), /private|token|digest|owner|capability/iu);
+  assert.deepEqual(calls.find(([name]) => name === 'vault-put').slice(1), [
+    'https://example.test/private?token=raw',
+    { auditId: 'audit-router-1', purpose: 'single-url', ttlMs: 600_000, includeQuery: false },
+  ]);
+  const begin = calls.find(([name]) => name === 'begin-url')[1];
+  assert.deepEqual(begin.plan, {
+    kind: 'single', ownershipId: `owner_${'O'.repeat(22)}`, navigationToken: 'T'.repeat(22),
+    navigationPurpose: 'single-url',
+    evidenceUrl: { version: 'EvidenceUrlV1', href: 'https://example.test/private', queryIncluded: false, redactedSegments: 0 },
+    sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+  });
+  assert.equal(Object.hasOwn(begin, 'url'), false);
+  assert.equal(begin.capturePolicy.mode, 'no-pixels');
 });
 
 test('starts each closed capture mode with its exact canonical policy', async () => {

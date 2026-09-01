@@ -58,7 +58,9 @@ import { createPersonaCoordinator } from './persona-coordinator.js';
 import { createPersonaLeaseStore } from './persona-lease-store.js';
 import { createPersonaInjectionRuntime } from './persona-runtime.js';
 import { createPersonaStartOrchestrator } from './persona-start-orchestrator.js';
-import { runAttachedAuditExecution } from './run-audit.js';
+import { createOwnershipId, runAttachedAuditExecution, runUrlAudit } from './run-audit.js';
+import { runObservedTabAudit } from './observed-tab-runner.js';
+import { createOwnedTabRegistry } from './owned-tabs.js';
 import { createSidePanelIntentRouter } from './side-panel-intent-router.js';
 import { createReportLaunchAuthority } from './report-launch.js';
 import {
@@ -751,7 +753,8 @@ async function buildDefaultRuntime(chromeApi, options) {
   const rawNavigationVault = (options.rawNavigationVaultFactory ?? createRawNavigationVaultV1)({
     sessionArea, digestManager, now: epochNow, randomBytes: bytes,
   });
-  if (typeof rawNavigationVault?.put !== 'function' || typeof rawNavigationVault?.take !== 'function') throw new Error('WORKER_UNAVAILABLE');
+  if (typeof rawNavigationVault?.put !== 'function' || typeof rawNavigationVault?.take !== 'function' ||
+    typeof rawNavigationVault?.clearAudit !== 'function') throw new Error('WORKER_UNAVAILABLE');
   const baseAdapter = typeof options.chromeAdapterFactory === 'function'
     ? options.chromeAdapterFactory(chromeApi, { sessionUrlDigestManager: digestManager })
     : createChromeAdapter(chromeAuditAuthority, { sessionUrlDigestManager: digestManager });
@@ -833,16 +836,25 @@ async function buildDefaultRuntime(chromeApi, options) {
           return Object.freeze({ ok: false, code: 'REPORT_SOURCE_DENIED' });
         }
         if (state === 'result') {
-          const binding = exact(session.targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest'], true);
-          const proof = binding?.kind === 'attached'
-            ? exact(await chromeAdapter.probeDocumentIdentity(binding.tabId),
-              ['tabId', 'windowId', 'documentId', 'urlSessionDigest'], true)
-            : null;
-          if (!proof || proof.tabId !== binding.tabId || proof.windowId !== session.windowId ||
-            proof.documentId !== binding.documentId || proof.urlSessionDigest !== binding.urlSessionDigest) {
+          const attached = exact(session.targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest'], true);
+          if (attached?.kind === 'attached') {
+            const proof = exact(await chromeAdapter.probeDocumentIdentity(attached.tabId),
+              ['tabId', 'windowId', 'documentId', 'urlSessionDigest'], true);
+            if (!proof || proof.tabId !== attached.tabId || proof.windowId !== session.windowId ||
+              proof.documentId !== attached.documentId || proof.urlSessionDigest !== attached.urlSessionDigest) {
+              return Object.freeze({ ok: false, code: 'REPORT_SOURCE_DENIED' });
+            }
+            return Object.freeze({ ok: true, state, binding: session.targetBinding, windowId: session.windowId, live: true });
+          }
+          const disposable = exact(session.targetBinding, ['kind', 'ownershipId', 'state'], true);
+          if (disposable?.kind !== 'disposable' || disposable.state !== 'retained-for-review' ||
+            !/^owner_[A-Za-z0-9_-]{22}$/u.test(disposable.ownershipId ?? '')) {
             return Object.freeze({ ok: false, code: 'REPORT_SOURCE_DENIED' });
           }
-          return Object.freeze({ ok: true, state, binding: session.targetBinding, windowId: session.windowId, live: true });
+          // A aba descartável não é projetada como fonte viva ao relatório.
+          // O relatório mantém exportação/revisão, mas não recebe poderes de
+          // destaque ou retorno sem uma prova de documento separada.
+          return Object.freeze({ ok: true, state, binding: session.targetBinding, windowId: session.windowId, live: false });
         }
         return Object.freeze({ ok: true, state, binding: session.targetBinding, windowId: session.windowId, live: false });
       } catch {
@@ -952,6 +964,48 @@ async function buildDefaultRuntime(chromeApi, options) {
     runAttachedAuditExecution: args => runAttachedAuditExecution({
       ...args, chromeAdapter, expectedExtensionId: chromeApi.runtime.id,
     }),
+    runUrlAuditExecution: options.runUrlAuditExecution ?? (args => runUrlAudit({
+      auditId: args.auditId,
+      ownershipId: args.ownershipId,
+      windowId: args.windowId,
+      navigationToken: args.navigationToken,
+      navigationPurpose: args.navigationPurpose,
+      evidenceUrl: args.evidenceUrl,
+      sessionDigest: args.sessionDigest,
+      rawNavigationVault,
+      chromeAdapter,
+      capturePolicy: args.capturePolicy,
+      checkpointStore: Object.freeze({
+        writeSanitized: (auditId, checkpoint) => {
+          if (auditId !== args.auditId) throw new Error('CHECKPOINT_PERSIST_DENIED');
+          return args.onCheckpoint(checkpoint);
+        },
+        persistAuditModel: (model, observedTarget) => args.persistAuditModel(model, observedTarget),
+      }),
+      onProgress: event => chromeAdapter.emitProgress(event),
+      now: args.modelNow,
+      signal: args.signal,
+      expectedExtensionId: chromeApi.runtime.id,
+      auditRunner: runObservedTabAudit,
+    })),
+    clearUrlAuditResources: async ({ auditId, ownershipId }) => {
+      let failed = false;
+      try { await rawNavigationVault.clearAudit(auditId); } catch { failed = true; }
+      let registry = null;
+      try {
+        registry = createOwnedTabRegistry({
+          sessionArea,
+          chromeAdapter: Object.freeze({ removeTab: tabId => chromeAdapter.removeTab(tabId) }),
+          now: modelNow,
+        });
+        await registry.clearAudit(auditId);
+      } catch { failed = true; }
+      if (failed || !registry) return false;
+      try {
+        const current = await registry.get(ownershipId);
+        return current === null || (current.auditId === auditId && current.ownershipId === ownershipId && current.state === 'removed');
+      } catch { return false; }
+    },
     persistLatest, persistCheckpoint: checkpoints.persistCheckpoint, removeCheckpoint: checkpoints.removeCheckpoint,
     commitTerminalAudit,
     readAuditSnapshot: ({ auditId }) => auditStore.getAuditSnapshot(auditId),
@@ -1009,6 +1063,8 @@ async function buildDefaultRuntime(chromeApi, options) {
   });
   const router = createSidePanelIntentRouter({
     chromeApi, authority, auditStarter, panelCoordinator, chromeAdapter,
+    urlAuditStarter: auditStarter, rawNavigationVault,
+    createOwnershipId: () => createOwnershipId(bytes),
     personaStart, personaCoordinator,
     readReportRevision: ({ auditId }) => auditStore.getReportRevision(auditId),
     buildPanelResultBundle, revokeViewOnly, epochNow, modelNow,

@@ -19,6 +19,12 @@ const RUNNING_PHASES = Object.freeze([
 ]);
 const COVERAGE_DISCLAIMER = 'Percentual da execução automática concluída. Não é nota, certificação ou declaração de conformidade.';
 const WCAG_LEVEL_ORDER = Object.freeze(['A', 'AA', 'AAA']);
+const ENTRY_ERRORS = Object.freeze({
+  required: 'Informe uma URL para continuar.',
+  invalid: 'Informe um endereço completo começando por http:// ou https://.',
+  'too-long': 'A URL é longa demais. Use um endereço com até 2.048 caracteres.',
+  'start-failed': 'Não foi possível iniciar a avaliação desta URL. Tente novamente.',
+});
 
 export function buildPanelView({ state, summary = null, detail = null } = {}) {
   const screen = dataProperty(state, 'screen');
@@ -36,6 +42,10 @@ export function buildPanelView({ state, summary = null, detail = null } = {}) {
     version: 1,
     screen,
     auditId: typeof state.auditId === 'string' ? state.auditId : null,
+    entryMode: dataProperty(state, 'entryMode') === 'single-url' ? 'single-url' : 'sources',
+    entryError: Object.hasOwn(ENTRY_ERRORS, dataProperty(state, 'entryError')) ? dataProperty(state, 'entryError') : null,
+    auditSource: ['attached', 'single-url'].includes(dataProperty(state, 'auditSource'))
+      ? dataProperty(state, 'auditSource') : null,
     captureMode,
     sessionStatus,
     privacy: sessionStatus === 'privacy-paused' ? privacy : neutralPrivacyProjection(),
@@ -75,8 +85,10 @@ export function renderPanelView({ view, document, onIntent, onEvent = () => {} }
   const emitIntent = intent => {
     switch (intent.type) {
       case 'START_ATTACHED':
+      case 'START_URL':
       case 'CONFIRM_PIXEL_CAPTURE':
       case 'OPEN_URL_FORM':
+      case 'CLOSE_URL_FORM':
       case 'OPEN_BATCH_FORM':
       case 'CANCEL_AUDIT':
       case 'OPEN_REPORT':
@@ -134,16 +146,82 @@ function renderInitial(document, view, emit, onEvent) {
     paragraph(document, 'A auditoria acontece localmente nesta página e não envia o conteúdo para serviços externos.', 'lead'),
     paragraph(document, LOCAL_PIXEL_NOTICE, 'privacy-local-copy'),
   );
+  if (view.entryMode === 'single-url') {
+    root.append(renderSingleUrlEntry(document, view, emit, onEvent));
+    return root;
+  }
   root.append(renderCaptureModeChoices(document, view.captureMode, onEvent));
   const choices = section(document, 'source-choices');
   choices.setAttribute('aria-label', 'Escolher origem da auditoria');
   choices.append(
     actionButton(document, 'Auditar a página atual', 'START_ATTACHED', 'start-attached', emit, 'primary-action'),
-    unavailableChoice(document, 'Outra URL', 'OPEN_URL_FORM', 'open-url-form', emit),
+    actionButton(document, 'Outra URL', 'OPEN_URL_FORM', 'open-url-form', emit, 'secondary-action'),
     unavailableChoice(document, 'Lote de páginas', 'OPEN_BATCH_FORM', 'open-batch-form', emit),
   );
   root.append(choices, liveRegion(document, 'Escolha como iniciar a auditoria.'));
   return root;
+}
+
+function renderSingleUrlEntry(document, view, emit, onEvent) {
+  const wrapper = section(document, 'single-url-entry');
+  const form = document.createElement('form');
+  form.setAttribute('id', 'audit-form');
+  form.setAttribute('novalidate', '');
+  const label = document.createElement('label');
+  label.setAttribute('for', 'audit-url');
+  label.textContent = 'Endereço da página';
+  const input = document.createElement('input');
+  input.setAttribute('id', 'audit-url');
+  input.setAttribute('name', 'audit-url');
+  input.setAttribute('type', 'url');
+  input.setAttribute('inputmode', 'url');
+  input.setAttribute('autocomplete', 'url');
+  input.setAttribute('required', '');
+  input.setAttribute('maxlength', '2048');
+  input.dataset.focusId = 'audit-url';
+  if (view.entryError !== null) {
+    input.setAttribute('aria-invalid', 'true');
+    input.setAttribute('aria-describedby', 'audit-url-error');
+  }
+  form.append(label, input);
+  if (view.entryError !== null) {
+    const error = paragraph(document, ENTRY_ERRORS[view.entryError], 'field-error');
+    error.setAttribute('id', 'audit-url-error');
+    form.append(error);
+  }
+  form.append(renderCaptureModeChoices(document, view.captureMode, onEvent));
+  const supported = view.captureMode === 'no-pixels';
+  if (!supported) {
+    form.append(paragraph(
+      document,
+      'Outra URL está disponível nesta versão somente no modo Sem imagens. Selecione Sem imagens para continuar.',
+      'availability-note',
+    ));
+  }
+  const actions = section(document, 'form-actions');
+  const submit = document.createElement('button');
+  submit.setAttribute('type', 'submit');
+  submit.className = 'primary-action';
+  submit.dataset.intent = 'START_URL';
+  submit.dataset.action = 'start-url-audit';
+  submit.dataset.focusId = 'start-url-audit';
+  submit.textContent = 'Avaliar acessibilidade';
+  if (!supported) {
+    submit.setAttribute('aria-disabled', 'true');
+    submit.setAttribute('disabled', '');
+  }
+  actions.append(submit, actionButton(document, 'Voltar', 'CLOSE_URL_FORM', 'close-url-form', emit, 'secondary-action'));
+  form.append(actions);
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    if (!supported) return;
+    emit({ type: 'START_URL', url: typeof input.value === 'string' ? input.value : '' });
+  });
+  wrapper.append(
+    form,
+    liveRegion(document, 'Informe a URL e escolha como coletar as evidências.'),
+  );
+  return wrapper;
 }
 
 function renderCaptureModeChoices(document, selectedMode, onEvent) {
@@ -449,7 +527,7 @@ function renderGroup(document, name, cards, view, emit, onEvent, detail) {
   for (const card of cards) {
     wrapper.append(renderCard(document, card, view, emit));
     if (detail && card.occurrenceIds.includes(detail.occurrenceId)) {
-      wrapper.append(renderDetail(document, detail, view.evidenceExpanded, view.highlight, emit, onEvent));
+      wrapper.append(renderDetail(document, detail, view.evidenceExpanded, view.highlight, emit, onEvent, view.captureMode));
     }
   }
   return wrapper;
@@ -496,7 +574,7 @@ function renderCard(document, card, view, emit) {
   return root;
 }
 
-function renderDetail(document, detail, expanded, highlight, emit, onEvent) {
+function renderDetail(document, detail, expanded, highlight, emit, onEvent, captureMode) {
   const root = section(document, 'result-detail');
   root.dataset.resultDetail = '';
   root.dataset.classification = detail.heading.classification;
@@ -523,7 +601,7 @@ function renderDetail(document, detail, expanded, highlight, emit, onEvent) {
     detailBlock(document, 'legal', 'Referência legal', detail.legalReference ? [
       detail.legalReference.statement, detail.legalReference.qualification,
     ] : ['Não há referência legal específica para esta ocorrência.']),
-    previewBlock(document, detail.previews, expanded, onEvent),
+    previewBlock(document, detail.previews, expanded, onEvent, captureMode),
     technicalBlock(document, detail.technical, expanded, onEvent),
   );
   const actions = section(document, 'detail-actions');
@@ -594,7 +672,7 @@ function detailBlock(document, name, title, values) {
   return block;
 }
 
-function previewBlock(document, previews, expanded, onEvent) {
+function previewBlock(document, previews, expanded, onEvent, captureMode) {
   const block = document.createElement('details');
   block.className = 'detail-block detail-previews';
   block.dataset.detailBlock = 'previews';
@@ -605,6 +683,10 @@ function previewBlock(document, previews, expanded, onEvent) {
   block.append(summary);
   bindDisclosure(block, expanded, 'evidence-summary', onEvent);
   if (previews.length === 0) block.append(paragraph(document, 'Nenhuma prévia visual foi armazenada.'));
+  if (captureMode === 'no-pixels' && previews.length > 0 && previews.every(preview => preview.dataUrl === '')) {
+    block.append(paragraph(document,
+      'Nenhuma captura raster foi coletada no modo sem imagens. As evidências estruturais permanecem disponíveis.'));
+  }
   for (const preview of previews) {
     const item = section(document, 'evidence-preview');
     const imageMetadata = safePngPreview(preview.dataUrl);

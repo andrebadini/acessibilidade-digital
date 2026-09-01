@@ -55,6 +55,31 @@ export function createPanelAttachedAuditIntent(raw) {
   });
 }
 
+export function normalizePanelUrlEntry(raw) {
+  if (typeof raw !== 'string') return Object.freeze({ ok: false, code: 'invalid' });
+  const url = raw.trim();
+  if (url === '') return Object.freeze({ ok: false, code: 'required' });
+  if (Array.from(url).length > 2_048) return Object.freeze({ ok: false, code: 'too-long' });
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username !== '' || parsed.password !== '' ||
+      /[\u0000-\u001F\u007F]/u.test(url)) return Object.freeze({ ok: false, code: 'invalid' });
+    if (Array.from(parsed.href).length > 2_048) return Object.freeze({ ok: false, code: 'too-long' });
+    return Object.freeze({ ok: true, url: parsed.href });
+  } catch { return Object.freeze({ ok: false, code: 'invalid' }); }
+}
+
+export function createPanelUrlAuditIntent(raw) {
+  const input = exactRecord(raw, ['capabilityId', 'url', 'captureMode']);
+  const normalized = input ? normalizePanelUrlEntry(input.url) : null;
+  if (!input || !OPAQUE_CAPABILITY.test(input.capabilityId ?? '') || input.captureMode !== 'no-pixels' ||
+    normalized?.ok !== true || normalized.url !== input.url) return null;
+  return Object.freeze({
+    type: 'PANEL_START_URL_AUDIT', capabilityId: input.capabilityId, url: normalized.url,
+    captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
+  });
+}
+
 export function shouldShowPanelStartFailure(current) {
   try {
     const screen = current && typeof current === 'object'
@@ -217,6 +242,14 @@ async function handleIntent(intent) {
       await privacyConfirmation.confirm(intent);
       return;
     case 'OPEN_URL_FORM':
+      transition({ type: 'URL_FORM_OPENED' });
+      return;
+    case 'CLOSE_URL_FORM':
+      transition({ type: 'URL_FORM_CLOSED' });
+      return;
+    case 'START_URL':
+      await startUrlAudit(intent.url);
+      return;
     case 'OPEN_BATCH_FORM':
       announce('Não disponível nesta beta.');
       return;
@@ -316,7 +349,7 @@ async function clearHighlight() {
 
 async function startAttachedAudit() {
   const captureMode = state.captureMode;
-  transition({ type: 'START_REQUESTED' });
+  transition({ type: 'START_REQUESTED', source: 'attached' });
   const requestId = nextRequestId();
   const prepared = parsePreparedCapability(await requestPanelIntent({ type: 'PREPARE_PANEL_CAPABILITY', requestId }), requestId);
   if (!prepared) {
@@ -334,6 +367,53 @@ async function startAttachedAudit() {
   if (!started && shouldShowPanelStartFailure(state)) {
     transition({ type: 'AUDIT_UNAVAILABLE', reason: 'Não foi possível concluir a operação local.' });
   }
+}
+
+async function startUrlAudit(rawUrl) {
+  const normalized = normalizePanelUrlEntry(rawUrl);
+  if (!normalized.ok) {
+    transition({ type: 'URL_ENTRY_REJECTED', code: normalized.code });
+    return;
+  }
+  const captureMode = state.captureMode;
+  if (state.screen !== 'initial' || state.entryMode !== 'single-url' || captureMode !== 'no-pixels') {
+    announce('Outra URL está disponível nesta versão somente no modo Sem imagens.');
+    return;
+  }
+  const submittedState = state;
+  const requestId = nextRequestId();
+  let preparedResponse = null;
+  try {
+    preparedResponse = await requestPanelIntent({
+      type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId, intent: 'single',
+    });
+  } catch { /* a safe nontechnical error is rendered below */ }
+  const prepared = parsePreparedCapability(preparedResponse, requestId);
+  if (state !== submittedState) return;
+  if (!prepared) {
+    transition({ type: 'URL_ENTRY_REJECTED', code: 'start-failed' });
+    return;
+  }
+  const startIntent = createPanelUrlAuditIntent({
+    capabilityId: prepared.capabilityId, url: normalized.url, captureMode,
+  });
+  if (!startIntent) {
+    transition({ type: 'URL_ENTRY_REJECTED', code: 'start-failed' });
+    return;
+  }
+  transition({ type: 'START_REQUESTED', source: 'single-url' });
+  if (state === submittedState || state.screen !== 'running' || state.auditId !== null ||
+    state.auditSource !== 'single-url' || state.captureMode !== captureMode) return;
+  let response = null;
+  try { response = await requestPanelIntent(startIntent); }
+  catch { /* a safe nontechnical error is rendered below */ }
+  const started = parseStartedAudit(response);
+  await personaSession.afterAuditAttempt({ started });
+  if (started) {
+    transition({ type: 'AUDIT_RUNNING', auditId: response.auditId });
+    return;
+  }
+  if (shouldShowPanelStartFailure(state)) transition({ type: 'URL_ENTRY_REJECTED', code: 'start-failed' });
 }
 
 async function requestSessionAction(type) {

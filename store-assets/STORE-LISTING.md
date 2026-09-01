@@ -1,4 +1,4 @@
-# Conteúdo de distribuição — Audita Acessibilidade 1.0.3 beta 2
+# Conteúdo de distribuição — Audita Acessibilidade 1.0.4 beta 3
 
 ## Nome
 
@@ -15,6 +15,7 @@ Audita Acessibilidade ajuda a examinar a acessibilidade de uma página web de fo
 Principais recursos:
 
 - auditoria da página HTTP ou HTTPS aberta no Chrome, em um clique;
+- auditoria de outra URL informada pelo usuário no modo Sem imagens, sem login e sem servidor externo;
 - três modos de evidência: Evidência completa, Somente elementos e Sem imagens;
 - pausa de privacidade e confirmação explícita antes de capturas potencialmente sensíveis;
 - verificações automatizadas e indicação transparente dos itens que exigem julgamento humano;
@@ -36,7 +37,7 @@ Antes de auditar, oculte dados pessoais ou sigilosos visíveis. As capturas são
 
 Audita Acessibilidade é uma ferramenta independente, sem vínculo institucional.
 
-Limites desta beta: a entrada de outra URL, a auditoria em lote e o mapa numerado consolidado de anúncios ainda não estão disponíveis.
+Limites desta beta: outra URL pode ser auditada somente no modo Sem imagens. A auditoria em lote e o mapa numerado consolidado de anúncios ainda não estão disponíveis.
 
 ## Finalidade única
 

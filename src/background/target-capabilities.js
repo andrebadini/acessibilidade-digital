@@ -6,6 +6,7 @@ const TRUSTED_SURFACES = new Set([PANEL_SURFACE, REVIEW_SURFACE, EXPORT_SURFACE]
 const SURFACE_BY_PATH = new Map([...TRUSTED_SURFACES].map(surface => [surface.path, surface]));
 const SESSION_AREA_TAILS = new WeakMap();
 const TARGET_PREFIX = 'audita:target-capability:v1:';
+const NAVIGATION_PREFIX = 'audita:navigation-capability:v1:';
 const SESSION_PREFIX = 'audita:audit-session-capability:v1:';
 const CAPABILITY_ID = /^[A-Za-z0-9_-]{22}$/u;
 const MODEL_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
@@ -21,7 +22,14 @@ const WORKER_CLAIM_KEYS = ['capabilityId', 'auditId', 'mode', 'allowedIntent', '
 const AUTHORIZE_KEYS = ['sessionCapabilityId', 'auditId', 'consumer', 'intent', 'sender'];
 const PANEL_AUTHORIZE_KEYS = [...AUTHORIZE_KEYS, 'claimedWindowId'];
 const TRANSITION_KEYS = ['sessionCapabilityId', 'auditId', 'nextState'];
+const DISPOSABLE_TRANSITION_KEYS = ['sessionCapabilityId', 'auditId', 'ownershipId', 'fromState', 'toState'];
 const REHYDRATE_KEYS = ['auditId', 'windowId', 'mode'];
+const NAVIGATION_PREPARE_KEYS = ['intent', 'senderContext'];
+const NAVIGATION_CLAIM_KEYS = ['capabilityId', 'auditId', 'ownershipId', 'intent', 'senderContext'];
+const NAVIGATION_KEYS = ['version', 'capabilityId', 'intent', 'windowId', 'issuer', 'sessionCapabilityId', 'issuedAt', 'expiresAt', 'state'];
+const DISPOSABLE_BINDING_STATES = new Set([
+  'pending', 'observing', 'retained-for-review', 'retained-for-consent', 'cleanup-pending', 'removed',
+]);
 const CONSUMERS = deepFreeze([
   { name: 'panel', path: PANEL_SURFACE.path, contextType: PANEL_SURFACE.contextType },
   { name: 'review', path: REVIEW_SURFACE.path, contextType: REVIEW_SURFACE.contextType },
@@ -112,6 +120,7 @@ export async function deriveTrustedExtensionContext({ sender, chromeApi, surface
 }
 
 export const targetCapabilityStorageKey = capabilityId => `${TARGET_PREFIX}${capabilityId}`;
+export const navigationCapabilityStorageKey = capabilityId => `${NAVIGATION_PREFIX}${capabilityId}`;
 export const sessionCapabilityStorageKey = sessionCapabilityId => `${SESSION_PREFIX}${sessionCapabilityId}`;
 
 export async function readPreparedAttachedAuditFact(args) {
@@ -191,6 +200,33 @@ export async function readAuditSessionForWorker(args) {
   } catch {
     throw new Error('AUDIT_SESSION_READ_DENIED');
   }
+}
+
+export async function readNavigationAuditCorrelationForRecovery(args) {
+  try {
+    const input = readDataRecord(args, ['sessionArea', 'capabilityId', 'auditId']);
+    if (!input || typeof input.sessionArea?.get !== 'function' || !CAPABILITY_ID.test(input.capabilityId ?? '') ||
+      !MODEL_ID.test(input.auditId ?? '')) throw new Error('denied');
+    const navigationKey = navigationCapabilityStorageKey(input.capabilityId);
+    const firstNavigation = parseNavigationRecord(readExactStoredValue(await input.sessionArea.get(navigationKey), navigationKey));
+    if (!firstNavigation || !CAPABILITY_ID.test(firstNavigation.sessionCapabilityId ?? '')) throw new Error('denied');
+    const sessionKey = sessionCapabilityStorageKey(firstNavigation.sessionCapabilityId);
+    const firstSession = parseSessionRecord(readExactStoredValue(await input.sessionArea.get(sessionKey), sessionKey));
+    const secondNavigation = parseNavigationRecord(readExactStoredValue(await input.sessionArea.get(navigationKey), navigationKey));
+    const secondSession = parseSessionRecord(readExactStoredValue(await input.sessionArea.get(sessionKey), sessionKey));
+    if (!firstSession || !secondNavigation || !secondSession || !sameGraph(firstNavigation, secondNavigation) ||
+      !sameGraph(firstSession, secondSession) || firstNavigation.capabilityId !== input.capabilityId ||
+      firstSession.auditId !== input.auditId || firstSession.sessionCapabilityId !== firstNavigation.sessionCapabilityId ||
+      firstSession.windowId !== firstNavigation.windowId || firstSession.mode !== 'single' ||
+      firstSession.targetBinding.kind !== 'disposable') throw new Error('denied');
+    return deepFreeze({
+      version: 1, capabilityId: firstNavigation.capabilityId, auditId: firstSession.auditId,
+      sessionCapabilityId: firstSession.sessionCapabilityId, windowId: firstSession.windowId,
+      capabilityState: firstNavigation.state, sessionState: firstSession.state,
+      ownershipId: firstSession.targetBinding.ownershipId, ownershipState: firstSession.targetBinding.state,
+      issuedAt: firstSession.issuedAt, expiresAt: firstSession.expiresAt,
+    });
+  } catch { throw new Error('NAVIGATION_AUDIT_CORRELATION_DENIED'); }
 }
 
 async function readAttachedAuditRecoveryGraph(args) {
@@ -285,6 +321,27 @@ export function createTargetCapabilityAuthority({
     return deepFreeze({ ok: true, capabilityId, expiresAt: record.expiresAt });
   });
 
+  const prepareNavigationForPanel = args => serialize(async () => {
+    const input = readDataRecord(args, NAVIGATION_PREPARE_KEYS);
+    const context = input && parsePanelNavigationContext(input.senderContext, chromeApi.runtime.id);
+    if (!input || input.intent !== 'single' || !context) throw new TypeError('CAPABILITY_PREPARE_DENIED');
+    const issuedAt = readNow(now);
+    const capabilityId = createCapabilityId(randomBytes);
+    const record = {
+      version: 1,
+      capabilityId,
+      intent: 'single',
+      windowId: context.windowId,
+      issuer: context.issuer,
+      sessionCapabilityId: null,
+      issuedAt,
+      expiresAt: issuedAt + capabilityTtlMs,
+      state: 'prepared',
+    };
+    await sessionArea.set({ [navigationCapabilityStorageKey(capabilityId)]: record });
+    return deepFreeze({ ok: true, capabilityId, expiresAt: record.expiresAt });
+  });
+
   const inspectPreparedTarget = args => serialize(() => provePersonaTarget(args, false));
   const claimPreparedTarget = args => serialize(() => provePersonaTarget(args, true));
   const inspectPreparedAuditTarget = args => serialize(async () => {
@@ -366,6 +423,40 @@ export function createTargetCapabilityAuthority({
   }
 
   const claimAndIssueAuditSession = args => serialize(() => claimCommon(args, false));
+  const claimNavigationAndIssueAuditSession = args => serialize(async () => {
+    const input = readDataRecord(args, NAVIGATION_CLAIM_KEYS);
+    if (!input || !CAPABILITY_ID.test(input.capabilityId ?? '') || !MODEL_ID.test(input.auditId ?? '') ||
+      !/^owner_[A-Za-z0-9_-]{22}$/u.test(input.ownershipId ?? '') || input.intent !== 'single') return unavailable();
+    const key = navigationCapabilityStorageKey(input.capabilityId);
+    const record = parseNavigationRecord(readStoredValue(await sessionArea.get(key), key));
+    const currentTime = readNow(now);
+    const context = parsePanelNavigationContext(input.senderContext, chromeApi.runtime.id);
+    if (!record || record.capabilityId !== input.capabilityId || record.intent !== input.intent ||
+      record.state !== 'prepared' || record.sessionCapabilityId !== null || record.issuedAt > currentTime ||
+      record.expiresAt <= currentTime || !context || context.windowId !== record.windowId ||
+      !sameGraph(context.issuer, record.issuer)) return unavailable();
+    let sessionCapabilityId;
+    try { sessionCapabilityId = createCapabilityId(randomBytes); } catch { return unavailable(); }
+    const session = createSessionRecord({
+      sessionCapabilityId,
+      auditId: input.auditId,
+      windowId: record.windowId,
+      mode: 'single',
+      targetBinding: { kind: 'disposable', ownershipId: input.ownershipId, state: 'pending' },
+      state: 'running',
+      issuedAt: currentTime,
+      expiresAt: currentTime + sessionTtlMs,
+    });
+    const claimed = { ...record, sessionCapabilityId, state: 'claimed' };
+    await sessionArea.set({
+      [key]: claimed,
+      [sessionCapabilityStorageKey(sessionCapabilityId)]: session,
+    });
+    return deepFreeze({
+      ok: true, capabilityId: record.capabilityId, sessionCapabilityId,
+      auditId: session.auditId, expiresAt: session.expiresAt,
+    });
+  });
   const claimWorkerEventAndIssueAuditSession = args => serialize(() => claimCommon(args, true));
 
   async function claimCommon(args, workerEvent) {
@@ -397,7 +488,7 @@ export function createTargetCapabilityAuthority({
       mode: input.mode,
       targetBinding: target.kind === 'attached'
         ? { kind: 'attached', tabId: target.tabId, documentId: target.documentId, urlSessionDigest: target.initialUrlSessionDigest }
-        : { kind: 'disposable', ownerId: target.capabilityId },
+        : { kind: 'disposable', ownershipId: target.capabilityId, state: 'pending' },
       state: 'running',
       issuedAt,
       expiresAt: issuedAt + sessionTtlMs,
@@ -475,11 +566,48 @@ export function createTargetCapabilityAuthority({
     return deepFreeze({ ok: true, sessionCapabilityId: session.sessionCapabilityId, auditId: session.auditId, state: changed.state });
   });
 
+  const transitionDisposableAuditSession = args => serialize(async () => {
+    const input = readDataRecord(args, DISPOSABLE_TRANSITION_KEYS);
+    if (!input || !CAPABILITY_ID.test(input.sessionCapabilityId ?? '') || !MODEL_ID.test(input.auditId ?? '') ||
+      !MODEL_ID.test(input.ownershipId ?? '') || !DISPOSABLE_BINDING_STATES.has(input.fromState) ||
+      !DISPOSABLE_BINDING_STATES.has(input.toState)) return transitionDenied();
+    const allowed = new Set([
+      'pending:observing', 'pending:retained-for-review', 'pending:cleanup-pending', 'pending:removed',
+      'observing:retained-for-review', 'observing:retained-for-consent', 'observing:cleanup-pending', 'observing:removed',
+      'retained-for-consent:observing', 'retained-for-consent:cleanup-pending', 'retained-for-consent:removed',
+      'retained-for-review:cleanup-pending', 'retained-for-review:removed', 'cleanup-pending:removed',
+    ]);
+    if (!allowed.has(`${input.fromState}:${input.toState}`)) return transitionDenied();
+    const key = sessionCapabilityStorageKey(input.sessionCapabilityId);
+    const session = parseSessionRecord(readStoredValue(await sessionArea.get(key), key));
+    if (!session || session.sessionCapabilityId !== input.sessionCapabilityId || session.auditId !== input.auditId ||
+      session.targetBinding.kind !== 'disposable' || session.targetBinding.ownershipId !== input.ownershipId ||
+      session.targetBinding.state !== input.fromState) return transitionDenied();
+    const changed = { ...session, targetBinding: { ...session.targetBinding, state: input.toState } };
+    try { await sessionArea.set({ [key]: changed }); } catch { /* readback confirms commit-then-throw */ }
+    let confirmed;
+    try { confirmed = parseSessionRecord(readStoredValue(await sessionArea.get(key), key)); }
+    catch { return transitionDenied(); }
+    if (!confirmed || !sameGraph(confirmed, changed)) return transitionDenied();
+    return deepFreeze({
+      ok: true, sessionCapabilityId: session.sessionCapabilityId, auditId: session.auditId,
+      ownershipId: input.ownershipId, state: input.toState,
+    });
+  });
+
   const invalidateCapability = (capabilityId, reason) => serialize(async () => {
     if (!CAPABILITY_ID.test(capabilityId ?? '') || typeof reason !== 'string' || !reason) return unavailable();
     const key = targetCapabilityStorageKey(capabilityId);
     const target = parseTargetRecord(readStoredValue(await sessionArea.get(key), key));
-    if (!target || target.capabilityId !== capabilityId) return unavailable();
+    if (!target || target.capabilityId !== capabilityId) {
+      const navigationKey = navigationCapabilityStorageKey(capabilityId);
+      const navigation = parseNavigationRecord(readStoredValue(await sessionArea.get(navigationKey), navigationKey));
+      if (!navigation || navigation.capabilityId !== capabilityId) return unavailable();
+      if (navigation.state !== 'invalidated') {
+        await sessionArea.set({ [navigationKey]: { ...navigation, state: 'invalidated' } });
+      }
+      return deepFreeze({ ok: true, capabilityId });
+    }
     if (isPersonaTarget(target)) {
       await sessionArea.remove(key);
       return deepFreeze({ ok: true, capabilityId });
@@ -506,15 +634,18 @@ export function createTargetCapabilityAuthority({
       const removals = [];
       for (const [key, rawRecord] of readStorageEntries(all)) {
         const target = parseTargetRecord(rawRecord);
+        const navigation = parseNavigationRecord(rawRecord);
         const session = parseSessionRecord(rawRecord);
         const record = target && key === targetCapabilityStorageKey(target.capabilityId)
           ? { type: 'target', value: target }
+          : navigation && key === navigationCapabilityStorageKey(navigation.capabilityId)
+            ? { type: 'navigation', value: navigation }
           : session && key === sessionCapabilityStorageKey(session.sessionCapabilityId)
             ? { type: 'session', value: session }
             : null;
         if (!record || !predicate(record)) continue;
         if (record.type === 'target' && isPersonaTarget(record.value)) removals.push(key);
-        else if (record.type === 'target' && record.value.state !== 'invalidated') changes[key] = { ...record.value, state: 'invalidated' };
+        else if (['target', 'navigation'].includes(record.type) && record.value.state !== 'invalidated') changes[key] = { ...record.value, state: 'invalidated' };
         if (record.type === 'session' && record.value.state !== 'revoked') changes[key] = { ...record.value, state: 'revoked' };
       }
       if (Object.keys(changes).length > 0) await sessionArea.set(changes);
@@ -545,13 +676,16 @@ export function createTargetCapabilityAuthority({
 
   return Object.freeze({
     prepare,
+    prepareNavigationForPanel,
     inspectPreparedTarget,
     claimPreparedTarget,
     inspectPreparedAuditTarget,
     claimAndIssueAuditSession,
+    claimNavigationAndIssueAuditSession,
     claimWorkerEventAndIssueAuditSession,
     authorizeSession,
     transitionAuditSession,
+    transitionDisposableAuditSession,
     invalidateCapability,
     invalidateForTab,
     invalidateForWindow,
@@ -634,6 +768,28 @@ function parseTargetRecord(value) {
   return { ...record, issuer };
 }
 
+function parseNavigationRecord(value) {
+  const record = readDataRecord(value, NAVIGATION_KEYS);
+  const issuer = record && parsePanelIssuer(record.issuer);
+  if (!record || record.version !== 1 || !CAPABILITY_ID.test(record.capabilityId ?? '') ||
+    record.intent !== 'single' || !safeChromeId(record.windowId) || !issuer ||
+    !safeTime(record.issuedAt) || !safeTime(record.expiresAt) || record.expiresAt <= record.issuedAt ||
+    !['prepared', 'claimed', 'invalidated'].includes(record.state) ||
+    (record.state === 'prepared' && record.sessionCapabilityId !== null) ||
+    (['claimed', 'invalidated'].includes(record.state) && record.sessionCapabilityId !== null &&
+      !CAPABILITY_ID.test(record.sessionCapabilityId ?? ''))) return null;
+  return { ...record, issuer };
+}
+
+function parsePanelNavigationContext(value, runtimeId) {
+  const context = readDataRecord(value, ['issuer', 'windowId', 'tabId', 'contextType', 'documentUrl']);
+  const issuer = context && parsePanelIssuer(context.issuer);
+  if (!context || !issuer || !safeChromeId(context.windowId) || context.tabId !== null ||
+    context.contextType !== PANEL_SURFACE.contextType ||
+    !validExtensionSurfaceUrl(context.documentUrl, runtimeId, PANEL_SURFACE)) return null;
+  return { ...context, issuer };
+}
+
 function parseSessionRecord(value) {
   const record = readDataRecord(value, SESSION_KEYS);
   if (!record) return null;
@@ -662,8 +818,9 @@ function parseTargetBinding(value) {
     const binding = readDataRecord(value, ['kind']);
     return binding?.kind === 'view-only' ? binding : null;
   }
-  const binding = readDataRecord(value, ['kind', 'ownerId']);
-  return binding && binding.kind === 'disposable' && MODEL_ID.test(binding.ownerId ?? '') ? binding : null;
+  const binding = readDataRecord(value, ['kind', 'ownershipId', 'state']);
+  return binding && binding.kind === 'disposable' && MODEL_ID.test(binding.ownershipId ?? '') &&
+    DISPOSABLE_BINDING_STATES.has(binding.state) ? binding : null;
 }
 
 function validExtensionClaimContext(target, context, runtimeId) {

@@ -92,6 +92,77 @@ test('keeps a closed session facade and CSPRNG behind a non-enumerable execution
   assert.equal(adapter[AUDIT_EXECUTION_INTERNAL].randomBytes(16).byteLength, 16);
 });
 
+test('invokes receiver-branded StorageArea methods on the captured native session object', async () => {
+  const fake = chromeFake();
+  const calls = [];
+  const nativeSession = {
+    async get(key) {
+      assert.equal(this, nativeSession);
+      calls.push(['get', key]);
+      return {};
+    },
+    async set(value) {
+      assert.equal(this, nativeSession);
+      calls.push(['set', value]);
+    },
+    async remove(key) {
+      assert.equal(this, nativeSession);
+      calls.push(['remove', key]);
+    },
+  };
+  fake.chromeApi.storage.session = nativeSession;
+
+  const sessionArea = createChromeAdapter(fake.chromeApi)[AUDIT_EXECUTION_INTERNAL].sessionArea;
+  await sessionArea.get('owned-key');
+  await sessionArea.set({ 'owned-key': { state: 'created' } });
+  await sessionArea.remove('owned-key');
+
+  assert.notEqual(sessionArea, nativeSession);
+  assert.equal(Object.getPrototypeOf(sessionArea), null);
+  assert.equal(Object.isFrozen(sessionArea), true);
+  assert.deepEqual(calls, [
+    ['get', 'owned-key'],
+    ['set', { 'owned-key': { state: 'created' } }],
+    ['remove', 'owned-key'],
+  ]);
+});
+
+test('invokes receiver-branded Chrome Event methods on their captured native event objects', async () => {
+  const fake = chromeFake();
+  const calls = [];
+  const updatedEvent = {
+    addListener(listener) {
+      assert.equal(this, updatedEvent);
+      calls.push(['updated-add', typeof listener]);
+    },
+    removeListener(listener) {
+      assert.equal(this, updatedEvent);
+      calls.push(['updated-remove', typeof listener]);
+    },
+  };
+  const removedEvent = {
+    addListener(listener) {
+      assert.equal(this, removedEvent);
+      calls.push(['removed-add', typeof listener]);
+    },
+    removeListener(listener) {
+      assert.equal(this, removedEvent);
+      calls.push(['removed-remove', typeof listener]);
+    },
+  };
+  fake.chromeApi.tabs.onUpdated = updatedEvent;
+  fake.chromeApi.tabs.onRemoved = removedEvent;
+  fake.chromeApi.tabs.get = async id => ({ id, status: 'complete', url: 'https://example.test/' });
+
+  const adapter = createChromeAdapter(fake.chromeApi);
+  await adapter.waitForStable(17, { timeoutMs: 50 });
+
+  assert.deepEqual(calls, [
+    ['updated-add', 'function'], ['removed-add', 'function'],
+    ['updated-remove', 'function'], ['removed-remove', 'function'],
+  ]);
+});
+
 test('publishes only the explicit Task 3C execution dependencies', () => {
   const fake = chromeFake();
   const capturePolicy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
@@ -611,7 +682,7 @@ test('fails closed when the create descriptor replaces sibling tabs methods betw
   assert.deepEqual(evilCalls, []);
 });
 
-test('binds the session method graph to its closed facade instead of the mutable raw receiver', async () => {
+test('rejects a mutated native StorageArea graph before invoking a captured method', async () => {
   const fake = chromeFake();
   const safeCalls = [];
   const evilCalls = [];
@@ -629,10 +700,12 @@ test('binds the session method graph to its closed facade instead of the mutable
   });
 
   const sessionArea = createChromeAdapter(fake.chromeApi, options)[AUDIT_EXECUTION_INTERNAL].sessionArea;
-  const result = await sessionArea.get('closed-key');
+  assert.throws(
+    () => sessionArea.get('closed-key'),
+    error => error?.constructor === TypeError && error.message === 'As APIs Chrome de auditoria não estão disponíveis.',
+  );
 
-  assert.deepEqual(result, { safe: 'closed-key' });
-  assert.deepEqual(safeCalls, [['get', 'closed-key'], ['remove', 'closed-key']]);
+  assert.deepEqual(safeCalls, []);
   assert.deepEqual(evilCalls, []);
 });
 

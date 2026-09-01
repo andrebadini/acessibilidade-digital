@@ -184,14 +184,15 @@ function legalReferenceFor({ occurrence, card, item, decision }) {
   };
 }
 
-function targetBlock(card, occurrenceById) {
-  const occurrences = card.occurrenceIds.map(id => occurrenceById.get(id));
-  if (occurrences.some(value => !value)) detailDenied();
-  return occurrences.map((occurrence, index) => ({
+function targetBlock(card, occurrenceById, selectedOccurrenceId) {
+  const index = card.occurrenceIds.indexOf(selectedOccurrenceId);
+  const occurrence = index >= 0 ? occurrenceById.get(selectedOccurrenceId) : null;
+  if (!occurrence) detailDenied();
+  return [{
     nodeId: occurrence.nodeId,
     position: index + 1,
-    total: occurrences.length,
-  }));
+    total: card.occurrenceIds.length,
+  }];
 }
 
 function expectedDisplayOutcome(occurrences, decisionByOccurrence) {
@@ -213,11 +214,8 @@ function freeze(value, seen = new WeakSet()) {
   return Object.freeze(value);
 }
 
-export function buildPanelDetail({ model: inputModel, summary: inputSummary, occurrenceId, highlightAvailability: _availability }) {
-  let model;
-  try { model = createAuditModel(inputModel); } catch { throw new TypeError('PANEL_DETAIL_MODEL_DENIED'); }
+function buildPanelDetailFromCanonical(model, summary, occurrenceId) {
   if (typeof occurrenceId !== 'string') detailDenied();
-  const summary = snapshotSummary(inputSummary, model.auditId);
   const card = matchingCard(summary, occurrenceId);
   const occurrenceById = new Map(model.occurrences.map(occurrence => [occurrence.occurrenceId, occurrence]));
   const occurrence = occurrenceById.get(occurrenceId);
@@ -274,7 +272,7 @@ export function buildPanelDetail({ model: inputModel, summary: inputSummary, occ
     },
     observed: reason,
     correction: correctionFor(occurrence, rule, item),
-    targets: targetBlock(card, occurrenceById),
+    targets: targetBlock(card, occurrenceById, occurrenceId),
     accessibility: accessibilityBlock(occurrence, evidence),
     normative: {
       wcag: normativeWcag.map(reference => reference.id),
@@ -297,4 +295,16 @@ export function buildPanelDetail({ model: inputModel, summary: inputSummary, occ
     action: { ...CONSULT_ACTION },
   };
   return freeze(detail);
+}
+
+export function createPanelDetailProjector({ model: inputModel, summary: inputSummary, highlightAvailability: _availability }) {
+  let model;
+  try { model = createAuditModel(inputModel); } catch { throw new TypeError('PANEL_DETAIL_MODEL_DENIED'); }
+  const summary = snapshotSummary(inputSummary, model.auditId);
+  const project = occurrenceId => buildPanelDetailFromCanonical(model, summary, occurrenceId);
+  return Object.freeze(project);
+}
+
+export function buildPanelDetail({ model, summary, occurrenceId, highlightAvailability }) {
+  return createPanelDetailProjector({ model, summary, highlightAvailability })(occurrenceId);
 }

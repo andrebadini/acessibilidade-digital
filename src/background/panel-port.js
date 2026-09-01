@@ -136,17 +136,23 @@ function parseBootstrap(value) {
 function parseSession(value) {
   const record = exact(value, SESSION_KEYS, true);
   if (!record || record.version !== 1 || !CAPABILITY.test(record.sessionCapabilityId ?? '') ||
-    !AUDIT_ID.test(record.auditId ?? '') || !safeChromeId(record.windowId) || record.mode !== 'attached' ||
+    !AUDIT_ID.test(record.auditId ?? '') || !safeChromeId(record.windowId) || !['attached', 'single'].includes(record.mode) ||
     !['running', 'privacy-paused', 'result', 'view-only', 'revoked'].includes(record.state) || !safeEpoch(record.issuedAt) ||
     !safeEpoch(record.expiresAt) || record.expiresAt <= record.issuedAt) return null;
   const viewOnlyBinding = exact(record.targetBinding, ['kind'], true);
   const attachedBinding = exact(record.targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest'], true);
-  const validViewOnly = viewOnlyBinding?.kind === 'view-only' && ['view-only', 'revoked'].includes(record.state);
-  const validAttached = attachedBinding?.kind === 'attached' && safeChromeId(attachedBinding.tabId) &&
+  const disposableBinding = exact(record.targetBinding, ['kind', 'ownershipId', 'state'], true);
+  const validViewOnly = record.mode === 'attached' && viewOnlyBinding?.kind === 'view-only' &&
+    ['view-only', 'revoked'].includes(record.state);
+  const validAttached = record.mode === 'attached' && attachedBinding?.kind === 'attached' && safeChromeId(attachedBinding.tabId) &&
     typeof attachedBinding.documentId === 'string' && attachedBinding.documentId.length > 0 &&
     attachedBinding.documentId.length <= 512 && DIGEST.test(attachedBinding.urlSessionDigest ?? '') &&
     record.state !== 'view-only';
-  if (!validViewOnly && !validAttached) return null;
+  const validDisposable = record.mode === 'single' && disposableBinding?.kind === 'disposable' &&
+    AUDIT_ID.test(disposableBinding.ownershipId ?? '') &&
+    ['pending', 'observing', 'retained-for-review', 'retained-for-consent', 'cleanup-pending', 'removed']
+      .includes(disposableBinding.state) && !['privacy-paused', 'view-only'].includes(record.state);
+  if (!validViewOnly && !validAttached && !validDisposable) return null;
   return freeze(record);
 }
 
@@ -155,10 +161,10 @@ function parseActive(value) {
   const record = exact(value, ACTIVE_KEYS, true);
   if (!record || record.version !== 1 || !AUDIT_ID.test(record.auditId ?? '') ||
     !CAPABILITY.test(record.capabilityId ?? '') || !CAPABILITY.test(record.sessionCapabilityId ?? '') ||
-    !safeChromeId(record.windowId) || record.mode !== 'attached' || !safeEpoch(record.createdAt) ||
+    !safeChromeId(record.windowId) || !['attached', 'single'].includes(record.mode) || !safeEpoch(record.createdAt) ||
     !safeEpoch(record.updatedAt) || record.updatedAt < record.createdAt) return undefined;
   if (record.state === 'running' && record.commitState === 'none' && record.expectedTerminalRevision === null) return freeze(record);
-  if (record.state === 'privacy-paused' && record.commitState === 'none' && record.expectedTerminalRevision === null) return freeze(record);
+  if (record.mode === 'attached' && record.state === 'privacy-paused' && record.commitState === 'none' && record.expectedTerminalRevision === null) return freeze(record);
   if (record.state === 'finalizing' && ['pending', 'confirmed'].includes(record.commitState) && record.expectedTerminalRevision === 1) return freeze(record);
   return undefined;
 }
@@ -261,7 +267,11 @@ function safeStringArray(value, maximum = 16) {
 function authorizedHighlightPublication(value, binding, actionAt) {
   const authorization = exact(value, ['ok', 'session', 'context'], true);
   const session = authorization && exact(authorization.session, AUTHORIZED_SESSION_KEYS, true);
-  const target = session && exact(session.targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest'], true);
+  const attachedTarget = session && exact(session.targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest'], true);
+  const disposableTarget = session && exact(session.targetBinding, ['kind', 'ownershipId', 'state'], true);
+  const target = attachedTarget?.kind === 'attached'
+    ? attachedTarget
+    : disposableTarget?.kind === 'disposable' ? disposableTarget : null;
   const intents = session && exact(session.intents, ['panel', 'review'], true);
   const panelIntents = intents && (
     exact(intents.panel, ['running', 'privacy-paused', 'result', 'view-only'], true) ??
@@ -270,14 +280,19 @@ function authorizedHighlightPublication(value, binding, actionAt) {
   const resultIntents = panelIntents && safeStringArray(panelIntents.result);
   const context = authorization && exact(authorization.context, ['issuer', 'windowId', 'tabId', 'contextType', 'documentUrl'], true);
   const issuer = context && exact(context.issuer, ['type', 'documentId', 'path'], true);
-  return Boolean(authorization?.ok === true && session && target && resultIntents &&
+  const targetAuthorized = Boolean(
+    session?.mode === 'attached' && target?.kind === 'attached' && target.tabId === binding.admission?.tabId &&
+      typeof target.documentId === 'string' && target.documentId.length >= 1 && target.documentId.length <= 512 &&
+      DIGEST.test(target.urlSessionDigest ?? '') ||
+    session?.mode === 'single' && target?.kind === 'disposable' && target.state === 'retained-for-review' &&
+      /^owner_[A-Za-z0-9_-]{22}$/u.test(target.ownershipId ?? ''),
+  );
+  return Boolean(authorization?.ok === true && session && target && targetAuthorized && resultIntents &&
     session.version === 1 && session.sessionCapabilityId === binding.sessionCapabilityId &&
-    session.auditId === binding.auditId && session.windowId === binding.windowId && session.mode === 'attached' &&
+    session.auditId === binding.auditId && session.windowId === binding.windowId &&
     session.state === 'result' && safeEpoch(session.issuedAt) && safeEpoch(session.expiresAt) &&
     session.issuedAt <= actionAt && actionAt < session.expiresAt &&
-    target.kind === 'attached' && target.tabId === binding.admission?.tabId &&
-    typeof target.documentId === 'string' && target.documentId.length >= 1 && target.documentId.length <= 512 &&
-    DIGEST.test(target.urlSessionDigest ?? '') && resultIntents.includes('highlight') &&
+    resultIntents.includes('highlight') &&
     context.windowId === binding.windowId && context.tabId === null && context.contextType === 'SIDE_PANEL' &&
     context.documentUrl === binding.sender.url && issuer?.type === 'extension-document' &&
     issuer.documentId === binding.issuerDocumentId && issuer.path === '/src/panel/index.html');
@@ -740,6 +755,24 @@ export function createPanelPortCoordinator(raw) {
       if (await readActive() !== null || !['result', 'view-only', 'revoked'].includes(session.state)) throw new Error('PANEL_TERMINAL_DENIED');
       const resultBundle = copyPanelResultBundleV1(await input.loadPanelResultBundle({ auditId: bootstrap.auditId }));
       if (await readActive() !== null) throw new Error('PANEL_TERMINAL_DENIED');
+      const disposableTarget = exact(session.targetBinding, ['kind', 'ownershipId', 'state'], true);
+      const retainedSingleResult = bootstrap.state === 'consumed' && session.mode === 'single' &&
+        session.state === 'result' && disposableTarget?.kind === 'disposable' &&
+        disposableTarget.state === 'retained-for-review' &&
+        /^owner_[A-Za-z0-9_-]{22}$/u.test(disposableTarget.ownershipId ?? '');
+      if (retainedSingleResult) {
+        const confirmedSession = await readSession(bootstrap.sessionCapabilityId, bootstrap.auditId);
+        const confirmedAt = input.epochNow();
+        if (!same(session, confirmedSession) || !safeEpoch(confirmedAt) || confirmedAt >= confirmedSession.expiresAt ||
+          await readActive() !== null || !await reprove(binding) || await readActive() !== null) {
+          throw new Error('PANEL_TERMINAL_DENIED');
+        }
+        const finalSession = await readSession(bootstrap.sessionCapabilityId, bootstrap.auditId);
+        if (!same(confirmedSession, finalSession)) throw new Error('PANEL_TERMINAL_DENIED');
+        send(binding, packet('result', bootstrap.auditId, bootstrap.sessionCapabilityId, resultBundle));
+        bind(binding, bootstrap.windowId, 'bound-session', bootstrap.auditId, bootstrap.sessionCapabilityId);
+        return true;
+      }
       minted = await input.rehydrateViewOnly({ auditId: bootstrap.auditId, windowId: bootstrap.windowId, mode: 'attached' });
       if (await readActive() !== null) throw new Error('PANEL_TERMINAL_DENIED');
       if (minted?.ok !== true || minted.auditId !== bootstrap.auditId || !CAPABILITY.test(minted.sessionCapabilityId ?? '') ||

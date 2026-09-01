@@ -13,8 +13,8 @@ const CONSENT_ID = /^[A-Za-z0-9_-]{21}[AQgw]$/u;
 const CAPTURE_MODES = new Set(['full-evidence', 'element-only', 'no-pixels']);
 const PIXEL_CAPTURE_MODES = new Set(['full-evidence', 'element-only']);
 const PANEL_PORT_TYPES = new Set([
-  'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
-  'PANEL_START_ATTACHED_AUDIT', 'CONFIRM_PIXEL_CAPTURE',
+  'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_NAVIGATION_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
+  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_URL_AUDIT', 'CONFIRM_PIXEL_CAPTURE',
   'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
   'PANEL_SET_PERSONA_MODE', 'PANEL_READER_STATE', 'PANEL_READER_ACTION',
   'PANEL_READER_ENABLE_VOICE',
@@ -27,8 +27,10 @@ const SHARED_HIGHLIGHT_TYPES = new Set([
 
 const MESSAGE_SCHEMAS = deepFreeze({
   PREPARE_PANEL_CAPABILITY: ['type', 'requestId', 'windowId'],
+  PREPARE_PANEL_NAVIGATION_CAPABILITY: ['type', 'requestId', 'intent', 'windowId'],
   PREPARE_PANEL_PERSONA_CAPABILITY: ['type', 'requestId', 'windowId'],
   PANEL_START_ATTACHED_AUDIT: ['type', 'capabilityId', 'captureMode', 'includeQuery', 'deleteAfterCompleteExport', 'windowId'],
+  PANEL_START_URL_AUDIT: ['type', 'capabilityId', 'url', 'captureMode', 'includeQuery', 'deleteAfterCompleteExport', 'windowId'],
   CONFIRM_PIXEL_CAPTURE: ['type', 'sessionCapabilityId', 'auditId', 'consentId', 'mode', 'accepted', 'windowId'],
   PANEL_START_PERSONA: ['type', 'capabilityId', 'mode', 'windowId'],
   PANEL_REHYDRATE_PERSONA: ['type', 'capabilityId', 'windowId'],
@@ -100,12 +102,20 @@ function hasFlatPrimitiveShape(value) {
 }
 
 function validWorkerEnvelope(value) {
+  if (value.type === 'PREPARE_PANEL_NAVIGATION_CAPABILITY') {
+    return validAuditId(value.requestId) && value.intent === 'single' && safeChromeId(value.windowId);
+  }
   if (['PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY'].includes(value.type)) {
     return validAuditId(value.requestId) && safeChromeId(value.windowId);
   }
   if (value.type === 'PANEL_START_ATTACHED_AUDIT') {
     return validOpaqueId(value.capabilityId) && CAPTURE_MODES.has(value.captureMode) &&
       value.includeQuery === false && value.deleteAfterCompleteExport === false && safeChromeId(value.windowId);
+  }
+  if (value.type === 'PANEL_START_URL_AUDIT') {
+    return validOpaqueId(value.capabilityId) && boundedCanonicalText(value.url, 2_048, false) &&
+      value.captureMode === 'no-pixels' && value.includeQuery === false &&
+      value.deleteAfterCompleteExport === false && safeChromeId(value.windowId);
   }
   if (value.type === 'CONFIRM_PIXEL_CAPTURE') {
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) &&

@@ -659,6 +659,277 @@ test('admits every closed capture policy before target inspection without touchi
   }
 });
 
+test('single-URL start persists bootstrap and active job before execution, then publishes one report', async () => {
+  const area = sessionArea();
+  const { authority, senderContext } = await authorityFixture(area);
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'single', senderContext });
+  const auditId = 'audit-url-report';
+  const report = await reportFixture(auditId);
+  const order = [];
+  const reportByAudit = new Map();
+  const dependencies = dependencyFixture({
+    area, authority, order, reportByAudit,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.runUrlAuditExecution = async args => {
+    order.push('run-url');
+    const active = await readActiveAuditJobForWorker({ sessionArea: area });
+    assert.equal(active.auditId, auditId);
+    assert.equal(active.mode, 'single');
+    assert.equal(order.indexOf('bootstrap-register') < order.indexOf('run-url'), true);
+    assert.equal(order.indexOf('latest:running') < order.indexOf('run-url'), true);
+    await args.onCheckpoint(report.checkpoint);
+    const observedTarget = Object.freeze({
+      version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId: `owner_${'O'.repeat(22)}`,
+      tabId: 27, windowId: 9, documentId: 'url-document',
+      urlEvidence: sanitizeEvidenceUrlV1('https://example.test/private', { includeQuery: false }),
+      urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+      cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+    });
+    assert.equal(typeof args.persistAuditModel, 'function');
+    await args.persistAuditModel(report.model, observedTarget);
+    return Object.freeze({
+      status: 'complete', model: report.model,
+      observedTarget,
+      observationState: 'observed', ownershipState: 'retained-for-review',
+    });
+  };
+  dependencies.clearUrlAuditResources = async () => true;
+  const starter = createAuthorizedAuditStarter(dependencies);
+  const started = await starter.beginAuthorizedUrlAudit({
+    capabilityId: prepared.capabilityId,
+    auditId,
+    senderContext,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    plan: {
+      kind: 'single', ownershipId: `owner_${'O'.repeat(22)}`, navigationToken: 'T'.repeat(22),
+      navigationPurpose: 'single-url',
+      evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/private?token=raw', { includeQuery: false }),
+      sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+    },
+  });
+  assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
+  assert.deepEqual(await started.completion, { ok: true, auditId, state: 'result', revision: 1 });
+  assert.equal(reportByAudit.has(auditId), true);
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+  const session = await readAuditSessionForWorker({
+    sessionArea: area, sessionCapabilityId: started.sessionCapabilityId, auditId,
+  });
+  assert.equal(session.state, 'result');
+  assert.deepEqual(session.targetBinding, {
+    kind: 'disposable', ownershipId: `owner_${'O'.repeat(22)}`, state: 'retained-for-review',
+  });
+  assert.doesNotMatch(JSON.stringify({ latest: area.values['latest'], report: reportByAudit.get(auditId) }),
+    /token=raw|TTTTTTTTTTTTTTTTTTTTTT|owner_O|hmac-sha256:D/iu);
+});
+
+test('single-URL terminal preparation failure removes its retained owner instead of revoking without a report', async () => {
+  const area = sessionArea();
+  const { authority, senderContext } = await authorityFixture(area);
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'single', senderContext });
+  const auditId = 'audit-url-terminal-preparation-failure';
+  const ownershipId = `owner_${'O'.repeat(22)}`;
+  const report = await reportFixture(auditId);
+  const reportByAudit = new Map();
+  const dependencies = dependencyFixture({
+    area, authority, reportByAudit,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.runUrlAuditExecution = async args => {
+    await args.onCheckpoint(report.checkpoint);
+    await args.persistAuditModel(report.model, Object.freeze({
+      version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId,
+      tabId: 27, windowId: 9, documentId: 'url-document',
+      urlEvidence: sanitizeEvidenceUrlV1('https://example.test/private', { includeQuery: false }),
+      urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+      cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+    }));
+    throw new Error('RUNNER_MUST_NOT_CONTINUE_AFTER_TERMINAL_PREPARATION_FAILURE');
+  };
+  dependencies.buildPanelResultBundle = async () => { throw new Error('BUNDLE_PREPARATION_FAILED'); };
+  const cleanups = [];
+  dependencies.clearUrlAuditResources = async value => { cleanups.push(value); return true; };
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedUrlAudit({
+    capabilityId: prepared.capabilityId, auditId, senderContext,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    plan: {
+      kind: 'single', ownershipId, navigationToken: 'T'.repeat(22), navigationPurpose: 'single-url',
+      evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/private?token=raw', { includeQuery: false }),
+      sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+    },
+  });
+
+  assert.deepEqual(await started.completion, {
+    ok: true, auditId, state: 'revoked', code: 'AUDIT_FAILED',
+  });
+  assert.deepEqual(cleanups, [{ auditId, ownershipId }]);
+  assert.equal(reportByAudit.has(auditId), false);
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+  const session = await readAuditSessionForWorker({
+    sessionArea: area, sessionCapabilityId: started.sessionCapabilityId, auditId,
+  });
+  assert.equal(session.state, 'revoked');
+  assert.deepEqual(session.targetBinding, { kind: 'disposable', ownershipId, state: 'removed' });
+});
+
+test('single-URL pre-observation cleanup failure blocks recovery and never publishes a report', async () => {
+  const area = sessionArea();
+  const { authority, senderContext } = await authorityFixture(area);
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'single', senderContext });
+  const auditId = 'audit-url-cleanup-blocked';
+  const reportByAudit = new Map();
+  const dependencies = dependencyFixture({
+    area, authority, reportByAudit,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.runUrlAuditExecution = async () => Object.freeze({
+    status: 'failed', model: null, observedTarget: null,
+    observationState: 'pre-observation-failure', ownershipState: 'cleanup-pending',
+  });
+  let cleanupCalls = 0;
+  dependencies.clearUrlAuditResources = async value => {
+    cleanupCalls += 1;
+    assert.deepEqual(value, { auditId, ownershipId: `owner_${'O'.repeat(22)}` });
+    return false;
+  };
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedUrlAudit({
+    capabilityId: prepared.capabilityId, auditId, senderContext,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    plan: {
+      kind: 'single', ownershipId: `owner_${'O'.repeat(22)}`, navigationToken: 'T'.repeat(22),
+      navigationPurpose: 'single-url',
+      evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/private?token=raw', { includeQuery: false }),
+      sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+    },
+  });
+
+  assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
+  assert.deepEqual(await started.completion, {
+    ok: false, auditId, state: 'blocked', code: 'AUDIT_RECOVERY_REQUIRED',
+  });
+  assert.equal(cleanupCalls >= 1, true);
+  assert.equal(reportByAudit.has(auditId), false);
+  assert.doesNotMatch(JSON.stringify(await area.get(null)), /token=raw|TTTTTTTTTTTTTTTTTTTTTT|hmac-sha256:D/iu);
+});
+
+test('worker restart interrupts a running single-URL audit and confirms cleanup of only its disposable owner', async () => {
+  const area = sessionArea();
+  const { authority, senderContext } = await authorityFixture(area);
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'single', senderContext });
+  const latest = { value: null };
+  const auditId = 'audit-url-restart';
+  const ownershipId = `owner_${'O'.repeat(22)}`;
+  const first = dependencyFixture({
+    area, authority, latest,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  first.runUrlAuditExecution = async () => new Promise(() => {});
+  first.clearUrlAuditResources = async () => true;
+  const started = await createAuthorizedAuditStarter(first).beginAuthorizedUrlAudit({
+    capabilityId: prepared.capabilityId, auditId, senderContext,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    plan: {
+      kind: 'single', ownershipId, navigationToken: 'T'.repeat(22), navigationPurpose: 'single-url',
+      evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/restart?private=raw', { includeQuery: false }),
+      sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+    },
+  });
+  assert.equal(started.response.ok, true);
+
+  const cleanups = [];
+  const recoveredDependencies = dependencyFixture({
+    area, authority, latest,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  recoveredDependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RESUME'); };
+  recoveredDependencies.clearUrlAuditResources = async value => { cleanups.push(value); return true; };
+  const recovery = await createAuthorizedAuditStarter(recoveredDependencies).recoverAuthorizedAuditLifecycle();
+
+  assert.deepEqual(recovery, { ok: true, state: 'interrupted', auditId, revision: null });
+  assert.deepEqual(cleanups, [{ auditId, ownershipId }]);
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+  const session = await readAuditSessionForWorker({
+    sessionArea: area, sessionCapabilityId: started.sessionCapabilityId, auditId,
+  });
+  assert.equal(session.state, 'revoked');
+  assert.deepEqual(session.targetBinding, { kind: 'disposable', ownershipId, state: 'removed' });
+  assert.doesNotMatch(JSON.stringify({ latest: latest.value, recovery }), /private=raw|TTTTTT|hmac-sha256|owner_/iu);
+});
+
+test('worker restart reconciles a committed single-URL report without deleting its retained review target', async () => {
+  const area = sessionArea();
+  const { authority, senderContext } = await authorityFixture(area);
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'single', senderContext });
+  const auditId = 'audit-url-finalizing-restart';
+  const ownershipId = `owner_${'O'.repeat(22)}`;
+  const report = await reportFixture(auditId);
+  const reportByAudit = new Map();
+  const latest = { value: null };
+  let reachedCommit;
+  const commitReached = new Promise(resolve => { reachedCommit = resolve; });
+  const first = dependencyFixture({
+    area, authority, latest, reportByAudit,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  first.runUrlAuditExecution = async args => {
+    await args.onCheckpoint(report.checkpoint);
+    const observedTarget = Object.freeze({
+      version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId,
+      tabId: 27, windowId: 9, documentId: 'url-document',
+      urlEvidence: sanitizeEvidenceUrlV1('https://example.test/final', { includeQuery: false }),
+      urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+      cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+    });
+    await args.persistAuditModel(report.model, observedTarget);
+    return Object.freeze({
+      status: 'complete', model: report.model, observedTarget,
+      observationState: 'observed', ownershipState: 'retained-for-review',
+    });
+  };
+  const commitTerminalAudit = first.commitTerminalAudit;
+  first.commitTerminalAudit = async value => {
+    await commitTerminalAudit(value);
+    reachedCommit();
+    return new Promise(() => {});
+  };
+  first.clearUrlAuditResources = async () => true;
+  const started = await createAuthorizedAuditStarter(first).beginAuthorizedUrlAudit({
+    capabilityId: prepared.capabilityId, auditId, senderContext,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    plan: {
+      kind: 'single', ownershipId, navigationToken: 'T'.repeat(22), navigationPurpose: 'single-url',
+      evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/final', { includeQuery: false }),
+      sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+    },
+  });
+  await commitReached;
+
+  let cleanupCalls = 0;
+  const recoveredDependencies = dependencyFixture({
+    area, authority, latest, reportByAudit,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  recoveredDependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RESUME'); };
+  recoveredDependencies.clearUrlAuditResources = async () => { cleanupCalls += 1; return true; };
+  const recovery = await createAuthorizedAuditStarter(recoveredDependencies).recoverAuthorizedAuditLifecycle();
+
+  assert.deepEqual(recovery, { ok: true, state: 'reconciled', auditId, revision: 1 });
+  assert.equal(cleanupCalls, 0);
+  assert.equal(reportByAudit.has(auditId), true);
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+  const session = await readAuditSessionForWorker({
+    sessionArea: area, sessionCapabilityId: started.sessionCapabilityId, auditId,
+  });
+  assert.equal(session.state, 'result');
+  assert.deepEqual(session.targetBinding, { kind: 'disposable', ownershipId, state: 'retained-for-review' });
+});
+
 test('a sensitive pixel begin durably pauses only after journal and checkpoint are confirmed', async () => {
   const area = sessionArea();
   const prepared = await authorityFixture(area);
