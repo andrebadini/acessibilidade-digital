@@ -41,6 +41,6 @@ Depois de instalar, fixe o ícone do Audita Acessibilidade na barra do Chrome, s
 
 ## Limitações operacionais
 
-Esta beta audita a página aberta ou outra URL nos três modos. **Lote de páginas** e o mapa numerado consolidado ainda não estão disponíveis. Páginas adicionais, fluxos autenticados, estados não visitados, conteúdo que muda com o tempo e equivalência de mídia podem exigir amostragem e revisão externas. Frames de terceiros, canvas, vídeo e restrições do navegador podem limitar evidências. Auditorias `partial`, `failed` ou `cancelled` não devem ser apresentadas como completas.
+Esta beta audita a página aberta ou outra URL nos três modos e aceita um lote explícito de 2 a 20 URLs no modo sem imagens. Lotes com capturas e o mapa numerado consolidado ainda não estão disponíveis. Páginas adicionais, fluxos autenticados, estados não visitados, conteúdo que muda com o tempo e equivalência de mídia podem exigir amostragem e revisão externas. Frames de terceiros, canvas, vídeo e restrições do navegador podem limitar evidências. Auditorias `partial`, `failed` ou `cancelled` não devem ser apresentadas como completas.
 
 O candidato beta só deve ser distribuído depois de um gate único com suíte lógica, verificação estática, E2E real na versão fixada do Chrome, instalação sem compactação, percurso completo até HTML, PDF, CSV e JSON-LD/EARL e QA visual do painel e do relatório. O resultado desse gate deve ser registrado junto ao pacote.
