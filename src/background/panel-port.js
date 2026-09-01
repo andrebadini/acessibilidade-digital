@@ -722,7 +722,7 @@ export function createPanelPortCoordinator(raw) {
       currentTime < second.session.expiresAt ? second : null;
   }
 
-  async function deliverPrivacyPaused(binding, bootstrap, assertOwned = null) {
+  async function deliverPrivacyPaused(binding, bootstrap, establishClientCorrelation = false, assertOwned = null) {
     if (!['pending', 'consumed'].includes(bootstrap.state)) throw new Error('PANEL_BOOTSTRAP_DENIED');
     const correlation = await stablePrivacyPauseCorrelation(bootstrap, assertOwned);
     reassert(assertOwned);
@@ -730,6 +730,9 @@ export function createPanelPortCoordinator(raw) {
     const context = await reprove(binding, assertOwned);
     reassert(assertOwned);
     if (!context) throw new Error('PANEL_CONTEXT_DENIED');
+    if (establishClientCorrelation) {
+      send(binding, packet('running', bootstrap.auditId, bootstrap.sessionCapabilityId, null), assertOwned);
+    }
     send(binding, privacyPausedPacket(correlation.suspension, bootstrap.sessionCapabilityId), assertOwned);
     bind(binding, bootstrap.windowId, 'bound-privacy-paused', bootstrap.auditId, bootstrap.sessionCapabilityId, assertOwned);
     return true;
@@ -854,7 +857,7 @@ export function createPanelPortCoordinator(raw) {
           return;
         }
         if (session.state === 'privacy-paused') {
-          await deliverPrivacyPaused(binding, bootstrap);
+          await deliverPrivacyPaused(binding, bootstrap, true);
           return;
         }
         if (!await recoverTerminal(binding, bootstrap, session)) throw new Error('PANEL_TERMINAL_DENIED');
@@ -1090,7 +1093,7 @@ export function createPanelPortCoordinator(raw) {
         }
         if (binding.auditId !== args.auditId || binding.sessionCapabilityId !== args.sessionCapabilityId ||
           !['bound-session', 'bound-privacy-paused'].includes(binding.state)) return false;
-        return await deliverPrivacyPaused(binding, bootstrap, assertOwned);
+        return await deliverPrivacyPaused(binding, bootstrap, false, assertOwned);
       } catch (error) {
         if (error === scopeDeniedSentinel) throw error;
         if (connected(binding)) {

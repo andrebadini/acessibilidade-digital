@@ -9,6 +9,7 @@ import {
   panelBootstrapStorageKey,
 } from '../../src/background/panel-port.js';
 import { createPanelResultBundleV1 } from '../../src/panel/panel-result-bundle.js';
+import { createPanelSessionPortClient } from '../../src/panel/panel-session-port.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 
 const RUNTIME_ID = 'abcdefghijklmnopabcdefghijklmnop';
@@ -28,6 +29,49 @@ function event() {
     removeListener(listener) { listeners.delete(listener); },
     emit(...args) { for (const listener of [...listeners]) listener(...args); },
   };
+}
+
+function linkedPanelPortPair({ coordinator, published, received }) {
+  const clientMessage = event();
+  const clientDisconnect = event();
+  const serverMessage = event();
+  const serverDisconnect = event();
+  let connected = true;
+  const close = () => {
+    if (!connected) return;
+    connected = false;
+    serverDisconnect.emit();
+    clientDisconnect.emit();
+  };
+  const client = {
+    onMessage: clientMessage,
+    onDisconnect: clientDisconnect,
+    postMessage(value) {
+      if (!connected) throw new Error('PORT_DISCONNECTED');
+      const copy = structuredClone(value);
+      received.push(copy);
+      queueMicrotask(() => { if (connected) serverMessage.emit(copy); });
+    },
+    disconnect: close,
+  };
+  const server = {
+    name: PANEL_PORT_NAME,
+    sender: {
+      id: RUNTIME_ID, url: PANEL_URL,
+      origin: `chrome-extension://${RUNTIME_ID}`,
+    },
+    onMessage: serverMessage,
+    onDisconnect: serverDisconnect,
+    postMessage(value) {
+      if (!connected) throw new Error('PORT_DISCONNECTED');
+      const copy = structuredClone(value);
+      published.push(copy);
+      queueMicrotask(() => { if (connected) clientMessage.emit(copy); });
+    },
+    disconnect: close,
+  };
+  assert.equal(coordinator.attachPanelPort(server), true);
+  return { client, close };
 }
 
 function area() {
@@ -593,6 +637,141 @@ test('rehydrates a single-URL privacy pause without exposing owner digest or con
   second.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
   await tick();
   assert.deepEqual(second.messages.at(-1), first.messages.at(-1));
+});
+
+test('re-establishes panel client correlation before a single-URL privacy pause after worker realm restart', async () => {
+  const ownershipId = `owner_${'R'.repeat(22)}`;
+  const urlSessionDigest = `hmac-sha256:${'D'.repeat(43)}`;
+  const evidenceUrl = 'https://example.test/private';
+  const durableArea = area();
+  let durableSession = Object.freeze({
+    version: 1, sessionCapabilityId: SESSION, auditId: 'audit-port', windowId: 9, mode: 'single',
+    targetBinding: { kind: 'disposable', ownershipId, state: 'observing' },
+    state: 'running', issuedAt: EPOCH, expiresAt: EPOCH + 10_000,
+  });
+  let durableActive = privacyPausedActive({ mode: 'single', state: 'running' });
+  let durableSuspension = null;
+  durableArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  const createRealm = () => fixture({
+    sessionArea: durableArea,
+    readActiveJob: async () => durableActive,
+    readAuditSession: async ({ sessionCapabilityId, auditId }) => {
+      if (sessionCapabilityId !== SESSION || auditId !== 'audit-port') throw new Error('denied');
+      return durableSession;
+    },
+    readPixelSuspension: async auditId => auditId === 'audit-port' ? durableSuspension : null,
+  }).coordinator;
+
+  let currentCoordinator = createRealm();
+  const publishedByConnection = [];
+  const receivedByConnection = [];
+  const connections = [];
+  const clientTimers = [];
+  const observed = [];
+  const statuses = [];
+  let requestSequence = 0;
+  const client = createPanelSessionPortClient({
+    chromeApi: {
+      runtime: {
+        connect({ name }) {
+          assert.equal(name, PANEL_PORT_NAME);
+          const published = [];
+          const received = [];
+          publishedByConnection.push(published);
+          receivedByConnection.push(received);
+          const connection = linkedPanelPortPair({
+            coordinator: currentCoordinator, published, received,
+          });
+          connections.push(connection);
+          return connection.client;
+        },
+      },
+    },
+    onBootstrapResult(value) { observed.push(structuredClone(value)); },
+    onStatus(value) { statuses.push(value); },
+    onHighlightState() {},
+    createRequestId() { requestSequence += 1; return `restart-request-${requestSequence}`; },
+    setTimer(callback, delay) {
+      const timer = { callback, delay, active: true };
+      clientTimers.push(timer);
+      return timer;
+    },
+    clearTimer(timer) { timer.active = false; },
+  });
+
+  assert.equal(client.start(), true);
+  for (let attempt = 0; attempt < 10 && observed.at(-1)?.state !== 'running'; attempt += 1) await tick();
+  assert.equal(observed.at(-1)?.state, 'running');
+
+  durableSession = Object.freeze({
+    ...durableSession,
+    targetBinding: { kind: 'disposable', ownershipId, state: 'retained-for-consent' },
+    state: 'privacy-paused',
+  });
+  durableActive = privacyPausedActive({ mode: 'single' });
+  durableSuspension = suspension({
+    tabId: 27, documentId: 'url-document',
+    urlEvidence: {
+      version: 'EvidenceUrlV1', href: evidenceUrl,
+      queryIncluded: false, redactedSegments: 0,
+    },
+    urlSessionDigest,
+    source: { kind: 'owned-disposable', ownershipId, cleanupMode: 'pre-observation-failure', pageId: 'page-1' },
+  });
+  assert.equal(await currentCoordinator.withWindowLock(9, scope => scope.publishPrivacyPaused({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+  })), true);
+  await tick();
+  assert.equal(observed.filter(value => value.state === 'privacy-paused').length, 1);
+
+  connections[0].close();
+  currentCoordinator = createRealm();
+  const reconnect = clientTimers.find(timer => timer.active && timer.delay === 250);
+  assert.ok(reconnect);
+  reconnect.active = false;
+  reconnect.callback();
+  for (let attempt = 0; attempt < 10; attempt += 1) await tick();
+
+  assert.deepEqual(publishedByConnection[1], [
+    {
+      protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'running',
+      auditId: 'audit-port', sessionCapabilityId: SESSION, result: null,
+    },
+    {
+      protocol: 'audita-panel', version: 1, type: 'privacy-paused',
+      auditId: 'audit-port', sessionCapabilityId: SESSION, mode: 'full-evidence',
+      categories: ['password', 'payment'], message: PAUSE_MESSAGE,
+    },
+  ]);
+  assert.equal(observed.filter(value => value.state === 'privacy-paused').length, 2);
+  assert.equal(statuses.at(-1), 'Painel conectado.');
+  const publicText = JSON.stringify(publishedByConnection[1]);
+  for (const secret of [ownershipId, urlSessionDigest, evidenceUrl, CONSENT]) {
+    assert.equal(publicText.includes(secret), false);
+  }
+  assert.doesNotMatch(publicText, /data:image|result-bundle/iu);
+
+  const confirmation = client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+  });
+  const replay = client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+  });
+  assert.deepEqual(await replay, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  assert.deepEqual(await confirmation, { ok: false, code: 'FEATURE_UNAVAILABLE' });
+  const confirmations = receivedByConnection[1].filter(value =>
+    value?.envelope?.type === 'PANEL_CONFIRM_PIXEL_CAPTURE');
+  assert.deepEqual(confirmations, [{
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: 'restart-request-1',
+    envelope: {
+      type: 'PANEL_CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION,
+      auditId: 'audit-port', mode: 'full-evidence', accepted: true,
+    },
+  }]);
+  assert.equal(client.stop(), true);
 });
 
 test('disconnect during pause reproof blocks the stale packet and later reconnect rehydrates safely', async () => {
