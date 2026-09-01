@@ -112,6 +112,15 @@ function privacyPaused(port, overrides = {}) {
   });
 }
 
+function ownedPrivacyPaused(port, overrides = {}) {
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'privacy-paused',
+    auditId: 'audit-private', sessionCapabilityId: SESSION_ID,
+    mode: 'full-evidence', categories: ['password', 'payment'], message: PRIVACY_MESSAGE,
+    ...overrides,
+  });
+}
+
 test('uses one admitted Port for bootstrap and every privileged panel intent', async () => {
   const env = fixture();
   const observed = [];
@@ -326,6 +335,139 @@ test('consumes the private nonce before posting one exact confirmation and rejec
     requestId: 'port-request-1', response: { ok: true, state: 'running' },
   });
   assert.deepEqual(await pending, { ok: true, state: 'running' });
+});
+
+test('accepts an owned pause without consent and posts one exact public confirmation without identifiers', async () => {
+  const env = fixture();
+  const bootstraps = [];
+  const client = createClient(env, { onBootstrapResult: value => bootstraps.push(value) });
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-private', SESSION_ID);
+  ownedPrivacyPaused(port);
+
+  assert.deepEqual(bootstraps.at(-1), {
+    state: 'privacy-paused', auditId: 'audit-private', result: null,
+    mode: 'full-evidence', categories: ['password', 'payment'], message: PRIVACY_MESSAGE,
+  });
+  assert.doesNotMatch(JSON.stringify(bootstraps), /consent|ownership|digest|documentId|tabId/iu);
+
+  const beforeForged = port.messages.length;
+  assert.deepEqual(await client.requestIntent({
+    type: 'PANEL_CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION_ID,
+    auditId: 'audit-private', mode: 'full-evidence', accepted: true,
+  }), { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  assert.equal(port.messages.length, beforeForged);
+
+  const pending = client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+  });
+  assert.deepEqual(port.messages.at(-1), {
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: 'port-request-1',
+    envelope: {
+      type: 'PANEL_CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION_ID,
+      auditId: 'audit-private', mode: 'full-evidence', accepted: true,
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(port.messages.at(-1)), /consent|ownership|digest|documentId|tabId/iu);
+
+  const messagesAfterFirstPost = port.messages.length;
+  assert.deepEqual(await client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+  }), { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  assert.equal(port.messages.length, messagesAfterFirstPost);
+
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'port-request-1', response: { ok: true, state: 'running' },
+  });
+  assert.deepEqual(await pending, { ok: true, state: 'running' });
+});
+
+test('does not rearm an owned confirmation when the same pause is retransmitted while it is in flight', async () => {
+  const env = fixture();
+  const bootstraps = [];
+  const client = createClient(env, { onBootstrapResult: value => bootstraps.push(value) });
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-private', SESSION_ID);
+  ownedPrivacyPaused(port);
+
+  const pending = client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+  });
+  const messagesAfterFirstPost = port.messages.length;
+  const bootstrapsAfterFirstPause = bootstraps.length;
+
+  ownedPrivacyPaused(port);
+  assert.equal(bootstraps.length, bootstrapsAfterFirstPause, 'the duplicate does not rearm the visible confirmation');
+  assert.deepEqual(await client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+  }), { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  assert.equal(port.messages.length, messagesAfterFirstPost, 'only one public confirmation is posted');
+
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'port-request-1', response: { ok: false, code: 'PIXEL_CONFIRMATION_FAILED' },
+  });
+  assert.deepEqual(await pending, { ok: false, code: 'PIXEL_CONFIRMATION_FAILED' });
+
+  ownedPrivacyPaused(port);
+  const retry = client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+  });
+  assert.equal(port.messages.length, messagesAfterFirstPost + 1, 'a fresh pause after failure may rearm once');
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'port-request-2', response: { ok: true, state: 'running' },
+  });
+  assert.deepEqual(await retry, { ok: true, state: 'running' });
+});
+
+test('keeps a different owned pause available when it rotates during an earlier confirmation', async () => {
+  const env = fixture();
+  const bootstraps = [];
+  const client = createClient(env, { onBootstrapResult: value => bootstraps.push(value) });
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-private', SESSION_ID);
+  ownedPrivacyPaused(port);
+  const first = client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+  });
+
+  ownedPrivacyPaused(port, { mode: 'element-only', categories: ['private-marker'] });
+  assert.deepEqual(bootstraps.at(-1), {
+    state: 'privacy-paused', auditId: 'audit-private', result: null,
+    mode: 'element-only', categories: ['private-marker'], message: PRIVACY_MESSAGE,
+  });
+  const second = client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'element-only', accepted: true,
+  });
+  assert.deepEqual(port.messages.filter(message =>
+    message?.envelope?.type === 'PANEL_CONFIRM_PIXEL_CAPTURE').map(message => message.envelope.mode), [
+    'full-evidence', 'element-only',
+  ]);
+
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'port-request-2', response: { ok: true, state: 'running' },
+  });
+  assert.deepEqual(await second, { ok: true, state: 'running' });
+  const messagesBeforeStaleReplay = port.messages.length;
+  const bootstrapsBeforeStaleReplay = bootstraps.length;
+  ownedPrivacyPaused(port);
+  assert.equal(bootstraps.length, bootstrapsBeforeStaleReplay);
+  assert.deepEqual(await client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true,
+  }), { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  assert.equal(port.messages.length, messagesBeforeStaleReplay);
+
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'port-request-1', response: { ok: false, code: 'STALE_CONFIRMATION' },
+  });
+  assert.deepEqual(await first, { ok: false, code: 'STALE_CONFIRMATION' });
 });
 
 test('one correlated revoked cancellation packet returns the same Port to initial', async () => {

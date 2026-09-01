@@ -24,7 +24,18 @@ const validMessages = [
     url: 'https://example.test/private?token=raw', captureMode: 'no-pixels',
     includeQuery: false, deleteAfterCompleteExport: false, windowId: 9,
   },
+  {
+    type: 'PANEL_START_URL_AUDIT', capabilityId: CAPABILITY,
+    url: 'https://example.test/private?token=raw', captureMode: 'full-evidence',
+    includeQuery: false, deleteAfterCompleteExport: false, windowId: 9,
+  },
+  {
+    type: 'PANEL_START_URL_AUDIT', capabilityId: CAPABILITY,
+    url: 'https://example.test/private?token=raw', captureMode: 'element-only',
+    includeQuery: false, deleteAfterCompleteExport: false, windowId: 9,
+  },
   { type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: '-audit.1', consentId: CONSENT, mode: 'full-evidence', accepted: true, windowId: 9 },
+  { type: 'PANEL_CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: '-audit.1', mode: 'element-only', accepted: true, windowId: 9 },
   { type: 'PANEL_START_PERSONA', capabilityId: CAPABILITY, mode: 'reader', windowId: 9 },
   { type: 'PANEL_REHYDRATE_PERSONA', capabilityId: CAPABILITY, windowId: 9 },
   { type: 'PANEL_SET_PERSONA_MODE', leaseId: LEASE, mode: 'motor', windowId: 9 },
@@ -195,26 +206,33 @@ test('adds the admitted window only at the panel Port boundary and rejects every
   assert.equal(reads, 0);
 });
 
-test('admits one bounded single-URL start through its exact panel Port envelopes', () => {
+test('admits each bounded single-URL capture mode through its exact panel Port envelopes', () => {
   const prepare = { type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: 'url-request-1', intent: 'single' };
+  assert.deepEqual(parsePanelPortIntent(prepare, 17), {
+    ok: true, value: { ...prepare, windowId: 17 },
+  });
+  for (const captureMode of ['full-evidence', 'element-only', 'no-pixels']) {
+    const start = {
+      type: 'PANEL_START_URL_AUDIT', capabilityId: CAPABILITY,
+      url: 'https://example.test/private?token=raw', captureMode,
+      includeQuery: false, deleteAfterCompleteExport: false,
+    };
+    assert.deepEqual(parsePanelPortIntent(start, 17), {
+      ok: true, value: { ...start, windowId: 17 },
+    });
+    assert.equal(isPanelPortIntent(start), true);
+  }
+
   const start = {
     type: 'PANEL_START_URL_AUDIT', capabilityId: CAPABILITY,
     url: 'https://example.test/private?token=raw', captureMode: 'no-pixels',
     includeQuery: false, deleteAfterCompleteExport: false,
   };
-  assert.deepEqual(parsePanelPortIntent(prepare, 17), {
-    ok: true, value: { ...prepare, windowId: 17 },
-  });
-  assert.deepEqual(parsePanelPortIntent(start, 17), {
-    ok: true, value: { ...start, windowId: 17 },
-  });
-  assert.equal(isPanelPortIntent(start), true);
 
   for (const invalid of [
     { ...prepare, intent: 'batch' },
     { ...prepare, url: 'https://forged.test/' },
-    { ...start, captureMode: 'full-evidence' },
-    { ...start, captureMode: 'element-only' },
+    { ...start, captureMode: 'pixels' },
     { ...start, includeQuery: true },
     { ...start, deleteAfterCompleteExport: true },
     { ...start, url: '' },
@@ -235,6 +253,28 @@ test('admits confirmation only through the panel Port and injects its bound wind
   assert.deepEqual(parseWorkerMessage(internal), { ok: true, value: internal });
   assert.deepEqual(parseWorkerMessage(clientIntent), { ok: false, code: 'INVALID_MESSAGE' });
   assert.deepEqual(parsePanelPortIntent(internal, 9), { ok: false, code: 'INVALID_MESSAGE' });
+});
+
+test('admits an owned confirmation only through the panel Port without any private identifier', () => {
+  const clientIntent = {
+    type: 'PANEL_CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION,
+    auditId: 'audit-1', mode: 'element-only', accepted: true,
+  };
+  const internal = { ...clientIntent, windowId: 9 };
+
+  assert.equal(isPanelPortIntent(clientIntent), true);
+  assert.deepEqual(parsePanelPortIntent(clientIntent, 9), { ok: true, value: internal });
+  assert.deepEqual(parseWorkerMessage(internal), { ok: true, value: internal });
+  assert.deepEqual(parseWorkerMessage(clientIntent), { ok: false, code: 'INVALID_MESSAGE' });
+  assert.deepEqual(parsePanelPortIntent(internal, 9), { ok: false, code: 'INVALID_MESSAGE' });
+  assert.doesNotMatch(JSON.stringify(internal), /consent|ownership|digest|documentId|tabId/iu);
+
+  for (const invalid of [
+    { ...clientIntent, accepted: false },
+    { ...clientIntent, mode: 'no-pixels' },
+    { ...clientIntent, consentId: CONSENT },
+    { ...clientIntent, ownershipId: 'owner_forged' },
+  ]) assert.deepEqual(parsePanelPortIntent(invalid, 9), { ok: false, code: 'INVALID_MESSAGE' });
 });
 
 test('rejects non-canonical or hostile pixel confirmations without invoking accessors', () => {

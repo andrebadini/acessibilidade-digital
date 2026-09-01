@@ -15,9 +15,13 @@ const PRIVACY_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private
 const BOOTSTRAP_KEYS = Object.freeze([
   'protocol', 'version', 'type', 'state', 'auditId', 'sessionCapabilityId', 'result',
 ]);
-const PRIVACY_PAUSED_KEYS = Object.freeze([
+const ATTACHED_PRIVACY_PAUSED_KEYS = Object.freeze([
   'protocol', 'version', 'type', 'auditId', 'sessionCapabilityId',
   'consentId', 'mode', 'categories', 'message',
+]);
+const OWNED_PRIVACY_PAUSED_KEYS = Object.freeze([
+  'protocol', 'version', 'type', 'auditId', 'sessionCapabilityId',
+  'mode', 'categories', 'message',
 ]);
 const INTENT_RESULT_KEYS = Object.freeze(['protocol', 'version', 'type', 'requestId', 'response']);
 const HIGHLIGHT_STATE_KEYS = Object.freeze(['version', 'type', 'auditId', 'occurrenceId', 'state']);
@@ -117,13 +121,20 @@ function copyPrivacyCategories(value) {
 }
 
 function parsePrivacyPaused(value) {
-  const packet = exact(value, PRIVACY_PAUSED_KEYS);
+  const attachedPacket = exact(value, ATTACHED_PRIVACY_PAUSED_KEYS);
+  const ownedPacket = attachedPacket ? null : exact(value, OWNED_PRIVACY_PAUSED_KEYS);
+  const packet = attachedPacket ?? ownedPacket;
   if (!packet || packet.protocol !== 'audita-panel' || packet.version !== 1 ||
     packet.type !== 'privacy-paused' || !AUDIT_ID.test(packet.auditId ?? '') ||
-    !SESSION_ID.test(packet.sessionCapabilityId ?? '') || !CONSENT_ID.test(packet.consentId ?? '') ||
+    !SESSION_ID.test(packet.sessionCapabilityId ?? '') ||
+    (attachedPacket !== null && !CONSENT_ID.test(packet.consentId ?? '')) ||
     !PRIVACY_MODES.has(packet.mode) || packet.message !== PRIVACY_MESSAGE) return null;
   const categories = copyPrivacyCategories(packet.categories);
-  return categories ? { packet, categories } : null;
+  if (!categories) return null;
+  const confirmation = attachedPacket
+    ? { kind: 'attached', consentId: packet.consentId, mode: packet.mode }
+    : { kind: 'single', mode: packet.mode, categoryKey: categories.join('\u0000') };
+  return { packet, categories, confirmation: freeze(confirmation) };
 }
 
 function parseIntentResult(value) {
@@ -181,6 +192,7 @@ export function createPanelSessionPortClient(raw) {
   let sessionId = null;
   let sessionState = null;
   let pendingConsent = null;
+  const ownedConfirmationsInFlight = new Set();
   const bindings = new WeakMap();
   const pending = new Map();
 
@@ -199,9 +211,11 @@ export function createPanelSessionPortClient(raw) {
     sessionId = null;
     sessionState = null;
     pendingConsent = null;
+    ownedConfirmationsInFlight.clear();
   };
   const settle = (entry, value) => {
     if (!entry) return;
+    if (entry.ownedConfirmation) ownedConfirmationsInFlight.delete(entry.ownedConfirmation);
     try { input.clearTimer(entry.timer); } catch { /* fixed cleanup */ }
     entry.resolve(value);
   };
@@ -251,6 +265,7 @@ export function createPanelSessionPortClient(raw) {
       if (priorCorrelation !== null && priorCorrelation !== nextCorrelation) settleAll(localUnavailable());
       reconnectIndex = 0;
       pendingConsent = null;
+      ownedConfirmationsInFlight.clear();
       ready = true;
       auditId = bootstrap.auditId;
       sessionId = bootstrap.sessionCapabilityId;
@@ -267,7 +282,14 @@ export function createPanelSessionPortClient(raw) {
         unavailable(port, true);
         return;
       }
-      pendingConsent = freeze({ consentId: packet.consentId, mode: packet.mode });
+      if (privacyPaused.confirmation.kind === 'single') {
+        for (const inFlight of ownedConfirmationsInFlight) {
+          if (inFlight.auditId === packet.auditId && inFlight.sessionCapabilityId === packet.sessionCapabilityId &&
+            inFlight.mode === privacyPaused.confirmation.mode &&
+            inFlight.categoryKey === privacyPaused.confirmation.categoryKey) return;
+        }
+      }
+      pendingConsent = privacyPaused.confirmation;
       sessionState = 'privacy-paused';
       notifyBootstrap(freeze({
         state: 'privacy-paused', auditId: packet.auditId, result: null,
@@ -361,7 +383,9 @@ export function createPanelSessionPortClient(raw) {
   function requestIntent(rawIntent) {
     if (!started || !ready || currentPort === null) return Promise.resolve(localUnavailable());
     let intent = copyIntent(rawIntent);
+    let ownedConfirmation = null;
     if (!intent) return Promise.resolve(localUnavailable());
+    if (intent.type === 'PANEL_CONFIRM_PIXEL_CAPTURE') return Promise.resolve(localUnavailable());
     if (intent.type === 'CONFIRM_PIXEL_CAPTURE') {
       const confirmation = exact(intent, ['type', 'mode', 'accepted']);
       if (!confirmation || confirmation.accepted !== true || !PRIVACY_MODES.has(confirmation.mode) ||
@@ -370,10 +394,20 @@ export function createPanelSessionPortClient(raw) {
       }
       const consent = pendingConsent;
       pendingConsent = null;
-      intent = freeze({
-        type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: sessionId, auditId,
-        consentId: consent.consentId, mode: consent.mode, accepted: true,
-      });
+      intent = consent.kind === 'attached'
+        ? freeze({
+            type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: sessionId, auditId,
+            consentId: consent.consentId, mode: consent.mode, accepted: true,
+          })
+        : freeze({
+            type: 'PANEL_CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: sessionId, auditId,
+            mode: consent.mode, accepted: true,
+          });
+      if (consent.kind === 'single') {
+        ownedConfirmation = freeze({
+          auditId, sessionCapabilityId: sessionId, mode: consent.mode, categoryKey: consent.categoryKey,
+        });
+      }
     }
     if (['PANEL_CANCEL_AUDIT', 'PANEL_OPEN_REPORT'].includes(intent.type)) {
       if (Reflect.ownKeys(intent).length !== 1 || auditId === null || sessionId === null) return Promise.resolve(localUnavailable());
@@ -410,7 +444,9 @@ export function createPanelSessionPortClient(raw) {
         auditId: ownDataOrNull(intent, 'auditId'),
         sessionCapabilityId: ownDataOrNull(intent, 'sessionCapabilityId'),
         sessionState,
+        ownedConfirmation,
       });
+      if (ownedConfirmation) ownedConfirmationsInFlight.add(ownedConfirmation);
       try {
         port.postMessage({ protocol: 'audita-panel', version: 1, type: 'intent', requestId, envelope: intent });
       } catch {

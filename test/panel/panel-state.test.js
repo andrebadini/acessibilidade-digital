@@ -89,7 +89,7 @@ test('creates an immutable initial screen with only stable interaction state', (
   assert.equal(Object.hasOwn(state, 'sessionCapabilityId'), false);
 });
 
-test('single-URL entry state never stores the typed URL and starts only the explicit no-pixels source', () => {
+test('single-URL entry state never stores private correlation and starts each explicit capture mode', () => {
   const initial = createInitialPanelState();
   const opened = reducePanelState(initial, { type: 'URL_FORM_OPENED' });
   assert.equal(opened.entryMode, 'single-url');
@@ -102,15 +102,22 @@ test('single-URL entry state never stores the typed URL and starts only the expl
     type: 'URL_ENTRY_REJECTED', code: 'invalid', url: 'https://secret.example/path?token=raw',
   }), opened);
 
-  assert.strictEqual(reducePanelState(opened, { type: 'START_REQUESTED', source: 'single-url' }), opened);
-  const noPixels = reducePanelState(opened, {
-    type: 'CAPTURE_MODE_SELECTED', mode: 'no-pixels', focusId: 'capture-mode-no-pixels',
-  });
-  const started = reducePanelState(noPixels, { type: 'START_REQUESTED', source: 'single-url' });
-  assert.equal(started.screen, 'running');
-  assert.equal(started.auditSource, 'single-url');
-  assert.equal(started.entryError, null);
-  assert.equal(Object.hasOwn(started, 'url'), false);
+  for (const mode of ['full-evidence', 'element-only', 'no-pixels']) {
+    const selected = reducePanelState(opened, {
+      type: 'CAPTURE_MODE_SELECTED', mode, focusId: `capture-mode-${mode}`,
+    });
+    const started = reducePanelState(selected, { type: 'START_REQUESTED', source: 'single-url' });
+    assert.equal(started.screen, 'running', mode);
+    assert.equal(started.auditSource, 'single-url', mode);
+    assert.equal(started.captureMode, mode);
+    assert.equal(started.entryError, null);
+    assert.equal(Object.hasOwn(started, 'url'), false);
+    assert.doesNotMatch(JSON.stringify(started), /example\.test|token=raw|consent|digest/iu);
+    assert.strictEqual(reducePanelState(selected, {
+      type: 'START_REQUESTED', source: 'single-url',
+      url: 'https://example.test/path?token=raw', consentId: 'PRIVATE', digest: 'PRIVATE',
+    }), selected, 'private start fields are never admitted to the reducer');
+  }
 
   const closed = reducePanelState(opened, { type: 'URL_FORM_CLOSED' });
   assert.equal(closed.entryMode, 'sources');

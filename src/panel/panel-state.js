@@ -106,7 +106,7 @@ export function reducePanelState(current, event) {
     case 'START_REQUESTED': {
       const requested = exactDataRecord(event, ['type', 'source']);
       if (!requested || !['attached', 'single-url'].includes(requested.source) || current.screen !== 'initial' ||
-        requested.source === 'single-url' && (current.entryMode !== 'single-url' || current.captureMode !== 'no-pixels')) return current;
+        requested.source === 'single-url' && current.entryMode !== 'single-url') return current;
       return nextPanelState(current, {
         screen: 'running', auditId: null, selectedOccurrenceId: null,
         auditSource: requested.source, entryError: null,

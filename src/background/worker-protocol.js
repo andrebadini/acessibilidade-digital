@@ -14,7 +14,7 @@ const CAPTURE_MODES = new Set(['full-evidence', 'element-only', 'no-pixels']);
 const PIXEL_CAPTURE_MODES = new Set(['full-evidence', 'element-only']);
 const PANEL_PORT_TYPES = new Set([
   'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_NAVIGATION_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
-  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_URL_AUDIT', 'CONFIRM_PIXEL_CAPTURE',
+  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_URL_AUDIT', 'CONFIRM_PIXEL_CAPTURE', 'PANEL_CONFIRM_PIXEL_CAPTURE',
   'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
   'PANEL_SET_PERSONA_MODE', 'PANEL_READER_STATE', 'PANEL_READER_ACTION',
   'PANEL_READER_ENABLE_VOICE',
@@ -32,6 +32,7 @@ const MESSAGE_SCHEMAS = deepFreeze({
   PANEL_START_ATTACHED_AUDIT: ['type', 'capabilityId', 'captureMode', 'includeQuery', 'deleteAfterCompleteExport', 'windowId'],
   PANEL_START_URL_AUDIT: ['type', 'capabilityId', 'url', 'captureMode', 'includeQuery', 'deleteAfterCompleteExport', 'windowId'],
   CONFIRM_PIXEL_CAPTURE: ['type', 'sessionCapabilityId', 'auditId', 'consentId', 'mode', 'accepted', 'windowId'],
+  PANEL_CONFIRM_PIXEL_CAPTURE: ['type', 'sessionCapabilityId', 'auditId', 'mode', 'accepted', 'windowId'],
   PANEL_START_PERSONA: ['type', 'capabilityId', 'mode', 'windowId'],
   PANEL_REHYDRATE_PERSONA: ['type', 'capabilityId', 'windowId'],
   PANEL_SET_PERSONA_MODE: ['type', 'leaseId', 'mode', 'windowId'],
@@ -114,13 +115,17 @@ function validWorkerEnvelope(value) {
   }
   if (value.type === 'PANEL_START_URL_AUDIT') {
     return validOpaqueId(value.capabilityId) && boundedCanonicalText(value.url, 2_048, false) &&
-      value.captureMode === 'no-pixels' && value.includeQuery === false &&
+      CAPTURE_MODES.has(value.captureMode) && value.includeQuery === false &&
       value.deleteAfterCompleteExport === false && safeChromeId(value.windowId);
   }
   if (value.type === 'CONFIRM_PIXEL_CAPTURE') {
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) &&
       CONSENT_ID.test(value.consentId ?? '') && PIXEL_CAPTURE_MODES.has(value.mode) &&
       value.accepted === true && safeChromeId(value.windowId);
+  }
+  if (value.type === 'PANEL_CONFIRM_PIXEL_CAPTURE') {
+    return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) &&
+      PIXEL_CAPTURE_MODES.has(value.mode) && value.accepted === true && safeChromeId(value.windowId);
   }
   if (value.type === 'PANEL_START_PERSONA') {
     return validOpaqueId(value.capabilityId) && PERSONA_MODES.has(value.mode) && safeChromeId(value.windowId);

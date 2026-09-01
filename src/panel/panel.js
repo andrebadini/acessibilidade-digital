@@ -72,11 +72,11 @@ export function normalizePanelUrlEntry(raw) {
 export function createPanelUrlAuditIntent(raw) {
   const input = exactRecord(raw, ['capabilityId', 'url', 'captureMode']);
   const normalized = input ? normalizePanelUrlEntry(input.url) : null;
-  if (!input || !OPAQUE_CAPABILITY.test(input.capabilityId ?? '') || input.captureMode !== 'no-pixels' ||
+  if (!input || !OPAQUE_CAPABILITY.test(input.capabilityId ?? '') || !CAPTURE_MODES.includes(input.captureMode) ||
     normalized?.ok !== true || normalized.url !== input.url) return null;
   return Object.freeze({
     type: 'PANEL_START_URL_AUDIT', capabilityId: input.capabilityId, url: normalized.url,
-    captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
+    captureMode: input.captureMode, includeQuery: false, deleteAfterCompleteExport: false,
   });
 }
 
@@ -376,10 +376,7 @@ async function startUrlAudit(rawUrl) {
     return;
   }
   const captureMode = state.captureMode;
-  if (state.screen !== 'initial' || state.entryMode !== 'single-url' || captureMode !== 'no-pixels') {
-    announce('Outra URL está disponível nesta versão somente no modo Sem imagens.');
-    return;
-  }
+  if (state.screen !== 'initial' || state.entryMode !== 'single-url' || !CAPTURE_MODES.includes(captureMode)) return;
   const submittedState = state;
   const requestId = nextRequestId();
   let preparedResponse = null;
@@ -410,7 +407,10 @@ async function startUrlAudit(rawUrl) {
   const started = parseStartedAudit(response);
   await personaSession.afterAuditAttempt({ started });
   if (started) {
-    transition({ type: 'AUDIT_RUNNING', auditId: response.auditId });
+    if (state.screen === 'running' && state.auditId === null && state.auditSource === 'single-url' &&
+      state.captureMode === captureMode && state.sessionStatus === null) {
+      transition({ type: 'AUDIT_RUNNING', auditId: response.auditId });
+    }
     return;
   }
   if (shouldShowPanelStartFailure(state)) transition({ type: 'URL_ENTRY_REJECTED', code: 'start-failed' });

@@ -190,14 +190,6 @@ function renderSingleUrlEntry(document, view, emit, onEvent) {
     form.append(error);
   }
   form.append(renderCaptureModeChoices(document, view.captureMode, onEvent));
-  const supported = view.captureMode === 'no-pixels';
-  if (!supported) {
-    form.append(paragraph(
-      document,
-      'Outra URL está disponível nesta versão somente no modo Sem imagens. Selecione Sem imagens para continuar.',
-      'availability-note',
-    ));
-  }
   const actions = section(document, 'form-actions');
   const submit = document.createElement('button');
   submit.setAttribute('type', 'submit');
@@ -206,15 +198,10 @@ function renderSingleUrlEntry(document, view, emit, onEvent) {
   submit.dataset.action = 'start-url-audit';
   submit.dataset.focusId = 'start-url-audit';
   submit.textContent = 'Avaliar acessibilidade';
-  if (!supported) {
-    submit.setAttribute('aria-disabled', 'true');
-    submit.setAttribute('disabled', '');
-  }
   actions.append(submit, actionButton(document, 'Voltar', 'CLOSE_URL_FORM', 'close-url-form', emit, 'secondary-action'));
   form.append(actions);
   form.addEventListener('submit', event => {
     event.preventDefault();
-    if (!supported) return;
     emit({ type: 'START_URL', url: typeof input.value === 'string' ? input.value : '' });
   });
   wrapper.append(

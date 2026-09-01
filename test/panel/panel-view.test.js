@@ -403,42 +403,41 @@ test('initial screen exposes three described radio modes and emits only a safe l
   assert.match(root.textContent, /Lote de páginas/u);
 });
 
-test('single-URL form keeps the typed value transient and blocks pixel modes without downgrading', () => {
-  const input = fixture();
-  input.state = {
-    ...input.state, screen: 'initial', auditId: null, entryMode: 'single-url', entryError: null,
-    auditSource: null, captureMode: 'no-pixels', sessionStatus: null,
-    privacy: { mode: null, categories: [], message: null, confirmationPending: false },
-  };
-  const emitted = [];
-  const view = buildPanelView({ state: input.state });
-  assert.equal(Object.hasOwn(view, 'url'), false);
-  const root = renderPanelView({
-    view, document: new TestDocument(), onIntent: intent => emitted.push(intent), onEvent() {},
-  });
-  const form = root.querySelector('form[id="audit-form"]');
-  const url = root.querySelector('input[id="audit-url"]');
-  assert.ok(form);
-  assert.ok(url);
-  assert.equal(url.getAttribute('name'), 'audit-url');
-  assert.equal(url.getAttribute('type'), 'url');
-  assert.equal(url.getAttribute('inputmode'), 'url');
-  assert.equal(url.getAttribute('autocomplete'), 'url');
-  assert.equal(url.hasAttribute('required'), true);
-  assert.equal(url.getAttribute('maxlength'), '2048');
-  assert.match(root.textContent, /Informe a URL e escolha como coletar as evidências\./u);
-  url.value = 'https://example.test/private?token=transient';
-  form.dispatch('submit');
-  assert.deepEqual(emitted, [{ type: 'START_URL', url: 'https://example.test/private?token=transient' }]);
-  assert.doesNotMatch(JSON.stringify(view), /token=transient/u);
-
-  input.state.captureMode = 'full-evidence';
-  const pixelRoot = renderPanelView({
-    view: buildPanelView({ state: input.state }), document: new TestDocument(), onIntent() {}, onEvent() {},
-  });
-  const submit = pixelRoot.querySelector('button[data-intent="START_URL"]');
-  assert.equal(submit.getAttribute('aria-disabled'), 'true');
-  assert.match(pixelRoot.textContent, /Outra URL está disponível nesta versão somente no modo Sem imagens/u);
+test('single-URL form keeps the typed value transient and enables all three explicit modes', () => {
+  for (const mode of ['full-evidence', 'element-only', 'no-pixels']) {
+    const input = fixture();
+    input.state = {
+      ...input.state, screen: 'initial', auditId: null, entryMode: 'single-url', entryError: null,
+      auditSource: null, captureMode: mode, sessionStatus: null,
+      privacy: { mode: null, categories: [], message: null, confirmationPending: false },
+    };
+    const emitted = [];
+    const view = buildPanelView({ state: input.state });
+    assert.equal(Object.hasOwn(view, 'url'), false);
+    const root = renderPanelView({
+      view, document: new TestDocument(), onIntent: intent => emitted.push(intent), onEvent() {},
+    });
+    const form = root.querySelector('form[id="audit-form"]');
+    const url = root.querySelector('input[id="audit-url"]');
+    const submit = root.querySelector('button[data-intent="START_URL"]');
+    assert.ok(form);
+    assert.ok(url);
+    assert.equal(url.getAttribute('name'), 'audit-url');
+    assert.equal(url.getAttribute('type'), 'url');
+    assert.equal(url.getAttribute('inputmode'), 'url');
+    assert.equal(url.getAttribute('autocomplete'), 'url');
+    assert.equal(url.hasAttribute('required'), true);
+    assert.equal(url.getAttribute('maxlength'), '2048');
+    assert.equal(submit.hasAttribute('disabled'), false, mode);
+    assert.equal(submit.hasAttribute('aria-disabled'), false, mode);
+    assert.match(root.textContent, /Informe a URL e escolha como coletar as evidências\./u);
+    assert.match(root.textContent, /A auditoria pode capturar pixels e conteúdo visível/u);
+    assert.doesNotMatch(root.textContent, /somente no modo Sem imagens/iu);
+    url.value = 'https://example.test/private?token=transient';
+    form.dispatch('submit');
+    assert.deepEqual(emitted, [{ type: 'START_URL', url: 'https://example.test/private?token=transient' }]);
+    assert.doesNotMatch(JSON.stringify(view), /token=transient/u);
+  }
 });
 
 test('single-URL errors are useful and never echo the rejected address', () => {

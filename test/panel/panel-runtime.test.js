@@ -125,7 +125,7 @@ test('builds the exact attached start envelope from each user-selected capture m
   ]) assert.equal(createPanelAttachedAuditIntent(input), null);
 });
 
-test('normalizes one transient URL and builds only the exact no-pixels start envelope', () => {
+test('normalizes one transient URL and builds the exact start envelope for each capture mode', () => {
   assert.deepEqual(normalizePanelUrlEntry(' https://example.test/path?q=private '), {
     ok: true, url: 'https://example.test/path?q=private',
   });
@@ -138,20 +138,19 @@ test('normalizes one transient URL and builds only the exact no-pixels start env
   ]) assert.deepEqual(normalizePanelUrlEntry(value), { ok: false, code });
   assert.equal(normalizePanelUrlEntry({ toString() { throw new Error('PRIVATE'); } }).ok, false);
 
-  const input = {
-    capabilityId: 'C'.repeat(22), url: 'https://example.test/path?q=private', captureMode: 'no-pixels',
-  };
-  assert.deepEqual(createPanelUrlAuditIntent(input), {
-    type: 'PANEL_START_URL_AUDIT', capabilityId: 'C'.repeat(22),
-    url: 'https://example.test/path?q=private', captureMode: 'no-pixels',
-    includeQuery: false, deleteAfterCompleteExport: false,
-  });
+  const input = { capabilityId: 'C'.repeat(22), url: 'https://example.test/path?q=private' };
+  for (const captureMode of ['full-evidence', 'element-only', 'no-pixels']) {
+    assert.deepEqual(createPanelUrlAuditIntent({ ...input, captureMode }), {
+      type: 'PANEL_START_URL_AUDIT', capabilityId: 'C'.repeat(22),
+      url: 'https://example.test/path?q=private', captureMode,
+      includeQuery: false, deleteAfterCompleteExport: false,
+    });
+  }
   for (const invalid of [
-    { ...input, captureMode: 'full-evidence' },
-    { ...input, captureMode: 'element-only' },
-    { ...input, capabilityId: 'short' },
-    { ...input, url: 'file:///private' },
-    { ...input, extra: 'secret' },
+    { ...input, captureMode: 'pixels' },
+    { ...input, captureMode: 'full-evidence', capabilityId: 'short' },
+    { ...input, captureMode: 'full-evidence', url: 'file:///private' },
+    { ...input, captureMode: 'full-evidence', extra: 'secret' },
   ]) assert.equal(createPanelUrlAuditIntent(invalid), null);
 });
 
@@ -233,6 +232,115 @@ test('does not start residual URL navigation when the form closes before PREPARE
   assert.equal(Boolean(residualStart), false);
   assert.ok(document.root.querySelector('button[data-intent="OPEN_URL_FORM"]'));
   assert.doesNotMatch(document.root.textContent, /Abrindo o site|Gerando relatório/iu);
+
+  await document.root.querySelector('button[data-intent="OPEN_URL_FORM"]').dispatch('click');
+  const secondUrl = document.root.querySelector('input[id="audit-url"]');
+  secondUrl.value = 'https://example.test/second?transient=private';
+  await document.root.querySelector('form[id="audit-form"]').dispatch('submit');
+  const prepares = ports[0].posted.filter(packet =>
+    packet?.envelope?.type === 'PREPARE_PANEL_NAVIGATION_CAPABILITY');
+  const secondPrepare = prepares.at(-1);
+  assert.equal(prepares.length, 2);
+  const changedMode = document.root.querySelector('input[data-capture-mode="full-evidence"]');
+  changedMode.checked = true;
+  await changedMode.dispatch('change');
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: secondPrepare.requestId,
+    response: {
+      ok: true, requestId: secondPrepare.envelope.requestId, capabilityId: 'C'.repeat(22),
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ports[0].posted.filter(packet => packet?.envelope?.type === 'PANEL_START_URL_AUDIT').length, 0);
+});
+
+test('a late URL start response cannot replace an authoritative privacy pause', async t => {
+  const originalDocument = globalThis.document;
+  const originalChrome = globalThis.chrome;
+  const originalLocation = globalThis.location;
+  t.after(() => {
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
+    if (originalChrome === undefined) delete globalThis.chrome; else globalThis.chrome = originalChrome;
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation;
+  });
+
+  const document = {
+    activeElement: null,
+    createElement(tagName) { return new RuntimeElement(tagName, document); },
+    querySelector(selector) { return selector === '#panel-root' ? document.root : null; },
+  };
+  document.root = new RuntimeElement('main', document);
+  const ports = [];
+  const chrome = {
+    runtime: {
+      id: 'abcdefghijklmnopabcdefghijklmnop',
+      connect({ name }) {
+        const port = {
+          name, posted: [], onMessage: runtimeEvent(), onDisconnect: runtimeEvent(),
+          postMessage(message) { this.posted.push(structuredClone(message)); },
+          disconnect() {},
+        };
+        ports.push(port);
+        return port;
+      },
+    },
+  };
+  globalThis.document = document;
+  globalThis.chrome = chrome;
+  globalThis.location = {
+    href: `chrome-extension://${chrome.runtime.id}/src/panel/index.html?launch=${'A'.repeat(43)}`,
+  };
+
+  await import(`../../src/panel/panel.js?url-start-privacy-race=${Date.now()}`);
+  const port = ports[0];
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null,
+  });
+  const personaPrepare = port.posted.find(packet =>
+    packet?.envelope?.type === 'PREPARE_PANEL_PERSONA_CAPABILITY');
+  if (personaPrepare) port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: personaPrepare.requestId,
+    response: { ok: false, code: 'PERSONA_NOT_FOUND' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  await document.root.querySelector('button[data-intent="OPEN_URL_FORM"]').dispatch('click');
+  const url = document.root.querySelector('input[id="audit-url"]');
+  url.value = 'https://example.test/path?transient=private';
+  await document.root.querySelector('form[id="audit-form"]').dispatch('submit');
+  const prepare = port.posted.find(packet =>
+    packet?.envelope?.type === 'PREPARE_PANEL_NAVIGATION_CAPABILITY');
+  assert.ok(prepare);
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: prepare.requestId,
+    response: { ok: true, requestId: prepare.envelope.requestId, capabilityId: 'C'.repeat(22) },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  const start = port.posted.find(packet => packet?.envelope?.type === 'PANEL_START_URL_AUDIT');
+  assert.ok(start);
+  assert.equal(start.envelope.captureMode, 'full-evidence');
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'running',
+    auditId: 'audit-private', sessionCapabilityId: 'S'.repeat(22), result: null,
+  });
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'privacy-paused',
+    auditId: 'audit-private', sessionCapabilityId: 'S'.repeat(22),
+    mode: 'full-evidence', categories: ['password'], message: PRIVACY_MESSAGE,
+  });
+  assert.ok(document.root.querySelector('[data-session-status="privacy-paused"]'));
+
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: start.requestId,
+    response: { ok: true, auditId: 'audit-private', state: 'running' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.ok(document.root.querySelector('[data-session-status="privacy-paused"]'));
+  assert.match(document.root.textContent, /Confirme antes de capturar imagens/u);
+  assert.doesNotMatch(document.root.textContent, /example\.test|transient=private|consent|digest/iu);
 });
 
 test('a late start timeout cannot replace an authoritative running or result bootstrap', () => {
