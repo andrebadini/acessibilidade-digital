@@ -776,11 +776,24 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   executive.append(metrics);
   const limitations = document.createElement('details');
   limitations.setAttribute('data-report-limitations', '');
-  const noPixelEvidence = view.executive.limitations.some(value =>
-    typeof value === 'string' && value.startsWith('PIXEL_CAPTURE_OMITTED:'));
-  limitations.append(element(document, 'summary', noPixelEvidence
-    ? `Limitações registradas (${view.executive.limitations.length}) · Modo sem imagens: nenhuma captura raster.`
-    : `Limitações registradas (${view.executive.limitations.length})`));
+  const noPixelEvidence = view.executive.limitations.includes(
+    'PIXEL_CAPTURE_OMITTED: Nenhuma captura raster foi coletada no modo sem imagens.');
+  const elementOnlyEvidence = view.executive.limitations.includes(
+    'FULL_PAGE_CAPTURE_OMITTED: A captura integral e o mapa anotado foram omitidos pela política; miniaturas de elementos permaneceram permitidas.') &&
+    !view.technicalEvidence.some(evidence => evidence.kind === 'full-page') &&
+    view.technicalEvidence.some(evidence => evidence.kind === 'element');
+  const elementThumbnailAvailable = view.technicalEvidence.some(evidence =>
+    evidence.kind === 'element' && isSafePngDataUrl(evidence.dataUrl));
+  const limitationSummary = noPixelEvidence
+    ? 'Modo sem imagens: nenhuma captura raster.'
+    : elementOnlyEvidence
+      ? elementThumbnailAvailable
+        ? 'Captura integral omitida: miniaturas de elementos disponíveis.'
+        : 'Captura integral omitida: evidências estruturais de elementos registradas, sem miniaturas PNG disponíveis.'
+      : null;
+  limitations.append(element(document, 'summary', `Limitações registradas (${view.executive.limitations.length})${
+    limitationSummary === null ? '' : ` · ${limitationSummary}`
+  }`));
   appendTextList(document, limitations, view.executive.limitations, 'Nenhuma limitação crítica registrada.');
   const actions = document.createElement('div');
   actions.setAttribute('class', 'executive-actions');

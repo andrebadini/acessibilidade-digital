@@ -12,6 +12,9 @@ import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { buildReportView, renderReportView, updateReportHighlightAction } from '../../src/review/report-view.js';
 import { EXPORT_FORMATS_V1 } from '../../src/export/report-export.js';
 
+const FULL_PAGE_CAPTURE_OMITTED_MESSAGE = 'A captura integral e o mapa anotado foram omitidos pela política; miniaturas de elementos permaneceram permitidas.';
+const FULL_PAGE_CAPTURE_OMITTED_LIMITATION = `FULL_PAGE_CAPTURE_OMITTED: ${FULL_PAGE_CAPTURE_OMITTED_MESSAGE}`;
+
 class Element {
   constructor(tagName, document) {
     this.tagName = tagName.toUpperCase(); this.ownerDocument = document; this.children = [];
@@ -77,6 +80,32 @@ async function fixture({ mutateDraft } = {}) {
   };
   const summary = await buildPanelSummary({ model, executionCheckpoint: checkpoint, inventory });
   return { model, summary };
+}
+
+function retainElementEvidenceWithoutFullPage(draft) {
+  const diagnostic = {
+    code: 'FULL_PAGE_CAPTURE_OMITTED', message: FULL_PAGE_CAPTURE_OMITTED_MESSAGE,
+    at: '2026-08-26T14:00:30.000Z', recoverable: true,
+  };
+  draft.evidence = draft.evidence.filter(artifact => artifact.kind === 'element').map(artifact => {
+    const retained = { ...artifact };
+    delete retained.fullPageEvidenceId;
+    return retained;
+  });
+  const retainedEvidenceIds = new Set(draft.evidence.map(artifact => artifact.evidenceId));
+  for (const occurrence of draft.occurrences) {
+    occurrence.evidenceRefs = occurrence.evidenceRefs.filter(id => retainedEvidenceIds.has(id));
+    occurrence.evidenceIds = occurrence.evidenceIds.filter(id => retainedEvidenceIds.has(id));
+  }
+  draft.evidenceStateCount = 0;
+  draft.reproducibility.capturedStateCount = 0;
+  draft.pages[0].status = 'complete';
+  draft.pages[0].diagnostics = [structuredClone(diagnostic)];
+  draft.session = { status: 'complete', partial: false, diagnostics: [diagnostic] };
+  draft.limitations = [
+    'O relatório cobre somente uma página e o estado observado; não constitui declaração de conformidade do site inteiro.',
+    FULL_PAGE_CAPTURE_OMITTED_MESSAGE,
+  ];
 }
 
 function addEditorialOccurrenceWithoutAbnt(draft) {
@@ -271,6 +300,63 @@ test('surfaces no-pixels collection in the visible limitations summary', async (
 
   assert.match(root.querySelector('[data-report-limitations]').querySelector('summary').textContent,
     /modo sem imagens.*nenhuma captura raster/iu);
+});
+
+test('element-only report discloses the omitted full-page capture in plain language and preserves its technical code in details', async () => {
+  const { model, summary } = await fixture({ mutateDraft: retainElementEvidenceWithoutFullPage });
+  assert.equal(model.evidence.filter(artifact => artifact.kind === 'full-page').length, 0);
+  assert.equal(model.evidence.filter(artifact => artifact.kind === 'element').length > 0, true);
+  assert.equal(model.session.diagnostics.some(diagnostic => diagnostic.code === 'FULL_PAGE_CAPTURE_OMITTED'), true);
+
+  const view = buildReportView({
+    model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash,
+  });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const limitations = root.querySelector('[data-report-limitations]');
+
+  assert.match(limitations.querySelector('summary').textContent,
+    /captura integral omitida.*miniaturas de elementos disponíveis/iu);
+  assert.doesNotMatch(limitations.querySelector('summary').textContent, /FULL_PAGE_CAPTURE_OMITTED/u);
+  assert.match(limitations.querySelector('ul').textContent, /FULL_PAGE_CAPTURE_OMITTED/u);
+});
+
+test('element-only report distinguishes structural element evidence from unavailable PNG thumbnails', async () => {
+  const { model, summary } = await fixture({
+    mutateDraft(draft) {
+      retainElementEvidenceWithoutFullPage(draft);
+      for (const artifact of draft.evidence) {
+        delete artifact.dataUrl;
+        delete artifact.metadata;
+      }
+    },
+  });
+  assert.equal(model.evidence.filter(artifact => artifact.kind === 'full-page').length, 0);
+  assert.equal(model.evidence.filter(artifact => artifact.kind === 'element').length > 0, true);
+  assert.equal(model.evidence.some(artifact => artifact.kind === 'element' && Object.hasOwn(artifact, 'dataUrl')), false);
+
+  const view = buildReportView({
+    model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash,
+  });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const limitations = root.querySelector('[data-report-limitations]');
+
+  assert.match(limitations.querySelector('summary').textContent,
+    /captura integral omitida.*evidências estruturais de elementos.*sem miniaturas PNG/iu);
+  assert.doesNotMatch(limitations.querySelector('summary').textContent, /miniaturas de elementos disponíveis/iu);
+  assert.match(limitations.querySelector('ul').textContent, /FULL_PAGE_CAPTURE_OMITTED/u);
+});
+
+test('capture summary requires the complete canonical limitation instead of trusting its prefix', async () => {
+  const { model, summary } = await fixture();
+  const view = structuredClone(buildReportView({
+    model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash,
+  }));
+  view.technicalEvidence = view.technicalEvidence.filter(artifact => artifact.kind === 'element');
+  view.executive.limitations.push(`${FULL_PAGE_CAPTURE_OMITTED_LIMITATION} texto não canônico`);
+
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  assert.doesNotMatch(root.querySelector('[data-report-limitations]').querySelector('summary').textContent,
+    /captura integral omitida/iu);
 });
 
 test('renderer keeps filters live-only without mutating the immutable report view', async () => {
