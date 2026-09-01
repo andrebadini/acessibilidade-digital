@@ -546,6 +546,55 @@ test('blocks malformed foreign expired or drifted suspensions before publication
   assert.equal(sessionReads, 2);
 });
 
+test('rehydrates a single-URL privacy pause without exposing owner digest or consent capability', async () => {
+  const ownershipId = `owner_${'O'.repeat(22)}`;
+  const env = fixture();
+  env.sessions.set(SESSION, Object.freeze({
+    version: 1, sessionCapabilityId: SESSION, auditId: 'audit-port', windowId: 9, mode: 'single',
+    targetBinding: { kind: 'disposable', ownershipId, state: 'retained-for-consent' },
+    state: 'privacy-paused', issuedAt: EPOCH, expiresAt: EPOCH + 10_000,
+  }));
+  env.setActive(privacyPausedActive({ mode: 'attached' }));
+  env.suspensions.set('audit-port', suspension({
+    tabId: 27, documentId: 'url-document',
+    urlEvidence: {
+      version: 'EvidenceUrlV1', href: 'https://example.test/private',
+      queryIncluded: false, redactedSegments: 0,
+    },
+    urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+    source: { kind: 'owned-disposable', ownershipId, cleanupMode: 'pre-observation-failure', pageId: 'page-1' },
+  }));
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'consumed',
+  };
+  assert.equal(await env.coordinator.withWindowLock(9, scope => scope.publishPrivacyPaused({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+  })), false);
+  env.setActive(privacyPausedActive({ mode: 'single' }));
+  assert.equal(await env.coordinator.withWindowLock(9, scope => scope.publishPrivacyPaused({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+  })), true);
+
+  const first = port();
+  env.coordinator.attachPanelPort(first);
+  first.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.deepEqual(first.messages.at(-1), {
+    protocol: 'audita-panel', version: 1, type: 'privacy-paused',
+    auditId: 'audit-port', sessionCapabilityId: SESSION, mode: 'full-evidence',
+    categories: ['password', 'payment'], message: PAUSE_MESSAGE,
+  });
+  assert.doesNotMatch(JSON.stringify(first.messages.at(-1)), /owner_|hmac-sha256|consentId|private/iu);
+  first.onDisconnect.emit();
+
+  const second = port({ documentId: 'panel-document-2' });
+  env.coordinator.attachPanelPort(second);
+  second.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.deepEqual(second.messages.at(-1), first.messages.at(-1));
+});
+
 test('disconnect during pause reproof blocks the stale packet and later reconnect rehydrates safely', async () => {
   const env = fixture();
   env.setActive(runningActive());

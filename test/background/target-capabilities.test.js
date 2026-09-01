@@ -462,6 +462,47 @@ test('single navigation capability is one-shot, panel-document bound, and issues
   });
 });
 
+test('single pixel session pauses only with its exact retained-consent owner and resumes only after owner CAS', async () => {
+  const { authority, sessionArea } = authorityFixture();
+  const ownershipId = `owner_${'A'.repeat(22)}`;
+  const prepared = await authority.prepareNavigationForPanel({
+    intent: 'single', senderContext: extensionContext(),
+  });
+  const claimed = await authority.claimNavigationAndIssueAuditSession({
+    capabilityId: prepared.capabilityId, auditId: 'audit-url-pixel', ownershipId,
+    intent: 'single', senderContext: extensionContext(),
+  });
+  const transitionOwner = (fromState, toState) => authority.transitionDisposableAuditSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-url-pixel', ownershipId,
+    fromState, toState,
+  });
+  const transitionSession = nextState => authority.transitionAuditSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-url-pixel', nextState,
+  });
+
+  assert.deepEqual(await transitionSession('privacy-paused'), {
+    ok: false, code: 'SESSION_TRANSITION_DENIED',
+  });
+  assert.equal((await transitionOwner('pending', 'observing')).state, 'observing');
+  assert.deepEqual(await transitionSession('privacy-paused'), {
+    ok: false, code: 'SESSION_TRANSITION_DENIED',
+  });
+  assert.equal((await transitionOwner('observing', 'retained-for-consent')).state, 'retained-for-consent');
+  assert.equal((await transitionSession('privacy-paused')).state, 'privacy-paused');
+  const paused = await readAuditSessionForWorker({
+    sessionArea,
+    sessionCapabilityId: claimed.sessionCapabilityId,
+    auditId: 'audit-url-pixel',
+  });
+  assert.equal(paused.state, 'privacy-paused');
+  assert.deepEqual(paused.targetBinding, { kind: 'disposable', ownershipId, state: 'retained-for-consent' });
+  assert.deepEqual(await transitionSession('running'), {
+    ok: false, code: 'SESSION_TRANSITION_DENIED',
+  });
+  assert.equal((await transitionOwner('retained-for-consent', 'observing')).state, 'observing');
+  assert.equal((await transitionSession('running')).state, 'running');
+});
+
 test('single navigation capability rejects expiry and every cross-document or cross-window claim', async () => {
   for (const senderContext of [extensionContext('another-panel'), extensionContext('panel-document-1', 10)]) {
     const { authority } = authorityFixture();

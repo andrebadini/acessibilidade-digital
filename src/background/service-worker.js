@@ -255,8 +255,11 @@ export function createPixelAttemptLifecycleV1(raw) {
 
   async function prepareResume(rawRequest) {
     const request = exact(rawRequest, ['auditId', 'consentId', 'pageId', 'ownershipId', 'expiresAt']);
+    const attachedAttempt = request?.pageId === null && request?.ownershipId === null;
+    const ownedAttempt = request?.pageId === 'page-1' &&
+      /^owner_[A-Za-z0-9_-]{22}$/u.test(request?.ownershipId ?? '');
     if (!request || !AUDIT_ID.test(request.auditId ?? '') || !CONSENT_ID.test(request.consentId ?? '') ||
-      request.pageId !== null || request.ownershipId !== null ||
+      (!attachedAttempt && !ownedAttempt) ||
       !Number.isSafeInteger(request.expiresAt) || request.expiresAt < 0) {
       throw new TypeError('PIXEL_ATTEMPT_LIFECYCLE_INVALID');
     }
@@ -265,7 +268,8 @@ export function createPixelAttemptLifecycleV1(raw) {
       auditId: request.auditId, consentId: request.consentId,
     });
     const correlation = Object.freeze({
-      auditId: request.auditId, attemptDigest, pageId: null, ownershipId: null,
+      auditId: request.auditId, attemptDigest,
+      pageId: request.pageId, ownershipId: request.ownershipId,
     });
     if (await input.attemptCorrelation.markerMatches(correlation) !== true) {
       throw new TypeError('PIXEL_ATTEMPT_LIFECYCLE_INVALID');
@@ -274,9 +278,17 @@ export function createPixelAttemptLifecycleV1(raw) {
   }
 
   async function classifyCore(rawRequest) {
-    const request = exact(rawRequest, ['auditId', 'consentId']);
+    const compact = exact(rawRequest, ['auditId', 'consentId']);
+    const correlated = exact(rawRequest, ['auditId', 'consentId', 'pageId', 'ownershipId']);
+    const request = compact ?? correlated;
+    const expectedPageId = correlated?.pageId ?? null;
+    const expectedOwnershipId = correlated?.ownershipId ?? null;
+    const expectedAttached = expectedPageId === null && expectedOwnershipId === null;
+    const expectedOwned = expectedPageId === 'page-1' &&
+      /^owner_[A-Za-z0-9_-]{22}$/u.test(expectedOwnershipId ?? '');
     if (!request || !AUDIT_ID.test(request.auditId ?? '') ||
-      !(request.consentId === null || CONSENT_ID.test(request.consentId ?? ''))) {
+      !(request.consentId === null || CONSENT_ID.test(request.consentId ?? '')) ||
+      (!expectedAttached && !expectedOwned)) {
       return { state: 'blocked', handle: null, correlation: null };
     }
     const scan = await scanMarker(request.auditId);
@@ -285,6 +297,10 @@ export function createPixelAttemptLifecycleV1(raw) {
       auditId: scan.marker.auditId, attemptDigest: scan.marker.attemptDigest,
       pageId: scan.marker.pageId, ownershipId: scan.marker.ownershipId,
     });
+    if (correlation && (correlation.pageId !== expectedPageId ||
+      correlation.ownershipId !== expectedOwnershipId)) {
+      return { state: 'blocked', handle: null, correlation: null };
+    }
     if (request.consentId !== null) {
       let attemptDigest;
       try {
@@ -293,7 +309,8 @@ export function createPixelAttemptLifecycleV1(raw) {
         });
       } catch { return { state: 'blocked', handle: null, correlation: null }; }
       const expected = Object.freeze({
-        auditId: request.auditId, attemptDigest, pageId: null, ownershipId: null,
+        auditId: request.auditId, attemptDigest,
+        pageId: expectedPageId, ownershipId: expectedOwnershipId,
       });
       if (correlation && !samePixelAttempt(correlation, expected)) {
         return { state: 'blocked', handle: null, correlation: null };
@@ -358,21 +375,32 @@ export function createPixelAttemptLifecycleV1(raw) {
     if (revision !== 1 || report?.modelRevision !== 1 || typeof modelHash !== 'string' ||
       report.modelHash !== modelHash) throw new Error('TERMINAL_COMMIT_DENIED');
     if (metadata) {
-      const classified = await classifyCore({ auditId: request.auditId, consentId: metadata.consentId });
+      const classified = await classifyCore({
+        auditId: request.auditId, consentId: metadata.consentId,
+        pageId: metadata.correlation.pageId, ownershipId: metadata.correlation.ownershipId,
+      });
       if (classified.state !== 'terminal') throw new Error('TERMINAL_COMMIT_DENIED');
     }
     return Object.freeze({ revision: 1, modelHash });
   }
 
   async function cleanup(rawRequest) {
-    const request = exact(rawRequest, ['auditId', 'consentId', 'expected']);
+    const compact = exact(rawRequest, ['auditId', 'consentId', 'expected']);
+    const correlated = exact(rawRequest, ['auditId', 'consentId', 'expected', 'pageId', 'ownershipId']);
+    const request = compact ?? correlated;
+    const pageId = correlated?.pageId ?? null;
+    const ownershipId = correlated?.ownershipId ?? null;
+    const expectedAttached = pageId === null && ownershipId === null;
+    const expectedOwned = pageId === 'page-1' && /^owner_[A-Za-z0-9_-]{22}$/u.test(ownershipId ?? '');
     if (!request || !AUDIT_ID.test(request.auditId ?? '') ||
       !(request.consentId === null || CONSENT_ID.test(request.consentId ?? '')) ||
-      !['prepared', 'terminal', 'post-finish'].includes(request.expected)) return false;
+      !['prepared', 'terminal', 'post-finish'].includes(request.expected) ||
+      (!expectedAttached && !expectedOwned)) return false;
     if (request.expected === 'post-finish') {
       const scan = await scanMarker(request.auditId);
       if (scan.state !== 'ok') return false;
       if (scan.marker === null) return true;
+      if (scan.marker.pageId !== pageId || scan.marker.ownershipId !== ownershipId) return false;
       const correlation = Object.freeze({
         auditId: scan.marker.auditId, attemptDigest: scan.marker.attemptDigest,
         pageId: scan.marker.pageId, ownershipId: scan.marker.ownershipId,
@@ -391,7 +419,9 @@ export function createPixelAttemptLifecycleV1(raw) {
         } catch { return false; }
       }
     }
-    const current = await classifyCore({ auditId: request.auditId, consentId: request.consentId });
+    const current = await classifyCore(correlated
+      ? { auditId: request.auditId, consentId: request.consentId, pageId, ownershipId }
+      : { auditId: request.auditId, consentId: request.consentId });
     if (current.state === 'blocked') return false;
     if (current.state === 'absent') return request.expected === 'post-finish';
     if (request.expected === 'prepared' && current.state !== 'prepared' ||
@@ -410,6 +440,55 @@ export function createPixelAttemptLifecycleV1(raw) {
   }
 
   return Object.freeze({ prepareResume, commitTerminal, classify, cleanup });
+}
+
+export function createExactUrlAuditResourceCleanerV1(raw) {
+  const input = exact(raw, ['rawNavigationVault', 'ownedTabRegistry']);
+  if (!input || typeof input.rawNavigationVault?.clearAudit !== 'function' ||
+    typeof input.ownedTabRegistry?.get !== 'function' ||
+    typeof input.ownedTabRegistry?.removeOwned !== 'function') {
+    throw new TypeError('URL_AUDIT_CLEANER_INVALID');
+  }
+  const states = new Set([
+    'created', 'observing', 'retained-for-review', 'retained-for-consent', 'cleanup-pending', 'removed',
+  ]);
+  const parseOwned = (value, auditId, ownershipId) => {
+    if (value === null) return null;
+    const record = exact(value, [
+      'version', 'ownershipId', 'auditId', 'purpose', 'tabId', 'windowId',
+      'cleanupMode', 'state', 'createdAt', 'updatedAt',
+    ]);
+    return record?.version === 2 && record.ownershipId === ownershipId && record.auditId === auditId &&
+      record.purpose === 'audit' && Number.isSafeInteger(record.tabId) && record.tabId >= 0 &&
+      Number.isSafeInteger(record.windowId) && record.windowId >= 0 &&
+      record.cleanupMode === 'pre-observation-failure' && states.has(record.state)
+      ? record : undefined;
+  };
+  return Object.freeze(async rawRequest => {
+    const request = exact(rawRequest, ['auditId', 'ownershipId']);
+    if (!request || !AUDIT_ID.test(request.auditId ?? '') ||
+      !/^owner_[A-Za-z0-9_-]{22}$/u.test(request.ownershipId ?? '')) return false;
+    let failed = false;
+    try { await input.rawNavigationVault.clearAudit(request.auditId); } catch { failed = true; }
+    let current;
+    try { current = parseOwned(await input.ownedTabRegistry.get(request.ownershipId), request.auditId, request.ownershipId); }
+    catch { return false; }
+    if (current === undefined) return false;
+    if (current !== null && current.state !== 'removed') {
+      let removed;
+      try {
+        removed = parseOwned(await input.ownedTabRegistry.removeOwned({
+          ownershipId: request.ownershipId, auditId: request.auditId,
+          tabId: current.tabId, fromState: current.state,
+        }), request.auditId, request.ownershipId);
+      } catch { return false; }
+      if (!removed || removed.state !== 'removed') return false;
+    }
+    let confirmed;
+    try { confirmed = parseOwned(await input.ownedTabRegistry.get(request.ownershipId), request.auditId, request.ownershipId); }
+    catch { return false; }
+    return !failed && (confirmed === null || confirmed?.state === 'removed');
+  });
 }
 
 async function invokeChrome(chromeApi, receiver, name, ...args) {
@@ -959,53 +1038,54 @@ async function buildDefaultRuntime(chromeApi, options) {
     attachPanelPort: panelCoordinator.attachPanelPort,
     withWindowLock: panelCoordinator.withWindowLock,
   });
+  const urlAuditResourceCleaner = createExactUrlAuditResourceCleanerV1({
+    rawNavigationVault,
+    ownedTabRegistry: createOwnedTabRegistry({
+      sessionArea,
+      chromeAdapter: Object.freeze({ removeTab: tabId => chromeAdapter.removeTab(tabId) }),
+      now: modelNow,
+    }),
+  });
   const auditStarter = createAuthorizedAuditStarter({
     authority, sessionArea, panelCoordinator: panelAuditCoordinator, targetQueue, cleanupBarrier,
     runAttachedAuditExecution: args => runAttachedAuditExecution({
       ...args, chromeAdapter, expectedExtensionId: chromeApi.runtime.id,
     }),
-    runUrlAuditExecution: options.runUrlAuditExecution ?? (args => runUrlAudit({
-      auditId: args.auditId,
-      ownershipId: args.ownershipId,
-      windowId: args.windowId,
-      navigationToken: args.navigationToken,
-      navigationPurpose: args.navigationPurpose,
-      evidenceUrl: args.evidenceUrl,
-      sessionDigest: args.sessionDigest,
-      rawNavigationVault,
-      chromeAdapter,
-      capturePolicy: args.capturePolicy,
-      checkpointStore: Object.freeze({
+    runUrlAuditExecution: options.runUrlAuditExecution ?? (args => {
+      const checkpointStore = Object.freeze({
         writeSanitized: (auditId, checkpoint) => {
           if (auditId !== args.auditId) throw new Error('CHECKPOINT_PERSIST_DENIED');
           return args.onCheckpoint(checkpoint);
         },
         persistAuditModel: (model, observedTarget) => args.persistAuditModel(model, observedTarget),
-      }),
-      onProgress: event => chromeAdapter.emitProgress(event),
-      now: args.modelNow,
-      signal: args.signal,
-      expectedExtensionId: chromeApi.runtime.id,
-      auditRunner: runObservedTabAudit,
-    })),
-    clearUrlAuditResources: async ({ auditId, ownershipId }) => {
-      let failed = false;
-      try { await rawNavigationVault.clearAudit(auditId); } catch { failed = true; }
-      let registry = null;
-      try {
-        registry = createOwnedTabRegistry({
-          sessionArea,
-          chromeAdapter: Object.freeze({ removeTab: tabId => chromeAdapter.removeTab(tabId) }),
-          now: modelNow,
-        });
-        await registry.clearAudit(auditId);
-      } catch { failed = true; }
-      if (failed || !registry) return false;
-      try {
-        const current = await registry.get(ownershipId);
-        return current === null || (current.auditId === auditId && current.ownershipId === ownershipId && current.state === 'removed');
-      } catch { return false; }
-    },
+      });
+      const common = {
+        auditId: args.auditId, chromeAdapter, capturePolicy: args.capturePolicy,
+        checkpointStore, onProgress: event => chromeAdapter.emitProgress(event),
+        now: args.modelNow, signal: args.signal, expectedExtensionId: chromeApi.runtime.id,
+        auditRunner: runObservedTabAudit,
+      };
+      return Object.hasOwn(args, 'resumeTarget')
+        ? runUrlAudit({
+            ...common,
+            requestedUrlEvidence: args.requestedUrlEvidence,
+            resumeTarget: args.resumeTarget,
+            resumeCheckpoint: args.resumeCheckpoint,
+            privacyGate: args.privacyGate,
+          })
+        : runUrlAudit({
+            ...common,
+            ownershipId: args.ownershipId,
+            windowId: args.windowId,
+            navigationToken: args.navigationToken,
+            navigationPurpose: args.navigationPurpose,
+            evidenceUrl: args.evidenceUrl,
+            sessionDigest: args.sessionDigest,
+            rawNavigationVault,
+            ...(args.privacyGate ? { privacyGate: args.privacyGate } : {}),
+          });
+    }),
+    clearUrlAuditResources: urlAuditResourceCleaner,
     persistLatest, persistCheckpoint: checkpoints.persistCheckpoint, removeCheckpoint: checkpoints.removeCheckpoint,
     commitTerminalAudit,
     readAuditSnapshot: ({ auditId }) => auditStore.getAuditSnapshot(auditId),

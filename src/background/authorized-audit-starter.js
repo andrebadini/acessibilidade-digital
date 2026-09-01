@@ -20,6 +20,7 @@ export const ACTIVE_AUDIT_JOB_KEY = 'audita:active-audit-job:v1';
 const START_JOURNAL_KEY = 'audita:start-journal:v1';
 export const retentionPreferenceStorageKey = auditId => `audita:retention-preference:v1:${auditId}`;
 export const executionCheckpointStorageKey = auditId => `audita:execution-checkpoint:v1:${auditId}`;
+const urlRequestedEvidenceStorageKey = auditId => `audita:url-requested-evidence:v1:${auditId}`;
 
 const FACTORY_KEYS = Object.freeze([
   'authority', 'sessionArea', 'panelCoordinator', 'targetQueue', 'cleanupBarrier', 'runAttachedAuditExecution',
@@ -211,6 +212,20 @@ function retentionIntent(value) {
   return record?.version === 1 && record.deleteAfterCompleteExport === false ? freeze(record) : null;
 }
 
+function urlRequestedEvidenceRecord(value, active) {
+  const record = exact(value, [
+    'version', 'auditId', 'capabilityId', 'sessionCapabilityId', 'windowId', 'evidenceUrl',
+  ]);
+  const evidenceUrl = record && exact(record.evidenceUrl, [
+    'version', 'href', 'queryIncluded', 'redactedSegments',
+  ]);
+  if (!record || record.version !== 1 || record.auditId !== active.auditId ||
+    record.capabilityId !== active.capabilityId || record.sessionCapabilityId !== active.sessionCapabilityId ||
+    record.windowId !== active.windowId || !evidenceUrl || !isEvidenceUrlV1(evidenceUrl) ||
+    evidenceUrl.queryIncluded !== false) return null;
+  return freeze({ ...record, evidenceUrl: { ...evidenceUrl } });
+}
+
 function exactCapturePolicy(value) {
   const record = exact(value, [
     'version', 'mode', 'includeQuery', 'captureFullPage', 'captureElements', 'composeAnnouncementMap',
@@ -379,21 +394,39 @@ function canonicalSensitiveCategories(value) {
 }
 
 function correlatedPixelContext(active, recoveryGrant) {
+  if (active.mode === 'attached') {
+    const grant = exact(recoveryGrant, [
+      'version', 'capabilityId', 'auditId', 'sessionCapabilityId', 'windowId', 'issuedAt', 'expiresAt',
+      'targetState', 'sessionState', 'target',
+    ]);
+    const target = grant && exact(grant.target, [
+      'kind', 'tabId', 'windowId', 'documentId', 'initialUrlEvidence', 'initialUrlSessionDigest',
+    ]);
+    if (!grant || grant.version !== 1 || !target || target.kind !== 'attached' ||
+      grant.auditId !== active.auditId || grant.capabilityId !== active.capabilityId ||
+      grant.sessionCapabilityId !== active.sessionCapabilityId || grant.windowId !== active.windowId ||
+      target.windowId !== active.windowId || !['claimed', 'invalidated'].includes(grant.targetState) ||
+      !['running', 'privacy-paused', 'result', 'revoked'].includes(grant.sessionState) ||
+      !Number.isSafeInteger(grant.issuedAt) || grant.issuedAt < 0 ||
+      !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= grant.issuedAt) return null;
+    return freeze({ kind: 'attached', grant, target, ownershipId: null,
+      sessionState: grant.sessionState, targetState: grant.targetState });
+  }
   const grant = exact(recoveryGrant, [
-    'version', 'capabilityId', 'auditId', 'sessionCapabilityId', 'windowId', 'issuedAt', 'expiresAt',
-    'targetState', 'sessionState', 'target',
+    'version', 'capabilityId', 'auditId', 'sessionCapabilityId', 'windowId', 'capabilityState',
+    'sessionState', 'ownershipId', 'ownershipState', 'issuedAt', 'expiresAt',
   ]);
-  const target = grant && exact(grant.target, [
-    'kind', 'tabId', 'windowId', 'documentId', 'initialUrlEvidence', 'initialUrlSessionDigest',
-  ]);
-  if (!grant || grant.version !== 1 || !target || target.kind !== 'attached' ||
-    grant.auditId !== active.auditId || grant.capabilityId !== active.capabilityId ||
-    grant.sessionCapabilityId !== active.sessionCapabilityId || grant.windowId !== active.windowId ||
-    target.windowId !== active.windowId || !['claimed', 'invalidated'].includes(grant.targetState) ||
+  if (!grant || grant.version !== 1 || grant.auditId !== active.auditId ||
+    grant.capabilityId !== active.capabilityId || grant.sessionCapabilityId !== active.sessionCapabilityId ||
+    grant.windowId !== active.windowId || !['claimed', 'invalidated'].includes(grant.capabilityState) ||
+    !/^owner_[A-Za-z0-9_-]{22}$/u.test(grant.ownershipId ?? '') ||
+    !['pending', 'observing', 'retained-for-consent', 'retained-for-review', 'cleanup-pending', 'removed']
+      .includes(grant.ownershipState) ||
     !['running', 'privacy-paused', 'result', 'revoked'].includes(grant.sessionState) ||
     !Number.isSafeInteger(grant.issuedAt) || grant.issuedAt < 0 ||
     !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= grant.issuedAt) return null;
-  return freeze({ grant, target, sessionState: grant.sessionState, targetState: grant.targetState });
+  return freeze({ kind: 'single', grant, target: null, ownershipId: grant.ownershipId,
+    sessionState: grant.sessionState, targetState: grant.ownershipState });
 }
 
 function correlatedPixelSuspension(value, active, context) {
@@ -402,18 +435,28 @@ function correlatedPixelSuspension(value, active, context) {
     'urlSessionDigest', 'mode', 'capturePolicy', 'categories', 'issuedAt', 'updatedAt', 'expiresAt',
     'cleanupAttempts', 'cleanupNotBefore', 'state', 'resumePhase', 'revokeReason', 'source',
   ]);
-  const source = record && exact(record.source, ['kind']);
+  const attachedSource = record && exact(record.source, ['kind']);
+  const ownedSource = record && exact(record.source, ['kind', 'ownershipId', 'cleanupMode', 'pageId']);
+  const source = attachedSource?.kind === 'attached' ? attachedSource
+    : ownedSource?.kind === 'owned-disposable' ? ownedSource : null;
   const policy = record && exactCapturePolicy(record.capturePolicy);
   const evidence = record && exact(record.urlEvidence, ['version', 'href', 'queryIncluded', 'redactedSegments']);
   const categories = record && canonicalSensitiveCategories(record.categories);
   const target = context?.target;
+  const attachedTargetMatches = context?.kind === 'attached' && source?.kind === 'attached' && target &&
+    record.tabId === target.tabId && record.documentId === target.documentId &&
+    record.urlSessionDigest === target.initialUrlSessionDigest && record.urlEvidence?.href === target.initialUrlEvidence;
+  const ownedTargetMatches = context?.kind === 'single' && source?.kind === 'owned-disposable' &&
+    source.ownershipId === context.ownershipId && source.cleanupMode === 'pre-observation-failure' &&
+    source.pageId === 'page-1' && Number.isSafeInteger(record.tabId) && record.tabId >= 0 &&
+    typeof record.documentId === 'string' && record.documentId.length >= 1 && record.documentId.length <= 512 &&
+    DIGEST.test(record.urlSessionDigest ?? '');
   if (!record || record.version !== 'AuditSuspensionV1' || record.auditId !== active.auditId ||
     !/^[A-Za-z0-9_-]{21}[AQgw]$/u.test(record.consentId ?? '') ||
-    record.windowId !== active.windowId || source?.kind !== 'attached' || !target ||
-    record.tabId !== target.tabId || record.documentId !== target.documentId ||
-    record.urlSessionDigest !== target.initialUrlSessionDigest || !policy || policy.mode !== record.mode ||
+    record.windowId !== active.windowId || (!attachedTargetMatches && !ownedTargetMatches) ||
+    !policy || policy.mode !== record.mode ||
     !['full-evidence', 'element-only'].includes(record.mode) || !evidence || !isEvidenceUrlV1(evidence) ||
-    evidence.queryIncluded !== false || evidence.href !== target.initialUrlEvidence || !categories ||
+    evidence.queryIncluded !== false || !categories ||
     !Number.isSafeInteger(record.revision) || record.revision < 1 ||
     !Number.isSafeInteger(record.issuedAt) || !Number.isSafeInteger(record.updatedAt) ||
     !Number.isSafeInteger(record.expiresAt) || record.issuedAt < 0 || record.updatedAt < record.issuedAt ||
@@ -430,6 +473,22 @@ function correlatedPixelSuspension(value, active, context) {
   return freeze({
     ...record, capturePolicy: policy, urlEvidence: evidence, categories, source,
   });
+}
+
+function canonicalPixelSource(value) {
+  const attached = exact(value, ['kind']);
+  if (attached?.kind === 'attached') return freeze(attached);
+  const owned = exact(value, ['kind', 'ownershipId', 'cleanupMode', 'pageId']);
+  return owned?.kind === 'owned-disposable' && /^owner_[A-Za-z0-9_-]{22}$/u.test(owned.ownershipId ?? '') &&
+    owned.cleanupMode === 'pre-observation-failure' && owned.pageId === 'page-1'
+    ? freeze(owned) : null;
+}
+
+function pixelAttemptRequest(auditId, consentId, source, additional = null) {
+  const base = source?.kind === 'owned-disposable'
+    ? { auditId, consentId, pageId: source.pageId, ownershipId: source.ownershipId }
+    : { auditId, consentId };
+  return additional === null ? freeze(base) : freeze({ ...base, ...additional });
 }
 
 export function createAuthorizedAuditStarter(input) {
@@ -525,11 +584,22 @@ export function createAuthorizedAuditStarter(input) {
     );
   }
 
+  async function readUrlRequestedEvidence(active) {
+    return readConfirmed(
+      sessionArea, urlRequestedEvidenceStorageKey(active.auditId),
+      value => urlRequestedEvidenceRecord(value, active), 'URL_REQUESTED_EVIDENCE_DENIED',
+    );
+  }
+
   async function readCorrelatedPixelSuspension(active) {
     const [recoveryGrant, rawSuspension] = await Promise.all([
-      readAttachedAuditRecoveryGrant({
-        sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
-      }),
+      active.mode === 'attached'
+        ? readAttachedAuditRecoveryGrant({
+            sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
+          })
+        : readNavigationAuditCorrelationForRecovery({
+            sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
+          }),
       pixelState.readSuspension(active.auditId),
     ]);
     const context = correlatedPixelContext(active, recoveryGrant);
@@ -592,7 +662,13 @@ export function createAuthorizedAuditStarter(input) {
       current => current.auditId === active.auditId && current.capabilityId === active.capabilityId && current.windowId === active.windowId,
     );
     const retention = removeRetention ? await removePreference(active) : true;
-    if (!removedJournal || !retention) throw new Error('CORRELATED_CLEANUP_DENIED');
+    const requestedEvidenceRemoved = active.mode !== 'single' || await removeCorrelated(
+      sessionArea, urlRequestedEvidenceStorageKey(active.auditId),
+      value => urlRequestedEvidenceRecord(value, active),
+      current => current.auditId === active.auditId && current.capabilityId === active.capabilityId &&
+        current.sessionCapabilityId === active.sessionCapabilityId && current.windowId === active.windowId,
+    );
+    if (!removedJournal || !retention || !requestedEvidenceRemoved) throw new Error('CORRELATED_CLEANUP_DENIED');
     const removedActive = await removeCorrelated(
       sessionArea, ACTIVE_AUDIT_JOB_KEY, activeRecord,
       current => current.auditId === active.auditId && current.capabilityId === active.capabilityId &&
@@ -618,6 +694,34 @@ export function createAuthorizedAuditStarter(input) {
     catch { return false; }
   }
 
+  async function clearOwnedPixelSource(active, source) {
+    if (source.kind !== 'owned-disposable' || active.mode !== 'single') return source.kind === 'attached';
+    let correlation = await readNavigationAuditCorrelationForRecovery({
+      sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
+    });
+    if (correlation.sessionCapabilityId !== active.sessionCapabilityId ||
+      correlation.windowId !== active.windowId || correlation.ownershipId !== source.ownershipId) return false;
+    if (correlation.ownershipState !== 'removed') {
+      if (await clearUrlAuditResources({
+        auditId: active.auditId, ownershipId: source.ownershipId,
+      }) !== true) return false;
+      const removed = await authority.transitionDisposableAuditSession({
+        sessionCapabilityId: active.sessionCapabilityId,
+        auditId: active.auditId,
+        ownershipId: source.ownershipId,
+        fromState: correlation.ownershipState,
+        toState: 'removed',
+      });
+      if (removed?.ok !== true || removed.state !== 'removed' || removed.ownershipId !== source.ownershipId) return false;
+    }
+    correlation = await readNavigationAuditCorrelationForRecovery({
+      sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
+    });
+    return correlation.sessionCapabilityId === active.sessionCapabilityId &&
+      correlation.windowId === active.windowId && correlation.ownershipId === source.ownershipId &&
+      correlation.ownershipState === 'removed';
+  }
+
   async function liquidatePixelAuditLocked(args, lockedScope = null) {
     if (args.signal?.aborted === true) return false;
     let active;
@@ -627,12 +731,12 @@ export function createAuthorizedAuditStarter(input) {
     let suspension;
     try { suspension = (await readCorrelatedPixelSuspension(active)).suspension; }
     catch { return false; }
-    if (!suspension || suspension.consentId !== args.consentId || suspension.source.kind !== args.source.kind ||
+    if (!suspension || suspension.consentId !== args.consentId || !same(suspension.source, args.source) ||
       suspension.state !== 'revoked' || suspension.revokeReason !== args.reason ||
       args.signal?.aborted === true) return false;
-    const classified = await pixelAttemptLifecycle.classify({
-      auditId: args.auditId, consentId: args.consentId,
-    });
+    const classified = await pixelAttemptLifecycle.classify(pixelAttemptRequest(
+      args.auditId, args.consentId, args.source,
+    ));
     const classification = exact(classified, ['state', 'handle']);
     if (!classification || !['absent', 'prepared', 'terminal', 'blocked'].includes(classification.state) ||
       classification.handle !== null || classification.state === 'blocked') return false;
@@ -652,6 +756,7 @@ export function createAuthorizedAuditStarter(input) {
       });
       if (['running', 'privacy-paused'].includes(session.state)) await transitionConfirmed(active, 'revoked');
       else if (session.state !== 'revoked') return false;
+      if (!await clearOwnedPixelSource(active, args.source)) return false;
       if (await invalidateConfirmed(active) !== true || args.signal?.aborted === true) return false;
       const disconnect = scope => scope.disconnectSession({
         auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId,
@@ -660,10 +765,10 @@ export function createAuthorizedAuditStarter(input) {
       const disconnected = lockedScope ? await disconnect(lockedScope)
         : await panelCoordinator.withWindowLock(active.windowId, disconnect);
       if (disconnected !== true || args.signal?.aborted === true) return false;
-      if (!await pixelAttemptLifecycle.cleanup({
-        auditId: active.auditId, consentId: args.consentId,
-        expected: classification.state === 'prepared' ? 'prepared' : 'post-finish',
-      })) return false;
+      if (!await pixelAttemptLifecycle.cleanup(pixelAttemptRequest(
+        active.auditId, args.consentId, args.source,
+        { expected: classification.state === 'prepared' ? 'prepared' : 'post-finish' },
+      ))) return false;
       try {
         if (await pixelState.finish({ auditId: active.auditId, consentId: args.consentId }) !== true) return false;
       } catch {
@@ -680,9 +785,9 @@ export function createAuthorizedAuditStarter(input) {
 
   async function liquidatePixelAudit(raw) {
     const args = exact(raw, ['auditId', 'consentId', 'reason', 'source', 'signal']);
-    const source = args && exact(args.source, ['kind']);
+    const source = args && canonicalPixelSource(args.source);
     if (!args || !AUDIT_ID.test(args.auditId ?? '') || !/^[A-Za-z0-9_-]{21}[AQgw]$/u.test(args.consentId ?? '') ||
-      !PIXEL_LIQUIDATION_REASONS.has(args.reason) || source?.kind !== 'attached' ||
+      !PIXEL_LIQUIDATION_REASONS.has(args.reason) || !source ||
       !args.signal || typeof args.signal !== 'object') return false;
     return withGlobalLock(() => liquidatePixelAuditLocked({ ...args, source }));
   }
@@ -908,9 +1013,13 @@ export function createAuthorizedAuditStarter(input) {
           });
           if (!acceptedTerminalDelivery(published)) throw new Error('PANEL_PUBLICATION_DENIED');
           if (!await finishPixelConsent(liveRecord)) throw new Error('PIXEL_STATE_UNAVAILABLE');
-          if (!await pixelAttemptLifecycle.cleanup({
-            auditId: current.auditId, consentId: null, expected: 'post-finish',
-          })) throw new Error('PIXEL_ATTEMPT_CLEANUP_DENIED');
+          const attemptSource = liveRecord.resumeTarget ? freeze({
+            kind: 'owned-disposable', ownershipId: liveRecord.resumeTarget.ownershipId,
+            cleanupMode: liveRecord.resumeTarget.cleanupMode, pageId: liveRecord.resumeTarget.pageId,
+          }) : freeze({ kind: 'attached' });
+          if (!await pixelAttemptLifecycle.cleanup(pixelAttemptRequest(
+            current.auditId, liveRecord.consentId, attemptSource, { expected: 'post-finish' },
+          ))) throw new Error('PIXEL_ATTEMPT_CLEANUP_DENIED');
           await cleanupActive(current);
           return freeze({ ok: true, auditId: current.auditId, state: 'result', revision: 1 });
         }
@@ -1029,14 +1138,15 @@ export function createAuthorizedAuditStarter(input) {
   }
 
   async function transitionUrlOwnership(liveRecord, fromState, toState) {
+    const ownershipId = liveRecord.plan?.ownershipId ?? liveRecord.resumeTarget?.ownershipId;
     const result = await authority.transitionDisposableAuditSession({
       sessionCapabilityId: liveRecord.active.sessionCapabilityId,
       auditId: liveRecord.active.auditId,
-      ownershipId: liveRecord.plan.ownershipId,
+      ownershipId,
       fromState,
       toState,
     });
-    if (result?.ok !== true || result.state !== toState || result.ownershipId !== liveRecord.plan.ownershipId) {
+    if (result?.ok !== true || result.state !== toState || result.ownershipId !== ownershipId) {
       throw new Error('URL_OWNERSHIP_STATE_DENIED');
     }
     return toState;
@@ -1044,18 +1154,14 @@ export function createAuthorizedAuditStarter(input) {
 
   async function executeUrl(liveRecord) {
     const active = liveRecord.active;
+    const ownershipId = liveRecord.plan?.ownershipId ?? liveRecord.resumeTarget?.ownershipId;
     let lastCheckpoint = null;
     let proposedTerminal = null;
     try {
-      const output = await runUrlAuditExecution({
+      const commonExecution = {
         auditId: active.auditId,
-        ownershipId: liveRecord.plan.ownershipId,
-        windowId: active.windowId,
-        navigationToken: liveRecord.plan.navigationToken,
-        navigationPurpose: liveRecord.plan.navigationPurpose,
-        evidenceUrl: liveRecord.plan.evidenceUrl,
-        sessionDigest: liveRecord.plan.sessionDigest,
         capturePolicy: liveRecord.capturePolicy,
+        privacyGate: liveRecord.privacyGate,
         modelNow,
         signal: liveRecord.controller.signal,
         onCheckpoint: async checkpoint => {
@@ -1076,7 +1182,7 @@ export function createAuthorizedAuditStarter(input) {
           if (lastCheckpoint === null || liveRecord.committed || proposedTerminal !== null) {
             throw new Error('CHECKPOINT_PERSIST_DENIED');
           }
-          const safeTarget = urlObservedTarget(observedTarget, liveRecord.plan.ownershipId, active.windowId);
+          const safeTarget = urlObservedTarget(observedTarget, ownershipId, active.windowId);
           if (!safeTarget) throw new Error('URL_AUDIT_OUTCOME_DENIED');
           const candidate = await terminalCandidate({
             auditId: active.auditId, model, checkpoint: lastCheckpoint,
@@ -1084,17 +1190,75 @@ export function createAuthorizedAuditStarter(input) {
           const bundle = copyPanelResultBundleV1(await buildPanelResultBundle({ reportRevision: candidate }));
           proposedTerminal = freeze({ safeTarget, candidate, bundle });
         },
-      });
+      };
+      const output = await runUrlAuditExecution(liveRecord.resumeTarget
+        ? {
+            auditId: commonExecution.auditId,
+            requestedUrlEvidence: liveRecord.requestedUrlEvidence,
+            resumeTarget: liveRecord.resumeTarget,
+            resumeCheckpoint: liveRecord.resumeCheckpoint,
+            capturePolicy: commonExecution.capturePolicy,
+            privacyGate: commonExecution.privacyGate,
+            modelNow: commonExecution.modelNow,
+            signal: commonExecution.signal,
+            onCheckpoint: commonExecution.onCheckpoint,
+            persistAuditModel: commonExecution.persistAuditModel,
+          }
+        : {
+            auditId: commonExecution.auditId,
+            ownershipId,
+            windowId: active.windowId,
+            navigationToken: liveRecord.plan.navigationToken,
+            navigationPurpose: liveRecord.plan.navigationPurpose,
+            evidenceUrl: liveRecord.plan.evidenceUrl,
+            sessionDigest: liveRecord.plan.sessionDigest,
+            capturePolicy: commonExecution.capturePolicy,
+            ...(commonExecution.privacyGate ? { privacyGate: commonExecution.privacyGate } : {}),
+            modelNow: commonExecution.modelNow,
+            signal: commonExecution.signal,
+            onCheckpoint: commonExecution.onCheckpoint,
+            persistAuditModel: commonExecution.persistAuditModel,
+          });
       const observed = exact(output, [
         'status', 'model', 'observedTarget', 'observationState', 'ownershipState',
+      ]) ?? exact(output, [
+        'status', 'model', 'observedTarget', 'observationState', 'ownershipState', 'signals',
       ]);
-      if (!observed || !['complete', 'partial', 'failed', 'cancelled'].includes(observed.status) ||
+      if (!observed || !['complete', 'partial', 'failed', 'cancelled', 'privacy-paused'].includes(observed.status) ||
         !['observed', 'pre-observation-failure'].includes(observed.observationState) ||
-        !['retained-for-review', 'cleanup-pending', 'removed'].includes(observed.ownershipState)) {
+        !['retained-for-review', 'retained-for-consent', 'cleanup-pending', 'removed'].includes(observed.ownershipState)) {
         throw new Error('URL_AUDIT_OUTCOME_DENIED');
       }
+      if (observed.status === 'privacy-paused') {
+        const safeTarget = urlObservedTarget(observed.observedTarget, ownershipId, active.windowId);
+        if (liveRecord.capturePolicy.mode === 'no-pixels' || observed.model !== null ||
+          observed.observationState !== 'observed' || observed.ownershipState !== 'retained-for-consent' ||
+          lastCheckpoint === null || !safeTarget) throw new Error('URL_AUDIT_OUTCOME_DENIED');
+        await transitionUrlOwnership(liveRecord, 'pending', 'observing');
+        await transitionUrlOwnership(liveRecord, 'observing', 'retained-for-consent');
+        liveRecord.observedTarget = safeTarget;
+        const checkpoint = await readPersistedCheckpoint(active);
+        const correlated = await readCorrelatedPixelSuspension(active);
+        if (!checkpoint || !same(checkpoint.checkpoint, lastCheckpoint) ||
+          correlated.sessionState !== 'running' || correlated.targetState !== 'retained-for-consent' ||
+          !correlated.suspension || correlated.suspension.state !== 'paused' ||
+          !same(correlated.suspension.capturePolicy, liveRecord.capturePolicy)) {
+          throw new Error('AUDIT_RECOVERY_REQUIRED');
+        }
+        await transitionConfirmed(active, 'privacy-paused');
+        const pausedActive = freeze({ ...active, state: 'privacy-paused', updatedAt: safeEpoch(epochNow) });
+        await writeConfirmed(sessionArea, ACTIVE_AUDIT_JOB_KEY, pausedActive, activeRecord, 'ACTIVE_AUDIT_JOB_DENIED');
+        await persistExactLatest(latestState(active.auditId, 'PRIVACY_PAUSED', modelNow));
+        await schedulePixelExpiryBestEffort();
+        const published = await panelCoordinator.withWindowLock(active.windowId, scope => scope.publishPrivacyPaused({
+          auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId, windowId: active.windowId,
+        }));
+        if (published !== true) throw new Error('PANEL_PUBLICATION_DENIED');
+        live.delete(active.auditId);
+        return freeze({ ok: true, auditId: active.auditId, state: 'privacy-paused', revision: null });
+      }
       if (observed.model !== null) {
-        const safeTarget = urlObservedTarget(observed.observedTarget, liveRecord.plan.ownershipId, active.windowId);
+        const safeTarget = urlObservedTarget(observed.observedTarget, ownershipId, active.windowId);
         if (lastCheckpoint === null || observed.observationState !== 'observed' ||
           observed.ownershipState !== 'retained-for-review' || !safeTarget ||
           (proposedTerminal && !same(proposedTerminal.safeTarget, safeTarget))) {
@@ -1110,7 +1274,7 @@ export function createAuthorizedAuditStarter(input) {
         }
         const bundle = proposedTerminal?.bundle ??
           copyPanelResultBundleV1(await buildPanelResultBundle({ reportRevision: candidate }));
-        await transitionUrlOwnership(liveRecord, 'pending', 'retained-for-review');
+        await transitionUrlOwnership(liveRecord, liveRecord.resumeTarget ? 'observing' : 'pending', 'retained-for-review');
         liveRecord.observedTarget = safeTarget;
         await markFinalizing(liveRecord, candidate, bundle);
         const committed = liveRecord.committed;
@@ -1126,11 +1290,11 @@ export function createAuthorizedAuditStarter(input) {
       await transitionUrlOwnership(liveRecord, 'pending', observed.ownershipState);
       if (observed.ownershipState === 'cleanup-pending') {
         if (await clearUrlAuditResources({
-          auditId: active.auditId, ownershipId: liveRecord.plan.ownershipId,
+          auditId: active.auditId, ownershipId,
         }) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
         await transitionUrlOwnership(liveRecord, 'cleanup-pending', 'removed');
       } else if (await clearUrlAuditResources({
-        auditId: active.auditId, ownershipId: liveRecord.plan.ownershipId,
+        auditId: active.auditId, ownershipId,
       }) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
       return settle(liveRecord, freeze({
         version: 1, auditId: active.auditId, state: 'revoked', failureCode: 'AUDIT_FAILED',
@@ -1160,7 +1324,7 @@ export function createAuthorizedAuditStarter(input) {
           sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
         });
         if (await clearUrlAuditResources({
-          auditId: active.auditId, ownershipId: liveRecord.plan.ownershipId,
+          auditId: active.auditId, ownershipId,
         }) !== true) {
           throw new Error('CORRELATED_CLEANUP_DENIED');
         }
@@ -1189,7 +1353,7 @@ export function createAuthorizedAuditStarter(input) {
     const context = args && exact(args.senderContext, ['issuer', 'windowId', 'tabId', 'contextType', 'documentUrl']);
     const denied = code => freeze({ response: { ok: false, code }, sessionCapabilityId: null, completion: null });
     if (!hasUrlAudit || !args || !CAPABILITY.test(args.capabilityId ?? '') || !AUDIT_ID.test(args.auditId ?? '') ||
-      !plan || !capturePolicy || capturePolicy.mode !== 'no-pixels' || capturePolicy.includeQuery !== false ||
+      !plan || !capturePolicy || capturePolicy.includeQuery !== false ||
       !preference || !context || !Number.isSafeInteger(context.windowId) || context.windowId < 0 ||
       context.tabId !== null || context.contextType !== 'SIDE_PANEL') return denied('AUDIT_START_FAILED');
 
@@ -1254,8 +1418,22 @@ export function createAuthorizedAuditStarter(input) {
             createdAt: postGrant, updatedAt: postGrant,
           });
           await writeConfirmed(sessionArea, ACTIVE_AUDIT_JOB_KEY, active, activeRecord, 'ACTIVE_AUDIT_JOB_DENIED');
+          const requestedEvidence = freeze({
+            version: 1, auditId: active.auditId, capabilityId: active.capabilityId,
+            sessionCapabilityId: active.sessionCapabilityId, windowId: active.windowId,
+            evidenceUrl: { ...plan.evidenceUrl },
+          });
+          await writeConfirmed(
+            sessionArea, urlRequestedEvidenceStorageKey(active.auditId), requestedEvidence,
+            value => urlRequestedEvidenceRecord(value, active), 'URL_REQUESTED_EVIDENCE_DENIED',
+          );
+          const privacyGate = capturePolicy.mode === 'no-pixels' ? null : createPixelPrivacyGateV1({
+            pixelState, consentId: null, authorityExpiresAt: correlation.expiresAt,
+            commitClock: pixelCommitClock, async afterPixels() {},
+          });
           const liveRecord = {
-            active, controller, plan, capturePolicy, consentId: null, grant: null, observedTarget: null,
+            active, controller, plan, requestedUrlEvidence: requestedEvidence.evidenceUrl,
+            capturePolicy, privacyGate, consentId: null, grant: null, observedTarget: null,
             externallyInvalidated: false, liquidationReason: null, committed: null, completion: null,
             attemptHandle: null,
           };
@@ -1499,7 +1677,8 @@ export function createAuthorizedAuditStarter(input) {
         preliminaryActive.windowId !== args.windowId) return denied();
       const preliminary = await readCorrelatedPixelSuspension(preliminaryActive);
       preliminarySuspension = preliminary.suspension;
-      if (preliminary.sessionState !== 'privacy-paused' || preliminary.targetState !== 'claimed' ||
+      const preliminaryTargetState = preliminaryActive.mode === 'single' ? 'retained-for-consent' : 'claimed';
+      if (preliminary.sessionState !== 'privacy-paused' || preliminary.targetState !== preliminaryTargetState ||
         !preliminarySuspension || preliminarySuspension.state !== 'paused' ||
         preliminarySuspension.consentId !== args.consentId ||
         preliminarySuspension.mode !== args.mode) return denied();
@@ -1526,11 +1705,14 @@ export function createAuthorizedAuditStarter(input) {
           return panelCoordinator.withWindowLock(active.windowId, async scope => {
             const journal = await readConfirmed(sessionArea, START_JOURNAL_KEY, journalRecord, 'START_JOURNAL_DENIED');
             const checkpoint = await readPersistedCheckpoint(active);
+            const requestedEvidence = active.mode === 'single' ? await readUrlRequestedEvidence(active) : null;
             const correlated = await readCorrelatedPixelSuspension(active);
             const { grant, suspension } = correlated;
             const capturePolicy = suspension?.capturePolicy ?? null;
-            if (correlated.sessionState !== 'privacy-paused' || correlated.targetState !== 'claimed' ||
+            const expectedPausedTarget = active.mode === 'single' ? 'retained-for-consent' : 'claimed';
+            if (correlated.sessionState !== 'privacy-paused' || correlated.targetState !== expectedPausedTarget ||
               journal !== null || !checkpoint || !grant || !suspension || suspension.state !== 'paused' ||
+              (active.mode === 'single' && !requestedEvidence) ||
               suspension.consentId !== args.consentId || suspension.mode !== args.mode) return denied();
             const revokeAndLiquidate = async (reason, code) => {
               try {
@@ -1569,9 +1751,15 @@ export function createAuthorizedAuditStarter(input) {
             const signals = sensitiveSignals(await probeSensitiveCaptureSignals(target.tabId, target.documentId));
             if (!signals) return denied();
             try {
+              const resumeProof = active.mode === 'single'
+                ? {
+                    kind: 'owned-disposable', ownershipId: suspension.source.ownershipId,
+                    ...proof, cleanupMode: suspension.source.cleanupMode, pageId: suspension.source.pageId,
+                  }
+                : { kind: 'attached', ...proof };
               await pixelState.claimAndBeginResume({
                 auditId: active.auditId, consentId: args.consentId,
-                proof: { kind: 'attached', ...proof }, mode: args.mode, categories: signals.categories,
+                proof: resumeProof, mode: args.mode, categories: signals.categories,
               });
             } catch (error) {
               if (error?.message === 'PIXEL_CONSENT_EXPIRED') {
@@ -1595,11 +1783,24 @@ export function createAuthorizedAuditStarter(input) {
               });
             }
             await schedulePixelExpiryBestEffort();
+            if (active.mode === 'single') {
+              const transitionedOwner = await authority.transitionDisposableAuditSession({
+                sessionCapabilityId: active.sessionCapabilityId, auditId: active.auditId,
+                ownershipId: suspension.source.ownershipId,
+                fromState: 'retained-for-consent', toState: 'observing',
+              });
+              if (transitionedOwner?.ok !== true || transitionedOwner.state !== 'observing' ||
+                transitionedOwner.ownershipId !== suspension.source.ownershipId) {
+                return revokeAndLiquidate('PIXEL_RESUME_INTERRUPTED', 'AUDIT_RESUME_DENIED');
+              }
+            }
             await transitionConfirmed(active, 'running');
             await pixelState.markSessionRunning({ auditId: active.auditId, consentId: args.consentId });
             const attemptHandle = await pixelAttemptLifecycle.prepareResume({
               auditId: active.auditId, consentId: args.consentId,
-              pageId: null, ownershipId: null, expiresAt: suspension.expiresAt,
+              pageId: active.mode === 'single' ? 'page-1' : null,
+              ownershipId: active.mode === 'single' ? suspension.source.ownershipId : null,
+              expiresAt: suspension.expiresAt,
             });
             if (!attemptHandle || typeof attemptHandle !== 'object' || Reflect.ownKeys(attemptHandle).length !== 0) {
               throw new Error('PIXEL_ATTEMPT_PREPARE_DENIED');
@@ -1622,9 +1823,18 @@ export function createAuthorizedAuditStarter(input) {
               commitClock: pixelCommitClock, async afterPixels() {},
             });
             const controller = createAbortController();
+            const resumeTarget = active.mode === 'single' ? freeze({
+              kind: 'owned-disposable-resume', ownershipId: suspension.source.ownershipId,
+              tabId: suspension.tabId, windowId: suspension.windowId, documentId: suspension.documentId,
+              initialUrlEvidence: suspension.urlEvidence,
+              initialUrlSessionDigest: suspension.urlSessionDigest,
+              cleanupMode: suspension.source.cleanupMode, pageId: suspension.source.pageId,
+            }) : null;
             const liveRecord = {
               active: running, controller, grant, capturePolicy, privacyGate,
               resumeCheckpoint: checkpoint.checkpoint,
+              ...(resumeTarget ? { plan: null, resumeTarget, observedTarget: null } : {}),
+              ...(resumeTarget ? { requestedUrlEvidence: requestedEvidence.evidenceUrl } : {}),
               consentId: args.consentId, targetLock: lock,
               externallyInvalidated: false, liquidationReason: null,
               committed: null, completion, attemptHandle,
@@ -1646,7 +1856,9 @@ export function createAuthorizedAuditStarter(input) {
       resolveStarted(freeze({
         response: setup.response, sessionCapabilityId: setup.sessionCapabilityId, completion,
       }));
-      return execute(setup.liveRecord);
+      return setup.liveRecord.active.mode === 'single'
+        ? executeUrl(setup.liveRecord)
+        : execute(setup.liveRecord);
     });
     void targetOperation.then(resolveCompletion, () => {
       resolveStarted(denied());
@@ -1673,7 +1885,8 @@ export function createAuthorizedAuditStarter(input) {
           const checkpoint = await readPersistedCheckpoint(active);
           const correlated = await readCorrelatedPixelSuspension(active);
           const suspension = correlated.suspension;
-          if (correlated.sessionState !== 'privacy-paused' || correlated.targetState !== 'claimed' ||
+          const expectedTargetState = active.mode === 'single' ? 'retained-for-consent' : 'claimed';
+          if (correlated.sessionState !== 'privacy-paused' || correlated.targetState !== expectedTargetState ||
             journal !== null || !checkpoint || !suspension || suspension.state !== 'paused') {
             return freeze({ ok: false, code: 'AUDIT_CANCEL_DENIED' });
           }
@@ -1767,12 +1980,39 @@ export function createAuthorizedAuditStarter(input) {
     if (recoverable) {
       if (recoverable.state === 'paused') {
         const checkpoint = await readPersistedCheckpoint(active);
+        const recoverableTargetStates = active.mode === 'single'
+          ? ['pending', 'observing', 'retained-for-consent'] : ['claimed'];
         if (active.state !== 'running' || !['running', 'privacy-paused'].includes(correlated.sessionState) ||
-          correlated.targetState !== 'claimed' || !checkpoint) throw new Error('AUDIT_RECOVERY_REQUIRED');
-        if (correlated.sessionState === 'running') await transitionConfirmed(active, 'privacy-paused');
+          !recoverableTargetStates.includes(correlated.targetState) || !checkpoint) {
+          throw new Error('AUDIT_RECOVERY_REQUIRED');
+        }
+        let advancedTarget = correlated;
+        if (active.mode === 'single' && advancedTarget.targetState === 'pending') {
+          const observing = await authority.transitionDisposableAuditSession({
+            sessionCapabilityId: active.sessionCapabilityId, auditId: active.auditId,
+            ownershipId: recoverable.source.ownershipId, fromState: 'pending', toState: 'observing',
+          });
+          if (observing?.ok !== true || observing.state !== 'observing' ||
+            observing.ownershipId !== recoverable.source.ownershipId) throw new Error('AUDIT_RECOVERY_REQUIRED');
+          advancedTarget = await readCorrelatedPixelSuspension(active);
+        }
+        if (active.mode === 'single' && advancedTarget.targetState === 'observing') {
+          const retained = await authority.transitionDisposableAuditSession({
+            sessionCapabilityId: active.sessionCapabilityId, auditId: active.auditId,
+            ownershipId: recoverable.source.ownershipId,
+            fromState: 'observing', toState: 'retained-for-consent',
+          });
+          if (retained?.ok !== true || retained.state !== 'retained-for-consent' ||
+            retained.ownershipId !== recoverable.source.ownershipId) throw new Error('AUDIT_RECOVERY_REQUIRED');
+          advancedTarget = await readCorrelatedPixelSuspension(active);
+        }
+        const expectedTargetState = active.mode === 'single' ? 'retained-for-consent' : 'claimed';
+        if (advancedTarget.targetState !== expectedTargetState || !advancedTarget.suspension ||
+          !same(advancedTarget.suspension, recoverable)) throw new Error('AUDIT_RECOVERY_REQUIRED');
+        if (advancedTarget.sessionState === 'running') await transitionConfirmed(active, 'privacy-paused');
         const advanced = await readCorrelatedPixelSuspension(active);
         const advancedCheckpoint = await readPersistedCheckpoint(active);
-        if (advanced.sessionState !== 'privacy-paused' || advanced.targetState !== 'claimed' ||
+        if (advanced.sessionState !== 'privacy-paused' || advanced.targetState !== expectedTargetState ||
           !advanced.suspension || !same(advanced.suspension, recoverable) ||
           !advancedCheckpoint || !same(advancedCheckpoint, checkpoint)) throw new Error('AUDIT_RECOVERY_REQUIRED');
         const durableActive = await readActiveAuditJobForWorker({ sessionArea });
@@ -1877,8 +2117,26 @@ export function createAuthorizedAuditStarter(input) {
       sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
     });
     if (correlation.sessionCapabilityId !== active.sessionCapabilityId || correlation.windowId !== active.windowId ||
-      correlation.capabilityState !== 'claimed' || correlation.sessionState !== 'running' ||
+      correlation.capabilityState !== 'claimed' || !['running', 'result'].includes(correlation.sessionState) ||
       correlation.ownershipState !== 'retained-for-review') throw new Error('AUDIT_RECOVERY_REQUIRED');
+    const attemptSource = freeze({
+      kind: 'owned-disposable', ownershipId: correlation.ownershipId,
+      cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+    });
+    let attempt = exact(await pixelAttemptLifecycle.classify(pixelAttemptRequest(
+      active.auditId, null, attemptSource,
+    )), ['state', 'handle']);
+    if (attempt?.state === 'blocked' && active.commitState === 'confirmed' &&
+      await pixelAttemptLifecycle.cleanup(pixelAttemptRequest(
+        active.auditId, null, attemptSource, { expected: 'post-finish' },
+      ))) {
+      attempt = exact(await pixelAttemptLifecycle.classify(pixelAttemptRequest(
+        active.auditId, null, attemptSource,
+      )), ['state', 'handle']);
+    }
+    if (!attempt || attempt.handle !== null || !['absent', 'terminal'].includes(attempt.state)) {
+      throw new Error('AUDIT_RECOVERY_REQUIRED');
+    }
     const candidate = await terminalCandidate({
       auditId: active.auditId, model: report.model, checkpoint: report.checkpoint,
     });
@@ -1891,12 +2149,15 @@ export function createAuthorizedAuditStarter(input) {
     if (latestAuditId === null || latestAuditId === active.auditId) {
       await persistExactLatest(latestState(active.auditId, candidate.model.session.status, modelNow));
     }
-    await transitionConfirmed(active, 'result');
+    if (correlation.sessionState === 'running') await transitionConfirmed(active, 'result');
     const published = await panelCoordinator.withWindowLock(active.windowId, scope => scope.publishResult({
       auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId,
       windowId: active.windowId, state: 'result', resultBundle: bundle,
     }));
     if (!acceptedTerminalDelivery(published)) throw new Error('AUDIT_RECOVERY_REQUIRED');
+    if (!await pixelAttemptLifecycle.cleanup(pixelAttemptRequest(
+      active.auditId, null, attemptSource, { expected: 'post-finish' },
+    ))) throw new Error('AUDIT_RECOVERY_REQUIRED');
     await cleanupActive(active);
     return freeze({ ok: true, state: 'reconciled', auditId: active.auditId, revision: 1 });
   }
@@ -1906,7 +2167,8 @@ export function createAuthorizedAuditStarter(input) {
     const checkpoint = await readPersistedCheckpoint(active);
     const correlated = await readCorrelatedPixelSuspension(active);
     const suspension = correlated.suspension;
-    if (correlated.sessionState !== 'privacy-paused' || correlated.targetState !== 'claimed' ||
+    const expectedTargetState = active.mode === 'single' ? 'retained-for-consent' : 'claimed';
+    if (correlated.sessionState !== 'privacy-paused' || correlated.targetState !== expectedTargetState ||
       journal !== null || !checkpoint || !suspension || suspension.state !== 'paused') {
       throw new Error('AUDIT_RECOVERY_REQUIRED');
     }
@@ -1934,16 +2196,17 @@ export function createAuthorizedAuditStarter(input) {
       suspension.state === 'resuming' && suspension.resumePhase !== 'runner-started')) {
       throw new Error('AUDIT_RECOVERY_REQUIRED');
     }
-    let attempt = exact(await pixelAttemptLifecycle.classify({
-      auditId: active.auditId, consentId: suspension?.consentId ?? null,
-    }), ['state', 'handle']);
+    const attemptSource = suspension?.source ?? freeze({ kind: 'attached' });
+    let attempt = exact(await pixelAttemptLifecycle.classify(pixelAttemptRequest(
+      active.auditId, suspension?.consentId ?? null, attemptSource,
+    )), ['state', 'handle']);
     if (attempt?.state === 'blocked' && suspension === null && active.commitState === 'confirmed' &&
-      await pixelAttemptLifecycle.cleanup({
-        auditId: active.auditId, consentId: null, expected: 'post-finish',
-      })) {
-      attempt = exact(await pixelAttemptLifecycle.classify({
-        auditId: active.auditId, consentId: null,
-      }), ['state', 'handle']);
+      await pixelAttemptLifecycle.cleanup(pixelAttemptRequest(
+        active.auditId, null, attemptSource, { expected: 'post-finish' },
+      ))) {
+      attempt = exact(await pixelAttemptLifecycle.classify(pixelAttemptRequest(
+        active.auditId, null, attemptSource,
+      )), ['state', 'handle']);
     }
     if (!attempt || attempt.handle !== null || attempt.state === 'blocked' || attempt.state === 'prepared' ||
       (suspension && attempt.state !== 'terminal')) throw new Error('AUDIT_RECOVERY_REQUIRED');
@@ -1981,9 +2244,9 @@ export function createAuthorizedAuditStarter(input) {
       }
       await schedulePixelExpiryBestEffort();
     }
-    if (!await pixelAttemptLifecycle.cleanup({
-      auditId: active.auditId, consentId: null, expected: 'post-finish',
-    })) throw new Error('AUDIT_RECOVERY_REQUIRED');
+    if (!await pixelAttemptLifecycle.cleanup(pixelAttemptRequest(
+      active.auditId, suspension?.consentId ?? null, attemptSource, { expected: 'post-finish' },
+    ))) throw new Error('AUDIT_RECOVERY_REQUIRED');
     await cleanupActive(active);
     return freeze({ ok: true, state: 'reconciled', auditId: active.auditId, revision: 1 });
   }
@@ -2003,10 +2266,15 @@ export function createAuthorizedAuditStarter(input) {
               sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
             });
           }
+          const singlePixelSuspension = active.mode === 'single'
+            ? (await readCorrelatedPixelSuspension(active)).suspension
+            : null;
           const result = active.mode === 'single'
             ? active.state === 'finalizing'
-              ? await recoverSingleFinalizing(active)
-              : await recoverSingleInterrupted(active)
+              ? singlePixelSuspension ? await recoverFinalizing(active, journal) : await recoverSingleFinalizing(active)
+              : active.state === 'privacy-paused'
+                ? await recoverPrivacyPaused(active)
+                : singlePixelSuspension ? await recoverInterrupted(active) : await recoverSingleInterrupted(active)
             : active.state === 'finalizing' ? await recoverFinalizing(active, journal)
               : active.state === 'privacy-paused' ? await recoverPrivacyPaused(active)
                 : await recoverInterrupted(active);

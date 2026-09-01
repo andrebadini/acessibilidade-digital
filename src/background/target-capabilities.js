@@ -549,14 +549,18 @@ export function createTargetCapabilityAuthority({
     }
     const key = sessionCapabilityStorageKey(input.sessionCapabilityId);
     const session = parseSessionRecord(readStoredValue(await sessionArea.get(key), key));
+    const pausableTarget = session?.targetBinding.kind === 'attached' ||
+      (session?.targetBinding.kind === 'disposable' && session.targetBinding.state === 'retained-for-consent');
+    const resumableTarget = session?.targetBinding.kind === 'attached' ||
+      (session?.targetBinding.kind === 'disposable' && session.targetBinding.state === 'observing');
     const allowed = session && session.sessionCapabilityId === input.sessionCapabilityId &&
       session.auditId === input.auditId &&
-      ((session.state === 'running' && ['privacy-paused', 'result', 'revoked'].includes(input.nextState)) ||
-        (session.state === 'privacy-paused' && ['running', 'revoked'].includes(input.nextState)) ||
+      ((session.state === 'running' && (input.nextState === 'privacy-paused'
+        ? pausableTarget : ['result', 'revoked'].includes(input.nextState))) ||
+        (session.state === 'privacy-paused' && (input.nextState === 'running'
+          ? resumableTarget : input.nextState === 'revoked')) ||
         (['result', 'view-only'].includes(session.state) && input.nextState === 'revoked'));
-    if (!allowed || (input.nextState === 'privacy-paused' && session.targetBinding.kind !== 'attached')) {
-      return transitionDenied();
-    }
+    if (!allowed) return transitionDenied();
     const changed = { ...session, state: input.nextState };
     try { await sessionArea.set({ [key]: changed }); } catch { /* readback confirms commit-then-throw */ }
     let confirmed;
@@ -801,7 +805,9 @@ function parseSessionRecord(value) {
     !targetBinding || !consumers || !intents || !['running', 'privacy-paused', 'result', 'view-only', 'revoked'].includes(record.state) ||
     (targetBinding.kind === 'view-only' && !['view-only', 'revoked'].includes(record.state)) ||
     (record.state === 'view-only' && targetBinding.kind !== 'view-only') ||
-    (record.state === 'privacy-paused' && targetBinding.kind !== 'attached') ||
+    (record.state === 'privacy-paused' && targetBinding.kind !== 'attached' &&
+      !(targetBinding.kind === 'disposable' &&
+        ['retained-for-consent', 'observing'].includes(targetBinding.state))) ||
     !safeTime(record.issuedAt) || !safeTime(record.expiresAt) || record.expiresAt <= record.issuedAt) return null;
   return { ...record, targetBinding, consumers, intents };
 }

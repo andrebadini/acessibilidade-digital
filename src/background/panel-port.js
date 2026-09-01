@@ -151,7 +151,8 @@ function parseSession(value) {
   const validDisposable = record.mode === 'single' && disposableBinding?.kind === 'disposable' &&
     AUDIT_ID.test(disposableBinding.ownershipId ?? '') &&
     ['pending', 'observing', 'retained-for-review', 'retained-for-consent', 'cleanup-pending', 'removed']
-      .includes(disposableBinding.state) && !['privacy-paused', 'view-only'].includes(record.state);
+      .includes(disposableBinding.state) && record.state !== 'view-only' &&
+    (record.state !== 'privacy-paused' || disposableBinding.state === 'retained-for-consent');
   if (!validViewOnly && !validAttached && !validDisposable) return null;
   return freeze(record);
 }
@@ -164,7 +165,7 @@ function parseActive(value) {
     !safeChromeId(record.windowId) || !['attached', 'single'].includes(record.mode) || !safeEpoch(record.createdAt) ||
     !safeEpoch(record.updatedAt) || record.updatedAt < record.createdAt) return undefined;
   if (record.state === 'running' && record.commitState === 'none' && record.expectedTerminalRevision === null) return freeze(record);
-  if (record.mode === 'attached' && record.state === 'privacy-paused' && record.commitState === 'none' && record.expectedTerminalRevision === null) return freeze(record);
+  if (record.state === 'privacy-paused' && record.commitState === 'none' && record.expectedTerminalRevision === null) return freeze(record);
   if (record.state === 'finalizing' && ['pending', 'confirmed'].includes(record.commitState) && record.expectedTerminalRevision === 1) return freeze(record);
   return undefined;
 }
@@ -199,14 +200,19 @@ function parseSuspension(value) {
   const policy = record && exact(record.capturePolicy, CAPTURE_POLICY_KEYS, true);
   const evidence = record && exact(record.urlEvidence, EVIDENCE_URL_KEYS, true);
   const categories = record && canonicalSensitiveCategories(record.categories);
-  const source = record && exact(record.source, ['kind'], true);
+  const attachedSource = record && exact(record.source, ['kind'], true);
+  const ownedSource = record && exact(record.source, ['kind', 'ownershipId', 'cleanupMode', 'pageId'], true);
+  const source = attachedSource?.kind === 'attached' ? attachedSource
+    : ownedSource?.kind === 'owned-disposable' && /^owner_[A-Za-z0-9_-]{22}$/u.test(ownedSource.ownershipId ?? '') &&
+      ownedSource.cleanupMode === 'pre-observation-failure' && ownedSource.pageId === 'page-1'
+      ? ownedSource : null;
   if (!record || record.version !== 'AuditSuspensionV1' || !Number.isSafeInteger(record.revision) ||
     record.revision < 1 || !AUDIT_ID.test(record.auditId ?? '') || !CONSENT_ID.test(record.consentId ?? '') ||
     !safeChromeId(record.tabId) || !safeChromeId(record.windowId) ||
     typeof record.documentId !== 'string' || record.documentId.length < 1 || record.documentId.length > 512 ||
     /[\u0000-\u001F\u007F]/u.test(record.documentId) || !DIGEST.test(record.urlSessionDigest ?? '') ||
     !PIXEL_MODES.has(record.mode) || !policy || !isCapturePolicyV1(policy) || policy.mode !== record.mode ||
-    !evidence || !isEvidenceUrlV1(evidence) || !categories || source?.kind !== 'attached' ||
+    !evidence || !isEvidenceUrlV1(evidence) || !categories || !source ||
     !safeEpoch(record.issuedAt) || !safeEpoch(record.updatedAt) || !safeEpoch(record.expiresAt) ||
     record.updatedAt < record.issuedAt || record.expiresAt <= record.issuedAt ||
     record.cleanupAttempts !== 0 || record.cleanupNotBefore !== null || record.state !== 'paused' ||
@@ -216,7 +222,7 @@ function parseSuspension(value) {
     capturePolicy: { ...policy },
     urlEvidence: { ...evidence },
     categories: [...categories],
-    source: { kind: 'attached' },
+    source: { ...source },
   });
 }
 
@@ -306,15 +312,16 @@ function packet(state, auditId, sessionCapabilityId, result) {
 }
 
 function privacyPausedPacket(suspension, sessionCapabilityId) {
-  return freeze({
+  const packet = {
     protocol: 'audita-panel', version: 1, type: 'privacy-paused',
     auditId: suspension.auditId,
     sessionCapabilityId,
-    consentId: suspension.consentId,
     mode: suspension.mode,
     categories: [...suspension.categories],
     message: PRIVACY_PAUSE_MESSAGE,
-  });
+  };
+  if (suspension.source.kind === 'attached') packet.consentId = suspension.consentId;
+  return freeze(packet);
 }
 
 function deniedRegistration() {
@@ -663,13 +670,21 @@ export function createPanelPortCoordinator(raw) {
   }
 
   function privacyPauseCorrelation(bootstrap, session, active, suspension, currentTime) {
-    const target = exact(session.targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest'], true);
-    return session.state === 'privacy-paused' && session.windowId === bootstrap.windowId && target?.kind === 'attached' &&
+    const attachedTarget = exact(session.targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest'], true);
+    const disposableTarget = exact(session.targetBinding, ['kind', 'ownershipId', 'state'], true);
+    const attached = session.mode === 'attached' && attachedTarget?.kind === 'attached' &&
+      suspension.source.kind === 'attached' && suspension.tabId === attachedTarget.tabId &&
+      suspension.documentId === attachedTarget.documentId &&
+      suspension.urlSessionDigest === attachedTarget.urlSessionDigest;
+    const single = session.mode === 'single' && disposableTarget?.kind === 'disposable' &&
+      disposableTarget.state === 'retained-for-consent' && suspension.source.kind === 'owned-disposable' &&
+      suspension.source.ownershipId === disposableTarget.ownershipId &&
+      suspension.source.cleanupMode === 'pre-observation-failure' && suspension.source.pageId === 'page-1';
+    return session.state === 'privacy-paused' && active?.mode === session.mode &&
+      session.windowId === bootstrap.windowId && (attached || single) &&
       active?.state === 'privacy-paused' && active.auditId === bootstrap.auditId &&
       active.sessionCapabilityId === bootstrap.sessionCapabilityId && active.windowId === bootstrap.windowId &&
       suspension.auditId === bootstrap.auditId && suspension.windowId === bootstrap.windowId &&
-      suspension.tabId === target.tabId && suspension.documentId === target.documentId &&
-      suspension.urlSessionDigest === target.urlSessionDigest && suspension.source.kind === 'attached' &&
       suspension.mode === suspension.capturePolicy.mode && suspension.issuedAt <= currentTime &&
       bootstrap.createdAt <= currentTime && currentTime < bootstrap.expiresAt &&
       currentTime < suspension.expiresAt && currentTime < session.expiresAt;

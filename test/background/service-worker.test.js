@@ -16,6 +16,7 @@ import * as serviceWorkerModule from '../../src/background/service-worker.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-commit-clock.js';
+import { createOwnedTabRegistry } from '../../src/background/owned-tabs.js';
 import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
@@ -541,6 +542,83 @@ test('pixel-attempt recovery classifies an expired prepared marker without remin
   });
   assert.deepEqual(await lifecycle.classify({ auditId, consentId }), { state: 'prepared', handle: null });
   assert.equal(prepareCalls, 0);
+});
+
+test('single-URL pixel attempt keeps the exact page and disposable owner through prepare and classify', async () => {
+  const auditId = 'audit-url-pixel-attempt';
+  const consentId = `${'A'.repeat(21)}Q`;
+  const ownershipId = `owner_${'O'.repeat(22)}`;
+  const attemptDigest = `hmac-sha256:${'F'.repeat(43)}`;
+  const key = `audita:pixel-attempt:v1:${auditId}:${'F'.repeat(43)}`;
+  const marker = {
+    version: 1, auditId, attemptDigest, pageId: 'page-1', ownershipId,
+    preparedAt: 1, expiresAt: 10,
+  };
+  const prepared = [];
+  const matched = [];
+  const lifecycle = serviceWorkerModule.createPixelAttemptLifecycleV1({
+    sessionArea: { async get() { return { [key]: structuredClone(marker) }; } },
+    auditStore: {
+      async commitAuditWithCheckpointIfAbsent() { throw new Error('not used'); },
+      async getReportRevision() { return null; },
+    },
+    attemptAuthority: { async digestAttempt() { return attemptDigest; } },
+    attemptCorrelation: {
+      async prepare(value) { prepared.push(structuredClone(value)); return Object.freeze(Object.create(null)); },
+      async markerMatches(value) { matched.push(structuredClone(value)); return true; },
+      async remove() { return true; },
+    },
+    modelNow: () => '2026-08-29T12:00:00.000Z',
+  });
+
+  const handle = await lifecycle.prepareResume({
+    auditId, consentId, pageId: 'page-1', ownershipId, expiresAt: 10,
+  });
+  assert.deepEqual(Reflect.ownKeys(handle), []);
+  assert.deepEqual(prepared, [{ auditId, consentId, pageId: 'page-1', ownershipId, expiresAt: 10 }]);
+  assert.deepEqual(matched[0], { auditId, attemptDigest, pageId: 'page-1', ownershipId });
+  const classification = await lifecycle.classify({
+    auditId, consentId, pageId: 'page-1', ownershipId,
+  });
+  assert.deepEqual(matched.at(-1), { auditId, attemptDigest, pageId: 'page-1', ownershipId });
+  assert.deepEqual(classification, { state: 'prepared', handle: null });
+  assert.deepEqual(await lifecycle.classify({ auditId, consentId: null }), {
+    state: 'blocked', handle: null,
+  });
+});
+
+test('single-URL cleanup removes only the exact disposable owner even when an audit has another owner', async () => {
+  assert.equal(typeof serviceWorkerModule.createExactUrlAuditResourceCleanerV1, 'function');
+  const area = sessionAreaForCheckpointTest();
+  const removedTabs = [];
+  let clock = 0;
+  const registry = createOwnedTabRegistry({
+    sessionArea: area,
+    chromeAdapter: { async removeTab(tabId) { removedTabs.push(tabId); } },
+    now: () => new Date(1_788_000_000_000 + clock++).toISOString(),
+  });
+  const auditId = 'audit-two-owned-tabs';
+  const ownerOne = `owner_${'A'.repeat(22)}`;
+  const ownerTwo = `owner_${'B'.repeat(22)}`;
+  await registry.registerCreated({
+    ownershipId: ownerOne, auditId, purpose: 'audit', tabId: 27, windowId: 9,
+    cleanupMode: 'pre-observation-failure',
+  });
+  await registry.registerCreated({
+    ownershipId: ownerTwo, auditId, purpose: 'audit', tabId: 28, windowId: 9,
+    cleanupMode: 'pre-observation-failure',
+  });
+  const clearedAudits = [];
+  const cleaner = serviceWorkerModule.createExactUrlAuditResourceCleanerV1({
+    rawNavigationVault: { async clearAudit(value) { clearedAudits.push(value); return 0; } },
+    ownedTabRegistry: registry,
+  });
+
+  assert.equal(await cleaner({ auditId, ownershipId: ownerOne }), true);
+  assert.deepEqual(clearedAudits, [auditId]);
+  assert.deepEqual(removedTabs, [27]);
+  assert.equal((await registry.get(ownerOne)).state, 'removed');
+  assert.equal((await registry.get(ownerTwo)).state, 'created');
 });
 
 test('post-finish cleanup accepts only the companion-first crash cut and removes the remaining marker', async () => {
