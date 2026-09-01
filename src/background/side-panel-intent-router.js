@@ -38,7 +38,7 @@ const READER_STATE_KEYS = Object.freeze([
 ]);
 const PANEL_PORT_TYPES = new Set([
   'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_NAVIGATION_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
-  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_URL_AUDIT', 'CONFIRM_PIXEL_CAPTURE',
+  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_URL_AUDIT', 'CONFIRM_PIXEL_CAPTURE', 'PANEL_CONFIRM_PIXEL_CAPTURE',
   'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
   'PANEL_SET_PERSONA_MODE', 'PANEL_READER_STATE', 'PANEL_READER_ACTION',
   'PANEL_READER_ENABLE_VOICE',
@@ -518,7 +518,8 @@ export function createSidePanelIntentRouter(raw) {
   }
 
   async function startUrl(envelope, sender) {
-    if (!hasUrlAudit || envelope.captureMode !== 'no-pixels' || envelope.includeQuery !== false ||
+    if (!hasUrlAudit || !['full-evidence', 'element-only', 'no-pixels'].includes(envelope.captureMode) ||
+      envelope.includeQuery !== false ||
       envelope.deleteAfterCompleteExport !== false || !canonicalHttpUrl(envelope.url)) return fail('AUDIT_START_FAILED');
     let context;
     try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
@@ -540,7 +541,7 @@ export function createSidePanelIntentRouter(raw) {
         capabilityId: envelope.capabilityId,
         auditId,
         senderContext: context,
-        capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+        capturePolicy: createCapturePolicyV1({ mode: envelope.captureMode, includeQuery: false }),
         retentionPreference: Object.freeze({ version: 1, deleteAfterCompleteExport: false }),
         plan: freeze({
           kind: 'single', ownershipId, navigationToken: issued.navigationToken,
@@ -572,19 +573,39 @@ export function createSidePanelIntentRouter(raw) {
       const session = authorized?.session;
       const context = authorized?.context;
       const targetBinding = own(session, 'targetBinding');
+      const attachedBinding = exact(targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest']);
+      const disposableBinding = exact(targetBinding, ['kind', 'ownershipId', 'state']);
+      const attachedConfirmation = envelope.type === 'CONFIRM_PIXEL_CAPTURE' &&
+        own(session, 'mode') === 'attached' && attachedBinding?.kind === 'attached' &&
+        safeChromeId(attachedBinding.tabId) && typeof attachedBinding.documentId === 'string' &&
+        attachedBinding.documentId.length >= 1 && attachedBinding.documentId.length <= 512 &&
+        !/[\u0000-\u001F\u007F]/u.test(attachedBinding.documentId) &&
+        DIGEST.test(attachedBinding.urlSessionDigest ?? '');
+      const disposableConfirmation = envelope.type === 'PANEL_CONFIRM_PIXEL_CAPTURE' &&
+        own(session, 'mode') === 'single' && disposableBinding?.kind === 'disposable' &&
+        /^owner_[A-Za-z0-9_-]{22}$/u.test(disposableBinding.ownershipId ?? '') &&
+        disposableBinding.state === 'retained-for-consent';
       if (authorized?.ok !== true || own(session, 'auditId') !== envelope.auditId ||
         own(session, 'sessionCapabilityId') !== envelope.sessionCapabilityId ||
         own(session, 'windowId') !== envelope.windowId || own(context, 'windowId') !== envelope.windowId ||
-        own(session, 'mode') !== 'attached' || own(session, 'state') !== 'privacy-paused' ||
-        own(targetBinding, 'kind') !== 'attached') return fail('PIXEL_CONFIRM_DENIED');
+        own(session, 'state') !== 'privacy-paused' ||
+        (!attachedConfirmation && !disposableConfirmation)) return fail('PIXEL_CONFIRM_DENIED');
 
-      const resumed = exact(await input.auditStarter.resumePrivacyPausedAudit({
+      const resumeRequest = disposableConfirmation ? {
+        auditId: envelope.auditId,
+        sessionCapabilityId: envelope.sessionCapabilityId,
+        windowId: envelope.windowId,
+        mode: envelope.mode,
+      } : {
         auditId: envelope.auditId,
         sessionCapabilityId: envelope.sessionCapabilityId,
         windowId: envelope.windowId,
         consentId: envelope.consentId,
         mode: envelope.mode,
-      }), ['response', 'sessionCapabilityId', 'completion']);
+      };
+      const resumed = exact(await input.auditStarter.resumePrivacyPausedAudit(resumeRequest), [
+        'response', 'sessionCapabilityId', 'completion',
+      ]);
       if (!resumed || resumed.sessionCapabilityId !== envelope.sessionCapabilityId) {
         return fail('PIXEL_CONFIRM_DENIED');
       }
@@ -864,7 +885,9 @@ export function createSidePanelIntentRouter(raw) {
     if (envelope.type === 'PREPARE_PANEL_PERSONA_CAPABILITY') return preparePanelPersona(envelope, request.sender, request.launchTabId);
     if (envelope.type === 'PANEL_START_ATTACHED_AUDIT') return startAttached(envelope, request.sender);
     if (envelope.type === 'PANEL_START_URL_AUDIT') return startUrl(envelope, request.sender);
-    if (envelope.type === 'CONFIRM_PIXEL_CAPTURE') return confirmPixelCapture(envelope, request.sender);
+    if (['CONFIRM_PIXEL_CAPTURE', 'PANEL_CONFIRM_PIXEL_CAPTURE'].includes(envelope.type)) {
+      return confirmPixelCapture(envelope, request.sender);
+    }
     if (envelope.type === 'PANEL_START_PERSONA') return startPersona(envelope, request.sender);
     if (envelope.type === 'PANEL_REHYDRATE_PERSONA') return rehydratePersona(envelope, request.sender);
     if (envelope.type === 'PANEL_SET_PERSONA_MODE') return setPersonaMode(envelope, request.sender);

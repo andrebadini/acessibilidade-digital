@@ -39,7 +39,8 @@ const URL_BEGIN_KEYS = Object.freeze([
 const URL_PLAN_KEYS = Object.freeze([
   'kind', 'ownershipId', 'navigationToken', 'navigationPurpose', 'evidenceUrl', 'sessionDigest',
 ]);
-const RESUME_KEYS = Object.freeze(['auditId', 'sessionCapabilityId', 'windowId', 'consentId', 'mode']);
+const ATTACHED_RESUME_KEYS = Object.freeze(['auditId', 'sessionCapabilityId', 'windowId', 'consentId', 'mode']);
+const SINGLE_RESUME_KEYS = Object.freeze(['auditId', 'sessionCapabilityId', 'windowId', 'mode']);
 const ACTIVE_KEYS = Object.freeze([
   'version', 'auditId', 'capabilityId', 'sessionCapabilityId', 'windowId', 'mode',
   'state', 'commitState', 'expectedTerminalRevision', 'createdAt', 'updatedAt',
@@ -1658,29 +1659,35 @@ export function createAuthorizedAuditStarter(input) {
   }
 
   async function resumePrivacyPausedAudit(raw) {
-    const args = exact(raw, RESUME_KEYS);
+    const attachedArgs = exact(raw, ATTACHED_RESUME_KEYS);
+    const singleArgs = attachedArgs ? null : exact(raw, SINGLE_RESUME_KEYS);
+    const args = attachedArgs ?? singleArgs;
     const denied = () => freeze({
       response: { ok: false, code: 'AUDIT_RESUME_DENIED' }, sessionCapabilityId: null, completion: null,
     });
     if (!args || !AUDIT_ID.test(args.auditId ?? '') || !CAPABILITY.test(args.sessionCapabilityId ?? '') ||
       !Number.isSafeInteger(args.windowId) || args.windowId < 0 ||
-      !/^[A-Za-z0-9_-]{21}[AQgw]$/u.test(args.consentId ?? '') ||
+      (attachedArgs && !/^[A-Za-z0-9_-]{21}[AQgw]$/u.test(attachedArgs.consentId ?? '')) ||
       !['full-evidence', 'element-only'].includes(args.mode)) return denied();
 
     let preliminaryActive;
     let preliminarySuspension;
+    let consentId;
     try {
       preliminaryActive = await readActiveAuditJobForWorker({ sessionArea });
       if (!preliminaryActive || preliminaryActive.state !== 'privacy-paused' ||
         preliminaryActive.auditId !== args.auditId ||
         preliminaryActive.sessionCapabilityId !== args.sessionCapabilityId ||
-        preliminaryActive.windowId !== args.windowId) return denied();
+        preliminaryActive.windowId !== args.windowId ||
+        (preliminaryActive.mode === 'attached' ? !attachedArgs : !singleArgs)) return denied();
       const preliminary = await readCorrelatedPixelSuspension(preliminaryActive);
       preliminarySuspension = preliminary.suspension;
+      consentId = attachedArgs?.consentId ?? preliminarySuspension?.consentId;
       const preliminaryTargetState = preliminaryActive.mode === 'single' ? 'retained-for-consent' : 'claimed';
       if (preliminary.sessionState !== 'privacy-paused' || preliminary.targetState !== preliminaryTargetState ||
         !preliminarySuspension || preliminarySuspension.state !== 'paused' ||
-        preliminarySuspension.consentId !== args.consentId ||
+        !/^[A-Za-z0-9_-]{21}[AQgw]$/u.test(consentId ?? '') ||
+        preliminarySuspension.consentId !== consentId ||
         preliminarySuspension.mode !== args.mode) return denied();
     } catch { return denied(); }
 
@@ -1713,24 +1720,24 @@ export function createAuthorizedAuditStarter(input) {
             if (correlated.sessionState !== 'privacy-paused' || correlated.targetState !== expectedPausedTarget ||
               journal !== null || !checkpoint || !grant || !suspension || suspension.state !== 'paused' ||
               (active.mode === 'single' && !requestedEvidence) ||
-              suspension.consentId !== args.consentId || suspension.mode !== args.mode) return denied();
+              suspension.consentId !== consentId || suspension.mode !== args.mode) return denied();
             const revokeAndLiquidate = async (reason, code) => {
               try {
                 const currentSuspension = (await readCorrelatedPixelSuspension(active)).suspension;
-                if (!currentSuspension || currentSuspension.consentId !== args.consentId ||
+                if (!currentSuspension || currentSuspension.consentId !== consentId ||
                   !['paused', 'resuming', 'revoked'].includes(currentSuspension.state)) {
                   return freeze({ response: { ok: false, code: 'AUDIT_RECOVERY_REQUIRED' }, sessionCapabilityId: null, completion: null });
                 }
                 if (currentSuspension.state !== 'revoked') {
-                  await pixelState.revokeAudit({ auditId: active.auditId, consentId: args.consentId, reason });
+                  await pixelState.revokeAudit({ auditId: active.auditId, consentId, reason });
                   await schedulePixelExpiryBestEffort();
                 }
                 const revoked = (await readCorrelatedPixelSuspension(active)).suspension;
                 const controller = createAbortController();
-                const liquidated = revoked?.consentId === args.consentId && revoked.state === 'revoked' &&
+                const liquidated = revoked?.consentId === consentId && revoked.state === 'revoked' &&
                   revoked.revokeReason === reason && controller?.signal &&
                   await liquidatePixelAuditLocked({
-                    auditId: active.auditId, consentId: args.consentId, reason,
+                    auditId: active.auditId, consentId, reason,
                     source: revoked.source, signal: controller.signal,
                   }, scope);
                 return liquidated
@@ -1758,7 +1765,7 @@ export function createAuthorizedAuditStarter(input) {
                   }
                 : { kind: 'attached', ...proof };
               await pixelState.claimAndBeginResume({
-                auditId: active.auditId, consentId: args.consentId,
+                auditId: active.auditId, consentId,
                 proof: resumeProof, mode: args.mode, categories: signals.categories,
               });
             } catch (error) {
@@ -1770,7 +1777,7 @@ export function createAuthorizedAuditStarter(input) {
               }
               if (error?.message !== 'PIXEL_CONSENT_SIGNALS_CHANGED') return denied();
               const replacement = (await readCorrelatedPixelSuspension(active)).suspension;
-              if (!replacement || replacement.state !== 'paused' || replacement.consentId === args.consentId) return denied();
+              if (!replacement || replacement.state !== 'paused' || replacement.consentId === consentId) return denied();
               await schedulePixelExpiryBestEffort();
               await persistExactLatest(latestState(active.auditId, 'PRIVACY_PAUSED', modelNow));
               if (await scope.publishPrivacyPaused({
@@ -1795,9 +1802,9 @@ export function createAuthorizedAuditStarter(input) {
               }
             }
             await transitionConfirmed(active, 'running');
-            await pixelState.markSessionRunning({ auditId: active.auditId, consentId: args.consentId });
+            await pixelState.markSessionRunning({ auditId: active.auditId, consentId });
             const attemptHandle = await pixelAttemptLifecycle.prepareResume({
-              auditId: active.auditId, consentId: args.consentId,
+              auditId: active.auditId, consentId,
               pageId: active.mode === 'single' ? 'page-1' : null,
               ownershipId: active.mode === 'single' ? suspension.source.ownershipId : null,
               expiresAt: suspension.expiresAt,
@@ -1818,7 +1825,7 @@ export function createAuthorizedAuditStarter(input) {
               return revokeAndLiquidate('PIXEL_RESUME_INTERRUPTED', 'AUDIT_RESUME_DENIED');
             }
             const privacyGate = createPixelPrivacyGateV1({
-              pixelState, consentId: args.consentId,
+              pixelState, consentId,
               authorityExpiresAt: suspension.expiresAt,
               commitClock: pixelCommitClock, async afterPixels() {},
             });
@@ -1835,7 +1842,7 @@ export function createAuthorizedAuditStarter(input) {
               resumeCheckpoint: checkpoint.checkpoint,
               ...(resumeTarget ? { plan: null, resumeTarget, observedTarget: null } : {}),
               ...(resumeTarget ? { requestedUrlEvidence: requestedEvidence.evidenceUrl } : {}),
-              consentId: args.consentId, targetLock: lock,
+              consentId, targetLock: lock,
               externallyInvalidated: false, liquidationReason: null,
               committed: null, completion, attemptHandle,
             };

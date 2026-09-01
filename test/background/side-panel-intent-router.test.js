@@ -13,7 +13,7 @@ const LAUNCH_TOKEN = 'L'.repeat(43);
 const PANEL_URL = `chrome-extension://${RUNTIME_ID}/src/panel/index.html?launch=${LAUNCH_TOKEN}`;
 const PANEL_TYPES = new Set([
   'PREPARE_PANEL_CAPABILITY', 'PREPARE_PANEL_NAVIGATION_CAPABILITY', 'PREPARE_PANEL_PERSONA_CAPABILITY',
-  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_URL_AUDIT', 'CONFIRM_PIXEL_CAPTURE',
+  'PANEL_START_ATTACHED_AUDIT', 'PANEL_START_URL_AUDIT', 'CONFIRM_PIXEL_CAPTURE', 'PANEL_CONFIRM_PIXEL_CAPTURE',
   'PANEL_START_PERSONA', 'PANEL_REHYDRATE_PERSONA',
   'PANEL_SET_PERSONA_MODE', 'PANEL_READER_STATE', 'PANEL_READER_ACTION',
   'PANEL_READER_ENABLE_VOICE',
@@ -93,7 +93,9 @@ function fixture(overrides = {}) {
       return { ok: true, session: {
         auditId: value.auditId, sessionCapabilityId: value.sessionCapabilityId,
         windowId: 9, mode: 'attached',
-        targetBinding: { kind: 'attached' },
+        targetBinding: {
+          kind: 'attached', tabId: 17, documentId: 'document-a', urlSessionDigest: DIGEST,
+        },
         state: value.intent === 'confirm-pixels' ? 'privacy-paused' : 'result',
       }, context: { windowId: 9 } };
     },
@@ -511,6 +513,56 @@ test('prepares and starts one tokenized URL without returning or retaining priva
   assert.equal(begin.capturePolicy.mode, 'no-pixels');
 });
 
+test('starts every URL capture mode with its exact canonical policy and clears the vault on denial', async () => {
+  const { router, calls } = fixture();
+  for (const [index, captureMode] of ['full-evidence', 'element-only', 'no-pixels'].entries()) {
+    const response = await router.dispatch({
+      envelope: parsed({
+        type: 'PANEL_START_URL_AUDIT', capabilityId: 'N'.repeat(22),
+        url: `https://example.test/${captureMode}?token=raw`, captureMode,
+        includeQuery: false, deleteAfterCompleteExport: false, windowId: 9,
+      }),
+      sender: panelSender(),
+    });
+    assert.deepEqual(response, { ok: true, auditId: `audit-router-${index + 1}`, state: 'running' });
+  }
+  assert.deepEqual(calls.filter(([name]) => name === 'begin-url').map(([, value]) => value.capturePolicy), [
+    {
+      version: 'CapturePolicyV1', mode: 'full-evidence', includeQuery: false,
+      captureFullPage: true, captureElements: true, composeAnnouncementMap: false,
+    },
+    {
+      version: 'CapturePolicyV1', mode: 'element-only', includeQuery: false,
+      captureFullPage: false, captureElements: true, composeAnnouncementMap: false,
+    },
+    {
+      version: 'CapturePolicyV1', mode: 'no-pixels', includeQuery: false,
+      captureFullPage: false, captureElements: false, composeAnnouncementMap: false,
+    },
+  ]);
+
+  const denied = fixture({
+    urlAuditStarter: {
+      async beginAuthorizedUrlAudit() {
+        return { response: { ok: false, code: 'AUDIT_START_FAILED' } };
+      },
+    },
+  });
+  const response = await denied.router.dispatch({
+    envelope: parsed({
+      type: 'PANEL_START_URL_AUDIT', capabilityId: 'N'.repeat(22),
+      url: 'https://example.test/private?token=must-not-escape', captureMode: 'full-evidence',
+      includeQuery: false, deleteAfterCompleteExport: false, windowId: 9,
+    }),
+    sender: panelSender(),
+  });
+  assert.deepEqual(response, { ok: false, code: 'AUDIT_START_FAILED' });
+  assert.deepEqual(denied.calls.filter(([name]) => name === 'vault-clear'), [
+    ['vault-clear', 'audit-router-1'],
+  ]);
+  assert.doesNotMatch(JSON.stringify(response), /must-not-escape|token|digest|owner|capability/iu);
+});
+
 test('starts each closed capture mode with its exact canonical policy', async () => {
   const { router, calls } = fixture();
   for (const captureMode of ['full-evidence', 'element-only', 'no-pixels']) {
@@ -560,6 +612,93 @@ test('authorizes and resumes one correlated privacy pause without exposing the c
   });
   assert.deepEqual(Reflect.ownKeys(response), ['ok', 'auditId', 'state']);
   assert.equal(calls.some(([name]) => ['begin', 'abort'].includes(name)), false);
+});
+
+test('resumes a correlated single-URL pause without receiving or forwarding private consent data', async () => {
+  const { router, calls, dependencies } = fixture();
+  dependencies.authority.authorizeSession = async value => {
+    calls.push(['authorize', value]);
+    return {
+      ok: true,
+      session: {
+        auditId: value.auditId, sessionCapabilityId: value.sessionCapabilityId,
+        windowId: 9, mode: 'single', state: 'privacy-paused',
+        targetBinding: {
+          kind: 'disposable', ownershipId: `owner_${'O'.repeat(22)}`, state: 'retained-for-consent',
+        },
+      },
+      context: { windowId: 9 },
+    };
+  };
+
+  const response = await router.dispatch({
+    envelope: parsed({
+      type: 'PANEL_CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION,
+      auditId: 'audit-url-paused', mode: 'element-only', accepted: true, windowId: 9,
+    }),
+    sender: panelSender(),
+  });
+
+  assert.deepEqual(response, { ok: true, auditId: 'audit-url-paused', state: 'running' });
+  assert.deepEqual(calls.find(([name]) => name === 'resume')[1], {
+    auditId: 'audit-url-paused', sessionCapabilityId: SESSION, windowId: 9,
+    mode: 'element-only',
+  });
+  assert.deepEqual(Reflect.ownKeys(response), ['ok', 'auditId', 'state']);
+  assert.doesNotMatch(JSON.stringify(response), /consent|owner_|hmac-sha256|digest/iu);
+});
+
+test('denies message, session, or disposable-binding drift before the single-URL starter', async t => {
+  const mutations = [
+    session => ({ ...session, state: 'running' }),
+    session => ({ ...session, mode: 'attached' }),
+    session => ({ ...session, targetBinding: { kind: 'attached' } }),
+    session => ({ ...session, targetBinding: { ...session.targetBinding, state: 'observing' } }),
+    session => ({ ...session, targetBinding: { ...session.targetBinding, ownershipId: 'owner_forged' } }),
+  ];
+  for (const [index, mutate] of mutations.entries()) await t.test(`single-${index}`, async () => {
+    const { router, calls, dependencies } = fixture();
+    dependencies.authority.authorizeSession = async value => ({
+      ok: true,
+      session: mutate({
+        auditId: value.auditId, sessionCapabilityId: value.sessionCapabilityId,
+        windowId: 9, mode: 'single', state: 'privacy-paused',
+        targetBinding: {
+          kind: 'disposable', ownershipId: `owner_${'O'.repeat(22)}`, state: 'retained-for-consent',
+        },
+      }),
+      context: { windowId: 9 },
+    });
+    assert.deepEqual(await router.dispatch({
+      envelope: parsed({
+        type: 'PANEL_CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION,
+        auditId: 'audit-url-paused', mode: 'full-evidence', accepted: true, windowId: 9,
+      }),
+      sender: panelSender(),
+    }), { ok: false, code: 'PIXEL_CONFIRM_DENIED' });
+    assert.equal(calls.some(([name]) => name === 'resume'), false);
+  });
+
+  const { router, calls, dependencies } = fixture();
+  dependencies.authority.authorizeSession = async value => ({
+    ok: true,
+    session: {
+      auditId: value.auditId, sessionCapabilityId: value.sessionCapabilityId,
+      windowId: 9, mode: 'single', state: 'privacy-paused',
+      targetBinding: {
+        kind: 'disposable', ownershipId: `owner_${'O'.repeat(22)}`, state: 'retained-for-consent',
+      },
+    },
+    context: { windowId: 9 },
+  });
+  assert.deepEqual(await router.dispatch({
+    envelope: parsed({
+      type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: 'audit-url-paused',
+      consentId: CONSENT, mode: 'full-evidence', accepted: true, windowId: 9,
+    }),
+    sender: panelSender(),
+  }), { ok: false, code: 'PIXEL_CONFIRM_DENIED' });
+  assert.equal(calls.some(([name]) => name === 'resume'), false);
 });
 
 test('projects only closed resume successes and allowlisted failures', async t => {
@@ -626,7 +765,11 @@ test('denies uncorrelated paused sessions and malformed starter wrappers', async
       ok: true,
       session: mutate({
         auditId: value.auditId, sessionCapabilityId: value.sessionCapabilityId,
-        windowId: 9, mode: 'attached', targetBinding: { kind: 'attached' }, state: 'privacy-paused',
+        windowId: 9, mode: 'attached',
+        targetBinding: {
+          kind: 'attached', tabId: 17, documentId: 'document-a', urlSessionDigest: DIGEST,
+        },
+        state: 'privacy-paused',
       }),
       context: { windowId: 9 },
     });

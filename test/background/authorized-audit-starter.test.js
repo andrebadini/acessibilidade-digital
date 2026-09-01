@@ -1124,7 +1124,7 @@ test('single-URL document drift revokes consent and cleans only its exact retain
 
   const result = await createAuthorizedAuditStarter(harness.dependencies).resumePrivacyPausedAudit({
     auditId, sessionCapabilityId: harness.started.sessionCapabilityId, windowId: 9,
-    consentId: suspension.consentId, mode: 'full-evidence',
+    mode: 'full-evidence',
   });
 
   assert.deepEqual(result, {
@@ -1449,9 +1449,18 @@ test('single-URL consent is one-shot and resumes the retained owner without navi
   await started.completion;
   const paused = await pixelState.readSuspension(auditId);
 
-  const resumed = await createAuthorizedAuditStarter(dependencies).resumePrivacyPausedAudit({
+  const forgedPublicConsent = await createAuthorizedAuditStarter(dependencies).resumePrivacyPausedAudit({
     auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9,
     consentId: paused.consentId, mode: 'element-only',
+  });
+  assert.deepEqual(forgedPublicConsent, {
+    response: { ok: false, code: 'AUDIT_RESUME_DENIED' }, sessionCapabilityId: null, completion: null,
+  });
+  assert.equal(executions, 1);
+
+  const resumed = await createAuthorizedAuditStarter(dependencies).resumePrivacyPausedAudit({
+    auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9,
+    mode: 'element-only',
   });
   assert.deepEqual(resumed.response, { ok: true, auditId, state: 'running' });
   assert.deepEqual(await resumed.completion, { ok: true, auditId, state: 'result', revision: 1 });
@@ -1473,7 +1482,7 @@ test('single-URL consent is one-shot and resumes the retained owner without navi
 
   const replay = await createAuthorizedAuditStarter(dependencies).resumePrivacyPausedAudit({
     auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9,
-    consentId: paused.consentId, mode: 'element-only',
+    mode: 'element-only',
   });
   assert.deepEqual(replay, {
     response: { ok: false, code: 'AUDIT_RESUME_DENIED' }, sessionCapabilityId: null, completion: null,
@@ -1707,6 +1716,23 @@ async function pausedAuditHarness(auditId) {
     expire(value) { currentAt = value; },
   };
 }
+
+test('attached privacy resume still requires its legacy private consent identifier', async () => {
+  const auditId = 'audit-attached-private-consent-required';
+  const harness = await pausedAuditHarness(auditId);
+  const suspension = await harness.suspension();
+
+  const missingConsent = await createAuthorizedAuditStarter(harness.dependencies).resumePrivacyPausedAudit({
+    auditId, sessionCapabilityId: harness.started.sessionCapabilityId,
+    windowId: 9, mode: 'full-evidence',
+  });
+
+  assert.deepEqual(missingConsent, {
+    response: { ok: false, code: 'AUDIT_RESUME_DENIED' }, sessionCapabilityId: null, completion: null,
+  });
+  assert.equal(harness.executions, 1);
+  assert.deepEqual(await harness.suspension(), suspension);
+});
 
 test('a failed running-resume publication compensates the claimed attempt before returning denial', async t => {
   for (const [name, publishRunningResume] of [
