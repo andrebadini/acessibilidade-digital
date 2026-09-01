@@ -7,6 +7,7 @@ import {
 } from '../../src/background/observed-tab-runner.js';
 import { createObservedPipelineRunner } from '../../src/background/audit-pipeline.js';
 import { createPixelPipelinePreflightV1, createPixelPrivacyGateV1 } from '../../src/background/pixel-privacy-gate.js';
+import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-commit-clock.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
@@ -70,6 +71,7 @@ function makePrivacyGate({ policy = FULL_POLICY, calls = [], consentId = null, s
       async gateRunnerStart() { throw new Error('unexpected resume'); },
     },
     consentId, authorityExpiresAt: 1_900_000_000_000,
+    commitClock: createScriptedPixelCommitClockV1({ epochs: Array(8).fill(1_800_000_000_010) }),
     async afterPixels() { calls.push('after-pixels'); },
   });
 }

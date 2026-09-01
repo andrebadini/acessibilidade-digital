@@ -23,6 +23,10 @@ import {
 import { createAuditLifecycle } from './audit-lifecycle.js';
 import { createPixelCaptureStateV1 } from './pixel-capture-consent.js';
 import {
+  createNativePixelCommitClockV1,
+  isPixelCommitClockV1,
+} from './pixel-commit-clock.js';
+import {
   PIXEL_CONSENT_ALARM_NAME,
   createPixelConsentExpirySchedulerV1,
 } from './pixel-consent-expiry.js';
@@ -725,6 +729,12 @@ export function createReportOperations({
 }
 
 async function buildDefaultRuntime(chromeApi, options) {
+  const pixelCommitClockFactory = options.pixelCommitClockFactory ?? createNativePixelCommitClockV1;
+  if (typeof pixelCommitClockFactory !== 'function') throw new Error('WORKER_UNAVAILABLE');
+  let pixelCommitClock;
+  try { pixelCommitClock = pixelCommitClockFactory(); }
+  catch { throw new Error('WORKER_UNAVAILABLE'); }
+  if (!isPixelCommitClockV1(pixelCommitClock)) throw new Error('WORKER_UNAVAILABLE');
   const chromeAuditAuthority = typeof options.chromeAdapterFactory === 'function'
     ? null
     : createChromeAuditAuthority(chromeApi);
@@ -948,6 +958,7 @@ async function buildDefaultRuntime(chromeApi, options) {
     readReportRevision: ({ auditId }) => auditStore.getReportRevision(auditId),
     readLatest: () => auditStore.getLatest(), buildPanelResultBundle,
     recordHighlightBinding: value => highlightBindingRecorder.record(value),
+    pixelCommitClock,
     epochNow, modelNow, createAbortController: () => new AbortController(),
     pixelState,
     probeDocumentIdentity: tabId => chromeAdapter.probeDocumentIdentity(tabId),

@@ -12,6 +12,7 @@ import { verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
 import { copyPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
 import { parseStorageGetEnvelope } from './storage-get-envelope.js';
 import { createPixelPrivacyGateV1 } from './pixel-privacy-gate.js';
+import { isPixelCommitClockV1 } from './pixel-commit-clock.js';
 import { isTerminalDeliveryV1 } from './panel-port.js';
 
 export const ACTIVE_AUDIT_JOB_KEY = 'audita:active-audit-job:v1';
@@ -23,7 +24,7 @@ const FACTORY_KEYS = Object.freeze([
   'authority', 'sessionArea', 'panelCoordinator', 'targetQueue', 'cleanupBarrier', 'runAttachedAuditExecution',
   'persistLatest', 'persistCheckpoint', 'removeCheckpoint', 'commitTerminalAudit',
   'readAuditSnapshot', 'readReportRevision', 'readLatest', 'buildPanelResultBundle', 'recordHighlightBinding',
-  'epochNow', 'modelNow', 'createAbortController', 'pixelState', 'probeDocumentIdentity',
+  'pixelCommitClock', 'epochNow', 'modelNow', 'createAbortController', 'pixelState', 'probeDocumentIdentity',
   'probeSensitiveCaptureSignals', 'pixelAttemptLifecycle', 'schedulePixelExpiry',
 ]);
 const BEGIN_KEYS = Object.freeze([
@@ -429,7 +430,7 @@ export function createAuthorizedAuditStarter(input) {
   if (!dependencies || !dependencies.authority || !dependencies.sessionArea || !dependencies.panelCoordinator ||
     FACTORY_KEYS.filter(key => ![
       'authority', 'sessionArea', 'panelCoordinator', 'targetQueue', 'cleanupBarrier', 'pixelState',
-      'pixelAttemptLifecycle',
+      'pixelAttemptLifecycle', 'pixelCommitClock',
     ].includes(key))
       .some(key => typeof dependencies[key] !== 'function') ||
     typeof dependencies.sessionArea.get !== 'function' || typeof dependencies.sessionArea.set !== 'function' ||
@@ -444,6 +445,7 @@ export function createAuthorizedAuditStarter(input) {
     typeof dependencies.targetQueue?.withTarget !== 'function' ||
     typeof dependencies.targetQueue?.assertHeld !== 'function' ||
     typeof dependencies.cleanupBarrier?.clearForAuditLocked !== 'function' ||
+    !isPixelCommitClockV1(dependencies.pixelCommitClock) ||
     !dependencies.pixelState ||
     ['pause', 'gateRunnerStart', 'readSuspension', 'claimAndBeginResume', 'markSessionRunning', 'finish', 'revokeAudit']
       .some(key => typeof dependencies.pixelState[key] !== 'function') ||
@@ -460,7 +462,8 @@ export function createAuthorizedAuditStarter(input) {
     authority, sessionArea, panelCoordinator, targetQueue, cleanupBarrier, runAttachedAuditExecution,
     persistLatest, persistCheckpoint, removeCheckpoint, commitTerminalAudit,
     readAuditSnapshot, readReportRevision, readLatest, buildPanelResultBundle, recordHighlightBinding,
-    epochNow, modelNow, createAbortController, pixelState, probeDocumentIdentity, probeSensitiveCaptureSignals,
+    pixelCommitClock, epochNow, modelNow, createAbortController, pixelState,
+    probeDocumentIdentity, probeSensitiveCaptureSignals,
     pixelAttemptLifecycle, schedulePixelExpiry,
   } = dependencies;
   let globalTail = Promise.resolve();
@@ -1091,7 +1094,8 @@ export function createAuthorizedAuditStarter(input) {
             });
             await writeConfirmed(sessionArea, ACTIVE_AUDIT_JOB_KEY, active, activeRecord, 'ACTIVE_AUDIT_JOB_DENIED');
             const privacyGate = capturePolicy.mode === 'no-pixels' ? null : createPixelPrivacyGateV1({
-              pixelState, consentId: null, authorityExpiresAt: grant.expiresAt, async afterPixels() {},
+              pixelState, consentId: null, authorityExpiresAt: grant.expiresAt,
+              commitClock: pixelCommitClock, async afterPixels() {},
             });
             const liveRecord = {
               active, controller, grant, capturePolicy, privacyGate, consentId: null, targetLock: lock,
@@ -1281,7 +1285,8 @@ export function createAuthorizedAuditStarter(input) {
             }
             const privacyGate = createPixelPrivacyGateV1({
               pixelState, consentId: args.consentId,
-              authorityExpiresAt: suspension.expiresAt, async afterPixels() {},
+              authorityExpiresAt: suspension.expiresAt,
+              commitClock: pixelCommitClock, async afterPixels() {},
             });
             const controller = createAbortController();
             const liveRecord = {

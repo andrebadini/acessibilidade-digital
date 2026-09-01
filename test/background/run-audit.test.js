@@ -19,6 +19,7 @@ import { renderHtmlReport } from '../../src/core/report/html.js';
 import { createAnnotationMapFixture } from '../report/annotation-map-fixture.js';
 import { captureElement as captureElementEvidence, captureFullPage as captureFullPageEvidence } from '../../src/browser/capture-evidence.js';
 import { createPixelPrivacyGateV1 } from '../../src/background/pixel-privacy-gate.js';
+import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-commit-clock.js';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const TEST_EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
@@ -29,12 +30,14 @@ const PASSWORD_SIGNALS = Object.freeze({ version: 'SensitiveCaptureSignalsV1', d
 
 function attachedPixelGate(policy, calls, {
   auditId = 'audit-attached-pixels', consentId = null, runnerStatus = 'ready', beforeGateResult = null,
+  commitClock = createScriptedPixelCommitClockV1({ epochs: Array(8).fill(1_788_000_000_010) }),
+  suspensionUpdatedAt = 1_788_000_000_010,
 } = {}) {
   const suspension = ({ state, resumePhase, token, categories }) => ({
     version: 'AuditSuspensionV1', revision: 1, auditId, consentId: token,
     tabId: 42, windowId: 9, documentId: 'document-a', urlEvidence: TEST_EVIDENCE_URL,
     urlSessionDigest: TEST_DIGEST, mode: policy.mode, capturePolicy: policy, categories,
-    issuedAt: 1_788_000_000_000, updatedAt: 1_788_000_000_001, expiresAt: 1_788_000_600_000,
+    issuedAt: 1_788_000_000_000, updatedAt: suspensionUpdatedAt, expiresAt: 1_788_000_600_000,
     cleanupAttempts: 0, cleanupNotBefore: null, state, resumePhase, revokeReason: null, source: { kind: 'attached' },
   });
   return createPixelPrivacyGateV1({
@@ -48,7 +51,7 @@ function attachedPixelGate(policy, calls, {
           : { version: 'PixelRunnerGateResultV1', status: 'repaused', suspension: suspension({ state: 'paused', resumePhase: null, token: 'C'.repeat(21) + 'Q', categories: value.categories }) };
       },
     },
-    consentId, authorityExpiresAt: 1_900_000_000_000,
+    consentId, authorityExpiresAt: 1_900_000_000_000, commitClock,
     async afterPixels() { calls.push('after'); },
   });
 }
@@ -620,7 +623,7 @@ test('attached full-evidence crosses proof, fresh probe and gate before raster, 
   assert.equal(adapter.counts.fullPageCalls, 1);
   assert.equal(adapter.events.includes('map'), true);
   const raster = adapter.events.indexOf('full-page');
-  assert.deepEqual(adapter.events.slice(raster - 3, raster), ['proof-2', 'sensitive-probe', 'proof-3']);
+  assert.deepEqual(adapter.events.slice(raster - 3, raster), ['sensitive-probe', 'proof-2', 'proof-3']);
   assert.deepEqual(gateCalls, ['after']);
 });
 
@@ -1023,6 +1026,41 @@ test('attached navigation while the runner gate is pending produces zero raster'
   assert.equal(result.state, 'revoked');
   assert.equal(result.failureCode, 'TARGET_CHANGED');
   assert.equal(adapter.counts.screenshots, 0);
+  assert.deepEqual(gateCalls, ['gate', 'after']);
+});
+
+test('attached consent expiring between gate authorization and final proof starts zero raster, persists nothing and cleans once', async () => {
+  const auditId = 'audit-attached-expired-at-raster';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const consentId = 'A'.repeat(21) + 'Q';
+  const gateCalls = [];
+  const clockValues = [1_788_000_599_999, 1_788_000_600_000];
+  let persisted = 0;
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST,
+    },
+    capturePolicy: policy,
+    privacyGate: attachedPixelGate(policy, gateCalls, {
+      auditId, consentId,
+      commitClock: createScriptedPixelCommitClockV1({ epochs: clockValues }),
+      suspensionUpdatedAt: clockValues[0],
+    }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { persisted += 1; },
+  });
+
+  assert.equal(result.state, 'revoked');
+  assert.equal(adapter.counts.screenshots, 0);
+  assert.equal(adapter.counts.fullPageCalls, 0);
+  assert.equal(adapter.counts.elementCalls, 0);
+  assert.equal(persisted, 0);
   assert.deepEqual(gateCalls, ['gate', 'after']);
 });
 

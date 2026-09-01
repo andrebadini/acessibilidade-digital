@@ -31,6 +31,7 @@ import { createPanelResultBundleV1 } from '../../src/panel/panel-result-bundle.j
 import { createPanelSessionPortClient } from '../../src/panel/panel-session-port.js';
 import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
 import { createPixelCaptureStateV1 } from '../../src/background/pixel-capture-consent.js';
+import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-commit-clock.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
@@ -40,6 +41,12 @@ const DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
 const EPOCH = 1_788_000_000_000;
 const START_JOURNAL_KEY = 'audita:start-journal:v1';
 const PANEL_URL = `chrome-extension://abcdefghijklmnopabcdefghijklmnop/src/panel/index.html?launch=${'L'.repeat(43)}`;
+
+function pixelCommitClock() {
+  return createScriptedPixelCommitClockV1({
+    epochs: [EPOCH + 1, ...Array(255).fill(EPOCH + 1_000)],
+  });
+}
 
 function sessionArea() {
   const values = Object.create(null);
@@ -447,6 +454,7 @@ function dependencyFixture({
       return createPanelResultBundleV1({ reportRevision, inventory });
     },
     async recordHighlightBinding() { return null; },
+    pixelCommitClock: pixelCommitClock(),
     epochNow: () => EPOCH + 1,
     modelNow: () => '2026-08-29T12:00:00.000Z',
     createAbortController: () => new AbortController(),
@@ -584,6 +592,7 @@ function capturePolicyGateHarness() {
     readLatest: touched('readLatest'),
     buildPanelResultBundle: touched('buildPanelResultBundle'),
     recordHighlightBinding: touched('recordHighlightBinding'),
+    pixelCommitClock: pixelCommitClock(),
     epochNow: touched('epochNow'),
     modelNow: touched('modelNow'),
     createAbortController: touched('createAbortController'),
@@ -605,6 +614,24 @@ function capturePolicyGateHarness() {
   };
   return { dependencies, effects };
 }
+
+test('starter rejects an unbranded pixel commit clock before any dependency effect', () => {
+  for (const invalidClock of [
+    Object.freeze(Object.create(null)),
+    {},
+    { ...pixelCommitClock() },
+    new Proxy(pixelCommitClock(), {}),
+  ]) {
+    const { dependencies, effects } = capturePolicyGateHarness();
+    dependencies.pixelCommitClock = invalidClock;
+    assert.throws(() => createAuthorizedAuditStarter(dependencies), /AUTHORIZED_AUDIT_STARTER_INVALID/u);
+    assert.deepEqual(effects, []);
+  }
+
+  const { dependencies, effects } = capturePolicyGateHarness();
+  assert.doesNotThrow(() => createAuthorizedAuditStarter(dependencies));
+  assert.deepEqual(effects, []);
+});
 
 test('admits every closed capture policy before target inspection without touching pixel state', async t => {
   const beginInput = (auditId, mode) => ({

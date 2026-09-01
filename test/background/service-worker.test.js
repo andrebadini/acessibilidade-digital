@@ -15,10 +15,12 @@ import { PIXEL_CONSENT_ALARM_NAME } from '../../src/background/pixel-consent-exp
 import * as serviceWorkerModule from '../../src/background/service-worker.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
+import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-commit-clock.js';
 import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
 import { createFakeLockManager } from '../personas/fake-lock-manager.js';
 
 const CAPABILITY = 'C'.repeat(22);
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 
 function event() {
   const listeners = new Set();
@@ -291,6 +293,9 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
     epochNow: () => 1_788_000_000_000,
     modelNow: fixtureOptions.modelNow ?? (() => '2026-08-29T12:00:00.000Z'),
     randomBytes: length => new Uint8Array(length).fill(7),
+    ...(fixtureOptions.useNativePixelCommitClock === true ? {} : {
+      pixelCommitClockFactory: () => createScriptedPixelCommitClockV1({ epochs: Array(256).fill(1_788_000_000_000) }),
+    }),
     ...(fixtureOptions.rawNavigationVaultFactory ? { rawNavigationVaultFactory: fixtureOptions.rawNavigationVaultFactory } : {}),
     ...(fixtureOptions.pixelConsentSchedulerFactory
       ? { pixelConsentSchedulerFactory: fixtureOptions.pixelConsentSchedulerFactory }
@@ -811,6 +816,13 @@ test('default runtime serializes persona recovery with the supplied Web Locks ma
     call.name === 'audita:persona-lease-store:v1' && call.options.mode === 'exclusive'), true);
 });
 
+test('real default worker graph composes the native branded pixel commit clock into its starter', async () => {
+  const env = defaultGraphFixture(null, { useNativePixelCommitClock: true });
+  const runtime = await env.registration.startupReady;
+  assert.equal(typeof runtime.auditStarter?.beginAuthorizedAudit, 'function');
+  assert.equal(Object.hasOwn(runtime.auditStarter, 'pixelCommitClock'), false);
+});
+
 test('default runtime bootstraps the operational adapter through a trusted Chrome authority', async () => {
   const env = defaultGraphFixture(null, { useDefaultChromeAdapter: true });
 
@@ -874,7 +886,23 @@ test('one canonical all-frame sensitive probe lets iframe password consent resum
   });
   const sendCommand = env.chromeApi.debugger.sendCommand;
   env.chromeApi.debugger.sendCommand = async (...args) => {
-    if (args[1] === 'Page.captureScreenshot') rasterCalls += 1;
+    const method = args[1];
+    if (method === 'Page.captureScreenshot') {
+      rasterCalls += 1;
+      return { data: PNG };
+    }
+    if (method === 'Page.getFrameTree') {
+      return { frameTree: { frame: { id: 'main', url: rawUrl } } };
+    }
+    if (method === 'DOMSnapshot.captureSnapshot') return { strings: [], documents: [] };
+    if (method === 'Accessibility.getFullAXTree') return { nodes: [] };
+    if (method === 'Page.getLayoutMetrics') {
+      return { cssContentSize: { width: 800, height: 600 } };
+    }
+    if (method === 'Browser.getVersion') return { product: 'Chrome/152.0.0.0' };
+    if (method === 'Runtime.evaluate') {
+      return { result: { value: { width: 800, height: 600, deviceScaleFactor: 1 } } };
+    }
     return sendCommand(...args);
   };
   const runtime = await env.registration.startupReady;

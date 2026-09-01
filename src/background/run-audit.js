@@ -40,8 +40,11 @@ import { createAuditModel } from '../core/report/audit-model.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
 import { isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
 import {
+  createPixelRasterBoundaryV1,
   createPixelPipelinePreflightV1,
-  createPixelPrivacyPauseInterruptionV1,
+  didPixelRasterStartV1,
+  didPixelRasterTargetChangeV1,
+  isPixelRasterBoundaryInterruptionV1,
   isPixelPrivacyGateV1,
   isPixelPrivacyPauseInterruptionV1,
 } from './pixel-privacy-gate.js';
@@ -965,64 +968,12 @@ function pixelBoundaryError() {
 
 function isPixelBoundaryInterruption(error, adapter) {
   return Boolean(error && typeof error === 'object' &&
-    (PIXEL_BOUNDARY_INTERRUPTION.has(error) ||
+    (PIXEL_BOUNDARY_INTERRUPTION.has(error) || isPixelRasterBoundaryInterruptionV1(error) ||
       (adapter?.privacyGate && isPixelPrivacyPauseInterruptionV1(error, adapter.privacyGate))));
 }
 
-function createObservedLegacyAdapter(chromeAdapter, observedTarget, capturePolicy, privacyGate, boundary) {
+function createObservedLegacyAdapter(chromeAdapter, observedTarget, capturePolicy, privacyGate, rasterBoundary) {
   const pixelMode = capturePolicy.mode !== 'no-pixels';
-  const fullPageEffect = chromeAdapter.captureFullPage;
-  const elementEffect = chromeAdapter.captureElement;
-  let firstPixelAuthorized = false;
-  let pixelStarted = false;
-  const proveRasterTarget = async () => {
-    if (boundary.signal?.aborted) throw pixelBoundaryError();
-    const proof = await boundary.probeDocumentIdentity(observedTarget.tabId);
-    if (!proofMatchesAttached(proof, {
-      tabId: observedTarget.tabId, windowId: observedTarget.windowId,
-      documentId: observedTarget.documentId, initialUrlSessionDigest: observedTarget.urlSessionDigest,
-    })) {
-      boundary.onTargetChanged();
-      throw pixelBoundaryError();
-    }
-    if (boundary.signal?.aborted) throw pixelBoundaryError();
-    return proof;
-  };
-  const authorize = async (effect, args, invokeRaster) => {
-    try {
-      if (!firstPixelAuthorized) {
-        const proof = await proveRasterTarget();
-        const signals = await boundary.probeSensitiveCaptureSignals(
-          observedTarget.tabId,
-          observedTarget.documentId,
-        );
-        const decision = await privacyGate.authorizeFirstPixel({
-          auditId: boundary.auditId, observedTarget, capturePolicy, proof, signals,
-        });
-        if (decision.status === 'privacy-paused') {
-          throw createPixelPrivacyPauseInterruptionV1(privacyGate, decision.signals);
-        }
-        if (decision.status !== 'ready') throw pixelBoundaryError();
-        await proveRasterTarget();
-        firstPixelAuthorized = true;
-        if (!invokeRaster) return decision;
-      } else if (!invokeRaster) {
-        return Object.freeze({ status: 'ready' });
-      } else {
-        await proveRasterTarget();
-      }
-      if (boundary.signal?.aborted) throw pixelBoundaryError();
-      let raster;
-      try { raster = effect(...args); } finally {
-        pixelStarted = true;
-        boundary.onPixelStarted();
-      }
-      return raster;
-    } catch (error) {
-      if (isPixelPrivacyPauseInterruptionV1(error, privacyGate) || PIXEL_BOUNDARY_INTERRUPTION.has(error)) throw error;
-      throw pixelBoundaryError();
-    }
-  };
   return {
     ...chromeAdapter,
     privacyGate,
@@ -1035,19 +986,18 @@ function createObservedLegacyAdapter(chromeAdapter, observedTarget, capturePolic
     async getFinalUrl() { return observedTarget.urlEvidence.href; },
     async removeTab() {},
     async captureFullPage(...args) {
-      if (!pixelMode || typeof fullPageEffect !== 'function') throw pixelBoundaryError();
-      return authorize(fullPageEffect, args, true);
+      if (!pixelMode || !rasterBoundary) throw pixelBoundaryError();
+      return rasterBoundary.captureFullPage(...args);
     },
     async captureElement(...args) {
-      if (!pixelMode || typeof elementEffect !== 'function') throw pixelBoundaryError();
-      return authorize(elementEffect, args, true);
+      if (!pixelMode || !rasterBoundary) throw pixelBoundaryError();
+      return rasterBoundary.captureElement(...args);
     },
     composeAnnouncementMap: capturePolicy.composeAnnouncementMap ? chromeAdapter.composeAnnouncementMap : undefined,
     async settlePixelBoundary() {
-      if (!pixelMode || firstPixelAuthorized) return;
-      await authorize(null, [], false);
+      if (!pixelMode || !rasterBoundary || didPixelRasterStartV1(rasterBoundary)) return;
+      await rasterBoundary.settle();
     },
-    pixelStarted() { return pixelStarted; },
   };
 }
 
@@ -1216,22 +1166,27 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
   let pixelCollectionStarted = false;
   let pixelStarted = false;
   let pixelTargetChanged = false;
+  let pixelRasterBoundary = null;
   const services = Object.freeze({
     async collectObservedPage({ observedTarget }) {
       if (safeCapturePolicy.mode !== 'no-pixels') pixelCollectionStarted = true;
+      pixelRasterBoundary = safeCapturePolicy.mode === 'no-pixels' ? null : createPixelRasterBoundaryV1({
+        auditId,
+        observedTarget,
+        capturePolicy: safeCapturePolicy,
+        privacyGate,
+        probeDocumentIdentity,
+        probeSensitiveCaptureSignals,
+        signal,
+        captureFullPage: safeCapturePolicy.captureFullPage ? legacyEffects.captureFullPage : null,
+        captureElement: safeCapturePolicy.captureElements ? legacyEffects.captureElement : null,
+      });
       const observedAdapter = createObservedLegacyAdapter(
         legacyEffects,
         observedTarget,
         safeCapturePolicy,
         privacyGate,
-        safeCapturePolicy.mode === 'no-pixels' ? null : {
-          auditId,
-          probeDocumentIdentity,
-          probeSensitiveCaptureSignals,
-          signal,
-          onPixelStarted() { pixelStarted = true; },
-          onTargetChanged() { pixelTargetChanged = true; closedFailureCode = 'TARGET_CHANGED'; },
-        },
+        pixelRasterBoundary,
       );
       legacyDraft = await runLegacyAudit({
         url: target.initialUrlEvidence.href,
@@ -1340,6 +1295,8 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
     if (terminalPersistenceStarted && !(signal?.aborted && legacyDraft)) {
       throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
     }
+    pixelStarted = pixelStarted || didPixelRasterStartV1(pixelRasterBoundary);
+    pixelTargetChanged = pixelTargetChanged || didPixelRasterTargetChangeV1(pixelRasterBoundary);
     if (runnerTargetChanged || pixelTargetChanged) closedFailureCode = 'TARGET_CHANGED';
     const attestationAttempted = runnerFinalProofAttempted || finalProofAttempted;
     const attestationsMatched = (!runnerFinalProofAttempted || runnerFinalProofMatched) &&
@@ -1347,6 +1304,9 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
     if (signal?.aborted && legacyDraft && closedFailureCode !== 'TARGET_CHANGED' &&
       (!attestationAttempted || attestationsMatched)) closedFailureCode = 'AUDIT_ABORTED';
   } finally {
+    pixelStarted = pixelStarted || didPixelRasterStartV1(pixelRasterBoundary);
+    pixelTargetChanged = pixelTargetChanged || didPixelRasterTargetChangeV1(pixelRasterBoundary);
+    if (pixelTargetChanged) closedFailureCode = 'TARGET_CHANGED';
     if (pixelCollectionStarted && observed?.status !== 'privacy-paused') {
       await privacyGate.afterPixels({ auditId, pixelStarted });
     }

@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createObservedPipelineRunner, executeObservedAuditPipeline, isObservedTargetV1 } from '../../src/background/audit-pipeline.js';
-import { createPixelPipelinePreflightV1, createPixelPrivacyGateV1 } from '../../src/background/pixel-privacy-gate.js';
+import {
+  createPixelPipelinePreflightV1,
+  createPixelPrivacyGateV1,
+  createPixelRasterBoundaryV1,
+} from '../../src/background/pixel-privacy-gate.js';
+import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-commit-clock.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
@@ -14,6 +19,7 @@ const POLICY = createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false })
 const PIXEL_POLICY = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
 const TARGET = Object.freeze({ version: 'ObservedTargetV1', kind: 'attached', tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST, urlEvidence: EVIDENCE });
 const EMPTY_SIGNALS = Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: false, categories: Object.freeze([]) });
+const pixelClock = () => createScriptedPixelCommitClockV1({ epochs: Array(8).fill(1_800_000_000_010) });
 
 function recorder() {
   const checkpoints = [];
@@ -34,7 +40,8 @@ const BEFORE_PERSIST = async () => ({ tabId: 7, windowId: 3, documentId: 'doc-1'
 function pixelGate({ signals = EMPTY_SIGNALS, afterPixels = async () => {} } = {}) {
   const gate = createPixelPrivacyGateV1({
     pixelState: { async pause() { throw new Error('unexpected pause'); }, async gateRunnerStart() { throw new Error('unexpected resume'); } },
-    consentId: null, authorityExpiresAt: 1_900_000_000_000, afterPixels,
+    consentId: null, authorityExpiresAt: 1_900_000_000_000,
+    commitClock: pixelClock(), afterPixels,
   });
   const pixelPreflight = createPixelPipelinePreflightV1(gate, {
     async probeSensitiveCaptureSignals() { return signals; },
@@ -65,10 +72,15 @@ test('pixel pipeline persists only after consuming the exact settled branded gat
     services: {
       ...services(),
       async collectObservedPage() {
-        await gate.authorizeFirstPixel({
-          auditId: AUDIT_ID, observedTarget: TARGET, capturePolicy: PIXEL_POLICY,
-          proof: { tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }, signals: EMPTY_SIGNALS,
+        const boundary = createPixelRasterBoundaryV1({
+          auditId: AUDIT_ID, observedTarget: TARGET, capturePolicy: PIXEL_POLICY, privacyGate: gate,
+          async probeDocumentIdentity() {
+            return { tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST };
+          },
+          async probeSensitiveCaptureSignals() { return EMPTY_SIGNALS; },
+          signal: undefined, async captureFullPage() {}, async captureElement() {},
         });
+        await boundary.captureFullPage();
         return { snapshot: { title: 'safe' } };
       },
       async persistAuditModel() { persisted += 1; },
@@ -121,7 +133,8 @@ test('sensitive preflight confirms started once and stops collection, rules and 
       },
       async gateRunnerStart() { throw new Error('unexpected'); },
     },
-    consentId: null, authorityExpiresAt: 1_900_000_000_000, async afterPixels() {},
+    consentId: null, authorityExpiresAt: 1_900_000_000_000,
+    commitClock: pixelClock(), async afterPixels() {},
   });
   const pixelPreflight = createPixelPipelinePreflightV1(gate, { async probeSensitiveCaptureSignals() { return signals; } });
   const runner = createObservedPipelineRunner({

@@ -1,5 +1,9 @@
 import { isCapturePolicyV1 } from '../core/privacy/capture-policy.js';
 import { isEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
+import {
+  isPixelCommitClockV1,
+  readPixelCommitEpochV1,
+} from './pixel-commit-clock.js';
 
 const ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const CONSENT_ID = /^[A-Za-z0-9_-]{21}[AQgw]$/u;
@@ -14,8 +18,19 @@ const SUSPENSION_KEYS = Object.freeze([
 const GATES = new WeakMap();
 const PAUSE_INTERRUPTION = new WeakMap();
 const PIPELINE_PREFLIGHTS = new WeakMap();
+const RASTER_BOUNDARIES = new WeakMap();
+const RASTER_INTERRUPTION = new WeakSet();
+const NATIVE_ABORTED = typeof globalThis.AbortSignal === 'function'
+  ? Object.getOwnPropertyDescriptor(globalThis.AbortSignal.prototype, 'aborted')?.get
+  : null;
+const NATIVE_REFLECT_APPLY = Reflect.apply;
 
 function denied() { return new TypeError('PIXEL_PRIVACY_GATE_DENIED'); }
+function rasterDenied() {
+  const error = new TypeError('PIXEL_CAPTURE_BOUNDARY_DENIED');
+  RASTER_INTERRUPTION.add(error);
+  return error;
+}
 
 function exact(value, keys) {
   try {
@@ -104,6 +119,13 @@ function copyProof(value, target) {
   return Object.freeze({ kind: 'attached', ...copy });
 }
 
+function captureProof(value) {
+  const copy = exact(value, ['tabId', 'windowId', 'documentId', 'urlSessionDigest']);
+  return copy && validInteger(copy.tabId) && validInteger(copy.windowId) && validId(copy.documentId) &&
+    typeof copy.urlSessionDigest === 'string' && DIGEST.test(copy.urlSessionDigest)
+    ? Object.freeze(copy) : null;
+}
+
 function samePolicy(left, right) {
   return left.mode === right.mode && left.includeQuery === right.includeQuery &&
     left.captureFullPage === right.captureFullPage && left.captureElements === right.captureElements &&
@@ -134,31 +156,38 @@ function context(input, metadata, withProof = false) {
   return { auditId: copy.auditId, target, policy, proof, signals };
 }
 
-function validSource(value) {
+function copySource(value) {
   const copy = exact(value, ['kind']);
-  return copy?.kind === 'attached';
+  return copy?.kind === 'attached' ? Object.freeze(copy) : null;
 }
 
-function validSuspension(value, expected, expectedState, expectedPhase, authorityExpiresAt) {
+function copySuspension(value) {
   const copy = exact(value, SUSPENSION_KEYS);
   const policy = copy && copyPolicy(copy.capturePolicy);
   const evidence = copy && copyEvidence(copy.urlEvidence);
   const categories = copy && copyCategories(copy.categories);
+  const source = copy && copySource(copy.source);
+  return copy && policy && evidence && categories && source
+    ? Object.freeze({ ...copy, capturePolicy: policy, urlEvidence: evidence, categories, source })
+    : null;
+}
+
+function validSuspension(copy, expected, expectedState, expectedPhase, authorityExpiresAt) {
   return Boolean(copy && copy.version === 'AuditSuspensionV1' && Number.isSafeInteger(copy.revision) && copy.revision > 0 &&
     copy.auditId === expected.auditId && CONSENT_ID.test(copy.consentId) &&
     copy.tabId === expected.target.tabId && copy.windowId === expected.target.windowId &&
     copy.documentId === expected.target.documentId && copy.urlSessionDigest === expected.target.urlSessionDigest &&
-    evidence && evidence.href === expected.target.urlEvidence.href &&
-    evidence.queryIncluded === expected.target.urlEvidence.queryIncluded &&
-    evidence.redactedSegments === expected.target.urlEvidence.redactedSegments &&
-    copy.mode === expected.policy.mode && policy && samePolicy(policy, expected.policy) && categories &&
-    categories.length === expected.signals.categories.length &&
-    categories.every((category, index) => category === expected.signals.categories[index]) &&
+    copy.urlEvidence.href === expected.target.urlEvidence.href &&
+    copy.urlEvidence.queryIncluded === expected.target.urlEvidence.queryIncluded &&
+    copy.urlEvidence.redactedSegments === expected.target.urlEvidence.redactedSegments &&
+    copy.mode === expected.policy.mode && samePolicy(copy.capturePolicy, expected.policy) &&
+    copy.categories.length === expected.signals.categories.length &&
+    copy.categories.every((category, index) => category === expected.signals.categories[index]) &&
     validInteger(copy.issuedAt) && validInteger(copy.updatedAt) && validInteger(copy.expiresAt) &&
     copy.updatedAt >= copy.issuedAt && copy.expiresAt > copy.updatedAt && copy.expiresAt <= authorityExpiresAt &&
     validInteger(copy.cleanupAttempts) && (copy.cleanupNotBefore === null || validInteger(copy.cleanupNotBefore)) &&
     copy.state === expectedState && copy.resumePhase === expectedPhase && copy.revokeReason === null &&
-    validSource(copy.source));
+    copy.source.kind === 'attached');
 }
 
 function validRunnerResult(value, expected, metadata) {
@@ -166,22 +195,97 @@ function validRunnerResult(value, expected, metadata) {
   if (!copy || copy.version !== 'PixelRunnerGateResultV1' || !['ready', 'repaused'].includes(copy.status)) return null;
   const state = copy.status === 'ready' ? 'resuming' : 'paused';
   const phase = copy.status === 'ready' ? 'runner-started' : null;
-  const suspension = exact(copy.suspension, SUSPENSION_KEYS);
+  const suspension = copySuspension(copy.suspension);
   if (!suspension || copy.status === 'ready' && suspension.consentId !== metadata.consentId ||
     copy.status === 'repaused' && suspension.consentId === metadata.consentId) return null;
-  return validSuspension(copy.suspension, expected, state, phase, metadata.authorityExpiresAt) ? copy.status : null;
+  return validSuspension(suspension, expected, state, phase, metadata.authorityExpiresAt)
+    ? Object.freeze({ status: copy.status, updatedAt: suspension.updatedAt, expiresAt: suspension.expiresAt })
+    : null;
+}
+
+function epoch(metadata) {
+  let value;
+  try { value = readPixelCommitEpochV1(metadata.commitClock); } catch { throw denied(); }
+  if (!validInteger(value) || value < metadata.highWater) throw denied();
+  metadata.highWater = value;
+  return value;
+}
+
+function promoteSuspensionTime(metadata, suspension) {
+  if (!suspension || suspension.updatedAt < metadata.highWater) throw denied();
+  metadata.highWater = suspension.updatedAt;
+  return suspension;
+}
+
+function nativeAbortFence(signal) {
+  if (signal === undefined) return;
+  if (typeof NATIVE_ABORTED !== 'function') throw rasterDenied();
+  let aborted;
+  try { aborted = NATIVE_ABORTED.call(signal); } catch { throw rasterDenied(); }
+  if (aborted === true) throw rasterDenied();
+}
+
+function targetProof(value, metadata) {
+  const proof = captureProof(value);
+  if (!proof) throw rasterDenied();
+  if (proof.tabId !== metadata.target.tabId || proof.windowId !== metadata.target.windowId ||
+    proof.documentId !== metadata.target.documentId ||
+    proof.urlSessionDigest !== metadata.target.urlSessionDigest) {
+    metadata.targetChanged = true;
+    throw rasterDenied();
+  }
+  return proof;
+}
+
+function commitFirstRaster(metadata, rawProof) {
+  targetProof(rawProof, metadata);
+  const gate = metadata.gateMetadata;
+  let committedAt;
+  try { committedAt = epoch(gate); } catch { gate.state = 'cleanup-eligible'; throw rasterDenied(); }
+  if (metadata.state !== 'authorizing' || gate.state !== 'ready' ||
+    !validInteger(gate.commitExpiresAt) || committedAt >= gate.commitExpiresAt) {
+    gate.state = 'cleanup-eligible';
+    throw rasterDenied();
+  }
+  try { nativeAbortFence(metadata.signal); } catch {
+    gate.state = 'cleanup-eligible';
+    throw rasterDenied();
+  }
+  metadata.state = 'raster-in-flight';
+  metadata.pixelStarted = true;
+  gate.state = 'committed';
+}
+
+function commitLaterRaster(metadata, rawProof) {
+  targetProof(rawProof, metadata);
+  nativeAbortFence(metadata.signal);
+  if (metadata.state !== 'later-authorizing' || metadata.gateMetadata.state !== 'committed') {
+    throw rasterDenied();
+  }
+  metadata.state = 'raster-in-flight';
+}
+
+function settleWithoutRaster(metadata) {
+  const gate = metadata.gateMetadata;
+  if (metadata.state !== 'fresh' || gate.state !== 'armed' ||
+    metadata.policy.mode !== 'element-only' || metadata.policy.captureFullPage ||
+    !metadata.policy.captureElements) throw rasterDenied();
+  metadata.state = 'settled-without-raster';
+  gate.state = 'no-raster-settled';
 }
 
 export function createPixelPrivacyGateV1(input) {
-  const args = exact(input, ['pixelState', 'consentId', 'authorityExpiresAt', 'afterPixels']);
+  const args = exact(input, ['pixelState', 'consentId', 'authorityExpiresAt', 'commitClock', 'afterPixels']);
   const pause = args && callable(args.pixelState, 'pause');
   const gateRunnerStart = args && callable(args.pixelState, 'gateRunnerStart');
   if (!args || !pause || !gateRunnerStart ||
     (args.consentId !== null && (typeof args.consentId !== 'string' || !CONSENT_ID.test(args.consentId))) ||
-    !validInteger(args.authorityExpiresAt) || typeof args.afterPixels !== 'function') throw denied();
+    !validInteger(args.authorityExpiresAt) || !isPixelCommitClockV1(args.commitClock) ||
+    typeof args.afterPixels !== 'function') throw denied();
   const metadata = {
     auditId: null, target: null, policy: null, state: 'created', pipelineConsumed: false,
     consentId: args.consentId, authorityExpiresAt: args.authorityExpiresAt,
+    commitExpiresAt: null, highWater: -1, commitClock: args.commitClock,
     pause, gateRunnerStart, afterPixels: args.afterPixels,
   };
   const gate = Object.freeze({
@@ -199,10 +303,14 @@ export function createPixelPrivacyGateV1(input) {
             authorityExpiresAt: metadata.authorityExpiresAt,
           });
         } catch { metadata.state = 'failed'; throw denied(); }
-        if (!validSuspension(suspension, captured, 'paused', null, metadata.authorityExpiresAt)) {
+        const canonicalSuspension = copySuspension(suspension);
+        if (!validSuspension(
+          canonicalSuspension, captured, 'paused', null, metadata.authorityExpiresAt,
+        )) {
           metadata.state = 'failed';
           throw denied();
         }
+        promoteSuspensionTime(metadata, canonicalSuspension);
         metadata.state = 'paused';
         return Object.freeze({ status: 'privacy-paused', signals: captured.signals });
       }
@@ -213,6 +321,12 @@ export function createPixelPrivacyGateV1(input) {
       if (metadata.state !== 'armed') throw denied();
       const captured = context(request, metadata, true);
       metadata.state = 'authorizing';
+      let authorizationAt;
+      try { authorizationAt = epoch(metadata); } catch { metadata.state = 'cleanup-eligible'; throw denied(); }
+      if (authorizationAt >= metadata.authorityExpiresAt) {
+        metadata.state = 'cleanup-eligible';
+        throw denied();
+      }
       if (metadata.consentId === null) {
         if (captured.signals.detected) {
           let suspension;
@@ -223,10 +337,15 @@ export function createPixelPrivacyGateV1(input) {
               authorityExpiresAt: metadata.authorityExpiresAt,
             });
           } catch { metadata.state = 'cleanup-eligible'; throw denied(); }
-          if (!validSuspension(suspension, captured, 'paused', null, metadata.authorityExpiresAt)) {
+          const canonicalSuspension = copySuspension(suspension);
+          if (!validSuspension(
+            canonicalSuspension, captured, 'paused', null, metadata.authorityExpiresAt,
+          )) {
             metadata.state = 'cleanup-eligible';
             throw denied();
           }
+          try { promoteSuspensionTime(metadata, canonicalSuspension); }
+          catch { metadata.state = 'cleanup-eligible'; throw denied(); }
           metadata.state = 'paused';
           return Object.freeze({ status: 'privacy-paused', signals: captured.signals });
         }
@@ -238,24 +357,30 @@ export function createPixelPrivacyGateV1(input) {
             proof: captured.proof, categories: captured.signals.categories,
           });
         } catch { metadata.state = 'cleanup-eligible'; throw denied(); }
-        const status = validRunnerResult(rawResult, captured, metadata);
-        if (!status) {
+        const result = validRunnerResult(rawResult, captured, metadata);
+        if (!result) {
           metadata.state = 'cleanup-eligible';
           throw denied();
         }
-        if (status === 'repaused') {
+        try { promoteSuspensionTime(metadata, result); }
+        catch { metadata.state = 'cleanup-eligible'; throw denied(); }
+        if (result.status === 'repaused') {
           metadata.state = 'paused';
           return Object.freeze({ status: 'privacy-paused', signals: captured.signals });
         }
+        metadata.commitExpiresAt = result.expiresAt;
       }
-      metadata.state = 'authorized';
+      if (metadata.consentId === null) metadata.commitExpiresAt = metadata.authorityExpiresAt;
+      metadata.state = 'ready';
       return Object.freeze({ status: 'ready' });
     },
     afterPixels: async request => {
       const captured = exact(request, ['auditId', 'pixelStarted']);
       if (!captured || captured.auditId !== metadata.auditId || typeof captured.pixelStarted !== 'boolean') throw denied();
+      const factualPixelStarted = metadata.state === 'committed';
+      if (captured.pixelStarted !== factualPixelStarted) throw denied();
       if (metadata.state === 'paused') return Object.freeze({ status: 'paused' });
-      if (!['armed', 'authorized', 'cleanup-eligible'].includes(metadata.state)) throw denied();
+      if (!['armed', 'ready', 'committed', 'no-raster-settled', 'cleanup-eligible'].includes(metadata.state)) throw denied();
       metadata.state = 'settled';
       try { await metadata.afterPixels(); } catch { throw denied(); }
       return Object.freeze({ status: 'settled' });
@@ -269,12 +394,150 @@ export function isPixelPrivacyGateV1(value) {
   return typeof value === 'object' && value !== null && GATES.has(value);
 }
 
+export function createPixelRasterBoundaryV1(input) {
+  const args = exact(input, [
+    'auditId', 'observedTarget', 'capturePolicy', 'privacyGate',
+    'probeDocumentIdentity', 'probeSensitiveCaptureSignals', 'signal',
+    'captureFullPage', 'captureElement',
+  ]);
+  const gateMetadata = args && GATES.get(args.privacyGate);
+  const target = args && copyTarget(args.observedTarget);
+  const policy = args && copyPolicy(args.capturePolicy);
+  if (!args || !gateMetadata || !target || !policy || !validId(args.auditId) ||
+    args.auditId !== gateMetadata.auditId || !sameTarget(target, gateMetadata.target) ||
+    !samePolicy(policy, gateMetadata.policy) || gateMetadata.state !== 'armed' ||
+    typeof args.probeDocumentIdentity !== 'function' ||
+    typeof args.probeSensitiveCaptureSignals !== 'function' ||
+    (args.signal !== undefined && (() => {
+      try { return typeof NATIVE_ABORTED !== 'function' || typeof NATIVE_ABORTED.call(args.signal) !== 'boolean'; }
+      catch { return true; }
+    })()) ||
+    (policy.captureFullPage ? typeof args.captureFullPage !== 'function' : args.captureFullPage !== null) ||
+    (policy.captureElements ? typeof args.captureElement !== 'function' : args.captureElement !== null)) {
+    throw denied();
+  }
+  const metadata = {
+    auditId: args.auditId,
+    target,
+    policy,
+    gate: args.privacyGate,
+    gateMetadata,
+    probeDocumentIdentity: args.probeDocumentIdentity,
+    probeSensitiveCaptureSignals: args.probeSensitiveCaptureSignals,
+    signal: args.signal,
+    captureFullPage: args.captureFullPage,
+    captureElement: args.captureElement,
+    state: 'fresh',
+    pixelStarted: false,
+    targetChanged: false,
+  };
+
+  const runRaster = async (effect, effectArgs) => {
+    if (metadata.state === 'fresh') {
+      metadata.state = 'authorizing';
+      try {
+        const signals = copySignals(await metadata.probeSensitiveCaptureSignals(
+          metadata.target.tabId,
+          metadata.target.documentId,
+        ));
+        if (!signals) throw rasterDenied();
+        const gateProof = targetProof(
+          await metadata.probeDocumentIdentity(metadata.target.tabId),
+          metadata,
+        );
+        const decision = await metadata.gate.authorizeFirstPixel({
+          auditId: metadata.auditId,
+          observedTarget: metadata.target,
+          capturePolicy: metadata.policy,
+          proof: gateProof,
+          signals,
+        });
+        if (decision.status === 'privacy-paused') {
+          metadata.state = 'paused';
+          throw createPixelPrivacyPauseInterruptionV1(metadata.gate, decision.signals);
+        }
+        if (decision.status !== 'ready') throw rasterDenied();
+        const finalProof = await metadata.probeDocumentIdentity(metadata.target.tabId);
+        let raster;
+        commitFirstRaster(metadata, finalProof);
+        raster = NATIVE_REFLECT_APPLY(effect, undefined, effectArgs);
+        const result = await raster;
+        metadata.state = 'active';
+        return result;
+      } catch (error) {
+        if (isPixelPrivacyPauseInterruptionV1(error, metadata.gate) || RASTER_INTERRUPTION.has(error)) throw error;
+        if (metadata.state !== 'paused' && metadata.state !== 'failed') metadata.state = 'failed';
+        throw rasterDenied();
+      }
+    }
+    if (metadata.state !== 'active') throw rasterDenied();
+    metadata.state = 'later-authorizing';
+    try {
+      const proof = await metadata.probeDocumentIdentity(metadata.target.tabId);
+      let raster;
+      commitLaterRaster(metadata, proof);
+      raster = NATIVE_REFLECT_APPLY(effect, undefined, effectArgs);
+      const result = await raster;
+      metadata.state = 'active';
+      return result;
+    } catch (error) {
+      if (RASTER_INTERRUPTION.has(error)) throw error;
+      metadata.state = 'failed';
+      throw rasterDenied();
+    }
+  };
+
+  const boundary = Object.freeze({
+    captureFullPage(...effectArgs) {
+      if (RASTER_BOUNDARIES.get(this) !== metadata ||
+        !metadata.policy.captureFullPage || typeof metadata.captureFullPage !== 'function') {
+        return Promise.reject(rasterDenied());
+      }
+      return runRaster(metadata.captureFullPage, effectArgs);
+    },
+    captureElement(...effectArgs) {
+      if (RASTER_BOUNDARIES.get(this) !== metadata ||
+        !metadata.policy.captureElements || typeof metadata.captureElement !== 'function') {
+        return Promise.reject(rasterDenied());
+      }
+      return runRaster(metadata.captureElement, effectArgs);
+    },
+    async settle() {
+      if (RASTER_BOUNDARIES.get(this) !== metadata) throw rasterDenied();
+      settleWithoutRaster(metadata);
+    },
+  });
+  RASTER_BOUNDARIES.set(boundary, metadata);
+  return boundary;
+}
+
+export function isPixelRasterBoundaryV1(value) {
+  return typeof value === 'object' && value !== null && RASTER_BOUNDARIES.has(value);
+}
+
+export function isPixelRasterBoundaryInterruptionV1(error) {
+  return Boolean(error && typeof error === 'object' && RASTER_INTERRUPTION.has(error));
+}
+
+export function didPixelRasterStartV1(value) {
+  return RASTER_BOUNDARIES.get(value)?.pixelStarted === true;
+}
+
+export function didPixelRasterTargetChangeV1(value) {
+  return RASTER_BOUNDARIES.get(value)?.targetChanged === true;
+}
+
 export function assertPixelPipelineAuthorizedV1(gate, input) {
   const metadata = gate && typeof gate === 'object' ? GATES.get(gate) : null;
   const captured = exact(input, ['auditId', 'capturePolicy']);
   const policy = captured && copyPolicy(captured.capturePolicy);
+  const committed = metadata?.state === 'committed';
+  const settledElementOnly = metadata?.state === 'no-raster-settled' &&
+    metadata.policy?.mode === 'element-only' && metadata.policy.captureFullPage === false &&
+    metadata.policy.captureElements === true;
   if (!metadata || !captured || !policy || captured.auditId !== metadata.auditId ||
-    !samePolicy(policy, metadata.policy) || metadata.state !== 'authorized' || metadata.pipelineConsumed) throw denied();
+    !samePolicy(policy, metadata.policy) ||
+    (!committed && !settledElementOnly) || metadata.pipelineConsumed) throw denied();
   metadata.pipelineConsumed = true;
   return true;
 }
