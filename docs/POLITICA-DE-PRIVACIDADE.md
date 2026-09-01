@@ -1,6 +1,6 @@
 # Política de Privacidade — Audita Acessibilidade
 
-Versão 1.2, atualizada em 28 de agosto de 2026.
+Versão 1.4, atualizada em 31 de agosto de 2026.
 
 ## 1. Finalidade
 
@@ -22,7 +22,7 @@ Durante uma auditoria, a extensão pode tratar:
 
 Esse tratamento inclui dados de navegação (a URL escolhida e os horários da auditoria) e conteúdo do site (texto, estrutura, imagens, mídia e demais recursos da página auditada). Esses dados são processados e armazenados localmente mesmo quando não são transmitidos a terceiros.
 
-As capturas podem conter dados pessoais ou sigilosos que estejam visíveis na página. Por isso, o usuário deve ocultar ou remover informações sensíveis antes de iniciar a auditoria.
+As capturas podem conter dados pessoais ou sigilosos que estejam visíveis na página. Nos modos com imagens, antes de cada captura a extensão verifica sinais conhecidos de conteúdo potencialmente sensível. Na primeira verificação, a identificação desses sinais pausa a auditoria e exige confirmação explícita. Nas verificações posteriores, uma categoria nova bloqueia aquela captura. Páginas dinâmicas podem mudar no intervalo técnico inevitável entre a última verificação e a captura; esse controle reduz, mas não elimina o risco. O usuário ainda deve ocultar ou remover informações sensíveis antes de confirmar.
 
 ## 3. Processamento local e transmissão
 
@@ -34,11 +34,9 @@ Ao abrir a URL indicada, o navegador se comunica normalmente com o site auditado
 
 O andamento, o modelo da auditoria, as evidências — inclusive pixels de capturas — e as decisões de revisão ficam no armazenamento local do perfil do navegador. A URL armazenada é sanitizada, mas ainda pode identificar a página ou conter dados pessoais que não tenham sido reconhecidos automaticamente. Os relatórios HTML, JSON-LD/EARL, CSV e PDF são salvos na pasta de downloads escolhida pelo navegador.
 
-Cada auditoria local permanece por, no máximo, 30 dias absolutos contados da primeira persistência. Revisar ou exportar novamente não reinicia nem prolonga esse prazo. Ao abrir o painel, a extensão procura auditorias vencidas e faz uma limpeza local incremental; uma exportação ou entrega ativa pode adiar a exclusão daquele registro, sem estender o vencimento.
+Nesta beta, cada auditoria permanece no armazenamento local do perfil até que o usuário a exclua pela respectiva página de relatório, remova a extensão ou limpe os dados da extensão no Chrome. A exclusão pela página de relatório exige confirmação e apaga o modelo, as evidências, os pixels e as revisões locais daquela auditoria. A beta não executa exclusão automática por prazo nem depois da exportação.
 
-Antes de iniciar, o usuário pode escolher excluir a auditoria local depois da exportação. Essa exclusão ocorre somente se os quatro arquivos — HTML, JSON-LD/EARL, CSV e PDF — tiverem sido baixados com sucesso. Download incompleto, interrompido ou com falha preserva a auditoria local para permitir nova tentativa.
-
-Os arquivos já baixados ficam fora do armazenamento interno da extensão. A limpeza por prazo, a exclusão de uma auditoria, a exclusão de todas e a opção após exportar não apagam esses arquivos da pasta de downloads; eles permanecem no sistema de arquivos até serem excluídos pelo usuário.
+Os arquivos já baixados ficam fora do armazenamento interno da extensão. A exclusão da auditoria local não apaga esses arquivos da pasta de downloads; eles permanecem no sistema de arquivos até serem excluídos pelo usuário.
 
 ## 5. Uso e compartilhamento
 
@@ -55,12 +53,15 @@ O usuário controla o compartilhamento posterior dos relatórios que baixar.
 
 ## 6. Permissões do navegador
 
-- `tabs`: cria, acompanha e fecha as abas descartáveis de auditoria e impressão.
+- `tabs`: identifica a página ativa escolhida e abre as páginas locais de relatório e impressão, sem substituir a página auditada.
 - `scripting`: executa somente os coletores e testes locais incluídos na extensão.
-- `debugger`: usa o Chrome DevTools Protocol para ler a estrutura técnica, obter a árvore de acessibilidade, capturar evidências e gerar PDF.
+- `debugger`: usa o Chrome DevTools Protocol na página escolhida para ler a estrutura técnica, obter a árvore de acessibilidade, capturar evidências autorizadas e gerar PDF.
 - `downloads`: salva os relatórios solicitados pelo usuário.
 - `storage`: mantém localmente o andamento, os resultados e as decisões de revisão.
-- acesso a endereços HTTP e HTTPS: permite auditar a URL informada pelo usuário.
+- `sidePanel`: mantém a interface persistente ao lado da página.
+- `alarms`: agenda a expiração e a limpeza de estados temporários, como consentimentos de captura, personas e destaques.
+- `contextMenus`: oferece um atalho opcional para iniciar a auditoria.
+- acesso a endereços HTTP e HTTPS: permite auditar localmente a página web escolhida pelo usuário.
 
 As permissões são usadas exclusivamente para a finalidade única descrita nesta política.
 
@@ -78,8 +79,6 @@ O usuário pode:
 - ocultar dados antes da captura;
 - revisar cada ocorrência que dependa de julgamento humano;
 - excluir uma auditoria e todas as evidências, pixels e revisões locais pela respectiva página de revisão;
-- excluir todas as auditorias locais pelo painel, sempre após confirmação;
-- escolher, antes de iniciar, a exclusão local condicionada ao download bem-sucedido dos quatro formatos;
 - excluir relatórios baixados;
 - apagar os dados locais removendo a extensão ou limpando seus dados no Chrome.
 

@@ -149,7 +149,7 @@ test('forged cantTell and legal claims are rejected rather than influencing ABNT
   forged.occurrences[0] = {
     ...forged.occurrences[0],
     outcome: 'cantTell', applicabilityEvidence: null,
-    legalAnalysis: { basisRef: 'br.consumer.accessibility.fixed.v1' },
+    legalAnalysis: { basisRef: 'br.consumer.accessibility.fixed.v2' },
     source: { ...forged.occurrences[0].source, engineRuleId: 'fake-rule' },
   };
   const checked = validateNormalizedAxeSupplemental(forged, { rulesVersion: '1.0.0' });

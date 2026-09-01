@@ -177,12 +177,55 @@ test('first raster probes fresh signals, proves twice, commits once and later ra
   });
 
   assert.equal(await boundary.captureFullPage('opaque-cdp'), 'full');
-  assert.deepEqual(events, ['signals', 'proof-1', 'proof-2', 'full-page']);
+  assert.deepEqual(events, ['signals', 'proof-1', 'signals', 'proof-2', 'full-page']);
   assert.equal(await boundary.captureElement('opaque-cdp', { x: 1 }), 'element');
-  assert.deepEqual(events, ['signals', 'proof-1', 'proof-2', 'full-page', 'proof-3', 'element']);
+  assert.deepEqual(events, [
+    'signals', 'proof-1', 'signals', 'proof-2', 'full-page',
+    'signals', 'proof-3', 'element',
+  ]);
   assert.equal(didPixelRasterStartV1(boundary), true);
   assert.equal(didPixelRasterTargetChangeV1(boundary), false);
   assert.equal(assertPixelPipelineAuthorizedV1(gate, { auditId: 'audit-1', capturePolicy: POLICY }), true);
+});
+
+test('later raster refuses sensitive categories added after the first captured pixel', async () => {
+  let signalReads = 0;
+  let rasters = 0;
+  const { boundary } = await rasterFixture({
+    probeSensitiveCaptureSignals: async () => {
+      signalReads += 1;
+      return signalReads < 3 ? EMPTY : SENSITIVE;
+    },
+    captureFullPage: async () => { rasters += 1; return 'full'; },
+    captureElement: async () => { rasters += 1; return 'element'; },
+  });
+
+  assert.equal(await boundary.captureFullPage(), 'full');
+  await assert.rejects(() => boundary.captureElement(), /PIXEL_CAPTURE_BOUNDARY_DENIED/u);
+  assert.equal(signalReads, 3);
+  assert.equal(rasters, 1, 'no later raster may include a newly detected sensitive category');
+});
+
+test('first raster refuses a sensitive category added while one-shot consent is being authorized', async () => {
+  const consentId = 'A'.repeat(21) + 'Q';
+  const expanded = Object.freeze({
+    version: 'SensitiveCaptureSignalsV1', detected: true,
+    categories: Object.freeze(['password', 'payment', 'private-marker']),
+  });
+  let signalReads = 0;
+  let rasters = 0;
+  const { boundary } = await rasterFixture({
+    consentId,
+    probeSensitiveCaptureSignals: async () => {
+      signalReads += 1;
+      return signalReads === 1 ? SENSITIVE : expanded;
+    },
+    captureFullPage: async () => { rasters += 1; return 'full'; },
+  });
+
+  await assert.rejects(() => boundary.captureFullPage(), /PIXEL_CAPTURE_BOUNDARY_DENIED/u);
+  assert.equal(signalReads, 2);
+  assert.equal(rasters, 0, 'authorization for earlier categories cannot cover a newly detected category');
 });
 
 test('first raster fails closed for expired, non-monotonic or invalid private clocks', async t => {
@@ -325,7 +368,7 @@ test('concurrent first-raster attempts invoke at most one captured effect', asyn
   const results = await Promise.allSettled([first, second]);
   assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
   assert.equal(results.filter(result => result.status === 'rejected').length, 1);
-  assert.equal(probes, 1);
+  assert.equal(probes, 2);
   assert.equal(rasters, 1);
 });
 

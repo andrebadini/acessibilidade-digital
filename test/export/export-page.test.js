@@ -60,7 +60,9 @@ test('internal export page authenticates first, rebuilds one stored revision and
   assert.doesNotMatch(script, /notify\(\{\s*type:\s*'AUDIT_DELETED'/u,
     'somente o worker validado pode publicar o evento visual de exclusão');
   assert.match(html, /HTML[\s\S]*PDF[\s\S]*CSV[\s\S]*JSON/iu);
-  assert.match(html, /exclusão[^.]*escolhida antes[^.]*quatro downloads[^.]*sucesso/iu);
+  assert.match(html, /beta[^.]*permanece no armazenamento local[^.]*exportação/iu);
+  assert.match(html, /Excluir auditoria local[^.]*página do relatório/iu);
+  assert.doesNotMatch(html, /exclusão[^.]*escolhida antes/iu);
   assert.match(html, /arquivos já baixados[^.]*não são apagados/iu);
   assert.doesNotMatch(html, /<button|<input/iu);
   assert.match(css, /@media\s*\(max-width:\s*24rem\)/u);

@@ -599,7 +599,7 @@ test('attached execution uses no owned-tab or URL-vault effects and returns the 
   assert.equal(Object.isFrozen(result.checkpoint), true);
 });
 
-test('attached full-evidence crosses proof, fresh probe and gate before raster, then maps and cleans once', async () => {
+test('attached full-evidence captures page and elements without invoking the deferred beta map', async () => {
   const auditId = 'audit-attached-pixels';
   const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
   const gateCalls = [];
@@ -620,10 +620,12 @@ test('attached full-evidence crosses proof, fresh probe and gate before raster, 
     onCheckpoint: async () => {}, persistAuditModel: async () => {},
   });
   assert.equal(result.state, 'model');
+  assert.equal(result.model.session.status, 'complete');
   assert.equal(adapter.counts.fullPageCalls, 1);
-  assert.equal(adapter.events.includes('map'), true);
+  assert.equal(adapter.events.includes('map'), false);
+  assert.equal(result.model.evidence.some(artifact => artifact.kind === 'announcement-map'), false);
   const raster = adapter.events.indexOf('full-page');
-  assert.deepEqual(adapter.events.slice(raster - 3, raster), ['sensitive-probe', 'proof-2', 'proof-3']);
+  assert.deepEqual(adapter.events.slice(raster - 3, raster), ['proof-2', 'sensitive-probe', 'proof-3']);
   assert.deepEqual(gateCalls, ['after']);
 });
 
@@ -2341,9 +2343,9 @@ test('integrates the recommendation failure, editorial occurrence and informatio
   assert.deepEqual(reportNewWindow.testedWcagRefs, []);
   assert.deepEqual(reportNewWindow.wcagRefs, []);
   assert.deepEqual(reportNewWindow.foreignBenchmarkRefs, []);
-  assert.deepEqual(reportNewWindow.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v1' });
+  assert.deepEqual(reportNewWindow.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v2' });
   assert.equal(reportNewWindow.classification, 'recommendation');
-  assert.deepEqual(reportNewWindow.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v1' });
+  assert.deepEqual(reportNewWindow.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v2' });
   assert.doesNotMatch(JSON.stringify(report), /PRIVATE-MATCH-SENTINEL/iu);
 });
 
@@ -2392,7 +2394,7 @@ test('integrates a confirmed top-frame axe violation with provenance, ABNT outco
   assert.equal(axeOccurrence.outcome, 'failed');
   assert.equal(axeOccurrence.itemId, '5.13.2');
   assert.equal(axeOccurrence.applicabilityEvidence.source.ruleId, 'page-language');
-  assert.deepEqual(axeOccurrence.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v1' });
+  assert.deepEqual(axeOccurrence.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v2' });
   assert.equal(axeOccurrence.nodeId, null);
   assert.deepEqual(axeOccurrence.evidenceIds, []);
   assert.equal(model.evidence.artifacts.some(item => item.kind === 'full-page'), false);
@@ -2418,7 +2420,7 @@ test('integrates a confirmed top-frame axe violation with provenance, ABNT outco
   assert.equal(reportOccurrence.target.selector, 'html');
   assert.equal(reportOccurrence.impact, 'serious');
   assert.equal(reportOccurrence.confidence, 'high');
-  assert.deepEqual(reportOccurrence.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v1' });
+  assert.deepEqual(reportOccurrence.legalAnalysis, { basisRef: 'br.consumer.accessibility.fixed.v2' });
   assert.deepEqual(reportOccurrence.wcagRefs, reportOccurrence.testedWcagRefs);
   assert.deepEqual(reportOccurrence.foreignBenchmarkRefs.map(reference => reference.criterionId), reportOccurrence.testedWcagRefs);
   const forgedResultType = structuredClone(report);

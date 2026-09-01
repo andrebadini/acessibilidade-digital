@@ -2,31 +2,40 @@
 
 Extensão MV3 para auditoria local de acessibilidade de uma página, com regras da ABNT NBR 17225:2025, referências WCAG 2.2, evidências e revisão assistida. O processamento local evita enviar conteúdo da página a um serviço externo.
 
-## Instalação para desenvolvimento
+## Instalação da beta
 
-1. Abra `chrome://extensions` em uma versão compatível do Chrome ou Chromium.
-2. Ative o **Modo do desenvolvedor**.
-3. Escolha **Carregar sem compactação** e selecione esta pasta.
-4. Fixe “Audita Acessibilidade” na barra do navegador, se desejar. Ao clicar no ícone, o Chrome abre o painel lateral persistente ao lado da página.
+1. Descompacte o arquivo da beta em uma pasta própria. Se estiver usando o código-fonte, use esta pasta do projeto.
+2. Abra `chrome://extensions` no Chrome.
+3. Ative o **Modo do desenvolvedor**.
+4. Escolha **Carregar sem compactação** e selecione a pasta que contém o `manifest.json`.
+5. Fixe “Audita Acessibilidade” na barra do navegador, se desejar. Ao clicar no ícone, o Chrome abre o painel lateral persistente ao lado da página.
 
-Para gerar o pacote distribuível, execute `npm run build:release`. O ZIP criado em `release/` contém somente o manifesto, o código executável local e os ícones necessários, com `manifest.json` na raiz.
+Para gerar o pacote distribuível a partir do código-fonte, execute `npm run build:release`. O ZIP criado em `release/` contém somente o manifesto, o código executável local, o axe-core empacotado e os ícones necessários, com `manifest.json` na raiz.
 
 ## Uso básico
 
-Clique no ícone da extensão para abrir o painel lateral e escolha **Auditar a página atual**. Abrir o painel não inicia a coleta: o botão é a confirmação explícita. O Chrome controla e permite redimensionar a largura do painel. Ao final, revise os casos indeterminados e use **Gerar relatório atualizado** quando registrar novas decisões. A exportação baixa HTML autocontido, PDF, CSV e JSON-LD técnico no vocabulário EARL.
+Abra a página que deseja examinar, clique no ícone da extensão e escolha um dos três modos de evidência:
 
-A auditoria anexada atual inspeciona localmente a estrutura da página ativa e não captura pixels. A URL e o conteúdo estrutural necessário à análise podem conter dados sensíveis; oculte ou remova esses dados antes de iniciar. Modos de captura visual condicionados a uma etapa própria de privacidade não fazem parte deste fluxo atual.
+- **Evidência completa:** pode capturar a página e os elementos relacionados às ocorrências.
+- **Somente elementos:** limita as capturas aos elementos relacionados às ocorrências.
+- **Sem imagens:** executa a auditoria sem capturar pixels.
 
-Os relatórios apresentam as ocorrências, os alvos estruturais disponíveis e as decisões de revisão. Como o fluxo anexado atual usa o modo sem pixels, ele não produz miniaturas nem capturas anotadas da página.
+Selecione **Auditar a página atual**. Abrir o painel não inicia a coleta: esse botão é a confirmação explícita. Nos modos com imagens, a extensão pausa antes da primeira captura quando identifica conteúdo potencialmente sensível; nesse caso, a pessoa usuária decide se continua ou cancela.
 
-As permissões `tabs` e `scripting` permitem identificar e inspecionar localmente a página ativa escolhida no painel; a auditoria anexada não navega, fecha nem substitui essa aba. `debugger` dá acesso local ao protocolo do Chrome para coletar a estrutura e preparar a impressão. `downloads` salva os artefatos e `storage` mantém auditoria e andamento no dispositivo. Os sites auditados são cobertos por `host_permissions` HTTP(S).
+Ao final, o painel mostra o sumário, filtros e fichas das ocorrências. Cada ficha apresenta explicação, WCAG 2.2, item ABNT NBR 17225, fundamentação legal, nome acessível, anúncio estimado, seletor, código e evidências disponíveis. **Ver e destacar na página** localiza o elemento quando a prova viva ainda corresponde ao documento auditado. **Abrir relatório completo** abre a revisão em uma aba própria. A exportação baixa HTML autocontido, PDF, CSV e JSON-LD/EARL.
 
-## Limites atuais
+Capturas apresentadas no relatório recebem molduras derivadas por ocorrência: vermelho para falha confirmada e âmbar tracejado para revisão pendente. Os PNGs originais e seus hashes permanecem separados e inalterados.
 
-A auditoria cobre uma página e o estado observado, não todo o serviço. Itens contextuais exigem revisão humana. Frames de terceiros ou coleta estrutural bloqueada podem produzir resultado parcial. Audita Acessibilidade é uma ferramenta independente, sem vínculo institucional; seus resultados não equivalem a certificação nem a laudo oficial.
+As permissões `tabs`, `scripting` e `debugger` permitem identificar e inspecionar localmente a página ativa escolhida, coletar a árvore de acessibilidade, registrar evidências e preparar a impressão. `sidePanel` mantém a interface ao lado da página; `downloads` salva os artefatos; `storage` mantém auditoria e andamento no dispositivo; `alarms` agenda a expiração de estados temporários; `contextMenus` oferece um atalho opcional. Os sites auditados são cobertos por `host_permissions` HTTP(S). A extensão não envia o conteúdo coletado para um servidor próprio.
 
-Nesta etapa, os testes unitários, de integração não gráfica e as verificações estáticas passaram. O gate E2E em Chrome 116 e na versão atual, incluindo QA visual em desktop, móvel e impressão, instalação sem compactação e o percurso completo até os quatro downloads, ainda está pendente e não deve ser tratado como comportamento verificado. Consulte [Uso fiscal](docs/USO-FISCAL.md) para a leitura correta dos resultados.
+## Limites atuais da beta
+
+A beta audita a página aberta e o estado observado, não todo o serviço. **Outra URL**, **Lote de páginas** e o mapa numerado consolidado de anúncios ainda não estão disponíveis; as evidências visuais individuais continuam disponíveis nos modos com captura. Itens contextuais exigem revisão humana. Frames de terceiros, canvas, vídeo, conteúdo protegido ou coleta estrutural bloqueada podem produzir resultado parcial.
+
+Audita Acessibilidade é uma ferramenta independente, sem vínculo institucional. A cobertura automática não equivale a certificação nem a laudo oficial. Consulte [Uso fiscal](docs/USO-FISCAL.md) para interpretar o resultado e [Backlog da beta](docs/BETA-BACKLOG.md) para as melhorias não bloqueantes já registradas.
+
+O candidato beta só deve ser distribuído depois do gate único de suíte lógica, verificação estática, E2E real no Chrome e QA visual. O registro desse gate acompanha o pacote final.
 
 ## Desenvolvimento
 
-Execute `npm test` para a suíte, `node scripts/verify-project.mjs` para o checklist de entrega local e `npm run build:release` para gerar o pacote público. O verificador não substitui o ensaio manual em navegador. A política aplicável está em [Política de Privacidade](docs/POLITICA-DE-PRIVACIDADE.md).
+Durante mudanças, execute apenas os testes afetados. No candidato de entrega, configure o Chrome for Testing previsto pelo projeto, execute a suíte ampla e os E2E reais uma vez, rode `AUDITA_VERIFY_SKIP_TESTS=1 npm run verify` e então gere o pacote com `npm run build:release`. A política aplicável está em [Política de Privacidade](docs/POLITICA-DE-PRIVACIDADE.md).

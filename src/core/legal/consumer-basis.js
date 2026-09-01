@@ -11,12 +11,12 @@ function deepFreeze(value, seen = new WeakSet()) {
 const ABNT_ITEM_IDS = new Set(NBR17225_ITEMS.map(item => item.id));
 
 export const CONSUMER_ACCESSIBILITY_FIXED_BASIS = deepFreeze({
-  id: 'br.consumer.accessibility.fixed.v1',
-  version: '1',
+  id: 'br.consumer.accessibility.fixed.v2',
+  version: '2',
   label: 'Base consumerista padronizada para análise',
-  sentencePrefix: 'A referida desconformidade infringe o disposto nos arts. 7º, caput, 20, § 2º, e 39, VIII, da Lei nº 8.078/1990, c/c o art. 12, IX, “a”, do Decreto nº 2.181/1997',
+  sentencePrefix: 'Quando aplicável a uma relação de consumo, este achado técnico constitui subsídio para avaliar possível infração ao disposto nos arts. 7º, caput, 20, § 2º, e 39, VIII, da Lei nº 8.078/1990, c/c o art. 12, IX, “a”, do Decreto nº 2.181/1997',
   display: 'Arts. 7º, caput, 20, § 2º, e 39, VIII, da Lei nº 8.078/1990, c/c art. 12, IX, “a”, do Decreto nº 2.181/1997.',
-  qualification: 'Referência normativa automatizada; não constitui conclusão automática de infração, responsabilidade, sanção, certificação jurídica ou dispensa de revisão humana.',
+  qualification: 'A conclusão jurídica depende da verificação do caso concreto, inclusive da existência de relação de consumo e da aplicabilidade do item técnico; esta referência automatizada não determina infração, responsabilidade, sanção ou certificação jurídica e não dispensa revisão humana.',
   sources: [
     {
       id: 'br.cdc.law8078', publisher: 'Câmara dos Deputados', title: 'Lei nº 8.078/1990',

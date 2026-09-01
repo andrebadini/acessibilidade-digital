@@ -202,7 +202,7 @@ function unavailableChoice(document, label, intent, focusId, emit) {
   const wrapper = section(document, 'source-choice secondary-choice');
   wrapper.append(
     actionButton(document, label, intent, focusId, emit, 'secondary-action'),
-    paragraph(document, 'Disponível no Marco 3', 'availability-note'),
+    paragraph(document, 'Não disponível nesta beta', 'availability-note'),
   );
   return wrapper;
 }

@@ -425,11 +425,11 @@ test('fails explicitly without worker canvas APIs and never mutates the pristine
   assert.equal(JSON.stringify(source), before);
 });
 
-test('keeps the production compositor disabled until URL input and pixel consent pass a public black-box flow', async () => {
+test('keeps the production compositor disabled while the numbered map remains outside this beta', async () => {
   assert.deepEqual(ANNOTATION_MAP_MV3_GATE, {
     enabled: false,
     code: 'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE',
-    reason: 'A entrada por URL e o consentimento público de pixels ainda não estão disponíveis no Painel Lateral.',
+    reason: 'O mapa numerado de anúncios permanece adiado nesta beta; as evidências visuais individuais continuam disponíveis nos modos com captura.',
     testedBrowser: null,
   });
   assert.equal(Object.isFrozen(ANNOTATION_MAP_MV3_GATE), true);

@@ -1,4 +1,5 @@
 import { createPanelSessionPortClient } from './panel-session-port.js';
+import { parseAuditDeletedEvent } from '../core/audit-deleted-event.js';
 import {
   createHighlightStateSynchronizer,
   runHighlightAction,
@@ -45,6 +46,30 @@ export function createPanelAttachedAuditIntent(raw) {
     type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: input.capabilityId,
     captureMode: input.captureMode, includeQuery: false, deleteAfterCompleteExport: false,
   });
+}
+
+export function createPanelAuditDeletionController({
+  runtime, readState, readResult, clearResult, invalidateHighlight, transition: applyTransition,
+} = {}) {
+  if (!runtime || typeof runtime.id !== 'string' || typeof runtime.workerUrl !== 'string' ||
+    typeof readState !== 'function' || typeof readResult !== 'function' ||
+    typeof clearResult !== 'function' || typeof invalidateHighlight !== 'function' ||
+    typeof applyTransition !== 'function') throw new TypeError('PANEL_AUDIT_DELETION_INVALID');
+
+  function receive(message, sender) {
+    const deletion = parseAuditDeletedEvent(message, sender, runtime);
+    if (!deletion) return false;
+    const current = readState();
+    const result = readResult();
+    const auditIds = [current?.auditId, result?.auditId].filter(value => AUDIT_ID.test(value ?? ''));
+    if (auditIds.length === 0 || (deletion.scope !== 'all' && !auditIds.includes(deletion.auditId))) return false;
+    clearResult();
+    invalidateHighlight();
+    applyTransition({ type: 'AUDIT_DELETED' });
+    return true;
+  }
+
+  return Object.freeze({ receive });
 }
 
 export function projectPanelBootstrapEvent(value) {
@@ -161,7 +186,7 @@ async function handleIntent(intent) {
       return;
     case 'OPEN_URL_FORM':
     case 'OPEN_BATCH_FORM':
-      announce('Disponível no Marco 3');
+      announce('Não disponível nesta beta.');
       return;
     case 'CANCEL_AUDIT':
       await requestSessionAction('PANEL_CANCEL_AUDIT');
@@ -548,6 +573,24 @@ if (authorizedLaunch && typeof chromeApi?.runtime?.connect === 'function') {
     clearTimer: globalThis.clearTimeout.bind(globalThis),
   });
   sessionPortClient.start();
+}
+
+if (authorizedLaunch && typeof chromeApi?.runtime?.onMessage?.addListener === 'function' &&
+  typeof chromeApi.runtime.getURL === 'function') {
+  const auditDeletionController = createPanelAuditDeletionController({
+    runtime: {
+      id: chromeApi.runtime.id,
+      workerUrl: chromeApi.runtime.getURL('src/background/service-worker.js'),
+    },
+    readState: () => state,
+    readResult: () => resultBundle,
+    clearResult() { resultBundle = null; },
+    invalidateHighlight() { highlightStateSynchronizer.invalidate(); },
+    transition,
+  });
+  chromeApi.runtime.onMessage.addListener((message, sender) => {
+    auditDeletionController.receive(message, sender);
+  });
 }
 
 function readLocationHref() {

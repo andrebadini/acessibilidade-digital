@@ -57,6 +57,11 @@ test('keeps the public listing concise, accurate and bounded by the Chrome summa
   assert.match(listing, /processamento local/iu);
   assert.match(listing, /não constitui certificação/iu);
   assert.match(listing, /debugger[\s\S]*DOMSnapshot[\s\S]*árvore de acessibilidade/iu);
+  assert.match(listing, /1\.0\.2 beta 1/iu);
+  assert.match(listing, /Evidência completa[\s\S]*Somente elementos[\s\S]*Sem imagens/iu);
+  assert.match(listing, /HTML, PDF, CSV e JSON-LD\/EARL/iu);
+  assert.match(listing, /Outra URL[\s\S]*lote[\s\S]*mapa numerado[\s\S]*não estão disponíveis/iu);
+  assert.doesNotMatch(listing, /1\.0\.1|aba descartável/iu);
 });
 
 test('publishes a complete privacy policy in Markdown and standalone HTML', async () => {
@@ -70,7 +75,23 @@ test('publishes a complete privacy policy in Markdown and standalone HTML', asyn
       /controle do usuário/iu,
       /contato/iu,
     ]) assert.match(policy, expectation, `${path}: ${expectation}`);
+    assert.match(policy, /versão (?:da política )?1\.4/iu, path);
+    assert.match(policy, /sidePanel[\s\S]*alarms[\s\S]*contextMenus/iu, path);
+    assert.match(policy, /permanece no armazenamento local[\s\S]*exclua[\s\S]*não executa exclusão automática por prazo/iu, path);
+    assert.match(policy, /antes (?:de|das) cada captura[\s\S]*intervalo técnico[\s\S]*não elimina/iu, path);
+    assert.doesNotMatch(policy, /no máximo,? 30 dias|auditorias vencidas/iu, path);
+    assert.doesNotMatch(policy, /escolher[^.]*exclusão local[^.]*exportação|excluir todas pelo painel/iu, path);
     assert.doesNotMatch(policy, /Chrome Web Store/iu,
       `${path}: a política não pode prometer publicação ou contato por uma loja específica`);
   }
+});
+
+test('ships beta test instructions for the complete current-page journey and declares deferred controls', async () => {
+  const instructions = (await read('store-assets/TEST-INSTRUCTIONS.md')).toString('utf8');
+  for (const phrase of [
+    'Carregar sem compactação', 'painel lateral', 'Evidência completa', 'Somente elementos', 'Sem imagens',
+    'Continuar e capturar', 'WCAG 2.2', 'ABNT NBR 17225', 'Abrir relatório completo',
+    'HTML', 'PDF', 'CSV', 'JSON-LD/EARL', 'Outra URL', 'Lote de páginas', 'mapa numerado',
+  ]) assert.match(instructions, new RegExp(phrase, 'iu'));
+  assert.doesNotMatch(instructions, /campo “Endereço do site”|aba descartável|1\.0\.1/iu);
 });

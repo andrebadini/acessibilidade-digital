@@ -11,10 +11,11 @@ import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
 import { validateNormativeData } from '../../src/core/normative/validate-normative-data.js';
 
 const DISPLAY = 'Arts. 7º, caput, 20, § 2º, e 39, VIII, da Lei nº 8.078/1990, c/c art. 12, IX, “a”, do Decreto nº 2.181/1997.';
-const QUALIFICATION = 'Referência normativa automatizada; não constitui conclusão automática de infração, responsabilidade, sanção, certificação jurídica ou dispensa de revisão humana.';
+const QUALIFICATION = 'A conclusão jurídica depende da verificação do caso concreto, inclusive da existência de relação de consumo e da aplicabilidade do item técnico; esta referência automatizada não determina infração, responsabilidade, sanção ou certificação jurídica e não dispensa revisão humana.';
 
 test('returns one immutable Brazilian consumer basis with exactly two official Câmara sources', () => {
-  assert.equal(CONSUMER_ACCESSIBILITY_FIXED_BASIS.id, 'br.consumer.accessibility.fixed.v1');
+  assert.equal(CONSUMER_ACCESSIBILITY_FIXED_BASIS.id, 'br.consumer.accessibility.fixed.v2');
+  assert.equal(CONSUMER_ACCESSIBILITY_FIXED_BASIS.version, '2');
   assert.equal(CONSUMER_ACCESSIBILITY_FIXED_BASIS.label, 'Base consumerista padronizada para análise');
   assert.equal(CONSUMER_ACCESSIBILITY_FIXED_BASIS.display, DISPLAY);
   assert.equal(CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification, QUALIFICATION);
@@ -38,7 +39,9 @@ test('qualifies original and reviewed nonconformity without mutating the canonic
   });
   const before = structuredClone(original);
   const direct = qualifiedConsumerReference({ occurrence: original, item, displayOutcome: 'failed', decision: null, normativeItems: NBR17225_ITEMS });
-  assert.match(direct.text, /A referida desconformidade infringe/u);
+  assert.match(direct.text, /Quando aplicável a uma relação de consumo/u);
+  assert.match(direct.text, /subsídio para avaliar possível infração/u);
+  assert.doesNotMatch(direct.text, /A referida desconformidade infringe/u);
   assert.match(direct.text, /item 5\.1\.1 da ABNT NBR 17225:2025\.$/u);
   assert.equal(direct.label, 'Referência técnica e jurídica qualificada');
   assert.equal(direct.qualification, QUALIFICATION);

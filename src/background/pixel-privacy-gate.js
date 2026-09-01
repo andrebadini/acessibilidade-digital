@@ -112,6 +112,13 @@ function copySignals(value) {
   return Object.freeze({ version: copy.version, detected: copy.detected, categories: Object.freeze(categories) });
 }
 
+function signalsWithinAuthorization(value, authorizedCategories) {
+  const signals = copySignals(value);
+  if (!signals || !Array.isArray(authorizedCategories) ||
+    signals.categories.some(category => !authorizedCategories.includes(category))) throw rasterDenied();
+  return signals;
+}
+
 function copyProof(value, target) {
   const copy = exact(value, ['tabId', 'windowId', 'documentId', 'urlSessionDigest']);
   if (!copy || copy.tabId !== target.tabId || copy.windowId !== target.windowId ||
@@ -430,6 +437,7 @@ export function createPixelRasterBoundaryV1(input) {
     state: 'fresh',
     pixelStarted: false,
     targetChanged: false,
+    authorizedCategories: null,
   };
 
   const runRaster = async (effect, effectArgs) => {
@@ -457,6 +465,11 @@ export function createPixelRasterBoundaryV1(input) {
           throw createPixelPrivacyPauseInterruptionV1(metadata.gate, decision.signals);
         }
         if (decision.status !== 'ready') throw rasterDenied();
+        metadata.authorizedCategories = signals.categories;
+        signalsWithinAuthorization(
+          await metadata.probeSensitiveCaptureSignals(metadata.target.tabId, metadata.target.documentId),
+          metadata.authorizedCategories,
+        );
         const finalProof = await metadata.probeDocumentIdentity(metadata.target.tabId);
         let raster;
         commitFirstRaster(metadata, finalProof);
@@ -473,6 +486,10 @@ export function createPixelRasterBoundaryV1(input) {
     if (metadata.state !== 'active') throw rasterDenied();
     metadata.state = 'later-authorizing';
     try {
+      signalsWithinAuthorization(
+        await metadata.probeSensitiveCaptureSignals(metadata.target.tabId, metadata.target.documentId),
+        metadata.authorizedCategories,
+      );
       const proof = await metadata.probeDocumentIdentity(metadata.target.tabId);
       let raster;
       commitLaterRaster(metadata, proof);

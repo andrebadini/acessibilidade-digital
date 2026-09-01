@@ -179,7 +179,7 @@ function legalReferenceFor({ occurrence, card, item, decision }) {
   return {
     basisRef: CONSUMER_ACCESSIBILITY_FIXED_BASIS.id,
     abntItem: item.id,
-    statement: `A referida desconformidade infringe o disposto nos arts. 7º, caput, 20, § 2º, e 39, VIII, da Lei nº 8.078/1990, c/c o art. 12, IX, “a”, do Decreto nº 2.181/1997, e no item ${item.id} da ABNT NBR 17225:2025.`,
+    statement: `${CONSUMER_ACCESSIBILITY_FIXED_BASIS.sentencePrefix}, e no item ${item.id} da ABNT NBR 17225:2025.`,
     qualification: CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification,
   };
 }

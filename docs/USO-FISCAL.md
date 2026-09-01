@@ -21,18 +21,26 @@ Os hashes SHA-256 ajudam a comparar bytes e manifestos, mas não são assinatura
 
 ## Evidências visuais
 
-A auditoria anexada atual usa o modo sem pixels: inspeciona a estrutura da página ativa, mas não produz captura da página, miniatura do elemento nem imagem anotada. O relatório deve indicar essa ausência de forma explícita. Modos futuros de captura condicionados a consentimento e decisões próprias de privacidade não devem ser presumidos neste fluxo.
+A pessoa operadora escolhe o modo antes de iniciar:
+
+- **Evidência completa:** pode produzir captura da página e dos elementos relacionados às ocorrências.
+- **Somente elementos:** restringe os pixels aos elementos relacionados às ocorrências.
+- **Sem imagens:** não captura pixels e registra essa limitação no relatório.
+
+Nos dois modos com imagens, a extensão verifica sinais sensíveis antes de cada captura. A primeira detecção pausa a auditoria e a captura só prossegue após confirmação explícita; uma categoria nova identificada nas verificações posteriores bloqueia aquela captura. Como páginas dinâmicas podem mudar no intervalo técnico inevitável entre a última verificação e a captura, esse controle reduz, mas não elimina o risco. Oculte dados pessoais ou sigilosos antes de confirmar.
+
+As molduras vermelha e âmbar exibidas no relatório são derivações visuais correlacionadas às ocorrências. Os PNGs originais e os respectivos hashes permanecem separados e não são modificados. O mapa numerado consolidado dos anúncios ainda não faz parte desta beta.
 
 ## Privacidade e permissões
 
 O processamento local não transmite o conteúdo coletado. URLs sensíveis são saneadas antes do armazenamento e da apresentação. Dados estruturais persistidos ficam no IndexedDB; Blob URLs temporárias são usadas somente durante impressão e download e depois revogadas.
 
-As permissões `debugger`, `downloads`, `tabs`, `scripting` e `storage`, além do acesso às páginas HTTP e HTTPS indicadas pelo usuário, são necessárias para coleta, impressão, download e persistência local.
+As permissões `debugger`, `downloads`, `tabs`, `scripting`, `sidePanel`, `storage`, `alarms` e `contextMenus`, além do acesso às páginas HTTP e HTTPS, são necessárias para coleta local, painel lateral, atalhos, expiração de estados temporários, impressão, download e persistência.
 
 Depois de instalar, fixe o ícone do Audita Acessibilidade na barra do Chrome, se desejar. Um clique no ícone abre diretamente o painel lateral persistente; a auditoria só começa quando você escolhe **Auditar a página atual** dentro dele. A instalação sem compactação, por **Carregar sem compactação**, é reservada a desenvolvimento e testes controlados.
 
 ## Limitações operacionais
 
-Páginas adicionais, fluxos autenticados, estados não visitados, conteúdo que muda com o tempo e equivalência de mídia podem exigir amostragem e revisão externas. Frames de terceiros, canvas, vídeo e restrições do navegador podem limitar evidências. Auditorias `partial`, `failed` ou `cancelled` não devem ser apresentadas como completas.
+Esta beta audita a página aberta. A entrada de outra URL, a auditoria em lote e o mapa numerado consolidado ainda não estão disponíveis. Páginas adicionais, fluxos autenticados, estados não visitados, conteúdo que muda com o tempo e equivalência de mídia podem exigir amostragem e revisão externas. Frames de terceiros, canvas, vídeo e restrições do navegador podem limitar evidências. Auditorias `partial`, `failed` ou `cancelled` não devem ser apresentadas como completas.
 
-Nesta etapa, os testes unitários, de integração não gráfica e as verificações estáticas passaram. O gate E2E em Chrome 116 e na versão atual, incluindo QA visual em desktop, móvel e impressão, instalação sem compactação e o percurso completo até HTML, PDF, CSV e JSON-LD, ainda está pendente. Até esse gate terminar, o comportamento real no navegador não deve ser apresentado como verificado.
+O candidato beta só deve ser distribuído depois de um gate único com suíte lógica, verificação estática, E2E real na versão fixada do Chrome, instalação sem compactação, percurso completo até HTML, PDF, CSV e JSON-LD/EARL e QA visual do painel e do relatório. O resultado desse gate deve ser registrado junto ao pacote.

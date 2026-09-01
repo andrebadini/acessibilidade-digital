@@ -48,7 +48,7 @@ function captureCallableBundle(value, keys) {
 function copyPolicy(value) {
   const copy = captureExact(value, ['version', 'mode', 'includeQuery', 'captureFullPage', 'captureElements', 'composeAnnouncementMap']);
   const expected = {
-    'full-evidence': [true, true, true], 'element-only': [false, true, false], 'no-pixels': [false, false, false],
+    'full-evidence': [true, true, false], 'element-only': [false, true, false], 'no-pixels': [false, false, false],
   }[copy?.mode];
   if (!copy || copy.version !== 'CapturePolicyV1' || !expected || typeof copy.includeQuery !== 'boolean' ||
     copy.captureFullPage !== expected[0] || copy.captureElements !== expected[1] || copy.composeAnnouncementMap !== expected[2]) return null;

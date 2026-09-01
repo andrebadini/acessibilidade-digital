@@ -468,7 +468,7 @@ test('starts each closed capture mode with its exact canonical policy', async ()
   assert.deepEqual(calls.filter(([name]) => name === 'begin').map(([, value]) => value.capturePolicy), [
     {
       version: 'CapturePolicyV1', mode: 'full-evidence', includeQuery: false,
-      captureFullPage: true, captureElements: true, composeAnnouncementMap: true,
+      captureFullPage: true, captureElements: true, composeAnnouncementMap: false,
     },
     {
       version: 'CapturePolicyV1', mode: 'element-only', includeQuery: false,

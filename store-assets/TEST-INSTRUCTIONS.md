@@ -1,25 +1,36 @@
-# Instruções para revisão da Chrome Web Store
+# Instruções de teste — Audita Acessibilidade 1.0.2 beta 1
 
 ## Acesso
 
-A extensão não exige conta, credencial, assinatura ou serviço externo.
+A extensão não exige conta, login, credencial, assinatura ou serviço externo.
 
-## Fluxo principal
+## Instalação
 
-1. Instale a extensão e clique no ícone Audita Acessibilidade.
-2. No campo “Endereço do site”, informe `https://www.w3.org/WAI/demos/bad/before/home.html`.
-3. Selecione “Auditar”.
-4. Aguarde a conclusão. A extensão cria uma aba descartável inativa, executa a coleta local, fecha essa aba e abre a tela de revisão.
-5. Confirme que as ocorrências automatizadas têm evidências e que os itens contextuais permanecem como “Revisar”.
-6. Em uma ocorrência de revisão, informe um nome de avaliador, selecione uma das três respostas, acrescente uma nota opcional e salve.
-7. Selecione “Gerar relatório atualizado”.
-8. Confirme os downloads HTML, JSON-LD/EARL e PDF.
-9. No relatório, confirme a moldura vermelha nas não conformidades, a moldura âmbar nos itens pendentes, a moldura verde após uma resposta humana “conforme” e a seção separada de PNGs originais com hashes.
+1. Descompacte `audita-acessibilidade-1.0.2.zip` em uma pasta vazia.
+2. Abra `chrome://extensions` no Chrome.
+3. Ative **Modo do desenvolvedor**.
+4. Selecione **Carregar sem compactação** e escolha a pasta descompactada, que contém `manifest.json`.
+5. Fixe o ícone “Audita Acessibilidade” na barra, se desejar.
 
-## Permissão debugger
+## Percurso principal
 
-A permissão é usada somente nas abas descartáveis criadas pelo fluxo acima. Ela permite obter DOMSnapshot, árvore de acessibilidade, métricas, capturas e PDF. A conexão é encerrada automaticamente.
+1. Abra uma página HTTP ou HTTPS que possa ser auditada.
+2. Clique no ícone da extensão. Confirme que o painel lateral abre sem popup e permanece ao lado da página.
+3. Escolha **Evidência completa**, **Somente elementos** ou **Sem imagens**.
+4. Selecione **Auditar a página atual** e aguarde o resultado.
+5. Se a página contiver campo de senha, pagamento ou outro marcador sensível, confirme que a auditoria pausa antes dos pixels. Escolha **Continuar e capturar** somente depois de ocultar dados reais; também verifique que é possível cancelar.
+6. No sumário, confira os totais de falhas, alertas, revisão humana e resultados positivos, além dos filtros por impacto, WCAG e ABNT.
+7. Abra uma ocorrência. Confira a explicação, o impacto, a correção sugerida, o nome acessível, o anúncio estimado, WCAG 2.2, ABNT NBR 17225, fundamentação legal, seletor, código e evidências.
+8. Use **Ver e destacar na página**. O destaque só deve aparecer se a página ainda corresponder ao documento auditado.
+9. Selecione **Abrir relatório completo**. Uma falha de abertura deve manter o sumário e permitir nova tentativa pelo mesmo botão.
+10. Na aba do relatório, registre uma decisão de revisão quando aplicável e selecione **Gerar relatório atualizado**.
+11. Confirme os quatro downloads: HTML, PDF, CSV e JSON-LD/EARL.
+12. Confira que as molduras vermelha e âmbar são derivações visuais e que os PNGs originais e hashes permanecem separados.
+
+## Limites declarados da beta
+
+**Outra URL**, **Lote de páginas** e o mapa numerado consolidado de anúncios aparecem como indisponíveis nesta beta. A auditoria da página aberta, as evidências individuais, o destaque, as personas e os quatro formatos de exportação fazem parte do percurso testável.
 
 ## Privacidade
 
-Todo processamento é local. A extensão não possui backend, analytics, publicidade ou código remoto. Os sites de teste recebem apenas a navegação normal do Chrome.
+Todo processamento da extensão é local. Não há backend, analytics, publicidade ou código remoto. A navegação normal da página auditada continua sujeita ao próprio site.

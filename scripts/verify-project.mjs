@@ -52,9 +52,9 @@ assert.deepEqual(AXE_RUN_CONFIG.rules['target-size'], { enabled: true }, 'target
 assert.deepEqual(ANNOTATION_MAP_MV3_GATE, {
   enabled: false,
   code: 'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE',
-  reason: 'A entrada por URL e o consentimento público de pixels ainda não estão disponíveis no Painel Lateral.',
+  reason: 'O mapa numerado de anúncios permanece adiado nesta beta; as evidências visuais individuais continuam disponíveis nos modos com captura.',
   testedBrowser: null,
-}, 'mapa anotado permanece desabilitado até existir prova black-box pública de URL e consentimento');
+}, 'mapa anotado permanece desabilitado durante esta beta');
 assert.doesNotMatch(JSON.stringify(AXE_RUN_CONFIG), /experimental|section508/iu);
 
 assert.equal(CORE_RULES.length, 130);
@@ -91,7 +91,7 @@ if (process.env.AUDITA_VERIFY_SKIP_TESTS !== '1') {
   assert.equal(suite.status, 0, 'npm test precisa passar');
 }
 
-console.log('verify-project: manifest/CSP e axe 4.13.0 aprovados no Chrome for Testing 152.0.7977.64; mapa aguarda fluxo público de URL/consentimento; 130/146 (96/50), identidade neutra, HTML/JSON/PDF, fixtures e privacidade GREEN');
+console.log('verify-project: manifest/CSP e axe 4.13.0 aprovados no Chrome for Testing 152.0.7977.64; mapa numerado adiado nesta beta; 130/146 (96/50), identidade neutra, HTML/JSON/PDF, fixtures e privacidade GREEN');
 
 async function sourceFiles(directoryUrl) {
   const directory = directoryUrl.pathname;

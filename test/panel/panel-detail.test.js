@@ -125,6 +125,9 @@ test('renders the qualified fixed legal basis only for an eligible failed offici
 
   assert.equal(failed.legalReference.basisRef, CONSUMER_ACCESSIBILITY_FIXED_BASIS.id);
   assert.equal(failed.legalReference.abntItem, '5.1.1');
+  assert.match(failed.legalReference.statement, /Quando aplicável a uma relação de consumo/u);
+  assert.match(failed.legalReference.statement, /subsídio para avaliar possível infração/u);
+  assert.doesNotMatch(failed.legalReference.statement, /A referida desconformidade infringe/u);
   assert.match(failed.legalReference.statement, /item 5\.1\.1 da ABNT NBR 17225:2025/u);
   assert.equal(failed.legalReference.qualification, CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification);
   assert.equal(pending.legalReference, null);

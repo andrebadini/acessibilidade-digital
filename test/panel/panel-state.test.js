@@ -173,6 +173,30 @@ test('implements the exact four-screen lifecycle and ignores unknown events', ()
   assert.strictEqual(reducePanelState(restarted, null), restarted);
 });
 
+test('drops deleted audit state while preserving an active persona and the selected capture mode', () => {
+  let result = reducePanelState(createInitialPanelState(), {
+    type: 'CAPTURE_MODE_SELECTED', mode: 'no-pixels', focusId: 'capture-mode-no-pixels',
+  });
+  result = reducePanelState(result, { type: 'PERSONA_SELECTED', mode: 'reader' });
+  result = reducePanelState(result, {
+    type: 'AUDIT_RESULT', auditId: 'audit-1', result: resultBundle(),
+  });
+
+  const cleared = reducePanelState(result, { type: 'AUDIT_DELETED' });
+
+  assert.equal(cleared.screen, 'initial');
+  assert.equal(cleared.auditId, null);
+  assert.equal(cleared.captureMode, 'no-pixels');
+  assert.equal(cleared.persona.mode, 'reader');
+  assert.equal(cleared.selectedOccurrenceId, null);
+  assert.equal(cleared.evidenceExpanded, false);
+  assert.deepEqual(cleared.highlight, {
+    state: 'idle', operation: null, occurrenceId: null,
+    bindingStatus: { state: 'unchecked' }, message: null,
+  });
+  assert.strictEqual(reducePanelState(result, { type: 'AUDIT_DELETED', auditId: 'PRIVATE' }), result);
+});
+
 test('unknown and invalid events return a detached recursively frozen valid state', () => {
   const mutable = {
     version: 1, screen: 'result', auditId: 'audit-1',

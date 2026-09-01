@@ -90,7 +90,7 @@ test('serializes a deterministic RFC 4180 occurrence table with fixed versioned 
     accessible_preview: DETAIL_MARKER,
     accessible_preview_source: DETAIL_MARKER,
     evidence_refs: 'ev-full;ev-control',
-    consumer_basis_ref: 'br.consumer.accessibility.fixed.v1',
+    consumer_basis_ref: 'br.consumer.accessibility.fixed.v2',
     evidence_hashes: `ev-full=${verified.evidence[0].hash};ev-control=${verified.evidence[1].hash}`,
     canonical_model_hash: verified.integrity.canonicalModelHash,
     evidence_manifest_hash: verified.integrity.evidenceManifestHash,

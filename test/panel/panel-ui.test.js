@@ -33,7 +33,7 @@ test('renderer uses only DOM construction and the fixed exhaustive screen and in
   assert.doesNotMatch(runtime, /relatório completo estará disponível na próxima etapa/iu);
 });
 
-test('initial URL and batch choices remain visible but local to Marco 3', async () => {
+test('initial URL and batch choices remain visible with an honest beta limitation', async () => {
   const view = await panelFile('panel-view.js');
   assert.match(view, /Auditar a página atual/u);
   for (const label of ['Evidência completa', 'Somente elementos', 'Sem imagens']) {
@@ -41,7 +41,7 @@ test('initial URL and batch choices remain visible but local to Marco 3', async 
   }
   assert.match(view, /Outra URL/u);
   assert.match(view, /Lote de páginas/u);
-  assert.match(view, /Disponível no Marco 3/u);
+  assert.match(view, /Não disponível nesta beta/u);
   assert.doesNotMatch(view, /type="url"|placeholder=.*https|prefill/iu);
 });
 

@@ -15,7 +15,8 @@ test('plain-language usage docs report the current verification boundary accurat
   for (const phrase of [
     'Carregar sem compactação', 'debugger', 'downloads', 'processamento local', 'revisão',
     'JSON-LD', 'EARL', 'HTML', 'PDF', 'CSV', 'E2E', 'Chrome', 'QA visual',
-    'desktop', 'móvel', 'impressão',
+    'Evidência completa', 'Somente elementos', 'Sem imagens', 'confirmação explícita',
+    'Outra URL', 'Lote de páginas', 'mapa numerado',
   ]) {
     assert.match(combined, new RegExp(phrase, 'iu'));
   }
@@ -23,11 +24,9 @@ test('plain-language usage docs report the current verification boundary accurat
   for (const format of ['HTML', 'PDF', 'CSV', 'JSON-LD']) {
     assert.match(guide, new RegExp(`^- ${format}:`, 'imu'));
   }
-  assert.match(combined, /testes unitários[^.]*integração não gráfica[^.]*verificações estáticas[^.]*passaram/iu);
-  assert.match(combined, /E2E[^.]*Chrome 116[^.]*versão atual[^.]*QA visual[^.]*pendente/iu);
-  assert.match(combined, /comportamento real[^.]*não deve ser apresentado como verificado/iu);
-  assert.doesNotMatch(combined,
-    /\b(?:E2E|QA visual)\b[^.]*\b(?:foi|foram|está|estão)\s+(?:executad|concluíd|completad|aprovad|verificad)/iu);
+  assert.match(combined, /candidato beta[^.]*gate único[^.]*E2E real[^.]*Chrome[^.]*QA visual/iu);
+  assert.match(combined, /Outra URL[^.]*Lote de páginas[^.]*mapa numerado[^.]*não estão disponíveis/iu);
+  assert.doesNotMatch(combined, /auditoria anexada atual[^.]*não captura pixels|fluxo anexado atual[^.]*modo sem pixels/iu);
 });
 
 test('neutral identity scanner rejects a forbidden identity in package content or file names', async () => {

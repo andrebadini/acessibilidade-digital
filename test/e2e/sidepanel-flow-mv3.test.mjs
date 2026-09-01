@@ -73,6 +73,7 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
     assert.equal(panelBehavior?.openPanelOnActionClick, false);
     const before = await extension.identityOf(extension.startPage);
     const panel = await extension.openSidePanelFromAction();
+    let currentPanel = panel;
     const sidePanels = await extension.runtimeContexts({ contextTypes: ['SIDE_PANEL'] });
     const popups = await extension.runtimeContexts({ contextTypes: ['POPUP'] });
     assert.equal(sidePanels.length, 1);
@@ -446,6 +447,7 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
         priorDocumentId: panelDocumentId,
         timeoutMs: 10_000,
       });
+      currentPanel = rebound.page;
       const reboundState = await extension.waitForValue(rebound.page, `(() => ({
         screen:document.querySelector('[data-screen]')?.dataset.screen??null,
         clear:Boolean(document.querySelector('[data-action="clear-highlight"]')),
@@ -538,6 +540,28 @@ test('real toolbar shortcut opens the Side Panel and completes the attached audi
       sha256: row.sha256,
     }));
     t.diagnostic(`auditId=${auditId}; coverage=${summary.coverage}; failures=${summary.failures}; receipt=complete; downloads=${JSON.stringify(downloadProofs)}`);
+
+    await extension.click(report, '#delete-audit');
+    await extension.waitForValue(report, `document.querySelector('#delete-audit-dialog')?.open`, Boolean);
+    await extension.click(report, '#delete-audit-confirm');
+    await extension.waitForValue(report, `(() => ({
+      disabled: document.querySelector('#delete-audit')?.disabled === true,
+      status: document.querySelector('#review-status')?.textContent ?? ''
+    }))()`, value => value?.disabled === true && /excluída/iu.test(value.status), {
+      timeoutMs: 20_000, intervalMs: 50,
+    });
+    const panelAfterDeletion = await extension.waitForValue(currentPanel, `(() => ({
+      screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
+      details: document.querySelectorAll('[data-result-detail]').length,
+      previews: document.querySelectorAll('[data-evidence-preview-image]').length,
+      dataImages: document.documentElement.outerHTML.includes('data:image/png;base64,')
+    }))()`, value => value?.screen === 'initial' && value.details === 0 && value.previews === 0 && value.dataImages === false, {
+      timeoutMs: 20_000, intervalMs: 50,
+    });
+    assert.deepEqual(panelAfterDeletion, {
+      screen: 'initial', details: 0, previews: 0, dataImages: false,
+    });
+    t.diagnostic('delete-sync=report-and-panel-memory-cleared; downloaded-files=preserved');
   } catch (error) {
     t.diagnostic(`controlled-failure=${redactDiagnostic(error?.code ?? error?.message ?? 'E2E_DENIED')}`);
     throw error;

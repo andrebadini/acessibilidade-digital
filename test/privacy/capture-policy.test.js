@@ -7,7 +7,7 @@ const { createCapturePolicyV1, isCapturePolicyV1 } = capturePolicy;
 
 test('derives the exact frozen pixel capabilities for every privacy mode', () => {
   const cases = [
-    ['full-evidence', true, true, true],
+    ['full-evidence', true, true, false],
     ['element-only', false, true, false],
     ['no-pixels', false, false, false],
   ];

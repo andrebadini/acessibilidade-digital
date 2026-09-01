@@ -10,6 +10,7 @@ if (priorDocument === undefined) delete globalThis.document;
 else globalThis.document = priorDocument;
 
 const {
+  createPanelAuditDeletionController,
   createPanelAttachedAuditIntent,
   createPanelPrivacyConfirmationController,
   projectPanelBootstrapEvent,
@@ -48,6 +49,52 @@ test('builds the exact attached start envelope from each user-selected capture m
     { capabilityId: 'C'.repeat(22), captureMode: 'pixels' },
     { capabilityId: 'C'.repeat(22), captureMode: 'full-evidence', extra: 'PRIVATE' },
   ]) assert.equal(createPanelAttachedAuditIntent(input), null);
+});
+
+test('clears the matching in-memory result when the worker confirms audit deletion', () => {
+  let current = { screen: 'result', auditId: 'audit-1' };
+  let result = { auditId: 'audit-1', pixels: 'data:image/png;base64,PRIVATE' };
+  const events = [];
+  let invalidations = 0;
+  const workerUrl = 'chrome-extension://extension-id/src/background/service-worker.js';
+  const controller = createPanelAuditDeletionController({
+    runtime: { id: 'extension-id', workerUrl },
+    readState: () => current,
+    readResult: () => result,
+    clearResult() { result = null; },
+    invalidateHighlight() { invalidations += 1; },
+    transition(event) { events.push(event); current = { ...current, screen: 'initial', auditId: null }; },
+  });
+
+  assert.equal(controller.receive({
+    type: 'AUDIT_DELETED', auditId: 'audit-1', reason: 'delete-one',
+  }, { id: 'extension-id', url: workerUrl }), true);
+  assert.equal(result, null);
+  assert.deepEqual(events, [{ type: 'AUDIT_DELETED' }]);
+  assert.equal(invalidations, 1);
+});
+
+test('ignores deletion notices from another audit or an untrusted sender without clearing memory', () => {
+  let result = { auditId: 'audit-1', pixels: 'data:image/png;base64,PRIVATE' };
+  let effects = 0;
+  const workerUrl = 'chrome-extension://extension-id/src/background/service-worker.js';
+  const controller = createPanelAuditDeletionController({
+    runtime: { id: 'extension-id', workerUrl },
+    readState: () => ({ screen: 'result', auditId: 'audit-1' }),
+    readResult: () => result,
+    clearResult() { result = null; effects += 1; },
+    invalidateHighlight() { effects += 1; },
+    transition() { effects += 1; },
+  });
+
+  assert.equal(controller.receive({
+    type: 'AUDIT_DELETED', auditId: 'audit-2', reason: 'delete-one',
+  }, { id: 'extension-id', url: workerUrl }), false);
+  assert.equal(controller.receive({
+    type: 'AUDIT_DELETED', auditId: 'audit-1', reason: 'delete-one',
+  }, { id: 'extension-id', url: 'chrome-extension://extension-id/src/review/index.html' }), false);
+  assert.notEqual(result, null);
+  assert.equal(effects, 0);
 });
 
 test('projects only the safe privacy bootstrap fields and rejects hostile transport shapes', () => {

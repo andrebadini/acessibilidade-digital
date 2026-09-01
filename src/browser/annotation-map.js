@@ -17,7 +17,7 @@ export { ANNOTATION_MAP_ALGORITHM, ANNOTATION_MAP_LIMITS, ANNOTATION_MAP_VERSION
 export const ANNOTATION_MAP_MV3_GATE = Object.freeze({
   enabled: false,
   code: 'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE',
-  reason: 'A entrada por URL e o consentimento público de pixels ainda não estão disponíveis no Painel Lateral.',
+  reason: 'O mapa numerado de anúncios permanece adiado nesta beta; as evidências visuais individuais continuam disponíveis nos modos com captura.',
   testedBrowser: null,
 });
 

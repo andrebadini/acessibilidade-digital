@@ -544,7 +544,7 @@ function isCanonicalCapturePolicy(value) {
   if (value.mode === 'full-evidence') {
     captureFullPage = true;
     captureElements = true;
-    composeAnnouncementMap = true;
+    composeAnnouncementMap = false;
   } else if (value.mode === 'element-only') {
     captureFullPage = false;
     captureElements = true;

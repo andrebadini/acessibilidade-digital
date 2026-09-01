@@ -1,6 +1,6 @@
 const POLICY_KEYS = Object.freeze(['mode', 'includeQuery']);
 const MODES = Object.freeze(Object.assign(Object.create(null), {
-  'full-evidence': Object.freeze([true, true, true]),
+  'full-evidence': Object.freeze([true, true, false]),
   'element-only': Object.freeze([false, true, false]),
   'no-pixels': Object.freeze([false, false, false]),
 }));

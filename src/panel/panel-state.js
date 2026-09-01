@@ -123,6 +123,14 @@ export function reducePanelState(current, event) {
         reason: null,
       });
     }
+    case 'AUDIT_DELETED':
+      if (!exactDataRecord(event, ['type'])) return current;
+      return nextPanelState(current, {
+        screen: 'initial', auditId: null, sessionStatus: null, privacy: neutralPrivacy(),
+        filters: { impact: [], wcag: [], abnt: [] }, selectedOccurrenceId: null,
+        evidenceExpanded: false, highlight: uncheckedHighlight(), focusId: 'start-attached',
+        scrollTop: 0, reason: null,
+      });
     case 'AUDIT_UNAVAILABLE': {
       const auditId = validPanelAuditId(event.auditId) ? event.auditId : current.auditId;
       const reason = PANEL_UNAVAILABLE_REASONS.has(event.reason)

@@ -1,4 +1,4 @@
-# Conteúdo da Chrome Web Store — Audita Acessibilidade 1.0.1
+# Conteúdo de distribuição — Audita Acessibilidade 1.0.2 beta 1
 
 ## Nome
 
@@ -14,15 +14,19 @@ Audita Acessibilidade ajuda a examinar a acessibilidade de uma página web de fo
 
 Principais recursos:
 
-- auditoria de uma URL HTTP ou HTTPS informada pelo usuário;
+- auditoria da página HTTP ou HTTPS aberta no Chrome, em um clique;
+- três modos de evidência: Evidência completa, Somente elementos e Sem imagens;
+- pausa de privacidade e confirmação explícita antes de capturas potencialmente sensíveis;
 - verificações automatizadas e indicação transparente dos itens que exigem julgamento humano;
 - associação de ocorrências aos itens da ABNT e aos critérios WCAG correspondentes;
-- captura da página inteira e de elementos relacionados às ocorrências;
-- moldura vermelha para não conformidades, âmbar para revisão pendente e verde após conformidade confirmada;
+- captura da página inteira e de elementos relacionados às ocorrências, conforme o modo escolhido;
+- moldura vermelha para não conformidades e âmbar tracejado para revisão pendente, sem alterar os PNGs originais;
 - trecho HTML sanitizado, seletor e propriedades de acessibilidade;
 - cálculo do nome acessível e prévia explicativa do anúncio esperado por tecnologia assistiva;
 - revisão assistida com registro do avaliador, decisão, data e nota;
-- relatórios locais em HTML, PDF e JSON-LD/EARL;
+- relatórios locais em HTML, PDF, CSV e JSON-LD/EARL;
+- painel lateral persistente, destaque vivo do elemento e relatório completo em aba própria;
+- personas de leitor de tela, acromatopsia e navegação por teclado;
 - processamento local, sem envio do conteúdo auditado para um servidor do desenvolvedor.
 
 Importante: a auditoria representa somente a página e o estado observados. Itens contextuais, fluxos completos e equivalência de conteúdo podem exigir análise humana. O relatório não constitui certificação do site inteiro.
@@ -30,6 +34,8 @@ Importante: a auditoria representa somente a página e o estado observados. Iten
 Antes de auditar, oculte dados pessoais ou sigilosos visíveis. As capturas são incorporadas aos relatórios baixados.
 
 Audita Acessibilidade é uma ferramenta independente, sem vínculo institucional.
+
+Limites desta beta: a entrada de outra URL, a auditoria em lote e o mapa numerado consolidado de anúncios ainda não estão disponíveis.
 
 ## Finalidade única
 
@@ -47,11 +53,11 @@ Português (Brasil).
 
 ### debugger
 
-Necessária para usar localmente o Chrome DevTools Protocol na aba descartável de auditoria: coletar DOMSnapshot e árvore de acessibilidade, ler métricas, capturar a página e os elementos e gerar o PDF. A extensão desconecta o protocolo e fecha as abas exatas ao terminar.
+Necessária para usar localmente o Chrome DevTools Protocol na página escolhida: coletar DOMSnapshot e árvore de acessibilidade, ler métricas, capturar evidências autorizadas e gerar o PDF. A extensão desconecta o protocolo ao terminar.
 
 ### downloads
 
-Necessária para salvar, mediante ação do usuário, os relatórios HTML, PDF e JSON-LD/EARL no dispositivo.
+Necessária para salvar, mediante ação do usuário, os relatórios HTML, PDF, CSV e JSON-LD/EARL no dispositivo.
 
 ### scripting
 
@@ -63,11 +69,23 @@ Necessária para manter localmente o andamento da auditoria, o modelo de resulta
 
 ### tabs
 
-Necessária para criar a aba descartável da URL auditada e a aba inativa de impressão, acompanhar o carregamento, obter a URL final e fechar somente essas abas ao concluir.
+Necessária para identificar a página ativa escolhida e abrir as páginas locais de relatório e impressão, sem substituir a página auditada.
+
+### sidePanel
+
+Necessária para manter a interface de auditoria ao lado da página examinada.
+
+### alarms
+
+Necessária para agendar a expiração e a limpeza de estados temporários, como consentimentos de captura, personas e destaques.
+
+### contextMenus
+
+Necessária para oferecer um atalho opcional de auditoria pelo menu de contexto.
 
 ### Acesso aos hosts HTTP e HTTPS
 
-Necessário porque o usuário pode informar qualquer página HTTP ou HTTPS para auditoria. O acesso é usado somente na URL iniciada pelo fluxo da extensão.
+Necessário para inspecionar localmente a página HTTP ou HTTPS que o usuário escolheu auditar.
 
 ## Código remoto
 
