@@ -179,7 +179,7 @@ test('publishes only the explicit Task 3C execution dependencies', () => {
 
   assert.deepEqual(
     [...Reflect.ownKeys(internal)].sort(),
-    ['capturePolicy', 'onExecutionCheckpoint', 'persistAuditModel', 'randomBytes', 'sessionArea'].sort(),
+    ['capturePolicy', 'onExecutionCheckpoint', 'persistAuditModel', 'randomBytes', 'sessionArea', 'snapshotAttachedCopySource'].sort(),
   );
   assert.notEqual(internal.capturePolicy, capturePolicy);
   assert.deepEqual({ ...internal.capturePolicy }, capturePolicy);
@@ -738,7 +738,7 @@ test('publishes an exact frozen null-prototype execution contract immune to inhe
 
   assert.equal(Object.getPrototypeOf(internal), null);
   assert.equal(Object.isFrozen(internal), true);
-  assert.deepEqual(Reflect.ownKeys(internal).sort(), ['randomBytes', 'sessionArea']);
+  assert.deepEqual(Reflect.ownKeys(internal).sort(), ['randomBytes', 'sessionArea', 'snapshotAttachedCopySource']);
   assert.deepEqual(inherited, {
     capturePolicy: undefined,
     privacyDecision: undefined,
@@ -787,7 +787,7 @@ test('publishes with captured primordials after hostile option reentrancy mutate
     const internal = adapter[AUDIT_EXECUTION_INTERNAL];
     assert.equal(Object.getPrototypeOf(internal), null);
     assert.equal(Object.isFrozen(internal), true);
-    assert.deepEqual(Reflect.ownKeys(internal).sort(), ['randomBytes', 'sessionArea']);
+    assert.deepEqual(Reflect.ownKeys(internal).sort(), ['randomBytes', 'sessionArea', 'snapshotAttachedCopySource']);
   }
   assert.deepEqual(innerFake.calls, []);
   assert.deepEqual(outerFake.calls, []);
@@ -1566,6 +1566,120 @@ test('rejects navigation or document replacement while HMAC digest is pending', 
   current = { url: 'https://example.test/after', documentId: 'document-after', status: 'loading' };
   releaseDigest();
   await assert.rejects(() => pending, /TARGET_DOCUMENT_UNAVAILABLE/u);
+});
+
+test('snapshots an attached source URL only through the opaque worker contract without mutating the tab', async () => {
+  const fake = chromeFake();
+  const rawUrl = 'https://example.test/private-path?token=KEEP-IN-WORKER#state';
+  const tab = Object.freeze({
+    id: 17,
+    windowId: 9,
+    status: 'complete',
+    url: rawUrl,
+  });
+  let tabReads = 0;
+  let scriptReads = 0;
+  fake.chromeApi.tabs.get = async () => {
+    tabReads += 1;
+    return structuredClone(tab);
+  };
+  fake.chromeApi.scripting.executeScript = async options => {
+    scriptReads += 1;
+    assert.deepEqual(options.target, { tabId: 17, frameIds: [0] });
+    assert.equal(options.world, 'ISOLATED');
+    return [{ frameId: 0, documentId: 'attached-document-a', result: rawUrl }];
+  };
+  const digest = `hmac-sha256:${'A'.repeat(43)}`;
+  const adapter = createChromeAdapter(fake.chromeApi, {
+    sessionUrlDigestManager: Object.freeze({ async digest(value) {
+      assert.equal(value, rawUrl);
+      return digest;
+    } }),
+  });
+
+  assert.equal(Object.hasOwn(adapter, 'snapshotAttachedCopySource'), false);
+  const source = await adapter[AUDIT_EXECUTION_INTERNAL].snapshotAttachedCopySource(Object.freeze({
+    tabId: 17,
+    windowId: 9,
+    documentId: 'attached-document-a',
+    urlSessionDigest: digest,
+  }));
+
+  assert.deepEqual(source, {
+    version: 'AttachedCopySourceV1',
+    tabId: 17,
+    windowId: 9,
+    documentId: 'attached-document-a',
+    urlSessionDigest: digest,
+    rawUrl,
+  });
+  assert.equal(Object.isFrozen(source), true);
+  assert.equal(tabReads, 3);
+  assert.equal(scriptReads, 2);
+  assert.deepEqual(tab, { id: 17, windowId: 9, status: 'complete', url: rawUrl });
+  assert.deepEqual(fake.calls.filter(([name]) => ['create', 'update', 'remove', 'attach', 'cdp'].includes(name)), []);
+});
+
+test('denies an attached source snapshot when navigation A to B occurs while its digest is pending', async () => {
+  const fake = chromeFake();
+  const digest = `hmac-sha256:${'A'.repeat(43)}`;
+  let current = { url: 'https://example.test/a?secret=NEVER-RETURN', documentId: 'document-a', status: 'complete' };
+  let releaseDigest;
+  let digestStarted = false;
+  const digestGate = new Promise(resolve => { releaseDigest = resolve; });
+  fake.chromeApi.tabs.get = async id => ({ id, windowId: 9, status: current.status, url: current.url });
+  fake.chromeApi.scripting.executeScript = async () => [{
+    frameId: 0,
+    documentId: current.documentId,
+    result: current.url,
+  }];
+  const adapter = createChromeAdapter(fake.chromeApi, {
+    sessionUrlDigestManager: Object.freeze({
+      async digest() {
+        digestStarted = true;
+        await digestGate;
+        return digest;
+      },
+    }),
+  });
+
+  const pending = adapter[AUDIT_EXECUTION_INTERNAL].snapshotAttachedCopySource({
+    tabId: 17,
+    windowId: 9,
+    documentId: 'document-a',
+    urlSessionDigest: digest,
+  });
+  while (!digestStarted) await new Promise(resolve => setImmediate(resolve));
+  current = { url: 'https://example.test/b', documentId: 'document-b', status: 'complete' };
+  releaseDigest();
+
+  await assert.rejects(pending, error => {
+    assert.equal(error.message, 'ATTACHED_COPY_SOURCE_UNAVAILABLE');
+    assert.doesNotMatch(error.message, /NEVER-RETURN|example\.test|document-a|hmac/iu);
+    return true;
+  });
+});
+
+test('rejects non-exact attached source targets before any browser or digest effect', async () => {
+  const fake = chromeFake();
+  let effects = 0;
+  fake.chromeApi.tabs.get = async () => { effects += 1; throw new Error('must not read'); };
+  fake.chromeApi.scripting.executeScript = async () => { effects += 1; throw new Error('must not script'); };
+  const adapter = createChromeAdapter(fake.chromeApi, {
+    sessionUrlDigestManager: Object.freeze({ async digest() { effects += 1; throw new Error('must not digest'); } }),
+  });
+
+  await assert.rejects(
+    () => adapter[AUDIT_EXECUTION_INTERNAL].snapshotAttachedCopySource({
+      tabId: 17,
+      windowId: 9,
+      documentId: 'document-a',
+      urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+      rawUrl: 'https://example.test/private',
+    }),
+    /ATTACHED_COPY_SOURCE_UNAVAILABLE/u,
+  );
+  assert.equal(effects, 0);
 });
 
 test('rejects ambiguous, stale, or non-HTTP document probes', async () => {

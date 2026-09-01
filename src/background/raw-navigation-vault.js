@@ -4,9 +4,10 @@ import { normalizeAuditUrl } from '../core/url.js';
 const PREFIX = 'audita:raw-navigation:v1:';
 const QUEUE_PREFIX = 'audita:raw-navigation-queue:v1:';
 const LEGACY_TTL_MS = 60_000;
+const ATTACHED_COPY_TTL_MS = 60_000;
 const SINGLE_USE_TTL_MS = 600_000;
 const BATCH_TTL_MS = 7_200_000;
-const PURPOSES = new Set(['single-url', 'batch-page', 'context-menu-link', 'current-state-assist']);
+const PURPOSES = new Set(['single-url', 'batch-page', 'context-menu-link', 'current-state-assist', 'attached-copy']);
 const QUEUE_STATUSES = new Set(['pending', 'running', 'finished']);
 const LEGACY_RECORD_KEYS = Object.freeze(['version', 'navigationToken', 'ownerId', 'rawUrl', 'issuedAt', 'expiresAt', 'state']);
 const RECORD_KEYS = Object.freeze(['version', 'auditId', 'purpose', 'rawUrl', 'issuedAt', 'expiresAt']);
@@ -74,7 +75,10 @@ function validToken(value) { return typeof value === 'string' && /^[A-Za-z0-9_-]
 function validDigest(value) { return typeof value === 'string' && /^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(value); }
 function validClock(value) { return Number.isSafeInteger(value) && value >= 0; }
 function validRawUrl(value) { try { return typeof value === 'string' && normalizeAuditUrl(value) === value; } catch { return false; } }
-function ttlFor(purpose) { return purpose === 'batch-page' ? BATCH_TTL_MS : SINGLE_USE_TTL_MS; }
+function ttlFor(purpose) {
+  if (purpose === 'batch-page') return BATCH_TTL_MS;
+  return purpose === 'attached-copy' ? ATTACHED_COPY_TTL_MS : SINGLE_USE_TTL_MS;
+}
 function unavailable() { return new Error('RAW_NAVIGATION_UNAVAILABLE'); }
 function consumed() { return new Error('Navegação expirada ou consumida.'); }
 function wrongPurpose() { return new Error('Finalidade não corresponde.'); }
@@ -471,7 +475,8 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
     put(rawUrl, options) { return serial(async () => {
       const input = exact(options, ['auditId', 'purpose', 'ttlMs', 'includeQuery']);
       if (!input || !validId(input.auditId) || !PURPOSES.has(input.purpose) || input.ttlMs !== ttlFor(input.purpose) ||
-        typeof input.includeQuery !== 'boolean' || !digestManager) throw new TypeError('RAW_NAVIGATION_INVALID');
+        typeof input.includeQuery !== 'boolean' || input.purpose === 'attached-copy' && input.includeQuery ||
+        !digestManager) throw new TypeError('RAW_NAVIGATION_INVALID');
       let canonical; let evidenceUrl;
       try { canonical = canonicalNavigationUrl(rawUrl); evidenceUrl = sanitizeEvidenceUrlV1(canonical, { includeQuery: input.includeQuery }); }
       catch { throw new TypeError('RAW_NAVIGATION_INVALID'); }
@@ -506,6 +511,7 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       const expectedEvidenceUrl = input && exact(input.expectedEvidenceUrl, EVIDENCE_URL_KEYS);
       if (!input || !validId(input.auditId) || !PURPOSES.has(input.purpose) ||
         !expectedEvidenceUrl || !isEvidenceUrlV1(expectedEvidenceUrl) ||
+        input.purpose === 'attached-copy' && expectedEvidenceUrl.queryIncluded ||
         !validDigest(input.expectedSessionDigest) || !digestManager) throw consumed();
       const { key, record } = await readPublic(navigationToken);
       if (record.auditId !== input.auditId) throw wrongAudit(); if (record.purpose !== input.purpose) throw wrongPurpose();

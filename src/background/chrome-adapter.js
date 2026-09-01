@@ -40,6 +40,7 @@ const MAX_HIGHLIGHT_SELECTOR_BYTES = 1_000_000;
 const CAPTURE_POLICY_KEYS = ObjectFreeze([
   'version', 'mode', 'includeQuery', 'captureFullPage', 'captureElements', 'composeAnnouncementMap',
 ]);
+const ATTACHED_COPY_TARGET_KEYS = ObjectFreeze(['tabId', 'windowId', 'documentId', 'urlSessionDigest']);
 
 function exactHighlightRecord(value, expectedKeys) {
   try {
@@ -481,6 +482,36 @@ function compositionDenied() {
 
 function adapterOptionsDenied() {
   return new PrimordialTypeError('AUDIT_ADAPTER_OPTIONS_DENIED');
+}
+
+function attachedCopySourceUnavailable() {
+  return new Error('ATTACHED_COPY_SOURCE_UNAVAILABLE');
+}
+
+function attachedCopyExpectedTarget(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const prototype = ObjectGetPrototypeOf(value);
+    if (prototype !== ObjectPrototype && prototype !== null) return null;
+    const keys = ReflectOwnKeys(value);
+    if (keys.length !== ATTACHED_COPY_TARGET_KEYS.length ||
+      keys.some(key => typeof key !== 'string' || !ATTACHED_COPY_TARGET_KEYS.includes(key))) return null;
+    const output = ObjectCreate(null);
+    for (let index = 0; index < ATTACHED_COPY_TARGET_KEYS.length; index += 1) {
+      const key = ATTACHED_COPY_TARGET_KEYS[index];
+      const descriptor = ObjectGetOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !ObjectHasOwn(descriptor, 'value')) return null;
+      output[key] = descriptor.value;
+    }
+    if (!Number.isSafeInteger(output.tabId) || output.tabId < 0 ||
+      !Number.isSafeInteger(output.windowId) || output.windowId < 0 ||
+      typeof output.documentId !== 'string' || !HIGHLIGHT_DOCUMENT_ID.test(output.documentId) ||
+      typeof output.urlSessionDigest !== 'string' ||
+      !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(output.urlSessionDigest)) return null;
+    return ObjectFreeze(output);
+  } catch {
+    return null;
+  }
 }
 
 function isAdapterOptionName(key) {
@@ -1394,6 +1425,57 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
     return { ok: true, proofs: Object.freeze(proofs), failures };
   };
 
+  const snapshotAttachedCopySource = async rawExpectedTarget => {
+    const expected = attachedCopyExpectedTarget(rawExpectedTarget);
+    if (!expected || typeof sessionUrlDigestManager?.digest !== 'function') {
+      throw attachedCopySourceUnavailable();
+    }
+    try {
+      const tab = await invoke(chromeApi, chromeApi.tabs, 'get', expected.tabId);
+      if (tab?.id !== expected.tabId || tab.windowId !== expected.windowId ||
+        tab.status !== 'complete' || typeof tab.url !== 'string') throw attachedCopySourceUnavailable();
+      const parsed = new URL(tab.url);
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.href !== tab.url ||
+        parsed.username !== '' || parsed.password !== '') throw attachedCopySourceUnavailable();
+      const firstResults = await executeScript({
+        target: { tabId: expected.tabId, frameIds: [0] },
+        world: 'ISOLATED',
+        func: () => globalThis.location?.href,
+      });
+      if (!Array.isArray(firstResults) || firstResults.length !== 1) throw attachedCopySourceUnavailable();
+      const [firstResult] = firstResults;
+      if (firstResult?.frameId !== 0 || firstResult.documentId !== expected.documentId ||
+        firstResult.result !== tab.url) throw attachedCopySourceUnavailable();
+      const confirmedTab = await invoke(chromeApi, chromeApi.tabs, 'get', expected.tabId);
+      if (confirmedTab?.id !== tab.id || confirmedTab.windowId !== tab.windowId ||
+        confirmedTab.status !== 'complete' || confirmedTab.url !== tab.url) throw attachedCopySourceUnavailable();
+      const urlSessionDigest = await sessionUrlDigestManager.digest(tab.url);
+      if (urlSessionDigest !== expected.urlSessionDigest) throw attachedCopySourceUnavailable();
+      const finalResults = await executeScript({
+        target: { tabId: expected.tabId, frameIds: [0] },
+        world: 'ISOLATED',
+        func: () => globalThis.location?.href,
+      });
+      if (!Array.isArray(finalResults) || finalResults.length !== 1) throw attachedCopySourceUnavailable();
+      const [finalResult] = finalResults;
+      if (finalResult?.frameId !== 0 || finalResult.documentId !== expected.documentId ||
+        finalResult.result !== tab.url) throw attachedCopySourceUnavailable();
+      const finalTab = await invoke(chromeApi, chromeApi.tabs, 'get', expected.tabId);
+      if (finalTab?.id !== tab.id || finalTab.windowId !== tab.windowId ||
+        finalTab.status !== 'complete' || finalTab.url !== tab.url) throw attachedCopySourceUnavailable();
+      return ObjectFreeze({
+        version: 'AttachedCopySourceV1',
+        tabId: expected.tabId,
+        windowId: expected.windowId,
+        documentId: expected.documentId,
+        urlSessionDigest: expected.urlSessionDigest,
+        rawUrl: tab.url,
+      });
+    } catch {
+      throw attachedCopySourceUnavailable();
+    }
+  };
+
   const adapter = {
     createTab(options) { return invoke(chromeApi, chromeApi.tabs, 'create', options); },
     navigateTab(tabId, url) { return invoke(chromeApi, chromeApi.tabs, 'update', tabId, { url }); },
@@ -1662,6 +1744,7 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
     ReflectApply(PrimordialGetRandomValues, PrimordialCrypto, [bytes]);
     return bytes;
   }, true, false, false);
+  defineDataProperty(internal, 'snapshotAttachedCopySource', snapshotAttachedCopySource, true, false, false);
   if (ObjectHasOwn(options, 'capturePolicy')) {
     defineDataProperty(internal, 'capturePolicy', options.capturePolicy, true, false, false);
   }

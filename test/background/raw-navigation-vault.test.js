@@ -149,6 +149,83 @@ test('public vault stores only a scoped one-shot URL and uses the shared HMAC ma
     /expirada ou consumida/iu);
 });
 
+test('attached-copy vault authority is query-redacted, one-shot, and expires after exactly 60 seconds', async () => {
+  const { sessionArea, clock, vault } = publicFixture();
+  const rawUrl = 'https://example.test/current?account=PRIVATE#transient';
+  const issued = await vault.put(rawUrl, {
+    auditId: 'audit-attached-copy', purpose: 'attached-copy', ttlMs: 60_000, includeQuery: false,
+  });
+  const key = `audita:raw-navigation:v1:${issued.navigationToken}`;
+
+  assert.equal(issued.expiresAt, clock.value + 60_000);
+  assert.deepEqual(issued.evidenceUrl, {
+    version: 'EvidenceUrlV1', href: 'https://example.test/current', queryIncluded: false, redactedSegments: 0,
+  });
+  assert.equal((await sessionArea.get(key))[key].purpose, 'attached-copy');
+  assert.equal(await vault.take(
+    issued.navigationToken,
+    publicTakeOptions(issued, 'audit-attached-copy', 'attached-copy'),
+  ), rawUrl);
+  assert.deepEqual(await sessionArea.get(key), {});
+  await assert.rejects(
+    () => vault.take(issued.navigationToken, publicTakeOptions(issued, 'audit-attached-copy', 'attached-copy')),
+    /expirada ou consumida/iu,
+  );
+
+  const expiring = await vault.put(rawUrl, {
+    auditId: 'audit-attached-copy-expiry', purpose: 'attached-copy', ttlMs: 60_000, includeQuery: false,
+  });
+  clock.value += 60_000;
+  await assert.rejects(
+    () => vault.take(expiring.navigationToken, publicTakeOptions(expiring, 'audit-attached-copy-expiry', 'attached-copy')),
+    /expirada ou consumida/iu,
+  );
+});
+
+test('attached-copy vault authority rejects longer TTL and query-bearing evidence policy', async () => {
+  const { vault } = publicFixture();
+  const options = {
+    auditId: 'audit-attached-copy', purpose: 'attached-copy', ttlMs: 60_000, includeQuery: false,
+  };
+  await assert.rejects(
+    () => vault.put('https://example.test/?private=1', { ...options, ttlMs: 600_000 }),
+    /RAW_NAVIGATION_INVALID/u,
+  );
+  await assert.rejects(
+    () => vault.put('https://example.test/?private=1', { ...options, includeQuery: true }),
+    /RAW_NAVIGATION_INVALID/u,
+  );
+});
+
+test('attached-copy rejects query-bearing evidence after restart without consuming the one-shot token', async () => {
+  const { sessionArea, clock, vault } = publicFixture();
+  const rawUrl = 'https://example.test/current?account=PRIVATE#transient';
+  const issued = await vault.put(rawUrl, {
+    auditId: 'audit-attached-copy-restart', purpose: 'attached-copy', ttlMs: 60_000, includeQuery: false,
+  });
+  const restarted = await restartedPublicVault(sessionArea, clock);
+  const widenedEvidence = {
+    version: 'EvidenceUrlV1',
+    href: 'https://example.test/current?account=PRIVATE',
+    queryIncluded: true,
+    redactedSegments: 0,
+  };
+
+  await assert.rejects(
+    () => restarted.take(issued.navigationToken, {
+      auditId: 'audit-attached-copy-restart',
+      purpose: 'attached-copy',
+      expectedEvidenceUrl: widenedEvidence,
+      expectedSessionDigest: issued.sessionDigest,
+    }),
+    /expirada ou consumida/iu,
+  );
+  assert.equal(await restarted.take(
+    issued.navigationToken,
+    publicTakeOptions(issued, 'audit-attached-copy-restart', 'attached-copy'),
+  ), rawUrl);
+});
+
 test('public vault consumes and denies a swapped private URL with the same sanitized evidence', async () => {
   const { sessionArea, vault } = publicFixture();
   const originalUrl = 'https://example.test/path?account=ORIGINAL#one';

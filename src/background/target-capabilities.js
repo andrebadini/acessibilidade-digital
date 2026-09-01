@@ -26,6 +26,7 @@ const DISPOSABLE_TRANSITION_KEYS = ['sessionCapabilityId', 'auditId', 'ownership
 const REHYDRATE_KEYS = ['auditId', 'windowId', 'mode'];
 const NAVIGATION_PREPARE_KEYS = ['intent', 'senderContext'];
 const NAVIGATION_CLAIM_KEYS = ['capabilityId', 'auditId', 'ownershipId', 'intent', 'senderContext'];
+const ATTACHED_COPY_EXCHANGE_KEYS = ['capabilityId', 'intent', 'senderContext'];
 const NAVIGATION_KEYS = ['version', 'capabilityId', 'intent', 'windowId', 'issuer', 'sessionCapabilityId', 'issuedAt', 'expiresAt', 'state'];
 const DISPOSABLE_BINDING_STATES = new Set([
   'pending', 'observing', 'retained-for-review', 'retained-for-consent', 'cleanup-pending', 'removed',
@@ -340,6 +341,68 @@ export function createTargetCapabilityAuthority({
     };
     await sessionArea.set({ [navigationCapabilityStorageKey(capabilityId)]: record });
     return deepFreeze({ ok: true, capabilityId, expiresAt: record.expiresAt });
+  });
+
+  const exchangeAttachedForNavigationCopy = args => serialize(async () => {
+    const input = readDataRecord(args, ATTACHED_COPY_EXCHANGE_KEYS);
+    const context = input && parsePanelNavigationContext(input.senderContext, chromeApi.runtime.id);
+    if (!input || !CAPABILITY_ID.test(input.capabilityId ?? '') || input.intent !== 'attached-copy' || !context) {
+      return unavailable();
+    }
+    const targetKey = targetCapabilityStorageKey(input.capabilityId);
+    const navigationKey = navigationCapabilityStorageKey(input.capabilityId);
+    let firstEnvelope;
+    try { firstEnvelope = await sessionArea.get([targetKey, navigationKey]); }
+    catch { return unavailable(); }
+    const target = parseTargetRecord(readStoredValue(firstEnvelope, targetKey));
+    const existingNavigation = readDataProperty(firstEnvelope, navigationKey);
+    const proofStartedAt = readNow(now);
+    const issuer = target && parsePanelIssuer(target.issuer);
+    if (!target || existingNavigation.found || target.capabilityId !== input.capabilityId ||
+      target.kind !== 'attached' || target.createdBy !== 'user' || target.allowedIntent !== 'start-audit' ||
+      target.state !== 'prepared' || target.sessionCapabilityId !== null || target.issuedAt > proofStartedAt ||
+      target.expiresAt <= proofStartedAt || !issuer || context.windowId !== target.windowId ||
+      !sameGraph(context.issuer, issuer)) return unavailable();
+    let proof;
+    try { proof = parseProof(await probeDocument(target.tabId)); }
+    catch { return unavailable(); }
+    const proofFinishedAt = readNow(now);
+    if (proofFinishedAt < proofStartedAt || target.expiresAt <= proofFinishedAt || !proof ||
+      proof.tabId !== target.tabId || proof.windowId !== target.windowId ||
+      proof.documentId !== target.documentId || proof.urlSessionDigest !== target.initialUrlSessionDigest) {
+      return unavailable();
+    }
+    let confirmingEnvelope;
+    try { confirmingEnvelope = await sessionArea.get([targetKey, navigationKey]); }
+    catch { return unavailable(); }
+    const confirmingTarget = parseTargetRecord(readStoredValue(confirmingEnvelope, targetKey));
+    if (!confirmingTarget || !sameGraph(confirmingTarget, target) ||
+      readDataProperty(confirmingEnvelope, navigationKey).found) return unavailable();
+    const commitStartedAt = readNow(now);
+    if (commitStartedAt < proofFinishedAt || target.expiresAt <= commitStartedAt) return unavailable();
+    const invalidated = { ...target, state: 'invalidated' };
+    const navigation = {
+      version: 1,
+      capabilityId: target.capabilityId,
+      intent: 'attached-copy',
+      windowId: target.windowId,
+      issuer,
+      sessionCapabilityId: null,
+      issuedAt: target.issuedAt,
+      expiresAt: target.expiresAt,
+      state: 'prepared',
+    };
+    try {
+      await sessionArea.set({ [targetKey]: invalidated, [navigationKey]: navigation });
+    } catch { /* An exact readback confirms commit-then-throw. */ }
+    let confirmedValues;
+    try { confirmedValues = readExactStoredValues(await sessionArea.get([targetKey, navigationKey]), [targetKey, navigationKey]); }
+    catch { return unavailable(); }
+    const confirmedTarget = parseTargetRecord(confirmedValues?.[targetKey]);
+    const confirmedNavigation = parseNavigationRecord(confirmedValues?.[navigationKey]);
+    if (!confirmedTarget || !confirmedNavigation || !sameGraph(confirmedTarget, invalidated) ||
+      !sameGraph(confirmedNavigation, navigation)) return unavailable();
+    return deepFreeze({ ok: true, capabilityId: target.capabilityId, expiresAt: target.expiresAt });
   });
 
   const inspectPreparedTarget = args => serialize(() => provePersonaTarget(args, false));
@@ -681,6 +744,7 @@ export function createTargetCapabilityAuthority({
   return Object.freeze({
     prepare,
     prepareNavigationForPanel,
+    exchangeAttachedForNavigationCopy,
     inspectPreparedTarget,
     claimPreparedTarget,
     inspectPreparedAuditTarget,
@@ -776,7 +840,7 @@ function parseNavigationRecord(value) {
   const record = readDataRecord(value, NAVIGATION_KEYS);
   const issuer = record && parsePanelIssuer(record.issuer);
   if (!record || record.version !== 1 || !CAPABILITY_ID.test(record.capabilityId ?? '') ||
-    record.intent !== 'single' || !safeChromeId(record.windowId) || !issuer ||
+    !['single', 'attached-copy'].includes(record.intent) || !safeChromeId(record.windowId) || !issuer ||
     !safeTime(record.issuedAt) || !safeTime(record.expiresAt) || record.expiresAt <= record.issuedAt ||
     !['prepared', 'claimed', 'invalidated'].includes(record.state) ||
     (record.state === 'prepared' && record.sessionCapabilityId !== null) ||
