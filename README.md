@@ -20,7 +20,7 @@ Abra a página que deseja examinar, clique no ícone da extensão e escolha um d
 - **Somente elementos:** limita as capturas aos elementos relacionados às ocorrências.
 - **Sem imagens:** executa a auditoria sem capturar pixels.
 
-Selecione **Auditar a página atual**. Abrir o painel não inicia a coleta: esse botão é a confirmação explícita. Nos modos com imagens, a extensão pausa antes da primeira captura quando identifica conteúdo potencialmente sensível; nesse caso, a pessoa usuária decide se continua ou cancela.
+Selecione **Auditar a página atual**. Abrir o painel não inicia a coleta: esse botão é a confirmação explícita. A inspeção ocorre em uma cópia temporária e inativa, de modo que a página original permanece visível, ativa e sem rolagens, mudanças de foco ou destaques durante a auditoria. Nos modos com imagens, a extensão pausa antes da primeira captura quando identifica conteúdo potencialmente sensível; nesse caso, a pessoa usuária decide se continua ou cancela. Também é possível escolher **Outra URL**, informar um endereço HTTP ou HTTPS e usar os mesmos três modos.
 
 Ao final, o painel mostra o sumário, filtros e fichas das ocorrências. Cada ficha apresenta explicação, WCAG 2.2, item ABNT NBR 17225, fundamentação legal, nome acessível, anúncio estimado, seletor, código e evidências disponíveis. **Ver e destacar na página** localiza o elemento quando a prova viva ainda corresponde ao documento auditado. **Abrir relatório completo** abre a revisão em uma aba própria. A exportação baixa HTML autocontido, PDF, CSV e JSON-LD/EARL.
 
@@ -30,7 +30,7 @@ As permissões `tabs`, `scripting` e `debugger` permitem identificar e inspecion
 
 ## Limites atuais da beta
 
-A beta audita a página aberta e o estado observado, não todo o serviço. **Outra URL**, **Lote de páginas** e o mapa numerado consolidado de anúncios ainda não estão disponíveis; as evidências visuais individuais continuam disponíveis nos modos com captura. Itens contextuais exigem revisão humana. Frames de terceiros, canvas, vídeo, conteúdo protegido ou coleta estrutural bloqueada podem produzir resultado parcial.
+A beta audita a página aberta ou outra URL nos três modos, sempre sobre o estado observado, e não todo o serviço. **Lote de páginas** e o mapa numerado consolidado de anúncios ainda não estão disponíveis; as evidências visuais individuais continuam disponíveis nos modos com captura. Itens contextuais exigem revisão humana. Frames de terceiros, canvas, vídeo, conteúdo protegido ou coleta estrutural bloqueada podem produzir resultado parcial.
 
 Audita Acessibilidade é uma ferramenta independente, sem vínculo institucional. A cobertura automática não equivale a certificação nem a laudo oficial. Consulte [Uso fiscal](docs/USO-FISCAL.md) para interpretar o resultado e [Backlog da beta](docs/BETA-BACKLOG.md) para as melhorias não bloqueantes já registradas.
 

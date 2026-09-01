@@ -1,10 +1,9 @@
-# Backlog da beta 1.0.4
+# Backlog da beta 1.0.5
 
 Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. Elas não reduzem os controles de privacidade, autorização de capturas, correlação das evidências, limpeza de estado ou confiabilidade normativa.
 
 ## Próximas entregas funcionais
 
-- habilitar Evidência completa e Somente elementos para outra URL após o percurso de consentimento e captura passar no Chrome real;
 - permitir auditoria em lote e relatório consolidado;
 - habilitar o mapa numerado consolidado dos anúncios estimados do leitor de tela após E2E próprio;
 - implementar retenção automática por prazo, com limpeza recuperável e indicação visível da expiração;

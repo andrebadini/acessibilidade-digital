@@ -25,7 +25,9 @@ test('plain-language usage docs report the current verification boundary accurat
     assert.match(guide, new RegExp(`^- ${format}:`, 'imu'));
   }
   assert.match(combined, /candidato beta[^.]*gate único[^.]*E2E real[^.]*Chrome[^.]*QA visual/iu);
-  assert.match(combined, /Outra URL[^.]*Lote de páginas[^.]*mapa numerado[^.]*não estão disponíveis/iu);
+  assert.match(combined, /Outra URL[^.]*três modos/iu);
+  assert.match(combined, /Lote de páginas[^.]*mapa numerado[^.]*não estão disponíveis/iu);
+  assert.match(combined, /cópia temporária e inativa[^.]*página original/iu);
   assert.doesNotMatch(combined, /auditoria anexada atual[^.]*não captura pixels|fluxo anexado atual[^.]*modo sem pixels/iu);
 });
 
