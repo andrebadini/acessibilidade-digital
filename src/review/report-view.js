@@ -5,6 +5,7 @@ import { NBR17225_ITEMS } from '../core/normative/nbr17225.js';
 import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
 import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from '../core/report/evidence-treatment.js';
 import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
+import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
 
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
 const GROUP_LABELS = Object.freeze({
@@ -56,8 +57,23 @@ const FALLBACK_CORRECTIONS = Object.freeze({
   humanReview: 'Realize a verificação humana indicada, registre as condições observadas e conclua se o requisito foi atendido, não atendido ou permaneceu inconclusivo.',
   passed: 'Nenhuma correção é indicada para este resultado positivo no escopo observado.',
 });
+const GENERIC_EVIDENCE_ONLY_MESSAGE = 'O destaque ao vivo não está disponível neste relatório. Consulte as capturas registradas no momento da auditoria.';
+const ATTACHED_COPY_EVIDENCE_ONLY_MESSAGE = 'A página foi avaliada em uma cópia temporária já removida. O destaque ao vivo não está disponível; consulte as capturas e os seletores registrados no momento da auditoria.';
 
 function denied() { throw new TypeError('REPORT_VIEW_DENIED'); }
+
+function hasAttachedCopyReloadedLimitation(limitations) {
+  return Array.isArray(limitations) && limitations.includes(ATTACHED_COPY_RELOADED_MESSAGE);
+}
+
+export function applyReportSourceControls({ reportSessionState, limitations, returnControl, explanation } = {}) {
+  if (!['result', 'view-only'].includes(reportSessionState) || !Array.isArray(limitations) ||
+    !returnControl || typeof returnControl !== 'object' || !explanation || typeof explanation !== 'object') denied();
+  const temporaryCopyViewOnly = reportSessionState === 'view-only' && hasAttachedCopyReloadedLimitation(limitations);
+  returnControl.disabled = reportSessionState !== 'result';
+  returnControl.hidden = temporaryCopyViewOnly;
+  explanation.hidden = !temporaryCopyViewOnly;
+}
 
 function freeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value) || Object.isFrozen(value)) return value;
@@ -551,7 +567,8 @@ function appendTechnicalDetails(document, article, issue, evidence) {
   article.append(details);
 }
 
-function appendEvidencePreview(document, article, evidence, evidenceAnchorById, issue, highlightOptions = null) {
+function appendEvidencePreview(document, article, evidence, evidenceAnchorById, issue, highlightOptions = null,
+  evidenceOnlyMessage = GENERIC_EVIDENCE_ONLY_MESSAGE) {
   const preview = document.createElement('section');
   preview.setAttribute('data-report-evidence-preview', '');
   preview.append(element(document, 'h4', 'Capturas registradas'));
@@ -595,7 +612,7 @@ function appendEvidencePreview(document, article, evidence, evidenceAnchorById, 
       article.append(control);
     }
   } else {
-    const fallback = element(document, 'p', 'O destaque ao vivo não está disponível neste relatório. Consulte as capturas registradas no momento da auditoria.');
+    const fallback = element(document, 'p', evidenceOnlyMessage);
     fallback.setAttribute('data-report-live-action', 'evidence-only');
     article.append(fallback);
   }
@@ -610,7 +627,8 @@ function appendEvidencePreview(document, article, evidence, evidenceAnchorById, 
   }
 }
 
-function issueArticle(document, issue, group, evidenceById, evidenceAnchorById, highlightOptions = null) {
+function issueArticle(document, issue, group, evidenceById, evidenceAnchorById, highlightOptions = null,
+  evidenceOnlyMessage = GENERIC_EVIDENCE_ONLY_MESSAGE) {
   const article = document.createElement('article');
   article.setAttribute('data-report-issue', '');
   article.setAttribute('data-result', group);
@@ -665,7 +683,7 @@ function issueArticle(document, issue, group, evidenceById, evidenceAnchorById, 
         ...highlightOptions, occurrenceIds: issue.occurrences.map(value => value.occurrenceId),
         issueTitle: issue.title, pageId: issue.pageId,
       }
-      : null);
+      : null, evidenceOnlyMessage);
   appendTechnicalDetails(document, article, issue, evidence);
   return article;
 }
@@ -730,6 +748,9 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   if (!view || view.version !== 1 || !document || typeof document.createElement !== 'function' ||
     typeof onExport !== 'function' || ![null, 'function'].includes(onHighlightIntent === null ? null : typeof onHighlightIntent)) denied();
   const root = document.createElement('div');
+  const evidenceOnlyMessage = onHighlightIntent === null && hasAttachedCopyReloadedLimitation(view.executive.limitations)
+    ? ATTACHED_COPY_EVIDENCE_ONLY_MESSAGE
+    : GENERIC_EVIDENCE_ONLY_MESSAGE;
   root.setAttribute('class', 'report-view');
   const identity = document.createElement('header');
   identity.setAttribute('class', 'report-identity');
@@ -820,7 +841,9 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
     groupNode.append(element(document, 'h3', `${GROUP_LABELS[group]}: ${view.issues[group].length}`));
     groupNode.append(element(document, 'p', 'As fichas detalhadas aparecem uma única vez nas seções seguintes.'));
     if (['alerts', 'passed'].includes(group)) {
-      for (const issue of view.issues[group]) groupNode.append(issueArticle(document, issue, group, evidenceById, evidenceAnchorById));
+      for (const issue of view.issues[group]) {
+        groupNode.append(issueArticle(document, issue, group, evidenceById, evidenceAnchorById, null, evidenceOnlyMessage));
+      }
     }
     coverage.append(groupNode);
   }
@@ -828,13 +851,13 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
 
   const failed = section(document, 2);
   for (const issue of view.issues.failed) failed.append(issueArticle(document, issue, 'failed', evidenceById, evidenceAnchorById,
-    onHighlightIntent ? { enabled: true, onIntent: onHighlightIntent } : null));
+    onHighlightIntent ? { enabled: true, onIntent: onHighlightIntent } : null, evidenceOnlyMessage));
   root.append(failed);
 
   const review = section(document, 3);
   review.setAttribute('data-review-controls-target', '');
   for (const issue of view.issues.humanReview) review.append(issueArticle(document, issue, 'humanReview', evidenceById, evidenceAnchorById,
-    onHighlightIntent ? { enabled: true, onIntent: onHighlightIntent } : null));
+    onHighlightIntent ? { enabled: true, onIntent: onHighlightIntent } : null, evidenceOnlyMessage));
   root.append(review);
 
   const maps = section(document, 4);

@@ -2,6 +2,9 @@ const ALL_TERMINAL_STATUSES = Object.freeze(['complete', 'partial', 'failed', 'c
 const INCOMPLETE_STATUSES = Object.freeze(['partial', 'failed', 'cancelled']);
 const BOTH_MODES = Object.freeze(['single', 'batch']);
 
+export const ATTACHED_COPY_RELOADED_MESSAGE =
+  'A auditoria foi executada em uma cópia temporária recarregada da URL da aba escolhida; alterações não salvas e estado mantido apenas em memória na aba original não foram observados.';
+
 export const EXPORT_ISSUE_MESSAGES = Object.freeze({
   REPORT_PDF_UNAVAILABLE: 'O PDF não foi gerado devido a uma limitação técnica local.',
   REPORT_CSV_UNAVAILABLE: 'O CSV não foi gerado devido a uma limitação técnica local.',
@@ -176,6 +179,14 @@ export const SYSTEM_DIAGNOSTIC_POLICY = Object.freeze([
   ...technicalPageDiagnostics,
   ...occurrencePageDiagnostics,
   ...annotationFailureDiagnostics,
+  page({
+    code: 'ATTACHED_COPY_RELOADED',
+    message: ATTACHED_COPY_RELOADED_MESSAGE,
+    statuses: ALL_TERMINAL_STATUSES,
+    recoverable: true,
+    fact: 'attached-copy-reloaded',
+    causePartial: false,
+  }),
   page({
     code: 'REPORT_HANDOFF_FAILED', message: 'A fila de revisão não pôde ser preparada.',
     modes: ['single'], fact: 'report-handoff',

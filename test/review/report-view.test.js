@@ -14,6 +14,9 @@ import { EXPORT_FORMATS_V1 } from '../../src/export/report-export.js';
 
 const FULL_PAGE_CAPTURE_OMITTED_MESSAGE = 'A captura integral e o mapa anotado foram omitidos pela política; miniaturas de elementos permaneceram permitidas.';
 const FULL_PAGE_CAPTURE_OMITTED_LIMITATION = `FULL_PAGE_CAPTURE_OMITTED: ${FULL_PAGE_CAPTURE_OMITTED_MESSAGE}`;
+const ATTACHED_COPY_RELOADED_MESSAGE = 'A auditoria foi executada em uma cópia temporária recarregada da URL da aba escolhida; alterações não salvas e estado mantido apenas em memória na aba original não foram observados.';
+const ATTACHED_COPY_EVIDENCE_ONLY_MESSAGE = 'A página foi avaliada em uma cópia temporária já removida. O destaque ao vivo não está disponível; consulte as capturas e os seletores registrados no momento da auditoria.';
+const ATTACHED_COPY_RETURN_MESSAGE = 'Retorno e destaque na aba original indisponíveis: a auditoria usou uma cópia temporária e não alterou a aba original.';
 
 class Element {
   constructor(tagName, document) {
@@ -507,6 +510,55 @@ test('live report renders decision-first cards, evidence previews and honest evi
   for (const label of ['Não conformidades', 'Alertas', 'Revisões humanas pendentes', 'Resultados positivos']) {
     assert.equal(headings.includes(label) || headings.some(value => value.startsWith(`${label}:`)), true);
   }
+});
+
+test('view-only temporary-copy report explains the removed copy while preserving occurrence evidence', async () => {
+  const { model, summary } = await fixture();
+  const view = structuredClone(buildReportView({
+    model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash,
+  }));
+  view.executive.limitations.push(ATTACHED_COPY_RELOADED_MESSAGE);
+
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const issue = root.querySelector('[data-report-issue][data-result="failed"]');
+
+  assert.equal(issue.querySelector('[data-report-live-action="evidence-only"]').textContent,
+    ATTACHED_COPY_EVIDENCE_ONLY_MESSAGE);
+  assert.equal(issue.querySelectorAll('[data-report-highlight-control]').length, 0);
+  assert.match(issue.querySelector('[data-report-plain-block="announcement"]').textContent,
+    /Nome acessível|Anúncio estimado/iu);
+  assert.match(issue.querySelector('[data-report-plain-block="normative"]').textContent, /WCAG 2\.2|ABNT NBR 17225/iu);
+  assert.match(issue.querySelector('[data-report-technical]').textContent, /Seletor|Snippet|Hash/iu);
+  assert.equal(issue.querySelector('[data-report-evidence-preview]').querySelectorAll('img').length > 0, true);
+});
+
+test('report source controls use session state as authority and limitation text only as the view-only reason', async () => {
+  const module = await import('../../src/review/report-view.js');
+  assert.equal(typeof module.applyReportSourceControls, 'function');
+  if (typeof module.applyReportSourceControls !== 'function') return;
+
+  const returnControl = { disabled: false, hidden: false };
+  const explanation = { hidden: true, textContent: ATTACHED_COPY_RETURN_MESSAGE };
+  module.applyReportSourceControls({
+    reportSessionState: 'view-only', limitations: [ATTACHED_COPY_RELOADED_MESSAGE],
+    returnControl, explanation,
+  });
+  assert.deepEqual(returnControl, { disabled: true, hidden: true });
+  assert.equal(explanation.hidden, false);
+  assert.equal(explanation.textContent, ATTACHED_COPY_RETURN_MESSAGE);
+
+  module.applyReportSourceControls({
+    reportSessionState: 'result', limitations: [ATTACHED_COPY_RELOADED_MESSAGE],
+    returnControl, explanation,
+  });
+  assert.deepEqual(returnControl, { disabled: false, hidden: false });
+  assert.equal(explanation.hidden, true, 'the model limitation cannot revoke a live session capability');
+
+  module.applyReportSourceControls({
+    reportSessionState: 'view-only', limitations: [], returnControl, explanation,
+  });
+  assert.deepEqual(returnControl, { disabled: true, hidden: false });
+  assert.equal(explanation.hidden, true, 'generic view-only reports do not claim that a temporary copy was used');
 });
 
 test('live report derives occurrence-specific boxes while preserving the pristine captured evidence', async () => {

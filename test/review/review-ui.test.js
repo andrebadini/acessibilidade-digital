@@ -15,6 +15,7 @@ test('review page leaves its one polite live announcement to the rendered report
   assert.match(html, /id="regenerate-report"/i);
   assert.match(html, /id="return-to-page"[^>]*disabled/iu);
   assert.match(html, />Voltar à página auditada e ao painel</iu);
+  assert.match(html, /id="report-source-explanation"[^>]*hidden[^>]*>Retorno e destaque na aba original indisponíveis: a auditoria usou uma cópia temporária e não alterou a aba original\.<\/p>/iu);
   assert.match(html, /href="#report-root"[^>]*>Voltar ao (?:início|sumário) do relatório/iu);
   assert.doesNotMatch(html, /href="\.\.\/panel\/index\.html"/iu);
   assert.doesNotMatch(html, /<script(?![^>]+src=)|<style\b|\sstyle=/i);
@@ -54,6 +55,8 @@ test('review script renders snippets inertly, offers exactly three answers and n
   assert.match(source, /getReportRevision\(id\)/u);
   assert.match(source, /buildReportView/u);
   assert.match(source, /renderReportView/u);
+  assert.match(source, /applyReportSourceControls/u);
+  assert.match(source, /reportSessionState[\s\S]*view\.executive\.limitations[\s\S]*returnControl:[\s]*returnToPage[\s\S]*explanation:[\s]*reportSourceExplanation/u);
   assert.match(source, /latest\?\.exportCleanupPending\s*===\s*true/u);
   assert.match(source, /arquivo obsoleto.*removido/iu);
   assert.match(source, /Solicitando a geração do relatório/u);

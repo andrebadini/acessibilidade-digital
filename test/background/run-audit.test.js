@@ -26,6 +26,7 @@ import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-com
 import { runObservedTabAudit } from '../../src/background/observed-tab-runner.js';
 import { createRawNavigationVaultV1 } from '../../src/background/raw-navigation-vault.js';
 import { createSessionUrlDigestManager } from '../../src/core/privacy/session-url-digest.js';
+import { ATTACHED_COPY_RELOADED_MESSAGE } from '../../src/core/report/diagnostic-policy.js';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const TEST_EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
@@ -70,11 +71,12 @@ function attachedPixelGate(policy, calls, {
 function ownedPixelGate(policy, calls, {
   auditId, ownershipId, consentId = null, runnerStatus = 'ready',
   urlEvidence = TEST_EVIDENCE_URL,
+  cleanupMode = 'pre-observation-failure',
   commitClock = createScriptedPixelCommitClockV1({ epochs: Array(8).fill(1_788_000_000_010) }),
 } = {}) {
   const source = Object.freeze({
     kind: 'owned-disposable', ownershipId,
-    cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+    cleanupMode, pageId: 'page-1',
   });
   const suspension = ({ state, resumePhase, token, categories }) => ({
     version: 'AuditSuspensionV1', revision: 1, auditId, consentId: token,
@@ -311,6 +313,44 @@ test('single URL executes full-evidence and element-only without silently changi
   });
 });
 
+test('attached-copy executes both pixel modes in an inactive disposable tab and removes it after observation', async t => {
+  for (const mode of ['full-evidence', 'element-only']) await t.test(mode, async () => {
+    const auditId = `audit-copy-${mode}`;
+    const ownershipId = `owner_${(mode === 'full-evidence' ? 'F' : 'E').repeat(22)}`;
+    const calls = [];
+    const sessionValues = {};
+    const createRequests = [];
+    const adapter = fakeAdapter({ canonicalInternals: true, sessionValues, trackCaptureCalls: true });
+    const baseCreate = adapter.createTab;
+    adapter.createTab = async details => {
+      createRequests.push(structuredClone(details));
+      return baseCreate(details);
+    };
+    const policy = createCapturePolicyV1({ mode, includeQuery: false });
+
+    const result = await runUrlAudit({
+      auditId, ownershipId, windowId: 9,
+      navigationToken: 'C'.repeat(22), navigationPurpose: 'attached-copy',
+      evidenceUrl: TEST_EVIDENCE_URL, sessionDigest: TEST_DIGEST,
+      rawNavigationVault: Object.freeze({ async take() { return 'https://example.test/final?secret=REMOVE'; } }),
+      chromeAdapter: adapter, capturePolicy: policy,
+      privacyGate: ownedPixelGate(policy, calls, { auditId, ownershipId, cleanupMode: 'always' }),
+      checkpointStore: Object.freeze({ async writeSanitized() {} }),
+      onProgress() {}, now: () => '2026-09-01T12:00:00.000Z', signal: undefined,
+      expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+    });
+
+    assert.equal(result.status, 'complete');
+    assert.equal(result.ownershipState, 'removed');
+    assert.equal(result.observedTarget.cleanupMode, 'always');
+    assert.deepEqual(createRequests, [{ url: 'about:blank', active: false, windowId: 9 }]);
+    assert.equal(adapter.counts.fullPageCalls, mode === 'full-evidence' ? 1 : 0);
+    assert.equal(adapter.counts.elementCalls > 0, true);
+    assert.equal(calls.at(-1), 'after');
+    assert.doesNotMatch(JSON.stringify({ result, sessionValues }), /secret=REMOVE/u);
+  });
+});
+
 test('single URL sensitive preflight retains its owned tab for consent with zero raster', async () => {
   const auditId = 'audit-url-sensitive-owned';
   const ownershipId = `owner_${'S'.repeat(22)}`;
@@ -377,6 +417,7 @@ test('single URL resume uses the retained owner without creating navigating or c
       documentId: paused.observedTarget.documentId,
       initialUrlEvidence: paused.observedTarget.urlEvidence,
       initialUrlSessionDigest: paused.observedTarget.urlSessionDigest,
+      navigationPurpose: 'single-url',
       cleanupMode: 'pre-observation-failure', pageId: 'page-1',
     }),
     resumeCheckpoint,
@@ -393,6 +434,60 @@ test('single URL resume uses the retained owner without creating navigating or c
   assert.equal(resumed.ownershipState, 'retained-for-review');
   assert.deepEqual(forbidden, []);
   assert.equal(resumeCalls.includes('gate'), true);
+});
+
+test('attached-copy resume transports its purpose explicitly and removes the retained owner without navigating again', async () => {
+  const auditId = 'audit-copy-resume-owned';
+  const ownershipId = `owner_${'C'.repeat(22)}`;
+  const sessionValues = {};
+  const checkpoints = [];
+  const policy = createCapturePolicyV1({ mode: 'element-only', includeQuery: false });
+  const adapter = fakeAdapter({
+    canonicalInternals: true, sessionValues, trackCaptureCalls: true,
+    sensitiveSignals: PASSWORD_SIGNALS,
+  });
+  const paused = await runUrlAudit({
+    auditId, ownershipId, windowId: 9, navigationToken: 'C'.repeat(22), navigationPurpose: 'attached-copy',
+    evidenceUrl: TEST_EVIDENCE_URL, sessionDigest: TEST_DIGEST,
+    rawNavigationVault: Object.freeze({ async take() { return 'https://example.test/final?secret=REMOVE'; } }),
+    chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: ownedPixelGate(policy, [], { auditId, ownershipId, cleanupMode: 'always' }),
+    checkpointStore: Object.freeze({ async writeSanitized(_auditId, checkpoint) { checkpoints.push(checkpoint); } }),
+    onProgress() {}, now: () => '2026-09-01T12:00:00.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  });
+  assert.equal(paused.status, 'privacy-paused');
+  assert.equal(paused.ownershipState, 'retained-for-consent');
+
+  const forbidden = [];
+  adapter.createTab = async () => { forbidden.push('create'); };
+  adapter.navigateTab = async () => { forbidden.push('navigate'); };
+  adapter.waitForStable = async () => { forbidden.push('stable'); };
+  adapter.probeSensitiveCaptureSignals = async () => EMPTY_SIGNALS;
+  const resumed = await runUrlAudit({
+    auditId,
+    requestedUrlEvidence: TEST_EVIDENCE_URL,
+    resumeTarget: Object.freeze({
+      kind: 'owned-disposable-resume', ownershipId,
+      tabId: paused.observedTarget.tabId, windowId: paused.observedTarget.windowId,
+      documentId: paused.observedTarget.documentId,
+      initialUrlEvidence: paused.observedTarget.urlEvidence,
+      initialUrlSessionDigest: paused.observedTarget.urlSessionDigest,
+      navigationPurpose: 'attached-copy', cleanupMode: 'always', pageId: 'page-1',
+    }),
+    resumeCheckpoint: checkpoints.at(-1), chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: ownedPixelGate(policy, [], {
+      auditId, ownershipId, consentId: 'A'.repeat(21) + 'Q', cleanupMode: 'always',
+    }),
+    checkpointStore: Object.freeze({ async writeSanitized() {} }),
+    onProgress() {}, now: () => '2026-09-01T12:00:01.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  });
+
+  assert.equal(resumed.status, 'complete');
+  assert.equal(resumed.ownershipState, 'removed');
+  assert.equal(resumed.observedTarget.cleanupMode, 'always');
+  assert.deepEqual(forbidden, []);
 });
 
 test('single URL element-only resume with no element consumes consent before pixel-free persistence', async () => {
@@ -432,6 +527,7 @@ test('single URL element-only resume with no element consumes consent before pix
       documentId: paused.observedTarget.documentId,
       initialUrlEvidence: paused.observedTarget.urlEvidence,
       initialUrlSessionDigest: paused.observedTarget.urlSessionDigest,
+      navigationPurpose: 'single-url',
       cleanupMode: 'pre-observation-failure', pageId: 'page-1',
     }),
     resumeCheckpoint: checkpoints.at(-1), chromeAdapter: adapter, capturePolicy: policy,
@@ -504,6 +600,7 @@ test('single URL redirect resume preserves the sanitized requested URL outside t
       documentId: paused.observedTarget.documentId,
       initialUrlEvidence: paused.observedTarget.urlEvidence,
       initialUrlSessionDigest: paused.observedTarget.urlSessionDigest,
+      navigationPurpose: 'single-url',
       cleanupMode: 'pre-observation-failure', pageId: 'page-1',
     }),
     resumeCheckpoint: checkpoints.at(-1), chromeAdapter: adapter, capturePolicy: policy,
@@ -974,6 +1071,14 @@ test('attached-copy production façade creates only an inactive tab and removes 
   const ownerKey = Object.keys(sessionValues).find(key => key.startsWith('audita:owned-tab:v2:'));
   assert.equal(sessionValues[ownerKey].state, 'removed');
   assert.equal(Object.hasOwn(result.observedTarget, 'navigationToken'), false);
+  assert.equal(result.model.session.status, 'complete');
+  assert.equal(result.model.session.diagnostics.filter(entry =>
+    entry.code === 'ATTACHED_COPY_RELOADED' && entry.message === ATTACHED_COPY_RELOADED_MESSAGE).length, 1);
+  assert.equal(result.model.pages[0].diagnostics.filter(entry =>
+    entry.code === 'ATTACHED_COPY_RELOADED' && entry.message === ATTACHED_COPY_RELOADED_MESSAGE).length, 1);
+  assert.deepEqual(result.model.limitations.filter(value => value === ATTACHED_COPY_RELOADED_MESSAGE), [
+    ATTACHED_COPY_RELOADED_MESSAGE,
+  ]);
   assert.doesNotMatch(JSON.stringify({ result, sessionValues }), /secret=REMOVE/u);
 });
 

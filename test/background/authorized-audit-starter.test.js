@@ -870,30 +870,298 @@ test('restart completes attached-copy cleanup after crash between invalidation a
   assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
 });
 
-test('current-page pixel modes fail closed before attached-copy snapshot or either execution path', async t => {
+test('current-page pixel modes execute only in an attached copy and publish after cleanup always', async t => {
   for (const mode of ['full-evidence', 'element-only']) await t.test(mode, async () => {
     const area = sessionArea();
     const { authority, capabilityId, senderContext } = await authorityFixture(area);
+    const auditId = `audit-current-page-${mode}`;
+    const ownershipId = `owner_${mode === 'full-evidence' ? 'F'.repeat(22) : 'E'.repeat(22)}`;
+    const report = await reportFixture(auditId);
+    const reportByAudit = new Map();
     const effects = [];
     const dependencies = dependencyFixture({
-      area, authority,
-      execution: async () => { effects.push('attached'); },
+      area, authority, reportByAudit,
+      execution: async () => { effects.push('attached-original'); },
     });
-    dependencies.prepareAttachedCopyPlan = async () => { effects.push('snapshot'); };
-    dependencies.runUrlAuditExecution = async () => { effects.push('url'); };
-    dependencies.clearUrlAuditResources = async () => true;
+    dependencies.prepareAttachedCopyPlan = async () => {
+      effects.push('prepare-copy');
+      await reserveAttachedCopyStartJournalV1({
+        sessionArea: area, capabilityId, auditId, windowId: 9, ownershipId, createdAt: EPOCH + 1,
+      });
+      assert.equal((await authority.exchangeAttachedForNavigationCopy({
+        capabilityId, intent: 'attached-copy', senderContext,
+      })).ok, true);
+      return Object.freeze({
+        kind: 'attached-copy', ownershipId, navigationToken: 'C'.repeat(22),
+        navigationPurpose: 'attached-copy',
+        evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/current?private=never', { includeQuery: false }),
+        sessionDigest: DIGEST,
+      });
+    };
+    dependencies.runUrlAuditExecution = async args => {
+      effects.push('run-copy');
+      assert.equal(args.capturePolicy.mode, mode);
+      assert.ok(args.privacyGate);
+      await args.onCheckpoint(report.checkpoint);
+      const observedTarget = Object.freeze({
+        version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId,
+        tabId: 27, windowId: 9, documentId: 'copy-document',
+        urlEvidence: sanitizeEvidenceUrlV1('https://example.test/current', { includeQuery: false }),
+        urlSessionDigest: DIGEST, cleanupMode: 'always', pageId: 'page-1',
+      });
+      await args.persistAuditModel(report.model, observedTarget);
+      return Object.freeze({
+        status: 'complete', model: report.model, observedTarget,
+        observationState: 'observed', ownershipState: 'removed',
+      });
+    };
+    const cleanups = [];
+    dependencies.clearUrlAuditResources = async request => { cleanups.push(structuredClone(request)); return true; };
     const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
-      capabilityId, eventNonce: null, auditId: `audit-current-page-${mode}`,
+      capabilityId, eventNonce: null, auditId,
       capturePolicy: createCapturePolicyV1({ mode, includeQuery: false }),
       retentionPreference: { version: 1, deleteAfterCompleteExport: false },
       senderContext,
     });
-    assert.deepEqual(started, {
-      response: { ok: false, code: 'AUDIT_START_FAILED' },
-      sessionCapabilityId: null,
-      completion: null,
+    assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
+    assert.deepEqual(await started.completion, { ok: true, auditId, state: 'result', revision: 1 });
+    assert.deepEqual(effects, ['prepare-copy', 'run-copy']);
+    assert.deepEqual(cleanups, [{
+      auditId, ownershipId, navigationPurpose: 'attached-copy', cleanupMode: 'always',
+    }]);
+    assert.equal(reportByAudit.has(auditId), true);
+    assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+    const session = await readAuditSessionForWorker({
+      sessionArea: area, sessionCapabilityId: started.sessionCapabilityId, auditId,
     });
-    assert.deepEqual(effects, []);
+    assert.deepEqual(session.targetBinding, { kind: 'disposable', ownershipId, state: 'removed' });
+    assert.doesNotMatch(JSON.stringify({ report: reportByAudit.get(auditId), effects }), /private=never|owner_/iu);
+  });
+});
+
+test('attached-copy privacy pause survives failed publication, restart and cancellation', async t => {
+  for (const publicationFailure of ['false', 'throw']) await t.test(publicationFailure, async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const auditId = 'audit-current-copy-pixel-paused';
+  const ownershipId = `owner_${'P'.repeat(22)}`;
+  const fixture = await reportFixture(auditId);
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const pixelState = createPixelCaptureStateV1({
+    sessionArea: area, now: () => EPOCH + 2, randomBytes: length => new Uint8Array(length).fill(13),
+  });
+  const observedTarget = Object.freeze({
+    version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId,
+    tabId: 27, windowId: 9, documentId: 'copy-document',
+    urlEvidence: sanitizeEvidenceUrlV1('https://example.test/current', { includeQuery: false }),
+    urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+    cleanupMode: 'always', pageId: 'page-1',
+  });
+  const cleanups = [];
+  const pausedPackets = [];
+  let allowPausePublication = false;
+  let executions = 0;
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority, pixelState,
+    execution: async () => { throw new Error('ORIGINAL_TAB_MUST_STAY_VIEW_ONLY'); },
+  });
+  dependencies.prepareAttachedCopyPlan = async () => {
+    await reserveAttachedCopyStartJournalV1({
+      sessionArea: area, capabilityId: prepared.capabilityId, auditId,
+      windowId: 9, ownershipId, createdAt: EPOCH + 1,
+    });
+    assert.equal((await prepared.authority.exchangeAttachedForNavigationCopy({
+      capabilityId: prepared.capabilityId, intent: 'attached-copy', senderContext: prepared.senderContext,
+    })).ok, true);
+    return Object.freeze({
+      kind: 'attached-copy', ownershipId, navigationToken: 'P'.repeat(22),
+      navigationPurpose: 'attached-copy',
+      evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/current?secret=never', { includeQuery: false }),
+      sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+    });
+  };
+  dependencies.runUrlAuditExecution = async args => {
+    executions += 1;
+    await args.onCheckpoint(fixture.checkpoint);
+    const decision = await args.privacyGate.preflight({
+      auditId, observedTarget, capturePolicy: policy,
+      signals: Object.freeze({
+        version: 'SensitiveCaptureSignalsV1', detected: true, categories: Object.freeze(['password']),
+      }),
+    });
+    return Object.freeze({
+      status: decision.status, model: null, observedTarget,
+      observationState: 'observed', ownershipState: 'retained-for-consent',
+      signals: Object.freeze({
+        version: 'SensitiveCaptureSignalsV1', detected: true, categories: Object.freeze(['password']),
+      }),
+    });
+  };
+  dependencies.clearUrlAuditResources = async request => { cleanups.push(structuredClone(request)); return true; };
+  dependencies.panelCoordinator = panelCoordinator([], {
+    async publishPrivacyPaused(value) {
+      pausedPackets.push(structuredClone(value));
+      if (allowPausePublication) return true;
+      if (publicationFailure === 'throw') throw new Error('PANEL_PUBLICATION_FAILED');
+      return false;
+    },
+  });
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId, capturePolicy: policy,
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    senderContext: prepared.senderContext,
+  });
+  assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
+  assert.deepEqual(await started.completion, {
+    ok: false, auditId, state: 'blocked', code: 'AUDIT_RECOVERY_REQUIRED',
+  });
+  assert.equal(executions, 1);
+  assert.deepEqual(cleanups, []);
+  assert.equal((await readActiveAuditJobForWorker({ sessionArea: area })).state, 'privacy-paused');
+  const suspension = await pixelState.readSuspension(auditId);
+  assert.equal(suspension.state, 'paused');
+  assert.deepEqual(suspension.source, {
+    kind: 'owned-disposable', ownershipId, cleanupMode: 'always', pageId: 'page-1',
+  });
+  assert.equal((await readNavigationAuditCorrelationForRecovery({
+    sessionArea: area, capabilityId: prepared.capabilityId, auditId,
+  })).navigationPurpose, 'attached-copy');
+
+  pausedPackets.length = 0;
+  allowPausePublication = true;
+  const restarted = createAuthorizedAuditStarter(dependencies);
+  assert.deepEqual(await restarted.recoverAuthorizedAuditLifecycle(), {
+    ok: true, state: 'privacy-paused', auditId, revision: null,
+  });
+  assert.equal(executions, 1);
+  assert.equal(pausedPackets.length, 1);
+  assert.deepEqual(await restarted.abortAuthorizedAudit({
+    auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9, reasonCode: 'USER_CANCELLED',
+  }), { ok: true, auditId, state: 'revoked' });
+  assert.deepEqual(cleanups, [{
+    auditId, ownershipId, navigationPurpose: 'attached-copy', cleanupMode: 'always',
+  }]);
+  assert.equal(await pixelState.readSuspension(auditId), null);
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+  assert.doesNotMatch(JSON.stringify({ pausedPackets, cleanups }), /secret=never|hmac-sha256|consentId/iu);
+  });
+});
+
+test('attached-copy consent resume keeps its explicit purpose and cleans before publishing the result', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const auditId = 'audit-current-copy-pixel-resume';
+  const ownershipId = `owner_${'Q'.repeat(22)}`;
+  const fixture = await reportFixture(auditId);
+  const policy = createCapturePolicyV1({ mode: 'element-only', includeQuery: false });
+  const pixelState = createPixelCaptureStateV1({
+    sessionArea: area,
+    now: (() => { let value = EPOCH + 2; return () => value++; })(),
+    randomBytes: length => new Uint8Array(length).fill(14),
+  });
+  const evidence = sanitizeEvidenceUrlV1('https://example.test/current', { includeQuery: false });
+  const observedTarget = Object.freeze({
+    version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId,
+    tabId: 27, windowId: 9, documentId: 'copy-document', urlEvidence: evidence,
+    urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+    cleanupMode: 'always', pageId: 'page-1',
+  });
+  const signals = Object.freeze({
+    version: 'SensitiveCaptureSignalsV1', detected: true, categories: Object.freeze(['password']),
+  });
+  const order = [];
+  let executions = 0;
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority, pixelState,
+    execution: async () => { throw new Error('ORIGINAL_TAB_MUST_STAY_VIEW_ONLY'); },
+    probeDocumentIdentity: async tabId => ({
+      tabId, windowId: 9, documentId: 'copy-document',
+      urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+    }),
+    probeSensitiveCaptureSignals: async () => signals,
+  });
+  dependencies.prepareAttachedCopyPlan = async () => {
+    await reserveAttachedCopyStartJournalV1({
+      sessionArea: area, capabilityId: prepared.capabilityId, auditId,
+      windowId: 9, ownershipId, createdAt: EPOCH + 1,
+    });
+    assert.equal((await prepared.authority.exchangeAttachedForNavigationCopy({
+      capabilityId: prepared.capabilityId, intent: 'attached-copy', senderContext: prepared.senderContext,
+    })).ok, true);
+    return Object.freeze({
+      kind: 'attached-copy', ownershipId, navigationToken: 'Q'.repeat(22),
+      navigationPurpose: 'attached-copy', evidenceUrl: evidence,
+      sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+    });
+  };
+  dependencies.runUrlAuditExecution = async args => {
+    executions += 1;
+    if (executions === 1) {
+      await args.onCheckpoint(fixture.checkpoint);
+      const decision = await args.privacyGate.preflight({
+        auditId, observedTarget, capturePolicy: policy, signals,
+      });
+      return Object.freeze({
+        status: decision.status, model: null, observedTarget,
+        observationState: 'observed', ownershipState: 'retained-for-consent', signals,
+      });
+    }
+    assert.deepEqual(args.resumeTarget, {
+      kind: 'owned-disposable-resume', ownershipId,
+      tabId: 27, windowId: 9, documentId: 'copy-document',
+      initialUrlEvidence: evidence,
+      initialUrlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+      navigationPurpose: 'attached-copy', cleanupMode: 'always', pageId: 'page-1',
+    });
+    assert.equal((await args.privacyGate.preflight({
+      auditId, observedTarget, capturePolicy: policy, signals,
+    })).status, 'armed');
+    assert.equal((await args.privacyGate.authorizeFirstPixel({
+      auditId, observedTarget, capturePolicy: policy,
+      proof: {
+        tabId: 27, windowId: 9, documentId: 'copy-document',
+        urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+      },
+      signals,
+    })).status, 'ready');
+    await args.onCheckpoint(fixture.checkpoint);
+    await args.persistAuditModel(fixture.model, observedTarget);
+    await args.privacyGate.afterPixels({ auditId, pixelStarted: false });
+    return Object.freeze({
+      status: 'complete', model: fixture.model, observedTarget,
+      observationState: 'observed', ownershipState: 'removed',
+    });
+  };
+  dependencies.clearUrlAuditResources = async request => { order.push(['cleanup', structuredClone(request)]); return true; };
+  dependencies.panelCoordinator = panelCoordinator([], {
+    async publishPrivacyPaused() { return true; },
+    async publishRunningResume() { return true; },
+    async publishResult(value) { order.push(['publish']); return issueDeferredTerminalDelivery(value); },
+  });
+  const starter = createAuthorizedAuditStarter(dependencies);
+  const started = await starter.beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId, capturePolicy: policy,
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    senderContext: prepared.senderContext,
+  });
+  assert.deepEqual(await started.completion, {
+    ok: true, auditId, state: 'privacy-paused', revision: null,
+  });
+  const resumed = await createAuthorizedAuditStarter(dependencies).resumePrivacyPausedAudit({
+    auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9, mode: 'element-only',
+  });
+  assert.deepEqual(resumed.response, { ok: true, auditId, state: 'running' });
+  assert.deepEqual(await resumed.completion, { ok: true, auditId, state: 'result', revision: 1 });
+  assert.equal(executions, 2);
+  assert.deepEqual(order[0], ['cleanup', {
+    auditId, ownershipId, navigationPurpose: 'attached-copy', cleanupMode: 'always',
+  }]);
+  assert.deepEqual(order[1], ['publish']);
+  assert.deepEqual(await createAuthorizedAuditStarter(dependencies).resumePrivacyPausedAudit({
+    auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9, mode: 'element-only',
+  }), {
+    response: { ok: false, code: 'AUDIT_RESUME_DENIED' }, sessionCapabilityId: null, completion: null,
   });
 });
 
@@ -1517,13 +1785,13 @@ test('sensitive single-URL pixels durably pause with the exact owner retained an
   assert.deepEqual(cancelledSession.targetBinding, { kind: 'disposable', ownershipId, state: 'removed' });
 });
 
-async function pausedSingleUrlAuditHarness(auditId) {
+async function pausedSingleUrlAuditHarness(auditId, { attachedCopy = false } = {}) {
   const area = sessionArea();
   const prepared = await authorityFixture(area);
-  const navigation = await prepared.authority.prepareNavigationForPanel({
+  const navigation = attachedCopy ? null : await prepared.authority.prepareNavigationForPanel({
     intent: 'single', senderContext: prepared.senderContext,
   });
-  const ownershipId = `owner_${'O'.repeat(22)}`;
+  const ownershipId = `owner_${(attachedCopy ? 'A' : 'O').repeat(22)}`;
   const fixture = await reportFixture(auditId);
   const reportByAudit = new Map();
   const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
@@ -1532,13 +1800,13 @@ async function pausedSingleUrlAuditHarness(auditId) {
   });
   const observedTarget = Object.freeze({
     version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId,
-    tabId: 27, windowId: 9, documentId: 'url-document',
+    tabId: 27, windowId: 9, documentId: attachedCopy ? 'copy-document' : 'url-document',
     urlEvidence: sanitizeEvidenceUrlV1('https://example.test/private', { includeQuery: false }),
     urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
-    cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+    cleanupMode: attachedCopy ? 'always' : 'pre-observation-failure', pageId: 'page-1',
   });
   let proof = {
-    tabId: 27, windowId: 9, documentId: 'url-document',
+    tabId: 27, windowId: 9, documentId: attachedCopy ? 'copy-document' : 'url-document',
     urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
   };
   let executions = 0;
@@ -1565,18 +1833,40 @@ async function pausedSingleUrlAuditHarness(auditId) {
       observationState: 'observed', ownershipState: 'retained-for-consent', signals,
     });
   };
-  dependencies.clearUrlAuditResources = async value => { cleanups.push(structuredClone(value)); return true; };
-  dependencies.panelCoordinator = panelCoordinator([], { async publishPrivacyPaused() { return true; } });
-  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedUrlAudit({
-    capabilityId: navigation.capabilityId, auditId, senderContext: prepared.senderContext,
-    capturePolicy: policy,
-    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
-    plan: {
-      kind: 'single', ownershipId, navigationToken: 'T'.repeat(22), navigationPurpose: 'single-url',
+  if (attachedCopy) dependencies.prepareAttachedCopyPlan = async () => {
+    await reserveAttachedCopyStartJournalV1({
+      sessionArea: area, capabilityId: prepared.capabilityId, auditId,
+      windowId: 9, ownershipId, createdAt: EPOCH + 1,
+    });
+    assert.equal((await prepared.authority.exchangeAttachedForNavigationCopy({
+      capabilityId: prepared.capabilityId, intent: 'attached-copy', senderContext: prepared.senderContext,
+    })).ok, true);
+    return Object.freeze({
+      kind: 'attached-copy', ownershipId, navigationToken: 'A'.repeat(22),
+      navigationPurpose: 'attached-copy',
       evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/private?token=raw', { includeQuery: false }),
       sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
-    },
-  });
+    });
+  };
+  dependencies.clearUrlAuditResources = async value => { cleanups.push(structuredClone(value)); return true; };
+  dependencies.panelCoordinator = panelCoordinator([], { async publishPrivacyPaused() { return true; } });
+  const starter = createAuthorizedAuditStarter(dependencies);
+  const started = attachedCopy
+    ? await starter.beginAuthorizedAudit({
+        capabilityId: prepared.capabilityId, eventNonce: null, auditId, senderContext: prepared.senderContext,
+        capturePolicy: policy,
+        retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+      })
+    : await starter.beginAuthorizedUrlAudit({
+        capabilityId: navigation.capabilityId, auditId, senderContext: prepared.senderContext,
+        capturePolicy: policy,
+        retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+        plan: {
+          kind: 'single', ownershipId, navigationToken: 'T'.repeat(22), navigationPurpose: 'single-url',
+          evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/private?token=raw', { includeQuery: false }),
+          sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+        },
+      });
   assert.deepEqual(await started.completion, {
     ok: true, auditId, state: 'privacy-paused', revision: null,
   });
@@ -1714,6 +2004,54 @@ test('restart during a claimed single-URL resume revokes and cleans without reca
   assert.deepEqual(session.targetBinding, {
     kind: 'disposable', ownershipId: harness.ownershipId, state: 'removed',
   });
+});
+
+test('restart during attached-copy resume liquidates its cleanup-always owner and suspension atomically', async () => {
+  const auditId = 'audit-copy-pixel-restart-resuming';
+  const harness = await pausedSingleUrlAuditHarness(auditId, { attachedCopy: true });
+  const suspension = await harness.pixelState.readSuspension(auditId);
+  await harness.pixelState.claimAndBeginResume({
+    auditId, consentId: suspension.consentId, mode: suspension.mode,
+    categories: suspension.categories,
+    proof: {
+      kind: 'owned-disposable', ownershipId: harness.ownershipId,
+      tabId: suspension.tabId, windowId: suspension.windowId,
+      documentId: suspension.documentId, urlSessionDigest: suspension.urlSessionDigest,
+      cleanupMode: 'always', pageId: 'page-1',
+    },
+  });
+  await harness.prepared.authority.transitionDisposableAuditSession({
+    sessionCapabilityId: harness.started.sessionCapabilityId, auditId,
+    ownershipId: harness.ownershipId,
+    fromState: 'retained-for-consent', toState: 'observing',
+  });
+  await harness.prepared.authority.transitionAuditSession({
+    sessionCapabilityId: harness.started.sessionCapabilityId, auditId, nextState: 'running',
+  });
+  await harness.pixelState.markSessionRunning({ auditId, consentId: suspension.consentId });
+  const active = await readActiveAuditJobForWorker({ sessionArea: harness.area });
+  harness.area.values[ACTIVE_AUDIT_JOB_KEY] = {
+    ...structuredClone(active), state: 'running', updatedAt: active.updatedAt + 1,
+  };
+
+  const recovery = await createAuthorizedAuditStarter(harness.dependencies).recoverAuthorizedAuditLifecycle();
+
+  assert.deepEqual(recovery, { ok: true, state: 'interrupted', auditId, revision: null });
+  assert.equal(harness.executions(), 1);
+  assert.deepEqual(harness.cleanups, [{
+    auditId, ownershipId: harness.ownershipId,
+    navigationPurpose: 'attached-copy', cleanupMode: 'always',
+  }]);
+  assert.equal(await harness.pixelState.readSuspension(auditId), null);
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: harness.area }), null);
+  const session = await readAuditSessionForWorker({
+    sessionArea: harness.area, sessionCapabilityId: harness.started.sessionCapabilityId, auditId,
+  });
+  assert.equal(session.state, 'revoked');
+  assert.deepEqual(session.targetBinding, {
+    kind: 'disposable', ownershipId: harness.ownershipId, state: 'removed',
+  });
+  assert.doesNotMatch(JSON.stringify(recovery), /owner_|hmac-sha256|consentId|private/iu);
 });
 
 test('restart after finishing a terminal single-URL consent reconciles the exact attempt without recapturing', async () => {
@@ -1861,6 +2199,7 @@ test('single-URL consent is one-shot and resumes the retained owner without navi
       kind: 'owned-disposable-resume', ownershipId, tabId: 27, windowId: 9,
       documentId: 'url-document', initialUrlEvidence: evidence,
       initialUrlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+      navigationPurpose: 'single-url',
       cleanupMode: 'pre-observation-failure', pageId: 'page-1',
     });
     assert.equal(Object.hasOwn(args, 'navigationToken'), false);

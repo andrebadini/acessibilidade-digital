@@ -5,7 +5,7 @@ import { createAuditStore } from '../storage/audit-store.js';
 import { createDestructiveDialog } from '../ui/destructive-dialog.js';
 import { parseAuditDeletedEvent } from '../core/audit-deleted-event.js';
 import { createAuthorizedReviewDecisionCommitter, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId } from './review-state.js';
-import { buildReportView, renderReportView, updateReportHighlightAction } from './report-view.js';
+import { applyReportSourceControls, buildReportView, renderReportView, updateReportHighlightAction } from './report-view.js';
 import { REPORT_PORT_NAME } from '../background/report-port.js';
 import { createReportHighlightPolicy } from './report-highlight-policy.js';
 
@@ -16,6 +16,7 @@ const reviewControls = document.querySelector('.review-controls');
 const status = document.querySelector('#review-status');
 const evaluator = document.querySelector('#review-evaluator');
 const returnToPage = document.querySelector('#return-to-page');
+const reportSourceExplanation = document.querySelector('#report-source-explanation');
 const regenerate = document.querySelector('#regenerate-report');
 const deleteAudit = document.querySelector('#delete-audit');
 const deleteAuditDialog = document.querySelector('#delete-audit-dialog');
@@ -83,6 +84,8 @@ function renderDeletedAudit() {
   list.replaceChildren();
   evaluator.disabled = true;
   returnToPage.disabled = true;
+  returnToPage.hidden = false;
+  reportSourceExplanation.hidden = true;
   regenerate.disabled = true;
   deleteAudit.disabled = true;
 }
@@ -430,6 +433,10 @@ async function start() {
   const bundle = await createPanelResultBundleV1({ reportRevision: revision, inventory });
   const view = buildReportView({ model: revision.model, summary: bundle.summary, modelRevision: revision.modelRevision, modelHash: revision.modelHash });
   auditModel = revision.model;
+  applyReportSourceControls({
+    reportSessionState, limitations: view.executive.limitations,
+    returnControl: returnToPage, explanation: reportSourceExplanation,
+  });
   const report = renderReportView({
     view, document, onExport: () => { void requestExport(); },
     onHighlightIntent: reportSessionState === 'result' ? value => {
@@ -442,7 +449,6 @@ async function start() {
   reviewTarget.append(reviewControls, list);
   deleteAudit.disabled = false;
   if (reportSessionState === 'result') {
-    returnToPage.disabled = false;
     connectReportHighlightState();
   }
   for (const entry of getPendingReviewEntries(auditModel)) renderCard(entry);

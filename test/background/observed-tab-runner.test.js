@@ -307,6 +307,7 @@ test('owned consent resume CASes retained owner and captures without create navi
     kind: 'owned-disposable-resume', ownershipId: 'ownership-1',
     tabId: 41, windowId: 3, documentId: 'doc-1',
     initialUrlEvidence: EVIDENCE, initialUrlSessionDigest: DIGEST,
+    navigationPurpose: 'single-url',
     cleanupMode: 'pre-observation-failure', pageId: 'page-1',
   };
   const { input } = fixture({
@@ -365,6 +366,7 @@ test('owned consent resume rejects a foreign owner record before pipeline or ras
       kind: 'owned-disposable-resume', ownershipId: 'ownership-1',
       tabId: 41, windowId: 3, documentId: 'doc-1',
       initialUrlEvidence: EVIDENCE, initialUrlSessionDigest: DIGEST,
+      navigationPurpose: 'single-url',
       cleanupMode: 'pre-observation-failure', pageId: 'page-1',
     },
     pipelineServices: {
@@ -391,6 +393,7 @@ test('concurrent owned consent replay loser cannot clean or mutate the winning o
     kind: 'owned-disposable-resume', ownershipId: 'ownership-1',
     tabId: 41, windowId: 3, documentId: 'doc-1',
     initialUrlEvidence: EVIDENCE, initialUrlSessionDigest: DIGEST,
+    navigationPurpose: 'single-url',
     cleanupMode: 'pre-observation-failure', pageId: 'page-1',
   });
   const bothReadRetained = deferred();

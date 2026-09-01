@@ -1,0 +1,31 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import {
+  ATTACHED_COPY_RELOADED_MESSAGE,
+  diagnosticPolicyEntry,
+} from '../../src/core/report/diagnostic-policy.js';
+import { deriveSystemLimitations } from '../../src/core/report/text-policy.js';
+
+test('attached-copy reload is a non-partial page limitation with one canonical message', () => {
+  assert.equal(
+    ATTACHED_COPY_RELOADED_MESSAGE,
+    'A auditoria foi executada em uma cópia temporária recarregada da URL da aba escolhida; alterações não salvas e estado mantido apenas em memória na aba original não foram observados.',
+  );
+  const diagnostic = {
+    code: 'ATTACHED_COPY_RELOADED',
+    message: ATTACHED_COPY_RELOADED_MESSAGE,
+    recoverable: true,
+  };
+  const policy = diagnosticPolicyEntry(diagnostic, {
+    role: 'page', mode: 'single', status: 'complete', attempted: true, finalUrlObserved: true,
+  });
+  assert.equal(policy?.fact, 'attached-copy-reloaded');
+  assert.equal(policy?.causePartial, false);
+  assert.deepEqual(deriveSystemLimitations({
+    requestedScope: { mode: 'single' },
+    session: { status: 'complete', diagnostics: [diagnostic, { ...diagnostic }] },
+    pages: [{ finalUrlObserved: false, viewport: {}, diagnostics: [diagnostic] }],
+    axe: { limitations: [] },
+  }).filter(value => value === ATTACHED_COPY_RELOADED_MESSAGE), [ATTACHED_COPY_RELOADED_MESSAGE]);
+});

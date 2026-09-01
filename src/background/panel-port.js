@@ -204,7 +204,7 @@ function parseSuspension(value) {
   const ownedSource = record && exact(record.source, ['kind', 'ownershipId', 'cleanupMode', 'pageId'], true);
   const source = attachedSource?.kind === 'attached' ? attachedSource
     : ownedSource?.kind === 'owned-disposable' && /^owner_[A-Za-z0-9_-]{22}$/u.test(ownedSource.ownershipId ?? '') &&
-      ownedSource.cleanupMode === 'pre-observation-failure' && ownedSource.pageId === 'page-1'
+      ['always', 'pre-observation-failure'].includes(ownedSource.cleanupMode) && ownedSource.pageId === 'page-1'
       ? ownedSource : null;
   if (!record || record.version !== 'AuditSuspensionV1' || !Number.isSafeInteger(record.revision) ||
     record.revision < 1 || !AUDIT_ID.test(record.auditId ?? '') || !CONSENT_ID.test(record.consentId ?? '') ||
@@ -679,7 +679,8 @@ export function createPanelPortCoordinator(raw) {
     const single = session.mode === 'single' && disposableTarget?.kind === 'disposable' &&
       disposableTarget.state === 'retained-for-consent' && suspension.source.kind === 'owned-disposable' &&
       suspension.source.ownershipId === disposableTarget.ownershipId &&
-      suspension.source.cleanupMode === 'pre-observation-failure' && suspension.source.pageId === 'page-1';
+      ['always', 'pre-observation-failure'].includes(suspension.source.cleanupMode) &&
+      suspension.source.pageId === 'page-1';
     return session.state === 'privacy-paused' && active?.mode === session.mode &&
       session.windowId === bootstrap.windowId && (attached || single) &&
       active?.state === 'privacy-paused' && active.auditId === bootstrap.auditId &&

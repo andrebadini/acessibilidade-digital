@@ -639,6 +639,44 @@ test('rehydrates a single-URL privacy pause without exposing owner digest or con
   assert.deepEqual(second.messages.at(-1), first.messages.at(-1));
 });
 
+test('rehydrates an attached-copy privacy pause with cleanup always as a bearer-free panel state', async () => {
+  const ownershipId = `owner_${'C'.repeat(22)}`;
+  const env = fixture();
+  env.sessions.set(SESSION, Object.freeze({
+    version: 1, sessionCapabilityId: SESSION, auditId: 'audit-port', windowId: 9, mode: 'single',
+    targetBinding: { kind: 'disposable', ownershipId, state: 'retained-for-consent' },
+    state: 'privacy-paused', issuedAt: EPOCH, expiresAt: EPOCH + 10_000,
+  }));
+  env.setActive(privacyPausedActive({ mode: 'single' }));
+  env.suspensions.set('audit-port', suspension({
+    tabId: 27, documentId: 'copy-document',
+    urlEvidence: {
+      version: 'EvidenceUrlV1', href: 'https://example.test/current',
+      queryIncluded: false, redactedSegments: 0,
+    },
+    urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+    source: { kind: 'owned-disposable', ownershipId, cleanupMode: 'always', pageId: 'page-1' },
+  }));
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'consumed',
+  };
+  assert.equal(await env.coordinator.withWindowLock(9, scope => scope.publishPrivacyPaused({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+  })), true);
+
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.deepEqual(connected.messages.at(-1), {
+    protocol: 'audita-panel', version: 1, type: 'privacy-paused',
+    auditId: 'audit-port', sessionCapabilityId: SESSION, mode: 'full-evidence',
+    categories: ['password', 'payment'], message: PAUSE_MESSAGE,
+  });
+  assert.doesNotMatch(JSON.stringify(connected.messages.at(-1)), /owner_|hmac-sha256|consentId|current/iu);
+});
+
 test('re-establishes panel client correlation before a single-URL privacy pause after worker realm restart', async () => {
   const ownershipId = `owner_${'R'.repeat(22)}`;
   const urlSessionDigest = `hmac-sha256:${'D'.repeat(43)}`;

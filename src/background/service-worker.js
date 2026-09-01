@@ -1042,7 +1042,8 @@ async function buildDefaultRuntime(chromeApi, options) {
             return Object.freeze({ ok: true, state, binding: session.targetBinding, windowId: session.windowId, live: true });
           }
           const disposable = exact(session.targetBinding, ['kind', 'ownershipId', 'state'], true);
-          if (disposable?.kind !== 'disposable' || disposable.state !== 'retained-for-review' ||
+          if (disposable?.kind !== 'disposable' ||
+            !['removed', 'retained-for-review'].includes(disposable.state) ||
             !/^owner_[A-Za-z0-9_-]{22}$/u.test(disposable.ownershipId ?? '')) {
             return Object.freeze({ ok: false, code: 'REPORT_SOURCE_DENIED' });
           }

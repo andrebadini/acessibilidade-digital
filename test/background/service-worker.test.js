@@ -960,7 +960,7 @@ test('default runtime bootstraps the operational adapter through a trusted Chrom
   assert.deepEqual(env.createdTabs, [{ active: false }]);
 });
 
-test('current-page full-evidence fails closed before privacy probing or raster in the attached-copy cut', async () => {
+test('current-page full-evidence pauses before raster when the inactive attached copy contains sensitive content', async () => {
   const documentTargets = [];
   const rawUrl = 'https://example.test/';
   let rasterCalls = 0;
@@ -1027,6 +1027,7 @@ test('current-page full-evidence fails closed before privacy probing or raster i
     return sendCommand(...args);
   };
   const runtime = await env.registration.startupReady;
+  env.setTabCreator((_options, callback) => callback?.({ id: 77, windowId: 9 }));
   const proof = await runtime.chromeAdapter.probeDocumentIdentity(17);
   const issuer = {
     type: 'extension-document', documentId: 'panel-document', path: '/src/panel/index.html',
@@ -1046,22 +1047,46 @@ test('current-page full-evidence fails closed before privacy probing or raster i
     capabilityId: prepared.capabilityId, eventNonce: null, auditId, capturePolicy: policy,
     retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext,
   });
-  assert.deepEqual(started, {
-    response: { ok: false, code: 'AUDIT_START_FAILED' },
-    sessionCapabilityId: null,
-    completion: null,
+  assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
+  assert.match(started.sessionCapabilityId, /^[A-Za-z0-9_-]{22}$/u);
+  const completion = await started.completion;
+  assert.deepEqual(completion, {
+    ok: true, auditId, state: 'privacy-paused', revision: null,
   });
   assert.equal(rasterCalls, 0);
-  assert.deepEqual(documentTargets, []);
+  assert.equal(documentTargets.length > 0, true);
 });
 
-test('default worker snapshots the current page into a private attached-copy plan before URL execution', async () => {
+test('default worker snapshots the current page and reauthorizes its removed copy as a view-only report source', async () => {
   const rawUrl = 'https://example.test/current?private=NEVER_PUBLIC';
+  const auditId = 'audit-default-current-copy';
+  const inventory = await createInstalledCoreRuleInventory();
+  const draft = structuredClone(SAMPLE_AUDIT);
+  draft.auditId = auditId;
+  draft.integrity.canonicalModelHash = 'pending';
+  draft.integrity.evidenceManifestHash = 'pending';
+  const model = await enrichAuditForReport(draft, {
+    now: () => '2026-08-29T12:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '0.1.0', rulesVersion: inventory.rulesVersion,
+    browserVersion: 'Chrome/147.0.0.0',
+  });
+  const checkpoint = {
+    version: 1, auditId,
+    pages: model.pages.map(page => ({
+      pageId: page.pageId, attempted: page.attempted,
+      startedAt: page.attempted ? page.timestamps.startedAt : null,
+      rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion,
+      inventoryHash: inventory.sha256, outcomes: [],
+    })),
+  };
+  const auditStore = createInMemoryAuditStore();
   let epoch = 1_788_000_000_000;
   const scriptTargets = [];
   const execution = deferred();
   let executionArgs = null;
   const env = defaultGraphFixture(null, {
+    auditStore,
+    enableReportLaunch: true,
     epochNow: () => epoch++,
     useDefaultChromeAdapter: true,
     tabsQuery: async () => [{
@@ -1088,10 +1113,19 @@ test('default worker snapshots the current page into a private attached-copy pla
         evidenceUrl: args.evidenceUrl,
         sessionDigest: args.sessionDigest,
       });
+      await args.onCheckpoint(checkpoint);
+      const observedTarget = Object.freeze({
+        version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId: args.ownershipId,
+        tabId: 27, windowId: 9, documentId: 'copy-document',
+        urlEvidence: sanitizeEvidenceUrlV1('https://example.test/current', { includeQuery: false }),
+        urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+        cleanupMode: 'always', pageId: 'page-1',
+      });
+      await args.persistAuditModel(model, observedTarget);
       execution.resolve();
       return Object.freeze({
-        status: 'failed', model: null, observedTarget: null,
-        observationState: 'pre-observation-failure', ownershipState: 'removed',
+        status: model.session.status, model, observedTarget,
+        observationState: 'observed', ownershipState: 'removed',
       });
     },
   });
@@ -1113,7 +1147,6 @@ test('default worker snapshots the current page into a private attached-copy pla
     issuer, windowId: 9, tabId: null, contextType: 'SIDE_PANEL',
     documentUrl: `chrome-extension://${env.chromeApi.runtime.id}/src/panel/index.html?launch=${'L'.repeat(43)}`,
   };
-  const auditId = 'audit-default-current-copy';
   const started = await runtime.auditStarter.beginAuthorizedAudit({
     capabilityId: prepared.capabilityId, eventNonce: null, auditId,
     capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
@@ -1123,7 +1156,7 @@ test('default worker snapshots the current page into a private attached-copy pla
   assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
   await execution.promise;
   assert.deepEqual(await started.completion, {
-    ok: true, auditId, state: 'revoked', code: 'AUDIT_FAILED',
+    ok: true, auditId, state: 'result', revision: 1,
   });
   assert.equal(executionArgs.navigationPurpose, 'attached-copy');
   assert.equal(executionArgs.windowId, 9);
@@ -1134,6 +1167,19 @@ test('default worker snapshots the current page into a private attached-copy pla
   assert.doesNotMatch(JSON.stringify(executionArgs), /NEVER_PUBLIC/u);
   assert.equal(env.createdTabs.length, 0);
   assert.equal(scriptTargets.every(target => target.tabId === 17 && target.frameIds?.[0] === 0), true);
+
+  const opening = runtime.reportLaunch.openRegisteredReport({
+    auditId, windowId: 9,
+    sourceSessionCapabilityId: started.sessionCapabilityId,
+    sourceSessionState: 'result',
+  });
+  for (let attempt = 0; attempt < 20 && !env.sessionValues[`audita:report-launch:v1:${auditId}`]; attempt += 1) {
+    await tick();
+  }
+  const { connected } = await env.connectReport(auditId, { preserveLaunch: true });
+  assert.equal((await opening).ok, true);
+  assert.equal(connected.state, 'view-only');
+  assert.doesNotMatch(JSON.stringify(connected), /NEVER_PUBLIC|owner_|hmac-sha256/iu);
 });
 
 test('default worker keeps the volatile vault closed while injecting the one digest manager by factories', async () => {

@@ -482,7 +482,7 @@ function correlatedPixelContext(active, recoveryGrant) {
   if (!grant || grant.version !== 1 || grant.auditId !== active.auditId ||
     grant.capabilityId !== active.capabilityId || grant.sessionCapabilityId !== active.sessionCapabilityId ||
     grant.windowId !== active.windowId || !['claimed', 'invalidated'].includes(grant.capabilityState) ||
-    grant.navigationPurpose !== 'single-url' ||
+    !['single-url', 'attached-copy'].includes(grant.navigationPurpose) ||
     !/^owner_[A-Za-z0-9_-]{22}$/u.test(grant.ownershipId ?? '') ||
     !['pending', 'observing', 'retained-for-consent', 'retained-for-review', 'cleanup-pending', 'removed']
       .includes(grant.ownershipState) ||
@@ -510,8 +510,10 @@ function correlatedPixelSuspension(value, active, context) {
   const attachedTargetMatches = context?.kind === 'attached' && source?.kind === 'attached' && target &&
     record.tabId === target.tabId && record.documentId === target.documentId &&
     record.urlSessionDigest === target.initialUrlSessionDigest && record.urlEvidence?.href === target.initialUrlEvidence;
+  const expectedOwnedCleanupMode = context?.grant?.navigationPurpose === 'attached-copy'
+    ? 'always' : 'pre-observation-failure';
   const ownedTargetMatches = context?.kind === 'single' && source?.kind === 'owned-disposable' &&
-    source.ownershipId === context.ownershipId && source.cleanupMode === 'pre-observation-failure' &&
+    source.ownershipId === context.ownershipId && source.cleanupMode === expectedOwnedCleanupMode &&
     source.pageId === 'page-1' && Number.isSafeInteger(record.tabId) && record.tabId >= 0 &&
     typeof record.documentId === 'string' && record.documentId.length >= 1 && record.documentId.length <= 512 &&
     DIGEST.test(record.urlSessionDigest ?? '');
@@ -544,7 +546,7 @@ function canonicalPixelSource(value) {
   if (attached?.kind === 'attached') return freeze(attached);
   const owned = exact(value, ['kind', 'ownershipId', 'cleanupMode', 'pageId']);
   return owned?.kind === 'owned-disposable' && /^owner_[A-Za-z0-9_-]{22}$/u.test(owned.ownershipId ?? '') &&
-    owned.cleanupMode === 'pre-observation-failure' && owned.pageId === 'page-1'
+    ['always', 'pre-observation-failure'].includes(owned.cleanupMode) && owned.pageId === 'page-1'
     ? freeze(owned) : null;
 }
 
@@ -766,11 +768,13 @@ export function createAuthorizedAuditStarter(input) {
       sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
     });
     if (correlation.sessionCapabilityId !== active.sessionCapabilityId ||
-      correlation.windowId !== active.windowId || correlation.ownershipId !== source.ownershipId) return false;
+      correlation.windowId !== active.windowId || correlation.ownershipId !== source.ownershipId ||
+      !(correlation.navigationPurpose === 'single-url' && source.cleanupMode === 'pre-observation-failure' ||
+        correlation.navigationPurpose === 'attached-copy' && source.cleanupMode === 'always')) return false;
     if (correlation.ownershipState !== 'removed') {
-      if (await clearUrlAuditResources({
-        auditId: active.auditId, ownershipId: source.ownershipId,
-      }) !== true) return false;
+      if (await clearUrlAuditResources(urlCleanupRequest(
+        active.auditId, source.ownershipId, correlation.navigationPurpose,
+      )) !== true) return false;
       const removed = await authority.transitionDisposableAuditSession({
         sessionCapabilityId: active.sessionCapabilityId,
         auditId: active.auditId,
@@ -1230,7 +1234,10 @@ export function createAuthorizedAuditStarter(input) {
   async function executeUrl(liveRecord) {
     const active = liveRecord.active;
     const ownershipId = liveRecord.plan?.ownershipId ?? liveRecord.resumeTarget?.ownershipId;
-    const navigationPurpose = liveRecord.plan?.navigationPurpose ?? 'single-url';
+    const navigationPurpose = liveRecord.plan?.navigationPurpose ?? liveRecord.resumeTarget?.navigationPurpose;
+    if (!['single-url', 'attached-copy'].includes(navigationPurpose)) {
+      throw new Error('URL_AUDIT_OUTCOME_DENIED');
+    }
     const attachedCopy = navigationPurpose === 'attached-copy';
     const expectedCleanupMode = attachedCopy ? 'always' : 'pre-observation-failure';
     let lastCheckpoint = null;
@@ -1374,7 +1381,11 @@ export function createAuthorizedAuditStarter(input) {
             ownershipId,
             navigationPurpose,
           )) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
-          await transitionUrlOwnership(liveRecord, 'pending', 'removed');
+          await transitionUrlOwnership(
+            liveRecord,
+            liveRecord.resumeTarget ? 'observing' : 'pending',
+            'removed',
+          );
           const correlation = await readNavigationAuditCorrelationForRecovery({
             sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
           });
@@ -1427,6 +1438,12 @@ export function createAuthorizedAuditStarter(input) {
       }
       let durable;
       try { durable = await readActiveAuditJobForWorker({ sessionArea }); } catch { durable = null; }
+      if (durable?.auditId === active.auditId && durable.state === 'privacy-paused') {
+        live.delete(active.auditId);
+        return freeze({
+          ok: false, auditId: active.auditId, state: 'blocked', code: 'AUDIT_RECOVERY_REQUIRED',
+        });
+      }
       if (durable?.auditId === active.auditId && durable.state === 'finalizing') {
         const recovery = await recoverAuthorizedAuditLifecycle();
         if (recovery.ok && recovery.state === 'reconciled') {
@@ -1688,9 +1705,6 @@ export function createAuthorizedAuditStarter(input) {
       (typeof args.eventNonce === 'string' && /^[A-Za-z0-9._:-]{20,240}$/u.test(args.eventNonce) && args.senderContext === null));
     if (!args || !CAPABILITY.test(args.capabilityId ?? '') || !AUDIT_ID.test(args.auditId ?? '') ||
       !capturePolicy || !preference || !inversePair) {
-      return freeze({ response: { ok: false, code: 'AUDIT_START_FAILED' }, sessionCapabilityId: null, completion: null });
-    }
-    if (hasUrlAudit && capturePolicy.mode !== 'no-pixels') {
       return freeze({ response: { ok: false, code: 'AUDIT_START_FAILED' }, sessionCapabilityId: null, completion: null });
     }
     let target;
@@ -2127,6 +2141,7 @@ export function createAuthorizedAuditStarter(input) {
               tabId: suspension.tabId, windowId: suspension.windowId, documentId: suspension.documentId,
               initialUrlEvidence: suspension.urlEvidence,
               initialUrlSessionDigest: suspension.urlSessionDigest,
+              navigationPurpose: grant.navigationPurpose,
               cleanupMode: suspension.source.cleanupMode, pageId: suspension.source.pageId,
             }) : null;
             const liveRecord = {
@@ -2716,9 +2731,7 @@ export function createAuthorizedAuditStarter(input) {
             });
           }
           const singlePixelSuspension = active.mode === 'single'
-            ? navigationCorrelation.navigationPurpose === 'attached-copy'
-              ? null
-              : (await readCorrelatedPixelSuspension(active)).suspension
+            ? (await readCorrelatedPixelSuspension(active)).suspension
             : null;
           const result = active.mode === 'single'
             ? active.state === 'finalizing'

@@ -262,12 +262,14 @@ function copyTarget(input) {
 
   const resume = captureExact(input, [
     'kind', 'ownershipId', 'tabId', 'windowId', 'documentId',
-    'initialUrlEvidence', 'initialUrlSessionDigest', 'cleanupMode', 'pageId',
+    'initialUrlEvidence', 'initialUrlSessionDigest', 'navigationPurpose', 'cleanupMode', 'pageId',
   ]);
   if (resume && kind === 'owned-disposable-resume' && validId(resume.ownershipId) &&
     validChromeId(resume.tabId) && validChromeId(resume.windowId) && validId(resume.documentId) &&
     copyEvidence(resume.initialUrlEvidence) && DIGEST.test(resume.initialUrlSessionDigest) &&
-    resume.cleanupMode === 'pre-observation-failure' && resume.pageId === 'page-1') {
+    (resume.navigationPurpose === 'single-url' && resume.cleanupMode === 'pre-observation-failure' ||
+      resume.navigationPurpose === 'attached-copy' && resume.cleanupMode === 'always') &&
+    resume.pageId === 'page-1') {
     return Object.freeze({ ...resume, kind: 'owned-disposable',
       initialUrlEvidence: copyEvidence(resume.initialUrlEvidence), navigationToken: null,
       preRegistered: true, resume: true });

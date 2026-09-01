@@ -37,6 +37,7 @@ import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-invent
 import { createCapturePolicyV1, isCapturePolicyV1 } from '../core/privacy/capture-policy.js';
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { createAuditModel } from '../core/report/audit-model.js';
+import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
 import { isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
 import {
@@ -132,7 +133,7 @@ function captureUrlAuditArgs(value) {
 function copyUrlResumeTarget(value) {
   const target = captureExactRecord(value, [
     'kind', 'ownershipId', 'tabId', 'windowId', 'documentId',
-    'initialUrlEvidence', 'initialUrlSessionDigest', 'cleanupMode', 'pageId',
+    'initialUrlEvidence', 'initialUrlSessionDigest', 'navigationPurpose', 'cleanupMode', 'pageId',
   ]);
   const evidence = target && copyEvidenceUrlV1(target.initialUrlEvidence);
   if (!target || target.kind !== 'owned-disposable-resume' ||
@@ -142,7 +143,10 @@ function copyUrlResumeTarget(value) {
     !/^[A-Za-z0-9._:-]{1,160}$/u.test(target.documentId ?? '') ||
     !evidence || evidence.queryIncluded ||
     !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(target.initialUrlSessionDigest ?? '') ||
-    target.cleanupMode !== 'pre-observation-failure' || target.pageId !== 'page-1') return null;
+    !(
+      target.navigationPurpose === 'single-url' && target.cleanupMode === 'pre-observation-failure' ||
+      target.navigationPurpose === 'attached-copy' && target.cleanupMode === 'always'
+    ) || target.pageId !== 'page-1') return null;
   return Object.freeze({ ...target, initialUrlEvidence: evidence });
 }
 
@@ -166,7 +170,8 @@ export async function runUrlAudit(rawArgs = {}) {
   const ownershipId = resuming ? resumeTarget?.ownershipId : args?.ownershipId;
   const windowId = resuming ? resumeTarget?.windowId : args?.windowId;
   const sessionDigest = resuming ? resumeTarget?.initialUrlSessionDigest : args?.sessionDigest;
-  const cleanupMode = !resuming && args?.navigationPurpose === 'attached-copy'
+  const navigationPurpose = resuming ? resumeTarget?.navigationPurpose : args?.navigationPurpose;
+  const cleanupMode = navigationPurpose === 'attached-copy'
     ? 'always'
     : 'pre-observation-failure';
   if (!args || !/^[A-Za-z0-9._:-]{1,160}$/u.test(args.auditId ?? '') ||
@@ -177,7 +182,6 @@ export async function runUrlAudit(rawArgs = {}) {
     !evidenceUrl || evidenceUrl.queryIncluded || !requestedUrlEvidence || requestedUrlEvidence.queryIncluded ||
     !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(sessionDigest ?? '') ||
     !policy || !isCapturePolicyV1(policy) || policy.includeQuery !== false ||
-    (!resuming && args.navigationPurpose === 'attached-copy' && policy.mode !== 'no-pixels') ||
     (policy.mode === 'no-pixels'
       ? resuming || privacyGate !== null
       : !isPixelPrivacyGateV1(privacyGate)) ||
@@ -309,9 +313,24 @@ export async function runUrlAudit(rawArgs = {}) {
         !['failed', 'cancelled'].includes(collectedDraft.session.status)) {
         await observedAdapter.settlePixelBoundary();
       }
-      const draft = alignLegacyDraftWithObservedEvidence(
+      let draft = alignLegacyDraftWithObservedEvidence(
         collectedDraft, safeTarget.urlEvidence.href, requestedUrlEvidence.href,
       );
+      if (navigationPurpose === 'attached-copy') {
+        const copy = structuredClone(draft);
+        const diagnostics = Array.isArray(copy.session?.diagnostics) ? copy.session.diagnostics : [];
+        if (!diagnostics.some(entry => entry?.code === 'ATTACHED_COPY_RELOADED' &&
+          entry.message === ATTACHED_COPY_RELOADED_MESSAGE)) {
+          diagnostics.push(diagnostic(
+            'ATTACHED_COPY_RELOADED',
+            ATTACHED_COPY_RELOADED_MESSAGE,
+            canonicalTime(copy.timestamps?.endedAt ?? args.now()),
+            true,
+          ));
+        }
+        copy.session.diagnostics = diagnostics;
+        draft = deepFreeze(copy);
+      }
       terminalModel = await enrichAuditForReport(draft, {
         now: args.now,
         expectedExtensionId: args.expectedExtensionId,
