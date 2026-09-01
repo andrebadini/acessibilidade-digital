@@ -76,6 +76,10 @@ button:hover, button:focus-visible, a:focus-visible, summary:focus-visible { bac
 [data-report-executive-actions] button:hover, [data-report-executive-actions] button:focus-visible { background: var(--brand); }
 code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: .75rem; background: #eef1f3; }
 .evidence-media { display: block; width: 100%; max-width: 100%; height: auto; max-height: 28rem; object-fit: contain; border: 1px solid #65737e; background: #fff; }
+.evidence-media--marked { overflow: hidden; }
+.evidence-highlight { fill: none; vector-effect: non-scaling-stroke; pointer-events: none; stroke-width: 7; }
+.evidence-highlight--failed { stroke: #8b1e1e; }
+.evidence-highlight--review { stroke: #6b4e00; stroke-dasharray: 14 9; }
 .answered { border-left: .4rem solid #287d3c; }
 #delete-audit { min-height: 2.75rem; }
 .danger-action { border-color: #7d2100; background: var(--danger); color: #fff; }
@@ -97,5 +101,5 @@ dialog:not([open]) { display: none; }
   [data-report-issue], [data-report-technical], [data-report-limitations], [data-report-evidence] { break-inside: auto; }
   [data-report-issue-heading], [data-report-evidence] > h4, summary { break-after: avoid; }
 }
-@media (forced-colors: active) { button, input, textarea, .review-controls, .review-card, dialog, .report-identity, .report-view > section, [data-report-metric], [data-report-issue], [data-report-evidence-preview] figure, [data-report-evidence], .section-nav a, .report-filters [role="group"], .report-view th, .report-view td { border-color: CanvasText; } .report-filters button[aria-pressed="true"] { background: Highlight; color: HighlightText; } [data-report-executive-actions] button { background: Canvas; color: CanvasText; border-color: ButtonText; } }
+@media (forced-colors: active) { button, input, textarea, .review-controls, .review-card, dialog, .report-identity, .report-view > section, [data-report-metric], [data-report-issue], [data-report-evidence-preview] figure, [data-report-evidence], .section-nav a, .report-filters [role="group"], .report-view th, .report-view td { border-color: CanvasText; } .report-filters button[aria-pressed="true"] { background: Highlight; color: HighlightText; } [data-report-executive-actions] button { background: Canvas; color: CanvasText; border-color: ButtonText; } .evidence-highlight { stroke: CanvasText; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }

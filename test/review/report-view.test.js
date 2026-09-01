@@ -3,8 +3,10 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
+import { projectOccurrenceEvidencePreviews } from '../../src/core/report/evidence-treatment.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
+import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { buildPanelSummary } from '../../src/panel/panel-summary.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { buildReportView, renderReportView, updateReportHighlightAction } from '../../src/review/report-view.js';
@@ -36,7 +38,10 @@ class Element {
   querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; }
 }
 
-class Document { createElement(tag) { return new Element(tag, this); } }
+class Document {
+  createElement(tag) { return new Element(tag, this); }
+  createElementNS(_namespace, tag) { return new Element(tag, this); }
+}
 
 function matches(node, selector) {
   const tag = selector.match(/^[a-z][a-z0-9-]*/iu)?.[0];
@@ -51,10 +56,10 @@ function matches(node, selector) {
 async function fixture({ mutateDraft } = {}) {
   const inventory = await createInstalledCoreRuleInventory();
   const draft = structuredClone(SAMPLE_AUDIT);
-  mutateDraft?.(draft);
-  draft.integrity.canonicalModelHash = 'pending';
-  draft.integrity.evidenceManifestHash = 'pending';
-  const model = await enrichAuditForReport(draft, {
+  const prepared = mutateDraft?.(draft) ?? draft;
+  prepared.integrity.canonicalModelHash = 'pending';
+  prepared.integrity.evidenceManifestHash = 'pending';
+  const model = await enrichAuditForReport(prepared, {
     now: () => '2026-08-29T12:00:00.000Z', timezone: 'America/Cuiaba',
     manifestVersion: '1.0.1', rulesVersion: inventory.rulesVersion, browserVersion: 'Chrome/151.0.0.0',
   });
@@ -369,7 +374,8 @@ test('live report renders decision-first cards, evidence previews and honest evi
   assert.match(firstIssue.querySelector('[data-report-plain-block="normative"]').textContent, /WCAG|ABNT/iu);
   assert.match(firstIssue.querySelector('[data-report-plain-block="legal"]').textContent, /Referência técnica e jurídica qualificada/iu);
   const preview = firstIssue.querySelector('[data-report-evidence-preview]');
-  assert.equal(preview.querySelectorAll('img').length, 2);
+  assert.equal(preview.querySelectorAll('img').length, 1);
+  assert.equal(preview.querySelectorAll('svg[data-evidence-treatment="failed"]').length, 1);
   assert.equal(preview.querySelectorAll('[data-evidence-kind="element"]').length, 1);
   assert.equal(preview.querySelectorAll('[data-evidence-kind="full-page"]').length, 1);
   assert.equal(firstIssue.querySelectorAll('details').length, 1);
@@ -378,7 +384,7 @@ test('live report renders decision-first cards, evidence previews and honest evi
   assert.equal(technical.querySelectorAll('img').length, 0);
   assert.match(technical.textContent, /Resultado original|Resultado consolidado|Contexto técnico|Página|Motor|Regra|Versão|URL|Horário|Seletor|Snippet|Hash|ID|Proveniência/iu);
   assert.match(technical.textContent, /ev-control|ev-full/iu);
-  assert.equal(firstIssue.querySelectorAll('img').length, 2);
+  assert.equal(firstIssue.querySelectorAll('img').length, 1);
   assert.equal(firstIssue.querySelector('[data-report-live-action="evidence-only"]').textContent,
     'O destaque ao vivo não está disponível neste relatório. Consulte as capturas registradas no momento da auditoria.');
   assert.equal(firstIssue.querySelector('[data-report-consult-evidence]').getAttribute('href'), '#report-evidence-1');
@@ -400,6 +406,176 @@ test('live report renders decision-first cards, evidence previews and honest evi
   for (const label of ['Não conformidades', 'Alertas', 'Revisões humanas pendentes', 'Resultados positivos']) {
     assert.equal(headings.includes(label) || headings.some(value => value.startsWith(`${label}:`)), true);
   }
+});
+
+test('live report derives occurrence-specific boxes while preserving the pristine captured evidence', async () => {
+  const { model, summary } = await fixture({
+    mutateDraft(draft) {
+      const elementEvidence = draft.evidence.find(evidence => evidence.kind === 'element');
+      elementEvidence.metadata = {
+        width: 128,
+        height: 88,
+        highlightBox: { x: 24, y: 12, width: 80, height: 40, coordinateSpace: 'capture-css-px' },
+      };
+    },
+  });
+  const original = model.evidence.find(evidence => evidence.kind === 'element');
+  const originalSnapshot = structuredClone(original);
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+
+  const failed = root.querySelector('[data-report-issue][data-result="failed"]');
+  const failedFigure = failed.querySelector('[data-evidence-kind="element"]');
+  const failedVisual = failedFigure.querySelector('svg[data-evidence-treatment="failed"]');
+  assert.ok(failedVisual);
+  assert.equal(failedVisual.getAttribute('aria-label'), 'Elemento local da evidência ev-control com falha confirmada destacada por moldura vermelha sólida.');
+  assert.equal(failedVisual.querySelector('image').getAttribute('href'), original.dataUrl);
+  const failedBox = failedVisual.querySelector('rect[data-evidence-highlight="failed"]');
+  assert.deepEqual(['x', 'y', 'width', 'height'].map(name => failedBox.getAttribute(name)), ['24', '12', '80', '40']);
+  assert.match(failedFigure.querySelector('figcaption').textContent, /✕ Falha confirmada.*moldura vermelha sólida/iu);
+
+  const review = root.querySelector('[data-report-issue][data-result="humanReview"]');
+  const reviewFigure = review.querySelector('[data-evidence-kind="element"]');
+  const reviewVisual = reviewFigure.querySelector('svg[data-evidence-treatment="review"]');
+  assert.ok(reviewVisual);
+  assert.equal(reviewVisual.querySelector('image').getAttribute('href'), original.dataUrl);
+  const reviewBox = reviewVisual.querySelector('rect[data-evidence-highlight="review"]');
+  assert.deepEqual(['x', 'y', 'width', 'height'].map(name => reviewBox.getAttribute(name)), ['24', '12', '80', '40']);
+  assert.match(reviewFigure.querySelector('figcaption').textContent, /\? Revisão humana necessária.*moldura âmbar tracejada/iu);
+
+  assert.equal(failed.querySelector('[data-evidence-kind="full-page"]').querySelector('svg'), null);
+  assert.equal(root.querySelector('[data-report-evidence="ev-control"]').querySelector('img').getAttribute('src'), original.dataUrl);
+  assert.deepEqual(model.evidence.find(evidence => evidence.kind === 'element'), originalSnapshot);
+
+  const html = renderHtmlReport(model, { reportView: view });
+  assert.match(html, /<svg class="evidence-media evidence-media--marked"[^>]*data-evidence-treatment="failed"[^>]*aria-label="Elemento local da evidência ev-control com falha confirmada destacada por moldura vermelha sólida\."/u);
+  assert.match(html, /<rect class="evidence-highlight evidence-highlight--failed" data-evidence-highlight="failed" x="24" y="12" width="80" height="40" aria-hidden="true"><\/rect>/u);
+  assert.match(html, /<svg class="evidence-media evidence-media--marked"[^>]*data-evidence-treatment="review"[^>]*aria-label="Elemento local da evidência ev-control com revisão humana necessária destacada por moldura âmbar tracejada\."/u);
+  assert.match(html, /<rect class="evidence-highlight evidence-highlight--review" data-evidence-highlight="review" x="24" y="12" width="80" height="40" aria-hidden="true"><\/rect>/u);
+  assert.match(html, /data-report-evidence="ev-control"[^]*?<img class="evidence-media" src="data:image\/png;base64,/u);
+  assert.deepEqual(model.evidence.find(evidence => evidence.kind === 'element'), originalSnapshot);
+});
+
+test('one consolidated issue marks every correlated element and keeps one full-page context', async () => {
+  const { model, summary } = await fixture({
+    mutateDraft(draft) {
+      const originalEvidence = draft.evidence.find(evidence => evidence.evidenceId === 'ev-control');
+      draft.evidence.push({
+        ...structuredClone(originalEvidence),
+        evidenceId: 'ev-control-2', nodeId: 'n-2', backendNodeId: 42,
+        selector: { css: '#cancelar', framePath: [] },
+        snippet: '<button id="cancelar" aria-label="Cancelar">Voltar</button>',
+        hash: 'sha256-element-sample-2',
+        metadata: {
+          width: 128, height: 88,
+          highlightBox: { x: 12, y: 16, width: 64, height: 36, coordinateSpace: 'capture-css-px' },
+        },
+        accessibility: {
+          ...structuredClone(originalEvidence.accessibility), name: 'Cancelar', visibleText: 'Voltar',
+          announcementPreview: 'Cancelar, botão, Volta para a etapa anterior',
+        },
+      });
+      draft.ruleResults.find(rule => rule.ruleId === 'focus-visible').targets.push('n-2');
+      const originalOccurrence = draft.occurrences.find(occurrence => occurrence.occurrenceId === 'occ-focus-failed');
+      draft.occurrences.push({
+        ...structuredClone(originalOccurrence),
+        occurrenceId: 'occ-focus-failed-2', nodeId: 'n-2',
+        target: { ...structuredClone(originalOccurrence.target), nodeId: 'n-2' },
+        accessiblePreview: 'Cancelar, botão, Volta para a etapa anterior',
+        evidenceRefs: ['ev-full', 'ev-control-2'], evidenceIds: ['ev-full', 'ev-control-2'],
+      });
+    },
+  });
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const issue = view.issues.failed.find(value => value.ruleId === 'focus-visible');
+  assert.equal(issue.occurrences.length, 2);
+
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const card = root.querySelector('[data-report-issue][data-result="failed"]');
+  const preview = card.querySelector('[data-report-evidence-preview]');
+  assert.equal(preview.querySelectorAll('[data-evidence-kind="element"]').length, 2);
+  assert.equal(preview.querySelectorAll('svg[data-evidence-treatment="failed"]').length, 2);
+  assert.equal(preview.querySelectorAll('[data-evidence-kind="full-page"]').length, 1);
+
+  const html = renderHtmlReport(model, { reportView: view });
+  const exportedCard = html.match(/<article class="occurrence-card"[^>]*data-result="failed"[^]*?<\/article>/u)?.[0] ?? '';
+  assert.equal((exportedCard.match(/data-evidence-kind="element"/gu) ?? []).length, 2);
+  assert.equal((exportedCard.match(/data-evidence-treatment="failed"/gu) ?? []).length, 2);
+  assert.equal((exportedCard.match(/data-evidence-kind="full-page"/gu) ?? []).length, 1);
+});
+
+test('shared evidence keeps one explicit derivation for each occurrence-specific treatment', () => {
+  const evidence = [{ evidenceId: 'ev-shared', kind: 'element' }];
+  const occurrences = [
+    {
+      occurrenceId: 'occ-failed', classification: 'requirement', outcome: 'cantTell',
+      decision: { answer: 'não conforme' }, evidenceRefs: ['ev-shared'],
+    },
+    {
+      occurrenceId: 'occ-review', classification: 'requirement', outcome: 'cantTell',
+      decision: null, evidenceRefs: ['ev-shared'],
+    },
+  ];
+  assert.deepEqual(projectOccurrenceEvidencePreviews({ evidence, occurrences }).map(entry => ({
+    evidenceId: entry.artifact.evidenceId, tone: entry.tone,
+  })), [
+    { evidenceId: 'ev-shared', tone: 'failed' },
+    { evidenceId: 'ev-shared', tone: 'review' },
+  ]);
+});
+
+test('mixed decisions derive red and amber treatments per occurrence inside one consolidated issue', async () => {
+  const { model, summary } = await fixture({
+    mutateDraft(draft) {
+      const originalEvidence = draft.evidence.find(evidence => evidence.evidenceId === 'ev-control');
+      draft.evidence.push({
+        ...structuredClone(originalEvidence),
+        evidenceId: 'ev-control-2', nodeId: 'n-2', backendNodeId: 42,
+        selector: { css: '#cancelar', framePath: [] },
+        snippet: '<button id="cancelar" aria-label="Cancelar">Voltar</button>',
+        hash: 'sha256-element-sample-2',
+        metadata: {
+          width: 128, height: 88,
+          highlightBox: { x: 12, y: 16, width: 64, height: 36, coordinateSpace: 'capture-css-px' },
+        },
+      });
+      draft.ruleResults.find(rule => rule.ruleId === 'focus-order').targets.push('n-2');
+      const occurrence = draft.occurrences.find(value => value.occurrenceId === 'occ-focus-review');
+      draft.occurrences.push({
+        ...structuredClone(occurrence), occurrenceId: 'occ-focus-review-2', nodeId: 'n-2',
+        target: { ...structuredClone(occurrence.target), nodeId: 'n-2' },
+        evidenceRefs: ['ev-full', 'ev-control-2'], evidenceIds: ['ev-full', 'ev-control-2'],
+      });
+      const review = draft.manualReview.find(value => value.occurrenceId === 'occ-focus-review');
+      draft.manualReview.push({ ...structuredClone(review), occurrenceId: 'occ-focus-review-2' });
+      const decision = createReviewDecision({
+        auditId: draft.auditId, itemId: occurrence.itemId, occurrenceId: occurrence.occurrenceId,
+        answer: 'não conforme', evaluator: 'Avaliadora de teste',
+        decidedAt: '2026-08-29T12:00:00.000Z', mode: occurrence.mode,
+        note: 'Falha confirmada somente na primeira ocorrência.',
+      });
+      return structuredClone(applyReviewDecisions(draft, [decision]));
+    },
+  });
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const issue = view.issues.failed.find(value => value.ruleId === 'focus-order');
+  assert.equal(issue.occurrences.length, 2);
+  assert.deepEqual(issue.occurrences.map(value => value.decision?.answer ?? null), ['não conforme', null]);
+
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const card = root.querySelectorAll('[data-report-issue][data-result="failed"]')
+    .find(value => value.querySelector('[data-report-issue-heading]').textContent.includes('Ordem de foco'));
+  const preview = card.querySelector('[data-report-evidence-preview]');
+  assert.equal(preview.querySelectorAll('svg[data-evidence-treatment="failed"]').length, 1);
+  assert.equal(preview.querySelectorAll('svg[data-evidence-treatment="review"]').length, 1);
+  assert.equal(preview.querySelectorAll('[data-evidence-kind="element"]').length, 2);
+
+  const html = renderHtmlReport(model, { reportView: view });
+  const exportedCard = [...html.matchAll(/<article class="occurrence-card"[^>]*data-result="failed"[^]*?<\/article>/gu)]
+    .map(match => match[0]).find(value => value.includes('Ordem de foco')) ?? '';
+  assert.equal((exportedCard.match(/data-evidence-treatment="failed"/gu) ?? []).length, 1);
+  assert.equal((exportedCard.match(/data-evidence-treatment="review"/gu) ?? []).length, 1);
+  assert.equal((exportedCard.match(/data-evidence-kind="element"/gu) ?? []).length, 2);
 });
 
 test('result report reveals live highlight only after worker approval and emits occurrence correlation only', async () => {

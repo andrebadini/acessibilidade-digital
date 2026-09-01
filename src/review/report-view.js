@@ -1,7 +1,9 @@
 import { createAuditModel } from '../core/report/audit-model.js';
+import { decodePngDataUrl } from '../core/evidence/png.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS, qualifiedConsumerReference } from '../core/legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../core/normative/nbr17225.js';
 import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
+import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from '../core/report/evidence-treatment.js';
 import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
@@ -46,6 +48,8 @@ const SECTION_NAV_LABELS = Object.freeze([
   'Matriz ABNT', 'Metodologia e evidências',
 ]);
 const MAX_GRAPH_NODES = 200_000;
+const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
+const EVIDENCE_FRAME_BY_ARTIFACT = new WeakMap();
 const FALLBACK_CORRECTIONS = Object.freeze({
   failed: 'Revise o elemento e aplique a orientação técnica antes de executar uma nova auditoria.',
   alerts: 'Revise o alerta no contexto da página e, se a barreira for confirmada, aplique a orientação técnica antes de repetir a auditoria.',
@@ -427,6 +431,77 @@ function sectionNavigation(document) {
 
 function isSafePngDataUrl(value) { return typeof value === 'string' && /^data:image\/png;base64,[A-Za-z0-9+/]+=*$/u.test(value); }
 
+function finitePositive(value) { return Number.isFinite(value) && value > 0 ? value : null; }
+
+function clamp(value, minimum, maximum) { return Math.min(maximum, Math.max(minimum, value)); }
+
+function evidenceFrame(artifact) {
+  const cached = EVIDENCE_FRAME_BY_ARTIFACT.get(artifact);
+  if (cached) return cached;
+  let width = finitePositive(artifact.metadata?.width);
+  let height = finitePositive(artifact.metadata?.height);
+  if (width === null || height === null) {
+    try {
+      const metadata = decodePngDataUrl(artifact.dataUrl);
+      width ??= metadata.width;
+      height ??= metadata.height;
+    } catch { return null; }
+  }
+  const candidate = artifact.metadata?.highlightBox;
+  const box = !candidate || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(candidate[key]))
+    ? { x: 0, y: 0, width, height }
+    : (() => {
+      const x = clamp(candidate.x, 0, width);
+      const y = clamp(candidate.y, 0, height);
+      const right = clamp(candidate.x + Math.max(0, candidate.width), x, width);
+      const bottom = clamp(candidate.y + Math.max(0, candidate.height), y, height);
+      return { x, y, width: right - x, height: bottom - y };
+    })();
+  const frame = Object.freeze({ width, height, box: Object.freeze(box) });
+  EVIDENCE_FRAME_BY_ARTIFACT.set(artifact, frame);
+  return frame;
+}
+
+function appendEvidenceMedia(document, figure, artifact, tone) {
+  const label = `${evidenceKindLabel(artifact.kind)} local da evidência ${artifact.evidenceId}`;
+  const treatment = artifact.kind === 'element' && tone ? EVIDENCE_TREATMENTS_V1[tone] : null;
+  const frame = treatment ? evidenceFrame(artifact) : null;
+  if (!treatment || !frame) {
+    const image = document.createElement('img');
+    image.setAttribute('src', artifact.dataUrl);
+    image.setAttribute('alt', label);
+    image.setAttribute('class', 'evidence-media');
+    figure.append(image);
+    return `${label}.`;
+  }
+  const svg = document.createElementNS(SVG_NAMESPACE, 'svg');
+  svg.setAttribute('class', 'evidence-media evidence-media--marked');
+  svg.setAttribute('data-evidence-treatment', treatment.tone);
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', `${label} ${treatment.aria}`);
+  svg.setAttribute('viewBox', `0 0 ${frame.width} ${frame.height}`);
+  svg.setAttribute('width', frame.width);
+  svg.setAttribute('height', frame.height);
+  svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+  svg.setAttribute('focusable', 'false');
+  const image = document.createElementNS(SVG_NAMESPACE, 'image');
+  image.setAttribute('href', artifact.dataUrl);
+  image.setAttribute('width', frame.width);
+  image.setAttribute('height', frame.height);
+  image.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+  const box = document.createElementNS(SVG_NAMESPACE, 'rect');
+  box.setAttribute('class', `evidence-highlight evidence-highlight--${treatment.tone}`);
+  box.setAttribute('data-evidence-highlight', treatment.tone);
+  box.setAttribute('x', frame.box.x);
+  box.setAttribute('y', frame.box.y);
+  box.setAttribute('width', frame.box.width);
+  box.setAttribute('height', frame.box.height);
+  box.setAttribute('aria-hidden', 'true');
+  svg.append(image, box);
+  figure.append(svg);
+  return `${treatment.legend} ${label}.`;
+}
+
 function plainBlock(document, name, title) {
   const block = document.createElement('section');
   block.setAttribute('class', 'issue-plain-block');
@@ -475,25 +550,22 @@ function appendTechnicalDetails(document, article, issue, evidence) {
   article.append(details);
 }
 
-function appendEvidencePreview(document, article, evidence, evidenceAnchorById, highlightOptions = null) {
+function appendEvidencePreview(document, article, evidence, evidenceAnchorById, issue, highlightOptions = null) {
   const preview = document.createElement('section');
   preview.setAttribute('data-report-evidence-preview', '');
   preview.append(element(document, 'h4', 'Capturas registradas'));
-  const selected = [
-    evidence.find(item => item.kind === 'element' && isSafePngDataUrl(item.dataUrl)),
-    evidence.find(item => item.kind === 'full-page' && isSafePngDataUrl(item.dataUrl)),
-  ].filter(Boolean);
+  const selected = projectOccurrenceEvidencePreviews({
+    evidence: evidence.filter(item => isSafePngDataUrl(item.dataUrl)),
+    occurrences: issue.occurrences,
+  });
   if (selected.length === 0) {
     preview.append(element(document, 'p', 'Nenhuma captura PNG local está disponível para esta verificação.'));
   } else {
-    for (const item of selected) {
+    for (const { artifact: item, tone } of selected) {
       const figure = document.createElement('figure');
       figure.setAttribute('data-evidence-kind', item.kind);
-      const image = document.createElement('img');
-      image.setAttribute('src', item.dataUrl);
-      image.setAttribute('alt', `${evidenceKindLabel(item.kind)} local da evidência ${item.evidenceId}`);
-      image.setAttribute('class', 'evidence-media');
-      figure.append(image, element(document, 'figcaption', `${evidenceKindLabel(item.kind)} — evidência ${item.evidenceId}.`));
+      const caption = appendEvidenceMedia(document, figure, item, tone);
+      figure.append(element(document, 'figcaption', caption));
       preview.append(figure);
     }
   }
@@ -586,7 +658,7 @@ function issueArticle(document, issue, group, evidenceById, evidenceAnchorById, 
     article.append(legal);
   }
   const evidence = correlatedEvidence(issue, evidenceById);
-  appendEvidencePreview(document, article, evidence, evidenceAnchorById,
+  appendEvidencePreview(document, article, evidence, evidenceAnchorById, issue,
     highlightOptions && ['failed', 'humanReview'].includes(group)
       ? {
         ...highlightOptions, occurrenceIds: issue.occurrences.map(value => value.occurrenceId),

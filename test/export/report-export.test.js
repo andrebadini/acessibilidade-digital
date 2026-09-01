@@ -313,7 +313,8 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
     markerPosition = next;
   }
   const technicalStart = failedCard.indexOf('data-report-technical');
-  assert.equal((failedCard.slice(0, technicalStart).match(/<img\b/gu) ?? []).length, 2);
+  assert.equal((failedCard.slice(0, technicalStart).match(/<img\b/gu) ?? []).length, 1);
+  assert.equal((failedCard.slice(0, technicalStart).match(/data-evidence-treatment="failed"/gu) ?? []).length, 1);
   assert.equal((failedCard.slice(technicalStart).match(/<img\b/gu) ?? []).length, 0);
   assert.match(failedCard, /O destaque ao vivo não está disponível neste relatório/u);
   assert.match(failedCard, /href="#report-evidence-1"/u);
