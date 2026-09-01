@@ -510,10 +510,12 @@ function receiveBootstrap(value) {
     return;
   }
   if (value?.state === 'initial') {
+    const duplicateIdleBootstrap = hasReceivedBootstrap && state.screen === 'initial';
     hasReceivedBootstrap = true;
     highlightStateSynchronizer.invalidate();
     resultBundle = null;
-    transition({ type: 'BOOTSTRAP_INITIAL' });
+    if (duplicateIdleBootstrap) render();
+    else transition({ type: 'BOOTSTRAP_INITIAL' });
     synchronizePersonaOnBootstrap();
     return;
   }

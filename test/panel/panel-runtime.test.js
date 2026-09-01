@@ -218,6 +218,18 @@ test('waits for the first valid bootstrap before exposing authorized panel actio
   assert.ok(document.root.querySelector('[data-screen="reconnecting"]'));
   assert.match(document.root.textContent, /Página alterada|Reconectando o painel/iu);
   assert.equal(document.root.querySelectorAll('button').length, 0);
+
+  const reconnectAfterBootstrap = timers.at(-1);
+  assert.equal(reconnectAfterBootstrap.delay, 250);
+  reconnectAfterBootstrap.callback();
+  const reconnectedPort = ports.at(-1);
+  reconnectedPort.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null,
+  });
+  assert.ok(document.root.querySelector('[data-screen="initial"]'));
+  assert.ok(document.root.querySelector('form[id="audit-form"]'));
+  assert.ok(document.root.querySelector('button[data-action="start-url-audit"]'));
 });
 
 test('shows terminal static unavailability after all pre-bootstrap Port attempts time out', async t => {
@@ -436,6 +448,93 @@ test('does not start residual URL navigation when the form closes before PREPARE
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(ports[0].posted.filter(packet => packet?.envelope?.type === 'PANEL_START_URL_AUDIT').length, 0);
+});
+
+test('a duplicate idle bootstrap during URL PREPARE preserves the submitted form and starts once', async t => {
+  const originalDocument = globalThis.document;
+  const originalChrome = globalThis.chrome;
+  const originalLocation = globalThis.location;
+  t.after(() => {
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
+    if (originalChrome === undefined) delete globalThis.chrome; else globalThis.chrome = originalChrome;
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation;
+  });
+
+  const document = {
+    activeElement: null,
+    createElement(tagName) { return new RuntimeElement(tagName, document); },
+    querySelector(selector) { return selector === '#panel-root' ? document.root : null; },
+  };
+  document.root = new RuntimeElement('main', document);
+  const ports = [];
+  const chrome = {
+    runtime: {
+      id: 'abcdefghijklmnopabcdefghijklmnop',
+      connect({ name }) {
+        const port = {
+          name, posted: [], onMessage: runtimeEvent(), onDisconnect: runtimeEvent(),
+          postMessage(message) { this.posted.push(structuredClone(message)); },
+          disconnect() {},
+        };
+        ports.push(port);
+        return port;
+      },
+    },
+  };
+  globalThis.document = document;
+  globalThis.chrome = chrome;
+  globalThis.location = {
+    href: `chrome-extension://${chrome.runtime.id}/src/panel/index.html?launch=${'A'.repeat(43)}`,
+  };
+
+  await import(`../../src/panel/panel.js?url-idle-bootstrap-race=${Date.now()}`);
+  const port = ports[0];
+  const idleBootstrap = {
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null,
+  };
+  port.onMessage.emit(idleBootstrap);
+  const personaPrepare = port.posted.find(packet =>
+    packet?.envelope?.type === 'PREPARE_PANEL_PERSONA_CAPABILITY');
+  if (personaPrepare) port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: personaPrepare.requestId,
+    response: { ok: false, code: 'PERSONA_NOT_FOUND' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  await document.root.querySelector('button[data-intent="OPEN_URL_FORM"]').dispatch('click');
+  const elementOnly = document.root.querySelector('input[data-capture-mode="element-only"]');
+  elementOnly.checked = true;
+  await elementOnly.dispatch('change');
+  const url = document.root.querySelector('input[id="audit-url"]');
+  url.value = 'https://example.test/idle-bootstrap-race?transient=private';
+  await document.root.querySelector('form[id="audit-form"]').dispatch('submit');
+  const prepare = port.posted.find(packet =>
+    packet?.envelope?.type === 'PREPARE_PANEL_NAVIGATION_CAPABILITY');
+  assert.ok(prepare);
+
+  port.onMessage.emit(idleBootstrap);
+  assert.ok(document.root.querySelector('form[id="audit-form"]'),
+    'an equivalent idle bootstrap must not discard the local submitted view');
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: prepare.requestId,
+    response: { ok: true, requestId: prepare.envelope.requestId, capabilityId: 'C'.repeat(22) },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  const starts = port.posted.filter(packet => packet?.envelope?.type === 'PANEL_START_URL_AUDIT');
+  assert.equal(starts.length, 1);
+  assert.deepEqual(starts[0].envelope, {
+    type: 'PANEL_START_URL_AUDIT', capabilityId: 'C'.repeat(22),
+    url: 'https://example.test/idle-bootstrap-race?transient=private',
+    captureMode: 'element-only', includeQuery: false, deleteAfterCompleteExport: false,
+  });
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: starts[0].requestId,
+    response: { ok: true, auditId: 'audit-idle-bootstrap-race', state: 'running' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(document.root.querySelector('[data-screen="running"]'));
 });
 
 test('a late URL start response cannot replace an authoritative privacy pause', async t => {
