@@ -1,4 +1,7 @@
-import { createPanelSessionPortClient } from './panel-session-port.js';
+import {
+  createPanelSessionPortClient,
+  PANEL_RECONNECT_EXHAUSTED_MESSAGE,
+} from './panel-session-port.js';
 import { parseAuditDeletedEvent } from '../core/audit-deleted-event.js';
 import {
   createHighlightStateSynchronizer,
@@ -7,7 +10,13 @@ import {
 } from './highlight-action.js';
 import { PANEL_UNPREPARED_MESSAGE } from './panel-status.js';
 import { isAuthorizedPanelLaunchUrl } from './panel-launch-url.js';
-import { buildPanelView, renderPanelReconnectView, renderPanelView } from './panel-view.js';
+import {
+  buildPanelView,
+  renderPanelPreparingView,
+  renderPanelReconnectView,
+  renderPanelStaticUnavailableView,
+  renderPanelView,
+} from './panel-view.js';
 import { createInitialPanelState, reducePanelState } from './panel-state.js';
 import { createPanelPersonaSession } from './persona-session.js';
 
@@ -30,6 +39,7 @@ let state = createInitialPanelState();
 let resultBundle = null;
 let requestSequence = 0;
 let personaBootstrapSynchronized = false;
+let hasReceivedBootstrap = false;
 const personaSession = createPanelPersonaSession({
   requestIntent: requestPanelIntent,
   createRequestId: nextRequestId,
@@ -493,12 +503,14 @@ async function retryAudit() {
 function receiveBootstrap(value) {
   const privacyEvent = projectPanelBootstrapEvent(value);
   if (privacyEvent) {
+    hasReceivedBootstrap = true;
     highlightStateSynchronizer.invalidate();
     resultBundle = null;
     transition(privacyEvent);
     return;
   }
   if (value?.state === 'initial') {
+    hasReceivedBootstrap = true;
     highlightStateSynchronizer.invalidate();
     resultBundle = null;
     transition({ type: 'BOOTSTRAP_INITIAL' });
@@ -506,6 +518,7 @@ function receiveBootstrap(value) {
     return;
   }
   if (value?.state === 'running' && AUDIT_ID.test(value.auditId ?? '') && value.result === null) {
+    hasReceivedBootstrap = true;
     highlightStateSynchronizer.invalidate();
     resultBundle = null;
     transition({ type: 'AUDIT_RUNNING', auditId: value.auditId });
@@ -513,6 +526,7 @@ function receiveBootstrap(value) {
     return;
   }
   if (['result', 'view-only'].includes(value?.state) && AUDIT_ID.test(value.auditId ?? '') && value.result) {
+    hasReceivedBootstrap = true;
     resultBundle = value.result;
     transition({ type: 'AUDIT_RESULT', auditId: value.auditId, result: value.result });
     synchronizePersonaOnBootstrap();
@@ -546,6 +560,12 @@ function applyHighlightState(value) {
 }
 
 function receivePortStatus(value) {
+  if (value === PANEL_RECONNECT_EXHAUSTED_MESSAGE) {
+    personaBootstrapSynchronized = false;
+    if (!hasReceivedBootstrap && root) root.replaceChildren(renderPanelStaticUnavailableView({ document }));
+    else announce(value);
+    return;
+  }
   if (value === PANEL_UNPREPARED_MESSAGE) {
     personaBootstrapSynchronized = false;
     if (state.screen === 'result' && resultBundle?.auditId === state.auditId) {
@@ -553,7 +573,9 @@ function receivePortStatus(value) {
       announce('A conexão local foi interrompida. O resultado permanece disponível; tente a ação novamente.');
       return;
     }
-    transition({ type: 'PORT_INTERRUPTED' });
+    if (root) root.replaceChildren(hasReceivedBootstrap
+      ? renderPanelReconnectView({ document })
+      : renderPanelPreparingView({ document }));
     return;
   }
   if (typeof value === 'string') announce(value);
@@ -697,13 +719,16 @@ function copyPrivacyCategories(value) {
 
 let sessionPortClient = null;
 const authorizedLaunch = isAuthorizedPanelLaunchUrl(readLocationHref(), chromeApi?.runtime?.id);
-if (!authorizedLaunch) {
-  if (root) root.replaceChildren(renderPanelReconnectView({ document }));
-} else {
-  render();
+const canConnectPanelSession = typeof chromeApi?.runtime?.connect === 'function';
+if (root) {
+  root.replaceChildren(!authorizedLaunch
+    ? renderPanelReconnectView({ document })
+    : canConnectPanelSession
+      ? renderPanelPreparingView({ document })
+      : renderPanelStaticUnavailableView({ document }));
 }
 
-if (authorizedLaunch && typeof chromeApi?.runtime?.connect === 'function') {
+if (authorizedLaunch && canConnectPanelSession) {
   sessionPortClient = createPanelSessionPortClient({
     chromeApi,
     onBootstrapResult: receiveBootstrap,

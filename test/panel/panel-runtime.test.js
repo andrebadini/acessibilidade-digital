@@ -109,6 +109,190 @@ function runtimeEvent() {
   };
 }
 
+test('waits for the first valid bootstrap before exposing authorized panel actions', async t => {
+  const originalDocument = globalThis.document;
+  const originalChrome = globalThis.chrome;
+  const originalLocation = globalThis.location;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  t.after(() => {
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
+    if (originalChrome === undefined) delete globalThis.chrome; else globalThis.chrome = originalChrome;
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  });
+
+  const document = {
+    activeElement: null,
+    createElement(tagName) { return new RuntimeElement(tagName, document); },
+    querySelector(selector) { return selector === '#panel-root' ? document.root : null; },
+  };
+  document.root = new RuntimeElement('main', document);
+  const timers = [];
+  globalThis.setTimeout = (callback, delay) => {
+    const timer = { callback, delay, cleared: false };
+    timers.push(timer);
+    return timer;
+  };
+  globalThis.clearTimeout = timer => { timer.cleared = true; };
+  const ports = [];
+  const chrome = {
+    runtime: {
+      id: 'abcdefghijklmnopabcdefghijklmnop',
+      connect({ name }) {
+        const port = {
+          name, posted: [], onMessage: runtimeEvent(), onDisconnect: runtimeEvent(),
+          postMessage(message) { this.posted.push(structuredClone(message)); },
+          disconnects: 0,
+          disconnect() { this.disconnects += 1; },
+        };
+        ports.push(port);
+        return port;
+      },
+    },
+  };
+  globalThis.document = document;
+  globalThis.chrome = chrome;
+  globalThis.location = {
+    href: `chrome-extension://${chrome.runtime.id}/src/panel/index.html?launch=${'A'.repeat(43)}`,
+  };
+
+  await import(`../../src/panel/panel.js?initial-bootstrap-gate=${Date.now()}`);
+  assert.deepEqual(ports.map(port => port.name), ['audita-panel-v1']);
+  const firstPort = ports[0];
+  assert.ok(document.root.querySelector('[data-screen="connecting"]'));
+  assert.match(document.root.textContent, /Preparando o painel/iu);
+  assert.doesNotMatch(document.root.textContent, /Página alterada|resultado local está sendo recuperado/iu);
+  assert.equal(document.root.querySelectorAll('button').length, 0);
+  assert.equal(document.root.querySelector('form[id="audit-form"]'), null);
+  assert.equal(document.root.querySelector('button[data-action="start-url-audit"]'), null);
+
+  const firstWatchdog = timers[0];
+  assert.equal(firstWatchdog.delay, 5000);
+  firstWatchdog.callback();
+  assert.equal(firstPort.disconnects, 1);
+  assert.ok(document.root.querySelector('[data-screen="connecting"]'));
+  assert.equal(document.root.querySelectorAll('button').length, 0);
+  const reconnect = timers.at(-1);
+  assert.equal(reconnect.delay, 250);
+  reconnect.callback();
+  assert.equal(ports.length, 2);
+  const port = ports[1];
+  assert.equal(timers.at(-1).delay, 5000);
+
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null,
+  });
+  assert.ok(document.root.querySelector('[data-screen="initial"]'));
+  const personaPrepare = port.posted.find(packet =>
+    packet?.envelope?.type === 'PREPARE_PANEL_PERSONA_CAPABILITY');
+  if (personaPrepare) port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: personaPrepare.requestId,
+    response: { ok: false, code: 'PERSONA_NOT_FOUND' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  await document.root.querySelector('button[data-intent="OPEN_URL_FORM"]').dispatch('click');
+  const form = document.root.querySelector('form[id="audit-form"]');
+  const url = document.root.querySelector('input[id="audit-url"]');
+  const submit = document.root.querySelector('button[data-action="start-url-audit"]');
+  assert.ok(form);
+  assert.ok(url);
+  assert.ok(submit);
+  assert.equal(submit.hasAttribute('disabled'), false);
+  url.value = 'https://example.test/bootstrap-ready';
+  await form.dispatch('submit');
+
+  const prepare = port.posted.find(packet =>
+    packet?.envelope?.type === 'PREPARE_PANEL_NAVIGATION_CAPABILITY');
+  assert.ok(prepare);
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: prepare.requestId,
+    response: { ok: false, code: 'TARGET_UNAVAILABLE' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  port.onDisconnect.emit();
+  assert.ok(document.root.querySelector('[data-screen="reconnecting"]'));
+  assert.match(document.root.textContent, /Página alterada|Reconectando o painel/iu);
+  assert.equal(document.root.querySelectorAll('button').length, 0);
+});
+
+test('shows terminal static unavailability after all pre-bootstrap Port attempts time out', async t => {
+  const originalDocument = globalThis.document;
+  const originalChrome = globalThis.chrome;
+  const originalLocation = globalThis.location;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  t.after(() => {
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
+    if (originalChrome === undefined) delete globalThis.chrome; else globalThis.chrome = originalChrome;
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  });
+
+  const document = {
+    activeElement: null,
+    createElement(tagName) { return new RuntimeElement(tagName, document); },
+    querySelector(selector) { return selector === '#panel-root' ? document.root : null; },
+  };
+  document.root = new RuntimeElement('main', document);
+  const timers = [];
+  globalThis.setTimeout = (callback, delay) => {
+    const timer = { callback, delay, cleared: false };
+    timers.push(timer);
+    return timer;
+  };
+  globalThis.clearTimeout = timer => { timer.cleared = true; };
+  const ports = [];
+  const chrome = {
+    runtime: {
+      id: 'abcdefghijklmnopabcdefghijklmnop',
+      connect({ name }) {
+        const port = {
+          name, posted: [], onMessage: runtimeEvent(), onDisconnect: runtimeEvent(), disconnects: 0,
+          postMessage(message) { this.posted.push(structuredClone(message)); },
+          disconnect() { this.disconnects += 1; },
+        };
+        ports.push(port);
+        return port;
+      },
+    },
+  };
+  globalThis.document = document;
+  globalThis.chrome = chrome;
+  globalThis.location = {
+    href: `chrome-extension://${chrome.runtime.id}/src/panel/index.html?launch=${'A'.repeat(43)}`,
+  };
+
+  await import(`../../src/panel/panel.js?bootstrap-exhausted=${Date.now()}`);
+
+  const reconnectDelays = [250, 500, 1000, 2000, 5000];
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const watchdog = timers.at(-1);
+    assert.equal(watchdog.delay, 5000);
+    watchdog.callback();
+    assert.equal(ports.at(-1).disconnects, 1);
+    assert.equal(document.root.querySelectorAll('button').length, 0);
+    if (attempt === reconnectDelays.length) continue;
+    assert.ok(document.root.querySelector('[data-screen="connecting"]'));
+    const reconnect = timers.at(-1);
+    assert.equal(reconnect.delay, reconnectDelays[attempt]);
+    reconnect.callback();
+  }
+
+  assert.equal(ports.length, 6);
+  assert.equal(timers.length, 11);
+  assert.ok(document.root.querySelector('[data-screen="unavailable"]'));
+  assert.match(document.root.textContent, /Painel indisponível/iu);
+  assert.doesNotMatch(document.root.textContent, /Preparando|Reconectando/iu);
+  assert.equal(document.root.querySelector('form[id="audit-form"]'), null);
+  assert.equal(document.root.querySelector('button[data-action="start-url-audit"]'), null);
+});
+
 test('builds the exact attached start envelope from each user-selected capture mode', () => {
   for (const mode of ['full-evidence', 'element-only', 'no-pixels']) {
     assert.deepEqual(createPanelAttachedAuditIntent({

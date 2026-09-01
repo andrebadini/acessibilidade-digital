@@ -138,6 +138,32 @@ export function renderPanelReconnectView({ document } = {}) {
   return root;
 }
 
+export function renderPanelPreparingView({ document } = {}) {
+  if (typeof document?.createElement !== 'function') throw new TypeError('PANEL_PREPARING_INPUT_INVALID');
+  const root = section(document, 'panel-screen panel-connecting');
+  root.dataset.screen = 'connecting';
+  root.append(
+    paragraph(document, 'Conexão local', 'status-label status-running'),
+    heading(document, 2, 'Preparando o painel'),
+    paragraph(document, 'A conexão local está sendo preparada com segurança.', 'supporting-copy'),
+    liveRegion(document, 'Preparando o painel.'),
+  );
+  return root;
+}
+
+export function renderPanelStaticUnavailableView({ document } = {}) {
+  if (typeof document?.createElement !== 'function') throw new TypeError('PANEL_STATIC_UNAVAILABLE_INPUT_INVALID');
+  const root = section(document, 'panel-screen panel-unavailable');
+  root.dataset.screen = 'unavailable';
+  root.append(
+    paragraph(document, 'Painel indisponível', 'status-label status-unavailable'),
+    heading(document, 2, 'Não foi possível preparar o painel'),
+    paragraph(document, 'Abra novamente pelo botão da extensão.', 'supporting-copy'),
+    liveRegion(document, 'Painel indisponível. Abra novamente pelo botão da extensão.'),
+  );
+  return root;
+}
+
 function renderInitial(document, view, emit, onEvent) {
   const root = section(document, 'panel-screen panel-initial');
   root.dataset.screen = 'initial';

@@ -8,7 +8,9 @@ const OCCURRENCE_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const CONSENT_ID = /^[A-Za-z0-9_-]{21}[AQgw]$/u;
 const RECONNECT_DELAYS = Object.freeze([250, 500, 1000, 2000, 5000]);
+const BOOTSTRAP_TIMEOUT_MS = 5000;
 const REQUEST_TIMEOUT_MS = 5000;
+export const PANEL_RECONNECT_EXHAUSTED_MESSAGE = 'Painel indisponível. Abra novamente pelo botão da extensão.';
 const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
 const PRIVACY_MODES = new Set(['full-evidence', 'element-only']);
 const PRIVACY_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private-marker']);
@@ -227,6 +229,10 @@ export function createPanelSessionPortClient(raw) {
   function detach(port, disconnect) {
     if (!port) return;
     const binding = bindings.get(port);
+    if (binding?.bootstrapTimer !== null && binding?.bootstrapTimer !== undefined) {
+      try { input.clearTimer(binding.bootstrapTimer); } catch { /* fixed cleanup */ }
+      binding.bootstrapTimer = null;
+    }
     try { if (binding) port.onMessage?.removeListener?.(binding.onMessage); } catch { /* fixed cleanup */ }
     try { if (binding) port.onDisconnect?.removeListener?.(binding.onDisconnect); } catch { /* fixed cleanup */ }
     bindings.delete(port);
@@ -237,27 +243,34 @@ export function createPanelSessionPortClient(raw) {
   }
 
   function scheduleReconnect() {
-    if (!started || reconnectTimer !== null || reconnectIndex >= RECONNECT_DELAYS.length) return;
+    if (!started) return false;
+    if (reconnectTimer !== null) return true;
+    if (reconnectIndex >= RECONNECT_DELAYS.length) return false;
     const delay = RECONNECT_DELAYS[reconnectIndex];
     reconnectIndex += 1;
     reconnectTimer = input.setTimer(() => {
       reconnectTimer = null;
       if (started) connect();
     }, delay);
+    return true;
   }
 
   function unavailable(port, disconnect = false) {
     clearCorrelation();
     settleAll(localUnavailable());
     detach(port, disconnect);
-    notifyStatus(PANEL_UNPREPARED_MESSAGE);
-    scheduleReconnect();
+    notifyStatus(scheduleReconnect() ? PANEL_UNPREPARED_MESSAGE : PANEL_RECONNECT_EXHAUSTED_MESSAGE);
   }
 
   function receive(port, rawPacket) {
     if (!started || currentPort !== port) return;
     const bootstrap = parseBootstrap(rawPacket);
     if (bootstrap) {
+      const binding = bindings.get(port);
+      if (binding?.bootstrapTimer !== null && binding?.bootstrapTimer !== undefined) {
+        try { input.clearTimer(binding.bootstrapTimer); } catch { /* fixed cleanup */ }
+        binding.bootstrapTimer = null;
+      }
       const priorCorrelation = ready && (auditId !== null || sessionId !== null)
         ? `${auditId ?? ''}\u0000${sessionId ?? ''}`
         : null;
@@ -352,10 +365,15 @@ export function createPanelSessionPortClient(raw) {
     currentPort = port;
     const onMessage = message => receive(port, message);
     const onDisconnect = () => { if (currentPort === port) unavailable(port, false); };
-    bindings.set(port, { onMessage, onDisconnect });
+    const binding = { onMessage, onDisconnect, bootstrapTimer: null };
+    bindings.set(port, binding);
     port.onMessage.addListener(onMessage);
     port.onDisconnect.addListener(onDisconnect);
     notifyStatus('Conectando ao painel.');
+    binding.bootstrapTimer = input.setTimer(() => {
+      binding.bootstrapTimer = null;
+      if (started && currentPort === port && !ready) unavailable(port, true);
+    }, BOOTSTRAP_TIMEOUT_MS);
     try { port.postMessage({ protocol: 'audita-panel', version: 1, type: 'bootstrap' }); }
     catch { unavailable(port, true); }
   }

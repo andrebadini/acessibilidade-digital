@@ -791,18 +791,71 @@ test('rejects malformed or replayed intent responses and stops without leaked li
   assert.equal(port.onDisconnect.listeners.size, 0);
 });
 
-test('bounds reconnect attempts so an unprepared default panel remains stable', () => {
+test('clears the five-second bootstrap watchdog on valid bootstrap, disconnect and stop', async t => {
+  await t.test('valid bootstrap', () => {
+    const env = fixture();
+    const client = createClient(env);
+    client.start();
+    const watchdog = env.timers[0];
+
+    assert.equal(watchdog?.delay, 5000);
+    bootstrap(env.ports[0]);
+
+    assert.equal(watchdog.cleared, true);
+  });
+
+  await t.test('disconnect', () => {
+    const env = fixture();
+    const client = createClient(env);
+    client.start();
+    const watchdog = env.timers[0];
+
+    assert.equal(watchdog?.delay, 5000);
+    env.ports[0].onDisconnect.emit();
+
+    assert.equal(watchdog.cleared, true);
+  });
+
+  await t.test('stop', () => {
+    const env = fixture();
+    const client = createClient(env);
+    client.start();
+    const watchdog = env.timers[0];
+
+    assert.equal(watchdog?.delay, 5000);
+    client.stop();
+
+    assert.equal(watchdog.cleared, true);
+  });
+});
+
+test('times out every silent Port and bounds reconnect attempts while intents stay unavailable', async () => {
   const env = fixture();
-  const client = createClient(env);
+  const statuses = [];
+  const client = createClient(env, { onStatus: value => statuses.push(value) });
   client.start();
 
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    env.ports.at(-1).onDisconnect.emit();
-    assert.equal(env.timers.length, attempt + 1);
-    env.timers.at(-1).callback();
+  const reconnectDelays = [250, 500, 1000, 2000, 5000];
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const port = env.ports.at(-1);
+    const watchdog = env.timers.at(-1);
+    assert.equal(watchdog?.delay, 5000, `Port ${attempt + 1} receives its own bootstrap watchdog`);
+
+    watchdog.callback();
+
+    assert.equal(port.disconnects, 1);
+    assert.deepEqual(await client.requestIntent({ type: 'PREPARE_PANEL_CAPABILITY', requestId: `denied-${attempt}` }), {
+      ok: false, code: 'PANEL_SESSION_UNAVAILABLE',
+    });
+    if (attempt === reconnectDelays.length) continue;
+    const reconnect = env.timers.at(-1);
+    assert.equal(reconnect.delay, reconnectDelays[attempt]);
+    reconnect.callback();
   }
-  env.ports.at(-1).onDisconnect.emit();
 
   assert.equal(env.ports.length, 6);
-  assert.equal(env.timers.length, 5);
+  assert.equal(env.timers.length, 11);
+  assert.equal(statuses.filter(value =>
+    value === 'Painel não preparado. Abra novamente pelo botão da extensão.').length, 5);
+  assert.equal(statuses.at(-1), 'Painel indisponível. Abra novamente pelo botão da extensão.');
 });

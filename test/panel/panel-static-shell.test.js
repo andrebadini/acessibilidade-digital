@@ -91,3 +91,33 @@ test('a static or malformed Side Panel stays on a stable reconnecting shell and 
     assert.equal(document.root.querySelectorAll('button').length, 0, href);
   }
 });
+
+test('an authorized Side Panel without runtime.connect shows static unavailability without actions', async t => {
+  const originalDocument = globalThis.document;
+  const originalChrome = globalThis.chrome;
+  const originalLocation = globalThis.location;
+  t.after(() => {
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
+    if (originalChrome === undefined) delete globalThis.chrome; else globalThis.chrome = originalChrome;
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation;
+  });
+
+  const document = {
+    createElement(tagName) { return new FakeElement(tagName); },
+    querySelector(selector) { return selector === '#panel-root' ? document.root : null; },
+  };
+  document.root = new FakeElement('main');
+  const extensionId = 'abcdefghijklmnopabcdefghijklmnop';
+  globalThis.document = document;
+  globalThis.chrome = { runtime: { id: extensionId } };
+  globalThis.location = {
+    href: `chrome-extension://${extensionId}/src/panel/index.html?launch=${'A'.repeat(43)}`,
+  };
+
+  await import(`../../src/panel/panel.js?static-unavailable=${Date.now()}`);
+
+  assert.ok(document.root.querySelector('[data-screen="unavailable"]'));
+  assert.match(document.root.textContent, /Painel indisponível/iu);
+  assert.doesNotMatch(document.root.textContent, /Preparando|Reconectando/iu);
+  assert.equal(document.root.querySelectorAll('button').length, 0);
+});

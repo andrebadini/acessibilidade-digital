@@ -108,12 +108,16 @@ test('panel runtime sends every privileged intent through its admitted Port with
   const originalChrome = globalThis.chrome;
   const originalLocation = globalThis.location;
   const originalSpeech = Object.getOwnPropertyDescriptor(globalThis, 'speechSynthesis');
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
   t.after(() => {
     if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
     if (originalChrome === undefined) delete globalThis.chrome; else globalThis.chrome = originalChrome;
     if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation;
     if (originalSpeech === undefined) delete globalThis.speechSynthesis;
     else Object.defineProperty(globalThis, 'speechSynthesis', originalSpeech);
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
   });
 
   const document = {
@@ -123,6 +127,8 @@ test('panel runtime sends every privileged intent through its admitted Port with
   };
   document.root = new FakeElement('main', document);
   document.root.scrollTop = 37;
+  globalThis.setTimeout = (callback, delay) => ({ callback, delay, cleared: false });
+  globalThis.clearTimeout = timer => { timer.cleared = true; };
 
   let speechReads = 0;
   Object.defineProperty(globalThis, 'speechSynthesis', {
@@ -173,15 +179,18 @@ test('panel runtime sends every privileged intent through its admitted Port with
   assert.equal(chromeTargetReads, 0);
   assert.deepEqual(ports.map(port => port.name), ['audita-panel-v1']);
   assert.deepEqual(ports[0].posted, [{ protocol: 'audita-panel', version: 1, type: 'bootstrap' }]);
-  assert.match(document.root.textContent, /Simular experiência/iu);
-  assert.equal(document.root.querySelectorAll('[data-persona-mode]').length, 3);
-  assert.doesNotMatch(document.root.textContent, /voz|speechSynthesis/iu);
+  assert.ok(document.root.querySelector('[data-screen="connecting"]'));
+  assert.equal(document.root.querySelectorAll('button').length, 0);
+  assert.equal(document.root.querySelectorAll('[data-persona-mode]').length, 0);
 
   ports[0].onMessage.emit({
     protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
     auditId: null, sessionCapabilityId: null, result: null,
   });
   await new Promise(resolve => setImmediate(resolve));
+  assert.match(document.root.textContent, /Simular experiência/iu);
+  assert.equal(document.root.querySelectorAll('[data-persona-mode]').length, 3);
+  assert.doesNotMatch(document.root.textContent, /voz|speechSynthesis/iu);
   const startupPersonaPrepare = ports[0].posted.find(packet =>
     packet?.envelope?.type === 'PREPARE_PANEL_PERSONA_CAPABILITY');
   assert.ok(startupPersonaPrepare, 'a reabertura verifica de modo seguro se existe uma persona ativa');
