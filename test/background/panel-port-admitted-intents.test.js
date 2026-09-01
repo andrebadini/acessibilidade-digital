@@ -30,6 +30,10 @@ function fixture() {
   const launchAuthority = {
     async admitPort(value) { calls.push(['admit', value]); return admission; },
     async reprove(value) { calls.push(['reprove', value]); return value === admission ? admission : { ok: false }; },
+    async retirePort(value) {
+      calls.push(['retire', value]);
+      return Object.freeze({ version: 1, state: 'released' });
+    },
     async revoke(value) { calls.push(['revoke', value]); return { ok: true }; },
   };
   const coordinator = createPanelPortCoordinator({
@@ -116,7 +120,7 @@ test('admits a real-shape document-less Port then routes privileged intents with
 
   port.onDisconnect.emit();
   await tick();
-  assert.deepEqual(calls.find(([name]) => name === 'revoke')[1], admission);
+  assert.deepEqual(calls.find(([name]) => name === 'retire')[1], admission);
 });
 
 test('rejects window claims and malformed or duplicate Port requests without dispatch', async () => {

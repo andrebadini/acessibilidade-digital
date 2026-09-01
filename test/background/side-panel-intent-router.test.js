@@ -1158,7 +1158,11 @@ test('registration exception revokes durable session while registered success re
   });
 
   await t.test('registered success', async () => {
-    const { router, durableSessions, calls } = fixture();
+    const { router, durableSessions, calls } = fixture({
+      panelScopeOverrides: {
+        async registerAndPublishViewOnly() { return { registered: true, delivered: true }; },
+      },
+    });
     assert.deepEqual(await router.dispatch({
       envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-register-success', windowId: 9 }),
       sender: panelSender(),
@@ -1166,6 +1170,28 @@ test('registration exception revokes durable session while registered success re
     assert.deepEqual(durableSessions.get(SESSION), { auditId: 'audit-register-success', state: 'view-only' });
     assert.equal(calls.some(([name]) => name === 'revoke'), false);
   });
+});
+
+test('rehydration revokes its minted session when registration does not reach the live Port', async () => {
+  let registrations = 0;
+  const { router, durableSessions, calls } = fixture({
+    panelScopeOverrides: {
+      async registerAndPublishViewOnly() {
+        registrations += 1;
+        return { registered: true, delivered: false };
+      },
+    },
+  });
+
+  const response = await router.dispatch({
+    envelope: parsed({ type: 'PANEL_REHYDRATE_VIEW', auditId: 'audit-undelivered-view', windowId: 9 }),
+    sender: panelSender(),
+  });
+
+  assert.deepEqual(response, { ok: false, code: 'AUDIT_REHYDRATE_DENIED' });
+  assert.deepEqual(durableSessions.get(SESSION), { auditId: 'audit-undelivered-view', state: 'revoked' });
+  assert.equal(registrations, 1);
+  assert.equal(calls.filter(([name]) => name === 'revoke').length, 1);
 });
 
 test('unconfirmed coordinator rollback remains recovery-required after minted-session revocation succeeds', async () => {

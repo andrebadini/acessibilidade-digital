@@ -48,6 +48,9 @@ const AUTHORIZED_SESSION_KEYS = Object.freeze([
   'version', 'sessionCapabilityId', 'auditId', 'windowId', 'mode', 'targetBinding',
   'consumers', 'intents', 'state', 'issuedAt', 'expiresAt',
 ]);
+const TERMINAL_DELIVERY_KEYS = Object.freeze(['version', 'state']);
+const LAUNCH_RETIREMENT_KEYS = Object.freeze(['version', 'state']);
+const terminalDeliveries = new WeakSet();
 
 function freeze(value) {
   if (value && typeof value === 'object') {
@@ -72,6 +75,25 @@ function exact(value, keys, allowNullPrototype = false) {
     }
     return copy;
   } catch { return null; }
+}
+
+function terminalDelivery(state) {
+  const receipt = Object.freeze({ version: 1, state });
+  terminalDeliveries.add(receipt);
+  return receipt;
+}
+
+function launchRetirementState(value) {
+  const receipt = exact(value, LAUNCH_RETIREMENT_KEYS);
+  return receipt?.version === 1 && ['released', 'revoked', 'denied'].includes(receipt.state)
+    ? receipt.state
+    : 'denied';
+}
+
+export function isTerminalDeliveryV1(value) {
+  if (!value || typeof value !== 'object' || !terminalDeliveries.has(value)) return false;
+  const receipt = exact(value, TERMINAL_DELIVERY_KEYS);
+  return Boolean(receipt?.version === 1 && ['delivered', 'deferred', 'denied'].includes(receipt.state));
 }
 
 function own(value, key) {
@@ -298,7 +320,7 @@ export function createPanelPortCoordinator(raw) {
     typeof input.revokeViewOnly !== 'function' || typeof input.epochNow !== 'function' ||
     typeof input.setTimer !== 'function' || typeof input.clearTimer !== 'function' ||
     typeof input.launchAuthority?.admitPort !== 'function' || typeof input.launchAuthority.reprove !== 'function' ||
-    typeof input.launchAuthority.revoke !== 'function' || typeof input.dispatchPanelIntent !== 'function' ||
+    typeof input.launchAuthority.retirePort !== 'function' || typeof input.dispatchPanelIntent !== 'function' ||
     typeof input.authorizeHighlightSession !== 'function') {
     throw new TypeError('PANEL_PORT_COORDINATOR_INVALID');
   }
@@ -332,10 +354,19 @@ export function createPanelPortCoordinator(raw) {
         return Promise.reject(error === scopeDeniedSentinel ? new Error('PANEL_SCOPE_DENIED') : error);
       }
     };
+    const invokeTerminal = rawArgs => {
+      try {
+        assertScope(scope, windowId);
+        if (own(rawArgs, 'windowId') !== windowId) return Promise.resolve(terminalDelivery('denied'));
+        return Promise.resolve(publishResult(rawArgs, () => assertScope(scope, windowId))).catch(exposeScopeFailure);
+      } catch (error) {
+        return Promise.reject(error === scopeDeniedSentinel ? new Error('PANEL_SCOPE_DENIED') : error);
+      }
+    };
     scope = Object.freeze({
       registerPendingBootstrap: invoke(registerPendingBootstrap),
       publishRegisteredBootstrap: invoke(publishRegisteredBootstrap),
-      publishResult: invoke(publishResult),
+      publishResult: invokeTerminal,
       registerAndPublishViewOnly: invoke(registerAndPublishViewOnly),
       publishPrivacyPaused: invoke(publishPrivacyPaused),
       publishRunningResume: invoke(publishRunningResume),
@@ -530,8 +561,10 @@ export function createPanelPortCoordinator(raw) {
     try { binding.port.onMessage.removeListener(binding.onHello); } catch { /* fixed cleanup */ }
   }
 
-  function disconnect(binding, assertOwned = null) {
-    if (!binding || binding.state === 'disconnected') return false;
+  function disconnect(binding, assertOwned = null, nativeAlreadyDisconnected = false) {
+    if (!binding) return Promise.resolve('denied');
+    if (binding.retirement) return binding.retirement;
+    if (binding.state === 'disconnected') return Promise.resolve(binding.retirementState ?? 'denied');
     reassert(assertOwned);
     binding.state = 'disconnected';
     removeTemporary(binding, assertOwned);
@@ -543,17 +576,41 @@ export function createPanelPortCoordinator(raw) {
     bindings.delete(binding.port);
     reassert(assertOwned);
     if (binding.windowId !== null && liveByWindow.get(binding.windowId) === binding) liveByWindow.delete(binding.windowId);
-    const admission = binding.admission;
+    const admissionClaim = binding.admission;
     binding.admission = null;
     binding.inFlightIntent = null;
     binding.retiringCancel = null;
-    if (admission) {
-      try { void Promise.resolve(input.launchAuthority.revoke(admission)).catch(() => {}); }
-      catch { /* launch cleanup remains fail-closed */ }
+    if (!admissionClaim) {
+      binding.retirementState = 'denied';
+      if (!nativeAlreadyDisconnected) {
+        reassert(assertOwned);
+        try { binding.port.disconnect(); } catch { /* fixed cleanup */ }
+      }
+      binding.retirement = Promise.resolve('denied');
+      return binding.retirement;
     }
-    reassert(assertOwned);
-    try { binding.port.disconnect(); } catch { /* fixed cleanup */ }
-    return true;
+    const retirement = (async () => {
+      let state = 'denied';
+      try {
+        const admission = await admissionClaim;
+        reassert(assertOwned);
+        if (admission?.ok === true) {
+          state = launchRetirementState(await input.launchAuthority.retirePort(admission));
+          reassert(assertOwned);
+        }
+      } catch (error) {
+        if (error === scopeDeniedSentinel) throw error;
+        state = 'denied';
+      }
+      binding.retirementState = state;
+      if (!nativeAlreadyDisconnected) {
+        reassert(assertOwned);
+        try { binding.port.disconnect(); } catch { /* fixed cleanup */ }
+      }
+      return state;
+    })();
+    binding.retirement = retirement;
+    return retirement;
   }
 
   async function reprove(binding, assertOwned = null) {
@@ -723,10 +780,7 @@ export function createPanelPortCoordinator(raw) {
     try {
       const admission = await binding.admission;
       if (admission?.ok !== true) throw new Error('PANEL_CONTEXT_DENIED');
-      if (!connected(binding)) {
-        try { await input.launchAuthority.revoke(admission); } catch { /* disconnected admission stays denied */ }
-        return;
-      }
+      if (!connected(binding)) { await binding.retirement; return; }
       binding.admission = admission;
       binding.issuerDocumentId = admission.documentId;
       await withWindowLock(admission.windowId, async () => {
@@ -757,7 +811,7 @@ export function createPanelPortCoordinator(raw) {
         }
         if (!await recoverTerminal(binding, bootstrap, session)) throw new Error('PANEL_TERMINAL_DENIED');
       });
-    } catch { disconnect(binding); }
+    } catch { await disconnect(binding); }
   }
 
   async function processIntent(binding, request) {
@@ -831,7 +885,7 @@ export function createPanelPortCoordinator(raw) {
         protocol: 'audita-panel', version: 1, type: 'intent-result',
         requestId: request.requestId, response,
       }));
-    } catch { disconnect(binding); }
+    } catch { await disconnect(binding); }
     finally {
       if (binding.inFlightIntent === inFlight) binding.inFlightIntent = null;
       if (binding.retiringCancel === inFlight && binding.state !== 'retiring-cancel') binding.retiringCancel = null;
@@ -840,22 +894,22 @@ export function createPanelPortCoordinator(raw) {
 
   function receiveBound(binding, value) {
     if (!connected(binding)) {
-      disconnect(binding);
+      void disconnect(binding);
       return;
     }
     const request = intentPacket(value);
     if (!request || binding.seenRequestIds.has(request.requestId)) {
-      disconnect(binding);
+      void disconnect(binding);
       return;
     }
     binding.seenRequestIds.add(request.requestId);
     if (binding.seenRequestIds.size > 1024) {
-      disconnect(binding);
+      void disconnect(binding);
       return;
     }
     if (binding.state === 'retiring-cancel') return;
     if (!['bound-idle', 'bound-session', 'bound-privacy-paused'].includes(binding.state)) {
-      disconnect(binding);
+      void disconnect(binding);
       return;
     }
     const queued = Object.freeze({
@@ -885,28 +939,14 @@ export function createPanelPortCoordinator(raw) {
       issuerDocumentId: null, admission: null, deadline: null, onHello: null, onBoundMessage: null, onDisconnect: null,
       intentTail: Promise.resolve(), seenRequestIds: new Set(), intentGeneration: 0,
       inFlightIntent: null, retiringCancel: null,
+      retirement: null, retirementState: null,
     };
     binding.onBoundMessage = value => receiveBound(binding, value);
-    binding.onDisconnect = () => {
-      if (binding.state === 'disconnected') return;
-      binding.state = 'disconnected';
-      removeTemporary(binding);
-      try { port.onMessage.removeListener(binding.onBoundMessage); } catch { /* fixed cleanup */ }
-      bindings.delete(port);
-      if (binding.windowId !== null && liveByWindow.get(binding.windowId) === binding) liveByWindow.delete(binding.windowId);
-      const admission = binding.admission;
-      binding.admission = null;
-      binding.inFlightIntent = null;
-      binding.retiringCancel = null;
-      if (admission) {
-        try { void Promise.resolve(input.launchAuthority.revoke(admission)).catch(() => {}); }
-        catch { /* launch cleanup remains fail-closed */ }
-      }
-    };
+    binding.onDisconnect = () => { void disconnect(binding, null, true); };
     binding.onHello = value => {
-      if (binding.state !== 'awaiting-hello') { disconnect(binding); return; }
+      if (binding.state !== 'awaiting-hello') { void disconnect(binding); return; }
       removeTemporary(binding);
-      if (!hello(value)) { disconnect(binding); return; }
+      if (!hello(value)) { void disconnect(binding); return; }
       binding.state = 'proving-hello';
       binding.admission = Promise.resolve(input.launchAuthority.admitPort({ sender })).catch(() => null);
       port.onMessage.addListener(binding.onBoundMessage);
@@ -915,7 +955,7 @@ export function createPanelPortCoordinator(raw) {
     bindings.set(port, binding);
     port.onMessage.addListener(binding.onHello);
     port.onDisconnect.addListener(binding.onDisconnect);
-    binding.deadline = input.setTimer(() => disconnect(binding), 5000);
+    binding.deadline = input.setTimer(() => { void disconnect(binding); }, 5000);
     return true;
   }
 
@@ -1006,7 +1046,7 @@ export function createPanelPortCoordinator(raw) {
       } catch (error) {
         if (error === scopeDeniedSentinel) throw error;
         if (connected(binding)) {
-          try { disconnect(binding, assertOwned); } catch { /* fixed fail-closed disconnect */ }
+          try { await disconnect(binding, assertOwned); } catch { /* fixed fail-closed disconnect */ }
         }
         return false;
       }
@@ -1050,7 +1090,7 @@ export function createPanelPortCoordinator(raw) {
       } catch (error) {
         if (error === scopeDeniedSentinel) throw error;
         if (connected(binding)) {
-          try { disconnect(binding, assertOwned); } catch { /* fixed fail-closed disconnect */ }
+          try { await disconnect(binding, assertOwned); } catch { /* fixed fail-closed disconnect */ }
         }
         return false;
       }
@@ -1059,29 +1099,46 @@ export function createPanelPortCoordinator(raw) {
 
   function publishResult(rawArgs, assertOwned) {
     const args = exact(rawArgs, ['auditId', 'sessionCapabilityId', 'windowId', 'state', 'resultBundle']);
-    if (!args) return Promise.resolve(false);
+    if (!args) return Promise.resolve(terminalDelivery('denied'));
     return (async () => {
+      let binding = null;
       try {
         assertOwned();
-        if (!['result', 'view-only'].includes(args.state)) return false;
+        if (!['result', 'view-only'].includes(args.state)) return terminalDelivery('denied');
         const resultBundle = copyPanelResultBundleV1(args.resultBundle);
-        if (resultBundle.auditId !== args.auditId) return false;
+        if (resultBundle.auditId !== args.auditId) return terminalDelivery('denied');
         const session = await readSession(args.sessionCapabilityId, args.auditId, assertOwned);
         assertOwned();
         const bootstrap = await readBootstrap(args.windowId, assertOwned);
         assertOwned();
-        const binding = liveByWindow.get(args.windowId);
+        binding = liveByWindow.get(args.windowId);
         if (session.state !== args.state || session.windowId !== args.windowId || !bootstrap ||
-          bootstrap.auditId !== args.auditId || bootstrap.sessionCapabilityId !== args.sessionCapabilityId ||
-          !connected(binding) || binding.auditId !== args.auditId || binding.sessionCapabilityId !== args.sessionCapabilityId) return false;
+          bootstrap.auditId !== args.auditId || bootstrap.sessionCapabilityId !== args.sessionCapabilityId) {
+          return terminalDelivery('denied');
+        }
+        if (!connected(binding)) return terminalDelivery('deferred');
+        if (binding.auditId !== args.auditId || binding.sessionCapabilityId !== args.sessionCapabilityId) {
+          return terminalDelivery('deferred');
+        }
         const context = await reprove(binding, assertOwned);
         assertOwned();
-        if (!context) return false;
+        if (!context) {
+          const retirement = await disconnect(binding, assertOwned);
+          return terminalDelivery(['released', 'revoked'].includes(retirement) ? 'deferred' : 'denied');
+        }
         send(binding, packet(args.state, args.auditId, args.sessionCapabilityId, resultBundle), assertOwned);
-        return true;
+        return terminalDelivery('delivered');
       } catch (error) {
         if (error === scopeDeniedSentinel) throw error;
-        return false;
+        if (binding) {
+          let retirement = 'denied';
+          try { retirement = await disconnect(binding, assertOwned); }
+          catch (retireError) {
+            if (retireError === scopeDeniedSentinel) throw retireError;
+          }
+          return terminalDelivery(['released', 'revoked'].includes(retirement) ? 'deferred' : 'denied');
+        }
+        return terminalDelivery('denied');
       }
     })();
   }
@@ -1193,7 +1250,7 @@ export function createPanelPortCoordinator(raw) {
           binding.state = 'retiring-cancel';
           binding.retiringCancel = inFlight;
         } else if (connected(binding) && binding.auditId === args.auditId &&
-          binding.sessionCapabilityId === args.sessionCapabilityId) disconnect(binding, assertOwned);
+          binding.sessionCapabilityId === args.sessionCapabilityId) await disconnect(binding, assertOwned);
         const bootstrap = await readBootstrap(args.windowId, assertOwned);
         assertOwned();
         if (bootstrap === null) {
@@ -1220,7 +1277,7 @@ export function createPanelPortCoordinator(raw) {
         if (error === scopeDeniedSentinel) throw error;
         const binding = liveByWindow.get(args.windowId);
         if (connected(binding) && binding.state === 'retiring-cancel') {
-          try { disconnect(binding, assertOwned); } catch { /* fixed fail-closed disconnect */ }
+          try { await disconnect(binding, assertOwned); } catch { /* fixed fail-closed disconnect */ }
         }
         return false;
       }
@@ -1236,12 +1293,12 @@ export function createPanelPortCoordinator(raw) {
     for (const binding of candidates) {
       try {
         if (!await reprove(binding)) {
-          disconnect(binding);
+          await disconnect(binding);
           continue;
         }
         const actionAt = input.epochNow();
         if (!safeEpoch(actionAt)) {
-          disconnect(binding);
+          await disconnect(binding);
           continue;
         }
         const authorization = await input.authorizeHighlightSession({
@@ -1251,12 +1308,12 @@ export function createPanelPortCoordinator(raw) {
           sender: binding.admission.syntheticSender,
         });
         if (!authorizedHighlightPublication(authorization, binding, actionAt)) {
-          disconnect(binding);
+          await disconnect(binding);
           continue;
         }
         send(binding, event);
         delivered += 1;
-      } catch { disconnect(binding); }
+      } catch { await disconnect(binding); }
     }
     return Object.freeze({ delivered });
   }

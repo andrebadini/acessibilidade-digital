@@ -577,7 +577,7 @@ export function createSidePanelIntentRouter(raw) {
           }));
       } catch { registration = null; }
       const registered = exact(registration, ['registered', 'delivered']);
-      if (!registered || registered.registered !== true || typeof registered.delivered !== 'boolean') {
+      if (!registered || registered.registered !== true || registered.delivered !== true) {
         const denied = exact(registration, ['registered', 'delivered', 'code']);
         recoveryRequired = denied?.registered === false && denied.delivered === false &&
           denied.code === 'AUDIT_RECOVERY_REQUIRED';

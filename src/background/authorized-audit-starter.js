@@ -12,6 +12,7 @@ import { verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
 import { copyPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
 import { parseStorageGetEnvelope } from './storage-get-envelope.js';
 import { createPixelPrivacyGateV1 } from './pixel-privacy-gate.js';
+import { isTerminalDeliveryV1 } from './panel-port.js';
 
 export const ACTIVE_AUDIT_JOB_KEY = 'audita:active-audit-job:v1';
 const START_JOURNAL_KEY = 'audita:start-journal:v1';
@@ -75,6 +76,12 @@ function exact(value, keys) {
     }
     return copy;
   } catch { return null; }
+}
+
+function acceptedTerminalDelivery(value) {
+  if (!isTerminalDeliveryV1(value)) return false;
+  const receipt = exact(value, ['version', 'state']);
+  return Boolean(receipt?.version === 1 && ['delivered', 'deferred'].includes(receipt.state));
 }
 
 function safeEpoch(now) {
@@ -861,7 +868,7 @@ export function createAuthorizedAuditStarter(input) {
             auditId: current.auditId, sessionCapabilityId: current.sessionCapabilityId,
             windowId: current.windowId, state: 'result', resultBundle: committed.bundle,
           });
-          if (typeof published !== 'boolean') throw new Error('PANEL_PUBLICATION_DENIED');
+          if (!acceptedTerminalDelivery(published)) throw new Error('PANEL_PUBLICATION_DENIED');
           if (!await finishPixelConsent(liveRecord)) throw new Error('PIXEL_STATE_UNAVAILABLE');
           if (!await pixelAttemptLifecycle.cleanup({
             auditId: current.auditId, consentId: null, expected: 'post-finish',
@@ -1262,10 +1269,16 @@ export function createAuthorizedAuditStarter(input) {
             }
             const running = freeze({ ...active, state: 'running', updatedAt: safeEpoch(epochNow) });
             await writeConfirmed(sessionArea, ACTIVE_AUDIT_JOB_KEY, running, activeRecord, 'ACTIVE_AUDIT_JOB_DENIED');
-            if (await scope.publishRunningResume({
-              auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId,
-              windowId: active.windowId,
-            }) !== true) return denied();
+            let runningPublished = false;
+            try {
+              runningPublished = await scope.publishRunningResume({
+                auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId,
+                windowId: active.windowId,
+              }) === true;
+            } catch { /* compensate the durable resume below */ }
+            if (!runningPublished) {
+              return revokeAndLiquidate('PIXEL_RESUME_INTERRUPTED', 'AUDIT_RESUME_DENIED');
+            }
             const privacyGate = createPixelPrivacyGateV1({
               pixelState, consentId: args.consentId,
               authorityExpiresAt: suspension.expiresAt, async afterPixels() {},
@@ -1414,6 +1427,22 @@ export function createAuthorizedAuditStarter(input) {
     const correlated = await readCorrelatedPixelSuspension(active);
     const recoverable = correlated.suspension;
     if (recoverable) {
+      if (recoverable.state === 'paused') {
+        const checkpoint = await readPersistedCheckpoint(active);
+        if (active.state !== 'running' || !['running', 'privacy-paused'].includes(correlated.sessionState) ||
+          correlated.targetState !== 'claimed' || !checkpoint) throw new Error('AUDIT_RECOVERY_REQUIRED');
+        if (correlated.sessionState === 'running') await transitionConfirmed(active, 'privacy-paused');
+        const advanced = await readCorrelatedPixelSuspension(active);
+        const advancedCheckpoint = await readPersistedCheckpoint(active);
+        if (advanced.sessionState !== 'privacy-paused' || advanced.targetState !== 'claimed' ||
+          !advanced.suspension || !same(advanced.suspension, recoverable) ||
+          !advancedCheckpoint || !same(advancedCheckpoint, checkpoint)) throw new Error('AUDIT_RECOVERY_REQUIRED');
+        const durableActive = await readActiveAuditJobForWorker({ sessionArea });
+        if (!durableActive || !same(durableActive, active)) throw new Error('AUDIT_RECOVERY_REQUIRED');
+        const paused = freeze({ ...active, state: 'privacy-paused', updatedAt: safeEpoch(epochNow) });
+        await writeConfirmed(sessionArea, ACTIVE_AUDIT_JOB_KEY, paused, activeRecord, 'ACTIVE_AUDIT_JOB_DENIED');
+        return recoverPrivacyPaused(paused);
+      }
       if (!['resuming', 'revoked'].includes(recoverable.state)) throw new Error('AUDIT_RECOVERY_REQUIRED');
       let suspension = recoverable;
       const reason = recoverable.state === 'revoked' && PIXEL_LIQUIDATION_REASONS.has(recoverable.revokeReason)
@@ -1524,7 +1553,7 @@ export function createAuthorizedAuditStarter(input) {
     });
     const published = lockedScope ? await publish(lockedScope)
       : await panelCoordinator.withWindowLock(active.windowId, publish);
-    if (typeof published !== 'boolean') throw new Error('AUDIT_RECOVERY_REQUIRED');
+    if (!acceptedTerminalDelivery(published)) throw new Error('AUDIT_RECOVERY_REQUIRED');
     if (suspension) {
       try {
         if (await pixelState.finish({ auditId: active.auditId, consentId: suspension.consentId }) !== true) {

@@ -183,6 +183,10 @@ function fixture(overrides = {}) {
           context.documentId === admission.documentId && [-1, undefined].includes(context.tabId) &&
           [-1, undefined].includes(context.windowId) ? admission : { ok: false, code: 'PANEL_LAUNCH_DENIED' };
       },
+      async retirePort(admission) {
+        launchRevoked.push(admission);
+        return Object.freeze({ version: 1, state: 'released' });
+      },
       async revoke(admission) { launchRevoked.push(admission); return { ok: true, revoked: true }; },
     },
     async authorizeHighlightSession({ sessionCapabilityId, auditId, claimedWindowId, sender }) {
@@ -244,6 +248,25 @@ function foreignRunningActive() {
 }
 
 function tick() { return new Promise(resolve => setImmediate(resolve)); }
+
+function launchAuthorityWithRetirement(retirePort) {
+  let owner = null;
+  return Object.freeze({
+    async admitPort({ sender }) {
+      owner = Object.freeze({
+        ok: true, token: LAUNCH_TOKEN, tabId: 17, windowId: 9, generation: 1,
+        contextId: 'panel-context', documentId: 'panel-document', url: sender.url,
+        syntheticSender: Object.freeze({ ...sender, documentId: 'panel-document' }),
+      });
+      return owner;
+    },
+    async reprove(admission) {
+      return admission === owner ? admission : Object.freeze({ ok: false, code: 'PANEL_LAUNCH_DENIED' });
+    },
+    retirePort,
+    async revoke() { return Object.freeze({ ok: true, revoked: true }); },
+  });
+}
 
 test('exports only lock entry and attaches fresh owner-bound mutation scopes', async () => {
   const { coordinator } = fixture();
@@ -817,6 +840,192 @@ test('publishResult cannot send after its owner callback settles during final re
   assert.equal(connected.messages.some(message => message.state === 'result'), false);
 });
 
+test('publishResult defers an exact durable result when no live Port exists', async () => {
+  const resultBundle = await bundle();
+  const env = fixture();
+  env.sessions.set(SESSION, session('result'));
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'consumed',
+  };
+
+  const published = await env.coordinator.withWindowLock(9, scope => scope.publishResult({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+    state: 'result', resultBundle,
+  }));
+
+  assert.deepEqual(published, { version: 1, state: 'deferred' });
+  assert.equal(Object.isFrozen(published), true);
+  assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].state, 'consumed');
+});
+
+test('publishResult disconnects a live Port whose result post fails and defers its durable result', async () => {
+  const resultBundle = await bundle();
+  const env = fixture();
+  env.setActive(runningActive());
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  const connected = port({ failState: 'result' });
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  env.sessions.set(SESSION, session('result'));
+
+  const published = await env.coordinator.withWindowLock(9, scope => scope.publishResult({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+    state: 'result', resultBundle,
+  }));
+
+  assert.deepEqual(published, { version: 1, state: 'deferred' });
+  assert.equal(Object.isFrozen(published), true);
+  assert.equal(connected.disconnects, 1);
+  assert.equal(connected.messages.some(message => message.state === 'result'), false);
+});
+
+test('terminal post failure makes the binding inert but awaits retirement before native disconnect', async () => {
+  const resultBundle = await bundle();
+  let resolveRetirement;
+  let retirementStarted = false;
+  const retirement = new Promise(resolve => { resolveRetirement = resolve; });
+  const env = fixture({
+    launchAuthority: launchAuthorityWithRetirement(async () => {
+      retirementStarted = true;
+      return retirement;
+    }),
+  });
+  env.setActive(runningActive());
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  const connected = port({ failState: 'result' });
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  env.sessions.set(SESSION, session('result'));
+
+  const publication = env.coordinator.withWindowLock(9, scope => scope.publishResult({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+    state: 'result', resultBundle,
+  }));
+  await tick();
+  assert.equal(retirementStarted, true);
+  assert.equal(connected.disconnects, 0);
+  resolveRetirement(Object.freeze({ version: 1, state: 'released' }));
+
+  assert.deepEqual(await publication, { version: 1, state: 'deferred' });
+  assert.equal(connected.disconnects, 1);
+});
+
+test('a denied Port retirement denies terminal delivery so finalizing ACTIVE cannot settle', async () => {
+  const resultBundle = await bundle();
+  const env = fixture({
+    launchAuthority: launchAuthorityWithRetirement(async () =>
+      Object.freeze({ version: 1, state: 'denied' })),
+  });
+  env.setActive(runningActive());
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  const connected = port({ failState: 'result' });
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  env.sessions.set(SESSION, session('result'));
+
+  const publication = await env.coordinator.withWindowLock(9, scope => scope.publishResult({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+    state: 'result', resultBundle,
+  }));
+
+  assert.deepEqual(publication, { version: 1, state: 'denied' });
+  assert.equal(connected.disconnects, 1);
+});
+
+test('publishResult preserves a foreign live Port while retaining the target result for recovery', async () => {
+  const resultBundle = await bundle();
+  const foreignSession = 'F'.repeat(22);
+  const env = fixture();
+  env.sessions.set(foreignSession, session('running', foreignSession, 'foreign-port-audit'));
+  env.setActive(Object.freeze({
+    ...runningActive(), auditId: 'foreign-port-audit', capabilityId: 'G'.repeat(22),
+    sessionCapabilityId: foreignSession,
+  }));
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'foreign-port-audit', sessionCapabilityId: foreignSession,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.equal(connected.messages.at(-1).auditId, 'foreign-port-audit');
+
+  env.sessions.set(SESSION, session('result'));
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'consumed',
+  };
+
+  const published = await env.coordinator.withWindowLock(9, scope => scope.publishResult({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+    state: 'result', resultBundle,
+  }));
+
+  assert.deepEqual(published, { version: 1, state: 'deferred' });
+  assert.equal(Object.isFrozen(published), true);
+  assert.equal(connected.disconnects, 0);
+  assert.equal(connected.messages.some(message => message.auditId === 'audit-port'), false);
+});
+
+test('publishResult returns delivered only after the correlated live Port accepts the result packet', async () => {
+  const resultBundle = await bundle();
+  const env = fixture();
+  env.setActive(runningActive());
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  env.sessions.set(SESSION, session('result'));
+
+  const published = await env.coordinator.withWindowLock(9, scope => scope.publishResult({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+    state: 'result', resultBundle,
+  }));
+
+  assert.deepEqual(published, { version: 1, state: 'delivered' });
+  assert.equal(Object.isFrozen(published), true);
+  assert.equal(connected.disconnects, 0);
+  assert.equal(connected.messages.at(-1).state, 'result');
+  assert.equal(connected.messages.at(-1).result.auditId, 'audit-port');
+});
+
+test('publishResult denies malformed or uncorrelated terminal publication without touching a foreign Port', async () => {
+  const resultBundle = await bundle();
+  const foreign = port();
+  const env = fixture();
+  env.coordinator.attachPanelPort(foreign);
+  foreign.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+
+  const denied = await env.coordinator.withWindowLock(9, scope => scope.publishResult({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+    state: 'result', resultBundle,
+  }));
+
+  assert.deepEqual(denied, { version: 1, state: 'denied' });
+  assert.equal(Object.isFrozen(denied), true);
+  assert.equal(foreign.disconnects, 0);
+  assert.equal(foreign.messages.some(message => message.state === 'result'), false);
+});
+
 test('view-only registration cannot send or bind after its owner callback settles during reproof', async () => {
   const resultBundle = await bundle();
   const env = fixture();
@@ -870,6 +1079,7 @@ test('panel-first receives initial, rejects a second hello and preserves the inc
   await tick();
   assert.equal(competitor.disconnects, 1);
   first.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
   assert.equal(first.disconnects, 1);
 });
 
@@ -988,7 +1198,7 @@ test('a bound port keeps its worker-owned launch identity when the active tab la
   assert.equal(connected.messages.some(message => message.state === 'view-only'), true);
 });
 
-test('a duplicate packet arriving while first-hello proof is pending disconnects immediately', async () => {
+test('a duplicate hello makes the pending binding inert before retiring its eventual owner', async () => {
   let resolveContexts;
   const contexts = new Promise(resolve => { resolveContexts = resolve; });
   const env = fixture({
@@ -1005,12 +1215,14 @@ test('a duplicate packet arriving while first-hello proof is pending disconnects
   env.coordinator.attachPanelPort(connected);
   connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
   connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
-  assert.equal(connected.disconnects, 1);
+  assert.equal(connected.disconnects, 0);
   resolveContexts([{
     contextId: 'panel-context', documentId: 'panel-document', documentUrl: PANEL_URL,
     contextType: 'SIDE_PANEL', tabId: -1, windowId: -1,
   }]);
   await tick();
+  await tick();
+  assert.equal(connected.disconnects, 1);
 });
 
 test('start-first consumes a pending bootstrap only after proving ACTIVE running', async () => {

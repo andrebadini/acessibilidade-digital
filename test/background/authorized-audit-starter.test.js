@@ -9,8 +9,13 @@ import {
   retentionPreferenceStorageKey,
 } from '../../src/background/authorized-audit-starter.js';
 import { AUDIT_EXECUTION_INTERNAL } from '../../src/background/chrome-adapter.js';
+import { createPanelLaunchAuthority } from '../../src/background/panel-launch-authority.js';
 import { runAttachedAuditExecution, runAudit } from '../../src/background/run-audit.js';
-import { createPanelPortCoordinator, panelBootstrapStorageKey } from '../../src/background/panel-port.js';
+import {
+  PANEL_PORT_NAME,
+  createPanelPortCoordinator,
+  panelBootstrapStorageKey,
+} from '../../src/background/panel-port.js';
 import { createTargetOperationQueue } from '../../src/background/target-operation-queue.js';
 import {
   createTargetCapabilityAuthority,
@@ -23,6 +28,7 @@ import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { createPanelResultBundleV1 } from '../../src/panel/panel-result-bundle.js';
+import { createPanelSessionPortClient } from '../../src/panel/panel-session-port.js';
 import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
 import { createPixelCaptureStateV1 } from '../../src/background/pixel-capture-consent.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
@@ -192,7 +198,10 @@ function panelCoordinator(order = [], overrides = {}) {
   const scope = Object.freeze({
     async registerPendingBootstrap(value) { order.push('bootstrap-register'); assert.equal(value.windowId >= 0, true); return true; },
     async publishRegisteredBootstrap(value) { order.push('bootstrap'); assert.equal(value.windowId >= 0, true); return true; },
-    async publishResult(value) { order.push(`publish:${value.state}`); return true; },
+    async publishResult(value) {
+      order.push(`publish:${value.state}`);
+      return issueDeferredTerminalDelivery(value);
+    },
     async publishPrivacyPaused(value) { order.push(`publish:${value.state ?? 'privacy-paused'}`); return true; },
     async publishRunningResume() { order.push('publish:running-resume'); return true; },
     async registerAndPublishViewOnly() { return { registered: true, delivered: false }; },
@@ -210,7 +219,145 @@ function panelCoordinator(order = [], overrides = {}) {
   });
 }
 
-function durablePanelCoordinator({ area, pixelState, epochNow = () => EPOCH + 3 }) {
+async function issueDeferredTerminalDelivery(value) {
+  const deliveryArea = sessionArea();
+  deliveryArea.values[panelBootstrapStorageKey(value.windowId)] = {
+    version: 1, kind: 'audit-session', auditId: value.auditId,
+    sessionCapabilityId: value.sessionCapabilityId, windowId: value.windowId,
+    createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'consumed',
+  };
+  const coordinator = createPanelPortCoordinator({
+    chromeApi: { runtime: { id: 'abcdefghijklmnopabcdefghijklmnop' } },
+    sessionArea: deliveryArea,
+    async readActiveJob() { return null; },
+    async readAuditSession() {
+      return {
+        version: 1, sessionCapabilityId: value.sessionCapabilityId, auditId: value.auditId,
+        windowId: value.windowId, mode: 'attached',
+        targetBinding: {
+          kind: 'attached', tabId: 17, documentId: 'document-a', urlSessionDigest: DIGEST,
+        },
+        state: value.state, issuedAt: EPOCH, expiresAt: EPOCH + 10_000,
+      };
+    },
+    async readPixelSuspension() { return null; },
+    async loadPanelResultBundle() { return null; },
+    async rehydrateViewOnly() { return null; },
+    async revokeViewOnly() { return false; },
+    epochNow: () => EPOCH + 1,
+    setTimer() { return Object.freeze({}); },
+    clearTimer() {},
+    launchAuthority: {
+      async admitPort() { return Object.freeze({ ok: false, code: 'PANEL_LAUNCH_DENIED' }); },
+      async reprove() { return Object.freeze({ ok: false, code: 'PANEL_LAUNCH_DENIED' }); },
+      async retirePort() { return Object.freeze({ version: 1, state: 'denied' }); },
+      async revoke() { return Object.freeze({ ok: true, revoked: true }); },
+    },
+    async dispatchPanelIntent() { return Object.freeze({ ok: false, code: 'FEATURE_UNAVAILABLE' }); },
+    async authorizeHighlightSession() { return Object.freeze({ ok: false }); },
+  });
+  return coordinator.withWindowLock(value.windowId, scope => scope.publishResult(value));
+}
+
+function panelEvent() {
+  const listeners = new Set();
+  return Object.freeze({
+    addListener(listener) { listeners.add(listener); },
+    removeListener(listener) { listeners.delete(listener); },
+    emit(...args) { for (const listener of [...listeners]) listener(...args); },
+  });
+}
+
+function attachedPanelPort({ failState = null } = {}) {
+  const onMessage = panelEvent();
+  const onDisconnect = panelEvent();
+  return {
+    name: PANEL_PORT_NAME,
+    sender: {
+      id: 'abcdefghijklmnopabcdefghijklmnop', url: PANEL_URL,
+      origin: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop',
+    },
+    onMessage, onDisconnect, messages: [], disconnects: 0,
+    postMessage(message) {
+      if (message.state === failState) throw new Error('PRIVATE_RESULT_POST_FAILURE');
+      this.messages.push(structuredClone(message));
+    },
+    disconnect() { this.disconnects += 1; onDisconnect.emit(); },
+  };
+}
+
+function admittedPanelLaunchAuthority(retirementState = 'released') {
+  return Object.freeze({
+    async admitPort({ sender }) {
+      return Object.freeze({
+        ok: true, token: 'L'.repeat(43), tabId: 17, windowId: 9, generation: 1,
+        contextId: 'panel-context', documentId: 'panel-doc', url: sender.url,
+        syntheticSender: Object.freeze({ ...sender, documentId: 'panel-doc' }),
+      });
+    },
+    async reprove(admission) { return admission; },
+    async retirePort() { return Object.freeze({ version: 1, state: retirementState }); },
+    async revoke() { return Object.freeze({ ok: true, revoked: true }); },
+  });
+}
+
+function linkedPanelPortPair({ sender, coordinator, failResult }) {
+  const clientMessage = panelEvent();
+  const clientDisconnect = panelEvent();
+  const serverMessage = panelEvent();
+  const serverDisconnect = panelEvent();
+  let connected = true;
+  const close = () => {
+    if (!connected) return;
+    connected = false;
+    serverDisconnect.emit();
+    clientDisconnect.emit();
+  };
+  const client = {
+    onMessage: clientMessage,
+    onDisconnect: clientDisconnect,
+    postMessage(value) {
+      if (!connected) throw new Error('PORT_DISCONNECTED');
+      serverMessage.emit(structuredClone(value));
+    },
+    disconnect: close,
+  };
+  const server = {
+    name: PANEL_PORT_NAME,
+    sender,
+    onMessage: serverMessage,
+    onDisconnect: serverDisconnect,
+    postMessage(value) {
+      if (!connected) throw new Error('PORT_DISCONNECTED');
+      if (failResult && value?.state === 'result') {
+        failResult();
+        throw new Error('PRIVATE_RESULT_POST_FAILURE');
+      }
+      clientMessage.emit(structuredClone(value));
+    },
+    disconnect: close,
+  };
+  assert.equal(coordinator.attachPanelPort(server), true);
+  return client;
+}
+
+async function waitUntil(predicate, attempts = 25) {
+  for (let index = 0; index < attempts; index += 1) {
+    if (predicate()) return;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.fail('condition was not reached');
+}
+
+function durablePanelCoordinator({
+  area,
+  pixelState,
+  epochNow = () => EPOCH + 3,
+  loadPanelResultBundle = async () => null,
+  rehydrateViewOnly = async () => null,
+  revokeViewOnly = async () => false,
+  launchAuthority = null,
+}) {
   const coordinator = createPanelPortCoordinator({
     chromeApi: { runtime: { id: 'abcdefghijklmnopabcdefghijklmnop' } },
     sessionArea: area,
@@ -219,15 +366,16 @@ function durablePanelCoordinator({ area, pixelState, epochNow = () => EPOCH + 3 
       sessionArea: area, sessionCapabilityId, auditId,
     }),
     readPixelSuspension: auditId => pixelState.readSuspension(auditId),
-    async loadPanelResultBundle() { return null; },
-    async rehydrateViewOnly() { return null; },
-    async revokeViewOnly() { return false; },
+    loadPanelResultBundle,
+    rehydrateViewOnly,
+    revokeViewOnly,
     epochNow,
     setTimer() { return Object.freeze({}); },
     clearTimer() {},
-    launchAuthority: {
+    launchAuthority: launchAuthority ?? {
       async admitPort() { return Object.freeze({ ok: false, code: 'PANEL_LAUNCH_DENIED' }); },
       async reprove() { return Object.freeze({ ok: false, code: 'PANEL_LAUNCH_DENIED' }); },
+      async retirePort() { return Object.freeze({ version: 1, state: 'denied' }); },
       async revoke() { return Object.freeze({ ok: true, revoked: true }); },
     },
     async dispatchPanelIntent() { return Object.freeze({ ok: false, code: 'FEATURE_UNAVAILABLE' }); },
@@ -606,7 +754,7 @@ test('resumes one paused pixel audit exactly once in the same target and finishe
   dependencies.panelCoordinator = panelCoordinator(order, {
     async publishPrivacyPaused() { order.push('publish:privacy-paused'); return true; },
     async publishRunningResume() { order.push('publish:running-resume'); return true; },
-    async publishResult() { order.push('publish:result'); return true; },
+    async publishResult(value) { order.push('publish:result'); return issueDeferredTerminalDelivery(value); },
   });
   const starter = createAuthorizedAuditStarter(dependencies);
   const started = await starter.beginAuthorizedAudit({
@@ -709,6 +857,121 @@ async function pausedAuditHarness(auditId) {
   };
 }
 
+test('a failed running-resume publication compensates the claimed attempt before returning denial', async t => {
+  for (const [name, publishRunningResume] of [
+    ['false', async () => false],
+    ['rejection', async () => { throw new Error('PRIVATE_RUNNING_POST_FAILURE'); }],
+  ]) await t.test(name, async () => {
+    const auditId = `audit-resume-publication-${name}`;
+    const harness = await pausedAuditHarness(auditId);
+    const paused = await harness.suspension();
+    let attemptState = 'absent';
+    const cleanups = [];
+    harness.dependencies.pixelAttemptLifecycle = Object.freeze({
+      async prepareResume() {
+        attemptState = 'prepared';
+        return Object.freeze(Object.create(null));
+      },
+      async commitTerminal() { throw new Error('TERMINAL_COMMIT_MUST_NOT_RUN'); },
+      async classify() { return Object.freeze({ state: attemptState, handle: null }); },
+      async cleanup(value) {
+        cleanups.push(structuredClone(value));
+        if (attemptState !== 'prepared' || value.expected !== 'prepared') return false;
+        attemptState = 'absent';
+        return true;
+      },
+    });
+    harness.dependencies.panelCoordinator = panelCoordinator([], { publishRunningResume });
+
+    const resumed = await createAuthorizedAuditStarter(harness.dependencies).resumePrivacyPausedAudit({
+      auditId, sessionCapabilityId: harness.started.sessionCapabilityId,
+      windowId: 9, consentId: paused.consentId, mode: 'full-evidence',
+    });
+
+    assert.deepEqual(resumed, {
+      response: { ok: false, code: 'AUDIT_RESUME_DENIED' }, sessionCapabilityId: null, completion: null,
+    });
+    assert.equal(harness.executions, 1);
+    assert.equal(await readActiveAuditJobForWorker({ sessionArea: harness.area }), null);
+    assert.equal(await harness.suspension(), null);
+    assert.equal((await readAuditSessionForWorker({
+      sessionArea: harness.area,
+      sessionCapabilityId: harness.started.sessionCapabilityId,
+      auditId,
+    })).state, 'revoked');
+    assert.deepEqual(cleanups, [{
+      auditId, consentId: paused.consentId, expected: 'prepared',
+    }]);
+    assert.equal(attemptState, 'absent');
+    assert.doesNotMatch(JSON.stringify(resumed), /PRIVATE|POST|FAILURE/u);
+  });
+});
+
+test('startup advances an exact paused crash cut from running session and ACTIVE without replaying collection', async () => {
+  const auditId = 'audit-pause-crash-cut';
+  const harness = await pausedAuditHarness(auditId);
+  const pausedActive = await readActiveAuditJobForWorker({ sessionArea: harness.area });
+  const pausedSuspension = await harness.suspension();
+  const pausedCheckpoint = structuredClone(harness.area.values[executionCheckpointStorageKey(auditId)]);
+  assert.deepEqual(await harness.prepared.authority.transitionAuditSession({
+    sessionCapabilityId: harness.started.sessionCapabilityId,
+    auditId,
+    nextState: 'running',
+  }), {
+    ok: true, sessionCapabilityId: harness.started.sessionCapabilityId, auditId, state: 'running',
+  });
+  harness.area.values[ACTIVE_AUDIT_JOB_KEY] = {
+    ...structuredClone(pausedActive), state: 'running',
+  };
+  harness.pausedPackets.length = 0;
+
+  const recovery = await createAuthorizedAuditStarter(harness.dependencies).recoverAuthorizedAuditLifecycle();
+
+  assert.deepEqual(recovery, { ok: true, state: 'privacy-paused', auditId, revision: null });
+  assert.equal(harness.executions, 1);
+  assert.equal((await readActiveAuditJobForWorker({ sessionArea: harness.area })).state, 'privacy-paused');
+  assert.equal((await readAuditSessionForWorker({
+    sessionArea: harness.area,
+    sessionCapabilityId: harness.started.sessionCapabilityId,
+    auditId,
+  })).state, 'privacy-paused');
+  assert.deepEqual(await harness.suspension(), pausedSuspension);
+  assert.deepEqual(harness.area.values[executionCheckpointStorageKey(auditId)], pausedCheckpoint);
+  assert.deepEqual(harness.pausedPackets, [{
+    auditId, sessionCapabilityId: harness.started.sessionCapabilityId, windowId: 9,
+  }]);
+});
+
+test('startup blocks a paused crash cut whose checkpoint correlation is missing', async () => {
+  const auditId = 'audit-pause-crash-cut-mismatch';
+  const harness = await pausedAuditHarness(auditId);
+  const pausedActive = await readActiveAuditJobForWorker({ sessionArea: harness.area });
+  const pausedSuspension = await harness.suspension();
+  await harness.prepared.authority.transitionAuditSession({
+    sessionCapabilityId: harness.started.sessionCapabilityId,
+    auditId,
+    nextState: 'running',
+  });
+  harness.area.values[ACTIVE_AUDIT_JOB_KEY] = {
+    ...structuredClone(pausedActive), state: 'running',
+  };
+  delete harness.area.values[executionCheckpointStorageKey(auditId)];
+  harness.pausedPackets.length = 0;
+
+  assert.deepEqual(await createAuthorizedAuditStarter(harness.dependencies).recoverAuthorizedAuditLifecycle(), {
+    ok: false, state: 'blocked', auditId: null, revision: null, code: 'AUDIT_RECOVERY_REQUIRED',
+  });
+  assert.equal(harness.executions, 1);
+  assert.equal((await readActiveAuditJobForWorker({ sessionArea: harness.area })).state, 'running');
+  assert.equal((await readAuditSessionForWorker({
+    sessionArea: harness.area,
+    sessionCapabilityId: harness.started.sessionCapabilityId,
+    auditId,
+  })).state, 'running');
+  assert.deepEqual(await harness.suspension(), pausedSuspension);
+  assert.deepEqual(harness.pausedPackets, []);
+});
+
 async function finalizingPixelRecoveryHarness(auditId) {
   const harness = await pausedAuditHarness(auditId);
   const suspension = await harness.suspension();
@@ -744,7 +1007,10 @@ async function finalizingPixelRecoveryHarness(auditId) {
     async finish(value) { effects.finishes += 1; return durablePixelState.finish(value); },
   });
   harness.dependencies.panelCoordinator = panelCoordinator([], {
-    async publishResult() { effects.publishes += 1; return true; },
+    async publishResult(value) {
+      effects.publishes += 1;
+      return issueDeferredTerminalDelivery(value);
+    },
   });
   harness.dependencies.pixelAttemptLifecycle = Object.freeze({
     ...harness.dependencies.pixelAttemptLifecycle,
@@ -1353,7 +1619,7 @@ test('commits and publishes a canonical failed terminal model through the produc
     async publishResult(value) {
       order.push(`publish:${value.state}`);
       published = value;
-      return true;
+      return issueDeferredTerminalDelivery(value);
     },
   });
   dependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({
@@ -1419,7 +1685,7 @@ test('recovers and publishes once when the real attached façade observes a term
     async publishResult(value) {
       order.push(`publish:${value.state}`);
       published = value;
-      return true;
+      return issueDeferredTerminalDelivery(value);
     },
   });
 
@@ -1494,7 +1760,7 @@ test('real attached façade commits one cancelled result when cancellation wins 
     async publishResult(value) {
       order.push(`publish:${value.state}`);
       published = value;
-      return true;
+      return issueDeferredTerminalDelivery(value);
     },
   });
   const starter = createAuthorizedAuditStarter(dependencies);
@@ -1588,7 +1854,7 @@ test('real attached façade commits cancellation accepted at its first observed 
     async publishResult(value) {
       order.push(`publish:${value.state}`);
       published = value;
-      return true;
+      return issueDeferredTerminalDelivery(value);
     },
   });
   const starter = createAuthorizedAuditStarter(dependencies);
@@ -2210,10 +2476,135 @@ test('finalizing fallback reconciles a witnessed commit after the commit adapter
   assert.equal(Object.hasOwn(area.values, ACTIVE_AUDIT_JOB_KEY), false);
 });
 
-test('settlement blocks with finalizing ACTIVE when result publication returns a non-boolean confirmation', async () => {
+test('real launch authority and panel client reconnect after a failed terminal post without manual recovery', async () => {
   const area = sessionArea();
   const prepared = await authorityFixture(area);
-  const report = await reportFixture('audit-publication-confirmation');
+  const report = await reportFixture('audit-terminal-delivery-reconnect');
+  const reportByAudit = new Map();
+  let terminalBundle = null;
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority, reportByAudit,
+    execution: async ({ onCheckpoint, persistAuditModel }) => {
+      await onCheckpoint(report.checkpoint);
+      await persistAuditModel(report.model);
+      return Object.freeze({
+        version: 1, auditId: report.model.auditId, state: 'model', failureCode: null,
+        model: report.model, checkpoint: report.checkpoint,
+      });
+    },
+  });
+  dependencies.buildPanelResultBundle = async ({ reportRevision }) => {
+    terminalBundle = await createPanelResultBundleV1({ reportRevision, inventory: report.inventory });
+    return terminalBundle;
+  };
+  let panelUrl = null;
+  const launchChromeApi = {
+    runtime: {
+      id: 'abcdefghijklmnopabcdefghijklmnop',
+      async getContexts({ contextTypes, documentUrls }) {
+        assert.deepEqual(contextTypes, ['SIDE_PANEL']);
+        assert.deepEqual(documentUrls, [panelUrl]);
+        return [{
+          contextType: 'SIDE_PANEL', contextId: 'panel-context', documentId: 'panel-doc',
+          documentUrl: panelUrl, tabId: -1, windowId: -1,
+        }];
+      },
+    },
+  };
+  const launchAuthority = createPanelLaunchAuthority({
+    chromeApi: launchChromeApi, sessionArea: area, now: () => EPOCH + 1,
+    randomBytes: length => new Uint8Array(length).fill(0x2c),
+  });
+  assert.equal(await launchAuthority.initialize(), true);
+  const issued = launchAuthority.issue({ tabId: 17, windowId: 9 });
+  assert.equal(await launchAuthority.whenReady(issued), true);
+  const durableSet = area.set.bind(area);
+  let admittedCommitThrows = 0;
+  area.set = async entries => {
+    await durableSet(entries);
+    if (admittedCommitThrows === 0 && Object.entries(entries).some(([key, value]) =>
+      key.startsWith('audita:panel-launch:') && value?.state === 'admitted')) {
+      admittedCommitThrows += 1;
+      throw new Error('PRIVATE_LAUNCH_ADMISSION_COMMIT');
+    }
+  };
+  panelUrl = `chrome-extension://abcdefghijklmnopabcdefghijklmnop/${issued.path}`;
+  const coordinator = durablePanelCoordinator({
+    area,
+    pixelState: dependencies.pixelState,
+    loadPanelResultBundle: async ({ auditId }) => auditId === report.model.auditId ? terminalBundle : null,
+    rehydrateViewOnly: args => prepared.authority.rehydrateViewOnly(args),
+    revokeViewOnly: async () => true,
+    launchAuthority,
+  });
+  dependencies.panelCoordinator = coordinator;
+  let failResultPosts = 1;
+  const connectedUrls = [];
+  const clientTimers = [];
+  const clientStates = [];
+  const client = createPanelSessionPortClient({
+    chromeApi: {
+      runtime: {
+        connect({ name }) {
+          assert.equal(name, PANEL_PORT_NAME);
+          connectedUrls.push(panelUrl);
+          return linkedPanelPortPair({
+            coordinator,
+            sender: {
+              id: 'abcdefghijklmnopabcdefghijklmnop', url: panelUrl,
+              origin: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop',
+            },
+            failResult: failResultPosts > 0 ? () => { failResultPosts -= 1; } : null,
+          });
+        },
+      },
+    },
+    onBootstrapResult(value) { clientStates.push(structuredClone(value)); },
+    onStatus() {},
+    onHighlightState() {},
+    createRequestId: () => 'request-terminal-reconnect',
+    setTimer(callback, delay) {
+      const timer = { callback, delay, active: true };
+      clientTimers.push(timer);
+      return timer;
+    },
+    clearTimer(timer) { timer.active = false; },
+  });
+  assert.equal(client.start(), true);
+  await waitUntil(() => clientStates.some(value => value.state === 'initial'));
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: report.model.auditId,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(await started.completion, {
+    ok: true, auditId: report.model.auditId, state: 'result', revision: 1,
+  });
+  assert.equal(Object.hasOwn(area.values, ACTIVE_AUDIT_JOB_KEY), false);
+  await waitUntil(() => clientTimers.some(timer => timer.active && timer.delay === 250));
+  const reconnect = clientTimers.find(timer => timer.active && timer.delay === 250);
+  reconnect.active = false;
+  reconnect.callback();
+  await waitUntil(() => clientStates.some(value => value.state === 'view-only'));
+
+  const rehydrated = clientStates.find(value => value.state === 'view-only');
+  assert.equal(rehydrated.auditId, report.model.auditId);
+  assert.equal(rehydrated.state, 'view-only');
+  assert.equal(rehydrated.result.auditId, report.model.auditId);
+  assert.deepEqual(rehydrated.result, terminalBundle);
+  assert.equal(failResultPosts, 0);
+  assert.equal(admittedCommitThrows, 1);
+  assert.deepEqual(connectedUrls, [panelUrl, panelUrl]);
+  assert.doesNotMatch(JSON.stringify({ completion: await started.completion, rehydrated }), /PRIVATE|POST_FAILURE/u);
+  assert.equal(client.stop(), true);
+});
+
+test('a denied real-coordinator Port retirement preserves confirmed finalizing ACTIVE', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const report = await reportFixture('audit-terminal-retirement-denied');
   const reportByAudit = new Map();
   const dependencies = dependencyFixture({
     area, authority: prepared.authority, reportByAudit,
@@ -2229,7 +2620,17 @@ test('settlement blocks with finalizing ACTIVE when result publication returns a
   dependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({
     reportRevision, inventory: report.inventory,
   });
-  dependencies.panelCoordinator = panelCoordinator([], { publishResult: async () => undefined });
+  const coordinator = durablePanelCoordinator({
+    area,
+    pixelState: dependencies.pixelState,
+    launchAuthority: admittedPanelLaunchAuthority('denied'),
+  });
+  dependencies.panelCoordinator = coordinator;
+  const connected = attachedPanelPort({ failState: 'result' });
+  assert.equal(coordinator.attachPanelPort(connected), true);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await waitUntil(() => connected.messages.some(message => message.state === 'initial'));
+
   const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
     capabilityId: prepared.capabilityId, eventNonce: null, auditId: report.model.auditId,
     capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
@@ -2238,6 +2639,147 @@ test('settlement blocks with finalizing ACTIVE when result publication returns a
 
   assert.deepEqual(await started.completion, {
     ok: false, auditId: report.model.auditId, state: 'blocked', code: 'AUDIT_RECOVERY_REQUIRED',
+  });
+  const active = await readActiveAuditJobForWorker({ sessionArea: area });
+  assert.equal(active.state, 'finalizing');
+  assert.equal(active.commitState, 'confirmed');
+  assert.equal(active.expectedTerminalRevision, 1);
+  assert.equal(connected.disconnects, 1);
+});
+
+test('settlement keeps confirmed ACTIVE for unbranded or hostile terminal delivery receipts', async t => {
+  let accessorReads = 0;
+  const accessor = {};
+  Object.defineProperties(accessor, {
+    version: { enumerable: true, value: 1 },
+    state: { enumerable: true, get() { accessorReads += 1; return 'delivered'; } },
+  });
+  const cases = [
+    ['undefined', async () => undefined],
+    ['boolean true', async () => true],
+    ['raw delivered', async () => ({ version: 1, state: 'delivered' })],
+    ['raw deferred', async () => ({ version: 1, state: 'deferred' })],
+    ['raw denied', async () => ({ version: 1, state: 'denied' })],
+    ['accessor', async () => accessor],
+    ['symbol', async () => ({ version: 1, state: 'delivered', [Symbol('private')]: true })],
+    ['extra', async () => ({ version: 1, state: 'delivered', privateReceipt: true })],
+    ['proxy', async () => new Proxy({ version: 1, state: 'delivered' }, {
+      ownKeys() { throw new Error('PRIVATE_RECEIPT_TRAP'); },
+    })],
+    ['rejection', async () => { throw new Error('PRIVATE_PUBLICATION_REJECTION'); }],
+  ];
+
+  for (const [name, publishResult] of cases) await t.test(name, async () => {
+    const area = sessionArea();
+    const prepared = await authorityFixture(area);
+    const report = await reportFixture(`audit-hostile-receipt-${name.replaceAll(' ', '-')}`);
+    const reportByAudit = new Map();
+    const dependencies = dependencyFixture({
+      area, authority: prepared.authority, reportByAudit,
+      execution: async ({ onCheckpoint, persistAuditModel }) => {
+        await onCheckpoint(report.checkpoint);
+        await persistAuditModel(report.model);
+        return Object.freeze({
+          version: 1, auditId: report.model.auditId, state: 'model', failureCode: null,
+          model: report.model, checkpoint: report.checkpoint,
+        });
+      },
+    });
+    dependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({
+      reportRevision, inventory: report.inventory,
+    });
+    dependencies.panelCoordinator = panelCoordinator([], { publishResult });
+    const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+      capabilityId: prepared.capabilityId, eventNonce: null, auditId: report.model.auditId,
+      capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+      retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+    });
+
+    const completion = await started.completion;
+    assert.deepEqual(completion, {
+      ok: false, auditId: report.model.auditId, state: 'blocked', code: 'AUDIT_RECOVERY_REQUIRED',
+    });
+    const active = await readActiveAuditJobForWorker({ sessionArea: area });
+    assert.equal(active.state, 'finalizing');
+    assert.equal(active.commitState, 'confirmed');
+    assert.doesNotMatch(JSON.stringify(completion), /PRIVATE|RECEIPT|PUBLICATION/u);
+  });
+  assert.equal(accessorReads, 0);
+});
+
+test('settlement keeps the confirmed finalizing job when a live result publication returns false', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const report = await reportFixture('audit-publication-live-failure');
+  const reportByAudit = new Map();
+  const dependencies = dependencyFixture({
+    area, authority: prepared.authority, reportByAudit,
+    execution: async ({ onCheckpoint, persistAuditModel }) => {
+      await onCheckpoint(report.checkpoint);
+      await persistAuditModel(report.model);
+      return Object.freeze({
+        version: 1, auditId: report.model.auditId, state: 'model', failureCode: null,
+        model: report.model, checkpoint: report.checkpoint,
+      });
+    },
+  });
+  dependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({
+    reportRevision, inventory: report.inventory,
+  });
+  dependencies.panelCoordinator = panelCoordinator([], { publishResult: async () => false });
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: report.model.auditId,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+
+  assert.deepEqual(await started.completion, {
+    ok: false, auditId: report.model.auditId, state: 'blocked', code: 'AUDIT_RECOVERY_REQUIRED',
+  });
+  const active = await readActiveAuditJobForWorker({ sessionArea: area });
+  assert.equal(active.state, 'finalizing');
+  assert.equal(active.commitState, 'confirmed');
+});
+
+test('finalizing recovery keeps ACTIVE when a live result publication returns false', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const report = await reportFixture('audit-recovery-live-publication');
+  const reportByAudit = new Map();
+  const firstDependencies = dependencyFixture({
+    area, authority: prepared.authority, reportByAudit,
+    execution: async ({ onCheckpoint, persistAuditModel }) => {
+      await onCheckpoint(report.checkpoint);
+      await persistAuditModel(report.model);
+      return Object.freeze({
+        version: 1, auditId: report.model.auditId, state: 'model', failureCode: null,
+        model: report.model, checkpoint: report.checkpoint,
+      });
+    },
+  });
+  firstDependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({
+    reportRevision, inventory: report.inventory,
+  });
+  firstDependencies.panelCoordinator = panelCoordinator([], { publishResult: async () => undefined });
+  const started = await createAuthorizedAuditStarter(firstDependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId, eventNonce: null, auditId: report.model.auditId,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: prepared.senderContext,
+  });
+  await started.completion;
+
+  const recoveryDependencies = dependencyFixture({
+    area, authority: prepared.authority, reportByAudit,
+    execution: async () => { throw new Error('RECOVERY_MUST_NOT_RERUN_COLLECTION'); },
+  });
+  recoveryDependencies.buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({
+    reportRevision, inventory: report.inventory,
+  });
+  recoveryDependencies.panelCoordinator = panelCoordinator([], { publishResult: async () => false });
+
+  assert.deepEqual(await createAuthorizedAuditStarter(recoveryDependencies).recoverAuthorizedAuditLifecycle(), {
+    ok: false, state: 'blocked', auditId: null, revision: null, code: 'AUDIT_RECOVERY_REQUIRED',
   });
   const active = await readActiveAuditJobForWorker({ sessionArea: area });
   assert.equal(active.state, 'finalizing');

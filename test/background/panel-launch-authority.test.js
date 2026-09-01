@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createPanelLaunchAuthority } from '../../src/background/panel-launch-authority.js';
+import * as panelLaunchModule from '../../src/background/panel-launch-authority.js';
+
+const { createPanelLaunchAuthority } = panelLaunchModule;
+const isPanelLaunchRetirementV1 = value =>
+  panelLaunchModule.isPanelLaunchRetirementV1?.(value) ?? false;
 
 const RUNTIME_ID = 'abcdefghijklmnopabcdefghijklmnop';
 const EPOCH = 1_788_000_000_000;
@@ -291,7 +295,7 @@ test('rejects absent, ambiguous or malformed native contexts without consuming t
   }
 });
 
-test('rehydrates a live admitted launch after restart, admits its reconnect once and re-proves the document', async () => {
+test('rehydrates an admitted launch after restart with a fresh one-shot connection owner', async () => {
   const filters = [];
   const chromeApi = {
     runtime: {
@@ -319,8 +323,13 @@ test('rehydrates a live admitted launch after restart, admits its reconnect once
   const rehydrated = await initialize(fixture({
     chromeApi, sessionArea: restartFacade(original.sessionArea),
   }));
-  assert.deepEqual(await rehydrated.authority.reprove(admitted), admitted);
-  assert.equal(filters.length, 5);
+  assert.deepEqual(await rehydrated.authority.reprove(admitted), {
+    ok: false, code: 'PANEL_LAUNCH_DENIED',
+  });
+  const freshOwner = await rehydrated.authority.admitPort({ sender: senderFor(issued.token) });
+  assert.equal(freshOwner.ok, true);
+  assert.deepEqual(await rehydrated.authority.reprove(freshOwner), freshOwner);
+  assert.equal(filters.length, 6);
   assert.equal(filters.every(filter =>
     JSON.stringify(filter) === JSON.stringify({
       contextTypes: ['SIDE_PANEL'], documentUrls: [senderFor(TOKEN_A).url],
@@ -411,7 +420,7 @@ test('rotates an expired pending token without leaving its record behind', async
   assert.doesNotMatch(JSON.stringify(persisted), new RegExp(TOKEN_A, 'u'));
 });
 
-test('never lets a restarted issuer overwrite a live persisted launch', async () => {
+test('a restarted issuer may replace only the now-disconnected admitted launch', async () => {
   const chromeApi = {
     runtime: {
       id: RUNTIME_ID,
@@ -429,12 +438,15 @@ test('never lets a restarted issuer overwrite a live persisted launch', async ()
   }));
 
   const competing = restarted.authority.issue({ tabId: 41, windowId: 9 });
-  assert.deepEqual(competing, { ok: false, code: 'PANEL_LAUNCH_CONFLICT' });
+  assert.deepEqual(competing, {
+    ok: true, token: TOKEN_B, path: `src/panel/index.html?launch=${TOKEN_B}`, generation: 2,
+  });
+  assert.equal(await restarted.authority.whenReady(competing), true);
 
   const persisted = await original.sessionArea.get(null);
   assert.equal(Object.keys(persisted).length, 2);
-  assert.match(JSON.stringify(persisted), new RegExp(first.token, 'u'));
-  assert.doesNotMatch(JSON.stringify(persisted), new RegExp(TOKEN_B, 'u'));
+  assert.doesNotMatch(JSON.stringify(persisted), new RegExp(first.token, 'u'));
+  assert.match(JSON.stringify(persisted), new RegExp(TOKEN_B, 'u'));
 });
 
 test('initializes across restart, removes a stale issued generation and makes the fresh launch admissible', async () => {
@@ -602,6 +614,382 @@ test('revokes a document-bound admission and makes subsequent proof unavailable'
   assert.deepEqual(await sessionArea.get(null), {});
   assert.deepEqual(await authority.reprove(admission), { ok: false, code: 'PANEL_LAUNCH_DENIED' });
   assert.doesNotMatch(JSON.stringify(admission), /side-panel-window:/u);
+});
+
+test('retires one branded owner by releasing the exact live document for same-token reconnect', async () => {
+  const chromeApi = {
+    runtime: {
+      id: RUNTIME_ID,
+      async getContexts() { return [contextFor(TOKEN_A)]; },
+    },
+  };
+  const { authority, sessionArea } = await initialize(fixture({ chromeApi }));
+  const issued = authority.issue({ tabId: 41, windowId: 9 });
+  const owner1 = await authority.admitPort({ sender: senderFor(issued.token) });
+
+  const released = await authority.retirePort(owner1);
+
+  assert.deepEqual(released, { version: 1, state: 'released' });
+  assert.equal(Object.isFrozen(released), true);
+  assert.equal(isPanelLaunchRetirementV1(released), true);
+  assert.equal(isPanelLaunchRetirementV1({ version: 1, state: 'released' }), false);
+  assert.doesNotMatch(JSON.stringify(released), new RegExp(TOKEN_A, 'u'));
+  assert.equal(Object.keys(await sessionArea.get(null)).length, 2);
+  assert.deepEqual(await authority.reprove(owner1), { ok: false, code: 'PANEL_LAUNCH_DENIED' });
+  assert.deepEqual(await authority.revoke(owner1), { ok: false, code: 'PANEL_LAUNCH_DENIED' });
+  assert.deepEqual(await authority.retirePort(owner1), { version: 1, state: 'denied' });
+
+  const owner2 = await authority.admitPort({ sender: senderFor(issued.token) });
+  assert.equal(owner2.ok, true);
+  assert.equal(owner2.token, owner1.token);
+  assert.notEqual(owner2, owner1);
+  assert.deepEqual(await authority.reprove(owner2), owner2);
+  assert.deepEqual(await authority.retirePort(owner1), { version: 1, state: 'denied' });
+  assert.deepEqual(await authority.reprove(owner2), owner2);
+});
+
+test('removes the admitted pair when retirement proves the Side Panel closed or changed', async t => {
+  for (const [name, contexts] of [
+    ['closed', []],
+    ['changed', [contextFor(TOKEN_A, { documentId: 'replacement-document' })]],
+  ]) await t.test(name, async () => {
+    let currentContexts = [contextFor(TOKEN_A)];
+    const chromeApi = {
+      runtime: {
+        id: RUNTIME_ID,
+        async getContexts() { return structuredClone(currentContexts); },
+      },
+    };
+    const { authority, sessionArea } = await initialize(fixture({ chromeApi }));
+    const issued = authority.issue({ tabId: 41, windowId: 9 });
+    const admission = await authority.admitPort({ sender: senderFor(issued.token) });
+    currentContexts = contexts;
+
+    const retired = await authority.retirePort(admission);
+
+    assert.deepEqual(retired, { version: 1, state: 'revoked' });
+    assert.equal(isPanelLaunchRetirementV1(retired), true);
+    assert.deepEqual(await sessionArea.get(null), {});
+    assert.deepEqual(await authority.reprove(admission), { ok: false, code: 'PANEL_LAUNCH_DENIED' });
+  });
+});
+
+test('a denied retirement preserves the current owner and blocks replacement or reconnect', async t => {
+  for (const mode of ['context rejection', 'remove no-op']) await t.test(mode, async () => {
+    let contexts = [contextFor(TOKEN_A)];
+    const sessionArea = createSessionArea();
+    const chromeApi = {
+      runtime: {
+        id: RUNTIME_ID,
+        async getContexts() {
+          if (mode === 'context rejection' && contexts.length === 0) throw new Error('PRIVATE_CONTEXT_FAILURE');
+          return structuredClone(contexts);
+        },
+      },
+    };
+    const { authority } = await initialize(fixture({ chromeApi, sessionArea }));
+    const issued = authority.issue({ tabId: 41, windowId: 9 });
+    const admission = await authority.admitPort({ sender: senderFor(issued.token) });
+    contexts = [];
+    if (mode === 'remove no-op') sessionArea.remove = async () => {};
+
+    assert.deepEqual(await authority.retirePort(admission), { version: 1, state: 'denied' });
+    assert.equal(Object.keys(await sessionArea.get(null)).length, 2);
+    assert.deepEqual(await authority.admitPort({ sender: senderFor(issued.token) }), {
+      ok: false, code: 'PANEL_LAUNCH_DENIED',
+    });
+    assert.deepEqual(authority.issue({ tabId: 41, windowId: 9 }), {
+      ok: false, code: 'PANEL_LAUNCH_CONFLICT',
+    });
+  });
+});
+
+test('a released admission can be atomically replaced by a fresh launch generation', async () => {
+  const bytes = [0xab, 0xbc];
+  const chromeApi = {
+    runtime: {
+      id: RUNTIME_ID,
+      async getContexts() { return [contextFor(TOKEN_A)]; },
+    },
+  };
+  const { authority, sessionArea } = await initialize(fixture({
+    chromeApi,
+    randomBytes: length => new Uint8Array(length).fill(bytes.shift()),
+  }));
+  const first = authority.issue({ tabId: 41, windowId: 9 });
+  const owner1 = await authority.admitPort({ sender: senderFor(first.token) });
+  assert.equal((await authority.retirePort(owner1)).state, 'released');
+
+  const second = authority.issue({ tabId: 41, windowId: 9 });
+  assert.deepEqual(second, {
+    ok: true, token: TOKEN_B, path: `src/panel/index.html?launch=${TOKEN_B}`, generation: 2,
+  });
+  assert.equal(await authority.whenReady(second), true);
+  const persisted = await sessionArea.get(null);
+  assert.equal(Object.keys(persisted).length, 2);
+  assert.doesNotMatch(JSON.stringify(persisted), new RegExp(TOKEN_A, 'u'));
+  assert.match(JSON.stringify(persisted), new RegExp(TOKEN_B, 'u'));
+  assert.deepEqual(await authority.retirePort(owner1), { version: 1, state: 'denied' });
+});
+
+test('treats an exact admission write committed before storage throws as committed', async () => {
+  let current = EPOCH;
+  const sessionArea = createSessionArea();
+  const originalSet = sessionArea.set.bind(sessionArea);
+  const chromeApi = {
+    runtime: {
+      id: RUNTIME_ID,
+      async getContexts() { return [contextFor(TOKEN_A)]; },
+    },
+  };
+  const { authority } = await initialize(fixture({
+    chromeApi, sessionArea, now: () => current, ttlMs: 10,
+  }));
+  const issued = authority.issue({ tabId: 41, windowId: 9 });
+  assert.equal(await authority.whenReady(issued), true);
+  let committedThrow = 0;
+  sessionArea.set = async entries => {
+    await originalSet(entries);
+    if (Object.entries(entries).some(([key, value]) =>
+      key.startsWith('audita:panel-launch:') && value?.state === 'admitted')) {
+      committedThrow += 1;
+      throw new Error('PRIVATE_COMMIT_THEN_THROW');
+    }
+  };
+
+  const owner = await authority.admitPort({ sender: senderFor(issued.token) });
+
+  assert.equal(owner.ok, true);
+  assert.equal(committedThrow, 1);
+  assert.deepEqual(await authority.reprove(owner), owner);
+  assert.equal(Object.values(await sessionArea.get(null)).every(value => value.state === 'admitted'), true);
+  current += 10;
+  assert.deepEqual(authority.issue({ tabId: 41, windowId: 9 }), {
+    ok: false, code: 'PANEL_LAUNCH_CONFLICT',
+  }, 'a connected one-shot owner blocks rotation independently of the pre-admission TTL');
+});
+
+test('treats an exact removal committed before storage throws as a confirmed revocation', async () => {
+  let contexts = [contextFor(TOKEN_A)];
+  const sessionArea = createSessionArea();
+  const originalRemove = sessionArea.remove.bind(sessionArea);
+  const chromeApi = {
+    runtime: {
+      id: RUNTIME_ID,
+      async getContexts() { return structuredClone(contexts); },
+    },
+  };
+  const { authority } = await initialize(fixture({ chromeApi, sessionArea }));
+  const issued = authority.issue({ tabId: 41, windowId: 9 });
+  const owner = await authority.admitPort({ sender: senderFor(issued.token) });
+  contexts = [];
+  sessionArea.remove = async keys => {
+    await originalRemove(keys);
+    throw new Error('PRIVATE_COMMIT_THEN_THROW');
+  };
+
+  const retired = await authority.retirePort(owner);
+
+  assert.deepEqual(retired, { version: 1, state: 'revoked' });
+  assert.deepEqual(await sessionArea.get(null), {});
+  assert.deepEqual(await authority.retirePort(owner), { version: 1, state: 'denied' });
+});
+
+test('rereads the exact pair after a storage throw-before and preserves the prior authority', async t => {
+  await t.test('admission write', async () => {
+    const sessionArea = createSessionArea();
+    const originalGet = sessionArea.get.bind(sessionArea);
+    const originalSet = sessionArea.set.bind(sessionArea);
+    const chromeApi = {
+      runtime: {
+        id: RUNTIME_ID,
+        async getContexts() { return [contextFor(TOKEN_A)]; },
+      },
+    };
+    const { authority } = await initialize(fixture({ chromeApi, sessionArea }));
+    const issued = authority.issue({ tabId: 41, windowId: 9 });
+    assert.equal(await authority.whenReady(issued), true);
+    const before = await sessionArea.get(null);
+    let mutationAttempted = false;
+    let readsAfterAttempt = 0;
+    sessionArea.get = async keys => {
+      if (mutationAttempted) readsAfterAttempt += 1;
+      return originalGet(keys);
+    };
+    sessionArea.set = async entries => {
+      if (Object.values(entries).some(value => value?.state === 'admitted')) {
+        mutationAttempted = true;
+        throw new Error('PRIVATE_THROW_BEFORE');
+      }
+      return originalSet(entries);
+    };
+
+    assert.deepEqual(await authority.admitPort({ sender: senderFor(issued.token) }), {
+      ok: false, code: 'PANEL_LAUNCH_DENIED',
+    });
+    assert.equal(readsAfterAttempt > 0, true);
+    assert.deepEqual(await sessionArea.get(null), before);
+    sessionArea.set = originalSet;
+    assert.equal((await authority.admitPort({ sender: senderFor(issued.token) })).ok, true);
+  });
+
+  await t.test('retirement removal', async () => {
+    let contexts = [contextFor(TOKEN_A)];
+    const sessionArea = createSessionArea();
+    const originalGet = sessionArea.get.bind(sessionArea);
+    const chromeApi = {
+      runtime: {
+        id: RUNTIME_ID,
+        async getContexts() { return structuredClone(contexts); },
+      },
+    };
+    const { authority } = await initialize(fixture({ chromeApi, sessionArea }));
+    const issued = authority.issue({ tabId: 41, windowId: 9 });
+    const owner = await authority.admitPort({ sender: senderFor(issued.token) });
+    const before = await sessionArea.get(null);
+    contexts = [];
+    let mutationAttempted = false;
+    let readsAfterAttempt = 0;
+    sessionArea.get = async keys => {
+      if (mutationAttempted) readsAfterAttempt += 1;
+      return originalGet(keys);
+    };
+    sessionArea.remove = async () => {
+      mutationAttempted = true;
+      throw new Error('PRIVATE_THROW_BEFORE');
+    };
+
+    assert.deepEqual(await authority.retirePort(owner), { version: 1, state: 'denied' });
+    assert.equal(readsAfterAttempt > 0, true);
+    assert.deepEqual(await sessionArea.get(null), before);
+    contexts = [contextFor(TOKEN_A)];
+    assert.deepEqual(await authority.reprove(owner), owner);
+  });
+});
+
+test('classifies partial or foreign pair mutations without touching another launch pair', async t => {
+  await t.test('partial admission write', async () => {
+    const bytes = [0xab, 0xbc];
+    const sessionArea = createSessionArea();
+    const originalGet = sessionArea.get.bind(sessionArea);
+    const originalSet = sessionArea.set.bind(sessionArea);
+    const chromeApi = {
+      runtime: {
+        id: RUNTIME_ID,
+        async getContexts() { return [contextFor(TOKEN_A)]; },
+      },
+    };
+    const { authority } = await initialize(fixture({
+      chromeApi, sessionArea,
+      randomBytes: length => new Uint8Array(length).fill(bytes.shift()),
+    }));
+    const target = authority.issue({ tabId: 41, windowId: 9 });
+    const foreign = authority.issue({ tabId: 42, windowId: 9 });
+    assert.equal(await authority.whenReady(target), true);
+    assert.equal(await authority.whenReady(foreign), true);
+    const foreignKeys = [
+      `audita:panel-launch:record:v1:${foreign.token}`,
+      'audita:panel-launch:index:v1:42',
+    ];
+    const foreignBefore = await sessionArea.get(foreignKeys);
+    let faulted = false;
+    let readsAfterFault = 0;
+    sessionArea.get = async keys => {
+      if (faulted) readsAfterFault += 1;
+      return originalGet(keys);
+    };
+    sessionArea.set = async entries => {
+      const admittedRecord = Object.entries(entries).find(([key, value]) =>
+        key === `audita:panel-launch:record:v1:${target.token}` && value?.state === 'admitted');
+      if (!admittedRecord) return originalSet(entries);
+      await originalSet({ [admittedRecord[0]]: admittedRecord[1] });
+      faulted = true;
+      throw new Error('PRIVATE_PARTIAL_COMMIT');
+    };
+
+    assert.deepEqual(await authority.admitPort({ sender: senderFor(target.token) }), {
+      ok: false, code: 'PANEL_LAUNCH_DENIED',
+    });
+    assert.equal(readsAfterFault > 0, true);
+    assert.deepEqual(await sessionArea.get(foreignKeys), foreignBefore);
+  });
+
+  await t.test('foreign retirement replacement', async () => {
+    const bytes = [0xab, 0xbc];
+    let contexts = [contextFor(TOKEN_A)];
+    const sessionArea = createSessionArea();
+    const originalGet = sessionArea.get.bind(sessionArea);
+    const originalRemove = sessionArea.remove.bind(sessionArea);
+    const chromeApi = {
+      runtime: {
+        id: RUNTIME_ID,
+        async getContexts() { return structuredClone(contexts); },
+      },
+    };
+    const { authority } = await initialize(fixture({
+      chromeApi, sessionArea,
+      randomBytes: length => new Uint8Array(length).fill(bytes.shift()),
+    }));
+    const target = authority.issue({ tabId: 41, windowId: 9 });
+    const foreign = authority.issue({ tabId: 42, windowId: 9 });
+    const owner = await authority.admitPort({ sender: senderFor(target.token) });
+    assert.equal(await authority.whenReady(foreign), true);
+    const targetRecordKey = `audita:panel-launch:record:v1:${target.token}`;
+    const foreignKeys = [
+      `audita:panel-launch:record:v1:${foreign.token}`,
+      'audita:panel-launch:index:v1:42',
+    ];
+    const foreignBefore = await sessionArea.get(foreignKeys);
+    let faulted = false;
+    let readsAfterFault = 0;
+    sessionArea.get = async keys => {
+      if (faulted) readsAfterFault += 1;
+      return originalGet(keys);
+    };
+    sessionArea.remove = async keys => {
+      const requested = Array.isArray(keys) ? keys : [keys];
+      if (!requested.includes(targetRecordKey)) return originalRemove(keys);
+      sessionArea.values[targetRecordKey] = structuredClone(foreignBefore[foreignKeys[0]]);
+      faulted = true;
+      throw new Error('PRIVATE_FOREIGN_COMMIT');
+    };
+    contexts = [];
+
+    assert.deepEqual(await authority.retirePort(owner), { version: 1, state: 'denied' });
+    assert.equal(readsAfterFault > 0, true);
+    assert.deepEqual(await sessionArea.get(foreignKeys), foreignBefore);
+  });
+});
+
+test('foreign and forged admissions cannot retire or revoke a current owner', async () => {
+  const chromeApi = {
+    runtime: {
+      id: RUNTIME_ID,
+      async getContexts({ documentUrls }) {
+        const token = new URL(documentUrls[0]).searchParams.get('launch');
+        return [contextFor(token)];
+      },
+    },
+  };
+  const bytes = [0xab, 0xbc];
+  const { authority, sessionArea } = await initialize(fixture({
+    chromeApi,
+    randomBytes: length => new Uint8Array(length).fill(bytes.shift()),
+  }));
+  const first = authority.issue({ tabId: 41, windowId: 9 });
+  const owner1 = await authority.admitPort({ sender: senderFor(first.token) });
+  assert.equal((await authority.retirePort(owner1)).state, 'released');
+  const owner2 = await authority.admitPort({ sender: senderFor(first.token) });
+  const foreign = authority.issue({ tabId: 42, windowId: 9 });
+  await authority.whenReady(foreign);
+  const before = await sessionArea.get(null);
+  const forged = structuredClone(owner2);
+
+  assert.deepEqual(await authority.retirePort(forged), { version: 1, state: 'denied' });
+  assert.deepEqual(await authority.revoke(forged), { ok: false, code: 'PANEL_LAUNCH_DENIED' });
+  assert.deepEqual(await authority.retirePort(owner1), { version: 1, state: 'denied' });
+  assert.deepEqual(await authority.reprove(owner2), owner2);
+  assert.deepEqual(await sessionArea.get(null), before);
 });
 
 test('fails closed when session writes or removals cannot be verified', async () => {

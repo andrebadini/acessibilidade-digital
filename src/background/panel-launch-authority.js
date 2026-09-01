@@ -5,6 +5,8 @@ const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const RECORD_PREFIX = 'audita:panel-launch:record:v1:';
 const INDEX_PREFIX = 'audita:panel-launch:index:v1:';
 const SHARED = new WeakMap();
+const ADMISSIONS = new WeakSet();
+const RETIREMENTS = new WeakSet();
 const ABSENT = Symbol('absent');
 const INVALID = Symbol('invalid');
 const RECORD_KEYS = Object.freeze([
@@ -17,6 +19,10 @@ const INDEX_KEYS = Object.freeze([
 const ADMISSION_KEYS = Object.freeze([
   'ok', 'token', 'tabId', 'windowId', 'generation', 'contextId', 'documentId', 'url', 'syntheticSender',
 ]);
+const RETIREMENT_KEYS = Object.freeze(['version', 'state']);
+const MUTATION_COMMITTED = 'committed';
+const MUTATION_NOT_COMMITTED = 'not-committed';
+const MUTATION_RECOVERY_REQUIRED = 'recovery-required';
 
 function exact(value, keys) {
   try {
@@ -85,6 +91,16 @@ function correlated(record, index) {
     record.issuedAt === index.issuedAt && record.expiresAt === index.expiresAt);
 }
 
+function canonicalPair(value) {
+  const row = exact(value, ['record', 'index']);
+  const record = parseRecord(row?.record);
+  const index = parseIndex(row?.index);
+  return record && index && correlated(record, index) &&
+    sameRecord(row.record, record, RECORD_KEYS) && sameRecord(row.index, index, INDEX_KEYS)
+    ? Object.freeze({ record, index })
+    : null;
+}
+
 function envelopeValue(envelope, key, allowedKeys = [key]) {
   try {
     if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) return INVALID;
@@ -148,7 +164,7 @@ function parseContext(value, expectedUrl) {
 }
 
 function createAdmission(runtimeId, record, url) {
-  return deepFreeze({
+  const admission = deepFreeze({
     ok: true,
     token: record.token,
     tabId: record.tabId,
@@ -164,9 +180,12 @@ function createAdmission(runtimeId, record, url) {
       documentId: record.documentId,
     },
   });
+  ADMISSIONS.add(admission);
+  return admission;
 }
 
 function parseAdmission(value, runtimeId) {
+  if (!value || typeof value !== 'object' || !ADMISSIONS.has(value)) return null;
   const row = exact(value, ADMISSION_KEYS);
   const syntheticSender = exact(row?.syntheticSender, ['id', 'url', 'origin', 'documentId']);
   if (!row || row.ok !== true || !TOKEN.test(row.token ?? '') || !safeChromeId(row.tabId) ||
@@ -175,7 +194,19 @@ function parseAdmission(value, runtimeId) {
     row.url !== urlFor(runtimeId, row.token) || !syntheticSender || syntheticSender.id !== runtimeId ||
     syntheticSender.url !== row.url || syntheticSender.origin !== `chrome-extension://${runtimeId}` ||
     syntheticSender.documentId !== row.documentId) return null;
-  return createAdmission(runtimeId, row, row.url);
+  return value;
+}
+
+function retirement(state) {
+  const receipt = Object.freeze({ version: 1, state });
+  RETIREMENTS.add(receipt);
+  return receipt;
+}
+
+export function isPanelLaunchRetirementV1(value) {
+  if (!value || typeof value !== 'object' || !RETIREMENTS.has(value)) return false;
+  const row = exact(value, RETIREMENT_KEYS);
+  return Boolean(row?.version === 1 && ['released', 'revoked', 'denied'].includes(row.state));
 }
 
 function parseIssued(value) {
@@ -189,6 +220,7 @@ function sharedState(sessionArea) {
   if (!state) {
     state = {
       tail: Promise.resolve(), byTab: new Map(), byToken: new Map(), generations: new Map(),
+      pendingByTab: new Map(), pendingByToken: new Map(),
       initialized: false, initialization: null,
     };
     SHARED.set(sessionArea, state);
@@ -248,18 +280,56 @@ export function createPanelLaunchAuthority({
     return pair && sameRecord(pair.index, index, INDEX_KEYS) ? pair : null;
   }
 
-  async function writePair(record, index) {
-    await sessionArea.set({ [recordKey(record.token)]: record, [indexKey(record.tabId)]: index });
-    const verified = await readPair(record.token);
-    return Boolean(verified && sameRecord(verified.record, record, RECORD_KEYS) &&
-      sameRecord(verified.index, index, INDEX_KEYS));
+  async function readPairSlot(token, tabId) {
+    const keys = [recordKey(token), indexKey(tabId)];
+    const envelope = await sessionArea.get(keys);
+    const storedRecord = envelopeValue(envelope, keys[0], keys);
+    const storedIndex = envelopeValue(envelope, keys[1], keys);
+    if (storedRecord === ABSENT && storedIndex === ABSENT) return Object.freeze({ state: 'absent', pair: null });
+    if (storedRecord === ABSENT || storedIndex === ABSENT || storedRecord === INVALID || storedIndex === INVALID) {
+      return Object.freeze({ state: 'invalid', pair: null });
+    }
+    const pair = canonicalPair({ record: storedRecord, index: storedIndex });
+    return pair && pair.record.token === token && pair.record.tabId === tabId
+      ? Object.freeze({ state: 'pair', pair })
+      : Object.freeze({ state: 'invalid', pair: null });
   }
 
-  async function removePair(record) {
-    const keys = [recordKey(record.token), indexKey(record.tabId)];
-    await sessionArea.remove(keys);
-    const envelope = await sessionArea.get(keys);
-    return keys.every(key => envelopeValue(envelope, key, keys) === ABSENT);
+  function slotMatches(slot, pair) {
+    if (pair === null) return slot?.state === 'absent';
+    return slot?.state === 'pair' && sameRecord(slot.pair.record, pair.record, RECORD_KEYS) &&
+      sameRecord(slot.pair.index, pair.index, INDEX_KEYS);
+  }
+
+  async function mutatePairExact(expectedValue, replacementValue) {
+    const expected = expectedValue === null ? null : canonicalPair(expectedValue);
+    const replacement = replacementValue === null ? null : canonicalPair(replacementValue);
+    if ((expectedValue !== null && !expected) || (replacementValue !== null && !replacement) ||
+      (!expected && !replacement) || (expected && replacement &&
+        (expected.record.token !== replacement.record.token || expected.record.tabId !== replacement.record.tabId))) {
+      return MUTATION_RECOVERY_REQUIRED;
+    }
+    const identity = replacement ?? expected;
+    let before;
+    try { before = await readPairSlot(identity.record.token, identity.record.tabId); }
+    catch { return MUTATION_RECOVERY_REQUIRED; }
+    if (!slotMatches(before, expected)) return MUTATION_RECOVERY_REQUIRED;
+    try {
+      if (replacement) {
+        await sessionArea.set({
+          [recordKey(replacement.record.token)]: replacement.record,
+          [indexKey(replacement.record.tabId)]: replacement.index,
+        });
+      } else {
+        await sessionArea.remove([recordKey(expected.record.token), indexKey(expected.record.tabId)]);
+      }
+    } catch { /* readback classifies commit-then-throw and throw-before */ }
+    let after;
+    try { after = await readPairSlot(identity.record.token, identity.record.tabId); }
+    catch { return MUTATION_RECOVERY_REQUIRED; }
+    if (slotMatches(after, replacement)) return MUTATION_COMMITTED;
+    if (slotMatches(after, expected)) return MUTATION_NOT_COMMITTED;
+    return MUTATION_RECOVERY_REQUIRED;
   }
 
   function forget(record) {
@@ -267,9 +337,9 @@ export function createPanelLaunchAuthority({
     if (state.byTab.get(record.tabId)?.token === record.token) state.byTab.delete(record.tabId);
   }
 
-  async function eraseExpired(record) {
-    if (!await removePair(record)) return false;
-    forget(record);
+  async function eraseExpired(pair) {
+    if (await mutatePairExact(pair, null) !== MUTATION_COMMITTED) return false;
+    forget(pair.record);
     return true;
   }
 
@@ -348,21 +418,17 @@ export function createPanelLaunchAuthority({
             continue;
           }
           const reservation = {
-            ...record, persistence: Promise.resolve(true), persistenceState: 'ready', connected: false,
+            ...record, persistence: Promise.resolve(true), persistenceState: 'ready',
+            connected: false, connectionOwner: null,
           };
           hydratedByTab.set(tabId, reservation);
           hydratedByToken.set(record.token, reservation);
         }
         for (const key of launchKeys) if (!retained.has(key)) removals.add(key);
         if (!await removeKeys([...removals])) return false;
-        const pending = [...state.byToken.values()].filter(reservation =>
-          reservation?.persistenceState === 'pending' &&
-          state.byTab.get(reservation.tabId) === reservation &&
-          state.byToken.get(reservation.token) === reservation);
-        for (const reservation of pending) {
-          if (hydratedByTab.has(reservation.tabId) || hydratedByToken.has(reservation.token)) continue;
-          hydratedByTab.set(reservation.tabId, reservation);
-          hydratedByToken.set(reservation.token, reservation);
+        for (const reservation of state.pendingByToken.values()) {
+          if (reservation?.persistenceState !== 'pending' ||
+            state.pendingByTab.get(reservation.tabId) !== reservation) continue;
           generations.set(reservation.tabId,
             Math.max(generations.get(reservation.tabId) ?? 0, reservation.generation));
         }
@@ -393,17 +459,15 @@ export function createPanelLaunchAuthority({
     try {
       issuedAt = now();
       if (!safeEpoch(issuedAt) || issuedAt > Number.MAX_SAFE_INTEGER - ttlMs) throw new Error('denied');
+      if (state.pendingByTab.has(input.tabId)) return fail('PANEL_LAUNCH_CONFLICT');
       const existing = state.byTab.get(input.tabId);
-      if (existing && (existing.state === 'admitted' || existing.expiresAt > issuedAt)) {
+      if (existing && (existing.connected || existing.connectionOwner !== null ||
+        (existing.state !== 'admitted' && existing.expiresAt > issuedAt))) {
         return fail('PANEL_LAUNCH_CONFLICT');
       }
-      if (existing) {
-        rotatesFrom = existing;
-        state.byTab.delete(input.tabId);
-        state.byToken.delete(existing.token);
-      }
+      if (existing) rotatesFrom = existing;
       token = encodeToken(randomBytes(32));
-      if (state.byToken.has(token)) return fail('PANEL_LAUNCH_CONFLICT');
+      if (state.byToken.has(token) || state.pendingByToken.has(token)) return fail('PANEL_LAUNCH_CONFLICT');
     } catch { return fail(); }
 
     const generation = (state.generations.get(input.tabId) ?? 0) + 1;
@@ -416,40 +480,55 @@ export function createPanelLaunchAuthority({
     const index = {
       version: 1, tabId: input.tabId, token, generation, state: 'issued', issuedAt, expiresAt,
     };
-    const reservation = { ...record, persistence: null, persistenceState: 'pending', connected: false };
+    const reservation = {
+      ...record, persistence: null, persistenceState: 'pending',
+      connected: false, connectionOwner: null,
+    };
     state.generations.set(input.tabId, generation);
-    state.byTab.set(input.tabId, reservation);
-    state.byToken.set(token, reservation);
+    state.pendingByTab.set(input.tabId, reservation);
+    state.pendingByToken.set(token, reservation);
     reservation.persistence = serialize(state, async () => {
       try {
-        if (!state.initialized || state.byTab.get(input.tabId) !== reservation ||
-          state.byToken.get(token) !== reservation) throw new Error('denied');
+        if (!state.initialized || state.pendingByTab.get(input.tabId) !== reservation ||
+          state.pendingByToken.get(token) !== reservation) throw new Error('denied');
         if (rotatesFrom) {
           const priorPersisted = await rotatesFrom.persistence;
           const prior = await readPair(rotatesFrom.token);
-          if (prior) {
-            if (!priorPersisted || prior.record.tabId !== input.tabId ||
-              prior.record.generation !== rotatesFrom.generation || prior.record.expiresAt > issuedAt ||
-              !await removePair(prior.record)) throw new Error('denied');
-          } else if (priorPersisted) {
-            throw new Error('denied');
-          }
+          const replaceable = priorPersisted && prior && state.byTab.get(input.tabId) === rotatesFrom &&
+            state.byToken.get(rotatesFrom.token) === rotatesFrom &&
+            sameRecord(rotatesFrom, prior.record, RECORD_KEYS) &&
+            rotatesFrom.connected === false && rotatesFrom.connectionOwner === null &&
+            (prior.record.state === 'admitted' || prior.record.expiresAt <= issuedAt);
+          if (!replaceable || await mutatePairExact(prior, null) !== MUTATION_COMMITTED) throw new Error('denied');
+          forget(prior.record);
         } else {
           const prior = await readIndexedPair(input.tabId);
           if (!prior) throw new Error('denied');
           if (!prior.absent) {
-            if (prior.record.state === 'admitted' || prior.record.expiresAt > issuedAt ||
-              !await removePair(prior.record)) throw new Error('denied');
+            const live = state.byTab.get(input.tabId);
+            const replaceable = prior.record.state === 'admitted'
+              ? live && state.byToken.get(prior.record.token) === live &&
+                sameRecord(live, prior.record, RECORD_KEYS) && live.connected === false &&
+                live.connectionOwner === null
+              : prior.record.expiresAt <= issuedAt && (!live ||
+                (state.byToken.get(prior.record.token) === live && sameRecord(live, prior.record, RECORD_KEYS) &&
+                  live.connected === false && live.connectionOwner === null));
+            if (!replaceable || await mutatePairExact(prior, null) !== MUTATION_COMMITTED) throw new Error('denied');
+            if (live) forget(prior.record);
           }
         }
-        const tokenEnvelope = await sessionArea.get(recordKey(token));
-        if (envelopeValue(tokenEnvelope, recordKey(token)) !== ABSENT) throw new Error('denied');
-        const persisted = await writePair(record, index);
-        if (!persisted) throw new Error('denied');
-        return persisted;
+        const pair = Object.freeze({ record, index });
+        if (await mutatePairExact(null, pair) !== MUTATION_COMMITTED ||
+          state.pendingByTab.get(input.tabId) !== reservation ||
+          state.pendingByToken.get(token) !== reservation) throw new Error('denied');
+        state.pendingByTab.delete(input.tabId);
+        state.pendingByToken.delete(token);
+        state.byTab.set(input.tabId, reservation);
+        state.byToken.set(token, reservation);
+        return true;
       } catch {
-        if (state.byTab.get(input.tabId) === reservation) state.byTab.delete(input.tabId);
-        if (state.byToken.get(token) === reservation) state.byToken.delete(token);
+        if (state.pendingByTab.get(input.tabId) === reservation) state.pendingByTab.delete(input.tabId);
+        if (state.pendingByToken.get(token) === reservation) state.pendingByToken.delete(token);
         return false;
       }
     }).then(persisted => {
@@ -478,9 +557,8 @@ export function createPanelLaunchAuthority({
   async function whenReady(raw) {
     const issued = parseIssued(raw);
     if (!issued) return false;
-    const reservation = state.byToken.get(issued.token);
-    if (!reservation || reservation.generation !== issued.generation ||
-      state.byTab.get(reservation.tabId) !== reservation || !await reservation.persistence) return false;
+    const reservation = state.byToken.get(issued.token) ?? state.pendingByToken.get(issued.token);
+    if (!reservation || reservation.generation !== issued.generation || !await reservation.persistence) return false;
     if (state.byToken.get(issued.token) !== reservation || state.byTab.get(reservation.tabId) !== reservation ||
       reservation.persistenceState !== 'ready') return false;
     if (reservation.state === 'admitted') return true;
@@ -500,11 +578,13 @@ export function createPanelLaunchAuthority({
       try {
         const pair = await readPair(parsedSender.token);
         const live = pair ? state.byToken.get(pair.record.token) : null;
-        if (pair?.record.state === 'admitted' && (!live || live.connected)) return fail();
+        if (!pair || !live || state.byTab.get(pair.record.tabId) !== live ||
+          !sameRecord(live, pair.record, RECORD_KEYS)) return fail();
+        if (pair.record.state === 'admitted' && (live.connected || live.connectionOwner !== null)) return fail();
         const proofStartedAt = readNow();
         if (!pair || pair.record.issuedAt > proofStartedAt) return fail();
         if (pair.record.state === 'issued' && proofStartedAt >= pair.record.expiresAt) {
-          await eraseExpired(pair.record);
+          await eraseExpired(pair);
           return fail();
         }
         const contexts = await chromeApi.runtime.getContexts({
@@ -513,30 +593,33 @@ export function createPanelLaunchAuthority({
         const proofFinishedAt = readNow();
         if (proofFinishedAt < proofStartedAt) return fail();
         if (pair.record.state === 'issued' && proofFinishedAt >= pair.record.expiresAt) {
-          await eraseExpired(pair.record);
+          await eraseExpired(pair);
           return fail();
         }
         if (!Array.isArray(contexts) || contexts.length !== 1) return fail();
         const context = parseContext(contexts[0], parsedSender.url);
         if (!context) return fail();
         if (pair.record.state === 'admitted') {
-          if (pair.record.contextId !== context.contextId ||
+          if (live.state !== 'admitted' || !sameRecord(live, pair.record, RECORD_KEYS) ||
+            pair.record.contextId !== context.contextId ||
             pair.record.documentId !== context.documentId) return fail();
+          const admission = createAdmission(chromeApi.runtime.id, pair.record, parsedSender.url);
+          live.connectionOwner = admission;
           live.connected = true;
-          return createAdmission(chromeApi.runtime.id, pair.record, parsedSender.url);
+          return admission;
         }
         const admittedRecord = {
           ...pair.record, state: 'admitted', contextId: context.contextId, documentId: context.documentId,
         };
         const admittedIndex = { ...pair.index, state: 'admitted' };
-        if (!await writePair(admittedRecord, admittedIndex)) return fail();
-        if (live) {
-          live.state = 'admitted';
-          live.contextId = context.contextId;
-          live.documentId = context.documentId;
-          live.connected = true;
-        }
-        return createAdmission(chromeApi.runtime.id, admittedRecord, parsedSender.url);
+        const admittedPair = Object.freeze({ record: admittedRecord, index: admittedIndex });
+        if (await mutatePairExact(pair, admittedPair) !== MUTATION_COMMITTED) return fail();
+        for (const key of RECORD_KEYS) live[key] = admittedRecord[key];
+        if (!sameRecord(live, admittedRecord, RECORD_KEYS)) return fail();
+        const admission = createAdmission(chromeApi.runtime.id, admittedRecord, parsedSender.url);
+        live.connectionOwner = admission;
+        live.connected = true;
+        return admission;
       } catch { return fail(); }
     });
   }
@@ -544,19 +627,27 @@ export function createPanelLaunchAuthority({
   async function reprove(raw) {
     const admission = parseAdmission(raw, chromeApi.runtime.id);
     if (!admission) return fail();
+    const reservation = state.byToken.get(admission.token);
+    if (!reservation || reservation.connectionOwner !== admission || !reservation.connected ||
+      state.byTab.get(admission.tabId) !== reservation) return fail();
     return serialize(state, async () => {
       try {
+        const owner = state.byToken.get(admission.token);
+        if (!owner || owner !== reservation || owner.connectionOwner !== admission || !owner.connected ||
+          state.byTab.get(admission.tabId) !== owner) return fail();
         const pair = await readPair(admission.token);
         if (!pair || pair.record.state !== 'admitted' || pair.record.tabId !== admission.tabId ||
           pair.record.windowId !== admission.windowId || pair.record.generation !== admission.generation ||
           pair.record.contextId !== admission.contextId || pair.record.documentId !== admission.documentId ||
-          pair.record.issuedAt > pair.record.expiresAt) return fail();
+          pair.record.issuedAt > pair.record.expiresAt || !sameRecord(owner, pair.record, RECORD_KEYS)) return fail();
         const contexts = await chromeApi.runtime.getContexts({
           contextTypes: ['SIDE_PANEL'], documentUrls: [admission.url],
         });
         if (!Array.isArray(contexts) || contexts.length !== 1) return fail();
         const context = parseContext(contexts[0], admission.url);
         if (!context || context.contextId !== admission.contextId || context.documentId !== admission.documentId) return fail();
+        if (state.byToken.get(admission.token) !== owner || owner.connectionOwner !== admission ||
+          !owner.connected || state.byTab.get(admission.tabId) !== owner) return fail();
         return admission;
       } catch { return fail(); }
     });
@@ -572,8 +663,7 @@ export function createPanelLaunchAuthority({
           pair.record.tabId !== source.tabId || pair.record.windowId !== source.windowId) return false;
         const reservation = state.byTab.get(source.tabId);
         if (!reservation || state.byToken.get(pair.record.token) !== reservation ||
-          reservation.token !== pair.record.token || reservation.generation !== pair.record.generation ||
-          reservation.contextId !== pair.record.contextId || reservation.documentId !== pair.record.documentId) return false;
+          !sameRecord(reservation, pair.record, RECORD_KEYS)) return false;
         const url = urlFor(chromeApi.runtime.id, pair.record.token);
         const contexts = await chromeApi.runtime.getContexts({
           contextTypes: ['SIDE_PANEL'], documentUrls: [url],
@@ -594,12 +684,12 @@ export function createPanelLaunchAuthority({
     return serialize(state, async () => {
       let replacement = null;
       try {
+        if (state.pendingByTab.has(source.tabId)) return fail('PANEL_LAUNCH_CONFLICT');
         const pair = await readIndexedPair(source.tabId);
         if (!pair || pair.absent === true || pair.record.state !== 'admitted') return fail();
         const current = state.byTab.get(source.tabId);
         if (!current || state.byToken.get(pair.record.token) !== current ||
-          current.token !== pair.record.token || current.generation !== pair.record.generation ||
-          current.contextId !== pair.record.contextId || current.documentId !== pair.record.documentId) return fail();
+          !sameRecord(current, pair.record, RECORD_KEYS)) return fail();
         const currentUrl = urlFor(chromeApi.runtime.id, pair.record.token);
         const contexts = await chromeApi.runtime.getContexts({
           contextTypes: ['SIDE_PANEL'], documentUrls: [currentUrl],
@@ -609,14 +699,14 @@ export function createPanelLaunchAuthority({
           : null;
         if (!context || context.contextId !== pair.record.contextId ||
           context.documentId !== pair.record.documentId) return fail();
-        if (!await removePair(pair.record)) return fail();
-        forget(pair.record);
 
         const issuedAt = readNow();
         if (issuedAt > Number.MAX_SAFE_INTEGER - ttlMs ||
           !Number.isSafeInteger(pair.record.generation + 1)) return fail();
         const token = encodeToken(randomBytes(32));
-        if (token === pair.record.token || state.byToken.has(token)) return fail('PANEL_LAUNCH_CONFLICT');
+        if (token === pair.record.token || state.byToken.has(token) || state.pendingByToken.has(token)) {
+          return fail('PANEL_LAUNCH_CONFLICT');
+        }
         const generation = pair.record.generation + 1;
         const expiresAt = issuedAt + ttlMs;
         const record = {
@@ -628,26 +718,72 @@ export function createPanelLaunchAuthority({
           state: 'issued', issuedAt, expiresAt,
         };
         replacement = {
-          ...record, persistence: Promise.resolve(false), persistenceState: 'pending', connected: false,
+          ...record, persistence: Promise.resolve(true), persistenceState: 'pending',
+          connected: false, connectionOwner: null,
         };
+        state.pendingByTab.set(record.tabId, replacement);
+        state.pendingByToken.set(token, replacement);
+        if (await mutatePairExact(pair, null) !== MUTATION_COMMITTED) throw new Error('denied');
+        forget(pair.record);
+        if (await mutatePairExact(null, Object.freeze({ record, index })) !== MUTATION_COMMITTED ||
+          state.pendingByTab.get(record.tabId) !== replacement ||
+          state.pendingByToken.get(token) !== replacement) throw new Error('denied');
+        state.pendingByTab.delete(record.tabId);
+        state.pendingByToken.delete(token);
         state.generations.set(record.tabId, Math.max(state.generations.get(record.tabId) ?? 0, generation));
         state.byTab.set(record.tabId, replacement);
         state.byToken.set(token, replacement);
-        const persisted = await writePair(record, index);
-        if (!persisted) throw new Error('denied');
         replacement.persistenceState = 'ready';
         replacement.persistence = Promise.resolve(true);
         return Object.freeze({ ok: true, token, path: pathFor(token), generation });
       } catch {
         if (replacement) {
-          if (state.byTab.get(replacement.tabId) === replacement) state.byTab.delete(replacement.tabId);
-          if (state.byToken.get(replacement.token) === replacement) state.byToken.delete(replacement.token);
-          try {
-            const persisted = await readPair(replacement.token);
-            if (persisted) await removePair(persisted.record);
-          } catch { /* the replacement remains denied */ }
+          if (state.pendingByTab.get(replacement.tabId) === replacement) state.pendingByTab.delete(replacement.tabId);
+          if (state.pendingByToken.get(replacement.token) === replacement) state.pendingByToken.delete(replacement.token);
         }
         return fail();
+      }
+    });
+  }
+
+  async function retirePort(raw) {
+    const admission = parseAdmission(raw, chromeApi.runtime.id);
+    if (!admission) return retirement('denied');
+    const reservation = state.byToken.get(admission.token);
+    if (!reservation || reservation.connectionOwner !== admission || !reservation.connected ||
+      state.byTab.get(admission.tabId) !== reservation) return retirement('denied');
+    return serialize(state, async () => {
+      try {
+        const owner = state.byToken.get(admission.token);
+        if (!owner || owner !== reservation || owner.connectionOwner !== admission || !owner.connected ||
+          state.byTab.get(admission.tabId) !== owner) return retirement('denied');
+        const pair = await readPair(admission.token);
+        if (!pair || pair.record.state !== 'admitted' || pair.record.tabId !== admission.tabId ||
+          pair.record.windowId !== admission.windowId || pair.record.generation !== admission.generation ||
+          pair.record.contextId !== admission.contextId || pair.record.documentId !== admission.documentId ||
+          !sameRecord(owner, pair.record, RECORD_KEYS)) {
+          return retirement('denied');
+        }
+        const contexts = await chromeApi.runtime.getContexts({
+          contextTypes: ['SIDE_PANEL'], documentUrls: [admission.url],
+        });
+        if (!Array.isArray(contexts)) return retirement('denied');
+        const context = contexts.length === 1 ? parseContext(contexts[0], admission.url) : null;
+        const confirmed = await readPair(admission.token);
+        if (!confirmed || !sameRecord(confirmed.record, pair.record, RECORD_KEYS) ||
+          !sameRecord(confirmed.index, pair.index, INDEX_KEYS) ||
+          state.byToken.get(admission.token) !== owner || owner.connectionOwner !== admission ||
+          !owner.connected || state.byTab.get(admission.tabId) !== owner) return retirement('denied');
+        if (context && context.contextId === admission.contextId && context.documentId === admission.documentId) {
+          owner.connectionOwner = null;
+          owner.connected = false;
+          return retirement('released');
+        }
+        if (await mutatePairExact(confirmed, null) !== MUTATION_COMMITTED) return retirement('denied');
+        forget(confirmed.record);
+        return retirement('revoked');
+      } catch {
+        return retirement('denied');
       }
     });
   }
@@ -658,15 +794,23 @@ export function createPanelLaunchAuthority({
     const claim = admission ?? issued;
     if (!claim) return fail();
     const reservation = state.byToken.get(claim.token);
+    if (admission && (!reservation || reservation.connectionOwner !== admission || !reservation.connected ||
+      state.byTab.get(admission.tabId) !== reservation)) return fail();
     if (reservation && !await reservation.persistence) return fail();
     return serialize(state, async () => {
       try {
+        if (admission) {
+          const owner = state.byToken.get(admission.token);
+          if (!owner || owner !== reservation || owner.connectionOwner !== admission || !owner.connected ||
+            state.byTab.get(admission.tabId) !== owner) return fail();
+        }
         const pair = await readPair(claim.token);
         if (!pair || pair.record.generation !== claim.generation ||
           (admission && (pair.record.state !== 'admitted' || pair.record.tabId !== admission.tabId ||
             pair.record.windowId !== admission.windowId || pair.record.contextId !== admission.contextId ||
-            pair.record.documentId !== admission.documentId))) return fail();
-        if (!await removePair(pair.record)) return fail();
+            pair.record.documentId !== admission.documentId ||
+            !sameRecord(reservation, pair.record, RECORD_KEYS)))) return fail();
+        if (await mutatePairExact(pair, null) !== MUTATION_COMMITTED) return fail();
         forget(pair.record);
         return Object.freeze({ ok: true, revoked: true });
       } catch { return fail(); }
@@ -675,6 +819,6 @@ export function createPanelLaunchAuthority({
 
   return Object.freeze({
     initialize, issue, isReady, whenReady, admitPort, reprove,
-    hasOpenPanelForSource, rotateForNavigation, revoke,
+    hasOpenPanelForSource, rotateForNavigation, retirePort, revoke,
   });
 }
