@@ -19,6 +19,13 @@ const CAPTURE_MODES = Object.freeze(['full-evidence', 'element-only', 'no-pixels
 const PIXEL_CAPTURE_MODES = Object.freeze(['full-evidence', 'element-only']);
 const PRIVACY_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private-marker']);
 const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
+const AUDIT_PROGRESS = Object.freeze([
+  ['opening', 'Abrindo o site', 5],
+  ['collecting', 'Lendo a estrutura', 25],
+  ['testing', 'Verificando acessibilidade', 50],
+  ['evidence', 'Preparando evidências', 72],
+  ['reporting', 'Gerando relatório', 92],
+]);
 let state = createInitialPanelState();
 let resultBundle = null;
 let requestSequence = 0;
@@ -46,6 +53,17 @@ export function createPanelAttachedAuditIntent(raw) {
     type: 'PANEL_START_ATTACHED_AUDIT', capabilityId: input.capabilityId,
     captureMode: input.captureMode, includeQuery: false, deleteAfterCompleteExport: false,
   });
+}
+
+export function shouldShowPanelStartFailure(current) {
+  try {
+    const screen = current && typeof current === 'object'
+      ? Object.getOwnPropertyDescriptor(current, 'screen') : null;
+    const auditId = current && typeof current === 'object'
+      ? Object.getOwnPropertyDescriptor(current, 'auditId') : null;
+    return Boolean(screen?.enumerable && Object.hasOwn(screen, 'value') && screen.value === 'running' &&
+      auditId?.enumerable && Object.hasOwn(auditId, 'value') && auditId.value === null);
+  } catch { return false; }
 }
 
 export function createPanelAuditDeletionController({
@@ -81,6 +99,20 @@ export function projectPanelBootstrapEvent(value) {
     type: 'PRIVACY_PAUSED', auditId: paused.auditId, mode: paused.mode,
     categories: Object.freeze(categories), message: PRIVACY_MESSAGE,
   }) : null;
+}
+
+export function projectPanelAuditProgressEvent(value, sender, runtime, currentAuditId) {
+  if (!authorizedWorkerSender(sender, runtime) || !AUDIT_ID.test(currentAuditId ?? '')) return null;
+  const event = exactRecord(value, ['type', 'auditId', 'sessionId', 'phase', 'message', 'percent', 'at']);
+  if (!event || event.type !== 'AUDIT_PROGRESS' || event.auditId !== currentAuditId ||
+    event.sessionId !== event.auditId || !canonicalIsoTime(event.at)) return null;
+  return AUDIT_PROGRESS.some(([phase, message, percent]) =>
+    event.phase === phase && event.message === message && event.percent === percent)
+    ? Object.freeze({
+        type: 'AUDIT_PROGRESS', auditId: event.auditId, sessionId: event.sessionId,
+        phase: event.phase, message: event.message, percent: event.percent, at: event.at,
+      })
+    : null;
 }
 
 export function createPanelPrivacyConfirmationController(raw) {
@@ -299,7 +331,7 @@ async function startAttachedAudit() {
   const response = await requestPanelIntent(startIntent);
   const started = parseStartedAudit(response);
   await personaSession.afterAuditAttempt({ started });
-  if (!started) {
+  if (!started && shouldShowPanelStartFailure(state)) {
     transition({ type: 'AUDIT_UNAVAILABLE', reason: 'Não foi possível concluir a operação local.' });
   }
 }
@@ -447,6 +479,35 @@ function receivePortStatus(value) {
   if (typeof value === 'string') announce(value);
 }
 
+function authorizedWorkerSender(sender, runtime) {
+  const source = ownDataRecord(sender);
+  const context = exactRecord(runtime, ['id', 'workerUrl']);
+  return Boolean(source && context && typeof context.id === 'string' && typeof context.workerUrl === 'string' &&
+    source.id === context.id && source.tab === undefined &&
+    (source.url === undefined || source.url === context.workerUrl));
+}
+
+function ownDataRecord(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.some(key => typeof key !== 'string')) return null;
+    const copy = {};
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
+      copy[key] = descriptor.value;
+    }
+    return copy;
+  } catch { return null; }
+}
+
+function canonicalIsoTime(value) {
+  if (typeof value !== 'string') return false;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) && date.toISOString() === value;
+}
+
 function synchronizePersonaOnBootstrap() {
   if (personaBootstrapSynchronized) return;
   personaBootstrapSynchronized = true;
@@ -589,6 +650,15 @@ if (authorizedLaunch && typeof chromeApi?.runtime?.onMessage?.addListener === 'f
     transition,
   });
   chromeApi.runtime.onMessage.addListener((message, sender) => {
+    const runtime = {
+      id: chromeApi.runtime.id,
+      workerUrl: chromeApi.runtime.getURL('src/background/service-worker.js'),
+    };
+    const progress = projectPanelAuditProgressEvent(message, sender, runtime, state.auditId);
+    if (progress) {
+      transition(progress);
+      return;
+    }
     auditDeletionController.receive(message, sender);
   });
 }

@@ -10,6 +10,7 @@ import {
   didPixelRasterTargetChangeV1,
   isPixelRasterBoundaryV1,
   isPixelPrivacyGateV1,
+  settleRefusedPixelRasterV1,
 } from '../../src/background/pixel-privacy-gate.js';
 import {
   createScriptedPixelCommitClockV1,
@@ -214,7 +215,7 @@ test('first raster refuses a sensitive category added while one-shot consent is 
   });
   let signalReads = 0;
   let rasters = 0;
-  const { boundary } = await rasterFixture({
+  const { boundary, gate, cleanup } = await rasterFixture({
     consentId,
     probeSensitiveCaptureSignals: async () => {
       signalReads += 1;
@@ -226,6 +227,10 @@ test('first raster refuses a sensitive category added while one-shot consent is 
   await assert.rejects(() => boundary.captureFullPage(), /PIXEL_CAPTURE_BOUNDARY_DENIED/u);
   assert.equal(signalReads, 2);
   assert.equal(rasters, 0, 'authorization for earlier categories cannot cover a newly detected category');
+  assert.equal(settleRefusedPixelRasterV1(boundary), true);
+  assert.equal(assertPixelPipelineAuthorizedV1(gate, { auditId: 'audit-1', capturePolicy: POLICY }), true);
+  assert.deepEqual(await gate.afterPixels({ auditId: 'audit-1', pixelStarted: false }), { status: 'settled' });
+  assert.deepEqual(cleanup, ['after']);
 });
 
 test('first raster fails closed for expired, non-monotonic or invalid private clocks', async t => {
@@ -329,6 +334,7 @@ test('document drift or native abort after the final proof starts no raster', as
     await assert.rejects(() => boundary.captureFullPage(), /PIXEL_CAPTURE_BOUNDARY_DENIED/u);
     assert.equal(rasters, 0);
     assert.equal(didPixelRasterTargetChangeV1(boundary), true);
+    assert.throws(() => settleRefusedPixelRasterV1(boundary), /PIXEL_CAPTURE_BOUNDARY_DENIED/u);
   });
 
   await t.test('abort on final proof return', async () => {
@@ -397,6 +403,7 @@ test('only element-only may settle without a raster and its attestation permanen
     policy,
     captureElement: async () => { rasters += 1; },
   });
+  await boundary.settle();
   await boundary.settle();
   assert.equal(assertPixelPipelineAuthorizedV1(gate, { auditId: 'audit-1', capturePolicy: policy }), true);
   await assert.rejects(() => boundary.captureElement(), /PIXEL_CAPTURE_BOUNDARY_DENIED/u);

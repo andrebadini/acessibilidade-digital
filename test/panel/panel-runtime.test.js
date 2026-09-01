@@ -13,7 +13,9 @@ const {
   createPanelAuditDeletionController,
   createPanelAttachedAuditIntent,
   createPanelPrivacyConfirmationController,
+  projectPanelAuditProgressEvent,
   projectPanelBootstrapEvent,
+  shouldShowPanelStartFailure,
 } = runtime;
 
 const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
@@ -49,6 +51,41 @@ test('builds the exact attached start envelope from each user-selected capture m
     { capabilityId: 'C'.repeat(22), captureMode: 'pixels' },
     { capabilityId: 'C'.repeat(22), captureMode: 'full-evidence', extra: 'PRIVATE' },
   ]) assert.equal(createPanelAttachedAuditIntent(input), null);
+});
+
+test('a late start timeout cannot replace an authoritative running or result bootstrap', () => {
+  assert.equal(shouldShowPanelStartFailure({ screen: 'running', auditId: null }), true);
+  assert.equal(shouldShowPanelStartFailure({ screen: 'running', auditId: 'audit-started' }), false);
+  assert.equal(shouldShowPanelStartFailure({ screen: 'result', auditId: 'audit-started' }), false);
+  assert.equal(shouldShowPanelStartFailure({ screen: 'unavailable', auditId: null }), false);
+});
+
+test('projects only canonical progress from the current worker and audit', () => {
+  const runtime = { id: 'extension-id', workerUrl: 'chrome-extension://extension-id/src/background/service-worker.js' };
+  const message = {
+    type: 'AUDIT_PROGRESS', auditId: 'audit-1', sessionId: 'audit-1',
+    phase: 'testing', message: 'Verificando acessibilidade', percent: 50, at: '2026-09-01T12:00:00.000Z',
+  };
+  assert.deepEqual(projectPanelAuditProgressEvent(message, { id: runtime.id, url: runtime.workerUrl }, runtime, 'audit-1'), message);
+  assert.deepEqual(projectPanelAuditProgressEvent(message, { id: runtime.id }, runtime, 'audit-1'), message);
+  assert.deepEqual(projectPanelAuditProgressEvent(
+    message,
+    { id: runtime.id, url: runtime.workerUrl, origin: 'chrome-extension://extension-id' },
+    runtime,
+    'audit-1',
+  ), message);
+  for (const [sender, event] of [
+    [{ id: 'other', url: runtime.workerUrl }, message],
+    [{ id: runtime.id, url: 'chrome-extension://extension-id/src/review/index.html' }, message],
+    [{ id: runtime.id, tab: { id: 7 } }, message],
+    [{ id: runtime.id, url: runtime.workerUrl }, { ...message, auditId: 'other-audit', sessionId: 'other-audit' }],
+    [{ id: runtime.id, url: runtime.workerUrl }, { ...message, message: 'PRIVATE', percent: 51 }],
+    [{ id: runtime.id, url: runtime.workerUrl }, { ...message, at: '2026-09-01T12:00:00Z' }],
+    [{ id: runtime.id, url: runtime.workerUrl }, { ...message, private: 'SECRET' }],
+    [{ id: runtime.id, url: runtime.workerUrl }, {
+      ...message, phase: 'complete', message: 'Auditoria concluída', percent: 100,
+    }],
+  ]) assert.equal(projectPanelAuditProgressEvent(event, sender, runtime, 'audit-1'), null);
 });
 
 test('clears the matching in-memory result when the worker confirms audit deletion', () => {

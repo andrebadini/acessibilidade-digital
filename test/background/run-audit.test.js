@@ -27,6 +27,11 @@ const TEST_DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
 const TEST_EVIDENCE_URL = sanitizeEvidenceUrlV1('https://example.test/final?secret=REMOVE', { includeQuery: false });
 const EMPTY_SIGNALS = Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: false, categories: Object.freeze([]) });
 const PASSWORD_SIGNALS = Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: true, categories: Object.freeze(['password']) });
+const PASSWORD_PAYMENT_SIGNALS = Object.freeze({
+  version: 'SensitiveCaptureSignalsV1',
+  detected: true,
+  categories: Object.freeze(['password', 'payment']),
+});
 
 function attachedPixelGate(policy, calls, {
   auditId = 'audit-attached-pixels', consentId = null, runnerStatus = 'ready', beforeGateResult = null,
@@ -693,6 +698,126 @@ test('attached full-evidence re-proves the same document before every raster wit
   assert.equal(rasterIndexes.length, adapter.counts.screenshots);
   for (const index of rasterIndexes) assert.match(adapter.events[index - 1], /^proof-\d+$/u);
   assert.deepEqual(gateCalls, ['gate', 'after'], 'one-shot consent is gated once even across multiple rasters');
+});
+
+test('attached full-evidence keeps a partial report while refusing every later raster after sensitive content expands', async () => {
+  const auditId = 'audit-attached-sensitive-expansion';
+  const consentId = 'A'.repeat(21) + 'Q';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const gateCalls = [];
+  let sensitiveReads = 0;
+  let persisted = 0;
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    sensitiveSignals: PASSWORD_SIGNALS,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  adapter.probeSensitiveCaptureSignals = async () => {
+    sensitiveReads += 1;
+    adapter.events.push(`sensitive-probe-${sensitiveReads}`);
+    return sensitiveReads < 4 ? PASSWORD_SIGNALS : PASSWORD_PAYMENT_SIGNALS;
+  };
+
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST,
+    },
+    capturePolicy: policy,
+    privacyGate: attachedPixelGate(policy, gateCalls, { auditId, consentId }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { persisted += 1; },
+  });
+
+  assert.equal(result.state, 'model');
+  assert.equal(result.failureCode, null);
+  assert.equal(result.model.session.status, 'partial');
+  assert.equal(persisted, 1);
+  assert.equal(adapter.counts.fullPageCalls, 1);
+  assert.equal(adapter.counts.elementCalls, 0);
+  assert.equal(adapter.counts.screenshots, 1, 'newly sensitive content must never reach a later raster');
+  assert.equal(result.model.session.diagnostics.some(entry => entry.code === 'ELEMENT_CAPTURE_FAILED'), true);
+  assert.deepEqual(gateCalls, ['gate', 'after']);
+});
+
+test('attached full-evidence falls back to a pixel-free partial report when sensitive content expands before the first raster', async () => {
+  const auditId = 'audit-attached-sensitive-expansion-before-first-raster';
+  const consentId = 'A'.repeat(21) + 'Q';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const gateCalls = [];
+  let sensitiveReads = 0;
+  let persisted = 0;
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    sensitiveSignals: PASSWORD_SIGNALS,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  adapter.probeSensitiveCaptureSignals = async () => {
+    sensitiveReads += 1;
+    adapter.events.push(`sensitive-probe-${sensitiveReads}`);
+    return sensitiveReads < 3 ? PASSWORD_SIGNALS : PASSWORD_PAYMENT_SIGNALS;
+  };
+
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST,
+    },
+    capturePolicy: policy,
+    privacyGate: attachedPixelGate(policy, gateCalls, { auditId, consentId }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { persisted += 1; },
+  });
+
+  assert.equal(result.state, 'model');
+  assert.equal(result.failureCode, null);
+  assert.equal(result.model.session.status, 'partial');
+  assert.equal(persisted, 1);
+  assert.equal(adapter.counts.screenshots, 0);
+  assert.equal(adapter.counts.fullPageCalls, 0);
+  assert.equal(adapter.counts.elementCalls, 0);
+  assert.equal(result.model.session.diagnostics.some(entry => entry.code === 'FULL_PAGE_CAPTURE_FAILED'), true);
+  assert.equal(result.model.session.diagnostics.some(entry => entry.code === 'ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE'), true);
+  assert.deepEqual(gateCalls, ['gate', 'after']);
+});
+
+test('attached element-only keeps a pixel-free partial report when sensitive content expands before the first thumbnail', async () => {
+  const auditId = 'audit-attached-element-sensitive-expansion';
+  const consentId = 'A'.repeat(21) + 'Q';
+  const policy = createCapturePolicyV1({ mode: 'element-only', includeQuery: false });
+  const gateCalls = [];
+  let sensitiveReads = 0;
+  let persisted = 0;
+  const adapter = fakeAdapter({ trackCaptureCalls: true, sensitiveSignals: PASSWORD_SIGNALS });
+  adapter.probeSensitiveCaptureSignals = async () => {
+    sensitiveReads += 1;
+    adapter.events.push(`sensitive-probe-${sensitiveReads}`);
+    return sensitiveReads < 3 ? PASSWORD_SIGNALS : PASSWORD_PAYMENT_SIGNALS;
+  };
+
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: {
+      kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+      initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST,
+    },
+    capturePolicy: policy,
+    privacyGate: attachedPixelGate(policy, gateCalls, { auditId, consentId }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { persisted += 1; },
+  });
+
+  assert.equal(result.state, 'model');
+  assert.equal(result.failureCode, null);
+  assert.equal(result.model.session.status, 'partial');
+  assert.equal(persisted, 1);
+  assert.equal(adapter.counts.screenshots, 0);
+  assert.equal(adapter.counts.fullPageCalls, 0);
+  assert.equal(adapter.counts.elementCalls, 0);
+  assert.equal(result.model.session.diagnostics.some(entry => entry.code === 'ELEMENT_CAPTURE_FAILED'), true);
+  assert.deepEqual(gateCalls, ['gate', 'after']);
 });
 
 test('attached full-evidence abort immediately before a later raster starts no later raster effect', async () => {

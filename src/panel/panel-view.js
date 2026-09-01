@@ -11,11 +11,11 @@ const PRIVACY_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private
 const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
 const LOCAL_PIXEL_NOTICE = 'A auditoria pode capturar pixels e conteúdo visível, inclusive dados pessoais. Tudo permanece neste dispositivo.';
 const RUNNING_PHASES = Object.freeze([
-  'Abrindo e estabilizando a página.',
-  'Lendo estrutura e acessibilidade.',
-  'Verificando regras automáticas.',
-  'Coletando evidências.',
-  'Preparando o resultado.',
+  ['opening', 'Abrindo o site', 5, 'Abrindo e estabilizando a página'],
+  ['collecting', 'Lendo a estrutura', 25, 'Lendo estrutura e acessibilidade'],
+  ['testing', 'Verificando acessibilidade', 50, 'Verificando regras automáticas'],
+  ['evidence', 'Preparando evidências', 72, 'Coletando evidências'],
+  ['reporting', 'Gerando relatório', 92, 'Preparando o resultado'],
 ]);
 const COVERAGE_DISCLAIMER = 'Percentual da execução automática concluída. Não é nota, certificação ou declaração de conformidade.';
 const WCAG_LEVEL_ORDER = Object.freeze(['A', 'AA', 'AAA']);
@@ -39,6 +39,7 @@ export function buildPanelView({ state, summary = null, detail = null } = {}) {
     captureMode,
     sessionStatus,
     privacy: sessionStatus === 'privacy-paused' ? privacy : neutralPrivacyProjection(),
+    progress: copyProgress(dataProperty(state, 'progress')),
     filters: copyFilters(state.filters),
     selectedOccurrenceId: typeof state.selectedOccurrenceId === 'string' ? state.selectedOccurrenceId : null,
     evidenceExpanded: state.evidenceExpanded === true,
@@ -211,23 +212,52 @@ function renderRunning(document, view, emit) {
   const root = section(document, 'panel-screen panel-running');
   root.dataset.screen = 'running';
   if (view.sessionStatus === 'privacy-paused') return renderPrivacyPause(root, document, view, emit);
+  const started = view.auditId !== null;
+  const current = view.progress.percent === null ? null : view.progress;
+  const currentPhase = current ? RUNNING_PHASES.find(([phase]) => phase === current.phase) : null;
+  const currentLabel = currentPhase?.[3] ?? current?.message;
+  const status = !started
+    ? 'Iniciando avaliação. Aguardando confirmação da auditoria.'
+    : current ? `Etapa atual: ${currentLabel}. ${current.percent}% concluído.`
+      : 'Auditoria em andamento. Aguardando a primeira atualização confirmada.';
   root.append(
-    paragraph(document, 'Auditoria em andamento', 'status-label status-running'),
+    paragraph(document, started ? 'Auditoria em andamento' : 'Iniciando avaliação', 'status-label status-running'),
     heading(document, 2, 'Avaliando a página atual'),
-    paragraph(document, 'Estas etapas explicam o processo em ordem, sem indicar qual delas está em andamento nem uma porcentagem parcial.', 'supporting-copy'),
+    paragraph(document, status, 'supporting-copy'),
   );
+  const progress = document.createElement('progress');
+  progress.className = 'audit-progress';
+  progress.dataset.auditProgress = '';
+  progress.setAttribute('aria-label', current ? `Progresso da auditoria: ${current.percent}%` : 'Progresso da auditoria em andamento');
+  if (current) {
+    progress.setAttribute('value', String(current.percent));
+    progress.setAttribute('max', '100');
+  }
   const phases = document.createElement('ol');
   phases.className = 'phase-list';
   phases.dataset.runningPhases = '';
-  for (const phase of RUNNING_PHASES) {
+  phases.setAttribute('aria-label', 'Etapas da auditoria');
+  for (const [phase, _message, percent, label] of RUNNING_PHASES) {
     const item = document.createElement('li');
-    item.textContent = phase;
+    const phaseState = current ? (percent < current.percent ? 'complete' : percent === current.percent ? 'current' : 'pending') : 'pending';
+    item.dataset.phaseState = phaseState;
+    if (phaseState === 'current') item.setAttribute('aria-current', 'step');
+    const indicator = document.createElement('span');
+    indicator.className = `phase-indicator phase-indicator-${phaseState}`;
+    indicator.dataset.phaseIndicator = phaseState;
+    indicator.setAttribute('aria-hidden', 'true');
+    indicator.textContent = phaseState === 'complete' ? '✓' : phaseState === 'current' ? '●' : '○';
+    const phaseLabel = document.createElement('span');
+    phaseLabel.textContent = phaseState === 'complete' ? `${label} — concluída`
+      : phaseState === 'current' ? `${label} — em andamento` : label;
+    item.append(indicator, phaseLabel);
     phases.append(item);
   }
   root.append(
+    progress,
     phases,
     actionButton(document, 'Cancelar auditoria', 'CANCEL_AUDIT', 'cancel-audit', emit, 'danger-action'),
-    liveRegion(document, 'Auditoria em andamento.'),
+    liveRegion(document, status),
   );
   return root;
 }
@@ -751,6 +781,24 @@ function copyFilters(filters) {
   const copy = {};
   for (const name of FILTERS) copy[name] = Array.isArray(filters?.[name]) ? [...filters[name]] : [];
   return copy;
+}
+
+function copyProgress(value) {
+  const valid = value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype;
+  if (!valid || value.phase === null || value.message === null || value.percent === null || value.at === null) {
+    return { phase: null, message: null, percent: null, at: null };
+  }
+  return RUNNING_PHASES.some(([phase, message, percent]) =>
+    value.phase === phase && value.message === message && value.percent === percent && canonicalIsoTime(value.at))
+    ? { phase: value.phase, message: value.message, percent: value.percent, at: value.at }
+    : { phase: null, message: null, percent: null, at: null };
+}
+
+function canonicalIsoTime(value) {
+  if (typeof value !== 'string') return false;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) && date.toISOString() === value;
 }
 
 function neutralPrivacyProjection() {

@@ -68,6 +68,7 @@ test('creates an immutable initial screen with only stable interaction state', (
     captureMode: 'full-evidence',
     sessionStatus: null,
     privacy: { mode: null, categories: [], message: null, confirmationPending: false },
+    progress: { phase: null, message: null, percent: null, at: null },
     filters: { impact: [], wcag: [], abnt: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,
@@ -173,6 +174,40 @@ test('implements the exact four-screen lifecycle and ignores unknown events', ()
   assert.strictEqual(reducePanelState(restarted, null), restarted);
 });
 
+test('records only canonical monotonic progress for the current running audit', () => {
+  let state = reducePanelState(createInitialPanelState(), { type: 'START_REQUESTED' });
+  assert.deepEqual(state.progress, { phase: null, message: null, percent: null, at: null });
+  state = reducePanelState(state, { type: 'AUDIT_RUNNING', auditId: 'audit-1' });
+  const opening = {
+    type: 'AUDIT_PROGRESS', auditId: 'audit-1', sessionId: 'audit-1',
+    phase: 'opening', message: 'Abrindo o site', percent: 5, at: '2026-09-01T12:00:00.000Z',
+  };
+  state = reducePanelState(state, opening);
+  assert.deepEqual(state.progress, { phase: 'opening', message: 'Abrindo o site', percent: 5, at: opening.at });
+
+  const testing = { ...opening, phase: 'testing', message: 'Verificando acessibilidade', percent: 50, at: '2026-09-01T12:00:01.000Z' };
+  state = reducePanelState(state, testing);
+  assert.equal(state.progress.percent, 50);
+  const evidence = { ...opening, phase: 'evidence', message: 'Preparando evidências', percent: 72, at: testing.at };
+  state = reducePanelState(state, evidence);
+  assert.equal(state.progress.percent, 72, 'distinct real milestones may share the same clock millisecond');
+  for (const invalid of [
+    { ...opening, at: '2026-09-01T12:00:02.000Z' },
+    { ...testing, auditId: 'other-audit', sessionId: 'other-audit', at: '2026-09-01T12:00:02.000Z' },
+    { ...testing, at: '2026-09-01T12:00:00.000Z' },
+    { ...testing, phase: 'testing', message: 'dado não confiável', at: '2026-09-01T12:00:02.000Z' },
+    { ...testing, phase: 'complete', message: 'Auditoria concluída', percent: 100, at: '2026-09-01T12:00:02.000Z' },
+  ]) assert.strictEqual(reducePanelState(state, invalid), state);
+
+  const paused = reducePanelState(state, {
+    type: 'PRIVACY_PAUSED', auditId: 'audit-1', mode: 'full-evidence', categories: ['password'],
+    message: 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.',
+  });
+  assert.strictEqual(reducePanelState(paused, { ...testing, at: '2026-09-01T12:00:02.000Z' }), paused);
+  const resumed = reducePanelState(paused, { type: 'AUDIT_RUNNING', auditId: 'audit-1' });
+  assert.equal(resumed.progress.percent, 72);
+});
+
 test('drops deleted audit state while preserving an active persona and the selected capture mode', () => {
   let result = reducePanelState(createInitialPanelState(), {
     type: 'CAPTURE_MODE_SELECTED', mode: 'no-pixels', focusId: 'capture-mode-no-pixels',
@@ -202,6 +237,7 @@ test('unknown and invalid events return a detached recursively frozen valid stat
     version: 1, screen: 'result', auditId: 'audit-1',
     captureMode: 'no-pixels', sessionStatus: null,
     privacy: { mode: null, categories: [], message: null, confirmationPending: false },
+    progress: { phase: null, message: null, percent: null, at: null },
     filters: { impact: ['critical'], wcag: [], abnt: [] },
     selectedOccurrenceId: 'occ-1', evidenceExpanded: false,
     persona: {
@@ -312,6 +348,7 @@ test('port interruption and retry preserve only the last safe audit ID', () => {
     captureMode: 'full-evidence',
     sessionStatus: null,
     privacy: { mode: null, categories: [], message: null, confirmationPending: false },
+    progress: { phase: null, message: null, percent: null, at: null },
     filters: { impact: [], wcag: [], abnt: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,

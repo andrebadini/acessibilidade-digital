@@ -45,17 +45,18 @@ test('initial URL and batch choices remain visible with an honest beta limitatio
   assert.doesNotMatch(view, /type="url"|placeholder=.*https|prefill/iu);
 });
 
-test('running screen presents the fixed explanatory phases without synthetic current progress', async () => {
+test('running screen presents only canonical worker progress phases with an accessible native indicator', async () => {
   const view = await panelFile('panel-view.js');
   for (const phase of [
-    'Abrindo e estabilizando a página.',
-    'Lendo estrutura e acessibilidade.',
-    'Verificando regras automáticas.',
-    'Coletando evidências.',
-    'Preparando o resultado.',
+    'Abrindo e estabilizando a página',
+    'Lendo estrutura e acessibilidade',
+    'Verificando regras automáticas',
+    'Coletando evidências',
+    'Preparando o resultado',
   ]) assert.match(view, new RegExp(phase.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
   assert.match(view, /aria-live['"], ['"]polite/u);
-  assert.doesNotMatch(view, /fase atual|concluída \d|\d+% conclu/iu);
+  assert.match(view, /progress\.dataset\.auditProgress/u);
+  assert.match(view, /Etapa atual/u);
   assert.match(view, /Confirme antes de capturar imagens/u);
   assert.match(view, /Tudo permanece neste dispositivo/u);
   assert.match(view, /Continuar e capturar/u);

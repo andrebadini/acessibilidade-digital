@@ -47,6 +47,7 @@ import {
   isPixelRasterBoundaryInterruptionV1,
   isPixelPrivacyGateV1,
   isPixelPrivacyPauseInterruptionV1,
+  settleRefusedPixelRasterV1,
 } from './pixel-privacy-gate.js';
 
 const SCHEMA_VERSION = 1;
@@ -67,6 +68,7 @@ const ANNOTATION_MAP_DIAGNOSTIC_CODES = new Set([
   'ANNOTATION_MAP_TIMEOUT',
 ]);
 const PIXEL_BOUNDARY_INTERRUPTION = new WeakSet();
+const OBSERVED_LEGACY_RASTER_BOUNDARIES = new WeakMap();
 
 function deepFreeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value) || Object.isFrozen(value)) return value;
@@ -409,6 +411,7 @@ async function runLegacyAudit({
   let cdp = null;
   let fatal = false;
   let recoverableFailure = false;
+  let furtherPixelCaptureSuppressed = false;
 
   const awaitStep = async operation => {
     throwIfAborted(signal);
@@ -515,7 +518,10 @@ async function runLegacyAudit({
         state.artifacts.push(artifact);
       }
     } catch (error) {
-      if (isPixelBoundaryInterruption(error, chromeAdapter)) throw error;
+      if (isPixelBoundaryInterruption(error, chromeAdapter)) {
+        if (!canContinueWithoutFurtherPixels(error, chromeAdapter, signal)) throw error;
+        furtherPixelCaptureSuppressed = true;
+      }
       rethrowAbort(error, signal);
       if (chromeAdapter.captureFullPageEnabled !== false) {
         recoverable('FULL_PAGE_CAPTURE_FAILED', 'Não foi possível capturar a página completa no estado original.');
@@ -655,7 +661,7 @@ async function runLegacyAudit({
           recoverable('SNIPPET_CAPTURE_FAILED', 'O trecho de código do elemento não pôde ser capturado.', { occurrenceId: occurrence.occurrenceId });
         }
         let thumbnail = null;
-        if (canCaptureElements) {
+        if (canCaptureElements && !furtherPixelCaptureSuppressed) {
           try {
             thumbnail = await awaitStep(() => (chromeAdapter.captureElement || captureElement)(cdp, node.rect, {
               ...(state.snapshot.document.layoutMetrics || raw.layoutMetrics || pristineMetrics),
@@ -665,7 +671,10 @@ async function runLegacyAudit({
               recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: occurrence.occurrenceId });
             }
           } catch (error) {
-            if (isPixelBoundaryInterruption(error, chromeAdapter)) throw error;
+            if (isPixelBoundaryInterruption(error, chromeAdapter)) {
+              if (!canContinueWithoutFurtherPixels(error, chromeAdapter, signal)) throw error;
+              furtherPixelCaptureSuppressed = true;
+            }
             rethrowAbort(error, signal);
             recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: occurrence.occurrenceId });
           }
@@ -972,9 +981,20 @@ function isPixelBoundaryInterruption(error, adapter) {
       (adapter?.privacyGate && isPixelPrivacyPauseInterruptionV1(error, adapter.privacyGate))));
 }
 
+function canContinueWithoutFurtherPixels(error, adapter, signal) {
+  const boundary = OBSERVED_LEGACY_RASTER_BOUNDARIES.get(adapter);
+  const safeRefusal = Boolean(!signal?.aborted && boundary && isPixelRasterBoundaryInterruptionV1(error) &&
+    !isPixelPrivacyPauseInterruptionV1(error, adapter?.privacyGate) &&
+    !didPixelRasterTargetChangeV1(boundary));
+  if (!safeRefusal) return false;
+  if (didPixelRasterStartV1(boundary)) return true;
+  try { return settleRefusedPixelRasterV1(boundary) === true; }
+  catch { return false; }
+}
+
 function createObservedLegacyAdapter(chromeAdapter, observedTarget, capturePolicy, privacyGate, rasterBoundary) {
   const pixelMode = capturePolicy.mode !== 'no-pixels';
-  return {
+  const adapter = {
     ...chromeAdapter,
     privacyGate,
     captureFullPageEnabled: capturePolicy.captureFullPage,
@@ -999,6 +1019,8 @@ function createObservedLegacyAdapter(chromeAdapter, observedTarget, capturePolic
       await rasterBoundary.settle();
     },
   };
+  OBSERVED_LEGACY_RASTER_BOUNDARIES.set(adapter, rasterBoundary);
+  return adapter;
 }
 
 function alignLegacyDraftWithObservedEvidence(draft, evidenceUrl, requestedEvidenceUrl = null) {

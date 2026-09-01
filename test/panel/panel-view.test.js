@@ -680,3 +680,39 @@ test('reader voice activation is an explicit panel intent and disappears after a
   });
   assert.equal(root.querySelector('button[data-intent="PERSONA_READER_ENABLE_VOICE"]'), null);
 });
+
+test('running view starts indeterminate and becomes determinate only after a validated progress event', () => {
+  const input = fixture();
+  input.state = {
+    ...input.state, screen: 'running', auditId: null, sessionStatus: null,
+    progress: { phase: null, message: null, percent: null, at: null },
+  };
+  let root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  let progress = root.querySelector('progress[data-audit-progress]');
+  assert.ok(progress);
+  assert.equal(progress.hasAttribute('value'), false);
+  assert.match(root.textContent, /Iniciando avaliação/u);
+
+  input.state = {
+    ...input.state, auditId: 'audit-1',
+    progress: { phase: 'testing', message: 'Verificando acessibilidade', percent: 50, at: '2026-09-01T12:00:00.000Z' },
+  };
+  root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  progress = root.querySelector('progress[data-audit-progress]');
+  assert.equal(progress.getAttribute('value'), '50');
+  assert.equal(progress.getAttribute('max'), '100');
+  assert.match(root.textContent, /Etapa atual: Verificando regras automáticas/u);
+  assert.match(root.querySelector('[role="status"]').textContent, /50%/u);
+  assert.equal(root.querySelectorAll('[data-phase-state="complete"]').length, 2);
+  assert.equal(root.querySelectorAll('[data-phase-state="current"]').length, 1);
+  assert.equal(root.querySelector('[data-phase-state="current"]').getAttribute('aria-current'), 'step');
+  assert.equal(root.querySelectorAll('[data-phase-indicator="complete"]').length, 2);
+  assert.equal(root.querySelectorAll('[data-phase-indicator="current"]').length, 1);
+  assert.equal(root.querySelector('[data-phase-indicator="complete"]').textContent, '✓');
+  assert.equal(root.querySelectorAll('[data-phase-state="complete"]')
+    .every(item => /concluída/u.test(item.textContent)), true);
+});

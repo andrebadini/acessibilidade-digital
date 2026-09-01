@@ -1,4 +1,4 @@
-# Backlog da beta 1.0.2
+# Backlog da beta 1.0.3
 
 Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. Elas não reduzem os controles de privacidade, autorização de capturas, correlação das evidências, limpeza de estado ou confiabilidade normativa.
 

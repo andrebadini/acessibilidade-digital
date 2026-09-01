@@ -1,4 +1,4 @@
-# Conteúdo de distribuição — Audita Acessibilidade 1.0.2 beta 1
+# Conteúdo de distribuição — Audita Acessibilidade 1.0.3 beta 2
 
 ## Nome
 
@@ -26,6 +26,7 @@ Principais recursos:
 - revisão assistida com registro do avaliador, decisão, data e nota;
 - relatórios locais em HTML, PDF, CSV e JSON-LD/EARL;
 - painel lateral persistente, destaque vivo do elemento e relatório completo em aba própria;
+- progresso real por etapa, com indicador da fase atual e confirmação visual das etapas concluídas;
 - personas de leitor de tela, acromatopsia e navegação por teclado;
 - processamento local, sem envio do conteúdo auditado para um servidor do desenvolvedor.
 

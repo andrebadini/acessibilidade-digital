@@ -274,9 +274,14 @@ function commitLaterRaster(metadata, rawProof) {
 
 function settleWithoutRaster(metadata) {
   const gate = metadata.gateMetadata;
+  const elementOnly = metadata.policy.mode === 'element-only' && !metadata.policy.captureFullPage &&
+    metadata.policy.captureElements;
+  if (metadata.state === 'settled-without-raster' && gate.state === 'no-raster-settled') {
+    if (!elementOnly || metadata.pixelStarted || metadata.targetChanged) throw rasterDenied();
+    return;
+  }
   if (metadata.state !== 'fresh' || gate.state !== 'armed' ||
-    metadata.policy.mode !== 'element-only' || metadata.policy.captureFullPage ||
-    !metadata.policy.captureElements) throw rasterDenied();
+    !elementOnly) throw rasterDenied();
   metadata.state = 'settled-without-raster';
   gate.state = 'no-raster-settled';
 }
@@ -478,7 +483,11 @@ export function createPixelRasterBoundaryV1(input) {
         metadata.state = 'active';
         return result;
       } catch (error) {
-        if (isPixelPrivacyPauseInterruptionV1(error, metadata.gate) || RASTER_INTERRUPTION.has(error)) throw error;
+        if (isPixelPrivacyPauseInterruptionV1(error, metadata.gate)) throw error;
+        if (RASTER_INTERRUPTION.has(error)) {
+          if (metadata.state !== 'paused' && metadata.state !== 'failed') metadata.state = 'failed';
+          throw error;
+        }
         if (metadata.state !== 'paused' && metadata.state !== 'failed') metadata.state = 'failed';
         throw rasterDenied();
       }
@@ -498,7 +507,10 @@ export function createPixelRasterBoundaryV1(input) {
       metadata.state = 'active';
       return result;
     } catch (error) {
-      if (RASTER_INTERRUPTION.has(error)) throw error;
+      if (RASTER_INTERRUPTION.has(error)) {
+        metadata.state = 'failed';
+        throw error;
+      }
       metadata.state = 'failed';
       throw rasterDenied();
     }
@@ -544,17 +556,27 @@ export function didPixelRasterTargetChangeV1(value) {
   return RASTER_BOUNDARIES.get(value)?.targetChanged === true;
 }
 
+export function settleRefusedPixelRasterV1(value) {
+  const metadata = value && typeof value === 'object' ? RASTER_BOUNDARIES.get(value) : null;
+  const gate = metadata?.gateMetadata;
+  if (!metadata || metadata.state !== 'failed' || metadata.pixelStarted || metadata.targetChanged ||
+    !['armed', 'ready'].includes(gate?.state)) throw rasterDenied();
+  try { nativeAbortFence(metadata.signal); }
+  catch { throw rasterDenied(); }
+  metadata.state = 'settled-without-raster';
+  gate.state = 'no-raster-settled';
+  return true;
+}
+
 export function assertPixelPipelineAuthorizedV1(gate, input) {
   const metadata = gate && typeof gate === 'object' ? GATES.get(gate) : null;
   const captured = exact(input, ['auditId', 'capturePolicy']);
   const policy = captured && copyPolicy(captured.capturePolicy);
   const committed = metadata?.state === 'committed';
-  const settledElementOnly = metadata?.state === 'no-raster-settled' &&
-    metadata.policy?.mode === 'element-only' && metadata.policy.captureFullPage === false &&
-    metadata.policy.captureElements === true;
+  const settledWithoutRaster = metadata?.state === 'no-raster-settled';
   if (!metadata || !captured || !policy || captured.auditId !== metadata.auditId ||
     !samePolicy(policy, metadata.policy) ||
-    (!committed && !settledElementOnly) || metadata.pipelineConsumed) throw denied();
+    (!committed && !settledWithoutRaster) || metadata.pipelineConsumed) throw denied();
   metadata.pipelineConsumed = true;
   return true;
 }

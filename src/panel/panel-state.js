@@ -8,7 +8,7 @@ const PRIVACY_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private
 const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
 const PANEL_STATE_KEYS = Object.freeze([
   'version', 'screen', 'auditId', 'captureMode', 'sessionStatus', 'privacy',
-  'filters', 'selectedOccurrenceId', 'evidenceExpanded', 'persona', 'highlight',
+  'progress', 'filters', 'selectedOccurrenceId', 'evidenceExpanded', 'persona', 'highlight',
   'focusId', 'scrollTop', 'reason',
 ]);
 const PERSONA_MODES = new Set(['reader', 'achromatopsia', 'keyboard']);
@@ -32,6 +32,18 @@ function neutralPrivacy() {
   return { mode: null, categories: [], message: null, confirmationPending: false };
 }
 
+function neutralProgress() {
+  return { phase: null, message: null, percent: null, at: null };
+}
+
+const AUDIT_PROGRESS = Object.freeze([
+  ['opening', 'Abrindo o site', 5],
+  ['collecting', 'Lendo a estrutura', 25],
+  ['testing', 'Verificando acessibilidade', 50],
+  ['evidence', 'Preparando evidências', 72],
+  ['reporting', 'Gerando relatório', 92],
+]);
+
 export function createInitialPanelState() {
   return deepFreezePanelState({
     version: 1,
@@ -40,6 +52,7 @@ export function createInitialPanelState() {
     captureMode: 'full-evidence',
     sessionStatus: null,
     privacy: neutralPrivacy(),
+    progress: neutralProgress(),
     filters: { impact: [], wcag: [], abnt: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,
@@ -72,6 +85,7 @@ export function reducePanelState(current, event) {
       return nextPanelState(current, {
         screen: 'running', auditId: null, selectedOccurrenceId: null,
         sessionStatus: null, privacy: neutralPrivacy(),
+        progress: neutralProgress(),
         evidenceExpanded: false, focusId: 'cancel-audit', scrollTop: 0, reason: null,
       });
     case 'AUDIT_RUNNING':
@@ -79,6 +93,7 @@ export function reducePanelState(current, event) {
       return nextPanelState(current, {
         screen: 'running', auditId: event.auditId, selectedOccurrenceId: null,
         sessionStatus: null, privacy: neutralPrivacy(),
+        progress: current.auditId === event.auditId ? current.progress : neutralProgress(),
         evidenceExpanded: false, focusId: 'cancel-audit', reason: null,
       });
     case 'PRIVACY_PAUSED': {
@@ -93,6 +108,15 @@ export function reducePanelState(current, event) {
         sessionStatus: 'privacy-paused',
         privacy: { mode: paused.mode, categories, message: PRIVACY_MESSAGE, confirmationPending: false },
         focusId: 'confirm-pixel-capture',
+      });
+    }
+    case 'AUDIT_PROGRESS': {
+      const progress = canonicalProgress(event);
+      if (!progress || current.screen !== 'running' || current.sessionStatus !== null ||
+        current.auditId !== progress.auditId || current.progress.percent !== null &&
+          (progress.percent <= current.progress.percent || progress.at < current.progress.at)) return current;
+      return nextPanelState(current, {
+        progress: { phase: progress.phase, message: progress.message, percent: progress.percent, at: progress.at },
       });
     }
     case 'PRIVACY_CONFIRM_REQUESTED':
@@ -118,6 +142,7 @@ export function reducePanelState(current, event) {
       return nextPanelState(current, {
         screen: 'result', auditId: event.auditId, selectedOccurrenceId: selected,
         sessionStatus: null, privacy: neutralPrivacy(),
+        progress: neutralProgress(),
         evidenceExpanded: false, focusId: 'result-summary',
         highlight: uncheckedHighlight(),
         reason: null,
@@ -127,6 +152,7 @@ export function reducePanelState(current, event) {
       if (!exactDataRecord(event, ['type'])) return current;
       return nextPanelState(current, {
         screen: 'initial', auditId: null, sessionStatus: null, privacy: neutralPrivacy(),
+        progress: neutralProgress(),
         filters: { impact: [], wcag: [], abnt: [] }, selectedOccurrenceId: null,
         evidenceExpanded: false, highlight: uncheckedHighlight(), focusId: 'start-attached',
         scrollTop: 0, reason: null,
@@ -317,7 +343,7 @@ function panelState(value) {
   const state = exactDataRecord(value, PANEL_STATE_KEYS);
   if (!state || state.version !== 1 || !['initial', 'running', 'result', 'unavailable'].includes(state.screen) ||
     !CAPTURE_MODES.includes(state.captureMode) || ![null, 'privacy-paused'].includes(state.sessionStatus) ||
-    !state.filters || !PANEL_FILTERS.every(filter => Array.isArray(state.filters[filter]))) return false;
+    !exactProgress(state.progress) || !state.filters || !PANEL_FILTERS.every(filter => Array.isArray(state.filters[filter]))) return false;
   const privacy = exactPrivacy(state.privacy);
   if (!privacy) return false;
   return state.sessionStatus === 'privacy-paused'
@@ -338,6 +364,7 @@ function immutablePanelState(value) {
     captureMode: value.captureMode,
     sessionStatus: value.sessionStatus,
     privacy: copyPrivacy(value.privacy),
+    progress: copyProgress(value.progress),
     filters: Object.fromEntries(PANEL_FILTERS.map(filter => [filter, [...value.filters[filter]]])),
     selectedOccurrenceId: value.selectedOccurrenceId,
     evidenceExpanded: value.evidenceExpanded,
@@ -401,6 +428,7 @@ function unavailablePanelState(current, auditId, reason) {
     auditId: validPanelAuditId(auditId) ? auditId : null,
     sessionStatus: null,
     privacy: neutralPrivacy(),
+    progress: neutralProgress(),
     filters: { impact: [], wcag: [], abnt: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,
@@ -475,6 +503,30 @@ function exactPrivacy(value) {
     privacy.message === PRIVACY_MESSAGE ? privacy : null;
 }
 
+function canonicalProgress(value) {
+  const progress = exactDataRecord(value, ['type', 'auditId', 'sessionId', 'phase', 'message', 'percent', 'at']);
+  if (!progress || progress.type !== 'AUDIT_PROGRESS' || !validPanelAuditId(progress.auditId) ||
+    progress.sessionId !== progress.auditId || !canonicalIsoTime(progress.at)) return null;
+  return AUDIT_PROGRESS.some(([phase, message, percent]) =>
+    progress.phase === phase && progress.message === message && progress.percent === percent)
+    ? { phase: progress.phase, message: progress.message, percent: progress.percent, at: progress.at, auditId: progress.auditId }
+    : null;
+}
+
+function exactProgress(value) {
+  const progress = exactDataRecord(value, ['phase', 'message', 'percent', 'at']);
+  if (!progress) return null;
+  if (progress.phase === null) return progress.message === null && progress.percent === null && progress.at === null ? progress : null;
+  return AUDIT_PROGRESS.some(([phase, message, percent]) =>
+    progress.phase === phase && progress.message === message && progress.percent === percent) && canonicalIsoTime(progress.at)
+    ? progress : null;
+}
+
+function copyProgress(value) {
+  const progress = exactProgress(value);
+  return progress ? { phase: progress.phase, message: progress.message, percent: progress.percent, at: progress.at } : neutralProgress();
+}
+
 function copyPrivacy(value) {
   const privacy = exactPrivacy(value);
   return privacy
@@ -505,6 +557,11 @@ function exactDataRecord(value, keys) {
 }
 
 function validPanelAuditId(value) { return typeof value === 'string' && PANEL_AUDIT_ID.test(value); }
+function canonicalIsoTime(value) {
+  if (typeof value !== 'string') return false;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) && date.toISOString() === value;
+}
 function validPanelOccurrenceId(value) { return typeof value === 'string' && value.length >= 1 && value.length <= 200; }
 function panelFocusId(value, fallback) {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,240}$/u.test(value) ? value : fallback;
