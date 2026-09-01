@@ -38,6 +38,7 @@ const AUDIT_PROGRESS = Object.freeze([
 let state = createInitialPanelState();
 let resultBundle = null;
 let requestSequence = 0;
+let urlEntryRevision = 0n;
 let personaBootstrapSynchronized = false;
 let hasReceivedBootstrap = false;
 const personaSession = createPanelPersonaSession({
@@ -233,6 +234,7 @@ function transition(event) {
 
 function handleEvent(event) {
   if (event?.type === 'CAPTURE_MODE_SELECTED') {
+    reviseUrlEntry();
     transition(event);
     return;
   }
@@ -252,9 +254,11 @@ async function handleIntent(intent) {
       await privacyConfirmation.confirm(intent);
       return;
     case 'OPEN_URL_FORM':
+      reviseUrlEntry();
       transition({ type: 'URL_FORM_OPENED' });
       return;
     case 'CLOSE_URL_FORM':
+      reviseUrlEntry();
       transition({ type: 'URL_FORM_CLOSED' });
       return;
     case 'START_URL':
@@ -380,6 +384,7 @@ async function startAttachedAudit() {
 }
 
 async function startUrlAudit(rawUrl) {
+  const submittedRevision = reviseUrlEntry();
   const normalized = normalizePanelUrlEntry(rawUrl);
   if (!normalized.ok) {
     transition({ type: 'URL_ENTRY_REJECTED', code: normalized.code });
@@ -387,7 +392,6 @@ async function startUrlAudit(rawUrl) {
   }
   const captureMode = state.captureMode;
   if (state.screen !== 'initial' || state.entryMode !== 'single-url' || !CAPTURE_MODES.includes(captureMode)) return;
-  const submittedState = state;
   const requestId = nextRequestId();
   let preparedResponse = null;
   try {
@@ -396,7 +400,8 @@ async function startUrlAudit(rawUrl) {
     });
   } catch { /* a safe nontechnical error is rendered below */ }
   const prepared = parsePreparedCapability(preparedResponse, requestId);
-  if (state !== submittedState) return;
+  if (urlEntryRevision !== submittedRevision || state.screen !== 'initial' ||
+    state.entryMode !== 'single-url' || state.captureMode !== captureMode) return;
   if (!prepared) {
     transition({ type: 'URL_ENTRY_REJECTED', code: 'start-failed' });
     return;
@@ -409,7 +414,7 @@ async function startUrlAudit(rawUrl) {
     return;
   }
   transition({ type: 'START_REQUESTED', source: 'single-url' });
-  if (state === submittedState || state.screen !== 'running' || state.auditId !== null ||
+  if (urlEntryRevision !== submittedRevision || state.screen !== 'running' || state.auditId !== null ||
     state.auditSource !== 'single-url' || state.captureMode !== captureMode) return;
   let response = null;
   try { response = await requestPanelIntent(startIntent); }
@@ -515,7 +520,10 @@ function receiveBootstrap(value) {
     highlightStateSynchronizer.invalidate();
     resultBundle = null;
     if (duplicateIdleBootstrap) render();
-    else transition({ type: 'BOOTSTRAP_INITIAL' });
+    else {
+      reviseUrlEntry();
+      transition({ type: 'BOOTSTRAP_INITIAL' });
+    }
     synchronizePersonaOnBootstrap();
     return;
   }
@@ -660,6 +668,11 @@ function exactDetail(occurrenceId) {
 function nextRequestId() {
   requestSequence += 1;
   return `panel-${Date.now()}-${requestSequence}`;
+}
+
+function reviseUrlEntry() {
+  urlEntryRevision += 1n;
+  return urlEntryRevision;
 }
 
 function requestPanelIntent(message) {

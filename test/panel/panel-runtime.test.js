@@ -412,6 +412,7 @@ test('does not start residual URL navigation when the form closes before PREPARE
     packet?.envelope?.type === 'PREPARE_PANEL_NAVIGATION_CAPABILITY');
   assert.ok(prepare);
   await document.root.querySelector('button[data-intent="CLOSE_URL_FORM"]').dispatch('click');
+  await document.root.querySelector('button[data-intent="OPEN_URL_FORM"]').dispatch('click');
   ports[0].onMessage.emit({
     protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: prepare.requestId,
     response: {
@@ -426,10 +427,9 @@ test('does not start residual URL navigation when the form closes before PREPARE
     response: { ok: false, code: 'AUDIT_NOT_STARTED' },
   });
   assert.equal(Boolean(residualStart), false);
-  assert.ok(document.root.querySelector('button[data-intent="OPEN_URL_FORM"]'));
+  assert.ok(document.root.querySelector('form[id="audit-form"]'));
   assert.doesNotMatch(document.root.textContent, /Abrindo o site|Gerando relatório/iu);
 
-  await document.root.querySelector('button[data-intent="OPEN_URL_FORM"]').dispatch('click');
   const secondUrl = document.root.querySelector('input[id="audit-url"]');
   secondUrl.value = 'https://example.test/second?transient=private';
   await document.root.querySelector('form[id="audit-form"]').dispatch('submit');
@@ -440,6 +440,9 @@ test('does not start residual URL navigation when the form closes before PREPARE
   const changedMode = document.root.querySelector('input[data-capture-mode="full-evidence"]');
   changedMode.checked = true;
   await changedMode.dispatch('change');
+  const restoredMode = document.root.querySelector('input[data-capture-mode="no-pixels"]');
+  restoredMode.checked = true;
+  await restoredMode.dispatch('change');
   ports[0].onMessage.emit({
     protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: secondPrepare.requestId,
     response: {
@@ -448,6 +451,42 @@ test('does not start residual URL navigation when the form closes before PREPARE
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(ports[0].posted.filter(packet => packet?.envelope?.type === 'PANEL_START_URL_AUDIT').length, 0);
+
+  const thirdUrl = document.root.querySelector('input[id="audit-url"]');
+  thirdUrl.value = 'https://example.test/third?transient=private';
+  await document.root.querySelector('form[id="audit-form"]').dispatch('submit');
+  const thirdPrepare = ports[0].posted.filter(packet =>
+    packet?.envelope?.type === 'PREPARE_PANEL_NAVIGATION_CAPABILITY').at(-1);
+  const fourthUrl = document.root.querySelector('input[id="audit-url"]');
+  fourthUrl.value = 'https://example.test/fourth?transient=private';
+  await document.root.querySelector('form[id="audit-form"]').dispatch('submit');
+  const allPrepares = ports[0].posted.filter(packet =>
+    packet?.envelope?.type === 'PREPARE_PANEL_NAVIGATION_CAPABILITY');
+  const fourthPrepare = allPrepares.at(-1);
+  assert.equal(allPrepares.length, 4);
+  assert.notEqual(thirdPrepare.requestId, fourthPrepare.requestId);
+
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: thirdPrepare.requestId,
+    response: { ok: true, requestId: thirdPrepare.envelope.requestId, capabilityId: 'D'.repeat(22) },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ports[0].posted.filter(packet => packet?.envelope?.type === 'PANEL_START_URL_AUDIT').length, 0);
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: fourthPrepare.requestId,
+    response: { ok: true, requestId: fourthPrepare.envelope.requestId, capabilityId: 'E'.repeat(22) },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const starts = ports[0].posted.filter(packet => packet?.envelope?.type === 'PANEL_START_URL_AUDIT');
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].envelope.url, 'https://example.test/fourth?transient=private');
+  assert.equal(starts[0].envelope.captureMode, 'no-pixels');
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: starts[0].requestId,
+    response: { ok: true, auditId: 'audit-fourth-submission', state: 'running' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(document.root.querySelector('[data-screen="running"]'));
 });
 
 test('a duplicate idle bootstrap during URL PREPARE preserves the submitted form and starts once', async t => {
@@ -532,6 +571,97 @@ test('a duplicate idle bootstrap during URL PREPARE preserves the submitted form
   port.onMessage.emit({
     protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: starts[0].requestId,
     response: { ok: true, auditId: 'audit-idle-bootstrap-race', state: 'running' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(document.root.querySelector('[data-screen="running"]'));
+});
+
+test('benign persona synchronization during URL PREPARE does not discard the submitted start', async t => {
+  const originalDocument = globalThis.document;
+  const originalChrome = globalThis.chrome;
+  const originalLocation = globalThis.location;
+  t.after(() => {
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
+    if (originalChrome === undefined) delete globalThis.chrome; else globalThis.chrome = originalChrome;
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation;
+  });
+
+  const document = {
+    activeElement: null,
+    createElement(tagName) { return new RuntimeElement(tagName, document); },
+    querySelector(selector) { return selector === '#panel-root' ? document.root : null; },
+  };
+  document.root = new RuntimeElement('main', document);
+  const ports = [];
+  const chrome = {
+    runtime: {
+      id: 'abcdefghijklmnopabcdefghijklmnop',
+      connect({ name }) {
+        const port = {
+          name, posted: [], onMessage: runtimeEvent(), onDisconnect: runtimeEvent(),
+          postMessage(message) { this.posted.push(structuredClone(message)); },
+          disconnect() {},
+        };
+        ports.push(port);
+        return port;
+      },
+    },
+  };
+  globalThis.document = document;
+  globalThis.chrome = chrome;
+  globalThis.location = {
+    href: `chrome-extension://${chrome.runtime.id}/src/panel/index.html?launch=${'A'.repeat(43)}`,
+  };
+
+  await import(`../../src/panel/panel.js?url-persona-sync-race=${Date.now()}`);
+  const port = ports[0];
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null,
+  });
+  const personaPrepare = port.posted.find(packet =>
+    packet?.envelope?.type === 'PREPARE_PANEL_PERSONA_CAPABILITY');
+  assert.ok(personaPrepare);
+
+  await document.root.querySelector('button[data-intent="OPEN_URL_FORM"]').dispatch('click');
+  const url = document.root.querySelector('input[id="audit-url"]');
+  url.value = 'https://example.test/persona-sync-race?transient=private';
+  await document.root.querySelector('form[id="audit-form"]').dispatch('submit');
+  const navigationPrepare = port.posted.find(packet =>
+    packet?.envelope?.type === 'PREPARE_PANEL_NAVIGATION_CAPABILITY');
+  assert.ok(navigationPrepare);
+
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: personaPrepare.requestId,
+    response: {
+      ok: true, requestId: personaPrepare.envelope.requestId, capabilityId: 'P'.repeat(22),
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const personaRehydrate = port.posted.find(packet =>
+    packet?.envelope?.type === 'PANEL_REHYDRATE_PERSONA');
+  assert.ok(personaRehydrate);
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: personaRehydrate.requestId,
+    response: { ok: false, code: 'PERSONA_NOT_FOUND' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(document.root.querySelector('form[id="audit-form"]'));
+
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: navigationPrepare.requestId,
+    response: {
+      ok: true, requestId: navigationPrepare.envelope.requestId, capabilityId: 'C'.repeat(22),
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  const starts = port.posted.filter(packet => packet?.envelope?.type === 'PANEL_START_URL_AUDIT');
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].envelope.captureMode, 'full-evidence');
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: starts[0].requestId,
+    response: { ok: true, auditId: 'audit-persona-sync-race', state: 'running' },
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.ok(document.root.querySelector('[data-screen="running"]'));
