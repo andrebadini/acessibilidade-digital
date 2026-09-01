@@ -72,6 +72,8 @@ test('default suite keeps fast tests parallel and classifies every real-Chrome E
     'test/e2e/retention-indexeddb-mv3.test.mjs',
     'test/e2e/sidepanel-flow-mv3.test.mjs',
     'test/e2e/support/real-chrome.test.mjs',
+    'test/e2e/url-audit-mv3.test.mjs',
+    'test/e2e/url-pixel-consent-mv3.test.mjs',
   ];
   const plan = createTestPlan(files);
   assert.deepEqual(plan.parallel, [
@@ -86,6 +88,8 @@ test('default suite keeps fast tests parallel and classifies every real-Chrome E
     'test/e2e/public-axe-map-mv3.test.mjs',
     'test/e2e/retention-indexeddb-mv3.test.mjs',
     'test/e2e/sidepanel-flow-mv3.test.mjs',
+    'test/e2e/url-audit-mv3.test.mjs',
+    'test/e2e/url-pixel-consent-mv3.test.mjs',
   ]);
   assert.deepEqual(createNodeTestArgs(plan.parallel), ['--test', ...plan.parallel]);
   assert.deepEqual(createNodeTestArgs(plan.serial, { serial: true }),

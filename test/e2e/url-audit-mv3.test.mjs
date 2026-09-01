@@ -100,8 +100,8 @@ test('audits one tokenized URL in no-pixels mode and keeps reports and exports p
   assert.deepEqual(entry.input, { name: 'audit-url', type: 'url', required: true, maxLength: 2048 });
   assert.equal(entry.screen, 'initial');
   assert.equal(entry.selected, 'full-evidence');
-  assert.equal(entry.disabled, true, 'pixel mode must be blocked instead of silently downgraded');
-  assert.match(entry.note, /somente no modo Sem imagens/u);
+  assert.equal(entry.disabled, false, 'all three explicit capture modes remain available for another URL');
+  assert.equal(entry.note, '');
   assert.equal(entry.status, 'Informe a URL e escolha como coletar as evidências.');
 
   await extension.click(panel, 'input[data-capture-mode="no-pixels"]');

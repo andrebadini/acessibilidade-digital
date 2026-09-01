@@ -11,6 +11,8 @@ const REAL_CHROME_E2E = new Set([
   'test/e2e/public-axe-map-mv3.test.mjs',
   'test/e2e/retention-indexeddb-mv3.test.mjs',
   'test/e2e/sidepanel-flow-mv3.test.mjs',
+  'test/e2e/url-audit-mv3.test.mjs',
+  'test/e2e/url-pixel-consent-mv3.test.mjs',
 ]);
 const PROCESS_SAFE_E2E = new Set([
   'test/e2e/axe-mv3-csp-decision.test.mjs',
