@@ -9,7 +9,7 @@ import test from 'node:test';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const releaseDirectory = fileURLToPath(new URL('../release/', import.meta.url));
-const packageName = 'audita-acessibilidade-1.0.7.zip';
+const packageName = 'audita-acessibilidade-1.0.8.zip';
 
 function runBuild(args) {
   return spawnSync(process.execPath, ['scripts/build-release.mjs', ...args], {

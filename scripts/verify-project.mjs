@@ -50,11 +50,11 @@ assert.deepEqual(AXE_MV3_CSP_GATE, {
 }, 'axe e target-size exigem a prova black-box pública desta versão');
 assert.deepEqual(AXE_RUN_CONFIG.rules['target-size'], { enabled: true }, 'target-size deve acompanhar o gate axe aprovado');
 assert.deepEqual(ANNOTATION_MAP_MV3_GATE, {
-  enabled: false,
-  code: 'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE',
-  reason: 'O mapa numerado de anúncios permanece adiado nesta beta; as evidências visuais individuais continuam disponíveis nos modos com captura.',
-  testedBrowser: null,
-}, 'mapa anotado permanece desabilitado durante esta beta');
+  enabled: true,
+  code: 'ANNOTATION_MAP_MV3_E2E_PASSED',
+  reason: 'Composição local e relatório com mapa validados no percurso público MV3 com confirmação e quatro exportações.',
+  testedBrowser: 'Google Chrome for Testing 152.0.7977.64',
+}, 'mapa anotado exige a prova pública de composição e exportação aprovada');
 assert.doesNotMatch(JSON.stringify(AXE_RUN_CONFIG), /experimental|section508/iu);
 
 assert.equal(CORE_RULES.length, 130);
@@ -91,7 +91,7 @@ if (process.env.AUDITA_VERIFY_SKIP_TESTS !== '1') {
   assert.equal(suite.status, 0, 'npm test precisa passar');
 }
 
-console.log('verify-project: manifest/CSP e axe 4.13.0 aprovados no Chrome for Testing 152.0.7977.64; mapa numerado adiado nesta beta; 130/146 (96/50), identidade neutra, HTML/JSON/PDF, fixtures e privacidade GREEN');
+console.log('verify-project: manifest/CSP e axe 4.13.0 aprovados no Chrome for Testing 152.0.7977.64; mapa numerado aprovado; 130/146 (96/50), identidade neutra, HTML/JSON/PDF, fixtures e privacidade GREEN');
 
 async function sourceFiles(directoryUrl) {
   const directory = directoryUrl.pathname;
