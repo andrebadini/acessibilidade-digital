@@ -1,5 +1,6 @@
 import {
   buildArtifactBaseName,
+  captureBlobLifecycle,
   downloadArtifacts,
 } from '../browser/download-artifacts.js';
 import { renderPdf } from '../browser/render-pdf.js';
@@ -69,6 +70,7 @@ export async function runReportExport(request, dependencies) {
     sourceModel = createAuditModel(capturedRequest.auditModel);
   }
   validateDependencies(dependencies);
+  const blobLifecycle = captureBlobLifecycle(dependencies.blobLifecycle);
   const timeoutMs = capturedRequest.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('Timeout de exportação inválido.');
   const deliveryAt = snapshotCapability === null
@@ -93,6 +95,7 @@ export async function runReportExport(request, dependencies) {
       artifactTimestamp: deliveryAt,
       timeoutMs: capturedRequest.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       dependencies,
+      blobLifecycle,
     });
   }
   const at = deliveryAt;
@@ -144,7 +147,7 @@ export async function runReportExport(request, dependencies) {
       break;
     }
 
-    const printed = await printFinalHtml(html, dependencies, timeoutMs, expectedPdfFallback);
+    const printed = await printFinalHtml(html, dependencies, timeoutMs, expectedPdfFallback, blobLifecycle);
     if (printed.cleanupLimited) {
       addUnique(printCleanupLimitations, createExportIssue('REPORT_PRINT_CLEANUP_LIMITED').message);
     }
@@ -208,6 +211,7 @@ export async function runReportExport(request, dependencies) {
   const baseName = buildArtifactBaseName(model.auditId, at);
   const downloadOptions = {
     timeoutMs,
+    ...(blobLifecycle ? { blobLifecycle } : {}),
     ...(snapshotCapability === null ? {} : {
       assertCanDownload: ({ format }) => dependencies.assertDelivery({
         snapshotCapability,
@@ -274,7 +278,7 @@ export async function runReportExport(request, dependencies) {
 }
 
 async function runImmutableRevisionExport({
-  sourceModel, reportView, snapshotCapability, exportLeaseOwnerId, exportAttempt, artifactTimestamp, timeoutMs, dependencies,
+  sourceModel, reportView, snapshotCapability, exportLeaseOwnerId, exportAttempt, artifactTimestamp, timeoutMs, dependencies, blobLifecycle,
 }) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !reportView || reportView.version !== 1 ||
     reportView.auditId !== sourceModel.auditId || reportView.modelHash !== sourceModel.integrity.canonicalModelHash ||
@@ -293,7 +297,7 @@ async function runImmutableRevisionExport({
   try { csv = renderCanonicalCsv(model, dependencies.csvRenderer, deliveryIdentity); }
   catch { limitations.push(createExportIssue('REPORT_CSV_UNAVAILABLE').message); }
   if (csv !== null) {
-    const printed = await printFinalHtml(html, dependencies, timeoutMs, false);
+    const printed = await printFinalHtml(html, dependencies, timeoutMs, false, blobLifecycle);
     if (printed.cleanupLimited) limitations.push(createExportIssue('REPORT_PRINT_CLEANUP_LIMITED').message);
     if (printed.issue) limitations.push(printed.issue.message);
     else {
@@ -310,6 +314,7 @@ async function runImmutableRevisionExport({
     baseName, html, json, ...(csv === null ? {} : { csv }), ...(pdf ? { pdf } : {}),
   }, dependencies.downloadsAdapter, {
     timeoutMs,
+    ...(blobLifecycle ? { blobLifecycle } : {}),
     assertCanDownload: ({ format }) => dependencies.assertDelivery({ snapshotCapability, exportLeaseOwnerId, format }),
     recordDeliveryState: entry => dependencies.recordDelivery({ snapshotCapability, exportLeaseOwnerId, ...entry }),
   });
@@ -578,7 +583,7 @@ function pendingReservationRecord(reservation) {
   try { return PENDING_RESERVATION_RECORDS.get(reservation) ?? null; } catch { return null; }
 }
 
-async function printFinalHtml(html, dependencies, timeoutMs, forceCompatible) {
+async function printFinalHtml(html, dependencies, timeoutMs, forceCompatible, blobLifecycle) {
   let bytes = null;
   let usedFallback = false;
   let issue = null;
@@ -587,10 +592,22 @@ async function printFinalHtml(html, dependencies, timeoutMs, forceCompatible) {
   let tabId = null;
   let cdp = null;
   let stage = 'blob';
+  let locallyRevoked = false;
   try {
     printUrl = dependencies.urlApi.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
     if (typeof printUrl !== 'string' || !printUrl.startsWith('blob:')) {
       throw new TypeError('A preparação da impressão não forneceu Blob URL válido.');
+    }
+    if (blobLifecycle) {
+      const registration = Promise.resolve().then(() => blobLifecycle.register(printUrl));
+      try {
+        await boundary(registration, timeoutMs, 'O registro do endereço de impressão excedeu o tempo limite.');
+      } catch (error) {
+        void registration.then(() => {
+          if (locallyRevoked) return blobLifecycle.release(printUrl);
+        }).catch(() => {});
+        throw error;
+      }
     }
     stage = 'tab';
     const tab = await adoptBoundary(
@@ -629,7 +646,13 @@ async function printFinalHtml(html, dependencies, timeoutMs, forceCompatible) {
       try { await boundary(dependencies.tabAdapter.removeTab(tabId), timeoutMs, 'A remoção da aba de impressão excedeu o tempo limite.'); } catch { cleanupLimited = true; }
     }
     if (printUrl !== null) {
-      try { dependencies.urlApi.revokeObjectURL(printUrl); } catch { cleanupLimited = true; }
+      try { dependencies.urlApi.revokeObjectURL(printUrl); locallyRevoked = true; } catch { cleanupLimited = true; }
+      if (locallyRevoked && blobLifecycle) {
+        try {
+          await boundary(Promise.resolve().then(() => blobLifecycle.release(printUrl)), timeoutMs,
+            'A liberação do registro de impressão excedeu o tempo limite.');
+        } catch { cleanupLimited = true; }
+      }
     }
   }
   return { bytes, usedFallback, issue, cleanupLimited };

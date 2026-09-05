@@ -39,8 +39,28 @@ export function buildArtifactBaseName(auditId, timestamp) {
   return baseName;
 }
 
+export function captureBlobLifecycle(value) {
+  if (value === undefined) return null;
+  try {
+    if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) throw new TypeError();
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== 2 || !keys.includes('register') || !keys.includes('release')) throw new TypeError();
+    const methods = {};
+    for (const name of ['register', 'release']) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, name);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'function') throw new TypeError();
+      const invoke = descriptor.value.bind(value);
+      methods[name] = async blobUrl => {
+        if (await invoke(blobUrl) !== undefined) throw new Error('BLOB_LIFECYCLE_UNCONFIRMED');
+      };
+    }
+    return Object.freeze(methods);
+  } catch { throw new TypeError('BLOB_LIFECYCLE_INVALID'); }
+}
+
 export async function downloadArtifacts(payload, adapter, options = {}) {
   validateAdapter(adapter);
+  const blobLifecycle = captureBlobLifecycle(options.blobLifecycle);
   if (!payload || typeof payload.baseName !== 'string' || !/^[A-Za-z0-9._-]{1,250}$/u.test(payload.baseName)) {
     throw new TypeError('Nome-base dos artefatos inválido.');
   }
@@ -94,7 +114,21 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
       appendFailure(formats, limitations, { format, filename, sha256, failureCode: 'ARTIFACT_BLOB_FAILED' });
       continue;
     }
+    let locallyRevoked = false;
     try {
+      if (blobLifecycle) {
+        const registration = Promise.resolve().then(() => blobLifecycle.register(blobUrl));
+        try {
+          await boundedOperation(registration, timeoutMs, 'O registro do endereço temporário excedeu o tempo limite.');
+        } catch {
+          // A late commit still needs cleanup, but must never start a download.
+          void registration.then(() => {
+            if (locallyRevoked) return blobLifecycle.release(blobUrl);
+          }).catch(() => {});
+          appendFailure(formats, limitations, { format, filename, sha256, failureCode: 'ARTIFACT_BLOB_FAILED' });
+          continue;
+        }
+      }
       let deliveryFailure = null;
       let journalFailure = null;
       const assertDelivery = async stage => {
@@ -329,8 +363,14 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
         monitor?.stop();
       }
     } finally {
-      try { adapter.revokeObjectURL(blobUrl); } catch {
+      try { adapter.revokeObjectURL(blobUrl); locallyRevoked = true; } catch {
         limitations.push(artifactCleanupLimitation(format));
+      }
+      if (locallyRevoked && blobLifecycle) {
+        try {
+          await boundedOperation(Promise.resolve().then(() => blobLifecycle.release(blobUrl)), timeoutMs,
+            'A liberação do registro temporário excedeu o tempo limite.');
+        } catch { limitations.push(artifactCleanupLimitation(format)); }
       }
     }
   }

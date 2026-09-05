@@ -188,15 +188,32 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
     assert.doesNotMatch(error?.message ?? '', /PRIVATE|IndexedDB|dependency/iu);
     return true;
   });
+  const temporaryUrls = new Set();
+  const releasedUrls = [];
+  const trackedDownloads = fakeDownloads([]);
+  const startDownload = trackedDownloads.download;
+  trackedDownloads.download = options => {
+    assert.equal(temporaryUrls.has(options.url), true, 'immutable exports register before download');
+    return startDownload(options);
+  };
+  const trackedPrintTab = successfulTabAdapter();
+  trackedPrintTab.createPrintTab = async ({ url }) => {
+    assert.equal(temporaryUrls.has(url), true, 'immutable exports register the print URL');
+    return { id: 70 };
+  };
   const result = await runReportExport({
     auditSnapshotCapability: snapshot.capability, exportLeaseOwnerId: deliveryOwnerId,
     exportAttempt: acquired.exportAttempt,
   }, {
     reportView,
+    blobLifecycle: {
+      async register(url) { temporaryUrls.add(url); },
+      async release(url) { temporaryUrls.delete(url); releasedUrls.push(url); },
+    },
     urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
-    tabAdapter: successfulTabAdapter(),
+    tabAdapter: trackedPrintTab,
     async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
-    downloadsAdapter: fakeDownloads([]),
+    downloadsAdapter: trackedDownloads,
     assertDelivery({ snapshotCapability, exportLeaseOwnerId }) {
       return store.assertExportLease(model.auditId, snapshotCapability, {
         ownerId: exportLeaseOwnerId, exportAttempt: acquired.exportAttempt,
@@ -210,6 +227,8 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
       });
     },
   });
+  assert.equal(temporaryUrls.size, 0);
+  assert.equal(releasedUrls.length, 5, 'one print URL and four delivered artifacts are released');
   assert.equal((await store.getAuditSnapshot(model.auditId)).revision, snapshot.revision);
   assert.deepEqual(result.deliveryReceipt.formats.map(entry => entry.format), EXPORT_FORMATS_V1);
   const artifactBaseName = buildArtifactBaseName(model.auditId, acquired.deliveryAt);
