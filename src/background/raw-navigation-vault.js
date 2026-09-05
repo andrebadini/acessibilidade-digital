@@ -1,5 +1,6 @@
 import { canonicalNavigationUrl, isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
 import { normalizeAuditUrl } from '../core/url.js';
+import { canonicalAuditId } from '../storage/audit-retention.js';
 
 const PREFIX = 'audita:raw-navigation:v1:';
 const QUEUE_PREFIX = 'audita:raw-navigation-queue:v1:';
@@ -671,7 +672,8 @@ export function createRawNavigationVaultV1({ sessionArea, digestManager = null, 
       }
     }); },
     clearAudit(auditId) { return serial(async () => {
-      if (!validId(auditId)) throw new TypeError('RAW_NAVIGATION_INVALID'); let entries;
+      try { canonicalAuditId(auditId); } catch { throw new TypeError('RAW_NAVIGATION_INVALID'); }
+      let entries;
       try { entries = await all(sessionArea); } catch { throw unavailable(); }
       const keys = auditCleanupTargets(entries, auditId);
       if (keys.length === 0) return 0;

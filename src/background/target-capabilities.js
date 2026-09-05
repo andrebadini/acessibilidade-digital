@@ -968,6 +968,47 @@ export function createTargetCapabilityAuthority({
     } catch { return unavailable(); }
   });
 
+  const finalizeAudit = auditId => serialize(async () => {
+    if (typeof auditId !== 'string' || !MODEL_ID.test(auditId)) return unavailable();
+    try {
+      const raw = await sessionArea.get(null);
+      const inventory = readDataRecord(raw, Reflect.ownKeys(raw));
+      if (!inventory) return unavailable();
+      const entries = Object.entries(inventory);
+      const sessions = new Map();
+      const sessionKeys = [];
+      const childKeys = [];
+      for (const [key, value] of entries) {
+        if (!key.startsWith(SESSION_PREFIX) || readDataProperty(value, 'auditId').value !== auditId) continue;
+        const session = parseSessionRecord(value);
+        if (!session || key !== sessionCapabilityStorageKey(session.sessionCapabilityId) || session.state !== 'revoked') {
+          return unavailable();
+        }
+        sessions.set(session.sessionCapabilityId, session);
+        sessionKeys.push(key);
+      }
+      for (const [key, value] of entries) {
+        const targetKind = key.startsWith(TARGET_PREFIX);
+        if (!targetKind && !key.startsWith(NAVIGATION_PREFIX)) continue;
+        const session = sessions.get(readDataProperty(value, 'sessionCapabilityId').value);
+        if (!session) continue;
+        const parse = targetKind ? parseTargetRecord : parseNavigationRecord;
+        const record = parse(value);
+        const storageKey = targetKind ? targetCapabilityStorageKey : navigationCapabilityStorageKey;
+        if (!record || key !== storageKey(record.capabilityId) || record.windowId !== session.windowId ||
+          record.state !== 'invalidated' || (targetKind && isPersonaTarget(record))) return unavailable();
+        childKeys.push(key);
+      }
+      const removeConfirmed = async keys => {
+        if (keys.length === 0) return true;
+        try { await sessionArea.remove(keys); } catch { /* Confirm commit-then-throw before retrying. */ }
+        return Boolean(readDataRecord(await sessionArea.get(keys), []));
+      };
+      if (!await removeConfirmed(childKeys) || !await removeConfirmed(sessionKeys)) return unavailable();
+      return deepFreeze({ ok: true, purged: childKeys.length + sessionKeys.length });
+    } catch { return unavailable(); }
+  });
+
   const rehydrateViewOnly = args => serialize(async () => {
     const input = readDataRecord(args, REHYDRATE_KEYS);
     if (!input || !MODEL_ID.test(input.auditId ?? '') || input.mode !== 'attached' ||
@@ -1007,6 +1048,7 @@ export function createTargetCapabilityAuthority({
     invalidateForTab,
     invalidateForWindow,
     clearAudit,
+    finalizeAudit,
     rehydrateViewOnly,
   });
 }

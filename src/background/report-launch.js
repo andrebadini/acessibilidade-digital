@@ -1,4 +1,5 @@
 import { REVIEW_SURFACE, deriveTrustedExtensionContext } from './target-capabilities.js';
+import { canonicalAuditId } from '../storage/audit-retention.js';
 
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const CAPABILITY = /^[A-Za-z0-9_-]{22}$/u;
@@ -540,7 +541,7 @@ export function createReportLaunchAuthority(raw) {
   }
 
   async function clearAudit(auditId) {
-    if (typeof auditId !== 'string' || !AUDIT_ID.test(auditId)) return false;
+    try { canonicalAuditId(auditId); } catch { return false; }
     return serialize(input.sessionArea, auditId, async () => {
       try {
         if (typeof input.sessionArea.remove !== 'function') return false;

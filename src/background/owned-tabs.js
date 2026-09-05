@@ -1,3 +1,5 @@
+import { canonicalAuditId } from '../storage/audit-retention.js';
+
 const V2_PREFIX = 'audita:owned-tab:v2:';
 const V1_PREFIX = 'audita:owned-tab:v1:';
 
@@ -380,7 +382,7 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
 
     clearAudit(auditId) {
       return serializeAudit(sessionArea, typeof auditId === 'string' ? auditId : '', async () => {
-        if (!validId(auditId)) throw denied();
+        try { canonicalAuditId(auditId); } catch { throw denied(); }
         let all;
         try { all = await sessionArea.get(null); } catch { throw denied(); }
         if (!all || typeof all !== 'object' || Array.isArray(all)) throw denied();
@@ -446,6 +448,41 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
         }
         if (operationalError) throw operationalError;
         return count;
+      });
+    },
+
+    purgeRemovedAudit(auditId) {
+      return serializeAudit(sessionArea, typeof auditId === 'string' ? auditId : '', async () => {
+        try {
+          canonicalAuditId(auditId);
+          const all = await sessionArea.get(null);
+          if (!all || typeof all !== 'object' || Array.isArray(all)) throw denied();
+          const candidates = [];
+          for (const key of Reflect.ownKeys(all)) {
+            if (typeof key !== 'string' || !key.startsWith(V2_PREFIX) && !key.startsWith(V1_PREFIX)) continue;
+            const property = storageProperty(all, key);
+            const identity = property.ok && property.exists ? storageProperty(property.value, 'auditId') : null;
+            if (!identity?.ok || !identity.exists || identity.value !== auditId) continue;
+            if (!key.startsWith(V2_PREFIX)) throw denied();
+            const ownershipId = key.slice(V2_PREFIX.length);
+            const record = exactV2(property.value, ownershipId);
+            if (!record || record.state !== 'removed') throw denied();
+            candidates.push(record);
+          }
+          let count = 0;
+          for (const candidate of candidates) {
+            count += await serializeOwner(sessionArea, candidate.ownershipId, async () => {
+              const current = await read(candidate.ownershipId);
+              if (!current.record) return 0;
+              if (!sameRecord(current.record, candidate) || current.record.state !== 'removed') throw denied();
+              try { await sessionArea.remove(current.key); } catch { /* Confirm a possible commit below. */ }
+              const after = storageProperty(await sessionArea.get(current.key), current.key);
+              if (!after.ok || after.exists) throw denied();
+              return 1;
+            });
+          }
+          return count;
+        } catch { throw denied('cleanup'); }
       });
     },
   });

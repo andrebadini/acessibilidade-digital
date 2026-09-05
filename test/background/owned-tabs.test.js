@@ -411,3 +411,97 @@ test('rejects the V2-only cleanup mode on V1 without touching it or blocking lat
   assert.equal(Object.hasOwn(sessionArea.values, invalidKey), true);
   assert.equal(Object.hasOwn(sessionArea.values, validKey), false);
 });
+
+function purge(owned, auditId) {
+  assert.equal(typeof owned.purgeRemovedAudit, 'function', 'purgeRemovedAudit is missing');
+  return owned.purgeRemovedAudit(auditId);
+}
+
+test('purgeRemovedAudit removes only confirmed removed V2 journals after clearAudit', async () => {
+  const { owned, sessionArea, calls, adapter } = fixture();
+  await owned.registerCreated(created);
+  await owned.registerCreated({ ...created, ownershipId: 'foreign-owner', auditId: 'foreign-audit', tabId: 42 });
+  sessionArea.values['unrelated-persona'] = { active: true };
+  sessionArea.values['audita:owned-tab:v2:unattributed'] = { state: 'removed', extra: true };
+  await owned.clearAudit(created.auditId);
+  assert.equal((await owned.get(created.ownershipId)).state, 'removed');
+  assert.equal(await purge(owned, created.auditId), 1);
+  assert.equal(await owned.get(created.ownershipId), null);
+  assert.equal((await owned.get('foreign-owner')).state, 'created');
+  assert.deepEqual(sessionArea.values['unrelated-persona'], { active: true });
+  assert.deepEqual(sessionArea.values['audita:owned-tab:v2:unattributed'], { state: 'removed', extra: true });
+  assert.deepEqual(calls, [41], 'purge must not remove a tab again');
+  const restarted = createOwnedTabRegistry({ sessionArea, chromeAdapter: adapter, now: () => '2026-08-29T12:00:00.000Z' });
+  assert.equal(await purge(restarted, created.auditId), 0);
+  assert.equal(await purge(restarted, 'a'.repeat(200)), 0);
+  await assert.rejects(() => purge(restarted, 'a'.repeat(201)), /OWNERSHIP_DENIED/u);
+  await assert.rejects(() => purge(restarted, '__latest__'), /OWNERSHIP_DENIED/u);
+});
+
+test('purgeRemovedAudit preflights active legacy and attributable malformed journals before any removal', async t => {
+  for (const kind of ['active', 'legacy', 'malformed', 'transplanted']) await t.test(kind, async () => {
+    const { owned, sessionArea, calls } = fixture(); await owned.registerCreated(created); await owned.clearAudit(created.auditId);
+    const retainedKey = 'audita:owned-tab:v2:owner-a';
+    const retained = structuredClone(sessionArea.values[retainedKey]);
+    const blockerKey = kind === 'legacy' ? 'audita:owned-tab:v1:blocker' : 'audita:owned-tab:v2:blocker';
+    const blocker = kind === 'legacy'
+      ? { version: 1, ownerId: 'blocker', auditId: created.auditId, sessionCapabilityId: 'session', tabId: 43, windowId: 9,
+        cleanupMode: 'always', state: 'removed', createdAt: retained.createdAt, updatedAt: retained.updatedAt }
+      : { ...retained, ownershipId: 'blocker', tabId: 43, ...(kind === 'active' ? { state: 'created' }
+        : kind === 'malformed' ? { extra: true } : { ownershipId: 'other-owner' }) };
+    sessionArea.values[blockerKey] = blocker;
+    const before = sessionArea.calls.length;
+    await assert.rejects(() => purge(owned, created.auditId), /OWNERSHIP_DENIED/u);
+    assert.deepEqual(sessionArea.values[retainedKey], retained);
+    assert.deepEqual(sessionArea.values[blockerKey], blocker);
+    assert.equal(sessionArea.calls.slice(before).some(call => call.type === 'remove'), false);
+    assert.deepEqual(calls, [41]);
+  });
+});
+
+test('purgeRemovedAudit requires readback and retries removal faults including commit-then-throw', async t => {
+  for (const mode of ['throw', 'noop', 'commit-throw', 'readback-failure']) await t.test(mode, async () => {
+    const { owned, sessionArea, calls } = fixture(); await owned.registerCreated(created); await owned.clearAudit(created.auditId);
+    const key = 'audita:owned-tab:v2:owner-a'; const originalRemove = sessionArea.remove.bind(sessionArea);
+    const originalGet = sessionArea.get.bind(sessionArea); let afterRemove = false;
+    sessionArea.remove = async keys => {
+      afterRemove = true;
+      if (mode === 'throw') throw new Error('PRIVATE_REMOVE_DETAIL');
+      if (mode === 'noop') return;
+      await originalRemove(keys);
+      if (mode === 'commit-throw') throw new Error('PRIVATE_COMMITTED_DETAIL');
+    };
+    sessionArea.get = async keys => {
+      if (mode === 'readback-failure' && afterRemove) throw new Error('PRIVATE_READ_DETAIL');
+      return originalGet(keys);
+    };
+    if (mode === 'commit-throw') assert.equal(await purge(owned, created.auditId), 1);
+    else await assert.rejects(() => purge(owned, created.auditId), error => {
+      assert.equal(error.message, 'OWNERSHIP_DENIED'); assert.equal(error.cause, undefined); return true;
+    });
+    sessionArea.remove = originalRemove; sessionArea.get = originalGet;
+    if (mode === 'throw' || mode === 'noop') {
+      assert.equal((await owned.get(created.ownershipId)).state, 'removed');
+      assert.equal(await purge(owned, created.auditId), 1);
+    } else assert.equal(await purge(owned, created.auditId), 0);
+    assert.equal(Object.hasOwn(sessionArea.values, key), false); assert.deepEqual(calls, [41]);
+  });
+});
+
+test('purgeRemovedAudit waits for a queued same-audit registration before its preflight', async () => {
+  const { owned, sessionArea, adapter } = fixture(); await owned.registerCreated(created); await owned.clearAudit(created.auditId);
+  let release; let started; const gate = new Promise(resolve => { release = resolve; });
+  const entered = new Promise(resolve => { started = resolve; });
+  const originalSet = sessionArea.set.bind(sessionArea);
+  sessionArea.set = async entries => { started(); await gate; return originalSet(entries); };
+  const registering = owned.registerCreated({ ...created, ownershipId: 'second-owner', tabId: 42 });
+  await entered;
+  const second = createOwnedTabRegistry({ sessionArea, chromeAdapter: adapter, now: () => '2026-08-29T12:00:00.000Z' });
+  let settled = false;
+  const pending = Promise.resolve().then(() => purge(second, created.auditId)).finally(() => { settled = true; });
+  const expectedRejection = assert.rejects(pending, /OWNERSHIP_DENIED/u);
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(settled, false);
+  release(); await registering; await expectedRejection;
+  assert.equal((await owned.get(created.ownershipId)).state, 'removed');
+  assert.equal((await owned.get('second-owner')).state, 'created');
+});

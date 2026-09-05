@@ -1,5 +1,6 @@
 import { isCapturePolicyV1 } from '../core/privacy/capture-policy.js';
 import { isEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
+import { canonicalAuditId } from '../storage/audit-retention.js';
 
 const PREFIX = 'audita:pixel-capture:v1:';
 const TTL_MS = 600_000;
@@ -588,7 +589,7 @@ export function createPixelCaptureStateV1(options) {
     }),
 
     readSuspension: auditId => serial(async () => {
-      if (!validAuditId(auditId)) throw unavailable();
+      try { canonicalAuditId(auditId); } catch { throw unavailable(); }
       const currentAt = at();
       const current = await read(auditId);
       if (!current) return null;
