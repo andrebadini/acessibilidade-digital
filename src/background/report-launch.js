@@ -446,16 +446,162 @@ export function createReportLaunchAuthority(raw) {
     }
   }
 
+  async function deletionGraph(auditId) {
+    const inventory = await input.sessionArea.get(null);
+    const root = exact(inventory, Reflect.ownKeys(inventory));
+    if (!root) throw new Error('REPORT_CLEANUP_DENIED');
+    const rows = new Map();
+    const targets = new Map();
+    const addTarget = row => {
+      let target = targets.get(row.tabId);
+      if (!target) {
+        target = { tabId: row.tabId, windowId: row.windowId, documents: new Set(), launch: null };
+        targets.set(row.tabId, target);
+      }
+      if (target.windowId !== row.windowId) throw new Error('REPORT_CLEANUP_DENIED');
+      if (row.documentId !== null) target.documents.add(row.documentId);
+      return target;
+    };
+    for (const [key, value] of Object.entries(root)) {
+      if (key === launchKey(auditId)) {
+        const launch = launchRecord(value);
+        if (!launch || launch.auditId !== auditId) throw new Error('REPORT_CLEANUP_DENIED');
+        rows.set(key, launch); addTarget(launch).launch = launch;
+      } else if (key.startsWith('audita:report-launch:v1:') && ownDataDescriptor(value, 'auditId')?.value === auditId) {
+        throw new Error('REPORT_CLEANUP_DENIED');
+      } else if (key.startsWith('audita:report-consumer:v1:') && ownDataDescriptor(value, 'auditId')?.value === auditId) {
+        const consumer = consumerRecord(value);
+        if (!consumer || key !== consumerKey(consumer.sessionCapabilityId)) throw new Error('REPORT_CLEANUP_DENIED');
+        rows.set(key, consumer); addTarget(consumer);
+      } else if (key.startsWith('audita:report-launch-tab:v1:') && value === auditId) {
+        const tabId = Number(key.slice('audita:report-launch-tab:v1:'.length));
+        if (!safeId(tabId) || key !== indexKey(tabId)) throw new Error('REPORT_CLEANUP_DENIED');
+        rows.set(key, value);
+      }
+    }
+    for (const target of targets.values()) {
+      const key = indexKey(target.tabId);
+      if (Object.hasOwn(root, key) && root[key] !== auditId) throw new Error('REPORT_CLEANUP_DENIED');
+      rows.set(key, root[key]);
+    }
+    return { rows, targets: [...targets.values()].sort((left, right) => left.tabId - right.tabId) };
+  }
+
+  async function deletionRowsMatch(rows) {
+    const inventory = await input.sessionArea.get([...rows.keys()]);
+    const root = exact(inventory, Reflect.ownKeys(inventory));
+    if (!root || Object.keys(root).some(key => !rows.has(key))) return false;
+    for (const [key, expected] of rows) {
+      if (expected === undefined) { if (Object.hasOwn(root, key)) return false; }
+      else if (typeof expected === 'string') { if (root[key] !== expected) return false; }
+      else {
+        const actual = exact(root[key], Object.keys(expected));
+        if (!actual || JSON.stringify(actual) !== JSON.stringify(expected)) return false;
+      }
+    }
+    return true;
+  }
+
+  async function replaceDeletionRows(rows, replacements) {
+    if (!await deletionRowsMatch(rows)) return false;
+    if (Object.keys(replacements).length > 0) {
+      try { await input.sessionArea.set(replacements); } catch { /* readback resolves an ambiguous write */ }
+      for (const [key, value] of Object.entries(replacements)) rows.set(key, value);
+    }
+    return deletionRowsMatch(rows);
+  }
+
+  async function tabAbsenceConfirmed(tabId) {
+    if (typeof input.chromeApi.tabs.query !== 'function') return false;
+    const tabs = await input.chromeApi.tabs.query({});
+    if (!Array.isArray(tabs)) return false;
+    for (const tab of tabs) {
+      const id = ownDataDescriptor(tab, 'id');
+      if (!id || !safeId(id.value) || id.value === tabId) return false;
+    }
+    return true;
+  }
+
+  async function deletionDocumentProof(target, auditId) {
+    let tab;
+    try { tab = tabSnapshot(await input.chromeApi.tabs.get(target.tabId)); }
+    catch { return await tabAbsenceConfirmed(target.tabId) ? { absent: true } : null; }
+    const expectedUrl = canonicalUrl(input.chromeApi, auditId);
+    if (!exactConnectedTab(tab, target, expectedUrl)) return null;
+    const contexts = await input.chromeApi.runtime.getContexts({ tabIds: [target.tabId], contextTypes: ['TAB'] });
+    if (!Array.isArray(contexts) || contexts.length !== 1) return null;
+    const context = contexts[0];
+    if (context?.contextType !== 'TAB' || context.tabId !== target.tabId || context.windowId !== target.windowId ||
+      context.documentUrl !== expectedUrl || typeof context.documentId !== 'string' || !context.documentId) return null;
+    if (!target.documents.has(context.documentId) && target.launch?.documentId !== null) return null;
+    const stableTab = tabSnapshot(await input.chromeApi.tabs.get(target.tabId));
+    if (!exactConnectedTab(stableTab, target, expectedUrl)) return null;
+    return { absent: false, documentId: context.documentId };
+  }
+
+  async function clearAudit(auditId) {
+    if (typeof auditId !== 'string' || !AUDIT_ID.test(auditId)) return false;
+    return serialize(input.sessionArea, auditId, async () => {
+      try {
+        if (typeof input.sessionArea.remove !== 'function') return false;
+        const { rows, targets } = await deletionGraph(auditId);
+        if (rows.size === 0) return true;
+        const revoked = {};
+        for (const [key, value] of rows) {
+          if (value && typeof value === 'object' && value.state !== 'revoked') revoked[key] = freeze({ ...value, state: 'revoked' });
+        }
+        if (!await replaceDeletionRows(rows, revoked)) return false;
+        for (const target of targets) {
+          let proof = await deletionDocumentProof(target, auditId);
+          if (!proof) return false;
+          if (!proof.absent && target.launch?.documentId === null) {
+            const key = launchKey(auditId);
+            const bound = freeze({ ...rows.get(key), documentId: proof.documentId });
+            if (!await replaceDeletionRows(rows, { [key]: bound })) return false;
+            target.launch = bound; target.documents.add(proof.documentId);
+          }
+          if (!await deletionRowsMatch(rows)) return false;
+          if (!proof.absent) {
+            proof = await deletionDocumentProof(target, auditId);
+            if (!proof) return false;
+            if (!proof.absent) {
+              try { await input.chromeApi.tabs.remove(target.tabId); } catch { /* only confirmed absence allows cleanup */ }
+              if (!await tabAbsenceConfirmed(target.tabId)) return false;
+            }
+          }
+        }
+        if (!await deletionRowsMatch(rows)) return false;
+        const keys = [...rows].filter(([, value]) => value !== undefined).map(([key]) => key);
+        try { await input.sessionArea.remove(keys); } catch { /* verify even when removal reports failure */ }
+        return deletionRowsMatch(new Map([...rows.keys()].map(key => [key, undefined])));
+      } catch { return false; }
+    });
+  }
+
   async function handleTabRemoved(tabId) {
     const auditId = safeId(tabId) ? await auditIdForTab(tabId) : null; if (!auditId) return false;
-    return serialize(input.sessionArea, auditId, async () => { const launch = await getLaunch(auditId); await revokeLaunch(launch); return true; });
+    return serialize(input.sessionArea, auditId, async () => {
+      const launch = await getLaunch(auditId);
+      if (!launch || launch.tabId !== tabId) return false;
+      await revokeLaunch(launch);
+      return true;
+    });
   }
   async function handleWindowRemoved(windowId) {
     if (!safeId(windowId)) return false;
     const envelope = await input.sessionArea.get(null); let changed = false;
     for (const [key, value] of Object.entries(envelope ?? {})) {
       const launch = key.startsWith('audita:report-launch:v1:') ? launchRecord(value) : null;
-      if (launch?.windowId === windowId && launch.state !== 'revoked') { await serialize(input.sessionArea, launch.auditId, () => revokeLaunch(launch)); changed = true; }
+      if (launch?.windowId === windowId && launch.state !== 'revoked') {
+        const revoked = await serialize(input.sessionArea, launch.auditId, async () => {
+          const current = await getLaunch(launch.auditId);
+          if (!current || current.windowId !== windowId || current.tabId !== launch.tabId ||
+            current.issuedAt !== launch.issuedAt || current.state === 'revoked') return false;
+          await revokeLaunch(current);
+          return true;
+        });
+        changed = revoked || changed;
+      }
     }
     return changed;
   }
@@ -464,5 +610,6 @@ export function createReportLaunchAuthority(raw) {
     openRegisteredReport, connect, authorizeIntent, authorizeExport, returnToSource,
     validateConsumer, getLaunch, getConsumer,
     handleTabUpdated, handleTabRemoved, handleWindowRemoved,
+    clearAudit,
   });
 }

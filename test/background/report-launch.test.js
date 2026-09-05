@@ -682,3 +682,318 @@ test('concurrent authorities sharing durable state admit one launch and one firs
   assert.equal(results.filter(result => result.ok === true).length, 2, 'second open focuses the one registered launch');
   assert.equal(first.calls.filter(call => call[0] === 'create').length, 1);
 });
+
+const CLEANUP_LAUNCH = 'audita:report-launch:v1:audit-1';
+const CLEANUP_INDEX = 'audita:report-launch-tab:v1:40';
+const CLEANUP_URL = 'chrome-extension://ext-test/src/review/index.html?auditId=audit-1';
+
+async function cleanupFixture() {
+  const env = fixture();
+  const opening = env.authority.openRegisteredReport({ auditId: 'audit-1', windowId: 7 });
+  await new Promise(resolve => setImmediate(resolve));
+  const connected = await env.authority.connect({ auditId: 'audit-1', sender: env.sender });
+  await opening;
+  const consumerKey = `audita:report-consumer:v1:${connected.sessionCapabilityId}`;
+  const tabs = new Map([[40, { id: 40, windowId: 7, url: CLEANUP_URL }]]);
+  const contexts = new Map([[40, {
+    contextType: 'TAB', documentId: 'report-doc-1', documentUrl: CLEANUP_URL, tabId: 40, windowId: 7,
+  }]]);
+  env.chromeApi.tabs.get = async tabId => {
+    env.calls.push(['get', tabId]);
+    if (!tabs.has(tabId)) throw new Error('PRIVATE_TAB_ERROR');
+    return structuredClone(tabs.get(tabId));
+  };
+  env.chromeApi.tabs.query = async query => {
+    assert.deepEqual(query, {});
+    return [...tabs.keys()].map(id => ({ id }));
+  };
+  env.chromeApi.tabs.remove = async tabId => {
+    env.calls.push(['remove', tabId]);
+    tabs.delete(tabId); contexts.delete(tabId);
+  };
+  env.chromeApi.runtime.getContexts = async filter => [...contexts.values()].filter(context =>
+    (!filter.tabIds || filter.tabIds.includes(context.tabId)) &&
+    (!filter.documentIds || filter.documentIds.includes(context.documentId)) &&
+    (!filter.contextTypes || filter.contextTypes.includes(context.contextType)));
+  return { ...env, consumerKey, tabs, contexts };
+}
+
+test('report audit cleanup revokes before closing its document, purges only own records and is idempotent', async () => {
+  const env = await cleanupFixture();
+  const foreign = { 'audita:report-launch-tab:v1:52': 'audit-other', 'audita:persona-lease:v1:7': { state: 'active' } };
+  await env.sessionArea.set(foreign);
+  const remove = env.chromeApi.tabs.remove;
+  env.chromeApi.tabs.remove = async tabId => {
+    assert.equal((await env.authority.getLaunch('audit-1')).state, 'revoked');
+    assert.equal((await env.sessionArea.get(env.consumerKey))[env.consumerKey].state, 'revoked');
+    await remove(tabId);
+  };
+  assert.equal(await env.authority.clearAudit('audit-1'), true);
+  assert.deepEqual(await env.sessionArea.get(null), foreign);
+  assert.equal(await env.authority.clearAudit('audit-1'), true);
+  assert.deepEqual(env.calls.filter(call => call[0] === 'remove'), [['remove', 40]]);
+  assert.equal((await env.authority.authorizeExport({ auditId: 'audit-1', sessionCapabilityId: env.consumerKey.split(':').at(-1), sender: env.sender })).ok, false);
+});
+
+test('report audit cleanup includes older orphan consumers and already revoked reports without closing a foreign tab', async () => {
+  const env = await cleanupFixture();
+  const oldConsumer = (await env.sessionArea.get(env.consumerKey))[env.consumerKey];
+  const olderId = 'Z'.repeat(22);
+  const olderKey = `audita:report-consumer:v1:${olderId}`;
+  await env.sessionArea.set({
+    [olderKey]: { ...oldConsumer, sessionCapabilityId: olderId, tabId: 41, documentId: 'older-document', state: 'revoked' },
+    'audita:report-launch-tab:v1:41': 'audit-1',
+    'audita:report-launch-tab:v1:52': 'audit-other',
+  });
+  env.tabs.set(41, { id: 41, windowId: 7, url: CLEANUP_URL });
+  env.contexts.set(41, { ...env.contexts.get(40), tabId: 41, documentId: 'older-document' });
+  env.tabs.set(52, { id: 52, windowId: 7, url: 'https://unrelated.invalid/' });
+  const launch = await env.authority.getLaunch('audit-1');
+  await env.sessionArea.set({ [CLEANUP_LAUNCH]: { ...launch, state: 'revoked' } });
+  assert.equal(await env.authority.clearAudit('audit-1'), true);
+  assert.deepEqual(env.calls.filter(call => call[0] === 'remove'), [['remove', 40], ['remove', 41]]);
+  assert.equal(env.tabs.has(52), true);
+  assert.deepEqual(await env.sessionArea.get(null), { 'audita:report-launch-tab:v1:52': 'audit-other' });
+});
+
+test('report audit cleanup adopts only a proved canonical preconnection document and otherwise remains pending', async t => {
+  for (const mode of ['canonical', 'blank', 'pending', 'context-missing']) await t.test(mode, async () => {
+    const env = await cleanupFixture();
+    const launch = await env.authority.getLaunch('audit-1');
+    await env.sessionArea.set({ [CLEANUP_LAUNCH]: { ...launch, state: 'awaiting-connection', documentId: null } });
+    await env.sessionArea.remove(env.consumerKey);
+    if (mode === 'blank') env.tabs.get(40).url = 'about:blank';
+    if (mode === 'pending') env.tabs.get(40).pendingUrl = CLEANUP_URL;
+    if (mode === 'context-missing') env.contexts.clear();
+    const remove = env.chromeApi.tabs.remove;
+    env.chromeApi.tabs.remove = async tabId => {
+      assert.equal((await env.authority.getLaunch('audit-1')).documentId, 'report-doc-1');
+      await remove(tabId);
+    };
+    assert.equal(await env.authority.clearAudit('audit-1'), mode === 'canonical');
+    if (mode === 'canonical') assert.deepEqual(await env.sessionArea.get(null), {});
+    else {
+      assert.equal(env.tabs.has(40), true);
+      assert.equal((await env.authority.getLaunch('audit-1')).state, 'revoked');
+    }
+  });
+});
+
+test('report audit cleanup preserves navigated or replaced documents and retries after confirmed absence', async t => {
+  for (const mode of ['url', 'document', 'window', 'pending', 'foreign-index']) await t.test(mode, async () => {
+    const env = await cleanupFixture();
+    if (mode === 'url') env.tabs.get(40).url = 'https://unrelated.invalid/';
+    if (mode === 'document') env.contexts.get(40).documentId = 'foreign-document';
+    if (mode === 'window') env.tabs.get(40).windowId = 8;
+    if (mode === 'pending') env.tabs.get(40).pendingUrl = 'https://unrelated.invalid/';
+    if (mode === 'foreign-index') await env.sessionArea.set({ [CLEANUP_INDEX]: 'audit-other' });
+    assert.equal(await env.authority.clearAudit('audit-1'), false);
+    assert.deepEqual(env.calls.filter(call => call[0] === 'remove'), []);
+    assert.equal(env.tabs.has(40), true);
+    assert.notEqual(await env.authority.getLaunch('audit-1'), null);
+    if (mode === 'foreign-index') await env.sessionArea.set({ [CLEANUP_INDEX]: 'audit-1' });
+    env.tabs.delete(40); env.contexts.delete(40);
+    assert.equal(await env.authority.clearAudit('audit-1'), true);
+    assert.deepEqual(await env.sessionArea.get(null), {});
+  });
+});
+
+test('report audit cleanup never interprets a tab or context read error as absence', async t => {
+  for (const mode of ['tab-get', 'query-failed', 'query-malformed', 'context-get']) await t.test(mode, async () => {
+    const env = await cleanupFixture();
+    if (mode === 'context-get') env.chromeApi.runtime.getContexts = async () => { throw new Error('PRIVATE_CONTEXT_ERROR'); };
+    else env.chromeApi.tabs.get = async () => { throw new Error('PRIVATE_TAB_ERROR'); };
+    if (mode === 'query-failed') env.chromeApi.tabs.query = async () => { throw new Error('PRIVATE_QUERY_ERROR'); };
+    if (mode === 'query-malformed') env.chromeApi.tabs.query = async () => null;
+    assert.equal(await env.authority.clearAudit('audit-1'), false);
+    assert.deepEqual(env.calls.filter(call => call[0] === 'remove'), []);
+    assert.notEqual(await env.authority.getLaunch('audit-1'), null);
+  });
+});
+
+test('report audit cleanup confirms failed effects by readback and keeps unconfirmed cleanup retryable', async t => {
+  for (const mode of ['write-throws', 'write-noop', 'write-commit-throw', 'close-throws', 'close-noop', 'close-commit-throw', 'remove-noop', 'remove-commit-throw']) await t.test(mode, async () => {
+    const env = await cleanupFixture();
+    const set = env.sessionArea.set;
+    const remove = env.sessionArea.remove;
+    const close = env.chromeApi.tabs.remove;
+    if (mode.startsWith('write-')) env.sessionArea.set = async rows => {
+      if (mode === 'write-commit-throw') await set(rows);
+      if (mode !== 'write-noop') throw new Error('PRIVATE_STORAGE_ERROR');
+    };
+    if (mode.startsWith('close-')) env.chromeApi.tabs.remove = async tabId => {
+      if (mode === 'close-commit-throw') await close(tabId);
+      if (mode !== 'close-noop') throw new Error('PRIVATE_CLOSE_ERROR');
+    };
+    if (mode.startsWith('remove-')) env.sessionArea.remove = async keys => {
+      if (mode === 'remove-commit-throw') { await remove(keys); throw new Error('PRIVATE_REMOVE_ERROR'); }
+    };
+    const confirmed = mode.endsWith('commit-throw');
+    assert.equal(await env.authority.clearAudit('audit-1'), confirmed);
+    if (confirmed) assert.deepEqual(await env.sessionArea.get(null), {});
+    else {
+      assert.notEqual(await env.authority.getLaunch('audit-1'), null);
+      if (mode.startsWith('write-')) assert.deepEqual(env.calls.filter(call => call[0] === 'remove'), []);
+      env.sessionArea.set = set; env.sessionArea.remove = remove; env.chromeApi.tabs.remove = close;
+      assert.equal(await env.authority.clearAudit('audit-1'), true);
+      assert.deepEqual(await env.sessionArea.get(null), {});
+    }
+  });
+});
+
+test('report audit cleanup rejects invalid input, malformed own records and storage replacement without foreign effects', async t => {
+  for (const mode of ['invalid-id', 'inventory-error', 'malformed-launch', 'transplanted-consumer', 'replacement']) await t.test(mode, async () => {
+    const env = await cleanupFixture();
+    if (mode === 'malformed-launch') await env.sessionArea.set({ [CLEANUP_LAUNCH]: { auditId: 'audit-1' } });
+    if (mode === 'transplanted-consumer') {
+      const consumer = (await env.sessionArea.get(env.consumerKey))[env.consumerKey];
+      await env.sessionArea.set({ [`audita:report-consumer:v1:${'Y'.repeat(22)}`]: consumer });
+    }
+    if (mode === 'inventory-error') env.sessionArea.get = async () => { throw new Error('PRIVATE_INVENTORY_ERROR'); };
+    if (mode === 'replacement') {
+      const contexts = env.chromeApi.runtime.getContexts;
+      env.chromeApi.runtime.getContexts = async filter => {
+        await env.sessionArea.set({ [CLEANUP_INDEX]: 'audit-other' });
+        return contexts(filter);
+      };
+    }
+    assert.equal(await env.authority.clearAudit(mode === 'invalid-id' ? { toString() { throw new Error('PRIVATE_INPUT'); } } : 'audit-1'), false);
+    assert.deepEqual(env.calls.filter(call => call[0] === 'remove'), []);
+    assert.equal(env.tabs.has(40), true);
+    if (mode === 'replacement') assert.equal((await env.sessionArea.get(CLEANUP_INDEX))[CLEANUP_INDEX], 'audit-other');
+  });
+});
+
+test('report audit cleanup joins the shared audit queue before a concurrent connection finishes', async t => {
+  let entered;
+  let release;
+  const waiting = new Promise(resolve => { entered = resolve; });
+  const env = fixture({ sourceSessionAuthority: { async reauthorizeReportSource() {
+    entered(); await new Promise(resolve => { release = resolve; });
+    return { ok: true, state: 'view-only' };
+  } } });
+  const opening = env.authority.openRegisteredReport({ auditId: 'audit-1', windowId: 7,
+    sourceSessionCapabilityId: 'S'.repeat(22), sourceSessionState: 'view-only' });
+  void opening.catch(() => {});
+  await new Promise(resolve => setImmediate(resolve));
+  const connection = env.authority.connect({ auditId: 'audit-1', sender: env.sender });
+  await waiting;
+  t.after(() => release?.());
+  let cleared = false;
+  let tabPresent = true;
+  env.chromeApi.tabs.query = async () => tabPresent ? [{ id: 40 }] : [];
+  env.chromeApi.tabs.remove = async () => { tabPresent = false; };
+  const second = createReportLaunchAuthority({ chromeApi: env.chromeApi, sessionArea: env.sessionArea,
+    epochNow: () => 1000, randomBytes: size => new Uint8Array(size).fill(9) });
+  const clearing = second.clearAudit('audit-1').then(value => { cleared = true; return value; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(cleared, false);
+  release();
+  assert.equal((await connection).ok, true);
+  await opening.catch(() => {});
+  assert.equal(await clearing, true);
+  assert.deepEqual(await env.sessionArea.get(null), {});
+});
+
+test('report audit cleanup is not undone by a window event holding an earlier inventory', async () => {
+  const env = await cleanupFixture();
+  const get = env.sessionArea.get;
+  let entered;
+  let release;
+  const captured = new Promise(resolve => { entered = resolve; });
+  let intercept = true;
+  env.sessionArea.get = async keys => {
+    const result = await get(keys);
+    if (keys === null && intercept) {
+      intercept = false;
+      return new Promise(resolve => { release = () => resolve(result); entered(); });
+    }
+    return result;
+  };
+  const windowEvent = env.authority.handleWindowRemoved(7);
+  await captured;
+  try { assert.equal(await env.authority.clearAudit('audit-1'), true); }
+  finally { release(); }
+  await windowEvent;
+  assert.deepEqual(await env.sessionArea.get(null), {});
+});
+
+test('report audit cleanup removes an orphan index without using it as authority to close a tab', async () => {
+  const env = await cleanupFixture();
+  await env.sessionArea.remove([CLEANUP_LAUNCH, env.consumerKey]);
+  assert.equal(await env.authority.clearAudit('audit-1'), true);
+  assert.equal(env.tabs.has(40), true);
+  assert.deepEqual(await env.sessionArea.get(null), {});
+  assert.deepEqual(env.calls.filter(call => call[0] === 'remove'), []);
+});
+
+test('report audit cleanup refuses navigation that begins during its final context read', async () => {
+  const env = await cleanupFixture();
+  const contexts = env.chromeApi.runtime.getContexts;
+  let reads = 0;
+  env.chromeApi.runtime.getContexts = async filter => {
+    const result = await contexts(filter);
+    if (++reads === 2) env.tabs.get(40).pendingUrl = 'https://user-navigation.invalid/';
+    return result;
+  };
+  assert.equal(await env.authority.clearAudit('audit-1'), false);
+  assert.equal(env.tabs.has(40), true);
+  assert.deepEqual(env.calls.filter(call => call[0] === 'remove'), []);
+  delete env.tabs.get(40).pendingUrl;
+  assert.equal(await env.authority.clearAudit('audit-1'), true);
+});
+
+test('report audit cleanup keeps an own launch under a foreign storage key pending without closing its tab', async () => {
+  const env = await cleanupFixture();
+  const launch = await env.authority.getLaunch('audit-1');
+  const foreignKey = 'audita:report-launch:v1:audit-other';
+  await env.sessionArea.set({ [foreignKey]: launch });
+  await env.sessionArea.remove([CLEANUP_LAUNCH, CLEANUP_INDEX, env.consumerKey]);
+  assert.equal(await env.authority.clearAudit('audit-1'), false);
+  assert.deepEqual(await env.sessionArea.get(null), { [foreignKey]: launch });
+  assert.equal(env.tabs.has(40), true);
+  assert.deepEqual(env.calls.filter(call => call[0] === 'remove'), []);
+});
+
+test('report audit cleanup tab removal event cannot revoke a subsequently queued launch in another tab', async () => {
+  const env = await cleanupFixture();
+  let entered;
+  let release;
+  const captured = new Promise(resolve => { entered = resolve; });
+  const contexts = env.chromeApi.runtime.getContexts;
+  let reads = 0;
+  env.chromeApi.runtime.getContexts = async filter => {
+    const result = await contexts(filter);
+    if (++reads === 1) { entered(); await new Promise(resolve => { release = resolve; }); }
+    return result;
+  };
+  const create = env.chromeApi.tabs.create;
+  env.chromeApi.tabs.create = async options => {
+    const tab = await create(options); env.tabs.set(tab.id, tab); return tab;
+  };
+  const update = env.chromeApi.tabs.update;
+  env.chromeApi.tabs.update = async (tabId, options) => {
+    const tab = await update(tabId, options); env.tabs.set(tabId, tab);
+    env.contexts.set(tabId, { contextType: 'TAB', tabId, windowId: 7, documentUrl: CLEANUP_URL, documentId: 'report-doc-2' });
+    return tab;
+  };
+  let removalEvent;
+  const remove = env.chromeApi.tabs.remove;
+  env.chromeApi.tabs.remove = async tabId => { await remove(tabId); removalEvent = env.authority.handleTabRemoved(tabId); };
+  const clearing = env.authority.clearAudit('audit-1');
+  await captured;
+  const opening = env.authority.openRegisteredReport({ auditId: 'audit-1', windowId: 7 });
+  void opening.catch(() => {});
+  release();
+  assert.equal(await clearing, true);
+  await new Promise(resolve => setImmediate(resolve));
+  await removalEvent;
+  const stateAfterEvent = (await env.authority.getLaunch('audit-1'))?.state;
+  if (stateAfterEvent === 'awaiting-connection') {
+    assert.equal((await env.authority.connect({ auditId: 'audit-1', sender: { ...env.sender, documentId: 'report-doc-2' } })).ok, true);
+  }
+  const opened = await opening.catch(() => null);
+  assert.equal(stateAfterEvent, 'awaiting-connection');
+  assert.equal(opened.tabId, 41);
+  assert.equal(env.tabs.has(41), true);
+});
