@@ -33,7 +33,7 @@ Revisão independente: **C=0/I=0** no incremento de interface, com reexecução 
 - Correção mínima: ao selecionar uma persona, restaurar foco no botão dessa persona; na leitura, iniciar a rolagem no topo. GREEN real **1/1**, 27 testes diretamente afetados e validação independente **C=0/I=0**. Atualizações passivas continuam sem alterar foco.
 - Captura final inspecionada: `/private/var/folders/3b/dv2ydqf51zq_qdv0gp1xmzzr0000gn/T/audita-marco-1-beta108-final-V0LniC/qa/persona-reader-tab-caption.png`.
 - Relatórios de página atual sem imagens e somente elementos abriram no Chrome. O teste público do mapa também abriu relatório e exportou os quatro formatos.
-- **Bloqueio de entrega ainda em investigação:** o cenário de estresse completo após reinício do worker conclui auditoria e sumário, mas pode negar a abertura do relatório antes de criar sua aba. Não se declara a nova beta pronta com essa falha pendente. Logs: `/private/tmp/audita-beta108-full-diagnostic.log` e `/private/tmp/audita-beta108-report-probe.log`.
+- **Bloqueio identificado nesta rodada e posteriormente corrigido:** o cenário de estresse completo após reinício do worker concluía auditoria e sumário, mas podia negar a abertura do relatório antes de criar sua aba. A reprodução, a causa e a correção estão no [registro da resposta tardia do Port](2026-09-05-report-port-late-response.md). Esse registro também distingue a abertura corrigida do timeout de exportação ainda conhecido em relatórios com milhares de ocorrências. Logs históricos: `/private/tmp/audita-beta108-full-diagnostic.log` e `/private/tmp/audita-beta108-report-probe.log`.
 
 ## Limites mantidos
 

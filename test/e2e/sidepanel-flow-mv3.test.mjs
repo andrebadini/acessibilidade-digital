@@ -1021,7 +1021,25 @@ function pdfInfoTitles(bytes) {
 
 async function exportFourFormats(extension, report, auditId, downloadDirectory) {
   await extension.click(report, 'button[data-report-export]');
-  const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 90_000, intervalMs: 50 });
+  let downloads;
+  try { downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 90_000, intervalMs: 50 }); }
+  catch (cause) {
+    // Diagnose a partial delivery without logging model contents, URL, IDs,
+    // filenames or private launch/lease correlation.
+    const progress = await extension.evaluate(extension.harnessPage, `(async () => {
+      const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+      const receipt=await store.getExportReceipt(${JSON.stringify(auditId)});
+      const latest=await store.getLatest();
+      const statuses=['running','delivering','complete','partial','failed'];
+      const formats=['html','pdf','csv','json'];
+      return {
+        receipt:statuses.includes(receipt?.status)?receipt.status:null,
+        completed:formats.filter(format=>receipt?.formats?.some(item=>item.format===format&&item.state==='complete')),
+        exportState:latest?.auditId===${JSON.stringify(auditId)}&&statuses.includes(latest?.exportStatus)?latest.exportStatus:null
+      };
+    })()`, { awaitPromise: true }).catch(() => null);
+    throw new Error(`EXPORT_DELIVERY_SNAPSHOT:${JSON.stringify(progress)}`, { cause });
+  }
   assert.deepEqual(downloads.map(row => row.format), ['html', 'pdf', 'csv', 'json']);
   assert.equal(downloads.every(row => row.state === 'complete' && row.byteLength > 0 &&
     /^[a-f0-9]{64}$/u.test(row.sha256)), true);
