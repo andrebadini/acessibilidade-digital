@@ -5,6 +5,8 @@ import {
   createSessionUrlDigestManager,
 } from '../core/privacy/session-url-digest.js';
 import { createRawNavigationVaultV1 } from './raw-navigation-vault.js';
+import { createBlobUrlPortBridgeV1 } from './blob-url-port.js';
+import { BLOB_URL_PORT_NAME } from '../export/blob-url-protocol.js';
 import { createBatchProgressStoreV1 } from './batch-progress-store.js';
 import { createAuditDeletedEvent } from '../core/audit-deleted-event.js';
 import { applyReviewDecisions, createReviewDecision } from '../core/review/decisions.js';
@@ -1287,6 +1289,7 @@ async function buildDefaultRuntime(chromeApi, options) {
   const launchApisAvailable = typeof chromeApi.tabs?.create === 'function' && typeof chromeApi.tabs?.update === 'function' &&
     typeof chromeApi.tabs?.get === 'function' && typeof chromeApi.tabs?.remove === 'function';
   const unavailableLaunch = freeze({
+    async getLaunch() { return null; }, async getSession() { return null; },
     async openRegisteredReport() { return { ok: false, code: 'REPORT_OPEN_DENIED' }; },
     async connect() { return { ok: false, code: 'CONTEXT_DENIED' }; },
     async authorizeIntent() { return { ok: false, code: 'REPORT_INTENT_DENIED' }; },
@@ -1630,6 +1633,9 @@ async function buildDefaultRuntime(chromeApi, options) {
   const exportLaunch = launchApisAvailable ? createExportLaunchAuthority({
     chromeApi, sessionArea, auditStore: exportCompletionStore, reportLaunch, epochNow, modelNow, randomBytes: bytes,
   }) : unavailableLaunch;
+  const blobUrlPortBridge = createBlobUrlPortBridgeV1({
+    chromeApi, sessionArea, exportLaunch, auditStore, now: epochNow,
+  });
   const reportOperations = createReportOperations({
     chromeApi, auditStore, sessionArea, modelNow, highlightController, highlightBindingStore,
     publishHighlightState,
@@ -1670,18 +1676,19 @@ async function buildDefaultRuntime(chromeApi, options) {
       personaCoordinator,
       highlightController: highlightRuntimeController,
     }),
-    router, panelCoordinator, panelLauncher, reportPortCoordinator, pixelScheduler,
+    router, panelCoordinator, panelLauncher, reportPortCoordinator, pixelScheduler, blobUrlPortBridge,
     pixelRecoveryComplete: true,
   };
 }
 
 function parseBuiltRuntime(value) {
-  const built = exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator', 'pixelScheduler', 'pixelRecoveryComplete'], true) ??
-    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'pixelScheduler', 'pixelRecoveryComplete'], true) ??
-    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator', 'pixelScheduler'], true) ??
-    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'pixelScheduler'], true) ??
-    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator'], true) ??
-    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher'], true);
+  const blobKeys = value && Object.hasOwn(value, 'blobUrlPortBridge') ? ['blobUrlPortBridge'] : [];
+  const built = exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator', 'pixelScheduler', 'pixelRecoveryComplete', ...blobKeys], true) ??
+    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'pixelScheduler', 'pixelRecoveryComplete', ...blobKeys], true) ??
+    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator', 'pixelScheduler', ...blobKeys], true) ??
+    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'pixelScheduler', ...blobKeys], true) ??
+    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator', ...blobKeys], true) ??
+    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', ...blobKeys], true);
   if (!built || typeof built.router?.dispatch !== 'function' ||
     typeof built.panelCoordinator?.attachPanelPort !== 'function' ||
     typeof built.panelLauncher?.launch !== 'function' ||
@@ -1690,6 +1697,8 @@ function parseBuiltRuntime(value) {
         typeof built.pixelScheduler?.run !== 'function' || typeof built.pixelScheduler?.scheduleNext !== 'function' ||
         typeof built.pixelScheduler?.dispose !== 'function')) ||
     (Object.hasOwn(built, 'pixelRecoveryComplete') && built.pixelRecoveryComplete !== true) ||
+    (Object.hasOwn(built, 'blobUrlPortBridge') &&
+      (typeof built.blobUrlPortBridge?.attachPort !== 'function' || typeof built.blobUrlPortBridge?.dispose !== 'function')) ||
     (Object.hasOwn(built, 'reportPortCoordinator') &&
       typeof built.reportPortCoordinator?.attachReportPort !== 'function')) throw new Error('WORKER_UNAVAILABLE');
   return { ...built, readyRuntime: copyReadyRuntime(built.readyRuntime) };
@@ -1719,6 +1728,8 @@ export function registerServiceWorker(chromeApi, options = {}) {
   let reportPortCoordinator = options.reportPortCoordinator ?? null;
   let panelLauncher = options.panelLauncher ?? null;
   let pixelScheduler = options.pixelScheduler ?? null;
+  let blobUrlPortBridge = options.blobUrlPortBridge ?? null;
+  let disposed = false;
   let earlyPanelLaunchAuthority = null;
   let settlePanelStorageGate = null;
   if (!options.startupReady && !options.buildRuntime && !panelLauncher) {
@@ -1771,15 +1782,16 @@ export function registerServiceWorker(chromeApi, options = {}) {
 
   const connectListener = port => {
     const name = own(port, 'name');
+    const disconnect = () => { try { port?.disconnect?.(); } catch { /* fixed denial */ } };
     void startupReady.then(() => {
+      if (disposed) { disconnect(); return; }
       if (name === PANEL_PORT_NAME) panelCoordinator.attachPanelPort(port);
       else if (name === REPORT_PORT_NAME && reportPortCoordinator) reportPortCoordinator.attachReportPort(port);
-      else {
-        try { port?.disconnect?.(); } catch { /* fixed denial */ }
-      }
-    }, () => {
-      try { port?.disconnect?.(); } catch { /* fixed denial */ }
-    });
+      else if (name === BLOB_URL_PORT_NAME && blobUrlPortBridge) {
+        try { if (blobUrlPortBridge.attachPort(port) !== true) disconnect(); }
+        catch { disconnect(); }
+      } else disconnect();
+    }, disconnect);
   };
 
   const alarmListener = alarm => {
@@ -1852,7 +1864,9 @@ export function registerServiceWorker(chromeApi, options = {}) {
         reportPortCoordinator = built.reportPortCoordinator ?? null;
         panelLauncher = built.panelLauncher;
         pixelScheduler = built.pixelScheduler ?? null;
+        blobUrlPortBridge = built.blobUrlPortBridge ?? null;
         if (pixelScheduler && built.pixelRecoveryComplete !== true) await pixelScheduler.recoverOnStartup();
+        if (disposed) { try { blobUrlPortBridge?.dispose(); } catch { /* local bridge cleanup */ } }
         resolveStartup(built.readyRuntime);
       } catch {
         rejectStartup(new Error('WORKER_UNAVAILABLE'));
@@ -1861,6 +1875,8 @@ export function registerServiceWorker(chromeApi, options = {}) {
   }
 
   function dispose() {
+    if (disposed) return;
+    disposed = true;
     chromeApi.runtime.onMessage.removeListener(messageListener);
     chromeApi.runtime.onConnect.removeListener(connectListener);
     chromeApi.alarms.onAlarm.removeListener(alarmListener);
@@ -1868,6 +1884,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
     lifecycle.dispose();
     contextMenus.dispose();
     try { pixelScheduler?.dispose?.(); } catch { /* disposal is best-effort and local */ }
+    try { blobUrlPortBridge?.dispose?.(); } catch { /* disposal is best-effort and local */ }
   }
 
   return Object.freeze({ startupReady, dispose });

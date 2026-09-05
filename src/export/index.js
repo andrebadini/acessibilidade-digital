@@ -11,6 +11,7 @@ import { buildReportView } from '../review/report-view.js';
 import { normalizeReviewAuditId } from '../review/review-state.js';
 import { createAuditStore, isAuditExportLeaseConflict, isAuditRevisionConflict } from '../storage/audit-store.js';
 import { deriveExportLeaseOwner } from '../background/export-launch.js';
+import { createExportBlobUrlClientV1 } from './blob-url-client.js';
 import { createExportTabAdapter } from './chrome-export-adapter.js';
 import {
   createExportFailureRequest,
@@ -41,6 +42,7 @@ let leaseOwnerId = null;
 let latestState = null;
 let leaseClaimed = false;
 let completionPending = false;
+let blobLifecycle = null;
 
 function sendWorkerRequest(message) {
   return new Promise(resolve => {
@@ -66,6 +68,11 @@ async function start() {
     !/^[1-9][0-9]*$/u.test(connected.attemptId ?? '')) throw new TypeError('Exportação não autorizada.');
   exportAttempt = Number(connected.attemptId);
   leaseOwnerId = deriveExportLeaseOwner(auditId, connected.attemptId);
+  const blobClient = createExportBlobUrlClientV1({
+    runtime: chrome.runtime, urlApi: globalThis.URL, auditId, sessionCapabilityId: connected.sessionCapabilityId,
+  });
+  blobLifecycle = blobClient.blobLifecycle;
+  globalThis.addEventListener('pagehide', () => blobClient.dispose(), { once: true });
   await generate(connected);
 }
 
@@ -104,7 +111,7 @@ async function generate(connected) {
     manifestVersion: chrome.runtime.getManifest().version, browserVersion: verified.environment?.chromeVersion || navigator.userAgent,
     timezone: verified.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
   }, {
-    reportView, urlApi: globalThis.URL, tabAdapter: createExportTabAdapter(chrome), downloadsAdapter,
+    reportView, urlApi: globalThis.URL, tabAdapter: createExportTabAdapter(chrome), downloadsAdapter, blobLifecycle,
     assertDelivery({ snapshotCapability, exportLeaseOwnerId }) {
       if (exportLeaseOwnerId !== leaseOwnerId) throw new TypeError('Exclusividade divergente.');
       return store.assertExportLease(auditId, snapshotCapability,

@@ -4,6 +4,8 @@ import test from 'node:test';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { PANEL_PORT_NAME, panelBootstrapStorageKey } from '../../src/background/panel-port.js';
 import { REPORT_PORT_NAME } from '../../src/background/report-port.js';
+import { BLOB_URL_PORT_NAME } from '../../src/export/blob-url-protocol.js';
+import { deriveExportLeaseOwner } from '../../src/background/export-launch.js';
 import { createRawNavigationVaultV1 } from '../../src/background/raw-navigation-vault.js';
 import { ACTIVE_AUDIT_JOB_KEY } from '../../src/background/authorized-audit-starter.js';
 import {
@@ -260,6 +262,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
       return fixtureOptions.exportReceipts?.get?.(auditId);
     },
     async getAuditRetention(auditId) { return retentions.get(auditId); },
+    async getExportLeaseState() { return { active: false }; },
     async acquireExportLease(_auditId, _capability, options) {
       return leaseResult.acquired
         ? { acquired: true, exportAttempt: leaseResult.exportAttempt, ownerId: options.ownerId }
@@ -443,6 +446,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
     chromeApi, events, registration, auditStore, sessionValues, sessionGetCalls, personaLockManager,
     sent, createdTabs, snapshots, retentions, deleted, storeCalls,
     sender, dispatch, connectPanel, connectReport,
+    setContext(value) { contexts.set(value.documentId, structuredClone(value)); },
     setLatest(value) { latest = value; },
     setLeaseResult(value) { leaseResult = value; },
     setDeletedAll(value) { deletedAll = value; },
@@ -1096,6 +1100,121 @@ test('attaches only the Side Panel and authenticated report ports after readines
   assert.equal(ports[1].disconnects, 0);
   assert.equal(ports[2].disconnects, 1);
   assert.equal(ports[3].disconnects, 1);
+});
+
+function blobWiringPort(name = BLOB_URL_PORT_NAME, sender = {}) {
+  const onMessage = event(); const onDisconnect = event();
+  return { name, sender, onMessage, onDisconnect, messages: [], disconnects: 0,
+    postMessage(value) { this.messages.push(structuredClone(value)); },
+    disconnect() { this.disconnects++; onDisconnect.emit(); } };
+}
+
+test('Blob wiring routes through one listener only after readiness and rejects failed attachments', async t => {
+  for (const mode of ['attached', 'false', 'throw', 'startup-failed']) await t.test(mode, async () => {
+    const { chromeApi, events } = chromeFixture(); const ready = deferred(); const attached = [];
+    const bridge = { registry: {}, attachPort(port) {
+      attached.push(port); if (mode === 'throw') throw new Error('PRIVATE_SENTINEL'); return mode !== 'false';
+    }, dispose() {} };
+    const registration = registerServiceWorker(chromeApi, {
+      startupReady: ready.promise, blobUrlPortBridge: bridge,
+      router: { async dispatch() { return { ok: true }; } },
+      panelCoordinator: { attachPanelPort() { assert.fail('Blob must not reach panel'); } },
+      reportPortCoordinator: { attachReportPort() { assert.fail('Blob must not reach report'); } },
+    });
+    t.after(() => registration.dispose());
+    const port = blobWiringPort(); events.connect.emit(port);
+    assert.equal(events.connect.listeners.size, 1); assert.equal(attached.length, 0);
+    const resolved = registration.startupReady.catch(() => null);
+    if (mode === 'startup-failed') ready.reject(new Error('PRIVATE_SENTINEL'));
+    else ready.resolve(runtimeValue());
+    await resolved; await tick();
+    assert.equal(attached.length, mode === 'startup-failed' ? 0 : 1);
+    assert.equal(port.disconnects, mode === 'attached' ? 0 : 1);
+  });
+});
+
+test('Blob wiring does not attach a queued Port after registration disposal', async () => {
+  const { chromeApi, events } = chromeFixture(); const ready = deferred(); let attaches = 0; let disposals = 0;
+  const registration = registerServiceWorker(chromeApi, {
+    startupReady: ready.promise,
+    blobUrlPortBridge: { registry: {}, attachPort() { attaches++; return true; }, dispose() { disposals++; } },
+  });
+  const port = blobWiringPort(); events.connect.emit(port);
+  registration.dispose(); ready.resolve(runtimeValue()); await registration.startupReady; await tick();
+  assert.equal(attaches, 0); assert.equal(disposals, 1); assert.equal(port.disconnects, 1);
+  assert.equal(events.connect.listeners.size, 0);
+});
+
+test('Blob wiring disposes a bridge built after registration was already disposed and keeps it private', async () => {
+  const { chromeApi, events } = chromeFixture(); const gate = deferred(); let disposals = 0; let attaches = 0;
+  const registration = registerServiceWorker(chromeApi, { async buildRuntime() {
+    await gate.promise;
+    return { readyRuntime: runtimeValue(), router: { dispatch() {} },
+      panelCoordinator: { attachPanelPort() {} }, panelLauncher: { launch() {} },
+      blobUrlPortBridge: { registry: {}, attachPort() { attaches++; return true; }, dispose() { disposals++; } } };
+  } });
+  const port = blobWiringPort(); events.connect.emit(port); await tick();
+  registration.dispose(); gate.resolve();
+  const runtime = await registration.startupReady; await tick();
+  assert.deepEqual(Object.keys(runtime), ['authority', 'auditStarter', 'chromeAdapter']);
+  assert.equal(disposals, 1); assert.equal(attaches, 0); assert.equal(port.disconnects, 1);
+});
+
+test('Blob wiring rejects a present malformed bridge in the private built graph', async () => {
+  for (const bridge of [{ registry: {}, dispose() {} }, { registry: {}, attachPort() {} }]) {
+    const { chromeApi } = chromeFixture();
+    const registration = registerServiceWorker(chromeApi, { async buildRuntime() {
+      return { readyRuntime: runtimeValue(), router: { dispatch() {} }, panelCoordinator: { attachPanelPort() {} },
+        panelLauncher: { launch() {} }, blobUrlPortBridge: bridge };
+    } });
+    await assert.rejects(registration.startupReady, /WORKER_UNAVAILABLE/u); registration.dispose();
+  }
+});
+
+test('Blob wiring default graph registers with its original store and native export document', async t => {
+  const auditStore = createInMemoryAuditStore(); const auditId = 'audit-blob-wiring';
+  const epoch = 1_788_000_000_000; const iso = new Date(epoch).toISOString();
+  const model = structuredClone(SAMPLE_AUDIT); model.auditId = auditId;
+  await auditStore.commitAudit(auditId, model, { auditId }, { now: iso });
+  const snapshot = await auditStore.getAuditSnapshot(auditId);
+  const leaseOwnerId = deriveExportLeaseOwner(auditId, '1');
+  await auditStore.acquireExportLease(auditId, snapshot.capability, { ownerId: `export:${auditId}:pending`, now: iso });
+  const lease = { ownerId: leaseOwnerId, exportAttempt: 1, now: iso, ttlMs: 600_000,
+    latestState: { auditId, exportStatus: 'running', exportRevision: snapshot.revision, exportAttempt: 1, leaseOwnerId } };
+  await auditStore.claimExportLease(auditId, snapshot.capability, lease);
+  await auditStore.beginExportDelivery(auditId, snapshot.capability, {
+    ...lease, latestState: { ...lease.latestState, exportStatus: 'delivering' },
+  });
+  const env = defaultGraphFixture(null, { auditStore, enableReportLaunch: true, modelNow: () => iso });
+  t.after(() => env.registration.dispose());
+  const runtime = await env.registration.startupReady;
+  assert.equal(Object.hasOwn(runtime, 'blobUrlPortBridge'), false);
+  const documentId = 'blob-export-document'; const capability = 'B'.repeat(22);
+  const url = env.chromeApi.runtime.getURL(`src/export/index.html?auditId=${auditId}`);
+  env.sessionValues[`audita:export-launch:v1:${auditId}`] = {
+    version: 1, auditId, sourceReviewSessionCapabilityId: 'R'.repeat(22), expectedRevision: snapshot.revision,
+    attemptId: '1', tabId: 77, windowId: 9, path: '/src/export/index.html', documentId,
+    state: 'connected', issuedAt: epoch, expiresAt: epoch + 900_000,
+  };
+  env.sessionValues[`audita:export-session:v1:${capability}`] = {
+    version: 1, sessionCapabilityId: capability, auditId, launchTabId: 77, launchDocumentId: documentId,
+    expectedRevision: snapshot.revision, attemptId: '1', intents: ['execute-export', 'complete-export'],
+    state: 'active', issuedAt: epoch, expiresAt: epoch + 900_000,
+  };
+  env.setContext({ documentId, documentUrl: url, contextType: 'TAB', tabId: 77, windowId: 9, frameId: 0 });
+  const from = { id: env.chromeApi.runtime.id, documentId, url, frameId: 0, tab: { id: 77, windowId: 9 } };
+  const port = blobWiringPort(BLOB_URL_PORT_NAME, from);
+  env.events.connect.emit(port); await tick();
+  port.onMessage.emit({ type: 'hello', auditId, sessionCapabilityId: capability });
+  await tick();
+  assert.deepEqual(port.messages, [{ type: 'ready' }]);
+  const blobUrl = `blob:chrome-extension://${env.chromeApi.runtime.id}/11111111-1111-4111-8111-111111111111`;
+  port.onMessage.emit({ type: 'register', requestId: 1, blobUrl });
+  for (let attempt = 0; attempt < 100 && port.messages.length < 2; attempt++) await tick();
+  assert.deepEqual(port.messages.at(-1), { type: 'result', requestId: 1, ok: true });
+  const rows = Object.entries(env.sessionValues).filter(([key]) => key.startsWith('audita:blob-url:v1:'));
+  assert.equal(rows.length, 1); assert.equal(rows[0][1].auditId, auditId);
+  assert.equal(rows[0][1].ownerDocumentId, documentId);
 });
 
 test('opens trusted session storage before building one shared runtime graph', async () => {

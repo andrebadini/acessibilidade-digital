@@ -112,7 +112,7 @@ await assert.rejects(registering, /BLOB_CLIENT_UNAVAILABLE/);
 
 ## Backlog explícito, não bloqueante deste canal
 
-Status de 05/09: protocolo, bridge e cliente concluídos; composição local com store/launch reais verde. Revisões e evidências consolidadas em `docs/qa/2026-09-05-retention-r3d-blob-composition.md`. Wiring público permanece pendente em checkpoint separado.
+Status de 05/09: protocolo, bridge, cliente e wiring no worker/exportador concluídos; composição local com store/launch reais verde. Revisões e evidências em `docs/qa/2026-09-05-retention-r3d-blob-composition.md`, `2026-09-05-retention-r3d-worker-wiring.md` e `2026-09-05-retention-r3d-export-wiring.md`. Agendamento da retenção, manual/pós-exportação e Chrome do candidato continuam separados.
 
 O conjunto de requestIds usados na bridge e os estados released do cliente permanecem em memória até o Port/documento encerrar. São limitados pelo uso normal (cinco URLs), não são expostos e não bloqueiam a entrega. Um limite explícito para sessões excepcionalmente longas é melhoria incremental.
 
