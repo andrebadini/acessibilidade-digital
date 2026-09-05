@@ -18,6 +18,7 @@ export function isAuditIntegrityVerified(value) {
  * link from the evidence content. Callers must use only the returned snapshot.
  */
 export async function verifyAuditIntegritySnapshot(input) {
+  if (VERIFIED_SNAPSHOTS.has(input)) return input;
   try {
     const model = createAuditModel(input);
     await verifyIntegrityLinks(model);

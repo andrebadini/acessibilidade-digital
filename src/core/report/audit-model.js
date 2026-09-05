@@ -87,9 +87,16 @@ export const V1_MIGRATION_DEFAULTS = Object.freeze({
   manualSourceEngine: 'audita-manual-review',
 });
 
+const CANONICAL_MODELS = new WeakSet();
+
 export function createAuditModel(input) {
+  if (CANONICAL_MODELS.has(input)) return input;
   try {
-    return createAuditModelInternal(captureAuditInput(input));
+    const model = createAuditModelInternal(captureAuditInput(input));
+    // Only our fully validated, deeply frozen output can bypass another copy.
+    // Persisted data, structured clones and caller-frozen objects still validate.
+    CANONICAL_MODELS.add(model);
+    return model;
   } catch {
     throw auditModelInputError();
   }

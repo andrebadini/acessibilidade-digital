@@ -13,6 +13,7 @@ import {
 } from '../../src/core/privacy/session-url-digest.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
+import { isAuditIntegrityVerified } from '../../src/core/report/integrity.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 import { reportInput } from '../report/helpers.js';
@@ -174,6 +175,10 @@ test('atomically stores and re-reads a canonical failed terminal model with revi
     assert.equal(committed.modelHash, model.integrity.canonicalModelHash);
     assert.equal(report.modelRevision, 1);
     assert.equal(report.model.session.status, 'failed');
+    assert.equal(isAuditIntegrityVerified(report.model), true,
+      'report consumers reuse the immutable snapshot already verified at the storage boundary');
+    assert.equal(Object.isFrozen(report.model), true);
+    assert.equal(isAuditIntegrityVerified(structuredClone(report.model)), false);
     assert.deepEqual(report.checkpoint, checkpoint);
     assert.deepEqual(await store.getLatest(), latest);
   });

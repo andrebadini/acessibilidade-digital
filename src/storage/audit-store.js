@@ -1555,7 +1555,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       const checkpoint = parseCheckpointCompanion(rawCompanion, key, model);
       return freezeStored({
         version: 1, auditId: key, modelRevision: revision,
-        modelHash: model.integrity.canonicalModelHash, model: storageClone(model), checkpoint: storageClone(checkpoint),
+        modelHash: model.integrity.canonicalModelHash, model, checkpoint: storageClone(checkpoint),
       });
     } catch (error) {
       if (error instanceof AuditStorageUnavailableError) throw error;
@@ -2141,7 +2141,7 @@ export function createAuditStore(options = {}) {
       return freezeStored({
         version: 1, auditId: key, modelRevision: revision,
         modelHash: model.integrity.canonicalModelHash,
-        model: storageClone(model), checkpoint: storageClone(terminalCheckpoint),
+        model, checkpoint: storageClone(terminalCheckpoint),
       });
     } catch (error) {
       if (error instanceof AuditStorageUnavailableError) throw error;

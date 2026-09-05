@@ -22,6 +22,40 @@ const ENRICH_OPTIONS = Object.freeze({
   browserVersion: 'Chrome/147.0.0.0',
 });
 
+test('reuses only the exact deeply frozen canonical model during report preparation', async () => {
+  const model = createAuditModel(await verifiedFixture());
+  const assertFrozen = value => {
+    if (!value || typeof value !== 'object') return;
+    assert.equal(Object.isFrozen(value), true);
+    Object.values(value).forEach(assertFrozen);
+  };
+  assertFrozen(model);
+  assert.equal(createAuditModel(model) === model, true);
+  const clone = structuredClone(model);
+  assert.equal(createAuditModel(clone) === clone, false);
+  const forged = structuredClone(model);
+  forged.normative = {};
+  Object.freeze(forged);
+  assert.throws(() => createAuditModel(forged));
+  assert.throws(() => createAuditModel(new Proxy(model, {
+    ownKeys() { throw new Error('untrusted wrapper'); },
+  })));
+});
+
+test('reuses an integrity attestation only for its exact immutable snapshot', async () => {
+  const verified = await verifiedFixture();
+  assert.equal(await verifyAuditIntegritySnapshot(verified) === verified, true);
+  const clone = structuredClone(verified);
+  assert.equal(isAuditIntegrityVerified(clone), false);
+  const independentlyVerified = await verifyAuditIntegritySnapshot(clone);
+  assert.equal(independentlyVerified === clone, false);
+  assert.equal(isAuditIntegrityVerified(independentlyVerified), true);
+  clone.integrity.canonicalModelHash = '0'.repeat(64);
+  Object.freeze(clone);
+  await assert.rejects(verifyAuditIntegritySnapshot(clone));
+  assert.equal(isAuditIntegrityVerified(clone), false);
+});
+
 test('attests only an immutable snapshot whose complete integrity chain recomputes', async () => {
   const model = await verifiedFixture();
   const input = structuredClone(model);

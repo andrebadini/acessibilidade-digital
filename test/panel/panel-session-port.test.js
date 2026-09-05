@@ -962,14 +962,14 @@ test('rejects malformed or replayed intent responses and stops without leaked li
   assert.equal(port.onDisconnect.listeners.size, 0);
 });
 
-test('clears the five-second bootstrap watchdog on valid bootstrap, disconnect and stop', async t => {
+test('clears the bounded recovery watchdog on valid bootstrap, disconnect and stop', async t => {
   await t.test('valid bootstrap', () => {
     const env = fixture();
     const client = createClient(env);
     client.start();
     const watchdog = env.timers[0];
 
-    assert.equal(watchdog?.delay, 5000);
+    assert.equal(watchdog?.delay, 60000);
     bootstrap(env.ports[0]);
 
     assert.equal(watchdog.cleared, true);
@@ -981,7 +981,7 @@ test('clears the five-second bootstrap watchdog on valid bootstrap, disconnect a
     client.start();
     const watchdog = env.timers[0];
 
-    assert.equal(watchdog?.delay, 5000);
+    assert.equal(watchdog?.delay, 60000);
     env.ports[0].onDisconnect.emit();
 
     assert.equal(watchdog.cleared, true);
@@ -993,7 +993,7 @@ test('clears the five-second bootstrap watchdog on valid bootstrap, disconnect a
     client.start();
     const watchdog = env.timers[0];
 
-    assert.equal(watchdog?.delay, 5000);
+    assert.equal(watchdog?.delay, 60000);
     client.stop();
 
     assert.equal(watchdog.cleared, true);
@@ -1010,7 +1010,7 @@ test('times out every silent Port and bounds reconnect attempts while intents st
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const port = env.ports.at(-1);
     const watchdog = env.timers.at(-1);
-    assert.equal(watchdog?.delay, 5000, `Port ${attempt + 1} receives its own bootstrap watchdog`);
+    assert.equal(watchdog?.delay, 60000, `Port ${attempt + 1} receives its own bootstrap watchdog`);
 
     watchdog.callback();
 
@@ -1029,4 +1029,26 @@ test('times out every silent Port and bounds reconnect attempts while intents st
   assert.equal(statuses.filter(value =>
     value === 'Painel não preparado. Abra novamente pelo botão da extensão.').length, 5);
   assert.equal(statuses.at(-1), 'Painel indisponível. Abra novamente pelo botão da extensão.');
+});
+
+test('opens the report after slow verified recovery and a queued read without timing out at five seconds', async () => {
+  const bundle = await resultBundle('audit-slow-report');
+  const env = fixture();
+  const client = createClient(env);
+  client.start();
+  const port = env.ports[0];
+  for (const timer of [...env.timers]) if (!timer.cleared && timer.delay <= 20000) timer.callback();
+  assert.equal(port.disconnects, 0, 'a verified recovery taking 20s must retain its original Port');
+  bootstrap(port, 'view-only', 'audit-slow-report', SESSION_ID, bundle);
+  const report = client.requestIntent({ type: 'PANEL_OPEN_REPORT' });
+  const request = port.messages.at(-1);
+  const watchdog = env.timers.at(-1);
+  assert.equal(watchdog.delay, 60000, 'report opening must tolerate a preceding large-model read');
+  for (const timer of [...env.timers]) if (!timer.cleared && timer.delay <= 20000) timer.callback();
+  port.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: request.requestId, response: { ok: true, auditId: 'audit-slow-report', state: 'connected' } });
+  assert.deepEqual(await report, { ok: true, auditId: 'audit-slow-report', state: 'connected' });
+  assert.equal(port.disconnects, 0);
+  assert.equal(watchdog.cleared, true);
+  client.stop();
 });

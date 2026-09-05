@@ -8,8 +8,10 @@ const OCCURRENCE_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const CONSENT_ID = /^[A-Za-z0-9_-]{21}[AQgw]$/u;
 const RECONNECT_DELAYS = Object.freeze([250, 500, 1000, 2000, 5000]);
-const BOOTSTRAP_TIMEOUT_MS = 5000;
+// Large saved audits must finish integrity verification before rehydration.
+const BOOTSTRAP_TIMEOUT_MS = 60000;
 const REQUEST_TIMEOUT_MS = 5000;
+const REPORT_OPEN_TIMEOUT_MS = 60000;
 export const PANEL_RECONNECT_EXHAUSTED_MESSAGE = 'Painel indisponível. Abra novamente pelo botão da extensão.';
 const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
 const CAPTURE_MODES = new Set(['full-evidence', 'element-only', 'no-pixels']);
@@ -492,7 +494,7 @@ export function createPanelSessionPortClient(raw) {
           timedOutRequests.add(requestId);
         }
         settle(entry, localUnavailable());
-      }, REQUEST_TIMEOUT_MS);
+      }, intent.type === 'PANEL_OPEN_REPORT' ? REPORT_OPEN_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
       pending.set(requestId, {
         resolve, timer,
         type: intent.type,
