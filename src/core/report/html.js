@@ -9,6 +9,7 @@ import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from './evi
 import { decodePngDataUrl } from '../evidence/png.js';
 import { ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO } from '../evidence/annotation-map-artifact.js';
 import { createExportDeliveryIdentityV1 } from '../../export/export-formats.js';
+import { readerMapPresentation, READER_MAP_INTRO } from './reader-map-presentation.js';
 
 const OUTCOME = Object.freeze({
   passed: { label: 'Atendido no escopo observado', icon: '✓' },
@@ -210,7 +211,7 @@ ${navigation}<p class="filters-noscript">Este arquivo contém todos os registros
 ${section(1, `${['failed','alerts','humanReview','passed'].map(group => `<h3>${escapeHtml(groupLabels[group])}: ${view.issues[group].length}</h3><p>As fichas detalhadas aparecem uma única vez nas seções seguintes.</p>${['alerts','passed'].includes(group) ? issueCards(group) : ''}`).join('')}`)}
 ${section(2, issueCards('failed'))}
 ${section(3, issueCards('humanReview'))}
-${section(4, `<p>As prévias de anúncio são uma estimativa; não são transcrições literais de tecnologia assistiva.</p>${view.readerMaps.map(map => `<article class="map-card"><p><strong>Artefato:</strong> ${escapeHtml(map.evidenceId)}.</p><p><strong>Legenda:</strong> mapa de anúncios da página ${escapeHtml(map.pageId)}.</p></article>`).join('')}`)}
+${section(4, reportViewReaderMaps(view))}
 ${section(5, `<div class="matrix-scroll" role="region" aria-label="Matriz completa dos 146 itens ABNT" tabindex="0"><table><caption>Matriz completa da ABNT NBR 17225</caption><thead><tr><th scope="col">Item</th><th scope="col">Título</th><th scope="col">Classificação</th><th scope="col">Resultado</th><th scope="col">WCAG</th></tr></thead><tbody>${view.matrix.map(row => `<tr><th scope="row">${escapeHtml(row.id)}</th><td>${escapeHtml(row.title)}</td><td>${escapeHtml(label(row.classification, classificationLabels))}</td><td>${escapeHtml(label(row.outcome, outcomeLabels))}</td><td>${escapeHtml(row.wcag.map(ref => `${ref.id} ${ref.level}`).join(', '))}</td></tr>`).join('')}</tbody></table></div>`)}
 ${section(6, `${view.methodology.caveats.map(value => `<p>${escapeHtml(value)}</p>`).join('')}<p><strong>Revisão do modelo:</strong> ${view.modelRevision}. <strong>Integridade:</strong> ${escapeHtml(view.modelHash)}.</p>${delivery}<h3>Fontes oficiais</h3><ul>${CONSUMER_ACCESSIBILITY_FIXED_BASIS.sources.map(source => `<li data-official-source>${escapeHtml(source.publisher)} — ${escapeHtml(source.title)} — ${escapeHtml(source.url)}</li>`).join('')}</ul><h3>Evidências técnicas e anexos</h3>${annex}`)}
 </main><footer class="report-footer"><p>Audita Acessibilidade — relatório local da auditoria ${escapeHtml(view.auditId)}.</p></footer></body></html>`;
@@ -226,6 +227,19 @@ function viewSectionTitle(index) {
     'Matriz completa dos 146 itens',
     'Metodologia, fontes, integridade, evidências técnicas e anexos',
   ][index];
+}
+
+function reportViewReaderMaps(view) {
+  return `<p>${escapeHtml(READER_MAP_INTRO)}</p>${readerMapPresentation(view.executive.pages, view.readerMaps).map(map => {
+    const figures = map.segments.map(segment => `<figure class="announcement-map-segment" data-map-segment="${escapeHtml(segment.id)}">${segment.dataUrl
+      ? `<img class="evidence-media" data-map-segment-image src="${escapeHtml(segment.dataUrl)}" alt="${escapeHtml(segment.caption)}" width="${segment.width}" height="${segment.height}">`
+      : '<p>PNG do segmento indisponível. A legenda e a proveniência foram preservadas.</p>'}<figcaption>${escapeHtml(segment.caption)}</figcaption></figure>`).join('');
+    const legend = map.legend.length ? `<h4>Legenda completa dos anúncios estimados</h4><ol class="announcement-map-legend">${map.legend.map(entry =>
+      `<li value="${entry.number}" data-map-marker="${entry.number}"><bdi>${escapeAuditedText(entry.preview)}</bdi><p>${escapeHtml(entry.location)}</p></li>`).join('')}</ol>` : '';
+    const provenance = map.provenance.length ? `<details data-map-provenance><summary>Consultar origem, integridade e limites do mapa</summary><dl class="meta map-meta">${map.provenance.map(([label, value]) =>
+      `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl></details>` : '';
+    return `<article class="map-card" data-announcement-map-page="${escapeHtml(map.pageId)}" data-map-status="${escapeHtml(map.status)}"><h3>${escapeHtml(map.title)}</h3><p class="map-state map-state--${escapeHtml(map.status)}">${escapeHtml(map.summary)}</p>${map.coverage ? `<p>${escapeHtml(map.coverage)}</p>` : ''}${map.limitations.length ? `<ul>${map.limitations.map(value => `<li>${escapeHtml(value)}</li>`).join('')}</ul>` : ''}${figures}${legend}${provenance}</article>`;
+  }).join('')}`;
 }
 
 function viewSectionNavigation() {

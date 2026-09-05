@@ -10,8 +10,10 @@ import { canonicalCoreRuleSummary } from '../../src/core/report/text-policy.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { buildCompleteReportSummary, buildPanelSummary } from '../../src/panel/panel-summary.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
-import { buildReportView, renderReportView, updateReportHighlightAction } from '../../src/review/report-view.js';
+import { buildReportView, projectExecutive, renderReportView, updateReportHighlightAction } from '../../src/review/report-view.js';
+import { readerMapPresentation } from '../../src/core/report/reader-map-presentation.js';
 import { EXPORT_FORMATS_V1 } from '../../src/export/report-export.js';
+import { createAnnotationMapFixture, createPristineMapSource, TEST_PNG } from '../report/annotation-map-fixture.js';
 
 const FULL_PAGE_CAPTURE_OMITTED_MESSAGE = 'A captura integral e o mapa anotado foram omitidos pela política; miniaturas de elementos permaneceram permitidas.';
 const FULL_PAGE_CAPTURE_OMITTED_LIMITATION = `FULL_PAGE_CAPTURE_OMITTED: ${FULL_PAGE_CAPTURE_OMITTED_MESSAGE}`;
@@ -107,6 +109,110 @@ function expandManualReviewOccurrences(draft, count) {
   }));
   draft.reviewDecisions = [];
 }
+
+async function readerMapFixture(status = 'complete', preview = 'Salvar & continuar <agora>, botão') {
+  const map = await createAnnotationMapFixture({ status, preview });
+  return fixture({ mutateDraft(draft) {
+    draft.evidence[0] = createPristineMapSource();
+    draft.evidence.push(map);
+    if (status === 'partial') {
+      const diagnostic = {
+        code: 'ANNOTATION_MAP_PARTIAL', message: 'O mapa visual foi gerado com cobertura parcial e limitações explícitas.',
+        at: draft.pages[0].timestamps.endedAt, recoverable: true,
+      };
+      draft.pages[0].diagnostics.push(diagnostic);
+      draft.session.diagnostics.push({ ...diagnostic });
+    }
+    return draft;
+  } });
+}
+
+test('the interactive reader map displays the derived PNG, numbered full announcement and source provenance', async () => {
+  const { model, summary } = await readerMapFixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const before = JSON.stringify(model);
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const card = root.querySelector('[data-announcement-map-page="page-1"]');
+  assert.ok(card, 'the reader map must render as a page-level visual, not just an artifact ID');
+  assert.equal(card.getAttribute('data-map-status'), 'complete');
+  const image = card.querySelector('img[data-map-segment-image]');
+  assert.equal(image?.getAttribute('src'), TEST_PNG);
+  assert.match(image?.getAttribute('alt') ?? '', /Segmento 1 de 1.*marcador 1/u);
+  const entry = card.querySelector('li[data-map-marker="1"]');
+  assert.equal(entry?.getAttribute('value'), '1');
+  assert.ok(entry.textContent.includes('Salvar & continuar <agora>, botão'));
+  assert.match(entry.textContent, /segmento 1/u);
+  const provenance = card.querySelector('details[data-map-provenance]');
+  assert.ok(provenance.textContent.includes(view.readerMaps[0].hash));
+  assert.ok(provenance.textContent.includes(view.readerMaps[0].derivation.sourceHash));
+  assert.match(card.textContent, /1 de 1 elementos elegíveis/u);
+  assert.equal(card.querySelectorAll('script').length, 0);
+  assert.equal(JSON.stringify(model), before, 'presenting the map must not change original evidence or normative identity');
+});
+
+test('the exported ReportView includes map pixels and escaped untruncated legend for HTML and PDF', async () => {
+  const preview = `Salvar & continuar <agora>, botão ${'descrição completa '.repeat(100)}`.trim();
+  const { model, summary } = await readerMapFixture('partial', preview);
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const html = renderHtmlReport(model, { reportView: view });
+  assert.match(html, /data-announcement-map-page="page-1"/u);
+  assert.match(html, /data-map-status="partial"/u);
+  assert.match(html, /data-map-segment-image/u);
+  assert.match(html, /data-map-marker="1"/u);
+  assert.ok(html.includes(TEST_PNG));
+  assert.ok(html.includes(preview.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')));
+  assert.ok(html.includes(view.readerMaps[0].hash));
+  assert.ok(html.includes(view.readerMaps[0].derivation.sourceHash));
+  assert.match(html, /cobertura parcial/u);
+  assert.match(html, /1 contextos de frame/u);
+  assert.doesNotMatch(html, /<agora>/u);
+});
+
+test('the interactive and exported map legends expose bidi controls without changing the source evidence', async () => {
+  const preview = 'Salvar \u202Etexto\u202C, botão';
+  const { model, summary } = await readerMapFixture('complete', preview);
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const before = JSON.stringify(model);
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const legend = root.querySelector('li[data-map-marker="1"]');
+  assert.ok(legend.textContent.includes('Salvar ⟦U+202E⟧texto⟦U+202C⟧, botão'));
+  assert.doesNotMatch(legend.textContent, /[\u202E\u202C]/u);
+  const html = renderHtmlReport(model, { reportView: view });
+  assert.ok(html.includes('Salvar ⟦U+202E⟧texto⟦U+202C⟧, botão'));
+  assert.equal(view.readerMaps[0].legend[0].announcementPreview, preview);
+  assert.equal(JSON.stringify(model), before);
+});
+
+test('reader map absence and empty selection are explicit without inventing an image or conformity', async () => {
+  for (const [setup, status] of [[fixture, 'absent'], [() => readerMapFixture('empty'), 'empty']]) {
+    const { model, summary } = await setup();
+    const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+    const root = renderReportView({ view, document: new Document(), onExport() {} });
+    const card = root.querySelector('[data-announcement-map-page="page-1"]');
+    assert.equal(card?.getAttribute('data-map-status'), status);
+    assert.equal(card.querySelectorAll('img').length, 0);
+    assert.match(card.textContent, status === 'absent' ? /Mapa não coletado/u : /não significa conformidade/u);
+    const html = renderHtmlReport(model, { reportView: view });
+    assert.ok(html.includes(`data-map-status="${status}"`));
+  }
+});
+
+test('executive projection preserves canonical page order for two-digit map page ordinals', async () => {
+  const { model, summary } = await fixture();
+  const orderedPages = Array.from({ length: 12 }, (_, index) => ({
+    ...model.pages[0], pageId: `page-${index + 1}`,
+    finalUrl: `https://example.test/page-${index + 1}`,
+  }));
+  const projected = projectExecutive({ ...model, pages: orderedPages }, summary);
+  assert.deepEqual(projected.pages.map(page => page.pageId), [
+    'page-1', 'page-2', 'page-3', 'page-4', 'page-5', 'page-6',
+    'page-7', 'page-8', 'page-9', 'page-10', 'page-11', 'page-12',
+  ]);
+  const cards = readerMapPresentation(projected.pages, []);
+  assert.equal(cards[1].title, 'Página 2 — page-2');
+  assert.equal(cards[9].title, 'Página 10 — page-10');
+  assert.equal(orderedPages[1].pageId, 'page-2');
+});
 
 function retainElementEvidenceWithoutFullPage(draft) {
   const diagnostic = {

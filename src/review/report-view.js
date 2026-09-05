@@ -6,6 +6,7 @@ import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
 import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from '../core/report/evidence-treatment.js';
 import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
+import { readerMapPresentation, READER_MAP_INTRO } from '../core/report/reader-map-presentation.js';
 
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
 const GROUP_LABELS = Object.freeze({
@@ -284,7 +285,7 @@ export function projectExecutive(model, summary) {
     pages: model.pages.map(page => ({
       pageId: page.pageId, status: page.status, attempted: page.attempted,
       finalUrl: page.finalUrl, finalUrlObserved: page.finalUrlObserved,
-    })).sort((left, right) => left.pageId.localeCompare(right.pageId)),
+    })),
     limitations: [...new Set([
       ...model.limitations,
       ...model.session.diagnostics.map(diagnostic => `${diagnostic.code}: ${diagnostic.message}`),
@@ -861,10 +862,50 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   root.append(review);
 
   const maps = section(document, 4);
-  maps.append(element(document, 'p', 'As prévias de anúncio são uma estimativa; não são transcrições literais de tecnologia assistiva.'));
-  for (const map of view.readerMaps) {
-    const card = document.createElement('article'); card.setAttribute('class', 'report-map');
-    card.append(element(document, 'p', `Artefato: ${map.evidenceId}.`), element(document, 'p', `Legenda: mapa de anúncios da página ${map.pageId}.`));
+  maps.append(element(document, 'p', READER_MAP_INTRO));
+  for (const map of readerMapPresentation(view.executive.pages, view.readerMaps)) {
+    const card = element(document, 'article', undefined, 'map-card');
+    card.setAttribute('data-announcement-map-page', map.pageId);
+    card.setAttribute('data-map-status', map.status);
+    card.append(element(document, 'h3', map.title), element(document, 'p', map.summary, `map-state map-state--${map.status}`));
+    if (map.coverage) card.append(element(document, 'p', map.coverage));
+    if (map.limitations.length) appendTextList(document, card, map.limitations);
+    for (const segment of map.segments) {
+      const figure = element(document, 'figure', undefined, 'announcement-map-segment');
+      figure.setAttribute('data-map-segment', segment.id);
+      if (segment.dataUrl) {
+        const image = element(document, 'img', undefined, 'evidence-media');
+        image.setAttribute('data-map-segment-image', '');
+        image.setAttribute('src', segment.dataUrl);
+        image.setAttribute('alt', segment.caption);
+        image.setAttribute('width', segment.width);
+        image.setAttribute('height', segment.height);
+        figure.append(image);
+      } else figure.append(element(document, 'p', 'PNG do segmento indisponível. A legenda e a proveniência foram preservadas.'));
+      figure.append(element(document, 'figcaption', segment.caption));
+      card.append(figure);
+    }
+    if (map.legend.length) {
+      card.append(element(document, 'h4', 'Legenda completa dos anúncios estimados'));
+      const legend = element(document, 'ol', undefined, 'announcement-map-legend');
+      for (const entry of map.legend) {
+        const item = element(document, 'li');
+        item.setAttribute('value', entry.number);
+        item.setAttribute('data-map-marker', entry.number);
+        item.append(element(document, 'bdi', entry.preview), element(document, 'p', entry.location));
+        legend.append(item);
+      }
+      card.append(legend);
+    }
+    if (map.provenance.length) {
+      const provenance = element(document, 'details');
+      provenance.setAttribute('data-map-provenance', '');
+      provenance.append(element(document, 'summary', 'Consultar origem, integridade e limites do mapa'));
+      const metadata = element(document, 'dl', undefined, 'meta map-meta');
+      for (const [label, value] of map.provenance) metadata.append(element(document, 'dt', label), element(document, 'dd', value));
+      provenance.append(metadata);
+      card.append(provenance);
+    }
     maps.append(card);
   }
   root.append(maps);
