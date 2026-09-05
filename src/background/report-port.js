@@ -1,3 +1,4 @@
+import { canonicalAuditId } from '../storage/audit-retention.js';
 import { capturedUtf8Length } from './worker-protocol.js';
 
 export const REPORT_PORT_NAME = 'audita-report-v1';
@@ -154,7 +155,7 @@ export function createReportPortCoordinator(raw) {
   }
 
   async function clearAudit(auditId) {
-    if (typeof auditId !== 'string' || !AUDIT_ID.test(auditId)) throw new TypeError('REPORT_PORT_CLEANUP_DENIED');
+    try { canonicalAuditId(auditId); } catch { throw new TypeError('REPORT_PORT_CLEANUP_DENIED'); }
     let cleared = 0;
     for (const binding of [...live]) {
       if (binding.auditId === auditId && disconnect(binding.port)) cleared += 1;

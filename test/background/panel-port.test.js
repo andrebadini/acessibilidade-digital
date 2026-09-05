@@ -2311,6 +2311,22 @@ test('panel audit cleanup removes its durable bootstrap without a Port and prese
   assert.equal(await env.coordinator.clearAudit('audit-port'), true);
 });
 
+test('panel audit cleanup confirms canonical audit absence through 200 and preserves foreign state', async () => {
+  const env = fixture();
+  const foreignKey = panelBootstrapStorageKey(10);
+  const foreign = cleanupBootstrap('audit-foreign', 'F'.repeat(22), 10);
+  env.sessionArea.values[foreignKey] = foreign;
+  env.sessionArea.values['audita:persona-lease:independent'] = { state: 'active' };
+  for (const length of [160, 161, 200]) {
+    assert.equal(await env.coordinator.clearAudit('a'.repeat(length)), true);
+  }
+  assert.deepEqual(env.sessionArea.values[foreignKey], foreign);
+  assert.deepEqual(env.sessionArea.values['audita:persona-lease:independent'], { state: 'active' });
+  for (const auditId of ['a'.repeat(201), '__latest__']) {
+    assert.equal(await env.coordinator.clearAudit(auditId), false);
+  }
+});
+
 test('panel audit cleanup reaches a live binding when bootstrap is absent or uses another capability of the same audit', async t => {
   for (const mode of ['absent', 'different-own-session']) await t.test(mode, async () => {
     const env = await runningCleanupFixture();

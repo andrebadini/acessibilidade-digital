@@ -72,6 +72,20 @@ test('report cleanup detaches only the requested audit, preserves foreign and id
   assert.deepEqual(await coordinator.publishHighlightState(activeEvent('audit-later')), { delivered: 1 });
 });
 
+test('report cleanup confirms canonical audit absence through 200 without detaching a foreign port', async t => {
+  const { coordinator, connect } = cleanupFixture(t);
+  const foreign = connect('audit-foreign');
+  await flush();
+  for (const length of [160, 161, 200]) {
+    assert.equal(await coordinator.clearAudit('a'.repeat(length)), 0);
+  }
+  assert.deepEqual(await coordinator.publishHighlightState(activeEvent('audit-foreign')), { delivered: 1 });
+  assert.deepEqual(foreign.posted.at(-1), activeEvent('audit-foreign'));
+  for (const auditId of ['a'.repeat(201), '__latest__']) {
+    await assert.rejects(coordinator.clearAudit(auditId), error => error.message === 'REPORT_PORT_CLEANUP_DENIED');
+  }
+});
+
 test('report cleanup sees authentication in flight and suppresses the late initial snapshot', async t => {
   let release;
   let snapshotCalls = 0;

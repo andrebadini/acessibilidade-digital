@@ -1,6 +1,7 @@
 import { copyPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
 import { isCapturePolicyV1 } from '../core/privacy/capture-policy.js';
 import { isEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
+import { canonicalAuditId } from '../storage/audit-retention.js';
 import { capturedUtf8Length, parsePanelPortIntent } from './worker-protocol.js';
 import { parseStorageGetEnvelope } from './storage-get-envelope.js';
 
@@ -1373,7 +1374,7 @@ export function createPanelPortCoordinator(raw) {
   }
 
   async function clearAudit(auditId) {
-    if (typeof auditId !== 'string' || !AUDIT_ID.test(auditId)) return false;
+    try { canonicalAuditId(auditId); } catch { return false; }
     try {
       const raw = await input.sessionArea.get(null);
       const inventory = exact(raw, Reflect.ownKeys(raw), true);
