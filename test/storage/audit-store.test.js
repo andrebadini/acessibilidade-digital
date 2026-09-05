@@ -539,6 +539,182 @@ const deletionRequest = (auditId, now = T30) => ({
   auditId, reason: 'retention-expired', now, expectedRevision: null, terminalReceipt: null,
 });
 
+test('expiration selection reports the absolute next deadline without extending retention', async t => {
+  for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
+    const store = context.open();
+    assert.equal(await store.nextExpiresAtV1(), null);
+    await store.commitAudit('next-later', auditFixture('next-later'), { auditId: 'next-later' }, { now: T29 });
+    await store.commitAudit('next-first', auditFixture('next-first'), { auditId: 'next-first' }, { now: T0 });
+    let snapshot = await store.getAuditSnapshot('next-first');
+    await store.commitAuditIfRevision('next-first', auditFixture('next-first', 'revision'),
+      { auditId: 'next-first' }, snapshot.capability, { now: T29 });
+    snapshot = await store.getAuditSnapshot('next-first');
+    await store.setRetentionIntent('next-first', snapshot.capability, { now: T29, deleteAfterCompleteExport: true });
+    await store.acquireExportLease('next-first', snapshot.capability, { ownerId: 'next-owner', now: T29 });
+    const before = context.auditEntries();
+    assert.equal(await context.open().nextExpiresAtV1(), T30);
+    assert.deepEqual(context.auditEntries(), before);
+    await store.stageExpiredAuditDeletionsV1({ now: T30, limit: 25 });
+    assert.equal(await store.nextExpiresAtV1(), '2026-09-29T00:00:00.000Z');
+  });
+});
+
+test('expiration selection stages at most 25 inclusive expired audits ordered by expiry then auditId', async t => {
+  for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
+    const store = context.open();
+    for (let index = 24; index >= 0; index -= 1) {
+      const auditId = `batch-${String(index).padStart(2, '0')}`;
+      await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0 });
+    }
+    await store.commitAudit('z-earlier', auditFixture('z-earlier'), { auditId: 'z-earlier' },
+      { now: '2026-07-31T00:00:00.000Z' });
+    await store.commitAudit('future', auditFixture('future'), { auditId: 'future' },
+      { now: '2026-08-01T00:00:00.001Z' });
+    const first = await store.stageExpiredAuditDeletionsV1({ now: T30, limit: 25 });
+    assert.deepEqual(first.map(value => value.auditId), ['z-earlier', ...Array.from({ length: 24 }, (_, i) => `batch-${String(i).padStart(2, '0')}`)]);
+    assert.equal(Object.isFrozen(first), true);
+    assert.equal(first.every(value => Object.isFrozen(value) && value.requestedAt === T30 && value.attempts === 0), true);
+    const second = await context.open().stageExpiredAuditDeletionsV1({ now: T30, limit: 25 });
+    assert.deepEqual(second.map(value => value.auditId), ['batch-24']);
+    assert.deepEqual(await store.stageExpiredAuditDeletionsV1({ now: T30, limit: 25 }), []);
+    assert.ok(await store.getAudit('future'));
+    assert.equal((await store.getLatest()).auditId, 'future');
+    assert.equal(await store.nextExpiresAtV1(), '2026-08-31T00:00:00.001Z');
+  });
+});
+
+test('expiration selection commits the R1 graph tombstone despite active delivery and preserves foreign state', async t => {
+  for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
+    const store = context.open();
+    const auditId = 'selected-terminal';
+    const terminal = await terminalFixture(auditId);
+    const pixel = await preparePixelAttempt(store, auditId);
+    await store.commitAuditWithCheckpointIfAbsent(auditId, terminal.model, terminal.checkpoint, terminal.latest,
+      { now: T0, deleteAfterCompleteExport: false, pixelAttemptCommit: pixel.capability });
+    const snapshot = await store.getAuditSnapshot(auditId);
+    const lease = await store.acquireExportLease(auditId, snapshot.capability,
+      { ownerId: 'selected-owner', now: '2026-08-30T23:59:59.000Z' });
+    const delivery = { ownerId: 'selected-owner', exportAttempt: lease.exportAttempt, now: '2026-08-30T23:59:59.100Z' };
+    await store.claimExportLease(auditId, snapshot.capability, delivery);
+    await store.beginExportDelivery(auditId, snapshot.capability, delivery);
+    await store.recordExportDelivery(auditId, snapshot.capability,
+      { ...delivery, format: 'html', filename: 'audit.html', state: 'starting' });
+    await store.commitAudit('selected-foreign', auditFixture('selected-foreign'), { auditId: 'selected-foreign' }, { now: T29 });
+    const foreign = await store.getAudit('selected-foreign');
+    assert.equal((await store.getExportLeaseState(auditId, { now: T30 })).active, true);
+    assert.equal((await store.getExportDeliveryJournal(auditId)).length, 1);
+    const tombstones = await store.stageExpiredAuditDeletionsV1({ now: T30, limit: 25 });
+    const reopened = context.open();
+    assert.deepEqual(await reopened.listDeletionTombstonesV1({ limit: 25 }), tombstones);
+    assert.deepEqual(tombstones.map(value => value.auditId), [auditId]);
+    assert.equal(await reopened.getAudit(auditId), undefined);
+    assert.equal(await reopened.getReportRevision(auditId), null);
+    assert.equal(await reopened.getAuditRetention(auditId), undefined);
+    assert.equal(await readPrivatePixelAttemptCommitV1(reopened, pixel.correlation), false);
+    assert.equal(context.auditEntries().some(([key]) => key.includes(auditId)), false);
+    assert.deepEqual(await reopened.getAudit('selected-foreign'), foreign);
+    assert.equal((await reopened.getLatest()).auditId, 'selected-foreign');
+  });
+});
+
+test('expiration selection is contention-safe and ignores preserved orphan metadata and prior tombstones', async t => {
+  for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
+    const store = context.open();
+    for (const auditId of ['orphan-selected', 'contended-selected']) {
+      await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0 });
+    }
+    await context.removeAuditModel('orphan-selected');
+    const orphan = await store.getAuditRetention('orphan-selected');
+    const results = await Promise.all([store, context.open()].map(connection =>
+      connection.stageExpiredAuditDeletionsV1({ now: T30, limit: 25 })));
+    assert.equal(results.flat().length >= 1, true);
+    assert.equal(results.flat().every(value => value.auditId === 'contended-selected' && value.requestedAt === T30), true);
+    await store.recordDeletionCleanupFailureV1({ auditId: 'contended-selected', at: '2026-08-31T00:00:01.000Z' });
+    const before = await store.listDeletionTombstonesV1({ limit: 25 });
+    assert.deepEqual(await context.open().stageExpiredAuditDeletionsV1({ now: '2026-09-01T00:00:00.000Z', limit: 25 }), []);
+    assert.deepEqual(await store.listDeletionTombstonesV1({ limit: 25 }), before);
+    assert.deepEqual(await store.getAuditRetention('orphan-selected'), orphan);
+    assert.equal(await store.nextExpiresAtV1(), null);
+  });
+});
+
+test('expiration selection continues independent commits after a failed audit and rejects without native secrets', async () => {
+  let fail = true;
+  let observedDeletes = false;
+  const options = {
+    rollbackWrites: true,
+    failWriteRequest: ({ storeName, operation, key }) => {
+      if (!fail || storeName !== 'audit-deletion-tombstones' || operation !== 'put' || key !== 'independent-b') return false;
+      observedDeletes = !fake.inspectStore('audits').has(key) && !fake.inspectStore('audit-retention').has(key);
+      return true;
+    },
+    writeError: new Error('PRIVATE_EXPIRATION_WRITE'),
+    readError: new Error('PRIVATE_EXPIRATION_READ'),
+  };
+  const fake = createFakeIndexedDb(options);
+  const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+  for (const auditId of ['independent-a', 'independent-b', 'independent-c']) {
+    await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0 });
+  }
+  await assert.rejects(store.stageExpiredAuditDeletionsV1({ now: T30, limit: 25 }),
+    error => error?.code === 'AUDIT_STORAGE_UNAVAILABLE' && !error.message.includes('PRIVATE_EXPIRATION'));
+  assert.equal(observedDeletes, true);
+  assert.deepEqual((await store.listDeletionTombstonesV1({ limit: 25 })).map(value => value.auditId), ['independent-a', 'independent-c']);
+  assert.ok(await store.getAudit('independent-b'));
+  assert.equal((await store.getAuditRetention('independent-b')).expiresAt, T30);
+  assert.equal(await store.getAudit('independent-a'), undefined);
+  assert.equal(await store.getAudit('independent-c'), undefined);
+  options.failReads = true;
+  for (const operation of [() => store.nextExpiresAtV1(), () => store.stageExpiredAuditDeletionsV1({ now: T30, limit: 25 })]) {
+    await assert.rejects(operation(), error => error?.code === 'AUDIT_STORAGE_UNAVAILABLE' && !error.message.includes('PRIVATE_EXPIRATION'));
+  }
+  options.failReads = false;
+  fail = false;
+  assert.deepEqual((await store.stageExpiredAuditDeletionsV1({ now: T30, limit: 25 })).map(value => value.auditId), ['independent-b']);
+});
+
+test('expiration selection captures closed arguments before effects and never samples a delayed clock', async t => {
+  for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
+    const store = context.open();
+    await store.commitAudit('captured-expired', auditFixture('captured-expired'), { auditId: 'captured-expired' }, { now: T0 });
+    await store.commitAudit('captured-future', auditFixture('captured-future'), { auditId: 'captured-future' },
+      { now: '2026-08-01T00:00:00.001Z' });
+    const before = context.auditEntries();
+    let getterCalls = 0;
+    for (const value of [
+      undefined, null, { now: T30 }, { now: T30, limit: 0 }, { now: T30, limit: 26 },
+      { now: T30, limit: 1.5 }, { now: T30, limit: '1' }, { now: T30, limit: NaN },
+      { now: '2026-08-31', limit: 1 }, { now: new Date(T30), limit: 1 },
+      { now: T30, limit: 1, secret: 'PRIVATE_INPUT' },
+      { get now() { getterCalls += 1; return T30; }, limit: 1 },
+    ]) await assert.rejects(store.stageExpiredAuditDeletionsV1(value), { code: 'AUDIT_DELETION_DENIED' });
+    assert.equal(getterCalls, 0);
+    assert.deepEqual(context.auditEntries(), before);
+    assert.deepEqual(await store.listDeletionTombstonesV1({ limit: 25 }), []);
+    const input = { now: T30, limit: 1 };
+    const pending = store.stageExpiredAuditDeletionsV1(input);
+    input.now = '2026-09-30T00:00:00.000Z';
+    input.limit = 25;
+    const result = await pending;
+    assert.deepEqual(result.map(value => [value.auditId, value.requestedAt]), [['captured-expired', T30]]);
+    assert.ok(await store.getAudit('captured-future'));
+  });
+  for (const [name, create] of [
+    ['memory-clock', () => createInMemoryAuditStore(new Map(), { now() { throw new Error('CLOCK_MUST_NOT_RUN'); } })],
+    ['IndexedDB-clock', () => {
+      const fake = createFakeIndexedDb();
+      return createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange, now() { throw new Error('CLOCK_MUST_NOT_RUN'); } });
+    }],
+  ]) await t.test(name, async () => {
+    const store = create();
+    assert.equal(await store.nextExpiresAtV1(), null);
+    assert.deepEqual(await store.stageExpiredAuditDeletionsV1({ now: T30, limit: 1 }), []);
+  });
+  const unavailable = createAuditStore({ indexedDB: null });
+  await assert.rejects(unavailable.nextExpiresAtV1(), { code: 'AUDIT_STORAGE_UNAVAILABLE' });
+  await assert.rejects(unavailable.stageExpiredAuditDeletionsV1({ now: T30, limit: 1 }), { code: 'AUDIT_STORAGE_UNAVAILABLE' });
+});
+
 test('deletion staging removes the expired durable graph despite an active export lease and survives reopening', async t => {
   for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
     const store = context.open();
@@ -3720,10 +3896,14 @@ function createFakeIndexedDb(options = {}) {
     };
     const cursorRequest = entriesFactory => {
       const result = {};
-      transaction._begin();
       let entries;
       let index = 0;
-      const dispatch = () => transaction._schedule(() => {
+      const dispatch = () => {
+        // A cursor can continue from a sibling request's success callback.
+        transaction._begin();
+        transaction._schedule(deliver);
+      };
+      const deliver = () => {
         try {
           entries ??= entriesFactory();
           if (index >= entries.length) {
@@ -3759,13 +3939,13 @@ function createFakeIndexedDb(options = {}) {
             delete() { definition.records.delete(primaryKey); },
           };
           result.onsuccess?.({ target: result });
-          if (!continued) transaction._end();
+          transaction._end();
         } catch (error) {
           result.error = error;
           result.onerror?.({ target: result });
           transaction._end();
         }
-      });
+      };
       dispatch();
       return result;
     };

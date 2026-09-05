@@ -380,6 +380,27 @@ function deletionOperationV1(value, keys) {
   } catch { throw new AuditDeletionDeniedError(); }
 }
 
+function expirationSelectionRequestV1(value) {
+  try {
+    const request = deletionOperationV1(value, ['now', 'limit']);
+    return { now: canonicalRetentionInstant(request.now).iso, limit: request.limit };
+  } catch { throw new AuditDeletionDeniedError(); }
+}
+
+async function stageSelectedAuditDeletionsV1(candidates, now, stage) {
+  const tombstones = [];
+  let failed = false;
+  for (const { auditId } of candidates) {
+    try {
+      const result = await stage({ auditId, reason: 'retention-expired', now, expectedRevision: null, terminalReceipt: null });
+      if (result.status === 'staged') tombstones.push(result.tombstone);
+    } catch { failed = true; }
+  }
+  // Successful per-audit commits remain recoverable through the tombstone listing.
+  if (failed) throw new AuditStorageUnavailableError();
+  return Object.freeze(tombstones);
+}
+
 function nextDeletionFailure(record, at) {
   if (at < (record.lastAttemptAt ?? record.requestedAt)) throw new AuditDeletionDeniedError();
   return validateDeletionTombstoneV1({ ...record, attempts: record.attempts + 1, lastAttemptAt: at }, record.auditId);
@@ -1130,6 +1151,21 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     ? storeOptions.now
     : () => new Date().toISOString();
   const owner = Object.freeze(Object.create(null));
+  const selectRetainedAuditsV1 = (now, limit) => {
+    try {
+      const records = [];
+      for (const [auditId, value] of retention) {
+        if (initial.get(auditId) === undefined) continue;
+        const metadata = validateRetentionMetadata(value, auditId);
+        if (now === null || metadata.expiresAt <= now) records.push(metadata);
+      }
+      records.sort((left, right) => {
+        if (left.expiresAt !== right.expiresAt) return left.expiresAt < right.expiresAt ? -1 : 1;
+        return left.auditId < right.auditId ? -1 : left.auditId > right.auditId ? 1 : 0;
+      });
+      return records.slice(0, limit);
+    } catch { throw new AuditStorageUnavailableError(); }
+  };
   const currentAudit = key => materializeCanonicalAuditModel(
     key,
     initial.get(key),
@@ -1586,6 +1622,14 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       const value = retention.get(key);
       return value === undefined ? undefined : storageClone(validateRetentionMetadata(value, key));
     },
+    async nextExpiresAtV1() {
+      return selectRetainedAuditsV1(null, 1)[0]?.expiresAt ?? null;
+    },
+    async stageExpiredAuditDeletionsV1(value) {
+      const { now, limit } = expirationSelectionRequestV1(value);
+      const candidates = selectRetainedAuditsV1(now, limit);
+      return stageSelectedAuditDeletionsV1(candidates, now, request => api.stageAuditDeletionV1(request));
+    },
     async stageAuditDeletionV1(value) {
       const request = deletionRequestV1(value);
       if (!request) return deniedDeletion();
@@ -1759,6 +1803,8 @@ function createUnavailableAuditStore() {
     getExportDeliveryJournal: unavailable,
     getExportReceipt: unavailable,
     getAuditRetention: unavailable,
+    nextExpiresAtV1: unavailable,
+    stageExpiredAuditDeletionsV1: unavailable,
     stageAuditDeletionV1: unavailable,
     listDeletionTombstonesV1: unavailable,
     recordDeletionCleanupFailureV1: unavailable,
@@ -1950,6 +1996,33 @@ export function createAuditStore(options = {}) {
         });
       });
     });
+  };
+  const selectRetainedAuditsV1 = async (now, limit) => {
+    try {
+      return await deletionTransaction([STORE_NAME, RETENTION_STORE_NAME], 'readonly', context => {
+        const records = [];
+        const audits = context.store(STORE_NAME);
+        const index = context.store(RETENTION_STORE_NAME).index('byExpiresAt');
+        const range = now === null ? undefined : indexedDbBoundary(() => keyRange.upperBound(now));
+        const request = index.openCursor(range);
+        context.read(request, cursor => {
+          if (!cursor) { context.setResult(records); return; }
+          const auditId = cursor.primaryKey;
+          context.read(audits.get(auditId), model => {
+            if (model !== undefined) records.push(validateRetentionMetadata(cursor.value, auditId));
+            if (records.length === limit) context.setResult(records);
+            else context.advance(cursor);
+          });
+        });
+      });
+    } catch { throw new AuditStorageUnavailableError(); }
+  };
+  const nextExpiresAtV1 = async () => (await selectRetainedAuditsV1(null, 1))[0]?.expiresAt ?? null;
+  const stageExpiredAuditDeletionsV1 = async value => {
+    const { now, limit } = expirationSelectionRequestV1(value);
+    // Finish the selection transaction before beginning independent R1 staging transactions.
+    const candidates = await selectRetainedAuditsV1(now, limit);
+    return stageSelectedAuditDeletionsV1(candidates, now, stageAuditDeletionV1);
   };
   const listDeletionTombstonesV1 = async value => {
     const { limit } = deletionOperationV1(value, ['limit']);
@@ -3340,6 +3413,8 @@ export function createAuditStore(options = {}) {
       return exportReceiptFromRevision(revision, entries) ?? exportReceiptFromLatest(latest, validId(id));
     },
     getAuditRetention,
+    nextExpiresAtV1,
+    stageExpiredAuditDeletionsV1,
     stageAuditDeletionV1,
     listDeletionTombstonesV1,
     recordDeletionCleanupFailureV1,
