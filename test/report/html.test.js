@@ -19,6 +19,21 @@ import { applyReviewDecisions, createReviewDecision } from '../../src/core/revie
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consumer-basis.js';
 import { SECTION508_REVISED_CROSSWALK, section508ReferencesForWcag } from '../../src/core/normative/section508.js';
 
+test('standalone evidence annex labels the recorded page period without inventing capture timestamps', () => {
+  const before = JSON.stringify(SAMPLE_AUDIT);
+  const html = renderHtmlReport(SAMPLE_AUDIT);
+  const annex = html.slice(html.indexOf('<section id="anexos"'));
+  const page = SAMPLE_AUDIT.pages[0];
+  const cards = [...annex.matchAll(/<article id="evidencia-[0-9]+"[\s\S]*?<\/article>/gu)];
+  for (const card of cards) {
+    assert.ok(card[0].includes(`URL da página observada:</strong> ${page.finalUrl}`));
+    assert.ok(card[0].includes(`Período observado da página:</strong> ${page.timestamps.startedAt} – ${page.timestamps.endedAt}`));
+    assert.ok(card[0].includes('Instante individual da captura:</strong> não registrado'));
+  }
+  assert.equal(cards.length, SAMPLE_AUDIT.evidence.length, 'every evidence card is checked');
+  assert.equal(JSON.stringify(SAMPLE_AUDIT), before);
+});
+
 function occurrenceCard(html, occurrenceId) {
   const marker = `data-occurrence-id="${occurrenceId}"`;
   const markerIndex = html.indexOf(marker);

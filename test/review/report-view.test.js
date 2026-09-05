@@ -127,6 +127,33 @@ async function readerMapFixture(status = 'complete', preview = 'Salvar & continu
   } });
 }
 
+test('evidence cards display page provenance and distinguish media URL and uncaptured individual time', async () => {
+  const { model, summary } = await fixture({ mutateDraft(draft) {
+    draft.evidence.find(item => item.evidenceId === 'ev-control').mediaUrl = 'https://media.test/a&b';
+  } });
+  const before = JSON.stringify(model);
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const page = model.pages.find(page => page.pageId === 'page-1');
+  for (const selector of ['[data-report-evidence="ev-control"]', '[data-report-occurrence-evidence="ev-control"]']) {
+    const card = root.querySelector(selector);
+    assert.ok(card.textContent.includes(`URL da página observada: ${page.finalUrl}`));
+    assert.ok(card.textContent.includes(`Período observado da página: ${page.timestamps.startedAt} – ${page.timestamps.endedAt}`));
+    assert.ok(card.textContent.includes('Instante individual da captura: não registrado'));
+    assert.ok(card.textContent.includes('URL da mídia: https://media.test/a&b'));
+  }
+  const html = renderHtmlReport(model, { reportView: view });
+  for (const marker of ['data-report-evidence="ev-control"', 'data-report-occurrence-evidence="ev-control"']) {
+    const section = html.slice(html.indexOf(marker)).split(/<\/(?:article|section)>/u)[0];
+    assert.ok(section.includes(`URL da página observada:</strong> ${page.finalUrl}`));
+    assert.ok(section.includes(`Período observado da página:</strong> ${page.timestamps.startedAt} – ${page.timestamps.endedAt}`));
+    assert.ok(section.includes('Instante individual da captura:</strong> não registrado'));
+    assert.ok(section.includes('URL da mídia:</strong> https://media.test/a&amp;b'));
+    assert.equal(section.includes('https://media.test/a&b'), false);
+  }
+  assert.equal(JSON.stringify(model), before);
+});
+
 test('the interactive reader map displays the derived PNG, numbered full announcement and source provenance', async () => {
   const { model, summary } = await readerMapFixture();
   const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });

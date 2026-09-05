@@ -7,6 +7,7 @@ import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from '../co
 import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
 import { readerMapPresentation, READER_MAP_INTRO } from '../core/report/reader-map-presentation.js';
+import { projectEvidenceProvenance, evidenceProvenanceRows } from '../core/report/evidence-provenance.js';
 
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
 const GROUP_LABELS = Object.freeze({
@@ -344,7 +345,9 @@ export function projectIssues(model, summary) {
 }
 
 export function projectTechnicalEvidence(model) {
-  return freeze(model.evidence.map(copyData).sort((left, right) => left.evidenceId.localeCompare(right.evidenceId)));
+  return freeze(model.evidence.map(evidence => ({
+    ...copyData(evidence), provenance: projectEvidenceProvenance(evidence, model.pages),
+  })).sort((left, right) => left.evidenceId.localeCompare(right.evidenceId)));
 }
 
 export function projectReaderMaps(model) {
@@ -557,8 +560,7 @@ function appendTechnicalDetails(document, article, issue, evidence) {
     block.append(
       element(document, 'h4', `ID da evidência: ${item.evidenceId} — ${evidenceKindLabel(item.kind)}`),
       element(document, 'p', `Proveniência: página ${item.pageId}; tipo ${item.kind}; estado ${item.state ?? 'não registrado'}.`),
-      element(document, 'p', `URL: ${item.mediaUrl ?? 'não registrada.'}`),
-      element(document, 'p', `Horário: ${item.observedAt ?? 'não registrado.'}`),
+      ...evidenceProvenanceRows(item).map(([label, value]) => element(document, 'p', `${label}: ${value}`)),
       element(document, 'p', `Seletor: ${item.selector?.css ?? 'não registrado.'}`),
       element(document, 'p', `Snippet: ${item.snippet ?? 'não disponível.'}`),
       element(document, 'p', `Hash: ${item.hash ?? 'não disponível.'}`),
@@ -951,8 +953,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
     card.setAttribute('id', evidenceAnchorById.get(evidence.evidenceId));
     card.append(
       element(document, 'h4', `${evidence.evidenceId} — ${evidenceKindLabel(evidence.kind)}`),
-      element(document, 'p', `URL: ${evidence.mediaUrl ?? 'não registrada.'}`),
-      element(document, 'p', `Horário: ${evidence.observedAt ?? 'não registrado.'}`),
+      ...evidenceProvenanceRows(evidence).map(([label, value]) => element(document, 'p', `${label}: ${value}`)),
       element(document, 'p', `Seletor: ${evidence.selector?.css ?? 'não registrado.'}`),
       element(document, 'p', `Snippet: ${evidence.snippet ?? 'não disponível.'}`),
     );
