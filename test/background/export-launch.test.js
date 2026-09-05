@@ -27,6 +27,7 @@ function navigationFixture({
       return Object.fromEntries(list.filter(key => records.has(key)).map(key => [key, structuredClone(records.get(key))]));
     },
     async set(rows) { for (const [key, value] of Object.entries(rows)) records.set(key, structuredClone(value)); },
+    async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) records.delete(key); },
   };
   const capability = Object.freeze({});
   const auditStore = {
@@ -85,12 +86,12 @@ function navigationFixture({
       async remove(receivedTabId) { calls.push(['remove', receivedTabId]); },
     },
   };
+  const reportLaunch = {
+    async authorizeExport() { return { ok: true, auditId, windowId, sessionCapabilityId: 'R'.repeat(22) }; },
+    async validateConsumer() { return true; },
+  };
   const authority = createExportLaunchAuthority({
-    chromeApi, sessionArea, auditStore,
-    reportLaunch: {
-      async authorizeExport() { return { ok: true, auditId, windowId, sessionCapabilityId: 'R'.repeat(22) }; },
-      async validateConsumer() { return true; },
-    },
+    chromeApi, sessionArea, auditStore, reportLaunch,
     epochNow: () => epoch,
     modelNow: () => '2026-08-30T12:00:00.000Z',
     randomBytes: size => new Uint8Array(size).fill(3),
@@ -102,6 +103,7 @@ function navigationFixture({
   const sender = { id: 'ext-test', documentId: 'export-doc', url: canonical };
   return {
     auditId, authority, calls, canonical, request, sender, tabId, windowId,
+    chromeApi, sessionArea, auditStore, reportLaunch,
     setCurrentTab(value) { currentTab = value; },
     setDocument(value) { contextDocument = value; },
     setEpoch(value) { epoch = value; },
@@ -733,4 +735,296 @@ test('isolates source validation failures and still revokes later independent ex
   assert.equal((await authority.getLaunch('audit-first')).state, 'connected');
   assert.equal((await authority.getLaunch('audit-second')).state, 'revoked');
   assert.deepEqual(calls, [['release', 'audit-second'], ['remove', 61]]);
+});
+
+async function exportCleanupFixture(state = 'connected') {
+  const env = navigationFixture({ deleted: false });
+  assert.equal((await env.authority.requestExport(env.request)).ok, true);
+  const connection = await env.authority.connect({ auditId: env.auditId, sender: env.sender });
+  assert.equal(connection.ok, true);
+  const completion = { auditId: env.auditId, sessionCapabilityId: connection.sessionCapabilityId, attemptId: '1', sender: env.sender };
+  if (state === 'terminal') assert.equal((await env.authority.complete(completion)).ok, true);
+  const launchKey = `audita:export-launch:v1:${env.auditId}`;
+  const indexKey = `audita:export-launch-tab:v1:${env.tabId}`;
+  const sessionKey = `audita:export-session:v1:${connection.sessionCapabilityId}`;
+  if (state === 'revoked') {
+    const launch = await env.authority.getLaunch(env.auditId);
+    const session = await env.authority.getSession(connection.sessionCapabilityId);
+    await env.sessionArea.set({ [launchKey]: { ...launch, state }, [sessionKey]: { ...session, state } });
+  }
+  const tabs = new Map([[env.tabId, { id: env.tabId, windowId: 7, url: env.canonical }]]);
+  const contexts = new Map([[env.tabId, {
+    contextType: 'TAB', documentId: 'export-doc', documentUrl: env.canonical, tabId: env.tabId, windowId: 7,
+  }]]);
+  env.chromeApi.tabs.get = async tabId => {
+    if (!tabs.has(tabId)) throw new Error('PRIVATE_TAB_ERROR');
+    return structuredClone(tabs.get(tabId));
+  };
+  env.chromeApi.tabs.query = async query => { assert.deepEqual(query, {}); return [...tabs.keys()].map(id => ({ id })); };
+  env.chromeApi.tabs.remove = async tabId => { env.calls.push(['remove', tabId]); tabs.delete(tabId); contexts.delete(tabId); };
+  env.chromeApi.runtime.getContexts = async filter => [...contexts.values()].filter(context =>
+    (!filter.tabIds || filter.tabIds.includes(context.tabId)) &&
+    (!filter.documentIds || filter.documentIds.includes(context.documentId)) &&
+    (!filter.contextTypes || filter.contextTypes.includes(context.contextType)));
+  const forbidden = [];
+  for (const owner of [env.auditStore, env.reportLaunch]) for (const method of Object.keys(owner)) {
+    owner[method] = async () => { forbidden.push(method); throw new Error('PRIVATE_DEPENDENCY_GONE'); };
+  }
+  env.chromeApi.downloads = {
+    async removeFile() { forbidden.push('removeFile'); }, async erase() { forbidden.push('erase'); },
+  };
+  env.calls.length = 0;
+  return { ...env, launchKey, indexKey, sessionKey, connection, completion, tabs, contexts, forbidden };
+}
+
+test('export audit cleanup revokes and purges connected terminal and revoked resources without model or download effects', async t => {
+  for (const state of ['connected', 'terminal', 'revoked']) await t.test(state, async () => {
+    const env = await exportCleanupFixture(state);
+    const foreign = { 'audita:export-launch-tab:v1:90': 'audit-other', 'audita:persona-lease:v1:7': { state: 'active' } };
+    await env.sessionArea.set(foreign);
+    const remove = env.chromeApi.tabs.remove;
+    env.chromeApi.tabs.remove = async tabId => {
+      const launch = await env.authority.getLaunch(env.auditId);
+      const session = await env.authority.getSession(env.connection.sessionCapabilityId);
+      assert.equal(launch.state, 'revoked'); assert.equal(session.state, 'revoked');
+      assert.equal(Object.hasOwn(launch, 'terminalProof'), false); assert.equal(Object.hasOwn(session, 'terminalProof'), false);
+      await remove(tabId);
+    };
+    assert.equal(await env.authority.clearAudit(env.auditId), true);
+    assert.equal(await env.authority.clearAudit(env.auditId), true);
+    assert.deepEqual(await env.sessionArea.get(null), foreign);
+    assert.deepEqual(env.calls, [['remove', 51]]);
+    assert.equal((await env.authority.complete(env.completion)).ok, false);
+    assert.deepEqual(env.forbidden, []);
+  });
+});
+
+test('export audit cleanup includes orphan sessions using their exact document and never an index-only tab', async () => {
+  const env = await exportCleanupFixture();
+  const session = await env.authority.getSession(env.connection.sessionCapabilityId);
+  const olderId = 'Z'.repeat(22);
+  await env.sessionArea.set({
+    [`audita:export-session:v1:${olderId}`]: { ...session, sessionCapabilityId: olderId, launchTabId: 52, launchDocumentId: 'older-doc', state: 'revoked' },
+    'audita:export-launch-tab:v1:52': env.auditId,
+    'audita:export-launch-tab:v1:53': env.auditId,
+  });
+  env.tabs.set(52, { id: 52, windowId: 8, url: env.canonical });
+  env.contexts.set(52, { ...env.contexts.get(51), tabId: 52, windowId: 8, documentId: 'older-doc' });
+  env.tabs.set(53, { id: 53, windowId: 7, url: 'https://unrelated.invalid/' });
+  assert.equal(await env.authority.clearAudit(env.auditId), true);
+  assert.deepEqual(env.calls, [['remove', 51], ['remove', 52]]);
+  assert.equal(env.tabs.has(53), true);
+  assert.deepEqual(await env.sessionArea.get(null), {});
+  assert.deepEqual(env.forbidden, []);
+});
+
+test('export audit cleanup adopts only a stable preconnection document and retains unproved blank or pending tabs', async t => {
+  for (const mode of ['canonical', 'blank', 'pending', 'context-missing']) await t.test(mode, async () => {
+    const env = await exportCleanupFixture();
+    const launch = await env.authority.getLaunch(env.auditId);
+    await env.sessionArea.set({ [env.launchKey]: { ...launch, state: 'awaiting-connection', documentId: null } });
+    await env.sessionArea.remove(env.sessionKey);
+    if (mode === 'blank') env.tabs.get(51).url = 'about:blank';
+    if (mode === 'pending') env.tabs.get(51).pendingUrl = env.canonical;
+    if (mode === 'context-missing') env.contexts.clear();
+    const remove = env.chromeApi.tabs.remove;
+    env.chromeApi.tabs.remove = async tabId => {
+      assert.equal((await env.authority.getLaunch(env.auditId)).documentId, 'export-doc'); await remove(tabId);
+    };
+    assert.equal(await env.authority.clearAudit(env.auditId), mode === 'canonical');
+    if (mode !== 'canonical') {
+      assert.equal(env.tabs.has(51), true);
+      assert.equal((await env.authority.getLaunch(env.auditId)).state, 'revoked');
+    }
+    assert.deepEqual(env.forbidden, []);
+  });
+});
+
+test('export audit cleanup refuses foreign documents navigation and indices then retries on proved absence', async t => {
+  for (const mode of ['url', 'document', 'window', 'pending', 'last-proof-navigation', 'foreign-index']) await t.test(mode, async () => {
+    const env = await exportCleanupFixture();
+    if (mode === 'url') env.tabs.get(51).url = 'https://unrelated.invalid/';
+    if (mode === 'document') env.contexts.get(51).documentId = 'foreign-doc';
+    if (mode === 'window') env.tabs.get(51).windowId = 9;
+    if (mode === 'pending') env.tabs.get(51).pendingUrl = 'https://unrelated.invalid/';
+    if (mode === 'foreign-index') await env.sessionArea.set({ [env.indexKey]: 'audit-other' });
+    if (mode === 'last-proof-navigation') {
+      let reads = 0; const contexts = env.chromeApi.runtime.getContexts;
+      env.chromeApi.runtime.getContexts = async filter => {
+        const result = await contexts(filter);
+        if (++reads === 2) env.tabs.get(51).pendingUrl = 'https://unrelated.invalid/';
+        return result;
+      };
+    }
+    assert.equal(await env.authority.clearAudit(env.auditId), false);
+    assert.deepEqual(env.calls, []); assert.equal(env.tabs.has(51), true);
+    env.tabs.delete(51); env.contexts.clear();
+    if (mode === 'foreign-index') await env.sessionArea.set({ [env.indexKey]: env.auditId });
+    assert.equal(await env.authority.clearAudit(env.auditId), true);
+    assert.deepEqual(await env.sessionArea.get(null), {});
+    assert.deepEqual(env.forbidden, []);
+  });
+});
+
+test('export audit cleanup confirms writes removal and tab absence instead of trusting exceptions or no-ops', async t => {
+  for (const mode of ['write-noop', 'write-throws', 'write-commit-throw', 'remove-noop', 'remove-commit-throw',
+    'close-noop', 'close-throws', 'close-commit-throw', 'tab-read-error', 'query-error', 'context-error']) await t.test(mode, async () => {
+    const env = await exportCleanupFixture('terminal');
+    const set = env.sessionArea.set; const remove = env.sessionArea.remove;
+    const getTab = env.chromeApi.tabs.get; const query = env.chromeApi.tabs.query;
+    const close = env.chromeApi.tabs.remove; const contexts = env.chromeApi.runtime.getContexts;
+    if (mode.startsWith('write-')) env.sessionArea.set = async rows => {
+      if (mode === 'write-commit-throw') await set(rows);
+      if (mode !== 'write-noop') throw new Error('PRIVATE_SET_ERROR');
+    };
+    if (mode.startsWith('remove-')) env.sessionArea.remove = async keys => {
+      if (mode === 'remove-commit-throw') { await remove(keys); throw new Error('PRIVATE_REMOVE_ERROR'); }
+    };
+    if (mode.startsWith('close-')) env.chromeApi.tabs.remove = async tabId => {
+      if (mode === 'close-commit-throw') await close(tabId);
+      if (mode !== 'close-noop') throw new Error('PRIVATE_CLOSE_ERROR');
+    };
+    if (['tab-read-error', 'query-error'].includes(mode)) env.chromeApi.tabs.get = async () => { throw new Error('PRIVATE_TAB_ERROR'); };
+    if (mode === 'query-error') env.chromeApi.tabs.query = async () => { throw new Error('PRIVATE_QUERY_ERROR'); };
+    if (mode === 'context-error') env.chromeApi.runtime.getContexts = async () => { throw new Error('PRIVATE_CONTEXT_ERROR'); };
+    const confirmed = mode.endsWith('commit-throw');
+    assert.equal(await env.authority.clearAudit(env.auditId), confirmed);
+    if (!confirmed) {
+      assert.notEqual(await env.authority.getLaunch(env.auditId), null);
+      env.sessionArea.set = set; env.sessionArea.remove = remove;
+      env.chromeApi.tabs.get = getTab; env.chromeApi.tabs.query = query;
+      env.chromeApi.tabs.remove = close; env.chromeApi.runtime.getContexts = contexts;
+      assert.equal(await env.authority.clearAudit(env.auditId), true);
+    }
+    assert.deepEqual(await env.sessionArea.get(null), {});
+    assert.deepEqual(env.forbidden, []);
+  });
+});
+
+test('export audit cleanup rejects invalid or transplanted records and foreign replacements without effects', async t => {
+  for (const mode of ['invalid-id', 'inventory-error', 'malformed-launch', 'transplant-launch', 'transplant-session', 'replacement']) await t.test(mode, async () => {
+    const env = await exportCleanupFixture();
+    if (mode === 'malformed-launch') await env.sessionArea.set({ [env.launchKey]: { auditId: env.auditId } });
+    if (mode === 'transplant-launch') {
+      await env.sessionArea.set({ 'audita:export-launch:v1:audit-other': await env.authority.getLaunch(env.auditId) });
+      await env.sessionArea.remove([env.launchKey, env.sessionKey, env.indexKey]);
+    }
+    if (mode === 'transplant-session') await env.sessionArea.set({
+      [`audita:export-session:v1:${'Z'.repeat(22)}`]: await env.authority.getSession(env.connection.sessionCapabilityId),
+    });
+    if (mode === 'inventory-error') env.sessionArea.get = async () => { throw new Error('PRIVATE_INVENTORY_ERROR'); };
+    if (mode === 'replacement') {
+      const contexts = env.chromeApi.runtime.getContexts;
+      env.chromeApi.runtime.getContexts = async filter => {
+        await env.sessionArea.set({ [env.indexKey]: 'audit-other' }); return contexts(filter);
+      };
+    }
+    assert.equal(await env.authority.clearAudit(mode === 'invalid-id' ? ['audit-navigation'] : env.auditId), false);
+    assert.deepEqual(env.calls, []); assert.equal(env.tabs.has(51), true);
+    assert.deepEqual(env.forbidden, []);
+  });
+});
+
+test('export audit cleanup is not undone by a delayed window inventory', async () => {
+  const env = await exportCleanupFixture();
+  const get = env.sessionArea.get;
+  let entered; let release; let intercept = true;
+  const captured = new Promise(resolve => { entered = resolve; });
+  env.sessionArea.get = async keys => {
+    const result = await get(keys);
+    if (keys === null && intercept) {
+      intercept = false;
+      return new Promise(resolve => { release = () => resolve(result); entered(); });
+    }
+    return result;
+  };
+  const event = env.authority.handleWindowRemoved(7);
+  await captured;
+  try { assert.equal(await env.authority.clearAudit(env.auditId), true); }
+  finally { release(); }
+  await event;
+  assert.deepEqual(await env.sessionArea.get(null), {});
+  assert.deepEqual(env.calls, [['remove', 51]]);
+  assert.deepEqual(env.forbidden, []);
+});
+
+test('export audit cleanup is not undone by an earlier source validation resolving false', async () => {
+  const env = await exportCleanupFixture();
+  let entered; let release;
+  const captured = new Promise(resolve => { entered = resolve; });
+  env.reportLaunch.validateConsumer = async () => {
+    entered(); await new Promise(resolve => { release = resolve; }); return false;
+  };
+  const event = env.authority.handleTabUpdated(99, { status: 'loading' });
+  await captured;
+  try { assert.equal(await env.authority.clearAudit(env.auditId), true); }
+  finally { release(); }
+  await event;
+  assert.deepEqual(await env.sessionArea.get(null), {});
+  assert.deepEqual(env.calls, [['remove', 51]]);
+  assert.deepEqual(env.forbidden, []);
+});
+
+test('export audit cleanup delayed old-tab event cannot revoke or close a replacement launch', async () => {
+  const env = await exportCleanupFixture();
+  const get = env.sessionArea.get;
+  let entered; let release; let intercept = true;
+  const captured = new Promise(resolve => { entered = resolve; });
+  env.sessionArea.get = async keys => {
+    const result = await get(keys);
+    if (keys === env.indexKey && intercept) {
+      intercept = false;
+      return new Promise(resolve => { release = () => resolve(result); entered(); });
+    }
+    return result;
+  };
+  const event = env.authority.handleTabRemoved(51);
+  await captured;
+  try {
+    assert.equal(await env.authority.clearAudit(env.auditId), true);
+    const capability = Object.freeze({});
+    env.auditStore.getAuditSnapshot = async () => ({ revision: 2, capability });
+    env.auditStore.acquireExportLease = async (_auditId, received) => {
+      assert.equal(received, capability); return { acquired: true, exportAttempt: 2, revision: 2 };
+    };
+    env.reportLaunch.authorizeExport = async () => ({ ok: true, auditId: env.auditId, windowId: 7 });
+    env.chromeApi.tabs.create = async options => ({ id: 52, windowId: options.windowId, url: 'about:blank' });
+    env.chromeApi.tabs.update = async (tabId, options) => {
+      const tab = { id: tabId, windowId: 7, url: options.url }; env.tabs.set(tabId, tab); return tab;
+    };
+    assert.equal((await env.authority.requestExport(env.request)).ok, true);
+  } finally { release(); }
+  await event;
+  const launch = await env.authority.getLaunch(env.auditId);
+  assert.equal(launch.state, 'awaiting-connection');
+  assert.equal(launch.tabId, 52);
+  assert.equal(env.tabs.has(52), true);
+  assert.deepEqual(env.calls, [['remove', 51]]);
+  assert.deepEqual(env.forbidden, []);
+});
+
+test('export audit cleanup is serialized across authorities sharing the same durable area', async () => {
+  const env = await exportCleanupFixture();
+  const second = createExportLaunchAuthority({ chromeApi: env.chromeApi, sessionArea: env.sessionArea,
+    auditStore: env.auditStore, reportLaunch: env.reportLaunch, epochNow: () => 1000,
+    modelNow: () => '2026-09-05T12:00:00.000Z', randomBytes: size => new Uint8Array(size).fill(9) });
+  const set = env.sessionArea.set;
+  let entered; let release; let intercept = true;
+  const captured = new Promise(resolve => { entered = resolve; });
+  env.sessionArea.set = async rows => {
+    await set(rows);
+    if (intercept) { intercept = false; entered(); await new Promise(resolve => { release = resolve; }); }
+  };
+  const first = env.authority.clearAudit(env.auditId);
+  await captured;
+  let secondDone = false;
+  const later = second.clearAudit(env.auditId).then(result => { secondDone = true; return result; });
+  await new Promise(resolve => setImmediate(resolve));
+  const wasDoneEarly = secondDone;
+  release();
+  assert.deepEqual(await Promise.all([first, later]), [true, true]);
+  assert.equal(wasDoneEarly, false);
+  assert.deepEqual(env.calls, [['remove', 51]]);
+  assert.deepEqual(await env.sessionArea.get(null), {});
+  assert.deepEqual(env.forbidden, []);
 });
