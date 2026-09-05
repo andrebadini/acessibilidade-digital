@@ -871,6 +871,7 @@ export function createPanelPortCoordinator(raw) {
         if (incumbent && incumbent !== binding && connected(incumbent)) throw new Error('PANEL_INCUMBENT');
         const currentTime = input.epochNow();
         if (!safeEpoch(currentTime)) throw new Error('PANEL_CLOCK_DENIED');
+        bind(binding, admission.windowId, 'proving-hello');
         const bootstrap = await readBootstrap(admission.windowId);
         if (!bootstrap) {
           bind(binding, admission.windowId, 'bound-idle');
@@ -880,6 +881,7 @@ export function createPanelPortCoordinator(raw) {
         if (bootstrap.windowId !== admission.windowId || bootstrap.createdAt > currentTime || bootstrap.expiresAt <= currentTime) {
           throw new Error('PANEL_BOOTSTRAP_DENIED');
         }
+        bind(binding, admission.windowId, 'proving-hello', bootstrap.auditId, bootstrap.sessionCapabilityId);
         const session = await readSession(bootstrap.sessionCapabilityId, bootstrap.auditId);
         if (session.windowId !== bootstrap.windowId) throw new Error('PANEL_SESSION_DENIED');
         if (session.state === 'running') {
@@ -1370,6 +1372,50 @@ export function createPanelPortCoordinator(raw) {
     })();
   }
 
+  async function clearAudit(auditId) {
+    if (typeof auditId !== 'string' || !AUDIT_ID.test(auditId)) return false;
+    try {
+      const raw = await input.sessionArea.get(null);
+      const inventory = exact(raw, Reflect.ownKeys(raw), true);
+      if (!inventory) return false;
+      const windows = new Map();
+      for (const [key, value] of Object.entries(inventory)) {
+        if (!key.startsWith('audita:panel-bootstrap:v1:') || own(value, 'auditId') !== auditId) continue;
+        const bootstrap = parseBootstrap(value);
+        if (!bootstrap || key !== panelBootstrapStorageKey(bootstrap.windowId)) return false;
+        windows.set(bootstrap.windowId, true);
+      }
+      for (const binding of liveByWindow.values()) {
+        if (!connected(binding)) continue;
+        if (binding.auditId === auditId) windows.set(binding.windowId, true);
+        else if (binding.state === 'proving-hello' && binding.auditId === null && !windows.has(binding.windowId)) {
+          windows.set(binding.windowId, false);
+        }
+      }
+      for (const [windowId, knownOwnAtScan] of [...windows].sort(([left], [right]) => left - right)) {
+        const cleared = await withWindowLock(windowId, async scope => {
+          let complete = true;
+          const bootstrap = await readBootstrap(windowId);
+          if (bootstrap?.auditId === auditId) {
+            complete = await scope.disconnectSession({
+              auditId, sessionCapabilityId: bootstrap.sessionCapabilityId, windowId, reasonCode: 'AUDIT_DELETED',
+            });
+          } else if (bootstrap && knownOwnAtScan) complete = false;
+          const binding = liveByWindow.get(windowId);
+          if (connected(binding) && binding.auditId === auditId) {
+            const detached = await scope.disconnectSession({
+              auditId, sessionCapabilityId: binding.sessionCapabilityId, windowId, reasonCode: 'AUDIT_DELETED',
+            });
+            complete = detached && complete;
+          }
+          return complete;
+        });
+        if (!cleared) return false;
+      }
+      return true;
+    } catch { return false; }
+  }
+
   async function publishHighlightState(rawEvent) {
     const event = highlightStatePacket(rawEvent);
     if (!event) return Object.freeze({ delivered: 0 });
@@ -1408,5 +1454,6 @@ export function createPanelPortCoordinator(raw) {
     attachPanelPort,
     withWindowLock,
     publishHighlightState,
+    clearAudit,
   });
 }

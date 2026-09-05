@@ -1636,7 +1636,12 @@ async function buildDefaultRuntime(chromeApi, options) {
     disconnectPanelAudit: auditId => disconnectPanelAuditSessions({ auditId, sessionArea, panelCoordinator }),
   });
   const router = createSidePanelIntentRouter({
-    chromeApi, authority, auditStarter, panelCoordinator, chromeAdapter,
+    chromeApi, authority, auditStarter, chromeAdapter,
+    panelCoordinator: Object.freeze({
+      attachPanelPort: panelCoordinator.attachPanelPort,
+      withWindowLock: panelCoordinator.withWindowLock,
+      publishHighlightState: panelCoordinator.publishHighlightState,
+    }),
     urlAuditStarter: auditStarter, rawNavigationVault,
     createOwnershipId: () => createOwnershipId(bytes),
     personaStart, personaCoordinator,

@@ -78,7 +78,10 @@ function area() {
   const values = Object.create(null);
   return {
     values,
-    async get(key) { return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {}; },
+    async get(key) {
+      if (key === null) return structuredClone(values);
+      return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {};
+    },
     async set(entries) { Object.assign(values, structuredClone(entries)); },
     async remove(key) { delete values[key]; },
   };
@@ -314,7 +317,7 @@ function launchAuthorityWithRetirement(retirePort) {
 
 test('exports only lock entry and attaches fresh owner-bound mutation scopes', async () => {
   const { coordinator } = fixture();
-  assert.deepEqual(Object.keys(coordinator), ['attachPanelPort', 'withWindowLock', 'publishHighlightState']);
+  assert.deepEqual(Object.keys(coordinator), ['attachPanelPort', 'withWindowLock', 'publishHighlightState', 'clearAudit']);
   assert.equal(Object.isFrozen(coordinator), true);
 
   let retained;
@@ -2272,6 +2275,208 @@ test('a live view-only send failure remains durably registered for reconnect', a
   }));
   assert.deepEqual(result, { registered: true, delivered: false });
   assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].state, 'consumed');
+});
+
+function cleanupBootstrap(auditId = 'audit-port', sessionCapabilityId = SESSION, windowId = 9) {
+  return {
+    version: 1, kind: 'audit-session', auditId, sessionCapabilityId, windowId,
+    createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+}
+
+async function runningCleanupFixture() {
+  const env = fixture();
+  env.setActive(runningActive());
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = cleanupBootstrap();
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.equal(connected.messages.at(-1)?.state, 'running');
+  return { ...env, connected };
+}
+
+test('panel audit cleanup removes its durable bootstrap without a Port and preserves foreign and unrelated records', async () => {
+  const env = fixture();
+  const ownKey = panelBootstrapStorageKey(9);
+  const foreignKey = panelBootstrapStorageKey(10);
+  env.sessionArea.values[ownKey] = cleanupBootstrap();
+  const foreign = cleanupBootstrap('audit-foreign', 'F'.repeat(22), 10);
+  env.sessionArea.values[foreignKey] = foreign;
+  env.sessionArea.values['audita:persona-lease:independent'] = { state: 'active' };
+  assert.equal(await env.coordinator.clearAudit('audit-port'), true);
+  assert.equal(Object.hasOwn(env.sessionArea.values, ownKey), false);
+  assert.deepEqual(env.sessionArea.values[foreignKey], foreign);
+  assert.deepEqual(env.sessionArea.values['audita:persona-lease:independent'], { state: 'active' });
+  assert.equal(await env.coordinator.clearAudit('audit-port'), true);
+});
+
+test('panel audit cleanup reaches a live binding when bootstrap is absent or uses another capability of the same audit', async t => {
+  for (const mode of ['absent', 'different-own-session']) await t.test(mode, async () => {
+    const env = await runningCleanupFixture();
+    const key = panelBootstrapStorageKey(9);
+    if (mode === 'absent') await env.sessionArea.remove(key);
+    else env.sessionArea.values[key] = cleanupBootstrap('audit-port', VIEW_SESSION);
+    assert.equal(await env.coordinator.clearAudit('audit-port'), true);
+    assert.equal(env.connected.disconnects, 1);
+    assert.equal(env.connected.onMessage.listeners.size, 0);
+    assert.equal(Object.hasOwn(env.sessionArea.values, key), false);
+    assert.equal(await env.coordinator.clearAudit('audit-port'), true);
+    assert.equal(env.connected.disconnects, 1);
+  });
+});
+
+test('panel audit cleanup preserves a live foreign binding in another window', async () => {
+  const env = await runningCleanupFixture();
+  const ownKey = panelBootstrapStorageKey(10);
+  env.sessionArea.values[ownKey] = cleanupBootstrap('audit-delete', 'D'.repeat(22), 10);
+  const before = structuredClone(env.sessionArea.values[panelBootstrapStorageKey(9)]);
+  assert.equal(await env.coordinator.clearAudit('audit-delete'), true);
+  assert.equal(Object.hasOwn(env.sessionArea.values, ownKey), false);
+  assert.deepEqual(env.sessionArea.values[panelBootstrapStorageKey(9)], before);
+  assert.equal(env.connected.disconnects, 0);
+  assert.equal(env.connected.onMessage.listeners.size, 1);
+});
+
+test('panel audit cleanup awaits an in-flight terminal hello and uses its current correlation', async t => {
+  const resultBundle = await bundle();
+  for (const kind of ['single-without-bootstrap', 'attached-rotates']) await t.test(kind, async () => {
+    let release;
+    let entered;
+    const loading = new Promise(resolve => { entered = resolve; });
+    const env = fixture({ loadPanelResultBundle: () => new Promise(resolve => {
+      release = () => resolve(resultBundle); entered();
+    }) });
+    env.sessions.set(SESSION, kind === 'single-without-bootstrap' ? {
+      ...session('result'), mode: 'single',
+      targetBinding: { kind: 'disposable', ownershipId: `owner_${'O'.repeat(22)}`, state: 'retained-for-review' },
+    } : session('result'));
+    const key = panelBootstrapStorageKey(9);
+    env.sessionArea.values[key] = { ...cleanupBootstrap(), state: 'consumed' };
+    const connected = port();
+    env.coordinator.attachPanelPort(connected);
+    connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+    await loading;
+    if (kind === 'single-without-bootstrap') await env.sessionArea.remove(key);
+    let completed = false;
+    const clearing = env.coordinator.clearAudit('audit-port').then(result => { completed = true; return result; });
+    await tick();
+    assert.equal(completed, false);
+    release();
+    assert.equal(await clearing, true);
+    assert.equal(connected.disconnects, 1);
+    assert.equal(Object.hasOwn(env.sessionArea.values, key), false);
+    const before = structuredClone(connected.messages);
+    await tick();
+    assert.deepEqual(connected.messages, before);
+    if (kind === 'attached-rotates') assert.equal(before.at(-1)?.sessionCapabilityId, VIEW_SESSION);
+  });
+});
+
+test('panel audit cleanup waits for a hello reading its session even after the bootstrap is removed', async () => {
+  let release;
+  let entered;
+  let reads = 0;
+  const reading = new Promise(resolve => { entered = resolve; });
+  const env = fixture({ readAuditSession: async () => {
+    if (++reads > 1) return session('revoked');
+    return new Promise(resolve => { release = () => resolve(session('running')); entered(); });
+  } });
+  env.setActive(runningActive());
+  const key = panelBootstrapStorageKey(9);
+  env.sessionArea.values[key] = cleanupBootstrap();
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await reading;
+  await env.sessionArea.remove(key);
+  let completed = false;
+  const clearing = env.coordinator.clearAudit('audit-port').then(result => { completed = true; return result; });
+  await tick();
+  assert.equal(completed, false);
+  release();
+  assert.equal(await clearing, true);
+  assert.equal(connected.disconnects, 1);
+  assert.deepEqual(connected.messages, []);
+});
+
+test('panel audit cleanup tracks a hello before its bootstrap read resolves without touching a foreign result', async t => {
+  const resultBundle = await bundle();
+  for (const requestedAudit of ['audit-port', 'audit-unrelated']) await t.test(requestedAudit, async () => {
+    const env = fixture({ loadPanelResultBundle: async () => resultBundle });
+    env.sessions.set(SESSION, {
+      ...session('result'), mode: 'single',
+      targetBinding: { kind: 'disposable', ownershipId: `owner_${'O'.repeat(22)}`, state: 'retained-for-review' },
+    });
+    const key = panelBootstrapStorageKey(9);
+    const bootstrap = { ...cleanupBootstrap(), state: 'consumed' };
+    env.sessionArea.values[key] = bootstrap;
+    const originalGet = env.sessionArea.get;
+    let reads = 0;
+    let entered;
+    let release;
+    const captured = new Promise(resolve => { entered = resolve; });
+    env.sessionArea.get = async request => {
+      const result = await originalGet(request);
+      if (request === key && ++reads === 2) {
+        return new Promise(resolve => { release = () => resolve(result); entered(); });
+      }
+      return result;
+    };
+    const connected = port();
+    env.coordinator.attachPanelPort(connected);
+    connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+    await captured;
+    if (requestedAudit === 'audit-port') await env.sessionArea.remove(key);
+    let completed = false;
+    const clearing = env.coordinator.clearAudit(requestedAudit).then(result => { completed = true; return result; });
+    await tick();
+    const completedBeforeRead = completed;
+    release();
+    assert.equal(await clearing, true);
+    await tick();
+    assert.equal(completedBeforeRead, false);
+    assert.equal(connected.messages.at(-1)?.state, 'result');
+    assert.equal(connected.disconnects, requestedAudit === 'audit-port' ? 1 : 0);
+    if (requestedAudit === 'audit-port') assert.equal(Object.hasOwn(env.sessionArea.values, key), false);
+    else assert.deepEqual(env.sessionArea.values[key], bootstrap);
+    const afterCleanup = structuredClone(connected.messages);
+    await tick();
+    assert.deepEqual(connected.messages, afterCleanup);
+  });
+});
+
+test('panel audit cleanup denies unreadable inventory and invalid identifiers without echoing input', async () => {
+  const env = fixture();
+  let reads = 0;
+  env.sessionArea.get = async () => { reads += 1; throw new Error('PRIVATE_SENTINEL'); };
+  for (const value of [null, ['audit-port'], 'https://private.invalid/', { toString() { throw new Error('PRIVATE_SENTINEL'); } }]) {
+    assert.equal(await env.coordinator.clearAudit(value), false);
+  }
+  assert.equal(reads, 0);
+  assert.equal(await env.coordinator.clearAudit('audit-port'), false);
+  env.sessionArea.get = async () => null;
+  assert.equal(await env.coordinator.clearAudit('audit-port'), false);
+});
+
+test('panel audit cleanup rejects unconfirmed storage cleanup and preserves foreign replacement', async t => {
+  for (const behavior of ['remove-throws', 'no-op', 'foreign-replacement', 'malformed-own']) await t.test(behavior, async () => {
+    const env = fixture();
+    const key = panelBootstrapStorageKey(9);
+    env.sessionArea.values[key] = cleanupBootstrap();
+    const foreign = cleanupBootstrap('audit-foreign', 'F'.repeat(22));
+    if (behavior === 'malformed-own') env.sessionArea.values[key].createdAt = 'invalid';
+    const originalRemove = env.sessionArea.remove;
+    env.sessionArea.remove = async () => {
+      if (behavior === 'remove-throws') throw new Error('PRIVATE_SENTINEL');
+      if (behavior === 'foreign-replacement') env.sessionArea.values[key] = foreign;
+    };
+    assert.equal(await env.coordinator.clearAudit('audit-port'), false);
+    assert.equal(Object.hasOwn(env.sessionArea.values, key), true);
+    if (behavior === 'foreign-replacement') assert.deepEqual(env.sessionArea.values[key], foreign);
+    env.sessionArea.remove = originalRemove;
+    if (behavior !== 'malformed-own') assert.equal(await env.coordinator.clearAudit('audit-port'), true);
+  });
 });
 
 test('disconnectSession removes a correlated durable bootstrap even when no live port exists', async () => {
