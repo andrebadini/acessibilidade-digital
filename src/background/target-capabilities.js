@@ -918,6 +918,56 @@ export function createTargetCapabilityAuthority({
     });
   }
 
+  const clearAudit = auditId => serialize(async () => {
+    if (typeof auditId !== 'string' || !MODEL_ID.test(auditId)) return unavailable();
+    try {
+      const raw = await sessionArea.get(null);
+      const inventory = readDataRecord(raw, Reflect.ownKeys(raw));
+      if (!inventory) return unavailable();
+      const entries = Object.entries(inventory);
+      const sessions = new Map();
+      const expected = new Map();
+      const changes = {};
+      const plan = (key, record, state, parse) => {
+        const changed = record.state === state ? record : { ...record, state };
+        expected.set(key, { record: changed, parse });
+        if (record.state !== state) changes[key] = changed;
+      };
+      for (const [key, value] of entries) {
+        if (!key.startsWith(SESSION_PREFIX) || readDataProperty(value, 'auditId').value !== auditId) continue;
+        const session = parseSessionRecord(value);
+        if (!session || key !== sessionCapabilityStorageKey(session.sessionCapabilityId)) return unavailable();
+        sessions.set(session.sessionCapabilityId, session);
+        plan(key, session, 'revoked', parseSessionRecord);
+      }
+      for (const [key, value] of entries) {
+        const targetKind = key.startsWith(TARGET_PREFIX);
+        if (!targetKind && !key.startsWith(NAVIGATION_PREFIX)) continue;
+        const session = sessions.get(readDataProperty(value, 'sessionCapabilityId').value);
+        if (!session) continue;
+        const parse = targetKind ? parseTargetRecord : parseNavigationRecord;
+        const record = parse(value);
+        const storageKey = targetKind ? targetCapabilityStorageKey : navigationCapabilityStorageKey;
+        if (!record || key !== storageKey(record.capabilityId) || record.windowId !== session.windowId ||
+          (targetKind && isPersonaTarget(record))) return unavailable();
+        plan(key, record, 'invalidated', parse);
+      }
+      const keys = [...expected.keys()];
+      const invalidated = Object.keys(changes).length;
+      try { if (invalidated > 0) await sessionArea.set(changes); }
+      catch { /* Confirm every planned record, including commit-then-throw. */ }
+      if (keys.length > 0) {
+        const confirmed = readExactStoredValues(await sessionArea.get(keys), keys);
+        if (!confirmed) return unavailable();
+        for (const [key, value] of expected) {
+          const record = value.parse(confirmed[key]);
+          if (!record || !sameGraph(record, value.record)) return unavailable();
+        }
+      }
+      return deepFreeze({ ok: true, invalidated });
+    } catch { return unavailable(); }
+  });
+
   const rehydrateViewOnly = args => serialize(async () => {
     const input = readDataRecord(args, REHYDRATE_KEYS);
     if (!input || !MODEL_ID.test(input.auditId ?? '') || input.mode !== 'attached' ||
@@ -956,6 +1006,7 @@ export function createTargetCapabilityAuthority({
     invalidateCapability,
     invalidateForTab,
     invalidateForWindow,
+    clearAudit,
     rehydrateViewOnly,
   });
 }
