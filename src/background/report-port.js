@@ -83,20 +83,20 @@ export function createReportPortCoordinator(raw) {
     let binding;
     const onDisconnect = () => disconnect(port);
     const onMessage = value => {
-      if (binding.ready) { disconnect(port); return; }
+      if (binding.auditId !== null) { disconnect(port); return; }
       const packet = hello(value);
       if (!packet) { disconnect(port); return; }
+      binding.auditId = packet.auditId;
+      binding.sessionCapabilityId = packet.sessionCapabilityId;
       void input.reportLaunch.authorizeIntent({
         sessionCapabilityId: packet.sessionCapabilityId, auditId: packet.auditId, intent: 'export', sender: port.sender,
       }).then(async authorization => {
-        if (!bindings.has(port) || authorization?.ok !== true || authorization.auditId !== packet.auditId ||
+        if (bindings.get(port) !== binding || authorization?.ok !== true || authorization.auditId !== packet.auditId ||
           authorization.sessionCapabilityId !== packet.sessionCapabilityId || authorization.intent !== 'export') {
           disconnect(port); return;
         }
         binding.ready = true;
         binding.syncing = true;
-        binding.auditId = packet.auditId;
-        binding.sessionCapabilityId = packet.sessionCapabilityId;
         try { input.clearTimer(binding.timer); } catch {}
         let current;
         try {
@@ -108,7 +108,7 @@ export function createReportPortCoordinator(raw) {
         } catch {
           disconnect(port); return;
         }
-        if (!bindings.has(port)) return;
+        if (bindings.get(port) !== binding) return;
         const snapshot = highlightSnapshot(current, packet.auditId);
         const next = binding.pendingEvent ?? snapshot;
         binding.pendingEvent = null;
@@ -134,13 +134,14 @@ export function createReportPortCoordinator(raw) {
     if (!event) return Object.freeze({ delivered: 0 });
     let delivered = 0;
     for (const binding of [...live]) {
-      if (!binding.ready || binding.auditId !== event.auditId) continue;
+      if (bindings.get(binding.port) !== binding || !binding.ready || binding.auditId !== event.auditId) continue;
       let authorization;
       try {
         authorization = await input.reportLaunch.authorizeIntent({
           sessionCapabilityId: binding.sessionCapabilityId, auditId: binding.auditId, intent: 'highlight', sender: binding.port.sender,
         });
       } catch { authorization = null; }
+      if (bindings.get(binding.port) !== binding) continue;
       if (authorization?.ok !== true || authorization.intent !== 'highlight') { disconnect(binding.port); continue; }
       if (binding.syncing) {
         binding.pendingEvent = event;
@@ -152,5 +153,14 @@ export function createReportPortCoordinator(raw) {
     return Object.freeze({ delivered });
   }
 
-  return Object.freeze({ attachReportPort, publishHighlightState });
+  async function clearAudit(auditId) {
+    if (typeof auditId !== 'string' || !AUDIT_ID.test(auditId)) throw new TypeError('REPORT_PORT_CLEANUP_DENIED');
+    let cleared = 0;
+    for (const binding of [...live]) {
+      if (binding.auditId === auditId && disconnect(binding.port)) cleared += 1;
+    }
+    return cleared;
+  }
+
+  return Object.freeze({ attachReportPort, publishHighlightState, clearAudit });
 }
