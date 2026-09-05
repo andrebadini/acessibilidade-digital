@@ -121,7 +121,7 @@ function suspension(overrides = {}) {
     mode: 'full-evidence',
     capturePolicy: {
       version: 'CapturePolicyV1', mode: 'full-evidence', includeQuery: false,
-      captureFullPage: true, captureElements: true, composeAnnouncementMap: false,
+      captureFullPage: true, captureElements: true, composeAnnouncementMap: true,
     },
     categories: ['password', 'payment'],
     issuedAt: EPOCH, updatedAt: EPOCH, expiresAt: EPOCH + 5_000,

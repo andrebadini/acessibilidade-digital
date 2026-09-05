@@ -4,7 +4,7 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Próximas entregas funcionais
 
-- habilitar o mapa numerado consolidado dos anúncios estimados do leitor de tela após E2E próprio;
+- publicar o mapa numerado consolidado na próxima beta: implementação e E2E próprio concluídos no código-fonte em 04/09/2026; o pacote 1.0.7 permanece sem esse recurso;
 - implementar retenção automática por prazo, com limpeza recuperável e indicação visível da expiração;
 - atualizar as imagens e o texto de eventual canal público de distribuição após estabilização da beta.
 
@@ -14,6 +14,7 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 - evitar o possível recorte de metade do traço quando uma moldura derivada encosta exatamente na borda superior ou esquerda da captura;
 - identificar, na legenda, as ocorrências que originaram cada tom quando a mesma evidência visual é compartilhada por falha confirmada e revisão pendente.
 - compactar a apresentação impressa de auditorias com milhares de ocorrências, preservando os anexos e as referências; a fixture de estresse da beta gerou um PDF válido de 1.091 páginas.
+- quando o orçamento global do lote omitir os pixels de um mapa já composto, substituir a orientação “Localize o número na imagem” por aviso específico de omissão; a legenda e os hashes continuam preservados e a ausência de PNG já é exibida.
 
 ## Infraestrutura de testes não bloqueante
 

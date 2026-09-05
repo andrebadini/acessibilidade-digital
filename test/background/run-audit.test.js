@@ -1538,7 +1538,7 @@ test('attached execution uses no owned-tab or URL-vault effects and returns the 
   assert.equal(Object.isFrozen(result.checkpoint), true);
 });
 
-test('attached full-evidence captures page and elements without invoking the deferred beta map', async () => {
+test('attached full-evidence derives one map from the authorized pristine source after element capture', async () => {
   const auditId = 'audit-attached-pixels';
   const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
   const gateCalls = [];
@@ -1561,11 +1561,67 @@ test('attached full-evidence captures page and elements without invoking the def
   assert.equal(result.state, 'model');
   assert.equal(result.model.session.status, 'complete');
   assert.equal(adapter.counts.fullPageCalls, 1);
-  assert.equal(adapter.events.includes('map'), false);
-  assert.equal(result.model.evidence.some(artifact => artifact.kind === 'announcement-map'), false);
+  assert.equal(adapter.events.filter(event => event === 'map').length, 1);
+  const map = result.model.evidence.find(artifact => artifact.kind === 'announcement-map');
+  const original = result.model.evidence.find(artifact => artifact.kind === 'full-page');
+  assert.equal(map?.derivation.sourceHash, original.hash);
+  assert.equal(map?.fullPageEvidenceId, original.evidenceId);
+  assert.ok(adapter.counts.elementCalls > 0);
+  assert.ok(adapter.events.indexOf('map') > adapter.events.findLastIndex(event => event.startsWith('thumbnail:')));
   const raster = adapter.events.indexOf('full-page');
   assert.deepEqual(adapter.events.slice(raster - 3, raster), ['proof-2', 'sensitive-probe', 'proof-3']);
   assert.deepEqual(gateCalls, ['after']);
+});
+
+test('navigation during map composition denies the terminal commit and exposes no derived model', async () => {
+  const auditId = 'audit-map-document-changed';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  let documentId = 'document-a';
+  let persisted = 0;
+  const adapter = fakeAdapter({ trackCaptureCalls: true, composeMap: async input => {
+    documentId = 'document-b';
+    return createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId });
+  } });
+  adapter.probeDocumentIdentity = async tabId => ({ tabId, windowId: 9, documentId, urlSessionDigest: TEST_DIGEST });
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy, privacyGate: attachedPixelGate(policy, [], { auditId }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => { persisted += 1; },
+  });
+  assert.equal(adapter.events.filter(event => event === 'map').length, 1);
+  assert.equal(persisted, 0);
+  assert.equal(result.model, null);
+  assert.equal(result.failureCode, 'TARGET_CHANGED');
+});
+
+test('a rejected map preserves the pristine capture and records an explicit derivation failure', async () => {
+  for (const corrupt of ['source-id', 'page-id', 'source-hash', 'geometry-hash', 'segment-hash']) {
+    const auditId = `audit-map-rejected-${corrupt}`;
+    const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+    const adapter = fakeAdapter({ trackCaptureCalls: true, composeMap: async input => {
+      const map = await createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId });
+      if (corrupt === 'source-id') map.fullPageEvidenceId = 'foreign-source';
+      if (corrupt === 'page-id') map.pageId = 'foreign-page';
+      if (corrupt === 'source-hash') map.derivation.sourceHash = 'e'.repeat(64);
+      if (corrupt === 'geometry-hash') map.derivation.geometrySnapshotHash = 'e'.repeat(64);
+      if (corrupt === 'segment-hash') map.segments[0].contentHash = 'e'.repeat(64);
+      return map;
+    } });
+    const result = await runAttachedAuditExecution({
+      auditId, sessionCapabilityId: 'S'.repeat(22),
+      target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+      capturePolicy: policy, privacyGate: attachedPixelGate(policy, [], { auditId }),
+      chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+      onCheckpoint: async () => {}, persistAuditModel: async () => {},
+    });
+    assert.equal(adapter.events.filter(event => event === 'map').length, 1, corrupt);
+    assert.equal(result.state, 'model', corrupt);
+    assert.equal(result.model.evidence.some(artifact => artifact.kind === 'full-page' && artifact.state === 'pristine'), true, corrupt);
+    assert.equal(result.model.evidence.some(artifact => artifact.kind === 'announcement-map'), false, corrupt);
+    assert.ok(result.model.session.diagnostics.some(diagnostic => diagnostic.code === 'ANNOTATION_MAP_OUTPUT_INVALID'), corrupt);
+  }
 });
 
 test('attached full-evidence denies every thumbnail after the observed document changes following the full-page raster', async () => {
@@ -1817,8 +1873,9 @@ test('attached sensitive preflight pauses with a durable checkpoint and zero ras
   const auditId = 'audit-attached-sensitive';
   const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
   const gateCalls = [];
-  const adapter = fakeAdapter({ trackCaptureCalls: true, sensitiveSignals: PASSWORD_SIGNALS });
-  adapter.composeAnnouncementMap = async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId });
+  const adapter = fakeAdapter({ trackCaptureCalls: true, sensitiveSignals: PASSWORD_SIGNALS,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
   const result = await runAttachedAuditExecution({
     auditId, sessionCapabilityId: 'S'.repeat(22),
     target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
@@ -1830,7 +1887,33 @@ test('attached sensitive preflight pauses with a durable checkpoint and zero ras
   assert.equal(result.state, 'privacy-paused');
   assert.equal(result.checkpoint.auditId, auditId);
   assert.equal(adapter.counts.screenshots, 0);
+  assert.equal(adapter.events.includes('map'), false);
   assert.deepEqual(gateCalls, ['pause']);
+});
+
+test('the attached map compositor stays dormant without an authorized pristine capture', async () => {
+  for (const mode of ['no-pixels', 'full-evidence']) {
+    const auditId = `audit-map-no-source-${mode}`;
+    const policy = createCapturePolicyV1({ mode, includeQuery: false });
+    const adapter = fakeAdapter({ trackCaptureCalls: true, fullPageFailure: new Error('PRIVATE_CAPTURE_FAILURE'),
+      composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+    });
+    const result = await runAttachedAuditExecution({
+      auditId, sessionCapabilityId: 'S'.repeat(22),
+      target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+      capturePolicy: policy,
+      privacyGate: mode === 'no-pixels' ? undefined : attachedPixelGate(policy, [], { auditId }),
+      chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+      onCheckpoint: async () => {}, persistAuditModel: async () => {},
+    });
+    assert.equal(result.state, 'model', mode);
+    assert.equal(adapter.events.includes('map'), false, mode);
+    assert.equal(result.model.evidence.some(artifact => ['full-page', 'announcement-map'].includes(artifact.kind)), false, mode);
+    assert.equal(result.model.session.diagnostics.some(entry => entry.code.startsWith('ANNOTATION_MAP_')), false, mode);
+    if (mode === 'no-pixels') assert.equal(adapter.counts.screenshots, 0);
+    else assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'FULL_PAGE_CAPTURE_FAILED'));
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_CAPTURE_FAILURE/u);
+  }
 });
 
 test('attached privacy resume preserves the original empty checkpoint when the model clock advances', async () => {

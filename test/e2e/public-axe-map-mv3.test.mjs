@@ -37,6 +37,11 @@ test('proves axe/map only through action → Side Panel → public URL consent �
 
   const extension = await launchUnpackedExtension(t, {
     extensionPath: await realpath(root), startUrl: fixtureUrl, chromeBinary, expectedMajor: 152,
+    downloadMode: 'profile',
+    ...(process.env.AUDITA_E2E_ARTIFACT_ROOT ? {
+      qaDirectory: join(process.env.AUDITA_E2E_ARTIFACT_ROOT, 'qa'),
+      downloadDirectory: join(process.env.AUDITA_E2E_ARTIFACT_ROOT, 'downloads'),
+    } : {}),
     viewport: { width: 1280, height: 800 },
   });
   assert.equal(extension.chromeProduct, CANONICAL_CHROME_PRODUCT);
@@ -56,24 +61,26 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   assert.deepEqual(publicUrlEntry, {
     urlInput: true, fullEvidence: true, submit: true, status: 'Informe a URL e escolha como coletar as evidências.',
   }, 'MARCO3_PUBLIC_URL_CONSENT_MISSING');
-  await extension.evaluate(panel, `(() => {
+  await extension.click(panel, '[name="capture-mode"][value="full-evidence"]');
+  const entered = await extension.evaluate(panel, `(() => {
     const input=document.querySelector('#audit-url, input[name="audit-url"]');
-    const mode=document.querySelector('[name="capture-mode"][value="full-evidence"]');
-    const submit=document.querySelector('#audit-form button[type="submit"], [data-action="start-url-audit"]');
     input.value=${JSON.stringify(fixtureUrl)};
     input.dispatchEvent(new Event('input',{bubbles:true}));
-    mode.click(); submit.click(); return true;
+    return { mode: document.querySelector('[name="capture-mode"]:checked').value, value: input.value };
   })()`);
-  await extension.waitForValue(panel, 'document.body.dataset.screen', value => value === 'privacy-paused', {
+  assert.deepEqual(entered, { mode: 'full-evidence', value: fixtureUrl });
+  await extension.click(panel, '[data-action="start-url-audit"]');
+  await extension.waitForValue(panel,
+    `Boolean(document.querySelector('[data-screen="running"][data-session-status="privacy-paused"] [data-action="confirm-pixel-capture"]'))`, Boolean, {
     timeoutMs: 60_000, intervalMs: 50,
   });
   assert.doesNotMatch(await extension.evaluate(panel, 'document.body.innerText'), new RegExp(privateMarkers.join('|'), 'u'));
-  await extension.click(panel, '[data-action="confirm-pixels"]');
-  await extension.waitForValue(panel, 'document.body.dataset.screen', value => value === 'result', {
+  await extension.click(panel, '[data-action="confirm-pixel-capture"]');
+  await extension.waitForValue(panel, `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'result', {
     timeoutMs: 120_000, intervalMs: 50,
   });
   const auditId = await extension.evaluate(panel,
-    `document.body.dataset.auditId || document.querySelector('[data-screen="result"]')?.dataset.auditId`);
+    `document.querySelector('[data-screen="result"]')?.dataset.auditId`);
   assert.match(auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);
   await extension.click(panel, '[data-action="open-report"], button[data-focus-id="open-report"]');
   const report = await extension.waitForReport({ auditId });
@@ -152,6 +159,28 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   assert.ok(map.segments.length > 0);
   assert.ok(map.legend.length > 0);
   assert.ok(map.segments.every(segment => /^[a-f0-9]{64}$/u.test(segment.contentHash)));
+  const rendered = await extension.evaluate(report, `(() => {
+    const card = document.querySelector('[data-announcement-map-page="page-1"]');
+    return {
+      images: [...card.querySelectorAll('img[data-map-segment-image]')].map(image => ({
+        loaded: image.complete && image.naturalWidth > 0, alt: image.alt,
+      })),
+      legend: [...card.querySelectorAll('[data-map-marker]')].map(entry => ({
+        number: Number(entry.dataset.mapMarker), text: entry.querySelector('bdi').textContent,
+      })),
+      sourceHash: card.querySelector('[data-map-provenance]').textContent,
+      horizontalOverflow: card.scrollWidth > card.clientWidth + 1,
+    };
+  })()`);
+  assert.equal(rendered.images.length, map.segments.length);
+  assert.ok(rendered.images.every(image => image.loaded && image.alt.includes('Segmento')));
+  assert.deepEqual(rendered.legend, map.legend.map(entry => ({ number: entry.number, text: entry.announcementPreview })));
+  assert.ok(rendered.sourceHash.includes(original.hash));
+  assert.equal(rendered.horizontalOverflow, false);
+  await extension.evaluate(report, `document.querySelector('[data-announcement-map-page="page-1"]').scrollIntoView({ behavior: 'instant', block: 'start' })`);
+  await extension.waitForValue(report,
+    `Math.abs(document.querySelector('[data-announcement-map-page="page-1"]').getBoundingClientRect().top) < 2`, Boolean);
+  await extension.captureJourney('report-reader-map', report, { captureBeyondViewport: false });
   assert.match(html, /data-announcement-map-page="page-1"/u);
   assert.match(html, new RegExp(map.hash, 'u'));
   assert.match(html, new RegExp(original.hash, 'u'));

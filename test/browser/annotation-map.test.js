@@ -425,19 +425,17 @@ test('fails explicitly without worker canvas APIs and never mutates the pristine
   assert.equal(JSON.stringify(source), before);
 });
 
-test('keeps the production compositor disabled while the numbered map remains outside this beta', async () => {
-  assert.deepEqual(ANNOTATION_MAP_MV3_GATE, {
-    enabled: false,
-    code: 'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE',
-    reason: 'O mapa numerado de anúncios permanece adiado nesta beta; as evidências visuais individuais continuam disponíveis nos modos com captura.',
-    testedBrowser: null,
-  });
+test('the production compositor rejects a missing pristine source before creating any canvas', async () => {
+  let canvasCount = 0;
   assert.equal(Object.isFrozen(ANNOTATION_MAP_MV3_GATE), true);
-  await assert.rejects(composeAnnouncementMapForProduction(), error =>
-    error instanceof AnnotationMapError && error.code === 'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE');
+  await assert.rejects(composeAnnouncementMapForProduction({
+    pageId: 'page-1', snapshot: snapshot([]),
+    runtime: { OffscreenCanvas: class { constructor() { canvasCount += 1; } }, createImageBitmap: async () => ({ close() {} }) },
+  }), error => error instanceof AnnotationMapError && error.code === 'ANNOTATION_MAP_SOURCE_INVALID');
+  assert.equal(canvasCount, 0);
 });
 
-test('composes and revalidates a strict PNG segment, records recalculable geometry and releases the bitmap', async () => {
+test('production wrapper composes and revalidates a strict PNG segment with geometry and bitmap cleanup', async () => {
   let closes = 0;
   const canvasSizes = [];
   const canvases = [];
@@ -453,7 +451,7 @@ test('composes and revalidates a strict PNG segment, records recalculable geomet
   }
   const source = await pristineSource(100, 100);
   const before = structuredClone(source);
-  const artifact = await composeAnnouncementMap({
+  const artifact = await composeAnnouncementMapForProduction({
     pageId: 'page-1',
     snapshot: snapshot([{ nodeId: 'action', accessibleName: 'Ação', axRole: 'button', rect: { x: 0, y: 0, width: 1, height: 1 } }]),
     fullPageEvidence: source,

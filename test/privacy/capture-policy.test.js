@@ -7,7 +7,7 @@ const { createCapturePolicyV1, isCapturePolicyV1 } = capturePolicy;
 
 test('derives the exact frozen pixel capabilities for every privacy mode', () => {
   const cases = [
-    ['full-evidence', true, true, false],
+    ['full-evidence', true, true, true],
     ['element-only', false, true, false],
     ['no-pixels', false, false, false],
   ];
@@ -18,6 +18,13 @@ test('derives the exact frozen pixel capabilities for every privacy mode', () =>
       captureFullPage, captureElements, composeAnnouncementMap,
     });
     assert.equal(Object.isFrozen(policy), true);
+  }
+});
+
+test('map authority cannot be added to element-only or no-pixels, or removed from the complete mode', () => {
+  for (const mode of ['full-evidence', 'element-only', 'no-pixels']) {
+    const value = { ...createCapturePolicyV1({ mode, includeQuery: false }), composeAnnouncementMap: mode !== 'full-evidence' };
+    assert.equal(isCapturePolicyV1(value), false);
   }
 });
 

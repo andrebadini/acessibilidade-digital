@@ -15,10 +15,10 @@ import { sha256Hex } from '../core/report/hash.js';
 export { ANNOTATION_MAP_ALGORITHM, ANNOTATION_MAP_LIMITS, ANNOTATION_MAP_VERSION };
 
 export const ANNOTATION_MAP_MV3_GATE = Object.freeze({
-  enabled: false,
-  code: 'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE',
-  reason: 'O mapa numerado de anúncios permanece adiado nesta beta; as evidências visuais individuais continuam disponíveis nos modos com captura.',
-  testedBrowser: null,
+  enabled: true,
+  code: 'ANNOTATION_MAP_MV3_E2E_PASSED',
+  reason: 'Composição local e relatório com mapa validados no percurso público MV3 com confirmação e quatro exportações.',
+  testedBrowser: 'Google Chrome for Testing 152.0.7977.64',
 });
 
 const SIGNIFICANT_TAGS = new Set(['a', 'button', 'details', 'iframe', 'img', 'li', 'summary', 'table', 'video', 'audio']);

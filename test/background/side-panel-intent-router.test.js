@@ -599,7 +599,7 @@ test('starts each batch evidence mode with its exact canonical policy and never 
   assert.deepEqual(observed, [
     {
       version: 'CapturePolicyV1', mode: 'full-evidence', includeQuery: false,
-      captureFullPage: true, captureElements: true, composeAnnouncementMap: false,
+      captureFullPage: true, captureElements: true, composeAnnouncementMap: true,
     },
     {
       version: 'CapturePolicyV1', mode: 'element-only', includeQuery: false,
@@ -628,7 +628,7 @@ test('starts every URL capture mode with its exact canonical policy and clears t
   assert.deepEqual(calls.filter(([name]) => name === 'begin-url').map(([, value]) => value.capturePolicy), [
     {
       version: 'CapturePolicyV1', mode: 'full-evidence', includeQuery: false,
-      captureFullPage: true, captureElements: true, composeAnnouncementMap: false,
+      captureFullPage: true, captureElements: true, composeAnnouncementMap: true,
     },
     {
       version: 'CapturePolicyV1', mode: 'element-only', includeQuery: false,
@@ -677,7 +677,7 @@ test('starts each closed capture mode with its exact canonical policy', async ()
   assert.deepEqual(calls.filter(([name]) => name === 'begin').map(([, value]) => value.capturePolicy), [
     {
       version: 'CapturePolicyV1', mode: 'full-evidence', includeQuery: false,
-      captureFullPage: true, captureElements: true, composeAnnouncementMap: false,
+      captureFullPage: true, captureElements: true, composeAnnouncementMap: true,
     },
     {
       version: 'CapturePolicyV1', mode: 'element-only', includeQuery: false,
