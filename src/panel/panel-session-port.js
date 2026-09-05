@@ -211,6 +211,10 @@ export function createPanelSessionPortClient(raw) {
   const ownedConfirmationsInFlight = new Set();
   const bindings = new WeakMap();
   const pending = new Map();
+  // Read-only highlight requests may reply after their timeout. Discard that
+  // one reply without invalidating a newer report request. Mutations keep the
+  // existing reconnect/rehydration path, including terminal cancellation.
+  const timedOutRequests = new Set();
 
   const notifyStatus = status => {
     try { input.onStatus(status); } catch { /* UI callbacks do not own transport state. */ }
@@ -270,6 +274,7 @@ export function createPanelSessionPortClient(raw) {
   }
 
   function unavailable(port, disconnect = false) {
+    timedOutRequests.clear();
     clearCorrelation();
     settleAll(localUnavailable());
     detach(port, disconnect);
@@ -345,6 +350,7 @@ export function createPanelSessionPortClient(raw) {
       return;
     }
     const result = parseIntentResult(rawPacket);
+    if (result && timedOutRequests.delete(result.requestId)) return;
     if (!result || !pending.has(result.requestId)) {
       unavailable(port, true);
       return;
@@ -409,6 +415,7 @@ export function createPanelSessionPortClient(raw) {
   function stop() {
     if (!started) return false;
     started = false;
+    timedOutRequests.clear();
     clearCorrelation();
     settleAll(localUnavailable());
     if (reconnectTimer !== null) {
@@ -469,13 +476,21 @@ export function createPanelSessionPortClient(raw) {
     }
     let requestId;
     try { requestId = input.createRequestId(); } catch { return Promise.resolve(localUnavailable()); }
-    if (!REQUEST_ID.test(requestId ?? '') || pending.has(requestId)) return Promise.resolve(localUnavailable());
+    if (!REQUEST_ID.test(requestId ?? '') || pending.has(requestId) || timedOutRequests.has(requestId)) {
+      return Promise.resolve(localUnavailable());
+    }
     const port = currentPort;
     return new Promise(resolve => {
       const timer = input.setTimer(() => {
         const entry = pending.get(requestId);
         if (!entry) return;
         pending.delete(requestId);
+        // The coordinator admits at most 1024 requests per Port. Bound the
+        // private tombstones to the same maximum and never retain payloads.
+        if (['GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY'].includes(entry.type)) {
+          if (timedOutRequests.size >= 1024) timedOutRequests.delete(timedOutRequests.values().next().value);
+          timedOutRequests.add(requestId);
+        }
         settle(entry, localUnavailable());
       }, REQUEST_TIMEOUT_MS);
       pending.set(requestId, {

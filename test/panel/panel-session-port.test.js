@@ -842,6 +842,104 @@ test('disconnect and correlation rotation close every pending request and never 
   assert.ok(statuses.includes('Painel não preparado. Abra novamente pelo botão da extensão.'));
 });
 
+for (const intent of [
+  { type: 'GET_HIGHLIGHT_STATE' },
+  { type: 'GET_HIGHLIGHT_AVAILABILITY', occurrenceId: 'occ-1' },
+]) test(`ignores one timed-out ${intent.type} response without losing the report session or settling a newer request`, async () => {
+  const env = fixture();
+  const client = createClient(env);
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'result', 'audit-late', SESSION_ID, await resultBundle('audit-late'));
+  const highlight = client.requestIntent(intent);
+  const prior = port.messages.at(-1);
+  env.timers.at(-1).callback();
+  assert.deepEqual(await highlight, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  const report = client.requestIntent({ type: 'PANEL_OPEN_REPORT' });
+  const current = port.messages.at(-1);
+  const response = {
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: prior.requestId, response: { ok: false, code: 'HIGHLIGHT_NO_BINDING' },
+  };
+  port.onMessage.emit(response);
+  assert.equal(port.disconnects, 0, 'a late reply to our own timeout must not tear down the result session');
+  port.onMessage.emit({ ...response, requestId: current.requestId,
+    response: { ok: true, auditId: 'audit-late', state: 'connected' } });
+  assert.deepEqual(await report, { ok: true, auditId: 'audit-late', state: 'connected' });
+  // Only the first late reply is discarded. Its replay is still rejected.
+  port.onMessage.emit(response);
+  assert.equal(port.disconnects, 1);
+});
+
+test('does not reuse a timed-out request identity or accept its malformed late packet', async () => {
+  const env = fixture();
+  const client = createClient(env, { createRequestId: () => 'same-request' });
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-port', SESSION_ID);
+  const pending = client.requestIntent({ type: 'GET_HIGHLIGHT_STATE' });
+  env.timers.at(-1).callback();
+  await pending;
+  const count = port.messages.length;
+  assert.deepEqual(await client.requestIntent({ type: 'PANEL_OPEN_REPORT' }), {
+    ok: false, code: 'PANEL_SESSION_UNAVAILABLE',
+  });
+  assert.equal(port.messages.length, count);
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'same-request', response: { ok: true }, extra: true,
+  });
+  assert.equal(port.disconnects, 1);
+});
+
+test('a late cancellation acknowledgement reconnects instead of preserving a revoked privacy session', async () => {
+  const env = fixture();
+  const client = createClient(env);
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-private', SESSION_ID);
+  privacyPaused(port);
+  const cancelled = client.requestIntent({ type: 'PANEL_CANCEL_AUDIT' });
+  const requestId = port.messages.at(-1).requestId;
+  env.timers.at(-1).callback();
+  assert.deepEqual(await cancelled, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId,
+    response: { ok: true, auditId: 'audit-private', state: 'revoked' },
+  });
+  assert.equal(port.disconnects, 1, 'terminal cancellation needs authoritative rehydration after timeout');
+  env.timers.at(-1).callback();
+  const next = env.ports[1];
+  bootstrap(next);
+  const prepare = client.requestIntent({ type: 'PREPARE_PANEL_CAPABILITY', requestId: 'prepare-after-late-cancel' });
+  next.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: next.messages.at(-1).requestId, response: { ok: true },
+  });
+  assert.deepEqual(await prepare, { ok: true });
+});
+
+test('timed-out identities cannot suppress traffic after reconnecting to a new Port', async () => {
+  const env = fixture();
+  const client = createClient(env);
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-port', SESSION_ID);
+  const pending = client.requestIntent({ type: 'GET_HIGHLIGHT_STATE' });
+  const requestId = port.messages.at(-1).requestId;
+  env.timers.at(-1).callback();
+  await pending;
+  port.onDisconnect.emit();
+  env.timers.at(-1).callback();
+  const replacement = env.ports[1];
+  bootstrap(replacement, 'running', 'audit-port', SESSION_ID);
+  replacement.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId,
+    response: { ok: true },
+  });
+  assert.equal(replacement.disconnects, 1);
+});
+
 test('rejects malformed or replayed intent responses and stops without leaked listeners or timers', async () => {
   const env = fixture();
   const client = createClient(env);

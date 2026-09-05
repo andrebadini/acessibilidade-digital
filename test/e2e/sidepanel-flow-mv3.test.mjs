@@ -590,10 +590,14 @@ async function beginAttachedAttempt(extension, panel, mode) {
       status:document.querySelector('[role="status"]')?.textContent??null
     };
   })()`);
-  assert.deepEqual(ready, {
+  const { status, ...controls } = ready;
+  assert.deepEqual(controls, {
     screen: 'initial', selected: mode, button: true, disabled: false,
-    ariaDisabled: null, status: 'Escolha como iniciar a auditoria.',
+    ariaDisabled: null,
   });
+  // A completed cancellation may leave its acknowledgement in the live region;
+  // both messages are compatible with these proven, enabled initial controls.
+  assert.ok(['Escolha como iniciar a auditoria.', 'Cancelamento solicitado.'].includes(status));
   await assertSourceUntouched(extension, identityBefore);
   const auditIdPromise = waitForActiveAuditId(extension);
   await extension.click(panel, 'button[data-intent="START_ATTACHED"]');
@@ -763,7 +767,25 @@ async function openViewOnlyReport(extension, panel, auditId, minimumImages, iden
   };
   await assertSourceUntouched(extension, identityBefore);
   await step('OPEN', () => extension.click(panel, 'button[data-intent="OPEN_REPORT"]'));
-  const report = await step('CONNECT', () => extension.waitForReport({ auditId }));
+  const report = await step('CONNECT', async () => {
+    try { return await extension.waitForReport({ auditId }); }
+    catch (cause) {
+      const panelState = await extension.evaluate(panel, `(() => ({
+        screen:document.querySelector('[data-screen]')?.dataset.screen??null,
+        status:document.querySelector('[data-report-launch-status]')?.textContent??null,
+        busy:document.querySelector('button[data-intent="OPEN_REPORT"]')?.getAttribute('aria-busy')??null
+      }))()`).catch(() => null);
+      const graph = await extension.evaluate(extension.harnessPage, `(async()=>{
+        const values=Object.values(await chrome.storage.session.get(null)).filter(value=>value?.auditId===${JSON.stringify(auditId)});
+        const states=['running','privacy-paused','result','view-only','allocated','awaiting-connection','connected','revoked','removed','observing','retained-for-review'];
+        return {records:values.map(value=>({state:states.includes(value.state)?value.state:'other',
+          report:value.path==='/src/review/index.html',
+          binding:['attached','disposable','batch','view-only'].includes(value.targetBinding?.kind)?value.targetBinding.kind:null})),
+          reportTabs:(await chrome.tabs.query({})).filter(tab=>tab.url?.startsWith(chrome.runtime.getURL('src/review/index.html'))).length};
+      })()`, { awaitPromise: true }).catch(() => null);
+      throw new Error(`REPORT_LAUNCH_SNAPSHOT:${JSON.stringify({ panelState, graph })}`, { cause });
+    }
+  });
   // Poll only readiness; serializing all embedded captures on every poll can itself
   // stall a large report. Inspect its complete surface once it has rendered.
   const ready = await step('READY', () => extension.waitForValue(report, `(() => ({
@@ -1208,32 +1230,52 @@ test('current-page audits run in one inactive copy and leave the original page i
       panel = await deleteAuditAndRestoreSource(extension, panel, report, auditId, owner.tabId);
     });
 
-    await t.test('full-evidence rehydrates after worker restart and exports all four formats', async () => {
-      const { identityBefore, auditIdPromise } = await beginAttachedAttempt(extension, panel, 'full-evidence');
-      await waitForPrivacyPause(extension, panel);
-      const auditId = await auditIdPromise;
+    await t.test('full-evidence rehydrates after worker restart and exports all four formats', async subtest => {
+      const step = async (name, operation) => {
+        subtest.diagnostic(`full-evidence-step=${name}:begin`);
+        try {
+          const result = await operation();
+          subtest.diagnostic(`full-evidence-step=${name}:passed`);
+          return result;
+        } catch (cause) {
+          subtest.diagnostic(`full-evidence-step=${name}:failed`);
+          throw new Error(`FULL_EVIDENCE_${name}_FAILED`, { cause });
+        }
+      };
+      const { identityBefore, auditIdPromise } = await step('BEGIN_ATTEMPT', () =>
+        beginAttachedAttempt(extension, panel, 'full-evidence'));
+      await step('PRIVACY_PAUSE', () => waitForPrivacyPause(extension, panel));
+      const auditId = await step('RESOLVE_AUDIT', () => auditIdPromise);
       assert.match(auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);
-      const owner = await assertPausedAttempt(extension, auditId, identityBefore, sourceUrl);
-      await stopServiceWorker(extension);
-      await proveReplacementServiceWorker(extension);
-      await waitForPrivacyPause(extension, panel);
-      const rehydrated = await readPrivateAttempt(extension, auditId);
-      assert.equal(rehydrated.activeState, 'privacy-paused');
-      assert.deepEqual(rehydrated.owners.map(value => value.tabId), [owner.tabId]);
-      assert.equal(rehydrated.sessionRasterDataUrls, 0);
-      await assertCopyIsolation(extension, owner.tabId, identityBefore, { removed: false });
-      await confirmOnce(extension, panel);
-      assert.equal(await waitForResult(extension, panel, auditId), auditId);
-      await assertObservedProgress(extension, panel);
-      await assertTerminalAttempt(extension, auditId, owner.tabId, identityBefore, {
+      const owner = await step('PAUSED_PROOF', () =>
+        assertPausedAttempt(extension, auditId, identityBefore, sourceUrl));
+      await step('WORKER_STOP', () => stopServiceWorker(extension));
+      await step('WORKER_REPLACEMENT', () => proveReplacementServiceWorker(extension));
+      await step('REHYDRATED_PAUSE', () => waitForPrivacyPause(extension, panel));
+      await step('REHYDRATED_STORAGE', async () => {
+        const rehydrated = await readPrivateAttempt(extension, auditId);
+        assert.equal(rehydrated.activeState, 'privacy-paused');
+        assert.deepEqual(rehydrated.owners.map(value => value.tabId), [owner.tabId]);
+        assert.equal(rehydrated.sessionRasterDataUrls, 0);
+      });
+      await step('REHYDRATED_ISOLATION', () =>
+        assertCopyIsolation(extension, owner.tabId, identityBefore, { removed: false }));
+      await step('CONFIRM', () => confirmOnce(extension, panel));
+      assert.equal(await step('RESULT', () => waitForResult(extension, panel, auditId)), auditId);
+      await step('PROGRESS', () => assertObservedProgress(extension, panel));
+      await step('TERMINAL_PROOF', () => assertTerminalAttempt(extension, auditId, owner.tabId, identityBefore, {
         minimumFullPage: 1, minimumElements: 1,
-      }, fixture.origin);
-      await assertPanelSummaryAndDetail(extension, panel, 'full-evidence', 1, identityBefore);
-      await extension.captureJourney('panel-current-copy-summary', panel);
-      const report = await openViewOnlyReport(extension, panel, auditId, 1, identityBefore);
-      await extension.captureJourney('report-current-copy-full', report, { captureBeyondViewport: false });
-      await exportFourFormats(extension, report, auditId, extension.downloadDirectory);
-      panel = await deleteAuditAndRestoreSource(extension, panel, report, auditId, owner.tabId);
+      }, fixture.origin));
+      await step('PANEL_DETAIL', () =>
+        assertPanelSummaryAndDetail(extension, panel, 'full-evidence', 1, identityBefore));
+      await step('PANEL_CAPTURE', () => extension.captureJourney('panel-current-copy-summary', panel));
+      const report = await step('REPORT_OPEN', () =>
+        openViewOnlyReport(extension, panel, auditId, 1, identityBefore));
+      await step('REPORT_CAPTURE', () =>
+        extension.captureJourney('report-current-copy-full', report, { captureBeyondViewport: false }));
+      await step('EXPORT_FOUR', () => exportFourFormats(extension, report, auditId, extension.downloadDirectory));
+      panel = await step('CLEANUP', () =>
+        deleteAuditAndRestoreSource(extension, panel, report, auditId, owner.tabId));
     });
 
     assert.equal(await extension.evaluate(extension.startPage.page, `(() => {
@@ -1242,7 +1284,7 @@ test('current-page audits run in one inactive copy and leave the original page i
     assert.equal(await extension.evaluate(extension.harnessPage, `(() => {
       globalThis.__auditaCurrentCopyProofV1?.dispose?.();return true;
     })()`), true);
-    t.diagnostic('Chrome=152; current-page=inactive-copy; source=unchanged; modes=no-pixels,element-only,full-evidence; restart=rehydrated; report=view-only; exports=4');
+    t.diagnostic('Chrome=152; current-page=inactive-copy; consult each subtest result for mode, restart, report and export proof');
   } catch (error) {
     t.diagnostic(`controlled-failure=${redactDiagnostic(error?.code ?? error?.message ?? 'E2E_DENIED')}`);
     throw error;
