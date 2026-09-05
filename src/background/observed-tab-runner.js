@@ -268,7 +268,7 @@ function copyTarget(input) {
     validChromeId(resume.tabId) && validChromeId(resume.windowId) && validId(resume.documentId) &&
     copyEvidence(resume.initialUrlEvidence) && DIGEST.test(resume.initialUrlSessionDigest) &&
     (resume.navigationPurpose === 'single-url' && resume.cleanupMode === 'pre-observation-failure' ||
-      resume.navigationPurpose === 'attached-copy' && resume.cleanupMode === 'always') &&
+      ['attached-copy', 'batch-page'].includes(resume.navigationPurpose) && resume.cleanupMode === 'always') &&
     resume.pageId === 'page-1') {
     return Object.freeze({ ...resume, kind: 'owned-disposable',
       initialUrlEvidence: copyEvidence(resume.initialUrlEvidence), navigationToken: null,

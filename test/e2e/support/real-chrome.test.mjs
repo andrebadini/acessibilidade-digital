@@ -67,6 +67,7 @@ test('default suite keeps fast tests parallel and classifies every real-Chrome E
     'test/e2e/axe-mv3-csp-decision.test.mjs',
     'test/e2e/axe-mv3-csp.test.mjs',
     'test/e2e/batch-audit-mv3.test.mjs',
+    'test/e2e/batch-pixel-consent-mv3.test.mjs',
     'test/e2e/download-uniquify-mv3.test.mjs',
     'test/e2e/personas-mv3-csp.test.mjs',
     'test/e2e/public-axe-map-mv3.test.mjs',
@@ -85,6 +86,7 @@ test('default suite keeps fast tests parallel and classifies every real-Chrome E
   assert.deepEqual(plan.serial, [
     'test/e2e/axe-mv3-csp.test.mjs',
     'test/e2e/batch-audit-mv3.test.mjs',
+    'test/e2e/batch-pixel-consent-mv3.test.mjs',
     'test/e2e/download-uniquify-mv3.test.mjs',
     'test/e2e/personas-mv3-csp.test.mjs',
     'test/e2e/public-axe-map-mv3.test.mjs',

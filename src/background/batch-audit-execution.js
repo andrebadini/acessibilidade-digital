@@ -6,14 +6,22 @@ import { canonicalTime } from './run-audit.js';
 import { createBatchExecutionRunner } from './run-batch.js';
 
 const FACTORY_KEYS = Object.freeze([
-  'rawNavigationVault', 'authority', 'ownedTabRegistry', 'createOwnershipId',
+  'rawNavigationVault', 'authority', 'ownedTabRegistry', 'batchProgressStore', 'createOwnershipId',
   'runBatch', 'runUrlAuditExecution', 'readBatchCorrelation', 'emitProgress',
   'tryEnterFinalization',
 ]);
+const PIXEL_FACTORY_KEYS = Object.freeze([...FACTORY_KEYS, 'createPixelPrivacyGate']);
 const RUN_KEYS = Object.freeze([
   'auditId', 'capabilityId', 'sessionCapabilityId', 'windowId', 'acceptedCount',
   'capturePolicy', 'now', 'signal', 'reportOptions', 'onExecutionCheckpoint',
 ]);
+const PIXEL_RUN_KEYS = Object.freeze([...RUN_KEYS, 'onPrivacyPaused', 'onPixelPageFinished']);
+const RECOVERY_KEYS = Object.freeze([
+  'auditId', 'capabilityId', 'sessionCapabilityId', 'windowId', 'capturePolicy', 'now', 'signal',
+  'reportOptions', 'onExecutionCheckpoint', 'onPrivacyPaused', 'onPixelPageFinished',
+  'consentId', 'resumeTarget', 'resumeCheckpoint',
+]);
+const RESUME_KEYS = Object.freeze(['auditId', 'pageId', 'ownershipId', 'consentId']);
 const CLEANUP_KEYS = Object.freeze([
   'auditId', 'capabilityId', 'sessionCapabilityId', 'windowId',
 ]);
@@ -137,6 +145,45 @@ function copyOwner(value, expected) {
     : null;
 }
 
+function copyOwnerInState(value, expected, state) {
+  const owner = exact(value, OWNER_KEYS);
+  return owner?.version === 2 && owner.ownershipId === expected.ownershipId &&
+    owner.auditId === expected.auditId && owner.purpose === 'audit' &&
+    Number.isSafeInteger(owner.tabId) && owner.tabId >= 0 && owner.windowId === expected.windowId &&
+    owner.cleanupMode === 'always' && owner.state === state
+    ? freeze(owner)
+    : null;
+}
+
+function copyPausedTarget(value, expected) {
+  const target = exact(value, [
+    'version', 'kind', 'ownershipId', 'tabId', 'windowId', 'documentId',
+    'urlEvidence', 'urlSessionDigest', 'cleanupMode', 'pageId',
+  ]);
+  const evidence = target && copyEvidence(target.urlEvidence);
+  return target?.version === 'ObservedTargetV1' && target.kind === 'owned-disposable' &&
+    target.ownershipId === expected.ownershipId && Number.isSafeInteger(target.tabId) && target.tabId >= 0 &&
+    target.windowId === expected.windowId && AUDIT_ID.test(target.documentId ?? '') && evidence &&
+    DIGEST.test(target.urlSessionDigest ?? '') && target.cleanupMode === 'always' && target.pageId === 'page-1'
+    ? freeze({ ...target, urlEvidence: evidence })
+    : null;
+}
+
+function copyRecoveryTarget(value, expected) {
+  const target = exact(value, [
+    'version', 'kind', 'ownershipId', 'tabId', 'windowId', 'documentId',
+    'urlEvidence', 'urlSessionDigest', 'cleanupMode', 'pageId',
+  ]);
+  const evidence = target && copyEvidence(target.urlEvidence);
+  return target?.version === 'ObservedTargetV1' && target.kind === 'owned-disposable' &&
+    target.ownershipId === expected.ownershipId && target.pageId === expected.pageId &&
+    Number.isSafeInteger(target.tabId) && target.tabId >= 0 && target.windowId === expected.windowId &&
+    AUDIT_ID.test(target.documentId ?? '') && evidence && DIGEST.test(target.urlSessionDigest ?? '') &&
+    target.cleanupMode === 'always'
+    ? freeze({ ...target, urlEvidence: evidence })
+    : null;
+}
+
 function copyOwnerForCleanup(value, expected) {
   if (value === null) return null;
   const owner = exact(value, OWNER_KEYS);
@@ -183,7 +230,7 @@ function projectCheckpoint(checkpoint, childAuditId, parentAuditId, pageId) {
 }
 
 export function createBatchAuditExecutionV1(rawDependencies) {
-  const dependencies = exact(rawDependencies, FACTORY_KEYS);
+  const dependencies = exact(rawDependencies, PIXEL_FACTORY_KEYS) ?? exact(rawDependencies, FACTORY_KEYS);
   if (!dependencies ||
     typeof dependencies.rawNavigationVault?.readQueue !== 'function' ||
     typeof dependencies.rawNavigationVault.replaceQueue !== 'function' ||
@@ -192,6 +239,11 @@ export function createBatchAuditExecutionV1(rawDependencies) {
     typeof dependencies.authority?.transitionBatchAuditSession !== 'function' ||
     typeof dependencies.ownedTabRegistry?.get !== 'function' ||
     typeof dependencies.ownedTabRegistry.removeOwned !== 'function' ||
+    typeof dependencies.batchProgressStore?.writeDraft !== 'function' ||
+    typeof dependencies.batchProgressStore.markCompleted !== 'function' ||
+    typeof dependencies.batchProgressStore.readCompleted !== 'function' ||
+    typeof dependencies.batchProgressStore.clearAudit !== 'function' ||
+    typeof dependencies.batchProgressStore.discardAudit !== 'function' ||
     typeof dependencies.createOwnershipId !== 'function' || typeof dependencies.runBatch !== 'function' ||
     typeof dependencies.runUrlAuditExecution !== 'function' || typeof dependencies.readBatchCorrelation !== 'function' ||
     typeof dependencies.emitProgress !== 'function' || typeof dependencies.tryEnterFinalization !== 'function') {
@@ -232,21 +284,128 @@ export function createBatchAuditExecutionV1(rawDependencies) {
     await dependencies.readBatchCorrelation({ capabilityId: args.capabilityId, auditId: args.auditId }), args,
   );
 
-  async function run(raw) {
-    const args = exact(raw, RUN_KEYS);
+  const pendingResumes = new Map();
+
+  async function waitForResume(metadata, onPrivacyPaused, signal) {
+    if (pendingResumes.has(metadata.auditId)) throw new Error('BATCH_PIXEL_RESUME_DENIED');
+    let resolveResume;
+    let rejectResume;
+    let abortListener = null;
+    const resumed = new Promise((resolve, reject) => {
+      resolveResume = resolve;
+      rejectResume = reject;
+    });
+    const pending = freeze({
+      ...metadata,
+      resolve: value => resolveResume(value),
+      reject: error => rejectResume(error),
+    });
+    pendingResumes.set(metadata.auditId, pending);
+    if (signal?.aborted) {
+      pendingResumes.delete(metadata.auditId);
+      throw signal.reason ?? new DOMException('Operação cancelada.', 'AbortError');
+    }
+    if (typeof signal?.addEventListener === 'function') {
+      abortListener = () => {
+        if (pendingResumes.get(metadata.auditId) !== pending) return;
+        pendingResumes.delete(metadata.auditId);
+        rejectResume(signal.reason ?? new DOMException('Operação cancelada.', 'AbortError'));
+      };
+      signal.addEventListener('abort', abortListener, { once: true });
+    }
+    try {
+      await onPrivacyPaused(freeze({
+        auditId: metadata.auditId,
+        childAuditId: metadata.childAuditId,
+        pageId: metadata.pageId,
+        ownershipId: metadata.ownershipId,
+      }));
+      return await resumed;
+    } finally {
+      if (pendingResumes.get(metadata.auditId) === pending) pendingResumes.delete(metadata.auditId);
+      signal?.removeEventListener?.('abort', abortListener);
+    }
+  }
+
+  async function execute(raw, recoveryMode) {
+    let args = recoveryMode ? exact(raw, RECOVERY_KEYS) : exact(raw, PIXEL_RUN_KEYS) ?? exact(raw, RUN_KEYS);
     const policy = args && exact(args.capturePolicy, [
       'version', 'mode', 'includeQuery', 'captureFullPage', 'captureElements', 'composeAnnouncementMap',
     ]);
     if (!args || !AUDIT_ID.test(args.auditId ?? '') || !CAPABILITY.test(args.capabilityId ?? '') ||
       !CAPABILITY.test(args.sessionCapabilityId ?? '') || !Number.isSafeInteger(args.windowId) || args.windowId < 0 ||
-      !Number.isSafeInteger(args.acceptedCount) || args.acceptedCount < 2 || args.acceptedCount > 20 ||
-      !policy || !isCapturePolicyV1(policy) || policy.mode !== 'no-pixels' || policy.includeQuery !== false ||
+      (!recoveryMode && (!Number.isSafeInteger(args.acceptedCount) || args.acceptedCount < 2 || args.acceptedCount > 20)) ||
+      !policy || !isCapturePolicyV1(policy) || policy.includeQuery !== false ||
+      (policy.mode !== 'no-pixels' && (typeof dependencies.createPixelPrivacyGate !== 'function' ||
+        typeof args.onPrivacyPaused !== 'function' ||
+        typeof args.onPixelPageFinished !== 'function')) ||
+      (recoveryMode && (policy.mode === 'no-pixels' ||
+        !/^[A-Za-z0-9_-]{21}[AQgw]$/u.test(args.consentId ?? '') ||
+        typeof args.onPixelPageFinished !== 'function')) ||
       typeof args.now !== 'function' || !args.signal || typeof args.signal !== 'object' ||
       typeof args.onExecutionCheckpoint !== 'function') throw new TypeError('BATCH_AUDIT_EXECUTION_DENIED');
+    let initialQueue;
+    if (recoveryMode) {
+      const rawQueue = await dependencies.rawNavigationVault.readQueue(args.auditId);
+      const queue = exact(rawQueue, QUEUE_KEYS);
+      const values = queue && dense(queue.entries);
+      if (!values || values.length < 2 || values.length > 20) throw new Error('BATCH_AUDIT_EXECUTION_DENIED');
+      initialQueue = copyQueue(rawQueue, args.auditId, values.length);
+      args = freeze({ ...args, acceptedCount: values.length });
+    } else {
+      initialQueue = await readQueue(args.auditId, args.acceptedCount);
+    }
     const initialCorrelation = await readCorrelation(args);
-    const initialQueue = await readQueue(args.auditId, args.acceptedCount);
-    if (!initialCorrelation || initialCorrelation.activePageId !== null || initialCorrelation.activeOwnershipId !== null ||
-      !initialQueue || initialQueue.nextIndex !== 0 || initialQueue.entries[0].status !== 'pending') {
+    const recoveryPageId = recoveryMode && initialQueue ? `page-${initialQueue.nextIndex + 1}` : null;
+    const recoveryTarget = recoveryMode && initialCorrelation ? copyRecoveryTarget(args.resumeTarget, {
+      ownershipId: initialCorrelation.activeOwnershipId,
+      pageId: recoveryPageId,
+      windowId: args.windowId,
+    }) : null;
+    const completed = recoveryMode ? await dependencies.batchProgressStore.readCompleted({ auditId: args.auditId }) : null;
+    const completedPages = recoveryMode && completed !== null ? dense(completed?.pages) : [];
+    const completedSeeds = recoveryMode && completedPages
+      ? completedPages.map(page => freeze({
+          pageId: page.pageId,
+          model: page.model,
+          failure: page.failure ?? null,
+          checkpoint: page.checkpoint,
+        }))
+      : [];
+    const pageOrderForRecovery = initialQueue
+      ? initialQueue.entries.map((_entry, index) => `page-${index + 1}`)
+      : [];
+    let recoveryCheckpoint = null;
+    if (recoveryMode && initialQueue && recoveryPageId) {
+      try {
+        recoveryCheckpoint = validateExecutionCheckpoint({
+          auditId: args.auditId,
+          checkpoint: args.resumeCheckpoint,
+          pageOrder: pageOrderForRecovery.slice(0, initialQueue.nextIndex + 1),
+        });
+      } catch { recoveryCheckpoint = null; }
+    }
+    if (!initialCorrelation || !initialQueue ||
+      (!recoveryMode && (initialCorrelation.activePageId !== null || initialCorrelation.activeOwnershipId !== null ||
+        initialQueue.nextIndex !== 0 || initialQueue.entries[0].status !== 'pending')) ||
+      (recoveryMode && (!recoveryTarget || initialQueue.nextIndex >= args.acceptedCount ||
+        initialQueue.entries[initialQueue.nextIndex]?.status !== 'running' ||
+        initialCorrelation.activePageId !== recoveryPageId ||
+        initialCorrelation.activeOwnershipId !== recoveryTarget.ownershipId || !recoveryCheckpoint ||
+        (initialQueue.nextIndex === 0
+          ? completed !== null
+          : !completed || completed.auditId !== args.auditId || completedPages === null ||
+            completedPages.length !== initialQueue.nextIndex)))) {
+      throw new Error('BATCH_AUDIT_EXECUTION_DENIED');
+    }
+    const recoveryOwner = recoveryMode ? copyOwnerInState(
+      await dependencies.ownedTabRegistry.get(recoveryTarget.ownershipId),
+      { ownershipId: recoveryTarget.ownershipId, auditId: `${args.auditId}:${recoveryPageId}`, windowId: args.windowId },
+      'retained-for-consent',
+    ) : null;
+    if (recoveryMode && (!recoveryOwner || recoveryOwner.tabId !== recoveryTarget.tabId ||
+      recoveryTarget.urlEvidence.href !== initialQueue.entries[initialQueue.nextIndex].evidenceUrl.href ||
+      recoveryTarget.urlSessionDigest !== initialQueue.entries[initialQueue.nextIndex].sessionDigest)) {
       throw new Error('BATCH_AUDIT_EXECUTION_DENIED');
     }
     const inventory = await createInstalledCoreRuleInventory();
@@ -256,7 +415,7 @@ export function createBatchAuditExecutionV1(rawDependencies) {
       evidenceUrl: { ...entry.evidenceUrl },
     }));
     const pageOrder = entries.map((_entry, index) => `page-${index + 1}`);
-    let latestCheckpoint = null;
+    let latestCheckpoint = recoveryMode ? recoveryCheckpoint : null;
     const runner = createBatchExecutionRunner(async rawOptions => {
       const options = exact(rawOptions, RUNNER_OPTION_KEYS);
       const pageMatch = options && /^page-([1-9]|1[0-9]|20)$/u.exec(options.pageId ?? '');
@@ -269,31 +428,49 @@ export function createBatchAuditExecutionV1(rawDependencies) {
       }
       const pendingQueue = await readQueue(args.auditId, args.acceptedCount);
       const entry = pendingQueue?.entries[pageIndex];
-      if (!pendingQueue || pendingQueue.nextIndex !== pageIndex || entry?.status !== 'pending' ||
+      const recoveringPage = recoveryMode && pageIndex === initialQueue.nextIndex;
+      const expectedStatus = recoveringPage ? 'running' : 'pending';
+      if (!pendingQueue || pendingQueue.nextIndex !== pageIndex || entry?.status !== expectedStatus ||
         options.url !== entry.evidenceUrl.href) throw new Error('BATCH_PAGE_EXECUTION_DENIED');
-      const ownershipId = dependencies.createOwnershipId();
+      const ownershipId = recoveringPage ? recoveryTarget.ownershipId : dependencies.createOwnershipId();
       if (!OWNER_ID.test(ownershipId ?? '')) throw new Error('BATCH_PAGE_EXECUTION_DENIED');
-      await transitionQueue({
-        auditId: args.auditId, acceptedCount: args.acceptedCount, pageIndex,
-        fromStatus: 'pending', toStatus: 'running',
-      });
-      const bound = await dependencies.authority.transitionBatchAuditSession({
-        sessionCapabilityId: args.sessionCapabilityId,
-        auditId: args.auditId,
-        fromPageId: null,
-        fromOwnershipId: null,
-        toPageId: options.pageId,
-        toOwnershipId: ownershipId,
-      });
-      if (bound?.ok !== true || bound.activePageId !== options.pageId || bound.activeOwnershipId !== ownershipId) {
-        throw new Error('BATCH_PAGE_EXECUTION_DENIED');
+      if (!recoveringPage) {
+        await transitionQueue({
+          auditId: args.auditId, acceptedCount: args.acceptedCount, pageIndex,
+          fromStatus: 'pending', toStatus: 'running',
+        });
+        const bound = await dependencies.authority.transitionBatchAuditSession({
+          sessionCapabilityId: args.sessionCapabilityId,
+          auditId: args.auditId,
+          fromPageId: null,
+          fromOwnershipId: null,
+          toPageId: options.pageId,
+          toOwnershipId: ownershipId,
+        });
+        if (bound?.ok !== true || bound.activePageId !== options.pageId || bound.activeOwnershipId !== ownershipId) {
+          throw new Error('BATCH_PAGE_EXECUTION_DENIED');
+        }
       }
       const correlated = await readCorrelation(args);
       if (!correlated || correlated.activePageId !== options.pageId || correlated.activeOwnershipId !== ownershipId) {
         throw new Error('BATCH_PAGE_EXECUTION_DENIED');
       }
-      let tokenConsumed = false;
-      let pageCheckpoint = null;
+      let tokenConsumed = recoveringPage;
+      let pageCheckpoint = recoveringPage ? freeze({
+        version: 1,
+        auditId: args.auditId,
+        pages: freeze([{ ...recoveryCheckpoint.pages.at(-1) }]),
+      }) : null;
+      let childCheckpoint = recoveringPage ? validateExecutionCheckpoint({
+        auditId: childAuditId,
+        checkpoint: {
+          version: 1,
+          auditId: childAuditId,
+          pages: [{ ...recoveryCheckpoint.pages.at(-1), pageId: 'page-1' }],
+        },
+        pageOrder: ['page-1'],
+      }) : null;
+      let pageConsentId = recoveringPage ? args.consentId : null;
       const navigationVault = Object.freeze({
         async take(navigationToken, request) {
           const captured = exact(request, [
@@ -315,30 +492,133 @@ export function createBatchAuditExecutionV1(rawDependencies) {
           return rawUrl;
         },
       });
-      const observed = await dependencies.runUrlAuditExecution({
-        auditId: childAuditId,
+      const createGate = consentId => policy.mode === 'no-pixels' ? null : dependencies.createPixelPrivacyGate(freeze({
+        batchAuditId: args.auditId,
+        childAuditId,
+        pageId: options.pageId,
         ownershipId,
-        windowId: args.windowId,
-        navigationToken: entry.navigationToken,
-        navigationPurpose: 'batch-page',
-        evidenceUrl: entry.evidenceUrl,
-        sessionDigest: entry.sessionDigest,
-        rawNavigationVault: navigationVault,
+        consentId,
+        authorityExpiresAt: correlated.expiresAt,
         capturePolicy: freeze({ ...policy }),
-        modelNow: args.now,
-        signal: options.signal,
-        onProgress: event => options.chromeAdapter.emitProgress(event),
-        onCheckpoint: async checkpoint => {
-          pageCheckpoint = projectCheckpoint(checkpoint, childAuditId, args.auditId, options.pageId);
-          await options.onCheckpoint(pageCheckpoint);
-        },
-        async persistAuditModel() {},
-      });
-      const result = exact(observed, [
+      }));
+      const checkpointPage = async checkpoint => {
+        childCheckpoint = validateExecutionCheckpoint({
+          auditId: childAuditId, checkpoint, pageOrder: ['page-1'],
+        });
+        pageCheckpoint = projectCheckpoint(checkpoint, childAuditId, args.auditId, options.pageId);
+        await options.onCheckpoint(pageCheckpoint);
+      };
+      const initialGate = createGate(recoveringPage ? args.consentId : null);
+      let observed = recoveringPage
+        ? await dependencies.runUrlAuditExecution({
+            auditId: childAuditId,
+            requestedUrlEvidence: entry.evidenceUrl,
+            resumeTarget: freeze({
+              kind: 'owned-disposable-resume',
+              ownershipId,
+              tabId: recoveryTarget.tabId,
+              windowId: recoveryTarget.windowId,
+              documentId: recoveryTarget.documentId,
+              initialUrlEvidence: recoveryTarget.urlEvidence,
+              initialUrlSessionDigest: recoveryTarget.urlSessionDigest,
+              navigationPurpose: 'batch-page',
+              cleanupMode: 'always',
+              pageId: 'page-1',
+            }),
+            resumeCheckpoint: childCheckpoint,
+            capturePolicy: freeze({ ...policy }),
+            privacyGate: initialGate,
+            modelNow: args.now,
+            signal: options.signal,
+            onProgress: event => options.chromeAdapter.emitProgress(event),
+            onCheckpoint: checkpointPage,
+            async persistAuditModel() {},
+          })
+        : await dependencies.runUrlAuditExecution({
+            auditId: childAuditId,
+            ownershipId,
+            windowId: args.windowId,
+            navigationToken: entry.navigationToken,
+            navigationPurpose: 'batch-page',
+            evidenceUrl: entry.evidenceUrl,
+            sessionDigest: entry.sessionDigest,
+            rawNavigationVault: navigationVault,
+            capturePolicy: freeze({ ...policy }),
+            ...(initialGate ? { privacyGate: initialGate } : {}),
+            modelNow: args.now,
+            signal: options.signal,
+            onProgress: event => options.chromeAdapter.emitProgress(event),
+            onCheckpoint: checkpointPage,
+            async persistAuditModel() {},
+          });
+      let result = exact(observed, [
         'status', 'model', 'observedTarget', 'observationState', 'ownershipState',
       ]) ?? exact(observed, [
         'status', 'model', 'observedTarget', 'observationState', 'ownershipState', 'signals',
       ]);
+      if (recoveringPage && result?.status === 'privacy-paused') {
+        throw new Error('BATCH_PAGE_EXECUTION_DENIED');
+      }
+      if (result?.status === 'privacy-paused') {
+        const pausedTarget = copyPausedTarget(result.observedTarget, {
+          ownershipId, windowId: args.windowId,
+        });
+        const retainedOwner = copyOwnerInState(await dependencies.ownedTabRegistry.get(ownershipId), {
+          ownershipId, auditId: childAuditId, windowId: args.windowId,
+        }, 'retained-for-consent');
+        if (result.model !== null || result.observationState !== 'observed' ||
+          result.ownershipState !== 'retained-for-consent' || !pausedTarget || !retainedOwner ||
+          !pageCheckpoint || !childCheckpoint || !tokenConsumed) {
+          throw new Error('BATCH_PAGE_EXECUTION_DENIED');
+        }
+        const pausedPages = [
+          ...(latestCheckpoint?.pages ?? []),
+          pageCheckpoint.pages[0],
+        ];
+        latestCheckpoint = validateExecutionCheckpoint({
+          auditId: args.auditId,
+          checkpoint: { version: 1, auditId: args.auditId, pages: pausedPages },
+          pageOrder: pageOrder.slice(0, pausedPages.length),
+        });
+        await args.onExecutionCheckpoint(latestCheckpoint);
+        const resumedPage = await waitForResume({
+          auditId: args.auditId, childAuditId, pageId: options.pageId, ownershipId,
+          authorityExpiresAt: correlated.expiresAt, capturePolicy: policy,
+        }, args.onPrivacyPaused, options.signal);
+        const resumeGate = resumedPage.gate;
+        pageConsentId = resumedPage.consentId;
+        observed = await dependencies.runUrlAuditExecution({
+          auditId: childAuditId,
+          requestedUrlEvidence: entry.evidenceUrl,
+          resumeTarget: freeze({
+            kind: 'owned-disposable-resume', ownershipId,
+            tabId: pausedTarget.tabId, windowId: pausedTarget.windowId,
+            documentId: pausedTarget.documentId,
+            initialUrlEvidence: pausedTarget.urlEvidence,
+            initialUrlSessionDigest: pausedTarget.urlSessionDigest,
+            navigationPurpose: 'batch-page', cleanupMode: 'always', pageId: 'page-1',
+          }),
+          resumeCheckpoint: childCheckpoint,
+          capturePolicy: freeze({ ...policy }),
+          privacyGate: resumeGate,
+          modelNow: args.now,
+          signal: options.signal,
+          onProgress: event => options.chromeAdapter.emitProgress(event),
+          onCheckpoint: async checkpoint => {
+            childCheckpoint = validateExecutionCheckpoint({
+              auditId: childAuditId, checkpoint, pageOrder: ['page-1'],
+            });
+            pageCheckpoint = projectCheckpoint(checkpoint, childAuditId, args.auditId, options.pageId);
+            await options.onCheckpoint(pageCheckpoint);
+          },
+          async persistAuditModel() {},
+        });
+        result = exact(observed, [
+          'status', 'model', 'observedTarget', 'observationState', 'ownershipState',
+        ]) ?? exact(observed, [
+          'status', 'model', 'observedTarget', 'observationState', 'ownershipState', 'signals',
+        ]);
+      }
       const rawOwner = await dependencies.ownedTabRegistry.get(ownershipId);
       const owner = copyOwner(rawOwner, {
         ownershipId, auditId: childAuditId, windowId: args.windowId,
@@ -354,6 +634,9 @@ export function createBatchAuditExecutionV1(rawDependencies) {
           rulesVersion: inventory.rulesVersion,
           inventory,
           onCheckpoint: async checkpoint => {
+            childCheckpoint = validateExecutionCheckpoint({
+              auditId: childAuditId, checkpoint, pageOrder: ['page-1'],
+            });
             pageCheckpoint = projectCheckpoint(checkpoint, childAuditId, args.auditId, options.pageId);
             await options.onCheckpoint(pageCheckpoint);
           },
@@ -362,8 +645,49 @@ export function createBatchAuditExecutionV1(rawDependencies) {
       }
       const cleanupConfirmed = Boolean(owner) || factualPreObservationFailure && rawOwner === null;
       if (!result || !pageCheckpoint || result.ownershipState !== 'removed' || !cleanupConfirmed ||
-        !tokenConsumed && !factualPreObservationFailure) {
+        !childCheckpoint || !tokenConsumed && !factualPreObservationFailure) {
         throw new Error('BATCH_PAGE_CLEANUP_UNCONFIRMED');
+      }
+      const failure = factualPreObservationFailure ? freeze({
+        version: 1,
+        kind: 'pre-observation-failure',
+        attempted: true,
+        startedAt: childCheckpoint.pages[0].startedAt,
+        endedAt: canonicalTime(args.now()),
+        urlEvidence: entry.evidenceUrl,
+      }) : null;
+      const draft = exact(await dependencies.batchProgressStore.writeDraft({
+        auditId: args.auditId,
+        pageId: options.pageId,
+        childAuditId,
+        model: result.model,
+        failure,
+        checkpoint: childCheckpoint,
+        expectedCompletedCount: pageIndex,
+      }), ['version', 'auditId', 'revision', 'page']);
+      if (!draft || draft.version !== 1 || draft.auditId !== args.auditId ||
+        draft.revision !== pageIndex * 2 + 1 || draft.page?.pageId !== options.pageId ||
+        draft.page?.childAuditId !== childAuditId || draft.page?.state !== 'draft') {
+        throw new Error('BATCH_PROGRESS_WRITE_DENIED');
+      }
+      const completed = exact(await dependencies.batchProgressStore.markCompleted({
+        auditId: args.auditId,
+        pageId: options.pageId,
+        expectedRevision: draft.revision,
+      }), ['version', 'auditId', 'revision', 'page']);
+      if (!completed || completed.version !== 1 || completed.auditId !== args.auditId ||
+        completed.revision !== pageIndex * 2 + 2 || completed.page?.pageId !== options.pageId ||
+        completed.page?.childAuditId !== childAuditId || completed.page?.state !== 'completed') {
+        throw new Error('BATCH_PROGRESS_COMPLETE_DENIED');
+      }
+      if (pageConsentId !== null) {
+        await args.onPixelPageFinished(freeze({
+          auditId: args.auditId,
+          childAuditId,
+          pageId: options.pageId,
+          ownershipId,
+          consentId: pageConsentId,
+        }));
       }
       const cleared = await dependencies.authority.transitionBatchAuditSession({
         sessionCapabilityId: args.sessionCapabilityId,
@@ -384,11 +708,12 @@ export function createBatchAuditExecutionV1(rawDependencies) {
         auditId: args.auditId, acceptedCount: args.acceptedCount, pageIndex,
         fromStatus: 'running', toStatus: 'finished',
       });
-      return freeze({ model: result.model, checkpoint: pageCheckpoint, ownershipState: 'removed' });
+      return freeze({ model: result.model, failure, checkpoint: pageCheckpoint, ownershipState: 'removed' });
     });
     const model = await dependencies.runBatch({
       entries,
       batchAuditId: args.auditId,
+      batchStartedAt: canonicalTime(initialQueue.issuedAt),
       chromeAdapter: Object.freeze({
         emitProgress: event => dependencies.emitProgress(event),
         tryEnterFinalization: () => dependencies.tryEnterFinalization(),
@@ -398,12 +723,14 @@ export function createBatchAuditExecutionV1(rawDependencies) {
       now: args.now,
       signal: args.signal,
       reportOptions: args.reportOptions,
+      ...(recoveryMode ? { completedPages: completedSeeds } : {}),
       onExecutionCheckpoint: async checkpoint => {
         latestCheckpoint = validateExecutionCheckpoint({
           auditId: args.auditId, checkpoint, pageOrder: pageOrder.slice(0, checkpoint.pages.length),
         });
         await args.onExecutionCheckpoint(latestCheckpoint);
       },
+      ...(policy.mode === 'no-pixels' ? {} : { pageTimeoutMs: 660_000 }),
     });
     const finalQueue = await readQueue(args.auditId, args.acceptedCount);
     const finalCorrelation = await readCorrelation(args);
@@ -419,7 +746,39 @@ export function createBatchAuditExecutionV1(rawDependencies) {
     if (await dependencies.rawNavigationVault.readQueue(args.auditId) !== null) {
       throw new Error('BATCH_AUDIT_CLEANUP_UNCONFIRMED');
     }
-    return freeze({ model, checkpoint });
+    return recoveryMode
+      ? freeze({ model, checkpoint, acceptedCount: args.acceptedCount })
+      : freeze({ model, checkpoint });
+  }
+
+  const run = raw => execute(raw, false);
+  const recover = raw => execute(raw, true);
+
+  async function resume(raw) {
+    const args = exact(raw, RESUME_KEYS);
+    const pending = args && pendingResumes.get(args.auditId);
+    if (!args || !AUDIT_ID.test(args.auditId ?? '') || !/^page-([1-9]|1[0-9]|20)$/u.test(args.pageId ?? '') ||
+      !OWNER_ID.test(args.ownershipId ?? '') || !/^[A-Za-z0-9_-]{21}[AQgw]$/u.test(args.consentId ?? '') ||
+      !pending || pending.pageId !== args.pageId || pending.ownershipId !== args.ownershipId) {
+      throw new Error('BATCH_PIXEL_RESUME_DENIED');
+    }
+    pendingResumes.delete(args.auditId);
+    try {
+      const gate = dependencies.createPixelPrivacyGate(freeze({
+        batchAuditId: pending.auditId,
+        childAuditId: pending.childAuditId,
+        pageId: pending.pageId,
+        ownershipId: pending.ownershipId,
+        consentId: args.consentId,
+        authorityExpiresAt: pending.authorityExpiresAt,
+        capturePolicy: freeze({ ...pending.capturePolicy }),
+      }));
+      pending.resolve(freeze({ gate, consentId: args.consentId }));
+      return true;
+    } catch (error) {
+      pending.reject(error);
+      throw new Error('BATCH_PIXEL_RESUME_DENIED');
+    }
   }
 
   async function cleanup(raw) {
@@ -493,5 +852,27 @@ export function createBatchAuditExecutionV1(rawDependencies) {
     return true;
   }
 
-  return Object.freeze({ run, cleanup });
+  async function clearProgress(raw) {
+    const args = exact(raw, ['auditId']);
+    if (!args || !AUDIT_ID.test(args.auditId ?? '')) throw new TypeError('BATCH_PROGRESS_CLEAR_DENIED');
+    const cleared = exact(await dependencies.batchProgressStore.clearAudit(args), ['auditId', 'cleared']);
+    if (!cleared || cleared.auditId !== args.auditId || cleared.cleared !== true ||
+      await dependencies.batchProgressStore.readCompleted(args) !== null) {
+      throw new Error('BATCH_PROGRESS_CLEAR_DENIED');
+    }
+    return true;
+  }
+
+  async function discardProgress(raw) {
+    const args = exact(raw, ['auditId']);
+    if (!args || !AUDIT_ID.test(args.auditId ?? '')) throw new TypeError('BATCH_PROGRESS_DISCARD_DENIED');
+    const discarded = exact(await dependencies.batchProgressStore.discardAudit(args), ['auditId', 'discarded']);
+    if (!discarded || discarded.auditId !== args.auditId || discarded.discarded !== true ||
+      await dependencies.batchProgressStore.readCompleted(args) !== null) {
+      throw new Error('BATCH_PROGRESS_DISCARD_DENIED');
+    }
+    return true;
+  }
+
+  return Object.freeze({ run, recover, resume, cleanup, clearProgress, discardProgress });
 }

@@ -27,6 +27,7 @@ const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde s
 const store = createAuditStore();
 const commitDecision = createAuthorizedReviewDecisionCommitter();
 let auditModel;
+let evidenceAnchorById = new Map();
 let reportSessionCapabilityId = null;
 let reportSessionState = null;
 let reportHighlightPort = null;
@@ -386,6 +387,16 @@ function renderCard(entry) {
   for (const evidence of evidenceFor(occurrence)) {
     if (evidence.selector?.css) appendText(card, 'code', `Seletor: ${evidence.selector.css}`);
     if (evidence.snippet) appendText(card, 'code', evidence.snippet);
+    // The original full-page image is already in the report annex. Refer to it
+    // instead of embedding the same potentially large raster in every form.
+    if (evidence.kind === 'full-page') {
+      const anchor = evidenceAnchorById.get(evidence.evidenceId);
+      if (anchor) {
+        const link = appendText(card, 'a', 'Ver captura completa da página nas evidências');
+        link.href = `#${anchor}`;
+      } else appendText(card, 'p', 'Captura completa indisponível nesta revisão.');
+      continue;
+    }
     if (isSafeEvidenceImageUrl(evidence.dataUrl, chrome.runtime.getURL('/'))) {
       const image = document.createElement('img');
       image.className = 'evidence-media';
@@ -435,6 +446,8 @@ async function start() {
   });
   const view = buildReportView({ model: revision.model, summary, modelRevision: revision.modelRevision, modelHash: revision.modelHash });
   auditModel = revision.model;
+  evidenceAnchorById = new Map(view.technicalEvidence.map((evidence, index) =>
+    [evidence.evidenceId, `report-evidence-${index + 1}`]));
   applyReportSourceControls({
     reportSessionState, limitations: view.executive.limitations,
     returnControl: returnToPage, explanation: reportSourceExplanation,

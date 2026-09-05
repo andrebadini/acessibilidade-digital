@@ -687,6 +687,12 @@ async function assertPanelSummaryAndDetail(extension, panel, mode, expectedImage
     const index=[...document.querySelectorAll('button[data-intent="SELECT_OCCURRENCE"]')].indexOf(button);
     button.click();return index;
   })()`, { userGesture: true });
+  if (selectedIndex < 0) {
+    await extension.captureJourney('panel-current-copy-missing-card', panel);
+    const cardKeys = await extension.evaluate(panel,
+      `Array.from(document.querySelectorAll('[data-result-card]'), card => card.dataset.checkKey)`);
+    assert.fail(`a ficha canônica de alternativa textual deve existir no sumário: ${JSON.stringify(cardKeys)}`);
+  }
   assert.equal(Number.isSafeInteger(selectedIndex) && selectedIndex >= 0, true,
     'a ficha canônica de alternativa textual deve existir no sumário');
   const detail = await extension.waitForValue(panel, `(() => {
@@ -751,11 +757,27 @@ function reportSurfaceExpression() {
 }
 
 async function openViewOnlyReport(extension, panel, auditId, minimumImages, identityBefore) {
+  const step = async (name, operation) => {
+    try { return await operation(); }
+    catch (cause) { throw new Error(`REPORT_${name}_${cause?.code ?? 'FAILED'}`, { cause }); }
+  };
   await assertSourceUntouched(extension, identityBefore);
-  await extension.click(panel, 'button[data-intent="OPEN_REPORT"]');
-  const report = await extension.waitForReport({ auditId });
-  const state = await extension.waitForValue(report, reportSurfaceExpression(), value =>
-    value?.ready === true && value?.issues > 0, { timeoutMs: 30_000, intervalMs: 50 });
+  await step('OPEN', () => extension.click(panel, 'button[data-intent="OPEN_REPORT"]'));
+  const report = await step('CONNECT', () => extension.waitForReport({ auditId }));
+  // Poll only readiness; serializing all embedded captures on every poll can itself
+  // stall a large report. Inspect its complete surface once it has rendered.
+  const ready = await step('READY', () => extension.waitForValue(report, `(() => ({
+    ready:Boolean(document.querySelector('button[data-report-export]')),
+    issues:document.querySelectorAll('[data-report-issue]').length,
+    status:document.querySelector('#review-status')?.textContent??''
+  }))()`, value => value?.ready === true && value?.issues > 0 ||
+    /não foi possível|não autorizad|não encontrad/iu.test(value?.status??''), {
+    timeoutMs: 30_000, intervalMs: 100,
+  }));
+  assert.equal(ready.ready, true, `report readiness: ${JSON.stringify(ready)}`);
+  const state = await step('SURFACE', () => extension.evaluate(report, reportSurfaceExpression()));
+  assert.equal(state.ready, true);
+  assert.ok(state.issues > 0);
   assert.equal(state.wcag, true);
   assert.equal(state.abnt, true);
   assert.equal(state.announcement, true);
@@ -1093,6 +1115,10 @@ test('current-page audits run in one inactive copy and leave the original page i
     extension = await launchUnpackedExtension(t, {
       extensionPath: await realpath(workspaceRoot), startUrl: sourceUrl,
       downloadMode: 'profile',
+      ...(process.env.AUDITA_E2E_ARTIFACT_ROOT ? {
+        qaDirectory: join(process.env.AUDITA_E2E_ARTIFACT_ROOT, 'qa'),
+        downloadDirectory: join(process.env.AUDITA_E2E_ARTIFACT_ROOT, 'downloads'),
+      } : {}),
       viewport: { width: 1280, height: 900 }, chromeBinary, expectedMajor: 152,
     });
     assert.equal(extension.chromeProduct, CANONICAL_CHROME_PRODUCT);

@@ -142,11 +142,11 @@ test('disconnects only the exact durable panel bootstrap for the deleted audit',
   const values = {
     [panelBootstrapStorageKey(9)]: {
       version: 1, kind: 'audit-session', auditId: 'audit-1', sessionCapabilityId: PANEL_SESSION,
-      windowId: 9, createdAt: 1, expiresAt: 10_000, state: 'consumed',
+      windowId: 9, captureMode: 'no-pixels', createdAt: 1, expiresAt: 10_000, state: 'consumed',
     },
     [panelBootstrapStorageKey(10)]: {
       version: 1, kind: 'audit-session', auditId: 'foreign-audit', sessionCapabilityId: PANEL_SESSION,
-      windowId: 10, createdAt: 1, expiresAt: 10_000, state: 'consumed',
+      windowId: 10, captureMode: 'no-pixels', createdAt: 1, expiresAt: 10_000, state: 'consumed',
     },
   };
   const sessionArea = {
@@ -191,7 +191,7 @@ test('fails closed on a malformed or unconfirmed target panel bootstrap', async 
     const key = panelBootstrapStorageKey(9);
     const row = {
       version: 1, kind: 'audit-session', auditId: 'audit-1', sessionCapabilityId: PANEL_SESSION,
-      windowId: 9, createdAt: 1, expiresAt: 10_000, state: 'consumed',
+      windowId: 9, captureMode: 'no-pixels', createdAt: 1, expiresAt: 10_000, state: 'consumed',
     };
     const sessionArea = { async get() { return { [key]: structuredClone(row) }; } };
     assert.equal(await disconnectPanelAuditSessions({

@@ -88,7 +88,7 @@ export function reducePanelState(current, event) {
       return createInitialPanelState();
     case 'CAPTURE_MODE_SELECTED': {
       const selected = exactDataRecord(event, ['type', 'mode', 'focusId']);
-      if (!selected || current.screen !== 'initial' || current.entryMode === 'batch' || !CAPTURE_MODES.includes(selected.mode)) return current;
+      if (!selected || current.screen !== 'initial' || !CAPTURE_MODES.includes(selected.mode)) return current;
       return nextPanelState(current, {
         captureMode: selected.mode,
         focusId: panelFocusId(selected.focusId, `capture-mode-${selected.mode}`),
@@ -143,7 +143,7 @@ export function reducePanelState(current, event) {
       const requested = exactDataRecord(event, ['type', 'source']);
       if (!requested || !['attached', 'single-url', 'batch'].includes(requested.source) || current.screen !== 'initial' ||
         requested.source === 'single-url' && current.entryMode !== 'single-url' ||
-        requested.source === 'batch' && (current.entryMode !== 'batch' || current.captureMode !== 'no-pixels')) return current;
+        requested.source === 'batch' && current.entryMode !== 'batch') return current;
       return nextPanelState(current, {
         screen: 'running', auditId: null, selectedOccurrenceId: null,
         auditSource: requested.source, entryError: null,
@@ -172,31 +172,52 @@ export function reducePanelState(current, event) {
     case 'BATCH_PREPARED': {
       const prepared = exactDataRecord(event, ['type', 'total']);
       if (!prepared || current.screen !== 'running' || current.auditSource !== 'batch' || current.auditId !== null ||
-        current.captureMode !== 'no-pixels' || !validBatchTotal(prepared.total) || current.batch.total !== null) return current;
+        !validBatchTotal(prepared.total) || current.batch.total !== null) return current;
       return nextPanelState(current, {
         batch: { total: prepared.total, pageNumber: 0, warnings: [], errors: [] },
       });
     }
-    case 'AUDIT_RUNNING':
-      if (!validPanelAuditId(event.auditId)) return current;
+    case 'AUDIT_RUNNING': {
+      const ordinary = exactDataRecord(event, ['type', 'auditId']);
+      const authoritative = ordinary ? null : exactDataRecord(event, ['type', 'auditId', 'captureMode']);
+      const running = ordinary ?? authoritative;
+      if (!running || !validPanelAuditId(running.auditId) || authoritative && !CAPTURE_MODES.includes(authoritative.captureMode)) {
+        return current;
+      }
       return nextPanelState(current, {
-        screen: 'running', auditId: event.auditId, selectedOccurrenceId: null,
+        screen: 'running', auditId: running.auditId, selectedOccurrenceId: null,
         auditSource: current.auditSource ?? 'attached',
+        captureMode: authoritative?.captureMode ?? current.captureMode,
         sessionStatus: null, privacy: neutralPrivacy(),
-        progress: current.auditId === event.auditId ? current.progress : neutralProgress(),
+        progress: current.auditId === running.auditId ? current.progress : neutralProgress(),
         evidenceExpanded: false, focusId: 'cancel-audit', reason: null,
       });
+    }
     case 'PRIVACY_PAUSED': {
-      const paused = exactDataRecord(event, ['type', 'auditId', 'mode', 'categories', 'message']);
+      const ordinary = exactDataRecord(event, ['type', 'auditId', 'mode', 'categories', 'message']);
+      const batchPaused = ordinary ? null : exactDataRecord(event, [
+        'type', 'auditId', 'mode', 'categories', 'message', 'pageNumber',
+      ]);
+      const paused = ordinary ?? batchPaused;
       const categories = paused ? copyPrivacyCategories(paused.categories) : null;
       if (!paused || current.screen !== 'running' || !validPanelAuditId(paused.auditId) ||
         (current.auditId !== null && current.auditId !== paused.auditId) ||
-        !PIXEL_CAPTURE_MODES.includes(paused.mode) || paused.message !== PRIVACY_MESSAGE || !categories) return current;
+        !PIXEL_CAPTURE_MODES.includes(paused.mode) || paused.message !== PRIVACY_MESSAGE || !categories ||
+        batchPaused && (!Number.isSafeInteger(batchPaused.pageNumber) || batchPaused.pageNumber < 1 ||
+          batchPaused.pageNumber > 20 || current.batch.total !== null && batchPaused.pageNumber > current.batch.total) ||
+        !batchPaused && current.auditSource === 'batch') return current;
       return nextPanelState(current, {
         auditId: paused.auditId,
+        auditSource: batchPaused ? 'batch' : current.auditSource,
         captureMode: paused.mode,
         sessionStatus: 'privacy-paused',
         privacy: { mode: paused.mode, categories, message: PRIVACY_MESSAGE, confirmationPending: false },
+        progress: batchPaused && batchPaused.pageNumber !== current.batch.pageNumber
+          ? neutralProgress() : current.progress,
+        batch: batchPaused ? {
+          total: current.batch.total, pageNumber: batchPaused.pageNumber,
+          warnings: current.auditSource === 'batch' ? current.batch.warnings : [], errors: [],
+        } : current.batch,
         focusId: 'confirm-pixel-capture',
       });
     }
@@ -218,7 +239,7 @@ export function reducePanelState(current, event) {
           warnings: current.auditSource === 'batch' ? current.batch.warnings : [], errors: [],
         },
         auditSource: infersBatch ? 'batch' : current.auditSource,
-        captureMode: infersBatch ? 'no-pixels' : current.captureMode,
+        captureMode: current.captureMode,
       });
     }
     case 'PRIVACY_CONFIRM_REQUESTED':
@@ -452,8 +473,6 @@ function panelState(value) {
     ![null, 'attached', 'single-url', 'batch'].includes(state.auditSource) ||
     !CAPTURE_MODES.includes(state.captureMode) || ![null, 'privacy-paused'].includes(state.sessionStatus) ||
     !exactProgress(state.progress) || !exactBatch(state.batch) ||
-    state.entryMode === 'batch' && state.captureMode !== 'no-pixels' ||
-    state.auditSource === 'batch' && state.captureMode !== 'no-pixels' ||
     state.progress.phase === 'batch-page' && state.auditSource !== 'batch' ||
     state.progress.phase !== null && state.progress.phase !== 'batch-page' && state.auditSource === 'batch' ||
     state.progress.phase === 'batch-page' && (!validBatchProgressMessage(
@@ -734,9 +753,13 @@ function exactBatch(value) {
   const warnings = copyBatchWarnings(batch.warnings);
   const errors = copyBatchErrors(batch.errors);
   if (!warnings || !errors) return null;
-  if (batch.total === null || batch.pageNumber === null) {
-    return batch.total === null && batch.pageNumber === null && warnings.length === 0 ? batch : null;
+  if (batch.total === null) {
+    if (warnings.length > 0) return null;
+    if (batch.pageNumber === null) return batch;
+    return errors.length === 0 && Number.isSafeInteger(batch.pageNumber) &&
+      batch.pageNumber >= 1 && batch.pageNumber <= 20 ? batch : null;
   }
+  if (batch.pageNumber === null) return null;
   return validBatchTotal(batch.total) && Number.isSafeInteger(batch.pageNumber) && batch.pageNumber >= 0 &&
     batch.pageNumber <= batch.total && errors.length === 0 ? batch : null;
 }

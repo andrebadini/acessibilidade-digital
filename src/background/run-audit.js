@@ -145,7 +145,7 @@ function copyUrlResumeTarget(value) {
     !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(target.initialUrlSessionDigest ?? '') ||
     !(
       target.navigationPurpose === 'single-url' && target.cleanupMode === 'pre-observation-failure' ||
-      target.navigationPurpose === 'attached-copy' && target.cleanupMode === 'always'
+      ['attached-copy', 'batch-page'].includes(target.navigationPurpose) && target.cleanupMode === 'always'
     ) || target.pageId !== 'page-1') return null;
   return Object.freeze({ ...target, initialUrlEvidence: evidence });
 }
@@ -182,7 +182,6 @@ export async function runUrlAudit(rawArgs = {}) {
     !evidenceUrl || evidenceUrl.queryIncluded || !requestedUrlEvidence || requestedUrlEvidence.queryIncluded ||
     !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(sessionDigest ?? '') ||
     !policy || !isCapturePolicyV1(policy) || policy.includeQuery !== false ||
-    (navigationPurpose === 'batch-page' && policy.mode !== 'no-pixels') ||
     (policy.mode === 'no-pixels'
       ? resuming || privacyGate !== null
       : !isPixelPrivacyGateV1(privacyGate)) ||

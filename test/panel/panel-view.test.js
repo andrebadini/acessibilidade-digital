@@ -403,7 +403,7 @@ test('initial screen exposes three described radio modes and emits only a safe l
   assert.match(root.textContent, /Lote de páginas/u);
 });
 
-test('batch form keeps URLs transient, explains the bounded list, and exposes only no-pixels', () => {
+test('batch form keeps URLs transient, defaults to no-pixels, and exposes all three evidence modes', () => {
   const input = fixture();
   input.state = {
     ...input.state, screen: 'initial', auditId: null, entryMode: 'batch', entryError: null,
@@ -412,10 +412,11 @@ test('batch form keeps URLs transient, explains the bounded list, and exposes on
     privacy: { mode: null, categories: [], message: null, confirmationPending: false },
   };
   const emitted = [];
+  const events = [];
   const view = buildPanelView({ state: input.state });
   assert.equal(Object.hasOwn(view, 'urls'), false);
   const root = renderPanelView({
-    view, document: new TestDocument(), onIntent: intent => emitted.push(intent), onEvent() {},
+    view, document: new TestDocument(), onIntent: intent => emitted.push(intent), onEvent: event => events.push(event),
   });
   const form = root.querySelector('form[id="batch-audit-form"]');
   const urls = root.querySelector('textarea[id="audit-urls"]');
@@ -428,11 +429,17 @@ test('batch form keeps URLs transient, explains the bounded list, and exposes on
   assert.match(root.textContent, /2 a 20 URLs HTTP\/HTTPS/u);
   assert.match(root.textContent, /uma por linha/u);
   assert.match(root.textContent, /não segue links/u);
-  assert.doesNotMatch(root.textContent, /pode capturar pixels/u);
-  assert.equal(root.querySelectorAll('input[data-capture-mode]').length, 1);
+  assert.match(root.textContent, /Você poderá confirmar antes de qualquer captura sensível/u);
+  assert.equal(root.querySelectorAll('input[data-capture-mode]').length, 3);
   assert.equal(root.querySelector('input[data-capture-mode="no-pixels"]').checked, true);
-  assert.equal(root.querySelector('input[data-capture-mode="full-evidence"]'), null);
+  assert.ok(root.querySelector('input[data-capture-mode="full-evidence"]'));
+  assert.ok(root.querySelector('input[data-capture-mode="element-only"]'));
   assert.ok(root.querySelector('button[data-intent="CLOSE_BATCH_FORM"]'));
+
+  root.querySelector('input[data-capture-mode="element-only"]').dispatch('change');
+  assert.deepEqual(events, [{
+    type: 'CAPTURE_MODE_SELECTED', mode: 'element-only', focusId: 'capture-mode-element-only',
+  }]);
 
   urls.value = 'https://one.example/private?token=alpha\nhttps://two.example/private?token=beta';
   form.dispatch('submit');
@@ -484,6 +491,47 @@ test('batch errors and running progress show only safe line numbers, totals, and
   const batchProgress = root.querySelector('[data-page-number="1"][data-total="2"]');
   assert.ok(batchProgress);
   assert.match(root.querySelector('[role="status"]').textContent, /Página 1 de 2/u);
+});
+
+test('batch running phases follow the current page while the progress bar preserves the batch total', () => {
+  const input = fixture();
+  input.state = {
+    ...input.state, screen: 'running', auditId: 'audit-batch-phases', auditSource: 'batch', sessionStatus: null,
+  };
+
+  for (const [pageNumber, total, percent, complete, label] of [
+    [2, 2, 52.5, 0, 'Abrindo e estabilizando a página'],
+    [2, 2, 55, 0, 'Abrindo e estabilizando a página'],
+    [2, 2, 75, 2, 'Verificando regras automáticas'],
+    [2, 2, 80, 2, 'Verificando regras automáticas'],
+    [2, 2, 100, 5, null],
+    [1, 3, 8.333333333333332, 1, 'Lendo estrutura e acessibilidade'],
+    [1, 3, 33.33333333333333, 5, null],
+  ]) {
+    input.state.batch = { total, pageNumber, warnings: [], errors: [] };
+    input.state.progress = {
+      phase: 'batch-page',
+      message: `Página ${pageNumber} de ${total}: ${complete === 5 ? 'processamento encerrado.' : 'auditoria em andamento.'}`,
+      percent, at: '2026-09-01T12:00:00.000Z',
+    };
+    const root = renderPanelView({
+      view: buildPanelView({ state: input.state }), document: new TestDocument(), onIntent() {}, onEvent() {},
+    });
+
+    const progress = root.querySelector('progress[data-audit-progress]');
+    assert.equal(progress.getAttribute('value'), String(percent));
+    assert.equal(progress.getAttribute('max'), '100');
+    assert.equal(root.querySelectorAll('li[data-phase-state]').length, 5);
+    assert.equal(root.querySelectorAll('[data-phase-state="complete"]').length, complete, `batch progress ${percent}%`);
+    assert.equal(root.querySelectorAll('[data-phase-indicator="complete"]').length, complete);
+    assert.equal(root.querySelectorAll('[data-phase-state="current"]').length, label ? 1 : 0);
+    if (label) {
+      const current = root.querySelector('[data-phase-state="current"]');
+      assert.equal(current.getAttribute('aria-current'), 'step');
+      assert.ok(current.textContent.includes(`${label} — em andamento`));
+    }
+    if (complete > 0) assert.equal(root.querySelector('[data-phase-indicator="complete"]').textContent, '✓');
+  }
 });
 
 test('single-URL form keeps the typed value transient and enables all three explicit modes', () => {
@@ -598,6 +646,49 @@ test('privacy pause stays on running screen, hides phases and personas, and emit
   root.querySelector('button[data-intent="CONFIRM_PIXEL_CAPTURE"]').click();
   assert.deepEqual(intents[0], { type: 'CONFIRM_PIXEL_CAPTURE', mode: 'full-evidence', accepted: true });
   assert.doesNotMatch(JSON.stringify(intents), /consent|capability|documentId|tabId|digest|PRIVATE/u);
+});
+
+test('batch privacy pause shows only safe mode, categories and page position before one-shot actions', () => {
+  const input = fixture();
+  input.state = {
+    ...input.state, screen: 'running', auditSource: 'batch', auditId: 'audit-batch-private',
+    captureMode: 'element-only', sessionStatus: 'privacy-paused',
+    batch: { total: 5, pageNumber: 3, warnings: [], errors: [] },
+    privacy: {
+      mode: 'element-only', categories: ['otp', 'private-marker'],
+      message: 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.',
+      confirmationPending: false,
+    },
+  };
+  const intents = [];
+  const root = renderPanelView({
+    view: buildPanelView({ state: input.state }), document: new TestDocument(),
+    onIntent: intent => intents.push(intent), onEvent() {},
+  });
+
+  assert.match(root.textContent, /Somente elementos/u);
+  assert.match(root.textContent, /Página 3 de 5/u);
+  assert.equal(root.dataset.pageNumber, '3');
+  assert.equal(root.dataset.total, '5');
+  assert.match(root.textContent, /Código de uso único/u);
+  assert.match(root.textContent, /Conteúdo marcado como privado/u);
+  assert.match(root.textContent, /Continuar e capturar/u);
+  assert.match(root.textContent, /Cancelar auditoria/u);
+  assert.doesNotMatch(root.textContent, /https?:|consent|owner|digest|documentId|tabId|audit-batch-private/iu);
+
+  root.querySelector('button[data-intent="CONFIRM_PIXEL_CAPTURE"]').click();
+  assert.deepEqual(intents, [{ type: 'CONFIRM_PIXEL_CAPTURE', mode: 'element-only', accepted: true }]);
+
+  input.state = {
+    ...input.state,
+    batch: { total: null, pageNumber: 3, warnings: [], errors: [] },
+  };
+  const rehydratedRoot = renderPanelView({
+    view: buildPanelView({ state: input.state }), document: new TestDocument(),
+    onIntent() {}, onEvent() {},
+  });
+  assert.match(rehydratedRoot.textContent, /Página 3 pausada/u);
+  assert.doesNotMatch(rehydratedRoot.textContent, /Página 3 de/u);
 });
 
 test('pending privacy confirmation is visibly one-shot while cancel remains available', () => {

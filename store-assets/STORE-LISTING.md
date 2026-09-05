@@ -1,4 +1,4 @@
-# Conteúdo de distribuição — Audita Acessibilidade 1.0.6 beta 5
+# Conteúdo de distribuição — Audita Acessibilidade 1.0.7 beta 6
 
 ## Nome
 
@@ -16,9 +16,9 @@ Principais recursos:
 
 - auditoria da página HTTP ou HTTPS aberta no Chrome, em um clique e sem movimentar a página original: a coleta ocorre em uma cópia temporária e inativa;
 - auditoria de outra URL informada pelo usuário nos três modos de evidência, sem login e sem servidor externo;
-- auditoria local de 2 a 20 URLs em lote no modo sem imagens, com progresso por página e relatório consolidado, sempre em abas temporárias inativas;
+- auditoria local de 2 a 20 URLs em lote nos três modos, com progresso por página e relatório consolidado, sempre em abas temporárias inativas;
 - três modos de evidência: Evidência completa, Somente elementos e Sem imagens;
-- pausa de privacidade e confirmação explícita antes de capturas potencialmente sensíveis;
+- pausa de privacidade e confirmação explícita antes de capturas potencialmente sensíveis, com confirmação individual por página em lotes;
 - verificações automatizadas e indicação transparente dos itens que exigem julgamento humano;
 - associação de ocorrências aos itens da ABNT e aos critérios WCAG correspondentes;
 - captura da página inteira e de elementos relacionados às ocorrências, conforme o modo escolhido;
@@ -38,7 +38,7 @@ Antes de auditar, oculte dados pessoais ou sigilosos visíveis. As capturas são
 
 Audita Acessibilidade é uma ferramenta independente, sem vínculo institucional.
 
-Limites desta beta: lotes com capturas e o mapa numerado consolidado de anúncios ainda não estão disponíveis.
+Limites desta beta: o mapa numerado consolidado de anúncios ainda não está disponível. A retenção automática por prazo também permanece em desenvolvimento.
 
 ## Finalidade única
 

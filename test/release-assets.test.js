@@ -57,13 +57,15 @@ test('keeps the public listing concise, accurate and bounded by the Chrome summa
   assert.match(listing, /processamento local/iu);
   assert.match(listing, /não constitui certificação/iu);
   assert.match(listing, /debugger[\s\S]*DOMSnapshot[\s\S]*árvore de acessibilidade/iu);
-  assert.match(listing, /1\.0\.6 beta 5/iu);
+  assert.match(listing, /1\.0\.7 beta 6/iu);
   assert.match(listing, /Evidência completa[\s\S]*Somente elementos[\s\S]*Sem imagens/iu);
   assert.match(listing, /HTML, PDF, CSV e JSON-LD\/EARL/iu);
   assert.match(listing, /outra URL[\s\S]*três modos/iu);
   assert.match(listing, /página original[\s\S]*cópia temporária e inativa/iu);
   assert.match(listing, /2 a 20 URLs[\s\S]*relatório consolidado/iu);
-  assert.match(listing, /lotes com capturas[\s\S]*mapa numerado[\s\S]*não estão disponíveis/iu);
+  assert.match(listing, /URLs em lote nos três modos/iu);
+  assert.match(listing, /confirmação individual por página/iu);
+  assert.match(listing, /mapa numerado[^.]*ainda não está disponível/iu);
   assert.doesNotMatch(listing, /1\.0\.1|aba descartável/iu);
 });
 

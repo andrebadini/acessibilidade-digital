@@ -7,6 +7,9 @@ import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
 import { AUDIT_EXECUTION_INTERNAL } from '../../src/background/chrome-adapter.js';
 import { runAudit } from '../../src/background/run-audit.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
+import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
+import { section508ReferencesForWcag } from '../../src/core/normative/section508.js';
+import { aggregateItems } from '../../src/core/rules/aggregate-items.js';
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { canonicalCoreRuleSummary } from '../../src/core/report/text-policy.js';
@@ -14,6 +17,7 @@ import {
   copyPanelResultBundleV1,
   createPanelResultBundleV1,
 } from '../../src/panel/panel-result-bundle.js';
+import { buildCompleteReportSummary } from '../../src/panel/panel-summary.js';
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const PANEL_PREVIEW_TOTAL_BYTES = 2_000_000;
@@ -203,6 +207,70 @@ test('bounds the interactive panel projection while preserving complete occurren
   assert.equal(bundle.details.length, exposedIds.length);
   assert.equal(bundle.summary.limitations.codes.some(value => /painel.+relat.rio completo/iu.test(value)), true);
   assert.equal(input.reportRevision.model.occurrences.length, 256);
+});
+
+test('keeps an image issue visible when an earlier card alone exceeds the occurrence budget', async () => {
+  const input = await fixture(null, draft => {
+    const originalOccurrence = SAMPLE_AUDIT.occurrences.find(value => value.occurrenceId === 'occ-focus-failed');
+    const originalEvidence = SAMPLE_AUDIT.evidence.find(value => value.evidenceId === 'ev-control');
+    draft.occurrences = [];
+    draft.manualReview = [];
+    draft.reviewDecisions = [];
+    draft.evidence = draft.evidence.filter(value => value.evidenceId === 'ev-full');
+    for (const rule of draft.ruleResults) {
+      const count = rule.ruleId === 'accessible-component-name' ? 70 : rule.ruleId === 'content-image-alternative' ? 1 : 0;
+      rule.outcome = count > 0 ? 'failed' : 'inapplicable';
+      rule.targets = [];
+      rule.summary = canonicalCoreRuleSummary(rule.ruleId, rule.outcome);
+      rule.limitations = [];
+      for (let index = 0; index < count; index += 1) {
+        const suffix = `${rule.ruleId}-${String(index).padStart(3, '0')}`;
+        const nodeId = `node-${suffix}`;
+        const evidenceId = `ev-${suffix}`;
+        const itemId = rule.nbrItems[0];
+        rule.targets.push(nodeId);
+        draft.evidence.push({
+          ...structuredClone(originalEvidence), evidenceId, nodeId,
+          selector: { css: `#${nodeId}`, framePath: [] },
+        });
+        draft.occurrences.push({
+          ...structuredClone(originalOccurrence), occurrenceId: `occ-${suffix}`,
+          itemId, ruleId: rule.ruleId, mode: rule.mode, nodeId,
+          source: { ...rule.source }, nbrItemRef: itemId,
+          itemWcagRefs: [...rule.wcag], sourceWcagRefs: [...rule.wcag],
+          testedWcagRefs: [...rule.wcag], wcagRefs: [...rule.wcag],
+          foreignBenchmarkRefs: [...section508ReferencesForWcag(rule.wcag)],
+          target: { nodeId, selector: null, framePath: [] },
+          evidenceIds: ['ev-full', evidenceId], evidenceRefs: ['ev-full', evidenceId],
+          justification: rule.summary,
+        });
+      }
+    }
+    draft.itemResults = aggregateItems(draft.ruleResults, NBR17225_ITEMS).map(item => ({
+      ...item, ruleResults: item.ruleResults.map(rule => rule.ruleId),
+    }));
+  });
+  const originalModel = JSON.stringify(input.reportRevision.model);
+  const bundle = await createPanelResultBundleV1(input);
+  const cards = bundle.summary.groups.failed;
+
+  assert.deepEqual(cards.map(card => card.ruleId), ['accessible-component-name', 'content-image-alternative']);
+  assert.deepEqual(cards.map(card => card.occurrenceIds.length), [63, 1]);
+  assert.equal(cards[0].occurrenceIds.at(-1), 'occ-accessible-component-name-062');
+  assert.equal(cards[1].occurrenceIds[0], 'occ-content-image-alternative-000');
+  assert.equal(bundle.details.length, 64);
+  assert.deepEqual(bundle.summary.counts.errors, { checkKeys: 2, occurrences: 71 });
+  for (const card of cards) {
+    assert.deepEqual(card.evidence.evidenceIds,
+      ['ev-full', ...card.occurrenceIds.map(id => id.replace(/^occ-/u, 'ev-'))]
+        .sort((left, right) => left.localeCompare(right)));
+  }
+  assert.deepEqual(copyPanelResultBundleV1(structuredClone(bundle)), bundle);
+  const complete = await buildCompleteReportSummary({
+    model: input.reportRevision.model, executionCheckpoint: input.reportRevision.checkpoint, inventory: input.inventory,
+  });
+  assert.deepEqual(complete.groups.failed.map(card => card.occurrenceIds.length), [70, 1]);
+  assert.equal(JSON.stringify(input.reportRevision.model), originalModel);
 });
 
 test('keeps a valid large canonical raster in the report while omitting only its panel preview', async () => {

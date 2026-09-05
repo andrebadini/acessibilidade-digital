@@ -183,6 +183,198 @@ test('accepts only a locally branded batch execution runner for cleanup and chec
   assert.deepEqual(executionCheckpoints.at(-1).pages.map(page => page.pageId), ['page-1', 'page-2']);
 });
 
+test('restart seeds completed child pages and never invokes their runner again', async () => {
+  const batchAuditId = 'batch-restart-seed';
+  const entries = normalizeUrlList('https://one.example.test/\nhttps://two.example.test/').entries;
+  const inventory = await createInstalledCoreRuleInventory();
+  const now = clock();
+  const firstChild = await enrichAuditForReport(rawChild({
+    auditId: `${batchAuditId}:page-1`, url: entries[0].navigationUrl, now,
+  }), { ...REPORT_OPTIONS, now });
+  const firstCheckpoint = Object.freeze({
+    version: 1,
+    auditId: `${batchAuditId}:page-1`,
+    pages: [Object.freeze({
+      pageId: 'page-1', attempted: true,
+      startedAt: firstChild.pages[0].timestamps.startedAt,
+      rulesVersion: inventory.rulesVersion,
+      inventoryVersion: inventory.inventoryVersion,
+      inventoryHash: inventory.sha256,
+      outcomes: [],
+    })],
+  });
+  const calls = [];
+  const runner = createBatchExecutionRunner(async options => {
+    calls.push(options.pageId);
+    const childAuditId = options.idFactory();
+    const model = await enrichAuditForReport(rawChild({
+      auditId: childAuditId, url: options.url, now: options.now,
+    }), { ...REPORT_OPTIONS, now: options.now });
+    const childCheckpoint = Object.freeze({
+      version: 1,
+      auditId: childAuditId,
+      pages: [Object.freeze({
+        pageId: 'page-1', attempted: true,
+        startedAt: model.pages[0].timestamps.startedAt,
+        rulesVersion: inventory.rulesVersion,
+        inventoryVersion: inventory.inventoryVersion,
+        inventoryHash: inventory.sha256,
+        outcomes: [],
+      })],
+    });
+    await options.onCheckpoint(Object.freeze({
+      version: 1, auditId: batchAuditId,
+      pages: [Object.freeze({ ...childCheckpoint.pages[0], pageId: options.pageId })],
+    }));
+    return Object.freeze({
+      model,
+      checkpoint: Object.freeze({
+        version: 1, auditId: batchAuditId,
+        pages: [Object.freeze({ ...childCheckpoint.pages[0], pageId: options.pageId })],
+      }),
+      ownershipState: 'removed',
+    });
+  });
+  const executionCheckpoints = [];
+
+  const model = await runBatch({
+    entries, batchAuditId, runner,
+    completedPages: [Object.freeze({
+      pageId: 'page-1', model: firstChild, checkpoint: firstCheckpoint,
+    })],
+    chromeAdapter: {
+      async emitProgress() {},
+      async handoffReport() { return { reviewUrl: null }; },
+      tryEnterFinalization() { return true; },
+    },
+    now,
+    reportOptions: REPORT_OPTIONS,
+    onExecutionCheckpoint: async value => executionCheckpoints.push(value),
+  });
+
+  assert.deepEqual(calls, ['page-2']);
+  assert.deepEqual(model.pages.map(page => page.pageId), ['page-1', 'page-2']);
+  assert.deepEqual(executionCheckpoints.at(-1).pages.map(page => page.pageId), ['page-1', 'page-2']);
+  assert.doesNotMatch(JSON.stringify(model), /token=|session=/u);
+});
+
+test('restart restores a factual pre-observation failure and still generates the consolidated report', async () => {
+  const batchAuditId = 'batch-restart-pre-observation';
+  const entries = normalizeUrlList([
+    'https://one.example.test/private?token=REMOVE',
+    'https://two.example.test/',
+  ].join('\n')).entries;
+  const inventory = await createInstalledCoreRuleInventory();
+  const failureStartedAt = '2026-08-28T12:00:00.000Z';
+  const failureEndedAt = '2026-08-28T12:00:01.000Z';
+  const firstCheckpoint = Object.freeze({
+    version: 1,
+    auditId: `${batchAuditId}:page-1`,
+    pages: [Object.freeze({
+      pageId: 'page-1', attempted: true, startedAt: failureStartedAt,
+      rulesVersion: inventory.rulesVersion,
+      inventoryVersion: inventory.inventoryVersion,
+      inventoryHash: inventory.sha256,
+      outcomes: [],
+    })],
+  });
+  const calls = [];
+  const runner = createBatchExecutionRunner(async options => {
+    calls.push(options.pageId);
+    const childAuditId = options.idFactory();
+    const model = await enrichAuditForReport(rawChild({
+      auditId: childAuditId, url: options.url, now: options.now,
+    }), { ...REPORT_OPTIONS, now: options.now });
+    const checkpoint = Object.freeze({
+      version: 1,
+      auditId: batchAuditId,
+      pages: [Object.freeze({
+        pageId: options.pageId, attempted: true,
+        startedAt: model.pages[0].timestamps.startedAt,
+        rulesVersion: inventory.rulesVersion,
+        inventoryVersion: inventory.inventoryVersion,
+        inventoryHash: inventory.sha256,
+        outcomes: [],
+      })],
+    });
+    await options.onCheckpoint(checkpoint);
+    return Object.freeze({ model, failure: null, checkpoint, ownershipState: 'removed' });
+  });
+
+  const model = await runBatch({
+    entries,
+    batchAuditId,
+    batchStartedAt: '2026-08-28T11:59:59.000Z',
+    runner,
+    completedPages: [Object.freeze({
+      pageId: 'page-1',
+      model: null,
+      failure: Object.freeze({
+        version: 1,
+        kind: 'pre-observation-failure',
+        attempted: true,
+        startedAt: failureStartedAt,
+        endedAt: failureEndedAt,
+        urlEvidence: entries[0].evidenceUrl,
+      }),
+      checkpoint: firstCheckpoint,
+    })],
+    chromeAdapter: {
+      async emitProgress() {},
+      async handoffReport() { return { reviewUrl: null }; },
+      tryEnterFinalization() { return true; },
+    },
+    now: clock(),
+    reportOptions: REPORT_OPTIONS,
+    async onExecutionCheckpoint() {},
+  });
+
+  assert.deepEqual(calls, ['page-2']);
+  assert.deepEqual(model.pages.map(page => page.status), ['failed', 'complete']);
+  assert.equal(model.pages[0].diagnostics[0].code, 'BATCH_PAGE_FAILED');
+  assert.equal(model.session.status, 'partial');
+  assert.doesNotMatch(JSON.stringify(model), /REMOVE|token=/u);
+});
+
+test('restart preserves the durable batch start when the retained first page began before the new worker clock', async () => {
+  const entries = normalizeUrlList([
+    'https://one.example.test/',
+    'https://two.example.test/',
+  ].join('\n')).entries;
+  const durableBatchStartedAt = '2026-08-28T11:59:59.000Z';
+  const restartedClock = (() => {
+    let tick = 0;
+    return () => new Date(Date.UTC(2026, 7, 28, 12, 5, tick++)).toISOString();
+  })();
+  let pageIndex = 0;
+
+  const model = await runBatch({
+    entries,
+    batchAuditId: 'batch-restart-first-page-clock',
+    batchStartedAt: durableBatchStartedAt,
+    runner: async options => {
+      const offset = pageIndex * 2;
+      pageIndex += 1;
+      let localTick = 0;
+      return rawChild({
+        auditId: options.idFactory(),
+        url: options.url,
+        now: () => new Date(Date.UTC(2026, 7, 28, 12, 0, offset + localTick++)).toISOString(),
+      });
+    },
+    chromeAdapter: {
+      async emitProgress() {},
+      async handoffReport() { return { reviewUrl: null }; },
+    },
+    now: restartedClock,
+    reportOptions: REPORT_OPTIONS,
+  });
+
+  assert.equal(model.timestamps.startedAt, durableBatchStartedAt);
+  assert.equal(model.pages.every(page => page.timestamps.startedAt >= model.timestamps.startedAt), true);
+  assert.deepEqual(model.pages.map(page => page.status), ['complete', 'complete']);
+});
+
 test('allows a branded token runner to process query-distinct pages with the same sanitized URL', async () => {
   const first = structuredClone(normalizeUrlList('https://example.test/item').entries[0]);
   const entries = [first, { ...structuredClone(first), line: 2 }];

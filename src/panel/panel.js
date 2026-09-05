@@ -123,13 +123,13 @@ export function normalizePanelBatchEntry(raw) {
 }
 
 export function createPanelBatchAuditIntent(raw) {
-  const input = exactRecord(raw, ['capabilityId', 'urls']);
+  const input = exactRecord(raw, ['capabilityId', 'urls', 'captureMode']);
   const normalized = input ? normalizePanelBatchEntry(input.urls) : null;
   if (!input || !OPAQUE_CAPABILITY.test(input.capabilityId ?? '') || normalized?.ok !== true ||
-    normalized.urls !== input.urls) return null;
+    normalized.urls !== input.urls || !CAPTURE_MODES.includes(input.captureMode)) return null;
   return Object.freeze({
     type: 'PANEL_START_BATCH_AUDIT', capabilityId: input.capabilityId, urls: input.urls,
-    captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
+    captureMode: input.captureMode, includeQuery: false, deleteAfterCompleteExport: false,
   });
 }
 
@@ -169,14 +169,27 @@ export function createPanelAuditDeletionController({
 }
 
 export function projectPanelBootstrapEvent(value) {
-  const paused = exactRecord(value, ['state', 'auditId', 'result', 'mode', 'categories', 'message']);
+  const running = exactRecord(value, ['state', 'auditId', 'result', 'captureMode']);
+  if (running?.state === 'running' && AUDIT_ID.test(running.auditId ?? '') && running.result === null &&
+    CAPTURE_MODES.includes(running.captureMode)) {
+    return Object.freeze({ type: 'AUDIT_RUNNING', auditId: running.auditId, captureMode: running.captureMode });
+  }
+  const ordinary = exactRecord(value, ['state', 'auditId', 'result', 'mode', 'categories', 'message']);
+  const batchPaused = ordinary ? null : exactRecord(value, [
+    'state', 'auditId', 'result', 'mode', 'categories', 'message', 'pageNumber',
+  ]);
+  const paused = ordinary ?? batchPaused;
   if (!paused || paused.state !== 'privacy-paused' || !AUDIT_ID.test(paused.auditId ?? '') || paused.result !== null ||
-    !PIXEL_CAPTURE_MODES.includes(paused.mode) || paused.message !== PRIVACY_MESSAGE) return null;
+    !PIXEL_CAPTURE_MODES.includes(paused.mode) || paused.message !== PRIVACY_MESSAGE ||
+    batchPaused && (!Number.isSafeInteger(batchPaused.pageNumber) || batchPaused.pageNumber < 1 || batchPaused.pageNumber > 20)) return null;
   const categories = copyPrivacyCategories(paused.categories);
-  return categories ? Object.freeze({
+  const projected = categories ? {
     type: 'PRIVACY_PAUSED', auditId: paused.auditId, mode: paused.mode,
     categories: Object.freeze(categories), message: PRIVACY_MESSAGE,
-  }) : null;
+  } : null;
+  if (!projected) return null;
+  if (batchPaused) projected.pageNumber = batchPaused.pageNumber;
+  return Object.freeze(projected);
 }
 
 export function projectPanelAuditProgressEvent(value, sender, runtime, currentAuditId) {
@@ -518,7 +531,8 @@ async function startBatchAudit(rawUrls) {
     transition({ type: 'BATCH_ENTRY_REJECTED', code: normalized.code, lines: normalized.lines });
     return;
   }
-  if (state.screen !== 'initial' || state.entryMode !== 'batch' || state.captureMode !== 'no-pixels') return;
+  const captureMode = state.captureMode;
+  if (state.screen !== 'initial' || state.entryMode !== 'batch' || !CAPTURE_MODES.includes(captureMode)) return;
   const requestId = nextRequestId();
   let preparedResponse = null;
   try {
@@ -528,12 +542,14 @@ async function startBatchAudit(rawUrls) {
   } catch { /* a safe nontechnical error is rendered below */ }
   const prepared = parsePreparedCapability(preparedResponse, requestId);
   if (navigationEntryRevision !== submittedRevision || state.screen !== 'initial' ||
-    state.entryMode !== 'batch' || state.captureMode !== 'no-pixels') return;
+    state.entryMode !== 'batch' || state.captureMode !== captureMode) return;
   if (!prepared) {
     transition({ type: 'BATCH_ENTRY_REJECTED', code: 'start-failed', lines: [] });
     return;
   }
-  const startIntent = createPanelBatchAuditIntent({ capabilityId: prepared.capabilityId, urls: normalized.urls });
+  const startIntent = createPanelBatchAuditIntent({
+    capabilityId: prepared.capabilityId, urls: normalized.urls, captureMode,
+  });
   if (!startIntent) {
     transition({ type: 'BATCH_ENTRY_REJECTED', code: 'start-failed', lines: [] });
     return;
@@ -541,7 +557,7 @@ async function startBatchAudit(rawUrls) {
   transition({ type: 'START_REQUESTED', source: 'batch' });
   transition({ type: 'BATCH_PREPARED', total: normalized.total });
   if (navigationEntryRevision !== submittedRevision || state.screen !== 'running' || state.auditId !== null ||
-    state.auditSource !== 'batch' || state.captureMode !== 'no-pixels') return;
+    state.auditSource !== 'batch' || state.captureMode !== captureMode) return;
   let response = null;
   try { response = await requestPanelIntent(startIntent); }
   catch { /* a safe nontechnical error is rendered below */ }
@@ -551,7 +567,7 @@ async function startBatchAudit(rawUrls) {
   if (started) {
     batchEntryDraft = '';
     if (state.screen === 'running' && (state.auditId === null || state.auditId === started.auditId) && state.auditSource === 'batch' &&
-      state.captureMode === 'no-pixels' && state.sessionStatus === null) {
+      state.captureMode === captureMode && state.sessionStatus === null) {
       transition({
         type: 'BATCH_STARTED', auditId: started.auditId, total: started.total, warnings: started.warnings,
       });
@@ -639,12 +655,21 @@ async function retryAudit() {
 }
 
 function receiveBootstrap(value) {
-  const privacyEvent = projectPanelBootstrapEvent(value);
-  if (privacyEvent) {
+  const bootstrapEvent = projectPanelBootstrapEvent(value);
+  if (bootstrapEvent?.type === 'PRIVACY_PAUSED') {
     hasReceivedBootstrap = true;
     highlightStateSynchronizer.invalidate();
     resultBundle = null;
-    transition(privacyEvent);
+    transition(bootstrapEvent);
+    return;
+  }
+  if (bootstrapEvent?.type === 'AUDIT_RUNNING') {
+    if (state.auditSource === 'batch') batchEntryDraft = '';
+    hasReceivedBootstrap = true;
+    highlightStateSynchronizer.invalidate();
+    resultBundle = null;
+    transition(bootstrapEvent);
+    synchronizePersonaOnBootstrap();
     return;
   }
   if (value?.state === 'initial') {

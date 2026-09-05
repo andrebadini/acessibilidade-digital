@@ -89,6 +89,27 @@ function sessionArea() {
   };
 }
 
+function persistedBatchProgress(auditId) {
+  const storage = sessionArea();
+  const record = {
+    auditId,
+    pages: [
+      { pageId: 'page-1', state: 'completed', model: structuredClone(SAMPLE_AUDIT) },
+      { pageId: 'page-2', state: 'draft', model: structuredClone(SAMPLE_AUDIT) },
+    ],
+  };
+  storage.values[auditId] = structuredClone(record);
+  return {
+    storage,
+    record,
+    async discard({ auditId: requestedAuditId }) {
+      assert.equal(requestedAuditId, auditId);
+      await storage.remove(requestedAuditId);
+      return true;
+    },
+  };
+}
+
 async function failedAudit(auditId) {
   const internalValues = {};
   const adapter = {
@@ -681,6 +702,23 @@ function capturePolicyGateHarness() {
   };
   return { dependencies, effects };
 }
+
+test('batch starter requires a terminal progress discard dependency', async () => {
+  const area = sessionArea();
+  const { authority } = await authorityFixture(area);
+  const dependencies = dependencyFixture({ area, authority, execution: async () => {} });
+  Object.assign(dependencies, {
+    runUrlAuditExecution: async () => {},
+    clearUrlAuditResources: async () => true,
+    runBatchAuditExecution: async () => {},
+    clearBatchAuditResources: async () => true,
+    clearBatchAuditProgress: async () => true,
+    discardBatchAuditProgress: async () => true,
+  });
+  assert.doesNotThrow(() => createAuthorizedAuditStarter(dependencies));
+  dependencies.discardBatchAuditProgress = null;
+  assert.throws(() => createAuthorizedAuditStarter(dependencies), /AUTHORIZED_AUDIT_STARTER_INVALID/u);
+});
 
 test('starter rejects an unbranded pixel commit clock before any dependency effect', () => {
   for (const invalidClock of [
@@ -1454,6 +1492,7 @@ test('single-URL start persists bootstrap and active job before execution, then 
   const report = await reportFixture(auditId);
   const order = [];
   const reportByAudit = new Map();
+  let recordedHighlight = null;
   const dependencies = dependencyFixture({
     area, authority, order, reportByAudit,
     execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
@@ -1482,6 +1521,7 @@ test('single-URL start persists bootstrap and active job before execution, then 
     });
   };
   dependencies.clearUrlAuditResources = async () => true;
+  dependencies.recordHighlightBinding = async input => { recordedHighlight = input; return null; };
   const starter = createAuthorizedAuditStarter(dependencies);
   const started = await starter.beginAuthorizedUrlAudit({
     capabilityId: prepared.capabilityId,
@@ -1499,6 +1539,13 @@ test('single-URL start persists bootstrap and active job before execution, then 
   assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
   assert.deepEqual(await started.completion, { ok: true, auditId, state: 'result', revision: 1 });
   assert.equal(reportByAudit.has(auditId), true);
+  assert.deepEqual(recordedHighlight.observedTarget, {
+    version: 1, kind: 'disposable', ownerId: `owner_${'O'.repeat(22)}`,
+    tabId: 27, windowId: 9, documentId: 'url-document',
+    urlEvidence: 'https://example.test/private',
+    urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+  }, 'the live-highlight boundary receives the sanitized URL string, not the EvidenceUrlV1 envelope');
+  assert.equal(recordedHighlight.snapshot.modelHash, report.model.integrity.canonicalModelHash);
   assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
   const session = await readAuditSessionForWorker({
     sessionArea: area, sessionCapabilityId: started.sessionCapabilityId, auditId,
@@ -1535,6 +1582,8 @@ test('batch start persists one active session, commits the consolidated report, 
     return Object.freeze({ model: report.model, checkpoint: report.checkpoint });
   };
   dependencies.clearBatchAuditResources = async () => true;
+  dependencies.clearBatchAuditProgress = async () => true;
+  dependencies.discardBatchAuditProgress = async () => true;
 
   const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedBatchAudit({
     capabilityId: prepared.capabilityId,
@@ -1562,6 +1611,421 @@ test('batch start persists one active session, commits the consolidated report, 
   assert.equal(order.indexOf('prepare-batch-queue') < order.indexOf('run-batch'), true);
   assert.equal(order.includes('run-batch'), true);
 });
+
+test('pixel batch pauses one explicit page and confirmation resumes its same live executor and owner', async () => {
+  const area = sessionArea();
+  const { authority, senderContext } = await authorityFixture(area);
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'batch', senderContext });
+  const auditId = 'audit-batch-pixel-resume';
+  const progress = persistedBatchProgress(auditId);
+  const pageId = 'page-2';
+  const childAuditId = 'opaque-batch-child';
+  const ownershipId = `owner_${'P'.repeat(22)}`;
+  const report = await batchReportFixture(auditId);
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const reportByAudit = new Map();
+  let currentAt = EPOCH + 2;
+  let random = 12;
+  const pixelState = createPixelCaptureStateV1({
+    sessionArea: area,
+    now: () => currentAt++,
+    randomBytes: length => new Uint8Array(length).fill(++random),
+  });
+  const observedTarget = Object.freeze({
+    version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId,
+    tabId: 27, windowId: 9, documentId: 'batch-document-a',
+    urlEvidence: sanitizeEvidenceUrlV1('https://two.example.test/private?token=secret', { includeQuery: false }),
+    urlSessionDigest: DIGEST, cleanupMode: 'always', pageId,
+  });
+  const signals = Object.freeze({
+    version: 'SensitiveCaptureSignalsV1', detected: true,
+    categories: Object.freeze(['password']),
+  });
+  let runCalls = 0;
+  let releaseBatch;
+  const batchReleased = new Promise(resolve => { releaseBatch = resolve; });
+  let announcePaused;
+  const paused = new Promise(resolve => { announcePaused = resolve; });
+  const resumeCalls = [];
+  const attemptCleanupCalls = [];
+  let finishPixelPage = null;
+  let boundDuringResume = null;
+  const dependencies = dependencyFixture({
+    area, authority, pixelState, reportByAudit,
+    probeDocumentIdentity: async () => ({
+      tabId: observedTarget.tabId, windowId: observedTarget.windowId,
+      documentId: observedTarget.documentId, urlSessionDigest: observedTarget.urlSessionDigest,
+    }),
+    probeSensitiveCaptureSignals: async () => signals,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  let registeredCaptureMode = null;
+  dependencies.panelCoordinator = panelCoordinator([], {
+    async registerPendingBootstrap(value) {
+      registeredCaptureMode = value.captureMode;
+      return true;
+    },
+  });
+  dependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RUN'); };
+  dependencies.clearUrlAuditResources = async () => true;
+  dependencies.pixelAttemptLifecycle = Object.freeze({
+    ...dependencies.pixelAttemptLifecycle,
+    async cleanup(value) { attemptCleanupCalls.push(structuredClone(value)); return true; },
+  });
+  dependencies.runBatchAuditExecution = async args => {
+    runCalls += 1;
+    finishPixelPage = args.onPixelPageFinished;
+    const bound = await authority.transitionBatchAuditSession({
+      sessionCapabilityId: args.sessionCapabilityId,
+      auditId,
+      fromPageId: null,
+      fromOwnershipId: null,
+      toPageId: pageId,
+      toOwnershipId: ownershipId,
+    });
+    assert.equal(bound.ok, true);
+    const correlation = await readBatchAuditCorrelationForRecovery({
+      sessionArea: area, capabilityId: args.capabilityId, auditId,
+    });
+    await pixelState.pause({
+      auditId,
+      observedTarget,
+      mode: policy.mode,
+      capturePolicy: policy,
+      categories: signals.categories,
+      authorityExpiresAt: correlation.expiresAt,
+    });
+    await args.onCheckpoint(report.checkpoint);
+    await args.onPrivacyPaused({ auditId, childAuditId, pageId, ownershipId });
+    announcePaused();
+    await batchReleased;
+    return Object.freeze({ model: report.model, checkpoint: report.checkpoint });
+  };
+  dependencies.resumeBatchAuditExecution = async request => {
+    resumeCalls.push(structuredClone(request));
+    boundDuringResume = await readBatchAuditCorrelationForRecovery({
+      sessionArea: area, capabilityId: prepared.capabilityId, auditId,
+    });
+    await pixelState.gateRunnerStart({
+      auditId,
+      consentId: request.consentId,
+      proof: {
+        kind: 'owned-disposable', ownershipId,
+        tabId: observedTarget.tabId, windowId: observedTarget.windowId,
+        documentId: observedTarget.documentId, urlSessionDigest: observedTarget.urlSessionDigest,
+        cleanupMode: 'always', pageId,
+      },
+      categories: signals.categories,
+    });
+    assert.equal(typeof finishPixelPage, 'function');
+    await finishPixelPage({
+      auditId, childAuditId, pageId, ownershipId, consentId: request.consentId,
+    });
+    assert.equal(await pixelState.readSuspension(auditId), null);
+    const cleared = await authority.transitionBatchAuditSession({
+      sessionCapabilityId: boundDuringResume.sessionCapabilityId,
+      auditId,
+      fromPageId: pageId,
+      fromOwnershipId: ownershipId,
+      toPageId: null,
+      toOwnershipId: null,
+    });
+    assert.equal(cleared.ok, true);
+    releaseBatch();
+    return true;
+  };
+  dependencies.recoverBatchAuditExecution = async () => { throw new Error('BATCH_RECOVERY_MUST_NOT_RUN'); };
+  dependencies.clearBatchAuditResources = async () => true;
+  dependencies.clearBatchAuditProgress = async request => {
+    assert.equal(reportByAudit.has(auditId), true);
+    return progress.discard(request);
+  };
+  dependencies.discardBatchAuditProgress = async () => { throw new Error('PAUSED_OR_COMMITTED_PROGRESS_MUST_NOT_BE_DISCARDED'); };
+  const starter = createAuthorizedAuditStarter(dependencies);
+  const started = await starter.beginAuthorizedBatchAudit({
+    capabilityId: prepared.capabilityId,
+    auditId,
+    senderContext,
+    capturePolicy: policy,
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    async preparePlan() { return { kind: 'batch', queueId: auditId, acceptedCount: 2 }; },
+  });
+  assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
+  assert.equal(registeredCaptureMode, 'full-evidence');
+  await paused;
+  assert.equal(Object.hasOwn(await progress.storage.get(auditId), auditId), true);
+  assert.equal((await readActiveAuditJobForWorker({ sessionArea: area })).state, 'privacy-paused');
+  const pausedCorrelation = await readBatchAuditCorrelationForRecovery({
+    sessionArea: area, capabilityId: prepared.capabilityId, auditId,
+  });
+  assert.equal(pausedCorrelation.activePageId, pageId);
+  assert.equal(pausedCorrelation.activeOwnershipId, ownershipId);
+
+  const resumed = await starter.resumePrivacyPausedAudit({
+    auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9,
+    mode: 'full-evidence',
+  });
+  assert.deepEqual(resumed.response, { ok: true, auditId, state: 'running' });
+  assert.equal(typeof resumed.completion?.then, 'function');
+  assert.equal(resumeCalls.length, 1);
+  assert.deepEqual({
+    auditId: resumeCalls[0].auditId,
+    pageId: resumeCalls[0].pageId,
+    ownershipId: resumeCalls[0].ownershipId,
+  }, { auditId, pageId, ownershipId });
+  assert.match(resumeCalls[0].consentId, /^[A-Za-z0-9_-]{21}[AQgw]$/u);
+  assert.equal(boundDuringResume.activePageId, pageId);
+  assert.equal(boundDuringResume.activeOwnershipId, ownershipId);
+  assert.deepEqual(await started.completion, { ok: true, auditId, state: 'result', revision: 1 });
+  assert.equal(Object.hasOwn(await progress.storage.get(auditId), auditId), false);
+  assert.equal(attemptCleanupCalls.some(value => value.expected === 'prepared' &&
+    value.pageId === pageId && value.ownershipId === ownershipId), true);
+  assert.equal(runCalls, 1);
+  assert.equal(await pixelState.readSuspension(auditId), null);
+  assert.deepEqual(await starter.resumePrivacyPausedAudit({
+    auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9,
+    mode: 'full-evidence',
+  }), {
+    response: { ok: false, code: 'AUDIT_RESUME_DENIED' }, sessionCapabilityId: null, completion: null,
+  });
+});
+
+test('worker restart rehydrates a paused batch page and resumes the same owner without navigation or token', async () => {
+  const area = sessionArea();
+  const { authority, senderContext } = await authorityFixture(area);
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'batch', senderContext });
+  const auditId = 'audit-batch-pixel-worker-restart';
+  const pageId = 'page-2';
+  const childAuditId = `${auditId}:${pageId}`;
+  const ownershipId = `owner_${'W'.repeat(22)}`;
+  const report = await batchReportFixture(auditId);
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const signals = Object.freeze({
+    version: 'SensitiveCaptureSignalsV1', detected: true, categories: Object.freeze(['password']),
+  });
+  let epoch = EPOCH + 2;
+  const pixelState = createPixelCaptureStateV1({
+    sessionArea: area, now: () => epoch++,
+    randomBytes: length => new Uint8Array(length).fill(19),
+  });
+  const observedTarget = Object.freeze({
+    version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId,
+    tabId: 37, windowId: 9, documentId: 'batch-restart-document',
+    urlEvidence: sanitizeEvidenceUrlV1('https://two.example.test/private?token=secret', { includeQuery: false }),
+    urlSessionDigest: DIGEST, cleanupMode: 'always', pageId,
+  });
+  let announcePause;
+  const paused = new Promise(resolve => { announcePause = resolve; });
+  const never = new Promise(() => {});
+  const recoveryCalls = [];
+  const reportByAudit = new Map();
+  const dependencies = dependencyFixture({
+    area, authority, pixelState, reportByAudit,
+    probeDocumentIdentity: async () => ({
+      tabId: observedTarget.tabId, windowId: observedTarget.windowId,
+      documentId: observedTarget.documentId, urlSessionDigest: observedTarget.urlSessionDigest,
+    }),
+    probeSensitiveCaptureSignals: async () => signals,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RUN'); };
+  dependencies.clearUrlAuditResources = async () => true;
+  dependencies.runBatchAuditExecution = async args => {
+    const bound = await authority.transitionBatchAuditSession({
+      sessionCapabilityId: args.sessionCapabilityId, auditId,
+      fromPageId: null, fromOwnershipId: null, toPageId: pageId, toOwnershipId: ownershipId,
+    });
+    const correlation = await readBatchAuditCorrelationForRecovery({
+      sessionArea: area, capabilityId: args.capabilityId, auditId,
+    });
+    await pixelState.pause({
+      auditId, observedTarget, mode: policy.mode, capturePolicy: policy,
+      categories: signals.categories, authorityExpiresAt: correlation.expiresAt,
+    });
+    await args.onCheckpoint(report.checkpoint);
+    await args.onPrivacyPaused({ auditId, childAuditId, pageId, ownershipId });
+    assert.equal(bound.ok, true);
+    announcePause();
+    return never;
+  };
+  dependencies.resumeBatchAuditExecution = async () => { throw new Error('VOLATILE_RESUME_MUST_NOT_RUN'); };
+  dependencies.recoverBatchAuditExecution = async args => {
+    recoveryCalls.push(args);
+    assert.equal(typeof args.onPrivacyPaused, 'function');
+    assert.equal(Object.hasOwn(args, 'navigationToken'), false);
+    assert.equal(Object.hasOwn(args, 'rawNavigationVault'), false);
+    assert.deepEqual(args.resumeTarget, observedTarget);
+    await pixelState.gateRunnerStart({
+      auditId, consentId: args.consentId,
+      proof: {
+        kind: 'owned-disposable', ownershipId, tabId: observedTarget.tabId,
+        windowId: observedTarget.windowId, documentId: observedTarget.documentId,
+        urlSessionDigest: observedTarget.urlSessionDigest, cleanupMode: 'always', pageId,
+      },
+      categories: signals.categories,
+    });
+    await args.onCheckpoint(report.checkpoint);
+    await args.onPixelPageFinished({ auditId, childAuditId, pageId, ownershipId, consentId: args.consentId });
+    const cleared = await authority.transitionBatchAuditSession({
+      sessionCapabilityId: args.sessionCapabilityId, auditId,
+      fromPageId: pageId, fromOwnershipId: ownershipId, toPageId: null, toOwnershipId: null,
+    });
+    assert.equal(cleared.ok, true);
+    return Object.freeze({ model: report.model, checkpoint: report.checkpoint, acceptedCount: 2 });
+  };
+  dependencies.clearBatchAuditResources = async () => true;
+  dependencies.clearBatchAuditProgress = async () => true;
+  dependencies.discardBatchAuditProgress = async () => true;
+
+  const original = createAuthorizedAuditStarter(dependencies);
+  const started = await original.beginAuthorizedBatchAudit({
+    capabilityId: prepared.capabilityId, auditId, senderContext,
+    capturePolicy: policy,
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    async preparePlan() { return { kind: 'batch', queueId: auditId, acceptedCount: 2 }; },
+  });
+  await paused;
+  const suspension = await pixelState.readSuspension(auditId);
+  assert.equal(suspension.source.ownershipId, ownershipId);
+
+  const restarted = createAuthorizedAuditStarter(dependencies);
+  assert.deepEqual(await restarted.recoverAuthorizedAuditLifecycle(), {
+    ok: true, state: 'privacy-paused', auditId, revision: null,
+  });
+  const resumed = await restarted.resumePrivacyPausedAudit({
+    auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9,
+    mode: 'full-evidence',
+  });
+  assert.deepEqual(resumed.response, { ok: true, auditId, state: 'running' });
+  assert.deepEqual(await resumed.completion, { ok: true, auditId, state: 'result', revision: 1 });
+  assert.equal(recoveryCalls.length, 1);
+  assert.equal(recoveryCalls[0].resumeTarget.ownershipId, ownershipId);
+  assert.equal(await pixelState.readSuspension(auditId), null);
+});
+
+for (const retry of ['none', 'direct', 'restart', 'startup-running']) {
+test(`revoked batch pixel suspension discards persisted child progress after owner cleanup (retry: ${retry})`, async () => {
+  const area = sessionArea();
+  const { authority, senderContext } = await authorityFixture(area);
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'batch', senderContext });
+  const auditId = 'audit-batch-pixel-liquidation';
+  const progress = persistedBatchProgress(auditId);
+  const discardFailsInitially = ['direct', 'restart'].includes(retry);
+  let discardFailed = false;
+  const pageId = 'page-2';
+  const ownershipId = `owner_${'L'.repeat(22)}`;
+  const claimed = await authority.claimNavigationAndIssueAuditSession({
+    capabilityId: prepared.capabilityId, auditId, ownershipId: null,
+    intent: 'batch', senderContext,
+  });
+  assert.equal(claimed.ok, true);
+  assert.equal((await authority.transitionBatchAuditSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId,
+    fromPageId: null, fromOwnershipId: null,
+    toPageId: pageId, toOwnershipId: ownershipId,
+  })).ok, true);
+  const correlation = await readBatchAuditCorrelationForRecovery({
+    sessionArea: area, capabilityId: prepared.capabilityId, auditId,
+  });
+  let currentAt = EPOCH + 2;
+  const pixelState = createPixelCaptureStateV1({
+    sessionArea: area,
+    now: () => currentAt++,
+    randomBytes: length => new Uint8Array(length).fill(21),
+  });
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const suspension = await pixelState.pause({
+    auditId,
+    observedTarget: {
+      version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId,
+      tabId: 27, windowId: 9, documentId: 'batch-document-a',
+      urlEvidence: sanitizeEvidenceUrlV1('https://two.example.test/', { includeQuery: false }),
+      urlSessionDigest: DIGEST, cleanupMode: 'always', pageId,
+    },
+    mode: policy.mode, capturePolicy: policy, categories: ['password'],
+    authorityExpiresAt: correlation.expiresAt,
+  });
+  if (retry !== 'startup-running') assert.equal((await authority.transitionAuditSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId, nextState: 'privacy-paused',
+  })).ok, true);
+  const active = {
+    version: 1, auditId, capabilityId: prepared.capabilityId,
+    sessionCapabilityId: claimed.sessionCapabilityId, windowId: 9, mode: 'batch',
+    state: retry === 'startup-running' ? 'running' : 'privacy-paused', commitState: 'none', expectedTerminalRevision: null,
+    createdAt: EPOCH + 1, updatedAt: EPOCH + 1,
+  };
+  area.values[ACTIVE_AUDIT_JOB_KEY] = structuredClone(active);
+  await pixelState.revokeAudit({
+    auditId, consentId: suspension.consentId, reason: 'PIXEL_CONSENT_DOCUMENT_CHANGED',
+  });
+  const cleanupCalls = [];
+  const dependencies = dependencyFixture({
+    area, authority, pixelState,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RUN'); };
+  dependencies.clearUrlAuditResources = async () => { throw new Error('URL_CLEANUP_MUST_NOT_RUN'); };
+  dependencies.runBatchAuditExecution = async () => { throw new Error('BATCH_EXECUTION_MUST_NOT_RUN'); };
+  dependencies.resumeBatchAuditExecution = async () => { throw new Error('BATCH_RESUME_MUST_NOT_RUN'); };
+  dependencies.recoverBatchAuditExecution = async () => { throw new Error('BATCH_RECOVERY_MUST_NOT_RUN'); };
+  dependencies.clearBatchAuditResources = async request => {
+    cleanupCalls.push(structuredClone(request));
+    const current = await readBatchAuditCorrelationForRecovery({
+      sessionArea: area, capabilityId: request.capabilityId, auditId: request.auditId,
+    });
+    if (current.activePageId === null && current.activeOwnershipId === null) return true;
+    const cleared = await authority.transitionBatchAuditSession({
+      sessionCapabilityId: request.sessionCapabilityId, auditId: request.auditId,
+      fromPageId: pageId, fromOwnershipId: ownershipId,
+      toPageId: null, toOwnershipId: null,
+    });
+    return cleared.ok === true;
+  };
+  dependencies.clearBatchAuditProgress = async () => true;
+  dependencies.discardBatchAuditProgress = async request => {
+    const correlation = await readBatchAuditCorrelationForRecovery({
+      sessionArea: area, capabilityId: prepared.capabilityId, auditId,
+    });
+    assert.equal(correlation.activeOwnershipId, null);
+    assert.equal(area.values[ACTIVE_AUDIT_JOB_KEY]?.auditId, auditId);
+    if (discardFailsInitially && !discardFailed) { discardFailed = true; return false; }
+    return progress.discard(request);
+  };
+  const starter = createAuthorizedAuditStarter(dependencies);
+  if (discardFailsInitially) {
+    assert.equal(await starter.liquidatePixelAudit({
+      auditId, consentId: suspension.consentId,
+      reason: 'PIXEL_CONSENT_DOCUMENT_CHANGED', source: suspension.source,
+      signal: new AbortController().signal,
+    }), false);
+    assert.equal((await readActiveAuditJobForWorker({ sessionArea: area }))?.auditId, auditId);
+    assert.equal((await pixelState.readSuspension(auditId))?.state, 'revoked');
+    assert.equal(Object.hasOwn(await progress.storage.get(auditId), auditId), true);
+  }
+  if (retry === 'restart' || retry === 'startup-running') {
+    assert.deepEqual(await createAuthorizedAuditStarter(dependencies).recoverAuthorizedAuditLifecycle(), {
+      ok: true, state: 'interrupted', auditId, revision: null,
+    });
+  } else assert.equal(await starter.liquidatePixelAudit({
+    auditId, consentId: suspension.consentId,
+    reason: 'PIXEL_CONSENT_DOCUMENT_CHANGED', source: suspension.source,
+    signal: new AbortController().signal,
+  }), true);
+  assert.equal(Object.hasOwn(await progress.storage.get(auditId), auditId), false);
+  assert.deepEqual(cleanupCalls[0], {
+    auditId, capabilityId: prepared.capabilityId,
+    sessionCapabilityId: claimed.sessionCapabilityId, windowId: 9,
+  });
+  assert.equal(await pixelState.readSuspension(auditId), null);
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+  const cleaned = await readBatchAuditCorrelationForRecovery({
+    sessionArea: area, capabilityId: prepared.capabilityId, auditId,
+  });
+  assert.equal(cleaned.capabilityState, 'invalidated');
+  assert.equal(cleaned.activePageId, null);
+  assert.equal(cleaned.activeOwnershipId, null);
+});
+}
 
 test('single-URL terminal preparation failure removes its retained owner instead of revoking without a report', async () => {
   const area = sessionArea();
@@ -4633,11 +5097,12 @@ test('active-job reader denies storage envelope drift and never returns the firs
   assert.equal(reads, 2);
 });
 
-test('restart cleans correlated batch resources before revoking and removing a running ACTIVE', async () => {
+for (const hasActivePage of [true, false]) test(`restart cleans correlated batch resources before revoking and removing a running ACTIVE (active page: ${hasActivePage})`, async () => {
   const area = sessionArea();
   const { authority, senderContext } = await authorityFixture(area);
   const prepared = await authority.prepareNavigationForPanel({ intent: 'batch', senderContext });
   const auditId = 'audit-batch-restart-running';
+  const progress = persistedBatchProgress(auditId);
   const claimed = await authority.claimNavigationAndIssueAuditSession({
     capabilityId: prepared.capabilityId,
     auditId,
@@ -4647,7 +5112,7 @@ test('restart cleans correlated batch resources before revoking and removing a r
   });
   assert.equal(claimed.ok, true);
   const ownershipId = `owner_${'R'.repeat(22)}`;
-  assert.equal((await authority.transitionBatchAuditSession({
+  if (hasActivePage) assert.equal((await authority.transitionBatchAuditSession({
     sessionCapabilityId: claimed.sessionCapabilityId,
     auditId,
     fromPageId: null,
@@ -4684,6 +5149,7 @@ test('restart cleans correlated batch resources before revoking and removing a r
       capabilityId: request.capabilityId,
       auditId: request.auditId,
     });
+    if (correlation.activePageId === null && correlation.activeOwnershipId === null) return true;
     const cleared = await authority.transitionBatchAuditSession({
       sessionCapabilityId: request.sessionCapabilityId,
       auditId: request.auditId,
@@ -4693,6 +5159,15 @@ test('restart cleans correlated batch resources before revoking and removing a r
       toOwnershipId: null,
     });
     return cleared.ok === true;
+  };
+  dependencies.clearBatchAuditProgress = async () => true;
+  dependencies.discardBatchAuditProgress = async request => {
+    const correlation = await readBatchAuditCorrelationForRecovery({
+      sessionArea: area, capabilityId: prepared.capabilityId, auditId,
+    });
+    assert.equal(correlation.activeOwnershipId, null);
+    assert.equal(area.values[ACTIVE_AUDIT_JOB_KEY]?.auditId, auditId);
+    return progress.discard(request);
   };
 
   assert.deepEqual(await createAuthorizedAuditStarter(dependencies).recoverAuthorizedAuditLifecycle(), {
@@ -4725,6 +5200,7 @@ test('restart cleans correlated batch resources before revoking and removing a r
   });
   assert.equal(correlation.capabilityState, 'invalidated');
   assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+  assert.equal(Object.hasOwn(await progress.storage.get(auditId), auditId), false);
 });
 
 test('live batch cancellation aborts execution, cleans resources and settles the session as revoked', async () => {
@@ -4732,6 +5208,7 @@ test('live batch cancellation aborts execution, cleans resources and settles the
   const { authority, senderContext } = await authorityFixture(area);
   const prepared = await authority.prepareNavigationForPanel({ intent: 'batch', senderContext });
   const auditId = 'audit-batch-live-cancel';
+  const progress = persistedBatchProgress(auditId);
   let announceExecution;
   const executionEntered = new Promise(resolve => { announceExecution = resolve; });
   const cleanupCalls = [];
@@ -4756,6 +5233,12 @@ test('live batch cancellation aborts execution, cleans resources and settles the
   dependencies.clearBatchAuditResources = async request => {
     cleanupCalls.push(structuredClone(request));
     return true;
+  };
+  dependencies.clearBatchAuditProgress = async () => true;
+  dependencies.discardBatchAuditProgress = async request => {
+    assert.equal(cleanupCalls.length, 1);
+    assert.equal(area.values[ACTIVE_AUDIT_JOB_KEY]?.auditId, auditId);
+    return progress.discard(request);
   };
   const starter = createAuthorizedAuditStarter(dependencies);
   const started = await starter.beginAuthorizedBatchAudit({
@@ -4808,7 +5291,68 @@ test('live batch cancellation aborts execution, cleans resources and settles the
     activeOwnershipId: null,
   });
   assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+  assert.equal(Object.hasOwn(await progress.storage.get(auditId), auditId), false);
 });
+
+for (const terminalKind of ['cancelled', 'failed']) {
+test(`batch ${terminalKind} retains ACTIVE when progress discard fails and restart retries it`, async () => {
+  const area = sessionArea();
+  const { authority, senderContext } = await authorityFixture(area);
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'batch', senderContext });
+  const auditId = `audit-batch-discard-${terminalKind}`;
+  const progress = persistedBatchProgress(auditId);
+  let announceExecution;
+  const executionEntered = new Promise(resolve => { announceExecution = resolve; });
+  let discardBlocked = true;
+  const dependencies = dependencyFixture({ area, authority, execution: async () => {} });
+  Object.assign(dependencies, {
+    runUrlAuditExecution: async () => {},
+    clearUrlAuditResources: async () => true,
+    async runBatchAuditExecution({ signal }) {
+      announceExecution();
+      if (terminalKind === 'cancelled') {
+        await new Promise((resolve, reject) => {
+          if (signal.aborted) reject(signal.reason);
+          else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      }
+      throw new Error('BATCH_EXECUTION_FAILED');
+    },
+    clearBatchAuditResources: async () => true,
+    clearBatchAuditProgress: async () => { throw new Error('RESULT_CLEAR_MUST_NOT_RUN'); },
+    async discardBatchAuditProgress(request) {
+      if (discardBlocked) throw new Error('BATCH_PROGRESS_UNAVAILABLE');
+      return progress.discard(request);
+    },
+  });
+  const starter = createAuthorizedAuditStarter(dependencies);
+  const started = await starter.beginAuthorizedBatchAudit({
+    capabilityId: prepared.capabilityId, auditId, senderContext,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    async preparePlan() { return { kind: 'batch', queueId: auditId, acceptedCount: 2 }; },
+  });
+  await executionEntered;
+  if (terminalKind === 'cancelled') {
+    assert.equal((await starter.abortAuthorizedAudit({
+      auditId, sessionCapabilityId: started.sessionCapabilityId, windowId: 9, reasonCode: 'USER_CANCELLED',
+    })).state, 'cancelling');
+  }
+  assert.deepEqual(await started.completion, {
+    ok: false, auditId, state: 'blocked', code: 'AUDIT_RECOVERY_REQUIRED',
+  });
+  assert.equal((await readActiveAuditJobForWorker({ sessionArea: area }))?.auditId, auditId);
+  assert.equal(Object.hasOwn(await progress.storage.get(auditId), auditId), true);
+  assert.equal((await createAuthorizedAuditStarter(dependencies).recoverAuthorizedAuditLifecycle()).state, 'blocked');
+  assert.equal((await readActiveAuditJobForWorker({ sessionArea: area }))?.auditId, auditId);
+  discardBlocked = false;
+  assert.deepEqual(await createAuthorizedAuditStarter(dependencies).recoverAuthorizedAuditLifecycle(), {
+    ok: true, state: 'interrupted', auditId, revision: null,
+  });
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+  assert.equal(Object.hasOwn(await progress.storage.get(auditId), auditId), false);
+});
+}
 
 test('claimed batch start keeps its journal until interrupted recovery is fully confirmed', async () => {
   const area = sessionArea();
@@ -4841,6 +5385,8 @@ test('claimed batch start keeps its journal until interrupted recovery is fully 
     cleanupAttempts += 1;
     return cleanupAttempts > 1;
   };
+  dependencies.clearBatchAuditProgress = async () => true;
+  dependencies.discardBatchAuditProgress = async () => true;
   const starter = createAuthorizedAuditStarter(dependencies);
 
   assert.deepEqual(await starter.recoverAuthorizedAuditLifecycle(), {
@@ -4860,7 +5406,7 @@ test('claimed batch start keeps its journal until interrupted recovery is fully 
   assert.equal(session.state, 'revoked');
 });
 
-test('restart blocks a durable privacy-paused ACTIVE in batch mode without touching cleanup resources', async () => {
+test('restart blocks an uncorrelated privacy-paused batch ACTIVE without touching cleanup resources', async () => {
   const area = sessionArea();
   const { authority } = await authorityFixture(area);
   const hostile = {
@@ -4890,6 +5436,8 @@ test('restart blocks a durable privacy-paused ACTIVE in batch mode without touch
     cleanupCalls += 1;
     return true;
   };
+  dependencies.clearBatchAuditProgress = async () => true;
+  dependencies.discardBatchAuditProgress = async () => true;
 
   assert.deepEqual(await createAuthorizedAuditStarter(dependencies).recoverAuthorizedAuditLifecycle(), {
     ok: false,
@@ -4900,8 +5448,5 @@ test('restart blocks a durable privacy-paused ACTIVE in batch mode without touch
   });
   assert.equal(cleanupCalls, 0);
   assert.deepEqual(area.values[ACTIVE_AUDIT_JOB_KEY], hostile);
-  await assert.rejects(
-    readActiveAuditJobForWorker({ sessionArea: area }),
-    error => error?.message === 'ACTIVE_AUDIT_JOB_DENIED',
-  );
+  assert.deepEqual(await readActiveAuditJobForWorker({ sessionArea: area }), hostile);
 });

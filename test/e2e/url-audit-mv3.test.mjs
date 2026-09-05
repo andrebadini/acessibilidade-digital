@@ -21,8 +21,8 @@ const privateFieldNames = Object.freeze([
   'navigationToken', 'sessionDigest', 'urlSessionDigest', 'ownershipId', 'capabilityId',
 ]);
 
-function targetDocument() {
-  const unnamedButtons = Array.from({ length: 240 }, (_, index) =>
+function targetDocument(controlCount) {
+  const unnamedButtons = Array.from({ length: controlCount }, (_, index) =>
     `<button class="unnamed-control" data-sequence="${index}"></button>`).join('');
   return `<!doctype html>
     <html lang="pt-BR">
@@ -51,7 +51,11 @@ function publicLeakExpression({ rawUrl, markers }) {
   })()`;
 }
 
-test('audits one tokenized URL in no-pixels mode and keeps reports and exports public-safe', { timeout: 300_000 }, async t => {
+for (const [name, controlCount, checkHighlight] of [
+  ['audits one tokenized URL in no-pixels mode and keeps reports and exports public-safe', 240, false],
+  ['highlights a live URL occurrence, clears it and exports its public-safe report', 20, true],
+]) {
+test(name, { timeout: 300_000 }, async t => {
   assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real de Outra URL.');
   await access(chromeBinary, fsConstants.X_OK);
   const fixture = await startFixtureServer(t, new Map([
@@ -63,7 +67,7 @@ test('audits one tokenized URL in no-pixels mode and keeps reports and exports p
     ['/url-audit-target', {
       status: 200,
       headers: { 'content-type': 'text/html; charset=utf-8' },
-      body: targetDocument(),
+      body: targetDocument(controlCount),
     }],
   ]));
   const rawUrl = `${fixture.origin}/url-audit-target?private_marker=${queryMarker}#${fragmentMarker}`;
@@ -196,7 +200,21 @@ test('audits one tokenized URL in no-pixels mode and keeps reports and exports p
   assert.equal(summary.url.includes(queryMarker), false);
   assert.equal(summary.url.includes(fragmentMarker), false);
 
-  await extension.click(panel, 'button[data-intent="SELECT_OCCURRENCE"]');
+  if (checkHighlight) {
+    const controls = await extension.evaluate(panel,
+      `Array.from(document.querySelectorAll('[data-result-card][data-classification="failed"] button[data-intent="SELECT_OCCURRENCE"]'), element=>element.dataset.focusId)`);
+    let highlightable = false;
+    for (const focusId of controls) {
+      await extension.click(panel, `button[data-focus-id="${focusId}"]`);
+      const action = await extension.waitForValue(panel,
+        `document.querySelector('[data-result-detail] .detail-actions [data-action]')?.dataset.action??null`,
+        value => ['highlight-occurrence', 'consult-evidence'].includes(value), {timeoutMs:5_000,intervalMs:25});
+      if (action === 'highlight-occurrence') { highlightable = true; break; }
+    }
+    assert.equal(highlightable, true, 'at least one confirmed element-level finding must offer live highlighting');
+  } else {
+    await extension.click(panel, 'button[data-intent="SELECT_OCCURRENCE"]');
+  }
   const detail = await extension.waitForValue(panel, `(() => ({
     visible:Boolean(document.querySelector('[data-result-detail]')),
     normative:document.querySelector('[data-detail-block="normative"]')?.textContent??'',
@@ -209,6 +227,63 @@ test('audits one tokenized URL in no-pixels mode and keeps reports and exports p
   assert.match(detail.accessibility, /Anúncio esperado:/u);
   assert.equal(detail.evidenceImages, 0);
   assert.match(detail.evidenceCopy, /Nenhuma captura raster foi coletada|modo sem imagens/iu);
+
+  if (checkHighlight) {
+  try {
+    await extension.waitForValue(panel,
+      `Boolean(document.querySelector('[data-action="highlight-occurrence"]'))`, Boolean);
+  } catch (error) {
+    const selectedOccurrence = await extension.evaluate(panel,
+      `document.querySelector('button[data-intent="SELECT_OCCURRENCE"][aria-pressed="true"]')?.dataset.focusId?.replace(/^occurrence-/, '')??null`);
+    t.diagnostic(`highlight-ui=${JSON.stringify(await extension.evaluate(panel, `({
+      heading:document.querySelector('[data-detail-block="heading"]')?.textContent,
+      actions:Array.from(document.querySelectorAll('[data-result-detail] [data-action]'),e=>e.dataset.action),
+      status:document.querySelector('[role="status"]')?.textContent
+    })`))}`);
+    t.diagnostic(`highlight-private-counts=${JSON.stringify(await extension.evaluate(extension.harnessPage, `(async()=>{
+      const stored=await chrome.storage.session.get(null);
+      const registry=stored['audita:highlight-bindings:v1'];
+      const bindings=Object.values(registry?.bindingsByAuditPage??{});
+      const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+      const revision=await store.getReportRevision(${JSON.stringify(auditId)});
+      const selectedOccurrence=${JSON.stringify(selectedOccurrence)};
+      let modelProof='not-loaded';
+      try {
+        const authority=(await import(chrome.runtime.getURL('/src/background/highlight-model-authority.js'))).createHighlightModelAuthority({auditStore:store});
+        const snapshot=await authority.loadValidated({auditId:${JSON.stringify(auditId)}});
+        const {assertBindingMatchesModel}=await import(chrome.runtime.getURL('/src/background/highlight-binding.js'));
+        for(const binding of bindings)assertBindingMatchesModel({binding,snapshot});
+        modelProof='valid';
+      } catch {modelProof='invalid';}
+      return {
+        bindingCount:bindings.length,
+        targetCounts:bindings.map(binding=>Object.keys(binding.targets??{}).length),
+        occurrences:revision?.model?.occurrences?.length,
+        evidence:revision?.model?.evidence?.length,
+        hasSelectedOccurrence:Boolean(selectedOccurrence),
+        selectedIsBound:bindings.some(binding=>Object.hasOwn(binding.targets??{},selectedOccurrence)),
+        modelProof,
+        sessions:Object.values(stored).filter(value=>value?.auditId===${JSON.stringify(auditId)}).map(value=>({state:value.state,mode:value.mode,kind:value.targetBinding?.kind}))
+      };
+    })()`, {awaitPromise:true}))}`);
+    throw error;
+  }
+  await extension.click(panel, '[data-action="highlight-occurrence"]');
+  await extension.waitForValue(panel,
+    `Boolean(document.querySelector('[data-action="clear-highlight"]'))`, Boolean);
+  const liveOverlayCount = () => extension.evaluate(extension.harnessPage, `(async()=>{
+    const targets=(await chrome.tabs.query({})).filter(tab=>tab.url===${JSON.stringify(rawUrl)});
+    if(targets.length!==1)return null;
+    const [observed]=await chrome.scripting.executeScript({target:{tabId:targets[0].id},func:()=>
+      document.querySelectorAll('[data-audita-highlight-root="v1"]').length});
+    return observed?.result??null;
+  })()`, { awaitPromise: true });
+  assert.equal(await liveOverlayCount(), 1, 'the explicit highlight action must reach the audited document');
+  await extension.click(panel, '[data-action="clear-highlight"]');
+  await extension.waitForValue(panel,
+    `Boolean(document.querySelector('[data-action="highlight-occurrence"]'))`, Boolean);
+  assert.equal(await liveOverlayCount(), 0, 'clearing the explicit highlight must remove its page overlay');
+  }
 
   const panelLeak = await extension.evaluate(panel, publicLeakExpression({
     rawUrl, markers: [queryMarker, fragmentMarker],
@@ -312,3 +387,4 @@ test('audits one tokenized URL in no-pixels mode and keeps reports and exports p
     JSON.stringify(exportProofs));
   t.diagnostic(`Chrome=${extension.chromeProduct}; source=single-url; mode=no-pixels; progress=visible; auditId=${auditId}; exports=html,pdf,csv,json; publicLeaks=0; rasterEvidence=0`);
 });
+}

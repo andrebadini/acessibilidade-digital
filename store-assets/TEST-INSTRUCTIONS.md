@@ -1,4 +1,4 @@
-# Instruções de teste — Audita Acessibilidade 1.0.6 beta 5
+# Instruções de teste — Audita Acessibilidade 1.0.7 beta 6
 
 ## Acesso
 
@@ -6,7 +6,7 @@ A extensão não exige conta, login, credencial, assinatura ou serviço externo.
 
 ## Instalação
 
-1. Descompacte `audita-acessibilidade-1.0.6.zip` em uma pasta vazia.
+1. Descompacte `audita-acessibilidade-1.0.7.zip` em uma pasta vazia.
 2. Abra `chrome://extensions` no Chrome.
 3. Ative **Modo do desenvolvedor**.
 4. Selecione **Carregar sem compactação** e escolha a pasta descompactada, que contém `manifest.json`.
@@ -22,7 +22,7 @@ A extensão não exige conta, login, credencial, assinatura ou serviço externo.
 5. Se a página contiver campo de senha, pagamento ou outro marcador sensível, confirme que a auditoria pausa antes dos pixels. Escolha **Continuar e capturar** somente depois de ocultar dados reais; também verifique que é possível cancelar.
 6. No sumário, confira os totais de falhas, alertas, revisão humana e resultados positivos, além dos filtros por impacto, WCAG e ABNT.
 7. Abra uma ocorrência. Confira a explicação, o impacto, a correção sugerida, o nome acessível, o anúncio estimado, WCAG 2.2, ABNT NBR 17225, fundamentação legal, seletor, código e evidências.
-8. Use **Ver e destacar na página**. O destaque só deve aparecer se a página ainda corresponder ao documento auditado.
+8. Consulte a captura e as evidências da ocorrência. A cópia da página atual é fechada ao terminar, portanto este fluxo não oferece destaque vivo. Para testar **Ver e destacar na página**, use **Outra URL** e mantenha a página auditada disponível; o destaque só deve aparecer se ela ainda corresponder ao documento auditado.
 9. Selecione **Abrir relatório completo**. Uma falha de abertura deve manter o sumário e permitir nova tentativa pelo mesmo botão.
 10. Na aba do relatório, registre uma decisão de revisão quando aplicável e selecione **Gerar relatório atualizado**.
 11. Confirme os quatro downloads: HTML, PDF, CSV e JSON-LD/EARL.
@@ -34,11 +34,11 @@ Abra **Outra URL**, informe um endereço HTTP ou HTTPS e repita o percurso nos t
 
 ## Várias páginas
 
-Abra **Várias páginas**, informe de 2 a 20 endereços HTTP ou HTTPS, um por linha, e inicie o lote no modo **Sem imagens**. Confira o andamento página a página, o relatório consolidado e a presença de resultados de todas as páginas. Durante toda a coleta, as páginas devem ser avaliadas em abas temporárias inativas: a aba original deve permanecer visível, sem rolagem, troca de foco, destaque ou navegação perceptível.
+Abra **Várias páginas**, informe de 2 a 20 endereços HTTP ou HTTPS, um por linha, e escolha um dos três modos de evidência. Confira as cinco etapas da página atual, a barra de avanço do lote inteiro, o relatório consolidado e a presença de resultados de todas as páginas. Nos modos com imagens, cada página sensível deve solicitar sua própria confirmação. Uma página que não puder ser observada deve aparecer como tentativa não concluída no relatório, sem impedir as próximas após a limpeza da tentativa. Durante toda a coleta, as páginas devem ser avaliadas em abas temporárias inativas: a aba original deve permanecer visível, sem rolagem, troca de foco, destaque ou navegação perceptível.
 
 ## Limites declarados da beta
 
-O mapa numerado consolidado de anúncios e os modos com capturas para lotes ainda não estão disponíveis nesta beta. A página aberta, outra URL, o lote sem imagens, as evidências individuais, o destaque quando há fonte viva, as personas e os quatro formatos de exportação fazem parte do percurso testável.
+O mapa numerado consolidado de anúncios e a retenção automática por prazo ainda não estão disponíveis nesta beta. A página aberta, outra URL, o lote nos três modos, as evidências individuais, o destaque quando há fonte viva, as personas e os quatro formatos de exportação fazem parte do percurso testável.
 
 ## Privacidade
 

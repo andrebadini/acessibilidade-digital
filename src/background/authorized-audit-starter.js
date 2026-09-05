@@ -32,7 +32,13 @@ const FACTORY_KEYS = Object.freeze([
   'probeSensitiveCaptureSignals', 'pixelAttemptLifecycle', 'schedulePixelExpiry', 'prepareAttachedCopyPlan',
 ]);
 const URL_FACTORY_KEYS = Object.freeze([...FACTORY_KEYS, 'runUrlAuditExecution', 'clearUrlAuditResources']);
-const BATCH_FACTORY_KEYS = Object.freeze([...URL_FACTORY_KEYS, 'runBatchAuditExecution', 'clearBatchAuditResources']);
+const BATCH_FACTORY_KEYS = Object.freeze([
+  ...URL_FACTORY_KEYS, 'runBatchAuditExecution', 'clearBatchAuditResources', 'clearBatchAuditProgress',
+  'discardBatchAuditProgress',
+]);
+const BATCH_RESUME_FACTORY_KEYS = Object.freeze([
+  ...BATCH_FACTORY_KEYS, 'resumeBatchAuditExecution', 'recoverBatchAuditExecution',
+]);
 const BEGIN_KEYS = Object.freeze([
   'capabilityId', 'eventNonce', 'auditId', 'capturePolicy', 'retentionPreference', 'senderContext',
 ]);
@@ -147,7 +153,7 @@ function activeRecord(value) {
   if (record.state === 'running') {
     if (record.commitState !== 'none' || record.expectedTerminalRevision !== null) return null;
   } else if (record.state === 'privacy-paused') {
-    if (record.mode === 'batch' || record.commitState !== 'none' || record.expectedTerminalRevision !== null) return null;
+    if (record.commitState !== 'none' || record.expectedTerminalRevision !== null) return null;
   } else if (record.state === 'finalizing') {
     if (!['pending', 'confirmed'].includes(record.commitState) || record.expectedTerminalRevision !== 1) return null;
   } else return null;
@@ -497,6 +503,27 @@ function correlatedPixelContext(active, recoveryGrant) {
     return freeze({ kind: 'attached', grant, target, ownershipId: null,
       sessionState: grant.sessionState, targetState: grant.targetState });
   }
+  if (active.mode === 'batch') {
+    const grant = exact(recoveryGrant, [
+      'version', 'capabilityId', 'auditId', 'sessionCapabilityId', 'windowId', 'capabilityState',
+      'sessionState', 'activePageId', 'activeOwnershipId', 'issuedAt', 'expiresAt',
+    ]);
+    const activePair = AUDIT_ID.test(grant?.activePageId ?? '') &&
+      /^owner_[A-Za-z0-9_-]{22}$/u.test(grant?.activeOwnershipId ?? '');
+    const clearedRevokedPair = grant?.sessionState === 'revoked' &&
+      grant.activePageId === null && grant.activeOwnershipId === null;
+    if (!grant || grant.version !== 1 || grant.auditId !== active.auditId ||
+      grant.capabilityId !== active.capabilityId || grant.sessionCapabilityId !== active.sessionCapabilityId ||
+      grant.windowId !== active.windowId || !['claimed', 'invalidated'].includes(grant.capabilityState) ||
+      !['running', 'privacy-paused', 'result', 'revoked'].includes(grant.sessionState) ||
+      (!activePair && !clearedRevokedPair) ||
+      !Number.isSafeInteger(grant.issuedAt) || grant.issuedAt < 0 ||
+      !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= grant.issuedAt) return null;
+    return freeze({
+      kind: 'batch', grant, target: null, ownershipId: grant.activeOwnershipId,
+      pageId: grant.activePageId, sessionState: grant.sessionState, targetState: grant.capabilityState,
+    });
+  }
   const grant = exact(recoveryGrant, [
     'version', 'capabilityId', 'auditId', 'sessionCapabilityId', 'windowId', 'capabilityState',
     'sessionState', 'navigationPurpose', 'ownershipId', 'ownershipState', 'issuedAt', 'expiresAt',
@@ -539,9 +566,17 @@ function correlatedPixelSuspension(value, active, context) {
     source.pageId === 'page-1' && Number.isSafeInteger(record.tabId) && record.tabId >= 0 &&
     typeof record.documentId === 'string' && record.documentId.length >= 1 && record.documentId.length <= 512 &&
     DIGEST.test(record.urlSessionDigest ?? '');
+  const batchTargetMatches = context?.kind === 'batch' && source?.kind === 'owned-disposable' &&
+    source.cleanupMode === 'always' &&
+    (source.ownershipId === context.ownershipId && source.pageId === context.pageId ||
+      context.sessionState === 'revoked' && context.ownershipId === null && context.pageId === null &&
+      record.state === 'revoked' && canonicalPixelSource(source) !== null) &&
+    Number.isSafeInteger(record.tabId) && record.tabId >= 0 &&
+    typeof record.documentId === 'string' && record.documentId.length >= 1 && record.documentId.length <= 512 &&
+    DIGEST.test(record.urlSessionDigest ?? '');
   if (!record || record.version !== 'AuditSuspensionV1' || record.auditId !== active.auditId ||
     !/^[A-Za-z0-9_-]{21}[AQgw]$/u.test(record.consentId ?? '') ||
-    record.windowId !== active.windowId || (!attachedTargetMatches && !ownedTargetMatches) ||
+    record.windowId !== active.windowId || (!attachedTargetMatches && !ownedTargetMatches && !batchTargetMatches) ||
     !policy || policy.mode !== record.mode ||
     !['full-evidence', 'element-only'].includes(record.mode) || !evidence || !isEvidenceUrlV1(evidence) ||
     evidence.queryIncluded !== false || !categories ||
@@ -568,7 +603,8 @@ function canonicalPixelSource(value) {
   if (attached?.kind === 'attached') return freeze(attached);
   const owned = exact(value, ['kind', 'ownershipId', 'cleanupMode', 'pageId']);
   return owned?.kind === 'owned-disposable' && /^owner_[A-Za-z0-9_-]{22}$/u.test(owned.ownershipId ?? '') &&
-    ['always', 'pre-observation-failure'].includes(owned.cleanupMode) && owned.pageId === 'page-1'
+    ['always', 'pre-observation-failure'].includes(owned.cleanupMode) &&
+    /^page-([1-9]|1[0-9]|20)$/u.test(owned.pageId ?? '')
     ? freeze(owned) : null;
 }
 
@@ -580,9 +616,11 @@ function pixelAttemptRequest(auditId, consentId, source, additional = null) {
 }
 
 export function createAuthorizedAuditStarter(input) {
-  const dependencies = exact(input, BATCH_FACTORY_KEYS) ?? exact(input, URL_FACTORY_KEYS) ?? exact(input, FACTORY_KEYS);
+  const dependencies = exact(input, BATCH_RESUME_FACTORY_KEYS) ?? exact(input, BATCH_FACTORY_KEYS) ??
+    exact(input, URL_FACTORY_KEYS) ?? exact(input, FACTORY_KEYS);
   const hasUrlAudit = Boolean(dependencies && Object.hasOwn(dependencies, 'runUrlAuditExecution'));
   const hasBatchAudit = Boolean(dependencies && Object.hasOwn(dependencies, 'runBatchAuditExecution'));
+  const hasBatchResume = Boolean(dependencies && Object.hasOwn(dependencies, 'resumeBatchAuditExecution'));
   const coordinator = exact(dependencies?.panelCoordinator, ['attachPanelPort', 'withWindowLock']);
   if (!dependencies || !dependencies.authority || !dependencies.sessionArea || !dependencies.panelCoordinator ||
     FACTORY_KEYS.filter(key => ![
@@ -623,7 +661,13 @@ export function createAuthorizedAuditStarter(input) {
   }
   if (hasBatchAudit && (typeof dependencies.runBatchAuditExecution !== 'function' ||
     typeof dependencies.clearBatchAuditResources !== 'function' ||
+    typeof dependencies.clearBatchAuditProgress !== 'function' ||
+    typeof dependencies.discardBatchAuditProgress !== 'function' ||
     typeof dependencies.authority.transitionBatchAuditSession !== 'function')) {
+    throw new TypeError('AUTHORIZED_AUDIT_STARTER_INVALID');
+  }
+  if (hasBatchResume && (typeof dependencies.resumeBatchAuditExecution !== 'function' ||
+    typeof dependencies.recoverBatchAuditExecution !== 'function')) {
     throw new TypeError('AUTHORIZED_AUDIT_STARTER_INVALID');
   }
 
@@ -639,6 +683,10 @@ export function createAuthorizedAuditStarter(input) {
   const clearUrlAuditResources = hasUrlAudit ? dependencies.clearUrlAuditResources : null;
   const runBatchAuditExecution = hasBatchAudit ? dependencies.runBatchAuditExecution : null;
   const clearBatchAuditResources = hasBatchAudit ? dependencies.clearBatchAuditResources : null;
+  const clearBatchAuditProgress = hasBatchAudit ? dependencies.clearBatchAuditProgress : null;
+  const discardBatchAuditProgress = hasBatchAudit ? dependencies.discardBatchAuditProgress : null;
+  const resumeBatchAuditExecution = hasBatchResume ? dependencies.resumeBatchAuditExecution : null;
+  const recoverBatchAuditExecution = hasBatchResume ? dependencies.recoverBatchAuditExecution : null;
   let globalTail = Promise.resolve();
   const live = new Map();
   const lockedAttachedCopyStarts = new WeakSet();
@@ -695,9 +743,13 @@ export function createAuthorizedAuditStarter(input) {
         ? readAttachedAuditRecoveryGrant({
             sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
           })
-        : readNavigationAuditCorrelationForRecovery({
-            sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
-          }),
+        : active.mode === 'batch'
+          ? readBatchAuditCorrelationForRecovery({
+              sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
+            })
+          : readNavigationAuditCorrelationForRecovery({
+              sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
+            }),
       pixelState.readSuspension(active.auditId),
     ]);
     const context = correlatedPixelContext(active, recoveryGrant);
@@ -782,6 +834,12 @@ export function createAuthorizedAuditStarter(input) {
     live.delete(active.auditId);
   }
 
+  async function discardTerminalBatchProgress(active) {
+    if (active.mode === 'batch' && await discardBatchAuditProgress({ auditId: active.auditId }) !== true) {
+      throw new Error('BATCH_PROGRESS_DISCARD_DENIED');
+    }
+  }
+
   async function finishPixelConsent(liveRecord) {
     if (liveRecord.consentId === null) return true;
     try {
@@ -799,7 +857,33 @@ export function createAuthorizedAuditStarter(input) {
   }
 
   async function clearOwnedPixelSource(active, source) {
-    if (source.kind !== 'owned-disposable' || active.mode !== 'single') return source.kind === 'attached';
+    if (source.kind === 'attached') return active.mode === 'attached';
+    if (source.kind !== 'owned-disposable') return false;
+    if (active.mode === 'batch') {
+      if (!hasBatchAudit || source.cleanupMode !== 'always' ||
+        !/^page-([1-9]|1[0-9]|20)$/u.test(source.pageId ?? '')) return false;
+      let correlation = await readBatchAuditCorrelationForRecovery({
+        sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
+      });
+      if (correlation.sessionCapabilityId !== active.sessionCapabilityId ||
+        correlation.windowId !== active.windowId ||
+        !(correlation.activePageId === source.pageId && correlation.activeOwnershipId === source.ownershipId ||
+          correlation.sessionState === 'revoked' && correlation.activePageId === null &&
+          correlation.activeOwnershipId === null)) return false;
+      if (await clearBatchAuditResources(freeze({
+        auditId: active.auditId,
+        capabilityId: active.capabilityId,
+        sessionCapabilityId: active.sessionCapabilityId,
+        windowId: active.windowId,
+      })) !== true) return false;
+      correlation = await readBatchAuditCorrelationForRecovery({
+        sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
+      });
+      return correlation.sessionCapabilityId === active.sessionCapabilityId &&
+        correlation.windowId === active.windowId && correlation.activePageId === null &&
+        correlation.activeOwnershipId === null;
+    }
+    if (active.mode !== 'single') return false;
     let correlation = await readNavigationAuditCorrelationForRecovery({
       sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
     });
@@ -863,6 +947,7 @@ export function createAuthorizedAuditStarter(input) {
       if (['running', 'privacy-paused'].includes(session.state)) await transitionConfirmed(active, 'revoked');
       else if (session.state !== 'revoked') return false;
       if (!await clearOwnedPixelSource(active, args.source)) return false;
+      await discardTerminalBatchProgress(active);
       if (await invalidateConfirmed(active) !== true || args.signal?.aborted === true) return false;
       const disconnect = scope => scope.disconnectSession({
         auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId,
@@ -928,7 +1013,7 @@ export function createAuthorizedAuditStarter(input) {
               windowId: liveRecord.observedTarget.windowId,
               documentId: liveRecord.observedTarget.documentId,
               urlSessionDigest: liveRecord.observedTarget.urlSessionDigest,
-              urlEvidence: liveRecord.observedTarget.urlEvidence,
+              urlEvidence: liveRecord.observedTarget.urlEvidence.href,
             }
           : {
               version: 1,
@@ -1064,6 +1149,7 @@ export function createAuthorizedAuditStarter(input) {
             auditId: current.auditId, sessionCapabilityId: current.sessionCapabilityId,
             windowId: current.windowId, reasonCode: 'AUDIT_REVOKED',
           }) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
+          await discardTerminalBatchProgress(current);
           await cleanupActive(current, { removeRetention: true });
           return completionRevoked(current.auditId, 'AUDIT_REVOKED');
         }
@@ -1126,6 +1212,9 @@ export function createAuthorizedAuditStarter(input) {
           if (!await pixelAttemptLifecycle.cleanup(pixelAttemptRequest(
             current.auditId, liveRecord.consentId, attemptSource, { expected: 'post-finish' },
           ))) throw new Error('PIXEL_ATTEMPT_CLEANUP_DENIED');
+          if (current.mode === 'batch' && await clearBatchAuditProgress({ auditId: current.auditId }) !== true) {
+            throw new Error('BATCH_PROGRESS_CLEAR_DENIED');
+          }
           await cleanupActive(current);
           return freeze({ ok: true, auditId: current.auditId, state: 'result', revision: 1 });
         }
@@ -1142,6 +1231,7 @@ export function createAuthorizedAuditStarter(input) {
           auditId: current.auditId, sessionCapabilityId: current.sessionCapabilityId,
           windowId: current.windowId, reasonCode: code,
         }) !== true) throw new Error('CORRELATED_CLEANUP_DENIED');
+        await discardTerminalBatchProgress(current);
         await cleanupActive(current, { removeRetention: true });
         return completionRevoked(current.auditId, code);
       } catch (error) {
@@ -1528,14 +1618,19 @@ export function createAuthorizedAuditStarter(input) {
 
   async function executeBatch(liveRecord) {
     const active = liveRecord.active;
-    let lastCheckpoint = null;
+    const recovery = liveRecord.batchRecovery ?? null;
+    let lastCheckpoint = recovery?.resumeCheckpoint ?? null;
     try {
-      const rawOutput = await runBatchAuditExecution({
+      const rawOutput = await (recovery ? recoverBatchAuditExecution : runBatchAuditExecution)({
         auditId: active.auditId,
         capabilityId: active.capabilityId,
         sessionCapabilityId: active.sessionCapabilityId,
         windowId: active.windowId,
-        acceptedCount: liveRecord.plan.acceptedCount,
+        ...(recovery ? {
+          consentId: recovery.consentId,
+          resumeTarget: recovery.resumeTarget,
+          resumeCheckpoint: recovery.resumeCheckpoint,
+        } : { acceptedCount: liveRecord.plan.acceptedCount }),
         capturePolicy: liveRecord.capturePolicy,
         modelNow,
         signal: liveRecord.controller.signal,
@@ -1555,8 +1650,91 @@ export function createAuthorizedAuditStarter(input) {
           }
           lastCheckpoint = record.checkpoint;
         },
+        onPrivacyPaused: async value => {
+          const paused = exact(value, ['auditId', 'childAuditId', 'pageId', 'ownershipId']);
+          if (!paused || paused.auditId !== active.auditId || !AUDIT_ID.test(paused.childAuditId ?? '') ||
+            !/^page-([1-9]|1[0-9]|20)$/u.test(paused.pageId ?? '') ||
+            !/^owner_[A-Za-z0-9_-]{22}$/u.test(paused.ownershipId ?? '') || lastCheckpoint === null) {
+            throw new Error('BATCH_PRIVACY_PAUSE_DENIED');
+          }
+          const correlation = await readBatchAuditCorrelationForRecovery({
+            sessionArea, capabilityId: active.capabilityId, auditId: active.auditId,
+          });
+          const checkpoint = await readPersistedCheckpoint(active);
+          const correlated = await readCorrelatedPixelSuspension(active);
+          if (correlation.sessionState !== 'running' || correlation.activePageId !== paused.pageId ||
+            correlation.activeOwnershipId !== paused.ownershipId || !checkpoint ||
+            !same(checkpoint.checkpoint, lastCheckpoint) || correlated.sessionState !== 'running' ||
+            correlated.targetState !== 'claimed' || !correlated.suspension ||
+            correlated.suspension.state !== 'paused' ||
+            correlated.suspension.source.kind !== 'owned-disposable' ||
+            correlated.suspension.source.ownershipId !== paused.ownershipId ||
+            correlated.suspension.source.pageId !== paused.pageId ||
+            !same(correlated.suspension.capturePolicy, liveRecord.capturePolicy)) {
+            throw new Error('BATCH_PRIVACY_PAUSE_DENIED');
+          }
+          liveRecord.pausedBatchPage = freeze({
+            childAuditId: paused.childAuditId,
+            pageId: paused.pageId,
+            ownershipId: paused.ownershipId,
+          });
+          await transitionConfirmed(active, 'privacy-paused');
+          const pausedActive = freeze({ ...active, state: 'privacy-paused', updatedAt: safeEpoch(epochNow) });
+          await writeConfirmed(sessionArea, ACTIVE_AUDIT_JOB_KEY, pausedActive, activeRecord, 'ACTIVE_AUDIT_JOB_DENIED');
+          liveRecord.active = pausedActive;
+          await persistExactLatest(latestState(active.auditId, 'PRIVACY_PAUSED', modelNow));
+          await schedulePixelExpiryBestEffort();
+          const published = await panelCoordinator.withWindowLock(active.windowId, scope => scope.publishPrivacyPaused({
+            auditId: active.auditId, sessionCapabilityId: active.sessionCapabilityId, windowId: active.windowId,
+          }));
+          if (published !== true) throw new Error('PANEL_PUBLICATION_DENIED');
+        },
+        onPixelPageFinished: async value => {
+          const finished = exact(value, ['auditId', 'childAuditId', 'pageId', 'ownershipId', 'consentId']);
+          const paused = liveRecord.pausedBatchPage;
+          const resume = liveRecord.resumeTarget;
+          if (!finished || finished.auditId !== active.auditId ||
+            (paused?.childAuditId !== null && finished.childAuditId !== paused?.childAuditId) ||
+            !AUDIT_ID.test(finished.childAuditId ?? '') || finished.pageId !== paused?.pageId ||
+            finished.ownershipId !== paused?.ownershipId || finished.consentId !== liveRecord.consentId ||
+            resume?.pageId !== finished.pageId || resume?.ownershipId !== finished.ownershipId ||
+            !/^[A-Za-z0-9_-]{21}[AQgw]$/u.test(finished.consentId ?? '') ||
+            !liveRecord.attemptHandle || typeof liveRecord.attemptHandle !== 'object') {
+            throw new Error('BATCH_PIXEL_FINISH_DENIED');
+          }
+          let pixelFinished = false;
+          try {
+            pixelFinished = await pixelState.finish({
+              auditId: active.auditId,
+              consentId: finished.consentId,
+            }) === true;
+          } catch {
+            pixelFinished = (await readCorrelatedPixelSuspension(active)).suspension === null;
+          }
+          if (!pixelFinished || (await readCorrelatedPixelSuspension(active)).suspension !== null ||
+            !await pixelAttemptLifecycle.cleanup({
+              auditId: active.auditId,
+              consentId: finished.consentId,
+              pageId: finished.pageId,
+              ownershipId: finished.ownershipId,
+              expected: 'prepared',
+            })) throw new Error('BATCH_PIXEL_FINISH_DENIED');
+          liveRecord.consentId = null;
+          liveRecord.attemptHandle = null;
+          liveRecord.resumeTarget = null;
+          liveRecord.pausedBatchPage = null;
+          await schedulePixelExpiryBestEffort();
+        },
       });
-      const output = exact(rawOutput, ['model', 'checkpoint']);
+      const recoveredOutput = recovery ? exact(rawOutput, ['model', 'checkpoint', 'acceptedCount']) : null;
+      const output = recoveredOutput ?? exact(rawOutput, ['model', 'checkpoint']);
+      if (recoveredOutput) {
+        if (!Number.isSafeInteger(recoveredOutput.acceptedCount) || recoveredOutput.acceptedCount < 2 ||
+          recoveredOutput.acceptedCount > 20) throw new Error('BATCH_AUDIT_OUTCOME_DENIED');
+        liveRecord.plan = freeze({
+          kind: 'batch', queueId: active.auditId, acceptedCount: recoveredOutput.acceptedCount,
+        });
+      }
       if (!output || lastCheckpoint === null ||
         !same(canonicalIntermediateCheckpoint(active.auditId, output.checkpoint), lastCheckpoint)) {
         throw new Error('BATCH_AUDIT_OUTCOME_DENIED');
@@ -1632,7 +1810,8 @@ export function createAuthorizedAuditStarter(input) {
     const context = args && exact(args.senderContext, ['issuer', 'windowId', 'tabId', 'contextType', 'documentUrl']);
     const denied = code => freeze({ response: { ok: false, code }, sessionCapabilityId: null, completion: null });
     if (!hasBatchAudit || !args || !CAPABILITY.test(args.capabilityId ?? '') || !AUDIT_ID.test(args.auditId ?? '') ||
-      typeof args?.preparePlan !== 'function' || !capturePolicy || capturePolicy.mode !== 'no-pixels' ||
+      typeof args?.preparePlan !== 'function' || !capturePolicy ||
+      (capturePolicy.mode !== 'no-pixels' && !hasBatchResume) ||
       capturePolicy.includeQuery !== false || !preference || !context ||
       !Number.isSafeInteger(context.windowId) || context.windowId < 0 || context.tabId !== null ||
       context.contextType !== 'SIDE_PANEL') return denied('AUDIT_START_FAILED');
@@ -1698,6 +1877,7 @@ export function createAuthorizedAuditStarter(input) {
             auditId: args.auditId,
             sessionCapabilityId: claimed.sessionCapabilityId,
             windowId: context.windowId,
+            captureMode: capturePolicy.mode,
             createdAt: postGrant,
             expiresAt: correlation.expiresAt,
           }) !== true) throw new Error('AUDIT_START_FAILED');
@@ -1889,7 +2069,8 @@ export function createAuthorizedAuditStarter(input) {
             preferenceParser, 'RETENTION_PREFERENCE_DENIED');
           if (await scope.registerPendingBootstrap({
             auditId: args.auditId, sessionCapabilityId: claimed.sessionCapabilityId,
-            windowId: context.windowId, createdAt: postGrant, expiresAt: correlation.expiresAt,
+            windowId: context.windowId, captureMode: capturePolicy.mode,
+            createdAt: postGrant, expiresAt: correlation.expiresAt,
           }) !== true) throw new Error('AUDIT_START_FAILED');
           await persistExactLatest(latestState(args.auditId, 'running', modelNow));
           const controller = createAbortController();
@@ -2214,7 +2395,8 @@ export function createAuthorizedAuditStarter(input) {
             await writeConfirmed(sessionArea, retentionPreferenceStorageKey(args.auditId), storedPreference, preferenceParser, 'RETENTION_PREFERENCE_DENIED');
             const bootstrapRegistered = await scope.registerPendingBootstrap({
               auditId: args.auditId, sessionCapabilityId: claimed.sessionCapabilityId,
-              windowId: fact.windowId, createdAt: postGrant, expiresAt: grant.expiresAt,
+              windowId: fact.windowId, captureMode: capturePolicy.mode,
+              createdAt: postGrant, expiresAt: grant.expiresAt,
             });
             if (bootstrapRegistered !== true) throw new Error('AUDIT_START_FAILED');
             await persistExactLatest(latestState(args.auditId, 'running', modelNow));
@@ -2380,7 +2562,7 @@ export function createAuthorizedAuditStarter(input) {
             const signals = sensitiveSignals(await probeSensitiveCaptureSignals(target.tabId, target.documentId));
             if (!signals) return denied();
             try {
-              const resumeProof = active.mode === 'single'
+              const resumeProof = active.mode !== 'attached'
                 ? {
                     kind: 'owned-disposable', ownershipId: suspension.source.ownershipId,
                     ...proof, cleanupMode: suspension.source.cleanupMode, pageId: suspension.source.pageId,
@@ -2427,8 +2609,8 @@ export function createAuthorizedAuditStarter(input) {
             await pixelState.markSessionRunning({ auditId: active.auditId, consentId });
             const attemptHandle = await pixelAttemptLifecycle.prepareResume({
               auditId: active.auditId, consentId,
-              pageId: active.mode === 'single' ? 'page-1' : null,
-              ownershipId: active.mode === 'single' ? suspension.source.ownershipId : null,
+              pageId: active.mode === 'attached' ? null : suspension.source.pageId,
+              ownershipId: active.mode === 'attached' ? null : suspension.source.ownershipId,
               expiresAt: suspension.expiresAt,
             });
             if (!attemptHandle || typeof attemptHandle !== 'object' || Reflect.ownKeys(attemptHandle).length !== 0) {
@@ -2445,6 +2627,93 @@ export function createAuthorizedAuditStarter(input) {
             } catch { /* compensate the durable resume below */ }
             if (!runningPublished) {
               return revokeAndLiquidate('PIXEL_RESUME_INTERRUPTED', 'AUDIT_RESUME_DENIED');
+            }
+            if (active.mode === 'batch') {
+              const existing = live.get(active.auditId);
+              const batchResumeTarget = freeze({
+                ownershipId: suspension.source.ownershipId,
+                cleanupMode: suspension.source.cleanupMode,
+                pageId: suspension.source.pageId,
+              });
+              if (!hasBatchResume) {
+                return revokeAndLiquidate('PIXEL_RESUME_INTERRUPTED', 'AUDIT_RESUME_DENIED');
+              }
+              if (!existing) {
+                const controller = createAbortController();
+                if (!controller?.signal || typeof controller.abort !== 'function') {
+                  return revokeAndLiquidate('PIXEL_RESUME_INTERRUPTED', 'AUDIT_RESUME_DENIED');
+                }
+                const recoveredTarget = freeze({
+                  version: 'ObservedTargetV1',
+                  kind: 'owned-disposable',
+                  ownershipId: suspension.source.ownershipId,
+                  tabId: suspension.tabId,
+                  windowId: suspension.windowId,
+                  documentId: suspension.documentId,
+                  urlEvidence: suspension.urlEvidence,
+                  urlSessionDigest: suspension.urlSessionDigest,
+                  cleanupMode: suspension.source.cleanupMode,
+                  pageId: suspension.source.pageId,
+                });
+                const recovered = {
+                  active: running,
+                  controller,
+                  plan: null,
+                  capturePolicy,
+                  privacyGate: null,
+                  consentId,
+                  grant: null,
+                  observedTarget: null,
+                  externallyInvalidated: false,
+                  liquidationReason: null,
+                  committed: null,
+                  completion: null,
+                  attemptHandle,
+                  resumeTarget: batchResumeTarget,
+                  pausedBatchPage: freeze({
+                    childAuditId: null,
+                    pageId: suspension.source.pageId,
+                    ownershipId: suspension.source.ownershipId,
+                  }),
+                  batchRecovery: freeze({
+                    consentId,
+                    resumeTarget: recoveredTarget,
+                    resumeCheckpoint: checkpoint.checkpoint,
+                  }),
+                };
+                live.set(active.auditId, recovered);
+                recovered.completion = executeBatch(recovered);
+                return {
+                  response: { ok: true, auditId: active.auditId, state: 'running' },
+                  sessionCapabilityId: active.sessionCapabilityId,
+                  liveRecord: recovered,
+                  resumedBatch: true,
+                };
+              }
+              if (existing.active.auditId !== active.auditId || existing.active.state !== 'privacy-paused' ||
+                existing.completion === null) {
+                return revokeAndLiquidate('PIXEL_RESUME_INTERRUPTED', 'AUDIT_RESUME_DENIED');
+              }
+              existing.active = running;
+              existing.consentId = consentId;
+              existing.attemptHandle = attemptHandle;
+              existing.resumeTarget = batchResumeTarget;
+              let resumed = false;
+              try {
+                resumed = await resumeBatchAuditExecution({
+                  auditId: active.auditId,
+                  pageId: suspension.source.pageId,
+                  ownershipId: suspension.source.ownershipId,
+                  consentId,
+                }) === true;
+              } catch { resumed = false; }
+              if (!resumed) return revokeAndLiquidate('PIXEL_RESUME_INTERRUPTED', 'AUDIT_RESUME_DENIED');
+              return {
+                response: { ok: true, auditId: active.auditId, state: 'running' },
+                sessionCapabilityId: active.sessionCapabilityId,
+                liveRecord: existing,
+                resumedBatch: true,
+              };
             }
             const privacyGate = createPixelPrivacyGateV1({
               pixelState, consentId,
@@ -2486,6 +2755,7 @@ export function createAuthorizedAuditStarter(input) {
       resolveStarted(freeze({
         response: setup.response, sessionCapabilityId: setup.sessionCapabilityId, completion,
       }));
+      if (setup.resumedBatch === true) return setup.liveRecord.completion;
       return setup.liveRecord.active.mode === 'single'
         ? executeUrl(setup.liveRecord)
         : execute(setup.liveRecord);
@@ -2855,6 +3125,7 @@ export function createAuthorizedAuditStarter(input) {
       windowId: active.windowId, reasonCode: 'AUDIT_INTERRUPTED',
     }));
     if (disconnected !== true) throw new Error('AUDIT_RECOVERY_REQUIRED');
+    await discardTerminalBatchProgress(active);
     await cleanupActive(active, { removeRetention: true });
     return freeze({ ok: true, state: 'interrupted', auditId: active.auditId, revision: null });
   }
@@ -2897,6 +3168,9 @@ export function createAuthorizedAuditStarter(input) {
     if (!await pixelAttemptLifecycle.cleanup({
       auditId: active.auditId, consentId: null, expected: 'post-finish',
     })) throw new Error('AUDIT_RECOVERY_REQUIRED');
+    if (await clearBatchAuditProgress({ auditId: active.auditId }) !== true) {
+      throw new Error('AUDIT_RECOVERY_REQUIRED');
+    }
     await cleanupActive(active);
     return freeze({ ok: true, state: 'reconciled', auditId: active.auditId, revision: 1 });
   }
@@ -2940,6 +3214,9 @@ export function createAuthorizedAuditStarter(input) {
     const checkpoint = await readPersistedCheckpoint(active);
     const correlated = await readCorrelatedPixelSuspension(active);
     const suspension = correlated.suspension;
+    if (active.mode === 'batch' && correlated.sessionState === 'revoked' && suspension?.state === 'revoked') {
+      return recoverInterrupted(active);
+    }
     const expectedTargetState = active.mode === 'single' ? 'retained-for-consent' : 'claimed';
     if (correlated.sessionState !== 'privacy-paused' || correlated.targetState !== expectedTargetState ||
       journal !== null || !checkpoint || !suspension || suspension.state !== 'paused') {
@@ -3196,10 +3473,15 @@ export function createAuthorizedAuditStarter(input) {
           const singlePixelSuspension = active.mode === 'single'
             ? (await readCorrelatedPixelSuspension(active)).suspension
             : null;
+          const batchRunningPixelSuspension = active.mode === 'batch' && active.state === 'running'
+            ? await pixelState.readSuspension(active.auditId)
+            : null;
           const result = active.mode === 'batch'
             ? active.state === 'finalizing'
               ? await recoverBatchFinalizing(active)
-              : await recoverBatchInterrupted(active)
+              : active.state === 'privacy-paused'
+                ? await recoverPrivacyPaused(active)
+                : batchRunningPixelSuspension ? await recoverInterrupted(active) : await recoverBatchInterrupted(active)
             : active.mode === 'single'
             ? active.state === 'finalizing'
               ? singlePixelSuspension ? await recoverFinalizing(active, journal) : await recoverSingleFinalizing(active)

@@ -278,9 +278,9 @@ test('audits exactly two explicit URLs invisibly in one sanitized no-pixels batc
     form: true,
     textarea: true,
     selected: 'no-pixels',
-    disabled: true,
+    disabled: false,
     submit: true,
-    status: 'Informe uma URL por linha. O lote usa somente o modo sem imagens.',
+    status: 'Informe uma URL por linha e escolha como coletar as evidências.',
   });
 
   assert.equal(await extension.evaluate(panel, `(() => {

@@ -46,7 +46,7 @@ test('initial URL and functional bounded batch choices remain visible', async ()
   assert.match(view, /2 a 20 URLs HTTP\/HTTPS/u);
   assert.match(view, /não segue links/u);
   assert.match(view, /Avaliar páginas/u);
-  assert.match(view, /Somente sem imagens/u);
+  assert.match(view, /Você poderá confirmar antes de qualquer captura sensível/u);
   assert.doesNotMatch(view, /Não disponível nesta beta/u);
   assert.doesNotMatch(view, /type="url"|placeholder=.*https|prefill/iu);
 });

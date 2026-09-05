@@ -581,6 +581,37 @@ test('normalizes and starts a tokenized no-pixels batch without reflecting priva
   assert.equal(begin.capturePolicy.mode, 'no-pixels');
 });
 
+test('starts each batch evidence mode with its exact canonical policy and never downgrades it', async () => {
+  const observed = [];
+  for (const captureMode of ['full-evidence', 'element-only', 'no-pixels']) {
+    const { router, calls } = fixture();
+    const response = await router.dispatch({
+      envelope: parsed({
+        type: 'PANEL_START_BATCH_AUDIT', capabilityId: 'N'.repeat(22),
+        urls: 'https://one.example.test/private?token=alpha\nhttps://two.example.test/path?token=beta',
+        captureMode, includeQuery: false, deleteAfterCompleteExport: false, windowId: 9,
+      }),
+      sender: panelSender(),
+    });
+    assert.equal(response.ok, true, captureMode);
+    observed.push(calls.find(([name]) => name === 'begin-batch')[1].capturePolicy);
+  }
+  assert.deepEqual(observed, [
+    {
+      version: 'CapturePolicyV1', mode: 'full-evidence', includeQuery: false,
+      captureFullPage: true, captureElements: true, composeAnnouncementMap: false,
+    },
+    {
+      version: 'CapturePolicyV1', mode: 'element-only', includeQuery: false,
+      captureFullPage: false, captureElements: true, composeAnnouncementMap: false,
+    },
+    {
+      version: 'CapturePolicyV1', mode: 'no-pixels', includeQuery: false,
+      captureFullPage: false, captureElements: false, composeAnnouncementMap: false,
+    },
+  ]);
+});
+
 test('starts every URL capture mode with its exact canonical policy and clears the vault on denial', async () => {
   const { router, calls } = fixture();
   for (const [index, captureMode] of ['full-evidence', 'element-only', 'no-pixels'].entries()) {
@@ -714,6 +745,39 @@ test('resumes a correlated single-URL pause without receiving or forwarding priv
   });
   assert.deepEqual(Reflect.ownKeys(response), ['ok', 'auditId', 'state']);
   assert.doesNotMatch(JSON.stringify(response), /consent|owner_|hmac-sha256|digest/iu);
+});
+
+test('resumes a correlated batch pause through the same one-shot public confirmation envelope', async () => {
+  const { router, calls, dependencies } = fixture();
+  dependencies.authority.authorizeSession = async value => {
+    calls.push(['authorize', value]);
+    return {
+      ok: true,
+      session: {
+        auditId: value.auditId, sessionCapabilityId: value.sessionCapabilityId,
+        windowId: 9, mode: 'batch', state: 'privacy-paused',
+        targetBinding: {
+          kind: 'batch', activePageId: 'page-3', activeOwnershipId: `owner_${'O'.repeat(22)}`,
+        },
+      },
+      context: { windowId: 9 },
+    };
+  };
+
+  const response = await router.dispatch({
+    envelope: parsed({
+      type: 'PANEL_CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION,
+      auditId: 'audit-batch-paused', mode: 'full-evidence', accepted: true, windowId: 9,
+    }),
+    sender: panelSender(),
+  });
+
+  assert.deepEqual(response, { ok: true, auditId: 'audit-batch-paused', state: 'running' });
+  assert.deepEqual(calls.find(([name]) => name === 'resume')[1], {
+    auditId: 'audit-batch-paused', sessionCapabilityId: SESSION, windowId: 9,
+    mode: 'full-evidence',
+  });
+  assert.doesNotMatch(JSON.stringify(response), /consent|owner_|hmac-sha256|digest|documentId|tabId/iu);
 });
 
 test('denies message, session, or disposable-binding drift before the single-URL starter', async t => {

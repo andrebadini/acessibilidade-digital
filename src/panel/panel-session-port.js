@@ -12,11 +12,13 @@ const BOOTSTRAP_TIMEOUT_MS = 5000;
 const REQUEST_TIMEOUT_MS = 5000;
 export const PANEL_RECONNECT_EXHAUSTED_MESSAGE = 'Painel indisponível. Abra novamente pelo botão da extensão.';
 const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
+const CAPTURE_MODES = new Set(['full-evidence', 'element-only', 'no-pixels']);
 const PRIVACY_MODES = new Set(['full-evidence', 'element-only']);
 const PRIVACY_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private-marker']);
 const BOOTSTRAP_KEYS = Object.freeze([
   'protocol', 'version', 'type', 'state', 'auditId', 'sessionCapabilityId', 'result',
 ]);
+const RUNNING_BOOTSTRAP_KEYS = Object.freeze([...BOOTSTRAP_KEYS, 'captureMode']);
 const ATTACHED_PRIVACY_PAUSED_KEYS = Object.freeze([
   'protocol', 'version', 'type', 'auditId', 'sessionCapabilityId',
   'consentId', 'mode', 'categories', 'message',
@@ -24,6 +26,10 @@ const ATTACHED_PRIVACY_PAUSED_KEYS = Object.freeze([
 const OWNED_PRIVACY_PAUSED_KEYS = Object.freeze([
   'protocol', 'version', 'type', 'auditId', 'sessionCapabilityId',
   'mode', 'categories', 'message',
+]);
+const BATCH_PRIVACY_PAUSED_KEYS = Object.freeze([
+  'protocol', 'version', 'type', 'auditId', 'sessionCapabilityId',
+  'mode', 'categories', 'message', 'pageNumber',
 ]);
 const INTENT_RESULT_KEYS = Object.freeze(['protocol', 'version', 'type', 'requestId', 'response']);
 const HIGHLIGHT_STATE_KEYS = Object.freeze(['version', 'type', 'auditId', 'occurrenceId', 'state']);
@@ -88,13 +94,17 @@ function copyData(value, state = { nodes: 0 }, depth = 0) {
 }
 
 function parseBootstrap(value) {
-  const packet = exact(value, BOOTSTRAP_KEYS);
+  const runningPacket = exact(value, RUNNING_BOOTSTRAP_KEYS);
+  const packet = runningPacket ?? exact(value, BOOTSTRAP_KEYS);
   if (!packet || packet.protocol !== 'audita-panel' || packet.version !== 1 || packet.type !== 'bootstrap-result') return null;
+  if (runningPacket && packet.state !== 'running') return null;
   if (packet.state === 'initial') {
     return packet.auditId === null && packet.sessionCapabilityId === null && packet.result === null ? freeze(packet) : null;
   }
   if (!AUDIT_ID.test(packet.auditId ?? '') || !SESSION_ID.test(packet.sessionCapabilityId ?? '')) return null;
-  if (packet.state === 'running') return packet.result === null ? freeze(packet) : null;
+  if (packet.state === 'running') {
+    return packet.result === null && (!runningPacket || CAPTURE_MODES.has(packet.captureMode)) ? freeze(packet) : null;
+  }
   if (!['result', 'view-only'].includes(packet.state)) return null;
   try {
     const result = copyPanelResultBundleV1(packet.result);
@@ -124,18 +134,22 @@ function copyPrivacyCategories(value) {
 
 function parsePrivacyPaused(value) {
   const attachedPacket = exact(value, ATTACHED_PRIVACY_PAUSED_KEYS);
-  const ownedPacket = attachedPacket ? null : exact(value, OWNED_PRIVACY_PAUSED_KEYS);
-  const packet = attachedPacket ?? ownedPacket;
+  const batchPacket = attachedPacket ? null : exact(value, BATCH_PRIVACY_PAUSED_KEYS);
+  const ownedPacket = attachedPacket || batchPacket ? null : exact(value, OWNED_PRIVACY_PAUSED_KEYS);
+  const packet = attachedPacket ?? batchPacket ?? ownedPacket;
   if (!packet || packet.protocol !== 'audita-panel' || packet.version !== 1 ||
     packet.type !== 'privacy-paused' || !AUDIT_ID.test(packet.auditId ?? '') ||
     !SESSION_ID.test(packet.sessionCapabilityId ?? '') ||
     (attachedPacket !== null && !CONSENT_ID.test(packet.consentId ?? '')) ||
+    (batchPacket !== null && (!Number.isSafeInteger(packet.pageNumber) || packet.pageNumber < 1 || packet.pageNumber > 20)) ||
     !PRIVACY_MODES.has(packet.mode) || packet.message !== PRIVACY_MESSAGE) return null;
   const categories = copyPrivacyCategories(packet.categories);
   if (!categories) return null;
   const confirmation = attachedPacket
     ? { kind: 'attached', consentId: packet.consentId, mode: packet.mode }
-    : { kind: 'single', mode: packet.mode, categoryKey: categories.join('\u0000') };
+    : batchPacket
+      ? { kind: 'batch', mode: packet.mode, categoryKey: categories.join('\u0000'), pageNumber: packet.pageNumber }
+      : { kind: 'single', mode: packet.mode, categoryKey: categories.join('\u0000'), pageNumber: null };
   return { packet, categories, confirmation: freeze(confirmation) };
 }
 
@@ -284,7 +298,11 @@ export function createPanelSessionPortClient(raw) {
       sessionId = bootstrap.sessionCapabilityId;
       sessionState = bootstrap.state;
       notifyStatus('Painel conectado.');
-      notifyBootstrap(freeze({ state: bootstrap.state, auditId: bootstrap.auditId, result: bootstrap.result }));
+      const projection = { state: bootstrap.state, auditId: bootstrap.auditId, result: bootstrap.result };
+      if (bootstrap.state === 'running' && CAPTURE_MODES.has(bootstrap.captureMode)) {
+        projection.captureMode = bootstrap.captureMode;
+      }
+      notifyBootstrap(freeze(projection));
       return;
     }
     const privacyPaused = parsePrivacyPaused(rawPacket);
@@ -295,19 +313,22 @@ export function createPanelSessionPortClient(raw) {
         unavailable(port, true);
         return;
       }
-      if (privacyPaused.confirmation.kind === 'single') {
+      if (privacyPaused.confirmation.kind !== 'attached') {
         for (const inFlight of ownedConfirmationsInFlight) {
           if (inFlight.auditId === packet.auditId && inFlight.sessionCapabilityId === packet.sessionCapabilityId &&
             inFlight.mode === privacyPaused.confirmation.mode &&
-            inFlight.categoryKey === privacyPaused.confirmation.categoryKey) return;
+            inFlight.categoryKey === privacyPaused.confirmation.categoryKey &&
+            inFlight.pageNumber === privacyPaused.confirmation.pageNumber) return;
         }
       }
       pendingConsent = privacyPaused.confirmation;
       sessionState = 'privacy-paused';
-      notifyBootstrap(freeze({
+      const projected = {
         state: 'privacy-paused', auditId: packet.auditId, result: null,
         mode: packet.mode, categories: privacyPaused.categories, message: PRIVACY_MESSAGE,
-      }));
+      };
+      if (privacyPaused.confirmation.kind === 'batch') projected.pageNumber = privacyPaused.confirmation.pageNumber;
+      notifyBootstrap(freeze(projected));
       return;
     }
     const highlightState = parseHighlightState(rawPacket);
@@ -421,9 +442,10 @@ export function createPanelSessionPortClient(raw) {
             type: 'PANEL_CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: sessionId, auditId,
             mode: consent.mode, accepted: true,
           });
-      if (consent.kind === 'single') {
+      if (consent.kind !== 'attached') {
         ownedConfirmation = freeze({
-          auditId, sessionCapabilityId: sessionId, mode: consent.mode, categoryKey: consent.categoryKey,
+          auditId, sessionCapabilityId: sessionId, mode: consent.mode,
+          categoryKey: consent.categoryKey, pageNumber: consent.pageNumber,
         });
       }
     }

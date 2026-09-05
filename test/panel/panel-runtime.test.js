@@ -352,7 +352,7 @@ test('normalizes one transient URL and builds the exact start envelope for each 
   ]) assert.equal(createPanelUrlAuditIntent(invalid), null);
 });
 
-test('normalizes 2–20 explicit batch URLs and builds only the exact no-pixels envelope', () => {
+test('normalizes 2–20 explicit batch URLs and builds the exact envelope for every evidence mode', () => {
   const raw = [
     ' https://one.example/private?token=alpha ',
     'https://two.example',
@@ -387,13 +387,16 @@ test('normalizes 2–20 explicit batch URLs and builds only the exact no-pixels 
   assert.doesNotMatch(JSON.stringify(invalid), /user:pass|file:\/\/\/private/u);
 
   const urls = normalizePanelBatchEntry(raw).urls;
-  assert.deepEqual(createPanelBatchAuditIntent({ capabilityId: 'C'.repeat(22), urls }), {
-    type: 'PANEL_START_BATCH_AUDIT', capabilityId: 'C'.repeat(22), urls,
-    captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
-  });
+  for (const captureMode of ['full-evidence', 'element-only', 'no-pixels']) {
+    assert.deepEqual(createPanelBatchAuditIntent({ capabilityId: 'C'.repeat(22), urls, captureMode }), {
+      type: 'PANEL_START_BATCH_AUDIT', capabilityId: 'C'.repeat(22), urls,
+      captureMode, includeQuery: false, deleteAfterCompleteExport: false,
+    });
+  }
   for (const invalidIntent of [
     { capabilityId: 'short', urls },
-    { capabilityId: 'C'.repeat(22), urls, captureMode: 'full-evidence' },
+    { capabilityId: 'C'.repeat(22), urls },
+    { capabilityId: 'C'.repeat(22), urls, captureMode: 'pixels' },
     { capabilityId: 'C'.repeat(22), urls, extra: 'PRIVATE' },
   ]) assert.equal(createPanelBatchAuditIntent(invalidIntent), null);
 });
@@ -445,6 +448,7 @@ test('starts a batch through an authorized capability and announces safe total a
   await new Promise(resolve => setImmediate(resolve));
 
   await document.root.querySelector('button[data-intent="OPEN_BATCH_FORM"]').dispatch('click');
+  await document.root.querySelector('input[data-capture-mode="element-only"]').dispatch('change');
   let textarea = document.root.querySelector('textarea[id="audit-urls"]');
   const rejectedUrls = 'https://one.example/private?token=alpha\nfile:///private';
   textarea.value = rejectedUrls;
@@ -476,6 +480,7 @@ test('starts a batch through an authorized capability and announces safe total a
   });
   await new Promise(resolve => setImmediate(resolve));
   const start = port.posted.find(packet => packet?.envelope?.type === 'PANEL_START_BATCH_AUDIT');
+  assert.ok(start);
   assert.deepEqual(start.envelope, {
     type: 'PANEL_START_BATCH_AUDIT', capabilityId: 'C'.repeat(22),
     urls: [
@@ -483,7 +488,7 @@ test('starts a batch through an authorized capability and announces safe total a
       'https://two.example/private?token=beta',
       'https://one.example/private?token=alpha',
     ].join('\n'),
-    captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
+    captureMode: 'element-only', includeQuery: false, deleteAfterCompleteExport: false,
   });
   port.onMessage.emit({
     protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: start.requestId,
@@ -1018,12 +1023,34 @@ test('projects only the safe privacy bootstrap fields and rejects hostile transp
   assert.equal(Object.isFrozen(projectPanelBootstrapEvent(safe)), true);
   assert.equal(Object.isFrozen(projectPanelBootstrapEvent(safe).categories), true);
 
+  const batch = { ...safe, mode: 'element-only', pageNumber: 4 };
+  assert.deepEqual(projectPanelBootstrapEvent(batch), {
+    type: 'PRIVACY_PAUSED', auditId: 'audit-private', mode: 'element-only',
+    categories: ['password', 'payment'], message: PRIVACY_MESSAGE, pageNumber: 4,
+  });
+  assert.doesNotMatch(JSON.stringify(projectPanelBootstrapEvent(batch)), /https?:|consent|owner|digest|documentId|tabId/iu);
+
   for (const hostile of [
     { ...safe, consentId: 'PRIVATE' },
+    { ...batch, pageNumber: 0 },
+    { ...batch, pageNumber: 21 },
     Object.assign({ ...safe }, { [Symbol('private')]: true }),
     Object.defineProperty({ ...safe }, 'mode', { enumerable: true, get() { throw new Error('PRIVATE'); } }),
     new Proxy(safe, { ownKeys() { throw new Error('PRIVATE'); } }),
   ]) assert.equal(projectPanelBootstrapEvent(hostile), null);
+});
+
+test('projects an exact running bootstrap capture mode without transport correlation', () => {
+  for (const captureMode of ['full-evidence', 'element-only', 'no-pixels']) {
+    assert.deepEqual(projectPanelBootstrapEvent({
+      state: 'running', auditId: `audit-running-${captureMode}`, result: null, captureMode,
+    }), {
+      type: 'AUDIT_RUNNING', auditId: `audit-running-${captureMode}`, captureMode,
+    });
+  }
+  assert.equal(projectPanelBootstrapEvent({
+    state: 'running', auditId: 'audit-running-hostile', result: null, captureMode: 'pixels-plus',
+  }), null);
 });
 
 test('marks confirmation pending before one exact safe request and blocks a second click', async () => {

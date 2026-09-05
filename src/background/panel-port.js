@@ -15,6 +15,7 @@ const FACTORY_KEYS = Object.freeze([
 const BOOTSTRAP_KEYS = Object.freeze([
   'version', 'kind', 'auditId', 'sessionCapabilityId', 'windowId', 'createdAt', 'expiresAt', 'state',
 ]);
+const CAPTURE_BOOTSTRAP_KEYS = Object.freeze([...BOOTSTRAP_KEYS, 'captureMode']);
 const SESSION_KEYS = Object.freeze([
   'version', 'sessionCapabilityId', 'auditId', 'windowId', 'mode', 'targetBinding', 'state', 'issuedAt', 'expiresAt',
 ]);
@@ -33,10 +34,12 @@ const CAPTURE_POLICY_KEYS = Object.freeze([
 ]);
 const EVIDENCE_URL_KEYS = Object.freeze(['version', 'href', 'queryIncluded', 'redactedSegments']);
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
+const BATCH_PAGE_ID = /^page-([1-9]|1[0-9]|20)$/u;
 const OCCURRENCE_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const CAPABILITY = /^[A-Za-z0-9_-]{22}$/u;
 const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
 const CONSENT_ID = /^[A-Za-z0-9_-]{21}[AQgw]$/u;
+const CAPTURE_MODES = new Set(['full-evidence', 'element-only', 'no-pixels']);
 const PIXEL_MODES = new Set(['full-evidence', 'element-only']);
 const SENSITIVE_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private-marker']);
 const PRIVACY_PAUSE_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
@@ -126,10 +129,12 @@ function same(left, right) {
 }
 
 function parseBootstrap(value) {
-  const record = exact(value, BOOTSTRAP_KEYS, true);
+  const captureRecord = exact(value, CAPTURE_BOOTSTRAP_KEYS, true);
+  const record = captureRecord ?? exact(value, BOOTSTRAP_KEYS, true);
   return record && record.version === 1 && record.kind === 'audit-session' && AUDIT_ID.test(record.auditId ?? '') &&
     CAPABILITY.test(record.sessionCapabilityId ?? '') && safeChromeId(record.windowId) && safeEpoch(record.createdAt) &&
     safeEpoch(record.expiresAt) && record.expiresAt > record.createdAt && ['pending', 'consumed'].includes(record.state)
+    && (!captureRecord || CAPTURE_MODES.has(record.captureMode))
     ? freeze(record) : null;
 }
 
@@ -155,10 +160,11 @@ function parseSession(value) {
       .includes(disposableBinding.state) && record.state !== 'view-only' &&
     (record.state !== 'privacy-paused' || disposableBinding.state === 'retained-for-consent');
   const emptyBatch = batchBinding?.activePageId === null && batchBinding?.activeOwnershipId === null;
-  const activeBatch = AUDIT_ID.test(batchBinding?.activePageId ?? '') &&
+  const activeBatch = BATCH_PAGE_ID.test(batchBinding?.activePageId ?? '') &&
     /^owner_[A-Za-z0-9_-]{22}$/u.test(batchBinding?.activeOwnershipId ?? '');
   const validBatch = record.mode === 'batch' && batchBinding?.kind === 'batch' &&
-    (emptyBatch || activeBatch) && !['privacy-paused', 'view-only'].includes(record.state);
+    (emptyBatch || activeBatch) && record.state !== 'view-only' &&
+    (record.state !== 'privacy-paused' || activeBatch);
   if (!validViewOnly && !validAttached && !validDisposable && !validBatch) return null;
   return freeze(record);
 }
@@ -171,7 +177,7 @@ function parseActive(value) {
     !safeChromeId(record.windowId) || !['attached', 'single', 'batch'].includes(record.mode) || !safeEpoch(record.createdAt) ||
     !safeEpoch(record.updatedAt) || record.updatedAt < record.createdAt) return undefined;
   if (record.state === 'running' && record.commitState === 'none' && record.expectedTerminalRevision === null) return freeze(record);
-  if (record.state === 'privacy-paused' && record.mode !== 'batch' && record.commitState === 'none' && record.expectedTerminalRevision === null) return freeze(record);
+  if (record.state === 'privacy-paused' && record.commitState === 'none' && record.expectedTerminalRevision === null) return freeze(record);
   if (record.state === 'finalizing' && ['pending', 'confirmed'].includes(record.commitState) && record.expectedTerminalRevision === 1) return freeze(record);
   return undefined;
 }
@@ -210,7 +216,7 @@ function parseSuspension(value) {
   const ownedSource = record && exact(record.source, ['kind', 'ownershipId', 'cleanupMode', 'pageId'], true);
   const source = attachedSource?.kind === 'attached' ? attachedSource
     : ownedSource?.kind === 'owned-disposable' && /^owner_[A-Za-z0-9_-]{22}$/u.test(ownedSource.ownershipId ?? '') &&
-      ['always', 'pre-observation-failure'].includes(ownedSource.cleanupMode) && ownedSource.pageId === 'page-1'
+      ['always', 'pre-observation-failure'].includes(ownedSource.cleanupMode) && BATCH_PAGE_ID.test(ownedSource.pageId ?? '')
       ? ownedSource : null;
   if (!record || record.version !== 'AuditSuspensionV1' || !Number.isSafeInteger(record.revision) ||
     record.revision < 1 || !AUDIT_ID.test(record.auditId ?? '') || !CONSENT_ID.test(record.consentId ?? '') ||
@@ -310,14 +316,16 @@ function authorizedHighlightPublication(value, binding, actionAt) {
     issuer.documentId === binding.issuerDocumentId && issuer.path === '/src/panel/index.html');
 }
 
-function packet(state, auditId, sessionCapabilityId, result) {
-  return freeze({
+function packet(state, auditId, sessionCapabilityId, result, captureMode = null) {
+  const output = {
     protocol: 'audita-panel', version: 1, type: 'bootstrap-result',
     state, auditId, sessionCapabilityId, result,
-  });
+  };
+  if (state === 'running' && CAPTURE_MODES.has(captureMode)) output.captureMode = captureMode;
+  return freeze(output);
 }
 
-function privacyPausedPacket(suspension, sessionCapabilityId) {
+function privacyPausedPacket(suspension, sessionCapabilityId, session) {
   const packet = {
     protocol: 'audita-panel', version: 1, type: 'privacy-paused',
     auditId: suspension.auditId,
@@ -327,6 +335,7 @@ function privacyPausedPacket(suspension, sessionCapabilityId) {
     message: PRIVACY_PAUSE_MESSAGE,
   };
   if (suspension.source.kind === 'attached') packet.consentId = suspension.consentId;
+  if (session.mode === 'batch') packet.pageNumber = Number(suspension.source.pageId.slice('page-'.length));
   return freeze(packet);
 }
 
@@ -678,6 +687,7 @@ export function createPanelPortCoordinator(raw) {
   function privacyPauseCorrelation(bootstrap, session, active, suspension, currentTime) {
     const attachedTarget = exact(session.targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest'], true);
     const disposableTarget = exact(session.targetBinding, ['kind', 'ownershipId', 'state'], true);
+    const batchTarget = exact(session.targetBinding, ['kind', 'activePageId', 'activeOwnershipId'], true);
     const attached = session.mode === 'attached' && attachedTarget?.kind === 'attached' &&
       suspension.source.kind === 'attached' && suspension.tabId === attachedTarget.tabId &&
       suspension.documentId === attachedTarget.documentId &&
@@ -687,8 +697,15 @@ export function createPanelPortCoordinator(raw) {
       suspension.source.ownershipId === disposableTarget.ownershipId &&
       ['always', 'pre-observation-failure'].includes(suspension.source.cleanupMode) &&
       suspension.source.pageId === 'page-1';
+    const batch = session.mode === 'batch' && batchTarget?.kind === 'batch' &&
+      BATCH_PAGE_ID.test(batchTarget.activePageId ?? '') &&
+      /^owner_[A-Za-z0-9_-]{22}$/u.test(batchTarget.activeOwnershipId ?? '') &&
+      suspension.source.kind === 'owned-disposable' &&
+      suspension.source.pageId === batchTarget.activePageId &&
+      suspension.source.ownershipId === batchTarget.activeOwnershipId &&
+      suspension.source.cleanupMode === 'always';
     return session.state === 'privacy-paused' && active?.mode === session.mode &&
-      session.windowId === bootstrap.windowId && (attached || single) &&
+      session.windowId === bootstrap.windowId && (attached || single || batch) &&
       active?.state === 'privacy-paused' && active.auditId === bootstrap.auditId &&
       active.sessionCapabilityId === bootstrap.sessionCapabilityId && active.windowId === bootstrap.windowId &&
       suspension.auditId === bootstrap.auditId && suspension.windowId === bootstrap.windowId &&
@@ -738,9 +755,13 @@ export function createPanelPortCoordinator(raw) {
     reassert(assertOwned);
     if (!context) throw new Error('PANEL_CONTEXT_DENIED');
     if (establishClientCorrelation) {
-      send(binding, packet('running', bootstrap.auditId, bootstrap.sessionCapabilityId, null), assertOwned);
+      send(binding, packet(
+        'running', bootstrap.auditId, bootstrap.sessionCapabilityId, null, bootstrap.captureMode,
+      ), assertOwned);
     }
-    send(binding, privacyPausedPacket(correlation.suspension, bootstrap.sessionCapabilityId), assertOwned);
+    send(binding, privacyPausedPacket(
+      correlation.suspension, bootstrap.sessionCapabilityId, correlation.session,
+    ), assertOwned);
     bind(binding, bootstrap.windowId, 'bound-privacy-paused', bootstrap.auditId, bootstrap.sessionCapabilityId, assertOwned);
     return true;
   }
@@ -768,7 +789,9 @@ export function createPanelPortCoordinator(raw) {
     const context = await reprove(binding, assertOwned);
     reassert(assertOwned);
     if (!context) throw new Error('PANEL_CONTEXT_DENIED');
-    send(binding, packet('running', current.auditId, current.sessionCapabilityId, null), assertOwned);
+    send(binding, packet(
+      'running', current.auditId, current.sessionCapabilityId, null, current.captureMode,
+    ), assertOwned);
     bind(binding, current.windowId, 'bound-session', current.auditId, current.sessionCapabilityId, assertOwned);
     return true;
   }
@@ -1018,8 +1041,10 @@ export function createPanelPortCoordinator(raw) {
   }
 
   function registerPendingBootstrap(rawArgs, assertOwned) {
-    const args = exact(rawArgs, ['auditId', 'sessionCapabilityId', 'windowId', 'createdAt', 'expiresAt']);
-    if (!args) return Promise.resolve(false);
+    const args = exact(rawArgs, [
+      'auditId', 'sessionCapabilityId', 'windowId', 'createdAt', 'expiresAt', 'captureMode',
+    ]);
+    if (!args || !CAPTURE_MODES.has(args.captureMode)) return Promise.resolve(false);
     return (async () => {
       try {
         assertOwned();
@@ -1037,6 +1062,7 @@ export function createPanelPortCoordinator(raw) {
         const replacement = await replaceBootstrap(existing, {
           version: 1, kind: 'audit-session', auditId: args.auditId, sessionCapabilityId: args.sessionCapabilityId,
           windowId: args.windowId, createdAt: args.createdAt, expiresAt: args.expiresAt, state: 'pending',
+          captureMode: args.captureMode,
         }, assertOwned);
         assertOwned();
         return replacement.state === 'committed';
@@ -1142,7 +1168,9 @@ export function createPanelPortCoordinator(raw) {
         const context = await reprove(binding, assertOwned);
         assertOwned();
         if (!context) return false;
-        send(binding, packet('running', args.auditId, args.sessionCapabilityId, null), assertOwned);
+        send(binding, packet(
+          'running', args.auditId, args.sessionCapabilityId, null, current.captureMode,
+        ), assertOwned);
         bind(binding, args.windowId, 'bound-session', args.auditId, args.sessionCapabilityId, assertOwned);
         return true;
       } catch (error) {

@@ -125,7 +125,7 @@ function validWorkerEnvelope(value) {
   }
   if (value.type === 'PANEL_START_BATCH_AUDIT') {
     return validOpaqueId(value.capabilityId) && boundedCanonicalText(value.urls, 41_000, false) &&
-      value.captureMode === 'no-pixels' && value.includeQuery === false &&
+      CAPTURE_MODES.has(value.captureMode) && value.includeQuery === false &&
       value.deleteAfterCompleteExport === false && safeChromeId(value.windowId);
   }
   if (value.type === 'CONFIRM_PIXEL_CAPTURE') {

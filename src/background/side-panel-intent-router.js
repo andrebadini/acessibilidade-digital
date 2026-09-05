@@ -569,7 +569,8 @@ export function createSidePanelIntentRouter(raw) {
   }
 
   async function startBatch(envelope, sender) {
-    if (!hasBatchAudit || envelope.captureMode !== 'no-pixels' || envelope.includeQuery !== false ||
+    if (!hasBatchAudit || !['full-evidence', 'element-only', 'no-pixels'].includes(envelope.captureMode) ||
+      envelope.includeQuery !== false ||
       envelope.deleteAfterCompleteExport !== false) return fail('AUDIT_START_FAILED');
     let context;
     try { context = await proveSurface(sender, PANEL_SURFACE, envelope.windowId); }
@@ -586,7 +587,7 @@ export function createSidePanelIntentRouter(raw) {
         capabilityId: envelope.capabilityId,
         auditId,
         senderContext: context,
-        capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+        capturePolicy: createCapturePolicyV1({ mode: envelope.captureMode, includeQuery: false }),
         retentionPreference: Object.freeze({ version: 1, deleteAfterCompleteExport: false }),
         async preparePlan() {
           const queueEntries = [];
@@ -640,6 +641,7 @@ export function createSidePanelIntentRouter(raw) {
       const targetBinding = own(session, 'targetBinding');
       const attachedBinding = exact(targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest']);
       const disposableBinding = exact(targetBinding, ['kind', 'ownershipId', 'state']);
+      const batchBinding = exact(targetBinding, ['kind', 'activePageId', 'activeOwnershipId']);
       const attachedConfirmation = envelope.type === 'CONFIRM_PIXEL_CAPTURE' &&
         own(session, 'mode') === 'attached' && attachedBinding?.kind === 'attached' &&
         safeChromeId(attachedBinding.tabId) && typeof attachedBinding.documentId === 'string' &&
@@ -650,13 +652,17 @@ export function createSidePanelIntentRouter(raw) {
         own(session, 'mode') === 'single' && disposableBinding?.kind === 'disposable' &&
         /^owner_[A-Za-z0-9_-]{22}$/u.test(disposableBinding.ownershipId ?? '') &&
         disposableBinding.state === 'retained-for-consent';
+      const batchConfirmation = envelope.type === 'PANEL_CONFIRM_PIXEL_CAPTURE' &&
+        own(session, 'mode') === 'batch' && batchBinding?.kind === 'batch' &&
+        /^page-([1-9]|1[0-9]|20)$/u.test(batchBinding.activePageId ?? '') &&
+        /^owner_[A-Za-z0-9_-]{22}$/u.test(batchBinding.activeOwnershipId ?? '');
       if (authorized?.ok !== true || own(session, 'auditId') !== envelope.auditId ||
         own(session, 'sessionCapabilityId') !== envelope.sessionCapabilityId ||
         own(session, 'windowId') !== envelope.windowId || own(context, 'windowId') !== envelope.windowId ||
         own(session, 'state') !== 'privacy-paused' ||
-        (!attachedConfirmation && !disposableConfirmation)) return fail('PIXEL_CONFIRM_DENIED');
+        (!attachedConfirmation && !disposableConfirmation && !batchConfirmation)) return fail('PIXEL_CONFIRM_DENIED');
 
-      const resumeRequest = disposableConfirmation ? {
+      const resumeRequest = disposableConfirmation || batchConfirmation ? {
         auditId: envelope.auditId,
         sessionCapabilityId: envelope.sessionCapabilityId,
         windowId: envelope.windowId,

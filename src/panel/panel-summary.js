@@ -240,41 +240,41 @@ function buildGroups(model, checkpoint, verifiedInventory) {
 function projectInteractiveGroups(groups, model) {
   const occurrenceById = new Map(model.occurrences.map(occurrence => [occurrence.occurrenceId, occurrence]));
   const projected = { failed: [], alerts: [], humanReview: [], passed: [] };
-  let cardCount = 0;
+  const selected = [];
   let occurrenceCount = 0;
   let limited = false;
 
   for (const groupName of GROUP_NAMES) {
     for (const card of groups[groupName]) {
-      if (cardCount >= MAX_INTERACTIVE_PANEL_CARDS) {
+      if (selected.length >= MAX_INTERACTIVE_PANEL_CARDS ||
+        (card.occurrenceIds.length > 0 && occurrenceCount >= MAX_INTERACTIVE_PANEL_OCCURRENCES)) {
         limited = true;
         continue;
       }
-      if (card.occurrenceIds.length === 0) {
-        projected[groupName].push(card);
-        cardCount += 1;
-        continue;
-      }
-      const remaining = MAX_INTERACTIVE_PANEL_OCCURRENCES - occurrenceCount;
-      if (remaining <= 0) {
-        limited = true;
-        continue;
-      }
-      const occurrenceIds = card.occurrenceIds.slice(0, remaining);
-      if (occurrenceIds.length < card.occurrenceIds.length) limited = true;
-      const evidenceIds = uniqueSorted(occurrenceIds.flatMap(occurrenceId => {
-        const occurrence = occurrenceById.get(occurrenceId);
-        if (!occurrence) checkpointDenied();
-        return occurrence.evidenceRefs;
-      }));
-      projected[groupName].push({
-        ...card,
-        occurrenceIds,
-        evidence: { ...card.evidence, evidenceIds },
-      });
-      cardCount += 1;
-      occurrenceCount += occurrenceIds.length;
+      selected.push({ groupName, card });
+      if (card.occurrenceIds.length > 0) occurrenceCount += 1;
     }
+  }
+  // Preserve distinct questions before allocating additional targets to any one card.
+  for (const { groupName, card } of selected) {
+    if (card.occurrenceIds.length === 0) {
+      projected[groupName].push(card);
+      continue;
+    }
+    const additional = Math.min(card.occurrenceIds.length - 1, MAX_INTERACTIVE_PANEL_OCCURRENCES - occurrenceCount);
+    const occurrenceIds = card.occurrenceIds.slice(0, 1 + additional);
+    occurrenceCount += additional;
+    if (occurrenceIds.length < card.occurrenceIds.length) limited = true;
+    const evidenceIds = uniqueSorted(occurrenceIds.flatMap(occurrenceId => {
+      const occurrence = occurrenceById.get(occurrenceId);
+      if (!occurrence) checkpointDenied();
+      return occurrence.evidenceRefs;
+    }));
+    projected[groupName].push({
+      ...card,
+      occurrenceIds,
+      evidence: { ...card.evidence, evidenceIds },
+    });
   }
   return { groups: projected, limited };
 }

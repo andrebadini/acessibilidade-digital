@@ -90,16 +90,18 @@ test('creates an immutable initial screen with only stable interaction state', (
   assert.equal(Object.hasOwn(state, 'sessionCapabilityId'), false);
 });
 
-test('batch entry stores only safe line diagnostics and starts only in no-pixels mode', () => {
+test('batch entry defaults to no-pixels, admits every explicit mode, and stores only safe diagnostics', () => {
   const initial = createInitialPanelState();
   const opened = reducePanelState(initial, { type: 'BATCH_FORM_OPENED' });
   assert.equal(opened.entryMode, 'batch');
   assert.equal(opened.captureMode, 'no-pixels');
   assert.equal(opened.focusId, 'audit-urls');
 
-  assert.strictEqual(reducePanelState(opened, {
+  const pixelBatch = reducePanelState(opened, {
     type: 'CAPTURE_MODE_SELECTED', mode: 'full-evidence', focusId: 'capture-mode-full-evidence',
-  }), opened, 'batch mode is fixed to no-pixels even for synthetic events');
+  });
+  assert.equal(pixelBatch.captureMode, 'full-evidence');
+  assert.equal(pixelBatch.focusId, 'capture-mode-full-evidence');
 
   const rejected = reducePanelState(opened, {
     type: 'BATCH_ENTRY_REJECTED', code: 'invalid-lines', lines: [
@@ -123,6 +125,18 @@ test('batch entry stores only safe line diagnostics and starts only in no-pixels
   assert.strictEqual(reducePanelState(opened, {
     type: 'START_REQUESTED', source: 'batch', urls: 'https://secret.example/?token=raw',
   }), opened);
+
+  for (const mode of ['full-evidence', 'element-only', 'no-pixels']) {
+    const selected = reducePanelState(opened, {
+      type: 'CAPTURE_MODE_SELECTED', mode, focusId: `capture-mode-${mode}`,
+    });
+    const modeRequested = reducePanelState(selected, { type: 'START_REQUESTED', source: 'batch' });
+    assert.equal(modeRequested.screen, 'running', mode);
+    assert.equal(modeRequested.auditSource, 'batch', mode);
+    assert.equal(modeRequested.captureMode, mode);
+    const modePrepared = reducePanelState(modeRequested, { type: 'BATCH_PREPARED', total: 2 });
+    assert.deepEqual(modePrepared.batch, { total: 2, pageNumber: 0, warnings: [], errors: [] }, mode);
+  }
 
   const warning = {
     line: 3, code: 'DUPLICATE_URL', firstLine: 1,
@@ -177,12 +191,87 @@ test('batch entry stores only safe line diagnostics and starts only in no-pixels
     pageNumber: 1, total: 2, at: '2026-09-01T12:00:00.000Z',
   });
   assert.equal(inferredBatch.auditSource, 'batch');
-  assert.equal(inferredBatch.captureMode, 'no-pixels');
+  assert.equal(inferredBatch.captureMode, 'full-evidence');
   assert.deepEqual(inferredBatch.batch, { total: 2, pageNumber: 1, warnings: [], errors: [] });
 
   const closed = reducePanelState(opened, { type: 'BATCH_FORM_CLOSED' });
   assert.equal(closed.entryMode, 'sources');
   assert.deepEqual(closed.batch, { total: null, pageNumber: null, warnings: [], errors: [] });
+});
+
+test('batch privacy pause preserves the safe total and projects only its page number and public signals', () => {
+  let state = reducePanelState(createInitialPanelState(), { type: 'BATCH_FORM_OPENED' });
+  state = reducePanelState(state, {
+    type: 'CAPTURE_MODE_SELECTED', mode: 'element-only', focusId: 'capture-mode-element-only',
+  });
+  state = reducePanelState(state, { type: 'START_REQUESTED', source: 'batch' });
+  state = reducePanelState(state, { type: 'BATCH_PREPARED', total: 4 });
+  state = reducePanelState(state, { type: 'AUDIT_RUNNING', auditId: 'audit-batch-private' });
+
+  const paused = reducePanelState(state, {
+    type: 'PRIVACY_PAUSED', auditId: 'audit-batch-private', mode: 'element-only',
+    categories: ['password', 'payment'],
+    message: 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.',
+    pageNumber: 3,
+  });
+  assert.equal(paused.sessionStatus, 'privacy-paused');
+  assert.equal(paused.auditSource, 'batch');
+  assert.equal(paused.captureMode, 'element-only');
+  assert.deepEqual(paused.batch, { total: 4, pageNumber: 3, warnings: [], errors: [] });
+  assert.doesNotMatch(JSON.stringify(paused), /https?:|consent|owner|digest|documentId|tabId/iu);
+
+  const rehydrated = reducePanelState(reducePanelState(createInitialPanelState(), {
+    type: 'AUDIT_RUNNING', auditId: 'audit-batch-rehydrated-private',
+  }), {
+    type: 'PRIVACY_PAUSED', auditId: 'audit-batch-rehydrated-private', mode: 'full-evidence',
+    categories: ['private-marker'],
+    message: 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.',
+    pageNumber: 2,
+  });
+  assert.equal(rehydrated.auditSource, 'batch');
+  assert.deepEqual(rehydrated.batch, { total: null, pageNumber: 2, warnings: [], errors: [] });
+});
+
+test('rehydrated batch progress preserves the authoritative capture mode for every evidence policy', () => {
+  for (const mode of ['full-evidence', 'element-only', 'no-pixels']) {
+    let state = reducePanelState(createInitialPanelState(), {
+      type: 'AUDIT_RUNNING', auditId: `audit-rehydrated-${mode}`, captureMode: mode,
+    });
+    assert.equal(state.captureMode, mode);
+    state = reducePanelState(state, {
+      type: 'AUDIT_PROGRESS', auditId: `audit-rehydrated-${mode}`, sessionId: `audit-rehydrated-${mode}`,
+      phase: 'batch-page', message: 'Página 1 de 3: auditoria em andamento.', percent: 10,
+      pageNumber: 1, total: 3, at: '2026-09-01T12:00:00.000Z',
+    });
+    assert.equal(state.auditSource, 'batch');
+    assert.equal(state.captureMode, mode, `batch progress must not invent another mode for ${mode}`);
+  }
+});
+
+test('a second-page privacy pause remains actionable after first-page progress', () => {
+  let state = reducePanelState(createInitialPanelState(), {
+    type: 'AUDIT_RUNNING', auditId: 'audit-two-pauses', captureMode: 'full-evidence',
+  });
+  state = reducePanelState(state, {
+    type: 'AUDIT_PROGRESS', auditId: 'audit-two-pauses', sessionId: 'audit-two-pauses',
+    phase: 'batch-page', message: 'Página 1 de 2: processamento encerrado.', percent: 50,
+    pageNumber: 1, total: 2, at: '2026-09-04T12:00:00.000Z',
+  });
+  const pause = pageNumber => ({
+    type: 'PRIVACY_PAUSED', auditId: 'audit-two-pauses', mode: 'full-evidence',
+    categories: ['password'], pageNumber,
+    message: 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.',
+  });
+  const samePage = reducePanelState(state, pause(1));
+  assert.equal(samePage.progress.percent, 50, 'same-page pause retains its correlated progress');
+  const second = reducePanelState(state, pause(2));
+  assert.equal(second.batch.total, 2);
+  assert.equal(second.batch.pageNumber, 2);
+  const confirmed = reducePanelState(second, { type: 'PRIVACY_CONFIRM_REQUESTED' });
+  assert.equal(confirmed.privacy.confirmationPending, true,
+    'a new page must not inherit a progress message which invalidates subsequent actions');
+  assert.equal(second.progress.phase, null);
+  assert.strictEqual(reducePanelState(confirmed, { type: 'PRIVACY_CONFIRM_REQUESTED' }), confirmed);
 });
 
 test('single-URL entry state never stores private correlation and starts each explicit capture mode', () => {

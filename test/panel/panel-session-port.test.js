@@ -67,11 +67,13 @@ function createClient(env, overrides = {}) {
   });
 }
 
-function bootstrap(port, state = 'initial', auditId = null, sessionCapabilityId = null, result = null) {
-  port.onMessage.emit({
+function bootstrap(port, state = 'initial', auditId = null, sessionCapabilityId = null, result = null, captureMode) {
+  const packet = {
     protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state,
     auditId, sessionCapabilityId, result,
-  });
+  };
+  if (captureMode !== undefined) packet.captureMode = captureMode;
+  port.onMessage.emit(packet);
 }
 
 async function resultBundle(auditId) {
@@ -117,6 +119,16 @@ function ownedPrivacyPaused(port, overrides = {}) {
     protocol: 'audita-panel', version: 1, type: 'privacy-paused',
     auditId: 'audit-private', sessionCapabilityId: SESSION_ID,
     mode: 'full-evidence', categories: ['password', 'payment'], message: PRIVACY_MESSAGE,
+    ...overrides,
+  });
+}
+
+function batchPrivacyPaused(port, overrides = {}) {
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'privacy-paused',
+    auditId: 'audit-private', sessionCapabilityId: SESSION_ID,
+    mode: 'element-only', categories: ['otp', 'private-marker'], message: PRIVACY_MESSAGE,
+    pageNumber: 3,
     ...overrides,
   });
 }
@@ -384,6 +396,45 @@ test('accepts an owned pause without consent and posts one exact public confirma
   assert.deepEqual(await pending, { ok: true, state: 'running' });
 });
 
+test('projects a batch pause with only its safe page number and consumes one public confirmation', async () => {
+  const env = fixture();
+  const bootstraps = [];
+  const client = createClient(env, { onBootstrapResult: value => bootstraps.push(value) });
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'running', 'audit-private', SESSION_ID);
+  batchPrivacyPaused(port);
+
+  assert.deepEqual(bootstraps.at(-1), {
+    state: 'privacy-paused', auditId: 'audit-private', result: null,
+    mode: 'element-only', categories: ['otp', 'private-marker'], message: PRIVACY_MESSAGE,
+    pageNumber: 3,
+  });
+  assert.doesNotMatch(JSON.stringify(bootstraps), /https?:|consent|owner|digest|documentId|tabId/iu);
+
+  const pending = client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'element-only', accepted: true,
+  });
+  assert.deepEqual(port.messages.at(-1), {
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: 'port-request-1',
+    envelope: {
+      type: 'PANEL_CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION_ID,
+      auditId: 'audit-private', mode: 'element-only', accepted: true,
+    },
+  });
+  const posted = port.messages.length;
+  assert.deepEqual(await client.requestIntent({
+    type: 'CONFIRM_PIXEL_CAPTURE', mode: 'element-only', accepted: true,
+  }), { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  assert.equal(port.messages.length, posted);
+
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: 'port-request-1', response: { ok: true, state: 'running' },
+  });
+  assert.deepEqual(await pending, { ok: true, state: 'running' });
+});
+
 test('does not rearm an owned confirmation when the same pause is retransmitted while it is in flight', async () => {
   const env = fixture();
   const bootstraps = [];
@@ -602,6 +653,28 @@ test('rotates A to B and reconnects only after the server rehydrates B', async (
     requestId: 'port-request-2', response: { ok: true, state: 'running' },
   });
   assert.equal((await rehydrated).ok, true);
+});
+
+test('reload and reconnect project the exact authoritative capture mode for every running audit policy', () => {
+  for (const mode of ['full-evidence', 'element-only', 'no-pixels']) {
+    const env = fixture();
+    const observed = [];
+    const client = createClient(env, { onBootstrapResult: value => observed.push(value) });
+    client.start();
+    const first = env.ports[0];
+    bootstrap(first, 'running', `audit-${mode}`, SESSION_ID, null, mode);
+    assert.deepEqual(observed.at(-1), {
+      state: 'running', auditId: `audit-${mode}`, result: null, captureMode: mode,
+    });
+
+    first.onDisconnect.emit();
+    env.timers.at(-1).callback();
+    const second = env.ports[1];
+    bootstrap(second, 'running', `audit-${mode}`, SESSION_ID, null, mode);
+    assert.deepEqual(observed.at(-1), {
+      state: 'running', auditId: `audit-${mode}`, result: null, captureMode: mode,
+    });
+  }
 });
 
 test('clears private consent on every ordinary bootstrap, session swap, disconnect and stop', async t => {

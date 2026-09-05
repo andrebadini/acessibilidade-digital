@@ -262,35 +262,153 @@ test('batch page resolves only its scoped vault token in no-pixels mode and alwa
   }]]);
 });
 
-test('batch page refuses pixel modes before releasing its private URL', async t => {
-  for (const mode of ['full-evidence', 'element-only']) await t.test(mode, async () => {
-    const auditId = `audit-batch-page-${mode}`;
-    const ownershipId = `owner_${(mode === 'full-evidence' ? 'F' : 'E').repeat(22)}`;
-    const policy = createCapturePolicyV1({ mode, includeQuery: false });
-    let effects = 0;
-    await assert.rejects(() => runUrlAudit({
-      auditId,
-      ownershipId,
-      navigationToken: 'B'.repeat(22),
-      windowId: 9,
-      navigationPurpose: 'batch-page',
-      evidenceUrl: TEST_EVIDENCE_URL,
-      sessionDigest: TEST_DIGEST,
-      rawNavigationVault: Object.freeze({
-        async take() { effects += 1; return 'https://example.test/final?private=REMOVE'; },
-      }),
-      chromeAdapter: Object.freeze({ marker: 'adapter' }),
-      capturePolicy: policy,
-      privacyGate: ownedPixelGate(policy, [], { auditId, ownershipId, cleanupMode: 'always' }),
-      checkpointStore: Object.freeze({ async writeSanitized() { effects += 1; } }),
-      onProgress() {},
-      now: () => '2026-09-01T12:00:00.000Z',
-      signal: undefined,
-      expectedExtensionId: TEST_EXTENSION_ID,
-      async auditRunner() { effects += 1; },
-    }), /URL_AUDIT_DENIED/u);
-    assert.equal(effects, 0);
+test('batch page sensitive preflight retains its inactive owner for consent with zero raster', async () => {
+  const auditId = 'audit-batch-page-sensitive';
+  const ownershipId = `owner_${'B'.repeat(22)}`;
+  const checkpoints = [];
+  const adapter = fakeAdapter({
+    canonicalInternals: true, sessionValues: {}, trackCaptureCalls: true,
+    sensitiveSignals: PASSWORD_SIGNALS,
   });
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+
+  const result = await runUrlAudit({
+    auditId, ownershipId, windowId: 9,
+    navigationToken: 'B'.repeat(22), navigationPurpose: 'batch-page',
+    evidenceUrl: TEST_EVIDENCE_URL, sessionDigest: TEST_DIGEST,
+    rawNavigationVault: Object.freeze({ async take() { return 'https://example.test/final?private=REMOVE'; } }),
+    chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: ownedPixelGate(policy, [], { auditId, ownershipId, cleanupMode: 'always' }),
+    checkpointStore: Object.freeze({
+      async writeSanitized(_auditId, checkpoint) { checkpoints.push(checkpoint); },
+    }),
+    onProgress() {}, now: () => '2026-09-01T12:00:00.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  });
+
+  assert.equal(result.status, 'privacy-paused');
+  assert.equal(result.ownershipState, 'retained-for-consent');
+  assert.equal(adapter.counts.screenshots, 0);
+  assert.equal(checkpoints.length > 0, true);
+});
+
+test('batch page consent resumes the same owner without creating navigating or consuming its URL token again', async () => {
+  const auditId = 'audit-batch-page-resume';
+  const ownershipId = `owner_${'Q'.repeat(22)}`;
+  const checkpoints = [];
+  const tokenCalls = [];
+  const policy = createCapturePolicyV1({ mode: 'element-only', includeQuery: false });
+  const adapter = fakeAdapter({
+    canonicalInternals: true, sessionValues: {}, trackCaptureCalls: true,
+    sensitiveSignals: PASSWORD_SIGNALS,
+  });
+  const paused = await runUrlAudit({
+    auditId, ownershipId, windowId: 9,
+    navigationToken: 'Q'.repeat(22), navigationPurpose: 'batch-page',
+    evidenceUrl: TEST_EVIDENCE_URL, sessionDigest: TEST_DIGEST,
+    rawNavigationVault: Object.freeze({
+      async take(token) { tokenCalls.push(token); return 'https://example.test/final?private=REMOVE'; },
+    }),
+    chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: ownedPixelGate(policy, [], { auditId, ownershipId, cleanupMode: 'always' }),
+    checkpointStore: Object.freeze({
+      async writeSanitized(_auditId, checkpoint) { checkpoints.push(checkpoint); },
+    }),
+    onProgress() {}, now: () => '2026-09-01T12:00:00.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  });
+  assert.equal(paused.status, 'privacy-paused');
+  assert.equal(paused.ownershipState, 'retained-for-consent');
+
+  const forbidden = [];
+  adapter.createTab = async () => { forbidden.push('create'); };
+  adapter.navigateTab = async () => { forbidden.push('navigate'); };
+  adapter.waitForStable = async () => { forbidden.push('stable'); };
+  adapter.probeSensitiveCaptureSignals = async () => EMPTY_SIGNALS;
+  const resumed = await runUrlAudit({
+    auditId,
+    requestedUrlEvidence: TEST_EVIDENCE_URL,
+    resumeTarget: Object.freeze({
+      kind: 'owned-disposable-resume', ownershipId,
+      tabId: paused.observedTarget.tabId, windowId: paused.observedTarget.windowId,
+      documentId: paused.observedTarget.documentId,
+      initialUrlEvidence: paused.observedTarget.urlEvidence,
+      initialUrlSessionDigest: paused.observedTarget.urlSessionDigest,
+      navigationPurpose: 'batch-page', cleanupMode: 'always', pageId: 'page-1',
+    }),
+    resumeCheckpoint: checkpoints.at(-1), chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: ownedPixelGate(policy, [], {
+      auditId, ownershipId, consentId: 'A'.repeat(21) + 'Q', cleanupMode: 'always',
+    }),
+    checkpointStore: Object.freeze({ async writeSanitized() {} }),
+    onProgress() {}, now: () => '2026-09-01T12:00:01.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  });
+
+  assert.equal(resumed.status, 'complete');
+  assert.equal(resumed.ownershipState, 'removed');
+  assert.equal(resumed.observedTarget.ownershipId, ownershipId);
+  assert.deepEqual(forbidden, []);
+  assert.deepEqual(tokenCalls, ['Q'.repeat(22)]);
+});
+
+test('batch page resume captures no thumbnail after its retained document navigates', async () => {
+  const auditId = 'audit-batch-page-raster-drift';
+  const ownershipId = `owner_${'R'.repeat(22)}`;
+  const checkpoints = [];
+  let documentId = 'document-a';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const adapter = fakeAdapter({
+    canonicalInternals: true,
+    sessionValues: {},
+    trackCaptureCalls: true,
+    sensitiveSignals: PASSWORD_SIGNALS,
+    async afterFullPage() { documentId = 'document-b'; },
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  adapter.probeDocumentIdentity = async tabId => ({
+    tabId, windowId: 9, documentId, urlSessionDigest: TEST_DIGEST,
+  });
+  const paused = await runUrlAudit({
+    auditId, ownershipId, windowId: 9,
+    navigationToken: 'R'.repeat(22), navigationPurpose: 'batch-page',
+    evidenceUrl: TEST_EVIDENCE_URL, sessionDigest: TEST_DIGEST,
+    rawNavigationVault: Object.freeze({
+      async take() { return 'https://example.test/final?private=REMOVE'; },
+    }),
+    chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: ownedPixelGate(policy, [], { auditId, ownershipId, cleanupMode: 'always' }),
+    checkpointStore: Object.freeze({
+      async writeSanitized(_auditId, checkpoint) { checkpoints.push(checkpoint); },
+    }),
+    onProgress() {}, now: () => '2026-09-01T12:00:00.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  });
+  assert.equal(paused.status, 'privacy-paused');
+
+  await assert.rejects(() => runUrlAudit({
+    auditId,
+    requestedUrlEvidence: TEST_EVIDENCE_URL,
+    resumeTarget: Object.freeze({
+      kind: 'owned-disposable-resume', ownershipId,
+      tabId: paused.observedTarget.tabId, windowId: paused.observedTarget.windowId,
+      documentId: paused.observedTarget.documentId,
+      initialUrlEvidence: paused.observedTarget.urlEvidence,
+      initialUrlSessionDigest: paused.observedTarget.urlSessionDigest,
+      navigationPurpose: 'batch-page', cleanupMode: 'always', pageId: 'page-1',
+    }),
+    resumeCheckpoint: checkpoints.at(-1), chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: ownedPixelGate(policy, [], {
+      auditId, ownershipId, consentId: 'A'.repeat(21) + 'Q', cleanupMode: 'always',
+    }),
+    checkpointStore: Object.freeze({ async writeSanitized() {} }),
+    onProgress() {}, now: () => '2026-09-01T12:00:01.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  }), /OBSERVED_RUNNER_DENIED/u);
+
+  assert.equal(adapter.counts.fullPageCalls, 1);
+  assert.equal(adapter.counts.elementCalls, 0);
+  assert.equal(adapter.counts.screenshots, 1, 'document B must produce zero thumbnail rasters');
 });
 
 test('single URL denies a swapped private URL whose sanitized evidence still matches the authorized address', async () => {

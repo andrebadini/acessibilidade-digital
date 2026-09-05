@@ -41,6 +41,18 @@ const validMessages = [
     captureMode: 'no-pixels', includeQuery: false,
     deleteAfterCompleteExport: false, windowId: 9,
   },
+  {
+    type: 'PANEL_START_BATCH_AUDIT', capabilityId: CAPABILITY,
+    urls: 'https://one.example.test/private?token=raw\nhttps://two.example.test/',
+    captureMode: 'full-evidence', includeQuery: false,
+    deleteAfterCompleteExport: false, windowId: 9,
+  },
+  {
+    type: 'PANEL_START_BATCH_AUDIT', capabilityId: CAPABILITY,
+    urls: 'https://one.example.test/private?token=raw\nhttps://two.example.test/',
+    captureMode: 'element-only', includeQuery: false,
+    deleteAfterCompleteExport: false, windowId: 9,
+  },
   { type: 'CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: '-audit.1', consentId: CONSENT, mode: 'full-evidence', accepted: true, windowId: 9 },
   { type: 'PANEL_CONFIRM_PIXEL_CAPTURE', sessionCapabilityId: SESSION, auditId: '-audit.1', mode: 'element-only', accepted: true, windowId: 9 },
   { type: 'PANEL_START_PERSONA', capabilityId: CAPABILITY, mode: 'reader', windowId: 9 },
@@ -248,7 +260,7 @@ test('admits each bounded single-URL capture mode through its exact panel Port e
   ]) assert.deepEqual(parsePanelPortIntent(invalid, 17), { ok: false, code: 'INVALID_MESSAGE' });
 });
 
-test('admits only a bounded no-pixels batch through the panel Port', () => {
+test('admits every explicit evidence mode for a bounded batch through the panel Port', () => {
   const prepare = { type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: 'batch-request-1', intent: 'batch' };
   assert.deepEqual(parsePanelPortIntent(prepare, 17), {
     ok: true, value: { ...prepare, windowId: 17 },
@@ -258,14 +270,16 @@ test('admits only a bounded no-pixels batch through the panel Port', () => {
     urls: 'https://one.example.test/private?token=raw\nhttps://two.example.test/',
     captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
   };
-  assert.deepEqual(parsePanelPortIntent(start, 17), {
-    ok: true, value: { ...start, windowId: 17 },
-  });
-  assert.equal(isPanelPortIntent(start), true);
+  for (const captureMode of ['full-evidence', 'element-only', 'no-pixels']) {
+    const modeStart = { ...start, captureMode };
+    assert.deepEqual(parsePanelPortIntent(modeStart, 17), {
+      ok: true, value: { ...modeStart, windowId: 17 },
+    });
+    assert.equal(isPanelPortIntent(modeStart), true);
+  }
 
   for (const invalid of [
-    { ...start, captureMode: 'full-evidence' },
-    { ...start, captureMode: 'element-only' },
+    { ...start, captureMode: 'pixels' },
     { ...start, includeQuery: true },
     { ...start, deleteAfterCompleteExport: true },
     { ...start, urls: '' },

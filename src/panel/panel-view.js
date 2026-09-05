@@ -193,7 +193,9 @@ function renderInitial(document, view, emit, onEvent) {
   );
   root.append(paragraph(
     document,
-    view.entryMode === 'batch' ? 'O lote é avaliado sem capturar imagens. Tudo permanece neste dispositivo.' : LOCAL_PIXEL_NOTICE,
+    view.entryMode === 'batch' && view.captureMode === 'no-pixels'
+      ? 'O lote é avaliado sem capturar imagens. Tudo permanece neste dispositivo.'
+      : LOCAL_PIXEL_NOTICE,
     'privacy-local-copy',
   ));
   if (view.entryMode === 'single-url') {
@@ -259,7 +261,7 @@ function renderBatchEntry(document, view, emit, onEvent) {
     }
     form.append(error);
   }
-  form.append(renderBatchCaptureMode(document));
+  form.append(renderCaptureModeChoices(document, view.captureMode, onEvent));
   const actions = section(document, 'form-actions');
   const submit = document.createElement('button');
   submit.setAttribute('type', 'submit');
@@ -274,38 +276,8 @@ function renderBatchEntry(document, view, emit, onEvent) {
     event.preventDefault();
     emit({ type: 'START_BATCH', urls: typeof textarea.value === 'string' ? textarea.value : '' });
   });
-  wrapper.append(form, liveRegion(document, 'Informe uma URL por linha. O lote usa somente o modo sem imagens.'));
+  wrapper.append(form, liveRegion(document, 'Informe uma URL por linha e escolha como coletar as evidências.'));
   return wrapper;
-}
-
-function renderBatchCaptureMode(document) {
-  const fieldset = document.createElement('fieldset');
-  fieldset.className = 'capture-mode-fieldset batch-capture-mode';
-  const legend = document.createElement('legend');
-  legend.textContent = 'Modo de evidência';
-  const option = document.createElement('label');
-  option.className = 'capture-mode-option';
-  option.setAttribute('for', 'batch-capture-mode-no-pixels');
-  const input = document.createElement('input');
-  input.setAttribute('type', 'radio');
-  input.setAttribute('name', 'capture-mode');
-  input.setAttribute('id', 'batch-capture-mode-no-pixels');
-  input.setAttribute('value', 'no-pixels');
-  input.setAttribute('disabled', '');
-  input.dataset.captureMode = 'no-pixels';
-  input.checked = true;
-  const copy = document.createElement('div');
-  copy.className = 'capture-mode-copy';
-  const label = document.createElement('span');
-  label.className = 'capture-mode-label';
-  label.textContent = 'Somente sem imagens';
-  const detail = document.createElement('span');
-  detail.className = 'capture-mode-description';
-  detail.textContent = 'O lote é avaliado localmente sem capturar pixels.';
-  copy.append(label, detail);
-  option.append(input, copy);
-  fieldset.append(legend, option);
-  return fieldset;
 }
 
 function renderSingleUrlEntry(document, view, emit, onEvent) {
@@ -437,13 +409,26 @@ function renderRunning(document, view, emit) {
     progress.setAttribute('value', String(current.percent));
     progress.setAttribute('max', '100');
   }
+  const phases = renderRunningPhases(document, current);
+  root.append(
+    progress,
+    phases,
+    actionButton(document, 'Cancelar auditoria', 'CANCEL_AUDIT', 'cancel-audit', emit, 'danger-action'),
+    liveRegion(document, status),
+  );
+  return root;
+}
+
+function renderRunningPhases(document, current) {
   const phases = document.createElement('ol');
   phases.className = 'phase-list';
   phases.dataset.runningPhases = '';
   phases.setAttribute('aria-label', 'Etapas da auditoria');
-  for (const [phase, _message, percent, label] of RUNNING_PHASES) {
+  for (const [index, [_phase, _message, percent, label]] of RUNNING_PHASES.entries()) {
     const item = document.createElement('li');
-    const phaseState = current ? (percent < current.percent ? 'complete' : percent === current.percent ? 'current' : 'pending') : 'pending';
+    const nextPercent = RUNNING_PHASES[index + 1]?.[2] ?? 100;
+    const phaseState = !current || current.percent < percent ? 'pending'
+      : current.percent >= nextPercent ? 'complete' : 'current';
     item.dataset.phaseState = phaseState;
     if (phaseState === 'current') item.setAttribute('aria-current', 'step');
     const indicator = document.createElement('span');
@@ -457,13 +442,7 @@ function renderRunning(document, view, emit) {
     item.append(indicator, phaseLabel);
     phases.append(item);
   }
-  root.append(
-    progress,
-    phases,
-    actionButton(document, 'Cancelar auditoria', 'CANCEL_AUDIT', 'cancel-audit', emit, 'danger-action'),
-    liveRegion(document, status),
-  );
-  return root;
+  return phases;
 }
 
 function renderBatchRunning(root, document, view, emit, started, current) {
@@ -497,7 +476,11 @@ function renderBatchRunning(root, document, view, emit, started, current) {
     progress.setAttribute('value', String(current.percent));
     progress.setAttribute('max', '100');
   }
-  root.append(progress);
+  // Remove floating-point drift when reversing the batch's weighted percentage.
+  const pageProgress = current && Number.isSafeInteger(page) && page > 0 && Number.isSafeInteger(total)
+    ? { percent: Math.max(0, Math.min(100, Number((current.percent * total - (page - 1) * 100).toFixed(8)))) }
+    : null;
+  root.append(progress, renderRunningPhases(document, pageProgress));
   if (view.batch.warnings.length > 0) {
     const warnings = section(document, 'batch-warnings');
     warnings.append(heading(document, 3, 'Avisos da lista'));
@@ -521,12 +504,25 @@ function renderBatchRunning(root, document, view, emit, started, current) {
 function renderPrivacyPause(root, document, view, emit) {
   root.className += ' privacy-pause';
   root.dataset.sessionStatus = 'privacy-paused';
+  if (view.auditSource === 'batch' && Number.isSafeInteger(view.batch.pageNumber) && view.batch.pageNumber > 0) {
+    root.dataset.pageNumber = String(view.batch.pageNumber);
+    if (Number.isSafeInteger(view.batch.total)) root.dataset.total = String(view.batch.total);
+  }
   root.append(
     paragraph(document, 'Auditoria pausada para sua proteção', 'status-label status-limited'),
     heading(document, 2, 'Confirme antes de capturar imagens'),
     paragraph(document, view.privacy.message, 'supporting-copy'),
     paragraph(document, LOCAL_PIXEL_NOTICE, 'privacy-local-copy'),
   );
+  const safeContext = section(document, 'privacy-safe-context');
+  safeContext.append(paragraph(document, `Modo: ${captureModeLabel(view.privacy.mode)}.`, 'privacy-capture-mode'));
+  if (view.auditSource === 'batch' && Number.isSafeInteger(view.batch.pageNumber) && view.batch.pageNumber > 0) {
+    const position = Number.isSafeInteger(view.batch.total)
+      ? `Página ${view.batch.pageNumber} de ${view.batch.total}.`
+      : `Página ${view.batch.pageNumber} pausada.`;
+    safeContext.append(paragraph(document, position, 'privacy-page-position'));
+  }
+  root.append(safeContext);
   const signals = section(document, 'privacy-signals');
   signals.append(heading(document, 3, 'Conteúdo sensível identificado'));
   const list = document.createElement('ul');
@@ -560,6 +556,12 @@ function renderPrivacyPause(root, document, view, emit) {
       : 'Auditoria pausada. Confirme a captura de imagens ou cancele a auditoria.'),
   );
   return root;
+}
+
+function captureModeLabel(mode) {
+  if (mode === 'full-evidence') return 'Evidência completa';
+  if (mode === 'element-only') return 'Somente elementos';
+  return 'Sem imagens';
 }
 
 function renderResult(document, view, emit, onEvent) {
@@ -1075,9 +1077,11 @@ function copyBatchProjection(value) {
   const errors = copyBatchErrors(batch.errors);
   if (!warnings || !errors) return { total: null, pageNumber: null, warnings: [], errors: [] };
   const empty = batch.total === null && batch.pageNumber === null;
+  const paused = batch.total === null && Number.isSafeInteger(batch.pageNumber) &&
+    batch.pageNumber >= 1 && batch.pageNumber <= 20 && errors.length === 0;
   const running = Number.isSafeInteger(batch.total) && batch.total >= 2 && batch.total <= 20 &&
     Number.isSafeInteger(batch.pageNumber) && batch.pageNumber >= 0 && batch.pageNumber <= batch.total;
-  return empty || running
+  return empty || paused || running
     ? { total: batch.total, pageNumber: batch.pageNumber, warnings, errors }
     : { total: null, pageNumber: null, warnings: [], errors: [] };
 }

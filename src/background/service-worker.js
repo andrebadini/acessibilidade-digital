@@ -1,9 +1,11 @@
 import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
+import { isCapturePolicyV1 } from '../core/privacy/capture-policy.js';
 import {
   createSessionPixelAttemptDigestAuthority,
   createSessionUrlDigestManager,
 } from '../core/privacy/session-url-digest.js';
 import { createRawNavigationVaultV1 } from './raw-navigation-vault.js';
+import { createBatchProgressStoreV1 } from './batch-progress-store.js';
 import { createAuditDeletedEvent } from '../core/audit-deleted-event.js';
 import { applyReviewDecisions, createReviewDecision } from '../core/review/decisions.js';
 import { createAuditModel } from '../core/report/audit-model.js';
@@ -23,6 +25,7 @@ import {
 } from './authorized-audit-starter.js';
 import { createAuditLifecycle } from './audit-lifecycle.js';
 import { createPixelCaptureStateV1 } from './pixel-capture-consent.js';
+import { createPixelPrivacyGateV1 } from './pixel-privacy-gate.js';
 import {
   createNativePixelCommitClockV1,
   isPixelCommitClockV1,
@@ -96,7 +99,8 @@ const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const CAPABILITY = /^[A-Za-z0-9_-]{22}$/u;
 const PANEL_BOOTSTRAP_PREFIX = 'audita:panel-bootstrap:v1:';
 const PANEL_BOOTSTRAP_KEYS = Object.freeze([
-  'version', 'kind', 'auditId', 'sessionCapabilityId', 'windowId', 'createdAt', 'expiresAt', 'state',
+  'version', 'kind', 'auditId', 'sessionCapabilityId', 'windowId', 'captureMode',
+  'createdAt', 'expiresAt', 'state',
 ]);
 
 function freeze(value, seen = new WeakSet()) {
@@ -152,6 +156,7 @@ function panelBootstrapRecord(value) {
   return record && record.version === 1 && record.kind === 'audit-session' &&
     AUDIT_ID.test(record.auditId ?? '') && CAPABILITY.test(record.sessionCapabilityId ?? '') &&
     Number.isSafeInteger(record.windowId) && record.windowId >= 0 &&
+    ['no-pixels', 'element-only', 'full-evidence'].includes(record.captureMode) &&
     Number.isSafeInteger(record.createdAt) && record.createdAt >= 0 &&
     Number.isSafeInteger(record.expiresAt) && record.expiresAt > record.createdAt &&
     ['pending', 'consumed'].includes(record.state)
@@ -244,6 +249,193 @@ const PIXEL_ATTEMPT_MARKER_PREFIX = 'audita:pixel-attempt:v1:';
 const CONSENT_ID = /^[A-Za-z0-9_-]{21}[AQgw]$/u;
 const ATTEMPT_DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
 const PRIVATE_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
+const BATCH_PAGE_ID = /^page-([1-9]|1[0-9]|20)$/u;
+const OWNER_ID = /^owner_[A-Za-z0-9_-]{22}$/u;
+const PIXEL_POLICY_KEYS = Object.freeze([
+  'version', 'mode', 'includeQuery', 'captureFullPage', 'captureElements', 'composeAnnouncementMap',
+]);
+const PIXEL_SUSPENSION_KEYS = Object.freeze([
+  'version', 'revision', 'auditId', 'consentId', 'tabId', 'windowId', 'documentId',
+  'urlEvidence', 'urlSessionDigest', 'mode', 'capturePolicy', 'categories', 'issuedAt',
+  'updatedAt', 'expiresAt', 'cleanupAttempts', 'cleanupNotBefore', 'state',
+  'resumePhase', 'revokeReason', 'source',
+]);
+
+function batchPixelPolicy(value) {
+  const policy = exact(value, PIXEL_POLICY_KEYS, true);
+  return policy && isCapturePolicyV1(policy) && policy.mode !== 'no-pixels' && policy.includeQuery === false
+    ? freeze({ ...policy })
+    : null;
+}
+
+function sameBatchPixelPolicy(left, right) {
+  return Boolean(left && right) && PIXEL_POLICY_KEYS.every(key => left[key] === right[key]);
+}
+
+function batchPixelEvidence(value) {
+  const evidence = exact(value, ['version', 'href', 'queryIncluded', 'redactedSegments'], true);
+  return evidence && isEvidenceUrlV1(evidence) && evidence.queryIncluded === false
+    ? freeze({ ...evidence })
+    : null;
+}
+
+function batchPixelCategories(value) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== value.length + 1 || !ownKeys.includes('length')) return null;
+    const copy = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value') ||
+        !['password', 'otp', 'payment', 'private-marker'].includes(descriptor.value)) return null;
+      copy.push(descriptor.value);
+    }
+    return freeze(copy);
+  } catch { return null; }
+}
+
+function batchPixelChildTarget(value, expected) {
+  const target = exact(value, [
+    'version', 'kind', 'ownershipId', 'tabId', 'windowId', 'documentId',
+    'urlEvidence', 'urlSessionDigest', 'cleanupMode', 'pageId',
+  ], true);
+  const evidence = target && batchPixelEvidence(target.urlEvidence);
+  return target?.version === 'ObservedTargetV1' && target.kind === 'owned-disposable' &&
+    target.ownershipId === expected.ownershipId && target.windowId === expected.windowId &&
+    Number.isSafeInteger(target.tabId) && target.tabId >= 0 &&
+    typeof target.documentId === 'string' && PRIVATE_ID.test(target.documentId) && evidence &&
+    ATTEMPT_DIGEST.test(target.urlSessionDigest ?? '') && target.cleanupMode === 'always' &&
+    target.pageId === 'page-1'
+    ? freeze({ ...target, urlEvidence: evidence })
+    : null;
+}
+
+function projectBatchPixelTarget(target, pageId) {
+  return freeze({ ...target, pageId });
+}
+
+function projectBatchPixelProof(value, expected, pageId) {
+  const proof = exact(value, [
+    'kind', 'ownershipId', 'tabId', 'windowId', 'documentId',
+    'urlSessionDigest', 'cleanupMode', 'pageId',
+  ], true);
+  return proof?.kind === 'owned-disposable' && proof.ownershipId === expected.ownershipId &&
+    proof.windowId === expected.windowId && Number.isSafeInteger(proof.tabId) && proof.tabId >= 0 &&
+    typeof proof.documentId === 'string' && PRIVATE_ID.test(proof.documentId) &&
+    ATTEMPT_DIGEST.test(proof.urlSessionDigest ?? '') && proof.cleanupMode === 'always' &&
+    proof.pageId === 'page-1'
+    ? freeze({ ...proof, pageId })
+    : null;
+}
+
+function projectBatchPixelSuspension(value, expected, direction) {
+  const suspension = exact(value, PIXEL_SUSPENSION_KEYS, true);
+  const policy = suspension && batchPixelPolicy(suspension.capturePolicy);
+  const evidence = suspension && batchPixelEvidence(suspension.urlEvidence);
+  const categories = suspension && batchPixelCategories(suspension.categories);
+  const source = suspension && exact(suspension.source,
+    ['kind', 'ownershipId', 'cleanupMode', 'pageId'], true);
+  const fromAuditId = direction === 'to-child' ? expected.batchAuditId : expected.childAuditId;
+  const fromPageId = direction === 'to-child' ? expected.pageId : 'page-1';
+  const toAuditId = direction === 'to-child' ? expected.childAuditId : expected.batchAuditId;
+  const toPageId = direction === 'to-child' ? 'page-1' : expected.pageId;
+  if (!suspension || suspension.auditId !== fromAuditId || !policy || !evidence || !categories ||
+    !source || source.kind !== 'owned-disposable' || source.ownershipId !== expected.ownershipId ||
+    source.cleanupMode !== 'always' || source.pageId !== fromPageId) return null;
+  return freeze({
+    ...suspension,
+    auditId: toAuditId,
+    capturePolicy: policy,
+    urlEvidence: evidence,
+    categories,
+    source: freeze({ ...source, pageId: toPageId }),
+  });
+}
+
+export function createBatchPagePixelPrivacyGateV1(raw) {
+  const input = exact(raw, [
+    'pixelState', 'pixelCommitClock', 'batchAuditId', 'childAuditId', 'pageId',
+    'ownershipId', 'consentId', 'authorityExpiresAt', 'capturePolicy',
+  ]);
+  const pause = input && own(input.pixelState, 'pause');
+  const gateRunnerStart = input && own(input.pixelState, 'gateRunnerStart');
+  const capturePolicy = input && batchPixelPolicy(input.capturePolicy);
+  if (!input || typeof pause !== 'function' || typeof gateRunnerStart !== 'function' ||
+    !AUDIT_ID.test(input.batchAuditId ?? '') || !AUDIT_ID.test(input.childAuditId ?? '') ||
+    !BATCH_PAGE_ID.test(input.pageId ?? '') || !OWNER_ID.test(input.ownershipId ?? '') ||
+    !capturePolicy || !Number.isSafeInteger(input.authorityExpiresAt) || input.authorityExpiresAt < 0) {
+    throw new TypeError('BATCH_PIXEL_GATE_DENIED');
+  }
+  const expected = freeze({
+    batchAuditId: input.batchAuditId,
+    childAuditId: input.childAuditId,
+    pageId: input.pageId,
+    ownershipId: input.ownershipId,
+    windowId: null,
+  });
+  const assertPolicy = value => {
+    const policy = batchPixelPolicy(value);
+    if (!policy || !sameBatchPixelPolicy(policy, capturePolicy)) throw new Error('BATCH_PIXEL_GATE_DENIED');
+    return policy;
+  };
+  const facade = Object.freeze({
+    async pause(rawRequest) {
+      const request = exact(rawRequest, [
+        'auditId', 'observedTarget', 'mode', 'capturePolicy', 'categories', 'authorityExpiresAt',
+      ]);
+      const windowId = request?.observedTarget && own(request.observedTarget, 'windowId');
+      const targetExpected = { ...expected, windowId };
+      const target = request && batchPixelChildTarget(request.observedTarget, targetExpected);
+      const policy = request && assertPolicy(request.capturePolicy);
+      const categories = request && batchPixelCategories(request.categories);
+      if (!request || request.auditId !== expected.childAuditId || request.mode !== capturePolicy.mode ||
+        request.authorityExpiresAt !== input.authorityExpiresAt || !target || !policy || !categories) {
+        throw new Error('BATCH_PIXEL_GATE_DENIED');
+      }
+      const suspension = await Reflect.apply(pause, input.pixelState, [{
+        ...request,
+        auditId: expected.batchAuditId,
+        observedTarget: projectBatchPixelTarget(target, expected.pageId),
+        capturePolicy: policy,
+        categories,
+      }]);
+      const projected = projectBatchPixelSuspension(suspension,
+        { ...expected, windowId: target.windowId }, 'to-child');
+      if (!projected) throw new Error('BATCH_PIXEL_GATE_DENIED');
+      return projected;
+    },
+    async gateRunnerStart(rawRequest) {
+      const request = exact(rawRequest, ['auditId', 'consentId', 'proof', 'categories']);
+      const windowId = request?.proof && own(request.proof, 'windowId');
+      const proof = request && projectBatchPixelProof(request.proof, { ...expected, windowId }, expected.pageId);
+      const categories = request && batchPixelCategories(request.categories);
+      if (!request || request.auditId !== expected.childAuditId || !proof || !categories) {
+        throw new Error('BATCH_PIXEL_GATE_DENIED');
+      }
+      const rawResult = await Reflect.apply(gateRunnerStart, input.pixelState, [{
+        ...request,
+        auditId: expected.batchAuditId,
+        proof,
+        categories,
+      }]);
+      const result = exact(rawResult, ['version', 'status', 'suspension'], true);
+      const suspension = result && projectBatchPixelSuspension(result.suspension,
+        { ...expected, windowId: proof.windowId }, 'to-child');
+      if (!result || !['ready', 'repaused'].includes(result.status) || !suspension) {
+        throw new Error('BATCH_PIXEL_GATE_DENIED');
+      }
+      return freeze({ ...result, suspension });
+    },
+  });
+  return createPixelPrivacyGateV1({
+    pixelState: facade,
+    consentId: input.consentId,
+    authorityExpiresAt: input.authorityExpiresAt,
+    commitClock: input.pixelCommitClock,
+    async afterPixels() {},
+  });
+}
 
 function pixelAttemptMarker(value) {
   const row = exact(value, [
@@ -339,7 +531,7 @@ export function createPixelAttemptLifecycleV1(raw) {
   async function prepareResume(rawRequest) {
     const request = exact(rawRequest, ['auditId', 'consentId', 'pageId', 'ownershipId', 'expiresAt']);
     const attachedAttempt = request?.pageId === null && request?.ownershipId === null;
-    const ownedAttempt = request?.pageId === 'page-1' &&
+    const ownedAttempt = BATCH_PAGE_ID.test(request?.pageId ?? '') &&
       /^owner_[A-Za-z0-9_-]{22}$/u.test(request?.ownershipId ?? '');
     if (!request || !AUDIT_ID.test(request.auditId ?? '') || !CONSENT_ID.test(request.consentId ?? '') ||
       (!attachedAttempt && !ownedAttempt) ||
@@ -367,7 +559,7 @@ export function createPixelAttemptLifecycleV1(raw) {
     const expectedPageId = correlated?.pageId ?? null;
     const expectedOwnershipId = correlated?.ownershipId ?? null;
     const expectedAttached = expectedPageId === null && expectedOwnershipId === null;
-    const expectedOwned = expectedPageId === 'page-1' &&
+    const expectedOwned = BATCH_PAGE_ID.test(expectedPageId ?? '') &&
       /^owner_[A-Za-z0-9_-]{22}$/u.test(expectedOwnershipId ?? '');
     if (!request || !AUDIT_ID.test(request.auditId ?? '') ||
       !(request.consentId === null || CONSENT_ID.test(request.consentId ?? '')) ||
@@ -474,7 +666,7 @@ export function createPixelAttemptLifecycleV1(raw) {
     const pageId = correlated?.pageId ?? null;
     const ownershipId = correlated?.ownershipId ?? null;
     const expectedAttached = pageId === null && ownershipId === null;
-    const expectedOwned = pageId === 'page-1' && /^owner_[A-Za-z0-9_-]{22}$/u.test(ownershipId ?? '');
+    const expectedOwned = BATCH_PAGE_ID.test(pageId ?? '') && /^owner_[A-Za-z0-9_-]{22}$/u.test(ownershipId ?? '');
     if (!request || !AUDIT_ID.test(request.auditId ?? '') ||
       !(request.consentId === null || CONSENT_ID.test(request.consentId ?? '')) ||
       !['prepared', 'terminal', 'post-finish'].includes(request.expected) ||
@@ -1308,10 +1500,29 @@ async function buildDefaultRuntime(chromeApi, options) {
       : 'Chrome (versão não disponível)',
     expectedExtensionId: chromeApi.runtime.id,
   });
+  let openedBatchProgressStore = null;
+  const batchProgressStore = options.batchProgressStore ?? Object.freeze({
+    writeDraft: args => (openedBatchProgressStore ??= createBatchProgressStoreV1({
+      indexedDB: options.batchProgressIndexedDB ?? globalThis.indexedDB,
+    })).writeDraft(args),
+    markCompleted: args => (openedBatchProgressStore ??= createBatchProgressStoreV1({
+      indexedDB: options.batchProgressIndexedDB ?? globalThis.indexedDB,
+    })).markCompleted(args),
+    readCompleted: args => (openedBatchProgressStore ??= createBatchProgressStoreV1({
+      indexedDB: options.batchProgressIndexedDB ?? globalThis.indexedDB,
+    })).readCompleted(args),
+    clearAudit: args => (openedBatchProgressStore ??= createBatchProgressStoreV1({
+      indexedDB: options.batchProgressIndexedDB ?? globalThis.indexedDB,
+    })).clearAudit(args),
+    discardAudit: args => (openedBatchProgressStore ??= createBatchProgressStoreV1({
+      indexedDB: options.batchProgressIndexedDB ?? globalThis.indexedDB,
+    })).discardAudit(args),
+  });
   const batchExecution = (options.batchAuditExecutionFactory ?? createBatchAuditExecutionV1)({
     rawNavigationVault,
     authority,
     ownedTabRegistry,
+    batchProgressStore,
     createOwnershipId: () => createOwnershipId(bytes),
     runBatch,
     runUrlAuditExecution,
@@ -1320,6 +1531,11 @@ async function buildDefaultRuntime(chromeApi, options) {
     }),
     emitProgress: event => chromeAdapter.emitProgress(event),
     tryEnterFinalization: () => true,
+    createPixelPrivacyGate: args => createBatchPagePixelPrivacyGateV1({
+      pixelState,
+      pixelCommitClock,
+      ...args,
+    }),
   });
   const auditStarter = createAuthorizedAuditStarter({
     authority, sessionArea, panelCoordinator: panelAuditCoordinator, targetQueue, cleanupBarrier,
@@ -1339,8 +1555,29 @@ async function buildDefaultRuntime(chromeApi, options) {
       signal: args.signal,
       reportOptions: batchReportOptions,
       onExecutionCheckpoint: args.onCheckpoint,
+      onPrivacyPaused: args.onPrivacyPaused,
+      onPixelPageFinished: args.onPixelPageFinished,
+    }),
+    resumeBatchAuditExecution: args => batchExecution.resume(args),
+    recoverBatchAuditExecution: args => batchExecution.recover({
+      auditId: args.auditId,
+      capabilityId: args.capabilityId,
+      sessionCapabilityId: args.sessionCapabilityId,
+      windowId: args.windowId,
+      capturePolicy: args.capturePolicy,
+      now: args.modelNow,
+      signal: args.signal,
+      reportOptions: batchReportOptions,
+      onExecutionCheckpoint: args.onCheckpoint,
+      onPrivacyPaused: args.onPrivacyPaused,
+      onPixelPageFinished: args.onPixelPageFinished,
+      consentId: args.consentId,
+      resumeTarget: args.resumeTarget,
+      resumeCheckpoint: args.resumeCheckpoint,
     }),
     clearBatchAuditResources: args => batchExecution.cleanup(args),
+    clearBatchAuditProgress: args => batchExecution.clearProgress(args),
+    discardBatchAuditProgress: args => batchExecution.discardProgress(args),
     persistLatest, persistCheckpoint: checkpoints.persistCheckpoint, removeCheckpoint: checkpoints.removeCheckpoint,
     commitTerminalAudit,
     readAuditSnapshot: ({ auditId }) => auditStore.getAuditSnapshot(auditId),

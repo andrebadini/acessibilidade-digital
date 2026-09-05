@@ -322,7 +322,7 @@ button:active { transform: translateY(1px); }
 .phase-indicator { inline-size: 1.25rem; flex: 0 0 1.25rem; text-align: center; font-size: 1.1rem; line-height: 1; }
 .phase-indicator-complete { color: var(--success); font-weight: 900; }
 .phase-indicator-current { color: var(--action); }
-.phase-indicator-pending { color: var(--muted); }
+.phase-indicator-pending { color: var(--border); }
 
 .privacy-pause {
   padding: 12px;

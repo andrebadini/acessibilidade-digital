@@ -1,5 +1,5 @@
 import { canonicalTime, runAuditExecution } from './run-audit.js';
-import { mergeExecutionCheckpoint } from './execution-checkpoint.js';
+import { mergeExecutionCheckpoint, validateExecutionCheckpoint } from './execution-checkpoint.js';
 import {
   createBatchSession,
   transitionBatchSession,
@@ -19,6 +19,8 @@ import {
   DEFAULT_BATCH_EVIDENCE_BUDGET_BYTES,
 } from '../core/batch/evidence-budget.js';
 import { AUDIT_EXECUTION_INTERNAL, composeChromeAdapter } from './chrome-adapter.js';
+import { createAuditModel } from '../core/report/audit-model.js';
+import { copyBatchPageFailure } from './batch-page-failure.js';
 
 const DEFAULT_PAGE_TIMEOUT_MS = 120_000;
 const DEFAULT_CLEANUP_TIMEOUT_MS = 10_000;
@@ -35,6 +37,7 @@ const REPORT_OPTION_KEYS = Object.freeze([
 const RUN_BATCH_REQUEST_KEYS = Object.freeze([
   'entries',
   'batchAuditId',
+  'batchStartedAt',
   'chromeAdapter',
   'runner',
   'now',
@@ -45,7 +48,10 @@ const RUN_BATCH_REQUEST_KEYS = Object.freeze([
   'reportOptions',
   'onCheckpoint',
   'onExecutionCheckpoint',
+  'completedPages',
 ]);
+const COMPLETED_PAGE_KEYS = Object.freeze(['pageId', 'model', 'checkpoint']);
+const FAILED_COMPLETED_PAGE_KEYS = Object.freeze([...COMPLETED_PAGE_KEYS, 'failure']);
 const CHECKPOINT_FAILURES = new WeakSet();
 const BATCH_EXECUTION_RUNNERS = new WeakSet();
 
@@ -62,6 +68,7 @@ export async function runBatch(request) {
   const {
     entries: requestedEntries,
     batchAuditId,
+    batchStartedAt: requestedBatchStartedAt,
     chromeAdapter,
     runner = runAuditExecution,
     now = () => new Date().toISOString(),
@@ -72,6 +79,7 @@ export async function runBatch(request) {
     reportOptions: requestedReportOptions,
     onCheckpoint = async () => {},
     onExecutionCheckpoint = async () => {},
+    completedPages: requestedCompletedPages = [],
   } = captureBatchRequest(request);
   const brandedExecutionRunner = BATCH_EXECUTION_RUNNERS.has(runner);
   const entries = captureBatchEntries(requestedEntries, {
@@ -79,8 +87,12 @@ export async function runBatch(request) {
   });
   const reportOptions = captureReportOptions(requestedReportOptions);
   validateInputs({ entries, batchAuditId, chromeAdapter, runner, pageTimeoutMs, cleanupTimeoutMs, evidenceBudgetBytes, reportOptions });
+  const completedPages = captureCompletedPages(requestedCompletedPages, batchAuditId, entries);
   const template = createBatchReportTemplate(reportOptions);
-  const startedAt = canonicalTime(now());
+  const durableBatchStartedAt = captureBatchStartedAt(requestedBatchStartedAt);
+  const startedAt = durableBatchStartedAt ?? (completedPages.length > 0
+    ? canonicalTime(completedPages[0].model?.timestamps.startedAt ?? completedPages[0].failure.startedAt)
+    : canonicalTime(now()));
   let checkpoint = createBatchSession({ id: batchAuditId, total: entries.length, startedAt });
   let lastProgress = 0;
   let terminal = false;
@@ -140,7 +152,46 @@ export async function runBatch(request) {
     await cancelRemaining({ active: false });
   } else {
     await move({ type: 'START', at: canonicalTime(now()) });
-    for (let index = 0; index < entries.length; index += 1) {
+    for (let index = 0; index < completedPages.length; index += 1) {
+      const recovered = completedPages[index];
+      const pageId = recovered.pageId;
+      const child = recovered.failure ? null : await enrichAuditForReport(recovered.model, {
+        ...reportOptions,
+        now,
+        browserVersion: reportOptions.browserVersion || recovered.model?.environment?.chromeVersion || 'não disponível',
+      });
+      let pageResult = recovered.failure
+        ? failureFor(entries[index], pageId, 'failed', true, recovered.failure.startedAt,
+          recovered.failure.endedAt, 'BATCH_PAGE_FAILED', 'A página não pôde ser auditada.')
+        : await remapAuditPage(child, { batchAuditId, pageId });
+      const budgeted = await applyBatchEvidenceBudget(pageResult, {
+        usedBytes: evidenceBytesUsed, limitBytes: evidenceBudgetBytes,
+        exhausted: evidenceBudgetExhausted,
+      });
+      pageResult = budgeted.result;
+      evidenceBytesUsed = budgeted.usedBytes;
+      evidenceBudgetExhausted = budgeted.exhausted;
+      pageResults.push(pageResult);
+      executionCheckpoint = mergeExecutionCheckpoint({
+        auditId: batchAuditId,
+        prior: executionCheckpoint,
+        pageSnapshot: Object.freeze({
+          version: 1,
+          auditId: batchAuditId,
+          pages: [Object.freeze({ ...recovered.checkpoint.pages[0], pageId })],
+        }),
+        pageOrder,
+      });
+      await saveExecutionCheckpoint();
+      await move({ type: 'PAGE_FINISHED', status: pageResult.page.status, at: canonicalTime(now()) });
+      await emitGlobalProgress({
+        pageIndex: index,
+        pagePercent: 100,
+        terminalMessage: `Página ${index + 1} de ${entries.length}: resultado recuperado.`,
+      });
+    }
+    if (completedPages.length === entries.length) claimFinalization();
+    for (let index = completedPages.length; index < entries.length; index += 1) {
       if (signal?.aborted) {
         await cancelRemaining({ active: false });
         break;
@@ -267,13 +318,19 @@ export async function runBatch(request) {
             executionCleanupPending = execution.ownershipState === 'cleanup-pending';
             executionCleanupUnconfirmed = execution.ownershipState === 'cleanup-unconfirmed';
           }
-          if (childValue?.auditId !== childAuditId) throw new TypeError('Auditoria filha não correlacionada.');
-          const child = await enrichAuditForReport(childValue, {
+          const failure = brandedExecutionRunner && childValue === null
+            ? copyBatchPageFailure(execution.failure, execution.checkpoint?.pages[0], entry.evidenceUrl)
+            : null;
+          if (!failure && childValue?.auditId !== childAuditId) throw new TypeError('Auditoria filha não correlacionada.');
+          const child = failure ? null : await enrichAuditForReport(childValue, {
             ...reportOptions,
             now,
             browserVersion: reportOptions.browserVersion || childValue?.environment?.chromeVersion || 'não disponível',
           });
-          pageResult = await remapAuditPage(child, { batchAuditId, pageId });
+          pageResult = failure
+            ? failureFor(entry, pageId, 'failed', true, failure.startedAt, failure.endedAt,
+              'BATCH_PAGE_FAILED', 'A página não pôde ser auditada.')
+            : await remapAuditPage(child, { batchAuditId, pageId });
           const budgeted = await applyBatchEvidenceBudget(pageResult, {
             usedBytes: evidenceBytesUsed, limitBytes: evidenceBudgetBytes,
             exhausted: evidenceBudgetExhausted,
@@ -375,6 +432,54 @@ export async function runBatch(request) {
   }
 }
 
+function captureCompletedPages(value, batchAuditId, entries) {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) throw new TypeError();
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const length = descriptors.length;
+    if (!length || !Object.hasOwn(length, 'value') || !Number.isSafeInteger(length.value) ||
+      length.value < 0 || length.value > entries.length || Reflect.ownKeys(descriptors).length !== length.value + 1) {
+      throw new TypeError();
+    }
+    const captured = [];
+    for (let index = 0; index < length.value; index += 1) {
+      const slot = descriptors[String(index)];
+      if (!slot?.enumerable || !Object.hasOwn(slot, 'value')) throw new TypeError();
+      const page = slot.value;
+      if (!page || typeof page !== 'object' || Array.isArray(page) ||
+        ![Object.prototype, null].includes(Object.getPrototypeOf(page))) throw new TypeError();
+      const pageDescriptors = Object.getOwnPropertyDescriptors(page);
+      if (!exactOwnDataDescriptors(pageDescriptors, COMPLETED_PAGE_KEYS) &&
+        !exactOwnDataDescriptors(pageDescriptors, FAILED_COMPLETED_PAGE_KEYS)) throw new TypeError();
+      const pageId = `page-${index + 1}`;
+      const childAuditId = `${batchAuditId}:${pageId}`;
+      if (pageDescriptors.pageId.value !== pageId) throw new TypeError();
+      const checkpoint = validateExecutionCheckpoint({
+        auditId: childAuditId,
+        checkpoint: pageDescriptors.checkpoint.value,
+        pageOrder: ['page-1'],
+      });
+      if (pageDescriptors.model.value === null) {
+        const failure = copyBatchPageFailure(pageDescriptors.failure?.value, checkpoint.pages[0], entries[index].evidenceUrl);
+        if (!failure) throw new TypeError();
+        captured.push(Object.freeze({ pageId, model: null, failure, checkpoint }));
+        continue;
+      }
+      if (pageDescriptors.failure && pageDescriptors.failure.value !== null) throw new TypeError();
+      const model = createAuditModel(pageDescriptors.model.value);
+      if (model.auditId !== childAuditId || model.pages.length !== 1 || model.pages[0].pageId !== 'page-1') {
+        throw new TypeError();
+      }
+      const requested = sanitizeEvidenceUrlV1(model.requestedUrl, { includeQuery: false });
+      if (requested.href !== entries[index].evidenceUrl.href) throw new TypeError();
+      captured.push(Object.freeze({ pageId, model, checkpoint }));
+    }
+    return Object.freeze(captured);
+  } catch {
+    throw new TypeError(INVALID_BATCH_CONFIG_MESSAGE);
+  }
+}
+
 function captureBatchRequest(value) {
   try {
     if (!value || typeof value !== 'object' || Array.isArray(value) ||
@@ -391,6 +496,17 @@ function captureBatchRequest(value) {
       captured[key] = descriptor.value;
     }
     return Object.freeze(captured);
+  } catch {
+    throw new TypeError(INVALID_BATCH_CONFIG_MESSAGE);
+  }
+}
+
+function captureBatchStartedAt(value) {
+  if (value === undefined) return null;
+  try {
+    const canonical = canonicalTime(value);
+    if (typeof value !== 'string' || canonical !== value) throw new TypeError();
+    return canonical;
   } catch {
     throw new TypeError(INVALID_BATCH_CONFIG_MESSAGE);
   }

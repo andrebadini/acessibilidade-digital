@@ -520,6 +520,43 @@ test('batch navigation capability binds and clears exactly one active owned page
   });
 });
 
+test('batch with one explicit active owner may pause and resume without changing its page binding', async () => {
+  const { authority, sessionArea } = authorityFixture();
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'batch', senderContext: extensionContext() });
+  const auditId = 'audit-batch-pixel-pause';
+  const claimed = await authority.claimNavigationAndIssueAuditSession({
+    capabilityId: prepared.capabilityId, auditId, ownershipId: null,
+    intent: 'batch', senderContext: extensionContext(),
+  });
+  const ownershipId = `owner_${'P'.repeat(22)}`;
+  assert.equal((await authority.transitionBatchAuditSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId,
+    fromPageId: null, fromOwnershipId: null, toPageId: 'page-1', toOwnershipId: ownershipId,
+  })).ok, true);
+
+  assert.deepEqual(await authority.transitionAuditSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId, nextState: 'privacy-paused',
+  }), {
+    ok: true, sessionCapabilityId: claimed.sessionCapabilityId, auditId, state: 'privacy-paused',
+  });
+  const paused = await readBatchAuditCorrelationForRecovery({
+    sessionArea, capabilityId: prepared.capabilityId, auditId,
+  });
+  assert.equal(paused.sessionState, 'privacy-paused');
+  assert.equal(paused.activePageId, 'page-1');
+  assert.equal(paused.activeOwnershipId, ownershipId);
+
+  assert.equal((await authority.transitionAuditSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId, nextState: 'running',
+  })).state, 'running');
+  const resumed = await readBatchAuditCorrelationForRecovery({
+    sessionArea, capabilityId: prepared.capabilityId, auditId,
+  });
+  assert.equal(resumed.sessionState, 'running');
+  assert.equal(resumed.activePageId, 'page-1');
+  assert.equal(resumed.activeOwnershipId, ownershipId);
+});
+
 test('revoked batch session can only clear its existing owned page during recovery', async () => {
   const { authority } = authorityFixture();
   const prepared = await authority.prepareNavigationForPanel({

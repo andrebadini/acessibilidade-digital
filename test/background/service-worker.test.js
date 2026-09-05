@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
-import { PANEL_PORT_NAME } from '../../src/background/panel-port.js';
+import { PANEL_PORT_NAME, panelBootstrapStorageKey } from '../../src/background/panel-port.js';
 import { REPORT_PORT_NAME } from '../../src/background/report-port.js';
 import { createRawNavigationVaultV1 } from '../../src/background/raw-navigation-vault.js';
 import { ACTIVE_AUDIT_JOB_KEY } from '../../src/background/authorized-audit-starter.js';
@@ -16,6 +16,7 @@ import * as serviceWorkerModule from '../../src/background/service-worker.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-commit-clock.js';
+import { createPixelCaptureStateV1 } from '../../src/background/pixel-capture-consent.js';
 import { createOwnedTabRegistry } from '../../src/background/owned-tabs.js';
 import { runBatch } from '../../src/background/run-batch.js';
 import { sanitizeEvidenceUrlV1 } from '../../src/core/privacy/evidence-url.js';
@@ -558,6 +559,132 @@ test('late-bound pixel liquidator is closed and denies work before its single bi
   assert.deepEqual(calls, [{ auditId: 'audit-a' }]);
 });
 
+test('panel bootstrap cleanup accepts only a closed record carrying its capture mode', async () => {
+  const auditId = 'audit-bootstrap-mode';
+  const area = sessionAreaForCheckpointTest();
+  const readOne = area.get.bind(area);
+  area.get = async key => key === null ? structuredClone(area.values) : readOne(key);
+  const key = panelBootstrapStorageKey(9);
+  area.values[key] = {
+    version: 1, kind: 'audit-session', auditId,
+    sessionCapabilityId: 'S'.repeat(22), windowId: 9,
+    captureMode: 'element-only',
+    createdAt: 10, expiresAt: 20, state: 'consumed',
+  };
+  const calls = [];
+  const panelCoordinator = {
+    async withWindowLock(windowId, callback) {
+      return callback({
+        async disconnectSession(value) {
+          calls.push([windowId, structuredClone(value)]);
+          delete area.values[key];
+          return true;
+        },
+      });
+    },
+  };
+  assert.equal(await serviceWorkerModule.disconnectPanelAuditSessions({
+    auditId, sessionArea: area, panelCoordinator,
+  }), true);
+  assert.deepEqual(calls, [[9, {
+    auditId, sessionCapabilityId: 'S'.repeat(22), windowId: 9, reasonCode: 'AUDIT_DELETED',
+  }]]);
+
+  area.values[key] = {
+    version: 1, kind: 'audit-session', auditId,
+    sessionCapabilityId: 'S'.repeat(22), windowId: 9,
+    createdAt: 10, expiresAt: 20, state: 'consumed',
+  };
+  calls.length = 0;
+  assert.equal(await serviceWorkerModule.disconnectPanelAuditSessions({
+    auditId, sessionArea: area, panelCoordinator,
+  }), false);
+  assert.deepEqual(calls, []);
+});
+
+test('batch pixel gate stores parent authority while projecting the exact child target to the runner', async () => {
+  assert.equal(typeof serviceWorkerModule.createBatchPagePixelPrivacyGateV1, 'function');
+  const area = sessionAreaForCheckpointTest();
+  let epoch = 1_788_000_000_000;
+  const pixelState = createPixelCaptureStateV1({
+    sessionArea: area,
+    now: () => epoch++,
+    randomBytes: length => new Uint8Array(length).fill(7),
+  });
+  const capturePolicy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const batchAuditId = 'audit-batch-pixels';
+  const childAuditId = 'opaque-child-audit';
+  const pageId = 'page-2';
+  const ownershipId = `owner_${'O'.repeat(22)}`;
+  const target = Object.freeze({
+    version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId,
+    tabId: 27, windowId: 9, documentId: 'document-a',
+    urlEvidence: sanitizeEvidenceUrlV1('https://example.test/private?token=secret', { includeQuery: false }),
+    urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+    cleanupMode: 'always', pageId: 'page-1',
+  });
+  const signals = Object.freeze({
+    version: 'SensitiveCaptureSignalsV1', detected: true,
+    categories: Object.freeze(['password']),
+  });
+  const gateInput = {
+    pixelState,
+    pixelCommitClock: createScriptedPixelCommitClockV1({
+      epochs: Array(8).fill(1_788_000_000_010),
+    }),
+    batchAuditId,
+    childAuditId,
+    pageId,
+    ownershipId,
+    consentId: null,
+    authorityExpiresAt: 1_788_000_500_000,
+    capturePolicy,
+  };
+  const pausedGate = serviceWorkerModule.createBatchPagePixelPrivacyGateV1(gateInput);
+  assert.deepEqual(await pausedGate.preflight({
+    auditId: childAuditId, observedTarget: target, capturePolicy, signals,
+  }), { status: 'privacy-paused', signals });
+  const suspension = await pixelState.readSuspension(batchAuditId);
+  assert.equal(suspension.auditId, batchAuditId);
+  assert.deepEqual(suspension.source, {
+    kind: 'owned-disposable', ownershipId, cleanupMode: 'always', pageId,
+  });
+  assert.equal(await pixelState.readSuspension(childAuditId), null);
+
+  const parentProof = {
+    kind: 'owned-disposable', ownershipId, tabId: target.tabId, windowId: target.windowId,
+    documentId: target.documentId, urlSessionDigest: target.urlSessionDigest,
+    cleanupMode: 'always', pageId,
+  };
+  await pixelState.claimAndBeginResume({
+    auditId: batchAuditId, consentId: suspension.consentId,
+    proof: parentProof, mode: capturePolicy.mode, categories: signals.categories,
+  });
+  await pixelState.markSessionRunning({ auditId: batchAuditId, consentId: suspension.consentId });
+  const resumedGate = serviceWorkerModule.createBatchPagePixelPrivacyGateV1({
+    ...gateInput,
+    pixelCommitClock: createScriptedPixelCommitClockV1({
+      epochs: Array(8).fill(1_788_000_000_000),
+    }),
+    consentId: suspension.consentId,
+  });
+  assert.deepEqual(await resumedGate.preflight({
+    auditId: childAuditId, observedTarget: target, capturePolicy, signals,
+  }), { status: 'armed' });
+  assert.deepEqual(await resumedGate.authorizeFirstPixel({
+    auditId: childAuditId, observedTarget: target, capturePolicy,
+    proof: {
+      tabId: target.tabId, windowId: target.windowId,
+      documentId: target.documentId, urlSessionDigest: target.urlSessionDigest,
+    },
+    signals,
+  }), { status: 'ready' });
+  const running = await pixelState.readSuspension(batchAuditId);
+  assert.equal(running.state, 'resuming');
+  assert.equal(running.resumePhase, 'runner-started');
+  assert.equal(running.source.pageId, pageId);
+});
+
 test('pixel-attempt recovery classifies an expired prepared marker without reminting a commit capability', async () => {
   assert.equal(typeof serviceWorkerModule.createPixelAttemptLifecycleV1, 'function');
   const auditId = 'audit-expired-attempt';
@@ -626,6 +753,52 @@ test('single-URL pixel attempt keeps the exact page and disposable owner through
   assert.deepEqual(await lifecycle.classify({ auditId, consentId: null }), {
     state: 'blocked', handle: null,
   });
+});
+
+test('batch pixel attempt accepts the exact later page and removes its prepared marker before the next consent', async () => {
+  const auditId = 'audit-batch-page-attempt';
+  const consentId = `${'B'.repeat(21)}Q`;
+  const ownershipId = `owner_${'P'.repeat(22)}`;
+  const attemptDigest = `hmac-sha256:${'G'.repeat(43)}`;
+  const key = `audita:pixel-attempt:v1:${auditId}:${'G'.repeat(43)}`;
+  let marker = {
+    version: 1, auditId, attemptDigest, pageId: 'page-2', ownershipId,
+    preparedAt: 1, expiresAt: 10,
+  };
+  const lifecycle = serviceWorkerModule.createPixelAttemptLifecycleV1({
+    sessionArea: { async get() { return marker ? { [key]: structuredClone(marker) } : {}; } },
+    auditStore: {
+      async commitAuditWithCheckpointIfAbsent() { throw new Error('not used'); },
+      async getReportRevision() { return null; },
+    },
+    attemptAuthority: { async digestAttempt() { return attemptDigest; } },
+    attemptCorrelation: {
+      async prepare() { return Object.freeze(Object.create(null)); },
+      async markerMatches(value) {
+        return Boolean(marker) && value.auditId === auditId && value.attemptDigest === attemptDigest &&
+          value.pageId === 'page-2' && value.ownershipId === ownershipId;
+      },
+      async remove(value) {
+        assert.equal(value.pageId, 'page-2');
+        assert.equal(value.ownershipId, ownershipId);
+        marker = null;
+        return true;
+      },
+    },
+    modelNow: () => '2026-08-29T12:00:00.000Z',
+  });
+
+  const handle = await lifecycle.prepareResume({
+    auditId, consentId, pageId: 'page-2', ownershipId, expiresAt: 10,
+  });
+  assert.deepEqual(Reflect.ownKeys(handle), []);
+  assert.deepEqual(await lifecycle.classify({ auditId, consentId, pageId: 'page-2', ownershipId }), {
+    state: 'prepared', handle: null,
+  });
+  assert.equal(await lifecycle.cleanup({
+    auditId, consentId, pageId: 'page-2', ownershipId, expected: 'prepared',
+  }), true);
+  assert.equal(marker, null);
 });
 
 test('single-URL cleanup removes only the exact disposable owner even when an audit has another owner', async () => {
@@ -1313,6 +1486,8 @@ test('default worker maps an explicit no-pixels batch from the panel to one cons
           return Object.freeze({ model: report.model, checkpoint: report.checkpoint });
         },
         async cleanup() { return true; },
+        async clearProgress() { return true; },
+        async discardProgress() { throw new Error('COMMITTED_RESULT_MUST_NOT_BE_DISCARDED'); },
       });
     },
   });
@@ -1364,6 +1539,64 @@ test('default worker maps an explicit no-pixels batch from the panel to one cons
   assert.match(connected.sessionCapabilityId ?? '', /^[A-Za-z0-9_-]{22}$/u);
   assert.equal(connected.state, 'view-only');
   assert.equal(opened.ok, true, JSON.stringify(opened));
+});
+
+test('default worker cancellation removes persisted batch child pixels before clearing ACTIVE', async () => {
+  const auditId = 'audit-worker-cancel-progress';
+  const progress = new Map();
+  const entered = deferred();
+  let resourcesCleared = false;
+  let randomSeed = 0;
+  const env = defaultGraphFixture(null, {
+    auditStore: createInMemoryAuditStore(),
+    createAuditId: () => auditId,
+    randomBytes: length => new Uint8Array(length).fill(++randomSeed),
+    tabsQuery: async () => [{
+      id: 17, windowId: 9, active: true, status: 'complete', url: 'https://example.test/',
+    }],
+    batchAuditExecutionFactory() {
+      return Object.freeze({
+        async run({ signal }) {
+          progress.set(auditId, structuredClone(SAMPLE_AUDIT));
+          entered.resolve();
+          await new Promise((resolve, reject) => {
+            if (signal.aborted) reject(signal.reason);
+            else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+          });
+        },
+        async cleanup() { resourcesCleared = true; return true; },
+        async clearProgress() { throw new Error('COMMITTED_RESULT_CLEAR_MUST_NOT_RUN'); },
+        async discardProgress(request) {
+          assert.deepEqual(request, { auditId });
+          assert.equal(resourcesCleared, true);
+          assert.equal(env.sessionValues[ACTIVE_AUDIT_JOB_KEY]?.auditId, auditId);
+          progress.delete(request.auditId);
+          return true;
+        },
+      });
+    },
+  });
+  const panel = await env.connectPanel();
+  const prepared = await panel.request({
+    type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: 'batch-cancel', intent: 'batch',
+  });
+  assert.equal(prepared.ok, true);
+  const started = await panel.request({
+    type: 'PANEL_START_BATCH_AUDIT', capabilityId: prepared.capabilityId,
+    urls: 'https://one.example.test/\nhttps://two.example.test/',
+    captureMode: 'no-pixels', includeQuery: false, deleteAfterCompleteExport: false,
+  });
+  assert.equal(started.ok, true);
+  await entered.promise;
+  assert.equal(progress.has(auditId), true);
+  const active = env.sessionValues[ACTIVE_AUDIT_JOB_KEY];
+  const cancelled = await panel.request({
+    type: 'PANEL_CANCEL_AUDIT', auditId, sessionCapabilityId: active.sessionCapabilityId,
+  });
+  assert.equal(cancelled.ok, true);
+  for (let attempt = 0; attempt < 100 && env.sessionValues[ACTIVE_AUDIT_JOB_KEY]; attempt += 1) await tick();
+  assert.equal(progress.has(auditId), false);
+  assert.equal(Object.hasOwn(env.sessionValues, ACTIVE_AUDIT_JOB_KEY), false);
 });
 
 test('default worker carries one tokenized URL from the Side Panel to a persisted result without public secrets', async () => {

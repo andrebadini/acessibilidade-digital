@@ -101,8 +101,17 @@ test('runs reversible personas against the exact real MV3 document under strict 
     sidePanels: contexts.filter(value => value.contextType === 'SIDE_PANEL').length,
     popups: contexts.filter(value => value.contextType === 'POPUP').length,
   }, { sidePanels: 1, popups: 0 });
-  await extension.waitForValue(panel,
-    `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial');
+  try {
+    await extension.waitForValue(panel,
+      `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial');
+  } catch (cause) {
+    const observed = await extension.evaluate(panel, `(() => ({
+      screen:document.querySelector('[data-screen]')?.dataset.screen??null,
+      status:document.querySelector('[role="status"]')?.textContent??null,
+      launchLength:new URL(location.href).searchParams.get('launch')?.length??0
+    }))()`);
+    throw new Error(`PERSONA_PANEL_BOOTSTRAP_FAILED ${JSON.stringify(observed)}`, { cause });
+  }
   assert.doesNotMatch(await extension.evaluate(panel, 'document.body.innerText'), new RegExp(sentinel, 'u'));
   assert.deepEqual(await pagePersonaState(extension, extension.startPage.page), { classes: [], artifacts: 0 });
 
@@ -243,6 +252,9 @@ test('runs reversible personas against the exact real MV3 document under strict 
   await extension.waitForValue(extension.startPage.page,
     `document.documentElement.classList.contains('audita-persona-reader')`, Boolean);
   await extension.browser.command('Target.closeTarget', { targetId: panel.targetId });
+  await extension.waitForValue(extension.harnessPage,
+    `chrome.runtime.getContexts({contextTypes:['SIDE_PANEL']}).then(contexts=>contexts.length===0)`,
+    Boolean, { timeoutMs: 10_000, intervalMs: 25 });
   const reconnectedPanel = await extension.openSidePanelFromAction();
   await extension.waitForValue(reconnectedPanel,
     `document.querySelector('button[data-persona-mode="reader"]')?.getAttribute('aria-pressed')`,
