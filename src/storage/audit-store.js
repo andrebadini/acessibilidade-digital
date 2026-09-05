@@ -1,10 +1,13 @@
 import {
+  AuditDeletionDeniedError,
   canonicalAuditId,
   canonicalRetentionInstant,
   createRetentionMetadata,
+  createDeletionTombstoneV1,
   isPrivateAuditKey,
   migrateRetentionMetadata,
   validateRetentionMetadata,
+  validateDeletionTombstoneV1,
 } from './audit-retention.js';
 import { runPixelAttemptCommitAuthorizationV1 } from '../background/pixel-attempt-correlation.js';
 import { AUDIT_STORAGE_UNAVAILABLE_MESSAGE as STORAGE_UNAVAILABLE_MESSAGE } from '../core/privacy.js';
@@ -19,6 +22,7 @@ import { createExportDeliveryIdentityV1, EXPORT_FORMATS_V1 } from '../export/exp
 const DB_NAME = 'audita-mt';
 const STORE_NAME = 'audits';
 const RETENTION_STORE_NAME = 'audit-retention';
+const DELETION_STORE_NAME = 'audit-deletion-tombstones';
 const LATEST_KEY = '__latest__';
 const REVISION_KEY_PREFIX = '__audit_revision__:';
 const CHECKPOINT_KEY_PREFIX = '__audit_checkpoint__:';
@@ -39,6 +43,7 @@ const TERMINAL_AUDIT_STATUSES = new Set(['complete', 'partial', 'failed', 'cance
 const INTERRUPTIBLE_AUDIT_STATUSES = new Set(['idle', 'validating', 'queued', 'running', 'cancelling']);
 const AUDIT_SNAPSHOT_CAPABILITIES = new WeakMap();
 const IN_MEMORY_RETENTION = new WeakMap();
+const IN_MEMORY_DELETIONS = new WeakMap();
 const PRIVATE_PIXEL_ATTEMPT_STORES = new WeakMap();
 
 function materializeCanonicalAuditModel(auditId, model, options = {}) {
@@ -354,6 +359,38 @@ function exactDataRecord(value, keys) {
     }
     return copy;
   } catch { return null; }
+}
+
+function deletionRequestV1(value) {
+  try {
+    const record = exactDataRecord(value, ['auditId', 'reason', 'now', 'expectedRevision', 'terminalReceipt']);
+    if (!record || record.reason !== 'retention-expired' || record.expectedRevision !== null || record.terminalReceipt !== null) return null;
+    return { auditId: canonicalAuditId(record.auditId), now: canonicalRetentionInstant(record.now).iso };
+  } catch { return null; }
+}
+
+function deletionOperationV1(value, keys) {
+  try {
+    const record = exactDataRecord(value, keys);
+    if (!record) throw new TypeError();
+    if (keys.includes('auditId')) canonicalAuditId(record.auditId);
+    if (keys.includes('at')) canonicalRetentionInstant(record.at);
+    if (keys.includes('limit') && (!Number.isSafeInteger(record.limit) || record.limit < 1 || record.limit > 25)) throw new TypeError();
+    return record;
+  } catch { throw new AuditDeletionDeniedError(); }
+}
+
+function nextDeletionFailure(record, at) {
+  if (at < (record.lastAttemptAt ?? record.requestedAt)) throw new AuditDeletionDeniedError();
+  return validateDeletionTombstoneV1({ ...record, attempts: record.attempts + 1, lastAttemptAt: at }, record.auditId);
+}
+
+function stagedDeletion(record, auditId) {
+  return Object.freeze({ status: 'staged', tombstone: validateDeletionTombstoneV1(record, auditId) });
+}
+
+function deniedDeletion() {
+  return Object.freeze({ status: 'denied', code: 'AUDIT_DELETION_DENIED' });
 }
 
 function exactTerminalOptions(value) {
@@ -1071,6 +1108,8 @@ function safeStoredErrorCode(value) {
 }
 
 export function createInMemoryAuditStore(initial = new Map(), storeOptions = {}) {
+  if (!IN_MEMORY_DELETIONS.has(initial)) IN_MEMORY_DELETIONS.set(initial, new Map());
+  const deletions = IN_MEMORY_DELETIONS.get(initial);
   let retention = IN_MEMORY_RETENTION.get(initial);
   if (!retention) {
     retention = new Map();
@@ -1547,6 +1586,37 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       const value = retention.get(key);
       return value === undefined ? undefined : storageClone(validateRetentionMetadata(value, key));
     },
+    async stageAuditDeletionV1(value) {
+      const request = deletionRequestV1(value);
+      if (!request) return deniedDeletion();
+      const { auditId, now } = request;
+      if (deletions.has(auditId)) return stagedDeletion(deletions.get(auditId), auditId);
+      if (initial.get(auditId) === undefined) return deniedDeletion();
+      const metadata = retention.get(auditId);
+      if (metadata === undefined || validateRetentionMetadata(metadata, auditId).expiresAt > now) return deniedDeletion();
+      const tombstone = createDeletionTombstoneV1({ auditId, requestedAt: now });
+      deleteStoredAudit(auditId);
+      deletions.set(auditId, tombstone);
+      return stagedDeletion(tombstone, auditId);
+    },
+    async listDeletionTombstonesV1(value) {
+      const { limit } = deletionOperationV1(value, ['limit']);
+      return Object.freeze([...deletions.keys()].sort().slice(0, limit)
+        .map(auditId => validateDeletionTombstoneV1(deletions.get(auditId), auditId)));
+    },
+    async recordDeletionCleanupFailureV1(value) {
+      const { auditId, at } = deletionOperationV1(value, ['auditId', 'at']);
+      const record = deletions.get(auditId);
+      if (record === undefined) return false;
+      deletions.set(auditId, nextDeletionFailure(validateDeletionTombstoneV1(record, auditId), at));
+      return true;
+    },
+    async completeAuditDeletionV1(value) {
+      const { auditId } = deletionOperationV1(value, ['auditId']);
+      if (!deletions.has(auditId)) return false;
+      validateDeletionTombstoneV1(deletions.get(auditId), auditId);
+      return deletions.delete(auditId);
+    },
     async setRetentionIntent(id, snapshotCapability, options) {
       const key = validId(id);
       canonicalRetentionInstant(options?.now);
@@ -1689,6 +1759,10 @@ function createUnavailableAuditStore() {
     getExportDeliveryJournal: unavailable,
     getExportReceipt: unavailable,
     getAuditRetention: unavailable,
+    stageAuditDeletionV1: unavailable,
+    listDeletionTombstonesV1: unavailable,
+    recordDeletionCleanupFailureV1: unavailable,
+    completeAuditDeletionV1: unavailable,
     setRetentionIntent: unavailable,
     cleanupExpiredAudits: unavailable,
     deleteAudit: unavailable,
@@ -1710,7 +1784,7 @@ export function createAuditStore(options = {}) {
     if (opening) return opening;
     let request;
     try {
-      request = indexedDbBoundary(() => factory.open(DB_NAME, 2));
+      request = indexedDbBoundary(() => factory.open(DB_NAME, 3));
     } catch (error) {
       opening = null;
       throw error;
@@ -1733,6 +1807,9 @@ export function createAuditStore(options = {}) {
           const retentionStore = indexedDbBoundary(() => db.objectStoreNames.contains(RETENTION_STORE_NAME), transaction)
             ? indexedDbObjectStore(transaction, () => transaction.objectStore(RETENTION_STORE_NAME))
             : indexedDbObjectStore(transaction, () => db.createObjectStore(RETENTION_STORE_NAME, { keyPath: 'auditId' }));
+          if (!indexedDbBoundary(() => db.objectStoreNames.contains(DELETION_STORE_NAME), transaction)) {
+            indexedDbBoundary(() => db.createObjectStore(DELETION_STORE_NAME, { keyPath: 'auditId' }), transaction);
+          }
           if (!indexedDbBoundary(() => retentionStore.indexNames.contains('byExpiresAt'), transaction)) {
             retentionStore.createIndex('byExpiresAt', 'expiresAt', { unique: false });
           }
@@ -1817,6 +1894,100 @@ export function createAuditStore(options = {}) {
     });
   };
   const get = async key => (await readKeys([key])).get(key);
+  const deletionTransaction = async (names, mode, run) => {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      let result;
+      let resultSet = false;
+      const transaction = indexedDbBoundary(() => db.transaction(names, mode));
+      const fail = error => {
+        abortIndexedDbTransaction(transaction);
+        reject(error instanceof AuditDeletionDeniedError ? error : new AuditStorageUnavailableError());
+      };
+      transaction.oncomplete = () => resultSet ? resolve(result) : reject(new AuditStorageUnavailableError());
+      transaction.onerror = transaction.onabort = () => reject(new AuditStorageUnavailableError());
+      const watch = request => { request.onerror = () => fail(); return request; };
+      const read = (request, receive) => {
+        watch(request).onsuccess = () => {
+          try { receive(request.result); } catch (error) { fail(error); }
+        };
+      };
+      try {
+        run({
+          store: name => indexedDbObjectStore(transaction, () => transaction.objectStore(name)),
+          read, watch, setResult: value => { result = value; resultSet = true; },
+          advance: cursor => continueIndexedDbCursor(transaction, cursor, 'continue'),
+        });
+      } catch (error) { fail(error); }
+    });
+  };
+  const stageAuditDeletionV1 = async value => {
+    const request = deletionRequestV1(value);
+    if (!request) return deniedDeletion();
+    const { auditId, now } = request;
+    return deletionTransaction([STORE_NAME, RETENTION_STORE_NAME, DELETION_STORE_NAME], 'readwrite', context => {
+      const audits = context.store(STORE_NAME);
+      const retention = context.store(RETENTION_STORE_NAME);
+      const deletions = context.store(DELETION_STORE_NAME);
+      context.read(deletions.get(auditId), existing => {
+        if (existing !== undefined) { context.setResult(stagedDeletion(existing, auditId)); return; }
+        context.read(audits.get(auditId), model => {
+          if (model === undefined) { context.setResult(deniedDeletion()); return; }
+          context.read(retention.get(auditId), metadata => {
+            if (metadata === undefined || validateRetentionMetadata(metadata, auditId).expiresAt > now) {
+              context.setResult(deniedDeletion()); return;
+            }
+            const tombstone = createDeletionTombstoneV1({ auditId, requestedAt: now });
+            context.read(audits.get(LATEST_KEY), latest => {
+              for (const key of [auditId, revisionKey(auditId), checkpointKey(auditId), pixelAttemptKey(auditId),
+                exportLeaseKey(auditId), exportAttemptKey(auditId), exportDeliveryKey(auditId)]) context.watch(audits.delete(key));
+              if (latest?.auditId === auditId) context.watch(audits.delete(LATEST_KEY));
+              context.watch(retention.delete(auditId));
+              context.watch(deletions.put(tombstone));
+              context.setResult(stagedDeletion(tombstone, auditId));
+            });
+          });
+        });
+      });
+    });
+  };
+  const listDeletionTombstonesV1 = async value => {
+    const { limit } = deletionOperationV1(value, ['limit']);
+    return deletionTransaction(DELETION_STORE_NAME, 'readonly', context => {
+      const records = [];
+      const request = context.store(DELETION_STORE_NAME).openCursor();
+      context.read(request, cursor => {
+        if (!cursor) { context.setResult(Object.freeze(records)); return; }
+        records.push(validateDeletionTombstoneV1(cursor.value, cursor.primaryKey ?? cursor.key));
+        if (records.length === limit) context.setResult(Object.freeze(records));
+        else context.advance(cursor);
+      });
+    });
+  };
+  const recordDeletionCleanupFailureV1 = async value => {
+    const { auditId, at } = deletionOperationV1(value, ['auditId', 'at']);
+    return deletionTransaction(DELETION_STORE_NAME, 'readwrite', context => {
+      const deletions = context.store(DELETION_STORE_NAME);
+      context.read(deletions.get(auditId), existing => {
+        if (existing === undefined) { context.setResult(false); return; }
+        const next = nextDeletionFailure(validateDeletionTombstoneV1(existing, auditId), at);
+        context.watch(deletions.put(next));
+        context.setResult(true);
+      });
+    });
+  };
+  const completeAuditDeletionV1 = async value => {
+    const { auditId } = deletionOperationV1(value, ['auditId']);
+    return deletionTransaction(DELETION_STORE_NAME, 'readwrite', context => {
+      const deletions = context.store(DELETION_STORE_NAME);
+      context.read(deletions.get(auditId), existing => {
+        if (existing === undefined) { context.setResult(false); return; }
+        validateDeletionTombstoneV1(existing, auditId);
+        context.watch(deletions.delete(auditId));
+        context.setResult(true);
+      });
+    });
+  };
   const getAuditSnapshot = async id => {
     const key = validId(id);
     const values = await readKeys([key, revisionKey(key)]);
@@ -3169,6 +3340,10 @@ export function createAuditStore(options = {}) {
       return exportReceiptFromRevision(revision, entries) ?? exportReceiptFromLatest(latest, validId(id));
     },
     getAuditRetention,
+    stageAuditDeletionV1,
+    listDeletionTombstonesV1,
+    recordDeletionCleanupFailureV1,
+    completeAuditDeletionV1,
     setRetentionIntent,
     cleanupExpiredAudits,
     deleteAudit,

@@ -518,6 +518,178 @@ function storeFactories() {
   ];
 }
 
+function deletionStoreContexts() {
+  const backing = new Map();
+  const fake = createFakeIndexedDb();
+  return [
+    { name: 'memory', open: () => createInMemoryAuditStore(backing), auditEntries: () => [...backing.entries()],
+      removeAuditModel: async auditId => backing.delete(auditId) },
+    { name: 'IndexedDB', open: () => createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange }),
+      auditEntries: () => [...fake.inspectStore('audits').entries()],
+      removeAuditModel: auditId => new Promise((resolve, reject) => {
+        const transaction = fake.database.transaction('audits', 'readwrite');
+        transaction.objectStore('audits').delete(auditId);
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = transaction.onabort = () => reject(new Error('fixture deletion failed'));
+      }) },
+  ];
+}
+
+const deletionRequest = (auditId, now = T30) => ({
+  auditId, reason: 'retention-expired', now, expectedRevision: null, terminalReceipt: null,
+});
+
+test('deletion staging removes the expired durable graph despite an active export lease and survives reopening', async t => {
+  for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
+    const store = context.open();
+    const auditId = 'expired-staging';
+    const terminal = await terminalFixture(auditId);
+    const pixel = await preparePixelAttempt(store, auditId);
+    await store.commitAuditWithCheckpointIfAbsent(auditId, terminal.model, terminal.checkpoint, terminal.latest,
+      { now: T0, deleteAfterCompleteExport: false, pixelAttemptCommit: pixel.capability });
+    const snapshot = await store.getAuditSnapshot(auditId);
+    const lease = await store.acquireExportLease(auditId, snapshot.capability, {
+      ownerId: 'active-export', now: '2026-08-30T23:59:59.000Z',
+    });
+    await store.claimExportLease(auditId, snapshot.capability, {
+      ownerId: 'active-export', exportAttempt: lease.exportAttempt, now: '2026-08-30T23:59:59.100Z',
+    });
+    await store.beginExportDelivery(auditId, snapshot.capability, {
+      ownerId: 'active-export', exportAttempt: lease.exportAttempt, now: '2026-08-30T23:59:59.200Z',
+    });
+    await store.recordExportDelivery(auditId, snapshot.capability, {
+      ownerId: 'active-export', exportAttempt: lease.exportAttempt, now: '2026-08-30T23:59:59.300Z',
+      format: 'html', filename: 'audit.html', state: 'starting',
+    });
+    assert.equal((await store.getExportLeaseState(auditId, { now: T30 })).active, true);
+    assert.equal((await store.getExportDeliveryJournal(auditId)).length, 1);
+    const result = await store.stageAuditDeletionV1(deletionRequest(auditId));
+    assert.deepEqual(result, { status: 'staged', tombstone: {
+      version: 1, auditId, reason: 'retention-expired', requestedAt: T30,
+      phase: 'transient-cleanup-pending', attempts: 0, lastAttemptAt: null,
+    } });
+    const reopened = context.open();
+    assert.equal(await reopened.getAudit(auditId), undefined);
+    assert.equal(await reopened.getReportRevision(auditId), null);
+    assert.equal(await reopened.getAuditRetention(auditId), undefined);
+    assert.equal(await reopened.getLatest(), undefined);
+    assert.equal(await readPrivatePixelAttemptCommitV1(reopened, pixel.correlation), false);
+    assert.deepEqual(context.auditEntries(), []);
+    assert.deepEqual(await reopened.listDeletionTombstonesV1({ limit: 25 }), [result.tombstone]);
+    await assert.rejects(reopened.commitAuditIfRevision(auditId, terminal.model, terminal.latest, snapshot.capability));
+  });
+});
+
+test('deletion staging denies premature, missing and unauthorized reasons without altering any audit', async t => {
+  for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
+    const store = context.open();
+    await store.commitAudit('staging-a', auditFixture('staging-a'), { auditId: 'staging-a' }, { now: T0 });
+    await store.commitAudit('foreign-audit', auditFixture('foreign-audit'), { auditId: 'foreign-audit' }, { now: T0 });
+    const before = context.auditEntries();
+    for (const request of [
+      deletionRequest('staging-a', '2026-08-30T23:59:59.999Z'), deletionRequest('absent-audit'),
+      { ...deletionRequest('staging-a'), reason: 'manual' },
+      { ...deletionRequest('staging-a'), reason: 'post-export' },
+      { ...deletionRequest('staging-a'), expectedRevision: 1 },
+      { ...deletionRequest('staging-a'), url: 'https://example.test/?token=PRIVATE' },
+    ]) assert.deepEqual(await store.stageAuditDeletionV1(request), { status: 'denied', code: 'AUDIT_DELETION_DENIED' });
+    assert.deepEqual(context.auditEntries(), before);
+    assert.deepEqual(await store.listDeletionTombstonesV1({ limit: 25 }), []);
+    assert.equal((await store.getAuditRetention('staging-a')).expiresAt, T30);
+    await store.stageAuditDeletionV1(deletionRequest('staging-a'));
+    assert.equal((await store.getLatest()).auditId, 'foreign-audit');
+    assert.ok(await store.getAudit('foreign-audit'));
+  });
+});
+
+test('deletion staging denies orphaned retention metadata without claiming a nonexistent audit was deleted', async t => {
+  for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
+    const store = context.open();
+    const auditId = 'orphan-retention';
+    await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0 });
+    await context.removeAuditModel(auditId);
+    const before = context.auditEntries();
+    const metadata = await store.getAuditRetention(auditId);
+    assert.equal(await store.getAudit(auditId), undefined);
+    assert.equal(metadata.expiresAt, T30);
+    assert.deepEqual(await store.stageAuditDeletionV1(deletionRequest(auditId)), {
+      status: 'denied', code: 'AUDIT_DELETION_DENIED',
+    });
+    assert.deepEqual(context.auditEntries(), before);
+    assert.deepEqual(await store.getAuditRetention(auditId), metadata);
+    assert.deepEqual(await store.listDeletionTombstonesV1({ limit: 25 }), []);
+  });
+});
+
+test('deletion tombstone retries preserve the original request and completion removes only its own record', async t => {
+  for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
+    const store = context.open();
+    for (const auditId of ['staging-a', 'staging-b']) {
+      await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0 });
+      await store.stageAuditDeletionV1(deletionRequest(auditId));
+    }
+    await store.recordDeletionCleanupFailureV1({ auditId: 'staging-a', at: '2026-08-31T00:00:01.000Z' });
+    await context.open().recordDeletionCleanupFailureV1({ auditId: 'staging-a', at: '2026-08-31T00:00:02.000Z' });
+    const restaged = await store.stageAuditDeletionV1(deletionRequest('staging-a', '2026-09-01T00:00:00.000Z'));
+    assert.equal(restaged.tombstone.requestedAt, T30);
+    assert.equal(restaged.tombstone.attempts, 2);
+    assert.equal(restaged.tombstone.lastAttemptAt, '2026-08-31T00:00:02.000Z');
+    await assert.rejects(store.recordDeletionCleanupFailureV1({ auditId: 'staging-a', at: T30 }), { code: 'AUDIT_DELETION_DENIED' });
+    await Promise.all([store, context.open()].map(connection => connection.recordDeletionCleanupFailureV1({
+      auditId: 'staging-a', at: '2026-08-31T00:00:03.000Z',
+    })));
+    assert.equal((await store.listDeletionTombstonesV1({ limit: 1 }))[0].attempts, 4);
+    assert.equal((await store.listDeletionTombstonesV1({ limit: 1 })).length, 1);
+    await store.completeAuditDeletionV1({ auditId: 'staging-a' });
+    await store.completeAuditDeletionV1({ auditId: 'staging-a' });
+    assert.deepEqual((await store.listDeletionTombstonesV1({ limit: 25 })).map(value => value.auditId), ['staging-b']);
+    assert.equal(await store.getAudit('staging-a'), undefined);
+    assert.equal(await store.getAudit('staging-b'), undefined);
+  });
+});
+
+test('deletion staging upgrades v2 without changing retained models or retention metadata', async () => {
+  const auditId = 'upgrade-staging';
+  const model = auditFixture(auditId);
+  const metadata = { auditId, schemaVersion: 1, firstPersistedAt: T0, expiresAt: T30, deleteAfterCompleteExport: false };
+  const fake = createFakeIndexedDb({ version: 2, initialStores: {
+    audits: [[auditId, model]], 'audit-retention': [[auditId, metadata]],
+  } });
+  const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+  assert.deepEqual(await store.getAudit(auditId), model);
+  assert.ok(fake.createdStores.includes('audit-deletion-tombstones'));
+  assert.equal(fake.database.version, 3);
+  assert.deepEqual(await store.getAuditRetention(auditId), metadata);
+  assert.deepEqual(await store.listDeletionTombstonesV1({ limit: 25 }), []);
+});
+
+test('deletion staging aborts and restores every durable record when the tombstone write fails after deletes', async () => {
+  let observedDeletesBeforeFailure = false;
+  const fake = createFakeIndexedDb({
+    rollbackWrites: true,
+    failWriteRequest: ({ storeName, operation }) => {
+      if (storeName !== 'audit-deletion-tombstones' || operation !== 'put') return false;
+      observedDeletesBeforeFailure = !fake.inspectStore('audits').has('expired-atomic') &&
+        !fake.inspectStore('audit-retention').has('expired-atomic');
+      return true;
+    },
+    writeError: new Error('PRIVATE_NATIVE_DELETION_FAILURE'),
+  });
+  const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+  for (const auditId of ['expired-atomic', 'foreign-atomic']) {
+    await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0 });
+  }
+  const names = ['audits', 'audit-retention', 'audit-deletion-tombstones'];
+  const before = names.map(name => fake.inspectStore(name));
+  await assert.rejects(store.stageAuditDeletionV1(deletionRequest('expired-atomic')),
+    error => error?.code === 'AUDIT_STORAGE_UNAVAILABLE' && !error.message.includes('PRIVATE_NATIVE_DELETION_FAILURE'));
+  assert.ok(fake.abortCalls > 0);
+  assert.equal(observedDeletesBeforeFailure, true, 'the regression must exercise rollback after real mutations, not a first-write failure');
+  assert.deepEqual(names.map(name => fake.inspectStore(name)), before);
+  assert.ok(await store.getAudit('expired-atomic'));
+  assert.ok(await store.getAudit('foreign-atomic'));
+});
+
 function hostileReviewModel() {
   const model = structuredClone(SAMPLE_AUDIT);
   model.report.reviewUrl = HOSTILE_REVIEW_URL;
@@ -1450,7 +1622,7 @@ test('IndexedDB audit storage uses a dedicated object store and persists a canon
   assert.equal(fake.createdStores.includes('audits'), true);
 });
 
-test('IndexedDB v2 persists limited retention metadata beside each model in one transaction', async () => {
+test('IndexedDB persists limited retention metadata beside each model in one transaction', async () => {
   const fake = createFakeIndexedDb();
   const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
   const auditId = 'audit-idb-retention';
@@ -1461,7 +1633,7 @@ test('IndexedDB v2 persists limited retention metadata beside each model in one 
     { now: T0, deleteAfterCompleteExport: true },
   );
 
-  assert.equal(fake.versions[0], 2);
+  assert.equal(fake.versions[0], 3);
   assert.equal(fake.createdStores.includes('audit-retention'), true);
   assert.equal(fake.inspectIndexes('audit-retention').get('byExpiresAt').keyPath, 'expiresAt');
   assert.ok(fake.transactionStores.some(names => names.length === 2 && names.includes('audits') && names.includes('audit-retention')));
@@ -1472,7 +1644,7 @@ test('IndexedDB v2 persists limited retention metadata beside each model in one 
   assert.doesNotMatch(JSON.stringify(fake.inspectStore('audit-retention')), /sensitive|token|pixel/iu);
 });
 
-test('IndexedDB v2 keeps a historical audit id using the former pixel-attempt-looking prefix manageable', async () => {
+test('IndexedDB upgrades v2 while keeping a historical pixel-attempt-looking audit id manageable', async () => {
   const auditId = '__audit_pixel_attempt__:historical-audit';
   const fake = createFakeIndexedDb({
     version: 2,
@@ -1489,7 +1661,7 @@ test('IndexedDB v2 keeps a historical audit id using the former pixel-attempt-lo
   assert.equal((await store.getAudit(auditId)).auditId, auditId);
   await store.setAudit(auditId, auditFixture(auditId, 'still-managed'));
   assert.equal((await store.getAudit(auditId)).versions.extension, 'test-still-managed');
-  assert.equal(fake.versions[0], 2);
+  assert.equal(fake.versions[0], 3);
 });
 
 test('IndexedDB v1 migration creates metadata only for normal audit records and preserves private keys', async () => {
@@ -3446,6 +3618,20 @@ function createFakeIndexedDb(options = {}) {
   const cloneValue = value => value === undefined ? undefined : structuredClone(value);
   const createTransaction = (storeNames, mode = 'readonly', active = true) => {
     const names = Array.isArray(storeNames) ? storeNames : [storeNames];
+    let rollbackSnapshot = null;
+    const captureRollbackSnapshot = () => {
+      if (!options.rollbackWrites || mode !== 'readwrite' || rollbackSnapshot) return;
+      rollbackSnapshot = new Map(names.map(name => [name,
+        new Map([...stores.get(name).records].map(([key, value]) => [key, cloneValue(value)])),
+      ]));
+    };
+    const restoreRollbackSnapshot = () => {
+      for (const [name, records] of rollbackSnapshot ?? []) {
+        const target = stores.get(name).records;
+        target.clear();
+        for (const [key, value] of records) target.set(key, cloneValue(value));
+      }
+    };
     let pending = 0;
     let completionQueued = false;
     let completed = false;
@@ -3461,6 +3647,7 @@ function createFakeIndexedDb(options = {}) {
       },
       abort() {
         if (completed) return;
+        restoreRollbackSnapshot();
         fake.abortCalls += 1;
         completed = true;
         transaction.error ??= new Error('AbortError');
@@ -3476,6 +3663,7 @@ function createFakeIndexedDb(options = {}) {
       },
       _activate() {
         if (active || completed) return;
+        captureRollbackSnapshot();
         active = true;
         for (const operation of scheduled.splice(0)) queueMicrotask(operation);
         if (pending === 0) transaction._queueCompletion();
@@ -3612,6 +3800,9 @@ function createFakeIndexedDb(options = {}) {
         throwSynchronousFailure('store.put');
         const key = keyFor(value, explicitKey);
         return request(() => {
+          if (options.failWriteRequest?.({ storeName: name, operation: 'put', key })) {
+            throw options.writeError ?? new Error('AbortError');
+          }
           if (options.failWrites) throw options.writeError ?? new Error('QuotaExceededError');
           definition.records.set(key, cloneValue(value));
           return key;

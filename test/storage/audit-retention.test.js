@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import * as retention from '../../src/storage/audit-retention.js';
 
 import {
   RETENTION_MS,
@@ -90,4 +91,36 @@ test('retention accepts only the shared bounded audit identifier grammar', () =>
     createRetentionMetadata('Audit_2.release:2026-08-28', '2026-08-01T00:00:00.000Z').auditId,
     'Audit_2.release:2026-08-28',
   );
+});
+
+test('deletion tombstone contains only the durable cleanup identity and canonical retry state', () => {
+  const record = retention.createDeletionTombstoneV1({ auditId: 'expired-audit', requestedAt: '2026-08-31T00:00:00.000Z' });
+  assert.deepEqual(record, {
+    version: 1, auditId: 'expired-audit', reason: 'retention-expired',
+    requestedAt: '2026-08-31T00:00:00.000Z', phase: 'transient-cleanup-pending',
+    attempts: 0, lastAttemptAt: null,
+  });
+  assert.equal(Object.isFrozen(record), true);
+  assert.deepEqual(retention.validateDeletionTombstoneV1(record, 'expired-audit'), record);
+});
+
+test('deletion tombstone rejects foreign identity, private fields and inconsistent retry chronology', () => {
+  const record = {
+    version: 1, auditId: 'expired-audit', reason: 'retention-expired',
+    requestedAt: '2026-08-31T00:00:00.000Z', phase: 'transient-cleanup-pending',
+    attempts: 0, lastAttemptAt: null,
+  };
+  for (const patch of [
+    { auditId: 'foreign-audit' }, { url: 'https://example.test/?token=PRIVATE' },
+    { reason: 'manual' }, { phase: 'complete' }, { attempts: -1 },
+    { attempts: 1 }, { lastAttemptAt: '2026-08-31T00:00:01.000Z' },
+    { attempts: 1, lastAttemptAt: '2026-08-30T23:59:59.999Z' },
+    { requestedAt: 'not-a-date' },
+  ]) assert.throws(() => retention.validateDeletionTombstoneV1({ ...record, ...patch }, 'expired-audit'),
+    error => error?.code === 'AUDIT_DELETION_DENIED' && !/PRIVATE|https:|token/u.test(error.message));
+  let reads = 0;
+  const accessor = { ...record };
+  Object.defineProperty(accessor, 'auditId', { enumerable: true, get() { reads += 1; return 'expired-audit'; } });
+  assert.throws(() => retention.validateDeletionTombstoneV1(accessor), { code: 'AUDIT_DELETION_DENIED' });
+  assert.equal(reads, 0);
 });

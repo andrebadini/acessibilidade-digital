@@ -18,6 +18,54 @@ const RETENTION_KEYS = Object.freeze([
 ]);
 const UNIX_EPOCH = '1970-01-01T00:00:00.000Z';
 
+export class AuditDeletionDeniedError extends TypeError {
+  constructor() {
+    super('Não foi possível autorizar a exclusão da auditoria.');
+    this.code = 'AUDIT_DELETION_DENIED';
+  }
+}
+
+function deletionDataRecord(value, keys) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new TypeError();
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length !== keys.length || ownKeys.some(key => !keys.includes(key))) throw new TypeError();
+    const result = {};
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new TypeError();
+      result[key] = descriptor.value;
+    }
+    return result;
+  } catch { throw new AuditDeletionDeniedError(); }
+}
+
+export function createDeletionTombstoneV1(value) {
+  const { auditId, requestedAt } = deletionDataRecord(value, ['auditId', 'requestedAt']);
+  return validateDeletionTombstoneV1({
+    version: 1, auditId, reason: 'retention-expired', requestedAt,
+    phase: 'transient-cleanup-pending', attempts: 0, lastAttemptAt: null,
+  });
+}
+
+export function validateDeletionTombstoneV1(value, expectedAuditId) {
+  try {
+    const record = deletionDataRecord(value, [
+      'version', 'auditId', 'reason', 'requestedAt', 'phase', 'attempts', 'lastAttemptAt',
+    ]);
+    canonicalAuditId(record.auditId);
+    if (expectedAuditId !== undefined && record.auditId !== canonicalAuditId(expectedAuditId)) throw new TypeError();
+    const requested = canonicalRetentionInstant(record.requestedAt);
+    if (record.version !== 1 || record.reason !== 'retention-expired' ||
+      record.phase !== 'transient-cleanup-pending' || !Number.isSafeInteger(record.attempts) || record.attempts < 0) throw new TypeError();
+    if (record.attempts === 0) {
+      if (record.lastAttemptAt !== null) throw new TypeError();
+    } else if (canonicalRetentionInstant(record.lastAttemptAt).milliseconds < requested.milliseconds) throw new TypeError();
+    return Object.freeze(record);
+  } catch { throw new AuditDeletionDeniedError(); }
+}
+
 export function isPrivateAuditKey(value) {
   return value === LATEST_KEY || value === RETENTION_CLEANUP_CURSOR_KEY ||
     PRIVATE_PREFIXES.some(prefix => value?.startsWith?.(prefix));
