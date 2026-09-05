@@ -280,6 +280,22 @@ button:active { transform: translateY(1px); }
 }
 
 .persona-message { color: #42586a; font-size: 14px; line-height: 1.35; }
+.persona-controls[data-reader-active="true"] {
+  padding: 14px;
+  border: 1px solid #b7c9d6;
+  border-radius: 14px;
+  background: #f2f7fa;
+}
+.reader-caption-card {
+  padding: 14px;
+  border-radius: 10px;
+  background: #16354a;
+  color: #fff;
+}
+.reader-caption-card h3 { margin: 0; font-size: 14px; color: #fff; }
+.reader-position { font-size: 13px; color: #c7e7f5; }
+.reader-caption { margin-block: 10px; font-size: 18px; line-height: 1.5; overflow-wrap: anywhere; max-block-size: 12rem; overflow-y: auto; }
+.reader-disclaimer { font-size: 12px; color: #d8e6ed; }
 .detail-actions { grid-column: 1 / -1; }
 
 .source-choice {
@@ -676,6 +692,9 @@ code {
 }
 
 .report-action { min-inline-size: min(100%, 240px); }
+.report-ready { display: grid; gap: 10px; padding: 16px; border: 1px solid #b2d8c5; border-radius: 14px; background: #f0f8f3; }
+.report-ready h2 { margin: 0; font-size: 18px; }
+.report-launch-status { margin: 0; font-size: 14px; line-height: 1.5; color: #284b3a; }
 
 .visually-hidden {
   position: fixed !important;

@@ -24,9 +24,15 @@ const PANEL_UNAVAILABLE_REASONS = new Set([
 ]);
 const HIGHLIGHT_BINDING_REASONS = new Set(['no-binding', 'expired', 'live-proof-failed']);
 const READER_SPEECH_AVAILABILITY = new Set(['available', 'unavailable', 'busy', 'error']);
+const PERSONA_KEYS = Object.freeze([
+  'mode', 'readerPaused', 'readerCaption', 'readerPosition', 'speechAvailability', 'voiceId', 'rate', 'message',
+]);
 
 function neutralPersona(message = 'Escolha uma simulação para esta página.') {
-  return { mode: null, readerPaused: false, speechAvailability: 'unavailable', voiceId: '', rate: 1, message };
+  return {
+    mode: null, readerPaused: false, readerCaption: '', readerPosition: '',
+    speechAvailability: 'unavailable', voiceId: '', rate: 1, message,
+  };
 }
 
 function uncheckedHighlight() {
@@ -319,8 +325,11 @@ export function reducePanelState(current, event) {
     case 'PERSONA_SELECTED':
       if (!PERSONA_MODES.has(event.mode)) return current;
       return nextPanelState(current, {
+        focusId: `persona-${event.mode}`,
+        scrollTop: event.mode === 'reader' ? 0 : current.scrollTop,
         persona: {
           mode: event.mode, readerPaused: false,
+          readerCaption: '', readerPosition: '',
           speechAvailability: 'unavailable', voiceId: '', rate: 1,
           message: event.mode === 'reader'
             ? 'Leitura simulada ativa. Use os controles para navegar pela legenda.'
@@ -354,6 +363,7 @@ export function reducePanelState(current, event) {
         return nextPanelState(current, {
           persona: {
             mode: 'reader', readerPaused: false,
+            readerCaption: '', readerPosition: '',
             speechAvailability: event.speechAvailability, voiceId: event.voiceId, rate: event.rate,
             message: `Leitura simulada pronta. Use Próximo para começar. ${speechMessage}`,
           },
@@ -365,6 +375,7 @@ export function reducePanelState(current, event) {
       return nextPanelState(current, {
         persona: {
           mode: 'reader', readerPaused: event.playback === 'paused',
+          readerCaption: event.caption, readerPosition: `${event.index + 1} de ${event.total}`,
           speechAvailability: event.speechAvailability, voiceId: event.voiceId, rate: event.rate,
           message: `Leitura ${event.index + 1} de ${event.total}: ${event.caption}. ${speechMessage}`,
         },
@@ -472,7 +483,7 @@ function panelState(value) {
     !validEntryError(state.entryMode, state.entryError) ||
     ![null, 'attached', 'single-url', 'batch'].includes(state.auditSource) ||
     !CAPTURE_MODES.includes(state.captureMode) || ![null, 'privacy-paused'].includes(state.sessionStatus) ||
-    !exactProgress(state.progress) || !exactBatch(state.batch) ||
+    !exactProgress(state.progress) || !exactBatch(state.batch) || !exactPersona(state.persona) ||
     state.progress.phase === 'batch-page' && state.auditSource !== 'batch' ||
     state.progress.phase !== null && state.progress.phase !== 'batch-page' && state.auditSource === 'batch' ||
     state.progress.phase === 'batch-page' && (!validBatchProgressMessage(
@@ -525,6 +536,8 @@ function copyPersona(value) {
     ? {
         mode: value.mode,
         readerPaused: value.readerPaused === true,
+        readerCaption: value.readerCaption,
+        readerPosition: value.readerPosition,
         speechAvailability: READER_SPEECH_AVAILABILITY.has(value.speechAvailability)
           ? value.speechAvailability : 'unavailable',
         voiceId: typeof value.voiceId === 'string' && !/[\u0000-\u001F\u007F]/u.test(value.voiceId) &&
@@ -534,6 +547,19 @@ function copyPersona(value) {
         message: typeof value.message === 'string' ? value.message : '',
       }
     : neutralPersona();
+}
+
+function exactPersona(value) {
+  const persona = exactDataRecord(value, PERSONA_KEYS);
+  if (!persona || !(PERSONA_MODES.has(persona.mode) || persona.mode === null) ||
+    typeof persona.readerPaused !== 'boolean' || typeof persona.readerCaption !== 'string' ||
+    /[\u0000-\u001F\u007F]/u.test(persona.readerCaption) || Array.from(persona.readerCaption).length > 2048 ||
+    persona.readerCaption !== persona.readerCaption.replace(/\s+/gu, ' ').trim() ||
+    typeof persona.readerPosition !== 'string') return null;
+  if (persona.readerCaption === '') return persona.readerPosition === '' ? persona : null;
+  if (persona.mode !== 'reader') return null;
+  const position = /^([1-9][0-9]{0,3}) de ([1-9][0-9]{0,3})$/u.exec(persona.readerPosition);
+  return position && Number(position[1]) <= Number(position[2]) && Number(position[2]) <= 2000 ? persona : null;
 }
 
 function readerSpeechMessage(availability, voiceId) {

@@ -78,6 +78,7 @@ test('creates an immutable initial screen with only stable interaction state', (
     evidenceExpanded: false,
     persona: {
       mode: null, readerPaused: false, speechAvailability: 'unavailable', voiceId: '', rate: 1,
+      readerCaption: '', readerPosition: '',
       message: 'Escolha uma simulação para esta página.',
     },
     highlight: { state: 'idle', operation: null, occurrenceId: null, bindingStatus: { state: 'unchecked' }, message: null },
@@ -314,6 +315,7 @@ test('keeps persona simulation and page highlight UI state closed and independen
   const reader = reducePanelState(initial, { type: 'PERSONA_SELECTED', mode: 'reader' });
   assert.deepEqual(reader.persona, {
     mode: 'reader', readerPaused: false, speechAvailability: 'unavailable', voiceId: '', rate: 1,
+    readerCaption: '', readerPosition: '',
     message: 'Leitura simulada ativa. Use os controles para navegar pela legenda.',
   });
   const paused = reducePanelState(reader, { type: 'PERSONA_READER_PAUSED' });
@@ -324,6 +326,7 @@ test('keeps persona simulation and page highlight UI state closed and independen
   });
   assert.deepEqual(announced.persona, {
     mode: 'reader', readerPaused: false, speechAvailability: 'unavailable', voiceId: '', rate: 1,
+    readerCaption: 'Enviar formulário, botão', readerPosition: '2 de 3',
     message: 'Leitura 2 de 3: Enviar formulário, botão. A legenda está ativa; ative uma voz local para ouvir.',
   });
   const voiced = reducePanelState(announced, {
@@ -332,11 +335,13 @@ test('keeps persona simulation and page highlight UI state closed and independen
   });
   assert.deepEqual(voiced.persona, {
     mode: 'reader', readerPaused: false, speechAvailability: 'available', voiceId: 'local-a', rate: 1.25,
+    readerCaption: 'Enviar formulário, botão', readerPosition: '2 de 3',
     message: 'Leitura 2 de 3: Enviar formulário, botão. Voz local ativa.',
   });
   const failed = reducePanelState(voiced, { type: 'PERSONA_FAILED' });
   assert.deepEqual(failed.persona, {
     mode: 'reader', readerPaused: false, speechAvailability: 'available', voiceId: 'local-a', rate: 1.25,
+    readerCaption: 'Enviar formulário, botão', readerPosition: '2 de 3',
     message: 'Não foi possível aplicar a simulação nesta página.',
   });
   const busy = reducePanelState(paused, { type: 'HIGHLIGHT_BUSY', occurrenceId: 'occ-1' });
@@ -431,6 +436,53 @@ test('records only canonical monotonic progress for the current running audit', 
   assert.equal(resumed.progress.percent, 72);
 });
 
+test('keeps a dedicated caption and position through voice unavailability and clears them when the reader ends', () => {
+  const selected = reducePanelState(createInitialPanelState(), { type: 'PERSONA_SELECTED', mode: 'reader' });
+  const reading = reducePanelState(selected, {
+    type: 'PERSONA_READER_STATE', playback: 'playing', index: 0, total: 2,
+    caption: 'Salvar, botão', speechAvailability: 'available', voiceId: 'local-a', rate: 1,
+  });
+  const unavailable = reducePanelState(reading, { type: 'PERSONA_READER_VOICE_UNAVAILABLE' });
+  assert.equal(unavailable.persona.readerCaption, 'Salvar, botão');
+  assert.equal(unavailable.persona.readerPosition, '1 de 2');
+  assert.equal(unavailable.persona.speechAvailability, 'unavailable');
+  assert.equal(unavailable.persona.voiceId, '');
+  assert.equal(unavailable.focusId, reading.focusId);
+  assert.equal(Object.isFrozen(unavailable.persona), true);
+  const paused = reducePanelState(unavailable, { type: 'PERSONA_READER_PAUSED' });
+  assert.equal(paused.persona.readerCaption, 'Salvar, botão');
+  const idle = reducePanelState(paused, {
+    type: 'PERSONA_READER_STATE', playback: 'idle', index: -1, total: 0,
+    caption: '', speechAvailability: 'unavailable', voiceId: '', rate: 1,
+  });
+  assert.equal(idle.persona.readerCaption, '');
+  assert.equal(idle.persona.readerPosition, '');
+  const ended = reducePanelState(reading, { type: 'PERSONA_ENDED' });
+  assert.equal(ended.persona.readerCaption, '');
+  assert.equal(ended.persona.readerPosition, '');
+});
+
+test('rejects malformed caption presentation in caller-owned panel state without reading accessors', () => {
+  const selected = reducePanelState(createInitialPanelState(), { type: 'PERSONA_SELECTED', mode: 'reader' });
+  for (const values of [
+    { readerCaption: 'Salvar\nsegredo', readerPosition: '1 de 2' },
+    { readerCaption: 'Salvar, botão', readerPosition: '3 de 2' },
+    { readerCaption: 'Salvar, botão', readerPosition: '' },
+    { readerCaption: '', readerPosition: '1 de 2' },
+    { readerCaption: 'Salvar, botão', readerPosition: '1 de 2001' },
+    { readerCaption: 'x'.repeat(2049), readerPosition: '1 de 2' },
+  ]) {
+    const invalid = { ...selected, persona: { ...selected.persona, ...values } };
+    assert.strictEqual(reducePanelState(invalid, { type: 'PERSONA_ENDED' }), invalid);
+  }
+  let reads = 0;
+  const persona = { ...selected.persona };
+  Object.defineProperty(persona, 'readerCaption', { enumerable: true, get() { reads += 1; throw new Error('accessor'); } });
+  const hostile = { ...selected, persona };
+  assert.strictEqual(reducePanelState(hostile, { type: 'PERSONA_ENDED' }), hostile);
+  assert.equal(reads, 0);
+});
+
 test('drops deleted audit state while preserving an active persona and the selected capture mode', () => {
   let result = reducePanelState(createInitialPanelState(), {
     type: 'CAPTURE_MODE_SELECTED', mode: 'no-pixels', focusId: 'capture-mode-no-pixels',
@@ -467,6 +519,7 @@ test('unknown and invalid events return a detached recursively frozen valid stat
     selectedOccurrenceId: 'occ-1', evidenceExpanded: false,
     persona: {
       mode: null, readerPaused: false, speechAvailability: 'unavailable', voiceId: '', rate: 1,
+      readerCaption: '', readerPosition: '',
       message: 'Escolha uma simulação para esta página.',
     },
     highlight: { state: 'idle', operation: null, occurrenceId: null, bindingStatus: { state: 'unchecked' }, message: null },
@@ -583,6 +636,7 @@ test('port interruption and retry preserve only the last safe audit ID', () => {
     evidenceExpanded: false,
     persona: {
       mode: null, readerPaused: false, speechAvailability: 'unavailable', voiceId: '', rate: 1,
+      readerCaption: '', readerPosition: '',
       message: 'Escolha uma simulação para esta página.',
     },
     highlight: { state: 'idle', operation: null, occurrenceId: null, bindingStatus: { state: 'unchecked' }, message: null },

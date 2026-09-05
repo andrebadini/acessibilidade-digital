@@ -906,6 +906,40 @@ test('persistent simulation controls expose pressed state and reader transport l
   assert.match(root.textContent, /Leitura simulada ativa/u);
 });
 
+test('completed result exposes the report action before filters and occurrences', () => {
+  const root = renderPanelView({
+    view: buildPanelView(fixture()), document: new TestDocument(), onIntent() {},
+  });
+  const ready = root.querySelector('[data-report-ready]');
+  assert.ok(ready, 'the report has a visible ready block, not only a footer button');
+  assert.match(ready.textContent, /relatório.*pronto/iu);
+  const button = ready.querySelector('button[data-intent="OPEN_REPORT"]');
+  assert.ok(button);
+  assert.match(button.className, /primary-action/u);
+  assert.equal(root.querySelectorAll('button[data-intent="OPEN_REPORT"]').length, 1);
+  const sections = root.children;
+  assert.ok(sections.indexOf(ready) < sections.findIndex(node => node.className === 'filters'));
+  assert.ok(ready.querySelector('[data-report-launch-status]'));
+});
+
+test('reader caption is prominent, separate from voice status and preserves literal text', () => {
+  const input = fixture();
+  input.state.persona = {
+    mode: 'reader', readerPaused: false, speechAvailability: 'unavailable', voiceId: '', rate: 1,
+    message: 'Nenhuma voz local disponível.',
+    readerCaption: '<Enviar>, botão', readerPosition: '2 de 3',
+  };
+  const root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {},
+  });
+  const controls = root.querySelector('[data-persona-controls]');
+  assert.equal(root.children[0], controls, 'active reader is visible before the long results');
+  assert.equal(root.querySelector('[data-reader-caption]')?.textContent, '<Enviar>, botão');
+  assert.equal(root.querySelector('[data-reader-position]')?.textContent, '2 de 3');
+  assert.equal(root.querySelector('[data-reader-caption]').children.length, 0);
+  assert.match(root.textContent, /estimativa|simulação/iu);
+});
+
 test('reader voice activation is an explicit panel intent and disappears after a local voice is active', () => {
   const input = fixture();
   input.state.persona = {

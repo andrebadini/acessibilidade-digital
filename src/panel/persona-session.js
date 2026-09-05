@@ -28,9 +28,25 @@ export function createPanelPersonaSession(raw) {
 
   let activeLease = null;
   let operation = false;
+  let operationRevision = 0;
+  let readerRefreshPending = false;
+  let lastReaderSnapshot = null;
+  let lastReaderLease = null;
 
   function emit(event) {
+    if (['PERSONA_SELECTED', 'PERSONA_ENDED', 'PERSONA_SYNCHRONIZED_NONE'].includes(event.type)) {
+      lastReaderSnapshot = null;
+      lastReaderLease = null;
+    }
     try { input.onEvent(deepFreeze({ ...event })); } catch { /* UI callbacks never own the session. */ }
+  }
+
+  function publishReaderState(reader, deduplicate = false) {
+    const snapshot = JSON.stringify(reader);
+    if (deduplicate && lastReaderLease === activeLease && lastReaderSnapshot === snapshot) return;
+    lastReaderLease = activeLease;
+    lastReaderSnapshot = snapshot;
+    emit({ type: 'PERSONA_READER_STATE', ...reader });
   }
 
   function clearAbsentLease(response) {
@@ -74,8 +90,28 @@ export function createPanelPersonaSession(raw) {
       type: 'PANEL_READER_STATE', leaseId: activeLease.leaseId,
     }));
     if (!reader) return false;
-    emit({ type: 'PERSONA_READER_STATE', ...reader });
+    publishReaderState(reader);
     return true;
+  }
+
+  async function refreshReaderState() {
+    if (operation || readerRefreshPending || activeLease?.activeMode !== 'reader') return false;
+    const lease = activeLease;
+    const revision = operationRevision;
+    readerRefreshPending = true;
+    try {
+      const response = await request({ type: 'PANEL_READER_STATE', leaseId: lease.leaseId });
+      if (activeLease !== lease || operation || operationRevision !== revision) return false;
+      const reader = parseReaderResponse(response);
+      if (!reader) {
+        clearAbsentLease(response);
+        return false;
+      }
+      publishReaderState(reader, true);
+      return true;
+    } finally {
+      readerRefreshPending = false;
+    }
   }
 
   async function synchronizeCore() {
@@ -108,6 +144,7 @@ export function createPanelPersonaSession(raw) {
 
   async function synchronize() {
     if (operation) return frozenResult(false, 'PANEL_PERSONA_BUSY');
+    operationRevision += 1;
     operation = true;
     try { return await synchronizeCore(); }
     finally { operation = false; }
@@ -116,6 +153,7 @@ export function createPanelPersonaSession(raw) {
   async function select(panelMode) {
     const workerMode = PANEL_TO_WORKER_MODE[panelMode];
     if (!workerMode || operation) return frozenResult(false, 'PANEL_PERSONA_BUSY');
+    operationRevision += 1;
     operation = true;
     const priorLease = activeLease;
     try {
@@ -171,6 +209,7 @@ export function createPanelPersonaSession(raw) {
     if (operation || !READER_ACTIONS.has(action) || !activeLease || activeLease.activeMode !== 'reader') {
       return frozenResult(false, 'PANEL_PERSONA_BUSY');
     }
+    operationRevision += 1;
     operation = true;
     try {
       const response = await request({
@@ -184,7 +223,7 @@ export function createPanelPersonaSession(raw) {
         emit({ type: 'PERSONA_FAILED' });
         return frozenResult(false, 'PANEL_READER_ACTION_FAILED');
       }
-      emit({ type: 'PERSONA_READER_STATE', ...reader });
+      publishReaderState(reader);
       return frozenActive('reader', true);
     } finally {
       operation = false;
@@ -195,6 +234,7 @@ export function createPanelPersonaSession(raw) {
     if (operation || !activeLease || activeLease.activeMode !== 'reader') {
       return frozenResult(false, 'PANEL_PERSONA_BUSY');
     }
+    operationRevision += 1;
     operation = true;
     try {
       const response = await request({
@@ -202,7 +242,7 @@ export function createPanelPersonaSession(raw) {
       });
       const reader = parseReaderResponse(response);
       if (reader) {
-        emit({ type: 'PERSONA_READER_STATE', ...reader });
+        publishReaderState(reader);
         return deepFreeze({ ok: true, state: 'active', voiceId: reader.voiceId });
       }
       const failure = exactRecord(response, ['ok', 'code']);
@@ -222,6 +262,7 @@ export function createPanelPersonaSession(raw) {
 
   async function stop() {
     if (operation || !activeLease) return frozenResult(false, 'PANEL_PERSONA_BUSY');
+    operationRevision += 1;
     operation = true;
     try {
       const rawResponse = await request({
@@ -247,6 +288,7 @@ export function createPanelPersonaSession(raw) {
     const parsed = exactRecord(value, ['started']);
     if (!parsed || typeof parsed.started !== 'boolean') return frozenResult(false, 'PANEL_PERSONA_INPUT_INVALID');
     if (operation) return frozenResult(false, 'PANEL_PERSONA_BUSY');
+    operationRevision += 1;
     if (parsed.started) {
       if (activeLease) emit({ type: 'PERSONA_ENDED' });
       activeLease = null;
@@ -257,7 +299,7 @@ export function createPanelPersonaSession(raw) {
     finally { operation = false; }
   }
 
-  return Object.freeze({ synchronize, select, readerAction, enableVoice, stop, afterAuditAttempt });
+  return Object.freeze({ synchronize, select, readerAction, refreshReaderState, enableVoice, stop, afterAuditAttempt });
 }
 
 function parsePersonaLease(value, expectedMode, expectedLeaseId) {

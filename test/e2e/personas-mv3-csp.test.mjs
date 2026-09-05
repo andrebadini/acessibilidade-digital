@@ -76,6 +76,9 @@ test('runs reversible personas against the exact real MV3 document under strict 
   const extension = await launchUnpackedExtension(t, {
     extensionPath: await realpath(workspaceRoot),
     startUrl: fixtureUrl,
+    ...(process.env.AUDITA_E2E_ARTIFACT_ROOT ? {
+      qaDirectory: join(process.env.AUDITA_E2E_ARTIFACT_ROOT, 'qa'),
+    } : {}),
     chromeBinary,
     expectedMajor: 152,
     viewport: { width: 1280, height: 800 },
@@ -175,6 +178,37 @@ test('runs reversible personas against the exact real MV3 document under strict 
     const panelText = await extension.evaluate(panel, 'document.body.innerText');
     assert.fail(`PERSONA_READER_NEXT_TIMEOUT:${JSON.stringify({ diagnostic, panelText })}`);
   }
+
+  await activateRealTab(extension, extension.startPage, { operationId: 'persona-reader-tab-focus' });
+  await extension.evaluate(extension.startPage.page, `(() => {
+    document.querySelector('#positive-one').focus();
+    return true;
+  })()`);
+  await extension.waitForValue(extension.startPage.page,
+    `document.hasFocus() && document.activeElement?.id === 'positive-one'`, Boolean);
+  await extension.pressKey(extension.startPage.page, {
+    key: 'Tab', code: 'Tab', virtualKeyCode: 9, raw: true,
+  });
+  const tabCaption = await extension.waitForValue(panel, `(() => ({
+    caption: document.querySelector('[data-reader-caption]')?.textContent ?? '',
+    position: document.querySelector('[data-reader-position]')?.textContent ?? '',
+    visible: (() => { const box=document.querySelector('[data-reader-caption]')?.getBoundingClientRect();
+      return Boolean(box && box.top >= 0 && box.bottom <= innerHeight); })()
+  }))()`, value => value?.caption === 'Positivo dois, botão' && /^2 de \d+$/u.test(value.position),
+  { timeoutMs: 10_000, intervalMs: 50 });
+  assert.equal(tabCaption.caption, 'Positivo dois, botão');
+  assert.match(tabCaption.position, /^2 de \d+$/u);
+  assert.equal(tabCaption.visible, true, 'a legenda precisa estar na área visível, não apenas existir fora da tela');
+  assert.deepEqual(await extension.evaluate(extension.startPage.page, `(() => ({
+    focused: document.hasFocus(),
+    activeId: document.activeElement?.id ?? null,
+    artifacts: [...document.querySelectorAll('[data-audita-persona-owned]')].map(node => node.textContent)
+  }))()`), {
+    focused: true,
+    activeId: 'positive-two',
+    artifacts: ['', ''],
+  }, 'atualizar a legenda não pode puxar foco nem projetar seu texto no DOM auditado');
+  await extension.captureJourney('persona-reader-tab-caption', panel);
 
   await extension.command(panel, 'Emulation.setDeviceMetricsOverride', {
     width: 640, height: 400, deviceScaleFactor: 2, mobile: false,

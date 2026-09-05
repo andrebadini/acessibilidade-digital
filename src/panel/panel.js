@@ -16,6 +16,7 @@ import {
   renderPanelReconnectView,
   renderPanelStaticUnavailableView,
   renderPanelView,
+  updatePanelReaderFeedback,
 } from './panel-view.js';
 import { createInitialPanelState, reducePanelState } from './panel-state.js';
 import { createPanelPersonaSession } from './persona-session.js';
@@ -44,10 +45,15 @@ let navigationEntryRevision = 0n;
 let batchEntryDraft = '';
 let personaBootstrapSynchronized = false;
 let hasReceivedBootstrap = false;
+let reportLaunchFeedback = null;
+let pendingReportLaunch = null;
+let readerRefreshTimer = null;
+let readerRefreshInFlight = false;
+let readerFeedbackStopped = false;
 const personaSession = createPanelPersonaSession({
   requestIntent: requestPanelIntent,
   createRequestId: nextRequestId,
-  onEvent: transition,
+  onEvent: receivePersonaEvent,
 });
 const highlightStateSynchronizer = createHighlightStateSynchronizer({
   requestCurrent: () => requestPanelIntent({ type: 'GET_HIGHLIGHT_STATE' }),
@@ -294,6 +300,7 @@ function render() {
   const view = buildPanelView({ state, summary, detail });
   const screen = renderPanelView({ view, document, onIntent: handleIntent, onEvent: handleEvent });
   root.replaceChildren(screen);
+  applyReportLaunchFeedback();
   if (state.screen === 'initial' && state.entryMode === 'batch' && typeof batchEntryDraft === 'string') {
     const textarea = root.querySelector?.('textarea[id="audit-urls"]');
     if (textarea) textarea.value = batchEntryDraft;
@@ -305,7 +312,52 @@ function render() {
 function transition(event) {
   state = reducePanelState(state, event);
   render();
+  synchronizeReaderRefresh();
 }
+
+function receivePersonaEvent(event) {
+  if (readerFeedbackStopped) return;
+  if (['PERSONA_READER_STATE', 'PERSONA_READER_VOICE_UNAVAILABLE'].includes(event.type)) {
+    state = reducePanelState(state, event);
+    if (updatePanelReaderFeedback({ root, persona: state.persona, document, onIntent: handleIntent })) {
+      synchronizeReaderRefresh();
+      return;
+    }
+  }
+  transition(event);
+}
+
+function readerFeedbackActive() {
+  return !readerFeedbackStopped && state.persona.mode === 'reader' &&
+    state.sessionStatus !== 'privacy-paused' && document.visibilityState !== 'hidden' &&
+    Boolean(root?.querySelector('[data-reader-caption]'));
+}
+
+function synchronizeReaderRefresh() {
+  if (!readerFeedbackActive()) {
+    if (readerRefreshTimer !== null) globalThis.clearTimeout(readerRefreshTimer);
+    readerRefreshTimer = null;
+    return;
+  }
+  if (readerRefreshTimer !== null || readerRefreshInFlight) return;
+  readerRefreshTimer = globalThis.setTimeout(async () => {
+    readerRefreshTimer = null;
+    if (!readerFeedbackActive()) return;
+    readerRefreshInFlight = true;
+    try { await personaSession.refreshReaderState(); }
+    catch { /* the next bounded read retries; never expose a transport error */ }
+    finally {
+      readerRefreshInFlight = false;
+      synchronizeReaderRefresh();
+    }
+  }, 250);
+}
+
+document.addEventListener?.('visibilitychange', synchronizeReaderRefresh);
+globalThis.addEventListener?.('pagehide', () => {
+  readerFeedbackStopped = true;
+  synchronizeReaderRefresh();
+});
 
 function handleEvent(event) {
   const draft = exactRecord(event, ['type', 'urls']);
@@ -587,14 +639,23 @@ async function requestSessionAction(type) {
   }
   if (type === 'PANEL_OPEN_REPORT') {
     const auditId = state.auditId;
+    if (state.screen !== 'result' || !auditId || pendingReportLaunch === auditId) return;
+    pendingReportLaunch = auditId;
+    reportLaunchFeedback = { auditId, pending: true, message: 'Abrindo o relatório completo…' };
+    applyReportLaunchFeedback();
+    announce(reportLaunchFeedback.message);
     let response = null;
     try { response = await sessionPortClient.requestIntent({ type }); }
     catch { /* the completed result remains available for another attempt */ }
+    if (pendingReportLaunch === auditId) pendingReportLaunch = null;
     if (state.screen !== 'result' || state.auditId !== auditId) return;
     const opened = exactRecord(response, ['ok', 'auditId', 'state']);
-    announce(opened?.ok === true && opened.auditId === auditId && opened.state === 'connected'
+    const message = opened?.ok === true && opened.auditId === auditId && opened.state === 'connected'
       ? 'Relatório completo aberto em uma nova aba.'
-      : 'Não foi possível abrir o relatório. Tente novamente.');
+      : 'Não foi possível abrir o relatório. Tente novamente.';
+    reportLaunchFeedback = { auditId, pending: false, message };
+    applyReportLaunchFeedback();
+    announce(message);
     return;
   }
   const response = await sessionPortClient.requestIntent({ type });
@@ -603,6 +664,23 @@ async function requestSessionAction(type) {
     return;
   }
   transition({ type: 'AUDIT_UNAVAILABLE', auditId: state.auditId, reason: 'Não foi possível concluir a operação local.' });
+}
+
+function applyReportLaunchFeedback() {
+  if (state.screen !== 'result' || reportLaunchFeedback?.auditId !== state.auditId) return;
+  const region = root?.querySelector('[data-report-launch-status]');
+  if (region) region.textContent = reportLaunchFeedback.message;
+  const button = root?.querySelector('button[data-intent="OPEN_REPORT"]');
+  if (!button) return;
+  if (reportLaunchFeedback.pending) {
+    button.setAttribute('aria-disabled', 'true');
+    button.setAttribute('aria-busy', 'true');
+    button.textContent = 'Abrindo relatório…';
+  } else {
+    button.removeAttribute('aria-disabled');
+    button.removeAttribute('aria-busy');
+    button.textContent = 'Abrir relatório completo';
+  }
 }
 
 function selectOccurrence(occurrenceId) {

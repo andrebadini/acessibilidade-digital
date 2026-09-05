@@ -120,14 +120,22 @@ test('panel runtime sends every privileged intent through its admitted Port with
     globalThis.clearTimeout = originalClearTimeout;
   });
 
+  const visibilityListeners = [];
+  const timers = [];
   const document = {
     activeElement: null,
+    visibilityState: 'visible',
+    addEventListener(type, listener) { if (type === 'visibilitychange') visibilityListeners.push(listener); },
     createElement(tagName) { return new FakeElement(tagName, document); },
     querySelector(selector) { return selector === '#panel-root' ? document.root : null; },
   };
   document.root = new FakeElement('main', document);
   document.root.scrollTop = 37;
-  globalThis.setTimeout = (callback, delay) => ({ callback, delay, cleared: false });
+  globalThis.setTimeout = (callback, delay) => {
+    const timer = { callback, delay, cleared: false };
+    timers.push(timer);
+    return timer;
+  };
   globalThis.clearTimeout = timer => { timer.cleared = true; };
 
   let speechReads = 0;
@@ -303,6 +311,11 @@ test('panel runtime sends every privileged intent through its admitted Port with
   assert.ok(openReport);
   await openReport.click();
   await new Promise(resolve => setImmediate(resolve));
+  assert.match(document.root.querySelector('[data-report-launch-status]')?.textContent ?? '', /Abrindo/iu);
+  assert.equal(openReport.getAttribute('aria-disabled'), 'true');
+  await openReport.click();
+  assert.equal(ports[0].posted.filter(packet => packet?.envelope?.type === 'PANEL_OPEN_REPORT').length, 1,
+    'double click does not launch two reports');
   const reportPacket = ports[0].posted.find(packet => packet?.envelope?.type === 'PANEL_OPEN_REPORT');
   assert.ok(reportPacket, 'opening the report is sent through the admitted panel Port');
   assert.deepEqual(reportPacket, {
@@ -321,6 +334,8 @@ test('panel runtime sends every privileged intent through its admitted Port with
     'a report launch failure keeps the completed result available');
   assert.ok(document.root.querySelector('button[data-intent="OPEN_REPORT"]'),
     'the user can retry opening the report without rehydrating the audit');
+  assert.match(document.root.querySelector('[data-report-launch-status]')?.textContent ?? '', /Não foi possível/iu);
+  assert.equal(document.root.querySelector('button[data-intent="OPEN_REPORT"]').getAttribute('aria-disabled'), null);
   assert.equal(document.root.querySelector('button[data-intent="RETRY"]'), null);
   assert.equal(
     document.root.querySelector('[role="status"][aria-live="polite"]')?.textContent,
@@ -395,6 +410,39 @@ test('panel runtime sends every privileged intent through its admitted Port with
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(document.root.querySelector('button[data-persona-mode="reader"]')?.getAttribute('aria-pressed'), 'true');
   assert.match(document.root.textContent, /Leitura 1 de 2: Positivo um, botão/u);
+  const passiveTimer = timers.find(timer => timer.delay === 250 && !timer.cleared);
+  assert.ok(passiveTimer, 'reader automatically refreshes the focused element through the admitted Port');
+  assert.equal(document.root.querySelector('[data-reader-caption]')?.textContent, 'Positivo um, botão');
+  const screenBeforeFocusChange = document.root.children[0];
+  const nextBeforeFocusChange = document.root.querySelector('button[data-intent="PERSONA_READER_NEXT"]');
+  const pageFocus = document.createElement('button');
+  pageFocus.focus();
+  document.root.scrollTop = 89;
+  passiveTimer.callback();
+  await new Promise(resolve => setImmediate(resolve));
+  const passivePacket = ports[0].posted.filter(packet => packet?.envelope?.type === 'PANEL_READER_STATE').at(-1);
+  assert.notEqual(passivePacket.requestId, readerStatePacket.requestId);
+  ports[0].onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: passivePacket.requestId,
+    response: { ok: true, readerState: {
+      version: 1, playback: 'playing', index: 1, total: 2,
+      caption: 'Enviar, botão', canPrevious: true, canNext: false,
+      speechAvailability: 'unavailable', voiceId: '', rate: 1,
+    } },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(document.root.querySelector('[data-reader-caption]')?.textContent, 'Enviar, botão');
+  assert.equal(document.root.querySelector('[data-reader-position]')?.textContent, '2 de 2');
+  assert.equal(document.activeElement, pageFocus, 'passive reader feedback never steals the page keyboard focus');
+  assert.equal(document.root.children[0], screenBeforeFocusChange, 'caption refresh does not reconstruct the panel');
+  assert.equal(document.root.querySelector('button[data-intent="PERSONA_READER_NEXT"]'), nextBeforeFocusChange);
+  assert.equal(document.root.scrollTop, 89);
+  document.visibilityState = 'hidden';
+  for (const listener of visibilityListeners) listener();
+  assert.equal(timers.filter(timer => timer.delay === 250 && !timer.cleared && timer !== passiveTimer).length, 0,
+    'a hidden panel does not keep polling the page');
+  document.visibilityState = 'visible';
+  for (const listener of visibilityListeners) listener();
   const enableVoice = document.root.querySelector('button[data-intent="PERSONA_READER_ENABLE_VOICE"]');
   assert.ok(enableVoice);
   await enableVoice.click();

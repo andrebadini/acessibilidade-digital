@@ -579,6 +579,17 @@ function renderResult(document, view, emit, onEvent) {
   );
   root.append(identity);
 
+  const ready = section(document, 'report-ready');
+  ready.dataset.reportReady = '';
+  const reportStatus = paragraph(document, 'Consulte as ocorrências, as evidências e exporte em HTML, PDF, CSV ou JSON.', 'report-launch-status');
+  reportStatus.dataset.reportLaunchStatus = '';
+  ready.append(
+    heading(document, 2, 'Seu relatório está pronto'),
+    actionButton(document, 'Abrir relatório completo', 'OPEN_REPORT', 'open-report', emit, 'primary-action report-action'),
+    reportStatus,
+  );
+  root.append(ready);
+
   const coverage = section(document, 'coverage-block');
   const coverageHeading = heading(document, 2, 'Cobertura automática');
   coverageHeading.dataset.focusId = 'result-summary';
@@ -623,9 +634,7 @@ function renderResult(document, view, emit, onEvent) {
     root.append(renderGlobalHighlightClear(document, view.highlight, emit));
   }
 
-  const footer = section(document, 'result-footer');
-  footer.append(actionButton(document, 'Abrir relatório completo', 'OPEN_REPORT', 'open-report', emit, 'secondary-action report-action'));
-  root.append(footer, liveRegion(document, view.highlight.message ??
+  root.append(liveRegion(document, view.highlight.message ??
     (view.evidenceExpanded && result.detail ? result.detail.action.reason : 'Resultado da auditoria carregado.')));
   return root;
 }
@@ -988,13 +997,29 @@ function appendPersonaControls(root, document, persona, emit) {
     modes.append(button);
   }
   section.append(modes, paragraph(document, persona.message, 'persona-message'));
+  section.querySelector('p').dataset.personaMessage = '';
   if (persona.mode === 'reader') {
+    section.dataset.readerActive = 'true';
+    const caption = document.createElement('div');
+    caption.className = 'reader-caption-card';
+    caption.setAttribute('role', 'region');
+    caption.setAttribute('aria-label', 'Legenda da leitura simulada');
+    const position = paragraph(document, persona.readerPosition, 'reader-position');
+    position.dataset.readerPosition = '';
+    const text = paragraph(document, persona.readerCaption || 'Use Tab na página ou Próximo para começar.', 'reader-caption');
+    text.dataset.readerCaption = '';
+    caption.append(heading(document, 3, 'Legenda da leitura'), position, text,
+      paragraph(document, 'Estimativa do anúncio. A experiência pode variar entre leitores de tela.', 'reader-disclaimer'));
+    section.append(caption);
+    const voiceControls = document.createElement('div');
+    voiceControls.dataset.readerVoiceControls = '';
     if (!persona.voiceId || ['unavailable', 'error'].includes(persona.speechAvailability)) {
-      section.append(actionButton(
+      voiceControls.append(actionButton(
         document, 'Ativar voz local', 'PERSONA_READER_ENABLE_VOICE',
         'persona-reader-enable-voice', emit, 'secondary-action',
       ));
     }
+    section.append(voiceControls);
     const transport = document.createElement('div');
     transport.className = 'persona-transport';
     for (const [intent, label] of [
@@ -1008,8 +1033,28 @@ function appendPersonaControls(root, document, persona, emit) {
       document, 'Encerrar simulação', 'PERSONA_END', 'persona-end', emit, 'secondary-action',
     ));
   }
-  root.append(section);
+  if (persona.mode === 'reader') root.replaceChildren(section, ...root.children);
+  else root.append(section);
   return root;
+}
+
+// Updates only feedback: page Tab navigation must not reconstruct the panel or move focus.
+export function updatePanelReaderFeedback({ root, persona, document, onIntent }) {
+  const controls = root?.querySelector('[data-persona-controls][data-reader-active="true"]');
+  if (!controls || persona?.mode !== 'reader') return false;
+  const safe = copyPersona(persona);
+  controls.querySelector('[data-reader-caption]').textContent = safe.readerCaption || 'Use Tab na página ou Próximo para começar.';
+  controls.querySelector('[data-reader-position]').textContent = safe.readerPosition;
+  controls.querySelector('[data-persona-message]').textContent = safe.message;
+  controls.querySelector('button[data-intent="PERSONA_READER_TOGGLE"]').textContent = safe.readerPaused ? 'Continuar' : 'Pausar';
+  const voiceControls = controls.querySelector('[data-reader-voice-controls]');
+  const needsVoice = !safe.voiceId || ['unavailable', 'error'].includes(safe.speechAvailability);
+  if (!needsVoice && voiceControls.children.length) voiceControls.replaceChildren();
+  else if (needsVoice && voiceControls.children.length === 0) {
+    voiceControls.append(actionButton(document, 'Ativar voz local', 'PERSONA_READER_ENABLE_VOICE',
+      'persona-reader-enable-voice', onIntent, 'secondary-action'));
+  }
+  return true;
 }
 
 function section(document, className) {
@@ -1198,6 +1243,10 @@ function copyPersona(value) {
     ? value.rate : 1;
   return {
     mode, readerPaused: value?.readerPaused === true, speechAvailability, voiceId, rate,
+    readerCaption: typeof value?.readerCaption === 'string' && Array.from(value.readerCaption).length <= 2048
+      ? value.readerCaption : '',
+    readerPosition: typeof value?.readerPosition === 'string' && /^\d{1,4} de \d{1,4}$/u.test(value.readerPosition)
+      ? value.readerPosition : '',
     message: typeof value?.message === 'string' ? value.message : 'Escolha uma simulação para esta página.',
   };
 }

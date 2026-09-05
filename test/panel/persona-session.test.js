@@ -32,7 +32,7 @@ function fixture(responses) {
   const session = createPanelPersonaSession({
     async requestIntent(envelope) {
       calls.push(structuredClone(envelope));
-      const response = responses.shift();
+      const response = await responses.shift();
       if (response instanceof Error) throw response;
       return structuredClone(response);
     },
@@ -41,6 +41,122 @@ function fixture(responses) {
   });
   return { session, calls, events, responses };
 }
+
+function deferredResponse() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+test('passively refreshes the active reader caption without preparing or restarting a persona and deduplicates snapshots', async () => {
+  const next = readerState({ index: 1, caption: 'Segundo, link', canPrevious: true, canNext: false });
+  const f = fixture([
+    { ok: true, requestId: 'persona-request-1', capabilityId: CAPABILITY_ID },
+    lease('reader'), readerState(), readerState(), next, next,
+  ]);
+  await f.session.select('reader');
+  assert.equal(typeof f.session.refreshReaderState, 'function');
+  const initialEvents = f.events.length;
+  assert.equal(await f.session.refreshReaderState(), true);
+  assert.equal(f.events.length, initialEvents, 'an unchanged snapshot must not redraw the panel');
+  assert.equal(await f.session.refreshReaderState(), true);
+  assert.equal(f.events.at(-1).caption, 'Segundo, link');
+  assert.equal(f.events.at(-1).index, 1);
+  assert.equal(await f.session.refreshReaderState(), true);
+  assert.equal(f.events.length, initialEvents + 1);
+  assert.deepEqual(f.calls.slice(3), Array(3).fill({ type: 'PANEL_READER_STATE', leaseId: LEASE_ID }));
+});
+
+test('passive refresh is inert without an active reader lease and after an explicit stop', async () => {
+  const f = fixture([
+    { ok: true, requestId: 'persona-request-1', capabilityId: CAPABILITY_ID },
+    lease('motor'), lease('reader'), readerState(), { ok: true, lease: null },
+  ]);
+  assert.equal(typeof f.session.refreshReaderState, 'function');
+  assert.equal(await f.session.refreshReaderState(), false);
+  assert.equal(f.calls.length, 0);
+  await f.session.select('keyboard');
+  assert.equal(await f.session.refreshReaderState(), false);
+  assert.equal(f.calls.length, 2);
+  await f.session.select('reader');
+  await f.session.stop();
+  const calls = f.calls.length;
+  assert.equal(await f.session.refreshReaderState(), false);
+  assert.equal(f.calls.length, calls);
+});
+
+test('passive refresh does not compete with an explicit operation or another pending refresh', async () => {
+  const action = deferredResponse();
+  const refresh = deferredResponse();
+  const f = fixture([
+    { ok: true, requestId: 'persona-request-1', capabilityId: CAPABILITY_ID },
+    lease('reader'), readerState(), action.promise, refresh.promise,
+  ]);
+  await f.session.select('reader');
+  assert.equal(typeof f.session.refreshReaderState, 'function');
+  const pause = f.session.readerAction('pause');
+  assert.equal(await f.session.refreshReaderState(), false);
+  assert.equal(f.calls.length, 4);
+  action.resolve(readerState({ playback: 'paused' }));
+  await pause;
+  const pending = f.session.refreshReaderState();
+  assert.equal(await f.session.refreshReaderState(), false);
+  assert.equal(f.calls.length, 5);
+  refresh.resolve(readerState({ playback: 'paused' }));
+  assert.equal(await pending, true);
+});
+
+test('passive refresh discards a response from a lease stopped while the read was pending', async () => {
+  const response = deferredResponse();
+  const f = fixture([
+    { ok: true, requestId: 'persona-request-1', capabilityId: CAPABILITY_ID },
+    lease('reader'), readerState(), response.promise, { ok: true, lease: null },
+  ]);
+  await f.session.select('reader');
+  assert.equal(typeof f.session.refreshReaderState, 'function');
+  const pending = f.session.refreshReaderState();
+  assert.deepEqual(await f.session.stop(), { ok: true, state: 'none' });
+  const events = f.events.length;
+  response.resolve(readerState({ caption: 'Legenda obsoleta, botão' }));
+  assert.equal(await pending, false);
+  assert.equal(f.events.length, events);
+  assert.deepEqual(f.events.at(-1), { type: 'PERSONA_ENDED' });
+});
+
+test('a stale passive snapshot cannot overwrite a newer explicit reader action on the same lease', async () => {
+  const response = deferredResponse();
+  const f = fixture([
+    { ok: true, requestId: 'persona-request-1', capabilityId: CAPABILITY_ID },
+    lease('reader'), readerState(), response.promise,
+    readerState({ index: 1, caption: 'Segundo, link', canPrevious: true, canNext: false }),
+  ]);
+  await f.session.select('reader');
+  assert.equal(typeof f.session.refreshReaderState, 'function');
+  const pending = f.session.refreshReaderState();
+  await f.session.readerAction('next');
+  const events = f.events.length;
+  response.resolve(readerState());
+  assert.equal(await pending, false);
+  assert.equal(f.events.length, events);
+  assert.equal(f.events.at(-1).caption, 'Segundo, link');
+});
+
+test('passive refresh clears a revoked lease without preparing capabilities and stays quiet on invalid replies', async () => {
+  const f = fixture([
+    { ok: true, requestId: 'persona-request-1', capabilityId: CAPABILITY_ID },
+    lease('reader'), readerState(), readerState({ caption: '' }),
+    { ok: false, code: 'PERSONA_NOT_FOUND' },
+  ]);
+  await f.session.select('reader');
+  assert.equal(typeof f.session.refreshReaderState, 'function');
+  const events = f.events.length;
+  assert.equal(await f.session.refreshReaderState(), false);
+  assert.equal(f.events.length, events);
+  assert.equal(await f.session.refreshReaderState(), false);
+  assert.deepEqual(f.events.at(-1), { type: 'PERSONA_ENDED' });
+  assert.equal(await f.session.refreshReaderState(), false);
+  assert.deepEqual(f.calls.slice(3), Array(2).fill({ type: 'PANEL_READER_STATE', leaseId: LEASE_ID }));
+});
 
 test('rehydrates the exact active persona when a Side Panel is opened again and keeps an explicit stop path', async () => {
   const f = fixture([
