@@ -1,3 +1,4 @@
+import { accessibilityGuidance } from './plain-language-guidance.js';
 import { consumerBasisForOccurrence, CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../legal/consumer-basis.js';
 import { SECTION508_REVISED_CROSSWALK } from '../normative/section508.js';
 import { WCAG22_LEVELS } from '../normative/wcag22.js';
@@ -126,6 +127,27 @@ ${methodologySection(model)}
 </html>`;
 }
 
+function reportItemCheckPresentation(issue, itemId) {
+  const occurrences = issue.occurrences.filter(occurrence => itemId === '__none__' ? !occurrence.itemId : occurrence.itemId === itemId);
+  const outcomes = occurrences.map(occurrence => effectiveOccurrenceOutcome(occurrence, occurrence.decision));
+  if (issue.occurrences.length === 0) outcomes.push(issue.displayOutcome);
+  const outcome = outcomes.includes('failed') ? 'failed' : outcomes.some(value => ['cantTell', 'untested'].includes(value)) ? 'cantTell'
+    : outcomes.includes('passed') ? 'passed' : outcomes.length ? 'inapplicable' : 'untested';
+  const classifications = [...new Set(occurrences.map(occurrence => occurrence.classification))];
+  if (issue.occurrences.length === 0) classifications.push(issue.classification);
+  const normative = classifications.some(value => ['requirement', 'recommendation'].includes(value));
+  const result = ['passed', 'inapplicable'].includes(outcome) ? 'passed' : normative ? outcome === 'failed' ? 'failed' : 'humanReview' : 'alerts';
+  const classification = result === 'humanReview' ? 'manual-review' : result;
+  const originalOutcome = occurrences.some(row => row.outcome === 'failed') ? 'failed'
+    : occurrences.some(row => ['cantTell', 'untested'].includes(row.outcome)) ? 'cantTell'
+      : occurrences.some(row => row.outcome === 'passed') ? 'passed' : occurrences.length ? 'inapplicable' : issue.originalOutcome;
+  return { outcome, result, classifications,
+    issue: { ...issue, occurrences, occurrenceIds: occurrences.map(occurrence => occurrence.occurrenceId),
+      abntItemIds: itemId === '__none__' ? [] : [itemId], displayOutcome: outcome, originalOutcome, classification },
+    guidance: accessibilityGuidance({ itemId, title: issue.title, outcome,
+    observed: [...new Set(occurrences.map(occurrence => occurrence.justification).filter(Boolean))].join(' ') }) };
+}
+
 function renderReportViewDocument(model, view, options = {}) {
   if (!view || view.version !== 1 || view.auditId !== model.auditId ||
     view.modelHash !== model.integrity.canonicalModelHash || !Object.isFrozen(view) ||
@@ -180,8 +202,10 @@ function renderReportViewDocument(model, view, options = {}) {
       }).join('');
     return `<section data-report-evidence-preview><h4>Capturas registradas</h4>${previews}</section>`;
   };
-  const technicalDetails = (issue, evidence) => `<details data-report-technical><summary>Ver detalhes técnicos</summary><p>Resultado original: ${escapeHtml(label(issue.originalOutcome, outcomeLabels))}. Resultado consolidado: ${escapeHtml(label(issue.displayOutcome, outcomeLabels))}.</p><p><strong>Contexto técnico:</strong> ${escapeHtml(issue.context ?? 'não registrado')}. <strong>Página:</strong> ${escapeHtml(issue.pageId)}.</p>${issue.occurrences.map(occurrence => `<section data-report-occurrence-technical="${escapeHtml(occurrence.occurrenceId)}"><h4>ID da ocorrência: ${escapeHtml(occurrence.occurrenceId)}</h4><p><strong>Proveniência:</strong> Página ${escapeHtml(issue.pageId)}; Motor ${escapeHtml(occurrence.source.engine)}; Regra ${escapeHtml(occurrence.source.ruleId)}; Versão ${escapeHtml(occurrence.source.version)}.</p><p><strong>Item ABNT:</strong> ${escapeHtml(reportAbntItemLabel(occurrence.itemId))}. <strong>Classificação:</strong> ${escapeHtml(label(occurrence.classification, classificationLabels))}.</p></section>`).join('')}${evidence.map(item => `<section data-report-occurrence-evidence="${escapeHtml(item.evidenceId)}"><h4>ID da evidência: ${escapeHtml(item.evidenceId)} — ${escapeHtml(label(item.kind, evidenceKindLabels, 'Evidência registrada'))}</h4><p><strong>Proveniência:</strong> página ${escapeHtml(item.pageId)}; tipo ${escapeHtml(item.kind)}; estado ${escapeHtml(item.state ?? 'não registrado')}.</p>${evidenceProvenanceHtml(item)}<p><strong>Seletor:</strong> ${escapeHtml(item.selector?.css ?? 'não registrado')}</p><p><strong>Snippet:</strong> ${escapeHtml(item.snippet ?? 'não disponível')}</p><p><strong>Hash:</strong> ${escapeHtml(item.hash ?? 'não disponível')}</p></section>`).join('')}</details>`;
-  const issueCard = (issue, group) => {
+  const technicalDetails = (issue, evidence) => `<details data-report-technical><summary>Ver detalhes técnicos</summary><p>Resultado original: ${escapeHtml(label(issue.originalOutcome, outcomeLabels))}. Resultado consolidado: ${escapeHtml(label(issue.displayOutcome, outcomeLabels))}.</p><p><strong>Orientação original registrada:</strong> ${escapeHtml(issue.plainLanguage.correction)}.</p><p><strong>Contexto técnico:</strong> ${escapeHtml(issue.context ?? 'não registrado')}. <strong>Página:</strong> ${escapeHtml(issue.pageId)}.</p>${issue.occurrences.map(occurrence => `<section data-report-occurrence-technical="${escapeHtml(occurrence.occurrenceId)}"><h4>ID da ocorrência: ${escapeHtml(occurrence.occurrenceId)}</h4><p><strong>Proveniência:</strong> Página ${escapeHtml(issue.pageId)}; Motor ${escapeHtml(occurrence.source.engine)}; Regra ${escapeHtml(occurrence.source.ruleId)}; Versão ${escapeHtml(occurrence.source.version)}.</p><p><strong>Item ABNT:</strong> ${escapeHtml(reportAbntItemLabel(occurrence.itemId))}. <strong>Classificação:</strong> ${escapeHtml(label(occurrence.classification, classificationLabels))}.</p></section>`).join('')}${evidence.map(item => `<section data-report-occurrence-evidence="${escapeHtml(item.evidenceId)}"><h4>ID da evidência: ${escapeHtml(item.evidenceId)} — ${escapeHtml(label(item.kind, evidenceKindLabels, 'Evidência registrada'))}</h4><p><strong>Proveniência:</strong> página ${escapeHtml(item.pageId)}; tipo ${escapeHtml(item.kind)}; estado ${escapeHtml(item.state ?? 'não registrado')}.</p>${evidenceProvenanceHtml(item)}<p><strong>Seletor:</strong> ${escapeHtml(item.selector?.css ?? 'não registrado')}</p><p><strong>Snippet:</strong> ${escapeHtml(item.snippet ?? 'não disponível')}</p><p><strong>Hash:</strong> ${escapeHtml(item.hash ?? 'não disponível')}</p></section>`).join('')}</details>`;
+  const issueCard = (issue, group, presentation) => {
+    group = presentation.result;
+    issue = presentation.issue;
     const evidence = correlatedEvidence(issue);
     const correctionPresentation = group === 'passed'
       ? { title: 'Orientação e manutenção', confirmation: 'mantenha este registro como evidência positiva do escopo observado e reavalie se a página mudar.' }
@@ -190,15 +214,37 @@ function renderReportViewDocument(model, view, options = {}) {
         : group === 'alerts'
           ? { title: 'Como analisar e tratar', confirmation: 'registre se a análise confirmou uma barreira e repita a auditoria somente após eventual correção.' }
           : { title: 'Como corrigir e confirmar', confirmation: 'repita a verificação após a correção.' };
-    const legalReferences = issue.occurrences.map(occurrence => occurrence.legalReference).filter(Boolean);
-    const legal = legalReferences.length === 0 ? '' : plainBlock('legal', 'Fundamentação legal qualificada', legalReferences.map(reference => `<p><strong>${escapeHtml(reference.label)}:</strong> ${escapeHtml(reference.text)} ${escapeHtml(reference.qualification)}</p>`).join(''));
+    const { guidance } = presentation;
     const firstAnchor = evidence.map(item => evidenceAnchorById.get(item.evidenceId)).find(Boolean);
     const evidenceLink = firstAnchor
       ? `<a data-report-consult-evidence href="#${firstAnchor}">Consultar evidências registradas</a>`
       : '<p>Nenhuma evidência correlata foi registrada para esta verificação.</p>';
-    return `<article class="occurrence-card" data-report-issue data-result="${escapeHtml(group)}" data-classification="${escapeHtml(issue.classification)}" data-page="${escapeHtml(issue.pageId)}" data-engine="${escapeHtml(issue.engine)}" data-impact="${escapeHtml(issue.impact ?? 'none')}" data-wcag="${escapeHtml(reportWcagLevels(issue.wcag).join(' '))}" data-abnt="${escapeHtml(reportAbntFilterToken(issue.abntItemIds))}"><header data-report-issue-heading><h3>${escapeHtml(issue.title)}</h3><p><strong>Estado consolidado:</strong> ${escapeHtml(label(issue.displayOutcome, outcomeLabels))}.</p><p><strong>Classificação:</strong> ${escapeHtml(label(issue.classification, classificationLabels))}. <strong>Impacto:</strong> ${escapeHtml(label(issue.impact, impactLabels, 'Não aplicável'))}.</p></header>${plainBlock('impact', 'Impacto para a pessoa usuária', `<p>${escapeHtml(issue.plainLanguage.impact)}</p>`)}${plainBlock('observed', 'O que foi observado', `<ul>${issue.plainLanguage.observed.map(value => `<li>${escapeHtml(value)}</li>`).join('') || '<li>Nenhuma justificativa adicional foi registrada.</li>'}</ul>`)}${plainBlock('correction', correctionPresentation.title, `<p><strong>Correção:</strong> ${escapeHtml(issue.plainLanguage.correction)}</p><p><strong>Confirmação:</strong> ${escapeHtml(correctionPresentation.confirmation)}</p>`)}${plainBlock('announcement', 'Nome acessível e anúncio estimado', `<p><strong>Nome acessível:</strong> ${escapeHtml(issue.accessibleName ?? 'não disponível')}.</p><p><strong>Anúncio estimado:</strong> ${escapeHtml(issue.announcement ?? 'indisponível')}.</p><p>Esta prévia não é transcrição literal de tecnologia assistiva e pode variar conforme o leitor e as preferências.</p>`)}${plainBlock('normative', 'Fundamentação normativa', `<p><strong>WCAG 2.2:</strong> ${escapeHtml(issue.wcag.join(', ') || 'sem referência')}. <strong>ABNT NBR 17225:</strong> ${escapeHtml(reportAbntItemsLabel(issue.abntItemIds))}.</p>`)}${legal}${evidencePreview(evidence, issue)}<p data-report-live-action="evidence-only">O destaque ao vivo não está disponível neste relatório. Consulte as capturas registradas no momento da auditoria.</p>${evidenceLink}${technicalDetails(issue, evidence)}</article>`;
+    return `<article class="occurrence-card" data-report-issue data-result="${escapeHtml(group)}" data-classification="${escapeHtml(issue.classification)}" data-page="${escapeHtml(issue.pageId)}" data-engine="${escapeHtml(issue.engine)}" data-impact="${escapeHtml(issue.impact ?? 'none')}" data-wcag="${escapeHtml(reportWcagLevels(issue.wcag).join(' '))}" data-abnt="${escapeHtml(reportAbntFilterToken(issue.abntItemIds))}"><header data-report-issue-heading><h3>${escapeHtml(issue.title)}</h3><p><strong>Resultado neste item:</strong> ${escapeHtml(label(presentation.outcome, outcomeLabels))}.</p><p><strong>Classificação:</strong> ${escapeHtml(presentation.classifications.map(value => label(value, classificationLabels)).join(', '))}. <strong>Impacto:</strong> ${escapeHtml(label(issue.impact, impactLabels, 'Não aplicável'))}.</p></header><details data-report-issue-details><summary>Entender o resultado, revisar e consultar evidências</summary>${plainBlock('impact', 'Impacto para a pessoa usuária', `<p>${escapeHtml(guidance.impact)}</p>`)}${plainBlock('observed', 'O que foi observado', `<p>${escapeHtml(guidance.observed)}</p>`)}${plainBlock('correction', correctionPresentation.title, `<p><strong>Correção:</strong> ${escapeHtml(guidance.correction)}</p><p><strong>Confirmação:</strong> ${escapeHtml(correctionPresentation.confirmation)}</p>`)}${plainBlock('announcement', 'Nome acessível e anúncio estimado', `<p><strong>Nome acessível:</strong> ${escapeHtml(issue.accessibleName ?? 'não disponível')}.</p><p><strong>Anúncio estimado:</strong> ${escapeHtml(issue.announcement ?? 'indisponível')}.</p><p>Esta prévia não é transcrição literal de tecnologia assistiva e pode variar conforme o leitor e as preferências.</p>`)}${plainBlock('normative', 'Fundamentação normativa', `<p><strong>WCAG 2.2:</strong> ${escapeHtml(issue.wcag.join(', ') || 'sem referência')}. <strong>ABNT NBR 17225:</strong> ${escapeHtml(reportAbntItemsLabel(issue.abntItemIds))}.</p>`)}${evidencePreview(evidence, issue)}<p data-report-live-action="evidence-only">O destaque ao vivo não está disponível neste relatório. Consulte as capturas registradas no momento da auditoria.</p>${evidenceLink}<ol>${guidance.reviewSteps.map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol><p>${escapeHtml(guidance.example)}</p>${technicalDetails(issue, evidence)}</details></article>`;
   };
-  const issueCards = group => view.issues[group].map(issue => issueCard(issue, group)).join('');
+  const groupedChecks = new Map();
+  for (const group of ['failed', 'alerts', 'humanReview', 'passed']) {
+    for (const issue of view.issues[group]) {
+      for (const itemId of new Set(issue.abntItemIds.length ? issue.abntItemIds : ['__none__'])) {
+        if (!groupedChecks.has(itemId)) groupedChecks.set(itemId, []);
+        groupedChecks.get(itemId).push({ issue, group });
+      }
+    }
+  }
+  let cardOrdinal = 0;
+  const itemGroups = [...groupedChecks].map(([itemId, checks]) => {
+    const matchingOccurrences = checks.flatMap(({ issue }) => issue.occurrences).filter(occurrence => itemId === '__none__' ? !occurrence.itemId : occurrence.itemId === itemId);
+    const occurrenceCount = new Set(matchingOccurrences.map(occurrence => occurrence.occurrenceId)).size;
+    const failed = matchingOccurrences.some(occurrence => occurrence.legalReference);
+    const pending = matchingOccurrences.some(occurrence => occurrence.decision ? occurrence.decision.answer === 'não foi possível determinar' : ['cantTell', 'untested'].includes(occurrence.outcome));
+    const reference = itemId !== '__none__' && (failed || pending) ? `<p data-report-item-reference>${failed ? 'Inconformidade ao' : 'Verificar o'} item ${escapeHtml(itemId)} da ABNT NBR 17225:2025</p>` : '';
+    const title = itemId === '__none__' ? REPORT_NO_ABNT_ITEM_LABEL : `Item ${itemId} da ABNT NBR 17225:2025`;
+    const cards = checks.map(({ issue, group }) => {
+      const presentation = reportItemCheckPresentation(issue, itemId);
+      const anchor = `report-check-${++cardOrdinal}`;
+      return issueCard(issue, group, presentation).replace('class="occurrence-card"', `class="occurrence-card" id="${anchor}" data-report-check-key="${escapeHtml(issue.checkKey)}"`);
+    }).join('');
+    return `<details data-report-item-group="${escapeHtml(itemId)}"><summary>${escapeHtml(title)} · ${countLabel(checks.length, 'verificação', 'verificações')} · ${countLabel(occurrenceCount, 'ocorrência', 'ocorrências')}</summary>${reference}${cards}</details>`;
+  }).join('');
   const section = (index, body) => `<section id="report-section-${index + 1}" aria-labelledby="report-heading-${index + 1}"><h2 id="report-heading-${index + 1}">${escapeHtml(viewSectionTitle(index))}</h2>${body}</section>`;
   const delivery = deliveryIdentity === null ? '' : `<p><strong>ExportDeliveryIdentityV1:</strong> auditoria ${escapeHtml(deliveryIdentity.auditId)}; revisão ${deliveryIdentity.modelRevision}; hash ${escapeHtml(deliveryIdentity.modelHash)}; tentativa ${escapeHtml(deliveryIdentity.attemptId)}.</p>`;
   const navigationLabels = ['Sumário', 'Resultados', 'Não conformidades', 'Revisões humanas', 'Anúncios', 'Matriz ABNT', 'Metodologia e evidências'];
@@ -206,11 +252,11 @@ function renderReportViewDocument(model, view, options = {}) {
   const coverage = view.executive.coverage.status === 'available' ? view.executive.coverage.percent : 'indisponível';
   const annex = view.technicalEvidence.map(evidence => `<article class="evidence-card" id="${evidenceAnchorById.get(evidence.evidenceId)}" data-report-evidence="${escapeHtml(evidence.evidenceId)}" data-evidence-kind="${escapeHtml(evidence.kind)}"><h4>${escapeHtml(evidence.evidenceId)} — ${escapeHtml(label(evidence.kind, evidenceKindLabels, 'Evidência registrada'))}</h4>${evidenceProvenanceHtml(evidence)}<p><strong>Seletor:</strong> ${escapeHtml(evidence.selector?.css ?? 'não registrado')}</p><p><strong>Snippet:</strong> ${escapeHtml(evidence.snippet ?? 'não disponível')}</p>${safePng(evidence.dataUrl) ? `<img class="evidence-media" src="${escapeHtml(evidence.dataUrl)}" alt="${escapeHtml(`${label(evidence.kind, evidenceKindLabels, 'Evidência registrada')} local da evidência ${evidence.evidenceId}`)}">` : '<p><strong>Imagem segura:</strong> PNG local não disponível.</p>'}</article>`).join('');
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${csp}"><title>Relatório de auditoria — Audita Acessibilidade</title><style>${REPORT_CSS}</style></head><body class="report-view-document">${header()}<main id="conteudo"><h1>Relatório de auditoria de acessibilidade</h1><p class="report-static-identity">Escopo avaliado: ${escapeHtml(view.executive.identity.finalUrl)}.</p>
-${section(0, `<p data-report-outcome><strong>Estado da auditoria:</strong> ${escapeHtml(label(view.executive.status, statusLabels))}.</p><div data-report-coverage><strong>Cobertura automática: ${escapeHtml(coverage)}.</strong> Mede a execução automática; não é nota, certificação ou declaração de conformidade.</div><div class="summary-grid" data-report-metrics>${['failed','alerts','humanReview','passed'].map(metric).join('')}</div><p>Formatos desta entrega: HTML, PDF, CSV e JSON.</p><details data-report-limitations><summary>Limitações registradas (${view.executive.limitations.length})</summary><ul>${view.executive.limitations.map(value => `<li>${escapeHtml(value)}</li>`).join('') || '<li>Nenhuma limitação crítica registrada.</li>'}</ul></details>`)}
+${section(0, `<p data-report-outcome><strong>Estado da auditoria:</strong> ${escapeHtml(label(view.executive.status, statusLabels))}.</p><div data-report-coverage><strong>Cobertura automática: ${escapeHtml(coverage)}.</strong> Mede os testes do motor próprio com conclusão automática (passed, failed ou inapplicable), divididos pelo inventário desse motor nas páginas tentadas; não é nota, certificação ou declaração de conformidade.</div><div class="summary-grid" data-report-metrics>${['failed','alerts','humanReview','passed'].map(metric).join('')}</div><p>Formatos desta entrega: HTML, PDF, CSV e JSON.</p><details data-report-limitations><summary>Limitações registradas (${view.executive.limitations.length})</summary><ul>${view.executive.limitations.map(value => `<li>${escapeHtml(value)}</li>`).join('') || '<li>Nenhuma limitação crítica registrada.</li>'}</ul></details>`)}
 ${navigation}<p class="filters-noscript">Este arquivo contém todos os registros; filtros interativos estão disponíveis somente no relatório vivo.</p>
-${section(1, `${['failed','alerts','humanReview','passed'].map(group => `<h3>${escapeHtml(groupLabels[group])}: ${view.issues[group].length}</h3><p>As fichas detalhadas aparecem uma única vez nas seções seguintes.</p>${['alerts','passed'].includes(group) ? issueCards(group) : ''}`).join('')}`)}
-${section(2, issueCards('failed'))}
-${section(3, issueCards('humanReview'))}
+${section(1, itemGroups)}
+${section(2, '<p>As não conformidades estão nas verificações agrupadas por item acima.</p>')}
+${section(3, '<p>As revisões humanas estão nas verificações agrupadas por item acima; um resultado pendente não confirma uma falha.</p>')}
 ${section(4, reportViewReaderMaps(view))}
 ${section(5, `<div class="matrix-scroll" role="region" aria-label="Matriz completa dos 146 itens ABNT" tabindex="0"><table><caption>Matriz completa da ABNT NBR 17225</caption><thead><tr><th scope="col">Item</th><th scope="col">Título</th><th scope="col">Classificação</th><th scope="col">Resultado</th><th scope="col">WCAG</th></tr></thead><tbody>${view.matrix.map(row => `<tr><th scope="row">${escapeHtml(row.id)}</th><td>${escapeHtml(row.title)}</td><td>${escapeHtml(label(row.classification, classificationLabels))}</td><td>${escapeHtml(label(row.outcome, outcomeLabels))}</td><td>${escapeHtml(row.wcag.map(ref => `${ref.id} ${ref.level}`).join(', '))}</td></tr>`).join('')}</tbody></table></div>`)}
 ${section(6, `${view.methodology.caveats.map(value => `<p>${escapeHtml(value)}</p>`).join('')}<p><strong>Revisão do modelo:</strong> ${view.modelRevision}. <strong>Integridade:</strong> ${escapeHtml(view.modelHash)}.</p>${delivery}<h3>Fontes oficiais</h3><ul>${CONSUMER_ACCESSIBILITY_FIXED_BASIS.sources.map(source => `<li data-official-source>${escapeHtml(source.publisher)} — ${escapeHtml(source.title)} — ${escapeHtml(source.url)}</li>`).join('')}</ul><h3>Evidências técnicas e anexos</h3>${annex}`)}

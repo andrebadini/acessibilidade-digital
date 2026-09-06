@@ -131,6 +131,8 @@ th{background:#eef4f8;color:#14212b}
 [data-report-technical] section{min-width:0;margin-top:.65rem;padding:.65rem;border:1px solid #738596;background:#eef4f8;overflow-wrap:anywhere}
 .report-view-document [data-report-evidence]{min-width:0;overflow-wrap:anywhere}
 .sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
+[data-report-item-group]{min-width:0;margin-block:.75rem;border:1px solid #738596;border-radius:.4rem;padding:.65rem}
+[data-report-item-group]>summary,[data-report-issue-details]>summary{min-height:44px;align-content:center;cursor:pointer;font-weight:700;overflow-wrap:anywhere}
 .report-footer{margin-top:3rem;font-size:.9rem}
 .report-footer p{max-width:72rem;margin:.25rem auto}
 @media (min-width:48rem){[data-report-metrics].summary-grid{grid-template-columns:repeat(4,minmax(0,1fr))}[data-report-evidence-preview]{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -144,4 +146,4 @@ th{background:#eef4f8;color:#14212b}
 `;
 
 // Updated by the CSP integrity test whenever the static stylesheet changes.
-export const REPORT_CSS_CSP_HASH = 'sha256-Fd77aLWYQkKelnU0LCq0kP1EJRThExKe4ECYJ/25RYo=';
+export const REPORT_CSS_CSP_HASH = 'sha256-0fsh4I6aWiw3O+K6PAh4dCGfjWe4xegD55WgF8cr1XA=';

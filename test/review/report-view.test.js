@@ -21,6 +21,161 @@ const ATTACHED_COPY_RELOADED_MESSAGE = 'A auditoria foi executada em uma cópia 
 const ATTACHED_COPY_EVIDENCE_ONLY_MESSAGE = 'A página foi avaliada em uma cópia temporária já removida. O destaque ao vivo não está disponível; consulte as capturas e os seletores registrados no momento da auditoria.';
 const ATTACHED_COPY_RETURN_MESSAGE = 'Retorno e destaque na aba original indisponíveis: a auditoria usou uma cópia temporária e não alterou a aba original.';
 
+test('metric cards filter results and clear without changing the exported records', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const all = root.querySelectorAll('[data-report-issue]');
+  const metric = root.querySelector('[data-report-metric="failed"]');
+  assert.equal(metric.tagName, 'BUTTON');
+  metric.click();
+  assert.equal(metric.getAttribute('aria-pressed'), 'true');
+  assert.deepEqual(all.filter(issue => !issue.hidden).map(issue => issue.getAttribute('data-result')), view.issues.failed.map(() => 'failed'));
+  root.querySelector('[data-report-clear-filters]').click();
+  assert.equal(all.filter(issue => !issue.hidden).length, all.length);
+  assert.equal(metric.getAttribute('aria-pressed'), 'false');
+  assert.equal((renderHtmlReport(model, { reportView: view }).match(/data-report-issue /gu) ?? []).length, all.length);
+});
+
+test('report starts with collapsed issue details and keeps guidance and evidence inside', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  for (const issue of root.querySelectorAll('[data-report-issue]')) {
+    const details = issue.querySelector('[data-report-issue-details]');
+    assert.ok(details, 'each check has an expandable explanation');
+    assert.equal(details.getAttribute('open'), null);
+    assert.ok(details.querySelector('[data-report-technical]'));
+    assert.match(details.textContent, /Exemplo hipotético/);
+  }
+  assert.match(root.querySelector('[data-report-coverage]').textContent, /motor próprio.*passed.*failed.*inapplicable.*inventário/su);
+  const html = renderHtmlReport(model, { reportView: view });
+  assert.match(html, /<details data-report-issue-details><summary>/u);
+  assert.match(html, /Exemplo hipotético/u);
+});
+
+test('ABNT expanders give each check and item a card without duplicating occurrences', async () => {
+  const { model, summary } = await fixture();
+  const view = structuredClone(buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash }));
+  const issues = Object.values(view.issues).flat();
+  issues[0].abntItemIds = ['5.2.1', '5.2.2'];
+  issues[1].abntItemIds = ['5.2.1'];
+  for (const occurrence of issues[0].occurrences) occurrence.itemId = '5.2.1';
+  for (const occurrence of issues[1].occurrences) occurrence.itemId = '5.2.1';
+  const additional = { ...issues[0].occurrences[0], occurrenceId: 'occ-second-item', itemId: '5.2.2' };
+  issues[0].occurrences.push(additional); issues[0].occurrenceIds.push(additional.occurrenceId);
+  Object.freeze(view);
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const items = root.querySelectorAll('[data-report-item-group]');
+  assert.ok(items.length > 0);
+  assert.equal(new Set(items.map(item => item.getAttribute('data-report-item-group'))).size, items.length);
+  const imageGroup = root.querySelector('[data-report-item-group="5.2.1"]');
+  assert.equal(imageGroup.tagName, 'DETAILS');
+  assert.equal(imageGroup.getAttribute('open'), null);
+  assert.ok(imageGroup.querySelectorAll('[data-report-issue]').length >= 2);
+  assert.ok(root.querySelector('[data-report-item-group="5.2.2"]').querySelector('[data-report-issue]'));
+  assert.equal(root.querySelectorAll('[data-report-issue]').length, issues.length + 1);
+  const occurrenceIds = root.querySelectorAll('[data-report-occurrence-technical]').map(node => node.getAttribute('data-report-occurrence-technical'));
+  assert.equal(new Set(occurrenceIds).size, occurrenceIds.length);
+  const anchors = root.querySelectorAll('[data-report-issue]').map(node => node.getAttribute('id'));
+  assert.equal(new Set(anchors).size, anchors.length);
+  root.querySelector('[data-report-metric="failed"]').click();
+  assert.equal(imageGroup.hidden, false);
+  const html = renderHtmlReport(model, { reportView: view });
+  assert.equal((html.match(/data-report-item-group="5\.2\.1"/gu) ?? []).length, 1);
+  assert.equal((html.match(/data-report-issue /gu) ?? []).length, issues.length + 1);
+});
+
+test('a shared check filters and explains the outcome of each item independently', async () => {
+  const { model, summary } = await fixture();
+  const view = structuredClone(buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash }));
+  const issue = view.issues.failed[0];
+  const first = { ...issue.occurrences[0], itemId: '5.1.1', outcome: 'failed', justification: 'Foco não visível.' };
+  const second = { ...first, occurrenceId: 'occ-shared-pending', itemId: '5.2.1', outcome: 'cantTell', classification: 'recommendation', legalReference: null, decision: null, justification: 'Imagem aguardando classificação.' };
+  issue.abntItemIds = ['5.1.1', '5.2.1']; issue.occurrences = [first, second];
+  issue.occurrenceIds = [first.occurrenceId, second.occurrenceId];
+  view.issues = { failed: [issue], alerts: [], humanReview: [], passed: [] };
+  Object.freeze(view);
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const pending = root.querySelector('[data-report-item-group="5.2.1"]');
+  assert.match(pending.textContent, /Requer revisão humana/);
+  assert.doesNotMatch(pending.textContent, /Não conformidades/);
+  assert.match(pending.textContent, /leitor de tela/);
+  assert.match(pending.textContent, /não confirma atendimento nem falha/);
+  assert.match(pending.textContent, /Imagem aguardando classificação/);
+  assert.doesNotMatch(pending.textContent, /Foco não visível/);
+  root.querySelector('[data-report-metric="failed"]').click();
+  assert.equal(pending.hidden, true);
+  root.querySelector('[data-report-metric="humanReview"]').click();
+  assert.equal(pending.hidden, false);
+  assert.equal(root.querySelector('[data-report-item-group="5.1.1"]').hidden, true);
+  assert.match(root.querySelector('[role="status"]').textContent, /^1 verificação visíveis/);
+  root.querySelector('[data-report-filter="classification"][data-filter-value="failed"]').click();
+  assert.equal(pending.hidden, true);
+  root.querySelector('[data-report-filter="classification"][data-filter-value="manual-review"]').click();
+  assert.equal(pending.hidden, false);
+  assert.equal(root.querySelectorAll('[data-report-issue]').length, 2);
+  assert.equal(pending.querySelectorAll('[data-report-occurrence-technical]').length, 1);
+  const html = renderHtmlReport(model, { reportView: view });
+  const pendingHtml = html.slice(html.indexOf('data-report-item-group="5.2.1"')).split('</details>')[0];
+  assert.match(pendingHtml, /Requer revisão humana/);
+  assert.match(pendingHtml, /não confirma atendimento nem falha/);
+  assert.doesNotMatch(pendingHtml, /Não conformidades|Foco não visível/);
+});
+
+test('normal classification filters match the result classification of real report cards', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  root.querySelector('[data-report-filter="classification"][data-filter-value="failed"]').click();
+  const visible = root.querySelectorAll('[data-report-issue]').filter(card => !card.hidden);
+  assert.ok(visible.length > 0);
+  assert.ok(visible.every(card => card.getAttribute('data-classification') === 'failed'));
+});
+
+test('passed and failed items of a shared check own their highlight controls in either order', async () => {
+  const { model, summary } = await fixture();
+  for (const itemOrder of [['5.1.1', '5.2.1'], ['5.2.1', '5.1.1']]) {
+    const view = structuredClone(buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash }));
+    const issue = view.issues.failed[0];
+    const failure = { ...issue.occurrences[0], itemId: '5.2.1', outcome: 'failed', occurrenceId: 'occ-failure-second' };
+    const passed = { ...failure, itemId: '5.1.1', outcome: 'passed', legalReference: null, occurrenceId: 'occ-passed-first' };
+    issue.abntItemIds = itemOrder; issue.occurrences = [passed, failure];
+    issue.occurrenceIds = [passed.occurrenceId, failure.occurrenceId];
+    view.issues = { failed: [issue], alerts: [], humanReview: [], passed: [] };
+    const root = renderReportView({ view, document: new Document(), onExport() {}, onHighlightIntent() {} });
+    const failedGroup = root.querySelector('[data-report-item-group="5.2.1"]');
+    const passedGroup = root.querySelector('[data-report-item-group="5.1.1"]');
+    assert.ok(failedGroup.querySelector('[data-report-highlight-control="occ-failure-second"]'));
+    assert.equal(passedGroup.querySelectorAll('[data-report-highlight-control]').length, 0);
+    assert.equal(failedGroup.querySelector('[data-report-issue]').getAttribute('data-result'), 'failed');
+    assert.equal(passedGroup.querySelector('[data-report-issue]').getAttribute('data-result'), 'passed');
+    assert.match(passedGroup.querySelector('[data-report-technical]').textContent, /Resultado original: Atendido no escopo observado/);
+    assert.deepEqual(failedGroup.querySelectorAll('[data-report-occurrence-technical]').map(node => node.getAttribute('data-report-occurrence-technical')), ['occ-failure-second']);
+    assert.deepEqual(passedGroup.querySelectorAll('[data-report-occurrence-technical]').map(node => node.getAttribute('data-report-occurrence-technical')), ['occ-passed-first']);
+  }
+});
+
+test('item references distinguish confirmed failure from pending checks without repeating legal paragraphs', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const failedItem = view.issues.failed[0].abntItemIds[0];
+  const pendingItem = view.issues.humanReview[0].abntItemIds[0];
+  assert.equal(root.querySelector(`[data-report-item-group="${failedItem}"]`).querySelectorAll('[data-report-item-reference]').length, 1);
+  assert.equal(root.querySelector(`[data-report-item-group="${failedItem}"]`).querySelector('[data-report-item-reference]').textContent, `Inconformidade ao item ${failedItem} da ABNT NBR 17225:2025`);
+  assert.equal(root.querySelector(`[data-report-item-group="${pendingItem}"]`).querySelector('[data-report-item-reference]').textContent, `Verificar o item ${pendingItem} da ABNT NBR 17225:2025`);
+  const html = renderHtmlReport(model, { reportView: view });
+  assert.equal((html.match(new RegExp(`Inconformidade ao item ${failedItem.replaceAll('.', '\\.')} da ABNT NBR 17225:2025`, 'gu')) ?? []).length, 1);
+  assert.match(html, new RegExp(`Verificar o item ${pendingItem.replaceAll('.', '\\.')} da ABNT NBR 17225:2025`, 'u'));
+  const inconclusive = structuredClone(view);
+  for (const issue of inconclusive.issues.humanReview) {
+    for (const occurrence of issue.occurrences) occurrence.decision = { answer: 'não foi possível determinar' };
+  }
+  const reviewedRoot = renderReportView({ view: inconclusive, document: new Document(), onExport() {} });
+  assert.match(reviewedRoot.querySelector(`[data-report-item-group="${pendingItem}"]`).querySelector('[data-report-item-reference]')?.textContent ?? '', /Verificar o item/);
+});
+
 class Element {
   constructor(tagName, document) {
     this.tagName = tagName.toUpperCase(); this.ownerDocument = document; this.children = [];
@@ -576,7 +731,6 @@ test('live filters expose visible Portuguese labels and apply WCAG levels', asyn
     'Filtrar por classificação',
     'Filtrar por página avaliada',
     'Filtrar por origem da verificação',
-    'Filtrar por item da ABNT NBR 17225',
   ]);
   assert.deepEqual(groups.map(group => group.querySelector('[data-report-filter-label]').textContent), [
     'Impacto',
@@ -585,7 +739,6 @@ test('live filters expose visible Portuguese labels and apply WCAG levels', asyn
     'Classificação',
     'Página avaliada',
     'Origem da verificação',
-    'Item ABNT NBR 17225',
   ]);
   const wcagGroup = groups[1];
   assert.deepEqual(wcagGroup.querySelectorAll('button').map(button => button.getAttribute('data-filter-value')), ['A', 'AA', 'AAA']);
@@ -611,10 +764,9 @@ test('missing ABNT association is explicit in the live report and HTML/PDF sourc
   assert.match(alert.querySelector('[data-report-plain-block="normative"]').textContent, /Sem item ABNT associado/u);
   assert.match(alert.querySelector('[data-report-technical]').textContent, /Item ABNT: Sem item ABNT associado\./u);
   assert.doesNotMatch(alert.textContent, /Item ABNT:\s*null|ABNT NBR 17225:\s*(?:\.|sem item\.)/iu);
-  const emptyAbntFilter = root.querySelector('button[data-report-filter="abnt"][data-filter-value="__none__"]');
-  assert.equal(emptyAbntFilter.textContent, 'Sem item ABNT associado (1)');
-  emptyAbntFilter.click();
-  assert.deepEqual(root.querySelectorAll('[data-report-issue]').filter(issue => !issue.hidden), [alert]);
+  const unassociated = root.querySelector('[data-report-item-group="__none__"]');
+  assert.match(unassociated.querySelector('summary').textContent, /Sem item ABNT associado/);
+  assert.deepEqual(unassociated.querySelectorAll('[data-report-issue]'), [alert]);
 
   const html = renderHtmlReport(model, { reportView: view });
   assert.match(html, /data-abnt="__none__"/u);
@@ -634,7 +786,7 @@ test('live report renders decision-first cards, evidence previews and honest evi
   const root = renderReportView({ view, document: new Document(), onExport() {} });
   const firstIssue = root.querySelector('[data-report-issue][data-result="failed"]');
   assert.ok(firstIssue);
-  const orderedBlocks = firstIssue.children.map(child => {
+  const orderedBlocks = [firstIssue.querySelector('[data-report-issue-heading]'), ...firstIssue.querySelector('[data-report-issue-details]').children.filter(child => child.tagName !== 'SUMMARY')].map(child => {
     if (child.getAttribute('data-report-issue-heading') !== null) return 'heading';
     if (child.getAttribute('data-report-plain-block') !== null) return child.getAttribute('data-report-plain-block');
     if (child.getAttribute('data-report-evidence-preview') !== null) return 'preview';
@@ -644,22 +796,22 @@ test('live report renders decision-first cards, evidence previews and honest evi
     return 'unexpected';
   });
   assert.deepEqual(orderedBlocks, [
-    'heading', 'impact', 'observed', 'correction', 'announcement', 'normative', 'legal',
+    'heading', 'impact', 'observed', 'correction', 'announcement', 'normative',
     'preview', 'live-action', 'consult-evidence', 'technical',
   ]);
   assert.match(firstIssue.querySelector('[data-report-issue-heading]').textContent, /Não atendido neste teste|Não conformidade identificada|Moderado/iu);
-  assert.match(firstIssue.querySelector('[data-report-plain-block="impact"]').textContent, /dificultar ou impedir/iu);
+  assert.match(firstIssue.querySelector('[data-report-plain-block="impact"]').textContent, /Pessoas que usam apenas teclado/iu);
   assert.doesNotMatch(firstIssue.querySelector('[data-report-plain-block="observed"]').textContent, /top-document|mixed|page-or-process/u);
   assert.match(firstIssue.querySelector('[data-report-plain-block="correction"]').textContent, /Correção/iu);
   assert.match(firstIssue.querySelector('[data-report-plain-block="announcement"]').textContent, /Nome acessível|anúncio estimado|não é transcrição literal/iu);
   assert.match(firstIssue.querySelector('[data-report-plain-block="normative"]').textContent, /WCAG|ABNT/iu);
-  assert.match(firstIssue.querySelector('[data-report-plain-block="legal"]').textContent, /Referência técnica e jurídica qualificada/iu);
+  assert.match(root.querySelector('[data-report-item-reference]').textContent, /Inconformidade ao item .* da ABNT NBR 17225:2025/iu);
   const preview = firstIssue.querySelector('[data-report-evidence-preview]');
   assert.equal(preview.querySelectorAll('img').length, 1);
   assert.equal(preview.querySelectorAll('svg[data-evidence-treatment="failed"]').length, 1);
   assert.equal(preview.querySelectorAll('[data-evidence-kind="element"]').length, 1);
   assert.equal(preview.querySelectorAll('[data-evidence-kind="full-page"]').length, 1);
-  assert.equal(firstIssue.querySelectorAll('details').length, 1);
+  assert.equal(firstIssue.querySelectorAll('details').length, 2);
   const technical = firstIssue.querySelector('[data-report-technical]');
   assert.equal(technical.getAttribute('open'), null);
   assert.equal(technical.querySelectorAll('img').length, 0);

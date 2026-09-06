@@ -8,6 +8,7 @@ import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
 import { readerMapPresentation, READER_MAP_INTRO } from '../core/report/reader-map-presentation.js';
 import { projectEvidenceProvenance, evidenceProvenanceRows } from '../core/report/evidence-provenance.js';
+import { accessibilityGuidance } from '../core/report/plain-language-guidance.js';
 
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
 const GROUP_LABELS = Object.freeze({
@@ -543,6 +544,7 @@ function appendTechnicalDetails(document, article, issue, evidence) {
     element(document, 'summary', 'Ver detalhes técnicos'),
     element(document, 'p', `Resultado original: ${outcomeLabel(issue.originalOutcome)}. Resultado consolidado: ${outcomeLabel(issue.displayOutcome)}.`),
     element(document, 'p', `Contexto técnico: ${issue.context ?? 'não registrado'}. Página: ${issue.pageId}.`),
+    element(document, 'p', `Orientação original registrada: ${issue.plainLanguage.correction}`),
   );
   for (const occurrence of issue.occurrences) {
     const block = document.createElement('section');
@@ -630,8 +632,33 @@ function appendEvidencePreview(document, article, evidence, evidenceAnchorById, 
   }
 }
 
+function itemCheckPresentation(issue, itemId) {
+  const occurrences = issue.occurrences.filter(occurrence => itemId === NO_ABNT_ITEM ? !occurrence.itemId : occurrence.itemId === itemId);
+  const outcomes = occurrences.map(occurrence => occurrence.outcome === 'failed' || occurrence.decision?.answer === 'não conforme' ? 'failed'
+    : occurrence.decision?.answer === 'conforme' ? 'passed'
+      : occurrence.decision?.answer === 'não foi possível determinar' ? 'cantTell' : occurrence.outcome);
+  if (issue.occurrences.length === 0) outcomes.push(issue.displayOutcome);
+  const outcome = outcomes.includes('failed') ? 'failed' : outcomes.some(value => ['cantTell', 'untested'].includes(value)) ? 'cantTell'
+    : outcomes.includes('passed') ? 'passed' : outcomes.length ? 'inapplicable' : 'untested';
+  const classifications = [...new Set(occurrences.map(occurrence => occurrence.classification))];
+  if (issue.occurrences.length === 0) classifications.push(issue.classification);
+  const normative = classifications.some(value => ['requirement', 'recommendation'].includes(value));
+  const result = ['passed', 'inapplicable'].includes(outcome) ? 'passed' : normative ? outcome === 'failed' ? 'failed' : 'humanReview' : 'alerts';
+  const classification = result === 'humanReview' ? 'manual-review' : result;
+  const originalOutcome = occurrences.some(row => row.outcome === 'failed') ? 'failed'
+    : occurrences.some(row => ['cantTell', 'untested'].includes(row.outcome)) ? 'cantTell'
+      : occurrences.some(row => row.outcome === 'passed') ? 'passed' : occurrences.length ? 'inapplicable' : issue.originalOutcome;
+  return { outcome, result, classifications,
+    issue: { ...issue, occurrences, occurrenceIds: occurrences.map(occurrence => occurrence.occurrenceId),
+      abntItemIds: itemId === NO_ABNT_ITEM ? [] : [itemId], displayOutcome: outcome, originalOutcome, classification },
+    guidance: accessibilityGuidance({ itemId, title: issue.title, outcome,
+    observed: [...new Set(occurrences.map(occurrence => occurrence.justification).filter(Boolean))].join(' ') }) };
+}
+
 function issueArticle(document, issue, group, evidenceById, evidenceAnchorById, highlightOptions = null,
-  evidenceOnlyMessage = GENERIC_EVIDENCE_ONLY_MESSAGE) {
+  evidenceOnlyMessage = GENERIC_EVIDENCE_ONLY_MESSAGE, presentation) {
+  group = presentation.result;
+  issue = presentation.issue;
   const article = document.createElement('article');
   article.setAttribute('data-report-issue', '');
   article.setAttribute('data-result', group);
@@ -645,49 +672,47 @@ function issueArticle(document, issue, group, evidenceById, evidenceAnchorById, 
   heading.setAttribute('data-report-issue-heading', '');
   heading.append(
     element(document, 'h3', issue.title),
-    element(document, 'p', `Estado consolidado: ${outcomeLabel(issue.displayOutcome)}.`),
-    element(document, 'p', `Classificação: ${classificationLabel(issue.classification)}. Impacto: ${impactLabel(issue.impact)}.`),
+    element(document, 'p', `Resultado neste item: ${outcomeLabel(presentation.outcome)}.`),
+    element(document, 'p', `Classificação: ${presentation.classifications.map(classificationLabel).join(', ')}. Impacto: ${impactLabel(issue.impact)}.`),
   );
-  article.append(heading);
+  const content = document.createElement('details');
+  content.setAttribute('data-report-issue-details', '');
+  content.append(element(document, 'summary', 'Entender o resultado, revisar e consultar evidências'));
+  article.append(heading, content);
+  const { guidance } = presentation;
   const impact = plainBlock(document, 'impact', 'Impacto para a pessoa usuária');
-  impact.append(element(document, 'p', issue.plainLanguage.impact)); article.append(impact);
+  impact.append(element(document, 'p', guidance.impact)); content.append(impact);
   const observed = plainBlock(document, 'observed', 'O que foi observado');
-  appendTextList(document, observed, issue.plainLanguage.observed, 'Nenhuma justificativa adicional foi registrada.');
-  article.append(observed);
+  observed.append(element(document, 'p', guidance.observed));
+  content.append(observed);
   const correctionCopy = correctionPresentation(group);
   const correction = plainBlock(document, 'correction', correctionCopy.title);
   correction.append(
-    element(document, 'p', `Correção: ${issue.plainLanguage.correction}`),
+    element(document, 'p', `Correção: ${guidance.correction}`),
     element(document, 'p', correctionCopy.confirmation),
   );
-  article.append(correction);
+  appendTextList(document, correction, guidance.reviewSteps);
+  correction.append(element(document, 'p', guidance.example));
+  content.append(correction);
   const announcement = plainBlock(document, 'announcement', 'Nome acessível e anúncio estimado');
   announcement.append(
     element(document, 'p', `Nome acessível: ${issue.accessibleName ?? 'não disponível'}.`),
     element(document, 'p', `Anúncio estimado: ${issue.announcement ?? 'indisponível'}.`),
     element(document, 'p', 'Esta prévia não é transcrição literal de tecnologia assistiva e pode variar conforme o leitor e as preferências.'),
   );
-  article.append(announcement);
+  content.append(announcement);
   const normative = plainBlock(document, 'normative', 'Fundamentação normativa');
   normative.append(element(document, 'p', `WCAG 2.2: ${issue.wcag.join(', ') || 'sem referência'}. ABNT NBR 17225: ${abntItemsLabel(issue.abntItemIds)}.`));
-  article.append(normative);
-  const legalReferences = issue.occurrences.map(occurrence => occurrence.legalReference).filter(Boolean);
-  if (legalReferences.length > 0) {
-    const legal = plainBlock(document, 'legal', 'Fundamentação legal qualificada');
-    for (const reference of legalReferences) {
-      legal.append(element(document, 'p', `${reference.label}: ${reference.text} ${reference.qualification}`));
-    }
-    article.append(legal);
-  }
+  content.append(normative);
   const evidence = correlatedEvidence(issue, evidenceById);
-  appendEvidencePreview(document, article, evidence, evidenceAnchorById, issue,
+  appendEvidencePreview(document, content, evidence, evidenceAnchorById, issue,
     highlightOptions && ['failed', 'humanReview'].includes(group)
       ? {
         ...highlightOptions, occurrenceIds: issue.occurrences.map(value => value.occurrenceId),
         issueTitle: issue.title, pageId: issue.pageId,
       }
       : null, evidenceOnlyMessage);
-  appendTechnicalDetails(document, article, issue, evidence);
+  appendTechnicalDetails(document, content, issue, evidence);
   return article;
 }
 
@@ -696,10 +721,11 @@ function renderFilters(document, view, root, status) {
   wrapper.setAttribute('class', 'report-filters');
   wrapper.setAttribute('aria-label', 'Filtros do relatório vivo');
   const active = new Map();
+  const visibleCheckIds = new Set();
   const total = GROUPS.reduce((count, group) => count + view.issues[group].length, 0);
   status.textContent = `${countLabel(total, 'verificação', 'verificações')} visíveis. Os filtros não alteram os arquivos exportados.`;
   const apply = () => {
-    let visible = 0;
+    visibleCheckIds.clear();
     for (const issue of root.querySelectorAll('[data-report-issue]')) {
       let match = true;
       for (const [dimension, value] of active) {
@@ -707,18 +733,48 @@ function renderFilters(document, view, root, status) {
         if (!values.includes(value)) { match = false; break; }
       }
       issue.hidden = !match;
-      if (match) visible += 1;
+      if (match) visibleCheckIds.add(issue.getAttribute('data-report-check-key'));
     }
-    status.textContent = `${visible} resultados visíveis. Os filtros não alteram os arquivos exportados.`;
+    for (const group of root.querySelectorAll('[data-report-item-group]')) {
+      group.hidden = ![...group.querySelectorAll('[data-report-issue]')].some(node => !node.hidden);
+    }
+    status.textContent = `${countLabel(visibleCheckIds.size, 'verificação', 'verificações')} visíveis. Os filtros não alteram os arquivos exportados.`;
+    for (const card of root.querySelectorAll('[data-report-metric]')) {
+      card.setAttribute('aria-pressed', String(active.get('result') === card.getAttribute('data-report-metric')));
+    }
   };
-  for (const dimension of FILTERS) {
+  for (const card of root.querySelectorAll('[data-report-metric]')) {
+    card.addEventListener('click', () => {
+      const value = card.getAttribute('data-report-metric');
+      if (active.get('result') === value) active.delete('result');
+      else active.set('result', value);
+      for (const peer of wrapper.querySelectorAll('[data-report-filter="result"]')) {
+        peer.setAttribute('aria-pressed', String(active.get('result') === peer.getAttribute('data-filter-value')));
+      }
+      apply();
+    });
+  }
+  for (const dimension of FILTERS.filter(value => value !== 'abnt')) {
     const group = document.createElement('div');
     group.setAttribute('role', 'group');
     group.setAttribute('aria-label', FILTER_PRESENTATION[dimension].aria);
     const visibleLabel = element(document, 'strong', FILTER_PRESENTATION[dimension].visible, 'report-filter-label');
     visibleLabel.setAttribute('data-report-filter-label', '');
     group.append(visibleLabel);
-    for (const option of view.filters[dimension]) {
+    let options = view.filters[dimension];
+    if (['classification', 'result'].includes(dimension)) {
+      const counts = new Map();
+      for (const issue of GROUPS.flatMap(group => view.issues[group])) {
+        for (const itemId of new Set(issue.abntItemIds.length ? issue.abntItemIds : [NO_ABNT_ITEM])) {
+          const presentation = itemCheckPresentation(issue, itemId);
+          const value = dimension === 'result' ? presentation.result : presentation.issue.classification;
+          if (!counts.has(value)) counts.set(value, new Set());
+          counts.get(value).add(issue.checkKey);
+        }
+      }
+      options = [...new Set([...options.map(option => option.id), ...counts.keys()])].map(id => ({ id, count: counts.get(id)?.size ?? 0 }));
+    }
+    for (const option of options) {
       const translated = dimension === 'impact' ? impactLabel(option.id)
         : dimension === 'result' ? labelFor(option.id, GROUP_LABELS)
           : dimension === 'classification' ? classificationLabel(option.id)
@@ -743,7 +799,14 @@ function renderFilters(document, view, root, status) {
     }
     wrapper.append(group);
   }
-  wrapper.append(status);
+  const clear = element(document, 'button', 'Limpar filtros');
+  clear.setAttribute('type', 'button'); clear.setAttribute('data-report-clear-filters', '');
+  clear.addEventListener('click', () => {
+    active.clear();
+    for (const control of wrapper.querySelectorAll('[data-report-filter]')) control.setAttribute('aria-pressed', 'false');
+    apply();
+  });
+  wrapper.append(clear, status);
   return wrapper;
 }
 
@@ -777,7 +840,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
     element(document, 'strong', view.executive.coverage.status === 'available'
       ? `Cobertura automática: ${view.executive.coverage.percent}.`
       : 'Cobertura automática: indisponível.'),
-    element(document, 'span', ' Mede a execução automática; não é nota, certificação ou declaração de conformidade.'),
+    element(document, 'span', ' Mede os testes do motor próprio com conclusão automática (passed, failed ou inapplicable), divididos pelo inventário desse motor nas páginas tentadas; não é nota, certificação ou declaração de conformidade.'),
   );
   executive.append(coverageSummary);
   const metrics = document.createElement('div');
@@ -789,7 +852,8 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
     ['humanReview', 'Revisões humanas', view.executive.counts.humanReview],
     ['passed', 'Resultados positivos', view.executive.counts.positive],
   ]) {
-    const card = document.createElement('article'); card.setAttribute('data-report-metric', group);
+    const card = document.createElement('button'); card.setAttribute('data-report-metric', group);
+    card.setAttribute('type', 'button'); card.setAttribute('aria-pressed', 'false');
     card.append(
       element(document, 'strong', String(count.checkKeys), 'metric-value'),
       element(document, 'span', label, 'metric-label'),
@@ -833,34 +897,57 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   const coverage = section(document, 1);
   const evidenceById = new Map(view.technicalEvidence.map(evidence => [evidence.evidenceId, evidence]));
   const evidenceAnchorById = new Map(view.technicalEvidence.map((evidence, index) => [evidence.evidenceId, `report-evidence-${index + 1}`]));
-  coverage.append(element(document, 'p', view.executive.coverage.status === 'available'
-    ? `Cobertura automática: ${view.executive.coverage.percent}.`
-    : 'Cobertura automática indisponível.'));
-  coverage.append(element(document, 'p', 'Percentual da execução automática concluída. Não é nota, certificação ou declaração de conformidade.'));
   coverage.append(renderFilters(document, view, root, live));
   for (const group of GROUPS) {
     const groupNode = document.createElement('div');
     groupNode.setAttribute('data-report-group', group);
     groupNode.append(element(document, 'h3', `${GROUP_LABELS[group]}: ${view.issues[group].length}`));
-    groupNode.append(element(document, 'p', 'As fichas detalhadas aparecem uma única vez nas seções seguintes.'));
-    if (['alerts', 'passed'].includes(group)) {
-      for (const issue of view.issues[group]) {
-        groupNode.append(issueArticle(document, issue, group, evidenceById, evidenceAnchorById, null, evidenceOnlyMessage));
+    coverage.append(groupNode);
+  }
+  const itemGroups = new Map();
+  let cardOrdinal = 0;
+  for (const result of GROUPS) {
+    for (const issue of view.issues[result]) {
+      for (const itemId of new Set(issue.abntItemIds.length ? issue.abntItemIds : [NO_ABNT_ITEM])) {
+        if (!itemGroups.has(itemId)) itemGroups.set(itemId, []);
+        itemGroups.get(itemId).push({ issue, result });
       }
     }
-    coverage.append(groupNode);
+  }
+  for (const [itemId, checks] of itemGroups) {
+    const item = document.createElement('details');
+    item.setAttribute('data-report-item-group', itemId);
+    const matchingOccurrences = checks.flatMap(({ issue }) => issue.occurrences).filter(occurrence => itemId === NO_ABNT_ITEM ? !occurrence.itemId : occurrence.itemId === itemId);
+    const occurrences = new Set(matchingOccurrences.map(occurrence => occurrence.occurrenceId));
+    item.append(element(document, 'summary', `${itemId === NO_ABNT_ITEM ? NO_ABNT_ITEM_LABEL : `Item ${itemId} da ABNT NBR 17225:2025`} · ${countLabel(checks.length, 'verificação', 'verificações')} · ${countLabel(occurrences.size, 'ocorrência', 'ocorrências')}`));
+    if (itemId !== NO_ABNT_ITEM) {
+      const failed = matchingOccurrences.some(occurrence => occurrence.legalReference);
+      const pending = matchingOccurrences.some(occurrence => occurrence.decision ? occurrence.decision.answer === 'não foi possível determinar' : ['cantTell', 'untested'].includes(occurrence.outcome));
+      if (failed || pending) {
+        const reference = element(document, 'p', `${failed ? 'Inconformidade ao' : 'Verificar o'} item ${itemId} da ABNT NBR 17225:2025`);
+        reference.setAttribute('data-report-item-reference', '');
+        item.append(reference);
+      }
+    }
+    for (const { issue, result } of checks) {
+      const presentation = itemCheckPresentation(issue, itemId);
+      const card = issueArticle(document, issue, result, evidenceById, evidenceAnchorById,
+        onHighlightIntent ? { enabled: true, onIntent: onHighlightIntent } : null, evidenceOnlyMessage, presentation);
+      card.setAttribute('id', `report-check-${++cardOrdinal}`);
+      card.setAttribute('data-report-check-key', issue.checkKey);
+      item.append(card);
+    }
+    coverage.append(item);
   }
   root.append(coverage);
 
   const failed = section(document, 2);
-  for (const issue of view.issues.failed) failed.append(issueArticle(document, issue, 'failed', evidenceById, evidenceAnchorById,
-    onHighlightIntent ? { enabled: true, onIntent: onHighlightIntent } : null, evidenceOnlyMessage));
+  failed.append(element(document, 'p', 'Use o cartão “Não conformidades” no sumário para filtrar as verificações agrupadas por item.'));
   root.append(failed);
 
   const review = section(document, 3);
   review.setAttribute('data-review-controls-target', '');
-  for (const issue of view.issues.humanReview) review.append(issueArticle(document, issue, 'humanReview', evidenceById, evidenceAnchorById,
-    onHighlightIntent ? { enabled: true, onIntent: onHighlightIntent } : null, evidenceOnlyMessage));
+  review.append(element(document, 'p', 'Use o cartão “Revisões humanas” no sumário para localizar as verificações pendentes. Registre a conclusão e as evidências nos controles de revisão.'));
   root.append(review);
 
   const maps = section(document, 4);
