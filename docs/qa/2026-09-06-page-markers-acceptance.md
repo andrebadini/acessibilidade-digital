@@ -40,6 +40,10 @@ O canal agora reconhece os quatro comandos fechados, acrescenta autoridade priva
 
 Task6, basea12c697: RED7/7 na API estendida ausente; após implementação,9/9 novos testes passaram, incluindo troca result→running→mesmo result. Testes de panel-port/panel-port-admitted-intents/panel-session-port:191/191PASS; regressão service-worker95/95PASS; diff-checkPASS. Revisão independente C0/I0 e9/9 confirmados. A conexão admitida agora mantém recibo privado de resultado, publica seleção sem autoridade no payload e invalida antes de cleanup assíncrono. Wiring global e Chrome permanecem pendentes.
 
+Task4 W3-runtime: controller e binder em cinco arquivos novos. RED comportamental inicial do controller0/11 e binder1/4; primeira versão congelada passou69/69 testes focados/relacionados. Revisão independente identificou três problemas importantes: cancelamento durante probe/instalação, janela alterada confundida com documento ausente e seleção privada obsoleta após alvo indisponível. Rodada agrupada: quatro reproduções RED0/4→GREEN4/4; conjunto final73/73PASS, confirmado pelo agente principal; syntax/diff-checkPASS. Mesmo revisor validou os três ajustes e TTL após probe: C0/I0. Nenhum teste nativo foi executado neste checkpoint.
+
+O controller usa o símbolo privado real AUDIT_EXECUTION_INTERNAL, prova a origem, injeta somente no documentId original, mantém seleção/instalação privadas e limpa o overlay próprio com possibilidade de repetir cleanup não confirmado. Binder mantém o canal apenas durante a conferência explícita. O pacote1.1.0 não foi alterado; conexão global com worker, controles visuais e prova de continuidade antes de Mostrar sinais ainda faltam.
+
 ## Base técnica consultada
 
 - [Chrome scripting](https://developer.chrome.com/docs/extensions/reference/api/scripting): função injetada autocontida, mundo isolado e direcionamento por documentIds.

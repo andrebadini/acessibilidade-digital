@@ -1,0 +1,335 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import { DIGEST, INSTALLATION_ID, SESSION_ID, createControllerFixture, deferred } from './page-markers-controller-fixture.js';
+
+test('show authorizes the private panel window and returns only located physical groups and global counts', async () => {
+  const fixture = await createControllerFixture();
+  const originalHash = fixture.model.integrity.canonicalModelHash;
+
+  const result = await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+
+  assert.deepEqual(result, { ok: true, markers: {
+    state: 'active', modelRevision: 7,
+    groups: [{ number: 1, ordinals: [1, 2] }],
+    counts: { markers: 1, located: 2, unlocated: 0, general: 1, omitted: 0 },
+    selectedOrdinal: null,
+  } });
+  assert.equal(fixture.model.integrity.canonicalModelHash, originalHash);
+  assert.deepEqual(fixture.calls.authorize[0], {
+    sessionCapabilityId: SESSION_ID, auditId: fixture.model.auditId, consumer: 'panel',
+    intent: 'review-markers', sender: fixture.sender, claimedWindowId: 9,
+  });
+  assert.equal(fixture.calls.scripts.some(call => Object.hasOwn(call.target, 'frameIds')), false);
+  assert.equal(JSON.stringify(result).includes(INSTALLATION_ID), false);
+  assert.deepEqual(fixture.calls.publish, [{
+    windowId: 9, sessionCapabilityId: SESSION_ID, auditId: fixture.model.auditId,
+    modelRevision: 7, state: 'active', selectedOrdinal: null,
+  }]);
+});
+
+test('authorization refusal and unavailable origin have no browser effects', async () => {
+  for (const options of [{ authorized: false }, { noOrigin: true }]) {
+    const fixture = await createControllerFixture(options);
+    const result = await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+    assert.deepEqual(result, { ok: false, code: options.authorized === false
+      ? 'PAGE_MARKERS_NOT_AUTHORIZED' : 'PAGE_MARKERS_UNAVAILABLE' });
+    assert.deepEqual(fixture.calls.probe, []);
+    assert.deepEqual(fixture.calls.scripts, []);
+  }
+});
+
+test('closed envelope, private window mismatch, stale revision and bundle mismatch fail closed', async () => {
+  const fixture = await createControllerFixture();
+  const accessor = fixture.envelope('PANEL_SHOW_PAGE_MARKERS');
+  let getterReads = 0;
+  Object.defineProperty(accessor, 'extra', { enumerable: true, get() { getterReads += 1; return 'private'; } });
+  assert.deepEqual(await fixture.controller.dispatch({ envelope: accessor, sender: fixture.sender,
+    panelWindowId: 9, isCurrent: () => true }), { ok: false, code: 'PAGE_MARKERS_INVALID' });
+  assert.equal(getterReads, 0);
+  assert.deepEqual(await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS', {}, { panelWindowId: 8 }),
+    { ok: false, code: 'PAGE_MARKERS_INVALID' });
+
+  const stale = await createControllerFixture();
+  assert.deepEqual(await stale.controller.dispatch({
+    envelope: { ...stale.envelope('PANEL_SHOW_PAGE_MARKERS'), modelRevision: 6 }, sender: stale.sender,
+    panelWindowId: 9, isCurrent: () => true,
+  }), { ok: false, code: 'PAGE_MARKERS_STALE_RESULT' });
+  const mismatch = await createControllerFixture({ bundle: { ...fixture.bundle, modelHash: 'f'.repeat(64) } });
+  assert.deepEqual(await mismatch.dispatch('PANEL_SHOW_PAGE_MARKERS'),
+    { ok: false, code: 'PAGE_MARKERS_STALE_RESULT' });
+});
+
+test('copy source is sanitized immediately and a redirect incompatible with the model is rejected before injection', async () => {
+  const fixture = await createControllerFixture({ source: {
+    version: 'AttachedCopySourceV1', tabId: 17, windowId: 9, documentId: 'document-a',
+    urlSessionDigest: DIGEST, rawUrl: 'https://other.example.test/private?token=secret',
+  } });
+  assert.deepEqual(await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS'),
+    { ok: false, code: 'PAGE_MARKERS_DOCUMENT_CHANGED' });
+  assert.deepEqual(fixture.calls.scripts, []);
+  assert.equal(JSON.stringify(fixture.calls.publish).includes('secret'), false);
+});
+
+test('selection and filtering translate ordinals through the private table and never alter audit totals', async () => {
+  const fixture = await createControllerFixture();
+  await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  const selected = await fixture.dispatch('PANEL_SELECT_PAGE_MARKER', { ordinal: 2, scroll: true });
+  assert.equal(selected.ok, true);
+  assert.equal(selected.markers.selectedOrdinal, 2);
+  assert.deepEqual(fixture.page.first.scrollCalls, [{ behavior: 'smooth', block: 'center', inline: 'nearest' }]);
+  const filtered = await fixture.dispatch('PANEL_FILTER_PAGE_MARKERS', { visibleOrdinals: '' });
+  assert.equal(filtered.ok, true);
+  assert.deepEqual(filtered.markers.counts, selected.markers.counts);
+  assert.equal(filtered.markers.selectedOrdinal, null);
+  assert.equal(fixture.page.environment.markerButtons()[0].style.display, 'none');
+  assert.deepEqual(await fixture.dispatch('PANEL_SELECT_PAGE_MARKER', { ordinal: 0, scroll: false }),
+    { ok: false, code: 'PAGE_MARKERS_SELECTION_UNAVAILABLE' });
+  for (const visibleOrdinals of ['2,1', '01', '1,1', '64', '3']) {
+    assert.deepEqual(await fixture.dispatch('PANEL_FILTER_PAGE_MARKERS', { visibleOrdinals }),
+      { ok: false, code: 'PAGE_MARKERS_INVALID' });
+  }
+});
+
+test('native selected event uses singular W2 name and rejects foreign senders and installation ids synchronously', async () => {
+  const fixture = await createControllerFixture();
+  await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  const sender = { id: 'extension-id', documentId: 'document-a', frameId: 0, tab: { id: 17, windowId: 9 } };
+  assert.equal(fixture.controller.handleRuntimeMessage({
+    type: 'AUDITA_PAGE_MARKER_SELECTED', installationId: INSTALLATION_ID, selectionId: 's3',
+  }, sender), true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.calls.publish.at(-1).selectedOrdinal, 2);
+  assert.equal(fixture.controller.handleRuntimeMessage({
+    type: 'AUDITA_PAGE_MARKERS_SELECTED', installationId: INSTALLATION_ID, selectionId: 's3',
+  }, sender), false);
+  assert.equal(fixture.controller.handleRuntimeMessage({
+    type: 'AUDITA_PAGE_MARKER_SELECTED', installationId: 'F'.repeat(22), selectionId: 's3',
+  }, sender), false);
+  assert.equal(fixture.controller.handleRuntimeMessage({
+    type: 'AUDITA_PAGE_MARKER_SELECTED', installationId: INSTALLATION_ID, selectionId: 's3',
+  }, { ...sender, frameId: 1 }), false);
+});
+
+test('hello is resolved directly by the native Port and a foreign sender cannot attach', async () => {
+  const fixture = await createControllerFixture({ autoHello: false });
+  const pending = fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  for (let attempt = 0; attempt < 20 && !fixture.latestPort(); attempt += 1)
+    await new Promise(resolve => setImmediate(resolve));
+  const owned = fixture.latestPort();
+  assert.ok(fixture.timerDelays().includes(5_000));
+  assert.equal(fixture.controller.attachPort(fixture.nativePort(INSTALLATION_ID, { frameId: 1 })), false);
+  owned.hello();
+  assert.equal((await pending).ok, true);
+  assert.equal(fixture.timerDelays().includes(5_000), false);
+});
+
+test('audit deletion during the first authorization await invalidates the captured generation before injection', async () => {
+  const gate = deferred();
+  const fixture = await createControllerFixture({ authorizationGate: gate });
+  const pending = fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  const clearing = fixture.controller.clearAudit(fixture.model.auditId);
+  gate.resolve();
+  assert.deepEqual(await pending, { ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' });
+  assert.equal(await clearing, true);
+  assert.deepEqual(fixture.calls.scripts, []);
+  assert.deepEqual(fixture.calls.publish, []);
+  assert.equal(fixture.originCache.get(fixture.model.auditId), null);
+});
+
+test('document A changing to B after installation triggers compensation only against A with no tab fallback', async () => {
+  const changed = { tabId: 17, windowId: 9, documentId: 'document-b', urlSessionDigest: `hmac-sha256:${'B'.repeat(43)}` };
+  const fixture = await createControllerFixture({ proofs: [
+    { tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST },
+    { tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST }, changed,
+  ] });
+  assert.deepEqual(await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS'),
+    { ok: false, code: 'PAGE_MARKERS_DOCUMENT_CHANGED' });
+  assert.ok(fixture.calls.scripts.every(call => JSON.stringify(call.target) === JSON.stringify({ tabId: 17, documentIds: ['document-a'] })));
+  assert.equal(fixture.calls.scripts.some(call => Object.hasOwn(call.target, 'frameIds')), false);
+});
+
+test('same document with a changed URL digest is explicitly cleared rather than presumed absent', async () => {
+  const changedDigest = { tabId: 17, windowId: 9, documentId: 'document-a',
+    urlSessionDigest: `hmac-sha256:${'B'.repeat(43)}` };
+  const fixture = await createControllerFixture({ proofs: [
+    { tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST },
+    { tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST }, changedDigest,
+  ] });
+  assert.deepEqual(await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS'),
+    { ok: false, code: 'PAGE_MARKERS_DOCUMENT_CHANGED' });
+  assert.equal(Object.hasOwn(fixture.page.environment, '__auditaPageMarkersOverlayV1'), false);
+  assert.equal(fixture.calls.scripts.some(call => call.args[0]?.op === 'clear'), true);
+});
+
+test('document A changing during the final authorization await is rejected before any injected effect', async () => {
+  const changed = { tabId: 17, windowId: 9, documentId: 'document-b', urlSessionDigest: `hmac-sha256:${'B'.repeat(43)}` };
+  const fixture = await createControllerFixture({ proofs: [
+    { tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST }, changed,
+  ] });
+  assert.deepEqual(await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS'),
+    { ok: false, code: 'PAGE_MARKERS_DOCUMENT_CHANGED' });
+  assert.deepEqual(fixture.calls.scripts, []);
+});
+
+test('hello timeout cancels while SHOW owns the lock and compensates the real W2 installation', async () => {
+  const fixture = await createControllerFixture({ autoHello: false });
+  const pending = fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  for (let attempt = 0; attempt < 20 && !fixture.latestPort(); attempt += 1)
+    await new Promise(resolve => setImmediate(resolve));
+  fixture.fireTimer(5_000);
+  assert.deepEqual(await pending, { ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' });
+  assert.equal(Object.hasOwn(fixture.page.environment, '__auditaPageMarkersOverlayV1'), false);
+  assert.deepEqual(fixture.calls.publish, []);
+});
+
+test('expired origin and copy/view-only session boundaries remain separate', async () => {
+  const expired = await createControllerFixture({ session: {
+    version: 1, sessionCapabilityId: SESSION_ID, auditId: 'audit-sample-20260826', windowId: 9,
+    mode: 'attached', targetBinding: { kind: 'attached' }, state: 'result', issuedAt: 9_999, expiresAt: 80_000,
+  } });
+  expired.setTime(70_000);
+  assert.deepEqual(await expired.dispatch('PANEL_SHOW_PAGE_MARKERS'),
+    { ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' });
+  assert.deepEqual(expired.calls.scripts, []);
+
+  const copy = await createControllerFixture({ session: {
+    version: 1, sessionCapabilityId: SESSION_ID, auditId: expired.model.auditId, windowId: 9,
+    mode: 'attached-copy', targetBinding: { kind: 'disposable' }, state: 'view-only', issuedAt: 9_999, expiresAt: 70_000,
+  } });
+  assert.equal((await copy.dispatch('PANEL_SHOW_PAGE_MARKERS')).ok, true);
+});
+
+test('authorization must affirm a non-batch mode instead of accepting a missing mode', async () => {
+  const fixture = await createControllerFixture({ session: {
+    version: 1, sessionCapabilityId: SESSION_ID, auditId: 'audit-sample-20260826', windowId: 9,
+    targetBinding: { kind: 'attached' }, state: 'result', issuedAt: 9_999, expiresAt: 70_000,
+  } });
+  assert.deepEqual(await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS'),
+    { ok: false, code: 'PAGE_MARKERS_NOT_AUTHORIZED' });
+  assert.deepEqual(fixture.calls.scripts, []);
+});
+
+test('HIDE uses the retained original target when the origin TTL has just expired', async () => {
+  const fixture = await createControllerFixture({ session: {
+    version: 1, sessionCapabilityId: SESSION_ID, auditId: 'audit-sample-20260826', windowId: 9,
+    mode: 'attached', targetBinding: { kind: 'attached' }, state: 'result', issuedAt: 9_999, expiresAt: 80_000,
+  } });
+  await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  fixture.setTime(70_000);
+  assert.equal((await fixture.dispatch('PANEL_HIDE_PAGE_MARKERS')).ok, true);
+  assert.equal(Object.hasOwn(fixture.page.environment, '__auditaPageMarkersOverlayV1'), false);
+});
+
+test('a later HIDE invalidates a SHOW waiting at its first authorization before browser effects', async () => {
+  const gate = deferred();
+  const fixture = await createControllerFixture({ authorizationGate: gate });
+  const showing = fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  const hiding = fixture.dispatch('PANEL_HIDE_PAGE_MARKERS');
+  gate.resolve();
+  assert.equal((await hiding).ok, true);
+  assert.deepEqual(await showing, { ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' });
+  assert.deepEqual(fixture.calls.scripts, []);
+  assert.deepEqual(fixture.calls.publish, []);
+});
+
+test('native Port disconnect clears the active installation and publishes clear once', async () => {
+  const fixture = await createControllerFixture();
+  await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  fixture.latestPort().onDisconnect.emit();
+  for (let attempt = 0; attempt < 10 && fixture.calls.publish.length < 2; attempt += 1)
+    await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(fixture.calls.publish.map(message => message.state), ['active', 'clear']);
+  assert.equal(Object.hasOwn(fixture.page.environment, '__auditaPageMarkersOverlayV1'), false);
+});
+
+test('clear proves foreign replacement absent without erasing it, while operational uncertainty is retryable', async () => {
+  const foreignFixture = await createControllerFixture();
+  await foreignFixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  const foreign = Object.freeze({ version: 1, installationId: 'F'.repeat(22),
+    dispose() { throw new Error('foreign'); }, execute() { throw new Error('foreign'); } });
+  Reflect.deleteProperty(foreignFixture.page.environment, '__auditaPageMarkersOverlayV1');
+  Object.defineProperty(foreignFixture.page.environment, '__auditaPageMarkersOverlayV1', {
+    value: foreign, enumerable: false, configurable: true, writable: false,
+  });
+  assert.equal(await foreignFixture.controller.clearAudit(foreignFixture.model.auditId), true);
+  assert.strictEqual(foreignFixture.page.environment.__auditaPageMarkersOverlayV1, foreign);
+
+  let fail = false;
+  const uncertain = await createControllerFixture({ scriptFailure: request => fail && request.func.name !== 'bindAuditaPageMarkersPort' });
+  await uncertain.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  fail = true;
+  assert.equal(await uncertain.controller.closePanel({ windowId: 9, sessionCapabilityId: SESSION_ID }), false);
+  const scriptsAfterFailure = uncertain.calls.scripts.length;
+  assert.deepEqual(await uncertain.dispatch('PANEL_SHOW_PAGE_MARKERS'),
+    { ok: false, code: 'PAGE_MARKERS_CLEANUP_UNCONFIRMED' });
+  assert.equal(uncertain.calls.scripts.length, scriptsAfterFailure);
+  fail = false;
+  assert.equal(await uncertain.controller.closePanel({ windowId: 9, sessionCapabilityId: SESSION_ID }), true);
+  assert.equal(Object.hasOwn(uncertain.page.environment, '__auditaPageMarkersOverlayV1'), false);
+});
+
+test('hide clears real W2 state and returns the closed clear projection', async () => {
+  const fixture = await createControllerFixture();
+  await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  assert.equal(Object.hasOwn(fixture.page.environment, '__auditaPageMarkersOverlayV1'), true);
+  assert.deepEqual(await fixture.dispatch('PANEL_HIDE_PAGE_MARKERS'), { ok: true, markers: {
+    state: 'clear', modelRevision: 7, groups: [],
+    counts: { markers: 0, located: 0, unlocated: 0, general: 0, omitted: 0 }, selectedOrdinal: null,
+  } });
+  assert.equal(Object.hasOwn(fixture.page.environment, '__auditaPageMarkersOverlayV1'), false);
+});
+
+test('panel close during the final pre-effect proof prevents all injection and publication', async () => {
+  const entered = deferred();
+  const release = deferred();
+  const fixture = await createControllerFixture({ probePause: { call: 2, entered, release } });
+  const showing = fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  await entered.promise;
+  assert.equal(await fixture.controller.closePanel({ windowId: 9, sessionCapabilityId: SESSION_ID }), true);
+  release.resolve();
+  assert.deepEqual(await showing, { ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' });
+  assert.deepEqual(fixture.calls.scripts, []);
+  assert.deepEqual(fixture.calls.publish, []);
+});
+
+test('panel close during install completion prevents binder injection and compensates under the held lock', async () => {
+  const entered = deferred();
+  const release = deferred();
+  const scriptPause = {
+    entered, release,
+    when: request => request.func.name === 'runAuditaPageMarkersCommand' && request.args[0]?.op === 'install',
+  };
+  const fixture = await createControllerFixture({ scriptPause });
+  const showing = fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  await entered.promise;
+  const closing = fixture.controller.closePanel({ windowId: 9, sessionCapabilityId: SESSION_ID });
+  release.resolve();
+  assert.deepEqual(await showing, { ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' });
+  assert.equal(await closing, true);
+  assert.equal(fixture.calls.scripts.some(call => call.func.name === 'bindAuditaPageMarkersPort'), false);
+  assert.equal(Object.hasOwn(fixture.page.environment, '__auditaPageMarkersOverlayV1'), false);
+  assert.deepEqual(fixture.calls.publish, []);
+});
+
+test('window drift alone does not prove the exact original document lacks its W2 overlay', async () => {
+  const fixture = await createControllerFixture();
+  await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  fixture.queueProof({ tabId: 17, windowId: 10, documentId: 'document-a', urlSessionDigest: DIGEST });
+  assert.equal(await fixture.controller.closePanel({ windowId: 9, sessionCapabilityId: SESSION_ID }), true);
+  assert.equal(Object.hasOwn(fixture.page.environment, '__auditaPageMarkersOverlayV1'), false);
+  assert.equal(fixture.calls.scripts.some(call => call.args[0]?.op === 'clear'), true);
+});
+
+test('selection-unavailable still proves the document, clears stale selection and publishes null', async () => {
+  const fixture = await createControllerFixture();
+  await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  assert.equal((await fixture.dispatch('PANEL_SELECT_PAGE_MARKER', { ordinal: 2, scroll: false })).ok, true);
+  const probesBefore = fixture.calls.probe.length;
+  assert.deepEqual(await fixture.dispatch('PANEL_SELECT_PAGE_MARKER', { ordinal: 0, scroll: false }),
+    { ok: false, code: 'PAGE_MARKERS_SELECTION_UNAVAILABLE' });
+  assert.equal(fixture.calls.probe.length, probesBefore + 2);
+  assert.equal(fixture.calls.publish.at(-1).selectedOrdinal, null);
+  const shown = await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  assert.equal(shown.markers.selectedOrdinal, null);
+});
