@@ -1,6 +1,30 @@
 # Conferência ABNT na própria página — gate de aceitação
 
-Status: **roteiro preparado; integração e Chrome real ainda pendentes**. Não é evidência de aprovação e não descreve recursos da beta1.1.0 já entregue.
+Status: **gate funcional e visual aprovado para a beta de conferência na página**. Não declara concluída toda a meta original nem altera retroativamente a beta1.1.0.
+
+## Aceitação final — 06/09/2026
+
+Runtime8bf1a0e mais ajuste explícito smooth→instant e remoção de nowrap do badge, ambos revisados. As duas revisões críticas independentes do mesmo070d895 encontraram somente I1 (IDs globais maiores que64); após RED real67ocorrências e correção mínima, ambas revalidaram C0/I0 e6/6testes. Principal: bridge/controller/worker134/134PASS. Ajuste de navegação:48/48PASS, revisão independente C0/I0.
+
+- `original-page ABNT markers visual review and verified exports`: PASS,7.836s.
+- `original-page ABNT markers remain usable across idle and preserve the report`: PASS,97.121s, incluindo duas esperas45s sem debugger do worker.
+- Ambos: auditoria silenciosa, original preservada, associação exata sinal↔ocorrência↔ABNT, seleção sem scroll, GO imediato, Tab/Enter/Espaço, filtros com quantidades exatas, ocultação, limpeza A→B, relatório e quatro downloads correlacionados.
+- Comparação de todos os campos de modelo/checkpoint por JSON com chaves ordenadas: idênticos antes/depois. A finalização do export avança apenas a revisão de armazenamento esperada. A primeira versão do novo teste produzia falso positivo por comparar ordem de inserção das chaves, corrigido sem mudar código de armazenamento/exportação.
+- Artefatos finais: `/private/var/folders/3b/dv2ydqf51zq_qdv0gp1xmzzr0000gn/T/audita-marco-1-markers-3IO2z1`. Screenshots da página marcada, detalhe ABNT, início do painel e relatório conferidos. O teste visual não alega cobertura de idle; o teste de idle não depende da composição de screenshots de janela oculta no macOS. Nenhum bypass por variável nem instrumentação de runtime permanece.
+- Suíte lógica ampla realizada uma vez:3931/3932; único RED de reflow corrigido, teste afetado7/7PASS. Verify skip-testsPASS. Não houve repetição ampla por correções pequenas. A verificação de gate e os testes focados estão discriminados, sem alegar um segundo resultado amplo não executado.
+
+Comandos nativos usaram Chrome for Testing152.0.7977.64, perfil isolado e `node --test --test-name-pattern='^original-page ABNT markers visual'` / `'^original-page ABNT markers remain' test/e2e/sidepanel-flow-mv3.test.mjs`, com `AUDITA_E2E_CHROME` e `AUDITA_E2E_ARTIFACT_ROOT` explícitos.
+
+Limites de beta:64ocorrências interativas, associação com identificador estável corroborado, demais ocorrências preservadas no relatório; compacto inicial/colisões de sinais e PDF executivo no backlog. Não há certificação normativa automática nem anúncio universal de leitor de tela.
+
+## Checkpoint nativo atual — HEAD070d895
+
+- Ensaio completo reproduziu aprovação da auditoria silenciosa, duas janelas de45s sem debugger do worker, sinais compartilhados, seleção exata página→ocorrência→ABNT e seleção painel→anel sem scroll automático. O comando explícito de navegação ainda está em diagnóstico.
+- Ensaio diagnóstico curto (sem as esperas de idle; não substitui aceitação) passou teclado Enter/Espaço, filtros com quantidades exatas, ocultação, navegação A→B e quatro downloads reais correlacionados. O teste de Enter foi corrigido para enviar texto CR no keyDown, conforme [CDP Input](https://chromedevtools.github.io/devtools-protocol/tot/Input/#method-dispatchKeyEvent) e o [mapa oficial do Puppeteer](https://github.com/puppeteer/puppeteer/blob/main/packages/puppeteer-core/src/common/USKeyboardLayout.ts).
+- A exportação incrementa deliberadamente a revisão de armazenamento. A prova de preservação deve comparar modelo canônico e checkpoint integralmente, verificando separadamente esse incremento único; exigir revisão idêntica após exportar era uma expectativa incorreta do novo teste.
+- Capturas de diagnóstico e os quatro arquivos estão em `/private/var/folders/3b/dv2ydqf51zq_qdv0gp1xmzzr0000gn/T/audita-marco-1-markers-xgtdDn`. PDF lido/renderizado: A4, tagged,259páginas,6120276bytes. Capa e sumário sem corte; a edição completa permanece longa, com refinamento executivo já registrado no backlog. Os artefatos não constituem release aprovada.
+
+Os registros abaixo são históricos e não devem reabrir componentes aprovados sem novo RED com impacto importante/crítico.
 
 ## Candidato W4 em preparação
 

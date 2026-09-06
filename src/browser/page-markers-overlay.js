@@ -415,7 +415,7 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
         for (const current of groups) updateGroup(current);
         if (next.scroll) {
           try {
-            group.element.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+            group.element.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'nearest' });
           } catch {
             return { ok: false, reason: 'runtime-unavailable' };
           }

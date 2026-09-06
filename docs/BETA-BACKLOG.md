@@ -4,13 +4,16 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Próximas entregas funcionais
 
-- conferência com múltiplos sinais clicáveis na página original, conforme as imagens WAVE enviadas durante o fechamento da1.1.0: requisito funcional em implementação separada, não disponível no mapa estático/destaque único atual. Plano `docs/superpowers/plans/2026-09-06-in-page-abnt-markers.md`.
+- conferência com múltiplos sinais clicáveis na página original: implementada e aprovada no gate nativo da beta1.1.1, com limite transparente de64ocorrências interativas e associação por identificador estável corroborado. Ampliar a localização segura de elementos sem ID em atualização incremental; a beta1.1.0 não contém os sinais. Plano `docs/superpowers/plans/2026-09-06-in-page-abnt-markers.md`.
 
 - mapa numerado consolidado incluído no candidato 1.0.8 e validado por E2E público; o pacote 1.0.7 permanece sem esse recurso;
 - retenção automática por prazo e limpeza recuperável implementadas no candidato atual; personalização do prazo e indicação individual da data de expiração podem ser acrescentadas;
 - atualizar as imagens e o texto de eventual canal público de distribuição após estabilização da beta.
 
 ## Refinamentos visuais não bloqueantes
+
+- conferência WAVE/ABNT: compactar as orientações iniciais e os blocos de ações do painel para que mais indicadores e itens ABNT apareçam no primeiro viewport. QA nativo06/09 confirma controles legíveis, mas em360px de largura o bloco de ajuda ainda empurra os totais abaixo da primeira tela. Preservar descrições acessíveis e limites transparentes em expansores, sem eliminar informação.
+- sinais fora do viewport atualmente permanecem acessíveis por teclado; aprimorar posicionamento e prevenção de sobreposição em páginas com muitos alvos próximos, preservando o vínculo inequívoco e o comando explícito “Ir ao elemento”.
 
 - impressão1.1.0: fixture pública de179ocorrências passou de400para254páginas após corrigir quebras artificiais e espaçamento. O PDF completo preserva todo o anexo; estudar uma edição executiva separada para leitura curta, sem substituir ou descartar a edição técnica.
 

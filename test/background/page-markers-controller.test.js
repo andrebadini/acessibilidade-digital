@@ -77,7 +77,7 @@ test('selection and filtering translate ordinals through the private table and n
   const selected = await fixture.dispatch('PANEL_SELECT_PAGE_MARKER', { ordinal: 2, scroll: true });
   assert.equal(selected.ok, true);
   assert.equal(selected.markers.selectedOrdinal, 2);
-  assert.deepEqual(fixture.page.first.scrollCalls, [{ behavior: 'smooth', block: 'center', inline: 'nearest' }]);
+  assert.deepEqual(fixture.page.first.scrollCalls, [{ behavior: 'instant', block: 'center', inline: 'nearest' }]);
   const filtered = await fixture.dispatch('PANEL_FILTER_PAGE_MARKERS', { visibleOrdinals: '' });
   assert.equal(filtered.ok, true);
   assert.deepEqual(filtered.markers.counts, selected.markers.counts);

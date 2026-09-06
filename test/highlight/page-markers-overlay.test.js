@@ -123,7 +123,7 @@ test('selection rings a visible target, and only explicit scroll moves it withou
   assert.deepEqual(fixture.environment.messages, []);
 
   assert.deepEqual(runAuditaPageMarkersCommand(select('s3', true), fixture.environment), { ok: true });
-  assert.deepEqual(fixture.second.scrollCalls, [{ behavior: 'smooth', block: 'center', inline: 'nearest' }]);
+  assert.deepEqual(fixture.second.scrollCalls, [{ behavior: 'instant', block: 'center', inline: 'nearest' }]);
   assert.equal(fixture.document.activeElement, fixture.priorFocus);
   assert.deepEqual(fixture.environment.messages, []);
 });

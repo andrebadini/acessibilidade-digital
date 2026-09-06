@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import {
   CANONICAL_CHROME_PRODUCT,
   launchUnpackedExtension,
+  navigateRealPage,
   redactDiagnostic,
   resolveRealChromeTestBinary,
   startFixtureServer,
@@ -31,8 +32,8 @@ const privateFieldNames = Object.freeze([
   'owner_', 'hmac-sha256',
 ]);
 
-function currentPageDocument() {
-  const repeatedControls = Array.from({ length: 240 }, (_, index) =>
+function currentPageDocument(controlCount = 240) {
+  const repeatedControls = Array.from({ length: controlCount }, (_, index) =>
     `<button class="unnamed-control" data-sequence="${index}"></button>`).join('');
   return `<!doctype html>
     <html lang="pt-BR">
@@ -66,6 +67,284 @@ function currentPageDocument() {
       </body>
     </html>`;
 }
+
+// Read only public presentation and a digest of the durable record. Native
+// marker interaction must not become a new capture or change the audit model.
+async function markerRecordFingerprint(extension, auditId) {
+  return extension.evaluate(extension.harnessPage, `(async()=>{
+    const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+    const revision=await store.getReportRevision(${JSON.stringify(auditId)});
+    const stable=value=>Array.isArray(value)?value.map(stable):value&&typeof value==='object'
+      ?Object.fromEntries(Object.keys(value).sort().map(key=>[key,stable(value[key])])):value;
+    const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(stable({model:revision?.model,checkpoint:revision?.checkpoint}))));
+    return {present:Boolean(revision?.model),revision:revision?.modelRevision,sha256:Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('')};
+  })()`, { awaitPromise: true });
+}
+
+const markerSurface = `(() => {
+  const host=document.querySelector('[data-audita-page-markers-root="v1"]');
+  const buttons=[...host?.shadowRoot?.querySelectorAll('.audita-marker')??[]];
+  return {roots:document.querySelectorAll('[data-audita-page-markers-root="v1"]').length,
+    buttons:buttons.map(button=>({label:button.getAttribute('aria-label'),text:button.textContent,
+      hidden:button.style.display==='none'})),
+    rings:[...host?.shadowRoot?.querySelectorAll('.audita-ring')??[]].filter(node=>node.style.display!=='none').length,
+    selectedNumbers:[...host?.shadowRoot?.querySelectorAll('.audita-ring')??[]].filter(node=>node.style.display!=='none')
+      .map(node=>Number(node.parentElement.querySelector('.audita-marker').getAttribute('aria-label').match(/^Sinal ([0-9]+)/)[1]))};
+})()`;
+
+async function waitForMarkerState(extension, panel, expected) {
+  return extension.waitForValue(panel, `(() => ({
+    state:document.querySelector('[data-page-marker-review]')?.dataset.markerStatus??null,
+    message:document.querySelector('.page-marker-status')?.textContent??null,
+    counts:[...document.querySelectorAll('.page-marker-counts li')].map(node=>node.textContent)
+  }))()`, value => value?.state === expected || value?.state === 'unavailable', {
+    timeoutMs: 65_000, intervalMs: 100,
+  });
+}
+
+async function activateMarkerByKey(extension, page, key) {
+  // Native activation needs the text-producing keyDown, not only raw key codes.
+  // CDP Input.dispatchKeyEvent; Enter's generated text is CR, Space's is space.
+  const code = key === 'Enter' ? 'Enter' : 'Space';
+  const text = key === 'Enter' ? '\r' : ' ';
+  const windowsVirtualKeyCode = key === 'Enter' ? 13 : 32;
+  await extension.command(page, 'Input.dispatchKeyEvent', {
+    type: 'keyDown', key, code, windowsVirtualKeyCode, text, unmodifiedText: text,
+  });
+  await extension.command(page, 'Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode });
+}
+
+for (const scenario of [
+  { name: 'original-page ABNT markers remain usable across idle and preserve the report', idle: true },
+  { name: 'original-page ABNT markers visual review and verified exports', idle: false },
+]) test(scenario.name, { timeout: 420_000 }, async t => {
+  assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório.');
+  const fixture = await startFixtureServer(t, new Map([
+    ['/current', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' },
+      body: currentPageDocument(0) }],
+    ['/other', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' },
+      body: currentPageDocument(0).replace('Origem preservada', 'Outro documento') }],
+  ]));
+  let extension;
+  const step = async (name, operation) => {
+    t.diagnostic(`page-markers-step=${name}:begin`);
+    try { const value = await operation(); t.diagnostic(`page-markers-step=${name}:passed`); return value; }
+    catch (cause) { throw new Error(`PAGE_MARKERS_${name}_FAILED`, { cause }); }
+  };
+  try {
+    extension = await launchUnpackedExtension(t, {
+      extensionPath: await realpath(workspaceRoot), startUrl: `${fixture.origin}/current`,
+      downloadMode: 'profile',
+      ...(process.env.AUDITA_E2E_ARTIFACT_ROOT ? {
+        qaDirectory: join(process.env.AUDITA_E2E_ARTIFACT_ROOT, 'qa'),
+        downloadDirectory: join(process.env.AUDITA_E2E_ARTIFACT_ROOT, 'downloads'),
+      } : {}),
+      viewport: { width: 1280, height: 900 }, chromeBinary, expectedMajor: 152,
+    });
+    await armSourceInvariantProof(extension);
+    const panel = await extension.openSidePanelFromAction();
+    await extension.waitForValue(panel, `document.querySelector('[data-screen]')?.dataset.screen`,
+      value => value === 'initial', { timeoutMs: 30_000 });
+    const { identityBefore, auditIdPromise } = await beginAttachedAttempt(extension, panel, 'element-only');
+    await waitForPrivacyPause(extension, panel);
+    const auditId = await auditIdPromise;
+    const owner = await assertPausedAttempt(extension, auditId, identityBefore, `${fixture.origin}/current`);
+    await confirmOnce(extension, panel);
+    assert.equal(await waitForResult(extension, panel, auditId).catch(async cause => {
+      const attempt = await readPrivateAttempt(extension, auditId).catch(() => null);
+      const surface = await extension.evaluate(panel, `(() => ({
+        screen:document.querySelector('[data-screen]')?.dataset.screen,
+        status:document.querySelector('[role="status"]')?.textContent,
+        stages:[...document.querySelectorAll('[data-phase-state]')].map(node=>({state:node.dataset.phaseState,text:node.textContent}))
+      }))()`).catch(() => null);
+      t.diagnostic(JSON.stringify({surface, attempt:attempt?{
+        activeState:attempt.activeState,latestStatus:attempt.latestStatus,latestMessage:attempt.latestMessage,
+        modelPresent:attempt.modelPresent,reportPresent:attempt.reportPresent,
+        owners:attempt.owners.map(owner=>({state:owner.state,tabExists:owner.tabExists})),
+        pixelStateCount:attempt.pixelStateCount,executionCheckpointPresent:attempt.executionCheckpointPresent,
+      }:null}));
+      throw cause;
+    }), auditId);
+    await step('SILENT_AUDIT', async () => {
+      await assertTerminalAttempt(extension, auditId, owner.tabId, identityBefore, {
+        minimumFullPage: 0, minimumElements: 1, fullPageExact: 0,
+        diagnostics: ['FULL_PAGE_CAPTURE_OMITTED'],
+      }, fixture.origin);
+      await assertPanelSummaryAndDetail(extension, panel, 'element-only', 1, identityBefore);
+    });
+    const fingerprint = await markerRecordFingerprint(extension, auditId);
+    assert.equal(fingerprint.present, true);
+    const workerTarget = (await extension.browser.command('Target.getTargets')).targetInfos
+      .find(info => info.type === 'service_worker' && info.url.startsWith(`chrome-extension://${extension.extensionId}/`));
+    assert.ok(workerTarget);
+    // Discovery attaches a debugger by default: detach it BEFORE both idle
+    // windows. Do not attach or evaluate the worker again during this journey.
+    await extension.browser.command('Target.detachFromTarget', { sessionId: extension.worker.sessionId });
+    if (scenario.idle) await step('IDLE_BEFORE_SHOW', async () => {
+      await new Promise(resolve => setTimeout(resolve, 45_000));
+      const targets = (await extension.browser.command('Target.getTargets')).targetInfos;
+      assert.equal(targets.some(info => info.targetId === workerTarget.targetId && info.attached === false), true);
+      await assertSourceUntouched(extension, identityBefore);
+    });
+    const preserved = await extension.evaluate(extension.startPage.page, `(() => {
+      globalThis.__auditaSourceInvariantV1.dispose();
+      const sentinel=document.createElement('aside');sentinel.id='foreign-review-overlay';sentinel.textContent='Outra ferramenta';
+      sentinel.style.cssText='position:fixed;right:8px;bottom:8px;background:white';document.body.append(sentinel);
+      globalThis.__markerControlClicks=0;
+      document.querySelector('#missing-name').addEventListener('click',()=>globalThis.__markerControlClicks++);
+      return {x:scrollX,y:scrollY,active:document.activeElement?.id,notes:document.querySelector('#source-notes').value};
+    })()`);
+    await step('SHOW', async () => {
+      await extension.click(panel, 'button[data-intent="SHOW_PAGE_MARKERS"]');
+      const state = await waitForMarkerState(extension, panel, 'active');
+      assert.equal(state.state, 'active', JSON.stringify(state));
+      const surface = await extension.evaluate(extension.startPage.page, markerSurface);
+      assert.equal(surface.roots, 1);
+      assert.ok(surface.buttons.length >= 2, JSON.stringify(surface));
+      assert.ok(surface.buttons.some(button => /[2-9] ocorrências/u.test(button.label)), 'shared element has one signal for several occurrences');
+      assert.ok(state.counts.some(text => /^[1-9]\d* ocorrências? não localizadas?/u.test(text)), JSON.stringify(state));
+      assert.deepEqual(await extension.evaluate(extension.startPage.page, `({x:scrollX,y:scrollY,
+        active:document.activeElement?.id,notes:document.querySelector('#source-notes').value})`), preserved);
+    });
+    if (scenario.idle) await step('IDLE_WITH_SIGNALS', async () => {
+      await new Promise(resolve => setTimeout(resolve, 45_000));
+      const targets = (await extension.browser.command('Target.getTargets')).targetInfos;
+      assert.equal(targets.some(info => info.targetId === workerTarget.targetId && info.attached === false), true);
+      assert.equal((await extension.evaluate(extension.startPage.page, markerSurface)).roots, 1);
+      assert.equal((await waitForMarkerState(extension, panel, 'active')).state, 'active');
+    });
+    const expectedSelection = await step('PAGE_TO_ABNT', async () => {
+      const number = await extension.evaluate(extension.startPage.page, `(() => {
+        const button=document.querySelector('[data-audita-page-markers-root="v1"]').shadowRoot.querySelector('.audita-marker');
+        return Number(button.getAttribute('aria-label').match(/^Sinal ([0-9]+)/)[1]);
+      })()`);
+      const expected = await extension.evaluate(panel, `(() => {
+        const buttons=[...document.querySelectorAll('[data-intent="SELECT_OCCURRENCE"]')]
+          .filter(button=>Number(button.querySelector('[data-page-marker-number]')?.dataset.pageMarkerNumber)===${number})
+          .sort((a,b)=>a.dataset.focusId.localeCompare(b.dataset.focusId));
+        const first=buttons[0];return {number:${number},focusId:first?.dataset.focusId,
+          abnt:first?.closest('details[data-abnt-group]')?.dataset.abntGroup};
+      })()`);
+      assert.match(expected.focusId ?? '', /^occurrence-/u);
+      assert.match(expected.abnt ?? '', /^5\./u);
+      await extension.evaluate(extension.startPage.page, `(() => {
+        document.querySelector('[data-audita-page-markers-root="v1"]').shadowRoot.querySelector('.audita-marker').click();return true;
+      })()`, { userGesture: true });
+      const selection = await extension.waitForValue(panel, `(() => {
+        const button=document.querySelector('[data-intent="SELECT_OCCURRENCE"][aria-pressed="true"]');
+        return {number:Number(button?.querySelector('[data-page-marker-number]')?.dataset.pageMarkerNumber),
+          focusId:button?.dataset.focusId,abnt:button?.closest('details[data-abnt-group]')?.dataset.abntGroup,
+          open:button?.closest('details[data-abnt-group]')?.open===true,
+          normative:document.querySelector('[data-detail-block="normative"]')?.textContent??'',
+          announcement:document.querySelector('[data-detail-block="accessibility"]')?.textContent??''};
+      })()`, value => value?.number === number && value.focusId === expected.focusId && value.open === true);
+      assert.equal(selection.abnt, expected.abnt);
+      assert.ok(selection.normative.includes(`ABNT NBR 17225: ${expected.abnt}`));
+      assert.match(selection.announcement, /Anúncio esperado:/u);
+      assert.equal(await extension.evaluate(extension.startPage.page, 'globalThis.__markerControlClicks'), 0);
+      assert.equal((await extension.evaluate(extension.startPage.page, markerSurface)).rings, 1);
+      return expected;
+    });
+    await step('PANEL_TO_PAGE_AND_KEYBOARD', async () => {
+      const otherNumber = await extension.evaluate(panel, `(() => {
+        const buttons=[...document.querySelectorAll('[data-intent="SELECT_OCCURRENCE"]')];
+        const other=buttons.find(button=>{const number=Number(button.querySelector('[data-page-marker-number]')?.dataset.pageMarkerNumber);
+          return number>0&&number!==${expectedSelection.number}});if(!other)return null;
+        const number=Number(other.querySelector('[data-page-marker-number]').dataset.pageMarkerNumber);
+        other.closest('details[data-abnt-group]').open=true;other.click();return number;
+      })()`, { userGesture: true });
+      assert.ok(otherNumber > 0 && otherNumber !== expectedSelection.number);
+      await extension.waitForValue(extension.startPage.page, markerSurface,
+        value => value.rings === 1 && value.selectedNumbers[0] === otherNumber);
+      assert.deepEqual(await extension.evaluate(extension.startPage.page, '({x:scrollX,y:scrollY})'), { x: preserved.x, y: preserved.y });
+      await step('EXPLICIT_GO', async () => {
+        await extension.click(panel, '[data-intent="GO_TO_PAGE_MARKER"]');
+        await extension.waitForValue(extension.startPage.page, 'scrollY', value => value !== preserved.y);
+      });
+      // Start from the final native page control, then Tab into the first
+      // overlay button. Only the starting point is focused by the harness.
+      await extension.evaluate(extension.startPage.page, `(() => {
+        document.querySelector('a[href="/current"]').focus();return true;
+      })()`);
+      await extension.pressKey(extension.startPage.page, { key: 'Tab', code: 'Tab', virtualKeyCode: 9, modifiers: 0 });
+      assert.equal(await extension.evaluate(extension.startPage.page, `document.querySelector('[data-audita-page-markers-root="v1"]').shadowRoot.activeElement?.className`), 'audita-marker');
+      await activateMarkerByKey(extension, extension.startPage.page, 'Enter');
+      await extension.waitForValue(panel, `document.querySelector('[data-intent="SELECT_OCCURRENCE"][aria-pressed="true"]')?.dataset.focusId`, value => value === expectedSelection.focusId);
+      await extension.evaluate(panel, `(() => {
+        const other=[...document.querySelectorAll('[data-intent="SELECT_OCCURRENCE"]')]
+          .find(button=>Number(button.querySelector('[data-page-marker-number]')?.dataset.pageMarkerNumber)===${otherNumber});
+        other.click();return true;
+      })()`, { userGesture: true });
+      await extension.waitForValue(extension.startPage.page, markerSurface, value => value.selectedNumbers[0] === otherNumber);
+      // Selecting a control in the panel is an explicit focus interaction.
+      // Return through the page's native tab order before testing Space there.
+      await extension.evaluate(extension.startPage.page, `(() => {
+        document.querySelector('a[href="/current"]').focus();return true;
+      })()`);
+      await extension.pressKey(extension.startPage.page, { key: 'Tab', code: 'Tab', virtualKeyCode: 9, modifiers: 0 });
+      assert.equal(await extension.evaluate(extension.startPage.page, `document.querySelector('[data-audita-page-markers-root="v1"]').shadowRoot.activeElement?.className`), 'audita-marker');
+      await activateMarkerByKey(extension, extension.startPage.page, ' ');
+      await extension.waitForValue(extension.startPage.page, markerSurface,
+        value => value.selectedNumbers[0] === expectedSelection.number);
+      assert.equal(await extension.evaluate(extension.startPage.page, 'globalThis.__markerControlClicks'), 0);
+      if (!scenario.idle) await step('QA_SCREENSHOTS', async () => {
+        await extension.captureJourney('markers-original-selected', extension.startPage.page, { captureBeyondViewport: false });
+        await extension.captureJourney('markers-panel-abnt-selected', panel, { captureBeyondViewport: false });
+        await extension.evaluate(panel, `(() => {document.querySelector('#panel-root').scrollTop=0;return true})()`);
+        await extension.captureJourney('markers-panel-summary', panel, { captureBeyondViewport: false });
+      });
+    });
+    await step('FILTER_AND_HIDE', async () => {
+      const totals = await extension.evaluate(panel, `[...document.querySelectorAll('[data-result-filter]')].map(node=>node.textContent)`);
+      const expected = await extension.evaluate(panel, `(() => {
+        const rows=[...document.querySelectorAll('[data-intent="SELECT_OCCURRENCE"]')].map(button=>({
+          number:Number(button.querySelector('[data-page-marker-number]')?.dataset.pageMarkerNumber),
+          classification:button.closest('[data-result-card]').dataset.classification})).filter(row=>row.number>0);
+        const classification=rows.some(row=>row.classification==='passed')?'passed':'failed';
+        const counts={};for(const row of rows.filter(row=>row.classification===classification))counts[row.number]=(counts[row.number]??0)+1;
+        return {classification,counts};
+      })()`);
+      assert.ok(Object.keys(expected.counts).length > 0);
+      await extension.click(panel, `[data-result-filter="${expected.classification}"]`);
+      const symbol = expected.classification === 'passed' ? '✓' : '×';
+      const expectedLabels = Object.entries(expected.counts).map(([number, count]) => `${number}${symbol}${count}`).sort();
+      await extension.waitForValue(extension.startPage.page, markerSurface, value => value.roots === 1 &&
+        JSON.stringify(value.buttons.filter(button=>!button.hidden).map(button=>button.text).sort()) === JSON.stringify(expectedLabels));
+      assert.deepEqual(await extension.evaluate(panel, `[...document.querySelectorAll('[data-result-filter]')].map(node=>node.textContent)`), totals);
+      await extension.click(panel, '[data-focus-id="metric-all"]');
+      await extension.click(panel, '[data-intent="HIDE_PAGE_MARKERS"]');
+      await extension.waitForValue(extension.startPage.page, markerSurface, value => value.roots === 0);
+      assert.equal(await extension.evaluate(extension.startPage.page, `Boolean(document.querySelector('#foreign-review-overlay'))`), true);
+    });
+    await step('NAVIGATION_CLEANUP', async () => {
+      await extension.click(panel, '[data-intent="SHOW_PAGE_MARKERS"]');
+      assert.equal((await waitForMarkerState(extension, panel, 'active')).state, 'active');
+      await navigateRealPage(extension, extension.startPage, { url: `${fixture.origin}/other`, operationId: 'markers-document-b' });
+      assert.equal((await extension.evaluate(extension.startPage.page, markerSurface)).roots, 0);
+      await extension.waitForValue(panel, `document.querySelector('[data-page-marker-review]')?.dataset.markerStatus`, value => value === 'idle');
+      await extension.waitForValue(panel, `Boolean(document.querySelector('[data-intent="SHOW_PAGE_MARKERS"]:not(:disabled)'))`, Boolean);
+      await extension.click(panel, '[data-intent="SHOW_PAGE_MARKERS"]');
+      assert.equal((await waitForMarkerState(extension, panel, 'unavailable')).state, 'unavailable');
+      assert.equal((await extension.evaluate(extension.startPage.page, markerSurface)).roots, 0);
+      assert.deepEqual(await markerRecordFingerprint(extension, auditId), fingerprint);
+    });
+    await step('REPORT_AND_EXPORT', async () => {
+      await extension.click(panel, '[data-intent="OPEN_REPORT"]');
+      const report = await extension.waitForReport({ auditId });
+      await extension.waitForValue(report, `Boolean(document.querySelector('[data-report-export]'))`, Boolean, { timeoutMs: 30_000 });
+      const surface = await extension.evaluate(report, reportSurfaceExpression());
+      assert.equal(surface.ready && surface.abnt && surface.wcag && surface.announcement, true);
+      assert.ok(surface.images > 0);
+      if (!scenario.idle) await extension.captureJourney('markers-report-after-review', report, { captureBeyondViewport: false });
+      await exportFourFormats(extension, report, auditId, extension.downloadDirectory);
+      // Finalizing a verified export advances the storage revision once; the
+      // canonical model, evidence and checkpoint themselves remain unchanged.
+      assert.deepEqual(await markerRecordFingerprint(extension, auditId), { ...fingerprint, revision: fingerprint.revision + 1 });
+    });
+    t.diagnostic(`Chrome152; native-page-markers; original-not-copy; ${scenario.idle
+      ? 'no-worker-debugger-during-two-idle-windows' : 'visual-QA-without-idle-claim'}; four-verified-downloads`);
+  } finally { await extension?.close().catch(() => {}); }
+});
 
 async function armSourceInvariantProof(extension) {
   const ready = await extension.evaluate(extension.startPage.page, `(async()=>{
@@ -505,7 +784,8 @@ async function waitForResult(extension, panel, expectedAuditId = null) {
     screen:document.querySelector('[data-screen]')?.dataset.screen??null,
     auditId:document.querySelector('[data-screen="result"]')?.dataset.auditId??null,
     status:document.querySelector('[role="status"]')?.textContent??null
-  }))()`, value => ['result', 'initial', 'unavailable'].includes(value?.screen), {
+  }))()`, value => ['result', 'initial', 'unavailable'].includes(value?.screen) ||
+    value?.status === 'Não foi possível confirmar a captura. Cancele a auditoria ou aguarde uma nova confirmação.', {
     timeoutMs: 120_000, intervalMs: 50,
   });
   if (terminal.screen !== 'result') {

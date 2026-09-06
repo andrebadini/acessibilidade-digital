@@ -767,7 +767,6 @@ code {
   font-size: 12px;
   font-weight: 800;
   line-height: 1.25;
-  white-space: nowrap;
 }
 .page-marker-number-failed { color: var(--failure); }
 .page-marker-number-alert,

@@ -24,7 +24,20 @@ Selecione **Auditar a página atual**. Abrir o painel não inicia a coleta: esse
 
 O painel apresenta as cinco etapas da avaliação. O indicador aparece ao lado da etapa atual e as etapas concluídas recebem um ✓ verde. Em lotes, as etapas acompanham a página em análise, enquanto a barra indica o avanço do lote inteiro. Se uma página não puder ser aberta ou observada, o relatório registra a falha e o lote segue após confirmar a limpeza daquela tentativa.
 
-Ao final, o painel mostra o sumário, filtros e fichas das ocorrências. Cada ficha apresenta explicação, WCAG 2.2, item ABNT NBR 17225, fundamentação legal, nome acessível, anúncio estimado, seletor, código e evidências disponíveis. **Ver e destacar na página** localiza o elemento quando a prova viva ainda corresponde ao documento auditado. A auditoria da página atual e os lotes fecham suas cópias temporárias: nesses casos, o relatório permite consultar as evidências, mas não destacar o elemento ao vivo. Para testar o destaque vivo nesta beta, use **Outra URL** e mantenha a página auditada disponível. **Abrir relatório completo** abre a revisão em uma aba própria. A exportação baixa HTML autocontido, PDF, CSV e JSON-LD/EARL.
+Ao final, o painel mostra o sumário, filtros e fichas das ocorrências. Cada ficha apresenta explicação, WCAG 2.2, item ABNT NBR 17225, referência normativa, nome acessível, anúncio estimado, seletor, código e evidências disponíveis. **Abrir relatório completo** abre a revisão em uma aba própria. A exportação baixa HTML autocontido, PDF, CSV e JSON-LD/EARL.
+
+### Conferir os elementos na própria página
+
+Depois de avaliar **a página atual**, escolha **Mostrar sinais na página**. Os sinais numerados aparecem junto aos elementos que puderam ser associados com segurança ao resultado. Um mesmo elemento pode reunir várias ocorrências. As cores e os símbolos distinguem falha (×), alerta (!), revisão humana (?) e resultado positivo (✓).
+
+- Clique no sinal para abrir a ocorrência e o item ABNT correspondente no painel.
+- Selecione uma ocorrência no painel para realçar seu elemento, sem mover a página automaticamente. **Ir ao elemento** faz a navegação imediata quando você a solicita.
+- Os filtros também controlam os sinais, sem alterar os totais nem as evidências da auditoria.
+- Use **Ocultar sinais na página** ou Escape para encerrar a marcação.
+
+Essa conferência é uma camada visual temporária, não uma nova captura. Não altera os arquivos de evidência nem aciona botões do site. Navegar para outro documento encerra a associação antiga. Após expiração ou reinício da extensão, pode ser necessário refazer a avaliação para recuperar os sinais.
+
+O painel oferece até64 ocorrências interativas; o relatório mantém todas. Questões gerais, alvos sem identificador estável corroborado, elementos mudados ou não localizados são informados separadamente, sem inventar sua posição. Lotes não recebem sinais na página original. O destaque individual **Ver e destacar na página** continua disponível quando a prova viva da página auditada ainda é válida, por exemplo em **Outra URL** enquanto essa página permanece disponível.
 
 Os quatro cartões do sumário funcionam como filtros. Clique novamente no cartão selecionado para mostrar todos os resultados. As ocorrências estão agrupadas por item da ABNT: abra o item e depois a ficha que deseja entender. A ficha explica o impacto, o que foi observado e como revisar ou corrigir, com exemplos. Código e detalhes técnicos ficam recolhidos. A referência curta distingue inconformidade confirmada de item ainda a verificar.
 
