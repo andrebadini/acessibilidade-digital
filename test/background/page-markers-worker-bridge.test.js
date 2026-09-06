@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createControllerFixture } from './page-markers-controller-fixture.js';
+import { buildPanelSummary } from '../../src/panel/panel-summary.js';
+import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 
 import {
   PAGE_MARKERS_PORT_NAME,
@@ -16,6 +19,45 @@ function event() {
     emit(...args) { for (const listener of [...listeners]) listener(...args); },
   };
 }
+
+test('an offered marker beyond global occurrence 64 opens its exact panel detail through the worker bridge', async () => {
+  const changeDraft = draft => {
+    const source = draft.occurrences.find(row => row.occurrenceId === 'occ-focus-failed');
+    for (let index = 0; index < 64; index += 1) {
+      const nodeId = `node-extra-${index}`, evidenceId = `ev-extra-${index}`;
+      draft.ruleResults.find(row => row.ruleId === 'focus-visible').targets.push(nodeId);
+      draft.occurrences.push({ ...structuredClone(source), occurrenceId: `occ-aaa-${String(index).padStart(2, '0')}`,
+        nodeId, target: { nodeId, selector: null, framePath: [] }, evidenceIds: [evidenceId], evidenceRefs: [evidenceId] });
+      draft.evidence.push({ ...structuredClone(draft.evidence[1]), evidenceId, nodeId, backendNodeId: 100 + index });
+    }
+  };
+  const first = await createControllerFixture({ changeDraft });
+  const inventory = await createInstalledCoreRuleInventory();
+  const executionCheckpoint = { version: 1, auditId: first.model.auditId,
+    pages: first.model.pages.map(page => ({ pageId: page.pageId, attempted: page.attempted,
+      startedAt: page.attempted ? page.timestamps.startedAt : null, rulesVersion: inventory.rulesVersion,
+      inventoryVersion: inventory.inventoryVersion, inventoryHash: inventory.sha256, outcomes: [] })) };
+  const summary = await buildPanelSummary({ model: first.model, executionCheckpoint, inventory });
+  const ids = Object.values(summary.groups).flatMap(cards => cards.flatMap(card => card.occurrenceIds))
+    .sort((left, right) => left.localeCompare(right));
+  const bundle = { ...first.bundle, details: ids.map(occurrenceId => ({ occurrenceId })) };
+  const fixture = await createControllerFixture({ changeDraft, bundle });
+  const shown = await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  assert.equal(first.model.occurrences.length, 67);
+  assert.equal(ids.length, 64);
+  assert.deepEqual(shown.markers.counts, { markers: 1, located: 63, unlocated: 0, general: 1, omitted: 3 });
+  const ordinal = ids.indexOf('occ-focus-review');
+  assert.equal(ordinal, 63);
+  await fixture.dispatch('PANEL_FILTER_PAGE_MARKERS', { visibleOrdinals: String(ordinal) });
+  fixture.page.environment.markerButtons()[0].click();
+  const message = fixture.page.environment.messages.at(-1);
+  assert.equal(message.selectionId, 's67');
+  const bridge = createPageMarkersWorkerBridge({ controller: fixture.controller });
+  assert.equal(isPageMarkersRuntimeMessage(message), true);
+  assert.equal(bridge.handleRuntimeMessage(message, fixture.latestPort().sender), true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.calls.publish.at(-1).selectedOrdinal, ordinal);
+});
 
 test('private marker bridge forwards only its exact page channel without echoing payloads', () => {
   const calls = [];
@@ -51,7 +93,12 @@ test('page event classifier rejects extras and accessors without invoking them',
 
   assert.equal(isPageMarkersRuntimeMessage(selected), true);
   assert.equal(isPageMarkersRuntimeMessage(cleared), true);
-  assert.equal(isPageMarkersRuntimeMessage({ ...selected, selectionId: 's65' }), false);
+  for (const selectionId of ['s65', 's71', 's5000']) {
+    assert.equal(isPageMarkersRuntimeMessage({ ...selected, selectionId }), true);
+  }
+  for (const selectionId of ['s0', 's01', 's-1', 's1.5', 's9007199254740992']) {
+    assert.equal(isPageMarkersRuntimeMessage({ ...selected, selectionId }), false);
+  }
   assert.equal(isPageMarkersRuntimeMessage({ ...selected, privateDigest: 'never' }), false);
   assert.equal(isPageMarkersRuntimeMessage(accessor), false);
   assert.equal(getters, 0);

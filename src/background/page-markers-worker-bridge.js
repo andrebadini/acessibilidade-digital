@@ -1,7 +1,8 @@
 export const PAGE_MARKERS_PORT_NAME = 'audita-page-markers-v1';
 
 const INSTALLATION_ID = /^[A-Za-z0-9_-]{22}$/u;
-const SELECTION_ID = /^s(?:[1-9]|[1-5][0-9]|6[0-4])$/u;
+// IDs come from the full projection; 64 limits offered details, not their IDs.
+const SELECTION_ID = /^s[1-9][0-9]{0,15}$/u;
 
 function ownData(value, key) {
   try {

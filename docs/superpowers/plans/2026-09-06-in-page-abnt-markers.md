@@ -1,5 +1,17 @@
 # Conferência na própria página — referência funcional WAVE
 
+## Task 13 — identificador global de sinal versus limite do painel
+
+As duas revisões independentes do SHA070d895 reproduziram o mesmo I: a projeção fornece IDs globais s67/s71, mas o painel pode oferecer esses achados dentro de seus64 detalhes e a bridge rejeitava qualquer ID acima de s64. Regression preservada com modelo67ocorrências, sumário/controller/overlay reais: o clique em s67 precisa publicar ordinal63. RED observado; correção somente da gramática da bridge para inteiro positivo canônico seguro, igual ao contrato W2. Limite de64 detalhes e validação de instalação, sender e mapa privado permanecem inalterados.
+
+Arquivos: `src/background/page-markers-worker-bridge.js` e seu teste. GREEN134/134 bridge/controller/worker; diff-checkPASS. Ambos os mesmos revisores validaram isoladamente os dois arquivos sobre dependências070d895:6/6PASS cada, C0/I0. Sem outros achados importantes/críticos nas fronteiras integradas revisadas. Nenhuma nova captura, armazenamento ou norma alterada.
+
+## Task 12 — navegação explícita determinística
+
+RED nativo em070d895: após as duas janelas de45s, “Ir ao elemento” envia exatamente uma chamada `scrollIntoView` ao alvo correto com `behavior:smooth`, mas a página permanece em scrollY640 por10s, com alvo acima do viewport. Instrumentação instalada antes da segunda espera confirma que a perda ocorre na animação nativa, não no protocolo ou na fila. Revisão prévia independente aprovou contrato reduzido: usar `behavior:instant` somente no ramo de scroll explicitamente solicitado, preservando seleção sem scroll/foco, alvo exato e alinhamento.
+
+Escopo: uma linha de `src/browser/page-markers-overlay.js`; expectativas correspondentes em `test/highlight/page-markers-overlay.test.js` e `test/background/page-markers-controller.test.js`; prova no novo percurso `test/e2e/sidepanel-flow-mv3.test.mjs`. Sem timers, retry, captura, persistência ou mudança de autorização. Testes diretamente relacionados:48/48PASS. Remover toda instrumentação e bypass temporário de idle antes do GREEN nativo. Revisão final do mesmo revisor após congelamento. As demais fronteiras permanecem aprovadas e congeladas.
+
 ## Task 11 — compatibilidade da limpeza no resume de pixels
 
 Novo RED nativo reproduzido duas vezes em dfa1929: element-only pausa, confirmação recusada, sem modelo/relatório; diagnóstico no Debugger da fixture confirma PIXEL_CONFIRM_DENIED no router681. Starter resume fornece target com tabId/windowId/documentId/urlSessionDigest à cleanupBarrier; composição Task7 encaminha4campos ao marker controller exact2 e provoca PAGE_MARKERS_INVALID. Revisão prévia independente confirmou causa e correção mínima.
