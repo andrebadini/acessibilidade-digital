@@ -158,6 +158,35 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   await extension.captureJourney('recorded-label-comparison', report, { captureBeyondViewport: false });
   t.diagnostic('recorded-label-comparison=retained-element=JSON=live=HTML; visible=B; accessible=Alvo pequeno vizinho');
 
+  // Confirm the new review procedures in their actual ABNT groups, not only in a helper.
+  for (const [itemId, phrase] of [
+    ['5.1.7', 'Procure outra forma de obter a mesma informação'],
+    ['5.1.8', 'tempo observado'],
+    ['5.1.9', 'Essa tecla não é a única solução possível'],
+    ['5.12.1', '24 pixels (16 × 1,5)'],
+    ['5.12.2', '32 pixels (16 × 2)'],
+    ['5.12.3', '1,92 pixels (16 × 0,12)'],
+    ['5.12.4', '2,56 pixels (16 × 0,16)'],
+  ]) {
+    assert.ok(audit.occurrences.some(occurrence => occurrence.itemId === itemId));
+    const guide = await extension.evaluate(report,
+      `document.querySelector('[data-report-item-group="${itemId}"]')?.textContent ?? ''`);
+    assert.ok(guide.includes(phrase), `live guide missing for ${itemId}`);
+    assert.ok(html.includes(phrase), `exported guide missing for ${itemId}`);
+  }
+  for (const itemId of ['5.1.9', '5.12.2']) {
+    await extension.evaluate(report, `(() => {
+      const group=document.querySelector('[data-report-item-group="${itemId}"]');
+      group.open=true;
+      const card=group.querySelector('[data-report-issue]');
+      for(const detail of card.querySelectorAll('details')) detail.open=true;
+      card.scrollIntoView({behavior:'instant',block:'start'});
+      return true;
+    })()`);
+    await extension.captureJourney(`practical-guide-${itemId}`, report, { captureBeyondViewport: false });
+  }
+  t.diagnostic('practical-guides=7; retained-ABNT-groups=live=HTML; pending-results-preserved');
+
   const rasters = audit.evidence.filter(artifact =>
     ['full-page', 'element'].includes(artifact.kind) && typeof artifact.dataUrl === 'string');
   assert.ok(rasters.some(artifact => artifact.kind === 'full-page'));
