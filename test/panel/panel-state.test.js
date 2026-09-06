@@ -55,6 +55,36 @@ function resultBundle(overrides = {}) {
   return frozen(bundle);
 }
 
+test('result filter is local and a new audit clears the old selection without replaying consent', () => {
+  let state = reducePanelState(createInitialPanelState(), { type: 'AUDIT_RESULT', auditId: 'audit-1', result: resultBundle() });
+  assert.equal(state.screen, 'result');
+  state = reducePanelState(state, { type: 'FILTER_SET', filter: 'result', values: ['humanReview'], focusId: 'metric-humanReview' });
+  assert.deepEqual(state.filters.result, ['humanReview']);
+  const denied = reducePanelState(state, { type: 'FILTER_SET', filter: 'result', values: ['invented'] });
+  assert.deepEqual(denied.filters.result, ['humanReview']);
+  const fresh = reducePanelState(state, { type: 'NEW_AUDIT_REQUESTED' });
+  assert.equal(fresh.screen, 'initial');
+  assert.equal(fresh.auditId, null);
+  assert.equal(fresh.privacy.confirmationPending, false);
+  assert.deepEqual(fresh.filters.result, []);
+});
+
+test('refazer preserves result controls until pending highlight removal succeeds', () => {
+  let state = reducePanelState(createInitialPanelState(), { type: 'AUDIT_RESULT', auditId: 'audit-1', result: resultBundle() });
+  state = reducePanelState(state, { type: 'HIGHLIGHT_ACTIVE', occurrenceId: 'occ-1' });
+  assert.equal(reducePanelState(state, { type: 'NEW_AUDIT_REQUESTED' }).screen, 'result');
+  state = reducePanelState(state, { type: 'HIGHLIGHT_CLEAR_BUSY' });
+  state = reducePanelState(state, { type: 'NEW_AUDIT_REQUESTED' });
+  state = reducePanelState(state, { type: 'NEW_AUDIT_REQUESTED' });
+  assert.equal(state.screen, 'result', 'a second activation must not abandon pending cleanup');
+  state = reducePanelState(state, { type: 'HIGHLIGHT_CLEAR_FAILED', occurrenceId: 'occ-1' });
+  assert.equal(state.screen, 'result');
+  assert.equal(state.highlight.state, 'active');
+  state = reducePanelState(state, { type: 'HIGHLIGHT_CLEAR_BUSY' });
+  state = reducePanelState(state, { type: 'HIGHLIGHT_CLEARED' });
+  assert.equal(reducePanelState(state, { type: 'NEW_AUDIT_REQUESTED' }).screen, 'initial');
+});
+
 test('exports only the live four-screen panel state contract', () => {
   assert.deepEqual(Object.keys(panelStateModule).sort(), ['createInitialPanelState', 'reducePanelState']);
 });
@@ -73,7 +103,7 @@ test('creates an immutable initial screen with only stable interaction state', (
     privacy: { mode: null, categories: [], message: null, confirmationPending: false },
     progress: { phase: null, message: null, percent: null, at: null },
     batch: { total: null, pageNumber: null, warnings: [], errors: [] },
-    filters: { impact: [], wcag: [], abnt: [] },
+    filters: { impact: [], wcag: [], abnt: [], result: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,
     persona: {
@@ -515,7 +545,7 @@ test('unknown and invalid events return a detached recursively frozen valid stat
     privacy: { mode: null, categories: [], message: null, confirmationPending: false },
     progress: { phase: null, message: null, percent: null, at: null },
     batch: { total: null, pageNumber: null, warnings: [], errors: [] },
-    filters: { impact: ['critical'], wcag: [], abnt: [] },
+    filters: { impact: ['critical'], wcag: [], abnt: [], result: [] },
     selectedOccurrenceId: 'occ-1', evidenceExpanded: false,
     persona: {
       mode: null, readerPaused: false, speechAvailability: 'unavailable', voiceId: '', rate: 1,

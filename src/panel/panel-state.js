@@ -1,7 +1,8 @@
 import { PANEL_UNPREPARED_MESSAGE } from './panel-status.js';
 
 const PANEL_AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
-const PANEL_FILTERS = Object.freeze(['impact', 'wcag', 'abnt']);
+const PANEL_FILTERS = Object.freeze(['impact', 'wcag', 'abnt', 'result']);
+const RESULT_FILTERS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
 const CAPTURE_MODES = Object.freeze(['full-evidence', 'element-only', 'no-pixels']);
 const PIXEL_CAPTURE_MODES = Object.freeze(['full-evidence', 'element-only']);
 const PRIVACY_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'private-marker']);
@@ -72,7 +73,7 @@ export function createInitialPanelState() {
     privacy: neutralPrivacy(),
     progress: neutralProgress(),
     batch: neutralBatch(),
-    filters: { impact: [], wcag: [], abnt: [] },
+    filters: { impact: [], wcag: [], abnt: [], result: [] },
     selectedOccurrenceId: null,
     evidenceExpanded: false,
     persona: neutralPersona(),
@@ -299,7 +300,7 @@ export function reducePanelState(current, event) {
     case 'FILTER_SET': {
       if (current.screen !== 'result' || !PANEL_FILTERS.includes(event.filter)) return current;
       const values = panelFilterValues(event.values);
-      if (!values) return current;
+      if (!values || event.filter === 'result' && values.some(value => !RESULT_FILTERS.includes(value))) return current;
       return nextPanelState(current, {
         filters: { ...current.filters, [event.filter]: values },
         focusId: panelFocusId(event.focusId, current.focusId),
@@ -466,6 +467,12 @@ export function reducePanelState(current, event) {
         focusId: panelFocusId(event.focusId, current.focusId),
         scrollTop: panelScrollTop(event.scrollTop, current.scrollTop),
       });
+    case 'NEW_AUDIT_REQUESTED':
+      if (!exactDataRecord(event, ['type']) || current.screen !== 'result' ||
+        current.highlight.state !== 'idle') return current;
+      return deepFreezePanelState({
+        ...createInitialPanelState(), captureMode: current.captureMode, persona: current.persona,
+      });
     case 'RETRY_REQUESTED':
       if (current.screen !== 'unavailable') return current;
       return nextPanelState(current, { focusId: 'retry' });
@@ -490,7 +497,8 @@ function panelState(value) {
       state.progress.message, state.batch.pageNumber, state.batch.total,
     ) || state.batch.pageNumber < 1) ||
     state.auditSource !== 'batch' && (state.batch.total !== null || state.batch.pageNumber !== null || state.batch.warnings.length > 0) ||
-    !state.filters || !PANEL_FILTERS.every(filter => Array.isArray(state.filters[filter]))) return false;
+    !state.filters || !PANEL_FILTERS.every(filter => Array.isArray(state.filters[filter]) ||
+      filter === 'result' && state.filters[filter] === undefined)) return false;
   const privacy = exactPrivacy(state.privacy);
   if (!privacy) return false;
   return state.sessionStatus === 'privacy-paused'
@@ -519,7 +527,7 @@ function immutablePanelState(value) {
     privacy: copyPrivacy(value.privacy),
     progress: copyProgress(value.progress),
     batch: copyBatch(value.batch),
-    filters: Object.fromEntries(PANEL_FILTERS.map(filter => [filter, [...value.filters[filter]]])),
+    filters: Object.fromEntries(PANEL_FILTERS.map(filter => [filter, [...(value.filters[filter] ?? [])]])),
     selectedOccurrenceId: value.selectedOccurrenceId,
     evidenceExpanded: value.evidenceExpanded,
     persona: copyPersona(value.persona),

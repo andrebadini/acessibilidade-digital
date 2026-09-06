@@ -3,6 +3,7 @@ import { sanitizeHtmlSnippetSource } from '../core/evidence/snippet.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../core/legal/consumer-basis.js';
 import { projectAuditResourceOrigin, sanitizeEvidenceUrl } from '../core/privacy.js';
 import { createAuditModel } from '../core/report/audit-model.js';
+import { accessibilityGuidance } from '../core/report/plain-language-guidance.js';
 import { assertPanelClassificationV1, deriveResultContextV1 } from './panel-result-contract.js';
 import {
   INTERACTIVE_PANEL_LIMITATION,
@@ -185,8 +186,8 @@ function legalReferenceFor({ occurrence, card, item, decision }) {
   return {
     basisRef: CONSUMER_ACCESSIBILITY_FIXED_BASIS.id,
     abntItem: item.id,
-    statement: `${CONSUMER_ACCESSIBILITY_FIXED_BASIS.sentencePrefix}, e no item ${item.id} da ABNT NBR 17225:2025.`,
-    qualification: CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification,
+    statement: `Inconformidade ao item ${item.id} da ABNT NBR 17225:2025`,
+    qualification: null,
   };
 }
 
@@ -264,6 +265,13 @@ function buildPanelDetailFromCanonical(model, summary, occurrenceId) {
   const decision = model.reviewDecisions.find(candidate => candidate.occurrenceId === occurrenceId) ?? null;
   const title = item?.title ?? rule?.summary ?? occurrence.justification;
   const reason = occurrence.justification || rule?.summary || title;
+  const selectedOutcome = ['failed', 'passed'].includes(occurrence.outcome) ? occurrence.outcome
+    : decision?.answer === 'não conforme' ? 'failed' : decision?.answer === 'conforme' ? 'passed' : occurrence.outcome;
+  const rawCorrection = correctionFor(occurrence, rule, item);
+  const guidance = accessibilityGuidance({
+    itemId: item?.id, title, outcome: selectedOutcome, observed: reason,
+    correction: rawCorrection === reason || rawCorrection === item?.humanReason ? '' : rawCorrection,
+  });
   const normativeWcag = item?.wcag ?? [];
   const detail = {
     version: 1,
@@ -277,11 +285,12 @@ function buildPanelDetailFromCanonical(model, summary, occurrenceId) {
       context: card.context,
     },
     affected: {
-      audience: item?.humanReason || reason,
-      reason,
+      audience: guidance.impact,
+      reason: guidance.example,
     },
-    observed: reason,
-    correction: correctionFor(occurrence, rule, item),
+    observed: guidance.observed,
+    correction: [guidance.correction, 'Como conferir:', ...guidance.reviewSteps.map((step, index) => `${index + 1}. ${step}`),
+      'Ao revisar, marque conforme somente se o comportamento esperado foi confirmado; não conforme se você comprovou a barreira; inconclusivo se faltarem condições ou conhecimento para decidir.'].join('\n'),
     targets: targetBlock(authoritativeOccurrences, occurrenceId),
     accessibility: accessibilityBlock(occurrence, evidence),
     normative: {

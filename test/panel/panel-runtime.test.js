@@ -171,7 +171,7 @@ test('waits for the first valid bootstrap before exposing authorized panel actio
   assert.equal(document.root.querySelector('button[data-action="start-url-audit"]'), null);
 
   const firstWatchdog = timers[0];
-  assert.equal(firstWatchdog.delay, 5000);
+  assert.equal(firstWatchdog.delay, 60000);
   firstWatchdog.callback();
   assert.equal(firstPort.disconnects, 1);
   assert.ok(document.root.querySelector('[data-screen="connecting"]'));
@@ -181,7 +181,7 @@ test('waits for the first valid bootstrap before exposing authorized panel actio
   reconnect.callback();
   assert.equal(ports.length, 2);
   const port = ports[1];
-  assert.equal(timers.at(-1).delay, 5000);
+  assert.equal(timers.at(-1).delay, 60000);
 
   port.onMessage.emit({
     protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
@@ -287,7 +287,7 @@ test('shows terminal static unavailability after all pre-bootstrap Port attempts
   const reconnectDelays = [250, 500, 1000, 2000, 5000];
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const watchdog = timers.at(-1);
-    assert.equal(watchdog.delay, 5000);
+    assert.equal(watchdog.delay, 60000);
     watchdog.callback();
     assert.equal(ports.at(-1).disconnects, 1);
     assert.equal(document.root.querySelectorAll('button').length, 0);

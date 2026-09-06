@@ -297,7 +297,7 @@ function render() {
     }
   }
 
-  const view = buildPanelView({ state, summary, detail });
+  const view = buildPanelView({ state, summary, detail, details: resultBundle?.details ?? [] });
   const screen = renderPanelView({ view, document, onIntent: handleIntent, onEvent: handleEvent });
   root.replaceChildren(screen);
   applyReportLaunchFeedback();
@@ -416,6 +416,17 @@ async function handleIntent(intent) {
       return;
     case 'OPEN_REPORT':
       await requestSessionAction('PANEL_OPEN_REPORT');
+      return;
+    case 'NEW_AUDIT':
+      if (state.screen !== 'result' || state.highlight.state === 'busy') return;
+      if (state.highlight.state === 'active') {
+        await clearHighlight();
+      }
+      if (state.screen !== 'result' || state.highlight.state !== 'idle') return;
+      reviseNavigationEntry();
+      batchEntryDraft = '';
+      transition({ type: 'NEW_AUDIT_REQUESTED' });
+      announce('Escolha a página e o modo para uma nova auditoria. O resultado anterior foi preservado.');
       return;
     case 'SELECT_OCCURRENCE':
       selectOccurrence(intent.occurrenceId);

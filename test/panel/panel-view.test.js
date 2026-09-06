@@ -149,6 +149,71 @@ function fixture() {
   return { state, summary, detail };
 }
 
+test('result metrics select a result filter without changing the audit totals', () => {
+  const input = fixture();
+  const events = [];
+  let view = buildPanelView(input);
+  const root = renderPanelView({ view, document: new TestDocument(), onIntent() {}, onEvent: e => events.push(e) });
+  const metric = root.querySelector('button[data-result-filter="humanReview"]');
+  assert.ok(metric, 'summary cards must be operable buttons');
+  metric.click();
+  assert.deepEqual(events[0], { type: 'FILTER_SET', filter: 'result', values: ['humanReview'], focusId: 'metric-humanReview' });
+  input.state.filters.result = ['humanReview'];
+  view = buildPanelView(input);
+  assert.equal(view.result.groups.failed.length, 0);
+  assert.equal(view.result.groups.humanReview.length, 1);
+  assert.equal(view.result.summary.counts.errors.occurrences, 1);
+});
+
+test('ABNT expanders group checks and occurrence actions once per item', () => {
+  const input = fixture();
+  input.summary.groups.failed.push(card({ checkKey: 'check-4', occurrenceIds: ['occ-4', 'occ-5'], impact: 'serious', wcag: '2.4.7', abnt: '5.1.1' }));
+  const root = renderPanelView({ view: buildPanelView(input), document: new TestDocument(), onIntent() {} });
+  const groups = root.querySelectorAll('details[data-abnt-group="5.1.1"]');
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].querySelectorAll('[data-result-card]').length, 2);
+  assert.equal(groups[0].querySelectorAll('button[data-intent="SELECT_OCCURRENCE"]').length, 3);
+  assert.match(groups[0].querySelector('summary').textContent, /3 ocorrências/u);
+  assert.equal(groups[0].open, true, 'selected detail remains reachable after rerender');
+  assert.equal(root.querySelectorAll('button[data-filter-dimension="abnt"]').length, 0);
+});
+
+test('result offers a fresh audit choice without emitting capture or deletion', () => {
+  const intents = [];
+  const root = renderPanelView({ view: buildPanelView(fixture()), document: new TestDocument(), onIntent: e => intents.push(e) });
+  const button = root.querySelector('button[data-intent="NEW_AUDIT"]');
+  assert.ok(button);
+  assert.match(button.textContent, /Refazer auditoria/u);
+  button.click();
+  assert.deepEqual(intents, [{ type: 'NEW_AUDIT' }]);
+});
+
+test('refazer is disabled while a highlight operation is pending', () => {
+  const input = fixture();
+  const intents = [];
+  input.state.highlight = { ...input.state.highlight, state: 'busy', operation: 'clear', occurrenceId: 'occ-1' };
+  const root = renderPanelView({ view: buildPanelView(input), document: new TestDocument(), onIntent: intent => intents.push(intent) });
+  const button = root.querySelector('button[data-intent="NEW_AUDIT"]');
+  assert.equal(button.getAttribute('aria-disabled'), 'true');
+  button.click();
+  button.click();
+  assert.deepEqual(intents, []);
+});
+
+test('a check spanning two ABNT items keeps each occurrence in its own item expander', () => {
+  const input = fixture();
+  const mixed = input.summary.groups.failed[0];
+  mixed.abntItemIds = ['5.1.1', '5.1.4'];
+  mixed.occurrenceIds = ['occ-1', 'occ-other'];
+  input.details = [input.detail, { ...input.detail, occurrenceId: 'occ-other', normative: { ...input.detail.normative, abntItem: '5.1.4' } }];
+  const root = renderPanelView({ view: buildPanelView(input), document: new TestDocument(), onIntent() {} });
+  const first = root.querySelector('details[data-abnt-group="5.1.1"]');
+  const second = root.querySelector('details[data-abnt-group="5.1.4"]');
+  assert.equal(first.querySelectorAll('button[data-focus-id="occurrence-occ-other"]').length, 0);
+  assert.equal(second.querySelectorAll('button[data-focus-id="occurrence-occ-1"]').length, 0);
+  assert.equal(root.querySelectorAll('button[data-focus-id="occurrence-occ-other"]').length, 1);
+});
+
 test('buildPanelView copies and recursively freezes its complete render model', () => {
   const input = fixture();
   const view = buildPanelView(input);
@@ -253,7 +318,7 @@ test('every occurrence in a multi-occurrence card is independently selectable', 
   assert.doesNotMatch(failedCard.textContent, /occ-1/iu, 'opaque occurrence IDs stay out of visible copy');
 });
 
-test('renders closed result metadata and stable impact WCAG and ABNT filter selectors', () => {
+test('renders closed result metadata with impact/WCAG filters and ABNT disclosures', () => {
   const input = fixture();
   const root = renderPanelView({
     view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
@@ -267,7 +332,7 @@ test('renders closed result metadata and stable impact WCAG and ABNT filter sele
   assert.equal(detailRoot.dataset.context, input.detail.heading.context);
   assert.ok(root.querySelector('button[data-filter-dimension="impact"][data-filter-value="critical"]'));
   assert.ok(root.querySelector('button[data-filter-dimension="wcag"][data-filter-value="AA"]'));
-  assert.ok(root.querySelector('button[data-filter-dimension="abnt"][data-filter-value="5.1.1"]'));
+  assert.ok(root.querySelector('details[data-abnt-group="5.1.1"]'));
   assert.equal(root.querySelector('button[data-filter-dimension="impact"][data-filter-value="critical"]').getAttribute('aria-pressed'), 'false');
 });
 
@@ -356,7 +421,7 @@ test('all four screens emit only the exhaustive UI intent union', () => {
   for (const button of pausedRoot.querySelectorAll('button[data-intent]')) button.click();
   assert.deepEqual(new Set(emitted.map(value => value.type)), new Set([
     'START_ATTACHED', 'OPEN_URL_FORM', 'OPEN_BATCH_FORM', 'CANCEL_AUDIT',
-    'OPEN_REPORT', 'SELECT_OCCURRENCE', 'CONSULT_EVIDENCE', 'RETRY',
+    'OPEN_REPORT', 'NEW_AUDIT', 'SELECT_OCCURRENCE', 'CONSULT_EVIDENCE', 'RETRY',
     'PERSONA_SELECT', 'CONFIRM_PIXEL_CAPTURE',
   ]));
 });

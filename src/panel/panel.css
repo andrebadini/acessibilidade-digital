@@ -127,6 +127,15 @@ button:active { transform: translateY(1px); }
 
 .source-choices { display: grid; gap: 12px; }
 
+.abnt-result-group { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); margin-block: 8px; }
+.abnt-result-group > summary { padding: 12px; color: var(--brand); font-weight: 700; cursor: pointer; }
+.abnt-result-group[open] > summary { border-bottom: 1px solid var(--border); background: var(--muted-surface); }
+.abnt-result-group > .result-group { padding: 12px; }
+button.metric { text-align: start; color: var(--ink); }
+button.metric[aria-pressed="true"] { outline: 3px solid var(--brand); outline-offset: 2px; }
+.metric-grid > .secondary-action { grid-column: 1 / -1; }
+.metric-unit { font-size: .8rem; font-weight: 400; }
+
 .single-url-entry form,
 .batch-url-entry form {
   display: grid;

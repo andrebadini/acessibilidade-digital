@@ -27,6 +27,21 @@ async function summaryFixture(model = SAMPLE_AUDIT) {
   return buildPanelSummary({ model, executionCheckpoint: checkpointFor(inventory, model), inventory });
 }
 
+test('explains a focus finding with practical guidance while retaining the original evidence', async () => {
+  const summary = await summaryFixture();
+  const failed = buildPanelDetail({ model: SAMPLE_AUDIT, summary, occurrenceId: 'occ-focus-failed', highlightAvailability: new Map() });
+  assert.match(failed.affected.audience, /teclado/u);
+  assert.match(failed.affected.reason, /Exemplo hipotético/u);
+  assert.match(failed.correction, /Tab/u);
+  assert.match(failed.observed, /Requisito “Indicador de foco visível”/u);
+  assert.equal(failed.legalReference.statement, 'Inconformidade ao item 5.1.1 da ABNT NBR 17225:2025');
+  assert.equal(failed.legalReference.qualification, null);
+  const pending = buildPanelDetail({ model: SAMPLE_AUDIT, summary, occurrenceId: 'occ-focus-review', highlightAvailability: new Map() });
+  assert.match(pending.observed, /não confirma atendimento nem falha/u);
+  assert.match(pending.correction, /Se a revisão confirmar/u);
+  assert.equal(pending.legalReference, null);
+});
+
 test('reuses one validated model and summary to project every requested detail', async () => {
   const summary = await summaryFixture();
   const project = createPanelDetailProjector({
@@ -90,12 +105,10 @@ test('projects the ten ordered detail blocks from canonical precedence without a
     title: 'Indicador de foco visível', classification: card.classification,
     impact: 'moderate', context: 'top-document',
   });
-  assert.deepEqual(detail.affected, {
-    audience: 'Requisito “Indicador de foco visível”: não conformidade técnica identificada.',
-    reason: 'Requisito “Indicador de foco visível”: não conformidade técnica identificada.',
-  });
-  assert.equal(detail.observed, 'Requisito “Indicador de foco visível”: não conformidade técnica identificada.');
-  assert.equal(detail.correction, 'Requisito “Indicador de foco visível”: não conformidade técnica identificada.');
+  assert.match(detail.affected.audience, /teclado/u);
+  assert.match(detail.affected.reason, /Exemplo hipotético/u);
+  assert.match(detail.observed, /Registro original: Requisito “Indicador de foco visível”: não conformidade técnica identificada\./u);
+  assert.match(detail.correction, /contorno visível/u);
   assert.deepEqual(detail.targets, [{ nodeId: 'n-1', position: 1, total: 1 }]);
   assert.deepEqual(detail.accessibility, {
     name: 'Continuar', nameSource: 'aria-label',
@@ -131,7 +144,7 @@ test('joins previews only through evidenceRefs, preserves safe PNG/HTTP media an
   assert.deepEqual(detail.technical.hashes, ['sha256-full-page-sample', 'sha256-element-sample']);
 });
 
-test('renders the qualified fixed legal basis only for an eligible failed official item', async () => {
+test('renders the concise normative reference only for an eligible failed official item', async () => {
   const summary = await summaryFixture();
   const failed = buildPanelDetail({
     model: SAMPLE_AUDIT, summary, occurrenceId: 'occ-focus-failed', highlightAvailability: new Map(),
@@ -142,11 +155,10 @@ test('renders the qualified fixed legal basis only for an eligible failed offici
 
   assert.equal(failed.legalReference.basisRef, CONSUMER_ACCESSIBILITY_FIXED_BASIS.id);
   assert.equal(failed.legalReference.abntItem, '5.1.1');
-  assert.match(failed.legalReference.statement, /Quando aplicável a uma relação de consumo/u);
-  assert.match(failed.legalReference.statement, /subsídio para avaliar possível infração/u);
+  assert.match(failed.legalReference.statement, /^Inconformidade ao item/u);
   assert.doesNotMatch(failed.legalReference.statement, /A referida desconformidade infringe/u);
   assert.match(failed.legalReference.statement, /item 5\.1\.1 da ABNT NBR 17225:2025/u);
-  assert.equal(failed.legalReference.qualification, CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification);
+  assert.equal(failed.legalReference.qualification, null);
   assert.equal(pending.legalReference, null);
 });
 
@@ -161,8 +173,8 @@ test('uses the singular selected item in detail and the sorted unique official i
   assert.deepEqual(card.abntItemIds, ['5.1.4']);
   assert.equal(detail.normative.abntItem, '5.1.4');
   assert.equal(detail.heading.title, 'Ordem de foco previsível');
-  assert.equal(detail.affected.audience, 'A verificação exige interação e julgamento humano sobre o comportamento observado.');
-  assert.equal(detail.observed, 'Requisito “Ordem de foco previsível”: conclusão dependente de revisão humana.');
+  assert.match(detail.affected.audience, /teclado/u);
+  assert.match(detail.observed, /Registro original: Requisito “Ordem de foco previsível”: conclusão dependente de revisão humana\./u);
 });
 
 test('uses only correlated evidence accessibility and never falls back to occurrence accessiblePreview', async () => {

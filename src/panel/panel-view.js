@@ -17,7 +17,7 @@ const RUNNING_PHASES = Object.freeze([
   ['evidence', 'Preparando evidências', 72, 'Coletando evidências'],
   ['reporting', 'Gerando relatório', 92, 'Preparando o resultado'],
 ]);
-const COVERAGE_DISCLAIMER = 'Percentual da execução automática concluída. Não é nota, certificação ou declaração de conformidade.';
+const COVERAGE_DISCLAIMER = 'Percentual dos testes do motor próprio que tiveram conclusão automática: atendido, não atendido ou não se aplica. Os demais podem precisar de revisão humana ou não ter sido executados. Não mede quanto do site é acessível e não é certificação de conformidade.';
 const WCAG_LEVEL_ORDER = Object.freeze(['A', 'AA', 'AAA']);
 const ENTRY_ERRORS = Object.freeze({
   required: 'Informe uma URL para continuar.',
@@ -39,7 +39,7 @@ const BATCH_LINE_ERRORS = Object.freeze({
 const DUPLICATE_URL_MESSAGE = 'A URL repete uma entrada anterior e não será auditada novamente.';
 const MAX_BATCH_LINE_NUMBER = 65_536;
 
-export function buildPanelView({ state, summary = null, detail = null } = {}) {
+export function buildPanelView({ state, summary = null, detail = null, details = [] } = {}) {
   const screen = dataProperty(state, 'screen');
   if (!state || !SCREEN_NAMES.includes(screen)) throw new TypeError('PANEL_VIEW_STATE_INVALID');
   const captureModeValue = dataProperty(state, 'captureMode');
@@ -83,9 +83,19 @@ export function buildPanelView({ state, summary = null, detail = null } = {}) {
   const detailCopy = detail && detail.auditId === base.auditId && detail.occurrenceId === base.selectedOccurrenceId
     ? copyDetail(detail)
     : null;
+  const occurrenceItems = [];
+  for (const candidate of details.length ? details : detail ? [detail] : []) {
+    if (candidate.auditId !== base.auditId) continue;
+    const card = GROUPS.flatMap(name => summaryCopy.groups[name]).find(row =>
+      row.checkKey === candidate.checkKey && row.occurrenceIds.includes(candidate.occurrenceId));
+    if (card && card.abntItemIds.includes(candidate.normative?.abntItem)) {
+      occurrenceItems.push([candidate.occurrenceId, candidate.normative.abntItem]);
+    }
+  }
   const groups = {};
   for (const name of GROUPS) {
-    groups[name] = summaryCopy.groups[name].filter(card => cardMatchesFilters(card, base.filters));
+    groups[name] = base.filters.result.length && !base.filters.result.includes(name) ? []
+      : summaryCopy.groups[name].filter(card => cardMatchesFilters(card, base.filters));
   }
   return freezeRenderModel({
     ...base,
@@ -93,6 +103,7 @@ export function buildPanelView({ state, summary = null, detail = null } = {}) {
       summary: summaryCopy,
       groups,
       detail: detailCopy,
+      occurrenceItems,
     },
   });
 }
@@ -112,6 +123,7 @@ export function renderPanelView({ view, document, onIntent, onEvent = () => {} }
       case 'OPEN_BATCH_FORM':
       case 'CANCEL_AUDIT':
       case 'OPEN_REPORT':
+      case 'NEW_AUDIT':
       case 'SELECT_OCCURRENCE':
       case 'CONSULT_EVIDENCE':
       case 'HIGHLIGHT_OCCURRENCE':
@@ -586,8 +598,10 @@ function renderResult(document, view, emit, onEvent) {
   ready.append(
     heading(document, 2, 'Seu relatório está pronto'),
     actionButton(document, 'Abrir relatório completo', 'OPEN_REPORT', 'open-report', emit, 'primary-action report-action'),
+    actionButton(document, 'Refazer auditoria', 'NEW_AUDIT', 'new-audit', emit, 'secondary-action', {}, view.highlight.state === 'busy'),
     reportStatus,
   );
+  ready.append(paragraph(document, 'Inicia uma nova avaliação. O resultado anterior não é apagado; você poderá escolher a página e o modo novamente.', 'supporting-copy'));
   root.append(ready);
 
   const coverage = section(document, 'coverage-block');
@@ -603,27 +617,25 @@ function renderResult(document, view, emit, onEvent) {
     progress.setAttribute('aria-label', `Cobertura automática: ${summary.coverage.percent}`);
     coverage.append(
       paragraph(document, summary.coverage.percent, 'coverage-value'),
-      paragraph(document, `${summary.coverage.numerator} de ${summary.coverage.denominator} testes aplicáveis`, 'coverage-ratio'),
+      paragraph(document, `${summary.coverage.numerator} de ${summary.coverage.denominator} testes do motor próprio com conclusão automática`, 'coverage-ratio'),
       progress,
     );
   } else {
     coverage.append(paragraph(document, 'Cobertura indisponível para esta execução.', 'coverage-value coverage-unavailable'));
   }
   coverage.append(paragraph(document, COVERAGE_DISCLAIMER, 'coverage-disclaimer'));
-  root.append(coverage, renderMetrics(document, summary.counts));
+  root.append(coverage, renderMetrics(document, summary.counts, view.filters.result, onEvent));
 
   const filters = section(document, 'filters');
   filters.append(heading(document, 2, 'Filtrar resultados'));
   for (const dimension of FILTERS) {
+    if (dimension === 'abnt') continue;
     filters.append(renderFilter(document, dimension, summary.distributions[dimension], view.filters[dimension], onEvent));
   }
-  root.append(filters, heading(document, 2, 'Principais questões'));
-
-  const groups = section(document, 'result-groups');
-  for (const name of GROUPS) {
-    groups.append(renderGroup(document, name, result.groups[name], view, emit, onEvent, result.detail));
-  }
-  root.append(groups);
+  root.append(filters, heading(document, 2, 'Resultados por item ABNT'));
+  root.append(paragraph(document, 'Abra um item para consultar suas verificações e ocorrências. Uma verificação pode encontrar vários elementos na página.', 'supporting-copy'));
+  root.append(renderAbntGroups(document, view, emit, onEvent));
+  for (const limitation of summary.limitations.codes) root.append(paragraph(document, limitation, 'supporting-copy'));
 
   const activeOccurrenceId = view.highlight.state === 'active' ||
     (view.highlight.state === 'busy' && view.highlight.operation === 'clear')
@@ -639,25 +651,83 @@ function renderResult(document, view, emit, onEvent) {
   return root;
 }
 
-function renderMetrics(document, counts) {
+function renderMetrics(document, counts, selected, onEvent) {
   const wrapper = section(document, 'metric-grid');
   wrapper.setAttribute('aria-label', 'Resumo dos resultados');
   const metrics = [
-    ['Falhas confirmadas', counts.errors, 'failure'],
-    ['Alertas', counts.alerts, 'alert'],
-    ['Revisão humana', counts.humanReview, 'review'],
-    ['Resultados positivos', counts.positive, 'success'],
+    ['Falhas confirmadas', counts.errors, 'failure', 'failed'],
+    ['Alertas', counts.alerts, 'alert', 'alerts'],
+    ['Revisão humana', counts.humanReview, 'review', 'humanReview'],
+    ['Resultados positivos', counts.positive, 'success', 'passed'],
   ];
-  for (const [label, value, kind] of metrics) {
-    const item = section(document, `metric metric-${kind}`);
+  for (const [label, value, kind, group] of metrics) {
+    const item = document.createElement('button');
+    item.setAttribute('type', 'button');
+    item.className = `metric metric-${kind}`;
+    item.dataset.resultFilter = group;
+    item.dataset.focusId = `metric-${group}`;
+    item.setAttribute('aria-pressed', String(selected.includes(group)));
+    item.addEventListener('click', () => onEvent({
+      type: 'FILTER_SET', filter: 'result', values: selected.includes(group) ? [] : [group], focusId: `metric-${group}`,
+    }));
     item.append(
       paragraph(document, String(value.checkKeys), 'metric-value'),
       paragraph(document, label, 'metric-label'),
+      paragraph(document, 'verificações', 'metric-unit'),
       paragraph(document, occurrenceText(value.occurrences), 'metric-occurrences'),
     );
     wrapper.append(item);
   }
+  const all = document.createElement('button');
+  all.setAttribute('type', 'button');
+  all.className = 'secondary-action';
+  all.dataset.focusId = 'metric-all';
+  all.setAttribute('aria-pressed', String(selected.length === 0));
+  all.textContent = 'Todos os tipos de resultado';
+  all.addEventListener('click', () => onEvent({ type: 'FILTER_SET', filter: 'result', values: [], focusId: 'metric-all' }));
+  wrapper.append(all);
   return wrapper;
+}
+
+function renderAbntGroups(document, view, emit, onEvent) {
+  const root = section(document, 'result-groups');
+  const byItem = new Map();
+  const itemByOccurrence = new Map(view.result.occurrenceItems);
+  for (const name of GROUPS) {
+    for (const card of view.result.groups[name]) {
+      const ids = card.occurrenceIds.length ? new Set(card.occurrenceIds.map(occurrenceId =>
+        itemByOccurrence.get(occurrenceId) ?? (card.abntItemIds.length === 1 ? card.abntItemIds[0]
+          : card.abntItemIds.length === 0 ? '__none__' : '__unresolved__')))
+        : new Set(card.abntItemIds.length ? card.abntItemIds : ['__none__']);
+      for (const id of ids) {
+        if (!byItem.has(id)) byItem.set(id, []);
+        const occurrenceIds = card.occurrenceIds.filter(occurrenceId =>
+          (itemByOccurrence.get(occurrenceId) ?? (card.abntItemIds.length === 1 ? card.abntItemIds[0]
+            : card.abntItemIds.length === 0 ? '__none__' : '__unresolved__')) === id);
+        byItem.get(id).push({ name, card: { ...card, occurrenceIds } });
+      }
+    }
+  }
+  for (const [id, rows] of [...byItem].sort(([a], [b]) => a.localeCompare(b, 'pt-BR', { numeric: true }))) {
+    const disclosure = document.createElement('details');
+    disclosure.className = 'abnt-result-group';
+    disclosure.dataset.abntGroup = id;
+    disclosure.open = rows.some(({ card }) => card.occurrenceIds.includes(view.selectedOccurrenceId));
+    const label = document.createElement('summary');
+    const occurrences = new Set(rows.flatMap(({ card }) => card.occurrenceIds));
+    const title = id === '__none__' ? 'Sem item ABNT associado' : id === '__unresolved__'
+      ? 'Verificações com vários itens associados — consulte o relatório' : `ABNT ${id}`;
+    label.textContent = `${title} · ${rows.length} ${rows.length === 1 ? 'verificação' : 'verificações'} · ${occurrenceText(occurrences.size)} exibidas`;
+    label.dataset.focusId = `abnt-group-${id}`;
+    disclosure.append(label);
+    for (const name of GROUPS) {
+      const cards = rows.filter(row => row.name === name).map(row => row.card);
+      if (cards.length) disclosure.append(renderGroup(document, name, cards, view, emit, onEvent, view.result.detail));
+    }
+    root.append(disclosure);
+  }
+  if (byItem.size === 0) root.append(paragraph(document, 'Nenhum resultado com estes filtros. Selecione todos os tipos ou ajuste impacto e WCAG.', 'empty-group'));
+  return root;
 }
 
 function renderFilter(document, dimension, rows, selected, onEvent) {
@@ -775,7 +845,7 @@ function renderDetail(document, detail, expanded, highlight, emit, onEvent, capt
     ]),
     detailBlock(document, 'affected', 'Quem é afetado', [detail.affected.audience, detail.affected.reason]),
     detailBlock(document, 'observed', 'O que foi observado', [detail.observed]),
-    detailBlock(document, 'correction', 'Como corrigir', [detail.correction]),
+    detailBlock(document, 'correction', 'Como corrigir e conferir', detail.correction.split('\n')),
     detailBlock(document, 'targets', 'Alvos relacionados', detail.targets.map(target => `Alvo ${target.position} de ${target.total}`)),
     detailBlock(document, 'accessibility', 'Acessibilidade', [
       detail.accessibility.name ? `Nome acessível: ${detail.accessibility.name}` : 'Nome acessível ausente',
@@ -787,9 +857,9 @@ function renderDetail(document, detail, expanded, highlight, emit, onEvent, capt
       detail.normative.level.length ? `Nível ${detail.normative.level.join(', ')}` : null,
       detail.normative.abntItem ? `ABNT NBR 17225: ${detail.normative.abntItem}` : null,
     ]),
-    detailBlock(document, 'legal', 'Referência legal', detail.legalReference ? [
-      detail.legalReference.statement, detail.legalReference.qualification,
-    ] : ['Não há referência legal específica para esta ocorrência.']),
+    detailBlock(document, 'legal', 'Referência normativa', detail.legalReference ? [
+      detail.legalReference.statement,
+    ] : [detail.normative.abntItem ? `Verificar o item ${detail.normative.abntItem} da ABNT NBR 17225:2025` : 'Verificação complementar, sem item ABNT associado.']),
     previewBlock(document, detail.previews, expanded, onEvent, captureMode),
     technicalBlock(document, detail.technical, expanded, onEvent),
   );
@@ -1087,6 +1157,7 @@ function liveRegion(document, value) {
 function copyFilters(filters) {
   const copy = {};
   for (const name of FILTERS) copy[name] = Array.isArray(filters?.[name]) ? [...filters[name]] : [];
+  copy.result = Array.isArray(filters?.result) ? filters.result.filter(value => GROUPS.includes(value)) : [];
   return copy;
 }
 

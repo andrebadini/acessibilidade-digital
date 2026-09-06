@@ -70,7 +70,9 @@ test('running screen presents only canonical worker progress phases with an acce
 
 test('result copy preserves the coverage limitation and four separate checkKey metrics', async () => {
   const view = await panelFile('panel-view.js');
-  assert.match(view, /Percentual da execução automática concluída\. Não é nota, certificação ou declaração de conformidade\./u);
+  assert.match(view, /testes do motor próprio que tiveram conclusão automática/u);
+  assert.match(view, /não se aplica/u);
+  assert.match(view, /Não mede quanto do site é acessível/u);
   for (const label of ['Falhas confirmadas', 'Alertas', 'Revisão humana', 'Resultados positivos']) {
     assert.match(view, new RegExp(label, 'u'));
   }
