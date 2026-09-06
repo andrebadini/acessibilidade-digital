@@ -4,6 +4,8 @@ Status: **gate funcional e visual aprovado para a beta de conferência na págin
 
 ## Aceitação final — 06/09/2026
 
+Entrega: beta1.1.1,193arquivos, ZIP `audita-acessibilidade-1.1.1.zip`, SHA-256 `ca217f60a5c1cc754a690875c394aa435ba578e440e098d01c11a47bd4517e22`. Gerado uma vez para entrega após gate; teste de pacote isolado6/6PASS comprova reprodutibilidade e preservação de arquivos alheios. Assets6/6 e panel-ui7/7PASS. Unzip-integrityPASS; comparação byte a byte de todos os193arquivos extraídos com fontePASS. Manifesto atualizado apenas em version/version_name; nenhum novo privilégio. Arquivos finais e instruções em `/Volumes/SSD1/acessibilidade-digital/entregas/`. Pacotes anteriores preservados; instalação pessoal do Chrome não foi alterada automaticamente.
+
 Runtime8bf1a0e mais ajuste explícito smooth→instant e remoção de nowrap do badge, ambos revisados. As duas revisões críticas independentes do mesmo070d895 encontraram somente I1 (IDs globais maiores que64); após RED real67ocorrências e correção mínima, ambas revalidaram C0/I0 e6/6testes. Principal: bridge/controller/worker134/134PASS. Ajuste de navegação:48/48PASS, revisão independente C0/I0.
 
 - `original-page ABNT markers visual review and verified exports`: PASS,7.836s.
