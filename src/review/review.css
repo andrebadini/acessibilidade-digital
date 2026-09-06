@@ -1,5 +1,11 @@
 :root { color-scheme: light; font: 100%/1.45 system-ui, sans-serif; color: #14212b; background: #edf3f7; --ink: #14212b; --surface: #fff; --pale: #eef4f8; --brand: #003b71; --action: #005a9c; --border: #738596; --danger: #8b2f00; --review: #745700; }
 * { box-sizing: border-box; }
+.results-overview{display:flex;align-items:center;flex-wrap:wrap;gap:1.25rem;padding:1.1rem;margin-block:1rem;background:#f4f8fb;border:1px solid #738596;border-radius:.75rem;break-inside:avoid}
+.results-overview svg{width:10rem;height:10rem;flex:none}
+.results-overview .overview-copy{flex:1;min-width:13rem}
+.results-overview ul{margin:.5rem 0;padding-left:1.2rem}
+.results-overview .overview-score{font-size:2rem;font-weight:800;color:#003b71;margin:.2rem 0}
+.results-overview details{font-size:.9rem}
 [data-report-summary-note] { display: none; }
 [data-report-print-status] { flex: 1 0 100%; font-size: .9rem; }
 html { scroll-behavior: smooth; }

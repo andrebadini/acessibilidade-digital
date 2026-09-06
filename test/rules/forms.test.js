@@ -5,6 +5,13 @@ import { runRules } from '../../src/core/rules/run-rules.js';
 import { FORM_RULES } from '../../src/core/rules/forms.js';
 import { normalizeSnapshot } from '../../src/core/normalize-snapshot.js';
 
+test('a programmatic aria-label is not reported as a missing label association', async () => {
+  const page = snapshot([record('search', 'textarea', {
+    attributes:{'aria-label':'Pesquisar',role:'combobox'}, accessibleName:'Pesquisar'
+  })]);
+  assert.equal((await evaluate('form-label-association', page)).outcome, 'passed');
+});
+
 function record(nodeId, tagName, overrides = {}) {
   return {
     nodeId,

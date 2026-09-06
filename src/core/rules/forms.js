@@ -138,7 +138,8 @@ function formLabelAssociation(snapshot) {
         failures.push(target(field, 'Use um ID único para associar o rótulo a este campo.', {
           reason: 'ambiguous-idref', attribute: 'for'
         }));
-      } else if (referencedLabels.length > 0 || explicitLabelsValid || nestedLabel(field, index)) {
+      } else if (referencedLabels.length > 0 || explicitLabelsValid || nestedLabel(field, index) ||
+          normalizeText(attribute(field, 'aria-label'))) {
         continue;
       } else {
         failures.push(target(field, 'Associe programaticamente um rótulo a este campo.', {

@@ -1,4 +1,5 @@
 import { assertSnapshotV1 } from './snapshot-schema.js';
+import { escapeCssIdentifier } from './evidence/selector.js';
 import {
   backgroundImageKind,
   redactNormalizedNode,
@@ -502,6 +503,46 @@ function normalizeColumnar(raw) {
   for (const ax of Array.isArray(raw.axTree) ? raw.axTree : raw.axTree?.nodes || []) {
     if (Number.isFinite(ax?.backendDOMNodeId) && !axByBackend.has(ax.backendDOMNodeId)) axByBackend.set(ax.backendDOMNodeId, ax);
   }
+  const rootsByDocument = new Map();
+  const childrenByRecord = new Map();
+  for (const record of records) childrenByRecord.set(record, []);
+  for (const record of records) {
+    const parent = byDocumentAndIndex.get(`${record.documentIndex}:${record.parentIndex}`);
+    if (parent) childrenByRecord.get(parent).push(record);
+    else {
+      const roots = rootsByDocument.get(record.documentIndex) || [];
+      roots.push(record);
+      rootsByDocument.set(record.documentIndex, roots);
+    }
+  }
+  // Mirror the runtime collector's structural selector, not its ordinal: Chrome
+  // includes user-agent shadow DOM in DOMSnapshot but not in document.children.
+  const runtimeSelector = record => {
+    if (record.nodeType !== 1) return '';
+    if (record.attributes.id && !SENSITIVE.test(record.attributes.id)) return `#${escapeCssIdentifier(record.attributes.id)}`;
+    const parts = [];
+    let current = record;
+    while (current?.nodeType === 1 && parts.length < 12) {
+      let part = current.tagName;
+      const parent = byDocumentAndIndex.get(`${current.documentIndex}:${current.parentIndex}`);
+      if (parent?.nodeType === 1) {
+        const siblings = childrenByRecord.get(parent).filter(child => child.nodeType === 1 && child.tagName === current.tagName);
+        if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+      }
+      parts.unshift(part);
+      let root = parent;
+      while (root && root.nodeType !== 9 && !root.shadowRootType) {
+        root = byDocumentAndIndex.get(`${root.documentIndex}:${root.parentIndex}`);
+      }
+      if (root?.shadowRootType) {
+        if (root.shadowRootType !== 'open') return '';
+        parts.unshift('::shadow');
+        current = byDocumentAndIndex.get(`${root.documentIndex}:${root.parentIndex}`);
+      } else current = parent;
+    }
+    return parts.join(' > ');
+  };
+  const selectors = new Map(records.map(record => [record, runtimeSelector(record)]));
   const addMulti = (map, key, value) => {
     if (key === '' || key === null || key === undefined) return;
     const values = map.get(key) || [];
@@ -511,7 +552,6 @@ function normalizeColumnar(raw) {
   const runtimeByBackend = new Map();
   const runtimeBySelector = new Map();
   const runtimeByUrlSelector = new Map();
-  const runtimeByUrlOrder = new Map();
   for (const entry of Array.isArray(raw.pageData) ? raw.pageData : []) {
     const result = ownData(entry, 'result');
     const data = result && typeof result === 'object' ? result : entry;
@@ -524,24 +564,19 @@ function normalizeColumnar(raw) {
         addMulti(runtimeBySelector, `${frameId}:${node.selectorHint}`, node);
         if (runtimeUrl) addMulti(runtimeByUrlSelector, `${runtimeUrl}:${node.selectorHint}`, node);
       }
-      if (runtimeUrl && Number.isSafeInteger(node.order) && typeof node.tagName === 'string') {
-        addMulti(runtimeByUrlOrder, `${runtimeUrl}:${node.order}:${node.tagName.toLowerCase()}`, node);
-      }
     }
   }
 
   const recordsByBackend = new Map();
   const recordsBySelector = new Map();
   const recordsByUrlSelector = new Map();
-  const recordsByUrlOrder = new Map();
   for (const record of records) {
     if (Number.isFinite(record.backendNodeId)) addMulti(recordsByBackend, record.backendNodeId, record);
-    const idSelector = record.attributes.id ? `#${record.attributes.id}` : '';
+    const idSelector = selectors.get(record);
     if (idSelector) {
       addMulti(recordsBySelector, `${record.frameId}:${idSelector}`, record);
       addMulti(recordsByUrlSelector, `${record.base}:${idSelector}`, record);
     }
-    if (Number.isSafeInteger(record.elementOrder)) addMulti(recordsByUrlOrder, `${record.base}:${record.elementOrder}:${record.tagName}`, record);
   }
   let ambiguousRuntimeMatch = false;
   const uniqueMatch = (runtimeMap, recordMap, key) => {
@@ -555,18 +590,6 @@ function normalizeColumnar(raw) {
     return null;
   };
 
-  const rootsByDocument = new Map();
-  const childrenByRecord = new Map();
-  for (const record of records) childrenByRecord.set(record, []);
-  for (const record of records) {
-    const parent = byDocumentAndIndex.get(`${record.documentIndex}:${record.parentIndex}`);
-    if (parent) childrenByRecord.get(parent).push(record);
-    else {
-      const roots = rootsByDocument.get(record.documentIndex) || [];
-      roots.push(record);
-      rootsByDocument.set(record.documentIndex, roots);
-    }
-  }
   const documentHost = new Map();
   for (const record of records) if (Number.isInteger(record.childDocumentIndex)) documentHost.set(record.childDocumentIndex, record);
 
@@ -670,11 +693,10 @@ function normalizeColumnar(raw) {
     const host = documentHost.get(record.documentIndex);
     const parent = byDocumentAndIndex.get(`${record.documentIndex}:${record.parentIndex}`);
     const effectiveParent = parent?.nodeType === 9 ? host || null : parent || host || null;
-    const idSelector = record.attributes.id ? `#${record.attributes.id}` : '';
+    const idSelector = selectors.get(record);
     const runtime = uniqueMatch(runtimeByBackend, recordsByBackend, record.backendNodeId) ||
       uniqueMatch(runtimeBySelector, recordsBySelector, idSelector ? `${record.frameId}:${idSelector}` : '') ||
-      uniqueMatch(runtimeByUrlSelector, recordsByUrlSelector, idSelector ? `${record.base}:${idSelector}` : '') ||
-      uniqueMatch(runtimeByUrlOrder, recordsByUrlOrder, Number.isSafeInteger(record.elementOrder) ? `${record.base}:${record.elementOrder}:${record.tagName}` : '') || null;
+      uniqueMatch(runtimeByUrlSelector, recordsByUrlSelector, idSelector ? `${record.base}:${idSelector}` : '') || null;
     const runtimeData = runtime ? copyRuntime(runtime, record.base) : {};
     const editable = editableElement(record.tagName, record.attributes);
     const ax = axByBackend.get(record.backendNodeId);
@@ -698,6 +720,19 @@ function normalizeColumnar(raw) {
       ...(!record.layout.rect && runtimeData.documentRect ? { rect: runtimeData.documentRect } : {}),
       ...runtimeData
     };
+    // Ignored generic containers remain relevant. Only explicit exclusion reasons
+    // prove invisibility, including descendants absent from the AX tree.
+    let ancestor = record;
+    while (ancestor) {
+      const ancestorAx = axByBackend.get(ancestor.backendNodeId);
+      if (ancestor.attributes['aria-hidden'] === 'true' || Object.hasOwn(ancestor.attributes, 'hidden') ||
+          (ancestorAx?.ignored === true && ancestorAx.ignoredReasons?.some(reason =>
+            ['notRendered', 'ariaHiddenElement', 'ariaHiddenSubtree'].includes(reason.name)))) {
+        node.hidden = true;
+        break;
+      }
+      ancestor = parentOfRecord(ancestor);
+    }
     const scope = shadowScope(record);
     if (scope) {
       node.shadowRootId = scope.root.id;
@@ -759,7 +794,7 @@ function normalizeColumnar(raw) {
 
   const primary = documents[0] || {};
   const primaryRoot = (rootsByDocument.get(0) || []).find(record => record.nodeType === 9);
-  const html = primaryRoot ? (childrenByRecord.get(primaryRoot) || []).find(record => record.tagName === 'html') : null;
+  const html = primaryRoot ? (childrenByRecord.get(primaryRoot) || []).find(record => record.nodeType === 1 && record.tagName === 'html') : null;
   const document = {
     nodeId: 'document',
     title: cleanText(stringAt(strings, primary.title)),

@@ -41,6 +41,17 @@ function assertEvidence(target) {
   assert.doesNotThrow(() => JSON.stringify(target));
 }
 
+test('allowed ARIA link/button replacements are evaluated by their exposed purpose, not failed twice', async () => {
+  const page = snapshot([
+    record('action', 'a', {attributes:{href:'#',role:'button'}, accessibleName:'Abrir opções'}),
+    record('destination', 'button', {attributes:{role:'link'}, accessibleName:'Ajuda'})
+  ]);
+  assert.equal((await evaluate('link-semantics', page)).outcome, 'passed');
+  assert.equal((await evaluate('button-semantics', page)).outcome, 'passed');
+  assert.notEqual((await evaluate('link-purpose-in-context', page)).outcome, 'failed');
+  assert.notEqual((await evaluate('button-purpose', page)).outcome, 'failed');
+});
+
 test('interactive rules declare exact ABNT, WCAG and mode metadata', () => {
   const expected = {
     'link-semantics': ['automated', ['5.7.1'], ['1.3.1']],

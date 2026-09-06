@@ -28,6 +28,7 @@ function interactiveResult(snapshot, evaluate) {
 }
 
 function isLink(node) {
+  if (tagOf(node) === 'a' && roleOf(node) === 'button' && node?.interaction !== 'link') return false;
   return !isHidden(node) && (
     (tagOf(node) === 'a' && hasAttribute(node, 'href')) ||
     roleOf(node) === 'link' || node?.interaction === 'link'
@@ -35,6 +36,7 @@ function isLink(node) {
 }
 
 function isButton(node) {
+  if (tagOf(node) === 'button' && roleOf(node) === 'link' && node?.interaction !== 'button') return false;
   const tag = tagOf(node);
   const type = normalizeText(attribute(node, 'type') ?? 'text').toLowerCase();
   return !isHidden(node) && (

@@ -155,7 +155,7 @@ function assistedReview(snapshot, item) {
         })
       ], [item.humanReason]);
     }
-    const targets = Array.isArray(candidates)
+    const targets = Array.isArray(candidates) && candidates.length === 1
       ? candidates.map(node => target(node, `Revise manualmente: ${item.title}.`, { reason: 'human-judgment-required', itemId: item.id }))
       : [documentTarget(document, `Revise a página e o processo quanto a: ${item.title}.`, { reason: 'page-level-human-judgment', itemId: item.id })];
     return result('cantTell', `A verificação de “${item.title}” exige revisão humana.`, targets, [item.humanReason]);

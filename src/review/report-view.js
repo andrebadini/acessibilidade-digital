@@ -1,4 +1,5 @@
 import { createAuditModel } from '../core/report/audit-model.js';
+import { resultsOverviewElement } from '../core/report/results-overview.js';
 import { decodePngDataUrl } from '../core/evidence/png.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS, qualifiedConsumerReference } from '../core/legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../core/normative/nbr17225.js';
@@ -932,7 +933,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
       : 'Cobertura automática: indisponível.'),
     element(document, 'span', ' Mede os testes do motor próprio com conclusão automática (passed, failed ou inapplicable), divididos pelo inventário desse motor nas páginas tentadas; não é nota, certificação ou declaração de conformidade.'),
   );
-  executive.append(coverageSummary);
+  executive.append(resultsOverviewElement(document, view), coverageSummary);
   const metrics = document.createElement('div');
   metrics.setAttribute('class', 'report-metrics');
   metrics.setAttribute('data-report-metrics', '');

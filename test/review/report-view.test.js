@@ -88,6 +88,21 @@ test('downloaded HTML is interactive while the same print projection is script-f
   assert.ok(print.includes(view.modelHash));
 });
 
+test('PDF presents grouped review guidance without repeating the per-occurrence technical dossier', async () => {
+  const {model,summary} = await fixture();
+  const view=buildReportView({model,summary,modelRevision:1,modelHash:model.integrity.canonicalModelHash});
+  const html=renderHtmlReport(model,{reportView:view});
+  const print=renderHtmlReport(model,{reportView:view,forPrint:true});
+  assert.match(html,/data-report-occurrence-technical=/u);
+  assert.doesNotMatch(print,/data-report-occurrence-technical=/u);
+  assert.match(print,/PDF de leitura/u);
+  assert.match(html,/data-results-overview/u);
+  assert.match(print,/data-automatic-score/u);
+  const root=renderReportView({view,document:new Document(),onExport(){}});
+  assert.ok(root.querySelector('[data-results-overview]'));
+  assert.equal((print.match(/data-report-issue /gu)??[]).length,(html.match(/data-report-issue /gu)??[]).length);
+});
+
 test('report uses proportional result bars and collapses the full matrix without losing rows', async () => {
   const { model, summary } = await fixture();
   const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
@@ -890,7 +905,7 @@ test('live report puts the decision summary before compact navigation and expose
     if (child.getAttribute('data-report-executive-actions') !== null) return 'actions';
     if (child.getAttribute('data-report-limitations') !== null) return 'limitations';
     return child.tagName.toLowerCase();
-  }), ['h2', 'outcome', 'coverage', 'metrics', 'actions', 'limitations']);
+  }), ['h2', 'outcome', 'section', 'coverage', 'metrics', 'actions', 'limitations']);
   assert.equal(root.querySelectorAll('button[data-report-export]').length, 1);
   assert.equal(firstSection.querySelector('[data-report-executive-actions]').querySelectorAll('button[data-report-export]').length, 1);
   root.querySelector('button[data-report-export]').click();

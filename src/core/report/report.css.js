@@ -1,4 +1,6 @@
-export const REPORT_CSS = `
+import { RESULTS_OVERVIEW_CSS } from './results-overview.js';
+
+export const REPORT_CSS = `${RESULTS_OVERVIEW_CSS}
 :root{color-scheme:light;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.55;color:#14212b;background:#fff;--ink:#14212b;--surface:#fff;--navy:#003b71;--blue:#005a9c;--focus:#8b2f00;--muted:#738596;--pale:#eef4f8;--danger:#8b1e1e;--review:#6b4e00}
 *{box-sizing:border-box}
 [data-report-summary-note]{display:none}
@@ -180,7 +182,14 @@ th{background:#eef4f8;color:#14212b}
   .report-view-document[data-print-layout="summary"] th,.report-view-document[data-print-layout="summary"] td{padding:.3rem}
   .report-view-document[data-print-layout="summary"] tr{break-inside:avoid}
   .report-view-document[data-print-layout="summary"] th:first-child{white-space:nowrap;width:5.5rem}
-  html.report-view-document{font-size:10.5pt;line-height:1.35}
+  .report-view-document{font-size:10.5pt;line-height:1.35}
+  .report-view-document [data-report-item-group]{padding:.3rem;margin-block:.35rem}
+  .report-view-document [data-report-item-reference]{display:none}
+  .report-view-document .print-checklist-row{padding:.25rem .4rem;border:0;border-inline-start:3px solid #6b4e00;margin:.2rem 0;break-inside:avoid}
+  .report-view-document .print-checklist-row h3{font-size:11pt;margin:.15rem 0}
+  .report-view-document .print-checklist-row [data-report-issue-heading]{border:0;padding:0;margin:0}
+  .report-view-document .print-checklist-row [data-report-issue-heading] p{border:0;padding:0;font-size:9pt;margin:.15rem 0}
+  .report-view-document .print-checklist-row>p{margin:.2rem 0}
   .report-view-document details{break-inside:auto}
   .report-view-document [data-report-issue-heading]{break-inside:avoid;break-after:auto}
   .report-view-document .issue-plain-block{padding:.35rem .5rem;margin-top:.4rem}
@@ -195,4 +204,4 @@ th{background:#eef4f8;color:#14212b}
 `;
 
 // Updated by the CSP integrity test whenever the static stylesheet changes.
-export const REPORT_CSS_CSP_HASH = 'sha256-qFxBGZITcyLGA/PcJm7efs5ScMtVM93yFQYeZYoopFA=';
+export const REPORT_CSS_CSP_HASH = 'sha256-23LTYU1GQZKM0oQ881frq0NAdgsFyUvAdM1mGZHgoNY=';

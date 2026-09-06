@@ -619,19 +619,74 @@ test('strictly redacts contenteditable root and descendant attributes while pres
   assert.deepEqual(first, second);
 });
 
-test('associates runtime data by sanitized document URL when Chrome and CDP frame IDs differ', () => {
+test('associates runtime data by unique selector when Chrome and CDP frame IDs differ', () => {
   const raw = columnarRaw();
   raw.pageData = [{
     frameId: 0,
     result: {
       url: 'https://example.test/page?view=public',
-      nodes: [{ order: 5, tagName: 'button', visibleText: 'Enviar por runtime', focusable: true, hidden: true }]
+      nodes: [{ order: 5, tagName: 'button', selectorHint: '#send', visibleText: 'Enviar por runtime', focusable: true, hidden: true }]
     }
   }];
   const button = normalizeSnapshot(raw).nodes.find(node => node.backendNodeId === 8);
   assert.equal(button.visibleText, 'Enviar por runtime');
   assert.equal(button.focusable, true);
   assert.equal(button.hidden, true);
+});
+
+test('DOCTYPE html cannot hide the language declared by the actual HTML element', () => {
+  const raw = {domSnapshot:{strings:['#document','html','HTML','lang','pt-BR','https://example.test/'],
+    documents:[{documentURL:5, nodes:{
+      nodeType:[9,10,1], nodeName:[0,1,2], parentIndex:[-1,0,0],
+      nodeValue:[-1,-1,-1], backendNodeId:[1,2,3], attributes:[[],[],[3,4]]
+    }}]}};
+  assert.equal(normalizeSnapshot(raw).document.language, 'pt-BR');
+});
+
+test('structural paths recover runtime data despite shifted element ordinals', () => {
+  const raw = columnarRaw();
+  raw.domSnapshot.documents[0].nodes.attributes[7] = [];
+  raw.pageData = [{frameId:0,result:{url:'https://example.test/page?view=public', nodes:[
+    {order:500,tagName:'button',selectorHint:'html > body > button',visibleText:'Enviar',hidden:true}
+  ]}}];
+  assert.equal(normalizeSnapshot(raw).nodes.find(node => node.backendNodeId === 8).hidden, true);
+});
+
+test('nested open shadow controls retain observations using the collector host-jump path', () => {
+  const raw = columnarRaw();
+  const nodes = raw.domSnapshot.documents[0].nodes;
+  // Reuse the shadow action text node as an enclosing section for the action.
+  const section = raw.domSnapshot.strings.push('SECTION') - 1;
+  nodes.nodeType[8] = 1;
+  nodes.nodeName[8] = section;
+  nodes.nodeValue[8] = -1;
+  nodes.parentIndex[8] = 11;
+  nodes.parentIndex[12] = 8;
+  raw.pageData = [{frameId:0,result:{url:'https://example.test/page?view=public',nodes:[
+    {order:500,tagName:'button',selectorHint:'html > body > div > ::shadow > button',focusable:true}
+  ]}}];
+  assert.equal(normalizeSnapshot(raw).nodes.find(node => node.backendNodeId === 18).focusable, true);
+});
+
+test('a matching ordinal and tag cannot transfer another element label or visibility', () => {
+  const raw = columnarRaw();
+  raw.pageData = [{frameId:0,result:{url:'https://example.test/page?view=public',nodes:[
+    {order:5, tagName:'button', selectorHint:'#another-button', visibleText:'WRONG LABEL', hidden:true}
+  ]}}];
+  const button = normalizeSnapshot(raw).nodes.find(node => node.backendNodeId === 8);
+  assert.equal(button.visibleText, 'Enviar');
+  assert.equal(button.hidden, false);
+});
+
+test('AX notRendered excludes hidden controls but uninteresting does not hide visible containers', () => {
+  const raw = columnarRaw();
+  raw.axTree.nodes.push({backendDOMNodeId:4,ignored:true,ignoredReasons:[{name:'uninteresting'}]});
+  raw.axTree.nodes[0].ignored = true;
+  raw.axTree.nodes[0].ignoredReasons = [{name:'notRendered'}];
+  raw.pageData[0].result.nodes[0].hidden = false;
+  const snapshot = normalizeSnapshot(raw);
+  assert.equal(snapshot.nodes.find(node => node.backendNodeId === 8).hidden, true);
+  assert.equal(snapshot.nodes.find(node => node.backendNodeId === 4).hidden, false);
 });
 
 test('keeps DOMSnapshot document bounds and only retains runtime viewport/document rects as distinct coordinates', () => {
@@ -651,8 +706,8 @@ test('does not associate ambiguous runtime fallbacks across same-URL frames', ()
   raw.domSnapshot.documents[1].documentURL = mainUrlIndex;
   raw.domSnapshot.documents[1].nodes.nodeName[3] = h1Index;
   raw.pageData = [
-    { frameId: 0, result: { url: 'https://example.test/page?view=public', nodes: [{ order: 2, tagName: 'h1', visibleText: 'WRONG_A', focusable: true }] } },
-    { frameId: 1, result: { url: 'https://example.test/page?view=public', nodes: [{ order: 2, tagName: 'h1', visibleText: 'WRONG_B', focusable: true }] } }
+    { frameId: 0, result: { url: 'https://example.test/page?view=public', nodes: [{ selectorHint: '#title', tagName: 'h1', visibleText: 'WRONG_A', focusable: true }] } },
+    { frameId: 1, result: { url: 'https://example.test/page?view=public', nodes: [{ selectorHint: '#title', tagName: 'h1', visibleText: 'WRONG_B', focusable: true }] } }
   ];
   raw.coverage = {
     runtime: { outcome: 'partial', expectedFrameCount: 2, observedFrameCount: 2 },

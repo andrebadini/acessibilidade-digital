@@ -51,14 +51,15 @@ test('manual candidate selection includes interactive non-focusable elements and
   assert.deepEqual(outside.targets.map(target => target.nodeId), ['outside']);
 });
 
-test('manual review preserves all 300 candidates in snapshot order', async () => {
+test('a generic review question is one page task, not 300 alleged element problems', async () => {
   const nodes = Array.from({ length: 300 }, (_, index) => record(`control-${index + 1}`, 'div', {
     interaction: 'button', focusable: false
   }));
   const value = await evaluate('focusable-elements-interactive', snapshot(nodes));
   assert.equal(value.outcome, 'cantTell');
-  assert.equal(value.targets.length, 300);
-  assert.deepEqual(value.targets.map(target => target.nodeId), nodes.map(node => node.nodeId));
+  assert.equal(value.targets.length, 1);
+  assert.equal(value.targets[0].nodeId, 'document');
+  assert.equal(value.targets[0].data.reason, 'page-level-human-judgment');
 });
 
 test('transversal assisted review uses page evidence when target collection is insufficient', async () => {
