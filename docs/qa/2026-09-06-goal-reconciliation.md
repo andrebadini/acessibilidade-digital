@@ -1,5 +1,15 @@
 # Reconciliação da meta com o produto entregue
 
+## Fechamento vigente — beta 1.1.7 entregue
+
+O registro histórico abaixo foi superado pela entrega `103107b`, documentada em `2026-09-06-beta117-release.md`. Foram tratados os três itens de “O que realmente falta”: preparação de personas, pacote verificado e os exemplos concretos de instruções genéricas, estes junto a sete perfis específicos. Percurso de painel, sinais, relatório, evidências, exportações e demais funções adiadas implementado e aceito em Chrome. Revisões finais: integração C=0/I=0/M=0; produto C=0/I=0/M=1 de paginação, não bloqueante.
+
+O ZIP 1.1.7 e seus 194 arquivos foram conferidos contra o SHA testado e entregues. Logs distinguem as falhas de expectativas de versão e preparação do ambiente das correções focadas; nenhuma execução inicial foi reclassificada como verde. As funções e limites da matriz abaixo permanecem válidos, mas seus estados temporais de candidatura/pendência não são o estado atual.
+
+Não há funcionalidade inteira pendente demonstrada no percurso solicitado. A meta pode ser encerrada pela definição de beta utilizável aprovada pelo usuário, mantendo os refinamentos em `docs/BETA-BACKLOG.md`. Aprofundar outros guias não deve reabrir o fluxo aprovado; a entrega não declara automação integral ou 146 procedimentos didáticos individualmente exaustivos. Preservar o aviso sobre registros antigos da 1.1.2: a prevenção foi entregue, mas não há recuperação automática de dados já afetados.
+
+## Registro histórico da reconciliação inicial
+
 Estado examinado: `2774ab3`, candidata 1.1.6; pacote anterior entregue: 1.1.5 (`9a27833`). Esta matriz substitui a leitura dos checklists históricos como se todos os quadrados vazios fossem funcionalidades ausentes. Não reclassifica testes antigos como executados hoje nem altera o escopo solicitado.
 
 **Fechamento posterior:** candidata corrigida `a41ddc1`, beta 1.1.6 entregue. Os itens 1–2 de “O que realmente falta” abaixo foram tratados por diagnóstico/RED/correção focada, E2E posterior e conferência/entrega do pacote. A execução ampla original continua 37/38; ver `2026-09-06-persona-bootstrap-readiness.md` e `2026-09-06-beta116-release.md`. O item 3, aprofundamento didático, permanece em andamento; o restante do texto preserva o ponto da reconciliação inicial.

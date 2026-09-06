@@ -6,11 +6,13 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 - A beta 1.1.2 pode persistir uma decisão humana com hash do modelo pendente e tornar esse relatório ilegível. A correção preventiva foi implementada após essa beta, com verificação do novo hash antes do commit atômico e exportação real da revisão. Registros já afetados **não são recuperados automaticamente**; preservar dados e arquivos previamente exportados. Recuperação exige uma base verificável, não a assinatura silenciosa de conteúdo antigo. Registro: `docs/qa/2026-09-06-live-review-refresh.md`.
 
-## Próximas entregas funcionais
+## Entrega atual e histórico funcional
+
+**Beta 1.1.7 entregue:** inclui os sete guias práticos 5.1.7–5.1.9 e 5.12.1–5.12.4, conferidos em Chrome, HTML e PDF. Percurso principal, relatório, sinais ABNT, personas, URL e lote aceitos; integração C=0/I=0 e produto C=0/I=0, com M1 de paginação registrado abaixo. Os incidentes de configuração dos gates e as correções focadas permanecem transparentes em `docs/qa/2026-09-06-beta117-release.md`. Não há nova funcionalidade inteira pendente demonstrada na reconciliação atual; os refinamentos listados não bloqueiam esta beta.
 
 Reconciliação com fontes e testes atuais: `docs/qa/2026-09-06-goal-reconciliation.md`. Não usar checklists históricos vazios como prova de funcionalidade ausente. **Beta 1.1.6 entregue** após correção reproduzível da disponibilidade inicial de personas, testes focados, percurso nativo corrigido e duas revisões C=0/I=0. A execução ampla original com 37/38 nativos continua registrada, sem ser reclassificada como verde. Registro final: `docs/qa/2026-09-06-beta116-release.md`.
 
-- orientação didática **implementada depois da beta 1.1.6** para **5.1.7–5.1.9 (conteúdo adicional)** e **5.12.1–5.12.4 (espaçamento de texto)**. Resolve os dois exemplos concretos identificados na revisão (5.1.9 e 5.12.2), com procedimentos, proporções, exemplos, exceções e apoio técnico quando necessário. 222 testes focados aprovados; revisão independente C=0/I=0/M=0. Ainda não incluída no ZIP 1.1.6; registro `docs/qa/2026-09-06-spacing-hover-guidance.md`. Os demais fallbacks por família podem ser aprofundados incrementalmente; não declarar que todos os 146 itens têm instrução individual completa.
+- orientação didática **entregue na beta 1.1.7**, depois da beta 1.1.6, para **5.1.7–5.1.9 (conteúdo adicional)** e **5.12.1–5.12.4 (espaçamento de texto)**. Resolve os dois exemplos concretos identificados na revisão (5.1.9 e 5.12.2), com procedimentos, proporções, exemplos, exceções e apoio técnico quando necessário. 222 testes focados aprovados; revisão independente C=0/I=0/M=0. Não incluída no ZIP antigo 1.1.6; registro `docs/qa/2026-09-06-spacing-hover-guidance.md`. Os demais fallbacks por família podem ser aprofundados incrementalmente; não declarar que todos os 146 itens têm instrução individual completa.
 
 **Atualização 1.1.5:** os horários individuais e as orientações 5.13.6–5.13.8 descritos abaixo foram entregues após o gate de 3.977 testes lógicos, 38 nativos, verificação estática, QA visual/PDF e duas revisões independentes. As menções “fora do ZIP 1.1.4” permanecem corretas para aquele pacote, não indicam pendência na 1.1.5. Registro: `docs/qa/2026-09-06-beta115-release.md`.
 
@@ -29,6 +31,8 @@ Reconciliação com fontes e testes atuais: `docs/qa/2026-09-06-goal-reconciliat
 - atualizar as imagens e o texto de eventual canal público de distribuição após estabilização da beta.
 
 ## Refinamentos visuais não bloqueantes
+
+- impressão completa da candidata 1.1.7: no PDF público, página 130, a última linha do horário de recebimento encosta no limite inferior da área impressa e o final “não certificado” parece parcialmente aparado; a página 131 continua a ficha em “URL da mídia”. O horário numérico permanece legível, o aviso é mantido em outros blocos e o texto extraído/JSON está íntegro. Revisor classificou C=0/I=0/M=1: melhorar paginação para evitar divisão de linha sem reabrir os guias ou bloquear a beta. Artefatos e hash: `docs/qa/2026-09-06-beta117-release.md`.
 
 - comparação 5.13.7: quando houver vários pares de texto visível/nome acessível na ficha, acrescentar um identificador visível ou link à respectiva evidência para localizar a captura mais rapidamente. Os pares já permanecem associados ao mesmo artefato; não há mistura de valores entre elementos.
 

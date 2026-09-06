@@ -4,6 +4,8 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação da beta
 
+A versão atual é **1.1.7**: confira o [guia de instalação e teste](docs/COMO-TESTAR-BETA-1.1.7.md) e o [registro de verificação](docs/qa/2026-09-06-beta117-release.md). O fluxo de conferência usa sinais clicáveis na página e grupos ABNT no painel; as novas instruções explicam dicas temporárias e espaçamentos de texto com exemplos. A revisão automática continua sem certificar conformidade integral.
+
 1. Descompacte o arquivo da beta em uma pasta própria. Se estiver usando o código-fonte, use esta pasta do projeto.
 2. Abra `chrome://extensions` no Chrome.
 3. Ative o **Modo do desenvolvedor**.
