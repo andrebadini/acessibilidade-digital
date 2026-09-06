@@ -544,6 +544,40 @@ const deletionRequest = (auditId, now = T30) => ({
   auditId, reason: 'retention-expired', now, expectedRevision: null, terminalReceipt: null,
 });
 
+test('manual deletion inventory snapshots canonical retained audit revisions without exposing models', async t => {
+  for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
+    const store = context.open();
+    for (const auditId of ['inventory-b', 'inventory-a', 'inventory-orphan']) {
+      await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0 });
+    }
+    await context.removeAuditModel('inventory-orphan');
+    const captured = await store.listAuditDeletionCandidatesV1();
+    assert.deepEqual(captured, [{ auditId: 'inventory-a', expectedRevision: 1 },
+      { auditId: 'inventory-b', expectedRevision: 1 }]);
+    await store.commitAudit('inventory-later', auditFixture('inventory-later'), { auditId: 'inventory-later' }, { now: T0 });
+    assert.equal(captured.length, 2);
+    assert.ok(Object.isFrozen(captured));
+    assert.ok(captured.every(Object.isFrozen));
+    assert.equal((await store.listAuditDeletionCandidatesV1()).length, 3);
+  });
+});
+
+test('manual inventory ignores malformed retained models and unrelated private records', async t => {
+  const metadata = auditId => ({ schemaVersion: 1, auditId, firstPersistedAt: T0, expiresAt: T30, deleteAfterCompleteExport: false });
+  const fake = createFakeIndexedDb({ version: 3, initialStores: {
+    audits: [['malformed-inventory', { auditId: 'malformed-inventory' }], ['unrelated-state', { secret: 'preserve' }]],
+    'audit-retention': [['malformed-inventory', metadata('malformed-inventory')]],
+    'audit-deletion-tombstones': [],
+  } });
+  const raw = new Map([['malformed-inventory', { auditId: 'malformed-inventory' }], ['unrelated-state', { secret: 'preserve' }]]);
+  for (const [name, store] of [['memory', createInMemoryAuditStore(raw)],
+    ['IndexedDB', createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange })]]) await t.test(name, async () => {
+    assert.deepEqual(await store.listAuditDeletionCandidatesV1(), []);
+  });
+  assert.deepEqual(raw.get('unrelated-state'), { secret: 'preserve' });
+  assert.deepEqual(fake.inspectStore('audits').get('unrelated-state'), { secret: 'preserve' });
+});
+
 test('expiration selection reports the absolute next deadline without extending retention', async t => {
   for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
     const store = context.open();

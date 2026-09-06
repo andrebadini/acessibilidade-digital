@@ -13,7 +13,6 @@ import { applyReviewDecisions, createReviewDecision } from '../core/review/decis
 import { createAuditModel } from '../core/report/audit-model.js';
 import { createPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
 import {
-  AuditDeleteBusyError,
   createAuditStore,
   readPrivatePixelAttemptCommitV1,
   removePrivatePixelAttemptCommitV1,
@@ -992,10 +991,8 @@ export function createPublishingHighlightController(raw) {
 
 export function createReportOperations({
   chromeApi, auditStore, sessionArea, modelNow, highlightController, highlightBindingStore,
-  publishHighlightState, disconnectPanelAudit,
+  publishHighlightState, requestAuditDeletion,
 }) {
-  const checkpoints = createCheckpointAdapters(sessionArea);
-  const now = () => canonicalModelTime(modelNow);
 
   async function clearHighlightAudit(auditId, reason) {
     const cleared = await highlightController.clearAudit(auditId, reason);
@@ -1057,53 +1054,57 @@ export function createReportOperations({
     return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
   }
 
-  async function deleteAudit({ auditId }) {
+  async function deleteCandidate({ auditId, expectedRevision }, manualAuthorization) {
     try {
       const active = await readActiveAuditJobForWorker({ sessionArea });
       if (active?.auditId === auditId) return Object.freeze({ ok: false, code: 'AUDIT_DELETE_BUSY' });
-      const snapshot = await auditStore.getAuditSnapshot(auditId);
-      if (snapshot?.model?.auditId !== auditId || !snapshot.capability) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
-      if (!await clearHighlightAudit(auditId, 'delete-audit')) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
-      if (typeof disconnectPanelAudit !== 'function' || !await disconnectPanelAudit(auditId)) {
-        return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
+      const result = await requestAuditDeletion({ auditId, reason: 'manual', expectedRevision,
+        terminalReceipt: null, manualAuthorization });
+      if (result?.status === 'denied') return Object.freeze({ ok: false, code: 'AUDIT_DELETION_DENIED' });
+      if (result?.auditId !== auditId || !['complete', 'pending'].includes(result?.status)) {
+        throw new Error('REPORT_OPERATION_FAILED');
       }
-      await checkpoints.removeCheckpoint({ auditId, sessionCapabilityId: null, windowId: null });
-      const result = await auditStore.deleteAudit(auditId, snapshot.capability, { now: now() });
-      if (result?.deleted !== true) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
-      await sendRuntimeMessage(chromeApi, createAuditDeletedEvent({ auditId, reason: 'delete-one' })).catch(() => {});
-      return freeze({ ok: true, auditId, deleted: true });
-    } catch (error) {
-      return error instanceof AuditDeleteBusyError || own(error, 'code') === 'AUDIT_DELETE_BUSY'
-        ? Object.freeze({ ok: false, code: 'AUDIT_DELETE_BUSY' })
-        : Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
+      if (result.status === 'complete') {
+        await sendRuntimeMessage(chromeApi, createAuditDeletedEvent({ auditId, reason: 'delete-one' })).catch(() => {});
+      }
+      return freeze({ ok: true, auditId, deleted: true, status: result.status });
+    } catch {
+      // Staging may have committed before an unavailable cleaner/journal reported failure.
+      try {
+        const snapshot = await auditStore.getAuditSnapshot(auditId);
+        if (snapshot?.model === undefined && snapshot?.revision === 0) {
+          return freeze({ ok: true, auditId, deleted: true, status: 'pending' });
+        }
+        return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED', preserved: true });
+      } catch { return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED', preserved: false }); }
     }
   }
 
-  async function deleteAllAudits() {
+  async function deleteAudit({ auditId, manualAuthorization }) {
+    try {
+      const snapshot = await auditStore.getAuditSnapshot(auditId);
+      if (snapshot?.model?.auditId !== auditId || !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 1) {
+        return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' });
+      }
+      return deleteCandidate({ auditId, expectedRevision: snapshot.revision }, manualAuthorization);
+    } catch { return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' }); }
+  }
+
+  async function deleteAllAudits({ manualAuthorization }) {
     try {
       if (await readActiveAuditJobForWorker({ sessionArea }) !== null) return Object.freeze({ ok: false, code: 'AUDIT_DELETE_BUSY' });
-      const highlightSnapshot = await highlightBindingStore.snapshot();
-      const highlightAuditIds = new Set([
-        ...Object.values(highlightSnapshot.bindingsByAuditPage ?? {}).map(value => value?.auditId),
-        ...Object.values(highlightSnapshot.activeOverlayByTab ?? {}).map(value => value?.auditId),
-      ].filter(value => typeof value === 'string'));
-      for (const auditId of highlightAuditIds) {
-        if (!await clearHighlightAudit(auditId, 'delete-all')) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
+      const candidates = await auditStore.listAuditDeletionCandidatesV1();
+      let deleted = 0; let pending = 0; let preserved = 0; let unconfirmed = 0;
+      for (const candidate of candidates) {
+        const result = await deleteCandidate(candidate, manualAuthorization);
+        if (result.ok) { deleted++; if (result.status === 'pending') pending++; }
+        else if (result.preserved === false) unconfirmed++;
+        else preserved++;
       }
-      const confirmedHighlights = await highlightBindingStore.snapshot();
-      if (Object.keys(confirmedHighlights.bindingsByAuditPage ?? {}).length > 0 ||
-        Object.keys(confirmedHighlights.activeOverlayByTab ?? {}).length > 0) {
-        return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
-      }
-      const result = await auditStore.deleteAllAudits({ now: now() });
-      if (!Number.isSafeInteger(result?.deleted) || result.deleted < 0) throw new Error('denied');
-      await sendRuntimeMessage(chromeApi, createAuditDeletedEvent({ scope: 'all', reason: 'delete-all' })).catch(() => {});
-      return freeze({ ok: true, deleted: result.deleted });
-    } catch (error) {
-      return error instanceof AuditDeleteBusyError || own(error, 'code') === 'AUDIT_DELETE_BUSY'
-        ? Object.freeze({ ok: false, code: 'AUDIT_DELETE_BUSY' })
-        : Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
-    }
+      if (preserved || unconfirmed) return freeze({ ok: false, code: 'AUDIT_DELETE_PARTIAL', deleted, pending, preserved,
+        ...(unconfirmed ? { unconfirmed } : {}) });
+      return freeze({ ok: true, deleted, pending, status: pending ? 'pending' : 'complete' });
+    } catch { return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' }); }
   }
 
   return freeze({
@@ -1650,7 +1651,12 @@ async function buildDefaultRuntime(chromeApi, options) {
   const reportOperations = createReportOperations({
     chromeApi, auditStore, sessionArea, modelNow, highlightController, highlightBindingStore,
     publishHighlightState,
-    disconnectPanelAudit: auditId => disconnectPanelAuditSessions({ auditId, sessionArea, panelCoordinator }),
+    async requestAuditDeletion(request) {
+      try { return await deletionCoordinator.request(request); }
+      finally {
+        if (retentionScheduler) void retentionScheduler.scheduleNext().catch(() => {});
+      }
+    },
   });
   const router = createSidePanelIntentRouter({
     chromeApi, authority, auditStarter, chromeAdapter,

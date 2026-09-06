@@ -253,7 +253,12 @@ const deleteAuditController = createDestructiveDialog({
       type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: reportSessionCapabilityId,
       auditId: auditModel.auditId,
     });
-    if (response.ok === true) renderDeletedAudit();
+    if (response.ok === true) {
+      renderDeletedAudit();
+      if (response.status === 'pending') deleteAuditController.completeSuccess(
+        'Os dados da auditoria já não estão disponíveis localmente. A limpeza de recursos permanece pendente e será retomada automaticamente. Os arquivos já baixados foram preservados.',
+      );
+    }
     return response;
   },
   successMessage: 'Auditoria local excluída. Downloads já salvos foram preservados.',

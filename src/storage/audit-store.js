@@ -418,6 +418,16 @@ function deniedDeletion() {
   return Object.freeze({ status: 'denied', code: 'AUDIT_DELETION_DENIED' });
 }
 
+function manualDeletionCandidate(auditId, model, revisionValue) {
+  try {
+    canonicalAuditId(auditId);
+    const revision = storedRevision(revisionValue);
+    const audit = materializeCanonicalAuditModel(auditId, model, { allowMissing: true });
+    if (!audit || revision < 1) return null;
+    return Object.freeze({ auditId, expectedRevision: revision });
+  } catch { return null; }
+}
+
 function exactTerminalOptions(value) {
   const options = exactDataRecord(value, ['now', 'deleteAfterCompleteExport']) ??
     exactDataRecord(value, ['now', 'deleteAfterCompleteExport', 'pixelAttemptCommit']);
@@ -1568,6 +1578,10 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
   };
   const api = {
     async setAudit(id, model, options) { return writeAudit(id, model, undefined, undefined, options); },
+    async listAuditDeletionCandidatesV1() {
+      return Object.freeze([...retention.keys()].sort().map(auditId =>
+        manualDeletionCandidate(auditId, initial.get(auditId), initial.get(revisionKey(auditId)))).filter(Boolean));
+    },
     async getAudit(id) { return snapshot(id).model; },
     async getAuditSnapshot(id) { return snapshot(id); },
     commitAuditWithCheckpointIfAbsent,
@@ -1815,6 +1829,7 @@ function createUnavailableAuditStore() {
     nextExpiresAtV1: unavailable,
     stageExpiredAuditDeletionsV1: unavailable,
     stageAuditDeletionV1: unavailable,
+    listAuditDeletionCandidatesV1: unavailable,
     listDeletionTombstonesV1: unavailable,
     recordDeletionCleanupFailureV1: unavailable,
     completeAuditDeletionV1: unavailable,
@@ -3394,6 +3409,25 @@ export function createAuditStore(options = {}) {
   };
   const api = {
     setAudit(id, model, options) { return mutateAudit(id, model, undefined, undefined, options); },
+    async listAuditDeletionCandidatesV1() {
+      return deletionTransaction([STORE_NAME, RETENTION_STORE_NAME], 'readonly', context => {
+        const audits = context.store(STORE_NAME);
+        context.read(context.store(RETENTION_STORE_NAME).getAllKeys(), keys => {
+          const candidates = [];
+          const sorted = keys.filter(key => typeof key === 'string').sort();
+          const next = index => {
+            if (index === sorted.length) { context.setResult(Object.freeze(candidates)); return; }
+            const auditId = sorted[index];
+            context.read(audits.get(auditId), model => context.read(audits.get(revisionKey(auditId)), revision => {
+              const candidate = manualDeletionCandidate(auditId, model, revision);
+              if (candidate) candidates.push(candidate);
+              next(index + 1);
+            }));
+          };
+          next(0);
+        });
+      });
+    },
     async getAudit(id) {
       const key = validId(id);
       return materializeCanonicalAuditModel(key, await get(key), { allowMissing: true });

@@ -1253,7 +1253,7 @@ test('routes report and export envelopes through the single launch authorities w
       return { ok: true, auditId: value.auditId, occurrenceId: value.occurrenceId, modelRevision: 4, modelHash: 'a'.repeat(64) };
     },
     async deleteAudit(value) { calls.push(['delete-audit', value]); return { ok: true, auditId: value.auditId, deleted: true }; },
-    async deleteAllAudits() { calls.push(['delete-all']); return { ok: true, deleted: 2 }; },
+    async deleteAllAudits(value) { calls.push(['delete-all', value]); return { ok: true, deleted: 2 }; },
   };
   const exportLaunch = {
     async requestExport(value) { calls.push(['request-export', value]); return { ok: true, auditId: value.auditId, attemptId: '1', state: 'awaiting-connection' }; },
@@ -1279,7 +1279,9 @@ test('routes report and export envelopes through the single launch authorities w
     assert.equal(calls.at(-1)[0], expectedCall);
     if (expectedCall === 'delete-all') {
       assert.equal(calls.at(-2)[0], 'authorize-report');
-      assert.equal(calls.at(-1).length, 1);
+      assert.deepEqual(calls.at(-1)[1], { manualAuthorization: {
+        version: 1, scope: 'all', auditId: null, authorizedAt: '2026-08-29T12:00:00.000Z',
+      } });
       continue;
     }
     assert.deepEqual(Object.keys(calls.at(-1)[1]).sort(), expectedCall === 'export-complete'
@@ -1287,7 +1289,7 @@ test('routes report and export envelopes through the single launch authorities w
       : expectedCall === 'review-commit'
         ? ['answer', 'auditId', 'decidedAt', 'evaluator', 'itemId', 'mode', 'note', 'occurrenceId']
         : expectedCall === 'delete-audit'
-          ? ['auditId']
+          ? ['auditId', 'manualAuthorization']
       : expectedCall === 'request-export'
         ? ['auditId', 'sender', 'sessionCapabilityId']
         : expectedCall === 'return-source'
@@ -1297,6 +1299,9 @@ test('routes report and export envelopes through the single launch authorities w
           : ['auditId', 'sender']);
   }
   const openCall = calls.find(([name]) => name === 'open');
+  assert.deepEqual(calls.find(([name]) => name === 'delete-audit')[1].manualAuthorization, {
+    version: 1, scope: 'one', auditId: 'audit-1', authorizedAt: '2026-08-29T12:00:00.000Z',
+  });
   assert.deepEqual(openCall[1], {
     auditId: 'audit-1', windowId: 9,
     sourceSessionCapabilityId: SESSION, sourceSessionState: 'result',

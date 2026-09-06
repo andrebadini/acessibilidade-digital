@@ -17,6 +17,7 @@ import { PIXEL_CONSENT_ALARM_NAME } from '../../src/background/pixel-consent-exp
 import { RETENTION_ALARM_NAME, registerRetentionSchedulerV1 } from '../../src/background/retention-scheduler.js';
 import * as serviceWorkerModule from '../../src/background/service-worker.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
+import { createAuditDeletionCoordinatorV1 } from '../../src/background/audit-deletion-coordinator.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
 import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-commit-clock.js';
 import { createPixelCaptureStateV1 } from '../../src/background/pixel-capture-consent.js';
@@ -98,6 +99,160 @@ async function retainAudit(store, auditId, now = '2026-08-01T00:00:00.000Z') {
 async function settleRetention() {
   for (let index = 0; index < 30; index += 1) await tick();
 }
+
+async function manualOperationsFixture() {
+  const store = createInMemoryAuditStore(); const sent = []; const requests = []; const session = {};
+  const controls = { pending: false, beforeDelete: null, failPendingJournal: false };
+  for (const auditId of ['manual-a', 'manual-b']) await retainAudit(store, auditId, RETENTION_NOW);
+  const coordinator = createAuditDeletionCoordinatorV1({ store: { ...store,
+    async recordDeletionCleanupFailureV1(input) {
+      if (controls.failPendingJournal) throw new Error('journal unavailable');
+      return store.recordDeletionCleanupFailureV1(input);
+    },
+  },
+    authority: { async clearAudit() { return { ok: true, invalidated: 0 }; }, async finalizeAudit() { return { ok: true, purged: 0 }; } },
+    panelPortRegistry: { async clearAudit() { return true; } }, reportPortRegistry: { async clearAudit() { return 0; } },
+    highlightController: { async clearAudit() { return { ok: true, state: 'clear' }; } },
+    highlightBindingStore: { async deleteAudit() { return false; } },
+    reportLaunch: { async clearAudit() { return true; } }, exportLaunch: { async clearAudit() { return true; } },
+    rawNavigationVault: { async clearAudit() { return 0; } },
+    pixelCaptureState: { async readSuspension() { return null; }, async revokeAudit() { throw new Error('unexpected pixel'); }, async finish() { return true; } },
+    ownedDisposableTabStore: { async clearAudit() { return 0; }, async purgeRemovedAudit() { return 0; } },
+    blobRegistry: { async clearAudit() { if (controls.pending) throw new Error('cleanup pending'); return 0; } },
+    now: () => RETENTION_NOW,
+  });
+  const operations = serviceWorkerModule.createReportOperations({
+    chromeApi: { runtime: { sendMessage(message, callback) { sent.push(message); callback?.(); } } },
+    auditStore: { ...store, async deleteAudit() { throw new Error('legacy delete must not run'); },
+      async deleteAllAudits() { throw new Error('legacy delete-all must not run'); } },
+    sessionArea: { async get(key) { return key === null ? structuredClone(session) :
+      Object.hasOwn(session, key) ? { [key]: session[key] } : {}; } },
+    modelNow: () => RETENTION_NOW,
+    async requestAuditDeletion(input) {
+      requests.push(input); if (controls.beforeDelete) await controls.beforeDelete(input);
+      return coordinator.request(input);
+    },
+  });
+  const proof = scope => ({ version: 1, scope, auditId: scope === 'one' ? 'manual-a' : null, authorizedAt: RETENTION_NOW });
+  return { store, sent, requests, session, controls, operations, proof };
+}
+
+test('R3-F2 manual operation delegates atomic deletion and distinguishes pending cleanup', async t => {
+  for (const pending of [false, true]) await t.test(String(pending), async () => {
+    const env = await manualOperationsFixture(); env.controls.pending = pending;
+    const result = await env.operations.deleteAudit({ auditId: 'manual-a', manualAuthorization: env.proof('one') });
+    assert.deepEqual(result, { ok: true, auditId: 'manual-a', deleted: true, status: pending ? 'pending' : 'complete' });
+    assert.equal(await env.store.getAudit('manual-a'), undefined);
+    assert.ok(await env.store.getAudit('manual-b'));
+    assert.equal(env.requests[0].expectedRevision, 1);
+    assert.equal(env.requests[0].reason, 'manual');
+    assert.equal((await env.store.listDeletionTombstonesV1({ limit: 25 })).length, pending ? 1 : 0);
+    assert.equal(env.sent.length, pending ? 0 : 1);
+  });
+});
+
+test('R3-F2 bulk deletion preserves a newly created audit and reports a stale revision as partial', async () => {
+  const env = await manualOperationsFixture();
+  env.controls.beforeDelete = async input => {
+    if (input.auditId !== 'manual-a') return;
+    await retainAudit(env.store, 'manual-new', RETENTION_NOW);
+    const snapshot = await env.store.getAuditSnapshot('manual-b');
+    await env.store.commitAuditIfRevision('manual-b', snapshot.model, undefined, snapshot.capability);
+  };
+  const result = await env.operations.deleteAllAudits({ manualAuthorization: env.proof('all') });
+  assert.deepEqual(result, { ok: false, code: 'AUDIT_DELETE_PARTIAL', deleted: 1, pending: 0, preserved: 1 });
+  assert.equal(await env.store.getAudit('manual-a'), undefined);
+  assert.ok(await env.store.getAudit('manual-b')); assert.ok(await env.store.getAudit('manual-new'));
+  assert.deepEqual(env.requests.map(value => [value.auditId, value.expectedRevision]), [['manual-a', 1], ['manual-b', 1]]);
+  assert.equal(env.sent.some(value => value.scope === 'all'), false);
+});
+
+test('R3-F2 does not claim data were preserved when cleanup throws after atomic staging', async () => {
+  const env = await manualOperationsFixture(); env.controls.pending = true; env.controls.failPendingJournal = true;
+  assert.deepEqual(await env.operations.deleteAudit({ auditId: 'manual-a', manualAuthorization: env.proof('one') }),
+    { ok: true, auditId: 'manual-a', deleted: true, status: 'pending' });
+  assert.equal(await env.store.getAudit('manual-a'), undefined);
+  assert.equal((await env.store.listDeletionTombstonesV1({ limit: 25 }))[0].auditId, 'manual-a');
+  assert.deepEqual(env.sent, []);
+});
+
+test('R3-F2 manual pending deletion rearms the real retry alarm even after journal failure', async t => {
+  for (const failJournal of [false, true]) await t.test(String(failJournal), async () => {
+    const store = createInMemoryAuditStore();
+    await retainAudit(store, 'manual-retry', RETENTION_NOW);
+    const auditStore = { ...store, async recordDeletionCleanupFailureV1(input) {
+      if (failJournal) throw new Error('pending journal unavailable');
+      return store.recordDeletionCleanupFailureV1(input);
+    } };
+    const env = defaultGraphFixture(null, { enableReportLaunch: true, auditStore, modelNow: () => RETENTION_NOW });
+    t.after(() => env.registration.dispose());
+    const { connected, from } = await env.connectReport('manual-retry');
+    await settleRetention();
+    assert.equal((await env.chromeApi.alarms.get(RETENTION_ALARM_NAME)).scheduledTime,
+      Date.parse('2026-10-05T14:00:00.000Z'));
+    env.denySessionScan();
+    assert.deepEqual(await env.dispatch({ type: 'REPORT_DELETE_AUDIT',
+      sessionCapabilityId: connected.sessionCapabilityId, auditId: 'manual-retry' }, from),
+    { ok: true, auditId: 'manual-retry', deleted: true, status: 'pending' });
+    await settleRetention();
+    assert.equal(await store.getAudit('manual-retry'), undefined);
+    assert.equal((await store.listDeletionTombstonesV1({ limit: 25 }))[0].auditId, 'manual-retry');
+    assert.equal((await env.chromeApi.alarms.get(RETENTION_ALARM_NAME)).scheduledTime,
+      Date.parse(RETENTION_NOW) + 60_000);
+  });
+});
+
+test('R3-F2 manual response does not wait for the retry scheduler', { timeout: 2000 }, async t => {
+  const store = createInMemoryAuditStore(); const entered = deferred(); const gate = deferred(); let hold = false;
+  await retainAudit(store, 'manual-retry-detached', RETENTION_NOW);
+  const auditStore = { ...store, async nextExpiresAtV1() {
+    if (hold) { entered.resolve(); await gate.promise; }
+    return store.nextExpiresAtV1();
+  } };
+  const env = defaultGraphFixture(null, { enableReportLaunch: true, auditStore, modelNow: () => RETENTION_NOW });
+  t.after(() => { gate.resolve(); env.registration.dispose(); });
+  const { connected, from } = await env.connectReport('manual-retry-detached');
+  await settleRetention(); hold = true; env.denySessionScan();
+  let replied = false;
+  const response = env.dispatch({ type: 'REPORT_DELETE_AUDIT',
+    sessionCapabilityId: connected.sessionCapabilityId, auditId: 'manual-retry-detached' }, from)
+    .then(value => { replied = true; return value; });
+  await entered.promise; await tick();
+  assert.equal(replied, true, 'scheduler storage must not delay the manual response');
+  gate.resolve(); assert.equal((await response).status, 'pending');
+});
+
+test('R3-F2 all-complete and pending bulk responses count only captured audits', async t => {
+  for (const pending of [false, true]) await t.test(String(pending), async () => {
+    const env = await manualOperationsFixture(); env.controls.pending = pending;
+    assert.deepEqual(await env.operations.deleteAllAudits({ manualAuthorization: env.proof('all') }),
+      { ok: true, deleted: 2, pending: pending ? 2 : 0, status: pending ? 'pending' : 'complete' });
+    assert.equal((await env.store.listAuditDeletionCandidatesV1()).length, 0);
+    assert.equal(env.sent.some(value => value.scope === 'all'), false);
+  });
+});
+
+test('R3-F2 active audit and active export preserve manual deletion targets', async t => {
+  for (const active of ['audit', 'export']) await t.test(active, async () => {
+    const env = await manualOperationsFixture();
+    if (active === 'audit') env.session[ACTIVE_AUDIT_JOB_KEY] = {
+      version: 1, auditId: 'manual-a', capabilityId: CAPABILITY, sessionCapabilityId: 'S'.repeat(22),
+      windowId: 9, mode: 'attached', state: 'running', commitState: 'none', expectedTerminalRevision: null,
+      createdAt: 1_788_000_000_000, updatedAt: 1_788_000_000_000,
+    };
+    else {
+      const snapshot = await env.store.getAuditSnapshot('manual-a');
+      await env.store.acquireExportLease('manual-a', snapshot.capability, { ownerId: 'active-owner', now: RETENTION_NOW });
+    }
+    const result = await env.operations.deleteAudit({ auditId: 'manual-a', manualAuthorization: env.proof('one') });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, active === 'audit' ? 'AUDIT_DELETE_BUSY' : 'AUDIT_DELETION_DENIED');
+    assert.ok(await env.store.getAudit('manual-a'));
+    assert.deepEqual(await env.store.listDeletionTombstonesV1({ limit: 25 }), []);
+    assert.equal(env.sent.length, 0);
+    if (active === 'audit') assert.equal(env.requests.length, 0);
+  });
+});
 
 test('R3-E startup removes expired real models and completed tombstones while preserving future and foreign state', async t => {
   const values = new Map();
@@ -2422,46 +2577,23 @@ test('expired revoked and wrong-document report sessions cause zero review-store
   });
 });
 
-test('real default graph deletes one/all through correlated surfaces and maps storage busy errors', async () => {
-  const env = defaultGraphFixture(null, { enableReportLaunch: true });
-  env.snapshots.set('audit-delete', { model: { auditId: 'audit-delete' }, revision: 1, capability: Object.freeze({}) });
+test('real default graph uses unified deletion after sender-bound report authorization', async t => {
+  const store = createInMemoryAuditStore();
+  await retainAudit(store, 'audit-delete', RETENTION_NOW);
+  const env = defaultGraphFixture(null, { enableReportLaunch: true, auditStore: store, modelNow: () => RETENTION_NOW });
+  t.after(() => env.registration.dispose());
   const { connected, from } = await env.connectReport('audit-delete');
   assert.equal(connected.ok, true);
-  assert.deepEqual(await env.dispatch(
-    { type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: connected.sessionCapabilityId, auditId: 'audit-delete' },
-    from,
-  ), { ok: true, auditId: 'audit-delete', deleted: true });
-  assert.deepEqual(env.deleted, ['audit-delete']);
-  assert.deepEqual(env.sent, [{ type: 'AUDIT_DELETED', auditId: 'audit-delete', reason: 'delete-one' }]);
-
-  env.setDeletedAll(3);
-  env.sessionValues['audita:execution-checkpoint:v1:audit-stale'] = {
-    version: 1, auditId: 'audit-stale', sessionCapabilityId: 'S'.repeat(22), windowId: 9,
-    checkpoint: { version: 1, auditId: 'audit-stale', pages: [] },
-  };
-  env.sessionValues['audita:execution-checkpoint:v1:audit-transplanted'] = {
-    version: 1, auditId: 'audit-foreign', sessionCapabilityId: 'F'.repeat(22), windowId: 11,
-    checkpoint: { version: 1, auditId: 'audit-foreign', pages: [] },
-  };
-  env.sessionValues['user:unrelated'] = { private: true };
-  const nullScansBeforeDeleteAll = env.sessionGetCalls.filter(value => value === null).length;
-  env.denySessionScan();
-  assert.deepEqual(await env.dispatch({
-    type: 'REPORT_DELETE_ALL_AUDITS', sessionCapabilityId: connected.sessionCapabilityId, auditId: 'audit-delete',
-  }, from), { ok: true, deleted: 3 });
-  assert.deepEqual(env.sent.at(-1), { type: 'AUDIT_DELETED', scope: 'all', reason: 'delete-all' });
-  assert.equal(Object.hasOwn(env.sessionValues, 'audita:execution-checkpoint:v1:audit-stale'), true);
-  assert.equal(Object.hasOwn(env.sessionValues, 'audita:execution-checkpoint:v1:audit-transplanted'), true);
-  assert.deepEqual(env.sessionValues['user:unrelated'], { private: true });
-  assert.equal(env.sessionGetCalls.filter(value => value === null).length, nullScansBeforeDeleteAll);
-
-  env.allowSessionScan();
-  env.snapshots.set('audit-delete', { model: { auditId: 'audit-delete' }, revision: 2, capability: Object.freeze({}) });
-  env.setDeleteError(Object.assign(new Error('native lock detail'), { code: 'AUDIT_DELETE_BUSY' }));
-  assert.deepEqual(await env.dispatch(
-    { type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: connected.sessionCapabilityId, auditId: 'audit-delete' },
-    from,
-  ), { ok: false, code: 'AUDIT_DELETE_BUSY' });
+  const message = { type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: connected.sessionCapabilityId, auditId: 'audit-delete' };
+  assert.equal((await env.dispatch(message, { ...from, documentId: 'foreign-document' })).ok, false);
+  assert.ok(await store.getAudit('audit-delete'));
+  const result = await env.dispatch(message, from);
+  assert.equal(result.ok, true);
+  assert.equal(result.deleted, true);
+  assert.ok(['complete', 'pending'].includes(result.status));
+  assert.equal(await store.getAudit('audit-delete'), undefined);
+  assert.equal(env.deleted.length, 0, 'legacy deletion callback must not run');
+  assert.equal((await env.dispatch(message, from)).ok, false, 'deleted report authority cannot be reused');
 });
 
 test('unknown URL and batch envelopes do not read, serialize, log or respond with secret fields', () => {

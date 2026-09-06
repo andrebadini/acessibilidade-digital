@@ -803,8 +803,14 @@ export function createSidePanelIntentRouter(raw) {
         answer: envelope.answer, evaluator: envelope.evaluator, decidedAt: envelope.decidedAt,
         mode: envelope.mode, note: envelope.note,
       });
-      if (intent === 'delete-audit') return await reportOperations.deleteAudit({ auditId: envelope.auditId });
-      return await reportOperations.deleteAllAudits();
+      const authorizedAt = input.modelNow();
+      if (typeof authorizedAt !== 'string' || new Date(authorizedAt).toISOString() !== authorizedAt) {
+        return fail('REPORT_OPERATION_DENIED');
+      }
+      const manualAuthorization = freeze({ version: 1, scope: intent === 'delete-audit' ? 'one' : 'all',
+        auditId: intent === 'delete-audit' ? envelope.auditId : null, authorizedAt });
+      if (intent === 'delete-audit') return await reportOperations.deleteAudit({ auditId: envelope.auditId, manualAuthorization });
+      return await reportOperations.deleteAllAudits({ manualAuthorization });
     } catch { return fail('REPORT_OPERATION_FAILED'); }
   }
 
