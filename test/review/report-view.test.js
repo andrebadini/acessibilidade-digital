@@ -6,6 +6,7 @@ import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule
 import { projectOccurrenceEvidencePreviews } from '../../src/core/report/evidence-treatment.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
+import { REPORT_VIEW_SCRIPT, REPORT_VIEW_SCRIPT_CSP_HASH } from '../../src/core/report/report-view-script.js';
 import { canonicalCoreRuleSummary } from '../../src/core/report/text-policy.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { buildCompleteReportSummary, buildPanelSummary } from '../../src/panel/panel-summary.js';
@@ -20,6 +21,81 @@ const FULL_PAGE_CAPTURE_OMITTED_LIMITATION = `FULL_PAGE_CAPTURE_OMITTED: ${FULL_
 const ATTACHED_COPY_RELOADED_MESSAGE = 'A auditoria foi executada em uma cópia temporária recarregada da URL da aba escolhida; alterações não salvas e estado mantido apenas em memória na aba original não foram observados.';
 const ATTACHED_COPY_EVIDENCE_ONLY_MESSAGE = 'A página foi avaliada em uma cópia temporária já removida. O destaque ao vivo não está disponível; consulte as capturas e os seletores registrados no momento da auditoria.';
 const ATTACHED_COPY_RETURN_MESSAGE = 'Retorno e destaque na aba original indisponíveis: a auditoria usou uma cópia temporária e não alterou a aba original.';
+
+test('downloaded HTML is interactive while the same print projection is script-free and expanded', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const html = renderHtmlReport(model, { reportView: view });
+  assert.equal((html.match(/<button[^>]+data-report-metric=/g) ?? []).length, 4);
+  assert.ok(html.includes(`<script>${REPORT_VIEW_SCRIPT}</script>`));
+  assert.ok(html.includes(`script-src '${REPORT_VIEW_SCRIPT_CSP_HASH}'`));
+  assert.match(html, /data-report-clear-filters/);
+  assert.match(html, /<details data-report-matrix>/);
+  const print = renderHtmlReport(model, { reportView: view, forPrint: true });
+  assert.doesNotMatch(print, /<script\b|script-src/);
+  assert.ok([...print.matchAll(/<details\b[^>]*>/g)].every(match => /\bopen\b/.test(match[0])));
+  assert.equal((print.match(/data-report-issue /g) ?? []).length, (html.match(/data-report-issue /g) ?? []).length);
+  assert.ok(print.includes(view.modelHash));
+});
+
+test('report uses proportional result bars and collapses the full matrix without losing rows', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const total = Object.values(view.executive.counts).reduce((sum, count) => sum + count.checkKeys, 0);
+  const meters = root.querySelectorAll('meter');
+  assert.equal(meters.length, 4);
+  assert.ok(meters.every(meter => Number(meter.getAttribute('max')) === Math.max(1, total)));
+  assert.equal(root.querySelector('details[data-report-matrix]').getAttribute('open'), null);
+  assert.equal(root.querySelector('details[data-report-matrix]').querySelector('tbody').querySelectorAll('tr').length, 146);
+  const annex = root.querySelector('details[data-report-annex]');
+  assert.equal(annex.getAttribute('open'), null);
+  root.querySelector('[data-report-consult-evidence]').click();
+  assert.equal(annex.getAttribute('open'), '');
+  const html = renderHtmlReport(model, { reportView: view });
+  assert.equal((html.match(/<meter /g) ?? []).length, 4);
+});
+
+test('native print reveals every collapsed detail and restores filters without accumulating listeners', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const document = new Document();
+  const listeners = new Map();
+  document.defaultView = {
+    addEventListener(type, listener) { const set = listeners.get(type) ?? new Set(); set.add(listener); listeners.set(type, set); },
+    removeEventListener(type, listener) { listeners.get(type)?.delete(listener); },
+  };
+  renderReportView({ view, document, onExport() {} });
+  const root = renderReportView({ view, document, onExport() {} });
+  assert.equal(listeners.get('beforeprint')?.size, 1);
+  assert.equal(listeners.get('afterprint')?.size, 1);
+  root.querySelector('[data-report-metric="failed"]').click();
+  const hiddenBefore = root.querySelectorAll('[data-report-issue]').map(card => card.hidden);
+  for (const listener of listeners.get('beforeprint')) listener();
+  assert.ok(root.querySelectorAll('details').every(detail => detail.getAttribute('open') === ''));
+  assert.ok(root.querySelectorAll('[data-report-issue]').every(card => !card.hidden));
+  for (const listener of listeners.get('afterprint')) listener();
+  assert.equal(root.querySelector('[data-report-matrix]').getAttribute('open'), null);
+  assert.equal(root.querySelector('[data-report-annex]').getAttribute('open'), null);
+  assert.deepEqual(root.querySelectorAll('[data-report-issue]').map(card => card.hidden), hiddenBefore);
+});
+
+test('reused report captures have one marked preview and an annex link instead of another image', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const html = renderHtmlReport(model, { reportView: view });
+  const previewFigures = [...html.matchAll(/<figure[^>]+data-report-preview-evidence="([^"]+)"[\s\S]*?<\/figure>/g)];
+  const previews = previewFigures.map(match => match[1]);
+  assert.ok(previews.length > 0);
+  const presentationKeys = previewFigures.map(match => `${match[1]}:${match[0].match(/data-evidence-treatment="([^"]+)"/)?.[1] ?? 'neutral'}`);
+  assert.equal(new Set(presentationKeys).size, presentationKeys.length, 'one copy per capture and necessary marking; distinct outcomes retain their own colors');
+  for (const id of previews) {
+    const record = html.slice(html.indexOf(`data-report-evidence="${id}"`)).split('</article>')[0];
+    assert.doesNotMatch(record, /<img\b|<svg\b/);
+    assert.match(record, /Consultar captura/);
+  }
+  assert.match(html, /data-evidence-highlight="failed"/);
+});
 
 test('metric cards filter results and clear without changing the exported records', async () => {
   const { model, summary } = await fixture();
@@ -934,7 +1010,8 @@ test('live report derives occurrence-specific boxes while preserving the pristin
   assert.match(html, /<rect class="evidence-highlight evidence-highlight--failed" data-evidence-highlight="failed" x="24" y="12" width="80" height="40" aria-hidden="true"><\/rect>/u);
   assert.match(html, /<svg class="evidence-media evidence-media--marked"[^>]*data-evidence-treatment="review"[^>]*aria-label="Elemento local da evidência ev-control com revisão humana necessária destacada por moldura âmbar tracejada\."/u);
   assert.match(html, /<rect class="evidence-highlight evidence-highlight--review" data-evidence-highlight="review" x="24" y="12" width="80" height="40" aria-hidden="true"><\/rect>/u);
-  assert.match(html, /data-report-evidence="ev-control"[^]*?<img class="evidence-media" src="data:image\/png;base64,/u);
+  assert.match(html, /data-report-evidence="ev-control"[^]*?Consultar captura ev-control/u);
+  assert.ok(html.includes(original.dataUrl), 'the original raster remains embedded under the derived SVG frame');
   assert.deepEqual(model.evidence.find(evidence => evidence.kind === 'element'), originalSnapshot);
 });
 

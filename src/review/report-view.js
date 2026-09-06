@@ -54,6 +54,7 @@ const SECTION_NAV_LABELS = Object.freeze([
 const MAX_GRAPH_NODES = 200_000;
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
 const EVIDENCE_FRAME_BY_ARTIFACT = new WeakMap();
+const PRINT_LISTENERS_BY_WINDOW = new WeakMap();
 const FALLBACK_CORRECTIONS = Object.freeze({
   failed: 'Revise o elemento e aplique a orientação técnica antes de executar uma nova auditoria.',
   alerts: 'Revise o alerta no contexto da página e, se a barreira for confirmada, aplique a orientação técnica antes de repetir a auditoria.',
@@ -810,6 +811,35 @@ function renderFilters(document, view, root, status) {
   return wrapper;
 }
 
+function installPrintPresentation(document, root) {
+  const window = document.defaultView;
+  if (typeof window?.addEventListener !== 'function' || typeof window?.removeEventListener !== 'function') return;
+  PRINT_LISTENERS_BY_WINDOW.get(window)?.();
+  let prior = null;
+  const before = () => {
+    if (prior) return;
+    const details = [...root.querySelectorAll('details')];
+    const rows = [...root.querySelectorAll('[data-report-issue]'), ...root.querySelectorAll('[data-report-item-group]')];
+    prior = { details: details.map(node => [node, node.getAttribute('open') !== null]), rows: rows.map(node => [node, node.hidden]) };
+    for (const detail of details) detail.setAttribute('open', '');
+    for (const row of rows) row.hidden = false;
+  };
+  const after = () => {
+    if (!prior) return;
+    for (const [node, open] of prior.details) {
+      if (open) node.setAttribute('open', ''); else node.removeAttribute('open');
+    }
+    for (const [node, hidden] of prior.rows) node.hidden = hidden;
+    prior = null;
+  };
+  window.addEventListener('beforeprint', before);
+  window.addEventListener('afterprint', after);
+  PRINT_LISTENERS_BY_WINDOW.set(window, () => {
+    window.removeEventListener('beforeprint', before);
+    window.removeEventListener('afterprint', after);
+  });
+}
+
 export function renderReportView({ view, document, onExport, onHighlightIntent = null } = {}) {
   if (!view || view.version !== 1 || !document || typeof document.createElement !== 'function' ||
     typeof onExport !== 'function' || ![null, 'function'].includes(onHighlightIntent === null ? null : typeof onHighlightIntent)) denied();
@@ -846,6 +876,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   const metrics = document.createElement('div');
   metrics.setAttribute('class', 'report-metrics');
   metrics.setAttribute('data-report-metrics', '');
+  const metricTotal = Math.max(1, Object.values(view.executive.counts).reduce((total, count) => total + count.checkKeys, 0));
   for (const [group, label, count] of [
     ['failed', 'Não conformidades', view.executive.counts.errors],
     ['alerts', 'Alertas', view.executive.counts.alerts],
@@ -859,6 +890,10 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
       element(document, 'span', label, 'metric-label'),
       element(document, 'small', `${countLabel(count.checkKeys, 'verificação', 'verificações')} · ${countLabel(count.occurrences, 'ocorrência', 'ocorrências')}`, 'metric-detail'),
     );
+    const meter = document.createElement('meter');
+    meter.setAttribute('min', '0'); meter.setAttribute('max', String(metricTotal));
+    meter.setAttribute('value', String(count.checkKeys)); meter.setAttribute('aria-hidden', 'true');
+    card.append(meter);
     metrics.append(card);
   }
   executive.append(metrics);
@@ -1020,7 +1055,9 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   const matrixScroll = document.createElement('div');
   matrixScroll.setAttribute('class', 'matrix-scroll'); matrixScroll.setAttribute('role', 'region');
   matrixScroll.setAttribute('aria-label', 'Matriz completa dos 146 itens ABNT'); matrixScroll.setAttribute('tabindex', '0');
-  matrixScroll.append(table); matrix.append(matrixScroll); root.append(matrix);
+  const matrixDetails = document.createElement('details'); matrixDetails.setAttribute('data-report-matrix', '');
+  matrixDetails.append(element(document, 'summary', 'Consultar a matriz completa dos 146 itens'));
+  matrixScroll.append(table); matrixDetails.append(matrixScroll); matrix.append(matrixDetails); root.append(matrix);
 
   const methodology = section(document, 6);
   appendTextList(document, methodology, view.methodology.caveats, 'Sem ressalvas adicionais.');
@@ -1032,8 +1069,9 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
     sourceText.setAttribute('data-official-source', ''); officialSources.append(sourceText);
   }
   methodology.append(officialSources);
-  const sources = document.createElement('div'); sources.setAttribute('data-technical-evidence', '');
-  sources.append(element(document, 'h3', 'Evidências técnicas e anexos'));
+  const sources = document.createElement('details'); sources.setAttribute('data-technical-evidence', '');
+  sources.setAttribute('data-report-annex', '');
+  sources.append(element(document, 'summary', `Consultar evidências técnicas e anexos (${view.technicalEvidence.length})`));
   for (const evidence of view.technicalEvidence) {
     const card = document.createElement('article'); card.setAttribute('data-report-evidence', evidence.evidenceId);
     card.setAttribute('data-evidence-kind', evidence.kind);
@@ -1053,6 +1091,17 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   }
   methodology.append(sources);
   root.append(methodology);
+  for (const link of root.querySelectorAll('[data-report-consult-evidence]')) {
+    link.addEventListener('click', event => {
+      const id = link.getAttribute('href')?.slice(1);
+      const target = [...sources.querySelectorAll('[data-report-evidence]')].find(card => card.getAttribute('id') === id);
+      if (!target) return;
+      event.preventDefault?.();
+      sources.setAttribute('open', '');
+      target.setAttribute('tabindex', '-1'); target.focus?.(); target.scrollIntoView?.({ block: 'start' });
+    });
+  }
+  installPrintPresentation(document, root);
   return root;
 }
 

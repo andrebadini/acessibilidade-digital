@@ -5,6 +5,7 @@ import { WCAG22_LEVELS } from '../normative/wcag22.js';
 import { createAuditModel } from './audit-model.js';
 import { REPORT_CSS, REPORT_CSS_CSP_HASH } from './report.css.js';
 import { REPORT_SCRIPT, REPORT_SCRIPT_CSP_HASH } from './report.js.js';
+import { REPORT_VIEW_SCRIPT, REPORT_VIEW_SCRIPT_CSP_HASH } from './report-view-script.js';
 import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from './evidence-treatment.js';
 import { decodePngDataUrl } from '../evidence/png.js';
 import { ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO } from '../evidence/annotation-map-artifact.js';
@@ -155,8 +156,10 @@ function renderReportViewDocument(model, view, options = {}) {
     throw new TypeError('ReportViewV1 inválida para exportação.');
   }
   const deliveryIdentity = options.deliveryIdentity === undefined ? null : createExportDeliveryIdentityV1(options.deliveryIdentity);
+  const forPrint = options.forPrint === true;
   const csp = [
     "default-src 'none'", "img-src data:", `style-src '${REPORT_CSS_CSP_HASH}'`,
+    ...(forPrint ? [] : [`script-src '${REPORT_VIEW_SCRIPT_CSP_HASH}'`]),
     "connect-src 'none'", "object-src 'none'", "frame-src 'none'", "font-src 'none'", "media-src 'none'",
     "worker-src 'none'", "base-uri 'none'", "form-action 'none'",
   ].join('; ');
@@ -174,13 +177,16 @@ function renderReportViewDocument(model, view, options = {}) {
   const metric = group => {
     const counts = view.executive.counts[{ failed: 'errors', alerts: 'alerts', humanReview: 'humanReview', passed: 'positive' }[group]];
     const detail = `${countLabel(counts.checkKeys, 'verificação', 'verificações')} · ${countLabel(counts.occurrences, 'ocorrência', 'ocorrências')}`;
-    return `<article class="summary-card" data-report-metric="${escapeHtml(group)}"><strong>${counts.checkKeys}</strong><span>${escapeHtml(groupLabels[group])}</span><small>${escapeHtml(detail)}</small></article>`;
+    const total = Math.max(1, Object.values(view.executive.counts).reduce((sum, count) => sum + count.checkKeys, 0));
+    return `<button type="button" class="summary-card" data-report-metric="${escapeHtml(group)}" aria-pressed="false"><strong>${counts.checkKeys}</strong><span>${escapeHtml(groupLabels[group])}</span><small>${escapeHtml(detail)}</small><meter min="0" max="${total}" value="${counts.checkKeys}" aria-hidden="true"></meter></button>`;
   };
   const correlatedEvidence = issue => {
     const ids = new Set(issue.occurrences.flatMap(occurrence => occurrence.evidenceRefs));
     return [...evidenceById.values()].filter(evidence => ids.has(evidence.evidenceId));
   };
   const plainBlock = (name, title, body) => `<section class="issue-plain-block" data-report-plain-block="${name}"><h4>${title}</h4>${body}</section>`;
+  const previewAnchors = new Map();
+  const firstPreviewByEvidence = new Map();
   const evidencePreview = (evidence, issue) => {
     const selected = projectOccurrenceEvidencePreviews({
       evidence: evidence.filter(item => safePng(item.dataUrl)),
@@ -189,16 +195,22 @@ function renderReportViewDocument(model, view, options = {}) {
     const previews = selected.length === 0
       ? '<p>Nenhuma captura PNG local está disponível para esta verificação.</p>'
       : selected.map(({ artifact: item, tone }) => {
+        const previewKey = JSON.stringify([item.evidenceId, item.kind === 'element' ? tone : null]);
+        if (previewAnchors.has(previewKey)) return `<p><a href="#${previewAnchors.get(previewKey)}">Consultar captura ${escapeHtml(item.evidenceId)} já apresentada</a>.</p>`;
+        const anchor = `report-preview-${previewAnchors.size + 1}`;
+        previewAnchors.set(previewKey, anchor);
+        if (!firstPreviewByEvidence.has(item.evidenceId)) firstPreviewByEvidence.set(item.evidenceId, anchor);
+        const figureAttributes = `id="${anchor}" data-report-preview-evidence="${escapeHtml(item.evidenceId)}" data-evidence-kind="${escapeHtml(item.kind)}"`;
         const accessibleLabel = `${label(item.kind, evidenceKindLabels, 'Evidência registrada')} local da evidência ${item.evidenceId}`;
         const treatment = item.kind === 'element' && tone ? EVIDENCE_TREATMENTS_V1[tone] : null;
         const png = treatment ? pngMetadata(item.dataUrl) : null;
         if (!treatment || !png) {
-          return `<figure data-evidence-kind="${escapeHtml(item.kind)}"><img class="evidence-media" src="${escapeHtml(item.dataUrl)}" alt="${escapeHtml(accessibleLabel)}"><figcaption>${escapeHtml(accessibleLabel)}.</figcaption></figure>`;
+          return `<figure ${figureAttributes}><img class="evidence-media" src="${escapeHtml(item.dataUrl)}" alt="${escapeHtml(accessibleLabel)}"><figcaption>${escapeHtml(accessibleLabel)}.</figcaption></figure>`;
         }
         const width = finitePositive(item.metadata?.width) || png.width;
         const height = finitePositive(item.metadata?.height) || png.height;
         const box = highlightBox(item, width, height);
-        return `<figure data-evidence-kind="${escapeHtml(item.kind)}"><svg class="evidence-media evidence-media--marked" data-evidence-treatment="${treatment.tone}" role="img" aria-label="${escapeHtml(`${accessibleLabel} ${treatment.aria}`)}" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid meet" focusable="false"><image href="${escapeHtml(item.dataUrl)}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid meet"></image><rect class="evidence-highlight evidence-highlight--${treatment.tone}" data-evidence-highlight="${treatment.tone}" x="${box.x}" y="${box.y}" width="${box.width}" height="${box.height}" aria-hidden="true"></rect></svg><figcaption>${escapeHtml(`${treatment.legend} ${accessibleLabel}.`)}</figcaption></figure>`;
+        return `<figure ${figureAttributes}><svg class="evidence-media evidence-media--marked" data-evidence-treatment="${treatment.tone}" role="img" aria-label="${escapeHtml(`${accessibleLabel} ${treatment.aria}`)}" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid meet" focusable="false"><image href="${escapeHtml(item.dataUrl)}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid meet"></image><rect class="evidence-highlight evidence-highlight--${treatment.tone}" data-evidence-highlight="${treatment.tone}" x="${box.x}" y="${box.y}" width="${box.width}" height="${box.height}" aria-hidden="true"></rect></svg><figcaption>${escapeHtml(`${treatment.legend} ${accessibleLabel}.`)}</figcaption></figure>`;
       }).join('');
     return `<section data-report-evidence-preview><h4>Capturas registradas</h4>${previews}</section>`;
   };
@@ -250,17 +262,18 @@ function renderReportViewDocument(model, view, options = {}) {
   const navigationLabels = ['Sumário', 'Resultados', 'Não conformidades', 'Revisões humanas', 'Anúncios', 'Matriz ABNT', 'Metodologia e evidências'];
   const navigation = `<div data-report-navigation><nav class="section-nav" aria-label="Seções do relatório"><strong>Ir para</strong><ul>${navigationLabels.map((navigationLabel, index) => `<li><a href="#report-section-${index + 1}">${escapeHtml(navigationLabel)}</a></li>`).join('')}</ul></nav></div>`;
   const coverage = view.executive.coverage.status === 'available' ? view.executive.coverage.percent : 'indisponível';
-  const annex = view.technicalEvidence.map(evidence => `<article class="evidence-card" id="${evidenceAnchorById.get(evidence.evidenceId)}" data-report-evidence="${escapeHtml(evidence.evidenceId)}" data-evidence-kind="${escapeHtml(evidence.kind)}"><h4>${escapeHtml(evidence.evidenceId)} — ${escapeHtml(label(evidence.kind, evidenceKindLabels, 'Evidência registrada'))}</h4>${evidenceProvenanceHtml(evidence)}<p><strong>Seletor:</strong> ${escapeHtml(evidence.selector?.css ?? 'não registrado')}</p><p><strong>Snippet:</strong> ${escapeHtml(evidence.snippet ?? 'não disponível')}</p>${safePng(evidence.dataUrl) ? `<img class="evidence-media" src="${escapeHtml(evidence.dataUrl)}" alt="${escapeHtml(`${label(evidence.kind, evidenceKindLabels, 'Evidência registrada')} local da evidência ${evidence.evidenceId}`)}">` : '<p><strong>Imagem segura:</strong> PNG local não disponível.</p>'}</article>`).join('');
-  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${csp}"><title>Relatório de auditoria — Audita Acessibilidade</title><style>${REPORT_CSS}</style></head><body class="report-view-document">${header()}<main id="conteudo"><h1>Relatório de auditoria de acessibilidade</h1><p class="report-static-identity">Escopo avaliado: ${escapeHtml(view.executive.identity.finalUrl)}.</p>
+  const annex = view.technicalEvidence.map(evidence => `<article class="evidence-card" id="${evidenceAnchorById.get(evidence.evidenceId)}" data-report-evidence="${escapeHtml(evidence.evidenceId)}" data-evidence-kind="${escapeHtml(evidence.kind)}"><h4>${escapeHtml(evidence.evidenceId)} — ${escapeHtml(label(evidence.kind, evidenceKindLabels, 'Evidência registrada'))}</h4>${evidenceProvenanceHtml(evidence)}<p><strong>Seletor:</strong> ${escapeHtml(evidence.selector?.css ?? 'não registrado')}</p><p><strong>Snippet:</strong> ${escapeHtml(evidence.snippet ?? 'não disponível')}</p>${firstPreviewByEvidence.has(evidence.evidenceId) ? `<p><a href="#${firstPreviewByEvidence.get(evidence.evidenceId)}">Consultar captura ${escapeHtml(evidence.evidenceId)}</a> apresentada nas ocorrências; o registro original e seu hash permanecem acima.</p>` : safePng(evidence.dataUrl) ? `<img class="evidence-media" src="${escapeHtml(evidence.dataUrl)}" alt="${escapeHtml(`${label(evidence.kind, evidenceKindLabels, 'Evidência registrada')} local da evidência ${evidence.evidenceId}`)}">` : '<p><strong>Imagem segura:</strong> PNG local não disponível.</p>'}</article>`).join('');
+  const documentHtml = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${csp}"><title>Relatório de auditoria — Audita Acessibilidade</title><style>${REPORT_CSS}</style></head><body class="report-view-document">${header()}<main id="conteudo"><h1>Relatório de auditoria de acessibilidade</h1><p class="report-static-identity">Escopo avaliado: ${escapeHtml(view.executive.identity.finalUrl)}.</p>
 ${section(0, `<p data-report-outcome><strong>Estado da auditoria:</strong> ${escapeHtml(label(view.executive.status, statusLabels))}.</p><div data-report-coverage><strong>Cobertura automática: ${escapeHtml(coverage)}.</strong> Mede os testes do motor próprio com conclusão automática (passed, failed ou inapplicable), divididos pelo inventário desse motor nas páginas tentadas; não é nota, certificação ou declaração de conformidade.</div><div class="summary-grid" data-report-metrics>${['failed','alerts','humanReview','passed'].map(metric).join('')}</div><p>Formatos desta entrega: HTML, PDF, CSV e JSON.</p><details data-report-limitations><summary>Limitações registradas (${view.executive.limitations.length})</summary><ul>${view.executive.limitations.map(value => `<li>${escapeHtml(value)}</li>`).join('') || '<li>Nenhuma limitação crítica registrada.</li>'}</ul></details>`)}
-${navigation}<p class="filters-noscript">Este arquivo contém todos os registros; filtros interativos estão disponíveis somente no relatório vivo.</p>
+${navigation}<div class="filter-actions"><button type="button" data-report-clear-filters>Mostrar todos os resultados</button><p role="status" data-report-filter-status></p></div><noscript><p>Os filtros exigem JavaScript local. Todos os registros continuam disponíveis nos expansores abaixo.</p></noscript>
 ${section(1, itemGroups)}
 ${section(2, '<p>As não conformidades estão nas verificações agrupadas por item acima.</p>')}
 ${section(3, '<p>As revisões humanas estão nas verificações agrupadas por item acima; um resultado pendente não confirma uma falha.</p>')}
 ${section(4, reportViewReaderMaps(view))}
-${section(5, `<div class="matrix-scroll" role="region" aria-label="Matriz completa dos 146 itens ABNT" tabindex="0"><table><caption>Matriz completa da ABNT NBR 17225</caption><thead><tr><th scope="col">Item</th><th scope="col">Título</th><th scope="col">Classificação</th><th scope="col">Resultado</th><th scope="col">WCAG</th></tr></thead><tbody>${view.matrix.map(row => `<tr><th scope="row">${escapeHtml(row.id)}</th><td>${escapeHtml(row.title)}</td><td>${escapeHtml(label(row.classification, classificationLabels))}</td><td>${escapeHtml(label(row.outcome, outcomeLabels))}</td><td>${escapeHtml(row.wcag.map(ref => `${ref.id} ${ref.level}`).join(', '))}</td></tr>`).join('')}</tbody></table></div>`)}
-${section(6, `${view.methodology.caveats.map(value => `<p>${escapeHtml(value)}</p>`).join('')}<p><strong>Revisão do modelo:</strong> ${view.modelRevision}. <strong>Integridade:</strong> ${escapeHtml(view.modelHash)}.</p>${delivery}<h3>Fontes oficiais</h3><ul>${CONSUMER_ACCESSIBILITY_FIXED_BASIS.sources.map(source => `<li data-official-source>${escapeHtml(source.publisher)} — ${escapeHtml(source.title)} — ${escapeHtml(source.url)}</li>`).join('')}</ul><h3>Evidências técnicas e anexos</h3>${annex}`)}
-</main><footer class="report-footer"><p>Audita Acessibilidade — relatório local da auditoria ${escapeHtml(view.auditId)}.</p></footer></body></html>`;
+${section(5, `<details data-report-matrix><summary>Consultar a matriz completa dos 146 itens</summary><div class="matrix-scroll" role="region" aria-label="Matriz completa dos 146 itens ABNT" tabindex="0"><table><caption>Matriz completa da ABNT NBR 17225</caption><thead><tr><th scope="col">Item</th><th scope="col">Título</th><th scope="col">Classificação</th><th scope="col">Resultado</th><th scope="col">WCAG</th></tr></thead><tbody>${view.matrix.map(row => `<tr><th scope="row">${escapeHtml(row.id)}</th><td>${escapeHtml(row.title)}</td><td>${escapeHtml(label(row.classification, classificationLabels))}</td><td>${escapeHtml(label(row.outcome, outcomeLabels))}</td><td>${escapeHtml(row.wcag.map(ref => `${ref.id} ${ref.level}`).join(', '))}</td></tr>`).join('')}</tbody></table></div></details>`)}
+${section(6, `${view.methodology.caveats.map(value => `<p>${escapeHtml(value)}</p>`).join('')}<p><strong>Revisão do modelo:</strong> ${view.modelRevision}. <strong>Integridade:</strong> ${escapeHtml(view.modelHash)}.</p>${delivery}<h3>Fontes oficiais</h3><ul>${CONSUMER_ACCESSIBILITY_FIXED_BASIS.sources.map(source => `<li data-official-source>${escapeHtml(source.publisher)} — ${escapeHtml(source.title)} — ${escapeHtml(source.url)}</li>`).join('')}</ul><details data-report-annex><summary>Consultar evidências técnicas e anexos (${view.technicalEvidence.length})</summary>${annex}</details>`)}
+</main><footer class="report-footer"><p>Audita Acessibilidade — relatório local da auditoria ${escapeHtml(view.auditId)}.</p></footer>${forPrint ? '' : `<script>${REPORT_VIEW_SCRIPT}</script>`}</body></html>`;
+  return forPrint ? documentHtml.replace(/<details(?![^>]*\bopen\b)(?=[\s>])/gu, '<details open') : documentHtml;
 }
 
 function viewSectionTitle(index) {
@@ -456,8 +469,7 @@ function legalAnalysis(occurrence, item, anchor, displayOutcome, decision) {
   const automaticBasis = consumerBasisForOccurrence(occurrence);
   const reviewedFailure = occurrence.outcome === 'cantTell' && decision?.answer === 'não conforme';
   if ((!automaticBasis && !reviewedFailure) || (automaticBasis && occurrence.legalAnalysis?.basisRef !== automaticBasis.id)) return '';
-  const basis = automaticBasis || CONSUMER_ACCESSIBILITY_FIXED_BASIS;
-  return `<section class="legal-analysis" aria-labelledby="${anchor}-juridico"><h4 id="${anchor}-juridico">${escapeHtml(basis.label)}</h4><p><strong>Referência técnica variável:</strong> ABNT NBR 17225:2025, item ${escapeHtml(item.id)} — ${escapeHtml(item.title)} (${escapeHtml(CLASSIFICATION[item.classification])}).</p><p>${escapeHtml(basis.sentencePrefix)}. ${escapeHtml(basis.qualification)}</p></section>`;
+  return `<section class="legal-analysis" aria-labelledby="${anchor}-juridico"><h4 id="${anchor}-juridico">Referência normativa</h4><p>Inconformidade ao item ${escapeHtml(item.id)} da ABNT NBR 17225:2025</p></section>`;
 }
 
 function occurrenceEvidence(occurrence, artifactById, imageByEvidenceId, outcome, occurrenceIndex) {

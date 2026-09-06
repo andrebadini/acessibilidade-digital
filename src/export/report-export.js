@@ -289,6 +289,7 @@ async function runImmutableRevisionExport({
     attemptId: String(exportAttempt),
   });
   const html = renderHtmlReport(model, { reportView, deliveryIdentity });
+  const printHtml = renderHtmlReport(model, { reportView, deliveryIdentity, forPrint: true });
   const json = renderTechnicalJson(model, { deliveryIdentity });
   let csv = null;
   let pdf = null;
@@ -297,7 +298,7 @@ async function runImmutableRevisionExport({
   try { csv = renderCanonicalCsv(model, dependencies.csvRenderer, deliveryIdentity); }
   catch { limitations.push(createExportIssue('REPORT_CSV_UNAVAILABLE').message); }
   if (csv !== null) {
-    const printed = await printFinalHtml(html, dependencies, timeoutMs, false, blobLifecycle);
+    const printed = await printFinalHtml(printHtml, dependencies, timeoutMs, false, blobLifecycle);
     if (printed.cleanupLimited) limitations.push(createExportIssue('REPORT_PRINT_CLEANUP_LIMITED').message);
     if (printed.issue) limitations.push(printed.issue.message);
     else {

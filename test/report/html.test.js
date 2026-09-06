@@ -44,6 +44,13 @@ function occurrenceCard(html, occurrenceId) {
   return html.slice(start, end + '</article>'.length);
 }
 
+test('legacy occurrence reference uses the concise ABNT wording without repeated legal qualification', () => {
+  const html = renderHtmlReport(SAMPLE_AUDIT);
+  const card = occurrenceCard(html, SAMPLE_AUDIT.occurrences.find(row => row.outcome === 'failed').occurrenceId);
+  assert.match(card, /Inconformidade ao item 5\.1\.1 da ABNT NBR 17225:2025/);
+  assert.doesNotMatch(card, /Quando aplicável a uma relação de consumo|A conclusão jurídica depende|Lei nº 8\.078/);
+});
+
 function reviewDecision(occurrenceId, itemId, answer, mode) {
   return createReviewDecision({
     auditId: SAMPLE_AUDIT.auditId,
@@ -315,11 +322,7 @@ test('changes occurrence evidence from review to red after a nonconformity decis
   assert.match(card, /evidence-highlight--failed/u);
   assert.match(card, /Símbolo ✕ e moldura sólida[^<]*não atendimento técnico/iu);
   assert.match(card, /class="legal-analysis"/u);
-  for (const fixedText of [
-    CONSUMER_ACCESSIBILITY_FIXED_BASIS.label,
-    CONSUMER_ACCESSIBILITY_FIXED_BASIS.sentencePrefix,
-    CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification,
-  ]) assert.match(card, new RegExp(fixedText.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+  assert.match(card, /Inconformidade ao item 5\.1\.4 da ABNT NBR 17225:2025/u);
   assert.doesNotMatch(card, /evidence-highlight--review/u);
   assert.ok(html.indexOf('data-occurrence-id="occ-focus-review"') < html.indexOf('data-occurrence-id="occ-cross-page"'));
   assert.match(html, /<h3>Não atendidas<\/h3><strong>2<\/strong>/u);
@@ -466,15 +469,14 @@ test('renders the approved ten-section information hierarchy before technical me
   assert.doesNotMatch(html, /percentual de conformidade/iu);
 });
 
-test('resolves the immutable consumer basis for every failed ABNT occurrence including recommendations', () => {
+test('keeps eligible failed ABNT references concise including recommendations', () => {
   const html = renderHtmlReport(withFailedRecommendation());
   const failedRequirement = occurrenceCard(html, 'occ-focus-failed');
   const failedRecommendation = occurrenceCard(html, 'occ-recommendation-failed');
   const humanReview = occurrenceCard(html, 'occ-focus-review');
   for (const card of [failedRequirement, failedRecommendation]) {
-    assert.match(card, new RegExp(CONSUMER_ACCESSIBILITY_FIXED_BASIS.label, 'u'));
-    assert.match(card, new RegExp(CONSUMER_ACCESSIBILITY_FIXED_BASIS.sentencePrefix.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
-    assert.match(card, new RegExp(CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+    assert.match(card, /Inconformidade ao item 5\.1\.[12] da ABNT NBR 17225:2025/u);
+    assert.doesNotMatch(card, /Quando aplicável a uma relação de consumo|A conclusão jurídica depende/u);
     assert.doesNotMatch(card, /conclusão jurídica final|certificação jurídica automática/iu);
   }
   assert.match(failedRecommendation, /Recomendação ABNT/u);

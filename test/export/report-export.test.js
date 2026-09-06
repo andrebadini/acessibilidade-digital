@@ -17,6 +17,7 @@ import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { AUDIT_MODEL_INPUT_ERROR_CODE, AUDIT_MODEL_INPUT_ERROR_MESSAGE } from '../../src/core/report/audit-input.js';
 import { canonicalBatchRuleSummary, canonicalScope } from '../../src/core/report/text-policy.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
+import { REPORT_VIEW_SCRIPT, REPORT_VIEW_SCRIPT_CSP_HASH } from '../../src/core/report/report-view-script.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { renderOccurrenceCsv } from '../../src/core/report/csv.js';
 import { verifyAuditIntegritySnapshot } from '../../src/core/report/integrity.js';
@@ -197,6 +198,7 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
     return startDownload(options);
   };
   const trackedPrintTab = successfulTabAdapter();
+  const printBlobs = [];
   trackedPrintTab.createPrintTab = async ({ url }) => {
     assert.equal(temporaryUrls.has(url), true, 'immutable exports register the print URL');
     return { id: 70 };
@@ -210,7 +212,7 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
       async register(url) { temporaryUrls.add(url); },
       async release(url) { temporaryUrls.delete(url); releasedUrls.push(url); },
     },
-    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    urlApi: { createObjectURL(blob) { printBlobs.push(blob); return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
     tabAdapter: trackedPrintTab,
     async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
     downloadsAdapter: trackedDownloads,
@@ -228,6 +230,9 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
     },
   });
   assert.equal(temporaryUrls.size, 0);
+  const printableHtml = await printBlobs[0].text();
+  assert.doesNotMatch(printableHtml, /<script\b|script-src/iu);
+  assert.ok([...printableHtml.matchAll(/<details\b[^>]*>/g)].every(match => /\bopen\b/.test(match[0])), 'automatic PDF contains expanded evidence independently of extension CSP');
   assert.equal(releasedUrls.length, 5, 'one print URL and four delivered artifacts are released');
   assert.equal((await store.getAuditSnapshot(model.auditId)).revision, snapshot.revision);
   assert.deepEqual(result.deliveryReceipt.formats.map(entry => entry.format), EXPORT_FORMATS_V1);
@@ -279,7 +284,7 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   }
   assert.match(result.html, /Resultado consolidado: Não atendido neste teste/u);
   assert.doesNotMatch(result.html, /Resultado consolidado: failed|Impacto:<\/strong> moderate|Classificação:<\/strong> failed/u);
-  assert.equal((result.html.match(/<img class="evidence-media" src="data:image\/png;base64,/gu) ?? []).length >= 2, true);
+  assert.equal((result.html.match(/data-report-preview-evidence=/gu) ?? []).length >= 2, true);
   assert.match(result.html, /data-report-evidence="ev-full" data-evidence-kind="full-page"/u);
   assert.match(result.html, /ev-control[\s\S]*ev-full|ev-full[\s\S]*ev-control/u);
   assert.match(result.html, /<nav class="section-nav" aria-label="Seções do relatório">/u);
@@ -287,7 +292,8 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
     assert.match(result.html, new RegExp(`href="#report-section-${index}"`, 'u'));
     assert.match(result.html, new RegExp(`id="report-section-${index}"`, 'u'));
   }
-  assert.doesNotMatch(result.html, /<script\b|script-src/iu);
+  assert.ok(result.html.includes(`<script>${REPORT_VIEW_SCRIPT}</script>`));
+  assert.ok(result.html.includes(`script-src '${REPORT_VIEW_SCRIPT_CSP_HASH}'`));
   assert.match(result.html, /<body class="report-view-document">/u);
   const printableBody = result.html.slice(result.html.indexOf('<body class="report-view-document">'));
   const printableHeading = printableBody.indexOf('<h1>Relatório de auditoria de acessibilidade</h1>');
@@ -295,7 +301,7 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   const printableSummary = printableBody.indexOf('id="report-section-1"');
   assert.equal(printableHeading >= 0 && printableHeading < printableIdentity && printableIdentity < printableSummary, true,
     'o documento imprimível deve começar semanticamente pelo h1 e preservar a URL final antes do sumário');
-  assert.doesNotMatch(result.html, /<button\b|data-report-export|data-report-highlight/iu);
+  assert.doesNotMatch(result.html, /data-report-export|data-report-highlight/iu);
   assert.match(result.html, /Formatos desta entrega: HTML, PDF, CSV e JSON/u);
   const summaryStart = result.html.indexOf('id="report-section-1"');
   const navigationStart = result.html.indexOf('<div data-report-navigation>');
@@ -303,11 +309,11 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   assert.equal(summaryStart >= 0 && summaryStart < navigationStart && navigationStart < resultsStart, true);
   assert.match(result.html, /data-report-outcome/u);
   assert.match(result.html, /data-report-coverage[^>]*>[\s\S]*não é nota, certificação/iu);
-  assert.equal((result.html.match(/<article class="summary-card" data-report-metric="(?:failed|alerts|humanReview|passed)"/gu) ?? []).length, 4);
+  assert.equal((result.html.match(/<button type="button" class="summary-card" data-report-metric="(?:failed|alerts|humanReview|passed)"/gu) ?? []).length, 4);
   for (const label of ['Sumário', 'Resultados', 'Não conformidades', 'Revisões humanas', 'Anúncios', 'Matriz ABNT', 'Metodologia e evidências']) {
     assert.match(result.html, new RegExp(`>${label}<`, 'u'));
   }
-  assert.match(result.html, /Este arquivo contém todos os registros; filtros interativos estão disponíveis somente no relatório vivo\./u);
+  assert.match(result.html, /Os filtros exigem JavaScript local\. Todos os registros continuam disponíveis/u);
   assert.match(result.html, /data-report-metric="passed"[\s\S]*<strong>1<\/strong>[\s\S]*0 ocorrências/u);
   assert.doesNotMatch(result.html, /\[&quot;page-1&quot;,&quot;audita-core&quot;,&quot;keyboard-focus-trap&quot;\]/u);
   assert.match(result.html, /Verificação não testada: Armadilha de foco — Página 1\./u);
@@ -321,7 +327,7 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   const orderedMarkers = [
     'data-report-issue-heading', 'data-report-plain-block="impact"', 'data-report-plain-block="observed"',
     'data-report-plain-block="correction"', 'data-report-plain-block="announcement"',
-    'data-report-plain-block="normative"', 'data-report-plain-block="legal"',
+    'data-report-plain-block="normative"',
     'data-report-evidence-preview', 'data-report-live-action="evidence-only"',
     'data-report-consult-evidence', 'data-report-technical',
   ];

@@ -114,3 +114,11 @@ dialog:not([open]) { display: none; }
 }
 @media (forced-colors: active) { button, input, textarea, .review-controls, .review-card, dialog, .report-identity, .report-view > section, [data-report-metric], [data-report-issue], [data-report-evidence-preview] figure, [data-report-evidence], .section-nav a, .report-filters [role="group"], .report-view th, .report-view td { border-color: CanvasText; } .report-filters button[aria-pressed="true"] { background: Highlight; color: HighlightText; } [data-report-executive-actions] button { background: Canvas; color: CanvasText; border-color: ButtonText; } .evidence-highlight { stroke: CanvasText; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
+[data-report-metrics] [data-report-metric="failed"]{background:#fff4f3;color:#8b1e1e}
+[data-report-metrics] [data-report-metric="alerts"],[data-report-metrics] [data-report-metric="humanReview"]{background:#fff9e9;color:#6b4e00}
+[data-report-metrics] [data-report-metric="passed"]{background:#eff9f2;color:#236b3b}
+[data-report-metrics] meter{display:block;width:100%;height:.65rem;margin-top:.65rem}
+[data-report-metrics] meter::-webkit-meter-bar{background:#e1e7ed;border:0;border-radius:1rem}
+[data-report-metrics] meter::-webkit-meter-optimum-value{background:#6b4e00}
+[data-report-metric="failed"] meter::-webkit-meter-optimum-value{background:#b42318}
+[data-report-metric="passed"] meter::-webkit-meter-optimum-value{background:#237440}

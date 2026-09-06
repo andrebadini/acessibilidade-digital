@@ -128,6 +128,20 @@ th{background:#eef4f8;color:#14212b}
 [data-report-live-action="evidence-only"]{margin:.85rem 0 .35rem;padding:.65rem .75rem;border-left:.3rem solid #6b4e00;background:#eef4f8}
 [data-report-consult-evidence]{display:inline-flex;align-items:center;min-height:44px;font-weight:750}
 [data-report-technical]{margin-top:.65rem}
+[data-report-metrics] button.summary-card{text-align:left;border-radius:.75rem;transition:box-shadow .15s}
+[data-report-metrics] [data-report-metric="failed"]{background:#fff4f3;color:#8b1e1e}
+[data-report-metrics] [data-report-metric="alerts"],[data-report-metrics] [data-report-metric="humanReview"]{background:#fff9e9;color:#6b4e00}
+[data-report-metrics] [data-report-metric="passed"]{background:#eff9f2;color:#236b3b}
+[data-report-metrics] [aria-pressed="true"]{outline:3px solid currentColor;outline-offset:2px}
+[data-report-metrics] meter{display:block;width:100%;height:.65rem;margin-top:.65rem}
+[data-report-metrics] meter::-webkit-meter-bar{background:#e1e7ed;border:0;border-radius:1rem}
+[data-report-metrics] meter::-webkit-meter-optimum-value{background:#6b4e00}
+[data-report-metric="failed"] meter::-webkit-meter-optimum-value{background:#b42318}
+[data-report-metric="passed"] meter::-webkit-meter-optimum-value{background:#237440}
+.report-view-document #report-section-3,.report-view-document #report-section-4{display:inline-block;vertical-align:top;width:49%;padding-right:1rem}
+.report-view-document #report-section-3 h2,.report-view-document #report-section-4 h2{font-size:1.1rem;margin-top:1rem;border:0}
+@media(max-width:40rem){.report-view-document #report-section-3,.report-view-document #report-section-4{display:block;width:100%}}
+@media print{.report-view-document #report-section-3,.report-view-document #report-section-4{display:none!important}[data-report-metrics]{print-color-adjust:exact}}
 [data-report-technical] section{min-width:0;margin-top:.65rem;padding:.65rem;border:1px solid #738596;background:#eef4f8;overflow-wrap:anywhere}
 .report-view-document [data-report-evidence]{min-width:0;overflow-wrap:anywhere}
 .sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
@@ -146,4 +160,4 @@ th{background:#eef4f8;color:#14212b}
 `;
 
 // Updated by the CSP integrity test whenever the static stylesheet changes.
-export const REPORT_CSS_CSP_HASH = 'sha256-0fsh4I6aWiw3O+K6PAh4dCGfjWe4xegD55WgF8cr1XA=';
+export const REPORT_CSS_CSP_HASH = 'sha256-00Y/aWxkglcc2w1wFge16gclP3hYh0iGm0ZGuzqizzo=';
