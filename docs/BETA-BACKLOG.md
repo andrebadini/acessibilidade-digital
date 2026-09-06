@@ -8,13 +8,13 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Próximas entregas funcionais
 
-Reconciliação com fontes e testes atuais: `docs/qa/2026-09-06-goal-reconciliation.md`. Não usar checklists históricos vazios como prova de funcionalidade ausente. A candidata 1.1.6 permanece sem liberação enquanto a falha nativa de personas do gate atual não for esclarecida.
+Reconciliação com fontes e testes atuais: `docs/qa/2026-09-06-goal-reconciliation.md`. Não usar checklists históricos vazios como prova de funcionalidade ausente. **Beta 1.1.6 entregue** após correção reproduzível da disponibilidade inicial de personas, testes focados, percurso nativo corrigido e duas revisões C=0/I=0. A execução ampla original com 37/38 nativos continua registrada, sem ser reclassificada como verde. Registro final: `docs/qa/2026-09-06-beta116-release.md`.
 
 - orientação didática ainda a aprofundar: procedimentos específicos para **5.12.2 (espaçamento entre parágrafos)** e **5.1.9 (conteúdo adicional dispensável)**. A revisão de produto reproduziu instruções por família genéricas demais nesses dois casos. Implementar procedimento e exemplo pertinentes ao item, mantendo as exceções normativas e a classificação; depois verificar os demais fallbacks para não declarar que todos os 146 itens já têm instrução individual completa.
 
 **Atualização 1.1.5:** os horários individuais e as orientações 5.13.6–5.13.8 descritos abaixo foram entregues após o gate de 3.977 testes lógicos, 38 nativos, verificação estática, QA visual/PDF e duas revisões independentes. As menções “fora do ZIP 1.1.4” permanecem corretas para aquele pacote, não indicam pendência na 1.1.5. Registro: `docs/qa/2026-09-06-beta115-release.md`.
 
-- comparação explícita dos valores registrados em 5.13.7 implementada depois da beta 1.1.5: pares de texto visível/nome acessível, sem misturar elementos nem inferir resultado, no painel e nas três apresentações de relatório. GREEN173/173; revisão independente C=0/I=0, com 96/96 testes. Ainda fora do pacote 1.1.5. Registro: `docs/qa/2026-09-06-recorded-label-comparisons.md`; prova nativa visual/PDF do novo par no próximo candidato.
+- comparação explícita dos valores registrados em 5.13.7 entregue na beta 1.1.6: pares de texto visível/nome acessível, sem misturar elementos nem inferir resultado, no painel e nas três apresentações de relatório. GREEN173/173; revisão independente C=0/I=0, com 96/96 testes. Continua fora do pacote antigo 1.1.5. Prova nativa JSON/relatório/HTML e PDF real concluída na 1.1.6; registros `docs/qa/2026-09-06-recorded-label-comparisons.md` e `docs/qa/2026-09-06-beta116-release.md`.
 
 - horário individual de recebimento de PNG implementado depois da beta 1.1.4: `metadata.captureReceivedAt`, preservação em modelos/JSON/orçamento e apresentação viva/HTML compartilhada com impressão. Relógio local explicitamente não certificado; datas antigas não são inventadas. Testes locais e duas revisões C=0/I=0; prova nativa concluída com 12 datas conferidas também no PDF e ausência de datas inventadas em no-pixels. Ainda fora do ZIP 1.1.4. Registros: `docs/qa/2026-09-06-capture-receipt-time.md` e `docs/qa/2026-09-06-capture-receipt-native.md`.
 
@@ -48,6 +48,8 @@ Reconciliação com fontes e testes atuais: `docs/qa/2026-09-06-goal-reconciliat
 - quando o orçamento global do lote omitir os pixels de um mapa já composto, substituir a orientação “Localize o número na imagem” por aviso específico de omissão; a legenda e os hashes continuam preservados e a ausência de PNG já é exibida.
 
 ## Infraestrutura de testes não bloqueante
+
+- substituir a captura de densidade de pixels denominada “persona-side-panel-200-percent” por prova real de zoom/CSS com imagem válida. O PNG repetido em tiles da 1.1.6 foi excluído do aceite visual; não demonstra falha de layout, mas também não prova zoom de 200%. Não confundir com a prova CSS independente do painel compacto.
 
 - horário de recebimento: acrescentar assertions específicas para Promise CDP rejeitada, tentativa de data em mapa derivado e adulteração do horário em elemento/artefato omitido. Guardas existentes revisados sem falha funcional; já há prova de data adulterada/removida na captura integral, ausência de data em mapa projetado e preservação no orçamento real.
 

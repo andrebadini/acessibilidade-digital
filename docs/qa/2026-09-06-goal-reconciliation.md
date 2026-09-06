@@ -2,6 +2,8 @@
 
 Estado examinado: `2774ab3`, candidata 1.1.6; pacote anterior entregue: 1.1.5 (`9a27833`). Esta matriz substitui a leitura dos checklists históricos como se todos os quadrados vazios fossem funcionalidades ausentes. Não reclassifica testes antigos como executados hoje nem altera o escopo solicitado.
 
+**Fechamento posterior:** candidata corrigida `a41ddc1`, beta 1.1.6 entregue. Os itens 1–2 de “O que realmente falta” abaixo foram tratados por diagnóstico/RED/correção focada, E2E posterior e conferência/entrega do pacote. A execução ampla original continua 37/38; ver `2026-09-06-persona-bootstrap-readiness.md` e `2026-09-06-beta116-release.md`. O item 3, aprofundamento didático, permanece em andamento; o restante do texto preserva o ponto da reconciliação inicial.
+
 O turno anterior produziu progresso verificável: commit `f6fda0e`, comparação dos valores registrados em ABNT 5.13.7, 173 testes focados aprovados e revisão independente C=0/I=0. A meta permanece ativa.
 
 ## Evidência de implementação e entrega
