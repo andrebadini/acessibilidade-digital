@@ -103,17 +103,16 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
         if (!target || !validOpaqueId(target.markerId, 'm') || markerIds.has(target.markerId) ||
           !Number.isSafeInteger(target.number) || target.number < 1 || target.number > 5_000) return null;
         markerIds.add(target.markerId);
-        const match = exactRecord(target.match, ['tag', 'id']) ?? exactRecord(target.match, ['tag', 'id', 'classes', 'path']);
-        if (!match || typeof match.tag !== 'string' || !/^[a-z][a-z0-9-]{0,62}$/u.test(match.tag) ||
-          (match.id !== null && !validStableCssId(match.id))) return null;
+        const match = exactRecord(target.match, ['tag', 'id']) ?? exactRecord(target.match, ['tag', 'classes', 'path']);
+        if (!match || typeof match.tag !== 'string' || !/^[a-z][a-z0-9-]{0,62}$/u.test(match.tag)) return null;
         let parsedMatch;
-        if (match.id === null) {
+        if (!Object.hasOwn(match, 'id')) {
           const classes = denseArray(match.classes, 2, 1);
           if (!classes || classes.some(value => !validStableCssId(value)) || new Set(classes).size !== classes.length ||
             !validStructuralPath(match.path, match.tag)) return null;
           parsedMatch = Object.freeze({ tag: match.tag, id: null, classes: Object.freeze(classes.sort()), path: match.path });
         } else {
-          if (Object.hasOwn(match, 'classes')) return null;
+          if (!validStableCssId(match.id)) return null;
           parsedMatch = Object.freeze({ tag: match.tag, id: match.id });
         }
         const signals = denseArray(target.signals, 64, 1);

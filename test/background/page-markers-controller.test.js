@@ -4,7 +4,7 @@ import test from 'node:test';
 import { DIGEST, INSTALLATION_ID, SESSION_ID, createControllerFixture, deferred } from './page-markers-controller-fixture.js';
 
 test('idless evidence flows through the authorized controller into a real marker and selection', async () => {
-  const fixture = await createControllerFixture({ changeDraft(draft) {
+  const fixture = await createControllerFixture({ omitNullArguments: true, changeDraft(draft) {
     draft.evidence[1].selector.css = 'main > button';
     draft.evidence[1].snippet = '<button class="primary action">Continuar</button>';
   } });
@@ -13,6 +13,9 @@ test('idless evidence flows through the authorized controller into a real marker
   const result = await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
   assert.equal(result.ok, true);
   assert.equal(result.markers.counts.located, 2);
+  const injected = fixture.calls.scripts.find(call => call.func.name === 'runAuditaPageMarkersCommand' && call.args[0].op === 'install');
+  assert.equal(Object.hasOwn(injected.args[0].targets[0].match, 'id'), false,
+    'the wire command must not depend on null dictionary fields preserved by Node but omitted by Chrome');
   assert.equal(fixture.page.environment.markerButtons().length, 1);
   const selected = await fixture.dispatch('PANEL_SELECT_PAGE_MARKER', { ordinal: 2, scroll: true });
   assert.equal(selected.ok, true);

@@ -424,7 +424,8 @@ export function createPageMarkersController({ originCache, modelAuthority, loadP
           }, 5_000);
         });
         const installCommand = freezeGraph({ version: 1, op: 'install', installationId, ttlMs,
-          targets: plan.targets.map(row => ({ markerId: row.markerId, number: row.number, match: { ...row.match },
+          targets: plan.targets.map(row => ({ markerId: row.markerId, number: row.number,
+            match: row.match.id === null ? { tag: row.match.tag, classes: [...row.match.classes], path: row.match.path } : { ...row.match },
             signals: row.signals.map(signal => ({ ...signal })) })) });
         let installed;
         try { installed = parseInstallResult(await executeInDocument(record, runAuditaPageMarkersCommand, installCommand), plan.targets); }

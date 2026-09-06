@@ -33,3 +33,5 @@ Incluem associação e seleção pelo controlador real, dados públicos sem loca
 Não cobre todo elemento sem ID: elementos sem classes seguras, locatores fora da gramática estrutural, frames, shadow roots e associações ambíguas continuam explicitamente não localizados. O limite transparente de 64 ocorrências interativas não mudou. Relatório e contagens totais não são reduzidos por esse limite.
 
 Não foram executados suíte ampla, Chrome real, `verify` ou ZIP nesta etapa. A nova alternativa ainda precisa compor o próximo candidato nativo antes de entrega ao usuário. O histórico humano legível de `0f469ba` também aguarda o próximo pacote.
+
+Atualização posterior: o gate nativo do candidato 1.1.4 detectou a omissão do campo nulo pela API do Chrome. A forma privada permanece a mesma; o comando transmitido agora é `{tag,classes,path}`, sem ID nulo. Correção e prova real aprovadas conforme [registro nativo](2026-09-06-beta114-native.md). Ainda não constitui pacote entregue.

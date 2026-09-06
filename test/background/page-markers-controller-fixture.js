@@ -97,7 +97,9 @@ export async function createControllerFixture(options = {}) {
         if (options.scriptFailure?.(request, calls.scripts.length)) throw new Error('script unavailable');
         const name = request.func.name;
         if (name === 'runAuditaPageMarkersCommand') {
-          const result = runAuditaPageMarkersCommand(request.args[0], page.environment);
+          const argument = options.omitNullArguments
+            ? JSON.parse(JSON.stringify(request.args[0], (_key, value) => value === null ? undefined : value)) : request.args[0];
+          const result = runAuditaPageMarkersCommand(argument, page.environment);
           return [{ frameId: 0, documentId: 'document-a', result }];
         }
         if (name === 'bindAuditaPageMarkersPort') {

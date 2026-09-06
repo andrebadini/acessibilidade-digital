@@ -119,9 +119,12 @@ for (const scenario of [
   { name: 'original-page ABNT markers visual review and verified exports', idle: false },
 ]) test(scenario.name, { timeout: 420_000 }, async t => {
   assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório.');
+  const documentBody = scenario.idle ? currentPageDocument(0) : currentPageDocument(0).replace(
+    '<button id="missing-name"></button>',
+    '<button class="idless-primary" style="width:180px;height:42px"></button>');
   const fixture = await startFixtureServer(t, new Map([
     ['/current', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' },
-      body: currentPageDocument(0) }],
+      body: documentBody }],
     ['/other', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' },
       body: currentPageDocument(0).replace('Origem preservada', 'Outro documento') }],
   ]));
@@ -191,7 +194,7 @@ for (const scenario of [
       const sentinel=document.createElement('aside');sentinel.id='foreign-review-overlay';sentinel.textContent='Outra ferramenta';
       sentinel.style.cssText='position:fixed;right:8px;bottom:8px;background:white';document.body.append(sentinel);
       globalThis.__markerControlClicks=0;
-      document.querySelector('#missing-name').addEventListener('click',()=>globalThis.__markerControlClicks++);
+      document.querySelector('#missing-name, button.idless-primary').addEventListener('click',()=>globalThis.__markerControlClicks++);
       return {x:scrollX,y:scrollY,active:document.activeElement?.id,notes:document.querySelector('#source-notes').value};
     })()`);
     await step('SHOW', async () => {
@@ -205,6 +208,39 @@ for (const scenario of [
       assert.ok(state.counts.some(text => /^[1-9]\d* ocorrências? não localizadas?/u.test(text)), JSON.stringify(state));
       assert.deepEqual(await extension.evaluate(extension.startPage.page, `({x:scrollX,y:scrollY,
         active:document.activeElement?.id,notes:document.querySelector('#source-notes').value})`), preserved);
+    });
+    if (!scenario.idle) await step('IDLESS_ORIGINAL_ELEMENT', async () => {
+      const number = await extension.evaluate(extension.startPage.page, `(() => {
+        const target=document.querySelector('button.idless-primary');
+        if(!target||target.hasAttribute('id'))throw Error('IDLESS_FIXTURE_INVALID');
+        const rect=target.getBoundingClientRect();
+        const root=document.querySelector('[data-audita-page-markers-root="v1"]');
+        const groups=[...root.shadowRoot.querySelectorAll('.audita-group')].filter(group=>{
+          const ring=group.querySelector('.audita-ring');
+          return ['left','top','width','height'].every(key=>Math.abs(parseFloat(ring.style[key])-rect[key])<1);
+        });
+        if(groups.length!==1)return {reason:'IDLESS_MARKER_NOT_CORRELATED',matches:groups.length,total:root.shadowRoot.querySelectorAll('.audita-group').length};
+        const button=groups[0].querySelector('.audita-marker');
+        const number=Number(button.getAttribute('aria-label').match(/^Sinal ([0-9]+)/)[1]);
+        button.click();return number;
+      })()`, { userGesture: true });
+      assert.equal(typeof number, 'number', JSON.stringify(number));
+      await extension.waitForValue(panel, `(() => ({
+        number:Number(document.querySelector('[data-intent="SELECT_OCCURRENCE"][aria-pressed="true"] [data-page-marker-number]')?.dataset.pageMarkerNumber),
+        technical:document.querySelector('[data-detail-block="technical"]')?.textContent??'',
+        normative:document.querySelector('[data-detail-block="normative"]')?.textContent??''
+      }))()`, value => value?.number === number && value.technical.includes('html > body > main > button') && /ABNT NBR 17225: 5\./u.test(value.normative));
+      assert.deepEqual(await extension.evaluate(extension.startPage.page, '({x:scrollX,y:scrollY})'), { x: preserved.x, y: preserved.y });
+      await extension.click(panel, '[data-intent="GO_TO_PAGE_MARKER"]');
+      await extension.waitForValue(extension.startPage.page, `(() => {
+        const r=document.querySelector('button.idless-primary').getBoundingClientRect();
+        const roots=[...document.querySelector('[data-audita-page-markers-root="v1"]').shadowRoot.querySelectorAll('.audita-ring')];
+        return r.top>=0&&r.bottom<=innerHeight&&roots.some(ring=>ring.style.display!=='none'&&
+          Math.abs(parseFloat(ring.style.top)-r.top)<1&&Math.abs(parseFloat(ring.style.left)-r.left)<1);
+      })()`, Boolean);
+      await extension.captureJourney('idless-original-selected', extension.startPage.page, { captureBeyondViewport: false });
+      // Restore only the harness scroll baseline for the unchanged silent-selection checks below.
+      await extension.evaluate(extension.startPage.page, `scrollTo({left:${preserved.x},top:${preserved.y},behavior:'instant'})`);
     });
     if (scenario.idle) await step('IDLE_WITH_SIGNALS', async () => {
       await new Promise(resolve => setTimeout(resolve, 45_000));
@@ -418,6 +454,7 @@ for (const scenario of [
             open:kept.next.open&&document.querySelector('[data-review-controls-target]').open,
             answered:kept.list.firstElementChild.classList.contains('answered'),
             matrixRows:document.querySelectorAll('[data-report-matrix] tbody tr').length,
+            history:document.querySelector('[data-review-history]')?.textContent??'',
             hash:text.match(/Integridade: ([a-f0-9]{64})/)[1]};
         })()`);
         assert.ok(refreshed.revision > beforeReview);
@@ -425,6 +462,7 @@ for (const scenario of [
         assert.equal(refreshed.note, 'Nota ainda não salva');
         assert.equal(refreshed.evaluator, 'Avaliadora QA');
         assert.equal(refreshed.matrixRows, 146);
+        assert.ok(refreshed.history.includes('Avaliadora QA') && refreshed.history.includes('Barreira confirmada no teste local'));
         const durable = await extension.evaluate(extension.harnessPage, `(async()=>{
           const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
           const revision=await store.getReportRevision(${JSON.stringify(auditId)});
@@ -1477,6 +1515,8 @@ async function exportFourFormats(extension, report, auditId, downloadDirectory, 
     assert.equal(technical.exportDeliveryIdentity.modelRevision, reviewedIdentity.modelRevision);
     assert.equal(technical.audit.reviewDecisions.length, 1);
     assert.equal(technical.audit.reviewDecisions[0].note, 'Barreira confirmada no teste local');
+    assert.match(html, /<details\b[^>]*\bdata-review-history(?:\s|=|>)/u);
+    assert.ok(html.includes('Avaliadora QA') && html.includes('Barreira confirmada no teste local'));
   }
   const occurrence = technical.audit?.occurrences?.find(candidate =>
     candidate?.source?.ruleId === 'content-image-alternative' &&
