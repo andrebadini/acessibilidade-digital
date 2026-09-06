@@ -48,6 +48,9 @@ const START_JOURNAL_KEY = 'audita:start-journal:v1';
 const HIGHLIGHT_INTENT_TYPES = new Set([
   'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT',
 ]);
+const PAGE_MARKERS_INTENT_TYPES = new Set([
+  'PANEL_SHOW_PAGE_MARKERS', 'PANEL_HIDE_PAGE_MARKERS', 'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS',
+]);
 const AUTHORIZED_SESSION_KEYS = Object.freeze([
   'version', 'sessionCapabilityId', 'auditId', 'windowId', 'mode', 'targetBinding',
   'consumers', 'intents', 'state', 'issuedAt', 'expiresAt',
@@ -317,6 +320,37 @@ function authorizedHighlightPublication(value, binding, actionAt) {
     issuer.documentId === binding.issuerDocumentId && issuer.path === '/src/panel/index.html');
 }
 
+function pageMarkersEvent(value) {
+  const record = exact(value, ['windowId', 'sessionCapabilityId', 'auditId', 'modelRevision', 'state', 'selectedOrdinal']);
+  if (!record || !safeChromeId(record.windowId) || typeof record.auditId !== 'string' || !AUDIT_ID.test(record.auditId) ||
+    typeof record.sessionCapabilityId !== 'string' || !CAPABILITY.test(record.sessionCapabilityId) ||
+    !Number.isSafeInteger(record.modelRevision) || record.modelRevision < 1 ||
+    !['active', 'clear'].includes(record.state) ||
+    (record.selectedOrdinal !== null && (!Number.isSafeInteger(record.selectedOrdinal) || record.selectedOrdinal < 0 || record.selectedOrdinal >= 64)) ||
+    (record.state === 'clear' && record.selectedOrdinal !== null)) return null;
+  return record;
+}
+
+function authorizedPageMarkersPublication(value, binding, actionAt) {
+  const authorization = exact(value, ['ok', 'session', 'context'], true);
+  const session = authorization && exact(authorization.session, AUTHORIZED_SESSION_KEYS, true);
+  const context = authorization && exact(authorization.context, ['issuer', 'windowId', 'tabId', 'contextType', 'documentUrl'], true);
+  const issuer = context && exact(context.issuer, ['type', 'documentId', 'path'], true);
+  const intents = session && exact(session.intents, ['panel', 'review'], true);
+  const panel = intents && (exact(intents.panel, ['running', 'privacy-paused', 'result', 'view-only'], true) ??
+    exact(intents.panel, ['running', 'result', 'view-only'], true));
+  const allowed = panel && ['result', 'view-only'].includes(session.state) && safeStringArray(panel[session.state]);
+  return Boolean(authorization?.ok === true && session?.version === 1 &&
+    session.sessionCapabilityId === binding.sessionCapabilityId && session.auditId === binding.auditId &&
+    session.windowId === binding.windowId && ['attached', 'single'].includes(session.mode) &&
+    own(session.targetBinding, 'kind') !== 'batch' && allowed && allowed.includes('review-markers') &&
+    safeEpoch(actionAt) && safeEpoch(session.issuedAt) && safeEpoch(session.expiresAt) &&
+    session.issuedAt <= actionAt && actionAt < session.expiresAt &&
+    context?.windowId === binding.windowId && context.tabId === null && context.contextType === 'SIDE_PANEL' &&
+    context.documentUrl === binding.sender.url && issuer?.type === 'extension-document' &&
+    issuer.documentId === binding.issuerDocumentId && issuer.path === '/src/panel/index.html');
+}
+
 function packet(state, auditId, sessionCapabilityId, result, captureMode = null) {
   const output = {
     protocol: 'audita-panel', version: 1, type: 'bootstrap-result',
@@ -349,7 +383,7 @@ function recoveryRequiredRegistration() {
 }
 
 export function createPanelPortCoordinator(raw) {
-  const input = exact(raw, FACTORY_KEYS);
+  const input = exact(raw, FACTORY_KEYS) ?? exact(raw, [...FACTORY_KEYS, 'authorizePageMarkersSession', 'closePanelMarkers']);
   if (!input || typeof input.chromeApi?.runtime?.id !== 'string' ||
     typeof input.sessionArea?.get !== 'function' || typeof input.sessionArea.set !== 'function' ||
     typeof input.readActiveJob !== 'function' || typeof input.readAuditSession !== 'function' ||
@@ -359,7 +393,9 @@ export function createPanelPortCoordinator(raw) {
     typeof input.setTimer !== 'function' || typeof input.clearTimer !== 'function' ||
     typeof input.launchAuthority?.admitPort !== 'function' || typeof input.launchAuthority.reprove !== 'function' ||
     typeof input.launchAuthority.retirePort !== 'function' || typeof input.dispatchPanelIntent !== 'function' ||
-    typeof input.authorizeHighlightSession !== 'function') {
+    typeof input.authorizeHighlightSession !== 'function' ||
+    (Object.hasOwn(input, 'authorizePageMarkersSession') &&
+      (typeof input.authorizePageMarkersSession !== 'function' || typeof input.closePanelMarkers !== 'function'))) {
     throw new TypeError('PANEL_PORT_COORDINATOR_INVALID');
   }
 
@@ -370,6 +406,25 @@ export function createPanelPortCoordinator(raw) {
   const scopeDeniedSentinel = Object.freeze(Object.create(null));
   const activeConflictSentinel = Object.freeze(Object.create(null));
   let scopeMarker = null;
+  const authorizePageMarkersSession = input.authorizePageMarkersSession;
+  const closePanelMarkers = input.closePanelMarkers;
+
+  function invalidateMarkerReceipt(binding) {
+    const receipt = binding.markerReceipt;
+    binding.markerReceipt = null;
+    if (!receipt) return;
+    // Cancel the controller synchronously. Its owned retry state must not hold
+    // the existing panel retirement/window lock while script cleanup settles.
+    try { Promise.resolve(closePanelMarkers({ windowId: receipt.windowId, sessionCapabilityId: receipt.sessionCapabilityId })).catch(() => {}); }
+    catch { /* Controller keeps unconfirmed owned cleanup for retry. */ }
+  }
+
+  function currentMarkerReceipt(binding, receipt, admission) {
+    return Boolean(receipt && connected(binding) && binding.state === 'bound-session' &&
+      binding.markerReceipt === receipt && binding.admission === admission &&
+      binding.windowId === receipt.windowId && binding.auditId === receipt.auditId &&
+      binding.sessionCapabilityId === receipt.sessionCapabilityId);
+  }
 
   function assertScope(scope, windowId) {
     const state = scopeStates.get(scope);
@@ -605,6 +660,7 @@ export function createPanelPortCoordinator(raw) {
     if (binding.state === 'disconnected') return Promise.resolve(binding.retirementState ?? 'denied');
     reassert(assertOwned);
     binding.state = 'disconnected';
+    invalidateMarkerReceipt(binding);
     removeTemporary(binding, assertOwned);
     reassert(assertOwned);
     try { binding.port.onMessage.removeListener(binding.onBoundMessage); } catch { /* fixed cleanup */ }
@@ -663,11 +719,30 @@ export function createPanelPortCoordinator(raw) {
   function send(binding, value, assertOwned = null) {
     reassert(assertOwned);
     if (!connected(binding)) throw new Error('PANEL_PORT_DISCONNECTED');
+    const isBootstrap = value.type === 'bootstrap-result';
+    const isPause = value.type === 'privacy-paused';
+    let nextReceipt = binding.markerReceipt;
+    if (closePanelMarkers && (isBootstrap || isPause)) {
+      const result = isBootstrap && ['result', 'view-only'].includes(value.state) ? value.result : null;
+      const unchanged = result && nextReceipt && nextReceipt.auditId === value.auditId &&
+        nextReceipt.sessionCapabilityId === value.sessionCapabilityId && nextReceipt.modelRevision === result.modelRevision;
+      if (!unchanged) {
+        invalidateMarkerReceipt(binding);
+        nextReceipt = result ? Object.freeze({ windowId: binding.windowId, auditId: value.auditId,
+          sessionCapabilityId: value.sessionCapabilityId, modelRevision: result.modelRevision,
+          detailCount: Math.min(64, result.details.length) }) : null;
+      }
+    }
     binding.port.postMessage(value);
+    if (closePanelMarkers && (isBootstrap || isPause) && connected(binding)) binding.markerReceipt = nextReceipt;
   }
 
   function bind(binding, windowId, state, auditId = null, sessionCapabilityId = null, assertOwned = null) {
     reassert(assertOwned);
+    if (binding.markerReceipt && (state !== 'bound-session' || binding.markerReceipt.windowId !== windowId ||
+      binding.markerReceipt.auditId !== auditId || binding.markerReceipt.sessionCapabilityId !== sessionCapabilityId)) {
+      invalidateMarkerReceipt(binding);
+    }
     binding.windowId = windowId;
     binding.state = state;
     binding.auditId = auditId;
@@ -925,6 +1000,15 @@ export function createPanelPortCoordinator(raw) {
         launchTabId: binding.admission.tabId,
       };
       if (HIGHLIGHT_INTENT_TYPES.has(parsed.value.type)) dispatchRequest.panelWindowId = binding.windowId;
+      if (PAGE_MARKERS_INTENT_TYPES.has(parsed.value.type)) {
+        const receipt = binding.markerReceipt;
+        const admission = binding.admission;
+        dispatchRequest.panelWindowId = binding.windowId;
+        dispatchRequest.isCurrent = () => currentMarkerReceipt(binding, receipt, admission) &&
+          receipt.modelRevision === parsed.value.modelRevision && receipt.auditId === parsed.value.auditId &&
+          receipt.sessionCapabilityId === parsed.value.sessionCapabilityId;
+        if (!dispatchRequest.isCurrent()) throw new Error('PANEL_INTENT_DENIED');
+      }
       const response = await input.dispatchPanelIntent(dispatchRequest);
       if (binding.retiringCancel === inFlight || binding.state === 'retiring-cancel') {
         const retired = revokedCancelResponse(response, inFlight.auditId);
@@ -1024,6 +1108,7 @@ export function createPanelPortCoordinator(raw) {
       intentTail: Promise.resolve(), seenRequestIds: new Set(), intentGeneration: 0,
       inFlightIntent: null, retiringCancel: null,
       retirement: null, retirementState: null,
+      markerReceipt: null, markerPublication: null,
     };
     binding.onBoundMessage = value => receiveBound(binding, value);
     binding.onDisconnect = () => { void disconnect(binding, null, true); };
@@ -1375,6 +1460,9 @@ export function createPanelPortCoordinator(raw) {
 
   async function clearAudit(auditId) {
     try { canonicalAuditId(auditId); } catch { return false; }
+    for (const binding of liveByWindow.values()) {
+      if (binding.markerReceipt?.auditId === auditId) invalidateMarkerReceipt(binding);
+    }
     try {
       const raw = await input.sessionArea.get(null);
       const inventory = exact(raw, Reflect.ownKeys(raw), true);
@@ -1451,10 +1539,34 @@ export function createPanelPortCoordinator(raw) {
     return Object.freeze({ delivered });
   }
 
+  async function publishPageMarkersState(rawEvent) {
+    const event = pageMarkersEvent(rawEvent);
+    if (!event) return Object.freeze({ delivered: 0 });
+    const binding = liveByWindow.get(event.windowId);
+    const receipt = binding?.markerReceipt;
+    const admission = binding?.admission;
+    if (!currentMarkerReceipt(binding, receipt, admission) || receipt.auditId !== event.auditId ||
+      receipt.sessionCapabilityId !== event.sessionCapabilityId || receipt.modelRevision !== event.modelRevision ||
+      (event.selectedOrdinal !== null && event.selectedOrdinal >= receipt.detailCount)) return Object.freeze({ delivered: 0 });
+    const sequence = Object.freeze({});
+    binding.markerPublication = sequence;
+    const current = () => currentMarkerReceipt(binding, receipt, admission) && binding.markerPublication === sequence;
+    try {
+      if (!await reprove(binding) || !current()) return Object.freeze({ delivered: 0 });
+      const authorized = await authorizePageMarkersSession({ sessionCapabilityId: receipt.sessionCapabilityId,
+        auditId: receipt.auditId, claimedWindowId: receipt.windowId, sender: admission.syntheticSender });
+      if (!current() || !authorizedPageMarkersPublication(authorized, binding, input.epochNow())) return Object.freeze({ delivered: 0 });
+      send(binding, freeze({ version: 1, type: 'PAGE_MARKERS_STATE_CHANGED', auditId: event.auditId,
+        modelRevision: event.modelRevision, state: event.state, selectedOrdinal: event.selectedOrdinal }));
+      return Object.freeze({ delivered: 1 });
+    } catch { return Object.freeze({ delivered: 0 }); }
+  }
+
   return Object.freeze({
     attachPanelPort,
     withWindowLock,
     publishHighlightState,
     clearAudit,
+    ...(closePanelMarkers ? { publishPageMarkersState } : {}),
   });
 }

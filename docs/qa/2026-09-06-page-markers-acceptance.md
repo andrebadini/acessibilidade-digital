@@ -38,6 +38,8 @@ Task5, base437f868: novos testes de protocolo produziram RED2/3 e novos testes d
 
 O canal agora reconhece os quatro comandos fechados, acrescenta autoridade privada e impede evento/resposta de revisão antiga de selecionar detalhes novos. Não há wiring global nem controles visuais novos neste checkpoint. W3-runtime continua separado; o roteiro Chrome acima permanece inteiramente pendente para a funcionalidade de sinais.
 
+Task6, basea12c697: RED7/7 na API estendida ausente; após implementação,9/9 novos testes passaram, incluindo troca result→running→mesmo result. Testes de panel-port/panel-port-admitted-intents/panel-session-port:191/191PASS; regressão service-worker95/95PASS; diff-checkPASS. Revisão independente C0/I0 e9/9 confirmados. A conexão admitida agora mantém recibo privado de resultado, publica seleção sem autoridade no payload e invalida antes de cleanup assíncrono. Wiring global e Chrome permanecem pendentes.
+
 ## Base técnica consultada
 
 - [Chrome scripting](https://developer.chrome.com/docs/extensions/reference/api/scripting): função injetada autocontida, mundo isolado e direcionamento por documentIds.

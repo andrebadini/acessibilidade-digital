@@ -135,7 +135,7 @@ function suspension(overrides = {}) {
   });
 }
 
-async function bundle(auditId = 'audit-port') {
+async function bundle(auditId = 'audit-port', modelRevision = 1) {
   const inventory = await createInstalledCoreRuleInventory();
   const draft = structuredClone(SAMPLE_AUDIT);
   draft.auditId = auditId;
@@ -155,7 +155,7 @@ async function bundle(auditId = 'audit-port') {
     })),
   };
   return createPanelResultBundleV1({
-    reportRevision: { version: 1, auditId, modelRevision: 1, modelHash: model.integrity.canonicalModelHash, model, checkpoint },
+    reportRevision: { version: 1, auditId, modelRevision, modelHash: model.integrity.canonicalModelHash, model, checkpoint },
     inventory,
   });
 }
@@ -295,6 +295,217 @@ function foreignRunningActive() {
 }
 
 function tick() { return new Promise(resolve => setImmediate(resolve)); }
+
+function markerAuthorization(value, overrides = {}) {
+  return {
+    ok: true,
+    session: {
+      ...session('result'),
+      consumers: [{ name: 'panel', path: '/src/panel/index.html', contextType: 'SIDE_PANEL' }],
+      intents: { panel: { running: ['cancel'], result: ['open-report', 'review-markers'], 'view-only': ['open-report', 'review-markers'] }, review: {} },
+      ...overrides,
+    },
+    context: {
+      issuer: { type: 'extension-document', documentId: value.sender.documentId, path: '/src/panel/index.html' },
+      windowId: value.claimedWindowId, tabId: null, contextType: 'SIDE_PANEL', documentUrl: value.sender.url,
+    },
+  };
+}
+
+async function markerFixture(overrides = {}) {
+  const closed = [];
+  const dispatched = [];
+  const env = fixture({
+    authorizePageMarkersSession: async value => markerAuthorization(value),
+    closePanelMarkers: value => { closed.push(value); return Promise.resolve(true); },
+    dispatchPanelIntent: async value => { dispatched.push(value); return { ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' }; },
+    ...overrides,
+  });
+  env.setActive(runningActive());
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'pending',
+  };
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  env.sessions.set(SESSION, session('result'));
+  env.setActive(null);
+  const resultBundle = await bundle();
+  const delivered = await env.coordinator.withWindowLock(9, scope => scope.publishResult({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, state: 'result', resultBundle,
+  }));
+  assert.equal(delivered.state, 'delivered');
+  return { ...env, connected, closed, dispatched, resultBundle };
+}
+
+function requestMarkers(env, modelRevision = 1) {
+  env.connected.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent', requestId: 'markers-request',
+    envelope: { type: 'PANEL_SHOW_PAGE_MARKERS', auditId: 'audit-port', sessionCapabilityId: SESSION, modelRevision },
+  });
+}
+
+function markerPublication(extra = {}) {
+  return { windowId: 9, sessionCapabilityId: SESSION, auditId: 'audit-port', modelRevision: 1,
+    state: 'active', selectedOrdinal: 0, ...extra };
+}
+
+test('page-marker admitted dispatch retains a private current callback beyond the response and cancels before disconnect cleanup awaits', async () => {
+  const closed = [];
+  const env = await markerFixture({ closePanelMarkers: value => { closed.push(value); return new Promise(() => {}); } });
+  requestMarkers(env);
+  await tick();
+  assert.equal(env.dispatched.length, 1);
+  const request = env.dispatched[0];
+  assert.equal(request.panelWindowId, 9);
+  assert.equal(request.envelope.windowId, 9);
+  assert.equal(request.isCurrent(), true);
+  env.connected.onDisconnect.emit();
+  assert.equal(request.isCurrent(), false);
+  assert.deepEqual(closed, [{ windowId: 9, sessionCapabilityId: SESSION }]);
+  await tick();
+  assert.equal(env.launchRevoked.length, 1, 'marker cleanup must not hold existing retirement');
+});
+
+test('page-marker publication is sender-bound and strips private correlation for result and view-only copy grants', async () => {
+  for (const state of ['result', 'view-only']) {
+    const calls = [];
+    const env = await markerFixture({ authorizePageMarkersSession: async value => {
+      calls.push(value);
+      return markerAuthorization(value, { state, mode: 'single', targetBinding: state === 'view-only'
+        ? { kind: 'view-only' } : { kind: 'disposable', ownershipId: `owner_${'a'.repeat(22)}`, state: 'removed' } });
+    } });
+    assert.deepEqual(await env.coordinator.publishPageMarkersState(markerPublication()), { delivered: 1 });
+    assert.deepEqual(env.connected.messages.at(-1), {
+      version: 1, type: 'PAGE_MARKERS_STATE_CHANGED', auditId: 'audit-port', modelRevision: 1, state: 'active', selectedOrdinal: 0,
+    });
+    assert.equal(calls[0].claimedWindowId, 9);
+    assert.equal(calls[0].sender.documentId, 'panel-document');
+    assert.equal(Object.hasOwn(calls[0], 'tabId'), false);
+  }
+});
+
+test('page-marker stale or foreign events have no effects and cannot disconnect another panel', async () => {
+  let authorizations = 0;
+  const env = await markerFixture({ authorizePageMarkersSession: async value => { authorizations += 1; return markerAuthorization(value); } });
+  const before = env.connected.messages.length;
+  const events = [
+    { auditId: 'foreign' }, { sessionCapabilityId: 'X'.repeat(22) }, { windowId: 10 }, { modelRevision: 2 },
+    { selectedOrdinal: env.resultBundle.details.length }, { selectedOrdinal: '0' }, { state: 'clear' },
+    { installationId: 'a'.repeat(22) },
+  ].map(extra => markerPublication(extra));
+  let getterReads = 0;
+  events.push(Object.defineProperty(markerPublication(), 'modelRevision', { enumerable: true, get() { getterReads += 1; return 1; } }));
+  for (const value of events) assert.deepEqual(await env.coordinator.publishPageMarkersState(value), { delivered: 0 });
+  assert.equal(authorizations, 0);
+  assert.equal(getterReads, 0);
+  assert.equal(env.connected.messages.length, before);
+  assert.equal(env.connected.disconnects, 0);
+});
+
+test('page-marker publication rejects batch, missing grant and expiry reached during authorization', async () => {
+  for (const kind of ['batch', 'no-intent', 'expires-during-await']) {
+    let clock = EPOCH + 1;
+    const env = await markerFixture({ epochNow: () => clock, authorizePageMarkersSession: async value => {
+      if (kind === 'expires-during-await') clock = EPOCH + 10_000;
+      return markerAuthorization(value, kind === 'batch' ? { mode: 'batch' }
+        : kind === 'no-intent' ? { intents: { panel: { running: [], result: ['open-report'], 'view-only': ['open-report'] }, review: {} } } : {});
+    } });
+    const before = env.connected.messages.length;
+    assert.deepEqual(await env.coordinator.publishPageMarkersState(markerPublication()), { delivered: 0 });
+    assert.equal(env.connected.messages.length, before);
+  }
+});
+
+test('page-marker delayed active cannot overwrite a later clear on the same delivered result', async () => {
+  let release;
+  let count = 0;
+  const env = await markerFixture({ authorizePageMarkersSession: async value => {
+    if (++count === 1) await new Promise(resolve => { release = resolve; });
+    return markerAuthorization(value);
+  } });
+  const active = env.coordinator.publishPageMarkersState(markerPublication());
+  await tick();
+  assert.equal(typeof release, 'function');
+  assert.deepEqual(await env.coordinator.publishPageMarkersState(markerPublication({ state: 'clear', selectedOrdinal: null })), { delivered: 1 });
+  release();
+  assert.deepEqual(await active, { delivered: 0 });
+  assert.equal(env.connected.messages.at(-1).state, 'clear');
+});
+
+test('page-marker receipt replacement and failed delivery invalidate callbacks without waiting for cleanup', async () => {
+  const env = await markerFixture();
+  requestMarkers(env);
+  await tick();
+  const isCurrent = env.dispatched[0].isCurrent;
+  const next = await bundle('audit-port', 2);
+  const delivered = await env.coordinator.withWindowLock(9, scope => scope.publishResult({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, state: 'result', resultBundle: next,
+  }));
+  assert.equal(delivered.state, 'delivered');
+  assert.equal(isCurrent(), false);
+  assert.deepEqual(env.closed, [{ windowId: 9, sessionCapabilityId: SESSION }]);
+  await env.coordinator.withWindowLock(9, scope => scope.publishResult({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, state: 'result', resultBundle: env.resultBundle,
+  }));
+  assert.equal(isCurrent(), false, 'equal values cannot revive an earlier delivery identity');
+  env.connected.throwOnType = 'bootstrap-result';
+  const failed = await env.coordinator.withWindowLock(9, scope => scope.publishResult({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, state: 'result', resultBundle: next,
+  }));
+  assert.notEqual(failed.state, 'delivered');
+  assert.deepEqual(await env.coordinator.publishPageMarkersState(markerPublication({ modelRevision: 2 })), { delivered: 0 });
+});
+
+test('page-marker delete invalidates callbacks before the audit inventory await', async () => {
+  const env = await markerFixture();
+  requestMarkers(env);
+  await tick();
+  const isCurrent = env.dispatched[0].isCurrent;
+  const get = env.sessionArea.get.bind(env.sessionArea);
+  let release;
+  env.sessionArea.get = async key => {
+    if (key === null) await new Promise(resolve => { release = resolve; });
+    return get(key);
+  };
+  const clearing = env.coordinator.clearAudit('audit-port');
+  assert.equal(isCurrent(), false);
+  assert.deepEqual(env.closed, [{ windowId: 9, sessionCapabilityId: SESSION }]);
+  release();
+  await clearing;
+});
+
+test('page-marker same-revision result after a running interval never revives an earlier receipt', async () => {
+  const env = await markerFixture();
+  requestMarkers(env);
+  await tick();
+  const isCurrent = env.dispatched[0].isCurrent;
+  env.sessions.set(SESSION, session('running'));
+  env.setActive(runningActive());
+  assert.equal(await env.coordinator.withWindowLock(9, scope => scope.publishRunningResume({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9,
+  })), true);
+  assert.equal(isCurrent(), false);
+  env.sessions.set(SESSION, session('result'));
+  env.setActive(null);
+  await env.coordinator.withWindowLock(9, scope => scope.publishResult({
+    auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, state: 'result', resultBundle: env.resultBundle,
+  }));
+  assert.equal(isCurrent(), false);
+  assert.deepEqual(await env.coordinator.publishPageMarkersState(markerPublication()), { delivered: 1 });
+});
+
+test('page-marker optional factory is all-or-nothing and stale dispatch cannot reach the controller', async () => {
+  assert.throws(() => fixture({ authorizePageMarkersSession: async () => ({ ok: false }) }), /PANEL_PORT_COORDINATOR_INVALID/);
+  assert.throws(() => fixture({ closePanelMarkers: async () => true }), /PANEL_PORT_COORDINATOR_INVALID/);
+  assert.throws(() => fixture({ authorizePageMarkersSession: null, closePanelMarkers: async () => true }), /PANEL_PORT_COORDINATOR_INVALID/);
+  const env = await markerFixture();
+  requestMarkers(env, 2);
+  await tick();
+  assert.deepEqual(env.dispatched, []);
+});
 
 function launchAuthorityWithRetirement(retirePort) {
   let owner = null;
