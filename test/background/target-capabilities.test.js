@@ -425,7 +425,7 @@ test('prepares an exact one-use target and atomically persists its running sessi
     { name: 'review', path: '/src/review/index.html', contextType: 'TAB' },
   ]);
   assert.deepEqual(session.intents, {
-    panel: { running: ['cancel'], 'privacy-paused': ['cancel', 'confirm-pixels'], result: ['open-report', 'highlight'], 'view-only': ['open-report'] },
+    panel: { running: ['cancel'], 'privacy-paused': ['cancel', 'confirm-pixels'], result: ['open-report', 'highlight', 'review-markers'], 'view-only': ['open-report', 'review-markers'] },
     review: { running: [], 'privacy-paused': [], result: ['export', 'highlight'], 'view-only': ['export'] },
   });
   assert.equal(sessionArea.writes.at(-1).keys.length, 2);
@@ -1415,6 +1415,102 @@ test('authorizes only state consumer intent audit window path and context matche
   assert.equal((await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'open-report', sender, claimedWindowId: 9 })).ok, true);
   assert.equal((await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'highlight', sender, claimedWindowId: 9 })).ok, true);
   assert.deepEqual(await authority.transitionAuditSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', nextState: 'running' }), { ok: false, code: 'SESSION_TRANSITION_DENIED' });
+});
+
+test('review-markers belongs only to a terminal panel session, not review or active audit', async () => {
+  const sender = { id: 'test', documentId: 'panel-document-1', url: PANEL_URL };
+  const review = { id: 'test', documentId: 'review-document-1', url: 'chrome-extension://test/src/review/index.html?auditId=audit-1' };
+  const { chromeApi } = panelChromeApi(sender);
+  chromeApi.runtime.getContexts = async ({ documentIds }) => documentIds[0] === review.documentId
+    ? [{ documentId: review.documentId, documentUrl: review.url, contextType: 'TAB', windowId: 9, tabId: 71 }]
+    : [{ documentId: sender.documentId, documentUrl: PANEL_URL, contextType: 'SIDE_PANEL', tabId: -1, windowId: -1 }];
+  const { authority } = authorityFixture({ chromeApi });
+  const prepared = await prepareAttached(authority);
+  const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+  const base = { sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', intent: 'review-markers' };
+  const panel = () => authority.authorizeSession({ ...base, consumer: 'panel', sender, claimedWindowId: 9 });
+  const denied = { ok: false, code: 'SESSION_DENIED' };
+  assert.deepEqual(await panel(), denied);
+  for (const state of ['privacy-paused', 'running', 'result', 'revoked']) {
+    assert.equal((await authority.transitionAuditSession({
+      sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', nextState: state,
+    })).ok, true);
+    if (state === 'result') {
+      assert.equal((await panel()).ok, true);
+      for (const change of [{ auditId: 'other' }, { claimedWindowId: 10 }, { sender: { ...sender, id: 'foreign' } }]) {
+        assert.deepEqual(await authority.authorizeSession({ ...base, consumer: 'panel', sender, claimedWindowId: 9, ...change }), denied);
+      }
+    } else assert.deepEqual(await panel(), denied);
+    assert.deepEqual(await authority.authorizeSession({ ...base, consumer: 'review', sender: review }), denied);
+  }
+});
+
+test('review-markers can be requested by a fresh view-only panel without granting highlight', async () => {
+  const sender = { id: 'test', documentId: 'panel-document-1', url: PANEL_URL };
+  const { chromeApi } = panelChromeApi(sender);
+  const { authority } = authorityFixture({ chromeApi });
+  const session = await authority.rehydrateViewOnly({ auditId: 'audit-1', windowId: 9, mode: 'attached' });
+  const base = { sessionCapabilityId: session.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', sender, claimedWindowId: 9 };
+  assert.equal((await authority.authorizeSession({ ...base, intent: 'review-markers' })).ok, true);
+  for (const intent of ['highlight', 'cancel', 'confirm-pixels']) {
+    assert.deepEqual(await authority.authorizeSession({ ...base, intent }), { ok: false, code: 'SESSION_DENIED' });
+  }
+});
+
+test('pre-markers sessions stay readable through result transition without a new grant', async () => {
+  const sender = { id: 'test', documentId: 'panel-document-1', url: PANEL_URL };
+  const { chromeApi } = panelChromeApi(sender);
+  const { authority, sessionArea } = authorityFixture({ chromeApi });
+  const prepared = await prepareAttached(authority);
+  const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+  const key = sessionCapabilityStorageKey(claimed.sessionCapabilityId);
+  const stored = (await sessionArea.get(key))[key];
+  const intents = {
+    panel: { running: ['cancel'], 'privacy-paused': ['cancel', 'confirm-pixels'], result: ['open-report', 'highlight'], 'view-only': ['open-report'] },
+    review: { running: [], 'privacy-paused': [], result: ['export', 'highlight'], 'view-only': ['export'] },
+  };
+  await sessionArea.set({ [key]: { ...stored, intents } });
+  assert.equal((await authority.transitionAuditSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', nextState: 'result' })).ok, true);
+  const base = { sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', sender, claimedWindowId: 9 };
+  for (const intent of ['open-report', 'highlight']) assert.equal((await authority.authorizeSession({ ...base, intent })).ok, true);
+  assert.deepEqual(await authority.authorizeSession({ ...base, intent: 'review-markers' }), { ok: false, code: 'SESSION_DENIED' });
+  assert.deepEqual((await sessionArea.get(key))[key].intents, intents);
+});
+
+test('batch never receives review-markers even with a transplanted current grant table', async () => {
+  const sender = { id: 'test', documentId: 'panel-document-1', url: PANEL_URL };
+  const { chromeApi } = panelChromeApi(sender);
+  const { authority, sessionArea } = authorityFixture({ chromeApi });
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'batch', senderContext: extensionContext() });
+  const claimed = await authority.claimNavigationAndIssueAuditSession({ capabilityId: prepared.capabilityId, auditId: 'audit-1', ownershipId: null, intent: 'batch', senderContext: extensionContext() });
+  assert.equal((await authority.transitionAuditSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', nextState: 'result' })).ok, true);
+  const key = sessionCapabilityStorageKey(claimed.sessionCapabilityId);
+  const stored = (await sessionArea.get(key))[key];
+  assert.equal(stored.intents.panel.result.includes('review-markers'), false);
+  const request = { sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', sender, claimedWindowId: 9, intent: 'review-markers' };
+  assert.deepEqual(await authority.authorizeSession(request), { ok: false, code: 'SESSION_DENIED' });
+  const intents = structuredClone(stored.intents);
+  intents.panel.result.push('review-markers');
+  intents.panel['view-only'].push('review-markers');
+  await sessionArea.set({ [key]: { ...stored, intents } });
+  assert.equal((await authority.authorizeSession({ ...request, intent: 'open-report' })).ok, true);
+  assert.deepEqual(await authority.authorizeSession(request), { ok: false, code: 'SESSION_DENIED' });
+});
+
+test('review-markers cannot be added to active or review grants in a nearly valid table', async () => {
+  const sender = { id: 'test', documentId: 'panel-document-1', url: PANEL_URL };
+  const { chromeApi } = panelChromeApi(sender);
+  const { authority, sessionArea } = authorityFixture({ chromeApi });
+  const prepared = await prepareAttached(authority);
+  const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+  const key = sessionCapabilityStorageKey(claimed.sessionCapabilityId);
+  const stored = (await sessionArea.get(key))[key];
+  for (const [consumer, state] of [['panel', 'running'], ['panel', 'privacy-paused'], ['review', 'result'], ['review', 'view-only']]) {
+    const intents = structuredClone(stored.intents);
+    intents[consumer][state].push('review-markers');
+    await sessionArea.set({ [key]: { ...stored, intents } });
+    assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', intent: 'cancel', sender, claimedWindowId: 9 }), { ok: false, code: 'SESSION_DENIED' });
+  }
 });
 
 test('authorizes the exact Side Panel privacy-paused intents and no review intent', async () => {

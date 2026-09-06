@@ -40,6 +40,10 @@ const CONSUMERS = deepFreeze([
   { name: 'review', path: REVIEW_SURFACE.path, contextType: REVIEW_SURFACE.contextType },
 ]);
 const INTENTS = deepFreeze({
+  panel: { running: ['cancel'], 'privacy-paused': ['cancel', 'confirm-pixels'], result: ['open-report', 'highlight', 'review-markers'], 'view-only': ['open-report', 'review-markers'] },
+  review: { running: [], 'privacy-paused': [], result: ['export', 'highlight'], 'view-only': ['export'] },
+});
+const PRE_MARKERS_INTENTS = deepFreeze({
   panel: { running: ['cancel'], 'privacy-paused': ['cancel', 'confirm-pixels'], result: ['open-report', 'highlight'], 'view-only': ['open-report'] },
   review: { running: [], 'privacy-paused': [], result: ['export', 'highlight'], 'view-only': ['export'] },
 });
@@ -716,6 +720,7 @@ export function createTargetCapabilityAuthority({
     const stateIntents = session?.intents[input.consumer]?.[session.state] ??
       (session?.state === 'privacy-paused' ? (input.consumer === 'panel' ? ['cancel'] : []) : null);
     const allowed = session && session.sessionCapabilityId === input.sessionCapabilityId &&
+      !(input.intent === 'review-markers' && (session.mode === 'batch' || session.targetBinding.kind === 'batch')) &&
       session.expiresAt > currentTime && session.auditId === input.auditId &&
       session.windowId === context.windowId && context.issuer.path === descriptor.path &&
       context.contextType === descriptor.contextType && session.consumers.some(value => sameConsumer(value, descriptor)) &&
@@ -1099,7 +1104,7 @@ function createSessionRecord(value) {
     mode: value.mode,
     targetBinding: structuredClone(value.targetBinding),
     consumers: structuredClone(CONSUMERS),
-    intents: structuredClone(INTENTS),
+    intents: structuredClone(value.mode === 'batch' ? PRE_MARKERS_INTENTS : INTENTS),
     state: value.state,
     issuedAt: value.issuedAt,
     expiresAt: value.expiresAt,
@@ -1273,7 +1278,7 @@ function parseIntents(value) {
   const panel = readDataRecord(intents.panel, ['running', 'privacy-paused', 'result', 'view-only']);
   const review = readDataRecord(intents.review, ['running', 'privacy-paused', 'result', 'view-only']);
   if (panel && review) {
-    for (const allowed of [INTENTS]) {
+    for (const allowed of [INTENTS, PRE_MARKERS_INTENTS]) {
       if (sameDataArray(panel.running, allowed.panel.running) &&
         sameDataArray(panel['privacy-paused'], allowed.panel['privacy-paused']) &&
         sameDataArray(panel.result, allowed.panel.result) &&

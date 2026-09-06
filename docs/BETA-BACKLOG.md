@@ -26,6 +26,8 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Infraestrutura de testes não bloqueante
 
+- conferência na página W3-auth: acrescentar casos explícitos de consumer review+view-only e transplantes independentes mode/binding batch; a negação correspondente já está implementada e revisada C0/I0, com121 testes focados verdes. São refinamentos de cobertura, não falhas conhecidas de autorização.
+
 - aplicar limite temporal também à leitura do recibo de exportação no helper E2E, para que uma falha de armazenamento nunca deixe o teste aguardando indefinidamente.
 - avaliar destaque incremental em auditorias acima do limite atual de 5.000 relações, preservando a verificação de identidade e sem omitir registros do relatório.
 - ampliar a simulação de IndexedDB dos testes unitários com rollback e ordenação de transações; a prova do armazenamento real continua a cargo dos E2E no Chrome.
