@@ -133,6 +133,31 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   const technical = JSON.parse(jsonBytes.replace(/^\uFEFF/u, ''));
   const audit = technical.audit;
 
+  // Read the actual retained occurrence, not an independently reconstructed label.
+  const labelOccurrence = audit.occurrences.find(occurrence => occurrence.itemId === '5.13.7');
+  assert.ok(labelOccurrence, 'the fixture must exercise the label-in-name finding');
+  const labelEvidence = audit.evidence.find(artifact => artifact.kind === 'element' &&
+    artifact.nodeId === labelOccurrence.nodeId && labelOccurrence.evidenceRefs.includes(artifact.evidenceId));
+  assert.ok(labelEvidence);
+  assert.equal(labelEvidence.accessibility.visibleText, 'B');
+  assert.equal(labelEvidence.accessibility.name, 'Alvo pequeno vizinho');
+  const recordedComparison = 'Texto visível registrado: “B” · Nome acessível registrado: “Alvo pequeno vizinho”.';
+  const liveComparisons = await extension.evaluate(report,
+    `[...document.querySelectorAll('[data-report-label-comparison]')].map(row=>({id:row.dataset.reportLabelComparison,text:row.textContent}))`);
+  assert.deepEqual(liveComparisons, [{ id: labelEvidence.evidenceId, text: recordedComparison }]);
+  assert.ok(html.includes(`data-report-label-comparison="${labelEvidence.evidenceId}"`));
+  assert.ok(html.includes(recordedComparison));
+  await extension.evaluate(report, `(() => {
+    const row=document.querySelector('[data-report-label-comparison]');
+    for(let parent=row.parentElement;parent;parent=parent.parentElement) {
+      if(parent.tagName==='DETAILS') parent.open=true;
+    }
+    row.closest('[data-report-issue]').scrollIntoView({behavior:'instant',block:'start'});
+    return true;
+  })()`);
+  await extension.captureJourney('recorded-label-comparison', report, { captureBeyondViewport: false });
+  t.diagnostic('recorded-label-comparison=retained-element=JSON=live=HTML; visible=B; accessible=Alvo pequeno vizinho');
+
   const rasters = audit.evidence.filter(artifact =>
     ['full-page', 'element'].includes(artifact.kind) && typeof artifact.dataUrl === 'string');
   assert.ok(rasters.some(artifact => artifact.kind === 'full-page'));
