@@ -8,6 +8,10 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Próximas entregas funcionais
 
+Reconciliação com fontes e testes atuais: `docs/qa/2026-09-06-goal-reconciliation.md`. Não usar checklists históricos vazios como prova de funcionalidade ausente. A candidata 1.1.6 permanece sem liberação enquanto a falha nativa de personas do gate atual não for esclarecida.
+
+- orientação didática ainda a aprofundar: procedimentos específicos para **5.12.2 (espaçamento entre parágrafos)** e **5.1.9 (conteúdo adicional dispensável)**. A revisão de produto reproduziu instruções por família genéricas demais nesses dois casos. Implementar procedimento e exemplo pertinentes ao item, mantendo as exceções normativas e a classificação; depois verificar os demais fallbacks para não declarar que todos os 146 itens já têm instrução individual completa.
+
 **Atualização 1.1.5:** os horários individuais e as orientações 5.13.6–5.13.8 descritos abaixo foram entregues após o gate de 3.977 testes lógicos, 38 nativos, verificação estática, QA visual/PDF e duas revisões independentes. As menções “fora do ZIP 1.1.4” permanecem corretas para aquele pacote, não indicam pendência na 1.1.5. Registro: `docs/qa/2026-09-06-beta115-release.md`.
 
 - comparação explícita dos valores registrados em 5.13.7 implementada depois da beta 1.1.5: pares de texto visível/nome acessível, sem misturar elementos nem inferir resultado, no painel e nas três apresentações de relatório. GREEN173/173; revisão independente C=0/I=0, com 96/96 testes. Ainda fora do pacote 1.1.5. Registro: `docs/qa/2026-09-06-recorded-label-comparisons.md`; prova nativa visual/PDF do novo par no próximo candidato.
