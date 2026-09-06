@@ -8,6 +8,10 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Próximas entregas funcionais
 
+**Atualização 1.1.5:** os horários individuais e as orientações 5.13.6–5.13.8 descritos abaixo foram entregues após o gate de 3.977 testes lógicos, 38 nativos, verificação estática, QA visual/PDF e duas revisões independentes. As menções “fora do ZIP 1.1.4” permanecem corretas para aquele pacote, não indicam pendência na 1.1.5. Registro: `docs/qa/2026-09-06-beta115-release.md`.
+
+- próxima melhoria didática a investigar: na ficha 5.13.7, apresentar lado a lado o texto visível e o nome acessível efetivamente registrados, quando disponíveis. O PDF 1.1.5 já explica a comparação, mas a observação principal ainda usa a justificativa normativa genérica e a pessoa precisa procurar os valores na evidência. Usar somente dados já correlacionados/sanitizados, sem inferir o texto de uma captura ou transformar ausência de dados em falha. Evidência concreta: páginas 4–5 do PDF registrado na QA 1.1.5.
+
 - horário individual de recebimento de PNG implementado depois da beta 1.1.4: `metadata.captureReceivedAt`, preservação em modelos/JSON/orçamento e apresentação viva/HTML compartilhada com impressão. Relógio local explicitamente não certificado; datas antigas não são inventadas. Testes locais e duas revisões C=0/I=0; prova nativa concluída com 12 datas conferidas também no PDF e ausência de datas inventadas em no-pixels. Ainda fora do ZIP 1.1.4. Registros: `docs/qa/2026-09-06-capture-receipt-time.md` e `docs/qa/2026-09-06-capture-receipt-native.md`.
 
 - explicações práticas de ABNT 5.13.6, 5.13.7 e 5.13.8 implementadas depois da beta 1.1.4, com comparação do nome visível/acessível, leitura contínua e teste seguro de mensagens de status. Resolvem a orientação genérica observada para 5.13.7 no PDF real, mantendo evidências e resultados. GREEN local113/113; revisão independente C=0/I=0/M=0. Ainda fora do ZIP 1.1.4. Registro: `docs/qa/2026-09-06-layperson-guidance-513.md`. Os demais fallbacks por família podem receber explicações mais específicas incrementalmente, sem apresentar isso como cobertura didática individual completa de todos os itens.
