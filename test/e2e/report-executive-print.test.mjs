@@ -10,13 +10,23 @@ import { renderHtmlReport } from '../../src/core/report/html.js';
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 import { buildCompleteReportSummary } from '../../src/panel/panel-summary.js';
 import { buildReportView } from '../../src/review/report-view.js';
+import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { createCdpPipeTransport, resolveRealChromeTestBinary, startFixtureServer, terminateChromeProcess } from './support/real-chrome.mjs';
 
 test('executive print keeps the complete ABNT matrix and reduces actual PDFs in live and downloaded reports', { timeout: 90_000 }, async t => {
   const binary = resolveRealChromeTestBinary();
   assert.ok(binary, 'Configure AUDITA_E2E_CHROME for native PDF verification.');
   const inventory = await createInstalledCoreRuleInventory();
-  const model = await enrichAuditForReport(SAMPLE_AUDIT, {
+  const longNote = 'INICIO-REVISAO\n' + 'x'.repeat(3950) + '\nFIM-REVISAO-NATIVA';
+  const reviewed = applyReviewDecisions(SAMPLE_AUDIT, [
+    createReviewDecision({ auditId: SAMPLE_AUDIT.auditId, itemId: '5.1.4', occurrenceId: 'occ-focus-review',
+      answer: 'não conforme', evaluator: 'Avaliadora QA do histórico', decidedAt: '2026-09-06T11:00:00.000Z',
+      mode: 'assisted', note: longNote }),
+    createReviewDecision({ auditId: SAMPLE_AUDIT.auditId, itemId: '5.7.5', occurrenceId: 'occ-cross-page',
+      answer: 'conforme', evaluator: 'Pessoa QA <script>literal</script>', decidedAt: '2026-09-06T11:05:00.000Z',
+      mode: 'manual', note: 'Verificação concluída no escopo observado.' }),
+  ]);
+  const model = await enrichAuditForReport(reviewed, {
     now: () => '2026-09-06T12:00:00.000Z', timezone: 'America/Cuiaba',
     manifestVersion: '1.1.1', rulesVersion: inventory.rulesVersion, browserVersion: 'Chrome/152.0.7977.64',
   });
@@ -62,7 +72,34 @@ test('executive print keeps the complete ABNT matrix and reduces actual PDFs in 
     await command('Page.navigate', { url: `${server.origin}/${mode}` });
     await waitReady();
     await evaluate('document.fonts.ready.then(()=>true)');
+    const screenHistory = await evaluate(`(() => {
+      const history=document.querySelector('[data-review-history]');
+      return {closed:history&&!history.open,records:history?.querySelectorAll('[data-review-record]').length,
+        scripts:history?.querySelectorAll('script').length};
+    })()`);
+    assert.deepEqual(screenHistory, { closed: true, records: 2, scripts: 0 });
+    await command('Emulation.setEmulatedMedia', { media: 'print' });
+    await evaluate(`window.dispatchEvent(new Event('beforeprint'))`);
+    const printHistory = await evaluate(`(() => {
+      const history=document.querySelector('[data-review-history]');
+      const visible=node=>{for(let p=node;p;p=p.parentElement)if(getComputedStyle(p).display==='none')return false;return true};
+      const note=[...history.querySelectorAll('dd')].find(node=>node.textContent.startsWith('INICIO-REVISAO'));
+      return {visible:visible(history),allNotes:note?.textContent===${JSON.stringify(longNote)},
+        end:document.body.innerText.includes('FIM-REVISAO-NATIVA'),
+        reviewer:document.body.innerText.includes('Avaliadora QA do histórico'),
+        noHorizontalClip:note.scrollWidth<=note.clientWidth+1};
+    })()`);
+    for (const [key, value] of Object.entries(printHistory)) assert.equal(value, true, `${mode}: ${key}`);
     const fullPages = await print(`${mode}-full`);
+    await evaluate(`window.dispatchEvent(new Event('afterprint'))`);
+    await command('Emulation.setEmulatedMedia', { media: '' });
+    assert.equal(await evaluate(`document.querySelector('[data-review-history]').open`), false);
+    if (process.env.AUDITA_PRINT_QA_DIR) {
+      await evaluate(`document.querySelector('[data-review-history]').open=true;document.querySelector('[data-review-history]').scrollIntoView({block:'start',behavior:'instant'})`);
+      const shot = await command('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+      await writeFile(join(process.env.AUDITA_PRINT_QA_DIR, `${mode}-history.png`), Buffer.from(shot.data, 'base64'), { flag: 'wx' });
+      await evaluate(`document.querySelector('[data-review-history]').open=false`);
+    }
     // Intercept only the OS print dialog. Capture the real renderer's document
     // at the exact window.print boundary, then rasterize it with native Chrome.
     const snapshot = await evaluate(`(() => {
@@ -80,12 +117,14 @@ test('executive print keeps the complete ABNT matrix and reduces actual PDFs in 
       return {items:[...document.querySelectorAll('[data-report-matrix] tbody tr')].filter(visible).map(row=>row.querySelector('th').textContent),
         annexHidden:!visible(document.querySelector('[data-report-annex]')),
         detailsHidden:[...document.querySelectorAll('[data-report-issue]')].every(node=>!visible(node)),
+        historyHidden:!visible(document.querySelector('[data-review-history]')),
+        historyNotice:document.querySelector('[data-report-summary-note]').textContent.includes('conclusões humanas detalhadas'),
         note:visible(document.querySelector('[data-report-summary-note]')),
         essentials:[1,6,7].every(index=>visible(document.getElementById('report-section-'+index))),
         identity:document.body.innerText.includes(${JSON.stringify(view.modelHash)})&&document.body.innerText.includes(${JSON.stringify(view.auditId)})};
     })()`);
     assert.deepEqual(retained.items, view.matrix.map(row => row.id));
-    for (const key of ['annexHidden', 'detailsHidden', 'note', 'essentials', 'identity']) assert.equal(retained[key], true, `${mode}: ${key}`);
+    for (const key of ['annexHidden', 'detailsHidden', 'historyHidden', 'historyNotice', 'note', 'essentials', 'identity']) assert.equal(retained[key], true, `${mode}: ${key}`);
     const summaryPages = await print(`${mode}-summary`);
     assert.ok(summaryPages > 1 && summaryPages < fullPages, `${mode}: full=${fullPages}, summary=${summaryPages}`);
     t.diagnostic(`${mode}: full=${fullPages} pages; summary=${summaryPages} pages; all146ABNTitems; noindividualevidence`);

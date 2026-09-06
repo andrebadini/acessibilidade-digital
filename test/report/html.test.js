@@ -19,6 +19,15 @@ import { applyReviewDecisions, createReviewDecision } from '../../src/core/revie
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consumer-basis.js';
 import { SECTION508_REVISED_CROSSWALK, section508ReferencesForWcag } from '../../src/core/normative/section508.js';
 
+test('standalone human review retains the evaluator note as escaped text', () => {
+  const decision = createReviewDecision({ auditId: SAMPLE_AUDIT.auditId, itemId: '5.1.4',
+    occurrenceId: 'occ-focus-review', answer: 'não conforme', evaluator: 'Pessoa revisora',
+    decidedAt: '2026-08-26T15:00:00.000Z', mode: 'assisted', note: 'Nota <script>registrada</script>\nFim.' });
+  const html = renderHtmlReport(applyReviewDecisions(SAMPLE_AUDIT, [decision]));
+  assert.match(html, /Nota &lt;script&gt;registrada&lt;\/script&gt;\nFim\./u);
+  assert.doesNotMatch(html, /<script>registrada<\/script>/u);
+});
+
 test('standalone evidence annex labels the recorded page period without inventing capture timestamps', () => {
   const before = JSON.stringify(SAMPLE_AUDIT);
   const html = renderHtmlReport(SAMPLE_AUDIT);

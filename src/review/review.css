@@ -80,6 +80,14 @@ summary { display: flex; align-items: center; min-height: 2.75rem; cursor: point
 .report-view th { background: var(--pale); }
 .matrix-scroll { min-width: 0; overflow-x: auto; }
 .review-controls, .review-card { background: white; border: 1px solid #c8d0d6; border-radius: .5rem; padding: 1rem; margin-block: 1rem; }
+[data-review-history] { margin-block: 1rem; }
+[data-review-history] > ol { padding-left: 1.6rem; }
+[data-review-record] { margin-block: 1rem; padding: .8rem; border: 1px solid #738596; border-left: .3rem solid #6b4e00; border-radius: .4rem; min-width: 0; overflow-wrap: anywhere; }
+[data-review-answer="conforme"] { border-left-color: #237440; }
+[data-review-answer="não conforme"] { border-left-color: #b42318; }
+[data-review-record] dt { font-weight: 700; margin-top: .55rem; }
+[data-review-record] dd { margin: .15rem 0 .5rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+[data-review-record] a { margin-right: 1rem; }
 label { display: block; font-weight: 700; }
 input, textarea, button { font: inherit; }
 input, textarea { box-sizing: border-box; width: 100%; max-width: 40rem; padding: .55rem; }
@@ -105,6 +113,8 @@ dialog:not([open]) { display: none; }
 @media (min-width: 48rem) { .report-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); } [data-report-evidence-preview] { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 32rem) { main { padding: .75rem; } .dialog-actions { flex-direction: column; } .report-filters { grid-template-columns: 1fr; } .report-identity, .report-view > section { padding: .85rem; } .section-nav { align-items: flex-start; flex-direction: column; } .section-nav ul { width: 100%; } }
 @media print {
+  [data-review-history], [data-review-record], [data-review-record] dl, [data-review-record] dd { break-inside: auto; }
+  [data-review-record] dt, [data-review-record] h3 { break-after: avoid; }
   .report-view[data-print-layout="summary"] > [data-report-section="2"],
   .report-view[data-print-layout="summary"] > [data-report-section="3"],
   .report-view[data-print-layout="summary"] > [data-report-section="4"],

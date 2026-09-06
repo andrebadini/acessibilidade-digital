@@ -596,7 +596,7 @@ test('ReportViewV1 owns exact frozen copies and the canonical four-format order'
   });
   assert.deepEqual(Object.keys(view), [
     'version', 'auditId', 'modelRevision', 'modelHash', 'filters', 'executive', 'issues',
-    'technicalEvidence', 'readerMaps', 'methodology', 'exports', 'matrix',
+    'technicalEvidence', 'readerMaps', 'methodology', 'exports', 'matrix', 'reviewHistory',
   ]);
   assert.deepEqual(Object.keys(view.filters), ['impact', 'wcag', 'result', 'classification', 'page', 'engine', 'abnt']);
   assert.deepEqual(Object.keys(view.issues), ['failed', 'alerts', 'humanReview', 'passed']);
@@ -649,6 +649,105 @@ test('complete report summary preserves every occurrence beyond the bounded inte
   assert.equal(reportOccurrences.length, 256);
   assert.equal(new Set(reportOccurrences.map(occurrence => occurrence.occurrenceId)).size, 256);
   assert.equal(completeSummary.limitations.codes.some(value => /painel.+relat.rio completo/iu.test(value)), false);
+});
+
+test('human history preserves a decision omitted by the bounded panel without changing the audit', async () => {
+  const { model, summary } = await fixture({ mutateDraft(draft) {
+    expandManualReviewOccurrences(draft, 256);
+    const occurrence = draft.occurrences[255];
+    return structuredClone(applyReviewDecisions(draft, [createReviewDecision({
+      auditId: draft.auditId, occurrenceId: occurrence.occurrenceId, itemId: occurrence.itemId,
+      answer: 'não foi possível determinar', evaluator: 'Pessoa 256', mode: occurrence.mode,
+      decidedAt: '2026-08-29T12:00:00.000Z', note: 'Ainda não concluído.',
+    })]));
+  } });
+  const before = JSON.stringify(model);
+  assert.ok(!Object.values(summary.groups).flat().flatMap(card => card.occurrenceIds).includes('occ-report-complete-255'));
+  const view = buildReportView({ model, summary, modelRevision: 2, modelHash: model.integrity.canonicalModelHash });
+  assert.equal(view.reviewHistory?.length, 1);
+  assert.equal(view.reviewHistory[0].occurrenceId, 'occ-report-complete-255');
+  assert.equal(Object.isFrozen(view.reviewHistory[0]), true);
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  assert.match(root.querySelector('[data-review-history]').textContent, /Pessoa 256/);
+  assert.match(renderHtmlReport(model, { reportView: view }), /Pessoa 256/);
+  assert.equal(JSON.stringify(model), before);
+});
+
+test('human history displays exact decisions once with literal notes and correlated local evidence', async () => {
+  const hostile = '</details><script>alert("human-note")</script>\nhttps://example.invalid/note';
+  const { model, summary } = await fixture({ mutateDraft(draft) {
+    return structuredClone(applyReviewDecisions(draft, [
+      createReviewDecision({ auditId: draft.auditId, itemId: '5.1.4', occurrenceId: 'occ-focus-review',
+        answer: 'não conforme', evaluator: 'Ana <img src=x>', mode: 'assisted',
+        decidedAt: '2026-08-29T12:00:00.000Z', note: hostile }),
+      createReviewDecision({ auditId: draft.auditId, itemId: '5.7.5', occurrenceId: 'occ-cross-page',
+        answer: 'conforme', evaluator: 'Bruno', mode: 'manual',
+        decidedAt: '2026-08-29T11:00:00.000Z' }),
+    ]));
+  } });
+  const view = buildReportView({ model, summary, modelRevision: 2, modelHash: model.integrity.canonicalModelHash });
+  assert.equal(view.reviewHistory?.length, 2);
+  assert.deepEqual(view.reviewHistory.map(entry => entry.occurrenceId), ['occ-cross-page', 'occ-focus-review']);
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const history = root.querySelector('[data-review-history]');
+  assert.equal(history.getAttribute('open'), null);
+  assert.equal(history.querySelectorAll('[data-review-record]').length, 2);
+  const first = history.querySelector('[data-review-record="occ-cross-page"]');
+  const second = history.querySelector('[data-review-record="occ-focus-review"]');
+  assert.match(first.textContent, /Bruno.*29\/08\/2026.*11:00:00.*conforme/su);
+  assert.match(first.textContent, /Nenhuma nota registrada/u);
+  assert.match(second.textContent, /Ana <img src=x>/u);
+  assert.ok(second.textContent.includes(hostile));
+  assert.equal(history.querySelectorAll('script').length, 0);
+  assert.equal(history.querySelectorAll('img').length, 0);
+  for (const [card, evidenceIds] of [[first, ['ev-full']], [second, ['ev-full', 'ev-control']]]) {
+    const links = card.querySelectorAll('[data-report-consult-evidence]');
+    const targets = links.map(link => root.querySelector(`[id="${link.getAttribute('href').slice(1)}"]`));
+    assert.deepEqual(targets.map(target => target.getAttribute('data-report-evidence')), evidenceIds);
+    links[0].click();
+    assert.equal(root.querySelector('[data-report-annex]').getAttribute('open'), '');
+  }
+  const html = renderHtmlReport(model, { reportView: view });
+  assert.equal((html.match(/data-review-record=/gu) ?? []).length, 2);
+  assert.ok(html.includes('&lt;/details&gt;&lt;script&gt;'));
+  assert.ok(!html.includes(hostile));
+  assert.ok(!html.includes('<img src=x>'));
+  assert.match(html, /Decisão humana/u);
+  assert.match(history.textContent, /não apagam falhas automáticas/u);
+});
+
+test('human history keeps a long note complete and print restores its closed disclosure', async () => {
+  const note = 'Primeira linha\n' + 'x'.repeat(3972) + '\nFIM-DA-NOTA';
+  const { model, summary } = await fixture({ mutateDraft(draft) {
+    return structuredClone(applyReviewDecisions(draft, [createReviewDecision({
+      auditId: draft.auditId, itemId: '5.1.4', occurrenceId: 'occ-focus-review', answer: 'conforme',
+      evaluator: 'Pessoa revisora', mode: 'assisted', decidedAt: '2026-08-29T12:00:00.000Z', note,
+    })]));
+  } });
+  const view = buildReportView({ model, summary, modelRevision: 2, modelHash: model.integrity.canonicalModelHash });
+  const document = new Document(); const listeners = new Map();
+  document.defaultView = { addEventListener(type, fn) { listeners.set(type, fn); }, removeEventListener() {} };
+  const root = renderReportView({ view, document, onExport() {} });
+  const history = root.querySelector('[data-review-history]');
+  assert.ok(history, 'a readable human history is present');
+  assert.ok(history.textContent.includes(note));
+  listeners.get('beforeprint')();
+  assert.equal(history.getAttribute('open'), '');
+  listeners.get('afterprint')();
+  assert.equal(history.getAttribute('open'), null);
+  const print = renderHtmlReport(model, { reportView: view, forPrint: true });
+  assert.match(print, /<details open data-review-history>/u);
+  assert.ok(print.includes(note));
+});
+
+test('unreviewed audits show a compact empty state without invented human decisions', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  assert.ok(root.querySelector('[data-review-history-empty]'));
+  assert.equal(root.querySelectorAll('[data-review-record]').length, 0);
+  assert.equal(root.querySelectorAll('[data-review-history]').length, 0);
+  assert.match(renderHtmlReport(model, { reportView: view }), /data-review-history-empty/u);
 });
 
 test('ReportViewV1 offers the three WCAG conformance levels instead of numeric criteria', async () => {
@@ -706,7 +805,7 @@ test('live report puts the decision summary before compact navigation and expose
     'Sumário executivo e limitações críticas',
     'Cobertura e quatro grupos de resultado',
     'Não conformidades priorizadas',
-    'Revisões humanas pendentes',
+    'Revisões humanas e conclusões registradas',
     'Mapas de anúncios',
     'Matriz completa dos 146 itens',
     'Metodologia, fontes, integridade, evidências técnicas e anexos',

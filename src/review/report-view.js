@@ -9,6 +9,7 @@ import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy
 import { readerMapPresentation, READER_MAP_INTRO } from '../core/report/reader-map-presentation.js';
 import { projectEvidenceProvenance, evidenceProvenanceRows } from '../core/report/evidence-provenance.js';
 import { accessibilityGuidance } from '../core/report/plain-language-guidance.js';
+import { projectReviewHistory, humanReviewMetadata, HUMAN_REVIEW_DESCRIPTION, HUMAN_REVIEW_EMPTY } from '../core/report/human-review-presentation.js';
 
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
 const GROUP_LABELS = Object.freeze({
@@ -42,7 +43,7 @@ const SECTION_TITLES = Object.freeze([
   'Sumário executivo e limitações críticas',
   'Cobertura e quatro grupos de resultado',
   'Não conformidades priorizadas',
-  'Revisões humanas pendentes',
+  'Revisões humanas e conclusões registradas',
   'Mapas de anúncios',
   'Matriz completa dos 146 itens',
   'Metodologia, fontes, integridade, evidências técnicas e anexos',
@@ -404,6 +405,7 @@ export function buildReportView({ model: inputModel, summary: inputSummary, mode
       methodology: projectMethodology(model),
       exports: projectExports(model),
       matrix: projectMatrix(model),
+      reviewHistory: projectReviewHistory(model),
     });
   } catch (error) {
     if (error instanceof TypeError && error.message === 'REPORT_VIEW_DENIED') throw error;
@@ -571,6 +573,36 @@ function appendTechnicalDetails(document, article, issue, evidence) {
     details.append(block);
   }
   article.append(details);
+}
+
+function appendHumanHistory(document, parent, entries, evidenceAnchorById) {
+  if (!entries.length) {
+    const empty = element(document, 'p', HUMAN_REVIEW_EMPTY);
+    empty.setAttribute('data-review-history-empty', ''); parent.append(empty); return;
+  }
+  const history = document.createElement('details'); history.setAttribute('data-review-history', '');
+  history.append(element(document, 'summary', `Conclusões humanas registradas (${entries.length})`),
+    element(document, 'p', HUMAN_REVIEW_DESCRIPTION));
+  const list = document.createElement('ol');
+  for (const entry of entries) {
+    const card = document.createElement('li'); card.setAttribute('data-review-record', entry.occurrenceId);
+    card.setAttribute('data-review-answer', entry.answer);
+    card.append(element(document, 'h3', `Item ${entry.itemId} da ABNT NBR 17225:2025`));
+    const metadata = document.createElement('dl');
+    for (const [label, value] of humanReviewMetadata(entry)) {
+      metadata.append(element(document, 'dt', label), element(document, 'dd', value));
+    }
+    card.append(metadata);
+    const links = entry.evidenceRefs.map(id => evidenceAnchorById.get(id)).filter(Boolean);
+    if (!links.length) card.append(element(document, 'p', 'Nenhuma evidência correlata foi registrada para esta ocorrência.'));
+    for (const [index, anchor] of links.entries()) {
+      const link = element(document, 'a', `Consultar evidência ${index + 1}`);
+      link.setAttribute('href', `#${anchor}`); link.setAttribute('data-report-consult-evidence', '');
+      card.append(link);
+    }
+    list.append(card);
+  }
+  history.append(list); parent.append(history);
 }
 
 function appendEvidencePreview(document, article, evidence, evidenceAnchorById, issue, highlightOptions = null,
@@ -875,7 +907,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
     element(document, 'p', `Escopo avaliado: ${view.executive.identity.finalUrl}`),
   );
   root.append(identity);
-  const summaryNote = element(document, 'p', 'Resumo executivo — não substitui o relatório completo. Fichas, capturas, anúncios e evidências individuais estão no relatório completo da mesma auditoria e revisão.');
+  const summaryNote = element(document, 'p', 'Resumo executivo — não substitui o relatório completo. Fichas, capturas, anúncios, conclusões humanas detalhadas e evidências individuais estão no relatório completo da mesma auditoria e revisão.');
   summaryNote.setAttribute('data-report-summary-note', '');
   root.append(summaryNote);
   const live = element(document, 'p');
@@ -960,7 +992,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   const summaryPrint = element(document, 'button', 'Imprimir resumo / salvar PDF');
   summaryPrint.setAttribute('type', 'button');
   summaryPrint.setAttribute('data-report-print-summary', '');
-  const printStatus = element(document, 'p', 'Resumo: totais, limitações, matriz ABNT e metodologia, sem fichas e capturas. No diálogo de impressão, escolha Salvar como PDF.');
+  const printStatus = element(document, 'p', 'Resumo: totais, limitações, matriz ABNT e metodologia, sem fichas, capturas e conclusões humanas detalhadas. No diálogo de impressão, escolha Salvar como PDF.');
   printStatus.setAttribute('data-report-print-status', '');
   printStatus.setAttribute('aria-live', 'polite');
   actions.append(exportButton, summaryPrint, printStatus, deletionChoice);
@@ -1020,6 +1052,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   root.append(failed);
 
   const review = section(document, 3);
+  appendHumanHistory(document, review, view.reviewHistory ?? [], evidenceAnchorById);
   review.append(element(document, 'p', 'Use o cartão “Revisões humanas” no sumário para localizar as verificações pendentes. Abra os formulários abaixo quando estiver pronto para registrar suas conclusões.'));
   const reviewForms = document.createElement('details');
   reviewForms.setAttribute('data-review-controls-target', '');
