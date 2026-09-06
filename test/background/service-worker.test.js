@@ -8,6 +8,7 @@ import { BLOB_URL_PORT_NAME } from '../../src/export/blob-url-protocol.js';
 import { deriveExportLeaseOwner } from '../../src/background/export-launch.js';
 import { createRawNavigationVaultV1 } from '../../src/background/raw-navigation-vault.js';
 import { createPageMarkerOriginCache } from '../../src/background/page-marker-origin-cache.js';
+import { PAGE_MARKERS_PORT_NAME } from '../../src/background/page-markers-worker-bridge.js';
 import { ACTIVE_AUDIT_JOB_KEY } from '../../src/background/authorized-audit-starter.js';
 import {
   HIGHLIGHT_EXPIRY_ALARM_NAME,
@@ -757,6 +758,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
     }),
     ...(fixtureOptions.rawNavigationVaultFactory ? { rawNavigationVaultFactory: fixtureOptions.rawNavigationVaultFactory } : {}),
     ...(fixtureOptions.pageMarkerOriginCacheFactory ? { pageMarkerOriginCacheFactory: fixtureOptions.pageMarkerOriginCacheFactory } : {}),
+    ...(fixtureOptions.pageMarkersControllerFactory ? { pageMarkersControllerFactory: fixtureOptions.pageMarkersControllerFactory } : {}),
     ...(fixtureOptions.runUrlAuditExecution ? { runUrlAuditExecution: fixtureOptions.runUrlAuditExecution } : {}),
     ...(fixtureOptions.batchAuditExecutionFactory
       ? { batchAuditExecutionFactory: fixtureOptions.batchAuditExecutionFactory }
@@ -1440,6 +1442,32 @@ test('classifies primary messages, ignores removed one-shot types, and responds 
   assert.deepEqual(calls, []);
 });
 
+test('generic runtime messages deny all four panel-only marker intents before router effects', async () => {
+  const { chromeApi, events } = chromeFixture();
+  let dispatches = 0;
+  const registration = registerServiceWorker(chromeApi, {
+    startupReady: Promise.resolve(runtimeValue()),
+    router: { async dispatch() { dispatches += 1; return { ok: true }; } },
+    panelCoordinator: { attachPanelPort() {} },
+  });
+  const base = {
+    sessionCapabilityId: 'S'.repeat(22), auditId: 'audit-markers-runtime', windowId: 9, modelRevision: 1,
+  };
+  const messages = [
+    { type: 'PANEL_SHOW_PAGE_MARKERS', ...base },
+    { type: 'PANEL_HIDE_PAGE_MARKERS', ...base },
+    { type: 'PANEL_SELECT_PAGE_MARKER', ...base, ordinal: 0, scroll: false },
+    { type: 'PANEL_FILTER_PAGE_MARKERS', ...base, visibleOrdinals: '' },
+  ];
+  const responses = [];
+  const listener = [...events.message.listeners][0];
+  for (const message of messages) assert.equal(listener(message, {}, value => responses.push(value)), true);
+  await tick();
+  assert.deepEqual(responses, messages.map(() => ({ ok: false, code: 'CONTEXT_DENIED' })));
+  assert.equal(dispatches, 0);
+  registration.dispose();
+});
+
 test('rejects absent extra and accessor panel window claims before router effects', async () => {
   const { chromeApi, events } = chromeFixture();
   let dispatches = 0;
@@ -1516,6 +1544,167 @@ test('attaches only the Side Panel and authenticated report ports after readines
   assert.equal(ports[1].disconnects, 0);
   assert.equal(ports[2].disconnects, 1);
   assert.equal(ports[3].disconnects, 1);
+});
+
+test('marker channels wait for startup and stay outside the public ready runtime', async () => {
+  const { chromeApi, events } = chromeFixture();
+  const gate = deferred();
+  const calls = [];
+  const bridge = {
+    attachPort(port) { calls.push(['port', port.name]); return true; },
+    handleRuntimeMessage(message, sender) { calls.push(['message', structuredClone(message), sender.documentId]); return true; },
+    dispose() { calls.push(['dispose']); },
+  };
+  const registration = registerServiceWorker(chromeApi, { async buildRuntime() {
+    await gate.promise;
+    return {
+      readyRuntime: runtimeValue(), router: { dispatch() {} },
+      panelCoordinator: { attachPanelPort() {} }, panelLauncher: { launch() {} },
+      pageMarkersWorkerBridge: bridge,
+    };
+  } });
+  const port = blobWiringPort(PAGE_MARKERS_PORT_NAME, { documentId: 'original-document' });
+  const selected = { type: 'AUDITA_PAGE_MARKER_SELECTED', installationId: 'I'.repeat(22), selectionId: 's1' };
+  const listener = [...events.message.listeners][0];
+
+  assert.equal(listener(selected, { documentId: 'original-document' }, () => assert.fail('page event has no response')), false);
+  events.connect.emit(port);
+  await tick();
+  assert.deepEqual(calls, []);
+
+  gate.resolve();
+  const runtime = await registration.startupReady;
+  await tick();
+  assert.deepEqual(calls, [
+    ['message', selected, 'original-document'],
+    ['port', PAGE_MARKERS_PORT_NAME],
+  ]);
+  assert.equal(Object.hasOwn(runtime, 'pageMarkersWorkerBridge'), false);
+  assert.equal(port.disconnects, 0);
+  registration.dispose();
+  assert.deepEqual(calls.at(-1), ['dispose']);
+});
+
+test('marker channels queued during startup are closed when registration is disposed', async () => {
+  const { chromeApi, events } = chromeFixture();
+  const gate = deferred();
+  let attaches = 0;
+  let messages = 0;
+  let disposals = 0;
+  const registration = registerServiceWorker(chromeApi, { async buildRuntime() {
+    await gate.promise;
+    return {
+      readyRuntime: runtimeValue(), router: { dispatch() {} },
+      panelCoordinator: { attachPanelPort() {} }, panelLauncher: { launch() {} },
+      pageMarkersWorkerBridge: {
+        attachPort() { attaches += 1; return true; },
+        handleRuntimeMessage() { messages += 1; return true; },
+        dispose() { disposals += 1; },
+      },
+    };
+  } });
+  const port = blobWiringPort(PAGE_MARKERS_PORT_NAME);
+  const selected = { type: 'AUDITA_PAGE_MARKERS_CLEARED', installationId: 'I'.repeat(22) };
+  [...events.message.listeners][0](selected, {}, () => assert.fail('page event has no response'));
+  events.connect.emit(port);
+  registration.dispose();
+  assert.equal(port.disconnects, 1, 'dispose must close an owned marker Port without waiting for startup');
+  gate.resolve();
+  await registration.startupReady;
+  await tick();
+  assert.equal(attaches, 0);
+  assert.equal(messages, 0);
+  assert.equal(disposals, 1);
+  assert.equal(port.disconnects, 1);
+});
+
+test('page-marker panel dispatcher sends exact four fields and never forwards the copied launch tab', async () => {
+  assert.equal(typeof serviceWorkerModule.createPageMarkersPanelDispatcher, 'function');
+  const markerCalls = [];
+  const fallbackCalls = [];
+  const isCurrent = () => true;
+  const dispatch = serviceWorkerModule.createPageMarkersPanelDispatcher({
+    pageMarkersController: {
+      async dispatch(request) { markerCalls.push(request); return { ok: true, marker: request.envelope.type }; },
+    },
+    async dispatchFallback(request) { fallbackCalls.push(request); return { ok: true, fallback: true }; },
+  });
+  for (const type of [
+    'PANEL_SHOW_PAGE_MARKERS', 'PANEL_HIDE_PAGE_MARKERS',
+    'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS',
+  ]) {
+    const envelope = Object.freeze({ type });
+    const sender = Object.freeze({ tab: { id: 17 } });
+    assert.deepEqual(await dispatch({ envelope, sender, launchTabId: 27, panelWindowId: 9, isCurrent }), {
+      ok: true, marker: type,
+    });
+    assert.deepEqual(Reflect.ownKeys(markerCalls.at(-1)), ['envelope', 'sender', 'panelWindowId', 'isCurrent']);
+    assert.equal(markerCalls.at(-1).envelope, envelope);
+    assert.equal(markerCalls.at(-1).sender, sender);
+    assert.equal(markerCalls.at(-1).panelWindowId, 9);
+    assert.equal(markerCalls.at(-1).isCurrent, isCurrent);
+    assert.equal(Object.hasOwn(markerCalls.at(-1), 'launchTabId'), false);
+  }
+  const legacy = { envelope: Object.freeze({ type: 'PANEL_OPEN_REPORT' }), sender: {}, launchTabId: 27 };
+  assert.deepEqual(await dispatch(legacy), { ok: true, fallback: true });
+  assert.equal(fallbackCalls[0], legacy);
+});
+
+test('marker and highlight cleanup both run under the received lock and deletion stays pending unless both confirm', async () => {
+  assert.equal(typeof serviceWorkerModule.createPageMarkersCleanupComposition, 'function');
+  const calls = [];
+  const lock = Object.freeze({ lock: 'held' });
+  const target = Object.freeze({ tabId: 17, documentId: 'original-document' });
+  let markerAudit = true;
+  let highlightAudit = { ok: true, state: 'clear' };
+  const composed = serviceWorkerModule.createPageMarkersCleanupComposition({
+    pageMarkersController: {
+      async clearForTargetLocked(...args) { calls.push(['marker-locked', ...args]); return { ok: true, state: 'absent' }; },
+      async clearAudit(auditId) { calls.push(['marker-audit', auditId]); return markerAudit; },
+      async invalidateTab(tabId) { calls.push(['marker-tab', tabId]); return true; },
+    },
+    highlightController: {
+      availability() {}, highlight() {}, clear() {}, invalidateContent() {}, recover() {}, expireDue() {},
+      async clearForTargetLocked(...args) { calls.push(['highlight-locked', ...args]); return { ok: true, state: 'clear' }; },
+      async clearAudit(...args) { calls.push(['highlight-audit', ...args]); return highlightAudit; },
+      async invalidateTab(...args) { calls.push(['highlight-tab', ...args]); return { ok: true, clearedAuditIds: [] }; },
+    },
+  });
+
+  assert.deepEqual(await composed.clearForTargetLocked(target, 'audit-start', lock), { ok: true, state: 'clear' });
+  assert.deepEqual(calls.slice(0, 2), [
+    ['marker-locked', target, 'audit-start', lock],
+    ['highlight-locked', target, 'audit-start', lock],
+  ]);
+
+  markerAudit = false;
+  assert.deepEqual(await composed.clearAudit('audit-old', 'audit-deleted'), { ok: false, state: 'pending' });
+  assert.deepEqual(calls.slice(2, 4), [
+    ['marker-audit', 'audit-old'],
+    ['highlight-audit', 'audit-old', 'audit-deleted'],
+  ]);
+
+  markerAudit = true;
+  highlightAudit = { ok: true, state: 'clear' };
+  assert.deepEqual(await composed.clearAudit('audit-old', 'audit-deleted'), { ok: true, state: 'clear' });
+});
+
+test('tab lifecycle attempts marker invalidation even when highlight invalidation fails', async () => {
+  const calls = [];
+  const composed = serviceWorkerModule.createPageMarkersCleanupComposition({
+    pageMarkersController: {
+      async clearForTargetLocked() { return { ok: true, state: 'absent' }; }, async clearAudit() { return true; },
+      async invalidateTab(tabId) { calls.push(['marker', tabId]); return true; },
+    },
+    highlightController: {
+      availability() {}, highlight() {}, clear() {}, invalidateContent() {}, recover() {}, expireDue() {},
+      async clearForTargetLocked() { return { ok: true, state: 'clear' }; }, async clearAudit() { return { ok: true, state: 'clear' }; },
+      async invalidateTab(tabId, reason) { calls.push(['highlight', tabId, reason]); throw new Error('highlight failure'); },
+    },
+  });
+
+  assert.deepEqual(await composed.invalidateTab(17, 'navigation'), { ok: false, code: 'HIGHLIGHT_STATE_FAILED' });
+  assert.deepEqual(calls, [['marker', 17], ['highlight', 17, 'navigation']]);
 });
 
 function blobWiringPort(name = BLOB_URL_PORT_NAME, sender = {}) {
@@ -1691,6 +1880,49 @@ test('default runtime serializes persona recovery with the supplied Web Locks ma
     call.name === 'audita:persona-lease-store:v1' && call.options.mode === 'exclusive'), true);
 });
 
+test('default graph constructs one private marker controller with dedicated publication and shared authorities', async () => {
+  let dependencies = null;
+  const controller = {
+    async dispatch() { return { ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' }; },
+    attachPort() { return false; }, handleRuntimeMessage() { return false; },
+    async clearAudit() { return true; }, async invalidateTab() { return true; }, async closePanel() { return true; },
+    async clearForTargetLocked() { return { ok: true, state: 'absent' }; },
+  };
+  const env = defaultGraphFixture(null, {
+    pageMarkersControllerFactory(input) { dependencies = input; return controller; },
+  });
+  const runtime = await env.registration.startupReady;
+  assert.ok(dependencies);
+  assert.equal(typeof dependencies.originCache?.get, 'function');
+  assert.equal(typeof dependencies.modelAuthority?.loadValidated, 'function');
+  assert.equal(typeof dependencies.loadPanelResultBundle, 'function');
+  assert.equal(typeof dependencies.authority?.authorizeSession, 'function');
+  assert.equal(dependencies.chromeApi, env.chromeApi);
+  assert.equal(typeof dependencies.chromeAdapter?.probeDocumentIdentity, 'function');
+  assert.equal(typeof dependencies.targetQueue?.withTarget, 'function');
+  assert.equal(typeof dependencies.targetQueue?.assertHeld, 'function');
+  assert.match(dependencies.createInstallationId(), /^[A-Za-z0-9_-]{22}$/u);
+  assert.deepEqual(await dependencies.publish({
+    windowId: 9, sessionCapabilityId: 'S'.repeat(22), auditId: 'audit-private-markers',
+    modelRevision: 1, state: 'clear', selectedOrdinal: null,
+  }), { delivered: 0 });
+  assert.equal(Object.hasOwn(runtime, 'pageMarkersController'), false);
+  assert.equal(Object.hasOwn(runtime, 'pageMarkersWorkerBridge'), false);
+});
+
+test('custom adapter without the native private Symbol keeps the worker ready while markers remain unavailable', async () => {
+  const env = defaultGraphFixture();
+  const runtime = await env.registration.startupReady;
+  assert.equal(typeof runtime.auditStarter?.beginAuthorizedAudit, 'function');
+  assert.equal(Object.hasOwn(runtime, 'pageMarkersController'), false);
+  assert.equal(Object.hasOwn(runtime, 'pageMarkersWorkerBridge'), false);
+  assert.equal(env.events.connect.listeners.size, 1);
+  const pagePort = blobWiringPort(PAGE_MARKERS_PORT_NAME);
+  env.events.connect.emit(pagePort);
+  await tick();
+  assert.equal(pagePort.disconnects, 1);
+});
+
 test('real default worker graph composes the native branded pixel commit clock into its starter', async () => {
   const env = defaultGraphFixture(null, { useNativePixelCommitClock: true });
   const runtime = await env.registration.startupReady;
@@ -1807,7 +2039,7 @@ test('current-page full-evidence pauses before raster when the inactive attached
 });
 
 test('default worker snapshots the current page and keeps marker origin private without making it audit authority', async t => {
-  for (const mode of ['stored', 'cache-reject', 'cache-throw', 'factory-throw', 'source-failure', 'vault-failure', 'vault-invalid']) await t.test(mode, async () => {
+  for (const mode of ['stored', 'cache-reject', 'cache-throw', 'factory-throw', 'marker-cleanup-denied', 'source-failure', 'vault-failure', 'vault-invalid']) await t.test(mode, async () => {
   const rawUrl = 'https://example.test/current?private=NEVER_PUBLIC';
   const auditId = 'audit-default-current-copy';
   const inventory = await createInstalledCoreRuleInventory();
@@ -1837,6 +2069,8 @@ test('default worker snapshots the current page and keeps marker origin private 
   let originCache = null;
   let cacheFactoryCalls = 0;
   let registerCalls = 0;
+  let sourceSnapshots = 0;
+  const markerInvalidations = [];
   const env = defaultGraphFixture(null, {
     auditStore,
     enableReportLaunch: true,
@@ -1860,6 +2094,18 @@ test('default worker snapshots the current page and keeps marker origin private 
         return mode === 'vault-invalid' ? { ...issued, sessionDigest: `hmac-sha256:${'Z'.repeat(43)}` } : issued;
       } });
     },
+    pageMarkersControllerFactory() {
+      return Object.freeze({
+        async dispatch() { return { ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' }; },
+        attachPort() { return false; }, handleRuntimeMessage() { return false; },
+        async clearAudit() { return true; }, async closePanel() { return true; },
+        async clearForTargetLocked() { return { ok: true, state: 'absent' }; },
+        async invalidateTab(tabId) {
+          markerInvalidations.push(tabId);
+          return mode !== 'marker-cleanup-denied';
+        },
+      });
+    },
     useDefaultChromeAdapter: true,
     tabsQuery: async () => [{
       id: 17, windowId: 9, active: true, status: 'complete', url: rawUrl,
@@ -1867,8 +2113,9 @@ test('default worker snapshots the current page and keeps marker origin private 
     scripting: {
       async executeScript(details) {
         scriptTargets.push(structuredClone(details.target));
-        if (mode === 'source-failure' && env.sessionValues['audita:start-journal:v1']) {
-          throw new Error('PRIVATE_SOURCE_FAILURE');
+        if (env.sessionValues['audita:start-journal:v1']) {
+          sourceSnapshots += 1;
+          if (mode === 'source-failure') throw new Error('PRIVATE_SOURCE_FAILURE');
         }
         if (details.target?.frameIds?.[0] === 0) {
           return [{ frameId: 0, documentId: 'document-a', result: rawUrl }];
@@ -1930,7 +2177,7 @@ test('default worker snapshots the current page and keeps marker origin private 
     retentionPreference: { version: 1, deleteAfterCompleteExport: false },
     senderContext,
   });
-  if (['source-failure', 'vault-failure', 'vault-invalid'].includes(mode)) {
+  if (['marker-cleanup-denied', 'source-failure', 'vault-failure', 'vault-invalid'].includes(mode)) {
     assert.equal(started.response.ok, false);
     assert.equal(started.completion, null);
     assert.equal(registerCalls, 0);
@@ -1938,6 +2185,8 @@ test('default worker snapshots the current page and keeps marker origin private 
     assert.equal(executionArgs, null);
     assert.equal((await auditStore.getAuditSnapshot(auditId)).model, undefined);
     assert.doesNotMatch(JSON.stringify(started), /PRIVATE_|NEVER_PUBLIC/u);
+    assert.deepEqual(markerInvalidations, [17]);
+    assert.equal(mode === 'marker-cleanup-denied' ? sourceSnapshots === 0 : sourceSnapshots > 0, true);
     return;
   }
   assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
@@ -1956,6 +2205,8 @@ test('default worker snapshots the current page and keeps marker origin private 
   assert.equal(env.createdTabs.length, 0);
   assert.equal(scriptTargets.every(target => target.tabId === 17 && target.frameIds?.[0] === 0), true);
   assert.equal(registerCalls, mode === 'factory-throw' ? 0 : 1);
+  assert.deepEqual(markerInvalidations, [17]);
+  assert.equal(sourceSnapshots > 0, true);
   if (mode === 'stored') {
     const origin = originCache.get(auditId);
     assert.deepEqual(origin, {

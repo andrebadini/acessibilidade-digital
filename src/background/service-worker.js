@@ -6,6 +6,13 @@ import {
 } from '../core/privacy/session-url-digest.js';
 import { createRawNavigationVaultV1 } from './raw-navigation-vault.js';
 import { createPageMarkerOriginCache } from './page-marker-origin-cache.js';
+import { createPageMarkersController } from './page-markers-controller.js';
+import {
+  PAGE_MARKERS_PORT_NAME,
+  createPageMarkersWorkerBridge,
+  createPageMarkersWorkerLifecycle,
+  isPageMarkersRuntimeMessage,
+} from './page-markers-worker-bridge.js';
 import { createBlobUrlPortBridgeV1 } from './blob-url-port.js';
 import { BLOB_URL_PORT_NAME } from '../export/blob-url-protocol.js';
 import { createBatchProgressStoreV1 } from './batch-progress-store.js';
@@ -990,6 +997,117 @@ export function createPublishingHighlightController(raw) {
   });
 }
 
+const PAGE_MARKER_PANEL_TYPES = new Set([
+  'PANEL_SHOW_PAGE_MARKERS', 'PANEL_HIDE_PAGE_MARKERS',
+  'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS',
+]);
+
+export function createPageMarkersPanelDispatcher(raw) {
+  const input = exact(raw, ['pageMarkersController', 'dispatchFallback']);
+  const dispatchMarkers = input && own(input.pageMarkersController, 'dispatch');
+  if (!input || typeof dispatchMarkers !== 'function' || typeof input.dispatchFallback !== 'function') {
+    throw new TypeError('PAGE_MARKERS_DISPATCHER_INVALID');
+  }
+  return async request => {
+    const envelope = own(request, 'envelope');
+    if (!PAGE_MARKER_PANEL_TYPES.has(own(envelope, 'type'))) return input.dispatchFallback(request);
+    const admitted = exact(request, ['envelope', 'sender', 'launchTabId', 'panelWindowId', 'isCurrent']);
+    if (!admitted || typeof admitted.isCurrent !== 'function') {
+      return Object.freeze({ ok: false, code: 'PAGE_MARKERS_INVALID' });
+    }
+    return Reflect.apply(dispatchMarkers, input.pageMarkersController, [{
+      envelope: admitted.envelope,
+      sender: admitted.sender,
+      panelWindowId: admitted.panelWindowId,
+      isCurrent: admitted.isCurrent,
+    }]);
+  };
+}
+
+export function createPageMarkersCleanupComposition(raw) {
+  const input = exact(raw, ['pageMarkersController', 'highlightController']);
+  const highlightMethods = [
+    'availability', 'highlight', 'clear', 'clearForTargetLocked', 'clearAudit',
+    'invalidateContent', 'invalidateTab', 'recover', 'expireDue',
+  ];
+  const markerMethods = ['clearForTargetLocked', 'clearAudit', 'invalidateTab'];
+  const highlight = {};
+  const markers = {};
+  if (!input) throw new TypeError('PAGE_MARKERS_CLEANUP_INVALID');
+  for (const name of highlightMethods) {
+    const method = own(input.highlightController, name);
+    if (typeof method !== 'function') throw new TypeError('PAGE_MARKERS_CLEANUP_INVALID');
+    highlight[name] = (...args) => Reflect.apply(method, input.highlightController, args);
+  }
+  for (const name of markerMethods) {
+    const method = own(input.pageMarkersController, name);
+    if (typeof method !== 'function') throw new TypeError('PAGE_MARKERS_CLEANUP_INVALID');
+    markers[name] = (...args) => Reflect.apply(method, input.pageMarkersController, args);
+  }
+  const confirmed = (value, states) => {
+    const result = exact(value, ['ok', 'state'], true);
+    return Boolean(result?.ok === true && states.includes(result.state));
+  };
+  return Object.freeze({
+    availability: highlight.availability,
+    highlight: highlight.highlight,
+    clear: highlight.clear,
+    invalidateContent: highlight.invalidateContent,
+    recover: highlight.recover,
+    expireDue: highlight.expireDue,
+    async clearForTargetLocked(target, reason, lock) {
+      let markerResult = null;
+      let highlightResult = null;
+      try { markerResult = await markers.clearForTargetLocked(target, reason, lock); } catch {}
+      try { highlightResult = await highlight.clearForTargetLocked(target, reason, lock); } catch {}
+      return confirmed(markerResult, ['absent', 'clear']) &&
+        confirmed(highlightResult, ['absent', 'clear', 'revoked'])
+        ? Object.freeze({ ok: true, state: 'clear' })
+        : Object.freeze({ ok: false, code: 'HIGHLIGHT_CLEANUP_UNCONFIRMED' });
+    },
+    async clearAudit(auditId, reason) {
+      let markerConfirmed = false;
+      let highlightResult = null;
+      try { markerConfirmed = await markers.clearAudit(auditId) === true; } catch {}
+      try { highlightResult = await highlight.clearAudit(auditId, reason); } catch {}
+      return markerConfirmed && confirmed(highlightResult, ['clear'])
+        ? Object.freeze({ ok: true, state: 'clear' })
+        : Object.freeze({ ok: false, state: 'pending' });
+    },
+    async invalidateTab(tabId, reason) {
+      let highlightResult = null;
+      try { await markers.invalidateTab(tabId); } catch {}
+      try { highlightResult = await highlight.invalidateTab(tabId, reason); }
+      catch { return Object.freeze({ ok: false, code: 'HIGHLIGHT_STATE_FAILED' }); }
+      return highlightResult;
+    },
+  });
+}
+
+function createUnavailablePageMarkersController(originCache) {
+  const clearAudit = typeof own(originCache, 'clearAudit') === 'function'
+    ? own(originCache, 'clearAudit')
+    : null;
+  const clearTab = typeof own(originCache, 'clearTab') === 'function'
+    ? own(originCache, 'clearTab')
+    : null;
+  return Object.freeze({
+    async dispatch() { return Object.freeze({ ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' }); },
+    attachPort() { return false; },
+    handleRuntimeMessage() { return false; },
+    async clearAudit(auditId) {
+      if (!clearAudit) return true;
+      try { Reflect.apply(clearAudit, originCache, [auditId]); return true; } catch { return false; }
+    },
+    async invalidateTab(tabId) {
+      if (!clearTab) return true;
+      try { Reflect.apply(clearTab, originCache, [tabId]); return true; } catch { return false; }
+    },
+    async closePanel() { return true; },
+    async clearForTargetLocked() { return Object.freeze({ ok: true, state: 'absent' }); },
+  });
+}
+
 export function createReportOperations({
   chromeApi, auditStore, sessionArea, modelNow, highlightController, highlightBindingStore,
   publishHighlightState, requestAuditDeletion,
@@ -1129,6 +1247,7 @@ async function buildDefaultRuntime(chromeApi, options) {
   try {
     pageMarkerOriginCache = (options.pageMarkerOriginCacheFactory ?? createPageMarkerOriginCache)({ now: epochNow });
   } catch { /* Optional presentation provenance must not prevent an audit. */ }
+  let pageMarkersCleanupController = createUnavailablePageMarkersController(pageMarkerOriginCache);
   const modelNow = options.modelNow ?? (() => new Date().toISOString());
   const bytes = options.randomBytes ?? randomBytes;
   const pixelState = (options.pixelCaptureStateFactory ?? createPixelCaptureStateV1)({
@@ -1183,6 +1302,9 @@ async function buildDefaultRuntime(chromeApi, options) {
       });
     } catch { throw new Error('AUDIT_RECOVERY_REQUIRED'); }
     try {
+      if (await pageMarkersCleanupController.invalidateTab(expectedTarget.tabId) !== true) {
+        throw new Error('ATTACHED_COPY_PREPARATION_DENIED');
+      }
       const internalDescriptor = Object.getOwnPropertyDescriptor(chromeAdapter, AUDIT_EXECUTION_INTERNAL);
       const internal = internalDescriptor && Object.hasOwn(internalDescriptor, 'value')
         ? internalDescriptor.value
@@ -1404,11 +1526,6 @@ async function buildDefaultRuntime(chromeApi, options) {
     recordBinding: recordHighlightBindingV1,
     scheduleExpiry: scheduleHighlightExpiry,
   });
-  const cleanupBarrier = createLiveAidCleanup({
-    highlightCleaner: highlightController,
-    personaCoordinator,
-    targetQueue,
-  });
   const inventory = await createInstalledCoreRuleInventory();
   const buildPanelResultBundle = ({ reportRevision }) => createPanelResultBundleV1({ reportRevision, inventory });
   const checkpoints = createCheckpointAdapters(sessionArea);
@@ -1427,7 +1544,13 @@ async function buildDefaultRuntime(chromeApi, options) {
     return reportRevision ? buildPanelResultBundle({ reportRevision }) : null;
   };
   let panelIntentDispatcher = null;
-  const panelCoordinator = createPanelPortCoordinator({
+  let panelCoordinator = null;
+  const pageMarkersWorkerLifecycle = createPageMarkersWorkerLifecycle({
+    publish: event => panelCoordinator
+      ? panelCoordinator.publishPageMarkersState(event)
+      : Object.freeze({ delivered: 0 }),
+  });
+  panelCoordinator = createPanelPortCoordinator({
     chromeApi, sessionArea,
     readActiveJob: () => readActiveAuditJobForWorker({ sessionArea }),
     readAuditSession: ({ sessionCapabilityId, auditId }) => readAuditSessionForWorker({ sessionArea, sessionCapabilityId, auditId }),
@@ -1442,9 +1565,54 @@ async function buildDefaultRuntime(chromeApi, options) {
     authorizeHighlightSession: value => authority.authorizeSession({
       ...value, consumer: 'panel', intent: 'highlight',
     }),
+    authorizePageMarkersSession: async value => {
+      if (!pageMarkersWorkerLifecycle.isActive()) return Object.freeze({ ok: false });
+      const result = await authority.authorizeSession({
+        ...value, consumer: 'panel', intent: 'review-markers',
+      });
+      return pageMarkersWorkerLifecycle.isActive() ? result : Object.freeze({ ok: false });
+    },
+    closePanelMarkers: value => pageMarkersCleanupController.closePanel(value),
     dispatchPanelIntent: request => panelIntentDispatcher
       ? panelIntentDispatcher(request)
       : Object.freeze({ ok: false, code: 'CONTEXT_DENIED' }),
+  });
+  let pageMarkersWorkerBridge = null;
+  try {
+    const controllerFactory = options.pageMarkersControllerFactory ?? createPageMarkersController;
+    if (typeof controllerFactory !== 'function') throw new Error('PAGE_MARKERS_UNAVAILABLE');
+    const controller = controllerFactory({
+      originCache: pageMarkerOriginCache,
+      modelAuthority: highlightModelAuthority,
+      loadPanelResultBundle,
+      authority,
+      chromeApi,
+      chromeAdapter,
+      targetQueue,
+      now: epochNow,
+      createInstallationId: () => base64Url(bytes(16)),
+      publish: event => pageMarkersWorkerLifecycle.publish(event),
+      setTimer: (callback, delay) => setTimeout(callback, delay),
+      clearTimer: timer => clearTimeout(timer),
+    });
+    if (typeof own(controller, 'closePanel') !== 'function') throw new Error('PAGE_MARKERS_UNAVAILABLE');
+    pageMarkersWorkerBridge = createPageMarkersWorkerBridge({
+      controller,
+      lifecycle: pageMarkersWorkerLifecycle,
+    });
+    pageMarkersCleanupController = controller;
+  } catch {
+    pageMarkersWorkerLifecycle.dispose();
+    pageMarkersWorkerBridge = null;
+  }
+  const composedHighlightController = createPageMarkersCleanupComposition({
+    pageMarkersController: pageMarkersCleanupController,
+    highlightController,
+  });
+  const cleanupBarrier = createLiveAidCleanup({
+    highlightCleaner: composedHighlightController,
+    personaCoordinator,
+    targetQueue,
   });
   const persistLatest = async ({ state }) => { await auditStore.setLatest(state); return freeze(structuredClone(state)); };
   const commitTerminalAudit = async ({ auditId, model, checkpoint, latestState, expectedRevision }) => {
@@ -1647,7 +1815,7 @@ async function buildDefaultRuntime(chromeApi, options) {
     return Object.freeze({ delivered: panelDelivered + reportDelivered });
   };
   const highlightRuntimeController = createPublishingHighlightController({
-    controller: highlightController,
+    controller: composedHighlightController,
     publishHighlightState,
     scheduleExpiry: scheduleHighlightExpiry,
   });
@@ -1684,7 +1852,7 @@ async function buildDefaultRuntime(chromeApi, options) {
     chromeApi, sessionArea, exportLaunch, auditStore, now: epochNow,
   });
   const reportOperations = createReportOperations({
-    chromeApi, auditStore, sessionArea, modelNow, highlightController, highlightBindingStore,
+    chromeApi, auditStore, sessionArea, modelNow, highlightController: composedHighlightController, highlightBindingStore,
     publishHighlightState,
     async requestAuditDeletion(request) {
       try { return await deletionCoordinator.request(request); }
@@ -1708,7 +1876,10 @@ async function buildDefaultRuntime(chromeApi, options) {
     createAuditId: options.createAuditId ?? defaultAuditId, reportLaunch, exportLaunch, reportOperations,
     highlightController, highlightSessionBridge, publishHighlightState,
   });
-  panelIntentDispatcher = request => router.dispatch(request);
+  panelIntentDispatcher = createPageMarkersPanelDispatcher({
+    pageMarkersController: pageMarkersCleanupController,
+    dispatchFallback: request => router.dispatch(request),
+  });
   const panelLauncher = options.panelLauncher ??
     createPanelLauncher({ chromeApi, launchAuthority: panelLaunchAuthority, logger: options.logger });
   await pixelScheduler.recoverOnStartup();
@@ -1723,7 +1894,7 @@ async function buildDefaultRuntime(chromeApi, options) {
     authority,
     panelPortRegistry: panelCoordinator,
     reportPortRegistry: reportPortCoordinator,
-    highlightController,
+    highlightController: composedHighlightController,
     highlightBindingStore,
     reportLaunch,
     exportLaunch,
@@ -1746,7 +1917,8 @@ async function buildDefaultRuntime(chromeApi, options) {
       personaCoordinator,
       highlightController: highlightRuntimeController,
     }),
-    router, panelCoordinator, panelLauncher, reportPortCoordinator, pixelScheduler, blobUrlPortBridge, retentionScheduler,
+    router, panelCoordinator, panelLauncher, reportPortCoordinator, pixelScheduler, blobUrlPortBridge,
+    ...(pageMarkersWorkerBridge ? { pageMarkersWorkerBridge } : {}), retentionScheduler,
     pixelRecoveryComplete: true,
   };
 }
@@ -1754,7 +1926,8 @@ async function buildDefaultRuntime(chromeApi, options) {
 function parseBuiltRuntime(value) {
   const blobKeys = value && Object.hasOwn(value, 'blobUrlPortBridge') ? ['blobUrlPortBridge'] : [];
   const retentionKeys = value && Object.hasOwn(value, 'retentionScheduler') ? ['retentionScheduler'] : [];
-  const privateKeys = [...blobKeys, ...retentionKeys];
+  const pageMarkerKeys = value && Object.hasOwn(value, 'pageMarkersWorkerBridge') ? ['pageMarkersWorkerBridge'] : [];
+  const privateKeys = [...blobKeys, ...retentionKeys, ...pageMarkerKeys];
   const built = exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator', 'pixelScheduler', 'pixelRecoveryComplete', ...privateKeys], true) ??
     exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'pixelScheduler', 'pixelRecoveryComplete', ...privateKeys], true) ??
     exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator', 'pixelScheduler', ...privateKeys], true) ??
@@ -1774,6 +1947,10 @@ function parseBuiltRuntime(value) {
         typeof built.retentionScheduler?.dispose !== 'function')) ||
     (Object.hasOwn(built, 'blobUrlPortBridge') &&
       (typeof built.blobUrlPortBridge?.attachPort !== 'function' || typeof built.blobUrlPortBridge?.dispose !== 'function')) ||
+    (Object.hasOwn(built, 'pageMarkersWorkerBridge') &&
+      (typeof built.pageMarkersWorkerBridge?.attachPort !== 'function' ||
+        typeof built.pageMarkersWorkerBridge?.handleRuntimeMessage !== 'function' ||
+        typeof built.pageMarkersWorkerBridge?.dispose !== 'function')) ||
     (Object.hasOwn(built, 'reportPortCoordinator') &&
       typeof built.reportPortCoordinator?.attachReportPort !== 'function')) throw new Error('WORKER_UNAVAILABLE');
   return { ...built, readyRuntime: copyReadyRuntime(built.readyRuntime) };
@@ -1804,8 +1981,10 @@ export function registerServiceWorker(chromeApi, options = {}) {
   let panelLauncher = options.panelLauncher ?? null;
   let pixelScheduler = options.pixelScheduler ?? null;
   let blobUrlPortBridge = options.blobUrlPortBridge ?? null;
+  let pageMarkersWorkerBridge = options.pageMarkersWorkerBridge ?? null;
   let retentionScheduler = null;
   let disposed = false;
+  const pendingPageMarkerPorts = new Map();
   let earlyPanelLaunchAuthority = null;
   let settlePanelStorageGate = null;
   if (!options.startupReady && !options.buildRuntime && !panelLauncher) {
@@ -1840,6 +2019,12 @@ export function registerServiceWorker(chromeApi, options = {}) {
   const getReadyRuntime = () => startupReady;
 
   const messageListener = (message, sender, sendResponse) => {
+    if (isPageMarkersRuntimeMessage(message)) {
+      void startupReady.then(() => {
+        if (!disposed) pageMarkersWorkerBridge?.handleRuntimeMessage(message, sender);
+      }, () => false).catch(() => false);
+      return false;
+    }
     const primary = parseWorkerMessage(message);
     if (!primary.ok && primary.code === 'UNKNOWN_MESSAGE') return false;
     void startupReady.then(async () => {
@@ -1859,15 +2044,32 @@ export function registerServiceWorker(chromeApi, options = {}) {
   const connectListener = port => {
     const name = own(port, 'name');
     const disconnect = () => { try { port?.disconnect?.(); } catch { /* fixed denial */ } };
+    const isPendingPageMarkerPort = name === PAGE_MARKERS_PORT_NAME;
+    if (isPendingPageMarkerPort) pendingPageMarkerPorts.set(port, disconnect);
+    const releasePendingPageMarkerPort = () => {
+      if (pendingPageMarkerPorts.get(port) !== disconnect) return false;
+      pendingPageMarkerPorts.delete(port);
+      return true;
+    };
     void startupReady.then(() => {
-      if (disposed) { disconnect(); return; }
+      const released = isPendingPageMarkerPort ? releasePendingPageMarkerPort() : true;
+      if (disposed) {
+        if (released) disconnect();
+        return;
+      }
       if (name === PANEL_PORT_NAME) panelCoordinator.attachPanelPort(port);
       else if (name === REPORT_PORT_NAME && reportPortCoordinator) reportPortCoordinator.attachReportPort(port);
       else if (name === BLOB_URL_PORT_NAME && blobUrlPortBridge) {
         try { if (blobUrlPortBridge.attachPort(port) !== true) disconnect(); }
         catch { disconnect(); }
+      } else if (name === PAGE_MARKERS_PORT_NAME && pageMarkersWorkerBridge) {
+        try { if (pageMarkersWorkerBridge.attachPort(port) !== true) disconnect(); }
+        catch { disconnect(); }
       } else disconnect();
-    }, disconnect);
+    }, () => {
+      const released = isPendingPageMarkerPort ? releasePendingPageMarkerPort() : true;
+      if (released) disconnect();
+    });
   };
 
   const alarmListener = alarm => {
@@ -1945,11 +2147,13 @@ export function registerServiceWorker(chromeApi, options = {}) {
         panelLauncher = built.panelLauncher;
         pixelScheduler = built.pixelScheduler ?? null;
         blobUrlPortBridge = built.blobUrlPortBridge ?? null;
+        pageMarkersWorkerBridge = built.pageMarkersWorkerBridge ?? null;
         retentionScheduler = built.retentionScheduler ?? null;
         if (pixelScheduler && built.pixelRecoveryComplete !== true) await pixelScheduler.recoverOnStartup();
         if (disposed) {
           try { pixelScheduler?.dispose(); } catch { /* local scheduler cleanup */ }
           try { blobUrlPortBridge?.dispose(); } catch { /* local bridge cleanup */ }
+          try { pageMarkersWorkerBridge?.dispose(); } catch { /* local bridge cleanup */ }
           try { retentionScheduler?.dispose(); } catch { /* local scheduler cleanup */ }
         }
         resolveStartup(built.readyRuntime);
@@ -1963,6 +2167,9 @@ export function registerServiceWorker(chromeApi, options = {}) {
   function dispose() {
     if (disposed) return;
     disposed = true;
+    const pendingMarkerDisconnects = [...pendingPageMarkerPorts.values()];
+    pendingPageMarkerPorts.clear();
+    for (const disconnect of pendingMarkerDisconnects) disconnect();
     chromeApi.runtime.onMessage.removeListener(messageListener);
     chromeApi.runtime.onConnect.removeListener(connectListener);
     chromeApi.alarms.onAlarm.removeListener(alarmListener);
@@ -1971,6 +2178,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
     contextMenus.dispose();
     try { pixelScheduler?.dispose?.(); } catch { /* disposal is best-effort and local */ }
     try { blobUrlPortBridge?.dispose?.(); } catch { /* disposal is best-effort and local */ }
+    try { pageMarkersWorkerBridge?.dispose?.(); } catch { /* disposal is best-effort and local */ }
     try { retentionScheduler?.dispose(); } catch { /* disposal is best-effort and local */ }
   }
 

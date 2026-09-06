@@ -16,6 +16,8 @@ Matriz prévia independente: (1) quatro intents chegam exact4, original17≠cóp
 
 Saída: REDs observados, GREEN focado, diff-check, uma revisão independente sobre arquivos congelados; correções agrupadas e validadas pelo mesmo revisor. Não alegar percurso disponível até UI e Chrome real.
 
+Fechamento Task7: implementação e correção de canais revisadas C0/I0/M1. Calibração ao escopo do usuário: dispose manual não é garantia de quiescência de uma publicação já admitida; essa race apenas na rotina de teardown de testes ficou registrada no backlog. A produção não chama o handle manual. Não reabrir Task6 por esse residual sem demonstrar impacto real ou antes de reutilizar a API para encerramento em produção. Demais contratos de documento, autorização, cleanup e evidência permanecem inalterados.
+
 ## Task 8 — seleção privada e painel utilizável (W3-UI)
 
 Escopo helper `src/panel/page-markers-session.js`, `test/panel/page-markers-session.test.js`, wiring `src/panel/panel.js`/`test/panel/panel-runtime.test.js`. Apresentação disjunta Task9 abaixo. Não editar protocolos, controller, core ou worker. TDD focado, sem Chrome/ZIP/suíte ampla. API `createPanelPageMarkersSession({requestIntent,onChange,onSelection})` retorna setResult(bundle|null), receive(packet), show(), hide(), select(occurrenceId,scroll=false), filter(visibleOccurrenceIds), reset(), read(). Correlação audit/revision e mapa ordinal de details ficam privados. Snapshot público congelado `{status:'idle'|'showing'|'active'|'hiding'|'unavailable',groups:[{number,occurrenceIds}],counts,selectedOccurrenceId,message}`; counts null ou `{markers,located,unlocated,general,omitted}`. Sem IDs de sessão/documento/instalação, sem ordinal/revisão no snapshot. Caller fornece bundle já validado pelo cliente.
