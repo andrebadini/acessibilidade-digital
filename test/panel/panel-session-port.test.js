@@ -76,7 +76,7 @@ function bootstrap(port, state = 'initial', auditId = null, sessionCapabilityId 
   port.onMessage.emit(packet);
 }
 
-async function resultBundle(auditId) {
+async function resultBundle(auditId, modelRevision = 1) {
   const inventory = await createInstalledCoreRuleInventory();
   const draft = structuredClone(SAMPLE_AUDIT);
   draft.auditId = auditId;
@@ -97,7 +97,7 @@ async function resultBundle(auditId) {
   };
   return createPanelResultBundleV1({
     reportRevision: {
-      version: 1, auditId, modelRevision: 1,
+      version: 1, auditId, modelRevision,
       modelHash: model.integrity.canonicalModelHash, model, checkpoint,
     },
     inventory,
@@ -132,6 +132,150 @@ function batchPrivacyPaused(port, overrides = {}) {
     ...overrides,
   });
 }
+
+const markerState = (auditId, extra = {}) => ({
+  version: 1, type: 'PAGE_MARKERS_STATE_CHANGED', auditId,
+  modelRevision: 1, state: 'active', selectedOrdinal: 0, ...extra,
+});
+
+function replyLastIntent(port, response) {
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result',
+    requestId: port.messages.at(-1).requestId, response,
+  });
+}
+
+test('page-marker intents enrich private session correlation and retain the exact offered revision', async () => {
+  const env = fixture();
+  const client = createClient(env);
+  client.start();
+  const port = env.ports[0];
+  const bundle = await resultBundle('audit-markers');
+  assert.ok(bundle.details.length > 0);
+  bootstrap(port, 'result', bundle.auditId, SESSION_ID, bundle);
+  for (const intent of [
+    { type: 'PANEL_SHOW_PAGE_MARKERS', modelRevision: 1 },
+    { type: 'PANEL_HIDE_PAGE_MARKERS', modelRevision: 1 },
+    { type: 'PANEL_SELECT_PAGE_MARKER', modelRevision: 1, ordinal: 0, scroll: true },
+    { type: 'PANEL_FILTER_PAGE_MARKERS', modelRevision: 1, visibleOrdinals: '0' },
+    { type: 'PANEL_FILTER_PAGE_MARKERS', modelRevision: 1, visibleOrdinals: '' },
+  ]) {
+    const pending = client.requestIntent(intent);
+    assert.deepEqual(port.messages.at(-1).envelope, { ...intent, auditId: bundle.auditId, sessionCapabilityId: SESSION_ID });
+    assert.equal(env.timers.at(-1).delay, intent.type === 'PANEL_SHOW_PAGE_MARKERS' ? 60000 : 5000);
+    replyLastIntent(port, { ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' });
+    assert.deepEqual(await pending, { ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' });
+  }
+  client.stop();
+});
+
+test('page-marker client rejects authority overrides, stale revision and noncanonical or unavailable ordinals without sending', async () => {
+  const env = fixture();
+  const client = createClient(env);
+  client.start();
+  const port = env.ports[0];
+  const bundle = await resultBundle('audit-markers');
+  bootstrap(port, 'view-only', bundle.auditId, SESSION_ID, bundle);
+  const base = { type: 'PANEL_SHOW_PAGE_MARKERS', modelRevision: 1 };
+  const invalid = [
+    ...[{ auditId: bundle.auditId }, { sessionCapabilityId: SESSION_ID }, { windowId: 9 }, { tabId: 7 }].map(extra => ({ ...base, ...extra })),
+    ...[0, 2, '1', 1.5].map(modelRevision => ({ ...base, modelRevision })),
+    ...[-1, 64, Math.min(64, bundle.details.length), '0'].map(ordinal => ({ type: 'PANEL_SELECT_PAGE_MARKER', modelRevision: 1, ordinal, scroll: false })),
+    { type: 'PANEL_SELECT_PAGE_MARKER', modelRevision: 1, ordinal: 0, scroll: 1 },
+    ...['00', '0,0', '1,0', '64', '0,', ' 0', String(Math.min(64, bundle.details.length))].map(visibleOrdinals => ({ type: 'PANEL_FILTER_PAGE_MARKERS', modelRevision: 1, visibleOrdinals })),
+  ];
+  let reads = 0;
+  const accessor = { ...base };
+  Object.defineProperty(accessor, 'modelRevision', { enumerable: true, get() { reads += 1; return 1; } });
+  invalid.push(accessor);
+  const messages = port.messages.length;
+  for (const intent of invalid) {
+    const pending = client.requestIntent(intent);
+    assert.equal(port.messages.length, messages, JSON.stringify(intent === accessor ? 'accessor' : intent));
+    assert.deepEqual(await pending, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  }
+  assert.equal(reads, 0);
+  client.stop();
+});
+
+test('page-marker state packets project no authority and ignore stale audits before checking current bounds', async () => {
+  const env = fixture();
+  const states = [];
+  const client = createClient(env, { onPageMarkersState: value => states.push(value) });
+  client.start();
+  const port = env.ports[0];
+  const bundle = await resultBundle('audit-markers');
+  bootstrap(port, 'result', bundle.auditId, SESSION_ID, bundle);
+  port.onMessage.emit(markerState('older-audit', { selectedOrdinal: 63 }));
+  port.onMessage.emit(markerState(bundle.auditId, { modelRevision: 2, selectedOrdinal: 63 }));
+  assert.equal(port.disconnects, 0);
+  assert.deepEqual(states, []);
+  port.onMessage.emit(markerState(bundle.auditId));
+  port.onMessage.emit(markerState(bundle.auditId, { state: 'clear', selectedOrdinal: null }));
+  assert.deepEqual(states, [
+    { modelRevision: 1, state: 'active', selectedOrdinal: 0 },
+    { modelRevision: 1, state: 'clear', selectedOrdinal: null },
+  ]);
+  assert.equal(Object.isFrozen(states[0]), true);
+  assert.equal(JSON.stringify(states).includes(SESSION_ID), false);
+  port.onMessage.emit(markerState(bundle.auditId, { selectedOrdinal: Math.min(64, bundle.details.length) }));
+  assert.equal(port.disconnects, 1);
+  client.stop();
+});
+
+test('page-marker packets work with legacy factory and throwing optional callback; malformed authority is rejected', async () => {
+  for (const overrides of [{}, { onPageMarkersState() { throw new Error('UI callback'); } }]) {
+    const env = fixture();
+    const client = createClient(env, overrides);
+    client.start();
+    const port = env.ports[0];
+    const bundle = await resultBundle('audit-markers');
+    bootstrap(port, 'result', bundle.auditId, SESSION_ID, bundle);
+    port.onMessage.emit(markerState(bundle.auditId));
+    assert.equal(port.disconnects, 0);
+    port.onMessage.emit(markerState(bundle.auditId, { installationId: 'a'.repeat(22) }));
+    assert.equal(port.disconnects, 1);
+    client.stop();
+  }
+});
+
+test('page-marker pending responses cannot restore an older result revision or audit', async () => {
+  for (const nextAuditId of ['audit-markers', 'audit-next']) {
+    const env = fixture();
+    const client = createClient(env);
+    client.start();
+    const port = env.ports[0];
+    const old = await resultBundle('audit-markers');
+    bootstrap(port, 'result', old.auditId, SESSION_ID, old);
+    const pending = client.requestIntent({ type: 'PANEL_SHOW_PAGE_MARKERS', modelRevision: 1 });
+    const next = await resultBundle(nextAuditId, 2);
+    bootstrap(port, 'view-only', next.auditId, SESSION_ID, next);
+    replyLastIntent(port, { ok: true, markers: { modelRevision: 1, state: 'active' } });
+    assert.deepEqual(await pending, { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+    assert.equal(port.disconnects, 0);
+    client.stop();
+  }
+});
+
+test('page-marker correlation resets for initial and running states before callbacks can request', async () => {
+  const env = fixture();
+  let client;
+  const attempts = [];
+  client = createClient(env, { onBootstrapResult() {
+    attempts.push(client.requestIntent({ type: 'PANEL_SHOW_PAGE_MARKERS', modelRevision: 1 }));
+  } });
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port);
+  assert.equal(port.messages.length, 1);
+  assert.deepEqual(await attempts.pop(), { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  bootstrap(port, 'running', 'audit-markers', SESSION_ID);
+  assert.equal(port.messages.length, 1);
+  assert.deepEqual(await attempts.pop(), { ok: false, code: 'PANEL_SESSION_UNAVAILABLE' });
+  port.onMessage.emit(markerState('audit-markers'));
+  assert.equal(port.disconnects, 0);
+  client.stop();
+});
 
 test('uses one admitted Port for bootstrap and every privileged panel intent', async () => {
   const env = fixture();

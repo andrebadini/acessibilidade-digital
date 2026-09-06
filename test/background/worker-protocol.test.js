@@ -12,6 +12,55 @@ const SESSION = '-1234567890123456789';
 const LEASE = 'lease-1234567890123456789012';
 const CONSENT = `${'C'.repeat(21)}Q`;
 
+const markerEnvelope = (type, extra = {}) => ({
+  type, auditId: 'audit-markers', sessionCapabilityId: SESSION,
+  modelRevision: 1, ...extra,
+});
+
+test('page-marker intents are panel-only and acquire the admitted window, never a client window', () => {
+  for (const intent of [
+    markerEnvelope('PANEL_SHOW_PAGE_MARKERS'),
+    markerEnvelope('PANEL_HIDE_PAGE_MARKERS'),
+    markerEnvelope('PANEL_SELECT_PAGE_MARKER', { ordinal: 63, scroll: false }),
+    markerEnvelope('PANEL_FILTER_PAGE_MARKERS', { visibleOrdinals: '0,2,63' }),
+  ]) {
+    assert.equal(isPanelPortIntent(intent), true, intent.type);
+    assert.deepEqual(parsePanelPortIntent(intent, 9), { ok: true, value: { ...intent, windowId: 9 } });
+    assert.equal(parsePanelPortIntent({ ...intent, windowId: 9 }, 9).ok, false);
+    assert.equal(parseWorkerMessage({ ...intent, windowId: 9 }).ok, true);
+    assert.equal(parseWorkerMessage(intent).ok, false);
+  }
+});
+
+test('page-marker revision, ordinal and filter boundaries are closed and canonical', () => {
+  const parse = intent => parsePanelPortIntent(intent, 9).ok;
+  for (const revision of [0, -1, 1.5, '1', Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(parse(markerEnvelope('PANEL_SHOW_PAGE_MARKERS', { modelRevision: revision })), false);
+  }
+  for (const ordinal of [-1, 64, 0.5, '0', null]) {
+    assert.equal(parse(markerEnvelope('PANEL_SELECT_PAGE_MARKER', { ordinal, scroll: false })), false);
+  }
+  assert.equal(parse(markerEnvelope('PANEL_SELECT_PAGE_MARKER', { ordinal: 0, scroll: true })), true);
+  assert.equal(parse(markerEnvelope('PANEL_SELECT_PAGE_MARKER', { ordinal: 0, scroll: 1 })), false);
+  for (const visibleOrdinals of ['', '0', '0,9,10,63', Array.from({ length: 64 }, (_, i) => i).join(',')]) {
+    assert.equal(parse(markerEnvelope('PANEL_FILTER_PAGE_MARKERS', { visibleOrdinals })), true);
+  }
+  for (const visibleOrdinals of ['00', '1,0', '0,0', '64', '-1', '0,', ' 0', '0, 1', [0]]) {
+    assert.equal(parse(markerEnvelope('PANEL_FILTER_PAGE_MARKERS', { visibleOrdinals })), false);
+  }
+});
+
+test('page-marker protocol rejects extra authority and accessor fields without reading them', () => {
+  const intent = markerEnvelope('PANEL_SHOW_PAGE_MARKERS');
+  for (const extra of [{ tabId: 7 }, { documentId: 'document-a' }, { installationId: 'a'.repeat(22) }, { ordinal: 0 }]) {
+    assert.equal(parsePanelPortIntent({ ...intent, ...extra }, 9).ok, false);
+  }
+  let reads = 0;
+  Object.defineProperty(intent, 'modelRevision', { enumerable: true, get() { reads += 1; return 1; } });
+  assert.equal(parsePanelPortIntent(intent, 9).ok, false);
+  assert.equal(reads, 0);
+});
+
 test('report export accepts only an optional boolean deletion preference and copies it without accessors', () => {
   const base = { type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: SESSION, auditId: 'audit-1' };
   for (const value of [true, false]) assert.deepEqual(parseWorkerMessage({ ...base, deleteAfterCompleteExport: value }),

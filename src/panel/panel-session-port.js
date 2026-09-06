@@ -35,6 +35,10 @@ const BATCH_PRIVACY_PAUSED_KEYS = Object.freeze([
 ]);
 const INTENT_RESULT_KEYS = Object.freeze(['protocol', 'version', 'type', 'requestId', 'response']);
 const HIGHLIGHT_STATE_KEYS = Object.freeze(['version', 'type', 'auditId', 'occurrenceId', 'state']);
+const PAGE_MARKERS_STATE_KEYS = Object.freeze(['version', 'type', 'auditId', 'modelRevision', 'state', 'selectedOrdinal']);
+const PAGE_MARKERS_TYPES = new Set([
+  'PANEL_SHOW_PAGE_MARKERS', 'PANEL_HIDE_PAGE_MARKERS', 'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS',
+]);
 
 function freeze(value, seen = new WeakSet()) {
   if (value && typeof value === 'object' && !seen.has(value)) {
@@ -179,6 +183,39 @@ function parseHighlightState(value) {
   return null;
 }
 
+function validMarkerOrdinal(value, maximum = 64) {
+  return Number.isSafeInteger(value) && value >= 0 && value < maximum;
+}
+
+function parsePageMarkersState(value) {
+  const packet = exact(value, PAGE_MARKERS_STATE_KEYS);
+  if (!packet || packet.version !== 1 || packet.type !== 'PAGE_MARKERS_STATE_CHANGED' ||
+    typeof packet.auditId !== 'string' || !AUDIT_ID.test(packet.auditId) ||
+    !Number.isSafeInteger(packet.modelRevision) || packet.modelRevision < 1 ||
+    !['active', 'clear'].includes(packet.state) ||
+    (packet.selectedOrdinal !== null && !validMarkerOrdinal(packet.selectedOrdinal)) ||
+    (packet.state === 'clear' && packet.selectedOrdinal !== null)) return null;
+  return freeze(packet);
+}
+
+function copyPageMarkersIntent(intent, maximum) {
+  const extras = intent.type === 'PANEL_SELECT_PAGE_MARKER' ? ['ordinal', 'scroll']
+    : intent.type === 'PANEL_FILTER_PAGE_MARKERS' ? ['visibleOrdinals'] : [];
+  const copy = exact(intent, ['type', 'modelRevision', ...extras]);
+  if (!copy) return null;
+  if (copy.type === 'PANEL_SELECT_PAGE_MARKER' &&
+    (!validMarkerOrdinal(copy.ordinal, maximum) || typeof copy.scroll !== 'boolean')) return null;
+  if (copy.type === 'PANEL_FILTER_PAGE_MARKERS') {
+    if (typeof copy.visibleOrdinals !== 'string' || copy.visibleOrdinals.length > 181) return null;
+    if (copy.visibleOrdinals !== '') {
+      const parts = copy.visibleOrdinals.split(',');
+      if (!parts.every((part, index) => validMarkerOrdinal(Number(part), maximum) &&
+        String(Number(part)) === part && (index === 0 || Number(part) > Number(parts[index - 1])))) return null;
+    }
+  }
+  return copy;
+}
+
 function copyIntent(value) {
   try {
     const copy = copyData(value);
@@ -191,13 +228,15 @@ function localUnavailable() {
 }
 
 export function createPanelSessionPortClient(raw) {
-  const input = exact(raw, [
+  const factoryKeys = [
     'chromeApi', 'onBootstrapResult', 'onStatus', 'onHighlightState',
     'createRequestId', 'setTimer', 'clearTimer',
-  ]);
+  ];
+  const input = exact(raw, factoryKeys) ?? exact(raw, [...factoryKeys, 'onPageMarkersState']);
   if (!input || typeof input.chromeApi?.runtime?.connect !== 'function' ||
     typeof input.onBootstrapResult !== 'function' || typeof input.onStatus !== 'function' ||
     typeof input.onHighlightState !== 'function' ||
+    (Object.hasOwn(input, 'onPageMarkersState') && typeof input.onPageMarkersState !== 'function') ||
     typeof input.createRequestId !== 'function' || typeof input.setTimer !== 'function' ||
     typeof input.clearTimer !== 'function') throw new TypeError('PANEL_SESSION_CLIENT_INVALID');
 
@@ -209,6 +248,8 @@ export function createPanelSessionPortClient(raw) {
   let auditId = null;
   let sessionId = null;
   let sessionState = null;
+  let markerRevision = null;
+  let markerDetailCount = 0;
   let pendingConsent = null;
   const ownedConfirmationsInFlight = new Set();
   const bindings = new WeakMap();
@@ -232,6 +273,8 @@ export function createPanelSessionPortClient(raw) {
     auditId = null;
     sessionId = null;
     sessionState = null;
+    markerRevision = null;
+    markerDetailCount = 0;
     pendingConsent = null;
     ownedConfirmationsInFlight.clear();
   };
@@ -241,8 +284,15 @@ export function createPanelSessionPortClient(raw) {
     try { input.clearTimer(entry.timer); } catch { /* fixed cleanup */ }
     entry.resolve(value);
   };
-  const settleAll = value => {
-    for (const entry of pending.values()) settle(entry, value);
+  const rememberRetiredRequest = requestId => {
+    if (timedOutRequests.size >= 1024) timedOutRequests.delete(timedOutRequests.values().next().value);
+    timedOutRequests.add(requestId);
+  };
+  const settleAll = (value, preserveMarkerReplies = false) => {
+    for (const [requestId, entry] of pending) {
+      if (preserveMarkerReplies && PAGE_MARKERS_TYPES.has(entry.type)) rememberRetiredRequest(requestId);
+      settle(entry, value);
+    }
     pending.clear();
   };
 
@@ -296,7 +346,7 @@ export function createPanelSessionPortClient(raw) {
         ? `${auditId ?? ''}\u0000${sessionId ?? ''}`
         : null;
       const nextCorrelation = `${bootstrap.auditId ?? ''}\u0000${bootstrap.sessionCapabilityId ?? ''}`;
-      if (priorCorrelation !== null && priorCorrelation !== nextCorrelation) settleAll(localUnavailable());
+      if (priorCorrelation !== null && priorCorrelation !== nextCorrelation) settleAll(localUnavailable(), true);
       reconnectIndex = 0;
       pendingConsent = null;
       ownedConfirmationsInFlight.clear();
@@ -304,6 +354,8 @@ export function createPanelSessionPortClient(raw) {
       auditId = bootstrap.auditId;
       sessionId = bootstrap.sessionCapabilityId;
       sessionState = bootstrap.state;
+      markerRevision = bootstrap.result?.modelRevision ?? null;
+      markerDetailCount = Math.min(64, bootstrap.result?.details.length ?? 0);
       notifyStatus('Painel conectado.');
       const projection = { state: bootstrap.state, auditId: bootstrap.auditId, result: bootstrap.result };
       if (bootstrap.state === 'running' && CAPTURE_MODES.has(bootstrap.captureMode)) {
@@ -330,12 +382,30 @@ export function createPanelSessionPortClient(raw) {
       }
       pendingConsent = privacyPaused.confirmation;
       sessionState = 'privacy-paused';
+      markerRevision = null;
+      markerDetailCount = 0;
       const projected = {
         state: 'privacy-paused', auditId: packet.auditId, result: null,
         mode: packet.mode, categories: privacyPaused.categories, message: PRIVACY_MESSAGE,
       };
       if (privacyPaused.confirmation.kind === 'batch') projected.pageNumber = privacyPaused.confirmation.pageNumber;
       notifyBootstrap(freeze(projected));
+      return;
+    }
+    const pageMarkersState = parsePageMarkersState(rawPacket);
+    if (pageMarkersState) {
+      // Old audit/revision events are harmless after rehydration. Check their
+      // structure before correlation, but current detail bounds only afterward.
+      if (!ready || !['result', 'view-only'].includes(sessionState) ||
+        pageMarkersState.auditId !== auditId || pageMarkersState.modelRevision !== markerRevision) return;
+      if (pageMarkersState.selectedOrdinal !== null && !validMarkerOrdinal(pageMarkersState.selectedOrdinal, markerDetailCount)) {
+        unavailable(port, true);
+        return;
+      }
+      try {
+        input.onPageMarkersState?.(freeze({ modelRevision: pageMarkersState.modelRevision,
+          state: pageMarkersState.state, selectedOrdinal: pageMarkersState.selectedOrdinal }));
+      } catch { /* UI callbacks do not own transport state. */ }
       return;
     }
     const highlightState = parseHighlightState(rawPacket);
@@ -358,6 +428,13 @@ export function createPanelSessionPortClient(raw) {
       return;
     }
     const entry = pending.get(result.requestId);
+    if (PAGE_MARKERS_TYPES.has(entry.type) && (entry.auditId !== auditId ||
+      entry.sessionCapabilityId !== sessionId || entry.modelRevision !== markerRevision ||
+      !['result', 'view-only'].includes(sessionState))) {
+      pending.delete(result.requestId);
+      settle(entry, localUnavailable());
+      return;
+    }
     const revoked = entry.type === 'PANEL_CANCEL_AUDIT'
       ? parseRevokedCancelResponse(result.response, entry.auditId)
       : null;
@@ -367,11 +444,13 @@ export function createPanelSessionPortClient(raw) {
         return;
       }
       pending.delete(result.requestId);
-      settleAll(localUnavailable());
+      settleAll(localUnavailable(), true);
       ready = true;
       auditId = null;
       sessionId = null;
       sessionState = 'initial';
+      markerRevision = null;
+      markerDetailCount = 0;
       pendingConsent = null;
       notifyBootstrap(freeze({ state: 'initial', auditId: null, result: null }));
       settle(entry, revoked);
@@ -434,6 +513,14 @@ export function createPanelSessionPortClient(raw) {
     let ownedConfirmation = null;
     if (!intent) return Promise.resolve(localUnavailable());
     if (intent.type === 'PANEL_CONFIRM_PIXEL_CAPTURE') return Promise.resolve(localUnavailable());
+    if (PAGE_MARKERS_TYPES.has(intent.type)) {
+      const markerIntent = copyPageMarkersIntent(intent, markerDetailCount);
+      if (!markerIntent || !['result', 'view-only'].includes(sessionState) || auditId === null || sessionId === null ||
+        markerIntent.modelRevision !== markerRevision || !Number.isSafeInteger(markerRevision) || markerRevision < 1) {
+        return Promise.resolve(localUnavailable());
+      }
+      intent = freeze({ ...markerIntent, sessionCapabilityId: sessionId, auditId });
+    }
     if (intent.type === 'CONFIRM_PIXEL_CAPTURE') {
       const confirmation = exact(intent, ['type', 'mode', 'accepted']);
       if (!confirmation || confirmation.accepted !== true || !PRIVACY_MODES.has(confirmation.mode) ||
@@ -490,17 +577,17 @@ export function createPanelSessionPortClient(raw) {
         // The coordinator admits at most 1024 requests per Port. Bound the
         // private tombstones to the same maximum and never retain payloads.
         if (['GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY'].includes(entry.type)) {
-          if (timedOutRequests.size >= 1024) timedOutRequests.delete(timedOutRequests.values().next().value);
-          timedOutRequests.add(requestId);
+          rememberRetiredRequest(requestId);
         }
         settle(entry, localUnavailable());
-      }, intent.type === 'PANEL_OPEN_REPORT' ? REPORT_OPEN_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
+      }, ['PANEL_OPEN_REPORT', 'PANEL_SHOW_PAGE_MARKERS'].includes(intent.type) ? REPORT_OPEN_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
       pending.set(requestId, {
         resolve, timer,
         type: intent.type,
         auditId: ownDataOrNull(intent, 'auditId'),
         sessionCapabilityId: ownDataOrNull(intent, 'sessionCapabilityId'),
         sessionState,
+        modelRevision: PAGE_MARKERS_TYPES.has(intent.type) ? markerRevision : null,
         ownedConfirmation,
       });
       if (ownedConfirmation) ownedConfirmationsInFlight.add(ownedConfirmation);

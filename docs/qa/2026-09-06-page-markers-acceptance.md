@@ -32,6 +32,12 @@ Prova de continuidade: deixar o resultado aberto por pelo menos45segundos antes 
 
 O primeiro recorte usa identificador estável/tag corroborados pela evidência. Alvos somente posicionais, iframes/Shadow DOM inacessíveis, seletores ambíguos e conteúdo mudado não recebem sinais inventados. O painel tem orçamento de64 ocorrências interativas; o relatório preserva o conjunto integral. Esses limites devem ser comunicados na interface, não ocultados atrás de um total de candidatos chamado “localizados”.
 
+## Verificação local W3-client (não nativa)
+
+Task5, base437f868: novos testes de protocolo produziram RED2/3 e novos testes de cliente RED6/6 antes da implementação. Após correção, `node --test test/background/worker-protocol.test.js test/panel/panel-session-port.test.js`:91/91PASS; regressões diretamente relacionadas de panel-port, panel-port-admitted-intents e service-worker:211/211PASS. `git diff --check`PASS. Revisão independente do diff congelado: C0/I0, novos testes9/9 confirmados pelo revisor.
+
+O canal agora reconhece os quatro comandos fechados, acrescenta autoridade privada e impede evento/resposta de revisão antiga de selecionar detalhes novos. Não há wiring global nem controles visuais novos neste checkpoint. W3-runtime continua separado; o roteiro Chrome acima permanece inteiramente pendente para a funcionalidade de sinais.
+
 ## Base técnica consultada
 
 - [Chrome scripting](https://developer.chrome.com/docs/extensions/reference/api/scripting): função injetada autocontida, mundo isolado e direcionamento por documentIds.

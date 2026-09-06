@@ -22,6 +22,8 @@ const PANEL_PORT_TYPES = new Set([
   'PANEL_READER_ENABLE_VOICE',
   'PANEL_STOP_PERSONA', 'PANEL_CANCEL_AUDIT',
   'PANEL_OPEN_REPORT', 'PANEL_REHYDRATE_VIEW',
+  'PANEL_SHOW_PAGE_MARKERS', 'PANEL_HIDE_PAGE_MARKERS',
+  'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS',
 ]);
 const SHARED_HIGHLIGHT_TYPES = new Set([
   'GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT',
@@ -45,6 +47,10 @@ const MESSAGE_SCHEMAS = deepFreeze({
   PANEL_STOP_PERSONA: ['type', 'leaseId', 'windowId'],
   PANEL_CANCEL_AUDIT: ['type', 'sessionCapabilityId', 'auditId', 'windowId'],
   PANEL_OPEN_REPORT: ['type', 'sessionCapabilityId', 'auditId', 'windowId'],
+  PANEL_SHOW_PAGE_MARKERS: ['type', 'sessionCapabilityId', 'auditId', 'windowId', 'modelRevision'],
+  PANEL_HIDE_PAGE_MARKERS: ['type', 'sessionCapabilityId', 'auditId', 'windowId', 'modelRevision'],
+  PANEL_SELECT_PAGE_MARKER: ['type', 'sessionCapabilityId', 'auditId', 'windowId', 'modelRevision', 'ordinal', 'scroll'],
+  PANEL_FILTER_PAGE_MARKERS: ['type', 'sessionCapabilityId', 'auditId', 'windowId', 'modelRevision', 'visibleOrdinals'],
   REPORT_REQUEST_EXPORT: ['type', 'sessionCapabilityId', 'auditId'],
   REPORT_RETURN_TO_SOURCE: ['type', 'sessionCapabilityId', 'auditId'],
   REPORT_COMMIT_REVIEW_DECISION: [
@@ -110,6 +116,13 @@ function hasFlatPrimitiveShape(value) {
 }
 
 function validWorkerEnvelope(value) {
+  if (['PANEL_SHOW_PAGE_MARKERS', 'PANEL_HIDE_PAGE_MARKERS', 'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS'].includes(value.type)) {
+    if (!validOpaqueId(value.sessionCapabilityId) || !validAuditId(value.auditId) || !safeChromeId(value.windowId) ||
+      !Number.isSafeInteger(value.modelRevision) || value.modelRevision < 1) return false;
+    if (value.type === 'PANEL_SELECT_PAGE_MARKER') return validMarkerOrdinal(value.ordinal) && typeof value.scroll === 'boolean';
+    if (value.type === 'PANEL_FILTER_PAGE_MARKERS') return validMarkerFilter(value.visibleOrdinals);
+    return true;
+  }
   if (value.type === 'PREPARE_PANEL_NAVIGATION_CAPABILITY') {
     return validAuditId(value.requestId) && ['single', 'batch'].includes(value.intent) && safeChromeId(value.windowId);
   }
@@ -193,6 +206,16 @@ function validWorkerEnvelope(value) {
 }
 
 function validOpaqueId(value) { return typeof value === 'string' && OPAQUE_ID.test(value); }
+function validMarkerOrdinal(value) { return Number.isSafeInteger(value) && value >= 0 && value < 64; }
+function validMarkerFilter(value) {
+  if (typeof value !== 'string' || value.length > 181) return false;
+  if (value === '') return true;
+  const parts = value.split(',');
+  return parts.every((part, index) => {
+    const ordinal = Number(part);
+    return validMarkerOrdinal(ordinal) && String(ordinal) === part && (index === 0 || ordinal > Number(parts[index - 1]));
+  });
+}
 function validAuditId(value) { return typeof value === 'string' && AUDIT_ID.test(value); }
 function validReviewId(value) { return typeof value === 'string' && REVIEW_ID.test(value); }
 function canonicalInstant(value) {
