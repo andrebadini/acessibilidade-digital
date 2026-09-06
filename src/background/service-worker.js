@@ -26,6 +26,8 @@ import {
   reserveAttachedCopyStartJournalV1,
 } from './authorized-audit-starter.js';
 import { createAuditLifecycle } from './audit-lifecycle.js';
+import { createAuditDeletionCoordinatorV1 } from './audit-deletion-coordinator.js';
+import { registerRetentionSchedulerV1 } from './retention-scheduler.js';
 import { createPixelCaptureStateV1 } from './pixel-capture-consent.js';
 import { createPixelPrivacyGateV1 } from './pixel-privacy-gate.js';
 import {
@@ -1282,6 +1284,7 @@ async function buildDefaultRuntime(chromeApi, options) {
   const pixelAttemptLifecycle = createPixelAttemptLifecycleV1({
     sessionArea, auditStore, attemptAuthority, attemptCorrelation, modelNow,
   });
+  let retentionScheduler = null;
   const liquidatorBridge = createLateBoundPixelLiquidatorFacadeV1();
   const pixelScheduler = (options.pixelConsentSchedulerFactory ?? createPixelConsentExpirySchedulerV1)(chromeApi, {
     pixelState, liquidator: liquidatorBridge.facade, now: epochNow,
@@ -1289,6 +1292,7 @@ async function buildDefaultRuntime(chromeApi, options) {
   const launchApisAvailable = typeof chromeApi.tabs?.create === 'function' && typeof chromeApi.tabs?.update === 'function' &&
     typeof chromeApi.tabs?.get === 'function' && typeof chromeApi.tabs?.remove === 'function';
   const unavailableLaunch = freeze({
+    async clearAudit() { throw new Error('AUDIT_DELETION_UNAVAILABLE'); },
     async getLaunch() { return null; }, async getSession() { return null; },
     async openRegisteredReport() { return { ok: false, code: 'REPORT_OPEN_DENIED' }; },
     async connect() { return { ok: false, code: 'CONTEXT_DENIED' }; },
@@ -1593,7 +1597,14 @@ async function buildDefaultRuntime(chromeApi, options) {
     pixelState,
     probeDocumentIdentity: tabId => chromeAdapter.probeDocumentIdentity(tabId),
     probeSensitiveCaptureSignals,
-    pixelAttemptLifecycle,
+    pixelAttemptLifecycle: Object.freeze({
+      ...pixelAttemptLifecycle,
+      async commitTerminal(request) {
+        const result = await pixelAttemptLifecycle.commitTerminal(request);
+        if (retentionScheduler) void retentionScheduler.scheduleNext().catch(() => {});
+        return result;
+      },
+    }),
     schedulePixelExpiry: () => pixelScheduler.scheduleNext(),
   });
   if (liquidatorBridge.bind(value => auditStarter.liquidatePixelAudit(value)) !== true) {
@@ -1666,6 +1677,24 @@ async function buildDefaultRuntime(chromeApi, options) {
   if (personaRecovery?.ok !== true) throw new Error('WORKER_UNAVAILABLE');
   const recovery = await auditStarter.recoverAuthorizedAuditLifecycle();
   if (recovery?.ok !== true) throw new Error('WORKER_UNAVAILABLE');
+  const deletionCoordinator = createAuditDeletionCoordinatorV1({
+    store: auditStore,
+    authority,
+    panelPortRegistry: panelCoordinator,
+    reportPortRegistry: reportPortCoordinator,
+    highlightController,
+    highlightBindingStore,
+    reportLaunch,
+    exportLaunch,
+    rawNavigationVault,
+    pixelCaptureState: pixelState,
+    ownedDisposableTabStore: ownedTabRegistry,
+    blobRegistry: blobUrlPortBridge.registry,
+    now: modelNow,
+  });
+  retentionScheduler = registerRetentionSchedulerV1(chromeApi, {
+    store: auditStore, deletionCoordinator, now: modelNow,
+  });
   return {
     readyRuntime: copyReadyRuntime({
       authority,
@@ -1676,19 +1705,21 @@ async function buildDefaultRuntime(chromeApi, options) {
       personaCoordinator,
       highlightController: highlightRuntimeController,
     }),
-    router, panelCoordinator, panelLauncher, reportPortCoordinator, pixelScheduler, blobUrlPortBridge,
+    router, panelCoordinator, panelLauncher, reportPortCoordinator, pixelScheduler, blobUrlPortBridge, retentionScheduler,
     pixelRecoveryComplete: true,
   };
 }
 
 function parseBuiltRuntime(value) {
   const blobKeys = value && Object.hasOwn(value, 'blobUrlPortBridge') ? ['blobUrlPortBridge'] : [];
-  const built = exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator', 'pixelScheduler', 'pixelRecoveryComplete', ...blobKeys], true) ??
-    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'pixelScheduler', 'pixelRecoveryComplete', ...blobKeys], true) ??
-    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator', 'pixelScheduler', ...blobKeys], true) ??
-    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'pixelScheduler', ...blobKeys], true) ??
-    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator', ...blobKeys], true) ??
-    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', ...blobKeys], true);
+  const retentionKeys = value && Object.hasOwn(value, 'retentionScheduler') ? ['retentionScheduler'] : [];
+  const privateKeys = [...blobKeys, ...retentionKeys];
+  const built = exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator', 'pixelScheduler', 'pixelRecoveryComplete', ...privateKeys], true) ??
+    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'pixelScheduler', 'pixelRecoveryComplete', ...privateKeys], true) ??
+    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator', 'pixelScheduler', ...privateKeys], true) ??
+    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'pixelScheduler', ...privateKeys], true) ??
+    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', 'reportPortCoordinator', ...privateKeys], true) ??
+    exact(value, ['readyRuntime', 'router', 'panelCoordinator', 'panelLauncher', ...privateKeys], true);
   if (!built || typeof built.router?.dispatch !== 'function' ||
     typeof built.panelCoordinator?.attachPanelPort !== 'function' ||
     typeof built.panelLauncher?.launch !== 'function' ||
@@ -1697,6 +1728,9 @@ function parseBuiltRuntime(value) {
         typeof built.pixelScheduler?.run !== 'function' || typeof built.pixelScheduler?.scheduleNext !== 'function' ||
         typeof built.pixelScheduler?.dispose !== 'function')) ||
     (Object.hasOwn(built, 'pixelRecoveryComplete') && built.pixelRecoveryComplete !== true) ||
+    (Object.hasOwn(built, 'retentionScheduler') &&
+      (typeof built.retentionScheduler?.run !== 'function' || typeof built.retentionScheduler?.scheduleNext !== 'function' ||
+        typeof built.retentionScheduler?.dispose !== 'function')) ||
     (Object.hasOwn(built, 'blobUrlPortBridge') &&
       (typeof built.blobUrlPortBridge?.attachPort !== 'function' || typeof built.blobUrlPortBridge?.dispose !== 'function')) ||
     (Object.hasOwn(built, 'reportPortCoordinator') &&
@@ -1729,6 +1763,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
   let panelLauncher = options.panelLauncher ?? null;
   let pixelScheduler = options.pixelScheduler ?? null;
   let blobUrlPortBridge = options.blobUrlPortBridge ?? null;
+  let retentionScheduler = null;
   let disposed = false;
   let earlyPanelLaunchAuthority = null;
   let settlePanelStorageGate = null;
@@ -1815,6 +1850,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
         logger.error('PANEL_LAUNCH_UNAVAILABLE');
       } else {
         void startupReady.then(() => pixelScheduler?.run?.('panel'), () => false).catch(() => false);
+        void startupReady.then(() => disposed ? false : retentionScheduler?.run('panel'), () => false).catch(() => false);
       }
     } catch { logger.error('PANEL_LAUNCH_UNAVAILABLE'); }
   };
@@ -1834,8 +1870,11 @@ export function registerServiceWorker(chromeApi, options = {}) {
   lifecycle.register();
   const contextMenus = registerAuditContextMenus(chromeApi, {
     getReadyRuntime, createEventNonce, createAuditId, epochNow, logger,
-    launchPanel: (tab, onOpened) => typeof panelLauncher?.launch === 'function' &&
-      panelLauncher.launch(tab, onOpened) === true,
+    launchPanel: (tab, onOpened) => {
+      if (typeof panelLauncher?.launch !== 'function' || panelLauncher.launch(tab, onOpened) !== true) return false;
+      void startupReady.then(() => disposed ? false : retentionScheduler?.run('panel'), () => false).catch(() => false);
+      return true;
+    },
   });
   void startupReady.then(() => contextMenus.installMenus(), () => false);
 
@@ -1865,9 +1904,15 @@ export function registerServiceWorker(chromeApi, options = {}) {
         panelLauncher = built.panelLauncher;
         pixelScheduler = built.pixelScheduler ?? null;
         blobUrlPortBridge = built.blobUrlPortBridge ?? null;
+        retentionScheduler = built.retentionScheduler ?? null;
         if (pixelScheduler && built.pixelRecoveryComplete !== true) await pixelScheduler.recoverOnStartup();
-        if (disposed) { try { blobUrlPortBridge?.dispose(); } catch { /* local bridge cleanup */ } }
+        if (disposed) {
+          try { pixelScheduler?.dispose(); } catch { /* local scheduler cleanup */ }
+          try { blobUrlPortBridge?.dispose(); } catch { /* local bridge cleanup */ }
+          try { retentionScheduler?.dispose(); } catch { /* local scheduler cleanup */ }
+        }
         resolveStartup(built.readyRuntime);
+        if (!disposed) void retentionScheduler?.run('startup').catch(() => {});
       } catch {
         rejectStartup(new Error('WORKER_UNAVAILABLE'));
       }
@@ -1885,6 +1930,7 @@ export function registerServiceWorker(chromeApi, options = {}) {
     contextMenus.dispose();
     try { pixelScheduler?.dispose?.(); } catch { /* disposal is best-effort and local */ }
     try { blobUrlPortBridge?.dispose?.(); } catch { /* disposal is best-effort and local */ }
+    try { retentionScheduler?.dispose(); } catch { /* disposal is best-effort and local */ }
   }
 
   return Object.freeze({ startupReady, dispose });

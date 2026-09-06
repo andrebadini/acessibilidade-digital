@@ -14,6 +14,7 @@ import {
   registerServiceWorker,
 } from '../../src/background/service-worker.js';
 import { PIXEL_CONSENT_ALARM_NAME } from '../../src/background/pixel-consent-expiry.js';
+import { RETENTION_ALARM_NAME, registerRetentionSchedulerV1 } from '../../src/background/retention-scheduler.js';
 import * as serviceWorkerModule from '../../src/background/service-worker.js';
 import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
 import { createCapturePolicyV1 } from '../../src/core/privacy/capture-policy.js';
@@ -45,7 +46,7 @@ function chromeFixture() {
   const events = {
     message: event(), connect: event(), installed: event(), context: event(),
     updated: event(), tabRemoved: event(), tabDetached: event(), windowRemoved: event(),
-    action: event(), alarm: event(),
+    action: event(), alarm: event(), startup: event(),
   };
   const alarmValues = new Map();
   return {
@@ -53,7 +54,7 @@ function chromeFixture() {
     chromeApi: {
       runtime: {
         id: 'abcdefghijklmnopabcdefghijklmnop',
-        onMessage: events.message, onConnect: events.connect, onInstalled: events.installed,
+        onMessage: events.message, onConnect: events.connect, onInstalled: events.installed, onStartup: events.startup,
       },
       contextMenus: { onClicked: events.context, async removeAll() {}, create() {} },
       sidePanel: { async open() {}, async setOptions() {}, async setPanelBehavior() {} },
@@ -85,6 +86,193 @@ function deferred() {
 }
 
 function tick() { return new Promise(resolve => setImmediate(resolve)); }
+
+const RETENTION_NOW = '2026-09-05T14:00:00.000Z';
+
+async function retainAudit(store, auditId, now = '2026-08-01T00:00:00.000Z') {
+  const model = structuredClone(SAMPLE_AUDIT);
+  model.auditId = auditId;
+  await store.commitAudit(auditId, model, { auditId }, { now });
+}
+
+async function settleRetention() {
+  for (let index = 0; index < 30; index += 1) await tick();
+}
+
+test('R3-E startup removes expired real models and completed tombstones while preserving future and foreign state', async t => {
+  const values = new Map();
+  const auditStore = createInMemoryAuditStore(values);
+  values.set('foreign-state', { private: 'preserve' });
+  await retainAudit(auditStore, 'expired-startup');
+  await retainAudit(auditStore, 'future-startup', RETENTION_NOW);
+  const env = defaultGraphFixture({ 'foreign-session': { private: 'preserve' } }, {
+    auditStore, enableReportLaunch: true, modelNow: () => RETENTION_NOW,
+  });
+  t.after(() => env.registration.dispose());
+  const runtime = await env.registration.startupReady;
+  await settleRetention();
+  assert.equal((await auditStore.getAuditSnapshot('expired-startup')).model === undefined, true);
+  assert.deepEqual(await auditStore.listDeletionTombstonesV1({ limit: 25 }), []);
+  assert.equal((await auditStore.getAuditSnapshot('future-startup')).model.auditId, 'future-startup');
+  assert.deepEqual(values.get('foreign-state'), { private: 'preserve' });
+  assert.deepEqual(env.sessionValues['foreign-session'], { private: 'preserve' });
+  assert.equal((await env.chromeApi.alarms.get(RETENTION_ALARM_NAME)).scheduledTime,
+    Date.parse('2026-10-05T14:00:00.000Z'));
+  assert.equal(Object.hasOwn(runtime, 'retentionScheduler'), false);
+  assert.equal(Object.hasOwn(runtime, 'deletionCoordinator'), false);
+});
+
+test('R3-E unavailable launch preserves a retry tombstone after hiding the model and does not block readiness', async t => {
+  const auditStore = createInMemoryAuditStore();
+  await retainAudit(auditStore, 'expired-unavailable-launch');
+  const env = defaultGraphFixture(null, { auditStore, modelNow: () => RETENTION_NOW });
+  t.after(() => env.registration.dispose());
+  const runtime = await env.registration.startupReady;
+  await settleRetention();
+  assert.equal((await auditStore.getAuditSnapshot('expired-unavailable-launch')).model === undefined, true);
+  const pending = await auditStore.listDeletionTombstonesV1({ limit: 25 });
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].attempts, 1);
+  assert.equal(pending[0].lastAttemptAt, RETENTION_NOW);
+  assert.equal((await env.chromeApi.alarms.get(RETENTION_ALARM_NAME)).scheduledTime,
+    Date.parse('2026-09-05T14:01:00.000Z'));
+  await assert.rejects(runtime.reportLaunch.clearAudit('expired-unavailable-launch'),
+    error => error.constructor === Error && error.message === 'AUDIT_DELETION_UNAVAILABLE' && error.cause === undefined);
+  await assert.rejects(runtime.exportLaunch.clearAudit('expired-unavailable-launch'), /AUDIT_DELETION_UNAVAILABLE/u);
+});
+
+test('R3-E retention waits for recovery completion and never starts after recovery rejection', async t => {
+  for (const outcome of ['complete', 'pixel-rejected', 'audit-blocked']) await t.test(outcome, async t => {
+    const auditStore = createInMemoryAuditStore();
+    await retainAudit(auditStore, 'expired-recovery');
+    const recovery = deferred();
+    const entered = deferred();
+    const env = defaultGraphFixture(outcome === 'audit-blocked' ? {
+      [ACTIVE_AUDIT_JOB_KEY]: { version: 1, auditId: 'malformed-active', state: 'running' },
+    } : null, {
+      auditStore, enableReportLaunch: true, modelNow: () => RETENTION_NOW,
+      pixelConsentSchedulerFactory() {
+        return { async recoverOnStartup() { entered.resolve(); await recovery.promise; },
+          async run() {}, async scheduleNext() {}, dispose() {} };
+      },
+    });
+    t.after(() => env.registration.dispose());
+    const ready = env.registration.startupReady.catch(error => error);
+    await entered.promise;
+    assert.equal(env.events.startup.listeners.size, 0);
+    assert.equal((await auditStore.getAuditSnapshot('expired-recovery')).model.auditId, 'expired-recovery');
+    assert.deepEqual(await auditStore.listDeletionTombstonesV1({ limit: 25 }), []);
+    if (outcome === 'pixel-rejected') recovery.reject(new Error('PRIVATE_RECOVERY_FAILURE'));
+    else recovery.resolve();
+    const result = await ready;
+    await settleRetention();
+    if (outcome === 'complete') {
+      assert.equal(result instanceof Error, false);
+      assert.equal((await auditStore.getAuditSnapshot('expired-recovery')).model === undefined, true);
+      assert.equal(env.events.startup.listeners.size, 1);
+    } else {
+      assert.equal(result.message, 'WORKER_UNAVAILABLE');
+      assert.equal(env.events.startup.listeners.size, 0);
+      assert.equal((await auditStore.getAuditSnapshot('expired-recovery')).model.auditId, 'expired-recovery');
+      assert.deepEqual(await auditStore.listDeletionTombstonesV1({ limit: 25 }), []);
+    }
+  });
+});
+
+test('R3-E startup alarm toolbar and context panel events run once and disposal preserves foreign listeners', async t => {
+  const realStore = createInMemoryAuditStore();
+  const staged = [];
+  const auditStore = { ...realStore, async stageExpiredAuditDeletionsV1(request) {
+    staged.push(structuredClone(request));
+    return realStore.stageExpiredAuditDeletionsV1(request);
+  } };
+  const env = defaultGraphFixture(null, { auditStore, enableReportLaunch: true, modelNow: () => RETENTION_NOW });
+  t.after(() => env.registration.dispose());
+  const foreignStartup = () => {};
+  const foreignAlarm = () => {};
+  env.events.startup.addListener(foreignStartup);
+  env.events.alarm.addListener(foreignAlarm);
+  await env.registration.startupReady;
+  await settleRetention();
+  assert.equal(staged.length, 1);
+  const tab = { id: 17, windowId: 9, status: 'complete', url: 'https://example.test/' };
+  const triggers = [
+    () => env.events.startup.emit(),
+    () => env.events.alarm.emit({ name: RETENTION_ALARM_NAME }),
+    () => env.events.action.emit(tab),
+    () => env.events.context.emit({ menuItemId: 'audita.accessibility.audit-page', frameId: 0 }, tab),
+  ];
+  for (let index = 0; index < triggers.length; index += 1) {
+    const auditId = `expired-event-${index}`;
+    await retainAudit(auditStore, auditId);
+    triggers[index]();
+    await settleRetention();
+    assert.equal(staged.length, index + 2);
+    assert.equal((await auditStore.getAuditSnapshot(auditId)).model === undefined, true);
+    assert.deepEqual(await auditStore.listDeletionTombstonesV1({ limit: 25 }), []);
+  }
+  assert.equal(staged.every(value => value.now === RETENTION_NOW && value.limit === 25), true);
+  env.events.alarm.emit({ name: 'foreign-alarm' });
+  await settleRetention();
+  assert.equal(staged.length, 5);
+  env.registration.dispose();
+  assert.deepEqual([...env.events.startup.listeners], [foreignStartup]);
+  assert.deepEqual([...env.events.alarm.listeners], [foreignAlarm]);
+  env.events.startup.emit();
+  env.events.alarm.emit({ name: RETENTION_ALARM_NAME });
+  await settleRetention();
+  assert.equal(staged.length, 5);
+});
+
+test('R3-E private built scheduler validates methods resolves readiness before cleanup and disposes late builds', async t => {
+  for (const late of [false, true]) await t.test(late ? 'late build' : 'Blob reconnection readiness', async t => {
+    const { chromeApi, events } = chromeFixture();
+    const gate = deferred();
+    const connected = deferred();
+    const realStore = createInMemoryAuditStore();
+    let staged = 0;
+    let startupObserved = false;
+    const store = { ...realStore, async stageExpiredAuditDeletionsV1(request) {
+      assert.equal(startupObserved, true, 'startup must be ready before cleanup starts');
+      await connected.promise;
+      staged += 1;
+      return realStore.stageExpiredAuditDeletionsV1(request);
+    } };
+    const registration = registerServiceWorker(chromeApi, { async buildRuntime() {
+      await gate.promise;
+      return { readyRuntime: runtimeValue(), router: { dispatch() {} }, panelCoordinator: { attachPanelPort() {} },
+        panelLauncher: { launch() { return true; } },
+        retentionScheduler: registerRetentionSchedulerV1(chromeApi, {
+          store, deletionCoordinator: { async resumePending() {} }, now: () => RETENTION_NOW,
+        }),
+        blobUrlPortBridge: { attachPort() { connected.resolve(); return true; }, dispose() {} },
+      };
+    } });
+    t.after(() => { connected.resolve(); registration.dispose(); });
+    const ready = registration.startupReady.then(value => { startupObserved = true; return value; });
+    if (late) registration.dispose();
+    gate.resolve();
+    const runtime = await ready;
+    assert.equal(Object.hasOwn(runtime, 'retentionScheduler'), false);
+    if (!late) events.connect.emit(blobWiringPort());
+    await settleRetention();
+    assert.equal(staged, late ? 0 : 1);
+    registration.dispose();
+    assert.equal(events.startup.listeners.size, 0);
+    assert.equal(events.alarm.listeners.size, 0);
+  });
+  for (const missing of ['run', 'scheduleNext', 'dispose']) await t.test(`reject missing ${missing}`, async () => {
+    const { chromeApi } = chromeFixture();
+    const scheduler = { async run() {}, async scheduleNext() {}, dispose() {} };
+    delete scheduler[missing];
+    const registration = registerServiceWorker(chromeApi, { async buildRuntime() {
+      return { readyRuntime: runtimeValue(), router: { dispatch() {} }, panelCoordinator: { attachPanelPort() {} },
+        panelLauncher: { launch() {} }, retentionScheduler: scheduler };
+    } });
+    await assert.rejects(registration.startupReady, /WORKER_UNAVAILABLE/u);
+    registration.dispose();
+  });
+});
 
 async function batchReportFixture(auditId) {
   let tickIndex = 0;
@@ -239,6 +427,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
   if (fixtureOptions.alarms) chromeApi.alarms = { ...chromeApi.alarms, ...fixtureOptions.alarms, onAlarm: events.alarm };
 
   const fixtureAuditStore = {
+    ...createInMemoryAuditStore(),
     async getLatest() { storeCalls.push(['getLatest']); return structuredClone(latest); },
     async setLatest(value) { latest = structuredClone(value); },
     async cleanupExpiredAudits(options) {
@@ -1579,10 +1768,22 @@ test('default worker exposes the tokenized single-URL capability only through it
   assert.match(prepared.capabilityId, /^[A-Za-z0-9_-]{22}$/u);
 });
 
-test('default worker maps an explicit no-pixels batch from the panel to one consolidated report', async () => {
+test('R3-E terminal commit schedules retention without holding the starter lock or blocking its result and report', async t => {
   const auditId = 'audit-worker-batch';
   const report = await batchReportFixture(auditId);
-  const auditStore = createInMemoryAuditStore();
+  const realStore = createInMemoryAuditStore();
+  const schedulingGate = deferred();
+  let schedulingPending = false;
+  const auditStore = {
+    ...realStore,
+    async nextExpiresAtV1() {
+      if (await realStore.getReportRevision(auditId)) {
+        schedulingPending = true;
+        await schedulingGate.promise;
+      }
+      return realStore.nextExpiresAtV1();
+    },
+  };
   let executorDependencies = null;
   let executorArgs = null;
   const executionSettled = deferred();
@@ -1610,6 +1811,7 @@ test('default worker maps an explicit no-pixels batch from the panel to one cons
       });
     },
   });
+  t.after(() => { schedulingGate.resolve(); env.registration.dispose(); });
   const panel = await env.connectPanel();
   const prepared = await panel.request({
     type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: 'batch-result', intent: 'batch',
@@ -1658,6 +1860,12 @@ test('default worker maps an explicit no-pixels batch from the panel to one cons
   assert.match(connected.sessionCapabilityId ?? '', /^[A-Za-z0-9_-]{22}$/u);
   assert.equal(connected.state, 'view-only');
   assert.equal(opened.ok, true, JSON.stringify(opened));
+  assert.equal(schedulingPending, true, 'the real terminal path must request expiry scheduling');
+  assert.equal((await auditStore.getLatest()).auditId, auditId);
+  schedulingGate.resolve();
+  await tick();
+  assert.equal((await env.chromeApi.alarms.get(RETENTION_ALARM_NAME))?.scheduledTime,
+    Date.parse('2026-09-28T12:00:00.000Z'));
 });
 
 test('default worker cancellation removes persisted batch child pixels before clearing ACTIVE', async () => {
@@ -1923,6 +2131,7 @@ test('default runtime clears the persona expiry alarm with the exact Promise API
     ['clear', 1, PIXEL_CONSENT_ALARM_NAME],
     ['clear', 1, HIGHLIGHT_EXPIRY_ALARM_NAME],
     ['clear', 1, PERSONA_EXPIRY_ALARM_NAME],
+    ['clear', 1, RETENTION_ALARM_NAME],
     ['clear', 1, HIGHLIGHT_EXPIRY_ALARM_NAME],
   ]);
 });
