@@ -688,6 +688,8 @@ async function assertPanelSummaryAndDetail(extension, panel, mode, expectedImage
       .find(value=>value.dataset.checkKey===expected);
     const button=card?.querySelector('button[data-intent="SELECT_OCCURRENCE"]');
     if(!button)return -1;
+    const group=card.closest('details[data-abnt-group]');
+    if(group&&!group.open)group.querySelector('summary').click();
     const index=[...document.querySelectorAll('button[data-intent="SELECT_OCCURRENCE"]')].indexOf(button);
     button.click();return index;
   })()`, { userGesture: true });
@@ -739,7 +741,7 @@ async function assertPanelSummaryAndDetail(extension, panel, mode, expectedImage
 
 function reportSurfaceExpression() {
   return `(() => {
-    const text=document.body?.innerText??'';
+    const text=document.body?.textContent??'';
     const html=document.documentElement?.outerHTML??'';
     const explanation=document.querySelector('#report-source-explanation');
     const back=document.querySelector('#return-to-page');
@@ -1286,7 +1288,7 @@ test('current-page audits run in one inactive copy and leave the original page i
       }, fixture.origin));
       await step('PANEL_DETAIL', () =>
         assertPanelSummaryAndDetail(extension, panel, 'full-evidence', 1, identityBefore));
-      await step('PANEL_CAPTURE', () => extension.captureJourney('panel-current-copy-summary', panel));
+      await step('PANEL_CAPTURE', () => extension.captureJourney('panel-current-copy-summary', panel, { captureBeyondViewport: false }));
       const report = await step('REPORT_OPEN', () =>
         openViewOnlyReport(extension, panel, auditId, 1, identityBefore));
       await step('REPORT_CAPTURE', () =>

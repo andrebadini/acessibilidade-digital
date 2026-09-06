@@ -5,17 +5,19 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 ## Próximas entregas funcionais
 
 - mapa numerado consolidado incluído no candidato 1.0.8 e validado por E2E público; o pacote 1.0.7 permanece sem esse recurso;
-- implementar retenção automática por prazo, com limpeza recuperável e indicação visível da expiração;
+- retenção automática por prazo e limpeza recuperável implementadas no candidato atual; personalização do prazo e indicação individual da data de expiração podem ser acrescentadas;
 - atualizar as imagens e o texto de eventual canal público de distribuição após estabilização da beta.
 
 ## Refinamentos visuais não bloqueantes
+
+- atualizar imediatamente o sumário visual após salvar uma decisão humana. Até esse refinamento, reabra o relatório para renovar a visualização ou use “Gerar relatório atualizado” para exportar a revisão persistida; o comando Imprimir do navegador imprime a visualização atualmente aberta.
 
 - preservar o foco da página também no encerramento automático de uma persona já ausente; as atualizações passivas da legenda já preservam foco, rolagem e controles;
 
 - trocar o título transitório “Avaliando a página atual” por uma mensagem específica ao auditar outra URL;
 - evitar o possível recorte de metade do traço quando uma moldura derivada encosta exatamente na borda superior ou esquerda da captura;
 - identificar, na legenda, as ocorrências que originaram cada tom quando a mesma evidência visual é compartilhada por falha confirmada e revisão pendente.
-- compactar a apresentação impressa de auditorias com milhares de ocorrências, preservando todos os registros e referências. Baseline 1.0.8: 5.686 ocorrências, 254 artefatos, 5.896 usos de PNG; PDF marcado válido de 1.421 páginas e 18.519.470 bytes. Possíveis incrementos: tabela por ocorrência com metadados comuns no cabeçalho; imagens em anexo único com referências (sem fundir identidades de evidência); fundamentação idêntica compartilhada dentro da verificação e espaçamento específico de impressão. Exigir paridade de IDs/relações com JSON/CSV, todos os itens normativos, proveniências, segmentos e legendas, além de QA visual. Não estimar redução antes de medir.
+- a apresentação atual agrupa por item, recolhe fichas e evidências na tela, usa referência normativa curta e evita imagens repetidas no HTML/PDF (preservando molduras diferentes). Auditorias muito grandes ainda podem produzir PDFs extensos porque nenhum registro técnico é descartado. Baseline 1.0.8: 5.686 ocorrências, 254 artefatos, 5.896 usos de PNG; PDF marcado válido de 1.421 páginas e 18.519.470 bytes. Medir a nova apresentação no gate nativo; não estimar redução antes de medir. Tabelas ainda mais compactas por ocorrência ficam como refinamento futuro.
 - quando o orçamento global do lote omitir os pixels de um mapa já composto, substituir a orientação “Localize o número na imagem” por aviso específico de omissão; a legenda e os hashes continuam preservados e a ausência de PNG já é exibida.
 
 ## Infraestrutura de testes não bloqueante

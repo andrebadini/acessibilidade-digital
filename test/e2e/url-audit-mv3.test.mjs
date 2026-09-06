@@ -205,6 +205,11 @@ test(name, { timeout: 300_000 }, async t => {
       `Array.from(document.querySelectorAll('[data-result-card][data-classification="failed"] button[data-intent="SELECT_OCCURRENCE"]'), element=>element.dataset.focusId)`);
     let highlightable = false;
     for (const focusId of controls) {
+      await extension.evaluate(panel, `(() => {
+        const button=document.querySelector('button[data-focus-id="${focusId}"]');
+        const group=button?.closest('details[data-abnt-group]');
+        if(group&&!group.open)group.querySelector('summary').click();
+      })()`);
       await extension.click(panel, `button[data-focus-id="${focusId}"]`);
       const action = await extension.waitForValue(panel,
         `document.querySelector('[data-result-detail] .detail-actions [data-action]')?.dataset.action??null`,

@@ -270,7 +270,7 @@ async function openAndProveReport(extension, panel, auditId, rawUrl, expected, r
   const state = await extension.waitForValue(report, `(() => ({
     ready:Boolean(document.querySelector('button[data-report-export]')),
     issues:document.querySelectorAll('[data-report-issue]').length,
-    text:document.body?.innerText??''
+    text:document.body?.textContent??''
   }))()`, value => value?.ready === true && value?.issues > 0, { timeoutMs: 30_000, intervalMs: 50 });
   assert.match(state.text, /WCAG 2\.2:/u);
   assert.match(state.text, /ABNT NBR 17225:/u);

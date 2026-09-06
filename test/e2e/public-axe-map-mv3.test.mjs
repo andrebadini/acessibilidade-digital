@@ -82,11 +82,44 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   const auditId = await extension.evaluate(panel,
     `document.querySelector('[data-screen="result"]')?.dataset.auditId`);
   assert.match(auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);
+  const summaryMetrics = await extension.evaluate(panel,
+    `[...document.querySelectorAll('.metric-grid button.metric')].map(button => button.textContent)`);
+  assert.equal(summaryMetrics.length, 4);
+  const groupedItems = await extension.evaluate(panel,
+    `[...document.querySelectorAll('details[data-abnt-group]')].map(group => group.dataset.abntGroup)`);
+  assert.ok(groupedItems.length > 0);
+  assert.equal(new Set(groupedItems).size, groupedItems.length);
+  await extension.click(panel, 'button[data-focus-id="metric-humanReview"]');
+  assert.equal(await extension.evaluate(panel,
+    `document.querySelector('button[data-focus-id="metric-humanReview"]').getAttribute('aria-pressed')`), 'true');
+  assert.deepEqual(await extension.evaluate(panel,
+    `[...document.querySelectorAll('.metric-grid button.metric')].map(button => button.textContent)`), summaryMetrics);
+  await extension.click(panel, 'button[data-focus-id="metric-humanReview"]');
+  await extension.captureJourney('friendly-panel-summary', panel, { captureBeyondViewport: false });
   await extension.click(panel, '[data-action="open-report"], button[data-focus-id="open-report"]');
   const report = await extension.waitForReport({ auditId });
   await extension.waitForValue(report, `Boolean(document.querySelector('button[data-report-export]'))`, Boolean, {
     timeoutMs: 30_000, intervalMs: 50,
   });
+  await extension.captureJourney('friendly-report-summary', report, { captureBeyondViewport: false });
+  const reportItems = await extension.evaluate(report,
+    `[...document.querySelectorAll('[data-report-item-group]')].map(group => group.dataset.reportItemGroup)`);
+  assert.ok(reportItems.length > 0);
+  assert.equal(new Set(reportItems).size, reportItems.length);
+  await extension.click(report, 'button[data-report-metric="humanReview"]');
+  assert.equal(await extension.evaluate(report,
+    `document.querySelector('button[data-report-metric="humanReview"]').getAttribute('aria-pressed')`), 'true');
+  assert.equal(await extension.evaluate(report,
+    `[...document.querySelectorAll('[data-report-issue]')].filter(issue => !issue.hidden).every(issue => issue.dataset.result === 'humanReview')`), true);
+  await extension.click(report, 'button[data-report-metric="humanReview"]');
+  await extension.evaluate(report, `(() => {
+    const group = [...document.querySelectorAll('[data-report-item-group]')].find(group => group.querySelector('[data-result="humanReview"]'));
+    group.open = true;
+    const card = group.querySelector('[data-result="humanReview"]');
+    card.querySelector('[data-report-issue-details]').open = true;
+    card.scrollIntoView({ block: 'start', behavior: 'instant' });
+  })()`);
+  await extension.captureJourney('friendly-report-occurrence', report, { captureBeyondViewport: false });
   await extension.click(report, 'button[data-report-export]');
   const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 60_000, intervalMs: 50 });
   assert.deepEqual(downloads.map(value => value.format), ['html', 'pdf', 'csv', 'json']);
@@ -194,6 +227,11 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   }
   assert.equal(loopback.cspReports.length, 0, `violações CSP: ${loopback.cspReports.join(' ')}`);
   assert.doesNotMatch(`${html}\n${loopback.cspReports.join('\n')}`, /unsafe-eval|EvalError/iu);
+  await extension.click(panel, 'button[data-intent="NEW_AUDIT"]');
+  await extension.waitForValue(panel, `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial');
+  assert.equal(await extension.evaluate(report,
+    `Boolean(document.querySelector('[data-announcement-map-page="page-1"]'))`), true,
+  'refazer must preserve the previous report and its evidence');
 });
 
 function pathsContaining(value, marker, path = '$', output = [], seen = new WeakSet()) {

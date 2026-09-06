@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-05-public-friendly-results-design.md`.
 
+**Progresso de implementação:** etapas 1–3 concluídas nos checkpoints cc1a599, 719b59b e 7f6b81f; retenção R3E c41ef15, manual F1/F2 85928cb/aca0786 e pós-exportação 0691c9d, com revisões críticas C=0/I=0. O checklist de fechamento permanece dependente de Chrome/PDF reais. Registros detalhados em docs/qa/2026-09-05-public-beta-acceptance.md. A apresentação foi refinada para formulários humanos recolhidos com guia e exemplos.
+
 ## Global Constraints
 
 - Sem login, serviço remoto novo ou bibliotecas instaladas pelo usuário.

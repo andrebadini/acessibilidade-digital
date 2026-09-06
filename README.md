@@ -26,13 +26,25 @@ O painel apresenta as cinco etapas da avaliação. O indicador aparece ao lado d
 
 Ao final, o painel mostra o sumário, filtros e fichas das ocorrências. Cada ficha apresenta explicação, WCAG 2.2, item ABNT NBR 17225, fundamentação legal, nome acessível, anúncio estimado, seletor, código e evidências disponíveis. **Ver e destacar na página** localiza o elemento quando a prova viva ainda corresponde ao documento auditado. A auditoria da página atual e os lotes fecham suas cópias temporárias: nesses casos, o relatório permite consultar as evidências, mas não destacar o elemento ao vivo. Para testar o destaque vivo nesta beta, use **Outra URL** e mantenha a página auditada disponível. **Abrir relatório completo** abre a revisão em uma aba própria. A exportação baixa HTML autocontido, PDF, CSV e JSON-LD/EARL.
 
+Os quatro cartões do sumário funcionam como filtros. Clique novamente no cartão selecionado para mostrar todos os resultados. As ocorrências estão agrupadas por item da ABNT: abra o item e depois a ficha que deseja entender. A ficha explica o impacto, o que foi observado e como revisar ou corrigir, com exemplos. Código e detalhes técnicos ficam recolhidos. A referência curta distingue inconformidade confirmada de item ainda a verificar.
+
+**Refazer auditoria** volta à escolha de página e modo sem apagar o relatório anterior nem iniciar outra captura automaticamente. O HTML baixado também tem filtros; os filtros de tela não removem registros do PDF ou dos demais arquivos.
+
+**Cobertura automática** é a proporção de testes do motor próprio que chegaram a uma conclusão automática — passou, falhou ou não se aplica — em relação ao inventário desse motor nas páginas tentadas. Não é o percentual da página acessível nem o percentual de toda a WCAG ou da ABNT que uma máquina consegue verificar. O axe-core e as revisões humanas aparecem nos resultados, mas não compõem esse denominador.
+
+## Dados locais e exclusão
+
+As auditorias ficam no dispositivo por até 30 dias desde o primeiro registro, sem renovação automática do prazo ao revisar ou exportar. A limpeza é retomada quando o Chrome puder executar a extensão; fechar o navegador não mantém um processo rodando.
+
+No relatório, **Excluir auditoria local** pede confirmação. Se desejar excluir depois de salvar, marque a opção junto a **Exportar HTML, PDF, CSV e JSON**. Ela começa desmarcada e só autoriza a exclusão daquela auditoria depois da confirmação dos quatro downloads. Entregas parciais e revisões que mudaram durante a exportação preservam os dados locais. A limpeza de recursos pode ser retomada automaticamente se houver interrupção. Os arquivos já baixados não são apagados.
+
 Capturas apresentadas no relatório recebem molduras derivadas por ocorrência: vermelho para falha confirmada e âmbar tracejado para revisão pendente. Os PNGs originais e seus hashes permanecem separados e inalterados.
 
 As permissões `tabs`, `scripting` e `debugger` permitem identificar e inspecionar localmente a página ativa escolhida, coletar a árvore de acessibilidade, registrar evidências e preparar a impressão. `sidePanel` mantém a interface ao lado da página; `downloads` salva os artefatos; `storage` mantém auditoria e andamento no dispositivo; `alarms` agenda a expiração de estados temporários; `contextMenus` oferece um atalho opcional. Os sites auditados são cobertos por `host_permissions` HTTP(S). A extensão não envia o conteúdo coletado para um servidor próprio.
 
 ## Limites atuais da beta
 
-A beta audita a página aberta, outra URL ou um lote explícito de 2 a 20 URLs nos três modos, sempre sobre os estados observados, e não todo o serviço. O mapa numerado consolidado de anúncios permanece em desenvolvimento; as evidências visuais individuais estão disponíveis nos modos com captura. Itens contextuais exigem revisão humana. Frames de terceiros, canvas, vídeo, conteúdo protegido ou coleta estrutural bloqueada podem produzir resultado parcial.
+A beta audita a página aberta, outra URL ou um lote explícito de 2 a 20 URLs nos três modos, sempre sobre os estados observados, e não todo o serviço. No modo de evidência completa, o relatório inclui o mapa numerado e a legenda dos anúncios estimados quando a coleta consegue produzi-los; omissões e limites ficam registrados. Itens contextuais exigem revisão humana. Frames de terceiros, canvas, vídeo, conteúdo protegido ou coleta estrutural bloqueada podem produzir resultado parcial.
 
 Audita Acessibilidade é uma ferramenta independente, sem vínculo institucional. A cobertura automática não equivale a certificação nem a laudo oficial. Consulte [Uso fiscal](docs/USO-FISCAL.md) para interpretar o resultado e [Backlog da beta](docs/BETA-BACKLOG.md) para as melhorias não bloqueantes já registradas.
 

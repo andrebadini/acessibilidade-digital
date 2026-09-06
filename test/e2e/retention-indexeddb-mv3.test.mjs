@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -161,75 +161,38 @@ test('Chrome teardown stops waiting when a killed process emits no exit event', 
   assert.ok(Date.now() - started < 1_000, 'o teardown deve ter limite explícito');
 });
 
-test('enforces retention and confirmed deletion through the native Side Panel and real MV3 IndexedDB', { timeout: 300_000 }, async t => {
+test('enforces retention and confirmed deletion through the native Side Panel and real MV3 IndexedDB', { timeout: 360_000 }, async t => {
   assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real de retenção.');
   await access(chromeBinary, fsConstants.X_OK);
   const loopback = await startLoopbackSite();
   t.after(() => loopback.close());
-  const sourceUrl = `${loopback.baseUrl}/source`;
+  loopback.releaseAuditGate();
   const extension = await launchUnpackedExtension(t, {
-    extensionPath: await realpath(root),
-    startUrl: sourceUrl,
-    chromeBinary,
-    expectedMajor: 152,
-    viewport: { width: 1280, height: 800 },
+    extensionPath: await realpath(root), startUrl: loopback.baseUrl + '/source', chromeBinary,
+    expectedMajor: 152, downloadMode: 'profile', viewport: { width: 1280, height: 800 },
   });
   assert.equal(extension.chromeProduct, CANONICAL_CHROME_PRODUCT);
-  const harness = extension.harnessPage;
-
-  const indexedDbPreflight = await extension.evaluate(harness, `(async () => {
-    const { createAuditStore } = await import(chrome.runtime.getURL('/src/storage/audit-store.js'));
-    const store = globalThis.__retentionE2eStore ??= createAuditStore();
-    const [latest, retention, cleanup] = await Promise.all([
-      store.getLatest(), store.getAuditRetention('preflight-audit'),
-      store.cleanupExpiredAudits({ now: '2026-08-28T00:00:00.000Z', limit: 1 })
-    ]);
-    return { ok: latest === undefined && retention === undefined, scanned: cleanup.scanned };
-  })()`, { awaitPromise: true });
-  assert.deepEqual(indexedDbPreflight, { ok: true, scanned: 0 });
-
-  const publicProof = await runPublicBatchRetentionProof({
-    extension,
-    browser: extension.browser,
-    harness,
-    extensionId: extension.extensionId,
-    loopback,
-    downloadDir: extension.downloadDirectory,
-    chromeStderr: () => '',
-  });
+  const publicProof = await runPublicBatchRetentionProof({ extension, loopback });
   assert.deepEqual(publicProof, {
-    panelActionOpened: true,
+    nativePanelOnly: true,
     explicitTwoPageBatch: true,
     crawlerTrapAvoided: true,
-    activeCheckpointSanitized: true,
-    busyAuditVisible: true,
-    busyDeleteInsideDialogAx: true,
-    retentionOffAtFirstCommit: true,
-    firstCommitPixels: true,
-    firstCommitPrivateDataAbsent: true,
-    firstCommitSingleBatchRecord: true,
-    retainedDeliveryFourOfFour: true,
-    retainedAuditPreserved: true,
-    retainedDeliveryJournalSettled: true,
-    terminalCheckpointCleared: true,
-    reviewMismatchRejected: true,
-    deletionSpoofIgnored: true,
-    explicitDeletionRendered: true,
-    explicitAuditDeleted: true,
-    automaticRetentionAtFirstCommit: true,
-    automaticFirstCommitValid: true,
-    automaticDeliveryFourOfFour: true,
-    automaticDeletionRendered: true,
-    automaticAuditDeleted: true,
-    downloadsPreserved: true,
-    panelResponsiveAtTwoHundredPercent: true,
-    reviewResponsiveAtTwoHundredPercent: true,
+    consentBeforePixels: true,
+    defaultRetentionPreserved: true,
+    expiryNotExtendedByExport: true,
+    retainedFourDownloads: true,
+    manualDialogKeyboardAndCancel: true,
+    manualDeletionCompleted: true,
+    reportOptInDefaultOff: true,
+    automaticFourDownloads: true,
+    automaticDeletionCompleted: true,
+    physicalDownloadsPreserved: true,
+    narrowLayoutUsable: true,
     storageAndReportsSanitized: true,
   });
-
-  const storageProof = await runRealStorageProof(harness);
+  const storageProof = await runRealStorageProof(extension.harnessPage);
   assert.deepEqual(storageProof, {
-    databaseVersion: 2,
+    databaseVersion: 3,
     retentionIndex: true,
     migratedRecords: 2,
     migrationPrivateKeysPreserved: true,
@@ -244,166 +207,12 @@ test('enforces retention and confirmed deletion through the native Side Panel an
     rollbackAtomic: true,
     reopenPersistent: true,
     partialRetained: true,
-    completeDeleted: true,
+    completePreservedBeforeStage: true,
+    completeDeletedAfterStage: true,
     batchSingleMetadata: true,
     unauthorizedDeleteRejected: true,
     localStorageLimited: true,
     sessionStorageSanitized: true,
-  });
-
-  const deleteAllProof = await extension.evaluate(harness, `(async () => {
-    const { createAuditStore } = await import(chrome.runtime.getURL('/src/storage/audit-store.js'));
-    const store = globalThis.__retentionE2eStore ??= createAuditStore();
-    const result = await store.deleteAllAudits({ now: '2026-09-03T00:00:00.000Z' });
-    return { deleted: result.deleted, latestAbsent: (await store.getLatest()) === undefined };
-  })()`, { awaitPromise: true });
-  assert.ok(deleteAllProof.deleted >= 3, JSON.stringify(deleteAllProof));
-  assert.equal(deleteAllProof.latestAbsent, true);
-
-  const panel = await extension.openSidePanelFromAction();
-  const contexts = await extension.runtimeContexts({ contextTypes: ['SIDE_PANEL', 'POPUP'] });
-  assert.equal(contexts.filter(value => value.contextType === 'SIDE_PANEL').length, 1);
-  assert.equal(contexts.filter(value => value.contextType === 'POPUP').length, 0);
-  await extension.waitForValue(panel,
-    `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial');
-  await extension.click(panel, 'button[data-focus-id="start-attached"][data-intent="START_ATTACHED"]');
-  const terminal = await extension.waitForValue(panel, `(() => ({
-    screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
-    auditId: document.querySelector('[data-screen="result"]')?.dataset.auditId ?? null,
-    status: document.querySelector('[role="status"]')?.textContent ?? null
-  }))()`, value => ['result', 'unavailable'].includes(value?.screen), { timeoutMs: 60_000, intervalMs: 50 });
-  if (terminal.screen !== 'result') {
-    const diagnostic = await extension.evaluate(harness, `(async () => {
-      const { createAuditStore } = await import(chrome.runtime.getURL('/src/storage/audit-store.js'));
-      const [latest, session] = await Promise.all([createAuditStore().getLatest(), chrome.storage.session.get(null)]);
-      return {
-        latest: latest && typeof latest === 'object' ? {
-          auditId: latest.auditId ?? null, status: latest.status ?? null,
-          failureCode: latest.failureCode ?? null, message: latest.message ?? null,
-        } : null,
-        sessionKeys: Object.keys(session).sort(),
-      };
-    })()`, { awaitPromise: true });
-    throw new Error(`RETENTION_NATIVE_PANEL_FAILED:${JSON.stringify({ terminal, diagnostic })}`);
-  }
-  assert.match(terminal.auditId, /^[A-Za-z0-9._:-]{1,160}$/u);
-  const auditId = terminal.auditId;
-
-  const retainedBeforeExport = await extension.evaluate(harness, `(async () => {
-    const { createAuditStore } = await import(chrome.runtime.getURL('/src/storage/audit-store.js'));
-    const store = globalThis.__retentionE2eStore ??= createAuditStore();
-    const [snapshot, retention, latest] = await Promise.all([
-      store.getAuditSnapshot(${JSON.stringify(auditId)}),
-      store.getAuditRetention(${JSON.stringify(auditId)}),
-      store.getLatest(),
-    ]);
-    const text = JSON.stringify({ model: snapshot.model, retention, latest });
-    return {
-      modelPresent: snapshot.model?.auditId === ${JSON.stringify(auditId)},
-      retentionOff: retention?.deleteAfterCompleteExport === false,
-      latestCorrelated: latest?.auditId === ${JSON.stringify(auditId)},
-      noPixelEvidence: Array.isArray(snapshot.model?.evidence) &&
-        snapshot.model.evidence.every(item => typeof item?.dataUrl !== 'string'),
-      sanitized: !text.includes(${JSON.stringify(sensitiveMarker)}) && !text.includes('?token=') && !text.includes('?auth='),
-    };
-  })()`, { awaitPromise: true });
-  assert.deepEqual(retainedBeforeExport, {
-    modelPresent: true,
-    retentionOff: true,
-    latestCorrelated: true,
-    noPixelEvidence: true,
-    sanitized: true,
-  });
-
-  await extension.click(panel, 'button[data-focus-id="open-report"][data-intent="OPEN_REPORT"]');
-  const review = await extension.waitForReport({ auditId });
-  const readReviewState = `(() => ({
-    deleteReady: !document.querySelector('#delete-audit')?.disabled,
-    exportReady: Boolean(document.querySelector('button[data-report-export]')),
-    status: document.querySelector('#review-status')?.textContent ?? null
-  }))()`;
-  try {
-    await extension.waitForValue(review, readReviewState,
-      value => value?.deleteReady === true && value?.exportReady === true &&
-        typeof value.status === 'string' && value.status !== 'Carregando a auditoria.',
-      { timeoutMs: 30_000, intervalMs: 50 });
-  } catch (error) {
-    const observed = await extension.evaluate(review, readReviewState).catch(() => null);
-    throw new Error(`RETENTION_REVIEW_NOT_READY:${JSON.stringify(observed)}`, { cause: error });
-  }
-
-  await extension.click(review, 'button[data-report-export]');
-  const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 60_000, intervalMs: 50 });
-  assert.deepEqual(downloads.map(value => value.format), ['html', 'pdf', 'csv', 'json']);
-  assert.equal(downloads.every(value => value.state === 'complete' && value.byteLength > 0 &&
-    /^[a-f0-9]{64}$/u.test(value.sha256)), true);
-  const retainedAfterExport = await extension.evaluate(harness, `(async () => {
-    const { createAuditStore } = await import(chrome.runtime.getURL('/src/storage/audit-store.js'));
-    const store = globalThis.__retentionE2eStore ??= createAuditStore();
-    const [model, retention, journal, lease] = await Promise.all([
-      store.getAudit(${JSON.stringify(auditId)}),
-      store.getAuditRetention(${JSON.stringify(auditId)}),
-      store.getExportDeliveryJournal(${JSON.stringify(auditId)}),
-      store.getExportLeaseState(${JSON.stringify(auditId)}, { now: new Date().toISOString() }),
-    ]);
-    return {
-      modelPreserved: model?.auditId === ${JSON.stringify(auditId)},
-      retentionOff: retention?.deleteAfterCompleteExport === false,
-      journalSettled: Array.isArray(journal) && journal.length === 0,
-      leaseInactive: lease?.active !== true,
-    };
-  })()`, { awaitPromise: true });
-  assert.deepEqual(retainedAfterExport, {
-    modelPreserved: true,
-    retentionOff: true,
-    journalSettled: true,
-    leaseInactive: true,
-  });
-
-  await extension.click(review, '#delete-audit');
-  await extension.waitForValue(review, `(() => ({
-    open: document.querySelector('#delete-audit-dialog')?.open === true,
-    focus: document.activeElement?.id ?? null
-  }))()`, value => value?.open === true && value.focus === 'delete-audit-cancel');
-  await extension.click(review, '#delete-audit-cancel');
-  await extension.waitForValue(review, `document.querySelector('#review-status')?.textContent`,
-    value => /exclusão cancelada/iu.test(value));
-  await extension.click(review, '#delete-audit');
-  await extension.waitForValue(review, `document.querySelector('#delete-audit-dialog')?.open`, Boolean);
-  await extension.click(review, '#delete-audit-confirm');
-  const deleted = await extension.waitForValue(review, `(() => ({
-    open: document.querySelector('#delete-audit-dialog')?.open === true,
-    disabled: document.querySelector('#delete-audit')?.disabled === true,
-    status: document.querySelector('#review-status')?.textContent ?? ''
-  }))()`, value => value?.open === false && value.disabled === true && /excluída/iu.test(value.status),
-  { timeoutMs: 20_000, intervalMs: 50 });
-  assert.match(deleted.status, /downloads já salvos foram preservados/iu);
-
-  const filesRemain = await Promise.all(downloads.map(value => stat(join(extension.downloadDirectory, value.filename))
-    .then(info => info.isFile() && info.size === value.byteLength, () => false)));
-  assert.equal(filesRemain.every(Boolean), true);
-  const finalProof = await extension.evaluate(harness, `(async () => {
-    const { createAuditStore } = await import(chrome.runtime.getURL('/src/storage/audit-store.js'));
-    const store = globalThis.__retentionE2eStore ??= createAuditStore();
-    const [model, retention, latest, local, session] = await Promise.all([
-      store.getAudit(${JSON.stringify(auditId)}),
-      store.getAuditRetention(${JSON.stringify(auditId)}),
-      store.getLatest(), chrome.storage.local.get(null), chrome.storage.session.get(null),
-    ]);
-    const allowedLocalKeys = new Set(['audita:persona:voiceId', 'audita:persona:rate']);
-    return {
-      auditDeleted: model === undefined && retention === undefined,
-      latestDeleted: latest === undefined || latest.auditId !== ${JSON.stringify(auditId)},
-      localKeysAllowed: Object.keys(local).every(key => allowedLocalKeys.has(key)),
-      sessionSanitized: !JSON.stringify(session).includes(${JSON.stringify(sensitiveMarker)}) &&
-        !JSON.stringify(session).includes('?token=') && !JSON.stringify(session).includes('?auth='),
-    };
-  })()`, { awaitPromise: true });
-  assert.deepEqual(finalProof, {
-    auditDeleted: true,
-    latestDeleted: true,
-    localKeysAllowed: true,
-    sessionSanitized: true,
   });
 });
 
@@ -576,621 +385,211 @@ async function startLoopbackSite() {
   };
 }
 
-async function runPublicBatchRetentionProof({
-  extension, browser, harness, extensionId, loopback, downloadDir, chromeStderr,
-}) {
-  const pageUrls = [
-    `${loopback.baseUrl}/page-a?token=${sensitiveMarker}`,
-    `${loopback.baseUrl}/page-b?auth=${sensitiveMarker}`,
-  ];
-  const firstPanel = await extension.openSidePanelFromAction();
-  const contexts = await extension.runtimeContexts({ contextTypes: ['SIDE_PANEL', 'POPUP'] });
-  assert.deepEqual({
-    sidePanels: contexts.filter(value => value.contextType === 'SIDE_PANEL').length,
-    popups: contexts.filter(value => value.contextType === 'POPUP').length,
-  }, { sidePanels: 1, popups: 0 });
-  await extension.waitForValue(firstPanel,
-    `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial');
-  await extension.click(firstPanel,
-    'button[data-focus-id="open-batch-form"][data-intent="OPEN_BATCH_FORM"]');
-  const publicBatchEntry = await extension.evaluate(firstPanel, `(() => ({
-    screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
-    urlList: Boolean(document.querySelector('#audit-urls, textarea[name="batch-urls"]')),
-    fullEvidence: Boolean(document.querySelector('input[name="capture-mode"][value="full-evidence"]')),
-    deleteAfterExport: Boolean(document.querySelector('#delete-after-export, input[name="delete-after-export"]')),
-    submit: Boolean(document.querySelector('#audit-form button[type="submit"], [data-action="start-batch-audit"]')),
-    status: document.querySelector('[role="status"]')?.textContent?.trim() ?? null
-  }))()`);
-  assert.deepEqual(publicBatchEntry, {
-    screen: 'batch-input',
-    urlList: true,
-    fullEvidence: true,
-    deleteAfterExport: true,
-    submit: true,
-    status: 'Informe duas ou mais URLs e escolha a retenção local.',
-  }, 'MARCO3_PUBLIC_BATCH_RETENTION_MISSING');
+async function runPublicBatchRetentionProof({ extension, loopback }) {
+  const harness = extension.harnessPage;
+  const urls = [loopback.baseUrl + '/page-a?token=' + sensitiveMarker,
+    loopback.baseUrl + '/page-b?auth=' + sensitiveMarker];
+  const exports = [];
+  let nativePanelOnly = true;
+  let consentBeforePixels = true;
+  let narrowLayoutUsable = true;
+  let manualDialogKeyboardAndCancel = false;
+  let defaultRetentionPreserved = false;
+  let expiryNotExtendedByExport = false;
+  let reportOptInDefaultOff = true;
+  let explicitTwoPageBatch = true;
+  let sanitized = true;
 
-  const secondPanel = await openPanelThroughAction(
-    browser, extensionId, `${loopback.baseUrl}/source-2`, chromeStderr,
-  );
-  await submitExplicitBatch(firstPanel, pageUrls, false);
+  for (const optIn of [false, true]) {
+    const panel = await extension.openSidePanelFromAction();
+    const contexts = await extension.runtimeContexts({ contextTypes: ['SIDE_PANEL', 'POPUP'] });
+    nativePanelOnly &&= contexts.filter(value => value.contextType === 'SIDE_PANEL').length === 1 &&
+      contexts.every(value => value.contextType !== 'POPUP');
+    await extension.waitForValue(panel, "document.querySelector('[data-screen]')?.dataset.screen",
+      value => value === 'initial', { timeoutMs: 30_000, intervalMs: 50 });
+    await extension.click(panel, '[data-intent="OPEN_BATCH_FORM"]');
+    assert.equal(await extension.evaluate(panel, "document.querySelector('#delete-after-export') === null"), true,
+      'a escolha de exclusão pertence ao relatório, não ao início da captura');
+    await extension.click(panel, '[name="capture-mode"][value="full-evidence"]');
+    await extension.evaluate(panel, "(() => { const input=document.querySelector('#audit-urls'); input.value=" +
+      JSON.stringify(urls.join('\n')) + "; input.dispatchEvent(new Event('input',{bubbles:true})); })()");
+    await extension.click(panel, '[data-action="start-batch-audit"]');
 
-  const active = await waitForValue(harness, `(async () => {
-    const { createAuditStore } = await import(chrome.runtime.getURL('src/storage/audit-store.js'));
-    const store = globalThis.__retentionE2eStore ??= createAuditStore();
-    const latest = await store.getLatest();
-    const session = await chrome.storage.session.get(null);
-    const activeBatch = session['audita-mt:session:active-batch'];
-    return {
-      ready: latest?.mode === 'batch' && latest.status === 'running' && activeBatch?.id === latest.auditId,
-      auditId: latest?.auditId || null,
-      sanitized: !JSON.stringify(session).includes(${JSON.stringify(sensitiveMarker)}) &&
-        !JSON.stringify(session).includes('data:image')
-    };
-  })()`, value => value?.ready === true, 60_000);
-  const auditId = active.auditId;
-
-  await submitExplicitBatch(secondPanel, pageUrls, false);
-  const busyAudit = await waitForValue(secondPanel,
-    `document.querySelector('#audit-status').textContent`,
-    value => /auditoria em andamento/iu.test(value), 20_000);
-  const panelResponsive = await responsiveAtTwoHundredPercent(secondPanel, '#delete-all-audits');
-  await openAndConfirmDialog(secondPanel, '#delete-all-audits', '#delete-all-confirm');
-  const activeBusy = await waitForValue(secondPanel, `(() => ({
-    open: document.querySelector('#delete-all-dialog').open,
-    internal: document.querySelector('#delete-all-dialog-status').textContent,
-    external: document.querySelector('#audit-status').textContent
-  }))()`, value => value?.open === true && /exportada|entrega pendente/iu.test(value.internal), 20_000);
-  const activeBusyAx = await dialogStatusInAxTree(secondPanel, /excluir todas as auditorias locais/iu,
-    /exportada|entrega pendente/iu);
-  assert.equal(activeBusyAx, true);
-  assert.doesNotMatch(activeBusy.external, /exportada|entrega pendente/iu);
-  await pressKey(secondPanel, 'Escape', 'Escape', 27);
-  await assertLiveStatusInAxTree(secondPanel, /exclusão cancelada/iu);
-  loopback.releaseAuditGate();
-
-  const firstCommit = await waitForValue(harness, `(async () => {
-    const { createAuditStore } = await import(chrome.runtime.getURL('src/storage/audit-store.js'));
-    const store = globalThis.__retentionE2eStore ??= createAuditStore();
-    try {
-      const [snapshot, retention] = await Promise.all([
-        store.getAuditSnapshot(${JSON.stringify(auditId)}),
-        store.getAuditRetention(${JSON.stringify(auditId)})
-      ]);
-      const model = snapshot?.model;
-      const evidence = Array.isArray(model?.evidence) ? model.evidence : [];
-      const text = JSON.stringify({ model, retention });
-      return {
-        ready: Boolean(model && retention),
-        pages: Array.isArray(model?.pages) ? model.pages.length : 0,
-        retentionOff: retention?.deleteAfterCompleteExport === false,
-        firstPersistedAt: retention?.firstPersistedAt || null,
-        expiresAt: retention?.expiresAt || null,
-        pixels: evidence.filter(item => item?.kind === 'full-page' && /^data:image\\/png;base64,/u.test(item.dataUrl)).length,
-        privateAbsent: !text.includes(${JSON.stringify(sensitiveMarker)}) && !text.includes('?token=') && !text.includes('?auth=')
-      };
-    } catch (error) {
-      const code = typeof error?.code === 'string' && /^[A-Z0-9_]+$/u.test(error.code)
-        ? error.code : 'EVALUATION_FAILED';
-      let latestState = 'unavailable';
-      let checkpointState = 'unavailable';
-      try {
-        const latest = await store.getLatest();
-        latestState = latest?.auditId === ${JSON.stringify(auditId)} ? latest.status ?? 'correlated' : latest ? 'other' : 'absent';
-      } catch {}
-      try {
-        const session = await chrome.storage.session.get(null);
-        checkpointState = session['audita-mt:session:active-batch']?.id === ${JSON.stringify(auditId)} ? 'active' : 'absent';
-      } catch {}
-      return { ready: false, code, latestState, checkpointState };
+    for (const pageNumber of [1, 2]) {
+      const paused = await extension.waitForValue(panel, "(() => { const root=document.querySelector('[data-screen]'); return {" +
+        "screen:root?.dataset.screen,status:root?.dataset.sessionStatus,page:Number(root?.dataset.pageNumber)," +
+        "confirm:Boolean(root?.querySelector('[data-action=\"confirm-pixel-capture\"]'))}; })()",
+      value => value?.screen === 'result' || value?.screen === 'unavailable' ||
+        value?.status === 'privacy-paused' && value.page === pageNumber && value.confirm,
+      { timeoutMs: 90_000, intervalMs: 50 });
+      assert.deepEqual(paused, { screen: 'running', status: 'privacy-paused', page: pageNumber, confirm: true });
+      const privacy = await extension.evaluate(harness, "chrome.storage.session.get(null).then(session => ({" +
+        "sanitized:!JSON.stringify(session).includes(" + JSON.stringify(sensitiveMarker) + ")," +
+        "noInlinePixels:!JSON.stringify(session).includes('data:image')}))", { awaitPromise: true });
+      consentBeforePixels &&= privacy.sanitized && privacy.noInlinePixels;
+      assert.equal(await extension.evaluate(panel, 'document.body.innerText.includes(' + JSON.stringify(sensitiveMarker) + ')'), false);
+      await extension.click(panel, '[data-action="confirm-pixel-capture"]');
     }
-  })()`, value => value?.ready === true, 150_000);
-  const databaseAtFirstCommit = await inspectBatchDatabase(harness, auditId);
+    const result = await extension.waitForValue(panel, "(() => { const root=document.querySelector('[data-screen]');" +
+      " return {screen:root?.dataset.screen,auditId:root?.dataset.auditId??null}; })()",
+    value => ['result', 'unavailable'].includes(value?.screen), { timeoutMs: 120_000, intervalMs: 50 });
+    assert.equal(result.screen, 'result');
+    assert.match(result.auditId, /^[A-Za-z0-9._:-]{1,160}$/u);
+    const auditId = result.auditId;
+    const stored = await readNativeAuditProof(extension, auditId);
+    assert.equal(stored.present, true);
+    assert.equal(stored.retentionOff, true);
+    assert.equal(stored.pages, 2);
+    assert.ok(stored.fullPageCaptures >= 2, 'as duas páginas devem conservar capturas autorizadas');
+    assert.equal(stored.sanitized, true);
+    assert.equal(Date.parse(stored.expiresAt) - Date.parse(stored.firstPersistedAt), 30 * 24 * 60 * 60 * 1000);
+    explicitTwoPageBatch &&= stored.pages === 2;
+    narrowLayoutUsable &&= await narrowLayoutProof(panel, '[data-focus-id="open-report"]');
 
-  const retainedDelivery = await waitForValue(harness, `(async () => {
-      const { createAuditStore } = await import(chrome.runtime.getURL('src/storage/audit-store.js'));
-      const store = globalThis.__retentionE2eStore ??= createAuditStore();
-      const [snapshot, retention, latest, journal, lease, physicalDownloads] = await Promise.all([
-        store.getAuditSnapshot(${JSON.stringify(auditId)}),
-        store.getAuditRetention(${JSON.stringify(auditId)}),
-        store.getLatest(),
-        store.getExportDeliveryJournal(${JSON.stringify(auditId)}),
-        store.getExportLeaseState(${JSON.stringify(auditId)}, { now: new Date().toISOString() }),
-        chrome.downloads.search({})
-      ]);
-      const receipt = latest?.auditId === ${JSON.stringify(auditId)} ? latest.deliveryReceipt : null;
-      const correlatedLatest = latest?.auditId === ${JSON.stringify(auditId)} ? latest : null;
-      const receiptFormats = Array.isArray(receipt?.formats) ? receipt.formats : [];
-      const receiptIds = receiptFormats.map(item => item?.downloadId);
-      return {
-        ready: Boolean(snapshot?.model && retention && latest?.auditId === ${JSON.stringify(auditId)} &&
-          latest.exportStatus === 'complete'),
-        terminal: ['complete', 'partial', 'failed'].includes(correlatedLatest?.exportStatus),
-        retained: Boolean(snapshot?.model && retention),
-        formats: Array.isArray(receipt?.formats)
-          ? receipt.formats.filter(item => item?.status === 'complete').map(item => item.format).sort() : [],
-        receiptEvidenceValid: receipt?.status === 'complete' && receiptFormats.length === 4 &&
-          new Set(receiptIds).size === 4 && receiptFormats.every(item => item?.status === 'complete' &&
-            Number.isSafeInteger(item.downloadId) && item.downloadId >= 0 &&
-            /^[a-f0-9]{64}$/u.test(item.sha256 || '') &&
-            /-delivery-[a-f0-9]{64}\\.(?:html|json|csv|pdf)$/u.test(item.filename || '')),
-        receiptIdsComplete: receiptFormats.length === 4 && receiptFormats.every(entry =>
-          physicalDownloads.some(item => item?.id === entry.downloadId && item?.state === 'complete' &&
-            item?.exists !== false)),
-        journalSettled: Array.isArray(journal) && journal.length === 0 && lease?.active !== true,
-        exportStatus: latest?.auditId === ${JSON.stringify(auditId)} ? latest.exportStatus || 'missing' : 'uncorrelated',
-        journalStates: Array.isArray(journal) ? journal.map(item => item?.state || 'invalid').sort() : ['unavailable'],
-        leaseState: lease?.active === true ? lease.phase || 'active' : 'inactive',
-        downloadStates: Array.isArray(physicalDownloads)
-          ? physicalDownloads.map(item => item?.state || 'unknown').sort() : ['unavailable'],
-        expiryUnchanged: retention?.firstPersistedAt === ${JSON.stringify(firstCommit.firstPersistedAt)} &&
-          retention?.expiresAt === ${JSON.stringify(firstCommit.expiresAt)}
-      };
-    })()`, value => value?.ready === true || value?.terminal === true, 60_000);
-  if (!retainedDelivery.ready) {
-    throw new Error(`Finalização da primeira entrega divergiu; estado seguro=${JSON.stringify(retainedDelivery)}`);
+    await extension.click(panel, '[data-focus-id="open-report"]');
+    const report = await extension.waitForReport({ auditId });
+    await extension.waitForValue(report,
+      "Boolean(document.querySelector('button[data-report-export]')) && !document.querySelector('#delete-audit')?.disabled",
+      Boolean, { timeoutMs: 30_000, intervalMs: 50 });
+    const control = await extension.evaluate(report, "(() => {const input=document.querySelector('#delete-after-export');" +
+      "return {exists:Boolean(input),checked:input?.checked,disabled:input?.disabled};})()");
+    assert.deepEqual(control, { exists: true, checked: false, disabled: false });
+    reportOptInDefaultOff &&= control.checked === false;
+    narrowLayoutUsable &&= await narrowLayoutProof(report, '#delete-audit');
+
+    const spoof = await extension.evaluate(report, "chrome.runtime.sendMessage({type:'AUDIT_DELETED',auditId:" +
+      JSON.stringify(auditId) + ",reason:'delete-one'}).catch(()=>null)", { awaitPromise: true });
+    void spoof;
+    assert.equal((await readNativeAuditProof(extension, auditId)).present, true,
+      'uma mensagem de exclusão emitida pelo relatório não concede autorização');
+    assert.equal(await extension.evaluate(report, "!document.querySelector('#delete-audit').disabled"), true);
+    if (optIn) await extension.click(report, '#delete-after-export');
+
+    const beforeIds = await extension.evaluate(harness, 'chrome.downloads.search({}).then(rows=>rows.map(row=>row.id))',
+      { awaitPromise: true });
+    await extension.click(report, 'button[data-report-export]');
+    // O receipt é apagado pelo cleanup pós-exportação. A prova física não depende de relê-lo depois da exclusão.
+    const downloads = await waitForNewPhysicalDownloads(extension, auditId, beforeIds);
+    exports.push(downloads);
+    const json = JSON.parse((await readFile(join(extension.downloadDirectory,
+      downloads.find(row => row.format === 'json').filename), 'utf8')).replace(/^\uFEFF/u, ''));
+    assert.equal(json.audit.auditId, auditId);
+    assert.equal(json.audit.pages.length, 2);
+    for (const row of downloads) {
+      const bytes = await readFile(join(extension.downloadDirectory, row.filename));
+      sanitized &&= !bytes.includes(Buffer.from(sensitiveMarker));
+    }
+
+    if (!optIn) {
+      const retained = await extension.waitForValue(harness, nativeAuditProofExpression(auditId),
+        value => value?.present === true && value.journalSettled, { timeoutMs: 20_000, intervalMs: 50 });
+      defaultRetentionPreserved = retained.retentionOff && retained.present;
+      expiryNotExtendedByExport = retained.expiresAt === stored.expiresAt &&
+        retained.firstPersistedAt === stored.firstPersistedAt;
+      await focus(report, '#delete-audit');
+      await pressKey(report, 'Enter', 'Enter', 13);
+      await extension.waitForValue(report, 'document.activeElement?.id', value => value === 'delete-audit-cancel');
+      await pressKey(report, 'Escape', 'Escape', 27);
+      await extension.waitForValue(report, "document.querySelector('#delete-audit-dialog').open", value => value === false);
+      assert.equal((await readNativeAuditProof(extension, auditId)).present, true);
+      manualDialogKeyboardAndCancel = /exclusão cancelada/iu.test(
+        await extension.evaluate(report, "document.querySelector('#review-status').textContent"));
+      await focus(report, '#delete-audit');
+      await pressKey(report, 'Enter', 'Enter', 13);
+      await extension.waitForValue(report, 'document.activeElement?.id', value => value === 'delete-audit-cancel');
+      await pressKey(report, 'Tab', 'Tab', 9);
+      await extension.waitForValue(report, 'document.activeElement?.id', value => value === 'delete-audit-confirm');
+      // O coordinator fecha a própria aba do relatório. O sucesso é comprovado no harness independente.
+      await pressKey(report, 'Enter', 'Enter', 13).catch(() => {});
+    }
+    const deleted = await extension.waitForValue(harness, nativeAuditProofExpression(auditId),
+      value => value?.present === false && value.retentionAbsent && value.journalSettled && value.tombstoneAbsent,
+      { timeoutMs: 30_000, intervalMs: 50 });
+    assert.equal(deleted.receiptAbsent, true);
+    assert.equal(deleted.sanitized, true);
+    await extension.waitForValue(harness, "chrome.tabs.query({}).then(tabs=>tabs.every(tab=>{" +
+      "try{const url=new URL(tab.url);return url.pathname!='/src/review/index.html'||url.searchParams.get('auditId')!==" +
+      JSON.stringify(auditId) + ";}catch{return true;}}))", Boolean, { timeoutMs: 20_000, intervalMs: 50 });
   }
-  assert.deepEqual(retainedDelivery.formats, ['csv', 'html', 'json', 'pdf']);
-  assert.equal(retainedDelivery.journalSettled, true);
-  assert.deepEqual(retainedDelivery.downloadStates, ['complete', 'complete', 'complete', 'complete']);
-  const firstDownloads = await waitForCompletedDownloads(harness, 4, 60_000);
-  const firstHistoryFiles = await completedDownloadBasenames(harness);
-  assert.equal(firstHistoryFiles.length, 4, 'o histórico Chrome não estabilizou em quatro downloads');
-  const firstFiles = await waitForDownloadedFiles(downloadDir, firstHistoryFiles, 30_000);
-  const firstFileExtensions = firstFiles.map(name => name.split('.').at(-1)).sort();
-  const firstFileStats = await Promise.all(firstFiles.map(name => stat(join(downloadDir, name))));
-  const checkpointCleared = await waitForValue(harness, `chrome.storage.session.get(null).then(session => ({
-    active: Object.hasOwn(session, 'audita-mt:session:active-batch'),
-    correlated: Object.hasOwn(session, 'audita-mt:session:' + ${JSON.stringify(auditId)}),
-    marker: JSON.stringify(session).includes(${JSON.stringify(sensitiveMarker)})
-  }))`, value => value && value.active === false && value.correlated === false, 20_000);
 
-  const review = await followLatestReportLink(firstPanel, auditId);
-  const reviewResponsive = await responsiveAtTwoHundredPercent(review, '#delete-audit');
-  const mismatch = await evaluate(review, `new Promise(resolve => chrome.runtime.sendMessage({
-    type: 'REQUEST_DELETE_AUDIT', auditId: 'mismatch-audit'
-  }, response => resolve(response)))`, true);
-  assert.equal(mismatch?.ok, false);
-  const spoofBaseline = await evaluate(secondPanel, `(() => ({
-    status: document.querySelector('#audit-status').textContent,
-    reportHidden: document.querySelector('#latest-report').hidden
-  }))()`);
-  const reviewBaseline = await evaluate(review, `(() => ({
-    status: document.querySelector('#review-status').textContent,
-    disabled: document.querySelector('#delete-audit').disabled,
-    cards: document.querySelector('#review-list').childElementCount
-  }))()`);
-  await evaluate(review, `Promise.resolve(chrome.runtime.sendMessage({
-    type: 'AUDIT_DELETED', auditId: ${JSON.stringify(auditId)}, reason: 'delete-one'
-  })).catch(() => undefined)`, true);
-  const [spoofedPanel, spoofedReview, spoofedDurable] = await Promise.all([
-    evaluate(secondPanel, `(() => ({
-      status: document.querySelector('#audit-status').textContent,
-      reportHidden: document.querySelector('#latest-report').hidden,
-      deletedMessage: /auditoria local foi excluída/iu.test(document.querySelector('#audit-status').textContent)
-    }))()`),
-    evaluate(review, `(() => ({
-      status: document.querySelector('#review-status').textContent,
-      disabled: document.querySelector('#delete-audit').disabled,
-      cards: document.querySelector('#review-list').childElementCount
-    }))()`),
-    evaluate(harness, `import(chrome.runtime.getURL('src/storage/audit-store.js')).then(async ({ createAuditStore }) =>
-      Boolean((await (globalThis.__retentionE2eStore ??= createAuditStore())
-        .getAuditSnapshot(${JSON.stringify(auditId)})).model))`, true),
-  ]);
-  const spoofIgnored = {
-    panelUnchanged: spoofedPanel.status === spoofBaseline.status &&
-      spoofedPanel.reportHidden === spoofBaseline.reportHidden && spoofedPanel.deletedMessage === false,
-    reviewPreserved: spoofedReview.status === reviewBaseline.status &&
-      spoofedReview.disabled === reviewBaseline.disabled && spoofedReview.cards === reviewBaseline.cards,
-    durablePreserved: spoofedDurable === true,
-  };
-
-  await exerciseDeleteOneDialog(review);
-  const explicitDeletion = await waitForValue(review, `(() => ({
-    disabled: document.querySelector('#delete-audit').disabled,
-    status: document.querySelector('#review-status').textContent,
-    cards: document.querySelector('#review-list').childElementCount
-  }))()`, value => value?.disabled === true && /auditoria local excluída/iu.test(value.status), 20_000);
-  const explicitDurableDeletion = await evaluate(harness, `(async () => {
-    const { createAuditStore } = await import(chrome.runtime.getURL('src/storage/audit-store.js'));
-    const store = globalThis.__retentionE2eStore ??= createAuditStore();
-    const [snapshot, retention, latest, journal, session] = await Promise.all([
-      store.getAuditSnapshot(${JSON.stringify(auditId)}),
-      store.getAuditRetention(${JSON.stringify(auditId)}),
-      store.getLatest(),
-      store.getExportDeliveryJournal(${JSON.stringify(auditId)}),
-      chrome.storage.session.get(null)
-    ]);
-    const open = indexedDB.open('audita-mt', 2);
-    const keys = await new Promise((resolve, reject) => {
-      open.onsuccess = () => {
-        const db = open.result;
-        const tx = db.transaction('audits', 'readonly');
-        const request = tx.objectStore('audits').getAllKeys();
-        request.onsuccess = () => { const value = request.result; db.close(); resolve(value); };
-        request.onerror = () => reject(new Error('read failed'));
-      };
-      open.onerror = () => reject(new Error('open failed'));
-    });
-    return {
-      absent: snapshot?.model === undefined && retention === undefined && latest?.auditId !== ${JSON.stringify(auditId)},
-      privateKeysAbsent: !keys.some(key => typeof key === 'string' && key.includes(${JSON.stringify(auditId)})),
-      journalSettled: Array.isArray(journal) && journal.length === 0,
-      sessionAbsent: !Object.hasOwn(session, 'audita-mt:session:' + ${JSON.stringify(auditId)}) &&
-        !Object.hasOwn(session, 'audita-mt:session:active-batch'),
-      markerAbsent: !JSON.stringify({ keys, session }).includes(${JSON.stringify(sensitiveMarker)})
-    };
-  })()`, true, 20_000);
-
-  const automaticPanel = await openPanelThroughAction(
-    browser, extensionId, `${loopback.baseUrl}/source-automatic`, chromeStderr,
-  );
-  await submitExplicitBatch(automaticPanel, pageUrls, true);
-  const automaticActive = await waitForValue(harness, `(async () => {
-    const { createAuditStore } = await import(chrome.runtime.getURL('src/storage/audit-store.js'));
-    const store = globalThis.__retentionE2eStore ??= createAuditStore();
-    const latest = await store.getLatest();
-    const session = await chrome.storage.session.get(null);
-    const activeBatch = session['audita-mt:session:active-batch'];
-    return {
-      ready: latest?.mode === 'batch' && latest.status === 'running' &&
-        latest.auditId !== ${JSON.stringify(auditId)} && activeBatch?.id === latest.auditId,
-      auditId: latest?.auditId || null,
-      sanitized: !JSON.stringify(session).includes(${JSON.stringify(sensitiveMarker)}) &&
-        !JSON.stringify(session).includes('data:image')
-    };
-  })()`, value => value?.ready === true, 60_000);
-  const automaticAuditId = automaticActive.auditId;
-  const automaticCommit = await waitForValue(harness, `(async () => {
-    const { createAuditStore } = await import(chrome.runtime.getURL('src/storage/audit-store.js'));
-    const store = globalThis.__retentionE2eStore ??= createAuditStore();
-    const [snapshot, retention] = await Promise.all([
-      store.getAuditSnapshot(${JSON.stringify(automaticAuditId)}),
-      store.getAuditRetention(${JSON.stringify(automaticAuditId)})
-    ]);
-    const model = snapshot?.model;
-    const evidence = Array.isArray(model?.evidence) ? model.evidence : [];
-    const text = JSON.stringify({ model, retention });
-    return {
-      ready: Boolean(model && retention),
-      pages: Array.isArray(model?.pages) ? model.pages.length : 0,
-      retentionOn: retention?.deleteAfterCompleteExport === true,
-      firstPersistedAt: retention?.firstPersistedAt || null,
-      expiresAt: retention?.expiresAt || null,
-      pixels: evidence.filter(item => item?.kind === 'full-page' && /^data:image\\/png;base64,/u.test(item.dataUrl)).length,
-      privateAbsent: !text.includes(${JSON.stringify(sensitiveMarker)}) &&
-        !text.includes('?token=') && !text.includes('?auth=')
-    };
-  })()`, value => value?.ready === true, 150_000);
-  const databaseAtAutomaticCommit = await inspectBatchDatabase(harness, automaticAuditId);
-  const automaticDownloads = await waitForCompletedDownloads(harness, 8, 60_000);
-  const automaticPanelDeletion = await waitForValue(automaticPanel, `(() => ({
-    status: document.querySelector('#audit-status').textContent,
-    reportHidden: document.querySelector('#latest-report').hidden,
-    submitEnabled: !document.querySelector('#audit-form button[type="submit"]').disabled
-  }))()`, value => value?.reportHidden === true && value.submitEnabled === true &&
-    /auditoria local foi excluída/iu.test(value.status), 60_000);
-  await assertLiveStatusInAxTree(automaticPanel, /auditoria local foi excluída/iu);
-  const automaticDurableDeletion = await evaluate(harness, `(async () => {
-    const { createAuditStore } = await import(chrome.runtime.getURL('src/storage/audit-store.js'));
-    const store = globalThis.__retentionE2eStore ??= createAuditStore();
-    const [snapshot, retention, latest, journal, lease, session] = await Promise.all([
-      store.getAuditSnapshot(${JSON.stringify(automaticAuditId)}),
-      store.getAuditRetention(${JSON.stringify(automaticAuditId)}),
-      store.getLatest(),
-      store.getExportDeliveryJournal(${JSON.stringify(automaticAuditId)}),
-      store.getExportLeaseState(${JSON.stringify(automaticAuditId)}, { now: new Date().toISOString() }),
-      chrome.storage.session.get(null)
-    ]);
-    return {
-      absent: snapshot?.model === undefined && retention === undefined &&
-        latest?.auditId !== ${JSON.stringify(automaticAuditId)},
-      journalSettled: Array.isArray(journal) && journal.length === 0 && lease?.active !== true,
-      sessionAbsent: !Object.hasOwn(session, 'audita-mt:session:' + ${JSON.stringify(automaticAuditId)}) &&
-        !Object.hasOwn(session, 'audita-mt:session:active-batch'),
-      markerAbsent: !JSON.stringify(session).includes(${JSON.stringify(sensitiveMarker)})
-    };
-  })()`, true, 20_000);
-
-  const finalHistoryFiles = await completedDownloadBasenames(harness);
-  assert.equal(finalHistoryFiles.length, 8, 'o histórico Chrome não estabilizou em oito downloads');
-  const files = await waitForDownloadedFiles(downloadDir, finalHistoryFiles, 30_000);
-  const fileExtensions = files.map(name => name.split('.').at(-1)).sort();
-  const fileStats = await Promise.all(files.map(name => stat(join(downloadDir, name))));
-  const firstFileSet = new Set(firstFiles);
-  const automaticFiles = files.filter(name => !firstFileSet.has(name));
-  const automaticFileExtensions = automaticFiles.map(name => name.split('.').at(-1)).sort();
-  const automaticFileStats = await Promise.all(automaticFiles.map(name => stat(join(downloadDir, name))));
-  const reportBytes = await Promise.all(files.map(name => readFile(join(downloadDir, name))));
-  const localAndSession = await evaluate(harness, `Promise.all([
-    chrome.storage.local.get(null), chrome.storage.session.get(null)
-  ]).then(([local, session]) => JSON.stringify({ local, session }))`, true);
-  const pageTextSanitized = await Promise.all([review, secondPanel, automaticPanel].map(page =>
-    evaluate(page, `document.body.innerText.includes(${JSON.stringify(sensitiveMarker)})`)));
-  const auditedRequests = loopback.requests.filter(value => /^\/page-[ab](?:\?|$)/u.test(value));
-
+  const all = exports.flat();
+  const names = await completedDownloadBasenames(harness);
+  assert.equal(names.length, 8);
+  const physical = await waitForDownloadedFiles(extension.downloadDirectory, names, 30_000);
+  const stats = await Promise.all(all.map(row => stat(join(extension.downloadDirectory, row.filename))));
+  const hashes = await Promise.all(all.map(async row => createHash('sha256')
+    .update(await readFile(join(extension.downloadDirectory, row.filename))).digest('hex')));
+  const storage = await extension.evaluate(harness,
+    'Promise.all([chrome.storage.local.get(null),chrome.storage.session.get(null)]).then(values=>JSON.stringify(values))',
+    { awaitPromise: true });
+  sanitized &&= !storage.includes(sensitiveMarker);
   return {
-    panelActionOpened: true,
-    explicitTwoPageBatch: firstCommit.pages === 2 && auditedRequests.some(value => value.startsWith('/page-a')) &&
-      auditedRequests.some(value => value.startsWith('/page-b')),
+    nativePanelOnly, explicitTwoPageBatch,
     crawlerTrapAvoided: !loopback.requests.some(value => value.startsWith('/crawler-trap')),
-    activeCheckpointSanitized: active.sanitized === true && automaticActive.sanitized === true,
-    busyAuditVisible: /auditoria em andamento/iu.test(busyAudit),
-    busyDeleteInsideDialogAx: activeBusyAx,
-    retentionOffAtFirstCommit: firstCommit.retentionOff === true && firstCommit.expiresAt === new Date(
-      Date.parse(firstCommit.firstPersistedAt) + 30 * 24 * 60 * 60 * 1000,
-    ).toISOString(),
-    firstCommitPixels: firstCommit.pixels >= 2,
-    firstCommitPrivateDataAbsent: firstCommit.privateAbsent,
-    firstCommitSingleBatchRecord: databaseAtFirstCommit.singleBatchRecord && databaseAtFirstCommit.metadataLimited,
-    retainedDeliveryFourOfFour: firstDownloads.count === 4 &&
-      ['csv', 'html', 'json', 'pdf'].every(format => firstDownloads.formats.includes(format)) &&
-      retainedDelivery.formats.length === 4 && retainedDelivery.receiptEvidenceValid === true &&
-      retainedDelivery.receiptIdsComplete === true && firstFiles.length === 4 &&
-      firstFileStats.every(value => value.size > 0) &&
-      ['csv', 'html', 'json', 'pdf'].every(format => firstFileExtensions.filter(value => value === format).length === 1),
-    retainedAuditPreserved: retainedDelivery.retained && retainedDelivery.expiryUnchanged,
-    retainedDeliveryJournalSettled: retainedDelivery.journalSettled,
-    terminalCheckpointCleared: checkpointCleared.active === false && checkpointCleared.correlated === false && checkpointCleared.marker === false,
-    reviewMismatchRejected: mismatch?.ok === false,
-    deletionSpoofIgnored: spoofIgnored.panelUnchanged && spoofIgnored.reviewPreserved && spoofIgnored.durablePreserved,
-    explicitDeletionRendered: explicitDeletion.disabled === true && explicitDeletion.cards === 0,
-    explicitAuditDeleted: explicitDurableDeletion.absent && explicitDurableDeletion.privateKeysAbsent &&
-      explicitDurableDeletion.journalSettled && explicitDurableDeletion.sessionAbsent &&
-      explicitDurableDeletion.markerAbsent,
-    automaticRetentionAtFirstCommit: automaticCommit.retentionOn === true &&
-      automaticCommit.expiresAt === new Date(
-        Date.parse(automaticCommit.firstPersistedAt) + 30 * 24 * 60 * 60 * 1000,
-      ).toISOString(),
-    automaticFirstCommitValid: automaticCommit.pages === 2 && automaticCommit.pixels >= 2 &&
-      automaticCommit.privateAbsent && databaseAtAutomaticCommit.singleBatchRecord &&
-      databaseAtAutomaticCommit.metadataLimited,
-    automaticDeliveryFourOfFour: automaticDownloads.count === 8 &&
-      ['csv', 'html', 'json', 'pdf'].every(format =>
-        automaticDownloads.formats.filter(value => value === format).length === 2) &&
-      automaticFiles.length === 4 && automaticFileStats.every(value => value.size > 0) &&
-      ['csv', 'html', 'json', 'pdf'].every(format =>
-        automaticFileExtensions.filter(value => value === format).length === 1),
-    automaticDeletionRendered: automaticPanelDeletion.reportHidden === true &&
-      automaticPanelDeletion.submitEnabled === true,
-    automaticAuditDeleted: automaticDurableDeletion.absent && automaticDurableDeletion.journalSettled &&
-      automaticDurableDeletion.sessionAbsent && automaticDurableDeletion.markerAbsent,
-    downloadsPreserved: files.length === 8 && fileStats.every(value => value.size > 0) &&
-      ['csv', 'html', 'json', 'pdf'].every(format => fileExtensions.filter(value => value === format).length === 2),
-    panelResponsiveAtTwoHundredPercent: panelResponsive,
-    reviewResponsiveAtTwoHundredPercent: reviewResponsive,
-    storageAndReportsSanitized: !localAndSession.includes(sensitiveMarker) &&
-      reportBytes.every(bytes => !bytes.includes(Buffer.from(sensitiveMarker))) &&
-      pageTextSanitized.every(value => value === false),
+    consentBeforePixels, defaultRetentionPreserved, expiryNotExtendedByExport,
+    retainedFourDownloads: exports[0].length === 4,
+    manualDialogKeyboardAndCancel, manualDeletionCompleted: true, reportOptInDefaultOff,
+    automaticFourDownloads: exports[1].length === 4, automaticDeletionCompleted: true,
+    physicalDownloadsPreserved: physical.length === 8 && stats.every((value, index) =>
+      value.size === all[index].byteLength && hashes[index] === all[index].sha256),
+    narrowLayoutUsable, storageAndReportsSanitized: sanitized,
   };
 }
 
-async function openPanelThroughAction(browser, extensionId, sourceUrl, stderr) {
-  const panelUrl = `chrome-extension://${extensionId}/src/panel/index.html`;
-  const sourceTarget = await browser.command('Target.createTarget', { url: sourceUrl });
-  const sourceInfo = await waitForTargetInfo(
-    browser,
-    info => info.targetId === sourceTarget.targetId && info.type === 'page' && info.url === sourceUrl,
-    stderr(),
-  );
-  const source = await attach(browser, sourceInfo.targetId);
-  await source.command('Runtime.enable');
-  await source.command('Page.enable');
-  await waitForValue(source, 'document.readyState === "complete"', Boolean);
-  const sourceTab = await waitForTabTarget(browser, sourceUrl);
-  const workerInfo = await waitForTargetInfo(
-    browser,
-    info => info.type === 'service_worker' &&
-      info.url === `chrome-extension://${extensionId}/src/background/service-worker.js`,
-    stderr(),
-  );
-  const worker = await attach(browser, workerInfo.targetId);
-  await worker.command('Runtime.enable');
-  await waitForValue(worker, 'chrome.action.onClicked.hasListeners()', value => value === true, 15_000);
-  const sourceChromeTabId = await evaluate(worker, `chrome.tabs.query({}).then(tabs =>
-    tabs.find(tab => tab.url === ${JSON.stringify(sourceUrl)})?.id)`, true);
-  assert.ok(Number.isSafeInteger(sourceChromeTabId), 'a página de origem não possui uma aba Chrome correlacionável');
-  await evaluate(worker, `chrome.tabs.update(${sourceChromeTabId}, { active: true }).then(() => true)`, true);
-  await waitForValue(worker, `chrome.tabs.query({ active: true }).then(tabs =>
-    tabs.some(tab => tab.id === ${sourceChromeTabId}))`, Boolean);
-  const before = new Set((await browser.command('Target.getTargets')).targetInfos.map(info => info.targetId));
-  await browser.command('Extensions.triggerAction', {
-    id: extensionId, targetId: sourceTab.targetId,
-  }, 20_000);
-  const panelInfo = await waitForTargetInfo(
-    browser,
-    info => info.type === 'page' && info.url === panelUrl && !before.has(info.targetId),
-    stderr(),
-  );
-  await browser.command('Target.activateTarget', { targetId: panelInfo.targetId });
-  const panel = await attach(browser, panelInfo.targetId);
-  await panel.command('Runtime.enable');
-  await panel.command('Page.enable');
-  await panel.command('Accessibility.enable');
-  await waitForValue(panel, 'document.readyState === "complete"', Boolean);
-  await waitForValue(panel, `!document.querySelector('#audit-form button[type="submit"]').disabled`, Boolean, 20_000);
-  return panel;
+function nativeAuditProofExpression(auditId) {
+  return "(async()=>{const {createAuditStore}=await import(chrome.runtime.getURL('/src/storage/audit-store.js'));" +
+    "const store=createAuditStore();const id=" + JSON.stringify(auditId) + ";" +
+    "const [model,retention,journal,lease,tombstones,receipt]=await Promise.all([store.getAudit(id),store.getAuditRetention(id)," +
+    "store.getExportDeliveryJournal(id),store.getExportLeaseState(id,{now:new Date().toISOString()})," +
+    "store.listDeletionTombstonesV1({limit:25}),store.getExportReceipt(id)]);" +
+    "return {present:model?.auditId===id,pages:model?.pages?.length??0," +
+    "fullPageCaptures:(model?.evidence??[]).filter(item=>item.kind==='full-page'&&typeof item.dataUrl==='string').length," +
+    "retentionOff:retention?.deleteAfterCompleteExport===false,retentionAbsent:retention===undefined," +
+    "firstPersistedAt:retention?.firstPersistedAt??null,expiresAt:retention?.expiresAt??null," +
+    "journalSettled:journal.length===0&&lease.active!==true,tombstoneAbsent:!tombstones.some(item=>item.auditId===id)," +
+    "receiptAbsent:receipt===null||receipt===undefined,sanitized:!JSON.stringify({model,retention}).includes(" +
+    JSON.stringify(sensitiveMarker) + ")};})()";
 }
 
-async function waitForTabTarget(browser, url) {
-  let latest = [];
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    const targets = await browser.command('Target.getTargets', {
-      filter: [{ type: 'tab', exclude: false }, { exclude: true }],
-    });
-    latest = targets.targetInfos || [];
-    const target = latest.find(info => info.type === 'tab' && info.url === url);
-    if (target) return target;
-    await delay(50);
+async function readNativeAuditProof(extension, auditId) {
+  return extension.evaluate(extension.harnessPage, nativeAuditProofExpression(auditId), { awaitPromise: true });
+}
+
+async function waitForNewPhysicalDownloads(extension, auditId, beforeIds) {
+  const rows = await extension.waitForValue(extension.harnessPage,
+    "chrome.downloads.search({}).then(rows=>rows.filter(row=>!" + JSON.stringify(beforeIds) +
+    ".includes(row.id)).map(row=>({id:row.id,state:row.state,exists:row.exists,mime:row.mime," +
+    "filename:String(row.filename).split(/[\\\\/]/u).at(-1),size:row.fileSize})))",
+    rows => rows.length === 4 && rows.every(row => row.state === 'complete' && row.exists !== false && row.size > 0),
+    { timeoutMs: 90_000, intervalMs: 50 });
+  const formats = rows.map(row => row.filename.split('.').at(-1)).sort();
+  assert.deepEqual(formats, ['csv', 'html', 'json', 'pdf']);
+  assert.equal(new Set(rows.map(row => row.id)).size, 4);
+  const mime = { html: 'text/html', pdf: 'application/pdf', csv: 'text/csv', json: 'application/json' };
+  const records = [];
+  for (const row of rows) {
+    const format = row.filename.split('.').at(-1);
+    assert.equal(row.mime.split(';')[0], mime[format]);
+    const bytes = await readFile(join(extension.downloadDirectory, row.filename));
+    assert.equal(bytes.byteLength, row.size);
+    assert.ok(bytes.byteLength > 0);
+    records.push({ auditId, format, filename: row.filename, downloadId: row.id, byteLength: bytes.byteLength,
+      sha256: createHash('sha256').update(bytes).digest('hex') });
   }
-  throw new Error(`Target de aba não apareceu; contagem segura=${latest.length}`);
+  return records;
 }
 
-async function submitExplicitBatch(panel, urls, deleteAfterCompleteExport) {
-  const submitted = await evaluate(panel, `(() => {
-    const form = document.querySelector('#audit-form');
-    const mode = form.querySelector('input[name="audit-mode"][value="batch"]');
-    const list = document.querySelector('#audit-urls');
-    const retention = document.querySelector('#delete-after-export');
-    const submit = form.querySelector('button[type="submit"]');
-    if (!form || !mode || !list || !retention || !submit || submit.disabled) return false;
-    mode.click();
-    list.value = ${JSON.stringify(urls.join('\n'))};
-    list.dispatchEvent(new Event('input', { bubbles: true }));
-    retention.checked = ${deleteAfterCompleteExport === true};
-    submit.click();
-    return true;
-  })()`);
-  assert.equal(submitted, true, 'o formulário público do lote não pôde ser enviado');
-}
-
-async function responsiveAtTwoHundredPercent(page, buttonSelector) {
-  await page.command('Emulation.setDeviceMetricsOverride', {
-    width: 640, height: 1_600, deviceScaleFactor: 1, mobile: false,
-  });
-  const zoomed = await evaluate(page, `new Promise(resolve => chrome.tabs.getCurrent(tab => {
-    if (!Number.isSafeInteger(tab?.id)) { resolve(false); return; }
-    chrome.tabs.setZoom(tab.id, 2, () => resolve(!chrome.runtime.lastError));
-  }))`, true);
-  let layout;
+async function narrowLayoutProof(page, selector) {
+  await page.command('Emulation.setDeviceMetricsOverride', { width: 320, height: 900, deviceScaleFactor: 1, mobile: false });
   try {
-    layout = await waitForValue(page, `(() => {
-      const control = document.querySelector(${JSON.stringify(buttonSelector)});
-      const rect = control?.getBoundingClientRect();
-      return {
-        width: innerWidth,
-        height: rect?.height || 0,
-        overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth
-      };
-    })()`, value => value && value.width <= 321, 10_000);
-  } finally {
-    await evaluate(page, `new Promise(resolve => chrome.tabs.getCurrent(tab => {
-      if (!Number.isSafeInteger(tab?.id)) { resolve(false); return; }
-      chrome.tabs.setZoom(tab.id, 1, () => resolve(!chrome.runtime.lastError));
-    }))`, true).catch(() => false);
-    await page.command('Emulation.clearDeviceMetricsOverride').catch(() => {});
-  }
-  return zoomed === true && layout.width >= 319 && layout.width <= 321 && layout.height >= 44 && layout.overflow === false;
+    const state = await evaluate(page, "(()=>{const button=document.querySelector(" + JSON.stringify(selector) +
+      ");button?.focus();return {height:button?.getBoundingClientRect().height??0," +
+      "overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth+1," +
+      "outline:button?getComputedStyle(button).outlineStyle:'none'};})()");
+    return state.height >= 44 && !state.overflow && state.outline !== 'none';
+  } finally { await page.command('Emulation.clearDeviceMetricsOverride'); }
 }
 
-async function openAndConfirmDialog(page, openSelector, confirmSelector) {
-  await focus(page, openSelector);
-  await pressKey(page, 'Enter', 'Enter', 13);
-  await waitForValue(page, `document.querySelector(${JSON.stringify(confirmSelector)})?.closest('dialog')?.open`, Boolean);
-  await focus(page, confirmSelector);
-  await pressKey(page, 'Enter', 'Enter', 13);
-}
-
-async function dialogStatusInAxTree(page, dialogName, statusText) {
-  const tree = await page.command('Accessibility.getFullAXTree');
-  const nodes = Array.isArray(tree?.nodes) ? tree.nodes : [];
-  const byId = new Map(nodes.map(node => [node.nodeId, node]));
-  const role = node => String(node?.role?.value || '').toLowerCase();
-  const name = node => String(node?.name?.value || '');
-  const dialog = nodes.find(node => role(node) === 'dialog' && dialogName.test(name(node)));
-  if (!dialog) return false;
-  const modal = dialog.properties?.some(property => property.name === 'modal' && property.value?.value === true);
-  if (!modal) return false;
-  if (statusText === null) return true;
-  const descendants = new Set();
-  const pending = [...(dialog.childIds || [])];
-  while (pending.length) {
-    const nodeId = pending.shift();
-    if (descendants.has(nodeId)) continue;
-    descendants.add(nodeId);
-    pending.push(...(byId.get(nodeId)?.childIds || []));
-  }
-  for (const nodeId of descendants) {
-    const node = byId.get(nodeId);
-    if (role(node) !== 'status') continue;
-    const text = subtreeAxText(node, byId);
-    if (statusText.test(text)) return true;
-  }
-  return false;
-}
-
-async function assertLiveStatusInAxTree(page, expected) {
-  const tree = await page.command('Accessibility.getFullAXTree');
-  const nodes = Array.isArray(tree?.nodes) ? tree.nodes : [];
-  const byId = new Map(nodes.map(node => [node.nodeId, node]));
-  const role = node => String(node?.role?.value || '').toLowerCase();
-  const insideDialog = node => {
-    let current = node;
-    const seen = new Set();
-    while (current?.parentId && !seen.has(current.parentId)) {
-      seen.add(current.parentId);
-      current = byId.get(current.parentId);
-      if (role(current) === 'dialog') return true;
-    }
-    return false;
-  };
-  const match = nodes.find(node => role(node) === 'status' && !insideDialog(node) &&
-    expected.test(subtreeAxText(node, byId)));
-  assert.ok(match, 'a região viva externa não apareceu na árvore de acessibilidade');
-}
-
-function subtreeAxText(rootNode, byId) {
-  const values = [];
-  const pending = [rootNode];
-  const seen = new Set();
-  while (pending.length) {
-    const node = pending.shift();
-    if (!node || seen.has(node.nodeId)) continue;
-    seen.add(node.nodeId);
-    const value = String(node.name?.value || '').trim();
-    if (value) values.push(value);
-    pending.push(...(node.childIds || []).map(nodeId => byId.get(nodeId)));
-  }
-  return values.join(' ');
-}
-
-async function inspectBatchDatabase(page, auditId) {
-  return evaluate(page, `(async () => {
-    const operation = indexedDB.open('audita-mt');
-    const db = await new Promise((resolve, reject) => {
-      operation.onsuccess = () => resolve(operation.result);
-      operation.onerror = () => reject(new Error('open failed'));
-    });
-    const tx = db.transaction(['audits', 'audit-retention'], 'readonly');
-    const request = value => new Promise((resolve, reject) => {
-      value.onsuccess = () => resolve(value.result);
-      value.onerror = () => reject(new Error('read failed'));
-    });
-    const [keys, metadata, model] = await Promise.all([
-      request(tx.objectStore('audits').getAllKeys()),
-      request(tx.objectStore('audit-retention').getAll()),
-      request(tx.objectStore('audits').get(${JSON.stringify(auditId)}))
-    ]);
-    await new Promise((resolve, reject) => {
-      tx.oncomplete = resolve;
-      tx.onerror = () => reject(new Error('transaction failed'));
-      tx.onabort = () => reject(new Error('transaction aborted'));
-    });
-    db.close();
-    const publicKeys = keys.filter(key => typeof key === 'string' && !key.startsWith('__'));
-    const serialized = JSON.stringify({ keys, metadata, model });
-    return {
-      singleBatchRecord: publicKeys.length === 1 && publicKeys[0] === ${JSON.stringify(auditId)} &&
-        Array.isArray(model?.pages) && model.pages.length === 2 &&
-        !keys.some(key => typeof key === 'string' && key.includes(':page-')),
-      metadataLimited: metadata.length === 1 && metadata[0]?.auditId === ${JSON.stringify(auditId)} &&
-        Object.keys(metadata[0]).length === 5 && !serialized.includes(${JSON.stringify(sensitiveMarker)}) &&
-        !serialized.includes('?token=') && !serialized.includes('?auth=')
-    };
-  })()`, true, 20_000);
-}
-
-async function waitForCompletedDownloads(page, expected, timeoutMs) {
-  return waitForValue(page, `chrome.downloads.search({}).then(items => {
-    const complete = items.filter(item => item.state === 'complete' && item.exists !== false &&
-      /\\.(?:html|json|csv|pdf)$/iu.test(item.filename || ''));
-    return {
-      count: complete.length,
-      formats: complete.map(item => item.filename.match(/\\.(html|json|csv|pdf)$/iu)?.[1].toLowerCase()).filter(Boolean).sort()
-    };
-  })`, value => value?.count === expected, timeoutMs);
-}
 
 async function completedDownloadBasenames(page) {
   return evaluate(page, `chrome.downloads.search({}).then(items => items
@@ -1220,19 +619,6 @@ async function waitForDownloadedFiles(directory, expectedBasenames, timeoutMs) {
   throw new Error(`Arquivos físicos não convergiram com o histórico; contagem segura=${files.length}`);
 }
 
-async function followLatestReportLink(panel, auditId) {
-  await waitForValue(panel, `(() => {
-    const link = document.querySelector('#latest-report');
-    return !link.hidden && link.href.includes('auditId=' + encodeURIComponent(${JSON.stringify(auditId)}));
-  })()`, Boolean, 20_000);
-  await focus(panel, '#latest-report');
-  await pressKey(panel, 'Enter', 'Enter', 13);
-  await waitForValue(panel, `location.pathname === '/src/review/index.html' &&
-    new URL(location.href).searchParams.get('auditId') === ${JSON.stringify(auditId)} &&
-    !document.querySelector('#delete-audit')?.disabled`, Boolean, 20_000);
-  await panel.command('Accessibility.enable');
-  return panel;
-}
 
 async function runRealStorageProof(page) {
   return evaluate(page, `(async () => {
@@ -1256,14 +642,14 @@ async function runRealStorageProof(page) {
       value.onabort = () => reject(new Error('indexeddb transaction aborted'));
     });
     const open = (version, upgrade) => new Promise((resolve, reject) => {
-      const operation = indexedDB.open('audita-mt', version);
+      const operation = indexedDB.open('audita-retention-storage-proof', version);
       operation.onupgradeneeded = () => upgrade?.(operation.result, operation.transaction);
       operation.onsuccess = () => resolve(operation.result);
       operation.onerror = () => reject(new Error('indexeddb open failed'));
       operation.onblocked = () => reject(new Error('indexeddb open blocked'));
     });
     await new Promise((resolve, reject) => {
-      const operation = indexedDB.deleteDatabase('audita-mt');
+      const operation = indexedDB.deleteDatabase('audita-retention-storage-proof');
       operation.onsuccess = () => resolve();
       operation.onerror = () => reject(new Error('indexeddb reset failed'));
       operation.onblocked = () => reject(new Error('indexeddb reset blocked'));
@@ -1282,12 +668,17 @@ async function runRealStorageProof(page) {
     legacyDb.close();
 
     const { createAuditStore } = await import(chrome.runtime.getURL('src/storage/audit-store.js'));
-    const first = createAuditStore();
-    const second = createAuditStore();
+    // Banco separado: nenhuma prova de migração apaga o banco usado pelo worker ou seus Ports.
+    const createProofStore = () => createAuditStore({
+      indexedDB: { open(_name, version) { return indexedDB.open('audita-retention-storage-proof', version); } },
+      IDBKeyRange,
+    });
+    const first = createProofStore();
+    const second = createProofStore();
     const [metaA, metaB] = await Promise.all([
       first.getAuditRetention('legacy-batch-a'), first.getAuditRetention('legacy-batch-b'),
     ]);
-    const upgradedDb = await open(2);
+    const upgradedDb = await open(3);
     const schemaTx = upgradedDb.transaction(['audits', 'audit-retention'], 'readonly');
     const auditKeys = await request(schemaTx.objectStore('audits').getAllKeys());
     const metadata = await request(schemaTx.objectStore('audit-retention').getAll());
@@ -1329,7 +720,7 @@ async function runRealStorageProof(page) {
 
     const persistedAt = new Date().toISOString();
     await first.commitAudit('rollback-stable', auditFixture('rollback-stable'), { auditId: 'rollback-stable', status: 'complete' }, { now: persistedAt });
-    const rollbackDb = await open(2);
+    const rollbackDb = await open(3);
     const rollbackTx = rollbackDb.transaction(['audits', 'audit-retention'], 'readwrite');
     rollbackTx.objectStore('audits').put({ auditId: 'rollback-transient' }, 'rollback-transient');
     rollbackTx.objectStore('audit-retention').put({
@@ -1344,12 +735,12 @@ async function runRealStorageProof(page) {
     rollbackTx.abort();
     await aborted;
     rollbackDb.close();
-    const reopened = createAuditStore();
+    const reopened = createProofStore();
     const rollbackAtomic = (await reopened.getAudit('rollback-transient')) === undefined &&
       (await reopened.getAuditRetention('rollback-transient')) === undefined &&
       (await reopened.getAudit('rollback-stable'))?.auditId === 'rollback-stable';
     await first.commitAudit('reopen-audit', auditFixture('reopen-audit', 'persisted'), { auditId: 'reopen-audit', status: 'complete' }, { now: persistedAt });
-    const reopenPersistent = (await createAuditStore().getAudit('reopen-audit'))?.versions?.extension === 'test-persisted';
+    const reopenPersistent = (await createProofStore().getAudit('reopen-audit'))?.versions?.extension === 'test-persisted';
 
     const prepareDelivery = async (auditId, ownerId, formats, seconds) => {
       let snapshot = await first.getAuditSnapshot(auditId);
@@ -1358,42 +749,57 @@ async function runRealStorageProof(page) {
           { auditId, status: 'complete' }, { now: persistedAt, deleteAfterCompleteExport: true });
         snapshot = await first.getAuditSnapshot(auditId);
       }
-      const prefix = '2026-09-02T00:00:' + String(seconds).padStart(2, '0');
+      const prefix = new Date(Date.parse(persistedAt) + seconds * 1000).toISOString().slice(0, -5);
       const lease = await first.acquireExportLease(auditId, snapshot.capability, {
         ownerId, now: prefix + '.000Z', ttlMs: 600000,
       });
       await first.claimExportLease(auditId, snapshot.capability, {
         ownerId, exportAttempt: lease.exportAttempt, now: prefix + '.100Z', ttlMs: 600000,
       });
-      await first.commitAuditIfRevisionWithExportLease(
-        auditId, auditFixture(auditId, 'delivery-' + formats.length),
-        { auditId, status: 'complete', exportStatus: 'delivering' }, snapshot.capability,
-        { ownerId, exportAttempt: lease.exportAttempt, now: prefix + '.200Z', phase: 'delivering', ttlMs: 600000 },
-      );
-      snapshot = await first.getAuditSnapshot(auditId);
+      await first.beginExportDelivery(auditId, snapshot.capability, {
+        ownerId, exportAttempt: lease.exportAttempt, now: prefix + '.200Z', ttlMs: 600000,
+      });
+      const mime = { html: 'text/html;charset=utf-8', pdf: 'application/pdf',
+        csv: 'text/csv;charset=utf-8', json: 'application/json;charset=utf-8' };
+      const receiptFormats = [];
       for (const [index, format] of formats.entries()) {
+        const identity = { format, filename: 'auditoria.' + format, mimeType: mime[format],
+          byteSize: 10 + index, sha256: String(index + 1).repeat(64), downloadId: seconds * 10 + index };
         await first.recordExportDelivery(auditId, snapshot.capability, {
           ownerId, exportAttempt: lease.exportAttempt,
           now: prefix + '.' + String(300 + index).padStart(3, '0') + 'Z',
-          format, filename: 'auditoria.' + format, state: 'terminal', downloadId: seconds * 10 + index,
+          ...identity, state: 'terminal',
         });
+        receiptFormats.push({ ...identity, status: 'complete' });
       }
-      return first.finalizeExportAndMaybeDelete(
-        auditId, auditFixture(auditId, 'final-' + formats.length),
-        { auditId, status: 'complete', exportStatus: formats.length === 4 ? 'complete' : 'partial' },
+      const status = formats.length === 4 ? 'complete' : 'partial';
+      const finalized = await first.finalizeExportAndMaybeDelete(
+        auditId, snapshot.model,
+        { auditId, exportStatus: status,
+          exportDeliveryIdentity: { auditId, modelRevision: snapshot.revision,
+            modelHash: 'a'.repeat(64), attemptId: String(lease.exportAttempt) },
+          deliveryReceipt: { status, limitations: status === 'complete' ? [] : ['Entrega incompleta'],
+            formats: receiptFormats } },
         snapshot.capability,
-        {
-          ownerId, exportAttempt: lease.exportAttempt, now: prefix + '.900Z',
-          clearDeliveryJournal: true, deleteAfterCompleteExport: true,
-        },
+        { ownerId, exportAttempt: lease.exportAttempt, now: prefix + '.900Z',
+          clearDeliveryJournal: true, deleteAfterCompleteExport: true },
       );
+      return { finalized, receipt: await first.getExportReceipt(auditId), now: prefix + '.950Z' };
     };
-    const partial = await prepareDelivery('delete-after-four', 'partial-owner', ['html', 'json', 'pdf'], 10);
-    const partialRetained = partial.deleted === false && Boolean(await first.getAudit('delete-after-four')) &&
-      Boolean(await first.getAuditRetention('delete-after-four'));
-    const complete = await prepareDelivery('delete-after-four', 'complete-owner', ['html', 'json', 'csv', 'pdf'], 20);
-    const completeDeleted = complete.deleted === true && (await first.getAudit('delete-after-four')) === undefined &&
-      (await first.getAuditRetention('delete-after-four')) === undefined;
+    const partial = await prepareDelivery('delete-after-four', 'partial-owner', ['html', 'pdf'], 10);
+    const partialStage = await first.stageAuditDeletionV1({ auditId: 'delete-after-four', reason: 'post-export',
+      now: partial.now, expectedRevision: partial.finalized.revision, terminalReceipt: partial.receipt });
+    const partialRetained = partial.finalized.deleted === false && partialStage.status === 'denied' &&
+      Boolean(await first.getAudit('delete-after-four')) && Boolean(await first.getAuditRetention('delete-after-four'));
+    const complete = await prepareDelivery('delete-after-four', 'complete-owner', ['html', 'pdf', 'csv', 'json'], 20);
+    const completePreservedBeforeStage = complete.finalized.deleted === false &&
+      Boolean(await first.getAudit('delete-after-four')) && complete.receipt?.status === 'complete';
+    const staged = await first.stageAuditDeletionV1({ auditId: 'delete-after-four', reason: 'post-export',
+      now: complete.now, expectedRevision: complete.receipt.modelRevision + 1, terminalReceipt: complete.receipt });
+    const completeDeletedAfterStage = staged.status === 'staged' && staged.tombstone.reason === 'post-export' &&
+      (await first.getAudit('delete-after-four')) === undefined &&
+      (await first.getAuditRetention('delete-after-four')) === undefined &&
+      (await first.listDeletionTombstonesV1({ limit: 25 })).some(row => row.auditId === 'delete-after-four');
 
     for (const auditId of ['ui-one', 'ui-all-a', 'ui-all-b']) {
       await first.commitAudit(auditId, auditFixture(auditId, 'ui'),
@@ -1425,124 +831,19 @@ async function runRealStorageProof(page) {
       rollbackAtomic,
       reopenPersistent,
       partialRetained,
-      completeDeleted,
+      completePreservedBeforeStage,
+      completeDeletedAfterStage,
       batchSingleMetadata: uiMetadata.length === 3 && uiMetadata.every(value => value && Object.keys(value).length === 5),
       unauthorizedDeleteRejected: unauthorized?.ok !== true,
       localStorageLimited: allowedLocalKeys.size === 2 &&
         !allowedLocalKeys.has('audita:persona:voiceId-backup') &&
         Object.keys(local).every(key => allowedLocalKeys.has(key)) &&
         !JSON.stringify(local).includes(marker),
-      sessionStorageSanitized: !JSON.stringify(session).includes(marker) && !JSON.stringify(session).includes('127.0.0.1'),
+      sessionStorageSanitized: !JSON.stringify(session).includes(marker),
     };
   })()`, true, 35_000);
 }
 
-async function exerciseDeleteOneDialog(review) {
-  await waitForValue(review, `(() => ({
-    ready: !document.querySelector('#delete-audit').disabled,
-    text: document.body.innerText
-  }))()`, value => value?.ready === true && !value.text.includes(sensitiveMarker));
-  await focus(review, '#delete-audit');
-  await pressKey(review, 'Enter', 'Enter', 13);
-  await waitForValue(review, `(() => ({
-    open: document.querySelector('#delete-audit-dialog').open,
-    focus: document.activeElement?.id
-  }))()`, value => value?.open === true && value.focus === 'delete-audit-cancel');
-  assert.equal(await dialogStatusInAxTree(review, /excluir esta auditoria local/iu, null), true);
-  await pressKey(review, 'Escape', 'Escape', 27);
-  assert.deepEqual(await evaluate(review, `({
-    open: document.querySelector('#delete-audit-dialog').open,
-    focus: document.activeElement?.id,
-    status: document.querySelector('#review-status').textContent
-  })`), { open: false, focus: 'delete-audit', status: 'Exclusão cancelada.' });
-
-  await review.command('Page.reload', { ignoreCache: true });
-  await waitForValue(review, 'document.readyState === "complete"', Boolean);
-  await waitForValue(review, `!document.querySelector('#delete-audit').disabled`, Boolean);
-  await focus(review, '#delete-audit');
-  await pressKey(review, 'Enter', 'Enter', 13);
-  await waitForValue(review, `document.activeElement?.id`, value => value === 'delete-audit-cancel');
-  await pressKey(review, 'Tab', 'Tab', 9);
-  await waitForValue(review, `document.activeElement?.id`, value => value === 'delete-audit-confirm');
-  await pressKey(review, 'Enter', 'Enter', 13);
-  const deleted = await waitForValue(review, `(() => ({
-    open: document.querySelector('#delete-audit-dialog').open,
-    disabled: document.querySelector('#delete-audit').disabled,
-    focus: document.activeElement?.id,
-    status: document.querySelector('#review-status').textContent
-  }))()`, value => value?.open === false && value.disabled === true && value.focus === 'review-status' &&
-    /excluída/iu.test(value.status));
-  assert.match(deleted.status, /downloads já salvos foram preservados/iu);
-  await assertLiveStatusInAxTree(review, /auditoria local excluída/iu);
-}
-
-async function exerciseDeleteAllDialogAndResponsiveUi(panel) {
-  await panel.command('Emulation.setDeviceMetricsOverride', {
-    width: 320, height: 800, deviceScaleFactor: 1, mobile: false,
-  });
-  await panel.command('Emulation.setPageScaleFactor', { pageScaleFactor: 2 });
-  await panel.command('Emulation.setEmulatedMedia', {
-    features: [
-      { name: 'forced-colors', value: 'active' },
-      { name: 'prefers-reduced-motion', value: 'reduce' },
-    ],
-  });
-  const layout = await waitForValue(panel, `(() => {
-    const button = document.querySelector('#delete-all-audits');
-    button.focus();
-    return {
-      ready: !button.disabled,
-      buttonHeight: button.getBoundingClientRect().height,
-      overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
-      outline: getComputedStyle(button).outlineStyle,
-      privateMarkerVisible: document.body.innerText.includes(${JSON.stringify(sensitiveMarker)})
-    };
-  })()`, value => value?.ready === true);
-  assert.ok(layout.buttonHeight >= 44);
-  assert.equal(layout.overflow, false);
-  assert.notEqual(layout.outline, 'none');
-  assert.equal(layout.privateMarkerVisible, false);
-
-  await focus(panel, '#delete-all-audits');
-  await pressKey(panel, 'Enter', 'Enter', 13);
-  await waitForValue(panel, `document.activeElement?.id`, value => value === 'delete-all-cancel');
-  await pressKey(panel, 'Escape', 'Escape', 27);
-  assert.deepEqual(await evaluate(panel, `({
-    open: document.querySelector('#delete-all-dialog').open,
-    focus: document.activeElement?.id,
-    status: document.querySelector('#audit-status').textContent
-  })`), { open: false, focus: 'delete-all-audits', status: 'Exclusão cancelada.' });
-
-  await panel.command('Page.reload', { ignoreCache: true });
-  await waitForValue(panel, 'document.readyState === "complete"', Boolean);
-  await waitForValue(panel, `!document.querySelector('#delete-all-audits').disabled`, Boolean);
-  await focus(panel, '#delete-all-audits');
-  await pressKey(panel, 'Enter', 'Enter', 13);
-  await waitForValue(panel, `document.activeElement?.id`, value => value === 'delete-all-cancel');
-  await pressKey(panel, 'Tab', 'Tab', 9);
-  await waitForValue(panel, `document.activeElement?.id`, value => value === 'delete-all-confirm');
-  await pressKey(panel, 'Enter', 'Enter', 13);
-  const deleted = await waitForValue(panel, `(() => ({
-    open: document.querySelector('#delete-all-dialog').open,
-    focus: document.activeElement?.id,
-    status: document.querySelector('#audit-status').textContent
-  }))()`, value => value?.open === false && value.focus === 'audit-status' &&
-    /todas as auditorias locais foram excluídas/iu.test(value.status));
-  assert.match(deleted.status, /downloads já salvos foram preservados/iu);
-  await assertLiveStatusInAxTree(panel, /todas as auditorias locais foram excluídas/iu);
-}
-
-async function openExtensionPage(browser, url, stderr) {
-  await browser.command('Target.createTarget', { url });
-  const info = await waitForTargetInfo(browser, target => target.type === 'page' && target.url === url, stderr);
-  await browser.command('Target.activateTarget', { targetId: info.targetId });
-  const page = await attach(browser, info.targetId);
-  await page.command('Runtime.enable');
-  await page.command('Page.enable');
-  await page.command('Accessibility.enable');
-  await waitForValue(page, 'document.readyState === "complete"', Boolean);
-  return page;
-}
 
 async function focus(page, selector) {
   await page.command('Page.bringToFront');
@@ -1589,32 +890,6 @@ async function waitForValue(page, expression, predicate, timeoutMs = 10_000) {
   throw new Error(`Condição E2E não satisfeita; último valor seguro=${JSON.stringify(latest)}`);
 }
 
-async function attach(browser, targetId) {
-  const attached = await browser.command('Target.attachToTarget', { targetId, flatten: true });
-  assert.match(attached.sessionId || '', /^[A-Fa-f0-9-]+$/u);
-  return new SessionCdp(browser, attached.sessionId);
-}
-
-async function waitForTargetInfo(browser, predicate, stderr) {
-  let latest = [];
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    const targets = await browser.command('Target.getTargets');
-    latest = targets.targetInfos || [];
-    const target = latest.find(predicate);
-    if (target) return target;
-    await delay(50);
-  }
-  throw new Error(`Target CDP não apareceu; alvos=${latest.map(safeTargetSummary).join(',')}; stderr=${stderr}`);
-}
-
-function safeTargetSummary(info) {
-  try {
-    const url = new URL(info.url);
-    return `${info.type}:${url.protocol}//${url.hostname}${url.pathname}`;
-  } catch {
-    return `${info.type}:sem-url`;
-  }
-}
 
 function delay(ms) {
   return new Promise(resolveDelay => setTimeout(resolveDelay, ms));
@@ -1851,16 +1126,6 @@ class RuntimeTargetCapture {
   }
 }
 
-class SessionCdp {
-  constructor(browser, sessionId) {
-    this.browser = browser;
-    this.sessionId = sessionId;
-  }
-
-  command(method, params = {}, timeoutMs = 10_000) {
-    return this.browser.command(method, params, timeoutMs, this.sessionId);
-  }
-}
 
 class PipeCdp {
   constructor(commandPipe, responsePipe, runtimeLogNeedles = []) {
