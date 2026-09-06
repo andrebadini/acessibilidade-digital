@@ -11,6 +11,7 @@ const REAL_CHROME_E2E = new Set([
   'test/e2e/download-uniquify-mv3.test.mjs',
   'test/e2e/personas-mv3-csp.test.mjs',
   'test/e2e/public-axe-map-mv3.test.mjs',
+  'test/e2e/report-print-layout.test.mjs',
   'test/e2e/retention-indexeddb-mv3.test.mjs',
   'test/e2e/sidepanel-flow-mv3.test.mjs',
   'test/e2e/url-audit-mv3.test.mjs',
