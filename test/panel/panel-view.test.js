@@ -1124,6 +1124,66 @@ test('persistent simulation controls expose pressed state and reader transport l
   assert.match(root.textContent, /Leitura simulada ativa/u);
 });
 
+test('result prioritizes summary filters and ABNT before secondary coverage guidance', () => {
+  const root = renderPanelView({
+    view: buildPanelView(fixture()), document: new TestDocument(), onIntent() {},
+  });
+  const metrics = root.querySelector('[aria-label="Resumo dos resultados"]');
+  const ready = root.querySelector('[data-report-ready]');
+  assert.ok(root.children.indexOf(metrics) < root.children.indexOf(ready), 'summary before action/help blocks');
+  const summaryFocus = root.querySelector('[data-focus-id="result-summary"]');
+  assert.equal(summaryFocus.textContent, 'Resumo da avaliação');
+  assert.equal(summaryFocus.parentNode, root, 'result focus must not be inside a closed disclosure');
+  const coverage = root.querySelector('details[data-result-guidance]');
+  assert.ok(coverage);
+  assert.equal(coverage.open, false);
+  assert.ok(coverage.querySelector('progress'));
+  assert.match(coverage.textContent, /78 de 100 testes/u);
+  const groups = root.children.find(node => node.querySelector('[data-abnt-group]'));
+  assert.ok(root.children.indexOf(groups) < root.children.indexOf(coverage));
+  assert.ok(root.children.some(node => /Não é certificação de conformidade/u.test(node.textContent) && node.tagName === 'P'));
+});
+
+test('compact marker help never hides show/hide actions, status or omitted-result warning', () => {
+  for (const status of ['idle', 'active', 'unavailable']) {
+    const root = renderPanelView({
+      view: buildPanelView({ ...fixture(), markers: markerSnapshot({ status, counts: { markers: 1, located: 2, unlocated: 3, general: 4, omitted: 5 } }) }),
+      document: new TestDocument(), onIntent() {},
+    });
+    const review = root.querySelector('[data-page-marker-review]');
+    const help = review.querySelector('details[data-marker-help]');
+    assert.ok(help);
+    assert.equal(help.open, false);
+    assert.match(help.textContent, /não cria nova prova/u);
+    assert.equal(help.querySelectorAll('[data-marker-legend]').length, 4);
+    assert.equal(help.querySelector('[data-intent]'), null);
+    assert.equal(review.querySelector('[role="status"]').parentNode, review);
+    assert.ok(review.children.some(node => /5 ocorrências omitidas/u.test(node.textContent) && node.tagName === 'P'));
+    assert.equal(review.querySelector('button').parentNode, review);
+  }
+});
+
+test('advanced filters are collapsed by default and stay exposed while a filter is active', () => {
+  for (const active of [false, true]) {
+    const input = fixture();
+    if (active) input.state.filters.impact = ['critical'];
+    const root = renderPanelView({ view: buildPanelView(input), document: new TestDocument(), onIntent() {} });
+    const filters = root.querySelector('details[data-advanced-filters]');
+    assert.ok(filters);
+    assert.equal(filters.open, active);
+    assert.ok(filters.querySelector('button'));
+  }
+});
+
+test('clearing the last advanced filter leaves its focus destination exposed', () => {
+  const input = fixture();
+  input.state.focusId = 'filter-impact-all';
+  const root = renderPanelView({ view: buildPanelView(input), document: new TestDocument(), onIntent() {} });
+  assert.equal(root.querySelector('details[data-advanced-filters]').open, true);
+  assert.ok(root.querySelector('button[data-focus-id="filter-impact-all"]'));
+  assert.doesNotMatch(root.querySelector('details[data-advanced-filters]').querySelector('summary').textContent, /filtros ativos/u);
+});
+
 test('completed result exposes the report action before filters and occurrences', () => {
   const root = renderPanelView({
     view: buildPanelView(fixture()), document: new TestDocument(), onIntent() {},

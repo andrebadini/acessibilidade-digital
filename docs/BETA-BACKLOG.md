@@ -12,7 +12,7 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Refinamentos visuais não bloqueantes
 
-- conferência WAVE/ABNT: compactar as orientações iniciais e os blocos de ações do painel para que mais indicadores e itens ABNT apareçam no primeiro viewport. QA nativo06/09 confirma controles legíveis, mas em360px de largura o bloco de ajuda ainda empurra os totais abaixo da primeira tela. Preservar descrições acessíveis e limites transparentes em expansores, sem eliminar informação.
+- conferência WAVE/ABNT: compactação implementada após a beta 1.1.1. Resumo primeiro, ajuda/cobertura/filtros secundários em expansores, avisos operacionais visíveis. QA nativo em 360 × 900 mostra os quatro cartões e o primeiro grupo ABNT; ampliação CSS de 200% mantém cartões legíveis. Registro: `docs/qa/2026-09-06-compact-result-panel.md`. Ainda não incluída no ZIP 1.1.1 entregue.
 - sinais fora do viewport atualmente permanecem acessíveis por teclado; aprimorar posicionamento e prevenção de sobreposição em páginas com muitos alvos próximos, preservando o vínculo inequívoco e o comando explícito “Ir ao elemento”.
 
 - impressão1.1.0: fixture pública de179ocorrências passou de400para254páginas após corrigir quebras artificiais e espaçamento. O PDF completo preserva todo o anexo; estudar uma edição executiva separada para leitura curta, sem substituir ou descartar a edição técnica.

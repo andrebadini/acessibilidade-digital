@@ -292,6 +292,44 @@ for (const scenario of [
         await extension.captureJourney('markers-panel-abnt-selected', panel, { captureBeyondViewport: false });
         await extension.evaluate(panel, `(() => {document.querySelector('#panel-root').scrollTop=0;return true})()`);
         await extension.captureJourney('markers-panel-summary', panel, { captureBeyondViewport: false });
+        try {
+          for (const width of [320, 360, 600]) {
+            await extension.command(panel, 'Emulation.setDeviceMetricsOverride', {
+              width, height: 900, deviceScaleFactor: 1, mobile: false,
+            });
+            const layout = await extension.evaluate(panel, `(() => {
+              document.querySelector('#panel-root').scrollTop=0;
+              const box=selector=>document.querySelector(selector).getBoundingClientRect();
+              const buttons=[...document.querySelectorAll('[data-result-filter]')];
+              return {
+                overflow:document.querySelector('#panel-root').scrollWidth>document.querySelector('#panel-root').clientWidth,
+                metricsVisible:buttons.every(node=>{const r=node.getBoundingClientRect();return r.top>=0&&r.bottom<900&&r.height>=44&&r.width>=44}),
+                summaryBeforeActions:box('[data-result-filter]').top<box('[data-report-ready]').top,
+                firstAbntBottom:box('[data-abnt-group] > summary').bottom,
+                reportVisible:!document.querySelector('[data-intent="OPEN_REPORT"]').closest('details:not([open])'),
+                statusVisible:!document.querySelector('[data-report-launch-status]').closest('details:not([open])'),
+                markerVisible:!document.querySelector('[data-page-marker-review] button').closest('details:not([open])'),
+                helpClosed:!document.querySelector('[data-marker-help]').open,
+                guidanceClosed:!document.querySelector('[data-result-guidance]').open
+              };
+            })()`);
+            assert.equal(layout.overflow, false, `horizontal reflow at ${width}px`);
+            for (const key of ['metricsVisible','summaryBeforeActions','reportVisible','statusVisible','markerVisible','helpClosed','guidanceClosed']) {
+              assert.equal(layout[key], true, `${key} at ${width}px`);
+            }
+            if (width === 360) {
+              assert.ok(layout.firstAbntBottom < 900, `ABNT first group below fold: ${layout.firstAbntBottom}`);
+              await extension.captureJourney('compact-panel-360', panel, { captureBeyondViewport: false });
+            }
+          }
+          await extension.evaluate(panel, `(() => {document.documentElement.style.zoom='2';document.querySelector('#panel-root').scrollTop=0;return true})()`);
+          assert.equal(await extension.evaluate(panel, `document.querySelector('#panel-root').scrollWidth>document.querySelector('#panel-root').clientWidth`), false, '200% CSS enlargement reflows without horizontal overflow');
+          assert.equal(await extension.evaluate(panel, `[...document.querySelectorAll('[data-result-filter]')].every(node=>node.getBoundingClientRect().width>=200)`), true, 'enlarged metric cards must not compress labels into vertical strips');
+          await extension.captureJourney('compact-panel-enlarged-200', panel, { captureBeyondViewport: false });
+        } finally {
+          await extension.evaluate(panel, `(() => {document.documentElement.style.zoom='';return true})()`);
+          await extension.command(panel, 'Emulation.clearDeviceMetricsOverride');
+        }
       });
     });
     await step('FILTER_AND_HIDE', async () => {

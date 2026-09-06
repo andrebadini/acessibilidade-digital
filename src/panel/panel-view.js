@@ -594,13 +594,18 @@ function renderResult(document, view, emit, onEvent) {
   identity.append(
     paragraph(document, statusText(summary.identity.status), `status-label status-${statusClass(summary.identity.status)}`),
     paragraph(document, summary.identity.finalUrl, 'result-url'),
-    paragraph(document, formatCompletedAt(summary.identity.completedAt), 'result-time'),
   );
   root.append(identity);
 
+  const summaryHeading = heading(document, 2, 'Resumo da avaliação');
+  summaryHeading.dataset.focusId = 'result-summary';
+  summaryHeading.setAttribute('tabindex', '-1');
+  root.append(summaryHeading, renderMetrics(document, summary.counts, view.filters.result, onEvent));
+  root.append(paragraph(document, 'Resultados automáticos. Não é certificação de conformidade.', 'result-disclaimer'));
+
   const ready = section(document, 'report-ready');
   ready.dataset.reportReady = '';
-  const reportStatus = paragraph(document, 'Consulte as ocorrências, as evidências e exporte em HTML, PDF, CSV ou JSON.', 'report-launch-status');
+  const reportStatus = paragraph(document, 'Exportação: HTML, PDF, CSV ou JSON.', 'report-launch-status');
   reportStatus.dataset.reportLaunchStatus = '';
   ready.append(
     heading(document, 2, 'Seu relatório está pronto'),
@@ -609,13 +614,10 @@ function renderResult(document, view, emit, onEvent) {
       view.highlight.state === 'busy' || ['showing', 'hiding'].includes(view.markers.status)),
     reportStatus,
   );
-  ready.append(paragraph(document, 'Inicia uma nova avaliação. O resultado anterior não é apagado; você poderá escolher a página e o modo novamente.', 'supporting-copy'));
   root.append(ready, renderPageMarkerReview(document, view.markers, emit));
 
   const coverage = section(document, 'coverage-block');
   const coverageHeading = heading(document, 2, 'Cobertura automática');
-  coverageHeading.dataset.focusId = 'result-summary';
-  coverageHeading.setAttribute('tabindex', '-1');
   coverage.append(coverageHeading);
   if (summary.coverage.status === 'available') {
     const progress = document.createElement('progress');
@@ -632,17 +634,35 @@ function renderResult(document, view, emit, onEvent) {
     coverage.append(paragraph(document, 'Cobertura indisponível para esta execução.', 'coverage-value coverage-unavailable'));
   }
   coverage.append(paragraph(document, COVERAGE_DISCLAIMER, 'coverage-disclaimer'));
-  root.append(coverage, renderMetrics(document, summary.counts, view.filters.result, onEvent));
 
-  const filters = section(document, 'filters');
-  filters.append(heading(document, 2, 'Filtrar resultados'));
+  const filters = document.createElement('details');
+  filters.className = 'filters';
+  filters.dataset.advancedFilters = '';
+  const hasAdvancedFilters = view.filters.impact.length > 0 || view.filters.wcag.length > 0;
+  filters.open = hasAdvancedFilters ||
+    /^filter-(?:impact|wcag)-(?:all|\d+)$/u.test(view.focusId ?? '');
+  const filtersLabel = document.createElement('summary');
+  filtersLabel.textContent = hasAdvancedFilters ? 'Mais filtros — filtros ativos' : 'Mais filtros: impacto e nível WCAG';
+  filtersLabel.dataset.focusId = 'advanced-filters';
+  filters.append(filtersLabel);
   for (const dimension of FILTERS) {
     if (dimension === 'abnt') continue;
     filters.append(renderFilter(document, dimension, summary.distributions[dimension], view.filters[dimension], onEvent));
   }
   root.append(filters, heading(document, 2, 'Resultados por item ABNT'));
-  root.append(paragraph(document, 'Abra um item para consultar suas verificações e ocorrências. Uma verificação pode encontrar vários elementos na página.', 'supporting-copy'));
   root.append(renderAbntGroups(document, view, emit, onEvent));
+  const guidance = document.createElement('details');
+  guidance.className = 'result-guidance';
+  guidance.dataset.resultGuidance = '';
+  const guidanceLabel = document.createElement('summary');
+  guidanceLabel.textContent = 'Como interpretar e refazer a avaliação';
+  guidanceLabel.dataset.focusId = 'result-guidance';
+  guidance.append(guidanceLabel,
+    paragraph(document, formatCompletedAt(summary.identity.completedAt), 'result-time'),
+    paragraph(document, 'Abra um item ABNT para consultar suas verificações e ocorrências. Uma verificação pode encontrar vários elementos na página.', 'supporting-copy'),
+    paragraph(document, 'Refazer auditoria inicia uma nova avaliação. O resultado anterior não é apagado; você poderá escolher a página e o modo novamente.', 'supporting-copy'),
+    coverage);
+  root.append(guidance);
   for (const limitation of summary.limitations.codes) root.append(paragraph(document, limitation, 'supporting-copy'));
 
   const activeOccurrenceId = view.highlight.state === 'active' ||
@@ -706,9 +726,6 @@ function renderPageMarkerReview(document, markers, emit) {
   if (['showing', 'hiding'].includes(markers.status)) wrapper.setAttribute('aria-busy', 'true');
   wrapper.append(
     heading(document, 2, 'Conferir na página'),
-    paragraph(document,
-      'Os sinais ligam o resultado registrado na auditoria ao elemento correspondente na página atual. Essa associação não cria nova prova.',
-      'page-marker-explanation'),
   );
 
   const action = ['active', 'hiding'].includes(markers.status)
@@ -723,8 +740,21 @@ function renderPageMarkerReview(document, markers, emit) {
   status.setAttribute('role', 'status');
   status.setAttribute('aria-live', 'polite');
   status.setAttribute('aria-atomic', 'true');
-  wrapper.append(status, renderMarkerLegend(document));
-  if (markers.counts !== null) wrapper.append(renderMarkerCounts(document, markers.counts));
+  wrapper.append(status);
+  if (markers.counts?.omitted > 0) wrapper.append(paragraph(document,
+    `${markers.counts.omitted} ${markers.counts.omitted === 1 ? 'ocorrência omitida' : 'ocorrências omitidas'} dos sinais — consulte o relatório.`,
+    'page-marker-limit'));
+  const help = document.createElement('details');
+  help.className = 'page-marker-help';
+  help.dataset.markerHelp = '';
+  const helpLabel = document.createElement('summary');
+  helpLabel.textContent = 'Legenda e limites dos sinais';
+  helpLabel.dataset.focusId = 'page-marker-help';
+  help.append(helpLabel, paragraph(document,
+    'Os sinais ligam o resultado registrado na auditoria ao elemento correspondente na página atual. Essa associação não cria nova prova.',
+    'page-marker-explanation'), renderMarkerLegend(document));
+  if (markers.counts !== null) help.append(renderMarkerCounts(document, markers.counts));
+  wrapper.append(help);
   return wrapper;
 }
 
