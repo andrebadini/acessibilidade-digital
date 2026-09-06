@@ -48,22 +48,45 @@ function enhanceReportView() {
       target.scrollIntoView({ block: 'start' });
     });
   }
-  window.addEventListener('beforeprint', () => {
+  function beforePrint() {
     if (printState) return;
     printState = { selected, open: details.map(detail => detail.open) };
     selected = null;
     update();
     for (const detail of details) detail.open = true;
-  });
-  window.addEventListener('afterprint', () => {
+  }
+  function afterPrint() {
     if (!printState) return;
     selected = printState.selected;
     details.forEach((detail, index) => { detail.open = printState.open[index]; });
     printState = null;
     update();
-  });
+  }
+  window.addEventListener('beforeprint', beforePrint);
+  window.addEventListener('afterprint', afterPrint);
+  for (const button of document.querySelectorAll('[data-report-print-summary]')) {
+    button.addEventListener('click', () => {
+      if (printState) return;
+      const previousLayout = document.body.getAttribute('data-print-layout');
+      const previousTitle = document.title;
+      try {
+        beforePrint();
+        document.body.setAttribute('data-print-layout', 'summary');
+        document.title = 'Resumo executivo — Audita Acessibilidade';
+        window.print();
+      } catch {
+        const printStatus = document.querySelector('[data-report-print-status]');
+        if (printStatus) printStatus.textContent = 'Não foi possível abrir a impressão. Use a exportação completa ou tente novamente.';
+      } finally {
+        afterPrint();
+        document.title = previousTitle;
+        if (previousLayout === null) document.body.removeAttribute('data-print-layout');
+        else document.body.setAttribute('data-print-layout', previousLayout);
+      }
+    });
+  }
   update();
 }
 
 export const REPORT_VIEW_SCRIPT = `'use strict';\n(${enhanceReportView.toString()})();`;
-export const REPORT_VIEW_SCRIPT_CSP_HASH = 'sha256-iNPt03p4VFO2md6RP5mqNba5hdAaEv86u0z8eRwR9lo=';
+export const REPORT_VIEW_SCRIPT_CSP_HASH = 'sha256-MbRep5FCh62Pl6yINMSGQlr6Kuyl629dRlYacsMCgYc=';

@@ -1,6 +1,8 @@
 export const REPORT_CSS = `
 :root{color-scheme:light;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.55;color:#14212b;background:#fff;--ink:#14212b;--surface:#fff;--navy:#003b71;--blue:#005a9c;--focus:#8b2f00;--muted:#738596;--pale:#eef4f8;--danger:#8b1e1e;--review:#6b4e00}
 *{box-sizing:border-box}
+[data-report-summary-note]{display:none}
+[data-report-print-controls]{margin-block:1rem;padding:.75rem;border:1px solid #738596;border-radius:.5rem}
 html{scroll-behavior:smooth}
 body{margin:0;background:#fff;color:#14212b}
 a{color:#005a9c;text-decoration-thickness:.12em;text-underline-offset:.15em}
@@ -155,6 +157,18 @@ th{background:#eef4f8;color:#14212b}
 @page{size:A4 portrait;margin:18mm 15mm 20mm}
 @media print{html{scroll-behavior:auto}.skip-link,.section-nav,.filters-shell,.filter-actions,.empty-state{display:none!important}.report-header,.report-footer{background:#fff;color:#14212b;border-bottom:2px solid #003b71;padding:.5rem 0}.report-footer{border-top:2px solid #003b71;border-bottom:0}.major-section{break-before:page}.scope-card,.summary-card,.page-card,.occurrence-card,.review-card,.widget-card,.evidence-card,.method-card,.announcement-map-segment,.announcement-map-legend li,details{break-inside:avoid}.occurrence-card[hidden]{display:block!important}details:not([open])>*:not(summary){display:block!important}[data-report-technical]:not([open])>*:not(summary),[data-report-limitations]:not([open])>*:not(summary){display:block!important}.report-view-document .report-header,.report-view-document [data-report-navigation],.report-view-document .filters-noscript{display:none!important}.report-view-document main>h1{display:block!important;margin:.25rem 0}.report-view-document .report-static-identity{display:block!important;margin:.2rem 0 .75rem}.report-view-document [data-report-evidence-preview] figure[data-evidence-kind="element"]{break-inside:avoid}.report-view-document [data-report-evidence-preview] figure[data-evidence-kind="full-page"]{break-inside:auto}.report-view-document [data-report-evidence-preview] figcaption{break-inside:avoid;break-before:avoid}.report-view-document [data-evidence-kind="full-page"]>.evidence-media{display:block;width:100%;max-height:210mm;object-fit:contain;object-position:top center}.report-view-document [data-report-issue],.report-view-document [data-report-technical],.report-view-document [data-report-limitations],.report-view-document [data-report-evidence]{break-inside:auto}.report-view-document [data-report-issue-heading],.report-view-document [data-report-evidence]>h4,.report-view-document summary{break-after:avoid}thead{display:table-header-group}a{color:#14212b;text-decoration:none}main{max-width:none;padding:0}.status,.chip{color:#14212b!important;background:#fff!important;border-color:#14212b!important}.matrix-scroll{overflow:visible}.matrix-scroll table{min-width:0;font-size:8.5pt}.report-enhanced .filters-noscript{display:block}.filters-noscript::after{content:" Todos os registros foram incluídos na impressão."}}
 @media print{
+  [data-report-print-controls]{display:none!important}
+  .report-view-document[data-print-layout="summary"] #report-section-2,
+  .report-view-document[data-print-layout="summary"] #report-section-3,
+  .report-view-document[data-print-layout="summary"] #report-section-4,
+  .report-view-document[data-print-layout="summary"] #report-section-5,
+  .report-view-document[data-print-layout="summary"] [data-report-annex]{display:none!important}
+  .report-view-document[data-print-layout="summary"] [data-report-summary-note]{display:block!important;padding:.75rem;border:2px solid #003b71;font-weight:700}
+  .report-view-document[data-print-layout="summary"]{font-size:10.5pt;line-height:1.35}
+  .report-view-document[data-print-layout="summary"] table{font-size:9pt}
+  .report-view-document[data-print-layout="summary"] th,.report-view-document[data-print-layout="summary"] td{padding:.3rem}
+  .report-view-document[data-print-layout="summary"] tr{break-inside:avoid}
+  .report-view-document[data-print-layout="summary"] th:first-child{white-space:nowrap;width:5.5rem}
   html.report-view-document{font-size:10.5pt;line-height:1.35}
   .report-view-document details{break-inside:auto}
   .report-view-document [data-report-issue-heading]{break-inside:avoid;break-after:auto}
@@ -170,4 +184,4 @@ th{background:#eef4f8;color:#14212b}
 `;
 
 // Updated by the CSP integrity test whenever the static stylesheet changes.
-export const REPORT_CSS_CSP_HASH = 'sha256-3kzj1ckxLMdBR0nTE1hMHpLwVTnUm2tBTwT44em2bbM=';
+export const REPORT_CSS_CSP_HASH = 'sha256-eJOJLHZa2tn82bg4rDMPiorM2iac+x4zqKBCxiDtBig=';

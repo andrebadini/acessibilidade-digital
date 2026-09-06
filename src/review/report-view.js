@@ -834,6 +834,26 @@ function installPrintPresentation(document, root) {
   };
   window.addEventListener('beforeprint', before);
   window.addEventListener('afterprint', after);
+  const summaryButton = root.querySelector('[data-report-print-summary]');
+  const printStatus = root.querySelector('[data-report-print-status]');
+  summaryButton?.addEventListener('click', () => {
+    if (prior) return;
+    const previousLayout = root.getAttribute('data-print-layout');
+    const previousTitle = document.title;
+    try {
+      before();
+      root.setAttribute('data-print-layout', 'summary');
+      document.title = 'Resumo executivo — Audita Acessibilidade';
+      window.print();
+    } catch {
+      if (printStatus) printStatus.textContent = 'Não foi possível abrir a impressão. Use a exportação completa ou tente novamente.';
+    } finally {
+      after();
+      document.title = previousTitle;
+      if (previousLayout === null) root.removeAttribute('data-print-layout');
+      else root.setAttribute('data-print-layout', previousLayout);
+    }
+  });
   PRINT_LISTENERS_BY_WINDOW.set(window, () => {
     window.removeEventListener('beforeprint', before);
     window.removeEventListener('afterprint', after);
@@ -855,6 +875,9 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
     element(document, 'p', `Escopo avaliado: ${view.executive.identity.finalUrl}`),
   );
   root.append(identity);
+  const summaryNote = element(document, 'p', 'Resumo executivo — não substitui o relatório completo. Fichas, capturas, anúncios e evidências individuais estão no relatório completo da mesma auditoria e revisão.');
+  summaryNote.setAttribute('data-report-summary-note', '');
+  root.append(summaryNote);
   const live = element(document, 'p');
   live.setAttribute('class', 'report-filter-status');
   live.setAttribute('role', 'status'); live.setAttribute('aria-live', 'polite'); live.setAttribute('aria-atomic', 'true');
@@ -934,7 +957,13 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   deletionChoice.append(deleteAfterExport, element(document, 'span',
     'Apagar os dados locais desta auditoria após baixar os quatro arquivos. Os downloads serão preservados.'));
   exportButton.addEventListener('click', () => onExport({ deleteAfterCompleteExport: deleteAfterExport.checked === true }));
-  actions.append(exportButton, deletionChoice);
+  const summaryPrint = element(document, 'button', 'Imprimir resumo / salvar PDF');
+  summaryPrint.setAttribute('type', 'button');
+  summaryPrint.setAttribute('data-report-print-summary', '');
+  const printStatus = element(document, 'p', 'Resumo: totais, limitações, matriz ABNT e metodologia, sem fichas e capturas. No diálogo de impressão, escolha Salvar como PDF.');
+  printStatus.setAttribute('data-report-print-status', '');
+  printStatus.setAttribute('aria-live', 'polite');
+  actions.append(exportButton, summaryPrint, printStatus, deletionChoice);
   executive.append(actions, limitations);
   root.append(executive);
   root.append(sectionNavigation(document));
@@ -1074,7 +1103,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
 
   const methodology = section(document, 6);
   appendTextList(document, methodology, view.methodology.caveats, 'Sem ressalvas adicionais.');
-  methodology.append(element(document, 'p', `Integridade: ${view.modelHash}.`));
+  methodology.append(element(document, 'p', `Auditoria: ${view.auditId}. Revisão do modelo: ${view.modelRevision}. Integridade: ${view.modelHash}.`));
   const officialSources = document.createElement('div'); officialSources.setAttribute('data-official-sources', '');
   officialSources.append(element(document, 'h3', 'Fontes oficiais'));
   for (const source of CONSUMER_ACCESSIBILITY_FIXED_BASIS.sources) {

@@ -17,6 +17,7 @@ async function harness() {
       dispatch(type) { listeners.get(type)?.({ preventDefault() {} }); },
       setAttribute(name, value) { this.attributes.set(name, value); },
       getAttribute(name) { return this.attributes.get(name) ?? null; },
+      removeAttribute(name) { this.attributes.delete(name); },
       focus() { this.focused = true; }, scrollIntoView() {},
     };
   };
@@ -28,22 +29,52 @@ async function harness() {
   const metrics = ['failed', 'alerts', 'humanReview', 'passed'].map(value => node({ reportMetric: value }));
   const clear = node();
   const status = node();
+  const printButton = node();
+  const printStatus = node();
+  const body = node();
   const detail = node(); detail.tagName = 'DETAILS'; detail.parentElement = groups[0];
   const evidence = node(); evidence.parentElement = detail;
   const link = node(); link.getAttribute = () => '#report-evidence-1';
   const document = {
+    body,
+    title: 'Relatório completo',
     querySelectorAll(selector) { return ({
       '[data-report-issue]': cards, '[data-report-item-group]': groups,
       '[data-report-metric]': metrics, '[data-report-clear-filters]': [clear],
       'details': [...groups, detail], 'a[href^="#"]': [link],
+      '[data-report-print-summary]': [printButton],
     })[selector] ?? []; },
-    querySelector() { return status; },
+    querySelector(selector) { return selector === '[data-report-print-status]' ? printStatus : status; },
     getElementById(id) { return id === 'report-evidence-1' ? evidence : null; },
   };
   const window = node();
   runInNewContext(runtime.REPORT_VIEW_SCRIPT, { document, window });
-  return { runtime, cards, groups, metrics, clear, status, detail, evidence, link, window };
+  return { runtime, cards, groups, metrics, clear, status, detail, evidence, link, window, printButton, printStatus, body, document };
 }
+
+test('downloaded summary print restores filters and layout after native success or failure', async () => {
+  for (const failure of [false, true]) {
+    const h = await harness();
+    let printed = null;
+    h.metrics[0].dispatch('click');
+    h.window.print = () => {
+      printed = { layout: h.body.getAttribute('data-print-layout'), title: h.document.title,
+        allVisible: h.cards.every(card => !card.hidden), allOpen: h.groups.every(group => group.open) };
+      if (failure) throw new Error('PRIVATE_PRINT_FAILURE');
+    };
+    h.printButton.dispatch('click');
+    assert.deepEqual(printed, { layout: 'summary', title: 'Resumo executivo — Audita Acessibilidade', allVisible: true, allOpen: true });
+    assert.equal(h.document.title, 'Relatório completo');
+    assert.equal(h.body.getAttribute('data-print-layout'), null);
+    assert.deepEqual(h.cards.map(card => card.hidden), [false, true, true]);
+    assert.ok(h.groups.every(group => !group.open));
+    assert.doesNotMatch(h.printStatus.textContent ?? '', /PRIVATE_PRINT_FAILURE|salvo com sucesso/u);
+    if (failure) assert.match(h.printStatus.textContent, /Não foi possível/u);
+    h.window.dispatch('beforeprint');
+    assert.equal(h.body.getAttribute('data-print-layout'), null);
+    h.window.dispatch('afterprint');
+  }
+});
 
 test('downloaded report filters grouped item cards without changing totals or double-counting checks', async () => {
   const h = await harness();

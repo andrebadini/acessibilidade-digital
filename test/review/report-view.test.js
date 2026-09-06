@@ -46,9 +46,12 @@ test('downloaded HTML is interactive while the same print projection is script-f
   assert.ok(html.includes(`<script>${REPORT_VIEW_SCRIPT}</script>`));
   assert.ok(html.includes(`script-src '${REPORT_VIEW_SCRIPT_CSP_HASH}'`));
   assert.match(html, /data-report-clear-filters/);
+  assert.match(html, /<button[^>]+data-report-print-summary/);
+  assert.match(html, /Resumo executivo — não substitui o relatório completo/u);
   assert.match(html, /<details data-report-matrix>/);
   const print = renderHtmlReport(model, { reportView: view, forPrint: true });
   assert.doesNotMatch(print, /<script\b|script-src/);
+  assert.doesNotMatch(print, /<button[^>]+data-report-print-summary|<body[^>]+data-print-layout="summary"/u);
   assert.ok([...print.matchAll(/<details\b[^>]*>/g)].every(match => /\bopen\b/.test(match[0])));
   assert.equal((print.match(/data-report-issue /g) ?? []).length, (html.match(/data-report-issue /g) ?? []).length);
   assert.ok(print.includes(view.modelHash));
@@ -94,6 +97,53 @@ test('native print reveals every collapsed detail and restores filters without a
   assert.equal(root.querySelector('[data-report-matrix]').getAttribute('open'), null);
   assert.equal(root.querySelector('[data-report-annex]').getAttribute('open'), null);
   assert.deepEqual(root.querySelectorAll('[data-report-issue]').map(card => card.hidden), hiddenBefore);
+});
+
+test('summary print is explicit, restores presentation on error and never triggers export or deletion', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 3, modelHash: model.integrity.canonicalModelHash });
+  const beforeModel = JSON.stringify(model);
+  const document = new Document();
+  const listeners = new Map();
+  let root;
+  document.title = 'Relatório completo';
+  let prints = 0;
+  const printedStates = [];
+  let exports = 0;
+  document.defaultView = {
+    addEventListener(type, listener) { listeners.set(type, listener); },
+    removeEventListener(type) { listeners.delete(type); },
+    print() {
+      prints++;
+      printedStates.push({ layout: root.getAttribute('data-print-layout'), title: document.title,
+        open: root.querySelector('[data-report-matrix]').getAttribute('open'),
+        rows: root.querySelector('[data-report-matrix]').querySelector('tbody').querySelectorAll('tr').length });
+      throw new Error('PRIVATE_NATIVE_ERROR');
+    },
+  };
+  root = renderReportView({ view, document, onExport() { exports++; } });
+  root.querySelector('[data-report-metric="failed"]').click();
+  const hidden = root.querySelectorAll('[data-report-issue]').map(node => node.hidden);
+  const button = root.querySelector('[data-report-print-summary]');
+  assert.ok(button, 'native summary print is reachable beside the full export');
+  assert.match(root.textContent, new RegExp(model.auditId, 'u'));
+  assert.match(root.textContent, /Revisão do modelo: 3/u);
+  assert.match(root.textContent, /não substitui o relatório completo/u);
+  button.click();
+  button.click();
+  assert.equal(prints, 2);
+  assert.deepEqual(printedStates, Array(2).fill({ layout: 'summary', title: 'Resumo executivo — Audita Acessibilidade', open: '', rows: 146 }));
+  assert.equal(document.title, 'Relatório completo');
+  assert.equal(exports, 0);
+  assert.equal(root.getAttribute('data-print-layout'), null);
+  assert.equal(root.querySelector('[data-report-matrix]').getAttribute('open'), null);
+  assert.deepEqual(root.querySelectorAll('[data-report-issue]').map(node => node.hidden), hidden);
+  assert.doesNotMatch(root.textContent, /PRIVATE_NATIVE_ERROR/u);
+  assert.match(root.querySelector('[data-report-print-status]').textContent, /Não foi possível/u);
+  assert.equal(JSON.stringify(model), beforeModel);
+  listeners.get('beforeprint')();
+  assert.equal(root.getAttribute('data-print-layout'), null, 'ordinary printing remains full');
+  listeners.get('afterprint')();
 });
 
 test('reused report captures have one marked preview and an annex link instead of another image', async () => {
