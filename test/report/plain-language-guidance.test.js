@@ -70,3 +70,92 @@ test('unknown items use a safe generic review and do not invent observations', (
   assert.doesNotMatch(result.correction, /alt=|imagem/);
   assert.ok(result.reviewSteps.join(' ').includes('Verificação local'));
 });
+
+test('page and passage languages explain declaration, pronunciation and review limits', () => {
+  const page = guidance({ itemId: '5.13.2', outcome: 'cantTell' });
+  const passage = guidance({ itemId: '5.13.3', outcome: 'cantTell' });
+  assert.match(page.impact, /pronúncia/);
+  assert.match(page.reviewSteps.join(' '), /idioma declarado/);
+  assert.match(page.example, /pt-BR/);
+  assert.match(passage.reviewSteps.join(' '), /nomes próprios/);
+  assert.match(passage.example, /inglês/);
+  assert.doesNotMatch(page.correction, /Revise “/);
+  assert.match(passage.correction, /trecho/);
+});
+
+test('abbreviations offer a concrete expansion and preserve recommendation status', () => {
+  const result = guidance({ itemId: '5.12.11', outcome: 'cantTell' });
+  assert.match(result.reviewSteps.join(' '), /significado por extenso/);
+  assert.match(result.example, /CPF.*Cadastro de Pessoas Físicas/);
+  assert.match(result.correction, /recomenda|considere/i);
+  assert.doesNotMatch(result.correction, /obrigat|sempre/i);
+});
+
+test('generic link review distinguishes context from a recommended standalone name', () => {
+  const contextual = guidance({ itemId: '5.7.4', outcome: 'cantTell' });
+  const standalone = guidance({ itemId: '5.7.3', outcome: 'cantTell' });
+  assert.match(contextual.reviewSteps.join(' '), /parágrafo|frase/);
+  assert.match(contextual.reviewSteps.join(' '), /não basta/i);
+  assert.match(contextual.example, /clique aqui/i);
+  assert.match(standalone.correction, /recomenda|considere/i);
+  assert.match(standalone.reviewSteps.join(' '), /isolad/);
+});
+
+test('new-window review explains tabs and asks for a safe test without requiring them', () => {
+  const result = guidance({ itemId: '5.7.6', outcome: 'cantTell' });
+  assert.match(result.reviewSteps.join(' '), /nova (guia|aba)/);
+  assert.match(result.reviewSteps.join(' '), /segur/);
+  assert.match(result.correction, /recomenda|considere/i);
+  assert.match(result.example, /abre em nova aba/i);
+});
+
+test('form labels separate visible instructions, position, association and description', () => {
+  const label = guidance({ itemId: '5.9.1', outcome: 'cantTell' });
+  const position = guidance({ itemId: '5.9.2', outcome: 'cantTell' });
+  const association = guidance({ itemId: '5.9.3', outcome: 'cantTell' });
+  const descriptive = guidance({ itemId: '5.9.4', outcome: 'cantTell' });
+  assert.match(label.reviewSteps.join(' '), /desaparece|digitar/);
+  assert.match(position.reviewSteps.join(' '), /posição|antes/);
+  assert.match(association.reviewSteps.join(' '), /leitor de tela/);
+  assert.match(association.correction, /associ/i);
+  assert.match(descriptive.example, /Nome completo/);
+});
+
+test('button and accessible-name guidance explains icon-only controls without triggering actions', () => {
+  for (const itemId of ['5.8.3', '5.13.10']) {
+    const result = guidance({ itemId, outcome: 'cantTell' });
+    assert.match(result.reviewSteps.join(' '), /nome acessível/);
+    assert.match(result.reviewSteps.join(' '), /sem acionar/);
+    assert.match(result.example, /lupa.*Buscar/);
+  }
+});
+
+test('page titles and content headings receive different concrete procedures', () => {
+  const page = guidance({ itemId: '5.13.1', outcome: 'cantTell' });
+  assert.match(page.reviewSteps.join(' '), /aba do navegador/);
+  assert.match(page.example, /Agendar atendimento/);
+  const semantics = guidance({ itemId: '5.3.1', outcome: 'cantTell' });
+  assert.match(semantics.reviewSteps.join(' '), /lista de (títulos|cabeçalhos)/);
+  const purpose = guidance({ itemId: '5.3.2', outcome: 'cantTell' });
+  assert.match(purpose.reviewSteps.join(' '), /assunto/);
+  const structure = guidance({ itemId: '5.3.5', outcome: 'cantTell' });
+  assert.match(structure.example, /Documentos.*Identificação/);
+});
+
+test('justified text explains visual spacing and a recommended alternative', () => {
+  const result = guidance({ itemId: '5.12.5', outcome: 'cantTell' });
+  assert.match(result.impact, /espaços/);
+  assert.match(result.reviewSteps.join(' '), /duas margens/);
+  assert.match(result.correction, /recomenda|considere/i);
+  assert.match(result.example, /esquerda/);
+});
+
+test('specific instructions never convert hypothetical examples into evidence or pending into failure', () => {
+  for (const itemId of ['5.13.2', '5.13.3', '5.12.11', '5.7.3', '5.7.4', '5.7.6', '5.9.1', '5.9.2', '5.9.3', '5.9.4', '5.8.3', '5.13.10', '5.13.1', '5.3.1', '5.3.2', '5.3.5', '5.12.5']) {
+    const result = guidance({ itemId, outcome: 'cantTell', observed: 'Amostra registrada; revisão pendente.' });
+    assert.equal(result.observed, 'O resultado disponível não confirma atendimento nem falha; é necessária revisão humana. Registro original: Amostra registrada; revisão pendente.', itemId);
+    assert.match(result.correction, /^Se a revisão confirmar/, itemId);
+    assert.match(result.example, /^Exemplo hipotético:/, itemId);
+    assert.match(guidance({ itemId, outcome: 'passed' }).correction, /^Nenhuma correção/, itemId);
+  }
+});

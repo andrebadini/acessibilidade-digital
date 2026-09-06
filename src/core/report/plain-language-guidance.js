@@ -113,10 +113,100 @@ const SPECIFIC = {
     correction: 'Disponibilize uma descrição que permita compreender as informações relevantes da imagem complexa.',
     example: 'um gráfico de atendimentos tem uma descrição dos dados e da tendência que ele comunica.'
   },
+  '5.3.1': {
+    correction: 'Marque os títulos de seção como cabeçalhos no código, para que possam ser encontrados por quem navega com leitor de tela; aumentar ou engrossar a fonte não faz essa marcação.',
+    steps: ['Localize um texto que funciona visualmente como título de seção.', 'Compare-o com a lista de títulos do leitor de tela. Sem acesso a essa lista ou ao código correspondente, registre a limitação em vez de concluir apenas pela aparência.'],
+    example: '“Documentos necessários” aparece como título na página e também na lista de cabeçalhos do leitor de tela.'
+  },
+  '5.3.2': {
+    correction: 'Use títulos que descrevam o assunto ou a finalidade da seção que apresentam.',
+    steps: ['Leia o título e tente prever o assunto da seção antes de ler seu conteúdo.', 'Leia a seção e compare: o título ajuda a encontrar aquela informação ou indica outro assunto? Registre o título e o trecho que sustentam sua conclusão.'],
+    example: '“Documentos necessários” identifica uma lista de documentos com mais clareza que um título vago como “Informações”.'
+  },
+  '5.3.5': {
+    correction: 'Organize os níveis dos cabeçalhos para representar a relação entre assuntos e subassuntos, sem escolher o nível apenas pelo tamanho da fonte.',
+    steps: ['Consulte a lista de cabeçalhos com seus níveis no leitor de tela e compare com as seções visíveis.', 'Leia a lista como um sumário: confira quais títulos são assuntos principais e quais pertencem a uma seção maior. Se os níveis não estiverem disponíveis, registre que essa parte depende de verificação técnica.'],
+    example: '“Documentos” é uma seção; “Identificação” é um assunto dentro dela e recebe um nível subordinado na estrutura.'
+  },
+  '5.7.3': {
+    correction: 'Como melhoria recomendada, use um texto de link que permita compreender o destino mesmo fora do parágrafo.',
+    steps: ['Leia o nome do link isoladamente, como na lista de links de um leitor de tela.', 'Pergunte qual destino esse nome comunica. Compare com o destino informado na evidência; este item recomenda compreensão sem depender do contexto.'],
+    example: '“Consultar andamento do pedido” explica o destino mesmo quando lido sem o parágrafo ao redor.'
+  },
+  '5.7.4': {
+    correction: 'Torne o propósito do link compreensível pelo seu nome ou pelo contexto associado a ele e disponível ao leitor de tela.',
+    steps: ['Leia o link junto da frase, do parágrafo ou do item de lista a que pertence e identifique o destino esperado.', 'Compare com o destino na evidência. Encontrar “clique aqui” não basta para concluir falha: verifique se o contexto esclarece a finalidade e se essa relação também está disponível ao leitor de tela; se não puder confirmar, mantenha a revisão pendente.'],
+    example: 'em “Para consultar seu pedido, clique aqui”, a frase pode esclarecer o propósito; “Consultar pedido” torna o próprio link mais claro. É preciso conferir o contexto acessível antes de concluir.'
+  },
+  '5.7.6': {
+    correction: 'Como melhoria recomendada, avise antes do acionamento quando o link abre outra aba ou janela, de modo perceptível também ao leitor de tela.',
+    steps: ['Procure, no link ou no aviso associado, uma indicação de nova aba (outra página na barra superior do navegador) ou nova janela.', 'Somente se o destino for seguro para testar, acione o link normalmente, sem teclas que forcem outra aba, e compare o comportamento com o aviso. Se não testar, registre essa limitação.'],
+    example: '“Consultar regras (abre em nova aba)” antecipa a mudança; o aviso também fica disponível a quem ouve o link.'
+  },
+  '5.8.3': {
+    correction: 'Dê ao botão um nome que explique sua ação, inclusive quando ele mostra apenas um desenho.',
+    steps: ['Confira o texto visível e o nome acessível (o nome que o navegador fornece às tecnologias assistivas) registrados para o botão, sem acionar compras, exclusões ou envios.', 'Compare o nome com a ação esperada. A leitura estimada do relatório ajuda a revisar, mas não substitui a confirmação com um leitor de tela quando houver dúvida.'],
+    example: 'um botão com desenho de lupa recebe o nome “Buscar”; o desenho sozinho pode não explicar a ação a quem não o vê.'
+  },
+  '5.9.1': {
+    correction: 'Identifique o campo com um rótulo que explique qual informação preencher e que esteja disponível às tecnologias assistivas.',
+    steps: ['Procure a identificação do campo antes de preenchê-lo. Se houver uma dica dentro da caixa, confira se ela desaparece ao digitar; não use dados pessoais reais no teste.', 'Confira também o nome anunciado ao chegar ao campo pelo leitor de tela. Não conclua que a identificação é suficiente apenas porque há texto perto da caixa.'],
+    example: 'um campo apresenta “Nome completo” como identificação, em vez de depender apenas de uma dica que some quando a pessoa começa a escrever.'
+  },
+  '5.9.2': {
+    correction: 'Posicione a identificação de modo que a pessoa entenda a qual campo ela pertence durante o preenchimento.',
+    steps: ['Observe a posição dos rótulos e identifique a qual campo cada um se refere, antes de preencher.', 'Percorra os campos na ordem de leitura e confira se a identificação aparece em uma sequência compreensível; considere também as opções de marcar ou selecionar.'],
+    example: '“Nome completo” fica próximo do campo correspondente, sem parecer identificar a caixa de e-mail ao lado.'
+  },
+  '5.9.3': {
+    correction: 'Associe o rótulo ao campo no código, para que o navegador comunique qual identificação pertence a ele.',
+    steps: ['Localize o campo e o rótulo que visualmente parece identificá-lo.', 'Chegue ao campo pelo teclado com um leitor de tela e confira a identificação anunciada. Texto próximo, por si só, não prova associação; se necessário, peça a verificação da associação no código e registre a limitação.'],
+    example: 'ao chegar à caixa de e-mail, o leitor de tela identifica “E-mail”, e não apenas um campo de edição sem nome.'
+  },
+  '5.9.4': {
+    correction: 'Escreva um rótulo que permita entender a informação solicitada sem adivinhar o significado do campo.',
+    steps: ['Leia o rótulo e diga qual informação você preencheria, sem usar dados pessoais reais.', 'Compare essa interpretação com a finalidade do campo e as instruções disponíveis. Registre palavras vagas ou ambíguas e por que dificultam o entendimento, caso existam.'],
+    example: '“Nome completo” descreve a informação solicitada com mais clareza que “Dados”, quando o campo pede o nome da pessoa.'
+  },
   '5.11.1': {
     correction: 'Acrescente uma forma de comunicar a informação que não dependa apenas da cor.',
     steps: ['Localize a informação comunicada por cor.', 'Confira se um texto, símbolo ou outra indicação também permite entender a mesma informação.'],
     example: 'um campo inválido apresenta uma mensagem de erro além da borda vermelha.'
+  },
+  '5.12.5': {
+    impact: 'Pessoas com dificuldade de leitura podem perder a sequência quando o texto justificado cria espaços desiguais entre as palavras para alinhar as duas bordas do parágrafo.',
+    correction: 'Como melhoria recomendada, ofereça uma apresentação dos blocos de texto sem alinhamento justificado, evitando esticar os espaços para alinhar as duas bordas.',
+    steps: ['Observe um parágrafo com várias linhas: o texto se alinha às duas margens, com espaços aumentados entre palavras? Compare com a evidência de alinhamento disponível.', 'Confira se há uma opção de apresentação sem justificação. A aparência é uma pista, não uma medição; registre a configuração verificada e as limitações da revisão.'],
+    example: 'um parágrafo em português alinhado à esquerda mantém a margem direita irregular, sem aumentar os espaços para preencher toda a linha.'
+  },
+  '5.12.11': {
+    impact: 'Pessoas com dificuldade de compreensão ou que não conhecem o assunto podem não entender uma sigla, mesmo conseguindo ler suas letras.',
+    correction: 'Como melhoria recomendada, disponibilize o significado das siglas e abreviaturas, por exemplo por uma explicação no texto ou um glossário acessível.',
+    steps: ['Localize a sigla e procure seu significado por extenso no texto, em uma explicação associada ou em um glossário disponível.', 'Confira se a explicação corresponde ao uso naquele contexto e pode ser encontrada também pelo teclado ou leitor de tela. Registre onde foi encontrada ou quais locais foram verificados.'],
+    example: '“CPF (Cadastro de Pessoas Físicas)” apresenta o significado de CPF para quem ainda não conhece a sigla.'
+  },
+  '5.13.1': {
+    impact: 'Pessoas cegas ou com dificuldade de orientação usam o título da página para reconhecer onde estão e distinguir abas abertas.',
+    correction: 'Defina um título da página que descreva seu assunto ou sua finalidade; ele é diferente de um título de seção dentro do conteúdo.',
+    steps: ['Confira o título da aba do navegador ou o título registrado no relatório; se estiver cortado na aba, consulte sua versão completa.', 'Compare-o com a finalidade da página: ele permite reconhecer o serviço ou assunto sem depender apenas de um nome genérico do site?'],
+    example: '“Agendar atendimento — Portal de serviços” identifica a finalidade da página com mais clareza que apenas “Início”.'
+  },
+  '5.13.2': {
+    impact: 'Pessoas cegas dependem da indicação de idioma para que o leitor de tela possa escolher a pronúncia adequada. Um texto em português tratado como outro idioma pode ser difícil de entender.',
+    correction: 'Informe no código o idioma principal que corresponde ao conteúdo da página. A equipe técnica pode ajustar o atributo lang do elemento html.',
+    steps: ['Leia uma amostra do conteúdo principal e identifique em qual idioma ele está escrito.', 'Compare com o idioma declarado na evidência ou no código da página. Se essa informação não estiver disponível, solicite a verificação técnica; ouvir uma pronúncia correta, sozinho, não prova que a declaração existe.'],
+    example: 'uma página predominantemente em português do Brasil declara lang="pt-BR" no elemento html. Esse é um exemplo de declaração, não um dado observado nesta auditoria.'
+  },
+  '5.13.3': {
+    impact: 'Quem usa leitor de tela pode ouvir um trecho estrangeiro com pronúncia inadequada se a mudança de idioma não estiver identificada.',
+    correction: 'Identifique no código o idioma dos trechos em outra língua quando o item se aplicar, para permitir a mudança de pronúncia pelo leitor de tela.',
+    steps: ['Procure frases ou passagens em idioma diferente do idioma principal e anote o trecho exato.', 'Confira a indicação de idioma daquele trecho na evidência ou peça ajuda técnica. Não trate automaticamente nomes próprios, termos técnicos e palavras incorporadas ao idioma como falhas: verifique as exceções aplicáveis; a pronúncia ouvida não substitui essa confirmação.'],
+    example: 'em uma página em português, uma frase citada em inglês pode receber lang="en" no trecho correspondente, sem mudar o idioma da página inteira.'
+  },
+  '5.13.10': {
+    correction: 'Forneça ao componente um nome acessível, isto é, uma identificação que o navegador consiga comunicar às tecnologias assistivas.',
+    steps: ['Consulte o nome acessível registrado na ficha do componente e compare com sua identificação visual, sem acionar a função.', 'Se não houver nome registrado, confira com leitor de tela ou apoio técnico antes de concluir quando o resultado estiver pendente. O anúncio estimado não garante a fala exata de todos os leitores de tela.'],
+    example: 'um controle com desenho de lupa tem o nome acessível “Buscar”, permitindo reconhecer sua função sem enxergar o desenho.'
   }
 };
 
