@@ -112,7 +112,7 @@ test('deletion tombstone rejects foreign identity, private fields and inconsiste
   };
   for (const patch of [
     { auditId: 'foreign-audit' }, { url: 'https://example.test/?token=PRIVATE' },
-    { reason: 'manual' }, { phase: 'complete' }, { attempts: -1 },
+    { reason: 'post-export' }, { phase: 'complete' }, { attempts: -1 },
     { attempts: 1 }, { lastAttemptAt: '2026-08-31T00:00:01.000Z' },
     { attempts: 1, lastAttemptAt: '2026-08-30T23:59:59.999Z' },
     { requestedAt: 'not-a-date' },
@@ -123,4 +123,18 @@ test('deletion tombstone rejects foreign identity, private fields and inconsiste
   Object.defineProperty(accessor, 'auditId', { enumerable: true, get() { reads += 1; return 'expired-audit'; } });
   assert.throws(() => retention.validateDeletionTombstoneV1(accessor), { code: 'AUDIT_DELETION_DENIED' });
   assert.equal(reads, 0);
+});
+
+test('manual tombstones preserve their reason through durable retry validation', () => {
+  const record = retention.createDeletionTombstoneV1({ auditId: 'manual-audit',
+    requestedAt: '2026-09-05T14:00:00.000Z', reason: 'manual' });
+  assert.equal(record.reason, 'manual');
+  const retried = retention.validateDeletionTombstoneV1({ ...record, attempts: 1,
+    lastAttemptAt: '2026-09-05T14:00:01.000Z' }, 'manual-audit');
+  assert.equal(retried.reason, 'manual');
+  assert.equal(retried.attempts, 1);
+  assert.throws(() => retention.createDeletionTombstoneV1({ auditId: 'manual-audit',
+    requestedAt: record.requestedAt, reason: 'post-export' }), { code: 'AUDIT_DELETION_DENIED' });
+  assert.throws(() => retention.createDeletionTombstoneV1({ auditId: 'manual-audit',
+    requestedAt: record.requestedAt, reason: undefined }), { code: 'AUDIT_DELETION_DENIED' });
 });

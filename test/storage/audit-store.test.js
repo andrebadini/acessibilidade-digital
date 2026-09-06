@@ -720,6 +720,76 @@ test('expiration selection captures closed arguments before effects and never sa
   await assert.rejects(unavailable.stageExpiredAuditDeletionsV1({ now: T30, limit: 1 }), { code: 'AUDIT_STORAGE_UNAVAILABLE' });
 });
 
+test('manual staging before expiry requires the current revision and preserves foreign records', async t => {
+  for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
+    const store = context.open(); const auditId = 'manual-current';
+    const terminal = await terminalFixture(auditId);
+    await store.commitAuditWithCheckpointIfAbsent(auditId, terminal.model, terminal.checkpoint, terminal.latest,
+      { now: T0, deleteAfterCompleteExport: false });
+    await store.commitAudit('manual-foreign', auditFixture('manual-foreign'), { auditId: 'manual-foreign' }, { now: T0 });
+    const snapshot = await store.getAuditSnapshot(auditId);
+    const request = { auditId, reason: 'manual', now: T29, expectedRevision: snapshot.revision,
+      terminalReceipt: null };
+    const before = context.auditEntries();
+    assert.deepEqual(await store.stageAuditDeletionV1({ ...request, expectedRevision: snapshot.revision + 1 }),
+      { status: 'denied', code: 'AUDIT_DELETION_DENIED' });
+    assert.deepEqual(context.auditEntries(), before);
+    assert.deepEqual(await store.listDeletionTombstonesV1({ limit: 25 }), []);
+    assert.equal((await store.getAuditRetention(auditId)).expiresAt, T30);
+    const result = await store.stageAuditDeletionV1(request);
+    assert.equal(result.status, 'staged');
+    assert.equal(result.tombstone.reason, 'manual');
+    const reopened = context.open();
+    assert.equal(await reopened.getAudit(auditId), undefined);
+    assert.equal(context.auditEntries().some(([key]) => key === `__audit_checkpoint__:${auditId}`), false);
+    assert.equal(await reopened.getAuditRetention(auditId), undefined);
+    assert.equal((await reopened.getLatest()).auditId, 'manual-foreign');
+    assert.ok(await reopened.getAudit('manual-foreign'));
+    assert.equal((await reopened.listDeletionTombstonesV1({ limit: 25 }))[0].reason, 'manual');
+  });
+});
+
+test('manual staging preserves active export leases and unresolved delivery journals', async t => {
+  for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
+    const store = context.open(); const auditId = 'manual-export';
+    await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0 });
+    const snapshot = await store.getAuditSnapshot(auditId);
+    const lease = await store.acquireExportLease(auditId, snapshot.capability, { ownerId: 'manual-owner', now: T29 });
+    const request = { auditId, reason: 'manual', now: T29, expectedRevision: snapshot.revision, terminalReceipt: null };
+    assert.deepEqual(await store.stageAuditDeletionV1(request), { status: 'denied', code: 'AUDIT_DELETION_DENIED' });
+    await store.claimExportLease(auditId, snapshot.capability, { ownerId: 'manual-owner', exportAttempt: lease.exportAttempt, now: T29 });
+    await store.beginExportDelivery(auditId, snapshot.capability, { ownerId: 'manual-owner', exportAttempt: lease.exportAttempt, now: T29 });
+    await store.recordExportDelivery(auditId, snapshot.capability, { ownerId: 'manual-owner',
+      exportAttempt: lease.exportAttempt, now: T29, format: 'html', filename: 'audit.html', state: 'starting' });
+    assert.equal((await store.getExportLeaseState(auditId, { now: T30 })).active, false);
+    const before = context.auditEntries();
+    assert.deepEqual(await store.stageAuditDeletionV1({ ...request, now: T30 }),
+      { status: 'denied', code: 'AUDIT_DELETION_DENIED' });
+    assert.deepEqual(context.auditEntries(), before);
+    assert.equal((await store.getExportDeliveryJournal(auditId)).length, 1);
+    assert.deepEqual(await store.listDeletionTombstonesV1({ limit: 25 }), []);
+    assert.equal((await store.stageAuditDeletionV1(deletionRequest(auditId))).status, 'staged');
+  });
+});
+
+test('manual staging rolls back all deletions when the tombstone write fails', async () => {
+  let observedDeletes = false;
+  const fake = createFakeIndexedDb({ rollbackWrites: true,
+    failWriteRequest: ({ storeName, operation }) => {
+      if (storeName !== 'audit-deletion-tombstones' || operation !== 'put') return false;
+      observedDeletes = !fake.inspectStore('audits').has('manual-atomic'); return true;
+    } });
+  const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+  await store.commitAudit('manual-atomic', auditFixture('manual-atomic'), { auditId: 'manual-atomic' }, { now: T0 });
+  const snapshot = await store.getAuditSnapshot('manual-atomic');
+  const names = ['audits', 'audit-retention', 'audit-deletion-tombstones'];
+  const before = names.map(name => fake.inspectStore(name));
+  await assert.rejects(store.stageAuditDeletionV1({ auditId: 'manual-atomic', reason: 'manual',
+    now: T29, expectedRevision: snapshot.revision, terminalReceipt: null }), { code: 'AUDIT_STORAGE_UNAVAILABLE' });
+  assert.equal(observedDeletes, true);
+  assert.deepEqual(names.map(name => fake.inspectStore(name)), before);
+});
+
 test('deletion staging removes the expired durable graph despite an active export lease and survives reopening', async t => {
   for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
     const store = context.open();

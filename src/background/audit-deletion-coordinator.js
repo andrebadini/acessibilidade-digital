@@ -145,13 +145,23 @@ export function createAuditDeletionCoordinatorV1(raw) {
     try {
       request = exact(value, REQUEST_KEYS);
       canonicalAuditId(request.auditId);
-      requireConfirmation(request.reason === 'retention-expired' && request.expectedRevision === null &&
-        request.terminalReceipt === null && request.manualAuthorization === null);
+      requireConfirmation(request.terminalReceipt === null);
+      if (request.reason === 'manual') {
+        requireConfirmation(Number.isSafeInteger(request.expectedRevision) && request.expectedRevision > 0);
+        const proof = exact(request.manualAuthorization, ['version', 'scope', 'auditId', 'authorizedAt']);
+        requireConfirmation(proof.version === 1 &&
+          (proof.scope === 'one' && proof.auditId === request.auditId || proof.scope === 'all' && proof.auditId === null));
+        canonicalRetentionInstant(proof.authorizedAt);
+        request.manualAuthorization = Object.freeze(proof);
+      } else {
+        requireConfirmation(request.reason === 'retention-expired' && request.expectedRevision === null &&
+          request.manualAuthorization === null);
+      }
     } catch { return DENIED; }
     return withAudit(request.auditId, async () => {
       const at = canonicalRetentionInstant(now()).iso;
       const result = await calls.store.stageAuditDeletionV1({ auditId: request.auditId, reason: request.reason, now: at,
-        expectedRevision: null, terminalReceipt: null });
+        expectedRevision: request.expectedRevision, terminalReceipt: null });
       if (own(result, 'status') === 'denied') {
         const denied = exact(result, ['status', 'code']);
         requireConfirmation(denied.code === DENIED.code);

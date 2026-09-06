@@ -69,7 +69,7 @@ function fixture() {
       if (tombstones.has(input.auditId)) return { status: 'staged', tombstone: copy(tombstones.get(input.auditId)) };
       if (!models.has(input.auditId)) return copy(DENIED);
       models.delete(input.auditId);
-      const record = { ...tombstone(input.auditId), requestedAt: input.now };
+      const record = { ...tombstone(input.auditId), requestedAt: input.now, reason: input.reason };
       tombstones.set(input.auditId, record);
       return { status: 'staged', tombstone: copy(record) };
     }),
@@ -110,6 +110,55 @@ function sessionArea() {
     async remove(key) { for (const item of Array.isArray(key) ? key : [key]) delete values[item]; },
   };
 }
+
+const manualRequest = (scope = 'one') => ({ auditId: AUDIT, reason: 'manual', expectedRevision: 3,
+  terminalReceipt: null, manualAuthorization: { version: 1, scope,
+    auditId: scope === 'one' ? AUDIT : null, authorizedAt: NOW } });
+
+test('R3-F1 manual one and all authority stage the current revision before cleanup', async t => {
+  for (const scope of ['one', 'all']) await t.test(scope, async () => {
+    const env = fixture();
+    assert.deepEqual(await env.create().request(manualRequest(scope)), { status: 'complete', auditId: AUDIT });
+    assert.deepEqual(env.calls[1], ['stage', { auditId: AUDIT, reason: 'manual', now: NOW,
+      expectedRevision: 3, terminalReceipt: null }]);
+    assert.equal(env.models.has(AUDIT), false);
+    assert.equal(env.models.has(FOREIGN), true);
+    assert.deepEqual([...env.resources.get(FOREIGN)], CLEANERS);
+  });
+});
+
+test('R3-F1 invalid manual proofs cannot stage or clean any audit', async () => {
+  const base = manualRequest();
+  const invalid = [
+    { ...base, expectedRevision: null }, { ...base, expectedRevision: 0 },
+    { ...base, terminalReceipt: {} }, { ...base, manualAuthorization: null },
+    ...[{ auditId: FOREIGN }, { scope: 'all' }, { scope: 'unknown' }, { version: 2 },
+      { authorizedAt: 'not-a-date' }, { extra: true }].map(patch => ({ ...base,
+      manualAuthorization: { ...base.manualAuthorization, ...patch } })),
+  ];
+  let accessed = 0;
+  invalid.push({ ...base, manualAuthorization: { ...base.manualAuthorization,
+    get auditId() { accessed++; return AUDIT; } } });
+  for (const input of invalid) {
+    const env = fixture();
+    assert.deepEqual(await env.create().request(input), DENIED);
+    assert.deepEqual(env.calls, []);
+  }
+  assert.equal(accessed, 0);
+});
+
+test('R3-F1 manual cleanup failure preserves a recoverable manual tombstone', async () => {
+  const env = fixture(); env.handlers.blob = () => { throw new Error(SECRET); };
+  const coordinator = env.create();
+  assert.deepEqual(await coordinator.request(manualRequest()), { status: 'pending', auditId: AUDIT });
+  assert.equal(env.models.has(AUDIT), false);
+  assert.equal(env.tombstones.get(AUDIT).reason, 'manual');
+  assert.equal(env.tombstones.get(AUDIT).attempts, 1);
+  delete env.handlers.blob;
+  await coordinator.resumePending({ limit: 25 });
+  assert.equal(env.tombstones.has(AUDIT), false);
+  assert.equal(env.models.has(FOREIGN), true);
+});
 async function pixelFixture(state = 'paused', auditId = AUDIT) {
   const area = sessionArea();
   const pixel = createPixelCaptureStateV1({ sessionArea: area, now: () => EPOCH,

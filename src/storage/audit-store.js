@@ -364,8 +364,12 @@ function exactDataRecord(value, keys) {
 function deletionRequestV1(value) {
   try {
     const record = exactDataRecord(value, ['auditId', 'reason', 'now', 'expectedRevision', 'terminalReceipt']);
-    if (!record || record.reason !== 'retention-expired' || record.expectedRevision !== null || record.terminalReceipt !== null) return null;
-    return { auditId: canonicalAuditId(record.auditId), now: canonicalRetentionInstant(record.now).iso };
+    if (!record || record.terminalReceipt !== null) return null;
+    if (record.reason === 'manual') {
+      if (!Number.isSafeInteger(record.expectedRevision) || record.expectedRevision < 1) return null;
+    } else if (record.reason !== 'retention-expired' || record.expectedRevision !== null) return null;
+    return { auditId: canonicalAuditId(record.auditId), now: canonicalRetentionInstant(record.now).iso,
+      reason: record.reason, expectedRevision: record.expectedRevision };
   } catch { return null; }
 }
 
@@ -1636,9 +1640,14 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       const { auditId, now } = request;
       if (deletions.has(auditId)) return stagedDeletion(deletions.get(auditId), auditId);
       if (initial.get(auditId) === undefined) return deniedDeletion();
-      const metadata = retention.get(auditId);
-      if (metadata === undefined || validateRetentionMetadata(metadata, auditId).expiresAt > now) return deniedDeletion();
-      const tombstone = createDeletionTombstoneV1({ auditId, requestedAt: now });
+      if (request.reason === 'manual') {
+        if (storedRevision(initial.get(revisionKey(auditId))) !== request.expectedRevision ||
+          hasDeliveryWork(auditId, canonicalRetentionInstant(now).milliseconds)) return deniedDeletion();
+      } else {
+        const metadata = retention.get(auditId);
+        if (metadata === undefined || validateRetentionMetadata(metadata, auditId).expiresAt > now) return deniedDeletion();
+      }
+      const tombstone = createDeletionTombstoneV1({ auditId, requestedAt: now, reason: request.reason });
       deleteStoredAudit(auditId);
       deletions.set(auditId, tombstone);
       return stagedDeletion(tombstone, auditId);
@@ -1979,11 +1988,8 @@ export function createAuditStore(options = {}) {
         if (existing !== undefined) { context.setResult(stagedDeletion(existing, auditId)); return; }
         context.read(audits.get(auditId), model => {
           if (model === undefined) { context.setResult(deniedDeletion()); return; }
-          context.read(retention.get(auditId), metadata => {
-            if (metadata === undefined || validateRetentionMetadata(metadata, auditId).expiresAt > now) {
-              context.setResult(deniedDeletion()); return;
-            }
-            const tombstone = createDeletionTombstoneV1({ auditId, requestedAt: now });
+          const stage = () => {
+            const tombstone = createDeletionTombstoneV1({ auditId, requestedAt: now, reason: request.reason });
             context.read(audits.get(LATEST_KEY), latest => {
               for (const key of [auditId, revisionKey(auditId), checkpointKey(auditId), pixelAttemptKey(auditId),
                 exportLeaseKey(auditId), exportAttemptKey(auditId), exportDeliveryKey(auditId)]) context.watch(audits.delete(key));
@@ -1992,6 +1998,28 @@ export function createAuditStore(options = {}) {
               context.watch(deletions.put(tombstone));
               context.setResult(stagedDeletion(tombstone, auditId));
             });
+          };
+          if (request.reason === 'manual') {
+            context.read(audits.get(revisionKey(auditId)), value => {
+              const revision = storedRevision(value);
+              if (revision !== request.expectedRevision) { context.setResult(deniedDeletion()); return; }
+              context.read(audits.get(exportLeaseKey(auditId)), lease => {
+                if (activeExportLease(lease, auditId, revision, canonicalRetentionInstant(now).milliseconds)) {
+                  context.setResult(deniedDeletion()); return;
+                }
+                context.read(audits.get(exportDeliveryKey(auditId)), delivery => {
+                  if (canonicalDeliveryJournal(delivery, auditId).length > 0) {
+                    context.setResult(deniedDeletion()); return;
+                  }
+                  stage();
+                });
+              });
+            });
+          } else context.read(retention.get(auditId), metadata => {
+            if (metadata === undefined || validateRetentionMetadata(metadata, auditId).expiresAt > now) {
+              context.setResult(deniedDeletion()); return;
+            }
+            stage();
           });
         });
       });

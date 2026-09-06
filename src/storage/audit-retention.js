@@ -42,9 +42,13 @@ function deletionDataRecord(value, keys) {
 }
 
 export function createDeletionTombstoneV1(value) {
-  const { auditId, requestedAt } = deletionDataRecord(value, ['auditId', 'requestedAt']);
+  let record;
+  try { record = deletionDataRecord(value, ['auditId', 'requestedAt']); }
+  catch { record = deletionDataRecord(value, ['auditId', 'requestedAt', 'reason']); }
+  const { auditId, requestedAt } = record;
+  const reason = Object.hasOwn(record, 'reason') ? record.reason : 'retention-expired';
   return validateDeletionTombstoneV1({
-    version: 1, auditId, reason: 'retention-expired', requestedAt,
+    version: 1, auditId, reason, requestedAt,
     phase: 'transient-cleanup-pending', attempts: 0, lastAttemptAt: null,
   });
 }
@@ -57,7 +61,7 @@ export function validateDeletionTombstoneV1(value, expectedAuditId) {
     canonicalAuditId(record.auditId);
     if (expectedAuditId !== undefined && record.auditId !== canonicalAuditId(expectedAuditId)) throw new TypeError();
     const requested = canonicalRetentionInstant(record.requestedAt);
-    if (record.version !== 1 || record.reason !== 'retention-expired' ||
+    if (record.version !== 1 || !['retention-expired', 'manual'].includes(record.reason) ||
       record.phase !== 'transient-cleanup-pending' || !Number.isSafeInteger(record.attempts) || record.attempts < 0) throw new TypeError();
     if (record.attempts === 0) {
       if (record.lastAttemptAt !== null) throw new TypeError();
