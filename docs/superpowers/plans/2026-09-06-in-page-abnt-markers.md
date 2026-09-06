@@ -54,3 +54,18 @@ Cache síncrono privado, sem storage, URL bruta, DOM ou logs. Registro exact7; T
 O worker registra exclusivamente a origem já provada em prepareAttachedCopyPlan, após validar troca, vault e EvidenceUrl; nenhuma nova espera foi introduzida. Recusa/erro do cache não bloqueia a auditoria. Testes comprovam original17/document-a diferente de cópia27/copy-document, falhas de preparação sem registro e modelo/relatório preservados.
 
 RED: cache11 testes sem factory; wiring8 falhas. GREEN: cache11/11; worker14 focados/regressões pelo implementador, revalidação main11 e revisão independente12 selecionados. Diff-check limpo. Cache revisado A, wiring revisado main e manual_export_deletion_contract: C0/I0 no recorte. Não confundir este checkpoint com instalação de sinais: projeção, resolução, sessão/lifecycle e UI ainda precisam de integração e E2E.
+
+### Contratos preservados para W2/W3
+
+- A projeção W1 contém **candidatos**, não prova de resolução na página original. O contador interno `locatedOccurrences` não pode ser apresentado como localização confirmada antes da resposta do runtime. A integração deve traduzir para candidatos/elegíveis até então.
+- A primeira resolução aceita identificador estável e tag corroborados pelo snippet sanitizado. Localizadores posicionais sem correspondência suficiente, contexto inacessível, evidência conflitante e elemento ausente devem ficar em lista explícita de não localizados. Não ignorar essas ocorrências nem reduzir os totais.
+- A página original continua sendo documento diferente da cópia. O texto deve dizer “elemento correspondente na página atual” e “resultado registrado na auditoria”; não presumir que a barreira ainda existe se o conteúdo mudou. Conferir também a URL final sanitizada do modelo e a origem atual, pois a cópia pode ter redirecionado.
+- Payload destinado à página só contém números, contagens, classes e IDs locais de seleção. Correlação, hash, URL, snippet e IDs de ocorrência permanecem no worker. Seletores necessários à resolução ficam no mundo isolado, nunca em atributos/texto/logs.
+- Instalar somente ocorrências selecionáveis no painel (hoje até64), com contagem de omissões e acesso ao relatório completo. Não criar ícone cujo clique não abre o detalhe correspondente. Expansores e filtros ABNT permanecem o eixo; WCAG é referência complementar.
+- Ao ligar o controller, acrescentar limpeza dos novos sinais e da origem nos eventos de exclusão, refazer, navegação, expiração e encerramento de sessão. Sem essa integração e prova A→B, W1 não deve ser anunciado como função utilizável nem incluído retroativamente no ZIP1.1.0.
+
+### Checkpoint W1 — projeção privada (implementado)
+
+Modelo verificado + revisão/hash + página → candidatos agrupados por nó/página e sinais independentes por ocorrência/check/item. Classificação individual preserva decisões humanas sem copiar o pior resultado de um card para todos os elementos. Envelope público só usa IDs locais/enums/contagens; correlação/locators ficam privados, sem reter snippet. Resultados gerais e não localizados são separados.
+
+RED inicial8; GREEN10. Revisão A encontrou conflito de framePath abortando toda a projeção de modelo válido; RED reproduzido e correção mínima isolou exclusivamente TypeError/RESULT_CONTEXT_DENIED por ocorrência. GREEN11/11, revisor A validou C0/I0; main cache+projeção22/22. Uma rodada de correção, sem reabrir motor/captura/modelo. W2 é o próximo recorte; ainda não há sinais clicáveis no runtime.
