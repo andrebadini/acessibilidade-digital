@@ -8,6 +8,8 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Próximas entregas funcionais
 
+- apresentar também no HTML/PDF um histórico legível das decisões humanas, com pessoa avaliadora, data e nota. A beta 1.1.3 exporta esses dados no JSON e atualiza a classificação, mas a extração do PDF nativo não encontrou a nota/nome da decisão. Não confundir integridade do modelo exportado com presença desses campos em todas as apresentações.
+
 - conferência com múltiplos sinais clicáveis na página original: implementada e aprovada no gate nativo da beta1.1.1, com limite transparente de64ocorrências interativas e associação por identificador estável corroborado. Ampliar a localização segura de elementos sem ID em atualização incremental; a beta1.1.0 não contém os sinais. Plano `docs/superpowers/plans/2026-09-06-in-page-abnt-markers.md`.
 
 - mapa numerado consolidado incluído no candidato 1.0.8 e validado por E2E público; o pacote 1.0.7 permanece sem esse recurso;

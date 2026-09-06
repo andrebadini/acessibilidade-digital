@@ -626,7 +626,7 @@ test('a review immediately after reservation revokes delivery before the first p
   const stored = await store.getAudit(SAMPLE_AUDIT.auditId);
   assert.equal(stored.reviewDecisions.length, 1);
   assert.equal(stored.report?.artifact?.status, 'pending');
-  assert.equal(stored.integrity.canonicalModelHash, 'pending');
+  assert.deepEqual(await verifyAuditIntegritySnapshot(stored), stored);
   assert.equal((await store.getLatest()).exportStatus, 'preparing');
 });
 
