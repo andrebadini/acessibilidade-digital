@@ -242,7 +242,11 @@ for (const scenario of [
       assert.ok(selection.normative.includes(`ABNT NBR 17225: ${expected.abnt}`));
       assert.match(selection.announcement, /Anúncio esperado:/u);
       assert.equal(await extension.evaluate(extension.startPage.page, 'globalThis.__markerControlClicks'), 0);
-      assert.equal((await extension.evaluate(extension.startPage.page, markerSurface)).rings, 1);
+      // Panel selection and the page's validated select command arrive through
+      // separate asynchronous channels. Require the exact ring, not a same-tick snapshot.
+      await extension.waitForValue(extension.startPage.page, markerSurface,
+        value => value.rings === 1 && value.selectedNumbers[0] === number,
+        { timeoutMs: 10_000, intervalMs: 50 });
       return expected;
     });
     await step('PANEL_TO_PAGE_AND_KEYBOARD', async () => {
