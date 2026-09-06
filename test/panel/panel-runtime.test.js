@@ -909,6 +909,61 @@ test('a duplicate idle bootstrap during URL PREPARE preserves the submitted form
   assert.ok(document.root.querySelector('[data-screen="running"]'));
 });
 
+for (const rehydrateCode of ['PERSONA_NOT_FOUND', 'CAPABILITY_UNAVAILABLE']) {
+test(`persona bootstrap marks controls busy until ${rehydrateCode} without blocking audit entry`, async t => {
+  const keys = ['document', 'chrome', 'location'];
+  const originals = new Map(keys.map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  t.after(() => { for (const [key, descriptor] of originals) {
+    if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key];
+  } });
+  const document = { activeElement: null,
+    createElement(tag) { return new RuntimeElement(tag, document); },
+    querySelector(selector) { return selector === '#panel-root' ? document.root : null; } };
+  document.root = new RuntimeElement('main', document);
+  const port = { name: 'audita-panel-v1', posted: [], onMessage: runtimeEvent(), onDisconnect: runtimeEvent(),
+    postMessage(packet) { this.posted.push(structuredClone(packet)); }, disconnect() {} };
+  globalThis.document = document;
+  globalThis.chrome = { runtime: { id: 'abcdefghijklmnopabcdefghijklmnop', connect: () => port } };
+  globalThis.location = { href: `chrome-extension://${chrome.runtime.id}/src/panel/index.html?launch=${'A'.repeat(43)}` };
+  await import(`../../src/panel/panel.js?persona-bootstrap-busy=${Date.now()}`);
+  port.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null });
+  const prepare = port.posted.find(packet => packet.envelope?.type === 'PREPARE_PANEL_PERSONA_CAPABILITY');
+  assert.ok(prepare);
+  const reader = document.root.querySelector('button[data-persona-mode="reader"]');
+  assert.equal(reader.getAttribute('aria-disabled'), 'true');
+  assert.equal(reader.disabled, true);
+  assert.match(document.root.querySelector('[data-persona-message]').textContent, /Preparando as simulações/u);
+  await reader.dispatch('click');
+  assert.equal(port.posted.some(packet => packet.envelope?.type === 'PANEL_START_PERSONA'), false);
+  await document.root.querySelector('button[data-intent="OPEN_URL_FORM"]').dispatch('click');
+  const url = document.root.querySelector('input[id="audit-url"]');
+  assert.ok(url, 'audit entry must remain usable while only personas are synchronizing');
+  assert.equal(document.root.querySelector('button[data-persona-mode="reader"]').disabled, true);
+  const answer = (packet, response) => port.onMessage.emit({ protocol: 'audita-panel', version: 1,
+    type: 'intent-result', requestId: packet.requestId, response });
+  answer(prepare, { ok: true, requestId: prepare.envelope.requestId, capabilityId: 'P'.repeat(22) });
+  await new Promise(resolve => setImmediate(resolve));
+  const rehydrate = port.posted.find(packet => packet.envelope?.type === 'PANEL_REHYDRATE_PERSONA');
+  assert.ok(rehydrate);
+  answer(rehydrate, { ok: false, code: rehydrateCode });
+  await new Promise(resolve => setImmediate(resolve));
+  const ready = document.root.querySelector('button[data-persona-mode="reader"]');
+  assert.equal(ready.disabled, false);
+  assert.notEqual(ready.getAttribute('aria-disabled'), 'true');
+  assert.doesNotMatch(document.root.querySelector('[data-persona-message]').textContent, /Preparando/u);
+  await ready.dispatch('click');
+  const nextPrepare = port.posted.filter(packet => packet.envelope?.type === 'PREPARE_PANEL_PERSONA_CAPABILITY').at(-1);
+  assert.notEqual(nextPrepare.requestId, prepare.requestId);
+  answer(nextPrepare, { ok: true, requestId: nextPrepare.envelope.requestId, capabilityId: 'Q'.repeat(22) });
+  await new Promise(resolve => setImmediate(resolve));
+  const start = port.posted.find(packet => packet.envelope?.type === 'PANEL_START_PERSONA');
+  assert.equal(start?.envelope.mode, 'reader', 'a click on a ready control must reach the worker');
+  answer(start, { ok: false, code: 'PERSONA_NOT_FOUND' });
+  await new Promise(resolve => setImmediate(resolve));
+});
+}
+
 test('benign persona synchronization during URL PREPARE does not discard the submitted start', async t => {
   const originalDocument = globalThis.document;
   const originalChrome = globalThis.chrome;

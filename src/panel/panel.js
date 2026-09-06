@@ -45,6 +45,8 @@ let requestSequence = 0;
 let navigationEntryRevision = 0n;
 let batchEntryDraft = '';
 let personaBootstrapSynchronized = false;
+let personaBootstrapSynchronizing = false;
+const personaSynchronizationButtons = new WeakMap();
 let hasReceivedBootstrap = false;
 let reportLaunchFeedback = null;
 let pendingReportLaunch = null;
@@ -312,6 +314,7 @@ function render(focusId = state.focusId) {
   const view = buildPanelView({ state, summary, detail, details: resultBundle?.details ?? [], markers: pageMarkers.read() });
   const screen = renderPanelView({ view, document, onIntent: handleIntent, onEvent: handleEvent });
   root.replaceChildren(screen);
+  applyPersonaSynchronizationState();
   applyReportLaunchFeedback();
   if (state.screen === 'initial' && state.entryMode === 'batch' && typeof batchEntryDraft === 'string') {
     const textarea = root.querySelector?.('textarea[id="audit-urls"]');
@@ -969,7 +972,35 @@ function validBatchProgressMessage(value, pageNumber, total) {
 function synchronizePersonaOnBootstrap() {
   if (personaBootstrapSynchronized) return;
   personaBootstrapSynchronized = true;
-  void personaSession.synchronize();
+  personaBootstrapSynchronizing = true;
+  applyPersonaSynchronizationState();
+  void personaSession.synchronize().finally(() => {
+    personaBootstrapSynchronizing = false;
+    applyPersonaSynchronizationState();
+  });
+}
+
+function applyPersonaSynchronizationState() {
+  const controls = root?.querySelector('[data-persona-controls]');
+  if (!controls) return;
+  controls.setAttribute('aria-busy', String(personaBootstrapSynchronizing));
+  for (const button of controls.querySelectorAll('button[data-intent]')) {
+    if (personaBootstrapSynchronizing) {
+      if (!personaSynchronizationButtons.has(button)) personaSynchronizationButtons.set(button, {
+        disabled: button.disabled, ariaDisabled: button.getAttribute('aria-disabled'),
+      });
+      button.disabled = true;
+      button.setAttribute('aria-disabled', 'true');
+    } else if (personaSynchronizationButtons.has(button)) {
+      const prior = personaSynchronizationButtons.get(button);
+      button.disabled = prior.disabled;
+      button.setAttribute('aria-disabled', prior.ariaDisabled ?? 'false');
+      personaSynchronizationButtons.delete(button);
+    }
+  }
+  const message = controls.querySelector('[data-persona-message]');
+  if (message) message.textContent = personaBootstrapSynchronizing
+    ? 'Preparando as simulações… Aguarde um instante.' : state.persona.message;
 }
 
 function currentInteraction(fallbackFocusId) {

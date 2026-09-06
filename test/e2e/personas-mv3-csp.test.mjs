@@ -118,10 +118,27 @@ test('runs reversible personas against the exact real MV3 document under strict 
   assert.doesNotMatch(await extension.evaluate(panel, 'document.body.innerText'), new RegExp(sentinel, 'u'));
   assert.deepEqual(await pagePersonaState(extension, extension.startPage.page), { classes: [], artifacts: 0 });
 
-  await extension.click(panel, 'button[data-persona-mode="reader"][data-intent="PERSONA_SELECT"]');
   await extension.waitForValue(panel,
-    `document.querySelector('button[data-persona-mode="reader"]')?.getAttribute('aria-pressed')`,
-    value => value === 'true');
+    `document.querySelector('button[data-persona-mode="reader"]')?.disabled === false &&
+      document.querySelector('button[data-persona-mode="reader"]')?.getAttribute('aria-disabled') !== 'true'`, Boolean);
+  await extension.click(panel, 'button[data-persona-mode="reader"][data-intent="PERSONA_SELECT"]');
+  try {
+    await extension.waitForValue(panel,
+      `document.querySelector('button[data-persona-mode="reader"]')?.getAttribute('aria-pressed')`,
+      value => value === 'true');
+  } catch (cause) {
+    const state = await extension.evaluate(panel, `(() => ({
+      screen: document.querySelector('[data-screen]')?.dataset.screen ?? null,
+      selected: document.querySelector('button[data-persona-mode="reader"]')?.getAttribute('aria-pressed') ?? null,
+      disabled: document.querySelector('button[data-persona-mode="reader"]')?.disabled ?? null,
+      message: document.querySelector('.persona-message')?.textContent ?? null
+    }))()`);
+    // Fixture-only diagnostic: never print unexpected page or private content.
+    state.message = typeof state.message === 'string' &&
+      !/SEGREDO|https?:|consent|capability|digest/iu.test(state.message) ? state.message : '[omitido]';
+    t.diagnostic(`PERSONA_READER_SELECTION_TIMEOUT:${JSON.stringify(state)}`);
+    throw cause;
+  }
   let readerVisual = null;
   try {
     readerVisual = await extension.waitForValue(extension.startPage.page, `(() => ({
@@ -296,6 +313,9 @@ test('runs reversible personas against the exact real MV3 document under strict 
   assert.equal(await extension.evaluate(extension.startPage.page,
     `document.documentElement.classList.contains('audita-persona-reader')`), true,
   'fechar o painel não pode abandonar uma persona invisível ao usuário');
+  await extension.waitForValue(reconnectedPanel,
+    `document.querySelector('button[data-intent="PERSONA_END"]')?.disabled === false &&
+      document.querySelector('button[data-intent="PERSONA_END"]')?.getAttribute('aria-disabled') !== 'true'`, Boolean);
   await extension.click(reconnectedPanel, 'button[data-intent="PERSONA_END"]');
   await extension.waitForValue(extension.startPage.page, `(() => ({
     active: [...document.documentElement.classList].some(name => name.startsWith('audita-persona-')),

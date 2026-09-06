@@ -2,6 +2,8 @@
 
 Esta versão coloca, lado a lado no texto da ficha ABNT 5.13.7, o **texto visível registrado** e o **nome acessível registrado**. Assim, é possível comparar o que aparece no controle com o nome fornecido às tecnologias assistivas, sem procurar esses valores no código. Dado indisponível não é tratado como texto vazio. A apresentação não modifica a conclusão da auditoria.
 
+Ao abrir o painel, as simulações podem mostrar **Preparando as simulações…** por um instante. Seus botões ficam disponíveis quando a verificação inicial termina, evitando que o primeiro clique seja ignorado. O formulário de auditoria continua disponível durante essa preparação.
+
 ## Atualizar mantendo suas auditorias
 
 1. Preserve os relatórios já baixados e feche o painel da extensão.
