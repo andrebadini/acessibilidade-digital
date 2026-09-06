@@ -133,6 +133,43 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   const technical = JSON.parse(jsonBytes.replace(/^\uFEFF/u, ''));
   const audit = technical.audit;
 
+  const rasters = audit.evidence.filter(artifact =>
+    ['full-page', 'element'].includes(artifact.kind) && typeof artifact.dataUrl === 'string');
+  assert.ok(rasters.some(artifact => artifact.kind === 'full-page'));
+  assert.ok(rasters.some(artifact => artifact.kind === 'element'));
+  const liveCards = await extension.evaluate(report,
+    `[...document.querySelectorAll('[data-report-annex] [data-report-evidence]')].map(card=>({id:card.dataset.reportEvidence,text:card.textContent}))`);
+  for (const artifact of rasters) {
+    const receivedAt = artifact.metadata?.captureReceivedAt;
+    assert.equal(typeof receivedAt, 'string', 'each retained raster must carry its actual receipt time');
+    assert.equal(new Date(receivedAt).toISOString(), receivedAt);
+    const page = audit.pages.find(candidate => candidate.pageId === artifact.pageId);
+    assert.ok(page && receivedAt >= page.timestamps.startedAt && receivedAt <= page.timestamps.endedAt,
+      'receipt must fall inside its own observed page period in this real-clock fixture');
+    assert.ok(html.includes(receivedAt));
+    const card = liveCards.find(candidate => candidate.id === artifact.evidenceId);
+    assert.ok(card?.text.includes(receivedAt), 'each live card must show its own recorded timestamp');
+    assert.match(card.text, /Captura recebida pela extensão \(UTC\).*relógio local; não certificado/u);
+  }
+  assert.match(html, /relógio local; não certificado/u);
+  const storedReceipts = await extension.evaluate(extension.harnessPage, `(async()=>{
+    const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+    const revision=await store.getReportRevision(${JSON.stringify(auditId)});
+    return {auditId:revision.model.auditId,modelHash:revision.modelHash,
+      receipts:revision.model.evidence.filter(artifact=>['full-page','element'].includes(artifact.kind)&&typeof artifact.dataUrl==='string')
+        .map(artifact=>[artifact.evidenceId,artifact.metadata?.captureReceivedAt])};
+  })()`, { awaitPromise: true });
+  assert.equal(storedReceipts.auditId, auditId);
+  assert.equal(storedReceipts.modelHash, technical.exportDeliveryIdentity.modelHash);
+  assert.deepEqual(storedReceipts.receipts, rasters.map(artifact => [artifact.evidenceId, artifact.metadata.captureReceivedAt]));
+  t.diagnostic(`capture-receipts=${rasters.length}; persisted=JSON=live=HTML; local-clock-not-certified`);
+  await extension.evaluate(report, `(() => {
+    document.querySelector('[data-report-annex]').open=true;
+    document.querySelector('[data-report-annex] [data-evidence-kind="full-page"]').scrollIntoView({behavior:'instant',block:'start'});
+    return true;
+  })()`);
+  await extension.captureJourney('capture-receipt-full-page', report, { captureBeyondViewport: false });
+
   assert.equal(technical.schemaVersion, 2);
   assert.equal(technical.assertions.length, 146);
   assert.equal(audit.schemaVersion, 2);
@@ -184,6 +221,7 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   const map = audit.evidence.find(artifact => artifact.kind === 'announcement-map' && artifact.state === 'derived');
   assert.ok(original, 'a captura pristine não chegou ao relatório técnico');
   assert.ok(map, 'o wrapper produtivo não publicou o mapa derivado');
+  assert.equal(Object.hasOwn(map.metadata ?? {}, 'captureReceivedAt'), false, 'a derived map is not a new browser raster');
   assert.equal(map.fullPageEvidenceId, original.evidenceId);
   assert.equal(map.derivation.sourceEvidenceId, original.evidenceId);
   assert.equal(map.derivation.sourceHash, original.hash);

@@ -8,7 +8,9 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Próximas entregas funcionais
 
-- horário individual de recebimento de PNG implementado depois da beta 1.1.4: `metadata.captureReceivedAt`, preservação em modelos/JSON/orçamento e apresentação viva/HTML compartilhada com impressão. Relógio local explicitamente não certificado; datas antigas não são inventadas. Testes locais e duas revisões C=0/I=0; ainda falta a prova nativa antes de incluir no próximo pacote. Registro: `docs/qa/2026-09-06-capture-receipt-time.md`.
+- horário individual de recebimento de PNG implementado depois da beta 1.1.4: `metadata.captureReceivedAt`, preservação em modelos/JSON/orçamento e apresentação viva/HTML compartilhada com impressão. Relógio local explicitamente não certificado; datas antigas não são inventadas. Testes locais e duas revisões C=0/I=0; prova nativa concluída com 12 datas conferidas também no PDF e ausência de datas inventadas em no-pixels. Ainda fora do ZIP 1.1.4. Registros: `docs/qa/2026-09-06-capture-receipt-time.md` e `docs/qa/2026-09-06-capture-receipt-native.md`.
+
+- aprofundar explicações ainda genéricas nas fichas para leigos: QA real do PDF identificou ABNT 5.13.7 com “Revise ‘Texto visível no nome acessível’…” em vez de instrução prática e exemplo. Revisar os fallbacks de `plain-language-guidance.js`, sem alterar resultado normativo nem evidências; cumprir o pedido de guias compreensíveis para revisão humana. Evidência: página 4 do PDF documentado em `docs/qa/2026-09-06-capture-receipt-native.md`.
 
 - histórico legível das decisões humanas entregue na beta 1.1.4: pessoa avaliadora, data UTC, conclusão, nota e evidências correlacionadas. PDF completo real e HTML validados; resumo executivo omite esses detalhes com aviso. A beta 1.1.3 exportava esses campos apenas no JSON. Registros: `docs/qa/2026-09-06-readable-human-history.md` e `docs/qa/2026-09-06-beta114-release.md`.
 

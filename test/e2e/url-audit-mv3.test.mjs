@@ -394,6 +394,13 @@ test(name, { timeout: 300_000 }, async t => {
   const exportProofs = await Promise.all(downloads.map(async row => {
     const bytes = await readFile(join(extension.downloadDirectory, row.filename));
     const text = bytes.toString('utf8');
+    if (row.format === 'json') {
+      const technical = JSON.parse(text.replace(/^\uFEFF/u, ''));
+      assert.ok(technical.audit.evidence.length > 0, 'no-pixels still retains technical evidence');
+      assert.equal(technical.audit.evidence.some(artifact =>
+        Object.hasOwn(artifact.metadata ?? {}, 'captureReceivedAt')), false,
+      'no-pixels must never invent a raster receipt from the page observation period');
+    }
     return {
       format: row.format,
       forbidden: forbiddenExportValues.filter(value => text.includes(value)),

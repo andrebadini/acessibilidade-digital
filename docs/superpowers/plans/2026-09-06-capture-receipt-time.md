@@ -48,3 +48,5 @@
 ## Prova seguinte (fora deste checkpoint)
 
 No próximo gate nativo de entrega: usar duas capturas reais e verificar datas distintas ou individualmente registradas, persistência/JSON/HTML/PDF da mesma revisão, inexistência de carimbo em no-pixels e integridade após retenção por orçamento. Não apresentar coleta real como verificada apenas pelos testes locais deste incremento.
+
+**Checkpoint nativo concluído em 06/09:** cenários completos e sem imagens 1/1 cada; 12 datas reais idênticas no armazenamento, JSON, fichas vivas, HTML e PDF extraído/inspecionado. O orçamento mantém a prova local com componentes reais do checkpoint anterior, sem alegação de omissão por orçamento reproduzida no Chrome nesta rodada. Ver `docs/qa/2026-09-06-capture-receipt-native.md`. Pacote 1.1.4 preservado; sem nova entrega neste checkpoint.
