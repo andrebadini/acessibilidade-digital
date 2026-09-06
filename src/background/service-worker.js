@@ -5,6 +5,7 @@ import {
   createSessionUrlDigestManager,
 } from '../core/privacy/session-url-digest.js';
 import { createRawNavigationVaultV1 } from './raw-navigation-vault.js';
+import { createPageMarkerOriginCache } from './page-marker-origin-cache.js';
 import { createBlobUrlPortBridgeV1 } from './blob-url-port.js';
 import { BLOB_URL_PORT_NAME } from '../export/blob-url-protocol.js';
 import { createBatchProgressStoreV1 } from './batch-progress-store.js';
@@ -1124,6 +1125,10 @@ async function buildDefaultRuntime(chromeApi, options) {
     : createChromeAuditAuthority(chromeApi);
   const sessionArea = chromeApi.storage.session;
   const epochNow = options.epochNow ?? Date.now;
+  let pageMarkerOriginCache = null;
+  try {
+    pageMarkerOriginCache = (options.pageMarkerOriginCacheFactory ?? createPageMarkerOriginCache)({ now: epochNow });
+  } catch { /* Optional presentation provenance must not prevent an audit. */ }
   const modelNow = options.modelNow ?? (() => new Date().toISOString());
   const bytes = options.randomBytes ?? randomBytes;
   const pixelState = (options.pixelCaptureStateFactory ?? createPixelCaptureStateV1)({
@@ -1216,6 +1221,14 @@ async function buildDefaultRuntime(chromeApi, options) {
         !Number.isSafeInteger(issued.expiresAt)) {
         throw new Error('ATTACHED_COPY_PREPARATION_DENIED');
       }
+      try {
+        const registeredAt = epochNow();
+        pageMarkerOriginCache?.register({
+          auditId: input.auditId, tabId: source.tabId, windowId: source.windowId,
+          documentId: source.documentId, urlSessionDigest: source.urlSessionDigest,
+          createdAt: registeredAt, expiresAt: registeredAt + 1_800_000,
+        });
+      } catch { /* Losing optional provenance does not invalidate the prepared copy. */ }
       return freeze({
         kind: 'attached-copy',
         ownershipId,

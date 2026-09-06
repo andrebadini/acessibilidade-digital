@@ -7,6 +7,7 @@ import { REPORT_PORT_NAME } from '../../src/background/report-port.js';
 import { BLOB_URL_PORT_NAME } from '../../src/export/blob-url-protocol.js';
 import { deriveExportLeaseOwner } from '../../src/background/export-launch.js';
 import { createRawNavigationVaultV1 } from '../../src/background/raw-navigation-vault.js';
+import { createPageMarkerOriginCache } from '../../src/background/page-marker-origin-cache.js';
 import { ACTIVE_AUDIT_JOB_KEY } from '../../src/background/authorized-audit-starter.js';
 import {
   HIGHLIGHT_EXPIRY_ALARM_NAME,
@@ -755,6 +756,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
       pixelCommitClockFactory: () => createScriptedPixelCommitClockV1({ epochs: Array(256).fill(1_788_000_000_000) }),
     }),
     ...(fixtureOptions.rawNavigationVaultFactory ? { rawNavigationVaultFactory: fixtureOptions.rawNavigationVaultFactory } : {}),
+    ...(fixtureOptions.pageMarkerOriginCacheFactory ? { pageMarkerOriginCacheFactory: fixtureOptions.pageMarkerOriginCacheFactory } : {}),
     ...(fixtureOptions.runUrlAuditExecution ? { runUrlAuditExecution: fixtureOptions.runUrlAuditExecution } : {}),
     ...(fixtureOptions.batchAuditExecutionFactory
       ? { batchAuditExecutionFactory: fixtureOptions.batchAuditExecutionFactory }
@@ -1804,7 +1806,8 @@ test('current-page full-evidence pauses before raster when the inactive attached
   assert.equal(documentTargets.length > 0, true);
 });
 
-test('default worker snapshots the current page and reauthorizes its removed copy as a view-only report source', async () => {
+test('default worker snapshots the current page and keeps marker origin private without making it audit authority', async t => {
+  for (const mode of ['stored', 'cache-reject', 'cache-throw', 'factory-throw', 'source-failure', 'vault-failure', 'vault-invalid']) await t.test(mode, async () => {
   const rawUrl = 'https://example.test/current?private=NEVER_PUBLIC';
   const auditId = 'audit-default-current-copy';
   const inventory = await createInstalledCoreRuleInventory();
@@ -1831,10 +1834,32 @@ test('default worker snapshots the current page and reauthorizes its removed cop
   const scriptTargets = [];
   const execution = deferred();
   let executionArgs = null;
+  let originCache = null;
+  let cacheFactoryCalls = 0;
+  let registerCalls = 0;
   const env = defaultGraphFixture(null, {
     auditStore,
     enableReportLaunch: true,
     epochNow: () => epoch++,
+    pageMarkerOriginCacheFactory(options) {
+      cacheFactoryCalls++;
+      if (mode === 'factory-throw') throw new Error('PRIVATE_CACHE_FAILURE');
+      originCache = createPageMarkerOriginCache(options);
+      return Object.freeze({ ...originCache, register(record) {
+        registerCalls++;
+        if (mode === 'cache-reject') return false;
+        if (mode === 'cache-throw') throw new Error('PRIVATE_CACHE_FAILURE');
+        return originCache.register(record);
+      } });
+    },
+    rawNavigationVaultFactory(options) {
+      const vault = createRawNavigationVaultV1(options);
+      return Object.freeze({ ...vault, async put(...args) {
+        if (mode === 'vault-failure') throw new Error('PRIVATE_VAULT_FAILURE');
+        const issued = await vault.put(...args);
+        return mode === 'vault-invalid' ? { ...issued, sessionDigest: `hmac-sha256:${'Z'.repeat(43)}` } : issued;
+      } });
+    },
     useDefaultChromeAdapter: true,
     tabsQuery: async () => [{
       id: 17, windowId: 9, active: true, status: 'complete', url: rawUrl,
@@ -1842,6 +1867,9 @@ test('default worker snapshots the current page and reauthorizes its removed cop
     scripting: {
       async executeScript(details) {
         scriptTargets.push(structuredClone(details.target));
+        if (mode === 'source-failure' && env.sessionValues['audita:start-journal:v1']) {
+          throw new Error('PRIVATE_SOURCE_FAILURE');
+        }
         if (details.target?.frameIds?.[0] === 0) {
           return [{ frameId: 0, documentId: 'document-a', result: rawUrl }];
         }
@@ -1880,6 +1908,8 @@ test('default worker snapshots the current page and reauthorizes its removed cop
     id: tabId, windowId: 9, active: true, status: 'complete', discarded: false, url: rawUrl,
   });
   const runtime = await env.registration.startupReady;
+  assert.equal(cacheFactoryCalls, 1, 'the optional cache must be instantiated privately');
+  assert.equal(Object.hasOwn(runtime, 'pageMarkerOriginCache'), false);
   const proof = await runtime.chromeAdapter.probeDocumentIdentity(17);
   const issuer = {
     type: 'extension-document', documentId: 'panel-document', path: '/src/panel/index.html',
@@ -1900,11 +1930,22 @@ test('default worker snapshots the current page and reauthorizes its removed cop
     retentionPreference: { version: 1, deleteAfterCompleteExport: false },
     senderContext,
   });
+  if (['source-failure', 'vault-failure', 'vault-invalid'].includes(mode)) {
+    assert.equal(started.response.ok, false);
+    assert.equal(started.completion, null);
+    assert.equal(registerCalls, 0);
+    assert.equal(originCache.get(auditId), null);
+    assert.equal(executionArgs, null);
+    assert.equal((await auditStore.getAuditSnapshot(auditId)).model, undefined);
+    assert.doesNotMatch(JSON.stringify(started), /PRIVATE_|NEVER_PUBLIC/u);
+    return;
+  }
   assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
   await execution.promise;
   assert.deepEqual(await started.completion, {
     ok: true, auditId, state: 'result', revision: 1,
   });
+  assert.deepEqual((await auditStore.getAuditSnapshot(auditId)).model, model);
   assert.equal(executionArgs.navigationPurpose, 'attached-copy');
   assert.equal(executionArgs.windowId, 9);
   assert.match(executionArgs.ownershipId, /^owner_[A-Za-z0-9_-]{22}$/u);
@@ -1914,6 +1955,17 @@ test('default worker snapshots the current page and reauthorizes its removed cop
   assert.doesNotMatch(JSON.stringify(executionArgs), /NEVER_PUBLIC/u);
   assert.equal(env.createdTabs.length, 0);
   assert.equal(scriptTargets.every(target => target.tabId === 17 && target.frameIds?.[0] === 0), true);
+  assert.equal(registerCalls, mode === 'factory-throw' ? 0 : 1);
+  if (mode === 'stored') {
+    const origin = originCache.get(auditId);
+    assert.deepEqual(origin, {
+      auditId, tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: proof.urlSessionDigest,
+      createdAt: origin.createdAt, expiresAt: origin.createdAt + 1_800_000,
+    });
+    assert.ok(origin.createdAt >= 1_788_000_000_000 && origin.createdAt < epoch);
+    assert.equal(Object.isFrozen(origin), true);
+    assert.doesNotMatch(JSON.stringify(origin), /NEVER_PUBLIC|copy-document|rawUrl|navigationToken/u);
+  } else assert.equal(originCache?.get(auditId) ?? null, null);
 
   const opening = runtime.reportLaunch.openRegisteredReport({
     auditId, windowId: 9,
@@ -1927,6 +1979,7 @@ test('default worker snapshots the current page and reauthorizes its removed cop
   assert.equal((await opening).ok, true);
   assert.equal(connected.state, 'view-only');
   assert.doesNotMatch(JSON.stringify(connected), /NEVER_PUBLIC|owner_|hmac-sha256/iu);
+  });
 });
 
 test('default worker keeps the volatile vault closed while injecting the one digest manager by factories', async () => {
