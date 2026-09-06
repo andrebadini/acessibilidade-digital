@@ -1,4 +1,4 @@
-import { accessibilityGuidance } from './plain-language-guidance.js';
+import { accessibilityGuidance, recordedLabelComparisons } from './plain-language-guidance.js';
 import { consumerBasisForOccurrence, CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../legal/consumer-basis.js';
 import { SECTION508_REVISED_CROSSWALK } from '../normative/section508.js';
 import { WCAG22_LEVELS } from '../normative/wcag22.js';
@@ -220,6 +220,7 @@ function renderReportViewDocument(model, view, options = {}) {
     group = presentation.result;
     issue = presentation.issue;
     const evidence = correlatedEvidence(issue);
+    const labelComparisons = labelComparisonsHtml(issue.abntItemIds[0], evidence);
     const correctionPresentation = group === 'passed'
       ? { title: 'Orientação e manutenção', confirmation: 'mantenha este registro como evidência positiva do escopo observado e reavalie se a página mudar.' }
       : group === 'humanReview'
@@ -232,7 +233,7 @@ function renderReportViewDocument(model, view, options = {}) {
     const evidenceLink = firstAnchor
       ? `<a data-report-consult-evidence href="#${firstAnchor}">Consultar evidências registradas</a>`
       : '<p>Nenhuma evidência correlata foi registrada para esta verificação.</p>';
-    return `<article class="occurrence-card" data-report-issue data-result="${escapeHtml(group)}" data-classification="${escapeHtml(issue.classification)}" data-page="${escapeHtml(issue.pageId)}" data-engine="${escapeHtml(issue.engine)}" data-impact="${escapeHtml(issue.impact ?? 'none')}" data-wcag="${escapeHtml(reportWcagLevels(issue.wcag).join(' '))}" data-abnt="${escapeHtml(reportAbntFilterToken(issue.abntItemIds))}"><header data-report-issue-heading><h3>${escapeHtml(issue.title)}</h3><p><strong>Resultado neste item:</strong> ${escapeHtml(label(presentation.outcome, outcomeLabels))}.</p><p><strong>Classificação:</strong> ${escapeHtml(presentation.classifications.map(value => label(value, classificationLabels)).join(', '))}. <strong>Impacto:</strong> ${escapeHtml(label(issue.impact, impactLabels, 'Não aplicável'))}.</p></header><details data-report-issue-details><summary>Entender o resultado, revisar e consultar evidências</summary>${plainBlock('impact', 'Impacto para a pessoa usuária', `<p>${escapeHtml(guidance.impact)}</p>`)}${plainBlock('observed', 'O que foi observado', `<p>${escapeHtml(guidance.observed)}</p>`)}${plainBlock('correction', correctionPresentation.title, `<p><strong>Correção:</strong> ${escapeHtml(guidance.correction)}</p><p><strong>Confirmação:</strong> ${escapeHtml(correctionPresentation.confirmation)}</p>`)}${plainBlock('announcement', 'Nome acessível e anúncio estimado', `<p><strong>Nome acessível:</strong> ${escapeHtml(issue.accessibleName ?? 'não disponível')}.</p><p><strong>Anúncio estimado:</strong> ${escapeHtml(issue.announcement ?? 'indisponível')}.</p><p>Esta prévia não é transcrição literal de tecnologia assistiva e pode variar conforme o leitor e as preferências.</p>`)}${plainBlock('normative', 'Fundamentação normativa', `<p><strong>WCAG 2.2:</strong> ${escapeHtml(issue.wcag.join(', ') || 'sem referência')}. <strong>ABNT NBR 17225:</strong> ${escapeHtml(reportAbntItemsLabel(issue.abntItemIds))}.</p>`)}${evidencePreview(evidence, issue)}<p data-report-live-action="evidence-only">O destaque ao vivo não está disponível neste relatório. Consulte as capturas registradas no momento da auditoria.</p>${evidenceLink}<ol>${guidance.reviewSteps.map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol><p>${escapeHtml(guidance.example)}</p>${technicalDetails(issue, evidence)}</details></article>`;
+    return `<article class="occurrence-card" data-report-issue data-result="${escapeHtml(group)}" data-classification="${escapeHtml(issue.classification)}" data-page="${escapeHtml(issue.pageId)}" data-engine="${escapeHtml(issue.engine)}" data-impact="${escapeHtml(issue.impact ?? 'none')}" data-wcag="${escapeHtml(reportWcagLevels(issue.wcag).join(' '))}" data-abnt="${escapeHtml(reportAbntFilterToken(issue.abntItemIds))}"><header data-report-issue-heading><h3>${escapeHtml(issue.title)}</h3><p><strong>Resultado neste item:</strong> ${escapeHtml(label(presentation.outcome, outcomeLabels))}.</p><p><strong>Classificação:</strong> ${escapeHtml(presentation.classifications.map(value => label(value, classificationLabels)).join(', '))}. <strong>Impacto:</strong> ${escapeHtml(label(issue.impact, impactLabels, 'Não aplicável'))}.</p></header><details data-report-issue-details><summary>Entender o resultado, revisar e consultar evidências</summary>${plainBlock('impact', 'Impacto para a pessoa usuária', `<p>${escapeHtml(guidance.impact)}</p>`)}${plainBlock('observed', 'O que foi observado', `<p>${escapeHtml(guidance.observed)}</p>${labelComparisons}`)}${plainBlock('correction', correctionPresentation.title, `<p><strong>Correção:</strong> ${escapeHtml(guidance.correction)}</p><p><strong>Confirmação:</strong> ${escapeHtml(correctionPresentation.confirmation)}</p>`)}${plainBlock('announcement', 'Nome acessível e anúncio estimado', `<p><strong>Nome acessível:</strong> ${escapeHtml(issue.accessibleName ?? 'não disponível')}.</p><p><strong>Anúncio estimado:</strong> ${escapeHtml(issue.announcement ?? 'indisponível')}.</p><p>Esta prévia não é transcrição literal de tecnologia assistiva e pode variar conforme o leitor e as preferências.</p>`)}${plainBlock('normative', 'Fundamentação normativa', `<p><strong>WCAG 2.2:</strong> ${escapeHtml(issue.wcag.join(', ') || 'sem referência')}. <strong>ABNT NBR 17225:</strong> ${escapeHtml(reportAbntItemsLabel(issue.abntItemIds))}.</p>`)}${evidencePreview(evidence, issue)}<p data-report-live-action="evidence-only">O destaque ao vivo não está disponível neste relatório. Consulte as capturas registradas no momento da auditoria.</p>${evidenceLink}<ol>${guidance.reviewSteps.map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol><p>${escapeHtml(guidance.example)}</p>${technicalDetails(issue, evidence)}</details></article>`;
   };
   const groupedChecks = new Map();
   for (const group of ['failed', 'alerts', 'humanReview', 'passed']) {
@@ -405,6 +406,11 @@ function occurrenceSection(occurrences, context) {
 <p class="section-intro">Falhas técnicas aparecem antes de revisões humanas; impacto, página e ordem original resolvem os demais empates.</p><div class="occurrence-list">${content}</div></section>`;
 }
 
+function labelComparisonsHtml(itemId, evidence) {
+  return recordedLabelComparisons(itemId, evidence)
+    .map(row => `<p data-report-label-comparison="${escapeHtml(row.evidenceId)}">${escapeHtml(row.text)}</p>`).join('');
+}
+
 function occurrenceCard(occurrence, index, context) {
   const item = occurrence.nbrItemRef ? context.itemById.get(occurrence.nbrItemRef) : null;
   const page = context.pageById.get(occurrence.pageId);
@@ -431,7 +437,7 @@ function occurrenceCard(occurrence, index, context) {
 <div class="chip-row">${impactMarkup(occurrence.impact)}${classificationMarkup(occurrence.classification)}</div>
 <p><strong>Página:</strong> ${escapeHtml(occurrence.pageId)} — ${pageStatus(page.status)}. <strong>Observada até:</strong> ${escapeHtml(page.timestamps.endedAt)}.</p>
 <div class="decision-strip"><p>Resultado do motor: ${escapeHtml(outcomeLabel(occurrence.outcome))}</p><p>Decisão humana: ${escapeHtml(decisionLabel)}</p><p>Estado consolidado: ${escapeHtml(outcomeLabel(consolidated))}</p></div>
-<div class="observed"><h4>O que foi observado</h4><p>${escapeHtml(occurrence.justification || rule?.summary || 'O motor registrou esta ocorrência sem descrição adicional.')}</p></div>
+<div class="observed"><h4>O que foi observado</h4><p>${escapeHtml(occurrence.justification || rule?.summary || 'O motor registrou esta ocorrência sem descrição adicional.')}</p>${labelComparisonsHtml(item?.id, evidence)}</div>
 ${remediation ? `<div class="remediation"><h4>Como corrigir</h4><p>${escapeHtml(remediation)}</p></div>` : ''}
 <div class="confirm"><h4>Como confirmar</h4><p>${escapeHtml(review?.question || confirmationInstruction(occurrence, item))}</p></div>
 ${normativeMapping(occurrence, item)}

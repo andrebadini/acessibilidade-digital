@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
+import { labelComparisonFixture } from './label-comparison-fixture.js';
 import { hashAnnotationMapArtifact } from '../../src/core/evidence/annotation-map-artifact.js';
 import { createAnnotationMapFixture, createPristineMapSource, TEST_PNG } from './annotation-map-fixture.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
@@ -18,6 +19,17 @@ import {
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consumer-basis.js';
 import { SECTION508_REVISED_CROSSWALK, section508ReferencesForWcag } from '../../src/core/normative/section508.js';
+
+test('standalone HTML keeps the recorded label comparison inside its own occurrence', async () => {
+  const { model } = await labelComparisonFixture();
+  const html = renderHtmlReport(model);
+  const first = occurrenceCard(html, 'occ-label-1');
+  assert.match(first, /data-report-label-comparison="ev-1"/u);
+  assert.match(first, /Texto visível registrado: “Buscar”.*Nome acessível registrado: “Pesquisar”/u);
+  assert.doesNotMatch(first, /Texto visível registrado: “Salvar/u);
+  const second = occurrenceCard(html, 'occ-label-2');
+  assert.match(second, /Texto visível registrado: “Salvar &lt;rascunho&gt;”/u);
+});
 
 test('standalone human review retains the evaluator note as escaped text', () => {
   const decision = createReviewDecision({ auditId: SAMPLE_AUDIT.auditId, itemId: '5.1.4',

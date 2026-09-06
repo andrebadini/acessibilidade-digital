@@ -8,7 +8,7 @@ import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
 import { readerMapPresentation, READER_MAP_INTRO } from '../core/report/reader-map-presentation.js';
 import { projectEvidenceProvenance, evidenceProvenanceRows } from '../core/report/evidence-provenance.js';
-import { accessibilityGuidance } from '../core/report/plain-language-guidance.js';
+import { accessibilityGuidance, recordedLabelComparisons } from '../core/report/plain-language-guidance.js';
 import { projectReviewHistory, humanReviewMetadata, HUMAN_REVIEW_DESCRIPTION, HUMAN_REVIEW_EMPTY } from '../core/report/human-review-presentation.js';
 
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
@@ -717,6 +717,11 @@ function issueArticle(document, issue, group, evidenceById, evidenceAnchorById, 
   impact.append(element(document, 'p', guidance.impact)); content.append(impact);
   const observed = plainBlock(document, 'observed', 'O que foi observado');
   observed.append(element(document, 'p', guidance.observed));
+  for (const row of recordedLabelComparisons(issue.abntItemIds[0], correlatedEvidence(issue, evidenceById))) {
+    const comparison = element(document, 'p', row.text);
+    comparison.setAttribute('data-report-label-comparison', row.evidenceId);
+    observed.append(comparison);
+  }
   content.append(observed);
   const correctionCopy = correctionPresentation(group);
   const correction = plainBlock(document, 'correction', correctionCopy.title);

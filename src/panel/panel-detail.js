@@ -3,7 +3,7 @@ import { sanitizeHtmlSnippetSource } from '../core/evidence/snippet.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../core/legal/consumer-basis.js';
 import { projectAuditResourceOrigin, sanitizeEvidenceUrl } from '../core/privacy.js';
 import { createAuditModel } from '../core/report/audit-model.js';
-import { accessibilityGuidance } from '../core/report/plain-language-guidance.js';
+import { accessibilityGuidance, recordedLabelComparisons } from '../core/report/plain-language-guidance.js';
 import { assertPanelClassificationV1, deriveResultContextV1 } from './panel-result-contract.js';
 import {
   INTERACTIVE_PANEL_LIMITATION,
@@ -288,7 +288,8 @@ function buildPanelDetailFromCanonical(model, summary, occurrenceId) {
       audience: guidance.impact,
       reason: guidance.example,
     },
-    observed: guidance.observed,
+    observed: [guidance.observed, ...recordedLabelComparisons(item?.id,
+      evidence.filter(artifact => accessibilityNodeMatches(occurrence, artifact))).map(row => row.text)].join('\n'),
     correction: [guidance.correction, 'Como conferir:', ...guidance.reviewSteps.map((step, index) => `${index + 1}. ${step}`),
       'Ao revisar, marque conforme somente se o comportamento esperado foi confirmado; não conforme se você comprovou a barreira; inconclusivo se faltarem condições ou conhecimento para decidir.'].join('\n'),
     targets: targetBlock(authoritativeOccurrences, occurrenceId),

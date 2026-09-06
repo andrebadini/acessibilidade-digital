@@ -10,7 +10,7 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 **Atualização 1.1.5:** os horários individuais e as orientações 5.13.6–5.13.8 descritos abaixo foram entregues após o gate de 3.977 testes lógicos, 38 nativos, verificação estática, QA visual/PDF e duas revisões independentes. As menções “fora do ZIP 1.1.4” permanecem corretas para aquele pacote, não indicam pendência na 1.1.5. Registro: `docs/qa/2026-09-06-beta115-release.md`.
 
-- próxima melhoria didática a investigar: na ficha 5.13.7, apresentar lado a lado o texto visível e o nome acessível efetivamente registrados, quando disponíveis. O PDF 1.1.5 já explica a comparação, mas a observação principal ainda usa a justificativa normativa genérica e a pessoa precisa procurar os valores na evidência. Usar somente dados já correlacionados/sanitizados, sem inferir o texto de uma captura ou transformar ausência de dados em falha. Evidência concreta: páginas 4–5 do PDF registrado na QA 1.1.5.
+- comparação explícita dos valores registrados em 5.13.7 implementada depois da beta 1.1.5: pares de texto visível/nome acessível, sem misturar elementos nem inferir resultado, no painel e nas três apresentações de relatório. GREEN173/173; revisão independente C=0/I=0, com 96/96 testes. Ainda fora do pacote 1.1.5. Registro: `docs/qa/2026-09-06-recorded-label-comparisons.md`; prova nativa visual/PDF do novo par no próximo candidato.
 
 - horário individual de recebimento de PNG implementado depois da beta 1.1.4: `metadata.captureReceivedAt`, preservação em modelos/JSON/orçamento e apresentação viva/HTML compartilhada com impressão. Relógio local explicitamente não certificado; datas antigas não são inventadas. Testes locais e duas revisões C=0/I=0; prova nativa concluída com 12 datas conferidas também no PDF e ausência de datas inventadas em no-pixels. Ainda fora do ZIP 1.1.4. Registros: `docs/qa/2026-09-06-capture-receipt-time.md` e `docs/qa/2026-09-06-capture-receipt-native.md`.
 
@@ -25,6 +25,8 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 - atualizar as imagens e o texto de eventual canal público de distribuição após estabilização da beta.
 
 ## Refinamentos visuais não bloqueantes
+
+- comparação 5.13.7: quando houver vários pares de texto visível/nome acessível na ficha, acrescentar um identificador visível ou link à respectiva evidência para localizar a captura mais rapidamente. Os pares já permanecem associados ao mesmo artefato; não há mistura de valores entre elementos.
 
 - conferência WAVE/ABNT: compactação incluída na beta 1.1.2. Resumo primeiro, ajuda/cobertura/filtros secundários em expansores, avisos operacionais visíveis. QA nativo em 360 × 900 mostra os quatro cartões e o primeiro grupo ABNT; ampliação CSS de 200% mantém cartões legíveis. Registro: `docs/qa/2026-09-06-compact-result-panel.md`.
 - sinais fora do viewport atualmente permanecem acessíveis por teclado; aprimorar posicionamento e prevenção de sobreposição em páginas com muitos alvos próximos, preservando o vínculo inequívoco e o comando explícito “Ir ao elemento”.

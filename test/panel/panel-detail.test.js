@@ -6,6 +6,33 @@ import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../../src/core/legal/consume
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 import { buildPanelDetail, createPanelDetailProjector } from '../../src/panel/panel-detail.js';
 import { buildPanelSummary } from '../../src/panel/panel-summary.js';
+import { labelComparisonFixture } from '../report/label-comparison-fixture.js';
+
+test('label-in-name detail compares recorded values from only the selected occurrence', async () => {
+  const { model, summary } = await labelComparisonFixture();
+  const before = JSON.stringify(model);
+  const detail = buildPanelDetail({ model, summary, occurrenceId: 'occ-label-1', highlightAvailability: new Map() });
+  assert.match(detail.observed, /Texto visível registrado: “Buscar”/u);
+  assert.match(detail.observed, /Nome acessível registrado: “Pesquisar”/u);
+  assert.doesNotMatch(detail.observed, /Salvar|Enviar/u);
+  assert.match(detail.observed, /Registro original:/u);
+  assert.match(detail.observed, /não confirma atendimento nem falha/u);
+  assert.equal(detail.legalReference, null);
+  assert.equal(JSON.stringify(model), before);
+});
+
+test('recorded empty labels are not confused with unavailable names or inferred from another element', async () => {
+  const { model, summary } = await labelComparisonFixture({ mutate(input) {
+    const artifact = input.evidence.artifacts.find(row => row.nodeId === 'n-1');
+    artifact.accessibility.visibleText = '';
+    artifact.accessibility.name = null;
+    artifact.accessibility.announcementPreview = null;
+  } });
+  const detail = buildPanelDetail({ model, summary, occurrenceId: 'occ-label-1', highlightAvailability: new Map() });
+  assert.match(detail.observed, /Texto visível registrado: vazio/u);
+  assert.match(detail.observed, /Nome acessível registrado: não disponível/u);
+  assert.doesNotMatch(detail.observed, /Salvar|Enviar/u);
+});
 
 function checkpointFor(inventory, model = SAMPLE_AUDIT) {
   return {

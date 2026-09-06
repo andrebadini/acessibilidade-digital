@@ -228,6 +228,17 @@ const SPECIFIC = {
   }
 };
 
+/** Pair fields from each already validated, correlated element; never infer a conclusion. */
+export function recordedLabelComparisons(itemId, evidence) {
+  if (itemId !== '5.13.7') return [];
+  const display = value => value === null || value === undefined ? 'não disponível'
+    : value === '' ? 'vazio (registrado sem texto)' : `“${value}”`;
+  return evidence.filter(artifact => artifact.kind === 'element' && artifact.accessibility)
+    .map(artifact => ({ evidenceId: artifact.evidenceId,
+      text: `Texto visível registrado: ${display(artifact.accessibility.visibleText)} · Nome acessível registrado: ${display(artifact.accessibility.name)}.`,
+    }));
+}
+
 /** Explain an existing result without deriving or modifying its outcome. */
 export function accessibilityGuidance({ itemId, title, outcome, observed, correction } = {}) {
   const item = ITEMS.get(itemId);

@@ -14,6 +14,7 @@ import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { buildReportView, projectExecutive, renderReportView, updateReportHighlightAction } from '../../src/review/report-view.js';
 import { readerMapPresentation } from '../../src/core/report/reader-map-presentation.js';
 import { EXPORT_FORMATS_V1 } from '../../src/export/report-export.js';
+import { labelComparisonFixture } from '../report/label-comparison-fixture.js';
 import { createAnnotationMapFixture, createPristineMapSource, TEST_PNG } from '../report/annotation-map-fixture.js';
 
 const FULL_PAGE_CAPTURE_OMITTED_MESSAGE = 'A captura integral e o mapa anotado foram omitidos pela política; miniaturas de elementos permaneceram permitidas.';
@@ -21,6 +22,25 @@ const FULL_PAGE_CAPTURE_OMITTED_LIMITATION = `FULL_PAGE_CAPTURE_OMITTED: ${FULL_
 const ATTACHED_COPY_RELOADED_MESSAGE = 'A auditoria foi executada em uma cópia temporária recarregada da URL da aba escolhida; alterações não salvas e estado mantido apenas em memória na aba original não foram observados.';
 const ATTACHED_COPY_EVIDENCE_ONLY_MESSAGE = 'A página foi avaliada em uma cópia temporária já removida. O destaque ao vivo não está disponível; consulte as capturas e os seletores registrados no momento da auditoria.';
 const ATTACHED_COPY_RETURN_MESSAGE = 'Retorno e destaque na aba original indisponíveis: a auditoria usou uma cópia temporária e não alterou a aba original.';
+
+test('live and exported label comparisons preserve separate recorded pairs without changing the model', async () => {
+  const { model, summary } = await labelComparisonFixture();
+  const before = JSON.stringify(model);
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const pairs = root.querySelectorAll('[data-report-label-comparison]');
+  assert.equal(pairs.length, 2);
+  assert.match(pairs[0].textContent, /Texto visível registrado: “Buscar”.*Nome acessível registrado: “Pesquisar”/u);
+  assert.match(pairs[1].textContent, /Texto visível registrado: “Salvar <rascunho>”.*Nome acessível registrado: “Enviar & continuar”/u);
+  assert.notEqual(pairs[0].getAttribute('data-report-label-comparison'), pairs[1].getAttribute('data-report-label-comparison'));
+  for (const forPrint of [false, true]) {
+    const html = renderHtmlReport(model, { reportView: view, forPrint });
+    assert.equal((html.match(/data-report-label-comparison=/gu) ?? []).length, 2);
+    assert.match(html, /Texto visível registrado: “Salvar &lt;rascunho&gt;”/u);
+    assert.doesNotMatch(html, /<rascunho>/u);
+  }
+  assert.equal(JSON.stringify(model), before);
+});
 
 test('live evidence annex shows individual receipt time and local-clock qualification without inventing old times', async () => {
   const { model, summary } = await fixture({ mutateDraft(draft) {
