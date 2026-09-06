@@ -62,6 +62,7 @@ export async function createControllerFixture(options = {}) {
   const proofQueue = [...(options.proofs ?? [])];
   const calls = { authorize: [], probe: [], source: [], scripts: [], publish: [] };
   const timers = new Map();
+  const targetQueue = createTargetOperationQueue();
   let nextTimer = 1;
   let controller;
   let latestPort = null;
@@ -153,7 +154,7 @@ export async function createControllerFixture(options = {}) {
       assert.equal(auditId, model.auditId);
       return structuredClone(options.bundle ?? bundle);
     },
-    authority, chromeApi, chromeAdapter, targetQueue: createTargetOperationQueue(),
+    authority, chromeApi, chromeAdapter, targetQueue,
     now: () => time, createInstallationId: () => INSTALLATION_ID,
     publish: async message => { calls.publish.push(structuredClone(message)); },
     setTimer(callback, delay) { const id = nextTimer++; timers.set(id, { callback, delay }); return id; },
@@ -171,7 +172,7 @@ export async function createControllerFixture(options = {}) {
       isCurrent: privateOptions.isCurrent ?? (() => true) });
   }
   return {
-    controller, model, snapshot, bundle, originCache, page, calls, sender, envelope, dispatch,
+    controller, model, snapshot, bundle, originCache, page, calls, sender, envelope, dispatch, targetQueue,
     nativePort, latestPort: () => latestPort, setTime(value) { time = value; },
     queueProof(value) { proofQueue.push(value); },
     fireTimer(delay) {

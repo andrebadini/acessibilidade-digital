@@ -31,6 +31,7 @@ import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 import { createFakeLockManager } from '../personas/fake-lock-manager.js';
 import { reportInput } from '../report/helpers.js';
+import { DIGEST, createControllerFixture } from './page-markers-controller-fixture.js';
 
 const CAPABILITY = 'C'.repeat(22);
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
@@ -1676,6 +1677,9 @@ test('marker and highlight cleanup both run under the received lock and deletion
     ['marker-locked', target, 'audit-start', lock],
     ['highlight-locked', target, 'audit-start', lock],
   ]);
+  assert.notStrictEqual(calls[0][1], target);
+  assert.equal(Object.isFrozen(calls[0][1]), true);
+  assert.strictEqual(calls[1][1], target);
 
   markerAudit = false;
   assert.deepEqual(await composed.clearAudit('audit-old', 'audit-deleted'), { ok: false, state: 'pending' });
@@ -1687,6 +1691,44 @@ test('marker and highlight cleanup both run under the received lock and deletion
   markerAudit = true;
   highlightAudit = { ok: true, state: 'clear' };
   assert.deepEqual(await composed.clearAudit('audit-old', 'audit-deleted'), { ok: true, state: 'clear' });
+});
+
+test('resume cleanup projects its four-field target only for the real page-marker controller', async () => {
+  const fixture = await createControllerFixture();
+  const initialTarget = Object.freeze({ tabId: 17, documentId: 'document-a' });
+  assert.deepEqual(await fixture.targetQueue.withTarget(initialTarget, lock =>
+    fixture.controller.clearForTargetLocked(initialTarget, 'audit-start', lock)), {
+    ok: true,
+    state: 'absent',
+  });
+
+  const resumeTarget = Object.freeze({
+    tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST,
+  });
+  let highlightCall = null;
+  const composed = serviceWorkerModule.createPageMarkersCleanupComposition({
+    pageMarkersController: fixture.controller,
+    highlightController: {
+      availability() {}, highlight() {}, clear() {}, invalidateContent() {}, recover() {}, expireDue() {},
+      async clearForTargetLocked(target, reason, lock) {
+        highlightCall = { target, reason, lock };
+        return { ok: true, state: 'absent' };
+      },
+      async clearAudit() { return { ok: true, state: 'clear' }; },
+      async invalidateTab() { return { ok: true, clearedAuditIds: [] }; },
+    },
+  });
+  let heldLock = null;
+  const result = await fixture.targetQueue.withTarget(resumeTarget, async lock => {
+    heldLock = lock;
+    return composed.clearForTargetLocked(resumeTarget, 'audit-start', lock);
+  });
+
+  assert.deepEqual(result, { ok: true, state: 'clear' });
+  assert.strictEqual(highlightCall.target, resumeTarget);
+  assert.equal(highlightCall.reason, 'audit-start');
+  assert.strictEqual(highlightCall.lock, heldLock);
+  assert.deepEqual(fixture.calls.scripts, []);
 });
 
 test('tab lifecycle attempts marker invalidation even when highlight invalidation fails', async () => {

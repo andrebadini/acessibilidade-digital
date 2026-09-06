@@ -1056,9 +1056,13 @@ export function createPageMarkersCleanupComposition(raw) {
     recover: highlight.recover,
     expireDue: highlight.expireDue,
     async clearForTargetLocked(target, reason, lock) {
+      const markerTarget = Object.freeze({
+        tabId: own(target, 'tabId'),
+        documentId: own(target, 'documentId'),
+      });
       let markerResult = null;
       let highlightResult = null;
-      try { markerResult = await markers.clearForTargetLocked(target, reason, lock); } catch {}
+      try { markerResult = await markers.clearForTargetLocked(markerTarget, reason, lock); } catch {}
       try { highlightResult = await highlight.clearForTargetLocked(target, reason, lock); } catch {}
       return confirmed(markerResult, ['absent', 'clear']) &&
         confirmed(highlightResult, ['absent', 'clear', 'revoked'])

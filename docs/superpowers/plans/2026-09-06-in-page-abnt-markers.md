@@ -1,5 +1,13 @@
 # Conferência na própria página — referência funcional WAVE
 
+## Task 11 — compatibilidade da limpeza no resume de pixels
+
+Novo RED nativo reproduzido duas vezes em dfa1929: element-only pausa, confirmação recusada, sem modelo/relatório; diagnóstico no Debugger da fixture confirma PIXEL_CONFIRM_DENIED no router681. Starter resume fornece target com tabId/windowId/documentId/urlSessionDigest à cleanupBarrier; composição Task7 encaminha4campos ao marker controller exact2 e provoca PAGE_MARKERS_INVALID. Revisão prévia independente confirmou causa e correção mínima.
+
+Arquivos autorizados: somente `src/background/service-worker.js`, `test/background/service-worker.test.js`, e `test/background/page-markers-controller-fixture.js` apenas para expor a fila real ao teste de integração (não alterar comportamento). Na composição clearForTargetLocked projetar apenas argumento dos markers para Object.freeze({tabId:own(target,'tabId'),documentId:own(target,'documentId')}) com helper descriptor-safe existente. Highlight mantém objeto original/reason/lock; ambos tentados em try separado, sucesso somente confirmação dupla. Não editar controller, starter, consentimento, queue ou normas. Nenhum novo gate de todos campos do input e nenhuma flexibilização de autorização.
+
+TDD focado: target4 da retomada e target2 inicial com controller/queue REAIS (fixture), sem instalação deve confirmar absent e composição clear; RED target4 antes da correção. Accessor de identidade nunca invocado, lock ausente/alheio/expirado recusado; erro de um cleaner mantém tentativa do outro e falha composta. Reusar regressões existentes para essas últimas provas. Testar service-worker e controller diretamente relacionados, diff-check, relatório SDD task-11-report.md. Sem subagentes/commit/Chrome/suíte ampla/ZIP pelo implementador. Main remove diagnóstico temporário do E2E e repete percurso nativo após GREEN e revisão independente congelada.
+
 ## Task 10 — continuidade limitada do resultado visível
 
 Escopo exclusivo: `src/panel/panel-session-port.js`, `src/panel/panel.js`, `src/background/panel-port.js` e seus três testes existentes em `test/panel/panel-session-port.test.js`, `test/panel/panel-runtime.test.js`, `test/background/panel-port.test.js`. Tasks1–9 congeladas salvo estes pontos de extensão. Sem editar worker/controller/overlay/cache/captura/normas/storage. Sem subagentes, commit, Chrome, suíte ampla ou pacote pelo implementador. TDD focado, diff-check; relatório SDD task-10-report.md. O coordenador prepara W4 em arquivo E2E disjunto.
