@@ -382,6 +382,61 @@ for (const scenario of [
       // Finalizing a verified export advances the storage revision once; the
       // canonical model, evidence and checkpoint themselves remain unchanged.
       assert.deepEqual(await markerRecordFingerprint(extension, auditId), { ...fingerprint, revision: fingerprint.revision + 1 });
+      if (!scenario.idle) await step('LIVE_REVIEW_REFRESH', async () => {
+        const prerequisites = await extension.evaluate(report, `(() => ({
+          cards:document.querySelectorAll('#review-list > details').length,
+          target:Boolean(document.querySelector('[data-review-controls-target]')),
+          evaluator:Boolean(document.querySelector('#review-evaluator')),
+          identity:/Revisão do modelo: [0-9]+/.test(document.querySelector('[data-report-section="7"]')?.textContent??'')
+        }))()`);
+        assert.ok(prerequisites.cards >= 2 && prerequisites.target && prerequisites.evaluator && prerequisites.identity,
+          JSON.stringify(prerequisites));
+        const beforeReview = await extension.evaluate(report, `(() => {
+          const cards=[...document.querySelectorAll('#review-list > details')];
+          if(cards.length<2)throw Error('REVIEW_FIXTURE_TOO_SMALL');
+          document.querySelector('[data-review-controls-target]').open=true;
+          cards[0].open=true;
+          document.querySelector('#review-evaluator').value='Avaliadora QA';
+          cards[1].querySelector('textarea').value='Nota ainda não salva';
+          window.__reviewPreserved={list:document.querySelector('#review-list'),evaluator:document.querySelector('#review-evaluator'),next:cards[1]};
+          const methodology=document.querySelector('[data-report-section="7"]').textContent;
+          const before=Number(methodology.match(/Revisão do modelo: ([0-9]+)/)[1]);
+          cards[0].querySelector('textarea').value='Barreira confirmada no teste local';
+          [...cards[0].querySelectorAll('button')].find(node=>node.textContent==='não conforme').click();
+          return before;
+        })()`, { userGesture: true });
+        const savedStatus = await extension.waitForValue(report, `document.querySelector('#review-status').textContent`,
+          value => /Decisão salva.*Relatório atualizado|[Nn]ão foi possível/u.test(value), { timeoutMs: 15_000, intervalMs: 50 });
+        assert.match(savedStatus, /Decisão salva.*Relatório atualizado/u);
+        const refreshed = await extension.evaluate(report, `(() => {
+          const kept=window.__reviewPreserved;
+          const text=document.querySelector('[data-report-section="7"]').textContent;
+          return {revision:Number(text.match(/Revisão do modelo: ([0-9]+)/)[1]),
+            sameForms:document.querySelector('#review-list')===kept.list&&document.querySelector('#review-evaluator')===kept.evaluator,
+            note:kept.next.querySelector('textarea').value,evaluator:kept.evaluator.value,
+            focus:document.activeElement===kept.next.querySelector('summary'),
+            open:kept.next.open&&document.querySelector('[data-review-controls-target]').open,
+            answered:kept.list.firstElementChild.classList.contains('answered'),
+            matrixRows:document.querySelectorAll('[data-report-matrix] tbody tr').length,
+            hash:text.match(/Integridade: ([a-f0-9]{64})/)[1]};
+        })()`);
+        assert.ok(refreshed.revision > beforeReview);
+        for (const key of ['sameForms', 'focus', 'open', 'answered']) assert.equal(refreshed[key], true, key);
+        assert.equal(refreshed.note, 'Nota ainda não salva');
+        assert.equal(refreshed.evaluator, 'Avaliadora QA');
+        assert.equal(refreshed.matrixRows, 146);
+        const durable = await extension.evaluate(extension.harnessPage, `(async()=>{
+          const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+          const revision=await store.getReportRevision(${JSON.stringify(auditId)});
+          return {revision:revision.modelRevision,hash:revision.modelHash};
+        })()`, { awaitPromise: true });
+        assert.equal(refreshed.revision, durable.revision);
+        assert.equal(refreshed.hash, durable.hash);
+        await extension.captureJourney('report-after-live-review', report, { captureBeyondViewport: false });
+        await exportFourFormats(extension, report, auditId, extension.downloadDirectory, {
+          modelHash: durable.hash, modelRevision: durable.revision,
+        });
+      });
     });
     t.diagnostic(`Chrome152; native-page-markers; original-not-copy; ${scenario.idle
       ? 'no-worker-debugger-during-two-idle-windows' : 'visual-QA-without-idle-claim'}; four-verified-downloads`);
@@ -1350,13 +1405,22 @@ function pdfInfoTitles(bytes) {
   return [...source.matchAll(pattern)].map(match => decodePdfString(match[1])).filter(Boolean);
 }
 
-async function exportFourFormats(extension, report, auditId, downloadDirectory) {
+async function exportFourFormats(extension, report, auditId, downloadDirectory, reviewedIdentity = null) {
   await extension.click(report, 'button[data-report-export]');
   const exportResponse = await extension.waitForValue(report,
     `document.querySelector('#review-status')?.textContent??''`,
     value => /Relatório atualizado na fila|Não foi possível gerar/u.test(value),
     { timeoutMs: 15_000, intervalMs: 100 });
   assert.equal(exportResponse, 'Relatório atualizado na fila de geração.', 'export request must be accepted');
+  if (reviewedIdentity) {
+    // A previous successful export must not satisfy the proof for this review.
+    await extension.waitForValue(extension.harnessPage, `(async()=>{
+      const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+      const receipt=await store.getExportReceipt(${JSON.stringify(auditId)});
+      return receipt?.status==='complete'&&receipt.modelHash===${JSON.stringify(reviewedIdentity.modelHash)}&&
+        receipt.modelRevision===${reviewedIdentity.modelRevision};
+    })()`, Boolean, { timeoutMs: 90_000, intervalMs: 100, awaitPromise: true });
+  }
   let downloads;
   try { downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 90_000, intervalMs: 50 }); }
   catch (cause) {
@@ -1408,6 +1472,12 @@ async function exportFourFormats(extension, report, auditId, downloadDirectory) 
   assert.equal(technical.audit?.auditId, auditId);
   assert.equal(technical.exportDeliveryIdentityType, 'ExportDeliveryIdentityV1');
   assert.equal(technical.exportDeliveryIdentity?.auditId, auditId);
+  if (reviewedIdentity) {
+    assert.equal(technical.exportDeliveryIdentity.modelHash, reviewedIdentity.modelHash);
+    assert.equal(technical.exportDeliveryIdentity.modelRevision, reviewedIdentity.modelRevision);
+    assert.equal(technical.audit.reviewDecisions.length, 1);
+    assert.equal(technical.audit.reviewDecisions[0].note, 'Barreira confirmada no teste local');
+  }
   const occurrence = technical.audit?.occurrences?.find(candidate =>
     candidate?.source?.ruleId === 'content-image-alternative' &&
     candidate?.nbrItemRef === knownOccurrence.abnt);

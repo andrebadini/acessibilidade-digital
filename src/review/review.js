@@ -28,6 +28,8 @@ const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde s
 const store = createAuditStore();
 const commitDecision = createAuthorizedReviewDecisionCommitter();
 let auditModel;
+let reportBasis = null;
+let reportModelRevision = 0;
 let evidenceAnchorById = new Map();
 let reportSessionCapabilityId = null;
 let reportSessionState = null;
@@ -73,6 +75,7 @@ function sendWorkerRequest(message) {
 
 function renderDeletedAudit() {
   auditModel = null;
+  reportBasis = null;
   reportSessionCapabilityId = null;
   reportSessionState = null;
   activeHighlightOccurrenceId = null;
@@ -342,7 +345,50 @@ function nextUnanswered(card) {
   (next?.querySelector('summary') || document.querySelector('a[href="#report-root"]'))?.focus();
 }
 
+function mountReportView(view) {
+  const previousTarget = reportRoot.querySelector('[data-review-controls-target]');
+  const focused = document.activeElement;
+  const restoreFocus = focused && (list.contains(focused) || reviewControls.contains(focused));
+  const report = renderReportView({
+    view, document, onExport: options => { void requestExport(options); },
+    onHighlightIntent: reportSessionState === 'result' ? value => {
+      if (value?.type === 'GET_HIGHLIGHT_AVAILABILITY') void reportHighlightPolicy.requestExplicit(value.occurrenceId);
+      else void handleReportHighlightIntent(value);
+    } : null,
+  });
+  const reviewTarget = report.querySelector('[data-review-controls-target]');
+  reviewTarget.open = previousTarget?.open === true;
+  // Keep the actual forms: notes, pending buttons and their handlers are not rebuilt.
+  reviewTarget.parentElement.insertBefore(reviewControls, reviewTarget);
+  reviewTarget.append(list);
+  reportRoot.replaceChildren(report);
+  evidenceAnchorById = new Map(view.technicalEvidence.map((evidence, index) =>
+    [evidence.evidenceId, `report-evidence-${index + 1}`]));
+  applyReportSourceControls({
+    reportSessionState, limitations: view.executive.limitations,
+    returnControl: returnToPage, explanation: reportSourceExplanation,
+  });
+  refreshAllReportHighlightControls();
+  if (restoreFocus) focused.focus({ preventScroll: true });
+}
+
+async function refreshCommittedReport(committed) {
+  const basis = reportBasis;
+  if (!basis || basis.auditId !== committed.model.auditId) return false;
+  const summary = await buildCompleteReportSummary({
+    model: committed.model, executionCheckpoint: basis.checkpoint, inventory: basis.inventory,
+  });
+  if (reportBasis !== basis || auditModel !== committed.model ||
+    reportModelRevision !== committed.modelRevision || !reportSessionCapabilityId) return false;
+  const view = buildReportView({ model: committed.model, summary,
+    modelRevision: committed.modelRevision, modelHash: committed.modelHash });
+  mountReportView(view);
+  return true;
+}
+
 async function saveDecision(occurrence, answer, note, card, trigger) {
+  if (!auditModel || !reportSessionCapabilityId) return;
+  const session = reportSessionCapabilityId;
   const evaluatorName = evaluator.value.trim();
   if (!evaluatorName) {
     status.textContent = 'Informe o nome da pessoa avaliadora antes de responder.';
@@ -372,11 +418,23 @@ async function saveDecision(occurrence, answer, note, card, trigger) {
     },
   });
   if (committed.status === 'duplicate') return;
-  auditModel = committed.model;
+  if (!auditModel || auditModel.auditId !== decision.auditId || reportSessionCapabilityId !== session) return;
   card.removeAttribute('aria-busy');
   card.classList.add('answered');
-  status.textContent = `Decisão salva para o item ${occurrence.itemId}.`;
   nextUnanswered(card);
+  if (committed.modelRevision <= reportModelRevision) return;
+  auditModel = committed.model;
+  reportModelRevision = committed.modelRevision;
+  status.textContent = `Decisão salva para o item ${occurrence.itemId}. Atualizando o relatório.`;
+  try {
+    if (await refreshCommittedReport(committed)) {
+      status.textContent = `Decisão salva para o item ${occurrence.itemId}. Relatório atualizado; filtros de visualização redefinidos.`;
+    }
+  } catch {
+    if (auditModel === committed.model && reportSessionCapabilityId === session) {
+      status.textContent = `Decisão salva para o item ${occurrence.itemId}, mas não foi possível atualizar a visualização. Reabra o relatório para consultar e imprimir a revisão atualizada.`;
+    }
+  }
 }
 
 function renderCard(entry) {
@@ -478,23 +536,9 @@ async function start() {
   });
   const view = buildReportView({ model: revision.model, summary, modelRevision: revision.modelRevision, modelHash: revision.modelHash });
   auditModel = revision.model;
-  evidenceAnchorById = new Map(view.technicalEvidence.map((evidence, index) =>
-    [evidence.evidenceId, `report-evidence-${index + 1}`]));
-  applyReportSourceControls({
-    reportSessionState, limitations: view.executive.limitations,
-    returnControl: returnToPage, explanation: reportSourceExplanation,
-  });
-  const report = renderReportView({
-    view, document, onExport: options => { void requestExport(options); },
-    onHighlightIntent: reportSessionState === 'result' ? value => {
-      if (value?.type === 'GET_HIGHLIGHT_AVAILABILITY') void reportHighlightPolicy.requestExplicit(value.occurrenceId);
-      else void handleReportHighlightIntent(value);
-    } : null,
-  });
-  reportRoot.replaceChildren(report);
-  const reviewTarget = report.querySelector('[data-review-controls-target]');
-  reviewTarget.parentElement.insertBefore(reviewControls, reviewTarget);
-  reviewTarget.append(list);
+  reportModelRevision = revision.modelRevision;
+  reportBasis = { auditId: id, checkpoint: revision.checkpoint, inventory };
+  mountReportView(view);
   deleteAudit.disabled = false;
   if (reportSessionState === 'result') {
     connectReportHighlightState();

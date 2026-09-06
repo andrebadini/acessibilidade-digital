@@ -2,6 +2,10 @@
 
 Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. Elas não reduzem os controles de privacidade, autorização de capturas, correlação das evidências, limpeza de estado ou confiabilidade normativa.
 
+## Incidente de compatibilidade — não confundir com refinamento menor
+
+- A beta 1.1.2 pode persistir uma decisão humana com hash do modelo pendente e tornar esse relatório ilegível. A correção preventiva foi implementada após essa beta, com verificação do novo hash antes do commit atômico e exportação real da revisão. Registros já afetados **não são recuperados automaticamente**; preservar dados e arquivos previamente exportados. Recuperação exige uma base verificável, não a assinatura silenciosa de conteúdo antigo. Registro: `docs/qa/2026-09-06-live-review-refresh.md`.
+
 ## Próximas entregas funcionais
 
 - conferência com múltiplos sinais clicáveis na página original: implementada e aprovada no gate nativo da beta1.1.1, com limite transparente de64ocorrências interativas e associação por identificador estável corroborado. Ampliar a localização segura de elementos sem ID em atualização incremental; a beta1.1.0 não contém os sinais. Plano `docs/superpowers/plans/2026-09-06-in-page-abnt-markers.md`.
@@ -17,7 +21,7 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 - impressão executiva incluída na beta 1.1.2: ação explícita “Imprimir resumo / salvar PDF” no relatório vivo e HTML baixado, mantendo a matriz ABNT e identificação da revisão. Na fixture nativa, 22/29 páginas completas passam a 8 no resumo. A exportação automática dos quatro formatos permanece completa. QA: `docs/qa/2026-09-06-executive-print.md`. Refino futuro: quebra entre cabeçalho da matriz e primeira linha. A redução anterior da fixture pública de 179 ocorrências, de 400 para 254 páginas completas, permanece válida e independente.
 
-- atualizar imediatamente o sumário visual após salvar uma decisão humana. Até esse refinamento, reabra o relatório para renovar a visualização ou use “Gerar relatório atualizado” para exportar a revisão persistida; o comando Imprimir do navegador imprime a visualização atualmente aberta.
+- atualização imediata do relatório após decisão humana implementada depois da beta 1.1.2; preserva formulários, notas, nome e foco. Filtros voltam a todos os resultados com aviso. Não usar a orientação antiga de apenas reabrir/exportar na beta 1.1.2: ela não corrige o incidente de integridade descrito acima.
 
 - preservar o foco da página também no encerramento automático de uma persona já ausente; as atualizações passivas da legenda já preservam foco, rolagem e controles;
 
@@ -28,6 +32,8 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 - quando o orçamento global do lote omitir os pixels de um mapa já composto, substituir a orientação “Localize o número na imagem” por aviso específico de omissão; a legenda e os hashes continuam preservados e a ausência de PNG já é exibida.
 
 ## Infraestrutura de testes não bloqueante
+
+- atualização viva da revisão: acrescentar uma asserção nativa direta sobre a mudança de contagem/célula/ocorrência. Já comprovados salvamento real, nova identidade, modelo/decisão exportados, matriz completa e preservação dos formulários; revisão independente C=0/I=0/M=1.
 
 - continuidade W3, revisão06/09 C0/I0/M1: troca terminal→terminal preserva agendamento do timer de transporte; callback verifica estado atual e envia somente heartbeat sem dados. Não reutiliza autoridade nem despacha operação antiga. Eventualmente invalidar geração nessa troca para coincidir literalmente com a matriz de callbacks antigos; sem impacto funcional conhecido ou renovação de prazo.
 

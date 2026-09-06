@@ -1411,6 +1411,31 @@ test('review CAS captures the candidate before SHA verification yields to caller
   }
 });
 
+test('a sealed human review remains readable through the report integrity boundary after atomic commit', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    const { model, checkpoint, latest } = await terminalFixture(`review-integrity-${backend.toLowerCase()}`);
+    await store.commitAuditWithCheckpointIfAbsent(model.auditId, model, checkpoint, latest,
+      { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false });
+    const snapshot = await store.getAuditSnapshot(model.auditId);
+    const entry = model.manualReview[0];
+    const decision = createReviewDecision({ auditId: model.auditId, itemId: entry.itemId,
+      occurrenceId: entry.occurrenceId, answer: 'não conforme', evaluator: 'Pessoa avaliadora',
+      decidedAt: '2026-08-29T12:01:00.000Z', mode: entry.mode });
+    const committed = await store.commitAuditReviewIfRevision(model.auditId,
+      applyReviewDecisions(model, [decision]), snapshot.capability);
+    const report = await store.getReportRevision(model.auditId);
+    assert.equal(report.modelRevision, committed.revision);
+    assert.match(report.modelHash, /^[a-f0-9]{64}$/u);
+    assert.notEqual(report.modelHash, model.integrity.canonicalModelHash);
+    assert.deepEqual(report.model.reviewDecisions, [decision]);
+    assert.deepEqual(report.model.evidence, model.evidence);
+    assert.deepEqual(report.model.reproducibility, model.reproducibility);
+    assert.equal(report.model.integrity.evidenceManifestHash, model.integrity.evidenceManifestHash);
+    assert.deepEqual(report.checkpoint, checkpoint);
+  });
+});
+
 test('production store fails visibly when IndexedDB is unavailable and never falls back to memory', async () => {
   const store = createAuditStore({ indexedDB: {} });
 

@@ -16,6 +16,7 @@ import { createAuditModel } from '../core/report/audit-model.js';
 import { auditModelInputError, captureAuditInput } from '../core/report/audit-input.js';
 import { canonicalStringify } from '../core/report/canonical-json.js';
 import { verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
+import { sha256Hex } from '../core/report/hash.js';
 import { applyReviewDecisions } from '../core/review/decisions.js';
 import { validateExecutionCheckpoint } from '../background/execution-checkpoint.js';
 import { createExportDeliveryIdentityV1, EXPORT_FORMATS_V1 } from '../export/export-formats.js';
@@ -89,6 +90,15 @@ async function canonicalReviewTransition(id, model, snapshotCapability, owner) {
     }
     const expected = createAuditModel(applyReviewDecisions(base, additions));
     if (canonicalStringify(candidate) !== canonicalStringify(expected)) throw new TypeError();
+    if (completeSha) {
+      // Seal the authorized review before the existing CAS transaction starts.
+      // Evidence and its manifest are unchanged; only the canonical model hash changes.
+      const hashInput = structuredClone(expected);
+      delete hashInput.integrity.canonicalModelHash;
+      const canonicalModelHash = await sha256Hex(canonicalStringify(hashInput));
+      return await verifyAuditIntegritySnapshot({ ...expected,
+        integrity: { ...expected.integrity, canonicalModelHash } });
+    }
     return expected;
   } catch {
     throw auditModelInputError();
