@@ -150,6 +150,61 @@ test('justified text explains visual spacing and a recommended alternative', () 
   assert.match(result.example, /esquerda/);
 });
 
+test('additional-content recommendation checks another way to obtain the information, not a ban on all tips', () => {
+  const result = guidance({ itemId: '5.1.7', outcome: 'cantTell' });
+  assert.match(result.correction, /recomenda/u);
+  assert.match(result.reviewSteps.join(' '), /Tab/u);
+  assert.match(result.reviewSteps.join(' '), /mouse/u);
+  assert.match(result.reviewSteps.join(' '), /outra forma/u);
+  assert.match(result.reviewSteps.join(' '), /5\.1\.8.*5\.1\.9/u);
+  assert.match(result.example, /ajuda/iu);
+});
+
+test('persistent-content review distinguishes a timer from allowed dismissal and obsolete information', () => {
+  const result = guidance({ itemId: '5.1.8', outcome: 'cantTell' });
+  const steps = result.reviewSteps.join(' ');
+  assert.match(result.impact, /tempo.*ler/u);
+  assert.match(steps, /sem mover.*mouse.*foco/u);
+  assert.match(steps, /tempo observado/u);
+  assert.match(steps, /deixou de ser válida/u);
+  assert.match(steps, /dispens/u);
+  assert.match(result.example, /some sozinha/u);
+});
+
+test('dismissible-content review includes a practical nonmoving test and both ABNT exceptions', () => {
+  const result = guidance({ itemId: '5.1.9', outcome: 'cantTell' });
+  const steps = result.reviewSteps.join(' ');
+  assert.match(steps, /Esc/u);
+  assert.match(steps, /sem mover.*mouse.*foco/u);
+  assert.match(steps, /não é a única/u);
+  assert.match(steps, /erro de (?:entrada|preenchimento)/u);
+  assert.match(steps, /não oculta nem substitui/u);
+  assert.match(result.example, /cobrindo/u);
+});
+
+for (const [itemId, topic, ratio, exampleValue] of [
+  ['5.12.1', /linhas/u, /1,5/u, /24 pixels/u],
+  ['5.12.2', /parágrafos/u, /2 vezes/u, /32 pixels/u],
+  ['5.12.3', /letras/u, /0,12/u, /1,92 pixels/u],
+  ['5.12.4', /palavras/u, /0,16/u, /2,56 pixels/u],
+]) {
+  test(`${itemId} explains its own spacing measurement, configuration alternative and limits`, () => {
+    const result = guidance({ itemId, outcome: 'cantTell' });
+    const steps = result.reviewSteps.join(' ');
+    assert.match(result.impact, topic);
+    assert.match(result.correction, ratio);
+    assert.match(result.correction, /ou.*(?:configur|ajust)/u);
+    assert.match(result.correction, /sem perda/u);
+    assert.match(steps, /não.*(?:fotografia|captura)/u);
+    assert.match(steps, /apoio técnico/u);
+    assert.match(steps, /quatro.*juntos/u);
+    assert.match(steps, /não exige um botão/u);
+    assert.match(result.example, /16 pixels/u);
+    assert.match(result.example, exampleValue);
+    assert.doesNotMatch(result.example, /sigla/u);
+  });
+}
+
 // Catch the generic assistive-technology fallback hiding each item's actual review task.
 test('label-in-name guides a comparison of visible words and the recorded accessible name, not action activation', () => {
   const result = guidance({ itemId: '5.13.7', outcome: 'failed' });
@@ -181,7 +236,7 @@ test('status-message review tests a safe dynamic update without requiring focus 
 });
 
 test('specific instructions never convert hypothetical examples into evidence or pending into failure', () => {
-  for (const itemId of ['5.13.6', '5.13.7', '5.13.8', '5.13.2', '5.13.3', '5.12.11', '5.7.3', '5.7.4', '5.7.6', '5.9.1', '5.9.2', '5.9.3', '5.9.4', '5.8.3', '5.13.10', '5.13.1', '5.3.1', '5.3.2', '5.3.5', '5.12.5']) {
+  for (const itemId of ['5.1.7', '5.1.8', '5.1.9', '5.12.1', '5.12.2', '5.12.3', '5.12.4', '5.13.6', '5.13.7', '5.13.8', '5.13.2', '5.13.3', '5.12.11', '5.7.3', '5.7.4', '5.7.6', '5.9.1', '5.9.2', '5.9.3', '5.9.4', '5.8.3', '5.13.10', '5.13.1', '5.3.1', '5.3.2', '5.3.5', '5.12.5']) {
     const result = guidance({ itemId, outcome: 'cantTell', observed: 'Amostra registrada; revisão pendente.' });
     assert.equal(result.observed, 'O resultado disponível não confirma atendimento nem falha; é necessária revisão humana. Registro original: Amostra registrada; revisão pendente.', itemId);
     assert.match(result.correction, /^Se a revisão confirmar/, itemId);

@@ -4,6 +4,8 @@ Estado examinado: `2774ab3`, candidata 1.1.6; pacote anterior entregue: 1.1.5 (`
 
 **Fechamento posterior:** candidata corrigida `a41ddc1`, beta 1.1.6 entregue. Os itens 1–2 de “O que realmente falta” abaixo foram tratados por diagnóstico/RED/correção focada, E2E posterior e conferência/entrega do pacote. A execução ampla original continua 37/38; ver `2026-09-06-persona-bootstrap-readiness.md` e `2026-09-06-beta116-release.md`. O item 3, aprofundamento didático, permanece em andamento; o restante do texto preserva o ponto da reconciliação inicial.
 
+**Incremento posterior à entrega:** os dois exemplos concretos do item 3 foram corrigidos junto aos itens próximos: sete perfis 5.1.7–5.1.9 e 5.12.1–5.12.4, 222 testes focados e revisão independente C=0/I=0/M=0. Ver `2026-09-06-spacing-hover-guidance.md`. Ainda fora do ZIP 1.1.6; não houve novo gate nativo ou pacote nesse incremento. Os demais refinamentos didáticos não significam uma funcionalidade inteira ausente nem justificam alegar que todos os 146 itens já têm guia individual completo.
+
 O turno anterior produziu progresso verificável: commit `f6fda0e`, comparação dos valores registrados em ABNT 5.13.7, 173 testes focados aprovados e revisão independente C=0/I=0. A meta permanece ativa.
 
 ## Evidência de implementação e entrega

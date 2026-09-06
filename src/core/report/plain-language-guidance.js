@@ -90,6 +90,11 @@ const PROFILES = {
   }
 };
 
+const SPACING_REVIEW = [
+  'Consulte os valores registrados ou peça apoio técnico para medi-los e testar o ajuste; não estime medidas pela captura de tela. Se houver um mecanismo de configuração, registre qual foi usado e confira se textos continuam disponíveis e controles continuam utilizáveis, sem realizar envios reais.',
+  'Para conferir também a WCAG 1.4.12, teste os quatro espaçamentos juntos: linhas 1,5; parágrafos 2; letras 0,12; palavras 0,16 vezes a fonte, sem alterar outros estilos. Essa WCAG não exige um botão de ajuste no site nem esses valores como padrão. Considere propriedades aplicáveis ao idioma; se o ajuste não puder ser confirmado, registre a limitação, não uma falha automática.'
+];
+
 const SPECIFIC = {
   '5.1.1': {
     correction: 'Torne perceptível qual controle está selecionado pelo teclado, por exemplo com um contorno visível.',
@@ -98,6 +103,24 @@ const SPECIFIC = {
   '5.1.6': {
     correction: 'Permita sair do componente usando o teclado, conforme a interação prevista para ele.',
     steps: ['Entre no componente pelo teclado e tente avançar e voltar com Tab e Shift+Tab.', 'Confira se existe uma forma de sair pelo teclado; registre as teclas e o ponto em que a navegação fica presa, se isso ocorrer.']
+  },
+  '5.1.7': {
+    impact: 'Pessoas com baixa visão, dificuldade motora ou que usam teclado podem não encontrar uma explicação que aparece apenas quando o ponteiro está em um ponto ou um controle recebe foco.',
+    correction: 'Como melhoria recomendada pela ABNT, disponibilize a informação sem depender somente da passagem do mouse ou do foco do teclado, por exemplo no próprio texto ou por uma ajuda acionável.',
+    steps: ['Localize a dica ou o conteúdo que aparece ao passar o mouse sem clicar. Depois, confira se aparece ao chegar ao controle com Tab; foco é o controle selecionado pelo teclado.', 'Procure outra forma de obter a mesma informação, como texto permanente ou um botão de ajuda. Registre o que faz o conteúdo aparecer; a existência de uma dica não confirma, sozinha, falha na WCAG. Se houver conteúdo adicional, examine separadamente a permanência (5.1.8) e a possibilidade de dispensá-lo (5.1.9).'],
+    example: 'a explicação de um campo está escrita junto dele ou pode ser aberta pelo botão “Ajuda”, sem exigir que a pessoa descubra onde parar o ponteiro.'
+  },
+  '5.1.8': {
+    impact: 'Pessoas com baixa visão ou dificuldade de leitura podem precisar de mais tempo para localizar e ler uma dica. Se ela desaparecer sozinha, podem perder a informação antes de compreendê-la.',
+    correction: 'Mantenha o conteúdo adicional visível até a pessoa retirar o foco, mover o ponteiro para fora, dispensar o conteúdo ou a informação deixar de ser válida; não o esconda apenas porque passou um prazo.',
+    steps: ['Faça a dica aparecer pelo mouse e, separadamente, pelo teclado. Observe sem mover o mouse nem mudar o foco e registre se ela desaparece sozinha e o tempo observado; uma captura isolada não prova esse comportamento.', 'Se desaparecer, confira se você retirou o foco, saiu da área com o ponteiro, dispensou a dica ou se a informação deixou de ser válida. Diferencie essas situações de um desaparecimento por tempo. Se não conseguir reproduzir, mantenha a revisão pendente.'],
+    example: 'uma explicação de preenchimento some sozinha enquanto a pessoa ainda a lê, sem que ela tenha movido o ponteiro ou o foco; isso merece verificação. Já um aviso de “Carregando” pode deixar de ser válido quando a operação termina.'
+  },
+  '5.1.9': {
+    impact: 'Quem usa ampliação da tela pode ter uma área pequena para ler. Uma dica que cobre o conteúdo pode impedir a leitura se só desaparecer quando a pessoa abandona aquele ponto.',
+    correction: 'Permita dispensar o conteúdo adicional sem retirar o foco nem reposicionar o ponteiro, quando não se aplicar a exceção de erro de entrada ou de conteúdo que não oculta nem substitui outro conteúdo.',
+    steps: ['Faça a dica aparecer e confira se ela cobre ou substitui outra informação. Sem preencher dados reais, verifique também se ela comunica um erro de preenchimento.', 'Se não houver uma dessas exceções, tente dispensá-la sem mover o mouse nem mudar o foco, por exemplo com Esc. Essa tecla não é a única solução possível: registre o mecanismo oferecido e se ele preserva a posição. Não conclua falha só por Esc não funcionar.', 'Registre se a dica comunica erro de entrada ou não oculta nem substitui outro conteúdo: essas são alternativas previstas neste item. Uma captura mostra a posição, mas é necessário reproduzir a interação para verificar como dispensar.'],
+    example: 'uma dica aparece cobrindo parte de um parágrafo; ao pressionar Esc, ela fecha e a pessoa continua no mesmo controle, podendo ler o que estava atrás.'
   },
   '5.2.1': { correction: 'Forneça um texto alternativo que transmita a informação relevante da imagem no contexto.' },
   '5.2.2': {
@@ -172,6 +195,30 @@ const SPECIFIC = {
     correction: 'Acrescente uma forma de comunicar a informação que não dependa apenas da cor.',
     steps: ['Localize a informação comunicada por cor.', 'Confira se um texto, símbolo ou outra indicação também permite entender a mesma informação.'],
     example: 'um campo inválido apresenta uma mensagem de erro além da borda vermelha.'
+  },
+  '5.12.1': {
+    impact: 'Pessoas com baixa visão ou dificuldade de leitura podem confundir linhas muito próximas e perder o ponto em que estavam lendo.',
+    correction: 'Ofereça entrelinhas de pelo menos 1,5 vez o tamanho da fonte ou um mecanismo para configurar esse espaçamento sem perda de conteúdo ou funcionalidade, conforme a alternativa prevista na ABNT.',
+    steps: ['Localize um bloco de texto com várias linhas. Confira o tamanho da fonte e a altura de cada linha (entrelinha); essa medida não é apenas a faixa branca entre as letras de duas linhas.', ...SPACING_REVIEW],
+    example: 'para uma fonte de 16 pixels, a entrelinha de referência é 24 pixels (16 × 1,5). Ao aplicar o ajuste, o final de um aviso continua legível, sem ficar cortado pela caixa.'
+  },
+  '5.12.2': {
+    impact: 'Pessoas com baixa visão ou dificuldade de leitura podem ter dificuldade para distinguir parágrafos muito próximos e perceber onde termina uma ideia e começa outra.',
+    correction: 'Ofereça espaço entre parágrafos de pelo menos 2 vezes o tamanho da fonte ou um mecanismo para configurar esse espaçamento sem perda de conteúdo ou funcionalidade, conforme a alternativa prevista na ABNT.',
+    steps: ['Localize dois parágrafos consecutivos. Confira o tamanho da fonte e o espaço que separa os parágrafos; não confunda esse espaço com a distância entre linhas de um mesmo parágrafo.', ...SPACING_REVIEW],
+    example: 'para uma fonte de 16 pixels, o espaço de referência entre parágrafos é 32 pixels (16 × 2). Depois do ajuste, o parágrafo seguinte e o botão abaixo dele continuam disponíveis.'
+  },
+  '5.12.3': {
+    impact: 'Pessoas com baixa visão ou dificuldade de leitura podem precisar afastar as letras para reconhecer palavras com mais facilidade.',
+    correction: 'Ofereça espaçamento entre letras de pelo menos 0,12 vez o tamanho da fonte ou um mecanismo para configurar esse espaçamento sem perda de conteúdo ou funcionalidade, conforme a alternativa prevista na ABNT.',
+    steps: ['Localize um bloco de texto e confira o tamanho da fonte e o ajuste de espaçamento entre letras. A equipe técnica pode verificar letter-spacing; medir a largura do desenho de uma letra não verifica esse ajuste.', ...SPACING_REVIEW],
+    example: 'para uma fonte de 16 pixels, o ajuste de referência entre letras é 1,92 pixels (16 × 0,12). Um título pode ocupar mais espaço, mas suas últimas letras continuam disponíveis para leitura.'
+  },
+  '5.12.4': {
+    impact: 'Pessoas com baixa visão ou dificuldade de leitura podem precisar de mais separação entre palavras para reconhecê-las sem confundi-las.',
+    correction: 'Ofereça espaçamento entre palavras de pelo menos 0,16 vez o tamanho da fonte ou um mecanismo para configurar esse espaçamento sem perda de conteúdo ou funcionalidade, conforme a alternativa prevista na ABNT.',
+    steps: ['Localize um bloco de texto e confira o tamanho da fonte e o ajuste de espaçamento entre palavras. A equipe técnica pode verificar word-spacing; não confunda esse ajuste com o espaçamento entre letras.', ...SPACING_REVIEW],
+    example: 'para uma fonte de 16 pixels, o ajuste de referência entre palavras é 2,56 pixels (16 × 0,16). Depois do ajuste, uma instrução pode quebrar em mais linhas, mas nenhuma palavra fica inacessível.'
   },
   '5.12.5': {
     impact: 'Pessoas com dificuldade de leitura podem perder a sequência quando o texto justificado cria espaços desiguais entre as palavras para alinhar as duas bordas do parágrafo.',
