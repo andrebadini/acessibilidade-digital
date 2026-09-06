@@ -44,13 +44,15 @@ function stableId(prefix, value) {
 async function capture(cdp, params, kind, metadata = {}) {
   if (!cdp || typeof cdp.command !== 'function') throw new TypeError('O cliente CDP de captura é inválido.');
   const response = await cdp.command('Page.captureScreenshot', params);
+  // Local receipt time, not a browser-attested raster instant or trusted timestamp.
+  const captureReceivedAt = new Date(Date.now()).toISOString();
   const png = pngPayload(response?.data);
   return {
     status: 'captured',
     evidenceId: stableId(kind, `${response.data}\u0000${JSON.stringify(metadata)}`),
     dataUrl: png.dataUrl,
     hash: await sha256Hex(png.bytes),
-    metadata: { kind, mimeType: 'image/png', ...metadata }
+    metadata: { kind, mimeType: 'image/png', ...metadata, captureReceivedAt }
   };
 }
 

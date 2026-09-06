@@ -6,6 +6,8 @@ export function projectEvidenceProvenance(evidence, pages) {
     pageUrl: page?.finalUrlObserved === true ? page.finalUrl ?? null : null,
     startedAt: page?.timestamps?.startedAt ?? null,
     endedAt: page?.timestamps?.endedAt ?? null,
+    ...(evidence.metadata?.captureReceivedAt
+      ? { captureReceivedAt: evidence.metadata.captureReceivedAt } : {}),
   });
 }
 
@@ -15,7 +17,9 @@ export function evidenceProvenanceRows(evidence) {
     ['URL da página observada', provenance?.pageUrl ?? 'indisponível'],
     ['Período observado da página', provenance?.startedAt && provenance?.endedAt
       ? `${provenance.startedAt} – ${provenance.endedAt}` : 'indisponível'],
-    ['Instante individual da captura', 'não registrado'],
+    provenance?.captureReceivedAt
+      ? ['Captura recebida pela extensão (UTC)', `${provenance.captureReceivedAt} — relógio local; não certificado`]
+      : ['Instante individual da captura', 'não registrado'],
     ['URL da mídia', evidence.mediaUrl ?? 'não registrada'],
   ];
 }

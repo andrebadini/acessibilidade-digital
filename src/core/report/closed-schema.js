@@ -397,7 +397,7 @@ function assertEvidence(artifact) {
 }
 
 function assertEvidenceMetadata(metadata) {
-  assertAllowedRecord(metadata, set('annotationMargin clip height highlightBox kind mimeType width'));
+  assertAllowedRecord(metadata, set('annotationMargin captureReceivedAt clip height highlightBox kind mimeType width'));
   for (const key of ['annotationMargin', 'height', 'width']) {
     if (metadata[key] !== undefined && !Number.isFinite(metadata[key])) throw new TypeError();
   }

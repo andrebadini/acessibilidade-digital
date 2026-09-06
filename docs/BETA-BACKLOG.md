@@ -8,6 +8,8 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Próximas entregas funcionais
 
+- horário individual de recebimento de PNG implementado depois da beta 1.1.4: `metadata.captureReceivedAt`, preservação em modelos/JSON/orçamento e apresentação viva/HTML compartilhada com impressão. Relógio local explicitamente não certificado; datas antigas não são inventadas. Testes locais e duas revisões C=0/I=0; ainda falta a prova nativa antes de incluir no próximo pacote. Registro: `docs/qa/2026-09-06-capture-receipt-time.md`.
+
 - histórico legível das decisões humanas entregue na beta 1.1.4: pessoa avaliadora, data UTC, conclusão, nota e evidências correlacionadas. PDF completo real e HTML validados; resumo executivo omite esses detalhes com aviso. A beta 1.1.3 exportava esses campos apenas no JSON. Registros: `docs/qa/2026-09-06-readable-human-history.md` e `docs/qa/2026-09-06-beta114-release.md`.
 
 - conferência com múltiplos sinais clicáveis na página original: entregue desde a beta 1.1.1, com limite transparente de 64 ocorrências interativas e associação por identificador estável corroborado. A beta 1.1.4 acrescenta alternativa local para elementos sem ID com classes seguras e caminho estrutural coincidentes, validada no Chrome real e incluída no pacote. Elementos sem essa correspondência continuam não localizados. QA `docs/qa/2026-09-06-idless-page-markers.md` e `docs/qa/2026-09-06-beta114-native.md`; plano `docs/superpowers/plans/2026-09-06-in-page-abnt-markers.md`.
@@ -35,6 +37,8 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Infraestrutura de testes não bloqueante
 
+- horário de recebimento: acrescentar assertions específicas para Promise CDP rejeitada, tentativa de data em mapa derivado e adulteração do horário em elemento/artefato omitido. Guardas existentes revisados sem falha funcional; já há prova de data adulterada/removida na captura integral, ausência de data em mapa projetado e preservação no orçamento real.
+
 - atualização viva da revisão: acrescentar uma asserção nativa direta sobre a mudança de contagem/célula/ocorrência. Já comprovados salvamento real, nova identidade, modelo/decisão exportados, matriz completa e preservação dos formulários; revisão independente C=0/I=0/M=1.
 
 - continuidade W3, revisão06/09 C0/I0/M1: troca terminal→terminal preserva agendamento do timer de transporte; callback verifica estado atual e envia somente heartbeat sem dados. Não reutiliza autoridade nem despacha operação antiga. Eventualmente invalidar geração nessa troca para coincidir literalmente com a matriz de callbacks antigos; sem impacto funcional conhecido ou renovação de prazo.
@@ -60,4 +64,4 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 - itens contextuais continuam sujeitos a revisão humana;
 - conteúdo protegido, canvas, vídeo, frames de terceiros e páginas que mudam durante a coleta podem limitar o resultado;
 - o anúncio do leitor de tela é uma estimativa explicável, não uma reprodução garantida de todos os leitores de tela e configurações.
-- o contrato atual registra o período de observação da página, mas não o instante individual de cada raster. O relatório distingue explicitamente esses conceitos; acrescentar carimbo por captura exige coleta/schema próprios e não pode ser reconstruído retrospectivamente.
+- a beta 1.1.4 registra o período de observação da página, mas não o instante individual de cada raster. O código posterior passa a registrar o recebimento de cada PNG pela extensão, distinguindo-o do período observado e do instante interno do raster, que o navegador não atesta por esse fluxo. O relógio local não é certificado e datas antigas não podem ser reconstruídas retrospectivamente.

@@ -22,6 +22,17 @@ const ATTACHED_COPY_RELOADED_MESSAGE = 'A auditoria foi executada em uma cópia 
 const ATTACHED_COPY_EVIDENCE_ONLY_MESSAGE = 'A página foi avaliada em uma cópia temporária já removida. O destaque ao vivo não está disponível; consulte as capturas e os seletores registrados no momento da auditoria.';
 const ATTACHED_COPY_RETURN_MESSAGE = 'Retorno e destaque na aba original indisponíveis: a auditoria usou uma cópia temporária e não alterou a aba original.';
 
+test('live evidence annex shows individual receipt time and local-clock qualification without inventing old times', async () => {
+  const { model, summary } = await fixture({ mutateDraft(draft) {
+    draft.evidence[0].metadata.captureReceivedAt = '2026-08-26T14:00:30.000Z';
+  } });
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const annex = root.querySelector('[data-report-annex]');
+  assert.match(annex.textContent, /Captura recebida pela extensão \(UTC\): 2026-08-26T14:00:30\.000Z — relógio local; não certificado/u);
+  assert.match(annex.textContent, /Instante individual da captura: não registrado/u);
+});
+
 test('export deletion is an explicit unchecked choice next to export and is reset by a fresh view', async () => {
   const { model, summary } = await fixture();
   const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });

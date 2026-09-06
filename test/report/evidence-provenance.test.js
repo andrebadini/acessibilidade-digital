@@ -9,6 +9,19 @@ const pages = [
     timestamps: { startedAt: '2026-09-05T12:01:00.000Z', endedAt: '2026-09-05T12:01:02.000Z' } },
 ];
 
+test('receipt provenance remains attached to each artifact and is never borrowed by a derived map', () => {
+  const model = { pages, evidence: [
+    { evidenceId: 'ev-a', pageId: 'page-a', kind: 'full-page', metadata: { captureReceivedAt: '2026-09-05T12:00:00.500Z' } },
+    { evidenceId: 'ev-b', pageId: 'page-b', kind: 'element', metadata: { captureReceivedAt: '2026-09-05T12:01:01.000Z' } },
+    { evidenceId: 'ev-map', pageId: 'page-a', kind: 'announcement-map', fullPageEvidenceId: 'ev-a' },
+  ] };
+  const projected = projectTechnicalEvidence(model);
+  assert.equal(projected.find(value => value.evidenceId === 'ev-a').provenance.captureReceivedAt, '2026-09-05T12:00:00.500Z');
+  assert.equal(projected.find(value => value.evidenceId === 'ev-b').provenance.captureReceivedAt, '2026-09-05T12:01:01.000Z');
+  assert.equal(projected.find(value => value.evidenceId === 'ev-map').provenance.captureReceivedAt, undefined);
+  assert.equal(projected.find(value => value.evidenceId === 'ev-b').provenance.startedAt, pages[1].timestamps.startedAt);
+});
+
 test('evidence provenance follows its exact page instead of the first page or media URL', () => {
   const model = { pages, evidence: [
     { evidenceId: 'ev-b', pageId: 'page-b', kind: 'element', mediaUrl: 'https://media.test/image.png' },

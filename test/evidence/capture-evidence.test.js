@@ -17,6 +17,22 @@ function fakeCdp(data = PNG_1PX) {
   };
 }
 
+test('timestamps each PNG receipt after the command resolves, not before waiting or from the previous raster', async t => {
+  let clock = Date.parse('2026-09-06T12:00:00.000Z');
+  t.mock.method(Date, 'now', () => clock);
+  const cdp = { async command() {
+    clock += 2000;
+    return { data: PNG_1PX };
+  } };
+  const full = await captureFullPage(cdp);
+  const element = await captureElement(cdp, { x: 0, y: 0, width: 10, height: 10 });
+  assert.equal(full.metadata.captureReceivedAt, '2026-09-06T12:00:02.000Z');
+  assert.equal(element.metadata.captureReceivedAt, '2026-09-06T12:00:04.000Z');
+  const absent = await captureElement(cdp, { x: 0, y: 0, width: 0, height: 10 });
+  assert.equal(absent.metadata, undefined);
+  assert.equal(clock, Date.parse('2026-09-06T12:00:04.000Z'));
+});
+
 test('captures and validates one deterministic full-page PNG evidence record', async () => {
   const cdp = fakeCdp();
   const first = await captureFullPage(cdp, { cssContentSize: { width: 800, height: 1200 } });
@@ -30,7 +46,9 @@ test('captures and validates one deterministic full-page PNG evidence record', a
   assert.equal(first.hash, createHash('sha256').update(Buffer.from(PNG_1PX, 'base64')).digest('hex'));
   assert.match(first.hash, /^[a-f0-9]{64}$/u);
   assert.equal(first.evidenceId, second.evidenceId);
-  assert.deepEqual(first.metadata, { kind: 'full-page', mimeType: 'image/png', width: 800, height: 1200 });
+  assert.equal(new Date(first.metadata.captureReceivedAt).toISOString(), first.metadata.captureReceivedAt);
+  const { captureReceivedAt, ...geometry } = first.metadata;
+  assert.deepEqual(geometry, { kind: 'full-page', mimeType: 'image/png', width: 800, height: 1200 });
 });
 
 test('hashes the decoded PNG bytes instead of a short stable identifier', async () => {

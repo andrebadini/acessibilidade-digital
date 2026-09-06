@@ -508,7 +508,7 @@ function projectV1Evidence(artifact, pageId) {
       'announcementPreview', 'description', 'descriptionSource', 'name', 'nameSource', 'role', 'states', 'valueStatus', 'visibleText',
     ]);
   }
-  if (artifact.metadata !== undefined) output.metadata = projectRecord(artifact.metadata, ['annotationMargin', 'clip', 'height', 'highlightBox', 'kind', 'mimeType', 'width']);
+  if (artifact.metadata !== undefined) output.metadata = projectRecord(artifact.metadata, ['annotationMargin', 'captureReceivedAt', 'clip', 'height', 'highlightBox', 'kind', 'mimeType', 'width']);
   return sanitizeEvidenceArtifactUrls(output);
 }
 
@@ -1923,6 +1923,12 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById, scopeMode = '
     if (!pageById.has(pageId)) throw new TypeError(`Evidência ${id} referencia página desconhecida.`);
     if (artifact.hash !== undefined && typeof artifact.hash !== 'string') {
       throw new TypeError(`Evidência ${id}.hash deve ser texto quando presente.`);
+    }
+    if (Object.hasOwn(artifact.metadata ?? {}, 'captureReceivedAt')) {
+      canonicalInstant(artifact.metadata.captureReceivedAt, 'metadata.captureReceivedAt');
+      if (!artifact.dataUrl && artifact.pixelState !== 'omitted-budget') {
+        throw new TypeError('Horário de recebimento exige evidência raster.');
+      }
     }
     evidenceIds.add(id);
     artifactById.set(id, artifact);
