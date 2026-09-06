@@ -7,49 +7,71 @@ import {
   disconnectPanelAuditSessions,
 } from '../../src/background/service-worker.js';
 import { panelBootstrapStorageKey } from '../../src/background/panel-port.js';
+import { createInMemoryAuditStore } from '../../src/storage/audit-store.js';
+import { createAuditDeletionCoordinatorV1 } from '../../src/background/audit-deletion-coordinator.js';
+import { createHighlightBindingV1 } from '../../src/background/highlight-binding.js';
+import { createHighlightBindingStore } from '../../src/background/highlight-binding-store.js';
+import { createHighlightController } from '../../src/background/highlight-controller.js';
+import { createTargetOperationQueue } from '../../src/background/target-operation-queue.js';
 
 const PANEL_SESSION = 'S'.repeat(22);
 
-function fixture({ clearOk = true, disconnectOk = true } = {}) {
+async function fixture({ clearOk = true, disconnectOk = true } = {}) {
   const calls = [];
-  const bindings = new Set(['audit-1']);
+  const now = '2026-08-30T12:00:00.000Z'; const epoch = Date.parse(now);
+  const controls = { clearOk, disconnectOk }; const values = {};
   const sessionArea = {
-    async get() { return {}; },
-    async set() {},
-    async remove() {},
+    async get(key) { return key === null ? structuredClone(values) :
+      Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {}; },
+    async set(entries) { Object.assign(values, structuredClone(entries)); },
+    async remove(key) { for (const name of Array.isArray(key) ? key : [key]) delete values[name]; },
   };
-  const auditStore = {
-    async getAuditSnapshot(auditId) {
-      calls.push(['snapshot-audit', auditId]);
-      return { model: { auditId }, capability: Object.freeze({}) };
-    },
-    async deleteAudit(auditId) { calls.push(['delete-audit', auditId]); return { deleted: true }; },
-    async deleteAllAudits() { calls.push(['delete-all']); return { deleted: 1 }; },
-  };
-  const highlightController = {
-    async clearAudit(auditId) {
-      calls.push(['clear-highlight', auditId]);
-      return clearOk ? { ok: true, state: 'clear' } : { ok: false, code: 'HIGHLIGHT_CLEANUP_UNCONFIRMED' };
-    },
-  };
-  const highlightBindingStore = {
-    async deleteAudit(auditId) { calls.push(['delete-binding', auditId]); bindings.delete(auditId); return true; },
-    async snapshot() {
-      const bindingsByAuditPage = Object.create(null);
-      for (const auditId of bindings) bindingsByAuditPage[`${auditId}\u0000page-1`] = { auditId };
-      return { bindingsByAuditPage, activeOverlayByTab: Object.create(null) };
-    },
-  };
+  const auditStore = createInMemoryAuditStore();
+  const model = structuredClone(SAMPLE_AUDIT); model.auditId = 'audit-1';
+  await auditStore.commitAudit('audit-1', model, { auditId: 'audit-1' }, { now });
+  const highlightBindingStore = createHighlightBindingStore({ sessionArea, now: () => epoch });
+  for (const [auditId, tabId] of [['audit-1', 7], ['foreign-audit', 8]]) {
+    await highlightBindingStore.put(createHighlightBindingV1({ version: 1, auditId, pageId: 'page-1',
+      modelRevision: 1, modelHash: 'a'.repeat(64), tabId, windowId: 3,
+      topDocumentId: `document-${tabId}`, topUrlEvidence: 'https://example.test/',
+      topUrlSessionDigest: `hmac-sha256:${'a'.repeat(43)}`, createdAt: epoch, expiresAt: epoch + 600_000,
+      locatorVersion: 'CSSSelectorV1+StructuralSignatureV1', targets: { 'occ-1': { documentId: `document-${tabId}`,
+        frameId: 0, backendNodeId: 1, evidenceId: 'ev-1', selector: { syntax: 'CSSSelectorV1', value: 'button', byteLength: 6, complexity: 1 },
+        structuralSignature: { version: 'StructuralSignatureV1', sha256: 'b'.repeat(64) }, rectBucket: null } } }));
+    assert.equal((await highlightBindingStore.beginOverlay({ version: 1, auditId, occurrenceId: 'occ-1',
+      tabId, windowId: 3, topDocumentId: `document-${tabId}`, documentId: `document-${tabId}`, frameId: 0,
+      nonce: 'R'.repeat(22), createdAt: epoch, expiresAt: epoch + 600_000, state: 'installing', revision: 1 })).ok, true);
+  }
+  const highlightController = createHighlightController({ bindingStore: highlightBindingStore, targetQueue: createTargetOperationQueue(),
+    chromeApi: { runtime: { id: 'extension-test' }, tabs: { async get(id) { return { id, status: 'complete', discarded: false }; } } },
+    chromeAdapter: { async injectHighlight(input) {
+      calls.push(['clear-overlay', input.tabId]);
+      assert.equal(await auditStore.getAudit('audit-1'), undefined, 'model must already be unavailable before raster-overlay cleanup');
+      return controls.clearOk ? { ok: true, nonce: input.command.nonce, documentId: input.documentId, frameId: 0 } : { ok: false };
+    } },
+    sessionAuthority: { async authorizeSession() { throw new Error('unused'); } },
+    modelAuthority: { async loadValidated() { throw new Error('unused'); } },
+    liveVerifier: { async verify() { throw new Error('unused'); } }, now: () => epoch,
+    randomBytes: length => new Uint8Array(length).fill(1),
+  });
+  const coordinator = createAuditDeletionCoordinatorV1({ store: auditStore,
+    authority: { async clearAudit() { return { ok: true, invalidated: 0 }; }, async finalizeAudit() { return { ok: true, purged: 0 }; } },
+    panelPortRegistry: { async clearAudit(auditId) { calls.push(['disconnect-panel', auditId]); return controls.disconnectOk; } },
+    reportPortRegistry: { async clearAudit() { return 0; } }, highlightController, highlightBindingStore,
+    reportLaunch: { async clearAudit() { return true; } }, exportLaunch: { async clearAudit() { return true; } },
+    rawNavigationVault: { async clearAudit() { return 0; } },
+    pixelCaptureState: { async readSuspension() { return null; }, async revokeAudit() { throw new Error('unused'); }, async finish() { return true; } },
+    ownedDisposableTabStore: { async clearAudit() { return 0; }, async purgeRemovedAudit() { return 0; } },
+    blobRegistry: { async clearAudit() { return 0; } }, now: () => now,
+  });
   const operations = createReportOperations({
     chromeApi: { runtime: {} }, auditStore, sessionArea,
-    modelNow: () => '2026-08-30T12:00:00.000Z', highlightController, highlightBindingStore,
-    async disconnectPanelAudit(auditId) {
-      calls.push(['disconnect-panel', auditId]);
-      return disconnectOk;
-    },
+    modelNow: () => now, highlightController, highlightBindingStore,
+    requestAuditDeletion: request => coordinator.request(request),
     async publishHighlightState(value) { calls.push(['publish-highlight', value]); return { delivered: 0 }; },
   });
-  return { operations, calls };
+  const manualAuthorization = scope => ({ version: 1, scope, auditId: scope === 'one' ? 'audit-1' : null, authorizedAt: now });
+  return { operations, calls, auditStore, highlightBindingStore, coordinator, controls, manualAuthorization };
 }
 
 function reviewFixture({ clearOk = true } = {}) {
@@ -106,36 +128,43 @@ function reviewFixture({ clearOk = true } = {}) {
   };
 }
 
-test('delete-one clears the real overlay and binding before deleting the audit', async () => {
-  const { operations, calls } = fixture();
-  assert.deepEqual(await operations.deleteAudit({ auditId: 'audit-1' }), {
-    ok: true, auditId: 'audit-1', deleted: true,
+test('delete-one stages data first then clears the real overlay and binding without touching foreign state', async () => {
+  const env = await fixture();
+  assert.deepEqual(await env.operations.deleteAudit({ auditId: 'audit-1', manualAuthorization: env.manualAuthorization('one') }), {
+    ok: true, auditId: 'audit-1', deleted: true, status: 'complete',
   });
-  assert.deepEqual(calls.slice(0, 6).map(([name, value]) => name === 'publish-highlight'
-    ? [name, value.state]
-    : [name, value]), [
-    ['snapshot-audit', 'audit-1'], ['clear-highlight', 'audit-1'],
-    ['delete-binding', 'audit-1'], ['publish-highlight', 'clear'],
-    ['disconnect-panel', 'audit-1'], ['delete-audit', 'audit-1'],
-  ]);
+  assert.equal(await env.auditStore.getAudit('audit-1'), undefined);
+  assert.equal(await env.highlightBindingStore.getActiveOverlay(7), null);
+  assert.equal(await env.highlightBindingStore.findTarget({ auditId: 'audit-1', occurrenceId: 'occ-1' }), null);
+  assert.notEqual(await env.highlightBindingStore.getActiveOverlay(8), null);
+  assert.notEqual(await env.highlightBindingStore.findTarget({ auditId: 'foreign-audit', occurrenceId: 'occ-1' }), null);
+  assert.deepEqual(env.calls, [['disconnect-panel', 'audit-1'], ['clear-overlay', 7]]);
 });
 
-test('delete-one fails closed before audit deletion when overlay cleanup is unconfirmed', async () => {
-  const { operations, calls } = fixture({ clearOk: false });
-  assert.deepEqual(await operations.deleteAudit({ auditId: 'audit-1' }), {
-    ok: false, code: 'REPORT_OPERATION_FAILED',
+test('unconfirmed overlay cleanup leaves the staged audit unavailable and its binding recoverable', async () => {
+  const env = await fixture({ clearOk: false });
+  assert.deepEqual(await env.operations.deleteAudit({ auditId: 'audit-1', manualAuthorization: env.manualAuthorization('one') }), {
+    ok: true, auditId: 'audit-1', deleted: true, status: 'pending',
   });
-  assert.equal(calls.some(([name]) => name === 'delete-audit'), false);
-  assert.equal(calls.some(([name]) => name === 'delete-binding'), false);
+  assert.equal(await env.auditStore.getAudit('audit-1'), undefined);
+  assert.equal((await env.highlightBindingStore.getActiveOverlay(7)).state, 'clearing');
+  assert.notEqual(await env.highlightBindingStore.findTarget({ auditId: 'audit-1', occurrenceId: 'occ-1' }), null);
+  assert.equal((await env.auditStore.listDeletionTombstonesV1({ limit: 25 })).length, 1);
+  env.controls.clearOk = true; await env.coordinator.resumePending({ limit: 25 });
+  assert.equal(await env.highlightBindingStore.getActiveOverlay(7), null);
+  assert.equal(await env.highlightBindingStore.findTarget({ auditId: 'audit-1', occurrenceId: 'occ-1' }), null);
+  assert.deepEqual(await env.auditStore.listDeletionTombstonesV1({ limit: 25 }), []);
 });
 
-test('delete-one fails closed before audit deletion when its panel session cannot be disconnected', async () => {
-  const { operations, calls } = fixture({ disconnectOk: false });
-  assert.deepEqual(await operations.deleteAudit({ auditId: 'audit-1' }), {
-    ok: false, code: 'REPORT_OPERATION_FAILED',
+test('unconfirmed panel disconnection leaves a tombstone and does not discard overlay ownership', async () => {
+  const env = await fixture({ disconnectOk: false });
+  assert.deepEqual(await env.operations.deleteAudit({ auditId: 'audit-1', manualAuthorization: env.manualAuthorization('one') }), {
+    ok: true, auditId: 'audit-1', deleted: true, status: 'pending',
   });
-  assert.equal(calls.some(([name]) => name === 'disconnect-panel'), true);
-  assert.equal(calls.some(([name]) => name === 'delete-audit'), false);
+  assert.equal(await env.auditStore.getAudit('audit-1'), undefined);
+  assert.notEqual(await env.highlightBindingStore.getActiveOverlay(7), null);
+  assert.equal(env.calls.some(([name]) => name === 'clear-overlay'), false);
+  assert.equal((await env.auditStore.listDeletionTombstonesV1({ limit: 25 })).length, 1);
 });
 
 test('disconnects only the exact durable panel bootstrap for the deleted audit', async () => {
@@ -203,18 +232,18 @@ test('fails closed on a malformed or unconfirmed target panel bootstrap', async 
   });
 });
 
-test('delete-all clears every highlight binding first and fails closed on unconfirmed cleanup', async () => {
-  const success = fixture();
-  assert.deepEqual(await success.operations.deleteAllAudits(), { ok: true, deleted: 1 });
-  assert.deepEqual(success.calls.slice(0, 4).map(([name, value]) => name === 'publish-highlight'
-    ? [name, value.state]
-    : [name, value]), [
-    ['clear-highlight', 'audit-1'], ['delete-binding', 'audit-1'], ['publish-highlight', 'clear'], ['delete-all', undefined],
-  ]);
-
-  const denied = fixture({ clearOk: false });
-  assert.deepEqual(await denied.operations.deleteAllAudits(), { ok: false, code: 'REPORT_OPERATION_FAILED' });
-  assert.equal(denied.calls.some(([name]) => name === 'delete-all'), false);
+test('delete-all clears only inventoried audit highlights and counts unconfirmed cleanup as pending', async () => {
+  const success = await fixture();
+  assert.deepEqual(await success.operations.deleteAllAudits({ manualAuthorization: success.manualAuthorization('all') }),
+    { ok: true, deleted: 1, pending: 0, status: 'complete' });
+  assert.equal(await success.highlightBindingStore.getActiveOverlay(7), null);
+  assert.notEqual(await success.highlightBindingStore.getActiveOverlay(8), null);
+  const pending = await fixture({ clearOk: false });
+  assert.deepEqual(await pending.operations.deleteAllAudits({ manualAuthorization: pending.manualAuthorization('all') }),
+    { ok: true, deleted: 1, pending: 1, status: 'pending' });
+  assert.equal(await pending.auditStore.getAudit('audit-1'), undefined);
+  assert.notEqual(await pending.highlightBindingStore.findTarget({ auditId: 'audit-1', occurrenceId: 'occ-1' }), null);
+  assert.notEqual(await pending.highlightBindingStore.getActiveOverlay(8), null);
 });
 
 test('review commit confirms overlay and binding invalidation before changing the model identity', async () => {
