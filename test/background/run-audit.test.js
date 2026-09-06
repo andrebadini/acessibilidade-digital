@@ -894,7 +894,7 @@ function rawPage() {
     warnings: [],
     layoutMetrics: { cssContentSize: { width: 800, height: 1200 }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } },
     nodes: [
-      { backendNodeId: 1, tagName: 'button', attributes: { id: 'ok' }, text: 'OK', parentBackendNodeId: null, rect: { x: 10, y: 20, width: 80, height: 30 } },
+      { backendNodeId: 1, tagName: 'button', focusable: true, attributes: { id: 'ok' }, text: 'OK', parentBackendNodeId: null, rect: { x: 10, y: 20, width: 80, height: 30 } },
       { backendNodeId: 2, tagName: 'button', attributes: { id: 'other' }, text: 'Outro', parentBackendNodeId: null, rect: { x: 10, y: 60, width: 80, height: 30 } },
       { backendNodeId: 3, tagName: 'video', attributes: { id: 'clip' }, text: '', parentBackendNodeId: null, rect: { x: 10, y: 100, width: 320, height: 180 }, media: { kind: 'video', currentSrc: 'https://user:pass@example.test/clip.mp4?token=REMOVE&lang=pt' } },
     ],
@@ -4070,7 +4070,10 @@ function decodeHtmlText(value) {
 }
 
 test('keeps a structural snippet failure partial while no-pixels never retries screenshots', async () => {
-  const adapter = fakeAdapter({ fullPageFailure: new DOMException('capture timeout', 'TimeoutError'), snippetFailureNode: 1 });
+  const page = rawPage();
+  // Keep a second concrete finding: generic page questions no longer select every control.
+  page.nodes[1].attributes.role = 'presentation';
+  const adapter = fakeAdapter({ page, fullPageFailure: new DOMException('capture timeout', 'TimeoutError'), snippetFailureNode: 1 });
   const model = await runAudit({ url: 'https://example.test/', chromeAdapter: adapter, now: clock, idFactory: () => 'audit-partial' });
   assert.equal(model.session.status, 'partial');
   assert.ok(model.session.diagnostics.some(item => item.code === 'PIXEL_CAPTURE_OMITTED'));

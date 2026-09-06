@@ -317,7 +317,7 @@ function humanPolicy(ruleId, reason, data) {
   if (reason === 'page-level-insufficient-observation' && PAGE_INSUFFICIENT_RULES.has(ruleId)) {
     return `Revise a página e suas interações quanto a: ${item.title}.`;
   }
-  if (reason === 'page-level-human-judgment' && !HUMAN_TARGET_RULES.has(ruleId)) {
+  if (reason === 'page-level-human-judgment') {
     return `Revise a página e o processo quanto a: ${item.title}.`;
   }
   return null;

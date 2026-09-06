@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { MANUAL_ITEMS, MANUAL_REVIEW_RULES } from '../../src/core/rules/manual-review.js';
 import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
 import { runRules } from '../../src/core/rules/run-rules.js';
+import { validateCoreRuleTargetInventory } from '../../src/core/report/remediation-policy.js';
 
 function record(nodeId, tagName, overrides = {}) {
   return { nodeId, tagName, attributes: {}, text: '', children: [], parentId: null, hidden: false, selectorHint: `#${nodeId}`, role: '', ...overrides };
@@ -60,6 +61,8 @@ test('a generic review question is one page task, not 300 alleged element proble
   assert.equal(value.targets.length, 1);
   assert.equal(value.targets[0].nodeId, 'document');
   assert.equal(value.targets[0].data.reason, 'page-level-human-judgment');
+  assert.equal(validateCoreRuleTargetInventory(value.ruleId, value.outcome, value.targets.map(({selectorHint, ...target}) => target)), true,
+    'the grouped task must be accepted by the production report boundary');
 });
 
 test('transversal assisted review uses page evidence when target collection is insufficient', async () => {

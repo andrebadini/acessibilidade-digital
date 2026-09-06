@@ -4,7 +4,7 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação da beta
 
-A versão atual é **1.1.7**: confira o [guia de instalação e teste](docs/COMO-TESTAR-BETA-1.1.7.md) e o [registro de verificação](docs/qa/2026-09-06-beta117-release.md). O fluxo de conferência usa sinais clicáveis na página e grupos ABNT no painel; as novas instruções explicam dicas temporárias e espaçamentos de texto com exemplos. A revisão automática continua sem certificar conformidade integral.
+A versão atual é **1.1.8**: confira o [guia de instalação e teste](docs/COMO-TESTAR-BETA-1.1.8.md) e o [diagnóstico e verificação](docs/qa/2026-09-06-google-counts.md). Corrige a multiplicação de revisões genéricas e falsos positivos reproduzidos no Google, acrescenta gráfico e índice técnico transparente e reduz a repetição no PDF. Os guias didáticos, sinais clicáveis e grupos ABNT continuam disponíveis. A revisão automática continua sem certificar conformidade integral.
 
 1. Descompacte o arquivo da beta em uma pasta própria. Se estiver usando o código-fonte, use esta pasta do projeto.
 2. Abra `chrome://extensions` no Chrome.
@@ -49,7 +49,7 @@ A beta 1.1.4 acrescenta histórico legível das conclusões humanas no HTML/PDF 
 
 A beta 1.1.5 acrescenta o horário de recebimento individual das capturas, identificado como relógio local não certificado, e orientações práticas para ABNT 5.13.6, 5.13.7 e 5.13.8. Não inventa datas para evidências antigas nem altera conclusões a partir dos exemplos. Consulte o [guia de teste e atualização](docs/COMO-TESTAR-BETA-1.1.5.md) e o [registro da entrega verificada](docs/qa/2026-09-06-beta115-release.md).
 
-A partir da beta 1.1.2, **Imprimir resumo / salvar PDF** oferece uma edição curta com totais, limitações, matriz ABNT e metodologia. Escolha **Salvar como PDF** no diálogo do navegador. O resumo identifica a auditoria e revisão, mas não substitui as fichas e evidências do relatório completo. Ctrl+P e a exportação automática dos quatro formatos continuam completos.
+A partir da beta 1.1.2, **Imprimir resumo / salvar PDF** oferece uma edição curta com totais, limitações, matriz ABNT e metodologia. Escolha **Salvar como PDF** no diálogo do navegador. O resumo identifica a auditoria e revisão, mas não substitui as fichas e evidências do relatório completo. Na beta 1.1.8, a exportação automática mantém HTML completo, CSV e JSON e produz um **PDF de leitura**: agrupa revisões, apresenta as orientações essenciais e evita repetir dossiês por ocorrência. Os registros técnicos integrais continuam no HTML/JSON da mesma revisão.
 
 A beta 1.1.3 corrige o salvamento da revisão humana e atualiza imediatamente o relatório aberto, preservando notas e formulários. **Não salve novas decisões na beta 1.1.2**: ela pode deixar o hash da revisão pendente e impedir a leitura do relatório. A atualização previne novas gravações defeituosas, mas não recupera automaticamente registros já afetados. Preserve os dados e arquivos exportados; uma nova auditoria não recupera decisões anteriores. Detalhes no [registro da correção](docs/qa/2026-09-06-live-review-refresh.md).
 

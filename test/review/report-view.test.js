@@ -98,6 +98,11 @@ test('PDF presents grouped review guidance without repeating the per-occurrence 
   assert.match(print,/PDF de leitura/u);
   assert.match(html,/data-results-overview/u);
   assert.match(print,/data-automatic-score/u);
+  for (const page of model.pages) {
+    assert.ok(print.includes(page.timestamps.startedAt));
+    assert.ok(print.includes(page.timestamps.endedAt));
+    assert.ok(print.includes(page.finalUrl));
+  }
   const root=renderReportView({view,document:new Document(),onExport(){}});
   assert.ok(root.querySelector('[data-results-overview]'));
   assert.equal((print.match(/data-report-issue /gu)??[]).length,(html.match(/data-report-issue /gu)??[]).length);
