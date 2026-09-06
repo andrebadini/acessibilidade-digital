@@ -1,4 +1,5 @@
 import { createReviewDecision } from '../core/review/decisions.js';
+import { accessibilityGuidance } from '../core/report/plain-language-guidance.js';
 import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
 import { buildCompleteReportSummary } from '../panel/panel-summary.js';
 import { createAuditStore } from '../storage/audit-store.js';
@@ -298,7 +299,9 @@ async function returnToAuditedPage() {
   status.textContent = 'Não foi possível retornar à página auditada. Ela pode ter sido fechada ou alterada.';
 }
 
-regenerate.addEventListener('click', () => { void requestExport(); });
+regenerate.addEventListener('click', () => { void requestExport({
+  deleteAfterCompleteExport: document.querySelector('[data-report-delete-after-export]')?.checked === true,
+}); });
 returnToPage.addEventListener('click', () => { void returnToAuditedPage(); });
 
 chrome.runtime.onMessage.addListener((message, sender) => {
@@ -335,7 +338,8 @@ function evidenceFor(occurrence) {
 function nextUnanswered(card) {
   let next = card.nextElementSibling;
   while (next?.classList.contains('answered')) next = next.nextElementSibling;
-  (next?.querySelector('button') || document.querySelector('a[href="#report-root"]'))?.focus();
+  if (next) next.open = true;
+  (next?.querySelector('summary') || document.querySelector('a[href="#report-root"]'))?.focus();
 }
 
 async function saveDecision(occurrence, answer, note, card, trigger) {
@@ -379,10 +383,20 @@ function renderCard(entry) {
   const occurrence = auditModel.occurrences.find(value => value.occurrenceId === entry.occurrenceId);
   const item = auditModel.itemResults.find(value => value.id === entry.itemId);
   if (!occurrence || !item) return;
-  const card = document.createElement('article');
+  const card = document.createElement('details');
   card.className = 'review-card';
   card.id = `review-${occurrence.occurrenceId.replace(/[^A-Za-z0-9_-]/gu, '-')}`;
-  appendText(card, 'h3', entry.question || `O item “${item.title}” está conforme no contexto apresentado?`);
+  appendText(card, 'summary', `Item ${item.id} — ${entry.question || item.title}`);
+  const guidance = accessibilityGuidance({ itemId: item.id, title: item.title, outcome: 'cantTell',
+    observed: entry.reason || occurrence.justification || item.humanReason });
+  appendText(card, 'h3', 'Como revisar este resultado');
+  appendText(card, 'p', guidance.impact);
+  appendText(card, 'p', guidance.observed);
+  const steps = document.createElement('ol');
+  for (const step of guidance.reviewSteps) appendText(steps, 'li', step);
+  card.append(steps);
+  appendText(card, 'p', guidance.example);
+  appendText(card, 'p', 'Escolha “conforme” somente se você conseguiu verificar que o requisito é atendido; “não conforme” se confirmou a barreira. Se não conseguiu testar ou ficou em dúvida, escolha “não foi possível determinar”. A dúvida não deve virar aprovação nem reprovação. Descreva na nota o que testou e o que aconteceu.');
   appendText(card, 'p', `ABNT NBR 17225 — item ${item.id} (${item.classification || 'classificação não informada'}).`);
   if (typeof item.printedId === 'string' && item.printedId !== item.id) {
     appendText(card, 'p', `Nota editorial: a impressão consultada mostra “${item.printedId}”; esta ferramenta usa a referência normalizada “${item.id}” da Seção 5, sem atribuir errata à ABNT.`);
@@ -390,17 +404,29 @@ function renderCard(entry) {
   const wcag = (item.wcag || []).map(reference => `${reference.id || reference} nível ${reference.level || ''}`.trim()).join(', ');
   appendText(card, 'p', `WCAG: ${wcag || 'sem referência vinculada'}.`);
   appendText(card, 'p', `Razão: ${entry.reason || occurrence.justification || item.humanReason || 'revisão humana necessária'}.`);
+  const technical = document.createElement('details');
+  appendText(technical, 'summary', 'Consultar código e evidências desta revisão');
+  card.append(technical);
   for (const evidence of evidenceFor(occurrence)) {
-    if (evidence.selector?.css) appendText(card, 'code', `Seletor: ${evidence.selector.css}`);
-    if (evidence.snippet) appendText(card, 'code', evidence.snippet);
+    if (evidence.selector?.css) appendText(technical, 'code', `Seletor: ${evidence.selector.css}`);
+    if (evidence.snippet) appendText(technical, 'code', evidence.snippet);
     // The original full-page image is already in the report annex. Refer to it
     // instead of embedding the same potentially large raster in every form.
     if (evidence.kind === 'full-page') {
       const anchor = evidenceAnchorById.get(evidence.evidenceId);
       if (anchor) {
-        const link = appendText(card, 'a', 'Ver captura completa da página nas evidências');
+        const link = appendText(technical, 'a', 'Ver captura completa da página nas evidências');
         link.href = `#${anchor}`;
-      } else appendText(card, 'p', 'Captura completa indisponível nesta revisão.');
+        link.addEventListener('click', event => {
+          const target = document.getElementById(anchor);
+          if (!target) return;
+          event.preventDefault();
+          for (let parent = target.parentElement; parent; parent = parent.parentElement) {
+            if (parent.tagName === 'DETAILS') parent.open = true;
+          }
+          target.setAttribute('tabindex', '-1'); target.focus(); target.scrollIntoView({ block: 'start' });
+        });
+      } else appendText(technical, 'p', 'Captura completa indisponível nesta revisão.');
       continue;
     }
     if (isSafeEvidenceImageUrl(evidence.dataUrl, chrome.runtime.getURL('/'))) {
@@ -408,7 +434,7 @@ function renderCard(entry) {
       image.className = 'evidence-media';
       image.src = evidence.dataUrl;
       image.alt = evidence.kind === 'full-page' ? 'Captura completa da página auditada' : `Captura do elemento relacionado ao item ${item.id}`;
-      card.append(image);
+      technical.append(image);
     }
   }
   const noteLabel = appendText(card, 'label', 'Nota opcional');
@@ -467,7 +493,8 @@ async function start() {
   });
   reportRoot.replaceChildren(report);
   const reviewTarget = report.querySelector('[data-review-controls-target]');
-  reviewTarget.append(reviewControls, list);
+  reviewTarget.parentElement.insertBefore(reviewControls, reviewTarget);
+  reviewTarget.append(list);
   deleteAudit.disabled = false;
   if (reportSessionState === 'result') {
     connectReportHighlightState();

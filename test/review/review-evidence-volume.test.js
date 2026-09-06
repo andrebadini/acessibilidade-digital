@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { isSafeEvidenceImageUrl } from '../../src/review/review-state.js';
+import { accessibilityGuidance } from '../../src/core/report/plain-language-guidance.js';
 
 // Execute the actual form renderer without starting its Chrome session bootstrap.
 const source = await readFile(new URL('../../src/review/review.js', import.meta.url), 'utf8');
@@ -25,7 +26,7 @@ function fixture({ kind = 'full-page', anchor = 'report-evidence-3', dataUrl = p
   const list = new Element('div');
   let validations = 0;
   const render = runInNewContext(`${renderSource}\nrenderCard;`, {
-    document, auditModel, list,
+    document, auditModel, list, accessibilityGuidance,
     evidenceAnchorById: new Map(anchor === null ? [] : [['ev-1', anchor]]),
     evidenceFor: occurrence => auditModel.evidence.filter(item => occurrence.evidenceRefs.includes(item.evidenceId)),
     appendText(parent, tag, text) { const node = document.createElement(tag); node.textContent = text; parent.append(node); return node; },
@@ -40,6 +41,20 @@ function fixture({ kind = 'full-page', anchor = 'report-evidence-3', dataUrl = p
   };
 }
 function descendants(root) { return root.children.flatMap(child => [child, ...descendants(child)]); }
+
+test('human review forms start collapsed and explain the decision with a guide and a hypothetical example', () => {
+  const run = fixture(); run.render();
+  const card = run.list.children[0];
+  assert.equal(card.tagName, 'details');
+  assert.notEqual(card.open, true);
+  assert.equal(card.children[0].tagName, 'summary');
+  const text = descendants(card).map(node => node.textContent).join(' ');
+  assert.match(text, /Como revisar/iu);
+  assert.match(text, /exemplo/iu);
+  assert.match(text, /não foi possível determinar/iu);
+  assert.equal(descendants(card).filter(node => node.tagName === 'button').length, 4);
+  assert.deepEqual(run.auditModel, run.before);
+});
 
 test('many review forms reference the original full-page annex without copying or decoding its pixels', () => {
   const run = fixture();

@@ -991,8 +991,11 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   root.append(failed);
 
   const review = section(document, 3);
-  review.setAttribute('data-review-controls-target', '');
-  review.append(element(document, 'p', 'Use o cartão “Revisões humanas” no sumário para localizar as verificações pendentes. Registre a conclusão e as evidências nos controles de revisão.'));
+  review.append(element(document, 'p', 'Use o cartão “Revisões humanas” no sumário para localizar as verificações pendentes. Abra os formulários abaixo quando estiver pronto para registrar suas conclusões.'));
+  const reviewForms = document.createElement('details');
+  reviewForms.setAttribute('data-review-controls-target', '');
+  reviewForms.append(element(document, 'summary', 'Abrir os formulários de revisão humana'));
+  review.append(reviewForms);
   root.append(review);
 
   const maps = section(document, 4);

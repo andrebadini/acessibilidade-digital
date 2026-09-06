@@ -106,6 +106,7 @@ dialog:not([open]) { display: none; }
   [data-report-item-group][hidden], [data-report-issue][hidden] { display: block !important; }
   [data-report-item-group]:not([open]) > *:not(summary), [data-report-issue-details]:not([open]) > *:not(summary) { display: block !important; }
   .executive-actions, .section-nav, .report-filters, .review-controls { display: none !important; }
+  #review-list { display: none !important; }
   [data-report-technical]:not([open]) > *:not(summary), [data-report-limitations]:not([open]) > *:not(summary) { display: block !important; }
   [data-report-evidence-preview] figure[data-evidence-kind="element"] { break-inside: avoid; }
   [data-report-evidence-preview] figure[data-evidence-kind="full-page"] { break-inside: auto; }

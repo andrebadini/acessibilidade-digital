@@ -17,3 +17,16 @@ test('review forwards explicit export choice; a default request never inherits d
   assert.deepEqual(sent.map(value => value.deleteAfterCompleteExport), [true, false]);
   assert.match(source, /onExport:\s*options\s*=>\s*\{\s*void requestExport\(options\)/u);
 });
+
+test('regenerate uses the same current checkbox choice as the main export button', () => {
+  const start = source.indexOf("regenerate.addEventListener('click'");
+  const handler = source.slice(start, source.indexOf('\nreturnToPage.addEventListener', start));
+  assert.ok(handler);
+  const values = [];
+  runInNewContext(handler, {
+    regenerate: { addEventListener(_type, callback) { callback(); } },
+    document: { querySelector() { return { checked: true }; } },
+    requestExport(options) { values.push(options?.deleteAfterCompleteExport); },
+  });
+  assert.deepEqual(values, [true]);
+});
