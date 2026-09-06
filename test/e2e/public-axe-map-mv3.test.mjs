@@ -118,6 +118,7 @@ test('proves axe/map only through action → Side Panel → public URL consent �
     const card = group.querySelector('[data-result="humanReview"]');
     card.querySelector('[data-report-issue-details]').open = true;
     card.scrollIntoView({ block: 'start', behavior: 'instant' });
+    return true;
   })()`);
   await extension.captureJourney('friendly-report-occurrence', report, { captureBeyondViewport: false });
   await extension.click(report, 'button[data-report-export]');

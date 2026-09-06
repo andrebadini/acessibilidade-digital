@@ -4,11 +4,15 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Próximas entregas funcionais
 
+- conferência com múltiplos sinais clicáveis na página original, conforme as imagens WAVE enviadas durante o fechamento da1.1.0: requisito funcional em implementação separada, não disponível no mapa estático/destaque único atual. Plano `docs/superpowers/plans/2026-09-06-in-page-abnt-markers.md`.
+
 - mapa numerado consolidado incluído no candidato 1.0.8 e validado por E2E público; o pacote 1.0.7 permanece sem esse recurso;
 - retenção automática por prazo e limpeza recuperável implementadas no candidato atual; personalização do prazo e indicação individual da data de expiração podem ser acrescentadas;
 - atualizar as imagens e o texto de eventual canal público de distribuição após estabilização da beta.
 
 ## Refinamentos visuais não bloqueantes
+
+- impressão1.1.0: fixture pública de179ocorrências passou de400para254páginas após corrigir quebras artificiais e espaçamento. O PDF completo preserva todo o anexo; estudar uma edição executiva separada para leitura curta, sem substituir ou descartar a edição técnica.
 
 - atualizar imediatamente o sumário visual após salvar uma decisão humana. Até esse refinamento, reabra o relatório para renovar a visualização ou use “Gerar relatório atualizado” para exportar a revisão persistida; o comando Imprimir do navegador imprime a visualização atualmente aberta.
 
@@ -28,6 +32,8 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 - complementar o teste das referências de captura integral nas fichas de revisão com a integração DOM de evidências cuja ordem original difira da ordem do anexo (correlação atual revisada, sem falha identificada).
 
 ## Aprofundamentos defensivos não bloqueantes
+
+- remover também os pequenos marcadores privados de preferência/fechamento que podem permanecer em storage.session após exclusão. O candidato nativo confirmou ausência de modelo, evidências, URLs privadas, recibos, abas próprias e tombstones; esses marcadores restantes não contêm conteúdo da página nem URLs.
 
 - avaliar recursos nativos futuros do Chrome que possam reduzir ainda mais o intervalo técnico inevitável entre a última verificação de sinais sensíveis e o efeito de captura, sem enfraquecer a prova do documento imediatamente anterior ao raster.
 

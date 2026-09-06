@@ -206,9 +206,10 @@ test(name, { timeout: 300_000 }, async t => {
     let highlightable = false;
     for (const focusId of controls) {
       await extension.evaluate(panel, `(() => {
-        const button=document.querySelector('button[data-focus-id="${focusId}"]');
+        const button=[...document.querySelectorAll('button[data-focus-id]')].find(node=>node.dataset.focusId===${JSON.stringify(focusId)});
         const group=button?.closest('details[data-abnt-group]');
         if(group&&!group.open)group.querySelector('summary').click();
+        return Boolean(button);
       })()`);
       await extension.click(panel, `button[data-focus-id="${focusId}"]`);
       const action = await extension.waitForValue(panel,
@@ -218,8 +219,20 @@ test(name, { timeout: 300_000 }, async t => {
     }
     assert.equal(highlightable, true, 'at least one confirmed element-level finding must offer live highlighting');
   } else {
-    await extension.click(panel, 'button[data-intent="SELECT_OCCURRENCE"]');
+    await extension.evaluate(panel, `(() => {
+      const button=document.querySelector('[data-result-card][data-classification="failed"] button[data-intent="SELECT_OCCURRENCE"]');
+      const group=button?.closest('details[data-abnt-group]');
+      if(group&&!group.open)group.querySelector('summary').click();
+      return Boolean(button);
+    })()`);
+    await extension.click(panel, '[data-result-card][data-classification="failed"] button[data-intent="SELECT_OCCURRENCE"]');
   }
+  await extension.evaluate(panel, `(() => {
+    for(const block of document.querySelectorAll('[data-detail-block="normative"], [data-detail-block="accessibility"]')) {
+      if(block.matches('details')&&!block.open)block.querySelector('summary').click();
+    }
+    return true;
+  })()`);
   const detail = await extension.waitForValue(panel, `(() => ({
     visible:Boolean(document.querySelector('[data-result-detail]')),
     normative:document.querySelector('[data-detail-block="normative"]')?.textContent??'',
@@ -325,9 +338,9 @@ test(name, { timeout: 300_000 }, async t => {
     navigation:Boolean(document.querySelector('[data-report-navigation]')),
     exportReady:Boolean(document.querySelector('button[data-report-export]')),
     occurrences:document.querySelectorAll('[data-report-issue]').length,
-    normative:document.body?.innerText.includes('WCAG 2.2:')&&document.body?.innerText.includes('ABNT NBR 17225:'),
-    announcement:document.body?.innerText.includes('Anúncio estimado:'),
-    limitation:document.body?.innerText.includes('PIXEL_CAPTURE_OMITTED')||/sem imagens|captura raster/iu.test(document.body?.innerText??'')
+    normative:document.body?.textContent.includes('WCAG 2.2:')&&document.body?.textContent.includes('ABNT NBR 17225:'),
+    announcement:document.body?.textContent.includes('Anúncio estimado:'),
+    limitation:document.body?.textContent.includes('PIXEL_CAPTURE_OMITTED')||/sem imagens|captura raster/iu.test(document.body?.textContent??'')
   }))()`, value => value?.navigation === true && value?.exportReady === true && value?.occurrences > 0,
   { timeoutMs: 30_000, intervalMs: 50 });
   assert.equal(reportState.normative, true);

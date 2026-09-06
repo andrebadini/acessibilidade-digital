@@ -353,6 +353,7 @@ async function startLoopbackSite() {
       main{max-width:42rem}button,a{min-height:44px;padding:10px;display:inline-block}
       </style></head><body><main><h1>Página local ${page}</h1>
       <p>Conteúdo determinístico para a auditoria pública de acessibilidade.</p>
+      ${page === 'A' || page === 'B' ? '<label for="test-password">Senha de teste (campo vazio)</label><input id="test-password" type="password" autocomplete="current-password">' : ''}
       ${page === 'A' ? '<img src="/pixel-a.png" alt="Símbolo local A"><button type="button">Ação A</button>' : ''}
       ${page === 'B' ? '<img src="/pixel-b.png"><a href="/crawler-trap">Página relacionada</a>' : ''}
       </main></body></html>`);
@@ -400,8 +401,37 @@ async function runPublicBatchRetentionProof({ extension, loopback }) {
   let explicitTwoPageBatch = true;
   let sanitized = true;
 
+  let panel;
   for (const optIn of [false, true]) {
-    const panel = await extension.openSidePanelFromAction();
+    if (panel) {
+      await panel.command('Page.bringToFront');
+      await extension.waitForValue(panel, 'document.visibilityState', value => value === 'visible');
+      await extension.evaluate(panel, 'new Promise(resolve=>requestAnimationFrame(()=>resolve(true)))', { awaitPromise: true });
+    }
+    try {
+      panel = await extension.openSidePanelFromAction();
+    } catch (cause) {
+      const contexts = await extension.runtimeContexts({ contextTypes: ['SIDE_PANEL', 'POPUP'] });
+      const targets = await extension.browser.command('Target.getTargets');
+      const panelContexts = contexts.filter(value => value.contextType === 'SIDE_PANEL');
+      const panelTargets = (targets.targetInfos ?? []).filter(value => value.url?.includes('/src/panel/index.html'));
+      // A nova ação pode substituir o contexto que o helper observou antes da navegação.
+      // Reanexa ao contexto fresco; não repete a ação nem reutiliza a sessão revogada.
+      if (optIn && cause.code === 'CDP_PAGE_TIMEOUT' && panelContexts.length === 1 &&
+        contexts.every(value => value.contextType !== 'POPUP') && panelTargets.length === 1 &&
+        panelTargets[0].type === 'page' && panelTargets[0].url === panelContexts[0].documentUrl) {
+        panel = await extension.waitForSidePanel();
+      } else {
+        throw new Error('RETENTION_PANEL_ACTION_UNCONFIRMED:' + JSON.stringify({ optIn,
+          sidePanelContexts: panelContexts.length,
+          popupContexts: contexts.filter(value => value.contextType === 'POPUP').length,
+          panelTargets: panelTargets.map(value => ({ type: value.type, contextUrlMatches: panelContexts.some(context => context.documentUrl === value.url) })),
+        }), { cause });
+      }
+    }
+    await panel.command('Page.bringToFront');
+    await extension.waitForValue(panel, 'document.visibilityState', value => value === 'visible');
+    await extension.evaluate(panel, 'new Promise(resolve=>requestAnimationFrame(()=>resolve(true)))', { awaitPromise: true });
     const contexts = await extension.runtimeContexts({ contextTypes: ['SIDE_PANEL', 'POPUP'] });
     nativePanelOnly &&= contexts.filter(value => value.contextType === 'SIDE_PANEL').length === 1 &&
       contexts.every(value => value.contextType !== 'POPUP');
@@ -411,9 +441,18 @@ async function runPublicBatchRetentionProof({ extension, loopback }) {
     assert.equal(await extension.evaluate(panel, "document.querySelector('#delete-after-export') === null"), true,
       'a escolha de exclusão pertence ao relatório, não ao início da captura');
     await extension.click(panel, '[name="capture-mode"][value="full-evidence"]');
-    await extension.evaluate(panel, "(() => { const input=document.querySelector('#audit-urls'); input.value=" +
-      JSON.stringify(urls.join('\n')) + "; input.dispatchEvent(new Event('input',{bubbles:true})); })()");
+    assert.equal(await extension.evaluate(panel, "(() => { const input=document.querySelector('#audit-urls'); if(!input)return false; input.value=" +
+      JSON.stringify(urls.join('\n')) + "; input.dispatchEvent(new Event('input',{bubbles:true})); return true; })()"), true);
     await extension.click(panel, '[data-action="start-batch-audit"]');
+    try {
+      await extension.waitForValue(panel, "document.querySelector('[data-screen]')?.dataset.screen",
+        value => ['running', 'result', 'unavailable'].includes(value), { timeoutMs: 5000, intervalMs: 50 });
+    } catch (cause) {
+      const state = await extension.evaluate(panel, "({screen:document.querySelector('[data-screen]')?.dataset.screen," +
+        "hidden:document.hidden,buttonDisabled:document.querySelector('[data-action=\"start-batch-audit\"]')?.disabled," +
+        "inputValid:document.querySelector('#audit-urls')?.validity.valid})");
+      throw new Error('RETENTION_BATCH_START_UNCONFIRMED:' + JSON.stringify({ optIn, state }), { cause });
+    }
 
     for (const pageNumber of [1, 2]) {
       const paused = await extension.waitForValue(panel, "(() => { const root=document.querySelector('[data-screen]'); return {" +
@@ -423,10 +462,30 @@ async function runPublicBatchRetentionProof({ extension, loopback }) {
         value?.status === 'privacy-paused' && value.page === pageNumber && value.confirm,
       { timeoutMs: 90_000, intervalMs: 50 });
       assert.deepEqual(paused, { screen: 'running', status: 'privacy-paused', page: pageNumber, confirm: true });
-      const privacy = await extension.evaluate(harness, "chrome.storage.session.get(null).then(session => ({" +
-        "sanitized:!JSON.stringify(session).includes(" + JSON.stringify(sensitiveMarker) + ")," +
-        "noInlinePixels:!JSON.stringify(session).includes('data:image')}))", { awaitPromise: true });
-      consentBeforePixels &&= privacy.sanitized && privacy.noInlinePixels;
+      const privacy = await extension.evaluate(harness, `(async()=>{
+        const session=await chrome.storage.session.get(null);
+        const auditId=session['audita:active-audit-job:v1']?.auditId;
+        const pageId=${JSON.stringify(`page-${pageNumber}`)};
+        const owners=Object.entries(session).filter(([key,value])=>key.startsWith('audita:owned-tab:v2:')&&value?.auditId===auditId+':'+pageId);
+        const store=(await import(chrome.runtime.getURL('src/storage/audit-store.js'))).createAuditStore();
+        const progressStore=(await import(chrome.runtime.getURL('src/background/batch-progress-store.js'))).createBatchProgressStoreV1({indexedDB});
+        const progress=typeof auditId==='string'?await progressStore.readCompleted({auditId}):null;
+        const parent=typeof auditId==='string'?await store.getReportRevision(auditId):null;
+        const child=typeof auditId==='string'?await store.getReportRevision(auditId+':'+pageId):null;
+        return {sanitized:Object.entries(session).every(([key,value])=>
+          !JSON.stringify(value).includes(${JSON.stringify(sensitiveMarker)})||
+          key.startsWith('audita:raw-navigation:v1:')&&value?.version==='RawNavigationUrlV1'&&
+          value.auditId===auditId&&value.purpose==='batch-page'),
+          noSessionRaster:! /data:image\\/(?:png|jpeg|webp);base64,/iu.test(JSON.stringify(session)),
+          ownerPaused:owners.length===1&&owners[0][1].state==='retained-for-consent',
+          noCurrentReport:!parent&&!child,
+          completedPages:(progress?.pages??[]).map(page=>page.pageId)};
+      })()`, { awaitPromise: true });
+      // A imagem SVG presente no próprio HTML da fixture não é um raster capturado.
+      // A página anterior autorizada pode estar no progress store, mas a atual não.
+      assert.deepEqual(privacy, { sanitized: true, noSessionRaster: true, ownerPaused: true,
+        noCurrentReport: true, completedPages: pageNumber === 1 ? [] : ['page-1'] });
+      consentBeforePixels &&= privacy.sanitized && privacy.noSessionRaster && privacy.ownerPaused && privacy.noCurrentReport;
       assert.equal(await extension.evaluate(panel, 'document.body.innerText.includes(' + JSON.stringify(sensitiveMarker) + ')'), false);
       await extension.click(panel, '[data-action="confirm-pixel-capture"]');
     }
@@ -458,7 +517,7 @@ async function runPublicBatchRetentionProof({ extension, loopback }) {
     narrowLayoutUsable &&= await narrowLayoutProof(report, '#delete-audit');
 
     const spoof = await extension.evaluate(report, "chrome.runtime.sendMessage({type:'AUDIT_DELETED',auditId:" +
-      JSON.stringify(auditId) + ",reason:'delete-one'}).catch(()=>null)", { awaitPromise: true });
+      JSON.stringify(auditId) + ",reason:'delete-one'}).then(()=>true,()=>true)", { awaitPromise: true });
     void spoof;
     assert.equal((await readNativeAuditProof(extension, auditId)).present, true,
       'uma mensagem de exclusão emitida pelo relatório não concede autorização');
@@ -502,9 +561,22 @@ async function runPublicBatchRetentionProof({ extension, loopback }) {
       // O coordinator fecha a própria aba do relatório. O sucesso é comprovado no harness independente.
       await pressKey(report, 'Enter', 'Enter', 13).catch(() => {});
     }
-    const deleted = await extension.waitForValue(harness, nativeAuditProofExpression(auditId),
-      value => value?.present === false && value.retentionAbsent && value.journalSettled && value.tombstoneAbsent,
-      { timeoutMs: 30_000, intervalMs: 50 });
+    let deleted;
+    try {
+      deleted = await extension.waitForValue(harness, nativeAuditProofExpression(auditId),
+        value => value?.present === false && value.retentionAbsent && value.journalSettled && value.tombstoneAbsent,
+        { timeoutMs: 30_000, intervalMs: 50 });
+    } catch (cause) {
+      const state = await readNativeAuditProof(extension, auditId).catch(() => ({ unavailable: true }));
+      const resources = await extension.evaluate(harness, "chrome.storage.session.get(null).then(values=>Object.entries(values)" +
+        ".filter(([key,value])=>key.includes(" + JSON.stringify(auditId) + ")||value?.auditId===" + JSON.stringify(auditId) + ")" +
+        ".map(([key,value])=>({prefix:key.split(':').slice(0,3).join(':'),version:value?.version??null,state:value?.state??null," +
+        "phase:value?.phase??null,purpose:value?.purpose??null,attempts:value?.attempts??null})))", { awaitPromise: true })
+        .catch(() => []);
+      const dialog = await extension.evaluate(report, "({open:document.querySelector('#delete-audit-dialog')?.open??false," +
+        "status:document.querySelector('#delete-audit-dialog-status')?.textContent??null})").catch(() => ({ closed: true }));
+      throw new Error('RETENTION_DELETION_UNCONFIRMED:' + JSON.stringify({ optIn, state, resources, dialog }), { cause });
+    }
     assert.equal(deleted.receiptAbsent, true);
     assert.equal(deleted.sanitized, true);
     await extension.waitForValue(harness, "chrome.tabs.query({}).then(tabs=>tabs.every(tab=>{" +
@@ -582,11 +654,15 @@ async function waitForNewPhysicalDownloads(extension, auditId, beforeIds) {
 async function narrowLayoutProof(page, selector) {
   await page.command('Emulation.setDeviceMetricsOverride', { width: 320, height: 900, deviceScaleFactor: 1, mobile: false });
   try {
+    // :focus-visible acompanha navegação por teclado, não foco programático após clique.
+    await pressKey(page, 'Tab', 'Tab', 9);
     const state = await evaluate(page, "(()=>{const button=document.querySelector(" + JSON.stringify(selector) +
       ");button?.focus();return {height:button?.getBoundingClientRect().height??0," +
       "overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth+1," +
       "outline:button?getComputedStyle(button).outlineStyle:'none'};})()");
-    return state.height >= 44 && !state.overflow && state.outline !== 'none';
+    const usable = state.height >= 44 && !state.overflow && state.outline !== 'none';
+    assert.ok(usable, 'RETENTION_NARROW_LAYOUT:' + JSON.stringify({ selector, ...state }));
+    return usable;
   } finally { await page.command('Emulation.clearDeviceMetricsOverride'); }
 }
 

@@ -359,9 +359,12 @@ export async function pressShortcut(target, shortcut, options = {}) {
 }
 
 export async function captureScreenshot(target, options = {}) {
-  if (!plain(options)) throw fixed('SCREENSHOT_DENIED');
+  if (!plain(options) || (Object.hasOwn(options, 'fromSurface') && typeof options.fromSurface !== 'boolean')) {
+    throw fixed('SCREENSHOT_DENIED');
+  }
   const result = await command(target, 'Page.captureScreenshot', {
     format: 'png', captureBeyondViewport: options.captureBeyondViewport !== false,
+    ...(Object.hasOwn(options, 'fromSurface') ? { fromSurface: options.fromSurface } : {}),
   });
   if (typeof result?.data !== 'string') throw fixed('SCREENSHOT_DENIED');
   const bytes = Buffer.from(result.data, 'base64');
@@ -1084,8 +1087,9 @@ async function qaFile(directory, name, code, mustExist = false) {
 
 export async function captureJourney(launch, name, target, captureOptions = {}) {
   if (typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,155}$/u.test(name)) throw fixed('QA_CAPTURE_DENIED');
-  if (!plain(captureOptions) || Reflect.ownKeys(captureOptions).some(key => key !== 'captureBeyondViewport') ||
-    (Object.hasOwn(captureOptions, 'captureBeyondViewport') && typeof captureOptions.captureBeyondViewport !== 'boolean')) {
+  if (!plain(captureOptions) || Reflect.ownKeys(captureOptions).some(key => !['captureBeyondViewport', 'fromSurface'].includes(key)) ||
+    (Object.hasOwn(captureOptions, 'captureBeyondViewport') && typeof captureOptions.captureBeyondViewport !== 'boolean') ||
+    (Object.hasOwn(captureOptions, 'fromSurface') && typeof captureOptions.fromSurface !== 'boolean')) {
     throw fixed('QA_CAPTURE_DENIED');
   }
   const filename = `${name}.png`;

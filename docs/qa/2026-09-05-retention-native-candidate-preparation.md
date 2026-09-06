@@ -24,4 +24,18 @@ Os controles antigos de exclusão coletiva no painel não existem no percurso at
 
 Preparação somente: `node --check` e `git diff --check` passaram. As expressões de navegador geradas por `runRealStorageProof` e `nativeAuditProofExpression` também foram compiladas sem erro de sintaxe, sem executar o navegador.
 
-Nenhum E2E, Chrome, pacote ou publicação foi executado nesta tarefa. O teste requer o candidato F3 integrado e deve ser executado pelo agente principal no marco nativo; este registro não declara GREEN funcional.
+Nesse marco inicial de preparação, nenhum E2E, Chrome, pacote ou publicação havia sido executado; o candidato F3 integrado ainda precisava da execução nativa registrada abaixo.
+
+## Candidato nativo executado
+
+Após integração, o teste foi executado isoladamente em Chrome for Testing 152, com perfil e diretório de downloads próprios. Resultado final: **1/1 PASS, 25,7 s**, comando `node --test --test-name-pattern='enforces retention' test/e2e/retention-indexeddb-mv3.test.mjs`, com `AUDITA_E2E_CHROME` previamente configurado.
+
+- Confirmados os dois lotes, os oito arquivos físicos (quatro formatos por lote), tamanho e SHA-256 preservados, exclusão manual e pós-exportação com modelos/receipts/tombstones ausentes e aba do relatório encerrada.
+- Confirmadas a confirmação individual por página, aba retida para consentimento, ausência de relatório da página atual antes de confirmar e progresso somente das páginas anteriormente autorizadas.
+- A sanitização durante a pausa admite URL original somente no cofre privado `RawNavigationUrlV1` do mesmo lote, finalidade `batch-page`; DOM, evidências exportadas e armazenamento após cleanup continuam sem o marcador. SVG da própria fixture não é confundido com raster capturado.
+- Confirmados 320 px sem overflow, alvos de 44 px e foco visível em modalidade teclado. A prova anterior aplicava foco programático após clique, que não representa a modalidade `:focus-visible`.
+- Confirmados IndexedDB v3, migração, CAS com duas conexões, lease ocupada, rollback, reabertura, exportação parcial preservada e finalização completa seguida de staging autorizado.
+
+O candidato revelou uma falha produtiva real no cleanup de exportação: comparação de `terminalProof` dependente da ordem das propriedades retornadas pelo Chrome storage. RED focado reproduziu a falha; a correção limitada à canonicalização desse proof passou o RED e três provas de rejeição (valor alterado, chave extra e getter sem execução). A repetição nativa acima confirmou a limpeza integral.
+
+O segundo acionamento legítimo da extensão pode substituir o contexto do painel enquanto o helper ainda espera o URL anterior. O teste reanexa pelo contexto fresco somente para `CDP_PAGE_TIMEOUT`, com exatamente um painel e nenhum popup; não repete a ação e não reutiliza a sessão revogada. Nenhum outro erro é ocultado.

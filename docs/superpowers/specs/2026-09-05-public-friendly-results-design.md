@@ -23,3 +23,18 @@ Reorganizar a apresentação existente, preservando modelos, evidências e decis
 5. Candidato integrado: suíte lógica ampla, verify, Chrome real e pacote; durante implementação somente testes relacionados e diff-check.
 
 Critérios: agrupamentos sem duplicatas; cartões filtram sem alterar totais/exportações; estado desconhecido nunca promovido a falha; dados novos continuam validados; captura só pelo fluxo existente autorizado; relatório extenso abre sem perder evidências; revisão e exportação operáveis por teclado. Pendências gerais não ficam silenciosamente omitidas.
+
+## Esclarecimento visual posterior — referência WAVE
+
+O usuário forneceu cinco imagens da WAVE Evaluation Tool. A referência é funcional, não uma cópia de marca ou de mapeamento normativo: painel compacto com sumário, lista agrupada e explicação, ligado a sinais na própria página aberta. A ABNT NBR 17225 continua sendo o eixo principal; WCAG é referência complementar.
+
+Requisitos adicionais explícitos para o percurso de conferência:
+
+- Após a inspeção silenciosa, permitir sinais visuais diretamente nos elementos correspondentes da página original. O mapa estático do relatório não substitui essa interação.
+- Selecionar uma ocorrência no painel identifica seu sinal; selecionar o sinal abre a mesma ocorrência e item ABNT. Não rolar, focar ou acionar controles durante a coleta automatizada.
+- Distinguir falha, alerta/revisão e informação por forma/ícone e texto, não só cor. Filtros e opção de ocultar os sinais evitam poluição visual.
+- Questões da página inteira têm área própria, sem inventar um elemento-alvo.
+- Preservar a identidade do documento e a correspondência entre ocorrência, evidência e elemento. Não transplantar um binding da cópia temporária para a original apenas porque a URL coincide. Se não houver correspondência verificável, a ocorrência permanece consultável pelas evidências e informa esse limite.
+- Retirar sinais após navegação, exclusão ou desligamento. Sinais não podem alterar resultados persistidos, capturas originais ou conteúdo funcional da página.
+
+Este recorte ainda não está entregue na beta candidata: a auditoria da página atual usa cópia temporária e atualmente oferece evidências, sem marcação viva na original. O inventário técnico desse vínculo será congelado antes da implementação. Os avanços de A–H e as correções do candidato atual permanecem preservados.

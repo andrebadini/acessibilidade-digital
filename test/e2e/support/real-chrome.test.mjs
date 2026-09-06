@@ -448,6 +448,24 @@ test('shared CDP helpers use the target command boundary and closed gestures', a
   assert.deepEqual(await captureScreenshot(target), Buffer.from('png'));
 });
 
+test('screenshot preserves default surface and explicitly supports native-view capture', async () => {
+  const calls = [];
+  const target = { async command(method, params) {
+    calls.push({ method, params });
+    return { data: Buffer.from('png').toString('base64') };
+  } };
+  await captureScreenshot(target);
+  assert.equal(Object.hasOwn(calls[0].params, 'fromSurface'), false);
+  await captureScreenshot(target, { captureBeyondViewport: false, fromSurface: false });
+  assert.deepEqual(calls[1], { method: 'Page.captureScreenshot',
+    params: { format: 'png', captureBeyondViewport: false, fromSurface: false } });
+  await captureScreenshot(target, { fromSurface: true });
+  assert.equal(calls[2].params.fromSurface, true);
+  await assert.rejects(captureScreenshot(target, { fromSurface: 'false' }),
+    error => error.code === 'SCREENSHOT_DENIED');
+  assert.equal(calls.length, 3);
+});
+
 test('key dispatch attempts a balanced release and exposes only a fixed failure', async () => {
   const events = [];
   const target = { async command(method, params) {
@@ -765,8 +783,11 @@ test('journey and visual captures hash measured files without claiming equality'
   };
   const journey = await captureJourney(launch, 'panel-summary', { async command(_method, params) {
     assert.equal(params.captureBeyondViewport, false);
+    assert.equal(params.fromSurface, false);
     return { data: actualBytes.toString('base64') };
-  } }, { captureBeyondViewport: false });
+  } }, { captureBeyondViewport: false, fromSurface: false });
+  await assert.rejects(captureJourney(launch, 'invalid', {}, { fromSurface: 'false' }),
+    error => error.code === 'QA_CAPTURE_DENIED');
   assert.equal(journey.name, 'panel-summary.png');
   const comparison = await captureVisualComparison(launch, {
     actual: 'panel-summary.png', reference, output: 'panel-reference-side-by-side.png',

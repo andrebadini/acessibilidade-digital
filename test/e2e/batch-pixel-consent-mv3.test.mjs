@@ -599,7 +599,7 @@ async function openAndProveConsolidatedReport(extension, panel, auditId, model) 
   const report = await extension.waitForReport({ auditId });
   const proof = await extension.waitForValue(report, `(()=>{
     const text=document.documentElement?.outerHTML??'';
-    const body=document.body?.innerText??'';
+    const body=document.body?.textContent??'';
     const forbidden=${JSON.stringify([queryMarkerA, queryMarkerB, fragmentMarkerA, fragmentMarkerB, ...privateFieldNames])};
     return{
       ready:Boolean(document.querySelector('[data-report-navigation]')&&document.querySelector('[data-report-export]')),
@@ -774,6 +774,12 @@ test('full-evidence batch resumes after restart, separately confirms both sensit
   }, 'P5B_HIDDEN_SEQUENTIAL_TAB_CONTRACT_BROKEN');
   await assertOriginalPageIntact(extension, originalIdentity);
 
+  // Publication precedes final checkpoint/attempt cleanup. Observe completion,
+  // not merely the first result frame; a permanently retained job still fails.
+  await extension.waitForValue(extension.harnessPage, `(async()=>{
+    const stored=await chrome.storage.session.get('audita:active-audit-job:v1');
+    return stored['audita:active-audit-job:v1']?.auditId!==${JSON.stringify(auditId)};
+  })()`, value => value === true, { timeoutMs: 10_000, intervalMs: 50 });
   const model = await readConsolidatedModel(extension, auditId);
   assert.equal(model.revision, 1, 'P5B_CONSOLIDATED_REPORT_REVISION_MISSING');
   assert.deepEqual(model.latest, { status: model.sessionStatus, modelRevision: 1 }, 'P5B_LATEST_REPORT_POINTER_INVALID');
