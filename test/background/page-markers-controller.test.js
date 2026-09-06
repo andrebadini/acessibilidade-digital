@@ -3,6 +3,70 @@ import test from 'node:test';
 
 import { DIGEST, INSTALLATION_ID, SESSION_ID, createControllerFixture, deferred } from './page-markers-controller-fixture.js';
 
+test('idless evidence flows through the authorized controller into a real marker and selection', async () => {
+  const fixture = await createControllerFixture({ changeDraft(draft) {
+    draft.evidence[1].selector.css = 'main > button';
+    draft.evidence[1].snippet = '<button class="primary action">Continuar</button>';
+  } });
+  fixture.page.first.removeAttribute('id');
+  fixture.page.first.setAttribute('class', 'primary action');
+  const result = await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  assert.equal(result.ok, true);
+  assert.equal(result.markers.counts.located, 2);
+  assert.equal(fixture.page.environment.markerButtons().length, 1);
+  const selected = await fixture.dispatch('PANEL_SELECT_PAGE_MARKER', { ordinal: 2, scroll: true });
+  assert.equal(selected.ok, true);
+  assert.equal(fixture.page.first.scrollCalls.length, 1);
+  assert.doesNotMatch(JSON.stringify(result), /primary|action|Continuar/u);
+});
+
+test('idless controller keeps different class identities separate even when tag and absent ID agree', async () => {
+  const fixture = await createControllerFixture({ changeDraft(draft) {
+    const source = draft.occurrences.find(row => row.occurrenceId === 'occ-focus-review');
+    draft.evidence[1].selector.css = 'button:nth-of-type(1)';
+    draft.evidence[1].snippet = '<button class="primary">Continuar</button>';
+    draft.ruleResults.find(row => row.ruleId === 'focus-order').targets.push('node-second');
+    draft.occurrences.push({ ...structuredClone(source), occurrenceId: 'occ-review-second', nodeId: 'node-second',
+      target: { nodeId: 'node-second', selector: null, framePath: [] },
+      evidenceIds: ['evidence-second'], evidenceRefs: ['evidence-second'] });
+    draft.manualReview.push({ ...structuredClone(draft.manualReview[0]), occurrenceId: 'occ-review-second' });
+    draft.evidence.push({ ...structuredClone(draft.evidence[1]), evidenceId: 'evidence-second', nodeId: 'node-second', backendNodeId: 42,
+      selector: { css: 'button:nth-of-type(2)', framePath: [] }, snippet: '<button class="secondary">Voltar</button>' });
+  } });
+  fixture.page.first.removeAttribute('id');
+  fixture.page.first.setAttribute('class', 'primary');
+  const second = fixture.page.document.createElement('button');
+  second.setAttribute('class', 'secondary');
+  fixture.page.main.appendChild(second);
+  const result = await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  assert.equal(result.ok, true);
+  assert.equal(result.markers.counts.markers, 2);
+  assert.equal(result.markers.counts.located, 3);
+  assert.equal(fixture.page.environment.markerButtons().length, 2);
+  assert.equal((await fixture.dispatch('PANEL_SELECT_PAGE_MARKER', { ordinal: 3, scroll: true })).ok, true);
+  assert.equal(second.scrollCalls.length, 1);
+  assert.equal(fixture.page.first.scrollCalls.length, 0);
+});
+
+test('non-ASCII class spacing cannot transfer audited findings to an unrelated element', async () => {
+  for (const separator of ['\u00a0', '\u2003', '\ufeff']) {
+    const fixture = await createControllerFixture({ changeDraft(draft) {
+      draft.evidence[1].selector.css = 'button:nth-of-type(1)';
+      draft.evidence[1].snippet = `<button class="primary${separator}action">Continuar</button>`;
+    } });
+    fixture.page.first.removeAttribute('id');
+    fixture.page.first.setAttribute('class', `primary${separator}action`);
+    const unrelated = fixture.page.document.createElement('button');
+    unrelated.setAttribute('class', 'primary action');
+    fixture.page.main.appendChild(unrelated);
+    const result = await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+    assert.equal(result.ok, true);
+    assert.equal(result.markers.counts.located, 0);
+    assert.equal((await fixture.dispatch('PANEL_SELECT_PAGE_MARKER', { ordinal: 2, scroll: true })).ok, false);
+    assert.equal(unrelated.scrollCalls.length, 0);
+  }
+});
+
 test('show authorizes the private panel window and returns only located physical groups and global counts', async () => {
   const fixture = await createControllerFixture();
   const originalHash = fixture.model.integrity.canonicalModelHash;

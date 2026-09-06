@@ -65,6 +65,20 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       !/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/iu.test(value);
   }
 
+  function validStructuralPath(value, tag) {
+    if (typeof value !== 'string' || value.length > 2048) return false;
+    const parts = value.split(' > ');
+    if (parts.length > 16) return false;
+    let complexity = parts.length - 1;
+    for (let index = 0; index < parts.length; index += 1) {
+      const segment = /^([a-z][a-z0-9-]{0,62})(?::nth-of-type\(([1-9][0-9]*)\))?$/u.exec(parts[index]);
+      if (!segment || (segment[2] && !Number.isSafeInteger(Number(segment[2]))) ||
+        (index === parts.length - 1 && segment[1] !== tag)) return false;
+      complexity += segment[2] ? 4 : 1;
+    }
+    return complexity <= 64;
+  }
+
   function parseCommand(value) {
     const envelope = exactRecord(value, ['version', 'op', ...(
       exactRecord(value, ['version', 'op', 'installationId', 'ttlMs', 'targets']) ? ['installationId', 'ttlMs', 'targets'] :
@@ -89,9 +103,19 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
         if (!target || !validOpaqueId(target.markerId, 'm') || markerIds.has(target.markerId) ||
           !Number.isSafeInteger(target.number) || target.number < 1 || target.number > 5_000) return null;
         markerIds.add(target.markerId);
-        const match = exactRecord(target.match, ['tag', 'id']);
+        const match = exactRecord(target.match, ['tag', 'id']) ?? exactRecord(target.match, ['tag', 'id', 'classes', 'path']);
         if (!match || typeof match.tag !== 'string' || !/^[a-z][a-z0-9-]{0,62}$/u.test(match.tag) ||
-          !validStableCssId(match.id)) return null;
+          (match.id !== null && !validStableCssId(match.id))) return null;
+        let parsedMatch;
+        if (match.id === null) {
+          const classes = denseArray(match.classes, 2, 1);
+          if (!classes || classes.some(value => !validStableCssId(value)) || new Set(classes).size !== classes.length ||
+            !validStructuralPath(match.path, match.tag)) return null;
+          parsedMatch = Object.freeze({ tag: match.tag, id: null, classes: Object.freeze(classes.sort()), path: match.path });
+        } else {
+          if (Object.hasOwn(match, 'classes')) return null;
+          parsedMatch = Object.freeze({ tag: match.tag, id: match.id });
+        }
         const signals = denseArray(target.signals, 64, 1);
         if (!signals) return null;
         const parsedSignals = [];
@@ -107,7 +131,7 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
         parsedTargets.push(Object.freeze({
           markerId: target.markerId,
           number: target.number,
-          match: Object.freeze({ tag: match.tag, id: match.id }),
+          match: parsedMatch,
           signals: Object.freeze(parsedSignals),
         }));
       }
@@ -191,6 +215,8 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       const a = left.targets[index];
       const b = right.targets[index];
       if (a.markerId !== b.markerId || a.number !== b.number || a.match.tag !== b.match.tag || a.match.id !== b.match.id ||
+        JSON.stringify(a.match.classes) !== JSON.stringify(b.match.classes) ||
+        a.match.path !== b.match.path ||
         a.signals.length !== b.signals.length) return false;
       for (let signalIndex = 0; signalIndex < a.signals.length; signalIndex += 1) {
         if (a.signals[signalIndex].selectionId !== b.signals[signalIndex].selectionId ||
@@ -226,7 +252,8 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
   function resolveTarget(target) {
     let matches;
     try {
-      matches = environment.document.querySelectorAll(`${target.match.tag}#${target.match.id}`);
+      const suffix = target.match.id === null ? target.match.classes.map(value => `.${value}`).join('') : `#${target.match.id}`;
+      matches = environment.document.querySelectorAll(`${target.match.tag}${suffix}`);
     } catch {
       return { reason: 'not-found' };
     }
@@ -237,6 +264,13 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       if (typeof element?.tagName !== 'string' || element.tagName.toLowerCase() !== target.match.tag ||
         typeof element.getAttribute !== 'function' || element.getAttribute('id') !== target.match.id) {
         return { reason: 'not-found' };
+      }
+      if (target.match.id === null) {
+        const classes = (element.getAttribute('class') ?? '').split(/[\t\n\f\r ]+/u);
+        if (!target.match.classes.every(value => classes.includes(value))) return { reason: 'not-found' };
+        const pathMatches = environment.document.querySelectorAll(target.match.path);
+        if (pathMatches.length !== 1) return { reason: pathMatches.length ? 'ambiguous' : 'not-found' };
+        if (pathMatches[0] !== element) return { reason: 'not-found' };
       }
     } catch {
       return { reason: 'not-found' };

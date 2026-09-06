@@ -1,6 +1,6 @@
 import { isAuditIntegrityVerified } from '../core/report/integrity.js';
 import { sanitizeHtmlSnippetSource } from '../core/evidence/snippet.js';
-import { parseCssSelectorV1 } from './highlight-locator.js';
+import { classifySelectorToken, parseCssSelectorV1 } from './highlight-locator.js';
 import { classifyPanelResultV1, deriveResultContextV1 } from '../panel/panel-result-contract.js';
 
 const MAX_ROWS = 5_000;
@@ -48,7 +48,7 @@ function classificationFor(occurrence, decision) {
 }
 
 // Read only the canonical opening tag produced by the existing sanitizer.
-// No markup is mounted or interpreted, and neither source nor attribute values are retained.
+// No markup is mounted; only bounded locator tokens leave this function.
 function rootIdentity(snippet) {
   if (typeof snippet !== 'string' || snippet.length === 0 || snippet.length > MAX_SNIPPET) return null;
   const opening = /^<([a-z][a-z0-9-]*)([^<>]*)>/u.exec(sanitizeHtmlSnippetSource(snippet));
@@ -56,18 +56,20 @@ function rootIdentity(snippet) {
   const attributes = opening[2].replace(/\s*\/\s*$/u, '');
   const token = / ([a-z][a-z0-9:._-]*)(?:="([^"]*)")?/uy;
   let position = 0;
-  let id = null;
+  const values = Object.create(null);
   while (position < attributes.length) {
     token.lastIndex = position;
     const match = token.exec(attributes);
     if (!match) return null;
     position = token.lastIndex;
-    if (match[1] === 'id') {
-      if (id !== null || match[2] === undefined) return null;
-      id = match[2];
+    if (['id', 'class', 'role', 'type'].includes(match[1])) {
+      if (Object.hasOwn(values, match[1]) || match[2] === undefined) return null;
+      values[match[1]] = match[2];
     }
   }
-  return id === null ? null : { tag: opening[1], id };
+  return { tag: opening[1], id: values.id ?? null,
+    classes: [...new Set((values.class ?? '').split(/[\t\n\f\r ]+/u).filter(classifySelectorToken))].sort(),
+    role: values.role ?? null, type: values.type ?? null };
 }
 
 function locatorFor(evidence) {
@@ -85,12 +87,22 @@ function locatorFor(evidence) {
       ? 'insufficient-correspondence' : 'unsupported-selector' };
   }
   const last = parsed.segments.at(-1);
-  if (!identity || last.id === null || last.tag !== identity.tag || last.id !== identity.id) {
+  if (!identity || last.tag !== identity.tag || last.id !== identity.id) {
     return { reason: 'insufficient-correspondence' };
+  }
+  let match = { tag: last.tag, id: last.id };
+  if (last.id === null) {
+    if (!identity.classes.length || parsed.segments.some(segment =>
+      segment.id !== null || segment.classes.length || segment.enumAttribute !== null)) {
+      return { reason: 'insufficient-correspondence' };
+    }
+    // Sanitized snippets normalize whitespace. Require the recorded structural path
+    // and the independent class conjunction to resolve to the same unique live element.
+    match = { tag: last.tag, id: null, classes: identity.classes.slice(0, 2), path: parsed.value };
   }
   return {
     selector: { syntax: parsed.syntax, value: parsed.value, byteLength: parsed.byteLength, complexity: parsed.complexity },
-    match: { tag: last.tag, id: last.id },
+    match,
   };
 }
 

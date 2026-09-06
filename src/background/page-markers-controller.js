@@ -321,7 +321,7 @@ export function createPageMarkersController({ originCache, modelAuthority, loadP
       const signals = candidate.selectionIds.map(id => projection.private.signals.find(row => row.selectionId === id))
         .filter(signal => signal && selectionToOrdinal.has(signal.selectionId));
       if (!signals.length) continue;
-      const key = `${candidate.match.tag}\u0000${candidate.match.id}`;
+      const key = JSON.stringify(candidate.match);
       if (!grouped.has(key)) grouped.set(key, { markerId: candidate.markerId, number: markerNumbers.get(candidate.markerId),
         match: candidate.match, signals: [] });
       grouped.get(key).signals.push(...signals.map(signal => ({ selectionId: signal.selectionId, classification: signal.classification })));

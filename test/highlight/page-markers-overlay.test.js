@@ -21,6 +21,130 @@ function assertClean(fixture) {
   });
 }
 
+test('idless unique classes locate without touching the page and reject changed reinstall identity', () => {
+  const fixture = createPageMarkersFixture();
+  fixture.first.removeAttribute('id');
+  fixture.first.setAttribute('class', 'primary action');
+  const command = install({ targets: [{ ...install().targets[0], match: { tag: 'button', id: null, classes: ['action', 'primary'], path: 'main > button' } }] });
+  assert.deepEqual(runAuditaPageMarkersCommand(command, fixture.environment), {
+    ok: true, locatedMarkerIds: ['m1'], unlocated: [],
+  });
+  assert.equal(fixture.environment.markerButtons().length, 1);
+  assert.equal(fixture.first.scrollCalls.length, 0);
+  assert.equal(fixture.first.focusCalls, 0);
+  assert.equal(fixture.first.getAttribute('class'), 'primary action');
+  const host = fixture.environment.hosts()[0];
+  assert.doesNotMatch(JSON.stringify(host.attributes) + host.shadowRoot.textContent, /primary|action/u);
+  const reordered = structuredClone(command);
+  reordered.targets[0].match.classes.reverse();
+  assert.deepEqual(runAuditaPageMarkersCommand(reordered, fixture.environment), {
+    ok: true, locatedMarkerIds: ['m1'], unlocated: [],
+  });
+  const changed = structuredClone(command);
+  changed.targets[0].match.classes = ['other'];
+  assert.deepEqual(runAuditaPageMarkersCommand(changed, fixture.environment), { ok: false, reason: 'installation-mismatch' });
+  const changedPath = structuredClone(command);
+  changedPath.targets[0].match.path = 'button:nth-of-type(1)';
+  assert.deepEqual(runAuditaPageMarkersCommand(changedPath, fixture.environment), { ok: false, reason: 'installation-mismatch' });
+  const duplicate = new FixtureElement('button', { class: 'primary action' }, fixture.document);
+  fixture.main.appendChild(duplicate);
+  fixture.environment.triggerMutations([{ type: 'childList', target: fixture.main, addedNodes: [duplicate] }]);
+  fixture.environment.flushFrames();
+  assertClean(fixture);
+});
+
+test('idless class matching never guesses among duplicates or an element with an ID', () => {
+  for (const kind of ['duplicate', 'mixed-duplicate', 'id', 'empty-id']) {
+    const fixture = createPageMarkersFixture();
+    fixture.first.removeAttribute('id');
+    fixture.first.setAttribute('class', 'primary');
+    if (kind.endsWith('duplicate')) fixture.main.appendChild(new FixtureElement('button',
+      kind === 'duplicate' ? { class: 'primary' } : { class: 'primary', id: 'other' }, fixture.document));
+    else fixture.first.setAttribute('id', kind === 'empty-id' ? '' : 'session-private');
+    const command = install({ targets: [{ ...install().targets[0], match: { tag: 'button', id: null, classes: ['primary'], path: 'button:nth-of-type(1)' } }] });
+    assert.deepEqual(runAuditaPageMarkersCommand(command, fixture.environment), {
+      ok: true, locatedMarkerIds: [], unlocated: [{ markerId: 'm1', reason: kind.endsWith('duplicate') ? 'ambiguous' : 'not-found' }],
+    });
+    assert.equal(fixture.environment.markerButtons().length, 0);
+  }
+});
+
+test('idless class changes and same-class replacement discard the old element rather than rebind', () => {
+  for (const change of ['class', 'id', 'replace']) {
+    const fixture = createPageMarkersFixture();
+    fixture.first.removeAttribute('id');
+    fixture.first.setAttribute('class', 'primary');
+    const command = install({ targets: [{ ...install().targets[0], match: { tag: 'button', id: null, classes: ['primary'], path: 'button:nth-of-type(1)' } }] });
+    assert.equal(runAuditaPageMarkersCommand(command, fixture.environment).locatedMarkerIds.length, 1);
+    if (change === 'replace') {
+      fixture.first.remove();
+      fixture.main.appendChild(new FixtureElement('button', { class: 'primary' }, fixture.document));
+    } else fixture.first.setAttribute(change, 'other');
+    fixture.environment.triggerMutations([{ type: 'childList', target: fixture.main }]);
+    fixture.environment.flushFrames();
+    assertClean(fixture);
+  }
+});
+
+test('idless match rejects unsafe tokens, empty lists and mixed ID/class envelopes before DOM queries', () => {
+  let reads = 0;
+  const accessorClasses = [];
+  Object.defineProperty(accessorClasses, '0', { enumerable: true, get() { reads += 1; return 'primary'; } });
+  for (const match of [
+    { tag: 'button', id: null, classes: [] },
+    { tag: 'button', id: null, classes: ['secret'] },
+    { tag: 'button', id: null, classes: ['primary', 'primary'] },
+    { tag: 'button', id: 'continue', classes: ['primary'] },
+    { tag: 'button', id: null, classes: ['a', 'b', 'c'] },
+    { tag: 'button', id: null, classes: accessorClasses },
+    { tag: 'button', id: null, classes: new Array(1) },
+    { tag: 'button', id: null, classes: ['primary'], snippet: 'private' },
+    { tag: 'button', id: null, classes: ['x'.repeat(24)] },
+  ]) {
+    const fixture = createPageMarkersFixture();
+    assert.deepEqual(runAuditaPageMarkersCommand(install({ targets: [{ ...install().targets[0], match: { ...match, path: 'button' } }] }), fixture.environment),
+      { ok: false, reason: 'invalid-command' });
+    assert.equal(fixture.document.queryCounts.size, 0);
+  }
+  assert.equal(reads, 0);
+});
+
+test('idless paths are closed structural selectors and must corroborate the same unique element', () => {
+  for (const path of [undefined, 'button.other', 'main#scope > button', 'button[type="submit"]', 'button + button',
+    'main button', 'button, a', 'button:nth-of-type(0)', 'button:nth-of-type(9007199254740992)',
+    'a', 'a'.repeat(2049), Array(17).fill('main').join(' > ') + ' > button']) {
+    const fixture = createPageMarkersFixture();
+    const match = { tag: 'button', id: null, classes: ['primary'], path };
+    assert.deepEqual(runAuditaPageMarkersCommand(install({ targets: [{ ...install().targets[0], match }] }), fixture.environment),
+      { ok: false, reason: 'invalid-command' });
+    assert.equal(fixture.document.queryCounts.size, 0);
+  }
+  for (const [path, expected] of [['section > button', 'not-found'], ['button', 'ambiguous'], ['button:nth-of-type(2)', 'not-found']]) {
+    const fixture = createPageMarkersFixture();
+    fixture.first.removeAttribute('id');
+    fixture.first.setAttribute('class', 'primary');
+    fixture.main.appendChild(new FixtureElement('button', { class: 'unrelated' }, fixture.document));
+    const match = { tag: 'button', id: null, classes: ['primary'], path };
+    assert.deepEqual(runAuditaPageMarkersCommand(install({ targets: [{ ...install().targets[0], match }] }), fixture.environment),
+      { ok: true, locatedMarkerIds: [], unlocated: [{ markerId: 'm1', reason: expected }] });
+    assert.equal(fixture.environment.markerButtons().length, 0);
+  }
+});
+
+test('idless structural position drift clears a still-unique class target', () => {
+  const fixture = createPageMarkersFixture();
+  fixture.first.removeAttribute('id');
+  fixture.first.setAttribute('class', 'primary');
+  const match = { tag: 'button', id: null, classes: ['primary'], path: 'button:nth-of-type(1)' };
+  assert.equal(runAuditaPageMarkersCommand(install({ targets: [{ ...install().targets[0], match }] }), fixture.environment).locatedMarkerIds.length, 1);
+  fixture.first.remove();
+  fixture.main.appendChild(new FixtureElement('button', { class: 'unrelated' }, fixture.document));
+  fixture.main.appendChild(fixture.first);
+  fixture.environment.triggerMutations([{ type: 'childList', target: fixture.main }]);
+  fixture.environment.flushFrames();
+  assertClean(fixture);
+});
+
 test('installs multiple isolated markers, groups duplicate DOM targets, and leaves page state untouched', () => {
   const fixture = createPageMarkersFixture();
   let pageClicks = 0;

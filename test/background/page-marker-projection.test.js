@@ -30,6 +30,37 @@ function addReviewTarget(draft, suffix = 'second') {
     selector: { css: `button#${suffix}`, framePath: [] }, snippet: `<button id="${suffix}">Enviar</button>` });
 }
 
+test('idless evidence uses corroborated safe classes, never bare ordinal or private content', async () => {
+  const input = await snapshot(draft => {
+    draft.evidence[1].selector.css = 'main > button:nth-of-type(2)';
+    draft.evidence[1].snippet = '<button class="primary\t\n\f\r action">Texto reservado</button>';
+  });
+  const result = project({ snapshot: input, pageId: 'page-1' });
+  assert.equal(result.public.counts.locatedOccurrences, 2);
+  assert.deepEqual(result.private.candidates[0].match,
+    { tag: 'button', id: null, classes: ['action', 'primary'], path: 'main > button:nth-of-type(2)' });
+  assert.doesNotMatch(JSON.stringify(result.public), /primary|action|reservado|nth-of-type/u);
+});
+
+test('idless class fallback rejects contradictory, unsafe and duplicated evidence attributes', async () => {
+  for (const [css, snippet] of [
+    ['button.other', '<button class="primary">Enviar</button>'],
+    ['button.primary.other', '<button class="primary">Enviar</button>'],
+    ['main.scope > button', '<button class="primary">Enviar</button>'],
+    ['main#scope > button', '<button class="primary">Enviar</button>'],
+    ['button#primary', '<button class="primary">Enviar</button>'],
+    ['button', '<a class="primary">Enviar</a>'],
+    ['button', '<button><span class="primary">Enviar</span></button>'],
+    ['button[type="submit"]', '<button class="primary" type="reset">Enviar</button>'],
+    ['button', '<button class="token-private">Enviar</button>'],
+    ['button', '<button class="primary" class="other">Enviar</button>'],
+    ['button', '<button id="" class="primary">Enviar</button>'],
+  ]) {
+    const input = await snapshot(draft => Object.assign(draft.evidence[1], { selector: { css, framePath: [] }, snippet }));
+    assert.equal(project({ snapshot: input, pageId: 'page-1' }).private.candidates.length, 0, snippet);
+  }
+});
+
 test('same node shares a marker while distinct checks and ABNT items remain independent', async () => {
   const input = await snapshot();
   const result = project({ snapshot: input, pageId: 'page-1' });

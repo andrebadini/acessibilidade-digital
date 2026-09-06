@@ -163,14 +163,31 @@ class FixtureDocument extends FixtureEventTarget {
 }
 
 function fixtureQuery(root, selector) {
-  const match = /^([a-z][a-z0-9-]{0,62})(?:#(-?[_A-Za-z][_A-Za-z0-9-]{0,22})|\.(-?[_A-Za-z][_A-Za-z0-9-]*))$/u.exec(selector);
+  const structural = selector.split(' > ').map(part => /^([a-z][a-z0-9-]*)(?::nth-of-type\(([1-9][0-9]*)\))?$/u.exec(part));
+  if (structural.every(Boolean)) {
+    const candidates = [];
+    const matches = (element, index) => {
+      const segment = structural[index];
+      if (element?.tagName?.toLowerCase() !== segment[1]) return false;
+      const siblings = element.parentNode?.children?.filter(child => child.tagName === element.tagName) ?? [];
+      if (segment[2] && siblings.indexOf(element) + 1 !== Number(segment[2])) return false;
+      return index === 0 || matches(element.parentNode, index - 1);
+    };
+    const visit = node => { for (const child of node.children ?? []) {
+      if (matches(child, structural.length - 1)) candidates.push(child);
+      visit(child);
+    } };
+    visit(root);
+    return candidates;
+  }
+  const match = /^([a-z][a-z0-9-]{0,62})(?:#(-?[_A-Za-z][_A-Za-z0-9-]{0,22})|((?:\.-?[_A-Za-z][_A-Za-z0-9-]*){1,2}))$/u.exec(selector);
   if (!match) return [];
   const results = [];
   const visit = node => {
     for (const child of node.children ?? []) {
-      const classes = (child.getAttribute('class') ?? '').split(/\s+/u).filter(Boolean);
+      const classes = (child.getAttribute('class') ?? '').split(/[\t\n\f\r ]+/u).filter(Boolean);
       if (child.tagName.toLowerCase() === match[1] &&
-        (match[2] === undefined ? classes.includes(match[3]) : child.getAttribute('id') === match[2])) results.push(child);
+        (match[2] === undefined ? match[3].slice(1).split('.').every(value => classes.includes(value)) : child.getAttribute('id') === match[2])) results.push(child);
       visit(child);
     }
   };
