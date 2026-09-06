@@ -149,6 +149,159 @@ function fixture() {
   return { state, summary, detail };
 }
 
+function markerSnapshot(overrides = {}) {
+  return {
+    status: 'active',
+    groups: [{ number: 7, occurrenceIds: ['occ-1', 'occ-2'] }],
+    counts: { markers: 1, located: 2, unlocated: 0, general: 0, omitted: 0 },
+    selectedOccurrenceId: 'occ-1',
+    message: 'Sinais visíveis na página atual.',
+    ...overrides,
+  };
+}
+
+test('marker projection copies only public fields and derives visible occurrence IDs from filtered cards', () => {
+  const input = fixture();
+  input.state.filters = { impact: ['serious'], wcag: [], abnt: [] };
+  const markers = {
+    ...markerSnapshot(), auditId: 'PRIVATE_AUDIT', modelRevision: 8,
+    groups: [{ number: 7, occurrenceIds: ['occ-1', 'occ-2'], ordinals: [0, 1], documentId: 'PRIVATE_DOCUMENT' }],
+    counts: { ...markerSnapshot().counts, eligible: 2 },
+  };
+  const view = buildPanelView({ ...input, markers });
+
+  assert.deepEqual(view.result.visibleOccurrenceIds, ['occ-2']);
+  assert.deepEqual(view.markers, markerSnapshot());
+  assert.equal(Object.isFrozen(view.markers), true);
+  assert.equal(Object.isFrozen(view.markers.groups[0].occurrenceIds), true);
+  assert.doesNotMatch(JSON.stringify(view), /PRIVATE|auditId":"PRIVATE|modelRevision|ordinal|documentId|eligible/u);
+
+  markers.groups[0].occurrenceIds.push('mutated');
+  markers.counts.located = 99;
+  assert.deepEqual(view.markers.groups[0].occurrenceIds, ['occ-1', 'occ-2']);
+  assert.equal(view.markers.counts.located, 2);
+  assert.equal(view.result.summary.counts.errors.occurrences, 1, 'filters and markers preserve canonical totals');
+});
+
+test('result defaults to an idle marker snapshot without changing non-result contracts', () => {
+  const input = fixture();
+  const view = buildPanelView(input);
+  assert.deepEqual(view.markers, {
+    status: 'idle', groups: [], counts: null, selectedOccurrenceId: null, message: null,
+  });
+  assert.deepEqual(view.result.visibleOccurrenceIds, ['occ-1', 'occ-2']);
+});
+
+test('active markers render a compact ABNT-first review block, shared numbers and exact navigation intents', () => {
+  const input = fixture();
+  const intents = [];
+  const markers = markerSnapshot({
+    counts: { markers: 1, located: 2, unlocated: 3, general: 4, omitted: 5 },
+  });
+  const root = renderPanelView({
+    view: buildPanelView({ ...input, markers }), document: new TestDocument(),
+    onIntent: intent => intents.push(intent), onEvent() {},
+  });
+
+  const review = root.querySelector('[data-page-marker-review]');
+  assert.ok(review);
+  assert.match(review.textContent, /Conferir na página/u);
+  assert.match(review.textContent, /resultado registrado.*elemento correspondente.*página atual/iu);
+  assert.match(review.textContent, /não cria nova prova/iu);
+  for (const [kind, symbol, label] of [
+    ['failure', '×', 'Falha'], ['alert', '!', 'Alerta'], ['review', '?', 'Revisão'], ['positive', '✓', 'Positivo'],
+  ]) {
+    const item = review.querySelector(`[data-marker-legend="${kind}"]`);
+    assert.ok(item, kind);
+    assert.equal(item.textContent, `${symbol}${label}`);
+  }
+  for (const copy of [
+    '1 elemento sinalizado', '2 ocorrências localizadas', '4 questões gerais',
+    '3 ocorrências não localizadas', '5 ocorrências omitidas — consulte o relatório',
+  ]) assert.match(review.textContent, new RegExp(copy, 'u'));
+
+  const first = root.querySelector('button[data-focus-id="occurrence-occ-1"]');
+  const second = root.querySelector('button[data-focus-id="occurrence-occ-2"]');
+  assert.equal(first.querySelector('[data-page-marker-number="7"]').textContent, 'Sinal 7');
+  assert.equal(second.querySelector('[data-page-marker-number="7"]').textContent, 'Sinal 7');
+  const firstCard = root.querySelector('[data-result-card][data-check-key="check-1"]');
+  assert.ok(firstCard.textContent.indexOf('ABNT 5.1.1') < firstCard.textContent.indexOf('WCAG 2.4.7'));
+  root.querySelector('button[data-intent="HIDE_PAGE_MARKERS"]').click();
+  root.querySelector('button[data-intent="GO_TO_PAGE_MARKER"]').click();
+  assert.deepEqual(intents, [
+    { type: 'HIDE_PAGE_MARKERS' },
+    { type: 'GO_TO_PAGE_MARKER', occurrenceId: 'occ-1' },
+  ]);
+});
+
+test('marker busy states are one-shot, announce progress and block a new audit', () => {
+  for (const [status, intent, label, message] of [
+    ['showing', 'SHOW_PAGE_MARKERS', 'Preparando sinais', 'Preparando os sinais na página atual.'],
+    ['hiding', 'HIDE_PAGE_MARKERS', 'Removendo sinais', 'Removendo os sinais da página atual.'],
+  ]) {
+    const input = fixture();
+    const intents = [];
+    const root = renderPanelView({
+      view: buildPanelView({ ...input, markers: markerSnapshot({ status, message: null }) }),
+      document: new TestDocument(), onIntent: value => intents.push(value), onEvent() {},
+    });
+    const review = root.querySelector('[data-page-marker-review]');
+    assert.equal(review.getAttribute('aria-busy'), 'true');
+    assert.match(review.textContent, new RegExp(label, 'u'));
+    assert.match(root.querySelector('[role="status"]').textContent, new RegExp(message.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+    const button = root.querySelector(`button[data-intent="${intent}"]`);
+    assert.equal(button.getAttribute('aria-disabled'), 'true');
+    button.click();
+    const newAudit = root.querySelector('button[data-intent="NEW_AUDIT"]');
+    assert.equal(newAudit.getAttribute('aria-disabled'), 'true');
+    newAudit.click();
+    assert.deepEqual(intents, []);
+  }
+});
+
+test('active zero-location review remains hideable and preserves detail evidence with an explicit limit', () => {
+  const input = fixture();
+  input.state.evidenceExpanded = true;
+  const intents = [];
+  const root = renderPanelView({
+    view: buildPanelView({ ...input, markers: markerSnapshot({
+      groups: [], counts: { markers: 0, located: 0, unlocated: 1, general: 1, omitted: 2 },
+      selectedOccurrenceId: null,
+    }) }),
+    document: new TestDocument(), onIntent: value => intents.push(value), onEvent() {},
+  });
+
+  const hide = root.querySelector('button[data-intent="HIDE_PAGE_MARKERS"]');
+  assert.ok(hide);
+  hide.click();
+  assert.deepEqual(intents, [{ type: 'HIDE_PAGE_MARKERS' }]);
+  assert.equal(root.querySelector('[data-page-marker-number]'), null);
+  assert.equal(root.querySelector('button[data-intent="GO_TO_PAGE_MARKER"]'), null);
+  assert.match(root.querySelector('[data-result-detail]').textContent, /não tem sinal localizado.*evidências.*relatório/iu);
+  assert.ok(root.querySelector('[data-detail-block="previews"]'));
+  assert.ok(root.querySelector('[data-detail-block="technical"]'));
+});
+
+test('idle and unavailable review states expose one keyboard-native show action', () => {
+  for (const [status, message] of [['idle', null], ['unavailable', 'Não foi possível mostrar os sinais. Tente novamente.']]) {
+    const input = fixture();
+    const intents = [];
+    const root = renderPanelView({
+      view: buildPanelView({ ...input, markers: markerSnapshot({
+        status, groups: [], counts: null, selectedOccurrenceId: null, message,
+      }) }),
+      document: new TestDocument(), onIntent: value => intents.push(value), onEvent() {},
+    });
+    const show = root.querySelector('button[data-intent="SHOW_PAGE_MARKERS"]');
+    assert.equal(show.tagName, 'BUTTON');
+    assert.equal(show.getAttribute('type'), 'button');
+    assert.equal(show.hasAttribute('aria-disabled'), false);
+    show.click();
+    assert.deepEqual(intents, [{ type: 'SHOW_PAGE_MARKERS' }]);
+    if (message) assert.match(root.textContent, /Não foi possível mostrar os sinais/u);
+  }
+});
+
 test('result metrics select a result filter without changing the audit totals', () => {
   const input = fixture();
   const events = [];
@@ -422,7 +575,7 @@ test('all four screens emit only the exhaustive UI intent union', () => {
   assert.deepEqual(new Set(emitted.map(value => value.type)), new Set([
     'START_ATTACHED', 'OPEN_URL_FORM', 'OPEN_BATCH_FORM', 'CANCEL_AUDIT',
     'OPEN_REPORT', 'NEW_AUDIT', 'SELECT_OCCURRENCE', 'CONSULT_EVIDENCE', 'RETRY',
-    'PERSONA_SELECT', 'CONFIRM_PIXEL_CAPTURE',
+    'PERSONA_SELECT', 'CONFIRM_PIXEL_CAPTURE', 'SHOW_PAGE_MARKERS',
   ]));
 });
 

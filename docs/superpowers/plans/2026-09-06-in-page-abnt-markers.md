@@ -1,5 +1,39 @@
 # Conferência na própria página — referência funcional WAVE
 
+## Task 7 — ligação do worker (W3-wiring)
+
+Escopo autorizado: `src/background/service-worker.js`, `test/background/service-worker.test.js`, módulo pequeno `src/background/page-markers-worker-bridge.js` e teste próprio se necessário para separar composição/canais. Tasks1–6 congeladas. Não editar painel, controller, overlay, normas, captura, protocolos ou armazenamento. Sem subagentes pelo implementador, sem commit, Chrome, pacote ou suíte ampla; TDD focado e diff-check. Relatório no workspace SDD `task-7-report.md`.
+
+Construir controller com origem privada, highlightModelAuthority, bundle validado, autoridade nativa, adapter com AUDIT_EXECUTION_INTERNAL, fila compartilhada, IDs próprios de22 caracteres e publicação dedicada do panel coordinator. Falta de API em adapters customizados não pode impedir auditoria existente: somente marcação fica indisponível. Não capturar erro genérico para afirmar disponibilidade.
+
+Interceptar somente os quatro intents de marcação do Port admitido, reconstruindo dispatch exact4 `{envelope,sender,panelWindowId,isCurrent}` sem launchTabId. Ativar os dois callbacks estendidos do panel coordinator: autorização fixa panel/review-markers e fechamento de marcas. Encaminhar publicação privada à conexão admitida, sem dados extras. Runtime genérico continua negando os quatro intents.
+
+Bridge privada encaminha Port `audita-page-markers-v1` e mensagens fechadas W2 selecionado/limpo somente após startup, deixa validação de sender/instalação ao controller, sem eco de payload ou diagnósticos privados. Manter bridge fora de readyRuntime. Dispose impede encaminhamento/publicação, desconecta canais próprios inclusive se startup pendente; não ampliar API do controller.
+
+Compor limpeza marker+highlight preservando API e publicação existentes. Locked usa lock recebido, nunca o readquire. Ambos cleaners são tentados mesmo quando outro falha; exclusão converte bool do marker para confirmação `{ok,state}` somente se ambos confirmaram, falha mantém pending. Lifecycle invalida marker e cache original sem depender do sucesso highlight. Refazer attached-copy limpa instalação/cache antigos pelo tabId ORIGINAL antes da nova troca/registro; falha bloqueia início, não usar auditId novo como alvo de limpeza. Preserve fluxo já aprovado de reserva/journal e compensação.
+
+Matriz prévia independente: (1) quatro intents chegam exact4, original17≠cópia27; (2) runtime genérico/seleção estrangeira negados; (3) publicação review-markers e fechamento por disconnect; (4) canais/startup/dispose ordenados; (5) cleanup ambos tentados, false não confirma exclusão; (6) refazer original antes do registro novo, sem nestedlock; (7) navegação/fechamento limpam ambos mesmo após falha highlight; (8) adapter custom sem Symbol preserva auditoria e readyRuntime privado. Reutilizar testes do controller para invariantes já provadas, testar aqui composição real, não refazer o motor.
+
+Saída: REDs observados, GREEN focado, diff-check, uma revisão independente sobre arquivos congelados; correções agrupadas e validadas pelo mesmo revisor. Não alegar percurso disponível até UI e Chrome real.
+
+## Task 8 — seleção privada e painel utilizável (W3-UI)
+
+Escopo helper `src/panel/page-markers-session.js`, `test/panel/page-markers-session.test.js`, wiring `src/panel/panel.js`/`test/panel/panel-runtime.test.js`. Apresentação disjunta Task9 abaixo. Não editar protocolos, controller, core ou worker. TDD focado, sem Chrome/ZIP/suíte ampla. API `createPanelPageMarkersSession({requestIntent,onChange,onSelection})` retorna setResult(bundle|null), receive(packet), show(), hide(), select(occurrenceId,scroll=false), filter(visibleOccurrenceIds), reset(), read(). Correlação audit/revision e mapa ordinal de details ficam privados. Snapshot público congelado `{status:'idle'|'showing'|'active'|'hiding'|'unavailable',groups:[{number,occurrenceIds}],counts,selectedOccurrenceId,message}`; counts null ou `{markers,located,unlocated,general,omitted}`. Sem IDs de sessão/documento/instalação, sem ordinal/revisão no snapshot. Caller fornece bundle já validado pelo cliente.
+
+Validar respostas exact e revisão; counts.markers igual grupos físicos, located soma ordinais únicos conhecidos, soma located/unlocated/general igual details oferecidos (até64); clear somente zerado. Não renderizar erros arbitrários. Generation invalida SHOW tardio após hide/reset/clear; versão de seleção preserva clique recente contra resposta antiga. Serializar SELECT/FILTER; efeitos pendentes não migram para outro resultado. Filtro deriva IDs dos cards filtrados do buildPanelView, ordinais sempre ordenados pela lista original details, não ordenar ABNT como se fosse ordinal. Totais globais não mudam.
+
+Incoming clique da página seleciona detalhe e abre ABNT; se oculto, limpar filtros e informar. Usar focusId neutro sem nó e impedir restoreFocus quando document.hasFocus()===false; não pedir highlight availability antigo nesse caminho. Reenviar filtro atual e select(false), nunca scroll automático. Mostrar é gesto explícito; botão separado Ir ao elemento chama select(true). Refazer exige hide confirmado se marcas ativas/em andamento; resultado/revisão/disconnect/exclusão resetam projeção sem recriar origem. Não implementar heartbeat aqui.
+
+REDs: show/validação/agrupamento; seleção nos dois sentidos e scroll explícito; filtros canônicos sem alteração de totais; packet clear durante show; clique posterior à requisição preservado; revisão/audit/reset invalidam retorno tardio; erros fechados; wiring render/actions/foco. Uma revisão independente congelada, correções agrupadas.
+
+## Task 9 — apresentação da conferência (W3-view)
+
+Escopo somente `src/panel/panel-view.js`, `src/panel/panel.css`, `test/panel/panel-view.test.js`. API buildPanelView ganha argumento opcional `markers` (snapshot Task8), default idle. Copiar apenas campos conhecidos, sem mutar entrada. Result view fornece `visibleOccurrenceIds` derivados dos cards já filtrados; sem alterar reducer/classificação/totais. renderResult mostra bloco “Conferir na página” compacto, Mostrar/Ocultar sinais (intents SHOW_PAGE_MARKERS/HIDE_PAGE_MARKERS), status/legenda × falha, ! alerta, ? revisão, ✓ positivo; cor+texto e formas, controles teclado. Estado showing/hiding desabilita botão correspondente e diz preparando/removendo. Contagens reais diferenciadas: elementos sinalizados, ocorrências localizadas, questões gerais, não localizadas, omitidas (consulte relatório). Explicação curta: sinais ligam resultado registrado a elemento correspondente atual, não nova prova.
+
+Cada ocorrência localizada mostra número do sinal correspondente, incluindo vários problemas por sinal; detalhe localizado oferece “Ir ao elemento” (intent GO_TO_PAGE_MARKER + occurrenceId), sem scroll ao apenas selecionar. Sem localização, manter evidências e texto de limite, nunca caixa inventada. ABNT continua agrupamento principal, nenhum ícone/marca WAVE copiado. Nova auditoria desabilitada enquanto showing/hiding. Preservar destaque/evidências existentes. Snapshot active com zero localizados ainda oferece Ocultar e lista limites. Responsivo no painel estreito, foco/contraste/forced-colors, sem ícones dependentes de fontes externas.
+
+TDD focado visual/DOM com fixture existente, intents exatos, agrupamento e filtros preservados; diff-check. Sem worker/helper edits, Chrome, ZIP, dependências, subagentes ou commit pelo implementador. Relatório SDD task-9-report.md, congelar para revisão independente. QA nativa será integrada posteriormente.
+
 > Execução incremental com TDD nas fronteiras de origem, mensagens e limpeza. A autorização do usuário permite decisões autônomas e trabalho paralelo em arquivos separados. Não reabrir captura, normas, modelo ou retenção aprovados sem regressão reproduzível.
 
 ## Resultado esperado

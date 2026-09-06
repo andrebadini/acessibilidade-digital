@@ -39,7 +39,7 @@ const BATCH_LINE_ERRORS = Object.freeze({
 const DUPLICATE_URL_MESSAGE = 'A URL repete uma entrada anterior e não será auditada novamente.';
 const MAX_BATCH_LINE_NUMBER = 65_536;
 
-export function buildPanelView({ state, summary = null, detail = null, details = [] } = {}) {
+export function buildPanelView({ state, summary = null, detail = null, details = [], markers = null } = {}) {
   const screen = dataProperty(state, 'screen');
   if (!state || !SCREEN_NAMES.includes(screen)) throw new TypeError('PANEL_VIEW_STATE_INVALID');
   const captureModeValue = dataProperty(state, 'captureMode');
@@ -73,6 +73,7 @@ export function buildPanelView({ state, summary = null, detail = null, details =
     evidenceExpanded: state.evidenceExpanded === true,
     persona: copyPersona(state.persona),
     highlight: copyHighlight(state.highlight),
+    markers: copyPageMarkers(markers),
     focusId: typeof state.focusId === 'string' ? state.focusId : null,
     scrollTop: Number.isSafeInteger(state.scrollTop) && state.scrollTop >= 0 ? state.scrollTop : 0,
     reason: typeof state.reason === 'string' ? state.reason : null,
@@ -97,6 +98,8 @@ export function buildPanelView({ state, summary = null, detail = null, details =
     groups[name] = base.filters.result.length && !base.filters.result.includes(name) ? []
       : summaryCopy.groups[name].filter(card => cardMatchesFilters(card, base.filters));
   }
+  const visibleOccurrenceIds = [...new Set(GROUPS.flatMap(name =>
+    groups[name].flatMap(card => card.occurrenceIds)))];
   return freezeRenderModel({
     ...base,
     result: {
@@ -104,6 +107,7 @@ export function buildPanelView({ state, summary = null, detail = null, details =
       groups,
       detail: detailCopy,
       occurrenceItems,
+      visibleOccurrenceIds,
     },
   });
 }
@@ -128,6 +132,9 @@ export function renderPanelView({ view, document, onIntent, onEvent = () => {} }
       case 'CONSULT_EVIDENCE':
       case 'HIGHLIGHT_OCCURRENCE':
       case 'CLEAR_HIGHLIGHT':
+      case 'SHOW_PAGE_MARKERS':
+      case 'HIDE_PAGE_MARKERS':
+      case 'GO_TO_PAGE_MARKER':
       case 'PERSONA_SELECT':
       case 'PERSONA_READER_PREVIOUS':
       case 'PERSONA_READER_REPEAT':
@@ -598,11 +605,12 @@ function renderResult(document, view, emit, onEvent) {
   ready.append(
     heading(document, 2, 'Seu relatório está pronto'),
     actionButton(document, 'Abrir relatório completo', 'OPEN_REPORT', 'open-report', emit, 'primary-action report-action'),
-    actionButton(document, 'Refazer auditoria', 'NEW_AUDIT', 'new-audit', emit, 'secondary-action', {}, view.highlight.state === 'busy'),
+    actionButton(document, 'Refazer auditoria', 'NEW_AUDIT', 'new-audit', emit, 'secondary-action', {},
+      view.highlight.state === 'busy' || ['showing', 'hiding'].includes(view.markers.status)),
     reportStatus,
   );
   ready.append(paragraph(document, 'Inicia uma nova avaliação. O resultado anterior não é apagado; você poderá escolher a página e o modo novamente.', 'supporting-copy'));
-  root.append(ready);
+  root.append(ready, renderPageMarkerReview(document, view.markers, emit));
 
   const coverage = section(document, 'coverage-block');
   const coverageHeading = heading(document, 2, 'Cobertura automática');
@@ -687,6 +695,86 @@ function renderMetrics(document, counts, selected, onEvent) {
   all.addEventListener('click', () => onEvent({ type: 'FILTER_SET', filter: 'result', values: [], focusId: 'metric-all' }));
   wrapper.append(all);
   return wrapper;
+}
+
+function renderPageMarkerReview(document, markers, emit) {
+  const wrapper = section(document, 'page-marker-review');
+  wrapper.dataset.pageMarkerReview = '';
+  wrapper.dataset.markerStatus = markers.status;
+  wrapper.setAttribute('role', 'region');
+  wrapper.setAttribute('aria-label', 'Conferir na página');
+  if (['showing', 'hiding'].includes(markers.status)) wrapper.setAttribute('aria-busy', 'true');
+  wrapper.append(
+    heading(document, 2, 'Conferir na página'),
+    paragraph(document,
+      'Os sinais ligam o resultado registrado na auditoria ao elemento correspondente na página atual. Essa associação não cria nova prova.',
+      'page-marker-explanation'),
+  );
+
+  const action = ['active', 'hiding'].includes(markers.status)
+    ? actionButton(document, markers.status === 'hiding' ? 'Removendo sinais' : 'Ocultar sinais na página',
+      'HIDE_PAGE_MARKERS', 'page-marker-action', emit, 'secondary-action page-marker-action', {}, markers.status === 'hiding')
+    : actionButton(document, markers.status === 'showing' ? 'Preparando sinais'
+      : markers.status === 'unavailable' ? 'Tentar mostrar sinais' : 'Mostrar sinais na página',
+    'SHOW_PAGE_MARKERS', 'page-marker-action', emit, 'primary-action page-marker-action', {}, markers.status === 'showing');
+  wrapper.append(action);
+
+  const status = paragraph(document, markerStatusMessage(markers), 'page-marker-status');
+  status.setAttribute('role', 'status');
+  status.setAttribute('aria-live', 'polite');
+  status.setAttribute('aria-atomic', 'true');
+  wrapper.append(status, renderMarkerLegend(document));
+  if (markers.counts !== null) wrapper.append(renderMarkerCounts(document, markers.counts));
+  return wrapper;
+}
+
+function markerStatusMessage(markers) {
+  if (typeof markers.message === 'string') return markers.message;
+  if (markers.status === 'showing') return 'Preparando os sinais na página atual.';
+  if (markers.status === 'hiding') return 'Removendo os sinais da página atual.';
+  if (markers.status === 'active') return 'Sinais visíveis na página atual.';
+  if (markers.status === 'unavailable') return 'Não foi possível mostrar os sinais. Tente novamente.';
+  return 'Os sinais estão ocultos.';
+}
+
+function renderMarkerLegend(document) {
+  const legend = section(document, 'page-marker-legend');
+  legend.setAttribute('aria-label', 'Legenda dos sinais');
+  legend.append(heading(document, 3, 'Legenda'));
+  const list = document.createElement('ul');
+  for (const [kind, symbol, label] of [
+    ['failure', '×', 'Falha'], ['alert', '!', 'Alerta'], ['review', '?', 'Revisão'], ['positive', '✓', 'Positivo'],
+  ]) {
+    const item = document.createElement('li');
+    item.dataset.markerLegend = kind;
+    const icon = document.createElement('span');
+    icon.className = `page-marker-symbol marker-symbol-${kind}`;
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = symbol;
+    item.append(icon, paragraph(document, label));
+    list.append(item);
+  }
+  legend.append(list);
+  return legend;
+}
+
+function renderMarkerCounts(document, counts) {
+  const list = document.createElement('ul');
+  list.className = 'page-marker-counts';
+  list.setAttribute('aria-label', 'Resumo dos sinais na página');
+  const rows = [
+    [counts.markers, 'elemento sinalizado', 'elementos sinalizados'],
+    [counts.located, 'ocorrência localizada', 'ocorrências localizadas'],
+    [counts.general, 'questão geral', 'questões gerais'],
+    [counts.unlocated, 'ocorrência não localizada', 'ocorrências não localizadas'],
+    [counts.omitted, 'ocorrência omitida — consulte o relatório', 'ocorrências omitidas — consulte o relatório'],
+  ];
+  for (const [count, singular, plural] of rows) {
+    const item = document.createElement('li');
+    item.textContent = `${count} ${count === 1 ? singular : plural}`;
+    list.append(item);
+  }
+  return list;
 }
 
 function renderAbntGroups(document, view, emit, onEvent) {
@@ -786,7 +874,8 @@ function renderGroup(document, name, cards, view, emit, onEvent, detail) {
   for (const card of cards) {
     wrapper.append(renderCard(document, card, view, emit));
     if (detail && card.occurrenceIds.includes(detail.occurrenceId)) {
-      wrapper.append(renderDetail(document, detail, view.evidenceExpanded, view.highlight, emit, onEvent, view.captureMode));
+      wrapper.append(renderDetail(document, detail, view.evidenceExpanded, view.highlight, view.markers,
+        emit, onEvent, view.captureMode));
     }
   }
   return wrapper;
@@ -802,7 +891,14 @@ function renderCard(document, card, view, emit) {
   if (card.occurrenceIds.length === 1) {
     const occurrenceId = card.occurrenceIds[0];
     const selected = view.selectedOccurrenceId === occurrenceId;
-    const button = actionButton(document, card.title, 'SELECT_OCCURRENCE', `occurrence-${occurrenceId}`, emit, 'card-select', { occurrenceId });
+    const markerNumber = markerNumberForOccurrence(view.markers, occurrenceId);
+    const button = actionButton(document, markerNumber === null ? card.title : '', 'SELECT_OCCURRENCE',
+      `occurrence-${occurrenceId}`, emit, 'card-select', { occurrenceId });
+    if (markerNumber !== null) button.append(
+      pageMarkerNumber(document, markerNumber, card.classification,
+        view.markers.selectedOccurrenceId === occurrenceId),
+      pageMarkerButtonTitle(document, ` · ${card.title}`),
+    );
     button.setAttribute('aria-pressed', String(selected));
     root.append(button);
   } else if (card.occurrenceIds.length > 1) {
@@ -812,9 +908,15 @@ function renderCard(document, card, view, emit) {
     occurrences.setAttribute('aria-label', `Ocorrências de ${card.title}`);
     for (const [index, occurrenceId] of card.occurrenceIds.entries()) {
       const selected = view.selectedOccurrenceId === occurrenceId;
+      const markerNumber = markerNumberForOccurrence(view.markers, occurrenceId);
       const button = actionButton(
-        document, `Ocorrência ${index + 1} de ${card.occurrenceIds.length}`,
+        document, markerNumber === null ? `Ocorrência ${index + 1} de ${card.occurrenceIds.length}` : '',
         'SELECT_OCCURRENCE', `occurrence-${occurrenceId}`, emit, 'occurrence-select', { occurrenceId },
+      );
+      if (markerNumber !== null) button.append(
+        pageMarkerNumber(document, markerNumber, card.classification,
+          view.markers.selectedOccurrenceId === occurrenceId),
+        pageMarkerButtonTitle(document, ` · Ocorrência ${index + 1} de ${card.occurrenceIds.length}`),
       );
       button.setAttribute('aria-pressed', String(selected));
       occurrences.append(button);
@@ -826,14 +928,35 @@ function renderCard(document, card, view, emit) {
   root.append(
     paragraph(document, classificationLabel(card.classification), 'card-classification'),
     paragraph(document, card.impact ? `Impacto ${impactLabel(card.impact)}` : 'Sem impacto associado', 'card-impact'),
-    paragraph(document, card.wcag.length ? `WCAG ${card.wcag.join(', ')}` : 'Sem critério WCAG associado', 'card-normative'),
     paragraph(document, card.abntItemIds.length ? `ABNT ${card.abntItemIds.join(', ')}` : 'Sem item ABNT associado', 'card-normative'),
+    paragraph(document, card.wcag.length ? `WCAG ${card.wcag.join(', ')}` : 'Sem critério WCAG associado', 'card-normative'),
     paragraph(document, occurrenceText(card.occurrenceIds.length), 'card-occurrences'),
   );
   return root;
 }
 
-function renderDetail(document, detail, expanded, highlight, emit, onEvent, captureMode) {
+function markerNumberForOccurrence(markers, occurrenceId) {
+  if (markers.status !== 'active' && markers.status !== 'hiding') return null;
+  return markers.groups.find(group => group.occurrenceIds.includes(occurrenceId))?.number ?? null;
+}
+
+function pageMarkerNumber(document, number, classification, selected) {
+  const marker = document.createElement('span');
+  marker.className = `page-marker-number page-marker-number-${classification}`;
+  marker.dataset.pageMarkerNumber = String(number);
+  marker.dataset.markerSelected = String(selected);
+  marker.textContent = `Sinal ${number}`;
+  return marker;
+}
+
+function pageMarkerButtonTitle(document, text) {
+  const title = document.createElement('span');
+  title.className = 'page-marker-card-title';
+  title.textContent = text;
+  return title;
+}
+
+function renderDetail(document, detail, expanded, highlight, markers, emit, onEvent, captureMode) {
   const root = section(document, 'result-detail');
   root.dataset.resultDetail = '';
   root.dataset.classification = detail.heading.classification;
@@ -864,6 +987,17 @@ function renderDetail(document, detail, expanded, highlight, emit, onEvent, capt
     technicalBlock(document, detail.technical, expanded, onEvent),
   );
   const actions = section(document, 'detail-actions');
+  const markerNumber = markerNumberForOccurrence(markers, detail.occurrenceId);
+  if (markerNumber !== null) {
+    const go = actionButton(document, `Ir ao elemento do sinal ${markerNumber}`, 'GO_TO_PAGE_MARKER',
+      'go-to-page-marker', emit, 'secondary-action marker-go-action', { occurrenceId: detail.occurrenceId });
+    go.dataset.action = 'go-to-page-marker';
+    actions.append(go);
+  } else if (markers.status === 'active') {
+    actions.append(paragraph(document,
+      'Esta ocorrência não tem sinal localizado na página atual. As evidências registradas permanecem disponíveis; consulte também o relatório.',
+      'page-marker-limit'));
+  }
   const action = highlightActionForOccurrence({
     occurrence: detail,
     bindingStatus: highlight.bindingStatus,
@@ -1319,6 +1453,35 @@ function copyPersona(value) {
     readerPosition: typeof value?.readerPosition === 'string' && /^\d{1,4} de \d{1,4}$/u.test(value.readerPosition)
       ? value.readerPosition : '',
     message: typeof value?.message === 'string' ? value.message : 'Escolha uma simulação para esta página.',
+  };
+}
+
+function copyPageMarkers(value) {
+  const statusValue = dataProperty(value, 'status');
+  const status = ['idle', 'showing', 'active', 'hiding', 'unavailable'].includes(statusValue)
+    ? statusValue : 'idle';
+  const groupsValue = dataProperty(value, 'groups');
+  const groups = Array.isArray(groupsValue) ? groupsValue.flatMap(group => {
+    const number = dataProperty(group, 'number');
+    const occurrenceIds = dataProperty(group, 'occurrenceIds');
+    if (!Number.isSafeInteger(number) || number < 1 || !Array.isArray(occurrenceIds)) return [];
+    return [{
+      number,
+      occurrenceIds: occurrenceIds.filter(occurrenceId => typeof occurrenceId === 'string'),
+    }];
+  }) : [];
+  const countsValue = dataProperty(value, 'counts');
+  const countNames = ['markers', 'located', 'unlocated', 'general', 'omitted'];
+  const counts = countsValue && countNames.every(name => {
+    const count = dataProperty(countsValue, name);
+    return Number.isSafeInteger(count) && count >= 0;
+  }) ? Object.fromEntries(countNames.map(name => [name, dataProperty(countsValue, name)])) : null;
+  const selectedOccurrenceId = dataProperty(value, 'selectedOccurrenceId');
+  const message = dataProperty(value, 'message');
+  return {
+    status, groups, counts,
+    selectedOccurrenceId: typeof selectedOccurrenceId === 'string' ? selectedOccurrenceId : null,
+    message: typeof message === 'string' ? message : null,
   };
 }
 

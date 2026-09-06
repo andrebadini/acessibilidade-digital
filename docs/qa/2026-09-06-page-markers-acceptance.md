@@ -46,6 +46,14 @@ O controller usa o símbolo privado real AUDIT_EXECUTION_INTERNAL, prova a orige
 
 ## Base técnica consultada
 
+## Integração de apresentação em teste local (06/09)
+
+Task8: nove REDs iniciais antes da API do helper; dois REDs adicionais reproduziram eco de seleção e fila antiga bloqueando novo resultado. GREEN do helper11/11. Runtime com bundle validado e cliente de Port reais (Chrome fake somente na fronteira) comprova Mostrar/Ocultar, seleção de ABNT após clique, filtros, preservação dos totais, ausência de transferência de foco e scroll somente explícito. Helper+runtime32/32 PASS. Task9 view45/45 PASS; conjunto diretamente relacionado view/client/state139/139 PASS. Diff-check limpo. Revisão independente ainda em andamento; esses números não representam aprovação nativa.
+
+A documentação oficial de lifecycle do Chrome foi conferida novamente: abrir Port não basta para preservar estado em memória durante inatividade. O intervalo entre receber o resultado e clicar em Mostrar continua sendo um item explícito de integração/aceitação. Não foi alterada a beta1.1.0 nem gerado novo pacote.
+
+Revisão Task8/9: C0/I1 inicial. Repro no painel importado confirmou continuação antiga selecionando A depois de usuário selecionar B. Correção agrupada associa continuações a bundle e versão de interação (inclui SHOW e Refazer). Helper+runtime32/32 PASS; teste adicional revision1→2 com mesmos IDs e retorno antigo confirma ausência de SELECT indevido. Mesmo revisor validou1/1 fresco, C0/I0. Apresentação local aprovada no recorte; gate Chrome continua pendente.
+
 - [Chrome scripting](https://developer.chrome.com/docs/extensions/reference/api/scripting): função injetada autocontida, mundo isolado e direcionamento por documentIds.
 - [Chrome messaging](https://developer.chrome.com/docs/extensions/develop/concepts/messaging): canal Port e encerramento do canal. A limpeza após reinício ainda exige prova real no gate, não inferência baseada apenas na documentação.
 - [Chrome service worker lifecycle](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle): encerramento por inatividade e diferenças entre canal aberto, mensagens e debugger ativo.

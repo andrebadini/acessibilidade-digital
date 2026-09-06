@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createInitialPanelState, reducePanelState } from '../../src/panel/panel-state.js';
+import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
+import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
+import { createPanelResultBundleV1 } from '../../src/panel/panel-result-bundle.js';
+import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 
 const priorDocument = globalThis.document;
 globalThis.document = { querySelector() { return null; } };
@@ -110,6 +114,107 @@ function runtimeEvent() {
     emit(...args) { for (const listener of [...listeners]) listener(...args); },
   };
 }
+
+test('page markers wire controls, ABNT selection, filters and explicit navigation without stealing page focus', async t => {
+  const keys = ['document', 'chrome', 'location', 'setTimeout', 'clearTimeout'];
+  const originals = new Map(keys.map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  t.after(() => { for (const [key, descriptor] of originals) {
+    if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key];
+  } });
+  const inventory = await createInstalledCoreRuleInventory();
+  const model = await enrichAuditForReport(structuredClone(SAMPLE_AUDIT), {
+    now: () => '2026-09-06T12:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '1.1.0', rulesVersion: inventory.rulesVersion, browserVersion: 'Chrome/152.0.0.0',
+  });
+  const result = await createPanelResultBundleV1({ inventory, reportRevision: {
+    version: 1, auditId: model.auditId, modelRevision: 1, modelHash: model.integrity.canonicalModelHash, model,
+    checkpoint: { version: 1, auditId: model.auditId, pages: model.pages.map(page => ({
+      pageId: page.pageId, attempted: page.attempted, startedAt: page.attempted ? page.timestamps.startedAt : null,
+      rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion, inventoryHash: inventory.sha256, outcomes: [],
+    })) },
+  } });
+  assert.ok(result.details.length >= 2);
+  const document = { activeElement: null, hasFocus: () => false,
+    createElement(tag) { return new RuntimeElement(tag, document); },
+    querySelector(selector) { return selector === '#panel-root' ? document.root : null; } };
+  document.root = new RuntimeElement('main', document);
+  const packets = [], pending = [];
+  const port = { name: 'audita-panel-v1', onMessage: runtimeEvent(), onDisconnect: runtimeEvent(), disconnect() {},
+    postMessage(packet) { packets.push(packet); if (packet.type === 'intent') pending.push(packet); } };
+  globalThis.document = document;
+  globalThis.chrome = { runtime: { id: 'abcdefghijklmnopabcdefghijklmnop', connect: () => port } };
+  globalThis.location = { href: `chrome-extension://${chrome.runtime.id}/src/panel/index.html?launch=${'A'.repeat(43)}` };
+  globalThis.setTimeout = () => ({}); globalThis.clearTimeout = () => {};
+  await import(`../../src/panel/panel.js?markers-runtime=${Date.now()}`);
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  const reply = (packet, response) => port.onMessage.emit({ protocol: 'audita-panel', version: 1,
+    type: 'intent-result', requestId: packet.requestId, response });
+  let markerModelRevision = 1;
+  const markerResponse = (selectedOrdinal = null) => ({ ok: true, markers: { state: 'active', modelRevision: markerModelRevision,
+    groups: [{ number: 9, ordinals: [0, 1] }],
+    counts: { markers: 1, located: 2, unlocated: 0, general: Math.min(64, result.details.length) - 2, omitted: 0 }, selectedOrdinal } });
+  const finishPending = async () => {
+    for (let turn = 0; turn < 8; turn++) {
+      await tick();
+      for (const packet of pending.splice(0)) reply(packet,
+        packet.envelope.type.startsWith('PANEL_') && packet.envelope.type.includes('MARKER')
+          ? markerResponse(packet.envelope.ordinal ?? null) : { ok: false, code: 'CONTEXT_DENIED' });
+    }
+  };
+  port.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'result',
+    auditId: result.auditId, sessionCapabilityId: 'S'.repeat(22), result });
+  await finishPending();
+  const show = document.root.querySelector('button[data-intent="SHOW_PAGE_MARKERS"]');
+  assert.ok(show, 'the result must offer explicit original-page markers');
+  await show.dispatch('click'); await finishPending();
+  assert.ok(document.root.querySelector('button[data-intent="HIDE_PAGE_MARKERS"]'));
+  const originalCounts = document.root.querySelector('[data-result-filter="failed"]').textContent;
+  await document.root.querySelector('[data-result-filter="passed"]').dispatch('click'); await finishPending();
+  assert.ok(packets.some(p => p.envelope?.type === 'PANEL_FILTER_PAGE_MARKERS'));
+  const pageFocus = { dataset: {} }; document.activeElement = pageFocus;
+  const oldAvailabilityCount = packets.filter(p => p.envelope?.type === 'GET_HIGHLIGHT_AVAILABILITY').length;
+  port.onMessage.emit({ version: 1, type: 'PAGE_MARKERS_STATE_CHANGED', auditId: result.auditId,
+    modelRevision: 1, state: 'active', selectedOrdinal: 1 });
+  await finishPending();
+  assert.equal(document.activeElement, pageFocus, 'page marker click must not focus the panel');
+  assert.equal(packets.filter(p => p.envelope?.type === 'GET_HIGHLIGHT_AVAILABILITY').length, oldAvailabilityCount);
+  const selected = document.root.querySelector(`button[data-focus-id="occurrence-${result.details[1].occurrenceId}"]`);
+  assert.equal(selected?.getAttribute('aria-pressed'), 'true');
+  assert.equal(document.root.querySelector('[data-result-filter="failed"]').textContent, originalCounts);
+  const selections = packets.filter(p => p.envelope?.type === 'PANEL_SELECT_PAGE_MARKER');
+  assert.ok(selections.length > 0); assert.ok(selections.every(p => p.envelope.scroll === false));
+  const raceStart = packets.length;
+  port.onMessage.emit({ version: 1, type: 'PAGE_MARKERS_STATE_CHANGED', auditId: result.auditId,
+    modelRevision: 1, state: 'active', selectedOrdinal: 0 });
+  await tick(); // Keep this page-click FILTER pending while a newer panel selection arrives.
+  await document.root.querySelector(`button[data-focus-id="occurrence-${result.details[1].occurrenceId}"]`).dispatch('click');
+  await finishPending();
+  assert.equal(packets.slice(raceStart).filter(p => p.envelope?.type === 'PANEL_SELECT_PAGE_MARKER').at(-1)?.envelope.ordinal,
+    1, 'the delayed page click must not replace the newer panel selection');
+  const go = document.root.querySelector('button[data-intent="GO_TO_PAGE_MARKER"]');
+  assert.ok(go); await go.dispatch('click'); await finishPending();
+  assert.equal(packets.filter(p => p.envelope?.type === 'PANEL_SELECT_PAGE_MARKER').at(-1).envelope.scroll, true);
+  port.onMessage.emit({ version: 1, type: 'PAGE_MARKERS_STATE_CHANGED', auditId: result.auditId,
+    modelRevision: 1, state: 'active', selectedOrdinal: 0 });
+  await tick();
+  const staleIndex = pending.findIndex(p => p.envelope.type === 'PANEL_FILTER_PAGE_MARKERS');
+  assert.ok(staleIndex >= 0);
+  const staleFilter = pending.splice(staleIndex, 1)[0];
+  const staleResponse = markerResponse();
+  markerModelRevision = 2;
+  port.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'result',
+    auditId: result.auditId, sessionCapabilityId: 'S'.repeat(22), result: { ...result, modelRevision: 2 } });
+  await document.root.querySelector('button[data-intent="SHOW_PAGE_MARKERS"]').dispatch('click');
+  await finishPending();
+  await document.root.querySelector(`button[data-focus-id="occurrence-${result.details[1].occurrenceId}"]`).dispatch('click');
+  await finishPending();
+  const beforeStale = packets.length;
+  reply(staleFilter, staleResponse); await finishPending();
+  assert.equal(packets.slice(beforeStale).some(p => p.envelope?.type === 'PANEL_SELECT_PAGE_MARKER'), false,
+    'old result continuation must not dispatch into a new revision with the same occurrence IDs');
+  port.onDisconnect.emit(); await tick();
+  assert.equal(document.root.querySelector('button[data-intent="HIDE_PAGE_MARKERS"]'), null);
+});
 
 test('waits for the first valid bootstrap before exposing authorized panel actions', async t => {
   const originalDocument = globalThis.document;

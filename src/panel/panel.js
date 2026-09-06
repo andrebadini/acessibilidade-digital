@@ -20,6 +20,7 @@ import {
 } from './panel-view.js';
 import { createInitialPanelState, reducePanelState } from './panel-state.js';
 import { createPanelPersonaSession } from './persona-session.js';
+import { createPanelPageMarkersSession } from './page-markers-session.js';
 
 const root = document.querySelector('#panel-root');
 const chromeApi = globalThis.chrome ?? null;
@@ -50,6 +51,7 @@ let pendingReportLaunch = null;
 let readerRefreshTimer = null;
 let readerRefreshInFlight = false;
 let readerFeedbackStopped = false;
+let pageMarkerInteractionRevision = 0;
 const personaSession = createPanelPersonaSession({
   requestIntent: requestPanelIntent,
   createRequestId: nextRequestId,
@@ -58,6 +60,15 @@ const personaSession = createPanelPersonaSession({
 const highlightStateSynchronizer = createHighlightStateSynchronizer({
   requestCurrent: () => requestPanelIntent({ type: 'GET_HIGHLIGHT_STATE' }),
   applyState: applyHighlightState,
+});
+const pageMarkers = createPanelPageMarkersSession({
+  requestIntent: requestPanelIntent,
+  onChange() {
+    if (state.screen === 'result' && resultBundle?.auditId === state.auditId) {
+      render(currentInteraction(state.focusId).focusId);
+    }
+  },
+  onSelection: selectOccurrenceFromPage,
 });
 const privacyConfirmation = createPanelPrivacyConfirmationController({
   readState: () => state,
@@ -272,7 +283,7 @@ export function createPanelPrivacyConfirmationController(raw) {
   return Object.freeze({ confirm });
 }
 
-function render() {
+function render(focusId = state.focusId) {
   if (!root) return;
   let summary = null;
   let detail = null;
@@ -297,7 +308,7 @@ function render() {
     }
   }
 
-  const view = buildPanelView({ state, summary, detail, details: resultBundle?.details ?? [] });
+  const view = buildPanelView({ state, summary, detail, details: resultBundle?.details ?? [], markers: pageMarkers.read() });
   const screen = renderPanelView({ view, document, onIntent: handleIntent, onEvent: handleEvent });
   root.replaceChildren(screen);
   applyReportLaunchFeedback();
@@ -306,7 +317,7 @@ function render() {
     if (textarea) textarea.value = batchEntryDraft;
   }
   root.scrollTop = state.scrollTop;
-  restoreFocus(state.focusId);
+  restoreFocus(focusId);
 }
 
 function transition(event) {
@@ -355,6 +366,8 @@ function synchronizeReaderRefresh() {
 
 document.addEventListener?.('visibilitychange', synchronizeReaderRefresh);
 globalThis.addEventListener?.('pagehide', () => {
+  pageMarkerInteractionRevision++;
+  pageMarkers.reset();
   readerFeedbackStopped = true;
   synchronizeReaderRefresh();
 });
@@ -376,6 +389,7 @@ function handleEvent(event) {
     ? event.focusId
     : (event.type === 'FILTER_SET' ? `filter-${event.filter}-all` : 'evidence-summary');
   transition({ ...event, ...currentInteraction(fallback) });
+  if (event.type === 'FILTER_SET') void pageMarkers.filter(visibleMarkerOccurrences());
 }
 
 async function handleIntent(intent) {
@@ -417,17 +431,44 @@ async function handleIntent(intent) {
     case 'OPEN_REPORT':
       await requestSessionAction('PANEL_OPEN_REPORT');
       return;
-    case 'NEW_AUDIT':
+    case 'SHOW_PAGE_MARKERS': {
+      const result = resultBundle;
+      if (state.screen === 'result' && await pageMarkers.show() && resultBundle === result) {
+        const interaction = pageMarkerInteractionRevision;
+        const selected = state.selectedOccurrenceId;
+        await pageMarkers.filter(visibleMarkerOccurrences());
+        if (resultBundle === result && state.screen === 'result' && interaction === pageMarkerInteractionRevision &&
+          state.selectedOccurrenceId === selected && selected) await pageMarkers.select(selected);
+      }
+      return;
+    }
+    case 'HIDE_PAGE_MARKERS':
+      pageMarkerInteractionRevision++;
+      await pageMarkers.hide();
+      return;
+    case 'GO_TO_PAGE_MARKER':
+      if (state.screen === 'result' && intent.occurrenceId === state.selectedOccurrenceId) {
+        pageMarkerInteractionRevision++;
+        await pageMarkers.select(intent.occurrenceId, true);
+      }
+      return;
+    case 'NEW_AUDIT': {
       if (state.screen !== 'result' || state.highlight.state === 'busy') return;
+      pageMarkerInteractionRevision++;
+      const priorResult = resultBundle;
+      if (!await pageMarkers.hide()) return;
+      if (resultBundle !== priorResult || state.screen !== 'result') return;
       if (state.highlight.state === 'active') {
         await clearHighlight();
       }
-      if (state.screen !== 'result' || state.highlight.state !== 'idle') return;
+      if (resultBundle !== priorResult || state.screen !== 'result' || state.highlight.state !== 'idle') return;
       reviseNavigationEntry();
       batchEntryDraft = '';
+      pageMarkers.reset();
       transition({ type: 'NEW_AUDIT_REQUESTED' });
       announce('Escolha a página e o modo para uma nova auditoria. O resultado anterior foi preservado.');
       return;
+    }
     case 'SELECT_OCCURRENCE':
       selectOccurrence(intent.occurrenceId);
       return;
@@ -696,9 +737,36 @@ function applyReportLaunchFeedback() {
 
 function selectOccurrence(occurrenceId) {
   if (!exactDetail(occurrenceId)) return;
+  pageMarkerInteractionRevision++;
   const interaction = currentInteraction(`occurrence-${occurrenceId}`);
   transition({ type: 'OCCURRENCE_SELECTED', occurrenceId, ...interaction });
+  void pageMarkers.select(occurrenceId);
   void refreshHighlightAvailability(occurrenceId);
+}
+
+function visibleMarkerOccurrences() {
+  if (state.screen !== 'result' || resultBundle?.auditId !== state.auditId) return [];
+  const view = buildPanelView({ state, summary: resultBundle.summary, details: resultBundle.details });
+  return view.result.visibleOccurrenceIds ?? [];
+}
+
+function selectOccurrenceFromPage(occurrenceId) {
+  if (state.screen !== 'result' || !exactDetail(occurrenceId)) return;
+  const result = resultBundle, interaction = ++pageMarkerInteractionRevision;
+  const hidden = !visibleMarkerOccurrences().includes(occurrenceId);
+  if (hidden) {
+    for (const filter of ['result', 'impact', 'wcag', 'abnt']) {
+      state = reducePanelState(state, { type: 'FILTER_SET', filter, values: [] });
+    }
+  }
+  transition({ type: 'OCCURRENCE_SELECTED', occurrenceId,
+    focusId: 'page-marker-selection', scrollTop: currentScrollTop() });
+  if (hidden) announce('Os filtros foram limpos para mostrar a ocorrência escolhida na página.');
+  void pageMarkers.filter(visibleMarkerOccurrences()).then(() => {
+    if (resultBundle === result && state.screen === 'result' && interaction === pageMarkerInteractionRevision &&
+      state.selectedOccurrenceId === occurrenceId) return pageMarkers.select(occurrenceId);
+    return false;
+  });
 }
 
 async function refreshHighlightAvailability(occurrenceId) {
@@ -744,6 +812,8 @@ async function retryAudit() {
 }
 
 function receiveBootstrap(value) {
+  pageMarkerInteractionRevision++;
+  if (!['result', 'view-only'].includes(value?.state)) pageMarkers.reset();
   const bootstrapEvent = projectPanelBootstrapEvent(value);
   if (bootstrapEvent?.type === 'PRIVACY_PAUSED') {
     hasReceivedBootstrap = true;
@@ -789,12 +859,14 @@ function receiveBootstrap(value) {
     hasReceivedBootstrap = true;
     resultBundle = value.result;
     transition({ type: 'AUDIT_RESULT', auditId: value.auditId, result: value.result });
+    pageMarkers.setResult(value.result);
     synchronizePersonaOnBootstrap();
     void highlightStateSynchronizer.synchronize();
     if (state.selectedOccurrenceId) void refreshHighlightAvailability(state.selectedOccurrenceId);
     return;
   }
   resultBundle = null;
+  pageMarkers.reset();
   highlightStateSynchronizer.invalidate();
   transition({ type: 'AUDIT_UNAVAILABLE', auditId: state.auditId, reason: 'O resultado local não pôde ser exibido com segurança.' });
 }
@@ -821,12 +893,16 @@ function applyHighlightState(value) {
 
 function receivePortStatus(value) {
   if (value === PANEL_RECONNECT_EXHAUSTED_MESSAGE) {
+    pageMarkerInteractionRevision++;
+    pageMarkers.reset();
     personaBootstrapSynchronized = false;
     if (!hasReceivedBootstrap && root) root.replaceChildren(renderPanelStaticUnavailableView({ document }));
     else announce(value);
     return;
   }
   if (value === PANEL_UNPREPARED_MESSAGE) {
+    pageMarkerInteractionRevision++;
+    pageMarkers.reset();
     personaBootstrapSynchronized = false;
     if (state.screen === 'result' && resultBundle?.auditId === state.auditId) {
       highlightStateSynchronizer.invalidate();
@@ -898,6 +974,7 @@ function currentScrollTop() {
 }
 
 function restoreFocus(focusId) {
+  if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
   if (!focusId || typeof root?.querySelectorAll !== 'function') return;
   const nodes = root.querySelectorAll('[data-focus-id]');
   for (const node of nodes) {
@@ -1038,6 +1115,7 @@ if (authorizedLaunch && canConnectPanelSession) {
     onBootstrapResult: receiveBootstrap,
     onStatus: receivePortStatus,
     onHighlightState: receiveHighlightState,
+    onPageMarkersState: value => pageMarkers.receive(value),
     createRequestId: nextRequestId,
     setTimer: globalThis.setTimeout.bind(globalThis),
     clearTimer: globalThis.clearTimeout.bind(globalThis),
@@ -1054,7 +1132,7 @@ if (authorizedLaunch && typeof chromeApi?.runtime?.onMessage?.addListener === 'f
     },
     readState: () => state,
     readResult: () => resultBundle,
-    clearResult() { resultBundle = null; },
+    clearResult() { pageMarkerInteractionRevision++; resultBundle = null; pageMarkers.reset(); },
     invalidateHighlight() { highlightStateSynchronizer.invalidate(); },
     transition,
   });

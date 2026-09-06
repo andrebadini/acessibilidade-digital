@@ -705,6 +705,79 @@ code {
 .report-ready h2 { margin: 0; font-size: 18px; }
 .report-launch-status { margin: 0; font-size: 14px; line-height: 1.5; color: #284b3a; }
 
+.page-marker-review {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 2px solid var(--brand);
+  border-radius: 10px;
+  background: var(--muted-surface);
+}
+
+.page-marker-review h2 { font-size: 18px; }
+.page-marker-explanation,
+.page-marker-status,
+.page-marker-limit { font-size: 14px; line-height: 1.4; }
+.page-marker-status { color: #42586a; font-weight: 650; }
+.page-marker-action { inline-size: 100%; }
+
+.page-marker-legend { display: grid; gap: 5px; }
+.page-marker-legend h3 { font-size: 14px; }
+.page-marker-legend ul {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.page-marker-legend li { display: flex; align-items: center; gap: 5px; min-inline-size: 0; }
+.page-marker-legend li p { font-size: 12px; font-weight: 700; }
+.page-marker-symbol {
+  display: inline-grid;
+  place-items: center;
+  inline-size: 1.5rem;
+  block-size: 1.5rem;
+  flex: 0 0 1.5rem;
+  border: 2px solid currentColor;
+  background: var(--surface);
+  font-weight: 900;
+  line-height: 1;
+}
+.marker-symbol-failure { border-radius: 2px; color: var(--failure); }
+.marker-symbol-alert { border-radius: 7px 2px; color: var(--review); }
+.marker-symbol-review { border-radius: 50%; color: var(--review); }
+.marker-symbol-positive { border-radius: 50% 2px 50% 50%; color: var(--success); }
+
+.page-marker-counts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+  margin: 0;
+  padding-inline-start: 20px;
+  font-size: 13px;
+}
+
+.page-marker-number {
+  display: inline-block;
+  padding: 2px 6px;
+  border: 2px solid currentColor;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+.page-marker-number-failed { color: var(--failure); }
+.page-marker-number-alert,
+.page-marker-number-manual-review { color: var(--review); }
+.page-marker-number-passed { color: var(--success); }
+.page-marker-number[data-marker-selected="true"] { outline: 2px solid currentColor; outline-offset: 2px; }
+.page-marker-card-title { display: inline; }
+.page-marker-limit { flex: 1 0 100%; color: var(--review); font-weight: 650; }
+.marker-go-action { flex: 1 1 13rem; }
+
 .visually-hidden {
   position: fixed !important;
   inline-size: 1px !important;
@@ -732,6 +805,8 @@ code {
   .coverage-block { grid-template-columns: 1fr; }
   .coverage-block > * { grid-column: 1; }
   .result-detail { padding: 12px; }
+  .page-marker-legend ul,
+  .page-marker-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (min-width: 30rem) {
@@ -753,7 +828,13 @@ code {
   code,
   .metric-grid,
   .result-group,
-  details.detail-block { border-color: CanvasText; }
+  details.detail-block,
+  .page-marker-review,
+  .page-marker-symbol,
+  .page-marker-number { border-color: CanvasText; }
+
+  .page-marker-symbol,
+  .page-marker-number { color: CanvasText; }
 
   .coverage-progress { forced-color-adjust: auto; }
 
