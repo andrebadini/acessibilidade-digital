@@ -43,6 +43,8 @@ Os quatro cartões do sumário funcionam como filtros. Clique novamente no cart�
 
 **Refazer auditoria** volta à escolha de página e modo sem apagar o relatório anterior nem iniciar outra captura automaticamente. O HTML baixado também tem filtros; os filtros de tela não removem registros do PDF ou dos demais arquivos.
 
+A beta 1.1.4 acrescenta histórico legível das conclusões humanas no HTML/PDF completo, com nome informado, data, decisão e nota. Amplia também os sinais para elementos sem ID quando classes e caminho estrutural encontram inequivocamente o mesmo elemento. A conferência real no Chrome está registrada em [QA do candidato](docs/qa/2026-09-06-beta114-native.md) e o pacote em [registro de entrega](docs/qa/2026-09-06-beta114-release.md); a página original continua sem ações automáticas de navegação durante a auditoria.
+
 A partir da beta 1.1.2, **Imprimir resumo / salvar PDF** oferece uma edição curta com totais, limitações, matriz ABNT e metodologia. Escolha **Salvar como PDF** no diálogo do navegador. O resumo identifica a auditoria e revisão, mas não substitui as fichas e evidências do relatório completo. Ctrl+P e a exportação automática dos quatro formatos continuam completos.
 
 A beta 1.1.3 corrige o salvamento da revisão humana e atualiza imediatamente o relatório aberto, preservando notas e formulários. **Não salve novas decisões na beta 1.1.2**: ela pode deixar o hash da revisão pendente e impedir a leitura do relatório. A atualização previne novas gravações defeituosas, mas não recupera automaticamente registros já afetados. Preserve os dados e arquivos exportados; uma nova auditoria não recupera decisões anteriores. Detalhes no [registro da correção](docs/qa/2026-09-06-live-review-refresh.md).
