@@ -414,7 +414,13 @@ export function createExportLaunchAuthority(raw) {
       else if (typeof expected === 'string') { if (root[key] !== expected) return false; }
       else {
         const actual = exact(root[key], Object.keys(expected));
-        if (!actual || JSON.stringify(actual) !== JSON.stringify(expected)) return false;
+        if (!actual) return false;
+        if (Object.hasOwn(expected, 'terminalProof')) {
+          const proof = terminalProofRecord(actual.terminalProof);
+          if (!sameTerminalProof(proof, expected.terminalProof)) return false;
+          actual.terminalProof = proof;
+        }
+        if (JSON.stringify(actual) !== JSON.stringify(expected)) return false;
       }
     }
     return true;

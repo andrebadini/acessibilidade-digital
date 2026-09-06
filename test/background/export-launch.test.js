@@ -838,6 +838,47 @@ test('export audit cleanup revokes and purges connected terminal and revoked res
   });
 });
 
+test('export audit cleanup accepts equivalent terminal proof after storage reorders object keys', async () => {
+  const env = await exportCleanupFixture('terminal');
+  const read = env.sessionArea.get;
+  const reordered = value => Array.isArray(value) ? value.map(reordered)
+    : value && typeof value === 'object'
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, reordered(value[key])])) : value;
+  env.sessionArea.get = async keys => reordered(await read(keys));
+  assert.equal((await env.authority.getLaunch(env.auditId)).state, 'terminal');
+  assert.equal(await env.authority.clearAudit(env.auditId), true);
+  assert.deepEqual(await env.sessionArea.get(null), {});
+  assert.deepEqual(env.calls, [['remove', 51]]);
+  assert.deepEqual(env.forbidden, []);
+});
+
+test('export audit cleanup still rejects changed or malformed terminal proof on readback', async t => {
+  for (const mode of ['changed-value', 'extra-key', 'getter']) await t.test(mode, async () => {
+    const env = await exportCleanupFixture('terminal');
+    const read = env.sessionArea.get;
+    let getterReads = 0;
+    env.sessionArea.get = async keys => {
+      const rows = await read(keys);
+      if (Array.isArray(keys)) {
+        const proof = rows[env.launchKey]?.terminalProof;
+        if (proof) {
+          if (mode === 'changed-value') proof.notified = !proof.notified;
+          if (mode === 'extra-key') proof.extra = true;
+          if (mode === 'getter') Object.defineProperty(proof, 'notified', {
+            enumerable: true, get() { getterReads += 1; return true; },
+          });
+        }
+      }
+      return rows;
+    };
+    assert.equal(await env.authority.clearAudit(env.auditId), false);
+    assert.equal(getterReads, 0);
+    assert.deepEqual(env.calls, []);
+    assert.equal(env.tabs.has(51), true);
+    assert.deepEqual(env.forbidden, []);
+  });
+});
+
 test('export audit cleanup includes orphan sessions using their exact document and never an index-only tab', async () => {
   const env = await exportCleanupFixture();
   const session = await env.authority.getSession(env.connection.sessionCapabilityId);
