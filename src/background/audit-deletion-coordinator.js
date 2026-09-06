@@ -1,4 +1,4 @@
-import { canonicalAuditId, canonicalRetentionInstant, validateDeletionTombstoneV1 } from '../storage/audit-retention.js';
+import { canonicalAuditId, canonicalRetentionInstant, validateDeletionTombstoneV1, validateTerminalExportReceiptV1 } from '../storage/audit-retention.js';
 
 const SHARED = new WeakMap();
 const DENIED = Object.freeze({ status: 'denied', code: 'AUDIT_DELETION_DENIED' });
@@ -145,8 +145,14 @@ export function createAuditDeletionCoordinatorV1(raw) {
     try {
       request = exact(value, REQUEST_KEYS);
       canonicalAuditId(request.auditId);
-      requireConfirmation(request.terminalReceipt === null);
-      if (request.reason === 'manual') {
+      if (request.reason === 'post-export') {
+        const receipt = validateTerminalExportReceiptV1(request.terminalReceipt);
+        requireConfirmation(receipt.auditId === request.auditId && receipt.status === 'complete' &&
+          Number.isSafeInteger(request.expectedRevision) && request.expectedRevision === receipt.modelRevision + 1 &&
+          request.manualAuthorization === null);
+        request.terminalReceipt = receipt;
+      } else if (request.reason === 'manual') {
+        requireConfirmation(request.terminalReceipt === null);
         requireConfirmation(Number.isSafeInteger(request.expectedRevision) && request.expectedRevision > 0);
         const proof = exact(request.manualAuthorization, ['version', 'scope', 'auditId', 'authorizedAt']);
         requireConfirmation(proof.version === 1 &&
@@ -155,13 +161,13 @@ export function createAuditDeletionCoordinatorV1(raw) {
         request.manualAuthorization = Object.freeze(proof);
       } else {
         requireConfirmation(request.reason === 'retention-expired' && request.expectedRevision === null &&
-          request.manualAuthorization === null);
+          request.manualAuthorization === null && request.terminalReceipt === null);
       }
     } catch { return DENIED; }
     return withAudit(request.auditId, async () => {
       const at = canonicalRetentionInstant(now()).iso;
       const result = await calls.store.stageAuditDeletionV1({ auditId: request.auditId, reason: request.reason, now: at,
-        expectedRevision: request.expectedRevision, terminalReceipt: null });
+        expectedRevision: request.expectedRevision, terminalReceipt: request.terminalReceipt });
       if (own(result, 'status') === 'denied') {
         const denied = exact(result, ['status', 'code']);
         requireConfirmation(denied.code === DENIED.code);
@@ -170,6 +176,7 @@ export function createAuditDeletionCoordinatorV1(raw) {
       const staged = exact(result, ['status', 'tombstone']);
       requireConfirmation(staged.status === 'staged');
       const tombstone = validateDeletionTombstoneV1(staged.tombstone, request.auditId);
+      if (request.reason === 'post-export') return Object.freeze({ status: 'pending', auditId: request.auditId });
       return cleanup(tombstone, at);
     });
   }

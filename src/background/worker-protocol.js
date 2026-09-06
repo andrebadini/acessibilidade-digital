@@ -68,7 +68,9 @@ const MESSAGE_SCHEMAS = deepFreeze({
 export function parseWorkerMessage(message) {
   const type = readSafeOwnEnumerableDataType(message);
   if (!type.found || !Object.hasOwn(MESSAGE_SCHEMAS, type.value)) return failure('UNKNOWN_MESSAGE');
-  const copy = copyExactDataRecord(message, MESSAGE_SCHEMAS[type.value]);
+  const copy = copyExactDataRecord(message, MESSAGE_SCHEMAS[type.value]) ??
+    (type.value === 'REPORT_REQUEST_EXPORT'
+      ? copyExactDataRecord(message, [...MESSAGE_SCHEMAS[type.value], 'deleteAfterCompleteExport']) : null);
   if (!copy) return failure('INVALID_MESSAGE');
   if (!hasFlatPrimitiveShape(copy)) return failure('INVALID_MESSAGE');
   const byteLength = capturedUtf8Length(copy);
@@ -160,7 +162,8 @@ function validWorkerEnvelope(value) {
       safeChromeId(value.windowId);
   }
   if (['REPORT_REQUEST_EXPORT', 'REPORT_RETURN_TO_SOURCE', 'REPORT_DELETE_AUDIT', 'REPORT_DELETE_ALL_AUDITS'].includes(value.type)) {
-    return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId);
+    return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) &&
+      (!Object.hasOwn(value, 'deleteAfterCompleteExport') || typeof value.deleteAfterCompleteExport === 'boolean');
   }
   if (['GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE'].includes(value.type)) {
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) && validReviewId(value.occurrenceId);

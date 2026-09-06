@@ -8,6 +8,7 @@ import {
   migrateRetentionMetadata,
   validateRetentionMetadata,
   validateDeletionTombstoneV1,
+  validateTerminalExportReceiptV1,
 } from './audit-retention.js';
 import { runPixelAttemptCommitAuthorizationV1 } from '../background/pixel-attempt-correlation.js';
 import { AUDIT_STORAGE_UNAVAILABLE_MESSAGE as STORAGE_UNAVAILABLE_MESSAGE } from '../core/privacy.js';
@@ -30,6 +31,7 @@ const PIXEL_ATTEMPT_KEY_PREFIX = '__audit_checkpoint__:/pixel-attempt/:';
 const EXPORT_LEASE_KEY_PREFIX = '__audit_export_lease__:';
 const EXPORT_ATTEMPT_KEY_PREFIX = '__audit_export_attempt__:';
 const EXPORT_DELIVERY_KEY_PREFIX = '__audit_export_delivery__:';
+const EXPORT_RECEIPT_KEY_PREFIX = '__audit_export_receipt__:';
 const RETENTION_CLEANUP_CURSOR_KEY = '__audit_retention_cleanup__';
 const DEFAULT_EXPORT_LEASE_TTL_MS = 2 * 60 * 1000;
 const MAX_EXPORT_LEASE_TTL_MS = 10 * 60 * 1000;
@@ -230,6 +232,7 @@ function legacyPrivateAuditKeyIsSafe(key, value) {
     EXPORT_LEASE_KEY_PREFIX,
     EXPORT_ATTEMPT_KEY_PREFIX,
     EXPORT_DELIVERY_KEY_PREFIX,
+    EXPORT_RECEIPT_KEY_PREFIX,
   ]) {
     if (!key?.startsWith?.(prefix)) continue;
     try {
@@ -364,12 +367,18 @@ function exactDataRecord(value, keys) {
 function deletionRequestV1(value) {
   try {
     const record = exactDataRecord(value, ['auditId', 'reason', 'now', 'expectedRevision', 'terminalReceipt']);
-    if (!record || record.terminalReceipt !== null) return null;
-    if (record.reason === 'manual') {
+    if (!record) return null;
+    let receipt = null;
+    if (record.reason === 'post-export') {
+      receipt = validateTerminalExportReceiptV1(record.terminalReceipt);
+      if (receipt.status !== 'complete' || receipt.auditId !== record.auditId ||
+        !Number.isSafeInteger(record.expectedRevision) || record.expectedRevision !== receipt.modelRevision + 1) return null;
+    } else if (record.terminalReceipt !== null) return null;
+    else if (record.reason === 'manual') {
       if (!Number.isSafeInteger(record.expectedRevision) || record.expectedRevision < 1) return null;
     } else if (record.reason !== 'retention-expired' || record.expectedRevision !== null) return null;
     return { auditId: canonicalAuditId(record.auditId), now: canonicalRetentionInstant(record.now).iso,
-      reason: record.reason, expectedRevision: record.expectedRevision };
+      reason: record.reason, expectedRevision: record.expectedRevision, terminalReceipt: receipt };
   } catch { return null; }
 }
 
@@ -416,6 +425,20 @@ function stagedDeletion(record, auditId) {
 
 function deniedDeletion() {
   return Object.freeze({ status: 'denied', code: 'AUDIT_DELETION_DENIED' });
+}
+
+function confirmedReceipt(value, auditId, revision) {
+  try {
+    const receipt = validateTerminalExportReceiptV1(value);
+    return receipt.auditId === auditId && revision === receipt.modelRevision + 1 ? receipt : null;
+  } catch { return null; }
+}
+
+function eligiblePostExport(request, persistedReceipt, metadata, revision) {
+  const durable = confirmedReceipt(persistedReceipt, request.auditId, revision);
+  return durable?.status === 'complete' && metadata !== undefined &&
+    validateRetentionMetadata(metadata, request.auditId).deleteAfterCompleteExport === true &&
+    canonicalStringify(durable) === canonicalStringify(request.terminalReceipt);
 }
 
 function manualDeletionCandidate(auditId, model, revisionValue) {
@@ -562,6 +585,8 @@ function exportAttemptKey(id) {
 function exportDeliveryKey(id) {
   return `${EXPORT_DELIVERY_KEY_PREFIX}${id}`;
 }
+
+function exportReceiptKey(id) { return `${EXPORT_RECEIPT_KEY_PREFIX}${id}`; }
 
 function canonicalLeaseNow(rawNow) {
   if (typeof rawNow !== 'string') throw new TypeError('Instante do lease de exportação inválido.');
@@ -898,17 +923,6 @@ function resolveDeliveryEntries(entries, options) {
     updatedAt,
   };
   return { entries: next, matched: true };
-}
-
-function isCompleteTerminalDelivery(entries, ownerId, exportAttempt) {
-  if (entries.length !== EXPORT_FORMATS.size) return false;
-  const formats = new Set();
-  for (const entry of entries) {
-    if (entry.ownerId !== ownerId || entry.exportAttempt !== exportAttempt || entry.state !== 'terminal' ||
-      !EXPORT_FORMATS.has(entry.format) || formats.has(entry.format)) return false;
-    formats.add(entry.format);
-  }
-  return formats.size === EXPORT_FORMATS.size;
 }
 
 function terminalDeliveriesMatchReceipt(entries, latestState, auditId, ownerId, exportAttempt) {
@@ -1461,6 +1475,7 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     initial.delete(exportLeaseKey(key));
     initial.delete(exportAttemptKey(key));
     initial.delete(exportDeliveryKey(key));
+    initial.delete(exportReceiptKey(key));
     retention.delete(key);
     if (initial.get(LATEST_KEY)?.auditId === key) initial.delete(LATEST_KEY);
   };
@@ -1512,15 +1527,10 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       !terminalDeliveriesMatchReceipt(entries, latestState, key, existing.ownerId, existing.exportAttempt)) {
       throw new AuditExportLeaseConflictError('Existem arquivos obsoletos pendentes de reconciliação.');
     }
-    const metadata = validateRetentionMetadata(retention.get(key), key);
-    const shouldDelete = metadata.deleteAfterCompleteExport === true &&
-      options.deleteAfterCompleteExport === true &&
-      isCompleteTerminalDelivery(entries, existing.ownerId, existing.exportAttempt);
-    if (shouldDelete) {
-      storageClone(canonicalModel);
-      if (latestState !== undefined) storageClone(latestState);
-      deleteStoredAudit(key);
-      return { deleted: true };
+    validateRetentionMetadata(retention.get(key), key);
+    const receipt = exportReceiptFromLatest(latestState, key);
+    if (receipt && (receipt.modelRevision !== revision || receipt.attemptId !== String(existing.exportAttempt))) {
+      throw new AuditExportLeaseConflictError();
     }
     const committed = commitAuditIfRevisionWithExportLease(
       key,
@@ -1529,6 +1539,8 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       snapshotCapability,
       { ...options, release: true },
     );
+    if (receipt) initial.set(exportReceiptKey(key), receipt);
+    else initial.delete(exportReceiptKey(key));
     return { ...committed, deleted: false };
   };
   const commitAuditWithCheckpointIfAbsent = async (id, model, checkpoint, latestState, options) => {
@@ -1630,10 +1642,10 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     async resolveExportDelivery(id, options) { return resolveExportDelivery(id, options); },
     async getExportDeliveryJournal(id) { return storageClone(getExportDeliveryJournal(id)); },
     async getExportReceipt(id) {
-      const [revision, entries, latest] = await Promise.all([
-        getReportRevision(id), Promise.resolve(getExportDeliveryJournal(id)), Promise.resolve(initial.get(LATEST_KEY)),
-      ]);
-      return exportReceiptFromRevision(revision, entries) ?? exportReceiptFromLatest(latest, validId(id));
+      const key = validId(id); const entries = getExportDeliveryJournal(key);
+      if (entries.length) return exportReceiptFromRevision(await getReportRevision(key), entries);
+      return confirmedReceipt(initial.get(exportReceiptKey(key)), key, storedRevision(initial.get(revisionKey(key)))) ??
+        exportReceiptFromLatest(initial.get(LATEST_KEY), key);
     },
     async getAuditRetention(id) {
       const key = validId(id);
@@ -1654,9 +1666,11 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
       const { auditId, now } = request;
       if (deletions.has(auditId)) return stagedDeletion(deletions.get(auditId), auditId);
       if (initial.get(auditId) === undefined) return deniedDeletion();
-      if (request.reason === 'manual') {
+      if (['manual', 'post-export'].includes(request.reason)) {
         if (storedRevision(initial.get(revisionKey(auditId))) !== request.expectedRevision ||
           hasDeliveryWork(auditId, canonicalRetentionInstant(now).milliseconds)) return deniedDeletion();
+        if (request.reason === 'post-export' && !eligiblePostExport(request, initial.get(exportReceiptKey(auditId)),
+          retention.get(auditId), request.expectedRevision)) return deniedDeletion();
       } else {
         const metadata = retention.get(auditId);
         if (metadata === undefined || validateRetentionMetadata(metadata, auditId).expiresAt > now) return deniedDeletion();
@@ -2007,14 +2021,14 @@ export function createAuditStore(options = {}) {
             const tombstone = createDeletionTombstoneV1({ auditId, requestedAt: now, reason: request.reason });
             context.read(audits.get(LATEST_KEY), latest => {
               for (const key of [auditId, revisionKey(auditId), checkpointKey(auditId), pixelAttemptKey(auditId),
-                exportLeaseKey(auditId), exportAttemptKey(auditId), exportDeliveryKey(auditId)]) context.watch(audits.delete(key));
+                exportLeaseKey(auditId), exportAttemptKey(auditId), exportDeliveryKey(auditId), exportReceiptKey(auditId)]) context.watch(audits.delete(key));
               if (latest?.auditId === auditId) context.watch(audits.delete(LATEST_KEY));
               context.watch(retention.delete(auditId));
               context.watch(deletions.put(tombstone));
               context.setResult(stagedDeletion(tombstone, auditId));
             });
           };
-          if (request.reason === 'manual') {
+          if (['manual', 'post-export'].includes(request.reason)) {
             context.read(audits.get(revisionKey(auditId)), value => {
               const revision = storedRevision(value);
               if (revision !== request.expectedRevision) { context.setResult(deniedDeletion()); return; }
@@ -2026,7 +2040,12 @@ export function createAuditStore(options = {}) {
                   if (canonicalDeliveryJournal(delivery, auditId).length > 0) {
                     context.setResult(deniedDeletion()); return;
                   }
-                  stage();
+                  if (request.reason === 'post-export') {
+                    context.read(retention.get(auditId), metadata => context.read(audits.get(exportReceiptKey(auditId)), receipt => {
+                      if (!eligiblePostExport(request, receipt, metadata, revision)) { context.setResult(deniedDeletion()); return; }
+                      stage();
+                    }));
+                  } else stage();
                 });
               });
             });
@@ -3049,6 +3068,7 @@ export function createAuditStore(options = {}) {
         auditStore.delete(exportLeaseKey(key));
         auditStore.delete(exportAttemptKey(key));
         auditStore.delete(exportDeliveryKey(key));
+        auditStore.delete(exportReceiptKey(key));
         if (latestValue?.auditId === key) auditStore.delete(LATEST_KEY);
         retentionStore.delete(key);
       };
@@ -3172,7 +3192,6 @@ export function createAuditStore(options = {}) {
       let leaseValue;
       let attemptValue;
       let deliveryValue;
-      let latestValue;
       let retentionValue;
       let conflict = false;
       let leaseConflict = false;
@@ -3186,13 +3205,12 @@ export function createAuditStore(options = {}) {
         pending -= 1;
         if (pending !== 0 || result || conflict || leaseConflict) return;
         let revision;
-        let metadata;
         let entries;
         let attemptRecord;
         try {
           revision = storedRevision(revisionValue);
           modelValue = materializeCanonicalAuditModel(key, modelValue, { allowMissing: true });
-          metadata = validateRetentionMetadata(retentionValue, key);
+          validateRetentionMetadata(retentionValue, key);
           entries = canonicalDeliveryJournal(deliveryValue, key);
         } catch (error) { finish(reject, error); return; }
         if (modelValue === undefined || revision !== expected) { conflict = true; return; }
@@ -3210,21 +3228,9 @@ export function createAuditStore(options = {}) {
           leaseConflict = true;
           return;
         }
-        const shouldDelete = metadata.deleteAfterCompleteExport === true &&
-          finalizeOptions.deleteAfterCompleteExport === true &&
-          isCompleteTerminalDelivery(entries, lease.ownerId, lease.exportAttempt);
-        if (shouldDelete) {
-          auditStore.delete(key);
-          auditStore.delete(revisionKey(key));
-          auditStore.delete(checkpointKey(key));
-          auditStore.delete(pixelAttemptKey(key));
-          auditStore.delete(exportLeaseKey(key));
-          auditStore.delete(exportAttemptKey(key));
-          auditStore.delete(exportDeliveryKey(key));
-          if (latestValue?.auditId === key) auditStore.delete(LATEST_KEY);
-          retentionStore.delete(key);
-          result = { deleted: true };
-          return;
+        const receipt = exportReceiptFromLatest(latestClone, key);
+        if (receipt && (receipt.modelRevision !== revision || receipt.attemptId !== String(lease.exportAttempt))) {
+          leaseConflict = true; return;
         }
         const nextRevision = revision + 1;
         auditStore.put(modelClone, key);
@@ -3232,6 +3238,11 @@ export function createAuditStore(options = {}) {
         auditStore.put(attemptRecord, exportAttemptKey(key));
         auditStore.delete(exportLeaseKey(key));
         auditStore.delete(exportDeliveryKey(key));
+        const receiptWrite = receipt ? auditStore.put(receipt, exportReceiptKey(key)) : auditStore.delete(exportReceiptKey(key));
+        receiptWrite.onerror = () => {
+          abortIndexedDbTransaction(transaction);
+          finish(reject, new AuditStorageUnavailableError());
+        };
         if (latestClone !== undefined) {
           auditStore.put(pendingCleanupLatest({ ...latestClone, exportAttempt: lease.exportAttempt }, []), LATEST_KEY);
         }
@@ -3243,7 +3254,7 @@ export function createAuditStore(options = {}) {
         [auditStore.get(exportLeaseKey(key)), value => { leaseValue = value; }],
         [auditStore.get(exportAttemptKey(key)), value => { attemptValue = value; }],
         [auditStore.get(exportDeliveryKey(key)), value => { deliveryValue = value; }],
-        [auditStore.get(LATEST_KEY), value => { latestValue = value; }],
+        [auditStore.get(LATEST_KEY), () => {}],
         [retentionStore.get(key), value => { retentionValue = value; }],
       ];
       for (const [request, receive] of requests) {
@@ -3385,6 +3396,7 @@ export function createAuditStore(options = {}) {
             auditStore.delete(exportLeaseKey(metadata.auditId));
             auditStore.delete(exportAttemptKey(metadata.auditId));
             auditStore.delete(exportDeliveryKey(metadata.auditId));
+            auditStore.delete(exportReceiptKey(metadata.auditId));
             const latestRequest = auditStore.get(LATEST_KEY);
             latestRequest.onsuccess = () => {
               if (latestRequest.result?.auditId === metadata.auditId) auditStore.delete(LATEST_KEY);
@@ -3471,8 +3483,11 @@ export function createAuditStore(options = {}) {
     resolveExportDelivery,
     getExportDeliveryJournal,
     async getExportReceipt(id) {
-      const [revision, entries, latest] = await Promise.all([getReportRevision(id), getExportDeliveryJournal(id), get(LATEST_KEY)]);
-      return exportReceiptFromRevision(revision, entries) ?? exportReceiptFromLatest(latest, validId(id));
+      const key = validId(id); const entries = await getExportDeliveryJournal(key);
+      if (entries.length) return exportReceiptFromRevision(await getReportRevision(key), entries);
+      const values = await readKeys([exportReceiptKey(key), revisionKey(key), LATEST_KEY]);
+      return confirmedReceipt(values.get(exportReceiptKey(key)), key, storedRevision(values.get(revisionKey(key)))) ??
+        exportReceiptFromLatest(values.get(LATEST_KEY), key);
     },
     getAuditRetention,
     nextExpiresAtV1,

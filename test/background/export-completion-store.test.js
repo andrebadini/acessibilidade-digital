@@ -137,6 +137,7 @@ test('a complete receipt applies deferred deletion to the exact finalized revisi
       auditId: AUDIT_ID,
       expectedRevision: MODEL_REVISION + 1,
       attemptId: ATTEMPT_ID,
+      terminalReceipt: receipt(),
     }],
   ]);
 });

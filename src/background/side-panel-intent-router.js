@@ -991,6 +991,7 @@ export function createSidePanelIntentRouter(raw) {
     }) ?? fail('FEATURE_UNAVAILABLE');
     if (envelope.type === 'REPORT_REQUEST_EXPORT') return input.exportLaunch?.requestExport?.({
       auditId: envelope.auditId, sessionCapabilityId: envelope.sessionCapabilityId, sender: request.sender,
+      deleteAfterCompleteExport: envelope.deleteAfterCompleteExport === true,
     }) ?? fail('FEATURE_UNAVAILABLE');
     if (envelope.type === 'REPORT_COMMIT_REVIEW_DECISION') return mutateReport(envelope, request.sender, 'review-commit');
     if (envelope.type === 'REPORT_DELETE_AUDIT') return mutateReport(envelope, request.sender, 'delete-audit');

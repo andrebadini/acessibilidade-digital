@@ -115,6 +115,40 @@ const manualRequest = (scope = 'one') => ({ auditId: AUDIT, reason: 'manual', ex
   terminalReceipt: null, manualAuthorization: { version: 1, scope,
     auditId: scope === 'one' ? AUDIT : null, authorizedAt: NOW } });
 
+function postExportRequest() {
+  const mime = ['text/html;charset=utf-8', 'application/pdf', 'text/csv;charset=utf-8', 'application/json;charset=utf-8'];
+  const terminalReceipt = { version: 1, auditId: AUDIT, modelRevision: 2, modelHash: 'a'.repeat(64),
+    attemptId: '1', status: 'complete', formats: ['html', 'pdf', 'csv', 'json'].map((format, index) => ({
+      format, mimeType: mime[index], byteSize: 10, sha256: 'b'.repeat(64), downloadId: index + 1, state: 'complete',
+    })) };
+  return { auditId: AUDIT, reason: 'post-export', expectedRevision: 3, terminalReceipt, manualAuthorization: null };
+}
+
+test('R3-F3 post-export staging defers every cleaner until explicit recovery outside the export lock', async () => {
+  const env = fixture(); const coordinator = env.create();
+  const request = postExportRequest();
+  assert.deepEqual(await coordinator.request(request), { status: 'pending', auditId: AUDIT });
+  assert.deepEqual(env.calls.map(row => row[0]), ['now', 'stage']);
+  assert.deepEqual(env.calls[1][1], { auditId: AUDIT, reason: 'post-export', now: NOW,
+    expectedRevision: 3, terminalReceipt: request.terminalReceipt });
+  assert.equal(env.models.has(AUDIT), false); assert.equal(env.tombstones.get(AUDIT).reason, 'post-export');
+  await coordinator.resumePending({ limit: 25 });
+  assert.equal(env.tombstones.size, 0); assert.equal(env.models.has(FOREIGN), true);
+});
+
+test('R3-F3 post-export requires complete receipt and exact audit plus terminal revision before staging', async () => {
+  const request = postExportRequest();
+  for (const patch of [
+    { expectedRevision: 2 }, { manualAuthorization: manualRequest().manualAuthorization },
+    { terminalReceipt: { ...request.terminalReceipt, auditId: FOREIGN } },
+    { terminalReceipt: { ...request.terminalReceipt, status: 'partial', formats: request.terminalReceipt.formats.slice(0, 2) } },
+  ]) {
+    const env = fixture();
+    assert.deepEqual(await env.create().request({ ...request, ...patch }), DENIED);
+    assert.deepEqual(env.calls, []);
+  }
+});
+
 test('R3-F1 manual one and all authority stage the current revision before cleanup', async t => {
   for (const scope of ['one', 'all']) await t.test(scope, async () => {
     const env = fixture();

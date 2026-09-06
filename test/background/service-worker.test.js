@@ -151,6 +151,76 @@ test('R3-F2 manual operation delegates atomic deletion and distinguishes pending
   });
 });
 
+test('R3-F3 completion stages exact delivered audit then cleans outside the export queue without delaying response', { timeout: 5000 }, async t => {
+  const auditId = 'post-export-runtime'; const store = createInMemoryAuditStore();
+  const model = structuredClone(SAMPLE_AUDIT); model.auditId = auditId;
+  await store.commitAudit(auditId, model, { auditId }, { now: RETENTION_NOW, deleteAfterCompleteExport: true });
+  const snapshot = await store.getAuditSnapshot(auditId);
+  const ownerId = 'receipt-owner'; const now = RETENTION_NOW;
+  const lease = await store.acquireExportLease(auditId, snapshot.capability, { ownerId, now });
+  const leaseOptions = { ownerId, now, exportAttempt: lease.exportAttempt };
+  await store.claimExportLease(auditId, snapshot.capability, leaseOptions);
+  await store.beginExportDelivery(auditId, snapshot.capability, leaseOptions);
+  const mime = ['text/html;charset=utf-8', 'application/pdf', 'text/csv;charset=utf-8', 'application/json;charset=utf-8'];
+  const formats = [];
+  for (const [index, format] of ['html', 'pdf', 'csv', 'json'].entries()) {
+    const row = { format, filename: `report.${format}`, mimeType: mime[index], byteSize: 10,
+      sha256: 'b'.repeat(64), downloadId: index + 1 };
+    await store.recordExportDelivery(auditId, snapshot.capability, { ...row, ...leaseOptions, state: 'terminal' });
+    formats.push({ ...row, status: 'complete' });
+  }
+  await store.finalizeExportAndMaybeDelete(auditId, snapshot.model, {
+    auditId, exportStatus: 'complete', exportDeliveryIdentity: {
+      auditId, modelRevision: snapshot.revision, modelHash: 'a'.repeat(64), attemptId: '1',
+    }, deliveryReceipt: { status: 'complete', formats, limitations: [] },
+  }, snapshot.capability, { ...leaseOptions, clearDeliveryJournal: true, deleteAfterCompleteExport: false });
+  const gate = deferred(); const entered = deferred(); let hold = false; let proofAtCleanup;
+  const auditStore = { ...store, async stageExpiredAuditDeletionsV1(request) {
+    if (hold) {
+      proofAtCleanup = env.sessionValues[`audita:export-launch:v1:${auditId}`]?.terminalProof;
+      entered.resolve(); await gate.promise;
+    }
+    return store.stageExpiredAuditDeletionsV1(request);
+  } };
+  const env = defaultGraphFixture(null, { auditStore, enableReportLaunch: true, modelNow: () => now });
+  t.after(() => { gate.resolve(); env.registration.dispose(); });
+  await env.registration.startupReady; await settleRetention();
+  const documentId = 'post-export-document'; const capability = 'B'.repeat(22); const epoch = 1_788_000_000_000;
+  const url = env.chromeApi.runtime.getURL(`src/export/index.html?auditId=${auditId}`);
+  env.sessionValues[`audita:export-launch:v1:${auditId}`] = {
+    version: 1, auditId, sourceReviewSessionCapabilityId: 'R'.repeat(22), expectedRevision: snapshot.revision,
+    attemptId: '1', tabId: 77, windowId: 9, path: '/src/export/index.html', documentId,
+    state: 'connected', issuedAt: epoch, expiresAt: epoch + 900_000,
+  };
+  env.sessionValues[`audita:export-session:v1:${capability}`] = {
+    version: 1, sessionCapabilityId: capability, auditId, launchTabId: 77, launchDocumentId: documentId,
+    expectedRevision: snapshot.revision, attemptId: '1', intents: ['execute-export', 'complete-export'],
+    state: 'active', issuedAt: epoch, expiresAt: epoch + 900_000,
+  };
+  env.setContext({ documentId, documentUrl: url, contextType: 'TAB', tabId: 77, windowId: 9, frameId: 0 });
+  const tabs = new Map([[77, { id: 77, windowId: 9, url }]]);
+  const getContexts = env.chromeApi.runtime.getContexts;
+  env.chromeApi.runtime.getContexts = async filter => filter.tabIds
+    ? (tabs.has(77) && filter.tabIds.includes(77)
+      ? [{ documentId, documentUrl: url, contextType: 'TAB', tabId: 77, windowId: 9 }] : [])
+    : getContexts(filter);
+  env.chromeApi.tabs.get = async id => { if (!tabs.has(id)) throw new Error('absent'); return tabs.get(id); };
+  env.chromeApi.tabs.query = async () => [...tabs.values()];
+  env.chromeApi.tabs.remove = async id => { tabs.delete(id); };
+  hold = true;
+  const response = await env.dispatch({ type: 'EXPORT_COMPLETE', auditId, sessionCapabilityId: capability, attemptId: '1' },
+    { id: env.chromeApi.runtime.id, documentId, url, frameId: 0, tab: { id: 77, windowId: 9 } });
+  assert.equal(response.ok, true);
+  assert.equal(await store.getAudit(auditId), undefined);
+  await entered.promise;
+  assert.equal(proofAtCleanup.applied, true);
+  assert.equal(proofAtCleanup.notified, true);
+  assert.equal(proofAtCleanup.deleted, true);
+  gate.resolve(); await settleRetention();
+  assert.equal((await store.listDeletionTombstonesV1({ limit: 25 })).length, 0);
+  assert.equal(tabs.size, 0);
+});
+
 test('R3-F2 bulk deletion preserves a newly created audit and reports a stale revision as partial', async () => {
   const env = await manualOperationsFixture();
   env.controls.beforeDelete = async input => {

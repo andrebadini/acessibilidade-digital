@@ -22,6 +22,22 @@ const ATTACHED_COPY_RELOADED_MESSAGE = 'A auditoria foi executada em uma cópia 
 const ATTACHED_COPY_EVIDENCE_ONLY_MESSAGE = 'A página foi avaliada em uma cópia temporária já removida. O destaque ao vivo não está disponível; consulte as capturas e os seletores registrados no momento da auditoria.';
 const ATTACHED_COPY_RETURN_MESSAGE = 'Retorno e destaque na aba original indisponíveis: a auditoria usou uma cópia temporária e não alterou a aba original.';
 
+test('export deletion is an explicit unchecked choice next to export and is reset by a fresh view', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const calls = [];
+  const root = renderReportView({ view, document: new Document(), onExport: options => calls.push(options) });
+  const checkbox = root.querySelector('input[data-report-delete-after-export]');
+  assert.ok(checkbox);
+  assert.notEqual(checkbox.checked, true);
+  root.querySelector('[data-report-export]').click();
+  checkbox.checked = true;
+  root.querySelector('[data-report-export]').click();
+  assert.deepEqual(calls, [{ deleteAfterCompleteExport: false }, { deleteAfterCompleteExport: true }]);
+  const fresh = renderReportView({ view, document: new Document(), onExport() {} });
+  assert.notEqual(fresh.querySelector('input[data-report-delete-after-export]').checked, true);
+});
+
 test('downloaded HTML is interactive while the same print projection is script-free and expanded', async () => {
   const { model, summary } = await fixture();
   const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });

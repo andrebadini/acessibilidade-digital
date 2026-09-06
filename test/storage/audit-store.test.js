@@ -1649,7 +1649,7 @@ test('retention CAS and destructive APIs have the same contract in IndexedDB', a
   assert.equal(fake.inspectStore('audit-retention').size, 0);
 });
 
-test('finalization deletes only after the exact four terminal formats for the current lease and intent', async () => {
+test('finalization preserves data until the exact four-format receipt is staged by the deletion coordinator', async () => {
   for (const createStore of [
     () => createInMemoryAuditStore(),
     () => {
@@ -1695,7 +1695,7 @@ test('finalization deletes only after the exact four terminal formats for the cu
       html: 'text/html;charset=utf-8', pdf: 'application/pdf',
       csv: 'text/csv;charset=utf-8', json: 'application/json;charset=utf-8',
     };
-    for (const [index, format] of ['html', 'json', 'csv', 'pdf'].entries()) {
+    for (const [index, format] of ['html', 'pdf', 'csv', 'json'].entries()) {
       const identity = {
         format, filename: `auditoria.${format}`, downloadId: index + 1,
         mimeType: mime[format], byteSize: index + 10, sha256: String(index + 1).repeat(64),
@@ -1712,6 +1712,7 @@ test('finalization deletes only after the exact four terminal formats for the cu
       auditFixture(auditId, 'complete'),
       {
         auditId, exportStatus: 'complete',
+        exportDeliveryIdentity: { auditId, modelRevision: snapshot.revision, modelHash: 'a'.repeat(64), attemptId: String(lease.exportAttempt) },
         deliveryReceipt: { status: 'complete', limitations: [], formats: receiptFormats },
       },
       snapshot.capability,
@@ -1721,12 +1722,106 @@ test('finalization deletes only after the exact four terminal formats for the cu
         deleteAfterCompleteExport: true,
       },
     );
-    assert.deepEqual(result, { deleted: true });
+    assert.equal(result.deleted, false);
+    assert.equal(result.revision, snapshot.revision + 1);
+    assert.ok(await store.getAudit(auditId));
+    assert.equal((await store.getAuditRetention(auditId)).deleteAfterCompleteExport, true);
+    assert.deepEqual(await store.getExportDeliveryJournal(auditId), []);
+    const receipt = await store.getExportReceipt(auditId);
+    assert.equal(receipt.modelRevision, snapshot.revision);
+    assert.equal((await store.stageAuditDeletionV1({ auditId, reason: 'post-export', now: T30,
+      expectedRevision: result.revision, terminalReceipt: receipt })).status, 'staged');
     assert.equal(await store.getAudit(auditId), undefined);
     assert.equal(await store.getAuditRetention(auditId), undefined);
-    assert.deepEqual(await store.getExportDeliveryJournal(auditId), []);
     assert.equal(await readPrivatePixelAttemptCommitV1(store, pixelAttempt.correlation), false);
   }
+});
+
+async function preparePostExport(store, auditId, { optIn = true, partial = false } = {}) {
+  await store.commitAudit(auditId, auditFixture(auditId), { auditId }, { now: T0, deleteAfterCompleteExport: optIn });
+  const snapshot = await store.getAuditSnapshot(auditId);
+  const lease = await store.acquireExportLease(auditId, snapshot.capability, { ownerId: 'receipt-owner', now: T29 });
+  await store.claimExportLease(auditId, snapshot.capability, { ownerId: 'receipt-owner', exportAttempt: lease.exportAttempt, now: T29 });
+  await store.beginExportDelivery(auditId, snapshot.capability, { ownerId: 'receipt-owner', exportAttempt: lease.exportAttempt, now: T29 });
+  const mime = ['text/html;charset=utf-8', 'application/pdf', 'text/csv;charset=utf-8', 'application/json;charset=utf-8'];
+  const formats = [];
+  for (const [index, format] of (partial ? ['html', 'pdf'] : ['html', 'pdf', 'csv', 'json']).entries()) {
+    const row = { format, filename: `report.${format}`, mimeType: mime[index], byteSize: 10,
+      sha256: 'b'.repeat(64), downloadId: index + 1 };
+    await store.recordExportDelivery(auditId, snapshot.capability, { ...row, ownerId: 'receipt-owner',
+      exportAttempt: lease.exportAttempt, now: T29, state: 'terminal' });
+    formats.push({ ...row, status: 'complete' });
+  }
+  const status = partial ? 'partial' : 'complete';
+  const latest = { auditId, exportStatus: status, exportDeliveryIdentity: {
+    auditId, modelRevision: snapshot.revision, modelHash: 'a'.repeat(64), attemptId: String(lease.exportAttempt),
+  }, deliveryReceipt: { status, formats, limitations: partial ? ['Incomplete delivery'] : [] } };
+  const finalize = () => store.finalizeExportAndMaybeDelete(auditId, snapshot.model, latest, snapshot.capability,
+    { ownerId: 'receipt-owner', exportAttempt: lease.exportAttempt, now: T29, clearDeliveryJournal: true, deleteAfterCompleteExport: true });
+  return { finalize, snapshot, latest };
+}
+
+test('post-export receipt survives latest replacement and staging atomically removes only its own companion', async t => {
+  for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
+    const store = context.open();
+    const first = await preparePostExport(store, 'receipt-first'); await first.finalize();
+    const receipt = await store.getExportReceipt('receipt-first');
+    assert.equal(receipt?.status, 'complete');
+    const second = await preparePostExport(store, 'receipt-second'); await second.finalize();
+    assert.deepEqual(await context.open().getExportReceipt('receipt-first'), receipt);
+    assert.equal((await store.getLatest()).auditId, 'receipt-second');
+    assert.equal((await store.stageAuditDeletionV1({ auditId: 'receipt-first', reason: 'post-export', now: T29,
+      expectedRevision: first.snapshot.revision + 1, terminalReceipt: receipt })).status, 'staged');
+    assert.equal(context.auditEntries().some(([key]) => key === '__audit_export_receipt__:receipt-first'), false);
+    assert.equal((await store.getExportReceipt('receipt-second')).auditId, 'receipt-second');
+    assert.ok(await store.getAudit('receipt-second'));
+  });
+});
+
+test('post-export staging preserves opt-out partial missing mismatched and stale receipts', async t => {
+  for (const context of deletionStoreContexts()) await t.test(context.name, async () => {
+    const store = context.open();
+    for (const mode of ['opt-out', 'partial', 'missing', 'mismatch', 'stale', 'active']) {
+      const auditId = `receipt-${mode}`;
+      const prepared = await preparePostExport(store, auditId, { optIn: mode !== 'opt-out', partial: mode === 'partial' });
+      await prepared.finalize(); const receipt = await store.getExportReceipt(auditId);
+      const snapshot = await store.getAuditSnapshot(auditId);
+      if (mode === 'active') await store.acquireExportLease(auditId, snapshot.capability, { ownerId: 'next-owner', now: T29 });
+      const before = context.auditEntries();
+      const supplied = mode === 'missing' ? null : mode === 'mismatch' ? { ...receipt, modelHash: 'c'.repeat(64) } : receipt;
+      assert.deepEqual(await store.stageAuditDeletionV1({ auditId, reason: 'post-export', now: T29,
+        expectedRevision: snapshot.revision + (mode === 'stale' ? 1 : 0), terminalReceipt: supplied }),
+      { status: 'denied', code: 'AUDIT_DELETION_DENIED' });
+      assert.deepEqual(context.auditEntries(), before);
+      assert.ok(await store.getAudit(auditId));
+    }
+  });
+});
+
+test('receipt companion write failure rolls back finalized revision model and delivery ownership', async () => {
+  let fail = false;
+  const fake = createFakeIndexedDb({ rollbackWrites: true,
+    failWriteRequest: ({ operation, key }) => fail && operation === 'put' && key === '__audit_export_receipt__:receipt-rollback' });
+  const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+  const prepared = await preparePostExport(store, 'receipt-rollback');
+  const before = fake.inspectStore('audits'); fail = true;
+  await assert.rejects(prepared.finalize(), { code: 'AUDIT_STORAGE_UNAVAILABLE' });
+  assert.deepEqual(fake.inspectStore('audits'), before);
+});
+
+test('post-export tombstone failure rolls back the model and its terminal receipt together', async () => {
+  let fail = false;
+  const fake = createFakeIndexedDb({ rollbackWrites: true,
+    failWriteRequest: ({ storeName, operation }) => fail && operation === 'put' && storeName === 'audit-deletion-tombstones' });
+  const store = createAuditStore({ indexedDB: fake, IDBKeyRange: fake.IDBKeyRange });
+  const prepared = await preparePostExport(store, 'post-export-rollback'); await prepared.finalize();
+  const receipt = await store.getExportReceipt('post-export-rollback');
+  const names = ['audits', 'audit-retention', 'audit-deletion-tombstones'];
+  const before = names.map(name => fake.inspectStore(name)); fail = true;
+  await assert.rejects(store.stageAuditDeletionV1({ auditId: 'post-export-rollback', reason: 'post-export', now: T29,
+    expectedRevision: prepared.snapshot.revision + 1, terminalReceipt: receipt }), { code: 'AUDIT_STORAGE_UNAVAILABLE' });
+  assert.deepEqual(names.map(name => fake.inspectStore(name)), before);
+  assert.deepEqual(await store.getExportReceipt('post-export-rollback'), receipt);
 });
 
 test('incomplete delivery receipt preserves the audit even when delete-after-export was selected', async () => {

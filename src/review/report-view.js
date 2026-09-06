@@ -923,8 +923,18 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   actions.setAttribute('data-report-executive-actions', '');
   const exportButton = element(document, 'button', 'Exportar HTML, PDF, CSV e JSON');
   exportButton.setAttribute('type', 'button'); exportButton.setAttribute('data-report-export', '');
-  exportButton.addEventListener('click', () => onExport());
-  actions.append(exportButton);
+  const deletionChoice = document.createElement('label');
+  deletionChoice.setAttribute('class', 'export-retention-choice');
+  deletionChoice.setAttribute('for', 'delete-after-export');
+  const deleteAfterExport = document.createElement('input');
+  deleteAfterExport.setAttribute('type', 'checkbox');
+  deleteAfterExport.setAttribute('id', 'delete-after-export');
+  deleteAfterExport.setAttribute('data-report-delete-after-export', '');
+  deleteAfterExport.checked = false;
+  deletionChoice.append(deleteAfterExport, element(document, 'span',
+    'Apagar os dados locais desta auditoria após baixar os quatro arquivos. Os downloads serão preservados.'));
+  exportButton.addEventListener('click', () => onExport({ deleteAfterCompleteExport: deleteAfterExport.checked === true }));
+  actions.append(exportButton, deletionChoice);
   executive.append(actions, limitations);
   root.append(executive);
   root.append(sectionNavigation(document));

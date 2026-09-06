@@ -182,6 +182,7 @@ export function createExportCompletionStore({ auditStore, emitTerminal, deleteCo
         auditId,
         expectedRevision: durable.modelRevision + 1,
         attemptId: input.attemptId,
+        terminalReceipt: durable,
       }));
       if (ownData(deletion, 'ok') === true && ownData(deletion, 'auditId') === auditId &&
         ownData(deletion, 'deleted') === true) {

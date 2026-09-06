@@ -12,6 +12,17 @@ const SESSION = '-1234567890123456789';
 const LEASE = 'lease-1234567890123456789012';
 const CONSENT = `${'C'.repeat(21)}Q`;
 
+test('report export accepts only an optional boolean deletion preference and copies it without accessors', () => {
+  const base = { type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: SESSION, auditId: 'audit-1' };
+  for (const value of [true, false]) assert.deepEqual(parseWorkerMessage({ ...base, deleteAfterCompleteExport: value }),
+    { ok: true, value: { ...base, deleteAfterCompleteExport: value } });
+  for (const value of ['true', 1, null, undefined]) assert.equal(
+    parseWorkerMessage({ ...base, deleteAfterCompleteExport: value }).ok, false);
+  const accessor = { ...base };
+  Object.defineProperty(accessor, 'deleteAfterCompleteExport', { enumerable: true, get() { throw new Error('must not read'); } });
+  assert.equal(parseWorkerMessage(accessor).ok, false);
+});
+
 const validMessages = [
   { type: 'PREPARE_PANEL_CAPABILITY', requestId: '_request', windowId: 9 },
   { type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: '_navigation', intent: 'single', windowId: 9 },

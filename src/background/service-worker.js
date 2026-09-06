@@ -1641,10 +1641,32 @@ async function buildDefaultRuntime(chromeApi, options) {
   const exportCompletionStore = createExportCompletionStore({
     auditStore,
     emitTerminal: event => chromeAdapter.emitProgress(event),
+    async deleteCompletedAudit({ auditId, expectedRevision, terminalReceipt }) {
+      const result = await deletionCoordinator.request({ auditId, reason: 'post-export', expectedRevision,
+        terminalReceipt, manualAuthorization: null });
+      return result?.auditId === auditId && result.status === 'pending'
+        ? Object.freeze({ ok: true, auditId, deleted: true })
+        : Object.freeze({ ok: false, code: 'AUDIT_DELETE_BUSY' });
+    },
   });
-  const exportLaunch = launchApisAvailable ? createExportLaunchAuthority({
+  const baseExportLaunch = launchApisAvailable ? createExportLaunchAuthority({
     chromeApi, sessionArea, auditStore: exportCompletionStore, reportLaunch, epochNow, modelNow, randomBytes: bytes,
   }) : unavailableLaunch;
+  const exportLaunch = Object.freeze({
+    ...baseExportLaunch,
+    async complete(request) {
+      let completed = false;
+      try {
+        const result = await baseExportLaunch.complete(request);
+        completed = result?.ok === true;
+        return result;
+      } finally {
+        // The launch queue must release its terminal proof before cleanup can clear that launch.
+        if (retentionScheduler) void (completed
+          ? retentionScheduler.run('post-export') : retentionScheduler.scheduleNext()).catch(() => {});
+      }
+    },
+  });
   const blobUrlPortBridge = createBlobUrlPortBridgeV1({
     chromeApi, sessionArea, exportLaunch, auditStore, now: epochNow,
   });

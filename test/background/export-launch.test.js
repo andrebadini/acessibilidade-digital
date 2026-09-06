@@ -31,6 +31,7 @@ function navigationFixture({
   };
   const capability = Object.freeze({});
   const auditStore = {
+    async setRetentionIntent() {},
     async getAuditSnapshot() { return { model: { auditId }, revision: 1, capability }; },
     async acquireExportLease(_auditId, receivedCapability) {
       assert.equal(receivedCapability, capability);
@@ -117,6 +118,39 @@ test('attempt identity is a canonical decimal string and its private owner is de
   for (const value of ['0', '01', '-1', '1.0', '9007199254740992']) {
     assert.throws(() => deriveExportLeaseOwner('audit-1', value), /EXPORT_ATTEMPT_DENIED/u);
   }
+});
+
+test('post-export preference is written after authorization and lease, before tab creation, with default off', async () => {
+  for (const value of [undefined, false, true]) {
+    const env = navigationFixture();
+    const acquired = env.auditStore.acquireExportLease;
+    env.auditStore.acquireExportLease = async (...args) => { env.calls.push(['lease']); return acquired(...args); };
+    env.auditStore.setRetentionIntent = async (id, capability, options) => {
+      assert.equal(id, env.auditId);
+      assert.ok(capability);
+      env.calls.push(['preference', options.deleteAfterCompleteExport]);
+    };
+    assert.equal((await env.authority.requestExport({ ...env.request,
+      ...(value === undefined ? {} : { deleteAfterCompleteExport: value }) })).ok, true);
+    assert.deepEqual(env.calls.slice(0, 3).map(call => call[0]), ['lease', 'preference', 'create']);
+    assert.equal(env.calls.find(call => call[0] === 'preference')[1], value === true);
+    assert.equal((await env.authority.requestExport({ ...env.request, deleteAfterCompleteExport: !value })).code, 'EXPORT_ALREADY_ACTIVE');
+    assert.equal(env.calls.filter(call => call[0] === 'preference').length, 1);
+  }
+});
+
+test('post-export preference failure releases lease without creating a tab; foreign sender has zero effects', async () => {
+  const env = navigationFixture();
+  env.auditStore.setRetentionIntent = async () => { throw new Error('private storage detail'); };
+  assert.deepEqual(await env.authority.requestExport({ ...env.request, deleteAfterCompleteExport: true }),
+    { ok: false, code: 'EXPORT_OPEN_FAILED' });
+  assert.ok(env.calls.some(call => call[0] === 'release'));
+  assert.equal(env.calls.some(call => call[0] === 'create'), false);
+  const foreign = navigationFixture();
+  foreign.reportLaunch.authorizeExport = async () => ({ ok: false });
+  foreign.auditStore.setRetentionIntent = async () => { throw new Error('must not run'); };
+  assert.equal((await foreign.authority.requestExport({ ...foreign.request, deleteAfterCompleteExport: true })).ok, false);
+  assert.deepEqual(foreign.calls, []);
 });
 
 test('accepts every exact pre-connection staging snapshot immediately without a timer', async () => {
@@ -441,6 +475,7 @@ test('export launch creates a bearer-free URL and persists one first-document se
   };
   const snapshot = { model: { auditId: 'audit-1' }, revision: 4, capability: Object.freeze({}) };
   const store = {
+    async setRetentionIntent() {},
     async getAuditSnapshot() { return snapshot; },
     async getReportRevision() { return { version: 1, auditId: 'audit-1', modelRevision: 4, modelHash: 'a'.repeat(64), model: { auditId: 'audit-1' }, checkpoint: {} }; },
     async acquireExportLease(_id, capability, options) { assert.equal(capability, snapshot.capability); calls.push(['lease', options.ownerId]); return { acquired: true, exportAttempt: 7, revision: 4, expiresAt: '2026-08-29T12:10:00.000Z' }; },
@@ -508,6 +543,7 @@ test('compensates a proven owned tab and export lease after launch allocation fa
   };
   const snapshot = { model: { auditId: 'audit.retry_1' }, revision: 2, capability: Object.freeze({}) };
   const auditStore = {
+    async setRetentionIntent() {},
     async getAuditSnapshot() { return snapshot; },
     async acquireExportLease() {
       if (leaseActive) return { acquired: false, exportAttempt: attempt, revision: 2 };
@@ -549,6 +585,7 @@ test('releases a lease whose acquired response cannot be correlated to the autho
   };
   const auditStore = {
     async getAuditSnapshot() { return { model: { auditId: 'audit-lease-validate' }, revision: 2, capability: Object.freeze({}) }; },
+    async setRetentionIntent() {},
     async acquireExportLease() {
       if (leaseActive) return { acquired: false, exportAttempt: attempt, revision: 2 };
       leaseActive = true; attempt += 1;
@@ -597,6 +634,7 @@ test('compensates validate, persist, navigate and confirm failures after lease a
         },
       };
       const auditStore = {
+        async setRetentionIntent() {},
         async getAuditSnapshot() { return { model: { auditId }, revision: 1, capability: Object.freeze({}) }; },
         async acquireExportLease() {
           if (activeLease) return { acquired: false, exportAttempt: attempt, revision: 1 };
@@ -645,6 +683,7 @@ test('revokes an active export when its source report consumer is revoked', asyn
   };
   const snapshot = { model: { auditId: 'audit-1' }, revision: 1, capability: Object.freeze({}) };
   const auditStore = {
+    async setRetentionIntent() {},
     async getAuditSnapshot() { return snapshot; },
     async acquireExportLease() { return { acquired: true, exportAttempt: 1, revision: 1 }; },
     async releaseExportLease(_auditId, options) { calls.push(['release', options.ownerId]); return true; },
@@ -987,6 +1026,7 @@ test('export audit cleanup delayed old-tab event cannot revoke or close a replac
     env.auditStore.acquireExportLease = async (_auditId, received) => {
       assert.equal(received, capability); return { acquired: true, exportAttempt: 2, revision: 2 };
     };
+    env.auditStore.setRetentionIntent = async () => {};
     env.reportLaunch.authorizeExport = async () => ({ ok: true, auditId: env.auditId, windowId: 7 });
     env.chromeApi.tabs.create = async options => ({ id: 52, windowId: options.windowId, url: 'about:blank' });
     env.chromeApi.tabs.update = async (tabId, options) => {

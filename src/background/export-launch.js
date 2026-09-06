@@ -182,7 +182,8 @@ export function createExportLaunchAuthority(raw) {
   const getLaunch = auditId => AUDIT_ID.test(auditId ?? '') ? stored(input.sessionArea, launchKey(auditId), launchRecord) : Promise.resolve(null);
   const getSession = id => CAPABILITY.test(id ?? '') ? stored(input.sessionArea, sessionKey(id), sessionRecord) : Promise.resolve(null);
 
-  async function requestExport({ auditId, sessionCapabilityId, sender } = {}) {
+  async function requestExport({ auditId, sessionCapabilityId, sender, deleteAfterCompleteExport = false } = {}) {
+    if (typeof deleteAfterCompleteExport !== 'boolean') return fail('REPORT_EXPORT_DENIED');
     const authorization = await input.reportLaunch.authorizeExport({ auditId, sessionCapabilityId, sender });
     if (!authorization?.ok) return fail(authorization?.code === 'CONTEXT_DENIED' ? 'CONTEXT_DENIED' : 'REPORT_EXPORT_DENIED');
     return serialize(input.sessionArea, auditId, async () => {
@@ -201,6 +202,9 @@ export function createExportLaunchAuthority(raw) {
       const attemptId = String(lease.exportAttempt);
       let ownedTabId = null;
       try {
+        await input.auditStore.setRetentionIntent(auditId, snapshot.capability, {
+          now: leaseNow, deleteAfterCompleteExport,
+        });
         const tab = await input.chromeApi.tabs.create({ url: 'about:blank', active: false, windowId: authorization.windowId });
         if (!safeId(tab?.id) || tab.windowId !== authorization.windowId) throw new Error('EXPORT_OPEN_FAILED');
         ownedTabId = tab.id;

@@ -1,3 +1,5 @@
+import { createExportDeliveryIdentityV1, EXPORT_FORMATS_V1 } from '../export/export-formats.js';
+
 export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 const LATEST_KEY = '__latest__';
@@ -7,6 +9,7 @@ const PRIVATE_PREFIXES = Object.freeze([
   '__audit_export_lease__:',
   '__audit_export_attempt__:',
   '__audit_export_delivery__:',
+  '__audit_export_receipt__:',
   '__audit_checkpoint__:',
 ]);
 const RETENTION_KEYS = Object.freeze([
@@ -53,6 +56,33 @@ export function createDeletionTombstoneV1(value) {
   });
 }
 
+export function validateTerminalExportReceiptV1(value) {
+  try {
+    const receipt = deletionDataRecord(value, ['version', 'auditId', 'modelRevision', 'modelHash', 'attemptId', 'status', 'formats']);
+    if (typeof receipt.auditId !== 'string' || typeof receipt.modelHash !== 'string' || typeof receipt.attemptId !== 'string') throw new TypeError();
+    const identity = createExportDeliveryIdentityV1({ auditId: receipt.auditId, modelRevision: receipt.modelRevision,
+      modelHash: receipt.modelHash, attemptId: receipt.attemptId });
+    if (receipt.version !== 1 || !['complete', 'partial'].includes(receipt.status) ||
+      !Number.isSafeInteger(Number(identity.attemptId)) || Number(identity.attemptId) < 1 ||
+      !Array.isArray(receipt.formats) || Object.getPrototypeOf(receipt.formats) !== Array.prototype ||
+      receipt.formats.length > 4 || Reflect.ownKeys(receipt.formats).length !== receipt.formats.length + 1 ||
+      receipt.status === 'complete' && receipt.formats.length !== 4) throw new TypeError();
+    const mime = ['text/html;charset=utf-8', 'application/pdf', 'text/csv;charset=utf-8', 'application/json;charset=utf-8'];
+    const seen = new Set(); let prior = -1; const formats = [];
+    for (let index = 0; index < receipt.formats.length; index++) {
+      const descriptor = Object.getOwnPropertyDescriptor(receipt.formats, String(index));
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new TypeError();
+      const row = deletionDataRecord(descriptor.value, ['format', 'mimeType', 'byteSize', 'sha256', 'downloadId', 'state']);
+      const position = EXPORT_FORMATS_V1.indexOf(row.format);
+      if (position <= prior || row.mimeType !== mime[position] || row.state !== 'complete' ||
+        !Number.isSafeInteger(row.byteSize) || row.byteSize < 0 || typeof row.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(row.sha256) ||
+        !Number.isSafeInteger(row.downloadId) || row.downloadId < 0 || seen.has(row.downloadId)) throw new TypeError();
+      prior = position; seen.add(row.downloadId); formats.push(Object.freeze(row));
+    }
+    return Object.freeze({ version: 1, ...identity, status: receipt.status, formats: Object.freeze(formats) });
+  } catch { throw new AuditDeletionDeniedError(); }
+}
+
 export function validateDeletionTombstoneV1(value, expectedAuditId) {
   try {
     const record = deletionDataRecord(value, [
@@ -61,7 +91,7 @@ export function validateDeletionTombstoneV1(value, expectedAuditId) {
     canonicalAuditId(record.auditId);
     if (expectedAuditId !== undefined && record.auditId !== canonicalAuditId(expectedAuditId)) throw new TypeError();
     const requested = canonicalRetentionInstant(record.requestedAt);
-    if (record.version !== 1 || !['retention-expired', 'manual'].includes(record.reason) ||
+    if (record.version !== 1 || !['retention-expired', 'manual', 'post-export'].includes(record.reason) ||
       record.phase !== 'transient-cleanup-pending' || !Number.isSafeInteger(record.attempts) || record.attempts < 0) throw new TypeError();
     if (record.attempts === 0) {
       if (record.lastAttemptAt !== null) throw new TypeError();

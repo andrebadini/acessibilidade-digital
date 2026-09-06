@@ -267,12 +267,13 @@ const deleteAuditController = createDestructiveDialog({
 
 deleteAudit.addEventListener('click', () => deleteAuditController.open(deleteAudit));
 
-async function requestExport() {
+async function requestExport({ deleteAfterCompleteExport = false } = {}) {
   if (!auditModel?.auditId) return;
   regenerate.disabled = true;
   status.textContent = 'Solicitando a geração do relatório.';
   const response = await sendWorkerRequest({
     type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: reportSessionCapabilityId, auditId: auditModel.auditId,
+    deleteAfterCompleteExport: deleteAfterCompleteExport === true,
   });
   regenerate.disabled = false;
   status.textContent = response?.ok ? 'Relatório atualizado na fila de geração.' : 'Não foi possível gerar o relatório atualizado.';
@@ -458,7 +459,7 @@ async function start() {
     returnControl: returnToPage, explanation: reportSourceExplanation,
   });
   const report = renderReportView({
-    view, document, onExport: () => { void requestExport(); },
+    view, document, onExport: options => { void requestExport(options); },
     onHighlightIntent: reportSessionState === 'result' ? value => {
       if (value?.type === 'GET_HIGHLIGHT_AVAILABILITY') void reportHighlightPolicy.requestExplicit(value.occurrenceId);
       else void handleReportHighlightIntent(value);

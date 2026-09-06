@@ -38,6 +38,8 @@ main { width: 100%; min-width: 0; max-width: 72rem; margin: auto; padding: 1rem 
 summary { display: flex; align-items: center; min-height: 2.75rem; cursor: pointer; font-weight: 750; color: var(--brand); padding: .45rem .25rem; overflow-wrap: anywhere; }
 [data-report-executive-actions] { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .55rem; }
 [data-report-executive-actions] button { min-height: 2.75rem; border-color: var(--action); background: var(--action); color: #fff; }
+.export-retention-choice { display: flex; align-items: center; gap: .65rem; width: 100%; min-height: 2.75rem; font-size: .9rem; cursor: pointer; }
+.export-retention-choice input { flex: 0 0 auto; width: 1.25rem; height: 1.25rem; margin: .25rem; accent-color: var(--action); }
 .section-nav { display: flex; align-items: center; gap: .6rem; min-width: 0; padding: .25rem .55rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--pale); }
 .section-nav strong { flex: 0 0 auto; }
 .section-nav ul { display: flex; flex: 1 1 auto; flex-wrap: wrap; gap: .15rem .35rem; list-style: none; margin: 0; padding: 0; }

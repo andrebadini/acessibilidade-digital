@@ -112,7 +112,7 @@ test('deletion tombstone rejects foreign identity, private fields and inconsiste
   };
   for (const patch of [
     { auditId: 'foreign-audit' }, { url: 'https://example.test/?token=PRIVATE' },
-    { reason: 'post-export' }, { phase: 'complete' }, { attempts: -1 },
+    { reason: 'unknown' }, { phase: 'complete' }, { attempts: -1 },
     { attempts: 1 }, { lastAttemptAt: '2026-08-31T00:00:01.000Z' },
     { attempts: 1, lastAttemptAt: '2026-08-30T23:59:59.999Z' },
     { requestedAt: 'not-a-date' },
@@ -134,7 +134,34 @@ test('manual tombstones preserve their reason through durable retry validation',
   assert.equal(retried.reason, 'manual');
   assert.equal(retried.attempts, 1);
   assert.throws(() => retention.createDeletionTombstoneV1({ auditId: 'manual-audit',
-    requestedAt: record.requestedAt, reason: 'post-export' }), { code: 'AUDIT_DELETION_DENIED' });
+    requestedAt: record.requestedAt, reason: 'unknown' }), { code: 'AUDIT_DELETION_DENIED' });
   assert.throws(() => retention.createDeletionTombstoneV1({ auditId: 'manual-audit',
     requestedAt: record.requestedAt, reason: undefined }), { code: 'AUDIT_DELETION_DENIED' });
+});
+
+function terminalReceipt() {
+  const mime = ['text/html;charset=utf-8', 'application/pdf', 'text/csv;charset=utf-8', 'application/json;charset=utf-8'];
+  return { version: 1, auditId: 'export-audit', modelRevision: 2, modelHash: 'a'.repeat(64), attemptId: '1', status: 'complete',
+    formats: ['html', 'pdf', 'csv', 'json'].map((format, index) => ({ format, mimeType: mime[index],
+      byteSize: 10, sha256: 'b'.repeat(64), downloadId: index + 1, state: 'complete' })) };
+}
+
+test('terminal export receipts preserve exact four-format identity and reject mismatches before use', () => {
+  const receipt = terminalReceipt();
+  const validated = retention.validateTerminalExportReceiptV1(receipt);
+  assert.deepEqual(validated, receipt);
+  assert.ok(Object.isFrozen(validated)); assert.ok(Object.isFrozen(validated.formats));
+  for (const bad of [
+    { ...receipt, extra: true }, { ...receipt, modelRevision: 0 },
+    { ...receipt, attemptId: '0' }, { ...receipt, formats: receipt.formats.slice(0, 3) },
+    { ...receipt, formats: [...receipt.formats].reverse() },
+    { ...receipt, formats: receipt.formats.map(row => ({ ...row, downloadId: 1 })) },
+    { ...receipt, formats: receipt.formats.map(row => ({ ...row, state: 'interrupted' })) },
+  ]) assert.throws(() => retention.validateTerminalExportReceiptV1(bad), { code: 'AUDIT_DELETION_DENIED' });
+  let reads = 0;
+  assert.throws(() => retention.validateTerminalExportReceiptV1({ ...receipt, get modelHash() { reads++; return receipt.modelHash; } }),
+    { code: 'AUDIT_DELETION_DENIED' });
+  assert.equal(reads, 0);
+  assert.equal(retention.createDeletionTombstoneV1({ auditId: receipt.auditId,
+    requestedAt: '2026-09-05T14:00:00.000Z', reason: 'post-export' }).reason, 'post-export');
 });

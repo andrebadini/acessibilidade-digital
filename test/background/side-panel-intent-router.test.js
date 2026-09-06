@@ -1266,6 +1266,7 @@ test('routes report and export envelopes through the single launch authorities w
     [{ type: 'PANEL_OPEN_REPORT', sessionCapabilityId: SESSION, auditId: 'audit-1', windowId: 9 }, 'open'],
     [{ type: 'REPORT_CONNECT', auditId: 'audit-1' }, 'report-connect'],
     [{ type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: SESSION, auditId: 'audit-1' }, 'request-export'],
+    [{ type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: SESSION, auditId: 'audit-1', deleteAfterCompleteExport: true }, 'request-export'],
     [{ type: 'REPORT_RETURN_TO_SOURCE', sessionCapabilityId: SESSION, auditId: 'audit-1' }, 'return-source'],
     [REVIEW_DECISION_MESSAGE, 'review-commit'],
     [{ type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: SESSION, auditId: 'audit-1' }, 'delete-audit'],
@@ -1286,12 +1287,12 @@ test('routes report and export envelopes through the single launch authorities w
     }
     assert.deepEqual(Object.keys(calls.at(-1)[1]).sort(), expectedCall === 'export-complete'
       ? ['attemptId', 'auditId', 'sender', 'sessionCapabilityId']
+      : expectedCall === 'request-export'
+        ? ['auditId', 'deleteAfterCompleteExport', 'sender', 'sessionCapabilityId']
       : expectedCall === 'review-commit'
         ? ['answer', 'auditId', 'decidedAt', 'evaluator', 'itemId', 'mode', 'note', 'occurrenceId']
         : expectedCall === 'delete-audit'
           ? ['auditId', 'manualAuthorization']
-      : expectedCall === 'request-export'
-        ? ['auditId', 'sender', 'sessionCapabilityId']
         : expectedCall === 'return-source'
           ? ['auditId', 'sender', 'sessionCapabilityId']
         : expectedCall === 'open'
@@ -1299,6 +1300,7 @@ test('routes report and export envelopes through the single launch authorities w
           : ['auditId', 'sender']);
   }
   const openCall = calls.find(([name]) => name === 'open');
+  assert.deepEqual(calls.filter(([name]) => name === 'request-export').map(([, value]) => value.deleteAfterCompleteExport), [false, true]);
   assert.deepEqual(calls.find(([name]) => name === 'delete-audit')[1].manualAuthorization, {
     version: 1, scope: 'one', auditId: 'audit-1', authorizedAt: '2026-08-29T12:00:00.000Z',
   });
