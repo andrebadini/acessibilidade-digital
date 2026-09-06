@@ -203,6 +203,24 @@ const SPECIFIC = {
     steps: ['Procure frases ou passagens em idioma diferente do idioma principal e anote o trecho exato.', 'Confira a indicação de idioma daquele trecho na evidência ou peça ajuda técnica. Não trate automaticamente nomes próprios, termos técnicos e palavras incorporadas ao idioma como falhas: verifique as exceções aplicáveis; a pronúncia ouvida não substitui essa confirmação.'],
     example: 'em uma página em português, uma frase citada em inglês pode receber lang="en" no trecho correspondente, sem mudar o idioma da página inteira.'
   },
+  '5.13.6': {
+    impact: 'Pessoas que ouvem a página com leitor de tela podem receber frases ou etapas fora de sequência e perder o sentido, mesmo quando a disposição visual parece correta.',
+    correction: 'Organize a sequência do conteúdo no código para preservar o sentido quando ele for lido de forma linear, sem depender da posição visual dos blocos.',
+    steps: ['Acompanhe a leitura contínua do trecho com um leitor de tela, incluindo títulos, parágrafos e instruções. Usar somente Tab percorre controles e não verifica toda a ordem de leitura.', 'Compare a sequência ouvida com o sentido do conteúdo: uma etapa aparece antes da instrução necessária ou frases de colunas diferentes se misturam? Uma ordem diferente da visual não é, sozinha, uma falha se preservar o sentido. Sem conseguir verificar a sequência, registre a limitação e mantenha a conclusão pendente.'],
+    example: 'em duas colunas com textos independentes, a leitura termina um texto antes de iniciar o outro, sem alternar frases entre os dois.'
+  },
+  '5.13.7': {
+    impact: 'Pessoas que usam comandos de voz dizem as palavras que veem para selecionar um controle. Se o navegador o identificar por outro nome, o comando pode não funcionar; quem vê e ouve a página também pode receber informações conflitantes.',
+    correction: 'Faça com que o nome acessível (a identificação fornecida pelo navegador às tecnologias assistivas) contenha o texto visível que identifica o controle. Ele pode incluir informação adicional; não precisa ser apenas esse texto.',
+    steps: ['Localize o controle pelo sinal ou pela captura e compare seu texto visível com o campo “Nome acessível” da ficha, sem acionar sua função.', 'Confira se as palavras visíveis estão no nome, na mesma ordem. Não conclua falha apenas por maiúsculas ou pontuação. Se houver só um ícone sem texto, não aplique automaticamente esta comparação; verifique o nome do componente no item próprio. Se faltar o nome registrado ou houver dúvida, peça confirmação técnica e mantenha a revisão pendente.'],
+    example: 'um botão mostra “Buscar”, mas tem o nome “Pesquisar”: as palavras não coincidem. “Buscar produtos” inclui o texto visível e esclarece a ação. Este exemplo não descreve o elemento auditado.'
+  },
+  '5.13.8': {
+    impact: 'Pessoas cegas ou com baixa visão podem não perceber um aviso que surge em outra parte da página, como o término de uma busca, e ficar sem saber se a ação deu resultado.',
+    correction: 'Identifique as mensagens de status no código para que a tecnologia assistiva possa comunicá-las sem deslocar o foco da pessoa. A equipe técnica deve escolher a marcação adequada à mensagem; não basta fazê-la aparecer visualmente.',
+    steps: ['Em uma tarefa segura para testar, como uma busca de teste sem dados pessoais, identifique o aviso de andamento, resultado ou erro que aparece sem abrir outra página ou diálogo. Não realize compras, exclusões ou envios reais para provocar um aviso.', 'Com o leitor de tela ativo, confira se o aviso é comunicado sem mover manualmente o foco até ele. O anúncio estimado do relatório não comprova essa atualização dinâmica. Se não puder reproduzir a mensagem ou confirmar sua marcação com apoio técnico, registre a limitação e mantenha a conclusão pendente.'],
+    example: 'ao terminar uma busca, aparece “3 resultados encontrados” e o leitor de tela pode comunicar esse aviso enquanto a pessoa permanece no controle de busca.'
+  },
   '5.13.10': {
     correction: 'Forneça ao componente um nome acessível, isto é, uma identificação que o navegador consiga comunicar às tecnologias assistivas.',
     steps: ['Consulte o nome acessível registrado na ficha do componente e compare com sua identificação visual, sem acionar a função.', 'Se não houver nome registrado, confira com leitor de tela ou apoio técnico antes de concluir quando o resultado estiver pendente. O anúncio estimado não garante a fala exata de todos os leitores de tela.'],

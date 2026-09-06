@@ -150,8 +150,38 @@ test('justified text explains visual spacing and a recommended alternative', () 
   assert.match(result.example, /esquerda/);
 });
 
+// Catch the generic assistive-technology fallback hiding each item's actual review task.
+test('label-in-name guides a comparison of visible words and the recorded accessible name, not action activation', () => {
+  const result = guidance({ itemId: '5.13.7', outcome: 'failed' });
+  assert.match(result.impact, /comandos de voz/u);
+  assert.match(result.reviewSteps.join(' '), /texto visível/u);
+  assert.match(result.reviewSteps.join(' '), /nome acessível/u);
+  assert.match(result.reviewSteps.join(' '), /sem acionar/u);
+  assert.match(result.correction, /contenha.*texto visível/u);
+  assert.match(result.example, /Buscar.*Pesquisar.*Buscar produtos/u);
+  assert.doesNotMatch(result.correction, /Revise “/u);
+});
+
+test('reading sequence review includes ordinary text and does not equate Tab order with reading order', () => {
+  const result = guidance({ itemId: '5.13.6', outcome: 'cantTell' });
+  assert.match(result.reviewSteps.join(' '), /parágrafos/u);
+  assert.match(result.reviewSteps.join(' '), /Tab.*não/u);
+  assert.match(result.reviewSteps.join(' '), /sentido/u);
+  assert.match(result.example, /colunas/u);
+  assert.doesNotMatch(result.correction, /Revise “/u);
+});
+
+test('status-message review tests a safe dynamic update without requiring focus on the message', () => {
+  const result = guidance({ itemId: '5.13.8', outcome: 'cantTell' });
+  assert.match(result.reviewSteps.join(' '), /segur/u);
+  assert.match(result.reviewSteps.join(' '), /sem mover.*foco/u);
+  assert.match(result.reviewSteps.join(' '), /estimad.*não comprova/u);
+  assert.match(result.example, /resultados encontrados/u);
+  assert.doesNotMatch(result.correction, /Revise “/u);
+});
+
 test('specific instructions never convert hypothetical examples into evidence or pending into failure', () => {
-  for (const itemId of ['5.13.2', '5.13.3', '5.12.11', '5.7.3', '5.7.4', '5.7.6', '5.9.1', '5.9.2', '5.9.3', '5.9.4', '5.8.3', '5.13.10', '5.13.1', '5.3.1', '5.3.2', '5.3.5', '5.12.5']) {
+  for (const itemId of ['5.13.6', '5.13.7', '5.13.8', '5.13.2', '5.13.3', '5.12.11', '5.7.3', '5.7.4', '5.7.6', '5.9.1', '5.9.2', '5.9.3', '5.9.4', '5.8.3', '5.13.10', '5.13.1', '5.3.1', '5.3.2', '5.3.5', '5.12.5']) {
     const result = guidance({ itemId, outcome: 'cantTell', observed: 'Amostra registrada; revisão pendente.' });
     assert.equal(result.observed, 'O resultado disponível não confirma atendimento nem falha; é necessária revisão humana. Registro original: Amostra registrada; revisão pendente.', itemId);
     assert.match(result.correction, /^Se a revisão confirmar/, itemId);
