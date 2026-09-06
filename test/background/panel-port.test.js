@@ -2869,3 +2869,120 @@ test('terminal hello denies publication and preserves its replacement when rollb
   assert.deepEqual(env.getActive(), foreignRunningActive());
   assert.equal(env.sessionArea.values[panelBootstrapStorageKey(9)].sessionCapabilityId, VIEW_SESSION);
 });
+
+test('marker-enabled coordinator coalesces exact review heartbeats without delaying ordinary intents', async () => {
+  let release;
+  const calls = [];
+  const env = await markerFixture({ authorizePageMarkersSession: async value => {
+    calls.push(value);
+    await new Promise(resolve => { release = resolve; });
+    return markerAuthorization(value);
+  } });
+  const before = env.connected.messages.length;
+  const heartbeat = { protocol: 'audita-panel', version: 1, type: 'review-heartbeat' };
+  env.connected.onMessage.emit(heartbeat);
+  env.connected.onMessage.emit(heartbeat);
+  requestMarkers(env);
+  await tick();
+  assert.equal(calls.length, 1, 'one heartbeat may be in flight per binding');
+  assert.deepEqual(Object.keys(calls[0]).sort(), ['auditId', 'claimedWindowId', 'sender', 'sessionCapabilityId']);
+  assert.equal(calls[0].auditId, 'audit-port');
+  assert.equal(calls[0].sessionCapabilityId, SESSION);
+  assert.equal(calls[0].claimedWindowId, 9);
+  assert.equal(calls[0].sender.documentId, 'panel-document');
+  assert.equal(env.dispatched.length, 1, 'heartbeat must not enter or block the intent queue');
+  release();
+  await tick();
+  assert.equal(env.connected.messages.length, before + 1, 'only the ordinary intent receives a response');
+  assert.equal(env.connected.messages.at(-1).type, 'intent-result');
+  assert.equal(env.connected.disconnects, 0);
+});
+
+test('review heartbeat revalidates its result receipt after await and denied paths stay effect-free', async t => {
+  await t.test('receipt replaced during authorization', async () => {
+    let release;
+    let epochReads = 0;
+    const env = await markerFixture({
+      epochNow: () => { epochReads += 1; return EPOCH + 1; },
+      authorizePageMarkersSession: async value => {
+        await new Promise(resolve => { release = resolve; });
+        return markerAuthorization(value);
+      },
+    });
+    epochReads = 0;
+    env.connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'review-heartbeat' });
+    await tick();
+    const nextBundle = await bundle('audit-port', 2);
+    const delivery = await env.coordinator.withWindowLock(9, scope => scope.publishResult({
+      auditId: 'audit-port', sessionCapabilityId: SESSION, windowId: 9, state: 'result', resultBundle: nextBundle,
+    }));
+    assert.equal(delivery.state, 'delivered');
+    release();
+    await tick();
+    assert.equal(epochReads, 0, 'stale receipt must be rejected before authorization validation');
+    assert.equal(env.connected.disconnects, 0);
+  });
+
+  await t.test('missing native context or authorization', async () => {
+    let authorizations = 0;
+    const env = await markerFixture({ authorizePageMarkersSession: async value => {
+      authorizations += 1;
+      return { ...markerAuthorization(value), ok: false };
+    } });
+    const before = env.connected.messages.length;
+    env.connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'review-heartbeat' });
+    await tick();
+    assert.equal(authorizations, 1);
+    assert.equal(env.connected.messages.length, before);
+    assert.equal(env.connected.disconnects, 0);
+    env.chromeApi.runtime.getContexts = async () => [];
+    env.connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'review-heartbeat' });
+    await tick();
+    assert.equal(authorizations, 1);
+    assert.equal(env.connected.messages.length, before);
+    assert.equal(env.connected.disconnects, 0);
+  });
+});
+
+test('review heartbeat stays closed for legacy or malformed packets and is a no-op without a result receipt', async t => {
+  await t.test('legacy factory', async () => {
+    const env = fixture();
+    const connected = port();
+    env.coordinator.attachPanelPort(connected);
+    connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+    await tick();
+    connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'review-heartbeat' });
+    await tick();
+    assert.equal(connected.disconnects, 1);
+  });
+
+  await t.test('marker-enabled without receipt', async () => {
+    let calls = 0;
+    const env = fixture({
+      authorizePageMarkersSession: async () => { calls += 1; return { ok: false }; },
+      closePanelMarkers: async () => true,
+    });
+    const connected = port();
+    env.coordinator.attachPanelPort(connected);
+    connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+    await tick();
+    connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'review-heartbeat' });
+    await tick();
+    assert.equal(calls, 0);
+    assert.equal(connected.disconnects, 0);
+  });
+
+  await t.test('extra key and accessor', async () => {
+    for (const malformed of [
+      { protocol: 'audita-panel', version: 1, type: 'review-heartbeat', auditId: 'audit-port' },
+      Object.defineProperty({ protocol: 'audita-panel', version: 1 }, 'type', {
+        enumerable: true, get() { throw new Error('must not run'); },
+      }),
+    ]) {
+      const env = await markerFixture();
+      env.connected.onMessage.emit(malformed);
+      await tick();
+      assert.equal(env.connected.disconnects, 1);
+    }
+  });
+});

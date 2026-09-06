@@ -286,7 +286,7 @@ test('uses one admitted Port for bootstrap and every privileged panel intent', a
     onStatus: value => statuses.push(value),
   });
 
-  assert.deepEqual(Object.keys(client), ['start', 'stop', 'requestIntent']);
+  assert.deepEqual(Object.keys(client), ['start', 'stop', 'requestIntent', 'setReviewVisible']);
   assert.equal(Object.isFrozen(client), true);
   assert.equal(client.start(), true);
   assert.equal(client.start(), false);
@@ -1195,4 +1195,93 @@ test('opens the report after slow verified recovery and a queued read without ti
   assert.equal(port.disconnects, 0);
   assert.equal(watchdog.cleared, true);
   client.stop();
+});
+
+test('review heartbeat is terminal-only, visible-only and keeps one absolute budget per audit across reconnects', async t => {
+  const originalNow = Date.now;
+  let now = 1_000;
+  Date.now = () => now;
+  t.after(() => { Date.now = originalNow; });
+  const env = fixture();
+  const client = createClient(env);
+
+  assert.equal(client.setReviewVisible(true), true);
+  assert.equal(env.timers.length, 0, 'visibility alone cannot start transport activity');
+  client.start();
+  const firstPort = env.ports[0];
+  assert.equal(env.timers.filter(timer => timer.delay === 20_000).length, 0);
+  bootstrap(firstPort, 'running', 'audit-heartbeat', SESSION_ID, null, 'no-pixels');
+  assert.equal(env.timers.filter(timer => timer.delay === 20_000).length, 0);
+
+  const firstBundle = await resultBundle('audit-heartbeat');
+  bootstrap(firstPort, 'result', 'audit-heartbeat', SESSION_ID, firstBundle);
+  const firstHeartbeat = env.timers.find(timer => timer.delay === 20_000 && !timer.cleared);
+  assert.ok(firstHeartbeat);
+  now += 5_000;
+  bootstrap(firstPort, 'result', 'audit-heartbeat', SESSION_ID, await resultBundle('audit-heartbeat', 2));
+  assert.equal(env.timers.filter(timer => timer.delay === 20_000 && !timer.cleared).length, 1,
+    'a new result revision must not duplicate or refresh the timer');
+
+  bootstrap(firstPort, 'running', 'audit-heartbeat', SESSION_ID, null, 'no-pixels');
+  assert.equal(firstHeartbeat.cleared, true, 'a non-terminal state must stop the timer immediately');
+  const beforeNonTerminalCallback = firstPort.messages.length;
+  firstHeartbeat.callback();
+  assert.equal(firstPort.messages.length, beforeNonTerminalCallback);
+  bootstrap(firstPort, 'result', 'audit-heartbeat', SESSION_ID, firstBundle);
+  const resumedHeartbeat = env.timers.findLast(timer => timer.delay === 20_000 && !timer.cleared);
+
+  now = 21_000;
+  resumedHeartbeat.callback();
+  assert.deepEqual(firstPort.messages.at(-1), {
+    protocol: 'audita-panel', version: 1, type: 'review-heartbeat',
+  });
+  const delayed = env.timers.findLast(timer => timer.delay === 20_000 && !timer.cleared);
+  client.setReviewVisible(false);
+  assert.equal(delayed.cleared, true);
+  const beforeDelayed = firstPort.messages.length;
+  delayed.callback();
+  assert.equal(firstPort.messages.length, beforeDelayed, 'cleared callbacks must be inert');
+
+  client.setReviewVisible(true);
+  const beforeDisconnect = env.timers.findLast(timer => timer.delay === 20_000 && !timer.cleared);
+  firstPort.onDisconnect.emit();
+  assert.equal(beforeDisconnect.cleared, true);
+  const reconnect = env.timers.findLast(timer => timer.delay === 250 && !timer.cleared);
+  reconnect.callback();
+  const secondPort = env.ports.at(-1);
+  now = 1_800_999;
+  bootstrap(secondPort, 'view-only', 'audit-heartbeat', 'B'.repeat(22), firstBundle);
+  const expiredCallback = env.timers.findLast(timer => timer.delay === 20_000 && !timer.cleared);
+  assert.ok(expiredCallback);
+  now = 1_801_001;
+  expiredCallback.callback();
+  assert.equal(secondPort.messages.some(packet => packet.type === 'review-heartbeat'), false,
+    'real time beyond the original deadline must suppress a delayed callback');
+
+  const nextBundle = await resultBundle('audit-heartbeat-next');
+  bootstrap(secondPort, 'result', 'audit-heartbeat-next', 'C'.repeat(22), nextBundle);
+  assert.ok(env.timers.some(timer => timer.delay === 20_000 && !timer.cleared),
+    'a different audit receives a fresh bounded budget');
+  client.stop();
+});
+
+test('review heartbeat post failure follows existing Port unavailability and never enters intent bookkeeping', async t => {
+  const originalNow = Date.now;
+  Date.now = () => 10_000;
+  t.after(() => { Date.now = originalNow; });
+  const env = fixture();
+  const statuses = [];
+  const client = createClient(env, { onStatus: value => statuses.push(value) });
+  client.start();
+  const port = env.ports[0];
+  bootstrap(port, 'result', 'audit-heartbeat-error', SESSION_ID, await resultBundle('audit-heartbeat-error'));
+  client.setReviewVisible(true);
+  const timer = env.timers.findLast(entry => entry.delay === 20_000 && !entry.cleared);
+  port.postMessage = () => { throw new Error('native secret'); };
+  timer.callback();
+  assert.equal(port.disconnects, 1);
+  assert.equal(statuses.at(-1), 'Painel não preparado. Abra novamente pelo botão da extensão.');
+  assert.deepEqual(await client.requestIntent({ type: 'PANEL_OPEN_REPORT' }), {
+    ok: false, code: 'PANEL_SESSION_UNAVAILABLE',
+  });
 });

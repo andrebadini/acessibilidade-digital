@@ -256,6 +256,12 @@ function intentPacket(value) {
   return freeze({ requestId: record.requestId, envelope: record.envelope });
 }
 
+function reviewHeartbeatPacket(value) {
+  const record = exact(value, ['protocol', 'version', 'type']);
+  return record?.protocol === 'audita-panel' && record.version === 1 && record.type === 'review-heartbeat'
+    ? freeze(record) : null;
+}
+
 function revokedCancelResponse(value, auditId) {
   const response = exact(value, ['ok', 'auditId', 'state']);
   return response?.ok === true && response.auditId === auditId && response.state === 'revoked'
@@ -1060,9 +1066,38 @@ export function createPanelPortCoordinator(raw) {
     }
   }
 
+  function processReviewHeartbeat(binding) {
+    if (binding.heartbeatInFlight !== null) return;
+    const receipt = binding.markerReceipt;
+    const admission = binding.admission;
+    if (!currentMarkerReceipt(binding, receipt, admission)) return;
+    const operation = Object.freeze({});
+    binding.heartbeatInFlight = operation;
+    void (async () => {
+      try {
+        if (!await reprove(binding) || !currentMarkerReceipt(binding, receipt, admission)) return;
+        const authorized = await authorizePageMarkersSession({
+          sessionCapabilityId: receipt.sessionCapabilityId,
+          auditId: receipt.auditId,
+          claimedWindowId: receipt.windowId,
+          sender: admission.syntheticSender,
+        });
+        if (!currentMarkerReceipt(binding, receipt, admission)) return;
+        if (!authorizedPageMarkersPublication(authorized, binding, input.epochNow())) return;
+      } catch { /* Heartbeats never alter the existing Port or marker lifecycle. */ }
+      finally {
+        if (binding.heartbeatInFlight === operation) binding.heartbeatInFlight = null;
+      }
+    })();
+  }
+
   function receiveBound(binding, value) {
     if (!connected(binding)) {
       void disconnect(binding);
+      return;
+    }
+    if (authorizePageMarkersSession && reviewHeartbeatPacket(value)) {
+      processReviewHeartbeat(binding);
       return;
     }
     const request = intentPacket(value);
@@ -1109,6 +1144,7 @@ export function createPanelPortCoordinator(raw) {
       inFlightIntent: null, retiringCancel: null,
       retirement: null, retirementState: null,
       markerReceipt: null, markerPublication: null,
+      heartbeatInFlight: null,
     };
     binding.onBoundMessage = value => receiveBound(binding, value);
     binding.onDisconnect = () => { void disconnect(binding, null, true); };

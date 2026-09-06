@@ -12,6 +12,11 @@ const RECONNECT_DELAYS = Object.freeze([250, 500, 1000, 2000, 5000]);
 const BOOTSTRAP_TIMEOUT_MS = 60000;
 const REQUEST_TIMEOUT_MS = 5000;
 const REPORT_OPEN_TIMEOUT_MS = 60000;
+const REVIEW_HEARTBEAT_INTERVAL_MS = 20000;
+const REVIEW_HEARTBEAT_BUDGET_MS = 30 * 60 * 1000;
+const REVIEW_HEARTBEAT_PACKET = Object.freeze({
+  protocol: 'audita-panel', version: 1, type: 'review-heartbeat',
+});
 export const PANEL_RECONNECT_EXHAUSTED_MESSAGE = 'Painel indisponível. Abra novamente pelo botão da extensão.';
 const PRIVACY_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
 const CAPTURE_MODES = new Set(['full-evidence', 'element-only', 'no-pixels']);
@@ -251,6 +256,11 @@ export function createPanelSessionPortClient(raw) {
   let markerRevision = null;
   let markerDetailCount = 0;
   let pendingConsent = null;
+  let reviewVisible = false;
+  let reviewHeartbeatTimer = null;
+  let reviewHeartbeatGeneration = 0;
+  let reviewBudgetAuditId = null;
+  let reviewDeadlineAt = null;
   const ownedConfirmationsInFlight = new Set();
   const bindings = new WeakMap();
   const pending = new Map();
@@ -295,6 +305,39 @@ export function createPanelSessionPortClient(raw) {
     }
     pending.clear();
   };
+  const stopReviewHeartbeat = () => {
+    reviewHeartbeatGeneration += 1;
+    if (reviewHeartbeatTimer !== null) {
+      try { input.clearTimer(reviewHeartbeatTimer); } catch { /* fixed cleanup */ }
+      reviewHeartbeatTimer = null;
+    }
+  };
+  const reviewHeartbeatEligible = () => started && ready && currentPort !== null && reviewVisible &&
+    ['result', 'view-only'].includes(sessionState) && auditId !== null && sessionId !== null &&
+    reviewBudgetAuditId === auditId && Number.isSafeInteger(reviewDeadlineAt) && Date.now() < reviewDeadlineAt;
+  const synchronizeReviewHeartbeat = () => {
+    if (!reviewHeartbeatEligible()) {
+      stopReviewHeartbeat();
+      return;
+    }
+    if (reviewHeartbeatTimer !== null) return;
+    const generation = ++reviewHeartbeatGeneration;
+    reviewHeartbeatTimer = input.setTimer(() => {
+      if (generation !== reviewHeartbeatGeneration) return;
+      reviewHeartbeatTimer = null;
+      if (!reviewHeartbeatEligible()) {
+        stopReviewHeartbeat();
+        return;
+      }
+      const port = currentPort;
+      try { port.postMessage(REVIEW_HEARTBEAT_PACKET); }
+      catch {
+        unavailable(port, true);
+        return;
+      }
+      synchronizeReviewHeartbeat();
+    }, REVIEW_HEARTBEAT_INTERVAL_MS);
+  };
 
   function detach(port, disconnect) {
     if (!port) return;
@@ -326,6 +369,7 @@ export function createPanelSessionPortClient(raw) {
   }
 
   function unavailable(port, disconnect = false) {
+    stopReviewHeartbeat();
     timedOutRequests.clear();
     clearCorrelation();
     settleAll(localUnavailable());
@@ -356,12 +400,19 @@ export function createPanelSessionPortClient(raw) {
       sessionState = bootstrap.state;
       markerRevision = bootstrap.result?.modelRevision ?? null;
       markerDetailCount = Math.min(64, bootstrap.result?.details.length ?? 0);
+      if (['result', 'view-only'].includes(bootstrap.state)) {
+        if (reviewBudgetAuditId !== bootstrap.auditId) {
+          reviewBudgetAuditId = bootstrap.auditId;
+          reviewDeadlineAt = Date.now() + REVIEW_HEARTBEAT_BUDGET_MS;
+        }
+      } else stopReviewHeartbeat();
       notifyStatus('Painel conectado.');
       const projection = { state: bootstrap.state, auditId: bootstrap.auditId, result: bootstrap.result };
       if (bootstrap.state === 'running' && CAPTURE_MODES.has(bootstrap.captureMode)) {
         projection.captureMode = bootstrap.captureMode;
       }
       notifyBootstrap(freeze(projection));
+      synchronizeReviewHeartbeat();
       return;
     }
     const privacyPaused = parsePrivacyPaused(rawPacket);
@@ -382,6 +433,7 @@ export function createPanelSessionPortClient(raw) {
       }
       pendingConsent = privacyPaused.confirmation;
       sessionState = 'privacy-paused';
+      stopReviewHeartbeat();
       markerRevision = null;
       markerDetailCount = 0;
       const projected = {
@@ -449,6 +501,7 @@ export function createPanelSessionPortClient(raw) {
       auditId = null;
       sessionId = null;
       sessionState = 'initial';
+      stopReviewHeartbeat();
       markerRevision = null;
       markerDetailCount = 0;
       pendingConsent = null;
@@ -496,6 +549,8 @@ export function createPanelSessionPortClient(raw) {
   function stop() {
     if (!started) return false;
     started = false;
+    reviewVisible = false;
+    stopReviewHeartbeat();
     timedOutRequests.clear();
     clearCorrelation();
     settleAll(localUnavailable());
@@ -504,6 +559,13 @@ export function createPanelSessionPortClient(raw) {
       reconnectTimer = null;
     }
     detach(currentPort, true);
+    return true;
+  }
+
+  function setReviewVisible(value) {
+    if (typeof value !== 'boolean') return false;
+    reviewVisible = value;
+    synchronizeReviewHeartbeat();
     return true;
   }
 
@@ -602,5 +664,5 @@ export function createPanelSessionPortClient(raw) {
     });
   }
 
-  return Object.freeze({ start, stop, requestIntent });
+  return Object.freeze({ start, stop, requestIntent, setReviewVisible });
 }

@@ -2,6 +2,14 @@
 
 Status: **roteiro preparado; integração e Chrome real ainda pendentes**. Não é evidência de aprovação e não descreve recursos da beta1.1.0 já entregue.
 
+## Candidato W4 em preparação
+
+HEAD de base9c15aac. Tasks1–9 integradas e congeladas; Task10 acrescenta somente continuidade limitada do cliente de painel visível result/view-only, sem renovar autorização ou origem. Revisão prévia definiu packet sem dados e deadline fixo; RED focado221 testes,212pass/9fail antes da implementação. Implementação/revisão ainda pendentes neste registro.
+
+Novo teste nativo independente no arquivo `test/e2e/sidepanel-flow-mv3.test.mjs`, nome `original-page ABNT markers remain usable across idle and preserve the report`: tentativa element-only fresca, fixture reduzida sem alterar o stress anterior, prova de original intocada antes da conferência, duas esperas45s com debugger do worker desconectado, seleção nos dois sentidos, teclado, filtro, ocultação, navegação A→B e quatro downloads verificados. Fingerprint SHA-256 da revisão persistida antes/depois; Chrome152.0.7977.64 confirmado pelo comando --version. Sintaxe validada, mas teste Chrome ainda NÃO executado. Não confundir preparação com aprovação.
+
+Task10 encerrada localmente: GREEN221/221 confirmado pelo implementador e pelo principal; diff-check PASS. Revisão independente spec/qualidade aprovada C0/I0/M1. Timer de transporte pode manter o agendamento numa troca terminal→terminal, mas só envia packet sem dados após validar o estado atual; refinamento registrado no backlog. Nenhum novo prazo de autorização, origem, captura ou evidência. Gate nativo permanece pendente.
+
 ## Referência visual e funcional
 
 As cinco imagens WAVE enviadas pelo usuário mostram painel lateral compacto, contadores, lista de ocorrências agrupadas, explicação contextual e sinais na página. Audita usará organização por ABNT NBR17225:2025, com WCAG complementar; não copiará marca, logotipo ou conclusão normativa do WAVE. O sinal representa um resultado registrado na auditoria e um elemento correspondente localizado agora, não nova captura nem certificação de que o conteúdo permaneceu idêntico à cópia auditada.

@@ -216,6 +216,76 @@ test('page markers wire controls, ABNT selection, filters and explicit navigatio
   assert.equal(document.root.querySelector('button[data-intent="HIDE_PAGE_MARKERS"]'), null);
 });
 
+test('panel synchronizes review visibility across result detail, document hiding and pagehide', async t => {
+  const keys = ['document', 'chrome', 'location', 'setTimeout', 'clearTimeout', 'addEventListener'];
+  const originals = new Map(keys.map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  t.after(() => { for (const [key, descriptor] of originals) {
+    if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key];
+  } });
+  const inventory = await createInstalledCoreRuleInventory();
+  const model = await enrichAuditForReport(structuredClone(SAMPLE_AUDIT), {
+    now: () => '2026-09-06T13:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '1.1.0', rulesVersion: inventory.rulesVersion, browserVersion: 'Chrome/152.0.0.0',
+  });
+  const result = await createPanelResultBundleV1({ inventory, reportRevision: {
+    version: 1, auditId: model.auditId, modelRevision: 1, modelHash: model.integrity.canonicalModelHash, model,
+    checkpoint: { version: 1, auditId: model.auditId, pages: model.pages.map(page => ({
+      pageId: page.pageId, attempted: page.attempted, startedAt: page.attempted ? page.timestamps.startedAt : null,
+      rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion,
+      inventoryHash: inventory.sha256, outcomes: [],
+    })) },
+  } });
+  const documentEvents = runtimeEvent();
+  const document = {
+    activeElement: null, visibilityState: 'visible', hasFocus: () => false,
+    createElement(tag) { return new RuntimeElement(tag, document); },
+    querySelector(selector) { return selector === '#panel-root' ? document.root : null; },
+    addEventListener(type, listener) { if (type === 'visibilitychange') documentEvents.addListener(listener); },
+  };
+  document.root = new RuntimeElement('main', document);
+  const pageEvents = runtimeEvent();
+  globalThis.addEventListener = (type, listener) => { if (type === 'pagehide') pageEvents.addListener(listener); };
+  const timers = [];
+  globalThis.setTimeout = (callback, delay) => {
+    const timer = { callback, delay, cleared: false };
+    timers.push(timer);
+    return timer;
+  };
+  globalThis.clearTimeout = timer => { timer.cleared = true; };
+  const packets = [];
+  const port = { name: 'audita-panel-v1', onMessage: runtimeEvent(), onDisconnect: runtimeEvent(),
+    postMessage(packet) { packets.push(structuredClone(packet)); }, disconnect() {} };
+  globalThis.document = document;
+  globalThis.chrome = { runtime: { id: 'abcdefghijklmnopabcdefghijklmnop', connect: () => port } };
+  globalThis.location = { href: `chrome-extension://${chrome.runtime.id}/src/panel/index.html?launch=${'A'.repeat(43)}` };
+
+  await import(`../../src/panel/panel.js?heartbeat-visibility=${Date.now()}`);
+  port.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'result',
+    auditId: result.auditId, sessionCapabilityId: 'S'.repeat(22), result });
+  assert.equal(timers.filter(timer => timer.delay === 20_000 && !timer.cleared).length, 1);
+  const detail = document.root.querySelector('button[data-intent="SELECT_OCCURRENCE"]');
+  assert.ok(detail);
+  await detail.dispatch('click');
+  assert.equal(timers.filter(timer => timer.delay === 20_000 && !timer.cleared).length, 1,
+    'detail rerender must retain the sole heartbeat timer');
+  const heartbeat = timers.find(timer => timer.delay === 20_000 && !timer.cleared);
+  heartbeat.cleared = true;
+  heartbeat.callback();
+  assert.deepEqual(packets.at(-1), { protocol: 'audita-panel', version: 1, type: 'review-heartbeat' });
+
+  document.visibilityState = 'hidden';
+  documentEvents.emit();
+  assert.equal(timers.filter(timer => timer.delay === 20_000 && !timer.cleared).length, 0);
+  document.visibilityState = 'visible';
+  documentEvents.emit();
+  assert.equal(timers.filter(timer => timer.delay === 20_000 && !timer.cleared).length, 1);
+  pageEvents.emit();
+  assert.equal(timers.filter(timer => timer.delay === 20_000 && !timer.cleared).length, 0);
+  documentEvents.emit();
+  assert.equal(timers.filter(timer => timer.delay === 20_000 && !timer.cleared).length, 0,
+    'pagehide permanently prevents reactivation');
+});
+
 test('waits for the first valid bootstrap before exposing authorized panel actions', async t => {
   const originalDocument = globalThis.document;
   const originalChrome = globalThis.chrome;

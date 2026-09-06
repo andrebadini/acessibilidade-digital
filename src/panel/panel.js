@@ -51,6 +51,7 @@ let pendingReportLaunch = null;
 let readerRefreshTimer = null;
 let readerRefreshInFlight = false;
 let readerFeedbackStopped = false;
+let panelPageHidden = false;
 let pageMarkerInteractionRevision = 0;
 const personaSession = createPanelPersonaSession({
   requestIntent: requestPanelIntent,
@@ -323,7 +324,16 @@ function render(focusId = state.focusId) {
 function transition(event) {
   state = reducePanelState(state, event);
   render();
+  synchronizeReviewVisibility();
   synchronizeReaderRefresh();
+}
+
+function synchronizeReviewVisibility() {
+  try {
+    sessionPortClient?.setReviewVisible(
+      !panelPageHidden && state.screen === 'result' && document.visibilityState !== 'hidden',
+    );
+  } catch { /* Visibility cannot own transport or UI state. */ }
 }
 
 function receivePersonaEvent(event) {
@@ -364,8 +374,13 @@ function synchronizeReaderRefresh() {
   }, 250);
 }
 
-document.addEventListener?.('visibilitychange', synchronizeReaderRefresh);
+document.addEventListener?.('visibilitychange', () => {
+  synchronizeReviewVisibility();
+  synchronizeReaderRefresh();
+});
 globalThis.addEventListener?.('pagehide', () => {
+  panelPageHidden = true;
+  sessionPortClient?.setReviewVisible(false);
   pageMarkerInteractionRevision++;
   pageMarkers.reset();
   readerFeedbackStopped = true;
@@ -1121,6 +1136,7 @@ if (authorizedLaunch && canConnectPanelSession) {
     clearTimer: globalThis.clearTimeout.bind(globalThis),
   });
   sessionPortClient.start();
+  synchronizeReviewVisibility();
 }
 
 if (authorizedLaunch && typeof chromeApi?.runtime?.onMessage?.addListener === 'function' &&

@@ -26,6 +26,8 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Infraestrutura de testes não bloqueante
 
+- continuidade W3, revisão06/09 C0/I0/M1: troca terminal→terminal preserva agendamento do timer de transporte; callback verifica estado atual e envia somente heartbeat sem dados. Não reutiliza autoridade nem despacha operação antiga. Eventualmente invalidar geração nessa troca para coincidir literalmente com a matriz de callbacks antigos; sem impacto funcional conhecido ou renovação de prazo.
+
 - W3-wiring, revisão06/09 C0/I0/M1: a API manual `registration.dispose()` usada pelos testes ainda não garante ausência absoluta de uma publicação já admitida. Repro: publicação aguarda autorização; resolver autorização; enfileirar `queueMicrotask(() => bridge.dispose())`; o mesmo painel admitido pode receber o packet antes da continuação externa retornar `delivered:0`. Port pendente e novas publicações são bloqueados, sem efeito sobre pixels, evidências, armazenamento ou outra auditoria. Bootstrap de produção não retém/chama esse handle, e término nativo encerra o worker; nenhum percurso de produção foi demonstrado. Corrigir na fronteira final de envio antes de reutilizar dispose em produção como garantia de encerramento completo. Não ampliar Task6 por esse residual de teardown de testes.
 
 - conferência na página W3-auth: acrescentar casos explícitos de consumer review+view-only e transplantes independentes mode/binding batch; a negação correspondente já está implementada e revisada C0/I0, com121 testes focados verdes. São refinamentos de cobertura, não falhas conhecidas de autorização.
