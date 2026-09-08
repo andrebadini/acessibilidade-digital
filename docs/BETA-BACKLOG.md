@@ -10,6 +10,8 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Entrega atual e histórico funcional
 
+**Beta 1.1.13 entregue antes da pausa solicitada:** corrige a versão de origem em novos registros, preserva documentos históricos, 357 testes focados, duas revisões C=0/I=0/M=0, etapa nativa 39/39 e Google atual com quatro exportações/27 páginas. A falha documental do gate lógico e sua correção estão explicitadas em `docs/qa/2026-09-08-beta1113-release.md`. Desenvolvimento pausado, meta de produção não concluída. A primeira falha CDP do teste 1.1.12 e a apresentação explícita da versão no PDF permanecem para a retomada; a 1.1.13 já registra a versão correta no JSON.
+
 **Beta 1.1.12 entregue:** preserva viewport observado quando a versão do navegador não pode ser lida e distingue recomendações na redação de novos registros, sem reescrever relatórios antigos. Candidato, correções das expectativas/ambiente de teste, gates, QA visual/PDF, limites e SHA em `docs/qa/2026-09-08-beta1112-release.md`. As indicações abaixo “fora do ZIP 1.1.11” continuam corretas para aquele pacote; os dois incrementos agora integram a 1.1.12.
 
 - Aceite A → B complementado manualmente na 1.1.12: digitação literal na barra, páginas de conteúdo diferente, nova auditoria B e moldura vermelha no botão vazio de B, mantendo o painel aberto. O contexto interno é recriado legitimamente. O teste nativo separado prova A preservada. Refinamento de infraestrutura: incorporar esse percurso ao controlador reutilizável sem exigir contexto interno imutável; a asserção excessiva da sessão manual e seu alcance estão registrados em `docs/qa/2026-09-08-beta1112-release.md`. Não reabrir o mecanismo aprovado.

@@ -10,6 +10,10 @@
 
 **Spec:** User correction on 08/09/2026; factual baseline and reproduction in `docs/qa/2026-09-08-google-1112-production-correction.md`.
 
+## User-requested pause checkpoint
+
+On 08/09 the user explicitly requested **beta 1.1.13, then pause**. Finish only the in-flight producer-version fix, validation and that beta delivery before pausing. This is an intermediate package requested by the user, not production approval or completion of this plan. Resume production work only when requested.
+
 ## Global Constraints
 
 - Production, not beta, is the goal. Do not merely remove the word beta.
@@ -34,10 +38,10 @@
 
 **Read-only scope initially:** `src/core/report/enrich-audit.js`, `src/background/run-audit.js`, `src/background/service-worker.js`, `src/background/run-batch.js`, related tests and `test/e2e/support/real-chrome.mjs`.
 
-- [ ] Trace all five enrichment sites and their installed-version source, including success, cancelled terminal models and resumed attempts. Record the minimal proposed input contract before editing it.
-- [ ] Add focused regression tests at the actual caller/model boundary: a supplied installed version must survive to the terminal report and persistence; a previously saved report must retain its historical version. Run RED before the minimal wiring correction.
+- [x] Trace all five enrichment sites and their installed-version source, including success, cancelled terminal models and resumed attempts. Version is captured as data from the trusted installed Chrome manifest and adapter, without changing public protocol envelopes.
+- [x] Add focused regression tests at the actual caller/model boundary: installed producer version survives to the report; historical V2 producer remains unchanged. RED: eight assertions; GREEN: 357/357 focused. Commit `796f802`.
 - [ ] For the first-attempt `CDP_COMMAND_FAILED`, instrument only the temporary test controller with substep, fixed error category and fresh panel state; never log raw page content or private capability values. Reproduce or explicitly retain the uncertainty; a subsequent pass alone is not a diagnosis.
-- [ ] Freeze the corrected increment after focused GREEN and `git diff --check`; obtain independent review of the frozen correction, grouping findings instead of reviewing moving code.
+- [x] Freeze the corrected increment after focused GREEN and `git diff --check`; two independent reviews of `796f802`: C=0/I=0/M=0. Reviewers independently verified eight and nine focused cases. Not production approval.
 
 ## Task 3 — Production candidate, not a relabelled beta
 
