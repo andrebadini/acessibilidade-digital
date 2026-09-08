@@ -131,6 +131,9 @@ test('proves axe/map only through action → Side Panel → public URL consent �
     readFile(join(extension.downloadDirectory, htmlRecord.filename), 'utf8'),
   ]);
   const technical = JSON.parse(jsonBytes.replace(/^\uFEFF/u, ''));
+  const installedManifest = JSON.parse(await readFile(join(root, 'manifest.json'), 'utf8'));
+  assert.equal(technical.audit.versions.extension, installedManifest.version,
+    'exported producer version must match the installed extension');
   const audit = technical.audit;
 
   for (const page of audit.pages) {
